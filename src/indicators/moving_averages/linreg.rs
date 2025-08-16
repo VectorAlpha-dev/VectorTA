@@ -963,6 +963,188 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	fn check_linreg_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Load real market data for realistic testing
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		let close_data = &candles.close;
+
+		// Strategy: test various parameter combinations with real data slices
+		let strat = (
+			2usize..=50,       // period (must be >= 2 for meaningful regression)
+			0usize..close_data.len().saturating_sub(200), // starting index for data slice
+			100usize..=200,    // length of data slice to use
+		);
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(period, start_idx, slice_len)| {
+				// Ensure we have valid slice bounds
+				let end_idx = (start_idx + slice_len).min(close_data.len());
+				if end_idx <= start_idx || end_idx - start_idx < period + 10 {
+					return Ok(()); // Skip invalid combinations
+				}
+
+				let data_slice = &close_data[start_idx..end_idx];
+				let params = LinRegParams { period: Some(period) };
+				let input = LinRegInput::from_slice(data_slice, params.clone());
+
+				// Test the specified kernel
+				let result = linreg_with_kernel(&input, kernel);
+				
+				// Also compute with scalar kernel for reference
+				let scalar_result = linreg_with_kernel(&input, Kernel::Scalar);
+
+				// Both should succeed or fail together
+				match (result, scalar_result) {
+					(Ok(LinRegOutput { values: out }), Ok(LinRegOutput { values: ref_out })) => {
+						// Verify output length
+						prop_assert_eq!(out.len(), data_slice.len());
+						prop_assert_eq!(ref_out.len(), data_slice.len());
+
+						// Find first non-NaN value in input
+						let first = data_slice.iter().position(|x| !x.is_nan()).unwrap_or(0);
+						let expected_warmup = first + period;
+
+						// Find first non-NaN value in output
+						let first_valid = out.iter().position(|x| !x.is_nan());
+						if let Some(first_idx) = first_valid {
+							// Verify warmup period is correct
+							prop_assert_eq!(
+								first_idx, expected_warmup,
+								"First valid at {} but expected warmup is {}",
+								first_idx, expected_warmup
+							);
+
+							// Check NaN pattern - all values before first_valid should be NaN
+							for i in 0..first_idx {
+								prop_assert!(
+									out[i].is_nan(),
+									"Expected NaN at index {} during warmup, got {}",
+									i, out[i]
+								);
+							}
+						}
+
+						// Verify kernel consistency
+						for i in 0..out.len() {
+							let y = out[i];
+							let r = ref_out[i];
+
+							// Both should be NaN or both should be valid
+							if y.is_nan() {
+								prop_assert!(r.is_nan(), "Kernel mismatch at {}: {} vs {}", i, y, r);
+								continue;
+							}
+
+							// Check finite values
+							prop_assert!(y.is_finite(), "Non-finite value at index {}: {}", i, y);
+
+							// Compare with scalar reference (allowing for floating-point precision)
+							let ulps_diff = if y == r {
+								0
+							} else {
+								let y_bits = y.to_bits();
+								let r_bits = r.to_bits();
+								((y_bits as i64) - (r_bits as i64)).unsigned_abs()
+							};
+
+							prop_assert!(
+								ulps_diff <= 3 || (y - r).abs() < 1e-9,
+								"Kernel mismatch at {}: {} vs {} (diff: {}, ulps: {})",
+								i, y, r, (y - r).abs(), ulps_diff
+							);
+						}
+
+						// Test specific properties of linear regression
+						if first_valid.is_some() {
+							// Property 1: Test with synthetic linear data
+							let mut linear_data = vec![0.0; period + 5];
+							for i in 0..linear_data.len() {
+								linear_data[i] = 100.0 + i as f64 * 2.0; // y = 100 + 2x
+							}
+							let linear_input = LinRegInput::from_slice(&linear_data, params.clone());
+							if let Ok(LinRegOutput { values: linear_out }) = linreg_with_kernel(&linear_input, kernel) {
+								// For perfectly linear data, prediction should be exact
+								for i in period..linear_data.len() {
+									if !linear_out[i].is_nan() {
+										let expected = 100.0 + (i + 1) as f64 * 2.0; // Next value in sequence
+										prop_assert!(
+											(linear_out[i] - expected).abs() < 1e-6,
+											"Linear prediction error at {}: got {} expected {}",
+											i, linear_out[i], expected
+										);
+									}
+								}
+							}
+
+							// Property 2: Test with constant data
+							let constant_val = 42.0;
+							let constant_data = vec![constant_val; period + 5];
+							let const_input = LinRegInput::from_slice(&constant_data, params);
+							if let Ok(LinRegOutput { values: const_out }) = linreg_with_kernel(&const_input, kernel) {
+								// For constant data, output should equal the constant
+								for i in period..constant_data.len() {
+									if !const_out[i].is_nan() {
+										prop_assert!(
+											(const_out[i] - constant_val).abs() < 1e-9,
+											"Constant prediction error at {}: got {} expected {}",
+											i, const_out[i], constant_val
+										);
+									}
+								}
+							}
+
+							// Property 3: Output bounds check for real data
+							for i in expected_warmup..out.len() {
+								if !out[i].is_nan() {
+									// Get the window that was used for this calculation
+									let window_start = i + 1 - period;
+									let window_end = i + 1;
+									let window = &data_slice[window_start..window_end];
+									
+									let min_val = window.iter().copied().fold(f64::INFINITY, f64::min);
+									let max_val = window.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+									
+									// Linear regression can extrapolate beyond the window bounds,
+									// but should be within a reasonable range (e.g., 2x the range)
+									let range = max_val - min_val;
+									let lower_bound = min_val - range;
+									let upper_bound = max_val + range;
+									
+									prop_assert!(
+										out[i] >= lower_bound && out[i] <= upper_bound,
+										"Output {} at index {} outside reasonable bounds [{}, {}]",
+										out[i], i, lower_bound, upper_bound
+									);
+								}
+							}
+						}
+
+						Ok(())
+					}
+					(Err(e1), Err(e2)) => {
+						// Both kernels should fail with the same error type
+						prop_assert_eq!(
+							std::mem::discriminant(&e1),
+							std::mem::discriminant(&e2),
+							"Different error types: {:?} vs {:?}",
+							e1, e2
+						);
+						Ok(())
+					}
+					_ => {
+						prop_assert!(false, "Kernel consistency failed - one succeeded, one failed");
+						Ok(())
+					}
+				}
+			})
+			.map_err(|e| e.into())
+	}
+
 	generate_all_linreg_tests!(
 		check_linreg_accuracy,
 		check_linreg_partial_params,
@@ -975,6 +1157,9 @@ mod tests {
 		check_linreg_streaming,
 		check_linreg_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_linreg_tests!(check_linreg_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);

@@ -805,6 +805,8 @@ mod tests {
 	use super::*;
 	use crate::skip_if_unsupported;
 	use crate::utilities::data_loader::read_candles_from_csv;
+	#[cfg(feature = "proptest")]
+	use proptest::prelude::*;
 
 	fn check_vpt_basic_candles(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test_name);
@@ -971,6 +973,125 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_vpt_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy to generate price and volume data
+		// Prices: non-negative values (including zero to test edge case)
+		// Volume: non-negative values (realistic for trading volume)
+		// Length: at least 2 points (minimum for VPT calculation)
+		let strat = (2usize..=400).prop_flat_map(|len| {
+			(
+				prop::collection::vec(
+					(0.0f64..1e6f64).prop_filter("finite non-negative price", |x| x.is_finite() && *x >= 0.0),
+					len,
+				),
+				prop::collection::vec(
+					(0.0f64..1e9f64).prop_filter("finite non-negative volume", |x| x.is_finite() && *x >= 0.0),
+					len,
+				),
+			)
+		});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(price, volume)| {
+				let input = VptInput::from_slices(&price, &volume);
+				
+				// Get output from the kernel being tested
+				let VptOutput { values: out } = vpt_with_kernel(&input, kernel)?;
+				
+				// Get reference output from scalar kernel
+				let VptOutput { values: ref_out } = vpt_with_kernel(&input, Kernel::Scalar)?;
+				
+				// Verify properties
+				prop_assert_eq!(out.len(), price.len(), "Output length mismatch");
+				prop_assert_eq!(ref_out.len(), price.len(), "Reference output length mismatch");
+				
+				// First value should always be NaN (warmup period)
+				prop_assert!(
+					out[0].is_nan(),
+					"First VPT value should be NaN, got {}",
+					out[0]
+				);
+				prop_assert!(
+					ref_out[0].is_nan(),
+					"First reference VPT value should be NaN, got {}",
+					ref_out[0]
+				);
+				
+				// Manually calculate VPT to verify correctness
+				let mut expected_vpt = vec![f64::NAN; price.len()];
+				let mut prev_vpt_val = f64::NAN;
+				
+				for i in 1..price.len() {
+					let p0 = price[i - 1];
+					let p1 = price[i];
+					let v1 = volume[i];
+					
+					// Calculate current VPT value
+					let vpt_val = if p0.is_nan() || p0 == 0.0 || p1.is_nan() || v1.is_nan() {
+						f64::NAN
+					} else {
+						v1 * ((p1 - p0) / p0)
+					};
+					
+					// Output is current VPT value + previous VPT value (shifted array approach)
+					expected_vpt[i] = if vpt_val.is_nan() || prev_vpt_val.is_nan() {
+						f64::NAN
+					} else {
+						vpt_val + prev_vpt_val
+					};
+					
+					// Save current VPT value for next iteration
+					prev_vpt_val = vpt_val;
+				}
+				
+				// Compare outputs with expected calculations
+				for i in 0..price.len() {
+					let y = out[i];
+					let r = ref_out[i];
+					let e = expected_vpt[i];
+					
+					// Check consistency between kernels
+					if y.is_nan() && r.is_nan() {
+						// Both NaN is fine
+						continue;
+					} else if !y.is_nan() && !r.is_nan() {
+						// Both should be very close
+						let diff = (y - r).abs();
+						prop_assert!(
+							diff < 1e-9,
+							"Kernel mismatch at idx {}: {} vs {} (diff: {})",
+							i, y, r, diff
+						);
+						
+						// Also check against expected value
+						if !e.is_nan() {
+							let diff_expected = (y - e).abs();
+							prop_assert!(
+								diff_expected < 1e-9,
+								"Value mismatch at idx {}: got {} expected {} (diff: {})",
+								i, y, e, diff_expected
+							);
+						}
+					} else {
+						prop_assert!(
+							false,
+							"NaN mismatch at idx {}: kernel={}, scalar={}",
+							i, y, r
+						);
+					}
+				}
+				
+				Ok(())
+			})?;
+		
+		Ok(())
+	}
+
 	generate_all_vpt_tests!(
 		check_vpt_basic_candles,
 		check_vpt_basic_slices,
@@ -980,6 +1101,9 @@ mod tests {
 		check_vpt_accuracy_from_csv,
 		check_vpt_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_vpt_tests!(check_vpt_property);
 
 	#[cfg(debug_assertions)]
 	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {

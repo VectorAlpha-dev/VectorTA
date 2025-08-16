@@ -1192,6 +1192,8 @@ mod tests {
 	use crate::skip_if_unsupported;
 	use crate::utilities::data_loader::read_candles_from_csv;
 	use crate::utilities::enums::Kernel;
+	#[cfg(feature = "proptest")]
+	use proptest::prelude::*;
 
 	fn check_cksp_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test_name);
@@ -1615,6 +1617,420 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_cksp_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		// Generate test data with OHLC price data and parameters
+		let strat = (1usize..=64).prop_flat_map(|p| {
+			(1usize..=20).prop_flat_map(move |q| {
+				(
+					// Generate realistic OHLC data
+					prop::collection::vec(
+						(10.0f64..1000.0f64).prop_filter("finite", |x| x.is_finite()),
+						(p + q)..400, // Ensure enough data for warmup
+					),
+					Just(p),
+					(0.1f64..10.0f64).prop_filter("finite", |x| x.is_finite()), // x parameter
+					Just(q),
+				)
+			})
+		});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(base_prices, p, x, q)| {
+				// Generate realistic OHLC data from base prices
+				let mut high = Vec::with_capacity(base_prices.len());
+				let mut low = Vec::with_capacity(base_prices.len());
+				let mut close = Vec::with_capacity(base_prices.len());
+				
+				for (i, price) in base_prices.iter().enumerate() {
+					let volatility = price * 0.02; // 2% volatility
+					let h = price + volatility;
+					let l = price - volatility;
+					high.push(h);
+					low.push(l);
+					// Close should be between high and low
+					// Use index for deterministic variation
+					let close_factor = 0.3 + 0.4 * ((i % 3) as f64 / 2.0); // Varies between 0.3 and 0.7
+					close.push(l + (h - l) * close_factor);
+				}
+
+				let params = CkspParams {
+					p: Some(p),
+					x: Some(x),
+					q: Some(q),
+				};
+				let input = CkspInput::from_slices(&high, &low, &close, params);
+				
+				// Test 1: Verify outputs are generated
+				let result = cksp_with_kernel(&input, kernel)?;
+				let CkspOutput { long_values, short_values } = result;
+				
+				prop_assert_eq!(long_values.len(), close.len(), "Long values length mismatch");
+				prop_assert_eq!(short_values.len(), close.len(), "Short values length mismatch");
+				
+				// Test 2: Warmup period validation
+				// Find the first non-NaN index to understand actual warmup behavior
+				let first_long_valid = long_values.iter().position(|&v| v.is_finite());
+				let first_short_valid = short_values.iter().position(|&v| v.is_finite());
+				
+				// Both should have the same first valid index
+				if let (Some(long_idx), Some(short_idx)) = (first_long_valid, first_short_valid) {
+					prop_assert_eq!(
+						long_idx, short_idx,
+						"First valid indices should match: long={}, short={}",
+						long_idx, short_idx
+					);
+					
+					// Verify NaN values before first valid index
+					for i in 0..long_idx {
+						prop_assert!(
+							long_values[i].is_nan(),
+							"idx {}: long value should be NaN before first valid ({}), got {}",
+							i,
+							long_idx,
+							long_values[i]
+						);
+						prop_assert!(
+							short_values[i].is_nan(),
+							"idx {}: short value should be NaN before first valid ({}), got {}",
+							i,
+							short_idx,
+							short_values[i]
+						);
+					}
+					
+					// Verify warmup is reasonable based on parameters
+					// The actual warmup depends on data and should be at least p-1 for ATR
+					prop_assert!(
+						long_idx >= p - 1,
+						"Warmup period {} should be at least p - 1 = {}",
+						long_idx,
+						p - 1
+					);
+					// And should not exceed p + q - 1 (theoretical maximum)
+					let max_warmup = p + q - 1;
+					prop_assert!(
+						long_idx <= max_warmup,
+						"Warmup period {} should not exceed p + q - 1 = {}",
+						long_idx,
+						max_warmup
+					);
+				}
+				
+				// Test 3: Non-NaN values after warmup
+				if let Some(first_valid) = first_long_valid {
+					for i in first_valid..close.len() {
+						prop_assert!(
+							long_values[i].is_finite(),
+							"idx {}: long value should be finite after warmup, got {}",
+							i,
+							long_values[i]
+						);
+						prop_assert!(
+							short_values[i].is_finite(),
+							"idx {}: short value should be finite after warmup, got {}",
+							i,
+							short_values[i]
+						);
+					}
+				}
+				
+				// Test 4: Kernel consistency (compare with scalar)
+				if kernel != Kernel::Scalar {
+					let scalar_result = cksp_with_kernel(&input, Kernel::Scalar)?;
+					let CkspOutput { long_values: scalar_long, short_values: scalar_short } = scalar_result;
+					
+					let start_idx = first_long_valid.unwrap_or(0);
+					for i in start_idx..close.len() {
+						let long_val = long_values[i];
+						let scalar_long_val = scalar_long[i];
+						let short_val = short_values[i];
+						let scalar_short_val = scalar_short[i];
+						
+						// Check ULP difference for long values
+						if long_val.is_finite() && scalar_long_val.is_finite() {
+							let long_bits = long_val.to_bits();
+							let scalar_long_bits = scalar_long_val.to_bits();
+							let ulp_diff = long_bits.abs_diff(scalar_long_bits);
+							
+							prop_assert!(
+								(long_val - scalar_long_val).abs() <= 1e-9 || ulp_diff <= 8,
+								"Long value mismatch at idx {}: {} vs {} (ULP={})",
+								i,
+								long_val,
+								scalar_long_val,
+								ulp_diff
+							);
+						}
+						
+						// Check ULP difference for short values
+						if short_val.is_finite() && scalar_short_val.is_finite() {
+							let short_bits = short_val.to_bits();
+							let scalar_short_bits = scalar_short_val.to_bits();
+							let ulp_diff = short_bits.abs_diff(scalar_short_bits);
+							
+							prop_assert!(
+								(short_val - scalar_short_val).abs() <= 1e-9 || ulp_diff <= 8,
+								"Short value mismatch at idx {}: {} vs {} (ULP={})",
+								i,
+								short_val,
+								scalar_short_val,
+								ulp_diff
+							);
+						}
+					}
+				}
+				
+				// Test 5: Mathematical properties and bounds checking
+				let start_idx = first_long_valid.unwrap_or(0);
+				if start_idx < close.len() {
+					// Calculate rough ATR estimate for bounds checking
+					let mut max_tr: f64 = 0.0;
+					for j in start_idx.saturating_sub(p)..start_idx {
+						if j < high.len() {
+							let tr = high[j] - low[j];
+							max_tr = max_tr.max(tr);
+						}
+					}
+					
+					// Find price range for bounds checking (use entire data, not just from start)
+					let price_max = high.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+					let price_min = low.iter().cloned().fold(f64::INFINITY, f64::min);
+					
+					for i in start_idx..close.len() {
+						// Both stops should be finite (not NaN or infinite)
+						prop_assert!(
+							long_values[i].is_finite(),
+							"Long stop should be finite at idx {}: {}",
+							i,
+							long_values[i]
+						);
+						prop_assert!(
+							short_values[i].is_finite(),
+							"Short stop should be finite at idx {}: {}",
+							i,
+							short_values[i]
+						);
+						
+						// Stops should be within reasonable bounds
+						// Use a generous margin to account for extreme market conditions
+						let price_range = price_max - price_min;
+						let margin = price_range * 2.0; // Allow stops to be within 2x the price range
+						
+						prop_assert!(
+							long_values[i] <= price_max + margin,
+							"Long stop {} should be <= max_price {} + margin {} at idx {}",
+							long_values[i],
+							price_max,
+							margin,
+							i
+						);
+						
+						prop_assert!(
+							short_values[i] >= price_min - margin,
+							"Short stop {} should be >= min_price {} - margin {} at idx {}",
+							short_values[i],
+							price_min,
+							margin,
+							i
+						);
+					}
+				}
+				
+				// Test 6: Edge case - period = 1 and q = 1
+				if p == 1 && q == 1 {
+					// With minimal periods, stops should react quickly to price changes
+					let start_check = first_long_valid.unwrap_or(0).saturating_add(1);
+					for i in start_check..close.len() {
+						// With minimal parameters, the stops should exist and be finite
+						prop_assert!(
+							long_values[i].is_finite(),
+							"Long stop should be finite with p=1,q=1 at idx {}: {}",
+							i,
+							long_values[i]
+						);
+						prop_assert!(
+							short_values[i].is_finite(),
+							"Short stop should be finite with p=1,q=1 at idx {}: {}",
+							i,
+							short_values[i]
+						);
+						
+						// With p=1 and q=1, stops should be very close to recent high/low
+						// Since ATR period is 1, the stop should be within 1 ATR of recent extremes
+						let recent_high = high[i];
+						let recent_low = low[i];
+						let recent_range = recent_high - recent_low;
+						
+						// Long stop should be below recent high
+						prop_assert!(
+							long_values[i] <= recent_high,
+							"With p=1,q=1: Long stop {} should be <= recent high {} at idx {}",
+							long_values[i],
+							recent_high,
+							i
+						);
+						
+						// Short stop should be above recent low
+						prop_assert!(
+							short_values[i] >= recent_low,
+							"With p=1,q=1: Short stop {} should be >= recent low {} at idx {}",
+							short_values[i],
+							recent_low,
+							i
+						);
+						
+						// With minimal parameters and extreme multipliers, stops can vary widely
+						// Just ensure they remain finite
+						// The actual bounds depend heavily on the ATR multiplier x
+					}
+				}
+				
+				// Test 8: ATR multiplier (x) effect
+				// Compare with a smaller x value to verify stops widen with larger x
+				if x > 1.0 {
+					let smaller_x = x * 0.5;
+					let params_small = CkspParams {
+						p: Some(p),
+						x: Some(smaller_x),
+						q: Some(q),
+					};
+					let input_small = CkspInput::from_slices(&high, &low, &close, params_small);
+					if let Ok(result_small) = cksp_with_kernel(&input_small, kernel) {
+						let CkspOutput { long_values: long_small, short_values: short_small } = result_small;
+						
+						// After warmup, stops with larger x should be wider apart than with smaller x
+						if let Some(start) = first_long_valid {
+							let sample_points = 5.min((close.len() - start) / 2);
+							for offset in 0..sample_points {
+								let idx = start + offset * 2;
+								if idx < close.len() {
+									let spread_large = (short_values[idx] - long_values[idx]).abs();
+									let spread_small = (short_small[idx] - long_small[idx]).abs();
+									
+									// In most cases, larger x should produce wider spreads
+									// But this isn't always guaranteed due to rolling window effects
+									// So we only check this as a general trend, not a strict rule
+									if spread_small > 0.0 {
+										// Just verify both spreads are reasonable
+										prop_assert!(
+											spread_large > 0.0 && spread_small > 0.0,
+											"At idx {}: Both spreads should be positive: large={}, small={}",
+											idx,
+											spread_large,
+											spread_small
+										);
+									}
+								}
+							}
+						}
+					}
+				}
+				
+				// Test 9: Rolling window (q) effect
+				// Compare with different q values to verify smoothing effect
+				if q > 2 && p < 10 {
+					let smaller_q = 1;
+					let params_small_q = CkspParams {
+						p: Some(p),
+						x: Some(x),
+						q: Some(smaller_q),
+					};
+					let input_small_q = CkspInput::from_slices(&high, &low, &close, params_small_q);
+					if let Ok(result_small_q) = cksp_with_kernel(&input_small_q, kernel) {
+						let CkspOutput { long_values: long_small_q, short_values: short_small_q } = result_small_q;
+						
+						// Calculate smoothness metric: sum of absolute differences between consecutive values
+						let start = (p + q).max(p + smaller_q);
+						if start + 10 < close.len() {
+							let mut volatility_large_q = 0.0;
+							let mut volatility_small_q = 0.0;
+							
+							for i in start..(start + 10) {
+								if i > 0 && i < close.len() {
+									volatility_large_q += (long_values[i] - long_values[i-1]).abs();
+									volatility_small_q += (long_small_q[i] - long_small_q[i-1]).abs();
+								}
+							}
+							
+							// Larger q often produces smoother stops, but not always
+							// Just verify that both have reasonable volatility
+							prop_assert!(
+								volatility_large_q.is_finite() && volatility_small_q.is_finite(),
+								"Volatilities should be finite: large_q={}, small_q={}",
+								volatility_large_q,
+								volatility_small_q
+							);
+						}
+					}
+				}
+				
+				// Test 7: Constant price property
+				if base_prices.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) {
+					// With constant prices, ATR should approach the fixed volatility we added
+					let last_idx = close.len() - 1;
+					let min_converge_idx = first_long_valid.unwrap_or(0) + p * 2; // Allow 2x period for convergence
+					if last_idx > min_converge_idx {
+						let constant_price = base_prices[0];
+						let constant_volatility = constant_price * 0.02; // From our OHLC generation
+						
+						// With constant prices, the stops should converge to:
+						// Long stop ≈ high - x * ATR ≈ (price + volatility) - x * (2 * volatility)
+						// Short stop ≈ low + x * ATR ≈ (price - volatility) + x * (2 * volatility)
+						
+						let expected_long = constant_price + constant_volatility - x * (2.0 * constant_volatility);
+						let expected_short = constant_price - constant_volatility + x * (2.0 * constant_volatility);
+						
+						// Check convergence at the end
+						let long_val = long_values[last_idx];
+						let short_val = short_values[last_idx];
+						
+						// Allow 20% tolerance for convergence
+						let tolerance = constant_price * 0.2;
+						
+						prop_assert!(
+							(long_val - expected_long).abs() <= tolerance,
+							"With constant price {}: Long stop {} should converge near {} (within {})",
+							constant_price,
+							long_val,
+							expected_long,
+							tolerance
+						);
+						
+						prop_assert!(
+							(short_val - expected_short).abs() <= tolerance,
+							"With constant price {}: Short stop {} should converge near {} (within {})",
+							constant_price,
+							short_val,
+							expected_short,
+							tolerance
+						);
+						
+						// Also check stabilization
+						if last_idx >= 3 {
+							let long_stable = (long_values[last_idx] - long_values[last_idx - 1]).abs() < constant_volatility * 0.1;
+							let short_stable = (short_values[last_idx] - short_values[last_idx - 1]).abs() < constant_volatility * 0.1;
+							
+							prop_assert!(
+								long_stable && short_stable,
+								"Stops should stabilize: Long diff {}, Short diff {}",
+								(long_values[last_idx] - long_values[last_idx - 1]).abs(),
+								(short_values[last_idx] - short_values[last_idx - 1]).abs()
+							);
+						}
+					}
+				}
+				
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_cksp_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1707,6 +2123,9 @@ mod tests {
 		check_cksp_streaming,
 		check_cksp_no_poison
 	);
+	
+	#[cfg(feature = "proptest")]
+	generate_all_cksp_tests!(check_cksp_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);

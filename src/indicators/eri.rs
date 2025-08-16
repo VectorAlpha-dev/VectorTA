@@ -46,6 +46,8 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use thiserror::Error;
+#[cfg(feature = "proptest")]
+use proptest::prelude::*;
 
 #[derive(Debug, Clone)]
 pub enum EriData<'a> {
@@ -1692,6 +1694,9 @@ mod tests {
 		check_eri_no_poison
 	);
 
+	#[cfg(feature = "proptest")]
+	generate_all_eri_tests!(check_eri_property);
+
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);
 
@@ -1886,6 +1891,288 @@ mod tests {
 
 	#[cfg(not(debug_assertions))]
 	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(())
+	}
+
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_eri_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy to generate realistic OHLC data
+		let strat = (2usize..=50)  // ERI requires minimum period of 2
+			.prop_flat_map(|period| {
+				(
+					100.0f64..5000.0f64,  // Base price
+					(period + 20)..400,    // Data length  
+					0.001f64..0.05f64,     // Volatility factor
+					-0.01f64..0.01f64,     // Trend factor
+					Just(period),
+					prop::sample::select(vec!["ema", "sma", "wma"]),  // MA types - simpler ones that don't need excessive warmup
+				)
+			})
+			.prop_map(|(base_price, data_len, volatility, trend, period, ma_type)| {
+				// Generate synthetic OHLC data with realistic constraints
+				let mut high = Vec::with_capacity(data_len);
+				let mut low = Vec::with_capacity(data_len);
+				let mut close = Vec::with_capacity(data_len);
+				
+				let mut price = base_price;
+				for i in 0..data_len {
+					// Add trend and volatility
+					price *= 1.0 + trend + (i as f64 * 0.0001 * trend);
+					let daily_vol = volatility * price;
+					
+					// Generate OHLC with proper constraints
+					let c = price + daily_vol * ((i as f64).sin() * 0.3);
+					let h = c + daily_vol * (0.5 + (i as f64 * 0.7).cos().abs() * 0.5);
+					let l = c - daily_vol * (0.5 + (i as f64 * 0.7).sin().abs() * 0.5);
+					
+					high.push(h);
+					low.push(l.min(c));  // Ensure low <= close
+					close.push(c);
+				}
+				
+				(high, low, close, period, ma_type.to_string())
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(high, low, close, period, ma_type)| {
+				let params = EriParams {
+					period: Some(period),
+					ma_type: Some(ma_type.clone()),
+				};
+				let input = EriInput::from_slices(&high, &low, &close, params.clone());
+				
+				// Run with specified kernel - handle MA errors gracefully
+				let result = match eri_with_kernel(&input, kernel) {
+					Ok(r) => r,
+					Err(e) => {
+						// DEMA and TEMA need approximately 2*period and 3*period data respectively
+						// These errors are expected when testing with shorter data lengths
+						match e {
+							EriError::MaCalculationError(msg) if msg.contains("Not enough data") => return Ok(()),
+							EriError::NotEnoughValidData { .. } => return Ok(()),
+							_ => panic!("Unexpected error type: {:?}", e),
+						}
+					}
+				};
+				
+				// Also run with scalar as reference
+				let reference = match eri_with_kernel(&input, Kernel::Scalar) {
+					Ok(r) => r,
+					Err(_) => return Ok(()), // If scalar fails, kernel would too
+				};
+				
+				// Calculate expected warmup period
+				let first_valid_idx = high.iter()
+					.zip(low.iter())
+					.zip(close.iter())
+					.position(|((h, l), c)| !h.is_nan() && !l.is_nan() && !c.is_nan())
+					.unwrap_or(0);
+				let warmup_period = first_valid_idx + period - 1;
+				
+				// Property 1: Check warmup period - values before warmup should be NaN
+				for i in 0..warmup_period.min(high.len()) {
+					prop_assert!(
+						result.bull[i].is_nan(),
+						"[{}] Expected NaN in bull warmup at index {}, got {}",
+						test_name, i, result.bull[i]
+					);
+					prop_assert!(
+						result.bear[i].is_nan(),
+						"[{}] Expected NaN in bear warmup at index {}, got {}",
+						test_name, i, result.bear[i]
+					);
+				}
+				
+				// Property 2: Check values after warmup are not NaN (unless input was NaN)
+				for i in warmup_period..high.len() {
+					if !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan() {
+						prop_assert!(
+							!result.bull[i].is_nan(),
+							"[{}] Unexpected NaN in bull at index {} after warmup",
+							test_name, i
+						);
+						prop_assert!(
+							!result.bear[i].is_nan(),
+							"[{}] Unexpected NaN in bear at index {} after warmup",
+							test_name, i
+						);
+					}
+				}
+				
+				// Property 3: Bear should always be <= Bull (since low <= high)
+				for i in warmup_period..high.len() {
+					if !result.bull[i].is_nan() && !result.bear[i].is_nan() {
+						prop_assert!(
+							result.bear[i] <= result.bull[i] + 1e-9,
+							"[{}] Bear {} > Bull {} at index {} (low={}, high={})",
+							test_name, result.bear[i], result.bull[i], i, low[i], high[i]
+						);
+					}
+				}
+				
+				// Property 4: Kernel consistency - all kernels should produce identical results
+				for i in 0..high.len() {
+					let bull_val = result.bull[i];
+					let bear_val = result.bear[i];
+					let ref_bull = reference.bull[i];
+					let ref_bear = reference.bear[i];
+					
+					// Check bull consistency
+					if bull_val.is_finite() && ref_bull.is_finite() {
+						let bull_diff = (bull_val - ref_bull).abs();
+						let bull_ulp = bull_val.to_bits().abs_diff(ref_bull.to_bits());
+						prop_assert!(
+							bull_diff <= 1e-9 || bull_ulp <= 4,
+							"[{}] Bull kernel mismatch at index {}: {} vs {} (diff={}, ULP={})",
+							test_name, i, bull_val, ref_bull, bull_diff, bull_ulp
+						);
+					} else {
+						prop_assert_eq!(
+							bull_val.to_bits(), ref_bull.to_bits(),
+							"[{}] Bull NaN/Inf mismatch at index {}: {} vs {}",
+							test_name, i, bull_val, ref_bull
+						);
+					}
+					
+					// Check bear consistency  
+					if bear_val.is_finite() && ref_bear.is_finite() {
+						let bear_diff = (bear_val - ref_bear).abs();
+						let bear_ulp = bear_val.to_bits().abs_diff(ref_bear.to_bits());
+						prop_assert!(
+							bear_diff <= 1e-9 || bear_ulp <= 4,
+							"[{}] Bear kernel mismatch at index {}: {} vs {} (diff={}, ULP={})",
+							test_name, i, bear_val, ref_bear, bear_diff, bear_ulp
+						);
+					} else {
+						prop_assert_eq!(
+							bear_val.to_bits(), ref_bear.to_bits(),
+							"[{}] Bear NaN/Inf mismatch at index {}: {} vs {}",
+							test_name, i, bear_val, ref_bear
+						);
+					}
+				}
+				
+				// Property 5: Constant price test - with constant prices, values converge to exact constants
+				let all_high_same = high.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
+				let all_low_same = low.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
+				let all_close_same = close.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
+				
+				if all_high_same && all_low_same && all_close_same && high.len() > warmup_period + 2 * period {
+					// With constant prices, MA converges to the constant close value
+					// So bull = high[0] - close[0] and bear = low[0] - close[0]
+					let expected_bull = high[0] - close[0];
+					let expected_bear = low[0] - close[0];
+					
+					// After sufficient warmup (2*period), values should converge
+					for i in (warmup_period + 2 * period)..high.len() {
+						if !result.bull[i].is_nan() && !result.bear[i].is_nan() {
+							prop_assert!(
+								(result.bull[i] - expected_bull).abs() < 1e-6,
+								"[{}] Constant price: Bull {} != expected {} at index {}",
+								test_name, result.bull[i], expected_bull, i
+							);
+							prop_assert!(
+								(result.bear[i] - expected_bear).abs() < 1e-6,
+								"[{}] Constant price: Bear {} != expected {} at index {}",
+								test_name, result.bear[i], expected_bear, i
+							);
+						}
+					}
+				}
+				
+				// Property 6: Mathematical definition check
+				// Bull = High - MA, Bear = Low - MA
+				// So Bull - Bear = High - Low
+				for i in warmup_period..high.len() {
+					if !result.bull[i].is_nan() && !result.bear[i].is_nan() {
+						let expected_diff = high[i] - low[i];
+						let actual_diff = result.bull[i] - result.bear[i];
+						prop_assert!(
+							(actual_diff - expected_diff).abs() < 1e-9,
+							"[{}] Bull - Bear != High - Low at index {}: {} vs {}",
+							test_name, i, actual_diff, expected_diff
+						);
+					}
+				}
+				
+				// Property 7: Impossible state check
+				// Since bull = high - MA and bear = low - MA, and high >= low,
+				// it's impossible for bull < 0 while bear > 0
+				for i in warmup_period..high.len() {
+					if !result.bull[i].is_nan() && !result.bear[i].is_nan() {
+						// The only impossible combination
+						if result.bull[i] < 0.0 && result.bear[i] > 0.0 {
+							prop_assert!(
+								false,
+								"[{}] Impossible state: bull {} < 0 but bear {} > 0 at index {} (high={}, low={})",
+								test_name, result.bull[i], result.bear[i], i, high[i], low[i]
+							);
+						}
+					}
+				}
+				
+				// Property 8: Period boundary test
+				if period == 1 {
+					// With period=1, most MAs should give MA ≈ close[i]
+					// So bull ≈ high[i] - close[i] and bear ≈ low[i] - close[i]
+					for i in warmup_period..high.len().min(warmup_period + 10) {
+						if !result.bull[i].is_nan() && !result.bear[i].is_nan() {
+							// Just check the relationship holds
+							let expected_diff = high[i] - low[i];
+							let actual_diff = result.bull[i] - result.bear[i];
+							prop_assert!(
+								(actual_diff - expected_diff).abs() < 1e-6,
+								"[{}] Period=1: Bull-Bear mismatch at index {}: {} vs {}",
+								test_name, i, actual_diff, expected_diff
+							);
+						}
+					}
+				}
+				
+				// Property 9: Bounds check - bull/bear values should be within reasonable range
+				// They shouldn't exceed the price range in the data
+				let max_price = high.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+				let min_price = low.iter().cloned().fold(f64::INFINITY, f64::min);
+				let price_range = max_price - min_price;
+				
+				for i in warmup_period..high.len() {
+					if !result.bull[i].is_nan() && !result.bear[i].is_nan() {
+						// Bull and bear represent deviations from MA, so they should be bounded
+						prop_assert!(
+							result.bull[i].abs() <= price_range * 2.0,
+							"[{}] Bull {} exceeds reasonable bounds (price range: {}) at index {}",
+							test_name, result.bull[i], price_range, i
+						);
+						prop_assert!(
+							result.bear[i].abs() <= price_range * 2.0,
+							"[{}] Bear {} exceeds reasonable bounds (price range: {}) at index {}",
+							test_name, result.bear[i], price_range, i
+						);
+					}
+				}
+				
+				// Property 10: Edge case - period close to data length
+				if period >= high.len() - 5 && period < high.len() {
+					// With period very close to data length, we should still get at least one valid value
+					let valid_count = result.bull.iter()
+						.zip(result.bear.iter())
+						.filter(|(b, r)| !b.is_nan() && !r.is_nan())
+						.count();
+					prop_assert!(
+						valid_count >= 1,
+						"[{}] No valid values with period {} and data_len {}",
+						test_name, period, high.len()
+					);
+				}
+				
+				Ok(())
+			})
+			.unwrap();
+
 		Ok(())
 	}
 

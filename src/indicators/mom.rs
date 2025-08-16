@@ -600,6 +600,8 @@ mod tests {
 	use super::*;
 	use crate::skip_if_unsupported;
 	use crate::utilities::data_loader::read_candles_from_csv;
+	#[cfg(feature = "proptest")]
+	use proptest::prelude::*;
 
 	fn check_mom_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test_name);
@@ -837,6 +839,171 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_mom_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy: generate period from 1 to 64, then data with length from period to 400
+		let strat = (1usize..=64)
+			.prop_flat_map(|period| {
+				(
+					prop::collection::vec(
+						(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+						period..400,
+					),
+					Just(period),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period)| {
+				let params = MomParams { period: Some(period) };
+				let input = MomInput::from_slice(&data, params.clone());
+
+				// Get output from the kernel under test
+				let MomOutput { values: out } = mom_with_kernel(&input, kernel).unwrap();
+				
+				// Get reference output from scalar kernel for consistency check
+				let MomOutput { values: ref_out } = mom_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Find first valid index (first non-NaN in data)
+				let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+				let warmup_period = first_valid + period;
+
+				// Property 1: Warmup period - first 'warmup_period' values should be NaN
+				for i in 0..warmup_period.min(out.len()) {
+					prop_assert!(
+						out[i].is_nan(),
+						"[{}] Expected NaN during warmup at index {}, got {}",
+						test_name, i, out[i]
+					);
+				}
+
+				// Property 2: Exact formula - momentum[i] = data[i] - data[i - period]
+				for i in warmup_period..data.len() {
+					let expected = data[i] - data[i - period];
+					let actual = out[i];
+					
+					if expected.is_finite() && actual.is_finite() {
+						prop_assert!(
+							(actual - expected).abs() < 1e-10,
+							"[{}] MOM formula mismatch at index {}: expected {}, got {}",
+							test_name, i, expected, actual
+						);
+					}
+				}
+
+				// Property 3: Kernel consistency - all kernels should produce identical results
+				for i in 0..out.len() {
+					let y = out[i];
+					let r = ref_out[i];
+					
+					// Check bit-exact equality for NaN/infinite values
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert!(
+							y.to_bits() == r.to_bits(),
+							"[{}] NaN/Inf mismatch at index {}: {} vs {}",
+							test_name, i, y, r
+						);
+					} else {
+						// For finite values, allow small numerical difference or ULP difference
+						let ulp_diff = y.to_bits().abs_diff(r.to_bits());
+						prop_assert!(
+							(y - r).abs() <= 1e-10 || ulp_diff <= 4,
+							"[{}] Kernel mismatch at index {}: {} vs {} (ULP diff: {})",
+							test_name, i, y, r, ulp_diff
+						);
+					}
+				}
+
+				// Property 4: Constant data produces zero momentum
+				let all_same = data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
+				if all_same && data.len() > period {
+					for i in warmup_period..out.len() {
+						prop_assert!(
+							out[i].abs() < 1e-10,
+							"[{}] Constant data should produce zero momentum at index {}, got {}",
+							test_name, i, out[i]
+						);
+					}
+				}
+
+				// Property 5: Linear data produces constant momentum
+				// Check if data is approximately linear (consecutive differences are constant)
+				if data.len() > period + 2 {
+					let diffs: Vec<f64> = data.windows(2).map(|w| w[1] - w[0]).collect();
+					let is_linear = diffs.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-9);
+					
+					if is_linear && diffs.len() > 0 {
+						let expected_momentum = diffs[0] * period as f64;
+						for i in warmup_period..out.len().min(warmup_period + 10) {
+							if out[i].is_finite() {
+								prop_assert!(
+									(out[i] - expected_momentum).abs() < 1e-9,
+									"[{}] Linear data should produce constant momentum {} at index {}, got {}",
+									test_name, expected_momentum, i, out[i]
+								);
+							}
+						}
+					}
+				}
+
+				// Property 6: Symmetry - negating input negates output
+				if data.len() < 100 { // Only test on smaller datasets for efficiency
+					let neg_data: Vec<f64> = data.iter().map(|&x| -x).collect();
+					let neg_input = MomInput::from_slice(&neg_data, params);
+					let MomOutput { values: neg_out } = mom_with_kernel(&neg_input, kernel).unwrap();
+					
+					for i in warmup_period..out.len() {
+						if out[i].is_finite() && neg_out[i].is_finite() {
+							prop_assert!(
+								(out[i] + neg_out[i]).abs() < 1e-10,
+								"[{}] Symmetry violated at index {}: {} vs {}",
+								test_name, i, out[i], -neg_out[i]
+							);
+						}
+					}
+				}
+
+				// Property 7: Period=1 gives adjacent differences
+				if period == 1 && data.len() > 1 {
+					for i in 1..data.len() {
+						let expected = data[i] - data[i - 1];
+						if out[i].is_finite() && expected.is_finite() {
+							prop_assert!(
+								(out[i] - expected).abs() < 1e-10,
+								"[{}] Period=1 should give adjacent differences at index {}: expected {}, got {}",
+								test_name, i, expected, out[i]
+							);
+						}
+					}
+				}
+
+				// Property 8: Output magnitude bounded by max difference in data
+				if data.len() > period {
+					let min_val = data.iter().filter(|x| x.is_finite()).fold(f64::INFINITY, |a, &b| a.min(b));
+					let max_val = data.iter().filter(|x| x.is_finite()).fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+					let max_diff = max_val - min_val;
+					
+					for i in warmup_period..out.len() {
+						if out[i].is_finite() {
+							prop_assert!(
+								out[i].abs() <= max_diff + 1e-9,
+								"[{}] Output magnitude {} exceeds max possible difference {} at index {}",
+								test_name, out[i].abs(), max_diff, i
+							);
+						}
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_mom_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -869,6 +1036,9 @@ mod tests {
 		check_mom_streaming,
 		check_mom_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_mom_tests!(check_mom_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);

@@ -1362,6 +1362,209 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_vidya_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy for generating realistic test data with varying volatility patterns
+		let strat = (1usize..=20)  // short_period range
+			.prop_flat_map(|short_period| {
+				// long_period must be >= short_period
+				let long_min = (short_period + 1).max(2);
+				let long_max = 100.min(long_min + 50);
+				
+				(long_min..=long_max).prop_flat_map(move |long_period| {
+					// Generate data with length >= long_period
+					let data_len = long_period.max(10)..400;
+					
+					(
+						// Generate realistic price data with varying volatility
+						prop::collection::vec(
+							(-0.05f64..0.05f64).prop_filter("finite", |x| x.is_finite()),
+							data_len,
+						).prop_map(|returns| {
+							let mut prices = Vec::with_capacity(returns.len());
+							let mut price = 100.0;
+							// Create periods of high and low volatility
+							for (i, ret) in returns.iter().enumerate() {
+								// Alternate between high and low volatility periods
+								let volatility_factor = if (i / 20) % 2 == 0 { 0.5 } else { 2.0 };
+								price *= 1.0 + (ret * volatility_factor);
+								prices.push(price);
+							}
+							prices
+						}),
+						Just(short_period),
+						Just(long_period),
+						0.01f64..1.0f64,  // alpha range
+					)
+				})
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, short_period, long_period, alpha)| {
+				let params = VidyaParams {
+					short_period: Some(short_period),
+					long_period: Some(long_period),
+					alpha: Some(alpha),
+				};
+				let input = VidyaInput::from_slice(&data, params.clone());
+
+				// Test kernel consistency
+				let VidyaOutput { values: out } = vidya_with_kernel(&input, kernel).unwrap();
+				let VidyaOutput { values: ref_out } = vidya_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Property 1: Kernel consistency - all kernels should produce identical results
+				for i in 0..data.len() {
+					let y = out[i];
+					let r = ref_out[i];
+					
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert!(y.to_bits() == r.to_bits(), 
+							"[{}] finite/NaN mismatch at idx {}: {} vs {}", test_name, i, y, r);
+						continue;
+					}
+					
+					let ulp_diff = y.to_bits().abs_diff(r.to_bits());
+					prop_assert!(
+						(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+						"[{}] kernel mismatch at idx {}: {} vs {} (ULP={})", 
+						test_name, i, y, r, ulp_diff
+					);
+				}
+
+				// Property 2: Warmup period - VIDYA starts outputting at first + long_period - 2
+				let first = data.iter().position(|&x| !x.is_nan()).unwrap_or(0);
+				let first_valid_idx = if first + long_period >= 2 { 
+					first + long_period - 2 
+				} else { 
+					0 
+				};
+				
+				// Values before first_valid_idx should be NaN
+				for i in 0..first_valid_idx.min(data.len()) {
+					prop_assert!(out[i].is_nan(), 
+						"[{}] Expected NaN during warmup at idx {}, got {}", test_name, i, out[i]);
+				}
+				
+				// Property 3: First valid output should be at first_valid_idx
+				if first_valid_idx < data.len() {
+					prop_assert!(!out[first_valid_idx].is_nan(),
+						"[{}] Expected valid value at first_valid_idx {}, got NaN", test_name, first_valid_idx);
+				}
+				
+				// For the rest of the test, use the actual warmup_end as defined by the implementation
+				let warmup_end = first + long_period - 1;
+
+				// Property 4: Output values should be reasonable (within data range + some margin)
+				if data.len() > warmup_end {
+					let data_min = data.iter().cloned().fold(f64::INFINITY, f64::min);
+					let data_max = data.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+					// Use a minimum margin for cases where all values are similar
+					let range = data_max - data_min;
+					let margin = if range < 1.0 { 
+						data_max.abs() * 0.2  // 20% of value when range is tiny
+					} else {
+						range * 0.1  // 10% of range otherwise
+					};
+					
+					for i in warmup_end..data.len() {
+						let y = out[i];
+						if y.is_finite() {
+							prop_assert!(
+								y >= data_min - margin && y <= data_max + margin,
+								"[{}] Output {} at idx {} outside reasonable range [{}, {}]",
+								test_name, y, i, data_min - margin, data_max + margin
+							);
+						}
+					}
+				}
+
+				// Property 5: Very low alpha should produce stable output
+				if alpha < 0.05 && data.len() > warmup_end + 10 {
+					// With very low alpha, VIDYA should change slowly
+					let vidya_section = &out[warmup_end..];
+					if vidya_section.len() > 2 {
+						// Check that consecutive values are very close
+						for window in vidya_section.windows(2) {
+							let change_ratio = (window[1] - window[0]).abs() / window[0].abs().max(1e-10);
+							prop_assert!(
+								change_ratio < 0.1,  // Less than 10% change between consecutive values
+								"[{}] With alpha={}, VIDYA should be stable but found large change ratio {}",
+								test_name, alpha, change_ratio
+							);
+						}
+					}
+				}
+
+				// Property 6: Constant input should produce constant output (after warmup)
+				if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) && data.len() > warmup_end {
+					// All data values are essentially the same
+					let constant_value = data[0];
+					for i in warmup_end..data.len() {
+						prop_assert!(
+							(out[i] - constant_value).abs() <= 1e-9,
+							"[{}] Constant input should produce constant output, got {} expected {}",
+							test_name, out[i], constant_value
+						);
+					}
+				}
+
+				// Property 7: VIDYA follows general price trends
+				// Check that VIDYA generally follows the direction of price movements
+				if data.len() > warmup_end + 20 {
+					// Count how often VIDYA moves in the same direction as price
+					let mut same_direction_count = 0;
+					let mut total_movements = 0;
+					
+					for i in (warmup_end + 1)..data.len() {
+						let price_change = data[i] - data[i - 1];
+						let vidya_change = out[i] - out[i - 1];
+						
+						// Only count significant movements
+						if price_change.abs() > 1e-6 && vidya_change.abs() > 1e-10 {
+							total_movements += 1;
+							if price_change.signum() == vidya_change.signum() {
+								same_direction_count += 1;
+							}
+						}
+					}
+					
+					// VIDYA should follow price direction more often than not (at least 45% for a lagging indicator)
+					// Note: Can be lower when there are many flat sections in the data
+					if total_movements > 10 {
+						let direction_ratio = same_direction_count as f64 / total_movements as f64;
+						prop_assert!(
+							direction_ratio >= 0.45,
+							"[{}] VIDYA should generally follow price direction, but only followed {:.1}% of the time",
+							test_name, direction_ratio * 100.0
+						);
+					}
+				}
+				
+				// Property 8: No poison values in output
+				for (i, &val) in out.iter().enumerate() {
+					if val.is_finite() {
+						let bits = val.to_bits();
+						prop_assert!(
+							bits != 0x11111111_11111111 && 
+							bits != 0x22222222_22222222 && 
+							bits != 0x33333333_33333333,
+							"[{}] Found poison value {} (0x{:016X}) at index {}",
+							test_name, val, bits, i
+						);
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_vidya_tests {
         ($($test_fn:ident),*) => {
             paste! {
@@ -1405,6 +1608,9 @@ mod tests {
 		check_vidya_streaming,
 		check_vidya_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_vidya_tests!(check_vidya_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);

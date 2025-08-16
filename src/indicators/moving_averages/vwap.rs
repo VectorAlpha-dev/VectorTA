@@ -1110,6 +1110,255 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	fn check_vwap_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Load real market data for realistic testing
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		
+		// Get all necessary data
+		let timestamps = candles.get_timestamp().unwrap();
+		let volumes = candles.select_candle_field("volume").unwrap();
+		let close_prices = &candles.close;
+		let high_prices = &candles.high;
+		let low_prices = &candles.low;
+		
+		// Anchor periods to test (m, h, d, M are supported)
+		let anchor_periods = vec!["30m", "1h", "4h", "12h", "1d", "2d", "3d"];
+		
+		// Strategy: test various anchor and data slice combinations
+		let strat = (
+			0usize..anchor_periods.len(),  // anchor index
+			0usize..timestamps.len().saturating_sub(200), // starting index
+			100usize..=200,    // length of data slice to use
+		);
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(anchor_idx, start_idx, slice_len)| {
+				// Ensure we have valid slice bounds
+				let end_idx = (start_idx + slice_len).min(timestamps.len());
+				if end_idx <= start_idx || end_idx - start_idx < 10 {
+					return Ok(()); // Skip invalid combinations
+				}
+
+				let anchor = anchor_periods[anchor_idx];
+				let ts_slice = &timestamps[start_idx..end_idx];
+				let vol_slice = &volumes[start_idx..end_idx];
+				let price_slice = &close_prices[start_idx..end_idx];
+				let high_slice = &high_prices[start_idx..end_idx];
+				let low_slice = &low_prices[start_idx..end_idx];
+				
+				let params = VwapParams { anchor: Some(anchor.to_string()) };
+				let input = VwapInput::from_slice(ts_slice, vol_slice, price_slice, params.clone());
+
+				// Test the specified kernel
+				let result = vwap_with_kernel(&input, kernel);
+				
+				// Also compute with scalar kernel for reference
+				let scalar_input = VwapInput::from_slice(ts_slice, vol_slice, price_slice, params.clone());
+				let scalar_result = vwap_with_kernel(&scalar_input, Kernel::Scalar);
+
+				// Both should succeed or fail together
+				match (result, scalar_result) {
+					(Ok(VwapOutput { values: out }), Ok(VwapOutput { values: ref_out })) => {
+						// Verify output length
+						prop_assert_eq!(out.len(), price_slice.len());
+						prop_assert_eq!(ref_out.len(), price_slice.len());
+
+						// Parse anchor to understand grouping
+						let (count, unit_char) = parse_anchor(anchor).unwrap();
+						
+						// Test specific properties for valid outputs
+						for i in 0..out.len() {
+							let y = out[i];
+							let r = ref_out[i];
+
+							// Kernel consistency check
+							if y.is_finite() && r.is_finite() {
+								let y_bits = y.to_bits();
+								let r_bits = r.to_bits();
+								let ulp_diff: u64 = y_bits.abs_diff(r_bits);
+								prop_assert!(
+									(y - r).abs() <= 1e-9 || ulp_diff <= 5,
+									"Kernel mismatch at {}: {} vs {} (ULP={})",
+									i, y, r, ulp_diff
+								);
+							} else if y.is_nan() && r.is_nan() {
+								// Both NaN is fine (zero volume case)
+								continue;
+							} else {
+								prop_assert_eq!(y.is_nan(), r.is_nan(), "NaN mismatch at {}: {} vs {}", i, y, r);
+							}
+
+							// VWAP should be positive for positive prices and volumes
+							if y.is_finite() && vol_slice[i] > 0.0 && price_slice[i] > 0.0 {
+								prop_assert!(
+									y > 0.0,
+									"VWAP should be positive at {} for positive price {} and volume {}",
+									i, price_slice[i], vol_slice[i]
+								);
+							}
+						}
+
+						// Test VWAP formula property: Find anchor boundaries and verify
+						let mut current_group_id = -1_i64;
+						let mut group_start = 0;
+						
+						for i in 0..ts_slice.len() {
+							let ts_ms = ts_slice[i];
+							let group_id = match unit_char {
+								'm' => ts_ms / ((count as i64) * 60_000),
+								'h' => ts_ms / ((count as i64) * 3_600_000),
+								'd' => ts_ms / ((count as i64) * 86_400_000),
+								'M' => floor_to_month(ts_ms, count).unwrap_or(-1),
+								_ => -1,
+							};
+
+							// Check if we've crossed an anchor boundary
+							if group_id != current_group_id {
+								// Verify the previous group if it exists
+								if current_group_id != -1 && i > group_start {
+									// Calculate expected VWAP for this group
+									let mut vol_sum = 0.0;
+									let mut vol_price_sum = 0.0;
+									let mut min_price = f64::INFINITY;
+									let mut max_price = f64::NEG_INFINITY;
+									
+									for j in group_start..i {
+										vol_sum += vol_slice[j];
+										vol_price_sum += vol_slice[j] * price_slice[j];
+										min_price = min_price.min(low_slice[j]);
+										max_price = max_price.max(high_slice[j]);
+									}
+									
+									if vol_sum > 0.0 {
+										let expected_vwap = vol_price_sum / vol_sum;
+										let actual_vwap = out[i - 1]; // Last value of previous group
+										
+										// VWAP should match the formula
+										prop_assert!(
+											(actual_vwap - expected_vwap).abs() < 1e-6,
+											"VWAP formula mismatch at group ending at {}: {} vs expected {}",
+											i - 1, actual_vwap, expected_vwap
+										);
+										
+										// VWAP should be within price bounds of the period
+										// Using low/high for bounds check since VWAP uses close prices
+										prop_assert!(
+											actual_vwap >= min_price - 1e-9 && actual_vwap <= max_price + 1e-9,
+											"VWAP {} outside price bounds [{}, {}] at {}",
+											actual_vwap, min_price, max_price, i - 1
+										);
+									}
+								}
+								
+								current_group_id = group_id;
+								group_start = i;
+							}
+						}
+
+						// Test streaming consistency for smaller slices
+						if price_slice.len() <= 50 {
+							let mut stream = VwapStream::try_new(params).unwrap();
+							let mut stream_values = Vec::with_capacity(price_slice.len());
+							
+							for i in 0..price_slice.len() {
+								match stream.update(ts_slice[i], price_slice[i], vol_slice[i]) {
+									Some(val) => stream_values.push(val),
+									None => stream_values.push(f64::NAN),
+								}
+							}
+
+							// Compare streaming output with batch output
+							for (i, (&batch_val, &stream_val)) in out.iter().zip(stream_values.iter()).enumerate() {
+								if batch_val.is_nan() && stream_val.is_nan() {
+									continue;
+								}
+								if batch_val.is_finite() && stream_val.is_finite() {
+									prop_assert!(
+										(batch_val - stream_val).abs() < 1e-9,
+										"Streaming mismatch at {}: batch={} vs stream={}",
+										i, batch_val, stream_val
+									);
+								}
+							}
+						}
+
+						// Test volume weighting property: VWAP is cumulative within anchor period
+						// Create synthetic timestamps that are guaranteed to be in the same anchor period
+						{
+							// Use a base timestamp and add small increments
+							let base_ts = 1609459200000_i64; // Jan 1, 2021 00:00:00 UTC
+							let test_ts = vec![
+								base_ts,           // Start of period
+								base_ts + 3600000, // +1 hour
+								base_ts + 7200000, // +2 hours
+							];
+							let test_prices = vec![100.0, 200.0, 300.0];
+							let test_volumes = vec![1.0, 2.0, 3.0];
+							
+							// Use 1d anchor to ensure all 3 are in same period
+							let test_params = VwapParams { anchor: Some("1d".to_string()) };
+							let test_input = VwapInput::from_slice(&test_ts, &test_volumes, &test_prices, test_params);
+							
+							if let Ok(VwapOutput { values: test_out }) = vwap_with_kernel(&test_input, kernel) {
+								// VWAP is cumulative:
+								// At index 0: 100*1 / 1 = 100
+								// At index 1: (100*1 + 200*2) / (1+2) = 500/3 = 166.67...
+								// At index 2: (100*1 + 200*2 + 300*3) / (1+2+3) = 1400/6 = 233.33...
+								
+								if test_out.len() >= 3 {
+									if test_out[0].is_finite() {
+										prop_assert!(
+											(test_out[0] - 100.0).abs() < 1e-9,
+											"VWAP at index 0 should be 100, got {}",
+											test_out[0]
+										);
+									}
+									if test_out[1].is_finite() {
+										let expected_1 = 500.0 / 3.0;
+										prop_assert!(
+											(test_out[1] - expected_1).abs() < 1e-9,
+											"VWAP at index 1 should be {}, got {}",
+											expected_1, test_out[1]
+										);
+									}
+									if test_out[2].is_finite() {
+										let expected_2 = 1400.0 / 6.0;
+										prop_assert!(
+											(test_out[2] - expected_2).abs() < 1e-9,
+											"VWAP at index 2 should be {}, got {}",
+											expected_2, test_out[2]
+										);
+									}
+								}
+							}
+						}
+					}
+					(Err(e1), Err(e2)) => {
+						// Both kernels should fail with similar errors
+						prop_assert_eq!(
+							std::mem::discriminant(&e1),
+							std::mem::discriminant(&e2),
+							"Different error types: {:?} vs {:?}",
+							e1, e2
+						);
+					}
+					_ => {
+						prop_assert!(false, "Kernel consistency failure: one succeeded, one failed");
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	generate_all_vwap_tests!(
 		check_vwap_partial_params,
 		check_vwap_accuracy,
@@ -1121,6 +1370,9 @@ mod tests {
 		check_vwap_with_default_params,
 		check_vwap_no_poison
 	);
+	
+	#[cfg(feature = "proptest")]
+	generate_all_vwap_tests!(check_vwap_property);
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);
 		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
@@ -1216,7 +1468,7 @@ mod tests {
 			("1m", "5m", 1), // Minute anchors
 			("1h", "6h", 1), // Hour anchors
 			("1d", "5d", 1), // Day anchors
-			("1w", "2w", 1), // Week anchors
+			("7d", "14d", 7), // Week-like anchors (using days)
 		];
 
 		let test_sources = vec!["close", "open", "high", "low", "hl2", "hlc3", "ohlc4"];

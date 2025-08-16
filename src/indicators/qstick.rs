@@ -633,6 +633,8 @@ mod tests {
 	use super::*;
 	use crate::skip_if_unsupported;
 	use crate::utilities::data_loader::read_candles_from_csv;
+	#[cfg(feature = "proptest")]
+	use proptest::prelude::*;
 	fn check_qstick_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test_name);
 		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
@@ -814,6 +816,148 @@ mod tests {
 	fn check_qstick_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		Ok(()) // No-op in release builds
 	}
+	
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_qstick_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+		
+		// Strategy for generating test data
+		let strat = (1usize..=64)
+			.prop_flat_map(|period| {
+				(period..=400usize).prop_flat_map(move |len| {
+					(
+						// Generate open prices
+						prop::collection::vec(
+							(1.0f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
+							len,
+						),
+						// Generate close prices as deltas from open
+						prop::collection::vec(
+							(-100.0f64..100.0f64).prop_filter("finite", |x| x.is_finite()),
+							len,
+						),
+						Just(period),
+					)
+				})
+			});
+		
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(open_prices, close_deltas, period)| {
+				// Create close prices from open + delta
+				let close_prices: Vec<f64> = open_prices
+					.iter()
+					.zip(close_deltas.iter())
+					.map(|(o, d)| o + d)
+					.collect();
+				
+				let params = QstickParams {
+					period: Some(period),
+				};
+				let input = QstickInput::from_slices(&open_prices, &close_prices, params);
+				
+				let QstickOutput { values: out } = qstick_with_kernel(&input, kernel).unwrap();
+				let QstickOutput { values: ref_out } = qstick_with_kernel(&input, Kernel::Scalar).unwrap();
+				
+				// Test 1: Warmup period - first (period - 1) values should be NaN
+				for i in 0..(period - 1) {
+					prop_assert!(
+						out[i].is_nan(),
+						"Expected NaN during warmup at index {}, got {}",
+						i,
+						out[i]
+					);
+				}
+				
+				// Test valid output values
+				for i in (period - 1)..open_prices.len() {
+					let window_start = i + 1 - period;
+					let window_end = i + 1;
+					
+					// Calculate the differences in the window
+					let diffs: Vec<f64> = (window_start..window_end)
+						.map(|j| close_prices[j] - open_prices[j])
+						.collect();
+					
+					// Test 2: Bounds property - QStick should be within min/max of differences
+					let min_diff = diffs.iter().cloned().fold(f64::INFINITY, f64::min);
+					let max_diff = diffs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+					let y = out[i];
+					
+					prop_assert!(
+						y.is_nan() || (y >= min_diff - 1e-9 && y <= max_diff + 1e-9),
+						"idx {}: QStick {} not in bounds [{}, {}]",
+						i, y, min_diff, max_diff
+					);
+					
+					// Test 3: Period=1 property - should equal close - open
+					if period == 1 {
+						let expected = close_prices[i] - open_prices[i];
+						prop_assert!(
+							(y - expected).abs() <= 1e-10,
+							"Period=1: expected {}, got {} at index {}",
+							expected, y, i
+						);
+					}
+					
+					// Test 4: Constant difference property
+					if diffs.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) {
+						let expected = diffs[0];
+						prop_assert!(
+							(y - expected).abs() <= 1e-9,
+							"Constant diff: expected {}, got {} at index {}",
+							expected, y, i
+						);
+					}
+					
+					// Test 5: Zero difference property - if open == close everywhere
+					if diffs.iter().all(|&d| d.abs() < 1e-10) {
+						prop_assert!(
+							y.abs() <= 1e-9,
+							"Zero diff: expected 0, got {} at index {}",
+							y, i
+						);
+					}
+					
+					// Test 6: Manual calculation verification
+					let expected_qstick = diffs.iter().sum::<f64>() / (period as f64);
+					prop_assert!(
+						(y - expected_qstick).abs() <= 1e-9,
+						"Manual calc: expected {}, got {} at index {}",
+						expected_qstick, y, i
+					);
+					
+					// Test 7: Kernel consistency - compare with scalar reference
+					let r = ref_out[i];
+					let y_bits = y.to_bits();
+					let r_bits = r.to_bits();
+					
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert!(
+							y.to_bits() == r.to_bits(),
+							"finite/NaN mismatch idx {}: {} vs {}",
+							i, y, r
+						);
+						continue;
+					}
+					
+					// ULP tolerance for floating point comparison
+					let ulp_diff: u64 = y_bits.abs_diff(r_bits);
+					prop_assert!(
+						(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+						"Kernel mismatch idx {}: {} vs {} (ULP={})",
+						i, y, r, ulp_diff
+					);
+				}
+				
+				Ok(())
+			})
+			.unwrap();
+		
+		Ok(())
+	}
+	
 	macro_rules! generate_all_qstick_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -847,6 +991,9 @@ mod tests {
 		check_qstick_nan_handling,
 		check_qstick_no_poison
 	);
+	
+	#[cfg(feature = "proptest")]
+	generate_all_qstick_tests!(check_qstick_property);
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);
 		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";

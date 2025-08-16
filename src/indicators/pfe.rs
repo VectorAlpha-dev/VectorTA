@@ -1287,6 +1287,256 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_pfe_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// More comprehensive data generation strategy
+		let strat = (2usize..=64)
+			.prop_flat_map(|period| {
+				(
+					// Generate varied price data - from very small to very large values
+					prop::collection::vec(
+						prop::strategy::Union::new(vec![
+							// Small values
+							(0.01f64..10.0f64).boxed(),
+							// Medium values  
+							(10.0f64..1000.0f64).boxed(),
+							// Large values
+							(1000.0f64..100000.0f64).boxed(),
+						]).prop_filter("finite", |x| x.is_finite()),
+						period + 50..400,
+					),
+					Just(period),
+					1usize..=20, // smoothing range
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period, smoothing)| {
+				let params = PfeParams {
+					period: Some(period),
+					smoothing: Some(smoothing),
+				};
+				let input = PfeInput::from_slice(&data, params);
+
+				let PfeOutput { values: out } = pfe_with_kernel(&input, kernel).unwrap();
+				let PfeOutput { values: ref_out } = pfe_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Basic structure checks
+				prop_assert_eq!(out.len(), data.len(), "[{}] Output length mismatch", test_name);
+
+				// Warmup period validation
+				for i in 0..period {
+					prop_assert!(
+						out[i].is_nan(),
+						"[{}] Expected NaN at index {} during warmup (period={})",
+						test_name,
+						i,
+						period
+					);
+				}
+
+				// Main validation loop with proper floating point tolerance
+				for i in period..data.len() {
+					let y = out[i];
+					let r = ref_out[i];
+
+					// Both NaN or both finite
+					if y.is_nan() != r.is_nan() {
+						prop_assert!(
+							false,
+							"[{}] NaN mismatch at index {}: {} vs {}",
+							test_name,
+							i,
+							y,
+							r
+						);
+					}
+
+					if y.is_finite() {
+						// Theoretical bounds check
+						prop_assert!(
+							y >= -100.0 && y <= 100.0,
+							"[{}] PFE value {} at index {} out of bounds [-100, 100]",
+							test_name,
+							y,
+							i
+						);
+
+						// Kernel consistency with ULP tolerance
+						let y_bits = y.to_bits();
+						let r_bits = r.to_bits();
+						let ulp_diff = y_bits.abs_diff(r_bits);
+						
+						// Allow small ULP difference for accumulated floating point errors
+						prop_assert!(
+							(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+							"[{}] Kernel mismatch at index {}: {} vs {} (ULP diff: {})",
+							test_name,
+							i,
+							y,
+							r,
+							ulp_diff
+						);
+					}
+				}
+
+				// Verify PFE calculation logic for specific patterns
+				// 1. Perfect straight line up should have high positive efficiency
+				let straight_up: Vec<f64> = (0..100).map(|i| 100.0 + i as f64).collect();
+				let straight_params = PfeParams {
+					period: Some(10),
+					smoothing: Some(1), // Minimal smoothing to see raw PFE
+				};
+				let straight_input = PfeInput::from_slice(&straight_up, straight_params);
+				if let Ok(straight_out) = pfe_with_kernel(&straight_input, kernel) {
+					// After warmup, straight line should have efficiency near 100
+					for i in 15..straight_out.values.len() {
+						if straight_out.values[i].is_finite() {
+							prop_assert!(
+								straight_out.values[i] > 50.0,
+								"[{}] Straight line up should have high positive efficiency, got {} at index {}",
+								test_name,
+								straight_out.values[i],
+								i
+							);
+						}
+					}
+				}
+
+				// 2. Zigzag pattern should have lower absolute efficiency
+				let zigzag: Vec<f64> = (0..100).map(|i| {
+					if i % 2 == 0 { 100.0 + (i as f64) } else { 100.0 + (i as f64) - 5.0 }
+				}).collect();
+				let zigzag_params = PfeParams {
+					period: Some(10),
+					smoothing: Some(1),
+				};
+				let zigzag_input = PfeInput::from_slice(&zigzag, zigzag_params.clone());
+				let straight_input2 = PfeInput::from_slice(&straight_up, zigzag_params);
+				
+				if let (Ok(zigzag_out), Ok(straight_out2)) = 
+					(pfe_with_kernel(&zigzag_input, kernel), pfe_with_kernel(&straight_input2, kernel)) {
+					// Compare average absolute efficiency
+					let zigzag_avg: f64 = zigzag_out.values[20..50]
+						.iter()
+						.filter(|x| x.is_finite())
+						.map(|x| x.abs())
+						.sum::<f64>() / 30.0;
+					let straight_avg: f64 = straight_out2.values[20..50]
+						.iter()
+						.filter(|x| x.is_finite())
+						.map(|x| x.abs())
+						.sum::<f64>() / 30.0;
+					
+					prop_assert!(
+						zigzag_avg < straight_avg,
+						"[{}] Zigzag pattern should have lower efficiency ({}) than straight line ({})",
+						test_name,
+						zigzag_avg,
+						straight_avg
+					);
+				}
+
+				// 3. Test EMA smoothing effect
+				if smoothing > 1 && data.len() > period + 20 {
+					// Calculate unsmoothed version
+					let unsmoothed_params = PfeParams {
+						period: Some(period),
+						smoothing: Some(1),
+					};
+					let unsmoothed_input = PfeInput::from_slice(&data, unsmoothed_params);
+					
+					if let Ok(unsmoothed_out) = pfe_with_kernel(&unsmoothed_input, kernel) {
+						// Calculate variance to compare smoothness
+						let smoothed_variance = calculate_variance(&out[period + 10..period + 20]);
+						let unsmoothed_variance = calculate_variance(&unsmoothed_out.values[period + 10..period + 20]);
+						
+						// Smoothed should generally have lower variance
+						if smoothed_variance.is_finite() && unsmoothed_variance.is_finite() 
+							&& unsmoothed_variance > 1e-6 {
+							// Only check if there's meaningful variance
+							prop_assert!(
+								smoothed_variance <= unsmoothed_variance * 1.1, // Allow small tolerance
+								"[{}] Smoothed variance ({}) should be <= unsmoothed variance ({})",
+								test_name,
+								smoothed_variance,
+								unsmoothed_variance
+							);
+						}
+					}
+				}
+
+				// 4. Edge case: period = 2 (minimum viable)
+				if period == 2 {
+					// With period=2, we're only looking at 2 points
+					// The calculation should still produce valid results
+					for i in 2..out.len() {
+						if out[i].is_finite() {
+							prop_assert!(
+								out[i] >= -100.0 && out[i] <= 100.0,
+								"[{}] Period=2 should still produce valid bounded values, got {} at index {}",
+								test_name,
+								out[i],
+								i
+							);
+						}
+					}
+				}
+
+				// 5. Constant prices verification - mathematically should be -100
+				let constant: Vec<f64> = vec![500.0; 50];
+				let const_params = PfeParams {
+					period: Some(10),
+					smoothing: Some(1), // No smoothing to see raw value
+				};
+				let const_input = PfeInput::from_slice(&constant, const_params);
+				if let Ok(const_out) = pfe_with_kernel(&const_input, kernel) {
+					// For constant prices:
+					// diff = 0, long_leg = period, short_leg = period * 1 = period
+					// raw_pfe = 100 * (period/period) = 100
+					// signed_pfe = -100 (because diff <= 0)
+					for i in 15..const_out.values.len() {
+						if const_out.values[i].is_finite() {
+							prop_assert!(
+								(const_out.values[i] - (-100.0)).abs() < 1e-6,
+								"[{}] Constant prices should produce exactly -100, got {} at index {}",
+								test_name,
+								const_out.values[i],
+								i
+							);
+						}
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		// Helper function for variance calculation
+		fn calculate_variance(values: &[f64]) -> f64 {
+			let finite_values: Vec<f64> = values.iter()
+				.filter(|x| x.is_finite())
+				.copied()
+				.collect();
+			
+			if finite_values.is_empty() {
+				return f64::NAN;
+			}
+			
+			let mean = finite_values.iter().sum::<f64>() / finite_values.len() as f64;
+			let variance = finite_values.iter()
+				.map(|x| (x - mean).powi(2))
+				.sum::<f64>() / finite_values.len() as f64;
+			variance
+		}
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_pfe_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1323,6 +1573,9 @@ mod tests {
 		check_pfe_streaming,
 		check_pfe_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_pfe_tests!(check_pfe_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);

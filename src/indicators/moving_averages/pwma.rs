@@ -330,14 +330,15 @@ pub unsafe fn pwma_avx2(data: &[f64], weights: &[f64], period: usize, first: usi
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
+#[target_feature(enable = "avx512f,fma")]
 pub unsafe fn pwma_avx512_short(data: &[f64], weights: &[f64], period: usize, first: usize, out: &mut [f64]) {
     let vecs = period / 8;
     let tail = period % 8;
-	let len = data.len();
+    let len = data.len();
 
     // Create tail mask for AVX512 masked operations
-    let tail_mask = if tail > 0 {
-        (1u8 << tail) - 1
+    let tail_mask: __mmask8 = if tail > 0 {
+        ((1u8 << tail) - 1) as __mmask8
     } else {
         0
     };
@@ -353,44 +354,36 @@ pub unsafe fn pwma_avx512_short(data: &[f64], weights: &[f64], period: usize, fi
             acc = _mm512_fmadd_pd(d, w, acc);
         }
 
-        // Process tail with AVX512 masking - no scalar fallback needed!
-        if tail > 0 {
+        // Process tail with AVX512 masking
+        if tail_mask != 0 {
             let d = _mm512_maskz_loadu_pd(tail_mask, data.as_ptr().add(start + vecs * 8));
             let w = _mm512_maskz_loadu_pd(tail_mask, weights.as_ptr().add(vecs * 8));
             acc = _mm512_fmadd_pd(d, w, acc);
         }
 
-        // Horizontal sum with correct pattern
-        // First reduce 512-bit to 256-bit
-        let low256 = _mm512_castpd512_pd256(acc);
-        let high256 = _mm512_extractf64x4_pd(acc, 1);
-        let sum256 = _mm256_add_pd(low256, high256);
+        // Use optimized horizontal reduction intrinsic
+        let total = _mm512_reduce_add_pd(acc);
         
-        // Then reduce 256-bit to 128-bit
-        let low128 = _mm256_castpd256_pd128(sum256);
-        let high128 = _mm256_extractf128_pd(sum256, 1);
-        let sum128 = _mm_add_pd(low128, high128);
-        
-        // Finally reduce 128-bit to scalar
-        let high64 = _mm_unpackhi_pd(sum128, sum128);
-        let final_sum = _mm_add_sd(sum128, high64);
-        let total = _mm_cvtsd_f64(final_sum);
-        
-        *out.as_mut_ptr().add(i) = total;
+        // Use stream store to avoid cache pollution
+        _mm_stream_sd(out.as_mut_ptr().add(i), _mm_set_sd(total));
     }
+    
+    // Ensure all stream stores are committed
+    _mm_sfence();
 }
 
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
+#[target_feature(enable = "avx512f,fma")]
 pub unsafe fn pwma_avx512_long(data: &[f64], weights: &[f64], period: usize, first: usize, out: &mut [f64]) {
     let len = data.len();
     let full_vecs = period / 8;
     let tail = period % 8;
     
     // Create tail mask
-    let tail_mask = if tail > 0 {
-        (1u8 << tail) - 1
+    let tail_mask: __mmask8 = if tail > 0 {
+        ((1u8 << tail) - 1) as __mmask8
     } else {
         0
     };
@@ -462,30 +455,24 @@ pub unsafe fn pwma_avx512_long(data: &[f64], weights: &[f64], period: usize, fir
         }
         
         // Process tail with masking
-        if tail > 0 {
+        if tail_mask != 0 {
             let d = _mm512_maskz_loadu_pd(tail_mask, data.as_ptr().add(start + full_vecs * 8));
             let w = _mm512_maskz_loadu_pd(tail_mask, weights.as_ptr().add(full_vecs * 8));
             acc0 = _mm512_fmadd_pd(d, w, acc0);
         }
         
         // Combine all accumulators
-        let acc01 = _mm512_add_pd(acc0, acc1);
-        let acc23 = _mm512_add_pd(acc2, acc3);
-        let acc = _mm512_add_pd(acc01, acc23);
+        let acc = _mm512_add_pd(_mm512_add_pd(acc0, acc1), _mm512_add_pd(acc2, acc3));
         
-        // Horizontal sum
-        let low256 = _mm512_castpd512_pd256(acc);
-        let high256 = _mm512_extractf64x4_pd(acc, 1);
-        let sum256 = _mm256_add_pd(low256, high256);
-        let low128 = _mm256_castpd256_pd128(sum256);
-        let high128 = _mm256_extractf128_pd(sum256, 1);
-        let sum128 = _mm_add_pd(low128, high128);
-        let high64 = _mm_unpackhi_pd(sum128, sum128);
-        let final_sum = _mm_add_sd(sum128, high64);
-        let total = _mm_cvtsd_f64(final_sum);
+        // Use optimized horizontal reduction intrinsic
+        let total = _mm512_reduce_add_pd(acc);
         
-        *out.as_mut_ptr().add(i) = total;
+        // Use stream store to avoid cache pollution
+        _mm_stream_sd(out.as_mut_ptr().add(i), _mm_set_sd(total));
     }
+    
+    // Ensure all stream stores are committed
+    _mm_sfence();
 }
 
 #[derive(Debug, Clone)]
@@ -864,6 +851,7 @@ pub unsafe fn pwma_row_avx512(
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
+#[target_feature(enable = "avx512f,fma")]
 unsafe fn pwma_row_avx512_short(
 	data: &[f64],
 	first: usize,
@@ -876,8 +864,8 @@ unsafe fn pwma_row_avx512_short(
 	let tail = period % 8;
 	
 	// Create tail mask for AVX512 masked operations
-	let tail_mask = if tail > 0 {
-		(1u8 << tail) - 1
+	let tail_mask: __mmask8 = if tail > 0 {
+		((1u8 << tail) - 1) as __mmask8
 	} else {
 		0
 	};
@@ -893,23 +881,15 @@ unsafe fn pwma_row_avx512_short(
 			acc = _mm512_fmadd_pd(d, w, acc);
 		}
 		
-		// Process tail with AVX512 masking - no scalar fallback needed!
-		if tail > 0 {
+		// Process tail with AVX512 masking
+		if tail_mask != 0 {
 			let d = _mm512_maskz_loadu_pd(tail_mask, data.as_ptr().add(start + vecs * 8));
 			let w = _mm512_maskz_loadu_pd(tail_mask, w_ptr.add(vecs * 8));
 			acc = _mm512_fmadd_pd(d, w, acc);
 		}
 		
-		// Horizontal sum
-		let low256 = _mm512_castpd512_pd256(acc);
-		let high256 = _mm512_extractf64x4_pd(acc, 1);
-		let sum256 = _mm256_add_pd(low256, high256);
-		let low128 = _mm256_castpd256_pd128(sum256);
-		let high128 = _mm256_extractf128_pd(sum256, 1);
-		let sum128 = _mm_add_pd(low128, high128);
-		let high64 = _mm_unpackhi_pd(sum128, sum128);
-		let final_sum = _mm_add_sd(sum128, high64);
-		let total = _mm_cvtsd_f64(final_sum);
+		// Use optimized horizontal reduction intrinsic
+		let total = _mm512_reduce_add_pd(acc);
 		
 		out[i] = total;
 	}
@@ -917,6 +897,7 @@ unsafe fn pwma_row_avx512_short(
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
+#[target_feature(enable = "avx512f,fma")]
 unsafe fn pwma_row_avx512_long(
 	data: &[f64],
 	first: usize,
@@ -929,8 +910,8 @@ unsafe fn pwma_row_avx512_long(
 	let tail = period % 8;
 	
 	// Create tail mask
-	let tail_mask = if tail > 0 {
-		(1u8 << tail) - 1
+	let tail_mask: __mmask8 = if tail > 0 {
+		((1u8 << tail) - 1) as __mmask8
 	} else {
 		0
 	};
@@ -1002,27 +983,17 @@ unsafe fn pwma_row_avx512_long(
 		}
 		
 		// Process tail with masking
-		if tail > 0 {
+		if tail_mask != 0 {
 			let d = _mm512_maskz_loadu_pd(tail_mask, data.as_ptr().add(start + full_vecs * 8));
 			let w = _mm512_maskz_loadu_pd(tail_mask, w_ptr.add(full_vecs * 8));
 			acc0 = _mm512_fmadd_pd(d, w, acc0);
 		}
 		
 		// Combine all accumulators
-		let acc01 = _mm512_add_pd(acc0, acc1);
-		let acc23 = _mm512_add_pd(acc2, acc3);
-		let acc = _mm512_add_pd(acc01, acc23);
+		let acc = _mm512_add_pd(_mm512_add_pd(acc0, acc1), _mm512_add_pd(acc2, acc3));
 		
-		// Horizontal sum
-		let low256 = _mm512_castpd512_pd256(acc);
-		let high256 = _mm512_extractf64x4_pd(acc, 1);
-		let sum256 = _mm256_add_pd(low256, high256);
-		let low128 = _mm256_castpd256_pd128(sum256);
-		let high128 = _mm256_extractf128_pd(sum256, 1);
-		let sum128 = _mm_add_pd(low128, high128);
-		let high64 = _mm_unpackhi_pd(sum128, sum128);
-		let final_sum = _mm_add_sd(sum128, high64);
-		let total = _mm_cvtsd_f64(final_sum);
+		// Use optimized horizontal reduction intrinsic
+		let total = _mm512_reduce_add_pd(acc);
 		
 		out[i] = total;
 	}
@@ -1304,6 +1275,162 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	fn check_pwma_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Load real market data for realistic testing
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		let close_data = &candles.close;
+
+		// Strategy: test various parameter combinations with real data slices
+		// PWMA typically uses smaller periods due to Pascal coefficient growth
+		let strat = (
+			2usize..=30,       // period (PWMA typically uses smaller periods)
+			0usize..close_data.len().saturating_sub(200), // starting index
+			100usize..=200,    // length of data slice to use
+		);
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(period, start_idx, slice_len)| {
+				// Ensure we have valid slice bounds
+				let end_idx = (start_idx + slice_len).min(close_data.len());
+				if end_idx <= start_idx || end_idx - start_idx < period + 10 {
+					return Ok(()); // Skip invalid combinations
+				}
+
+				let data_slice = &close_data[start_idx..end_idx];
+				let params = PwmaParams { period: Some(period) };
+				let input = PwmaInput::from_slice(data_slice, params);
+
+				// Test the specified kernel
+				let result = pwma_with_kernel(&input, kernel);
+				
+				// Also compute with scalar kernel for reference
+				let scalar_result = pwma_with_kernel(&input, Kernel::Scalar);
+
+				// Both should succeed or fail together
+				match (result, scalar_result) {
+					(Ok(PwmaOutput { values: out }), Ok(PwmaOutput { values: ref_out })) => {
+						// Verify output length
+						prop_assert_eq!(out.len(), data_slice.len());
+						prop_assert_eq!(ref_out.len(), data_slice.len());
+
+						// Find first non-NaN value
+						let first = data_slice.iter().position(|x| !x.is_nan()).unwrap_or(0);
+						let expected_warmup = first + period - 1;
+
+						// Check NaN pattern during warmup
+						for i in 0..expected_warmup {
+							prop_assert!(
+								out[i].is_nan(),
+								"Expected NaN at index {} during warmup, got {}",
+								i,
+								out[i]
+							);
+						}
+
+						// Test Pascal weight properties
+						let weights = pascal_weights(period).unwrap();
+						
+						// Verify weights sum to 1.0 (already normalized)
+						let weight_sum: f64 = weights.iter().sum();
+						prop_assert!(
+							(weight_sum - 1.0).abs() < 1e-10,
+							"Pascal weights don't sum to 1.0: sum = {}",
+							weight_sum
+						);
+
+						// Verify symmetry of Pascal weights
+						for i in 0..period/2 {
+							let diff = (weights[i] - weights[period - 1 - i]).abs();
+							prop_assert!(
+								diff < 1e-10,
+								"Pascal weights not symmetric at positions {} and {}: {} vs {}",
+								i, period - 1 - i, weights[i], weights[period - 1 - i]
+							);
+						}
+
+						// Test specific properties for valid outputs
+						for i in expected_warmup..out.len() {
+							let y = out[i];
+							let r = ref_out[i];
+
+							// Both should be valid
+							prop_assert!(!y.is_nan(), "Unexpected NaN at index {}", i);
+							prop_assert!(y.is_finite(), "Non-finite value at index {}: {}", i, y);
+
+							// Kernel consistency check
+							let y_bits = y.to_bits();
+							let r_bits = r.to_bits();
+
+							if !y.is_finite() || !r.is_finite() {
+								prop_assert_eq!(y_bits, r_bits, "NaN/Inf mismatch at {}: {} vs {}", i, y, r);
+								continue;
+							}
+
+							// ULP difference check for floating-point precision
+							let ulp_diff: u64 = y_bits.abs_diff(r_bits);
+							prop_assert!(
+								(y - r).abs() <= 1e-9 || ulp_diff <= 5,
+								"Kernel mismatch at {}: {} vs {} (ULP={})",
+								i, y, r, ulp_diff
+							);
+
+							// Output bounds check - PWMA output should be within window bounds
+							if i >= period - 1 {
+								let window_start = i + 1 - period;
+								let window = &data_slice[window_start..=i];
+								let min_val = window.iter().cloned().fold(f64::INFINITY, f64::min);
+								let max_val = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+
+								// PWMA is a weighted average, so it must be within min/max
+								prop_assert!(
+									y >= min_val - 1e-9 && y <= max_val + 1e-9,
+									"PWMA value {} outside window bounds [{}, {}] at index {}",
+									y, min_val, max_val, i
+								);
+							}
+						}
+
+						// Test constant data property
+						let const_data = vec![42.0; period + 10];
+						let const_input = PwmaInput::from_slice(&const_data, params);
+						if let Ok(PwmaOutput { values: const_out }) = pwma_with_kernel(&const_input, kernel) {
+							for (i, &val) in const_out.iter().enumerate() {
+								if !val.is_nan() {
+									prop_assert!(
+										(val - 42.0).abs() < 1e-9,
+										"PWMA of constant data should equal the constant at {}: got {}",
+										i, val
+									);
+								}
+							}
+						}
+					}
+					(Err(e1), Err(e2)) => {
+						// Both kernels should fail with similar errors
+						prop_assert_eq!(
+							std::mem::discriminant(&e1),
+							std::mem::discriminant(&e2),
+							"Different error types: {:?} vs {:?}",
+							e1, e2
+						);
+					}
+					_ => {
+						prop_assert!(false, "Kernel consistency failure: one succeeded, one failed");
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	generate_all_pwma_tests!(
 		check_pwma_partial_params,
 		check_pwma_accuracy,
@@ -1316,6 +1443,9 @@ mod tests {
 		check_pwma_streaming,
 		check_pwma_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_pwma_tests!(check_pwma_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);

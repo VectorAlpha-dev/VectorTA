@@ -896,6 +896,183 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	fn check_sqwma_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Load real market data for realistic testing
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		let close_data = &candles.close;
+
+		// Strategy: test various parameter combinations with real data slices
+		// SQWMA uses squared weights, typically with moderate periods
+		let strat = (
+			2usize..=50,       // period (SQWMA typical range)
+			0usize..close_data.len().saturating_sub(200), // starting index
+			100usize..=200,    // length of data slice to use
+		);
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(period, start_idx, slice_len)| {
+				// Ensure we have valid slice bounds
+				let end_idx = (start_idx + slice_len).min(close_data.len());
+				if end_idx <= start_idx || end_idx - start_idx < period + 10 {
+					return Ok(()); // Skip invalid combinations
+				}
+
+				let data_slice = &close_data[start_idx..end_idx];
+				let params = SqwmaParams { period: Some(period) };
+				let input = SqwmaInput::from_slice(data_slice, params.clone());
+
+				// Test the specified kernel
+				let result = sqwma_with_kernel(&input, kernel);
+				
+				// Also compute with scalar kernel for reference
+				let scalar_result = sqwma_with_kernel(&input, Kernel::Scalar);
+
+				// Both should succeed or fail together
+				match (result, scalar_result) {
+					(Ok(SqwmaOutput { values: out }), Ok(SqwmaOutput { values: ref_out })) => {
+						// Verify output length
+						prop_assert_eq!(out.len(), data_slice.len());
+						prop_assert_eq!(ref_out.len(), data_slice.len());
+
+						// Find first non-NaN value
+						let first = data_slice.iter().position(|x| !x.is_nan()).unwrap_or(0);
+						let expected_warmup = first + period + 1; // SQWMA warmup: first + period + 1
+
+						// Check NaN pattern during warmup
+						for i in 0..expected_warmup.min(out.len()) {
+							prop_assert!(
+								out[i].is_nan(),
+								"Expected NaN at index {} during warmup, got {}",
+								i,
+								out[i]
+							);
+						}
+
+						// Test square weight properties
+						// SQWMA weights: (period)^2, (period-1)^2, ..., 2^2
+						let mut weights = Vec::with_capacity(period - 1);
+						for i in 0..(period - 1) {
+							weights.push((period as f64 - i as f64).powi(2));
+						}
+						let weight_sum: f64 = weights.iter().sum();
+						
+						// Verify weights follow quadratic pattern
+						for i in 0..(period - 1) {
+							let expected_weight = (period as f64 - i as f64).powi(2);
+							prop_assert!(
+								(weights[i] - expected_weight).abs() < 1e-10,
+								"Weight {} doesn't match quadratic pattern: {} vs {}",
+								i, weights[i], expected_weight
+							);
+						}
+
+						// Verify weight sum is positive and reasonable
+						prop_assert!(
+							weight_sum > 0.0,
+							"Weight sum should be positive: {}",
+							weight_sum
+						);
+
+						// Test specific properties for valid outputs
+						for i in expected_warmup..out.len() {
+							let y = out[i];
+							let r = ref_out[i];
+
+							// Both should be valid
+							prop_assert!(!y.is_nan(), "Unexpected NaN at index {}", i);
+							prop_assert!(y.is_finite(), "Non-finite value at index {}: {}", i, y);
+
+							// Kernel consistency check
+							let y_bits = y.to_bits();
+							let r_bits = r.to_bits();
+
+							if !y.is_finite() || !r.is_finite() {
+								prop_assert_eq!(y_bits, r_bits, "NaN/Inf mismatch at {}: {} vs {}", i, y, r);
+								continue;
+							}
+
+							// ULP difference check for floating-point precision
+							let ulp_diff: u64 = y_bits.abs_diff(r_bits);
+							prop_assert!(
+								(y - r).abs() <= 1e-9 || ulp_diff <= 5,
+								"Kernel mismatch at {}: {} vs {} (ULP={})",
+								i, y, r, ulp_diff
+							);
+
+							// Output bounds check - SQWMA output should be within window bounds
+							// SQWMA uses values from i down to i-(period-2), which is period-1 values
+							if i >= period - 1 {
+								let window_start = i - (period - 2); // i - period + 2
+								let window_end = i + 1; // inclusive of i
+								let window = &data_slice[window_start..window_end];
+								let min_val = window.iter().cloned().fold(f64::INFINITY, f64::min);
+								let max_val = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+
+								// SQWMA is a weighted average, so it must be within min/max
+								prop_assert!(
+									y >= min_val - 1e-9 && y <= max_val + 1e-9,
+									"SQWMA value {} outside window bounds [{}, {}] at index {}",
+									y, min_val, max_val, i
+								);
+							}
+						}
+
+						// Test constant data property
+						let const_data = vec![42.0; period + 10];
+						let const_input = SqwmaInput::from_slice(&const_data, params.clone());
+						if let Ok(SqwmaOutput { values: const_out }) = sqwma_with_kernel(&const_input, kernel) {
+							// Find where outputs should start being valid
+							let const_warmup = period + 1; // No NaN in input, so warmup is just period + 1
+							for (i, &val) in const_out.iter().enumerate() {
+								if i >= const_warmup && !val.is_nan() {
+									prop_assert!(
+										(val - 42.0).abs() < 1e-9,
+										"SQWMA of constant data should equal the constant at {}: got {}",
+										i, val
+									);
+								}
+							}
+						}
+
+						// Test that weights decrease quadratically
+						if period > 2 {
+							for i in 1..(period - 1) {
+								let ratio = weights[i] / weights[i - 1];
+								let expected_ratio = ((period as f64 - i as f64) / (period as f64 - (i - 1) as f64)).powi(2);
+								prop_assert!(
+									(ratio - expected_ratio).abs() < 1e-10,
+									"Weight ratio doesn't follow quadratic pattern at {}: {} vs {}",
+									i, ratio, expected_ratio
+								);
+							}
+						}
+					}
+					(Err(e1), Err(e2)) => {
+						// Both kernels should fail with similar errors
+						prop_assert_eq!(
+							std::mem::discriminant(&e1),
+							std::mem::discriminant(&e2),
+							"Different error types: {:?} vs {:?}",
+							e1, e2
+						);
+					}
+					_ => {
+						prop_assert!(false, "Kernel consistency failure: one succeeded, one failed");
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	generate_all_sqwma_tests!(
 		check_sqwma_partial_params,
 		check_sqwma_accuracy,
@@ -906,6 +1083,9 @@ mod tests {
 		check_sqwma_streaming,
 		check_sqwma_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_sqwma_tests!(check_sqwma_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);

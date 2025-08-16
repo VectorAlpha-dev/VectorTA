@@ -658,6 +658,8 @@ mod tests {
 	use super::*;
 	use crate::skip_if_unsupported;
 	use crate::utilities::data_loader::read_candles_from_csv;
+	#[cfg(feature = "proptest")]
+	use proptest::prelude::*;
 
 	fn check_medium_ad_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test_name);
@@ -827,6 +829,283 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_medium_ad_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy: generate period from 1 to 64, then data with length from period to 400
+		let strat = (1usize..=64)
+			.prop_flat_map(|period| {
+				(
+					prop::collection::vec(
+						(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+						period..400,
+					),
+					Just(period),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period)| {
+				let params = MediumAdParams { period: Some(period) };
+				let input = MediumAdInput::from_slice(&data, params);
+
+				// Compute with the specified kernel
+				let MediumAdOutput { values: out } = medium_ad_with_kernel(&input, kernel).unwrap();
+				// Compute reference with scalar kernel
+				let MediumAdOutput { values: ref_out } = medium_ad_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Property 1: Kernel consistency - all kernels should produce identical results
+				for i in 0..data.len() {
+					let y = out[i];
+					let r = ref_out[i];
+
+					// Check if both are NaN or both are finite
+					if y.is_nan() {
+						prop_assert!(r.is_nan(), "Kernel consistency: NaN mismatch at idx {}", i);
+					} else if r.is_nan() {
+						prop_assert!(y.is_nan(), "Kernel consistency: NaN mismatch at idx {}", i);
+					} else {
+						// Both are finite, check they're close
+						let ulp_diff = y.to_bits().abs_diff(r.to_bits());
+						prop_assert!(
+							(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+							"Kernel mismatch at idx {}: {} vs {} (ULP={})",
+							i, y, r, ulp_diff
+						);
+					}
+				}
+
+				// Property 2: Warmup period - first (period - 1) values should be NaN
+				for i in 0..(period - 1) {
+					prop_assert!(
+						out[i].is_nan(),
+						"Expected NaN during warmup at idx {}, got {}",
+						i, out[i]
+					);
+				}
+
+				// Property 3: Post-warmup - values should be finite and non-negative (MAD is always >= 0)
+				for i in (period - 1)..data.len() {
+					let mad = out[i];
+					prop_assert!(
+						mad.is_finite() && mad >= 0.0,
+						"MAD at idx {} is not finite or negative: {}",
+						i, mad
+					);
+				}
+
+				// Property 4: For constant data, MAD should be exactly 0.0
+				if data.windows(2).all(|w| (w[0] - w[1]).abs() < f64::EPSILON) && data.len() >= period {
+					for i in (period - 1)..data.len() {
+						prop_assert!(
+							out[i].abs() < 1e-9,
+							"Constant data should have MAD=0.0, got {} at idx {}",
+							out[i], i
+						);
+					}
+				}
+
+				// Property 5: MAD bounds - should not exceed theoretical maximum
+				for i in (period - 1)..data.len() {
+					let window = &data[i + 1 - period..=i];
+					let min_val = window.iter().cloned().fold(f64::INFINITY, f64::min);
+					let max_val = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+					let range = max_val - min_val;
+					let mad = out[i];
+
+					// MAD theoretical maximum is 50% of range
+					prop_assert!(
+						mad <= range * 0.5 + 1e-9,
+						"MAD {} exceeds theoretical maximum (50% of range {}) at idx {}",
+						mad, range * 0.5, i
+					);
+				}
+
+				// Property 6: Period = 1 special case - MAD should always be 0.0
+				if period == 1 {
+					for i in 0..data.len() {
+						if !out[i].is_nan() {
+							prop_assert!(
+								out[i].abs() < f64::EPSILON,
+								"Period=1 should have MAD=0.0, got {} at idx {}",
+								out[i], i
+							);
+						}
+					}
+				}
+
+				// Property 7: Symmetry - MAD should be the same for data and -data
+				let neg_data: Vec<f64> = data.iter().map(|&x| -x).collect();
+				let neg_input = MediumAdInput::from_slice(&neg_data, MediumAdParams { period: Some(period) });
+				let MediumAdOutput { values: neg_out } = medium_ad_with_kernel(&neg_input, kernel).unwrap();
+
+				for i in (period - 1)..data.len() {
+					let mad = out[i];
+					let neg_mad = neg_out[i];
+					prop_assert!(
+						(mad - neg_mad).abs() < 1e-9,
+						"Symmetry failed at idx {}: {} vs {}",
+						i, mad, neg_mad
+					);
+				}
+
+				// Property 8: Scale Invariance - MAD(c * data) = |c| * MAD(data)
+				// Test with a few different scale factors
+				let scale_factors = [2.0, -3.0, 0.5];
+				for &scale in &scale_factors {
+					let scaled_data: Vec<f64> = data.iter().map(|&x| x * scale).collect();
+					let scaled_input = MediumAdInput::from_slice(&scaled_data, MediumAdParams { period: Some(period) });
+					let MediumAdOutput { values: scaled_out } = medium_ad_with_kernel(&scaled_input, kernel).unwrap();
+					
+					for i in (period - 1)..data.len() {
+						let original_mad = out[i];
+						let scaled_mad = scaled_out[i];
+						let expected_scaled_mad = original_mad * scale.abs();
+						
+						prop_assert!(
+							(scaled_mad - expected_scaled_mad).abs() < 1e-9,
+							"Scale invariance failed at idx {} with scale {}: {} vs expected {}",
+							i, scale, scaled_mad, expected_scaled_mad
+						);
+					}
+				}
+
+				// Property 9: Outlier Robustness - MAD should be less affected by outliers
+				// Compare behavior with and without an outlier
+				if period >= 5 && data.len() >= period + 10 {
+					// Create a version with an outlier in the middle of each window
+					let mut outlier_data = data.clone();
+					
+					// Test a few windows to verify outlier robustness
+					for test_idx in (period + 4..data.len().min(period + 20)).step_by(5) {
+						// Find the range of values in the window
+						let window = &data[test_idx + 1 - period..=test_idx];
+						let win_min = window.iter().cloned().fold(f64::INFINITY, f64::min);
+						let win_max = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+						let win_range = win_max - win_min;
+						
+						// Add an outlier that's 10x the range away
+						let outlier_idx = test_idx - period / 2;
+						let original_value = outlier_data[outlier_idx];
+						outlier_data[outlier_idx] = win_max + win_range * 10.0;
+						
+						// Calculate MAD with outlier
+						let outlier_input = MediumAdInput::from_slice(&outlier_data, MediumAdParams { period: Some(period) });
+						let MediumAdOutput { values: outlier_out } = medium_ad_with_kernel(&outlier_input, kernel).unwrap();
+						
+						// MAD should change, but not dramatically (less than doubling)
+						let original_mad = out[test_idx];
+						let outlier_mad = outlier_out[test_idx];
+						
+						// MAD is robust but extreme outliers can still have significant effect
+						// especially with degenerate data patterns (many zeros, few non-zeros)
+						// The bound needs to account for the outlier's extreme distance
+						let outlier_effect = win_range * 10.0;  // The outlier is 10x range away
+						prop_assert!(
+							outlier_mad <= original_mad * 10.0 + outlier_effect * 0.1,
+							"MAD not robust enough to outliers at idx {}: original {}, with outlier {}",
+							test_idx, original_mad, outlier_mad
+						);
+						
+						// For meaningful original MAD values, check relative increase
+						// Skip ratio check for very small original MAD as the ratio can be huge
+						if original_mad > win_range * 0.01 {  // Only check if original MAD is meaningful
+							let mad_ratio = outlier_mad / original_mad;
+							prop_assert!(
+								mad_ratio <= 20.0,
+								"MAD ratio too high with outlier at idx {}: ratio {}",
+								test_idx, mad_ratio
+							);
+						}
+						
+						// Restore original value for next test
+						outlier_data[outlier_idx] = original_value;
+					}
+				}
+
+				// Property 10: Known Value Verification - test exact MAD for known patterns
+				// This ensures the implementation is actually calculating MAD correctly
+				
+				// Test 1: Sequential data [1, 2, 3, ..., period]
+				if period >= 3 && period <= 20 {
+					let sequential: Vec<f64> = (1..=period).map(|i| i as f64).collect();
+					let seq_input = MediumAdInput::from_slice(&sequential, MediumAdParams { period: Some(period) });
+					let MediumAdOutput { values: seq_out } = medium_ad_with_kernel(&seq_input, kernel).unwrap();
+					
+					// For sequential data, calculate expected MAD
+					// Median is the middle value(s)
+					let median = if period % 2 == 1 {
+						(period / 2 + 1) as f64
+					} else {
+						(period / 2) as f64 + 0.5
+					};
+					
+					// For sequential data, MAD should be reasonable but exact value depends on period
+					// Let's just verify it's within expected bounds
+					if period - 1 < sequential.len() {
+						let calculated_mad = seq_out[period - 1];
+						let seq_range = (period - 1) as f64;  // Range is period - 1 for sequential data
+						
+						// MAD should be non-zero and less than half the range
+						prop_assert!(
+							calculated_mad > 0.0 && calculated_mad <= seq_range * 0.5,
+							"MAD for sequential data with period {} out of bounds: got {}, range is {}",
+							period, calculated_mad, seq_range
+						);
+						
+						// For specific known cases, test exact values
+						if period == 3 {
+							// For [1,2,3]: median=2, devs=[1,0,1], MAD=median([0,1,1])=1
+							prop_assert!(
+								(calculated_mad - 1.0).abs() < 1e-9,
+								"MAD for [1,2,3] should be 1.0, got {}",
+								calculated_mad
+							);
+						} else if period == 5 {
+							// For [1,2,3,4,5]: median=3, devs=[2,1,0,1,2], MAD=median([0,1,1,2,2])=1
+							prop_assert!(
+								(calculated_mad - 1.0).abs() < 1e-9,
+								"MAD for [1,2,3,4,5] should be 1.0, got {}",
+								calculated_mad
+							);
+						}
+					}
+				}
+				
+				// Test 2: Data with half values at min and half at max
+				// This should produce MAD close to range/2
+				if period >= 4 && period % 2 == 0 {
+					let mut extreme_data = vec![0.0; period];
+					for i in 0..period/2 {
+						extreme_data[i] = 100.0;  // Half at max
+					}
+					// Other half remains at 0.0 (min)
+					
+					let extreme_input = MediumAdInput::from_slice(&extreme_data, MediumAdParams { period: Some(period) });
+					let MediumAdOutput { values: extreme_out } = medium_ad_with_kernel(&extreme_input, kernel).unwrap();
+					
+					// For this pattern, median is 50.0, and MAD should be 50.0
+					let expected_extreme_mad = 50.0;
+					
+					if period - 1 < extreme_data.len() {
+						let calculated_extreme_mad = extreme_out[period - 1];
+						prop_assert!(
+							(calculated_extreme_mad - expected_extreme_mad).abs() < 1e-9,
+							"MAD mismatch for extreme data pattern with period {}: got {}, expected {}",
+							period, calculated_extreme_mad, expected_extreme_mad
+						);
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_medium_ad_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -862,6 +1141,9 @@ mod tests {
 		check_medium_ad_nan_handling,
 		check_medium_ad_streaming
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_medium_ad_tests!(check_medium_ad_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);

@@ -907,6 +907,206 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	fn check_tema_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Load real market data for realistic testing
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		let close_data = &candles.close;
+
+		// Strategy: test various parameter combinations with real data slices
+		// TEMA uses triple exponential smoothing, typically with moderate periods
+		let strat = (
+			2usize..=50,       // period (TEMA typical range)
+			0usize..close_data.len().saturating_sub(200), // starting index
+			100usize..=200,    // length of data slice to use
+		);
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(period, start_idx, slice_len)| {
+				// Ensure we have valid slice bounds
+				let end_idx = (start_idx + slice_len).min(close_data.len());
+				if end_idx <= start_idx || end_idx - start_idx < period * 3 + 10 {
+					return Ok(()); // Skip invalid combinations (need enough data for triple smoothing)
+				}
+
+				let data_slice = &close_data[start_idx..end_idx];
+				let params = TemaParams { period: Some(period) };
+				let input = TemaInput::from_slice(data_slice, params);
+
+				// Test the specified kernel
+				let result = tema_with_kernel(&input, kernel);
+				
+				// Also compute with scalar kernel for reference
+				let scalar_result = tema_with_kernel(&input, Kernel::Scalar);
+
+				// Both should succeed or fail together
+				match (result, scalar_result) {
+					(Ok(TemaOutput { values: out }), Ok(TemaOutput { values: ref_out })) => {
+						// Verify output length
+						prop_assert_eq!(out.len(), data_slice.len());
+						prop_assert_eq!(ref_out.len(), data_slice.len());
+
+						// Find first non-NaN value
+						let first = data_slice.iter().position(|x| !x.is_nan()).unwrap_or(0);
+						let lookback = (period - 1) * 3;
+						let expected_warmup = first + lookback; // TEMA warmup: first + (period - 1) * 3
+
+						// Check NaN pattern during warmup
+						for i in 0..expected_warmup.min(out.len()) {
+							prop_assert!(
+								out[i].is_nan(),
+								"Expected NaN at index {} during warmup, got {}",
+								i,
+								out[i]
+							);
+						}
+
+						// Test exponential smoothing properties
+						let multiplier = 2.0 / (period as f64 + 1.0);
+						prop_assert!(
+							multiplier > 0.0 && multiplier <= 1.0,
+							"EMA multiplier should be in (0, 1]: {}",
+							multiplier
+						);
+
+						// Test specific properties for valid outputs
+						for i in expected_warmup..out.len() {
+							let y = out[i];
+							let r = ref_out[i];
+
+							// Both should be valid
+							prop_assert!(!y.is_nan(), "Unexpected NaN at index {}", i);
+							prop_assert!(y.is_finite(), "Non-finite value at index {}: {}", i, y);
+
+							// Kernel consistency check
+							let y_bits = y.to_bits();
+							let r_bits = r.to_bits();
+
+							if !y.is_finite() || !r.is_finite() {
+								prop_assert_eq!(y_bits, r_bits, "NaN/Inf mismatch at {}: {} vs {}", i, y, r);
+								continue;
+							}
+
+							// ULP difference check for floating-point precision
+							let ulp_diff: u64 = y_bits.abs_diff(r_bits);
+							prop_assert!(
+								(y - r).abs() <= 1e-9 || ulp_diff <= 5,
+								"Kernel mismatch at {}: {} vs {} (ULP={})",
+								i, y, r, ulp_diff
+							);
+
+							// Note: TEMA can legitimately exceed window bounds due to its formula (3*EMA1 - 3*EMA2 + EMA3)
+							// The triple exponential smoothing amplifies recent price movements, which means:
+							// - In strong uptrends, TEMA can overshoot the maximum by ~10-20%
+							// - In strong downtrends, TEMA can undershoot the minimum by ~10-20%
+							// This is expected behavior, not a calculation error, so we don't enforce bounds checking
+						}
+
+						// Test constant data property
+						let const_value = 100.0;
+						let const_data = vec![const_value; period * 4];
+						let const_input = TemaInput::from_slice(&const_data, TemaParams { period: Some(period) });
+						if let Ok(TemaOutput { values: const_out }) = tema_with_kernel(&const_input, kernel) {
+							// After warmup, TEMA of constant data should converge to the constant
+							let const_warmup = lookback; // No NaN in input, so warmup is just lookback
+							for (i, &val) in const_out.iter().enumerate() {
+								if i >= const_warmup && !val.is_nan() {
+									prop_assert!(
+										(val - const_value).abs() < 1e-9,
+										"TEMA of constant data should equal the constant at {}: got {}",
+										i, val
+									);
+								}
+							}
+						}
+
+						// Test streaming consistency
+						if period <= 20 {  // Only test smaller periods for speed
+							let mut stream = TemaStream::try_new(TemaParams { period: Some(period) }).unwrap();
+							let mut stream_values = Vec::with_capacity(data_slice.len());
+							
+							for &price in data_slice {
+								match stream.update(price) {
+									Some(val) => stream_values.push(val),
+									None => stream_values.push(f64::NAN),
+								}
+							}
+
+							// Compare streaming output with batch output
+							for (i, (&batch_val, &stream_val)) in out.iter().zip(stream_values.iter()).enumerate() {
+								if batch_val.is_nan() && stream_val.is_nan() {
+									continue;
+								}
+								if !batch_val.is_nan() && !stream_val.is_nan() {
+									prop_assert!(
+										(batch_val - stream_val).abs() < 1e-9,
+										"Streaming mismatch at {}: batch={} vs stream={}",
+										i, batch_val, stream_val
+									);
+								}
+							}
+						}
+
+						// Test that EMA relationship holds for some data points
+						// TEMA = 3*EMA1 - 3*EMA2 + EMA3
+						// We can't directly verify this without computing the EMAs,
+						// but we can check that TEMA responds appropriately to trends
+						
+						// For a strongly trending section, TEMA should amplify the trend
+						if data_slice.len() > period * 2 {
+							// Find a trending section
+							let trend_start = expected_warmup;
+							let trend_end = (trend_start + period).min(data_slice.len());
+							
+							if trend_end > trend_start + 3 {
+								let trend_data = &data_slice[trend_start..trend_end];
+								let is_uptrend = trend_data.windows(2).filter(|w| w[1] > w[0]).count() > 
+												 trend_data.windows(2).filter(|w| w[1] < w[0]).count();
+								
+								if is_uptrend {
+									// In an uptrend, TEMA often leads price (can be above current price)
+									// This is because TEMA = 3*EMA1 - 3*EMA2 + EMA3 amplifies recent movements
+									// We just check that TEMA is responding to the trend, not lagging excessively
+									let last_price = data_slice[trend_end - 1];
+									let tema_value = out[trend_end - 1];
+									
+									// TEMA should be reasonably close to the price, not wildly divergent
+									let price_range = trend_data.iter().cloned().fold(f64::NEG_INFINITY, f64::max) -
+													 trend_data.iter().cloned().fold(f64::INFINITY, f64::min);
+									prop_assert!(
+										(tema_value - last_price).abs() < price_range * 1.5,
+										"TEMA diverged too much from price: TEMA={}, price={}, range={}",
+										tema_value, last_price, price_range
+									);
+								}
+							}
+						}
+					}
+					(Err(e1), Err(e2)) => {
+						// Both kernels should fail with similar errors
+						prop_assert_eq!(
+							std::mem::discriminant(&e1),
+							std::mem::discriminant(&e2),
+							"Different error types: {:?} vs {:?}",
+							e1, e2
+						);
+					}
+					_ => {
+						prop_assert!(false, "Kernel consistency failure: one succeeded, one failed");
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	generate_all_tema_tests!(
 		check_tema_partial_params,
 		check_tema_accuracy,
@@ -920,6 +1120,9 @@ mod tests {
 		check_tema_streaming,
 		check_tema_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_tema_tests!(check_tema_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);

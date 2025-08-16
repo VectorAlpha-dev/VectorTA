@@ -45,6 +45,8 @@ use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
+#[cfg(feature = "proptest")]
+use proptest::prelude::*;
 
 #[derive(Debug, Clone)]
 pub enum DiData<'a> {
@@ -1283,6 +1285,261 @@ mod tests {
 	fn check_di_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		Ok(()) // No-op in release builds
 	}
+	
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_di_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		// Strategy to generate realistic OHLC data
+		let strat = (2usize..=50)  // DI requires minimum period of 2
+			.prop_flat_map(|period| {
+				(
+					100.0f64..5000.0f64,  // Base price (realistic range)
+					(period + 20)..400,    // Data length (ensure enough data after warmup)
+					0.001f64..0.05f64,     // Volatility factor (1% to 5% daily moves)
+					-0.01f64..0.01f64,     // Trend factor (slight trend)
+					Just(period),
+				)
+			})
+			.prop_map(|(base_price, data_len, volatility, trend, period)| {
+				// Generate synthetic OHLC data
+				let mut high = Vec::with_capacity(data_len);
+				let mut low = Vec::with_capacity(data_len);
+				let mut close = Vec::with_capacity(data_len);
+				
+				let mut price = base_price;
+				
+				for i in 0..data_len {
+					// Add trend and some randomness
+					let trend_component = trend * i as f64;
+					let random_component = ((i * 137 + 11) % 100) as f64 / 100.0 - 0.5; // Pseudo-random
+					price = price * (1.0 + trend_component + random_component * volatility);
+					
+					// Ensure price stays positive
+					price = price.max(1.0);
+					
+					// Generate OHLC with realistic constraints
+					let daily_range = price * volatility * (1.0 + ((i * 73) % 50) as f64 / 100.0);
+					let h = price + daily_range * 0.5;
+					let l = price - daily_range * 0.5;
+					
+					// Close should be between high and low
+					let close_factor = ((i * 29 + 7) % 100) as f64 / 100.0; // Pseudo-random [0, 1]
+					let c = l + (h - l) * close_factor;
+					
+					high.push(h);
+					low.push(l);
+					close.push(c);
+				}
+				
+				(high, low, close, period)
+			});
+		
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(high, low, close, period)| {
+				let params = DiParams { period: Some(period) };
+				let input = DiInput::from_slices(&high, &low, &close, params);
+				
+				// Run with the specified kernel
+				let output = di_with_kernel(&input, kernel)?;
+				
+				// Run with scalar as reference
+				let ref_output = di_with_kernel(&input, Kernel::Scalar)?;
+				
+				// Property 1: Output length should match input length
+				prop_assert_eq!(output.plus.len(), high.len());
+				prop_assert_eq!(output.minus.len(), high.len());
+				
+				// Property 2: Warmup period should have NaN values
+				let warmup_end = period - 1;
+				for i in 0..warmup_end {
+					prop_assert!(
+						output.plus[i].is_nan(),
+						"Expected NaN at index {} during warmup, got {}",
+						i, output.plus[i]
+					);
+					prop_assert!(
+						output.minus[i].is_nan(),
+						"Expected NaN at index {} during warmup, got {}",
+						i, output.minus[i]
+					);
+				}
+				
+				// Property 3: After warmup, values should be finite and in range [0, 100]
+				for i in warmup_end..high.len() {
+					let plus_val = output.plus[i];
+					let minus_val = output.minus[i];
+					
+					prop_assert!(
+						plus_val.is_finite(),
+						"Expected finite +DI at index {}, got {}",
+						i, plus_val
+					);
+					prop_assert!(
+						minus_val.is_finite(),
+						"Expected finite -DI at index {}, got {}",
+						i, minus_val
+					);
+					
+					// DI values should be in [0, 100] range
+					prop_assert!(
+						plus_val >= 0.0 && plus_val <= 100.0,
+						"+DI at index {} = {} is out of range [0, 100]",
+						i, plus_val
+					);
+					prop_assert!(
+						minus_val >= 0.0 && minus_val <= 100.0,
+						"-DI at index {} = {} is out of range [0, 100]",
+						i, minus_val
+					);
+				}
+				
+				// Property 4: Kernel consistency - compare with scalar reference
+				for i in 0..high.len() {
+					let plus_val = output.plus[i];
+					let minus_val = output.minus[i];
+					let ref_plus = ref_output.plus[i];
+					let ref_minus = ref_output.minus[i];
+					
+					// Handle NaN comparison
+					if plus_val.is_nan() || ref_plus.is_nan() {
+						prop_assert_eq!(plus_val.is_nan(), ref_plus.is_nan(),
+							"NaN mismatch in +DI at index {}", i);
+					} else {
+						// Allow small numerical differences due to floating point
+						prop_assert!(
+							(plus_val - ref_plus).abs() <= 1e-9,
+							"+DI mismatch at index {}: {} vs {} (diff: {})",
+							i, plus_val, ref_plus, (plus_val - ref_plus).abs()
+						);
+					}
+					
+					if minus_val.is_nan() || ref_minus.is_nan() {
+						prop_assert_eq!(minus_val.is_nan(), ref_minus.is_nan(),
+							"NaN mismatch in -DI at index {}", i);
+					} else {
+						prop_assert!(
+							(minus_val - ref_minus).abs() <= 1e-9,
+							"-DI mismatch at index {}: {} vs {} (diff: {})",
+							i, minus_val, ref_minus, (minus_val - ref_minus).abs()
+						);
+					}
+				}
+				
+				// Property 5: Special case - when high == low (no volatility), 
+				// directional movement should be minimal
+				let constant_high = vec![100.0; 50];
+				let constant_low = vec![100.0; 50];
+				let constant_close = vec![100.0; 50];
+				let const_params = DiParams { period: Some(period) };
+				let const_input = DiInput::from_slices(&constant_high, &constant_low, &constant_close, const_params);
+				
+				if let Ok(const_output) = di_with_kernel(&const_input, kernel) {
+					// After warmup, both DI values should approach 0 (no directional movement)
+					for i in (period + 5)..constant_high.len() {
+						prop_assert!(
+							const_output.plus[i] < 1.0,
+							"Expected near-zero +DI for constant prices, got {} at index {}",
+							const_output.plus[i], i
+						);
+						prop_assert!(
+							const_output.minus[i] < 1.0,
+							"Expected near-zero -DI for constant prices, got {} at index {}",
+							const_output.minus[i], i
+						);
+					}
+				}
+				
+				// Property 5.5: Volatility spike handling
+				// Test that sudden volatility spikes don't break the indicator
+				let mut spike_high = vec![100.0; 30];
+				let mut spike_low = vec![99.0; 30];
+				let mut spike_close = vec![99.5; 30];
+				
+				// Add a volatility spike in the middle
+				spike_high[15] = 120.0;  // 20% spike
+				spike_low[15] = 80.0;    // 20% drop  
+				spike_close[15] = 100.0; // Close in middle
+				
+				let spike_params = DiParams { period: Some(period.min(10)) };
+				let spike_input = DiInput::from_slices(&spike_high, &spike_low, &spike_close, spike_params);
+				
+				if let Ok(spike_output) = di_with_kernel(&spike_input, kernel) {
+					// All values should still be in valid range
+					for (i, (&plus, &minus)) in spike_output.plus.iter()
+						.zip(spike_output.minus.iter())
+						.enumerate() 
+					{
+						if !plus.is_nan() {
+							prop_assert!(
+								plus >= 0.0 && plus <= 100.0,
+								"Volatility spike caused +DI out of range at {}: {}",
+								i, plus
+							);
+						}
+						if !minus.is_nan() {
+							prop_assert!(
+								minus >= 0.0 && minus <= 100.0,
+								"Volatility spike caused -DI out of range at {}: {}",
+								i, minus
+							);
+						}
+					}
+				}
+				
+				// Property 6: Strong trend detection (only test if period is reasonable)
+				// In a strong uptrend, +DI should generally be higher than -DI
+				// In a strong downtrend, -DI should generally be higher than +DI
+				if period <= 20 {  // Only test trend detection for reasonable periods
+					let trend_len = 200;  // Use longer series for trend testing
+					let mut uptrend_high = Vec::with_capacity(trend_len);
+					let mut uptrend_low = Vec::with_capacity(trend_len);
+					let mut uptrend_close = Vec::with_capacity(trend_len);
+					
+					for i in 0..trend_len {
+						let price = 100.0 + i as f64 * 2.0; // Strong uptrend
+						uptrend_high.push(price + 1.0);
+						uptrend_low.push(price - 1.0);
+						uptrend_close.push(price);
+					}
+					
+					let trend_params = DiParams { period: Some(period) };
+					let trend_input = DiInput::from_slices(&uptrend_high, &uptrend_low, &uptrend_close, trend_params);
+					
+					if let Ok(trend_output) = di_with_kernel(&trend_input, kernel) {
+						// Check the last half of values (well after warmup)
+						let check_start = trend_len / 2;
+						let mut plus_wins = 0;
+						let mut minus_wins = 0;
+						
+						for i in check_start..trend_len {
+							if trend_output.plus[i] > trend_output.minus[i] {
+								plus_wins += 1;
+							} else {
+								minus_wins += 1;
+							}
+						}
+						
+						// In a strong uptrend, +DI should dominate most of the time
+						// We only check if we have enough samples
+						if plus_wins + minus_wins > 0 {
+							prop_assert!(
+								plus_wins > minus_wins,
+								"In uptrend, expected +DI > -DI more often. +DI wins: {}, -DI wins: {} (period: {})",
+								plus_wins, minus_wins, period
+							);
+						}
+					}
+				}
+				
+				Ok(())
+			})
+			.unwrap();
+		
+		Ok(())
+	}
+	
 	macro_rules! generate_all_di_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1316,6 +1573,9 @@ mod tests {
 		check_di_accuracy_nan_check,
 		check_di_no_poison
 	);
+	
+	#[cfg(feature = "proptest")]
+	generate_all_di_tests!(check_di_property);
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);
 

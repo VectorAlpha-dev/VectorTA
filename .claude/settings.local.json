@@ -276,10 +276,15 @@
       "Bash(.venvScriptspython testspythontest_willr.py)",
       "Bash(./test_nan_filling.exe)",
       "Bash(./test_medprice_nan.exe)",
-      "Bash(./test_nma_values.exe)",
-      "Bash(./bench_nma_performance.exe)",
-      "Bash(./test_nma_batch_perf.exe)",
-      "Bash(./test_batch_perf.exe)"
+      "WebSearch",
+      "WebFetch(domain:lemire.me)",
+      "WebFetch(domain:www.intel.com)",
+      "Bash(PROPTEST_CASES=10 cargo test --features nightly-avx --lib indicators::moving_averages::hma::tests::check_hma_property_avx512_f64 -- --nocapture)",
+      "Bash(./test_hma_avx512.exe)",
+      "Bash(./test_hma_avx512_detailed.exe)",
+      "Bash(./test_horiz_sum.exe)",
+      "Bash(PROPTEST_CASES=1000 cargo test --features nightly-avx --lib indicators::cci::tests::check_cci_property_scalar -- --nocapture)",
+      "Bash(PROPTEST_CASES=1000 cargo test --features nightly-avx --lib indicators::cci::tests::check_cci_property_avx512 -- --nocapture)"
     ],
     "deny": []
   }
