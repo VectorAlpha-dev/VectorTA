@@ -927,6 +927,157 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_mwdx_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Test strategy: factor 0.01-2.0, data length 1-400
+		let strat = (0.01f64..=2.0).prop_flat_map(|factor| {
+			(
+				prop::collection::vec(
+					(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+					1..400,
+				),
+				Just(factor),
+			)
+		});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, factor)| {
+				let params = MwdxParams { factor: Some(factor) };
+				let input = MwdxInput::from_slice(&data, params);
+				
+				// Get output from test kernel and reference scalar kernel
+				let MwdxOutput { values: out } = mwdx_with_kernel(&input, kernel).unwrap();
+				
+				// Property 1: Initial value equals first input
+				prop_assert_eq!(
+					out[0], data[0], 
+					"Initial value mismatch: out[0]={} != data[0]={}", out[0], data[0]
+				);
+				
+				// Property 2: Formula verification
+				// MWDX formula: out[i] = fac * data[i] + (1.0 - fac) * out[i-1]
+				// where fac = 2.0 / ((2.0 / factor))
+				let fac = 2.0 / ((2.0 / factor));
+				for i in 1..data.len() {
+					let expected = fac * data[i] + (1.0 - fac) * out[i - 1];
+					prop_assert!(
+						(out[i] - expected).abs() < 1e-9,
+						"Formula mismatch at index {}: out[{}]={}, expected={}", i, i, out[i], expected
+					);
+				}
+				
+				// Property 3: Output bounded by historical min/max (only when fac <= 1.0)
+				// When fac > 1.0, the exponential smoothing can amplify values beyond input range
+				if fac <= 1.0 {
+					for i in 1..data.len() {
+						let hist_min = data[0..=i].iter().cloned().fold(f64::INFINITY, f64::min);
+						let hist_max = data[0..=i].iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+						prop_assert!(
+							out[i] >= hist_min - 1e-9 && out[i] <= hist_max + 1e-9,
+							"Output out of bounds at index {}: {} not in [{}, {}]", i, out[i], hist_min, hist_max
+						);
+					}
+				}
+				
+				// Property 4: Convergence with constant input
+				if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-9) {
+					// All values are essentially the same
+					let target = data[0];
+					let last = out[data.len() - 1];
+					prop_assert!(
+						(last - target).abs() < 1e-6,
+						"Failed to converge to constant input: last={}, target={}", last, target
+					);
+				}
+				
+				// Property 5: Monotonicity preservation
+				let is_increasing = data.windows(2).all(|w| w[1] >= w[0] - 1e-12);
+				let is_decreasing = data.windows(2).all(|w| w[1] <= w[0] + 1e-12);
+				if is_increasing {
+					for i in 1..out.len() {
+						prop_assert!(
+							out[i] >= out[i - 1] - 1e-9,
+							"Monotonic increasing violated at index {}: {} < {}", i, out[i], out[i - 1]
+						);
+					}
+				}
+				if is_decreasing {
+					for i in 1..out.len() {
+						prop_assert!(
+							out[i] <= out[i - 1] + 1e-9,
+							"Monotonic decreasing violated at index {}: {} > {}", i, out[i], out[i - 1]
+						);
+					}
+				}
+				
+				// Property 6: Cross-kernel consistency (only if not testing Scalar)
+				if kernel != Kernel::Scalar {
+					let MwdxOutput { values: ref_out } = mwdx_with_kernel(&input, Kernel::Scalar).unwrap();
+					for i in 0..data.len() {
+						let y = out[i];
+						let r = ref_out[i];
+						
+						// Check bit-exact equality for special values
+						if !y.is_finite() || !r.is_finite() {
+							prop_assert_eq!(
+								y.to_bits(), r.to_bits(),
+								"Special value mismatch at index {}: {} vs {}", i, y, r
+							);
+							continue;
+						}
+						
+						// Check numerical equality with tolerance
+						prop_assert!(
+							(y - r).abs() <= 1e-9,
+							"Cross-kernel mismatch at index {}: {} vs {} (diff={})", i, y, r, (y - r).abs()
+						);
+					}
+				}
+				
+				// Property 7: Smoothness (variance reduction)
+				// MWDX should produce smoother output than input for reasonable factors
+				if data.len() > 10 && factor > 0.05 && factor < 0.5 {
+					let input_mean = data.iter().sum::<f64>() / data.len() as f64;
+					let output_mean = out.iter().sum::<f64>() / out.len() as f64;
+					
+					let input_var = data.iter().map(|x| (x - input_mean).powi(2)).sum::<f64>() / data.len() as f64;
+					let output_var = out.iter().map(|x| (x - output_mean).powi(2)).sum::<f64>() / out.len() as f64;
+					
+					// Skip this check for nearly constant data
+					if input_var > 1e-6 {
+						prop_assert!(
+							output_var <= input_var * 1.01, // Allow 1% tolerance
+							"Output variance {} should be less than input variance {}", output_var, input_var
+						);
+					}
+				}
+				
+				// Property 8: Poison value detection (debug mode only)
+				#[cfg(debug_assertions)]
+				{
+					for (i, &val) in out.iter().enumerate() {
+						if val.is_nan() {
+							continue;
+						}
+						let bits = val.to_bits();
+						prop_assert!(
+							bits != 0x11111111_11111111 && bits != 0x22222222_22222222 && bits != 0x33333333_33333333,
+							"Poison value detected at index {}: {} (0x{:016X})", i, val, bits
+						);
+					}
+				}
+				
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	generate_all_mwdx_tests!(
 		check_mwdx_partial_params,
 		check_mwdx_accuracy,
@@ -938,6 +1089,9 @@ mod tests {
 		check_mwdx_nan_handling,
 		check_mwdx_no_poison
 	);
+	
+	#[cfg(feature = "proptest")]
+	generate_all_mwdx_tests!(check_mwdx_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);

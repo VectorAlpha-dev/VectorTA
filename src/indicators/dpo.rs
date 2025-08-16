@@ -948,6 +948,174 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_dpo_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		let strat = (1usize..=100)
+			.prop_flat_map(|period| {
+				(
+					prop::collection::vec(
+						(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+						period..400,
+					),
+					Just(period),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period)| {
+				let params = DpoParams {
+					period: Some(period),
+				};
+				let input = DpoInput::from_slice(&data, params);
+
+				let DpoOutput { values: out } = dpo_with_kernel(&input, kernel).unwrap();
+				let DpoOutput { values: ref_out } = dpo_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Property 1: Warmup period - first 'period' values should be NaN
+				for i in 0..period.min(data.len()) {
+					prop_assert!(
+						out[i].is_nan(),
+						"[{}] Expected NaN during warmup at index {}, got {}",
+						test_name,
+						i,
+						out[i]
+					);
+				}
+
+				// Property 2: Output finiteness - all non-warmup values should be finite
+				for i in period..data.len() {
+					prop_assert!(
+						out[i].is_finite(),
+						"[{}] Expected finite value at index {}, got {}",
+						test_name,
+						i,
+						out[i]
+					);
+				}
+
+				// Property 3: Kernel consistency - all kernels should produce identical results
+				for i in 0..data.len() {
+					if out[i].is_nan() && ref_out[i].is_nan() {
+						continue;
+					}
+					let y_bits = out[i].to_bits();
+					let r_bits = ref_out[i].to_bits();
+					let ulp_diff = if y_bits > r_bits {
+						y_bits - r_bits
+					} else {
+						r_bits - y_bits
+					};
+					prop_assert!(
+						ulp_diff <= 3,
+						"[{}] Kernel mismatch at idx {}: {} ({:016X}) vs {} ({:016X}), ULP diff: {}",
+						test_name,
+						i,
+						out[i],
+						y_bits,
+						ref_out[i],
+						r_bits,
+						ulp_diff
+					);
+				}
+
+				// Property 4: DPO formula validation
+				// DPO = data[i - back] - moving_average
+				// where back = period / 2 + 1
+				let back = period / 2 + 1;
+				for i in period..data.len() {
+					if i >= back {
+						// Calculate the moving average manually
+						let sum: f64 = data[i + 1 - period..=i].iter().sum();
+						let avg = sum / period as f64;
+						let expected_dpo = data[i - back] - avg;
+						
+						// Allow small numerical error
+						prop_assert!(
+							(out[i] - expected_dpo).abs() < 1e-9,
+							"[{}] DPO formula mismatch at idx {}: got {}, expected {}",
+							test_name,
+							i,
+							out[i],
+							expected_dpo
+						);
+					}
+				}
+
+				// Property 5: Bounded output
+				// DPO should be bounded by the range of input data
+				if data.len() > period {
+					let min_val = data.iter().cloned().fold(f64::INFINITY, f64::min);
+					let max_val = data.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+					let range = max_val - min_val;
+					
+					for i in period..data.len() {
+						// DPO should not exceed 2x the data range (conservative bound)
+						prop_assert!(
+							out[i].abs() <= 2.0 * range,
+							"[{}] DPO exceeds reasonable bounds at idx {}: {} (data range: {})",
+							test_name,
+							i,
+							out[i],
+							range
+						);
+					}
+				}
+
+				// Property 6: Special case - period = 1
+				if period == 1 {
+					// With period=1, back=1, so DPO = data[i-1] - data[i]
+					for i in 1..data.len() {
+						let expected = data[i - 1] - data[i];
+						prop_assert!(
+							(out[i] - expected).abs() < 1e-9,
+							"[{}] Period=1 special case failed at idx {}: got {}, expected {}",
+							test_name,
+							i,
+							out[i],
+							expected
+						);
+					}
+				}
+
+				// Property 7: Constant data
+				if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) && data.len() > period {
+					// For constant data, DPO should be zero after warmup
+					for i in period..data.len() {
+						prop_assert!(
+							out[i].abs() < 1e-9,
+							"[{}] Expected zero DPO for constant data at idx {}, got {}",
+							test_name,
+							i,
+							out[i]
+						);
+					}
+				}
+
+				// Property 8: No poison values
+				for i in 0..data.len() {
+					if !out[i].is_nan() {
+						let bits = out[i].to_bits();
+						prop_assert!(
+							bits != 0x11111111_11111111 && bits != 0x22222222_22222222 && bits != 0x33333333_33333333,
+							"[{}] Found poison value at idx {}: {} ({:016X})",
+							test_name,
+							i,
+							out[i],
+							bits
+						);
+					}
+				}
+
+				Ok(())
+			})?;
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_dpo_tests {
         ($($test_fn:ident),*) => {
             paste! {
@@ -991,6 +1159,9 @@ mod tests {
 		check_dpo_streaming,
 		check_dpo_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_dpo_tests!(check_dpo_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);

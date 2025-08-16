@@ -989,6 +989,231 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_supersmoother_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+		
+		// Test strategy: generate period first, then data of appropriate length
+		let strat = (1usize..=100).prop_flat_map(|period| {
+			(
+				prop::collection::vec(
+					(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+					period..400,
+				),
+				Just(period),
+			)
+		});
+		
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period)| {
+				let params = SuperSmootherParams { period: Some(period) };
+				let input = SuperSmootherInput::from_slice(&data, params);
+				
+				// Run with test kernel and reference scalar kernel
+				let SuperSmootherOutput { values: out } = supersmoother_with_kernel(&input, kernel).unwrap();
+				let SuperSmootherOutput { values: ref_out } = supersmoother_with_kernel(&input, Kernel::Scalar).unwrap();
+				
+				// Find first non-NaN index
+				let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+				let warmup = first + period - 1;
+				
+				// Property 1: Warmup period values should be NaN
+				for i in 0..warmup.min(out.len()) {
+					prop_assert!(out[i].is_nan(), "Expected NaN during warmup at index {}", i);
+				}
+				
+				// Property 2: Initial conditions - first two values after warmup should match input
+				if warmup < data.len() {
+					let tolerance = if period == 1 { 1e-8 } else { 1e-9 };
+					prop_assert!(
+						(out[warmup] - data[warmup]).abs() <= tolerance,
+						"Initial condition 1 failed at index {}: {} vs {}", 
+						warmup, out[warmup], data[warmup]
+					);
+				}
+				if warmup + 1 < data.len() {
+					let tolerance = if period == 1 { 1e-8 } else { 1e-9 };
+					prop_assert!(
+						(out[warmup + 1] - data[warmup + 1]).abs() <= tolerance,
+						"Initial condition 2 failed at index {}: {} vs {}", 
+						warmup + 1, out[warmup + 1], data[warmup + 1]
+					);
+				}
+				
+				// Property 3: Constant input property
+				if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) && !data.is_empty() {
+					// For constant input, output should converge to that constant
+					let constant_val = data[first];
+					for i in (warmup + 10).min(out.len() - 1)..out.len() {
+						let tolerance = if period == 1 { 1e-8 } else { 1e-6 };
+						prop_assert!(
+							(out[i] - constant_val).abs() <= tolerance,
+							"Constant input property failed at index {}: {} vs {}",
+							i, out[i], constant_val
+						);
+					}
+				}
+				
+				// Property 4: Cross-kernel consistency
+				for i in warmup..out.len() {
+					let y = out[i];
+					let r = ref_out[i];
+					
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert!(
+							y.to_bits() == r.to_bits(),
+							"NaN/infinite mismatch at index {}: {} vs {}", 
+							i, y, r
+						);
+					} else {
+						// Allow slightly more tolerance for period=1 due to numerical precision
+						let tolerance = if period == 1 { 1e-8 } else { 1e-9 };
+						let ulp_diff = y.to_bits().abs_diff(r.to_bits());
+						
+						prop_assert!(
+							(y - r).abs() <= tolerance || ulp_diff <= 8,
+							"Cross-kernel mismatch at index {}: {} vs {} (diff={}, ULP={})",
+							i, y, r, (y - r).abs(), ulp_diff
+						);
+					}
+				}
+				
+				// Property 5: Filter stability - output should not blow up
+				for i in warmup..out.len() {
+					prop_assert!(
+						out[i].is_nan() || out[i].abs() < 1e12,
+						"Filter instability detected at index {}: {}",
+						i, out[i]
+					);
+				}
+				
+				// Property 6: Reasonable bounds check - only for non-sparse data
+				// IIR filters can have unbounded overshoot with sparse/impulsive data
+				if warmup < out.len() {
+					// Check for sparse data (lots of zeros or near-zeros)
+					let zero_count = data.iter().filter(|&&x| x.abs() < 1e-10).count();
+					let sparsity_ratio = zero_count as f64 / data.len() as f64;
+					
+					// Only check bounds for non-sparse data where behavior is more predictable
+					if sparsity_ratio < 0.3 {
+						let data_min = data[0..=out.len()-1].iter().cloned().fold(f64::INFINITY, f64::min);
+						let data_max = data[0..=out.len()-1].iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+						let data_range = (data_max - data_min).abs();
+						let max_magnitude = data_max.abs().max(data_min.abs());
+						
+						for i in warmup..out.len() {
+							if out[i].is_finite() {
+								// Allow up to 12x overshoot for IIR filters with normal data
+								// IIR filters can have significant overshoot even with normal data
+								let bound = 12.0 * max_magnitude + data_range + 1e-3;
+								prop_assert!(
+									out[i].abs() <= bound,
+									"Bounds check failed at index {}: |{}| > {}",
+									i, out[i], bound
+								);
+							}
+						}
+					}
+				}
+				
+				// Property 7: Recursive formula verification (for indices after initial conditions)
+				if warmup + 2 < out.len() {
+					// Calculate filter coefficients
+					let a = (-1.414_f64 * std::f64::consts::PI / (period as f64)).exp();
+					let a_sq = a * a;
+					let b = 2.0 * a * (1.414_f64 * std::f64::consts::PI / (period as f64)).cos();
+					let c = (1.0 + a_sq - b) * 0.5;
+					
+					// Verify recursive formula for a few samples
+					let test_start = warmup + 2;
+					let test_end = (test_start + 10).min(out.len());
+					
+					for i in test_start..test_end {
+						let expected = c * (data[i] + data[i-1]) + b * out[i-1] - a_sq * out[i-2];
+						let tolerance = 1e-9 * (1.0 + expected.abs());
+						prop_assert!(
+							(out[i] - expected).abs() <= tolerance,
+							"Recursive formula failed at index {}: {} vs expected {}",
+							i, out[i], expected
+						);
+					}
+				}
+				
+				// Property 8: Period=1 edge case with proper tolerance
+				if period == 1 && warmup + 2 < out.len() {
+					// With period=1, the filter still applies its coefficients
+					// Check that output remains bounded relative to recent input
+					for i in warmup + 2..out.len() {
+						let recent_window = &data[i.saturating_sub(5)..=i];
+						let recent_min = recent_window.iter().cloned().fold(f64::INFINITY, f64::min);
+						let recent_max = recent_window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+						let recent_range = (recent_max - recent_min).abs();
+						
+						// Allow significant overshoot for period=1 due to filter characteristics
+						let tolerance = recent_range + recent_max.abs().max(recent_min.abs()) + 1e-6;
+						prop_assert!(
+							out[i].abs() <= recent_max.abs() + tolerance,
+							"Period=1 bounds failed at index {}: |{}| exceeds reasonable bounds",
+							i, out[i]
+						);
+					}
+				}
+				
+				// Property 9: Monotonic response test
+				if warmup + 10 < out.len() {
+					// Check if input is monotonically increasing or decreasing in a window
+					let test_window_start = warmup + 2;
+					let test_window_end = (test_window_start + 20).min(out.len() - 1);
+					
+					if test_window_end > test_window_start {
+						let input_window = &data[test_window_start..test_window_end];
+						let is_monotonic_inc = input_window.windows(2).all(|w| w[1] >= w[0] - 1e-10);
+						let is_monotonic_dec = input_window.windows(2).all(|w| w[1] <= w[0] + 1e-10);
+						
+						if is_monotonic_inc || is_monotonic_dec {
+							// Output should generally follow the trend (with some lag and smoothing)
+							let output_window = &out[test_window_start..test_window_end];
+							let input_trend = data[test_window_end - 1] - data[test_window_start];
+							let output_trend = out[test_window_end - 1] - out[test_window_start];
+							
+							// Check that trends have the same sign (allowing for small differences)
+							if input_trend.abs() > 1e-6 {
+								prop_assert!(
+									input_trend.signum() == output_trend.signum() || output_trend.abs() < 1e-6,
+									"Monotonic response failed: input trend {} but output trend {}",
+									input_trend, output_trend
+								);
+							}
+						}
+					}
+				}
+				
+				// Property 10: Poison value detection
+				for (i, &val) in out.iter().enumerate() {
+					if val.is_finite() {
+						let bits = val.to_bits();
+						prop_assert!(
+							bits != 0x11111111_11111111 && 
+							bits != 0x22222222_22222222 && 
+							bits != 0x33333333_33333333,
+							"Poison value detected at index {}: {} (0x{:016X})",
+							i, val, bits
+						);
+					}
+				}
+				
+				Ok(())
+			})
+			.unwrap();
+		
+		Ok(())
+	}
+	
+	#[cfg(feature = "proptest")]
+	generate_all_supersmoother_tests!(check_supersmoother_property);
+	
 	generate_all_supersmoother_tests!(
 		check_supersmoother_partial_params,
 		check_supersmoother_accuracy,

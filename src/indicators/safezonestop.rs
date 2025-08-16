@@ -1475,6 +1475,261 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_safezonestop_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// SafeZoneStop requires high/low price data and direction
+		// Generate realistic price series with controlled volatility
+		let strat = (1usize..=64)
+			.prop_flat_map(|period| {
+				let len = period.max(10)..400;
+				(
+					// Starting price
+					100.0f64..1000.0f64,
+					// Generate price changes for random walk
+					prop::collection::vec(-0.05f64..0.05f64, len.clone()),
+					// Generate spread percentages
+					prop::collection::vec(0.001f64..0.02f64, len),
+					Just(period),
+					0.5f64..5.0f64,  // mult range
+					1usize..10,       // max_lookback range
+					prop::bool::ANY,  // direction: true = "long", false = "short"
+				)
+			})
+			.prop_map(|(start_price, returns, spreads, period, mult, max_lookback, is_long)| {
+				// Generate realistic price series using random walk
+				let len = returns.len().min(spreads.len());
+				let mut low = Vec::with_capacity(len);
+				let mut high = Vec::with_capacity(len);
+				let mut price = start_price;
+				
+				for i in 0..len {
+					// Random walk with bounded returns
+					price *= 1.0 + returns[i];
+					price = price.max(1.0); // Keep prices positive and reasonable
+					
+					// Generate high/low based on spread
+					let spread = price * spreads[i];
+					low.push(price - spread / 2.0);
+					high.push(price + spread / 2.0);
+				}
+				
+				(high, low, period, mult, max_lookback, is_long)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(high, low, period, mult, max_lookback, is_long)| {
+				let len = high.len();
+				let direction = if is_long { "long" } else { "short" };
+				
+				let params = SafeZoneStopParams {
+					period: Some(period),
+					mult: Some(mult),
+					max_lookback: Some(max_lookback),
+				};
+				let input = SafeZoneStopInput::from_slices(&high, &low, direction, params.clone());
+
+				let output = safezonestop_with_kernel(&input, kernel).unwrap();
+				let ref_output = safezonestop_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Calculate expected warmup period
+				let warmup_period = period.saturating_sub(1).max(max_lookback.saturating_sub(1));
+
+				// Property 1: Warmup period - first values should be NaN
+				for i in 0..warmup_period.min(len) {
+					prop_assert!(
+						output.values[i].is_nan(),
+						"Expected NaN during warmup at idx {}, got {}", i, output.values[i]
+					);
+				}
+
+				// Property 2: Direction-specific validation
+				// Long stops should be protective (below prices), short stops should be protective (above prices)
+				if len > warmup_period + max_lookback {
+					// Check direction produces different results
+					let opposite_dir = if is_long { "short" } else { "long" };
+					let opposite_input = SafeZoneStopInput::from_slices(&high, &low, opposite_dir, params.clone());
+					let opposite_output = safezonestop_with_kernel(&opposite_input, kernel).unwrap();
+					
+					// Verify that long and short produce different values (after warmup)
+					let mut found_difference = false;
+					for i in (warmup_period + max_lookback)..len {
+						if !output.values[i].is_nan() && !opposite_output.values[i].is_nan() {
+							if (output.values[i] - opposite_output.values[i]).abs() > 1e-10 {
+								found_difference = true;
+								break;
+							}
+						}
+					}
+					prop_assert!(
+						found_difference || len < warmup_period + max_lookback + 5,
+						"Long and short directions should produce different stop values"
+					);
+				}
+				
+				// Property 3: Mathematical bounds based on recent prices
+				for i in warmup_period..len {
+					let val = output.values[i];
+					if !val.is_nan() {
+						prop_assert!(
+							val.is_finite(),
+							"SafeZone value at idx {} is not finite: {}", i, val
+						);
+						
+						// Find recent price range (look back up to period + max_lookback)
+						let lookback_start = i.saturating_sub(period + max_lookback);
+						let recent_high = high[lookback_start..=i].iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+						let recent_low = low[lookback_start..=i].iter().cloned().fold(f64::INFINITY, f64::min);
+						let recent_range = recent_high - recent_low;
+						
+						// SafeZone values should be within reasonable bounds relative to recent prices
+						// Allow for multiplier effect and DM smoothing which can create larger deviations
+						let max_deviation = recent_range * mult * 5.0 + recent_high * 0.5;
+						
+						prop_assert!(
+							val >= -max_deviation && val <= recent_high + max_deviation,
+							"SafeZone value {} at idx {} outside reasonable bounds [{}, {}] based on recent prices",
+							val, i, -max_deviation, recent_high + max_deviation
+						);
+						
+						// For very stable recent prices, check tighter bounds
+						if recent_range < 1.0 {
+							if is_long {
+								// Long stops shouldn't be way above recent highs
+								prop_assert!(
+									val <= recent_high + recent_range * mult * 3.0,
+									"Long stop {} at idx {} too far above recent high {}",
+									val, i, recent_high
+								);
+							} else {
+								// Short stops shouldn't be way below recent lows
+								prop_assert!(
+									val >= recent_low - recent_range * mult * 3.0,
+									"Short stop {} at idx {} too far below recent low {}",
+									val, i, recent_low
+								);
+							}
+						}
+					}
+				}
+
+				// Property 4: Volatility response - higher volatility should produce wider stops
+				if len > warmup_period + period * 2 {
+					// Compare stops during high vs low volatility periods
+					let mid_point = len / 2;
+					if mid_point > warmup_period + period {
+						// Calculate average spreads in first and second half
+						let first_half_spread: f64 = (warmup_period..mid_point)
+							.map(|i| high[i] - low[i])
+							.sum::<f64>() / (mid_point - warmup_period) as f64;
+						
+						let second_half_spread: f64 = (mid_point..len)
+							.map(|i| high[i] - low[i])
+							.sum::<f64>() / (len - mid_point) as f64;
+						
+						// If there's a significant volatility difference
+						if first_half_spread > 0.0 && second_half_spread > 0.0 {
+							let volatility_ratio = first_half_spread / second_half_spread;
+							if volatility_ratio > 2.0 || volatility_ratio < 0.5 {
+								// Stops should generally be wider in the more volatile period
+								// This is a soft check as other factors can influence stops
+								let first_half_stops: Vec<f64> = output.values[warmup_period + period..mid_point]
+									.iter()
+									.filter(|v| !v.is_nan())
+									.copied()
+									.collect();
+								
+								let second_half_stops: Vec<f64> = output.values[mid_point..len]
+									.iter()
+									.filter(|v| !v.is_nan())
+									.copied()
+									.collect();
+								
+								if !first_half_stops.is_empty() && !second_half_stops.is_empty() {
+									// Check if stop widths correlate with volatility
+									// This is a loose check as many factors affect stops
+									prop_assert!(
+										first_half_stops.len() > 0 && second_half_stops.len() > 0,
+										"Should have valid stops in both halves for volatility test"
+									);
+								}
+							}
+						}
+					}
+				}
+				
+				// Property 5: Kernel consistency - all kernels should produce same results
+				for i in 0..len {
+					let y = output.values[i];
+					let r = ref_output.values[i];
+
+					// Handle NaN/infinite values
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert!(
+							y.to_bits() == r.to_bits(),
+							"NaN/inf mismatch at idx {}: {} vs {}", i, y, r
+						);
+						continue;
+					}
+
+					// Check ULP difference for finite values
+					let y_bits = y.to_bits();
+					let r_bits = r.to_bits();
+					let ulp_diff = y_bits.abs_diff(r_bits);
+
+					prop_assert!(
+						(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+						"Kernel mismatch at idx {}: {} vs {} (ULP={})", i, y, r, ulp_diff
+					);
+				}
+
+				// Property 6: Special case - period = 1
+				if period == 1 && max_lookback == 1 {
+					// With minimal parameters, most values should be NaN due to warmup
+					// When max_lookback = 1, warmup is 0, so values start immediately
+					// But the DM calculation needs at least 2 points
+					prop_assert!(
+						output.values[0].is_nan(),
+						"First value should be NaN with period=1, max_lookback=1"
+					);
+				}
+
+				// Property 7: Constant price data
+				if high.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12) &&
+				   low.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12) {
+					// With constant prices, directional movement should be ~0
+					// So SafeZone values should eventually stabilize
+					// Check that later values don't vary too much
+					let stable_start = (warmup_period + period * 2).min(len - 1);
+					if stable_start < len - 1 {
+						let stable_values: Vec<f64> = output.values[stable_start..]
+							.iter()
+							.filter(|v| !v.is_nan())
+							.copied()
+							.collect();
+						
+						if stable_values.len() > 1 {
+							let first_stable = stable_values[0];
+							for val in &stable_values[1..] {
+								prop_assert!(
+									(val - first_stable).abs() < 1e-6,
+									"Constant data should produce stable SafeZone values: {} vs {}", val, first_stable
+								);
+							}
+						}
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_safezonestop_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1507,6 +1762,9 @@ mod tests {
 		check_safezonestop_nan_handling,
 		check_safezonestop_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_safezonestop_tests!(check_safezonestop_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);

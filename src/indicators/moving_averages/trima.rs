@@ -1608,6 +1608,320 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_trima_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		use crate::indicators::sma::{sma, SmaData, SmaInput, SmaParams};
+		skip_if_unsupported!(kernel, test_name);
+
+		// Test strategy: generate period first (4 is minimum valid), then data of appropriate length
+		let strat = (4usize..=100).prop_flat_map(|period| {
+			(
+				prop::collection::vec(
+					(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+					period..400,
+				),
+				Just(period),
+			)
+		});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period)| {
+				let params = TrimaParams { period: Some(period) };
+				let input = TrimaInput::from_slice(&data, params);
+				
+				// Compute TRIMA with the specified kernel and scalar reference
+				let result = trima_with_kernel(&input, kernel)?;
+				let scalar_result = trima_with_kernel(&input, Kernel::Scalar)?;
+				
+				let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+				let warmup_end = first + period - 1;
+				
+				// Property 1: Warmup period - values before warmup_end should be NaN
+				for i in 0..warmup_end.min(data.len()) {
+					prop_assert!(
+						result.values[i].is_nan(),
+						"Expected NaN during warmup at index {}, got {}",
+						i,
+						result.values[i]
+					);
+				}
+				
+				// Property 2: Valid values after warmup
+				for i in warmup_end..data.len() {
+					prop_assert!(
+						result.values[i].is_finite() || data[i].is_nan(),
+						"Expected finite value after warmup at index {}, got {}",
+						i,
+						result.values[i]
+					);
+				}
+				
+				// Property 3: Constant input produces constant output
+				if data[first..].windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) && data.len() > first {
+					let constant_val = data[first];
+					for i in warmup_end..data.len() {
+						prop_assert!(
+							(result.values[i] - constant_val).abs() < 1e-9,
+							"Constant input should produce constant output at index {}: expected {}, got {}",
+							i,
+							constant_val,
+							result.values[i]
+						);
+					}
+				}
+				
+				// Property 4: Cross-kernel consistency
+				for i in 0..data.len() {
+					let val = result.values[i];
+					let ref_val = scalar_result.values[i];
+					
+					if val.is_nan() && ref_val.is_nan() {
+						continue;
+					}
+					
+					if !val.is_finite() || !ref_val.is_finite() {
+						prop_assert_eq!(
+							val.to_bits(),
+							ref_val.to_bits(),
+							"NaN/Inf mismatch at index {}: {} vs {}",
+							i,
+							val,
+							ref_val
+						);
+					} else {
+						let ulp_diff = val.to_bits().abs_diff(ref_val.to_bits());
+						prop_assert!(
+							(val - ref_val).abs() < 1e-9 || ulp_diff <= 4,
+							"Cross-kernel mismatch at index {}: {} vs {} (ULP diff: {})",
+							i,
+							val,
+							ref_val,
+							ulp_diff
+						);
+					}
+				}
+				
+				// Property 5: Numerical stability - no infinite values
+				for (i, &val) in result.values.iter().enumerate() {
+					prop_assert!(
+						val.is_nan() || val.is_finite(),
+						"Value should be finite or NaN at index {}, got {}",
+						i,
+						val
+					);
+				}
+				
+				// Property 6: Bounds check - output within window bounds (with tolerance for double smoothing)
+				// TRIMA is double-smoothed, so it should be well within bounds
+				for i in warmup_end..data.len() {
+					if i >= period - 1 {
+						let start = if i >= period - 1 { i + 1 - period } else { 0 };
+						let window = &data[start..=i];
+						let min_val = window.iter().filter(|x| x.is_finite()).fold(f64::INFINITY, |a, &b| a.min(b));
+						let max_val = window.iter().filter(|x| x.is_finite()).fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+						
+						if min_val.is_finite() && max_val.is_finite() {
+							let val = result.values[i];
+							// Allow small tolerance for numerical errors
+							prop_assert!(
+								val >= min_val - 1e-6 && val <= max_val + 1e-6,
+								"TRIMA value {} at index {} outside window bounds [{}, {}]",
+								val,
+								i,
+								min_val,
+								max_val
+							);
+						}
+					}
+				}
+				
+				// Property 7: Period=4 edge case with actual calculation verification
+				if period == 4 {
+					// m1 = (4+1)/2 = 2, m2 = 4-2+1 = 3
+					// Verify the actual two-pass calculation for minimum period
+					let m1 = 2;
+					let m2 = 3;
+					
+					// Compute the expected two-pass SMA
+					let sma1_input = SmaInput {
+						data: SmaData::Slice(&data),
+						params: SmaParams { period: Some(m1) },
+					};
+					let pass1 = sma(&sma1_input)?;
+					
+					let sma2_input = SmaInput {
+						data: SmaData::Slice(&pass1.values),
+						params: SmaParams { period: Some(m2) },
+					};
+					let expected = sma(&sma2_input)?;
+					
+					// Verify TRIMA matches the two-pass calculation
+					for i in warmup_end..data.len().min(warmup_end + 5) {
+						prop_assert!(
+							(result.values[i] - expected.values[i]).abs() < 1e-9,
+							"Period=4: TRIMA mismatch at index {}: got {}, expected {}",
+							i,
+							result.values[i],
+							expected.values[i]
+						);
+					}
+				}
+				
+				// Property 8: Two-pass SMA formula verification
+				// TRIMA must equal SMA(SMA(data, m1), m2) where m1=(period+1)/2, m2=period-m1+1
+				{
+					let m1 = (period + 1) / 2;
+					let m2 = period - m1 + 1;
+					
+					// Compute the expected two-pass SMA
+					let sma1_input = SmaInput {
+						data: SmaData::Slice(&data),
+						params: SmaParams { period: Some(m1) },
+					};
+					let pass1 = sma(&sma1_input)?;
+					
+					let sma2_input = SmaInput {
+						data: SmaData::Slice(&pass1.values),
+						params: SmaParams { period: Some(m2) },
+					};
+					let expected = sma(&sma2_input)?;
+					
+					// Spot check several points to verify formula
+					let check_points = vec![
+						warmup_end,
+						warmup_end + period / 2,
+						warmup_end + period,
+						data.len() - 1,
+					];
+					
+					for &idx in &check_points {
+						if idx < data.len() {
+							let trima_val = result.values[idx];
+							let expected_val = expected.values[idx];
+							
+							if trima_val.is_finite() && expected_val.is_finite() {
+								prop_assert!(
+									(trima_val - expected_val).abs() < 1e-9,
+									"Two-pass SMA formula mismatch at index {}: TRIMA={}, Expected={}",
+									idx,
+									trima_val,
+									expected_val
+								);
+							}
+						}
+					}
+				}
+				
+				// Property 9: Smoothness verification - TRIMA should be smoother than single SMA
+				if data.len() >= warmup_end + 20 {
+					// Compute single SMA for comparison
+					let sma_input = SmaInput {
+						data: SmaData::Slice(&data),
+						params: SmaParams { period: Some(period) },
+					};
+					let single_sma = sma(&sma_input)?;
+					
+					// Calculate roughness (sum of absolute differences between consecutive values)
+					let trima_roughness: f64 = result.values[warmup_end..warmup_end + 20]
+						.windows(2)
+						.map(|w| (w[1] - w[0]).abs())
+						.sum();
+					
+					let sma_roughness: f64 = single_sma.values[warmup_end..warmup_end + 20]
+						.windows(2)
+						.map(|w| (w[1] - w[0]).abs())
+						.sum();
+					
+					// TRIMA should generally be smoother (lower roughness) than single SMA
+					// Allow for some tolerance as this depends on data pattern
+					if sma_roughness > 1e-10 {
+						// Only check if there's actual variation in the data
+						prop_assert!(
+							trima_roughness <= sma_roughness * 1.1, // Allow 10% tolerance
+							"TRIMA should be smoother than single SMA: TRIMA roughness={}, SMA roughness={}",
+							trima_roughness,
+							sma_roughness
+						);
+					}
+				}
+				
+				// Property 10: Edge case - exact period length data
+				if data.len() == period {
+					// Should have exactly one valid output value at the last index
+					prop_assert!(
+						result.values[period - 1].is_finite(),
+						"With data.len()==period, last value should be finite, got {}",
+						result.values[period - 1]
+					);
+					// All other values should be NaN
+					for i in 0..period - 1 {
+						prop_assert!(
+							result.values[i].is_nan(),
+							"With data.len()==period, value at {} should be NaN, got {}",
+							i,
+							result.values[i]
+						);
+					}
+				}
+				
+				// Property 11: Monotonicity preservation
+				// For strictly monotonic data, TRIMA should preserve the trend
+				let is_monotonic_increasing = data[first..].windows(2).all(|w| w[1] >= w[0] - 1e-10);
+				let is_monotonic_decreasing = data[first..].windows(2).all(|w| w[1] <= w[0] + 1e-10);
+				
+				if is_monotonic_increasing || is_monotonic_decreasing {
+					let valid_trima = &result.values[warmup_end..];
+					if valid_trima.len() >= 2 {
+						if is_monotonic_increasing {
+							for w in valid_trima.windows(2) {
+								prop_assert!(
+									w[1] >= w[0] - 1e-9,
+									"TRIMA should preserve increasing trend: {} < {}",
+									w[1], w[0]
+								);
+							}
+						} else {
+							for w in valid_trima.windows(2) {
+								prop_assert!(
+									w[1] <= w[0] + 1e-9,
+									"TRIMA should preserve decreasing trend: {} > {}",
+									w[1], w[0]
+								);
+							}
+						}
+					}
+				}
+				
+				// Property 12: Poison detection (debug mode only)
+				#[cfg(debug_assertions)]
+				{
+					for (i, &val) in result.values.iter().enumerate() {
+						if !val.is_nan() {
+							let bits = val.to_bits();
+							prop_assert!(
+								bits != 0x11111111_11111111 &&
+								bits != 0x22222222_22222222 &&
+								bits != 0x33333333_33333333,
+								"Found poison value at index {}: {} (0x{:016X})",
+								i,
+								val,
+								bits
+							);
+						}
+					}
+				}
+				
+				Ok(())
+			})?;
+		
+		Ok(())
+	}
+
+	#[cfg(feature = "proptest")]
+	generate_all_trima_tests!(check_trima_property);
+	
 	generate_all_trima_tests!(
 		check_trima_partial_params,
 		check_trima_accuracy,

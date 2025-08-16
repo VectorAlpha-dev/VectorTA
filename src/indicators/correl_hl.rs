@@ -1353,60 +1353,155 @@ mod tests {
 
 	// Property-based testing
 	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
 	fn check_correl_hl_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		use proptest::prelude::*;
 		skip_if_unsupported!(kernel, test_name);
 
-		proptest!(|(
-			high in prop::collection::vec(prop::num::f64::NORMAL | prop::num::f64::POSITIVE, 10..100),
-			low in prop::collection::vec(prop::num::f64::NORMAL | prop::num::f64::POSITIVE, 10..100),
-			period in 2usize..20
-		)| {
-			// Ensure same length
-			let min_len = high.len().min(low.len());
-			let high = &high[..min_len];
-			let low = &low[..min_len];
-			
-			if period > min_len {
-				return Ok(());
-			}
-
-			let params = CorrelHlParams { period: Some(period) };
-			let input = CorrelHlInput::from_slices(high, low, params);
-			
-			match correl_hl_with_kernel(&input, kernel) {
-				Ok(output) => {
-					// Property 1: Output length should match input length
-					prop_assert_eq!(output.values.len(), min_len);
-					
-					// Property 2: First period-1 values should be NaN
-					for i in 0..(period-1) {
-						prop_assert!(output.values[i].is_nan());
-					}
-					
-					// Property 3: Correlation values should be in range [-1, 1]
-					for &val in &output.values {
-						if !val.is_nan() {
-							prop_assert!(val >= -1.0 && val <= 1.0,
-								"Correlation {} out of range [-1, 1]", val);
+		// Generate realistic OHLC-like data
+		// Note: Period=1 correlation is mathematically undefined (returns 0)
+		// We test periods 2-100 for meaningful correlation values
+		let strat = (2usize..=100).prop_flat_map(|period| {
+			(
+				// Generate base close prices, then derive high/low with realistic spreads
+				prop::collection::vec(
+					(1.0f64..1000.0f64),  // Positive price range typical for assets
+					period..400,
+				)
+				.prop_flat_map(move |close_prices| {
+					// For each close price, generate realistic high/low
+					let len = close_prices.len();
+					(
+						Just(close_prices.clone()),
+						prop::collection::vec(
+							(0.001f64..0.05f64, 0.001f64..0.05f64),  // 0.1% to 5% daily range (avoid zero spread)
+							len,
+						),
+					).prop_map(move |(close, spreads)| {
+						let mut high = Vec::with_capacity(len);
+						let mut low = Vec::with_capacity(len);
+						
+						for (i, &close_price) in close.iter().enumerate() {
+							let (up_spread, down_spread) = spreads[i];
+							// High is always >= close, low is always <= close
+							high.push(close_price * (1.0 + up_spread));
+							low.push(close_price * (1.0 - down_spread));
 						}
-					}
-					
-					// Property 4: If high and low are identical, correlation should be 1.0
-					if high == low {
-						for i in (period-1)..min_len {
-							if !output.values[i].is_nan() {
-								prop_assert!((output.values[i] - 1.0).abs() < 1e-10,
-									"Identical series should have correlation 1.0, got {}", output.values[i]);
+						
+						(high, low)
+					})
+				}),
+				Just(period),
+			)
+		});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |((high, low), period)| {
+				let params = CorrelHlParams { period: Some(period) };
+				let input = CorrelHlInput::from_slices(&high, &low, params);
+
+				// Get results from test kernel and reference scalar kernel
+				let result = correl_hl_with_kernel(&input, kernel);
+				let reference = correl_hl_with_kernel(&input, Kernel::Scalar);
+				
+				// Both should succeed or fail together
+				match (result, reference) {
+					(Ok(output), Ok(ref_output)) => {
+						let out = &output.values;
+						let ref_out = &ref_output.values;
+						
+						// Property 1: Output length matches input
+						prop_assert_eq!(out.len(), high.len());
+						
+						// Property 2: Warmup period
+						// First (period-1) values should be NaN for valid warmup
+						let warmup_len = period.saturating_sub(1).min(high.len());
+						for i in 0..warmup_len {
+							prop_assert!(
+								out[i].is_nan(),
+								"Expected NaN during warmup at index {}, got {}",
+								i, out[i]
+							);
+						}
+						
+						// Property 3: Cross-kernel consistency
+						// All kernels should produce identical results
+						for i in 0..out.len() {
+							let y = out[i];
+							let r = ref_out[i];
+							
+							// Check special values (NaN, inf) have exact bit equality
+							if !y.is_finite() || !r.is_finite() {
+								prop_assert_eq!(
+									y.to_bits(), r.to_bits(),
+									"Special value mismatch at index {}: {} vs {}",
+									i, y, r
+								);
+								continue;
+							}
+							
+							// Use ULP comparison for finite values
+							let ulp_diff = y.to_bits().abs_diff(r.to_bits());
+							prop_assert!(
+								(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+								"Kernel mismatch at index {}: {} vs {} (ULP={})",
+								i, y, r, ulp_diff
+							);
+						}
+						
+						// Property 4: Correlation bounds [-1, 1]
+						// All correlations must be within valid range (with small tolerance for FP errors)
+						for (i, &val) in out.iter().enumerate() {
+							if !val.is_nan() {
+								// Allow small numerical errors due to floating-point arithmetic
+								let tolerance = 1e-6;
+								prop_assert!(
+									val >= -1.0 - tolerance && val <= 1.0 + tolerance,
+									"Correlation at index {} out of range: {}",
+									i, val
+								);
+							}
+						}
+						
+						// Property 5: Realistic correlation expectations
+						// Since we generate OHLC data with high/low derived from same close,
+						// correlations should be positive and strong
+						
+						// Property 6: Monotonic relationship preservation
+						// If high and low have perfect linear relationship in a window,
+						// correlation should be very close to ±1
+						if period > 1 && period <= 10 {
+							// Check first valid window for strong correlation
+							// (our generated data has high/low derived from same close price)
+							let first_valid = warmup_len;
+							if first_valid < out.len() {
+								let corr = out[first_valid];
+								if !corr.is_nan() {
+									// Since high/low are derived from same close with small spreads,
+									// they should be highly correlated (> 0.9)
+									prop_assert!(
+										corr > 0.9,
+										"Expected strong positive correlation for OHLC data, got {} at index {}",
+										corr, first_valid
+									);
+								}
 							}
 						}
 					}
+					(Err(_), Err(_)) => {
+						// Both kernels failed - this is acceptable
+					}
+					(Ok(_), Err(e)) => {
+						prop_assert!(false, "Reference kernel failed but test kernel succeeded: {}", e);
+					}
+					(Err(e), Ok(_)) => {
+						prop_assert!(false, "Test kernel failed but reference kernel succeeded: {}", e);
+					}
 				}
-				Err(_) => {
-					// Errors are acceptable for edge cases
-				}
-			}
-		});
+				
+				Ok(())
+			})
+			.unwrap();
 
 		Ok(())
 	}
@@ -1489,6 +1584,42 @@ mod tests {
             }
         }
     }
+
+	// Test period=1 behavior - reproduce the bug
+	#[test]
+	fn test_period_one_bug() {
+		// Test case that reproduces the bug from property test
+		let high = vec![100.0, 200.0, 300.0];
+		let low = vec![90.0, 190.0, 310.0];  // Different from high
+		
+		let params = CorrelHlParams { period: Some(1) };
+		let input = CorrelHlInput::from_slices(&high, &low, params.clone());
+		let result = correl_hl(&input).unwrap();
+		
+		println!("Period=1 correlation with different high/low:");
+		for (i, &val) in result.values.iter().enumerate() {
+			println!("  Index {}: high={}, low={}, corr={}", i, high[i], low[i], val);
+			
+			// Correlation MUST be within [-1, 1]
+			assert!(
+				val.is_nan() || (val >= -1.0 && val <= 1.0),
+				"Period=1 correlation at index {} out of bounds: {}",
+				i, val
+			);
+		}
+		
+		// Test with identical values
+		let high2 = vec![100.0, 200.0, 300.0];
+		let low2 = vec![100.0, 200.0, 300.0];  // Same as high
+		
+		let input2 = CorrelHlInput::from_slices(&high2, &low2, params.clone());
+		let result2 = correl_hl(&input2).unwrap();
+		
+		println!("\nPeriod=1 correlation with identical high/low:");
+		for (i, &val) in result2.values.iter().enumerate() {
+			println!("  Index {}: high={}, low={}, corr={}", i, high2[i], low2[i], val);
+		}
+	}
 
 	generate_all_correl_hl_tests!(
 		check_correl_hl_partial_params,

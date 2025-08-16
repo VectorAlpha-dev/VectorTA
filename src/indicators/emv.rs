@@ -1033,6 +1033,171 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_emv_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Generate realistic market data
+		let strat = prop::collection::vec(
+			(
+				// High price (10 to 100000)
+				10.0f64..100000.0f64,
+				// Low as percentage of high (50% to 99.9% of high)
+				0.5f64..0.999f64,
+				// Volume (1000 to 1e9)
+				1000.0f64..1e9f64,
+			),
+			2..400, // Need at least 2 points for EMV
+		).prop_map(|data| {
+			// Convert percentages to actual low values
+			let high: Vec<f64> = data.iter().map(|(h, _, _)| *h).collect();
+			let low: Vec<f64> = data.iter().zip(&high).map(|((_, l_pct, _), h)| h * l_pct).collect();
+			let volume: Vec<f64> = data.iter().map(|(_, _, v)| *v).collect();
+			// Close values are not used in EMV calculation, but needed for API
+			let close = high.clone();
+			(high, low, close, volume)
+		});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(high, low, close, volume)| {
+				let input = EmvInput::from_slices(&high, &low, &close, &volume);
+				
+				// Test with specified kernel
+				let EmvOutput { values: out } = emv_with_kernel(&input, kernel).unwrap();
+				
+				// Test with scalar reference
+				let EmvOutput { values: ref_out } = emv_with_kernel(&input, Kernel::Scalar).unwrap();
+				
+				// Property 1: Warmup period - first value should always be NaN
+				prop_assert!(
+					out[0].is_nan(),
+					"First EMV value should always be NaN (warmup period)"
+				);
+				
+				// Property 2: Output finiteness - when inputs are finite, outputs should be finite (except warmup and zero range)
+				for i in 1..out.len() {
+					if high[i].is_finite() && low[i].is_finite() && volume[i].is_finite() {
+						let range = high[i] - low[i];
+						if range != 0.0 {
+							prop_assert!(
+								out[i].is_finite(),
+								"EMV at index {} should be finite when inputs are finite and range != 0",
+								i
+							);
+						}
+					}
+				}
+				
+				// Property 3: Kernel consistency - different kernels should produce nearly identical results
+				for i in 0..out.len() {
+					let y = out[i];
+					let r = ref_out[i];
+					
+					if !y.is_finite() || !r.is_finite() {
+						// Both should be NaN or infinite in the same way
+						prop_assert!(
+							y.to_bits() == r.to_bits(),
+							"Non-finite mismatch at index {}: {} vs {}",
+							i, y, r
+						);
+					} else {
+						// Check ULP difference for finite values
+						let y_bits = y.to_bits();
+						let r_bits = r.to_bits();
+						let ulp_diff = y_bits.abs_diff(r_bits);
+						
+						prop_assert!(
+							ulp_diff <= 3,
+							"ULP difference too large at index {}: {} vs {} (ULP={})",
+							i, y, r, ulp_diff
+						);
+					}
+				}
+				
+				// Property 4: EMV formula verification
+				// EMV = (current_mid - last_mid) / (volume / 10000 / range)
+				let mut last_mid = 0.5 * (high[0] + low[0]);
+				for i in 1..out.len() {
+					let current_mid = 0.5 * (high[i] + low[i]);
+					let range = high[i] - low[i];
+					
+					if range == 0.0 {
+						// Property 5: Zero range handling - output should be NaN
+						prop_assert!(
+							out[i].is_nan(),
+							"EMV at index {} should be NaN when range is zero",
+							i
+						);
+					} else {
+						let expected_emv = (current_mid - last_mid) / (volume[i] / 10000.0 / range);
+						
+						// Allow for small numerical errors
+						if out[i].is_finite() && expected_emv.is_finite() {
+							let diff = (out[i] - expected_emv).abs();
+							let tolerance = 1e-9;
+							prop_assert!(
+								diff <= tolerance,
+								"EMV formula mismatch at index {}: got {}, expected {}, diff={}",
+								i, out[i], expected_emv, diff
+							);
+						}
+					}
+					
+					last_mid = current_mid;
+				}
+				
+				// Property 6: Bounded output - EMV should be reasonable relative to price movement
+				for i in 1..out.len() {
+					if out[i].is_finite() {
+						let price_change = (high[i] + low[i]) / 2.0 - (high[i-1] + low[i-1]) / 2.0;
+						let max_reasonable = price_change.abs() * 1e8; // Very generous bound
+						
+						prop_assert!(
+							out[i].abs() <= max_reasonable,
+							"EMV at index {} seems unreasonably large: {} (price change: {})",
+							i, out[i], price_change
+						);
+					}
+				}
+				
+				// Property 7: Constant data with non-zero range produces zero EMV
+				if high.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) &&
+				   low.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) &&
+				   high.iter().zip(&low).all(|(h, l)| h > l) {
+					for i in 1..out.len() {
+						if out[i].is_finite() {
+							prop_assert!(
+								out[i].abs() < 1e-9,
+								"EMV should be ~0 for constant prices, got {} at index {}",
+								out[i], i
+							);
+						}
+					}
+				}
+				
+				// Property 8: No poison values
+				for (i, &val) in out.iter().enumerate() {
+					if !val.is_nan() {
+						let bits = val.to_bits();
+						prop_assert!(
+							bits != 0x11111111_11111111 &&
+							bits != 0x22222222_22222222 &&
+							bits != 0x33333333_33333333,
+							"Found poison value at index {}: {} (0x{:016X})",
+							i, val, bits
+						);
+					}
+				}
+				
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_emv_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1067,6 +1232,9 @@ mod tests {
 		check_emv_streaming,
 		check_emv_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_emv_tests!(check_emv_property);
 
 	fn check_batch_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);

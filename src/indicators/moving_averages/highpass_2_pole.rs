@@ -910,27 +910,245 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
 	fn check_highpass2_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test_name);
 		use proptest::prelude::*;
+		use std::f64::consts::PI;
 
-		let strat = (30usize..100, 2usize..20, 0.1f64..0.9);
+		// Strategy for generating test parameters and data
+		let strat = (2usize..=50)  // period range
+			.prop_flat_map(|period| {
+				(
+					// Generate realistic data with varying patterns
+					prop::collection::vec(
+						(-1000f64..1000f64).prop_filter("finite", |x| x.is_finite()),
+						period.max(10)..400,  // data length from max(period,10) to 400
+					),
+					Just(period),
+					0.01f64..0.99f64,  // k parameter range (extended to test boundaries)
+				)
+			});
 
 		proptest::test_runner::TestRunner::default()
-			.run(&strat, |(len, period, k)| {
-				let data = vec![5.0; len];
+			.run(&strat, |(data, period, k)| {
 				let params = HighPass2Params {
 					period: Some(period),
 					k: Some(k),
 				};
 				let input = HighPass2Input::from_slice(&data, params);
-				let out = highpass_2_pole_with_kernel(&input, kernel).unwrap();
-				prop_assert_eq!(out.values.len(), len);
-				let tail = out.values.last().copied().unwrap_or(0.0).abs();
-				prop_assert!(tail.is_finite());
+				
+				// Compute with specified kernel
+				let HighPass2Output { values: out } = highpass_2_pole_with_kernel(&input, kernel).unwrap();
+				
+				// Also compute with scalar kernel as reference
+				let HighPass2Output { values: ref_out } = highpass_2_pole_with_kernel(&input, Kernel::Scalar).unwrap();
+				
+				// Basic property: output length equals input length
+				prop_assert_eq!(out.len(), data.len());
+				
+				// Property 1: Verify initial seeding behavior
+				// Implementation seeds first two values directly from input
+				if data.len() > 0 && data[0].is_finite() {
+					prop_assert!((out[0] - data[0]).abs() < 1e-10,
+						"First output {} should match first input {}", out[0], data[0]);
+				}
+				if data.len() > 1 && data[1].is_finite() {
+					prop_assert!((out[1] - data[1]).abs() < 1e-10,
+						"Second output {} should match second input {}", out[1], data[1]);
+				}
+				
+				// Property 2: Verify the recursive filter equation for i >= 2
+				// y[i] = c*(x[i] - 2*x[i-1] + x[i-2]) + 2*(1-α)*y[i-1] - (1-α)²*y[i-2]
+				if data.len() >= 3 {
+					// Calculate filter coefficients
+					let angle = 2.0 * PI * k / (period as f64);
+					let sin_val = angle.sin();
+					let cos_val = angle.cos();
+					let alpha = 1.0 + ((sin_val - 1.0) / cos_val);
+					let c = (1.0 - alpha / 2.0).powi(2);
+					let one_minus_alpha = 1.0 - alpha;
+					let one_minus_alpha_sq = one_minus_alpha * one_minus_alpha;
+					
+					// Verify a few points of the filter equation
+					for i in 2..(10.min(data.len())) {
+						if data[i].is_finite() && data[i-1].is_finite() && data[i-2].is_finite() {
+							let expected = c * data[i] - 2.0 * c * data[i-1] + c * data[i-2] 
+								+ 2.0 * one_minus_alpha * out[i-1] - one_minus_alpha_sq * out[i-2];
+							prop_assert!((out[i] - expected).abs() < 1e-10,
+								"Filter equation mismatch at index {}: got {} expected {}", i, out[i], expected);
+						}
+					}
+				}
+				
+				// Property 3: DC removal test (fixed - no permissive OR condition)
+				// For constant input, output should converge toward zero
+				let const_start = data.len().saturating_sub(period * 3);
+				let const_end = data.len();
+				if const_start < const_end && const_end - const_start >= period {
+					let window = &data[const_start..const_end];
+					if window.iter().all(|&x| x.is_finite()) {
+						let mean = window.iter().sum::<f64>() / window.len() as f64;
+						let is_constant = window.iter().all(|&x| (x - mean).abs() < 1e-6);
+						
+						if is_constant && mean.abs() > 1e-6 {
+							// For constant input, high-pass output should be near zero at the end
+							let final_out = out[const_end - 1];
+							let relative_output = final_out.abs() / mean.abs();
+							prop_assert!(relative_output < 0.01,
+								"DC not removed: output {} is {:.2}% of constant input {} at index {}",
+								final_out, relative_output * 100.0, mean, const_end - 1);
+						}
+					}
+				}
+				
+				// Property 4: Step response test
+				// For a significant step change in input, high-pass should produce a transient response
+				// Note: Due to the recursive nature and period, decay may not be monotonic
+				if data.len() > period * 3 {
+					// Look for large changes in the data
+					for i in period..(data.len() - period * 2) {
+						if i > 0 && data[i].is_finite() && data[i-1].is_finite() {
+							let change = (data[i] - data[i-1]).abs();
+							if change > 200.0 {  // Significant change
+								// High-pass filter responds to changes
+								// Check that output shows response to the change
+								if out[i].is_finite() {
+									// Output should show some response to the change
+									prop_assert!(out[i].abs() > 0.01,
+										"High-pass should respond to change of {} at index {}", change, i);
+								}
+								break; // Only test one step per data set
+							}
+						}
+					}
+				}
+				
+				// Property 5: Frequency response - alternating signal should pass through
+				// Test with a section of alternating values
+				if data.len() > 10 {
+					let alt_start = 5;
+					let alt_end = (alt_start + 8).min(data.len());
+					let mut is_alternating = true;
+					for i in (alt_start + 1)..alt_end {
+						if data[i].is_finite() && data[i-1].is_finite() {
+							// Check if signs alternate
+							if data[i] * data[i-1] > 0.0 {
+								is_alternating = false;
+								break;
+							}
+						} else {
+							is_alternating = false;
+							break;
+						}
+					}
+					
+					if is_alternating && alt_end > alt_start + 4 {
+						// High frequency (alternating) signal should pass through
+						// Output amplitude should be significant relative to input
+						let input_amp = data[alt_start..alt_end].iter()
+							.filter(|x| x.is_finite())
+							.map(|x| x.abs())
+							.fold(0.0, f64::max);
+						let output_amp = out[alt_start..alt_end].iter()
+							.filter(|x| x.is_finite())
+							.map(|x| x.abs())
+							.fold(0.0, f64::max);
+						
+						if input_amp > 1e-6 {
+							let pass_ratio = output_amp / input_amp;
+							prop_assert!(pass_ratio > 0.1,
+								"High frequency should pass: input_amp={} output_amp={} ratio={}",
+								input_amp, output_amp, pass_ratio);
+						}
+					}
+				}
+				
+				// Property 6: Cross-kernel consistency check
+				for i in 2..data.len() {
+					let y = out[i];
+					let r = ref_out[i];
+					
+					if !y.is_finite() || !r.is_finite() {
+						// Both should handle non-finite values the same way
+						prop_assert!(y.to_bits() == r.to_bits(),
+							"Non-finite mismatch at index {}: {} vs {}", i, y, r);
+					} else {
+						// Check floating point consistency
+						let abs_diff = (y - r).abs();
+						let rel_diff = if r.abs() > 1e-10 { abs_diff / r.abs() } else { abs_diff };
+						
+						prop_assert!(abs_diff < 1e-9 || rel_diff < 1e-10,
+							"Kernel mismatch at index {}: {} vs {} (abs_diff={}, rel_diff={})",
+							i, y, r, abs_diff, rel_diff);
+					}
+				}
+				
+				// Property 7: Filter stability - output should remain bounded
+				// For bounded input, output should not explode
+				let input_bound = data.iter()
+					.filter(|x| x.is_finite())
+					.map(|x| x.abs())
+					.fold(0.0, f64::max);
+				
+				if input_bound > 0.0 && input_bound.is_finite() {
+					// Theoretical bound for 2-pole high-pass filter
+					// Maximum gain occurs at Nyquist frequency
+					let max_gain = 4.0; // Conservative upper bound for high-pass gain
+					let expected_bound = input_bound * max_gain;
+					
+					for (i, &val) in out.iter().enumerate() {
+						if val.is_finite() && i >= 2 {
+							prop_assert!(val.abs() <= expected_bound,
+								"Output {} at index {} exceeds stability bound {} (input_bound={})",
+								val, i, expected_bound, input_bound);
+						}
+					}
+				}
+				
+				// Property 8: Check for poison values
+				for (i, &val) in out.iter().enumerate() {
+					if !val.is_nan() {
+						let bits = val.to_bits();
+						prop_assert!(bits != 0x11111111_11111111,
+							"Found alloc_with_nan_prefix poison at index {}", i);
+						prop_assert!(bits != 0x22222222_22222222,
+							"Found init_matrix_prefixes poison at index {}", i);
+						prop_assert!(bits != 0x33333333_33333333,
+							"Found make_uninit_matrix poison at index {}", i);
+					}
+				}
+				
+				// Property 9: Boundary k values (near 0 and 1) should still produce valid output
+				if k < 0.02 || k > 0.98 {
+					// Even at extreme k values, filter should remain stable
+					let finite_count = out.iter().filter(|x| x.is_finite()).count();
+					let expected_finite = data.iter().filter(|x| x.is_finite()).count();
+					prop_assert!(finite_count >= expected_finite.saturating_sub(2),
+						"Filter unstable at k={}: only {} finite outputs from {} finite inputs",
+						k, finite_count, expected_finite);
+				}
+				
 				Ok(())
 			})
 			.unwrap();
+		Ok(())
+	}
+	
+	// Keep the existing simple property test as a fallback for non-proptest builds
+	#[cfg(not(feature = "proptest"))]
+	fn check_highpass2_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		// Simple test when proptest feature is not enabled
+		let data = vec![5.0; 100];
+		let params = HighPass2Params {
+			period: Some(10),
+			k: Some(0.707),
+		};
+		let input = HighPass2Input::from_slice(&data, params);
+		let out = highpass_2_pole_with_kernel(&input, kernel)?;
+		assert_eq!(out.values.len(), data.len());
 		Ok(())
 	}
 	macro_rules! generate_all_highpass2_tests {
@@ -1063,9 +1281,11 @@ mod tests {
 		check_highpass2_nan_handling,
 		check_highpass2_empty_input,
 		check_highpass2_invalid_k,
-		check_highpass2_property,
 		check_highpass2_no_poison
 	);
+	
+	#[cfg(feature = "proptest")]
+	generate_all_highpass2_tests!(check_highpass2_property);
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);
 		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";

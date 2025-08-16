@@ -1009,6 +1009,285 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_aroon_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+		
+		// Test strategy: generate length and OHLC data
+		let strat = (1usize..=100).prop_flat_map(|length| {
+			(
+				prop::collection::vec(
+					// Generate OHLC bars with realistic constraints
+					(-1e6f64..1e6f64)
+						.prop_filter("finite", |x| x.is_finite())
+						.prop_flat_map(|base| {
+							(0.0f64..0.3f64).prop_map(move |volatility| {
+								let range = base.abs() * volatility + 0.01;
+								let mid = base;
+								let high = mid + range;
+								let low = mid - range;
+								(high, low)
+							})
+						}),
+					length..400,
+				),
+				Just(length),
+			)
+		});
+		
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(bars, length)| {
+				let (highs, lows): (Vec<f64>, Vec<f64>) = bars.into_iter().unzip();
+				
+				let params = AroonParams { length: Some(length) };
+				let input = AroonInput::from_slices_hl(&highs, &lows, params.clone());
+				
+				let AroonOutput { aroon_up: out_up, aroon_down: out_down } = 
+					aroon_with_kernel(&input, kernel).unwrap();
+				let AroonOutput { aroon_up: ref_up, aroon_down: ref_down } = 
+					aroon_with_kernel(&input, Kernel::Scalar).unwrap();
+				
+				// Property 1: Output structure
+				prop_assert_eq!(out_up.len(), highs.len());
+				prop_assert_eq!(out_down.len(), lows.len());
+				
+				// Property 2: Warmup period (first `length` values are NaN)
+				for i in 0..length.min(out_up.len()) {
+					prop_assert!(out_up[i].is_nan());
+					prop_assert!(out_down[i].is_nan());
+				}
+				
+				// Property 3: Valid values after warmup
+				for i in length..out_up.len() {
+					prop_assert!(!out_up[i].is_nan());
+					prop_assert!(!out_down[i].is_nan());
+				}
+				
+				// Property 4: Range bounds [0, 100]
+				for i in length..out_up.len() {
+					prop_assert!(
+						out_up[i] >= 0.0 && out_up[i] <= 100.0,
+						"Aroon up at {} = {}, outside [0,100]", i, out_up[i]
+					);
+					prop_assert!(
+						out_down[i] >= 0.0 && out_down[i] <= 100.0,
+						"Aroon down at {} = {}, outside [0,100]", i, out_down[i]
+					);
+				}
+				
+				// Property 5: Mathematical formula verification
+				// Spot check a few calculated values
+				for i in length..out_up.len().min(length + 5) {
+					// Find the position of highest high in window
+					let window_start = i - length;
+					let mut max_val = highs[window_start];
+					let mut max_idx = window_start;
+					let mut min_val = lows[window_start];
+					let mut min_idx = window_start;
+					
+					for j in (window_start + 1)..=i {
+						if highs[j] > max_val {
+							max_val = highs[j];
+							max_idx = j;
+						}
+						if lows[j] < min_val {
+							min_val = lows[j];
+							min_idx = j;
+						}
+					}
+					
+					let periods_since_high = i - max_idx;
+					let periods_since_low = i - min_idx;
+					let expected_up = ((length as f64 - periods_since_high as f64) / length as f64) * 100.0;
+					let expected_down = ((length as f64 - periods_since_low as f64) / length as f64) * 100.0;
+					
+					prop_assert!(
+						(out_up[i] - expected_up).abs() < 1e-9,
+						"Formula mismatch for aroon_up at {}: expected {}, got {}",
+						i, expected_up, out_up[i]
+					);
+					prop_assert!(
+						(out_down[i] - expected_down).abs() < 1e-9,
+						"Formula mismatch for aroon_down at {}: expected {}, got {}",
+						i, expected_down, out_down[i]
+					);
+				}
+				
+				// Property 6: Edge case - length = 1
+				if length == 1 {
+					// With length=1, the window size is actually 2 (indices [i-1, i])
+					// The value depends on whether current bar's high/low is strictly greater/less
+					// than the previous bar
+					for i in 1..out_up.len().min(10) {
+						// Aroon values with length=1 can only be 0 or 100
+						prop_assert!(
+							out_up[i] == 0.0 || out_up[i] == 100.0,
+							"With length=1, aroon_up must be exactly 0 or 100, got {} at {}",
+							out_up[i], i
+						);
+						prop_assert!(
+							out_down[i] == 0.0 || out_down[i] == 100.0,
+							"With length=1, aroon_down must be exactly 0 or 100, got {} at {}",
+							out_down[i], i
+						);
+						
+						// Additional check: verify the logic
+						if i > 0 && i < highs.len() {
+							// If current high > previous high, aroon_up should be 100
+							if highs[i] > highs[i-1] {
+								prop_assert_eq!(out_up[i], 100.0,
+									"When high[{}]={} > high[{}]={}, aroon_up should be 100",
+									i, highs[i], i-1, highs[i-1]
+								);
+							}
+							// If current low < previous low, aroon_down should be 100
+							if lows[i] < lows[i-1] {
+								prop_assert_eq!(out_down[i], 100.0,
+									"When low[{}]={} < low[{}]={}, aroon_down should be 100",
+									i, lows[i], i-1, lows[i-1]
+								);
+							}
+						}
+					}
+				}
+				
+				// Property 7: Constant data behavior
+				let is_constant = highs.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) &&
+								 lows.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
+				
+				if is_constant && length > 1 {
+					// With constant prices, all positions are equally "recent"
+					// Aroon should decay to 0 as we get past the initial period
+					for i in (length * 2).min(out_up.len())..(length * 3).min(out_up.len()) {
+						prop_assert!(
+							out_up[i] <= 100.0 / length as f64 + 1e-9,
+							"With constant prices, aroon_up should approach 0, got {} at {}",
+							out_up[i], i
+						);
+						prop_assert!(
+							out_down[i] <= 100.0 / length as f64 + 1e-9,
+							"With constant prices, aroon_down should approach 0, got {} at {}",
+							out_down[i], i
+						);
+					}
+				}
+				
+				// Property 8: Cross-kernel validation
+				prop_assert_eq!(out_up.len(), ref_up.len());
+				prop_assert_eq!(out_down.len(), ref_down.len());
+				
+				for i in 0..out_up.len() {
+					let y_up = out_up[i];
+					let r_up = ref_up[i];
+					let y_down = out_down[i];
+					let r_down = ref_down[i];
+					
+					// Check NaN/finite consistency
+					if !y_up.is_finite() || !r_up.is_finite() {
+						prop_assert_eq!(y_up.to_bits(), r_up.to_bits());
+					} else {
+						let ulp_diff = y_up.to_bits().abs_diff(r_up.to_bits());
+						prop_assert!(
+							(y_up - r_up).abs() <= 1e-9 || ulp_diff <= 4,
+							"Kernel mismatch for aroon_up at {}: {} vs {} (ULP={})",
+							i, y_up, r_up, ulp_diff
+						);
+					}
+					
+					if !y_down.is_finite() || !r_down.is_finite() {
+						prop_assert_eq!(y_down.to_bits(), r_down.to_bits());
+					} else {
+						let ulp_diff = y_down.to_bits().abs_diff(r_down.to_bits());
+						prop_assert!(
+							(y_down - r_down).abs() <= 1e-9 || ulp_diff <= 4,
+							"Kernel mismatch for aroon_down at {}: {} vs {} (ULP={})",
+							i, y_down, r_down, ulp_diff
+						);
+					}
+				}
+				
+				// Property 9: Monotonicity - Aroon decreases as distance from extreme increases
+				// Test a few windows to verify this property
+				for i in (length + 10)..(out_up.len().min(length + 15)) {
+					let window_start = i - length;
+					
+					// Find position of highest high
+					let mut max_idx = window_start;
+					for j in (window_start + 1)..=i {
+						if highs[j] > highs[max_idx] {
+							max_idx = j;
+						}
+					}
+					
+					// If the high is getting older (further from current), Aroon up should decrease
+					if i + 1 < out_up.len() && max_idx < i {
+						// Next window: if same high is still max but now older
+						let next_window_start = i + 1 - length;
+						let mut next_max_idx = next_window_start;
+						for j in (next_window_start + 1)..=i+1 {
+							if j < highs.len() && highs[j] > highs[next_max_idx] {
+								next_max_idx = j;
+							}
+						}
+						
+						// If the same extreme is still the max but older, Aroon should decrease
+						if next_max_idx == max_idx {
+							prop_assert!(
+								out_up[i + 1] <= out_up[i] + 1e-9,
+								"Monotonicity: Aroon up should decrease as extreme ages: {} -> {}",
+								out_up[i], out_up[i + 1]
+							);
+						}
+					}
+				}
+				
+				// Property 10: High/Low relationship integrity
+				for i in 0..highs.len() {
+					prop_assert!(
+						highs[i] >= lows[i],
+						"Data integrity: High {} < Low {} at index {}",
+						highs[i], lows[i], i
+					);
+				}
+				
+				// Property 11: Poison value detection (debug mode only)
+				#[cfg(debug_assertions)]
+				{
+					for (i, &val) in out_up.iter().enumerate() {
+						if val.is_finite() {
+							let bits = val.to_bits();
+							prop_assert!(
+								bits != 0x11111111_11111111 && 
+								bits != 0x22222222_22222222 && 
+								bits != 0x33333333_33333333,
+								"Found poison value {} (0x{:016X}) at {} in aroon_up",
+								val, bits, i
+							);
+						}
+					}
+					for (i, &val) in out_down.iter().enumerate() {
+						if val.is_finite() {
+							let bits = val.to_bits();
+							prop_assert!(
+								bits != 0x11111111_11111111 && 
+								bits != 0x22222222_22222222 && 
+								bits != 0x33333333_33333333,
+								"Found poison value {} (0x{:016X}) at {} in aroon_down",
+								val, bits, i
+							);
+						}
+					}
+				}
+				
+				Ok(())
+			})
+			.unwrap();
+		
+		Ok(())
+	}
+
 	macro_rules! generate_all_aroon_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1045,6 +1324,9 @@ mod tests {
 		check_aroon_streaming,
 		check_aroon_no_poison
 	);
+	
+	#[cfg(feature = "proptest")]
+	generate_all_aroon_tests!(check_aroon_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);

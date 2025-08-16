@@ -1189,6 +1189,183 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_rocr_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// ROCR is for price data, typically positive but can be zero
+		// Test with realistic price ranges including edge cases
+		let strat = (1usize..=64)
+			.prop_flat_map(|period| {
+				(
+					prop::collection::vec(
+						prop::strategy::Union::new(vec![
+							// Most values: normal price range
+							(0.1f64..10000f64).boxed(),
+							// Occasional zeros (about 5% chance)
+							prop::strategy::Just(0.0).boxed(),
+							// Extreme small values for ratio testing
+							(1e-10f64..1e-5f64).boxed(),
+							// Large values for overflow testing
+							(1e5f64..1e8f64).boxed(),
+						]).prop_filter("finite values", |x| x.is_finite() && *x >= 0.0),
+						period..400,
+					),
+					Just(period),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period)| {
+				let params = RocrParams {
+					period: Some(period),
+				};
+				let input = RocrInput::from_slice(&data, params);
+
+				let RocrOutput { values: out } = rocr_with_kernel(&input, kernel).unwrap();
+				let RocrOutput { values: ref_out } = rocr_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Check warmup period - first 'period' values should be NaN
+				for i in 0..period {
+					prop_assert!(
+						out[i].is_nan(),
+						"Expected NaN during warmup at index {}, got {}",
+						i,
+						out[i]
+					);
+				}
+
+				// Verify ROCR calculation for valid indices
+				for i in period..data.len() {
+					let current = data[i];
+					let past = data[i - period];
+					
+					// Calculate expected value according to ROCR formula
+					let expected = if past == 0.0 || past.is_nan() {
+						0.0
+					} else {
+						current / past
+					};
+
+					let y = out[i];
+					let r = ref_out[i];
+
+					// Verify the mathematical formula
+					if !y.is_nan() {
+						// Use relative tolerance for large values, absolute for small
+						let tolerance = if expected.abs() > 1.0 {
+							expected.abs() * 1e-9
+						} else {
+							1e-9
+						};
+						
+						prop_assert!(
+							(y - expected).abs() <= tolerance,
+							"ROCR formula mismatch at idx {}: got {}, expected {} (current={}, past={})",
+							i, y, expected, current, past
+						);
+
+						// ROCR should be non-negative (prices are non-negative)
+						prop_assert!(
+							y >= 0.0,
+							"ROCR should be non-negative at idx {}: got {}",
+							i, y
+						);
+						
+						// Test edge case: when current is 0, ROCR should be 0
+						if current == 0.0 && past != 0.0 {
+							prop_assert!(
+								y == 0.0,
+								"ROCR should be 0 when current=0 at idx {}: got {}",
+								i, y
+							);
+						}
+						
+						// Test edge case: when past is 0, ROCR should be 0
+						if past == 0.0 {
+							prop_assert!(
+								y == 0.0,
+								"ROCR should be 0 when past=0 at idx {}: got {}",
+								i, y
+							);
+						}
+						
+						// Verify no overflow/underflow with extreme ratios
+						prop_assert!(
+							y.is_finite(),
+							"ROCR should be finite at idx {}: got {} (current={}, past={})",
+							i, y, current, past
+						);
+					}
+
+					// Special case: period = 1 means comparing to previous value
+					if period == 1 && i > 0 && data[i - 1] != 0.0 {
+						let expected_simple = data[i] / data[i - 1];
+						if !y.is_nan() {
+							let tolerance = if expected_simple.abs() > 1.0 {
+								expected_simple.abs() * 1e-9
+							} else {
+								1e-9
+							};
+							prop_assert!(
+								(y - expected_simple).abs() <= tolerance,
+								"Period=1 mismatch at idx {}: got {}, expected {}",
+								i, y, expected_simple
+							);
+						}
+					}
+
+					// Special case: constant non-zero data should return 1.0
+					// Only check this for windows with at least 2 elements
+					if i >= period && period > 1 {
+						let window = &data[i - period + 1..=i];
+						// Check if all values in the window are approximately equal
+						let first_val = window[0];
+						let is_constant = first_val != 0.0 && window.iter()
+							.all(|&v| (v - first_val).abs() <= 1e-10 * first_val.abs().max(1.0));
+						
+						if is_constant {
+							prop_assert!(
+								(y - 1.0).abs() <= 1e-9,
+								"Constant data should yield ROCR=1.0 at idx {}: got {}",
+								i, y
+							);
+						}
+					}
+
+					// Verify kernel consistency
+					let y_bits = y.to_bits();
+					let r_bits = r.to_bits();
+
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert!(
+							y.to_bits() == r.to_bits(),
+							"finite/NaN mismatch idx {}: {} vs {}",
+							i, y, r
+						);
+						continue;
+					}
+
+					let ulp_diff: u64 = y_bits.abs_diff(r_bits);
+
+					// Allow slightly more ULP difference for extreme values
+					let max_ulp = if y.abs() > 1e6 || y.abs() < 1e-6 { 8 } else { 4 };
+					
+					prop_assert!(
+						(y - r).abs() <= 1e-9 || ulp_diff <= max_ulp,
+						"Kernel mismatch idx {}: {} vs {} (ULP={})",
+						i, y, r, ulp_diff
+					);
+				}
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_rocr_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1225,6 +1402,9 @@ mod tests {
 		check_rocr_streaming,
 		check_rocr_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_rocr_tests!(check_rocr_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);
