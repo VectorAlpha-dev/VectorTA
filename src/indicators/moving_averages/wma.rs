@@ -921,6 +921,217 @@ mod tests {
         }
     }
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_wma_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Test strategy: generate period first (2 is minimum valid), then data of appropriate length
+		let strat = (2usize..=100).prop_flat_map(|period| {
+			(
+				prop::collection::vec(
+					(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+					period..400,
+				),
+				Just(period),
+			)
+		});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period)| {
+				let params = WmaParams { period: Some(period) };
+				let input = WmaInput::from_slice(&data, params.clone());
+
+				// Get output from the kernel being tested
+				let WmaOutput { values: out } = wma_with_kernel(&input, kernel).unwrap();
+				
+				// Get reference output from scalar kernel for cross-kernel verification
+				let WmaOutput { values: ref_out } = wma_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Find first non-NaN value in input
+				let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+				let warmup_end = first + period - 1;
+
+				// Property 1: Warmup period - first (first + period - 1) values should be NaN
+				for i in 0..warmup_end.min(out.len()) {
+					prop_assert!(
+						out[i].is_nan(),
+						"Expected NaN during warmup at index {}, got {}",
+						i,
+						out[i]
+					);
+				}
+
+				// Property 2: Valid values after warmup - all should be finite
+				for i in warmup_end..out.len() {
+					prop_assert!(
+						out[i].is_finite(),
+						"Expected finite value after warmup at index {}, got {}",
+						i,
+						out[i]
+					);
+				}
+
+				// Properties 3-11 for valid WMA values
+				for i in warmup_end..data.len() {
+					let window_start = i + 1 - period;
+					let window = &data[window_start..=i];
+					
+					// Property 3: Bounds checking - WMA should be within [min, max] of window
+					let lo = window.iter().cloned().fold(f64::INFINITY, f64::min);
+					let hi = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+					let y = out[i];
+					
+					prop_assert!(
+						y >= lo - 1e-9 && y <= hi + 1e-9,
+						"WMA at index {} = {} is outside window bounds [{}, {}]",
+						i, y, lo, hi
+					);
+
+					// Property 4: Constant input - if all values same, WMA = that value
+					if window.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12) {
+						prop_assert!(
+							(y - window[0]).abs() <= 1e-9,
+							"Constant input should produce constant output: {} vs {}",
+							y, window[0]
+						);
+					}
+
+					// Property 5: Cross-kernel consistency
+					let r = ref_out[i];
+					if y.is_finite() && r.is_finite() {
+						let y_bits = y.to_bits();
+						let r_bits = r.to_bits();
+						let ulp_diff = y_bits.abs_diff(r_bits);
+						
+						prop_assert!(
+							(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+							"Kernel mismatch at index {}: {} vs {} (ULP={})",
+							i, y, r, ulp_diff
+						);
+					}
+				}
+
+				// Property 6: Period=2 edge case (minimum valid period)
+				if period == 2 && out.len() >= 2 {
+					let idx = warmup_end;
+					if idx < out.len() {
+						// WMA with period 2: weights are [1, 2], sum = 3
+						// WMA = (1*data[i-1] + 2*data[i]) / 3
+						let expected = (data[idx - 1] + 2.0 * data[idx]) / 3.0;
+						prop_assert!(
+							(out[idx] - expected).abs() <= 1e-9,
+							"Period=2 calculation mismatch: {} vs expected {}",
+							out[idx], expected
+						);
+					}
+				}
+
+				// Property 7: Weight formula verification for small periods
+				if period <= 5 && warmup_end < out.len() {
+					let idx = warmup_end;
+					let window_start = idx + 1 - period;
+					
+					// Calculate WMA manually using the exact formula
+					let mut weighted_sum = 0.0;
+					let mut weight_sum = 0.0;
+					for (j, &val) in data[window_start..=idx].iter().enumerate() {
+						let weight = (j + 1) as f64;
+						weighted_sum += weight * val;
+						weight_sum += weight;
+					}
+					let expected = weighted_sum / weight_sum;
+					
+					prop_assert!(
+						(out[idx] - expected).abs() <= 1e-9,
+						"Weight formula verification failed at index {}: {} vs expected {}",
+						idx, out[idx], expected
+					);
+				}
+
+				// Property 8: Responsiveness - WMA responds more to recent values
+				// Test with a step function: if data suddenly changes, WMA should move toward new value
+				if data.len() >= period * 2 {
+					let mid = data.len() / 2;
+					if mid > warmup_end {
+						// Create synthetic step: first half low, second half high
+						let mut step_data = vec![10.0; data.len()];
+						for i in mid..step_data.len() {
+							step_data[i] = 100.0;
+						}
+						
+						let step_input = WmaInput::from_slice(&step_data, params.clone());
+						let WmaOutput { values: step_out } = wma_with_kernel(&step_input, kernel).unwrap();
+						
+						// After the step, WMA should be closer to 100 than 10 (due to higher weights on recent)
+						if mid + period < step_out.len() {
+							let wma_after_step = step_out[mid + period - 1];
+							let distance_to_new = (wma_after_step - 100.0).abs();
+							let distance_to_old = (wma_after_step - 10.0).abs();
+							prop_assert!(
+								distance_to_new < distance_to_old,
+								"WMA should respond more to recent values: {} should be closer to 100 than 10",
+								wma_after_step
+							);
+						}
+					}
+				}
+
+				// Property 9: Exact period length data - single valid output
+				if data.len() == period {
+					let valid_count = out.iter().filter(|x| x.is_finite()).count();
+					prop_assert!(
+						valid_count == 1,
+						"With data.len() == period, should have exactly 1 valid output, got {}",
+						valid_count
+					);
+					
+					// The single valid value should be at the last index
+					prop_assert!(
+						out[data.len() - 1].is_finite(),
+						"Last value should be valid when data.len() == period"
+					);
+				}
+
+				// Property 10: Monotonicity preservation
+				// If input is strictly increasing, WMA should be increasing (allowing for numerical tolerance)
+				let is_monotonic_increasing = data.windows(2).all(|w| w[1] >= w[0] - 1e-12);
+				if is_monotonic_increasing && out.len() > warmup_end + 1 {
+					for i in (warmup_end + 1)..out.len() {
+						// Allow small tolerance for numerical errors
+						prop_assert!(
+							out[i] >= out[i - 1] - 1e-9,
+							"Monotonic input should produce monotonic WMA: {} < {} at index {}",
+							out[i], out[i - 1], i
+						);
+					}
+				}
+
+				// Property 11: Poison value detection (in debug mode)
+				#[cfg(debug_assertions)]
+				{
+					for (i, &val) in out.iter().enumerate() {
+						if !val.is_nan() {
+							let bits = val.to_bits();
+							prop_assert!(
+								bits != 0x11111111_11111111 && 
+								bits != 0x22222222_22222222 && 
+								bits != 0x33333333_33333333,
+								"Found poison value at index {}: {} (0x{:016X})",
+								i, val, bits
+							);
+						}
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	generate_all_wma_tests!(
 		check_wma_partial_params,
 		check_wma_accuracy,
@@ -933,6 +1144,9 @@ mod tests {
 		check_wma_streaming,
 		check_wma_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_wma_tests!(check_wma_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);

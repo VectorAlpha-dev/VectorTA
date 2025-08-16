@@ -998,6 +998,267 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_adx_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+		
+		// Test strategy: generate period first (2 is minimum valid), then OHLC data of appropriate length
+		let strat = (2usize..=100).prop_flat_map(|period| {
+			// Generate base price and volatility for realistic OHLC
+			(
+				(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),  // base price
+				(0.01f64..0.2f64),  // volatility factor
+				period + 1..400,    // data length (need at least period + 1)
+			).prop_flat_map(move |(base_price, volatility, len)| {
+				// Generate realistic OHLC data
+				prop::collection::vec(
+					(0f64..1f64).prop_map(move |rand| {
+						// Create realistic OHLC bar
+						let change = (rand - 0.5) * volatility * base_price.abs();
+						let open = base_price + change;
+						let close = open + (rand - 0.5) * volatility * base_price.abs() * 0.5;
+						let high = open.max(close) + rand * volatility * base_price.abs() * 0.3;
+						let low = open.min(close) - rand * volatility * base_price.abs() * 0.3;
+						(high, low, close)
+					}),
+					len,
+				).prop_map(move |bars| (bars, period))
+			})
+		});
+		
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(bars, period)| {
+				let mut highs = Vec::with_capacity(bars.len());
+				let mut lows = Vec::with_capacity(bars.len());
+				let mut closes = Vec::with_capacity(bars.len());
+				
+				for &(h, l, c) in &bars {
+					highs.push(h);
+					lows.push(l);
+					closes.push(c);
+				}
+				
+				let params = AdxParams { period: Some(period) };
+				let input = AdxInput::from_slices(&highs, &lows, &closes, params.clone());
+				
+				let AdxOutput { values: out } = adx_with_kernel(&input, kernel).unwrap();
+				let AdxOutput { values: ref_out } = adx_with_kernel(&input, Kernel::Scalar).unwrap();
+				
+				// Property 1: Warmup period validation
+				let warmup_period = 2 * period - 1;
+				for i in 0..warmup_period.min(out.len()) {
+					prop_assert!(
+						out[i].is_nan(),
+						"[{}] Property 1: Expected NaN during warmup at index {}, got {}",
+						test_name, i, out[i]
+					);
+				}
+				
+				// Property 2: Valid values after warmup
+				if out.len() > warmup_period + 10 {
+					for i in (warmup_period + 10)..out.len() {
+						prop_assert!(
+							!out[i].is_nan(),
+							"[{}] Property 2: Unexpected NaN after warmup at index {}",
+							test_name, i
+						);
+					}
+				}
+				
+				// Property 3: Range bounds (ADX is 0-100)
+				for (i, &val) in out.iter().enumerate() {
+					if !val.is_nan() {
+						prop_assert!(
+							val >= 0.0 && val <= 100.0,
+							"[{}] Property 3: ADX value {} at index {} outside [0, 100] range",
+							test_name, val, i
+						);
+					}
+				}
+				
+				// Property 4: Constant market behavior
+				// Create constant price data
+				let const_price = 100.0;
+				let const_highs = vec![const_price; closes.len()];
+				let const_lows = vec![const_price; closes.len()];
+				let const_closes = vec![const_price; closes.len()];
+				let const_input = AdxInput::from_slices(&const_highs, &const_lows, &const_closes, params.clone());
+				
+				if let Ok(AdxOutput { values: const_out }) = adx_with_kernel(&const_input, kernel) {
+					// After warmup, ADX should be 0 or very close to 0 for no movement
+					for i in warmup_period..const_out.len() {
+						if !const_out[i].is_nan() {
+							prop_assert!(
+								const_out[i] <= 1.0,  // Allow small tolerance
+								"[{}] Property 4: ADX should be near 0 for constant prices, got {} at index {}",
+								test_name, const_out[i], i
+							);
+						}
+					}
+				}
+				
+				// Property 5: Cross-kernel validation
+				prop_assert_eq!(
+					out.len(), ref_out.len(),
+					"[{}] Property 5: Kernel output length mismatch",
+					test_name
+				);
+				
+				for i in 0..out.len() {
+					let y = out[i];
+					let r = ref_out[i];
+					
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert!(
+							y.to_bits() == r.to_bits(),
+							"[{}] Property 5: NaN/Inf mismatch at index {}: {} vs {}",
+							test_name, i, y, r
+						);
+						continue;
+					}
+					
+					let ulp_diff = y.to_bits().abs_diff(r.to_bits());
+					prop_assert!(
+						(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+						"[{}] Property 5: Kernel mismatch at index {}: {} vs {} (ULP={})",
+						test_name, i, y, r, ulp_diff
+					);
+				}
+				
+				// Property 6: Minimum period edge case
+				if period == 2 {
+					// Should still produce valid output with minimum period
+					prop_assert!(
+						out.len() == closes.len(),
+						"[{}] Property 6: Output length mismatch with period=2",
+						test_name
+					);
+					// Check that we get non-NaN values after warmup (2*2-1 = 3)
+					if out.len() > 3 {
+						prop_assert!(
+							!out[3].is_nan(),
+							"[{}] Property 6: Should have valid ADX at index 3 with period=2",
+							test_name
+						);
+					}
+				}
+				
+				// Property 7: Trending market detection
+				// Create strong uptrend data
+				let trend_len = closes.len();
+				let mut trend_highs = Vec::with_capacity(trend_len);
+				let mut trend_lows = Vec::with_capacity(trend_len);
+				let mut trend_closes = Vec::with_capacity(trend_len);
+				
+				for i in 0..trend_len {
+					let base = 100.0 + (i as f64) * 2.0;  // Strong uptrend
+					trend_lows.push(base - 0.5);
+					trend_highs.push(base + 0.5);
+					trend_closes.push(base);
+				}
+				
+				let trend_input = AdxInput::from_slices(&trend_highs, &trend_lows, &trend_closes, params.clone());
+				
+				if let Ok(AdxOutput { values: trend_out }) = adx_with_kernel(&trend_input, kernel) {
+					// In a strong trend, ADX should be relatively high (> 25 is considered trending)
+					let last_valid_adx = trend_out.iter()
+						.rposition(|&v| !v.is_nan())
+						.and_then(|i| Some(trend_out[i]));
+					
+					if let Some(adx_val) = last_valid_adx {
+						prop_assert!(
+							adx_val > 20.0,  // Strong trend should produce ADX > 20
+							"[{}] Property 7: Strong trend should produce high ADX, got {}",
+							test_name, adx_val
+						);
+					}
+				}
+				
+				// Property 8: No directional movement
+				// Create data with no directional movement (doji candles)
+				let doji_price = 100.0;
+				let mut doji_highs = Vec::with_capacity(closes.len());
+				let mut doji_lows = Vec::with_capacity(closes.len());
+				let mut doji_closes = Vec::with_capacity(closes.len());
+				
+				for _ in 0..closes.len() {
+					doji_highs.push(doji_price + 0.01);  // Tiny range
+					doji_lows.push(doji_price - 0.01);
+					doji_closes.push(doji_price);
+				}
+				
+				let doji_input = AdxInput::from_slices(&doji_highs, &doji_lows, &doji_closes, params.clone());
+				
+				if let Ok(AdxOutput { values: doji_out }) = adx_with_kernel(&doji_input, kernel) {
+					// With minimal movement, ADX should be low
+					for i in warmup_period..doji_out.len() {
+						if !doji_out[i].is_nan() {
+							prop_assert!(
+								doji_out[i] <= 30.0,  // No strong trend
+								"[{}] Property 8: Low movement should produce low ADX, got {} at index {}",
+								test_name, doji_out[i], i
+							);
+						}
+					}
+				}
+				
+				// Property 9: Exact period validation
+				// ADX should start producing non-NaN values at exactly warmup_period index
+				if out.len() > warmup_period {
+					prop_assert!(
+						!out[warmup_period].is_nan(),
+						"[{}] Property 9: Should have valid ADX at index {} (warmup_period)",
+						test_name, warmup_period
+					);
+					if warmup_period > 0 {
+						prop_assert!(
+							out[warmup_period - 1].is_nan(),
+							"[{}] Property 9: Should have NaN at index {} (before warmup_period)",
+							test_name, warmup_period - 1
+						);
+					}
+				}
+				
+				// Property 10: Poison value detection (debug mode only)
+				#[cfg(debug_assertions)]
+				{
+					for (i, &val) in out.iter().enumerate() {
+						if val.is_finite() {
+							let bits = val.to_bits();
+							prop_assert!(
+								bits != 0x11111111_11111111 && 
+								bits != 0x22222222_22222222 && 
+								bits != 0x33333333_33333333,
+								"[{}] Property 10: Found poison value {} (0x{:016X}) at index {}",
+								test_name, val, bits, i
+							);
+						}
+					}
+				}
+				
+				// Property 11: OHLC relationship integrity
+				for (i, &(h, l, c)) in bars.iter().enumerate() {
+					prop_assert!(
+						h >= l,
+						"[{}] Property 11: High {} < Low {} at index {}",
+						test_name, h, l, i
+					);
+					prop_assert!(
+						c >= l && c <= h,
+						"[{}] Property 11: Close {} outside [Low {}, High {}] at index {}",
+						test_name, c, l, h, i
+					);
+				}
+				
+				Ok(())
+			})
+			.unwrap();
+		
+		Ok(())
+	}
+
 	macro_rules! generate_all_adx_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1034,6 +1295,9 @@ mod tests {
 		check_adx_streaming,
 		check_adx_no_poison
 	);
+	
+	#[cfg(feature = "proptest")]
+	generate_all_adx_tests!(check_adx_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);

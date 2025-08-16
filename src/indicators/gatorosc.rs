@@ -1839,6 +1839,8 @@ mod tests {
 	use super::*;
 	use crate::skip_if_unsupported;
 	use crate::utilities::data_loader::read_candles_from_csv;
+	#[cfg(feature = "proptest")]
+	use proptest::prelude::*;
 
 	fn check_gatorosc_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test_name);
@@ -2156,6 +2158,300 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_gatorosc_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+		
+		// Generate realistic market data with various parameter combinations
+		let strat = (
+			// Jaws parameters (longest EMA)
+			(5usize..=50), // jaws_length
+			(1usize..=10), // jaws_shift (must be at least 1)
+			// Teeth parameters (medium EMA)
+			(3usize..=30), // teeth_length
+			(1usize..=8),  // teeth_shift (must be at least 1)
+			// Lips parameters (shortest EMA)
+			(2usize..=20), // lips_length
+			(1usize..=5),  // lips_shift (must be at least 1)
+		).prop_flat_map(|(jaws_len, jaws_shift, teeth_len, teeth_shift, lips_len, lips_shift)| {
+			// Calculate minimum data needed
+			let min_data_len = jaws_len.max(teeth_len).max(lips_len) + 
+				jaws_shift.max(teeth_shift).max(lips_shift) + 10;
+			(
+				// Data generation: realistic price data with enough points
+				prop::collection::vec(
+					(10.0f64..100000.0f64).prop_filter("finite", |x| x.is_finite()),
+					min_data_len..400,
+				),
+				Just(jaws_len),
+				Just(jaws_shift),
+				Just(teeth_len),
+				Just(teeth_shift),
+				Just(lips_len),
+				Just(lips_shift),
+			)
+		});
+		
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, jaws_length, jaws_shift, teeth_length, teeth_shift, lips_length, lips_shift)| {
+				let params = GatorOscParams {
+					jaws_length: Some(jaws_length),
+					jaws_shift: Some(jaws_shift),
+					teeth_length: Some(teeth_length),
+					teeth_shift: Some(teeth_shift),
+					lips_length: Some(lips_length),
+					lips_shift: Some(lips_shift),
+				};
+				let input = GatorOscInput::from_slice(&data, params);
+				
+				// Get outputs from test kernel and reference (scalar)
+				let test_output = gatorosc_with_kernel(&input, kernel).unwrap();
+				let ref_output = gatorosc_with_kernel(&input, Kernel::Scalar).unwrap();
+				
+				let GatorOscOutput { upper, lower, upper_change, lower_change } = test_output;
+				let GatorOscOutput { 
+					upper: ref_upper, 
+					lower: ref_lower, 
+					upper_change: ref_upper_change, 
+					lower_change: ref_lower_change 
+				} = ref_output;
+				
+				// Property 1: Warmup period validation
+				// Check which values are actually NaN vs finite
+				let mut first_finite_upper = None;
+				let mut first_finite_lower = None;
+				
+				for i in 0..upper.len() {
+					if upper[i].is_finite() && first_finite_upper.is_none() {
+						first_finite_upper = Some(i);
+					}
+					if lower[i].is_finite() && first_finite_lower.is_none() {
+						first_finite_lower = Some(i);
+					}
+				}
+				
+				// At least some warmup period should exist
+				if let Some(idx) = first_finite_upper {
+					prop_assert!(
+						idx > 0,
+						"Upper should have at least some warmup period, but first finite value is at index {}",
+						idx
+					);
+				}
+				
+				if let Some(idx) = first_finite_lower {
+					prop_assert!(
+						idx > 0,
+						"Lower should have at least some warmup period, but first finite value is at index {}",
+						idx
+					);
+				}
+				
+				// Property 2: Output finiteness after initial warmup
+				// After sufficient data points, outputs should be finite
+				let safe_start = (jaws_length.max(teeth_length).max(lips_length) + 
+					jaws_shift.max(teeth_shift).max(lips_shift)).min(data.len() - 1);
+				
+				for i in safe_start..upper.len() {
+					prop_assert!(
+						upper[i].is_finite() || upper[i].is_nan(),
+						"Upper should be finite or NaN at index {}: got {}",
+						i, upper[i]
+					);
+				}
+				
+				for i in safe_start..lower.len() {
+					prop_assert!(
+						lower[i].is_finite() || lower[i].is_nan(),
+						"Lower should be finite or NaN at index {}: got {}",
+						i, lower[i]
+					);
+				}
+				
+				// Property 3: Kernel consistency (compare with scalar reference)
+				for i in 0..data.len() {
+					// Check upper consistency
+					if upper[i].is_finite() && ref_upper[i].is_finite() {
+						let ulp_diff = upper[i].to_bits().abs_diff(ref_upper[i].to_bits());
+						prop_assert!(
+							(upper[i] - ref_upper[i]).abs() <= 1e-9 || ulp_diff <= 4,
+							"Upper mismatch at {}: {} vs {} (ULP={})",
+							i, upper[i], ref_upper[i], ulp_diff
+						);
+					} else {
+						prop_assert_eq!(
+							upper[i].is_nan(), ref_upper[i].is_nan(),
+							"Upper NaN mismatch at {}", i
+						);
+					}
+					
+					// Check lower consistency
+					if lower[i].is_finite() && ref_lower[i].is_finite() {
+						let ulp_diff = lower[i].to_bits().abs_diff(ref_lower[i].to_bits());
+						prop_assert!(
+							(lower[i] - ref_lower[i]).abs() <= 1e-9 || ulp_diff <= 4,
+							"Lower mismatch at {}: {} vs {} (ULP={})",
+							i, lower[i], ref_lower[i], ulp_diff
+						);
+					} else {
+						prop_assert_eq!(
+							lower[i].is_nan(), ref_lower[i].is_nan(),
+							"Lower NaN mismatch at {}", i
+						);
+					}
+					
+					// Check upper_change consistency
+					if upper_change[i].is_finite() && ref_upper_change[i].is_finite() {
+						let ulp_diff = upper_change[i].to_bits().abs_diff(ref_upper_change[i].to_bits());
+						prop_assert!(
+							(upper_change[i] - ref_upper_change[i]).abs() <= 1e-9 || ulp_diff <= 4,
+							"Upper change mismatch at {}: {} vs {} (ULP={})",
+							i, upper_change[i], ref_upper_change[i], ulp_diff
+						);
+					} else {
+						prop_assert_eq!(
+							upper_change[i].is_nan(), ref_upper_change[i].is_nan(),
+							"Upper change NaN mismatch at {}", i
+						);
+					}
+					
+					// Check lower_change consistency
+					if lower_change[i].is_finite() && ref_lower_change[i].is_finite() {
+						let ulp_diff = lower_change[i].to_bits().abs_diff(ref_lower_change[i].to_bits());
+						prop_assert!(
+							(lower_change[i] - ref_lower_change[i]).abs() <= 1e-9 || ulp_diff <= 4,
+							"Lower change mismatch at {}: {} vs {} (ULP={})",
+							i, lower_change[i], ref_lower_change[i], ulp_diff
+						);
+					} else {
+						prop_assert_eq!(
+							lower_change[i].is_nan(), ref_lower_change[i].is_nan(),
+							"Lower change NaN mismatch at {}", i
+						);
+					}
+				}
+				
+				// Property 4: Upper always positive/zero, lower always negative/zero
+				for i in safe_start..upper.len() {
+					prop_assert!(
+						upper[i] >= -1e-10, // Allow tiny numerical errors
+						"Upper should be non-negative at {}: got {}",
+						i, upper[i]
+					);
+				}
+				
+				for i in safe_start..lower.len() {
+					prop_assert!(
+						lower[i] <= 1e-10, // Allow tiny numerical errors
+						"Lower should be non-positive at {}: got {}",
+						i, lower[i]
+					);
+				}
+				
+				// Property 5: Change values are correct 1-period differences
+				for i in 1..data.len() {
+					if !upper[i].is_nan() && !upper[i-1].is_nan() {
+						let expected_change = upper[i] - upper[i-1];
+						if upper_change[i].is_finite() {
+							prop_assert!(
+								(upper_change[i] - expected_change).abs() <= 1e-9,
+								"Upper change incorrect at {}: got {}, expected {}",
+								i, upper_change[i], expected_change
+							);
+						}
+					}
+					
+					if !lower[i].is_nan() && !lower[i-1].is_nan() {
+						// Note: lower_change is negated in the implementation
+						let expected_change = -(lower[i] - lower[i-1]);
+						if lower_change[i].is_finite() {
+							prop_assert!(
+								(lower_change[i] - expected_change).abs() <= 1e-9,
+								"Lower change incorrect at {}: got {}, expected {}",
+								i, lower_change[i], expected_change
+							);
+						}
+					}
+				}
+				
+				// Property 6: EMA bounds - outputs influenced by input range
+				let min_price = data.iter().cloned().fold(f64::INFINITY, f64::min);
+				let max_price = data.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+				let price_range = max_price - min_price;
+				
+				for i in safe_start..upper.len() {
+					// Upper is abs(Jaws - Teeth), bounded by price range
+					prop_assert!(
+						upper[i] <= price_range + 1e-9,
+						"Upper exceeds price range at {}: {} > {}",
+						i, upper[i], price_range
+					);
+				}
+				
+				for i in safe_start..lower.len() {
+					// Lower is -abs(Teeth - Lips), bounded by negative price range
+					prop_assert!(
+						lower[i] >= -(price_range + 1e-9),
+						"Lower exceeds negative price range at {}: {} < {}",
+						i, lower[i], -price_range
+					);
+				}
+				
+				// Property 7: Constant data produces minimal oscillation
+				if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-9) {
+					// With constant data, all EMAs converge to same value
+					// So upper and lower should approach zero
+					for i in (data.len() * 3 / 4)..data.len() {
+						if upper[i].is_finite() {
+							prop_assert!(
+								upper[i].abs() <= 1e-6,
+								"Upper should be near zero with constant data at {}: {}",
+								i, upper[i]
+							);
+						}
+						if lower[i].is_finite() {
+							prop_assert!(
+								lower[i].abs() <= 1e-6,
+								"Lower should be near zero with constant data at {}: {}",
+								i, lower[i]
+							);
+						}
+					}
+				}
+				
+				// Property 8: No poison values in output
+				for i in 0..data.len() {
+					if upper[i].is_finite() {
+						prop_assert_ne!(upper[i].to_bits(), 0x11111111_11111111u64);
+						prop_assert_ne!(upper[i].to_bits(), 0x22222222_22222222u64);
+						prop_assert_ne!(upper[i].to_bits(), 0x33333333_33333333u64);
+					}
+					if lower[i].is_finite() {
+						prop_assert_ne!(lower[i].to_bits(), 0x11111111_11111111u64);
+						prop_assert_ne!(lower[i].to_bits(), 0x22222222_22222222u64);
+						prop_assert_ne!(lower[i].to_bits(), 0x33333333_33333333u64);
+					}
+					if upper_change[i].is_finite() {
+						prop_assert_ne!(upper_change[i].to_bits(), 0x11111111_11111111u64);
+						prop_assert_ne!(upper_change[i].to_bits(), 0x22222222_22222222u64);
+						prop_assert_ne!(upper_change[i].to_bits(), 0x33333333_33333333u64);
+					}
+					if lower_change[i].is_finite() {
+						prop_assert_ne!(lower_change[i].to_bits(), 0x11111111_11111111u64);
+						prop_assert_ne!(lower_change[i].to_bits(), 0x22222222_22222222u64);
+						prop_assert_ne!(lower_change[i].to_bits(), 0x33333333_33333333u64);
+					}
+				}
+				
+				Ok(())
+			})
+			.unwrap();
+		
+		Ok(())
+	}
+
 	macro_rules! generate_all_gatorosc_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -2189,6 +2485,9 @@ mod tests {
 		check_gatorosc_batch_default_row,
 		check_gatorosc_no_poison
 	);
+	
+	#[cfg(feature = "proptest")]
+	generate_all_gatorosc_tests!(check_gatorosc_property);
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);
 

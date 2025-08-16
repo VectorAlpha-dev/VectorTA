@@ -1102,6 +1102,197 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_ppo_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		use crate::indicators::moving_averages::ma::{ma, MaData};
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy to generate test parameters
+		let strat = (2usize..=64)
+			.prop_flat_map(|slow_period| {
+				(
+					// Data vector with length from slow_period to 400
+					prop::collection::vec(
+						(10f64..100000f64).prop_filter("positive finite", |x| x.is_finite() && *x > 0.0),
+						slow_period..400,
+					),
+					// Fast period must be less than or equal to slow period
+					2usize..=slow_period,
+					Just(slow_period),
+					// MA type - focus on SMA for mathematical verification
+					Just("sma"),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, fast_period, slow_period, ma_type)| {
+				let params = PpoParams {
+					fast_period: Some(fast_period),
+					slow_period: Some(slow_period),
+					ma_type: Some(ma_type.to_string()),
+				};
+				let input = PpoInput::from_slice(&data, params);
+
+				// Get output from kernel under test
+				let PpoOutput { values: out } = ppo_with_kernel(&input, kernel).unwrap();
+				// Get reference output from scalar kernel
+				let PpoOutput { values: ref_out } = ppo_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Calculate MAs independently for verification
+				let fast_ma = ma(&ma_type, MaData::Slice(&data), fast_period).unwrap();
+				let slow_ma = ma(&ma_type, MaData::Slice(&data), slow_period).unwrap();
+
+				// Property 1: Check warmup period consistency
+				for i in 0..(slow_period - 1).min(data.len()) {
+					prop_assert!(
+						out[i].is_nan(),
+						"Expected NaN during warmup at index {}, got {}",
+						i, out[i]
+					);
+				}
+
+				// Check properties for each valid output value
+				for i in (slow_period - 1)..data.len() {
+					let y = out[i];
+					let r = ref_out[i];
+					let fast_val = fast_ma[i];
+					let slow_val = slow_ma[i];
+
+					// Property 2: Verify mathematical formula
+					// PPO = 100 * (fast_ma - slow_ma) / slow_ma
+					if !fast_val.is_nan() && !slow_val.is_nan() && slow_val != 0.0 {
+						let expected_ppo = 100.0 * (fast_val - slow_val) / slow_val;
+						
+						if y.is_finite() && expected_ppo.is_finite() {
+							prop_assert!(
+								(y - expected_ppo).abs() < 1e-9,
+								"PPO formula mismatch at index {}: got {}, expected {} (fast={}, slow={})",
+								i, y, expected_ppo, fast_val, slow_val
+							);
+						}
+					}
+
+					// Property 3: Consistency between kernels
+					let y_bits = y.to_bits();
+					let r_bits = r.to_bits();
+
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert!(
+							y.to_bits() == r.to_bits(),
+							"finite/NaN mismatch idx {}: {} vs {}",
+							i, y, r
+						);
+						continue;
+					}
+
+					let ulp_diff: u64 = y_bits.abs_diff(r_bits);
+					prop_assert!(
+						(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+						"kernel mismatch idx {}: {} vs {} (ULP={})",
+						i, y, r, ulp_diff
+					);
+
+					// Property 4: Sign correctness
+					if y.is_finite() && fast_val.is_finite() && slow_val.is_finite() && slow_val > 0.0 {
+						if fast_val > slow_val {
+							prop_assert!(y > 0.0, "PPO should be positive when fast > slow at index {}", i);
+						} else if fast_val < slow_val {
+							prop_assert!(y < 0.0, "PPO should be negative when fast < slow at index {}", i);
+						} else {
+							prop_assert!(y.abs() < 1e-9, "PPO should be ~0 when fast == slow at index {}", i);
+						}
+					}
+
+					// Property 5: Special case - equal periods
+					if fast_period == slow_period && y.is_finite() {
+						prop_assert!(
+							y.abs() < 1e-9,
+							"PPO should be ~0 when fast_period == slow_period at index {}: got {}",
+							i, y
+						);
+					}
+
+					// Property 6: Constant data check
+					if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12) && y.is_finite() {
+						prop_assert!(
+							y.abs() < 1e-6,
+							"PPO should be ~0 for constant data at index {}: got {}",
+							i, y
+						);
+					}
+
+					// Property 7: Reasonable bounds for price data
+					// For realistic price data (10-100000 range), PPO rarely exceeds ±200%
+					// unless there's extreme volatility in a small window
+					if y.is_finite() {
+						// Calculate data volatility in the window
+						let window_start = i.saturating_sub(slow_period - 1);
+						let window = &data[window_start..=i];
+						let min_val = window.iter().cloned().fold(f64::INFINITY, f64::min);
+						let max_val = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+						let volatility_ratio = if min_val > 0.0 { max_val / min_val } else { 1.0 };
+						
+						// PPO should be bounded by the volatility of the underlying data
+						// High volatility (10x price change) could produce PPO around ±900%
+						let max_expected_ppo = 100.0 * (volatility_ratio - 1.0);
+						
+						prop_assert!(
+							y.abs() <= max_expected_ppo * 1.5, // Allow some margin for MA lag
+							"PPO exceeds expected bounds at index {}: got {}%, max expected ~{}% (volatility ratio {})",
+							i, y, max_expected_ppo, volatility_ratio
+						);
+					}
+
+					// Property 8: Handle near-zero slow_ma correctly
+					if slow_val.abs() < 1e-10 && slow_val != 0.0 {
+						// When slow_ma is very close to zero, PPO should be NaN or very large
+						prop_assert!(
+							y.is_nan() || y.abs() > 1000.0,
+							"PPO should be NaN or very large when slow_ma ~0 at index {}: slow_ma={}, ppo={}",
+							i, slow_val, y
+						);
+					}
+				}
+
+				// Property 9: Monotonic data behavior
+				let is_monotonic_increasing = data.windows(2).all(|w| w[1] >= w[0]);
+				let is_monotonic_decreasing = data.windows(2).all(|w| w[1] <= w[0]);
+				
+				if (is_monotonic_increasing || is_monotonic_decreasing) && data.len() > slow_period * 2 {
+					// After sufficient data, PPO should stabilize
+					let last_values = &out[out.len() - slow_period/2..];
+					let valid_last: Vec<f64> = last_values.iter().filter(|x| x.is_finite()).cloned().collect();
+					
+					if valid_last.len() > 2 {
+						if is_monotonic_increasing && fast_period < slow_period {
+							// For increasing data with fast < slow, PPO should be positive
+							let avg = valid_last.iter().sum::<f64>() / valid_last.len() as f64;
+							prop_assert!(
+								avg > -1e-6,
+								"PPO should be positive for monotonic increasing data: avg={}",
+								avg
+							);
+						} else if is_monotonic_decreasing && fast_period < slow_period {
+							// For decreasing data with fast < slow, PPO should be negative
+							let avg = valid_last.iter().sum::<f64>() / valid_last.len() as f64;
+							prop_assert!(
+								avg < 1e-6,
+								"PPO should be negative for monotonic decreasing data: avg={}",
+								avg
+							);
+						}
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_ppo_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1137,6 +1328,9 @@ mod tests {
 		check_ppo_streaming,
 		check_ppo_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_ppo_tests!(check_ppo_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);

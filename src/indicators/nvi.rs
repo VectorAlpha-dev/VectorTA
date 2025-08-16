@@ -34,6 +34,8 @@ use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use thiserror::Error;
+#[cfg(feature = "proptest")]
+use proptest::prelude::*;
 
 #[derive(Debug, Clone)]
 pub enum NviData<'a> {
@@ -517,6 +519,239 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 
+	#[cfg(feature = "proptest")]
+	fn check_nvi_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Since NVI has no parameters, we focus on generating various price and volume scenarios
+		let strat = (50usize..=500).prop_flat_map(|len| {
+			(
+				// Generate realistic price data
+				prop::collection::vec(
+					prop::strategy::Union::new(vec![
+						(0.001f64..0.1f64).boxed(),      // Very small prices
+						(10f64..10000f64).boxed(),       // Normal prices
+						(1e6f64..1e8f64).boxed(),        // Very large prices
+					]).prop_filter("finite", |x| x.is_finite()),
+					len,
+				),
+				// Generate realistic volume data
+				prop::collection::vec(
+					prop::strategy::Union::new(vec![
+						(100f64..1000f64).boxed(),       // Small volume
+						(1000f64..1e6f64).boxed(),       // Normal volume
+						(1e6f64..1e9f64).boxed(),        // Large volume
+					]).prop_filter("finite", |x| x.is_finite()),
+					len,
+				),
+				// Scenario selector for different volume patterns
+				0usize..=7,
+			)
+		}).prop_map(|(mut prices, mut volumes, scenario)| {
+			// Create different test scenarios
+			match scenario {
+				0 => {
+					// Random realistic data (already generated)
+				},
+				1 => {
+					// Constant volume - NVI should never change from 1000.0
+					let const_vol = volumes[0];
+					volumes.iter_mut().for_each(|v| *v = const_vol);
+				},
+				2 => {
+					// Always decreasing volume - NVI should track all price changes
+					volumes.sort_by(|a, b| b.partial_cmp(a).unwrap());
+				},
+				3 => {
+					// Always increasing volume - NVI should stay at 1000.0
+					volumes.sort_by(|a, b| a.partial_cmp(b).unwrap());
+				},
+				4 => {
+					// Alternating volume - predictable pattern
+					for i in 0..volumes.len() {
+						volumes[i] = if i % 2 == 0 { 1000.0 } else { 500.0 };
+					}
+				},
+				5 => {
+					// Constant prices with varying volume
+					let const_price = prices[0];
+					prices.iter_mut().for_each(|p| *p = const_price);
+				},
+				6 => {
+					// Trending prices with random volume
+					let start = prices[0];
+					let trend = 0.01f64; // 1% per bar
+					for i in 0..prices.len() {
+						prices[i] = start * (1.0 + trend).powi(i as i32);
+					}
+				},
+				7 => {
+					// Oscillating prices with decreasing volume trend
+					let base = prices[0];
+					for i in 0..prices.len() {
+						prices[i] = base * (1.0 + 0.1 * ((i as f64 * 0.5).sin()));
+					}
+					// Add decreasing trend to volume
+					for i in 0..volumes.len() {
+						volumes[i] *= (1.0 - (i as f64 / volumes.len() as f64) * 0.5);
+					}
+				},
+				_ => unreachable!(),
+			}
+			(prices, volumes, scenario)
+		});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(close_data, volume_data, scenario)| {
+				let input = NviInput::from_slices(&close_data, &volume_data, NviParams);
+				
+				// Test with the specified kernel
+				let NviOutput { values: out } = nvi_with_kernel(&input, kernel)?;
+				
+				// Also get scalar reference for kernel consistency check
+				let NviOutput { values: ref_out } = nvi_with_kernel(&input, Kernel::Scalar)?;
+				
+				// Find first valid index
+				let first_valid = close_data
+					.iter()
+					.zip(volume_data.iter())
+					.position(|(&c, &v)| !c.is_nan() && !v.is_nan())
+					.unwrap_or(close_data.len());
+				
+				if first_valid >= close_data.len() {
+					return Ok(()); // No valid data
+				}
+				
+				// Property 1: NVI should start at 1000.0 at first valid index
+				prop_assert!(
+					(out[first_valid] - 1000.0).abs() < 1e-9,
+					"NVI should start at 1000.0, got {} at index {} (scenario {})",
+					out[first_valid], first_valid, scenario
+				);
+				
+				// Property 2 & 3: NVI only changes when volume decreases
+				let mut prev_nvi = 1000.0;
+				let mut prev_close = close_data[first_valid];
+				let mut prev_volume = volume_data[first_valid];
+				
+				for i in (first_valid + 1)..close_data.len() {
+					let curr_close = close_data[i];
+					let curr_volume = volume_data[i];
+					let curr_nvi = out[i];
+					
+					if curr_volume < prev_volume {
+						// Property 2: NVI should change based on price change
+						let expected_pct = (curr_close - prev_close) / prev_close;
+						let expected_nvi = prev_nvi + prev_nvi * expected_pct;
+						
+						prop_assert!(
+							(curr_nvi - expected_nvi).abs() < 1e-9 || 
+							(curr_nvi - expected_nvi).abs() / expected_nvi.abs() < 1e-9,
+							"NVI calculation error at index {} (scenario {}): expected {}, got {}, \
+							prev_nvi={}, pct_change={}, volume {} -> {}",
+							i, scenario, expected_nvi, curr_nvi, prev_nvi, expected_pct,
+							prev_volume, curr_volume
+						);
+					} else {
+						// Property 3: NVI should stay constant when volume doesn't decrease
+						prop_assert!(
+							(curr_nvi - prev_nvi).abs() < 1e-9,
+							"NVI should not change when volume doesn't decrease at index {} (scenario {}): \
+							prev_nvi={}, curr_nvi={}, volume {} -> {}",
+							i, scenario, prev_nvi, curr_nvi, prev_volume, curr_volume
+						);
+					}
+					
+					prev_nvi = curr_nvi;
+					prev_close = curr_close;
+					prev_volume = curr_volume;
+				}
+				
+				// Property 4: Kernel consistency - all kernels should produce identical results
+				for i in first_valid..close_data.len() {
+					let y = out[i];
+					let r = ref_out[i];
+					
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert!(
+							y.to_bits() == r.to_bits(),
+							"Kernel finite/NaN mismatch at index {} (scenario {}): {} vs {}",
+							i, scenario, y, r
+						);
+					} else {
+						let ulp_diff = y.to_bits().abs_diff(r.to_bits());
+						prop_assert!(
+							(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+							"Kernel mismatch at index {} (scenario {}): {} vs {} (ULP={})",
+							i, scenario, y, r, ulp_diff
+						);
+					}
+				}
+				
+				// Property 5: Special case validations based on scenario
+				match scenario {
+					1 => {
+						// Constant volume - NVI should never change from 1000.0
+						for i in (first_valid + 1)..out.len() {
+							prop_assert!(
+								(out[i] - 1000.0).abs() < 1e-9,
+								"NVI should stay at 1000.0 with constant volume, got {} at index {}",
+								out[i], i
+							);
+						}
+					},
+					3 => {
+						// Always increasing volume - NVI should stay at 1000.0
+						for i in (first_valid + 1)..out.len() {
+							prop_assert!(
+								(out[i] - 1000.0).abs() < 1e-9,
+								"NVI should stay at 1000.0 with always increasing volume, got {} at index {}",
+								out[i], i
+							);
+						}
+					},
+					5 => {
+						// Constant prices - NVI should remain constant (no price change means pct_change = 0)
+						// NVI stays at whatever value it has reached based on volume changes
+						if first_valid + 1 < out.len() {
+							let mut expected_nvi = out[first_valid]; // Start with initial NVI value (1000.0)
+							for i in (first_valid + 1)..out.len() {
+								// With constant prices, pct_change is always 0, so NVI doesn't change
+								// regardless of volume changes
+								prop_assert!(
+									(out[i] - expected_nvi).abs() < 1e-9,
+									"NVI should stay constant at {} with constant prices, got {} at index {}",
+									expected_nvi, out[i], i
+								);
+							}
+						}
+					},
+					_ => {}
+				}
+				
+				// Property 6: Streaming should match batch processing
+				let mut stream = NviStream::try_new()?;
+				for i in 0..close_data.len() {
+					if let Some(stream_val) = stream.update(close_data[i], volume_data[i]) {
+						let batch_val = out[i];
+						if !batch_val.is_nan() {
+							prop_assert!(
+								(stream_val - batch_val).abs() < 1e-9,
+								"Streaming mismatch at index {} (scenario {}): stream={}, batch={}",
+								i, scenario, stream_val, batch_val
+							);
+						}
+					}
+				}
+				
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_nvi_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -537,6 +772,9 @@ mod tests {
 		check_nvi_streaming,
 		check_nvi_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_nvi_tests!(check_nvi_property);
 }
 
 #[cfg(feature = "python")]

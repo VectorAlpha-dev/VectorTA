@@ -1222,6 +1222,299 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_stoch_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Generate realistic OHLC data with proper price relationships and trends
+		let strat = (2usize..=50)
+			.prop_flat_map(|fastk_period| {
+				(
+					// Generate price series with trend component
+					prop::collection::vec(
+						(1.0f64..1000.0f64, 0.001f64..0.1f64), // (price, volatility)
+						fastk_period.max(10)..400,
+					),
+					Just(fastk_period),
+					1usize..=10,  // slowk_period
+					1usize..=10,  // slowd_period
+					prop::bool::ANY,  // use_ema (false=sma, true=ema)
+					-0.01f64..0.01f64,  // trend factor
+					prop::bool::ANY,  // test flat market
+				)
+			})
+			.prop_flat_map(|(price_vol_pairs, fastk_period, slowk_period, slowd_period, use_ema, trend, is_flat)| {
+				// Generate close position within high-low range for each bar
+				let len = price_vol_pairs.len();
+				(
+					Just((price_vol_pairs, fastk_period, slowk_period, slowd_period, use_ema, trend, is_flat)),
+					prop::collection::vec(-1.0f64..1.0f64, len), // Close position factor
+					prop::collection::vec(0.0f64..1.0f64, len),  // Beta distribution parameters for realistic close
+				)
+			})
+			.prop_map(|((price_vol_pairs, fastk_period, slowk_period, slowd_period, use_ema, trend, is_flat), close_factors, beta_params)| {
+				// Generate OHLC data maintaining high >= close >= low relationship
+				let mut high = Vec::with_capacity(price_vol_pairs.len());
+				let mut low = Vec::with_capacity(price_vol_pairs.len());
+				let mut close = Vec::with_capacity(price_vol_pairs.len());
+				
+				let mut cumulative_trend = 1.0;
+				
+				for (i, ((base_price, volatility), (close_factor, beta))) in 
+					price_vol_pairs.into_iter().zip(close_factors.into_iter().zip(beta_params)).enumerate() 
+				{
+					// Apply trend
+					cumulative_trend *= 1.0 + trend;
+					let trended_price = base_price * cumulative_trend;
+					
+					if is_flat {
+						// Test flat market case
+						let flat_price = if i == 0 { base_price } else { high[0] };
+						high.push(flat_price);
+						low.push(flat_price);
+						close.push(flat_price);
+					} else {
+						let spread = trended_price * volatility;
+						let h = trended_price + spread;
+						let l = (trended_price - spread).max(0.01);
+						
+						// Use beta-like distribution for more realistic close positions
+						// Most closes near middle, fewer at extremes
+						let beta_factor = if beta < 0.5 {
+							2.0 * beta * beta  // Bias toward low
+						} else {
+							1.0 - 2.0 * (1.0 - beta) * (1.0 - beta)  // Bias toward high
+						};
+						
+						let close_position = close_factor * 0.5 + beta_factor * 0.5;
+						let c = l + (h - l) * ((close_position + 1.0) / 2.0);
+						
+						high.push(h);
+						low.push(l);
+						close.push(c.clamp(l, h));
+					}
+				}
+				
+				let ma_type = if use_ema { "ema" } else { "sma" };
+				
+				(high, low, close, fastk_period, slowk_period, slowd_period, ma_type.to_string(), is_flat)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(high, low, close, fastk_period, slowk_period, slowd_period, ma_type, is_flat)| {
+				let params = StochParams {
+					fastk_period: Some(fastk_period),
+					slowk_period: Some(slowk_period),
+					slowk_ma_type: Some(ma_type.clone()),
+					slowd_period: Some(slowd_period),
+					slowd_ma_type: Some(ma_type.clone()),
+				};
+				
+				let input = StochInput::from_slices(&high, &low, &close, params.clone());
+				
+				// Test with specified kernel
+				let result = stoch_with_kernel(&input, kernel)?;
+				
+				// Test kernel consistency with scalar
+				let ref_result = stoch_with_kernel(&input, Kernel::Scalar)?;
+				
+				// Validate output lengths
+				prop_assert_eq!(result.k.len(), high.len());
+				prop_assert_eq!(result.d.len(), high.len());
+				
+				// Calculate proper warmup period accounting for cascading MAs
+				// fastk needs fastk_period-1, then slowk smoothing adds more, then slowd adds more
+				let warmup_k = fastk_period - 1;  // Raw stoch warmup
+				let warmup_slowk = if ma_type == "ema" { 0 } else { slowk_period - 1 };  // Additional for K smoothing
+				let warmup_slowd = if ma_type == "ema" { 0 } else { slowd_period - 1 };  // Additional for D smoothing
+				let expected_warmup = warmup_k.max(warmup_k + warmup_slowk).max(warmup_k + warmup_slowk + warmup_slowd);
+				
+				// Validate warmup period - initial values should be NaN
+				for i in 0..warmup_k.min(high.len()) {
+					prop_assert!(
+						result.k[i].is_nan(),
+						"K[{}] should be NaN during initial warmup but was {}", i, result.k[i]
+					);
+					prop_assert!(
+						result.d[i].is_nan(),
+						"D[{}] should be NaN during initial warmup but was {}", i, result.d[i]
+					);
+				}
+				
+				// Validate mathematical properties after warmup
+				for i in expected_warmup..high.len() {
+					let k_val = result.k[i];
+					let d_val = result.d[i];
+					let ref_k = ref_result.k[i];
+					let ref_d = ref_result.d[i];
+					
+					// Property 1: K and D must be in [0, 100] range (or NaN during extended warmup)
+					if !k_val.is_nan() {
+						prop_assert!(
+							k_val >= -1e-9 && k_val <= 100.0 + 1e-9,
+							"K[{}] = {} is outside [0, 100] range", i, k_val
+						);
+					}
+					
+					if !d_val.is_nan() {
+						prop_assert!(
+							d_val >= -1e-9 && d_val <= 100.0 + 1e-9,
+							"D[{}] = {} is outside [0, 100] range", i, d_val
+						);
+					}
+					
+					// Property 2: Test kernel consistency (different SIMD kernels should produce same results)
+					if k_val.is_finite() && ref_k.is_finite() {
+						let k_diff = (k_val - ref_k).abs();
+						let k_ulp_diff = k_val.to_bits().abs_diff(ref_k.to_bits());
+						prop_assert!(
+							k_diff <= 1e-9 || k_ulp_diff <= 4,
+							"K mismatch at [{}]: {} vs {} (diff={}, ULP={})",
+							i, k_val, ref_k, k_diff, k_ulp_diff
+						);
+					}
+					
+					if d_val.is_finite() && ref_d.is_finite() {
+						let d_diff = (d_val - ref_d).abs();
+						let d_ulp_diff = d_val.to_bits().abs_diff(ref_d.to_bits());
+						prop_assert!(
+							d_diff <= 1e-9 || d_ulp_diff <= 4,
+							"D mismatch at [{}]: {} vs {} (diff={}, ULP={})",
+							i, d_val, ref_d, d_diff, d_ulp_diff
+						);
+					}
+					
+					// Property 3: Special cases validation (relaxed for smoothed values)
+					if i >= fastk_period - 1 && !k_val.is_nan() {
+						let window_start = i + 1 - fastk_period;
+						let window_high = &high[window_start..=i];
+						let window_low = &low[window_start..=i];
+						
+						let max_h = window_high.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+						let min_l = window_low.iter().cloned().fold(f64::INFINITY, f64::min);
+						
+						// Special case: flat market (high == low)
+						if is_flat || (max_h - min_l).abs() < f64::EPSILON {
+							// K should be 50 when there's no price range
+							prop_assert!(
+								(k_val - 50.0).abs() < 1e-6,
+								"K[{}] = {} should be 50 in flat market", i, k_val
+							);
+						} else {
+							// For non-flat markets, check extremes with relaxed bounds for smoothing
+							// Note: Raw K would be 100/0 at extremes, but smoothing dampens this
+							
+							// When close equals highest high in the window
+							if (close[i] - max_h).abs() < 1e-10 {
+								// With slowk_period=1, K should be very close to 100
+								// With larger periods, it's smoothed so we relax the bound
+								let expected_min = if slowk_period == 1 { 99.0 } else { 85.0 };
+								prop_assert!(
+									k_val >= expected_min,
+									"K[{}] = {} should be >= {} when close equals highest high (slowk_period={})", 
+									i, k_val, expected_min, slowk_period
+								);
+							}
+							
+							// When close equals lowest low in the window
+							if (close[i] - min_l).abs() < 1e-10 {
+								// With slowk_period=1, K should be very close to 0
+								// With larger periods, it's smoothed so we relax the bound
+								let expected_max = if slowk_period == 1 { 1.0 } else { 15.0 };
+								prop_assert!(
+									k_val <= expected_max,
+									"K[{}] = {} should be <= {} when close equals lowest low (slowk_period={})", 
+									i, k_val, expected_max, slowk_period
+								);
+							}
+						}
+					}
+				}
+				
+				// Property 4: D should be a smoothed version of K
+				// After sufficient data points, D should be less volatile than K
+				let k_valid: Vec<f64> = result.k.iter().filter(|x| x.is_finite()).copied().collect();
+				let d_valid: Vec<f64> = result.d.iter().filter(|x| x.is_finite()).copied().collect();
+				
+				if k_valid.len() > 10 && d_valid.len() > 10 && !is_flat {
+					// Calculate simple variance as a volatility measure
+					let k_mean = k_valid.iter().sum::<f64>() / k_valid.len() as f64;
+					let d_mean = d_valid.iter().sum::<f64>() / d_valid.len() as f64;
+					
+					let k_var = k_valid.iter().map(|x| (x - k_mean).powi(2)).sum::<f64>() / k_valid.len() as f64;
+					let d_var = d_valid.iter().map(|x| (x - d_mean).powi(2)).sum::<f64>() / d_valid.len() as f64;
+					
+					// D should generally have lower or equal variance than K (it's smoothed)
+					// Tightened tolerance for better sensitivity
+					if slowd_period > 1 && k_var > 1e-6 {  // Only test if there's meaningful variance
+						prop_assert!(
+							d_var <= k_var * 1.01,  // Tightened from 1.1 to 1.01
+							"D variance {} should be <= K variance {} (smoothing effect with slowd_period={})",
+							d_var, k_var, slowd_period
+						);
+					}
+					
+					// Special case: when slowd_period = 1, D should equal K (no additional smoothing)
+					if slowd_period == 1 {
+						for i in expected_warmup..result.k.len() {
+							if result.k[i].is_finite() && result.d[i].is_finite() {
+								prop_assert!(
+									(result.k[i] - result.d[i]).abs() < 1e-9,
+									"When slowd_period=1, D[{}]={} should equal K[{}]={}",
+									i, result.d[i], i, result.k[i]
+								);
+							}
+						}
+					}
+				}
+				
+				// Property 5: Test that SMA and EMA produce different results
+				// Run the same data with opposite MA type to verify difference
+				if !is_flat && high.len() > fastk_period + 10 {
+					let opposite_ma_type = if ma_type == "sma" { "ema" } else { "sma" };
+					let opposite_params = StochParams {
+						fastk_period: Some(fastk_period),
+						slowk_period: Some(slowk_period),
+						slowk_ma_type: Some(opposite_ma_type.to_string()),
+						slowd_period: Some(slowd_period),
+						slowd_ma_type: Some(opposite_ma_type.to_string()),
+					};
+					
+					let opposite_input = StochInput::from_slices(&high, &low, &close, opposite_params);
+					let opposite_result = stoch_with_kernel(&opposite_input, kernel)?;
+					
+					// Count how many values differ between SMA and EMA
+					let mut diff_count = 0;
+					let mut total_valid = 0;
+					for i in expected_warmup..result.k.len() {
+						if result.k[i].is_finite() && opposite_result.k[i].is_finite() {
+							total_valid += 1;
+							if (result.k[i] - opposite_result.k[i]).abs() > 1e-6 {
+								diff_count += 1;
+							}
+						}
+					}
+					
+					// At least 80% of values should differ between SMA and EMA
+					// (allows for some similar values during flat periods)
+					if total_valid > 10 && slowk_period > 1 {
+						let diff_ratio = diff_count as f64 / total_valid as f64;
+						prop_assert!(
+							diff_ratio >= 0.8,
+							"SMA and EMA should produce different results: only {}/{} values differ ({}%)",
+							diff_count, total_valid, (diff_ratio * 100.0) as i32
+						);
+					}
+				}
+				
+				Ok(())
+			})?;
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_stoch_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1242,6 +1535,9 @@ mod tests {
 		check_stoch_all_nan,
 		check_stoch_no_poison
 	);
+	
+	#[cfg(feature = "proptest")]
+	generate_all_stoch_tests!(check_stoch_property);
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);
 

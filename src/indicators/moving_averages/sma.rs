@@ -1262,6 +1262,181 @@ mod tests {
 	fn check_sma_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		Ok(())
 	}
+
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_sma_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Test strategy: generate period first, then data of appropriate length
+		let strat = (1usize..=100).prop_flat_map(|period| {
+			(
+				prop::collection::vec(
+					(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+					period..400,
+				),
+				Just(period),
+			)
+		});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period)| {
+				let params = SmaParams { period: Some(period) };
+				let input = SmaInput::from_slice(&data, params);
+
+				// Compute SMA with specified kernel and scalar reference
+				let SmaOutput { values: out } = sma_with_kernel(&input, kernel).unwrap();
+				let SmaOutput { values: ref_out } = sma_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Property 1: Initial values should be NaN (warmup period)
+				for i in 0..(period - 1) {
+					prop_assert!(
+						out[i].is_nan(),
+						"Expected NaN during warmup at index {}, got {}",
+						i,
+						out[i]
+					);
+				}
+
+				// Properties 2-7: Test each valid SMA value
+				for i in (period - 1)..data.len() {
+					let window_start = i + 1 - period;
+					let window = &data[window_start..=i];
+					
+					// Property 2: SMA should equal exact arithmetic mean of window
+					let expected_sum: f64 = window.iter().sum();
+					let expected_mean = expected_sum / period as f64;
+					
+					// Use slightly relaxed tolerance for numerical stability across different kernels
+					let tolerance = if period == 1 { 1e-8 } else { 1e-9 };
+					prop_assert!(
+						(out[i] - expected_mean).abs() <= tolerance,
+						"SMA mismatch at index {}: expected {}, got {} (diff: {})",
+						i,
+						expected_mean,
+						out[i],
+						(out[i] - expected_mean).abs()
+					);
+
+					// Property 3: SMA bounded by min/max of input window
+					let window_min = window.iter().cloned().fold(f64::INFINITY, f64::min);
+					let window_max = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+					
+					prop_assert!(
+						out[i] >= window_min - 1e-9 && out[i] <= window_max + 1e-9,
+						"SMA out of bounds at index {}: {} not in [{}, {}]",
+						i,
+						out[i],
+						window_min,
+						window_max
+					);
+
+					// Property 4: For constant input, SMA equals that constant
+					if window.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12) {
+						let tolerance = if period == 1 { 1e-8 } else { 1e-9 };
+						prop_assert!(
+							(out[i] - window[0]).abs() <= tolerance,
+							"Constant input property failed at index {}: expected {}, got {}",
+							i,
+							window[0],
+							out[i]
+						);
+					}
+
+					// Property 5: Linear trend - SMA of linear function should be at midpoint
+					// Check if window forms a linear sequence
+					if period >= 3 {
+						let diffs: Vec<f64> = window.windows(2).map(|w| w[1] - w[0]).collect();
+						let is_linear = diffs.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-9);
+						
+						if is_linear && !diffs.is_empty() {
+							// For linear sequence, SMA should equal value at midpoint
+							let midpoint_value = window[period / 2];
+							let tolerance = if period % 2 == 0 {
+								// Even period: average of two middle values
+								(window[period / 2 - 1] - window[period / 2]).abs() / 2.0 + 1e-9
+							} else {
+								1e-9
+							};
+							
+							prop_assert!(
+								(out[i] - midpoint_value).abs() <= tolerance,
+								"Linear trend property failed at index {}: expected ~{}, got {}",
+								i,
+								midpoint_value,
+								out[i]
+							);
+						}
+					}
+
+					// Property 6: Cross-kernel consistency
+					prop_assert!(
+						(out[i] - ref_out[i]).abs() <= 1e-9 || 
+						(out[i].is_nan() && ref_out[i].is_nan()),
+						"Kernel mismatch at index {}: {} ({:?}) vs {} (Scalar)",
+						i,
+						out[i],
+						kernel,
+						ref_out[i]
+					);
+
+					// Property 7: Lag property - SMA should smooth out sharp changes
+					// When sliding the window, the change in SMA depends on the new value added
+					// and the old value removed from the window
+					if i >= period {
+						let new_value = data[i];
+						let old_value = data[i - period];
+						let expected_sma_change = (new_value - old_value) / period as f64;
+						let actual_sma_change = out[i] - out[i - 1];
+						
+						prop_assert!(
+							(actual_sma_change - expected_sma_change).abs() <= 1e-9,
+							"Lag property failed at index {}: SMA change {} should be {} (new: {}, old: {})",
+							i,
+							actual_sma_change,
+							expected_sma_change,
+							new_value,
+							old_value
+						);
+					}
+
+					// Property 8: Check for poison values (debug mode only)
+					#[cfg(debug_assertions)]
+					{
+						let bits = out[i].to_bits();
+						prop_assert!(
+							bits != 0x11111111_11111111 && 
+							bits != 0x22222222_22222222 && 
+							bits != 0x33333333_33333333,
+							"Found poison value at index {}: {} (0x{:016X})",
+							i,
+							out[i],
+							bits
+						);
+					}
+				}
+
+				// Additional property: Period = 1 should return original data
+				if period == 1 {
+					for i in 0..data.len() {
+						prop_assert!(
+							(out[i] - data[i]).abs() <= 1e-8,
+							"Period=1 property failed at index {}: expected {}, got {}",
+							i,
+							data[i],
+							out[i]
+						);
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_sma_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1297,6 +1472,9 @@ mod tests {
 		check_sma_streaming,
 		check_sma_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_sma_tests!(check_sma_property);
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);
 		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";

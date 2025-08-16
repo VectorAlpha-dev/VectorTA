@@ -45,6 +45,9 @@ use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
+#[cfg(feature = "proptest")]
+use proptest::prelude::*;
+
 impl<'a> AsRef<[f64]> for LinearRegSlopeInput<'a> {
 	#[inline(always)]
 	fn as_ref(&self) -> &[f64] {
@@ -1222,4 +1225,225 @@ mod tests {
 	}
 	gen_batch_tests!(check_batch_default_row);
 	gen_batch_tests!(check_batch_no_poison);
+
+	#[cfg(feature = "proptest")]
+	fn check_linearreg_slope_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Generate realistic test parameters
+		let strat = (2usize..=100)
+			.prop_flat_map(|period| {
+				(
+					// Generate data with length from period to 500
+					prop::collection::vec(
+						(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+						period..=500,
+					),
+					Just(period),
+					// Add a scenario selector for different data patterns
+					0usize..=5,
+				)
+			})
+			.prop_map(|(mut data, period, scenario)| {
+				// Apply different data patterns based on scenario
+				match scenario {
+					0 => {
+						// Random data (already generated)
+					}
+					1 => {
+						// Constant data
+						let constant = data.get(0).copied().unwrap_or(100.0);
+						data.iter_mut().for_each(|x| *x = constant);
+					}
+					2 => {
+						// Perfect linear trend: y = 2x + 10
+						for (i, val) in data.iter_mut().enumerate() {
+							*val = 2.0 * i as f64 + 10.0;
+						}
+					}
+					3 => {
+						// Monotonic increasing with noise
+						let mut base = 100.0;
+						for val in data.iter_mut() {
+							*val = base;
+							base += (0.1 + (*val).abs() * 1e-6); // Small positive increment
+						}
+					}
+					4 => {
+						// Monotonic decreasing with noise
+						let mut base = 1000.0;
+						for val in data.iter_mut() {
+							*val = base;
+							base -= (0.1 + (*val).abs() * 1e-6); // Small negative increment
+						}
+					}
+					5 => {
+						// Data with occasional outliers
+						for (i, val) in data.iter_mut().enumerate() {
+							*val = if i % 20 == 0 { 
+								1000.0 * (if i % 40 == 0 { 1.0 } else { -1.0 })
+							} else { 
+								10.0 + i as f64 * 0.5 
+							};
+						}
+					}
+					_ => unreachable!(),
+				}
+				(data, period)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period)| {
+				let params = LinearRegSlopeParams { period: Some(period) };
+				let input = LinearRegSlopeInput::from_slice(&data, params);
+
+				// Calculate output with the test kernel
+				let LinearRegSlopeOutput { values: out } = 
+					linearreg_slope_with_kernel(&input, kernel).unwrap();
+				
+				// Calculate reference output with scalar kernel
+				let LinearRegSlopeOutput { values: ref_out } = 
+					linearreg_slope_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Property 1: Warmup period validation
+				// First period-1 values should be NaN
+				for i in 0..(period - 1).min(data.len()) {
+					prop_assert!(
+						out[i].is_nan(),
+						"Expected NaN during warmup at index {}, got {}", i, out[i]
+					);
+				}
+
+				// Test properties for each valid output value
+				for i in (period - 1)..data.len() {
+					let window = &data[i + 1 - period..=i];
+					let y = out[i];
+					let r = ref_out[i];
+
+					// Property 2: Kernel consistency
+					// Different kernels should produce identical or near-identical results
+					if y.is_finite() && r.is_finite() {
+						let y_bits = y.to_bits();
+						let r_bits = r.to_bits();
+						let ulp_diff: u64 = y_bits.abs_diff(r_bits);
+
+						prop_assert!(
+							(y - r).abs() <= 1e-9 || ulp_diff <= 8,
+							"Kernel mismatch at idx {}: {} vs {} (ULP={})",
+							i, y, r, ulp_diff
+						);
+					} else {
+						// Both should be NaN or both should be finite
+						prop_assert_eq!(
+							y.is_nan(), r.is_nan(),
+							"NaN mismatch at idx {}: {} vs {}", i, y, r
+						);
+					}
+
+					// Property 3: Constant data
+					// If all values in window are the same, slope should be ~0
+					if window.windows(2).all(|w| (w[0] - w[1]).abs() < f64::EPSILON) {
+						prop_assert!(
+							y.abs() <= 1e-8,
+							"Expected slope ~0 for constant data at idx {}, got {}", i, y
+						);
+					}
+
+					// Property 4: Perfect linear data
+					// Check if data is perfectly linear (y = mx + b)
+					let is_linear = {
+						if period >= 3 {
+							// Calculate expected slope using first and last points
+							let x1 = 0.0;
+							let y1 = window[0];
+							let x2 = (period - 1) as f64;
+							let y2 = window[period - 1];
+							let expected_slope = (y2 - y1) / (x2 - x1);
+							
+							// Check if all points lie on this line
+							let mut is_linear = true;
+							for (j, &val) in window.iter().enumerate() {
+								let expected = y1 + expected_slope * j as f64;
+								if (val - expected).abs() > 1e-9 {
+									is_linear = false;
+									break;
+								}
+							}
+							
+							if is_linear {
+								// Verify calculated slope matches expected
+								prop_assert!(
+									(y - expected_slope).abs() <= 1e-9,
+									"Linear data slope mismatch at idx {}: {} vs expected {}",
+									i, y, expected_slope
+								);
+							}
+							is_linear
+						} else {
+							false
+						}
+					};
+
+					// Property 5: Monotonic increasing data
+					// Strictly increasing data should have positive slope
+					let is_increasing = window.windows(2).all(|w| w[1] > w[0]);
+					if is_increasing && !is_linear {
+						prop_assert!(
+							y > 1e-8,
+							"Expected positive slope for increasing data at idx {}, got {}", i, y
+						);
+					}
+
+					// Property 6: Monotonic decreasing data  
+					// Strictly decreasing data should have negative slope
+					let is_decreasing = window.windows(2).all(|w| w[1] < w[0]);
+					if is_decreasing && !is_linear {
+						prop_assert!(
+							y < -1e-8,
+							"Expected negative slope for decreasing data at idx {}, got {}", i, y
+						);
+					}
+
+					// Property 7: Bounded output
+					// Slope magnitude should be reasonable given the data range
+					if y.is_finite() {
+						let data_range = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+							- window.iter().cloned().fold(f64::INFINITY, f64::min);
+						
+						// For constant data (range ~0), allow small numerical errors
+						if data_range < 1e-9 {
+							prop_assert!(
+								y.abs() <= 1e-6,
+								"Expected near-zero slope for constant data at idx {}, got {}",
+								i, y
+							);
+						} else {
+							let max_slope = data_range / (period as f64 * 0.5); // Conservative bound
+							
+							prop_assert!(
+								y.abs() <= max_slope * 5.0, // Tighter margin for better edge case detection
+								"Slope magnitude too large at idx {}: {} (max expected ~{})",
+								i, y.abs(), max_slope
+							);
+						}
+					}
+
+					// Property 8: No infinite values
+					// All non-warmup outputs should be finite (not infinite)
+					prop_assert!(
+						!y.is_infinite(),
+						"Found infinite value at idx {}: {}", i, y
+					);
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
+	#[cfg(feature = "proptest")]
+	generate_all_linearreg_slope_tests!(check_linearreg_slope_property);
 }

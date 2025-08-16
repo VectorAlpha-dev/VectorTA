@@ -46,6 +46,8 @@ use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
+#[cfg(feature = "proptest")]
+use proptest::prelude::*;
 
 // --- Input Data Abstractions ---
 #[derive(Debug, Clone)]
@@ -1256,6 +1258,295 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 
+	#[cfg(feature = "proptest")]
+	fn check_midprice_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Generate test strategy with realistic price data
+		let strat = (2usize..=100)
+			.prop_flat_map(|period| {
+				(
+					// Generate base prices - include edge cases with very small and large values
+					prop::collection::vec(
+						prop::strategy::Union::new(vec![
+							(0.001f64..0.1f64).boxed(),      // Very small prices
+							(10f64..10000f64).boxed(),       // Normal prices
+							(1e6f64..1e8f64).boxed(),        // Very large prices
+						]).prop_filter("finite", |x| x.is_finite()),
+						period..=500,
+					),
+					Just(period),
+					// Spread factor - realistic market spreads
+					prop::strategy::Union::new(vec![
+						(0.0001f64..0.01f64).boxed(),    // Tight spreads (0.01% - 1%)
+						(0.01f64..0.1f64).boxed(),       // Normal spreads (1% - 10%)
+						(0.1f64..0.3f64).boxed(),        // Wide spreads (10% - 30%)
+					]),
+					// Scenario selector - expanded to 10 scenarios
+					0usize..=9,
+				)
+			})
+			.prop_map(|(base_prices, period, spread_factor, scenario)| {
+				let len = base_prices.len();
+				let mut highs = Vec::with_capacity(len);
+				let mut lows = Vec::with_capacity(len);
+				
+				match scenario {
+					0 => {
+						// Random realistic price data with variable spread
+						for &base in &base_prices {
+							let spread = base * spread_factor;
+							highs.push(base + spread / 2.0);
+							lows.push(base - spread / 2.0);
+						}
+					}
+					1 => {
+						// Constant prices
+						let price = base_prices[0];
+						let spread = price * spread_factor;
+						for _ in 0..len {
+							highs.push(price + spread / 2.0);
+							lows.push(price - spread / 2.0);
+						}
+					}
+					2 => {
+						// Monotonically increasing prices
+						let start_price = base_prices[0];
+						let increment = 10.0;
+						for i in 0..len {
+							let price = start_price + (i as f64) * increment;
+							let spread = price * spread_factor;
+							highs.push(price + spread / 2.0);
+							lows.push(price - spread / 2.0);
+						}
+					}
+					3 => {
+						// Monotonically decreasing prices
+						let start_price = base_prices[0];
+						let decrement = 10.0;
+						for i in 0..len {
+							let price = (start_price - (i as f64) * decrement).max(10.0);
+							let spread = price * spread_factor;
+							highs.push(price + spread / 2.0);
+							lows.push(price - spread / 2.0);
+						}
+					}
+					4 => {
+						// Period=1 special case (exact midpoint test)
+						for &base in &base_prices {
+							let spread = base * 0.01; // Small fixed spread
+							highs.push(base + spread);
+							lows.push(base);
+						}
+					}
+					5 => {
+						// Oscillating prices (sine wave)
+						let amplitude = 100.0;
+						let offset = base_prices[0];
+						for i in 0..len {
+							let phase = (i as f64) * 0.1;
+							let price = offset + amplitude * phase.sin();
+							let spread = price.abs() * spread_factor;
+							highs.push(price + spread / 2.0);
+							lows.push(price - spread / 2.0);
+						}
+					}
+					6 => {
+						// Step function (sudden jumps)
+						let step_size = 100.0;
+						let steps = 5;
+						for i in 0..len {
+							let step = (i * steps / len) as f64;
+							let price = base_prices[0] + step * step_size;
+							let spread = price * spread_factor;
+							highs.push(price + spread / 2.0);
+							lows.push(price - spread / 2.0);
+						}
+					}
+					7 => {
+						// Volatile market (use base prices with added volatility)
+						for (i, &base) in base_prices.iter().enumerate() {
+							// Add volatility based on position (creates pseudo-random walk)
+							let volatility = ((i as f64 * 0.1).sin() + 1.0) * 0.5; // 0 to 1
+							let price = base * (1.0 + spread_factor * volatility);
+							let spread = price * spread_factor;
+							highs.push(price + spread / 2.0);
+							lows.push(price - spread / 2.0);
+						}
+					}
+					8 => {
+						// Edge case: period equals data length (test full window)
+						// Generate prices that change to verify window includes all data
+						for i in 0..len {
+							let price = base_prices[0] + (i as f64) * 5.0;
+							let spread = price * spread_factor.min(0.1); // Cap spread for this test
+							highs.push(price + spread / 2.0);
+							lows.push(price - spread / 2.0);
+						}
+					}
+					_ => {
+						// Extreme monotonic test: prices that strictly increase then strictly decrease
+						// This tests the indicator's ability to track turning points
+						let mid_point = len / 2;
+						for i in 0..len {
+							let base = if i < mid_point {
+								// Strictly increasing in first half
+								base_prices[0] + (i as f64) * 20.0
+							} else {
+								// Strictly decreasing in second half
+								base_prices[0] + (mid_point as f64) * 20.0 - ((i - mid_point) as f64) * 20.0
+							};
+							let spread = base * spread_factor.min(0.05); // Cap spread at 5% for this test
+							highs.push(base + spread / 2.0);
+							lows.push(base - spread / 2.0);
+						}
+					}
+				}
+				
+				(highs, lows, period)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(highs, lows, period)| {
+				let params = MidpriceParams { period: Some(period) };
+				let input = MidpriceInput::from_slices(&highs, &lows, params);
+				
+				// Get outputs from both test kernel and scalar reference
+				let MidpriceOutput { values: out } = midprice_with_kernel(&input, kernel)?;
+				let MidpriceOutput { values: ref_out } = midprice_with_kernel(&input, Kernel::Scalar)?;
+				
+				// Find first valid index
+				let first_valid = (0..highs.len())
+					.find(|&i| !highs[i].is_nan() && !lows[i].is_nan())
+					.unwrap_or(0);
+				
+				// Property 1: Warmup period - first (first_valid + period - 1) values should be NaN
+				let warmup_end = first_valid + period - 1;
+				for i in 0..warmup_end.min(out.len()) {
+					prop_assert!(
+						out[i].is_nan(),
+						"Expected NaN during warmup at index {}, got {}",
+						i, out[i]
+					);
+				}
+				
+				// Properties for valid output values
+				for i in warmup_end..out.len() {
+					let y = out[i];
+					let r = ref_out[i];
+					let window_start = i + 1 - period;
+					
+					// Property 2: Output bounds - midprice should be between min(low) and max(high) in window
+					let window_high = &highs[window_start..=i];
+					let window_low = &lows[window_start..=i];
+					let max_high = window_high.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+					let min_low = window_low.iter().cloned().fold(f64::INFINITY, f64::min);
+					
+					// Adaptive tolerance based on magnitude
+					let magnitude = y.abs().max(1.0);
+					let tolerance = (magnitude * f64::EPSILON * 10.0).max(1e-9);
+					
+					prop_assert!(
+						y.is_nan() || (y >= min_low - tolerance && y <= max_high + tolerance),
+						"Midprice {} at index {} outside bounds [{}, {}]",
+						y, i, min_low, max_high
+					);
+					
+					// Property 3: Kernel consistency
+					if y.is_finite() && r.is_finite() {
+						let ulp_diff = y.to_bits().abs_diff(r.to_bits());
+						prop_assert!(
+							(y - r).abs() <= tolerance || ulp_diff <= 8,
+							"Kernel mismatch at index {}: {} vs {} (ULP={})",
+							i, y, r, ulp_diff
+						);
+					} else {
+						prop_assert_eq!(
+							y.to_bits(), r.to_bits(),
+							"NaN/finite mismatch at index {}: {} vs {}",
+							i, y, r
+						);
+					}
+					
+					// Property 4: Period=1 special case
+					if period == 1 {
+						let expected = (highs[i] + lows[i]) / 2.0;
+						prop_assert!(
+							(y - expected).abs() <= tolerance,
+							"Period=1 midprice {} != expected {} at index {}",
+							y, expected, i
+						);
+					}
+					
+					// Property 5: Constant data
+					if window_high.windows(2).all(|w| (w[0] - w[1]).abs() < tolerance) &&
+					   window_low.windows(2).all(|w| (w[0] - w[1]).abs() < tolerance) {
+						let expected = (window_high[0] + window_low[0]) / 2.0;
+						prop_assert!(
+							(y - expected).abs() <= tolerance,
+							"Constant data midprice {} != expected {} at index {}",
+							y, expected, i
+						);
+					}
+					
+					// Property 6: Mathematical correctness
+					let actual_max_high = window_high.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+					let actual_min_low = window_low.iter().cloned().fold(f64::INFINITY, f64::min);
+					let expected = (actual_max_high + actual_min_low) / 2.0;
+					prop_assert!(
+						(y - expected).abs() <= tolerance,
+						"Midprice {} != expected {} at index {}",
+						y, expected, i
+					);
+					
+					// Property 7: Midprice always within actual high and low at current index
+					// The midprice of the window should be between the lowest low and highest high
+					// but also should never exceed the current bar's high or go below current bar's low
+					// when period = 1
+					if period == 1 {
+						prop_assert!(
+							y >= lows[i] - tolerance && y <= highs[i] + tolerance,
+							"When period=1, midprice {} should be within current bar's range [{}, {}] at index {}",
+							y, lows[i], highs[i], i
+						);
+					}
+					
+					// Property 8: Monotonicity check for strictly monotonic data
+					// If both high and low arrays are strictly increasing/decreasing in the window,
+					// the midprice should follow the trend
+					if i > warmup_end && window_high.len() > 1 && window_low.len() > 1 {
+						let high_increasing = window_high.windows(2).all(|w| w[1] >= w[0] - tolerance);
+						let high_decreasing = window_high.windows(2).all(|w| w[1] <= w[0] + tolerance);
+						let low_increasing = window_low.windows(2).all(|w| w[1] >= w[0] - tolerance);
+						let low_decreasing = window_low.windows(2).all(|w| w[1] <= w[0] + tolerance);
+						
+						// If both arrays are monotonic in the same direction
+						if high_increasing && low_increasing {
+							// Previous midprice should be less than or equal to current
+							if i > warmup_end {
+								let prev_y = out[i - 1];
+								if prev_y.is_finite() && y.is_finite() {
+									// Allow for some tolerance due to the sliding window
+									// The midprice might decrease slightly if a high value exits the window
+									let allowed_decrease = max_high * 0.1; // Allow 10% decrease
+									prop_assert!(
+										y >= prev_y - allowed_decrease,
+										"Midprice should generally increase with monotonic increasing data: {} < {} - {} at index {}",
+										y, prev_y, allowed_decrease, i
+									);
+								}
+							}
+						}
+					}
+				}
+				
+				Ok(())
+			})?;
+		
+		Ok(())
+	}
+
 	macro_rules! generate_all_midprice_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1293,6 +1584,9 @@ mod tests {
 		check_midprice_all_nan,
 		check_midprice_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_midprice_tests!(check_midprice_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);

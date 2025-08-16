@@ -1065,6 +1065,8 @@ mod tests {
 	use super::*;
 	use crate::skip_if_unsupported;
 	use crate::utilities::data_loader::read_candles_from_csv;
+	#[cfg(feature = "proptest")]
+	use proptest::prelude::*;
 
 	fn check_kst_default_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test_name);
@@ -1448,6 +1450,340 @@ mod tests {
 	fn check_kst_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		Ok(()) // No-op in release builds
 	}
+
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_kst_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Generate realistic parameter combinations for KST
+		let strat = (
+			// SMA periods (reasonable ranges)
+			(3usize..=20),  // sma_period1
+			(3usize..=20),  // sma_period2
+			(3usize..=20),  // sma_period3
+			(5usize..=25),  // sma_period4
+			// ROC periods (reasonable ranges)
+			(5usize..=15),  // roc_period1
+			(10usize..=20), // roc_period2
+			(15usize..=25), // roc_period3
+			(20usize..=35), // roc_period4
+			// Signal period
+			(3usize..=15),  // signal_period
+			// Data scenario selector
+			(0usize..=3),   // scenario type
+		).prop_flat_map(|(s1, s2, s3, s4, r1, r2, r3, r4, sig, scenario)| {
+			// Calculate minimum data length needed
+			let warmup1 = r1 + s1 - 1;
+			let warmup2 = r2 + s2 - 1;
+			let warmup3 = r3 + s3 - 1;
+			let warmup4 = r4 + s4 - 1;
+			let warmup = warmup1.max(warmup2).max(warmup3).max(warmup4);
+			let min_data_len = warmup + sig + 20; // Extra buffer for testing
+			
+			// Different data generation strategies based on scenario
+			let data_strategy = match scenario {
+				0 => {
+					// Normal price range (most common)
+					prop::collection::vec(
+						(10.0f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
+						min_data_len..400,
+					).boxed()
+				},
+				1 => {
+					// Small values (penny stocks)
+					prop::collection::vec(
+						(0.01f64..5.0f64).prop_filter("finite", |x| x.is_finite()),
+						min_data_len..400,
+					).boxed()
+				},
+				2 => {
+					// Data with plateaus (same value for extended periods)
+					prop::collection::vec(
+						(10.0f64..1000.0f64),
+						min_data_len..400,
+					).prop_map(|mut v| {
+						// Create plateaus by repeating some values
+						for i in 0..v.len()/4 {
+							let plateau_start = i * 4;
+							let plateau_end = (plateau_start + 3).min(v.len() - 1);
+							let plateau_value = v[plateau_start];
+							for j in plateau_start..=plateau_end {
+								v[j] = plateau_value;
+							}
+						}
+						v
+					}).boxed()
+				},
+				_ => {
+					// Data with large jumps
+					prop::collection::vec(
+						(10.0f64..1000.0f64),
+						min_data_len..400,
+					).prop_map(|mut v| {
+						// Introduce some large jumps
+						for i in (5..v.len()).step_by(20) {
+							v[i] = v[i-1] * (1.5 + (i % 3) as f64 * 0.5); // 1.5x to 2.5x jump
+						}
+						v
+					}).boxed()
+				}
+			};
+			
+			(
+				data_strategy,
+				Just(s1),
+				Just(s2),
+				Just(s3),
+				Just(s4),
+				Just(r1),
+				Just(r2),
+				Just(r3),
+				Just(r4),
+				Just(sig),
+			)
+		});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, s1, s2, s3, s4, r1, r2, r3, r4, sig)| {
+				let params = KstParams {
+					sma_period1: Some(s1),
+					sma_period2: Some(s2),
+					sma_period3: Some(s3),
+					sma_period4: Some(s4),
+					roc_period1: Some(r1),
+					roc_period2: Some(r2),
+					roc_period3: Some(r3),
+					roc_period4: Some(r4),
+					signal_period: Some(sig),
+				};
+				let input = KstInput::from_slice(&data, params);
+
+				// Calculate warmup period
+				let warmup1 = r1 + s1 - 1;
+				let warmup2 = r2 + s2 - 1;
+				let warmup3 = r3 + s3 - 1;
+				let warmup4 = r4 + s4 - 1;
+				let warmup = warmup1.max(warmup2).max(warmup3).max(warmup4);
+				let signal_warmup = warmup + sig - 1;
+
+				// Get outputs from both kernels
+				let KstOutput { line, signal } = kst_with_kernel(&input, kernel).unwrap();
+				let KstOutput { line: ref_line, signal: ref_signal } = kst_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Property 1: Warmup period validation
+				for i in 0..warmup.min(data.len()) {
+					prop_assert!(
+						line[i].is_nan(),
+						"KST line should be NaN during warmup at index {i}"
+					);
+				}
+				for i in 0..signal_warmup.min(data.len()) {
+					prop_assert!(
+						signal[i].is_nan(),
+						"Signal should be NaN during warmup at index {i}"
+					);
+				}
+
+				// Property 2: Kernel consistency - all kernels should produce identical results
+				for i in warmup..data.len() {
+					let y = line[i];
+					let r = ref_line[i];
+					
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert!(y.to_bits() == r.to_bits(), "NaN/Inf mismatch at idx {i}: {y} vs {r}");
+						continue;
+					}
+					
+					let ulp_diff = y.to_bits().abs_diff(r.to_bits());
+					prop_assert!(
+						(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+						"KST line kernel mismatch idx {i}: {y} vs {r} (ULP={ulp_diff})"
+					);
+				}
+				
+				for i in signal_warmup..data.len() {
+					let y = signal[i];
+					let r = ref_signal[i];
+					
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert!(y.to_bits() == r.to_bits(), "Signal NaN/Inf mismatch at idx {i}: {y} vs {r}");
+						continue;
+					}
+					
+					let ulp_diff = y.to_bits().abs_diff(r.to_bits());
+					prop_assert!(
+						(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+						"Signal kernel mismatch idx {i}: {y} vs {r} (ULP={ulp_diff})"
+					);
+				}
+
+				// Property 3: Constant data - KST should converge to 0
+				if data.windows(2).all(|w| (w[0] - w[1]).abs() <= f64::EPSILON) {
+					for i in warmup..data.len() {
+						prop_assert!(
+							line[i].abs() <= 1e-9,
+							"KST should be ~0 for constant data at idx {i}: {}",
+							line[i]
+						);
+					}
+				}
+
+				// Property 4: Monotonic increasing data - KST should be positive
+				if data.windows(2).all(|w| w[1] > w[0] + f64::EPSILON) {
+					let check_start = warmup + 10; // Allow some stabilization
+					for i in check_start..data.len() {
+						if line[i].is_finite() {
+							prop_assert!(
+								line[i] > -1e-6,
+								"KST should be positive for increasing data at idx {i}: {}",
+								line[i]
+							);
+						}
+					}
+				}
+
+				// Property 5: Monotonic decreasing data - KST should be negative
+				if data.windows(2).all(|w| w[0] > w[1] + f64::EPSILON) {
+					let check_start = warmup + 10; // Allow some stabilization
+					for i in check_start..data.len() {
+						if line[i].is_finite() {
+							prop_assert!(
+								line[i] < 1e-6,
+								"KST should be negative for decreasing data at idx {i}: {}",
+								line[i]
+							);
+						}
+					}
+				}
+
+				// Property 6: Signal smoothing - signal should be smoother than KST line
+				// Check variance of differences for stable portions of data
+				if signal_warmup + sig * 2 < data.len() && data.len() > signal_warmup + 20 {
+					// Skip initial volatile period after warmup
+					let stable_start = signal_warmup + sig;
+					let line_diffs: Vec<f64> = line[stable_start..data.len()-1]
+						.windows(2)
+						.map(|w| (w[1] - w[0]).abs())
+						.filter(|x| x.is_finite())
+						.collect();
+					
+					let signal_diffs: Vec<f64> = signal[stable_start..data.len()-1]
+						.windows(2)
+						.map(|w| (w[1] - w[0]).abs())
+						.filter(|x| x.is_finite())
+						.collect();
+					
+					if line_diffs.len() > 15 && signal_diffs.len() > 15 {
+						// Check mean variance for smoothness
+						let line_variance: f64 = line_diffs.iter().sum::<f64>() / line_diffs.len() as f64;
+						let signal_variance: f64 = signal_diffs.iter().sum::<f64>() / signal_diffs.len() as f64;
+						
+						// Signal should generally be smoother than the line
+						// But with edge case data (plateaus, jumps), allow more tolerance
+						if line_variance > 1e-10 && signal_variance > 1e-10 {
+							// Allow up to 2.5x variance for edge cases
+							prop_assert!(
+								signal_variance <= line_variance * 2.5,
+								"Signal variance too high relative to KST line: signal_var={signal_variance}, line_var={line_variance}"
+							);
+						}
+					}
+				}
+
+				// Property 7: Reasonable bounds - KST values should be within reasonable range
+				// KST is weighted sum of ROCs: 1*ROC1 + 2*ROC2 + 3*ROC3 + 4*ROC4
+				// With extreme price movements, this can reach large values
+				// Calculate max possible ROC based on data range
+				let min_price = data.iter().cloned().fold(f64::INFINITY, f64::min);
+				let max_price = data.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+				let max_roc = if min_price > 0.0 {
+					((max_price / min_price) - 1.0) * 100.0
+				} else {
+					10000.0 // Default upper bound
+				};
+				// KST max is approximately 10 * max_roc (sum of weights 1+2+3+4)
+				let kst_bound = max_roc * 10.0;
+				
+				for i in warmup..data.len() {
+					if line[i].is_finite() {
+						prop_assert!(
+							line[i] >= -kst_bound && line[i] <= kst_bound,
+							"KST line out of reasonable bounds at idx {i}: {} (bound: ±{})",
+							line[i], kst_bound
+						);
+					}
+				}
+				for i in signal_warmup..data.len() {
+					if signal[i].is_finite() {
+						prop_assert!(
+							signal[i] >= -kst_bound && signal[i] <= kst_bound,
+							"Signal out of reasonable bounds at idx {i}: {} (bound: ±{})",
+							signal[i], kst_bound
+						);
+					}
+				}
+
+				// Property 8: No infinite values in valid output range
+				for i in warmup..data.len() {
+					prop_assert!(
+						line[i].is_nan() || line[i].is_finite(),
+						"KST line has infinite value at idx {i}: {}",
+						line[i]
+					);
+				}
+				for i in signal_warmup..data.len() {
+					prop_assert!(
+						signal[i].is_nan() || signal[i].is_finite(),
+						"Signal has infinite value at idx {i}: {}",
+						signal[i]
+					);
+				}
+
+				// Property 9: Signal follows KST line trend
+				// The signal is a smoothed version of the KST line, so it should follow the general trend
+				if signal_warmup + sig + 5 < data.len() {
+					// Check individual points with appropriate tolerance
+					for i in (signal_warmup + sig)..data.len() {
+						// Calculate average KST line over the signal period
+						let line_window = &line[i.saturating_sub(sig-1)..=i.min(data.len()-1)];
+						let valid_values: Vec<f64> = line_window.iter()
+							.filter(|x| x.is_finite())
+							.cloned()
+							.collect();
+						
+						if !valid_values.is_empty() && signal[i].is_finite() {
+							let line_avg = valid_values.iter().sum::<f64>() / valid_values.len() as f64;
+							
+							// Tighter tolerance: 0.5% for large values, absolute tolerance for small values
+							let tolerance = if line_avg.abs() > 100.0 {
+								0.005  // 0.5% for large values
+							} else if line_avg.abs() > 10.0 {
+								0.007  // 0.7% for medium values
+							} else {
+								0.01   // 1% for small values (original)
+							};
+							
+							prop_assert!(
+								(signal[i] - line_avg).abs() <= 1e-6 || 
+								(signal[i] - line_avg).abs() / line_avg.abs().max(1.0) <= tolerance,
+								"Signal deviates from KST trend at idx {i}: signal={}, line_avg={}, tolerance={}%",
+								signal[i], line_avg, tolerance * 100.0
+							);
+						}
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
+	#[cfg(feature = "proptest")]
+	generate_all_kst_tests!(check_kst_property);
 
 	generate_all_kst_tests!(check_kst_default_params, check_kst_accuracy, check_kst_nan_handling, check_kst_no_poison);
 

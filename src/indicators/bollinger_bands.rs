@@ -1431,6 +1431,258 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_bollinger_bands_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Note: This test currently only validates with SMA and standard deviation (devtype=0).
+		// Future enhancement could test other MA types (EMA, WMA, etc.) and deviation types
+		// (mean_ad, median_ad), each with their own specific invariants.
+		
+		// Generate test strategy: period, data, devup, devdn
+		let strat = (1usize..=100).prop_flat_map(|period| {
+			(
+				prop::collection::vec(
+					(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+					period..400,
+				),
+				Just(period),
+				0.0f64..5.0f64,  // devup multiplier
+				0.0f64..5.0f64,  // devdn multiplier
+			)
+		});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period, devup, devdn)| {
+				// Create input with SMA as default (most common)
+				let params = BollingerBandsParams {
+					period: Some(period),
+					devup: Some(devup),
+					devdn: Some(devdn),
+					matype: Some("sma".to_string()),
+					devtype: Some(0), // Standard deviation
+				};
+				let input = BollingerBandsInput::from_slice(&data, params);
+
+				// For period=1 with standard deviation, the indicator should fail
+				// (standard deviation requires at least 2 points)
+				if period == 1 {
+					let result = bollinger_bands_with_kernel(&input, kernel);
+					prop_assert!(result.is_err(), "Period=1 with stddev should return error");
+					return Ok(());
+				}
+
+				// Compute with specified kernel
+				let result = bollinger_bands_with_kernel(&input, kernel).unwrap();
+				let upper = &result.upper_band;
+				let middle = &result.middle_band;
+				let lower = &result.lower_band;
+
+				// Also compute with scalar kernel for reference
+				let ref_result = bollinger_bands_with_kernel(&input, Kernel::Scalar).unwrap();
+				let ref_upper = &ref_result.upper_band;
+				let ref_middle = &ref_result.middle_band;
+				let ref_lower = &ref_result.lower_band;
+
+				// Find first valid index
+				let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+				let warmup_end = first_valid + period - 1;
+
+				// Property 1: Warmup period should be NaN
+				for i in 0..warmup_end.min(data.len()) {
+					prop_assert!(upper[i].is_nan(), "Upper band should be NaN at idx {}", i);
+					prop_assert!(middle[i].is_nan(), "Middle band should be NaN at idx {}", i);
+					prop_assert!(lower[i].is_nan(), "Lower band should be NaN at idx {}", i);
+				}
+
+				// Test properties for valid output range
+				for i in warmup_end..data.len() {
+					let u = upper[i];
+					let m = middle[i];
+					let l = lower[i];
+
+					// Property 2: Band ordering (when bands are finite and devup/devdn >= 0)
+					if u.is_finite() && m.is_finite() && l.is_finite() && devup >= 0.0 && devdn >= 0.0 {
+						prop_assert!(
+							u >= m - 1e-9,
+							"Upper band {} should be >= middle band {} at idx {}",
+							u, m, i
+						);
+						prop_assert!(
+							m >= l - 1e-9,
+							"Middle band {} should be >= lower band {} at idx {}",
+							m, l, i
+						);
+					}
+
+					// Property 3: Middle band should be within window range
+					if m.is_finite() {
+						let window_start = i.saturating_sub(period - 1);
+						let window = &data[window_start..=i];
+						let valid_values: Vec<f64> = window.iter()
+							.filter(|x| x.is_finite())
+							.copied()
+							.collect();
+						
+						if !valid_values.is_empty() {
+							let window_min = valid_values.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+							let window_max = valid_values.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+							
+							// Middle band (moving average) should be within data range
+							prop_assert!(
+								m >= window_min - 1e-9 && m <= window_max + 1e-9,
+								"Middle band {} not in window range [{}, {}] at idx {}",
+								m, window_min, window_max, i
+							);
+						}
+					}
+
+					// Property 4: Cross-kernel consistency
+					let ru = ref_upper[i];
+					let rm = ref_middle[i];
+					let rl = ref_lower[i];
+
+					// Check upper band consistency
+					if u.is_finite() && ru.is_finite() {
+						let ulp_diff = u.to_bits().abs_diff(ru.to_bits());
+						prop_assert!(
+							(u - ru).abs() <= 1e-9 || ulp_diff <= 4,
+							"Upper band mismatch at idx {}: {} vs {} (ULP={})",
+							i, u, ru, ulp_diff
+						);
+					} else {
+						prop_assert_eq!(u.is_nan(), ru.is_nan(), "Upper NaN mismatch at idx {}", i);
+					}
+
+					// Check middle band consistency
+					if m.is_finite() && rm.is_finite() {
+						let ulp_diff = m.to_bits().abs_diff(rm.to_bits());
+						prop_assert!(
+							(m - rm).abs() <= 1e-9 || ulp_diff <= 4,
+							"Middle band mismatch at idx {}: {} vs {} (ULP={})",
+							i, m, rm, ulp_diff
+						);
+					} else {
+						prop_assert_eq!(m.is_nan(), rm.is_nan(), "Middle NaN mismatch at idx {}", i);
+					}
+
+					// Check lower band consistency
+					if l.is_finite() && rl.is_finite() {
+						let ulp_diff = l.to_bits().abs_diff(rl.to_bits());
+						prop_assert!(
+							(l - rl).abs() <= 1e-9 || ulp_diff <= 4,
+							"Lower band mismatch at idx {}: {} vs {} (ULP={})",
+							i, l, rl, ulp_diff
+						);
+					} else {
+						prop_assert_eq!(l.is_nan(), rl.is_nan(), "Lower NaN mismatch at idx {}", i);
+					}
+				}
+
+				// Property 5: Period=2 edge case (smallest valid period for stddev)
+				if period == 2 && warmup_end < data.len() {
+					// With period=2, we can validate basic properties
+					for i in warmup_end..data.len() {
+						if upper[i].is_finite() && middle[i].is_finite() && lower[i].is_finite() {
+							// Bands should still follow ordering
+							prop_assert!(
+								upper[i] >= middle[i] - 1e-9,
+								"Period=2: upper band should be >= middle at idx {}", i
+							);
+							prop_assert!(
+								middle[i] >= lower[i] - 1e-9,
+								"Period=2: middle band should be >= lower at idx {}", i
+							);
+						}
+					}
+				}
+
+				// Property 6: Constant data property
+				let all_same = data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12);
+				if all_same && data.len() > 0 && data[0].is_finite() {
+					let const_val = data[0];
+					for i in warmup_end..data.len() {
+						if upper[i].is_finite() {
+							// With constant data, std dev = 0, so all bands equal the constant
+							prop_assert!(
+								(upper[i] - const_val).abs() <= 1e-9,
+								"Constant data: upper band should be {} at idx {}", const_val, i
+							);
+							prop_assert!(
+								(middle[i] - const_val).abs() <= 1e-9,
+								"Constant data: middle band should be {} at idx {}", const_val, i
+							);
+							prop_assert!(
+								(lower[i] - const_val).abs() <= 1e-9,
+								"Constant data: lower band should be {} at idx {}", const_val, i
+							);
+						}
+					}
+				}
+
+				// Property 7: Band width relationship
+				if devup > 0.0 && devdn > 0.0 && warmup_end < data.len() {
+					for i in warmup_end..data.len() {
+						if upper[i].is_finite() && middle[i].is_finite() && lower[i].is_finite() {
+							let upper_width = upper[i] - middle[i];
+							let lower_width = middle[i] - lower[i];
+							
+							// Band widths should be proportional to deviation multipliers
+							if upper_width > 1e-12 && lower_width > 1e-12 {
+								let ratio = (upper_width / lower_width) / (devup / devdn);
+								prop_assert!(
+									(ratio - 1.0).abs() <= 1e-4,
+									"Band width ratio mismatch at idx {}: expected {}, got {}",
+									i, devup / devdn, upper_width / lower_width
+								);
+							}
+						}
+					}
+				}
+
+				// Property 8: Symmetry with equal multipliers
+				if (devup - devdn).abs() < 1e-12 && devup > 0.0 {
+					for i in warmup_end..data.len() {
+						if upper[i].is_finite() && middle[i].is_finite() && lower[i].is_finite() {
+							let upper_dist = upper[i] - middle[i];
+							let lower_dist = middle[i] - lower[i];
+							prop_assert!(
+								(upper_dist - lower_dist).abs() <= 1e-9,
+								"Bands should be symmetric at idx {}: upper_dist={}, lower_dist={}",
+								i, upper_dist, lower_dist
+							);
+						}
+					}
+				}
+
+				// Property 9: Finite output for finite input
+				let all_finite = data.iter().all(|x| x.is_finite());
+				if all_finite {
+					for i in warmup_end..data.len() {
+						prop_assert!(
+							upper[i].is_finite(),
+							"Upper band should be finite at idx {} with finite input", i
+						);
+						prop_assert!(
+							middle[i].is_finite(),
+							"Middle band should be finite at idx {} with finite input", i
+						);
+						prop_assert!(
+							lower[i].is_finite(),
+							"Lower band should be finite at idx {} with finite input", i
+						);
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_bb_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1467,6 +1719,10 @@ mod tests {
 		check_bb_streaming,
 		check_bb_no_poison
 	);
+
+	// Generate property tests only when proptest feature is enabled
+	#[cfg(feature = "proptest")]
+	generate_all_bb_tests!(check_bollinger_bands_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);

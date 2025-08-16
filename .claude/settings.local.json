@@ -275,7 +275,8 @@
       "Bash(.venv/Scripts/pip install:*)",
       "Bash(.venvScriptspython testspythontest_willr.py)",
       "Bash(./test_nan_filling.exe)",
-      "Bash(./test_medprice_nan.exe)"
+      "Bash(./test_medprice_nan.exe)",
+      "Bash(cargo test:*)"
     ],
     "deny": []
   }

@@ -1355,4 +1355,201 @@ mod tests {
 
 	gen_batch_tests!(check_batch_default_row);
 	gen_batch_tests!(check_batch_no_poison);
+
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_jsa_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Generate test strategy: period from 1 to 100, data length from period to 400
+		let strat = (1usize..=100).prop_flat_map(|period| {
+			(
+				prop::collection::vec(
+					(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+					period..400,
+				),
+				Just(period),
+			)
+		});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period)| {
+				let params = JsaParams { period: Some(period) };
+				let input = JsaInput::from_slice(&data, params);
+
+				// Test with specified kernel
+				let JsaOutput { values: out } = jsa_with_kernel(&input, kernel).unwrap();
+				
+				// Use scalar as reference for cross-kernel validation
+				let JsaOutput { values: ref_out } = jsa_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Find first valid index
+				let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+				let warmup_period = first_valid + period;
+
+				// Property 1: Verify warmup period - all values before warmup should be NaN
+				for i in 0..warmup_period.min(data.len()) {
+					prop_assert!(
+						out[i].is_nan(),
+						"[{}] Expected NaN during warmup at index {}, got {}",
+						test_name,
+						i,
+						out[i]
+					);
+				}
+
+				// Property 2: Verify JSA formula for valid outputs
+				// JSA formula: out[i] = (data[i] + data[i - period]) * 0.5
+				for i in warmup_period..data.len() {
+					let expected = (data[i] + data[i - period]) * 0.5;
+					let actual = out[i];
+					
+					// Allow small numerical error for floating point
+					prop_assert!(
+						(actual - expected).abs() < 1e-9,
+						"[{}] Formula verification failed at index {}: expected {}, got {}, diff = {}",
+						test_name,
+						i,
+						expected,
+						actual,
+						(actual - expected).abs()
+					);
+				}
+
+				// Property 3: Output bounds - result should be within min/max of the two values being averaged
+				for i in warmup_period..data.len() {
+					let val1 = data[i];
+					let val2 = data[i - period];
+					let min_val = val1.min(val2);
+					let max_val = val1.max(val2);
+					let actual = out[i];
+					
+					prop_assert!(
+						actual >= min_val - 1e-9 && actual <= max_val + 1e-9,
+						"[{}] Output bounds check failed at index {}: {} not in [{}, {}]",
+						test_name,
+						i,
+						actual,
+						min_val,
+						max_val
+					);
+				}
+
+				// Property 4: Cross-kernel consistency
+				// Only test against scalar reference if we're not already testing scalar
+				if kernel != Kernel::Scalar {
+					for i in 0..data.len() {
+						let y = out[i];
+						let r = ref_out[i];
+						
+						if y.is_nan() && r.is_nan() {
+							continue; // Both NaN is fine
+						}
+						
+						// Check bit-exact equality for non-NaN values
+						let y_bits = y.to_bits();
+						let r_bits = r.to_bits();
+						prop_assert!(
+							y_bits == r_bits,
+							"[{}] Cross-kernel mismatch at index {}: {} ({:016X}) != {} ({:016X})",
+							test_name,
+							i,
+							y,
+							y_bits,
+							r,
+							r_bits
+						);
+					}
+				}
+
+				// Property 5: Constant data should produce the same constant
+				if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-9) && !data.is_empty() {
+					let constant = data[first_valid];
+					for i in warmup_period..data.len() {
+						prop_assert!(
+							(out[i] - constant).abs() < 1e-9,
+							"[{}] Constant data test failed at index {}: expected {}, got {}",
+							test_name,
+							i,
+							constant,
+							out[i]
+						);
+					}
+				}
+
+				// Property 6: Monotonic increasing data - outputs should also be monotonic
+				let is_monotonic_inc = data.windows(2).all(|w| w[1] >= w[0] - 1e-12);
+				if is_monotonic_inc && warmup_period + 1 < data.len() {
+					for i in (warmup_period + 1)..data.len() {
+						// For monotonic increasing data, JSA output should also be increasing
+						// Since we're averaging current with past, and both sequences are increasing
+						prop_assert!(
+							out[i] >= out[i - 1] - 1e-9,
+							"[{}] Monotonic test failed at index {}: {} < {}",
+							test_name,
+							i,
+							out[i],
+							out[i - 1]
+						);
+					}
+				}
+
+				// Property 7: Period = 1 special case - averaging consecutive values
+				if period == 1 && warmup_period < data.len() {
+					for i in warmup_period..data.len() {
+						let expected = (data[i] + data[i - 1]) * 0.5;
+						let actual = out[i];
+						prop_assert!(
+							(actual - expected).abs() < 1e-9,
+							"[{}] Period=1 test failed at index {}: expected {}, got {}",
+							test_name,
+							i,
+							expected,
+							actual
+						);
+					}
+				}
+
+				// Property 8: Check for poison values in debug mode
+				#[cfg(debug_assertions)]
+				{
+					for (i, &val) in out.iter().enumerate() {
+						if val.is_nan() {
+							continue; // NaN is expected in warmup
+						}
+						
+						let bits = val.to_bits();
+						
+						// Check for common poison patterns
+						prop_assert!(
+							bits != 0x11111111_11111111,
+							"[{}] Found alloc_with_nan_prefix poison at index {}",
+							test_name,
+							i
+						);
+						prop_assert!(
+							bits != 0x22222222_22222222,
+							"[{}] Found init_matrix_prefixes poison at index {}",
+							test_name,
+							i
+						);
+						prop_assert!(
+							bits != 0x33333333_33333333,
+							"[{}] Found make_uninit_matrix poison at index {}",
+							test_name,
+							i
+						);
+					}
+				}
+
+				Ok(())
+			})?;
+
+		Ok(())
+	}
+
+	// Generate property test variants for each kernel
+	#[cfg(feature = "proptest")]
+	generate_all_jsa_tests!(check_jsa_property);
 }

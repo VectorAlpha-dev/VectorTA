@@ -1254,6 +1254,220 @@ mod tests {
         }
     }
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_chande_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Note: This test validates Chande Exits invariants including ATR calculation,
+		// rolling max/min windows, and directional consistency.
+		
+		// Generate test strategy: period, data length, mult, direction
+		let strat = (1usize..=100).prop_flat_map(|period| {
+			(
+				// Generate high/low/close data with realistic relationships
+				prop::collection::vec(
+					(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+					period..400,
+				).prop_flat_map(move |close| {
+					// Generate high/low based on close with realistic constraints
+					let len = close.len();
+					(
+						Just(close.clone()),
+						prop::collection::vec(
+							0.0f64..1000.0f64, // spread above close
+							len,
+						),
+						prop::collection::vec(
+							0.0f64..1000.0f64, // spread below close  
+							len,
+						),
+					).prop_map(move |(c, high_spread, low_spread)| {
+						let high: Vec<f64> = c.iter().zip(&high_spread)
+							.map(|(&close_val, &spread)| close_val + spread)
+							.collect();
+						let low: Vec<f64> = c.iter().zip(&low_spread)
+							.map(|(&close_val, &spread)| close_val - spread)
+							.collect();
+						(high, low, c.clone())
+					})
+				}),
+				Just(period),
+				0.1f64..10.0f64,  // mult range
+				prop::bool::ANY,  // direction (true = long, false = short)
+			)
+		});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |((high, low, close), period, mult, is_long)| {
+				let direction = if is_long { "long" } else { "short" };
+				
+				// Build candles structure
+				let candles = Candles {
+					high: high.clone(),
+					low: low.clone(),
+					close: close.clone(),
+					timestamp: vec![],
+					open: vec![],
+					volume: vec![],
+					hl2: vec![],
+					hlc3: vec![],
+					ohlc4: vec![],
+					hlcc4: vec![],
+				};
+				
+				let params = ChandeParams {
+					period: Some(period),
+					mult: Some(mult),
+					direction: Some(direction.to_string()),
+				};
+				
+				let input = ChandeInput::from_candles(&candles, params);
+				
+				// Test with specified kernel
+				let result = chande_with_kernel(&input, kernel);
+				
+				// Property 1: Should succeed for valid inputs
+				prop_assert!(result.is_ok(), "Chande should succeed for valid inputs");
+				let output = result.unwrap();
+				
+				// Property 2: Output length matches input length
+				prop_assert_eq!(output.values.len(), high.len(), "Output length should match input");
+				
+				// Find first non-NaN index
+				let first_valid = close.iter().position(|&x| !x.is_nan()).unwrap_or(0);
+				let warmup_period = first_valid + period - 1;
+				
+				// Property 3: Warmup period correctness - NaN values until warmup complete
+				for i in 0..warmup_period.min(output.values.len()) {
+					prop_assert!(
+						output.values[i].is_nan(),
+						"Expected NaN during warmup at index {}", i
+					);
+				}
+				
+				// Property 4: Values after warmup should be finite (if input is finite)
+				if warmup_period < output.values.len() {
+					for i in warmup_period..output.values.len() {
+						let val = output.values[i];
+						prop_assert!(
+							val.is_finite(),
+							"Expected finite value after warmup at index {}, got {}", i, val
+						);
+					}
+				}
+				
+				// Property 5: Long exit should be below or equal to period max high
+				// Short exit should be above or equal to period min low
+				for i in warmup_period..output.values.len() {
+					let start_idx = i + 1 - period;
+					let period_high = high[start_idx..=i].iter().cloned().fold(f64::MIN, f64::max);
+					let period_low = low[start_idx..=i].iter().cloned().fold(f64::MAX, f64::min);
+					let val = output.values[i];
+					
+					if is_long {
+						// Long exit should be below the period high
+						prop_assert!(
+							val <= period_high + 1e-6,
+							"Long exit {} should be <= period high {} at index {}", 
+							val, period_high, i
+						);
+					} else {
+						// Short exit should be above the period low  
+						prop_assert!(
+							val >= period_low - 1e-6,
+							"Short exit {} should be >= period low {} at index {}",
+							val, period_low, i
+						);
+					}
+				}
+				
+				// Property 6: Cross-kernel consistency
+				let ref_output = chande_with_kernel(&input, Kernel::Scalar).unwrap();
+				for i in 0..output.values.len() {
+					let val = output.values[i];
+					let ref_val = ref_output.values[i];
+					
+					// Handle NaN/infinite values
+					if !val.is_finite() || !ref_val.is_finite() {
+						prop_assert_eq!(
+							val.to_bits(), ref_val.to_bits(),
+							"NaN/Inf mismatch at index {}: {} vs {}", i, val, ref_val
+						);
+						continue;
+					}
+					
+					// Check ULP difference for finite values
+					let val_bits = val.to_bits();
+					let ref_bits = ref_val.to_bits();
+					let ulp_diff = val_bits.abs_diff(ref_bits);
+					
+					prop_assert!(
+						(val - ref_val).abs() <= 1e-9 || ulp_diff <= 4,
+						"Kernel mismatch at index {}: {} vs {} (ULP={})",
+						i, val, ref_val, ulp_diff
+					);
+				}
+				
+				// Property 7: Period=1 edge case
+				// With period=1, ATR calculation uses a single TR value
+				// Due to the complexity of ATR calculation with previous close values,
+				// we just verify the basic invariant that the output is finite
+				// and follows the directional constraints
+				if period == 1 && warmup_period < output.values.len() {
+					for i in warmup_period..output.values.len() {
+						let val = output.values[i];
+						prop_assert!(
+							val.is_finite(),
+							"Period=1 should produce finite values at index {}", i
+						);
+						
+						// Basic directional check
+						if is_long {
+							// Long exit should be <= current high
+							prop_assert!(
+								val <= high[i] + 1e-6,
+								"Period=1 long exit {} should be <= high {} at index {}",
+								val, high[i], i
+							);
+						} else {
+							// Short exit should be >= current low
+							prop_assert!(
+								val >= low[i] - 1e-6,
+								"Period=1 short exit {} should be >= low {} at index {}",
+								val, low[i], i
+							);
+						}
+					}
+				}
+				
+				// Property 8: Constant data produces stable output (after warmup)
+				let all_same_close = close.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12);
+				let all_same_high = high.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12);
+				let all_same_low = low.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12);
+				
+				if all_same_close && all_same_high && all_same_low && warmup_period + 10 < output.values.len() {
+					// After sufficient warmup, output should stabilize
+					let stable_start = warmup_period + period; // Extra period for ATR to stabilize
+					if stable_start + 2 < output.values.len() {
+						for i in stable_start..output.values.len()-1 {
+							prop_assert!(
+								(output.values[i] - output.values[i+1]).abs() <= 1e-6,
+								"Constant data should produce stable output at index {}: {} vs {}",
+								i, output.values[i], output.values[i+1]
+							);
+						}
+					}
+				}
+				
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	generate_all_chande_tests!(
 		check_chande_partial_params,
 		check_chande_accuracy,
@@ -1264,6 +1478,10 @@ mod tests {
 		check_chande_streaming,
 		check_chande_no_poison
 	);
+	
+	// Generate property tests only when proptest feature is enabled
+	#[cfg(feature = "proptest")]
+	generate_all_chande_tests!(check_chande_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);

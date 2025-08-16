@@ -1334,6 +1334,209 @@ mod tests {
 
 	gen_batch_tests!(check_batch_default_row);
 	gen_batch_tests!(check_batch_no_poison);
+
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_decycler_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Generate realistic test data with valid parameters
+		// hp_period range: 2-100 (must be >= 2)
+		// k range: 0.1-5.0 (must be positive)
+		let strat = (2usize..=100)
+			.prop_flat_map(|period| {
+				(
+					prop::collection::vec(
+						(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+						period..400,
+					),
+					Just(period),
+					0.1f64..5.0f64,  // k must be positive
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, hp_period, k)| {
+				let params = DecyclerParams {
+					hp_period: Some(hp_period),
+					k: Some(k),
+				};
+				let input = DecyclerInput::from_slice(&data, params);
+
+				// Test with specified kernel
+				let DecyclerOutput { values: out } = decycler_with_kernel(&input, kernel).unwrap();
+				
+				// Also test against scalar reference for kernel consistency
+				let DecyclerOutput { values: ref_out } = decycler_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Find first non-NaN value
+				let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+				let warmup_period = first + 2;
+
+				// Property 1: Warmup period should have NaN values
+				for i in 0..warmup_period.min(out.len()) {
+					prop_assert!(
+						out[i].is_nan(),
+						"Expected NaN during warmup at index {}, got {}",
+						i,
+						out[i]
+					);
+				}
+
+				// Property 2: After warmup, values should be finite
+				for i in warmup_period..out.len() {
+					prop_assert!(
+						out[i].is_finite(),
+						"Expected finite value after warmup at index {}, got {}",
+						i,
+						out[i]
+					);
+				}
+
+				// Property 3: Kernel consistency - results should match across kernels
+				for i in 0..out.len() {
+					let y = out[i];
+					let r = ref_out[i];
+					
+					if y.is_nan() && r.is_nan() {
+						continue;  // Both NaN is ok
+					}
+					
+					// Use ULP comparison for floating point equality
+					let y_bits = y.to_bits();
+					let r_bits = r.to_bits();
+					let ulp_diff = if y_bits > r_bits {
+						y_bits - r_bits
+					} else {
+						r_bits - y_bits
+					};
+					
+					prop_assert!(
+						ulp_diff <= 3,
+						"Kernel mismatch at index {}: {} ({} bits) vs {} ({} bits), ULP diff: {}",
+						i, y, y_bits, r, r_bits, ulp_diff
+					);
+				}
+
+				// Property 4: For constant input, high-pass filter output should be close to 0
+				// Decycler = input - high_pass, so for DC signal, high_pass → input, decycler → 0
+				if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-9) && !data.is_empty() {
+					// After sufficient warmup for filter to stabilize
+					if out.len() > warmup_period + hp_period * 2 {
+						let check_idx = out.len() - 1;
+						prop_assert!(
+							out[check_idx].abs() <= 1e-6 || out[check_idx].abs() <= data[first].abs() * 1e-6,
+							"Constant input {} should produce output close to 0 (high-pass filtered), got {}",
+							data[first],
+							out[check_idx]
+						);
+					}
+				}
+
+				// Property 5: Bounded output - decycler removes components, shouldn't amplify much
+				// After warmup, output magnitude should be bounded relative to input
+				if out.len() > warmup_period + hp_period {
+					let start_check = warmup_period + hp_period;
+					for i in start_check..out.len() {
+						let input_mag = data[i].abs();
+						let output_mag = out[i].abs();
+						// Allow some tolerance for numerical precision and filter characteristics
+						// Decycler can have transient responses but shouldn't amplify significantly
+						prop_assert!(
+							output_mag <= input_mag * 2.0 + 1.0,
+							"Output magnitude {} exceeds reasonable bound for input {} at index {}",
+							output_mag,
+							input_mag,
+							i
+						);
+					}
+				}
+
+				// Property 6: For monotonic trends, decycler should reduce the trend
+				// Check if data has a strong linear trend
+				if data.len() > warmup_period + 10 {
+					let trend_start = warmup_period;
+					let trend_end = data.len().min(warmup_period + 50);
+					let is_monotonic_increasing = data[trend_start..trend_end].windows(2)
+						.all(|w| w[1] >= w[0] - 1e-9);
+					let is_monotonic_decreasing = data[trend_start..trend_end].windows(2)
+						.all(|w| w[1] <= w[0] + 1e-9);
+					
+					if (is_monotonic_increasing || is_monotonic_decreasing) && trend_end > trend_start + 5 {
+						// For strong trends, the decycler output should have less variance than input
+						// as it removes the low-frequency trend component
+						let input_range = data[trend_start..trend_end].iter()
+							.fold(f64::INFINITY, |a, &b| a.min(b))
+							..=data[trend_start..trend_end].iter()
+							.fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+						let output_range = out[trend_start..trend_end].iter()
+							.fold(f64::INFINITY, |a, &b| a.min(b))
+							..=out[trend_start..trend_end].iter()
+							.fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+						
+						let input_span = input_range.end() - input_range.start();
+						let output_span = output_range.end() - output_range.start();
+						
+						// Output should have reduced range for monotonic trends
+						// Allow some tolerance for edge effects
+						if input_span > 1e-9 {
+							prop_assert!(
+								output_span <= input_span * 1.5,
+								"Decycler should reduce trend variation: input span {}, output span {}",
+								input_span,
+								output_span
+							);
+						}
+					}
+				}
+
+				// Property 7: Check for poison values (debug builds only)
+				#[cfg(debug_assertions)]
+				for (i, &val) in out.iter().enumerate() {
+					if val.is_nan() {
+						continue;
+					}
+					
+					let bits = val.to_bits();
+					prop_assert!(
+						bits != 0x11111111_11111111 && 
+						bits != 0x22222222_22222222 && 
+						bits != 0x33333333_33333333,
+						"Found poison value at index {}: {} (0x{:016X})",
+						i, val, bits
+					);
+				}
+
+				// Property 8: Edge cases - minimum period and extreme k values
+				if hp_period == 2 {
+					// Should still produce valid output with correct length
+					prop_assert!(
+						out.len() == data.len(),
+						"Output length mismatch for period=2"
+					);
+				}
+				
+				// For extreme k values, output should still be bounded
+				if k < 0.2 || k > 4.5 {
+					for i in warmup_period..out.len() {
+						prop_assert!(
+							out[i].is_finite(),
+							"Extreme k={} produced non-finite value at index {}",
+							k,
+							i
+						);
+					}
+				}
+
+				Ok(())
+			})?;
+
+		Ok(())
+	}
+
+	#[cfg(feature = "proptest")]
+	generate_all_decycler_tests!(check_decycler_property);
 }
 
 #[cfg(feature = "python")]

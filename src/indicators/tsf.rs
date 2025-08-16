@@ -1303,6 +1303,156 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_tsf_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Generate test strategies with various period values and data patterns
+		let strat = (1usize..=64)
+			.prop_flat_map(|period| {
+				(
+					// Generate data vectors with various patterns
+					prop::collection::vec(
+						(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+						period.max(10)..400,
+					),
+					Just(period),
+					// Trend factor for generating linear trends
+					-100.0f64..100.0f64,
+					// Intercept for linear data
+					-1e5f64..1e5f64,
+					// Flag to test special patterns
+					prop::bool::ANY,
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(mut data, period, trend, intercept, use_special_pattern)| {
+				// Optionally apply special patterns for testing
+				if use_special_pattern {
+					let pattern_choice = data.len() % 3;
+					match pattern_choice {
+						0 => {
+							// Create perfectly linear data
+							for (i, val) in data.iter_mut().enumerate() {
+								*val = trend * i as f64 + intercept;
+							}
+						}
+						1 => {
+							// Create constant data
+							let constant = data.first().copied().unwrap_or(42.0);
+							data.fill(constant);
+						}
+						_ => {
+							// Keep random data but add a trend
+							for (i, val) in data.iter_mut().enumerate() {
+								*val += trend * i as f64;
+							}
+						}
+					}
+				}
+
+				let params = TsfParams {
+					period: Some(period),
+				};
+				let input = TsfInput::from_slice(&data, params);
+
+				// Run TSF with specified kernel and scalar reference
+				let TsfOutput { values: out } = tsf_with_kernel(&input, kernel).unwrap();
+				let TsfOutput { values: ref_out } = tsf_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Verify warmup period
+				for i in 0..(period - 1) {
+					prop_assert!(
+						out[i].is_nan(),
+						"Expected NaN during warmup at index {}, got {}",
+						i,
+						out[i]
+					);
+				}
+
+				// Test properties after warmup
+				for i in (period - 1)..data.len() {
+					let y = out[i];
+					let r = ref_out[i];
+
+					// Property 1: Kernel consistency
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert!(
+							y.to_bits() == r.to_bits(),
+							"finite/NaN mismatch idx {}: {} vs {}",
+							i, y, r
+						);
+						continue;
+					}
+
+					let ulp_diff: u64 = y.to_bits().abs_diff(r.to_bits());
+					prop_assert!(
+						(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+						"Kernel mismatch idx {}: {} vs {} (ULP={})",
+						i, y, r, ulp_diff
+					);
+
+					// Property 2: Special cases
+					if period == 1 {
+						// Period=1 should return the current value
+						prop_assert!(
+							(y - data[i]).abs() <= f64::EPSILON,
+							"Period=1 should return current value at idx {}: {} vs {}",
+							i, y, data[i]
+						);
+					}
+
+					// Property 3: Constant data
+					if i >= period && data[i - period + 1..=i].windows(2).all(|w| (w[0] - w[1]).abs() <= 1e-10) {
+						let expected = data[i];
+						prop_assert!(
+							(y - expected).abs() <= 1e-6,
+							"Constant data should forecast constant at idx {}: {} vs {}",
+							i, y, expected
+						);
+					}
+
+					// Property 4: Linear trend verification
+					// For perfectly linear data, the forecast should be exact
+					if i >= period + 1 {
+						let window = &data[i - period + 1..=i];
+						let is_linear = window.windows(2).enumerate().all(|(j, w)| {
+							if j == 0 { return true; }
+							let diff1 = w[1] - w[0];
+							let diff0 = window[1] - window[0];
+							(diff1 - diff0).abs() <= 1e-10
+						});
+
+						if is_linear && window.len() >= 2 {
+							// For linear data, forecast should continue the trend
+							let slope = (window[window.len() - 1] - window[0]) / (window.len() - 1) as f64;
+							let expected = window[window.len() - 1] + slope;
+							prop_assert!(
+								(y - expected).abs() <= 1e-6,
+								"Linear forecast mismatch at idx {}: {} vs {} (slope={})",
+								i, y, expected, slope
+							);
+						}
+					}
+
+					// Property 5: Finite output for finite input
+					prop_assert!(
+						y.is_finite(),
+						"Output should be finite at idx {}: {}",
+						i, y
+					);
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_tsf_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1339,6 +1489,9 @@ mod tests {
 		check_tsf_streaming,
 		check_tsf_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_tsf_tests!(check_tsf_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);

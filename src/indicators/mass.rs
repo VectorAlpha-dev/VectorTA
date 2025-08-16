@@ -48,6 +48,9 @@ use rayon::prelude::*;
 use std::convert::AsRef;
 use thiserror::Error;
 
+#[cfg(feature = "proptest")]
+use proptest::prelude::*;
+
 #[derive(Debug, Clone)]
 pub enum MassData<'a> {
 	Candles {
@@ -943,6 +946,271 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 
+	#[cfg(feature = "proptest")]
+	fn check_mass_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Generate realistic test parameters for Mass Index
+		let strat = (2usize..=100)
+			.prop_flat_map(|period| {
+				(
+					// Generate high/low data with proper relationship
+					prop::collection::vec(
+						(0f64..1000f64).prop_filter("finite", |x| x.is_finite()),
+						(16 + period)..=500, // Need at least 16 + period for warmup
+					),
+					Just(period),
+					// Add a scenario selector for different data patterns
+					0usize..=6,
+				)
+			})
+			.prop_map(|(mut base_data, period, scenario)| {
+				// Generate high and low arrays based on scenario
+				let mut high = Vec::with_capacity(base_data.len());
+				let mut low = Vec::with_capacity(base_data.len());
+				
+				match scenario {
+					0 => {
+						// Random data with realistic high/low relationship
+						for val in base_data {
+							let range = val * 0.1; // 10% range
+							high.push(val + range / 2.0);
+							low.push(val - range / 2.0);
+						}
+					}
+					1 => {
+						// Zero range (high == low)
+						for val in base_data {
+							high.push(val);
+							low.push(val);
+						}
+					}
+					2 => {
+						// Constant range
+						let constant_range = 10.0;
+						for val in base_data {
+							high.push(val + constant_range / 2.0);
+							low.push(val - constant_range / 2.0);
+						}
+					}
+					3 => {
+						// Increasing volatility (but keep it reasonable)
+						for (i, val) in base_data.iter().enumerate() {
+							let range = 1.0 + (i as f64 * 0.1).min(20.0); // Cap at 20
+							high.push(val + range);
+							low.push(val - range);
+						}
+					}
+					4 => {
+						// Decreasing volatility
+						for (i, val) in base_data.iter().enumerate() {
+							let range = (20.0 - (i as f64 * 0.1)).max(0.5); // Min at 0.5
+							high.push(val + range);
+							low.push(val - range);
+						}
+					}
+					5 => {
+						// Data with realistic volatility spikes (10x normal volatility)
+						for (i, val) in base_data.iter().enumerate() {
+							let range = if i % 20 == 0 { 50.0 } else { 5.0 }; // 10x spike, not 100x
+							high.push(val + range);
+							low.push(val - range);
+						}
+					}
+					6 => {
+						// Gradually approaching zero range (edge case)
+						for (i, val) in base_data.iter().enumerate() {
+							// Range decreases exponentially toward zero
+							let range = 10.0 * (0.95_f64).powi(i as i32);
+							high.push(val + range);
+							low.push(val - range);
+						}
+					}
+					_ => unreachable!(),
+				}
+				
+				(high, low, period)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(high, low, period)| {
+				let params = MassParams { period: Some(period) };
+				let input = MassInput::from_slices(&high, &low, params);
+
+				// Calculate output with the test kernel
+				let MassOutput { values: out } = 
+					mass_with_kernel(&input, kernel).unwrap();
+				
+				// Calculate reference output with scalar kernel
+				let MassOutput { values: ref_out } = 
+					mass_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Property 1: Warmup period validation
+				// First 16 + period - 1 values should be NaN
+				let warmup_end = 16 + period - 1;
+				for i in 0..warmup_end.min(high.len()) {
+					prop_assert!(
+						out[i].is_nan(),
+						"Expected NaN during warmup at index {}, got {}", i, out[i]
+					);
+				}
+
+				// Test properties for each valid output value
+				for i in warmup_end..high.len() {
+					let y = out[i];
+					let r = ref_out[i];
+
+					// Property 2: Kernel consistency
+					// Different kernels should produce identical or near-identical results
+					if y.is_finite() && r.is_finite() {
+						let y_bits = y.to_bits();
+						let r_bits = r.to_bits();
+						let ulp_diff: u64 = y_bits.abs_diff(r_bits);
+
+						prop_assert!(
+							(y - r).abs() <= 1e-9 || ulp_diff <= 8,
+							"Kernel mismatch at idx {}: {} vs {} (ULP={})",
+							i, y, r, ulp_diff
+						);
+					} else {
+						// Both should be NaN or both should be finite
+						prop_assert_eq!(
+							y.is_nan(), r.is_nan(),
+							"NaN mismatch at idx {}: {} vs {}", i, y, r
+						);
+					}
+
+					// Property 3: Bounded output
+					// Mass Index should be positive and typically between 0 and 2.5*period
+					if y.is_finite() {
+						prop_assert!(
+							y > 0.0,
+							"Mass Index should be positive at idx {}, got {}", i, y
+						);
+						
+						// Mass Index rarely exceeds 2.5*period in realistic conditions
+						prop_assert!(
+							y <= (period as f64) * 2.5,
+							"Mass Index unusually high at idx {}: {} (period={})", i, y, period
+						);
+					}
+
+					// Property 4: Stable range property (combines zero and constant range)
+					// When range is stable (constant or zero), Mass Index approaches period
+					let window_start = i.saturating_sub(period - 1);
+					let window_end = i + 1;
+					let ranges: Vec<f64> = (window_start..window_end)
+						.map(|j| high[j] - low[j])
+						.collect();
+					
+					// Check if range is constant across the window
+					let is_constant_range = ranges.windows(2)
+						.all(|w| (w[0] - w[1]).abs() < 1e-9);
+					
+					// Only check convergence if we're well past the warmup and range has been stable
+					// Need at least 2*period bars after range becomes stable for convergence
+					if is_constant_range && y.is_finite() && i >= warmup_end + 2 * period {
+						let avg_range = ranges.iter().sum::<f64>() / ranges.len() as f64;
+						
+						// For zero or near-zero range
+						if avg_range < f64::EPSILON {
+							prop_assert!(
+								(y - period as f64).abs() <= 1e-6,
+								"Zero range Mass Index should be ~{} at idx {}, got {}", period, i, y
+							);
+						} 
+						// For constant non-zero range with reasonable size
+						else if avg_range > 0.01 && avg_range < 100.0 {
+							// Only check when range is in a reasonable band
+							// Realistic tolerance: Mass Index converges gradually to period
+							let tolerance = (period as f64) * 0.2 + 2.0;
+							prop_assert!(
+								(y - period as f64).abs() <= tolerance,
+								"Constant range Mass Index should be close to {} at idx {}, got {} (tolerance: {})", 
+								period, i, y, tolerance
+							);
+						}
+					}
+
+					// Property 5: High >= Low constraint
+					// Verify the indicator respects high >= low relationship
+					for j in window_start..window_end {
+						prop_assert!(
+							high[j] >= low[j] - f64::EPSILON,
+							"High should be >= Low at index {}: high={}, low={}", j, high[j], low[j]
+						);
+					}
+
+					// Property 6: No infinite values
+					// All non-warmup outputs should be finite (not infinite)
+					prop_assert!(
+						!y.is_infinite(),
+						"Found infinite value at idx {}: {}", i, y
+					);
+
+					// Property 7: Volatility response pattern
+					// Mass Index responds to volatility changes with a predictable pattern
+					if i >= warmup_end + period && y.is_finite() {
+						// Calculate average range in current window
+						let avg_range = ranges.iter().sum::<f64>() / ranges.len() as f64;
+						
+						// For very low volatility (near zero range), Mass Index converges toward period
+						// Note: convergence is gradual and depends on the EMA smoothing
+						if avg_range < 0.001 {
+							// More realistic tolerance based on how far from zero the range is
+							let tolerance = if avg_range < 1e-10 { 
+								1.0 
+							} else {
+								// Scale tolerance with period for very small but non-zero ranges
+								(period as f64) * 0.25 + 2.0
+							};
+							prop_assert!(
+								(y - period as f64).abs() <= tolerance,
+								"Low volatility Mass Index should be near {} at idx {}, got {} (avg_range: {}, tolerance: {})",
+								period, i, y, avg_range, tolerance
+							);
+						}
+						
+						// For significant volatility changes, verify response
+						if i > warmup_end + period + 5 {
+							// Compare current and previous window volatility
+							let prev_window_start = (i - 5).saturating_sub(period - 1);
+							let prev_window_end = i - 4;
+							let prev_ranges: Vec<f64> = (prev_window_start..prev_window_end)
+								.map(|j| high[j] - low[j])
+								.collect();
+							let prev_avg_range = prev_ranges.iter().sum::<f64>() / prev_ranges.len() as f64;
+							
+							// If volatility doubled, Mass Index should show some increase
+							if avg_range > prev_avg_range * 2.0 && prev_avg_range > 0.1 {
+								let prev_mass = out[i - 5];
+								if prev_mass.is_finite() {
+									prop_assert!(
+										y >= prev_mass - 0.5, // Allow some lag but expect general increase
+										"Mass Index should respond to doubling volatility: {} at idx {} vs {} at idx {}",
+										y, i, prev_mass, i - 5
+									);
+								}
+							}
+						}
+						
+						// General bounds check
+						prop_assert!(
+							y >= (period as f64) * 0.3 && y <= (period as f64) * 2.5,
+							"Mass Index out of reasonable bounds at idx {}: {} (period={})",
+							i, y, period
+						);
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_mass_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -978,6 +1246,9 @@ mod tests {
 		check_mass_nan_handling,
 		check_mass_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_mass_tests!(check_mass_property);
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);
 		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
