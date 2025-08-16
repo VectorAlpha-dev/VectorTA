@@ -1325,6 +1325,302 @@ mod tests {
         }
     }
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_ui_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		let strat = (2usize..=20, 1.0f64..200.0f64)
+			.prop_flat_map(|(period, scalar)| {
+				let min_data_needed = period * 2 - 2 + 20; // warmup + some data for testing
+				(
+					prop::collection::vec(
+						(0.001f64..1e6f64).prop_filter("positive finite", |x| x.is_finite() && *x > 0.0),
+						min_data_needed..400,
+					),
+					Just(period),
+					Just(scalar),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period, scalar)| {
+				let params = UiParams {
+					period: Some(period),
+					scalar: Some(scalar),
+				};
+				let input = UiInput::from_slice(&data, params);
+
+				let UiOutput { values: out } = ui_with_kernel(&input, kernel).unwrap();
+				let UiOutput { values: ref_out } = ui_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Property 1: Warmup period should be NaN
+				let warmup_period = period * 2 - 2;
+				for i in 0..warmup_period.min(data.len()) {
+					prop_assert!(
+						out[i].is_nan(),
+						"[{}] Expected NaN during warmup at index {}, got {}",
+						test_name, i, out[i]
+					);
+				}
+
+				// Property 2: Non-negativity - UI must always be >= 0
+				for (i, &value) in out.iter().enumerate() {
+					if !value.is_nan() {
+						prop_assert!(
+							value >= 0.0,
+							"[{}] UI must be non-negative at index {}: got {}",
+							test_name, i, value
+						);
+					}
+				}
+
+				// Property 3: Zero when prices monotonically increase
+				let is_monotonic_increase = data.windows(2).all(|w| w[1] >= w[0]);
+				if is_monotonic_increase && data.len() > warmup_period {
+					for i in warmup_period..data.len() {
+						prop_assert!(
+							out[i].abs() < 1e-9,
+							"[{}] UI should be ~0 for monotonic increase at index {}: got {}",
+							test_name, i, out[i]
+						);
+					}
+				}
+
+				// Property 4: Period=1 edge case - UI should always be 0
+				if period == 1 {
+					// With period=1, warmup is 0, so all values should be valid
+					for (i, &value) in out.iter().enumerate() {
+						prop_assert!(
+							value.abs() < 1e-9,
+							"[{}] UI with period=1 should be 0 at index {}: got {}",
+							test_name, i, value
+						);
+					}
+				}
+
+				// Property 5: Flat data should give UI = 0
+				let is_flat = data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12);
+				if is_flat && data.len() > warmup_period {
+					for i in warmup_period..data.len() {
+						prop_assert!(
+							out[i].abs() < 1e-9,
+							"[{}] UI should be 0 for flat data at index {}: got {}",
+							test_name, i, out[i]
+						);
+					}
+				}
+
+				// Property 6: Bounded by theoretical maximum
+				// UI = sqrt(avg(squared_percentage_drawdowns)) * scalar
+				// Maximum theoretical: all prices drop to near-zero = 100% drawdown
+				// UI_max = sqrt(1.0) * scalar = scalar
+				for i in warmup_period..data.len() {
+					if !out[i].is_nan() {
+						// UI theoretical max is scalar * 1.0, allow 10% margin for numerical precision
+						prop_assert!(
+							out[i] <= scalar * 1.1,
+							"[{}] UI exceeds theoretical maximum at index {}: UI={}, max={}",
+							test_name, i, out[i], scalar * 1.1
+						);
+						
+						// Also check that UI is finite
+						prop_assert!(
+							out[i].is_finite(),
+							"[{}] UI is not finite at index {}: {}",
+							test_name, i, out[i]
+						);
+					}
+				}
+
+				// Property 7: Kernel consistency - all kernels should produce identical results
+				for i in 0..data.len() {
+					let y = out[i];
+					let r = ref_out[i];
+					
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert!(
+							y.to_bits() == r.to_bits(),
+							"[{}] finite/NaN mismatch at index {}: {} vs {}",
+							test_name, i, y, r
+						);
+						continue;
+					}
+
+					let ulp_diff: u64 = y.to_bits().abs_diff(r.to_bits());
+					prop_assert!(
+						(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+						"[{}] kernel mismatch at index {}: {} vs {} (ULP={})",
+						test_name, i, y, r, ulp_diff
+					);
+				}
+
+				// Property 8: Determinism - running twice should give identical results
+				let UiOutput { values: out2 } = ui_with_kernel(&input, kernel).unwrap();
+				for i in 0..data.len() {
+					if out[i].is_finite() && out2[i].is_finite() {
+						prop_assert!(
+							(out[i] - out2[i]).abs() < 1e-12,
+							"[{}] Non-deterministic result at index {}: {} vs {}",
+							test_name, i, out[i], out2[i]
+						);
+					} else {
+						prop_assert!(
+							out[i].to_bits() == out2[i].to_bits(),
+							"[{}] Non-deterministic NaN at index {}",
+							test_name, i
+						);
+					}
+				}
+
+				// Property 9: Scalar proportionality
+				// Test that doubling scalar doubles the output
+				if scalar > 1.0 && scalar < 100.0 {
+					let params2 = UiParams {
+						period: Some(period),
+						scalar: Some(scalar * 2.0),
+					};
+					let input2 = UiInput::from_slice(&data, params2);
+					let UiOutput { values: out_scaled } = ui_with_kernel(&input2, kernel).unwrap();
+					
+					for i in warmup_period..data.len() {
+						if out[i].is_finite() && out_scaled[i].is_finite() && out[i] > 1e-9 {
+							let ratio = out_scaled[i] / out[i];
+							prop_assert!(
+								(ratio - 2.0).abs() < 1e-6,
+								"[{}] Scalar not proportional at index {}: ratio={} (expected 2.0)",
+								test_name, i, ratio
+							);
+						}
+					}
+				}
+
+				// Property 10: When data is well-behaved, outputs should stabilize
+				// For sufficiently large, stable data, we should get valid UI values
+				let has_large_stable_region = data.len() > period * 4 && 
+					data.iter().all(|&x| x > 0.1 && x < 1e5);
+				if has_large_stable_region {
+					// Count valid outputs after warmup
+					let valid_count = out[warmup_period..]
+						.iter()
+						.filter(|&&x| !x.is_nan())
+						.count();
+					let expected_valid = data.len() - warmup_period;
+					
+					// We should have mostly valid outputs (allow some edge cases)
+					prop_assert!(
+						valid_count as f64 >= expected_valid as f64 * 0.8,
+						"[{}] Too few valid outputs: {} out of {} expected",
+						test_name, valid_count, expected_valid
+					);
+				}
+
+				// Property 11: Volatility relationship - UI should increase with volatility
+				// Create synthetic high and low volatility periods if we have enough data
+				if data.len() > period * 4 {
+					// Find a stable period (low volatility)
+					let mut min_volatility_ui = f64::INFINITY;
+					let mut max_volatility_ui = 0.0;
+					
+					for i in warmup_period..data.len() {
+						if !out[i].is_nan() {
+							// Look at the price range in the window
+							let window_start = i.saturating_sub(period - 1);
+							let window = &data[window_start..=i];
+							let max_price = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+							let min_price = window.iter().cloned().fold(f64::INFINITY, f64::min);
+							let price_range = (max_price - min_price) / max_price;
+							
+							// Track UI values for different volatility levels
+							if price_range < 0.01 && out[i] < min_volatility_ui {
+								min_volatility_ui = out[i];
+							}
+							if price_range > 0.1 && out[i] > max_volatility_ui {
+								max_volatility_ui = out[i];
+							}
+						}
+					}
+					
+					// If we found both low and high volatility periods, high should have higher UI
+					if min_volatility_ui != f64::INFINITY && max_volatility_ui > 0.0 {
+						prop_assert!(
+							max_volatility_ui >= min_volatility_ui,
+							"[{}] UI should be higher for volatile periods: low_vol_UI={}, high_vol_UI={}",
+							test_name, min_volatility_ui, max_volatility_ui
+						);
+					}
+				}
+
+				// Property 12: Direct formula verification for simple cases
+				// For a window with sufficient drawdown, verify the calculation
+				if period <= 5 && data.len() > warmup_period + period {
+					// Find a window where we can manually calculate
+					for i in (warmup_period + period)..data.len().min(warmup_period + period * 2) {
+						if !out[i].is_nan() && out[i] > scalar * 0.01 {  // Only verify when UI is meaningful
+							// Calculate the window of interest for the last 'period' UI calculations
+							// UI at position i uses a sliding window approach
+							let mut sum_squared_dd = 0.0;
+							let mut valid_count = 0;
+							
+							// For UI at position i, we need to look at the last 'period' drawdowns
+							for j in 0..period {
+								let pos = i - j;
+								if pos >= period - 1 {
+									// Find the rolling max for this position
+									let max_start = pos + 1 - period;
+									let max_end = pos + 1;
+									let rolling_max = data[max_start..max_end]
+										.iter()
+										.cloned()
+										.fold(f64::NEG_INFINITY, f64::max);
+									
+									if rolling_max > 0.0 && !data[pos].is_nan() {
+										let dd = scalar * (data[pos] - rolling_max) / rolling_max;
+										sum_squared_dd += dd * dd;
+										valid_count += 1;
+									}
+								}
+							}
+							
+							if valid_count == period {
+								let manual_ui = (sum_squared_dd / period as f64).sqrt();
+								// Allow 5% tolerance or small absolute difference for floating point
+								let tolerance = manual_ui * 0.05 + 1e-6;
+								prop_assert!(
+									(out[i] - manual_ui).abs() <= tolerance,
+									"[{}] Direct formula verification failed at index {}: calculated={}, expected={}, diff={}",
+									test_name, i, out[i], manual_ui, (out[i] - manual_ui).abs()
+								);
+								break; // Only need to verify once
+							}
+						}
+					}
+				}
+
+				// Property 13: Near-zero volatility test
+				// When price movements are minimal, UI should approach zero
+				let has_low_volatility = data.windows(2)
+					.all(|w| (w[1] - w[0]).abs() / w[0] < 0.0001); // Less than 0.01% change
+				if has_low_volatility && data.len() > warmup_period {
+					for i in warmup_period..data.len() {
+						if !out[i].is_nan() {
+							prop_assert!(
+								out[i] < scalar * 0.01, // UI should be less than 1% of scalar
+								"[{}] UI too high for near-zero volatility at index {}: UI={}",
+								test_name, i, out[i]
+							);
+						}
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	generate_all_ui_tests!(
 		check_ui_partial_params,
 		check_ui_accuracy,
@@ -1334,6 +1630,9 @@ mod tests {
 		check_ui_very_small_dataset,
 		check_ui_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_ui_tests!(check_ui_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);

@@ -1430,6 +1430,275 @@ mod tests {
 
 	gen_batch_tests!(check_batch_default_row);
 	gen_batch_tests!(check_batch_no_poison);
+
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_maaq_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy 1: Main strategy - test general properties with realistic data
+		let main_strat = (
+			proptest::collection::vec((-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()), 20..200),
+			2usize..30,  // period
+			1usize..10,  // fast_period  
+			10usize..50, // slow_period
+		).prop_filter("valid params", |(data, period, fast_p, slow_p)| {
+			*period <= data.len() && *fast_p < *slow_p
+		});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&main_strat, |(data, period, fast_p, slow_p)| {
+				let params = MaaqParams {
+					period: Some(period),
+					fast_period: Some(fast_p),
+					slow_period: Some(slow_p),
+				};
+				let input = MaaqInput::from_slice(&data, params.clone());
+
+				// Run with test kernel and scalar reference
+				let result = maaq_with_kernel(&input, kernel)?;
+				let reference = maaq_with_kernel(&input, Kernel::Scalar)?;
+
+				// Property 1: Output length matches input
+				prop_assert_eq!(result.values.len(), data.len(), 
+					"Output length {} doesn't match input length {}", result.values.len(), data.len());
+
+				// Property 2: First 'period' values equal raw prices (warmup)
+				for i in 0..period.min(data.len()) {
+					let expected = data[i];
+					let actual = result.values[i];
+					if expected.is_finite() {
+						prop_assert!(
+							(actual - expected).abs() < 1e-10,
+							"Warmup value at {} incorrect: got {}, expected {}", i, actual, expected
+						);
+					}
+				}
+
+				// Property 3: SIMD consistency with scalar (ULP tolerance)
+				for i in 0..result.values.len() {
+					let y = result.values[i];
+					let r = reference.values[i];
+					
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert_eq!(y.to_bits(), r.to_bits(), 
+							"NaN/Inf mismatch at {}: {} vs {}", i, y, r);
+						continue;
+					}
+
+					let ulp_diff = y.to_bits().abs_diff(r.to_bits());
+					prop_assert!(
+						(y - r).abs() <= 1e-9 || ulp_diff <= 5,
+						"SIMD mismatch at {}: {} vs {} (ULP={})", i, y, r, ulp_diff
+					);
+				}
+
+				// Property 4: Values stay within reasonable bounds
+				// MAAQ uses adaptive smoothing bounded by EMA nature
+				let data_min = data.iter().copied().fold(f64::INFINITY, f64::min);
+				let data_max = data.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+				let range = (data_max - data_min).abs();
+				let tolerance = range * 0.02; // Allow only 2% tolerance since MAAQ is bounded
+
+				for (i, &val) in result.values.iter().enumerate() {
+					if val.is_finite() && i >= period {
+						prop_assert!(
+							val >= data_min - tolerance && val <= data_max + tolerance,
+							"Value {} at index {} outside bounds [{}, {}]", 
+							val, i, data_min - tolerance, data_max + tolerance
+						);
+					}
+				}
+
+				// Property 5: Constant data produces stable output
+				if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) && data.len() > period {
+					let constant_val = data[0];
+					for (i, &val) in result.values[period..].iter().enumerate() {
+						prop_assert!(
+							(val - constant_val).abs() < 1e-8,
+							"Constant data should produce constant output, got {} at index {}", 
+							val, i + period
+						);
+					}
+				}
+
+				Ok(())
+			})?;
+
+		// Strategy 2: MAAQ-specific efficiency ratio and adaptive behavior
+		let maaq_strat = (
+			proptest::collection::vec((-100f64..100f64).prop_filter("finite", |x| x.is_finite()), 50..100),
+			5usize..15,  // period
+			1usize..5,   // fast_period
+			20usize..40, // slow_period
+		).prop_filter("valid maaq params", |(_data, period, fast_p, slow_p)| {
+			*fast_p < *slow_p
+		});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&maaq_strat, |(data, period, fast_p, slow_p)| {
+				let params = MaaqParams {
+					period: Some(period),
+					fast_period: Some(fast_p),
+					slow_period: Some(slow_p),
+				};
+				let input = MaaqInput::from_slice(&data, params);
+				let result = maaq_with_kernel(&input, kernel)?;
+
+				// Calculate efficiency ratios manually to verify MAAQ behavior
+				let fast_sc = 2.0 / (fast_p as f64 + 1.0);
+				let slow_sc = 2.0 / (slow_p as f64 + 1.0);
+				
+				// After warmup, verify adaptive smoothing behavior
+				for i in (period + 1)..data.len() {
+					// Calculate efficiency ratio components
+					let signal = (data[i] - data[i - period]).abs();
+					let noise: f64 = (1..=period)
+						.map(|j| (data[i - j + 1] - data[i - j]).abs())
+						.sum();
+					
+					// MAAQ property: efficiency ratio should be in [0, 1]
+					if noise > f64::EPSILON {
+						let er = signal / noise;
+						prop_assert!(
+							er >= 0.0 && er <= 1.0 + 1e-10,
+							"Efficiency ratio {} out of bounds at index {}", er, i
+						);
+						
+						// When ER is high (trending), output should follow input more closely
+						// When ER is low (noisy), output should be smoother
+						let sc = (er * fast_sc + slow_sc).powi(2);
+						
+						// Smoothing constant should be bounded
+						let min_sc = slow_sc.powi(2);
+						let max_sc = (fast_sc + slow_sc).powi(2);
+						prop_assert!(
+							sc >= min_sc - 1e-10 && sc <= max_sc + 1e-10,
+							"Smoothing constant {} out of bounds [{}..{}] at index {}", 
+							sc, min_sc, max_sc, i
+						);
+					}
+				}
+
+				// Test adaptive behavior: create trending vs noisy sections
+				if data.len() >= period * 3 {
+					// For trending sections (large signal), should track closely
+					let trending_indices: Vec<usize> = (period..data.len())
+						.filter(|&i| {
+							let signal = (data[i] - data[i.saturating_sub(period)]).abs();
+							signal > 10.0  // Strong trend
+						})
+						.collect();
+					
+					for &i in trending_indices.iter().take(5) {
+						let tracking_error = (result.values[i] - data[i]).abs();
+						let price_range = data[i.saturating_sub(period)..=i]
+							.iter()
+							.fold((f64::INFINITY, f64::NEG_INFINITY), |(min, max), &v| {
+								(min.min(v), max.max(v))
+							});
+						let local_range = (price_range.1 - price_range.0).abs();
+						
+						// In trending markets, MAAQ should track within 20% of local range
+						prop_assert!(
+							tracking_error <= local_range * 0.2 + 1.0,
+							"Poor tracking in trend at {}: error {} > 20% of range {}", 
+							i, tracking_error, local_range
+						);
+					}
+				}
+
+				Ok(())
+			})?;
+
+		// Strategy 3: Step response - test convergence to new levels
+		let step_strat = (
+			10usize..30,  // period
+			2usize..5,    // fast_period
+			20usize..40,  // slow_period
+			-100f64..100f64,  // initial level
+			-100f64..100f64,  // final level
+		).prop_filter("different levels", |(_p, _f, _s, init, final_level)| {
+			(init - final_level).abs() > 1.0
+		});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&step_strat, |(period, fast_p, slow_p, initial, final_level)| {
+				// Create step function data
+				let mut data = vec![initial; 50];
+				data.extend(vec![final_level; 50]);
+
+				let params = MaaqParams {
+					period: Some(period),
+					fast_period: Some(fast_p),
+					slow_period: Some(slow_p),
+				};
+				let input = MaaqInput::from_slice(&data, params);
+				let result = maaq_with_kernel(&input, kernel)?;
+
+				// Check that output eventually converges toward the new level
+				let last_values = &result.values[90..];
+				let convergence_target = final_level;
+				
+				for &val in last_values {
+					let distance_to_target = (val - convergence_target).abs();
+					let initial_distance = (initial - final_level).abs();
+					
+					// Should be much closer to final than initial (stricter convergence)
+					prop_assert!(
+						distance_to_target < initial_distance * 0.3,
+						"Failed to converge: value {} too far from target {}", 
+						val, convergence_target
+					);
+				}
+
+				Ok(())
+			})?;
+
+		// Strategy 4: Small data edge cases
+		let small_strat = (
+			proptest::collection::vec((-100f64..100f64).prop_filter("finite", |x| x.is_finite()), 1..5),
+			1usize..3,   // period
+			1usize..3,   // fast_period  
+			3usize..6,   // slow_period
+		).prop_filter("valid small params", |(data, period, _fast_p, _slow_p)| {
+			*period <= data.len()
+		});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&small_strat, |(data, period, fast_p, slow_p)| {
+				let params = MaaqParams {
+					period: Some(period),
+					fast_period: Some(fast_p),
+					slow_period: Some(slow_p),
+				};
+				let input = MaaqInput::from_slice(&data, params);
+				
+				// Should not panic with small data
+				let result = maaq_with_kernel(&input, kernel)?;
+				
+				// Basic sanity checks
+				prop_assert_eq!(result.values.len(), data.len());
+				
+				// First values should match input during warmup
+				for i in 0..period.min(data.len()) {
+					if data[i].is_finite() {
+						prop_assert!(
+							(result.values[i] - data[i]).abs() < 1e-10,
+							"Small data warmup mismatch at {}", i
+						);
+					}
+				}
+
+				Ok(())
+			})?;
+
+		Ok(())
+	}
+
+	#[cfg(feature = "proptest")]
+	generate_all_maaq_tests!(check_maaq_property);
 }
 
 // --- Python bindings ---

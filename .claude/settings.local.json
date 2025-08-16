@@ -278,13 +278,7 @@
       "Bash(./test_medprice_nan.exe)",
       "WebSearch",
       "WebFetch(domain:lemire.me)",
-      "WebFetch(domain:www.intel.com)",
-      "Bash(PROPTEST_CASES=10 cargo test --features nightly-avx --lib indicators::moving_averages::hma::tests::check_hma_property_avx512_f64 -- --nocapture)",
-      "Bash(./test_hma_avx512.exe)",
-      "Bash(./test_hma_avx512_detailed.exe)",
-      "Bash(./test_horiz_sum.exe)",
-      "Bash(PROPTEST_CASES=1000 cargo test --features nightly-avx --lib indicators::cci::tests::check_cci_property_scalar -- --nocapture)",
-      "Bash(PROPTEST_CASES=1000 cargo test --features nightly-avx --lib indicators::cci::tests::check_cci_property_avx512 -- --nocapture)"
+      "Bash(RUST_LOG=proptest=debug cargo test --features nightly-avx --lib indicators::moving_averages::fwma::tests::check_fwma_property_scalar_f64 -- --nocapture)"
     ],
     "deny": []
   }

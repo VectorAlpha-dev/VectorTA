@@ -1078,6 +1078,208 @@ mod tests {
         }
     }
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_ad_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Generate test data with appropriate ranges for AD (OHLCV data)
+		// Data length: 10-400 to test various sizes
+		let strat = (10usize..400).prop_flat_map(|len| {
+			// Generate OHLCV data with proper constraints
+			prop::collection::vec(
+				// Generate (low, high_delta, close_ratio, volume) tuples
+				(1.0f64..1000.0f64, 0.0f64..500.0f64, 0.0f64..1.0f64, 0.0f64..1e6f64)
+					.prop_filter("finite values", |(l, hd, cr, v)| {
+						l.is_finite() && hd.is_finite() && cr.is_finite() && v.is_finite() && *v >= 0.0
+					})
+					.prop_map(|(low, high_delta, close_ratio, volume)| {
+						let high = low + high_delta;
+						let close = if high_delta == 0.0 {
+							low
+						} else {
+							low + high_delta * close_ratio
+						};
+						(high, low, close, volume)
+					}),
+				len,
+			)
+			.prop_map(|data| {
+				let (highs, lows, closes, volumes): (Vec<_>, Vec<_>, Vec<_>, Vec<_>) = 
+					data.into_iter().map(|(h, l, c, v)| (h, l, c, v)).unzip4();
+				(highs, lows, closes, volumes)
+			})
+		});
+
+		// Helper trait for unzip4
+		trait Unzip4<A, B, C, D> {
+			fn unzip4(self) -> (Vec<A>, Vec<B>, Vec<C>, Vec<D>);
+		}
+		
+		impl<I, A, B, C, D> Unzip4<A, B, C, D> for I
+		where
+			I: Iterator<Item = (A, B, C, D)>,
+		{
+			fn unzip4(self) -> (Vec<A>, Vec<B>, Vec<C>, Vec<D>) {
+				let (mut a, mut b, mut c, mut d) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+				for (av, bv, cv, dv) in self {
+					a.push(av);
+					b.push(bv);
+					c.push(cv);
+					d.push(dv);
+				}
+				(a, b, c, d)
+			}
+		}
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(highs, lows, closes, volumes)| {
+				let input = AdInput::from_slices(&highs, &lows, &closes, &volumes, AdParams::default());
+				
+				// Get output from the kernel being tested
+				let AdOutput { values: out } = ad_with_kernel(&input, kernel).unwrap();
+				
+				// Get reference output from scalar kernel
+				let AdOutput { values: ref_out } = ad_with_kernel(&input, Kernel::Scalar).unwrap();
+				
+				// Property 1: Output length should match input length
+				prop_assert_eq!(out.len(), highs.len(), "Output length mismatch");
+				
+				// Property 2: No NaN values (AD has no warmup period)
+				for (i, &val) in out.iter().enumerate() {
+					prop_assert!(
+						!val.is_nan(),
+						"Unexpected NaN at index {}: AD should not have NaN values",
+						i
+					);
+				}
+				
+				// Property 3: SIMD kernel consistency
+				for i in 0..out.len() {
+					let y = out[i];
+					let r = ref_out[i];
+					
+					let y_bits = y.to_bits();
+					let r_bits = r.to_bits();
+					
+					// Check for exact bit equality for special values
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert_eq!(
+							y_bits, r_bits,
+							"Special value mismatch at idx {}: {} vs {}",
+							i, y, r
+						);
+					} else {
+						// For finite values, allow small tolerance
+						let ulp_diff: u64 = y_bits.abs_diff(r_bits);
+						prop_assert!(
+							(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+							"Value mismatch at idx {}: {} vs {} (ULP={})",
+							i, y, r, ulp_diff
+						);
+					}
+				}
+				
+				// Property 4: Zero volume handling
+				// When volume is 0, AD should remain unchanged from previous value
+				for i in 1..volumes.len() {
+					if volumes[i] == 0.0 {
+						prop_assert!(
+							(out[i] - out[i - 1]).abs() < 1e-10,
+							"AD should not change when volume is 0 at index {}",
+							i
+						);
+					}
+				}
+				
+				// Property 5: High = Low edge case
+				// When high equals low, MFM calculation should handle division by zero gracefully
+				for i in 0..highs.len() {
+					if (highs[i] - lows[i]).abs() < 1e-10 {
+						if i == 0 {
+							prop_assert!(
+								out[i].abs() < 1e-10,
+								"When high=low, first AD value should be 0, got {}",
+								out[i]
+							);
+						} else {
+							prop_assert!(
+								(out[i] - out[i - 1]).abs() < 1e-10,
+								"When high=low at index {}, AD should remain unchanged",
+								i
+							);
+						}
+					}
+				}
+				
+				// Property 6: Cumulative property
+				// AD is cumulative, so we can verify by recalculating
+				let mut expected_ad = 0.0;
+				for i in 0..highs.len() {
+					let hl = highs[i] - lows[i];
+					if hl != 0.0 {
+						let mfm = ((closes[i] - lows[i]) - (highs[i] - closes[i])) / hl;
+						let mfv = mfm * volumes[i];
+						expected_ad += mfv;
+					}
+					prop_assert!(
+						(out[i] - expected_ad).abs() < 1e-9,
+						"Cumulative property violation at index {}: expected {}, got {}",
+						i, expected_ad, out[i]
+					);
+				}
+				
+				// Property 7: First value calculation
+				// The first AD value should equal the first MFV
+				if !highs.is_empty() {
+					let hl = highs[0] - lows[0];
+					let expected_first = if hl != 0.0 {
+						((closes[0] - lows[0]) - (highs[0] - closes[0])) / hl * volumes[0]
+					} else {
+						0.0
+					};
+					prop_assert!(
+						(out[0] - expected_first).abs() < 1e-10,
+						"First value mismatch: expected {}, got {}",
+						expected_first, out[0]
+					);
+				}
+				
+				// Property 8: Price relationship constraints
+				// Verify that input data maintains low <= close <= high
+				for i in 0..highs.len() {
+					prop_assert!(
+						lows[i] <= closes[i] + 1e-10 && closes[i] <= highs[i] + 1e-10,
+						"Price constraint violation at index {}: low={}, close={}, high={}",
+						i, lows[i], closes[i], highs[i]
+					);
+				}
+				
+				// Property 9: Special case - all equal prices
+				// If high = low = close for all data points, AD should remain at 0
+				let all_equal = highs.iter()
+					.zip(lows.iter())
+					.zip(closes.iter())
+					.all(|((&h, &l), &c)| (h - l).abs() < 1e-10 && (l - c).abs() < 1e-10);
+				
+				if all_equal {
+					for (i, &val) in out.iter().enumerate() {
+						prop_assert!(
+							val.abs() < 1e-10,
+							"When all prices are equal, AD should be 0 at index {}, got {}",
+							i, val
+						);
+					}
+				}
+				
+				Ok(())
+			})
+			.unwrap();
+		
+		Ok(())
+	}
+
 	generate_all_ad_tests!(
 		check_ad_partial_params,
 		check_ad_accuracy,
@@ -1087,6 +1289,10 @@ mod tests {
 		check_ad_streaming,
 		check_ad_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_ad_tests!(check_ad_property);
+
 	fn check_batch_single_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);
 		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";

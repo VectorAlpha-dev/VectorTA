@@ -1637,6 +1637,345 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_vlma_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Generate test parameters
+		let strat = (2usize..=20, 0.001f64..1e6f64)
+			.prop_flat_map(|(min_period, scalar)| {
+				// max_period must be > min_period
+				let max_period_start = min_period + 1;
+				(
+					prop::collection::vec(
+						(0.001f64..1e6f64).prop_filter("positive finite", |x| x.is_finite() && *x > 0.0),
+						max_period_start..400,
+					),
+					Just(min_period),
+					(max_period_start..=50),
+					prop::sample::select(vec!["sma", "ema", "wma"]),
+					(0usize..=2), // devtype: 0=std, 1=mad, 2=median
+					Just(scalar),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, min_period, max_period, matype, devtype, scalar)| {
+				// Ensure max_period is valid for the data length
+				if max_period > data.len() {
+					return Ok(());
+				}
+
+				let params = VlmaParams {
+					min_period: Some(min_period),
+					max_period: Some(max_period),
+					matype: Some(matype.to_string()),
+					devtype: Some(devtype),
+				};
+				let input = VlmaInput::from_slice(&data, params.clone());
+
+				// Test with specified kernel
+				let VlmaOutput { values: out } = vlma_with_kernel(&input, kernel).unwrap();
+				
+				// Also compute with scalar kernel for comparison
+				let VlmaOutput { values: ref_out } = vlma_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Property 1: Warmup period validation
+				// VLMA sets an initial value at first_valid, then NaN until max_period - 1
+				let first_valid = data.iter().position(|&x| !x.is_nan()).unwrap_or(0);
+				let expected_warmup = first_valid + max_period - 1;
+				
+				// Check that first_valid has a value (if it exists)
+				if first_valid < out.len() {
+					prop_assert!(
+						!out[first_valid].is_nan(),
+						"Expected initial value at first_valid index {}, got NaN",
+						first_valid
+					);
+					
+					// Property 1b: Initial value should equal first data point
+					prop_assert!(
+						(out[first_valid] - data[first_valid]).abs() < 1e-9,
+						"Initial VLMA value {} should equal first data point {} at index {}",
+						out[first_valid],
+						data[first_valid],
+						first_valid
+					);
+				}
+				
+				// Check NaN values between first_valid+1 and expected_warmup
+				for i in (first_valid + 1)..expected_warmup.min(out.len()) {
+					prop_assert!(
+						out[i].is_nan(),
+						"Expected NaN during warmup at index {}, got {}",
+						i,
+						out[i]
+					);
+				}
+
+				// Property 2: Regular values should start at expected_warmup
+				if expected_warmup < out.len() {
+					prop_assert!(
+						!out[expected_warmup].is_nan(),
+						"Expected valid value at warmup end (index {}), got NaN",
+						expected_warmup
+					);
+				}
+
+				// Property 3: Output bounds - VLMA should be within exact data range
+				let data_min = data.iter().cloned().fold(f64::INFINITY, f64::min);
+				let data_max = data.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+				
+				for (i, &val) in out.iter().enumerate() {
+					if !val.is_nan() && i != first_valid { // Skip first_valid as it equals the data point
+						prop_assert!(
+							val >= data_min - 1e-9 && val <= data_max + 1e-9,
+							"VLMA at index {} = {} is outside data range [{}, {}]",
+							i,
+							val,
+							data_min,
+							data_max
+						);
+					}
+				}
+
+				// Property 4: Convergence for constant data
+				if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) {
+					// For constant data, VLMA should converge to that constant
+					for (i, &val) in out.iter().enumerate() {
+						if !val.is_nan() && i >= expected_warmup + 10 {
+							prop_assert!(
+								(val - data[0]).abs() < 1e-6,
+								"VLMA should converge to constant value {} but got {} at index {}",
+								data[0],
+								val,
+								i
+							);
+						}
+					}
+				}
+
+				// Property 5: Smoothness - output variance should be <= input variance in stable regions
+				if data.len() >= max_period * 2 {
+					let stable_start = expected_warmup + max_period;
+					let stable_end = data.len();
+					
+					if stable_start < stable_end {
+						let input_segment = &data[stable_start..stable_end];
+						let output_segment = &out[stable_start..stable_end];
+						
+						// Calculate variance for both
+						let input_mean: f64 = input_segment.iter().sum::<f64>() / input_segment.len() as f64;
+						let input_var: f64 = input_segment.iter()
+							.map(|x| (x - input_mean).powi(2))
+							.sum::<f64>() / input_segment.len() as f64;
+						
+						let valid_outputs: Vec<f64> = output_segment.iter()
+							.filter(|x| !x.is_nan())
+							.cloned()
+							.collect();
+						
+						if valid_outputs.len() > 1 {
+							let output_mean: f64 = valid_outputs.iter().sum::<f64>() / valid_outputs.len() as f64;
+							let output_var: f64 = valid_outputs.iter()
+								.map(|x| (x - output_mean).powi(2))
+								.sum::<f64>() / valid_outputs.len() as f64;
+							
+							// VLMA should smooth the data, so variance should be less than or equal to input
+							prop_assert!(
+								output_var <= input_var * 1.01 || output_var < 1e-10,
+								"Output variance {} should not exceed input variance {} (smoothing property)",
+								output_var,
+								input_var
+							);
+						}
+					}
+				}
+				
+				// Property 5b: Adaptive period behavior test
+				// For volatile data, VLMA should show adaptive behavior
+				if data.len() >= max_period * 3 {
+					// Calculate volatility in two different regions
+					let mid_point = data.len() / 2;
+					let region1_start = expected_warmup + max_period;
+					
+					// Ensure mid_point is after region1_start to avoid underflow
+					if mid_point > region1_start && data.len() > mid_point + max_period {
+						let region1_end = region1_start + max_period.min((mid_point - region1_start) / 2);
+						let region2_start = mid_point + max_period;
+						let region2_end = region2_start + max_period.min((data.len() - region2_start) / 2);
+					
+						if region1_end > region1_start && region2_end > region2_start {
+							// Calculate standard deviation for each region
+							let calc_std = |segment: &[f64]| -> f64 {
+								let mean = segment.iter().sum::<f64>() / segment.len() as f64;
+								let variance = segment.iter()
+									.map(|x| (x - mean).powi(2))
+									.sum::<f64>() / segment.len() as f64;
+								variance.sqrt()
+							};
+							
+							let region1_data = &data[region1_start..region1_end.min(data.len())];
+							let region2_data = &data[region2_start..region2_end.min(data.len())];
+							
+							if region1_data.len() > 2 && region2_data.len() > 2 {
+								let std1 = calc_std(region1_data);
+								let std2 = calc_std(region2_data);
+								
+								// If one region is significantly more volatile than the other
+								if (std1 > std2 * 2.0 || std2 > std1 * 2.0) && std1 > 1e-6 && std2 > 1e-6 {
+									// VLMA outputs should show some difference between regions
+									let out1: Vec<f64> = out[region1_start..region1_end.min(out.len())]
+										.iter()
+										.filter(|x| !x.is_nan())
+										.cloned()
+										.collect();
+									let out2: Vec<f64> = out[region2_start..region2_end.min(out.len())]
+										.iter()
+										.filter(|x| !x.is_nan())
+										.cloned()
+										.collect();
+									
+									if out1.len() > 2 && out2.len() > 2 {
+										let out_std1 = calc_std(&out1);
+										let out_std2 = calc_std(&out2);
+										
+										// The region with higher volatility should have different characteristics
+										prop_assert!(
+											(out_std1 - out_std2).abs() > 1e-10 || (std1 - std2).abs() < 1e-6,
+											"VLMA should show adaptive behavior: region1 std={}, region2 std={}, but outputs are too similar",
+											std1,
+											std2
+										);
+									}
+								}
+							}
+						}
+					}
+				}
+
+				// Property 6: Kernel consistency
+				for i in expected_warmup..out.len().min(ref_out.len()) {
+					let y = out[i];
+					let r = ref_out[i];
+
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert!(
+							y.to_bits() == r.to_bits(),
+							"NaN/Inf mismatch at index {}: {} vs {}",
+							i,
+							y,
+							r
+						);
+						continue;
+					}
+
+					// Check ULP difference for floating point comparison
+					let y_bits = y.to_bits();
+					let r_bits = r.to_bits();
+					let ulp_diff: u64 = y_bits.abs_diff(r_bits);
+
+					prop_assert!(
+						(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+						"Kernel mismatch at index {}: {} vs {} (ULP={})",
+						i,
+						y,
+						r,
+						ulp_diff
+					);
+				}
+
+				// Property 7: No poison values (in debug builds)
+				#[cfg(debug_assertions)]
+				for (i, &val) in out.iter().enumerate() {
+					if !val.is_nan() {
+						let bits = val.to_bits();
+						prop_assert!(
+							bits != 0x11111111_11111111 &&
+							bits != 0x22222222_22222222 &&
+							bits != 0x33333333_33333333,
+							"Found poison value {} (0x{:016X}) at index {}",
+							val,
+							bits,
+							i
+						);
+					}
+				}
+
+				// Property 8: Monotonicity trend preservation
+				// If data is strictly increasing/decreasing, VLMA should follow the trend
+				let is_increasing = data.windows(2).all(|w| w[1] >= w[0]);
+				let is_decreasing = data.windows(2).all(|w| w[1] <= w[0]);
+				
+				if is_increasing || is_decreasing {
+					let valid_outputs: Vec<(usize, f64)> = out.iter()
+						.enumerate()
+						.filter(|(_, x)| !x.is_nan())
+						.map(|(i, &x)| (i, x))
+						.collect();
+					
+					if valid_outputs.len() >= 10 {
+						// Check last 5 values follow the trend
+						let last_5 = &valid_outputs[valid_outputs.len() - 5..];
+						if is_increasing {
+							for w in last_5.windows(2) {
+								prop_assert!(
+									w[1].1 >= w[0].1 * 0.999, // Tighter tolerance of 0.1%
+									"VLMA should be non-decreasing for increasing data at indices {}-{}: {} > {}",
+									w[0].0,
+									w[1].0,
+									w[0].1,
+									w[1].1
+								);
+							}
+						} else if is_decreasing {
+							for w in last_5.windows(2) {
+								prop_assert!(
+									w[1].1 <= w[0].1 * 1.001, // Tighter tolerance of 0.1%
+									"VLMA should be non-increasing for decreasing data at indices {}-{}: {} < {}",
+									w[0].0,
+									w[1].0,
+									w[0].1,
+									w[1].1
+								);
+							}
+						}
+					}
+				}
+
+				// Property 9: Determinism - same input produces same output
+				let input2 = VlmaInput::from_slice(&data, params);
+				let VlmaOutput { values: out2 } = vlma_with_kernel(&input2, kernel).unwrap();
+				
+				for i in 0..out.len().min(out2.len()) {
+					if out[i].is_finite() && out2[i].is_finite() {
+						prop_assert!(
+							(out[i] - out2[i]).abs() < f64::EPSILON,
+							"Non-deterministic output at index {}: {} vs {}",
+							i,
+							out[i],
+							out2[i]
+						);
+					} else {
+						prop_assert!(
+							out[i].to_bits() == out2[i].to_bits(),
+							"Non-deterministic NaN/Inf at index {}: {:016X} vs {:016X}",
+							i,
+							out[i].to_bits(),
+							out2[i].to_bits()
+						);
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	#[cfg(debug_assertions)]
 	fn check_vlma_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test_name);
@@ -1814,6 +2153,9 @@ mod tests {
 		check_vlma_streaming,
 		check_vlma_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_vlma_tests!(check_vlma_property);
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);
 		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";

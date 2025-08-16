@@ -2166,58 +2166,203 @@ mod tests {
 	}
 	
 	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
 	fn check_damiani_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
 		skip_if_unsupported!(kernel, test_name);
-		
-		proptest!(|(
-			data in prop::collection::vec(any::<f64>().prop_filter("Not NaN", |x| !x.is_nan()), 200..=1000),
-			vis_atr in 5usize..20,
-			vis_std in 10usize..30,
-			sed_atr in 20usize..50,
-			sed_std in 50usize..150,
-			threshold in 0.5f64..3.0,
-		)| {
-			let params = DamianiVolatmeterParams {
-				vis_atr: Some(vis_atr),
-				vis_std: Some(vis_std),
-				sed_atr: Some(sed_atr),
-				sed_std: Some(sed_std),
-				threshold: Some(threshold),
-			};
-			let input = DamianiVolatmeterInput::from_slice(&data, params);
-			
-			// Test that the function doesn't panic and produces output of correct length
-			match damiani_volatmeter_with_kernel(&input, kernel) {
-				Ok(output) => {
-					prop_assert_eq!(output.vol.len(), data.len());
-					prop_assert_eq!(output.anti.len(), data.len());
-					
-					// Check that warmup period is respected
-					let warmup = *[vis_atr, vis_std, sed_atr, sed_std, 3].iter().max().unwrap();
-					
-					// Vol values should start appearing after warmup
-					let first_non_nan_vol = output.vol.iter().position(|&x| !x.is_nan());
-					if let Some(idx) = first_non_nan_vol {
-						prop_assert!(idx >= warmup - 1);
+
+		// Test strategy: Generate reasonable parameter ranges based on typical usage
+		// Using prop_flat_map to ensure data length is sufficient for the largest period
+		let strat = (5usize..=20, 10usize..=30, 20usize..=50, 50usize..=150, 0.5f64..3.0f64)
+			.prop_flat_map(|(vis_atr, vis_std, sed_atr, sed_std, threshold)| {
+				let min_len = *[vis_atr, vis_std, sed_atr, sed_std].iter().max().unwrap() + 10;
+				(
+					prop::collection::vec(
+						(-1e6f64..1e6f64)
+							.prop_filter("finite", |x| {
+								x.is_finite()
+							}),
+						min_len..400,
+					),
+					Just(vis_atr),
+					Just(vis_std),
+					Just(sed_atr),
+					Just(sed_std),
+					Just(threshold),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, vis_atr, vis_std, sed_atr, sed_std, threshold)| {
+				let params = DamianiVolatmeterParams {
+					vis_atr: Some(vis_atr),
+					vis_std: Some(vis_std),
+					sed_atr: Some(sed_atr),
+					sed_std: Some(sed_std),
+					threshold: Some(threshold),
+				};
+				let input = DamianiVolatmeterInput::from_slice(&data, params);
+
+				// Get output from tested kernel
+				let output = damiani_volatmeter_with_kernel(&input, kernel)?;
+				// Get reference output from scalar kernel for comparison
+				let ref_output = damiani_volatmeter_with_kernel(&input, Kernel::Scalar)?;
+
+				// Property 1: Output length consistency
+				prop_assert_eq!(output.vol.len(), data.len(), "vol length mismatch");
+				prop_assert_eq!(output.anti.len(), data.len(), "anti length mismatch");
+
+				// Property 2: Warmup period validation
+				let warmup = *[vis_atr, vis_std, sed_atr, sed_std, 3].iter().max().unwrap();
+				
+				// Check NaN prefix for vol
+				for i in 0..warmup.min(data.len()) {
+					prop_assert!(
+						output.vol[i].is_nan(),
+						"vol[{}] should be NaN during warmup but got {}",
+						i, output.vol[i]
+					);
+				}
+
+				// Property 3: First valid output appears after warmup
+				let first_valid_vol = output.vol.iter().position(|&x| !x.is_nan());
+				if let Some(idx) = first_valid_vol {
+					prop_assert!(
+						idx >= warmup - 1,
+						"First valid vol at {} but warmup is {}",
+						idx, warmup
+					);
+				}
+
+				// Property 4: All finite values should be reasonable
+				for (i, &val) in output.vol.iter().enumerate() {
+					if !val.is_nan() {
+						prop_assert!(
+							val.is_finite(),
+							"vol[{}] should be finite but got {}",
+							i, val
+						);
+						// Values shouldn't be absurdly large
+						prop_assert!(
+							val.abs() < 1e10,
+							"vol[{}] = {} is unreasonably large",
+							i, val
+						);
 					}
-					
-					// Anti values need both stddev windows filled, so may appear later
-					let first_non_nan_anti = output.anti.iter().position(|&x| !x.is_nan());
-					if let Some(idx) = first_non_nan_anti {
-						prop_assert!(idx >= warmup - 1);
+				}
+
+				for (i, &val) in output.anti.iter().enumerate() {
+					if !val.is_nan() {
+						prop_assert!(
+							val.is_finite(),
+							"anti[{}] should be finite but got {}",
+							i, val
+						);
 					}
 				}
-				Err(DamianiVolatmeterError::InvalidPeriod { .. }) => {
-					// This can happen if generated periods exceed data length
-					prop_assert!(sed_std > data.len() || sed_atr > data.len() || 
-					            vis_std > data.len() || vis_atr > data.len());
+
+				// Property 5: Kernel consistency - compare with scalar reference
+				for i in 0..data.len() {
+					let vol = output.vol[i];
+					let ref_vol = ref_output.vol[i];
+					let anti = output.anti[i];
+					let ref_anti = ref_output.anti[i];
+
+					// Check vol consistency
+					if !vol.is_finite() || !ref_vol.is_finite() {
+						prop_assert!(
+							vol.to_bits() == ref_vol.to_bits(),
+							"vol finite/NaN mismatch at {}: {} vs {}",
+							i, vol, ref_vol
+						);
+					} else {
+						let vol_bits = vol.to_bits();
+						let ref_vol_bits = ref_vol.to_bits();
+						let ulp_diff = vol_bits.abs_diff(ref_vol_bits);
+						
+						prop_assert!(
+							(vol - ref_vol).abs() <= 1e-9 || ulp_diff <= 8,
+							"vol mismatch at {}: {} vs {} (ULP={})",
+							i, vol, ref_vol, ulp_diff
+						);
+					}
+
+					// Check anti consistency
+					if !anti.is_finite() || !ref_anti.is_finite() {
+						prop_assert!(
+							anti.to_bits() == ref_anti.to_bits(),
+							"anti finite/NaN mismatch at {}: {} vs {}",
+							i, anti, ref_anti
+						);
+					} else {
+						let anti_bits = anti.to_bits();
+						let ref_anti_bits = ref_anti.to_bits();
+						let ulp_diff = anti_bits.abs_diff(ref_anti_bits);
+						
+						prop_assert!(
+							(anti - ref_anti).abs() <= 1e-9 || ulp_diff <= 8,
+							"anti mismatch at {}: {} vs {} (ULP={})",
+							i, anti, ref_anti, ulp_diff
+						);
+					}
 				}
-				Err(e) => {
-					panic!("Unexpected error: {:?}", e);
+
+				// Property 6: Special case - constant data
+				if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) {
+					// For constant data, volatility should be very low
+					for (i, &val) in output.vol.iter().enumerate().skip(warmup) {
+						if !val.is_nan() {
+							prop_assert!(
+								val.abs() < 1e-4,
+								"vol[{}] = {} should be near zero for constant data",
+								i, val
+							);
+						}
+					}
 				}
-			}
-		});
-		
+
+				// Property 7: Monotonic relationships
+				// Strong trends should produce meaningful volatility values
+				let is_strong_uptrend = data.windows(2)
+					.all(|w| w[1] > w[0] + 0.01);
+				let is_strong_downtrend = data.windows(2)
+					.all(|w| w[1] < w[0] - 0.01);
+				
+				if is_strong_uptrend || is_strong_downtrend {
+					// Strong trends should show volatility (can be positive or negative)
+					let valid_vols: Vec<f64> = output.vol.iter()
+						.skip(warmup)
+						.filter(|&&x| !x.is_nan())
+						.copied()
+						.collect();
+					
+					if !valid_vols.is_empty() {
+						// At least some volatility values should be non-zero for trends
+						let non_zero_count = valid_vols.iter().filter(|&&v| v.abs() > 1e-10).count();
+						prop_assert!(
+							non_zero_count > 0,
+							"Expected non-zero volatility values for trending data"
+						);
+					}
+				}
+
+				// Property 8: Anti values should be finite when vol is finite
+				// Anti represents threshold-adjusted volatility
+				for i in warmup..data.len() {
+					if !output.vol[i].is_nan() && !output.anti[i].is_nan() {
+						// Both should be finite together
+						prop_assert!(
+							output.vol[i].is_finite() && output.anti[i].is_finite(),
+							"vol[{}] and anti[{}] should both be finite",
+							i, i
+						);
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
 		Ok(())
 	}
 	

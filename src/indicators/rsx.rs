@@ -1017,6 +1017,137 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_rsx_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// RSX period typically ranges from 2 to 64
+		let strat = (2usize..=64)
+			.prop_flat_map(|period| {
+				(
+					prop::collection::vec(
+						(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+						period..400,
+					),
+					Just(period),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period)| {
+				let params = RsxParams {
+					period: Some(period),
+				};
+				let input = RsxInput::from_slice(&data, params);
+
+				let RsxOutput { values: out } = rsx_with_kernel(&input, kernel).unwrap();
+				let RsxOutput { values: ref_out } = rsx_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Property 1: RSX values must be bounded between 0 and 100
+				for i in period..data.len() {
+					let y = out[i];
+					if !y.is_nan() {
+						prop_assert!(
+							y >= 0.0 && y <= 100.0,
+							"idx {i}: RSX value {y} outside [0, 100] bounds"
+						);
+					}
+				}
+
+				// Property 2: Warmup period should be exactly period (includes initialization NaN)
+				for i in 0..period.min(data.len()) {
+					prop_assert!(
+						out[i].is_nan(),
+						"idx {i}: Expected NaN during warmup, got {}", out[i]
+					);
+				}
+				
+				// Property 3: First valid value should be at index period
+				if data.len() > period {
+					prop_assert!(
+						!out[period].is_nan(),
+						"idx {}: Expected valid RSX value after warmup, got NaN", period
+					);
+				}
+
+				// Property 4: Constant data should produce RSX around 50.0
+				if data.windows(2).all(|w| (w[0] - w[1]).abs() < f64::EPSILON) && data.len() > period {
+					// For constant data, RSX should converge to 50.0
+					for i in period..data.len() {
+						prop_assert!(
+							(out[i] - 50.0).abs() <= 1e-9,
+							"idx {i}: Constant data should produce RSX=50.0, got {}", out[i]
+						);
+					}
+				}
+
+				// Property 5: Strictly increasing prices should produce RSX > 50 (after stabilization)
+				let is_strictly_increasing = data.windows(2).all(|w| w[1] > w[0]);
+				if is_strictly_increasing && data.len() >= period + 10 {
+					// Check after some stabilization
+					for i in (period + 10)..data.len() {
+						prop_assert!(
+							out[i] > 50.0 || (out[i] - 50.0).abs() < 1e-9,
+							"idx {i}: Strictly increasing prices should produce RSX > 50, got {}", out[i]
+						);
+					}
+				}
+
+				// Property 6: Strictly decreasing prices should produce RSX < 50 (after stabilization)
+				let is_strictly_decreasing = data.windows(2).all(|w| w[1] < w[0]);
+				if is_strictly_decreasing && data.len() >= period + 10 {
+					// Check after some stabilization
+					for i in (period + 10)..data.len() {
+						prop_assert!(
+							out[i] < 50.0 || (out[i] - 50.0).abs() < 1e-9,
+							"idx {i}: Strictly decreasing prices should produce RSX < 50, got {}", out[i]
+						);
+					}
+				}
+
+				// Property 7: Kernel consistency - compare with scalar implementation
+				for i in 0..data.len() {
+					let y = out[i];
+					let r = ref_out[i];
+
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert!(
+							y.to_bits() == r.to_bits(),
+							"finite/NaN mismatch idx {i}: {y} vs {r}"
+						);
+						continue;
+					}
+
+					// RSX should be deterministic and consistent across kernels
+					let y_bits = y.to_bits();
+					let r_bits = r.to_bits();
+					let ulp_diff: u64 = y_bits.abs_diff(r_bits);
+
+					prop_assert!(
+						(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+						"kernel mismatch idx {i}: {y} vs {r} (ULP={ulp_diff})"
+					);
+				}
+
+				// Property 8: RSX should be deterministic - same input always produces same output
+				// Run the same calculation again and verify identical results
+				let RsxOutput { values: out2 } = rsx_with_kernel(&input, kernel).unwrap();
+				for i in 0..data.len() {
+					prop_assert!(
+						out[i].to_bits() == out2[i].to_bits(),
+						"determinism failed at idx {i}: first={}, second={}", out[i], out2[i]
+					);
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	generate_all_rsx_tests!(
 		check_rsx_partial_params,
 		check_rsx_accuracy,
@@ -1029,6 +1160,9 @@ mod tests {
 		check_rsx_streaming,
 		check_rsx_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_rsx_tests!(check_rsx_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);

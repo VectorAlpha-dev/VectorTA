@@ -1008,6 +1008,161 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_srwma_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Single comprehensive strategy - SRWMA requires period >= 2
+		let strat = (2usize..=50)
+			.prop_flat_map(|period| {
+				(
+					prop::collection::vec(
+						(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+						period + 2..400, // Need at least period+2 for valid output
+					),
+					Just(period),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period)| {
+				let params = SrwmaParams { period: Some(period) };
+				let input = SrwmaInput::from_slice(&data, params);
+
+				// Compute with specified kernel and scalar reference
+				let SrwmaOutput { values: out } = srwma_with_kernel(&input, kernel).unwrap();
+				let SrwmaOutput { values: ref_out } = srwma_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Property 1: Output length must match input
+				prop_assert_eq!(out.len(), data.len(), "Output length mismatch");
+
+				// SRWMA warmup is period + 1 (assuming clean input data)
+				let warmup_end = period + 1;
+
+				// Property 2: Warmup period values must be NaN
+				for i in 0..warmup_end.min(out.len()) {
+					prop_assert!(
+						out[i].is_nan(),
+						"Expected NaN during warmup at index {}, got {}",
+						i,
+						out[i]
+					);
+				}
+
+				// Property 3: Values after warmup should be finite and within bounds
+				for i in warmup_end..data.len() {
+					let window_start = i + 1 - period;
+					let window_end = i;
+					let window = &data[window_start..=window_end];
+					
+					let lo = window.iter().cloned().fold(f64::INFINITY, f64::min);
+					let hi = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+					let y = out[i];
+					let r = ref_out[i];
+
+					// Property 4: Output within window bounds
+					prop_assert!(
+						y.is_nan() || (y >= lo - 1e-9 && y <= hi + 1e-9),
+						"idx {}: {} ∉ [{}, {}]",
+						i,
+						y,
+						lo,
+						hi
+					);
+
+					// Property 5: SIMD consistency check
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert_eq!(y.to_bits(), r.to_bits(), "NaN/finite mismatch at idx {}", i);
+						continue;
+					}
+
+					let ulp_diff = y.to_bits().abs_diff(r.to_bits());
+					prop_assert!(
+						(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+						"SIMD mismatch at idx {}: {} vs {} (ULP={})",
+						i,
+						y,
+						r,
+						ulp_diff
+					);
+				}
+
+				// Property 6: Constant data should produce near-constant output
+				if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) && data.len() > warmup_end {
+					// For constant data, all outputs after warmup should equal the input constant value
+					let const_val = data[0];  // All values are the same, use first one
+					for i in warmup_end..out.len() {
+						if out[i].is_finite() {
+							prop_assert!(
+								(out[i] - const_val).abs() < 1e-6,
+								"Constant data test failed at idx {}: expected {}, got {}",
+								i,
+								const_val,
+								out[i]
+							);
+						}
+					}
+				}
+
+				// Property 7: Period=2 edge case (minimum valid period)
+				if period == 2 && data.len() > warmup_end {
+					// With period=2, weights are [sqrt(2), sqrt(1)] = [1.414.., 1.0]
+					// Output should be weighted average favoring more recent value
+					for i in warmup_end..out.len() {
+						if out[i].is_finite() {
+							let expected_range_lo = data[i - 1].min(data[i]) - 1e-9;
+							let expected_range_hi = data[i - 1].max(data[i]) + 1e-9;
+							prop_assert!(
+								out[i] >= expected_range_lo && out[i] <= expected_range_hi,
+								"Period=2 test failed at idx {}: {} not in [{}, {}]",
+								i,
+								out[i],
+								expected_range_lo,
+								expected_range_hi
+							);
+						}
+					}
+				}
+
+				// Property 8: Monotonicity test for trending data
+				// If input is strictly increasing/decreasing, output should follow trend
+				let is_increasing = data.windows(2).all(|w| w[1] >= w[0]);
+				let is_decreasing = data.windows(2).all(|w| w[1] <= w[0]);
+				
+				if (is_increasing || is_decreasing) && data.len() > warmup_end + 10 {
+					// Check trend preservation in stable part (skip immediate post-warmup)
+					for i in (warmup_end + 5)..out.len() - 1 {
+						if out[i].is_finite() && out[i + 1].is_finite() {
+							if is_increasing {
+								prop_assert!(
+									out[i + 1] >= out[i] - 1e-9,
+									"Monotonic increase violated at idx {}: {} > {}",
+									i,
+									out[i],
+									out[i + 1]
+								);
+							} else if is_decreasing {
+								prop_assert!(
+									out[i + 1] <= out[i] + 1e-9,
+									"Monotonic decrease violated at idx {}: {} < {}",
+									i,
+									out[i],
+									out[i + 1]
+								);
+							}
+						}
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	generate_all_srwma_tests!(
 		check_srwma_partial_params,
 		check_srwma_accuracy,
@@ -1018,7 +1173,8 @@ mod tests {
 		check_srwma_reinput,
 		check_srwma_nan_handling,
 		check_srwma_streaming,
-		check_srwma_no_poison
+		check_srwma_no_poison,
+		check_srwma_property
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {

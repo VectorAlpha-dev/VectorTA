@@ -1487,6 +1487,203 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_srsi_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Generate test strategy with periods from 2 to 20 for more realistic testing
+		let strat = (2usize..=20, 2usize..=20, 2usize..=10, 2usize..=10)
+			.prop_flat_map(|(rsi_period, stoch_period, k, d)| {
+				// Calculate minimum data needed for SRSI to work
+				// RSI needs rsi_period points, then Stoch needs additional points for its calculations
+				let min_data_needed = rsi_period + stoch_period.max(k).max(d) + 10; // Extra buffer
+				(
+					prop::collection::vec(
+						(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+						min_data_needed..400,
+					),
+					Just(rsi_period),
+					Just(stoch_period),
+					Just(k),
+					Just(d),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, rsi_period, stoch_period, k, d)| {
+				let params = SrsiParams {
+					rsi_period: Some(rsi_period),
+					stoch_period: Some(stoch_period),
+					k: Some(k),
+					d: Some(d),
+					source: None,
+				};
+				let input = SrsiInput::from_slice(&data, params.clone());
+
+				// Check if we have enough data - if not, skip this test case
+				let output_result = srsi_with_kernel(&input, kernel);
+				let ref_output_result = srsi_with_kernel(&input, Kernel::Scalar);
+				
+				// Both should either succeed or fail together
+				match (output_result, ref_output_result) {
+					(Ok(output), Ok(ref_output)) => {
+						// Calculate expected warmup period
+						// RSI produces first value at rsi_period, then Stoch needs more values
+						// The actual warmup is complex due to the chained indicators
+						let expected_min_warmup = rsi_period;
+
+						// Property 1: K and D values must be bounded between 0 and 100
+						for i in 0..data.len() {
+							if !output.k[i].is_nan() {
+								prop_assert!(
+									output.k[i] >= -1e-9 && output.k[i] <= 100.0 + 1e-9,
+									"idx {}: K value {} is out of bounds [0, 100]", i, output.k[i]
+								);
+							}
+							if !output.d[i].is_nan() {
+								prop_assert!(
+									output.d[i] >= -1e-9 && output.d[i] <= 100.0 + 1e-9,
+									"idx {}: D value {} is out of bounds [0, 100]", i, output.d[i]
+								);
+							}
+						}
+
+						// Property 2: Warmup period - check that early values are NaN
+						// Don't be too strict about exact warmup period as it's complex with chained indicators
+						for i in 0..expected_min_warmup.min(data.len()) {
+							prop_assert!(
+								output.k[i].is_nan(),
+								"idx {}: Expected NaN during early warmup for K, got {}", i, output.k[i]
+							);
+							prop_assert!(
+								output.d[i].is_nan(),
+								"idx {}: Expected NaN during early warmup for D, got {}", i, output.d[i]
+							);
+						}
+
+						// Property 3: Eventually should get valid values if we have enough data
+						let has_valid_k = output.k.iter().any(|&x| !x.is_nan());
+						let has_valid_d = output.d.iter().any(|&x| !x.is_nan());
+						if data.len() > rsi_period + stoch_period + k + d {
+							prop_assert!(
+								has_valid_k,
+								"Expected at least one valid K value with sufficient data"
+							);
+							prop_assert!(
+								has_valid_d,
+								"Expected at least one valid D value with sufficient data"
+							);
+						}
+
+						// Property 4: Constant data should produce SRSI around 50 (neutral)
+						if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) {
+							let last_k = output.k[data.len() - 1];
+							let last_d = output.d[data.len() - 1];
+							if !last_k.is_nan() && !last_d.is_nan() {
+								prop_assert!(
+									(last_k - 50.0).abs() < 10.0,
+									"Constant data should produce K near 50, got {}", last_k
+								);
+								prop_assert!(
+									(last_d - 50.0).abs() < 10.0,
+									"Constant data should produce D near 50, got {}", last_d
+								);
+							}
+						}
+
+						// Property 5: Strictly increasing prices should produce high SRSI
+						let is_increasing = data.windows(2).all(|w| w[1] > w[0]);
+						if is_increasing && has_valid_k {
+							let last_k = output.k[data.len() - 1];
+							if !last_k.is_nan() {
+								prop_assert!(
+									last_k > 50.0,
+									"Strictly increasing prices should produce K > 50, got {}", last_k
+								);
+							}
+						}
+
+						// Property 6: Strictly decreasing prices should produce low SRSI
+						let is_decreasing = data.windows(2).all(|w| w[1] < w[0]);
+						if is_decreasing && has_valid_k {
+							let last_k = output.k[data.len() - 1];
+							if !last_k.is_nan() {
+								prop_assert!(
+									last_k < 50.0,
+									"Strictly decreasing prices should produce K < 50, got {}", last_k
+								);
+							}
+						}
+
+						// Property 7: Kernel consistency - compare with scalar implementation
+						for i in 0..data.len() {
+							let k_val = output.k[i];
+							let d_val = output.d[i];
+							let ref_k = ref_output.k[i];
+							let ref_d = ref_output.d[i];
+
+							// Check for NaN consistency
+							if !k_val.is_finite() || !ref_k.is_finite() {
+								prop_assert!(
+									k_val.to_bits() == ref_k.to_bits(),
+									"K finite/NaN mismatch idx {}: {} vs {}", i, k_val, ref_k
+								);
+							} else {
+								// Check ULP difference for finite values
+								let k_ulp_diff = k_val.to_bits().abs_diff(ref_k.to_bits());
+								prop_assert!(
+									(k_val - ref_k).abs() <= 1e-9 || k_ulp_diff <= 4,
+									"K mismatch idx {}: {} vs {} (ULP={})", i, k_val, ref_k, k_ulp_diff
+								);
+							}
+
+							if !d_val.is_finite() || !ref_d.is_finite() {
+								prop_assert!(
+									d_val.to_bits() == ref_d.to_bits(),
+									"D finite/NaN mismatch idx {}: {} vs {}", i, d_val, ref_d
+								);
+							} else {
+								let d_ulp_diff = d_val.to_bits().abs_diff(ref_d.to_bits());
+								prop_assert!(
+									(d_val - ref_d).abs() <= 1e-9 || d_ulp_diff <= 4,
+									"D mismatch idx {}: {} vs {} (ULP={})", i, d_val, ref_d, d_ulp_diff
+								);
+							}
+						}
+
+						// Property 8: Determinism - running same calculation twice produces same result
+						let output2 = srsi_with_kernel(&input, kernel).unwrap();
+						for i in 0..data.len() {
+							prop_assert!(
+								output.k[i].to_bits() == output2.k[i].to_bits(),
+								"K determinism failed at idx {}: {} vs {}", i, output.k[i], output2.k[i]
+							);
+							prop_assert!(
+								output.d[i].to_bits() == output2.d[i].to_bits(),
+								"D determinism failed at idx {}: {} vs {}", i, output.d[i], output2.d[i]
+							);
+						}
+					}
+					(Err(_), Err(_)) => {
+						// Both failed - this is expected for insufficient data, skip this test case
+					}
+					(Ok(_), Err(e)) => {
+						prop_assert!(false, "Kernel succeeded but scalar failed: {:?}", e);
+					}
+					(Err(e), Ok(_)) => {
+						prop_assert!(false, "Kernel failed but scalar succeeded: {:?}", e);
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_srsi_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1518,6 +1715,9 @@ mod tests {
 		check_srsi_from_slice,
 		check_srsi_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_srsi_tests!(check_srsi_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);

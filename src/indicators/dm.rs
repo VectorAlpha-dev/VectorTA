@@ -1009,6 +1009,155 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_dm_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy for generating realistic high/low data
+		let strat = (2usize..=50)
+			.prop_flat_map(|period| {
+				(
+					// Generate base prices, volatility, and random changes for price movement
+					(100f64..10000f64, 0.01f64..0.05f64, period + 10..400)
+						.prop_flat_map(move |(base_price, volatility, data_len)| {
+							// Generate random changes and spreads for each data point
+							(
+								Just(base_price),
+								Just(volatility),
+								Just(data_len),
+								prop::collection::vec((-1f64..1f64), data_len),
+								prop::collection::vec((0f64..2f64), data_len),
+							)
+						})
+						.prop_map(move |(base_price, volatility, data_len, changes, spreads)| {
+							// Generate synthetic high/low data with realistic movement
+							let mut high = Vec::with_capacity(data_len);
+							let mut low = Vec::with_capacity(data_len);
+							let mut current_price = base_price;
+							
+							for i in 0..data_len {
+								// Random walk with volatility
+								let change = changes[i] * volatility * current_price;
+								current_price = (current_price + change).max(10.0); // Prevent negative prices
+								
+								// Generate high/low with spread
+								let spread = current_price * 0.01 * spreads[i];
+								let daily_high = current_price + spread;
+								let daily_low = current_price - spread;
+								
+								high.push(daily_high);
+								low.push(daily_low.max(1.0)); // Ensure low is positive
+							}
+							
+							(high, low)
+						}),
+					Just(period),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |((high, low), period)| {
+				let params = DmParams { period: Some(period) };
+				let input = DmInput::from_slices(&high, &low, params);
+
+				// Test with the specified kernel
+				let DmOutput { plus: out_plus, minus: out_minus } = dm_with_kernel(&input, kernel)?;
+				
+				// Test with scalar reference
+				let DmOutput { plus: ref_plus, minus: ref_minus } = dm_with_kernel(&input, Kernel::Scalar)?;
+
+				// Property 1: Output length matches input
+				prop_assert_eq!(out_plus.len(), high.len());
+				prop_assert_eq!(out_minus.len(), high.len());
+
+				// Property 2: Warmup period handling
+				let warmup_period = period - 1;
+				for i in 0..warmup_period {
+					prop_assert!(out_plus[i].is_nan(), 
+						"Plus value at index {} should be NaN during warmup", i);
+					prop_assert!(out_minus[i].is_nan(),
+						"Minus value at index {} should be NaN during warmup", i);
+				}
+
+				// Property 3: Non-negative values after warmup
+				for i in warmup_period..high.len() {
+					if !out_plus[i].is_nan() {
+						prop_assert!(out_plus[i] >= -1e-9,
+							"Plus DM at index {} is negative: {}", i, out_plus[i]);
+					}
+					if !out_minus[i].is_nan() {
+						prop_assert!(out_minus[i] >= -1e-9,
+							"Minus DM at index {} is negative: {}", i, out_minus[i]);
+					}
+				}
+
+				// Property 4: Kernel consistency (compare with scalar)
+				const MAX_ULP: i64 = 3;
+				for i in 0..high.len() {
+					let plus_y = out_plus[i];
+					let plus_r = ref_plus[i];
+					let minus_y = out_minus[i];
+					let minus_r = ref_minus[i];
+
+					// Check plus values
+					if plus_y.is_nan() {
+						prop_assert!(plus_r.is_nan(), 
+							"Plus kernel mismatch at {}: {} vs NaN", i, plus_r);
+					} else {
+						let plus_y_bits = plus_y.to_bits();
+						let plus_r_bits = plus_r.to_bits();
+						let plus_ulp_diff = (plus_y_bits as i64).wrapping_sub(plus_r_bits as i64).abs();
+						
+						prop_assert!(
+							plus_ulp_diff <= MAX_ULP,
+							"Plus kernel mismatch at {}: {} vs {} (ULP diff: {})",
+							i, plus_y, plus_r, plus_ulp_diff
+						);
+					}
+
+					// Check minus values
+					if minus_y.is_nan() {
+						prop_assert!(minus_r.is_nan(),
+							"Minus kernel mismatch at {}: {} vs NaN", i, minus_r);
+					} else {
+						let minus_y_bits = minus_y.to_bits();
+						let minus_r_bits = minus_r.to_bits();
+						let minus_ulp_diff = (minus_y_bits as i64).wrapping_sub(minus_r_bits as i64).abs();
+						
+						prop_assert!(
+							minus_ulp_diff <= MAX_ULP,
+							"Minus kernel mismatch at {}: {} vs {} (ULP diff: {})",
+							i, minus_y, minus_r, minus_ulp_diff
+						);
+					}
+				}
+
+				// Property 5: Constant data produces near-zero DM after initial period
+				let all_high_equal = high.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
+				let all_low_equal = low.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
+				
+				if all_high_equal && all_low_equal {
+					// After the initial period, DM values should decay to near zero
+					for i in (period * 2).min(high.len() - 1)..high.len() {
+						if !out_plus[i].is_nan() {
+							prop_assert!(out_plus[i].abs() < 1e-6,
+								"Plus DM should be near zero for constant data at {}: {}", i, out_plus[i]);
+						}
+						if !out_minus[i].is_nan() {
+							prop_assert!(out_minus[i].abs() < 1e-6,
+								"Minus DM should be near zero for constant data at {}: {}", i, out_minus[i]);
+						}
+					}
+				}
+
+				Ok(())
+			})?;
+
+		Ok(())
+	}
+
 	generate_all_dm_tests!(
 		check_dm_partial_params,
 		check_dm_default_candles,
@@ -1021,6 +1170,9 @@ mod tests {
 		check_dm_known_values,
 		check_dm_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_dm_tests!(check_dm_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);

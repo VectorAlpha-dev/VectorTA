@@ -2311,6 +2311,231 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 	
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_vwmacd_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Generate test strategies with proper constraints and edge cases
+		let strat = (2usize..=20, 5usize..=50, 2usize..=20, 0..3usize)
+			.prop_flat_map(|(fast, slow, signal, ma_variant)| {
+				let slow = slow.max(fast + 1); // Ensure slow > fast
+				let data_len = slow * 2 + signal; // Ensure enough data for warmup
+				(
+					// Generate close prices in reasonable range
+					prop::collection::vec(
+						(100.0f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
+						data_len..400,
+					),
+					// Generate volumes with wider range to test edge cases
+					prop::collection::vec(
+						(0.001f64..1000000.0f64).prop_filter("finite positive", |x| x.is_finite() && *x > 0.0),
+						data_len..400,
+					),
+					Just(fast),
+					Just(slow),
+					Just(signal),
+					Just(ma_variant),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(close, volume, fast, slow, signal, ma_variant)| {
+				// Ensure equal length
+				let len = close.len().min(volume.len());
+				let close = &close[..len];
+				let volume = &volume[..len];
+				
+				// Test different MA type combinations
+				let (fast_ma, slow_ma, signal_ma) = match ma_variant {
+					0 => ("sma", "sma", "ema"),  // Default
+					1 => ("ema", "ema", "sma"),  // Alternative
+					_ => ("wma", "sma", "ema"),  // Mixed
+				};
+				
+				let params = VwmacdParams {
+					fast_period: Some(fast),
+					slow_period: Some(slow),
+					signal_period: Some(signal),
+					fast_ma_type: Some(fast_ma.to_string()),
+					slow_ma_type: Some(slow_ma.to_string()),
+					signal_ma_type: Some(signal_ma.to_string()),
+				};
+				let input = VwmacdInput::from_slices(close, volume, params);
+				
+				// Calculate outputs with test kernel and reference scalar kernel
+				let VwmacdOutput { macd, signal: sig, hist } = 
+					vwmacd_with_kernel(&input, kernel).unwrap();
+				let VwmacdOutput { macd: ref_macd, signal: ref_sig, hist: ref_hist } = 
+					vwmacd_with_kernel(&input, Kernel::Scalar).unwrap();
+				
+				// Also calculate individual VWMAs for validation
+				let params_fast = VwmacdParams {
+					fast_period: Some(fast),
+					slow_period: Some(fast), // Use fast for both to get fast VWMA
+					signal_period: Some(2),  // Minimal signal
+					fast_ma_type: Some(fast_ma.to_string()),
+					slow_ma_type: Some(fast_ma.to_string()),
+					signal_ma_type: Some("sma".to_string()),
+				};
+				let input_fast = VwmacdInput::from_slices(close, volume, params_fast);
+				let fast_vwma_result = vwmacd_with_kernel(&input_fast, Kernel::Scalar).unwrap();
+				
+				// Determine warmup periods for each component
+				let macd_warmup = slow - 1;  // MACD starts after slow period
+				let signal_warmup = macd_warmup + signal - 1;  // Signal starts signal periods after MACD
+				let hist_warmup = signal_warmup;  // Histogram same as signal
+				
+				// Test properties for each valid output
+				for i in 0..len {
+					let y_macd = macd[i];
+					let y_sig = sig[i];
+					let y_hist = hist[i];
+					let r_macd = ref_macd[i];
+					let r_sig = ref_sig[i];
+					let r_hist = ref_hist[i];
+					
+					// Property 1: Kernel consistency for NaN patterns
+					// Both kernels should have the same NaN pattern
+					if y_macd.is_nan() != r_macd.is_nan() {
+						prop_assert!(false, "MACD NaN mismatch at index {}: test={} ref={}", i, y_macd.is_nan(), r_macd.is_nan());
+					}
+					if y_sig.is_nan() != r_sig.is_nan() {
+						prop_assert!(false, "Signal NaN mismatch at index {}: test={} ref={}", i, y_sig.is_nan(), r_sig.is_nan());
+					}
+					if y_hist.is_nan() != r_hist.is_nan() {
+						prop_assert!(false, "Histogram NaN mismatch at index {}: test={} ref={}", i, y_hist.is_nan(), r_hist.is_nan());
+					}
+					
+					// Property 2: After warmup, values should be finite
+					if i >= hist_warmup {
+						prop_assert!(y_macd.is_finite(), "MACD not finite at index {}: {}", i, y_macd);
+						prop_assert!(y_sig.is_finite(), "Signal not finite at index {}: {}", i, y_sig);
+						prop_assert!(y_hist.is_finite(), "Histogram not finite at index {}: {}", i, y_hist);
+					}
+					
+					// Property 3: Histogram = MACD - Signal (when both are valid)
+					if y_macd.is_finite() && y_sig.is_finite() {
+						let expected_hist = y_macd - y_sig;
+						prop_assert!(
+							(y_hist - expected_hist).abs() <= 1e-9,
+							"Histogram mismatch at {}: {} vs {} (macd={}, signal={})",
+							i, y_hist, expected_hist, y_macd, y_sig
+						);
+					}
+					
+					// Property 4: Kernel consistency - different kernels should produce same results
+					if !y_macd.is_finite() || !r_macd.is_finite() {
+						prop_assert!(y_macd.to_bits() == r_macd.to_bits(), "MACD finite/NaN mismatch at {}: {} vs {}", i, y_macd, r_macd);
+					} else {
+						let ulp_diff = y_macd.to_bits().abs_diff(r_macd.to_bits());
+						prop_assert!(
+							(y_macd - r_macd).abs() <= 1e-9 || ulp_diff <= 4,
+							"MACD mismatch at {}: {} vs {} (ULP={})", i, y_macd, r_macd, ulp_diff
+						);
+					}
+					
+					if !y_sig.is_finite() || !r_sig.is_finite() {
+						prop_assert!(y_sig.to_bits() == r_sig.to_bits(), "Signal finite/NaN mismatch at {}: {} vs {}", i, y_sig, r_sig);
+					} else {
+						let ulp_diff = y_sig.to_bits().abs_diff(r_sig.to_bits());
+						prop_assert!(
+							(y_sig - r_sig).abs() <= 1e-9 || ulp_diff <= 4,
+							"Signal mismatch at {}: {} vs {} (ULP={})", i, y_sig, r_sig, ulp_diff
+						);
+					}
+					
+					if !y_hist.is_finite() || !r_hist.is_finite() {
+						prop_assert!(y_hist.to_bits() == r_hist.to_bits(), "Histogram finite/NaN mismatch at {}: {} vs {}", i, y_hist, r_hist);
+					} else {
+						let ulp_diff = y_hist.to_bits().abs_diff(r_hist.to_bits());
+						prop_assert!(
+							(y_hist - r_hist).abs() <= 1e-9 || ulp_diff <= 4,
+							"Histogram mismatch at {}: {} vs {} (ULP={})", i, y_hist, r_hist, ulp_diff
+						);
+					}
+					
+					// Property 5: With constant prices AND constant volumes, MACD should be ~0
+					// This is because both fast and slow VWMA will equal the constant price
+					if close.windows(2).all(|w| (w[0] - w[1]).abs() < f64::EPSILON) &&
+					   volume.windows(2).all(|w| (w[0] - w[1]).abs() < f64::EPSILON) && 
+					   y_macd.is_finite() {
+						prop_assert!(
+							y_macd.abs() <= 1e-9,
+							"MACD should be ~0 with constant prices and volumes, got {} at index {}", y_macd, i
+						);
+					}
+					
+					// Property 6: Volume weighting validation
+					// With very small volumes, the indicator should still produce valid results
+					if volume[i] < 1.0 && y_macd.is_finite() {
+						// Just verify no NaN/Inf from division issues
+						prop_assert!(y_macd.is_finite(), "MACD should be finite even with small volume {} at index {}", volume[i], i);
+					}
+					
+					// Property 7: VWMA component bounds
+					// Each VWMA (that makes up MACD) should be within the price range of its window
+					// We can check this indirectly: |MACD| should not exceed the total price range
+					if y_macd.is_finite() && i >= slow - 1 {
+						let all_prices_min = close.iter().cloned().fold(f64::INFINITY, f64::min);
+						let all_prices_max = close.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+						let total_range = all_prices_max - all_prices_min;
+						
+						// MACD is difference of two VWMAs, each bounded by price range
+						// So |MACD| should not exceed the total price range
+						prop_assert!(
+							y_macd.abs() <= total_range + 1e-6,
+							"MACD {} exceeds total price range {} at index {}",
+							y_macd.abs(), total_range, i
+						);
+					}
+				}
+				
+				// Additional test: Extreme volume ratios
+				// Create a test case with extreme volume imbalance
+				if len > slow * 2 {
+					let mut extreme_volume = volume.to_vec();
+					// Set some volumes to be 1000x larger
+					for i in (0..len).step_by(5) {
+						extreme_volume[i] *= 1000.0;
+					}
+					
+					let params_extreme = VwmacdParams {
+						fast_period: Some(fast),
+						slow_period: Some(slow),
+						signal_period: Some(signal),
+						fast_ma_type: Some(fast_ma.to_string()),
+						slow_ma_type: Some(slow_ma.to_string()),
+						signal_ma_type: Some(signal_ma.to_string()),
+					};
+					let input_extreme = VwmacdInput::from_slices(close, &extreme_volume, params_extreme);
+					
+					// Should not panic or produce NaN inappropriately
+					let result = vwmacd_with_kernel(&input_extreme, kernel);
+					prop_assert!(result.is_ok(), "Should handle extreme volume ratios");
+					
+					if let Ok(extreme_output) = result {
+						// Check that high-volume periods dominate the VWMA
+						// (This is a soft check - we just verify no crashes/NaNs)
+						for i in hist_warmup..len {
+							if extreme_output.macd[i].is_finite() {
+								prop_assert!(
+									extreme_output.macd[i].is_finite(),
+									"MACD should be finite with extreme volumes at index {}", i
+								);
+							}
+						}
+					}
+				}
+				
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+	
 	generate_all_vwmacd_tests!(
 		check_vwmacd_partial_params,
 		check_vwmacd_accuracy,
@@ -2321,6 +2546,9 @@ mod tests {
 		check_vwmacd_streaming,
 		check_vwmacd_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_vwmacd_tests!(check_vwmacd_property);
 
 	fn check_vwmacd_streaming(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test_name);

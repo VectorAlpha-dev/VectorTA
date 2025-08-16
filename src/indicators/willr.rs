@@ -819,6 +819,8 @@ mod tests {
 	use crate::skip_if_unsupported;
 	use crate::utilities::data_loader::read_candles_from_csv;
 	use paste::paste;
+	#[cfg(feature = "proptest")]
+	use proptest::prelude::*;
 
 	fn check_willr_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test_name);
@@ -1018,6 +1020,184 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_willr_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy for generating test data
+		// Period range: 2-50 for realistic testing
+		let strat = (2usize..=50)
+			.prop_flat_map(|period| {
+				(
+					// Generate high, low, close prices with proper constraints
+					prop::collection::vec(
+						// Generate (low, high_offset, close_ratio) to ensure high >= low and close within range
+						(1.0f64..1000.0f64)
+							.prop_flat_map(|low| {
+								(
+									Just(low),
+									0.0f64..100.0f64, // high_offset to ensure high >= low
+									0.0f64..=1.0f64,  // close_ratio for close within [low, high]
+								)
+							}),
+						period..400,
+					),
+					Just(period),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(price_data, period)| {
+				// Construct high, low, close arrays from generated data
+				let mut high = Vec::with_capacity(price_data.len());
+				let mut low = Vec::with_capacity(price_data.len());
+				let mut close = Vec::with_capacity(price_data.len());
+				
+				for (l, h_offset, c_ratio) in price_data {
+					let h = l + h_offset;
+					let c = l + (h - l) * c_ratio;
+					high.push(h);
+					low.push(l);
+					close.push(c);
+				}
+
+				let params = WillrParams { period: Some(period) };
+				let input = WillrInput::from_slices(&high, &low, &close, params.clone());
+				
+				// Get output from kernel under test
+				let WillrOutput { values: out } = willr_with_kernel(&input, kernel).unwrap();
+				
+				// Get reference output from scalar kernel
+				let WillrOutput { values: ref_out } = willr_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Property 1: Warmup period - first (period-1) values should be NaN
+				for i in 0..(period - 1) {
+					prop_assert!(
+						out[i].is_nan(),
+						"Warmup period violation at index {}: expected NaN, got {}",
+						i, out[i]
+					);
+				}
+
+				// Test properties for valid output values
+				for i in (period - 1)..high.len() {
+					let y = out[i];
+					let r = ref_out[i];
+					
+					if y.is_nan() {
+						// If NaN, reference should also be NaN
+						prop_assert!(r.is_nan(), "NaN mismatch at index {}", i);
+						continue;
+					}
+
+					// Property 2: Output bounds - Williams %R should be between -100 and 0
+					prop_assert!(
+						y >= -100.0 - 1e-9 && y <= 0.0 + 1e-9,
+						"Output bounds violation at index {}: {} not in [-100, 0]",
+						i, y
+					);
+
+					// Property 3: Extreme values validation
+					let window_start = i + 1 - period;
+					let window_high = high[window_start..=i]
+						.iter()
+						.cloned()
+						.fold(f64::NEG_INFINITY, f64::max);
+					let window_low = low[window_start..=i]
+						.iter()
+						.cloned()
+						.fold(f64::INFINITY, f64::min);
+					
+					// If close equals highest high, %R should be close to 0
+					if (close[i] - window_high).abs() < 1e-10 {
+						prop_assert!(
+							y.abs() < 1e-6,
+							"When close = highest high, %R should be ~0, got {} at index {}",
+							y, i
+						);
+					}
+					
+					// If close equals lowest low, %R should be close to -100
+					if (close[i] - window_low).abs() < 1e-10 {
+						prop_assert!(
+							(y + 100.0).abs() < 1e-6,
+							"When close = lowest low, %R should be ~-100, got {} at index {}",
+							y, i
+						);
+					}
+
+					// Property 4: Single period case
+					if period == 1 {
+						let expected = if high[i] == low[i] {
+							0.0 // When high = low, denominator is 0, so %R = 0
+						} else {
+							(high[i] - close[i]) / (high[i] - low[i]) * -100.0
+						};
+						prop_assert!(
+							(y - expected).abs() < 1e-9,
+							"Period=1 mismatch at index {}: expected {}, got {}",
+							i, expected, y
+						);
+					}
+
+					// Property 5: Constant prices
+					let window_highs = &high[window_start..=i];
+					let window_lows = &low[window_start..=i];
+					let window_closes = &close[window_start..=i];
+					
+					let all_equal = window_highs.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) &&
+					                window_lows.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) &&
+					                window_closes.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) &&
+					                (window_highs[0] - window_lows[0]).abs() < 1e-10;
+					
+					if all_equal {
+						prop_assert!(
+							y.abs() < 1e-6,
+							"With constant equal prices, %R should be ~0, got {} at index {}",
+							y, i
+						);
+					}
+
+					// Property 6: Kernel consistency
+					if !r.is_finite() {
+						prop_assert!(
+							y.to_bits() == r.to_bits(),
+							"NaN/Inf mismatch at index {}: {} vs {}",
+							i, y, r
+						);
+					} else {
+						let ulp_diff: u64 = y.to_bits().abs_diff(r.to_bits());
+						prop_assert!(
+							(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+							"Kernel mismatch at index {}: {} vs {} (diff: {}, ULP: {})",
+							i, y, r, (y - r).abs(), ulp_diff
+						);
+					}
+
+					// Property 7: Mathematical bounds based on window
+					// %R formula: ((high - close) / (high - low)) * -100
+					// Since close is within [low, high], the fraction is in [0, 1]
+					// So %R is in [-100, 0]
+					let range = window_high - window_low;
+					if range > 1e-10 {
+						let theoretical_value = (window_high - close[i]) / range * -100.0;
+						// Allow for some numerical error
+						prop_assert!(
+							(y - theoretical_value).abs() < 1e-6,
+							"Mathematical formula mismatch at index {}: expected {}, got {}",
+							i, theoretical_value, y
+						);
+					}
+				}
+
+				Ok(())
+			})?;
+
+		Ok(())
+	}
+
 	generate_all_willr_tests!(
 		check_willr_partial_params,
 		check_willr_accuracy,
@@ -1028,6 +1208,9 @@ mod tests {
 		check_willr_not_enough_valid_data,
 		check_willr_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_willr_tests!(check_willr_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);

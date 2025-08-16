@@ -1695,6 +1695,311 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_kdj_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy for generating realistic KDJ parameters and price data
+		let strat = (5usize..=21, 2usize..=5, 2usize..=5)
+			.prop_flat_map(|(fast_k_period, slow_k_period, slow_d_period)| {
+				(
+					// Generate base price, volatility, and data length
+					(100f64..10000f64, 0.01f64..0.05f64, fast_k_period + 10..400, 0u8..100u8)
+						.prop_flat_map(move |(base_price, volatility, data_len, scenario_type)| {
+							// Generate random changes for price movement
+							(
+								Just(base_price),
+								Just(volatility),
+								Just(data_len),
+								Just(scenario_type),
+								prop::collection::vec((-1f64..1f64), data_len),
+								prop::collection::vec((0.001f64..0.02f64), data_len), // Spread factors
+								prop::collection::vec(prop::bool::ANY, data_len), // Zero spread flags
+							)
+						})
+						.prop_map(move |(base_price, volatility, data_len, scenario_type, price_changes, spread_factors, zero_spread_flags)| {
+							// Generate synthetic high/low/close data with realistic movement
+							let mut high = Vec::with_capacity(data_len);
+							let mut low = Vec::with_capacity(data_len);
+							let mut close = Vec::with_capacity(data_len);
+							let mut current_price = base_price;
+							
+							// Scenario types: 0-70 = normal, 70-85 = uptrend, 85-95 = downtrend, 95-100 = flat/zero-spread
+							for i in 0..data_len {
+								let (h, l, c) = if scenario_type >= 95 && i > fast_k_period {
+									// Flat/zero-spread scenario (5% chance)
+									(current_price, current_price, current_price)
+								} else if scenario_type >= 85 && scenario_type < 95 {
+									// Strong downtrend scenario (10% chance)
+									current_price = (current_price * 0.99).max(10.0);
+									let spread = current_price * spread_factors[i] * 0.5;
+									(current_price + spread * 0.3, current_price - spread, current_price - spread * 0.7)
+								} else if scenario_type >= 70 && scenario_type < 85 {
+									// Strong uptrend scenario (15% chance)
+									current_price = current_price * 1.01;
+									let spread = current_price * spread_factors[i] * 0.5;
+									(current_price + spread, current_price - spread * 0.3, current_price + spread * 0.7)
+								} else {
+									// Normal random walk (70% chance)
+									let change = price_changes[i] * volatility * current_price;
+									current_price = (current_price + change).max(10.0);
+									
+									// Occasionally inject zero-spread periods
+									if zero_spread_flags[i] && i % 10 == 0 {
+										(current_price, current_price, current_price)
+									} else {
+										let spread = current_price * spread_factors[i];
+										let half_spread = spread / 2.0;
+										let close_position = (price_changes[i] + 1.0) / 2.0;
+										let c = current_price - half_spread + spread * close_position;
+										((current_price + half_spread).max(c), (current_price - half_spread).min(c), c)
+									}
+								};
+								
+								high.push(h);
+								low.push(l);
+								close.push(c);
+							}
+							
+							(high, low, close)
+						}),
+					Just(fast_k_period),
+					Just(slow_k_period),
+					Just(slow_d_period),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |((high, low, close), fast_k_period, slow_k_period, slow_d_period)| {
+				let params = KdjParams {
+					fast_k_period: Some(fast_k_period),
+					slow_k_period: Some(slow_k_period),
+					slow_k_ma_type: Some("sma".to_string()),
+					slow_d_period: Some(slow_d_period),
+					slow_d_ma_type: Some("sma".to_string()),
+				};
+				let input = KdjInput::from_slices(&high, &low, &close, params.clone());
+
+				let KdjOutput { k, d, j } = kdj_with_kernel(&input, kernel).unwrap();
+				let KdjOutput { k: ref_k, d: ref_d, j: ref_j } = kdj_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Property 1: Output length should match input length
+				prop_assert_eq!(k.len(), high.len(), "K length mismatch");
+				prop_assert_eq!(d.len(), high.len(), "D length mismatch");
+				prop_assert_eq!(j.len(), high.len(), "J length mismatch");
+
+				// Property 2: Warmup period - should have NaN values at the beginning
+				// KDJ has complex warmup: stoch warmup + slow_k smoothing + slow_d smoothing
+				let first_valid_idx = high.iter()
+					.zip(low.iter())
+					.zip(close.iter())
+					.position(|((&h, &l), &c)| !h.is_nan() && !l.is_nan() && !c.is_nan())
+					.unwrap_or(0);
+				let stoch_warmup = first_valid_idx + fast_k_period - 1;
+				let k_warmup = stoch_warmup + slow_k_period - 1;
+				let d_warmup = k_warmup + slow_d_period - 1;
+
+				// K should be NaN before k_warmup
+				for i in 0..k_warmup.min(k.len()) {
+					prop_assert!(k[i].is_nan(), "K[{}] should be NaN during warmup but was {}", i, k[i]);
+				}
+				// D should be NaN before d_warmup
+				for i in 0..d_warmup.min(d.len()) {
+					prop_assert!(d[i].is_nan(), "D[{}] should be NaN during warmup but was {}", i, d[i]);
+				}
+				// J should be NaN before d_warmup (since J depends on both K and D)
+				for i in 0..d_warmup.min(j.len()) {
+					prop_assert!(j[i].is_nan(), "J[{}] should be NaN during warmup but was {}", i, j[i]);
+				}
+
+				// Property 3: K and D values should be in [0, 100] range (stochastic oscillator bounds)
+				for i in k_warmup..k.len() {
+					if !k[i].is_nan() {
+						prop_assert!(
+							k[i] >= -1e-9 && k[i] <= 100.0 + 1e-9,
+							"K[{}] = {} is outside [0, 100] range", i, k[i]
+						);
+					}
+				}
+				for i in d_warmup..d.len() {
+					if !d[i].is_nan() {
+						prop_assert!(
+							d[i] >= -1e-9 && d[i] <= 100.0 + 1e-9,
+							"D[{}] = {} is outside [0, 100] range", i, d[i]
+						);
+					}
+				}
+
+				// Property 4: J = 3*K - 2*D relationship should hold
+				for i in d_warmup..j.len() {
+					if !k[i].is_nan() && !d[i].is_nan() && !j[i].is_nan() {
+						let expected_j = 3.0 * k[i] - 2.0 * d[i];
+						prop_assert!(
+							(j[i] - expected_j).abs() <= 1e-9,
+							"J[{}] = {} but expected {} (3*K - 2*D = 3*{} - 2*{})", 
+							i, j[i], expected_j, k[i], d[i]
+						);
+					}
+				}
+
+				// Property 5: With zero spread (high=low), stochastic should produce NaN
+				// This tests the mathematical edge case where the denominator becomes 0
+				for i in stoch_warmup..high.len().min(stoch_warmup + fast_k_period * 2) {
+					// Check windows where all highs equal all lows in the period
+					if i >= fast_k_period {
+						let window_start = i + 1 - fast_k_period;
+						let all_zero_spread = (window_start..=i)
+							.all(|j| (high[j] - low[j]).abs() < 1e-10);
+						
+						if all_zero_spread && i >= k_warmup {
+							// When hh - ll = 0, K should be NaN
+							prop_assert!(
+								k[i].is_nan(),
+								"K[{}] should be NaN when high=low in window, but was {}", i, k[i]
+							);
+						}
+					}
+				}
+				
+				// Property 7: J can exceed [0, 100] bounds (this is valid behavior)
+				// J = 3*K - 2*D, so if K=90 and D=30, J=210 which is valid
+				let mut j_outside_bounds_found = false;
+				for i in d_warmup..j.len() {
+					if !j[i].is_nan() {
+						if j[i] < -1e-9 || j[i] > 100.0 + 1e-9 {
+							j_outside_bounds_found = true;
+							// Verify this is consistent with the formula
+							let expected_j = 3.0 * k[i] - 2.0 * d[i];
+							prop_assert!(
+								(j[i] - expected_j).abs() <= 1e-9,
+								"J[{}] = {} is outside [0,100] but doesn't match formula 3*K - 2*D", i, j[i]
+							);
+						}
+					}
+				}
+				// Note: We don't require j_outside_bounds_found to be true as it depends on data
+				
+				// Property 8: Trend behavior validation
+				// Check if we have a strong trend scenario
+				let mut trend_sum = 0.0;
+				for i in 1..high.len().min(50) {
+					trend_sum += close[i] - close[i-1];
+				}
+				
+				if high.len() > d_warmup + 20 {
+					let avg_change = trend_sum / (high.len().min(50) - 1) as f64;
+					let first_close = close[0];
+					
+					// Strong uptrend: average change > 0.5% of initial price
+					if avg_change > first_close * 0.005 {
+						// In strong uptrend, K should tend toward higher values
+						let last_valid_k = k.iter().rev()
+							.find(|&&x| !x.is_nan())
+							.copied()
+							.unwrap_or(0.0);
+						
+						// We expect K to be above 50 in a strong uptrend (not strict, just tendency)
+						if last_valid_k < 30.0 {
+							// This is a soft check - log but don't fail
+							// Strong uptrends should generally push K higher
+						}
+					}
+					
+					// Strong downtrend: average change < -0.5% of initial price  
+					if avg_change < -first_close * 0.005 {
+						// In strong downtrend, K should tend toward lower values
+						let last_valid_k = k.iter().rev()
+							.find(|&&x| !x.is_nan())
+							.copied()
+							.unwrap_or(100.0);
+						
+						// We expect K to be below 50 in a strong downtrend (not strict, just tendency)
+						if last_valid_k > 70.0 {
+							// This is a soft check - log but don't fail
+							// Strong downtrends should generally push K lower
+						}
+					}
+				}
+
+				// Property 6: Kernel consistency - different kernels should produce same results
+				// Allow for small floating-point differences (ULP comparison)
+				for i in 0..k.len() {
+					let k_bits = k[i].to_bits();
+					let ref_k_bits = ref_k[i].to_bits();
+					let d_bits = d[i].to_bits();
+					let ref_d_bits = ref_d[i].to_bits();
+					let j_bits = j[i].to_bits();
+					let ref_j_bits = ref_j[i].to_bits();
+
+					if k[i].is_nan() && ref_k[i].is_nan() {
+						// Both NaN is fine
+					} else if !k[i].is_nan() && !ref_k[i].is_nan() {
+						let ulp_diff = if k_bits > ref_k_bits {
+							k_bits - ref_k_bits
+						} else {
+							ref_k_bits - k_bits
+						};
+						prop_assert!(
+							ulp_diff <= 5,
+							"K[{}]: kernel {} gives {} but scalar gives {} (ULP diff: {})",
+							i, kernel as u8, k[i], ref_k[i], ulp_diff
+						);
+					} else {
+						prop_assert!(
+							false,
+							"K[{}]: NaN mismatch between kernels", i
+						);
+					}
+
+					if d[i].is_nan() && ref_d[i].is_nan() {
+						// Both NaN is fine
+					} else if !d[i].is_nan() && !ref_d[i].is_nan() {
+						let ulp_diff = if d_bits > ref_d_bits {
+							d_bits - ref_d_bits
+						} else {
+							ref_d_bits - d_bits
+						};
+						prop_assert!(
+							ulp_diff <= 5,
+							"D[{}]: kernel {} gives {} but scalar gives {} (ULP diff: {})",
+							i, kernel as u8, d[i], ref_d[i], ulp_diff
+						);
+					} else {
+						prop_assert!(
+							false,
+							"D[{}]: NaN mismatch between kernels", i
+						);
+					}
+
+					if j[i].is_nan() && ref_j[i].is_nan() {
+						// Both NaN is fine
+					} else if !j[i].is_nan() && !ref_j[i].is_nan() {
+						let ulp_diff = if j_bits > ref_j_bits {
+							j_bits - ref_j_bits
+						} else {
+							ref_j_bits - j_bits
+						};
+						prop_assert!(
+							ulp_diff <= 10, // J has more computation, allow slightly more ULP difference
+							"J[{}]: kernel {} gives {} but scalar gives {} (ULP diff: {})",
+							i, kernel as u8, j[i], ref_j[i], ulp_diff
+						);
+					} else {
+						prop_assert!(
+							false,
+							"J[{}]: NaN mismatch between kernels", i
+						);
+					}
+				}
+
+				Ok(())
+			})?;
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_kdj_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1738,6 +2043,9 @@ mod tests {
 		check_kdj_nan_handling,
 		check_kdj_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_kdj_tests!(check_kdj_property);
 
 	// Batch test, matches alma batch style
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {

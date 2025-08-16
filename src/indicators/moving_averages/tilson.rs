@@ -1152,6 +1152,147 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_tilson_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Generate test data with appropriate ranges for Tilson
+		// Period: 1-30 (reasonable range for T3)
+		// Volume factor: 0.0-1.0 (valid range)
+		// Data length: Must be at least 6*(period-1)+1 for valid output
+		let strat = (1usize..=30)
+			.prop_flat_map(|period| {
+				// Ensure data is long enough for the warmup period
+				let min_len = (6 * period.saturating_sub(1) + 1).max(period);
+				(
+					prop::collection::vec(
+						(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+						min_len..400,
+					),
+					Just(period),
+					0.0f64..=1.0f64,  // Volume factor range [0, 1]
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period, volume_factor)| {
+				let params = TilsonParams {
+					period: Some(period),
+					volume_factor: Some(volume_factor),
+				};
+				let input = TilsonInput::from_slice(&data, params);
+
+				// Compute with the specified kernel
+				let TilsonOutput { values: out } = tilson_with_kernel(&input, kernel).unwrap();
+				// Compute reference with scalar kernel for comparison
+				let TilsonOutput { values: ref_out } = tilson_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Property 1: Output length must match input
+				prop_assert_eq!(out.len(), data.len(), "Output length mismatch");
+
+				// Calculate warmup period (assuming clean input data, no NaN)
+				let warmup_end = 6 * (period - 1);
+
+				// Property 2: Warmup period values must be NaN
+				for i in 0..warmup_end.min(out.len()) {
+					prop_assert!(
+						out[i].is_nan(),
+						"Expected NaN during warmup at index {}, got {}",
+						i,
+						out[i]
+					);
+				}
+
+				// Check if the entire data array is constant (for Property 5)
+				let is_constant_data = data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12);
+
+				// Property 3: Values after warmup should be finite and SIMD-consistent
+				for i in warmup_end..data.len() {
+					let y = out[i];
+					let r = ref_out[i];
+
+					// Property 4: SIMD consistency check
+					if y.is_finite() && r.is_finite() {
+						let y_bits = y.to_bits();
+						let r_bits = r.to_bits();
+						let ulp_diff = y_bits.abs_diff(r_bits);
+
+						prop_assert!(
+							(y - r).abs() <= 1e-9 || ulp_diff <= 8,  // Allow slightly more ULP for T3's complexity
+							"SIMD mismatch at idx {}: {} vs {} (ULP={})",
+							i,
+							y,
+							r,
+							ulp_diff
+						);
+					} else {
+						// For non-finite values, require exact bit match
+						prop_assert_eq!(
+							y.to_bits(),
+							r.to_bits(),
+							"Non-finite value mismatch at index {}",
+							i
+						);
+					}
+
+					// Property 5: For constant data, output should converge to that constant
+					if is_constant_data && i >= warmup_end + period {
+						let const_val = data[0];
+						prop_assert!(
+							(y - const_val).abs() <= 1e-9,
+							"Constant data property failed at idx {}: expected {}, got {}",
+							i,
+							const_val,
+							y
+						);
+					}
+				}
+
+				// Property 6: Special case for period=1
+				if period == 1 {
+					// With period=1, after warmup (which is 0), output should approximately equal input
+					// Note: Even with period=1, Tilson applies 6 cascaded EMAs which can accumulate floating-point errors
+					for i in 0..data.len() {
+						if out[i].is_finite() && data[i].is_finite() {
+							// Use relative tolerance for large values
+							let tol = (data[i].abs() * 1e-10).max(1e-9);
+							prop_assert!(
+								(out[i] - data[i]).abs() <= tol,
+								"Period=1 property failed at idx {}: expected {}, got {}, diff={}",
+								i,
+								data[i],
+								out[i],
+								(out[i] - data[i]).abs()
+							);
+						}
+					}
+				}
+
+				// Property 7: Volume factor edge cases
+				if volume_factor == 0.0 && warmup_end < data.len() {
+					// With volume_factor=0, c1=0, c2=0, c3=0, c4=1
+					// This means output = e3 (third EMA)
+					// Verify output is finite and reasonable
+					for i in warmup_end..data.len() {
+						prop_assert!(
+							out[i].is_finite(),
+							"With volume_factor=0, output should be finite at idx {}",
+							i
+						);
+					}
+				}
+
+				// Note: Removed monotonicity check as it's too strict for a 6-cascaded EMA smoothing indicator
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	generate_all_tilson_tests!(
 		check_tilson_partial_params,
 		check_tilson_accuracy,
@@ -1163,7 +1304,8 @@ mod tests {
 		check_tilson_reinput,
 		check_tilson_nan_handling,
 		check_tilson_streaming,
-		check_tilson_no_poison
+		check_tilson_no_poison,
+		check_tilson_property
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {

@@ -973,6 +973,223 @@ mod tests {
 	fn check_ao_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		Ok(()) // No-op in release builds
 	}
+
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_ao_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Generate test strategy:
+		// - short_period: 1 to 50
+		// - long_period: short_period+1 to 100
+		// - data: random finite values between -1e6 and 1e6
+		let strat = (1usize..=50)
+			.prop_flat_map(|short_period| {
+				((short_period + 1)..=100).prop_flat_map(move |long_period| {
+					(
+						prop::collection::vec(
+							(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+							long_period..400,
+						),
+						Just(short_period),
+						Just(long_period),
+					)
+				})
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, short_period, long_period)| {
+				let params = AoParams {
+					short_period: Some(short_period),
+					long_period: Some(long_period),
+				};
+				let input = AoInput::from_slice(&data, params);
+
+				// Compute AO with the kernel under test
+				let AoOutput { values: out } = ao_with_kernel(&input, kernel).unwrap();
+				// Compute reference with scalar kernel
+				let AoOutput { values: ref_out } = ao_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Property 1: Warmup period - first (long_period - 1) values should be NaN
+				for i in 0..(long_period - 1) {
+					prop_assert!(
+						out[i].is_nan(),
+						"Expected NaN during warmup at index {}, got {}",
+						i,
+						out[i]
+					);
+				}
+
+				// Property 2: After warmup, values should be finite (assuming input is finite)
+				for i in (long_period - 1)..data.len() {
+					prop_assert!(
+						out[i].is_finite(),
+						"Expected finite value after warmup at index {}, got {}",
+						i,
+						out[i]
+					);
+				}
+
+				// Property 3: For constant data, AO should be 0 (short SMA = long SMA)
+				if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) && data.len() >= long_period {
+					// All data is constant
+					for i in (long_period - 1)..data.len() {
+						prop_assert!(
+							out[i].abs() < 1e-9,
+							"For constant data, AO should be 0 at index {}, got {}",
+							i,
+							out[i]
+						);
+					}
+				}
+
+				// Property 4: Tighter output bounds based on actual window differences
+				// Calculate the maximum possible difference between any short-window average 
+				// and any long-window average
+				if data.len() >= long_period {
+					for i in (long_period - 1)..data.len() {
+						// Calculate actual bounds for this position
+						let short_start = i + 1 - short_period;
+						let long_start = i + 1 - long_period;
+						
+						// Get min/max in the long window (which contains the short window)
+						let long_window = &data[long_start..=i];
+						let window_min = long_window.iter().cloned().fold(f64::INFINITY, f64::min);
+						let window_max = long_window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+						
+						// Theoretical maximum: all short values at max, remaining long values at min
+						// Theoretical minimum: all short values at min, remaining long values at max
+						let theoretical_max = window_max - window_min;
+						
+						prop_assert!(
+							out[i].abs() <= theoretical_max + 1e-9,
+							"AO value {} at index {} exceeds theoretical max {}",
+							out[i],
+							i,
+							theoretical_max
+						);
+					}
+				}
+
+				// Property 5: Special case - when short_period = 1 and long_period = 2
+				if short_period == 1 && long_period == 2 && data.len() >= 2 {
+					// Short SMA with period 1 = current value
+					// Long SMA with period 2 = average of last 2 values
+					// AO = current - average(last 2)
+					for i in 1..data.len() {
+						let expected = data[i] - (data[i] + data[i - 1]) / 2.0;
+						let actual = out[i];
+						prop_assert!(
+							(actual - expected).abs() < 1e-9,
+							"Special case (short=1, long=2) mismatch at index {}: expected {}, got {}",
+							i,
+							expected,
+							actual
+						);
+					}
+				}
+
+				// Property 6: Trend Monotonicity - for strictly increasing/decreasing data
+				// Check if data is strictly increasing
+				let is_increasing = data.windows(2).all(|w| w[1] > w[0] + 1e-10);
+				let is_decreasing = data.windows(2).all(|w| w[1] < w[0] - 1e-10);
+				
+				if is_increasing && data.len() >= long_period {
+					// For strictly increasing data, AO should be positive (short SMA > long SMA)
+					for i in (long_period - 1)..data.len() {
+						prop_assert!(
+							out[i] > -1e-9,
+							"For strictly increasing data, AO should be positive at index {}, got {}",
+							i,
+							out[i]
+						);
+					}
+				}
+				
+				if is_decreasing && data.len() >= long_period {
+					// For strictly decreasing data, AO should be negative (short SMA < long SMA)
+					for i in (long_period - 1)..data.len() {
+						prop_assert!(
+							out[i] < 1e-9,
+							"For strictly decreasing data, AO should be negative at index {}, got {}",
+							i,
+							out[i]
+						);
+					}
+				}
+
+				// Property 7: Linear trend test - for data with constant slope
+				// Check if data forms a linear sequence (arithmetic progression)
+				if data.len() >= 3 {
+					let diffs: Vec<f64> = data.windows(2).map(|w| w[1] - w[0]).collect();
+					let is_linear = diffs.windows(2).all(|w| (w[1] - w[0]).abs() < 1e-10);
+					
+					if is_linear && data.len() >= long_period + 10 {
+						// For linear data, AO should stabilize to a constant value after initial warmup
+						// Check the last several values are approximately constant
+						let stable_start = long_period + 5;
+						if stable_start < data.len() - 1 {
+							let stable_values = &out[stable_start..];
+							if stable_values.len() >= 2 {
+								let first_stable = stable_values[0];
+								for (idx, &val) in stable_values.iter().enumerate() {
+									prop_assert!(
+										(val - first_stable).abs() < 1e-8,
+										"For linear data, AO should stabilize. Value at {} differs from stable value: {} vs {}",
+										stable_start + idx,
+										val,
+										first_stable
+									);
+								}
+							}
+						}
+					}
+				}
+
+				// Property 8: Kernel consistency - all kernels should produce identical results
+				for i in 0..data.len() {
+					let y = out[i];
+					let r = ref_out[i];
+
+					// Check NaN consistency
+					if y.is_nan() || r.is_nan() {
+						prop_assert!(
+							y.is_nan() && r.is_nan(),
+							"NaN mismatch at index {}: kernel={:?} is_nan={}, scalar is_nan={}",
+							i,
+							kernel,
+							y.is_nan(),
+							r.is_nan()
+						);
+						continue;
+					}
+
+					// Check finite value consistency with ULP tolerance
+					let y_bits = y.to_bits();
+					let r_bits = r.to_bits();
+					let ulp_diff: u64 = y_bits.abs_diff(r_bits);
+
+					prop_assert!(
+						(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+						"Kernel mismatch at index {}: kernel={:?} value={}, scalar value={}, \
+						 diff={}, ULP diff={}",
+						i,
+						kernel,
+						y,
+						r,
+						(y - r).abs(),
+						ulp_diff
+					);
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_ao_tests {
         ($($test_fn:ident),*) => {
             paste! {
@@ -1007,6 +1224,9 @@ mod tests {
 		check_ao_nan_handling,
 		check_ao_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_ao_tests!(check_ao_property);
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);
 		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";

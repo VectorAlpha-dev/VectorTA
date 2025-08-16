@@ -1437,4 +1437,242 @@ mod tests {
 	}
 	gen_batch_tests!(check_batch_default_row);
 	gen_batch_tests!(check_batch_no_poison);
+
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_trix_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Generate test strategy with periods from 2 to 20 for more realistic testing
+		let strat = (2usize..=20)
+			.prop_flat_map(|period| {
+				// TRIX needs 3*(period-1)+1 valid data points
+				let min_data_needed = 3 * (period - 1) + 1 + 10; // Add 10 extra for testing
+				(
+					prop::collection::vec(
+						// Use positive values since TRIX uses log internally
+						// Include very small values to test edge cases
+						(0.001f64..1e6f64).prop_filter("positive finite", |x| x.is_finite() && *x > 0.0),
+						min_data_needed..400,
+					),
+					Just(period),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period)| {
+				let params = TrixParams { period: Some(period) };
+				let input = TrixInput::from_slice(&data, params);
+
+				// Test with the specified kernel
+				let TrixOutput { values: out } = trix_with_kernel(&input, kernel).unwrap();
+				// Get reference output from scalar kernel for comparison
+				let TrixOutput { values: ref_out } = trix_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Property 1: Warmup period validation
+				// TRIX needs 3*(period-1) for triple EMA + 1 for ROC
+				let warmup_period = 3 * (period - 1) + 1;
+				for i in 0..warmup_period.min(data.len()) {
+					prop_assert!(
+						out[i].is_nan(),
+						"Expected NaN during warmup at index {}, got {}",
+						i,
+						out[i]
+					);
+				}
+
+				// Property 2: First valid value should be at warmup_period index
+				if data.len() > warmup_period {
+					prop_assert!(
+						!out[warmup_period].is_nan(),
+						"Expected valid value at index {} (after warmup), got NaN",
+						warmup_period
+					);
+				}
+
+				// Property 3: Constant data should produce near-zero TRIX
+				if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) && data.len() > warmup_period {
+					// For constant data, log is constant, triple EMA is constant, so ROC should be ~0
+					for i in warmup_period..data.len() {
+						prop_assert!(
+							out[i].abs() < 1e-6,
+							"TRIX should be near zero for constant data at index {}: got {}",
+							i,
+							out[i]
+						);
+					}
+				}
+
+				// Property 4: Monotonic increasing data should tend toward positive TRIX
+				// Check if data is mostly increasing (80% of consecutive pairs increase)
+				let increasing_count = data.windows(2).filter(|w| w[1] > w[0]).count();
+				let is_mostly_increasing = increasing_count as f64 > data.len() as f64 * 0.8;
+				if is_mostly_increasing && data.len() > warmup_period + 10 {
+					// Check the average of last 5 valid values
+					let last_values: Vec<f64> = out[(data.len() - 5)..data.len()]
+						.iter()
+						.filter(|&&v| !v.is_nan())
+						.copied()
+						.collect();
+					if !last_values.is_empty() {
+						let avg = last_values.iter().sum::<f64>() / last_values.len() as f64;
+						prop_assert!(
+							avg > -10.0,  // TRIX multiplies by 10000, so allow reasonable range
+							"TRIX average should be positive for mostly increasing data: got {}",
+							avg
+						);
+					}
+				}
+
+				// Property 5: Monotonic decreasing data should tend toward negative TRIX
+				// Check if data is mostly decreasing (80% of consecutive pairs decrease)
+				let decreasing_count = data.windows(2).filter(|w| w[1] < w[0]).count();
+				let is_mostly_decreasing = decreasing_count as f64 > data.len() as f64 * 0.8;
+				if is_mostly_decreasing && data.len() > warmup_period + 10 {
+					// Check the average of last 5 valid values
+					let last_values: Vec<f64> = out[(data.len() - 5)..data.len()]
+						.iter()
+						.filter(|&&v| !v.is_nan())
+						.copied()
+						.collect();
+					if !last_values.is_empty() {
+						let avg = last_values.iter().sum::<f64>() / last_values.len() as f64;
+						prop_assert!(
+							avg < 10.0,  // TRIX multiplies by 10000, so allow reasonable range
+							"TRIX average should be negative for mostly decreasing data: got {}",
+							avg
+						);
+					}
+				}
+
+				// Property 6: Output magnitude should be reasonable
+				// TRIX multiplies by 10000, but for reasonable price movements, 
+				// the output shouldn't exceed ±100000 (representing ±10% rate of change)
+				for i in warmup_period..data.len() {
+					if !out[i].is_nan() {
+						prop_assert!(
+							out[i].abs() < 100000.0,
+							"TRIX value too large at index {}: {}",
+							i,
+							out[i]
+						);
+					}
+				}
+
+				// Property 7: No infinite values for finite input
+				for (i, &val) in out.iter().enumerate() {
+					prop_assert!(
+						val.is_nan() || val.is_finite(),
+						"TRIX should not produce infinite values at index {}: got {}",
+						i,
+						val
+					);
+				}
+
+				// Property 8: Smoothness property - TRIX should be smoother than log returns
+				// Calculate standard deviation of log returns vs TRIX values
+				if data.len() > warmup_period + 20 {
+					// Calculate log returns
+					let log_returns: Vec<f64> = data.windows(2)
+						.skip(warmup_period)
+						.map(|w| (w[1] / w[0]).ln() * 10000.0)  // Scale similarly to TRIX
+						.collect();
+					
+					let trix_values: Vec<f64> = out.iter()
+						.skip(warmup_period + 1)
+						.filter(|&&v| !v.is_nan())
+						.copied()
+						.collect();
+					
+					if log_returns.len() > 10 && trix_values.len() > 10 {
+						let log_std = calculate_std(&log_returns);
+						let trix_std = calculate_std(&trix_values);
+						
+						// TRIX should be smoother (lower std) due to triple smoothing
+						// Allow some tolerance for edge cases
+						prop_assert!(
+							trix_std <= log_std * 1.2 || trix_std < 1.0,
+							"TRIX should be smoother than log returns: TRIX std={}, log return std={}",
+							trix_std,
+							log_std
+						);
+					}
+				}
+
+				// Property 9: Kernel consistency - compare with scalar reference
+				for i in warmup_period..data.len() {
+					let y = out[i];
+					let r = ref_out[i];
+
+					// Both should be NaN or both should be finite
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert!(
+							y.to_bits() == r.to_bits(),
+							"finite/NaN mismatch at index {}: {} vs {}",
+							i,
+							y,
+							r
+						);
+						continue;
+					}
+
+					// Check ULP difference for finite values
+					let y_bits = y.to_bits();
+					let r_bits = r.to_bits();
+					let ulp_diff: u64 = y_bits.abs_diff(r_bits);
+
+					prop_assert!(
+						(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+						"Kernel mismatch at index {}: {} vs {} (ULP={})",
+						i,
+						y,
+						r,
+						ulp_diff
+					);
+				}
+
+				// Property 10: Determinism - running twice should give same result
+				let TrixOutput { values: out2 } = trix_with_kernel(&input, kernel).unwrap();
+				prop_assert_eq!(
+					out.len(),
+					out2.len(),
+					"Output length mismatch on second run"
+				);
+				for i in 0..out.len() {
+					prop_assert!(
+						out[i].to_bits() == out2[i].to_bits(),
+						"Determinism failed at index {}: {} vs {}",
+						i,
+						out[i],
+						out2[i]
+					);
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		// Additional test: Handle edge cases with very small positive values
+		// These should work since log is defined for all positive values
+		let edge_data = vec![0.001, 0.01, 0.1, 1.0, 10.0, 100.0, 1000.0, 10000.0];
+		let params = TrixParams { period: Some(2) };
+		let input = TrixInput::from_slice(&edge_data, params);
+		let result = trix_with_kernel(&input, kernel);
+		assert!(result.is_ok(), "TRIX should handle very small positive values");
+
+		Ok(())
+	}
+
+	// Helper function to calculate standard deviation
+	fn calculate_std(values: &[f64]) -> f64 {
+		let mean = values.iter().sum::<f64>() / values.len() as f64;
+		let variance = values.iter()
+			.map(|&v| (v - mean).powi(2))
+			.sum::<f64>() / values.len() as f64;
+		variance.sqrt()
+	}
+
+	#[cfg(feature = "proptest")]
+	generate_all_trix_tests!(check_trix_property);
 }

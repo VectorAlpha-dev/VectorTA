@@ -1318,6 +1318,10 @@ mod tests {
 		check_fwma_no_poison
 	);
 
+	// Generate property tests only when proptest feature is enabled
+	#[cfg(feature = "proptest")]
+	generate_all_fwma_tests!(check_fwma_property);
+
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);
 
@@ -1422,6 +1426,324 @@ mod tests {
 	// Release mode stub - does nothing
 	#[cfg(not(debug_assertions))]
 	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(())
+	}
+
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_fwma_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Generate test cases with varying periods and data lengths
+		let strat = (1usize..=64).prop_flat_map(|period| {
+			(
+				prop::collection::vec(
+					(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+					period..400,
+				),
+				Just(period),
+			)
+		});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(mut data, period)| {
+				// Test edge case: data.len() == period
+				if data.len() > period && period > 1 {
+					// Occasionally test minimum valid length
+					if data.len() % 10 == 0 {
+						data.truncate(period);
+					}
+				}
+
+				let params = FwmaParams { period: Some(period) };
+				let input = FwmaInput::from_slice(&data, params);
+
+				// Run FWMA with the specified kernel
+				let FwmaOutput { values: out } = fwma_with_kernel(&input, kernel).unwrap();
+				// Run FWMA with scalar kernel as reference
+				let FwmaOutput { values: ref_out } = fwma_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Verify output length matches input
+				prop_assert_eq!(out.len(), data.len());
+				prop_assert_eq!(ref_out.len(), data.len());
+
+				// Check warmup period - first (period-1) values should be NaN
+				for i in 0..(period - 1).min(data.len()) {
+					prop_assert!(
+						out[i].is_nan(),
+						"Expected NaN during warmup at index {}, got {}",
+						i,
+						out[i]
+					);
+				}
+
+				// Property: Fibonacci weight verification for special cases
+				if period == 2 && data.len() >= 2 {
+					// For period=2, Fibonacci sequence is [1, 1], so weights should be [0.5, 0.5]
+					let expected = (data[0] + data[1]) / 2.0;
+					if out[1].is_finite() && data[0].is_finite() && data[1].is_finite() {
+						prop_assert!(
+							(out[1] - expected).abs() <= 1e-9,
+							"Period=2: output {} should equal average {} at index 1",
+							out[1],
+							expected
+						);
+					}
+				}
+
+				// Check valid outputs starting from index (period-1)
+				for i in (period - 1)..data.len() {
+					let window = &data[i + 1 - period..=i];
+					let lo = window.iter().cloned().fold(f64::INFINITY, f64::min);
+					let hi = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+					let y = out[i];
+					let r = ref_out[i];
+
+					// Property 1: Output should be within bounds of input window
+					prop_assert!(
+						y.is_nan() || (y >= lo - 1e-9 && y <= hi + 1e-9),
+						"idx {}: {} ∉ [{}, {}]",
+						i,
+						y,
+						lo,
+						hi
+					);
+
+					// Property 2: When period = 1, output should equal input
+					if period == 1 {
+						prop_assert!(
+							(y - data[i]).abs() <= f64::EPSILON,
+							"Period=1: output {} should equal input {} at index {}",
+							y,
+							data[i],
+							i
+						);
+					}
+
+					// Property 3: For constant data, output should equal the constant
+					if data.windows(2).all(|w| w[0] == w[1]) && !data.is_empty() {
+						prop_assert!(
+							(y - data[0]).abs() <= 1e-9,
+							"Constant data: output {} should equal constant {} at index {}",
+							y,
+							data[0],
+							i
+						);
+					}
+
+					// Property 4: NaN propagation - if window contains NaN, output should be NaN
+					if window.iter().any(|x| x.is_nan()) {
+						prop_assert!(
+							y.is_nan(),
+							"Window contains NaN but output {} is not NaN at index {}",
+							y,
+							i
+						);
+					}
+
+					// Property 5: Check SIMD consistency - results should match within tolerance
+					if !y.is_finite() || !r.is_finite() {
+						// NaN/infinity should match exactly
+						prop_assert!(
+							y.to_bits() == r.to_bits(),
+							"finite/NaN mismatch idx {}: {} vs {}",
+							i,
+							y,
+							r
+						);
+						continue;
+					}
+
+					// Check ULP difference for finite values
+					let y_bits = y.to_bits();
+					let r_bits = r.to_bits();
+					let ulp_diff: u64 = y_bits.abs_diff(r_bits);
+
+					prop_assert!(
+						(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+						"mismatch idx {}: {} vs {} (ULP={})",
+						i,
+						y,
+						r,
+						ulp_diff
+					);
+				}
+
+				// Property 6: Monotonicity test
+				// For strictly monotonic data, FWMA should preserve monotonicity
+				let is_monotonic_inc = data.windows(2).all(|w| w[0] <= w[1]);
+				let is_monotonic_dec = data.windows(2).all(|w| w[0] >= w[1]);
+				
+				if (is_monotonic_inc || is_monotonic_dec) && data.len() >= period + 1 {
+					for i in period..out.len() {
+						if out[i].is_finite() && out[i-1].is_finite() {
+							if is_monotonic_inc {
+								prop_assert!(
+									out[i] >= out[i-1] - 1e-9,
+									"Monotonic increasing data but output decreases: {} < {} at index {}",
+									out[i],
+									out[i-1],
+									i
+								);
+							}
+							if is_monotonic_dec {
+								prop_assert!(
+									out[i] <= out[i-1] + 1e-9,
+									"Monotonic decreasing data but output increases: {} > {} at index {}",
+									out[i],
+									out[i-1],
+									i
+								);
+							}
+						}
+					}
+				}
+
+				// Property 7: Fibonacci weights should give more weight to recent values
+				// Test with a simple ascending sequence
+				if period >= 3 && data.len() >= period * 2 {
+					// Create a test window with ascending values
+					let test_start = period;
+					if test_start + period <= data.len() {
+						let all_ascending = (0..period).all(|j| {
+							let idx = test_start + j;
+							idx == 0 || !data[idx].is_finite() || !data[idx-1].is_finite() || 
+							data[idx] >= data[idx-1]
+						});
+						
+						if all_ascending && out[test_start + period - 1].is_finite() {
+							// FWMA should be biased towards the higher (more recent) values
+							let window = &data[test_start..test_start + period];
+							let window_avg = window.iter().sum::<f64>() / period as f64;
+							if window.iter().all(|x| x.is_finite()) {
+								// FWMA should be greater than simple average for ascending data
+								// because Fibonacci weights favor recent values
+								prop_assert!(
+									out[test_start + period - 1] >= window_avg - 1e-9,
+									"FWMA {} should be >= average {} for ascending window",
+									out[test_start + period - 1],
+									window_avg
+								);
+							}
+						}
+					}
+				}
+
+				// Property 8: Test extreme values don't cause overflow/underflow
+				if period > 1 && data.len() >= period * 2 {
+					// Check that FWMA doesn't amplify values beyond reasonable bounds
+					let data_range = data.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b.abs()));
+					for &val in &out[(period - 1)..] {
+						if val.is_finite() && data_range > 0.0 {
+							prop_assert!(
+								val.abs() <= data_range * 1.1,
+								"Output {} exceeds reasonable bounds for data range {}",
+								val,
+								data_range
+							);
+						}
+					}
+				}
+
+				// Property 9: Verify specific FWMA calculation for period=3
+				if period == 3 && data.len() >= 3 {
+					// Fibonacci for period=3: [1, 1, 2], normalized: [0.25, 0.25, 0.5]
+					let idx = period - 1;
+					if data[idx-2].is_finite() && data[idx-1].is_finite() && data[idx].is_finite() {
+						let expected = data[idx-2] * 0.25 + data[idx-1] * 0.25 + data[idx] * 0.5;
+						prop_assert!(
+							(out[idx] - expected).abs() <= 1e-9,
+							"Period=3: output {} should equal weighted avg {} at index {}",
+							out[idx],
+							expected,
+							idx
+						);
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		// Additional test for NaN propagation with controlled data
+		let nan_strat = (2usize..=10).prop_flat_map(|period| {
+			(
+				Just(period),
+				1usize..10,  // position to insert NaN (skip 0 to avoid warmup issues)
+			)
+		});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&nan_strat, |(period, nan_pos)| {
+				let mut data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0];
+				if nan_pos < data.len() {
+					data[nan_pos] = f64::NAN;
+				}
+
+				let params = FwmaParams { period: Some(period) };
+				let input = FwmaInput::from_slice(&data, params);
+				let FwmaOutput { values: out } = fwma_with_kernel(&input, kernel).unwrap();
+
+				// Check NaN propagation
+				for i in (period - 1)..data.len() {
+					let window_start = i + 1 - period;
+					let window = &data[window_start..=i];
+					let has_nan = window.iter().any(|x| x.is_nan());
+					
+					if has_nan {
+						prop_assert!(
+							out[i].is_nan(),
+							"Window [{}, {}] contains NaN but output {} is not NaN at index {}",
+							window_start,
+							i,
+							out[i],
+							i
+						);
+					}
+				}
+				Ok(())
+			})
+			.unwrap();
+
+		// Test with extreme values
+		let extreme_strat = (1usize..=10).prop_flat_map(|period| {
+			(
+				Just(period),
+				prop::bool::ANY,  // use max or min
+			)
+		});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&extreme_strat, |(period, use_max)| {
+				let extreme_val = if use_max { 1e308 } else { 1e-308 };
+				let data = vec![extreme_val; period * 2];
+				
+				let params = FwmaParams { period: Some(period) };
+				let input = FwmaInput::from_slice(&data, params);
+				let result = fwma_with_kernel(&input, kernel);
+				
+				// Should not panic and should handle extreme values gracefully
+				prop_assert!(result.is_ok(), "Failed to handle extreme values");
+				
+				if let Ok(FwmaOutput { values: out }) = result {
+					for i in (period - 1)..data.len() {
+						if out[i].is_finite() {
+							// For constant extreme values, output should equal the constant
+							prop_assert!(
+								(out[i] - extreme_val).abs() / extreme_val.abs() <= 1e-9,
+								"Extreme constant value {} doesn't match output {} at index {}",
+								extreme_val,
+								out[i],
+								i
+							);
+						}
+					}
+				}
+				Ok(())
+			})
+			.unwrap();
+
 		Ok(())
 	}
 	macro_rules! gen_batch_tests {
