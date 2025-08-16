@@ -1377,6 +1377,228 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_stddev_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Generate random parameter combinations and corresponding data vectors
+		// Use positive values to simulate realistic financial data (prices >= 0)
+		let strat = (2usize..=30, 0.5f64..=3.0f64)
+			.prop_flat_map(|(period, nbdev)| {
+				(
+					prop::collection::vec(
+						(0.01f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+						period..400,
+					),
+					Just(period),
+					Just(nbdev),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period, nbdev)| {
+				let params = StdDevParams {
+					period: Some(period),
+					nbdev: Some(nbdev),
+				};
+				let input = StdDevInput::from_slice(&data, params);
+
+				let StdDevOutput { values: out } = stddev_with_kernel(&input, kernel).unwrap();
+				let StdDevOutput { values: ref_out } = stddev_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Calculate expected warmup period
+				let warmup_period = period - 1;
+
+				// Verify warmup period values are NaN
+				for i in 0..warmup_period {
+					prop_assert!(
+						out[i].is_nan(),
+						"Expected NaN during warmup at index {}, got {}",
+						i,
+						out[i]
+					);
+				}
+
+				// Test properties for valid output values
+				for i in warmup_period..data.len() {
+					let y = out[i];
+					let r = ref_out[i];
+
+					// Property 1: Standard deviation is always non-negative
+					prop_assert!(
+						y.is_nan() || y >= 0.0,
+						"StdDev at index {} is negative: {}",
+						i,
+						y
+					);
+
+					// Property 2: Check kernel consistency (all kernels should produce same result)
+					let y_bits = y.to_bits();
+					let r_bits = r.to_bits();
+					let ulp_diff = if y_bits > r_bits {
+						y_bits - r_bits
+					} else {
+						r_bits - y_bits
+					};
+					prop_assert!(
+						ulp_diff <= 3 || (y.is_nan() && r.is_nan()),
+						"Kernel mismatch at index {}: {} vs {} (ULP diff: {})",
+						i,
+						y,
+						r,
+						ulp_diff
+					);
+
+					// Property 3: For constant window, stddev should be 0
+					let window = &data[i + 1 - period..=i];
+					let is_constant = window.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12);
+					if is_constant {
+						prop_assert!(
+							y.abs() < 1e-9,
+							"StdDev should be ~0 for constant data at index {}, got {}",
+							i,
+							y
+						);
+					}
+
+					// Property 4: Bounded by theoretical maximum (for nbdev=1)
+					// Maximum stddev occurs with bimodal distribution at extremes
+					// Max stddev ≈ range/2 * sqrt(n/(n-1)) for n points
+					if (nbdev - 1.0).abs() < 1e-9 {
+						let window_min = window.iter().cloned().fold(f64::INFINITY, f64::min);
+						let window_max = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+						let range = window_max - window_min;
+						
+						// Theoretical maximum with correction factor for finite samples
+						let max_stddev = (range / 2.0) * ((period as f64) / ((period - 1) as f64)).sqrt();
+						
+						prop_assert!(
+							y <= max_stddev + 1e-9,
+							"StdDev at index {} ({}) exceeds theoretical maximum ({})",
+							i,
+							y,
+							max_stddev
+						);
+					}
+
+					// Property 5: Scaling with nbdev
+					// Run another calculation with nbdev=1.0 to verify scaling
+					if (nbdev - 1.0).abs() > 1e-9 {
+						let params_unit = StdDevParams {
+							period: Some(period),
+							nbdev: Some(1.0),
+						};
+						let input_unit = StdDevInput::from_slice(&data, params_unit);
+						let StdDevOutput { values: out_unit } = stddev_with_kernel(&input_unit, kernel).unwrap();
+						let y_unit = out_unit[i];
+						
+						// Verify that output scales linearly with nbdev
+						let expected = y_unit * nbdev;
+						let diff = (y - expected).abs();
+						prop_assert!(
+							diff < 1e-9 || (y.is_nan() && y_unit.is_nan()),
+							"Scaling mismatch at index {}: {} != {} * {} = {}",
+							i,
+							y,
+							y_unit,
+							nbdev,
+							expected
+						);
+					}
+				}
+
+				// Special case: period=2 with two identical values should give 0
+				if period == 2 && data.len() >= 2 {
+					let identical_data = vec![42.0; 10];
+					let params2 = StdDevParams {
+						period: Some(2),
+						nbdev: Some(nbdev),
+					};
+					let input2 = StdDevInput::from_slice(&identical_data, params2);
+					let StdDevOutput { values: out2 } = stddev_with_kernel(&input2, kernel).unwrap();
+					
+					for i in 1..out2.len() {
+						prop_assert!(
+							out2[i].abs() < 1e-9,
+							"StdDev for identical pairs should be 0, got {} at index {}",
+							out2[i],
+							i
+						);
+					}
+				}
+
+				// Test monotonic increasing pattern
+				// For a linear sequence, stddev = range * sqrt((n²-1)/12) / n
+				if data.len() >= period * 2 {
+					let monotonic_data: Vec<f64> = (0..100).map(|i| 100.0 + i as f64 * 10.0).collect();
+					let mono_params = StdDevParams {
+						period: Some(period),
+						nbdev: Some(1.0),
+					};
+					let mono_input = StdDevInput::from_slice(&monotonic_data, mono_params);
+					let StdDevOutput { values: mono_out } = stddev_with_kernel(&mono_input, kernel).unwrap();
+					
+					// For linear sequence with step size d, theoretical stddev = d * sqrt((n²-1)/12)
+					let step_size = 10.0;
+					let expected_stddev = step_size * ((period * period - 1) as f64 / 12.0).sqrt();
+					
+					for i in (period - 1)..mono_out.len().min(period * 3) {
+						let deviation = (mono_out[i] - expected_stddev).abs();
+						prop_assert!(
+							deviation < 1.0,  // Allow some tolerance for numerical precision
+							"Monotonic pattern stddev mismatch at index {}: got {}, expected ~{}",
+							i,
+							mono_out[i],
+							expected_stddev
+						);
+					}
+				}
+
+				// Test alternating pattern (high-low-high-low)
+				// This should produce high variance
+				if data.len() >= period * 2 && period >= 4 {
+					let alternating_data: Vec<f64> = (0..100)
+						.map(|i| if i % 2 == 0 { 1000.0 } else { 100.0 })
+						.collect();
+					let alt_params = StdDevParams {
+						period: Some(period),
+						nbdev: Some(1.0),
+					};
+					let alt_input = StdDevInput::from_slice(&alternating_data, alt_params);
+					let StdDevOutput { values: alt_out } = stddev_with_kernel(&alt_input, kernel).unwrap();
+					
+					// For alternating pattern, stddev should be close to range/2
+					let alt_range = 900.0;  // 1000 - 100
+					let expected_alt_stddev = alt_range / 2.0;  // Approximately 450
+					
+					for i in (period - 1)..alt_out.len().min(period * 3) {
+						// Should be substantial (at least 40% of range)
+						prop_assert!(
+							alt_out[i] > alt_range * 0.4,
+							"Alternating pattern should produce high stddev at index {}: got {}",
+							i,
+							alt_out[i]
+						);
+						// But not exceed theoretical maximum
+						let max_possible = (alt_range / 2.0) * ((period as f64) / ((period - 1) as f64)).sqrt();
+						prop_assert!(
+							alt_out[i] <= max_possible + 1e-9,
+							"Alternating pattern stddev exceeds maximum at index {}: got {}, max {}",
+							i,
+							alt_out[i],
+							max_possible
+						);
+					}
+				}
+
+				Ok(())
+			})?;
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_stddev_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1412,6 +1634,9 @@ mod tests {
 		check_stddev_streaming,
 		check_stddev_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_stddev_tests!(check_stddev_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);

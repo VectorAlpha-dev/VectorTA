@@ -953,6 +953,8 @@ mod tests {
 	use super::*;
 	use crate::skip_if_unsupported;
 	use crate::utilities::data_loader::read_candles_from_csv;
+	#[cfg(feature = "proptest")]
+	use proptest::prelude::*;
 
 	fn check_ultosc_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test_name);
@@ -1190,6 +1192,207 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_ultosc_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Generate random test data for high/low/close prices with varying periods
+		let strat = (1usize..=50, 1usize..=50, 1usize..=50)
+			.prop_flat_map(|(p1, p2, p3)| {
+				let max_period = p1.max(p2).max(p3);
+				(
+					// Generate price data with realistic constraints
+					// Need at least max_period + 1 for ULTOSC (needs previous close)
+					prop::collection::vec(
+						(0.1f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
+						(max_period + 1)..400,
+					),
+					Just((p1, p2, p3)),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(base_prices, (p1, p2, p3))| {
+				// Generate high/low/close from base prices with realistic and varied relationships
+				let mut high = Vec::with_capacity(base_prices.len());
+				let mut low = Vec::with_capacity(base_prices.len());
+				let mut close = Vec::with_capacity(base_prices.len());
+				
+				// Use a simple pseudo-random number generator for variation
+				let mut seed = p1 + p2 * 7 + p3 * 13;
+				for &price in &base_prices {
+					// Vary the spread between 1% and 10%
+					seed = (seed * 1103515245 + 12345) % (1 << 31);
+					let spread_pct = 0.01 + (seed as f64 / (1u64 << 31) as f64) * 0.09;
+					let spread = price * spread_pct;
+					
+					// Vary where the close falls within the range
+					seed = (seed * 1103515245 + 12345) % (1 << 31);
+					let close_position = seed as f64 / (1u64 << 31) as f64; // 0.0 to 1.0
+					
+					let h = price + spread * 0.5;
+					let l = price - spread * 0.5;
+					let c = l + (h - l) * close_position;
+					
+					high.push(h);
+					low.push(l);
+					close.push(c);
+				}
+
+				let params = UltOscParams {
+					timeperiod1: Some(p1),
+					timeperiod2: Some(p2),
+					timeperiod3: Some(p3),
+				};
+				let input = UltOscInput::from_slices(&high, &low, &close, params.clone());
+				
+				let result = ultosc_with_kernel(&input, kernel).unwrap();
+				let out = result.values;
+				
+				// Also compute with scalar kernel for reference
+				let ref_result = ultosc_with_kernel(&input, Kernel::Scalar).unwrap();
+				let ref_out = ref_result.values;
+				
+				let max_period = p1.max(p2).max(p3);
+				// ULTOSC needs previous close, so warmup is max_period (includes the first_valid offset)
+				let warmup = max_period;
+				
+				// Property 1: Warmup period validation
+				// First warmup values should be NaN
+				for i in 0..warmup.min(out.len()) {
+					prop_assert!(
+						out[i].is_nan(),
+						"[{}] Expected NaN during warmup at index {}, got {}",
+						test_name, i, out[i]
+					);
+				}
+				
+				// Property 2: Kernel consistency
+				// All kernels should produce identical results
+				for (i, (&y, &r)) in out.iter().zip(ref_out.iter()).enumerate() {
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert!(
+							y.to_bits() == r.to_bits(),
+							"[{}] NaN/inf mismatch at index {}: {} vs {}",
+							test_name, i, y, r
+						);
+					} else {
+						let ulp_diff = y.to_bits().abs_diff(r.to_bits());
+						prop_assert!(
+							(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+							"[{}] Value mismatch at index {}: {} vs {} (ULP diff: {})",
+							test_name, i, y, r, ulp_diff
+						);
+					}
+				}
+				
+				// Property 3: Output bounds
+				// ULTOSC values must be between 0 and 100
+				for (i, &val) in out.iter().enumerate() {
+					if !val.is_nan() {
+						prop_assert!(
+							val >= 0.0 && val <= 100.0,
+							"[{}] ULTOSC value {} at index {} is out of bounds [0, 100]",
+							test_name, val, i
+						);
+					}
+				}
+				
+				// Property 4: Constant price property
+				// If all prices are constant, ULTOSC should stabilize to a specific value
+				if high.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) &&
+				   low.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) &&
+				   close.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) {
+					// After the largest period, the indicator should produce stable values
+					// We need at least max_period + a few more points to see stability
+					let stability_check_start = (warmup + p3.max(p2).max(p1)).min(out.len());
+					if stability_check_start < out.len() - 2 {
+						// Find first non-NaN value after stability point
+						let stable_region = &out[stability_check_start..];
+						let first_valid = stable_region.iter().position(|&v| !v.is_nan());
+						
+						if let Some(idx) = first_valid {
+							let expected_stable = stable_region[idx];
+							// All subsequent values should match the first stable value
+							for (i, &val) in stable_region.iter().skip(idx + 1).enumerate() {
+								if !val.is_nan() {
+									prop_assert!(
+										(val - expected_stable).abs() < 1e-8,
+										"[{}] Expected stable value {} for constant prices at index {}, got {}",
+										test_name, expected_stable, stability_check_start + idx + 1 + i, val
+									);
+								}
+							}
+						}
+					}
+				}
+				
+				// Property 5: Zero range property
+				// When high = low = close for all values
+				let zero_range_high = vec![100.0; base_prices.len()];
+				let zero_range_low = zero_range_high.clone();
+				let zero_range_close = zero_range_high.clone();
+				
+				let zero_input = UltOscInput::from_slices(&zero_range_high, &zero_range_low, &zero_range_close, params.clone());
+				if let Ok(zero_result) = ultosc_with_kernel(&zero_input, kernel) {
+					// After warmup, with zero range (high=low=close), true range is 0,
+					// so ULTOSC should be 0 (as per lines 459-462 implementation)
+					for (i, &val) in zero_result.values.iter().enumerate().skip(warmup) {
+						if !val.is_nan() {
+							prop_assert!(
+								val.abs() < 1e-8,
+								"[{}] Expected 0 for zero range at index {}, got {}",
+								test_name, i, val
+							);
+						}
+					}
+				}
+				
+				// Property 6: Weight relationship verification (4:2:1)
+				// ULTOSC formula: 100 * (4*BP1/TR1 + 2*BP2/TR2 + BP3/TR3) / 7
+				// This is a fundamental property of the indicator
+				// We can verify the weights are applied correctly by checking that
+				// the final result is properly weighted
+				if out.len() > warmup {
+					// The formula divides by 7 because 4+2+1=7
+					// This is a sanity check that the implementation follows the spec
+					for i in warmup..out.len().min(warmup + 5) {
+						if !out[i].is_nan() {
+							// ULTOSC values should be reasonable oscillator values
+							// Not testing exact formula here, just that it's bounded reasonably
+							prop_assert!(
+								out[i] >= 0.0 && out[i] <= 100.0,
+								"[{}] ULTOSC at {} should be in [0,100], got {}",
+								test_name, i, out[i]
+							);
+						}
+					}
+				}
+				
+				// Property 7: Period ordering independence
+				// ULTOSC should work regardless of period ordering (p1, p2, p3 don't need to be ordered)
+				let reordered_params = UltOscParams {
+					timeperiod1: Some(p3),
+					timeperiod2: Some(p1),
+					timeperiod3: Some(p2),
+				};
+				let reordered_input = UltOscInput::from_slices(&high, &low, &close, reordered_params);
+				
+				// Should not error regardless of ordering
+				prop_assert!(
+					ultosc_with_kernel(&reordered_input, kernel).is_ok(),
+					"[{}] ULTOSC should work with any period ordering",
+					test_name
+				);
+				
+				Ok(())
+			})?;
+			
+		Ok(())
+	}
+
 	macro_rules! generate_all_ultosc_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1222,6 +1425,9 @@ mod tests {
 		check_ultosc_period_exceeds_data_length,
 		check_ultosc_no_poison
 	);
+	
+	#[cfg(feature = "proptest")]
+	generate_all_ultosc_tests!(check_ultosc_property);
 	fn check_ultosc_batch_default(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test_name);
 

@@ -1140,6 +1140,278 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_apo_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy 1: Random price data with realistic period ranges
+		let random_data_strat = (3usize..=20, 10usize..=50)
+			.prop_filter("short < long", |(s, l)| s < l)
+			.prop_flat_map(|(short_period, long_period)| {
+				// Generate data length that's sufficient for the long period
+				let len = long_period * 2..400;
+				(
+					prop::collection::vec(
+						// Generate realistic price data
+						(10f64..10000f64).prop_filter("finite", |x| x.is_finite()),
+						len,
+					),
+					Just(short_period),
+					Just(long_period),
+					Just("random"),
+				)
+			});
+
+		// Strategy 2: Constant data (APO should stay near 0)
+		let constant_data_strat = (3usize..=20, 10usize..=50)
+			.prop_filter("short < long", |(s, l)| s < l)
+			.prop_flat_map(|(short_period, long_period)| {
+				let len = long_period * 2..200;
+				(
+					prop::collection::vec(Just(100.0f64), len),
+					Just(short_period),
+					Just(long_period),
+					Just("constant"),
+				)
+			});
+
+		// Strategy 3: Trending data (monotonic increase/decrease)
+		let trending_data_strat = (3usize..=20, 10usize..=50)
+			.prop_filter("short < long", |(s, l)| s < l)
+			.prop_flat_map(|(short_period, long_period)| {
+				let len = long_period * 2..200;
+				(
+					(50..150usize).prop_flat_map(move |size| {
+						(0.1f64..5.0).prop_map(move |slope| {
+							(0..size).map(|i| 100.0 + slope * i as f64).collect::<Vec<f64>>()
+						})
+					}),
+					Just(short_period),
+					Just(long_period),
+					Just("trending"),
+				)
+			});
+
+		// Combine all strategies
+		let strat = prop_oneof![
+			random_data_strat,
+			constant_data_strat,
+			trending_data_strat,
+		];
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, short_period, long_period, data_type)| {
+				let params = ApoParams {
+					short_period: Some(short_period),
+					long_period: Some(long_period),
+				};
+				let input = ApoInput::from_slice(&data, params.clone());
+
+				let result = apo_with_kernel(&input, kernel);
+				prop_assert!(result.is_ok(), "APO computation failed: {:?}", result);
+
+				let ApoOutput { values: out } = result.unwrap();
+
+				// Property 1: Output length matches input
+				prop_assert_eq!(out.len(), data.len(), "Output length mismatch");
+
+				// Property 2: First valid value should be 0.0 (both EMAs start with same value)
+				let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+				if first_valid < data.len() {
+					prop_assert!(
+						out[first_valid].abs() < 1e-10,
+						"First APO value should be 0, got {} at index {}",
+						out[first_valid],
+						first_valid
+					);
+				}
+
+				// Property 3: All values after warmup should be finite
+				for i in first_valid..out.len() {
+					prop_assert!(
+						out[i].is_finite(),
+						"APO output at index {} should be finite, got {}",
+						i,
+						out[i]
+					);
+				}
+
+				// Property 4: Values should be bounded reasonably
+				// APO is the difference between two EMAs, both bounded by data range
+				// In practice, APO magnitude is much smaller than data range
+				let data_min = data.iter().filter(|x| x.is_finite()).fold(f64::INFINITY, |a, &b| a.min(b));
+				let data_max = data.iter().filter(|x| x.is_finite()).fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+				let data_range = data_max - data_min;
+				
+				// Tighter bound: APO typically doesn't exceed 30% of data range
+				let apo_bound = data_range * 0.3;
+				
+				for i in first_valid..out.len() {
+					prop_assert!(
+						out[i].abs() <= apo_bound,
+						"APO value at index {} exceeds expected bound: {} > {}",
+						i,
+						out[i].abs(),
+						apo_bound
+					);
+				}
+
+				// Property 5: Data-type specific validations
+				match data_type {
+					"constant" => {
+						// For constant data, APO should remain very close to 0
+						for i in first_valid..out.len() {
+							prop_assert!(
+								out[i].abs() < 1e-9,
+								"APO should be ~0 for constant data, got {} at index {}",
+								out[i],
+								i
+							);
+						}
+					}
+					"trending" => {
+						// For monotonically increasing data, APO should generally be positive after initial warmup
+						// (short EMA responds faster, stays above long EMA)
+						if data.len() > long_period * 2 {
+							let check_start = first_valid + long_period;
+							let check_end = out.len();
+							if check_start < check_end {
+								// Check if data is increasing or decreasing
+								let is_increasing = data[first_valid] < data[data.len() - 1];
+								
+								// Count positive vs negative values in the latter part
+								let positive_count = out[check_start..check_end]
+									.iter()
+									.filter(|&&v| v > 0.0)
+									.count();
+								let total_count = check_end - check_start;
+								
+								if is_increasing {
+									// For uptrend, expect mostly positive APO values
+									prop_assert!(
+										positive_count > total_count / 2,
+										"APO should be mostly positive for uptrend, got {} positive out of {}",
+										positive_count,
+										total_count
+									);
+								} else {
+									// For downtrend, expect mostly negative APO values
+									prop_assert!(
+										positive_count < total_count / 2,
+										"APO should be mostly negative for downtrend, got {} positive out of {}",
+										positive_count,
+										total_count
+									);
+								}
+							}
+						}
+					}
+					_ => {} // Random data, no specific pattern expected
+				}
+
+				// Property 6: Manual calculation verification for first few values
+				if data.len() >= 3 && first_valid + 2 < data.len() {
+					let alpha_short = 2.0 / (short_period as f64 + 1.0);
+					let alpha_long = 2.0 / (long_period as f64 + 1.0);
+
+					// First value after warmup
+					let mut short_ema = data[first_valid];
+					let mut long_ema = data[first_valid];
+					let expected_first = 0.0; // Both EMAs start equal
+					prop_assert!(
+						(out[first_valid] - expected_first).abs() < 1e-9,
+						"First value mismatch: expected {}, got {}",
+						expected_first,
+						out[first_valid]
+					);
+
+					// Second value
+					if first_valid + 1 < data.len() {
+						let price = data[first_valid + 1];
+						short_ema = alpha_short * price + (1.0 - alpha_short) * short_ema;
+						long_ema = alpha_long * price + (1.0 - alpha_long) * long_ema;
+						let expected_second = short_ema - long_ema;
+						prop_assert!(
+							(out[first_valid + 1] - expected_second).abs() < 1e-9,
+							"Second value mismatch: expected {}, got {}",
+							expected_second,
+							out[first_valid + 1]
+						);
+					}
+
+					// Third value
+					if first_valid + 2 < data.len() {
+						let price = data[first_valid + 2];
+						short_ema = alpha_short * price + (1.0 - alpha_short) * short_ema;
+						long_ema = alpha_long * price + (1.0 - alpha_long) * long_ema;
+						let expected_third = short_ema - long_ema;
+						prop_assert!(
+							(out[first_valid + 2] - expected_third).abs() < 1e-9,
+							"Third value mismatch: expected {}, got {}",
+							expected_third,
+							out[first_valid + 2]
+						);
+					}
+				}
+
+				// Property 7: Kernel consistency - all kernels should produce the same result
+				let ref_output = apo_with_kernel(&input, Kernel::Scalar);
+				prop_assert!(ref_output.is_ok(), "Reference scalar computation failed");
+				let ApoOutput { values: ref_out } = ref_output.unwrap();
+
+				for (i, (&val, &ref_val)) in out.iter().zip(ref_out.iter()).enumerate() {
+					if !val.is_finite() || !ref_val.is_finite() {
+						// Both should be NaN at the same positions
+						prop_assert_eq!(
+							val.is_nan(), ref_val.is_nan(),
+							"NaN mismatch at index {}: kernel={}, scalar={}",
+							i, val, ref_val
+						);
+					} else {
+						// Values should be nearly identical (allowing for small floating-point differences)
+						let diff = (val - ref_val).abs();
+						let ulp_diff = val.to_bits().abs_diff(ref_val.to_bits());
+						prop_assert!(
+							diff <= 1e-9 || ulp_diff <= 4,
+							"Kernel mismatch at index {}: {} vs {} (diff: {}, ULP: {})",
+							i, val, ref_val, diff, ulp_diff
+						);
+					}
+				}
+
+				// Property 8: Period relationship
+				prop_assert!(short_period < long_period, "Short period must be less than long period");
+
+				// Property 9: Streaming consistency
+				let mut stream = ApoStream::try_new(params).unwrap();
+				let mut stream_values = Vec::new();
+				for &price in &data {
+					if let Some(val) = stream.update(price) {
+						stream_values.push(val);
+					} else {
+						stream_values.push(f64::NAN);
+					}
+				}
+				
+				// Compare streaming vs batch (allowing for floating-point differences)
+				for i in first_valid..out.len() {
+					if out[i].is_finite() && stream_values[i].is_finite() {
+						let diff = (out[i] - stream_values[i]).abs();
+						prop_assert!(
+							diff < 1e-10,
+							"Streaming mismatch at index {}: batch={}, stream={}, diff={}",
+							i, out[i], stream_values[i], diff
+						);
+					}
+				}
+
+				Ok(())
+			})
+			.map_err(|e| e.into())
+	}
+
 	macro_rules! generate_all_apo_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1182,7 +1454,8 @@ mod tests {
 		check_apo_very_small_dataset,
 		check_apo_reinput,
 		check_apo_nan_handling,
-		check_apo_no_poison
+		check_apo_no_poison,
+		check_apo_property
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {

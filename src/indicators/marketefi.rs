@@ -590,6 +590,8 @@ mod tests {
 	use crate::skip_if_unsupported;
 	use crate::utilities::data_loader::read_candles_from_csv;
 	use paste::paste;
+	#[cfg(feature = "proptest")]
+	use proptest::prelude::*;
 
 	fn check_marketefi_accuracy(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);
@@ -661,6 +663,227 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_marketefi_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		// Strategy for generating test data
+		// Generate realistic market data with varying scenarios
+		let strat = (50usize..400, 0usize..7, any::<u64>())
+			.prop_map(|(len, scenario, seed)| {
+				// LCG-based deterministic RNG for reproducible tests
+				let mut rng_state = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+				let mut next_f64 = || {
+					rng_state = rng_state.wrapping_mul(1664525).wrapping_add(1013904223);
+					(rng_state as f64) / (u64::MAX as f64)
+				};
+				
+				let mut high = Vec::with_capacity(len);
+				let mut low = Vec::with_capacity(len);
+				let mut volume = Vec::with_capacity(len);
+				
+				match scenario {
+					0 => {
+						// Random realistic market data
+						for _ in 0..len {
+							let base = 50.0 + next_f64() * 450.0;
+							let spread = 0.1 + next_f64() * 10.0;
+							high.push(base + spread);
+							low.push(base);
+							volume.push(100.0 + next_f64() * 10000.0);
+						}
+					},
+					1 => {
+						// Constant prices (high = low) - should produce 0.0
+						let price = 100.0 + next_f64() * 200.0;
+						for _ in 0..len {
+							high.push(price);
+							low.push(price);
+							volume.push(1000.0 + next_f64() * 1000.0);
+						}
+					},
+					2 => {
+						// Trending market with increasing volatility
+						let mut base = 100.0;
+						for i in 0..len {
+							let trend = 0.5 * (i as f64 / len as f64);
+							base += trend;
+							let volatility = 0.5 + (i as f64 / len as f64) * 5.0;
+							high.push(base + volatility);
+							low.push(base - volatility * 0.5);
+							volume.push(500.0 + next_f64() * 5000.0 + i as f64 * 10.0);
+						}
+					},
+					3 => {
+						// Small volumes (edge case testing)
+						for _ in 0..len {
+							let base = 50.0 + next_f64() * 100.0;
+							let spread = 0.1 + next_f64() * 5.0;
+							high.push(base + spread);
+							low.push(base);
+							volume.push(0.001 + next_f64() * 1.0); // Very small volumes
+						}
+					},
+					4 => {
+						// Large volumes and price ranges
+						for _ in 0..len {
+							let base = 1000.0 + next_f64() * 9000.0;
+							let spread = 10.0 + next_f64() * 100.0;
+							high.push(base + spread);
+							low.push(base);
+							volume.push(1e6 + next_f64() * 1e7); // Large volumes
+						}
+					},
+					5 => {
+						// Zero volumes mixed with valid volumes
+						for i in 0..len {
+							let base = 100.0 + next_f64() * 100.0;
+							let spread = 1.0 + next_f64() * 5.0;
+							high.push(base + spread);
+							low.push(base);
+							// Every 5th element has zero volume
+							if i % 5 == 0 {
+								volume.push(0.0);
+							} else {
+								volume.push(100.0 + next_f64() * 1000.0);
+							}
+						}
+					},
+					_ => {
+						// Inverted prices (high < low) - data quality issue but should handle
+						for _ in 0..len {
+							let base = 100.0 + next_f64() * 200.0;
+							let spread = 1.0 + next_f64() * 10.0;
+							// Occasionally invert high and low
+							if next_f64() < 0.3 {
+								high.push(base - spread);  // high is lower
+								low.push(base);             // low is higher
+							} else {
+								high.push(base + spread);
+								low.push(base);
+							}
+							volume.push(500.0 + next_f64() * 5000.0);
+						}
+					},
+				}
+				
+				(high, low, volume, scenario)
+			});
+		
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(high, low, volume, scenario)| {
+				let input = MarketefiInput::from_slices(&high, &low, &volume, MarketefiParams::default());
+				
+				// Get output from the kernel being tested
+				let output = marketefi_with_kernel(&input, kernel)?;
+				
+				// Get reference output from scalar kernel
+				let ref_output = marketefi_with_kernel(&input, Kernel::Scalar)?;
+				
+				// Property 1: Output length must match input length
+				prop_assert_eq!(output.values.len(), high.len(), 
+					"Output length mismatch: got {}, expected {}", output.values.len(), high.len());
+				
+				// Property 2: First valid index behavior - all values before first valid index should be NaN
+				let first_valid = (0..high.len()).find(|&i| {
+					!high[i].is_nan() && !low[i].is_nan() && !volume[i].is_nan()
+				});
+				
+				if let Some(first) = first_valid {
+					for i in 0..first {
+						prop_assert!(output.values[i].is_nan(), 
+							"Expected NaN before first valid index {} but got {} at index {}", 
+							first, output.values[i], i);
+					}
+				}
+				
+				// Property 3: Mathematical accuracy - verify calculation
+				for i in 0..high.len() {
+					let expected = if high[i].is_nan() || low[i].is_nan() || volume[i].is_nan() || volume[i] == 0.0 {
+						f64::NAN
+					} else {
+						(high[i] - low[i]) / volume[i]
+					};
+					
+					let actual = output.values[i];
+					
+					if expected.is_nan() {
+						prop_assert!(actual.is_nan(), 
+							"Expected NaN at index {} but got {}", i, actual);
+					} else {
+						prop_assert!((actual - expected).abs() < 1e-10, 
+							"Calculation mismatch at index {}: expected {}, got {}", i, expected, actual);
+					}
+				}
+				
+				// Property 4: Kernel consistency - all kernels must produce identical results
+				for i in 0..output.values.len() {
+					let out_val = output.values[i];
+					let ref_val = ref_output.values[i];
+					
+					if out_val.is_nan() && ref_val.is_nan() {
+						continue;
+					}
+					
+					prop_assert!((out_val - ref_val).abs() < 1e-10,
+						"Kernel mismatch at index {}: kernel={}, reference={}", i, out_val, ref_val);
+				}
+				
+				// Property 5: Special case - when high equals low, result should be 0.0 (for non-zero volume)
+				if scenario == 1 {
+					for i in 0..output.values.len() {
+						if !high[i].is_nan() && !low[i].is_nan() && !volume[i].is_nan() && volume[i] != 0.0 {
+							prop_assert!((output.values[i] - 0.0).abs() < 1e-10,
+								"When high=low, expected 0.0 but got {} at index {}", output.values[i], i);
+						}
+					}
+				}
+				
+				// Property 6: Zero volume should produce NaN
+				if scenario == 5 {
+					for i in 0..output.values.len() {
+						if volume[i] == 0.0 {
+							prop_assert!(output.values[i].is_nan(),
+								"Expected NaN for zero volume at index {} but got {}", i, output.values[i]);
+						}
+					}
+				}
+				
+				// Property 7: Inverted prices (high < low) should produce negative values
+				if scenario == 6 {
+					for i in 0..output.values.len() {
+						if !high[i].is_nan() && !low[i].is_nan() && !volume[i].is_nan() && volume[i] != 0.0 {
+							if high[i] < low[i] {
+								prop_assert!(output.values[i] < 0.0,
+									"Expected negative value when high < low at index {}, but got {}", i, output.values[i]);
+							}
+						}
+					}
+				}
+				
+				// Property 8: Check for poison values
+				for (i, &val) in output.values.iter().enumerate() {
+					if val.is_nan() {
+						continue;
+					}
+					
+					let bits = val.to_bits();
+					
+					prop_assert!(bits != 0x11111111_11111111,
+						"Found alloc_with_nan_prefix poison value at index {}", i);
+					prop_assert!(bits != 0x22222222_22222222,
+						"Found init_matrix_prefixes poison value at index {}", i);
+					prop_assert!(bits != 0x33333333_33333333,
+						"Found make_uninit_matrix poison value at index {}", i);
+				}
+				
+				Ok(())
+			})?;
+		
+		Ok(())
+	}
+
 	macro_rules! generate_all_marketefi_tests {
         ($($test_fn:ident),*) => {
             paste! {
@@ -691,6 +914,9 @@ mod tests {
 		check_marketefi_streaming,
 		check_marketefi_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_marketefi_tests!(check_marketefi_property);
 
 	#[test]
 	fn test_marketefi_into_slice() -> Result<(), Box<dyn Error>> {

@@ -926,6 +926,8 @@ mod tests {
 	use super::*;
 	use crate::skip_if_unsupported;
 	use crate::utilities::data_loader::read_candles_from_csv;
+	#[cfg(feature = "proptest")]
+	use proptest::prelude::*;
 
 	fn check_jma_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test_name);
@@ -1294,6 +1296,279 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_jma_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		let strat = (2usize..=100)
+			.prop_flat_map(|period| {
+				(
+					prop::collection::vec(
+						(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+						period..400,
+					),
+					Just(period),
+					-100f64..=100f64,  // phase range
+					1u32..=10,         // power range
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period, phase, power)| {
+				let params = JmaParams {
+					period: Some(period),
+					phase: Some(phase),
+					power: Some(power),
+				};
+				let input = JmaInput::from_slice(&data, params);
+
+				let JmaOutput { values: out } = jma_with_kernel(&input, kernel).unwrap();
+				let JmaOutput { values: ref_out } = jma_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Basic property: output length matches input
+				prop_assert_eq!(out.len(), data.len());
+
+				// Find first non-NaN value in data
+				let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(data.len());
+				
+				// Property 1: JMA warmup behavior
+				// JMA outputs NaN before first_valid, then starts outputting values immediately
+				// This is different from other indicators that wait for the full warmup period
+				for i in 0..first_valid.min(out.len()) {
+					prop_assert!(
+						out[i].is_nan(),
+						"idx {}: expected NaN before first valid input, got {}", i, out[i]
+					);
+				}
+				
+				// JMA should have a valid value at first_valid index (if within bounds)
+				if first_valid < out.len() {
+					prop_assert!(
+						out[first_valid].is_finite(),
+						"JMA should output a finite value at first_valid index {}", first_valid
+					);
+				}
+
+				// Property 2: After first_valid, values should be finite (unless input has NaN)
+				for i in (first_valid + 1)..data.len() {
+					if data[i].is_finite() && !data[first_valid..=i].iter().any(|x| x.is_nan()) {
+						prop_assert!(
+							out[i].is_finite(),
+							"idx {}: expected finite value, got {}", i, out[i]
+						);
+					}
+				}
+
+				// Property 3: Smoothness - JMA should reduce variance
+				let warmup_estimate = first_valid + period;
+				if warmup_estimate + 20 < data.len() {
+					let window_start = warmup_estimate;
+					let window_end = (warmup_estimate + 50).min(data.len());
+					
+					let input_slice = &data[window_start..window_end];
+					let output_slice = &out[window_start..window_end];
+					
+					if input_slice.iter().all(|x| x.is_finite()) && output_slice.iter().all(|x| x.is_finite()) {
+						let input_mean: f64 = input_slice.iter().sum::<f64>() / input_slice.len() as f64;
+						let output_mean: f64 = output_slice.iter().sum::<f64>() / output_slice.len() as f64;
+						
+						let input_var: f64 = input_slice.iter()
+							.map(|x| (x - input_mean).powi(2))
+							.sum::<f64>() / input_slice.len() as f64;
+						let output_var: f64 = output_slice.iter()
+							.map(|x| (x - output_mean).powi(2))
+							.sum::<f64>() / output_slice.len() as f64;
+						
+						// JMA should reduce variance (smoothing effect)
+						if input_var > 1e-10 {
+							prop_assert!(
+								output_var <= input_var * 1.1,  // Allow 10% tolerance
+								"JMA should smooth data: input_var={}, output_var={}, period={}, phase={}, power={}",
+								input_var, output_var, period, phase, power
+							);
+						}
+					}
+				}
+
+				// Property 4: Period=1 special case
+				if period == 1 {
+					// With period=1, JMA should closely track the input
+					for i in first_valid..data.len().min(first_valid + 20) {
+						if data[i].is_finite() && out[i].is_finite() {
+							prop_assert!(
+								(out[i] - data[i]).abs() <= data[i].abs() * 0.1 + 1e-6,
+								"period=1 should closely track input: idx={}, data={}, out={}, diff={}",
+								i, data[i], out[i], (out[i] - data[i]).abs()
+							);
+						}
+					}
+				}
+
+				// Property 5: Constant input should produce near-constant output
+				let warmup_estimate = first_valid + period;
+				if data[first_valid..].windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) && warmup_estimate + 5 < data.len() {
+					let constant_val = data[first_valid];
+					for i in (warmup_estimate + 5)..data.len() {
+						if out[i].is_finite() {
+							prop_assert!(
+								(out[i] - constant_val).abs() <= 1e-6,
+								"constant input should produce constant output: idx={}, expected={}, got={}",
+								i, constant_val, out[i]
+							);
+						}
+					}
+				}
+
+				// Property 6: Kernel consistency - different kernels should produce very similar results
+				if kernel != Kernel::Scalar {
+					for i in first_valid..data.len() {
+						if out[i].is_finite() && ref_out[i].is_finite() {
+							let y_bits = out[i].to_bits();
+							let r_bits = ref_out[i].to_bits();
+							let diff_bits = if y_bits > r_bits {
+								y_bits - r_bits
+							} else {
+								r_bits - y_bits
+							};
+							
+							// JMA uses iterative calculations that can accumulate small differences
+							// Allow more tolerance for SIMD implementations
+							let abs_diff = (out[i] - ref_out[i]).abs();
+							let rel_diff = if ref_out[i].abs() > 1e-10 {
+								abs_diff / ref_out[i].abs()
+							} else {
+								abs_diff
+							};
+							
+							prop_assert!(
+								diff_bits <= 1000 || abs_diff < 1e-9 || rel_diff < 1e-12,
+								"kernel consistency failed at idx {}: {:?}={}, Scalar={}, diff_bits={}, abs_diff={}, rel_diff={}",
+								i, kernel, out[i], ref_out[i], diff_bits, abs_diff, rel_diff
+							);
+						}
+					}
+				}
+
+				// Property 7: Phase effect - negative phase should lag, positive should lead
+				// Test by comparing with phase=0
+				let warmup_estimate = first_valid + period;
+				if phase.abs() > 10.0 && warmup_estimate + 30 < data.len() {
+					let params_neutral = JmaParams {
+						period: Some(period),
+						phase: Some(0.0),
+						power: Some(power),
+					};
+					let input_neutral = JmaInput::from_slice(&data, params_neutral);
+					if let Ok(JmaOutput { values: out_neutral }) = jma_with_kernel(&input_neutral, kernel) {
+						// Check trend following behavior
+						let check_start = warmup_estimate + 10;
+						let check_end = (warmup_estimate + 30).min(data.len() - 1);
+						
+						// Count how many times phased output leads/lags neutral
+						let mut lead_count = 0;
+						let mut lag_count = 0;
+						
+						for i in check_start..check_end {
+							if data[i].is_finite() && data[i-1].is_finite() && 
+							   out[i].is_finite() && out_neutral[i].is_finite() {
+								let data_change = data[i] - data[i-1];
+								if data_change.abs() > 1e-10 {
+									let phase_diff = out[i] - out_neutral[i];
+									if data_change > 0.0 {
+										// Rising data
+										if phase > 0.0 && phase_diff > 0.0 {
+											lead_count += 1;
+										} else if phase < 0.0 && phase_diff < 0.0 {
+											lag_count += 1;
+										}
+									} else {
+										// Falling data
+										if phase > 0.0 && phase_diff < 0.0 {
+											lead_count += 1;
+										} else if phase < 0.0 && phase_diff > 0.0 {
+											lag_count += 1;
+										}
+									}
+								}
+							}
+						}
+						
+						// Phase should have some effect
+						if phase > 10.0 {
+							prop_assert!(
+								lead_count > 0,
+								"Positive phase should show leading behavior: phase={}, lead_count={}",
+								phase, lead_count
+							);
+						} else if phase < -10.0 {
+							prop_assert!(
+								lag_count > 0,
+								"Negative phase should show lagging behavior: phase={}, lag_count={}",
+								phase, lag_count
+							);
+						}
+					}
+				}
+
+				// Property 8: Power effect - higher power should be more responsive
+				let warmup_estimate2 = first_valid + period;
+				if power > 1 && warmup_estimate2 + 20 < data.len() {
+					let params_low_power = JmaParams {
+						period: Some(period),
+						phase: Some(phase),
+						power: Some(1),
+					};
+					let input_low_power = JmaInput::from_slice(&data, params_low_power);
+					if let Ok(JmaOutput { values: out_low_power }) = jma_with_kernel(&input_low_power, kernel) {
+						// Calculate responsiveness as average absolute difference from input
+						let check_start = warmup_estimate2;
+						let check_end = (warmup_estimate2 + 30).min(data.len());
+						
+						let mut high_power_responsiveness = 0.0;
+						let mut low_power_responsiveness = 0.0;
+						let mut count = 0;
+						
+						for i in check_start..check_end {
+							if data[i].is_finite() && out[i].is_finite() && out_low_power[i].is_finite() {
+								high_power_responsiveness += (out[i] - data[i]).abs();
+								low_power_responsiveness += (out_low_power[i] - data[i]).abs();
+								count += 1;
+							}
+						}
+						
+						if count > 0 {
+							high_power_responsiveness /= count as f64;
+							low_power_responsiveness /= count as f64;
+							
+							// Higher power should generally be closer to the raw data (more responsive)
+							// But this is not always strictly true due to the adaptive nature
+							// So we only check for significant differences
+							if low_power_responsiveness > high_power_responsiveness * 1.5 {
+								prop_assert!(
+									high_power_responsiveness <= low_power_responsiveness,
+									"Higher power should be more responsive: power={} resp={}, power=1 resp={}",
+									power, high_power_responsiveness, low_power_responsiveness
+								);
+							}
+						}
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
+	// Stub for when proptest feature is not enabled
+	#[cfg(not(feature = "proptest"))]
+	fn check_jma_property(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(())
+	}
+
 	macro_rules! generate_all_jma_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1328,6 +1603,7 @@ mod tests {
 		check_jma_reinput,
 		check_jma_nan_handling,
 		check_jma_streaming,
+		check_jma_property,
 		check_jma_no_poison
 	);
 

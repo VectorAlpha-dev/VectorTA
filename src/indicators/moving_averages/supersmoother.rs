@@ -1000,6 +1000,7 @@ mod tests {
 		check_supersmoother_nan_handling,
 		check_supersmoother_no_poison
 	);
+
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);
 		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";

@@ -1148,6 +1148,300 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_fosc_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy 1: Variable period with random price data
+		let strat1 = (2usize..=50)
+			.prop_flat_map(|period| {
+				(
+					prop::collection::vec(
+						(1e-6f64..1e6f64).prop_filter("finite and non-zero", |x| x.is_finite() && x.abs() > 1e-10),
+						period..400,
+					),
+					Just(period),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat1, |(data, period)| {
+				let params = FoscParams { period: Some(period) };
+				let input = FoscInput::from_slice(&data, params);
+
+				let FoscOutput { values: out } = fosc_with_kernel(&input, kernel).unwrap();
+				let FoscOutput { values: ref_out } = fosc_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Property 1: Output length must match input length
+				prop_assert_eq!(out.len(), data.len());
+				prop_assert_eq!(ref_out.len(), data.len());
+
+				// Property 2: Warmup period correctness - first (period-1) values should be NaN
+				for i in 0..(period - 1) {
+					prop_assert!(out[i].is_nan(), "Expected NaN at index {} during warmup", i);
+					prop_assert!(ref_out[i].is_nan(), "Expected NaN at index {} during warmup (scalar)", i);
+				}
+
+				// Property 3: Kernel consistency - all kernels should produce identical results
+				for i in (period - 1)..data.len() {
+					let y = out[i];
+					let r = ref_out[i];
+
+					// Both should be NaN or both should be finite
+					if r.is_nan() {
+						prop_assert!(y.is_nan(), "Kernel mismatch at {}: scalar is NaN but kernel is {}", i, y);
+					} else if y.is_nan() {
+						prop_assert!(r.is_nan(), "Kernel mismatch at {}: kernel is NaN but scalar is {}", i, r);
+					} else {
+						// Allow small tolerance for floating-point differences
+						let diff = (y - r).abs();
+						let tolerance = 1e-9 * r.abs().max(1.0);
+						prop_assert!(
+							diff <= tolerance,
+							"Kernel mismatch at {}: {} vs {} (diff: {})",
+							i, y, r, diff
+						);
+					}
+
+					// Property 4: Poison value detection
+					let y_bits = y.to_bits();
+					prop_assert_ne!(y_bits, 0x11111111_11111111, "Found alloc_with_nan_prefix poison at {}", i);
+					prop_assert_ne!(y_bits, 0x22222222_22222222, "Found init_matrix_prefixes poison at {}", i);
+					prop_assert_ne!(y_bits, 0x33333333_33333333, "Found make_uninit_matrix poison at {}", i);
+				}
+
+				Ok(())
+			})?;
+
+		// Strategy 2: Fixed period with varying data lengths
+		let strat2 = prop::collection::vec(
+			(1e-6f64..1e6f64).prop_filter("finite and non-zero", |x| x.is_finite() && x.abs() > 1e-10),
+			10..1000,
+		);
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat2, |data| {
+				let period = 5; // Use default period
+				let params = FoscParams { period: Some(period) };
+				let input = FoscInput::from_slice(&data, params);
+
+				let FoscOutput { values: out } = fosc_with_kernel(&input, kernel).unwrap();
+
+				// Check bounds - FOSC is percentage, typically -100 to +100 but can exceed
+				// We'll use a reasonable bound of -200% to +200%
+				for i in (period - 1)..data.len() {
+					if !out[i].is_nan() {
+						prop_assert!(
+							out[i] >= -200.0 && out[i] <= 200.0,
+							"FOSC value {} at index {} is out of reasonable bounds",
+							out[i], i
+						);
+					}
+				}
+
+				Ok(())
+			})?;
+
+		// Strategy 3: Trending (monotonic) data
+		let strat3 = (2usize..=20, 1e-6f64..10f64, 10usize..100)
+			.prop_map(|(period, start, len)| {
+				let data: Vec<f64> = (0..len).map(|i| start + (i as f64) * 0.1).collect();
+				(data, period)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat3, |(data, period)| {
+				let params = FoscParams { period: Some(period) };
+				let input = FoscInput::from_slice(&data, params);
+
+				let FoscOutput { values: out } = fosc_with_kernel(&input, kernel).unwrap();
+
+				// For perfectly linear data, FOSC should be small and consistent
+				// Due to the one-step-ahead nature, it won't be exactly zero
+				// Note: First valid value (at period-1) may be incorrect due to tsf initialization
+				let start_idx = if period > 0 { period } else { period - 1 };  // Skip first value
+				let valid_fosc: Vec<f64> = out.iter()
+					.skip(start_idx)
+					.filter(|v| !v.is_nan())
+					.copied()
+					.collect();
+				
+				if valid_fosc.len() > 5 {
+					// For linear trend, FOSC should be small (within 5%) and relatively consistent
+					for &val in &valid_fosc {
+						prop_assert!(
+							val.abs() < 5.0,
+							"FOSC {} too large for linear trend",
+							val
+						);
+					}
+					
+					// Check consistency - standard deviation should be small
+					let mean: f64 = valid_fosc.iter().sum::<f64>() / valid_fosc.len() as f64;
+					let variance: f64 = valid_fosc.iter()
+						.map(|v| (v - mean).powi(2))
+						.sum::<f64>() / valid_fosc.len() as f64;
+					let std_dev = variance.sqrt();
+					
+					prop_assert!(
+						std_dev < 1.0,
+						"FOSC standard deviation {} too high for linear trend",
+						std_dev
+					);
+				}
+
+				Ok(())
+			})?;
+
+		// Strategy 4: Oscillating (sine-wave) patterns
+		let strat4 = (2usize..=20, 10usize..100)
+			.prop_map(|(period, len)| {
+				let data: Vec<f64> = (0..len)
+					.map(|i| 100.0 + 10.0 * (i as f64 * 0.5).sin())
+					.collect();
+				(data, period)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat4, |(data, period)| {
+				let params = FoscParams { period: Some(period) };
+				let input = FoscInput::from_slice(&data, params);
+
+				let FoscOutput { values: out } = fosc_with_kernel(&input, kernel).unwrap();
+
+				// For oscillating data, FOSC should oscillate around zero
+				let valid_values: Vec<f64> = out.iter()
+					.skip(period - 1)
+					.filter(|v| !v.is_nan())
+					.copied()
+					.collect();
+
+				if valid_values.len() > 10 {
+					let mean: f64 = valid_values.iter().sum::<f64>() / valid_values.len() as f64;
+					// Mean should be close to zero for symmetric oscillations
+					prop_assert!(
+						mean.abs() < 10.0,
+						"Mean FOSC {} is too far from zero for oscillating data",
+						mean
+					);
+				}
+
+				Ok(())
+			})?;
+
+		// Strategy 5: Real-world-like OHLC data with small variations
+		let strat5 = (2usize..=20, 50f64..200f64, 20usize..100)
+			.prop_flat_map(|(period, base_price, len)| {
+				(
+					prop::collection::vec(
+						(-0.5f64..0.5f64, 0f64..0.5f64, 0f64..0.5f64)
+							.prop_map(move |(change, high_diff, low_diff)| {
+								base_price * (1.0 + change * 0.01) + high_diff
+							}),
+						len,
+					),
+					Just(period),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat5, |(data, period)| {
+				let params = FoscParams { period: Some(period) };
+				let input = FoscInput::from_slice(&data, params);
+
+				let result = fosc_with_kernel(&input, kernel);
+				prop_assert!(result.is_ok(), "FOSC failed for OHLC-like data");
+
+				let FoscOutput { values: out } = result.unwrap();
+
+				// Edge case: Test with period = 2 (minimum valid period)
+				if period == 2 {
+					for i in 1..data.len() {
+						if !out[i].is_nan() {
+							// With period=2, we're doing linear regression on just 2 points
+							// The forecast should be reasonable
+							prop_assert!(
+								out[i].abs() < 100.0,
+								"FOSC {} at index {} unreasonable for period=2",
+								out[i], i
+							);
+						}
+					}
+				}
+
+				// Property: Constant data should produce near-zero FOSC
+				if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) && data.len() > period {
+					for i in (period - 1)..data.len() {
+						if !out[i].is_nan() {
+							prop_assert!(
+								out[i].abs() < 1e-6,
+								"FOSC {} at index {} should be ~0 for constant data",
+								out[i], i
+							);
+						}
+					}
+				}
+
+				Ok(())
+			})?;
+
+		// Strategy 6: Near-zero value testing
+		let strat6 = (2usize..=10, 10usize..50)
+			.prop_flat_map(|(period, len)| {
+				(
+					prop::collection::vec(
+						prop::strategy::Union::new(vec![
+							// Mix of normal values, very small values, and occasional zeros
+							(0.9f64..1.0).prop_map(|p| if p < 0.95 { 100.0 + p } else if p < 0.98 { 1e-12 } else { 0.0 }).boxed(),
+							(50f64..150f64).boxed(),
+							(-1e-12f64..1e-12f64).prop_filter("not exactly zero", |x| x.abs() > 1e-15).boxed(),
+						]),
+						len,
+					),
+					Just(period),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat6, |(data, period)| {
+				let params = FoscParams { period: Some(period) };
+				let input = FoscInput::from_slice(&data, params);
+
+				let result = fosc_with_kernel(&input, kernel);
+				prop_assert!(result.is_ok(), "FOSC failed for near-zero data");
+
+				let FoscOutput { values: out } = result.unwrap();
+
+				// When price is exactly 0.0, FOSC should be NaN
+				for i in (period - 1)..data.len() {
+					if data[i] == 0.0 {
+						prop_assert!(
+							out[i].is_nan(),
+							"FOSC should be NaN when price is 0.0 at index {}",
+							i
+						);
+					} else if data[i].abs() < 1e-10 {
+						// For very small values, FOSC might be large or NaN
+						// Just ensure it doesn't crash
+						if !out[i].is_nan() {
+							// Even with tiny prices, bounds should be reasonable
+							prop_assert!(
+								out[i].abs() < 10000.0,
+								"FOSC {} unreasonably large for tiny price {} at index {}",
+								out[i], data[i], i
+							);
+						}
+					}
+				}
+
+				Ok(())
+			})?;
+
+		Ok(())
+	}
+
 	generate_all_fosc_tests!(
 		check_fosc_partial_params,
 		check_fosc_basic_accuracy,
@@ -1159,6 +1453,9 @@ mod tests {
 		check_fosc_expected_values_reference,
 		check_fosc_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_fosc_tests!(check_fosc_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);

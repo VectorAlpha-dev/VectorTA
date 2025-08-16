@@ -1355,6 +1355,188 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_rvi_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Generate random parameter combinations and corresponding data vectors
+		// Use positive values to simulate realistic financial data (prices >= 0)
+		let strat = (2usize..=30, 2usize..=30, 0usize..=1, 0usize..=2)
+			.prop_flat_map(|(period, ma_len, matype, devtype)| {
+				(
+					prop::collection::vec(
+						(0.01f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+						(period + ma_len)..400,
+					),
+					Just(period),
+					Just(ma_len),
+					Just(matype),
+					Just(devtype),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period, ma_len, matype, devtype)| {
+				let params = RviParams {
+					period: Some(period),
+					ma_len: Some(ma_len),
+					matype: Some(matype),
+					devtype: Some(devtype),
+				};
+				let input = RviInput::from_slice(&data, params.clone());
+
+				// Get output from the kernel being tested
+				let RviOutput { values: out } = rvi_with_kernel(&input, kernel).unwrap();
+				
+				// Get reference output from scalar kernel for comparison
+				let RviOutput { values: ref_out } = rvi_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Calculate warmup period
+				let warmup = period.saturating_sub(1) + ma_len.saturating_sub(1);
+
+				// Verify warmup period handling
+				for i in 0..warmup.min(data.len()) {
+					prop_assert!(
+						out[i].is_nan(),
+						"Expected NaN during warmup at index {}, got {}",
+						i, out[i]
+					);
+				}
+
+				// Verify values after warmup period
+				for i in warmup..data.len() {
+					let y = out[i];
+					let r = ref_out[i];
+
+					// Property 1: RVI should be between 0 and 100 (it's a percentage)
+					if y.is_finite() {
+						prop_assert!(
+							y >= -1e-9 && y <= 100.0 + 1e-9,
+							"RVI out of bounds at idx {}: {} (should be 0-100)",
+							i, y
+						);
+					}
+
+					// Property 2: Kernel consistency check
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert!(
+							y.to_bits() == r.to_bits(),
+							"finite/NaN mismatch idx {}: {} vs {}",
+							i, y, r
+						);
+					} else {
+						// Use ULP comparison for floating-point accuracy
+						let y_bits = y.to_bits();
+						let r_bits = r.to_bits();
+						let ulp_diff: u64 = y_bits.abs_diff(r_bits);
+
+						prop_assert!(
+							(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+							"Kernel mismatch at idx {}: {} vs {} (ULP={})",
+							i, y, r, ulp_diff
+						);
+					}
+				}
+
+				// Property 3: Special case - monotonic increasing data
+				// When prices consistently increase, up_deviation dominates, RVI should be close to 100
+				let is_monotonic_increasing = data.windows(2)
+					.all(|w| w[1] >= w[0] - f64::EPSILON);
+				
+				if is_monotonic_increasing && out.len() > warmup + 10 {
+					let last_values = &out[out.len().saturating_sub(10)..];
+					let finite_values: Vec<f64> = last_values.iter()
+						.filter(|v| v.is_finite())
+						.copied()
+						.collect();
+					
+					if !finite_values.is_empty() {
+						let avg_rvi = finite_values.iter().sum::<f64>() / finite_values.len() as f64;
+						prop_assert!(
+							avg_rvi >= 90.0,  // Should be close to 100, allow some smoothing tolerance
+							"RVI should be high for monotonic increasing data, got avg {}",
+							avg_rvi
+						);
+					}
+				}
+
+				// Property 4: Special case - monotonic decreasing data
+				// When prices consistently decrease, down_deviation dominates, RVI should be close to 0
+				let is_monotonic_decreasing = data.windows(2)
+					.all(|w| w[1] <= w[0] + f64::EPSILON);
+				
+				if is_monotonic_decreasing && out.len() > warmup + 10 {
+					let last_values = &out[out.len().saturating_sub(10)..];
+					let finite_values: Vec<f64> = last_values.iter()
+						.filter(|v| v.is_finite())
+						.copied()
+						.collect();
+					
+					if !finite_values.is_empty() {
+						let avg_rvi = finite_values.iter().sum::<f64>() / finite_values.len() as f64;
+						prop_assert!(
+							avg_rvi <= 10.0,  // Should be close to 0, allow some smoothing tolerance
+							"RVI should be low for monotonic decreasing data, got avg {}",
+							avg_rvi
+						);
+					}
+				}
+
+				// Property 5: Special case - constant data
+				// When all values are the same, there's no volatility, RVI should be NaN
+				let is_constant = data.windows(2)
+					.all(|w| (w[0] - w[1]).abs() <= f64::EPSILON * w[0].abs().max(1.0));
+				
+				if is_constant && out.len() > warmup {
+					for i in warmup..out.len() {
+						prop_assert!(
+							out[i].is_nan(),
+							"RVI should be NaN for constant data at idx {}, got {}",
+							i, out[i]
+						);
+					}
+				}
+
+				// Property 6: Special case - alternating pattern
+				// When prices alternate up/down regularly, RVI should be near 50
+				let mut is_alternating = data.len() >= 4;
+				if is_alternating {
+					for i in 1..data.len().saturating_sub(1) {
+						let diff1 = data[i] - data[i - 1];
+						let diff2 = data[i + 1] - data[i];
+						// Check if signs alternate
+						if diff1 * diff2 >= 0.0 && diff1.abs() > f64::EPSILON {
+							is_alternating = false;
+							break;
+						}
+					}
+				}
+				
+				if is_alternating && out.len() > warmup + 10 {
+					let last_values = &out[out.len().saturating_sub(10)..];
+					let finite_values: Vec<f64> = last_values.iter()
+						.filter(|v| v.is_finite())
+						.copied()
+						.collect();
+					
+					if !finite_values.is_empty() {
+						let avg_rvi = finite_values.iter().sum::<f64>() / finite_values.len() as f64;
+						prop_assert!(
+							avg_rvi >= 35.0 && avg_rvi <= 65.0,
+							"RVI should be near 50 for alternating data, got avg {}",
+							avg_rvi
+						);
+					}
+				}
+
+				Ok(())
+			})?;
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_rvi_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1390,6 +1572,9 @@ mod tests {
 		check_rvi_example_values,
 		check_rvi_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_rvi_tests!(check_rvi_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);

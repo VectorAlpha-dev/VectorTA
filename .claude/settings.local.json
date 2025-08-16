@@ -280,6 +280,7 @@
       "WebFetch(domain:lemire.me)",
       "Bash(RUST_LOG=proptest=debug cargo test --features nightly-avx --lib indicators::moving_averages::fwma::tests::check_fwma_property_scalar_f64 -- --nocapture)"
     ],
-    "deny": []
+    "deny": [],
+    "defaultMode": "acceptEdits"
   }
 }

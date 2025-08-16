@@ -628,6 +628,8 @@ mod tests {
 	use super::*;
 	use crate::skip_if_unsupported;
 	use crate::utilities::data_loader::read_candles_from_csv;
+	#[cfg(feature = "proptest")]
+	use proptest::prelude::*;
 
 	fn check_midpoint_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test_name);
@@ -842,6 +844,249 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_midpoint_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		// Strategy for generating test data with multiple scenarios
+		let strat = (1usize..50, 50usize..400, 0usize..9, any::<u64>())
+			.prop_map(|(period, len, scenario, seed)| {
+				// LCG-based deterministic RNG
+				let mut lcg = seed;
+				let mut rng = || {
+					lcg = lcg.wrapping_mul(1103515245).wrapping_add(12345);
+					((lcg / 65536) % 1000000) as f64 / 10000.0 - 50.0
+				};
+				
+				let data = match scenario {
+					0 => {
+						// Random data
+						(0..len).map(|_| rng()).collect()
+					}
+					1 => {
+						// Constant value
+						let val = rng();
+						vec![val; len]
+					}
+					2 => {
+						// Monotonic increasing
+						let start = rng();
+						let step = rng().abs() / 100.0;
+						(0..len).map(|i| start + (i as f64) * step).collect()
+					}
+					3 => {
+						// Monotonic decreasing
+						let start = rng();
+						let step = rng().abs() / 100.0;
+						(0..len).map(|i| start - (i as f64) * step).collect()
+					}
+					4 => {
+						// Extreme ranges
+						(0..len).map(|i| {
+							if i % 2 == 0 { 1000.0 + rng() } else { -1000.0 + rng() }
+						}).collect()
+					}
+					5 => {
+						// Sine wave pattern
+						let amplitude = rng().abs() + 10.0;
+						let offset = rng();
+						(0..len).map(|i| {
+							offset + amplitude * (i as f64 * 0.1).sin()
+						}).collect()
+					}
+					6 => {
+						// Large values (realistic for financial data)
+						(0..len).map(|_| rng() * 1e6).collect()
+					}
+					7 => {
+						// Small values (penny stocks, fractional shares)
+						(0..len).map(|_| rng() * 1e-3).collect()
+					}
+					8 => {
+						// Mixed scale values (diversified portfolio)
+						(0..len).map(|i| {
+							if i % 3 == 0 { rng() * 1e6 } 
+							else if i % 3 == 1 { rng() * 1e-3 } 
+							else { rng() }
+						}).collect()
+					}
+					_ => {
+						// Triangle wave pattern
+						let amplitude = rng().abs() + 10.0;
+						let period_len = 20;
+						(0..len).map(|i| {
+							let phase = (i % period_len) as f64 / period_len as f64;
+							if phase < 0.5 {
+								amplitude * (2.0 * phase)
+							} else {
+								amplitude * (2.0 - 2.0 * phase)
+							}
+						}).collect()
+					}
+				};
+				
+				(data, period, scenario)
+			});
+		
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period, scenario)| {
+				let params = MidpointParams { period: Some(period) };
+				let input = MidpointInput::from_slice(&data, params);
+				
+				let result = midpoint_with_kernel(&input, kernel)?;
+				let scalar_result = midpoint_with_kernel(&input, Kernel::Scalar)?;
+				
+				// Adaptive tolerance based on value magnitude
+				let tolerance = |expected: f64| -> f64 {
+					// Use relative tolerance for large values, absolute for small
+					(expected.abs() * 1e-12).max(1e-10)
+				};
+				
+				// Property 1: Output length matches input
+				prop_assert_eq!(result.values.len(), data.len());
+				
+				// Find first non-NaN value
+				let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+				let warmup_end = first + period - 1;
+				
+				// Property 2: First valid index behavior
+				for i in 0..warmup_end.min(result.values.len()) {
+					prop_assert!(
+						result.values[i].is_nan(),
+						"Expected NaN at index {} during warmup (warmup_end={})",
+						i, warmup_end
+					);
+				}
+				
+				// Property 3: Mathematical accuracy
+				for i in warmup_end..data.len() {
+					let window = &data[(i + 1 - period)..=i];
+					let mut highest = f64::MIN;
+					let mut lowest = f64::MAX;
+					
+					for &val in window {
+						if val > highest {
+							highest = val;
+						}
+						if val < lowest {
+							lowest = val;
+						}
+					}
+					
+					let expected = (highest + lowest) / 2.0;
+					let actual = result.values[i];
+					let tol = tolerance(expected);
+					
+					prop_assert!(
+						(actual - expected).abs() < tol,
+						"Mathematical accuracy failed at index {}: expected {}, got {}, tolerance {}",
+						i, expected, actual, tol
+					);
+				}
+				
+				// Property 4: Kernel consistency
+				for i in 0..result.values.len() {
+					let kernel_val = result.values[i];
+					let scalar_val = scalar_result.values[i];
+					
+					if kernel_val.is_nan() && scalar_val.is_nan() {
+						continue;
+					}
+					
+					let tol = tolerance(scalar_val);
+					prop_assert!(
+						(kernel_val - scalar_val).abs() < tol,
+						"Kernel consistency failed at index {}: kernel={}, scalar={}, tolerance={}",
+						i, kernel_val, scalar_val, tol
+					);
+				}
+				
+				// Property 5: Special case - period = 1
+				if period == 1 {
+					for i in first..data.len() {
+						let tol = tolerance(data[i]);
+						prop_assert!(
+							(result.values[i] - data[i]).abs() < tol,
+							"Period=1 should equal input at index {}: {} vs {}, tolerance {}",
+							i, result.values[i], data[i], tol
+						);
+					}
+				}
+				
+				// Property 6: Special case - constant data
+				if !data.is_empty() {
+					let first_val = data[first];
+					let val_tol = tolerance(first_val);
+					if data.windows(2).all(|w| (w[0] - w[1]).abs() < val_tol) {
+						for i in warmup_end..data.len() {
+							prop_assert!(
+								(result.values[i] - first_val).abs() < val_tol,
+								"Constant data should produce constant output at index {}",
+								i
+							);
+						}
+					}
+				}
+				
+				// Property 7: Window with identical values
+				for i in warmup_end..data.len() {
+					let window = &data[(i + 1 - period)..=i];
+					if !window.is_empty() {
+						let window_val = window[0];
+						let win_tol = tolerance(window_val);
+						if window.windows(2).all(|w| (w[0] - w[1]).abs() < win_tol) {
+							prop_assert!(
+								(result.values[i] - window_val).abs() < win_tol,
+								"Window with identical values should produce that value at index {}",
+								i
+							);
+						}
+					}
+				}
+				
+				// Property 8: Monotonic data midpoint verification
+				if scenario == 2 || scenario == 3 {
+					// For monotonic data, midpoint should be exactly between first and last of window
+					for i in warmup_end..data.len() {
+						let window_start = data[i + 1 - period];
+						let window_end = data[i];
+						let expected_midpoint = (window_start + window_end) / 2.0;
+						let tol = tolerance(expected_midpoint);
+						
+						prop_assert!(
+							(result.values[i] - expected_midpoint).abs() < tol,
+							"Monotonic data midpoint mismatch at index {}: expected {}, got {}, tolerance {}",
+							i, expected_midpoint, result.values[i], tol
+						);
+					}
+				}
+				
+				// Property 9: Poison detection
+				#[cfg(debug_assertions)]
+				{
+					for (i, &val) in result.values.iter().enumerate() {
+						if val.is_nan() {
+							continue;
+						}
+						
+						let bits = val.to_bits();
+						prop_assert!(
+							bits != 0x11111111_11111111 && 
+							bits != 0x22222222_22222222 && 
+							bits != 0x33333333_33333333,
+							"Found poison value at index {}: {} (0x{:016X})",
+							i, val, bits
+						);
+					}
+				}
+				
+				Ok(())
+			})?;
+		
+		Ok(())
+	}
+
 	macro_rules! generate_all_midpoint_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -865,6 +1110,9 @@ mod tests {
 		check_midpoint_streaming,
 		check_midpoint_no_poison
 	);
+	
+	#[cfg(feature = "proptest")]
+	generate_all_midpoint_tests!(check_midpoint_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);

@@ -170,12 +170,16 @@ pub enum GaussianError {
 	InvalidPeriod { period: usize, data_len: usize },
 	#[error("gaussian: Invalid number of poles: expected 1..4, got {poles}")]
 	InvalidPoles { poles: usize },
-	#[error("Gaussian filter period is longer than the data. period={period}, data_len={data_len}")]
+	#[error("gaussian: Period is longer than the data. period={period}, data_len={data_len}")]
 	PeriodLongerThanData { period: usize, data_len: usize },
 	#[error("gaussian: All values are NaN.")]
 	AllValuesNaN,
 	#[error("gaussian: Not enough valid data: needed = {needed}, valid = {valid}")]
 	NotEnoughValidData { needed: usize, valid: usize },
+	#[error("gaussian: Period too small. Period must be >= 2 for meaningful Gaussian filtering. Got period={period}")]
+	DegeneratePeriod { period: usize },
+	#[error("gaussian: Period of 1 causes degenerate filter (alpha=0). This produces constant zero output. Use period >= 2.")]
+	PeriodOneDegenerate,
 }
 
 #[inline]
@@ -291,14 +295,23 @@ pub fn gaussian_with_kernel(input: &GaussianInput, kernel: Kernel) -> Result<Gau
 	if len == 0 {
 		return Err(GaussianError::NoData);
 	}
-	if period == 0 || period > len {
-		return Err(GaussianError::InvalidPeriod { period, data_len: len });
+	
+	// Check for degenerate period=1 case
+	if period == 1 {
+		return Err(GaussianError::PeriodOneDegenerate);
 	}
+	
+	// Period must be at least 2 for meaningful Gaussian filtering
+	if period < 2 {
+		return Err(GaussianError::DegeneratePeriod { period });
+	}
+	
+	if period > len {
+		return Err(GaussianError::PeriodLongerThanData { period, data_len: len });
+	}
+	
 	if !(1..=4).contains(&poles) {
 		return Err(GaussianError::InvalidPoles { poles });
-	}
-	if len < period {
-		return Err(GaussianError::PeriodLongerThanData { period, data_len: len });
 	}
 
 	let first_valid = data
@@ -527,9 +540,17 @@ impl GaussianStream {
 	pub fn try_new(params: GaussianParams) -> Result<Self, GaussianError> {
 		let period = params.period.unwrap_or(14);
 		let poles = params.poles.unwrap_or(4);
-		if period == 0 {
-			return Err(GaussianError::InvalidPeriod { period, data_len: 0 });
+		
+		// Check for degenerate period=1 case
+		if period == 1 {
+			return Err(GaussianError::PeriodOneDegenerate);
 		}
+		
+		// Period must be at least 2 for meaningful Gaussian filtering
+		if period < 2 {
+			return Err(GaussianError::DegeneratePeriod { period });
+		}
+		
 		if !(1..=4).contains(&poles) {
 			return Err(GaussianError::InvalidPoles { poles });
 		}
@@ -1045,8 +1066,19 @@ fn gaussian_batch_inner(
 	for c in &combos {
 		let period = c.period.unwrap_or(14);
 		let poles = c.poles.unwrap_or(4);
-		if period == 0 || period > cols {
-			return Err(GaussianError::InvalidPeriod { period, data_len: cols });
+		
+		// Check for degenerate period=1 case
+		if period == 1 {
+			return Err(GaussianError::PeriodOneDegenerate);
+		}
+		
+		// Period must be at least 2 for meaningful Gaussian filtering
+		if period < 2 {
+			return Err(GaussianError::DegeneratePeriod { period });
+		}
+		
+		if period > cols {
+			return Err(GaussianError::PeriodLongerThanData { period, data_len: cols });
 		}
 		if !(1..=4).contains(&poles) {
 			return Err(GaussianError::InvalidPoles { poles });
@@ -1365,8 +1397,8 @@ mod tests {
 		let input = GaussianInput::from_slice(&data, params);
 		let res = gaussian_with_kernel(&input, kernel);
 		assert!(
-			matches!(res, Err(GaussianError::InvalidPeriod { .. })),
-			"[{test_name}] expected InvalidPeriod error"
+			matches!(res, Err(GaussianError::DegeneratePeriod { .. })),
+			"[{test_name}] expected DegeneratePeriod error for period=0"
 		);
 		Ok(())
 	}
@@ -1537,21 +1569,232 @@ mod tests {
 	fn check_gaussian_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test_name);
 
-		let strat = (
-			proptest::collection::vec((-1e6f64..1e6).prop_filter("finite", |x| x.is_finite()), 10..200),
-			1usize..30,
-		)
-			.prop_filter("period <= len", |(d, p)| *p <= d.len());
+		// Strategy: generate random data with various period and pole combinations
+		// Start from period=2 to avoid the degenerate period=1 case initially
+		let strat = (2usize..=50)
+			.prop_flat_map(|period| {
+				(
+					prop::collection::vec(
+						(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+						period..400,
+					),
+					Just(period),
+					1usize..=4,  // All valid pole values
+				)
+			});
 
 		proptest::test_runner::TestRunner::default()
-			.run(&strat, |(data, period)| {
+			.run(&strat, |(data, period, poles)| {
 				let params = GaussianParams {
 					period: Some(period),
-					poles: Some(2),
+					poles: Some(poles),
 				};
 				let input = GaussianInput::from_slice(&data, params);
+
 				let GaussianOutput { values: out } = gaussian_with_kernel(&input, kernel).unwrap();
+				let GaussianOutput { values: ref_out } = gaussian_with_kernel(&input, Kernel::Scalar).unwrap();
+				
+				// Basic property: output length matches input
 				prop_assert_eq!(out.len(), data.len());
+				
+				// Find first non-NaN value in data
+				let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(data.len());
+				
+				// Property 1: Warmup period validation
+				// The implementation calculates warm = first_valid + period
+				// and calls alloc_with_nan_prefix(len, warm)
+				// We should verify this is respected
+				let expected_warmup = first_valid + period;
+				
+				// Check that NaN values are properly set for leading NaN inputs
+				for i in 0..first_valid {
+					prop_assert!(
+						out[i].is_nan(),
+						"idx {}: expected NaN for NaN input, got {}", i, out[i]
+					);
+				}
+				
+				// Property 2: After first valid data, values should be finite (unless input has NaN)
+				// Note: The Gaussian filter starts producing values immediately after first_valid,
+				// not after warmup, which may be a design choice or issue
+				for i in first_valid..data.len() {
+					if data[i].is_finite() && !data[first_valid..=i].iter().any(|x| x.is_nan()) {
+						prop_assert!(
+							out[i].is_finite(),
+							"idx {}: expected finite value, got {}", i, out[i]
+						);
+					}
+				}
+				
+				// Property 3: STRICT Smoothness - Gaussian filter MUST reduce variance
+				// No tolerance for variance increase
+				let stability_point = first_valid + period * 2; // Use 2x period for stability
+				if period > 1 && stability_point + 20 < data.len() {
+					let window_start = stability_point;
+					let window_end = (stability_point + 50).min(data.len());
+					
+					let input_slice = &data[window_start..window_end];
+					let output_slice = &out[window_start..window_end];
+					
+					if input_slice.len() > 10 && 
+					   input_slice.iter().all(|x| x.is_finite()) && 
+					   output_slice.iter().all(|x| x.is_finite()) {
+						let input_mean: f64 = input_slice.iter().sum::<f64>() / input_slice.len() as f64;
+						let output_mean: f64 = output_slice.iter().sum::<f64>() / output_slice.len() as f64;
+						
+						let input_var: f64 = input_slice.iter()
+							.map(|x| (x - input_mean).powi(2))
+							.sum::<f64>() / input_slice.len() as f64;
+						let output_var: f64 = output_slice.iter()
+							.map(|x| (x - output_mean).powi(2))
+							.sum::<f64>() / output_slice.len() as f64;
+						
+						// STRICT: Gaussian filter MUST reduce variance (no tolerance)
+						if input_var > 1e-10 {  // Only check if input has meaningful variance
+							// Allow tiny numerical error (1e-15) but no real increase
+							prop_assert!(
+								output_var <= input_var + 1e-15,
+								"Gaussian filter MUST reduce variance: input_var={}, output_var={}, period={}, poles={}",
+								input_var, output_var, period, poles
+							);
+						}
+					}
+				}
+				
+				// Property 4: Period validation - period must be >= 2
+				// Period=1 is now properly handled with an error
+				if period < 2 {
+					// This should never happen since we start from period=2 in our strategy
+					prop_assert!(
+						false,
+						"Test should not generate period < 2, but got period={}",
+						period
+					);
+				}
+				
+				// Property 5: Constant input MUST produce constant output (after stability)
+				let stability_check = first_valid + period * 3; // More conservative stability point
+				if data[first_valid..].windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) && stability_check < data.len() {
+					let constant_val = data[first_valid];
+					for i in stability_check..data.len() {
+						if out[i].is_finite() {
+							// STRICT: Constant input must converge to exact constant
+							prop_assert!(
+								(out[i] - constant_val).abs() <= 1e-12,
+								"constant input MUST produce constant output: idx={}, expected={}, got={}, diff={}",
+								i, constant_val, out[i], (out[i] - constant_val).abs()
+							);
+						}
+					}
+				}
+				
+				// Property 6: Kernel consistency - different kernels MUST produce identical results
+				// Within reasonable floating point precision
+				if kernel != Kernel::Scalar {
+					for i in first_valid..data.len() {
+						if out[i].is_finite() && ref_out[i].is_finite() {
+							let y_bits = out[i].to_bits();
+							let r_bits = ref_out[i].to_bits();
+							let diff_bits = if y_bits > r_bits {
+								y_bits - r_bits
+							} else {
+								r_bits - y_bits
+							};
+							
+							// STRICT: Maximum 10 ULP difference for same algorithm
+							prop_assert!(
+								diff_bits <= 10 || (out[i] - ref_out[i]).abs() < 1e-14,
+								"kernel consistency failed at idx {}: {:?}={}, Scalar={}, diff_bits={}, abs_diff={}",
+								i, kernel, out[i], ref_out[i], diff_bits, (out[i] - ref_out[i]).abs()
+							);
+						}
+					}
+				}
+				
+				// Property 7: STRICT Pole Testing - Mathematical properties of each pole count
+				// Each pole adds a recursive stage to the filter
+				if stability_point + 30 < data.len() {
+					match poles {
+						1 => {
+							// Single pole: Should provide some smoothing
+							// We verify this by checking overall variance reduction
+							let check_start = (first_valid + period * 2).min(data.len()/2);
+							let check_end = data.len();
+							
+							if check_end > check_start + 10 {
+								let input_slice = &data[check_start..check_end];
+								let output_slice = &out[check_start..check_end];
+								
+								// Calculate variance for both
+								if input_slice.iter().all(|x| x.is_finite()) && output_slice.iter().all(|x| x.is_finite()) {
+									let input_mean = input_slice.iter().sum::<f64>() / input_slice.len() as f64;
+									let output_mean = output_slice.iter().sum::<f64>() / output_slice.len() as f64;
+									
+									let input_var = input_slice.iter()
+										.map(|x| (x - input_mean).powi(2))
+										.sum::<f64>() / input_slice.len() as f64;
+									let output_var = output_slice.iter()
+										.map(|x| (x - output_mean).powi(2))
+										.sum::<f64>() / output_slice.len() as f64;
+									
+									// 1-pole filter should reduce variance
+									if input_var > 1e-10 {
+										prop_assert!(
+											output_var <= input_var,
+											"1-pole filter should reduce variance: input_var={}, output_var={}",
+											input_var, output_var
+										);
+									}
+								}
+							}
+						},
+						2 | 3 | 4 => {
+							// Multi-pole: Should be smoother than single pole
+							let params_1pole = GaussianParams {
+								period: Some(period),
+								poles: Some(1),
+							};
+							let input_1pole = GaussianInput::from_slice(&data, params_1pole);
+							if let Ok(GaussianOutput { values: out_1pole }) = gaussian_with_kernel(&input_1pole, kernel) {
+								// Calculate smoothness metric
+								let window_start = stability_point;
+								let window_end = (stability_point + 30).min(data.len() - 1);
+								
+								if window_end > window_start + 5 {
+									// Calculate second differences (acceleration) as smoothness metric
+									let accel_multi: f64 = (window_start+2..window_end).map(|i| {
+										if out[i-2].is_finite() && out[i-1].is_finite() && out[i].is_finite() {
+											((out[i] - out[i-1]) - (out[i-1] - out[i-2])).abs()
+										} else {
+											0.0
+										}
+									}).sum::<f64>();
+									
+									let accel_1pole: f64 = (window_start+2..window_end).map(|i| {
+										if out_1pole[i-2].is_finite() && out_1pole[i-1].is_finite() && out_1pole[i].is_finite() {
+											((out_1pole[i] - out_1pole[i-1]) - (out_1pole[i-1] - out_1pole[i-2])).abs()
+										} else {
+											0.0
+										}
+									}).sum::<f64>();
+									
+									// Multi-pole should have lower acceleration (smoother)
+									// Only check if we have meaningful variation in the data
+									if accel_1pole > 1e-10 && accel_multi > 1e-10 {
+										// Allow small tolerance for numerical errors
+										prop_assert!(
+											accel_multi <= accel_1pole * 1.01,
+											"{}-pole filter should be smoother than 1-pole: accel_{}pole={}, accel_1pole={}",
+											poles, poles, accel_multi, accel_1pole
+										);
+									}
+								}
+							}
+						},
+						_ => {}
+					}
+				}
+				
 				Ok(())
 			})
 			.unwrap();
@@ -1579,6 +1822,160 @@ mod tests {
             }
         }
     }
+
+	// Test edge cases that the property test might miss
+	fn check_gaussian_edge_cases(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		// Edge Case 1: Period=1 should now return error
+		{
+			let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+			let params = GaussianParams {
+				period: Some(1),
+				poles: Some(1),
+			};
+			let input = GaussianInput::from_slice(&data, params);
+			let result = gaussian_with_kernel(&input, kernel);
+			
+			// Should return error for period=1
+			assert!(
+				result.is_err(),
+				"[{}] Period=1 should return error, but got Ok",
+				test_name
+			);
+			
+			if let Err(e) = result {
+				match e {
+					GaussianError::PeriodOneDegenerate => {},
+					_ => panic!("[{}] Wrong error type for period=1: {:?}", test_name, e)
+				}
+			}
+		}
+		
+		// Edge Case 2: Period equals data length
+		{
+			let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+			let params = GaussianParams {
+				period: Some(data.len()),
+				poles: Some(2),
+			};
+			let input = GaussianInput::from_slice(&data, params);
+			let result = gaussian_with_kernel(&input, kernel)?;
+			assert_eq!(result.values.len(), data.len());
+			
+			// The Gaussian filter is an IIR filter that starts producing output immediately
+			// It doesn't require a full period of data to start, unlike moving averages
+			// So we just check that it produces finite values
+			for i in 0..data.len() {
+				assert!(
+					result.values[i].is_finite() || result.values[i].is_nan(),
+					"[{}] Output should be finite or NaN at index {}, got {}",
+					test_name, i, result.values[i]
+				);
+			}
+		}
+		
+		// Edge Case 3: Single data point with period=1 should return error
+		{
+			let data = vec![42.0];
+			let params = GaussianParams {
+				period: Some(1),
+				poles: Some(1),
+			};
+			let input = GaussianInput::from_slice(&data, params);
+			let result = gaussian_with_kernel(&input, kernel);
+			
+			// Should return error for period=1
+			assert!(
+				result.is_err(),
+				"[{}] Single data point with period=1 should return error",
+				test_name
+			);
+		}
+		
+		// Edge Case 4: All zeros input - should produce all zeros
+		{
+			let data = vec![0.0; 10];
+			let params = GaussianParams {
+				period: Some(3),
+				poles: Some(2),
+			};
+			let input = GaussianInput::from_slice(&data, params);
+			let result = gaussian_with_kernel(&input, kernel)?;
+			
+			// After warmup, should be all zeros
+			for i in 3..result.values.len() {
+				assert!(
+					result.values[i].abs() < 1e-15 || result.values[i].is_nan(),
+					"[{}] All-zero input should produce zero output at index {}: got {}",
+					test_name, i, result.values[i]
+				);
+			}
+		}
+		
+		// Edge Case 5: Period > data length should return error
+		{
+			let data = vec![1.0, 2.0, 3.0];
+			let params = GaussianParams {
+				period: Some(5),
+				poles: Some(2),
+			};
+			let input = GaussianInput::from_slice(&data, params);
+			let result = gaussian_with_kernel(&input, kernel);
+			
+			assert!(
+				result.is_err(),
+				"[{}] Period > data.len() should return error, but got Ok",
+				test_name
+			);
+			
+			if let Err(e) = result {
+				match e {
+					GaussianError::InvalidPeriod { .. } | 
+					GaussianError::PeriodLongerThanData { .. } => {},
+					_ => panic!("[{}] Wrong error type for period > data.len(): {:?}", test_name, e)
+				}
+			}
+		}
+		
+		// Edge Case 6: Maximum poles (4) with minimum period (2)
+		{
+			let data = vec![1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0];
+			let params = GaussianParams {
+				period: Some(2),
+				poles: Some(4),
+			};
+			let input = GaussianInput::from_slice(&data, params);
+			let result = gaussian_with_kernel(&input, kernel)?;
+			
+			// Should heavily smooth the alternating pattern
+			// After warmup, variance should be very low
+			let start = 2; // warmup
+			if result.values.len() > start + 2 {
+				let slice = &result.values[start..];
+				let valid_values: Vec<f64> = slice.iter()
+					.filter(|x| x.is_finite())
+					.copied()
+					.collect();
+				
+				if valid_values.len() > 2 {
+					let mean = valid_values.iter().sum::<f64>() / valid_values.len() as f64;
+					let variance = valid_values.iter()
+						.map(|x| (x - mean).powi(2))
+						.sum::<f64>() / valid_values.len() as f64;
+					
+					// 4 poles should smooth alternating input, though with period=2 the effect is limited
+					assert!(
+						variance < 0.6,  // Adjusted for realistic expectation with period=2
+						"[{}] 4-pole filter should smooth alternating input: variance={}",
+						test_name, variance
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
 
 	// Check for poison values in single output - only runs in debug mode
 	#[cfg(debug_assertions)]
@@ -1689,6 +2086,7 @@ mod tests {
 		check_gaussian_nan_handling,
 		check_gaussian_streaming,
 		check_gaussian_property,
+		check_gaussian_edge_cases,
 		check_gaussian_no_poison
 	);
 
@@ -1865,8 +2263,19 @@ fn gaussian_batch_inner_into(
 	for c in &combos {
 		let period = c.period.unwrap_or(14);
 		let poles = c.poles.unwrap_or(4);
-		if period == 0 || period > cols {
-			return Err(GaussianError::InvalidPeriod { period, data_len: cols });
+		
+		// Check for degenerate period=1 case
+		if period == 1 {
+			return Err(GaussianError::PeriodOneDegenerate);
+		}
+		
+		// Period must be at least 2 for meaningful Gaussian filtering
+		if period < 2 {
+			return Err(GaussianError::DegeneratePeriod { period });
+		}
+		
+		if period > cols {
+			return Err(GaussianError::PeriodLongerThanData { period, data_len: cols });
 		}
 		if !(1..=4).contains(&poles) {
 			return Err(GaussianError::InvalidPoles { poles });

@@ -1628,6 +1628,133 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 	
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_zscore_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+		
+		// Strategy: Generate data with wider range to test numerical stability
+		let strat = (2usize..=64).prop_flat_map(|period| {
+			(
+				// Generate wider range data to test edge cases
+				prop::collection::vec(
+					(-1e5f64..1e5f64).prop_filter("finite", |x| x.is_finite()),
+					period + 10..400, // Ensure we have enough data after warmup
+				),
+				Just(period),
+				// MA type selection
+				prop::sample::select(vec!["sma", "ema", "wma"]),
+				// nbdev: typical range for deviation multipliers
+				0.5f64..3.0f64,
+				// devtype: 0=stddev, 1=mean abs dev, 2=median abs dev
+				0usize..=2,
+			)
+		});
+		
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period, ma_type, nbdev, devtype)| {
+				let params = ZscoreParams {
+					period: Some(period),
+					ma_type: Some(ma_type.to_string()),
+					nbdev: Some(nbdev),
+					devtype: Some(devtype),
+				};
+				let input = ZscoreInput::from_slice(&data, params.clone());
+				
+				// Run with specified kernel
+				let ZscoreOutput { values: out } = zscore_with_kernel(&input, kernel)?;
+				// Run with scalar as reference
+				let ZscoreOutput { values: ref_out } = zscore_with_kernel(&input, Kernel::Scalar)?;
+				
+				// Property 1: Output length matches input
+				prop_assert_eq!(out.len(), data.len(), "Output length mismatch");
+				
+				// Property 2: Warmup period handling - first period-1 values should be NaN
+				for i in 0..(period - 1) {
+					prop_assert!(
+						out[i].is_nan(),
+						"Expected NaN during warmup at index {}, got {}",
+						i,
+						out[i]
+					);
+				}
+				
+				// Property 3: Check kernel consistency for all values
+				for i in (period - 1)..data.len() {
+					let y = out[i];
+					let r = ref_out[i];
+					
+					// Property 4: Kernel consistency - compare with scalar reference
+					if !y.is_finite() || !r.is_finite() {
+						// Both should be NaN/infinite in same cases
+						prop_assert_eq!(
+							y.to_bits(),
+							r.to_bits(),
+							"NaN/infinite mismatch at index {}: {} vs {}",
+							i,
+							y,
+							r
+						);
+					} else {
+						// For finite values, check ULP difference
+						let y_bits = y.to_bits();
+						let r_bits = r.to_bits();
+						let ulp_diff = y_bits.abs_diff(r_bits);
+						
+						prop_assert!(
+							(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+							"Kernel mismatch at index {}: {} vs {} (ULP={})",
+							i,
+							y,
+							r,
+							ulp_diff
+						);
+					}
+				}
+				
+				// Property 6: Special case - constant data should produce NaN zscore (stddev = 0)
+				if data.windows(2).all(|w| (w[0] - w[1]).abs() < f64::EPSILON) {
+					for i in (period - 1)..data.len() {
+						prop_assert!(
+							out[i].is_nan() || devtype != 0, // Only stddev (devtype=0) should give NaN for constant data
+							"Expected NaN for constant data with stddev at index {}, got {}",
+							i,
+							out[i]
+						);
+					}
+				}
+				
+				// Property 7: When period = 2 and using stddev, verify basic zscore calculation
+				if period == 2 && devtype == 0 && ma_type == "sma" {
+					for i in 1..data.len() {
+						if out[i].is_finite() {
+							let mean = (data[i - 1] + data[i]) / 2.0;
+							let diff1 = (data[i - 1] - mean).powi(2);
+							let diff2 = (data[i] - mean).powi(2);
+							let variance = (diff1 + diff2) / 2.0;
+							let stddev = variance.sqrt();
+							
+							if stddev > f64::EPSILON {
+								let expected = (data[i] - mean) / (stddev * nbdev);
+								prop_assert!(
+									(out[i] - expected).abs() <= 1e-6,
+									"Zscore calculation mismatch at index {}: {} vs expected {}",
+									i,
+									out[i],
+									expected
+								);
+							}
+						}
+					}
+				}
+				
+				Ok(())
+			})?;
+		
+		Ok(())
+	}
+	
 	generate_all_zscore_tests!(
 		check_zscore_partial_params,
 		check_zscore_with_zero_period,
@@ -1637,6 +1764,9 @@ mod tests {
 		check_zscore_input_with_default_candles,
 		check_zscore_no_poison
 	);
+	
+	#[cfg(feature = "proptest")]
+	generate_all_zscore_tests!(check_zscore_property);
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);
 		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";

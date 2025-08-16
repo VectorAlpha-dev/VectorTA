@@ -1266,6 +1266,243 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	fn check_bollinger_bands_width_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		use proptest::prelude::*;
+
+		// Strategy 1: Random price data with realistic period ranges
+		let random_data_strat = (10usize..=30, 1.0f64..=3.0, 1.0f64..=3.0)
+			.prop_flat_map(|(period, devup, devdn)| {
+				let len = period * 3..400;
+				(
+					prop::collection::vec(
+						(10f64..10000f64).prop_filter("finite", |x| x.is_finite()),
+						len,
+					),
+					Just(period),
+					Just(devup),
+					Just(devdn),
+					Just("random"),
+				)
+			});
+
+		// Strategy 2: Constant data (BBW should be near 0)
+		let constant_data_strat = (10usize..=25, 1.0f64..=2.5, 1.0f64..=2.5)
+			.prop_flat_map(|(period, devup, devdn)| {
+				let len = period * 2..200;
+				(
+					prop::collection::vec(Just(100.0f64), len),
+					Just(period),
+					Just(devup),
+					Just(devdn),
+					Just("constant"),
+				)
+			});
+
+		// Strategy 3: High volatility data (alternating high/low)
+		let volatile_data_strat = (10usize..=25, 1.5f64..=2.5, 1.5f64..=2.5)
+			.prop_flat_map(|(period, devup, devdn)| {
+				let len = period * 3..300;
+				(
+					prop::collection::vec(0f64..1000f64, len)
+						.prop_map(|v| {
+							// Create alternating high/low pattern for high volatility
+							v.into_iter().enumerate().map(|(i, val)| {
+								if i % 2 == 0 {
+									val + 500.0
+								} else {
+									val
+								}
+							}).collect()
+						}),
+					Just(period),
+					Just(devup),
+					Just(devdn),
+					Just("volatile"),
+				)
+			});
+
+		// Strategy 4: Edge cases with small periods
+		let edge_case_strat = (2usize..=5, 0.5f64..=4.0, 0.5f64..=4.0)
+			.prop_flat_map(|(period, devup, devdn)| {
+				let len = period * 4..100;
+				(
+					prop::collection::vec(
+						(50f64..500f64).prop_filter("finite", |x| x.is_finite()),
+						len,
+					),
+					Just(period),
+					Just(devup),
+					Just(devdn),
+					Just("edge"),
+				)
+			});
+
+		// Combine all strategies
+		let combined_strat = prop_oneof![
+			random_data_strat,
+			constant_data_strat,
+			volatile_data_strat,
+			edge_case_strat,
+		];
+
+		proptest::test_runner::TestRunner::default()
+			.run(&combined_strat, |(data, period, devup, devdn, data_type)| {
+				let params = BollingerBandsWidthParams {
+					period: Some(period),
+					devup: Some(devup),
+					devdn: Some(devdn),
+					matype: Some("sma".to_string()),
+					devtype: Some(0), // standard deviation
+				};
+				let input = BollingerBandsWidthInput::from_slice(&data, params.clone());
+
+				// Test with the specified kernel
+				let result = bollinger_bands_width_with_kernel(&input, kernel);
+				prop_assert!(result.is_ok(), "BBW calculation failed: {:?}", result);
+				let out = result.unwrap().values;
+
+				// Test with scalar reference kernel for comparison
+				let ref_input = BollingerBandsWidthInput::from_slice(&data, params);
+				let ref_result = bollinger_bands_width_with_kernel(&ref_input, Kernel::Scalar);
+				prop_assert!(ref_result.is_ok(), "Reference BBW calculation failed");
+				let ref_out = ref_result.unwrap().values;
+
+				// Property 1: Output length should match input
+				prop_assert_eq!(out.len(), data.len(), "Output length mismatch");
+
+				// Property 2: Warmup period - first (period-1) values should be NaN
+				for i in 0..(period - 1) {
+					prop_assert!(
+						out[i].is_nan(),
+						"Expected NaN during warmup at index {}, got {}",
+						i,
+						out[i]
+					);
+				}
+
+				// Property 3: Non-NaN values should be non-negative (BBW is a width)
+				for (i, &val) in out.iter().enumerate() {
+					if !val.is_nan() {
+						prop_assert!(
+							val >= 0.0,
+							"BBW must be non-negative at index {}: got {}",
+							i,
+							val
+						);
+					}
+				}
+
+				// Property 4: For constant data, BBW should be near 0
+				if data_type == "constant" {
+					for (i, &val) in out.iter().enumerate().skip(period - 1) {
+						prop_assert!(
+							val.abs() < 1e-6,
+							"BBW for constant data should be near 0 at index {}: got {}",
+							i,
+							val
+						);
+					}
+				}
+
+				// Property 5: Kernel consistency - compare with scalar reference
+				for i in 0..out.len() {
+					let y = out[i];
+					let r = ref_out[i];
+
+					// Both should be NaN or both should be finite
+					if y.is_nan() && r.is_nan() {
+						continue;
+					}
+
+					prop_assert!(
+						y.is_finite() == r.is_finite(),
+						"Finite/NaN mismatch at index {}: kernel={}, scalar={}",
+						i,
+						y,
+						r
+					);
+
+					if y.is_finite() && r.is_finite() {
+						// Check ULP difference for floating point accuracy
+						let y_bits = y.to_bits();
+						let r_bits = r.to_bits();
+						let ulp_diff: u64 = y_bits.abs_diff(r_bits);
+
+						prop_assert!(
+							(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+							"Kernel mismatch at index {}: {} vs {} (ULP={}, diff={})",
+							i,
+							y,
+							r,
+							ulp_diff,
+							(y - r).abs()
+						);
+					}
+				}
+
+				// Property 6: BBW should respond to volatility appropriately
+				if data_type == "volatile" && out.len() > period * 2 {
+					// For highly volatile data, BBW should be consistently higher
+					let valid_values: Vec<f64> = out.iter()
+						.skip(period - 1)
+						.copied()
+						.filter(|&v| v.is_finite())
+						.collect();
+					
+					if valid_values.len() > 10 {
+						let avg_bbw = valid_values.iter().sum::<f64>() / valid_values.len() as f64;
+						// For alternating high/low pattern, BBW should be substantial
+						prop_assert!(
+							avg_bbw > 0.1,
+							"BBW should be substantial for volatile data: avg={}",
+							avg_bbw
+						);
+					}
+				}
+				
+				// Property 7: Mathematical relationship - BBW scales with deviation multipliers
+				// BBW = (devup + devdn) * stddev / ma
+				// So if we double devup and devdn, BBW should approximately double
+				if data_type == "random" && out.len() > period * 2 {
+					// Run the same data with doubled deviations
+					let params_double = BollingerBandsWidthParams {
+						period: Some(period),
+						devup: Some(devup * 2.0),
+						devdn: Some(devdn * 2.0),
+						matype: Some("sma".to_string()),
+						devtype: Some(0),
+					};
+					let input_double = BollingerBandsWidthInput::from_slice(&data, params_double);
+					let result_double = bollinger_bands_width_with_kernel(&input_double, kernel);
+					
+					if let Ok(out_double) = result_double {
+						let out_double = out_double.values;
+						
+						// Compare ratios for valid values
+						for i in (period - 1)..out.len().min(period * 3) {
+							if out[i].is_finite() && out_double[i].is_finite() && out[i] > 1e-6 {
+								let ratio = out_double[i] / out[i];
+								// The ratio should be approximately 2.0 (within 10% tolerance)
+								prop_assert!(
+									(ratio - 2.0).abs() < 0.2,
+									"BBW scaling issue at index {}: ratio={} (expected ~2.0)",
+									i,
+									ratio
+								);
+							}
+						}
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_bbw_tests {
         ($($test_fn:ident),*) => {
             paste! {
@@ -1299,6 +1536,9 @@ mod tests {
 		check_bbw_nan_check,
 		check_bollinger_bands_width_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_bbw_tests!(check_bollinger_bands_width_property);
 
 	macro_rules! gen_batch_tests {
 		($fn_name:ident) => {

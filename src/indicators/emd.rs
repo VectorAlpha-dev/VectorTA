@@ -1194,6 +1194,377 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_emd_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy 1: Variable period with random price data
+		let strat1 = (2usize..=64)
+			.prop_flat_map(|period| {
+				(
+					prop::collection::vec(
+						(1f64..1000f64).prop_filter("finite", |x| x.is_finite()),
+						(2 * period).max(50)..400,
+					),
+					Just(period),
+					(0.1f64..1.0f64).prop_filter("finite", |x| x.is_finite()),
+					(0.01f64..0.5f64).prop_filter("finite", |x| x.is_finite()),
+				)
+			});
+
+		// Strategy 2: Fixed period with varying data lengths
+		let strat2 = prop::collection::vec(
+			(100f64..10000f64).prop_filter("finite", |x| x.is_finite()),
+			100..500,
+		).prop_map(|data| (data, 20usize, 0.5f64, 0.1f64));
+
+		// Strategy 3: Trending data (monotonic)
+		let strat3 = (100usize..400, prop::bool::ANY).prop_map(|(len, increasing)| {
+			let mut data = Vec::with_capacity(len);
+			let mut val = 100.0;
+			for _ in 0..len {
+				data.push(val);
+				val += if increasing { 1.0 } else { -1.0 };
+			}
+			(data, 14usize, 0.5f64, 0.1f64)
+		});
+
+		// Strategy 4: Oscillating data (sine-wave patterns)
+		let strat4 = (100usize..400, 5usize..50).prop_map(|(len, period_wave)| {
+			let mut data = Vec::with_capacity(len);
+			for i in 0..len {
+				let val = 1000.0 + 100.0 * (2.0 * std::f64::consts::PI * i as f64 / period_wave as f64).sin();
+				data.push(val);
+			}
+			(data, 20usize, 0.5f64, 0.1f64)
+		});
+
+		// Strategy 5: Real-world-like OHLC data with proper constraints
+		let strat5 = (2usize..=30).prop_flat_map(|period| {
+			let min_len = (2 * period).max(50);
+			prop::collection::vec(
+				(50f64..150f64, 0.1f64..10f64, -0.5f64..0.5f64, 0f64..0.5f64, 0f64..0.5f64)
+					.prop_map(|(base, range, close_offset, high_extra, low_extra)| {
+						let open = base;
+						let close = base + range * close_offset;
+						let high = open.max(close) + range * high_extra;
+						let low = open.min(close) - range * low_extra;
+						(high, low, close, base * 1000.0) // volume
+					}),
+				min_len..300,
+			).prop_map(move |ohlc_data| {
+				let (highs, lows, closes, volumes): (Vec<_>, Vec<_>, Vec<_>, Vec<_>) = 
+					ohlc_data.into_iter().unzip4();
+				(highs, lows, closes, volumes, period, 0.5f64, 0.1f64)
+			})
+		});
+
+		// Helper closure to unzip4
+		trait Unzip4<A, B, C, D> {
+			fn unzip4(self) -> (Vec<A>, Vec<B>, Vec<C>, Vec<D>);
+		}
+		impl<A, B, C, D, I: Iterator<Item = (A, B, C, D)>> Unzip4<A, B, C, D> for I {
+			fn unzip4(self) -> (Vec<A>, Vec<B>, Vec<C>, Vec<D>) {
+				let (mut a_vec, mut b_vec, mut c_vec, mut d_vec) = 
+					(Vec::new(), Vec::new(), Vec::new(), Vec::new());
+				for (a, b, c, d) in self {
+					a_vec.push(a);
+					b_vec.push(b);
+					c_vec.push(c);
+					d_vec.push(d);
+				}
+				(a_vec, b_vec, c_vec, d_vec)
+			}
+		}
+
+		// Combine all strategies
+		let combined_strat = prop_oneof![
+			strat1.prop_map(|(data, period, delta, fraction)| {
+				let high = data.clone();
+				let low = data.clone();
+				let close = data.clone();
+				let volume = vec![1000.0; data.len()];
+				(high, low, close, volume, period, delta, fraction)
+			}),
+			strat2.prop_map(|(data, period, delta, fraction)| {
+				let high = data.iter().map(|x| x + 10.0).collect();
+				let low = data.iter().map(|x| x - 10.0).collect();
+				let close = data.clone();
+				let volume = vec![1000.0; data.len()];
+				(high, low, close, volume, period, delta, fraction)
+			}),
+			strat3.prop_map(|(data, period, delta, fraction)| {
+				let high = data.iter().map(|x| x + 5.0).collect();
+				let low = data.iter().map(|x| x - 5.0).collect();
+				let close = data.clone();
+				let volume = vec![1000.0; data.len()];
+				(high, low, close, volume, period, delta, fraction)
+			}),
+			strat4.prop_map(|(data, period, delta, fraction)| {
+				let high = data.iter().map(|x| x + 20.0).collect();
+				let low = data.iter().map(|x| x - 20.0).collect();
+				let close = data.clone();
+				let volume = vec![5000.0; data.len()];
+				(high, low, close, volume, period, delta, fraction)
+			}),
+			strat5,
+		];
+
+		proptest::test_runner::TestRunner::default()
+			.run(&combined_strat, |(high, low, close, volume, period, delta, fraction)| {
+				// Validate input constraints
+				for i in 0..high.len() {
+					prop_assert!(
+						high[i] >= low[i],
+						"Invalid OHLC data at index {}: high ({}) < low ({})",
+						i, high[i], low[i]
+					);
+				}
+
+				let params = EmdParams {
+					period: Some(period),
+					delta: Some(delta),
+					fraction: Some(fraction),
+				};
+				let input = EmdInput::from_slices(&high, &low, &close, &volume, params);
+
+				// Test with specified kernel
+				let result = emd_with_kernel(&input, kernel).unwrap();
+				let upperband = &result.upperband;
+				let middleband = &result.middleband;
+				let lowerband = &result.lowerband;
+
+				// Test with scalar kernel for comparison
+				let ref_result = emd_with_kernel(&input, Kernel::Scalar).unwrap();
+				let ref_upperband = &ref_result.upperband;
+				let ref_middleband = &ref_result.middleband;
+				let ref_lowerband = &ref_result.lowerband;
+
+				// Property 1: Output length matches input
+				prop_assert_eq!(upperband.len(), high.len());
+				prop_assert_eq!(middleband.len(), high.len());
+				prop_assert_eq!(lowerband.len(), high.len());
+
+				// Property 2: Warmup period handling
+				// Actual warmup calculation from emd_scalar:
+				// upperband_warmup = first + per_up_low - 1 = 0 + 50 - 1 = 49
+				// middleband_warmup = first + per_mid - 1 = 0 + 2*period - 1
+				let upperband_warmup = (50 - 1).min(high.len());
+				let middleband_warmup = ((2 * period) - 1).min(high.len());
+
+				for i in 0..upperband_warmup {
+					prop_assert!(
+						upperband[i].is_nan(),
+						"Upperband should be NaN during warmup at index {}", i
+					);
+					prop_assert!(
+						lowerband[i].is_nan(),
+						"Lowerband should be NaN during warmup at index {}", i
+					);
+				}
+
+				for i in 0..middleband_warmup {
+					prop_assert!(
+						middleband[i].is_nan(),
+						"Middleband should be NaN during warmup at index {}", i
+					);
+				}
+
+				// Property 3: Band values should be reasonable (after warmup)
+				let start_idx = upperband_warmup.max(middleband_warmup) + 1;
+				if start_idx < high.len() {
+					// Calculate input data range for bounds checking
+					let input_min = high[start_idx..]
+						.iter()
+						.chain(low[start_idx..].iter())
+						.fold(f64::INFINITY, |a, &b| if b.is_finite() { a.min(b) } else { a });
+					let input_max = high[start_idx..]
+						.iter()
+						.chain(low[start_idx..].iter())
+						.fold(f64::NEG_INFINITY, |a, &b| if b.is_finite() { a.max(b) } else { a });
+					
+					if input_min.is_finite() && input_max.is_finite() {
+						let range = input_max - input_min;
+						let center = (input_max + input_min) / 2.0;
+						// Bands should be within reasonable bounds of input data
+						// EMD bands can extend beyond input range due to filtering, but not excessively
+						let bounds_factor = 3.0; // Allow bands to be within 3x range from center
+						let lower_bound = center - bounds_factor * range.max(1.0);
+						let upper_bound = center + bounds_factor * range.max(1.0);
+						
+						for i in start_idx..high.len() {
+							if !upperband[i].is_nan() && !middleband[i].is_nan() && !lowerband[i].is_nan() {
+								// All bands should be finite
+								prop_assert!(
+									upperband[i].is_finite(),
+									"Upperband should be finite at index {}", i
+								);
+								prop_assert!(
+									middleband[i].is_finite(),
+									"Middleband should be finite at index {}", i
+								);
+								prop_assert!(
+									lowerband[i].is_finite(),
+									"Lowerband should be finite at index {}", i
+								);
+								
+								// Bands should be within reasonable bounds
+								prop_assert!(
+									upperband[i] >= lower_bound && upperband[i] <= upper_bound,
+									"Upperband {} at index {} outside reasonable bounds [{}, {}]",
+									upperband[i], i, lower_bound, upper_bound
+								);
+								prop_assert!(
+									middleband[i] >= lower_bound && middleband[i] <= upper_bound,
+									"Middleband {} at index {} outside reasonable bounds [{}, {}]",
+									middleband[i], i, lower_bound, upper_bound
+								);
+								prop_assert!(
+									lowerband[i] >= lower_bound && lowerband[i] <= upper_bound,
+									"Lowerband {} at index {} outside reasonable bounds [{}, {}]",
+									lowerband[i], i, lower_bound, upper_bound
+								);
+							}
+						}
+					}
+				}
+
+				// Property 4: Kernel consistency
+				// Use more reasonable tolerance for floating-point comparison across SIMD implementations
+				let tolerance = 1e-10;
+				for i in 0..high.len() {
+					let ub_diff = (upperband[i] - ref_upperband[i]).abs();
+					let mb_diff = (middleband[i] - ref_middleband[i]).abs();
+					let lb_diff = (lowerband[i] - ref_lowerband[i]).abs();
+
+					if !upperband[i].is_nan() && !ref_upperband[i].is_nan() {
+						prop_assert!(
+							ub_diff < tolerance,
+							"Upperband kernel mismatch at index {}: {} vs {} (diff: {})",
+							i, upperband[i], ref_upperband[i], ub_diff
+						);
+					}
+					if !middleband[i].is_nan() && !ref_middleband[i].is_nan() {
+						prop_assert!(
+							mb_diff < tolerance,
+							"Middleband kernel mismatch at index {}: {} vs {} (diff: {})",
+							i, middleband[i], ref_middleband[i], mb_diff
+						);
+					}
+					if !lowerband[i].is_nan() && !ref_lowerband[i].is_nan() {
+						prop_assert!(
+							lb_diff < tolerance,
+							"Lowerband kernel mismatch at index {}: {} vs {} (diff: {})",
+							i, lowerband[i], ref_lowerband[i], lb_diff
+						);
+					}
+				}
+
+				// Property 5: Check for poison values
+				for i in 0..high.len() {
+					let ub_bits = upperband[i].to_bits();
+					let mb_bits = middleband[i].to_bits();
+					let lb_bits = lowerband[i].to_bits();
+					
+					prop_assert_ne!(ub_bits, 0x1111_1111_1111_1111, "Poison value in upperband at {}", i);
+					prop_assert_ne!(ub_bits, 0x2222_2222_2222_2222, "Poison value in upperband at {}", i);
+					prop_assert_ne!(ub_bits, 0x3333_3333_3333_3333, "Poison value in upperband at {}", i);
+					
+					prop_assert_ne!(mb_bits, 0x1111_1111_1111_1111, "Poison value in middleband at {}", i);
+					prop_assert_ne!(mb_bits, 0x2222_2222_2222_2222, "Poison value in middleband at {}", i);
+					prop_assert_ne!(mb_bits, 0x3333_3333_3333_3333, "Poison value in middleband at {}", i);
+					
+					prop_assert_ne!(lb_bits, 0x1111_1111_1111_1111, "Poison value in lowerband at {}", i);
+					prop_assert_ne!(lb_bits, 0x2222_2222_2222_2222, "Poison value in lowerband at {}", i);
+					prop_assert_ne!(lb_bits, 0x3333_3333_3333_3333, "Poison value in lowerband at {}", i);
+				}
+
+				// Property 6: Edge case - period = 2 (minimum viable)
+				if period == 2 {
+					// Should still produce valid output after warmup
+					let min_warmup = (2 * 2).max(50); // max(4, 50) = 50
+					if high.len() > min_warmup {
+						prop_assert!(
+							middleband[min_warmup].is_finite() || middleband[min_warmup].is_nan(),
+							"Period=2 should produce valid or NaN output"
+						);
+					}
+				}
+
+				// Property 7: Constant data should produce stable output
+				if high.windows(2).all(|w| (w[0] - w[1]).abs() < f64::EPSILON) &&
+				   low.windows(2).all(|w| (w[0] - w[1]).abs() < f64::EPSILON) &&
+				   close.windows(2).all(|w| (w[0] - w[1]).abs() < f64::EPSILON) {
+					// For constant input, bands should stabilize after warmup
+					let check_start = start_idx + period;
+					if check_start + 5 < high.len() {
+						let ub_stable = &upperband[check_start..check_start+5];
+						let mb_stable = &middleband[check_start..check_start+5];
+						let lb_stable = &lowerband[check_start..check_start+5];
+						
+						for w in ub_stable.windows(2) {
+							if !w[0].is_nan() && !w[1].is_nan() {
+								prop_assert!(
+									(w[0] - w[1]).abs() < 1e-6,
+									"Upperband should be stable for constant input"
+								);
+							}
+						}
+						for w in mb_stable.windows(2) {
+							if !w[0].is_nan() && !w[1].is_nan() {
+								prop_assert!(
+									(w[0] - w[1]).abs() < 1e-6,
+									"Middleband should be stable for constant input"
+								);
+							}
+						}
+						for w in lb_stable.windows(2) {
+							if !w[0].is_nan() && !w[1].is_nan() {
+								prop_assert!(
+									(w[0] - w[1]).abs() < 1e-6,
+									"Lowerband should be stable for constant input"
+								);
+							}
+						}
+					}
+				}
+
+				// Property 8: Fraction parameter effect
+				// When fraction is very small, upper and lower bands should be close to 0 after warmup
+				if fraction < 0.01 && start_idx < high.len() {
+					// Check a few values after warmup
+					let check_end = (start_idx + 10).min(high.len());
+					for i in start_idx..check_end {
+						if !upperband[i].is_nan() && !lowerband[i].is_nan() {
+							// With very small fraction, bands should be near zero
+							// (since they're fraction * peak/valley averages)
+							prop_assert!(
+								upperband[i].abs() < 10.0,
+								"With fraction={}, upperband should be small, got {} at index {}",
+								fraction, upperband[i], i
+							);
+							prop_assert!(
+								lowerband[i].abs() < 10.0,
+								"With fraction={}, lowerband should be small, got {} at index {}",
+								fraction, lowerband[i], i
+							);
+						}
+					}
+				}
+
+				Ok(())
+			})?;
+
+		Ok(())
+	}
+
+	#[cfg(not(feature = "proptest"))]
+	fn check_emd_property(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(())
+	}
+
 	macro_rules! generate_all_emd_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1463,6 +1834,10 @@ mod tests {
 		check_emd_default_candles,
 		check_emd_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_emd_tests!(check_emd_property);
+
 	#[cfg(test)]
 	mod batch_tests {
 		use super::*;

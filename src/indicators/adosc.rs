@@ -1327,6 +1327,241 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_adosc_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		let strat = (1usize..=10, 11usize..=30)
+			.prop_flat_map(|(short_period, long_period)| {
+				// Generate realistic OHLC data where High >= Close >= Low
+				let len = long_period..400;
+				(
+					prop::collection::vec(
+						// Generate base prices
+						(1f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+						len.clone(),
+					)
+					.prop_flat_map(move |base_prices| {
+						let len = base_prices.len();
+						// Generate spreads for high and low
+						let high_spreads = prop::collection::vec(
+							(0f64..100f64).prop_filter("finite", |x| x.is_finite()),
+							len,
+						);
+						let low_spreads = prop::collection::vec(
+							(0f64..100f64).prop_filter("finite", |x| x.is_finite()),
+							len,
+						);
+						// Generate close position between 0 and 1 (0 = at low, 1 = at high)
+						let close_positions = prop::collection::vec(0f64..=1f64, len);
+						
+						(Just(base_prices), high_spreads, low_spreads, close_positions)
+					})
+					.prop_map(|(base, high_spreads, low_spreads, close_positions)| {
+						let mut high = Vec::with_capacity(base.len());
+						let mut low = Vec::with_capacity(base.len());
+						let mut close = Vec::with_capacity(base.len());
+						
+						for i in 0..base.len() {
+							let h = base[i] + high_spreads[i];
+							let l = base[i] - low_spreads[i];
+							let c = l + (h - l) * close_positions[i];
+							
+							high.push(h);
+							low.push(l);
+							close.push(c);
+						}
+						
+						(high, low, close)
+					}),
+					prop::collection::vec(
+						(0f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+						len,
+					),
+					Just(short_period),
+					Just(long_period),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |((high, low, close), volume, short_period, long_period)| {
+				// Ensure all vectors have the same length
+				let len = high.len();
+				prop_assert_eq!(low.len(), len);
+				prop_assert_eq!(close.len(), len);
+				prop_assert_eq!(volume.len(), len);
+				
+				// Verify OHLC relationships are valid
+				for i in 0..len {
+					prop_assert!(
+						high[i] >= low[i],
+						"High must be >= Low at index {}: {} < {}",
+						i, high[i], low[i]
+					);
+					prop_assert!(
+						close[i] >= low[i] && close[i] <= high[i],
+						"Close must be between Low and High at index {}: {} not in [{}, {}]",
+						i, close[i], low[i], high[i]
+					);
+				}
+
+				let params = AdoscParams {
+					short_period: Some(short_period),
+					long_period: Some(long_period),
+				};
+				let input = AdoscInput::from_slices(&high, &low, &close, &volume, params);
+
+				let result = adosc_with_kernel(&input, kernel);
+				prop_assert!(result.is_ok(), "ADOSC computation failed: {:?}", result);
+
+				let AdoscOutput { values: out } = result.unwrap();
+
+				// Property 1: Output length matches input
+				prop_assert_eq!(out.len(), len, "Output length mismatch");
+
+				// Property 2: All values are finite (ADOSC has no warmup period)
+				for (i, &val) in out.iter().enumerate() {
+					prop_assert!(
+						val.is_finite(),
+						"ADOSC output at index {} should be finite, got {}",
+						i,
+						val
+					);
+				}
+
+				// Property 3: First value should be 0 (short_ema - long_ema both start at same value)
+				prop_assert!(
+					out[0].abs() < 1e-10,
+					"First ADOSC value should be 0, got {}",
+					out[0]
+				);
+
+				// Property 4: Zero volume should maintain previous AD value
+				if volume.iter().all(|&v| v == 0.0) {
+					// With zero volume, MFV is always 0, so AD never changes
+					// This means short_ema and long_ema decay towards 0
+					// ADOSC = short_ema - long_ema should approach 0
+					for &val in out.iter() {
+						prop_assert!(
+							val.abs() < 1e-9,
+							"With zero volume, ADOSC should be ~0, got {}",
+							val
+						);
+					}
+				}
+
+				// Property 5: MFM bounds check
+				// Money Flow Multiplier should always be between -1 and 1
+				for i in 0..len {
+					let h = high[i];
+					let l = low[i];
+					let c = close[i];
+					let hl = h - l;
+					if hl != 0.0 {
+						let mfm = ((c - l) - (h - c)) / hl;
+						prop_assert!(
+							mfm >= -1.0 - 1e-10 && mfm <= 1.0 + 1e-10,
+							"MFM at index {} out of bounds: {}",
+							i, mfm
+						);
+					}
+				}
+
+				// Property 6: Values should be bounded reasonably
+				// Since MFM is bounded [-1, 1], the maximum AD change per step is volume
+				// The maximum cumulative AD is sum of all volumes * 1
+				// ADOSC is the difference between two EMAs of AD
+				let total_volume: f64 = volume.iter().sum();
+				// The maximum possible difference between EMAs is proportional to total volume
+				// Using a tighter bound based on the fact that EMAs converge
+				let expected_bound = total_volume * 0.5; // Tighter bound
+				for (i, &val) in out.iter().enumerate() {
+					prop_assert!(
+						val.abs() <= expected_bound,
+						"ADOSC at index {} exceeds reasonable bounds: {} > {}",
+						i,
+						val.abs(),
+						expected_bound
+					);
+				}
+
+				// Property 7: Verify period relationship
+				prop_assert!(short_period < long_period, "Short period must be less than long period");
+
+				// Property 8: Formula validation - manually calculate first few values
+				if len >= 3 {
+					let alpha_short = 2.0 / (short_period as f64 + 1.0);
+					let alpha_long = 2.0 / (long_period as f64 + 1.0);
+					
+					// First value calculation
+					let h0 = high[0];
+					let l0 = low[0];
+					let c0 = close[0];
+					let v0 = volume[0];
+					let hl0 = h0 - l0;
+					let mfm0 = if hl0 != 0.0 { ((c0 - l0) - (h0 - c0)) / hl0 } else { 0.0 };
+					let mfv0 = mfm0 * v0;
+					let sum_ad0 = mfv0;
+					let expected_first = 0.0; // short_ema - long_ema both start at sum_ad0
+					prop_assert!(
+						(out[0] - expected_first).abs() < 1e-9,
+						"First value mismatch: expected {}, got {}",
+						expected_first,
+						out[0]
+					);
+
+					// Second value calculation
+					let h1 = high[1];
+					let l1 = low[1];
+					let c1 = close[1];
+					let v1 = volume[1];
+					let hl1 = h1 - l1;
+					let mfm1 = if hl1 != 0.0 { ((c1 - l1) - (h1 - c1)) / hl1 } else { 0.0 };
+					let mfv1 = mfm1 * v1;
+					let sum_ad1 = sum_ad0 + mfv1;
+					let short_ema1 = alpha_short * sum_ad1 + (1.0 - alpha_short) * sum_ad0;
+					let long_ema1 = alpha_long * sum_ad1 + (1.0 - alpha_long) * sum_ad0;
+					let expected_second = short_ema1 - long_ema1;
+					prop_assert!(
+						(out[1] - expected_second).abs() < 1e-9,
+						"Second value mismatch: expected {}, got {}",
+						expected_second,
+						out[1]
+					);
+				}
+
+				// Property 9: Kernel consistency - all kernels should produce the same result
+				let ref_output = adosc_with_kernel(&input, Kernel::Scalar);
+				prop_assert!(ref_output.is_ok(), "Reference scalar computation failed");
+				let AdoscOutput { values: ref_out } = ref_output.unwrap();
+
+				for (i, (&val, &ref_val)) in out.iter().zip(ref_out.iter()).enumerate() {
+					let val_bits = val.to_bits();
+					let ref_bits = ref_val.to_bits();
+
+					if !val.is_finite() || !ref_val.is_finite() {
+						prop_assert_eq!(
+							val_bits, ref_bits,
+							"NaN/Inf mismatch at index {}: {} vs {}",
+							i, val, ref_val
+						);
+					} else {
+						let ulp_diff = val_bits.abs_diff(ref_bits);
+						prop_assert!(
+							(val - ref_val).abs() <= 1e-9 || ulp_diff <= 4,
+							"Kernel mismatch at index {}: {} vs {} (diff: {}, ULP: {})",
+							i, val, ref_val, (val - ref_val).abs(), ulp_diff
+						);
+					}
+				}
+
+				Ok(())
+			})
+			.map_err(|e| e.into())
+	}
+
 	generate_all_adosc_tests!(
 		check_adosc_accuracy,
 		check_adosc_partial_params,
@@ -1337,7 +1572,8 @@ mod tests {
 		check_adosc_reinput,
 		check_adosc_nan_handling,
 		check_adosc_streaming,
-		check_adosc_no_poison
+		check_adosc_no_poison,
+		check_adosc_property
 	);
 
 	macro_rules! gen_batch_tests {

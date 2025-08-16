@@ -691,6 +691,8 @@ mod tests {
 	use super::*;
 	use crate::skip_if_unsupported;
 	use crate::utilities::data_loader::read_candles_from_csv;
+	#[cfg(feature = "proptest")]
+	use proptest::prelude::*;
 
 	fn check_supersmoother_3_pole_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test_name);
@@ -834,6 +836,156 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_supersmoother_3_pole_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy: generate period first, then data of appropriate length
+		let strat = (1usize..=64)
+			.prop_flat_map(|period| {
+				(
+					prop::collection::vec(
+						(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+						period..400,
+					),
+					Just(period),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period)| {
+				let params = SuperSmoother3PoleParams { period: Some(period) };
+				let input = SuperSmoother3PoleInput::from_slice(&data, params);
+
+				let SuperSmoother3PoleOutput { values: out } = supersmoother_3_pole_with_kernel(&input, kernel).unwrap();
+				let SuperSmoother3PoleOutput { values: ref_out } = supersmoother_3_pole_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Since we don't inject NaN, first is always 0
+				let first = 0;
+				let warmup = first + period;
+
+				// Property 1: Output length matches input length
+				prop_assert_eq!(out.len(), data.len(), "Output length mismatch");
+
+				// Property 2: First three values pass through directly
+				if data.len() > 0 {
+					prop_assert!(
+						(out[0] - data[0]).abs() < f64::EPSILON,
+						"First value mismatch: {} vs {}", out[0], data[0]
+					);
+				}
+				if data.len() > 1 {
+					prop_assert!(
+						(out[1] - data[1]).abs() < f64::EPSILON,
+						"Second value mismatch: {} vs {}", out[1], data[1]
+					);
+				}
+				if data.len() > 2 {
+					prop_assert!(
+						(out[2] - data[2]).abs() < f64::EPSILON,
+						"Third value mismatch: {} vs {}", out[2], data[2]
+					);
+				}
+
+				// Property 3: Values from index 3 onwards are computed
+				// Note: The implementation computes from index 3 regardless of warmup
+				// This appears to be the actual behavior of the filter
+				for i in 3..data.len() {
+					prop_assert!(
+						out[i].is_finite(),
+						"Expected finite value at index {}, got {}",
+						i, out[i]
+					);
+				}
+
+				// Property 4: Output remains finite (no NaN or Inf)
+				// Recursive filters can amplify significantly but should remain finite
+				for i in 3..data.len() {
+					prop_assert!(
+						out[i].is_finite(),
+						"Output at index {} is not finite: {}",
+						i, out[i]
+					);
+				}
+
+				// Property 5: Smoothing property - should reduce variation
+				// Check from a stable point after initial transients
+				let stable_start = (period * 2).max(10).min(data.len() - 1);
+				if data.len() > stable_start + 10 {
+					let input_variation: f64 = data[stable_start..data.len()-1]
+						.windows(2)
+						.map(|w| (w[1] - w[0]).abs())
+						.sum::<f64>();
+					let output_variation: f64 = out[stable_start..out.len()-1]
+						.windows(2)
+						.map(|w| (w[1] - w[0]).abs())
+						.sum::<f64>();
+					
+					// For a smoothing filter, output variation should generally be less
+					// Allow up to 2x amplification for edge cases
+					if input_variation > 1e-9 {
+						let variation_ratio = output_variation / input_variation;
+						prop_assert!(
+							variation_ratio <= 2.0,
+							"Output variation too high: ratio = {} (out={}, in={})",
+							variation_ratio, output_variation, input_variation
+						);
+					}
+				}
+
+				// Property 6: Constant input produces constant output
+				if data.windows(2).all(|w| (w[0] - w[1]).abs() < f64::EPSILON) {
+					let constant_val = data[0];
+					// Check from a stable point
+					let stable_start = period.max(3);
+					for i in stable_start..out.len() {
+						prop_assert!(
+							(out[i] - constant_val).abs() <= 1e-9,
+							"Constant input should produce constant output at index {}: {} vs {}",
+							i, out[i], constant_val
+						);
+					}
+				}
+
+				// Property 7: Period=1 special case
+				if period == 1 {
+					// Values from index 3 onwards should be computed
+					for i in 3..data.len() {
+						prop_assert!(
+							out[i].is_finite(),
+							"Period=1 should produce finite values from index 3, got {} at {}",
+							out[i], i
+						);
+					}
+				}
+
+				// Property 8: Kernel consistency (all kernels should match since AVX forwards to scalar)
+				for i in 0..out.len() {
+					if out[i].is_finite() && ref_out[i].is_finite() {
+						let diff = (out[i] - ref_out[i]).abs();
+						let ulp_diff = out[i].to_bits().abs_diff(ref_out[i].to_bits());
+						prop_assert!(
+							diff <= 1e-9 || ulp_diff <= 4,
+							"Kernel mismatch at index {}: {} vs {} (diff={}, ULP={})",
+							i, out[i], ref_out[i], diff, ulp_diff
+						);
+					} else {
+						prop_assert_eq!(
+							out[i].is_nan(), ref_out[i].is_nan(),
+							"NaN mismatch at index {}", i
+						);
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_ss3pole_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -935,6 +1087,9 @@ mod tests {
 		check_supersmoother_3_pole_streaming,
 		check_supersmoother_3_pole_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_ss3pole_tests!(check_supersmoother_3_pole_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);

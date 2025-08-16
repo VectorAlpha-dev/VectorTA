@@ -1303,6 +1303,206 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_tsf_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Generate random parameter combinations and corresponding data vectors
+		// Period must be at least 2 for meaningful regression (period=1 would have no regression)
+		let strat = (2usize..=30)
+			.prop_flat_map(|period| {
+				(
+					prop::collection::vec(
+						(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+						period..400,
+					),
+					Just(period),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period)| {
+				let params = TsfParams {
+					period: Some(period),
+				};
+				let input = TsfInput::from_slice(&data, params);
+
+				// Get outputs from the kernel under test and scalar reference
+				let TsfOutput { values: out } = tsf_with_kernel(&input, kernel).unwrap();
+				let TsfOutput { values: ref_out } = tsf_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Find first non-NaN index (warmup period)
+				let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+				let warmup_end = first + period - 1;
+
+				// Property 1: Warmup period validation - first period-1 values should be NaN
+				for i in 0..warmup_end {
+					prop_assert!(
+						out[i].is_nan(),
+						"[{}] Expected NaN during warmup at index {}, got {}",
+						test_name,
+						i,
+						out[i]
+					);
+				}
+
+				// Property 2: Kernel consistency - compare with scalar reference
+				for i in warmup_end..data.len() {
+					let y = out[i];
+					let r = ref_out[i];
+
+					// Handle NaN/infinite values
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert!(
+							y.to_bits() == r.to_bits(),
+							"[{}] finite/NaN mismatch at idx {}: {} vs {}",
+							test_name,
+							i,
+							y,
+							r
+						);
+						continue;
+					}
+
+					// ULP comparison for finite values
+					let y_bits = y.to_bits();
+					let r_bits = r.to_bits();
+					let ulp_diff: u64 = y_bits.abs_diff(r_bits);
+
+					prop_assert!(
+						(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+						"[{}] Kernel mismatch at idx {}: {} vs {} (ULP={})",
+						test_name,
+						i,
+						y,
+						r,
+						ulp_diff
+					);
+				}
+
+				// Property 3: Constant data property - TSF should predict the same constant
+				if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) && !data.is_empty() {
+					for i in warmup_end..data.len() {
+						if out[i].is_finite() {
+							prop_assert!(
+								(out[i] - data[0]).abs() <= 1e-6,
+								"[{}] Constant data: TSF at {} = {}, expected {}",
+								test_name,
+								i,
+								out[i],
+								data[0]
+							);
+						}
+					}
+				}
+
+				// Property 4: Bounded output range
+				// TSF predictions should be within reasonable bounds of the input data
+				// Since TSF extrapolates, we allow for some extension beyond the data range
+				let data_min = data[first..].iter().fold(f64::INFINITY, |a, &b| a.min(b));
+				let data_max = data[first..].iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+				let data_range = data_max - data_min;
+				
+				// Allow TSF to extrapolate up to 2x the data range beyond min/max
+				let bound_factor = 2.0;
+				let lower_bound = data_min - bound_factor * data_range;
+				let upper_bound = data_max + bound_factor * data_range;
+				
+				for i in warmup_end..data.len() {
+					if out[i].is_finite() && data_range > 1e-10 {
+						prop_assert!(
+							out[i] >= lower_bound && out[i] <= upper_bound,
+							"[{}] TSF at {} = {} is outside bounds [{}, {}]",
+							test_name,
+							i,
+							out[i],
+							lower_bound,
+							upper_bound
+						);
+					}
+				}
+
+				// Property 5: Monotonic trend validation (improved)
+				let is_monotonic_inc = data.windows(2).all(|w| w[1] >= w[0] - 1e-10);
+				let is_monotonic_dec = data.windows(2).all(|w| w[1] <= w[0] + 1e-10);
+				
+				if is_monotonic_inc || is_monotonic_dec {
+					// For monotonic data, check trend direction at a few points
+					let test_points = vec![warmup_end, (warmup_end + data.len()) / 2, data.len() - 1];
+					
+					for &i in test_points.iter() {
+						if i < data.len() && out[i].is_finite() {
+							let window_end = i;
+							let window_start = i.saturating_sub(period - 1);
+							
+							if is_monotonic_inc {
+								// For increasing data, TSF should predict >= last value
+								prop_assert!(
+									out[i] >= data[window_end] - 1e-6,
+									"[{}] Monotonic increasing: TSF at {} = {} < last value {}",
+									test_name,
+									i,
+									out[i],
+									data[window_end]
+								);
+							} else if is_monotonic_dec {
+								// For decreasing data, TSF should predict <= last value
+								prop_assert!(
+									out[i] <= data[window_end] + 1e-6,
+									"[{}] Monotonic decreasing: TSF at {} = {} > last value {}",
+									test_name,
+									i,
+									out[i],
+									data[window_end]
+								);
+							}
+						}
+					}
+				}
+
+				// Property 6: Edge case - period = 2 (minimum valid period)
+				// Only test once at the first valid output position
+				if period == 2 && warmup_end < data.len() {
+					let i = warmup_end;
+					if out[i].is_finite() {
+						// With period=2, TSF fits a line through the last 2 points and extrapolates
+						let x0 = data[i - 1]; // older point at x=0
+						let x1 = data[i];     // newer point at x=1
+						// Linear extrapolation to x=2: 2*x1 - x0
+						let expected = 2.0 * x1 - x0;
+						prop_assert!(
+							(out[i] - expected).abs() <= 1e-6,
+							"[{}] Period=2: TSF at {} = {}, expected {}",
+							test_name,
+							i,
+							out[i],
+							expected
+						);
+					}
+				}
+
+				// Property 7: Clean input produces clean output (no NaN injection)
+				// After warmup, all outputs should be finite for finite inputs
+				for i in warmup_end..data.len() {
+					if data[i.saturating_sub(period - 1)..=i].iter().all(|x| x.is_finite()) {
+						prop_assert!(
+							out[i].is_finite(),
+							"[{}] TSF produced NaN/Inf at {} despite finite input window",
+							test_name,
+							i
+						);
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_tsf_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1339,6 +1539,9 @@ mod tests {
 		check_tsf_streaming,
 		check_tsf_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_tsf_tests!(check_tsf_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);

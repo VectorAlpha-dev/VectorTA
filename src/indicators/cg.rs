@@ -929,6 +929,9 @@ mod tests {
 		check_cg_no_poison
 	);
 
+	#[cfg(feature = "proptest")]
+	generate_all_cg_tests!(check_cg_property);
+
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);
 
@@ -1025,6 +1028,278 @@ mod tests {
 	}
 	gen_batch_tests!(check_batch_default_row);
 	gen_batch_tests!(check_batch_no_poison);
+
+	#[cfg(feature = "proptest")]
+	fn check_cg_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy 1: Random price data with realistic period ranges
+		let random_data_strat = (2usize..=30)
+			.prop_flat_map(|period| {
+				(
+					prop::collection::vec(
+						(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+						period + 10..400,  // Ensure enough data for warmup
+					),
+					Just(period),
+				)
+			});
+
+		// Strategy 2: Constant data (CG should converge to a specific value)
+		let constant_data_strat = (2usize..=20)
+			.prop_flat_map(|period| {
+				(
+					(1f64..1000f64).prop_flat_map(move |value| {
+						Just(vec![value; period + 50])
+					}),
+					Just(period),
+				)
+			});
+
+		// Strategy 3: Trending data (linear increase/decrease)
+		let trending_data_strat = (2usize..=25)
+			.prop_flat_map(|period| {
+				(
+					(-100f64..100f64).prop_flat_map(move |start| {
+						(-10f64..10f64).prop_map(move |slope| {
+							(0..period + 100)
+								.map(|i| start + slope * i as f64)
+								.collect::<Vec<_>>()
+						})
+					}),
+					Just(period),
+				)
+			});
+
+		// Strategy 4: Edge cases with small periods
+		let edge_case_strat = (2usize..=5)
+			.prop_flat_map(|period| {
+				(
+					prop::collection::vec(
+						(-1e3f64..1e3f64).prop_filter("finite", |x| x.is_finite()),
+						period + 5..50,
+					),
+					Just(period),
+				)
+			});
+
+		// Combine all strategies
+		let combined_strat = prop_oneof![
+			random_data_strat.clone(),
+			constant_data_strat,
+			trending_data_strat,
+			edge_case_strat,
+		];
+
+		proptest::test_runner::TestRunner::default()
+			.run(&combined_strat, |(data, period)| {
+				let params = CgParams { period: Some(period) };
+				let input = CgInput::from_slice(&data, params);
+
+				// Get output from the kernel under test
+				let CgOutput { values: out } = cg_with_kernel(&input, kernel).unwrap();
+				// Get reference output from scalar kernel
+				let CgOutput { values: ref_out } = cg_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Validate warmup period
+				for i in 0..period {
+					prop_assert!(
+						out[i].is_nan(),
+						"Expected NaN during warmup at index {}, got {}", i, out[i]
+					);
+				}
+
+				// Validate computed values
+				for i in period..data.len() {
+					let y = out[i];
+					let r = ref_out[i];
+
+					// Property 1: Output should be finite (not infinity)
+					if !y.is_nan() {
+						prop_assert!(
+							y.is_finite(),
+							"CG output at index {} is not finite: {}", i, y
+						);
+					}
+
+					// Property 2: For constant data, CG should equal a specific value
+					// When all prices are the same, CG = -sum(k*p)/sum(p) where k goes from 1 to period-1
+					// This simplifies to -sum(k)/count where count = period-1
+					if i >= period && data[i-period+1..=i].windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) {
+						let constant_val = data[i];
+						if constant_val.abs() > f64::EPSILON {
+							// Calculate expected CG for constant data
+							// sum of 1 + 2 + ... + (period-1) = (period-1)*period/2
+							let weight_sum = ((period - 1) * period) as f64 / 2.0;
+							let expected_cg = -weight_sum / (period - 1) as f64;
+							prop_assert!(
+								(y - expected_cg).abs() < 1e-9,
+								"For constant data, CG at index {} should be {}, got {}", i, expected_cg, y
+							);
+						}
+					}
+
+					// Property 3: For period=2, verify the degenerate case
+					// When period=2, CG uses only 1 bar (period-1 = 1), resulting in a constant -1.0
+					// This is a mathematical artifact but worth validating for completeness
+					if period == 2 && i >= 2 {
+						let p0 = data[i];  // Most recent price (weight = 1)
+						if p0.abs() > f64::EPSILON {
+							// For period=2: CG = -(1*p0)/(p0) = -1.0
+							prop_assert!(
+								(y - (-1.0)).abs() < 1e-9,
+								"Period=2 should always yield -1.0, got {} at index {}", y, i
+							);
+						} else {
+							// When price is effectively 0, CG should be 0
+							prop_assert!(
+								y.abs() < 1e-9,
+								"Period=2 with zero price should yield 0, got {} at index {}", y, i
+							);
+						}
+					}
+
+					// Property 4: Verify CG produces valid output for non-zero data
+					// For data with non-zero values, CG should produce non-zero results
+					if period > 2 && i >= period + 2 {
+						let window = &data[i-period+1..=i];
+						let all_nonzero = window.iter().all(|&x| x.abs() > f64::EPSILON);
+						
+						if all_nonzero && !y.is_nan() {
+							// When all values in the window are non-zero, CG should be non-zero
+							prop_assert!(
+								y.abs() > f64::EPSILON,
+								"CG should be non-zero when all input values are non-zero at index {}, got {}", i, y
+							);
+						}
+					}
+
+					// Property 5: Kernel consistency - all kernels should produce identical results
+					let y_bits = y.to_bits();
+					let r_bits = r.to_bits();
+
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert!(
+							y_bits == r_bits,
+							"NaN/infinity mismatch at index {}: {} vs {}", i, y, r
+						);
+						continue;
+					}
+
+					let ulp_diff: u64 = y_bits.abs_diff(r_bits);
+					prop_assert!(
+						(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+						"Kernel mismatch at index {}: {} vs {} (ULP={})", i, y, r, ulp_diff
+					);
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		// Additional focused test for mathematical properties
+		let math_test_strat = (2usize..=10, prop::collection::vec(1f64..100f64, 20..50));
+		
+		proptest::test_runner::TestRunner::default()
+			.run(&math_test_strat, |(period, data)| {
+				let params = CgParams { period: Some(period) };
+				let input = CgInput::from_slice(&data, params);
+				let CgOutput { values: out } = cg_with_kernel(&input, kernel).unwrap();
+
+				// Verify that CG calculation uses exactly period-1 bars
+				for i in period..data.len() {
+					if out[i].is_nan() {
+						continue;
+					}
+
+					// Manually calculate CG using the exact formula
+					let mut num = 0.0;
+					let mut denom = 0.0;
+					for count in 0..(period - 1) {
+						let price = data[i - count];
+						let weight = (1 + count) as f64;
+						num += weight * price;
+						denom += price;
+					}
+					
+					if denom.abs() > f64::EPSILON {
+						let expected = -num / denom;
+						prop_assert!(
+							(out[i] - expected).abs() < 1e-9,
+							"Manual calculation mismatch at index {}: expected {}, got {}", i, expected, out[i]
+						);
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		// Volatility response test - verify CG responds appropriately to alternating values
+		let volatility_test_strat = (3usize..=15)
+			.prop_flat_map(|period| {
+				(
+					(10f64..100f64).prop_flat_map(move |base| {
+						(1f64..50f64).prop_map(move |amplitude| {
+							// Create alternating high/low pattern
+							let mut data = Vec::with_capacity(period + 50);
+							for i in 0..(period + 50) {
+								if i % 2 == 0 {
+									data.push(base + amplitude);
+								} else {
+									data.push(base - amplitude);
+								}
+							}
+							data
+						})
+					}),
+					Just(period),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&volatility_test_strat, |(data, period)| {
+				let params = CgParams { period: Some(period) };
+				let input = CgInput::from_slice(&data, params);
+				let CgOutput { values: out } = cg_with_kernel(&input, kernel).unwrap();
+
+				// For alternating data, CG should oscillate but remain bounded
+				for i in (period + 2)..data.len() {
+					if out[i].is_nan() {
+						continue;
+					}
+
+					// CG should respond to the alternating pattern
+					// The exact behavior depends on period (odd vs even)
+					if period % 2 == 0 {
+						// For even periods with alternating data, CG should be relatively stable
+						// because the weights balance out symmetrically
+						if i >= period + 4 {
+							let variation = (out[i] - out[i-1]).abs();
+							prop_assert!(
+								variation < 2.0,
+								"CG variation too large for alternating data with even period at index {}: {}", i, variation
+							);
+						}
+					}
+					
+					// Verify CG remains bounded relative to the amplitude
+					let base = (data[i] + data[i-1]) / 2.0;  // Approximate base value
+					let relative_cg = (out[i] / base).abs();
+					prop_assert!(
+						relative_cg < 10.0,  // CG shouldn't exceed 10x the base value
+						"CG magnitude too large relative to data at index {}: CG={}, base={}", i, out[i], base
+					);
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
 }
 
 #[cfg(feature = "python")]

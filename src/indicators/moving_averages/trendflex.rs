@@ -1140,6 +1140,209 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_trendflex_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		let strat = (1usize..=64)
+			.prop_flat_map(|period| {
+				(
+					prop::collection::vec(
+						(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+						period..400,
+					),
+					Just(period),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period)| {
+				let input = TrendFlexInput::from_slice(&data, TrendFlexParams { period: Some(period) });
+				let output = trendflex_with_kernel(&input, kernel)?;
+
+				// Property 1: Output length matches input
+				prop_assert_eq!(
+					output.values.len(),
+					data.len(),
+					"Output length mismatch"
+				);
+
+				// Find first non-NaN value in data
+				let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+				let warmup = first + period;
+
+				// Property 2: Warmup period - values before warmup should be NaN
+				for i in 0..warmup.min(data.len()) {
+					prop_assert!(
+						output.values[i].is_nan(),
+						"Expected NaN in warmup period at index {}, got {}",
+						i,
+						output.values[i]
+					);
+				}
+
+				// Property 3: Finite values after warmup
+				for i in warmup..output.values.len() {
+					prop_assert!(
+						output.values[i].is_finite(),
+						"Output at index {} is not finite: {}",
+						i,
+						output.values[i]
+					);
+				}
+
+				// Property 4: Scale invariance - due to normalization, scaling input shouldn't dramatically change output
+				// Test with a scale factor of 10
+				if data.len() > warmup + 10 {
+					let scale_factor = 10.0;
+					let scaled_data: Vec<f64> = data.iter().map(|&x| x * scale_factor).collect();
+					let scaled_input = TrendFlexInput::from_slice(&scaled_data, TrendFlexParams { period: Some(period) });
+					let scaled_output = trendflex_with_kernel(&scaled_input, kernel)?;
+					
+					// Compare normalized outputs - they should be very similar
+					let mut similarity_count = 0;
+					let mut total_compared = 0;
+					for i in warmup..output.values.len() {
+						if output.values[i].is_finite() && scaled_output.values[i].is_finite() {
+							// Allow for some numerical differences, but shapes should be similar
+							let diff = (output.values[i] - scaled_output.values[i]).abs();
+							// TrendFlex is normalized, so outputs should be very close
+							if diff < 0.5 {
+								similarity_count += 1;
+							}
+							total_compared += 1;
+						}
+					}
+					
+					if total_compared > 0 {
+						let similarity_ratio = similarity_count as f64 / total_compared as f64;
+						prop_assert!(
+							similarity_ratio > 0.9,
+							"Scale invariance failed: only {:.1}% of values are similar after scaling",
+							similarity_ratio * 100.0
+						);
+					}
+				}
+
+				// Property 5: Trend response - monotonic sequences should produce appropriate signed values
+				if data.len() > warmup + 20 {
+					// Check if we have a monotonic increasing sequence
+					let mut is_increasing = true;
+					let mut is_decreasing = true;
+					for i in (warmup + 1)..data.len().min(warmup + 50) {
+						if data[i] <= data[i - 1] {
+							is_increasing = false;
+						}
+						if data[i] >= data[i - 1] {
+							is_decreasing = false;
+						}
+					}
+					
+					// For strong trends, TrendFlex should respond appropriately
+					if is_increasing {
+						// Count positive values in the output after warmup
+						let positive_count = output.values[warmup..]
+							.iter()
+							.filter(|&&v| v > 0.0)
+							.count();
+						let total = output.values.len() - warmup;
+						let positive_ratio = positive_count as f64 / total as f64;
+						prop_assert!(
+							positive_ratio > 0.7,
+							"Increasing trend should produce mostly positive values, got {:.1}% positive",
+							positive_ratio * 100.0
+						);
+					} else if is_decreasing {
+						// Count negative values in the output after warmup
+						let negative_count = output.values[warmup..]
+							.iter()
+							.filter(|&&v| v < 0.0)
+							.count();
+						let total = output.values.len() - warmup;
+						let negative_ratio = negative_count as f64 / total as f64;
+						prop_assert!(
+							negative_ratio > 0.7,
+							"Decreasing trend should produce mostly negative values, got {:.1}% negative",
+							negative_ratio * 100.0
+						);
+					}
+				}
+
+				// Property 6: Constant input produces values near zero
+				// Since there's no trend in constant data, TrendFlex should converge near 0
+				let all_same = data[first..].windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
+				if all_same && data.len() > warmup + 10 {
+					let last_values = &output.values[(data.len() - 5)..];
+					for val in last_values {
+						prop_assert!(
+							val.abs() < 0.1,
+							"Constant input should produce values near 0, got {}",
+							val
+						);
+					}
+				}
+
+				// Property 7: Period = 1 special case
+				if period == 1 {
+					// With period=1, super smoother period = round(1/2) = 1
+					// Values should still be finite after warmup
+					for i in (first + 1)..output.values.len() {
+						prop_assert!(
+							output.values[i].is_finite(),
+							"Period=1 should still produce finite values at index {}",
+							i
+						);
+					}
+				}
+
+				// Property 8: Large period behavior
+				// When period is close to data length, should still produce valid output
+				if data.len() > 5 && period >= data.len().saturating_sub(5) && data.len() > period {
+					// Should have at least some non-NaN values at the end
+					let last_idx = data.len() - 1;
+					if last_idx >= warmup {
+						prop_assert!(
+							output.values[last_idx].is_finite(),
+							"Large period should still produce finite values at the end"
+						);
+					}
+				}
+
+				// Property 9: Kernel consistency
+				if cfg!(all(feature = "nightly-avx", target_arch = "x86_64")) {
+					// Test that different kernels produce identical results
+					let scalar_output = trendflex_with_kernel(&input, Kernel::Scalar)?;
+					
+					for i in 0..output.values.len() {
+						if output.values[i].is_finite() && scalar_output.values[i].is_finite() {
+							prop_assert!(
+								(output.values[i] - scalar_output.values[i]).abs() < 1e-9,
+								"Kernel consistency failed at index {}: {} vs {}",
+								i,
+								output.values[i],
+								scalar_output.values[i]
+							);
+						} else {
+							prop_assert_eq!(
+								output.values[i].is_nan(),
+								scalar_output.values[i].is_nan(),
+								"NaN mismatch between kernels at index {}",
+								i
+							);
+						}
+					}
+				}
+
+				Ok(())
+			})
+			.map_err(|e| e.into())
+	}
+
+	#[cfg(feature = "proptest")]
+	generate_all_trendflex_tests!(check_trendflex_property);
+
 	generate_all_trendflex_tests!(
 		check_trendflex_partial_params,
 		check_trendflex_accuracy,
