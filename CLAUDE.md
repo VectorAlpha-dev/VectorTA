@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+**Environment Note: You are running in a Windows PowerShell environment via Git Bash. The Bash tool executes Windows commands directly. Use Windows batch files without ./ prefix (e.g., `test_bindings.bat alma` not `./test_bindings.bat alma`).**
+
 **Note: All commands in this file are for Windows environments. Use Command Prompt or PowerShell.**
 
 ## Project Overview

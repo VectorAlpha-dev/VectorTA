@@ -1845,6 +1845,211 @@ pub fn vwmacd_into(
 	}
 }
 
+#[cfg(feature = "python")]
+#[pyfunction(name = "vwmacd")]
+#[pyo3(signature = (close, volume, fast_period=None, slow_period=None, signal_period=None, fast_ma_type=None, slow_ma_type=None, signal_ma_type=None, kernel=None))]
+pub fn vwmacd_py<'py>(
+	py: Python<'py>,
+	close: PyReadonlyArray1<'py, f64>,
+	volume: PyReadonlyArray1<'py, f64>,
+	fast_period: Option<usize>,
+	slow_period: Option<usize>,
+	signal_period: Option<usize>,
+	fast_ma_type: Option<&str>,
+	slow_ma_type: Option<&str>,
+	signal_ma_type: Option<&str>,
+	kernel: Option<&str>,
+) -> PyResult<(
+	Bound<'py, PyArray1<f64>>,
+	Bound<'py, PyArray1<f64>>,
+	Bound<'py, PyArray1<f64>>,
+)> {
+	let close_slice = close.as_slice()?;
+	let volume_slice = volume.as_slice()?;
+	
+	let kern = validate_kernel(kernel, false)?;
+	
+	let params = VwmacdParams {
+		fast_period,
+		slow_period,
+		signal_period,
+		fast_ma_type: fast_ma_type.map(|s| s.to_string()),
+		slow_ma_type: slow_ma_type.map(|s| s.to_string()),
+		signal_ma_type: signal_ma_type.map(|s| s.to_string()),
+	};
+	
+	let input = VwmacdInput::from_slices(close_slice, volume_slice, params);
+	
+	let result = py
+		.allow_threads(|| vwmacd_with_kernel(&input, kern))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	Ok((
+		result.macd.into_pyarray(py),
+		result.signal.into_pyarray(py),
+		result.hist.into_pyarray(py),
+	))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "VwmacdStream")]
+pub struct VwmacdStreamPy {
+	stream: VwmacdStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl VwmacdStreamPy {
+	#[new]
+	#[pyo3(signature = (fast_period=None, slow_period=None, signal_period=None, fast_ma_type=None, slow_ma_type=None, signal_ma_type=None))]
+	fn new(
+		fast_period: Option<usize>,
+		slow_period: Option<usize>,
+		signal_period: Option<usize>,
+		fast_ma_type: Option<&str>,
+		slow_ma_type: Option<&str>,
+		signal_ma_type: Option<&str>,
+	) -> PyResult<Self> {
+		let params = VwmacdParams {
+			fast_period,
+			slow_period,
+			signal_period,
+			fast_ma_type: fast_ma_type.map(|s| s.to_string()),
+			slow_ma_type: slow_ma_type.map(|s| s.to_string()),
+			signal_ma_type: signal_ma_type.map(|s| s.to_string()),
+		};
+		
+		let stream = VwmacdStream::try_new(params)
+			.map_err(|e| PyValueError::new_err(e.to_string()))?;
+		
+		Ok(VwmacdStreamPy { stream })
+	}
+	
+	fn update(&mut self, close: f64, volume: f64) -> (Option<f64>, Option<f64>, Option<f64>) {
+		match self.stream.update(close, volume) {
+			Some((macd, signal, hist)) => (Some(macd), Some(signal), Some(hist)),
+			None => (None, None, None),
+		}
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "vwmacd_batch")]
+#[pyo3(signature = (close, volume, fast_range, slow_range, signal_range, fast_ma_type=None, slow_ma_type=None, signal_ma_type=None, kernel=None))]
+pub fn vwmacd_batch_py<'py>(
+	py: Python<'py>,
+	close: PyReadonlyArray1<'py, f64>,
+	volume: PyReadonlyArray1<'py, f64>,
+	fast_range: (usize, usize, usize),
+	slow_range: (usize, usize, usize),
+	signal_range: (usize, usize, usize),
+	fast_ma_type: Option<&str>,
+	slow_ma_type: Option<&str>,
+	signal_ma_type: Option<&str>,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	let close_slice = close.as_slice()?;
+	let volume_slice = volume.as_slice()?;
+	
+	let sweep = VwmacdBatchRange {
+		fast: fast_range,
+		slow: slow_range,
+		signal: signal_range,
+		fast_ma_type: fast_ma_type.map(|s| s.to_string()).unwrap_or_else(|| "sma".to_string()),
+		slow_ma_type: slow_ma_type.map(|s| s.to_string()).unwrap_or_else(|| "sma".to_string()),
+		signal_ma_type: signal_ma_type.map(|s| s.to_string()).unwrap_or_else(|| "ema".to_string()),
+	};
+	
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = close_slice.len();
+	
+	// Allocate output arrays
+	let macd_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let signal_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let hist_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	
+	let macd_slice = unsafe { macd_arr.as_slice_mut()? };
+	let signal_slice = unsafe { signal_arr.as_slice_mut()? };
+	let hist_slice = unsafe { hist_arr.as_slice_mut()? };
+	
+	let kern = validate_kernel(kernel, true)?;
+	
+	// Compute in parallel
+	let output = py
+		.allow_threads(|| {
+			let kernel = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+			vwmacd_batch_par_slice(
+				close_slice,
+				volume_slice,
+				&sweep,
+				kernel,
+			)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	// Copy output data to pre-allocated arrays
+	// Note: vwmacd_batch_par_slice returns VwmacdBatchOutput with macd, signal, hist
+	// We need to implement batch functions that write directly to slices
+	// For now, let's use the simpler batch function
+	let batch_output = vwmacd_batch_with_kernel(close_slice, volume_slice, &sweep, kern)
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	// Build return dictionary
+	let dict = PyDict::new(py);
+	
+	// The batch output has macd as a single Vec with all results concatenated
+	// We need to reshape it properly
+	dict.set_item("macd", batch_output.macd.into_pyarray(py).reshape((rows, cols))?)?;
+	
+	// For signal and hist, we need to compute them separately or modify the batch function
+	// For now, let's compute them for each parameter combination
+	let mut signal_data = Vec::with_capacity(rows * cols);
+	let mut hist_data = Vec::with_capacity(rows * cols);
+	
+	for params in &combos {
+		let input = VwmacdInput::from_slices(close_slice, volume_slice, params.clone());
+		let result = vwmacd_with_kernel(&input, kern)
+			.map_err(|e| PyValueError::new_err(e.to_string()))?;
+		signal_data.extend_from_slice(&result.signal);
+		hist_data.extend_from_slice(&result.hist);
+	}
+	
+	dict.set_item("signal", signal_data.into_pyarray(py).reshape((rows, cols))?)?;
+	dict.set_item("hist", hist_data.into_pyarray(py).reshape((rows, cols))?)?;
+	
+	// Add parameter arrays
+	dict.set_item(
+		"fast_periods",
+		combos
+			.iter()
+			.map(|p| p.fast_period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+	dict.set_item(
+		"slow_periods",
+		combos
+			.iter()
+			.map(|p| p.slow_period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+	dict.set_item(
+		"signal_periods",
+		combos
+			.iter()
+			.map(|p| p.signal_period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+	
+	Ok(dict.into())
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;

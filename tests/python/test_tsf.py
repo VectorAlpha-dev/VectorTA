@@ -189,7 +189,7 @@ class TestTsf:
         ]
         
         for params in params_list:
-            compare_with_rust('tsf', close, params)
+            compare_with_rust('tsf', close, 'close', params)
 
 
 if __name__ == "__main__":

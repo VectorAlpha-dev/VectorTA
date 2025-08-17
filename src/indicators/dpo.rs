@@ -324,7 +324,7 @@ unsafe fn dpo_simd128(data: &[f64], period: usize, first_val: usize, out: &mut [
 			let result = f64x2_sub(data_vec, f64x2_mul(sum_vec, scale_vec));
 			
 			// Store result
-			v128_store(result, &mut out[i] as *mut f64 as *mut v128);
+			v128_store(&mut out[i] as *mut f64 as *mut v128, result);
 			
 			// Update sum for next iteration
 			if i + STEP < data.len() {

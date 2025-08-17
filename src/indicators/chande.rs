@@ -1774,6 +1774,23 @@ pub fn chande_batch_py<'py>(
 	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
 	let slice_out = unsafe { out_arr.as_slice_mut()? };
 	
+	// Find first valid index in close data
+	let first = close_slice
+		.iter()
+		.position(|&x| !x.is_nan())
+		.unwrap_or(0);
+	
+	// Calculate warmup periods for each row and initialize NaN prefixes
+	let warmup_periods: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
+	
+	// Initialize NaN prefixes for each row
+	for (row_idx, &warmup) in warmup_periods.iter().enumerate() {
+		let row_start = row_idx * cols;
+		for col_idx in 0..warmup.min(cols) {
+			slice_out[row_start + col_idx] = f64::NAN;
+		}
+	}
+	
 	let combos = py
 		.allow_threads(|| {
 			let kernel = match kern {
@@ -1787,7 +1804,7 @@ pub fn chande_batch_py<'py>(
 				_ => unreachable!(),
 			};
 			
-			// Compute directly into pre-allocated buffer without intermediate allocation
+			// Compute directly into pre-allocated buffer with NaN prefixes already initialized
 			chande_batch_inner_into(high_slice, low_slice, close_slice, &sweep, direction, simd, true, slice_out)
 		})
 		.map_err(|e| PyValueError::new_err(e.to_string()))?;

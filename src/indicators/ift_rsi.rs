@@ -177,7 +177,7 @@ impl IftRsiBuilder {
 
 #[derive(Debug, Error)]
 pub enum IftRsiError {
-	#[error("ift_rsi: No data provided.")]
+	#[error("ift_rsi: Input data slice is empty.")]
 	EmptyData,
 	#[error("ift_rsi: All values are NaN.")]
 	AllValuesNaN,
@@ -347,6 +347,12 @@ pub fn ift_rsi_into_slice(
 		});
 	}
 
+	// Initialize dst with NaN for warmup period (matching alma.rs pattern)
+	let warmup_period = rsi_period + wma_period - 1;
+	for v in &mut dst[..warmup_period] {
+		*v = f64::NAN;
+	}
+
 	// Compute into dst
 	match kern {
 		Kernel::Scalar | Kernel::ScalarBatch => {
@@ -363,12 +369,6 @@ pub fn ift_rsi_into_slice(
 			ift_rsi_compute_into(data, rsi_period, wma_period, first, dst)?;
 		}
 		_ => unreachable!(),
-	}
-	
-	// Fill warmup with NaN
-	let warmup_period = first + rsi_period + wma_period - 2;
-	for v in &mut dst[..warmup_period] {
-		*v = f64::NAN;
 	}
 	
 	Ok(())
@@ -608,7 +608,7 @@ fn ift_rsi_batch_inner(
 	// Calculate warmup periods for each parameter combination
 	let warmup_periods: Vec<usize> = combos
 		.iter()
-		.map(|c| first + c.rsi_period.unwrap() + c.wma_period.unwrap() - 2)
+		.map(|c| c.rsi_period.unwrap() + c.wma_period.unwrap() - 1)
 		.collect();
 	
 	// Use uninitialized memory with proper NaN prefixes
@@ -702,6 +702,15 @@ fn ift_rsi_batch_inner_into(
 	let rows = combos.len();
 	let cols = data.len();
 
+	// Initialize NaN prefixes for each row based on warmup period
+	for (row, combo) in combos.iter().enumerate() {
+		let warmup = combo.rsi_period.unwrap() + combo.wma_period.unwrap() - 1;
+		let row_start = row * cols;
+		for i in 0..warmup.min(cols) {
+			out[row_start + i] = f64::NAN;
+		}
+	}
+
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let rsi_p = combos[row].rsi_period.unwrap();
 		let wma_p = combos[row].wma_period.unwrap();
@@ -740,6 +749,7 @@ fn ift_rsi_batch_inner_into(
 
 #[inline(always)]
 unsafe fn ift_rsi_row_scalar(data: &[f64], first: usize, rsi_period: usize, wma_period: usize, out: &mut [f64]) {
+	// Compute on data starting from first valid value
 	let sliced = &data[first..];
 	let mut rsi_values = match rsi(&RsiInput::from_slice(
 		sliced,
@@ -768,11 +778,15 @@ unsafe fn ift_rsi_row_scalar(data: &[f64], first: usize, rsi_period: usize, wma_
 			return;
 		}
 	};
+	// Write to the output row, accounting for the offset
+	// The warmup period has already been initialized with NaN by init_matrix_prefixes
 	for (i, &w) in wma_values.iter().enumerate() {
 		if !w.is_nan() {
 			let two_w = 2.0 * w;
 			let numerator = two_w * two_w - 1.0;
 			let denominator = two_w * two_w + 1.0;
+			// Write at position first + i in the output row
+			// (out is already a row slice, so we write directly at the correct index)
 			out[first + i] = numerator / denominator;
 		}
 	}
@@ -830,42 +844,92 @@ impl IftRsiStream {
 		Ok(Self {
 			rsi_period,
 			wma_period,
-			rsi_buf: vec![f64::NAN; rsi_period],
+			rsi_buf: vec![f64::NAN; rsi_period + 1],  // Need +1 for RSI to calculate differences
 			wma_buf: vec![f64::NAN; wma_period],
 			head: 0,
 			filled: false,
 		})
 	}
 	pub fn update(&mut self, value: f64) -> Option<f64> {
-		self.rsi_buf[self.head % self.rsi_period] = value;
+		// Store value in circular buffer (using rsi_period + 1 size)
+		self.rsi_buf[self.head % (self.rsi_period + 1)] = value;
 		self.head += 1;
-		if self.head < self.rsi_period {
+		
+		// Need at least rsi_period + 1 values before we can calculate RSI (for differences)
+		if self.head <= self.rsi_period {
 			return None;
 		}
-		let rsi_slice = &self.rsi_buf;
-		let rsi_val = match rsi(&RsiInput::from_slice(
-			rsi_slice,
-			RsiParams {
-				period: Some(self.rsi_period),
-			},
-		)) {
-			Ok(res) => res.values.last().cloned().unwrap_or(f64::NAN),
-			Err(_) => return None,
+		
+		// For the first rsi_period + 1 values, we need to use a growing slice
+		// After that, we use the circular buffer
+		let rsi_val = if self.head == self.rsi_period + 1 && !self.filled {
+			// First time we have enough data - buffer is now full of real values
+			self.filled = true;
+			match rsi(&RsiInput::from_slice(
+				&self.rsi_buf[0..=self.rsi_period],
+				RsiParams {
+					period: Some(self.rsi_period),
+				},
+			)) {
+				Ok(res) => res.values.last().cloned().unwrap_or(f64::NAN),
+				Err(_) => return None,
+			}
+		} else if self.filled {
+			// Circular buffer is full, calculate RSI on the reordered buffer
+			let mut ordered = vec![0.0; self.rsi_period + 1];
+			let start = self.head % (self.rsi_period + 1);
+			for i in 0..(self.rsi_period + 1) {
+				ordered[i] = self.rsi_buf[(start + i) % (self.rsi_period + 1)];
+			}
+			match rsi(&RsiInput::from_slice(
+				&ordered,
+				RsiParams {
+					period: Some(self.rsi_period),
+				},
+			)) {
+				Ok(res) => res.values.last().cloned().unwrap_or(f64::NAN),
+				Err(_) => return None,
+			}
+		} else {
+			return None;
 		};
+		
 		let v1 = 0.1 * (rsi_val - 50.0);
-		self.wma_buf[(self.head - self.rsi_period) % self.wma_period] = v1;
-		if self.head < self.rsi_period + self.wma_period - 1 {
+		let wma_idx = (self.head - self.rsi_period - 1) % self.wma_period;
+		self.wma_buf[wma_idx] = v1;
+		
+		if self.head < self.rsi_period + self.wma_period {
 			return None;
 		}
-		let wma_slice = &self.wma_buf;
-		let wma_val = match wma(&WmaInput::from_slice(
-			wma_slice,
-			WmaParams {
-				period: Some(self.wma_period),
-			},
-		)) {
-			Ok(res) => res.values.last().cloned().unwrap_or(f64::NAN),
-			Err(_) => return None,
+		
+		// Similar logic for WMA buffer - reorder if needed
+		let wma_val = if self.head == self.rsi_period + self.wma_period {
+			// First time we have enough data for WMA
+			match wma(&WmaInput::from_slice(
+				&self.wma_buf,
+				WmaParams {
+					period: Some(self.wma_period),
+				},
+			)) {
+				Ok(res) => res.values.last().cloned().unwrap_or(f64::NAN),
+				Err(_) => return None,
+			}
+		} else {
+			// Reorder circular buffer for WMA calculation
+			let mut ordered = vec![0.0; self.wma_period];
+			let start = (wma_idx + 1) % self.wma_period;
+			for i in 0..self.wma_period {
+				ordered[i] = self.wma_buf[(start + i) % self.wma_period];
+			}
+			match wma(&WmaInput::from_slice(
+				&ordered,
+				WmaParams {
+					period: Some(self.wma_period),
+				},
+			)) {
+				Ok(res) => res.values.last().cloned().unwrap_or(f64::NAN),
+				Err(_) => return None,
+			}
 		};
 		if wma_val.is_nan() {
 			None
@@ -1681,7 +1745,7 @@ pub fn ift_rsi_into(
 	wma_period: usize,
 ) -> Result<(), JsValue> {
 	if in_ptr.is_null() || out_ptr.is_null() {
-		return Err(JsValue::from_str("Null pointer provided"));
+		return Err(JsValue::from_str("null pointer passed to ift_rsi_into"));
 	}
 	
 	unsafe {

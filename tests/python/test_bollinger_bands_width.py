@@ -296,7 +296,8 @@ class TestBollingerBandsWidth:
                 assert len(result) == 100
             except ValueError as e:
                 # Some kernels might not be supported on this platform
-                assert "not supported" in str(e) or "Unsupported" in str(e)
+                assert ("not supported" in str(e) or "Unsupported" in str(e) or 
+                        "not compiled" in str(e))
     
     def test_edge_cases(self):
         """Test edge cases for BBW."""

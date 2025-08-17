@@ -134,7 +134,7 @@ test('Aroon empty input', () => {
     
     assert.throws(() => {
         wasm.aroon_js(empty, empty, 14);
-    }, /Invalid length/);
+    }, /Input data slice is empty/);
 });
 
 test('Aroon mismatched lengths', () => {

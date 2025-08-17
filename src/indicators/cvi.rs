@@ -47,8 +47,6 @@ use thiserror::Error;
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
-#[cfg(feature = "proptest")]
-use proptest::prelude::*;
 
 impl<'a> AsRef<[f64]> for CviInput<'a> {
 	#[inline(always)]
@@ -997,7 +995,7 @@ mod tests {
 		check_cvi_no_poison
 	);
 
-	#[cfg(feature = "proptest")]
+	#[cfg(test)]
 	generate_all_cvi_tests!(check_cvi_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
@@ -1106,7 +1104,7 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 	
-	#[cfg(feature = "proptest")]
+	#[cfg(test)]
 	#[allow(clippy::float_cmp)]
 	fn check_cvi_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		use proptest::prelude::*;

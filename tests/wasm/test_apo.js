@@ -405,22 +405,30 @@ test('APO fast API - basic operation', () => {
     const data = new Float64Array(testData.close);
     const len = data.length;
     
-    // Allocate memory
+    // Allocate memory for input and output
+    const inPtr = wasm.apo_alloc(len);
     const outPtr = wasm.apo_alloc(len);
-    assert(outPtr !== 0, 'Failed to allocate memory');
+    assert(inPtr !== 0, 'Failed to allocate input memory');
+    assert(outPtr !== 0, 'Failed to allocate output memory');
     
     try {
-        // Compute using fast API
-        wasm.apo_into(data, outPtr, len, 10, 20);
+        // Copy data to WASM memory
+        const inView = new Float64Array(wasm.__wasm.memory.buffer, inPtr, len);
+        inView.set(data);
         
-        // Read results back
-        const result = new Float64Array(wasm.memory.buffer, outPtr, len);
+        // Compute using fast API
+        wasm.apo_into(inPtr, outPtr, len, 10, 20);
+        
+        // Read results back (convert to array for comparison)
+        const resultView = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
+        const result = Array.from(resultView);
         
         // Compare with safe API
         const safeResult = wasm.apo_js(data, 10, 20);
         assertArrayClose(result, safeResult, 1e-10, "Fast API vs safe API mismatch");
     } finally {
         // Always free memory
+        wasm.apo_free(inPtr, len);
         wasm.apo_free(outPtr, len);
     }
 });
@@ -438,15 +446,19 @@ test('APO fast API - in-place operation (aliasing)', () => {
     
     try {
         // Copy data to WASM memory
-        const wasmData = new Float64Array(wasm.memory.buffer, ptr, len);
+        const wasmData = new Float64Array(wasm.__wasm.memory.buffer, ptr, len);
         wasmData.set(data);
         
         // Compute in-place (input and output are the same)
         wasm.apo_into(ptr, ptr, len, 10, 20);
         
+        // Re-create view after computation (memory might have changed)
+        const resultView = new Float64Array(wasm.__wasm.memory.buffer, ptr, len);
+        const result = Array.from(resultView);
+        
         // Compare with safe API result
         const expectedResult = wasm.apo_js(originalData, 10, 20);
-        assertArrayClose(wasmData, expectedResult, 1e-10, "In-place operation mismatch");
+        assertArrayClose(result, expectedResult, 1e-10, "In-place operation mismatch");
     } finally {
         wasm.apo_free(ptr, len);
     }
@@ -462,16 +474,23 @@ test('APO fast API - error handling', () => {
     }, /Null pointer/);
     
     // Test with invalid parameters
+    const inPtr = wasm.apo_alloc(len);
     const outPtr = wasm.apo_alloc(len);
+    
     try {
+        // Copy data to WASM memory
+        const inView = new Float64Array(wasm.__wasm.memory.buffer, inPtr, len);
+        inView.set(data);
+        
         assert.throws(() => {
-            wasm.apo_into(data, outPtr, len, 0, 20);
+            wasm.apo_into(inPtr, outPtr, len, 0, 20);
         }, /Invalid period/);
         
         assert.throws(() => {
-            wasm.apo_into(data, outPtr, len, 20, 10);
+            wasm.apo_into(inPtr, outPtr, len, 20, 10);
         }, /short_period not less than long_period/);
     } finally {
+        wasm.apo_free(inPtr, len);
         wasm.apo_free(outPtr, len);
     }
 });
@@ -484,7 +503,7 @@ test('APO fast API - memory management', () => {
         assert(ptr !== 0, `Failed to allocate ${size} elements`);
         
         // Verify we can write to the memory
-        const mem = new Float64Array(wasm.memory.buffer, ptr, size);
+        const mem = new Float64Array(wasm.__wasm.memory.buffer, ptr, size);
         mem[0] = 42.0;
         mem[size - 1] = 99.0;
         assert.strictEqual(mem[0], 42.0);

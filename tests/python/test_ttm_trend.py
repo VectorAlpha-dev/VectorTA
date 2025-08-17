@@ -8,15 +8,15 @@ import sys
 from pathlib import Path
 
 try:
-    import my_project as ta_indicators
+    import my_project as ta
 except ImportError:
     # If not in virtual environment, try to import from installed location
     try:
-        import my_project as ta_indicators
+        import my_project as ta
     except ImportError:
         pytest.skip("Python module not built. Run 'maturin develop --features python' first", allow_module_level=True)
 
-from test_utils import load_test_data, assert_close, generate_candle_source_data
+from test_utils import load_test_data, assert_close
 
 
 class TestTtmTrend:
@@ -33,7 +33,7 @@ class TestTtmTrend:
         hl2 = (high + low) / 2.0
         
         # Test with default period (None -> 5)
-        result = ta_indicators.ttm_trend(hl2, close, period=5)
+        result = ta.ttm_trend(hl2, close, period=5)
         assert len(result) == len(close)
         assert result.dtype == np.bool_
     
@@ -45,7 +45,7 @@ class TestTtmTrend:
         close = test_data['close']
         hl2 = (high + low) / 2.0
         
-        result = ta_indicators.ttm_trend(hl2, close, period=5)
+        result = ta.ttm_trend(hl2, close, period=5)
         
         assert len(result) == len(close)
         
@@ -59,7 +59,7 @@ class TestTtmTrend:
         close = np.array([12.0, 22.0, 32.0])
         
         with pytest.raises(ValueError, match="Invalid period"):
-            ta_indicators.ttm_trend(src, close, period=0)
+            ta.ttm_trend(src, close, period=0)
     
     def test_ttm_trend_period_exceeds_length(self):
         """Test TTM Trend fails when period exceeds data length - mirrors check_ttm_period_exceeds_length"""
@@ -67,7 +67,7 @@ class TestTtmTrend:
         close = np.array([1.0, 2.0, 3.0])
         
         with pytest.raises(ValueError, match="Invalid period"):
-            ta_indicators.ttm_trend(src, close, period=10)
+            ta.ttm_trend(src, close, period=10)
     
     def test_ttm_trend_very_small_dataset(self):
         """Test TTM Trend fails with insufficient data - mirrors check_ttm_very_small_dataset"""
@@ -75,7 +75,7 @@ class TestTtmTrend:
         close = np.array([43.0])
         
         with pytest.raises(ValueError, match="Invalid period|Not enough valid data"):
-            ta_indicators.ttm_trend(src, close, period=5)
+            ta.ttm_trend(src, close, period=5)
     
     def test_ttm_trend_all_nan(self):
         """Test TTM Trend fails with all NaN values - mirrors check_ttm_all_nan"""
@@ -83,14 +83,14 @@ class TestTtmTrend:
         close = np.array([np.nan, np.nan, np.nan])
         
         with pytest.raises(ValueError, match="All values are NaN"):
-            ta_indicators.ttm_trend(src, close, period=5)
+            ta.ttm_trend(src, close, period=5)
     
     def test_ttm_trend_empty_input(self):
         """Test TTM Trend fails with empty input"""
         empty = np.array([])
         
         with pytest.raises(ValueError):
-            ta_indicators.ttm_trend(empty, empty, period=5)
+            ta.ttm_trend(empty, empty, period=5)
     
     def test_ttm_trend_mismatched_lengths(self):
         """Test TTM Trend handles mismatched input lengths"""
@@ -98,7 +98,7 @@ class TestTtmTrend:
         close = np.array([1.0, 2.0, 3.0])  # Shorter
         
         # Should use the minimum length
-        result = ta_indicators.ttm_trend(src, close, period=2)
+        result = ta.ttm_trend(src, close, period=2)
         assert len(result) == len(close)
     
     def test_ttm_trend_streaming(self, test_data):
@@ -112,10 +112,10 @@ class TestTtmTrend:
         period = 5
         
         # Batch calculation
-        batch_result = ta_indicators.ttm_trend(hl2, close, period=period)
+        batch_result = ta.ttm_trend(hl2, close, period=period)
         
         # Streaming calculation
-        stream = ta_indicators.TtmTrendStream(period=period)
+        stream = ta.TtmTrendStream(period=period)
         stream_values = []
         
         for i in range(len(close)):
@@ -137,14 +137,14 @@ class TestTtmTrend:
         hl2 = (high + low) / 2.0
         
         # Single period batch
-        batch_result = ta_indicators.ttm_trend_batch(
+        batch_result = ta.ttm_trend_batch(
             hl2,
             close,
             period_range=(5, 5, 0)  # Only period 5
         )
         
         # Should match single calculation
-        single_result = ta_indicators.ttm_trend(hl2, close, period=5)
+        single_result = ta.ttm_trend(hl2, close, period=5)
         
         assert batch_result['values'].shape[0] == 1  # 1 row
         assert batch_result['values'].shape[1] == len(close)  # n columns
@@ -160,7 +160,7 @@ class TestTtmTrend:
         hl2 = (high + low) / 2.0
         
         # Multiple periods: 5, 10, 15
-        batch_result = ta_indicators.ttm_trend_batch(
+        batch_result = ta.ttm_trend_batch(
             hl2,
             close,
             period_range=(5, 15, 5)
@@ -174,7 +174,7 @@ class TestTtmTrend:
         # Verify each row matches individual calculation
         periods = [5, 10, 15]
         for i, period in enumerate(periods):
-            single_result = ta_indicators.ttm_trend(hl2, close, period=period)
+            single_result = ta.ttm_trend(hl2, close, period=period)
             assert np.array_equal(batch_result['values'][i], single_result)
     
     def test_ttm_trend_batch_invalid_range(self):
@@ -184,7 +184,7 @@ class TestTtmTrend:
         
         # Period range that would exceed data length
         with pytest.raises(ValueError):
-            ta_indicators.ttm_trend_batch(
+            ta.ttm_trend_batch(
                 src,
                 close,
                 period_range=(10, 20, 5)  # All periods exceed data length
@@ -199,8 +199,8 @@ class TestTtmTrend:
         hl2 = (high + low) / 2.0
         
         # Test with different kernels
-        result_auto = ta_indicators.ttm_trend(hl2, close, period=5, kernel=None)
-        result_scalar = ta_indicators.ttm_trend(hl2, close, period=5, kernel="scalar")
+        result_auto = ta.ttm_trend(hl2, close, period=5, kernel=None)
+        result_scalar = ta.ttm_trend(hl2, close, period=5, kernel="scalar")
         
         # Results should be identical regardless of kernel
         assert np.array_equal(result_auto, result_scalar)
@@ -214,14 +214,14 @@ class TestTtmTrend:
         hl2 = (high + low) / 2.0
         
         # Test batch with kernel
-        result_auto = ta_indicators.ttm_trend_batch(
+        result_auto = ta.ttm_trend_batch(
             hl2,
             close,
             period_range=(5, 10, 5),
             kernel=None
         )
         
-        result_scalar = ta_indicators.ttm_trend_batch(
+        result_scalar = ta.ttm_trend_batch(
             hl2,
             close,
             period_range=(5, 10, 5),

@@ -4,7 +4,7 @@ Tests for the GatorOsc indicator Python bindings.
 
 import pytest
 import numpy as np
-import rust_backtester as ta
+import my_project as ta
 
 def test_gatorosc_basic():
     """Test basic GatorOsc calculation."""

@@ -1,15 +1,11 @@
 import numpy as np
 import pytest
-import rust_backtester as ta
-from .utils import (
-    generate_random_data,
-    assert_valid_output,
-    assert_warmup_period,
-    compare_with_reference,
-    check_edge_cases,
-    validate_batch_output,
-    check_streaming_consistency,
-    create_candle_data
+import my_project as ta
+from test_utils import (
+    load_test_data,
+    assert_close,
+    assert_all_nan,
+    assert_no_nan
 )
 
 
@@ -29,13 +25,14 @@ class TestDTI:
         
     def test_dti_with_real_data(self):
         """Test DTI with realistic market data"""
-        candles = create_candle_data(1000)
-        high = candles['high']
-        low = candles['low']
+        test_data = load_test_data()
+        high = test_data['high'][:1000]
+        low = test_data['low'][:1000]
         
         result = ta.dti(high, low, r=14, s=10, u=5)
         
-        assert_valid_output(result)
+        assert isinstance(result, np.ndarray)
+        assert len(result) == len(high)
         # DTI should be bounded between -100 and 100
         valid_values = result[~np.isnan(result)]
         assert np.all(valid_values >= -100.0)
@@ -123,7 +120,8 @@ class TestDTI:
         
         for r, s, u in params:
             result = ta.dti(high, low, r=r, s=s, u=u)
-            assert_valid_output(result)
+            assert isinstance(result, np.ndarray)
+        assert len(result) == len(high)
             
     def test_dti_batch_single_param(self):
         """Test DTI batch calculation with single parameter set"""
@@ -137,7 +135,8 @@ class TestDTI:
             u_range=(5, 5, 0)
         )
         
-        validate_batch_output(result, expected_rows=1, expected_cols=len(high))
+        # Validate batch output shape
+        assert result.shape == (1, len(high))
         
         # Should match single calculation
         single_result = ta.dti(high, low, r=14, s=10, u=5)
@@ -158,7 +157,8 @@ class TestDTI:
         )
         
         # Should have 3 * 3 * 3 = 27 combinations
-        validate_batch_output(result, expected_rows=27, expected_cols=len(high))
+        # Validate batch output shape
+        assert result.shape == (27, len(high))
         
         # Check parameter arrays
         assert 'r_values' in result
@@ -187,7 +187,8 @@ class TestDTI:
         # Compare with batch calculation
         batch_result = ta.dti(high, low, r=14, s=10, u=5)
         
-        check_streaming_consistency(stream_results, batch_result)
+        # Check streaming consistency with batch
+        assert_close(stream_results[-50:], batch_result[-50:], rtol=1e-10)
         
     def test_dti_kernel_parameter(self):
         """Test DTI with different kernel parameters"""

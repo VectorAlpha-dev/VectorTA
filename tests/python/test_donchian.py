@@ -5,7 +5,7 @@ These tests verify that Python bindings correctly wrap the Rust implementation.
 
 import pytest
 import numpy as np
-from test_utils import load_test_data, assert_close, get_expected_output
+from test_utils import load_test_data, assert_close
 
 # Import from the Rust module
 try:
@@ -61,16 +61,15 @@ def test_donchian_with_real_data():
     assert not np.isnan(upper[period-1])
     
     # Verify last values match expected
-    expected = get_expected_output('donchian')
-    if expected:
-        expected_upper = expected.get('upper_last5', [61290.0, 61290.0, 61290.0, 61290.0, 61290.0])
-        expected_middle = expected.get('middle_last5', [59583.0, 59583.0, 59583.0, 59583.0, 59583.0])
-        expected_lower = expected.get('lower_last5', [57876.0, 57876.0, 57876.0, 57876.0, 57876.0])
-        
-        for i in range(5):
-            assert_close(upper[-5+i], expected_upper[i], tol=0.1)
-            assert_close(middle[-5+i], expected_middle[i], tol=0.1)
-            assert_close(lower[-5+i], expected_lower[i], tol=0.1)
+    # Expected values from Rust implementation
+    expected_upper = [61290.0, 61290.0, 61290.0, 61290.0, 61290.0]
+    expected_middle = [59583.0, 59583.0, 59583.0, 59583.0, 59583.0]
+    expected_lower = [57876.0, 57876.0, 57876.0, 57876.0, 57876.0]
+    
+    for i in range(5):
+        assert_close(upper[-5+i], expected_upper[i], tol=0.1)
+        assert_close(middle[-5+i], expected_middle[i], tol=0.1)
+        assert_close(lower[-5+i], expected_lower[i], tol=0.1)
 
 
 def test_donchian_with_kernels():

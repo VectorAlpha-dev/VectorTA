@@ -1022,17 +1022,71 @@ fn mab_batch_inner_into(
 		});
 	}
 
-	// Split the output slices into chunks for parallel processing
-	let upper_chunks = upper_out.par_chunks_mut(cols);
-	let middle_chunks = middle_out.par_chunks_mut(cols);
-	let lower_chunks = lower_out.par_chunks_mut(cols);
+	// Process either in parallel or sequentially based on the parallel flag and target
+	#[cfg(not(target_arch = "wasm32"))]
+	{
+		if parallel {
+			// Split the output slices into chunks for parallel processing
+			let upper_chunks = upper_out.par_chunks_mut(cols);
+			let middle_chunks = middle_out.par_chunks_mut(cols);
+			let lower_chunks = lower_out.par_chunks_mut(cols);
 
-	// Process in parallel
-	upper_chunks
-		.zip(middle_chunks)
-		.zip(lower_chunks)
-		.enumerate()
-		.for_each(|(row, ((upper_row, middle_row), lower_row))| {
+			// Process in parallel
+			upper_chunks
+				.zip(middle_chunks)
+				.zip(lower_chunks)
+				.enumerate()
+				.for_each(|(row, ((upper_row, middle_row), lower_row))| {
+					let params = &combos[row];
+					let mab_params = MabParams {
+						fast_period: params.fast_period,
+						slow_period: params.slow_period,
+						devup: params.devup,
+						devdn: params.devdn,
+						fast_ma_type: params.fast_ma_type.clone(),
+						slow_ma_type: params.slow_ma_type.clone(),
+					};
+					let mab_input = MabInput::from_slice(input, mab_params);
+
+					// Process this row
+					if let Ok(output) = mab_with_kernel(&mab_input, kernel) {
+						upper_row.copy_from_slice(&output.upperband);
+						middle_row.copy_from_slice(&output.middleband);
+						lower_row.copy_from_slice(&output.lowerband);
+					}
+				});
+		} else {
+			// Sequential processing
+			for row in 0..rows {
+				let start = row * cols;
+				let end = start + cols;
+				let params = &combos[row];
+				let mab_params = MabParams {
+					fast_period: params.fast_period,
+					slow_period: params.slow_period,
+					devup: params.devup,
+					devdn: params.devdn,
+					fast_ma_type: params.fast_ma_type.clone(),
+					slow_ma_type: params.slow_ma_type.clone(),
+				};
+				let mab_input = MabInput::from_slice(input, mab_params);
+
+				// Process this row
+				if let Ok(output) = mab_with_kernel(&mab_input, kernel) {
+					upper_out[start..end].copy_from_slice(&output.upperband);
+					middle_out[start..end].copy_from_slice(&output.middleband);
+					lower_out[start..end].copy_from_slice(&output.lowerband);
+				}
+			}
+		}
+	}
+	
+	#[cfg(target_arch = "wasm32")]
+	{
+		// WASM doesn't support parallel processing
+		for row in 0..rows {
+			let start = row * cols;
+			let end = start + cols;
 			let params = &combos[row];
 			let mab_params = MabParams {
 				fast_period: params.fast_period,
@@ -1046,11 +1100,12 @@ fn mab_batch_inner_into(
 
 			// Process this row
 			if let Ok(output) = mab_with_kernel(&mab_input, kernel) {
-				upper_row.copy_from_slice(&output.upperband);
-				middle_row.copy_from_slice(&output.middleband);
-				lower_row.copy_from_slice(&output.lowerband);
+				upper_out[start..end].copy_from_slice(&output.upperband);
+				middle_out[start..end].copy_from_slice(&output.middleband);
+				lower_out[start..end].copy_from_slice(&output.lowerband);
 			}
-		});
+		}
+	}
 
 	Ok(combos)
 }

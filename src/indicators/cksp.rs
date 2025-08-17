@@ -2528,6 +2528,28 @@ pub fn cksp_batch_py<'py>(
 	let long_slice = unsafe { long_arr.as_slice_mut()? };
 	let short_slice = unsafe { short_arr.as_slice_mut()? };
 	
+	// Find first valid index
+	let first = close_slice
+		.iter()
+		.position(|&x| !x.is_nan())
+		.unwrap_or(0);
+	
+	// Calculate warmup periods for each row and initialize NaN prefixes
+	let warmup_periods: Vec<usize> = combos.iter().map(|c| {
+		let atr_period = c.p.unwrap();
+		let rolling_period = c.q.unwrap();
+		first + atr_period.max(rolling_period)
+	}).collect();
+	
+	// Initialize NaN prefixes for both arrays
+	for (row_idx, &warmup) in warmup_periods.iter().enumerate() {
+		let row_start = row_idx * cols;
+		for col_idx in 0..warmup.min(cols) {
+			long_slice[row_start + col_idx] = f64::NAN;
+			short_slice[row_start + col_idx] = f64::NAN;
+		}
+	}
+	
 	// Compute without GIL
 	let combos = py.allow_threads(|| {
 		// Handle kernel selection for batch operations

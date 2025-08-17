@@ -1833,6 +1833,25 @@ pub fn kvo_batch_py<'py>(
 	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
 	let slice_out = unsafe { out_arr.as_slice_mut()? };
 	
+	// Find first valid index
+	let first = close_slice
+		.iter()
+		.position(|&x| !x.is_nan())
+		.unwrap_or(0);
+	
+	// Calculate warmup periods for each row and initialize NaN prefixes
+	let warmup_periods: Vec<usize> = combos.iter().map(|c| {
+		first + c.long_period.unwrap() - 1
+	}).collect();
+	
+	// Initialize NaN prefixes
+	for (row_idx, &warmup) in warmup_periods.iter().enumerate() {
+		let row_start = row_idx * cols;
+		for col_idx in 0..warmup.min(cols) {
+			slice_out[row_start + col_idx] = f64::NAN;
+		}
+	}
+	
 	let kern = validate_kernel(kernel, true)?;
 	let combos = py.allow_threads(|| {
 		let kernel = match kern {

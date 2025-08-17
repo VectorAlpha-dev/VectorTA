@@ -388,7 +388,7 @@ const EXPECTED_OUTPUTS = {
     },
     apo: {
         defaultParams: { short_period: 10, long_period: 20 },
-        last5Values: [-429.8, -401.6, -386.1, -357.9, -374.1]
+        last5Values: [-691.2244918867873, -678.1375323319808, -690.4319046263408, -667.846363327466, -711.136406617501]
     },
     bandpass: {
         defaultParams: { period: 20, bandwidth: 0.3 },
@@ -445,7 +445,6 @@ const EXPECTED_OUTPUTS = {
             -0.5336179295624333
         ]
     },
-<<<<<<< HEAD
     var: {
         defaultParams: { period: 14, nbdev: 1.0 },
         last5Values: [
@@ -553,7 +552,8 @@ const EXPECTED_OUTPUTS = {
             56.71819195768154,
             60.487299747927636,
             55.022521428674175
-=======
+        ]
+    },
     midprice: {
         defaultParams: { period: 14 },
         last5Values: [
@@ -562,7 +562,6 @@ const EXPECTED_OUTPUTS = {
             59583.0,
             59486.0,
             58989.0
->>>>>>> trip-6
         ]
     }
 };

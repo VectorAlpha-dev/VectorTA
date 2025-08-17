@@ -46,8 +46,6 @@ use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
-#[cfg(feature = "proptest")]
-use proptest::prelude::*;
 
 // --- Input Data Abstractions ---
 #[derive(Debug, Clone)]
@@ -1258,7 +1256,7 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 
-	#[cfg(feature = "proptest")]
+	#[cfg(test)]
 	fn check_midprice_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		use proptest::prelude::*;
 		skip_if_unsupported!(kernel, test_name);
@@ -1585,7 +1583,7 @@ mod tests {
 		check_midprice_no_poison
 	);
 
-	#[cfg(feature = "proptest")]
+	#[cfg(test)]
 	generate_all_midprice_tests!(check_midprice_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {

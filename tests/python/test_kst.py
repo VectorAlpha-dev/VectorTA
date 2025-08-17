@@ -146,8 +146,8 @@ class TestKst:
         """Test KST streaming functionality"""
         close = test_data['close']
         
-        # Create stream with default params
-        stream = ta_indicators.KstStream()
+        # Create stream with default params (all None)
+        stream = ta_indicators.KstStream(None, None, None, None, None, None, None, None, None)
         
         # Process values one by one
         stream_results = []

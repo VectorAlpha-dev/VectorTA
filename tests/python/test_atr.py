@@ -240,7 +240,7 @@ class TestAtr:
         # Should have 3 combinations
         assert values.shape[0] == 3
         assert len(lengths) == 3
-        assert lengths == [10, 15, 20]
+        assert list(lengths) == [10, 15, 20]
 
     def test_atr_error_coverage(self, test_data):
         """Test all error enum variants are covered."""

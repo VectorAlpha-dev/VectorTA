@@ -971,11 +971,6 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(vidya_batch_py, m)?)?;
 	m.add_class::<VidyaStreamPy>()?;
 	
-	// Register VWMACD functions with their user-facing names
-	m.add_function(wrap_pyfunction!(vwmacd_py, m)?)?;
-	m.add_function(wrap_pyfunction!(vwmacd_batch_py, m)?)?;
-	m.add_class::<VwmacdStreamPy>()?;
-
 	// Register WILLR functions with their user-facing names
 	m.add_function(wrap_pyfunction!(willr_py, m)?)?;
 	m.add_function(wrap_pyfunction!(willr_batch_py, m)?)?;

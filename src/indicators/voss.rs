@@ -446,8 +446,8 @@ unsafe fn voss_simd128(
 			let voss_val1 = if idx1 >= first && !voss[idx1].is_nan() { voss[idx1] } else { 0.0 };
 			let voss_val2 = if idx2 >= first && !voss[idx2].is_nan() { voss[idx2] } else { 0.0 };
 			
-			let v1 = v128_load64_splat(&voss_val1);
-			let v2 = v128_load64_splat(&voss_val2);
+			let v1 = v128_load64_splat(&voss_val1 as *const f64 as *const u64);
+			let v2 = v128_load64_splat(&voss_val2 as *const f64 as *const u64);
 			let vals = f64x2_replace_lane::<1>(v1, f64x2_extract_lane::<0>(v2));
 			
 			let w1 = (j * 2 + 1) as f64 * inv_order;

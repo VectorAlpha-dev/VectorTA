@@ -113,7 +113,7 @@ class TestIftRsi:
         """Test IFT RSI fails with empty input"""
         empty = np.array([])
         
-        with pytest.raises(ValueError, match="Empty"):
+        with pytest.raises(ValueError, match="Input data slice is empty"):
             ta_indicators.ift_rsi(empty, 5, 9)
     
     def test_ift_rsi_all_nan_input(self):

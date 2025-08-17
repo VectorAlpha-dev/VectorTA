@@ -12,7 +12,7 @@ Tests cover:
 import pytest
 import numpy as np
 from numpy.testing import assert_allclose, assert_array_equal
-import rust_backtester as ta
+import my_project as ta
 
 
 class TestMFI:

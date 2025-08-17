@@ -46,8 +46,6 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use thiserror::Error;
-#[cfg(feature = "proptest")]
-use proptest::prelude::*;
 
 #[derive(Debug, Clone)]
 pub enum EriData<'a> {
@@ -909,11 +907,27 @@ pub fn eri_batch_py<'py>(
 	let bear_array: Bound<'py, PyArray1<f64>> =
 		unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
 
-	// 3. Get mutable slices from arrays and initialize NaN prefixes
+	// 3. Get mutable slices from arrays
 	let bull_slice = unsafe { bull_array.as_slice_mut()? };
 	let bear_slice = unsafe { bear_array.as_slice_mut()? };
 	
-	// Initialize NaN prefixes based on warmup periods
+	// Find first valid index
+	let first = source_slice
+		.iter()
+		.position(|&x| !x.is_nan())
+		.unwrap_or(0);
+	
+	// Calculate warmup periods for each row and initialize NaN prefixes
+	let warmup_periods: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
+	
+	// Initialize NaN prefixes for both arrays
+	for (row_idx, &warmup) in warmup_periods.iter().enumerate() {
+		let row_start = row_idx * cols;
+		for col_idx in 0..warmup.min(cols) {
+			bull_slice[row_start + col_idx] = f64::NAN;
+			bear_slice[row_start + col_idx] = f64::NAN;
+		}
+	}
 	let first_valid = high_slice.iter()
 		.zip(low_slice.iter())
 		.zip(source_slice.iter())
@@ -1694,7 +1708,7 @@ mod tests {
 		check_eri_no_poison
 	);
 
-	#[cfg(feature = "proptest")]
+	#[cfg(test)]
 	generate_all_eri_tests!(check_eri_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
@@ -1894,7 +1908,7 @@ mod tests {
 		Ok(())
 	}
 
-	#[cfg(feature = "proptest")]
+	#[cfg(test)]
 	#[allow(clippy::float_cmp)]
 	fn check_eri_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		use proptest::prelude::*;

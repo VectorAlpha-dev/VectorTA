@@ -145,7 +145,7 @@ test('IFT RSI empty input', () => {
     
     assert.throws(() => {
         wasm.ift_rsi_js(empty, 5, 9);
-    }, /Empty/);
+    }, /Input data slice is empty/);
 });
 
 test('IFT RSI all NaN input', () => {
@@ -168,21 +168,24 @@ test('IFT RSI fast API (in-place)', () => {
     
     try {
         // Copy data to allocated memory
-        const mem = new Float64Array(wasm.memory.buffer, ptr, len);
+        const mem = new Float64Array(wasm.__wasm.memory.buffer, ptr, len);
         mem.set(close);
         
         // Perform in-place operation (input and output are the same)
         wasm.ift_rsi_into(ptr, ptr, len, 5, 9);
         
+        // Recreate view in case memory grew during operation
+        const mem2 = new Float64Array(wasm.__wasm.memory.buffer, ptr, len);
+        
         // Check result
-        assert.strictEqual(mem.length, len);
+        assert.strictEqual(mem2.length, len);
         
         // Values should be bounded between -1 and 1 (IFT output range)
         let validCount = 0;
         for (let i = 0; i < len; i++) {
-            if (!isNaN(mem[i])) {
-                assert(mem[i] >= -1.0 && mem[i] <= 1.0, 
-                       `Value ${mem[i]} at index ${i} out of IFT range [-1, 1]`);
+            if (!isNaN(mem2[i])) {
+                assert(mem2[i] >= -1.0 && mem2[i] <= 1.0, 
+                       `Value ${mem2[i]} at index ${i} out of IFT range [-1, 1]`);
                 validCount++;
             }
         }
@@ -209,18 +212,19 @@ test('IFT RSI fast API (separate buffers)', () => {
     
     try {
         // Copy input data
-        const inMem = new Float64Array(wasm.memory.buffer, inPtr, len);
+        const inMem = new Float64Array(wasm.__wasm.memory.buffer, inPtr, len);
         inMem.set(close);
         
         // Perform operation
         wasm.ift_rsi_into(inPtr, outPtr, len, 5, 9);
         
-        // Check output
-        const outMem = new Float64Array(wasm.memory.buffer, outPtr, len);
-        
         // Compare with safe API result
         const safeResult = wasm.ift_rsi_js(close, 5, 9);
-        assertArrayClose(outMem, safeResult, 1e-10, "Fast API result differs from safe API");
+        
+        // IMPORTANT: Recreate the output view after calling safe API, as memory may have grown
+        const finalOutMem = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
+        
+        assertArrayClose(finalOutMem, safeResult, 1e-10, "Fast API result differs from safe API");
         
     } finally {
         // Free both buffers

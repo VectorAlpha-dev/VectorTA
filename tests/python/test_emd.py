@@ -11,7 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'target/wheels'))
 
 try:
-    import my_project as ta_indicators
+    import my_project as ta
 except ImportError:
     pytest.skip("Python module not built. Run 'maturin develop --features python' first", allow_module_level=True)
 
@@ -26,7 +26,7 @@ class TestEmd:
     def test_emd_accuracy(self, test_data):
         """Test EMD matches expected values from Rust tests"""
         # EMD requires high, low, close, and volume data
-        upperband, middleband, lowerband = ta_indicators.emd(
+        upperband, middleband, lowerband = ta.emd(
             test_data['high'],
             test_data['low'],
             test_data['close'],
@@ -72,7 +72,7 @@ class TestEmd:
         """Test error handling"""
         # Test with empty data
         with pytest.raises(ValueError, match="All values are NaN"):
-            ta_indicators.emd(
+            ta.emd(
                 np.array([]),
                 np.array([]),
                 np.array([]),
@@ -85,7 +85,7 @@ class TestEmd:
         # Test with all NaN
         nan_data = np.full(10, np.nan)
         with pytest.raises(ValueError, match="All values are NaN"):
-            ta_indicators.emd(
+            ta.emd(
                 nan_data,
                 nan_data,
                 nan_data,
@@ -98,7 +98,7 @@ class TestEmd:
         # Test with invalid period (0)
         data = np.array([1.0, 2.0, 3.0])
         with pytest.raises(ValueError, match="Invalid period"):
-            ta_indicators.emd(
+            ta.emd(
                 data,
                 data,
                 data,
@@ -111,7 +111,7 @@ class TestEmd:
         # Test with not enough data
         small_data = np.array([10.0] * 10)
         with pytest.raises(ValueError, match="Not enough valid data"):
-            ta_indicators.emd(
+            ta.emd(
                 small_data,
                 small_data,
                 small_data,
@@ -124,7 +124,7 @@ class TestEmd:
     def test_emd_streaming(self):
         """Test EMD streaming functionality"""
         # Create stream
-        stream = ta_indicators.EmdStream(period=20, delta=0.5, fraction=0.1)
+        stream = ta.EmdStream(period=20, delta=0.5, fraction=0.1)
         
         # Feed some data
         for i in range(100):
@@ -140,7 +140,7 @@ class TestEmd:
     
     def test_emd_batch(self, test_data):
         """Test batch processing"""
-        result = ta_indicators.emd_batch(
+        result = ta.emd_batch(
             test_data['high'],
             test_data['low'],
             test_data['close'],
@@ -161,7 +161,7 @@ class TestEmd:
         assert len(result['fractions']) == 8
         
         # Verify first combo matches single calculation
-        upperband, middleband, lowerband = ta_indicators.emd(
+        upperband, middleband, lowerband = ta.emd(
             test_data['high'],
             test_data['low'],
             test_data['close'],

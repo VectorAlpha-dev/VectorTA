@@ -45,8 +45,6 @@ use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
-#[cfg(feature = "proptest")]
-use proptest::prelude::*;
 
 impl<'a> AsRef<[f64]> for LinearRegSlopeInput<'a> {
 	#[inline(always)]
@@ -1226,7 +1224,7 @@ mod tests {
 	gen_batch_tests!(check_batch_default_row);
 	gen_batch_tests!(check_batch_no_poison);
 
-	#[cfg(feature = "proptest")]
+	#[cfg(test)]
 	fn check_linearreg_slope_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		use proptest::prelude::*;
 		skip_if_unsupported!(kernel, test_name);
@@ -1444,6 +1442,6 @@ mod tests {
 		Ok(())
 	}
 
-	#[cfg(feature = "proptest")]
+	#[cfg(test)]
 	generate_all_linearreg_slope_tests!(check_linearreg_slope_property);
 }

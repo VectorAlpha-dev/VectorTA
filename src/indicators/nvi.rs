@@ -34,8 +34,6 @@ use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use thiserror::Error;
-#[cfg(feature = "proptest")]
-use proptest::prelude::*;
 
 #[derive(Debug, Clone)]
 pub enum NviData<'a> {
@@ -519,7 +517,7 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 
-	#[cfg(feature = "proptest")]
+	#[cfg(test)]
 	fn check_nvi_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		use proptest::prelude::*;
 		skip_if_unsupported!(kernel, test_name);
@@ -773,7 +771,7 @@ mod tests {
 		check_nvi_no_poison
 	);
 
-	#[cfg(feature = "proptest")]
+	#[cfg(test)]
 	generate_all_nvi_tests!(check_nvi_property);
 }
 

@@ -134,6 +134,11 @@ pub use cci::{cci, CciInput, CciOutput, CciParams};
 pub use cfo::{cfo, CfoInput, CfoOutput, CfoParams};
 pub use coppock::{coppock, CoppockInput, CoppockOutput, CoppockParams};
 pub use er::{er, ErInput, ErOutput, ErParams};
+pub use ift_rsi::{ift_rsi, IftRsiInput, IftRsiOutput, IftRsiParams, IftRsiError, IftRsiBuilder, IftRsiStream, IftRsiBatchOutput, IftRsiBatchBuilder, IftRsiBatchRange};
+#[cfg(feature = "python")]
+pub use ift_rsi::{ift_rsi_py, ift_rsi_batch_py, IftRsiStreamPy};
+#[cfg(feature = "wasm")]
+pub use ift_rsi::{ift_rsi_js, ift_rsi_into, ift_rsi_alloc, ift_rsi_free, ift_rsi_batch_unified_js};
 pub use linearreg_angle::{linearreg_angle, Linearreg_angleInput, Linearreg_angleOutput, Linearreg_angleParams};
 pub use rsi::{rsi, RsiInput, RsiOutput, RsiParams, RsiStream, RsiBatchOutput};
 pub use squeeze_momentum::{

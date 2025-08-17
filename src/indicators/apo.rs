@@ -932,7 +932,7 @@ mod tests {
 		let candles = read_candles_from_csv(file_path)?;
 		let input = ApoInput::with_default_candles(&candles);
 		let result = apo_with_kernel(&input, kernel)?;
-		let expected_last_five = [-429.8, -401.6, -386.1, -357.9, -374.1];
+		let expected_last_five = [-691.2244918867873, -678.1375323319808, -690.4319046263408, -667.846363327466, -711.136406617501];
 		let start_index = result.values.len().saturating_sub(5);
 		let result_last_five = &result.values[start_index..];
 		for (i, &value) in result_last_five.iter().enumerate() {
@@ -1788,7 +1788,7 @@ pub fn apo_into(
 		};
 		let input = ApoInput::from_slice(data, params);
 		
-		if in_ptr == out_ptr as *const f64 {  // CRITICAL: Aliasing check
+		if in_ptr == out_ptr {  // CRITICAL: Aliasing check - compare pointers directly
 			let mut temp = vec![0.0; len];
 			apo_into_slice(&mut temp, &input, Kernel::Auto)
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;

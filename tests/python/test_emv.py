@@ -5,7 +5,7 @@ These tests verify that Python bindings correctly wrap the Rust implementation.
 
 import pytest
 import numpy as np
-from test_utils import load_test_data, assert_close, get_expected_output
+from test_utils import load_test_data, assert_close
 
 # Import from the Rust module
 try:

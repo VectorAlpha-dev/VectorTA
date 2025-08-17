@@ -628,8 +628,9 @@ fn gatorosc_compute_into(
 				upper_change,
 				lower_change,
 			),
+			// WASM SIMD is handled via Scalar kernel with SIMD128 optimizations
 			#[cfg(all(target_feature = "simd128", target_arch = "wasm32"))]
-			Kernel::Simd128 | Kernel::Simd128Batch => gatorosc_simd128(
+			Kernel::Scalar | Kernel::ScalarBatch if cfg!(all(target_feature = "simd128", target_arch = "wasm32")) => gatorosc_simd128(
 				data,
 				jaws_length,
 				jaws_shift,
@@ -1219,11 +1220,6 @@ pub fn gatorosc_batch_inner_into(
 				&mut lower_change_out[start..end],
 			);
 		}
-	}
-	
-	#[cfg(target_arch = "wasm32")]
-	for row in 0..rows {
-		do_row(row);
 	}
 	
 	Ok(combos)

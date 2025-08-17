@@ -1702,6 +1702,20 @@ pub fn bollinger_bands_width_batch_py<'py>(
 	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
 	let slice_out = unsafe { out_arr.as_slice_mut()? };
 
+	// Calculate warmup periods for each row and initialize NaN prefixes
+	let warm: Vec<usize> = combos
+		.iter()
+		.map(|c| slice_in.iter().position(|x| !x.is_nan()).unwrap_or(0) + c.period.unwrap() - 1)
+		.collect();
+	
+	// Initialize NaN prefixes for each row
+	for (row_idx, &warmup) in warm.iter().enumerate() {
+		let row_start = row_idx * cols;
+		for col_idx in 0..warmup.min(cols) {
+			slice_out[row_start + col_idx] = f64::NAN;
+		}
+	}
+
 	// Heavy work without the GIL
 	let (combos, matype_used, devtype_used) = py
 		.allow_threads(
@@ -1716,7 +1730,7 @@ pub fn bollinger_bands_width_batch_py<'py>(
 				};
 
 				// Compute directly into the pre-allocated NumPy buffer
-				// The Rust function handles NaN initialization internally
+				// NaN prefixes have been initialized above
 				let mut combos = bollinger_bands_width_batch_inner_into(slice_in, &sweep, kernel, true, slice_out)?;
 
 				// Update combos with matype and devtype

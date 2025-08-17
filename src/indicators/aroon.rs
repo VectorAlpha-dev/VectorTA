@@ -1758,8 +1758,9 @@ pub fn aroon_batch_js(
 	};
 
 	// Use the existing batch function with parallel=false for WASM
+	// In WASM, we should always use Scalar kernel
 	let output =
-		aroon_batch_inner(high, low, &sweep, Kernel::Auto, false).map_err(|e| JsValue::from_str(&e.to_string()))?;
+		aroon_batch_inner(high, low, &sweep, Kernel::Scalar, false).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	// Create the structured output
 	let js_output = AroonBatchJsOutput {
@@ -1820,8 +1821,9 @@ pub fn aroon_batch_unified_js(high: &[f64], low: &[f64], config: JsValue) -> Res
 	};
 
 	// 2. Run the existing core logic
+	// In WASM, we should always use Scalar kernel
 	let output =
-		aroon_batch_inner(high, low, &sweep, Kernel::Auto, false).map_err(|e| JsValue::from_str(&e.to_string()))?;
+		aroon_batch_inner(high, low, &sweep, Kernel::Scalar, false).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	// 3. Create the structured output
 	let js_output = AroonBatchJsOutput {

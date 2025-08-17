@@ -279,7 +279,20 @@
       "Bash(cargo test:*)",
       "WebSearch",
       "WebFetch(domain:lemire.me)",
-      "Bash(RUST_LOG=proptest=debug cargo test --features nightly-avx --lib indicators::moving_averages::fwma::tests::check_fwma_property_scalar_f64 -- --nocapture)"
+      "Bash(RUST_LOG=proptest=debug cargo test --features nightly-avx --lib indicators::moving_averages::fwma::tests::check_fwma_property_scalar_f64 -- --nocapture)",
+      "Bash(./test_bindings.bat)",
+      "Bash(.venvScriptspython.exe -m pytest tests/python/test_alligator.py -xvs --tb=short)",
+      "Bash(for indicator in cksp correlation_cycle eri kvo rvi stc)",
+      "Bash(do echo -n \"$indicator: \")",
+      "Bash(done)",
+      "Bash(do grep -l \"$indicator_batch_py\" src/indicators/$indicator.rs)",
+      "Bash(echo \"$indicator has Python batch binding\")",
+      "Bash(.venvScriptspython.exe -m pytest tests/python -x --tb=short -q)",
+      "Bash(.venvScriptspython.exe tests/python/test_ift_rsi.py)",
+      "Bash(C:Python313python.exe -m maturin develop --features python --release)",
+      "Bash(C:Python313python.exe -m maturin develop --features python --release --quiet)",
+      "Bash(C:Python313python.exe -m pytest tests/python/test_ift_rsi.py -xvs)",
+      "Bash(.venvScriptspython.exe -m pytest tests/python/test_ift_rsi.py::TestIftRsiBatch::test_ift_rsi_batch_single_parameter_set -xvs)"
     ],
     "deny": [],
     "defaultMode": "acceptEdits"

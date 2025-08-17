@@ -48,8 +48,6 @@ use rayon::prelude::*;
 use std::convert::AsRef;
 use thiserror::Error;
 
-#[cfg(feature = "proptest")]
-use proptest::prelude::*;
 
 #[derive(Debug, Clone)]
 pub enum MassData<'a> {
@@ -946,7 +944,7 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 
-	#[cfg(feature = "proptest")]
+	#[cfg(test)]
 	fn check_mass_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		use proptest::prelude::*;
 		skip_if_unsupported!(kernel, test_name);
@@ -1247,7 +1245,7 @@ mod tests {
 		check_mass_no_poison
 	);
 
-	#[cfg(feature = "proptest")]
+	#[cfg(test)]
 	generate_all_mass_tests!(check_mass_property);
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);

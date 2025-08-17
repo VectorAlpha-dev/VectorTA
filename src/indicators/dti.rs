@@ -520,9 +520,11 @@ pub fn dti_row_avx512_long(
 	unsafe { dti_avx512_long(high, low, r, s, u, first_valid_idx, out) }
 }
 
-#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-#[inline]
-unsafe fn dti_simd128(high: &[f64], low: &[f64], r: usize, s: usize, u: usize, first_valid_idx: usize, out: &mut [f64]) {
+// Commented out duplicate function - already defined above
+// #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+// #[inline]
+// unsafe fn dti_simd128(high: &[f64], low: &[f64], r: usize, s: usize, u: usize, first_valid_idx: usize, out: &mut [f64]) {
+/*
 	use core::arch::wasm32::*;
 	
 	let alpha_r = 2.0 / (r as f64 + 1.0);
@@ -705,7 +707,8 @@ unsafe fn dti_simd128(high: &[f64], low: &[f64], r: usize, s: usize, u: usize, f
 		};
 		i += 1;
 	}
-}
+*/
+// End of commented out duplicate function
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 #[inline(always)]

@@ -198,6 +198,8 @@ pub enum AoError {
 	NoData,
 	#[error("ao: Not enough valid data: needed = {needed}, valid = {valid}")]
 	NotEnoughValidData { needed: usize, valid: usize },
+	#[error("ao: High and low arrays must have same length: high={high_len}, low={low_len}")]
+	MismatchedArrayLengths { high_len: usize, low_len: usize },
 }
 
 #[inline]
@@ -328,9 +330,9 @@ pub fn ao_with_kernel(input: &AoInput, kernel: Kernel) -> Result<AoOutput, AoErr
 #[inline]
 pub fn compute_hl2_with_kernel(high: &[f64], low: &[f64], kernel: Kernel) -> Result<Vec<f64>, AoError> {
 	if high.len() != low.len() {
-		return Err(AoError::InvalidPeriods {
-			short: high.len(),
-			long: low.len(),
+		return Err(AoError::MismatchedArrayLengths {
+			high_len: high.len(),
+			low_len: low.len(),
 		});
 	}
 	
