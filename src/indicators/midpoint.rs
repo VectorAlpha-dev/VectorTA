@@ -1457,6 +1457,40 @@ pub fn midpoint_into(
 }
 
 #[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn midpoint_batch_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+) -> Result<usize, JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to midpoint_batch_into"));
+	}
+
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+
+		let sweep = MidpointBatchRange {
+			period: (period_start, period_end, period_step),
+		};
+
+		let combos = expand_grid(&sweep);
+		let rows = combos.len();
+		let cols = len;
+
+		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+
+		midpoint_batch_inner_into(data, &sweep, detect_best_kernel(), false, out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+		Ok(rows)
+	}
+}
+
+#[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct MidpointBatchConfig {
 	pub period_range: (usize, usize, usize),
@@ -1481,7 +1515,7 @@ pub fn midpoint_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsVal
 		period: config.period_range,
 	};
 	
-	let result = midpoint_batch_slice(data, &sweep, Kernel::Auto)
+	let result = midpoint_batch_with_kernel(data, &sweep, Kernel::Auto)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 	
 	let output = MidpointBatchJsOutput {

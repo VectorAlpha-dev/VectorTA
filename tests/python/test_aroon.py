@@ -107,7 +107,7 @@ class TestAroon:
         """Test Aroon fails with empty input"""
         empty = np.array([])
         
-        with pytest.raises(ValueError, match="Invalid length"):
+        with pytest.raises(ValueError, match="Input data slice is empty"):
             ta_indicators.aroon(empty, empty, length=14)
     
     def test_aroon_mismatched_lengths(self):

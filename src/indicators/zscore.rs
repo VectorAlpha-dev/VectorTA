@@ -297,14 +297,10 @@ pub unsafe fn zscore_scalar(
 	for v in &mut sigmas {
 		*v *= nbdev;
 	}
-	let mut out = alloc_with_nan_prefix(data.len(), first + period - 1);
-	// Fill remaining values with NaN for binding compatibility
-	for i in (first + period - 1)..out.len() {
-		out[i] = f64::NAN;
-	}
-	for i in (first + period - 1)..data.len() {
-		let mean = means[i - first];
-		let sigma = sigmas[i - first];
+	let mut out = alloc_with_nan_prefix(data.len(), first + period);
+	for i in (first + period)..data.len() {
+		let mean = means[i];
+		let sigma = sigmas[i];
 		let value = data[i];
 		out[i] = if sigma == 0.0 || sigma.is_nan() {
 			f64::NAN
@@ -681,7 +677,7 @@ fn zscore_batch_inner(
 	// Calculate warmup periods for each combination
 	let warmup_periods: Vec<usize> = combos
 		.iter()
-		.map(|c| first + c.period.unwrap() - 1)
+		.map(|c| first + c.period.unwrap())
 		.collect();
 	
 	// Initialize NaN prefixes for each row
@@ -691,14 +687,6 @@ fn zscore_batch_inner(
 	let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
 	let out: &mut [f64] = 
 		unsafe { core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len()) };
-	
-	// Fill remaining values with NaN for binding compatibility
-	for (row_idx, warmup) in warmup_periods.iter().enumerate() {
-		let row_start = row_idx * cols;
-		for col in *warmup..cols {
-			out[row_start + col] = f64::NAN;
-		}
-	}
 	
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let prm = &combos[row];
@@ -789,9 +777,9 @@ unsafe fn zscore_row_scalar(
 	for v in &mut sigmas {
 		*v *= nbdev;
 	}
-	for i in (first + period - 1)..data.len() {
-		let mean = means[i - first];
-		let sigma = sigmas[i - first];
+	for i in (first + period)..data.len() {
+		let mean = means[i];
+		let sigma = sigmas[i];
 		let value = data[i];
 		out[i] = if sigma == 0.0 || sigma.is_nan() {
 			f64::NAN
@@ -889,6 +877,17 @@ pub fn zscore_batch_inner_into(
 	}
 
 	let cols = data.len();
+	
+	// Initialize NaN prefixes for each row based on warmup period
+	// This is critical for external buffers from Python/WASM that contain garbage
+	for (row, combo) in combos.iter().enumerate() {
+		let warmup = first + combo.period.unwrap();
+		let row_start = row * cols;
+		for i in 0..warmup.min(cols) {
+			out[row_start + i] = f64::NAN;
+		}
+	}
+	
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let prm = &combos[row];
 		let period = prm.period.unwrap();
@@ -1126,7 +1125,7 @@ unsafe fn zscore_compute_into_scalar(
 	out: &mut [f64],
 ) -> Result<(), ZscoreError> {
 	// Fill warmup with NaN
-	for v in &mut out[..(first + period - 1)] {
+	for v in &mut out[..(first + period)] {
 		*v = f64::NAN;
 	}
 
@@ -1144,9 +1143,9 @@ unsafe fn zscore_compute_into_scalar(
 		*v *= nbdev;
 	}
 	
-	for i in (first + period - 1)..data.len() {
-		let mean = means[i - first];
-		let sigma = sigmas[i - first];
+	for i in (first + period)..data.len() {
+		let mean = means[i];
+		let sigma = sigmas[i];
 		let value = data[i];
 		out[i] = if sigma == 0.0 || sigma.is_nan() {
 			f64::NAN

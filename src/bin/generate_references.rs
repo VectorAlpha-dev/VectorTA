@@ -18,8 +18,11 @@ use my_project::indicators::bop::{bop, BopInput, BopParams};
 use my_project::indicators::cci::{cci, CciInput, CciParams};
 use my_project::indicators::cfo::{cfo, CfoInput, CfoParams};
 use my_project::indicators::cg::{cg, CgInput, CgParams};
+use my_project::indicators::kurtosis::{kurtosis, KurtosisInput, KurtosisParams};
+use my_project::indicators::midpoint::{midpoint, MidpointInput, MidpointParams};
 /// Binary to generate reference outputs for indicator testing
 /// This is used by Python and WASM tests to verify their outputs match Rust
+use my_project::indicators::decycler::{decycler, DecyclerInput, DecyclerParams};
 use my_project::indicators::moving_averages::alma::{alma, AlmaInput, AlmaParams};
 use my_project::indicators::moving_averages::cwma::{cwma, CwmaInput, CwmaParams};
 use my_project::indicators::moving_averages::dema::{dema, DemaInput, DemaParams};
@@ -64,6 +67,9 @@ use my_project::indicators::moving_averages::vwma::{vwma, VwmaInput, VwmaParams}
 use my_project::indicators::moving_averages::wilders::{wilders, WildersInput, WildersParams};
 use my_project::indicators::moving_averages::wma::{wma, WmaInput, WmaParams};
 use my_project::indicators::moving_averages::zlema::{zlema, ZlemaInput, ZlemaParams};
+use my_project::indicators::vpci::{vpci, VpciData, VpciInput, VpciParams};
+use my_project::indicators::vpt::{vpt, VptInput, VptData};
+use my_project::indicators::stddev::{stddev, StdDevData, StdDevInput, StdDevParams};
 use my_project::utilities::data_loader::read_candles_from_csv;
 use serde_json::json;
 use std::env;
@@ -72,7 +78,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	let args: Vec<String> = env::args().collect();
 	if args.len() < 2 {
 		eprintln!("Usage: {} <indicator_name> [source]", args[0]);
-		eprintln!("Available indicators: ad, acosc, adx, adosc, adxr, alligator, alma, ao, apo, aroon, aroonosc, atr, bandpass, bollinger_bands, bollinger_bands_width, bop, cci, cfo, cg, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass_2_pole, highpass, hma, hwma, jma, jsa, kama, linreg, maaq, mama, mwdx, nma, pwma, reflex, sinwma, sma, smma, sqwma, srwma, supersmoother_3_pole, supersmoother, swma, tema, tilson, trendflex, trima, vwap, vwma, vpwma, wilders, wma, zlema");
+		eprintln!("Available indicators: ad, acosc, adx, adosc, adxr, alligator, alma, ao, apo, aroon, aroonosc, atr, bandpass, bollinger_bands, bollinger_bands_width, bop, cci, cfo, cg, cwma, decycler, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass_2_pole, highpass, hma, hwma, jma, jsa, kama, kurtosis, linreg, maaq, mama, mwdx, nma, pwma, reflex, sinwma, sma, smma, sqwma, srwma, stddev, supersmoother_3_pole, supersmoother, swma, tema, tilson, trendflex, trima, vpci, vwap, vwma, vpwma, wilders, wma, zlema");
 		eprintln!("Available sources: open, high, low, close, volume, hl2, hlc3, ohlc4, hlcc4");
 		std::process::exit(1);
 	}
@@ -113,6 +119,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 				"source": source,
 				"params": {
 					"period": period
+				},
+				"values": result.values,
+				"length": result.values.len()
+			})
+		}
+		"decycler" => {
+			let params = DecyclerParams::default();
+			let hp_period = params.hp_period.unwrap_or(125);
+			let k = params.k.unwrap_or(0.707);
+			let input = DecyclerInput::from_candles(&candles, source, params);
+			let result = decycler(&input)?;
+			json!({
+				"indicator": "decycler",
+				"source": source,
+				"params": {
+					"hp_period": hp_period,
+					"k": k
 				},
 				"values": result.values,
 				"length": result.values.len()
@@ -348,6 +371,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 				"length": result.values.len()
 			})
 		}
+		"kurtosis" => {
+			let params = KurtosisParams::default();
+			let period = params.period.unwrap_or(5);
+			let input = KurtosisInput::from_candles(&candles, source, params);
+			let result = kurtosis(&input)?;
+			json!({
+				"indicator": "kurtosis",
+				"source": source,
+				"params": {
+					"period": period
+				},
+				"values": result.values,
+				"length": result.values.len()
+			})
+		}
 		"kama" => {
 			let params = KamaParams::default();
 			let period = params.period.unwrap_or(30);
@@ -413,6 +451,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 				"mama_values": result.mama_values,
 				"fama_values": result.fama_values,
 				"length": result.mama_values.len()
+			})
+		}
+		"midpoint" => {
+			let params = MidpointParams::default();
+			let period = params.period.unwrap_or(14);
+			let input = MidpointInput::from_candles(&candles, source, params);
+			let result = midpoint(&input)?;
+			json!({
+				"indicator": "midpoint",
+				"source": source,
+				"params": {
+					"period": period
+				},
+				"values": result.values,
+				"length": result.values.len()
 			})
 		}
 		"mwdx" => {
@@ -545,6 +598,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 				"source": source,
 				"params": {
 					"period": period
+				},
+				"values": result.values,
+				"length": result.values.len()
+			})
+		}
+		"stddev" => {
+			let params = StdDevParams::default();
+			let period = params.period.unwrap_or(5);
+			let nbdev = params.nbdev.unwrap_or(1.0);
+			let input = StdDevInput::from_candles(&candles, source, params);
+			let result = stddev(&input)?;
+			json!({
+				"indicator": "stddev",
+				"source": source,
+				"params": {
+					"period": period,
+					"nbdev": nbdev
 				},
 				"values": result.values,
 				"length": result.values.len()
@@ -683,6 +753,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 				"params": {
 					"period": period
 				},
+				"values": result.values,
+				"length": result.values.len()
+			})
+		}
+		"vpci" => {
+			let params = VpciParams::default();
+			let short_range = params.short_range.unwrap_or(5);
+			let long_range = params.long_range.unwrap_or(25);
+			let input = VpciInput::from_candles(&candles, "close", "volume", params);
+			let result = vpci(&input)?;
+			json!({
+				"indicator": "vpci",
+				"source": "close",
+				"params": {
+					"short_range": short_range,
+					"long_range": long_range
+				},
+				"vpci": result.vpci,
+				"vpcis": result.vpcis,
+				"length": result.vpci.len()
+			})
+		}
+		"vpt" => {
+			// VPT requires price and volume data
+			let volume = candles.select_candle_field("volume")?;
+			let price = candles.select_candle_field(source)?;
+			let input = VptInput::from_slices(price, volume);
+			let result = vpt(&input)?;
+			json!({
+				"indicator": "vpt",
+				"source": source,
+				"params": {},
 				"values": result.values,
 				"length": result.values.len()
 			})

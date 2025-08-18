@@ -83,7 +83,7 @@ test('VPCI with default parameters', () => {
     
     // Test with default values (short=5, long=25)
     const result = wasm.vpci_js(close, volume, 5, 25);
-    assert(Array.isArray(result), 'Result should be an array');
+    assert(result instanceof Float64Array || Array.isArray(result), 'Result should be an array');
     assert.strictEqual(result.length, close.length * 2, 'Result should be twice input length');
 });
 
@@ -275,19 +275,23 @@ test('VPCI fast API (vpci_into)', () => {
     const volume = testData.volume.slice(0, 100);
     const len = close.length;
     
-    // Allocate output buffers
+    // Allocate buffers for input and output
+    const closePtr = wasm.vpci_alloc(len);
+    const volumePtr = wasm.vpci_alloc(len);
     const vpciPtr = wasm.vpci_alloc(len);
     const vpcisPtr = wasm.vpci_alloc(len);
     
     try {
-        // Create typed arrays from test data
-        const closeBytes = new Float64Array(close);
-        const volumeBytes = new Float64Array(volume);
+        // Copy input data to WASM memory
+        const closeView = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
+        const volumeView = new Float64Array(wasm.__wasm.memory.buffer, volumePtr, len);
+        closeView.set(close);
+        volumeView.set(volume);
         
-        // Call fast API
+        // Call fast API with pointers
         wasm.vpci_into(
-            closeBytes.buffer,
-            volumeBytes.buffer,
+            closePtr,
+            volumePtr,
             vpciPtr,
             vpcisPtr,
             len,
@@ -296,8 +300,8 @@ test('VPCI fast API (vpci_into)', () => {
         );
         
         // Read results from WASM memory
-        const memoryVpci = new Float64Array(wasm.memory.buffer, vpciPtr, len);
-        const memoryVpcis = new Float64Array(wasm.memory.buffer, vpcisPtr, len);
+        const memoryVpci = new Float64Array(wasm.__wasm.memory.buffer, vpciPtr, len);
+        const memoryVpcis = new Float64Array(wasm.__wasm.memory.buffer, vpcisPtr, len);
         const resultVpci = Array.from(memoryVpci);
         const resultVpcis = Array.from(memoryVpcis);
         
@@ -310,6 +314,8 @@ test('VPCI fast API (vpci_into)', () => {
         assertArrayClose(resultVpcis, expectedVpcis, 1e-14, 'Fast API VPCIS should match safe API');
         
     } finally {
+        wasm.vpci_free(closePtr, len);
+        wasm.vpci_free(volumePtr, len);
         wasm.vpci_free(vpciPtr, len);
         wasm.vpci_free(vpcisPtr, len);
     }

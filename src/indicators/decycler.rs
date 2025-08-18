@@ -1632,16 +1632,20 @@ pub fn decycler_batch_py<'py>(
 	let dict = PyDict::new(py);
 	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
 	dict.set_item(
-		"params",
-		PyList::new(
-			py,
-			combos.iter().map(|p| {
-				let d = PyDict::new(py);
-				d.set_item("hp_period", p.hp_period).unwrap();
-				d.set_item("k", p.k).unwrap();
-				d
-			}),
-		)?,
+		"hp_periods",
+		combos
+			.iter()
+			.map(|p| p.hp_period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+	dict.set_item(
+		"ks",
+		combos
+			.iter()
+			.map(|p| p.k.unwrap())
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
 	)?;
 	dict.set_item("rows", rows)?;
 	dict.set_item("cols", cols)?;
@@ -1676,6 +1680,15 @@ fn decycler_batch_inner_into(
 
 	let rows = combos.len();
 	let cols = data.len();
+
+	// Initialize NaN prefixes for each row based on warmup period
+	for (row, _combo) in combos.iter().enumerate() {
+		let warmup = first + 2;  // Each row needs warmup of first + 2
+		let row_start = row * cols;
+		for i in 0..warmup.min(cols) {
+			out[row_start + i] = f64::NAN;
+		}
+	}
 
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let hp_period = combos[row].hp_period.unwrap();

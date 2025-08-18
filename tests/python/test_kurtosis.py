@@ -218,7 +218,7 @@ class TestKurtosis:
         assert len(result_auto) == len(close)
         
         # Test invalid kernel
-        with pytest.raises(ValueError, match="Invalid kernel"):
+        with pytest.raises(ValueError, match="Unknown kernel"):
             ta_indicators.kurtosis(close, period=5, kernel='invalid')
 
 

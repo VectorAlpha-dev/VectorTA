@@ -241,6 +241,12 @@ pub fn kurtosis_into_slice(dst: &mut [f64], input: &KurtosisInput, kernel: Kerne
 		});
 	}
 	
+	// Initialize warmup period with NaN BEFORE computation
+	let warmup_end = first + period - 1;
+	for v in &mut dst[..warmup_end] {
+		*v = f64::NAN;
+	}
+	
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
 		other => other,
@@ -255,12 +261,6 @@ pub fn kurtosis_into_slice(dst: &mut [f64], input: &KurtosisInput, kernel: Kerne
 			Kernel::Avx512 | Kernel::Avx512Batch => kurtosis_avx512(data, period, first, dst),
 			_ => unreachable!(),
 		}
-	}
-	
-	// Fill warmup period with NaN
-	let warmup_end = first + period - 1;
-	for v in &mut dst[..warmup_end] {
-		*v = f64::NAN;
 	}
 	
 	Ok(())
@@ -564,6 +564,16 @@ fn kurtosis_batch_inner_into(
 	
 	let rows = combos.len();
 	let cols = data.len();
+	
+	// Initialize NaN prefixes for each row based on warmup period
+	for (row, combo) in combos.iter().enumerate() {
+		let period = combo.period.unwrap();
+		let warmup = first + period - 1;
+		let row_start = row * cols;
+		for i in 0..warmup.min(cols) {
+			out[row_start + i] = f64::NAN;
+		}
+	}
 	
 	let out_uninit = unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>, out.len()) };
 	
@@ -1599,7 +1609,7 @@ pub fn kurtosis_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValu
 		period: config.period_range,
 	};
 
-	let output = kurtosis_batch_inner(data, &sweep, Kernel::Auto, false)
+	let output = kurtosis_batch_with_kernel(data, &sweep, Kernel::Auto)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	let js_output = KurtosisBatchJsOutput {
@@ -1640,7 +1650,8 @@ pub fn kurtosis_batch_into(
 
 		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
 
-		kurtosis_batch_inner_into(data, &sweep, Kernel::Auto, false, out)
+		let kernel = detect_best_kernel();
+		kurtosis_batch_inner_into(data, &sweep, kernel, false, out)
 			.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 		Ok(rows)

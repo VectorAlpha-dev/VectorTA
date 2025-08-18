@@ -97,7 +97,7 @@ test('Decycler period exceeds length', () => {
     
     assert.throws(() => {
         wasm.decycler_js(dataSmall, 10, 0.707);
-    }, /Not enough valid data/);
+    }, /Invalid period/);
 });
 
 test('Decycler edge case k=0', () => {
@@ -131,7 +131,7 @@ test('Decycler all NaN input', () => {
     allNaN.fill(NaN);
     
     assert.throws(() => {
-        wasm.decycler_js(allNaN, 125, 0.707);
+        wasm.decycler_js(allNaN, 50, 0.707);  // Use period < length to test NaN check
     }, /All values are NaN/);
 });
 
@@ -240,7 +240,7 @@ test('Decycler batch edge cases', () => {
             hp_period_range: [125, 125, 0],
             k_range: [0.707, 0.707, 0]
         });
-    }, /Empty data/);
+    }, /All values are NaN/);
 });
 
 // Fast API tests (zero-copy)

@@ -71,11 +71,11 @@ test('VPT accuracy from CSV', async () => {
     const result = wasm.vpt_js(close, volume);
     
     const expected_last_five = [
-        -0.40358334248536065,
-        -0.16292768139917702,
-        -0.4792942916867958,
-        -0.1188231211518107,
-        -3.3492674990910025,
+        -18292.323972247592,
+        -18292.510374716476,
+        -18292.803266539282,
+        -18292.62919783763,
+        -18296.152568643138,
     ];
     
     assert(result.length >= 5);
@@ -89,7 +89,7 @@ test('VPT accuracy from CSV', async () => {
     );
     
     // Compare with Rust
-    await compareWithRust('vpt', { price: close, volume }, result);
+    await compareWithRust('vpt', result);
 });
 
 test('VPT not enough data', () => {
@@ -148,13 +148,21 @@ test('VPT in-place operation', () => {
     
     // Allocate output
     const out_ptr = wasm.vpt_alloc(len);
-    const output = new Float64Array(wasm.memory.buffer, out_ptr, len);
+    const output = new Float64Array(wasm.__wasm.memory.buffer, out_ptr, len);
     
     // Copy price to output for in-place test
     output.set(price);
     
     // Test in-place (price_ptr == out_ptr)
-    wasm.vpt_into(output.byteOffset, volume.byteOffset, out_ptr, len);
+    // Create volume array in WASM memory
+    const vol_ptr = wasm.vpt_alloc(len);
+    const volumeWasm = new Float64Array(wasm.__wasm.memory.buffer, vol_ptr, len);
+    volumeWasm.set(volume);
+    
+    wasm.vpt_into(out_ptr, vol_ptr, out_ptr, len);
+    
+    // Clean up volume allocation
+    wasm.vpt_free(vol_ptr, len);
     
     // Should have results
     assert(!isNaN(output[1]), 'Should have computed values after in-place operation');

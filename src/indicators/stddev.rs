@@ -888,7 +888,7 @@ pub fn stddev_js(data: &[f64], period: usize, nbdev: f64) -> Result<Vec<f64>, Js
 	let input = StdDevInput::from_slice(data, params);
 	
 	let mut output = vec![0.0; data.len()];  // Single allocation
-	stddev_into_slice(&mut output, &input, Kernel::Auto)
+	stddev_into_slice(&mut output, &input, detect_best_kernel())
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 	
 	Ok(output)
@@ -917,13 +917,13 @@ pub fn stddev_into(
 		
 		if in_ptr == out_ptr {  // CRITICAL: Aliasing check
 			let mut temp = vec![0.0; len];
-			stddev_into_slice(&mut temp, &input, Kernel::Auto)
+			stddev_into_slice(&mut temp, &input, detect_best_kernel())
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 			let out = std::slice::from_raw_parts_mut(out_ptr, len);
 			out.copy_from_slice(&temp);
 		} else {
 			let out = std::slice::from_raw_parts_mut(out_ptr, len);
-			stddev_into_slice(out, &input, Kernel::Auto)
+			stddev_into_slice(out, &input, detect_best_kernel())
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 		}
 		Ok(())
@@ -980,20 +980,15 @@ pub fn stddev_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue,
 		return Err(JsValue::from_str("No parameter combinations generated"));
 	}
 
-	let rows = combos.len();
-	let cols = data.len();
-	let total = rows * cols;
-
-	let mut output = vec![0.0; total];
-	let params = stddev_batch_inner_into(data, &sweep, Kernel::Auto, false, &mut output)
+	let output = stddev_batch_inner(data, &sweep, detect_best_kernel(), false)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	let result = StdDevBatchJsOutput {
-		values: output,
-		periods: params.iter().map(|p| p.period.unwrap()).collect(),
-		nbdevs: params.iter().map(|p| p.nbdev.unwrap()).collect(),
-		rows,
-		cols,
+		values: output.values,
+		periods: output.combos.iter().map(|p| p.period.unwrap()).collect(),
+		nbdevs: output.combos.iter().map(|p| p.nbdev.unwrap()).collect(),
+		rows: output.rows,
+		cols: output.cols,
 	};
 
 	serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&e.to_string()))
@@ -1032,7 +1027,7 @@ pub fn stddev_batch_into(
 		let data = std::slice::from_raw_parts(in_ptr, len);
 		let out = std::slice::from_raw_parts_mut(out_ptr, total);
 
-		let params = stddev_batch_inner_into(data, &sweep, Kernel::Auto, false, out)
+		let params = stddev_batch_inner_into(data, &sweep, detect_best_kernel(), false, out)
 			.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 		let result = StdDevBatchJsOutput {

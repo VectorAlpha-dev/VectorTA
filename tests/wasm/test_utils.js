@@ -39,6 +39,9 @@ function loadTestData() {
         candles.volume.push(parseFloat(row[5]));
     }
     
+    // Add calculated fields
+    candles.hl2 = candles.high.map((h, i) => (h + candles.low[i]) / 2.0);
+    
     return candles;
 }
 
@@ -131,6 +134,16 @@ const EXPECTED_OUTPUTS = {
             59171.21190130624,
             59167.01279027576,
             59039.413552249636
+        ]
+    },
+    decycler: {
+        defaultParams: { hp_period: 125, k: 0.707 },
+        last5Values: [
+            60289.96384058519,
+            60204.010366691065,
+            60114.255563805666,
+            60028.535266555904,
+            59934.26876964316
         ]
     },
     dema: {

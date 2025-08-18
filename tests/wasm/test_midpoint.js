@@ -175,15 +175,21 @@ test('Midpoint fast API basic', () => {
     const close = new Float64Array(testData.close);
     const len = close.length;
     
+    // Allocate input buffer
+    const inPtr = wasm.midpoint_alloc(len);
     // Allocate output buffer
     const outPtr = wasm.midpoint_alloc(len);
     
     try {
-        // Compute midpoint using fast API
-        wasm.midpoint_into(close, outPtr, len, 14);
+        // Create memory views
+        const inView = new Float64Array(wasm.__wasm.memory.buffer, inPtr, len);
+        inView.set(close);
         
-        // Read result back
-        const result = new Float64Array(wasm.memory.buffer, outPtr, len);
+        // Compute midpoint using fast API
+        wasm.midpoint_into(inPtr, outPtr, len, 14);
+        
+        // Read result back (recreate view in case memory grew)
+        const result = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
         
         // Verify last 5 values
         const expectedLastFive = [59578.5, 59578.5, 59578.5, 58886.0, 58886.0];
@@ -194,6 +200,7 @@ test('Midpoint fast API basic', () => {
         }
     } finally {
         // Always free memory
+        wasm.midpoint_free(inPtr, len);
         wasm.midpoint_free(outPtr, len);
     }
 });
@@ -203,15 +210,29 @@ test('Midpoint fast API in-place', () => {
     const data = new Float64Array([1.0, 2.0, 3.0, 4.0, 5.0]);
     const len = data.length;
     
-    // Use the same buffer for input and output
-    wasm.midpoint_into(data, data, len, 3);
+    // Allocate memory
+    const ptr = wasm.midpoint_alloc(len);
     
-    // Verify results
-    assert(isNaN(data[0]));
-    assert(isNaN(data[1]));
-    assertClose(data[2], 2.0, 1e-10);
-    assertClose(data[3], 3.0, 1e-10);
-    assertClose(data[4], 4.0, 1e-10);
+    try {
+        // Create memory view and copy data
+        const memView = new Float64Array(wasm.__wasm.memory.buffer, ptr, len);
+        memView.set(data);
+        
+        // Use the same buffer for input and output
+        wasm.midpoint_into(ptr, ptr, len, 3);
+        
+        // Read result back (recreate view in case memory grew)
+        const result = new Float64Array(wasm.__wasm.memory.buffer, ptr, len);
+        
+        // Verify results
+        assert(isNaN(result[0]));
+        assert(isNaN(result[1]));
+        assertClose(result[2], 2.0, 1e-10);
+        assertClose(result[3], 3.0, 1e-10);
+        assertClose(result[4], 4.0, 1e-10);
+    } finally {
+        wasm.midpoint_free(ptr, len);
+    }
 });
 
 test('Midpoint batch API', async () => {
@@ -262,5 +283,119 @@ test('Midpoint batch single parameter', () => {
         if (!isNaN(singleResult[i]) && !isNaN(batchValues[i])) {
             assertClose(batchValues[i], singleResult[i], 1e-10);
         }
+    }
+});
+
+test('Midpoint batch zero-copy API', () => {
+    // Test the zero-copy batch API
+    const close = new Float64Array(testData.close.slice(0, 100));
+    const len = close.length;
+    
+    // Test with multiple periods: 10, 14, 18
+    const periodStart = 10;
+    const periodEnd = 18;
+    const periodStep = 4;
+    const expectedRows = 3; // [10, 14, 18]
+    
+    // Allocate input buffer
+    const inPtr = wasm.midpoint_alloc(len);
+    // Allocate output buffer for batch results
+    const outPtr = wasm.midpoint_alloc(len * expectedRows);
+    
+    try {
+        // Copy data to input buffer
+        const inView = new Float64Array(wasm.__wasm.memory.buffer, inPtr, len);
+        inView.set(close);
+        
+        // Run batch computation
+        const rows = wasm.midpoint_batch_into(
+            inPtr, outPtr, len,
+            periodStart, periodEnd, periodStep
+        );
+        
+        assert.strictEqual(rows, expectedRows, 'Should return correct number of rows');
+        
+        // Read results (recreate view in case memory grew)
+        const outView = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len * rows);
+        
+        // Verify each row matches individual calculations
+        const periods = [10, 14, 18];
+        for (let row = 0; row < rows; row++) {
+            const period = periods[row];
+            const singleResult = wasm.midpoint_js(close, period);
+            const rowStart = row * len;
+            
+            for (let col = 0; col < len; col++) {
+                const batchVal = outView[rowStart + col];
+                const singleVal = singleResult[col];
+                
+                if (!isNaN(singleVal) && !isNaN(batchVal)) {
+                    assertClose(batchVal, singleVal, 1e-10,
+                        `Row ${row} (period ${period}), col ${col} mismatch`);
+                }
+            }
+        }
+    } finally {
+        // Always free memory
+        wasm.midpoint_free(inPtr, len);
+        wasm.midpoint_free(outPtr, len * expectedRows);
+    }
+});
+
+test('Midpoint batch zero-copy with large dataset', () => {
+    // Test zero-copy batch with larger dataset
+    const size = 1000;
+    const data = new Float64Array(size);
+    for (let i = 0; i < size; i++) {
+        data[i] = Math.sin(i * 0.01) + Math.random() * 0.1;
+    }
+    
+    // Test with 3 periods
+    const periodStart = 10;
+    const periodEnd = 30;
+    const periodStep = 10;
+    const expectedRows = 3; // [10, 20, 30]
+    
+    // Allocate buffers
+    const inPtr = wasm.midpoint_alloc(size);
+    const outPtr = wasm.midpoint_alloc(size * expectedRows);
+    
+    try {
+        // Copy data to input buffer
+        const inView = new Float64Array(wasm.__wasm.memory.buffer, inPtr, size);
+        inView.set(data);
+        
+        // Run batch computation
+        const rows = wasm.midpoint_batch_into(
+            inPtr, outPtr, size,
+            periodStart, periodEnd, periodStep
+        );
+        
+        assert.strictEqual(rows, expectedRows);
+        
+        // Read results
+        const outView = new Float64Array(wasm.__wasm.memory.buffer, outPtr, size * rows);
+        
+        // Check each row has proper warmup period
+        const periods = [10, 20, 30];
+        for (let row = 0; row < rows; row++) {
+            const period = periods[row];
+            const rowStart = row * size;
+            
+            // Check warmup period has NaN
+            for (let i = 0; i < period - 1; i++) {
+                assert(isNaN(outView[rowStart + i]), 
+                    `Row ${row} (period ${period}): Expected NaN at warmup index ${i}`);
+            }
+            
+            // Check after warmup has values
+            for (let i = period - 1; i < Math.min(period + 10, size); i++) {
+                assert(!isNaN(outView[rowStart + i]), 
+                    `Row ${row} (period ${period}): Expected value at index ${i}, got NaN`);
+            }
+        }
+    } finally {
+        wasm.midpoint_free(inPtr, size);
+        wasm.midpoint_free(outPtr, size * expectedRows);
     }
 });

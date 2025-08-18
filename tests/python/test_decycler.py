@@ -181,7 +181,8 @@ class TestDecycler:
         )
         
         assert 'values' in result
-        assert 'params' in result
+        assert 'hp_periods' in result
+        assert 'ks' in result
         assert 'rows' in result
         assert 'cols' in result
         
@@ -220,14 +221,15 @@ class TestDecycler:
         # Should have 3 * 3 = 9 combinations
         assert result['values'].shape[0] == 9
         assert result['values'].shape[1] == len(close)
-        assert len(result['params']) == 9
+        assert len(result['hp_periods']) == 9
+        assert len(result['ks']) == 9
     
     def test_decycler_all_nan_input(self):
         """Test Decycler with all NaN values"""
         all_nan = np.full(100, np.nan)
         
-        with pytest.raises(ValueError, match="All values are NaN"):
-            ta_indicators.decycler(all_nan)
+        with pytest.raises(ValueError, match="decycler: All values are NaN"):
+            ta_indicators.decycler(all_nan, hp_period=50)  # Use period < length to test NaN check
     
     def test_decycler_kernel_parameter(self, test_data):
         """Test Decycler with different kernel parameters"""
@@ -242,7 +244,7 @@ class TestDecycler:
         assert len(result_auto) == len(close)
         
         # Test with invalid kernel
-        with pytest.raises(ValueError, match="Invalid kernel"):
+        with pytest.raises(ValueError, match="Unknown kernel"):
             ta_indicators.decycler(close, kernel="invalid")
 
 

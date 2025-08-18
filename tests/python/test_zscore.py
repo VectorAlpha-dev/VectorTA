@@ -132,16 +132,28 @@ class TestZscore:
         """Test ZSCORE with different moving average types"""
         close = test_data['close'][:100]  # Use smaller dataset
         
-        ma_types = ["sma", "ema", "wma", "dema", "tema"]
+        # Different MA types have different warmup periods
+        # For period=14: SMA/EMA/WMA need ~14, DEMA needs ~27, TEMA needs ~40
+        ma_types_with_check_indices = [
+            ("sma", 20),   # Check at index 20 for SMA
+            ("ema", 20),   # Check at index 20 for EMA
+            ("wma", 20),   # Check at index 20 for WMA
+            ("dema", 30),  # Check at index 30 for DEMA (needs more warmup)
+            ("tema", 45),  # Check at index 45 for TEMA (needs even more warmup)
+        ]
         
-        for ma_type in ma_types:
+        for ma_type, check_idx in ma_types_with_check_indices:
             try:
                 result = ta_indicators.zscore(close, period=14, ma_type=ma_type)
                 assert len(result) == len(close)
-                # Check warmup period
+                # Check warmup period - first value should always be NaN
                 assert np.isnan(result[0])
-                # After warmup should have values
-                assert not np.isnan(result[20])
+                # After sufficient warmup for this MA type, should have values
+                if check_idx < len(close):
+                    assert not np.isnan(result[check_idx]), f"{ma_type} should have value at index {check_idx}"
+                # Verify we eventually get non-NaN values
+                non_nan_count = np.sum(~np.isnan(result))
+                assert non_nan_count > 0, f"{ma_type} should produce some non-NaN values"
             except ValueError as e:
                 # Some MA types might not be supported
                 assert "Unknown MA" in str(e) or "Invalid" in str(e)

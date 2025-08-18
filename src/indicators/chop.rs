@@ -339,6 +339,12 @@ pub fn chop_into_slice(dst: &mut [f64], input: &ChopInput, kern: Kernel) -> Resu
 		});
 	}
 
+	// Fill warmup period with NaN first
+	let warmup_period = first_valid_idx + period - 1;
+	for v in &mut dst[..warmup_period] {
+		*v = f64::NAN;
+	}
+
 	let chosen = match kern {
 		Kernel::Auto => detect_best_kernel(),
 		other => other,
@@ -357,12 +363,6 @@ pub fn chop_into_slice(dst: &mut [f64], input: &ChopInput, kern: Kernel) -> Resu
 			}
 			_ => unreachable!(),
 		}
-	}
-
-	// Fill warmup period with NaN
-	let warmup_period = first_valid_idx + period - 1;
-	for v in &mut dst[..warmup_period] {
-		*v = f64::NAN;
 	}
 
 	Ok(())
@@ -1885,6 +1885,15 @@ fn chop_batch_inner_into(
 	let rows = combos.len();
 	let cols = len;
 	
+	// Initialize NaN prefixes for each row based on warmup period
+	for (row, combo) in combos.iter().enumerate() {
+		let warmup = first + combo.period.unwrap() - 1;
+		let row_start = row * cols;
+		for i in 0..warmup.min(cols) {
+			out[row_start + i] = f64::NAN;
+		}
+	}
+	
 	// Write directly to the provided output slice
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let ChopParams { period, scalar, drift } = combos[row].clone();
@@ -2161,7 +2170,7 @@ pub fn chop_batch_js(
 		drift: config.drift_range,
 	};
 
-	let output = chop_batch_inner(high, low, close, &sweep, Kernel::Auto, false)
+	let output = chop_batch_with_kernel(high, low, close, &sweep, Kernel::Auto)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	let js_output = ChopBatchJsOutput {
@@ -2214,7 +2223,14 @@ pub fn chop_batch_into(
 
 		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
 
-		chop_batch_inner_into(high, low, close, &sweep, Kernel::Auto, false, out)
+		let kernel = detect_best_batch_kernel();
+		let simd = match kernel {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch => Kernel::Avx2,
+			Kernel::ScalarBatch => Kernel::Scalar,
+			_ => Kernel::Scalar,
+		};
+		chop_batch_inner_into(high, low, close, &sweep, simd, false, out)
 			.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 		Ok(rows)

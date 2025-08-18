@@ -105,6 +105,7 @@ pub mod squeeze_momentum;
 pub mod srsi;
 pub mod stc;
 pub mod stddev;
+pub use stddev::{stddev, StdDevInput, StdDevOutput, StdDevParams};
 pub mod stoch;
 pub mod stochf;
 pub mod supertrend;
@@ -123,12 +124,18 @@ pub mod vosc;
 pub mod voss;
 pub mod vpci;
 pub mod vpt;
+pub use vpt::{vpt, VptInput, VptOutput, VptParams};
 pub mod vwmacd;
 pub mod wad;
 pub mod wavetrend;
 pub mod wclprice;
 pub mod willr;
 pub mod zscore;
+pub use vpci::{vpci, VpciInput, VpciOutput, VpciParams, VpciError, VpciData, VpciStream, VpciBatchOutput, VpciBatchBuilder, VpciBatchRange};
+#[cfg(feature = "python")]
+pub use vpci::{vpci_py, vpci_batch_py, VpciStreamPy};
+#[cfg(feature = "wasm")]
+pub use vpci::{vpci_js, vpci_into, vpci_alloc, vpci_free, vpci_batch_js, vpci_batch_into, VpciContext};
 pub use apo::{apo, ApoInput, ApoOutput, ApoParams};
 pub use cci::{cci, CciInput, CciOutput, CciParams};
 pub use cfo::{cfo, CfoInput, CfoOutput, CfoParams};
