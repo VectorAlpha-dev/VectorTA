@@ -952,6 +952,15 @@ fn alma_batch_inner_into(
 	let cols = data.len();
 	let mut inv_norms = vec![0.0; rows];
 
+	// Initialize NaN prefixes for each row based on warmup period
+	for (row, combo) in combos.iter().enumerate() {
+		let warmup = first + combo.period.unwrap() - 1;
+		let row_start = row * cols;
+		for i in 0..warmup.min(cols) {
+			out[row_start + i] = f64::NAN;
+		}
+	}
+
 	let cap = rows * max_p;
 	let mut flat_w = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cap);
 	flat_w.resize(cap, 0.0);

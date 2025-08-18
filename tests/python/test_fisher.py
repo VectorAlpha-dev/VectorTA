@@ -94,13 +94,16 @@ class TestFisher:
             ta_indicators.fisher(empty, empty, period=9)
     
     def test_fisher_mismatched_lengths(self):
-        """Test Fisher fails with mismatched input lengths"""
+        """Test Fisher handles mismatched input lengths by using minimum length"""
         high = np.array([10.0, 20.0, 30.0])
         low = np.array([5.0, 15.0])  # Different length
         
-        # The error might come from numpy when slicing or from the Rust side
-        with pytest.raises((ValueError, IndexError)):
-            ta_indicators.fisher(high, low, period=2)
+        # Fisher uses minimum length (2 in this case)
+        fisher, signal = ta_indicators.fisher(high, low, period=2)
+        
+        # Result should have length equal to minimum of input lengths
+        assert len(fisher) == 2
+        assert len(signal) == 2
     
     def test_fisher_reinput(self):
         """Test Fisher applied to Fisher output - mirrors check_fisher_reinput"""

@@ -61,12 +61,12 @@ class TestEmd:
         
         # Check last 5 values
         for i in range(5):
-            assert_close(upperband[-5+i], expected_last_five_upper[i], epsilon=1e-6,
-                        f"EMD upperband mismatch at index {-5+i}")
-            assert_close(middleband[-5+i], expected_last_five_middle[i], epsilon=1e-6,
-                        f"EMD middleband mismatch at index {-5+i}")
-            assert_close(lowerband[-5+i], expected_last_five_lower[i], epsilon=1e-6,
-                        f"EMD lowerband mismatch at index {-5+i}")
+            assert_close(upperband[-5+i], expected_last_five_upper[i], 
+                        rtol=1e-6, atol=1e-6, msg=f"EMD upperband mismatch at index {-5+i}")
+            assert_close(middleband[-5+i], expected_last_five_middle[i], 
+                        rtol=1e-6, atol=1e-6, msg=f"EMD middleband mismatch at index {-5+i}")
+            assert_close(lowerband[-5+i], expected_last_five_lower[i], 
+                        rtol=1e-6, atol=1e-6, msg=f"EMD lowerband mismatch at index {-5+i}")
     
     def test_emd_errors(self):
         """Test error handling"""
@@ -110,7 +110,7 @@ class TestEmd:
         
         # Test with not enough data
         small_data = np.array([10.0] * 10)
-        with pytest.raises(ValueError, match="Not enough valid data"):
+        with pytest.raises(ValueError, match="Invalid period"):
             ta.emd(
                 small_data,
                 small_data,

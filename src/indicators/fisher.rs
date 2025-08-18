@@ -268,16 +268,15 @@ pub fn fisher_scalar_into(
 		}
 		let start = i + 1 - period;
 		
-		// Calculate min/max directly from high/low arrays
+		// Calculate min/max from midpoint values
 		let (mut min_val, mut max_val) = (f64::MAX, f64::MIN);
 		for j in start..=i {
-			let h = high[j];
-			let l = low[j];
-			if h > max_val {
-				max_val = h;
+			let midpoint = 0.5 * (high[j] + low[j]);
+			if midpoint > max_val {
+				max_val = midpoint;
 			}
-			if l < min_val {
-				min_val = l;
+			if midpoint < min_val {
+				min_val = midpoint;
 			}
 		}
 		
@@ -335,6 +334,11 @@ pub fn fisher_into_slice(
 	let (high, low) = input.as_ref();
 	let data_len = high.len().min(low.len());
 	let period = input.params.period.unwrap_or(9);
+	
+	// Check for empty data first
+	if data_len == 0 {
+		return Err(FisherError::EmptyData);
+	}
 	
 	// Find first valid index by checking both high and low
 	let mut first = None;
@@ -637,6 +641,84 @@ fn fisher_batch_inner(
 }
 
 #[inline(always)]
+fn fisher_batch_inner_into(
+	high: &[f64],
+	low: &[f64],
+	sweep: &FisherBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	fisher_out: &mut [f64],
+	signal_out: &mut [f64],
+) -> Result<Vec<FisherParams>, FisherError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(FisherError::InvalidPeriod { period: 0, data_len: 0 });
+	}
+
+	let data_len = high.len().min(low.len());
+	
+	// Find first valid index
+	let mut first = None;
+	for i in 0..data_len {
+		if !high[i].is_nan() && !low[i].is_nan() {
+			first = Some(i);
+			break;
+		}
+	}
+	let first = first.ok_or(FisherError::AllValuesNaN)?;
+	
+	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	if data_len - first < max_p {
+		return Err(FisherError::NotEnoughValidData {
+			needed: max_p,
+			valid: data_len - first,
+		});
+	}
+	
+	let rows = combos.len();
+	let cols = data_len;
+	
+	// Initialize NaN values for warmup periods in the pre-allocated buffers
+	for (row, combo) in combos.iter().enumerate() {
+		let warmup = first + combo.period.unwrap() - 1;
+		let row_start = row * cols;
+		for i in 0..warmup.min(cols) {
+			fisher_out[row_start + i] = f64::NAN;
+			signal_out[row_start + i] = f64::NAN;
+		}
+	}
+	
+	let do_row = |row: usize, out_fish: &mut [f64], out_signal: &mut [f64]| {
+		let period = combos[row].period.unwrap();
+		fisher_row_scalar_direct(high, low, first, period, out_fish, out_signal)
+	};
+
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			fisher_out
+				.par_chunks_mut(cols)
+				.zip(signal_out.par_chunks_mut(cols))
+				.enumerate()
+				.for_each(|(row, (fish, sig))| do_row(row, fish, sig));
+		}
+
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, (fish, sig)) in fisher_out.chunks_mut(cols).zip(signal_out.chunks_mut(cols)).enumerate() {
+				do_row(row, fish, sig);
+			}
+		}
+	} else {
+		for (row, (fish, sig)) in fisher_out.chunks_mut(cols).zip(signal_out.chunks_mut(cols)).enumerate() {
+			do_row(row, fish, sig);
+		}
+	}
+	
+	Ok(combos)
+}
+
+#[inline(always)]
 fn fisher_row_scalar_direct(
 	high: &[f64],
 	low: &[f64],
@@ -655,16 +737,15 @@ fn fisher_row_scalar_direct(
 		}
 		let start = i + 1 - period;
 		
-		// Calculate min/max directly from high/low arrays
+		// Calculate min/max from midpoint values
 		let (mut min_val, mut max_val) = (f64::MAX, f64::MIN);
 		for j in start..=i {
-			let h = high[j];
-			let l = low[j];
-			if h > max_val {
-				max_val = h;
+			let midpoint = 0.5 * (high[j] + low[j]);
+			if midpoint > max_val {
+				max_val = midpoint;
 			}
-			if l < min_val {
-				min_val = l;
+			if midpoint < min_val {
+				min_val = midpoint;
 			}
 		}
 		
@@ -1536,19 +1617,24 @@ pub fn fisher_py<'py>(
 	let low_slice = low.as_slice()?;
 	let kern = validate_kernel(kernel, false)?;
 	
+	let data_len = high_slice.len().min(low_slice.len());
+	
+	// Pre-allocate NumPy arrays for zero-copy operation
+	let fisher_arr = unsafe { PyArray1::<f64>::new(py, [data_len], false) };
+	let signal_arr = unsafe { PyArray1::<f64>::new(py, [data_len], false) };
+	let fisher_slice = unsafe { fisher_arr.as_slice_mut()? };
+	let signal_slice = unsafe { signal_arr.as_slice_mut()? };
+	
 	let params = FisherParams { period: Some(period) };
 	let input = FisherInput::from_slices(high_slice, low_slice, params);
 	
-	let (fisher_vec, signal_vec) = py.allow_threads(|| {
-		fisher_with_kernel(&input, kern)
-			.map(|o| (o.fisher, o.signal))
+	// Compute directly into pre-allocated arrays
+	py.allow_threads(|| {
+		fisher_into_slice(fisher_slice, signal_slice, &input, kern)
 	})
 	.map_err(|e| PyValueError::new_err(e.to_string()))?;
 	
-	Ok((
-		fisher_vec.into_pyarray(py),
-		signal_vec.into_pyarray(py)
-	))
+	Ok((fisher_arr, signal_arr))
 }
 
 #[cfg(feature = "python")]
@@ -1602,7 +1688,7 @@ pub fn fisher_batch_py<'py>(
 	let fisher_slice = unsafe { fisher_arr.as_slice_mut()? };
 	let signal_slice = unsafe { signal_arr.as_slice_mut()? };
 	
-	// Compute batch results
+	// Compute batch results directly into pre-allocated arrays
 	let combos = py.allow_threads(|| {
 		let kernel = match kern {
 			Kernel::Auto => detect_best_batch_kernel(),
@@ -1615,14 +1701,8 @@ pub fn fisher_batch_py<'py>(
 			_ => kernel,
 		};
 		
-		// Use the internal batch function that fills the pre-allocated arrays
-		let output = fisher_batch_inner(high_slice, low_slice, &sweep, simd, true)?;
-		
-		// Copy results to the pre-allocated arrays
-		fisher_slice.copy_from_slice(&output.fisher);
-		signal_slice.copy_from_slice(&output.signal);
-		
-		Ok::<Vec<FisherParams>, FisherError>(output.combos)
+		// Use the new function that writes directly to pre-allocated arrays
+		fisher_batch_inner_into(high_slice, low_slice, &sweep, simd, true, fisher_slice, signal_slice)
 	})
 	.map_err(|e: FisherError| PyValueError::new_err(e.to_string()))?;
 	

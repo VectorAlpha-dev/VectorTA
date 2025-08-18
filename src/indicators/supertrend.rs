@@ -1151,6 +1151,16 @@ pub fn supertrend_batch_inner_into(
 	let rows = combos.len();
 	let cols = len;
 
+	// Initialize NaN prefixes for each row based on warmup period
+	for (row, combo) in combos.iter().enumerate() {
+		let warmup = first_valid_idx + combo.period.unwrap_or(10) - 1;
+		let row_start = row * cols;
+		for i in 0..warmup.min(cols) {
+			trend_out[row_start + i] = f64::NAN;
+			changed_out[row_start + i] = f64::NAN;
+		}
+	}
+
 	let do_row = |row: usize, trend_row: &mut [f64], changed_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
 		let factor = combos[row].factor.unwrap();
@@ -1421,15 +1431,18 @@ pub fn supertrend_js(
 	};
 	let input = SuperTrendInput::from_slices(high, low, close, params);
 	
-	let output = supertrend_with_kernel(&input, Kernel::Auto)
+	// Allocate output array once - flattened as [trend..., changed...]
+	let len = high.len();
+	let mut output = vec![0.0; len * 2];
+	
+	// Split the output into trend and changed slices
+	let (trend_slice, changed_slice) = output.split_at_mut(len);
+	
+	// Compute directly into the pre-allocated slices
+	supertrend_into_slice(trend_slice, changed_slice, &input, detect_best_kernel())
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 	
-	// Return flattened array: [trend..., changed...]
-	let mut result = Vec::with_capacity(output.trend.len() * 2);
-	result.extend_from_slice(&output.trend);
-	result.extend_from_slice(&output.changed);
-	
-	Ok(result)
+	Ok(output)
 }
 
 #[cfg(feature = "wasm")]
@@ -1783,7 +1796,7 @@ mod tests {
 				}
 				None => {
 					stream_trend.push(f64::NAN);
-					stream_changed.push(0.0);
+					stream_changed.push(f64::NAN);
 				}
 			}
 		}
@@ -1806,6 +1819,9 @@ mod tests {
 			);
 		}
 		for (i, (&b, &s)) in batch_output.changed.iter().zip(stream_changed.iter()).enumerate() {
+			if b.is_nan() && s.is_nan() {
+				continue;
+			}
 			let diff = (b - s).abs();
 			assert!(
 				diff < 1e-9,

@@ -380,7 +380,7 @@ pub unsafe fn cksp_scalar(
 				break;
 			}
 		}
-		if current_atr != 0.0 && i >= first_valid_idx + p - 1 {
+		if current_atr != 0.0 && i >= warmup_period {
 			if let (Some(&(_, mh)), Some(&(_, ml))) = (dq_h.front(), dq_l.front()) {
 				let ls0_val = mh - x * current_atr;
 				let ss0_val = ml + x * current_atr;
@@ -578,7 +578,7 @@ pub unsafe fn cksp_compute_into(
 				break;
 			}
 		}
-		if current_atr != 0.0 && i >= first_valid_idx + p - 1 {
+		if current_atr != 0.0 && i >= warmup_period {
 			if let (Some(&(_, mh)), Some(&(_, ml))) = (dq_h.front(), dq_l.front()) {
 				let ls0_val = mh - x * current_atr;
 				let ss0_val = ml + x * current_atr;
@@ -810,6 +810,12 @@ impl CkspStream {
 				break;
 			}
 		}
+		// Check if we're still in warmup period
+		if self.i < self.p + self.q - 1 {
+			self.i += 1;
+			return None;
+		}
+		
 		let atr = match atr_opt {
 			Some(v) => v,
 			None => {
@@ -2536,9 +2542,7 @@ pub fn cksp_batch_py<'py>(
 	
 	// Calculate warmup periods for each row and initialize NaN prefixes
 	let warmup_periods: Vec<usize> = combos.iter().map(|c| {
-		let atr_period = c.p.unwrap();
-		let rolling_period = c.q.unwrap();
-		first + atr_period.max(rolling_period)
+		first + c.p.unwrap() + c.q.unwrap() - 1
 	}).collect();
 	
 	// Initialize NaN prefixes for both arrays

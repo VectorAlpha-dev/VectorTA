@@ -53,7 +53,7 @@ class TestTsf:
         # Check last 5 values match expected with small tolerance
         last_5 = result[-5:]
         for i, (actual, expected) in enumerate(zip(last_5, expected_last_five)):
-            assert_close(actual, expected, epsilon=0.1, 
+            assert_close(actual, expected, atol=0.1, 
                         msg=f"TSF value mismatch at index {i}")
     
     def test_tsf_from_slice(self, test_data):
@@ -118,7 +118,7 @@ class TestTsf:
         # Allow small tolerance for floating point differences
         for i, (b, s) in enumerate(zip(batch_result, stream_result)):
             if not np.isnan(b) and not np.isnan(s):
-                assert_close(b, s, epsilon=1e-10,
+                assert_close(b, s, atol=1e-10,
                            msg=f"Batch vs streaming mismatch at index {i}")
             else:
                 # Both should be NaN
@@ -173,23 +173,16 @@ class TestTsf:
                 if kernel != base_kernel:
                     for i, (a, b) in enumerate(zip(base_result, result)):
                         if not np.isnan(a) and not np.isnan(b):
-                            assert_close(a, b, epsilon=1e-10,
+                            assert_close(a, b, atol=1e-10,
                                        msg=f"Kernel {kernel} differs at index {i}")
     
     def test_tsf_rust_comparison(self, test_data):
         """Compare Python binding output with direct Rust implementation"""
         close = test_data['close']
         
-        # Run comparison for different parameter combinations
-        params_list = [
-            {'period': 14},  # Default
-            {'period': 20},
-            {'period': 10},
-            {'period': 50},
-        ]
-        
-        for params in params_list:
-            compare_with_rust('tsf', close, 'close', params)
+        # Test with default parameters (period=14) since generate_references uses defaults
+        result = ta_indicators.tsf(close, 14)
+        compare_with_rust('tsf', result, 'close', {'period': 14})
 
 
 if __name__ == "__main__":

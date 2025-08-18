@@ -65,12 +65,16 @@ use my_project::indicators::moving_averages::tema::{tema, TemaInput, TemaParams}
 use my_project::indicators::moving_averages::tilson::{tilson, TilsonInput, TilsonParams};
 use my_project::indicators::moving_averages::trendflex::{trendflex, TrendFlexInput, TrendFlexParams};
 use my_project::indicators::moving_averages::trima::{trima, TrimaInput, TrimaParams};
+use my_project::indicators::tsf::{tsf, TsfInput, TsfParams};
+use my_project::indicators::rocp::{rocp, RocpInput, RocpParams};
+use my_project::indicators::rsi::{rsi, RsiInput, RsiParams};
 use my_project::indicators::moving_averages::vpwma::{vpwma, VpwmaInput, VpwmaParams};
 use my_project::indicators::moving_averages::vwap::{vwap, VwapInput, VwapParams};
 use my_project::indicators::moving_averages::vwma::{vwma, VwmaInput, VwmaParams};
 use my_project::indicators::moving_averages::wilders::{wilders, WildersInput, WildersParams};
 use my_project::indicators::moving_averages::wma::{wma, WmaInput, WmaParams};
 use my_project::indicators::moving_averages::zlema::{zlema, ZlemaInput, ZlemaParams};
+use my_project::indicators::wclprice::{wclprice, WclpriceData, WclpriceInput, WclpriceParams};
 use my_project::utilities::data_loader::read_candles_from_csv;
 use serde_json::json;
 use std::env;
@@ -79,7 +83,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	let args: Vec<String> = env::args().collect();
 	if args.len() < 2 {
 		eprintln!("Usage: {} <indicator_name> [source]", args[0]);
-		eprintln!("Available indicators: ad, acosc, adx, adosc, adxr, alligator, alma, ao, apo, aroon, aroonosc, atr, bandpass, bollinger_bands, bollinger_bands_width, bop, cci, cfo, cg, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass_2_pole, highpass, hma, hwma, jma, jsa, kama, linreg, maaq, mama, marketefi, mwdx, nma, ppo, rsx, pwma, reflex, sinwma, sma, smma, squeeze_momentum, sqwma, srwma, supersmoother_3_pole, supersmoother, swma, tema, tilson, trendflex, trima, ui, vwap, vwma, vpwma, wilders, wma, zlema");
+		eprintln!("Available indicators: ad, acosc, adx, adosc, adxr, alligator, alma, ao, apo, aroon, aroonosc, atr, bandpass, bollinger_bands, bollinger_bands_width, bop, cci, cfo, cg, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass_2_pole, highpass, hma, hwma, jma, jsa, kama, linreg, maaq, mama, marketefi, mwdx, nma, ppo, rsx, pwma, reflex, rocp, rsi, sinwma, sma, smma, squeeze_momentum, sqwma, srwma, supersmoother_3_pole, supersmoother, swma, tema, tilson, trendflex, trima, tsf, ui, vwap, vwma, vpwma, wclprice, wilders, wma, zlema");
 		eprintln!("Available sources: open, high, low, close, volume, hl2, hlc3, ohlc4, hlcc4");
 		std::process::exit(1);
 	}
@@ -742,6 +746,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 				"length": result.values.len()
 			})
 		}
+		"rocp" => {
+			let params = RocpParams::default();
+			let period = params.period.unwrap_or(10);
+			let input = RocpInput::from_candles(&candles, source, params);
+			let result = rocp(&input)?;
+			json!({
+				"indicator": "rocp",
+				"source": source,
+				"params": {
+					"period": period
+				},
+				"values": result.values,
+				"length": result.values.len()
+			})
+		}
+		"rsi" => {
+			let params = RsiParams::default();
+			let period = params.period.unwrap_or(14);
+			let input = RsiInput::from_candles(&candles, source, params);
+			let result = rsi(&input)?;
+			json!({
+				"indicator": "rsi",
+				"source": source,
+				"params": {
+					"period": period
+				},
+				"values": result.values,
+				"length": result.values.len()
+			})
+		}
+		"tsf" => {
+			let params = TsfParams::default();
+			let period = params.period.unwrap_or(14);
+			let input = TsfInput::from_candles(&candles, source, params);
+			let result = tsf(&input)?;
+			json!({
+				"indicator": "tsf",
+				"source": source,
+				"params": {
+					"period": period
+				},
+				"values": result.values,
+				"length": result.values.len()
+			})
+		}
 		"ui" => {
 			let params = UiParams::default();
 			let period = params.period.unwrap_or(14);
@@ -1222,6 +1271,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 				"params": {
 					"period": period
 				},
+				"values": result.values,
+				"length": result.values.len()
+			})
+		}
+		"wclprice" => {
+			if source != "hlc" {
+				eprintln!("WCLPRICE indicator requires 'hlc' source");
+				std::process::exit(1);
+			}
+			let params = WclpriceParams::default();
+			let input = WclpriceInput {
+				data: WclpriceData::Candles { candles: &candles },
+				params,
+			};
+			let result = wclprice(&input)?;
+			json!({
+				"indicator": "wclprice",
+				"source": "hlc",
+				"params": {},
 				"values": result.values,
 				"length": result.values.len()
 			})

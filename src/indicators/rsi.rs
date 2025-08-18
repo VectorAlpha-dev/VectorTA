@@ -626,6 +626,15 @@ pub fn rsi_batch_inner_into(
 		return Err(RsiError::InvalidPeriod { period: out.len(), data_len: rows * cols });
 	}
 
+	// Initialize NaN prefixes for each row based on warmup period
+	for (row, combo) in combos.iter().enumerate() {
+		let warmup = first + combo.period.unwrap();
+		let row_start = row * cols;
+		for i in 0..warmup.min(cols) {
+			out[row_start + i] = f64::NAN;
+		}
+	}
+
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
 		match kern {
@@ -1521,6 +1530,11 @@ pub fn rsi_batch_py<'py>(
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn rsi_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+	// Check for empty input first
+	if data.is_empty() {
+		return Err(JsValue::from_str("Input data slice is empty"));
+	}
+	
 	let params = RsiParams { period: Some(period) };
 	let input = RsiInput::from_slice(data, params);
 	
@@ -1610,6 +1624,11 @@ pub struct RsiBatchJsOutput {
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = rsi_batch)]
 pub fn rsi_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	// Check for empty input first
+	if data.is_empty() {
+		return Err(JsValue::from_str("Input data slice is empty"));
+	}
+	
 	let config: RsiBatchConfig =
 		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
 

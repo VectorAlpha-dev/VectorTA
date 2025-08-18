@@ -1049,6 +1049,111 @@ fn expand_grid_for_emdbatch(r: &EmdBatchRange) -> Vec<EmdParams> {
 	expand_grid(r)
 }
 
+#[inline(always)]
+fn emd_batch_inner_into(
+	high: &[f64],
+	low: &[f64],
+	sweep: &EmdBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	upperband_out: &mut [f64],
+	middleband_out: &mut [f64],
+	lowerband_out: &mut [f64],
+) -> Result<Vec<EmdParams>, EmdError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(EmdError::InvalidPeriod { period: 0, data_len: 0 });
+	}
+	let len = high.len();
+	let first = (0..len)
+		.find(|&i| !high[i].is_nan() && !low[i].is_nan())
+		.ok_or(EmdError::AllValuesNaN)?;
+	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	let needed = (2 * max_p).max(50);
+	if len - first < needed {
+		return Err(EmdError::NotEnoughValidData {
+			needed,
+			valid: len - first,
+		});
+	}
+
+	let rows = combos.len();
+	let cols = len;
+	
+	// Ensure output slices are the correct size
+	if upperband_out.len() != rows * cols || middleband_out.len() != rows * cols || lowerband_out.len() != rows * cols {
+		return Err(EmdError::InvalidPeriod { period: rows * cols, data_len: upperband_out.len() });
+	}
+
+	// Convert to MaybeUninit slices for direct writing
+	let upperband_uninit = unsafe { 
+		std::slice::from_raw_parts_mut(upperband_out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>, rows * cols) 
+	};
+	let middleband_uninit = unsafe { 
+		std::slice::from_raw_parts_mut(middleband_out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>, rows * cols) 
+	};
+	let lowerband_uninit = unsafe { 
+		std::slice::from_raw_parts_mut(lowerband_out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>, rows * cols) 
+	};
+
+	// Calculate warmup periods for each row
+	let warmup_periods_upper: Vec<usize> = combos.iter()
+		.map(|_| first + 49) // upperband/lowerband warmup is always first + 49
+		.collect();
+	let warmup_periods_middle: Vec<usize> = combos.iter()
+		.map(|c| first + 2 * c.period.unwrap() - 1)
+		.collect();
+
+	// Initialize NaN prefixes
+	init_matrix_prefixes(upperband_uninit, cols, &warmup_periods_upper);
+	init_matrix_prefixes(middleband_uninit, cols, &warmup_periods_middle);
+	init_matrix_prefixes(lowerband_uninit, cols, &warmup_periods_upper);
+
+	let do_row = |row: usize, ub: &mut [f64], mb: &mut [f64], lb: &mut [f64]| {
+		let prm = &combos[row];
+		let period = prm.period.unwrap();
+		let delta = prm.delta.unwrap();
+		let fraction = prm.fraction.unwrap();
+		let out = unsafe { emd_row_scalar(high, low, period, delta, fraction, first, cols) }
+			.expect("emd row computation failed");
+		ub.copy_from_slice(&out.upperband);
+		mb.copy_from_slice(&out.middleband);
+		lb.copy_from_slice(&out.lowerband);
+	};
+
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			upperband_out
+				.par_chunks_mut(cols)
+				.zip(middleband_out.par_chunks_mut(cols))
+				.zip(lowerband_out.par_chunks_mut(cols))
+				.enumerate()
+				.for_each(|(row, ((ub, mb), lb))| {
+					do_row(row, ub, mb, lb);
+				});
+		}
+		#[cfg(target_arch = "wasm32")]
+		{
+			for row in 0..rows {
+				let ub = &mut upperband_out[row * cols..(row + 1) * cols];
+				let mb = &mut middleband_out[row * cols..(row + 1) * cols];
+				let lb = &mut lowerband_out[row * cols..(row + 1) * cols];
+				do_row(row, ub, mb, lb);
+			}
+		}
+	} else {
+		for row in 0..rows {
+			let ub = &mut upperband_out[row * cols..(row + 1) * cols];
+			let mb = &mut middleband_out[row * cols..(row + 1) * cols];
+			let lb = &mut lowerband_out[row * cols..(row + 1) * cols];
+			do_row(row, ub, mb, lb);
+		}
+	}
+
+	Ok(combos)
+}
+
 // API parity: this is required for batch indicator discovery/row mapping
 impl EmdBatchOutput {
 	pub fn row_for_params(&self, p: &EmdParams) -> Option<usize> {
@@ -2225,6 +2330,9 @@ pub fn emd_batch_py<'py>(
 	fraction_range: (f64, f64, f64),
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+	use pyo3::types::PyDict;
+
 	let high_slice = high.as_slice()?;
 	let low_slice = low.as_slice()?;
 	let kern = validate_kernel(kernel, true)?;
@@ -2235,21 +2343,48 @@ pub fn emd_batch_py<'py>(
 		fraction: fraction_range,
 	};
 
-	let output = py
-		.allow_threads(|| emd_batch_with_kernel(high_slice, low_slice, &sweep, kern))
+	// Calculate dimensions
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = high_slice.len();
+
+	// Pre-allocate NumPy arrays directly (zero-copy optimization)
+	let upperband_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let middleband_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let lowerband_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	
+	let upperband_slice = unsafe { upperband_arr.as_slice_mut()? };
+	let middleband_slice = unsafe { middleband_arr.as_slice_mut()? };
+	let lowerband_slice = unsafe { lowerband_arr.as_slice_mut()? };
+
+	let combos = py
+		.allow_threads(|| {
+			let kernel = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+			let simd = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => unreachable!(),
+			};
+			emd_batch_inner_into(
+				high_slice, 
+				low_slice, 
+				&sweep, 
+				simd, 
+				true,
+				upperband_slice,
+				middleband_slice,
+				lowerband_slice
+			)
+		})
 		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
 	let dict = PyDict::new(py);
 	
 	// Reshape the flattened arrays into 2D matrices
-	let rows = output.rows;
-	let cols = output.cols;
-	
-	// Create reshaped arrays
-	let upperband_arr = output.upperband.into_pyarray(py);
-	let middleband_arr = output.middleband.into_pyarray(py);
-	let lowerband_arr = output.lowerband.into_pyarray(py);
-	
 	dict.set_item("upperband", upperband_arr.reshape((rows, cols))?)?;
 	dict.set_item("middleband", middleband_arr.reshape((rows, cols))?)?;
 	dict.set_item("lowerband", lowerband_arr.reshape((rows, cols))?)?;
@@ -2257,7 +2392,7 @@ pub fn emd_batch_py<'py>(
 	// Add parameter arrays
 	dict.set_item(
 		"periods",
-		output.combos
+		combos
 			.iter()
 			.map(|p| p.period.unwrap() as u64)
 			.collect::<Vec<_>>()
@@ -2265,7 +2400,7 @@ pub fn emd_batch_py<'py>(
 	)?;
 	dict.set_item(
 		"deltas",
-		output.combos
+		combos
 			.iter()
 			.map(|p| p.delta.unwrap())
 			.collect::<Vec<_>>()
@@ -2273,7 +2408,7 @@ pub fn emd_batch_py<'py>(
 	)?;
 	dict.set_item(
 		"fractions",
-		output.combos
+		combos
 			.iter()
 			.map(|p| p.fraction.unwrap())
 			.collect::<Vec<_>>()
@@ -2699,21 +2834,28 @@ pub fn emd_batch_into(
 			hlcc4,
 		};
 
-		let output = emd_batch_slice(high, low, &sweep, Kernel::Auto)
-			.map_err(|e| JsValue::from_str(&e.to_string()))?;
-
-		let rows = output.rows;
-		let cols = output.cols;
+		// Calculate dimensions
+		let combos = expand_grid_for_emdbatch(&sweep);
+		let rows = combos.len();
+		let cols = len;
 		let total_len = rows * cols;
 
-		// Check output buffer sizes
+		// Get output buffer slices
 		let upper_slice = std::slice::from_raw_parts_mut(upper_ptr, total_len);
 		let middle_slice = std::slice::from_raw_parts_mut(middle_ptr, total_len);
 		let lower_slice = std::slice::from_raw_parts_mut(lower_ptr, total_len);
 
-		upper_slice.copy_from_slice(&output.upperband);
-		middle_slice.copy_from_slice(&output.middleband);
-		lower_slice.copy_from_slice(&output.lowerband);
+		// Use the optimized _inner_into function for zero-copy operation
+		emd_batch_inner_into(
+			high,
+			low,
+			&sweep,
+			detect_best_kernel(),
+			false,
+			upper_slice,
+			middle_slice,
+			lower_slice
+		).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 		Ok(rows)
 	}

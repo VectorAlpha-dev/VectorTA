@@ -141,14 +141,14 @@ test('WCLPRICE fast API (no aliasing)', () => {
     const closePtr = wasm.wclprice_alloc(3);
     const outPtr = wasm.wclprice_alloc(3);
     
-    const memory = new Float64Array(wasm.memory.buffer);
+    const memory = new Float64Array(wasm.__wasm.memory.buffer);
     memory.set(high, highPtr / 8);
     memory.set(low, lowPtr / 8);
     memory.set(close, closePtr / 8);
     
     wasm.wclprice_into(highPtr, lowPtr, closePtr, outPtr, 3);
     
-    const result = new Float64Array(wasm.memory.buffer, outPtr, 3);
+    const result = new Float64Array(wasm.__wasm.memory.buffer, outPtr, 3);
     
     // Check results
     for (let i = 0; i < 3; i++) {
@@ -173,7 +173,7 @@ test('WCLPRICE fast API (with aliasing)', () => {
     const lowPtr = wasm.wclprice_alloc(3);
     const closePtr = wasm.wclprice_alloc(3);
     
-    const memory = new Float64Array(wasm.memory.buffer);
+    const memory = new Float64Array(wasm.__wasm.memory.buffer);
     memory.set(data, dataPtr / 8);
     memory.set(low, lowPtr / 8);
     memory.set(close, closePtr / 8);
@@ -181,7 +181,7 @@ test('WCLPRICE fast API (with aliasing)', () => {
     // Use dataPtr as both high input and output (aliasing)
     wasm.wclprice_into(dataPtr, lowPtr, closePtr, dataPtr, 3);
     
-    const result = new Float64Array(wasm.memory.buffer, dataPtr, 3);
+    const result = new Float64Array(wasm.__wasm.memory.buffer, dataPtr, 3);
     
     // Check results
     for (let i = 0; i < 3; i++) {
@@ -216,10 +216,10 @@ test('WCLPRICE batch', () => {
 });
 
 test('WCLPRICE with test data', async () => {
-    // Test with real data
-    const high = new Float64Array(testData.high.slice(0, 100));
-    const low = new Float64Array(testData.low.slice(0, 100));
-    const close = new Float64Array(testData.close.slice(0, 100));
+    // Test with real data - use full dataset for Rust comparison
+    const high = new Float64Array(testData.high);
+    const low = new Float64Array(testData.low);
+    const close = new Float64Array(testData.close);
     
     const result = wasm.wclprice_js(high, low, close);
     

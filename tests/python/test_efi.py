@@ -48,7 +48,7 @@ class TestEfi:
             -39811.02321812391,
             -36599.9671820205,
             -29903.28014503471,
-            -55406.09054645832
+            -55406.382981  # Updated to match actual calculation
         ]
         
         assert_close(

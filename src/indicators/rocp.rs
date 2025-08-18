@@ -217,7 +217,7 @@ pub fn rocp_with_kernel(input: &RocpInput, kernel: Kernel) -> Result<RocpOutput,
 			Kernel::Avx2 | Kernel::Avx2Batch => rocp_avx2(data, period, first, &mut out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 | Kernel::Avx512Batch => rocp_avx512(data, period, first, &mut out),
-			_ => unreachable!(),
+			_ => rocp_scalar(data, period, first, &mut out),
 		}
 	}
 
@@ -268,7 +268,7 @@ pub fn rocp_into_slice(dst: &mut [f64], input: &RocpInput, kern: Kernel) -> Resu
 			Kernel::Avx2 | Kernel::Avx2Batch => rocp_avx2(data, period, first, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 | Kernel::Avx512Batch => rocp_avx512(data, period, first, dst),
-			_ => unreachable!(),
+			_ => rocp_scalar(data, period, first, dst),
 		}
 	}
 
@@ -418,8 +418,8 @@ pub fn rocp_batch_with_kernel(data: &[f64], sweep: &RocpBatchRange, k: Kernel) -
 	let simd = match kernel {
 		Kernel::Avx512Batch => Kernel::Avx512,
 		Kernel::Avx2Batch => Kernel::Avx2,
-		Kernel::ScalarBatch => Kernel::Scalar,
-		_ => unreachable!(),
+		Kernel::ScalarBatch | Kernel::Scalar => Kernel::Scalar,
+		_ => Kernel::Scalar,
 	};
 	rocp_batch_par_slice(data, sweep, simd)
 }
@@ -522,7 +522,7 @@ fn rocp_batch_inner(
 			Kernel::Avx2 => rocp_row_avx2(data, first, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 => rocp_row_avx512(data, first, period, out_row),
-			_ => unreachable!(),
+			_ => rocp_row_scalar(data, first, period, out_row),
 		}
 	};
 
@@ -653,7 +653,7 @@ pub fn rocp_batch_inner_into(
 			Kernel::Avx2 => rocp_row_avx2(data, first, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 => rocp_row_avx512(data, first, period, out_row),
-			_ => unreachable!(),
+			_ => rocp_row_scalar(data, first, period, out_row),
 		}
 	};
 
@@ -761,8 +761,8 @@ pub fn rocp_batch_py<'py>(
 			let simd = match kernel {
 				Kernel::Avx512Batch => Kernel::Avx512,
 				Kernel::Avx2Batch => Kernel::Avx2,
-				Kernel::ScalarBatch => Kernel::Scalar,
-				_ => unreachable!(),
+				Kernel::ScalarBatch | Kernel::Scalar => Kernel::Scalar,
+				_ => Kernel::Scalar,
 			};
 
 			rocp_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
@@ -790,7 +790,7 @@ pub fn rocp_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
 	let input = RocpInput::from_slice(data, params);
 
 	let mut output = vec![0.0; data.len()];
-	rocp_into_slice(&mut output, &input, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))?;
+	rocp_into_slice(&mut output, &input, detect_best_kernel()).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	Ok(output)
 }
@@ -875,7 +875,7 @@ pub fn rocp_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, J
 		period: config.period_range,
 	};
 
-	let output = rocp_batch_inner(data, &sweep, Kernel::Auto, false).map_err(|e| JsValue::from_str(&e.to_string()))?;
+	let output = rocp_batch_inner(data, &sweep, detect_best_kernel(), false).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	let js_output = RocpBatchJsOutput {
 		values: output.values,
@@ -918,7 +918,7 @@ pub fn rocp_batch_into(
 		let simd = match kernel {
 			Kernel::Avx512Batch => Kernel::Avx512,
 			Kernel::Avx2Batch => Kernel::Avx2,
-			Kernel::ScalarBatch => Kernel::Scalar,
+			Kernel::ScalarBatch | Kernel::Scalar => Kernel::Scalar,
 			_ => Kernel::Scalar,
 		};
 

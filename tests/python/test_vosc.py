@@ -26,7 +26,7 @@ class TestVosc:
     def test_vosc_accuracy(self, test_data):
         """Test VOSC matches expected values from Rust tests"""
         # Extract volume data
-        volume = test_data.volume
+        volume = test_data['volume']
         
         # Parameters from Rust test
         short_period = 2
@@ -76,7 +76,7 @@ class TestVosc:
     
     def test_vosc_batch(self, test_data):
         """Test VOSC batch calculation"""
-        volume = test_data.volume
+        volume = test_data['volume']
         
         # Run batch calculation with ranges
         result = ta_indicators.vosc_batch(
