@@ -666,6 +666,76 @@ fn vosc_batch_inner(
 	})
 }
 
+#[inline(always)]
+fn vosc_batch_inner_into(
+	data: &[f64],
+	sweep: &VoscBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	out: &mut [f64],
+) -> Result<Vec<VoscParams>, VoscError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(VoscError::InvalidLongPeriod { period: 0, data_len: 0 });
+	}
+
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(VoscError::AllValuesNaN)?;
+	let max_long = combos.iter().map(|c| c.long_period.unwrap()).max().unwrap();
+	if data.len() - first < max_long {
+		return Err(VoscError::NotEnoughValidData {
+			needed: max_long,
+			valid: data.len() - first,
+		});
+	}
+
+	let rows = combos.len();
+	let cols = data.len();
+	
+	// CRITICAL: Initialize NaN prefixes for each row in the externally-provided buffer
+	for (row, combo) in combos.iter().enumerate() {
+		let warmup = first + combo.long_period.unwrap() - 1;
+		let row_start = row * cols;
+		for i in 0..warmup.min(cols) {
+			out[row_start + i] = f64::NAN;
+		}
+	}
+
+	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+		let short = combos[row].short_period.unwrap();
+		let long = combos[row].long_period.unwrap();
+		match kern {
+			Kernel::Scalar => vosc_row_scalar(data, first, short, long, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => vosc_row_avx2(data, first, short, long, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => vosc_row_avx512(data, first, short, long, out_row),
+			_ => unreachable!(),
+		}
+	};
+	
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			out.par_chunks_mut(cols)
+				.enumerate()
+				.for_each(|(row, slice)| do_row(row, slice));
+		}
+
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, slice) in out.chunks_mut(cols).enumerate() {
+				do_row(row, slice);
+			}
+		}
+	} else {
+		for (row, slice) in out.chunks_mut(cols).enumerate() {
+			do_row(row, slice);
+		}
+	}
+
+	Ok(combos)
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -1334,12 +1404,8 @@ pub fn vosc_batch_py<'py>(
 				_ => kernel,
 			};
 
-			let result = vosc_batch_inner(slice_in, &sweep, simd, true)?;
-
-			// Copy results to the pre-allocated buffer
-			slice_out.copy_from_slice(&result.values);
-
-			Ok(result.combos)
+			// Use vosc_batch_inner_into to write directly to the pre-allocated buffer
+			vosc_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
 		})
 		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
@@ -1546,7 +1612,7 @@ pub fn vosc_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> 
 		long_period: config.long_period_range,
 	};
 
-	let output = vosc_batch_inner(data, &sweep, Kernel::Auto, false)
+	let output = vosc_batch_inner(data, &sweep, detect_best_kernel(), false)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	let js_output = VoscBatchJsOutput {

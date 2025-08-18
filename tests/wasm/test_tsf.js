@@ -122,14 +122,14 @@ test('TSF fast API', async (t) => {
         
         try {
             // Copy input data to WASM memory
-            const wasmMemory = new Float64Array(wasm.memory.buffer);
-            wasmMemory.set(close, inPtr / 8);
+            const wasmMemory = new Float64Array(wasm.__wasm.memory.buffer, inPtr, len);
+            wasmMemory.set(close);
             
             // Run computation
             wasm.tsf_into(inPtr, outPtr, len, 14);
             
             // Read results
-            const result = new Float64Array(wasm.memory.buffer, outPtr, len);
+            const result = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
             const resultCopy = new Float64Array(result); // Copy before freeing
             
             // Compare with safe API
@@ -151,14 +151,14 @@ test('TSF fast API', async (t) => {
         
         try {
             // Copy input data to WASM memory
-            const wasmMemory = new Float64Array(wasm.memory.buffer);
-            wasmMemory.set(close, ptr / 8);
+            const wasmMemory = new Float64Array(wasm.__wasm.memory.buffer, ptr, len);
+            wasmMemory.set(close);
             
             // Run in-place computation
             wasm.tsf_into(ptr, ptr, len, 14);
             
             // Read results
-            const result = new Float64Array(wasm.memory.buffer, ptr, len);
+            const result = new Float64Array(wasm.__wasm.memory.buffer, ptr, len);
             const resultCopy = new Float64Array(result); // Copy before freeing
             
             // Compare with safe API
@@ -213,8 +213,8 @@ test('TSF batch fast API', () => {
     
     try {
         // Copy input data to WASM memory
-        const wasmMemory = new Float64Array(wasm.memory.buffer);
-        wasmMemory.set(close, inPtr / 8);
+        const wasmMemory = new Float64Array(wasm.__wasm.memory.buffer, inPtr, len);
+        wasmMemory.set(close);
         
         // Run batch computation
         const rows = wasm.tsf_batch_into(
@@ -225,7 +225,7 @@ test('TSF batch fast API', () => {
         assert.strictEqual(rows, expectedRows, 'Should return correct number of rows');
         
         // Read results
-        const result = new Float64Array(wasm.memory.buffer, outPtr, len * rows);
+        const result = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len * rows);
         
         // Verify each row against single computation
         for (let i = 0; i < rows; i++) {
@@ -256,15 +256,15 @@ test('TSF memory management', () => {
     assert(ptr > 0, 'Should return valid pointer');
     
     // Test writing to allocated memory
-    const wasmMemory = new Float64Array(wasm.memory.buffer);
+    const wasmMemory = new Float64Array(wasm.__wasm.memory.buffer, ptr, len);
     const data = new Float64Array(len);
     for (let i = 0; i < len; i++) {
         data[i] = Math.random();
     }
-    wasmMemory.set(data, ptr / 8);
+    wasmMemory.set(data);
     
     // Test reading back
-    const readBack = new Float64Array(wasm.memory.buffer, ptr, len);
+    const readBack = new Float64Array(wasm.__wasm.memory.buffer, ptr, len);
     assertArrayClose(new Float64Array(readBack), data, 1e-15, 'Should read back same data');
     
     // Free memory

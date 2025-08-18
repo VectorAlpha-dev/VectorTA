@@ -153,12 +153,12 @@ class TestCorrelationCycle:
             result = stream.update(val)
             results.append(result)
         
-        # First 19 values should return None (warmup period)
-        for i in range(19):
+        # First 20 values should return None (warmup period)
+        for i in range(20):
             assert results[i] is None
         
         # After warmup, should get tuples with 4 values
-        for i in range(19, 50):
+        for i in range(20, 50):
             assert results[i] is not None
             assert isinstance(results[i], tuple)
             assert len(results[i]) == 4  # real, imag, angle, state

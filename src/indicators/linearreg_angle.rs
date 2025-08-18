@@ -1342,6 +1342,12 @@ pub fn linearreg_angle_into_slice(
 		other => other,
 	};
 
+	// Initialize warmup period with NaN before computation
+	let warmup_end = first + period - 1;
+	for v in &mut dst[..warmup_end] {
+		*v = f64::NAN;
+	}
+
 	unsafe {
 		match chosen {
 			Kernel::Scalar | Kernel::ScalarBatch => linearreg_angle_scalar(data, period, first, dst),
@@ -1351,12 +1357,6 @@ pub fn linearreg_angle_into_slice(
 			Kernel::Avx512 | Kernel::Avx512Batch => linearreg_angle_avx512(data, period, first, dst),
 			_ => unreachable!(),
 		}
-	}
-
-	// Fill warmup period with NaN
-	let warmup_end = first + period - 1;
-	for v in &mut dst[..warmup_end] {
-		*v = f64::NAN;
 	}
 
 	Ok(())
@@ -1486,6 +1486,16 @@ fn linearreg_angle_batch_inner_into(
 	}
 	let rows = combos.len();
 	let cols = data.len();
+	
+	// Initialize NaN prefixes for each row based on warmup period
+	for (row, combo) in combos.iter().enumerate() {
+		let warmup = first + combo.period.unwrap() - 1;
+		let row_start = row * cols;
+		for i in 0..warmup.min(cols) {
+			out[row_start + i] = f64::NAN;
+		}
+	}
+	
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
 		match kern {
@@ -1620,7 +1630,7 @@ pub fn linearreg_angle_batch_js(data: &[f64], config: JsValue) -> Result<JsValue
 		period: config.period_range,
 	};
 
-	let output = linearreg_angle_batch_inner(data, &sweep, Kernel::Auto, false)
+	let output = linearreg_angle_batch_inner(data, &sweep, Kernel::Scalar, false)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	let js_output = Linearreg_angleBatchJsOutput {

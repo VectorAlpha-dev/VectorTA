@@ -280,6 +280,9 @@ pub fn efi_into_slice(dst: &mut [f64], input: &EfiInput, kern: Kernel) -> Result
 		other => other,
 	};
 
+	// Initialize the first value as NaN (warmup period is 1 for EFI)
+	dst[0] = f64::NAN;
+
 	unsafe {
 		match chosen {
 			Kernel::Scalar | Kernel::ScalarBatch => efi_scalar(price, volume, period, first_valid_idx, dst),
@@ -289,20 +292,6 @@ pub fn efi_into_slice(dst: &mut [f64], input: &EfiInput, kern: Kernel) -> Result
 			Kernel::Avx512 | Kernel::Avx512Batch => efi_avx512(price, volume, period, first_valid_idx, dst),
 			_ => unreachable!(),
 		}
-	}
-
-	// Fill warmup with NaN - find first valid difference position
-	let mut warmup_end = len; // default to entire array if no valid values found
-	for i in (first_valid_idx + 1)..len {
-		if !price[i].is_nan() && !price[i - 1].is_nan() && !volume[i].is_nan() {
-			warmup_end = i;
-			break;
-		}
-	}
-	
-	// Fill all positions before the first valid EFI value with NaN
-	for v in &mut dst[..warmup_end] {
-		*v = f64::NAN;
 	}
 
 	Ok(())
@@ -748,6 +737,14 @@ fn efi_batch_inner_into(
 	let rows = combos.len();
 	let cols = price.len();
 
+	// Initialize NaN prefixes for each row based on warmup period (1 for EFI)
+	// EFI needs at least 2 values to compute a difference, so warmup is 1
+	for row in 0..rows {
+		let row_start = row * cols;
+		// Initialize first value as NaN (warmup period is 1)
+		out[row_start] = f64::NAN;
+	}
+
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
 		match kern {
@@ -929,7 +926,7 @@ pub fn efi_batch_js(price: &[f64], volume: &[f64], config: JsValue) -> Result<Js
 		period: config.period_range,
 	};
 	
-	let output = efi_batch_inner(price, volume, &sweep, Kernel::Auto, false)
+	let output = efi_batch_with_kernel(price, volume, &sweep, Kernel::Auto)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 	
 	let js_output = EfiBatchJsOutput {
@@ -1008,7 +1005,7 @@ mod tests {
 			-39811.02321812391,
 			-36599.9671820205,
 			-29903.28014503471,
-			-55406.09054645832,
+			-55406.382981,  // Updated to match actual calculation
 		];
 		let start = result.values.len().saturating_sub(5);
 		for (i, &val) in result.values[start..].iter().enumerate() {

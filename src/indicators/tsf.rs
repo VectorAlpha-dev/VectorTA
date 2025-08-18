@@ -590,6 +590,8 @@ fn tsf_batch_inner(
 			Kernel::Avx2 => tsf_row_avx2(data, first, period, sum_x, divisor, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 => tsf_row_avx512(data, first, period, sum_x, divisor, out_row),
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx512 => tsf_row_scalar(data, first, period, sum_x, divisor, out_row),
 			_ => unreachable!(),
 		}
 	};
@@ -690,6 +692,8 @@ fn tsf_batch_inner_into(
 			Kernel::Avx2 => tsf_row_avx2(data, first, period, sum_x, divisor, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 => tsf_row_avx512(data, first, period, sum_x, divisor, out_row),
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx512 => tsf_row_scalar(data, first, period, sum_x, divisor, out_row),
 			_ => unreachable!(),
 		}
 	};
@@ -907,7 +911,7 @@ pub fn tsf_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
 
 	let mut output = vec![0.0; data.len()];
 
-	tsf_into_slice(&mut output, &input, Kernel::Auto)
+	tsf_into_slice(&mut output, &input, detect_best_kernel())
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	Ok(output)
@@ -951,16 +955,17 @@ pub fn tsf_into(
 		};
 		let input = TsfInput::from_slice(data, params);
 
+		let kernel = detect_best_kernel();
 		if in_ptr == out_ptr {
 			// Handle aliasing case
 			let mut temp = vec![0.0; len];
-			tsf_into_slice(&mut temp, &input, Kernel::Auto)
+			tsf_into_slice(&mut temp, &input, kernel)
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 			let out = std::slice::from_raw_parts_mut(out_ptr, len);
 			out.copy_from_slice(&temp);
 		} else {
 			let out = std::slice::from_raw_parts_mut(out_ptr, len);
-			tsf_into_slice(out, &input, Kernel::Auto)
+			tsf_into_slice(out, &input, kernel)
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 		}
 		Ok(())
@@ -993,7 +998,14 @@ pub fn tsf_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, Js
 		period: config.period_range,
 	};
 
-	let output = tsf_batch_inner(data, &sweep, Kernel::Auto, false)
+	let kernel = detect_best_batch_kernel();
+	let simd = match kernel {
+		Kernel::Avx512Batch => Kernel::Avx512,
+		Kernel::Avx2Batch => Kernel::Avx2,
+		Kernel::ScalarBatch => Kernel::Scalar,
+		_ => Kernel::Scalar, // Fallback for WASM
+	};
+	let output = tsf_batch_inner(data, &sweep, simd, false)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	let js_output = TsfBatchJsOutput {

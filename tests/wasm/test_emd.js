@@ -2,10 +2,11 @@
  * WASM binding tests for EMD indicator.
  * These tests mirror the Rust unit tests to ensure WASM bindings work correctly.
  */
-const test = require('node:test');
-const assert = require('node:assert');
-const path = require('path');
-const { 
+import test from 'node:test';
+import assert from 'node:assert';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { 
     loadTestData, 
     assertArrayClose, 
     assertClose,
@@ -13,7 +14,10 @@ const {
     assertAllNaN,
     assertNoNaN,
     EXPECTED_OUTPUTS 
-} = require('./test_utils');
+} from './test_utils.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 let wasm;
 let testData;
@@ -22,8 +26,11 @@ test.before(async () => {
     // Load WASM module
     try {
         const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
-        wasm = await import(wasmPath);
-        await wasm.default();
+        const importPath = process.platform === 'win32' 
+            ? 'file:///' + wasmPath.replace(/\\/g, '/')
+            : wasmPath;
+        wasm = await import(importPath);
+        // No need to call default() for ES modules
     } catch (error) {
         console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
         throw error;
@@ -44,10 +51,10 @@ test('EMD accuracy', () => {
         0.1      // fraction
     );
     
-    assert.strictEqual(result.rows(), 3, 'Should have 3 output rows');
-    assert.strictEqual(result.cols(), testData.close.length, 'Cols should match input length');
+    assert.strictEqual(result.rows, 3, 'Should have 3 output rows');
+    assert.strictEqual(result.cols, testData.close.length, 'Cols should match input length');
     
-    const values = result.values();
+    const values = result.values;
     const len = testData.close.length;
     
     // Extract the three bands
@@ -128,24 +135,39 @@ test('EMD error handling', () => {
     assert.throws(() => {
         const data = new Float64Array(10).fill(1.0);
         wasm.emd_js(data, data, data, data, 20, 0.5, 0.1);
-    }, /Not enough valid data/, 'Should throw on insufficient data');
+    }, /Invalid period/, 'Should throw on insufficient data');
 });
 
 test('EMD fast/unsafe API', () => {
     const len = testData.close.length;
     
-    // Allocate output buffers
+    // Allocate input and output buffers
+    const highPtr = wasm.emd_alloc(len);
+    const lowPtr = wasm.emd_alloc(len);
+    const closePtr = wasm.emd_alloc(len);
+    const volumePtr = wasm.emd_alloc(len);
     const upperPtr = wasm.emd_alloc(len);
     const middlePtr = wasm.emd_alloc(len);
     const lowerPtr = wasm.emd_alloc(len);
     
     try {
+        // Copy input data to WASM memory
+        const highView = new Float64Array(wasm.__wasm.memory.buffer, highPtr, len);
+        const lowView = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, len);
+        const closeView = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
+        const volumeView = new Float64Array(wasm.__wasm.memory.buffer, volumePtr, len);
+        
+        highView.set(testData.high);
+        lowView.set(testData.low);
+        closeView.set(testData.close);
+        volumeView.set(testData.volume);
+        
         // Call fast API
         wasm.emd_into(
-            testData.high,
-            testData.low,
-            testData.close,
-            testData.volume,
+            highPtr,
+            lowPtr,
+            closePtr,
+            volumePtr,
             upperPtr,
             middlePtr,
             lowerPtr,
@@ -155,10 +177,10 @@ test('EMD fast/unsafe API', () => {
             0.1      // fraction
         );
         
-        // Create typed arrays from pointers
-        const upperband = new Float64Array(wasm.memory.buffer, upperPtr, len);
-        const middleband = new Float64Array(wasm.memory.buffer, middlePtr, len);
-        const lowerband = new Float64Array(wasm.memory.buffer, lowerPtr, len);
+        // Create typed arrays from pointers (recreate in case memory grew)
+        const upperband = new Float64Array(wasm.__wasm.memory.buffer, upperPtr, len);
+        const middleband = new Float64Array(wasm.__wasm.memory.buffer, middlePtr, len);
+        const lowerband = new Float64Array(wasm.__wasm.memory.buffer, lowerPtr, len);
         
         // Expected values from Rust tests (last 5 values)
         const expectedLastFiveUpper = [
@@ -180,6 +202,10 @@ test('EMD fast/unsafe API', () => {
         }
     } finally {
         // Clean up allocated memory
+        wasm.emd_free(highPtr, len);
+        wasm.emd_free(lowPtr, len);
+        wasm.emd_free(closePtr, len);
+        wasm.emd_free(volumePtr, len);
         wasm.emd_free(upperPtr, len);
         wasm.emd_free(middlePtr, len);
         wasm.emd_free(lowerPtr, len);
@@ -189,21 +215,33 @@ test('EMD fast/unsafe API', () => {
 test('EMD in-place operation (aliasing)', () => {
     const len = testData.close.length;
     
-    // Create a copy of high data for in-place operation
-    const data = new Float64Array(testData.high);
-    
-    // Allocate output buffers
+    // Allocate buffers for all inputs and outputs
+    const highPtr = wasm.emd_alloc(len);  // Will also be used for upperband output
+    const lowPtr = wasm.emd_alloc(len);
+    const closePtr = wasm.emd_alloc(len);
+    const volumePtr = wasm.emd_alloc(len);
     const middlePtr = wasm.emd_alloc(len);
     const lowerPtr = wasm.emd_alloc(len);
     
     try {
-        // Call fast API with input as output (aliasing)
+        // Copy input data to WASM memory
+        const highView = new Float64Array(wasm.__wasm.memory.buffer, highPtr, len);
+        const lowView = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, len);
+        const closeView = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
+        const volumeView = new Float64Array(wasm.__wasm.memory.buffer, volumePtr, len);
+        
+        highView.set(testData.high);
+        lowView.set(testData.low);
+        closeView.set(testData.close);
+        volumeView.set(testData.volume);
+        
+        // Call fast API with input as output (aliasing - highPtr used for both input and upperband output)
         wasm.emd_into(
-            data,           // high
-            testData.low,
-            testData.close,
-            testData.volume,
-            data,           // upperband output (same as high input - aliasing!)
+            highPtr,         // high input
+            lowPtr,
+            closePtr,
+            volumePtr,
+            highPtr,         // upperband output (same as high input - aliasing!)
             middlePtr,
             lowerPtr,
             len,
@@ -211,6 +249,9 @@ test('EMD in-place operation (aliasing)', () => {
             0.5,     // delta
             0.1      // fraction
         );
+        
+        // Recreate view after operation
+        const upperband = new Float64Array(wasm.__wasm.memory.buffer, highPtr, len);
         
         // The data array should now contain upperband values
         const expectedLastFiveUpper = [
@@ -224,13 +265,17 @@ test('EMD in-place operation (aliasing)', () => {
         // Check that in-place operation worked correctly
         for (let i = 0; i < 5; i++) {
             assertClose(
-                data[len - 5 + i],
+                upperband[len - 5 + i],
                 expectedLastFiveUpper[i],
                 1e-6,
                 `In-place upperband mismatch at index ${len - 5 + i}`
             );
         }
     } finally {
+        wasm.emd_free(highPtr, len);
+        wasm.emd_free(lowPtr, len);
+        wasm.emd_free(closePtr, len);
+        wasm.emd_free(volumePtr, len);
         wasm.emd_free(middlePtr, len);
         wasm.emd_free(lowerPtr, len);
     }
@@ -270,7 +315,7 @@ test('EMD batch processing', () => {
         0.1      // fraction
     );
     
-    const singleValues = singleResult.values();
+    const singleValues = singleResult.values;
     const len = testData.close.length;
     const singleUpper = singleValues.slice(0, len);
     
@@ -290,17 +335,32 @@ test('EMD batch fast API', () => {
     const expectedRows = 2 * 2 * 2; // 8 combinations
     const totalLen = expectedRows * len;
     
-    // Allocate output buffers
+    // Allocate input and output buffers
+    const highPtr = wasm.emd_alloc(len);
+    const lowPtr = wasm.emd_alloc(len);
+    const closePtr = wasm.emd_alloc(len);
+    const volumePtr = wasm.emd_alloc(len);
     const upperPtr = wasm.emd_alloc(totalLen);
     const middlePtr = wasm.emd_alloc(totalLen);
     const lowerPtr = wasm.emd_alloc(totalLen);
     
     try {
+        // Copy input data to WASM memory
+        const highView = new Float64Array(wasm.__wasm.memory.buffer, highPtr, len);
+        const lowView = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, len);
+        const closeView = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
+        const volumeView = new Float64Array(wasm.__wasm.memory.buffer, volumePtr, len);
+        
+        highView.set(testData.high);
+        lowView.set(testData.low);
+        closeView.set(testData.close);
+        volumeView.set(testData.volume);
+        
         const rows = wasm.emd_batch_into(
-            testData.high,
-            testData.low,
-            testData.close,
-            testData.volume,
+            highPtr,
+            lowPtr,
+            closePtr,
+            volumePtr,
             upperPtr,
             middlePtr,
             lowerPtr,
@@ -312,8 +372,8 @@ test('EMD batch fast API', () => {
         
         assert.strictEqual(rows, expectedRows, 'Should return correct number of rows');
         
-        // Create typed arrays from pointers
-        const upperband = new Float64Array(wasm.memory.buffer, upperPtr, totalLen);
+        // Create typed arrays from pointers (recreate in case memory grew)
+        const upperband = new Float64Array(wasm.__wasm.memory.buffer, upperPtr, totalLen);
         
         // Verify first row matches single calculation
         const singleResult = wasm.emd_js(
@@ -326,7 +386,7 @@ test('EMD batch fast API', () => {
             0.1      // fraction
         );
         
-        const singleValues = singleResult.values();
+        const singleValues = singleResult.values;
         const singleUpper = singleValues.slice(0, len);
         
         // Compare first row of batch with single calculation
@@ -339,6 +399,10 @@ test('EMD batch fast API', () => {
             );
         }
     } finally {
+        wasm.emd_free(highPtr, len);
+        wasm.emd_free(lowPtr, len);
+        wasm.emd_free(closePtr, len);
+        wasm.emd_free(volumePtr, len);
         wasm.emd_free(upperPtr, totalLen);
         wasm.emd_free(middlePtr, totalLen);
         wasm.emd_free(lowerPtr, totalLen);

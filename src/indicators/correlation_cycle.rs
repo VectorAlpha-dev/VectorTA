@@ -717,10 +717,12 @@ pub fn correlation_cycle_batch_with_kernel(
 	};
 
 	let simd = match kernel {
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 		Kernel::Avx512Batch => Kernel::Avx512,
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 		Kernel::Avx2Batch => Kernel::Avx2,
 		Kernel::ScalarBatch => Kernel::Scalar,
-		_ => unreachable!(),
+		_ => Kernel::Scalar,  // Fallback to scalar for safety
 	};
 	correlation_cycle_batch_par_slice(data, sweep, simd)
 }
@@ -887,7 +889,7 @@ fn correlation_cycle_batch_inner(
 				Kernel::Avx2 => correlation_cycle_row_avx2(data, period, threshold, out_real, out_imag, out_angle, out_state),
 				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 				Kernel::Avx512 => correlation_cycle_row_avx512(data, period, threshold, out_real, out_imag, out_angle, out_state),
-				_ => unreachable!(),
+				_ => correlation_cycle_row_scalar(data, period, threshold, out_real, out_imag, out_angle, out_state),
 			}
 		};
 

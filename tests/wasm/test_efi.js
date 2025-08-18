@@ -161,22 +161,34 @@ test('EFI fast API', () => {
     const volume = new Float64Array(testData.volume);
     const len = close.length;
     
-    // Allocate output buffer
+    // Allocate memory for inputs and output
+    const pricePtr = wasm.efi_alloc(len);
+    const volumePtr = wasm.efi_alloc(len);
     const outPtr = wasm.efi_alloc(len);
     
-    // Run calculation
-    wasm.efi_into(close, volume, outPtr, len, 13);
-    
-    // Read result
-    const memory = new Float64Array(wasm.memory.buffer, outPtr, len);
-    const result = Array.from(memory);
-    
-    // Cleanup
-    wasm.efi_free(outPtr, len);
-    
-    // Verify result matches safe API
-    const safeResult = wasm.efi_js(close, volume, 13);
-    assertArrayClose(result, safeResult, 1e-10, "Fast API result mismatch");
+    try {
+        // Copy input data to WASM memory
+        const priceView = new Float64Array(wasm.__wasm.memory.buffer, pricePtr, len);
+        const volumeView = new Float64Array(wasm.__wasm.memory.buffer, volumePtr, len);
+        priceView.set(close);
+        volumeView.set(volume);
+        
+        // Run calculation
+        wasm.efi_into(pricePtr, volumePtr, outPtr, len, 13);
+        
+        // Read result (recreate view in case memory grew)
+        const memory = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
+        const result = Array.from(memory);
+        
+        // Verify result matches safe API
+        const safeResult = wasm.efi_js(close, volume, 13);
+        assertArrayClose(result, safeResult, 1e-10, "Fast API result mismatch");
+    } finally {
+        // Cleanup
+        wasm.efi_free(pricePtr, len);
+        wasm.efi_free(volumePtr, len);
+        wasm.efi_free(outPtr, len);
+    }
 });
 
 test('EFI batch processing', () => {
@@ -219,13 +231,33 @@ test('EFI aliasing detection', () => {
     const volume = new Float64Array(testData.volume.slice(0, 100));
     const len = close.length;
     
-    // Use price array as output (aliasing)
-    const closePtr = close;
+    // Allocate memory for inputs
+    const pricePtr = wasm.efi_alloc(len);
+    const volumePtr = wasm.efi_alloc(len);
     
-    // This should handle aliasing internally
-    wasm.efi_into(close, volume, closePtr, len, 13);
-    
-    // The result should be valid EFI values, not corrupted
-    assert(!isNaN(closePtr[10]), "Aliasing produced NaN");
-    assert(Math.abs(closePtr[10]) > 0.001, "Aliasing produced zero");
+    try {
+        // Copy input data to WASM memory
+        const priceView = new Float64Array(wasm.__wasm.memory.buffer, pricePtr, len);
+        const volumeView = new Float64Array(wasm.__wasm.memory.buffer, volumePtr, len);
+        priceView.set(close);
+        volumeView.set(volume);
+        
+        // Use price array as output (aliasing)
+        wasm.efi_into(pricePtr, volumePtr, pricePtr, len, 13);
+        
+        // Read result from the aliased buffer
+        const resultView = new Float64Array(wasm.__wasm.memory.buffer, pricePtr, len);
+        
+        // The result should be valid EFI values, not corrupted
+        assert(!isNaN(resultView[10]), "Aliasing produced NaN at index 10");
+        assert(Math.abs(resultView[10]) > 0.001, "Aliasing produced zero");
+        
+        // Should still match the regular calculation
+        const safeResult = wasm.efi_js(close, volume, 13);
+        assertArrayClose(Array.from(resultView), safeResult, 1e-10, "Aliasing result mismatch");
+    } finally {
+        // Cleanup
+        wasm.efi_free(pricePtr, len);
+        wasm.efi_free(volumePtr, len);
+    }
 });

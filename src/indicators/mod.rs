@@ -155,6 +155,11 @@ pub use squeeze_momentum::{
 pub use trix::{trix, TrixInput, TrixOutput, TrixParams, TrixStream, TrixBatchOutput};
 #[cfg(feature = "python")]
 pub use trix::{trix_py, trix_batch_py, TrixStreamPy};
+pub use tsf::{tsf, TsfInput, TsfOutput, TsfParams, TsfStream, TsfBatchOutput, TsfError, TsfBuilder, TsfBatchBuilder, TsfBatchRange};
+#[cfg(feature = "python")]
+pub use tsf::{tsf_py, tsf_batch_py, TsfStreamPy};
+#[cfg(feature = "wasm")]
+pub use tsf::{tsf_js, tsf_into, tsf_alloc, tsf_free, tsf_batch_unified_js, tsf_batch_into};
 pub use mean_ad::{mean_ad, MeanAdInput, MeanAdOutput, MeanAdParams};
 pub use mom::{mom, MomInput, MomOutput, MomParams};
 pub use ui::{ui, UiInput, UiOutput, UiParams};

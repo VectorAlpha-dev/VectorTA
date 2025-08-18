@@ -183,56 +183,100 @@ test('Fisher fast API basic', () => {
     // Test fast API basic functionality
     const high = new Float64Array([10.0, 12.0, 14.0, 16.0, 18.0, 20.0]);
     const low = new Float64Array([5.0, 7.0, 9.0, 10.0, 13.0, 15.0]);
+    const len = high.length;
     
-    // Allocate output arrays
-    const fisherOut = new Float64Array(high.length);
-    const signalOut = new Float64Array(high.length);
+    // Allocate memory in WASM
+    const highPtr = wasm.fisher_alloc(len);
+    const lowPtr = wasm.fisher_alloc(len);
+    const fisherPtr = wasm.fisher_alloc(len);
+    const signalPtr = wasm.fisher_alloc(len);
     
-    // Call fast API
-    wasm.fisher_into(
-        high.buffer,
-        low.buffer,
-        fisherOut.buffer,
-        signalOut.buffer,
-        high.length,
-        3
-    );
-    
-    // Verify results match safe API
-    const safeResult = wasm.fisher_js(high, low, 3);
-    const safeFisher = safeResult.slice(0, high.length);
-    const safeSignal = safeResult.slice(high.length);
-    
-    assertArrayClose(fisherOut, safeFisher, 1e-10, "Fast API fisher mismatch");
-    assertArrayClose(signalOut, safeSignal, 1e-10, "Fast API signal mismatch");
+    try {
+        // Create views into WASM memory
+        const highView = new Float64Array(wasm.__wasm.memory.buffer, highPtr, len);
+        const lowView = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, len);
+        
+        // Copy input data to WASM memory
+        highView.set(high);
+        lowView.set(low);
+        
+        // Call fast API
+        wasm.fisher_into(
+            highPtr,
+            lowPtr,
+            fisherPtr,
+            signalPtr,
+            len,
+            3
+        );
+        
+        // Read results from WASM memory (recreate views in case memory grew)
+        const fisherOut = new Float64Array(wasm.__wasm.memory.buffer, fisherPtr, len);
+        const signalOut = new Float64Array(wasm.__wasm.memory.buffer, signalPtr, len);
+        
+        // Verify results match safe API
+        const safeResult = wasm.fisher_js(high, low, 3);
+        const safeFisher = safeResult.slice(0, len);
+        const safeSignal = safeResult.slice(len);
+        
+        assertArrayClose(fisherOut, safeFisher, 1e-10, "Fast API fisher mismatch");
+        assertArrayClose(signalOut, safeSignal, 1e-10, "Fast API signal mismatch");
+    } finally {
+        // Clean up allocated memory
+        wasm.fisher_free(highPtr, len);
+        wasm.fisher_free(lowPtr, len);
+        wasm.fisher_free(fisherPtr, len);
+        wasm.fisher_free(signalPtr, len);
+    }
 });
 
 test('Fisher fast API aliasing', () => {
     // Test fast API with aliasing (in-place operation)
     const high = new Float64Array([10.0, 12.0, 14.0, 16.0, 18.0, 20.0]);
     const low = new Float64Array([5.0, 7.0, 9.0, 10.0, 13.0, 15.0]);
+    const len = high.length;
     
     // Copy for comparison
     const highCopy = new Float64Array(high);
     const lowCopy = new Float64Array(low);
     
-    // Call fast API with aliasing (fisher output overwrites high)
-    wasm.fisher_into(
-        high.buffer,
-        low.buffer,
-        high.buffer,  // Output to same buffer as input
-        low.buffer,   // Output to same buffer as input
-        high.length,
-        3
-    );
+    // Allocate memory in WASM (reuse input pointers for output to test aliasing)
+    const highPtr = wasm.fisher_alloc(len);
+    const lowPtr = wasm.fisher_alloc(len);
     
-    // Verify results match safe API
-    const safeResult = wasm.fisher_js(highCopy, lowCopy, 3);
-    const safeFisher = safeResult.slice(0, highCopy.length);
-    const safeSignal = safeResult.slice(highCopy.length);
-    
-    assertArrayClose(high, safeFisher, 1e-10, "Fast API aliased fisher mismatch");
-    assertArrayClose(low, safeSignal, 1e-10, "Fast API aliased signal mismatch");
+    try {
+        // Create views and copy input data
+        let highView = new Float64Array(wasm.__wasm.memory.buffer, highPtr, len);
+        let lowView = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, len);
+        highView.set(high);
+        lowView.set(low);
+        
+        // Call fast API with aliasing (fisher output overwrites high, signal overwrites low)
+        wasm.fisher_into(
+            highPtr,
+            lowPtr,
+            highPtr,  // Output to same buffer as input
+            lowPtr,   // Output to same buffer as input
+            len,
+            3
+        );
+        
+        // Read results (recreate views in case memory grew)
+        highView = new Float64Array(wasm.__wasm.memory.buffer, highPtr, len);
+        lowView = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, len);
+        
+        // Verify results match safe API
+        const safeResult = wasm.fisher_js(highCopy, lowCopy, 3);
+        const safeFisher = safeResult.slice(0, len);
+        const safeSignal = safeResult.slice(len);
+        
+        assertArrayClose(highView, safeFisher, 1e-10, "Fast API aliased fisher mismatch");
+        assertArrayClose(lowView, safeSignal, 1e-10, "Fast API aliased signal mismatch");
+    } finally {
+        // Clean up allocated memory
+        wasm.fisher_free(highPtr, len);
+        wasm.fisher_free(lowPtr, len);
+    }
 });
 
 // Batch API tests

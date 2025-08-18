@@ -2,10 +2,11 @@
  * WASM binding tests for VOSC indicator.
  * These tests mirror the Rust unit tests to ensure WASM bindings work correctly.
  */
-const test = require('node:test');
-const assert = require('node:assert');
-const path = require('path');
-const { 
+import test from 'node:test';
+import assert from 'node:assert';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { 
     loadTestData, 
     assertArrayClose, 
     assertClose,
@@ -13,7 +14,10 @@ const {
     assertAllNaN,
     assertNoNaN,
     EXPECTED_OUTPUTS 
-} = require('./test_utils');
+} from './test_utils.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 let wasm;
 let testData;
@@ -22,8 +26,11 @@ test.before(async () => {
     // Load WASM module
     try {
         const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
-        wasm = await import(wasmPath);
-        await wasm.default();
+        const importPath = process.platform === 'win32' 
+            ? `file:///${wasmPath.replace(/\\/g, '/')}`
+            : wasmPath;
+        wasm = await import(importPath);
+        // No need to call default() for ES modules
     } catch (error) {
         console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
         throw error;
@@ -106,14 +113,14 @@ test('VOSC fast API', () => {
     
     try {
         // Copy data to WASM memory
-        const wasmMemory = new Float64Array(wasm.memory.buffer);
+        const wasmMemory = new Float64Array(wasm.__wasm.memory.buffer);
         wasmMemory.set(volume, inPtr / 8);
         
         // Run calculation
         wasm.vosc_into(inPtr, outPtr, len, shortPeriod, longPeriod);
         
         // Read results
-        const result = new Float64Array(wasm.memory.buffer, outPtr, len);
+        const result = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
         const resultCopy = Array.from(result);
         
         // Compare with safe API
@@ -137,14 +144,14 @@ test('VOSC in-place operation', () => {
     const ptr = wasm.vosc_alloc(len);
     
     try {
-        const wasmMemory = new Float64Array(wasm.memory.buffer);
+        const wasmMemory = new Float64Array(wasm.__wasm.memory.buffer);
         wasmMemory.set(volume, ptr / 8);
         
         // Run in-place calculation
         wasm.vosc_into(ptr, ptr, len, shortPeriod, longPeriod);
         
         // Read results
-        const result = new Float64Array(wasm.memory.buffer, ptr, len);
+        const result = new Float64Array(wasm.__wasm.memory.buffer, ptr, len);
         const resultCopy = Array.from(result);
         
         // Compare with safe API

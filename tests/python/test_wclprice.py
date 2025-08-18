@@ -172,7 +172,7 @@ class TestWclprice:
         )
         
         # Test invalid kernel
-        with pytest.raises(ValueError, match="Invalid kernel"):
+        with pytest.raises(ValueError, match="Unknown kernel"):
             ta_indicators.wclprice(high, low, close, kernel="invalid_kernel")
 
 

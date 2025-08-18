@@ -215,7 +215,7 @@ test('SuperTrend fast API (no aliasing)', () => {
     
     try {
         // Copy input data to WASM memory
-        const memory = new Float64Array(wasm.memory.buffer);
+        const memory = new Float64Array(wasm.__wasm.memory.buffer);
         memory.set(high, highPtr / 8);
         memory.set(low, lowPtr / 8);
         memory.set(close, closePtr / 8);
@@ -227,9 +227,10 @@ test('SuperTrend fast API (no aliasing)', () => {
             size, 5, 2.0
         );
         
-        // Read results
-        const trend = Array.from(memory.slice(trendPtr / 8, trendPtr / 8 + size));
-        const changed = Array.from(memory.slice(changedPtr / 8, changedPtr / 8 + size));
+        // Read results (recreate view in case memory grew)
+        const memoryView = new Float64Array(wasm.__wasm.memory.buffer);
+        const trend = Array.from(memoryView.slice(trendPtr / 8, trendPtr / 8 + size));
+        const changed = Array.from(memoryView.slice(changedPtr / 8, changedPtr / 8 + size));
         
         // Verify results
         assert.strictEqual(trend.length, size);
@@ -277,7 +278,7 @@ test('SuperTrend fast API (with aliasing)', () => {
     
     try {
         // Copy input data to WASM memory
-        const memory = new Float64Array(wasm.memory.buffer);
+        const memory = new Float64Array(wasm.__wasm.memory.buffer);
         memory.set(data, dataPtr / 8);
         
         // Call fast API with aliasing
@@ -287,9 +288,10 @@ test('SuperTrend fast API (with aliasing)', () => {
             size, 5, 2.0
         );
         
-        // Read results
-        const trend = Array.from(memory.slice(trendPtr / 8, trendPtr / 8 + size));
-        const changed = Array.from(memory.slice(changedPtr / 8, changedPtr / 8 + size));
+        // Read results (recreate view in case memory grew)
+        const memoryView = new Float64Array(wasm.__wasm.memory.buffer);
+        const trend = Array.from(memoryView.slice(trendPtr / 8, trendPtr / 8 + size));
+        const changed = Array.from(memoryView.slice(changedPtr / 8, changedPtr / 8 + size));
         
         // Verify results
         assert.strictEqual(trend.length, size);

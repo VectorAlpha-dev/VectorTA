@@ -2,10 +2,11 @@
  * WASM binding tests for ROCP indicator.
  * These tests mirror the Rust unit tests to ensure WASM bindings work correctly.
  */
-const test = require('node:test');
-const assert = require('node:assert');
-const path = require('path');
-const { 
+import test from 'node:test';
+import assert from 'node:assert';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { 
     loadTestData, 
     assertArrayClose, 
     assertClose,
@@ -13,7 +14,10 @@ const {
     assertAllNaN,
     assertNoNaN,
     EXPECTED_OUTPUTS 
-} = require('./test_utils');
+} from './test_utils.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 let wasm;
 let testData;
@@ -22,8 +26,11 @@ test.before(async () => {
     // Load WASM module
     try {
         const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
-        wasm = await import(wasmPath);
-        await wasm.default();
+        const importPath = process.platform === 'win32' 
+            ? 'file:///' + wasmPath.replace(/\\/g, '/')
+            : wasmPath;
+        wasm = await import(importPath);
+        // No need to call default() for ES modules
     } catch (error) {
         console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
         throw error;
@@ -65,16 +72,22 @@ test('ROCP Fast API with aliasing', () => {
     
     try {
         // Create typed array view for input/output
-        const memory = new Float64Array(wasm.memory.buffer, ptr, len);
+        const memory = new Float64Array(wasm.__wasm.memory.buffer, ptr, len);
         memory.set(testData.close);
         
         // In-place computation (aliasing case)
         wasm.rocp_into(ptr, ptr, len, period);
         
+        // Recreate view in case memory grew
+        const memory2 = new Float64Array(wasm.__wasm.memory.buffer, ptr, len);
+        
+        // Convert to regular array to avoid detached buffer issues
+        const result = [...memory2];
+        
         // Compare with safe API result
         const safeResult = wasm.rocp_js(testData.close, period);
         assertArrayClose(
-            Array.from(memory),
+            result,
             safeResult,
             1e-9,
             'Fast API with aliasing mismatch'
@@ -94,8 +107,8 @@ test('ROCP Fast API without aliasing', () => {
     
     try {
         // Create typed array views
-        const inMemory = new Float64Array(wasm.memory.buffer, inPtr, len);
-        const outMemory = new Float64Array(wasm.memory.buffer, outPtr, len);
+        const inMemory = new Float64Array(wasm.__wasm.memory.buffer, inPtr, len);
+        const outMemory = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
         
         // Copy input data
         inMemory.set(testData.close);
@@ -103,10 +116,16 @@ test('ROCP Fast API without aliasing', () => {
         // Compute with separate buffers
         wasm.rocp_into(inPtr, outPtr, len, period);
         
+        // Recreate view in case memory grew
+        const outMemory2 = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
+        
+        // Convert to regular array to avoid detached buffer issues
+        const result = [...outMemory2];
+        
         // Compare with safe API result
         const safeResult = wasm.rocp_js(testData.close, period);
         assertArrayClose(
-            Array.from(outMemory),
+            result,
             safeResult,
             1e-9,
             'Fast API without aliasing mismatch'
@@ -186,7 +205,7 @@ test('ROCP Batch Fast API', () => {
     
     try {
         // Copy input data
-        const inMemory = new Float64Array(wasm.memory.buffer, inPtr, len);
+        const inMemory = new Float64Array(wasm.__wasm.memory.buffer, inPtr, len);
         inMemory.set(testData.close);
         
         // Run batch computation
@@ -202,7 +221,7 @@ test('ROCP Batch Fast API', () => {
         assert.strictEqual(rows, expectedRows, 'Batch rows mismatch');
         
         // Get output
-        const outMemory = new Float64Array(wasm.memory.buffer, outPtr, totalSize);
+        const outMemory = new Float64Array(wasm.__wasm.memory.buffer, outPtr, totalSize);
         
         // Verify first row (period=5)
         const firstRow = outMemory.slice(0, len);
