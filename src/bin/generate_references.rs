@@ -18,6 +18,10 @@ use my_project::indicators::bop::{bop, BopInput, BopParams};
 use my_project::indicators::cci::{cci, CciInput, CciParams};
 use my_project::indicators::cfo::{cfo, CfoInput, CfoParams};
 use my_project::indicators::cg::{cg, CgInput, CgParams};
+use my_project::indicators::chande::{chande, ChandeData, ChandeInput, ChandeParams};
+use my_project::indicators::ppo::{ppo, PpoInput, PpoParams};
+use my_project::indicators::rsx::{rsx, RsxInput, RsxParams};
+use my_project::indicators::marketefi::{marketefi, MarketefiData, MarketefiInput, MarketefiParams};
 use my_project::indicators::ui::{ui, UiInput, UiParams};
 use my_project::indicators::squeeze_momentum::{squeeze_momentum, SqueezeMomentumInput, SqueezeMomentumParams};
 use my_project::indicators::mass::{mass, MassData, MassInput, MassParams};
@@ -75,7 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	let args: Vec<String> = env::args().collect();
 	if args.len() < 2 {
 		eprintln!("Usage: {} <indicator_name> [source]", args[0]);
-		eprintln!("Available indicators: ad, acosc, adx, adosc, adxr, alligator, alma, ao, apo, aroon, aroonosc, atr, bandpass, bollinger_bands, bollinger_bands_width, bop, cci, cfo, cg, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass_2_pole, highpass, hma, hwma, jma, jsa, kama, linreg, maaq, mama, mwdx, nma, pwma, reflex, sinwma, sma, smma, squeeze_momentum, sqwma, srwma, supersmoother_3_pole, supersmoother, swma, tema, tilson, trendflex, trima, ui, vwap, vwma, vpwma, wilders, wma, zlema");
+		eprintln!("Available indicators: ad, acosc, adx, adosc, adxr, alligator, alma, ao, apo, aroon, aroonosc, atr, bandpass, bollinger_bands, bollinger_bands_width, bop, cci, cfo, cg, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass_2_pole, highpass, hma, hwma, jma, jsa, kama, linreg, maaq, mama, marketefi, mwdx, nma, ppo, rsx, pwma, reflex, sinwma, sma, smma, squeeze_momentum, sqwma, srwma, supersmoother_3_pole, supersmoother, swma, tema, tilson, trendflex, trima, ui, vwap, vwma, vpwma, wilders, wma, zlema");
 		eprintln!("Available sources: open, high, low, close, volume, hl2, hlc3, ohlc4, hlcc4");
 		std::process::exit(1);
 	}
@@ -418,6 +422,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 				"length": result.mama_values.len()
 			})
 		}
+		"marketefi" => {
+			if source != "hlv" {
+				eprintln!("MarketEFI indicator requires 'hlv' source");
+				std::process::exit(1);
+			}
+			let params = MarketefiParams::default();
+			let input = MarketefiInput {
+				data: MarketefiData::Candles {
+					candles: &candles,
+					source_high: "high",
+					source_low: "low",
+					source_volume: "volume",
+				},
+				params,
+			};
+			let result = marketefi(&input)?;
+			json!({
+				"indicator": "marketefi",
+				"source": source,
+				"params": {},
+				"values": result.values,
+				"length": result.values.len()
+			})
+		}
 		"mass" => {
 			// Mass Index requires high and low data
 			if !source.contains(",") {
@@ -460,6 +488,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 			let result = nma(&input)?;
 			json!({
 				"indicator": "nma",
+				"source": source,
+				"params": {
+					"period": period
+				},
+				"values": result.values,
+				"length": result.values.len()
+			})
+		}
+		"ppo" => {
+			let params = PpoParams::default();
+			let fast_period = params.fast_period.unwrap_or(12);
+			let slow_period = params.slow_period.unwrap_or(26);
+			let ma_type = params.ma_type.clone().unwrap_or_else(|| "sma".to_string());
+			let input = PpoInput::from_candles(&candles, source, params);
+			let result = ppo(&input)?;
+			json!({
+				"indicator": "ppo",
+				"source": source,
+				"params": {
+					"fast_period": fast_period,
+					"slow_period": slow_period,
+					"ma_type": ma_type
+				},
+				"values": result.values,
+				"length": result.values.len()
+			})
+		}
+		"rsx" => {
+			let params = RsxParams::default();
+			let period = params.period.unwrap_or(14);
+			let input = RsxInput::from_candles(&candles, source, params);
+			let result = rsx(&input)?;
+			json!({
+				"indicator": "rsx",
 				"source": source,
 				"params": {
 					"period": period
@@ -1159,6 +1221,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 				"source": source,
 				"params": {
 					"period": period
+				},
+				"values": result.values,
+				"length": result.values.len()
+			})
+		}
+		"chande" => {
+			if source != "candles" {
+				eprintln!("Chande indicator requires 'candles' source");
+				std::process::exit(1);
+			}
+			let params = ChandeParams::default();
+			let period = params.period.unwrap_or(22);
+			let mult = params.mult.unwrap_or(3.0);
+			let direction = params.direction.clone().unwrap_or("long".to_string());
+			let input = ChandeInput {
+				data: ChandeData::Candles { candles: &candles },
+				params,
+			};
+			let result = chande(&input)?;
+			json!({
+				"indicator": "chande",
+				"source": source,
+				"params": {
+					"period": period,
+					"mult": mult,
+					"direction": direction
 				},
 				"values": result.values,
 				"length": result.values.len()

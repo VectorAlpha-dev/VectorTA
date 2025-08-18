@@ -83,7 +83,7 @@ class TestWavetrend:
         )
         
         # Check wt_diff calculation
-        expected_diff = [wt2[i] - wt1[i] for i, wt1 in enumerate(expected_wt1)]
+        expected_diff = [expected_wt2[i] - expected_wt1[i] for i in range(len(expected_wt1))]
         assert_close(
             wt_diff[-5:],
             expected_diff,
@@ -96,7 +96,7 @@ class TestWavetrend:
         hlc3 = (test_data['high'] + test_data['low'] + test_data['close']) / 3
         
         # Default params: channel_length=9, average_length=12, ma_length=3, factor=0.015
-        wt1, wt2, wt_diff = ta_indicators.wavetrend(hlc3)
+        wt1, wt2, wt_diff = ta_indicators.wavetrend(hlc3, 9, 12, 3, 0.015)
         assert len(wt1) == len(hlc3)
         assert len(wt2) == len(hlc3)
         assert len(wt_diff) == len(hlc3)

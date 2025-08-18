@@ -289,8 +289,14 @@ pub fn ppo_into_slice(dst: &mut [f64], input: &PpoInput, kern: Kernel) -> Result
 		return Err(PpoError::InvalidPeriod { fast, slow, data_len: data.len() });
 	}
 	
-	let first = fast.min(slow);
+	let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
 	let warmup = first + slow - 1;
+	
+	// Fill warmup with NaN BEFORE computation
+	let warmup_end = warmup.min(dst.len());
+	for v in &mut dst[..warmup_end] {
+		*v = f64::NAN;
+	}
 	
 	// Select and execute kernel
 	let kernel = kern;
@@ -303,11 +309,6 @@ pub fn ppo_into_slice(dst: &mut [f64], input: &PpoInput, kern: Kernel) -> Result
 			Kernel::Avx512 | Kernel::Avx512Batch => ppo_avx512(data, fast, slow, ma_type, first, dst),
 			_ => unreachable!(),
 		}
-	}
-	
-	// Fill warmup with NaN
-	for v in &mut dst[..warmup] {
-		*v = f64::NAN;
 	}
 	
 	Ok(())
@@ -521,6 +522,15 @@ fn ppo_batch_inner_into(
 		});
 	}
 	let cols = data.len();
+	
+	// Initialize NaN prefixes for each row based on warmup period
+	for (row, combo) in combos.iter().enumerate() {
+		let warmup = first + combo.slow_period.unwrap() - 1;
+		let row_start = row * cols;
+		for i in 0..warmup.min(cols) {
+			out[row_start + i] = f64::NAN;
+		}
+	}
 	
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let p = &combos[row];
@@ -1554,8 +1564,14 @@ pub fn ppo_batch_py<'py>(
 				Kernel::Auto => detect_best_batch_kernel(),
 				k => k,
 			};
-			// Note: PPO doesn't have SIMD-specific batch kernels, just use regular kernel
-			ppo_batch_inner_into(slice_in, &sweep, kernel, true, slice_out)
+			let simd = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				k if !k.is_batch() => k,
+				_ => Kernel::Scalar,
+			};
+			ppo_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
 		})
 		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 	

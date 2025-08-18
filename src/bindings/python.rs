@@ -100,6 +100,8 @@ use crate::indicators::ppo::{ppo_batch_py, ppo_py, PpoStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::rsi::{rsi_batch_py, rsi_py, RsiStreamPy};
 #[cfg(feature = "python")]
+use crate::indicators::rsx::{rsx_batch_py, rsx_py, RsxStreamPy};
+#[cfg(feature = "python")]
 use crate::indicators::squeeze_momentum::{squeeze_momentum_batch_py, squeeze_momentum_py, SqueezeMomentumStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::trix::{trix_batch_py, trix_py, TrixStreamPy};
@@ -293,8 +295,6 @@ use crate::indicators::midprice::{midprice_batch_py, midprice_py, MidpriceStream
 use crate::indicators::obv::{obv_batch_py, obv_py, ObvStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::qstick::{qstick_batch_py, qstick_py, QstickStreamPy};
-#[cfg(feature = "python")]
-use crate::indicators::rsx::{rsx_batch_py, rsx_py, RsxStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::stc::{stc_batch_py, stc_py, StcStreamPy};
 #[cfg(feature = "python")]
@@ -826,6 +826,11 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(rsi_py, m)?)?;
 	m.add_function(wrap_pyfunction!(rsi_batch_py, m)?)?;
 	m.add_class::<RsiStreamPy>()?;
+
+	// Register RSX functions with their user-facing names
+	m.add_function(wrap_pyfunction!(rsx_py, m)?)?;
+	m.add_function(wrap_pyfunction!(rsx_batch_py, m)?)?;
+	m.add_class::<RsxStreamPy>()?;
 
 	// Register Squeeze Momentum functions with their user-facing names
 	m.add_function(wrap_pyfunction!(squeeze_momentum_py, m)?)?;

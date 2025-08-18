@@ -100,12 +100,12 @@ test('RSX period exceeds length', () => {
 });
 
 test('RSX all NaN', () => {
-    // Test RSX handles all NaN input - mirrors check_rsx_all_nan
+    // Test RSX fails on all NaN input
     const allNan = new Float64Array(10).fill(NaN);
     
-    const result = wasm.rsx_js(allNan, 3);
-    assert.strictEqual(result.length, allNan.length);
-    assertAllNaN(result, "Expected all NaN for NaN input");
+    assert.throws(() => {
+        wasm.rsx_js(allNan, 3);
+    }, /All values are NaN/);
 });
 
 test('RSX NaN handling', () => {
@@ -129,7 +129,7 @@ test('RSX empty input', () => {
     
     assert.throws(() => {
         wasm.rsx_js(emptyData, 14);
-    }, /AllValuesNaN|Invalid period|empty/i);
+    }, /All values are NaN|Invalid period|empty/i);
 });
 
 test('RSX fast API (rsx_into)', () => {
@@ -143,14 +143,14 @@ test('RSX fast API (rsx_into)', () => {
     
     try {
         // Copy data to WASM memory
-        const memory = new Float64Array(wasm.memory.buffer, inPtr, len);
+        const memory = new Float64Array(wasm.__wasm.memory.buffer, inPtr, len);
         memory.set(close);
         
         // Call fast API
         wasm.rsx_into(inPtr, outPtr, len, 14);
         
         // Read results
-        const result = new Float64Array(wasm.memory.buffer, outPtr, len);
+        const result = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
         const resultCopy = new Float64Array(result);
         
         // Compare with safe API
@@ -173,14 +173,14 @@ test('RSX fast API in-place', () => {
     
     try {
         // Copy data to WASM memory
-        const memory = new Float64Array(wasm.memory.buffer, ptr, len);
+        const memory = new Float64Array(wasm.__wasm.memory.buffer, ptr, len);
         memory.set(close);
         
         // Call fast API with same pointer for input and output
         wasm.rsx_into(ptr, ptr, len, 14);
         
         // Read results
-        const result = new Float64Array(wasm.memory.buffer, ptr, len);
+        const result = new Float64Array(wasm.__wasm.memory.buffer, ptr, len);
         const resultCopy = new Float64Array(result);
         
         // Compare with safe API
@@ -201,7 +201,7 @@ test('RSX memory allocation/deallocation', () => {
     assert(ptr !== 0, "Allocation returned null pointer");
     
     // Write some data
-    const memory = new Float64Array(wasm.memory.buffer, ptr, len);
+    const memory = new Float64Array(wasm.__wasm.memory.buffer, ptr, len);
     for (let i = 0; i < len; i++) {
         memory[i] = i * 1.5;
     }
@@ -265,7 +265,7 @@ test('RSX batch fast API', () => {
     
     try {
         // Copy data to WASM memory
-        const memory = new Float64Array(wasm.memory.buffer, inPtr, len);
+        const memory = new Float64Array(wasm.__wasm.memory.buffer, inPtr, len);
         memory.set(close);
         
         // Call batch fast API
@@ -277,7 +277,7 @@ test('RSX batch fast API', () => {
         assert.strictEqual(rows, expectedRows, "Row count mismatch");
         
         // Read results
-        const result = new Float64Array(wasm.memory.buffer, outPtr, outputSize);
+        const result = new Float64Array(wasm.__wasm.memory.buffer, outPtr, outputSize);
         
         // Verify first few values are NaN (warmup period)
         assert(isNaN(result[0]), "First value should be NaN");

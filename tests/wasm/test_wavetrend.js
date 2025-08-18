@@ -199,15 +199,27 @@ test('WaveTrend fast API (in-place)', () => {
         (testData.high[i] + testData.low[i] + c) / 3
     ));
     
+    // Allocate input buffer and copy data
+    const inPtr = wasm.wavetrend_alloc(hlc3.length);
+    assert(inPtr !== 0, 'Failed to allocate input memory');
+    
+    // Create view into WASM memory for input
+    const inView = new Float64Array(
+        wasm.__wasm.memory.buffer,
+        inPtr,
+        hlc3.length
+    );
+    inView.set(hlc3);
+    
     // Allocate output buffers
     const wt1Out = wasm.wavetrend_alloc(hlc3.length);
     const wt2Out = wasm.wavetrend_alloc(hlc3.length);
     const wtDiffOut = wasm.wavetrend_alloc(hlc3.length);
     
     try {
-        // Call fast API
+        // Call fast API with pointer to input data
         wasm.wavetrend_into(
-            hlc3,
+            inPtr,
             wt1Out,
             wt2Out,
             wtDiffOut,
@@ -220,6 +232,7 @@ test('WaveTrend fast API (in-place)', () => {
         assert.ok(true, "Fast API executed without error");
     } finally {
         // Clean up
+        wasm.wavetrend_free(inPtr, hlc3.length);
         wasm.wavetrend_free(wt1Out, hlc3.length);
         wasm.wavetrend_free(wt2Out, hlc3.length);
         wasm.wavetrend_free(wtDiffOut, hlc3.length);

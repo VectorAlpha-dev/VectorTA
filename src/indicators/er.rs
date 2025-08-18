@@ -276,7 +276,12 @@ pub fn er_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
 			sum += (data[j + 1] - data[j]).abs();
 		}
 		if sum > 0.0 {
-			out[i] = delta / sum;
+			// Clamp to [0.0, 1.0] to handle floating point precision issues
+			out[i] = (delta / sum).min(1.0);
+		} else {
+			// When sum is 0 (all values in window are the same), ER is undefined
+			// but we set it to 0.0 to indicate no directional movement
+			out[i] = 0.0;
 		}
 	}
 }
@@ -356,9 +361,10 @@ impl ErStream {
 		let end = (self.head + self.period - 1) % self.period;
 		let delta = (self.buffer[end] - self.buffer[start]).abs();
 		if sum > 0.0 {
-			Some(delta / sum)
+			// Clamp to [0.0, 1.0] to handle floating point precision issues
+			Some((delta / sum).min(1.0))
 		} else {
-			Some(f64::NAN)
+			Some(0.0)
 		}
 	}
 }
@@ -473,6 +479,59 @@ pub fn er_batch_slice(data: &[f64], sweep: &ErBatchRange, kern: Kernel) -> Resul
 #[inline(always)]
 pub fn er_batch_par_slice(data: &[f64], sweep: &ErBatchRange, kern: Kernel) -> Result<ErBatchOutput, ErError> {
 	er_batch_inner(data, sweep, kern, true)
+}
+
+#[inline(always)]
+fn er_batch_inner_into(data: &[f64], sweep: &ErBatchRange, kern: Kernel, parallel: bool, out: &mut [f64]) -> Result<Vec<ErParams>, ErError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(ErError::InvalidPeriod { period: 0, data_len: 0 });
+	}
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(ErError::AllValuesNaN)?;
+	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	if data.len() - first < max_p {
+		return Err(ErError::NotEnoughValidData {
+			needed: max_p,
+			valid: data.len() - first,
+		});
+	}
+	let rows = combos.len();
+	let cols = data.len();
+	
+	// Process each row
+	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+		let period = combos[row].period.unwrap();
+		match kern {
+			Kernel::Scalar => er_row_scalar(data, first, period, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => er_row_avx2(data, first, period, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => er_row_avx512(data, first, period, out_row),
+			_ => unreachable!(),
+		}
+	};
+	
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			out.par_chunks_mut(cols)
+				.enumerate()
+				.for_each(|(row, slice)| do_row(row, slice));
+		}
+
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, slice) in out.chunks_mut(cols).enumerate() {
+				do_row(row, slice);
+			}
+		}
+	} else {
+		for (row, slice) in out.chunks_mut(cols).enumerate() {
+			do_row(row, slice);
+		}
+	}
+	
+	Ok(combos)
 }
 
 #[inline(always)]
@@ -654,18 +713,54 @@ pub fn er_batch_py<'py>(
 
 	let sweep = ErBatchRange { period: period_range };
 
-	let result = py
-		.allow_threads(|| er_batch_with_kernel(slice_in, &sweep, kern))
+	// First expand grid to get combos and dimensions
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = slice_in.len();
+
+	// Create pre-allocated numpy array
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+	// Initialize NaN prefixes for each row based on warmup period
+	for (row, combo) in combos.iter().enumerate() {
+		let warmup = combo.period.unwrap_or(5) - 1;
+		let row_start = row * cols;
+		for i in 0..warmup.min(cols) {
+			slice_out[row_start + i] = f64::NAN;
+		}
+	}
+
+	// Run batch computation into pre-allocated buffer
+	let result_combos = py
+		.allow_threads(|| {
+			// Use er_batch_inner directly with the pre-allocated buffer
+			let kernel = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				other if other.is_batch() => other,
+				_ => return Err(ErError::InvalidPeriod { period: 0, data_len: 0 }),
+			};
+			let simd = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => unreachable!(),
+			};
+			
+			// Calculate values directly into the pre-allocated buffer
+			er_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+		})
 		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
 	let py_dict = PyDict::new(py);
 	
-	let py_periods: Vec<usize> = result.combos.iter().map(|c| c.period.unwrap_or(5)).collect();
+	let py_periods: Vec<usize> = result_combos.iter().map(|c| c.period.unwrap_or(5)).collect();
 
-	py_dict.set_item("values", result.values.into_pyarray(py))?;
+	// Return flat array to match expected API
+	py_dict.set_item("values", out_arr)?;
 	py_dict.set_item("periods", py_periods)?;
-	py_dict.set_item("rows", result.rows)?;
-	py_dict.set_item("cols", result.cols)?;
+	py_dict.set_item("rows", rows)?;
+	py_dict.set_item("cols", cols)?;
 
 	Ok(py_dict.into())
 }
@@ -803,16 +898,30 @@ pub fn er_batch_into(
 			period: (period_start, period_end, period_step),
 		};
 		
-		let output = er_batch_with_kernel(data, &sweep, Kernel::Auto)
-			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		// Expand grid to get combos and dimensions
+		let combos = expand_grid(&sweep);
+		let rows = combos.len();
+		let cols = len;
+		let total_len = rows * cols;
 		
-		let total_len = output.values.len();
 		if total_len > 0 {
 			let out = std::slice::from_raw_parts_mut(out_ptr, total_len);
-			out.copy_from_slice(&output.values);
+			
+			// Initialize NaN prefixes for each row based on warmup period
+			for (row, combo) in combos.iter().enumerate() {
+				let warmup = combo.period.unwrap_or(5) - 1;
+				let row_start = row * cols;
+				for i in 0..warmup.min(cols) {
+					out[row_start + i] = f64::NAN;
+				}
+			}
+			
+			// Run computation into pre-initialized buffer
+			er_batch_inner_into(data, &sweep, detect_best_kernel(), false, out)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 		}
 		
-		Ok(output.rows)
+		Ok(rows)
 	}
 }
 

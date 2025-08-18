@@ -227,14 +227,14 @@ test('PPO fast API - basic', () => {
     
     try {
         // Copy data to WASM memory
-        const wasmMemory = new Float64Array(wasm.memory.buffer);
+        const wasmMemory = new Float64Array(wasm.__wasm.memory.buffer);
         wasmMemory.set(close, inPtr / 8);
         
         // Compute PPO
         wasm.ppo_into(inPtr, outPtr, len, 12, 26, 'sma');
         
         // Read result
-        const result = new Float64Array(wasm.memory.buffer, outPtr, len);
+        const result = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
         const resultCopy = new Float64Array(result); // Copy before freeing
         
         // Compare with safe API
@@ -258,14 +258,14 @@ test('PPO fast API - in-place (aliasing)', () => {
     
     try {
         // Copy data to WASM memory
-        const wasmMemory = new Float64Array(wasm.memory.buffer);
+        const wasmMemory = new Float64Array(wasm.__wasm.memory.buffer);
         wasmMemory.set(close, ptr / 8);
         
         // Compute PPO in-place
         wasm.ppo_into(ptr, ptr, len, 12, 26, 'sma');
         
         // Read result
-        const result = new Float64Array(wasm.memory.buffer, ptr, len);
+        const result = new Float64Array(wasm.__wasm.memory.buffer, ptr, len);
         const resultCopy = new Float64Array(result); // Copy before freeing
         
         // Compare with safe API

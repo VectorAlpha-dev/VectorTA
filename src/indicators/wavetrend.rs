@@ -1214,6 +1214,18 @@ fn wavetrend_batch_inner_into(
 	let rows = combos.len();
 	let cols = data.len();
 
+	// Initialize NaN prefixes for each row based on warmup period
+	// Since _batch_inner_into receives external buffers, we must manually initialize
+	for (row, combo) in combos.iter().enumerate() {
+		let warmup = first + combo.channel_length.unwrap() - 1 + combo.average_length.unwrap() - 1 + combo.ma_length.unwrap() - 1;
+		let row_start = row * cols;
+		for i in 0..warmup.min(cols) {
+			out_wt1[row_start + i] = f64::NAN;
+			out_wt2[row_start + i] = f64::NAN;
+			out_wt_diff[row_start + i] = f64::NAN;
+		}
+	}
+
 	let do_row = |row: usize, w1: &mut [f64], w2: &mut [f64], wd: &mut [f64]| unsafe {
 		let p = &combos[row];
 		let r = wavetrend_row_scalar(

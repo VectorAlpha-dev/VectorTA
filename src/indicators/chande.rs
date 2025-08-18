@@ -855,17 +855,36 @@ fn chande_batch_inner_into(
 	
 	let cols = high.len();
 	
+	// Resolve Auto kernel to concrete kernel
+	let actual_kern = match kern {
+		Kernel::Auto => detect_best_batch_kernel(),
+		k => k,
+	};
+	
+	// Initialize NaN prefixes for each row based on warmup period
+	for (row, combo) in combos.iter().enumerate() {
+		let warmup = first + combo.period.unwrap() - 1;
+		let row_start = row * cols;
+		for i in 0..warmup.min(cols) {
+			out[row_start + i] = f64::NAN;
+		}
+	}
+	
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
 		let mult = combos[row].mult.unwrap();
 		let direction = combos[row].direction.as_deref().unwrap();
-		match kern {
-			Kernel::Scalar => chande_row_scalar(high, low, close, first, period, mult, direction, out_row),
+		match actual_kern {
+			Kernel::Scalar | Kernel::ScalarBatch => chande_row_scalar(high, low, close, first, period, mult, direction, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => chande_row_avx2(high, low, close, first, period, mult, direction, out_row),
+			Kernel::Avx2 | Kernel::Avx2Batch => chande_row_avx2(high, low, close, first, period, mult, direction, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => chande_row_avx512(high, low, close, first, period, mult, direction, out_row),
-			_ => unreachable!(),
+			Kernel::Avx512 | Kernel::Avx512Batch => chande_row_avx512(high, low, close, first, period, mult, direction, out_row),
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+				chande_row_scalar(high, low, close, first, period, mult, direction, out_row)
+			}
+			Kernel::Auto => unreachable!("Auto kernel should have been resolved"),
 		}
 	};
 	
@@ -1934,8 +1953,8 @@ pub fn chande_batch_js(
 	let rows = combos.len();
 	let cols = high.len();
 	
-	// Allocate output matrix
-	let mut out_flat = vec![0.0; rows * cols];
+	// Allocate output matrix with NaN values
+	let mut out_flat = vec![f64::NAN; rows * cols];
 	
 	// Compute batch
 	let _ = chande_batch_inner_into(high, low, close, &sweep, direction, Kernel::Auto, false, &mut out_flat)
@@ -2057,8 +2076,8 @@ pub fn chande_batch_into(
 		let needs_temp = high_ptr == out_ptr || low_ptr == out_ptr || close_ptr == out_ptr;
 		
 		if needs_temp {
-			// Use temporary buffer
-			let mut temp = vec![0.0; rows * cols];
+			// Use temporary buffer initialized with NaN
+			let mut temp = vec![f64::NAN; rows * cols];
 			chande_batch_inner_into(high, low, close, &sweep, direction, Kernel::Auto, false, &mut temp)
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 			let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);

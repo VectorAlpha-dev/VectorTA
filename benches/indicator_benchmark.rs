@@ -141,6 +141,7 @@ use my_project::indicators::{
 	rocr::{rocr as rocr_raw, RocrInput},
 	rsi::{rsi as rsi_raw, RsiInput},
 	rsmk::{rsmk as rsmk_raw, RsmkInput},
+	rsx::{rsx as rsx_raw, RsxInput},
 	rvi::{rvi as rvi_raw, RviInput},
 	safezonestop::{safezonestop as safezonestop_raw, SafeZoneStopInput},
 	sar::{sar as sar_raw, SarInput},
@@ -302,6 +303,7 @@ pub type RocpInputS = RocpInput<'static>;
 pub type RocrInputS = RocrInput<'static>;
 pub type RsiInputS = RsiInput<'static>;
 pub type RsmkInputS = RsmkInput<'static>;
+pub type RsxInputS = RsxInput<'static>;
 pub type RviInputS = RviInput<'static>;
 pub type SafeZoneStopInputS = SafeZoneStopInput<'static>;
 pub type SarInputS = SarInput<'static>;
@@ -780,6 +782,7 @@ bench_wrappers! {
 	(rocr_bench, rocr_raw, RocrInputS),
 	(rsi_bench, rsi_raw, RsiInputS),
 	(rsmk_bench, rsmk_raw, RsmkInputS),
+	(rsx_bench, rsx_raw, RsxInputS),
 	(rvi_bench, rvi_raw, RviInputS),
 	(safezonestop_bench, safezonestop_raw, SafeZoneStopInputS),
 	(sar_bench, sar_raw, SarInputS),
@@ -908,6 +911,7 @@ bench_scalars!(
 	rocr_bench   => RocrInputS,
 	rsi_bench    => RsiInputS,
 	rsmk_bench   => RsmkInputS,
+	rsx_bench    => RsxInputS,
 	rvi_bench    => RviInputS,
 	safezonestop_bench => SafeZoneStopInputS,
 	sar_bench    => SarInputS,

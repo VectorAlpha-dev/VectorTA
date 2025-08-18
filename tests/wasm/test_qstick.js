@@ -2,10 +2,11 @@
  * WASM binding tests for QSTICK indicator.
  * These tests mirror the Rust unit tests to ensure WASM bindings work correctly.
  */
-const test = require('node:test');
-const assert = require('node:assert');
-const path = require('path');
-const { 
+import test from 'node:test';
+import assert from 'node:assert';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { 
     loadTestData, 
     assertArrayClose, 
     assertClose,
@@ -13,7 +14,10 @@ const {
     assertAllNaN,
     assertNoNaN,
     EXPECTED_OUTPUTS 
-} = require('./test_utils');
+} from './test_utils.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 let wasm;
 let testData;
@@ -22,8 +26,9 @@ test.before(async () => {
     // Load WASM module
     try {
         const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
-        wasm = await import(wasmPath);
-        await wasm.default();
+        const wasmUrl = new URL(`file:///${wasmPath.replace(/\\/g, '/')}`).href;
+        wasm = await import(wasmUrl);
+        // The CommonJS module doesn't export a default function, it auto-initializes
     } catch (error) {
         console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
         throw error;
@@ -79,23 +84,35 @@ test('QSTICK fast API', () => {
     const period = 5;
     const len = open_data.length;
     
-    // Allocate output buffer
+    // Allocate buffers
     const out_ptr = wasm.qstick_alloc(len);
+    const open_ptr = wasm.qstick_alloc(len);
+    const close_ptr = wasm.qstick_alloc(len);
     
     try {
-        // Compute using fast API
-        wasm.qstick_into(open_data, close_data, out_ptr, len, period);
+        // Copy input data to WASM memory
+        let memory = wasm.__wasm.memory;
+        const open_array = new Float64Array(memory.buffer, open_ptr, len);
+        const close_array = new Float64Array(memory.buffer, close_ptr, len);
+        open_array.set(open_data);
+        close_array.set(close_data);
         
-        // Get results from memory
-        const memory = wasm.memory.buffer;
-        const result = new Float64Array(memory, out_ptr, len);
+        // Compute using fast API
+        wasm.qstick_into(open_ptr, close_ptr, out_ptr, len, period);
+        
+        // Get results from memory (re-get memory buffer in case it grew)
+        memory = wasm.__wasm.memory;
+        const result = new Float64Array(memory.buffer, out_ptr, len);
+        const resultCopy = [...result]; // Copy before any potential detachment
         
         // Compare with safe API
         const expected = wasm.qstick_js(open_data, close_data, period);
-        assertArrayClose(result, expected, 1e-10, 'Fast API should match safe API');
+        assertArrayClose(resultCopy, expected, 1e-10, 'Fast API should match safe API');
     } finally {
         // Clean up
         wasm.qstick_free(out_ptr, len);
+        wasm.qstick_free(open_ptr, len);
+        wasm.qstick_free(close_ptr, len);
     }
 });
 

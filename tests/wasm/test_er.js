@@ -175,7 +175,7 @@ test('ER fast API - basic calculation', async () => {
     
     try {
         // Create typed arrays from WASM memory
-        const memory = new Float64Array(wasm.memory.buffer);
+        const memory = new Float64Array(wasm.__wasm.memory.buffer);
         const inOffset = inPtr / 8;
         const outOffset = outPtr / 8;
         
@@ -210,7 +210,7 @@ test('ER fast API - in-place operation (aliasing)', async () => {
     
     try {
         // Create typed array from WASM memory
-        const memory = new Float64Array(wasm.memory.buffer);
+        const memory = new Float64Array(wasm.__wasm.memory.buffer);
         const offset = ptr / 8;
         
         // Copy data to buffer
@@ -306,7 +306,7 @@ test('ER batch - fast API', () => {
     const outPtr = wasm.er_alloc(outputLen);
     
     try {
-        const memory = new Float64Array(wasm.memory.buffer);
+        const memory = new Float64Array(wasm.__wasm.memory.buffer);
         const inOffset = inPtr / 8;
         const outOffset = outPtr / 8;
         
