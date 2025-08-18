@@ -251,15 +251,26 @@ test('Chande zero-copy API', () => {
     const low = new Float64Array(testData.low.slice(0, len));
     const close = new Float64Array(testData.close.slice(0, len));
     
-    // Allocate output buffer
+    // Allocate memory for inputs and output
+    const highPtr = wasm.chande_alloc(len);
+    const lowPtr = wasm.chande_alloc(len);
+    const closePtr = wasm.chande_alloc(len);
     const outPtr = wasm.chande_alloc(len);
     
     try {
+        // Copy input data to WASM memory
+        const highMem = new Float64Array(wasm.__wasm.memory.buffer, highPtr, len);
+        const lowMem = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, len);
+        const closeMem = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
+        highMem.set(high);
+        lowMem.set(low);
+        closeMem.set(close);
+        
         // Compute using zero-copy API
         wasm.chande_into(
-            high.buffer,
-            low.buffer,
-            close.buffer,
+            highPtr,
+            lowPtr,
+            closePtr,
             outPtr,
             len,
             22,
@@ -268,7 +279,7 @@ test('Chande zero-copy API', () => {
         );
         
         // Read result from pointer
-        const result = new Float64Array(wasm.memory.buffer, outPtr, len);
+        const result = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
         
         // Compare with safe API
         const expected = wasm.chande_js(high, low, close, 22, 3.0, 'long');
@@ -280,6 +291,9 @@ test('Chande zero-copy API', () => {
         );
     } finally {
         // Clean up allocated memory
+        wasm.chande_free(highPtr, len);
+        wasm.chande_free(lowPtr, len);
+        wasm.chande_free(closePtr, len);
         wasm.chande_free(outPtr, len);
     }
 });
@@ -291,29 +305,49 @@ test('Chande zero-copy API with aliasing', () => {
     const low = new Float64Array(testData.low.slice(0, len));
     const close = new Float64Array(testData.close.slice(0, len));
     
-    // Make a copy for in-place operation
-    const closeCopy = new Float64Array(close);
+    // Allocate memory for inputs
+    const highPtr = wasm.chande_alloc(len);
+    const lowPtr = wasm.chande_alloc(len);
+    const closePtr = wasm.chande_alloc(len);
     
-    // Compute in-place (output overwrites close)
-    wasm.chande_into(
-        high.buffer,
-        low.buffer,
-        closeCopy.buffer,
-        closeCopy.buffer,  // Same as close - aliasing!
-        len,
-        22,
-        3.0,
-        'long'
-    );
-    
-    // Compare with safe API
-    const expected = wasm.chande_js(high, low, close, 22, 3.0, 'long');
-    assertArrayClose(
-        closeCopy,
-        expected,
-        1e-10,
-        "Zero-copy API with aliasing mismatch"
-    );
+    try {
+        // Copy input data to WASM memory
+        const highMem = new Float64Array(wasm.__wasm.memory.buffer, highPtr, len);
+        const lowMem = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, len);
+        const closeMem = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
+        highMem.set(high);
+        lowMem.set(low);
+        closeMem.set(close);
+        
+        // Compute in-place (output overwrites close)
+        wasm.chande_into(
+            highPtr,
+            lowPtr,
+            closePtr,
+            closePtr,  // Same as close - aliasing!
+            len,
+            22,
+            3.0,
+            'long'
+        );
+        
+        // Read result from close pointer (which now contains output)
+        const result = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
+        
+        // Compare with safe API
+        const expected = wasm.chande_js(high, low, close, 22, 3.0, 'long');
+        assertArrayClose(
+            result,
+            expected,
+            1e-10,
+            "Zero-copy API with aliasing mismatch"
+        );
+    } finally {
+        // Clean up allocated memory
+        wasm.chande_free(highPtr, len);
+        wasm.chande_free(lowPtr, len);
+        wasm.chande_free(closePtr, len);
+    }
 });
 
 test('Chande batch zero-copy API', () => {
@@ -330,15 +364,26 @@ test('Chande batch zero-copy API', () => {
     // Calculate expected rows
     const expectedRows = 2 * 3;  // 2 periods * 3 mults
     
-    // Allocate output buffer
+    // Allocate memory for inputs and output
+    const highPtr = wasm.chande_alloc(len);
+    const lowPtr = wasm.chande_alloc(len);
+    const closePtr = wasm.chande_alloc(len);
     const outPtr = wasm.chande_alloc(expectedRows * len);
     
     try {
+        // Copy input data to WASM memory
+        const highMem = new Float64Array(wasm.__wasm.memory.buffer, highPtr, len);
+        const lowMem = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, len);
+        const closeMem = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
+        highMem.set(high);
+        lowMem.set(low);
+        closeMem.set(close);
+        
         // Compute batch using zero-copy API
         const rows = wasm.chande_batch_into(
-            high.buffer,
-            low.buffer,
-            close.buffer,
+            highPtr,
+            lowPtr,
+            closePtr,
             outPtr,
             len,
             periodStart, periodEnd, periodStep,
@@ -349,7 +394,7 @@ test('Chande batch zero-copy API', () => {
         assert.strictEqual(rows, expectedRows);
         
         // Read result from pointer
-        const result = new Float64Array(wasm.memory.buffer, outPtr, rows * len);
+        const result = new Float64Array(wasm.__wasm.memory.buffer, outPtr, rows * len);
         
         // Compare with safe batch API
         const expected = wasm.chande_batch_js(
@@ -367,6 +412,9 @@ test('Chande batch zero-copy API', () => {
         );
     } finally {
         // Clean up allocated memory
+        wasm.chande_free(highPtr, len);
+        wasm.chande_free(lowPtr, len);
+        wasm.chande_free(closePtr, len);
         wasm.chande_free(outPtr, expectedRows * len);
     }
 });

@@ -68,7 +68,7 @@ test('MarketEFI accuracy', async () => {
     );
     
     // Compare full output with Rust
-    await compareWithRust('marketefi', result, { high, low, volume }, {});
+    await compareWithRust('marketefi', result, 'hlv', {});
 });
 
 test('MarketEFI NaN handling', () => {

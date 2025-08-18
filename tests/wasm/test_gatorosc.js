@@ -86,7 +86,7 @@ test('GatorOsc fast API (no aliasing)', () => {
     
     try {
         // Copy input data to WASM memory
-        const memory = new Float64Array(wasm.memory.buffer);
+        const memory = new Float64Array(wasm.__wasm.memory.buffer);
         memory.set(data, inPtr / 8);
         
         // Call fast API
@@ -95,9 +95,12 @@ test('GatorOsc fast API (no aliasing)', () => {
             len, 5, 3, 3, 2, 2, 1
         );
         
+        // Recreate memory view in case memory grew
+        const memory2 = new Float64Array(wasm.__wasm.memory.buffer);
+        
         // Read results
-        const upper = Array.from(memory.slice(upperPtr / 8, upperPtr / 8 + len));
-        const lower = Array.from(memory.slice(lowerPtr / 8, lowerPtr / 8 + len));
+        const upper = Array.from(memory2.slice(upperPtr / 8, upperPtr / 8 + len));
+        const lower = Array.from(memory2.slice(lowerPtr / 8, lowerPtr / 8 + len));
         
         // Check results exist
         assert(upper.some(v => !isNaN(v)), 'Upper should have some non-NaN values');
@@ -125,7 +128,7 @@ test('GatorOsc fast API (with aliasing)', () => {
     
     try {
         // Copy input data to WASM memory
-        const memory = new Float64Array(wasm.memory.buffer);
+        const memory = new Float64Array(wasm.__wasm.memory.buffer);
         memory.set(data, inPtr / 8);
         
         // Call fast API with aliasing (inPtr == upperPtr)
@@ -134,9 +137,12 @@ test('GatorOsc fast API (with aliasing)', () => {
             len, 5, 3, 3, 2, 2, 1
         );
         
+        // Recreate memory view in case memory grew
+        const memory2 = new Float64Array(wasm.__wasm.memory.buffer);
+        
         // Read results
-        const upper = Array.from(memory.slice(inPtr / 8, inPtr / 8 + len));  // Upper overwrote input
-        const lower = Array.from(memory.slice(lowerPtr / 8, lowerPtr / 8 + len));
+        const upper = Array.from(memory2.slice(inPtr / 8, inPtr / 8 + len));  // Upper overwrote input
+        const lower = Array.from(memory2.slice(lowerPtr / 8, lowerPtr / 8 + len));
         
         // Check results exist and input was overwritten
         assert(upper.some(v => !isNaN(v)), 'Upper should have some non-NaN values');

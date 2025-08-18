@@ -207,6 +207,16 @@ const EXPECTED_OUTPUTS = {
             59110.03801260874
         ]
     },
+    rsx: {
+        default_params: { period: 14 },
+        last_5_values: [
+            46.11486311289701,
+            46.88048640321688,
+            47.174443049619995,
+            47.48751360654475,
+            46.552886446171684
+        ]
+    },
     supersmoother_3_pole: {
         defaultParams: { period: 14 },
         last5Values: [
@@ -562,6 +572,26 @@ const EXPECTED_OUTPUTS = {
             59583.0,
             59486.0,
             58989.0
+        ]
+    },
+    coppock: {
+        defaultParams: { short: 11, long: 14, ma: 10, ma_type: "wma" },
+        last5Values: [
+            -1.4542764618985533,
+            -1.3795224034983653,
+            -1.614331648987457,
+            -1.9179048338714915,
+            -2.1096548435774625
+        ]
+    },
+    ppo: {
+        defaultParams: { fast_period: 12, slow_period: 26, ma_type: "sma" },
+        last5Values: [
+            -0.8532313608928664,
+            -0.8537562894550523,
+            -0.6821291938174874,
+            -0.5620008722078592,
+            -0.4101724140910927
         ]
     }
 };

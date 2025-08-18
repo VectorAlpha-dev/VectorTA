@@ -46,10 +46,10 @@ class TestMarketEFI:
         
         # Check last 5 values match expected
         for i, (actual, expected) in enumerate(zip(result[-5:], expected_last_five)):
-            assert_close(actual, expected, 1e-6, f"MarketEFI mismatch at index {i}")
+            assert_close(actual, expected, rtol=1e-6, msg=f"MarketEFI mismatch at index {i}")
         
         # Compare full output with Rust using kernel
-        compare_with_rust('marketefi', result, {'high': high, 'low': low, 'volume': volume}, {})
+        compare_with_rust('marketefi', result, 'hlv', {})
     
     def test_marketefi_nan_handling(self):
         """Test MarketEFI NaN handling - mirrors check_marketefi_nan_handling"""
@@ -60,8 +60,8 @@ class TestMarketEFI:
         result = ta_indicators.marketefi(high, low, volume)
         
         assert np.isnan(result[0]), "First value should be NaN"
-        assert_close(result[1], 1.0, 1e-8, "Second value mismatch")
-        assert_close(result[2], 1.0, 1e-8, "Third value mismatch")
+        assert_close(result[1], 1.0, rtol=1e-8, msg="Second value mismatch")
+        assert_close(result[2], 1.0, rtol=1e-8, msg="Third value mismatch")
     
     def test_marketefi_empty_data(self):
         """Test MarketEFI with empty data - mirrors check_marketefi_empty_data"""
@@ -89,9 +89,9 @@ class TestMarketEFI:
         
         result = ta_indicators.marketefi(high, low, volume)
         
-        assert_close(result[0], 1.0, 1e-8)
+        assert_close(result[0], 1.0, rtol=1e-8)
         assert np.isnan(result[1]), "Zero volume should produce NaN"
-        assert_close(result[2], 0.5, 1e-8)
+        assert_close(result[2], 0.5, rtol=1e-8)
     
     def test_marketefi_streaming(self):
         """Test MarketEFI streaming functionality - mirrors check_marketefi_streaming"""
@@ -113,7 +113,7 @@ class TestMarketEFI:
         for i, (stream_val, batch_val) in enumerate(zip(streaming_results, batch_result)):
             if np.isnan(stream_val) and np.isnan(batch_val):
                 continue
-            assert_close(stream_val, batch_val, 1e-8, f"Streaming mismatch at index {i}")
+            assert_close(stream_val, batch_val, rtol=1e-8, msg=f"Streaming mismatch at index {i}")
     
     def test_marketefi_batch(self, test_data):
         """Test MarketEFI batch functionality"""
@@ -134,7 +134,7 @@ class TestMarketEFI:
         single_result = ta_indicators.marketefi(high, low, volume)
         
         for i in range(len(single_result)):
-            assert_close(values[0, i], single_result[i], 1e-10, f"Batch mismatch at index {i}")
+            assert_close(values[0, i], single_result[i], rtol=1e-10, msg=f"Batch mismatch at index {i}")
     
     def test_marketefi_with_kernel(self, test_data):
         """Test MarketEFI with different kernels"""
@@ -150,7 +150,7 @@ class TestMarketEFI:
         for i in range(len(result_auto)):
             if np.isnan(result_auto[i]) and np.isnan(result_scalar[i]):
                 continue
-            assert_close(result_auto[i], result_scalar[i], 1e-10, f"Kernel mismatch at index {i}")
+            assert_close(result_auto[i], result_scalar[i], rtol=1e-10, msg=f"Kernel mismatch at index {i}")
     
     def test_marketefi_all_nan_input(self):
         """Test MarketEFI with all NaN values"""

@@ -559,7 +559,10 @@ pub fn rsx_batch_with_kernel(data: &[f64], sweep: &RsxBatchRange, k: Kernel) -> 
 		Kernel::Avx512Batch => Kernel::Avx512,
 		Kernel::Avx2Batch => Kernel::Avx2,
 		Kernel::ScalarBatch => Kernel::Scalar,
-		_ => unreachable!(),
+		Kernel::Avx512 => Kernel::Avx512,
+		Kernel::Avx2 => Kernel::Avx2,
+		Kernel::Scalar => Kernel::Scalar,
+		Kernel::Auto => detect_best_kernel(),
 	};
 	rsx_batch_par_slice(data, sweep, simd)
 }
@@ -636,6 +639,12 @@ fn rsx_batch_inner(
 	let rows = combos.len();
 	let cols = data.len();
 	
+	// Resolve kernel selection
+	let actual_kernel = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		k => k,
+	};
+	
 	// Use uninitialized memory like ALMA
 	let mut buf_mu = make_uninit_matrix(rows, cols);
 	
@@ -656,13 +665,17 @@ fn rsx_batch_inner(
 
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
-		match kern {
-			Kernel::Scalar => rsx_row_scalar(data, first, period, out_row),
+		match actual_kernel {
+			Kernel::Scalar | Kernel::ScalarBatch => rsx_row_scalar(data, first, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => rsx_row_avx2(data, first, period, out_row),
+			Kernel::Avx2 | Kernel::Avx2Batch => rsx_row_avx2(data, first, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => rsx_row_avx512(data, first, period, out_row),
-			_ => unreachable!(),
+			Kernel::Avx512 | Kernel::Avx512Batch => rsx_row_avx512(data, first, period, out_row),
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+				rsx_row_scalar(data, first, period, out_row)
+			}
+			Kernel::Auto => unreachable!("Auto kernel should have been resolved"),
 		}
 	};
 
@@ -1409,9 +1422,75 @@ fn rsx_batch_inner_into(
 	parallel: bool,
 	out: &mut [f64],
 ) -> Result<Vec<RsxParams>, RsxError> {
-	let result = rsx_batch_inner(data, sweep, kern, parallel)?;
-	out.copy_from_slice(&result.values);
-	Ok(result.combos)
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(RsxError::InvalidPeriod { period: 0, data_len: 0 });
+	}
+
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(RsxError::AllValuesNaN)?;
+	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	if data.len() - first < max_p {
+		return Err(RsxError::NotEnoughValidData {
+			needed: max_p,
+			valid: data.len() - first,
+		});
+	}
+
+	let rows = combos.len();
+	let cols = data.len();
+
+	// Resolve kernel selection
+	let actual_kernel = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		k => k,
+	};
+
+	// Initialize NaN prefixes for each row based on warmup period
+	for (row, combo) in combos.iter().enumerate() {
+		let warmup = first + combo.period.unwrap() - 1;
+		let row_start = row * cols;
+		for i in 0..warmup.min(cols) {
+			out[row_start + i] = f64::NAN;
+		}
+	}
+
+	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+		let period = combos[row].period.unwrap();
+		match actual_kernel {
+			Kernel::Scalar | Kernel::ScalarBatch => rsx_row_scalar(data, first, period, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => rsx_row_avx2(data, first, period, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => rsx_row_avx512(data, first, period, out_row),
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+				rsx_row_scalar(data, first, period, out_row)
+			}
+			Kernel::Auto => unreachable!("Auto kernel should have been resolved"),
+		}
+	};
+
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			out.par_chunks_mut(cols)
+				.enumerate()
+				.for_each(|(row, slice)| do_row(row, slice));
+		}
+
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, slice) in out.chunks_mut(cols).enumerate() {
+				do_row(row, slice);
+			}
+		}
+	} else {
+		for (row, slice) in out.chunks_mut(cols).enumerate() {
+			do_row(row, slice);
+		}
+	}
+
+	Ok(combos)
 }
 
 #[cfg(feature = "wasm")]

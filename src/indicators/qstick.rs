@@ -519,15 +519,25 @@ fn qstick_batch_inner_into(
 		}
 	}
 	
+	// Initialize NaN prefixes for each row based on warmup period
+	for (row, combo) in combos.iter().enumerate() {
+		let warmup = first + combo.period.unwrap() - 1;
+		let row_start = row * cols;
+		for i in 0..warmup.min(cols) {
+			out[row_start + i] = f64::NAN;
+		}
+	}
+	
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
 		match kern {
-			Kernel::Scalar => qstick_row_scalar(open, close, first, period, out_row),
+			Kernel::Scalar | Kernel::ScalarBatch | Kernel::Auto => qstick_row_scalar(open, close, first, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => qstick_row_avx2(open, close, first, period, out_row),
+			Kernel::Avx2 | Kernel::Avx2Batch => qstick_row_avx2(open, close, first, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => qstick_row_avx512(open, close, first, period, out_row),
-			_ => unreachable!(),
+			Kernel::Avx512 | Kernel::Avx512Batch => qstick_row_avx512(open, close, first, period, out_row),
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			_ => qstick_row_scalar(open, close, first, period, out_row),
 		}
 	};
 	
@@ -1270,6 +1280,12 @@ pub fn qstick_into_slice(
 		k => k,
 	};
 	
+	// Initialize warmup period with NaN
+	let warmup_end = first_valid + period - 1;
+	for i in 0..warmup_end {
+		dst[i] = f64::NAN;
+	}
+	
 	match kernel {
 		Kernel::Scalar | Kernel::ScalarBatch => qstick_scalar(open, close, period, first_valid, dst),
 		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1278,7 +1294,6 @@ pub fn qstick_into_slice(
 		Kernel::Avx512 | Kernel::Avx512Batch => qstick_avx512(open, close, period, first_valid, dst),
 		_ => unreachable!(),
 	}
-	
 	
 	Ok(())
 }
