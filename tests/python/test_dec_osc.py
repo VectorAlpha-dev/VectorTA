@@ -208,9 +208,9 @@ class TestDecOsc:
 
 
 # Add performance test (optional)
-@pytest.mark.benchmark
-def test_dec_osc_performance(benchmark):
-    """Benchmark DEC_OSC performance"""
+# @pytest.mark.benchmark  # Commented out as pytest-benchmark is not installed
+def test_dec_osc_performance():
+    """Test DEC_OSC performance with large dataset"""
     data = np.random.randn(10000)
-    result = benchmark(ta_indicators.dec_osc, data, hp_period=125, k=1.0)
+    result = ta_indicators.dec_osc(data, hp_period=125, k=1.0)
     assert len(result) == len(data)

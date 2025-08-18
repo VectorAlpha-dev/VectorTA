@@ -234,6 +234,22 @@ pub fn minmax_into_slice(
 		});
 	}
 	
+	// Initialize ALL indices with NaN before computation
+	// The scalar function only writes to is_min/is_max when extrema are detected,
+	// leaving other indices uninitialized
+	for v in is_min_dst.iter_mut() {
+		*v = f64::NAN;
+	}
+	for v in is_max_dst.iter_mut() {
+		*v = f64::NAN;
+	}
+	for v in &mut last_min_dst[..first_valid_idx] {
+		*v = f64::NAN;
+	}
+	for v in &mut last_max_dst[..first_valid_idx] {
+		*v = f64::NAN;
+	}
+	
 	let chosen = match kern {
 		Kernel::Auto => detect_best_kernel(),
 		other => other,
@@ -286,21 +302,6 @@ pub fn minmax_into_slice(
 		}
 	}
 	
-	// Fill warmup with NaN
-	let warmup_period = order;
-	for v in &mut is_min_dst[..warmup_period] {
-		*v = f64::NAN;
-	}
-	for v in &mut is_max_dst[..warmup_period] {
-		*v = f64::NAN;
-	}
-	for v in &mut last_min_dst[..first_valid_idx] {
-		*v = f64::NAN;
-	}
-	for v in &mut last_max_dst[..first_valid_idx] {
-		*v = f64::NAN;
-	}
-	
 	Ok(())
 }
 
@@ -341,12 +342,13 @@ pub fn minmax_with_kernel(input: &MinmaxInput, kernel: Kernel) -> Result<MinmaxO
 			valid: len_data - first_valid_idx,
 		});
 	}
-	// Use zero-copy allocation for outputs
-	let warmup_period = order;
-	let mut is_min = alloc_with_nan_prefix(len_data, warmup_period);
-	let mut is_max = alloc_with_nan_prefix(len_data, warmup_period);
-	let mut last_min = alloc_with_nan_prefix(len_data, first_valid_idx);
-	let mut last_max = alloc_with_nan_prefix(len_data, first_valid_idx);
+	// Allocate outputs and initialize ALL indices to NaN
+	// The scalar function only writes when extrema are detected, leaving other indices uninitialized
+	// Using vec! ensures all values are initialized, unlike alloc_with_nan_prefix which may leave some uninitialized
+	let mut is_min = vec![f64::NAN; len_data];
+	let mut is_max = vec![f64::NAN; len_data];
+	let mut last_min = vec![f64::NAN; len_data];
+	let mut last_max = vec![f64::NAN; len_data];
 
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
@@ -782,35 +784,12 @@ fn minmax_batch_inner(
 	let rows = combos.len();
 	let cols = len_data;
 	
-	// Calculate warmup periods for each row
-	let warmup_periods: Vec<usize> = combos.iter()
-		.map(|c| c.order.unwrap() + first_valid_idx)
-		.collect();
-	
-	// Use uninitialized memory helpers for batch outputs
-	let mut is_min_buf = make_uninit_matrix(rows, cols);
-	let mut is_max_buf = make_uninit_matrix(rows, cols);
-	let mut last_min_buf = make_uninit_matrix(rows, cols);
-	let mut last_max_buf = make_uninit_matrix(rows, cols);
-	
-	// Initialize NaN prefixes for each row
-	init_matrix_prefixes(&mut is_min_buf, cols, &warmup_periods);
-	init_matrix_prefixes(&mut is_max_buf, cols, &warmup_periods);
-	
-	let first_valid_periods: Vec<usize> = vec![first_valid_idx; rows];
-	init_matrix_prefixes(&mut last_min_buf, cols, &first_valid_periods);
-	init_matrix_prefixes(&mut last_max_buf, cols, &first_valid_periods);
-	
-	// Convert to mutable slices for computation
-	let mut is_min_guard = core::mem::ManuallyDrop::new(is_min_buf);
-	let mut is_max_guard = core::mem::ManuallyDrop::new(is_max_buf);
-	let mut last_min_guard = core::mem::ManuallyDrop::new(last_min_buf);
-	let mut last_max_guard = core::mem::ManuallyDrop::new(last_max_buf);
-	
-	let is_min: &mut [f64] = unsafe { core::slice::from_raw_parts_mut(is_min_guard.as_mut_ptr() as *mut f64, is_min_guard.len()) };
-	let is_max: &mut [f64] = unsafe { core::slice::from_raw_parts_mut(is_max_guard.as_mut_ptr() as *mut f64, is_max_guard.len()) };
-	let last_min: &mut [f64] = unsafe { core::slice::from_raw_parts_mut(last_min_guard.as_mut_ptr() as *mut f64, last_min_guard.len()) };
-	let last_max: &mut [f64] = unsafe { core::slice::from_raw_parts_mut(last_max_guard.as_mut_ptr() as *mut f64, last_max_guard.len()) };
+	// For batch operations, use simple vec allocation with full NaN initialization
+	// to avoid any poison value issues
+	let mut is_min = vec![f64::NAN; rows * cols];
+	let mut is_max = vec![f64::NAN; rows * cols];
+	let mut last_min = vec![f64::NAN; rows * cols];
+	let mut last_max = vec![f64::NAN; rows * cols];
 
 	let do_row = |row: usize,
 	              out_min: &mut [f64],
@@ -887,42 +866,6 @@ fn minmax_batch_inner(
 		}
 	}
 	
-	// Convert back to Vecs
-	let is_min = unsafe {
-		Vec::from_raw_parts(
-			is_min_guard.as_mut_ptr() as *mut f64,
-			is_min_guard.len(),
-			is_min_guard.capacity(),
-		)
-	};
-	let is_max = unsafe {
-		Vec::from_raw_parts(
-			is_max_guard.as_mut_ptr() as *mut f64,
-			is_max_guard.len(),
-			is_max_guard.capacity(),
-		)
-	};
-	let last_min = unsafe {
-		Vec::from_raw_parts(
-			last_min_guard.as_mut_ptr() as *mut f64,
-			last_min_guard.len(),
-			last_min_guard.capacity(),
-		)
-	};
-	let last_max = unsafe {
-		Vec::from_raw_parts(
-			last_max_guard.as_mut_ptr() as *mut f64,
-			last_max_guard.len(),
-			last_max_guard.capacity(),
-		)
-	};
-	
-	// Forget the guards since we've taken ownership
-	core::mem::forget(is_min_guard);
-	core::mem::forget(is_max_guard);
-	core::mem::forget(last_min_guard);
-	core::mem::forget(last_max_guard);
-	
 	Ok(MinmaxBatchOutput {
 		is_min,
 		is_max,
@@ -969,6 +912,25 @@ fn minmax_batch_inner_into(
 	
 	let rows = combos.len();
 	let cols = len_data;
+	
+	// Initialize ALL values with NaN before computation
+	// The scalar function only writes to is_min/is_max when extrema are detected,
+	// leaving other indices uninitialized
+	for v in is_min_out.iter_mut() {
+		*v = f64::NAN;
+	}
+	for v in is_max_out.iter_mut() {
+		*v = f64::NAN;
+	}
+	
+	// Initialize last_min/last_max warmup periods for each row
+	for row in 0..rows {
+		let row_start = row * cols;
+		for i in 0..first_valid_idx {
+			last_min_out[row_start + i] = f64::NAN;
+			last_max_out[row_start + i] = f64::NAN;
+		}
+	}
 	
 	let do_row = |row: usize,
 	              out_min: &mut [f64],
@@ -1858,22 +1820,22 @@ mod tests {
 					// Generate data length from order to 400
 					(order..400)
 						.prop_flat_map(move |len| {
-							// Generate low prices first
+							// Generate pairs of (low, spread) to ensure high >= low
 							prop::collection::vec(
-								(0.1f64..1000.0f64).prop_filter("finite", |x| x.is_finite()),
+								(0.1f64..1000.0f64, 0.0f64..=0.2)
+									.prop_filter("finite", |(x, _)| x.is_finite()),
 								len,
 							)
-							.prop_flat_map(move |low| {
-								// Generate high prices with realistic spreads
-								let high_strategies: Vec<_> = low
-									.iter()
-									.map(|&l| {
-										// Generate spread factor between 0% and 20%
-										(0.0f64..=0.2).prop_map(move |spread| l * (1.0 + spread))
-									})
-									.collect();
-								prop::collection::vec(prop::strategy::Union::new(high_strategies), low.len())
-									.prop_map(move |high| (high, low.clone()))
+							.prop_map(move |pairs| {
+								let mut low = Vec::with_capacity(len);
+								let mut high = Vec::with_capacity(len);
+								
+								for (l, spread) in pairs {
+									low.push(l);
+									high.push(l * (1.0 + spread)); // Ensure high[i] >= low[i]
+								}
+								
+								(high, low)
 							})
 						}),
 					Just(order),

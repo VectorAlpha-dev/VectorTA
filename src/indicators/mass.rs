@@ -300,6 +300,12 @@ pub fn mass_into_slice(dst: &mut [f64], input: &MassInput, kern: Kernel) -> Resu
 		});
 	}
 
+	// Initialize NaN values for warmup period first
+	let warmup_end = first_valid_idx + 16 + period - 1;
+	for v in &mut dst[..warmup_end] {
+		*v = f64::NAN;
+	}
+
 	let chosen = match kern {
 		Kernel::Auto => detect_best_kernel(),
 		other => other,
@@ -314,11 +320,6 @@ pub fn mass_into_slice(dst: &mut [f64], input: &MassInput, kern: Kernel) -> Resu
 			Kernel::Avx512 | Kernel::Avx512Batch => mass_avx512(high, low, period, first_valid_idx, dst),
 			_ => unreachable!(),
 		}
-	}
-
-	let warmup_end = first_valid_idx + 16 + period - 1;
-	for v in &mut dst[..warmup_end] {
-		*v = f64::NAN;
 	}
 
 	Ok(())
@@ -649,15 +650,26 @@ fn mass_batch_inner(
 	let values_slice: &mut [f64] =
 		unsafe { core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len()) };
 
+	// Resolve Auto kernel for WASM
+	let actual_kern = match kern {
+		Kernel::Auto => {
+			#[cfg(target_arch = "wasm32")]
+			{ Kernel::Scalar }
+			#[cfg(not(target_arch = "wasm32"))]
+			{ detect_best_kernel() }
+		},
+		other => other,
+	};
+
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
-		match kern {
+		match actual_kern {
 			Kernel::Scalar => mass_row_scalar(high, low, period, first, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx2 => mass_row_avx2(high, low, period, first, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 => mass_row_avx512(high, low, period, first, out_row),
-			_ => unreachable!(),
+			_ => mass_row_scalar(high, low, period, first, out_row), // Fallback to scalar
 		}
 	};
 
@@ -1506,19 +1518,37 @@ fn mass_batch_inner_into(
 
 	let cols = high.len();
 
+	// Initialize NaN prefixes for each row based on warmup period
+	// This is necessary because the buffer comes from Python/WASM and wasn't created by our helpers
+	for (row, combo) in combos.iter().enumerate() {
+		let period = combo.period.unwrap();
+		let warmup_end = first + 16 + period - 1;
+		let row_start = row * cols;
+		for i in 0..warmup_end.min(cols) {
+			out[row_start + i] = f64::NAN;
+		}
+	}
+
+	// Resolve Auto kernel for WASM
+	let actual_kern = match kern {
+		Kernel::Auto => {
+			#[cfg(target_arch = "wasm32")]
+			{ Kernel::Scalar }
+			#[cfg(not(target_arch = "wasm32"))]
+			{ detect_best_kernel() }
+		},
+		other => other,
+	};
+
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
-		let warmup_end = first + 16 + period - 1;
-		for v in &mut out_row[..warmup_end] {
-			*v = f64::NAN;
-		}
-		match kern {
+		match actual_kern {
 			Kernel::Scalar => mass_row_scalar(high, low, period, first, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx2 => mass_row_avx2(high, low, period, first, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 => mass_row_avx512(high, low, period, first, out_row),
-			_ => unreachable!(),
+			_ => mass_row_scalar(high, low, period, first, out_row), // Fallback to scalar
 		}
 	};
 

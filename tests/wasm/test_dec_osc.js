@@ -237,14 +237,14 @@ test('DEC_OSC fast API (into)', () => {
     
     try {
         // Copy input data to WASM memory
-        const wasmMemory = new Float64Array(wasm.memory.buffer);
+        const wasmMemory = new Float64Array(wasm.__wasm.memory.buffer);
         wasmMemory.set(close, inPtr / 8);
         
         // Call fast API
         wasm.dec_osc_into(inPtr, outPtr, len, 125, 1.0);
         
         // Read result from WASM memory
-        const result = new Float64Array(wasm.memory.buffer, outPtr, len);
+        const result = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
         
         // Compare with safe API
         const safeResult = wasm.dec_osc_js(close, 125, 1.0);
@@ -267,14 +267,14 @@ test('DEC_OSC fast API with aliasing', () => {
     
     try {
         // Copy input data to WASM memory
-        const wasmMemory = new Float64Array(wasm.memory.buffer);
+        const wasmMemory = new Float64Array(wasm.__wasm.memory.buffer);
         wasmMemory.set(close, ptr / 8);
         
         // Call fast API with same pointer for input and output (in-place)
         wasm.dec_osc_into(ptr, ptr, len, 125, 1.0);
         
         // Read result from WASM memory
-        const result = new Float64Array(wasm.memory.buffer, ptr, len);
+        const result = new Float64Array(wasm.__wasm.memory.buffer, ptr, len);
         
         // Compare with safe API
         const safeResult = wasm.dec_osc_js(close, 125, 1.0);

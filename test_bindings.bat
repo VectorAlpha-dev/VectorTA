@@ -81,9 +81,15 @@ if "%RUN_PYTHON%"=="true" (
     for /f %%i in ('.venv\Scripts\python.exe -m site --user-base') do set PATH=%%i\Scripts;!PATH!
     
     echo.
+    echo Cleaning Python module cache...
+    REM Remove cached compiled modules to ensure fresh build
+    .venv\Scripts\python.exe -c "import sys; import shutil; import pathlib; [shutil.rmtree(p, ignore_errors=True) for p in pathlib.Path('.venv/Lib/site-packages').glob('my_project*')]" 2>nul
+    .venv\Scripts\python.exe -c "import sys; sys.path_importer_cache.clear() if hasattr(sys, 'path_importer_cache') else None" 2>nul
+    
     echo Building Python bindings...
     REM Enable dylib-lto for Python builds
     set "RUSTFLAGS=-Zdylib-lto"
+    REM Build with release optimizations
     maturin develop --features python,nightly-avx --release
     if !errorlevel! equ 0 (
         echo Python build successful
@@ -110,6 +116,15 @@ if "%RUN_PYTHON%"=="true" (
 REM WASM tests
 if "%RUN_WASM%"=="true" (
     echo.
+    echo Cleaning WASM build artifacts...
+    REM Clean any existing WASM artifacts to ensure fresh build
+    if exist "pkg" (
+        rmdir /s /q pkg 2>nul
+    )
+    if exist "target\wasm32-unknown-unknown" (
+        rmdir /s /q "target\wasm32-unknown-unknown" 2>nul
+    )
+    
     echo Building WASM bindings...
     REM Disable LTO for WASM builds
     set "CARGO_PROFILE_RELEASE_LTO=off"

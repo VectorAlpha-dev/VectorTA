@@ -501,6 +501,9 @@ pub fn squeeze_momentum_scalar_impl(
 			} else {
 				momentum_signal[i + 1] = if next < curr { -1.0 } else { -2.0 };
 			}
+		} else if i + 1 >= warmup_signal {
+			// Explicitly set NaN when momentum values are NaN
+			momentum_signal[i + 1] = f64::NAN;
 		}
 	}
 	SqueezeMomentumOutput {
@@ -749,6 +752,83 @@ pub fn squeeze_momentum_batch_with_kernel(
 	})
 }
 
+// Function to handle batch computation into an externally-provided buffer
+pub fn squeeze_momentum_batch_inner_into(
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	sweep: &SqueezeMomentumBatchRange,
+	kernel: Kernel,
+	parallel: bool,
+	out: &mut [f64],
+) -> Result<Vec<SqueezeMomentumBatchParams>, SqueezeMomentumError> {
+	let combos = expand_grid_sm(sweep);
+	if combos.is_empty() {
+		return Err(SqueezeMomentumError::InvalidLength { length: 0, data_len: 0 });
+	}
+	
+	let first_valid = (0..close.len())
+		.find(|&i| !(high[i].is_nan() || low[i].is_nan() || close[i].is_nan()))
+		.ok_or(SqueezeMomentumError::AllValuesNaN)?;
+	
+	let max_l = combos.iter().map(|c| c.length_bb.max(c.length_kc)).max().unwrap();
+	if close.len() - first_valid < max_l {
+		return Err(SqueezeMomentumError::NotEnoughValidData {
+			needed: max_l,
+			valid: close.len() - first_valid,
+		});
+	}
+	
+	let rows = combos.len();
+	let cols = close.len();
+	
+	// Initialize NaN prefixes for each row in the externally-provided buffer
+	// The warmup period for momentum in squeeze_momentum is length_kc - 1
+	for (row, combo) in combos.iter().enumerate() {
+		let warmup = combo.length_kc.saturating_sub(1);
+		let row_start = row * cols;
+		for i in 0..warmup.min(cols) {
+			out[row_start + i] = f64::NAN;
+		}
+	}
+	
+	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+		let p = &combos[row];
+		squeeze_momentum_row_scalar(
+			high,
+			low,
+			close,
+			first_valid,
+			p.length_bb,
+			p.mult_bb,
+			p.length_kc,
+			p.mult_kc,
+			out_row,
+		);
+	};
+	
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			out.par_chunks_mut(cols).enumerate().for_each(|(row, slice)| {
+				do_row(row, slice);
+			});
+		}
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, slice) in out.chunks_mut(cols).enumerate() {
+				do_row(row, slice);
+			}
+		}
+	} else {
+		for (row, slice) in out.chunks_mut(cols).enumerate() {
+			do_row(row, slice);
+		}
+	}
+	
+	Ok(combos)
+}
+
 // Per-row kernel, just outputting the momentum vector for the parameter set
 pub unsafe fn squeeze_momentum_row_scalar(
 	high: &[f64],
@@ -987,6 +1067,9 @@ fn linearreg_slice(data: &[f64], period: usize) -> Vec<f64> {
 		let subset = &data[i + 1 - period..=i];
 		if subset.iter().all(|x| x.is_finite()) {
 			output[i] = linear_regression_last_point(subset);
+		} else {
+			// Explicitly set NaN when input data contains NaN
+			output[i] = f64::NAN;
 		}
 	}
 	output
@@ -1945,13 +2028,8 @@ pub fn squeeze_momentum_batch_py<'py>(
 				_ => kernel,
 			};
 
-			// Run batch computation
-			let result = squeeze_momentum_batch_with_kernel(high_slice, low_slice, close_slice, &sweep, simd)?;
-			
-			// Copy momentum values to output
-			slice_out.copy_from_slice(&result.momentum);
-			
-			Ok::<Vec<SqueezeMomentumBatchParams>, SqueezeMomentumError>(result.combos)
+			// Use batch_inner_into to handle the external buffer properly
+			squeeze_momentum_batch_inner_into(high_slice, low_slice, close_slice, &sweep, simd, true, slice_out)
 		})
 		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 

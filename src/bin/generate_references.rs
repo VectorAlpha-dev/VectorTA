@@ -18,6 +18,9 @@ use my_project::indicators::bop::{bop, BopInput, BopParams};
 use my_project::indicators::cci::{cci, CciInput, CciParams};
 use my_project::indicators::cfo::{cfo, CfoInput, CfoParams};
 use my_project::indicators::cg::{cg, CgInput, CgParams};
+use my_project::indicators::ui::{ui, UiInput, UiParams};
+use my_project::indicators::squeeze_momentum::{squeeze_momentum, SqueezeMomentumInput, SqueezeMomentumParams};
+use my_project::indicators::mass::{mass, MassData, MassInput, MassParams};
 /// Binary to generate reference outputs for indicator testing
 /// This is used by Python and WASM tests to verify their outputs match Rust
 use my_project::indicators::moving_averages::alma::{alma, AlmaInput, AlmaParams};
@@ -72,7 +75,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	let args: Vec<String> = env::args().collect();
 	if args.len() < 2 {
 		eprintln!("Usage: {} <indicator_name> [source]", args[0]);
-		eprintln!("Available indicators: ad, acosc, adx, adosc, adxr, alligator, alma, ao, apo, aroon, aroonosc, atr, bandpass, bollinger_bands, bollinger_bands_width, bop, cci, cfo, cg, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass_2_pole, highpass, hma, hwma, jma, jsa, kama, linreg, maaq, mama, mwdx, nma, pwma, reflex, sinwma, sma, smma, sqwma, srwma, supersmoother_3_pole, supersmoother, swma, tema, tilson, trendflex, trima, vwap, vwma, vpwma, wilders, wma, zlema");
+		eprintln!("Available indicators: ad, acosc, adx, adosc, adxr, alligator, alma, ao, apo, aroon, aroonosc, atr, bandpass, bollinger_bands, bollinger_bands_width, bop, cci, cfo, cg, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass_2_pole, highpass, hma, hwma, jma, jsa, kama, linreg, maaq, mama, mwdx, nma, pwma, reflex, sinwma, sma, smma, squeeze_momentum, sqwma, srwma, supersmoother_3_pole, supersmoother, swma, tema, tilson, trendflex, trima, ui, vwap, vwma, vpwma, wilders, wma, zlema");
 		eprintln!("Available sources: open, high, low, close, volume, hl2, hlc3, ohlc4, hlcc4");
 		std::process::exit(1);
 	}
@@ -415,6 +418,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 				"length": result.mama_values.len()
 			})
 		}
+		"mass" => {
+			// Mass Index requires high and low data
+			if !source.contains(",") {
+				eprintln!("Mass Index requires 'high,low' source");
+				std::process::exit(1);
+			}
+			let params = MassParams::default();
+			let period = params.period.unwrap_or(5);
+			let input = MassInput::from_candles(&candles, "high", "low", params);
+			let result = mass(&input)?;
+			json!({
+				"indicator": "mass",
+				"source": source,
+				"params": {
+					"period": period
+				},
+				"values": result.values,
+				"length": result.values.len()
+			})
+		}
 		"mwdx" => {
 			let params = MwdxParams::default();
 			let factor = params.factor.unwrap_or(0.2);
@@ -655,6 +678,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 				},
 				"values": result.values,
 				"length": result.values.len()
+			})
+		}
+		"ui" => {
+			let params = UiParams::default();
+			let period = params.period.unwrap_or(14);
+			let scalar = params.scalar.unwrap_or(100.0);
+			let input = UiInput::from_candles(&candles, source, params);
+			let result = ui(&input)?;
+			json!({
+				"indicator": "ui",
+				"source": source,
+				"params": {
+					"period": period,
+					"scalar": scalar
+				},
+				"values": result.values,
+				"length": result.values.len()
+			})
+		}
+		"squeeze_momentum" => {
+			let params = SqueezeMomentumParams::default();
+			let length_bb = params.length_bb.unwrap_or(20);
+			let mult_bb = params.mult_bb.unwrap_or(2.0);
+			let length_kc = params.length_kc.unwrap_or(20);
+			let mult_kc = params.mult_kc.unwrap_or(1.5);
+			let input = SqueezeMomentumInput::from_candles(&candles, params);
+			let result = squeeze_momentum(&input)?;
+			// For squeeze_momentum, we return the momentum values as the main output
+			// This matches what the Python test expects
+			json!({
+				"indicator": "squeeze_momentum",
+				"source": "hlc",
+				"params": {
+					"length_bb": length_bb,
+					"mult_bb": mult_bb,
+					"length_kc": length_kc,
+					"mult_kc": mult_kc
+				},
+				"values": result.momentum,
+				"length": result.momentum.len()
 			})
 		}
 		"vwap" => {

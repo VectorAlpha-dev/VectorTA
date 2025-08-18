@@ -224,24 +224,24 @@ class TestUI:
         # Create stream with period=5 for easier testing
         stream = ta_indicators.UiStream(period=5, scalar=100.0)
         
-        # Test data
-        data = [10.0, 12.0, 8.0, 15.0, 11.0, 9.0, 13.0, 10.0]
+        # The stream needs more values than the regular function due to how it builds the window
+        # Need period*3-2 = 13 values for first output with period=5
+        data = [10.0, 12.0, 8.0, 15.0, 11.0, 9.0, 13.0, 10.0, 14.0, 12.0, 11.0, 13.0, 15.0, 14.0, 16.0]
         
         results = []
         for value in data:
             result = stream.update(value)
             results.append(result)
         
-        # First period*2-2 = 8 values should be None (warmup)
-        # Actually for UI, the warmup is more complex
-        # Just verify we eventually get non-None values
+        # Should eventually produce some non-None values
         non_none_count = sum(1 for r in results if r is not None)
-        assert non_none_count > 0, "Stream should produce some non-None values"
+        assert non_none_count > 0, f"Stream should produce some non-None values. Results: {results}"
         
-        # Verify last result is reasonable
-        if results[-1] is not None:
-            assert results[-1] >= 0, "UI should be non-negative"
-            assert results[-1] < 1000, "UI should be reasonable"
+        # Verify all non-None results are reasonable
+        for i, result in enumerate(results):
+            if result is not None:
+                assert result >= 0, f"UI at index {i} should be non-negative, got {result}"
+                assert result < 1000, f"UI at index {i} should be reasonable, got {result}"
     
     def test_ui_nan_handling(self, test_data):
         """Test UI handles NaN values correctly"""

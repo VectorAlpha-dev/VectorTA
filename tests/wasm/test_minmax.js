@@ -2,10 +2,11 @@
  * WASM binding tests for MINMAX indicator.
  * These tests mirror the Rust unit tests to ensure WASM bindings work correctly.
  */
-const test = require('node:test');
-const assert = require('node:assert');
-const path = require('path');
-const { 
+import test from 'node:test';
+import assert from 'node:assert';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { 
     loadTestData, 
     assertArrayClose, 
     assertClose,
@@ -13,7 +14,10 @@ const {
     assertAllNaN,
     assertNoNaN,
     EXPECTED_OUTPUTS 
-} = require('./test_utils');
+} from './test_utils.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 let wasm;
 let testData;
@@ -22,8 +26,11 @@ test.before(async () => {
     // Load WASM module
     try {
         const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
-        wasm = await import(wasmPath);
-        await wasm.default();
+        const importPath = process.platform === 'win32' 
+            ? 'file:///' + wasmPath.replace(/\\/g, '/')
+            : wasmPath;
+        wasm = await import(importPath);
+        // No need to call default() for ES modules
     } catch (error) {
         console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
         throw error;
@@ -138,21 +145,27 @@ test('MINMAX fast API', () => {
     const len = high.length;
     const order = 3;
     
-    // Allocate output buffers
+    // Allocate input and output buffers
+    const high_ptr = wasm.minmax_alloc(len);
+    const low_ptr = wasm.minmax_alloc(len);
     const is_min_ptr = wasm.minmax_alloc(len);
     const is_max_ptr = wasm.minmax_alloc(len);
     const last_min_ptr = wasm.minmax_alloc(len);
     const last_max_ptr = wasm.minmax_alloc(len);
     
     try {
-        // Convert to typed arrays
-        const highArray = new Float64Array(high);
-        const lowArray = new Float64Array(low);
+        // Create views into WASM memory for inputs
+        const highMemView = new Float64Array(wasm.__wasm.memory.buffer, high_ptr, len);
+        const lowMemView = new Float64Array(wasm.__wasm.memory.buffer, low_ptr, len);
         
-        // Call fast API
+        // Copy input data into WASM memory
+        highMemView.set(high);
+        lowMemView.set(low);
+        
+        // Call fast API with pointers
         wasm.minmax_into(
-            highArray,
-            lowArray,
+            high_ptr,
+            low_ptr,
             is_min_ptr,
             is_max_ptr,
             last_min_ptr,
@@ -161,19 +174,23 @@ test('MINMAX fast API', () => {
             order
         );
         
-        // Read results back
-        const is_min_result = new Float64Array(wasm.memory.buffer, is_min_ptr, len);
-        const is_max_result = new Float64Array(wasm.memory.buffer, is_max_ptr, len);
-        const last_min_result = new Float64Array(wasm.memory.buffer, last_min_ptr, len);
-        const last_max_result = new Float64Array(wasm.memory.buffer, last_max_ptr, len);
+        // Read results back (recreate views in case memory grew)
+        const is_min_result = new Float64Array(wasm.__wasm.memory.buffer, is_min_ptr, len);
+        const is_max_result = new Float64Array(wasm.__wasm.memory.buffer, is_max_ptr, len);
+        const last_min_result = new Float64Array(wasm.__wasm.memory.buffer, last_min_ptr, len);
+        const last_max_result = new Float64Array(wasm.__wasm.memory.buffer, last_max_ptr, len);
         
         // Compare with safe API
         const safe_result = wasm.minmax_js(high, low, order);
         assertArrayClose(Array.from(is_min_result), safe_result.is_min, 1e-9, 'Fast vs safe API mismatch for is_min');
         assertArrayClose(Array.from(is_max_result), safe_result.is_max, 1e-9, 'Fast vs safe API mismatch for is_max');
+        assertArrayClose(Array.from(last_min_result), safe_result.last_min, 1e-9, 'Fast vs safe API mismatch for last_min');
+        assertArrayClose(Array.from(last_max_result), safe_result.last_max, 1e-9, 'Fast vs safe API mismatch for last_max');
         
     } finally {
-        // Clean up
+        // Clean up all allocated memory
+        wasm.minmax_free(high_ptr, len);
+        wasm.minmax_free(low_ptr, len);
         wasm.minmax_free(is_min_ptr, len);
         wasm.minmax_free(is_max_ptr, len);
         wasm.minmax_free(last_min_ptr, len);

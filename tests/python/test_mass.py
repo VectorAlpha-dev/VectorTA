@@ -194,7 +194,10 @@ class TestMass:
     
     def test_mass_batch_edge_cases(self, test_data):
         """Test edge cases for batch processing"""
-        high = np.array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], dtype=np.float64)
+        # Mass needs at least 16 + period - 1 data points
+        # For period=3, that's 18 points minimum, so use 20 to be safe
+        high = np.array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 
+                        11, 12, 13, 14, 15, 16, 17, 18, 19, 20], dtype=np.float64)
         low = high * 0.9
         
         # Single value sweep
@@ -204,7 +207,7 @@ class TestMass:
             period_range=(3, 3, 1)
         )
         
-        assert single_batch['values'].shape == (1, 10)
+        assert single_batch['values'].shape == (1, 20)
         assert len(single_batch['periods']) == 1
         
         # Step larger than range
@@ -215,7 +218,7 @@ class TestMass:
         )
         
         # Should only have period=3
-        assert large_batch['values'].shape == (1, 10)
+        assert large_batch['values'].shape == (1, 20)
         assert len(large_batch['periods']) == 1
     
     def test_mass_streaming(self):

@@ -576,37 +576,9 @@ fn aroon_batch_inner(
 	let down: &mut [f64] =
 		unsafe { core::slice::from_raw_parts_mut(buf_down_guard.as_mut_ptr() as *mut f64, buf_down_guard.len()) };
 
-	let do_row = |row: usize, out_up: &mut [f64], out_down: &mut [f64]| unsafe {
-		let length = combos[row].length.unwrap();
-		match kern {
-			Kernel::Scalar => aroon_row_scalar(high, low, length, out_up, out_down),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => aroon_row_avx2(high, low, length, out_up, out_down),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => aroon_row_avx512(high, low, length, out_up, out_down),
-			_ => unreachable!(),
-		}
-	};
-	if parallel {
-		#[cfg(not(target_arch = "wasm32"))]
-		{
-			up.par_chunks_mut(cols)
-				.zip(down.par_chunks_mut(cols))
-				.enumerate()
-				.for_each(|(row, (u, d))| do_row(row, u, d));
-		}
+	// Step 5: Perform batch computation into the buffers
+	aroon_batch_inner_into(high, low, sweep, kern, parallel, up, down)?;
 
-		#[cfg(target_arch = "wasm32")]
-		{
-			for (row, (u, d)) in up.chunks_mut(cols).zip(down.chunks_mut(cols)).enumerate() {
-				do_row(row, u, d);
-			}
-		}
-	} else {
-		for (row, (u, d)) in up.chunks_mut(cols).zip(down.chunks_mut(cols)).enumerate() {
-			do_row(row, u, d);
-		}
-	}
 	// Step 6: Reclaim as Vec<f64>
 	let up_values = unsafe {
 		Vec::from_raw_parts(
@@ -630,6 +602,94 @@ fn aroon_batch_inner(
 		rows,
 		cols,
 	})
+}
+
+/// Zero-copy batch computation that writes directly into provided output slices
+#[inline(always)]
+fn aroon_batch_inner_into(
+	high: &[f64],
+	low: &[f64],
+	sweep: &AroonBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	out_up: &mut [f64],
+	out_down: &mut [f64],
+) -> Result<Vec<AroonParams>, AroonError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(AroonError::InvalidLength { length: 0, data_len: 0 });
+	}
+	if high.len() != low.len() {
+		return Err(AroonError::MismatchSliceLength {
+			high_len: high.len(),
+			low_len: low.len(),
+		});
+	}
+	let len = high.len();
+	let max_l = combos.iter().map(|c| c.length.unwrap()).max().unwrap();
+	if len < max_l {
+		return Err(AroonError::NotEnoughValidData {
+			needed: max_l,
+			valid: len,
+		});
+	}
+	
+	let rows = combos.len();
+	let cols = len;
+	
+	// Validate output buffer sizes
+	if out_up.len() != rows * cols || out_down.len() != rows * cols {
+		return Err(AroonError::InvalidLength { 
+			length: out_up.len(), 
+			data_len: rows * cols 
+		});
+	}
+	
+	// Calculate warmup periods for each row
+	let warmup_periods: Vec<usize> = combos.iter().map(|c| c.length.unwrap()).collect();
+	
+	// Initialize NaN prefixes for each row in the provided buffers
+	for (row, &warmup) in warmup_periods.iter().enumerate() {
+		let row_start = row * cols;
+		for i in 0..warmup.min(cols) {
+			out_up[row_start + i] = f64::NAN;
+			out_down[row_start + i] = f64::NAN;
+		}
+	}
+
+	let do_row = |row: usize, out_up: &mut [f64], out_down: &mut [f64]| unsafe {
+		let length = combos[row].length.unwrap();
+		match kern {
+			Kernel::Scalar => aroon_row_scalar(high, low, length, out_up, out_down),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => aroon_row_avx2(high, low, length, out_up, out_down),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => aroon_row_avx512(high, low, length, out_up, out_down),
+			_ => unreachable!(),
+		}
+	};
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			out_up.par_chunks_mut(cols)
+				.zip(out_down.par_chunks_mut(cols))
+				.enumerate()
+				.for_each(|(row, (u, d))| do_row(row, u, d));
+		}
+
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, (u, d)) in out_up.chunks_mut(cols).zip(out_down.chunks_mut(cols)).enumerate() {
+				do_row(row, u, d);
+			}
+		}
+	} else {
+		for (row, (u, d)) in out_up.chunks_mut(cols).zip(out_down.chunks_mut(cols)).enumerate() {
+			do_row(row, u, d);
+		}
+	}
+	
+	Ok(combos)
 }
 
 #[inline(always)]
@@ -1619,30 +1679,46 @@ pub fn aroon_batch_py<'py>(
 		)));
 	}
 
+	let sweep = AroonBatchRange { length: length_range };
+	
+	// Pre-calculate dimensions
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = high_slice.len();
+	
+	// Pre-allocate numpy arrays for zero-copy operation
+	let out_up_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let out_down_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out_up = unsafe { out_up_arr.as_slice_mut()? };
+	let slice_out_down = unsafe { out_down_arr.as_slice_mut()? };
+
 	// Validate kernel before allow_threads
 	let kern = validate_kernel(kernel, true)?;
 
-	let sweep = AroonBatchRange { length: length_range };
-
-	// Heavy work without the GIL
-	let output = py
+	// Heavy work without the GIL - write directly into numpy arrays
+	let combos = py
 		.allow_threads(|| {
 			let kernel = match kern {
 				Kernel::Auto => detect_best_batch_kernel(),
 				k => k,
 			};
-			aroon_batch_with_kernel(high_slice, low_slice, &sweep, kernel)
+			let simd = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => unreachable!(),
+			};
+			aroon_batch_inner_into(high_slice, low_slice, &sweep, simd, true, slice_out_up, slice_out_down)
 		})
 		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
 	// Build dict with zero-copy transfers
 	let dict = PyDict::new(py);
-	dict.set_item("up", output.up.into_pyarray(py).reshape((output.rows, output.cols))?)?;
-	dict.set_item("down", output.down.into_pyarray(py).reshape((output.rows, output.cols))?)?;
+	dict.set_item("up", out_up_arr.reshape((rows, cols))?)?;
+	dict.set_item("down", out_down_arr.reshape((rows, cols))?)?;
 	dict.set_item(
 		"lengths",
-		output
-			.combos
+		combos
 			.iter()
 			.map(|p| p.length.unwrap() as u64)
 			.collect::<Vec<_>>()
@@ -1940,21 +2016,9 @@ pub fn aroon_batch_into(
 		let up_out = std::slice::from_raw_parts_mut(up_ptr, total_size);
 		let down_out = std::slice::from_raw_parts_mut(down_ptr, total_size);
 		
-		// Compute each parameter combination
-		for (i, params) in combos.iter().enumerate() {
-			let row_start = i * len;
-			let row_end = row_start + len;
-			
-			let input = AroonInput::from_slices_hl(high, low, params.clone());
-			
-			aroon_into_slice(
-				&mut up_out[row_start..row_end],
-				&mut down_out[row_start..row_end],
-				&input,
-				Kernel::Auto,
-			)
+		// Use the optimized batch_inner_into function for zero-copy operation
+		aroon_batch_inner_into(high, low, &sweep, detect_best_kernel(), false, up_out, down_out)
 			.map_err(|e| JsValue::from_str(&e.to_string()))?;
-		}
 		
 		Ok(rows)
 	}

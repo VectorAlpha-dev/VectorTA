@@ -232,7 +232,8 @@ test('UI batch multiple scalars', () => {
 
 test('UI batch metadata from result', () => {
     // Test that batch result includes correct parameter combinations
-    const close = new Float64Array(20);
+    // Need at least 27 points for period 14 (warmup = 14*2-2 = 26)
+    const close = new Float64Array(30);
     close.fill(100);
     
     const result = wasm.ui_batch(close, {
@@ -392,8 +393,8 @@ test('UI batch fast API', () => {
     inView.set(data);
     
     // Allocate output buffer for batch results
-    // 2 periods * 2 scalars = 4 combinations
-    const outSize = 4 * size;
+    // 3 periods (10, 12, 14) * 2 scalars (50, 100) = 6 combinations
+    const outSize = 6 * size;
     const outPtr = wasm.ui_alloc(outSize);
     assert(outPtr !== 0, 'Failed to allocate output buffer');
     
@@ -404,7 +405,7 @@ test('UI batch fast API', () => {
             50.0, 100.0, 50.0  // scalar range
         );
         
-        assert.strictEqual(numCombos, 4, 'Expected 4 combinations');
+        assert.strictEqual(numCombos, 6, 'Expected 6 combinations');
         
         // Verify results
         const outView = new Float64Array(wasm.__wasm.memory.buffer, outPtr, outSize);

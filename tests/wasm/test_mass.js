@@ -1,40 +1,25 @@
-const test = require('node:test');
-const assert = require('node:assert');
-const fs = require('fs');
-const path = require('path');
+import test from 'node:test';
+import assert from 'node:assert';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
+import { 
+    loadTestData, 
+    assertArrayClose, 
+    assertClose,
+    isNaN,
+    assertAllNaN,
+    assertNoNaN,
+    EXPECTED_OUTPUTS 
+} from './test_utils.js';
 const { describe, it } = test;
 
-// Import the WASM module
-const talib = require('../../pkg/my_project.js');
+// Get __dirname equivalent in ES modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
-// Test data loader
-function loadTestData() {
-    const csvPath = path.join(__dirname, '../../src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv');
-    const content = fs.readFileSync(csvPath, 'utf-8');
-    const lines = content.trim().split('\n');
-    
-    // Skip header
-    lines.shift();
-    
-    const data = {
-        high: [],
-        low: [],
-        close: [],
-        volume: []
-    };
-    
-    lines.forEach(line => {
-        const parts = line.split(',');
-        if (parts.length >= 7) {
-            data.high.push(parseFloat(parts[2]));
-            data.low.push(parseFloat(parts[3]));
-            data.close.push(parseFloat(parts[4]));
-            data.volume.push(parseFloat(parts[6]));
-        }
-    });
-    
-    return data;
-}
+// Import the WASM module
+import * as talib from '../../pkg/my_project.js';
 
 describe('Mass Index', () => {
     let testData;
@@ -112,7 +97,7 @@ describe('Mass Index', () => {
             const lowPtr = talib.mass_alloc(len);
             
             // Copy data to WASM memory
-            const wasmMemory = new Float64Array(talib.memory.buffer);
+            const wasmMemory = new Float64Array(talib.__wasm.memory.buffer);
             wasmMemory.set(high, highPtr / 8);
             wasmMemory.set(low, lowPtr / 8);
             
@@ -120,7 +105,7 @@ describe('Mass Index', () => {
             talib.mass_into(highPtr, lowPtr, outPtr, len, 5);
             
             // Read result
-            const result = new Float64Array(talib.memory.buffer, outPtr, len);
+            const result = new Float64Array(talib.__wasm.memory.buffer, outPtr, len);
             
             // Compare results
             for (let i = 0; i < len; i++) {
@@ -131,7 +116,7 @@ describe('Mass Index', () => {
             
             // Test in-place operation (output overwrites high)
             talib.mass_into(highPtr, lowPtr, highPtr, len, 5);
-            const inPlaceResult = new Float64Array(talib.memory.buffer, highPtr, len);
+            const inPlaceResult = new Float64Array(talib.__wasm.memory.buffer, highPtr, len);
             
             for (let i = 0; i < len; i++) {
                 assert.ok(Math.abs(inPlaceResult[i] - expected[i]) < 1e-10 || 
@@ -196,7 +181,7 @@ describe('Mass Index', () => {
         
         try {
             // Copy data to WASM memory
-            const wasmMemory = new Float64Array(talib.memory.buffer);
+            const wasmMemory = new Float64Array(talib.__wasm.memory.buffer);
             wasmMemory.set(high, highPtr / 8);
             wasmMemory.set(low, lowPtr / 8);
             
@@ -209,7 +194,7 @@ describe('Mass Index', () => {
             assert.strictEqual(rows, expectedRows, 'Should return correct number of rows');
             
             // Read and verify results
-            const results = new Float64Array(talib.memory.buffer, outPtr, len * rows);
+            const results = new Float64Array(talib.__wasm.memory.buffer, outPtr, len * rows);
             
             // Verify against individual calculations
             const periods = [5, 10];

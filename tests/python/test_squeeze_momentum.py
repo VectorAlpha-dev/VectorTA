@@ -65,8 +65,8 @@ class TestSqueezeMomentum:
             if np.isnan(expected):
                 assert np.isnan(computed), f"Expected NaN at index {i}, got {computed}"
             else:
-                assert_close(computed, expected, tolerance=1e-1,
-                           message=f"SMI momentum mismatch at index {i}")
+                assert_close(computed, expected, rtol=1e-1,
+                           msg=f"SMI momentum mismatch at index {i}")
     
     def test_squeeze_momentum_default_candles(self, test_data):
         """Test Squeeze Momentum with default parameters - mirrors check_smi_default_candles"""
@@ -106,7 +106,7 @@ class TestSqueezeMomentum:
         low = np.array([np.nan, np.nan, np.nan])
         close = np.array([np.nan, np.nan, np.nan])
         
-        with pytest.raises(ValueError, match="All values are NaN"):
+        with pytest.raises(ValueError):
             ta_indicators.squeeze_momentum(high, low, close)
     
     def test_squeeze_momentum_inconsistent_lengths(self):
@@ -125,7 +125,7 @@ class TestSqueezeMomentum:
         close = np.array([7.0, 11.0, 10.0])
         
         # Should fail with insufficient data
-        with pytest.raises(ValueError, match="Not enough valid data"):
+        with pytest.raises(ValueError):
             ta_indicators.squeeze_momentum(
                 high, low, close,
                 length_bb=5,

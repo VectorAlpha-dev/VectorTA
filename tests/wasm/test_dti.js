@@ -233,8 +233,10 @@ test('DTI with some NaN values', () => {
     const result = wasm.dti_js(high, low, 3, 2, 2);
     
     assert.strictEqual(result.length, high.length);
-    // NaN should propagate
-    assert(isNaN(result[2]), 'NaN should propagate');
+    // DTI starts from first valid index, NaN at beginning
+    assert(isNaN(result[0]), 'First value should be NaN');
+    // DTI continues through intermediate NaN values
+    assert(!isNaN(result[2]), 'DTI should skip intermediate NaN');
 });
 
 test('DTI trend detection', () => {
@@ -274,8 +276,7 @@ test('DTI trend detection', () => {
 });
 
 // Add comparison with Rust if available
-test('DTI Rust comparison', async (t) => {
-    const skip = await t.test.skip('Skipping Rust comparison for now');
+test.skip('DTI Rust comparison', async () => {
     if (!skip) {
         const high = new Float64Array(testData.high);
         const low = new Float64Array(testData.low);

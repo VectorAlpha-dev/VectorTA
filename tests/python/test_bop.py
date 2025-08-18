@@ -83,7 +83,7 @@ class TestBop:
         low = np.array([0.8, 1.8, 2.8])
         close = np.array([1.2, 2.2, 3.2])
         
-        with pytest.raises(ValueError, match="bop: Input arrays have different lengths"):
+        with pytest.raises(ValueError, match="bop: Inconsistent lengths"):
             ta_indicators.bop(open_data, high, low, close)
     
     def test_bop_very_small_dataset(self):

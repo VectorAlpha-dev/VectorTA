@@ -106,7 +106,7 @@ test('BOP with inconsistent lengths', () => {
     
     assert.throws(() => {
         wasm.bop_js(open, high, low, close);
-    }, /Inconsistent lengths/);
+    }, /Input lengths mismatch/);
 });
 
 test('BOP very small dataset', () => {
@@ -503,12 +503,15 @@ test('BOP large dataset performance', () => {
         console.log(`  Regular API: ${timeRegular.toFixed(2)}ms`);
         console.log(`  Speedup: ${(timeRegular / timeFast).toFixed(2)}x`);
         
+        // Recreate the view after potential memory growth from regular API call
+        const outViewFinal = new Float64Array(wasm.__wasm.memory.buffer, outPtr, size);
+        
         // Verify first few values match
         for (let i = 0; i < 100; i++) {
-            if (isNaN(regularResult[i]) && isNaN(outView[i])) {
+            if (isNaN(regularResult[i]) && isNaN(outViewFinal[i])) {
                 continue;
             }
-            assert(Math.abs(regularResult[i] - outView[i]) < 1e-10,
+            assert(Math.abs(regularResult[i] - outViewFinal[i]) < 1e-10,
                    `Mismatch at index ${i}`);
         }
     } finally {

@@ -100,7 +100,7 @@ class TestMinmax:
         high = np.array([np.nan, 10.0])
         low = np.array([np.nan, 5.0])
         
-        with pytest.raises(ValueError, match="Not enough valid data"):
+        with pytest.raises(ValueError, match="Invalid order"):
             ta_indicators.minmax(high, low, order=3)
     
     def test_minmax_basic_slices(self):

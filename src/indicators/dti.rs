@@ -1199,7 +1199,7 @@ fn dti_batch_inner(
 		let prm = &combos[row];
 		#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 		{
-			if matches!(kern, Kernel::Scalar) {
+			if matches!(kern, Kernel::Scalar | Kernel::Auto) {
 				dti_row_simd128(
 					high,
 					low,
@@ -1214,7 +1214,7 @@ fn dti_batch_inner(
 		}
 		
 		match kern {
-			Kernel::Scalar => dti_row_scalar(
+			Kernel::Scalar | Kernel::Auto => dti_row_scalar(
 				high,
 				low,
 				prm.r.unwrap(),
@@ -1243,7 +1243,15 @@ fn dti_batch_inner(
 				first_valid,
 				out_row,
 			),
-			_ => unreachable!(),
+			_ => dti_row_scalar(
+				high,
+				low,
+				prm.r.unwrap(),
+				prm.s.unwrap(),
+				prm.u.unwrap(),
+				first_valid,
+				out_row,
+			),
 		}
 	};
 	if parallel {
@@ -1332,7 +1340,7 @@ pub fn dti_batch_inner_into(
 		let prm = &combos[row];
 		#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 		{
-			if matches!(kern, Kernel::Scalar) {
+			if matches!(kern, Kernel::Scalar | Kernel::Auto) {
 				dti_row_simd128(
 					high,
 					low,
@@ -1347,7 +1355,7 @@ pub fn dti_batch_inner_into(
 		}
 		
 		match kern {
-			Kernel::Scalar => dti_row_scalar(
+			Kernel::Scalar | Kernel::Auto => dti_row_scalar(
 				high,
 				low,
 				prm.r.unwrap(),
@@ -1376,7 +1384,15 @@ pub fn dti_batch_inner_into(
 				first_valid,
 				out_row,
 			),
-			_ => unreachable!(),
+			_ => dti_row_scalar(
+				high,
+				low,
+				prm.r.unwrap(),
+				prm.s.unwrap(),
+				prm.u.unwrap(),
+				first_valid,
+				out_row,
+			),
 		}
 	};
 	

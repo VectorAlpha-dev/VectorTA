@@ -688,6 +688,15 @@ pub fn dec_osc_batch_inner_into(
 		});
 	}
 
+	// Initialize NaN prefixes for each row based on warmup period
+	for (row, _combo) in combos.iter().enumerate() {
+		let warmup = first + 1; // DEC_OSC warmup is first + 1
+		let row_start = row * cols;
+		for i in 0..warmup.min(cols) {
+			out[row_start + i] = f64::NAN;
+		}
+	}
+
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].hp_period.unwrap();
 		let k_val = combos[row].k.unwrap();

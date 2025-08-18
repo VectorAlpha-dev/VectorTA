@@ -1231,6 +1231,12 @@ pub fn bop_into_slice(
 		.find(|&i| !open[i].is_nan() && !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
 		.unwrap_or(len);
 
+	// Only initialize the warmup period with NaN, not the entire buffer
+	// This matches the optimization pattern used in ALMA
+	for v in &mut dst[..warmup_period] {
+		*v = f64::NAN;
+	}
+
 	// Select kernel
 	let chosen = match kern {
 		Kernel::Auto => detect_best_kernel(),
@@ -1251,11 +1257,6 @@ pub fn bop_into_slice(
 			}
 			_ => unreachable!(),
 		}
-	}
-
-	// Fill warmup with NaN
-	for v in &mut dst[..warmup_period] {
-		*v = f64::NAN;
 	}
 
 	Ok(())
