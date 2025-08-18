@@ -131,7 +131,7 @@ impl VptBuilder {
 pub enum VptError {
 	#[error("vpt: Empty data provided.")]
 	EmptyData,
-	#[error("vpt: All price/volume values are NaN.")]
+	#[error("vpt: All values are NaN.")]
 	AllValuesNaN,
 	#[error("vpt: Not enough valid data (fewer than 2 valid points).")]
 	NotEnoughValidData,
@@ -192,29 +192,30 @@ pub unsafe fn vpt_scalar(price: &[f64], volume: &[f64]) -> Result<VptOutput, Vpt
 	let mut res = alloc_with_nan_prefix(n, 1);
 	
 	// VPT uses "shifted array approach": output[i] = vpt_val[i] + vpt_val[i-1]
-	let mut prev_vpt_val = f64::NAN;
+	// Start with 0.0 for cumulative calculation
+	let mut prev_vpt_val = 0.0;
 	
 	for i in 1..n {
 		let p0 = price[i - 1];
 		let p1 = price[i];
 		let v1 = volume[i];
 		
-		// Calculate current VPT value
+		// Calculate current VPT value (change for this period)
 		let vpt_val = if p0.is_nan() || p0 == 0.0 || p1.is_nan() || v1.is_nan() {
 			f64::NAN
 		} else {
 			v1 * ((p1 - p0) / p0)
 		};
 		
-		// Output is current VPT value + previous VPT value (shifted array approach)
-		res[i] = if vpt_val.is_nan() || prev_vpt_val.is_nan() {
+		// Calculate cumulative VPT
+		res[i] = if vpt_val.is_nan() {
 			f64::NAN
 		} else {
 			vpt_val + prev_vpt_val
 		};
 		
-		// Save current VPT value for next iteration
-		prev_vpt_val = vpt_val;
+		// Save cumulative value for next iteration
+		prev_vpt_val = res[i];  // Keep NaN to propagate it forward
 	}
 	
 	Ok(VptOutput { values: res })
@@ -420,23 +421,29 @@ impl VptStream {
 	pub fn update(&mut self, price: f64, volume: f64) -> Option<f64> {
 		if !self.is_initialized {
 			self.last_price = price;
-			self.last_vpt = f64::NAN;
+			self.last_vpt = f64::NAN;  // Start with NaN to match array behavior
 			self.is_initialized = true;
 			return None;
 		}
 		if self.last_price.is_nan() || self.last_price == 0.0 || price.is_nan() || volume.is_nan() {
 			self.last_price = price;
-			self.last_vpt = f64::NAN;
+			self.last_vpt = f64::NAN;  // Keep as NaN to propagate
 			return Some(f64::NAN);
 		}
 		let vpt_val = volume * ((price - self.last_price) / self.last_price);
+		// Cumulative sum: current VPT value + previous VPT sum  
+		// First actual calculation returns NaN because last_vpt starts as NaN
 		let out = if self.last_vpt.is_nan() {
+			// This is the first actual VPT calculation, return NaN but save the value for next time
+			self.last_price = price;
+			self.last_vpt = vpt_val;  // Save first value for cumulative calculation
 			f64::NAN
 		} else {
-			vpt_val + self.last_vpt
+			let result = vpt_val + self.last_vpt;
+			self.last_price = price;
+			self.last_vpt = result;  // Store cumulative sum
+			result
 		};
-		self.last_price = price;
-		self.last_vpt = vpt_val;
 		Some(out)
 	}
 }
@@ -546,29 +553,30 @@ pub unsafe fn vpt_row_scalar(price: &[f64], volume: &[f64], out: &mut [f64]) {
 	out[0] = f64::NAN;
 	
 	// VPT uses "shifted array approach": output[i] = vpt_val[i] + vpt_val[i-1]
-	let mut prev_vpt_val = f64::NAN;
+	// Start with 0.0 for cumulative calculation
+	let mut prev_vpt_val = 0.0;
 	
 	for i in 1..n {
 		let p0 = price[i - 1];
 		let p1 = price[i];
 		let v1 = volume[i];
 		
-		// Calculate current VPT value
+		// Calculate current VPT value (change for this period)
 		let vpt_val = if p0.is_nan() || p0 == 0.0 || p1.is_nan() || v1.is_nan() {
 			f64::NAN
 		} else {
 			v1 * ((p1 - p0) / p0)
 		};
 		
-		// Output is current VPT value + previous VPT value (shifted array approach)
-		out[i] = if vpt_val.is_nan() || prev_vpt_val.is_nan() {
+		// Calculate cumulative VPT
+		out[i] = if vpt_val.is_nan() {
 			f64::NAN
 		} else {
 			vpt_val + prev_vpt_val
 		};
 		
-		// Save current VPT value for next iteration
-		prev_vpt_val = vpt_val;
+		// Save cumulative value for next iteration
+		prev_vpt_val = out[i];  // Keep NaN to propagate it forward
 	}
 }
 
@@ -866,11 +874,11 @@ mod tests {
 		let output = vpt_with_kernel(&input, kernel)?;
 
 		let expected_last_five = [
-			-0.40358334248536065,
-			-0.16292768139917702,
-			-0.4792942916867958,
-			-0.1188231211518107,
-			-3.3492674990910025,
+			-18292.323972247592,
+			-18292.510374716476,
+			-18292.803266539282,
+			-18292.62919783763,
+			-18296.152568643138,
 		];
 
 		assert!(output.values.len() >= 5);

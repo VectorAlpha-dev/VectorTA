@@ -67,8 +67,8 @@ class TestVpci:
         )
         
         # Compare full output with Rust
-        compare_with_rust('vpci', vpci, 'close', expected['default_params'])
-        compare_with_rust('vpcis', vpcis, 'close', expected['default_params'])
+        # VPCI returns two outputs, so pass them as a dict
+        compare_with_rust('vpci', {'vpci': vpci, 'vpcis': vpcis}, 'close', expected['default_params'])
     
     def test_vpci_default_params(self, test_data):
         """Test VPCI with default parameters - mirrors check_vpci_default_candles"""

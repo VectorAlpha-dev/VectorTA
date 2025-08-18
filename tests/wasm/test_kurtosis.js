@@ -157,20 +157,20 @@ test('Kurtosis fast API', () => {
     const close = new Float64Array(testData.close);
     const len = close.length;
     
-    // Allocate memory
+    // Allocate memory for both input and output
+    const inPtr = wasm.kurtosis_alloc(len);
     const outPtr = wasm.kurtosis_alloc(len);
     
     try {
-        // Create input pointer
-        const memory = wasm.memory;
-        const inputArray = new Float64Array(memory.buffer, 0, len);
+        // Create input view and copy data
+        const inputArray = new Float64Array(wasm.__wasm.memory.buffer, inPtr, len);
         inputArray.set(close);
         
         // Call fast API
-        wasm.kurtosis_into(inputArray.byteOffset, outPtr, len, 5);
+        wasm.kurtosis_into(inPtr, outPtr, len, 5);
         
-        // Read results
-        const output = new Float64Array(memory.buffer, outPtr, len);
+        // Read results (recreate view in case memory grew)
+        const output = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
         
         // Compare with safe API
         const expected = wasm.kurtosis_js(close, 5);
@@ -178,6 +178,7 @@ test('Kurtosis fast API', () => {
         
     } finally {
         // Free memory
+        wasm.kurtosis_free(inPtr, len);
         wasm.kurtosis_free(outPtr, len);
     }
 });
@@ -192,16 +193,18 @@ test('Kurtosis fast API aliasing', () => {
     
     try {
         // Create memory view
-        const memory = wasm.memory;
-        const dataArray = new Float64Array(memory.buffer, ptr, len);
+        const dataArray = new Float64Array(wasm.__wasm.memory.buffer, ptr, len);
         dataArray.set(close);
         
         // Call fast API with same pointer for input and output (aliasing)
         wasm.kurtosis_into(ptr, ptr, len, 5);
         
+        // Recreate view in case memory grew
+        const resultArray = new Float64Array(wasm.__wasm.memory.buffer, ptr, len);
+        
         // Compare with safe API
         const expected = wasm.kurtosis_js(close, 5);
-        assertArrayClose(dataArray, expected, 1e-10, "Fast API aliasing mismatch");
+        assertArrayClose(resultArray, expected, 1e-10, "Fast API aliasing mismatch");
         
     } finally {
         // Free memory
@@ -325,15 +328,14 @@ test('Kurtosis zero-copy API', () => {
     
     try {
         // Create memory views
-        const memory = wasm.memory;
-        const inputArray = new Float64Array(memory.buffer, inPtr, len);
-        const outputArray = new Float64Array(memory.buffer, outPtr, len);
-        
-        // Copy test data
+        const inputArray = new Float64Array(wasm.__wasm.memory.buffer, inPtr, len);
         inputArray.set(testData);
         
         // Call zero-copy API
         wasm.kurtosis_into(inPtr, outPtr, len, 5);
+        
+        // Read result (recreate view in case memory grew)
+        const outputArray = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
         
         // Compare with safe API
         const expected = wasm.kurtosis_js(testData, 5);
@@ -378,8 +380,7 @@ test('Kurtosis zero-copy memory management', () => {
         assert(ptr !== 0, `Failed to allocate ${size} elements`);
         
         // Verify we can write to the memory
-        const memory = wasm.memory;
-        const array = new Float64Array(memory.buffer, ptr, size);
+        const array = new Float64Array(wasm.__wasm.memory.buffer, ptr, size);
         array.fill(42.0);
         
         // Free should not throw

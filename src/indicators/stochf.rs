@@ -274,6 +274,18 @@ pub fn stochf_into_slice(
 		});
 	}
 
+	// Initialize warmup periods with NaN
+	let k_warmup = fastk_period - 1;
+	let d_warmup = fastk_period - 1 + fastd_period - 1;
+	
+	for i in 0..k_warmup.min(len) {
+		dst_k[i] = f64::NAN;
+	}
+	
+	for i in 0..d_warmup.min(len) {
+		dst_d[i] = f64::NAN;
+	}
+
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
 		other => other,
@@ -434,6 +446,13 @@ pub unsafe fn stochf_scalar(
 	d_vals: &mut [f64],
 ) {
 	let len = high.len();
+	
+	// Initialize warmup periods with NaN
+	let k_warmup = fastk_period - 1;
+	for i in 0..k_warmup.min(len) {
+		k_vals[i] = f64::NAN;
+	}
+	
 	for i in first_valid_idx..len {
 		if i < first_valid_idx + fastk_period - 1 {
 			continue;
@@ -911,6 +930,23 @@ pub fn stochf_batch_inner_into(
 		return Err(StochfError::EmptyData);
 	}
 	
+	// Initialize NaN prefixes for each row based on warmup period
+	for (row, combo) in combos.iter().enumerate() {
+		let k_warmup = combo.fastk_period.unwrap() - 1;
+		let d_warmup = combo.fastk_period.unwrap() - 1 + combo.fastd_period.unwrap() - 1;
+		let row_start = row * cols;
+		
+		// Initialize K warmup period with NaN
+		for i in 0..k_warmup.min(cols) {
+			k_out[row_start + i] = f64::NAN;
+		}
+		
+		// Initialize D warmup period with NaN
+		for i in 0..d_warmup.min(cols) {
+			d_out[row_start + i] = f64::NAN;
+		}
+	}
+	
 	let do_row = |row: usize, kout: &mut [f64], dout: &mut [f64]| unsafe {
 		let fastk_period = combos[row].fastk_period.unwrap();
 		let fastd_period = combos[row].fastd_period.unwrap();
@@ -1072,6 +1108,13 @@ unsafe fn stochf_row_scalar(
 	d_out: &mut [f64],
 ) {
 	let len = high.len();
+	
+	// Initialize warmup periods with NaN
+	let k_warmup = fastk_period - 1;
+	for i in 0..k_warmup.min(len) {
+		k_out[i] = f64::NAN;
+	}
+	
 	for i in first..len {
 		if i < first + fastk_period - 1 {
 			continue;
@@ -1288,11 +1331,11 @@ pub struct StochfStreamPy {
 #[pymethods]
 impl StochfStreamPy {
 	#[new]
-	fn new(fastk_period: Option<usize>, fastd_period: Option<usize>, fastd_matype: Option<usize>) -> PyResult<Self> {
+	fn new(fastk_period: usize, fastd_period: usize, fastd_matype: usize) -> PyResult<Self> {
 		let params = StochfParams {
-			fastk_period,
-			fastd_period,
-			fastd_matype,
+			fastk_period: Some(fastk_period),
+			fastd_period: Some(fastd_period),
+			fastd_matype: Some(fastd_matype),
 		};
 		let stream = StochfStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
 		Ok(StochfStreamPy { stream })
@@ -2272,58 +2315,23 @@ pub fn stochf_batch_unified_js(
 		fastd_period: config.fastd_range,
 	};
 	
-	// Get the combos to know output size
-	let combos = expand_grid(&sweep);
-	let rows = combos.len();
-	let cols = high.len();
-	
-	// Allocate output buffers
-	let mut k_out = make_uninit_matrix(rows, cols);
-	let mut d_out = make_uninit_matrix(rows, cols);
-	
-	// Initialize prefixes with warmup NaNs
-	let warmups: Vec<usize> = combos.iter()
-		.map(|p| p.fastk_period.unwrap_or(5) - 1)
-		.collect();
-	init_matrix_prefixes(&mut k_out, cols, &warmups);
-	
-	let d_warmups: Vec<usize> = combos.iter()
-		.map(|p| p.fastk_period.unwrap_or(5) + p.fastd_period.unwrap_or(3) - 2)
-		.collect();
-	init_matrix_prefixes(&mut d_out, cols, &d_warmups);
-	
-	// Compute using batch function
+	// Use the inner function that allocates and initializes properly
 	let kernel = detect_best_batch_kernel();
-	
-	// Convert uninitialized memory to slices
-	let k_out_ptr = k_out.as_mut_ptr() as *mut f64;
-	let d_out_ptr = d_out.as_mut_ptr() as *mut f64;
-	let k_slice = unsafe { std::slice::from_raw_parts_mut(k_out_ptr, rows * cols) };
-	let d_slice = unsafe { std::slice::from_raw_parts_mut(d_out_ptr, rows * cols) };
-	
-	stochf_batch_inner_into(
-		high,
-		low,
-		close,
-		&sweep,
-		kernel,
-		false,
-		k_slice,
-		d_slice,
-	).map_err(|e| JsValue::from_str(&e.to_string()))?;
-	
-	// Convert MaybeUninit to initialized memory
-	let k_values = unsafe {
-		let ptr = k_out.as_mut_ptr() as *mut f64;
-		Vec::from_raw_parts(ptr, rows * cols, rows * cols)
+	// Convert batch kernel to regular kernel for the inner function
+	let simd_kernel = match kernel {
+		Kernel::Avx512Batch => Kernel::Avx512,
+		Kernel::Avx2Batch => Kernel::Avx2,
+		Kernel::ScalarBatch => Kernel::Scalar,
+		_ => Kernel::Scalar,
 	};
-	std::mem::forget(k_out);
+	let output = stochf_batch_inner(high, low, close, &sweep, simd_kernel, false)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 	
-	let d_values = unsafe {
-		let ptr = d_out.as_mut_ptr() as *mut f64;
-		Vec::from_raw_parts(ptr, rows * cols, rows * cols)
-	};
-	std::mem::forget(d_out);
+	let k_values = output.k;
+	let d_values = output.d;
+	let combos = output.combos;
+	let rows = output.rows;
+	let cols = output.cols;
 	
 	let js_output = StochfBatchJsOutput {
 		k_values,
@@ -2398,6 +2406,13 @@ pub fn stochf_batch_into(
 			
 			// Compute
 			let kernel = detect_best_batch_kernel();
+			// Convert batch kernel to regular kernel
+			let simd_kernel = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => Kernel::Scalar,
+			};
 			
 			// Convert uninitialized memory to slices
 			let temp_k_ptr = temp_k.as_mut_ptr() as *mut f64;
@@ -2405,7 +2420,7 @@ pub fn stochf_batch_into(
 			let temp_k_slice = unsafe { std::slice::from_raw_parts_mut(temp_k_ptr, rows * cols) };
 			let temp_d_slice = unsafe { std::slice::from_raw_parts_mut(temp_d_ptr, rows * cols) };
 			
-			stochf_batch_inner_into(high, low, close, &sweep, kernel, false, temp_k_slice, temp_d_slice)
+			stochf_batch_inner_into(high, low, close, &sweep, simd_kernel, false, temp_k_slice, temp_d_slice)
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 			
 			// Copy to output
@@ -2422,32 +2437,17 @@ pub fn stochf_batch_into(
 			let out_k_slice = std::slice::from_raw_parts_mut(out_k_ptr, rows * cols);
 			let out_d_slice = std::slice::from_raw_parts_mut(out_d_ptr, rows * cols);
 			
-			// Create uninitialized wrappers over existing memory
-			let k_uninit = out_k_slice as *mut [f64] as *mut [MaybeUninit<f64>];
-			let d_uninit = out_d_slice as *mut [f64] as *mut [MaybeUninit<f64>];
-			
-			let mut k_buf = Vec::from_raw_parts(k_uninit as *mut MaybeUninit<f64>, rows * cols, rows * cols);
-			let mut d_buf = Vec::from_raw_parts(d_uninit as *mut MaybeUninit<f64>, rows * cols, rows * cols);
-			
-			// Initialize with warmup NaNs
-			let warmups: Vec<usize> = combos.iter()
-				.map(|p| p.fastk_period.unwrap_or(5) - 1)
-				.collect();
-			init_matrix_prefixes(&mut k_buf, cols, &warmups);
-			
-			let d_warmups: Vec<usize> = combos.iter()
-				.map(|p| p.fastk_period.unwrap_or(5) + p.fastd_period.unwrap_or(3) - 2)
-				.collect();
-			init_matrix_prefixes(&mut d_buf, cols, &d_warmups);
-			
-			// Compute
+			// Compute - stochf_batch_inner_into now handles NaN initialization
 			let kernel = detect_best_batch_kernel();
-			stochf_batch_inner_into(high, low, close, &sweep, kernel, false, out_k_slice, out_d_slice)
+			// Convert batch kernel to regular kernel
+			let simd_kernel = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => Kernel::Scalar,
+			};
+			stochf_batch_inner_into(high, low, close, &sweep, simd_kernel, false, out_k_slice, out_d_slice)
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
-			
-			// Forget the wrappers without dropping
-			std::mem::forget(k_buf);
-			std::mem::forget(d_buf);
 		}
 		
 		Ok(rows)

@@ -35,7 +35,13 @@ def load_test_data():
             candles['low'].append(float(row[4]))
             candles['volume'].append(float(row[5]))
     
-    return {k: np.array(v) for k, v in candles.items()}
+    # Convert to numpy arrays
+    result = {k: np.array(v) for k, v in candles.items()}
+    
+    # Add calculated fields
+    result['hl2'] = (result['high'] + result['low']) / 2.0
+    
+    return result
 
 def assert_close(actual, expected, rtol=1e-8, atol=1e-10, msg=""):
     """Assert arrays are close with better error messages"""

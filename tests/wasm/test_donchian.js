@@ -160,16 +160,25 @@ test('Donchian - fast API in-place operation', async () => {
     const period = 20;
     const len = high.length;
     
-    // Allocate output buffers
+    // Allocate input and output buffers
+    const highPtr = wasm.donchian_alloc(len);
+    const lowPtr = wasm.donchian_alloc(len);
     const upperPtr = wasm.donchian_alloc(len);
     const middlePtr = wasm.donchian_alloc(len);
     const lowerPtr = wasm.donchian_alloc(len);
     
     try {
+        // Copy input data into WASM memory
+        const memory = new Float64Array(wasm.__wasm.memory.buffer);
+        const highStart = highPtr / 8;
+        const lowStart = lowPtr / 8;
+        memory.set(high, highStart);
+        memory.set(low, lowStart);
+        
         // Call fast API
         wasm.donchian_into(
-            high.byteOffset,
-            low.byteOffset,
+            highPtr,
+            lowPtr,
             upperPtr,
             middlePtr,
             lowerPtr,
@@ -177,15 +186,15 @@ test('Donchian - fast API in-place operation', async () => {
             period
         );
         
-        // Read results
-        const memory = new Float64Array(wasm.memory.buffer);
+        // Read results (recreate view in case memory grew)
+        const memoryAfter = new Float64Array(wasm.__wasm.memory.buffer);
         const upperStart = upperPtr / 8;
         const middleStart = middlePtr / 8;
         const lowerStart = lowerPtr / 8;
         
-        const upper = memory.slice(upperStart, upperStart + len);
-        const middle = memory.slice(middleStart, middleStart + len);
-        const lower = memory.slice(lowerStart, lowerStart + len);
+        const upper = memoryAfter.slice(upperStart, upperStart + len);
+        const middle = memoryAfter.slice(middleStart, middleStart + len);
+        const lower = memoryAfter.slice(lowerStart, lowerStart + len);
         
         // Verify some values
         assert(!isNaN(upper[period]), 'Upper should have valid values after warmup');
@@ -193,6 +202,8 @@ test('Donchian - fast API in-place operation', async () => {
         assert(!isNaN(lower[period]), 'Lower should have valid values after warmup');
     } finally {
         // Clean up
+        wasm.donchian_free(highPtr, len);
+        wasm.donchian_free(lowPtr, len);
         wasm.donchian_free(upperPtr, len);
         wasm.donchian_free(middlePtr, len);
         wasm.donchian_free(lowerPtr, len);
@@ -252,9 +263,12 @@ test('Donchian - reinput test', () => {
     assert.strictEqual(secondResult.cols, len);
     
     // Check some values exist after warmup
-    assert(!isNaN(secondUpper[period]), 'Second pass upper should have values after warmup');
-    assert(!isNaN(secondMiddle[period]), 'Second pass middle should have values after warmup');
-    assert(!isNaN(secondLower[period]), 'Second pass lower should have values after warmup');
+    // Note: The first pass middle has NaN values for the first period-1 indices,
+    // so the second pass needs 2*period-1 indices before valid values
+    const secondWarmup = 2 * period - 1;
+    assert(!isNaN(secondUpper[secondWarmup]), 'Second pass upper should have values after warmup');
+    assert(!isNaN(secondMiddle[secondWarmup]), 'Second pass middle should have values after warmup');
+    assert(!isNaN(secondLower[secondWarmup]), 'Second pass lower should have values after warmup');
 });
 
 test('Donchian - invalid high/low relationship', () => {
@@ -270,8 +284,16 @@ test('Donchian - invalid high/low relationship', () => {
     const middle = result.values.slice(len, 2 * len);
     const lower = result.values.slice(2 * len, 3 * len);
     
-    // After warmup, upper should be less than lower (inverted)
-    assert(upper[period - 1] < lower[period - 1], 'Upper should be less than lower when high < low');
+    // After warmup, check that values are computed (even though semantically inverted)
+    // Upper will be max of 'high' values (which are smaller)
+    // Lower will be min of 'low' values (which are larger) 
+    // So upper < lower when input high < low
+    assert(!isNaN(upper[period - 1]), 'Upper should have value after warmup');
+    assert(!isNaN(lower[period - 1]), 'Lower should have value after warmup');
+    // Upper band tracks the max of high values (10, 15, 20) = 20
+    // Lower band tracks the min of low values (15, 20, 25) = 15
+    // So upper (20) > lower (15) even with inverted input
+    assert(upper[period - 1] >= lower[period - 1], 'Bands should still maintain proper relationship');
 });
 
 test('Donchian - partial NaN handling', () => {
@@ -325,7 +347,7 @@ test('Donchian - zero-copy with aliasing', async () => {
     
     try {
         // Copy input data
-        const memory = new Float64Array(wasm.memory.buffer);
+        let memory = new Float64Array(wasm.__wasm.memory.buffer);
         const highStart = highPtr / 8;
         const lowStart = lowPtr / 8;
         memory.set(high, highStart);
@@ -479,18 +501,27 @@ test('Donchian - zero-copy with large dataset', () => {
     
     const period = 50;
     
-    // Allocate output buffers
+    // Allocate input and output buffers
+    const highPtr = wasm.donchian_alloc(size);
+    const lowPtr = wasm.donchian_alloc(size);
     const upperPtr = wasm.donchian_alloc(size);
     const middlePtr = wasm.donchian_alloc(size);
     const lowerPtr = wasm.donchian_alloc(size);
     
     try {
+        // Copy input data into WASM memory
+        const memory = new Float64Array(wasm.__wasm.memory.buffer);
+        const highStart = highPtr / 8;
+        const lowStart = lowPtr / 8;
+        memory.set(high, highStart);
+        memory.set(low, lowStart);
+        
         const start = performance.now();
         
         // Call fast API
         wasm.donchian_into(
-            high.byteOffset,
-            low.byteOffset,
+            highPtr,
+            lowPtr,
             upperPtr,
             middlePtr,
             lowerPtr,
@@ -501,10 +532,10 @@ test('Donchian - zero-copy with large dataset', () => {
         const elapsed = performance.now() - start;
         console.log(`  Zero-copy API processed ${size} points in ${elapsed.toFixed(2)}ms`);
         
-        // Verify some values
-        const memory = new Float64Array(wasm.memory.buffer);
+        // Verify some values (recreate view in case memory grew)
+        const memoryAfter = new Float64Array(wasm.__wasm.memory.buffer);
         const upperStart = upperPtr / 8;
-        const upper = memory.slice(upperStart, upperStart + size);
+        const upper = memoryAfter.slice(upperStart, upperStart + size);
         
         // Check warmup period
         for (let i = 0; i < period - 1; i++) {
@@ -513,6 +544,8 @@ test('Donchian - zero-copy with large dataset', () => {
         assert(!isNaN(upper[period]), 'Should have values after warmup');
         
     } finally {
+        wasm.donchian_free(highPtr, size);
+        wasm.donchian_free(lowPtr, size);
         wasm.donchian_free(upperPtr, size);
         wasm.donchian_free(middlePtr, size);
         wasm.donchian_free(lowerPtr, size);
@@ -530,17 +563,26 @@ test('Donchian - fast batch API', () => {
     const periodStep = 10;
     const expectedRows = 3; // [10, 20, 30]
     
-    // Allocate buffers
+    // Allocate input and output buffers
+    const highPtr = wasm.donchian_alloc(len);
+    const lowPtr = wasm.donchian_alloc(len);
     const totalSize = expectedRows * len;
     const upperPtr = wasm.donchian_alloc(totalSize);
     const middlePtr = wasm.donchian_alloc(totalSize);
     const lowerPtr = wasm.donchian_alloc(totalSize);
     
     try {
+        // Copy input data into WASM memory
+        const memory = new Float64Array(wasm.__wasm.memory.buffer);
+        const highStart = highPtr / 8;
+        const lowStart = lowPtr / 8;
+        memory.set(high, highStart);
+        memory.set(low, lowStart);
+        
         // Call fast batch API
         const rows = wasm.donchian_batch_into(
-            high.byteOffset,
-            low.byteOffset,
+            highPtr,
+            lowPtr,
             upperPtr,
             middlePtr,
             lowerPtr,
@@ -552,10 +594,10 @@ test('Donchian - fast batch API', () => {
         
         assert.strictEqual(rows, expectedRows, 'Should return correct number of rows');
         
-        // Verify data structure
-        const memory = new Float64Array(wasm.memory.buffer);
+        // Verify data structure (recreate view in case memory grew)
+        const memoryAfter = new Float64Array(wasm.__wasm.memory.buffer);
         const upperStart = upperPtr / 8;
-        const upper = memory.slice(upperStart, upperStart + totalSize);
+        const upper = memoryAfter.slice(upperStart, upperStart + totalSize);
         
         // Check each row has proper warmup
         for (let row = 0; row < rows; row++) {
@@ -571,6 +613,8 @@ test('Donchian - fast batch API', () => {
         }
         
     } finally {
+        wasm.donchian_free(highPtr, len);
+        wasm.donchian_free(lowPtr, len);
         wasm.donchian_free(upperPtr, totalSize);
         wasm.donchian_free(middlePtr, totalSize);
         wasm.donchian_free(lowerPtr, totalSize);
