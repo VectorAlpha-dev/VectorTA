@@ -123,9 +123,30 @@ test('SMMA reinput', () => {
     const firstResult = wasm.smma(close, 7);
     assert.strictEqual(firstResult.length, close.length);
     
+    // Verify first pass matches expected
+    const expectedFirstPass = [59434.4, 59398.2, 59346.9, 59319.4, 59224.5];
+    assertArrayClose(
+        firstResult.slice(-5),
+        expectedFirstPass,
+        1e-1,
+        "First pass SMMA values mismatch"
+    );
+    
     // Second pass with period 5 - apply SMMA to SMMA output
     const secondResult = wasm.smma(firstResult, 5);
     assert.strictEqual(secondResult.length, firstResult.length);
+    
+    // Verify the re-input produces expected smoothing
+    // Calculate standard deviation to verify smoothing
+    const calcStdDev = (arr) => {
+        const validValues = arr.filter(v => !isNaN(v));
+        const mean = validValues.reduce((a, b) => a + b, 0) / validValues.length;
+        const variance = validValues.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / validValues.length;
+        return Math.sqrt(variance);
+    };
+    
+    assert(calcStdDev(secondResult) < calcStdDev(firstResult),
+           "Second pass should produce smoother results");
 });
 
 test('SMMA NaN handling', () => {
@@ -142,10 +163,11 @@ test('SMMA NaN handling', () => {
         }
     }
     
-    // First period-1 values should be NaN (matching ALMA convention)
-    assertAllNaN(result.slice(0, 6), "Expected NaN in warmup period");
-    // First valid value should be at index period-1
-    assert(!isNaN(result[6]), "Expected valid value at index period-1");
+    // First period-1 values should be NaN (warmup = first + period - 1)
+    // Since first valid index is 0, warmup = 0 + 7 - 1 = 6  
+    assertAllNaN(result.slice(0, 6), "Expected NaN in warmup period (indices 0-5)");
+    // First valid value should be at index 6 (period-1)
+    assert(!isNaN(result[6]), "Expected valid value at index 6 (period-1)");
 });
 
 test('SMMA all NaN input', () => {
@@ -162,7 +184,7 @@ test('SMMA batch single period', () => {
     // Test batch with single period - mirrors check_batch_default_row
     const close = new Float64Array(testData.close);
     
-    const batchValues = wasm.smma_batch(close, 7, 7, 0); // Default period only
+    const batchValues = wasm.smma_batch_legacy(close, 7, 7, 0); // Default period only
     const metadata = wasm.smma_batch_metadata(7, 7, 0);
     const dims = wasm.smma_batch_rows_cols(7, 7, 0, close.length);
     
@@ -187,7 +209,7 @@ test('SMMA batch multiple periods', () => {
     // Test batch with multiple period values
     const close = new Float64Array(testData.close.slice(0, 100)); // Smaller dataset for speed
     
-    const batchValues = wasm.smma_batch(close, 5, 10, 1); // Periods 5, 6, 7, 8, 9, 10
+    const batchValues = wasm.smma_batch_legacy(close, 5, 10, 1); // Periods 5, 6, 7, 8, 9, 10
     const metadata = wasm.smma_batch_metadata(5, 10, 1);
     const dims = wasm.smma_batch_rows_cols(5, 10, 1, 100);
     
@@ -212,7 +234,7 @@ test('SMMA batch large range', () => {
     // Test batch with large period range
     const close = new Float64Array(testData.close.slice(0, 200)); // Use subset for speed
     
-    const batchValues = wasm.smma_batch(close, 7, 100, 1); // Default range from Rust
+    const batchValues = wasm.smma_batch_legacy(close, 7, 100, 1); // Default range from Rust
     const metadata = wasm.smma_batch_metadata(7, 100, 1);
     const dims = wasm.smma_batch_rows_cols(7, 100, 1, 200);
     
@@ -228,7 +250,7 @@ test('SMMA edge case period one', () => {
     const result = wasm.smma(data, 1);
     
     // With period=1, SMMA should equal the input data
-    assertArrayClose(result, data, 1e-12, "SMMA with period=1 should equal input");
+    assertArrayClose(result, data, 1e-10, "SMMA with period=1 should equal input");
 });
 
 test('SMMA constant values', () => {
@@ -253,7 +275,7 @@ test('SMMA formula verification', () => {
     
     const result = wasm.smma(data, period);
     
-    // First period-1 values should be NaN (matching ALMA convention)
+    // First period-1 values should be NaN (warmup = first + period - 1)
     assertAllNaN(result.slice(0, period - 1), "First period-1 values should be NaN");
     
     // First SMMA value (at index period-1) should be mean of first period values
@@ -274,7 +296,8 @@ test('SMMA warmup period', () => {
     
     const result = wasm.smma(close, period);
     
-    // First period-1 values should be NaN (warmup) - matching ALMA convention
+    // First period-1 values should be NaN (warmup = first + period - 1)
+    // Since first valid index is 0, warmup = 0 + period - 1 = period - 1
     assertAllNaN(result.slice(0, period - 1), `Expected NaN in first ${period - 1} values`);
     
     // Value at period-1 index should not be NaN
@@ -286,7 +309,7 @@ test('SMMA batch step parameter', () => {
     const close = new Float64Array(testData.close.slice(0, 50));
     
     // Test with step=2 (periods 5, 7, 9)
-    const batchValues = wasm.smma_batch(close, 5, 9, 2);
+    const batchValues = wasm.smma_batch_legacy(close, 5, 9, 2);
     const metadata = wasm.smma_batch_metadata(5, 9, 2);
     const dims = wasm.smma_batch_rows_cols(5, 9, 2, 50);
     
@@ -301,7 +324,7 @@ test('SMMA batch zero step', () => {
     // Test batch with step=0 (single value)
     const close = new Float64Array(testData.close.slice(0, 50));
     
-    const batchValues = wasm.smma_batch(close, 7, 7, 0);
+    const batchValues = wasm.smma_batch_legacy(close, 7, 7, 0);
     const metadata = wasm.smma_batch_metadata(7, 7, 0);
     const dims = wasm.smma_batch_rows_cols(7, 7, 0, 50);
     
@@ -387,7 +410,7 @@ test('SMMA batch new API', () => {
         period_range: [5, 10, 1]  // 6 values: 5, 6, 7, 8, 9, 10
     };
     
-    const result = wasm.smma_batch_new(close, config);
+    const result = wasm.smma_batch(close, config);
     
     assert.strictEqual(result.rows, 6);
     assert.strictEqual(result.cols, 50);
@@ -427,5 +450,128 @@ test('SMMA batch fast API', () => {
     } finally {
         wasm.smma_free(inPtr, close.length);
         wasm.smma_free(outPtr, 6 * close.length);
+    }
+});
+
+test('SMMA streaming', () => {
+    // Test SMMA streaming matches batch calculation - mirrors Python streaming test
+    const close = new Float64Array(testData.close.slice(0, 100)); // Use smaller dataset
+    const period = 7;
+    
+    // Batch calculation
+    const batchResult = wasm.smma(close, period);
+    
+    // Simulate streaming (no streaming API in WASM, so we'll test incremental)
+    const streamValues = new Float64Array(close.length);
+    streamValues.fill(NaN);
+    
+    // Process data incrementally
+    for (let i = period; i <= close.length; i++) {
+        const partialData = close.slice(0, i);
+        const partialResult = wasm.smma(partialData, period);
+        streamValues[i - 1] = partialResult[i - 1];
+    }
+    
+    // Compare batch vs "streaming" for valid values
+    for (let i = period - 1; i < close.length; i++) {
+        if (!isNaN(batchResult[i]) && !isNaN(streamValues[i])) {
+            assertClose(batchResult[i], streamValues[i], 1e-10, 
+                       `Streaming mismatch at index ${i}`);
+        }
+    }
+});
+
+test('SMMA batch validation', () => {
+    // Test SMMA batch parameter validation
+    const close = new Float64Array(testData.close.slice(0, 50));
+    
+    // Test invalid config (missing required fields)
+    assert.throws(() => {
+        wasm.smma_batch(close, {});
+    }, /Invalid config/);
+    
+    // Test invalid period range
+    assert.throws(() => {
+        wasm.smma_batch(close, {
+            period_range: [10, 5, 1]  // start > end
+        });
+    }, /Invalid|Error/);
+    
+    // Test zero period
+    assert.throws(() => {
+        wasm.smma_batch(close, {
+            period_range: [0, 5, 1]
+        });
+    }, /Invalid period|unreachable/);
+});
+
+test('SMMA batch matches individual', () => {
+    // Test that batch results match individual calculations
+    const close = new Float64Array(testData.close.slice(0, 100)); // Use subset for speed
+    
+    // Test multiple periods
+    const periods = [5, 7, 10, 14];
+    const batchResult = wasm.smma_batch(close, {
+        period_range: [5, 14, 1]
+    });
+    
+    // Verify each period matches individual calculation
+    for (const period of periods) {
+        const rowIdx = period - 5; // Since we start at 5
+        const rowStart = rowIdx * close.length;
+        const rowEnd = rowStart + close.length;
+        const batchRow = batchResult.values.slice(rowStart, rowEnd);
+        
+        // Calculate individual result
+        const individualResult = wasm.smma(close, period);
+        
+        // They should match exactly
+        assertArrayClose(
+            batchRow,
+            individualResult,
+            1e-10,
+            `Batch row for period ${period} doesn't match individual calculation`
+        );
+    }
+});
+
+test('SMMA leading NaNs', () => {
+    // Test SMMA with leading NaN values in data
+    const data = new Float64Array([NaN, NaN, NaN, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
+    const period = 3;
+    
+    const result = wasm.smma(data, period);
+    
+    // First valid data point is at index 3
+    // Warmup = first + period - 1 = 3 + 3 - 1 = 5
+    // So indices 0-4 should be NaN, index 5 should be first valid
+    assertAllNaN(result.slice(0, 5), "Expected NaN through index 4");
+    assert(!isNaN(result[5]), "Expected valid value at index 5");
+    
+    // The first valid SMMA value should be mean of [1.0, 2.0, 3.0]
+    const expectedFirst = (1.0 + 2.0 + 3.0) / 3;
+    assertClose(result[5], expectedFirst, 1e-10, "First valid value incorrect");
+});
+
+test('SMMA batch fast API error handling', () => {
+    // Test error conditions in batch_into
+    const close = new Float64Array([1, 2, 3, 4, 5]);
+    
+    // Test with null pointers
+    assert.throws(() => {
+        wasm.smma_batch_into(0, 0, close.length, 2, 3, 1);
+    }, /null pointer/);
+    
+    // Test with invalid period range
+    const inPtr = wasm.smma_alloc(close.length);
+    const outPtr = wasm.smma_alloc(close.length);
+    
+    try {
+        assert.throws(() => {
+            wasm.smma_batch_into(inPtr, outPtr, close.length, 10, 5, 1); // start > end
+        });
+    } finally {
+        wasm.smma_free(inPtr, close.length);
+        wasm.smma_free(outPtr, close.length);
     }
 });

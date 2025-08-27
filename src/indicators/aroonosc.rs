@@ -12,16 +12,15 @@
 //!
 //! ## Errors
 //! - **InvalidLength**: aroon_osc: The specified `length` is zero.
-//! - **NoCandles**: aroon_osc: No candle data available.
-//! - **EmptySlices**: aroon_osc: One or both high/low slices are empty.
-//! - **SlicesLengthMismatch**: aroon_osc: High/low slices have different lengths.
+//! - **EmptyData**: aroonosc: Empty input data.
+//! - **MismatchedArrayLengths**: aroonosc: High/low arrays have different lengths.
 //! - **NotEnoughData**: aroon_osc: Not enough data points to compute the Aroon Oscillator.
 //!
 //! ## Returns
 //! - **`Ok(AroonOscOutput)`** on success, containing a `Vec<f64>` of the oscillator values.
 //! - **`Err(AroonOscError)`** otherwise.
 
-use crate::utilities::data_loader::{source_type, Candles};
+use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
 	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
@@ -30,10 +29,14 @@ use crate::utilities::helpers::{
 use core::arch::x86_64::*;
 use paste::paste;
 #[cfg(not(target_arch = "wasm32"))]
-#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::mem::ManuallyDrop;
 use thiserror::Error;
+
+#[inline(always)]
+fn first_valid_hilo(high: &[f64], low: &[f64]) -> Option<usize> {
+	high.iter().zip(low).position(|(h, l)| h.is_finite() && l.is_finite())
+}
 
 #[derive(Debug, Clone)]
 pub enum AroonOscData<'a> {
@@ -167,29 +170,23 @@ impl AroonOscBuilder {
 
 #[derive(Debug, Error)]
 pub enum AroonOscError {
-	#[error("aroonosc: Candle field error: {0}")]
-	CandleFieldError(String),
-
-	#[error("aroonosc: Invalid length specified for Aroon Osc calculation. length={length}")]
+	#[error("aroonosc: Invalid length: {length}")]
 	InvalidLength { length: usize },
 
-	#[error("aroonosc: No candles available.")]
-	NoCandles,
+	#[error("aroonosc: Mismatched array lengths: high_len={high_len}, low_len={low_len}")]
+	MismatchedArrayLengths { high_len: usize, low_len: usize },
 
-	#[error("aroonosc: One or both of the slices for AroonOsc are empty.")]
-	EmptySlices,
-
-	#[error("aroonosc: Mismatch in high/low slice length. high_len={high_len}, low_len={low_len}")]
-	SlicesLengthMismatch { high_len: usize, low_len: usize },
-
-	#[error("aroonosc: Not enough data points for Aroon Osc: required={required}, found={found}")]
+	#[error("aroonosc: Not enough data points: required={required}, found={found}")]
 	NotEnoughData { required: usize, found: usize },
 	
 	#[error("aroonosc: Empty data")]
 	EmptyData,
 	
-	#[error("aroonosc: Mismatched array lengths: high_len={high_len}, low_len={low_len}")]
-	MismatchedArrayLengths { high_len: usize, low_len: usize },
+	#[error("aroonosc: Invalid kernel")]
+	InvalidKernel,
+	
+	#[error("aroonosc: Invalid output length: expected={expected}, got={got}")]
+	InvalidOutputLen { expected: usize, got: usize },
 }
 
 #[inline]
@@ -197,74 +194,62 @@ pub fn aroon_osc(input: &AroonOscInput) -> Result<AroonOscOutput, AroonOscError>
 	aroon_osc_with_kernel(input, Kernel::Auto)
 }
 
-pub fn aroon_osc_with_kernel(input: &AroonOscInput, kernel: Kernel) -> Result<AroonOscOutput, AroonOscError> {
+#[inline(always)]
+fn aroon_osc_prepare<'a>(
+	input: &'a AroonOscInput,
+	kernel: Kernel,
+) -> Result<(&'a [f64], &'a [f64], usize, usize, Kernel), AroonOscError> {
 	let length = input.get_length();
-	if length == 0 {
-		return Err(AroonOscError::InvalidLength { length });
+	if length == 0 { return Err(AroonOscError::InvalidLength { length }); }
+
+	let high = input.get_high();
+	let low  = input.get_low();
+	if high.is_empty() || low.is_empty() { return Err(AroonOscError::EmptyData); }
+	if high.len() != low.len() {
+		return Err(AroonOscError::MismatchedArrayLengths { high_len: high.len(), low_len: low.len() });
 	}
-	let (high, low) = match &input.data {
-		AroonOscData::Candles { candles } => {
-			if candles.close.is_empty() {
-				return Err(AroonOscError::NoCandles);
-			}
-			let high = candles
-				.select_candle_field("high")
-				.map_err(|e| AroonOscError::CandleFieldError(e.to_string()))?;
-			let low = candles
-				.select_candle_field("low")
-				.map_err(|e| AroonOscError::CandleFieldError(e.to_string()))?;
-			(high, low)
-		}
-		AroonOscData::SlicesHL { high, low } => {
-			if high.is_empty() || low.is_empty() {
-				return Err(AroonOscError::EmptySlices);
-			}
-			if high.len() != low.len() {
-				return Err(AroonOscError::SlicesLengthMismatch {
-					high_len: high.len(),
-					low_len: low.len(),
-				});
-			}
-			(*high, *low)
-		}
-	};
+
 	let len = low.len();
-	if len < length {
-		return Err(AroonOscError::NotEnoughData {
-			required: length,
-			found: len,
-		});
+	let first = first_valid_hilo(high, low).ok_or(AroonOscError::EmptyData)?;
+	// Need at least (length+1) values after `first`
+	if len.saturating_sub(first) < length + 1 {
+		return Err(AroonOscError::NotEnoughData { required: length + 1, found: len.saturating_sub(first) });
 	}
 
-	// Calculate warmup period for Aroon Oscillator
-	// Aroon needs (length + 1) data points to start producing values
-	let warmup_period = length; // Values before index (length) are NaN
-	let mut out = alloc_with_nan_prefix(len, warmup_period);
+	let chosen = match kernel { Kernel::Auto => detect_best_kernel(), k => k };
+	Ok((high, low, length, first, chosen))
+}
 
-	let chosen = match kernel {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
+pub fn aroon_osc_with_kernel(input: &AroonOscInput, kernel: Kernel) -> Result<AroonOscOutput, AroonOscError> {
+	let (high, low, length, first, chosen) = aroon_osc_prepare(input, kernel)?;
+	let mut out = alloc_with_nan_prefix(high.len(), first + length);
 
-	unsafe {
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => aroon_osc_scalar(high, low, length, &mut out),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => aroon_osc_avx2(high, low, length, &mut out),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => aroon_osc_avx512(high, low, length, &mut out),
-			_ => unreachable!(),
-		}
+	match chosen {
+		Kernel::Scalar | Kernel::ScalarBatch => aroon_osc_scalar_highlow_into(high, low, length, first, &mut out),
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch =>
+			aroon_osc_scalar_highlow_into(high, low, length, first, &mut out),
+		_ => unreachable!(),
 	}
 	Ok(AroonOscOutput { values: out })
 }
 
 #[inline]
-pub fn aroon_osc_scalar(high: &[f64], low: &[f64], length: usize, out: &mut [f64]) {
+pub fn aroon_osc_scalar_highlow_into(
+	high: &[f64],
+	low: &[f64],
+	length: usize,
+	first: usize,
+	out: &mut [f64],
+) {
 	let len = low.len();
 	let window = length + 1;
+	let start_i = first + length; // window-1 == length
+	if start_i >= len { return; }
+
 	let inv_length = 1.0 / length as f64;
-	for i in (window - 1)..len {
+
+	for i in start_i..len {
 		let start = i + 1 - window;
 		let mut highest_val = high[start];
 		let mut lowest_val = low[start];
@@ -292,92 +277,43 @@ pub fn aroon_osc_scalar(high: &[f64], low: &[f64], length: usize, out: &mut [f64
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub fn aroon_osc_avx512(high: &[f64], low: &[f64], length: usize, out: &mut [f64]) {
-	unsafe { aroon_osc_scalar(high, low, length, out) }
+pub fn aroon_osc_avx512(high: &[f64], low: &[f64], length: usize, first: usize, out: &mut [f64]) {
+	aroon_osc_scalar_highlow_into(high, low, length, first, out)
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub fn aroon_osc_avx2(high: &[f64], low: &[f64], length: usize, out: &mut [f64]) {
-	unsafe { aroon_osc_scalar(high, low, length, out) }
+pub fn aroon_osc_avx2(high: &[f64], low: &[f64], length: usize, first: usize, out: &mut [f64]) {
+	aroon_osc_scalar_highlow_into(high, low, length, first, out)
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub unsafe fn aroon_osc_avx512_short(high: &[f64], low: &[f64], length: usize, out: &mut [f64]) {
-	aroon_osc_scalar(high, low, length, out)
+pub unsafe fn aroon_osc_avx512_short(high: &[f64], low: &[f64], length: usize, first: usize, out: &mut [f64]) {
+	aroon_osc_scalar_highlow_into(high, low, length, first, out)
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub unsafe fn aroon_osc_avx512_long(high: &[f64], low: &[f64], length: usize, out: &mut [f64]) {
-	aroon_osc_scalar(high, low, length, out)
+pub unsafe fn aroon_osc_avx512_long(high: &[f64], low: &[f64], length: usize, first: usize, out: &mut [f64]) {
+	aroon_osc_scalar_highlow_into(high, low, length, first, out)
 }
 
 /// Write Aroon Oscillator directly to output slice - no allocations
 #[inline]
 pub fn aroon_osc_into_slice(dst: &mut [f64], input: &AroonOscInput, kern: Kernel) -> Result<(), AroonOscError> {
-	let length = input.get_length();
-	if length == 0 {
-		return Err(AroonOscError::InvalidLength { length: 0 });
+	let (high, low, length, first, chosen) = aroon_osc_prepare(input, kern)?;
+	if dst.len() != high.len() {
+		return Err(AroonOscError::InvalidLength { length: dst.len() });
 	}
 
-	let data_len = input.data_len();
-	if data_len == 0 {
-		return Err(AroonOscError::EmptyData);
-	}
-	if length > data_len {
-		return Err(AroonOscError::NotEnoughData {
-			required: length,
-			found: data_len,
-		});
-	}
-	if dst.len() != data_len {
-		return Err(AroonOscError::InvalidLength { 
-			length: dst.len(),
-		});
-	}
-
-	let high = input.get_high();
-	let low = input.get_low();
-	
-	if high.len() != low.len() {
-		return Err(AroonOscError::MismatchedArrayLengths {
-			high_len: high.len(),
-			low_len: low.len(),
-		});
-	}
-
-	// Fill warmup with NaN first
-	let warmup = length;
-	for v in &mut dst[..warmup] {
-		*v = f64::NAN;
-	}
-
-	// Select kernel
-	let chosen = match kern {
-		Kernel::Auto => detect_best_kernel(),
-		k => k,
-	};
-
-	// Compute Aroon Oscillator values
 	match chosen {
+		Kernel::Scalar | Kernel::ScalarBatch => aroon_osc_scalar_highlow_into(high, low, length, first, dst),
 		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-		Kernel::Avx512 => {
-			#[target_feature(enable = "avx512f")]
-			unsafe fn aroon_osc_avx512_wrapper(high: &[f64], low: &[f64], length: usize, out: &mut [f64]) {
-				aroon_osc_avx512(high, low, length, out)
-			}
-			unsafe { aroon_osc_avx512_wrapper(high, low, length, dst) }
-		}
-		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-		Kernel::Avx2 => {
-			#[target_feature(enable = "avx2,fma")]
-			unsafe fn aroon_osc_avx2_wrapper(high: &[f64], low: &[f64], length: usize, out: &mut [f64]) {
-				aroon_osc_avx2(high, low, length, out)
-			}
-			unsafe { aroon_osc_avx2_wrapper(high, low, length, dst) }
-		}
-		_ => aroon_osc_scalar(high, low, length, dst),
+		Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch =>
+			aroon_osc_scalar_highlow_into(high, low, length, first, dst),
+		_ => unreachable!(),
 	}
 
+	let warm = first + length;
+	for v in &mut dst[..warm] { *v = f64::NAN; }
 	Ok(())
 }
 
@@ -392,7 +328,7 @@ pub fn aroon_osc_batch_with_kernel(
 		Kernel::Auto => detect_best_batch_kernel(),
 		other if other.is_batch() => other,
 		_ => {
-			return Err(AroonOscError::InvalidLength { length: 0 });
+			return Err(AroonOscError::InvalidKernel);
 		}
 	};
 	let simd = match kernel {
@@ -468,10 +404,10 @@ impl AroonOscBatchBuilder {
 	pub fn apply_candles(self, c: &Candles) -> Result<AroonOscBatchOutput, AroonOscError> {
 		let high = c
 			.select_candle_field("high")
-			.map_err(|e| AroonOscError::CandleFieldError(e.to_string()))?;
+			.map_err(|_| AroonOscError::EmptyData)?;
 		let low = c
 			.select_candle_field("low")
-			.map_err(|e| AroonOscError::CandleFieldError(e.to_string()))?;
+			.map_err(|_| AroonOscError::EmptyData)?;
 		self.apply_slices(high, low)
 	}
 	pub fn with_default_candles(c: &Candles) -> Result<AroonOscBatchOutput, AroonOscError> {
@@ -523,36 +459,29 @@ fn aroon_osc_batch_inner(
 	parallel: bool,
 ) -> Result<AroonOscBatchOutput, AroonOscError> {
 	let combos = expand_grid(sweep);
-	if combos.is_empty() {
-		return Err(AroonOscError::InvalidLength { length: 0 });
-	}
-	let len = high.len();
+	if combos.is_empty() { return Err(AroonOscError::InvalidLength { length: 0 }); }
 	if high.len() != low.len() {
-		return Err(AroonOscError::SlicesLengthMismatch {
-			high_len: high.len(),
-			low_len: low.len(),
-		});
+		return Err(AroonOscError::MismatchedArrayLengths { high_len: high.len(), low_len: low.len() });
 	}
-	let max_l = combos.iter().map(|c| c.length.unwrap()).max().unwrap();
-	if len < max_l {
-		return Err(AroonOscError::NotEnoughData {
-			required: max_l,
-			found: len,
-		});
+
+	let len = high.len();
+	let first = first_valid_hilo(high, low).ok_or(AroonOscError::EmptyData)?;
+
+	// largest window = length + 1; first must allow that
+	let max_len = combos.iter().map(|c| c.length.unwrap()).max().unwrap();
+	let needed = max_len + 1;
+	if len.saturating_sub(first) < needed {
+		return Err(AroonOscError::NotEnoughData { required: needed, found: len.saturating_sub(first) });
 	}
+
 	let rows = combos.len();
 	let cols = len;
 
 	// Step 1: Allocate uninitialized matrix
 	let mut buf_mu = make_uninit_matrix(rows, cols);
 
-	// Step 2: Calculate warmup periods for each row
-	let warmup_periods: Vec<usize> = combos
-		.iter()
-		.map(|c| c.length.unwrap()) // Each row needs length warmup period
-		.collect();
-
-	// Step 3: Initialize NaN prefixes for each row
+	// Step 2: per-row warm prefix = first + length
+	let warmup_periods: Vec<usize> = combos.iter().map(|c| first + c.length.unwrap()).collect();
 	init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
 
 	// Step 4: Convert to mutable slice for computation
@@ -560,16 +489,9 @@ fn aroon_osc_batch_inner(
 	let values: &mut [f64] =
 		unsafe { core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len()) };
 
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+	let do_row = |row: usize, out_row: &mut [f64]| {
 		let length = combos[row].length.unwrap();
-		match kern {
-			Kernel::Scalar => aroon_osc_row_scalar(high, low, length, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => aroon_osc_row_avx2(high, low, length, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => aroon_osc_row_avx512(high, low, length, out_row),
-			_ => unreachable!(),
-		}
+		aroon_osc_scalar_highlow_into(high, low, length, first, out_row);
 	};
 
 	if parallel {
@@ -620,95 +542,79 @@ fn aroon_osc_batch_inner_into(
 	out: &mut [f64],
 ) -> Result<Vec<AroonOscParams>, AroonOscError> {
 	let combos = expand_grid(sweep);
-	if combos.is_empty() {
-		return Err(AroonOscError::InvalidLength { length: 0 });
-	}
-	let len = high.len();
+	if combos.is_empty() { return Err(AroonOscError::InvalidLength { length: 0 }); }
 	if high.len() != low.len() {
-		return Err(AroonOscError::SlicesLengthMismatch {
-			high_len: high.len(),
-			low_len: low.len(),
-		});
+		return Err(AroonOscError::MismatchedArrayLengths { high_len: high.len(), low_len: low.len() });
 	}
-	let max_l = combos.iter().map(|c| c.length.unwrap()).max().unwrap();
-	if len < max_l {
-		return Err(AroonOscError::NotEnoughData {
-			required: max_l,
-			found: len,
-		});
+
+	let len = high.len();
+	let first = first_valid_hilo(high, low).ok_or(AroonOscError::EmptyData)?;
+	let max_len = combos.iter().map(|c| c.length.unwrap()).max().unwrap();
+	let needed = max_len + 1;
+	if len.saturating_sub(first) < needed {
+		return Err(AroonOscError::NotEnoughData { required: needed, found: len.saturating_sub(first) });
 	}
+
 	let rows = combos.len();
 	let cols = len;
+	let warmup_periods: Vec<usize> = combos.iter().map(|c| first + c.length.unwrap()).collect();
 
-	// Initialize NaN prefixes for each row
-	for (row, combo) in combos.iter().enumerate() {
-		let warmup = combo.length.unwrap();
-		let row_start = row * cols;
-		out[row_start..row_start + warmup].fill(f64::NAN);
-	}
+	// Initialize warm prefixes to NaN using the standard helper
+	let mut out_uninit = unsafe { 
+		Vec::from_raw_parts(out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>, out.len(), out.len()) 
+	};
+	init_matrix_prefixes(&mut out_uninit, cols, &warmup_periods);
+	std::mem::forget(out_uninit);
 
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+	// Treat `out` as uninitialized for computation
+	let out_mu = unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>, out.len()) };
+
+	let do_row = |row: usize, row_mu: &mut [std::mem::MaybeUninit<f64>]| {
+		// compute into a temporary view over the same memory as f64 for the computed tail only
+		let dst = unsafe { core::slice::from_raw_parts_mut(row_mu.as_mut_ptr() as *mut f64, row_mu.len()) };
 		let length = combos[row].length.unwrap();
-		match kern {
-			Kernel::Scalar => aroon_osc_row_scalar(high, low, length, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => aroon_osc_row_avx2(high, low, length, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => aroon_osc_row_avx512(high, low, length, out_row),
-			_ => unreachable!(),
-		}
+		aroon_osc_scalar_highlow_into(high, low, length, first, dst);
 	};
 
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
-		{
-			out.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
-		}
-
+		out_mu.par_chunks_mut(cols).enumerate().for_each(|(r, s)| do_row(r, s));
 		#[cfg(target_arch = "wasm32")]
-		{
-			for (row, slice) in out.chunks_mut(cols).enumerate() {
-				do_row(row, slice);
-			}
-		}
+		for (r, s) in out_mu.chunks_mut(cols).enumerate() { do_row(r, s); }
 	} else {
-		for (row, slice) in out.chunks_mut(cols).enumerate() {
-			do_row(row, slice);
-		}
+		for (r, s) in out_mu.chunks_mut(cols).enumerate() { do_row(r, s); }
 	}
 
 	Ok(combos)
 }
 
 #[inline(always)]
-pub unsafe fn aroon_osc_row_scalar(high: &[f64], low: &[f64], length: usize, out: &mut [f64]) {
-	aroon_osc_scalar(high, low, length, out)
+pub unsafe fn aroon_osc_row_scalar(high: &[f64], low: &[f64], length: usize, first: usize, out: &mut [f64]) {
+	aroon_osc_scalar_highlow_into(high, low, length, first, out)
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-pub unsafe fn aroon_osc_row_avx2(high: &[f64], low: &[f64], length: usize, out: &mut [f64]) {
-	aroon_osc_scalar(high, low, length, out)
+pub unsafe fn aroon_osc_row_avx2(high: &[f64], low: &[f64], length: usize, first: usize, out: &mut [f64]) {
+	aroon_osc_scalar_highlow_into(high, low, length, first, out)
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-pub unsafe fn aroon_osc_row_avx512(high: &[f64], low: &[f64], length: usize, out: &mut [f64]) {
+pub unsafe fn aroon_osc_row_avx512(high: &[f64], low: &[f64], length: usize, first: usize, out: &mut [f64]) {
 	if length <= 32 {
-		aroon_osc_avx512_short(high, low, length, out);
+		aroon_osc_avx512_short(high, low, length, first, out);
 	} else {
-		aroon_osc_avx512_long(high, low, length, out);
+		aroon_osc_avx512_long(high, low, length, first, out);
 	}
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-pub unsafe fn aroon_osc_row_avx512_short(high: &[f64], low: &[f64], length: usize, out: &mut [f64]) {
-	aroon_osc_scalar(high, low, length, out)
+pub unsafe fn aroon_osc_row_avx512_short(high: &[f64], low: &[f64], length: usize, first: usize, out: &mut [f64]) {
+	aroon_osc_scalar_highlow_into(high, low, length, first, out)
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-pub unsafe fn aroon_osc_row_avx512_long(high: &[f64], low: &[f64], length: usize, out: &mut [f64]) {
-	aroon_osc_scalar(high, low, length, out)
+pub unsafe fn aroon_osc_row_avx512_long(high: &[f64], low: &[f64], length: usize, first: usize, out: &mut [f64]) {
+	aroon_osc_scalar_highlow_into(high, low, length, first, out)
 }
 
 /// Write batch Aroon Oscillator directly to output slice - no allocations
@@ -728,7 +634,7 @@ pub fn aroon_osc_batch_into_slice(
 	
 	let len = high.len();
 	if high.len() != low.len() {
-		return Err(AroonOscError::SlicesLengthMismatch {
+		return Err(AroonOscError::MismatchedArrayLengths {
 			high_len: high.len(),
 			low_len: low.len(),
 		});
@@ -736,8 +642,9 @@ pub fn aroon_osc_batch_into_slice(
 	
 	let expected_len = combos.len() * len;
 	if out.len() != expected_len {
-		return Err(AroonOscError::InvalidLength { 
-			length: out.len(),
+		return Err(AroonOscError::InvalidOutputLen { 
+			expected: expected_len,
+			got: out.len(),
 		});
 	}
 	
@@ -784,30 +691,20 @@ impl AroonOscStream {
 	}
 	#[inline(always)]
 	fn calc_ring(&self) -> f64 {
-		let window = self.length + 1;
-		let mut highest_val = self.high_buffer[0];
-		let mut lowest_val = self.low_buffer[0];
-		let mut highest_idx = 0;
-		let mut lowest_idx = 0;
-		for i in 1..window {
-			let idx = (self.head + i) % window;
-			let h_val = self.high_buffer[idx];
-			if h_val > highest_val {
-				highest_val = h_val;
-				highest_idx = i;
-			}
-			let l_val = self.low_buffer[idx];
-			if l_val < lowest_val {
-				lowest_val = l_val;
-				lowest_idx = i;
-			}
+		let w = self.length + 1;
+		let mut hi = self.high_buffer[self.head];
+		let mut lo = self.low_buffer[self.head];
+		let mut hi_i = 0usize;
+		let mut lo_i = 0usize;
+		for i in 1..w {
+			let idx = (self.head + i) % w;
+			let h = self.high_buffer[idx];
+			if h > hi { hi = h; hi_i = i; }
+			let l = self.low_buffer[idx];
+			if l < lo { lo = l; lo_i = i; }
 		}
-		let offset_highest = self.length - highest_idx;
-		let offset_lowest = self.length - lowest_idx;
-		let inv_length = 1.0 / self.length as f64;
-		let up = (self.length as f64 - offset_highest as f64) * inv_length * 100.0;
-		let down = (self.length as f64 - offset_lowest as f64) * inv_length * 100.0;
-		up - down
+		let inv = 1.0 / self.length as f64;
+		(hi_i as f64 * inv * 100.0) - (lo_i as f64 * inv * 100.0)
 	}
 }
 

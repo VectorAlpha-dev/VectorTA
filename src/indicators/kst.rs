@@ -29,7 +29,7 @@ use crate::indicators::roc::{roc, RocData, RocError, RocInput, RocOutput, RocPar
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes};
-use aligned_vec::{AVec, CACHELINE_ALIGN};
+// aligned_vec imports removed - not used in KST
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -301,6 +301,8 @@ pub enum KstError {
 	Roc(#[from] RocError),
 	#[error("kst: {0}")]
 	Sma(#[from] SmaError),
+	#[error("kst: Input data slice is empty.")]
+	EmptyInputData,
 	#[error("kst: All values are NaN.")]
 	AllValuesNaN,
 	#[error("kst: Invalid period: period = {period}, data length = {data_len}")]
@@ -314,33 +316,26 @@ pub fn kst(input: &KstInput) -> Result<KstOutput, KstError> {
 	kst_with_kernel(input, Kernel::Auto)
 }
 
-pub fn kst_with_kernel(input: &KstInput, kernel: Kernel) -> Result<KstOutput, KstError> {
-	let data: &[f64] = input.as_ref();
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(KstError::AllValuesNaN)?;
+#[inline(always)]
+fn kst_prepare<'a>(
+	input: &'a KstInput,
+	kernel: Kernel,
+) -> Result<(
+	&'a [f64],
+	// periods
+	(usize,usize,usize,usize), // s1..s4
+	(usize,usize,usize,usize), // r1..r4
+	usize,                     // sig
+	usize,                     // first
+	usize,                     // warm_line = max(ri+si-1)
+	usize,                     // warm_sig  = warm_line + sig - 1
+	Kernel                     // chosen
+), KstError> {
+	let data = input.as_ref();
 	let len = data.len();
-	if len == 0 {
-		return Err(KstError::AllValuesNaN);
-	}
+	if len == 0 { return Err(KstError::EmptyInputData); }
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(KstError::AllValuesNaN)?;
 
-	let chosen = match kernel {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
-	unsafe {
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => kst_scalar(input, first, len),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => kst_avx2(input, first, len),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => kst_avx512(input, first, len),
-			_ => unreachable!(),
-		}
-	}
-}
-
-#[inline]
-pub unsafe fn kst_scalar(input: &KstInput, first: usize, len: usize) -> Result<KstOutput, KstError> {
-	let data: &[f64] = input.as_ref();
 	let s1 = input.get_sma_period1();
 	let s2 = input.get_sma_period2();
 	let s3 = input.get_sma_period3();
@@ -351,181 +346,190 @@ pub unsafe fn kst_scalar(input: &KstInput, first: usize, len: usize) -> Result<K
 	let r4 = input.get_roc_period4();
 	let sig = input.get_signal_period();
 
-	// Calculate warmup periods for each component
-	let warmup1 = r1 + s1 - 1;
-	let warmup2 = r2 + s2 - 1;
-	let warmup3 = r3 + s3 - 1;
-	let warmup4 = r4 + s4 - 1;
-	let warmup = warmup1.max(warmup2).max(warmup3).max(warmup4);
-	
-	// Allocate output buffers
-	let mut line = alloc_with_nan_prefix(len, warmup);
-	let mut signal = alloc_with_nan_prefix(len, warmup + sig - 1);
-	
-	// Circular buffers for ROC values (only need to store sma_period values)
-	let mut roc1_buf = AVec::<f64>::with_capacity(CACHELINE_ALIGN, s1);
-	let mut roc2_buf = AVec::<f64>::with_capacity(CACHELINE_ALIGN, s2);
-	let mut roc3_buf = AVec::<f64>::with_capacity(CACHELINE_ALIGN, s3);
-	let mut roc4_buf = AVec::<f64>::with_capacity(CACHELINE_ALIGN, s4);
-	
-	// Initialize buffers
-	roc1_buf.resize(s1, 0.0);
-	roc2_buf.resize(s2, 0.0);
-	roc3_buf.resize(s3, 0.0);
-	roc4_buf.resize(s4, 0.0);
-	
-	// Initialize ROC buffer indices
-	let mut idx1 = 0;
-	let mut idx2 = 0;
-	let mut idx3 = 0;
-	let mut idx4 = 0;
-	
-	// Running sums for SMAs
-	let mut sum1 = 0.0;
-	let mut sum2 = 0.0;
-	let mut sum3 = 0.0;
-	let mut sum4 = 0.0;
-	
-	// Inverse periods for multiplication instead of division
-	let inv1 = 1.0 / (s1 as f64);
-	let inv2 = 1.0 / (s2 as f64);
-	let inv3 = 1.0 / (s3 as f64);
-	let inv4 = 1.0 / (s4 as f64);
-	
-	// Initialize NaN prefix for initial invalid data
-	for i in 0..first {
-		line[i] = f64::NAN;
-		signal[i] = f64::NAN;
+	// explicit period checks
+	for &p in [s1,s2,s3,s4,r1,r2,r3,r4,sig].iter() {
+		if p == 0 || p > len { return Err(KstError::InvalidPeriod { period: p, data_len: len }); }
 	}
-	
-	// Process data
-	for i in first..len {
-		// Calculate ROC values inline
-		let mut roc1_val = 0.0;
-		let mut roc2_val = 0.0;
-		let mut roc3_val = 0.0;
-		let mut roc4_val = 0.0;
-		
-		if i >= r1 {
-			let prev1 = data[i - r1];
-			if prev1 != 0.0 && !prev1.is_nan() {
-				roc1_val = ((data[i] / prev1) - 1.0) * 100.0;
+
+	let warm1 = r1 + s1 - 1;
+	let warm2 = r2 + s2 - 1;
+	let warm3 = r3 + s3 - 1;
+	let warm4 = r4 + s4 - 1;
+	let warm_line = warm1.max(warm2).max(warm3).max(warm4);
+	if len - first < warm_line {
+		return Err(KstError::NotEnoughValidData { needed: warm_line, valid: len - first });
+	}
+	let warm_sig = warm_line + sig - 1;
+	if warm_sig > len { return Err(KstError::NotEnoughValidData { needed: warm_sig, valid: len }); }
+
+	let chosen = match kernel { Kernel::Auto => detect_best_kernel(), k => k };
+	Ok((data, (s1,s2,s3,s4), (r1,r2,r3,r4), sig, first, warm_line, warm_sig, chosen))
+}
+
+#[inline(always)]
+fn kst_compute_into(
+    data: &[f64],
+    s: (usize,usize,usize,usize),
+    r: (usize,usize,usize,usize),
+    sig: usize,
+    first: usize,
+    warm_line: usize,
+    warm_sig: usize,
+    out_line: &mut [f64],
+    out_sig: &mut [f64],
+) {
+    let len = data.len();
+    let (s1,s2,s3,s4) = s; let (r1,r2,r3,r4) = r;
+
+    // use stack buffers to avoid wasm memory.grow detaching JS views
+    const STACK: usize = 256;
+    let mut sb1 = [0.0f64; STACK]; let mut sb2 = [0.0f64; STACK];
+    let mut sb3 = [0.0f64; STACK]; let mut sb4 = [0.0f64; STACK];
+    let mut vb1; let mut vb2; let mut vb3; let mut vb4;
+
+    let (b1, b2, b3, b4): (&mut [f64], &mut [f64], &mut [f64], &mut [f64]) = {
+        vb1 = if s1 > STACK { vec![0.0; s1] } else { Vec::new() };
+        vb2 = if s2 > STACK { vec![0.0; s2] } else { Vec::new() };
+        vb3 = if s3 > STACK { vec![0.0; s3] } else { Vec::new() };
+        vb4 = if s4 > STACK { vec![0.0; s4] } else { Vec::new() };
+        let b1 = if s1 <= STACK { &mut sb1[..s1] } else { vb1.as_mut_slice() };
+        let b2 = if s2 <= STACK { &mut sb2[..s2] } else { vb2.as_mut_slice() };
+        let b3 = if s3 <= STACK { &mut sb3[..s3] } else { vb3.as_mut_slice() };
+        let b4 = if s4 <= STACK { &mut sb4[..s4] } else { vb4.as_mut_slice() };
+        (b1,b2,b3,b4)
+    };
+
+    let mut i1=0usize; let mut i2=0usize; let mut i3=0usize; let mut i4=0usize;
+    let mut sum1=0.0; let mut sum2=0.0; let mut sum3=0.0; let mut sum4=0.0;
+    let inv1 = 1.0/(s1 as f64); let inv2 = 1.0/(s2 as f64);
+    let inv3 = 1.0/(s3 as f64); let inv4 = 1.0/(s4 as f64);
+
+    let start_line = first + warm_line;
+
+    for i in first..len {
+        let mut v1=0.0; if i>=first+r1 && data[i-r1].is_finite() && data[i].is_finite() {
+            let p=data[i-r1]; if p!=0.0 { v1=((data[i]/p)-1.0)*100.0; }
+        }
+        let mut v2=0.0; if i>=first+r2 && data[i-r2].is_finite() && data[i].is_finite() {
+            let p=data[i-r2]; if p!=0.0 { v2=((data[i]/p)-1.0)*100.0; }
+        }
+        let mut v3=0.0; if i>=first+r3 && data[i-r3].is_finite() && data[i].is_finite() {
+            let p=data[i-r3]; if p!=0.0 { v3=((data[i]/p)-1.0)*100.0; }
+        }
+        let mut v4=0.0; if i>=first+r4 && data[i-r4].is_finite() && data[i].is_finite() {
+            let p=data[i-r4]; if p!=0.0 { v4=((data[i]/p)-1.0)*100.0; }
+        }
+
+        if i>=first+r1 { sum1 -= b1[i1]; b1[i1]=v1; sum1 += v1; i1 = (i1+1)%s1; }
+        if i>=first+r2 { sum2 -= b2[i2]; b2[i2]=v2; sum2 += v2; i2 = (i2+1)%s2; }
+        if i>=first+r3 { sum3 -= b3[i3]; b3[i3]=v3; sum3 += v3; i3 = (i3+1)%s3; }
+        if i>=first+r4 { sum4 -= b4[i4]; b4[i4]=v4; sum4 += v4; i4 = (i4+1)%s4; }
+
+        if i < start_line { continue; } // hard gate: no writes before all components are ready
+
+        let k = (sum1*inv1) + 2.0*(sum2*inv2) + 3.0*(sum3*inv3) + 4.0*(sum4*inv4);
+        out_line[i] = k;
+    }
+
+    // signal
+    let sig_start = start_line;
+    let sig_warm  = first + warm_sig;
+    let mut ssum = 0.0;
+    for i in sig_start..(sig_start+sig).min(len) {
+        let v = out_line[i];
+        if v.is_finite() { ssum += v; }
+    }
+    if sig_warm < len { out_sig[sig_warm] = ssum/(sig as f64); }
+    for i in (sig_start+sig)..len {
+        ssum += out_line[i] - out_line[i-sig];
+        out_sig[i] = ssum/(sig as f64);
+    }
+}
+
+pub fn kst_with_kernel(input: &KstInput, kernel: Kernel) -> Result<KstOutput, KstError> {
+	let (data, s, r, sig, first, warm_line, warm_sig, chosen) = kst_prepare(input, kernel)?;
+	let len = data.len();
+
+	// Adjust warmup to account for NaN prefix
+	let actual_warm_line = first + warm_line;
+	let actual_warm_sig = first + warm_sig;
+	let mut line   = alloc_with_nan_prefix(len, actual_warm_line);
+	let mut signal = alloc_with_nan_prefix(len, actual_warm_sig);
+
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => {
+				kst_compute_into(data, s, r, sig, first, warm_line, warm_sig, &mut line, &mut signal);
 			}
-		}
-		
-		if i >= r2 {
-			let prev2 = data[i - r2];
-			if prev2 != 0.0 && !prev2.is_nan() {
-				roc2_val = ((data[i] / prev2) - 1.0) * 100.0;
+			#[cfg(all(feature="nightly-avx", target_arch="x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch |
+			Kernel::Avx512 | Kernel::Avx512Batch => {
+				// keep stubs, call scalar body
+				kst_compute_into(data, s, r, sig, first, warm_line, warm_sig, &mut line, &mut signal);
 			}
-		}
-		
-		if i >= r3 {
-			let prev3 = data[i - r3];
-			if prev3 != 0.0 && !prev3.is_nan() {
-				roc3_val = ((data[i] / prev3) - 1.0) * 100.0;
-			}
-		}
-		
-		if i >= r4 {
-			let prev4 = data[i - r4];
-			if prev4 != 0.0 && !prev4.is_nan() {
-				roc4_val = ((data[i] / prev4) - 1.0) * 100.0;
-			}
-		}
-		
-		// Update SMA buffers and sums
-		if i >= r1 {
-			sum1 -= roc1_buf[idx1];
-			roc1_buf[idx1] = roc1_val;
-			sum1 += roc1_val;
-			idx1 = (idx1 + 1) % s1;
-		}
-		
-		if i >= r2 {
-			sum2 -= roc2_buf[idx2];
-			roc2_buf[idx2] = roc2_val;
-			sum2 += roc2_val;
-			idx2 = (idx2 + 1) % s2;
-		}
-		
-		if i >= r3 {
-			sum3 -= roc3_buf[idx3];
-			roc3_buf[idx3] = roc3_val;
-			sum3 += roc3_val;
-			idx3 = (idx3 + 1) % s3;
-		}
-		
-		if i >= r4 {
-			sum4 -= roc4_buf[idx4];
-			roc4_buf[idx4] = roc4_val;
-			sum4 += roc4_val;
-			idx4 = (idx4 + 1) % s4;
-		}
-		
-		// Calculate KST line value
-		if i >= warmup {
-			let sma1 = sum1 * inv1;
-			let sma2 = sum2 * inv2;
-			let sma3 = sum3 * inv3;
-			let sma4 = sum4 * inv4;
-			line[i] = sma1 + 2.0 * sma2 + 3.0 * sma3 + 4.0 * sma4;
+			_ => unreachable!(),
 		}
 	}
-	
-	// Calculate signal line using SMA on the KST line
-	let mut sig_sum = 0.0;
-	let sig_inv = 1.0 / (sig as f64);
-	
-	// Initialize signal sum
-	for i in warmup..(warmup + sig).min(len) {
-		if !line[i].is_nan() {
-			sig_sum += line[i];
-		}
-	}
-	
-	// First signal value
-	if warmup + sig - 1 < len {
-		signal[warmup + sig - 1] = sig_sum * sig_inv;
-	}
-	
-	// Rolling signal calculation
-	for i in (warmup + sig)..len {
-		sig_sum += line[i] - line[i - sig];
-		signal[i] = sig_sum * sig_inv;
-	}
-	
 	Ok(KstOutput { line, signal })
 }
 
+#[inline]
+pub fn kst_into_slice(
+    out_line: &mut [f64],
+    out_signal: &mut [f64],
+    input: &KstInput,
+    kernel: Kernel,
+) -> Result<(), KstError> {
+    let (data, s, r, sig, first, warm_line, warm_sig, _chosen) = kst_prepare(input, kernel)?;
+    if out_line.len()!=data.len() || out_signal.len()!=data.len() {
+        return Err(KstError::InvalidPeriod { period: out_line.len(), data_len: data.len() });
+    }
+
+    kst_compute_into(data, s, r, sig, first, warm_line, warm_sig, out_line, out_signal);
+
+    let prefix_line  = (first + warm_line).min(out_line.len());
+    let prefix_sig   = (first + warm_sig ).min(out_signal.len());
+    for v in &mut out_line[..prefix_line]  { *v = f64::NAN; }
+    for v in &mut out_signal[..prefix_sig] { *v = f64::NAN; }
+    Ok(())
+}
+
+// The old kst_scalar function has been removed as it's no longer needed
+// The functionality is now handled by kst_compute_into
+
+// SIMD stubs - these remain for API parity but use the scalar implementation
+// Future optimization: implement actual SIMD versions
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub unsafe fn kst_avx2(input: &KstInput, first: usize, len: usize) -> Result<KstOutput, KstError> {
-	// Stub: calls scalar for now, API parity
-	kst_scalar(input, first, len)
+pub(crate) unsafe fn kst_avx2(_input: &KstInput, _first: usize, _len: usize) -> Result<KstOutput, KstError> {
+	// Stub: would implement AVX2 optimization
+	unreachable!("AVX2 stub should not be called directly")
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub unsafe fn kst_avx512(input: &KstInput, first: usize, len: usize) -> Result<KstOutput, KstError> {
-	// Dispatch to long/short stub (all scalar for now)
+pub(crate) unsafe fn kst_avx512(_input: &KstInput, _first: usize, len: usize) -> Result<KstOutput, KstError> {
+	// Dispatch to long/short stub
 	if len <= 32 {
-		kst_avx512_short(input, first, len)
+		kst_avx512_short(_input, _first, len)
 	} else {
-		kst_avx512_long(input, first, len)
+		kst_avx512_long(_input, _first, len)
 	}
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub unsafe fn kst_avx512_short(input: &KstInput, first: usize, len: usize) -> Result<KstOutput, KstError> {
-	kst_scalar(input, first, len)
+pub(crate) unsafe fn kst_avx512_short(_input: &KstInput, _first: usize, _len: usize) -> Result<KstOutput, KstError> {
+	// Stub: would implement AVX512 short optimization
+	unreachable!("AVX512 short stub should not be called directly")
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub unsafe fn kst_avx512_long(input: &KstInput, first: usize, len: usize) -> Result<KstOutput, KstError> {
-	kst_scalar(input, first, len)
+pub(crate) unsafe fn kst_avx512_long(_input: &KstInput, _first: usize, _len: usize) -> Result<KstOutput, KstError> {
+	// Stub: would implement AVX512 long optimization
+	unreachable!("AVX512 long stub should not be called directly")
 }
 
 #[inline]
@@ -545,6 +549,7 @@ pub fn kst_batch_with_kernel(data: &[f64], sweep: &KstBatchRange, k: Kernel) -> 
 }
 
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "wasm", derive(serde::Serialize, serde::Deserialize))]
 pub struct KstBatchRange {
 	pub sma_period1: (usize, usize, usize),
 	pub sma_period2: (usize, usize, usize),
@@ -735,6 +740,7 @@ pub fn kst_batch_par_slice(data: &[f64], sweep: &KstBatchRange, kern: Kernel) ->
 	kst_batch_inner(data, sweep, kern, true)
 }
 
+#[inline(always)]
 fn kst_batch_inner(
 	data: &[f64],
 	sweep: &KstBatchRange,
@@ -742,139 +748,84 @@ fn kst_batch_inner(
 	parallel: bool,
 ) -> Result<KstBatchOutput, KstError> {
 	let combos = expand_grid(sweep);
-	if combos.is_empty() {
-		return Err(KstError::InvalidPeriod { period: 0, data_len: 0 });
-	}
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(KstError::AllValuesNaN)?;
-	let max_p = combos
-		.iter()
-		.map(|c| {
-			c.sma_period1
-				.unwrap()
-				.max(c.sma_period2.unwrap())
-				.max(c.sma_period3.unwrap())
-				.max(c.sma_period4.unwrap())
-				.max(c.roc_period1.unwrap())
-				.max(c.roc_period2.unwrap())
-				.max(c.roc_period3.unwrap())
-				.max(c.roc_period4.unwrap())
-				.max(c.signal_period.unwrap())
-		})
-		.max()
-		.unwrap();
-	if data.len() - first < max_p {
-		return Err(KstError::NotEnoughValidData {
-			needed: max_p,
-			valid: data.len() - first,
-		});
-	}
-	let rows = combos.len();
+	if combos.is_empty() { return Err(KstError::InvalidPeriod { period: 0, data_len: 0 }); }
 	let cols = data.len();
+	if cols==0 { return Err(KstError::EmptyInputData); }
 	
-	// Allocate uninitialized memory for lines and signals
-	let mut lines_mu = make_uninit_matrix(rows, cols);
-	let mut signals_mu = make_uninit_matrix(rows, cols);
-	
-	// Calculate warmup periods for each parameter combo
-	let warm_periods: Vec<usize> = combos
-		.iter()
-		.map(|c| {
-			// Warmup is max ROC period + its SMA period - 1
-			let max_roc = c.roc_period4.unwrap_or(30);
-			let max_sma = c.sma_period4.unwrap_or(15);
-			max_roc + max_sma - 1
-		})
-		.collect();
-	
-	// Initialize NaN prefixes
-	init_matrix_prefixes(&mut lines_mu, cols, &warm_periods);
-	init_matrix_prefixes(&mut signals_mu, cols, &warm_periods);
-	
-	// Convert to mutable slices
-	let mut lines_guard = core::mem::ManuallyDrop::new(lines_mu);
-	let lines: &mut [f64] = unsafe { 
-		core::slice::from_raw_parts_mut(lines_guard.as_mut_ptr() as *mut f64, lines_guard.len()) 
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(KstError::AllValuesNaN)?;
+
+	// per-row warms
+	let mut warm_line = Vec::with_capacity(combos.len());
+	let mut warm_sig  = Vec::with_capacity(combos.len());
+	for c in &combos {
+		let s1=c.sma_period1.unwrap(); let s2=c.sma_period2.unwrap();
+		let s3=c.sma_period3.unwrap(); let s4=c.sma_period4.unwrap();
+		let r1=c.roc_period1.unwrap(); let r2=c.roc_period2.unwrap();
+		let r3=c.roc_period3.unwrap(); let r4=c.roc_period4.unwrap();
+		let sig=c.signal_period.unwrap();
+		let wl = (r1+s1-1).max(r2+s2-1).max(r3+s3-1).max(r4+s4-1);
+		warm_line.push(wl);
+		warm_sig.push(wl + sig - 1);
+	}
+
+	// allocate two uninit matrices then prefix NaNs
+	let rows = combos.len();
+	let mut line_mu   = make_uninit_matrix(rows, cols);
+	let mut signal_mu = make_uninit_matrix(rows, cols);
+	let warm_line_abs: Vec<usize> = warm_line.iter().map(|&wl| first + wl).collect();
+	let warm_sig_abs:  Vec<usize> = warm_sig.iter().map(|&ws| first + ws).collect();
+	init_matrix_prefixes(&mut line_mu,   cols, &warm_line_abs);
+	init_matrix_prefixes(&mut signal_mu, cols, &warm_sig_abs);
+
+	// cast to &mut [f64] safely via ManuallyDrop
+	let mut line_guard   = core::mem::ManuallyDrop::new(line_mu);
+	let mut signal_guard = core::mem::ManuallyDrop::new(signal_mu);
+	let line_out:   &mut [f64] = unsafe { core::slice::from_raw_parts_mut(line_guard.as_mut_ptr()   as *mut f64, line_guard.len()) };
+	let signal_out: &mut [f64] = unsafe { core::slice::from_raw_parts_mut(signal_guard.as_mut_ptr() as *mut f64, signal_guard.len()) };
+
+	// resolve scalar for parity (stubs OK)
+	let actual = match kern {
+		Kernel::Auto => detect_best_batch_kernel(),
+		k => k,
 	};
-	
-	let mut signals_guard = core::mem::ManuallyDrop::new(signals_mu);
-	let signals: &mut [f64] = unsafe { 
-		core::slice::from_raw_parts_mut(signals_guard.as_mut_ptr() as *mut f64, signals_guard.len()) 
+	let simd = match actual {
+		Kernel::ScalarBatch => Kernel::Scalar,
+		Kernel::Avx2Batch   => Kernel::Scalar,  // Use scalar if AVX2 not available
+		Kernel::Avx512Batch => Kernel::Scalar,  // Use scalar if AVX512 not available
+		_ => Kernel::Scalar,
 	};
 
-	let do_row = |row: usize, line_row: &mut [f64], sig_row: &mut [f64]| unsafe {
+	// Closure to process each row. The unwrap() is safe because:
+	// 1. expand_grid() ensures all parameters in combos are Some(valid_value)
+	// 2. We've already validated data is not empty above
+	// So kst_prepare() cannot fail with InvalidPeriod or EmptyInputData
+	let do_row = |row: usize, ldst: &mut [f64], sdst: &mut [f64]| {
 		let prm = &combos[row];
-		let inp = KstInput::from_slice(data, *prm);
-		match kern {
-			Kernel::Scalar => {
-				let r = kst_row_scalar(&inp, first, cols)?;
-				line_row.copy_from_slice(&r.line);
-				sig_row.copy_from_slice(&r.signal);
-			}
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => {
-				let r = kst_row_avx2(&inp, first, cols)?;
-				line_row.copy_from_slice(&r.line);
-				sig_row.copy_from_slice(&r.signal);
-			}
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => {
-				let r = kst_row_avx512(&inp, first, cols)?;
-				line_row.copy_from_slice(&r.line);
-				sig_row.copy_from_slice(&r.signal);
-			}
-			_ => unreachable!(),
-		}
-		Ok::<(), KstError>(())
+		let input = KstInput::from_slice(data, *prm);
+		let (_d, s, r, sig, first, wl, ws, _chosen) = kst_prepare(&input, simd).unwrap();
+		kst_compute_into(data, s, r, sig, first, wl, ws, ldst, sdst);
 	};
+
 	if parallel {
-		#[cfg(not(target_arch = "wasm32"))]
-		{
-			lines
-				.par_chunks_mut(cols)
-				.zip(signals.par_chunks_mut(cols))
-				.enumerate()
-				.for_each(|(row, (lrow, srow))| {
-					let _ = do_row(row, lrow, srow);
-				});
-		}
-		#[cfg(target_arch = "wasm32")]
-		{
-			for (row, (lrow, srow)) in lines.chunks_mut(cols).zip(signals.chunks_mut(cols)).enumerate() {
-				let _ = do_row(row, lrow, srow);
-			}
-		}
+		#[cfg(not(target_arch="wasm32"))]
+		line_out.par_chunks_mut(cols)
+			.zip(signal_out.par_chunks_mut(cols))
+			.enumerate()
+			.for_each(|(row,(l,s))| do_row(row,l,s));
+		#[cfg(target_arch="wasm32")]
+		for (row,(l,s)) in line_out.chunks_mut(cols).zip(signal_out.chunks_mut(cols)).enumerate() { do_row(row,l,s); }
 	} else {
-		for (row, (lrow, srow)) in lines.chunks_mut(cols).zip(signals.chunks_mut(cols)).enumerate() {
-			let _ = do_row(row, lrow, srow);
-		}
+		for (row,(l,s)) in line_out.chunks_mut(cols).zip(signal_out.chunks_mut(cols)).enumerate() { do_row(row,l,s); }
 	}
-	
-	// Convert back to Vec<f64> for output
-	let lines_vec = unsafe {
-		let raw_ptr = lines_guard.as_mut_ptr() as *mut f64;
-		let len = lines_guard.len();
-		let cap = lines_guard.capacity();
-		core::mem::forget(lines_guard);
-		Vec::from_raw_parts(raw_ptr, len, cap)
-	};
-	
-	let signals_vec = unsafe {
-		let raw_ptr = signals_guard.as_mut_ptr() as *mut f64;
-		let len = signals_guard.len();
-		let cap = signals_guard.capacity();
-		core::mem::forget(signals_guard);
-		Vec::from_raw_parts(raw_ptr, len, cap)
-	};
-	
-	Ok(KstBatchOutput {
-		lines: lines_vec,
-		signals: signals_vec,
-		combos,
-		rows,
-		cols,
-	})
+
+	// reconstitute Vecs without copy
+	let lines = unsafe { Vec::from_raw_parts(line_guard.as_mut_ptr() as *mut f64, line_guard.len(), line_guard.capacity()) };
+	let signals = unsafe { Vec::from_raw_parts(signal_guard.as_mut_ptr() as *mut f64, signal_guard.len(), signal_guard.capacity()) };
+
+	Ok(KstBatchOutput { lines, signals, combos, rows, cols })
 }
 
+#[inline(always)]
 fn kst_batch_inner_into(
 	data: &[f64],
 	sweep: &KstBatchRange,
@@ -882,180 +833,185 @@ fn kst_batch_inner_into(
 	parallel: bool,
 	lines_out: &mut [f64],
 	signals_out: &mut [f64],
-) -> Result<(), KstError> {
+) -> Result<Vec<KstParams>, KstError> {
 	let combos = expand_grid(sweep);
-	if combos.is_empty() {
-		return Err(KstError::InvalidPeriod { period: 0, data_len: 0 });
+	if combos.is_empty() { return Err(KstError::InvalidPeriod { period: 0, data_len: 0 }); }
+	let cols = data.len(); let rows = combos.len();
+	if lines_out.len()!=rows*cols || signals_out.len()!=rows*cols {
+		return Err(KstError::InvalidPeriod { period: lines_out.len(), data_len: rows*cols });
 	}
+	
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(KstError::AllValuesNaN)?;
-	let max_p = combos
-		.iter()
-		.map(|c| {
-			c.sma_period1
-				.unwrap()
-				.max(c.sma_period2.unwrap())
-				.max(c.sma_period3.unwrap())
-				.max(c.sma_period4.unwrap())
-				.max(c.roc_period1.unwrap())
-				.max(c.roc_period2.unwrap())
-				.max(c.roc_period3.unwrap())
-				.max(c.roc_period4.unwrap())
-				.max(c.signal_period.unwrap())
-		})
-		.max()
-		.unwrap();
-	if data.len() - first < max_p {
-		return Err(KstError::NotEnoughValidData {
-			needed: max_p,
-			valid: data.len() - first,
-		});
-	}
-	let rows = combos.len();
-	let cols = data.len();
-	
-	// Calculate warmup periods for each parameter combo
-	let warm_periods: Vec<usize> = combos
-		.iter()
-		.map(|c| {
-			// Warmup is max ROC period + its SMA period - 1
-			let max_roc = c.roc_period4.unwrap_or(30);
-			let max_sma = c.sma_period4.unwrap_or(15);
-			max_roc + max_sma - 1
-		})
-		.collect();
 
-	// Initialize NaN prefixes directly in the output buffers
-	for (row, warmup) in warm_periods.iter().enumerate() {
-		let start_idx = row * cols;
-		let end_idx = start_idx + warmup;
-		for i in start_idx..end_idx {
-			lines_out[i] = f64::NAN;
-			signals_out[i] = f64::NAN;
-		}
+	// warmups per row
+	let mut warm_line = vec![0usize; rows];
+	let mut warm_sig  = vec![0usize; rows];
+	for (row,c) in combos.iter().enumerate() {
+		let wl = (c.roc_period1.unwrap()+c.sma_period1.unwrap()-1)
+		       .max(c.roc_period2.unwrap()+c.sma_period2.unwrap()-1)
+		       .max(c.roc_period3.unwrap()+c.sma_period3.unwrap()-1)
+		       .max(c.roc_period4.unwrap()+c.sma_period4.unwrap()-1);
+		warm_line[row]=wl;
+		warm_sig[row]=wl + c.signal_period.unwrap() - 1;
+		// prefix NaNs directly with first offset
+		let abs_wl = first + warm_line[row];
+		let abs_ws = first + warm_sig[row];
+		for v in &mut lines_out[row*cols .. row*cols + abs_wl.min(cols)] { *v = f64::NAN; }
+		for v in &mut signals_out[row*cols .. row*cols + abs_ws.min(cols)] { *v = f64::NAN; }
 	}
 
-	let do_row = |row: usize, line_row: &mut [f64], sig_row: &mut [f64]| unsafe {
-		let prm = &combos[row];
-		let inp = KstInput::from_slice(data, *prm);
-		match kern {
-			Kernel::Scalar => {
-				let r = kst_row_scalar(&inp, first, cols)?;
-				line_row.copy_from_slice(&r.line);
-				sig_row.copy_from_slice(&r.signal);
-			}
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => {
-				let r = kst_row_avx2(&inp, first, cols)?;
-				line_row.copy_from_slice(&r.line);
-				sig_row.copy_from_slice(&r.signal);
-			}
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => {
-				let r = kst_row_avx512(&inp, first, cols)?;
-				line_row.copy_from_slice(&r.line);
-				sig_row.copy_from_slice(&r.signal);
-			}
-			_ => unreachable!(),
-		}
-		Ok::<(), KstError>(())
+	let actual = match kern { Kernel::Auto => detect_best_batch_kernel(), k => k };
+	let simd = match actual {
+		Kernel::ScalarBatch => Kernel::Scalar,
+		Kernel::Avx2Batch => Kernel::Scalar,  // Use scalar if AVX2 not available
+		Kernel::Avx512Batch => Kernel::Scalar,  // Use scalar if AVX512 not available
+		_ => Kernel::Scalar,
 	};
+
+	// Closure to process each row. The unwrap() is safe because:
+	// 1. expand_grid() ensures all parameters in combos are Some(valid_value)
+	// 2. We've already validated data is not empty above
+	// So kst_prepare() cannot fail with InvalidPeriod or EmptyInputData
+	let do_row = |row: usize, ldst: &mut [f64], sdst: &mut [f64]| {
+		let prm = &combos[row];
+		let input = KstInput::from_slice(data, *prm);
+		let (_d, s, r, sig, first, wl, ws, _chosen) = kst_prepare(&input, simd).unwrap();
+		kst_compute_into(data, s, r, sig, first, wl, ws, ldst, sdst);
+	};
+
 	if parallel {
-		#[cfg(not(target_arch = "wasm32"))]
-		{
-			lines_out
-				.par_chunks_mut(cols)
-				.zip(signals_out.par_chunks_mut(cols))
-				.enumerate()
-				.for_each(|(row, (lrow, srow))| {
-					let _ = do_row(row, lrow, srow);
-				});
-		}
-		#[cfg(target_arch = "wasm32")]
-		{
-			for (row, (lrow, srow)) in lines_out.chunks_mut(cols).zip(signals_out.chunks_mut(cols)).enumerate() {
-				let _ = do_row(row, lrow, srow);
-			}
-		}
+		#[cfg(not(target_arch="wasm32"))]
+		lines_out.par_chunks_mut(cols).zip(signals_out.par_chunks_mut(cols)).enumerate().for_each(|(r,(l,s))| do_row(r,l,s));
+		#[cfg(target_arch="wasm32")]
+		for (r,(l,s)) in lines_out.chunks_mut(cols).zip(signals_out.chunks_mut(cols)).enumerate() { do_row(r,l,s); }
 	} else {
-		for (row, (lrow, srow)) in lines_out.chunks_mut(cols).zip(signals_out.chunks_mut(cols)).enumerate() {
-			let _ = do_row(row, lrow, srow);
-		}
+		for (r,(l,s)) in lines_out.chunks_mut(cols).zip(signals_out.chunks_mut(cols)).enumerate() { do_row(r,l,s); }
 	}
-	
-	Ok(())
+
+	Ok(combos)
 }
 
-#[inline(always)]
-pub unsafe fn kst_row_scalar(input: &KstInput, first: usize, len: usize) -> Result<KstOutput, KstError> {
-	kst_scalar(input, first, len)
-}
+// Row helper functions removed - no longer needed with direct compute_into approach
 
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
-pub unsafe fn kst_row_avx2(input: &KstInput, first: usize, len: usize) -> Result<KstOutput, KstError> {
-	kst_avx2(input, first, len)
-}
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
-pub unsafe fn kst_row_avx512(input: &KstInput, first: usize, len: usize) -> Result<KstOutput, KstError> {
-	kst_avx512(input, first, len)
-}
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
-pub unsafe fn kst_row_avx512_short(input: &KstInput, first: usize, len: usize) -> Result<KstOutput, KstError> {
-	kst_avx512_short(input, first, len)
-}
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
-pub unsafe fn kst_row_avx512_long(input: &KstInput, first: usize, len: usize) -> Result<KstOutput, KstError> {
-	kst_avx512_long(input, first, len)
-}
-
-// Streaming KST
 #[derive(Debug, Clone)]
 pub struct KstStream {
-	period_params: KstParams,
-	buffer: Vec<f64>,
-	idx: usize,
-	filled: bool,
-	// (full streaming ROC/SMA state can be added here if needed)
+	s:(usize,usize,usize,usize),
+	r:(usize,usize,usize,usize),
+	sig:usize,
+	// ring buffers for ROC SMAs
+	b1:Vec<f64>, b2:Vec<f64>, b3:Vec<f64>, b4:Vec<f64>,
+	i1:usize, i2:usize, i3:usize, i4:usize,
+	sum1:f64, sum2:f64, sum3:f64, sum4:f64,
+	inv1:f64, inv2:f64, inv3:f64, inv4:f64,
+	// signal ring
+	sig_buf:Vec<f64>, sig_idx:usize, sig_sum:f64,
+	// price history for ROC calculations
+	price_history:Vec<f64>,
+	price_idx:usize,
+	// warm tracking
+	t:usize,    // ticks seen
+	warm_line:usize,
+	warm_sig:usize,
+	last_line:f64,
 }
 impl KstStream {
 	pub fn try_new(params: KstParams) -> Result<Self, KstError> {
-		let max_p = params
-			.sma_period1
-			.unwrap_or(10)
-			.max(params.sma_period2.unwrap_or(10))
-			.max(params.sma_period3.unwrap_or(10))
-			.max(params.sma_period4.unwrap_or(15))
-			.max(params.roc_period1.unwrap_or(10))
-			.max(params.roc_period2.unwrap_or(15))
-			.max(params.roc_period3.unwrap_or(20))
-			.max(params.roc_period4.unwrap_or(30))
-			.max(params.signal_period.unwrap_or(9));
-		Ok(Self {
-			period_params: params,
-			buffer: (0..max_p).map(|_| f64::NAN).collect(),
-			idx: 0,
-			filled: false,
+		let s1=params.sma_period1.unwrap_or(10);
+		let s2=params.sma_period2.unwrap_or(10);
+		let s3=params.sma_period3.unwrap_or(10);
+		let s4=params.sma_period4.unwrap_or(15);
+		let r1=params.roc_period1.unwrap_or(10);
+		let r2=params.roc_period2.unwrap_or(15);
+		let r3=params.roc_period3.unwrap_or(20);
+		let r4=params.roc_period4.unwrap_or(30);
+		let sig=params.signal_period.unwrap_or(9);
+		for &p in [s1,s2,s3,s4,r1,r2,r3,r4,sig].iter() {
+			if p==0 { return Err(KstError::InvalidPeriod { period: p, data_len: 0 }); }
+		}
+		let warm_line = (r1+s1-1).max(r2+s2-1).max(r3+s3-1).max(r4+s4-1);
+		let warm_sig  = warm_line + sig - 1;
+		let max_roc = r1.max(r2).max(r3).max(r4);
+		Ok(Self{
+			s:(s1,s2,s3,s4), r:(r1,r2,r3,r4), sig,
+			b1:vec![0.0;s1], b2:vec![0.0;s2], b3:vec![0.0;s3], b4:vec![0.0;s4],
+			i1:0,i2:0,i3:0,i4:0, sum1:0.0,sum2:0.0,sum3:0.0,sum4:0.0,
+			inv1:1.0/(s1 as f64), inv2:1.0/(s2 as f64), inv3:1.0/(s3 as f64), inv4:1.0/(s4 as f64),
+			sig_buf:vec![f64::NAN; sig], sig_idx:0, sig_sum:0.0,
+			price_history:vec![f64::NAN; max_roc + 1],
+			price_idx:0,
+			t:0, warm_line, warm_sig, last_line:f64::NAN
 		})
 	}
-	pub fn update(&mut self, value: f64) -> Option<(f64, f64)> {
-		self.buffer[self.idx] = value;
-		self.idx = (self.idx + 1) % self.buffer.len();
-		if !self.filled && self.idx == 0 {
-			self.filled = true;
+	pub fn update(&mut self, price: f64) -> Option<(f64, f64)> {
+		let (s1,s2,s3,s4)=self.s; let (r1,r2,r3,r4)=self.r;
+		
+		// Store price in circular buffer
+		self.price_history[self.price_idx] = price;
+		self.price_idx = (self.price_idx + 1) % self.price_history.len();
+		
+		// compute inline ROCs only when lookback available
+		let mut v1=0.0; 
+		if self.t>=r1 { 
+			let idx = (self.price_idx + self.price_history.len() - r1 - 1) % self.price_history.len();
+			let p=self.price_history[idx]; 
+			if p!=0.0 && p.is_finite(){ v1=((price/p)-1.0)*100.0; } 
 		}
-		if !self.filled {
-			return None;
+		let mut v2=0.0; 
+		if self.t>=r2 { 
+			let idx = (self.price_idx + self.price_history.len() - r2 - 1) % self.price_history.len();
+			let p=self.price_history[idx]; 
+			if p!=0.0 && p.is_finite(){ v2=((price/p)-1.0)*100.0; } 
 		}
-		// Not efficient, but matches batch logic: process the buffer as a slice.
-		let inp = KstInput::from_slice(&self.buffer, self.period_params);
-		if let Ok(KstOutput { line, signal }) = kst(&inp) {
-			let last_idx = line.len() - 1;
-			Some((line[last_idx], signal[last_idx]))
+		let mut v3=0.0; 
+		if self.t>=r3 { 
+			let idx = (self.price_idx + self.price_history.len() - r3 - 1) % self.price_history.len();
+			let p=self.price_history[idx]; 
+			if p!=0.0 && p.is_finite(){ v3=((price/p)-1.0)*100.0; } 
+		}
+		let mut v4=0.0; 
+		if self.t>=r4 { 
+			let idx = (self.price_idx + self.price_history.len() - r4 - 1) % self.price_history.len();
+			let p=self.price_history[idx]; 
+			if p!=0.0 && p.is_finite(){ v4=((price/p)-1.0)*100.0; } 
+		}
+		
+		if self.t>=r1 { self.sum1 -= self.b1[self.i1]; self.b1[self.i1]=v1; self.sum1 += v1; self.i1 = (self.i1+1)%s1; }
+		if self.t>=r2 { self.sum2 -= self.b2[self.i2]; self.b2[self.i2]=v2; self.sum2 += v2; self.i2 = (self.i2+1)%s2; }
+		if self.t>=r3 { self.sum3 -= self.b3[self.i3]; self.b3[self.i3]=v3; self.sum3 += v3; self.i3 = (self.i3+1)%s3; }
+		if self.t>=r4 { self.sum4 -= self.b4[self.i4]; self.b4[self.i4]=v4; self.sum4 += v4; self.i4 = (self.i4+1)%s4; }
+		
+		self.t+=1;
+		
+		if self.t<=self.warm_line { return None; }
+		
+		let line = (self.sum1*self.inv1) + 2.0*(self.sum2*self.inv2) + 3.0*(self.sum3*self.inv3) + 4.0*(self.sum4*self.inv4);
+		self.last_line = line;
+		
+		// Update signal SMA
+		if self.t == self.warm_line + 1 {
+			// First signal calculation
+			self.sig_buf[0] = line;
+			self.sig_sum = line;
+			self.sig_idx = 1;
+			return Some((line, f64::NAN));
+		} else if self.t <= self.warm_sig {
+			// Building up signal buffer
+			self.sig_buf[self.sig_idx] = line;
+			self.sig_sum += line;
+			self.sig_idx = (self.sig_idx + 1) % self.sig;
+			if self.t == self.warm_sig {
+				let signal = self.sig_sum / (self.sig as f64);
+				return Some((line, signal));
+			}
+			return Some((line, f64::NAN));
 		} else {
-			None
+			// Normal operation
+			self.sig_sum -= self.sig_buf[self.sig_idx];
+			self.sig_buf[self.sig_idx] = line;
+			self.sig_sum += line;
+			self.sig_idx = (self.sig_idx + 1) % self.sig;
+			let signal = self.sig_sum / (self.sig as f64);
+			return Some((line, signal));
 		}
 	}
 }
@@ -1992,6 +1948,30 @@ mod tests {
 
 	gen_batch_tests!(check_batch_default_row);
 	gen_batch_tests!(check_batch_no_poison);
+
+	#[test]
+	fn check_empty_input_error() {
+		// Test that empty input returns EmptyInputData, not AllValuesNaN
+		let empty_data: Vec<f64> = vec![];
+		let params = KstParams::default();
+		let input = KstInput::from_slice(&empty_data, params);
+		
+		match kst(&input) {
+			Err(KstError::EmptyInputData) => {},  // Expected
+			Err(e) => panic!("Expected EmptyInputData, got: {:?}", e),
+			Ok(_) => panic!("Empty input should have failed"),
+		}
+		
+		// Test that all NaN still returns AllValuesNaN
+		let nan_data = vec![f64::NAN; 10];
+		let input2 = KstInput::from_slice(&nan_data, params);
+		
+		match kst(&input2) {
+			Err(KstError::AllValuesNaN) => {},  // Expected
+			Err(e) => panic!("Expected AllValuesNaN, got: {:?}", e),
+			Ok(_) => panic!("All NaN should have failed"),
+		}
+	}
 }
 
 // =============================================================================
@@ -2010,48 +1990,43 @@ use pyo3::types::{PyDict, PyList};
 use crate::utilities::kernel_validation::validate_kernel;
 
 #[cfg(feature = "python")]
-#[pyfunction(name = "kst")]
-#[pyo3(signature = (data, sma_period1=None, sma_period2=None, sma_period3=None, sma_period4=None, roc_period1=None, roc_period2=None, roc_period3=None, roc_period4=None, signal_period=None, kernel=None))]
+#[pyfunction(name="kst")]
+#[pyo3(signature=(data,
+    sma_period1=None, sma_period2=None, sma_period3=None, sma_period4=None,
+    roc_period1=None, roc_period2=None, roc_period3=None, roc_period4=None,
+    signal_period=None, kernel=None))]
 pub fn kst_py<'py>(
     py: Python<'py>,
     data: numpy::PyReadonlyArray1<'py, f64>,
-    sma_period1: Option<usize>,
-    sma_period2: Option<usize>,
-    sma_period3: Option<usize>,
+    sma_period1: Option<usize>, 
+    sma_period2: Option<usize>, 
+    sma_period3: Option<usize>, 
     sma_period4: Option<usize>,
-    roc_period1: Option<usize>,
-    roc_period2: Option<usize>,
-    roc_period3: Option<usize>,
+    roc_period1: Option<usize>, 
+    roc_period2: Option<usize>, 
+    roc_period3: Option<usize>, 
     roc_period4: Option<usize>,
     signal_period: Option<usize>,
     kernel: Option<&str>,
-) -> PyResult<Bound<'py, PyDict>> {
-    let slice_in = data.as_slice()?;
-    let kern = validate_kernel(kernel, false)?;
-    
-    let params = KstParams {
-        sma_period1,
-        sma_period2,
-        sma_period3,
-        sma_period4,
-        roc_period1,
-        roc_period2,
-        roc_period3,
-        roc_period4,
-        signal_period,
+) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
+    let slice = data.as_slice()?;
+    let prm = KstParams {
+        sma_period1: Some(sma_period1.unwrap_or(10)),
+        sma_period2: Some(sma_period2.unwrap_or(10)),
+        sma_period3: Some(sma_period3.unwrap_or(10)),
+        sma_period4: Some(sma_period4.unwrap_or(15)),
+        roc_period1: Some(roc_period1.unwrap_or(10)),
+        roc_period2: Some(roc_period2.unwrap_or(15)),
+        roc_period3: Some(roc_period3.unwrap_or(20)),
+        roc_period4: Some(roc_period4.unwrap_or(30)),
+        signal_period: Some(signal_period.unwrap_or(9)),
     };
-    
-    let kst_in = KstInput::from_slice(slice_in, params);
-
-    let result = py
-        .allow_threads(|| kst_with_kernel(&kst_in, kern))
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-
-    let dict = PyDict::new(py);
-    dict.set_item("line", result.line.into_pyarray(py))?;
-    dict.set_item("signal", result.signal.into_pyarray(py))?;
-    
-    Ok(dict)
+    let input = KstInput::from_slice(slice, prm);
+    let kern = validate_kernel(kernel, false)?;
+    let (line, signal) = py.allow_threads(|| {
+        kst_with_kernel(&input, kern).map(|o| (o.line, o.signal))
+    }).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok((line.into_pyarray(py), signal.into_pyarray(py)))
 }
 
 #[cfg(feature = "python")]
@@ -2096,282 +2071,161 @@ impl KstStreamPy {
     }
 }
 
-#[cfg(feature = "python")]
-#[pyfunction(name = "kst_batch")]
-#[pyo3(signature = (data, sma_period1_range=None, sma_period2_range=None, sma_period3_range=None, sma_period4_range=None, roc_period1_range=None, roc_period2_range=None, roc_period3_range=None, roc_period4_range=None, signal_period_range=None, kernel=None))]
+#[cfg(feature="python")]
+#[pyfunction(name="kst_batch")]
+#[pyo3(signature=(data,
+    sma1_range, sma2_range, sma3_range, sma4_range,
+    roc1_range, roc2_range, roc3_range, roc4_range,
+    sig_range, kernel=None))]
 pub fn kst_batch_py<'py>(
     py: Python<'py>,
     data: numpy::PyReadonlyArray1<'py, f64>,
-    sma_period1_range: Option<(usize, usize, usize)>,
-    sma_period2_range: Option<(usize, usize, usize)>,
-    sma_period3_range: Option<(usize, usize, usize)>,
-    sma_period4_range: Option<(usize, usize, usize)>,
-    roc_period1_range: Option<(usize, usize, usize)>,
-    roc_period2_range: Option<(usize, usize, usize)>,
-    roc_period3_range: Option<(usize, usize, usize)>,
-    roc_period4_range: Option<(usize, usize, usize)>,
-    signal_period_range: Option<(usize, usize, usize)>,
+    sma1_range: (usize,usize,usize),
+    sma2_range: (usize,usize,usize),
+    sma3_range: (usize,usize,usize),
+    sma4_range: (usize,usize,usize),
+    roc1_range: (usize,usize,usize),
+    roc2_range: (usize,usize,usize),
+    roc3_range: (usize,usize,usize),
+    roc4_range: (usize,usize,usize),
+    sig_range:  (usize,usize,usize),
     kernel: Option<&str>,
-) -> PyResult<Bound<'py, PyDict>> {
-    let slice_in = data.as_slice()?;
-    let kern = validate_kernel(kernel, true)?;
-    
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    let slice = data.as_slice()?;
     let sweep = KstBatchRange {
-        sma_period1: sma_period1_range.unwrap_or((10, 10, 0)),
-        sma_period2: sma_period2_range.unwrap_or((10, 10, 0)),
-        sma_period3: sma_period3_range.unwrap_or((10, 10, 0)),
-        sma_period4: sma_period4_range.unwrap_or((15, 15, 0)),
-        roc_period1: roc_period1_range.unwrap_or((10, 10, 0)),
-        roc_period2: roc_period2_range.unwrap_or((15, 15, 0)),
-        roc_period3: roc_period3_range.unwrap_or((20, 20, 0)),
-        roc_period4: roc_period4_range.unwrap_or((30, 30, 0)),
-        signal_period: signal_period_range.unwrap_or((9, 9, 0)),
+        sma_period1: sma1_range, sma_period2: sma2_range,
+        sma_period3: sma3_range, sma_period4: sma4_range,
+        roc_period1: roc1_range, roc_period2: roc2_range,
+        roc_period3: roc3_range, roc_period4: roc4_range,
+        signal_period: sig_range,
+    };
+    let kern = validate_kernel(kernel, true)?;
+    let combos;
+    let rows; let cols = slice.len();
+    let (line_arr, sig_arr) = {
+        let tmp_combos = expand_grid(&sweep);
+        rows = tmp_combos.len();
+        combos = tmp_combos; // keep for metadata
+        let out_line = unsafe { PyArray1::<f64>::new(py, [rows*cols], false) };
+        let out_sig  = unsafe { PyArray1::<f64>::new(py, [rows*cols], false) };
+        let lo = unsafe { out_line.as_slice_mut()? };
+        let so = unsafe { out_sig.as_slice_mut()? };
+        py.allow_threads(|| {
+            let k = match kern {
+                Kernel::Auto => detect_best_batch_kernel(),
+                x => x,
+            };
+            let simd = match k {
+                Kernel::ScalarBatch => Kernel::Scalar,
+                Kernel::Avx2Batch => Kernel::Scalar,  // Use scalar if AVX2 not available
+                Kernel::Avx512Batch => Kernel::Scalar,  // Use scalar if AVX512 not available
+                _ => Kernel::Scalar,
+            };
+            kst_batch_inner_into(slice, &sweep, simd, true, lo, so)
+        }).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        (out_line, out_sig)
     };
 
-    let result = py
-        .allow_threads(|| kst_batch_with_kernel(slice_in, &sweep, kern))
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-
-    let dict = PyDict::new(py);
-    
-    // Reshape the output arrays
-    let lines_array = result.lines.into_pyarray(py);
-    let signals_array = result.signals.into_pyarray(py);
-    
-    dict.set_item("lines", lines_array.reshape([result.rows, result.cols])?)?;
-    dict.set_item("signals", signals_array.reshape([result.rows, result.cols])?)?;
-    
-    // Create combo arrays for each parameter
-    let sma_period1_arr: Vec<usize> = result.combos.iter().map(|c| c.sma_period1.unwrap_or(10)).collect();
-    let sma_period2_arr: Vec<usize> = result.combos.iter().map(|c| c.sma_period2.unwrap_or(10)).collect();
-    let sma_period3_arr: Vec<usize> = result.combos.iter().map(|c| c.sma_period3.unwrap_or(10)).collect();
-    let sma_period4_arr: Vec<usize> = result.combos.iter().map(|c| c.sma_period4.unwrap_or(15)).collect();
-    let roc_period1_arr: Vec<usize> = result.combos.iter().map(|c| c.roc_period1.unwrap_or(10)).collect();
-    let roc_period2_arr: Vec<usize> = result.combos.iter().map(|c| c.roc_period2.unwrap_or(15)).collect();
-    let roc_period3_arr: Vec<usize> = result.combos.iter().map(|c| c.roc_period3.unwrap_or(20)).collect();
-    let roc_period4_arr: Vec<usize> = result.combos.iter().map(|c| c.roc_period4.unwrap_or(30)).collect();
-    let signal_period_arr: Vec<usize> = result.combos.iter().map(|c| c.signal_period.unwrap_or(9)).collect();
-    
-    dict.set_item("sma_period1", sma_period1_arr.into_pyarray(py))?;
-    dict.set_item("sma_period2", sma_period2_arr.into_pyarray(py))?;
-    dict.set_item("sma_period3", sma_period3_arr.into_pyarray(py))?;
-    dict.set_item("sma_period4", sma_period4_arr.into_pyarray(py))?;
-    dict.set_item("roc_period1", roc_period1_arr.into_pyarray(py))?;
-    dict.set_item("roc_period2", roc_period2_arr.into_pyarray(py))?;
-    dict.set_item("roc_period3", roc_period3_arr.into_pyarray(py))?;
-    dict.set_item("roc_period4", roc_period4_arr.into_pyarray(py))?;
-    dict.set_item("signal_period", signal_period_arr.into_pyarray(py))?;
-    
-    Ok(dict)
+    let d = pyo3::types::PyDict::new(py);
+    d.set_item("line",   line_arr.reshape((rows, cols))?)?;
+    d.set_item("signal", sig_arr.reshape((rows, cols))?)?;
+    // metadata vectors per combo
+    d.set_item("sma1", combos.iter().map(|c| c.sma_period1.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+    d.set_item("sma2", combos.iter().map(|c| c.sma_period2.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+    d.set_item("sma3", combos.iter().map(|c| c.sma_period3.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+    d.set_item("sma4", combos.iter().map(|c| c.sma_period4.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+    d.set_item("roc1", combos.iter().map(|c| c.roc_period1.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+    d.set_item("roc2", combos.iter().map(|c| c.roc_period2.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+    d.set_item("roc3", combos.iter().map(|c| c.roc_period3.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+    d.set_item("roc4", combos.iter().map(|c| c.roc_period4.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+    d.set_item("sig",  combos.iter().map(|c| c.signal_period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+    Ok(d)
 }
 
 // =========================== WASM Bindings ===========================
 
-/// Helper function to perform the calculation without double allocation
-#[cfg(feature = "wasm")]
-fn kst_into_slice(
-    data: &[f64],
-    sma_period1: usize,
-    sma_period2: usize,
-    sma_period3: usize,
-    sma_period4: usize,
-    roc_period1: usize,
-    roc_period2: usize,
-    roc_period3: usize,
-    roc_period4: usize,
-    signal_period: usize,
-    line_out: &mut [f64],
-    signal_out: &mut [f64],
-) -> Result<(), KstError> {
-    // Validate input
-    if data.is_empty() {
-        return Err(KstError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
-    if line_out.len() != data.len() || signal_out.len() != data.len() {
-        return Err(KstError::InvalidPeriod {
-            period: line_out.len(),
-            data_len: data.len(),
-        });
-    }
-    
-    // Find first valid value
-    let first = match data.iter().position(|&x| !x.is_nan()) {
-        Some(idx) => idx,
-        None => return Err(KstError::AllValuesNaN),
-    };
-    
-    // Calculate warmup periods
-    let warmup1 = roc_period1 + sma_period1 - 1;
-    let warmup2 = roc_period2 + sma_period2 - 1;
-    let warmup3 = roc_period3 + sma_period3 - 1;
-    let warmup4 = roc_period4 + sma_period4 - 1;
-    let line_warmup = warmup1.max(warmup2).max(warmup3).max(warmup4);
-    let signal_warmup = line_warmup + signal_period - 1;
-    
-    // Validate we have enough data
-    let max_period = roc_period1.max(roc_period2).max(roc_period3).max(roc_period4);
-    if data.len() - first < max_period {
-        return Err(KstError::NotEnoughValidData {
-            needed: max_period,
-            valid: data.len() - first,
-        });
-    }
-    
-    // Fill warmup periods with NaN
-    for i in 0..line_warmup {
-        line_out[i] = f64::NAN;
-    }
-    for i in 0..signal_warmup {
-        signal_out[i] = f64::NAN;
-    }
-    
-    // For now, still use the original approach but it already has NaN values
-    // TODO: Implement direct computation into slices to avoid double allocation
-    let params = KstParams {
-        sma_period1: Some(sma_period1),
-        sma_period2: Some(sma_period2),
-        sma_period3: Some(sma_period3),
-        sma_period4: Some(sma_period4),
-        roc_period1: Some(roc_period1),
-        roc_period2: Some(roc_period2),
-        roc_period3: Some(roc_period3),
-        roc_period4: Some(roc_period4),
-        signal_period: Some(signal_period),
-    };
-    let input = KstInput::from_slice(data, params);
-    
-    match kst(&input) {
-        Ok(output) => {
-            // Copy only the non-NaN values to preserve our explicit NaN filling
-            line_out[line_warmup..].copy_from_slice(&output.line[line_warmup..]);
-            signal_out[signal_warmup..].copy_from_slice(&output.signal[signal_warmup..]);
-            Ok(())
-        }
-        Err(e) => Err(e),
-    }
+// WASM kst_into_slice has been removed - kst_into_slice is now in the main module
+
+#[cfg(feature="wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct KstJsResult {
+    pub values: Vec<f64>, // [line..., signal...]
+    pub rows: usize,      // 2
+    pub cols: usize,      // len
 }
 
-/// WASM interface for KST calculation (safe API)
-/// Returns an object with line and signal arrays
-#[cfg(feature = "wasm")]
-#[wasm_bindgen]
-pub fn kst_js(
-    data: &[f64],
-    sma_period1: usize,
-    sma_period2: usize,
-    sma_period3: usize,
-    sma_period4: usize,
-    roc_period1: usize,
-    roc_period2: usize,
-    roc_period3: usize,
-    roc_period4: usize,
-    signal_period: usize,
+#[cfg(feature="wasm")]
+#[wasm_bindgen(js_name = "kst")]
+pub fn kst_js(data: &[f64],
+    sma1: usize, sma2: usize, sma3: usize, sma4: usize,
+    roc1: usize, roc2: usize, roc3: usize, roc4: usize,
+    sig: usize
 ) -> Result<JsValue, JsValue> {
-    let params = KstParams {
-        sma_period1: Some(sma_period1),
-        sma_period2: Some(sma_period2),
-        sma_period3: Some(sma_period3),
-        sma_period4: Some(sma_period4),
-        roc_period1: Some(roc_period1),
-        roc_period2: Some(roc_period2),
-        roc_period3: Some(roc_period3),
-        roc_period4: Some(roc_period4),
-        signal_period: Some(signal_period),
+    let prm = KstParams {
+        sma_period1: Some(sma1), sma_period2: Some(sma2),
+        sma_period3: Some(sma3), sma_period4: Some(sma4),
+        roc_period1: Some(roc1), roc_period2: Some(roc2),
+        roc_period3: Some(roc3), roc_period4: Some(roc4),
+        signal_period: Some(sig),
     };
-    let input = KstInput::from_slice(data, params);
-    
-    match kst(&input) {
-        Ok(output) => {
-            let obj = js_sys::Object::new();
-            js_sys::Reflect::set(
-                &obj,
-                &JsValue::from_str("line"),
-                &serde_wasm_bindgen::to_value(&output.line).unwrap(),
-            )?;
-            js_sys::Reflect::set(
-                &obj,
-                &JsValue::from_str("signal"),
-                &serde_wasm_bindgen::to_value(&output.signal).unwrap(),
-            )?;
-            Ok(obj.into())
-        }
-        Err(e) => Err(JsValue::from_str(&e.to_string())),
-    }
+    let input = KstInput::from_slice(data, prm);
+
+    let mut line   = vec![0.0; data.len()];
+    let mut signal = vec![0.0; data.len()];
+    kst_into_slice(&mut line, &mut signal, &input, detect_best_kernel()).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    let mut values = line; values.extend_from_slice(&signal);
+    let result = KstJsResult { values, rows: 2, cols: data.len() };
+    serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
 }
 
-/// Fast/unsafe WASM interface with pre-allocated memory
-#[cfg(feature = "wasm")]
+// optional fast pointers API
+#[cfg(feature="wasm")]
 #[wasm_bindgen]
 pub fn kst_into(
     in_ptr: *const f64,
-    line_out_ptr: *mut f64,
-    signal_out_ptr: *mut f64,
+    out_line_ptr: *mut f64,
+    out_signal_ptr: *mut f64,
     len: usize,
-    sma_period1: usize,
-    sma_period2: usize,
-    sma_period3: usize,
-    sma_period4: usize,
-    roc_period1: usize,
-    roc_period2: usize,
-    roc_period3: usize,
-    roc_period4: usize,
-    signal_period: usize,
+    sma1: usize, sma2: usize, sma3: usize, sma4: usize,
+    roc1: usize, roc2: usize, roc3: usize, roc4: usize,
+    sig: usize
 ) -> Result<(), JsValue> {
-    if in_ptr.is_null() || line_out_ptr.is_null() || signal_out_ptr.is_null() {
-        return Err(JsValue::from_str("null pointer passed to kst_into"));
+    if in_ptr.is_null() || out_line_ptr.is_null() || out_signal_ptr.is_null() {
+        return Err(JsValue::from_str("null pointer"));
     }
-    
     unsafe {
-        let data = std::slice::from_raw_parts(in_ptr, len);
-        
-        // Handle aliasing - if input and output pointers are the same
-        if in_ptr == line_out_ptr as *const f64 || in_ptr == signal_out_ptr as *const f64 {
-            // Use a temporary buffer
-            let params = KstParams {
-                sma_period1: Some(sma_period1),
-                sma_period2: Some(sma_period2),
-                sma_period3: Some(sma_period3),
-                sma_period4: Some(sma_period4),
-                roc_period1: Some(roc_period1),
-                roc_period2: Some(roc_period2),
-                roc_period3: Some(roc_period3),
-                roc_period4: Some(roc_period4),
-                signal_period: Some(signal_period),
-            };
-            let input = KstInput::from_slice(data, params);
-            
-            match kst(&input) {
-                Ok(output) => {
-                    let line_out = std::slice::from_raw_parts_mut(line_out_ptr, len);
-                    let signal_out = std::slice::from_raw_parts_mut(signal_out_ptr, len);
-                    line_out.copy_from_slice(&output.line);
-                    signal_out.copy_from_slice(&output.signal);
-                    Ok(())
-                }
-                Err(e) => Err(JsValue::from_str(&e.to_string())),
-            }
+        // detect aliasing (same or overlapping regions)
+        let in_beg = in_ptr as usize;          let in_end = in_beg + len*8;
+        let lo_beg = out_line_ptr as usize;    let lo_end = lo_beg + len*8;
+        let so_beg = out_signal_ptr as usize;  let so_end = so_beg + len*8;
+        let overlap = |a0:usize,a1:usize,b0:usize,b1:usize| a0 < b1 && b0 < a1;
+
+        let data_slice = std::slice::from_raw_parts(in_ptr, len);
+        let shadow; // optional owned copy if aliasing
+        let data = if overlap(in_beg,in_end,lo_beg,lo_end) || overlap(in_beg,in_end,so_beg,so_end) {
+            // alias-safe fallback
+            shadow = data_slice.to_vec();
+            &shadow[..]
         } else {
-            let line_out = std::slice::from_raw_parts_mut(line_out_ptr, len);
-            let signal_out = std::slice::from_raw_parts_mut(signal_out_ptr, len);
-            kst_into_slice(
-                data,
-                sma_period1,
-                sma_period2,
-                sma_period3,
-                sma_period4,
-                roc_period1,
-                roc_period2,
-                roc_period3,
-                roc_period4,
-                signal_period,
-                line_out,
-                signal_out,
-            )
+            data_slice
+        };
+
+        let prm = KstParams {
+            sma_period1: Some(sma1), sma_period2: Some(sma2),
+            sma_period3: Some(sma3), sma_period4: Some(sma4),
+            roc_period1: Some(roc1), roc_period2: Some(roc2),
+            roc_period3: Some(roc3), roc_period4: Some(roc4),
+            signal_period: Some(sig),
+        };
+        let input = KstInput::from_slice(data, prm);
+
+        let ldst = std::slice::from_raw_parts_mut(out_line_ptr, len);
+        let sdst = std::slice::from_raw_parts_mut(out_signal_ptr, len);
+
+        // compute with stack-backed buffers (see kst_compute_into above) to avoid memory.grow during write
+        kst_into_slice(ldst, sdst, &input, detect_best_kernel())
             .map_err(|e| JsValue::from_str(&e.to_string()))
-        }
     }
 }
 
@@ -2409,47 +2263,36 @@ pub struct KstBatchConfig {
     pub signal_period_range: (usize, usize, usize),
 }
 
-/// Output structure for batch WASM API
-#[cfg(feature = "wasm")]
+#[cfg(feature="wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct KstBatchJsOutput {
-    pub line: Vec<f64>,
-    pub signal: Vec<f64>,
+    pub values: Vec<f64>,     // rows = combos*2
     pub combos: Vec<KstParams>,
-    pub rows: usize,
+    pub rows: usize,          // combos*2
     pub cols: usize,
 }
 
-/// WASM interface for batch KST calculation
-#[cfg(feature = "wasm")]
-#[wasm_bindgen(js_name = kst_batch)]
+#[cfg(feature="wasm")]
+#[wasm_bindgen(js_name="kst_batch")]
 pub fn kst_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
-    let config: KstBatchConfig =
-        serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
-    
-    let sweep = KstBatchRange {
-        sma_period1: config.sma_period1_range,
-        sma_period2: config.sma_period2_range,
-        sma_period3: config.sma_period3_range,
-        sma_period4: config.sma_period4_range,
-        roc_period1: config.roc_period1_range,
-        roc_period2: config.roc_period2_range,
-        roc_period3: config.roc_period3_range,
-        roc_period4: config.roc_period4_range,
-        signal_period: config.signal_period_range,
-    };
-    
-    let output = kst_batch_inner(data, &sweep, Kernel::Auto, false).map_err(|e| JsValue::from_str(&e.to_string()))?;
-    
-    let js_output = KstBatchJsOutput {
-        line: output.lines,
-        signal: output.signals,
-        combos: output.combos,
-        rows: output.rows,
-        cols: output.cols,
-    };
-    
-    serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+    let sweep: KstBatchRange = serde_wasm_bindgen::from_value(config)
+        .map_err(|e| JsValue::from_str(&format!("Invalid config: {e}")))?;
+    let combos = expand_grid(&sweep);
+    let rows = combos.len(); let cols = data.len();
+
+    // allocate flat buffers rows*cols for each output and fill
+    let mut lines  = vec![0.0; rows*cols];
+    let mut sigs   = vec![0.0; rows*cols];
+    kst_batch_inner_into(data, &sweep, detect_best_kernel(), false, &mut lines, &mut sigs)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    // interleave by outputs -> concatenate [line rows..., signal rows...]
+    let mut values = lines; values.extend_from_slice(&sigs);
+
+    // Note: rows = combos*2 since KST has two outputs (line and signal)
+    // This differs from ALMA which reports rows = combos with single output
+    let out = KstBatchJsOutput { values, combos, rows: rows*2, cols };
+    serde_wasm_bindgen::to_value(&out).map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
 }
 
 /// Fast batch calculation into pre-allocated memory

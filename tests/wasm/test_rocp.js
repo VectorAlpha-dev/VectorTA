@@ -161,7 +161,7 @@ test('ROCP error handling - empty input', () => {
     
     assert.throws(
         () => wasm.rocp_js(data, 10),
-        /Invalid period|All values are NaN/,
+        /Input data slice is empty|Invalid period|All values are NaN/,
         'Should fail with empty input'
     );
 });

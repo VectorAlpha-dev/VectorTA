@@ -225,8 +225,8 @@ class TestDpo:
         """Test DPO with empty input"""
         empty = np.array([])
         
-        # Should fail with invalid period error since period > data length
-        with pytest.raises(ValueError, match="Invalid period"):
+        # Should fail with empty input data error
+        with pytest.raises(ValueError, match="Input data slice is empty"):
             ta_indicators.dpo(empty, 5)
 
 

@@ -43,15 +43,15 @@ test('EPMA partial params', () => {
     const close = new Float64Array(testData.close);
     
     // Default parameters (period=11, offset=4)
-    const result = wasm.epma_js(close, undefined, undefined);
+    const result = wasm.epma_js(close, 11, 4);
     assert.strictEqual(result.length, close.length);
     
-    // Partial custom parameters
-    const resultCustomPeriod = wasm.epma_js(close, 15, undefined);
-    assert.strictEqual(resultCustomPeriod.length, close.length);
+    // Custom parameters
+    const resultCustom1 = wasm.epma_js(close, 15, 6);
+    assert.strictEqual(resultCustom1.length, close.length);
     
-    const resultCustomOffset = wasm.epma_js(close, undefined, 3);
-    assert.strictEqual(resultCustomOffset.length, close.length);
+    const resultCustom2 = wasm.epma_js(close, 9, 3);
+    assert.strictEqual(resultCustom2.length, close.length);
 });
 
 test('EPMA accuracy', async () => {
@@ -81,7 +81,7 @@ test('EPMA empty input', () => {
     const empty = new Float64Array([]);
     
     assert.throws(() => {
-        wasm.epma_js(empty, undefined, undefined);
+        wasm.epma_js(empty, 11, 4);
     }, /Input data slice is empty/);
 });
 
@@ -89,9 +89,9 @@ test('EPMA zero period', () => {
     // Test error with zero period - mirrors check_epma_zero_period
     const data = new Float64Array([10.0, 20.0, 30.0]);
     
-    // With period=0 and default offset=4, it will fail with "Invalid offset"
+    // With period=0 and offset=4, it will fail with "Invalid offset"
     assert.throws(() => {
-        wasm.epma_js(data, 0, undefined);
+        wasm.epma_js(data, 0, 4);
     }, /Invalid offset/);
     
     // With period=0 and offset=0, it will fail with "Invalid offset" because 0 >= 0
@@ -105,7 +105,7 @@ test('EPMA period exceeds length', () => {
     const dataSmall = new Float64Array([10.0, 20.0, 30.0]);
     
     assert.throws(() => {
-        wasm.epma_js(dataSmall, 10, undefined);
+        wasm.epma_js(dataSmall, 10, 4);
     }, /Invalid period/);
 });
 
@@ -114,7 +114,7 @@ test('EPMA very small dataset', () => {
     const singlePoint = new Float64Array([42.0]);
     
     assert.throws(() => {
-        wasm.epma_js(singlePoint, 9, undefined);
+        wasm.epma_js(singlePoint, 9, 4);
     }, /Invalid period|Not enough valid data/);
 });
 
@@ -138,7 +138,7 @@ test('EPMA all NaN input', () => {
     allNaN.fill(NaN);
     
     assert.throws(() => {
-        wasm.epma_js(allNaN, undefined, undefined);
+        wasm.epma_js(allNaN, 11, 4);
     }, /All values are NaN/);
 });
 
@@ -146,9 +146,9 @@ test('EPMA period too small', () => {
     // Test error with period < 2
     const data = new Float64Array([1.0, 2.0, 3.0, 4.0, 5.0]);
     
-    // With period=1 and default offset=4, it will fail with "Invalid offset"
+    // With period=1 and offset=4, it will fail with "Invalid offset"
     assert.throws(() => {
-        wasm.epma_js(data, 1, undefined);
+        wasm.epma_js(data, 1, 4);
     }, /Invalid offset/);
     
     // With period=1 and offset=0, it will fail with "Invalid period"
@@ -171,13 +171,19 @@ test('EPMA reinput', () => {
     // Test applying indicator twice - mirrors check_epma_reinput
     const close = new Float64Array(testData.close);
     
-    // First pass with period=9, offset will default to 4
-    const firstResult = wasm.epma_js(close, 9, undefined);
+    // First pass with period=9, offset=4
+    const firstResult = wasm.epma_js(close, 9, 4);
     assert.strictEqual(firstResult.length, close.length);
+    
+    // Check warmup for first pass: 9 + 4 + 1 = 14
+    assertAllNaN(firstResult.slice(0, 14), "First pass warmup should be NaN");
     
     // Second pass with period=3, offset=0 (explicitly set to avoid error)
     const secondResult = wasm.epma_js(firstResult, 3, 0);
     assert.strictEqual(secondResult.length, firstResult.length);
+    
+    // Check warmup for second pass: 3 + 0 + 1 = 4
+    assertAllNaN(secondResult.slice(0, 4), "Second pass warmup should be NaN");
 });
 
 test('EPMA NaN handling', () => {
@@ -202,18 +208,19 @@ test('EPMA batch single parameter set', () => {
     // Test batch with single parameter combination
     const close = new Float64Array(testData.close);
     
-    // Single parameter set
-    const batchResult = wasm.epma_batch_js(
-        close,
-        11, 11, 0,    // period range
-        4, 4, 0       // offset range
-    );
+    // Single parameter set using unified API
+    const config = {
+        period_range: [11, 11, 0],  // period range
+        offset_range: [4, 4, 0]     // offset range
+    };
+    
+    const batchResult = wasm.epma_batch(close, config);
     
     // Should match single calculation
     const singleResult = wasm.epma_js(close, 11, 4);
     
-    assert.strictEqual(batchResult.length, singleResult.length);
-    assertArrayClose(batchResult, singleResult, 1e-10, "Batch vs single mismatch");
+    assert.strictEqual(batchResult.values.length, singleResult.length);
+    assertArrayClose(batchResult.values, singleResult, 1e-10, "Batch vs single mismatch");
 });
 
 test('EPMA batch multiple parameters', () => {
@@ -221,17 +228,19 @@ test('EPMA batch multiple parameters', () => {
     const close = new Float64Array(testData.close.slice(0, 100));
     
     // Multiple parameters: period 5,7,9 x offset 1,2,3
-    const batchResult = wasm.epma_batch_js(
-        close,
-        5, 9, 2,      // period: 5, 7, 9
-        1, 3, 1       // offset: 1, 2, 3
-    );
+    const config = {
+        period_range: [5, 9, 2],    // period: 5, 7, 9
+        offset_range: [1, 3, 1]     // offset: 1, 2, 3
+    };
+    
+    const batchResult = wasm.epma_batch(close, config);
     
     // Should have 3 x 3 = 9 rows * 100 cols = 900 values
-    assert.strictEqual(batchResult.length, 9 * 100);
+    assert.strictEqual(batchResult.values.length, 9 * 100);
+    assert.strictEqual(batchResult.combos.length, 9);
     
     // Verify first combination matches individual calculation
-    const firstRow = batchResult.slice(0, 100);
+    const firstRow = batchResult.values.slice(0, 100);
     const singleResult = wasm.epma_js(close, 5, 1);
     assertArrayClose(
         firstRow, 
@@ -242,49 +251,51 @@ test('EPMA batch multiple parameters', () => {
 });
 
 test('EPMA batch metadata', () => {
-    // Test metadata function returns correct parameter combinations
-    const metadata = wasm.epma_batch_metadata_js(
-        5, 9, 2,      // period: 5, 7, 9
-        1, 3, 1       // offset: 1, 2, 3
-    );
+    // Test metadata through batch function result
+    const close = new Float64Array(testData.close.slice(0, 50));
+    const config = {
+        period_range: [5, 9, 2],    // period: 5, 7, 9
+        offset_range: [1, 3, 1]     // offset: 1, 2, 3
+    };
     
-    // Should have 3 x 3 = 9 combinations, each with 2 values
-    assert.strictEqual(metadata.length, 9 * 2);
+    const result = wasm.epma_batch(close, config);
+    
+    // Should have 3 x 3 = 9 combinations
+    assert.strictEqual(result.combos.length, 9);
     
     // Check first combination
-    assert.strictEqual(metadata[0], 5);   // period
-    assert.strictEqual(metadata[1], 1);   // offset
+    assert.strictEqual(result.combos[0].period, 5);   // period
+    assert.strictEqual(result.combos[0].offset, 1);   // offset
     
     // Check second combination
-    assert.strictEqual(metadata[2], 5);   // period
-    assert.strictEqual(metadata[3], 2);   // offset
+    assert.strictEqual(result.combos[1].period, 5);   // period
+    assert.strictEqual(result.combos[1].offset, 2);   // offset
     
     // Check fourth combination (second period)
-    assert.strictEqual(metadata[6], 7);   // period
-    assert.strictEqual(metadata[7], 1);   // offset
+    assert.strictEqual(result.combos[3].period, 7);   // period
+    assert.strictEqual(result.combos[3].offset, 1);   // offset
 });
 
 test('EPMA batch warmup validation', () => {
     // Test batch warmup period handling
     const close = new Float64Array(testData.close.slice(0, 50));
     
-    const batchResult = wasm.epma_batch_js(
-        close,
-        5, 10, 5,     // period: 5, 10
-        2, 4, 2       // offset: 2, 4
-    );
+    const config = {
+        period_range: [5, 10, 5],   // period: 5, 10
+        offset_range: [2, 4, 2]     // offset: 2, 4
+    };
     
-    const metadata = wasm.epma_batch_metadata_js(5, 10, 5, 2, 4, 2);
-    const numCombos = metadata.length / 2;
-    assert.strictEqual(numCombos, 4);  // 2 periods x 2 offsets
+    const batchResult = wasm.epma_batch(close, config);
+    
+    assert.strictEqual(batchResult.combos.length, 4);  // 2 periods x 2 offsets
     
     // Check warmup periods for each combination
-    for (let combo = 0; combo < numCombos; combo++) {
-        const period = metadata[combo * 2];
-        const offset = metadata[combo * 2 + 1];
+    for (let combo = 0; combo < batchResult.combos.length; combo++) {
+        const period = batchResult.combos[combo].period;
+        const offset = batchResult.combos[combo].offset;
         const warmup = period + offset + 1;
         const rowStart = combo * 50;
-        const rowData = batchResult.slice(rowStart, rowStart + 50);
+        const rowData = batchResult.values.slice(rowStart, rowStart + 50);
         
         // First warmup values should be NaN
         for (let i = 0; i < warmup; i++) {
@@ -305,30 +316,32 @@ test('EPMA batch edge cases', () => {
     const close = new Float64Array(20).fill(0).map((_, i) => i + 1);
     
     // Single value sweep
-    const singleBatch = wasm.epma_batch_js(
-        close,
-        5, 5, 1,
-        1, 1, 1
-    );
+    const singleConfig = {
+        period_range: [5, 5, 1],
+        offset_range: [1, 1, 1]
+    };
+    const singleBatch = wasm.epma_batch(close, singleConfig);
     
-    assert.strictEqual(singleBatch.length, 20);
+    assert.strictEqual(singleBatch.values.length, 20);
+    assert.strictEqual(singleBatch.combos.length, 1);
     
     // Step = 0 should return single value when start=end
-    const zeroStepBatch = wasm.epma_batch_js(
-        close,
-        7, 7, 0,
-        2, 2, 0
-    );
+    const zeroStepConfig = {
+        period_range: [7, 7, 0],
+        offset_range: [2, 2, 0]
+    };
+    const zeroStepBatch = wasm.epma_batch(close, zeroStepConfig);
     
-    assert.strictEqual(zeroStepBatch.length, 20); // Single combination
+    assert.strictEqual(zeroStepBatch.values.length, 20); // Single combination
+    assert.strictEqual(zeroStepBatch.combos.length, 1);
     
     // Empty data should throw
     assert.throws(() => {
-        wasm.epma_batch_js(
-            new Float64Array([]),
-            11, 11, 0,
-            4, 4, 0
-        );
+        const emptyConfig = {
+            period_range: [11, 11, 0],
+            offset_range: [4, 4, 0]
+        };
+        wasm.epma_batch(new Float64Array([]), emptyConfig);
     }, /Input data slice is empty|All values are NaN/);
 });
 
@@ -337,12 +350,13 @@ test('EPMA batch performance test', () => {
     const close = new Float64Array(testData.close.slice(0, 200));
     
     // Batch calculation
+    const batchConfig = {
+        period_range: [5, 15, 2],   // 6 period values
+        offset_range: [1, 4, 1]     // 4 offset values (max 4 to ensure offset < min period of 5)
+    };
+    
     const startBatch = Date.now();
-    const batchResult = wasm.epma_batch_js(
-        close,
-        5, 15, 2,     // 6 period values
-        1, 4, 1       // 4 offset values (max 4 to ensure offset < min period of 5)
-    );
+    const batchResult = wasm.epma_batch(close, batchConfig);
     const batchTime = Date.now() - startBatch;
     
     // Equivalent single calculations
@@ -357,7 +371,7 @@ test('EPMA batch performance test', () => {
     const singleTime = Date.now() - startSingle;
     
     // Batch should have same total length
-    assert.strictEqual(batchResult.length, singleResults.length);
+    assert.strictEqual(batchResult.values.length, singleResults.length);
     
     // Log performance (batch should be faster)
     console.log(`  EPMA Batch time: ${batchTime}ms, Single calls time: ${singleTime}ms`);
@@ -450,10 +464,10 @@ test('EPMA zero-copy error handling', () => {
             memView[i] = i + 1.0;
         }
         
-        // Invalid period
+        // Invalid period (period=0 triggers offset error since 3 >= 0)
         assert.throws(() => {
             wasm.epma_into(ptr, ptr, 10, 0, 3);
-        }, /Invalid period/);
+        }, /Invalid offset/);
         
         // Invalid offset (offset >= period)
         assert.throws(() => {
@@ -519,6 +533,103 @@ test('EPMA batch unified API', async () => {
     );
 });
 
+test('EPMA batch - new unified API with single parameter', () => {
+    const close = new Float64Array(testData.close.slice(0, 100));
+    
+    // Test with single parameter set using unified API
+    const config = {
+        period_range: [11, 11, 0],  // period: just 11
+        offset_range: [4, 4, 0]     // offset: just 4
+    };
+    
+    const result = wasm.epma_batch(close, config);
+    
+    assert(result.values, 'Missing values in result');
+    assert(result.combos, 'Missing combos in result');
+    assert.strictEqual(result.values.length, 100, 'Values length mismatch');
+    assert.strictEqual(result.combos.length, 1, 'Should have 1 combination');
+    assert.strictEqual(result.combos[0].period, 11, 'Period mismatch');
+    assert.strictEqual(result.combos[0].offset, 4, 'Offset mismatch');
+    
+    // Compare with single calculation
+    const singleResult = wasm.epma_js(close, 11, 4);
+    assertArrayClose(result.values, singleResult, 1e-10, 
+        'Batch single parameter result mismatch');
+});
+
+test('EPMA batch - new unified API with multiple parameters', () => {
+    const close = new Float64Array(testData.close.slice(0, 50));
+    
+    // Test with multiple parameter combinations
+    const config = {
+        period_range: [5, 9, 2],    // periods: 5, 7, 9
+        offset_range: [1, 3, 1]     // offsets: 1, 2, 3
+    };
+    
+    const result = wasm.epma_batch(close, config);
+    
+    assert(result.values, 'Missing values in result');
+    assert(result.combos, 'Missing combos in result');
+    assert.strictEqual(result.combos.length, 9, 'Should have 9 combinations');
+    assert.strictEqual(result.values.length, 450, 'Should have 9*50 values');
+    assert.strictEqual(result.rows, 9, 'Should have 9 rows');
+    assert.strictEqual(result.cols, 50, 'Should have 50 cols');
+    
+    // Verify first combination (period=5, offset=1)
+    const firstRow = result.values.slice(0, 50);
+    const singleResult = wasm.epma_js(close, 5, 1);
+    assertArrayClose(firstRow, singleResult, 1e-10,
+        'First batch row mismatch');
+    
+    // Check warmup periods
+    for (let i = 0; i < 9; i++) {
+        const period = result.combos[i].period;
+        const offset = result.combos[i].offset;
+        const warmup = period + offset + 1;
+        const rowStart = i * 50;
+        
+        // Check NaN values in warmup
+        for (let j = 0; j < warmup && j < 50; j++) {
+            assert(isNaN(result.values[rowStart + j]),
+                `Expected NaN at row ${i} index ${j}`);
+        }
+    }
+});
+
+test('EPMA zero-copy error handling', () => {
+    const data = new Float64Array([1, 2, 3, 4, 5]);
+    const ptr = wasm.epma_alloc(data.length);
+    
+    try {
+        // Copy data
+        const view = new Float64Array(wasm.__wasm.memory.buffer, ptr, data.length);
+        view.set(data);
+        
+        // Test invalid period
+        assert.throws(
+            () => wasm.epma_into(ptr, ptr, data.length, 0, 4),
+            /Invalid offset/,
+            'Should fail with period=0'
+        );
+        
+        // Test invalid offset (>= period)
+        assert.throws(
+            () => wasm.epma_into(ptr, ptr, data.length, 3, 3),
+            /Invalid offset/,
+            'Should fail with offset >= period'
+        );
+        
+        // Test period exceeds data length
+        assert.throws(
+            () => wasm.epma_into(ptr, ptr, data.length, 10, 4),
+            /Invalid/,  // Could be 'Invalid period' or 'Invalid offset'
+            'Should fail when period > data length'
+        );
+    } finally {
+        wasm.epma_free(ptr, data.length);
+    }
+});
+
 test('EPMA batch zero-copy API', () => {
     const close = new Float64Array(testData.close.slice(0, 50));
     
@@ -545,10 +656,15 @@ test('EPMA batch zero-copy API', () => {
         const outView = new Float64Array(wasm.__wasm.memory.buffer, outPtr, close.length * rows);
         
         // Check each row has appropriate NaN warmup
-        const metadata = wasm.epma_batch_metadata_js(5, 10, 5, 2, 4, 2);
+        const combinations = [];
+        for (let p = 5; p <= 10; p += 5) {
+            for (let o = 2; o <= 4; o += 2) {
+                combinations.push({ period: p, offset: o });
+            }
+        }
         for (let row = 0; row < rows; row++) {
-            const period = metadata[row * 2];
-            const offset = metadata[row * 2 + 1];
+            const period = combinations[row].period;
+            const offset = combinations[row].offset;
             const warmup = period + offset + 1;
             const rowStart = row * 50;
             

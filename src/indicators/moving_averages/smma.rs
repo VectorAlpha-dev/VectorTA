@@ -18,13 +18,13 @@
 //! - **`Err(SmmaError)`** otherwise.
 
 #[cfg(feature = "python")]
-use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1};
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::PyDict;
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
@@ -37,9 +37,6 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-use aligned_vec::{AVec, CACHELINE_ALIGN};
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::mem::MaybeUninit;
@@ -171,6 +168,10 @@ pub enum SmmaError {
 	InvalidPeriod { period: usize, data_len: usize },
 	#[error("smma: Not enough valid data: needed = {needed}, valid = {valid}")]
 	NotEnoughValidData { needed: usize, valid: usize },
+	#[error("smma: Invalid kernel for batch operation: {kernel:?} (expected batch kernel)")]
+	InvalidKernel { kernel: Kernel },
+	#[error("smma: Output buffer length mismatch: expected = {expected}, actual = {actual}")]
+	OutputLenMismatch { expected: usize, actual: usize },
 }
 
 #[inline]
@@ -208,7 +209,7 @@ pub fn smma_with_kernel(input: &SmmaInput, kernel: Kernel) -> Result<SmmaOutput,
 		other => other,
 	};
 
-	let warm = first + period;
+	let warm = first + period - 1;
 	let mut out = alloc_with_nan_prefix(len, warm);
 
 	unsafe {
@@ -464,7 +465,7 @@ pub fn smma_batch_with_kernel(data: &[f64], sweep: &SmmaBatchRange, k: Kernel) -
 	let kernel = match k {
 		Kernel::Auto => detect_best_batch_kernel(),
 		other if other.is_batch() => other,
-		_ => return Err(SmmaError::InvalidPeriod { period: 0, data_len: 0 }),
+		other => return Err(SmmaError::InvalidKernel { kernel: other }),
 	};
 	let simd = match kernel {
 		Kernel::Avx512Batch => Kernel::Avx512,
@@ -534,7 +535,7 @@ fn smma_batch_inner(
 	// ------------------------------------------------------------------
 	// 1.  Figure out how long each row’s NaN prefix should be
 	// ------------------------------------------------------------------
-	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
+	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
 
 	// ------------------------------------------------------------------
 	// 2.  Allocate rows × cols uninitialised and write the NaN prefixes
@@ -589,9 +590,16 @@ fn smma_batch_inner(
 	}
 
 	// ------------------------------------------------------------------
-	// 5.  All elements are now initialised – transmute to Vec<f64>
+	// 5.  All elements are now initialised – materialize Vec<f64> without copies
 	// ------------------------------------------------------------------
-	let values: Vec<f64> = unsafe { core::mem::transmute(raw) };
+	let mut guard = core::mem::ManuallyDrop::new(raw);
+	let values = unsafe {
+		Vec::from_raw_parts(
+			guard.as_mut_ptr() as *mut f64,
+			guard.len(),
+			guard.capacity(),
+		)
+	};
 
 	Ok(SmmaBatchOutput {
 		values,
@@ -631,7 +639,7 @@ fn smma_batch_inner_into(
 	let cols = data.len();
 
 	// Collect warm-up lengths per row
-	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
+	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
 
 	// SAFETY: We're reinterpreting the output slice as MaybeUninit to use the efficient
 	// init_matrix_prefixes function. This is safe because:
@@ -1436,20 +1444,21 @@ pub fn smma_into_slice(dst: &mut [f64], input: &SmmaInput, kern: Kernel) -> Resu
 
 	// Verify output buffer size matches input
 	if dst.len() != data.len() {
-		return Err(SmmaError::InvalidPeriod {
-			period: dst.len(),
-			data_len: data.len(),
+		return Err(SmmaError::OutputLenMismatch {
+			expected: data.len(),
+			actual: dst.len(),
 		});
+	}
+
+	// Reinterpret dst as MaybeUninit to use init_matrix_prefixes for NaN filling
+	let warmup_end = first + period - 1;
+	unsafe {
+		let dst_uninit = std::slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut MaybeUninit<f64>, dst.len());
+		init_matrix_prefixes(dst_uninit, dst.len(), &[warmup_end]);
 	}
 
 	// Compute SMMA values directly into dst
 	smma_compute_into(data, period, first, chosen, dst);
-
-	// Fill warmup period with NaN
-	let warmup_end = first + period - 1;
-	for v in &mut dst[..warmup_end] {
-		*v = f64::NAN;
-	}
 
 	Ok(())
 }
@@ -1485,7 +1494,7 @@ pub struct SmmaBatchJsOutput {
 }
 
 #[cfg(feature = "wasm")]
-#[wasm_bindgen(js_name = "smma_batch_new")]
+#[wasm_bindgen(js_name = "smma_batch")]
 pub fn smma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
 	let config: SmmaBatchConfig =
 		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
@@ -1508,7 +1517,7 @@ pub fn smma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, J
 
 // Legacy wrapper for backward compatibility
 #[cfg(feature = "wasm")]
-#[wasm_bindgen(js_name = "smma_batch")]
+#[wasm_bindgen(js_name = "smma_batch_legacy")]
 pub fn smma_batch_js(
 	data: &[f64],
 	period_start: usize,
@@ -1641,8 +1650,16 @@ pub fn smma_batch_into(
 
 		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
 
+		// Resolve Auto kernel to concrete batch kernel, then map to non-batch
+		let batch = detect_best_batch_kernel();
+		let simd = match batch {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch => Kernel::Avx2,
+			_ => Kernel::Scalar,
+		};
+		
 		// Use optimized batch processing
-		smma_batch_inner_into(data, &sweep, Kernel::Auto, false, out).map_err(|e| JsValue::from_str(&e.to_string()))?;
+		smma_batch_inner_into(data, &sweep, simd, false, out).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 		Ok(rows)
 	}

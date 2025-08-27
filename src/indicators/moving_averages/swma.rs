@@ -1,6 +1,6 @@
 //! # Symmetric Weighted Moving Average (SWMA)
 //!
-//! A triangular weighted moving average centered on the window. More weight is given to center elements, balancing smoothness and responsiveness.
+//! A triangular weighted moving average that applies symmetric weights to past values. More weight is given to values closer to the current position, balancing smoothness and responsiveness.
 //!
 //! ## Parameters
 //! - **period**: Window size (number of data points). Default is 5.
@@ -161,6 +161,8 @@ impl SwmaBuilder {
 
 #[derive(Debug, Error)]
 pub enum SwmaError {
+	#[error("swma: Input data slice is empty.")]
+	EmptyInputData,
 	#[error("swma: All values are NaN.")]
 	AllValuesNaN,
 
@@ -184,19 +186,19 @@ fn swma_prepare<'a>(
 	input: &'a SwmaInput,
 	kernel: Kernel,
 ) -> Result<(&'a [f64], AVec<f64>, usize, usize, Kernel), SwmaError> {
-	let data: &[f64] = match &input.data {
-		SwmaData::Candles { candles, source } => source_type(candles, source),
-		SwmaData::Slice(sl) => sl,
-	};
+	let data: &[f64] = input.as_ref();
+	let len = data.len();
+	if len == 0 {
+		return Err(SwmaError::EmptyInputData);
+	}
 
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(SwmaError::AllValuesNaN)?;
-	let len = data.len();
 	let period = input.get_period();
 
 	if period == 0 || period > len {
 		return Err(SwmaError::InvalidPeriod { period, data_len: len });
 	}
-	if (len - first) < period {
+	if len - first < period {
 		return Err(SwmaError::NotEnoughValidData {
 			needed: period,
 			valid: len - first,
@@ -204,10 +206,9 @@ fn swma_prepare<'a>(
 	}
 
 	let weights = build_symmetric_triangle_avec(period);
-
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
-		other => other,
+		k => k,
 	};
 
 	Ok((data, weights, period, first, chosen))
@@ -251,6 +252,7 @@ pub fn swma_into_slice(dst: &mut [f64], input: &SwmaInput, kern: Kernel) -> Resu
 	let (data, weights, period, first, chosen) = swma_prepare(input, kern)?;
 
 	// Verify output buffer size matches input
+	// Note: Using InvalidPeriod for size mismatch to maintain parity with ALMA
 	if dst.len() != data.len() {
 		return Err(SwmaError::InvalidPeriod {
 			period: dst.len(),
@@ -271,9 +273,26 @@ pub fn swma_into_slice(dst: &mut [f64], input: &SwmaInput, kern: Kernel) -> Resu
 }
 
 #[inline(always)]
-fn build_symmetric_triangle(n: usize) -> Vec<f64> {
-	let weights = build_symmetric_triangle_avec(n);
-	weights.to_vec()
+fn build_symmetric_triangle_vec(n: usize) -> Vec<f64> {
+	let mut w = Vec::with_capacity(n);
+	if n == 1 {
+		w.push(1.0);
+	} else if n == 2 {
+		w.extend_from_slice(&[0.5, 0.5]);
+	} else if n % 2 == 0 {
+		let half = n / 2;
+		for i in 1..=half { w.push(i as f64); }
+		for i in (1..=half).rev() { w.push(i as f64); }
+		let sum: f64 = w.iter().sum();
+		for x in &mut w { *x /= sum; }
+	} else {
+		let half_plus = (n + 1) / 2;
+		for i in 1..=half_plus { w.push(i as f64); }
+		for i in (1..half_plus).rev() { w.push(i as f64); }
+		let sum: f64 = w.iter().sum();
+		for x in &mut w { *x /= sum; }
+	}
+	w
 }
 
 #[inline(always)]
@@ -378,7 +397,7 @@ impl SwmaStream {
 		if period == 0 {
 			return Err(SwmaError::InvalidPeriod { period, data_len: 0 });
 		}
-		let weights = build_symmetric_triangle(period);
+		let weights = build_symmetric_triangle_vec(period);
 		Ok(Self {
 			period,
 			weights,
@@ -533,6 +552,17 @@ pub fn swma_batch_par_slice(data: &[f64], sweep: &SwmaBatchRange, kern: Kernel) 
 	swma_batch_inner(data, sweep, kern, true)
 }
 
+/// Compute SWMA batch directly into the provided output slice.
+/// The output slice must have size rows * cols where rows is the number of parameter combinations.
+pub fn swma_batch_into_slice(
+	dst: &mut [f64],
+	data: &[f64],
+	sweep: &SwmaBatchRange,
+	k: Kernel,
+) -> Result<Vec<SwmaParams>, SwmaError> {
+	swma_batch_inner_into(data, sweep, k, true, dst)
+}
+
 #[inline(always)]
 fn swma_batch_inner(
 	data: &[f64],
@@ -545,10 +575,13 @@ fn swma_batch_inner(
 		return Err(SwmaError::InvalidPeriod { period: 0, data_len: 0 });
 	}
 
-	// Reuse validation logic
+	let len = data.len();
+	if len == 0 {
+		return Err(SwmaError::EmptyInputData);
+	}
+
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(SwmaError::AllValuesNaN)?;
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-	let len = data.len();
 
 	if max_p == 0 || max_p > len {
 		return Err(SwmaError::InvalidPeriod {
@@ -556,7 +589,7 @@ fn swma_batch_inner(
 			data_len: len,
 		});
 	}
-	if (len - first) < max_p {
+	if len - first < max_p {
 		return Err(SwmaError::NotEnoughValidData {
 			needed: max_p,
 			valid: len - first,
@@ -614,61 +647,70 @@ fn swma_batch_inner(
 	}
 
 	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
-	let mut raw = make_uninit_matrix(rows, cols);
-	unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-	// ------------------------------------------------------------------
-	// 2)  Closure that fills one row; it receives &mut [MaybeUninit<f64>]
-	// ------------------------------------------------------------------
+	// Resolve actual kernel once
+	let actual_kern = match kern {
+		Kernel::Auto => detect_best_batch_kernel(),
+		k => k,
+	};
+	let simd = match actual_kern {
+		Kernel::Avx512Batch => Kernel::Avx512,
+		Kernel::Avx2Batch => Kernel::Avx2,
+		Kernel::ScalarBatch => Kernel::Scalar,
+		// if a non-batch enum sneaks in, keep it as-is
+		other => other,
+	};
+
+	// Writer closure
 	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
 		let period = combos[row].period.unwrap();
 		let w_ptr = flat_w.as_ptr().add(row * max_p);
-
-		// Cast just this row to &mut [f64] (now safe to write real values)
 		let out_row = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
-
-		match kern {
+		match simd {
 			Kernel::Scalar => swma_row_scalar(data, first, period, w_ptr, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx2 => swma_row_avx2(data, first, period, w_ptr, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 => swma_row_avx512(data, first, period, w_ptr, out_row),
-			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
-				// Fallback to scalar when AVX is not available
-				swma_row_scalar(data, first, period, w_ptr, out_row)
-			}
-			_ => unreachable!(),
+			_ => swma_row_scalar(data, first, period, w_ptr, out_row),
 		}
 	};
 
-	// ------------------------------------------------------------------
-	// 3)  Run every row, writing directly into `raw`
-	// ------------------------------------------------------------------
-	if parallel {
+	// Fill
+	{
+		use std::mem::MaybeUninit;
+		let rows_mut: &mut [MaybeUninit<f64>] = &mut buf_mu;
 		#[cfg(not(target_arch = "wasm32"))]
-		{
-			raw.par_chunks_mut(cols)
+		if parallel {
+			use rayon::prelude::*;
+			rows_mut.par_chunks_mut(cols)
 				.enumerate()
 				.for_each(|(row, slice)| do_row(row, slice));
-		}
-
-		#[cfg(target_arch = "wasm32")]
-		{
-			for (row, slice) in raw.chunks_mut(cols).enumerate() {
-				do_row(row, slice);
+		} else {
+			for (row, slice) in rows_mut.chunks_mut(cols).enumerate() { 
+				do_row(row, slice); 
 			}
 		}
-	} else {
-		for (row, slice) in raw.chunks_mut(cols).enumerate() {
-			do_row(row, slice);
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, slice) in rows_mut.chunks_mut(cols).enumerate() { 
+				do_row(row, slice); 
+			}
 		}
 	}
 
-	// ------------------------------------------------------------------
-	// 4)  Transmute the now-initialised buffer into Vec<f64>
-	// ------------------------------------------------------------------
-	let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
+	// Finalize without copies or UB
+	use core::mem::ManuallyDrop;
+	let mut guard = ManuallyDrop::new(buf_mu);
+	let values = unsafe {
+		Vec::from_raw_parts(
+			guard.as_mut_ptr() as *mut f64,
+			guard.len(),
+			guard.capacity(),
+		)
+	};
 
 	Ok(SwmaBatchOutput {
 		values,
@@ -691,10 +733,13 @@ fn swma_batch_inner_into(
 		return Err(SwmaError::InvalidPeriod { period: 0, data_len: 0 });
 	}
 
-	// Reuse validation logic
+	let len = data.len();
+	if len == 0 {
+		return Err(SwmaError::EmptyInputData);
+	}
+
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(SwmaError::AllValuesNaN)?;
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-	let len = data.len();
 
 	if max_p == 0 || max_p > len {
 		return Err(SwmaError::InvalidPeriod {
@@ -702,7 +747,7 @@ fn swma_batch_inner_into(
 			data_len: len,
 		});
 	}
-	if (len - first) < max_p {
+	if len - first < max_p {
 		return Err(SwmaError::NotEnoughValidData {
 			needed: max_p,
 			valid: len - first,
@@ -760,34 +805,32 @@ fn swma_batch_inner_into(
 	}
 
 	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
-
-	// SAFETY: We're reinterpreting the output slice as MaybeUninit to use the efficient
-	// init_matrix_prefixes function. This is safe because:
-	// 1. MaybeUninit<T> has the same layout as T
-	// 2. We ensure all values are written before the slice is used again
 	let out_uninit = unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len()) };
+	init_matrix_prefixes(out_uninit, cols, &warm);
 
-	unsafe { init_matrix_prefixes(out_uninit, cols, &warm) };
+	// Resolve once
+	let actual_kern = match kern {
+		Kernel::Auto => detect_best_batch_kernel(),
+		k => k,
+	};
+	let simd = match actual_kern {
+		Kernel::Avx512Batch => Kernel::Avx512,
+		Kernel::Avx2Batch => Kernel::Avx2,
+		Kernel::ScalarBatch => Kernel::Scalar,
+		other => other,
+	};
 
-	// Closure that fills one row
 	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
 		let period = combos[row].period.unwrap();
 		let w_ptr = flat_w.as_ptr().add(row * max_p);
-
-		// Cast just this row to &mut [f64]
 		let out_row = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
-
-		match kern {
-			Kernel::Scalar | Kernel::ScalarBatch => swma_row_scalar(data, first, period, w_ptr, out_row),
+		match simd {
+			Kernel::Scalar => swma_row_scalar(data, first, period, w_ptr, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => swma_row_avx2(data, first, period, w_ptr, out_row),
+			Kernel::Avx2 => swma_row_avx2(data, first, period, w_ptr, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => swma_row_avx512(data, first, period, w_ptr, out_row),
-			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
-				swma_row_scalar(data, first, period, w_ptr, out_row)
-			}
-			_ => unreachable!(),
+			Kernel::Avx512 => swma_row_avx512(data, first, period, w_ptr, out_row),
+			_ => swma_row_scalar(data, first, period, w_ptr, out_row),
 		}
 	};
 
@@ -1305,11 +1348,12 @@ mod tests {
 			59179.88888888889,
 			59080.99999999999,
 		];
-		let start = row.len() - 5;
-		for (i, &v) in row[start..].iter().enumerate().skip(period) {
+		let tail = &row[row.len()-5..];
+		for (i, &v) in tail.iter().enumerate() {
 			assert!(
 				(v - expected[i]).abs() < 1e-8,
-				"[{test}] default-row mismatch at idx {i}: {v} vs {expected:?}"
+				"[{test}] default-row mismatch at idx {i}: {v} vs {}",
+				expected[i]
 			);
 		}
 		Ok(())
@@ -1539,19 +1583,8 @@ pub fn swma_batch_py<'py>(
 	// 3. Heavy work without the GIL
 	let combos = py
 		.allow_threads(|| {
-			// Resolve Kernel::Auto to a specific kernel
-			let kernel = match kern {
-				Kernel::Auto => detect_best_batch_kernel(),
-				k => k,
-			};
-			let simd = match kernel {
-				Kernel::Avx512Batch => Kernel::Avx512,
-				Kernel::Avx2Batch => Kernel::Avx2,
-				Kernel::ScalarBatch => Kernel::Scalar,
-				_ => unreachable!(),
-			};
-			// Use the _into variant that writes directly to our pre-allocated buffer
-			swma_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+			// Pass kernel directly - inner function will resolve Auto if needed
+			swma_batch_inner_into(slice_in, &sweep, kern, true, slice_out)
 		})
 		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
@@ -1596,10 +1629,8 @@ pub fn swma_batch_js(
 	let sweep = SwmaBatchRange {
 		period: (period_start, period_end, period_step),
 	};
-
-	// Use the existing batch function with parallel=false for WASM
-	swma_batch_inner(data, &sweep, Kernel::Scalar, false)
-		.map(|output| output.values)
+	swma_batch_with_kernel(data, &sweep, Kernel::Auto)
+		.map(|o| o.values)
 		.map_err(|e| JsValue::from_str(&e.to_string()))
 }
 

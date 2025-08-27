@@ -239,11 +239,18 @@ test('PMA streaming', () => {
         assert(isNaN(streamResults[i][1]), `Expected NaN trigger during warmup at index ${i}`);
     }
     
-    // After warmup, should return valid values
-    for (let i = 6; i < streamResults.length; i++) {
+    // After warmup, predict should be valid but trigger needs more values
+    for (let i = 6; i < 9 && i < streamResults.length; i++) {
         const [predict, trigger] = streamResults[i];
         assert(!isNaN(predict), `Expected valid predict value after warmup at index ${i}`);
-        assert(!isNaN(trigger), `Expected valid trigger value after warmup at index ${i}`);
+        assert(isNaN(trigger), `Expected NaN trigger (still warming up) at index ${i}`);
+    }
+    
+    // After index 9 (10th value), both should be valid
+    for (let i = 9; i < streamResults.length; i++) {
+        const [predict, trigger] = streamResults[i];
+        assert(!isNaN(predict), `Expected valid predict value at index ${i}`);
+        assert(!isNaN(trigger), `Expected valid trigger value at index ${i}`);
     }
 });
 
@@ -280,14 +287,11 @@ test('PMA batch API', () => {
 
 test('Rust parity', async () => {
     // Test that WASM bindings match Rust implementation
-    const result = await compareWithRust('pma', testData.close);
+    const close = new Float64Array(testData.close);
+    const wasmResult = wasm.pma_js(close);
+    // PMA returns flattened [predict..., trigger...], we compare predict (first half)
+    const predict = wasmResult.slice(0, close.length);
     
-    assert(result.success, `Rust parity check failed: ${result.error || 'Unknown error'}`);
-    
-    if (result.differences) {
-        for (const diff of result.differences) {
-            assert(diff.difference < 1e-10, 
-                `Value mismatch at index ${diff.index}: WASM=${diff.wasm}, Rust=${diff.rust}`);
-        }
-    }
+    // compareWithRust throws on error, no need to check return value
+    await compareWithRust('pma', predict);
 });

@@ -33,13 +33,13 @@ use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
+use std::mem::MaybeUninit;
 use thiserror::Error;
 
 impl<'a> AsRef<[f64]> for TsfInput<'a> {
@@ -165,6 +165,10 @@ pub enum TsfError {
 	InvalidPeriod { period: usize, data_len: usize },
 	#[error("tsf: Not enough valid data: needed = {needed}, valid = {valid}")]
 	NotEnoughValidData { needed: usize, valid: usize },
+	#[error("tsf: Mismatched output length: expected = {expected}, actual = {actual}")]
+	MismatchedOutputLen { expected: usize, actual: usize },
+	#[error("tsf: Period must be at least 2 for linear regression, got {period}")]
+	PeriodTooSmall { period: usize },
 }
 
 #[inline]
@@ -185,7 +189,10 @@ pub fn tsf_with_kernel(input: &TsfInput, kernel: Kernel) -> Result<TsfOutput, Ts
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(TsfError::AllValuesNaN)?;
 	let period = input.get_period();
 
-	if period == 0 || period > len {
+	if period < 2 {
+		return Err(TsfError::PeriodTooSmall { period });
+	}
+	if period > len {
 		return Err(TsfError::InvalidPeriod { period, data_len: len });
 	}
 	if (len - first) < period {
@@ -229,7 +236,10 @@ pub fn tsf_into_slice(dst: &mut [f64], input: &TsfInput, kern: Kernel) -> Result
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(TsfError::AllValuesNaN)?;
 	let period = input.get_period();
 
-	if period == 0 || period > len {
+	if period < 2 {
+		return Err(TsfError::PeriodTooSmall { period });
+	}
+	if period > len {
 		return Err(TsfError::InvalidPeriod { period, data_len: len });
 	}
 	if (len - first) < period {
@@ -239,9 +249,9 @@ pub fn tsf_into_slice(dst: &mut [f64], input: &TsfInput, kern: Kernel) -> Result
 		});
 	}
 	if dst.len() != data.len() {
-		return Err(TsfError::InvalidPeriod {
-			period: dst.len(),
-			data_len: data.len(),
+		return Err(TsfError::MismatchedOutputLen {
+			expected: data.len(),
+			actual: dst.len(),
 		});
 	}
 
@@ -270,7 +280,7 @@ pub fn tsf_into_slice(dst: &mut [f64], input: &TsfInput, kern: Kernel) -> Result
 	Ok(())
 }
 
-#[inline]
+#[inline(always)]
 pub fn tsf_scalar(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) {
 	// Precompute ∑ x and ∑ x² for x = 0..period-1
 	let sum_x = (0..period).map(|x| x as f64).sum::<f64>();
@@ -344,8 +354,8 @@ pub struct TsfStream {
 impl TsfStream {
 	pub fn try_new(params: TsfParams) -> Result<Self, TsfError> {
 		let period = params.period.unwrap_or(14);
-		if period == 0 {
-			return Err(TsfError::InvalidPeriod { period, data_len: 0 });
+		if period < 2 {
+			return Err(TsfError::PeriodTooSmall { period });
 		}
 
 		// Precompute ∑ x and ∑ x² for x = 0..period-1
@@ -549,17 +559,15 @@ fn tsf_batch_inner(
 	let rows = combos.len();
 	let cols = data.len();
 	let mut sum_xs = vec![0.0; rows];
-	let mut sum_x_sq = vec![0.0; rows];
 	let mut divisors = vec![0.0; rows];
 
-	// Precompute ∑x and (∑x²) and divisor for each "period = combos[row].period"
+	// Precompute ∑x and divisor for each "period = combos[row].period"
 	for (row, prm) in combos.iter().enumerate() {
 		let period = prm.period.unwrap();
 		let sum_x = (0..period).map(|x| x as f64).sum::<f64>();
 		let sum_x2 = (0..period).map(|x| (x as f64) * (x as f64)).sum::<f64>();
 		let divisor = (period as f64 * sum_x2) - (sum_x * sum_x);
 		sum_xs[row] = sum_x;
-		sum_x_sq[row] = sum_x2;
 		divisors[row] = divisor;
 	}
 
@@ -643,80 +651,69 @@ fn tsf_batch_inner_into(
 	parallel: bool,
 	output: &mut [f64],
 ) -> Result<Vec<TsfParams>, TsfError> {
-	// Build the list of TsfParams to run over
+	// Build combos
 	let combos = expand_grid(sweep);
 	if combos.is_empty() {
 		return Err(TsfError::InvalidPeriod { period: 0, data_len: 0 });
 	}
 
-	// Find first non‐NaN index
+	// First valid index and max window
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(TsfError::AllValuesNaN)?;
-	// Compute the maximum period required by any combo
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
 	if data.len() - first < max_p {
-		return Err(TsfError::NotEnoughValidData {
-			needed: max_p,
-			valid: data.len() - first,
-		});
+		return Err(TsfError::NotEnoughValidData { needed: max_p, valid: data.len() - first });
 	}
 
 	let rows = combos.len();
 	let cols = data.len();
-	let mut sum_xs = vec![0.0; rows];
-	let mut sum_x_sq = vec![0.0; rows];
-	let mut divisors = vec![0.0; rows];
 
-	// Precompute ∑x and (∑x²) and divisor for each "period = combos[row].period"
+	// Precompute ∑x and divisor per row
+	let mut sum_xs = vec![0.0; rows];
+	let mut divisors = vec![0.0; rows];
 	for (row, prm) in combos.iter().enumerate() {
-		let period = prm.period.unwrap();
-		let sum_x = (0..period).map(|x| x as f64).sum::<f64>();
-		let sum_x2 = (0..period).map(|x| (x as f64) * (x as f64)).sum::<f64>();
-		let divisor = (period as f64 * sum_x2) - (sum_x * sum_x);
+		let p = prm.period.unwrap();
+		let sum_x = (0..p).map(|x| x as f64).sum::<f64>();
+		let sum_x2 = (0..p).map(|x| (x as f64) * (x as f64)).sum::<f64>();
 		sum_xs[row] = sum_x;
-		sum_x_sq[row] = sum_x2;
-		divisors[row] = divisor;
+		divisors[row] = (p as f64 * sum_x2) - (sum_x * sum_x);
 	}
 
-	// Initialize output with NaN
-	output.fill(f64::NAN);
+	// Initialize only warmup prefixes to NaN using helper, zero extra writes
+	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
+	let out_mu: &mut [MaybeUninit<f64>] = unsafe {
+		core::slice::from_raw_parts_mut(output.as_mut_ptr() as *mut MaybeUninit<f64>, output.len())
+	};
+	init_matrix_prefixes(out_mu, cols, &warm);
 
-	// Closure that computes one row into out_row
+	// Row kernel
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-		let period = combos[row].period.unwrap();
+		let p = combos[row].period.unwrap();
 		let sum_x = sum_xs[row];
-		let divisor = divisors[row];
-
+		let div = divisors[row];
 		match kern {
-			Kernel::Scalar => tsf_row_scalar(data, first, period, sum_x, divisor, out_row),
+			Kernel::Scalar => tsf_row_scalar(data, first, p, sum_x, div, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => tsf_row_avx2(data, first, period, sum_x, divisor, out_row),
+			Kernel::Avx2 => tsf_row_avx2(data, first, p, sum_x, div, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => tsf_row_avx512(data, first, period, sum_x, divisor, out_row),
+			Kernel::Avx512 => tsf_row_avx512(data, first, p, sum_x, div, out_row),
 			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-			Kernel::Avx2 | Kernel::Avx512 => tsf_row_scalar(data, first, period, sum_x, divisor, out_row),
+			Kernel::Avx2 | Kernel::Avx512 => tsf_row_scalar(data, first, p, sum_x, div, out_row),
 			_ => unreachable!(),
 		}
 	};
 
+	// Compute rows into output
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			output
-				.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
+			output.par_chunks_mut(cols).enumerate().for_each(|(r, sl)| do_row(r, sl));
 		}
-
 		#[cfg(target_arch = "wasm32")]
 		{
-			for (row, slice) in output.chunks_mut(cols).enumerate() {
-				do_row(row, slice);
-			}
+			for (r, sl) in output.chunks_mut(cols).enumerate() { do_row(r, sl); }
 		}
 	} else {
-		for (row, slice) in output.chunks_mut(cols).enumerate() {
-			do_row(row, slice);
-		}
+		for (r, sl) in output.chunks_mut(cols).enumerate() { do_row(r, sl); }
 	}
 
 	Ok(combos)
@@ -774,22 +771,6 @@ unsafe fn tsf_row_avx512_long(data: &[f64], first: usize, period: usize, sum_x: 
 	tsf_row_scalar(data, first, period, sum_x, divisor, out)
 }
 
-#[inline(always)]
-pub fn expand_grid_tsf(r: &TsfBatchRange) -> Vec<TsfParams> {
-	fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-		if step == 0 || start == end {
-			return vec![start];
-		}
-		(start..=end).step_by(step).collect()
-	}
-
-	let periods = axis_usize(r.period);
-	let mut out = Vec::with_capacity(periods.len());
-	for &p in &periods {
-		out.push(TsfParams { period: Some(p) });
-	}
-	out
-}
 
 // ================================
 // Python Bindings
@@ -1132,6 +1113,39 @@ mod tests {
 		let input = TsfInput::from_slice(&input_data, params);
 		let res = tsf_with_kernel(&input, kernel);
 		assert!(res.is_err(), "[{}] TSF should fail with zero period", test_name);
+		if let Err(e) = res {
+			assert!(matches!(e, TsfError::PeriodTooSmall { period: 0 }));
+		}
+		Ok(())
+	}
+
+	fn check_tsf_period_one(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		let input_data = [10.0, 20.0, 30.0, 40.0, 50.0];
+		let params = TsfParams { period: Some(1) };
+		let input = TsfInput::from_slice(&input_data, params);
+		let res = tsf_with_kernel(&input, kernel);
+		assert!(res.is_err(), "[{}] TSF should fail with period=1", test_name);
+		if let Err(e) = res {
+			assert!(matches!(e, TsfError::PeriodTooSmall { period: 1 }));
+		}
+		Ok(())
+	}
+
+	fn check_tsf_mismatched_output_len(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		let input_data = [10.0, 20.0, 30.0, 40.0, 50.0];
+		let params = TsfParams { period: Some(3) };
+		let input = TsfInput::from_slice(&input_data, params);
+		
+		// Destination slice has wrong length
+		let mut dst = vec![0.0; 10]; // Wrong size (should be 5)
+		let res = tsf_into_slice(&mut dst, &input, kernel);
+		
+		assert!(res.is_err(), "[{}] TSF should fail with mismatched output length", test_name);
+		if let Err(e) = res {
+			assert!(matches!(e, TsfError::MismatchedOutputLen { expected: 5, actual: 10 }));
+		}
 		Ok(())
 	}
 
@@ -1544,6 +1558,8 @@ mod tests {
 		check_tsf_accuracy,
 		check_tsf_default_candles,
 		check_tsf_zero_period,
+		check_tsf_period_one,
+		check_tsf_mismatched_output_len,
 		check_tsf_period_exceeds_length,
 		check_tsf_very_small_dataset,
 		check_tsf_reinput,

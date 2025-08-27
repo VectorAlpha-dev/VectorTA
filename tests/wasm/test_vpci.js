@@ -46,12 +46,14 @@ test('VPCI accuracy', () => {
     // Using default parameters: short_range=5, long_range=25
     const result = wasm.vpci_js(close, volume, 5, 25);
     
-    // Result is flattened [vpci..., vpcis...]
-    assert.strictEqual(result.length, close.length * 2, 'Result should be twice input length (vpci + vpcis)');
+    // Result is an object with vpci and vpcis arrays
+    assert(result.vpci, 'Result should have vpci array');
+    assert(result.vpcis, 'Result should have vpcis array');
+    assert.strictEqual(result.vpci.length, close.length, 'VPCI length should match input length');
+    assert.strictEqual(result.vpcis.length, close.length, 'VPCIS length should match input length');
     
-    const len = close.length;
-    const vpci = result.slice(0, len);
-    const vpcis = result.slice(len);
+    const vpci = result.vpci;
+    const vpcis = result.vpcis;
     
     // Check last 5 values match expected from Rust tests
     const expectedLastFiveVpci = [
@@ -83,8 +85,10 @@ test('VPCI with default parameters', () => {
     
     // Test with default values (short=5, long=25)
     const result = wasm.vpci_js(close, volume, 5, 25);
-    assert(result instanceof Float64Array || Array.isArray(result), 'Result should be an array');
-    assert.strictEqual(result.length, close.length * 2, 'Result should be twice input length');
+    assert(result.vpci, 'Result should have vpci array');
+    assert(result.vpcis, 'Result should have vpcis array');
+    assert.strictEqual(result.vpci.length, close.length, 'VPCI should match input length');
+    assert.strictEqual(result.vpcis.length, close.length, 'VPCIS should match input length');
 });
 
 test('VPCI error handling - zero period', () => {
@@ -125,7 +129,7 @@ test('VPCI error handling - insufficient data', () => {
     
     assert.throws(
         () => wasm.vpci_js(singlePoint, singlePoint, 5, 25),
-        /Not enough valid data/,
+        /Invalid range/,
         'Should throw error for insufficient data'
     );
 });
@@ -135,7 +139,7 @@ test('VPCI error handling - empty input', () => {
     
     assert.throws(
         () => wasm.vpci_js(empty, empty, 5, 25),
-        /Empty/,
+        /All close or volume values are NaN/,
         'Should throw error for empty input'
     );
 });
@@ -155,9 +159,9 @@ test('VPCI NaN handling', () => {
     const volume = testData.volume;
     
     const result = wasm.vpci_js(close, volume, 5, 25);
+    const vpci = result.vpci;
+    const vpcis = result.vpcis;
     const len = close.length;
-    const vpci = result.slice(0, len);
-    const vpcis = result.slice(len);
     
     // Check that we have expected number of NaN values at the beginning
     let nanCountVpci = 0;
@@ -205,8 +209,8 @@ test('VPCI batch processing', () => {
     
     // Compare with single calculation
     const singleResult = wasm.vpci_js(close, volume, 5, 25);
-    const singleVpci = singleResult.slice(0, 100);
-    const singleVpcis = singleResult.slice(100);
+    const singleVpci = singleResult.vpci;
+    const singleVpcis = singleResult.vpcis;
     
     assertArrayClose(
         result.vpci, 
@@ -244,8 +248,8 @@ test('VPCI batch with multiple parameters', () => {
     const firstRowVpci = result.vpci.slice(0, 50);
     const firstRowVpcis = result.vpcis.slice(0, 50);
     const singleResult = wasm.vpci_js(close, volume, 5, 20);
-    const singleVpci = singleResult.slice(0, 50);
-    const singleVpcis = singleResult.slice(50);
+    const singleVpci = singleResult.vpci;
+    const singleVpcis = singleResult.vpcis;
     
     assertArrayClose(firstRowVpci, singleVpci, 1e-10, 'First batch VPCI row should match single calculation');
     assertArrayClose(firstRowVpcis, singleVpcis, 1e-10, 'First batch VPCIS row should match single calculation');
@@ -307,8 +311,8 @@ test('VPCI fast API (vpci_into)', () => {
         
         // Compare with safe API
         const expected = wasm.vpci_js(close, volume, 5, 25);
-        const expectedVpci = expected.slice(0, len);
-        const expectedVpcis = expected.slice(len);
+        const expectedVpci = expected.vpci;
+        const expectedVpcis = expected.vpcis;
         
         assertArrayClose(resultVpci, expectedVpci, 1e-14, 'Fast API VPCI should match safe API');
         assertArrayClose(resultVpcis, expectedVpcis, 1e-14, 'Fast API VPCIS should match safe API');

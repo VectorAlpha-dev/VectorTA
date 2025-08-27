@@ -385,8 +385,8 @@ test('StdDev batch zero-copy API', () => {
         const inView = new Float64Array(wasm.__wasm.memory.buffer, inPtr, data.length);
         inView.set(data);
         
-        // Run batch computation
-        const result = wasm.stddev_batch_into(inPtr, outPtr, data.length, config);
+        // Run batch computation (using config-based API for backward compatibility)
+        const result = wasm.stddev_batch_into_cfg(inPtr, outPtr, data.length, config);
         
         // Verify metadata
         assert.strictEqual(result.rows, expectedRows);

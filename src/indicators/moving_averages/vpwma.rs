@@ -1,16 +1,15 @@
 //! # Variable Power Weighted Moving Average (VPWMA)
 //!
 //! The Variable Power Weighted Moving Average (VPWMA) adjusts the weights of each
-//! price data point in its calculation based on their respective volumes. This
-//! means that periods with higher trading volumes have a greater influence on
-//! the moving average. By raising the weight to a specified power (`power`),
-//! one can control how aggressively recent, high-volume data points dominate
-//! the resulting average.
+//! price data point in its calculation based on their recency. More recent data
+//! points receive higher weights according to the formula: weight = (period - k)^power,
+//! where k is the offset from the current position. By adjusting the power parameter,
+//! one can control how aggressively recent data points dominate the resulting average.
 //!
 //! ## Parameters
 //! - **period**: Number of data points in each calculation window (defaults to 14).
-//! - **power**: Exponent applied to the volume-based weight function. Higher
-//!   values give more impact to recent, higher-volume data (defaults to 0.382).
+//! - **power**: Exponent applied to the recency-based weight function. Higher
+//!   values give more impact to recent data points (defaults to 0.382).
 //!
 //! ## Errors
 //! - **AllValuesNaN**: vpwma: All input data values are `NaN`.
@@ -201,6 +200,10 @@ pub enum VpwmaError {
 	NotEnoughValidData { needed: usize, valid: usize },
 	#[error("vpwma: Invalid power: {power}")]
 	InvalidPower { power: f64 },
+	#[error("vpwma: Invalid batch kernel: {kernel:?}. Expected a batch kernel (ScalarBatch, Avx2Batch, or Avx512Batch).")]
+	InvalidBatchKernel { kernel: Kernel },
+	#[error("vpwma: Output length mismatch: out_len = {out_len}, data_len = {data_len}")]
+	InvalidOutLen { out_len: usize, data_len: usize },
 }
 
 #[inline]
@@ -265,6 +268,10 @@ pub fn vpwma_with_kernel(input: &VpwmaInput, kernel: Kernel) -> Result<VpwmaOutp
 			Kernel::Avx2 | Kernel::Avx2Batch => vpwma_avx2(data, &weights, period, first, inv_norm, &mut out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 | Kernel::Avx512Batch => vpwma_avx512(data, &weights, period, first, inv_norm, &mut out),
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+				vpwma_scalar(data, &weights, period, first, inv_norm, &mut out)
+			}
 			_ => unreachable!(),
 		}
 	}
@@ -494,8 +501,8 @@ pub fn vpwma_batch_with_kernel(
 	let kernel = match k {
 		Kernel::Auto => detect_best_batch_kernel(),
 		other if other.is_batch() => other,
-		_ => {
-			return Err(VpwmaError::InvalidPeriod { period: 0, data_len: 0 });
+		other => {
+			return Err(VpwmaError::InvalidBatchKernel { kernel: other });
 		}
 	};
 	let simd = match kernel {
@@ -599,22 +606,24 @@ fn vpwma_batch_inner(
 	}
 
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(VpwmaError::AllValuesNaN)?;
-	let max_p = combos.iter().map(|c| round_up8(c.period.unwrap())).max().unwrap();
-	if data.len() - first < max_p {
+	let max_period = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	if data.len() - first < max_period {
 		return Err(VpwmaError::NotEnoughValidData {
-			needed: max_p,
+			needed: max_period,
 			valid: data.len() - first,
 		});
 	}
+	let max_p = combos.iter().map(|c| round_up8(c.period.unwrap())).max().unwrap();
 
 	let rows = combos.len();
 	let cols = data.len();
+
+	// Build flattened weights and norms (unchanged from your version)
 	let mut inv_norms = vec![0.0; rows];
 	let cap = rows * max_p;
 	let mut flat_w = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cap);
 	flat_w.resize(cap, 0.0);
 
-	// Build, for each combo, exactly (period - 1) weights
 	for (row, prm) in combos.iter().enumerate() {
 		let period = prm.period.unwrap();
 		let power = prm.power.unwrap();
@@ -631,20 +640,17 @@ fn vpwma_batch_inner(
 		inv_norms[row] = 1.0 / norm;
 	}
 
-	// VPWMA uses period-1 weights, so warmup is first + period - 1
+	// Warmup vector and uninit matrix allocation
 	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-	// --- 2.  allocate an uninitialised rows×cols matrix and stamp the prefixes --
-	let mut raw = make_uninit_matrix(rows, cols);
-	unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
-
-	// --- 3.  closure that fills ONE row; it works on &mut [MaybeUninit<f64>] ----
+	// Row filler uses MaybeUninit slices
 	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
 		let period = combos[row].period.unwrap();
 		let w_ptr = flat_w.as_ptr().add(row * max_p);
 		let inv_n = *inv_norms.get_unchecked(row);
 
-		// Cast just this row to &mut [f64] so the row-kernel can write into it.
 		let out_row = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
 		match kern {
@@ -653,40 +659,41 @@ fn vpwma_batch_inner(
 			Kernel::Avx2 => vpwma_row_avx2(data, first, period, max_p, w_ptr, inv_n, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 => vpwma_row_avx512(data, first, period, max_p, w_ptr, inv_n, out_row),
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx512 => vpwma_row_scalar(data, first, period, max_p, w_ptr, inv_n, out_row),
 			_ => unreachable!(),
 		}
 	};
 
-	// --- 4.  run every row (parallel or serial) ---------------------------------
-	if parallel {
-		#[cfg(not(target_arch = "wasm32"))]
-		{
-			raw.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
-		}
-
-		#[cfg(target_arch = "wasm32")]
-		{
-			for (row, slice) in raw.chunks_mut(cols).enumerate() {
+	// Parallel/serial over MaybeUninit rows
+	#[cfg(not(target_arch = "wasm32"))]
+	{
+		if parallel {
+			buf_mu.par_chunks_mut(cols).enumerate().for_each(|(row, slice)| do_row(row, slice));
+		} else {
+			for (row, slice) in buf_mu.chunks_mut(cols).enumerate() {
 				do_row(row, slice);
 			}
 		}
-	} else {
-		for (row, slice) in raw.chunks_mut(cols).enumerate() {
+	}
+	#[cfg(target_arch = "wasm32")]
+	{
+		for (row, slice) in buf_mu.chunks_mut(cols).enumerate() {
 			do_row(row, slice);
 		}
 	}
 
-	// --- 5.  all elements are initialised; transmute into Vec<f64> --------------
-	let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
+	// Safe ownership transfer to Vec<f64>
+	let mut guard = core::mem::ManuallyDrop::new(buf_mu);
+	let values = unsafe {
+		Vec::from_raw_parts(
+			guard.as_mut_ptr() as *mut f64,
+			guard.len(),
+			guard.capacity(),
+		)
+	};
 
-	Ok(VpwmaBatchOutput {
-		values,
-		combos,
-		rows,
-		cols,
-	})
+	Ok(VpwmaBatchOutput { values, combos, rows, cols })
 }
 
 #[inline(always)]
@@ -707,22 +714,24 @@ fn vpwma_batch_inner_into(
 	}
 
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(VpwmaError::AllValuesNaN)?;
-	let max_p = combos.iter().map(|c| round_up8(c.period.unwrap())).max().unwrap();
-	if data.len() - first < max_p {
+	let max_period = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	if data.len() - first < max_period {
 		return Err(VpwmaError::NotEnoughValidData {
-			needed: max_p,
+			needed: max_period,
 			valid: data.len() - first,
 		});
 	}
+	let max_p = combos.iter().map(|c| round_up8(c.period.unwrap())).max().unwrap();
 
 	let rows = combos.len();
 	let cols = data.len();
+
+	// Flattened weights + norms (unchanged)
 	let mut inv_norms = vec![0.0; rows];
 	let cap = rows * max_p;
 	let mut flat_w = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cap);
 	flat_w.resize(cap, 0.0);
 
-	// Build, for each combo, exactly (period - 1) weights
 	for (row, prm) in combos.iter().enumerate() {
 		let period = prm.period.unwrap();
 		let power = prm.power.unwrap();
@@ -739,26 +748,19 @@ fn vpwma_batch_inner_into(
 		inv_norms[row] = 1.0 / norm;
 	}
 
-	// VPWMA uses period-1 weights, so warmup is first + period - 1
+	// Stamp warmup NaNs using helper
 	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
+	let out_mu: &mut [MaybeUninit<f64>] = unsafe {
+		core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
+	};
+	init_matrix_prefixes(out_mu, cols, &warm);
 
-	// Initialize the prefixes with NaN using unsafe to write to MaybeUninit
-	let out_uninit = unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len()) };
-	
-	// Initialize prefixes efficiently
-	for (row, &warmup) in warm.iter().enumerate() {
-		let row_start = row * cols;
-		let row_slice = &mut out_uninit[row_start..row_start + cols];
-		for i in 0..warmup {
-			row_slice[i].write(f64::NAN);
-		}
-	}
-
-	// Closure that fills ONE row
-	let do_row = |row: usize, dst: &mut [f64]| unsafe {
+	// Row filler takes MaybeUninit rows
+	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
 		let period = combos[row].period.unwrap();
 		let w_ptr = flat_w.as_ptr().add(row * max_p);
 		let inv_n = *inv_norms.get_unchecked(row);
+		let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
 		match kern {
 			Kernel::Scalar => vpwma_row_scalar(data, first, period, max_p, w_ptr, inv_n, dst),
@@ -766,27 +768,25 @@ fn vpwma_batch_inner_into(
 			Kernel::Avx2 => vpwma_row_avx2(data, first, period, max_p, w_ptr, inv_n, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 => vpwma_row_avx512(data, first, period, max_p, w_ptr, inv_n, dst),
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx512 => vpwma_row_scalar(data, first, period, max_p, w_ptr, inv_n, dst),
 			_ => unreachable!(),
 		}
 	};
 
-	// Run every row (parallel or serial)
-	if parallel {
-		#[cfg(not(target_arch = "wasm32"))]
-		{
-			out.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
-		}
-
-		#[cfg(target_arch = "wasm32")]
-		{
-			for (row, slice) in out.chunks_mut(cols).enumerate() {
+	#[cfg(not(target_arch = "wasm32"))]
+	{
+		if parallel {
+			out_mu.par_chunks_mut(cols).enumerate().for_each(|(row, slice)| do_row(row, slice));
+		} else {
+			for (row, slice) in out_mu.chunks_mut(cols).enumerate() {
 				do_row(row, slice);
 			}
 		}
-	} else {
-		for (row, slice) in out.chunks_mut(cols).enumerate() {
+	}
+	#[cfg(target_arch = "wasm32")]
+	{
+		for (row, slice) in out_mu.chunks_mut(cols).enumerate() {
 			do_row(row, slice);
 		}
 	}
@@ -802,8 +802,8 @@ pub fn vpwma_into_slice(dst: &mut [f64], input: &VpwmaInput, kern: Kernel) -> Re
 	}
 	
 	if dst.len() != data.len() {
-		return Err(VpwmaError::InvalidPeriod {
-			period: dst.len(),
+		return Err(VpwmaError::InvalidOutLen {
+			out_len: dst.len(),
 			data_len: data.len(),
 		});
 	}
@@ -1698,9 +1698,10 @@ pub fn vpwma_js(data: &[f64], period: usize, power: f64) -> Result<Vec<f64>, JsV
 	};
 	let input = VpwmaInput::from_slice(data, params);
 
-	vpwma_with_kernel(&input, Kernel::Scalar)
-		.map(|o| o.values)
-		.map_err(|e| JsValue::from_str(&e.to_string()))
+	let mut output = vec![0.0; data.len()];
+	vpwma_into_slice(&mut output, &input, detect_best_kernel())
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	Ok(output)
 }
 
 #[cfg(feature = "wasm")]
@@ -1796,12 +1797,12 @@ pub fn vpwma_into(
 
 		if in_ptr == out_ptr {
 			let mut temp = vec![0.0; len];
-			vpwma_into_slice(&mut temp, &input, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))?;
+			vpwma_into_slice(&mut temp, &input, detect_best_kernel()).map_err(|e| JsValue::from_str(&e.to_string()))?;
 			let out = std::slice::from_raw_parts_mut(out_ptr, len);
 			out.copy_from_slice(&temp);
 		} else {
 			let out = std::slice::from_raw_parts_mut(out_ptr, len);
-			vpwma_into_slice(out, &input, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))?;
+			vpwma_into_slice(out, &input, detect_best_kernel()).map_err(|e| JsValue::from_str(&e.to_string()))?;
 		}
 
 		Ok(())
@@ -1933,7 +1934,7 @@ pub fn vpwma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, 
 		power: config.power_range,
 	};
 
-	let output = vpwma_batch_inner(data, &sweep, Kernel::Auto, false).map_err(|e| JsValue::from_str(&e.to_string()))?;
+	let output = vpwma_batch_inner(data, &sweep, detect_best_kernel(), false).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	let js_output = VpwmaBatchJsOutput {
 		values: output.values,
@@ -1962,20 +1963,25 @@ pub fn vpwma_batch_into(
 		return Err(JsValue::from_str("Null pointer passed to vpwma_batch_into"));
 	}
 
-	let sweep = VpwmaBatchRange {
-		period: (period_start, period_end, period_step),
-		power: (power_start, power_end, power_step),
-	};
-
 	unsafe {
 		let data = std::slice::from_raw_parts(in_ptr, data_len);
+		let sweep = VpwmaBatchRange {
+			period: (period_start, period_end, period_step),
+			power: (power_start, power_end, power_step),
+		};
 		let combos = expand_grid(&sweep);
 		let rows = combos.len();
 		let cols = data_len;
+
 		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
-
-		vpwma_batch_inner_into(data, &sweep, Kernel::Auto, false, out).map_err(|e| JsValue::from_str(&e.to_string()))?;
-
+		// resolve Auto→SIMD like Python path
+		let simd = match detect_best_batch_kernel() {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch => Kernel::Avx2,
+			_ => Kernel::Scalar,
+		};
+		vpwma_batch_inner_into(data, &sweep, simd, false, out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
 		Ok(rows)
 	}
 }

@@ -41,23 +41,29 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-use aligned_vec::{AVec, CACHELINE_ALIGN};
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
-use std::convert::AsRef;
+use std::collections::VecDeque;
 use std::error::Error;
 use thiserror::Error;
 
-impl<'a> AsRef<[f64]> for SafeZoneStopInput<'a> {
-	#[inline(always)]
-	fn as_ref(&self) -> &[f64] {
-		match &self.data {
-			SafeZoneStopData::Candles { candles, .. } => source_type(candles, "close"),
-			SafeZoneStopData::Slices { low, .. } => low,
+// Core helper functions
+#[inline(always)]
+fn first_valid_pair(high: &[f64], low: &[f64]) -> Option<usize> {
+	let n = high.len().min(low.len());
+	for i in 0..n {
+		if !high[i].is_nan() && !low[i].is_nan() {
+			return Some(i);
 		}
 	}
+	None
+}
+
+#[inline(always)]
+fn warm_len(first: usize, period: usize, max_lookback: usize) -> usize {
+	// first usable out index i must include j = first+period in its window,
+	// and also have a full lookback window.
+	first + period.max(max_lookback.saturating_sub(1))
 }
 
 #[derive(Debug, Clone)]
@@ -252,14 +258,14 @@ pub fn safezonestop_with_kernel(
 	if period == 0 || period > len {
 		return Err(SafeZoneStopError::InvalidPeriod { period, data_len: len });
 	}
-
-	let has_any_non_nan = high.iter().any(|&v| !v.is_nan()) || low.iter().any(|&v| !v.is_nan());
-	if !has_any_non_nan {
-		return Err(SafeZoneStopError::AllValuesNaN);
-	}
-
 	if direction != "long" && direction != "short" {
 		return Err(SafeZoneStopError::InvalidDirection);
+	}
+
+	let first = first_valid_pair(high, low).ok_or(SafeZoneStopError::AllValuesNaN)?;
+	let needed = (period + 1).max(max_lookback);
+	if len - first < needed {
+		return Err(SafeZoneStopError::NotEnoughValidData { needed, valid: len - first });
 	}
 
 	let chosen = match kernel {
@@ -267,26 +273,22 @@ pub fn safezonestop_with_kernel(
 		other => other,
 	};
 
-	// Determine warmup period
-	let warmup_period = period.saturating_sub(1).max(max_lookback.saturating_sub(1));
-	
-	// Use proper memory allocation
-	let mut out = alloc_with_nan_prefix(len, warmup_period);
-	// Fill remaining values with NaN for binding compatibility
-	for i in warmup_period..out.len() {
-		out[i] = f64::NAN;
-	}
+	// allocate only warm prefix as NaN
+	let warm = warm_len(first, period, max_lookback);
+	let mut out = alloc_with_nan_prefix(len, warm);
 
 	unsafe {
 		match chosen {
 			Kernel::Scalar | Kernel::ScalarBatch => {
-				safezonestop_scalar(high, low, period, mult, max_lookback, direction, &mut out)
+				safezonestop_scalar(high, low, period, mult, max_lookback, direction, first, &mut out)
 			}
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => safezonestop_avx2(high, low, period, mult, max_lookback, direction, &mut out),
+			Kernel::Avx2 | Kernel::Avx2Batch => {
+				safezonestop_avx2(high, low, period, mult, max_lookback, direction, first, &mut out)
+			}
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 | Kernel::Avx512Batch => {
-				safezonestop_avx512(high, low, period, mult, max_lookback, direction, &mut out)
+				safezonestop_avx512(high, low, period, mult, max_lookback, direction, first, &mut out)
 			}
 			_ => unreachable!(),
 		}
@@ -304,67 +306,53 @@ pub fn safezonestop_into_slice(
 ) -> Result<(), SafeZoneStopError> {
 	let (high, low, direction) = match &input.data {
 		SafeZoneStopData::Candles { candles, direction } => {
-			let high = source_type(candles, "high");
-			let low = source_type(candles, "low");
-			(high, low, *direction)
+			(source_type(candles, "high"), source_type(candles, "low"), *direction)
 		}
 		SafeZoneStopData::Slices { high, low, direction } => (*high, *low, *direction),
 	};
 
 	let len = high.len();
-	if len != low.len() {
-		return Err(SafeZoneStopError::MismatchedLengths);
-	}
-	
-	if dst.len() != len {
-		return Err(SafeZoneStopError::InvalidPeriod { period: dst.len(), data_len: len });
-	}
+	if len != low.len() { return Err(SafeZoneStopError::MismatchedLengths); }
+	if dst.len() != len { return Err(SafeZoneStopError::MismatchedLengths); }
 
-	let period = input.params.period.unwrap_or(22);
-	let mult = input.params.mult.unwrap_or(2.5);
-	let max_lookback = input.params.max_lookback.unwrap_or(3);
-
+	let period = input.get_period();
+	let mult = input.get_mult();
+	let max_lookback = input.get_max_lookback();
 	if period == 0 || period > len {
 		return Err(SafeZoneStopError::InvalidPeriod { period, data_len: len });
 	}
-	
 	if direction != "long" && direction != "short" {
 		return Err(SafeZoneStopError::InvalidDirection);
 	}
 
-	let chosen = match kern {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
-
-	// Determine warmup period
-	let warmup_period = period.saturating_sub(1).max(max_lookback.saturating_sub(1));
-	
-	// Fill warmup period with NaN
-	let warmup_end = warmup_period.min(dst.len());
-	for v in &mut dst[..warmup_end] {
-		*v = f64::NAN;
+	let first = first_valid_pair(high, low).ok_or(SafeZoneStopError::AllValuesNaN)?;
+	let needed = (period + 1).max(max_lookback);
+	if len - first < needed {
+		return Err(SafeZoneStopError::NotEnoughValidData { needed, valid: len - first });
 	}
+
+	let chosen = match kern { Kernel::Auto => detect_best_kernel(), other => other };
 
 	unsafe {
 		match chosen {
 			Kernel::Scalar | Kernel::ScalarBatch => {
-				safezonestop_scalar(high, low, period, mult, max_lookback, direction, dst)
+				safezonestop_scalar(high, low, period, mult, max_lookback, direction, first, dst)
 			}
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => safezonestop_avx2(high, low, period, mult, max_lookback, direction, dst),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => {
-				safezonestop_avx512(high, low, period, mult, max_lookback, direction, dst)
-			}
+			#[cfg(all(feature="nightly-avx", target_arch="x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => safezonestop_avx2(high, low, period, mult, max_lookback, direction, first, dst),
+			#[cfg(all(feature="nightly-avx", target_arch="x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => safezonestop_avx512(high, low, period, mult, max_lookback, direction, first, dst),
 			_ => unreachable!(),
 		}
 	}
 
+	// enforce warm NaNs after compute (ALMA pattern)
+	let warm_end = warm_len(first, period, max_lookback).min(dst.len());
+	for v in &mut dst[..warm_end] { *v = f64::NAN; }
+
 	Ok(())
 }
 
-#[inline(always)]
 pub unsafe fn safezonestop_scalar(
 	high: &[f64],
 	low: &[f64],
@@ -372,93 +360,70 @@ pub unsafe fn safezonestop_scalar(
 	mult: f64,
 	max_lookback: usize,
 	direction: &str,
+	first: usize,
 	out: &mut [f64],
 ) {
 	let len = high.len();
-	
-	// Note: These allocations are necessary for the algorithm's intermediate calculations
-	// They store derived values that must be computed sequentially
-	// Unlike output arrays, these cannot use uninitialized memory as they need specific values
-	
-	// Compute directional movement
+	// Work buffer must be fully initialized because we read .is_nan() before all writes
 	let mut dm_smooth = vec![f64::NAN; len];
-	
-	if direction == "long" {
-		// Calculate minus DM for long positions
+
+	// Wilder bootstrap starting at `first`
+	if first + period < len {
+		let end0 = first + period;
 		let mut sum = 0.0;
-		for i in 1..=period.min(len - 1) {
-			let up_move = high[i] - high[i - 1];
-			let down_move = low[i - 1] - low[i];
-			if down_move > up_move && down_move > 0.0 {
-				sum += down_move;
-			}
+		for i in (first + 1)..=end0 {
+			let up = high[i] - high[i - 1];
+			let dn = low[i - 1] - low[i];
+			let dm = if direction == "long" {
+				if dn > up && dn > 0.0 { dn } else { 0.0 }
+			} else {
+				if up > dn && up > 0.0 { up } else { 0.0 }
+			};
+			sum += dm;
 		}
-		
-		if period < len {
-			dm_smooth[period] = sum;
-			for i in (period + 1)..len {
-				let up_move = high[i] - high[i - 1];
-				let down_move = low[i - 1] - low[i];
-				let dm = if down_move > up_move && down_move > 0.0 { down_move } else { 0.0 };
-				dm_smooth[i] = dm_smooth[i - 1] - (dm_smooth[i - 1] / (period as f64)) + dm;
-			}
+		dm_smooth[end0] = sum;
+		for i in (end0 + 1)..len {
+			let up = high[i] - high[i - 1];
+			let dn = low[i - 1] - low[i];
+			let dm = if direction == "long" {
+				if dn > up && dn > 0.0 { dn } else { 0.0 }
+			} else {
+				if up > dn && up > 0.0 { up } else { 0.0 }
+			};
+			let prev = dm_smooth[i - 1];
+			dm_smooth[i] = prev - (prev / period as f64) + dm;
 		}
-		
-		// Compute SafeZone values for long
-		for i in 0..len {
-			if i + 1 < max_lookback {
-				continue;
-			}
-			
+	}
+
+	// Only write after warm
+	let warm = first + period.max(max_lookback) - 1;
+	if warm >= len { return; }
+	
+	// Fill the warmup period with NaN
+	for i in 0..warm.min(len) {
+		out[i] = f64::NAN;
+	}
+
+	if direction == "long" {
+		for i in warm..len {
 			let start_idx = i + 1 - max_lookback;
 			let mut mx = f64::NAN;
-			
 			for j in start_idx..=i {
 				if j > 0 && !dm_smooth[j].is_nan() {
 					let val = low[j - 1] - mult * dm_smooth[j];
-					if mx.is_nan() || val > mx {
-						mx = val;
-					}
+					if mx.is_nan() || val > mx { mx = val; }
 				}
 			}
 			out[i] = mx;
 		}
 	} else {
-		// Calculate plus DM for short positions
-		let mut sum = 0.0;
-		for i in 1..=period.min(len - 1) {
-			let up_move = high[i] - high[i - 1];
-			let down_move = low[i - 1] - low[i];
-			if up_move > down_move && up_move > 0.0 {
-				sum += up_move;
-			}
-		}
-		
-		if period < len {
-			dm_smooth[period] = sum;
-			for i in (period + 1)..len {
-				let up_move = high[i] - high[i - 1];
-				let down_move = low[i - 1] - low[i];
-				let dm = if up_move > down_move && up_move > 0.0 { up_move } else { 0.0 };
-				dm_smooth[i] = dm_smooth[i - 1] - (dm_smooth[i - 1] / (period as f64)) + dm;
-			}
-		}
-		
-		// Compute SafeZone values for short
-		for i in 0..len {
-			if i + 1 < max_lookback {
-				continue;
-			}
-			
+		for i in warm..len {
 			let start_idx = i + 1 - max_lookback;
 			let mut mn = f64::NAN;
-			
 			for j in start_idx..=i {
 				if j > 0 && !dm_smooth[j].is_nan() {
 					let val = high[j - 1] + mult * dm_smooth[j];
-					if mn.is_nan() || val < mn {
-						mn = val;
-					}
+					if mn.is_nan() || val < mn { mn = val; }
 				}
 			}
 			out[i] = mn;
@@ -475,12 +440,13 @@ pub unsafe fn safezonestop_avx512(
 	mult: f64,
 	max_lookback: usize,
 	direction: &str,
+	first: usize,
 	out: &mut [f64],
 ) {
 	if period <= 32 {
-		safezonestop_avx512_short(high, low, period, mult, max_lookback, direction, out);
+		safezonestop_avx512_short(high, low, period, mult, max_lookback, direction, first, out);
 	} else {
-		safezonestop_avx512_long(high, low, period, mult, max_lookback, direction, out);
+		safezonestop_avx512_long(high, low, period, mult, max_lookback, direction, first, out);
 	}
 }
 
@@ -493,9 +459,10 @@ pub unsafe fn safezonestop_avx512_short(
 	mult: f64,
 	max_lookback: usize,
 	direction: &str,
+	first: usize,
 	out: &mut [f64],
 ) {
-	safezonestop_scalar(high, low, period, mult, max_lookback, direction, out)
+	safezonestop_scalar(high, low, period, mult, max_lookback, direction, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -507,9 +474,10 @@ pub unsafe fn safezonestop_avx512_long(
 	mult: f64,
 	max_lookback: usize,
 	direction: &str,
+	first: usize,
 	out: &mut [f64],
 ) {
-	safezonestop_scalar(high, low, period, mult, max_lookback, direction, out)
+	safezonestop_scalar(high, low, period, mult, max_lookback, direction, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -521,9 +489,10 @@ pub unsafe fn safezonestop_avx2(
 	mult: f64,
 	max_lookback: usize,
 	direction: &str,
+	first: usize,
 	out: &mut [f64],
 ) {
-	safezonestop_scalar(high, low, period, mult, max_lookback, direction, out)
+	safezonestop_scalar(high, low, period, mult, max_lookback, direction, first, out)
 }
 
 #[derive(Debug, Clone)]
@@ -531,16 +500,27 @@ pub struct SafeZoneStopStream {
 	period: usize,
 	mult: f64,
 	max_lookback: usize,
-	direction: String,
-	buffer_high: Vec<f64>,
-	buffer_low: Vec<f64>,
-	idx: usize,
-	filled: bool,
-	last_result: f64,
-	// Pre-allocated work buffers to avoid allocations on every update
-	work_high: Vec<f64>,
-	work_low: Vec<f64>,
-	work_out: Vec<f64>,
+	dir_long: bool,
+
+	// index of current bar (0-based). increments after each processed pair.
+	i: usize,
+
+	// previous bar to form DM
+	have_prev: bool,
+	prev_high: f64,
+	prev_low: f64,
+
+	// Wilder state
+	boot_n: usize,       // number of raw DM terms accumulated toward bootstrap
+	boot_sum: f64,       // sum of raw DM terms during bootstrap
+	dm_prev: f64,        // last Wilder-smoothed DM
+	dm_ready: bool,      // true once bootstrap completes
+
+	// monotonic deque for rolling extremum of candidate values
+	dq_idx: VecDeque<usize>,
+	dq_val: VecDeque<f64>,
+
+	warmup_i: usize,     // earliest i with a usable output
 }
 
 impl SafeZoneStopStream {
@@ -548,70 +528,136 @@ impl SafeZoneStopStream {
 		let period = params.period.unwrap_or(22);
 		let mult = params.mult.unwrap_or(2.5);
 		let max_lookback = params.max_lookback.unwrap_or(3);
+
 		if period == 0 {
 			return Err(SafeZoneStopError::InvalidPeriod { period, data_len: 0 });
 		}
 		if direction != "long" && direction != "short" {
 			return Err(SafeZoneStopError::InvalidDirection);
 		}
-		let buf_size = period.max(max_lookback);
+
+		let dir_long = direction == "long";
+		let warmup_i = period.max(max_lookback.saturating_sub(1)); // matches warm_len(first=0,...)
+
+		let mut dq_idx = VecDeque::with_capacity(max_lookback.max(1));
+		let mut dq_val = VecDeque::with_capacity(max_lookback.max(1));
+		// ensure no future reallocs within bounds
+		dq_idx.shrink_to_fit();
+		dq_val.shrink_to_fit();
+
 		Ok(Self {
-			period,
-			mult,
-			max_lookback,
-			direction: direction.to_string(),
-			buffer_high: vec![f64::NAN; buf_size],
-			buffer_low: vec![f64::NAN; buf_size],
-			idx: 0,
-			filled: false,
-			last_result: f64::NAN,
-			// Pre-allocate work buffers
-			work_high: vec![0.0; buf_size],
-			work_low: vec![0.0; buf_size],
-			work_out: vec![f64::NAN; buf_size],
+			period, mult, max_lookback, dir_long,
+			i: 0,
+			have_prev: false,
+			prev_high: f64::NAN,
+			prev_low: f64::NAN,
+			boot_n: 0,
+			boot_sum: 0.0,
+			dm_prev: f64::NAN,
+			dm_ready: false,
+			dq_idx,
+			dq_val,
+			warmup_i,
 		})
 	}
-	pub fn update(&mut self, high: f64, low: f64) -> Option<f64> {
-		let n = self.buffer_high.len();
-		self.buffer_high[self.idx] = high;
-		self.buffer_low[self.idx] = low;
-		self.idx = (self.idx + 1) % n;
-		if !self.filled && self.idx == 0 {
-			self.filled = true;
+
+	#[inline]
+	fn push_candidate(&mut self, j: usize, cand: f64) {
+		// evict out-of-window indices: keep j' in [j+1-max_lookback, j]
+		let start = j + 1 - self.max_lookback;
+		while let Some(&front_idx) = self.dq_idx.front() {
+			if front_idx < start { self.dq_idx.pop_front(); self.dq_val.pop_front(); }
+			else { break; }
 		}
-		if !self.filled {
+		// maintain monotonicity
+		if self.dir_long {
+			while let Some(&back_val) = self.dq_val.back() {
+				if back_val <= cand { self.dq_val.pop_back(); self.dq_idx.pop_back(); }
+				else { break; }
+			}
+		} else {
+			while let Some(&back_val) = self.dq_val.back() {
+				if back_val >= cand { self.dq_val.pop_back(); self.dq_idx.pop_back(); }
+				else { break; }
+			}
+		}
+		self.dq_idx.push_back(j);
+		self.dq_val.push_back(cand);
+	}
+
+	#[inline]
+	fn reset_on_nan(&mut self) {
+		// Hard reset to match scalar assumptions if a NaN appears
+		self.have_prev = false;
+		self.boot_n = 0;
+		self.boot_sum = 0.0;
+		self.dm_prev = f64::NAN;
+		self.dm_ready = false;
+		self.dq_idx.clear();
+		self.dq_val.clear();
+	}
+
+	pub fn update(&mut self, high: f64, low: f64) -> Option<f64> {
+		if !high.is_finite() || !low.is_finite() {
+			self.reset_on_nan();
 			return None;
 		}
-		
-		// Copy circular buffer to work buffers in correct order (no allocation)
-		let mut write_idx = 0;
-		for read_idx in self.idx..n {
-			self.work_high[write_idx] = self.buffer_high[read_idx];
-			self.work_low[write_idx] = self.buffer_low[read_idx];
-			write_idx += 1;
+
+		if !self.have_prev {
+			self.prev_high = high;
+			self.prev_low = low;
+			self.have_prev = true;
+			self.i = 0;
+			return None; // need two bars to form first DM
 		}
-		for read_idx in 0..self.idx {
-			self.work_high[write_idx] = self.buffer_high[read_idx];
-			self.work_low[write_idx] = self.buffer_low[read_idx];
-			write_idx += 1;
+
+		// Form raw DM at j = i+1 from prev and current
+		let up = high - self.prev_high;
+		let dn = self.prev_low - low;
+
+		let dm_raw = if self.dir_long {
+			if dn > up && dn > 0.0 { dn } else { 0.0 }
+		} else {
+			if up > dn && up > 0.0 { up } else { 0.0 }
+		};
+
+		let j = self.i + 1;
+
+		// Wilder smoothing
+		if !self.dm_ready {
+			self.boot_n += 1;
+			self.boot_sum += dm_raw;
+			if self.boot_n == self.period {
+				self.dm_prev = self.boot_sum; // bootstrap at j = period
+				self.dm_ready = true;
+			}
+		} else {
+			self.dm_prev = self.dm_prev - (self.dm_prev / self.period as f64) + dm_raw;
 		}
-		
-		// Reset output buffer
-		self.work_out.fill(f64::NAN);
-		
-		unsafe {
-			safezonestop_scalar(
-				&self.work_high,
-				&self.work_low,
-				self.period,
-				self.mult,
-				self.max_lookback,
-				&self.direction,
-				&mut self.work_out,
-			);
+
+		// Build candidate using previous bar's extreme and current smoothed DM
+		if self.dm_ready {
+			let cand = if self.dir_long {
+				self.prev_low - self.mult * self.dm_prev
+			} else {
+				self.prev_high + self.mult * self.dm_prev
+			};
+			self.push_candidate(j, cand);
 		}
-		self.last_result = *self.work_out.last().unwrap_or(&f64::NAN);
-		Some(self.last_result)
+
+		// advance prev for next tick
+		self.prev_high = high;
+		self.prev_low = low;
+		self.i = j;
+
+		// Output when both conditions hold:
+		// 1) dm_ready (i >= period)
+		// 2) i >= warmup_i
+		if self.dm_ready && self.i >= self.warmup_i && !self.dq_val.is_empty() {
+			Some(*self.dq_val.front().unwrap())
+		} else {
+			None
+		}
 	}
 }
 
@@ -807,62 +853,41 @@ fn safezonestop_batch_inner(
 	parallel: bool,
 ) -> Result<SafeZoneStopBatchOutput, SafeZoneStopError> {
 	let combos = expand_grid(sweep);
-	if combos.is_empty() {
-		return Err(SafeZoneStopError::InvalidPeriod { period: 0, data_len: 0 });
-	}
-	if high.len() != low.len() {
-		return Err(SafeZoneStopError::MismatchedLengths);
-	}
+	if combos.is_empty() { return Err(SafeZoneStopError::InvalidPeriod { period: 0, data_len: 0 }); }
+	if high.len() != low.len() { return Err(SafeZoneStopError::MismatchedLengths); }
 	let len = high.len();
-	let first = high.iter().position(|x| !x.is_nan()).unwrap_or(0);
-	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-	if len - first < max_p {
-		return Err(SafeZoneStopError::NotEnoughValidData {
-			needed: max_p,
-			valid: len - first,
-		});
+	let first = first_valid_pair(high, low).ok_or(SafeZoneStopError::AllValuesNaN)?;
+	let max_need = combos.iter().map(|c| (c.period.unwrap() + 1).max(c.max_lookback.unwrap())).max().unwrap();
+	if len - first < max_need {
+		return Err(SafeZoneStopError::NotEnoughValidData { needed: max_need, valid: len - first });
 	}
 	let rows = combos.len();
 	let cols = len;
-	
-	// Use proper matrix allocation with NaN prefixes
+
+	// allocate rows×cols uninit, then write NaN only in warm prefixes
 	let mut buf_uninit = make_uninit_matrix(rows, cols);
-	
-	// Initialize warmup periods for each row
-	let warmup_periods: Vec<usize> = combos
-		.iter()
-		.map(|c| {
-			let p = c.period.unwrap();
-			let mlb = c.max_lookback.unwrap();
-			p.saturating_sub(1).max(mlb.saturating_sub(1))
-		})
+	let warm_prefixes: Vec<usize> = combos.iter()
+		.map(|c| warm_len(first, c.period.unwrap(), c.max_lookback.unwrap()))
 		.collect();
-	
-	init_matrix_prefixes(&mut buf_uninit, cols, &warmup_periods);
-	
-	// Use ManuallyDrop to avoid copy - zero-copy pattern from ALMA
-	let mut buf_guard = core::mem::ManuallyDrop::new(buf_uninit);
+	init_matrix_prefixes(&mut buf_uninit, cols, &warm_prefixes);
+
+	// make a &mut [f64] view without copy
+	let mut guard = core::mem::ManuallyDrop::new(buf_uninit);
 	let values_slice: &mut [f64] =
-		unsafe { core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len()) };
-	
-	// Fill remaining values with NaN for binding compatibility
-	for (row_idx, warmup) in warmup_periods.iter().enumerate() {
-		let row_start = row_idx * cols;
-		for col in *warmup..cols {
-			values_slice[row_start + col] = f64::NAN;
-		}
-	}
+		unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
+
+	// no "fill remaining with NaN" here
 
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-		let period = combos[row].period.unwrap();
-		let mult = combos[row].mult.unwrap();
-		let max_lookback = combos[row].max_lookback.unwrap();
+		let p = combos[row].period.unwrap();
+		let m = combos[row].mult.unwrap();
+		let lb = combos[row].max_lookback.unwrap();
 		match kern {
-			Kernel::Scalar => safezonestop_row_scalar(high, low, period, mult, max_lookback, direction, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => safezonestop_row_avx2(high, low, period, mult, max_lookback, direction, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => safezonestop_row_avx512(high, low, period, mult, max_lookback, direction, out_row),
+			Kernel::Scalar => safezonestop_row_scalar(high, low, p, m, lb, direction, first, out_row),
+			#[cfg(all(feature="nightly-avx", target_arch="x86_64"))]
+			Kernel::Avx2 => safezonestop_row_avx2(high, low, p, m, lb, direction, first, out_row),
+			#[cfg(all(feature="nightly-avx", target_arch="x86_64"))]
+			Kernel::Avx512 => safezonestop_row_avx512(high, low, p, m, lb, direction, first, out_row),
 			_ => unreachable!(),
 		}
 	};
@@ -891,9 +916,9 @@ fn safezonestop_batch_inner(
 	// Convert back to Vec without copying - zero-copy pattern from ALMA
 	let values = unsafe {
 		Vec::from_raw_parts(
-			buf_guard.as_mut_ptr() as *mut f64,
-			buf_guard.len(),
-			buf_guard.capacity(),
+			guard.as_mut_ptr() as *mut f64,
+			guard.len(),
+			guard.capacity(),
 		)
 	};
 
@@ -916,34 +941,27 @@ pub fn safezonestop_batch_inner_into(
 	out: &mut [f64],
 ) -> Result<Vec<SafeZoneStopParams>, SafeZoneStopError> {
 	let combos = expand_grid(sweep);
-	if combos.is_empty() {
-		return Err(SafeZoneStopError::InvalidPeriod { period: 0, data_len: 0 });
-	}
-	if high.len() != low.len() {
-		return Err(SafeZoneStopError::MismatchedLengths);
-	}
+	if combos.is_empty() { return Err(SafeZoneStopError::InvalidPeriod { period: 0, data_len: 0 }); }
+	if high.len() != low.len() { return Err(SafeZoneStopError::MismatchedLengths); }
 	let len = high.len();
-	let first = high.iter().position(|x| !x.is_nan()).unwrap_or(0);
-	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-	if len - first < max_p {
-		return Err(SafeZoneStopError::NotEnoughValidData {
-			needed: max_p,
-			valid: len - first,
-		});
+	let first = first_valid_pair(high, low).ok_or(SafeZoneStopError::AllValuesNaN)?;
+	let max_need = combos.iter().map(|c| (c.period.unwrap() + 1).max(c.max_lookback.unwrap())).max().unwrap();
+	if len - first < max_need {
+		return Err(SafeZoneStopError::NotEnoughValidData { needed: max_need, valid: len - first });
 	}
 	let rows = combos.len();
 	let cols = len;
 
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-		let period = combos[row].period.unwrap();
-		let mult = combos[row].mult.unwrap();
-		let max_lookback = combos[row].max_lookback.unwrap();
+		let p = combos[row].period.unwrap();
+		let m = combos[row].mult.unwrap();
+		let lb = combos[row].max_lookback.unwrap();
 		match kern {
-			Kernel::Scalar => safezonestop_row_scalar(high, low, period, mult, max_lookback, direction, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => safezonestop_row_avx2(high, low, period, mult, max_lookback, direction, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => safezonestop_row_avx512(high, low, period, mult, max_lookback, direction, out_row),
+			Kernel::Scalar => safezonestop_row_scalar(high, low, p, m, lb, direction, first, out_row),
+			#[cfg(all(feature="nightly-avx", target_arch="x86_64"))]
+			Kernel::Avx2 => safezonestop_row_avx2(high, low, p, m, lb, direction, first, out_row),
+			#[cfg(all(feature="nightly-avx", target_arch="x86_64"))]
+			Kernel::Avx512 => safezonestop_row_avx512(high, low, p, m, lb, direction, first, out_row),
 			_ => unreachable!(),
 		}
 	};
@@ -971,7 +989,6 @@ pub fn safezonestop_batch_inner_into(
 	Ok(combos)
 }
 
-#[inline(always)]
 pub unsafe fn safezonestop_row_scalar(
 	high: &[f64],
 	low: &[f64],
@@ -979,9 +996,10 @@ pub unsafe fn safezonestop_row_scalar(
 	mult: f64,
 	max_lookback: usize,
 	direction: &str,
+	first: usize,
 	out: &mut [f64],
 ) {
-	safezonestop_scalar(high, low, period, mult, max_lookback, direction, out)
+	safezonestop_scalar(high, low, period, mult, max_lookback, direction, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -993,9 +1011,10 @@ pub unsafe fn safezonestop_row_avx2(
 	mult: f64,
 	max_lookback: usize,
 	direction: &str,
+	first: usize,
 	out: &mut [f64],
 ) {
-	safezonestop_scalar(high, low, period, mult, max_lookback, direction, out)
+	safezonestop_scalar(high, low, period, mult, max_lookback, direction, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1007,12 +1026,13 @@ pub unsafe fn safezonestop_row_avx512(
 	mult: f64,
 	max_lookback: usize,
 	direction: &str,
+	first: usize,
 	out: &mut [f64],
 ) {
 	if period <= 32 {
-		safezonestop_row_avx512_short(high, low, period, mult, max_lookback, direction, out)
+		safezonestop_row_avx512_short(high, low, period, mult, max_lookback, direction, first, out)
 	} else {
-		safezonestop_row_avx512_long(high, low, period, mult, max_lookback, direction, out)
+		safezonestop_row_avx512_long(high, low, period, mult, max_lookback, direction, first, out)
 	}
 }
 
@@ -1025,9 +1045,10 @@ pub unsafe fn safezonestop_row_avx512_short(
 	mult: f64,
 	max_lookback: usize,
 	direction: &str,
+	first: usize,
 	out: &mut [f64],
 ) {
-	safezonestop_scalar(high, low, period, mult, max_lookback, direction, out)
+	safezonestop_scalar(high, low, period, mult, max_lookback, direction, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1039,9 +1060,10 @@ pub unsafe fn safezonestop_row_avx512_long(
 	mult: f64,
 	max_lookback: usize,
 	direction: &str,
+	first: usize,
 	out: &mut [f64],
 ) {
-	safezonestop_scalar(high, low, period, mult, max_lookback, direction, out)
+	safezonestop_scalar(high, low, period, mult, max_lookback, direction, first, out)
 }
 
 // ====== WASM BINDINGS ======
@@ -1164,7 +1186,14 @@ pub fn safezonestop_batch_unified_js(high: &[f64], low: &[f64], config: JsValue)
 		max_lookback: config.max_lookback_range,
 	};
 
-	let output = safezonestop_batch_inner(high, low, &sweep, &config.direction, Kernel::Auto, false)
+	// FIX: choose batch kernel, then map to row kernel
+	let row_kernel = match detect_best_batch_kernel() {
+		Kernel::Avx512Batch => Kernel::Avx512,
+		Kernel::Avx2Batch => Kernel::Avx2,
+		_ => Kernel::Scalar,
+	};
+
+	let output = safezonestop_batch_inner(high, low, &sweep, &config.direction, row_kernel, false)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	let js_output = SafeZoneStopBatchJsOutput {
@@ -1213,7 +1242,14 @@ pub fn safezonestop_batch_into(
 		let total_size = combos.len() * len;
 		let out = std::slice::from_raw_parts_mut(out_ptr, total_size);
 		
-		safezonestop_batch_inner_into(high, low, &sweep, direction, Kernel::Auto, false, out)
+		// FIX: choose batch kernel, then map to row kernel
+		let row_kernel = match detect_best_batch_kernel() {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch => Kernel::Avx2,
+			_ => Kernel::Scalar,
+		};
+		
+		safezonestop_batch_inner_into(high, low, &sweep, direction, row_kernel, false, out)
 			.map_err(|e| JsValue::from_str(&e.to_string()))?;
 		
 		Ok(combos.len())
@@ -1485,7 +1521,7 @@ mod tests {
 		// Generate realistic price series with controlled volatility
 		let strat = (1usize..=64)
 			.prop_flat_map(|period| {
-				let len = period.max(10)..400;
+				let len = (period + 1).max(10)..400;
 				(
 					// Starting price
 					100.0f64..1000.0f64,

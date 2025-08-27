@@ -19,9 +19,8 @@
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+	detect_best_batch_kernel, detect_best_kernel, make_uninit_matrix,
 };
-use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -164,10 +163,10 @@ pub enum HighPassError {
 	InvalidPeriod { period: usize, data_len: usize },
 	#[error("highpass: Not enough valid data: needed = {needed}, valid = {valid}")]
 	NotEnoughValidData { needed: usize, valid: usize },
-	#[error("highpass: Invalid output buffer size: expected = {expected}, actual = {actual}")]
-	InvalidOutputBuffer { expected: usize, actual: usize },
 	#[error("highpass: Invalid alpha calculation. cos_val is too close to zero: cos_val = {cos_val}")]
 	InvalidAlpha { cos_val: f64 },
+	#[error("highpass: Invalid kernel type for batch operation")]
+	InvalidKernel,
 }
 
 #[inline]
@@ -180,6 +179,7 @@ fn highpass_into_internal(input: &HighPassInput, out: &mut [f64]) -> Result<(), 
 	highpass_with_kernel_into(input, Kernel::Auto, out)
 }
 
+#[inline(always)]
 pub fn highpass_with_kernel(input: &HighPassInput, kernel: Kernel) -> Result<HighPassOutput, HighPassError> {
 	let data: &[f64] = match &input.data {
 		HighPassData::Candles { candles, source } => source_type(candles, source),
@@ -218,15 +218,15 @@ pub fn highpass_with_kernel(input: &HighPassInput, kernel: Kernel) -> Result<Hig
 		other => other,
 	};
 
-	let warm = first + period;
-	let mut out = alloc_with_nan_prefix(len, warm);
+	// Highpass writes all values, allocate without NaN prefix
+	let mut out = vec![0.0; len];
 	unsafe {
 		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => highpass_scalar(data, period, first, &mut out),
+			Kernel::Scalar | Kernel::ScalarBatch => highpass_scalar(data, period, &mut out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => highpass_avx2(data, period, first, &mut out),
+			Kernel::Avx2 | Kernel::Avx2Batch => highpass_avx2(data, period, &mut out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => highpass_avx512(data, period, first, &mut out),
+			Kernel::Avx512 | Kernel::Avx512Batch => highpass_avx512(data, period, &mut out),
 			_ => unreachable!(),
 		}
 	}
@@ -234,6 +234,7 @@ pub fn highpass_with_kernel(input: &HighPassInput, kernel: Kernel) -> Result<Hig
 	Ok(HighPassOutput { values: out })
 }
 
+#[inline(always)]
 fn highpass_with_kernel_into(input: &HighPassInput, kernel: Kernel, out: &mut [f64]) -> Result<(), HighPassError> {
 	let data: &[f64] = match &input.data {
 		HighPassData::Candles { candles, source } => source_type(candles, source),
@@ -246,9 +247,9 @@ fn highpass_with_kernel_into(input: &HighPassInput, kernel: Kernel, out: &mut [f
 
 	// Ensure output buffer is the correct size
 	if out.len() != data.len() {
-		return Err(HighPassError::InvalidOutputBuffer {
-			expected: data.len(),
-			actual: out.len(),
+		return Err(HighPassError::InvalidPeriod {
+			period: out.len(),
+			data_len: data.len(),
 		});
 	}
 
@@ -285,11 +286,11 @@ fn highpass_with_kernel_into(input: &HighPassInput, kernel: Kernel, out: &mut [f
 
 	unsafe {
 		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => highpass_scalar(data, period, first, out),
+			Kernel::Scalar | Kernel::ScalarBatch => highpass_scalar(data, period, out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => highpass_avx2(data, period, first, out),
+			Kernel::Avx2 | Kernel::Avx2Batch => highpass_avx2(data, period, out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => highpass_avx512(data, period, first, out),
+			Kernel::Avx512 | Kernel::Avx512Batch => highpass_avx512(data, period, out),
 			_ => unreachable!(),
 		}
 	}
@@ -297,30 +298,58 @@ fn highpass_with_kernel_into(input: &HighPassInput, kernel: Kernel, out: &mut [f
 	Ok(())
 }
 
-// Scalar implementation
-#[inline]
-pub unsafe fn highpass_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-	let len = data.len();
-	let k = 1.0;
-	let two_pi_k_div = 2.0 * std::f64::consts::PI * k / (period as f64);
-	let sin_val = two_pi_k_div.sin();
-	let cos_val = two_pi_k_div.cos();
+// Optimized scalar implementation with pointer arithmetic
+#[inline(always)]
+pub unsafe fn highpass_scalar(data: &[f64], period: usize, out: &mut [f64]) {
+	use core::f64::consts::PI;
 
-	let alpha = 1.0 + (sin_val - 1.0) / cos_val;
-	let one_minus_half_alpha = 1.0 - alpha / 2.0;
-	let one_minus_alpha = 1.0 - alpha;
+	let n = data.len();
+	if n == 0 { return; }
 
-	out[0] = data[0];
-	for i in 1..len {
-		let val = one_minus_half_alpha * data[i] - one_minus_half_alpha * data[i - 1] + one_minus_alpha * out[i - 1];
-		out[i] = val;
+	let theta = 2.0 * PI / period as f64;      // k=1 baked in
+	let alpha = 1.0 + ((theta.sin() - 1.0) / theta.cos());
+	let c    = 1.0 - 0.5 * alpha;              // (1 - α/2)
+	let oma  = 1.0 - alpha;                    // (1 - α)
+
+	let mut src = data.as_ptr();
+	let mut dst = out.as_mut_ptr();
+
+	// seed
+	*dst = *src;
+	if n == 1 { return; }
+
+	let mut x_im1 = *src;
+	let mut y_im1 = *dst;
+
+	src = src.add(1);
+	dst = dst.add(1);
+
+	let mut rem = n - 1;
+	while rem >= 2 {
+		let x_i   = *src;
+		let y_i   = oma.mul_add(y_im1, c * (x_i - x_im1));
+		*dst      = y_i;
+
+		let x_ip1 = *src.add(1);
+		let y_ip1 = oma.mul_add(y_i, c * (x_ip1 - x_i));
+		*dst.add(1) = y_ip1;
+
+		x_im1 = x_ip1;
+		y_im1 = y_ip1;
+		src   = src.add(2);
+		dst   = dst.add(2);
+		rem  -= 2;
+	}
+	if rem == 1 {
+		let x_i = *src;
+		*dst = oma.mul_add(y_im1, c * (x_i - x_im1));
 	}
 }
 
 // AVX2 stub
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub unsafe fn highpass_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
+pub unsafe fn highpass_avx2(data: &[f64], period: usize, out: &mut [f64]) {
 	use core::f64::consts::PI;
 
 	let n = data.len();
@@ -376,8 +405,8 @@ pub unsafe fn highpass_avx2(data: &[f64], period: usize, first: usize, out: &mut
 // AVX512 stub and long/short variants
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub unsafe fn highpass_avx512(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-	highpass_avx2(data, period, first, out)
+pub unsafe fn highpass_avx512(data: &[f64], period: usize, out: &mut [f64]) {
+	highpass_avx2(data, period, out)
 }
 
 // Batch/Range types and functions
@@ -474,7 +503,7 @@ pub fn highpass_batch_with_kernel(
 	let kernel = match k {
 		Kernel::Auto => detect_best_batch_kernel(),
 		other if other.is_batch() => other,
-		_ => return Err(HighPassError::InvalidPeriod { period: 0, data_len: 0 }),
+		_ => return Err(HighPassError::InvalidKernel),
 	};
 	let simd = match kernel {
 		Kernel::Avx512Batch => Kernel::Avx512,
@@ -527,14 +556,8 @@ fn highpass_batch_inner(
 		.position(|x| !x.is_nan())
 		.ok_or(HighPassError::AllValuesNaN)?;
 
-	// Allocate uninitialized matrix using zero-copy approach
+	// Allocate uninitialized matrix - no NaN prefixes needed for highpass
 	let mut buf_mu = make_uninit_matrix(rows, cols);
-
-	// Calculate warmup periods for each row
-	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
-
-	// Initialize NaN prefixes for each row
-	init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
 	// Use ManuallyDrop to keep capacity when converting
 	let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
@@ -563,19 +586,19 @@ fn highpass_batch_inner(
 
 // Row functions, all variants just call scalar
 #[inline(always)]
-pub unsafe fn highpass_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-	highpass_scalar(data, period, first, out)
+pub unsafe fn highpass_row_scalar(data: &[f64], period: usize, out: &mut [f64]) {
+	highpass_scalar(data, period, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-pub unsafe fn highpass_row_avx2(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-	highpass_avx2(data, period, first, out)
+pub unsafe fn highpass_row_avx2(data: &[f64], period: usize, out: &mut [f64]) {
+	highpass_avx2(data, period, out)
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-pub unsafe fn highpass_row_avx512(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-	highpass_row_avx2(data, first, period, out)
+pub unsafe fn highpass_row_avx512(data: &[f64], period: usize, out: &mut [f64]) {
+	highpass_row_avx2(data, period, out)
 }
 
 // Streaming
@@ -1248,14 +1271,9 @@ fn highpass_batch_inner_into(
 	let rows = combos.len();
 	let cols = data.len();
 
-	// Calculate warmup periods for each row
-	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
-
 	// Reinterpret output slice as MaybeUninit for row processing
 	let out_uninit = unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len()) };
-
-	// Initialize NaN prefixes
-	init_matrix_prefixes(out_uninit, cols, &warm);
+	// No NaN initialization needed - highpass writes all values
 
 	// ---------- worker that fills one row ----------
 	let do_row = |row: usize, dst_mu: &mut [std::mem::MaybeUninit<f64>]| unsafe {
@@ -1265,11 +1283,11 @@ fn highpass_batch_inner_into(
 		let out_row = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
 		match kern {
-			Kernel::Scalar => highpass_row_scalar(data, first, period, out_row),
+			Kernel::Scalar => highpass_row_scalar(data, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => highpass_row_avx2(data, first, period, out_row),
+			Kernel::Avx2 => highpass_row_avx2(data, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => highpass_row_avx512(data, first, period, out_row),
+			Kernel::Avx512 => highpass_row_avx512(data, period, out_row),
 			_ => unreachable!(),
 		}
 	};
@@ -1338,6 +1356,14 @@ pub fn highpass_batch_py<'py>(
 
 	let slice_in = data.as_slice()?;
 	let kern = validate_kernel(kernel, true)?;
+
+	// Validate input like the Rust path does
+	if slice_in.is_empty() {
+		return Err(PyValueError::new_err("highpass: Input data slice is empty."));
+	}
+	if slice_in.iter().all(|x| x.is_nan()) {
+		return Err(PyValueError::new_err("highpass: All values are NaN."));
+	}
 
 	let sweep = HighPassBatchRange { period: period_range };
 
@@ -1412,9 +1438,9 @@ pub fn highpass_into_slice(dst: &mut [f64], input: &HighPassInput, kern: Kernel)
 	}
 
 	if dst.len() != data.len() {
-		return Err(HighPassError::InvalidOutputBuffer {
-			expected: data.len(),
-			actual: dst.len(),
+		return Err(HighPassError::InvalidPeriod {
+			period: dst.len(),
+			data_len: data.len(),
 		});
 	}
 
@@ -1593,8 +1619,9 @@ pub fn highpass_batch_into(
 
 		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
 
-		// Use optimized batch processing
-		highpass_batch_inner_into(data, &sweep, Kernel::Auto, false, out)
+		// Resolve Auto kernel before calling inner_into
+		let kernel = detect_best_kernel();
+		highpass_batch_inner_into(data, &sweep, kernel, false, out)
 			.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 		Ok(rows)

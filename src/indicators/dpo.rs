@@ -147,6 +147,8 @@ impl DpoBuilder {
 
 #[derive(Debug, Error)]
 pub enum DpoError {
+	#[error("dpo: Input data slice is empty.")]
+	EmptyInputData,
 	#[error("dpo: All values are NaN.")]
 	AllValuesNaN,
 
@@ -169,12 +171,15 @@ pub fn dpo(input: &DpoInput) -> Result<DpoOutput, DpoError> {
 	dpo_with_kernel(input, Kernel::Auto)
 }
 
-#[cfg(any(feature = "python", feature = "wasm"))]
 #[inline]
 pub fn dpo_into_slice(dst: &mut [f64], input: &DpoInput, kern: Kernel) -> Result<(), DpoError> {
 	let data: &[f64] = input.as_ref();
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(DpoError::AllValuesNaN)?;
 	let len = data.len();
+	if len == 0 {
+		return Err(DpoError::EmptyInputData);
+	}
+
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(DpoError::AllValuesNaN)?;
 	let period = input.get_period();
 
 	if period == 0 || period > len {
@@ -186,10 +191,10 @@ pub fn dpo_into_slice(dst: &mut [f64], input: &DpoInput, kern: Kernel) -> Result
 			valid: len - first,
 		});
 	}
-	if dst.len() != data.len() {
+	if dst.len() != len {
 		return Err(DpoError::InvalidPeriod {
 			period: dst.len(),
-			data_len: data.len(),
+			data_len: len,
 		});
 	}
 
@@ -198,34 +203,52 @@ pub fn dpo_into_slice(dst: &mut [f64], input: &DpoInput, kern: Kernel) -> Result
 		other => other,
 	};
 
-	// Initialize output with NaN for warmup period
-	dst[..period].fill(f64::NAN);
-
 	unsafe {
 		#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-		{
-			if matches!(chosen, Kernel::Scalar | Kernel::ScalarBatch) {
-				dpo_simd128(data, period, first, dst);
-				return Ok(());
+		if matches!(chosen, Kernel::Scalar | Kernel::ScalarBatch) {
+			dpo_simd128(data, period, first, dst);
+		} else {
+			match chosen {
+				Kernel::Scalar | Kernel::ScalarBatch => dpo_scalar(data, period, first, dst),
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+				Kernel::Avx2 | Kernel::Avx2Batch => dpo_avx2(data, period, first, dst),
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+				Kernel::Avx512 | Kernel::Avx512Batch => dpo_avx512(data, period, first, dst),
+				_ => unreachable!(),
 			}
 		}
-		
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => dpo_scalar(data, period, first, dst),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => dpo_avx2(data, period, first, dst),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => dpo_avx512(data, period, first, dst),
-			_ => unreachable!(),
+
+		#[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+		{
+			match chosen {
+				Kernel::Scalar | Kernel::ScalarBatch => dpo_scalar(data, period, first, dst),
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+				Kernel::Avx2 | Kernel::Avx2Batch => dpo_avx2(data, period, first, dst),
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+				Kernel::Avx512 | Kernel::Avx512Batch => dpo_avx512(data, period, first, dst),
+				_ => unreachable!(),
+			}
 		}
 	}
+
+	// Single, precise prefix write. No full-buffer NaN fill.
+	let back = period / 2 + 1;
+	let warm = (first + period - 1).max(back);
+	for v in &mut dst[..warm] {
+		*v = f64::NAN;
+	}
+
 	Ok(())
 }
 
 pub fn dpo_with_kernel(input: &DpoInput, kernel: Kernel) -> Result<DpoOutput, DpoError> {
 	let data: &[f64] = input.as_ref();
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(DpoError::AllValuesNaN)?;
 	let len = data.len();
+	if len == 0 {
+		return Err(DpoError::EmptyInputData);
+	}
+
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(DpoError::AllValuesNaN)?;
 	let period = input.get_period();
 
 	if period == 0 || period > len {
@@ -238,12 +261,15 @@ pub fn dpo_with_kernel(input: &DpoInput, kernel: Kernel) -> Result<DpoOutput, Dp
 		});
 	}
 
+	let back = period / 2 + 1;
+	let warm = (first + period - 1).max(back);
+
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
 		other => other,
 	};
 
-	let mut out = alloc_with_nan_prefix(len, period);
+	let mut out = alloc_with_nan_prefix(len, warm);
 	unsafe {
 		match chosen {
 			Kernel::Scalar | Kernel::ScalarBatch => dpo_scalar(data, period, first, &mut out),
@@ -484,7 +510,6 @@ pub fn dpo_batch_par_slice(data: &[f64], sweep: &DpoBatchRange, kern: Kernel) ->
 	dpo_batch_inner(data, sweep, kern, true)
 }
 
-#[cfg(any(feature = "python", feature = "wasm"))]
 #[inline(always)]
 pub fn dpo_batch_inner_into(
 	data: &[f64],
@@ -497,45 +522,60 @@ pub fn dpo_batch_inner_into(
 	if combos.is_empty() {
 		return Err(DpoError::InvalidPeriod { period: 0, data_len: 0 });
 	}
+
+	let len = data.len();
+	if len == 0 {
+		return Err(DpoError::EmptyInputData);
+	}
+
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(DpoError::AllValuesNaN)?;
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-	if data.len() - first < max_p {
+	if len - first < max_p {
 		return Err(DpoError::NotEnoughValidData {
 			needed: max_p,
-			valid: data.len() - first,
+			valid: len - first,
 		});
 	}
-	let cols = data.len();
 
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+	let rows = combos.len();
+	let cols = len;
+	debug_assert_eq!(out.len(), rows * cols);
+
+	// Initialize NaN prefixes in the caller's buffer without extra copies.
+	let warm: Vec<usize> = combos.iter().map(|c| {
+		let p = c.period.unwrap();
+		let back = p / 2 + 1;
+		(first + p - 1).max(back)
+	}).collect();
+
+	let out_mu: &mut [std::mem::MaybeUninit<f64>] = unsafe {
+		std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>, out.len())
+	};
+	init_matrix_prefixes(out_mu, cols, &warm);
+
+	let do_row = |row: usize, dst_mu: &mut [std::mem::MaybeUninit<f64>]| unsafe {
 		let period = combos[row].period.unwrap();
+		let dst = std::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, cols);
 		match kern {
-			Kernel::Scalar => dpo_row_scalar(data, first, period, out_row),
+			Kernel::Scalar | Kernel::ScalarBatch => dpo_row_scalar(data, first, period, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => dpo_row_avx2(data, first, period, out_row),
+			Kernel::Avx2 | Kernel::Avx2Batch => dpo_row_avx2(data, first, period, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => dpo_row_avx512(data, first, period, out_row),
-			_ => unreachable!(),
+			Kernel::Avx512 | Kernel::Avx512Batch => dpo_row_avx512(data, first, period, dst),
+			_ => dpo_row_scalar(data, first, period, dst),
 		}
 	};
 
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
-		{
-			out.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
-		}
-
+		out_mu.par_chunks_mut(cols).enumerate().for_each(|(r, s)| do_row(r, s));
 		#[cfg(target_arch = "wasm32")]
-		{
-			for (row, slice) in out.chunks_mut(cols).enumerate() {
-				do_row(row, slice);
-			}
+		for (r, s) in out_mu.chunks_mut(cols).enumerate() {
+			do_row(r, s);
 		}
 	} else {
-		for (row, slice) in out.chunks_mut(cols).enumerate() {
-			do_row(row, slice);
+		for (r, s) in out_mu.chunks_mut(cols).enumerate() {
+			do_row(r, s);
 		}
 	}
 
@@ -553,30 +593,36 @@ fn dpo_batch_inner(
 	if combos.is_empty() {
 		return Err(DpoError::InvalidPeriod { period: 0, data_len: 0 });
 	}
+	
+	let len = data.len();
+	if len == 0 {
+		return Err(DpoError::EmptyInputData);
+	}
+
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(DpoError::AllValuesNaN)?;
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-	if data.len() - first < max_p {
+	if len - first < max_p {
 		return Err(DpoError::NotEnoughValidData {
 			needed: max_p,
-			valid: data.len() - first,
+			valid: len - first,
 		});
 	}
+
 	let rows = combos.len();
-	let cols = data.len();
-	
-	// Calculate warmup periods for each parameter combination
-	let warmup_periods: Vec<usize> = combos.iter().map(|c| c.period.unwrap()).collect();
-	
-	// Allocate uninitialized matrix
+	let cols = len;
+
+	// Correct row-wise warm prefixes: max(first + p - 1, back)
+	let warm: Vec<usize> = combos.iter().map(|c| {
+		let p = c.period.unwrap();
+		let back = p / 2 + 1;
+		(first + p - 1).max(back)
+	}).collect();
+
 	let mut buf_mu = make_uninit_matrix(rows, cols);
-	
-	// Initialize NaN prefixes for each row
-	init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
-	
-	// Convert to initialized Vec<f64>
+	init_matrix_prefixes(&mut buf_mu, cols, &warm);
+
+	// Move to Vec<f64> without extra copy
 	let mut values = unsafe {
-		// SAFETY: init_matrix_prefixes has initialized the NaN prefixes,
-		// and we'll initialize the rest of the values in do_row
 		let ptr = buf_mu.as_mut_ptr() as *mut f64;
 		let len = buf_mu.len();
 		std::mem::forget(buf_mu);
@@ -586,12 +632,12 @@ fn dpo_batch_inner(
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
 		match kern {
-			Kernel::Scalar => dpo_row_scalar(data, first, period, out_row),
+			Kernel::Scalar | Kernel::ScalarBatch => dpo_row_scalar(data, first, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => dpo_row_avx2(data, first, period, out_row),
+			Kernel::Avx2 | Kernel::Avx2Batch => dpo_row_avx2(data, first, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => dpo_row_avx512(data, first, period, out_row),
-			_ => unreachable!(),
+			Kernel::Avx512 | Kernel::Avx512Batch => dpo_row_avx512(data, first, period, out_row),
+			_ => dpo_row_scalar(data, first, period, out_row),
 		}
 	};
 
@@ -660,10 +706,15 @@ unsafe fn dpo_row_avx512_long(data: &[f64], first: usize, period: usize, out: &m
 #[derive(Debug, Clone)]
 pub struct DpoStream {
 	period: usize,
-	buf: Vec<f64>,
+	back: usize,
+	sma_buf: Vec<f64>,  // Buffer for SMA calculation (size = period)
+	lag_buf: Vec<f64>,  // Buffer for lagged values (size = back + 1)
 	sum: f64,
-	head: usize,
-	filled: bool,
+	sma_head: usize,
+	lag_head: usize,
+	sma_filled: bool,
+	lag_filled: bool,
+	count: usize,
 }
 
 impl DpoStream {
@@ -672,32 +723,59 @@ impl DpoStream {
 		if period == 0 {
 			return Err(DpoError::InvalidPeriod { period, data_len: 0 });
 		}
+		let back = period / 2 + 1;
 		Ok(Self {
 			period,
-			buf: vec![f64::NAN; period],
+			back,
+			sma_buf: vec![f64::NAN; period],
+			lag_buf: vec![f64::NAN; back + 1],
 			sum: 0.0,
-			head: 0,
-			filled: false,
+			sma_head: 0,
+			lag_head: 0,
+			sma_filled: false,
+			lag_filled: false,
+			count: 0,
 		})
 	}
 
 	#[inline(always)]
 	pub fn update(&mut self, value: f64) -> Option<f64> {
-		if !self.filled && self.head == self.period - 1 {
-			self.filled = true;
+		// Update lag buffer
+		self.lag_buf[self.lag_head] = value;
+		self.lag_head = (self.lag_head + 1) % self.lag_buf.len();
+		
+		// Update SMA buffer
+		if !self.sma_buf[self.sma_head].is_nan() {
+			self.sum -= self.sma_buf[self.sma_head];
 		}
-		if !self.buf[self.head].is_nan() {
-			self.sum -= self.buf[self.head];
-		}
-		self.buf[self.head] = value;
+		self.sma_buf[self.sma_head] = value;
 		self.sum += value;
-		self.head = (self.head + 1) % self.period;
-		if !self.filled {
+		self.sma_head = (self.sma_head + 1) % self.period;
+		
+		self.count += 1;
+		
+		// Check if buffers are filled
+		if !self.sma_filled && self.count >= self.period {
+			self.sma_filled = true;
+		}
+		if !self.lag_filled && self.count > self.back {
+			self.lag_filled = true;
+		}
+		
+		// We need both buffers filled to produce output
+		if !self.sma_filled || !self.lag_filled {
 			return None;
 		}
-		let back = self.period / 2 + 1;
-		let idx = (self.head + self.period - back - 1) % self.period;
-		Some(self.buf[idx] - (self.sum / self.period as f64))
+		
+		// Get lagged value (back positions ago)
+		let lag_idx = (self.lag_head + self.lag_buf.len() - self.back - 1) % self.lag_buf.len();
+		let lagged_value = self.lag_buf[lag_idx];
+		
+		// Calculate SMA
+		let sma = self.sum / self.period as f64;
+		
+		// DPO = Price[i - back] - SMA
+		Some(lagged_value - sma)
 	}
 }
 

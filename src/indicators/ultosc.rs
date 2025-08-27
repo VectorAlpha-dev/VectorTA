@@ -239,9 +239,9 @@ fn ultosc_prepare<'a>(input: &'a UltOscInput, kernel: Kernel) -> Result<((&'a [f
 			low_src,
 			close_src,
 		} => {
-			let high = candles.select_candle_field(high_src).unwrap();
-			let low = candles.select_candle_field(low_src).unwrap();
-			let close = candles.select_candle_field(close_src).unwrap();
+			let high = source_type(candles, high_src);
+			let low = source_type(candles, low_src);
+			let close = source_type(candles, close_src);
 			(high, low, close)
 		}
 		UltOscData::Slices { high, low, close } => (*high, *low, *close),
@@ -396,7 +396,7 @@ unsafe fn ultosc_scalar_impl(
 	let mut buf_idx = 0;
 	
 	// Calculate values for warmup period
-	for i in (first_valid + 1)..=start_idx {
+	for i in first_valid..=start_idx {
 		if i >= len {
 			break;
 		}
@@ -811,18 +811,13 @@ fn ultosc_batch_inner(
 		return Err(UltOscError::EmptyData);
 	}
 	
-	// Find first valid index
-	let mut first_valid_idx = None;
-	for i in 0..cols {
-		if !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan() {
-			first_valid_idx = Some(i);
-			break;
-		}
-	}
-	let first_valid_idx = match first_valid_idx {
-		Some(idx) => idx,
-		None => return Err(UltOscError::AllValuesNaN),
-	};
+	// Find first valid index (both i-1 and i must be valid)
+	let first_valid_idx = (1..cols)
+		.find(|&i| {
+			!high[i - 1].is_nan() && !low[i - 1].is_nan() && !close[i - 1].is_nan()
+				&& !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan()
+		})
+		.ok_or(UltOscError::AllValuesNaN)?;
 	
 	// Calculate warmup periods for each combo
 	let warm: Vec<usize> = combos
@@ -877,17 +872,13 @@ pub fn ultosc_batch_inner_into(
 	}
 	
 	let len = high.len();
-	let mut first_valid_idx = None;
-	for i in 0..len {
-		if !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan() {
-			first_valid_idx = Some(i);
-			break;
-		}
-	}
-	let first_valid_idx = match first_valid_idx {
-		Some(idx) => idx,
-		None => return Err(UltOscError::AllValuesNaN),
-	};
+	// Find first valid index (both i-1 and i must be valid)
+	let first_valid_idx = (1..len)
+		.find(|&i| {
+			!high[i - 1].is_nan() && !low[i - 1].is_nan() && !close[i - 1].is_nan()
+				&& !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan()
+		})
+		.ok_or(UltOscError::AllValuesNaN)?;
 	
 	let max_p = combos.iter()
 		.map(|c| {
@@ -1875,6 +1866,28 @@ pub fn ultosc_batch_py<'py>(
 	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
 	let slice_out = unsafe { out_arr.as_slice_mut()? };
 	
+	// Find first valid index (both i-1 and i must be valid)
+	let first_valid_idx = (1..cols)
+		.find(|&i| {
+			!high_slice[i - 1].is_nan() && !low_slice[i - 1].is_nan() && !close_slice[i - 1].is_nan()
+				&& !high_slice[i].is_nan() && !low_slice[i].is_nan() && !close_slice[i].is_nan()
+		})
+		.unwrap_or(0);
+	
+	// Calculate warmup periods for each combo and initialize NaN prefixes
+	for (row, combo) in combos.iter().enumerate() {
+		let p1 = combo.timeperiod1.unwrap_or(7);
+		let p2 = combo.timeperiod2.unwrap_or(14);
+		let p3 = combo.timeperiod3.unwrap_or(28);
+		let warmup = first_valid_idx + p1.max(p2).max(p3) - 1;
+		
+		// Fill the warmup period with NaN for this row
+		let row_start = row * cols;
+		for i in 0..warmup.min(cols) {
+			slice_out[row_start + i] = f64::NAN;
+		}
+	}
+	
 	let combos = py
 		.allow_threads(|| {
 			let kernel = match kern {
@@ -1910,6 +1923,7 @@ pub struct UltOscStreamPy {
 #[pymethods]
 impl UltOscStreamPy {
 	#[new]
+	#[pyo3(signature = (timeperiod1=None, timeperiod2=None, timeperiod3=None))]
 	fn new(timeperiod1: Option<usize>, timeperiod2: Option<usize>, timeperiod3: Option<usize>) -> PyResult<Self> {
 		let params = UltOscParams {
 			timeperiod1,

@@ -19,8 +19,11 @@ use my_project::indicators::cci::{cci, CciInput, CciParams};
 use my_project::indicators::cfo::{cfo, CfoInput, CfoParams};
 use my_project::indicators::cg::{cg, CgInput, CgParams};
 use my_project::indicators::kurtosis::{kurtosis, KurtosisInput, KurtosisParams};
+use my_project::indicators::kst::{kst, KstInput, KstParams};
 use my_project::indicators::midpoint::{midpoint, MidpointInput, MidpointParams};
 use my_project::indicators::chande::{chande, ChandeData, ChandeInput, ChandeParams};
+use my_project::indicators::chop::{chop, ChopData, ChopInput, ChopParams};
+use my_project::indicators::dpo::{dpo, DpoInput, DpoParams};
 use my_project::indicators::ppo::{ppo, PpoInput, PpoParams};
 use my_project::indicators::rsx::{rsx, RsxInput, RsxParams};
 use my_project::indicators::marketefi::{marketefi, MarketefiData, MarketefiInput, MarketefiParams};
@@ -30,6 +33,8 @@ use my_project::indicators::mass::{mass, MassData, MassInput, MassParams};
 /// Binary to generate reference outputs for indicator testing
 /// This is used by Python and WASM tests to verify their outputs match Rust
 use my_project::indicators::decycler::{decycler, DecyclerInput, DecyclerParams};
+use my_project::indicators::deviation::{deviation, DeviationInput, DeviationParams};
+use my_project::indicators::emv::{emv, EmvInput, EmvParams};
 use my_project::indicators::moving_averages::alma::{alma, AlmaInput, AlmaParams};
 use my_project::indicators::moving_averages::cwma::{cwma, CwmaInput, CwmaParams};
 use my_project::indicators::moving_averages::dema::{dema, DemaInput, DemaParams};
@@ -52,6 +57,7 @@ use my_project::indicators::moving_averages::maaq::{maaq, MaaqInput, MaaqParams}
 use my_project::indicators::moving_averages::mama::{mama, MamaInput, MamaParams};
 use my_project::indicators::moving_averages::mwdx::{mwdx, MwdxInput, MwdxParams};
 use my_project::indicators::moving_averages::nma::{nma, NmaInput, NmaParams};
+use my_project::indicators::pma::{pma, PmaInput, PmaParams};
 use my_project::indicators::moving_averages::pwma::{pwma, PwmaInput, PwmaParams};
 use my_project::indicators::moving_averages::reflex::{reflex, ReflexInput, ReflexParams};
 use my_project::indicators::moving_averages::sinwma::{sinwma, SinWmaInput, SinWmaParams};
@@ -89,7 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	let args: Vec<String> = env::args().collect();
 	if args.len() < 2 {
 		eprintln!("Usage: {} <indicator_name> [source]", args[0]);
-		eprintln!("Available indicators: ad, acosc, adx, adosc, adxr, alligator, alma, ao, apo, aroon, aroonosc, atr, bandpass, bollinger_bands, bollinger_bands_width, bop, cci, cfo, cg, cwma, decycler, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass_2_pole, highpass, hma, hwma, jma, jsa, kama, kurtosis, linreg, maaq, mama, marketefi, mwdx, nma, ppo, rsx, pwma, reflex, rocp, rsi, sinwma, sma, smma, squeeze_momentum, sqwma, srwma, stddev, supersmoother_3_pole, supersmoother, swma, tema, tilson, trendflex, trima, vpci, tsf, ui, vwap, vwma, vpwma, wclprice, wilders, wma, zlema");
+		eprintln!("Available indicators: ad, acosc, adx, adosc, adxr, alligator, alma, ao, apo, aroon, aroonosc, atr, bandpass, bollinger_bands, bollinger_bands_width, bop, cci, cfo, cg, chop, cwma, decycler, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass_2_pole, highpass, hma, hwma, jma, jsa, kama, kst, kurtosis, linreg, maaq, mama, marketefi, mwdx, nma, pma, ppo, rsx, pwma, reflex, rocp, rsi, sinwma, sma, smma, squeeze_momentum, sqwma, srwma, stddev, supersmoother_3_pole, supersmoother, swma, tema, tilson, trendflex, trima, vpci, tsf, ui, vwap, vwma, vpwma, wclprice, wilders, wma, zlema");
 		eprintln!("Available sources: open, high, low, close, volume, hl2, hlc3, ohlc4, hlcc4");
 		std::process::exit(1);
 	}
@@ -152,6 +158,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 				"length": result.values.len()
 			})
 		}
+		"deviation" => {
+			let params = DeviationParams::default();
+			let period = params.period.unwrap_or(9);
+			let devtype = params.devtype.unwrap_or(0);
+			let input = DeviationInput::from_candles(&candles, source, params);
+			let result = deviation(&input)?;
+			json!({
+				"indicator": "deviation",
+				"source": source,
+				"params": {
+					"period": period,
+					"devtype": devtype
+				},
+				"values": result.values,
+				"length": result.values.len()
+			})
+		}
+		"emv" => {
+			// EMV requires OHLCV data
+			let high = candles.select_candle_field("high")?;
+			let low = candles.select_candle_field("low")?;
+			let close = candles.select_candle_field("close")?;
+			let volume = candles.select_candle_field("volume")?;
+			let input = EmvInput::from_slices(high, low, close, volume);
+			let result = emv(&input)?;
+			json!({
+				"indicator": "emv",
+				"source": "ohlcv",
+				"params": {},
+				"values": result.values,
+				"length": result.values.len()
+			})
+		}
 		"dema" => {
 			let params = DemaParams::default();
 			let period = params.period.unwrap_or(21);
@@ -159,6 +198,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 			let result = dema(&input)?;
 			json!({
 				"indicator": "dema",
+				"source": source,
+				"params": {
+					"period": period
+				},
+				"values": result.values,
+				"length": result.values.len()
+			})
+		}
+		"dpo" => {
+			let params = DpoParams::default();
+			let period = params.period.unwrap_or(5);
+			let input = DpoInput::from_candles(&candles, source, params);
+			let result = dpo(&input)?;
+			json!({
+				"indicator": "dpo",
 				"source": source,
 				"params": {
 					"period": period
@@ -397,6 +451,73 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 				"length": result.values.len()
 			})
 		}
+		"kst" => {
+			let params = KstParams::default();
+			let input = KstInput::from_candles(&candles, source, params);
+			let result = kst(&input)?;
+			json!({
+				"indicator": "kst",
+				"source": source,
+				"params": {
+					"sma_period1": params.sma_period1.unwrap_or(10),
+					"sma_period2": params.sma_period2.unwrap_or(10),
+					"sma_period3": params.sma_period3.unwrap_or(10),
+					"sma_period4": params.sma_period4.unwrap_or(15),
+					"roc_period1": params.roc_period1.unwrap_or(10),
+					"roc_period2": params.roc_period2.unwrap_or(15),
+					"roc_period3": params.roc_period3.unwrap_or(20),
+					"roc_period4": params.roc_period4.unwrap_or(30),
+					"signal_period": params.signal_period.unwrap_or(9)
+				},
+				"line": result.line,
+				"signal": result.signal,
+				"length": result.line.len()
+			})
+		}
+		"kst_line" => {
+			let params = KstParams::default();
+			let input = KstInput::from_candles(&candles, source, params);
+			let result = kst(&input)?;
+			json!({
+				"indicator": "kst_line",
+				"source": source,
+				"params": {
+					"sma_period1": params.sma_period1.unwrap_or(10),
+					"sma_period2": params.sma_period2.unwrap_or(10),
+					"sma_period3": params.sma_period3.unwrap_or(10),
+					"sma_period4": params.sma_period4.unwrap_or(15),
+					"roc_period1": params.roc_period1.unwrap_or(10),
+					"roc_period2": params.roc_period2.unwrap_or(15),
+					"roc_period3": params.roc_period3.unwrap_or(20),
+					"roc_period4": params.roc_period4.unwrap_or(30),
+					"signal_period": params.signal_period.unwrap_or(9)
+				},
+				"values": result.line,
+				"length": result.line.len()
+			})
+		}
+		"kst_signal" => {
+			let params = KstParams::default();
+			let input = KstInput::from_candles(&candles, source, params);
+			let result = kst(&input)?;
+			json!({
+				"indicator": "kst_signal",
+				"source": source,
+				"params": {
+					"sma_period1": params.sma_period1.unwrap_or(10),
+					"sma_period2": params.sma_period2.unwrap_or(10),
+					"sma_period3": params.sma_period3.unwrap_or(10),
+					"sma_period4": params.sma_period4.unwrap_or(15),
+					"roc_period1": params.roc_period1.unwrap_or(10),
+					"roc_period2": params.roc_period2.unwrap_or(15),
+					"roc_period3": params.roc_period3.unwrap_or(20),
+					"roc_period4": params.roc_period4.unwrap_or(30),
+					"signal_period": params.signal_period.unwrap_or(9)
+				},
+				"values": result.signal,
+				"length": result.signal.len()
+			})
+		}
 		"kama" => {
 			let params = KamaParams::default();
 			let period = params.period.unwrap_or(30);
@@ -585,6 +706,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 				},
 				"values": result.values,
 				"length": result.values.len()
+			})
+		}
+		"pma" => {
+			let params = PmaParams::default();
+			let input = PmaInput::from_candles(&candles, source, params);
+			let result = pma(&input)?;
+			// PMA returns two arrays: predict and trigger
+			// For consistency with other indicators, we'll return predict as the main values
+			json!({
+				"indicator": "pma",
+				"source": source,
+				"params": {},
+				"values": result.predict,
+				"trigger": result.trigger,
+				"length": result.predict.len()
 			})
 		}
 		"pwma" => {
@@ -1417,6 +1553,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 					"period": period,
 					"mult": mult,
 					"direction": direction
+				},
+				"values": result.values,
+				"length": result.values.len()
+			})
+		}
+		"chop" => {
+			if source != "hlc" {
+				eprintln!("CHOP indicator requires 'hlc' source");
+				std::process::exit(1);
+			}
+			let params = ChopParams::default();
+			let period = params.period.unwrap_or(14);
+			let scalar = params.scalar.unwrap_or(100.0);
+			let drift = params.drift.unwrap_or(1);
+			
+			let high = candles.select_candle_field("high")?;
+			let low = candles.select_candle_field("low")?;
+			let close = candles.select_candle_field("close")?;
+			
+			let input = ChopInput {
+				data: ChopData::Slice { high, low, close },
+				params,
+			};
+			let result = chop(&input)?;
+			json!({
+				"indicator": "chop",
+				"source": source,
+				"params": {
+					"period": period,
+					"scalar": scalar,
+					"drift": drift
 				},
 				"values": result.values,
 				"length": result.values.len()

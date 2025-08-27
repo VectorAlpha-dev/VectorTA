@@ -22,7 +22,7 @@ use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::PyDict;
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
@@ -169,6 +169,10 @@ pub enum LinearRegSlopeError {
 	NotEnoughValidData { needed: usize, valid: usize },
 	#[error("linearreg_slope: All values are NaN.")]
 	AllValuesNaN,
+	#[error("linearreg_slope: Kernel mismatch - expected batch kernel for batch operation")]
+	KernelMismatch,
+	#[error("linearreg_slope: Invalid output length: output = {output_len}, expected = {expected_len}")]
+	InvalidOutputLength { output_len: usize, expected_len: usize },
 }
 
 #[inline]
@@ -185,7 +189,8 @@ pub fn linearreg_slope_with_kernel(
 		return Err(LinearRegSlopeError::EmptyData);
 	}
 	let period = input.get_period();
-	if period == 0 || period > data.len() {
+	// Linear regression requires at least 2 points to define a slope
+	if period < 2 || period > data.len() {
 		return Err(LinearRegSlopeError::InvalidPeriod {
 			period,
 			data_len: data.len(),
@@ -284,7 +289,7 @@ pub fn linearreg_slope_batch_with_kernel(
 	let k = match kernel {
 		Kernel::Auto => detect_best_batch_kernel(),
 		other if other.is_batch() => other,
-		_ => return Err(LinearRegSlopeError::InvalidPeriod { period: 0, data_len: 0 }),
+		_ => return Err(LinearRegSlopeError::KernelMismatch),
 	};
 	let simd = match k {
 		Kernel::Avx512Batch => Kernel::Avx512,
@@ -413,6 +418,15 @@ fn linearreg_slope_batch_inner(
 	if combos.is_empty() {
 		return Err(LinearRegSlopeError::InvalidPeriod { period: 0, data_len: 0 });
 	}
+	
+	// Validate all periods are >= 2 (linear regression needs at least 2 points)
+	for combo in &combos {
+		let period = combo.period.unwrap();
+		if period < 2 {
+			return Err(LinearRegSlopeError::InvalidPeriod { period, data_len: data.len() });
+		}
+	}
+	
 	let first = data
 		.iter()
 		.position(|x| !x.is_nan())
@@ -471,6 +485,14 @@ fn linearreg_slope_batch_inner_into(
 		return Err(LinearRegSlopeError::InvalidPeriod { period: 0, data_len: 0 });
 	}
 	
+	// Validate all periods are >= 2 (linear regression needs at least 2 points)
+	for combo in &combos {
+		let period = combo.period.unwrap();
+		if period < 2 {
+			return Err(LinearRegSlopeError::InvalidPeriod { period, data_len: data.len() });
+		}
+	}
+	
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(LinearRegSlopeError::AllValuesNaN)?;
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
 	if data.len() - first < max_p {
@@ -482,6 +504,16 @@ fn linearreg_slope_batch_inner_into(
 	
 	let rows = combos.len();
 	let cols = data.len();
+	
+	// Initialize NaN prefixes for each row based on warmup period
+	for (row, combo) in combos.iter().enumerate() {
+		let warmup = first + combo.period.unwrap() - 1;
+		let row_start = row * cols;
+		for i in 0..warmup.min(cols) {
+			out[row_start + i] = f64::NAN;
+		}
+	}
+	
 	let out_uninit = unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len()) };
 	
 	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
@@ -564,12 +596,16 @@ pub struct LinearRegSlopeStream {
 	n: f64,
 	sum_x: f64,
 	sum_x2: f64,
+	sum_y: f64,
+	sum_xy: f64,
+	count: usize,
 }
 
 impl LinearRegSlopeStream {
 	pub fn try_new(params: LinearRegSlopeParams) -> Result<Self, LinearRegSlopeError> {
 		let period = params.period.unwrap_or(14);
-		if period == 0 {
+		// Linear regression requires at least 2 points to define a slope
+		if period < 2 {
 			return Err(LinearRegSlopeError::InvalidPeriod { period, data_len: 0 });
 		}
 		let n = period as f64;
@@ -583,35 +619,53 @@ impl LinearRegSlopeStream {
 			n,
 			sum_x,
 			sum_x2,
+			sum_y: 0.0,
+			sum_xy: 0.0,
+			count: 0,
 		})
 	}
 
 	#[inline(always)]
 	pub fn update(&mut self, value: f64) -> Option<f64> {
-		// Update buffer
+		let old_value = self.buffer[self.head];
 		self.buffer[self.head] = value;
+		let old_head = self.head;
 		self.head = (self.head + 1) % self.period;
 
 		if !self.filled && self.head == 0 {
 			self.filled = true;
 		}
+
+		// Calculate sum_y and sum_xy for current window
+		if self.filled {
+			self.sum_xy = 0.0;
+			self.sum_y = 0.0;
+			let mut idx = self.head;
+			for x in 0..self.period {
+				let y = self.buffer[idx];
+				self.sum_y += y;
+				self.sum_xy += (x as f64) * y;
+				idx = (idx + 1) % self.period;
+			}
+		} else {
+			// Still filling buffer
+			self.count += 1;
+			if !value.is_nan() {
+				// Add new value's contribution
+				// Position is (count - 1) in the logical window
+				self.sum_y += value;
+				self.sum_xy += (self.count - 1) as f64 * value;
+			}
+			if self.count < self.period {
+				return None;
+			}
+		}
+
 		if !self.filled {
 			return None;
 		}
 
-		// Calculate sum_y and sum_xy for current window
-		let mut sum_y = 0.0;
-		let mut sum_xy = 0.0;
-		let mut idx = self.head;
-		
-		for x in 0..self.period {
-			let y = self.buffer[idx];
-			sum_y += y;
-			sum_xy += (x as f64) * y;
-			idx = (idx + 1) % self.period;
-		}
-
-		let numerator = self.n * sum_xy - self.sum_x * sum_y;
+		let numerator = self.n * self.sum_xy - self.sum_x * self.sum_y;
 		let denominator = self.n * self.sum_x2 - self.sum_x * self.sum_x;
 		Some(if denominator.abs() < f64::EPSILON {
 			f64::NAN
@@ -662,52 +716,62 @@ pub fn linearreg_slope_batch_py<'py>(
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
 	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
 	use pyo3::types::PyDict;
-	
+	use std::mem::MaybeUninit;
+
 	let slice_in = data.as_slice()?;
-	
-	let sweep = LinearRegSlopeBatchRange {
-		period: period_range,
-	};
-	
+	let sweep = LinearRegSlopeBatchRange { period: period_range };
+
 	let combos = expand_grid(&sweep);
 	let rows = combos.len();
 	let cols = slice_in.len();
-	
+
+	// 1) Allocate NumPy buffer (uninitialized)
 	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
 	let slice_out = unsafe { out_arr.as_slice_mut()? };
-	
-	let kern = validate_kernel(kernel, true)?;
-	
-	let combos = py
-		.allow_threads(|| {
-			let kernel = match kern {
-				Kernel::Auto => detect_best_batch_kernel(),
-				k => k,
-			};
-			let simd = match kernel {
-				Kernel::Avx512Batch => Kernel::Avx512,
-				Kernel::Avx2Batch => Kernel::Avx2,
-				Kernel::ScalarBatch => Kernel::Scalar,
-				_ => unreachable!(),
-			};
-			linearreg_slope_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
-		})
-		.map_err(|e| PyValueError::new_err(e.to_string()))?;
-	
-	let result = PyDict::new(py);
-	result.set_item("values", out_arr)?;
-	result.set_item("rows", rows)?;
-	result.set_item("cols", cols)?;
-	
-	let combo_list = PyList::empty(py);
-	for combo in combos {
-		let combo_dict = PyDict::new(py);
-		combo_dict.set_item("period", combo.period.unwrap_or(14))?;
-		combo_list.append(combo_dict)?;
+
+	// 2) Warmup prefixes: identical to alma.rs pattern
+	let first = slice_in
+		.iter()
+		.position(|x| !x.is_nan())
+		.ok_or_else(|| PyValueError::new_err("All values are NaN"))?;
+	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
+	unsafe {
+		let out_mu: &mut [MaybeUninit<f64>] = core::slice::from_raw_parts_mut(
+			slice_out.as_mut_ptr() as *mut MaybeUninit<f64>,
+			slice_out.len(),
+		);
+		init_matrix_prefixes(out_mu, cols, &warm);
 	}
-	result.set_item("combos", combo_list)?;
-	
-	Ok(result.into())
+
+	// 3) Compute rows into the same buffer
+	let kern = validate_kernel(kernel, true)?;
+	py.allow_threads(|| {
+		let k = match kern {
+			Kernel::Auto => detect_best_batch_kernel(),
+			k => k,
+		};
+		let simd = match k {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch   => Kernel::Avx2,
+			Kernel::ScalarBatch => Kernel::Scalar,
+			_ => unreachable!(),
+		};
+		linearreg_slope_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+	})
+	.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	// 4) Return schema aligned to ALMA
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"periods",
+		combos
+			.iter()
+			.map(|p| p.period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+	Ok(dict)
 }
 
 #[cfg(feature = "python")]
@@ -745,16 +809,17 @@ pub fn linearreg_slope_into_slice(
 		return Err(LinearRegSlopeError::EmptyData);
 	}
 	let period = input.get_period();
-	if period == 0 || period > data.len() {
+	// Linear regression requires at least 2 points to define a slope
+	if period < 2 || period > data.len() {
 		return Err(LinearRegSlopeError::InvalidPeriod {
 			period,
 			data_len: data.len(),
 		});
 	}
 	if dst.len() != data.len() {
-		return Err(LinearRegSlopeError::InvalidPeriod {
-			period: dst.len(),
-			data_len: data.len(),
+		return Err(LinearRegSlopeError::InvalidOutputLength {
+			output_len: dst.len(),
+			expected_len: data.len(),
 		});
 	}
 	
@@ -827,13 +892,13 @@ pub fn linearreg_slope_into(
 		if in_ptr == out_ptr {
 			// Handle aliasing
 			let mut temp = vec![0.0; len];
-			linearreg_slope_into_slice(&mut temp, &input, Kernel::Auto)
+			linearreg_slope_into_slice(&mut temp, &input, detect_best_kernel())
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 			let out = std::slice::from_raw_parts_mut(out_ptr, len);
 			out.copy_from_slice(&temp);
 		} else {
 			let out = std::slice::from_raw_parts_mut(out_ptr, len);
-			linearreg_slope_into_slice(out, &input, Kernel::Auto)
+			linearreg_slope_into_slice(out, &input, detect_best_kernel())
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 		}
 		Ok(())
@@ -882,7 +947,8 @@ pub fn linearreg_slope_batch_js(data: &[f64], config: JsValue) -> Result<JsValue
 		period: config.period_range,
 	};
 	
-	let output = linearreg_slope_batch_inner(data, &sweep, Kernel::Auto, false)
+	// Use Scalar kernel for WASM (Auto might select invalid kernels)
+	let output = linearreg_slope_batch_inner(data, &sweep, Kernel::Scalar, false)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 	
 	let js_output = LinearRegSlopeBatchJsOutput {
@@ -894,6 +960,45 @@ pub fn linearreg_slope_batch_js(data: &[f64], config: JsValue) -> Result<JsValue
 	
 	serde_wasm_bindgen::to_value(&js_output)
 		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn linearreg_slope_batch_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+) -> Result<usize, JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to linearreg_slope_batch_into"));
+	}
+	unsafe {
+		let data = core::slice::from_raw_parts(in_ptr, len);
+		let sweep = LinearRegSlopeBatchRange { period: (period_start, period_end, period_step) };
+		let combos = expand_grid(&sweep);
+		let rows = combos.len();
+		let cols = len;
+
+		let out = core::slice::from_raw_parts_mut(out_ptr, rows * cols);
+
+		// Warmup prefixes on the JS-provided buffer
+		let first = data
+			.iter()
+			.position(|x| !x.is_nan())
+			.ok_or_else(|| JsValue::from_str("All values are NaN"))?;
+		let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
+		let out_mu = core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len());
+		init_matrix_prefixes(out_mu, cols, &warm);
+
+		// Compute
+		linearreg_slope_batch_inner_into(data, &sweep, detect_best_kernel(), false, out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+		Ok(rows)
+	}
 }
 
 #[cfg(test)]
@@ -939,6 +1044,30 @@ mod tests {
 			"[{}] linearreg_slope should fail with zero period",
 			test_name
 		);
+		Ok(())
+	}
+
+	fn check_linearreg_slope_period_one(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		let input_data = [10.0, 20.0, 30.0, 40.0, 50.0];
+		let params = LinearRegSlopeParams { period: Some(1) };
+		let input = LinearRegSlopeInput::from_slice(&input_data, params);
+		let res = linearreg_slope_with_kernel(&input, kernel);
+		assert!(
+			res.is_err(),
+			"[{}] linearreg_slope should fail with period=1 (needs at least 2 points for slope)",
+			test_name
+		);
+		// Verify the error message mentions invalid period
+		if let Err(e) = res {
+			let msg = e.to_string();
+			assert!(
+				msg.contains("Invalid period"),
+				"[{}] Expected 'Invalid period' error, got: {}",
+				test_name,
+				msg
+			);
+		}
 		Ok(())
 	}
 
@@ -1106,6 +1235,7 @@ mod tests {
 		check_linearreg_slope_partial_params,
 		check_linearreg_slope_accuracy,
 		check_linearreg_slope_zero_period,
+		check_linearreg_slope_period_one,
 		check_linearreg_slope_period_exceeds_length,
 		check_linearreg_slope_very_small_dataset,
 		check_linearreg_slope_reinput,
