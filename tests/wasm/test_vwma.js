@@ -165,8 +165,10 @@ test('VWMA slice reinput', () => {
     assert.strictEqual(secondResult.length, firstResult.length);
     
     // After warmup, should have valid values
-    const start = 20 + 10 - 2;  // first period + second period - 2
-    for (let i = start; i < secondResult.length; i++) {
+    // First pass warmup: first + period - 1 = 0 + 20 - 1 = 19
+    // Second pass warmup: first_warmup + period2 - 1 = 19 + 10 - 1 = 28
+    const expectedWarmup = 28;
+    for (let i = expectedWarmup; i < secondResult.length; i++) {
         assert(!isNaN(secondResult[i]), `Unexpected NaN at index ${i}`);
     }
 });
@@ -565,6 +567,88 @@ test('VWMA batch fast API with aliasing', () => {
     } finally {
         wasm.vwma_free(pricePtr, 10);
         wasm.vwma_free(volumePtr, 10);
+    }
+});
+
+test('VWMA zero volume', () => {
+    // Test VWMA handles zero volume correctly
+    const prices = new Float64Array([10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]);
+    const volumes = new Float64Array([100.0, 0.0, 300.0, 0.0, 500.0, 0.0, 700.0, 0.0, 900.0, 0.0]);
+    
+    const result = wasm.vwma_js(prices, volumes, 3);
+    assert.strictEqual(result.length, prices.length);
+    
+    // Check that we get NaN where all volumes in window are zero
+    // but valid values where at least one volume is non-zero
+    assert(!isNaN(result[2]), "Index 2 should have valid value with non-zero volumes in window");
+});
+
+test('VWMA partial NaN data', () => {
+    // Test VWMA with NaN values in middle of dataset
+    const close = new Float64Array(testData.close.slice(0, 200));
+    const volume = new Float64Array(testData.volume.slice(0, 200));
+    
+    // Inject NaN values in middle of data
+    for (let i = 100; i < 110; i++) {
+        close[i] = NaN;
+        volume[i] = NaN;
+    }
+    
+    // VWMA should handle NaN gracefully but might propagate them
+    // This test verifies the function doesn't crash
+    const result = wasm.vwma_js(close, volume, 20);
+    assert.strictEqual(result.length, close.length);
+    
+    // Should have NaN during warmup
+    assertAllNaN(result.slice(0, 19), "Expected NaN in warmup period");
+    
+    // Note: NaN handling depends on implementation - some may continue
+    // producing NaN until all data is valid again
+});
+
+test('VWMA warmup period verification', () => {
+    // Test VWMA warmup period calculation matches Rust exactly
+    const close = new Float64Array(testData.close);
+    const volume = new Float64Array(testData.volume);
+    const period = 20;
+    
+    const result = wasm.vwma_js(close, volume, period);
+    
+    // Warmup should be first + period - 1 = 0 + 20 - 1 = 19
+    // So indices 0-18 should be NaN, index 19 should be first valid
+    assertAllNaN(result.slice(0, 19), "First 19 values should be NaN");
+    assert(!isNaN(result[19]), "Index 19 should be first valid value");
+});
+
+test('VWMA batch multiple parameter sweeps', () => {
+    // Test batch with multiple period values
+    const close = new Float64Array(testData.close.slice(0, 100));
+    const volume = new Float64Array(testData.volume.slice(0, 100));
+    
+    // Test with periods: 10, 20, 30
+    const batchResult = wasm.vwma_batch_js(
+        close,
+        volume,
+        10, 30, 10  // period range
+    );
+    
+    // Should have 3 rows * 100 cols = 300 values
+    assert.strictEqual(batchResult.length, 3 * 100);
+    
+    // Verify each row matches individual calculation
+    const periods = [10, 20, 30];
+    for (let i = 0; i < periods.length; i++) {
+        const rowStart = i * 100;
+        const rowEnd = rowStart + 100;
+        const rowData = batchResult.slice(rowStart, rowEnd);
+        
+        const singleResult = wasm.vwma_js(close, volume, periods[i]);
+        assertArrayClose(
+            rowData, 
+            singleResult, 
+            1e-10, 
+            `Period ${periods[i]} mismatch in batch`
+        );
     }
 });
 

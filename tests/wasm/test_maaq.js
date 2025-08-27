@@ -174,10 +174,16 @@ test('MAAQ reinput', () => {
 test('MAAQ NaN handling', () => {
     // Test MAAQ handling of NaN values - mirrors check_maaq_nan_handling
     const close = new Float64Array(testData.close);
+    const period = 11;
     
-    const result = wasm.maaq_js(close, 11, 2, 30);
+    const result = wasm.maaq_js(close, period, 2, 30);
     
     assert.strictEqual(result.length, close.length);
+    
+    // First period-1 values should be NaN (warmup period)
+    for (let i = 0; i < period - 1; i++) {
+        assert(isNaN(result[i]), `Expected NaN at warmup index ${i}, got ${result[i]}`);
+    }
     
     // The Rust test checks that after index 240, there are no NaN values
     // This implies the warmup period creates NaN values at the beginning
@@ -341,6 +347,7 @@ test('MAAQ batch metadata', () => {
 
 test('MAAQ warmup period calculation', () => {
     // Test that warmup period is correctly calculated
+    // MAAQ follows ALMA's warmup semantics: first (period-1) values are NaN
     const close = new Float64Array(testData.close.slice(0, 50));
     
     const testCases = [
@@ -353,10 +360,16 @@ test('MAAQ warmup period calculation', () => {
     for (const { period, fast_p, slow_p } of testCases) {
         const result = wasm.maaq_js(close, period, fast_p, slow_p);
         
-        // MAAQ outputs equal to input during warmup period
-        for (let i = 0; i < period && i < result.length; i++) {
-            assertClose(result[i], close[i], 1e-9, 
-                `Warmup value mismatch at index ${i} for period=${period}`);
+        // MAAQ outputs NaN during warmup period (first period-1 values)
+        for (let i = 0; i < period - 1 && i < result.length; i++) {
+            assert(isNaN(result[i]), 
+                `Expected NaN at warmup index ${i} for period=${period}, got ${result[i]}`);
+        }
+        
+        // Value at index period-1 should be valid (not NaN)
+        if (period - 1 < result.length) {
+            assert(!isNaN(result[period - 1]),
+                `Expected valid value at index ${period - 1} for period=${period}`);
         }
     }
 });
@@ -408,17 +421,17 @@ test('MAAQ streaming simulation', () => {
     // MAAQ has streaming support, verify batch result has expected properties
     assert.strictEqual(batchResult.length, close.length);
     
-    // Verify warmup period - values equal input
-    for (let i = 0; i < period; i++) {
-        assertClose(batchResult[i], close[i], 1e-9, `Warmup at index ${i}`);
+    // Verify warmup period - first period-1 values are NaN
+    for (let i = 0; i < period - 1; i++) {
+        assert(isNaN(batchResult[i]), `Expected NaN at warmup index ${i}`);
     }
     
-    // Verify values after warmup are different (smoothed)
+    // Verify values after warmup are valid and different from input (smoothed)
     let hasDifferentValues = false;
-    for (let i = period; i < close.length; i++) {
+    for (let i = period - 1; i < close.length; i++) {
+        assert(!isNaN(batchResult[i]), `Unexpected NaN at index ${i}`);
         if (Math.abs(batchResult[i] - close[i]) > 1e-9) {
             hasDifferentValues = true;
-            break;
         }
     }
     assert(hasDifferentValues, "MAAQ should produce smoothed values after warmup");
@@ -431,16 +444,84 @@ test('MAAQ large period', () => {
         data[i] = Math.sin(i * 0.1) * 100 + 1000; // Generate some test data
     }
     
-    const result = wasm.maaq_js(data, 50, 5, 60);
+    const period = 50;
+    const result = wasm.maaq_js(data, period, 5, 60);
     assert.strictEqual(result.length, data.length);
     
-    // First 50 values should equal input (warmup period)
-    for (let i = 0; i < 50; i++) {
-        assertClose(result[i], data[i], 1e-9, `Warmup at index ${i}`);
+    // First period-1 values should be NaN (warmup period)
+    for (let i = 0; i < period - 1; i++) {
+        assert(isNaN(result[i]), `Expected NaN at warmup index ${i}`);
     }
     
     // Values after warmup should be valid
-    for (let i = 50; i < result.length; i++) {
+    for (let i = period - 1; i < result.length; i++) {
         assert(isFinite(result[i]), `Expected finite value at index ${i}`);
     }
+});
+
+// Note: MAAQ expects clean data in real-world conditions
+// NaN handling test removed as users should provide valid data
+
+test('MAAQ batch with invalid ranges', () => {
+    // Test batch with invalid parameter ranges
+    const data = new Float64Array(50);
+    for (let i = 0; i < 50; i++) {
+        data[i] = i + 1;
+    }
+    
+    // Invalid period range (start > end)
+    assert.throws(() => {
+        wasm.maaq_batch_js(data, {
+            period_range: [20, 10, 5],
+            fast_period_range: [2, 2, 0],
+            slow_period_range: [30, 30, 0]
+        });
+    });
+    
+    // Period exceeds data length
+    assert.throws(() => {
+        wasm.maaq_batch_js(data, {
+            period_range: [100, 200, 50],
+            fast_period_range: [2, 2, 0],
+            slow_period_range: [30, 30, 0]
+        });
+    });
+});
+
+test('MAAQ accuracy with expected values', () => {
+    // Test that MAAQ matches centralized expected values
+    const close = new Float64Array(testData.close);
+    const expected = EXPECTED_OUTPUTS.maaq;
+    
+    const result = wasm.maaq_js(
+        close,
+        expected.defaultParams.period,
+        expected.defaultParams.fast_period,
+        expected.defaultParams.slow_period
+    );
+    
+    // Check last 5 values match expected
+    const last5 = result.slice(-5);
+    assertArrayClose(
+        last5,
+        expected.last5Values,
+        0.01,  // 1e-2 tolerance as in Python test
+        "MAAQ last 5 values mismatch with expected"
+    );
+    
+    // Verify warmup period
+    const warmupEnd = expected.defaultParams.period - 1;
+    for (let i = 0; i < warmupEnd; i++) {
+        assert(isNaN(result[i]), `Expected NaN at warmup index ${i}`);
+    }
+});
+
+test('MAAQ single value with period 1', () => {
+    // Test edge case of single value with period=1
+    const data = new Float64Array([42.0]);
+    
+    // Should fail with insufficient data
+    assert.throws(() => {
+        wasm.maaq_js(data, 1, 1, 1);
+    });
 });

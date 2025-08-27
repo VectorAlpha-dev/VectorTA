@@ -213,7 +213,7 @@ pub fn vwma_with_kernel(input: &VwmaInput, kernel: Kernel) -> Result<VwmaOutput,
 		});
 	}
 
-	let warm = first + period;
+	let warm = first + period - 1;
 	let mut out = alloc_with_nan_prefix(len, warm);
 
 	let chosen = match kernel {
@@ -407,7 +407,7 @@ fn vwma_batch_inner(
 	let rows = combos.len();
 	let cols = len;
 
-	let warm_prefixes: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
+	let warm_prefixes: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
 
 	let mut raw = make_uninit_matrix(rows, cols);
 	unsafe { init_matrix_prefixes(&mut raw, cols, &warm_prefixes) };
@@ -585,6 +585,93 @@ impl VwmaBatchBuilder {
 	pub fn apply_slice(self, prices: &[f64], volumes: &[f64]) -> Result<VwmaBatchOutput, VwmaError> {
 		vwma_batch_with_kernel(prices, volumes, &self.range, self.kernel)
 	}
+}
+
+#[inline(always)]
+pub fn vwma_batch_inner_into(
+	price: &[f64],
+	volume: &[f64],
+	sweep: &VwmaBatchRange,
+	kern: Kernel,          // expect Scalar | Avx2 | Avx512 (not *Batch)
+	parallel: bool,
+	out: &mut [f64],       // rows*cols, will be filled in place
+) -> Result<Vec<VwmaParams>, VwmaError> {
+	// 0) grid + validity
+	let combos = expand_grid_vwma(sweep);
+	if combos.is_empty() {
+		return Err(VwmaError::InvalidPeriod { period: 0, data_len: 0 });
+	}
+	let len = price.len();
+	if volume.len() != len {
+		return Err(VwmaError::PriceVolumeMismatch { price_len: len, volume_len: volume.len() });
+	}
+	let first = price
+		.iter()
+		.zip(volume.iter())
+		.position(|(&p,&v)| !p.is_nan() && !v.is_nan())
+		.ok_or(VwmaError::AllValuesNaN)?;
+	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	if len - first < max_p {
+		return Err(VwmaError::NotEnoughValidData { needed: max_p, valid: len - first });
+	}
+
+	// 1) shape + out buffer
+	let rows = combos.len();
+	let cols = len;
+	if out.len() != rows * cols {
+		return Err(VwmaError::InvalidPeriod { period: out.len(), data_len: rows * cols });
+	}
+	let out_mu: &mut [MaybeUninit<f64>] = unsafe {
+		core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
+	};
+
+	// 2) write NaN prefixes per row (zero extra copies)
+	let warm_prefixes: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
+	init_matrix_prefixes(out_mu, cols, &warm_prefixes);
+
+	// 3) row worker
+	let do_row = |row: usize, row_mu: &mut [MaybeUninit<f64>]| unsafe {
+		let period = combos[row].period.unwrap();
+		let row_out: &mut [f64] =
+			core::slice::from_raw_parts_mut(row_mu.as_mut_ptr() as *mut f64, row_mu.len());
+		match kern {
+			Kernel::Scalar => vwma_row_scalar(price, volume, first, period, row_out),
+			#[cfg(all(feature="nightly-avx", target_arch="x86_64"))]
+			Kernel::Avx2   => vwma_row_avx2(price, volume, first, period, row_out),
+			#[cfg(all(feature="nightly-avx", target_arch="x86_64"))]
+			Kernel::Avx512 => vwma_row_avx512(price, volume, first, period, row_out),
+			_ => vwma_row_scalar(price, volume, first, period, row_out),
+		}
+	};
+
+	// 4) run all rows
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			out_mu.par_chunks_mut(cols).enumerate().for_each(|(r, chunk)| do_row(r, chunk));
+		}
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (r, chunk) in out_mu.chunks_mut(cols).enumerate() { do_row(r, chunk); }
+		}
+	} else {
+		for (r, chunk) in out_mu.chunks_mut(cols).enumerate() { do_row(r, chunk); }
+	}
+
+	Ok(combos)
+}
+
+#[inline(always)]
+pub fn vwma_batch_into_slice(
+	dst: &mut [f64], price: &[f64], volume: &[f64], sweep: &VwmaBatchRange, k: Kernel
+) -> Result<Vec<VwmaParams>, VwmaError> {
+	let simd = match if matches!(k, Kernel::Auto) { detect_best_batch_kernel() } else { k } {
+		Kernel::Avx512Batch => Kernel::Avx512,
+		Kernel::Avx2Batch => Kernel::Avx2,
+		Kernel::ScalarBatch => Kernel::Scalar,
+		_ => Kernel::Scalar,
+	};
+	vwma_batch_inner_into(price, volume, sweep, simd, true, dst)
 }
 
 #[inline(always)]
@@ -1254,57 +1341,40 @@ pub fn vwma_batch_py<'py>(
 	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
 	use pyo3::types::PyDict;
 
-	let prices_slice = prices.as_slice()?;
-	let volumes_slice = volumes.as_slice()?;
-	let kern = validate_kernel(kernel, true)?;
-
+	let p = prices.as_slice()?;
+	let v = volumes.as_slice()?;
 	let sweep = VwmaBatchRange { period: period_range };
 
-	// Expand grid to know rows*cols
-	let combos = expand_grid(&sweep);
-	let rows = combos.len();
-	let cols = prices_slice.len();
+	// precompute shape
+	let combos0 = expand_grid_vwma(&sweep);
+	let rows = combos0.len();
+	let cols = p.len();
 
-	// Pre-allocate NumPy array for batch operations (acceptable pattern)
+	// preallocate numpy target (zero-copy)
 	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-	let slice_out = unsafe { out_arr.as_slice_mut()? };
+	let out_slice = unsafe { out_arr.as_slice_mut()? };
 
-	// Heavy work without the GIL
+	let kern = validate_kernel(kernel, true)?;
 	let combos = py.allow_threads(|| {
-		let kernel = match kern {
+		let batch = match kern {
 			Kernel::Auto => detect_best_batch_kernel(),
 			k => k,
 		};
-		let simd = match kernel {
+		let simd = match batch {
 			Kernel::Avx512Batch => Kernel::Avx512,
 			Kernel::Avx2Batch => Kernel::Avx2,
 			Kernel::ScalarBatch => Kernel::Scalar,
-			// Fallback to scalar for any other case
 			_ => Kernel::Scalar,
 		};
+		vwma_batch_inner_into(p, v, &sweep, simd, true, out_slice)
+	}).map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-		// Use the existing batch_inner function which already handles NaN prefixes
-		vwma_batch_inner(prices_slice, volumes_slice, &sweep, simd, true)
-			.and_then(|output| {
-				// Copy the output values to our pre-allocated buffer
-				slice_out.copy_from_slice(&output.values);
-				Ok(output.combos)
-			})
-	})
-	.map_err(|e| PyValueError::new_err(e.to_string()))?;
-
-	// Build dict with the GIL
 	let dict = PyDict::new(py);
 	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
 	dict.set_item(
 		"periods",
-		combos
-			.iter()
-			.map(|p| p.period.unwrap() as u64)
-			.collect::<Vec<_>>()
-			.into_pyarray(py),
+		combos.iter().map(|c| c.period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py),
 	)?;
-
 	Ok(dict.into())
 }
 
@@ -1552,47 +1622,33 @@ pub fn vwma_batch_into(
 	if price_ptr.is_null() || volume_ptr.is_null() || out_ptr.is_null() {
 		return Err(JsValue::from_str("Null pointer provided"));
 	}
-
 	unsafe {
 		let prices = std::slice::from_raw_parts(price_ptr, len);
 		let volumes = std::slice::from_raw_parts(volume_ptr, len);
+		let sweep = VwmaBatchRange { period: (period_start, period_end, period_step) };
+		let combos = expand_grid_vwma(&sweep);
+		let rows = combos.len();
 
-		let sweep = VwmaBatchRange {
-			period: (period_start, period_end, period_step),
+		// choose simd like ALMA
+		let simd = match detect_best_batch_kernel() {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch => Kernel::Avx2,
+			Kernel::ScalarBatch => Kernel::Scalar,
+			_ => Kernel::Scalar,
 		};
 
-		let combos = expand_grid(&sweep);
-		let rows = combos.len();
-		
-		if price_ptr == out_ptr || volume_ptr == out_ptr {
-			// Use temporary buffer if output aliases with either input
-			let kernel = detect_best_batch_kernel();
-			let simd_kernel = match kernel {
-				Kernel::Avx512Batch => Kernel::Avx512,
-				Kernel::Avx2Batch => Kernel::Avx2,
-				Kernel::ScalarBatch => Kernel::Scalar,
-				// Fallback to scalar for any other case
-				_ => Kernel::Scalar,
-			};
-			let output = vwma_batch_inner(prices, volumes, &sweep, simd_kernel, false)
+		if (out_ptr as *const f64) == price_ptr || (out_ptr as *const f64) == volume_ptr {
+			// alias-safe: temp then copy once
+			let mut tmp = vec![0f64; rows * len];
+			vwma_batch_inner_into(prices, volumes, &sweep, simd, false, &mut tmp)
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 			let out = std::slice::from_raw_parts_mut(out_ptr, rows * len);
-			out.copy_from_slice(&output.values);
+			out.copy_from_slice(&tmp);
 		} else {
-			let out_slice = std::slice::from_raw_parts_mut(out_ptr, rows * len);
-			
-			// Process each parameter combination
-			for (i, combo) in combos.iter().enumerate() {
-				let row_start = i * len;
-				let row_end = row_start + len;
-				let row_out = &mut out_slice[row_start..row_end];
-				
-				let input = VwmaInput::from_slice(prices, volumes, combo.clone());
-				vwma_into_slice(row_out, &input, detect_best_kernel())
-					.map_err(|e| JsValue::from_str(&e.to_string()))?;
-			}
+			let out = std::slice::from_raw_parts_mut(out_ptr, rows * len);
+			vwma_batch_inner_into(prices, volumes, &sweep, simd, false, out)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 		}
-
 		Ok(rows)
 	}
 }

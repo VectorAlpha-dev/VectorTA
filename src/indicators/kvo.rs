@@ -30,6 +30,7 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
+use std::mem::MaybeUninit;
 use thiserror::Error;
 
 #[cfg(feature = "python")]
@@ -209,6 +210,8 @@ pub enum KvoError {
 	NotEnoughValidData { valid: usize },
 	#[error("kvo: All values are NaN.")]
 	AllValuesNaN,
+	#[error("kvo: Output buffer length mismatch: got={got}, expected={expected}")]
+	OutputLenMismatch { got: usize, expected: usize },
 }
 
 #[inline]
@@ -330,6 +333,14 @@ pub fn kvo_compute_into(out: &mut [f64], input: &KvoInput, kernel: Kernel) -> Re
 		return Err(KvoError::EmptyData);
 	}
 
+	// Validate output buffer length matches input length
+	if out.len() != high.len() {
+		return Err(KvoError::OutputLenMismatch {
+			got: out.len(),
+			expected: high.len(),
+		});
+	}
+
 	let short_period = input.get_short_period();
 	let long_period = input.get_long_period();
 	if short_period < 1 || long_period < short_period {
@@ -405,6 +416,12 @@ pub fn kvo_compute_into(out: &mut [f64], input: &KvoInput, kernel: Kernel) -> Re
 	}
 	
 	Ok(())
+}
+
+/// Compute KVO into slice with API matching alma.rs
+#[inline]
+pub fn kvo_into_slice(dst: &mut [f64], input: &KvoInput, kern: Kernel) -> Result<(), KvoError> {
+	kvo_compute_into(dst, input, kern)
 }
 
 #[inline]
@@ -736,6 +753,43 @@ pub fn kvo_batch_par_slice(
 	kvo_batch_inner(high, low, close, volume, sweep, kern, true)
 }
 
+/// Compute KVO batch directly into the provided output buffer for zero-copy operations
+/// The output buffer must have size: rows * cols where rows is the number of parameter combinations
+/// and cols is the length of the input data. Data is laid out in row-major order.
+#[inline]
+pub fn kvo_batch_into_slice(
+	out: &mut [f64],
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	volume: &[f64],
+	sweep: &KvoBatchRange,
+	kern: Kernel,
+	parallel: bool,
+) -> Result<Vec<KvoParams>, KvoError> {
+	// Validate that all input slices have the same length
+	let len = high.len();
+	if low.len() != len || close.len() != len || volume.len() != len {
+		return Err(KvoError::OutputLenMismatch {
+			got: out.len(),
+			expected: len,
+		});
+	}
+	
+	// Calculate expected output size
+	let combos = expand_grid(sweep);
+	let expected_size = combos.len() * len;
+	
+	if out.len() != expected_size {
+		return Err(KvoError::OutputLenMismatch {
+			got: out.len(),
+			expected: expected_size,
+		});
+	}
+	
+	kvo_batch_inner_into(high, low, close, volume, sweep, kern, parallel, out)
+}
+
 #[inline(always)]
 fn kvo_batch_inner(
 	high: &[f64],
@@ -750,78 +804,38 @@ fn kvo_batch_inner(
 	if combos.is_empty() {
 		return Err(KvoError::InvalidPeriod { short: 0, long: 0 });
 	}
-	let first = high
-		.iter()
-		.zip(low)
-		.zip(close)
-		.zip(volume)
-		.position(|(((h, l), c), v)| !h.is_nan() && !l.is_nan() && !c.is_nan() && !v.is_nan())
-		.ok_or(KvoError::AllValuesNaN)?;
-	let max_short = combos.iter().map(|c| c.short_period.unwrap()).max().unwrap();
-	let max_long = combos.iter().map(|c| c.long_period.unwrap()).max().unwrap();
-	if high.len() - first < 2 {
-		return Err(KvoError::NotEnoughValidData {
-			valid: high.len() - first,
-		});
-	}
-	let rows = combos.len();
 	let cols = high.len();
+	let rows = combos.len();
 	
-	// Create uninitialized matrix
-	let mut values_uninit = make_uninit_matrix(rows, cols);
+	// 1) allocate rows×cols uninit
+	let mut buf_mu = make_uninit_matrix(rows, cols);
 	
-	// Calculate warmup periods for each combo
-	let warmup_periods: Vec<usize> = combos.iter().map(|_| first + 1).collect();
+	// 2) init NaN warmup using first+1 per row, same as before
+	let first = high.iter().zip(low).zip(close).zip(volume)
+		.position(|(((h,l),c),v)| !h.is_nan() && !l.is_nan() && !c.is_nan() && !v.is_nan())
+		.ok_or(KvoError::AllValuesNaN)?;
+	let warm: Vec<usize> = combos.iter().map(|_| first + 1).collect();
+	init_matrix_prefixes(&mut buf_mu, cols, &warm);
 	
-	// Initialize NaN prefixes
-	init_matrix_prefixes(&mut values_uninit, cols, &warmup_periods);
-	
-	// Convert to initialized Vec
-	let mut values = unsafe {
-		let ptr = values_uninit.as_mut_ptr() as *mut f64;
-		let len = values_uninit.len();
-		std::mem::forget(values_uninit);
-		Vec::from_raw_parts(ptr, len, len)
+	// 3) expose &mut [f64] view to write into in-place
+	let mut guard = core::mem::ManuallyDrop::new(buf_mu);
+	let out_slice: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len())
 	};
 	
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-		let short = combos[row].short_period.unwrap();
-		let long = combos[row].long_period.unwrap();
-		match kern {
-			Kernel::Scalar => kvo_row_scalar(high, low, close, volume, first, short, long, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => kvo_row_avx2(high, low, close, volume, first, short, long, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => kvo_row_avx512(high, low, close, volume, first, short, long, out_row),
-			_ => unreachable!(),
-		}
+	// 4) write rows directly into the same allocation
+	let simd = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		k => k,
 	};
-	if parallel {
-		#[cfg(not(target_arch = "wasm32"))]
-		{
-			values
-				.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
-		}
-
-		#[cfg(target_arch = "wasm32")]
-		{
-			for (row, slice) in values.chunks_mut(cols).enumerate() {
-				do_row(row, slice);
-			}
-		}
-	} else {
-		for (row, slice) in values.chunks_mut(cols).enumerate() {
-			do_row(row, slice);
-		}
-	}
-	Ok(KvoBatchOutput {
-		values,
-		combos,
-		rows,
-		cols,
-	})
+	let combos_back = kvo_batch_inner_into(high, low, close, volume, sweep, simd, parallel, out_slice)?;
+	
+	// 5) reclaim as Vec<f64> without copying
+	let values = unsafe {
+		Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, guard.len(), guard.capacity())
+	};
+	
+	Ok(KvoBatchOutput { values, combos: combos_back, rows, cols })
 }
 
 #[inline(always)]
@@ -1805,93 +1819,60 @@ impl KvoStreamPy {
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "kvo_batch")]
-#[pyo3(signature = (high, low, close, volume, short_period_range, long_period_range, kernel=None))]
+#[pyo3(signature = (high, low, close, volume, short_range, long_range, kernel=None))]
 pub fn kvo_batch_py<'py>(
 	py: Python<'py>,
-	high: PyReadonlyArray1<'py, f64>,
-	low: PyReadonlyArray1<'py, f64>,
-	close: PyReadonlyArray1<'py, f64>,
-	volume: PyReadonlyArray1<'py, f64>,
-	short_period_range: (usize, usize, usize),
-	long_period_range: (usize, usize, usize),
+	high: numpy::PyReadonlyArray1<'py, f64>,
+	low: numpy::PyReadonlyArray1<'py, f64>,
+	close: numpy::PyReadonlyArray1<'py, f64>,
+	volume: numpy::PyReadonlyArray1<'py, f64>,
+	short_range: (usize, usize, usize),
+	long_range: (usize, usize, usize),
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
-	let high_slice = high.as_slice()?;
-	let low_slice = low.as_slice()?;
-	let close_slice = close.as_slice()?;
-	let volume_slice = volume.as_slice()?;
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
 	
-	let sweep = KvoBatchRange {
-		short_period: short_period_range,
-		long_period: long_period_range,
-	};
+	let h = high.as_slice()?;
+	let l = low.as_slice()?;
+	let c = close.as_slice()?;
+	let v = volume.as_slice()?;
 	
+	// grid + shape
+	let sweep = KvoBatchRange { short_period: short_range, long_period: long_range };
 	let combos = expand_grid(&sweep);
 	let rows = combos.len();
-	let cols = high_slice.len();
+	let cols = h.len();
 	
-	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-	let slice_out = unsafe { out_arr.as_slice_mut()? };
+	// pre-allocate the exact target buffer in NumPy
+	let arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let out_flat: &mut [f64] = unsafe { arr.as_slice_mut()? };
 	
-	// Find first valid index
-	let first = close_slice
-		.iter()
-		.position(|&x| !x.is_nan())
-		.unwrap_or(0);
+	let kern = validate_kernel(kernel, true)?; // expect batch-ish
+	let simd = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		k => k,
+	};
 	
-	// Calculate warmup periods for each row and initialize NaN prefixes
-	let warmup_periods: Vec<usize> = combos.iter().map(|c| {
-		first + c.long_period.unwrap() - 1
-	}).collect();
-	
-	// Initialize NaN prefixes
-	for (row_idx, &warmup) in warmup_periods.iter().enumerate() {
-		let row_start = row_idx * cols;
-		for col_idx in 0..warmup.min(cols) {
-			slice_out[row_start + col_idx] = f64::NAN;
-		}
-	}
-	
-	let kern = validate_kernel(kernel, true)?;
-	let combos = py.allow_threads(|| {
-		let kernel = match kern {
-			Kernel::Auto => detect_best_batch_kernel(),
-			k => k,
-		};
-		let simd = match kernel {
-			Kernel::Avx512Batch => Kernel::Avx512,
-			Kernel::Avx2Batch => Kernel::Avx2,
-			Kernel::ScalarBatch => Kernel::Scalar,
-			_ => unreachable!(),
-		};
-		
-		// Use a custom batch implementation that writes directly to slice_out
-		kvo_batch_inner_into(high_slice, low_slice, close_slice, volume_slice, &sweep, simd, true, slice_out)
-	})
-	.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	py.allow_threads(|| {
+		kvo_batch_inner_into(h, l, c, v, &sweep, simd, true, out_flat)
+	}).map_err(|e| PyValueError::new_err(e.to_string()))?;
 	
 	let dict = PyDict::new(py);
-	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item("values", arr.reshape((rows, cols))?)?;
 	dict.set_item(
-		"short_periods",
-		combos.iter()
-			.map(|p| p.short_period.unwrap() as u64)
-			.collect::<Vec<_>>()
-			.into_pyarray(py)
+		"shorts",
+		combos.iter().map(|p| p.short_period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py)
 	)?;
 	dict.set_item(
-		"long_periods",
-		combos.iter()
-			.map(|p| p.long_period.unwrap() as u64)
-			.collect::<Vec<_>>()
-			.into_pyarray(py)
+		"longs",
+		combos.iter().map(|p| p.long_period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py)
 	)?;
 	
 	Ok(dict)
 }
 
 // Helper function for batch processing that writes directly into the provided slice
-#[cfg(any(feature = "python", feature = "wasm"))]
+#[inline(always)]
 fn kvo_batch_inner_into(
 	high: &[f64],
 	low: &[f64],
@@ -1907,6 +1888,7 @@ fn kvo_batch_inner_into(
 		return Err(KvoError::InvalidPeriod { short: 0, long: 0 });
 	}
 	
+	// First valid index across all inputs
 	let first = high
 		.iter()
 		.zip(low)
@@ -1923,16 +1905,37 @@ fn kvo_batch_inner_into(
 	
 	let rows = combos.len();
 	let cols = high.len();
+	assert_eq!(out.len(), rows * cols, "out buffer has wrong length");
 	
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-		let short = combos[row].short_period.unwrap();
-		let long = combos[row].long_period.unwrap();
-		match kern {
-			Kernel::Scalar => kvo_row_scalar(high, low, close, volume, first, short, long, out_row),
+	// Initialize warm prefixes as NaN per row without extra copies
+	let out_mu: &mut [MaybeUninit<f64>] = unsafe {
+		std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
+	};
+	let warm: Vec<usize> = combos.iter().map(|_| first + 1).collect();
+	init_matrix_prefixes(out_mu, cols, &warm);
+	
+	// Choose concrete kernel (scalar/avx/avx512) for rows
+	let actual = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		k => k,
+	};
+	
+	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
+		let s = combos[row].short_period.unwrap();
+		let l = combos[row].long_period.unwrap();
+		
+		// Cast row to &mut [f64] once; we only *write* into it.
+		let dst = std::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
+		
+		match actual {
+			Kernel::Scalar | Kernel::ScalarBatch =>
+				kvo_row_scalar(high, low, close, volume, first, s, l, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => kvo_row_avx2(high, low, close, volume, first, short, long, out_row),
+			Kernel::Avx2 | Kernel::Avx2Batch =>
+				kvo_row_avx2(high, low, close, volume, first, s, l, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => kvo_row_avx512(high, low, close, volume, first, short, long, out_row),
+			Kernel::Avx512 | Kernel::Avx512Batch =>
+				kvo_row_avx512(high, low, close, volume, first, s, l, dst),
 			_ => unreachable!(),
 		}
 	};
@@ -1940,21 +1943,15 @@ fn kvo_batch_inner_into(
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			out.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
+			use rayon::prelude::*;
+			out_mu.par_chunks_mut(cols).enumerate().for_each(|(r, row)| do_row(r, row));
 		}
-		
 		#[cfg(target_arch = "wasm32")]
 		{
-			for (row, slice) in out.chunks_mut(cols).enumerate() {
-				do_row(row, slice);
-			}
+			for (r, row) in out_mu.chunks_mut(cols).enumerate() { do_row(r, row); }
 		}
 	} else {
-		for (row, slice) in out.chunks_mut(cols).enumerate() {
-			do_row(row, slice);
-		}
+		for (r, row) in out_mu.chunks_mut(cols).enumerate() { do_row(r, row); }
 	}
 	
 	Ok(combos)
@@ -1967,7 +1964,7 @@ fn kvo_batch_inner_into(
 /// Helper function for WASM that writes directly to output slice - no allocations
 #[cfg(feature = "wasm")]
 #[inline]
-pub fn kvo_into_slice(
+fn kvo_wasm_into_slice(
 	dst: &mut [f64],
 	high: &[f64],
 	low: &[f64],
@@ -2012,7 +2009,7 @@ pub fn kvo_js(
 ) -> Result<Vec<f64>, JsValue> {
 	let mut output = vec![0.0; high.len()];  // Single allocation
 	
-	kvo_into_slice(&mut output, high, low, close, volume, short_period, long_period, detect_best_kernel())
+	kvo_wasm_into_slice(&mut output, high, low, close, volume, short_period, long_period, detect_best_kernel())
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 	
 	Ok(output)
@@ -2046,14 +2043,14 @@ pub fn kvo_into(
 		if high_ptr == out_ptr || low_ptr == out_ptr || close_ptr == out_ptr || volume_ptr == out_ptr {
 			// Need temporary buffer
 			let mut temp = vec![0.0; len];
-			kvo_into_slice(&mut temp, high, low, close, volume, short_period, long_period, detect_best_kernel())
+			kvo_wasm_into_slice(&mut temp, high, low, close, volume, short_period, long_period, detect_best_kernel())
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 			let out = std::slice::from_raw_parts_mut(out_ptr, len);
 			out.copy_from_slice(&temp);
 		} else {
 			// No aliasing, can write directly
 			let out = std::slice::from_raw_parts_mut(out_ptr, len);
-			kvo_into_slice(out, high, low, close, volume, short_period, long_period, detect_best_kernel())
+			kvo_wasm_into_slice(out, high, low, close, volume, short_period, long_period, detect_best_kernel())
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 		}
 		

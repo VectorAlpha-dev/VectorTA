@@ -6,7 +6,8 @@
 //!
 //! ## Parameters
 //! - **period**: The look-back period for smoothing (defaults to 5).
-//! - **volume_factor**: Controls the depth of the T3 smoothing. Range [0.0, 1.0], higher values = more smoothing (default 0.0).
+//! - **volume_factor**: Controls the depth of the T3 smoothing. Higher values = more smoothing (default 0.0).
+//!   The implementation validates that volume_factor is not NaN or infinite.
 //!
 //! ## Errors
 //! - **AllValuesNaN**: tilson: All input data values are `NaN`.
@@ -25,7 +26,7 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-use aligned_vec::{AVec, CACHELINE_ALIGN};
+// AVec not needed for Tilson since we don't store weights like ALMA
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -212,64 +213,26 @@ pub fn tilson(input: &TilsonInput) -> Result<TilsonOutput, TilsonError> {
 }
 
 pub fn tilson_with_kernel(input: &TilsonInput, kernel: Kernel) -> Result<TilsonOutput, TilsonError> {
-	let data: &[f64] = match &input.data {
-		TilsonData::Candles { candles, source } => source_type(candles, source),
-		TilsonData::Slice(sl) => sl,
-	};
-
-	if data.is_empty() {
-		return Err(TilsonError::EmptyInputData);
-	}
-
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(TilsonError::AllValuesNaN)?;
-
-	let len = data.len();
-	let period = input.get_period();
-	let v_factor = input.get_volume_factor();
-
-	if period == 0 || period > len {
-		return Err(TilsonError::InvalidPeriod { period, data_len: len });
-	}
-	if (len - first) < period {
-		return Err(TilsonError::NotEnoughValidData {
-			needed: period,
-			valid: len - first,
-		});
-	}
-	if v_factor.is_nan() || v_factor.is_infinite() {
-		return Err(TilsonError::InvalidVolumeFactor { v_factor });
-	}
-
+	let (data, period, v_factor, first, len, chosen) = tilson_prepare(input, kernel)?;
 	let lookback_total = 6 * (period - 1);
-	if (len - first) < lookback_total + 1 {
-		return Err(TilsonError::NotEnoughValidData {
-			needed: lookback_total + 1,
-			valid: len - first,
-		});
-	}
-
-	let chosen = match kernel {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
-
-	let lookback_total = 6 * (period - 1); // first real value appears here
 	let warm = first + lookback_total;
+
 	let mut out = alloc_with_nan_prefix(len, warm);
-
-	// ----------- run the chosen kernel, filling `out` in-place
-	unsafe {
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => tilson_scalar(data, period, v_factor, first, &mut out),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => tilson_avx2(data, period, v_factor, first, &mut out),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => tilson_avx512(data, period, v_factor, first, &mut out),
-			_ => unreachable!(),
-		}?; // <-- OK!
-	}
-
+	tilson_compute_into(data, period, v_factor, first, chosen, &mut out)?;
 	Ok(TilsonOutput { values: out })
+}
+
+#[inline]
+pub fn tilson_into_slice(dst: &mut [f64], input: &TilsonInput, kern: Kernel) -> Result<(), TilsonError> {
+	let (data, period, v_factor, first, _len, chosen) = tilson_prepare(input, kern)?;
+	if dst.len() != data.len() {
+		return Err(TilsonError::InvalidPeriod { period: dst.len(), data_len: data.len() });
+	}
+	tilson_compute_into(data, period, v_factor, first, chosen, dst)?;
+	let warm = first + 6 * (period - 1);
+	let warm_end = warm.min(dst.len());
+	for v in &mut dst[..warm_end] { *v = f64::NAN; }
+	Ok(())
 }
 
 #[inline]
@@ -284,9 +247,9 @@ pub fn tilson_scalar(
 	let lookback_total = 6 * (period - 1);
 	debug_assert_eq!(len, out.len());
 
-	if len == 0 || period == 0 || v_factor.is_nan() || v_factor.is_infinite() || len - first_valid < period {
-		return Err(TilsonError::InvalidPeriod { period, data_len: len });
-	}
+	if len == 0 { return Err(TilsonError::EmptyInputData); }
+	if period == 0 || len - first_valid < period { return Err(TilsonError::InvalidPeriod { period, data_len: len }); }
+	if v_factor.is_nan() || v_factor.is_infinite() { return Err(TilsonError::InvalidVolumeFactor { v_factor }); }
 	if lookback_total + first_valid >= len {
 		return Err(TilsonError::NotEnoughValidData {
 			needed: lookback_total + 1,
@@ -690,8 +653,15 @@ fn tilson_batch_inner(
 		}
 	}
 
-	// ------------- 4. transmute to a plain Vec<f64> ----------
-	let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
+	// ------------- 4. convert to Vec<f64> like alma.rs ----------
+	let mut guard = core::mem::ManuallyDrop::new(raw);
+	let values = unsafe {
+		Vec::from_raw_parts(
+			guard.as_mut_ptr() as *mut f64,
+			guard.len(),
+			guard.capacity(),
+		)
+	};
 
 	Ok(TilsonBatchOutput {
 		values,
@@ -703,7 +673,7 @@ fn tilson_batch_inner(
 
 #[inline(always)]
 pub unsafe fn tilson_row_scalar(data: &[f64], first: usize, period: usize, v_factor: f64, out: &mut [f64]) {
-	tilson_scalar(data, period, v_factor, first, out);
+	let _ = tilson_scalar(data, period, v_factor, first, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -737,12 +707,13 @@ pub struct TilsonStream {
 	e: [f64; 6],
 	k: f64,
 	one_minus_k: f64,
-	head: usize,
-	buffer: Vec<f64>,
-	filled: bool,
+	c1: f64,
+	c2: f64,
+	c3: f64,
+	c4: f64,
 	lookback_total: usize,
-	seen: usize,
-	history: Vec<f64>,
+	values_seen: usize,
+	initialized: bool,
 }
 
 impl TilsonStream {
@@ -756,63 +727,59 @@ impl TilsonStream {
 			return Err(TilsonError::InvalidVolumeFactor { v_factor });
 		}
 		let lookback_total = 6 * (period - 1);
+		let k = 2.0 / (period as f64 + 1.0);
+		
+		// Pre-calculate T3 coefficients
+		let t = v_factor * v_factor;
+		let c1 = -(t * v_factor);
+		let c2 = 3.0 * (t - c1);
+		let c3 = -6.0 * t - 3.0 * (v_factor - c1);
+		let c4 = 1.0 + 3.0 * v_factor - c1 + 3.0 * t;
+		
 		Ok(Self {
 			period,
 			v_factor,
 			e: [0.0; 6],
-			k: 2.0 / (period as f64 + 1.0),
-			one_minus_k: 1.0 - 2.0 / (period as f64 + 1.0),
-			head: 0,
-			buffer: vec![f64::NAN; period],
-			filled: false,
+			k,
+			one_minus_k: 1.0 - k,
+			c1,
+			c2,
+			c3,
+			c4,
 			lookback_total,
-			seen: 0,
-			history: Vec::new(),
+			values_seen: 0,
+			initialized: false,
 		})
 	}
 
 	#[inline(always)]
 	pub fn update(&mut self, value: f64) -> Option<f64> {
-		self.buffer[self.head] = value;
-		self.head = (self.head + 1) % self.period;
-		self.history.push(value);
-		self.seen += 1;
-		if !self.filled && self.head == 0 {
-			self.filled = true;
+		self.values_seen += 1;
+		
+		// Initialize EMAs on first value
+		if !self.initialized {
+			for i in 0..6 {
+				self.e[i] = value;
+			}
+			self.initialized = true;
+			if self.values_seen <= self.lookback_total {
+				return None;
+			}
 		}
-		if !self.filled {
-			return None;
-		}
-		if self.seen <= self.lookback_total {
-			self.dot_ring();
-			return None;
-		}
-		let params = TilsonParams {
-			period: Some(self.period),
-			volume_factor: Some(self.v_factor),
-		};
-		let input = TilsonInput::from_slice(&self.history, params);
-		match tilson_with_kernel(&input, Kernel::Scalar) {
-			Ok(out) => out.values.last().copied(),
-			Err(_) => None,
-		}
-	}
-
-	#[inline(always)]
-	fn dot_ring(&mut self) -> f64 {
-		let idx = if self.head == 0 { self.period - 1 } else { self.head - 1 };
-		let mut val = self.buffer[idx];
-		let mut e = &mut self.e;
-		e[0] = self.k * val + self.one_minus_k * e[0];
+		
+		// Update the EMA cascade
+		self.e[0] = self.k * value + self.one_minus_k * self.e[0];
 		for i in 1..6 {
-			e[i] = self.k * e[i - 1] + self.one_minus_k * e[i];
+			self.e[i] = self.k * self.e[i - 1] + self.one_minus_k * self.e[i];
 		}
-		let temp = self.v_factor * self.v_factor;
-		let c1 = -(temp * self.v_factor);
-		let c2 = 3.0 * (temp - c1);
-		let c3 = -6.0 * temp - 3.0 * (self.v_factor - c1);
-		let c4 = 1.0 + 3.0 * self.v_factor - c1 + 3.0 * temp;
-		c1 * e[5] + c2 * e[4] + c3 * e[3] + c4 * e[2]
+		
+		// Return None during warmup period
+		if self.values_seen <= self.lookback_total {
+			return None;
+		}
+		
+		// Calculate and return T3 value
+		Some(self.c1 * self.e[5] + self.c2 * self.e[4] + self.c3 * self.e[3] + self.c4 * self.e[2])
 	}
 }
 
@@ -1308,6 +1275,44 @@ mod tests {
 		check_tilson_property
 	);
 
+	#[test]
+	fn test_volume_factor_validation() {
+		// Need at least 6*(period-1)+1 = 13 points for period=3
+		let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0];
+		
+		// Test with volume_factor = 1.5 (outside typical [0,1] range) - should work
+		let params1 = TilsonParams {
+			period: Some(3),
+			volume_factor: Some(1.5),
+		};
+		let input1 = TilsonInput::from_slice(&data, params1);
+		assert!(tilson(&input1).is_ok(), "volume_factor=1.5 should be accepted");
+		
+		// Test with volume_factor = -0.5 (negative) - should work
+		let params2 = TilsonParams {
+			period: Some(3),
+			volume_factor: Some(-0.5),
+		};
+		let input2 = TilsonInput::from_slice(&data, params2);
+		assert!(tilson(&input2).is_ok(), "volume_factor=-0.5 should be accepted");
+		
+		// Test with NaN - should be rejected
+		let params3 = TilsonParams {
+			period: Some(3),
+			volume_factor: Some(f64::NAN),
+		};
+		let input3 = TilsonInput::from_slice(&data, params3);
+		assert!(tilson(&input3).is_err(), "volume_factor=NaN should be rejected");
+		
+		// Test with infinite - should be rejected
+		let params4 = TilsonParams {
+			period: Some(3),
+			volume_factor: Some(f64::INFINITY),
+		};
+		let input4 = TilsonInput::from_slice(&data, params4);
+		assert!(tilson(&input4).is_err(), "volume_factor=INFINITY should be rejected");
+	}
+
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);
 
@@ -1768,22 +1773,37 @@ pub fn tilson_batch_py<'py>(
 	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
 	dict.set_item(
 		"periods",
-		combos
-			.iter()
-			.map(|p| p.period.unwrap() as u64)
-			.collect::<Vec<_>>()
-			.into_pyarray(py),
+		combos.iter().map(|p| p.period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py),
 	)?;
 	dict.set_item(
 		"volume_factors",
-		combos
-			.iter()
-			.map(|p| p.volume_factor.unwrap())
-			.collect::<Vec<_>>()
-			.into_pyarray(py),
+		combos.iter().map(|p| p.volume_factor.unwrap()).collect::<Vec<_>>().into_pyarray(py),
 	)?;
+	Ok(dict)
+}
 
-	Ok(dict.into())
+#[cfg(feature = "python")]
+#[pyfunction(name = "tilson_into")]
+#[pyo3(signature = (data, period, volume_factor=None, kernel=None))]
+pub fn tilson_into_py<'py>(
+	py: Python<'py>,
+	data: numpy::PyReadonlyArray1<'py, f64>,
+	period: usize,
+	volume_factor: Option<f64>,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+	use numpy::{PyArray1, PyArrayMethods};
+	let slice_in = data.as_slice()?;
+	let out = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+	let slice_out = unsafe { out.as_slice_mut()? };
+
+	let kern = validate_kernel(kernel, false)?;
+	let params = TilsonParams { period: Some(period), volume_factor: Some(volume_factor.unwrap_or(0.0)) };
+	let input = TilsonInput::from_slice(slice_in, params);
+
+	py.allow_threads(|| tilson_into_slice(slice_out, &input, kern))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	Ok(out)
 }
 
 // ========== WASM Bindings ==========
@@ -1815,17 +1835,15 @@ pub struct TilsonBatchJsOutput {
 ///
 /// # Returns
 /// Array of Tilson values, same length as input
-pub fn tilson_js(data: &[f64], period: usize, volume_factor: Option<f64>) -> Result<Vec<f64>, JsValue> {
+pub fn tilson_js(data: &[f64], period: usize, volume_factor: f64) -> Result<Vec<f64>, JsValue> {
 	let params = TilsonParams {
 		period: Some(period),
-		volume_factor: volume_factor.or(Some(0.0)),
+		volume_factor: Some(volume_factor),
 	};
 	let input = TilsonInput::from_slice(data, params);
-
-	// Use Scalar kernel which will auto-upgrade to SIMD128 if available
-	tilson_with_kernel(&input, Kernel::Scalar)
-		.map(|output| output.values)
-		.map_err(|e| JsValue::from_str(&e.to_string()))
+	let mut out = vec![0.0; data.len()];
+	tilson_into_slice(&mut out, &input, detect_best_kernel()).map_err(|e| JsValue::from_str(&e.to_string()))?;
+	Ok(out)
 }
 
 #[cfg(feature = "wasm")]

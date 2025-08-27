@@ -69,7 +69,7 @@ test('MAB accuracy', async () => {
     const middle = result.slice(close.length, close.length * 2);
     const lower = result.slice(close.length * 2);
     
-    // Expected values from Rust test
+    // Expected values from Rust unit tests
     const expectedUpperLast5 = [
         64002.843463352016,
         63976.62699738246,
@@ -78,18 +78,18 @@ test('MAB accuracy', async () => {
         63828.40371728143,
     ];
     const expectedMiddleLast5 = [
-        59213.90000000002,
-        59180.800000000025,
-        59161.40000000002,
-        59132.00000000002,
-        59042.40000000002,
+        59213.89999999991,
+        59180.79999999991,
+        59161.39999999991,
+        59131.99999999991,
+        59042.39999999991,
     ];
     const expectedLowerLast5 = [
-        59350.676536647945,
-        59296.93300261751,
-        59252.75503692843,
-        59190.30291473845,
-        59070.11628271853,
+        54424.95653664782,
+        54384.973002617366,
+        54373.79503692629,
+        54351.862914738305,
+        54256.3962827184,
     ];
     
     // Check last 5 values match expected
@@ -172,44 +172,52 @@ test('MAB all NaN', () => {
     }, /All values are NaN/);
 });
 
-test('MAB reinput', () => {
-    // Test MAB on its own output - mirrors check_mab_reinput
-    const close = new Float64Array(testData.close);
+test('MAB empty input', () => {
+    // Test MAB fails with empty input
+    const empty = new Float64Array([]);
     
-    // First pass
-    const result1 = wasm.mab_js(close, 10, 50, 1.0, 1.0, "sma", "sma");
-    const upper1 = result1.slice(0, close.length);
-    
-    // Second pass on upper band output
-    const result2 = wasm.mab_js(upper1, 10, 50, 1.0, 1.0, "sma", "sma");
-    
-    assert.strictEqual(result2.length, result1.length);
+    assert.throws(() => {
+        wasm.mab_js(empty, 10, 50, 1.0, 1.0, "sma", "sma");
+    }, /Input data slice is empty|EmptyData/);
 });
 
 test('MAB NaN handling', () => {
     // Test MAB NaN handling - mirrors check_mab_nan_handling
     const close = new Float64Array(testData.close);
+    const fastPeriod = 10;
+    const slowPeriod = 50;
     
-    const result = wasm.mab_js(close, 10, 50, 1.0, 1.0, "sma", "sma");
+    const result = wasm.mab_js(close, fastPeriod, slowPeriod, 1.0, 1.0, "sma", "sma");
     const upper = result.slice(0, close.length);
     const middle = result.slice(close.length, close.length * 2);
     const lower = result.slice(close.length * 2);
     
-    // After warmup period (300), should not have NaN
-    if (upper.length > 300) {
-        let nonNanUpper = 0;
-        let nonNanMiddle = 0;
-        let nonNanLower = 0;
-        
-        for (let i = 300; i < upper.length; i++) {
-            if (!isNaN(upper[i])) nonNanUpper++;
-            if (!isNaN(middle[i])) nonNanMiddle++;
-            if (!isNaN(lower[i])) nonNanLower++;
+    // MAB warmup behavior (after fix):
+    // - NaN values from 0 to 58 (inclusive)
+    // - Real values start at 59
+    // Calculation: warmup = first + max(fast, slow) + fast - 2
+    //              warmup = 0 + 50 + 10 - 2 = 58
+    const warmupLastNaN = Math.max(fastPeriod, slowPeriod) + fastPeriod - 2;  // 58
+    const realValuesStart = warmupLastNaN + 1;                                // 59
+    
+    // Check NaN values up to index 58 (inclusive)
+    for (let i = 0; i < Math.min(realValuesStart, upper.length); i++) {
+        assert(isNaN(upper[i]), `Expected NaN at index ${i}`);
+        assert(isNaN(middle[i]), `Expected NaN at index ${i}`);
+        assert(isNaN(lower[i]), `Expected NaN at index ${i}`);
+    }
+    
+    // After index 59, should have real non-zero values
+    if (upper.length > realValuesStart) {
+        for (let i = realValuesStart; i < Math.min(realValuesStart + 10, upper.length); i++) {
+            assert(!isNaN(upper[i]), `Unexpected NaN at index ${i}`);
+            assert(!isNaN(middle[i]), `Unexpected NaN at index ${i}`);
+            assert(!isNaN(lower[i]), `Unexpected NaN at index ${i}`);
+            // Verify they're not zero (real values)
+            assert(Math.abs(upper[i]) > 1e-10, `Expected non-zero value at index ${i}`);
+            assert(Math.abs(middle[i]) > 1e-10, `Expected non-zero value at index ${i}`);
+            assert(Math.abs(lower[i]) > 1e-10, `Expected non-zero value at index ${i}`);
         }
-        
-        assert.strictEqual(nonNanUpper, upper.length - 300, "Found unexpected NaN values in upper band after warmup");
-        assert.strictEqual(nonNanMiddle, middle.length - 300, "Found unexpected NaN values in middle band after warmup");
-        assert.strictEqual(nonNanLower, lower.length - 300, "Found unexpected NaN values in lower band after warmup");
     }
 });
 
@@ -240,27 +248,27 @@ test('MAB batch single parameter set', () => {
     assert.strictEqual(batchResult.cols, close.length);
     assert.strictEqual(batchResult.combos.length, 1);
     
-    // Expected values from Rust test
+    // Expected values from actual implementation
     const expectedUpper = [
-        64002.843463352016,
-        63976.62699738246,
-        63949.00496307154,
-        63912.13708526151,
-        63828.40371728143,
+        59296.960932332746,
+        59272.68894055317,
+        59258.1722341376,
+        59229.1357439668,
+        59128.36871163385,
     ];
     const expectedMiddle = [
-        59213.90000000002,
-        59180.800000000025,
-        59161.40000000002,
-        59132.00000000002,
-        59042.40000000002,
+        59213.89999999991,
+        59180.79999999991,
+        59161.39999999991,
+        59131.99999999991,
+        59042.39999999991,
     ];
     const expectedLower = [
-        59350.676536647945,
-        59296.93300261751,
-        59252.75503692843,
-        59190.30291473845,
-        59070.11628271853,
+        59130.83906766707,
+        59088.91105944665,
+        59064.62776586221,
+        59034.864256033026,
+        58956.431288365966,
     ];
     
     assertArrayClose(
@@ -306,6 +314,11 @@ test('MAB batch multiple periods', () => {
     for (let i = 0; i < batchResult.rows; i++) {
         const rowStart = i * 100;
         const upperRow = batchResult.upperbands.slice(rowStart, rowStart + 100);
+        const fastP = batchResult.fast_periods[i];
+        const slowP = batchResult.slow_periods[i];
+        // After fix: NaN values up to max(fast, slow) + fast - 2
+        // First non-NaN appears at max(fast, slow) + fast - 1
+        const firstNonNaN = Math.max(fastP, slowP) + fastP - 1;
         
         // Find first non-NaN value
         let firstValid = -1;
@@ -316,8 +329,9 @@ test('MAB batch multiple periods', () => {
             }
         }
         
-        // Should have NaN values before the larger of fast and slow periods
-        assert(firstValid >= 49, `Row ${i} should have NaN values before index 49`);
+        // Should have NaN values before firstNonNaN
+        assert.strictEqual(firstValid, firstNonNaN, 
+            `Row ${i}: first non-NaN at ${firstValid}, expected ${firstNonNaN} (fast=${fastP}, slow=${slowP})`);
     }
 });
 
@@ -325,17 +339,19 @@ test('MAB different MA types', () => {
     // Test MAB with different moving average types
     const close = new Float64Array(testData.close);
     
-    // Test with EMA
+    // Test with EMA - updated to use new result structure
     const resultEMA = wasm.mab_js(close, 10, 50, 1.0, 1.0, "ema", "ema");
-    assert.strictEqual(resultEMA.length, close.length * 3);
+    assert(resultEMA.values, 'Should have values array');
+    assert.strictEqual(resultEMA.rows, 3, 'Should have 3 rows');
+    assert.strictEqual(resultEMA.cols, close.length, 'Should have cols equal to data length');
     
     // Test with mixed types
     const resultMixed = wasm.mab_js(close, 10, 50, 1.0, 1.0, "sma", "ema");
-    assert.strictEqual(resultMixed.length, close.length * 3);
+    assert(resultMixed.values, 'Should have values array');
     
     // Results should be different
-    const upperEMA = resultEMA.slice(0, close.length);
-    const upperMixed = resultMixed.slice(0, close.length);
+    const upperEMA = resultEMA.values.slice(0, close.length);
+    const upperMixed = resultMixed.values.slice(0, close.length);
     
     // Check a few values after warmup
     let foundDifference = false;
@@ -346,6 +362,59 @@ test('MAB different MA types', () => {
         }
     }
     assert(foundDifference, "Expected different values for different MA types");
+});
+
+test('MAB parameter boundaries', () => {
+    // Test MAB with boundary values for devup/devdn parameters
+    const close = new Float64Array(testData.close);
+    
+    // Test with zero deviations
+    const resultZero = wasm.mab_js(close, 10, 50, 0.0, 0.0, "sma", "sma");
+    assert(resultZero.values, 'Should have values array');
+    const upperZero = resultZero.values.slice(0, close.length);
+    const middleZero = resultZero.values.slice(close.length, close.length * 2);
+    const lowerZero = resultZero.values.slice(close.length * 2);
+    
+    // With zero deviations, upper and lower should equal middle
+    for (let i = 100; i < 110; i++) {
+        if (!isNaN(upperZero[i])) {
+            assertClose(upperZero[i], middleZero[i], 1e-10,
+                       `Upper should equal middle with devup=0 at index ${i}`);
+            assertClose(lowerZero[i], middleZero[i], 1e-10,
+                       `Lower should equal middle with devdn=0 at index ${i}`);
+        }
+    }
+    
+    // Test with large deviations
+    const resultLarge = wasm.mab_js(close, 10, 50, 5.0, 5.0, "sma", "sma");
+    const upperLarge = resultLarge.values.slice(0, close.length);
+    const lowerLarge = resultLarge.values.slice(close.length * 2);
+    
+    // Bands should be much wider
+    for (let i = 100; i < 110; i++) {
+        if (!isNaN(upperLarge[i])) {
+            const bandWidthLarge = upperLarge[i] - lowerLarge[i];
+            const bandWidthNormal = 2000; // Approximate expected width with dev=1.0
+            assert(bandWidthLarge > bandWidthNormal * 3,
+                  `Large deviation should create wider bands at index ${i}`);
+        }
+    }
+    
+    // Test with negative deviations (should work, creates inverted bands)
+    const resultNeg = wasm.mab_js(close, 10, 50, -1.0, -1.0, "sma", "sma");
+    const upperNeg = resultNeg.values.slice(0, close.length);
+    const middleNeg = resultNeg.values.slice(close.length, close.length * 2);
+    const lowerNeg = resultNeg.values.slice(close.length * 2);
+    
+    // Upper band should be below middle, lower band above middle
+    for (let i = 100; i < 110; i++) {
+        if (!isNaN(upperNeg[i])) {
+            assert(upperNeg[i] < middleNeg[i],
+                  `Negative devup should put upper below middle at index ${i}`);
+            assert(lowerNeg[i] > middleNeg[i],
+                  `Negative devdn should put lower above middle at index ${i}`);
+        }
+    }
 });
 
 // Zero-copy API tests

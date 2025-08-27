@@ -152,14 +152,15 @@ pub use linearreg_angle::{linearreg_angle, Linearreg_angleInput, Linearreg_angle
 pub use rsi::{rsi, RsiInput, RsiOutput, RsiParams, RsiStream, RsiBatchOutput};
 pub use squeeze_momentum::{
 	squeeze_momentum, SqueezeMomentumInput, SqueezeMomentumOutput, SqueezeMomentumParams, 
-	SqueezeMomentumBuilder, SqueezeMomentumBatchOutput, SqueezeMomentumBatchParams
+	SqueezeMomentumBuilder, SqueezeMomentumBatchOutput, SqueezeMomentumBatchParams,
+	SqueezeMomentumStream
 };
 #[cfg(feature = "python")]
 pub use squeeze_momentum::{squeeze_momentum_py, squeeze_momentum_batch_py, SqueezeMomentumStreamPy};
 #[cfg(feature = "wasm")]
 pub use squeeze_momentum::{
-	squeeze_momentum_js, squeeze_momentum_into, squeeze_momentum_alloc, squeeze_momentum_free,
-	squeeze_momentum_batch_js, SqueezeMomentumResult
+	squeeze_momentum_js, squeeze_momentum_batch, squeeze_momentum_into, 
+	squeeze_momentum_alloc, squeeze_momentum_free, SmiResult, SmiBatchJsOutput
 };
 pub use trix::{trix, TrixInput, TrixOutput, TrixParams, TrixStream, TrixBatchOutput};
 #[cfg(feature = "python")]

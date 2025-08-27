@@ -23,13 +23,13 @@ use crate::utilities::helpers::{
 	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, 
 	make_uninit_matrix,
 };
-use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
+use std::mem::MaybeUninit;
 use thiserror::Error;
 
 #[cfg(feature = "wasm")]
@@ -173,6 +173,9 @@ pub enum CmoError {
 
 	#[error("cmo: Not enough valid data: needed={needed}, valid={valid}")]
 	NotEnoughValidData { needed: usize, valid: usize },
+
+	#[error("cmo: Invalid output length: expected={expected}, got={got}")]
+	InvalidOutputLen { expected: usize, got: usize },
 }
 
 #[inline]
@@ -180,108 +183,67 @@ pub fn cmo(input: &CmoInput) -> Result<CmoOutput, CmoError> {
 	cmo_with_kernel(input, Kernel::Auto)
 }
 
-pub fn cmo_with_kernel(input: &CmoInput, kernel: Kernel) -> Result<CmoOutput, CmoError> {
-	let data: &[f64] = match &input.data {
-		CmoData::Candles { candles, source } => source_type(candles, source),
-		CmoData::Slice(sl) => sl,
-	};
-
-	if data.is_empty() {
+#[inline(always)]
+fn cmo_prepare<'a>(
+	input: &'a CmoInput,
+	k: Kernel,
+) -> Result<(&'a [f64], usize, usize, Kernel), CmoError> {
+	let data: &[f64] = input.as_ref();
+	let len = data.len();
+	if len == 0 {
 		return Err(CmoError::EmptyData);
 	}
-
 	let period = input.get_period();
-	let len = data.len();
-
 	if period == 0 || period > len {
 		return Err(CmoError::InvalidPeriod { period, data_len: len });
 	}
-
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(CmoError::AllValuesNaN)?;
-
-	if (len - first) < period {
-		return Err(CmoError::NotEnoughValidData {
-			needed: period,
-			valid: len - first,
-		});
+	if len - first <= period {
+		return Err(CmoError::NotEnoughValidData { needed: period + 1, valid: len - first });
 	}
-
-	let mut out = alloc_with_nan_prefix(len, first + period);
-
-	let chosen = match kernel {
+	let chosen = match k {
 		Kernel::Auto => detect_best_kernel(),
 		other => other,
 	};
+	Ok((data, period, first, chosen))
+}
 
+#[inline(always)]
+fn cmo_compute_into(
+	data: &[f64],
+	period: usize,
+	first: usize,
+	kernel: Kernel,
+	out: &mut [f64],
+) {
 	unsafe {
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => cmo_scalar(data, period, first, &mut out),
+		match kernel {
+			Kernel::Scalar | Kernel::ScalarBatch => cmo_scalar(data, period, first, out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => cmo_avx2(data, period, first, &mut out),
+			Kernel::Avx2 | Kernel::Avx2Batch => cmo_avx2(data, period, first, out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => cmo_avx512(data, period, first, &mut out),
+			Kernel::Avx512 | Kernel::Avx512Batch => cmo_avx512(data, period, first, out),
 			_ => unreachable!(),
 		}
 	}
+}
+
+pub fn cmo_with_kernel(input: &CmoInput, kernel: Kernel) -> Result<CmoOutput, CmoError> {
+	let (data, period, first, chosen) = cmo_prepare(input, kernel)?;
+	let mut out = alloc_with_nan_prefix(data.len(), first + period);
+	cmo_compute_into(data, period, first, chosen, &mut out);
 	Ok(CmoOutput { values: out })
 }
 
 #[inline]
 pub fn cmo_into_slice(dst: &mut [f64], input: &CmoInput, kern: Kernel) -> Result<(), CmoError> {
-	let data: &[f64] = match &input.data {
-		CmoData::Candles { candles, source } => source_type(candles, source),
-		CmoData::Slice(sl) => sl,
-	};
-
-	if data.is_empty() {
-		return Err(CmoError::EmptyData);
+	let (data, period, first, chosen) = cmo_prepare(input, kern)?;
+	if dst.len() != data.len() {
+		return Err(CmoError::InvalidOutputLen { expected: data.len(), got: dst.len() });
 	}
-
-	let period = input.get_period();
-	let len = data.len();
-
-	if dst.len() != len {
-		return Err(CmoError::InvalidPeriod {
-			period: dst.len(),
-			data_len: len,
-		});
-	}
-
-	if period == 0 || period > len {
-		return Err(CmoError::InvalidPeriod { period, data_len: len });
-	}
-
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(CmoError::AllValuesNaN)?;
-
-	if (len - first) < period {
-		return Err(CmoError::NotEnoughValidData {
-			needed: period,
-			valid: len - first,
-		});
-	}
-
-	let warmup = first + period;
-	let chosen = match kern {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
-
-	unsafe {
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => cmo_scalar(data, period, first, dst),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => cmo_avx2(data, period, first, dst),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => cmo_avx512(data, period, first, dst),
-			_ => unreachable!(),
-		}
-	}
-
-	// Fill warmup with NaN
-	for v in &mut dst[..warmup] {
-		*v = f64::NAN;
-	}
-
+	cmo_compute_into(data, period, first, chosen, dst);
+	let warmup_end = first + period;
+	for v in &mut dst[..warmup_end] { *v = f64::NAN; }
 	Ok(())
 }
 
@@ -497,9 +459,9 @@ fn cmo_batch_inner(
 	}
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(CmoError::AllValuesNaN)?;
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-	if data.len() - first < max_p {
+	if data.len() - first <= max_p {
 		return Err(CmoError::NotEnoughValidData {
-			needed: max_p,
+			needed: max_p + 1,
 			valid: data.len() - first,
 		});
 	}
@@ -583,31 +545,28 @@ fn cmo_batch_inner_into(
 	}
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(CmoError::AllValuesNaN)?;
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-	if data.len() - first < max_p {
-		return Err(CmoError::NotEnoughValidData {
-			needed: max_p,
-			valid: data.len() - first,
-		});
+	if data.len() - first <= max_p {
+		return Err(CmoError::NotEnoughValidData { needed: max_p + 1, valid: data.len() - first });
 	}
 	let cols = data.len();
 
-	// Initialize NaN prefixes for each row based on warmup period
-	for (row, combo) in combos.iter().enumerate() {
-		let warmup = first + combo.period.unwrap();
-		let row_start = row * cols;
-		for i in 0..warmup.min(cols) {
-			out[row_start + i] = f64::NAN;
-		}
-	}
+	// 2a) Treat caller buffer as MaybeUninit and initialize only warm prefixes.
+	let out_mu: &mut [MaybeUninit<f64>] = unsafe {
+		std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
+	};
+	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
+	init_matrix_prefixes(out_mu, cols, &warm);
 
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+	// 2b) Now compute rows writing real values after warmup.
+	let do_row = |row: usize, row_mu: &mut [MaybeUninit<f64>]| unsafe {
 		let period = combos[row].period.unwrap();
+		let row_dst: &mut [f64] = std::slice::from_raw_parts_mut(row_mu.as_mut_ptr() as *mut f64, row_mu.len());
 		match kern {
-			Kernel::Scalar => cmo_row_scalar(data, first, period, out_row),
+			Kernel::Scalar => cmo_row_scalar(data, first, period, row_dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => cmo_row_avx2(data, first, period, out_row),
+			Kernel::Avx2    => cmo_row_avx2(data, first, period, row_dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => cmo_row_avx512(data, first, period, out_row),
+			Kernel::Avx512  => cmo_row_avx512(data, first, period, row_dst),
 			_ => unreachable!(),
 		}
 	};
@@ -615,24 +574,35 @@ fn cmo_batch_inner_into(
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			out.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
+			out_mu.par_chunks_mut(cols).enumerate().for_each(|(r, row_mu)| do_row(r, row_mu));
 		}
-
 		#[cfg(target_arch = "wasm32")]
 		{
-			for (row, slice) in out.chunks_mut(cols).enumerate() {
-				do_row(row, slice);
-			}
+			for (r, row_mu) in out_mu.chunks_mut(cols).enumerate() { do_row(r, row_mu); }
 		}
 	} else {
-		for (row, slice) in out.chunks_mut(cols).enumerate() {
-			do_row(row, slice);
-		}
+		for (r, row_mu) in out_mu.chunks_mut(cols).enumerate() { do_row(r, row_mu); }
 	}
 
 	Ok(combos)
+}
+
+#[inline]
+pub fn cmo_batch_into_slice(out: &mut [f64], data: &[f64], sweep: &CmoBatchRange, k: Kernel)
+	-> Result<Vec<CmoParams>, CmoError>
+{
+	let kernel = match k {
+		Kernel::Auto => detect_best_batch_kernel(),
+		other if other.is_batch() => other,
+		_ => return Err(CmoError::InvalidPeriod { period: 0, data_len: 0 }),
+	};
+	let simd = match kernel {
+		Kernel::Avx512Batch => Kernel::Avx512,
+		Kernel::Avx2Batch => Kernel::Avx2,
+		Kernel::ScalarBatch => Kernel::Scalar,
+		_ => unreachable!(),
+	};
+	cmo_batch_inner_into(data, sweep, simd, true, out)
 }
 
 #[inline(always)]
@@ -671,13 +641,12 @@ unsafe fn cmo_row_avx512_long(data: &[f64], first: usize, period: usize, out: &m
 #[derive(Debug, Clone)]
 pub struct CmoStream {
 	period: usize,
-	buffer: Vec<f64>,
-	head: usize,
 	filled: bool,
 	avg_gain: f64,
 	avg_loss: f64,
 	prev: f64,
 	started: bool,
+	head: usize,
 }
 
 impl CmoStream {
@@ -688,13 +657,12 @@ impl CmoStream {
 		}
 		Ok(Self {
 			period,
-			buffer: alloc_with_nan_prefix(period, period),
-			head: 0,
 			filled: false,
 			avg_gain: 0.0,
 			avg_loss: 0.0,
 			prev: 0.0,
 			started: false,
+			head: 0,
 		})
 	}
 	#[inline(always)]
@@ -1069,7 +1037,7 @@ mod tests {
 							.prop_filter("finite and non-zero", |x| {
 								x.is_finite() && x.abs() > 1e-10
 							}),
-						period.max(2)..400,  // Ensure at least 2 data points for period=1
+						(period + 1).max(2)..400,  // Need period+1 data points for CMO
 					),
 					Just(period),
 				)
@@ -1421,7 +1389,7 @@ pub fn cmo_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
 		period: (p_start, p_end, p_step),
 	};
 	
-	let output = cmo_batch_with_kernel(data, &batch_range, detect_best_kernel())
+	let output = cmo_batch_with_kernel(data, &batch_range, Kernel::Auto)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 	
 	let js_output = CmoBatchJsOutput {

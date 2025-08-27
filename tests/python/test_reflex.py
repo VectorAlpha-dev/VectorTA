@@ -4,393 +4,319 @@ These tests mirror the Rust unit tests to ensure Python bindings work correctly.
 """
 import pytest
 import numpy as np
-from test_utils import load_test_data, assert_close
+import sys
+from pathlib import Path
 
-# Import Reflex functions - they'll be available after building with maturin
 try:
-    from my_project import (
-        reflex, 
-        reflex_batch,
-        ReflexStream
-    )
+    import my_project as ta_indicators
 except ImportError:
-    pytest.skip("Reflex module not available - run 'maturin develop' first", allow_module_level=True)
+    # If not in virtual environment, try to import from installed location
+    try:
+        import my_project as ta_indicators
+    except ImportError:
+        pytest.skip("Python module not built. Run 'maturin develop --features python' first", allow_module_level=True)
+
+from test_utils import load_test_data, assert_close, EXPECTED_OUTPUTS
+from rust_comparison import compare_with_rust
 
 
-def test_reflex_partial_params():
-    """Test Reflex with default parameters - mirrors check_reflex_partial_params"""
-    data = load_test_data()
-    close = np.array(data['close'], dtype=np.float64)
+class TestReflex:
+    @pytest.fixture(scope='class')
+    def test_data(self):
+        return load_test_data()
     
-    # Test with default parameter (20)
-    result = reflex(close, 20)
-    assert isinstance(result, np.ndarray)
-    assert len(result) == len(close)
-
-
-def test_reflex_accuracy():
-    """Test Reflex matches expected values from Rust tests - mirrors check_reflex_accuracy"""
-    data = load_test_data()
-    close = np.array(data['close'], dtype=np.float64)
+    def test_reflex_partial_params(self, test_data):
+        """Test Reflex with default parameters - mirrors check_reflex_partial_params"""
+        close = test_data['close']
+        
+        # Test with default parameter (20)
+        result = ta_indicators.reflex(close, 20)
+        assert len(result) == len(close)
     
-    # Test with period=20 (default)
-    result = reflex(close, 20)
-    
-    assert len(result) == len(close)
-    
-    # Expected values from Rust test
-    expected_last_five = [
-        0.8085220962465361,
-        0.445264715886137,
-        0.13861699036615063,
-        -0.03598639652007061,
-        -0.224906760543743
-    ]
-    
-    actual_last_five = result[-5:]
-    
-    for i, (actual, expected) in enumerate(zip(actual_last_five, expected_last_five)):
-        assert_close(actual, expected, rtol=1e-7, msg=f"Reflex mismatch at index {i}")
-
-
-def test_reflex_invalid_period():
-    """Test Reflex fails with invalid period"""
-    input_data = np.array([10.0, 20.0, 30.0], dtype=np.float64)
-    
-    # Period < 2 should fail
-    with pytest.raises(ValueError, match="reflex"):
-        reflex(input_data, 1)
-    
-    # Period = 0 should fail
-    with pytest.raises(ValueError, match="reflex"):
-        reflex(input_data, 0)
-
-
-def test_reflex_period_exceeds_length():
-    """Test Reflex fails with period exceeding length"""
-    data_small = np.array([10.0, 20.0, 30.0], dtype=np.float64)
-    
-    with pytest.raises(ValueError, match="reflex"):
-        reflex(data_small, 10)
-
-
-def test_reflex_very_small_dataset():
-    """Test Reflex fails with insufficient data"""
-    single_point = np.array([42.0], dtype=np.float64)
-    
-    with pytest.raises(ValueError, match="reflex"):
-        reflex(single_point, 5)
-
-
-def test_reflex_reinput():
-    """Test Reflex with re-input of Reflex result - mirrors check_reflex_reinput"""
-    data = load_test_data()
-    close = np.array(data['close'], dtype=np.float64)
-    
-    # First Reflex pass with period=14
-    first_result = reflex(close, 14)
-    
-    # Second Reflex pass with period=20 using first result as input
-    second_result = reflex(first_result, 20)
-    
-    assert len(second_result) == len(first_result)
-    
-    # All values should be finite after initial warmup periods
-    # Find first non-NaN in input
-    first_valid = np.where(~np.isnan(close))[0][0]
-    warmup = first_valid + 20  # second pass warmup
-    assert np.all(np.isfinite(second_result[warmup:]))
-
-
-def test_reflex_nan_handling():
-    """Test Reflex handling of NaN values - mirrors check_reflex_nan_handling"""
-    data = load_test_data()
-    close = np.array(data['close'], dtype=np.float64)
-    
-    result = reflex(close, 20)
-    
-    assert len(result) == len(close)
-    
-    # After warmup, all values should be finite
-    first_valid = np.where(~np.isnan(close))[0][0]
-    warmup = first_valid + 20
-    
-    assert np.all(np.isfinite(result[warmup:]))
-
-
-def test_reflex_all_nan():
-    """Test Reflex with all NaN values"""
-    all_nan = np.full(100, np.nan, dtype=np.float64)
-    
-    with pytest.raises(ValueError, match="reflex"):
-        reflex(all_nan, 20)
-
-
-def test_reflex_empty_input():
-    """Test Reflex with empty input"""
-    data_empty = np.array([], dtype=np.float64)
-    
-    with pytest.raises(ValueError, match="reflex"):
-        reflex(data_empty, 20)
-
-
-def test_reflex_batch():
-    """Test Reflex batch computation"""
-    data = load_test_data()
-    close = np.array(data['close'], dtype=np.float64)
-    
-    # Test period range
-    batch_result = reflex_batch(
-        close,
-        (10, 30, 5)  # period range: 10, 15, 20, 25, 30
-    )
-    
-    # Check result is a dict with the expected keys
-    assert isinstance(batch_result, dict)
-    assert 'values' in batch_result
-    assert 'periods' in batch_result
-    
-    # Should have 5 period combinations
-    assert batch_result['values'].shape == (5, len(close))
-    assert len(batch_result['periods']) == 5
-    
-    # Verify first combination matches individual calculation
-    individual_result = reflex(close, 10)
-    batch_first = batch_result['values'][0]
-    
-    # Compare after warmup period
-    first_valid = np.where(~np.isnan(close))[0][0]
-    warmup = first_valid + 10
-    assert_close(batch_first[warmup:], individual_result[warmup:], atol=1e-9, msg="Reflex first combination mismatch")
-
-
-def test_reflex_stream():
-    """Test Reflex streaming interface"""
-    data = load_test_data()
-    close = data['close']
-    
-    # Create stream with period=20
-    period = 20
-    
-    # Calculate batch result for comparison
-    close_array = np.array(close, dtype=np.float64)
-    batch_result = reflex(close_array, period)
-    
-    # Test streaming
-    stream = ReflexStream(period)
-    stream_results = []
-    
-    for price in close:
-        result = stream.update(price)
-        stream_results.append(result if result is not None else np.nan)
-    
-    stream_results = np.array(stream_results)
-    
-    # Compare values where both are not NaN
-    for i in range(len(close)):
-        if np.isnan(batch_result[i]) and np.isnan(stream_results[i]):
-            continue
-        if not np.isnan(batch_result[i]) and not np.isnan(stream_results[i]):
-            assert_close(batch_result[i], stream_results[i], rtol=1e-9, msg=f"Reflex streaming mismatch at index {i}")
-
-
-def test_reflex_different_periods():
-    """Test Reflex with various period values"""
-    data = load_test_data()
-    close = np.array(data['close'], dtype=np.float64)
-    
-    # Test various period values
-    test_periods = [5, 10, 20, 50]
-    
-    for period in test_periods:
-        result = reflex(close, period)
+    def test_reflex_accuracy(self, test_data):
+        """Test Reflex matches expected values from Rust tests - mirrors check_reflex_accuracy"""
+        close = test_data['close']
+        expected = EXPECTED_OUTPUTS.get('reflex', {})
+        
+        # Test with period=20 (default)
+        result = ta_indicators.reflex(close, period=20)
+        
         assert len(result) == len(close)
         
-        # After warmup, all values should be finite
-        first_valid = np.where(~np.isnan(close))[0][0]
-        warmup = first_valid + period
-        if warmup < len(result):
-            assert np.all(np.isfinite(result[warmup:])), f"NaN values found for period={period}"
-
-
-def test_reflex_batch_performance():
-    """Test that batch computation works correctly (performance is secondary)"""
-    data = load_test_data()
-    close = np.array(data['close'][:1000], dtype=np.float64)  # Use first 1000 values
+        # Expected values from Rust test (check_reflex_accuracy and check_batch_default_row)
+        expected_last_five = [
+            0.8085220962465361,
+            0.445264715886137,
+            0.13861699036615063,
+            -0.03598639652007061,
+            -0.224906760543743
+        ]
+        
+        # Check last 5 values match expected
+        assert_close(
+            result[-5:], 
+            expected_last_five,
+            rtol=1e-7,
+            msg="Reflex last 5 values mismatch"
+        )
+        
+        # Compare full output with Rust
+        compare_with_rust('reflex', result, 'close', {'period': 20})
     
-    # Test multiple parameter combinations
-    batch_result = reflex_batch(
-        close,
-        (10, 50, 10)  # periods: 10, 20, 30, 40, 50
-    )
-    
-    # Should have 5 combinations
-    assert batch_result['values'].shape == (5, len(close))
-    
-    # Verify metadata
-    expected_periods = [10, 20, 30, 40, 50]
-    assert np.array_equal(batch_result['periods'], expected_periods)
-
-
-def test_reflex_edge_cases():
-    """Test Reflex with edge case inputs"""
-    # Test with monotonically increasing data
-    data = np.arange(1.0, 101.0, dtype=np.float64)
-    result = reflex(data, 20)
-    assert len(result) == len(data)
-    assert np.all(np.isfinite(result[20:]))  # After period
-    
-    # Test with constant values
-    data = np.array([50.0] * 100, dtype=np.float64)
-    result = reflex(data, 20)
-    assert len(result) == len(data)
-    # With constant input, Reflex produces NaN after warmup (division by zero variance)
-    # This is expected behavior when there's no price variation
-    # First period values should be zeros
-    assert np.all(result[:20] == 0.0)
-    
-    # Test with oscillating values
-    data = np.array([10.0, 20.0, 10.0, 20.0] * 25, dtype=np.float64)
-    result = reflex(data, 20)
-    assert len(result) == len(data)
-    assert np.all(np.isfinite(result[20:]))
-
-
-def test_reflex_consistency():
-    """Test that Reflex produces consistent results across multiple calls"""
-    data = load_test_data()
-    close = np.array(data['close'][:100], dtype=np.float64)
-    
-    result1 = reflex(close, 20)
-    result2 = reflex(close, 20)
-    
-    assert_close(result1, result2, atol=1e-15, msg="Reflex results not consistent")
-
-
-def test_reflex_step_precision():
-    """Test batch with various step sizes"""
-    data = np.arange(1, 51, dtype=np.float64)
-    
-    # Test with different step sizes
-    batch_result = reflex_batch(
-        data,
-        (10, 20, 2)  # periods: 10, 12, 14, 16, 18, 20
-    )
-    
-    assert batch_result['values'].shape == (6, len(data))
-    expected_periods = [10, 12, 14, 16, 18, 20]
-    assert np.array_equal(batch_result['periods'], expected_periods)
-
-
-def test_reflex_batch_error_handling():
-    """Test Reflex batch error handling"""
-    # Test with all NaN data
-    all_nan = np.full(100, np.nan, dtype=np.float64)
-    with pytest.raises(ValueError, match="reflex"):
-        reflex_batch(all_nan, (10, 20, 5))
-    
-    # Test with insufficient data
-    small_data = np.array([1.0, 2.0, 3.0], dtype=np.float64)
-    with pytest.raises(ValueError, match="reflex"):
-        reflex_batch(small_data, (10, 20, 5))
-
-
-def test_reflex_zero_copy_verification():
-    """Verify Reflex uses zero-copy operations"""
-    data = load_test_data()
-    close = np.array(data['close'][:100], dtype=np.float64)
-    
-    # The result should be computed directly without intermediate copies
-    result = reflex(close, 20)
-    assert len(result) == len(close)
-    
-    # Batch should also use zero-copy
-    batch_result = reflex_batch(close, (10, 20, 5))
-    assert batch_result['values'].shape[0] == 3  # 10, 15, 20
-    assert batch_result['values'].shape[1] == len(close)
-
-
-def test_reflex_stream_error_handling():
-    """Test Reflex stream error handling"""
-    # Test with invalid period
-    with pytest.raises(ValueError, match="reflex"):
-        ReflexStream(1)
-    
-    # Test that stream properly handles warmup
-    stream = ReflexStream(20)
-    
-    # First 20 updates should return None (period = 20)
-    for i in range(20):
-        result = stream.update(float(i + 1))
-        assert result is None
-    
-    # 21st update should return a value
-    result = stream.update(21.0)
-    assert result is not None
-    assert isinstance(result, float)
-
-
-def test_reflex_warmup_behavior():
-    """Test Reflex warmup period behavior"""
-    data = load_test_data()
-    close = np.array(data['close'], dtype=np.float64)
-    
-    period = 20
-    result = reflex(close, period)
-    
-    # Find first non-NaN value in input
-    first_valid = np.where(~np.isnan(close))[0][0]
-    warmup = first_valid + period
-    
-    # Values during warmup should be zero (Reflex specific behavior)
-    assert np.all(result[:period] == 0.0), "Expected zeros during warmup period"
-    
-    # Values after warmup should be finite
-    assert np.all(np.isfinite(result[warmup:])), "Expected finite values after warmup"
-
-
-def test_reflex_formula_verification():
-    """Verify Reflex formula implementation"""
-    # Create simple test data with known pattern
-    data = np.array([10.0, 11.0, 12.0, 11.0, 10.0, 9.0, 10.0, 11.0, 12.0, 13.0] * 5, dtype=np.float64)
-    period = 5
-    
-    result = reflex(data, period)
-    
-    # Result length should match input
-    assert len(result) == len(data)
-    
-    # Warmup period should have zeros
-    assert np.all(result[:period] == 0.0)
-    
-    # After warmup, values should be finite
-    assert np.all(np.isfinite(result[period:]))
-    
-    # Reflex should detect the oscillating pattern
-    # Values should not all be the same after warmup
-    assert not np.allclose(result[period:], result[period], rtol=1e-9)
-
-
-def test_reflex_kernel_options():
-    """Test Reflex with different kernel options"""
-    data = load_test_data()
-    close = np.array(data['close'][:100], dtype=np.float64)
-    
-    # Test with different kernels
-    kernels = ['auto', 'scalar']
-    
-    for kernel in kernels:
-        result = reflex(close, 20, kernel=kernel)
+    def test_reflex_default_candles(self, test_data):
+        """Test Reflex with default parameters - mirrors check_reflex_default_candles"""
+        close = test_data['close']
+        
+        # Default param: period=20
+        result = ta_indicators.reflex(close, 20)
         assert len(result) == len(close)
+    
+    def test_reflex_zero_period(self):
+        """Test Reflex fails with zero period - mirrors check_reflex_zero_period"""
+        input_data = np.array([10.0, 20.0, 30.0])
+        
+        with pytest.raises(ValueError, match="period must be >=2"):
+            ta_indicators.reflex(input_data, period=0)
+    
+    def test_reflex_period_less_than_two(self):
+        """Test Reflex fails when period < 2 - mirrors check_reflex_period_less_than_two"""
+        input_data = np.array([10.0, 20.0, 30.0])
+        
+        with pytest.raises(ValueError, match="period must be >=2"):
+            ta_indicators.reflex(input_data, period=1)
+    
+    def test_reflex_period_exceeds_length(self):
+        """Test Reflex fails when period exceeds data length - mirrors check_reflex_very_small_data_set"""
+        data_small = np.array([10.0, 20.0, 30.0])
+        
+        with pytest.raises(ValueError, match="Not enough data"):
+            ta_indicators.reflex(data_small, period=10)
+    
+    def test_reflex_very_small_dataset(self):
+        """Test Reflex fails with insufficient data - mirrors check_reflex_very_small_data_set"""
+        single_point = np.array([42.0])
+        
+        with pytest.raises(ValueError, match="Not enough data"):
+            ta_indicators.reflex(single_point, period=5)
+    
+    def test_reflex_empty_input(self):
+        """Test Reflex fails with empty input - mirrors empty input test"""
+        empty = np.array([])
+        
+        with pytest.raises(ValueError, match="No data available"):
+            ta_indicators.reflex(empty, period=20)
+    
+    def test_reflex_nan_handling(self, test_data):
+        """Test Reflex handles NaN values correctly - mirrors check_reflex_nan_handling"""
+        close = test_data['close']
+        period = 14
+        
+        result = ta_indicators.reflex(close, period=period)
+        assert len(result) == len(close)
+        
+        # After warmup period, no NaN values should exist (except from NaN propagation)
+        if len(result) > period:
+            # Check values after period are finite
+            for i in range(period, len(result)):
+                if not np.isnan(close[i]):
+                    assert np.isfinite(result[i]), f"Found unexpected non-finite value at index {i}"
+        
+        # First period values should be 0.0 (Reflex specific warmup behavior)
+        assert np.all(result[:period] == 0.0), "Expected zeros in warmup period"
+    
+    def test_reflex_streaming(self, test_data):
+        """Test Reflex streaming matches batch calculation - mirrors check_reflex_streaming"""
+        close = test_data['close']
+        period = 14
+        
+        # Batch calculation
+        batch_result = ta_indicators.reflex(close, period=period)
+        
+        # Streaming calculation
+        stream = ta_indicators.ReflexStream(period=period)
+        stream_values = []
+        
+        for price in close:
+            result = stream.update(price)
+            # Reflex returns 0.0 during warmup, not None
+            stream_values.append(result if result is not None else 0.0)
+        
+        stream_values = np.array(stream_values)
+        
+        # Compare batch vs streaming
+        assert len(batch_result) == len(stream_values)
+        
+        # Compare values
+        for i, (b, s) in enumerate(zip(batch_result, stream_values)):
+            assert_close(b, s, rtol=1e-9, atol=1e-9, 
+                        msg=f"Reflex streaming mismatch at index {i}")
+    
+    def test_reflex_batch(self, test_data):
+        """Test Reflex batch processing - mirrors check_batch_default_row"""
+        close = test_data['close']
+        
+        # Test with default period only
+        result = ta_indicators.reflex_batch(
+            close,
+            (20, 20, 0)  # Default period only
+        )
+        
+        assert 'values' in result
+        assert 'periods' in result
+        assert result['values'].shape == (1, len(close))
+        
+        # Values should match single calculation
+        single_result = ta_indicators.reflex(close, period=20)
+        assert_close(
+            result['values'][0], 
+            single_result,
+            rtol=1e-9,
+            msg="Reflex batch vs single mismatch"
+        )
+        
+        # Check last 5 values match expected from Rust
+        expected_last_five = [
+            0.8085220962465361,
+            0.445264715886137,
+            0.13861699036615063,
+            -0.03598639652007061,
+            -0.224906760543743
+        ]
+        
+        assert_close(
+            result['values'][0][-5:],
+            expected_last_five,
+            rtol=1e-7,
+            msg="Reflex batch last 5 values mismatch"
+        )
+    
+    def test_reflex_batch_multiple_periods(self, test_data):
+        """Test Reflex batch computation with multiple periods"""
+        close = test_data['close']
+        
+        # Test period range
+        batch_result = ta_indicators.reflex_batch(
+            close,
+            (10, 30, 5)  # period range: 10, 15, 20, 25, 30
+        )
+        
+        # Check result is a dict with the expected keys
+        assert isinstance(batch_result, dict)
+        assert 'values' in batch_result
+        assert 'periods' in batch_result
+        
+        # Should have 5 period combinations
+        assert batch_result['values'].shape == (5, len(close))
+        assert len(batch_result['periods']) == 5
+        assert np.array_equal(batch_result['periods'], [10, 15, 20, 25, 30])
+        
+        # Verify first combination matches individual calculation
+        individual_result = ta_indicators.reflex(close, 10)
+        batch_first = batch_result['values'][0]
+        
+        # Compare after warmup period
+        warmup = 10
+        assert_close(batch_first[warmup:], individual_result[warmup:], atol=1e-9, 
+                    msg="Reflex batch first combination mismatch")
+    
+    def test_reflex_all_nan_input(self):
+        """Test Reflex with all NaN values"""
+        all_nan = np.full(100, np.nan)
+        
+        with pytest.raises(ValueError, match="All values.*NaN"):
+            ta_indicators.reflex(all_nan, period=20)
+    
+    def test_reflex_batch_error_conditions(self):
+        """Test Reflex batch error handling"""
+        # Test with all NaN data
+        all_nan = np.full(100, np.nan)
+        with pytest.raises(ValueError, match="All values.*NaN"):
+            ta_indicators.reflex_batch(all_nan, (10, 20, 5))
+        
+        # Test with insufficient data
+        small_data = np.array([1.0, 2.0, 3.0])
+        with pytest.raises(ValueError, match="Not enough data"):
+            ta_indicators.reflex_batch(small_data, (10, 20, 5))
+    
+    def test_reflex_edge_cases(self, test_data):
+        """Test Reflex with edge case inputs"""
+        # Test with monotonically increasing data
+        data = np.arange(1.0, 101.0)
+        result = ta_indicators.reflex(data, 20)
+        assert len(result) == len(data)
+        assert np.all(result[:20] == 0.0)  # Warmup period has zeros
+        assert np.all(np.isfinite(result[20:]))  # After period
+        
+        # Test with constant values
+        data = np.array([50.0] * 100)
+        result = ta_indicators.reflex(data, 20)
+        assert len(result) == len(data)
+        # First period values should be zeros
+        assert np.all(result[:20] == 0.0)
+        # With constant input, Reflex produces NaN after warmup (division by zero variance)
+        # This is expected behavior
+        
+        # Test with oscillating values
+        data = np.array([10.0, 20.0, 10.0, 20.0] * 25)
+        result = ta_indicators.reflex(data, 20)
+        assert len(result) == len(data)
+        assert np.all(result[:20] == 0.0)  # Warmup
         assert np.all(np.isfinite(result[20:]))
     
-    # Invalid kernel should fail
-    with pytest.raises(ValueError, match="Unknown kernel"):
-        reflex(close, 20, kernel='invalid')
+    def test_reflex_warmup_behavior(self, test_data):
+        """Test Reflex warmup period behavior"""
+        close = test_data['close']
+        period = 20
+        
+        result = ta_indicators.reflex(close, period)
+        
+        # Values during warmup should be zeros (Reflex specific behavior)
+        assert np.all(result[:period] == 0.0), "Expected zeros during warmup period"
+        
+        # Find first non-NaN value in input
+        first_valid = np.where(~np.isnan(close))[0][0] if np.any(~np.isnan(close)) else 0
+        warmup = first_valid + period
+        
+        # Values after warmup should be finite
+        if warmup < len(result):
+            assert np.all(np.isfinite(result[warmup:])), "Expected finite values after warmup"
+    
+    def test_reflex_consistency(self, test_data):
+        """Test that Reflex produces consistent results across multiple calls"""
+        close = test_data['close'][:100]
+        
+        result1 = ta_indicators.reflex(close, 20)
+        result2 = ta_indicators.reflex(close, 20)
+        
+        assert_close(result1, result2, atol=1e-15, msg="Reflex results not consistent")
+    
+    def test_reflex_formula_verification(self):
+        """Verify Reflex formula implementation with simple pattern"""
+        # Create simple test data with known pattern
+        data = np.array([10.0, 11.0, 12.0, 11.0, 10.0, 9.0, 10.0, 11.0, 12.0, 13.0] * 5)
+        period = 5
+        
+        result = ta_indicators.reflex(data, period)
+        
+        # Result length should match input
+        assert len(result) == len(data)
+        
+        # Warmup period should have zeros
+        assert np.all(result[:period] == 0.0)
+        
+        # After warmup, values should be finite
+        assert np.all(np.isfinite(result[period:]))
+        
+        # Reflex should detect the oscillating pattern
+        # Values should not all be the same after warmup
+        unique_values = np.unique(result[period:])
+        assert len(unique_values) > 1, "Expected varying values for oscillating input"
 
 
 if __name__ == '__main__':
     # Run a simple test to verify the module loads correctly
     print("Testing Reflex module...")
-    test_reflex_accuracy()
+    test = TestReflex()
+    test_data = load_test_data()
+    test.test_reflex_accuracy(test_data)
     print("Reflex tests passed!")

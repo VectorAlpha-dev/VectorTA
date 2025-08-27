@@ -95,6 +95,26 @@ EXPECTED_OUTPUTS = {
             -5.004210799262688
         ]
     },
+    'tilson': {
+        'default_params': {'period': 5, 'volume_factor': 0.0},
+        'last_5_values': [
+            59304.716332473254,
+            59283.56868015526,
+            59261.16173577631,
+            59240.25895948583,
+            59203.544843167765
+        ]
+    },
+    'dx': {
+        'default_params': {'period': 14},
+        'last_5_values': [
+            43.72121533411883,
+            41.47251493226443,
+            43.43041386436222,
+            43.22673458811955,
+            51.65514026197179
+        ]
+    },
     'correl_hl': {
         'default_params': {'period': 5},
         'last_5_values': [
@@ -175,6 +195,29 @@ EXPECTED_OUTPUTS = {
             59067.97928994083
         ]
     },
+    'kaufmanstop': {
+        'default_params': {
+            'period': 22,
+            'mult': 2.0,
+            'direction': 'long',
+            'ma_type': 'sma'
+        },
+        'last_5_values': [
+            56711.545454545456,
+            57132.72727272727,
+            57015.72727272727,
+            57137.18181818182,
+            56516.09090909091
+        ],
+        'warmup_period': 21,  # first + period - 1 = 0 + 22 - 1
+        'batch_default_row': [
+            56711.545454545456,
+            57132.72727272727,
+            57015.72727272727,
+            57137.18181818182,
+            56516.09090909091
+        ]
+    },
     'srwma': {
         'default_params': {'period': 14},
         'last_5_values': [
@@ -244,6 +287,11 @@ EXPECTED_OUTPUTS = {
             59196.261392450084,
             59151.22059588594
         ]
+    },
+    'minmax': {
+        'default_params': {'order': 3},
+        'last_5_values_min': [57876.0, 57876.0, 57876.0, 57876.0, 57876.0],
+        'last_5_values_max': [60102.0, 60102.0, 60102.0, 60102.0, 60102.0]
     },
     'acosc': {
         'default_params': {},  # ACOSC has no parameters
@@ -534,19 +582,20 @@ EXPECTED_OUTPUTS = {
             'threshold': 1.4
         },
         'vol_last_5_values': [
-            0.9009485470514558,
-            0.8333604467044887,
-            0.815318380178986,
-            0.8276892636184923,
-            0.879447954127426
+            0.8539059,  # These are the actual values when using close-only data
+            0.75935611,
+            0.73610448,
+            0.76744843,
+            0.84842545
         ],
         'anti_last_5_values': [
-            1.1227721577887388,
-            1.1250333024152703,
-            1.1325501989919875,
-            1.1403866079746106,
-            1.1392919184055932
-        ]
+            1.1250333,  # These are the actual values when using close-only data
+            1.1325502,
+            1.14038661,
+            1.13929192,
+            1.12982407
+        ],
+        'warmup_period': 101  # max(vis_atr, vis_std, sed_atr, sed_std, 3) + 1
     },
     'di': {
         'default_params': {'period': 14},
@@ -653,6 +702,24 @@ EXPECTED_OUTPUTS = {
                 -81.32373697835556
             ]
         }
+    },
+    'maaq': {
+        'default_params': {'period': 11, 'fast_period': 2, 'slow_period': 30},
+        'last_5_values': [
+            59747.657115949725,
+            59740.803138018055,
+            59724.24153333905,
+            59720.60576365108,
+            59673.9954445178
+        ],
+        'warmup_period': 10,  # period - 1 = 11 - 1
+        'batch_default_row': [
+            59747.657115949725,
+            59740.803138018055,
+            59724.24153333905,
+            59720.60576365108,
+            59673.9954445178
+        ]
     },
     'keltner': {
         'default_params': {'period': 20, 'multiplier': 2.0, 'ma_type': 'ema'},

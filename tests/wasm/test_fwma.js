@@ -67,6 +67,14 @@ test('FWMA accuracy', async () => {
     
     assert.strictEqual(result.length, close.length);
     
+    // Verify warmup period: first (period-1) values should be NaN
+    const period = 5;
+    for (let i = 0; i < period - 1; i++) {
+        assert(isNaN(result[i]), `Expected NaN at index ${i} (warmup period)`);
+    }
+    // First valid value should be at index period-1
+    assert(!isNaN(result[period - 1]), `Expected valid value at index ${period - 1}`);
+    
     // Expected last 5 values from Rust test
     const expectedLastFive = [
         59273.583333333336,
@@ -106,7 +114,28 @@ test('FWMA zero period', () => {
     
     assert.throws(() => {
         wasm.fwma_js(inputData, 0);
-    });
+    }, /Invalid period/);
+});
+
+test('FWMA empty input', () => {
+    // Test FWMA fails with empty input - mirrors ALMA's check_alma_empty_input
+    const empty = new Float64Array([]);
+    
+    assert.throws(() => {
+        wasm.fwma_js(empty, 5);
+    }, /Input data slice is empty/);
+});
+
+test('FWMA all NaN input', () => {
+    // Test FWMA fails with all NaN values
+    const allNaN = new Float64Array(10);
+    for (let i = 0; i < allNaN.length; i++) {
+        allNaN[i] = NaN;
+    }
+    
+    assert.throws(() => {
+        wasm.fwma_js(allNaN, 3);
+    }, /All values are NaN/);
 });
 
 test('FWMA period exceeds length', () => {
@@ -115,7 +144,7 @@ test('FWMA period exceeds length', () => {
     
     assert.throws(() => {
         wasm.fwma_js(dataSmall, 5);
-    });
+    }, /Invalid period/);
 });
 
 test('FWMA very small dataset', () => {
@@ -124,7 +153,7 @@ test('FWMA very small dataset', () => {
     
     assert.throws(() => {
         wasm.fwma_js(dataSingle, 5);
-    });
+    }, /Invalid period|Not enough valid data/);
 });
 
 test('FWMA reinput', () => {
@@ -166,8 +195,10 @@ test('FWMA NaN handling', () => {
 });
 
 test('FWMA batch', () => {
-    // Test FWMA batch computation
-    const close = new Float64Array(testData.close);
+    // Test FWMA batch computation with multiple parameter sets
+    const close = new Float64Array(testData.close.slice(0, 100)); // Use first 100 values for faster testing
+    
+    // Test 1: Multiple periods (like ALMA test)
     const period_start = 3;
     const period_end = 9;
     const period_step = 2; // periods: 3, 5, 7, 9
@@ -191,7 +222,24 @@ test('FWMA batch', () => {
         const row = batch_result.slice(row_start, row_start + close.length);
         
         assertArrayClose(row, individual_result, 1e-9, `Period ${period}`);
+        
+        // Verify warmup period for this row
+        for (let j = 0; j < period - 1; j++) {
+            assert(isNaN(row[j]), `Row ${i} (period ${period}): Expected NaN at index ${j} (warmup period)`);
+        }
+        assert(!isNaN(row[period - 1]), `Row ${i} (period ${period}): Expected valid value at index ${period - 1}`);
     }
+    
+    // Test 2: Single period batch (like check_batch_default_row)
+    const single_batch = wasm.fwma_batch_js(close, 5, 5, 0);
+    const single_metadata = wasm.fwma_batch_metadata_js(5, 5, 0);
+    
+    assert.deepStrictEqual(Array.from(single_metadata), [5], 'Single period metadata mismatch');
+    assert.strictEqual(single_batch.length, close.length, 'Single batch result length mismatch');
+    
+    // Verify single batch matches individual calculation
+    const individual_5 = wasm.fwma_js(close, 5);
+    assertArrayClose(single_batch, individual_5, 1e-9, 'Single period batch vs individual');
 });
 
 test('FWMA Fibonacci weights calculation', () => {

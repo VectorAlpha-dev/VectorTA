@@ -51,12 +51,13 @@ test('Reflex partial params', () => {
 test('Reflex accuracy', async () => {
     // Test Reflex matches expected values from Rust tests - mirrors check_reflex_accuracy
     const close = new Float64Array(testData.close);
+    const expected = EXPECTED_OUTPUTS.reflex || {};
     
     const result = wasm.reflex_js(close, 20);
     
     assert.strictEqual(result.length, close.length);
     
-    // Expected values from Rust test
+    // Expected values from Rust test (check_reflex_accuracy and check_batch_default_row)
     const expectedLastFive = [
         0.8085220962465361,
         0.445264715886137,
@@ -67,93 +68,138 @@ test('Reflex accuracy', async () => {
     
     const actualLastFive = result.slice(-5);
     
-    for (let i = 0; i < 5; i++) {
-        assertClose(actualLastFive[i], expectedLastFive[i], 1e-7, 
-            `Reflex mismatch at index ${i}`);
-    }
+    assertArrayClose(
+        actualLastFive,
+        expectedLastFive,
+        1e-7,
+        "Reflex last 5 values mismatch"
+    );
     
     // Compare with Rust implementation
     await compareWithRust('reflex', result, 'close', { period: 20 });
 });
 
-test('Reflex invalid period', () => {
-    // Test Reflex fails with invalid period
+test('Reflex default candles', () => {
+    // Test Reflex with default parameters - mirrors check_reflex_default_candles
+    const close = new Float64Array(testData.close);
+    
+    const result = wasm.reflex_js(close, 20);
+    assert.strictEqual(result.length, close.length);
+});
+
+test('Reflex zero period', () => {
+    // Test Reflex fails with zero period - mirrors check_reflex_zero_period
     const inputData = new Float64Array([10.0, 20.0, 30.0]);
     
-    // Period < 2 should fail
-    assert.throws(() => {
-        wasm.reflex_js(inputData, 1);
-    });
-    
-    // Period = 0 should fail
     assert.throws(() => {
         wasm.reflex_js(inputData, 0);
-    });
+    }, /period must be >=2/);
+});
+
+test('Reflex period less than two', () => {
+    // Test Reflex fails when period < 2 - mirrors check_reflex_period_less_than_two
+    const inputData = new Float64Array([10.0, 20.0, 30.0]);
+    
+    assert.throws(() => {
+        wasm.reflex_js(inputData, 1);
+    }, /period must be >=2/);
 });
 
 test('Reflex period exceeds length', () => {
-    // Test Reflex fails with period exceeding length
+    // Test Reflex fails when period exceeds data length - mirrors check_reflex_very_small_data_set
     const dataSmall = new Float64Array([10.0, 20.0, 30.0]);
     
     assert.throws(() => {
         wasm.reflex_js(dataSmall, 10);
-    });
+    }, /Not enough data/);
 });
 
 test('Reflex very small dataset', () => {
-    // Test Reflex fails with insufficient data
+    // Test Reflex fails with insufficient data - mirrors check_reflex_very_small_data_set
     const singlePoint = new Float64Array([42.0]);
     
     assert.throws(() => {
         wasm.reflex_js(singlePoint, 5);
-    });
+    }, /Not enough data/);
 });
 
 test('Reflex empty input', () => {
-    // Test Reflex with empty input
+    // Test Reflex fails with empty input
     const dataEmpty = new Float64Array([]);
     
     assert.throws(() => {
         wasm.reflex_js(dataEmpty, 20);
-    });
-});
-
-test('Reflex reinput', () => {
-    // Test Reflex with re-input of Reflex result - mirrors check_reflex_reinput
-    const close = new Float64Array(testData.close);
-    
-    // First Reflex pass with period=14
-    const firstResult = wasm.reflex_js(close, 14);
-    
-    // Second Reflex pass with period=20 using first result as input
-    const secondResult = wasm.reflex_js(firstResult, 20);
-    
-    assert.strictEqual(secondResult.length, firstResult.length);
-    
-    // All values should be finite after warmup
-    const warmup = 240 + 20;  // first_valid + second_period
-    for (let i = warmup; i < secondResult.length; i++) {
-        assert(isFinite(secondResult[i]), `NaN found at index ${i}`);
-    }
+    }, /No data available/);
 });
 
 test('Reflex NaN handling', () => {
-    // Test Reflex handling of NaN values - mirrors check_reflex_nan_handling
+    // Test Reflex handles NaN values correctly - mirrors check_reflex_nan_handling
     const close = new Float64Array(testData.close);
+    const period = 14;
     
-    const result = wasm.reflex_js(close, 20);
+    const result = wasm.reflex_js(close, period);
     
     assert.strictEqual(result.length, close.length);
     
-    // After warmup, all values should be finite
-    const warmup = 240 + 20;  // first_valid + period
-    for (let i = warmup; i < result.length; i++) {
-        assert(isFinite(result[i]), `NaN found at index ${i}`);
+    // First period values should be 0.0 (Reflex specific warmup behavior)
+    for (let i = 0; i < period; i++) {
+        assert.strictEqual(result[i], 0.0, `Expected zero at index ${i} during warmup`);
+    }
+    
+    // After warmup period, values should be finite (if input is valid)
+    if (result.length > period) {
+        for (let i = period; i < result.length; i++) {
+            if (!isNaN(close[i])) {
+                assert(isFinite(result[i]), `Found unexpected non-finite value at index ${i}`);
+            }
+        }
     }
 });
 
 test('Reflex batch', () => {
-    // Test Reflex batch computation
+    // Test Reflex batch processing - mirrors check_batch_default_row
+    const close = new Float64Array(testData.close);
+    
+    // Test with default period only
+    const batch_result = wasm.reflex_batch_js(
+        close, 
+        20, 20, 0    // period range: just 20
+    );
+    
+    // Get rows and cols info
+    const rows_cols = wasm.reflex_batch_rows_cols_js(20, 20, 0, close.length);
+    const rows = rows_cols[0];
+    const cols = rows_cols[1];
+    
+    assert(batch_result instanceof Float64Array);
+    assert.strictEqual(rows, 1); // Only 1 period value
+    assert.strictEqual(cols, close.length);
+    assert.strictEqual(batch_result.length, rows * cols);
+    
+    // Verify it matches individual calculation
+    const individual_result = wasm.reflex_js(close, 20);
+    assertArrayClose(batch_result, individual_result, 1e-9, "Batch vs single results");
+    
+    // Check last 5 values match expected from Rust
+    const expectedLastFive = [
+        0.8085220962465361,
+        0.445264715886137,
+        0.13861699036615063,
+        -0.03598639652007061,
+        -0.224906760543743
+    ];
+    
+    const actualLastFive = batch_result.slice(-5);
+    assertArrayClose(
+        actualLastFive,
+        expectedLastFive,
+        1e-7,
+        "Reflex batch last 5 values mismatch"
+    );
+});
+
+test('Reflex batch multiple periods', () => {
+    // Test Reflex batch computation with multiple periods
     const close = new Float64Array(testData.close);
     
     // Test parameter ranges
@@ -172,79 +218,66 @@ test('Reflex batch', () => {
     assert.strictEqual(cols, close.length);
     assert.strictEqual(batch_result.length, rows * cols);
     
+    // Verify metadata
+    const metadata = wasm.reflex_batch_metadata_js(10, 30, 5);
+    assert.strictEqual(metadata.length, 5);
+    assert.deepStrictEqual(Array.from(metadata), [10, 15, 20, 25, 30]);
+    
     // Verify first combination matches individual calculation
     const individual_result = wasm.reflex_js(close, 10);
     const batch_first = batch_result.slice(0, close.length);
     
-    // Compare after warmup
-    const warmup = 240 + 10;  // first valid + period
+    // Compare after warmup period
+    const warmup = 10;
     for (let i = warmup; i < close.length; i++) {
         assertClose(batch_first[i], individual_result[i], 1e-9, `Batch mismatch at ${i}`);
     }
 });
 
-test('Reflex different periods', () => {
-    // Test Reflex with different period values
-    const close = new Float64Array(testData.close);
-    
-    // Test various period values
-    const testPeriods = [5, 10, 20, 50];
-    
-    for (const period of testPeriods) {
-        const result = wasm.reflex_js(close, period);
-        assert.strictEqual(result.length, close.length);
-        
-        // After warmup, all values should be finite
-        const warmup = 240 + period;
-        if (warmup < result.length) {
-            for (let i = warmup; i < result.length; i++) {
-                assert(isFinite(result[i]), `NaN at index ${i} for period=${period}`);
-            }
-        }
+test('Reflex all NaN input', () => {
+    // Test Reflex with all NaN values
+    const allNaN = new Float64Array(100);
+    for (let i = 0; i < 100; i++) {
+        allNaN[i] = NaN;
     }
+    
+    assert.throws(() => {
+        wasm.reflex_js(allNaN, 20);
+    }, /All values.*NaN/);
 });
 
-test('Reflex batch performance', () => {
-    // Test that batch computation is more efficient than multiple single computations
-    const close = new Float64Array(testData.close.slice(0, 1000)); // Use first 1000 values
-    
-    // Test multiple parameter combinations
-    const startBatch = performance.now();
-    const batchResult = wasm.reflex_batch_js(
-        close,
-        10, 50, 10    // periods: 10, 20, 30, 40, 50
-    );
-    const batchTime = performance.now() - startBatch;
-    
-    // Get the exact parameters used by the batch function
-    const metadata = wasm.reflex_batch_metadata_js(10, 50, 10);
-    
-    const startSingle = performance.now();
-    const singleResults = [];
-    // Use the exact parameters from metadata
-    for (const period of metadata) {
-        const result = wasm.reflex_js(close, period);
-        singleResults.push(...result);
+test('Reflex batch error conditions', () => {
+    // Test batch error handling with all NaN data
+    const allNaN = new Float64Array(100);
+    for (let i = 0; i < 100; i++) {
+        allNaN[i] = NaN;
     }
-    const singleTime = performance.now() - startSingle;
     
-    // Batch should be faster than multiple single calls
-    console.log(`Batch time: ${batchTime.toFixed(2)}ms, Single time: ${singleTime.toFixed(2)}ms`);
+    assert.throws(() => {
+        wasm.reflex_batch_js(allNaN, 10, 20, 5);
+    }, /All values.*NaN/);
     
-    // Verify results match
-    assertArrayClose(batchResult, singleResults, 1e-9, 'Batch vs single results');
+    // Test with insufficient data
+    const smallData = new Float64Array([1.0, 2.0, 3.0]);
+    assert.throws(() => {
+        wasm.reflex_batch_js(smallData, 10, 20, 5);
+    }, /Not enough data/);
 });
 
 test('Reflex edge cases', () => {
-    // Test Reflex with edge case inputs
-    
     // Test with monotonically increasing data
     const data = new Float64Array(100);
     for (let i = 0; i < 100; i++) {
         data[i] = i + 1;
     }
+    
     const result = wasm.reflex_js(data, 20);
     assert.strictEqual(result.length, data.length);
+    
+    // First 20 values should be zeros (warmup)
+    for (let i = 0; i < 20; i++) {
+        assert.strictEqual(result[i], 0.0, `Expected zero at index ${i} during warmup`);
+    }
     
     // After warmup, all values should be finite
     for (let i = 20; i < result.length; i++) {
@@ -257,68 +290,31 @@ test('Reflex edge cases', () => {
     
     assert.strictEqual(constantResult.length, constantData.length);
     
-    // With constant input, Reflex produces NaN after warmup (division by zero variance)
-    // This is expected behavior when there's no price variation
     // First period values should be zeros
     for (let i = 0; i < 20; i++) {
         assert.strictEqual(constantResult[i], 0.0, `Expected zero at index ${i} during warmup`);
     }
-});
-
-test('Reflex batch metadata', () => {
-    // Test metadata function returns correct period values
-    const metadata = wasm.reflex_batch_metadata_js(
-        10, 30, 5    // period range: 10, 15, 20, 25, 30
-    );
+    // With constant input, Reflex produces NaN after warmup (division by zero variance)
+    // This is expected behavior
     
-    // Should have 5 period values
-    assert.strictEqual(metadata.length, 5);
-    assert.strictEqual(metadata[0], 10);
-    assert.strictEqual(metadata[1], 15);
-    assert.strictEqual(metadata[2], 20);
-    assert.strictEqual(metadata[3], 25);
-    assert.strictEqual(metadata[4], 30);
-});
-
-test('Reflex consistency across calls', () => {
-    // Test that Reflex produces consistent results across multiple calls
-    const close = new Float64Array(testData.close.slice(0, 100));
-    
-    const result1 = wasm.reflex_js(close, 20);
-    const result2 = wasm.reflex_js(close, 20);
-    
-    assertArrayClose(result1, result2, 1e-15, "Reflex results not consistent");
-});
-
-test('Reflex step precision', () => {
-    // Test batch with various step sizes
-    const data = new Float64Array(50);
-    for (let i = 0; i < 50; i++) {
-        data[i] = i + 1;
+    // Test with oscillating values
+    const oscillatingData = new Float64Array(100);
+    for (let i = 0; i < 100; i++) {
+        oscillatingData[i] = (i % 2 === 0) ? 10.0 : 20.0;
     }
     
-    const batch_result = wasm.reflex_batch_js(
-        data,
-        10, 20, 2     // periods: 10, 12, 14, 16, 18, 20
-    );
+    const oscillatingResult = wasm.reflex_js(oscillatingData, 20);
+    assert.strictEqual(oscillatingResult.length, oscillatingData.length);
     
-    // Get rows and cols info
-    const rows_cols = wasm.reflex_batch_rows_cols_js(10, 20, 2, data.length);
-    const rows = rows_cols[0];
+    // First 20 values should be zeros
+    for (let i = 0; i < 20; i++) {
+        assert.strictEqual(oscillatingResult[i], 0.0, `Expected zero at index ${i} during warmup`);
+    }
     
-    // Should have 6 combinations
-    assert.strictEqual(rows, 6);
-    assert.strictEqual(batch_result.length, 6 * data.length);
-    
-    // Verify metadata
-    const metadata = wasm.reflex_batch_metadata_js(10, 20, 2);
-    assert.strictEqual(metadata.length, 6);
-    assert.strictEqual(metadata[0], 10);
-    assert.strictEqual(metadata[1], 12);
-    assert.strictEqual(metadata[2], 14);
-    assert.strictEqual(metadata[3], 16);
-    assert.strictEqual(metadata[4], 18);
-    assert.strictEqual(metadata[5], 20);
+    // After warmup, all values should be finite
+    for (let i = 20; i < oscillatingResult.length; i++) {
+        assert(isFinite(oscillatingResult[i]), `Expected finite value at index ${i}`);
+    }
 });
 
 test('Reflex warmup behavior', () => {
@@ -345,29 +341,40 @@ test('Reflex warmup behavior', () => {
     const warmup = firstValid + period;
     
     // Values after warmup should be finite
-    for (let i = warmup; i < result.length; i++) {
-        assert(isFinite(result[i]), `Expected finite value at index ${i} after warmup`);
+    if (warmup < result.length) {
+        for (let i = warmup; i < result.length; i++) {
+            assert(isFinite(result[i]), `Expected finite value at index ${i} after warmup`);
+        }
     }
 });
 
-test('Reflex oscillating data', () => {
-    // Test with oscillating values
-    const data = new Float64Array(100);
-    for (let i = 0; i < 100; i++) {
-        data[i] = (i % 2 === 0) ? 10.0 : 20.0;
-    }
+test('Reflex consistency', () => {
+    // Test that Reflex produces consistent results across multiple calls
+    const close = new Float64Array(testData.close.slice(0, 100));
     
-    const result = wasm.reflex_js(data, 20);
-    assert.strictEqual(result.length, data.length);
+    const result1 = wasm.reflex_js(close, 20);
+    const result2 = wasm.reflex_js(close, 20);
     
-    // After warmup, all values should be finite
-    for (let i = 20; i < result.length; i++) {
-        assert(isFinite(result[i]), `Expected finite value at index ${i}`);
-    }
+    assertArrayClose(result1, result2, 1e-15, "Reflex results not consistent");
 });
 
-test('Reflex small step size', () => {
-    // Test batch with very small step size
+test('Reflex batch metadata', () => {
+    // Test metadata function returns correct period values
+    const metadata = wasm.reflex_batch_metadata_js(
+        10, 30, 5    // period range: 10, 15, 20, 25, 30
+    );
+    
+    // Should have 5 period values
+    assert.strictEqual(metadata.length, 5);
+    assert.strictEqual(metadata[0], 10);
+    assert.strictEqual(metadata[1], 15);
+    assert.strictEqual(metadata[2], 20);
+    assert.strictEqual(metadata[3], 25);
+    assert.strictEqual(metadata[4], 30);
+});
+
+test('Reflex step precision', () => {
+    // Test batch with various step sizes
     const data = new Float64Array(50);
     for (let i = 0; i < 50; i++) {
         data[i] = i + 1;
@@ -375,14 +382,21 @@ test('Reflex small step size', () => {
     
     const batch_result = wasm.reflex_batch_js(
         data,
-        10, 14, 1     // periods: 10, 11, 12, 13, 14
+        10, 20, 2     // periods: 10, 12, 14, 16, 18, 20
     );
     
-    const rows_cols = wasm.reflex_batch_rows_cols_js(10, 14, 1, data.length);
+    // Get rows and cols info
+    const rows_cols = wasm.reflex_batch_rows_cols_js(10, 20, 2, data.length);
     const rows = rows_cols[0];
     
-    assert.strictEqual(rows, 5);
-    assert.strictEqual(batch_result.length, 5 * data.length);
+    // Should have 6 combinations
+    assert.strictEqual(rows, 6);
+    assert.strictEqual(batch_result.length, 6 * data.length);
+    
+    // Verify metadata
+    const metadata = wasm.reflex_batch_metadata_js(10, 20, 2);
+    assert.strictEqual(metadata.length, 6);
+    assert.deepStrictEqual(Array.from(metadata), [10, 12, 14, 16, 18, 20]);
 });
 
 test('Reflex formula verification', () => {
@@ -404,46 +418,11 @@ test('Reflex formula verification', () => {
     for (let i = period; i < result.length; i++) {
         assert(isFinite(result[i]), `Expected finite value at index ${i}`);
     }
-});
-
-test('Reflex all NaN input', () => {
-    // Test Reflex with all NaN values
-    const allNaN = new Float64Array(100).fill(NaN);
     
-    assert.throws(() => {
-        wasm.reflex_js(allNaN, 20);
-    }, /All values are NaN/);
-});
-
-test('Reflex batch error conditions', () => {
-    // Test various error conditions for batch
-    const data = new Float64Array([1, 2, 3, 4, 5]);
-    
-    // Period exceeds data length
-    assert.throws(() => {
-        wasm.reflex_batch_js(data, 10, 20, 5);
-    });
-    
-    // Empty data
-    const empty = new Float64Array([]);
-    assert.throws(() => {
-        wasm.reflex_batch_js(empty, 10, 20, 5);
-    });
-});
-
-test('Reflex constant input normalization', () => {
-    // Test with constant input to verify normalization
-    const data = new Float64Array(10).fill(1.0);
-    
-    // For any period with constant input, warmup values should be zeros
-    for (const period of [3, 5, 7]) {
-        const result = wasm.reflex_js(data, period);
-        
-        // First period values should be zeros
-        for (let i = 0; i < period; i++) {
-            assert.strictEqual(result[i], 0.0, 
-                `Expected zero at index ${i} for period=${period}`);
-        }
-        // After warmup, constant input produces NaN (zero variance)
+    // Reflex should detect the pattern - not all values should be the same
+    const uniqueValues = new Set();
+    for (let i = period; i < result.length; i++) {
+        uniqueValues.add(result[i]);
     }
+    assert(uniqueValues.size > 1, "Expected varying values for oscillating input");
 });

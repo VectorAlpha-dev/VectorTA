@@ -26,7 +26,6 @@
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix};
-use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -690,29 +689,32 @@ fn vosc_batch_inner_into(
 
 	let rows = combos.len();
 	let cols = data.len();
-	
-	// CRITICAL: Initialize NaN prefixes for each row in the externally-provided buffer
-	for (row, combo) in combos.iter().enumerate() {
-		let warmup = first + combo.long_period.unwrap() - 1;
-		let row_start = row * cols;
-		for i in 0..warmup.min(cols) {
-			out[row_start + i] = f64::NAN;
-		}
-	}
 
+	// Initialize NaN prefixes in-place using the same helper ALMA uses.
+	let warm: Vec<usize> = combos
+		.iter()
+		.map(|c| first + c.long_period.unwrap() - 1)
+		.collect();
+
+	let out_mu: &mut [std::mem::MaybeUninit<f64>] = unsafe {
+		std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>, out.len())
+	};
+	init_matrix_prefixes(out_mu, cols, &warm);
+
+	// Row executor
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-		let short = combos[row].short_period.unwrap();
-		let long = combos[row].long_period.unwrap();
+		let s = combos[row].short_period.unwrap();
+		let l = combos[row].long_period.unwrap();
 		match kern {
-			Kernel::Scalar => vosc_row_scalar(data, first, short, long, out_row),
+			Kernel::Scalar => vosc_row_scalar(data, first, s, l, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => vosc_row_avx2(data, first, short, long, out_row),
+			Kernel::Avx2 => vosc_row_avx2(data, first, s, l, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => vosc_row_avx512(data, first, short, long, out_row),
+			Kernel::Avx512 => vosc_row_avx512(data, first, s, l, out_row),
 			_ => unreachable!(),
 		}
 	};
-	
+
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
@@ -720,7 +722,6 @@ fn vosc_batch_inner_into(
 				.enumerate()
 				.for_each(|(row, slice)| do_row(row, slice));
 		}
-
 		#[cfg(target_arch = "wasm32")]
 		{
 			for (row, slice) in out.chunks_mut(cols).enumerate() {
@@ -1436,8 +1437,7 @@ pub fn vosc_batch_py<'py>(
 // WASM API
 // ============================================================================
 
-#[cfg(feature = "wasm")]
-/// Write VOSC values directly to output slice - no allocations
+#[inline]
 pub fn vosc_into_slice(
 	dst: &mut [f64], 
 	input: &VoscInput, 
@@ -1495,8 +1495,6 @@ pub fn vosc_into_slice(
 		other => other,
 	};
 
-	let warmup_period = first + long_period - 1;
-
 	unsafe {
 		match chosen {
 			Kernel::Scalar | Kernel::ScalarBatch => vosc_scalar(data, short_period, long_period, first, dst),
@@ -1508,8 +1506,9 @@ pub fn vosc_into_slice(
 		}
 	}
 	
-	// Fill warmup with NaN
-	for v in &mut dst[..warmup_period] {
+	// Warmup NaNs
+	let warm = first + long_period - 1;
+	for v in &mut dst[..warm] {
 		*v = f64::NAN;
 	}
 
@@ -1623,4 +1622,37 @@ pub fn vosc_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> 
 	};
 
 	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vosc_batch_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	short_start: usize, short_end: usize, short_step: usize,
+	long_start: usize, long_end: usize, long_step: usize,
+) -> Result<usize, JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to vosc_batch_into"));
+	}
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		let sweep = VoscBatchRange {
+			short_period: (short_start, short_end, short_step),
+			long_period: (long_start, long_end, long_step),
+		};
+
+		let combos = expand_grid(&sweep);
+		let rows = combos.len();
+		let cols = len;
+
+		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+
+		// Resolve to regular kernel for row executor, match alma.rs
+		vosc_batch_inner_into(data, &sweep, detect_best_kernel(), false, out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+		Ok(rows)
+	}
 }

@@ -39,12 +39,31 @@ test.before(async () => {
     testData = loadTestData();
 });
 
+/**
+ * Helper function to unpack the new concatenated format into the old format
+ * The new format returns {values: [...], rows: 4, cols: len}
+ * where values = [is_min..., is_max..., last_min..., last_max...]
+ */
+function unpackMinmaxResult(result) {
+    const { values, rows, cols } = result;
+    assert.strictEqual(rows, 4, 'Expected 4 rows for minmax result');
+    
+    const is_min = values.slice(0, cols);
+    const is_max = values.slice(cols, 2 * cols);
+    const last_min = values.slice(2 * cols, 3 * cols);
+    const last_max = values.slice(3 * cols, 4 * cols);
+    
+    return { is_min, is_max, last_min, last_max };
+}
+
 test('MINMAX partial params', () => {
     const high = testData.high;
     const low = testData.low;
     
     // Test with default order (3)
-    const result = wasm.minmax_js(high, low, 3);
+    const rawResult = wasm.minmax_js(high, low, 3);
+    const result = unpackMinmaxResult(rawResult);
+    
     assert.strictEqual(result.is_min.length, high.length, 'is_min length mismatch');
     assert.strictEqual(result.is_max.length, high.length, 'is_max length mismatch');
     assert.strictEqual(result.last_min.length, high.length, 'last_min length mismatch');
@@ -56,7 +75,9 @@ test('MINMAX accuracy', () => {
     const low = testData.low;
     const order = 3;
     
-    const result = wasm.minmax_js(high, low, order);
+    const rawResult = wasm.minmax_js(high, low, order);
+    const result = unpackMinmaxResult(rawResult);
+    
     assert.strictEqual(result.is_min.length, high.length, 'is_min length mismatch');
     
     // Check last 5 values match expected
@@ -105,7 +126,9 @@ test('MINMAX basic slices', () => {
     const low = [40.0, 38.0, 35.0, 38.0, 40.0, 42.0, 41.0, 39.0];
     const order = 2;
     
-    const result = wasm.minmax_js(high, low, order);
+    const rawResult = wasm.minmax_js(high, low, order);
+    const result = unpackMinmaxResult(rawResult);
+    
     assert.strictEqual(result.is_min.length, 8);
     assert.strictEqual(result.is_max.length, 8);
     assert.strictEqual(result.last_min.length, 8);
@@ -118,25 +141,127 @@ test('MINMAX basic slices', () => {
     assert(!isNaN(result.is_max[2]), 'Should have found a maximum at index 2');
 });
 
-test('MINMAX batch processing', () => {
+test('MINMAX batch processing - improved validation', () => {
     const high = testData.high.slice(0, 100); // Use smaller dataset
     const low = testData.low.slice(0, 100);
     
-    const config = {
-        order_range: [2, 5, 1] // Orders: 2, 3, 4, 5
-    };
+    // Test various parameter sweep configurations
+    const testConfigs = [
+        { order_range: [2, 5, 1], expectedCombos: 4 },      // Orders: 2, 3, 4, 5
+        { order_range: [1, 1, 0], expectedCombos: 1 },      // Single value (step 0)
+        { order_range: [10, 20, 5], expectedCombos: 3 },    // Orders: 10, 15, 20
+        { order_range: [3, 3, 0], expectedCombos: 1 },      // Default order only
+    ];
     
-    const result = wasm.minmax_batch(high, low, config);
+    for (const { order_range, expectedCombos } of testConfigs) {
+        const result = wasm.minmax_batch(high, low, { order_range });
+        
+        // Verify structure
+        assert.strictEqual(result.combos.length, expectedCombos, 
+            `Should have ${expectedCombos} parameter combinations for range ${order_range}`);
+        assert.strictEqual(result.rows, 4 * expectedCombos, 
+            `Should have ${4 * expectedCombos} rows (4 series × ${expectedCombos} combos)`);
+        assert.strictEqual(result.cols, 100, 'Should have 100 columns');
+        assert.strictEqual(result.values.length, result.rows * result.cols, 'Values array size mismatch');
+        
+        // Verify each combo matches single calculation
+        for (let comboIdx = 0; comboIdx < result.combos.length; comboIdx++) {
+            const order = result.combos[comboIdx].order || 3; // Default order is 3
+            
+            // Extract this combo's results from the batch
+            // Layout: series-major, so combo's is_min is at values[comboIdx * cols .. (comboIdx+1) * cols]
+            const batchIsMin = result.values.slice(
+                comboIdx * result.cols, 
+                (comboIdx + 1) * result.cols
+            );
+            const batchIsMax = result.values.slice(
+                (expectedCombos + comboIdx) * result.cols,
+                (expectedCombos + comboIdx + 1) * result.cols
+            );
+            const batchLastMin = result.values.slice(
+                (2 * expectedCombos + comboIdx) * result.cols,
+                (2 * expectedCombos + comboIdx + 1) * result.cols
+            );
+            const batchLastMax = result.values.slice(
+                (3 * expectedCombos + comboIdx) * result.cols,
+                (3 * expectedCombos + comboIdx + 1) * result.cols
+            );
+            
+            // Compare with single calculation
+            const singleRawResult = wasm.minmax_js(high, low, order);
+            const singleResult = unpackMinmaxResult(singleRawResult);
+            
+            // Check that at least some values match (allowing for NaN differences during warmup)
+            let matchCount = 0;
+            for (let i = order; i < Math.min(20, batchIsMin.length); i++) {
+                if (!isNaN(batchIsMin[i]) && !isNaN(singleResult.is_min[i])) {
+                    assertClose(batchIsMin[i], singleResult.is_min[i], 1e-9, 
+                        `Batch vs single mismatch for is_min at order=${order}, index=${i}`);
+                    matchCount++;
+                }
+            }
+            
+            // Ensure we actually compared some values
+            if (order < 20) {
+                assert(matchCount > 0, `No valid comparisons made for order=${order}`);
+            }
+        }
+    }
+});
+
+test('MINMAX mismatched lengths', () => {
+    const high = [50.0, 55.0, 60.0, 55.0, 50.0];
+    const low = [40.0, 38.0, 35.0];  // Different length
     
-    // Should have 4 combinations
-    assert.strictEqual(result.rows, 4, 'Should have 4 parameter combinations');
-    assert.strictEqual(result.is_min.length, 4, 'Should have 4 rows of is_min');
-    assert.strictEqual(result.is_max.length, 4, 'Should have 4 rows of is_max');
+    assert.throws(() => {
+        wasm.minmax_js(high, low, 2);
+    }, /Invalid order/, 'Should throw error for mismatched array lengths');
+});
+
+test('MINMAX warmup verification', () => {
+    const high = testData.high.slice(0, 50);
+    const low = testData.low.slice(0, 50);
+    const order = 3;
     
-    // Check first row matches single calculation
-    const single_result = wasm.minmax_js(high, low, 2);
-    assertArrayClose(result.is_min[0], single_result.is_min, 1e-9, 'Batch vs single mismatch for is_min');
-    assertArrayClose(result.is_max[0], single_result.is_max, 1e-9, 'Batch vs single mismatch for is_max');
+    const rawResult = wasm.minmax_js(high, low, order);
+    const result = unpackMinmaxResult(rawResult);
+    
+    // Find first non-NaN index
+    let firstValidIdx = 0;
+    for (let i = 0; i < high.length; i++) {
+        if (!isNaN(high[i]) && !isNaN(low[i])) {
+            firstValidIdx = i;
+            break;
+        }
+    }
+    
+    // During warmup period (first 'order' values after first valid), is_min and is_max should be NaN
+    for (let i = firstValidIdx; i < Math.min(firstValidIdx + order, result.is_min.length); i++) {
+        assert(isNaN(result.is_min[i]), `Expected NaN at index ${i} during warmup for is_min`);
+        assert(isNaN(result.is_max[i]), `Expected NaN at index ${i} during warmup for is_max`);
+    }
+    
+    // last_min and last_max should start propagating values after extrema are found
+    let hasMin = false;
+    let hasMax = false;
+    for (let i = firstValidIdx + order; i < result.last_min.length; i++) {
+        if (!isNaN(result.last_min[i])) {
+            hasMin = true;
+        }
+        if (!isNaN(result.last_max[i])) {
+            hasMax = true;
+        }
+        
+        // Once we have a value, it should persist (forward-fill)
+        if (hasMin && i > 0 && isNaN(result.is_min[i])) {
+            assert.strictEqual(result.last_min[i], result.last_min[i-1], 
+                `last_min should forward-fill at index ${i}`);
+        }
+        if (hasMax && i > 0 && isNaN(result.is_max[i])) {
+            assert.strictEqual(result.last_max[i], result.last_max[i-1], 
+                `last_max should forward-fill at index ${i}`);
+        }
+    }
 });
 
 test('MINMAX fast API', () => {
@@ -181,7 +306,9 @@ test('MINMAX fast API', () => {
         const last_max_result = new Float64Array(wasm.__wasm.memory.buffer, last_max_ptr, len);
         
         // Compare with safe API
-        const safe_result = wasm.minmax_js(high, low, order);
+        const safeRawResult = wasm.minmax_js(high, low, order);
+        const safe_result = unpackMinmaxResult(safeRawResult);
+        
         assertArrayClose(Array.from(is_min_result), safe_result.is_min, 1e-9, 'Fast vs safe API mismatch for is_min');
         assertArrayClose(Array.from(is_max_result), safe_result.is_max, 1e-9, 'Fast vs safe API mismatch for is_max');
         assertArrayClose(Array.from(last_min_result), safe_result.last_min, 1e-9, 'Fast vs safe API mismatch for last_min');
@@ -198,6 +325,4 @@ test('MINMAX fast API', () => {
     }
 });
 
-test.after(() => {
-    console.log('MINMAX WASM tests completed');
-});
+console.log('MINMAX WASM tests completed');

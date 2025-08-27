@@ -181,15 +181,13 @@ pub fn reflex_with_kernel(input: &ReflexInput, kernel: Kernel) -> Result<ReflexO
 	let (data, period, first, chosen) = reflex_prepare(input, kernel)?;
 	let len = data.len();
 
-	let warm = first + period;
-	let mut out = alloc_with_nan_prefix(len, warm);
+	// Only need a warm prefix of `period` for Reflex.
+	let mut out = alloc_with_nan_prefix(len, period);
 
 	reflex_compute_into(data, period, first, chosen, &mut out);
 
-	// Reflex fills zeros for the first period values
-	for x in &mut out[..period.min(len)] {
-		*x = 0.0;
-	}
+	// Reflex contract: first `period` outputs are 0.0
+	out[..period.min(len)].fill(0.0);
 
 	Ok(ReflexOutput { values: out })
 }
@@ -208,16 +206,10 @@ pub fn reflex_into_slice(dst: &mut [f64], input: &ReflexInput, kern: Kernel) -> 
 		});
 	}
 
-	// Fill buffer with NaN for warmup period
-	let warmup = first + period;
-	for i in 0..warmup.min(dst.len()) {
-		dst[i] = f64::NAN;
-	}
-
-	// Compute Reflex values directly into dst
+	// Compute directly. Reflex writes from `i >= period`.
 	reflex_compute_into(data, period, first, chosen, dst);
 
-	// Reflex fills zeros for the first period values
+	// Set the mandated warmup zeros.
 	let end = period.min(dst.len());
 	for x in &mut dst[..end] {
 		*x = 0.0;
@@ -850,64 +842,40 @@ fn reflex_batch_inner(
 
 	let rows = combos.len();
 	let cols = data.len();
+
+	// Allocate rows×cols uninit and mark only the Reflex warm prefix per row.
+	let mut buf_mu = make_uninit_matrix(rows, cols);
 	let warm: Vec<usize> = combos.iter().map(|c| c.period.unwrap()).collect();
-	let mut raw: Vec<MaybeUninit<f64>> = make_uninit_matrix(rows, cols);
-	unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
+	init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-	// ---- row-filler closure ----------------------------------------------------
-	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
-		let period = combos[row].period.unwrap();
-
-		// cast this row to &mut [f64]
-		let out_row = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
-
-		match kern {
-			Kernel::Scalar => reflex_row_scalar(data, first, period, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => reflex_row_avx2(data, first, period, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => reflex_row_avx512(data, first, period, out_row),
-			_ => unreachable!(),
-		}
+	// Alias to &mut [f64] without materializing Vec<f64> yet.
+	let mut guard = core::mem::ManuallyDrop::new(buf_mu);
+	let out: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len())
 	};
 
-	// ---- fill every row directly into `raw` ------------------------------------
-	if parallel {
-		#[cfg(not(target_arch = "wasm32"))]
-		{
-			raw.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
-		}
+	// Compute directly into the matrix, making each row self-contained.
+	let kernel = match kern {
+		Kernel::Auto => detect_best_batch_kernel(),
+		other => other,
+	};
+	
+	// Convert batch kernels to scalar equivalents (like ALMA does)
+	let simd = match kernel {
+		Kernel::Avx512Batch => Kernel::Avx512,
+		Kernel::Avx2Batch => Kernel::Avx2,
+		Kernel::ScalarBatch => Kernel::Scalar,
+		other => other,
+	};
+	
+	let meta = reflex_batch_inner_into(data, sweep, simd, parallel, out)?;
 
-		#[cfg(target_arch = "wasm32")]
-		{
-			for (row, slice) in raw.chunks_mut(cols).enumerate() {
-				do_row(row, slice);
-			}
-		}
-	} else {
-		for (row, slice) in raw.chunks_mut(cols).enumerate() {
-			do_row(row, slice);
-		}
-	}
+	// Reconstitute Vec<f64> without copies.
+	let values = unsafe {
+		Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, guard.len(), guard.capacity())
+	};
 
-	// ---- transmute after all rows are written ----------------------------------
-	let mut values: Vec<f64> = unsafe { std::mem::transmute(raw) };
-
-	for (row, prm) in combos.iter().enumerate() {
-		let p = prm.period.unwrap();
-		let start = row * cols;
-		for cell in &mut values[start..start + p.min(cols)] {
-			*cell = 0.0;
-		}
-	}
-	return Ok(ReflexBatchOutput {
-		values,
-		combos,
-		rows,
-		cols,
-	});
+	Ok(ReflexBatchOutput { values, combos: meta.combos, rows: meta.rows, cols: meta.cols })
 }
 
 #[inline(always)]
@@ -926,6 +894,7 @@ unsafe fn reflex_row_avx2(data: &[f64], first: usize, period: usize, out: &mut [
 unsafe fn reflex_row_avx512(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
 	reflex_avx512(data, period, first, out)
 }
+
 
 // --- Zero-copy batch operations ---
 
@@ -1094,9 +1063,6 @@ pub fn reflex_batch_py<'py>(
 	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
 	let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-	// Initialize with NaN (will be overwritten with zeros in warmup)
-	slice_out.fill(f64::NAN);
-
 	// Release GIL during computation
 	let metadata = py
 		.allow_threads(|| {
@@ -1104,11 +1070,13 @@ pub fn reflex_batch_py<'py>(
 				Kernel::Auto => detect_best_batch_kernel(),
 				k => k,
 			};
+			
+			// Convert batch kernels to scalar equivalents (like ALMA does)
 			let simd = match kernel {
 				Kernel::Avx512Batch => Kernel::Avx512,
 				Kernel::Avx2Batch => Kernel::Avx2,
 				Kernel::ScalarBatch => Kernel::Scalar,
-				_ => unreachable!(),
+				other => other,
 			};
 
 			reflex_batch_inner_into(data_slice, &range, simd, true, slice_out)
@@ -1274,6 +1242,33 @@ pub fn reflex_into(in_ptr: *const f64, out_ptr: *mut f64, len: usize, period: us
 		}
 		Ok(())
 	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn reflex_batch_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+) -> Result<usize, JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer"));
+	}
+	let data = unsafe { std::slice::from_raw_parts(in_ptr, len) };
+	let sweep = ReflexBatchRange { period: (period_start, period_end, period_step) };
+	
+	// rows = combos.len()
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = len;
+	let out = unsafe { std::slice::from_raw_parts_mut(out_ptr, rows * cols) };
+
+	reflex_batch_inner_into(data, &sweep, detect_best_kernel(), false, out)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	Ok(rows)
 }
 
 // -- Test coverage macros: ALMA parity --

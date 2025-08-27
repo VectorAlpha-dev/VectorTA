@@ -42,6 +42,12 @@ class TestFwma:
         
         assert len(result) == len(close)
         
+        # Verify warmup period: first (period-1) values should be NaN
+        period = 5
+        assert np.all(np.isnan(result[:period-1])), f"Expected NaN in warmup period (first {period-1} values)"
+        # First valid value should be at index period-1
+        assert not np.isnan(result[period-1]), f"Expected valid value at index {period-1}"
+        
         # Expected last 5 values from Rust test
         expected_last_five = [
             59273.583333333336,
@@ -77,22 +83,35 @@ class TestFwma:
         """Test FWMA fails with zero period - mirrors check_fwma_zero_period"""
         input_data = np.array([10.0, 20.0, 30.0])
         
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="Invalid period"):
             ta_indicators.fwma(input_data, period=0)
-
+    
+    def test_fwma_empty_input(self):
+        """Test FWMA fails with empty input - mirrors ALMA's test_alma_empty_input"""
+        empty = np.array([])
+        
+        with pytest.raises(ValueError, match="Input data slice is empty"):
+            ta_indicators.fwma(empty, period=5)
+    
+    def test_fwma_all_nan_input(self):
+        """Test FWMA fails with all NaN values"""
+        all_nan = np.array([np.nan] * 10)
+        
+        with pytest.raises(ValueError, match="All values are NaN"):
+            ta_indicators.fwma(all_nan, period=3)
     
     def test_fwma_period_exceeds_length(self):
         """Test FWMA fails when period exceeds data length - mirrors check_fwma_period_exceeds_length"""
         data_small = np.array([10.0, 20.0, 30.0])
         
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="Invalid period"):
             ta_indicators.fwma(data_small, period=5)
     
     def test_fwma_very_small_dataset(self):
         """Test FWMA with very small dataset - mirrors check_fwma_very_small_dataset"""
         data_single = np.array([42.0])
         
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="Invalid period|Not enough valid data"):
             ta_indicators.fwma(data_single, period=5)
     
     def test_fwma_reinput(self, test_data):
@@ -151,8 +170,10 @@ class TestFwma:
         )
     
     def test_fwma_batch(self, test_data):
-        """Test FWMA batch computation."""
-        close = test_data['close']
+        """Test FWMA batch computation with multiple parameter sets."""
+        close = test_data['close'][:100]  # Use first 100 values for faster testing
+        
+        # Test 1: Multiple periods (like ALMA test)
         period_range = (3, 10, 2)  # periods: 3, 5, 7, 9
         
         result = ta_indicators.fwma_batch(close, period_range)
@@ -169,6 +190,25 @@ class TestFwma:
         for i, period in enumerate(expected_periods):
             individual_result = ta_indicators.fwma(close, period)
             np.testing.assert_allclose(result['values'][i], individual_result, rtol=1e-9)
+        
+        # Test 2: Single period (like check_batch_default_row)
+        single_result = ta_indicators.fwma_batch(close, (5, 5, 0))
+        assert single_result['values'].shape == (1, len(close))
+        assert list(single_result['periods']) == [5]
+        
+        # Verify single batch result matches individual calculation
+        individual_5 = ta_indicators.fwma(close, 5)
+        np.testing.assert_allclose(single_result['values'][0], individual_5, rtol=1e-9)
+        
+        # Test 3: Verify warmup periods in batch results
+        for i, period in enumerate(expected_periods):
+            row_values = result['values'][i]
+            # Check warmup: first (period-1) values should be NaN
+            assert np.all(np.isnan(row_values[:period-1])), \
+                f"Row {i} (period {period}): Expected NaN in warmup period"
+            # First valid value should be at index period-1
+            assert not np.isnan(row_values[period-1]), \
+                f"Row {i} (period {period}): Expected valid value at index {period-1}"
     
     def test_fwma_fibonacci_weights(self):
         """Test that FWMA correctly applies Fibonacci weights."""

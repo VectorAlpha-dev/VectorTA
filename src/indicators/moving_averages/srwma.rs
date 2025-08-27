@@ -26,7 +26,6 @@ use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
-#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::mem::MaybeUninit;
@@ -150,6 +149,8 @@ impl SrwmaBuilder {
 
 #[derive(Debug, Error)]
 pub enum SrwmaError {
+	#[error("srwma: Input data slice is empty.")]
+	EmptyInputData,
 	#[error("srwma: All values are NaN.")]
 	AllValuesNaN,
 	#[error("srwma: Invalid period: period = {period}, data length = {data_len}")]
@@ -169,8 +170,12 @@ pub fn srwma_with_kernel(input: &SrwmaInput, kernel: Kernel) -> Result<SrwmaOutp
 		SrwmaData::Slice(sl) => sl,
 	};
 
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(SrwmaError::AllValuesNaN)?;
 	let len = data.len();
+	if len == 0 {
+		return Err(SrwmaError::EmptyInputData);
+	}
+
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(SrwmaError::AllValuesNaN)?;
 	let period = input.get_period();
 
 	if period == 0 || period > len {
@@ -408,7 +413,6 @@ pub fn srwma_batch_par_slice(
 fn round_up8(x: usize) -> usize {
 	(x + 7) & !7
 }
-use std::alloc::{alloc, dealloc, Layout};
 
 #[inline(always)]
 fn srwma_batch_inner(
@@ -422,8 +426,12 @@ fn srwma_batch_inner(
 		return Err(SrwmaError::InvalidPeriod { period: 0, data_len: 0 });
 	}
 
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(SrwmaError::AllValuesNaN)?;
 	let len = data.len();
+	if len == 0 {
+		return Err(SrwmaError::EmptyInputData);
+	}
+
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(SrwmaError::AllValuesNaN)?;
 
 	let max_wlen = combos.iter().map(|c| c.period.unwrap() - 1).max().unwrap();
 	let rows = combos.len();
@@ -462,7 +470,7 @@ fn srwma_batch_inner(
 		.collect();
 
 	let mut raw = make_uninit_matrix(rows, cols);
-	unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
+	init_matrix_prefixes(&mut raw, cols, &warm);
 
 	// ---------- 2. per-row worker ---------------------------------------
 	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
@@ -505,7 +513,14 @@ fn srwma_batch_inner(
 	}
 
 	// ---------- 4. finished – convert to Vec<f64> ------------------------
-	let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
+	let mut guard = core::mem::ManuallyDrop::new(raw);
+	let values = unsafe {
+		Vec::from_raw_parts(
+			guard.as_mut_ptr() as *mut f64,
+			guard.len(),
+			guard.capacity(),
+		)
+	};
 
 	Ok(SrwmaBatchOutput {
 		values,
@@ -528,8 +543,12 @@ pub fn srwma_batch_inner_into(
 		return Err(SrwmaError::InvalidPeriod { period: 0, data_len: 0 });
 	}
 
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(SrwmaError::AllValuesNaN)?;
 	let len = data.len();
+	if len == 0 {
+		return Err(SrwmaError::EmptyInputData);
+	}
+
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(SrwmaError::AllValuesNaN)?;
 
 	let max_wlen = combos.iter().map(|c| c.period.unwrap() - 1).max().unwrap();
 	let rows = combos.len();
@@ -562,50 +581,40 @@ pub fn srwma_batch_inner_into(
 		inv_norms[row] = 1.0 / norm;
 	}
 
+	// Warmup per row
 	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() + 1).collect();
 
-	// Initialize the output buffer with NaN for warmup periods
-	for (row, &warmup) in warm.iter().enumerate() {
-		let row_start = row * cols;
-		for i in 0..warmup {
-			out[row_start + i] = f64::NAN;
-		}
-	}
+	// Cast `out` to MaybeUninit and initialize warm prefixes with NaN
+	let out_mu: &mut [MaybeUninit<f64>] = unsafe {
+		core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
+	};
+	init_matrix_prefixes(out_mu, cols, &warm);
 
-	// ---------- 2. per-row worker ---------------------------------------
-	let do_row = |row: usize, out_slice: &mut [f64]| unsafe {
+	// Worker writes each row directly
+	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
 		let period = combos[row].period.unwrap();
 		let w_ptr = flat_slice.as_ptr().add(row * max_wlen);
 		let inv_n = *inv_norms.get_unchecked(row);
+		// Treat this row as &mut [f64]
+		let out_row = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
 		match kern {
-			Kernel::Scalar => srwma_row_scalar(data, first, period, max_wlen, w_ptr, inv_n, out_slice),
+			Kernel::Scalar | Kernel::ScalarBatch => srwma_row_scalar(data, first, period, max_wlen, w_ptr, inv_n, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => srwma_row_avx2(data, first, period, max_wlen, w_ptr, inv_n, out_slice),
+			Kernel::Avx2 | Kernel::Avx2Batch => srwma_row_avx2(data, first, period, max_wlen, w_ptr, inv_n, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => srwma_row_avx512(data, first, period, max_wlen, w_ptr, inv_n, out_slice),
+			Kernel::Avx512 | Kernel::Avx512Batch => srwma_row_avx512(data, first, period, max_wlen, w_ptr, inv_n, out_row),
 			_ => unreachable!(),
 		}
 	};
 
-	// ---------- 3. fill every row directly into `out` --------------------
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
-		{
-			out.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
-		}
+		out_mu.par_chunks_mut(cols).enumerate().for_each(|(r, row_mu)| do_row(r, row_mu));
 		#[cfg(target_arch = "wasm32")]
-		{
-			for (row, slice) in out.chunks_mut(cols).enumerate() {
-				do_row(row, slice);
-			}
-		}
+		for (r, row_mu) in out_mu.chunks_mut(cols).enumerate() { do_row(r, row_mu); }
 	} else {
-		for (row, slice) in out.chunks_mut(cols).enumerate() {
-			do_row(row, slice);
-		}
+		for (r, row_mu) in out_mu.chunks_mut(cols).enumerate() { do_row(r, row_mu); }
 	}
 
 	Ok(combos)
@@ -1479,6 +1488,10 @@ pub fn srwma_into_slice(dst: &mut [f64], input: &SrwmaInput, kern: Kernel) -> Re
 		SrwmaData::Candles { candles, source } => source_type(candles, source),
 	};
 
+	if data.is_empty() {
+		return Err(SrwmaError::EmptyInputData);
+	}
+
 	let period = input.params.period.unwrap_or(14);
 
 	// Validate parameters
@@ -1591,7 +1604,7 @@ pub fn srwma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, 
 	};
 
 	let output =
-		srwma_batch_inner(data, &sweep, Kernel::Scalar, false).map_err(|e| JsValue::from_str(&e.to_string()))?;
+		srwma_batch_inner(data, &sweep, detect_best_kernel(), false).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	let combos = expand_grid(&sweep);
 
@@ -1620,7 +1633,7 @@ pub fn srwma_batch_js(
 	};
 
 	// Use batch function with parallel=false for WASM
-	srwma_batch_inner(data, &sweep, Kernel::Scalar, false)
+	srwma_batch_inner(data, &sweep, detect_best_kernel(), false)
 		.map(|output| output.values)
 		.map_err(|e| JsValue::from_str(&e.to_string()))
 }
@@ -1725,7 +1738,7 @@ pub fn srwma_batch_into(
 		let out = std::slice::from_raw_parts_mut(out_ptr, total_size);
 
 		// Use batch_inner_into for direct computation
-		srwma_batch_inner_into(data, &sweep, Kernel::Scalar, false, out)
+		srwma_batch_inner_into(data, &sweep, detect_best_kernel(), false, out)
 			.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 		Ok(rows)

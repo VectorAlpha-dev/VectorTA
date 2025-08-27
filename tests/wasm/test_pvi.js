@@ -2,10 +2,11 @@
  * WASM binding tests for PVI indicator.
  * These tests mirror the Rust unit tests to ensure WASM bindings work correctly.
  */
-const test = require('node:test');
-const assert = require('node:assert');
-const path = require('path');
-const { 
+import test from 'node:test';
+import assert from 'node:assert';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { 
     loadTestData, 
     assertArrayClose, 
     assertClose,
@@ -13,7 +14,10 @@ const {
     assertAllNaN,
     assertNoNaN,
     EXPECTED_OUTPUTS 
-} = require('./test_utils');
+} from './test_utils.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 let wasm;
 let testData;
@@ -22,8 +26,11 @@ test.before(async () => {
     // Load WASM module
     try {
         const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
-        wasm = await import(wasmPath);
-        await wasm.default();
+        const importPath = process.platform === 'win32' 
+            ? 'file:///' + wasmPath.replace(/\\/g, '/')
+            : wasmPath;
+        wasm = await import(importPath);
+        // No need to call default() for ES modules
     } catch (error) {
         console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
         throw error;
@@ -100,17 +107,32 @@ test('PVI fast API (in-place operation)', () => {
     const volume = new Float64Array([500.0, 600.0, 500.0, 700.0, 680.0, 900.0]);
     const initialValue = 1000.0;
     
-    // Test non-aliased operation
+    // Allocate WASM memory for input and output
     const len = close.length;
+    const closePtr = wasm.pvi_alloc(len);
+    const volumePtr = wasm.pvi_alloc(len);
     const outPtr = wasm.pvi_alloc(len);
     
     try {
-        wasm.pvi_into(close, volume, outPtr, len, initialValue);
+        // Copy input data to WASM memory
+        const closeWasm = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
+        const volumeWasm = new Float64Array(wasm.__wasm.memory.buffer, volumePtr, len);
+        closeWasm.set(close);
+        volumeWasm.set(volume);
+        
+        // Call the fast API with pointers
+        wasm.pvi_into(closePtr, volumePtr, outPtr, len, initialValue);
         
         // Read back results
-        const result = new Float64Array(wasm.memory.buffer, outPtr, len);
+        const result = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
         assertClose(result[0], 1000.0, 1e-6, 'PVI fast API initial value mismatch');
+        
+        // Verify the calculation matches the safe API
+        const expected = wasm.pvi_js(close, volume, initialValue);
+        assertArrayClose(Array.from(result), expected, 1e-9, 'PVI fast API result mismatch');
     } finally {
+        wasm.pvi_free(closePtr, len);
+        wasm.pvi_free(volumePtr, len);
         wasm.pvi_free(outPtr, len);
     }
 });
@@ -120,14 +142,32 @@ test('PVI fast API (aliasing with close)', () => {
     const volume = new Float64Array([500.0, 600.0, 500.0, 700.0, 680.0, 900.0]);
     const initialValue = 1000.0;
     
-    // Create a copy for comparison
-    const closeOriginal = new Float64Array(close);
+    // Allocate WASM memory
+    const len = close.length;
+    const closePtr = wasm.pvi_alloc(len);
+    const volumePtr = wasm.pvi_alloc(len);
     
-    // Test aliased operation (output overwrites close)
-    wasm.pvi_into(close, volume, close, close.length, initialValue);
-    
-    // Verify first value is the initial value
-    assertClose(close[0], 1000.0, 1e-6, 'PVI aliased initial value mismatch');
+    try {
+        // Copy input data to WASM memory
+        const closeWasm = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
+        const volumeWasm = new Float64Array(wasm.__wasm.memory.buffer, volumePtr, len);
+        closeWasm.set(close);
+        volumeWasm.set(volume);
+        
+        // Test aliased operation (output overwrites close)
+        wasm.pvi_into(closePtr, volumePtr, closePtr, len, initialValue);
+        
+        // Read back results from close pointer (which now contains output)
+        const result = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
+        assertClose(result[0], 1000.0, 1e-6, 'PVI aliased initial value mismatch');
+        
+        // Verify the calculation matches the safe API
+        const expected = wasm.pvi_js(close, volume, initialValue);
+        assertArrayClose(Array.from(result), expected, 1e-9, 'PVI aliased result mismatch');
+    } finally {
+        wasm.pvi_free(closePtr, len);
+        wasm.pvi_free(volumePtr, len);
+    }
 });
 
 test('PVI batch operations', () => {
@@ -168,24 +208,46 @@ test('PVI batch fast API', () => {
     const initialStep = 100.0;
     const expectedRows = 3;
     
+    // Allocate WASM memory for inputs and output
+    const closePtr = wasm.pvi_alloc(len);
+    const volumePtr = wasm.pvi_alloc(len);
     const outPtr = wasm.pvi_alloc(expectedRows * len);
     
     try {
+        // Copy input data to WASM memory
+        const closeWasm = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
+        const volumeWasm = new Float64Array(wasm.__wasm.memory.buffer, volumePtr, len);
+        closeWasm.set(close);
+        volumeWasm.set(volume);
+        
+        // Call batch fast API with pointers
         const rows = wasm.pvi_batch_into(
-            close, volume, outPtr, len,
+            closePtr, volumePtr, outPtr, len,
             initialStart, initialEnd, initialStep
         );
         
         assert.strictEqual(rows, expectedRows);
         
         // Read back results
-        const result = new Float64Array(wasm.memory.buffer, outPtr, rows * len);
+        const result = new Float64Array(wasm.__wasm.memory.buffer, outPtr, rows * len);
         
         // Verify first value of each row matches the initial value
         assertClose(result[0], 900.0, 1e-6);
         assertClose(result[len], 1000.0, 1e-6);
         assertClose(result[2 * len], 1100.0, 1e-6);
+        
+        // Verify each row matches single calculation
+        for (let i = 0; i < rows; i++) {
+            const initialValue = 900.0 + i * 100.0;
+            const rowStart = i * len;
+            const rowValues = Array.from(result.slice(rowStart, rowStart + len));
+            
+            const expected = wasm.pvi_js(close, volume, initialValue);
+            assertArrayClose(rowValues, expected, 1e-9, `Batch row ${i} mismatch`);
+        }
     } finally {
+        wasm.pvi_free(closePtr, len);
+        wasm.pvi_free(volumePtr, len);
         wasm.pvi_free(outPtr, expectedRows * len);
     }
 });
@@ -204,18 +266,36 @@ test('PVI performance comparison', () => {
     
     // Benchmark fast API
     const len = close.length;
+    const closePtr = wasm.pvi_alloc(len);
+    const volumePtr = wasm.pvi_alloc(len);
     const outPtr = wasm.pvi_alloc(len);
     
-    const fastStart = performance.now();
-    for (let i = 0; i < 10; i++) {
-        wasm.pvi_into(close, volume, outPtr, len, initialValue);
+    try {
+        // Copy data to WASM memory once
+        const closeWasm = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
+        const volumeWasm = new Float64Array(wasm.__wasm.memory.buffer, volumePtr, len);
+        closeWasm.set(close);
+        volumeWasm.set(volume);
+        
+        const fastStart = performance.now();
+        for (let i = 0; i < 10; i++) {
+            wasm.pvi_into(closePtr, volumePtr, outPtr, len, initialValue);
+        }
+        const fastTime = performance.now() - fastStart;
+        
+        console.log(`Safe API: ${safeTime.toFixed(2)}ms, Fast API: ${fastTime.toFixed(2)}ms`);
+        console.log(`Fast API is ${(safeTime / fastTime).toFixed(2)}x faster`);
+        
+        // Verify results match - get expected first (might grow memory)
+        const expected = wasm.pvi_js(close, volume, initialValue);
+        // Recreate view after potential memory growth
+        const result = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
+        assertArrayClose(Array.from(result), expected, 1e-9, 'Performance test result mismatch');
+    } finally {
+        wasm.pvi_free(closePtr, len);
+        wasm.pvi_free(volumePtr, len);
+        wasm.pvi_free(outPtr, len);
     }
-    const fastTime = performance.now() - fastStart;
-    
-    wasm.pvi_free(outPtr, len);
-    
-    console.log(`Safe API: ${safeTime.toFixed(2)}ms, Fast API: ${fastTime.toFixed(2)}ms`);
-    console.log(`Fast API is ${(safeTime / fastTime).toFixed(2)}x faster`);
 });
 
 test('PVI NaN handling', () => {
@@ -288,27 +368,50 @@ test('PVI zero-copy memory management', () => {
     const sizes = [100, 1000, 10000];
     const ptrs = [];
     
-    // Allocate multiple buffers
-    for (const size of sizes) {
-        const ptr = wasm.pvi_alloc(size);
-        assert(ptr !== 0, 'Allocation should return non-zero pointer');
-        ptrs.push({ ptr, size });
-    }
-    
-    // Use the buffers
-    const close = new Float64Array(100).fill(100.0);
-    const volume = new Float64Array(100).fill(500.0);
-    
-    for (const { ptr, size } of ptrs) {
-        if (size >= 100) {
-            // Should succeed for buffers large enough
-            wasm.pvi_into(close, volume, ptr, 100, 1000.0);
+    try {
+        // Allocate multiple buffers
+        for (const size of sizes) {
+            const ptr = wasm.pvi_alloc(size);
+            assert(ptr !== 0, 'Allocation should return non-zero pointer');
+            ptrs.push({ ptr, size });
         }
-    }
-    
-    // Free all buffers
-    for (const { ptr, size } of ptrs) {
-        wasm.pvi_free(ptr, size);
+        
+        // Test using the buffers with actual PVI calculation
+        const testLen = 100;
+        const close = new Float64Array(testLen).fill(100.0);
+        const volume = new Float64Array(testLen).fill(500.0);
+        
+        // Allocate input buffers
+        const closePtr = wasm.pvi_alloc(testLen);
+        const volumePtr = wasm.pvi_alloc(testLen);
+        
+        try {
+            // Copy data to WASM memory
+            const closeWasm = new Float64Array(wasm.__wasm.memory.buffer, closePtr, testLen);
+            const volumeWasm = new Float64Array(wasm.__wasm.memory.buffer, volumePtr, testLen);
+            closeWasm.set(close);
+            volumeWasm.set(volume);
+            
+            // Use each allocated buffer that's large enough
+            for (const { ptr, size } of ptrs) {
+                if (size >= testLen) {
+                    // Should succeed for buffers large enough
+                    wasm.pvi_into(closePtr, volumePtr, ptr, testLen, 1000.0);
+                    
+                    // Verify the result is valid
+                    const result = new Float64Array(wasm.__wasm.memory.buffer, ptr, testLen);
+                    assertClose(result[0], 1000.0, 1e-6, 'Zero-copy result mismatch');
+                }
+            }
+        } finally {
+            wasm.pvi_free(closePtr, testLen);
+            wasm.pvi_free(volumePtr, testLen);
+        }
+    } finally {
+        // Free all allocated buffers
+        for (const { ptr, size } of ptrs) {
+            wasm.pvi_free(ptr, size);
+        }
     }
 });
 

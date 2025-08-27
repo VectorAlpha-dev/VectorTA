@@ -110,7 +110,6 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 #[cfg(not(target_arch = "wasm32"))]
-#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
@@ -239,6 +238,8 @@ impl FwmaBuilder {
 
 #[derive(Debug, Error)]
 pub enum FwmaError {
+	#[error("fwma: Input data slice is empty.")]
+	EmptyInputData,
 	#[error("fwma: All values are NaN.")]
 	AllValuesNaN,
 	#[error("fwma: Invalid period: period = {period}, data length = {data_len}")]
@@ -276,7 +277,7 @@ fn fwma_prepare<'a>(
 	let data: &[f64] = input.as_ref();
 	let len = data.len();
 	if len == 0 {
-		return Err(FwmaError::AllValuesNaN);
+		return Err(FwmaError::EmptyInputData);
 	}
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(FwmaError::AllValuesNaN)?;
 	let period = input.get_period();
@@ -827,6 +828,19 @@ fn expand_grid(r: &FwmaBatchRange) -> Vec<FwmaParams> {
 		out.push(FwmaParams { period: Some(p) });
 	}
 	out
+}
+
+/// Helper function to fill NaN values in the warmup periods for batch operations on slice-backed buffers.
+/// This is used when we can't use make_uninit_matrix/init_matrix_prefixes (e.g., PyArray, WASM buffers).
+#[inline(always)]
+fn fill_nan_prefixes_slice(rows: usize, cols: usize, warmup_periods: &[usize], out_slice: &mut [f64]) {
+	for (row, &warmup) in warmup_periods.iter().enumerate() {
+		let row_start = row * cols;
+		let row_end = row_start + warmup.min(cols);
+		for i in row_start..row_end {
+			out_slice[i] = f64::NAN;
+		}
+	}
 }
 
 #[inline(always)]
@@ -1772,6 +1786,68 @@ mod tests {
 	}
 	gen_batch_tests!(check_batch_default_row);
 	gen_batch_tests!(check_batch_no_poison);
+	
+	#[cfg(feature = "wasm")]
+	#[test]
+	fn test_fwma_batch_into_warmup() {
+		// Test that fwma_batch_into correctly initializes warmup NaN values
+		let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+		let len = data.len();
+		
+		// Test with periods 2, 3, 4
+		let period_start = 2;
+		let period_end = 4;
+		let period_step = 1;
+		
+		// Calculate expected number of rows
+		let sweep = FwmaBatchRange {
+			period: (period_start, period_end, period_step),
+		};
+		let combos = expand_grid(&sweep);
+		let rows = combos.len();
+		
+		// Allocate output buffer
+		let mut output = vec![999.0; rows * len]; // Fill with non-NaN value first
+		
+		// Call fwma_batch_into
+		let result = unsafe {
+			fwma_batch_into(
+				data.as_ptr(),
+				output.as_mut_ptr(),
+				len,
+				period_start,
+				period_end,
+				period_step
+			)
+		};
+		
+		assert!(result.is_ok());
+		assert_eq!(result.unwrap(), rows);
+		
+		// Check warmup NaN values for each row
+		for (r, params) in combos.iter().enumerate() {
+			let period = params.period.unwrap();
+			let warmup_end = period - 1;
+			
+			// Check warmup period has NaN values
+			for i in 0..warmup_end {
+				let idx = r * len + i;
+				assert!(
+					output[idx].is_nan(), 
+					"Expected NaN at row {} col {} (period {}) but got {}", 
+					r, i, period, output[idx]
+				);
+			}
+			
+			// Check first valid value is not NaN
+			let first_valid_idx = r * len + warmup_end;
+			assert!(
+				!output[first_valid_idx].is_nan(), 
+				"Expected valid value at row {} col {} (period {}) but got NaN", 
+				r, warmup_end, period
+			);
+		}
+	}
 
 	#[test]
 	fn print_actual_fwma_values() {
@@ -1901,14 +1977,8 @@ pub fn fwma_batch_py<'py>(
 	let first = slice_in.iter().position(|x| !x.is_nan()).unwrap_or(0);
 	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
 
-	// Initialize NaN prefixes for each row
-	for (row, &warmup) in warm.iter().enumerate() {
-		let row_start = row * cols;
-		let row_slice = &mut slice_out[row_start..row_start + cols];
-		for i in 0..warmup.min(cols) {
-			row_slice[i] = f64::NAN;
-		}
-	}
+	// Use helper to initialize NaN prefixes for each row
+	fill_nan_prefixes_slice(rows, cols, &warm, slice_out);
 
 	let combos = py
 		.allow_threads(|| {
@@ -1922,6 +1992,9 @@ pub fn fwma_batch_py<'py>(
 				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 				Kernel::Avx2Batch => Kernel::Avx2,
 				Kernel::ScalarBatch => Kernel::Scalar,
+				#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+				_ => Kernel::Scalar,
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 				_ => unreachable!(),
 			};
 			fwma_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
@@ -2115,6 +2188,13 @@ pub fn fwma_batch_into(
 		let cols = len;
 
 		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+
+		// Initialize warmup NaNs per row (mirror other APIs)
+		let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+		let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
+		
+		// Use helper to initialize NaN prefixes
+		fill_nan_prefixes_slice(rows, cols, &warm, out);
 
 		// Use optimized batch processing
 		fwma_batch_inner_into(data, &sweep, Kernel::Auto, false, out).map_err(|e| JsValue::from_str(&e.to_string()))?;

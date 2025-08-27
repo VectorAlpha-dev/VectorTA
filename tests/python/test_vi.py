@@ -182,8 +182,8 @@ class TestVI:
     
     def test_vi_streaming(self):
         """Test VI streaming functionality"""
-        # Create stream
-        stream = ta_indicators.ViStream(14)
+        # Create stream with period=3 (small enough for our 8 test values)
+        stream = ta_indicators.ViStream(3)
         
         # Test data
         high_values = [100.0, 102.0, 101.5, 103.0, 102.5, 104.0, 103.5, 105.0]

@@ -21,6 +21,7 @@ use my_project::indicators::cg::{cg, CgInput, CgParams};
 use my_project::indicators::kurtosis::{kurtosis, KurtosisInput, KurtosisParams};
 use my_project::indicators::midpoint::{midpoint, MidpointInput, MidpointParams};
 use my_project::indicators::chande::{chande, ChandeData, ChandeInput, ChandeParams};
+use my_project::indicators::cmo::{cmo, CmoInput, CmoParams};
 use my_project::indicators::ppo::{ppo, PpoInput, PpoParams};
 use my_project::indicators::rsx::{rsx, RsxInput, RsxParams};
 use my_project::indicators::marketefi::{marketefi, MarketefiData, MarketefiInput, MarketefiParams};
@@ -29,7 +30,10 @@ use my_project::indicators::squeeze_momentum::{squeeze_momentum, SqueezeMomentum
 use my_project::indicators::mass::{mass, MassData, MassInput, MassParams};
 /// Binary to generate reference outputs for indicator testing
 /// This is used by Python and WASM tests to verify their outputs match Rust
+use my_project::indicators::damiani_volatmeter::{damiani_volatmeter, DamianiVolatmeterInput, DamianiVolatmeterParams, DamianiVolatmeterData};
 use my_project::indicators::decycler::{decycler, DecyclerInput, DecyclerParams};
+use my_project::indicators::di::{di, DiData, DiInput, DiParams};
+use my_project::indicators::eri::{eri, EriData, EriInput, EriParams};
 use my_project::indicators::moving_averages::alma::{alma, AlmaInput, AlmaParams};
 use my_project::indicators::moving_averages::cwma::{cwma, CwmaInput, CwmaParams};
 use my_project::indicators::moving_averages::dema::{dema, DemaInput, DemaParams};
@@ -89,7 +93,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	let args: Vec<String> = env::args().collect();
 	if args.len() < 2 {
 		eprintln!("Usage: {} <indicator_name> [source]", args[0]);
-		eprintln!("Available indicators: ad, acosc, adx, adosc, adxr, alligator, alma, ao, apo, aroon, aroonosc, atr, bandpass, bollinger_bands, bollinger_bands_width, bop, cci, cfo, cg, cwma, decycler, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass_2_pole, highpass, hma, hwma, jma, jsa, kama, kurtosis, linreg, maaq, mama, marketefi, mwdx, nma, ppo, rsx, pwma, reflex, rocp, rsi, sinwma, sma, smma, squeeze_momentum, sqwma, srwma, stddev, supersmoother_3_pole, supersmoother, swma, tema, tilson, trendflex, trima, vpci, tsf, ui, vwap, vwma, vpwma, wclprice, wilders, wma, zlema");
+		eprintln!("Available indicators: ad, acosc, adx, adosc, adxr, alligator, alma, ao, apo, aroon, aroonosc, atr, bandpass, bollinger_bands, bollinger_bands_width, bop, cci, cfo, cg, cwma, decycler, dema, di, edcf, ehlers_itrend, ema, epma, eri, frama, fwma, gaussian, highpass_2_pole, highpass, hma, hwma, jma, jsa, kama, kurtosis, linreg, maaq, mama, marketefi, mwdx, nma, ppo, rsx, pwma, reflex, rocp, rsi, sinwma, sma, smma, squeeze_momentum, sqwma, srwma, stddev, supersmoother_3_pole, supersmoother, swma, tema, tilson, trendflex, trima, vpci, tsf, ui, vwap, vwma, vpwma, wclprice, wilders, wma, zlema");
 		eprintln!("Available sources: open, high, low, close, volume, hl2, hlc3, ohlc4, hlcc4");
 		std::process::exit(1);
 	}
@@ -167,6 +171,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 				"length": result.values.len()
 			})
 		}
+		"damiani_volatmeter" => {
+			let params = DamianiVolatmeterParams::default();
+			let vis_atr = params.vis_atr.unwrap_or(13);
+			let vis_std = params.vis_std.unwrap_or(20);
+			let sed_atr = params.sed_atr.unwrap_or(40);
+			let sed_std = params.sed_std.unwrap_or(100);
+			let threshold = params.threshold.unwrap_or(1.4);
+			let input = DamianiVolatmeterInput::from_candles(&candles, source, params);
+			let result = damiani_volatmeter(&input)?;
+			json!({
+				"indicator": "damiani_volatmeter",
+				"source": source,
+				"params": {
+					"vis_atr": vis_atr,
+					"vis_std": vis_std,
+					"sed_atr": sed_atr,
+					"sed_std": sed_std,
+					"threshold": threshold
+				},
+				"vol": result.vol,
+				"anti": result.anti,
+				"length": result.vol.len()
+			})
+		}
+		"di" => {
+			if source != "hlc" {
+				eprintln!("DI indicator requires 'hlc' source");
+				std::process::exit(1);
+			}
+			let params = DiParams::default();
+			let period = params.period.unwrap_or(14);
+			let input = DiInput {
+				data: DiData::Candles { candles: &candles },
+				params,
+			};
+			let result = di(&input)?;
+			json!({
+				"indicator": "di",
+				"source": source,
+				"params": {
+					"period": period
+				},
+				"plus": result.plus,
+				"minus": result.minus,
+				"length": result.plus.len()
+			})
+		}
 		"edcf" => {
 			let params = EdcfParams::default();
 			let period = params.period.unwrap_or(15);
@@ -229,6 +280,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 				},
 				"values": result.values,
 				"length": result.values.len()
+			})
+		}
+		"eri" => {
+			let params = EriParams::default();
+			let period = params.period.unwrap_or(13);
+			let ma_type = params.ma_type.clone().unwrap_or("ema".to_string());
+			let input = EriInput {
+				data: EriData::Candles { candles: &candles, source },
+				params,
+			};
+			let result = eri(&input)?;
+			json!({
+				"indicator": "eri",
+				"source": source,
+				"params": {
+					"period": period,
+					"ma_type": ma_type
+				},
+				"bull": result.bull,
+				"bear": result.bear,
+				"length": result.bull.len()
 			})
 		}
 		"frama" => {
@@ -1417,6 +1489,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 					"period": period,
 					"mult": mult,
 					"direction": direction
+				},
+				"values": result.values,
+				"length": result.values.len()
+			})
+		}
+		"cmo" => {
+			let params = CmoParams::default();
+			let period = params.period.unwrap_or(14);
+			let input = CmoInput::from_candles(&candles, source, params);
+			let result = cmo(&input)?;
+			serde_json::json!({
+				"params": {
+					"period": period
 				},
 				"values": result.values,
 				"length": result.values.len()

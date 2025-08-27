@@ -21,13 +21,12 @@
 //! - **AllValuesNaN**: edcf: All input data values are `NaN`.
 //! - **InvalidPeriod**: edcf: `period` is zero or exceeds the data length.
 //! - **NotEnoughValidData**: edcf: Not enough valid data points for the requested `period`.
-//! - **NaNFound**: edcf: A `NaN` was encountered after the first valid index.
+//! - **OutputLenMismatch**: edcf: Output buffer length doesn't match input data length.
 //!
 //! ## Returns
 //! - **`Ok(EdcfOutput)`** on success, containing a `Vec<f64>` of length matching the input.
 //! - **`Err(EdcfError)`** otherwise.
 
-use crate::utilities::aligned_vector::AlignedVec;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -45,7 +44,6 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
-#[cfg(not(target_arch = "wasm32"))]
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 #[cfg(feature = "wasm")]
@@ -143,8 +141,8 @@ pub enum EdcfError {
 	InvalidPeriod { period: usize, data_len: usize },
 	#[error("edcf: Not enough valid data: needed = {needed}, valid = {valid}")]
 	NotEnoughValidData { needed: usize, valid: usize },
-	#[error("edcf: NaN found in data after the first valid index.")]
-	NaNFound,
+	#[error("edcf: Output buffer length mismatch: expected = {expected}, got = {got}")]
+	OutputLenMismatch { expected: usize, got: usize },
 	#[error("edcf: Invalid kernel specified")]
 	InvalidKernel,
 }
@@ -209,10 +207,7 @@ fn edcf_prepare<'a>(
 	input: &'a EdcfInput,
 	kernel: Kernel,
 ) -> Result<(&'a [f64], usize, usize, usize, Kernel), EdcfError> {
-	let data: &[f64] = match &input.data {
-		EdcfData::Candles { candles, source } => source_type(candles, source),
-		EdcfData::Slice(sl) => sl,
-	};
+	let data: &[f64] = input.as_ref();
 	let len = data.len();
 	if len == 0 {
 		return Err(EdcfError::NoData);
@@ -228,9 +223,6 @@ fn edcf_prepare<'a>(
 			needed,
 			valid: len - first,
 		});
-	}
-	if data[first..].iter().any(|&v| v.is_nan()) {
-		return Err(EdcfError::NaNFound);
 	}
 
 	let warm = first + 2 * period;
@@ -281,17 +273,19 @@ pub fn edcf_into_slice(dst: &mut [f64], input: &EdcfInput, kern: Kernel) -> Resu
 
 	// Verify output buffer size matches input
 	if dst.len() != data.len() {
-		return Err(EdcfError::InvalidPeriod {
-			period: dst.len(),
-			data_len: data.len(),
+		return Err(EdcfError::OutputLenMismatch {
+			expected: data.len(),
+			got: dst.len(),
 		});
 	}
 
-	// Fill warmup period with NaN
-	dst[..warm].fill(f64::NAN);
-
 	// Compute directly into the output buffer
 	edcf_compute_into(data, period, first, chosen, dst);
+
+	// Fill warmup period with NaN (post-compute write pattern like ALMA)
+	for v in &mut dst[..warm] {
+		*v = f64::NAN;
+	}
 
 	Ok(())
 }
@@ -338,6 +332,59 @@ pub fn edcf_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f
 				let w = *wp.add(k);
 				let v = *dp.add(k);
 
+				num = w.mul_add(v, num);
+				coef_sum += w;
+			}
+			if coef_sum != 0.0 {
+				*out.get_unchecked_mut(j) = num / coef_sum;
+			}
+		}
+	}
+}
+
+#[inline(always)]
+fn edcf_scalar_into_with_scratch(
+	data: &[f64],
+	period: usize,
+	first_valid: usize,
+	out: &mut [f64],
+	scratch: &mut Vec<f64>,
+) {
+	let len = data.len();
+	// Ensure capacity, then expose uninit tail. We will only read initialized parts.
+	if scratch.capacity() < len {
+		scratch.reserve_exact(len - scratch.capacity());
+	}
+	unsafe {
+		scratch.set_len(len);
+	}
+	let zero_end = (first_valid + period).min(len);
+	scratch[..zero_end].fill(0.0);
+
+	unsafe {
+		let dp = data.as_ptr();
+		let wp = scratch.as_mut_ptr();
+
+		// Fill distances for indices that will be read
+		for k in (first_valid + period)..len {
+			let xk = *dp.add(k);
+			let mut sum_sq = 0.0;
+			for lb in 1..period {
+				let diff = xk - *dp.add(k - lb);
+				sum_sq = diff.mul_add(diff, sum_sq);
+			}
+			*wp.add(k) = sum_sq;
+		}
+
+		// Weighted average using the distance weights
+		let start_j = first_valid + 2 * period;
+		for j in start_j..len {
+			let mut num = 0.0;
+			let mut coef_sum = 0.0;
+			for i in 0..period {
+				let k = j - i;
+				let w = *wp.add(k);
+				let v = *dp.add(k);
 				num = w.mul_add(v, num);
 				coef_sum += w;
 			}
@@ -417,7 +464,6 @@ pub unsafe fn edcf_avx2(data: &[f64], period: usize, first_valid: usize, out: &m
 	const STEP: usize = 4;
 	let len = data.len();
 	let chunks = period / STEP;
-	let tail_len = period % STEP;
 
 	// Allocate uninitialized memory for dist buffer
 	let mut dist: Vec<f64> = Vec::with_capacity(len);
@@ -600,7 +646,10 @@ impl EdcfStream {
 		if !value.is_finite() {
 			return None;
 		}
+		
+		// write at head; idx points at the just-written sample x_k
 		self.buffer[self.head] = value;
+		let idx = self.head;
 		self.head = (self.head + 1) % self.period;
 
 		if !self.filled && self.head == 0 {
@@ -610,35 +659,33 @@ impl EdcfStream {
 			return None;
 		}
 
+		// distance of x_k to previous period-1 samples (skip self once)
 		let mut sum_sq = 0.0;
-		let mut xk = value;
-		let mut pos = self.head;
-		for lb in 1..self.period {
+		let mut pos = idx;
+		for _ in 1..self.period {
 			pos = (pos + self.period - 1) % self.period;
-			let diff = xk - self.buffer[pos];
-			sum_sq += diff * diff;
+			let d = value - self.buffer[pos];
+			sum_sq += d * d;
 		}
-		self.dist[self.head] = sum_sq;
+		self.dist[idx] = sum_sq;
 
+		// weighted average, aligned to idx
 		let mut num = 0.0;
-		let mut coef_sum = 0.0;
-		pos = self.head;
+		let mut den = 0.0;
+		pos = idx;
 		for _ in 0..self.period {
 			let w = self.dist[pos];
 			let v = self.buffer[pos];
 			num += w * v;
-			coef_sum += w;
+			den += w;
 			pos = (pos + self.period - 1) % self.period;
 		}
-		if coef_sum != 0.0 {
-			Some(num / coef_sum)
-		} else {
-			None
-		}
+		(den != 0.0).then_some(num / den)
 	}
 }
 
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct EdcfBatchRange {
 	/// Range for `period` as `(start, end, step)`.
 	pub period: (usize, usize, usize),
@@ -844,37 +891,58 @@ fn edcf_batch_inner_into(
 	let rows = combos.len();
 	let cols = data.len();
 
-	// The buffer already has NaN prefixes initialized by the caller
-	// Just compute into the provided buffer
-	let do_row = |row: usize, dst: &mut [f64]| {
-		let period = combos[row].period.unwrap();
-
-		match kern {
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => unsafe { edcf_row_avx512(data, first, period, dst) },
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => unsafe { edcf_row_avx2(data, first, period, dst) },
-			_ => unsafe { edcf_row_scalar(data, first, period, dst) },
-		}
-	};
-
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			out.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
+			use rayon::prelude::*;
+
+			out.par_chunks_mut(cols).enumerate().for_each(|(row, dst)| {
+				let period = combos[row].period.unwrap();
+				match kern {
+					Kernel::Scalar => {
+						// For parallel execution, each thread gets its own scratch buffer
+						let mut scratch = Vec::<f64>::new();
+						edcf_scalar_into_with_scratch(data, period, first, dst, &mut scratch);
+					}
+					#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+					Kernel::Avx2 => unsafe { edcf_row_avx2(data, first, period, dst) },
+					#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+					Kernel::Avx512 => unsafe { edcf_row_avx512(data, first, period, dst) },
+					_ => unsafe { edcf_row_scalar(data, first, period, dst) }, // wasm path
+				}
+			});
 		}
 
 		#[cfg(target_arch = "wasm32")]
 		{
-			for (row, slice) in out.chunks_mut(cols).enumerate() {
-				do_row(row, slice);
+			for (row, dst) in out.chunks_mut(cols).enumerate() {
+				let period = combos[row].period.unwrap();
+				unsafe { edcf_row_scalar(data, first, period, dst) }
 			}
 		}
 	} else {
-		for (row, slice) in out.chunks_mut(cols).enumerate() {
-			do_row(row, slice);
+		// serial: single reusable scratch
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			let mut scratch = Vec::<f64>::new();
+			for (row, dst) in out.chunks_mut(cols).enumerate() {
+				let period = combos[row].period.unwrap();
+				match kern {
+					Kernel::Scalar => edcf_scalar_into_with_scratch(data, period, first, dst, &mut scratch),
+					#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+					Kernel::Avx2 => unsafe { edcf_row_avx2(data, first, period, dst) },
+					#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+					Kernel::Avx512 => unsafe { edcf_row_avx512(data, first, period, dst) },
+					_ => unsafe { edcf_row_scalar(data, first, period, dst) },
+				}
+			}
+		}
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, dst) in out.chunks_mut(cols).enumerate() {
+				let period = combos[row].period.unwrap();
+				unsafe { edcf_row_scalar(data, first, period, dst) }
+			}
 		}
 	}
 

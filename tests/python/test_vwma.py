@@ -135,8 +135,10 @@ class TestVwma:
         assert len(second_result) == len(first_result)
         
         # After warmup, should have valid values
-        start = 20 + 10 - 2  # first period + second period - 2
-        for i in range(start, len(second_result)):
+        # First pass warmup: first + period - 1 = 0 + 20 - 1 = 19
+        # Second pass warmup: first_warmup + period2 - 1 = 19 + 10 - 1 = 28
+        expected_warmup = 28
+        for i in range(expected_warmup, len(second_result)):
             assert not np.isnan(second_result[i]), f"Unexpected NaN at index {i}"
     
     def test_vwma_nan_handling(self, test_data):
@@ -228,6 +230,104 @@ class TestVwma:
                 # AVX kernels might not be available on all systems
                 if "Unknown kernel" not in str(e) and "not available on this CPU" not in str(e) and "not compiled in this build" not in str(e):
                     raise
+    
+    def test_vwma_zero_volume(self):
+        """Test VWMA handles zero volume correctly"""
+        prices = np.array([10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0])
+        volumes = np.array([100.0, 0.0, 300.0, 0.0, 500.0, 0.0, 700.0, 0.0, 900.0, 0.0])
+        
+        result = ta_indicators.vwma(prices, volumes, 3)
+        assert len(result) == len(prices)
+        
+        # Check that we get NaN where all volumes in window are zero
+        # but valid values where at least one volume is non-zero
+        assert not np.isnan(result[2])  # Window has non-zero volumes
+    
+    def test_vwma_partial_nan_data(self, test_data):
+        """Test VWMA with NaN values in middle of dataset"""
+        close = test_data['close'].copy()
+        volume = test_data['volume'].copy()
+        
+        # Inject NaN values in middle of data
+        close[100:110] = np.nan
+        volume[100:110] = np.nan
+        
+        # VWMA should handle NaN gracefully but might propagate them
+        # This test verifies the function doesn't crash
+        result = ta_indicators.vwma(close, volume, 20)
+        assert len(result) == len(close)
+        
+        # Should have NaN during warmup
+        assert np.all(np.isnan(result[:19])), "Expected NaN in warmup period"
+        
+        # Note: NaN handling depends on implementation - some may continue
+        # producing NaN until all data is valid again
+    
+    def test_vwma_warmup_period(self, test_data):
+        """Test VWMA warmup period calculation matches Rust exactly"""
+        close = test_data['close']
+        volume = test_data['volume']
+        period = 20
+        
+        result = ta_indicators.vwma(close, volume, period)
+        
+        # Warmup should be first + period - 1 = 0 + 20 - 1 = 19
+        # So indices 0-18 should be NaN, index 19 should be first valid
+        assert np.all(np.isnan(result[:19])), "First 19 values should be NaN"
+        assert not np.isnan(result[19]), "Index 19 should be first valid value"
+    
+    def test_vwma_batch_multiple_periods(self, test_data):
+        """Test VWMA batch with multiple period values"""
+        close = test_data['close'][:100]  # Use smaller dataset
+        volume = test_data['volume'][:100]
+        
+        result = ta_indicators.vwma_batch(
+            close,
+            volume,
+            period_range=(10, 30, 10),  # periods: 10, 20, 30
+        )
+        
+        assert 'values' in result
+        assert 'periods' in result
+        
+        # Should have 3 combinations
+        assert result['values'].shape[0] == 3
+        assert result['values'].shape[1] == 100
+        assert len(result['periods']) == 3
+        assert np.array_equal(result['periods'], [10, 20, 30])
+        
+        # Verify each row matches single calculation
+        for i, period in enumerate([10, 20, 30]):
+            single_result = ta_indicators.vwma(close, volume, period)
+            assert_close(
+                result['values'][i],
+                single_result,
+                rtol=1e-10,
+                msg=f"Batch period {period} mismatch"
+            )
+    
+    def test_vwma_batch_edge_cases(self):
+        """Test VWMA batch with edge case parameters"""
+        prices = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0])
+        volumes = np.array([10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0])
+        
+        # Test with step=0 (single value)
+        result = ta_indicators.vwma_batch(
+            prices,
+            volumes,
+            period_range=(5, 5, 0),
+        )
+        assert result['values'].shape[0] == 1
+        assert result['periods'] == [5]
+        
+        # Test with step > range (single value)
+        result = ta_indicators.vwma_batch(
+            prices,
+            volumes,
+            period_range=(5, 7, 10),
+        )
+        assert result['values'].shape[0] == 1
+        assert result['periods'] == [5]
 
 
 if __name__ == '__main__':

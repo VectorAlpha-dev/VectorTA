@@ -101,7 +101,7 @@ class TestWillr:
         low = np.full(10, np.nan)
         close = np.full(10, np.nan)
         
-        with pytest.raises(ValueError, match="All values are NaN"):
+        with pytest.raises(ValueError, match="All input values are NaN"):
             ta.willr(high, low, close, 5)
     
     def test_willr_not_enough_valid_data(self):

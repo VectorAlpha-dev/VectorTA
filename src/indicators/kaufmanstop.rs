@@ -19,12 +19,12 @@
 //! - **Ok(KaufmanstopOutput)**: Output vector length matches input, leading NaNs where window not filled
 //! - **Err(KaufmanstopError)**: Error on failure
 use crate::indicators::moving_averages::ma::{ma, MaData};
-use crate::utilities::data_loader::{source_type, Candles};
+use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
 	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
-use aligned_vec::{AVec, CACHELINE_ALIGN};
+// aligned_vec not needed for this indicator
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -455,7 +455,6 @@ pub struct KaufmanstopStream {
 	range_buffer: Vec<f64>,
 	buffer_head: usize,
 	filled: bool,
-	ma_vals: Vec<f64>,
 }
 
 impl KaufmanstopStream {
@@ -475,7 +474,6 @@ impl KaufmanstopStream {
 			range_buffer: vec![f64::NAN; period],
 			buffer_head: 0,
 			filled: false,
-			ma_vals: vec![f64::NAN; period],
 		})
 	}
 	#[inline(always)]
@@ -720,110 +718,155 @@ fn kaufmanstop_batch_inner(
 	parallel: bool,
 ) -> Result<KaufmanstopBatchOutput, KaufmanstopError> {
 	let combos = expand_grid(sweep);
-	if combos.is_empty() {
+	let cols = high.len();
+	let rows = combos.len();
+	if rows == 0 {
 		return Err(KaufmanstopError::InvalidPeriod { period: 0, data_len: 0 });
 	}
+
+	// Allocate rows×cols with helpers and initialize warm prefixes
+	let mut buf_mu = make_uninit_matrix(rows, cols);
 	let first = high
 		.iter()
 		.zip(low.iter())
 		.position(|(&h, &l)| !h.is_nan() && !l.is_nan())
 		.ok_or(KaufmanstopError::AllValuesNaN)?;
-	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-	if high.len() - first < max_p {
-		return Err(KaufmanstopError::NotEnoughValidData {
-			needed: max_p,
-			valid: high.len() - first,
-		});
-	}
-	let rows = combos.len();
-	let cols = high.len();
-	// Use helper function to allocate with NaN prefix
-	let mut range_buf = alloc_with_nan_prefix(high.len(), first);
-	for i in first..high.len() {
-		if high[i].is_nan() || low[i].is_nan() {
-			range_buf[i] = f64::NAN;
-		} else {
-			range_buf[i] = high[i] - low[i];
-		}
-	}
-	
-	// Use make_uninit_matrix and init_matrix_prefixes instead of vec![f64::NAN; ...]
-	let mut buf_mu = make_uninit_matrix(rows, cols);
-	
-	// Calculate warmup periods for each parameter combination
-	let warmup_periods: Vec<usize> = combos.iter()
-		.map(|c| first + c.period.unwrap() - 1)
-		.collect();
-	
-	init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
-	
-	// Convert to mutable slice for computation
-	let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
-	let out: &mut [f64] = unsafe { 
-		core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len()) 
-	};
-	
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-		let prm = &combos[row];
-		let period = prm.period.unwrap();
-		let mult = prm.mult.unwrap();
-		let direction = prm.direction.as_ref().unwrap();
-		let ma_type = prm.ma_type.as_ref().unwrap();
-		let ma_input = MaData::Slice(&range_buf[first..]);
-		let hl_diff_ma = match ma(ma_type, ma_input, period) {
-			Ok(v) => v,
-			Err(_) => {
-				for x in out_row.iter_mut() {
-					*x = f64::NAN;
-				}
-				return;
-			}
-		};
-		match kern {
-			Kernel::Scalar => kaufmanstop_row_scalar(high, low, &hl_diff_ma, period, first, mult, direction, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => kaufmanstop_row_avx2(high, low, &hl_diff_ma, period, first, mult, direction, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => kaufmanstop_row_avx512(high, low, &hl_diff_ma, period, first, mult, direction, out_row),
-			_ => unreachable!(),
-		}
-	};
-	if parallel {
-		#[cfg(not(target_arch = "wasm32"))]
-		{
-			out
-				.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
-		}
+	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
+	init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-		#[cfg(target_arch = "wasm32")]
-		{
-			for (row, slice) in out.chunks_mut(cols).enumerate() {
-				do_row(row, slice);
-			}
-		}
-	} else {
-		for (row, slice) in out.chunks_mut(cols).enumerate() {
-			do_row(row, slice);
-		}
-	}
-	
-	// Convert back to Vec from ManuallyDrop
-	let values = unsafe {
-		Vec::from_raw_parts(
-			buf_guard.as_mut_ptr() as *mut f64,
-			buf_guard.len(),
-			buf_guard.capacity() * core::mem::size_of::<std::mem::MaybeUninit<f64>>() / core::mem::size_of::<f64>(),
-		)
+	// Compute into that matrix
+	let mut guard = core::mem::ManuallyDrop::new(buf_mu);
+	let out: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len())
 	};
-	
+
+	let _ = kaufmanstop_batch_inner_into(high, low, sweep, kern, parallel, out)?;
+
+	// Turn back into Vec<f64> (capacity is element-count, 1:1)
+	let values = unsafe {
+		Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, guard.len(), guard.capacity())
+	};
+
 	Ok(KaufmanstopBatchOutput {
 		values,
 		combos,
 		rows,
 		cols,
 	})
+}
+
+#[inline(always)]
+pub fn kaufmanstop_batch_inner_into(
+	high: &[f64],
+	low: &[f64],
+	sweep: &KaufmanstopBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	out: &mut [f64],
+) -> Result<Vec<KaufmanstopParams>, KaufmanstopError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(KaufmanstopError::InvalidPeriod { period: 0, data_len: 0 });
+	}
+
+	let len = high.len();
+	if len == 0 || len != low.len() {
+		return Err(KaufmanstopError::EmptyData);
+	}
+
+	let first = high
+		.iter()
+		.zip(low.iter())
+		.position(|(&h, &l)| !h.is_nan() && !l.is_nan())
+		.ok_or(KaufmanstopError::AllValuesNaN)?;
+
+	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	if len - first < max_p {
+		return Err(KaufmanstopError::NotEnoughValidData {
+			needed: max_p,
+			valid: len - first,
+		});
+	}
+
+	// range_buf with prefix-only init
+	let mut range_buf = alloc_with_nan_prefix(len, first);
+	for i in first..len {
+		range_buf[i] = if high[i].is_nan() || low[i].is_nan() {
+			f64::NAN
+		} else {
+			high[i] - low[i]
+		};
+	}
+
+	let rows = combos.len();
+	let cols = len;
+	assert_eq!(out.len(), rows * cols, "out size must be rows*cols");
+
+	// Reinterpret as MaybeUninit for parity with ALMA's writer
+	let out_mu = unsafe {
+		std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
+	};
+
+	let actual = match kern {
+		Kernel::Auto => detect_best_batch_kernel(),
+		k => k,
+	};
+
+	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
+		let c = &combos[row];
+		let period = c.period.unwrap();
+		let mult = c.mult.unwrap();
+		let direction = c.direction.as_ref().unwrap();
+		let ma_type = c.ma_type.as_ref().unwrap();
+
+		// MA for this row over the valid tail
+		let ma_input = MaData::Slice(&range_buf[first..]);
+		let hl_diff_ma = match ma(ma_type, ma_input, period) {
+			Ok(v) => v,
+			Err(_) => {
+				// Fill this row with NaNs
+				let dst = std::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, cols);
+				for x in dst.iter_mut() {
+					*x = f64::NAN;
+				}
+				return;
+			}
+		};
+
+		let dst = std::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, cols);
+		match actual {
+			Kernel::Scalar | Kernel::ScalarBatch => {
+				kaufmanstop_row_scalar(high, low, &hl_diff_ma, period, first, mult, direction, dst)
+			}
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => {
+				kaufmanstop_row_avx2(high, low, &hl_diff_ma, period, first, mult, direction, dst)
+			}
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => {
+				kaufmanstop_row_avx512(high, low, &hl_diff_ma, period, first, mult, direction, dst)
+			}
+			_ => unreachable!(),
+		}
+	};
+
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		out_mu
+			.par_chunks_mut(cols)
+			.enumerate()
+			.for_each(|(r, s)| do_row(r, s));
+		#[cfg(target_arch = "wasm32")]
+		for (r, s) in out_mu.chunks_mut(cols).enumerate() {
+			do_row(r, s);
+		}
+	} else {
+		for (r, s) in out_mu.chunks_mut(cols).enumerate() {
+			do_row(r, s);
+		}
+	}
+
+	Ok(combos)
 }
 
 #[inline(always)]
@@ -991,10 +1034,9 @@ pub fn kaufmanstop_batch_py<'py>(
 	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
 	use pyo3::types::PyDict;
 
-	let high_slice = high.as_slice()?;
-	let low_slice = low.as_slice()?;
-	
-	if high_slice.len() != low_slice.len() {
+	let h = high.as_slice()?;
+	let l = low.as_slice()?;
+	if h.len() != l.len() {
 		return Err(PyValueError::new_err("High and low arrays must have the same length"));
 	}
 
@@ -1005,40 +1047,43 @@ pub fn kaufmanstop_batch_py<'py>(
 		ma_type: (ma_type.to_string(), ma_type.to_string(), 0.0),
 	};
 
-	let kern = validate_kernel(kernel, true)?;
-	
-	// Perform computation within allow_threads for better performance
-	let result = py.allow_threads(|| kaufmanstop_batch_with_kernel(high_slice, low_slice, &sweep, kern));
+	// Predict rows/cols before allocating
+	let combos_preview = expand_grid(&sweep);
+	let rows = combos_preview.len();
+	let cols = h.len();
 
-	match result {
-		Ok(output) => {
-			let dict = PyDict::new(py);
-			
-			// Convert values to numpy array
-			dict.set_item("values", output.values.into_pyarray(py))?;
-			
-			// Convert combos to list of dicts
-			let combos_list = PyList::empty(py);
-			for combo in output.combos {
-				let combo_dict = PyDict::new(py);
-				combo_dict.set_item("period", combo.period.unwrap_or(22))?;
-				combo_dict.set_item("mult", combo.mult.unwrap_or(2.0))?;
-				combo_dict.set_item("direction", combo.direction.unwrap_or_else(|| "long".to_string()))?;
-				combo_dict.set_item("ma_type", combo.ma_type.unwrap_or_else(|| "sma".to_string()))?;
-				combos_list.append(combo_dict)?;
-			}
-			dict.set_item("combos", combos_list)?;
-			dict.set_item("rows", output.rows)?;
-			dict.set_item("cols", output.cols)?;
-			
-			Ok(dict)
-		}
-		Err(e) => Err(PyValueError::new_err(e.to_string())),
-	}
+	// Preallocate NumPy 1D buffer then fill
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let out_slice = unsafe { out_arr.as_slice_mut()? };
+
+	let kern = validate_kernel(kernel, true)?;
+	let combos = py.allow_threads(|| {
+		let simd = match match kern { 
+			Kernel::Auto => detect_best_batch_kernel(), 
+			k => k 
+		} {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch => Kernel::Avx2,
+			Kernel::ScalarBatch => Kernel::Scalar,
+			_ => unreachable!(),
+		};
+		kaufmanstop_batch_inner_into(h, l, &sweep, simd, true, out_slice)
+	}).map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	// Columnar metadata like ALMA
+	dict.set_item("periods", combos.iter().map(|c| c.period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+	dict.set_item("mults", combos.iter().map(|c| c.mult.unwrap()).collect::<Vec<_>>().into_pyarray(py))?;
+	// String arrays need to be Python lists, not NumPy arrays
+	dict.set_item("directions", combos.iter().map(|c| c.direction.as_deref().unwrap()).collect::<Vec<_>>())?;
+	dict.set_item("ma_types", combos.iter().map(|c| c.ma_type.as_deref().unwrap()).collect::<Vec<_>>())?;
+	dict.set_item("rows", rows)?;
+	dict.set_item("cols", cols)?;
+	Ok(dict)
 }
 
-// ================== WASM Bindings ==================
-#[cfg(feature = "wasm")]
+// ================== Core Helper Functions ==================
 /// Core helper that writes directly to an output slice with no allocations.
 /// This is the foundation for all WASM APIs.
 pub fn kaufmanstop_into_slice(
@@ -1100,8 +1145,8 @@ pub fn kaufmanstop_into_slice(
 		});
 	}
 
-	// Calculate high-low differences in a temporary buffer
-	let mut hl_diff = vec![f64::NAN; high.len()];
+	// Calculate high-low differences in a temporary buffer using zero-copy allocation
+	let mut hl_diff = alloc_with_nan_prefix(high.len(), first_valid_idx);
 	for i in first_valid_idx..high.len() {
 		if high[i].is_nan() || low[i].is_nan() {
 			hl_diff[i] = f64::NAN;
@@ -1445,31 +1490,28 @@ pub fn kaufmanstop_batch_into(
 	unsafe {
 		let high = std::slice::from_raw_parts(high_ptr, len);
 		let low = std::slice::from_raw_parts(low_ptr, len);
-		
+
 		let sweep = KaufmanstopBatchRange {
 			period: (period_start, period_end, period_step),
 			mult: (mult_start, mult_end, mult_step),
 			direction: (direction.to_string(), direction.to_string(), 0.0),
 			ma_type: (ma_type.to_string(), ma_type.to_string(), 0.0),
 		};
-		
-		let output = kaufmanstop_batch_slice(high, low, &sweep, Kernel::Auto)
+
+		let combos_preview = expand_grid(&sweep);
+		let rows = combos_preview.len();
+		let cols = len;
+
+		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+
+		let _ = kaufmanstop_batch_inner_into(high, low, &sweep, detect_best_batch_kernel(), false, out)
 			.map_err(|e| JsError::new(&e.to_string()))?;
-		
-		// Calculate expected output size
-		let expected_size = output.rows * output.cols;
-		let out = std::slice::from_raw_parts_mut(out_ptr, expected_size);
-		
-		// Copy results to output buffer
-		out.copy_from_slice(&output.values);
-		
-		// Return metadata
+
 		let meta = KaufmanstopBatchMeta {
-			combos: output.combos,
-			rows: output.rows,
-			cols: output.cols,
+			combos: combos_preview,
+			rows,
+			cols,
 		};
-		
 		serde_wasm_bindgen::to_value(&meta).map_err(Into::into)
 	}
 }

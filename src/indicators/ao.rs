@@ -11,7 +11,7 @@
 //! - **InvalidPeriods**: ao: short=0 or long=0
 //! - **ShortPeriodNotLess**: ao: short >= long
 //! - **NoData**: ao: Input slice is empty
-//! - **NotEnoughData**: ao: Not enough valid data for requested long_period
+//! - **NotEnoughValidData**: ao: Not enough valid data for requested long_period
 //!
 //! ## Returns
 //! - **`Ok(AoOutput)`** with Vec<f64> of same length as input, leading values are NaN
@@ -37,13 +37,10 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
-#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
-use std::convert::AsRef;
 use std::error::Error;
 use std::mem::{ManuallyDrop, MaybeUninit};
 use thiserror::Error;
@@ -200,6 +197,10 @@ pub enum AoError {
 	NotEnoughValidData { needed: usize, valid: usize },
 	#[error("ao: High and low arrays must have same length: high={high_len}, low={low_len}")]
 	MismatchedArrayLengths { high_len: usize, low_len: usize },
+	#[error("ao: Output length mismatch: expected={expected}, got={got}")]
+	OutputLenMismatch { expected: usize, got: usize },
+	#[error("ao: Invalid kernel for batch operation: {kernel:?}")]
+	InvalidKernel { kernel: Kernel },
 }
 
 #[inline]
@@ -210,26 +211,17 @@ pub fn ao(input: &AoInput) -> Result<AoOutput, AoError> {
 #[inline]
 pub fn ao_into_slice(dst: &mut [f64], input: &AoInput, kern: Kernel) -> Result<(), AoError> {
 	let (data, short, long, first, len) = ao_prepare(input)?;
-
 	if dst.len() != len {
-		return Err(AoError::InvalidPeriods {
-			short: dst.len(),
-			long: len,
+		return Err(AoError::OutputLenMismatch {
+			expected: len,
+			got: dst.len(),
 		});
 	}
 
 	let chosen = match kern {
 		Kernel::Auto => detect_best_kernel(),
-		other => other,
+		k => k,
 	};
-
-	// Calculate warmup period
-	let warmup_period = first + long - 1;
-
-	// Initialize NaN prefix
-	if warmup_period > 0 {
-		dst[..warmup_period].fill(f64::NAN);
-	}
 
 	unsafe {
 		match chosen {
@@ -242,39 +234,23 @@ pub fn ao_into_slice(dst: &mut [f64], input: &AoInput, kern: Kernel) -> Result<(
 		}
 	}
 
+	let warmup_end = first + long - 1;
+	for v in &mut dst[..warmup_end] {
+		*v = f64::NAN;
+	}
 	Ok(())
 }
 
 #[inline(always)]
 fn ao_prepare<'a>(
 	input: &'a AoInput,
-) -> Result<
-	(
-		// data
-		&'a [f64],
-		// short
-		usize,
-		// long
-		usize,
-		// first
-		usize,
-		// len
-		usize,
-	),
-	AoError,
-> {
-	let data: &[f64] = match &input.data {
-		AoData::Candles { candles, source } => source_type(candles, source),
-		AoData::Slice(sl) => sl,
-	};
-
-	// Early empty slice detection
+) -> Result<(&'a [f64], usize, usize, usize, usize), AoError> {
+	let data = input.as_ref();
 	if data.is_empty() {
 		return Err(AoError::NoData);
 	}
 
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(AoError::AllValuesNaN)?;
-
 	let len = data.len();
 	let short = input.get_short();
 	let long = input.get_long();
@@ -285,16 +261,12 @@ fn ao_prepare<'a>(
 	if short >= long {
 		return Err(AoError::ShortPeriodNotLess { short, long });
 	}
-	if len == 0 {
-		return Err(AoError::NoData);
-	}
-	if (len - first) < long {
+	if len - first < long {
 		return Err(AoError::NotEnoughValidData {
 			needed: long,
 			valid: len - first,
 		});
 	}
-
 	Ok((data, short, long, first, len))
 }
 
@@ -328,26 +300,25 @@ pub fn ao_with_kernel(input: &AoInput, kernel: Kernel) -> Result<AoOutput, AoErr
 
 // Helper function to compute hl2 from high/low arrays with zero-copy allocation
 #[inline]
-pub fn compute_hl2_with_kernel(high: &[f64], low: &[f64], kernel: Kernel) -> Result<Vec<f64>, AoError> {
+pub fn compute_hl2(high: &[f64], low: &[f64]) -> Result<Vec<f64>, AoError> {
 	if high.len() != low.len() {
 		return Err(AoError::MismatchedArrayLengths {
 			high_len: high.len(),
 			low_len: low.len(),
 		});
 	}
-	
 	if high.is_empty() {
 		return Err(AoError::NoData);
 	}
 
-	// Use zero-copy allocation - no warmup needed for hl2 computation
 	let mut out = alloc_with_nan_prefix(high.len(), 0);
-
-	// Compute hl2 directly into pre-allocated buffer
+	// Safe: we write every element before any read.
 	for i in 0..high.len() {
-		out[i] = (high[i] + low[i]) / 2.0;
+		// unchecked to avoid bounds checks in tight loop
+		unsafe {
+			*out.get_unchecked_mut(i) = (*high.get_unchecked(i) + *low.get_unchecked(i)) * 0.5;
+		}
 	}
-
 	Ok(out)
 }
 
@@ -539,8 +510,8 @@ pub fn ao_batch_with_kernel(data: &[f64], sweep: &AoBatchRange, k: Kernel) -> Re
 	let kernel = match k {
 		Kernel::Auto => detect_best_batch_kernel(),
 		other if other.is_batch() => other,
-		_ => {
-			return Err(AoError::InvalidPeriods { short: 0, long: 0 });
+		other => {
+			return Err(AoError::InvalidKernel { kernel: other });
 		}
 	};
 	let simd = match kernel {
@@ -674,12 +645,23 @@ fn ao_batch_inner(data: &[f64], sweep: &AoBatchRange, kern: Kernel, parallel: bo
 		return Err(AoError::NoData);
 	}
 
-	// Use zero-copy matrix allocation
+	// Validate BEFORE allocation to prevent memory leaks
+	if combos.is_empty() {
+		return Err(AoError::InvalidPeriods { short: 0, long: 0 });
+	}
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(AoError::AllValuesNaN)?;
+	let max_long = combos.iter().map(|c| c.long_period.unwrap()).max().unwrap();
+	if data.len() - first < max_long {
+		return Err(AoError::NotEnoughValidData {
+			needed: max_long,
+			valid: data.len() - first,
+		});
+	}
+
+	// Now safe to allocate - we've validated all error conditions
 	let mut buf_mu = make_uninit_matrix(rows, cols);
 
 	// Calculate warmup periods for each combination
-	let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
-
 	let warm: Vec<usize> = combos.iter().map(|c| first + c.long_period.unwrap() - 1).collect();
 
 	// Initialize NaN prefixes
@@ -695,7 +677,8 @@ fn ao_batch_inner(data: &[f64], sweep: &AoBatchRange, kern: Kernel, parallel: bo
 		// Create slice for ao_batch_inner_into
 		let slice = std::slice::from_raw_parts_mut(values_ptr, values_len);
 
-		// Do the computation
+		// Do the computation - we already validated, so this shouldn't fail
+		// but if it does somehow, we have a memory leak (which shouldn't happen now)
 		ao_batch_inner_into(data, sweep, kern, parallel, slice)?;
 
 		// Reclaim as Vec<f64>
@@ -1229,6 +1212,46 @@ mod tests {
 
 	#[cfg(feature = "proptest")]
 	generate_all_ao_tests!(check_ao_property);
+
+	#[test]
+	fn test_output_len_mismatch_error() {
+		let data = vec![10.0, 20.0, 30.0, 40.0, 50.0];
+		let params = AoParams {
+			short_period: Some(2),
+			long_period: Some(3),
+		};
+		let input = AoInput::from_slice(&data, params);
+		
+		// Create a wrong-sized output buffer
+		let mut wrong_sized_buf = vec![0.0; 10]; // Wrong size
+		
+		let result = ao_into_slice(&mut wrong_sized_buf, &input, Kernel::Auto);
+		assert!(result.is_err());
+		
+		if let Err(AoError::OutputLenMismatch { expected, got }) = result {
+			assert_eq!(expected, 5);
+			assert_eq!(got, 10);
+		} else {
+			panic!("Expected OutputLenMismatch error");
+		}
+	}
+
+	#[test]
+	fn test_invalid_kernel_error() {
+		let data = vec![10.0, 20.0, 30.0, 40.0, 50.0];
+		let sweep = AoBatchRange::default();
+		
+		// Try to use a non-batch kernel for batch operation
+		let result = ao_batch_with_kernel(&data, &sweep, Kernel::Scalar);
+		assert!(result.is_err());
+		
+		if let Err(AoError::InvalidKernel { kernel }) = result {
+			assert!(matches!(kernel, Kernel::Scalar));
+		} else {
+			panic!("Expected InvalidKernel error");
+		}
+	}
+
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);
 		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
@@ -1395,7 +1418,7 @@ pub fn ao_py<'py>(
 	let result_vec: Vec<f64> = py
 		.allow_threads(|| -> Result<Vec<f64>, AoError> {
 			// Compute hl2 using zero-copy allocation
-			let hl2 = compute_hl2_with_kernel(high_slice, low_slice, kern)?;
+			let hl2 = compute_hl2(high_slice, low_slice)?;
 			
 			// Build input struct
 			let params = AoParams {
@@ -1479,7 +1502,7 @@ pub fn ao_batch_py<'py>(
 	let combos = py
 		.allow_threads(|| -> Result<Vec<AoParams>, AoError> {
 			// Compute hl2 using zero-copy allocation
-			let hl2 = compute_hl2_with_kernel(high_slice, low_slice, kern)?;
+			let hl2 = compute_hl2(high_slice, low_slice)?;
 			
 			// Initialize NaN prefixes for each row
 			let first = hl2.iter().position(|x| !x.is_nan()).unwrap_or(0);
@@ -1537,7 +1560,7 @@ pub fn ao_batch_py<'py>(
 #[wasm_bindgen]
 pub fn ao_js(high: &[f64], low: &[f64], short_period: usize, long_period: usize) -> Result<Vec<f64>, JsValue> {
 	// Compute hl2 using zero-copy allocation
-	let hl2 = compute_hl2_with_kernel(high, low, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))?;
+	let hl2 = compute_hl2(high, low).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	let params = AoParams {
 		short_period: Some(short_period),
@@ -1564,7 +1587,7 @@ pub fn ao_batch_js(
 	long_step: usize,
 ) -> Result<Vec<f64>, JsValue> {
 	// Compute hl2 using zero-copy allocation
-	let hl2 = compute_hl2_with_kernel(high, low, Kernel::Scalar).map_err(|e| JsValue::from_str(&e.to_string()))?;
+	let hl2 = compute_hl2(high, low).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	let sweep = AoBatchRange {
 		short_period: (short_start, short_end, short_step),
@@ -1628,7 +1651,7 @@ pub fn ao_batch_unified_js(high: &[f64], low: &[f64], config: JsValue) -> Result
 		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
 
 	// Compute hl2 using zero-copy allocation
-	let hl2 = compute_hl2_with_kernel(high, low, Kernel::Scalar).map_err(|e| JsValue::from_str(&e.to_string()))?;
+	let hl2 = compute_hl2(high, low).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	let sweep = AoBatchRange {
 		short_period: config.short_period_range,
@@ -1683,22 +1706,37 @@ pub fn ao_into(
 		return Err(JsValue::from_str("Null pointer provided"));
 	}
 
+	#[inline(always)]
+	unsafe fn overlaps(a: *const f64, b: *const f64, n: usize) -> bool {
+		let as_ = a as usize;
+		let ae = as_.wrapping_add(n * core::mem::size_of::<f64>());
+		let bs_ = b as usize;
+		let be = bs_.wrapping_add(n * core::mem::size_of::<f64>());
+		!(ae <= bs_ || be <= as_)
+	}
+
 	unsafe {
 		let high = std::slice::from_raw_parts(in_high_ptr, len);
 		let low = std::slice::from_raw_parts(in_low_ptr, len);
 		let out = std::slice::from_raw_parts_mut(out_ptr, len);
 
-		// Compute hl2 using zero-copy allocation
-		let hl2 = compute_hl2_with_kernel(high, low, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))?;
+		let alias = overlaps(in_high_ptr, out_ptr as *const f64, len)
+			|| overlaps(in_low_ptr, out_ptr as *const f64, len);
 
+		let hl2 = compute_hl2(high, low).map_err(|e| JsValue::from_str(&e.to_string()))?;
 		let params = AoParams {
 			short_period: Some(short_period),
 			long_period: Some(long_period),
 		};
 		let input = AoInput::from_slice(&hl2, params);
 
-		// Compute AO into output buffer
-		ao_into_slice(out, &input, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))?;
+		if alias {
+			let mut tmp = vec![0.0; len];
+			ao_into_slice(&mut tmp, &input, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))?;
+			out.copy_from_slice(&tmp);
+		} else {
+			ao_into_slice(out, &input, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
 		Ok(())
 	}
 }
@@ -1735,7 +1773,7 @@ pub fn ao_batch_into(
 		let out = std::slice::from_raw_parts_mut(out_ptr, rows * len);
 
 		// Compute hl2 using zero-copy allocation
-		let hl2 = compute_hl2_with_kernel(high, low, Kernel::Scalar).map_err(|e| JsValue::from_str(&e.to_string()))?;
+		let hl2 = compute_hl2(high, low).map_err(|e| JsValue::from_str(&e.to_string()))?;
 		
 		// Compute batch directly into output
 		ao_batch_inner_into(&hl2, &sweep, Kernel::Scalar, false, out)

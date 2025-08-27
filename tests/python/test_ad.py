@@ -187,9 +187,103 @@ class TestAd:
         closes = [np.array([1.0, 2.0, 3.0]), np.array([1.0, 2.0])]
         volumes = [np.array([1.0, 2.0, 3.0]), np.array([1.0, 2.0])]
         
-        # Should still work as each security is processed independently
+        # Should fail because rows have different lengths
+        with pytest.raises(ValueError, match="Data length mismatch"):
+            ta_indicators.ad_batch(highs, lows, closes, volumes)
+    
+    def test_ad_all_nan_input(self):
+        """Test AD with all NaN values"""
+        all_nan = np.full(100, np.nan)
+        
+        # AD returns all NaN when input is all NaN (doesn't throw error)
+        result = ta_indicators.ad(all_nan, all_nan, all_nan, all_nan)
+        assert len(result) == len(all_nan)
+        assert np.all(np.isnan(result)), "AD should return all NaN when input is all NaN"
+    
+    def test_ad_no_warmup_period(self, test_data):
+        """Test AD has no warmup period - starts from 0"""
+        high = test_data['high'][:50]
+        low = test_data['low'][:50]
+        close = test_data['close'][:50]
+        volume = test_data['volume'][:50]
+        
+        result = ta_indicators.ad(high, low, close, volume)
+        
+        # AD should start at 0, not NaN
+        assert not np.isnan(result[0]), "AD should not have NaN at index 0"
+        # First AD value calculation: if high == low, CLV = 0, so AD[0] = 0
+        # Otherwise AD[0] = CLV * volume
+        if high[0] == low[0]:
+            assert result[0] == 0, "First AD value should be 0 when high equals low"
+    
+    def test_ad_high_low_validation(self):
+        """Test AD handles invalid high/low relationships"""
+        high = np.array([100.0, 90.0, 95.0])  
+        low = np.array([105.0, 95.0, 90.0])  # low > high (invalid)
+        close = np.array([102.0, 92.0, 93.0])
+        volume = np.array([1000.0, 1500.0, 1200.0])
+        
+        # Should handle gracefully (CLV becomes 0 when high==low)
+        result = ta_indicators.ad(high, low, close, volume)
+        assert len(result) == len(close)
+    
+    def test_ad_zero_volume(self, test_data):
+        """Test AD with zero volume periods"""
+        high = test_data['high'][:10]
+        low = test_data['low'][:10]
+        close = test_data['close'][:10]
+        volume = np.array(test_data['volume'][:10])
+        volume[5] = 0.0  # Set one volume to 0
+        
+        result = ta_indicators.ad(high, low, close, volume)
+        assert len(result) == len(close)
+        # When volume is 0, AD should not change from previous value
+        if len(result) > 6:
+            # AD[i] = AD[i-1] + CLV * volume, so if volume=0, AD[i] = AD[i-1]
+            assert_close(result[5], result[4], rtol=1e-10, atol=1e-10,
+                        msg="AD should not change when volume is 0")
+    
+    def test_ad_batch_metadata(self, test_data):
+        """Test AD batch returns proper metadata"""
+        high = test_data['high']
+        low = test_data['low']
+        close = test_data['close']
+        volume = test_data['volume']
+        
+        highs = [high, high]
+        lows = [low, low]
+        closes = [close, close]
+        volumes = [volume, volume]
+        
         result = ta_indicators.ad_batch(highs, lows, closes, volumes)
-        assert result['values'].shape[0] == 2
+        
+        assert 'values' in result
+        assert 'rows' in result
+        assert 'cols' in result
+        assert result['rows'] == 2
+        assert result['cols'] == len(close)
+    
+    def test_ad_streaming_reset(self):
+        """Test AD streaming can be reset"""
+        stream = ta_indicators.AdStream()
+        
+        # Add some values
+        for i in range(5):
+            val = float(i)
+            result = stream.update(val+1, val, val+0.5, 100.0)
+            assert result is not None
+        
+        # Reset stream (create new instance)
+        stream = ta_indicators.AdStream()
+        
+        # First value after reset should start fresh
+        result = stream.update(10.0, 9.0, 9.5, 1000.0)
+        assert result is not None
+        # AD is cumulative, so first value after reset should be the CLV * volume
+        clv = (2 * 9.5 - 10.0 - 9.0) / (10.0 - 9.0)
+        expected = clv * 1000.0
+        assert_close(result, expected, rtol=1e-10, atol=1e-10,
+                    msg="First AD value after reset should be CLV * volume")
 
 
 if __name__ == '__main__':
