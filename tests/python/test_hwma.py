@@ -204,14 +204,14 @@ class TestHwma:
         
         assert isinstance(result, dict)
         assert 'values' in result
-        assert 'na_values' in result
-        assert 'nb_values' in result
-        assert 'nc_values' in result
+        assert 'na' in result
+        assert 'nb' in result
+        assert 'nc' in result
         
         values = result['values']
-        na_values = result['na_values']
-        nb_values = result['nb_values']
-        nc_values = result['nc_values']
+        na_values = result['na']
+        nb_values = result['nb']
+        nc_values = result['nc']
         
         # Should have 3 * 3 * 3 = 27 combinations
         assert values.shape == (27, len(close))
@@ -332,9 +332,9 @@ class TestHwma:
         data = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
         result = ta_indicators.hwma_batch(data, na_range, nb_range, nc_range)
         
-        na_values = result['na_values']
-        nb_values = result['nb_values']
-        nc_values = result['nc_values']
+        na_values = result['na']
+        nb_values = result['nb']
+        nc_values = result['nc']
         
         # Should have 2 * 2 * 2 = 8 combinations
         assert len(na_values) == 8

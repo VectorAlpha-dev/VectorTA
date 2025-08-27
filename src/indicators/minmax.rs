@@ -201,23 +201,20 @@ pub fn minmax_into_slice(
 	if high.is_empty() || low.is_empty() {
 		return Err(MinmaxError::EmptyData);
 	}
-	
-	let order = input.get_order();
-	let len_data = high.len();
-	
-	// Validate lengths
-	if is_min_dst.len() != len_data || is_max_dst.len() != len_data 
-		|| last_min_dst.len() != len_data || last_max_dst.len() != len_data {
-		return Err(MinmaxError::InvalidOrder {
-			order: is_min_dst.len(),
-			data_len: len_data,
-		});
+	if high.len() != low.len() {
+		return Err(MinmaxError::InvalidOrder { order: 0, data_len: high.len().max(low.len()) });
 	}
 	
-	if order == 0 || order > len_data {
+	let len = high.len();
+	if is_min_dst.len()!=len || is_max_dst.len()!=len || last_min_dst.len()!=len || last_max_dst.len()!=len {
+		return Err(MinmaxError::InvalidOrder { order: is_min_dst.len(), data_len: len });
+	}
+	
+	let order = input.get_order();
+	if order == 0 || order > len {
 		return Err(MinmaxError::InvalidOrder {
 			order,
-			data_len: len_data,
+			data_len: len,
 		});
 	}
 	
@@ -227,27 +224,19 @@ pub fn minmax_into_slice(
 		.position(|(&h, &l)| !(h.is_nan() || l.is_nan()))
 		.ok_or(MinmaxError::AllValuesNaN)?;
 
-	if (len_data - first_valid_idx) < order {
+	if (len - first_valid_idx) < order {
 		return Err(MinmaxError::NotEnoughValidData {
 			needed: order,
-			valid: len_data - first_valid_idx,
+			valid: len - first_valid_idx,
 		});
 	}
 	
-	// Initialize ALL indices with NaN before computation
-	// The scalar function only writes to is_min/is_max when extrema are detected,
-	// leaving other indices uninitialized
-	for v in is_min_dst.iter_mut() {
-		*v = f64::NAN;
-	}
-	for v in is_max_dst.iter_mut() {
-		*v = f64::NAN;
-	}
-	for v in &mut last_min_dst[..first_valid_idx] {
-		*v = f64::NAN;
-	}
-	for v in &mut last_max_dst[..first_valid_idx] {
-		*v = f64::NAN;
+	// only warm prefix
+	for i in 0..first_valid_idx {
+		is_min_dst[i] = f64::NAN;
+		is_max_dst[i] = f64::NAN;
+		last_min_dst[i] = f64::NAN;
+		last_max_dst[i] = f64::NAN;
 	}
 	
 	let chosen = match kern {
@@ -322,12 +311,15 @@ pub fn minmax_with_kernel(input: &MinmaxInput, kernel: Kernel) -> Result<MinmaxO
 	if high.is_empty() || low.is_empty() {
 		return Err(MinmaxError::EmptyData);
 	}
+	if high.len() != low.len() {
+		return Err(MinmaxError::InvalidOrder { order: 0, data_len: high.len().max(low.len()) });
+	}
+	let len = high.len();
 	let order = input.get_order();
-	let len_data = high.len();
-	if order == 0 || order > len_data {
+	if order == 0 || order > len {
 		return Err(MinmaxError::InvalidOrder {
 			order,
-			data_len: len_data,
+			data_len: len,
 		});
 	}
 	let first_valid_idx = high
@@ -336,19 +328,17 @@ pub fn minmax_with_kernel(input: &MinmaxInput, kernel: Kernel) -> Result<MinmaxO
 		.position(|(&h, &l)| !(h.is_nan() || l.is_nan()))
 		.ok_or(MinmaxError::AllValuesNaN)?;
 
-	if (len_data - first_valid_idx) < order {
+	if (len - first_valid_idx) < order {
 		return Err(MinmaxError::NotEnoughValidData {
 			needed: order,
-			valid: len_data - first_valid_idx,
+			valid: len - first_valid_idx,
 		});
 	}
-	// Allocate outputs and initialize ALL indices to NaN
-	// The scalar function only writes when extrema are detected, leaving other indices uninitialized
-	// Using vec! ensures all values are initialized, unlike alloc_with_nan_prefix which may leave some uninitialized
-	let mut is_min = vec![f64::NAN; len_data];
-	let mut is_max = vec![f64::NAN; len_data];
-	let mut last_min = vec![f64::NAN; len_data];
-	let mut last_max = vec![f64::NAN; len_data];
+	// NaN only for the warm prefix; everything else will be written once in the scalar
+	let mut is_min  = alloc_with_nan_prefix(len, first_valid_idx);
+	let mut is_max  = alloc_with_nan_prefix(len, first_valid_idx);
+	let mut last_min = alloc_with_nan_prefix(len, first_valid_idx);
+	let mut last_max = alloc_with_nan_prefix(len, first_valid_idx);
 
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
@@ -414,45 +404,64 @@ pub fn minmax_scalar(
 	last_max: &mut [f64],
 ) {
 	let len = high.len();
+
+	// prefix [0..first_valid_idx)
+	for i in 0..first_valid_idx {
+		is_min[i] = f64::NAN;
+		is_max[i] = f64::NAN;
+		last_min[i] = f64::NAN;
+		last_max[i] = f64::NAN;
+	}
+
 	let mut last_min_val = f64::NAN;
 	let mut last_max_val = f64::NAN;
 
 	for i in first_valid_idx..len {
-		let center_low = low[i];
-		let center_high = high[i];
-		if i >= order && i + order < len && !center_low.is_nan() && !center_high.is_nan() {
+		let ch = high[i];
+		let cl = low[i];
+
+		// default to NaN at this index
+		let mut min_here = f64::NAN;
+		let mut max_here = f64::NAN;
+
+		// only consider if the window is fully inside bounds and center is finite
+		if i >= order && i + order < len && ch.is_finite() && cl.is_finite() {
+			// neighbors must all be finite
 			let mut less_than_neighbors = true;
 			let mut greater_than_neighbors = true;
 
 			for o in 1..=order {
-				if center_low >= low[i - o] || center_low >= low[i + o] {
+				let lh = high[i - o];
+				let rh = high[i + o];
+				let ll = low[i - o];
+				let rl = low[i + o];
+
+				if !(ll.is_finite() && rl.is_finite()) {
+					less_than_neighbors = false;
+				} else if !(cl < ll && cl < rl) {
 					less_than_neighbors = false;
 				}
-				if center_high <= high[i - o] || center_high <= high[i + o] {
+
+				if !(lh.is_finite() && rh.is_finite()) {
+					greater_than_neighbors = false;
+				} else if !(ch > lh && ch > rh) {
 					greater_than_neighbors = false;
 				}
-				if !less_than_neighbors && !greater_than_neighbors {
-					break;
-				}
+
+				if !less_than_neighbors && !greater_than_neighbors { break; }
 			}
-			if less_than_neighbors {
-				is_min[i] = center_low;
-			}
-			if greater_than_neighbors {
-				is_max[i] = center_high;
-			}
+
+			if less_than_neighbors { min_here = cl; }
+			if greater_than_neighbors { max_here = ch; }
 		}
-		if i == first_valid_idx {
-			last_min_val = is_min[i];
-			last_max_val = is_max[i];
-		} else {
-			if !is_min[i].is_nan() {
-				last_min_val = is_min[i];
-			}
-			if !is_max[i].is_nan() {
-				last_max_val = is_max[i];
-			}
-		}
+
+		// write this row fully
+		is_min[i] = min_here;
+		is_max[i] = max_here;
+
+		if min_here.is_finite() { last_min_val = min_here; }
+		if max_here.is_finite() { last_max_val = max_here; }
+
 		last_min[i] = last_min_val;
 		last_max[i] = last_max_val;
 	}
@@ -764,246 +773,194 @@ fn minmax_batch_inner(
 	kern: Kernel,
 	parallel: bool,
 ) -> Result<MinmaxBatchOutput, MinmaxError> {
+	if high.is_empty() || low.is_empty() { return Err(MinmaxError::EmptyData); }
+	if high.len()!=low.len() { return Err(MinmaxError::InvalidOrder { order: 0, data_len: high.len().max(low.len()) }); }
+	
 	let combos = expand_grid(sweep);
-	if combos.is_empty() {
-		return Err(MinmaxError::InvalidOrder { order: 0, data_len: 0 });
-	}
-	let len_data = high.len();
-	let first_valid_idx = high
-		.iter()
-		.zip(low.iter())
-		.position(|(&h, &l)| !(h.is_nan() || l.is_nan()))
+	if combos.is_empty() { return Err(MinmaxError::InvalidOrder { order: 0, data_len: 0 }); }
+	
+	let len = high.len();
+	let first = high.iter().zip(low.iter())
+		.position(|(&h,&l)| !(h.is_nan() || l.is_nan()))
 		.ok_or(MinmaxError::AllValuesNaN)?;
 	let max_o = combos.iter().map(|c| c.order.unwrap()).max().unwrap();
-	if (len_data - first_valid_idx) < max_o {
-		return Err(MinmaxError::NotEnoughValidData {
-			needed: max_o,
-			valid: len_data - first_valid_idx,
-		});
+	if len - first < max_o {
+		return Err(MinmaxError::NotEnoughValidData { needed: max_o, valid: len - first });
 	}
-	let rows = combos.len();
-	let cols = len_data;
 	
-	// For batch operations, use simple vec allocation with full NaN initialization
-	// to avoid any poison value issues
-	let mut is_min = vec![f64::NAN; rows * cols];
-	let mut is_max = vec![f64::NAN; rows * cols];
-	let mut last_min = vec![f64::NAN; rows * cols];
-	let mut last_max = vec![f64::NAN; rows * cols];
+	let rows = combos.len();
+	let cols = len;
+	
+	// 4 matrices, uninitialized
+	let mut min_mu  = make_uninit_matrix(rows, cols);
+	let mut max_mu  = make_uninit_matrix(rows, cols);
+	let mut lmin_mu = make_uninit_matrix(rows, cols);
+	let mut lmax_mu = make_uninit_matrix(rows, cols);
+	
+	// warm prefix per row
+	let warm = vec![first; rows];
+	init_matrix_prefixes(&mut min_mu,  cols, &warm);
+	init_matrix_prefixes(&mut max_mu,  cols, &warm);
+	init_matrix_prefixes(&mut lmin_mu, cols, &warm);
+	init_matrix_prefixes(&mut lmax_mu, cols, &warm);
+	
+	// flatten to &mut [f64] without copies
+	let mut min_guard  = core::mem::ManuallyDrop::new(min_mu);
+	let mut max_guard  = core::mem::ManuallyDrop::new(max_mu);
+	let mut lmin_guard = core::mem::ManuallyDrop::new(lmin_mu);
+	let mut lmax_guard = core::mem::ManuallyDrop::new(lmax_mu);
+	
+	let is_min:   &mut [f64] = unsafe { core::slice::from_raw_parts_mut(min_guard.as_mut_ptr()  as *mut f64,  min_guard.len())  };
+	let is_max:   &mut [f64] = unsafe { core::slice::from_raw_parts_mut(max_guard.as_mut_ptr()  as *mut f64,  max_guard.len())  };
+	let last_min: &mut [f64] = unsafe { core::slice::from_raw_parts_mut(lmin_guard.as_mut_ptr() as *mut f64,  lmin_guard.len()) };
+	let last_max: &mut [f64] = unsafe { core::slice::from_raw_parts_mut(lmax_guard.as_mut_ptr() as *mut f64,  lmax_guard.len()) };
 
+	// row worker
 	let do_row = |row: usize,
 	              out_min: &mut [f64],
 	              out_max: &mut [f64],
-	              out_last_min: &mut [f64],
-	              out_last_max: &mut [f64]| unsafe {
-		let order = combos[row].order.unwrap();
+	              out_lmin:&mut [f64],
+	              out_lmax:&mut [f64]| unsafe {
+		let o = combos[row].order.unwrap();
 		match kern {
-			Kernel::Scalar => minmax_row_scalar(
-				high,
-				low,
-				first_valid_idx,
-				order,
-				out_min,
-				out_max,
-				out_last_min,
-				out_last_max,
-			),
+			Kernel::Scalar | Kernel::ScalarBatch =>
+				minmax_row_scalar(high, low, first, o, out_min, out_max, out_lmin, out_lmax),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => minmax_row_avx2(
-				high,
-				low,
-				first_valid_idx,
-				order,
-				out_min,
-				out_max,
-				out_last_min,
-				out_last_max,
-			),
+			Kernel::Avx2 | Kernel::Avx2Batch =>
+				minmax_row_avx2(high, low, first, o, out_min, out_max, out_lmin, out_lmax),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => minmax_row_avx512(
-				high,
-				low,
-				first_valid_idx,
-				order,
-				out_min,
-				out_max,
-				out_last_min,
-				out_last_max,
-			),
-			_ => unreachable!(),
+			Kernel::Avx512 | Kernel::Avx512Batch =>
+				minmax_row_avx512(high, low, first, o, out_min, out_max, out_lmin, out_lmax),
+			_ => minmax_row_scalar(high, low, first, o, out_min, out_max, out_lmin, out_lmax),
 		}
 	};
 
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			is_min
-				.par_chunks_mut(cols)
+			is_min.par_chunks_mut(cols)
 				.zip(is_max.par_chunks_mut(cols))
 				.zip(last_min.par_chunks_mut(cols).zip(last_max.par_chunks_mut(cols)))
 				.enumerate()
-				.for_each(|(row, ((min, max), (lmin, lmax)))| do_row(row, min, max, lmin, lmax));
+				.for_each(|(row, ((m, x), (lm, lx)))| do_row(row, m, x, lm, lx));
 		}
 		#[cfg(target_arch = "wasm32")]
-		{
-			for (row, ((min, max), (lmin, lmax))) in is_min
-				.chunks_mut(cols)
-				.zip(is_max.chunks_mut(cols))
-				.zip(last_min.chunks_mut(cols).zip(last_max.chunks_mut(cols)))
-				.enumerate()
-			{
-				do_row(row, min, max, lmin, lmax)
-			}
-		}
-	} else {
-		for (row, ((min, max), (lmin, lmax))) in is_min
-			.chunks_mut(cols)
+		for (row, ((m, x), (lm, lx))) in is_min.chunks_mut(cols)
 			.zip(is_max.chunks_mut(cols))
 			.zip(last_min.chunks_mut(cols).zip(last_max.chunks_mut(cols)))
-			.enumerate()
-		{
-			do_row(row, min, max, lmin, lmax)
+			.enumerate() {
+			do_row(row, m, x, lm, lx);
+		}
+	} else {
+		for (row, ((m, x), (lm, lx))) in is_min.chunks_mut(cols)
+			.zip(is_max.chunks_mut(cols))
+			.zip(last_min.chunks_mut(cols).zip(last_max.chunks_mut(cols)))
+			.enumerate() {
+			do_row(row, m, x, lm, lx);
 		}
 	}
-	
-	Ok(MinmaxBatchOutput {
-		is_min,
-		is_max,
-		last_min,
-		last_max,
-		combos,
-		rows,
-		cols,
-	})
+
+	// reconstitute Vec<f64> without copies
+	let is_min  = unsafe { Vec::from_raw_parts(min_guard.as_mut_ptr()  as *mut f64, min_guard.len(),  min_guard.capacity())  };
+	let is_max  = unsafe { Vec::from_raw_parts(max_guard.as_mut_ptr()  as *mut f64, max_guard.len(),  max_guard.capacity())  };
+	let last_min= unsafe { Vec::from_raw_parts(lmin_guard.as_mut_ptr() as *mut f64, lmin_guard.len(), lmin_guard.capacity()) };
+	let last_max= unsafe { Vec::from_raw_parts(lmax_guard.as_mut_ptr() as *mut f64, lmax_guard.len(), lmax_guard.capacity()) };
+
+	Ok(MinmaxBatchOutput { is_min, is_max, last_min, last_max, combos, rows, cols })
 }
 
 // Direct buffer writing variant for Python/WASM bindings
 #[inline(always)]
 fn minmax_batch_inner_into(
 	high: &[f64],
-	low: &[f64],
+	low:  &[f64],
 	sweep: &MinmaxBatchRange,
-	kern: Kernel,
+	kern:  Kernel,
 	parallel: bool,
-	is_min_out: &mut [f64],
-	is_max_out: &mut [f64],
+	is_min_out:   &mut [f64],
+	is_max_out:   &mut [f64],
 	last_min_out: &mut [f64],
 	last_max_out: &mut [f64],
 ) -> Result<Vec<MinmaxParams>, MinmaxError> {
+	if high.is_empty() || low.is_empty() { return Err(MinmaxError::EmptyData); }
+	if high.len()!=low.len() { return Err(MinmaxError::InvalidOrder { order: 0, data_len: high.len().max(low.len()) }); }
+
 	let combos = expand_grid(sweep);
-	if combos.is_empty() {
-		return Err(MinmaxError::InvalidOrder { order: 0, data_len: 0 });
-	}
-	
-	let len_data = high.len();
-	let first_valid_idx = high
-		.iter()
-		.zip(low.iter())
-		.position(|(&h, &l)| !(h.is_nan() || l.is_nan()))
-		.ok_or(MinmaxError::AllValuesNaN)?;
-	
-	let max_o = combos.iter().map(|c| c.order.unwrap()).max().unwrap();
-	if (len_data - first_valid_idx) < max_o {
-		return Err(MinmaxError::NotEnoughValidData {
-			needed: max_o,
-			valid: len_data - first_valid_idx,
-		});
-	}
-	
+	if combos.is_empty() { return Err(MinmaxError::InvalidOrder { order: 0, data_len: 0 }); }
+
+	let len = high.len();
 	let rows = combos.len();
-	let cols = len_data;
-	
-	// Initialize ALL values with NaN before computation
-	// The scalar function only writes to is_min/is_max when extrema are detected,
-	// leaving other indices uninitialized
-	for v in is_min_out.iter_mut() {
-		*v = f64::NAN;
+	let cols = len;
+
+	if is_min_out.len()!=rows*cols || is_max_out.len()!=rows*cols ||
+	   last_min_out.len()!=rows*cols || last_max_out.len()!=rows*cols {
+		return Err(MinmaxError::InvalidOrder { order: is_min_out.len(), data_len: rows*cols });
 	}
-	for v in is_max_out.iter_mut() {
-		*v = f64::NAN;
+
+	let first = high.iter().zip(low.iter())
+		.position(|(&h,&l)| !(h.is_nan() || l.is_nan()))
+		.ok_or(MinmaxError::AllValuesNaN)?;
+	let max_o = combos.iter().map(|c| c.order.unwrap()).max().unwrap();
+	if len - first < max_o {
+		return Err(MinmaxError::NotEnoughValidData { needed: max_o, valid: len - first });
 	}
-	
-	// Initialize last_min/last_max warmup periods for each row
-	for row in 0..rows {
-		let row_start = row * cols;
-		for i in 0..first_valid_idx {
-			last_min_out[row_start + i] = f64::NAN;
-			last_max_out[row_start + i] = f64::NAN;
-		}
-	}
+
+	// Treat raw outputs as MaybeUninit and use prefix helper
+	let warm = vec![first; rows];
+	let (min_mu, max_mu, lmin_mu, lmax_mu) = unsafe {
+		(
+			core::slice::from_raw_parts_mut(is_min_out.as_mut_ptr()   as *mut std::mem::MaybeUninit<f64>, rows*cols),
+			core::slice::from_raw_parts_mut(is_max_out.as_mut_ptr()   as *mut std::mem::MaybeUninit<f64>, rows*cols),
+			core::slice::from_raw_parts_mut(last_min_out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>, rows*cols),
+			core::slice::from_raw_parts_mut(last_max_out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>, rows*cols),
+		)
+	};
+	init_matrix_prefixes(min_mu,  cols, &warm);
+	init_matrix_prefixes(max_mu,  cols, &warm);
+	init_matrix_prefixes(lmin_mu, cols, &warm);
+	init_matrix_prefixes(lmax_mu, cols, &warm);
 	
 	let do_row = |row: usize,
 	              out_min: &mut [f64],
 	              out_max: &mut [f64],
-	              out_last_min: &mut [f64],
-	              out_last_max: &mut [f64]| unsafe {
-		let order = combos[row].order.unwrap();
+	              out_lmin:&mut [f64],
+	              out_lmax:&mut [f64]| unsafe {
+		let o = combos[row].order.unwrap();
 		match kern {
-			Kernel::Scalar => minmax_row_scalar(
-				high,
-				low,
-				first_valid_idx,
-				order,
-				out_min,
-				out_max,
-				out_last_min,
-				out_last_max,
-			),
+			Kernel::Scalar | Kernel::ScalarBatch =>
+				minmax_row_scalar(high, low, first, o, out_min, out_max, out_lmin, out_lmax),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => minmax_row_avx2(
-				high,
-				low,
-				first_valid_idx,
-				order,
-				out_min,
-				out_max,
-				out_last_min,
-				out_last_max,
-			),
+			Kernel::Avx2 | Kernel::Avx2Batch =>
+				minmax_row_avx2(high, low, first, o, out_min, out_max, out_lmin, out_lmax),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => minmax_row_avx512(
-				high,
-				low,
-				first_valid_idx,
-				order,
-				out_min,
-				out_max,
-				out_last_min,
-				out_last_max,
-			),
-			_ => unreachable!(),
+			Kernel::Avx512 | Kernel::Avx512Batch =>
+				minmax_row_avx512(high, low, first, o, out_min, out_max, out_lmin, out_lmax),
+			_ => minmax_row_scalar(high, low, first, o, out_min, out_max, out_lmin, out_lmax),
 		}
 	};
 	
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			is_min_out
-				.par_chunks_mut(cols)
+			is_min_out.par_chunks_mut(cols)
 				.zip(is_max_out.par_chunks_mut(cols))
 				.zip(last_min_out.par_chunks_mut(cols).zip(last_max_out.par_chunks_mut(cols)))
 				.enumerate()
-				.for_each(|(row, ((min, max), (lmin, lmax)))| do_row(row, min, max, lmin, lmax));
+				.for_each(|(row, ((m,x),(lm,lx)))| do_row(row, m, x, lm, lx));
 		}
 		#[cfg(target_arch = "wasm32")]
-		{
-			for (row, ((min, max), (lmin, lmax))) in is_min_out
-				.chunks_mut(cols)
-				.zip(is_max_out.chunks_mut(cols))
-				.zip(last_min_out.chunks_mut(cols).zip(last_max_out.chunks_mut(cols)))
-				.enumerate()
-			{
-				do_row(row, min, max, lmin, lmax)
-			}
-		}
-	} else {
-		for (row, ((min, max), (lmin, lmax))) in is_min_out
-			.chunks_mut(cols)
+		for (row, ((m,x),(lm,lx))) in is_min_out.chunks_mut(cols)
 			.zip(is_max_out.chunks_mut(cols))
 			.zip(last_min_out.chunks_mut(cols).zip(last_max_out.chunks_mut(cols)))
-			.enumerate()
-		{
-			do_row(row, min, max, lmin, lmax)
+			.enumerate() {
+			do_row(row, m, x, lm, lx);
+		}
+	} else {
+		for (row, ((m,x),(lm,lx))) in is_min_out.chunks_mut(cols)
+			.zip(is_max_out.chunks_mut(cols))
+			.zip(last_min_out.chunks_mut(cols).zip(last_max_out.chunks_mut(cols)))
+			.enumerate() {
+			do_row(row, m, x, lm, lx);
 		}
 	}
 	
@@ -1225,31 +1182,30 @@ pub fn minmax_batch_py<'py>(
 // --- WASM BINDINGS ---
 
 #[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct MinmaxResult {
+	pub values: Vec<f64>, // [is_min..., is_max..., last_min..., last_max...]
+	pub rows: usize,      // 4
+	pub cols: usize,      // len
+}
+
+#[cfg(feature = "wasm")]
 #[wasm_bindgen]
-pub fn minmax_js(
-	high: &[f64],
-	low: &[f64],
-	order: usize,
-) -> Result<JsValue, JsValue> {
-	let params = MinmaxParams { order: Some(order) };
-	let input = MinmaxInput::from_slices(high, low, params);
-	
-	// Single allocation for all outputs
-	let len = high.len();
-	let mut is_min = vec![0.0; len];
-	let mut is_max = vec![0.0; len];
-	let mut last_min = vec![0.0; len];
-	let mut last_max = vec![0.0; len];
-	
-	minmax_into_slice(&mut is_min, &mut is_max, &mut last_min, &mut last_max, &input, Kernel::Auto)
+pub fn minmax_js(high: &[f64], low: &[f64], order: usize) -> Result<JsValue, JsValue> {
+	let input = MinmaxInput::from_slices(high, low, MinmaxParams { order: Some(order) });
+
+	let out = minmax_with_kernel(&input, Kernel::Auto)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
-	
-	let result = js_sys::Object::new();
-	js_sys::Reflect::set(&result, &"is_min".into(), &serde_wasm_bindgen::to_value(&is_min).unwrap()).unwrap();
-	js_sys::Reflect::set(&result, &"is_max".into(), &serde_wasm_bindgen::to_value(&is_max).unwrap()).unwrap();
-	js_sys::Reflect::set(&result, &"last_min".into(), &serde_wasm_bindgen::to_value(&last_min).unwrap()).unwrap();
-	js_sys::Reflect::set(&result, &"last_max".into(), &serde_wasm_bindgen::to_value(&last_max).unwrap()).unwrap();
-	Ok(result.into())
+
+	let len = high.len();
+	let mut values = Vec::with_capacity(4 * len);
+	values.extend_from_slice(&out.is_min);
+	values.extend_from_slice(&out.is_max);
+	values.extend_from_slice(&out.last_min);
+	values.extend_from_slice(&out.last_max);
+
+	let result = MinmaxResult { values, rows: 4, cols: len };
+	serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 #[cfg(feature = "wasm")]
@@ -1375,50 +1331,43 @@ pub struct MinmaxBatchConfig {
 }
 
 #[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct MinmaxBatchJsOutput {
+	pub values: Vec<f64>,     // concatenated by series, then by combo
+	pub combos: Vec<MinmaxParams>,
+	pub rows: usize,          // 4 * combos.len()
+	pub cols: usize,          // len
+}
+
+#[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = minmax_batch)]
-pub fn minmax_batch_unified_js(
-	high: &[f64],
-	low: &[f64],
-	config: JsValue,
-) -> Result<JsValue, JsValue> {
-	let config: MinmaxBatchConfig = serde_wasm_bindgen::from_value(config)
+pub fn minmax_batch_unified_js(high: &[f64], low: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let cfg: MinmaxBatchConfig = serde_wasm_bindgen::from_value(config)
 		.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
-	
-	let sweep = MinmaxBatchRange { order: config.order_range };
-	
-	minmax_batch_with_kernel(high, low, &sweep, Kernel::Auto)
-		.map(|output| {
-			let result = js_sys::Object::new();
-			let rows = output.rows;
-			let cols = output.cols;
-			
-			// Create 2D arrays for each output
-			let is_min_2d = js_sys::Array::new();
-			let is_max_2d = js_sys::Array::new();
-			let last_min_2d = js_sys::Array::new();
-			let last_max_2d = js_sys::Array::new();
-			
-			for i in 0..rows {
-				let start = i * cols;
-				let end = start + cols;
-				
-				is_min_2d.push(&serde_wasm_bindgen::to_value(&output.is_min[start..end]).unwrap());
-				is_max_2d.push(&serde_wasm_bindgen::to_value(&output.is_max[start..end]).unwrap());
-				last_min_2d.push(&serde_wasm_bindgen::to_value(&output.last_min[start..end]).unwrap());
-				last_max_2d.push(&serde_wasm_bindgen::to_value(&output.last_max[start..end]).unwrap());
-			}
-			
-			js_sys::Reflect::set(&result, &"is_min".into(), &is_min_2d).unwrap();
-			js_sys::Reflect::set(&result, &"is_max".into(), &is_max_2d).unwrap();
-			js_sys::Reflect::set(&result, &"last_min".into(), &last_min_2d).unwrap();
-			js_sys::Reflect::set(&result, &"last_max".into(), &last_max_2d).unwrap();
-			js_sys::Reflect::set(&result, &"combos".into(), &serde_wasm_bindgen::to_value(&output.combos).unwrap()).unwrap();
-			js_sys::Reflect::set(&result, &"rows".into(), &JsValue::from_f64(rows as f64)).unwrap();
-			js_sys::Reflect::set(&result, &"cols".into(), &JsValue::from_f64(cols as f64)).unwrap();
-			
-			result.into()
-		})
-		.map_err(|e| JsValue::from_str(&e.to_string()))
+
+	let sweep = MinmaxBatchRange { order: cfg.order_range };
+	let out = minmax_batch_with_kernel(high, low, &sweep, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	let rows = out.rows;  // combos
+	let cols = out.cols;
+
+	let mut values = Vec::with_capacity(4 * rows * cols);
+	// series-major layout: is_min, is_max, last_min, last_max blocks
+	for series in 0..4 {
+		for r in 0..rows {
+			let (src, start) = match series {
+				0 => (&out.is_min,   r * cols),
+				1 => (&out.is_max,   r * cols),
+				2 => (&out.last_min, r * cols),
+				_ => (&out.last_max, r * cols),
+			};
+			values.extend_from_slice(&src[start..start + cols]);
+		}
+	}
+
+	let js_out = MinmaxBatchJsOutput { values, combos: out.combos, rows: 4 * rows, cols };
+	serde_wasm_bindgen::to_value(&js_out).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 #[cfg(feature = "wasm")]

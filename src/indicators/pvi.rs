@@ -310,7 +310,7 @@ pub fn pvi_into_slice(dst: &mut [f64], input: &PviInput, kern: Kernel) -> Result
 		}
 	}
 
-	// Fill warmup period with NaN
+	// We only set the warmup prefix to NaN; no other NaNs are filled or imputed.
 	for v in &mut dst[..first_valid_idx] {
 		*v = f64::NAN;
 	}
@@ -331,16 +331,52 @@ pub fn pvi_avx512(close: &[f64], volume: &[f64], first_valid: usize, initial: f6
 }
 
 #[inline]
-pub fn pvi_scalar(close: &[f64], volume: &[f64], first_valid: usize, initial: f64, out: &mut [f64]) {
-	let mut pvi_current = initial;
-	out[first_valid] = pvi_current;
-	for i in (first_valid + 1)..close.len() {
-		if !close[i].is_nan() && !volume[i].is_nan() && !close[i - 1].is_nan() && !volume[i - 1].is_nan() {
-			if volume[i] > volume[i - 1] {
-				pvi_current += ((close[i] - close[i - 1]) / close[i - 1]) * pvi_current;
+pub fn pvi_scalar(
+	close: &[f64],
+	volume: &[f64],
+	first_valid: usize,
+	initial: f64,
+	out: &mut [f64],
+) {
+	debug_assert_eq!(close.len(), volume.len());
+	debug_assert_eq!(close.len(), out.len());
+	let n = close.len();
+	if n == 0 { return; }
+
+	// First valid point
+	let mut pvi = initial;
+	out[first_valid] = pvi;
+
+	// Track previous day (required by definition)
+	let mut prev_close = close[first_valid];
+	let mut prev_vol   = volume[first_valid];
+
+	for i in (first_valid + 1)..n {
+		let c = close[i];
+		let v = volume[i];
+
+		// If current or previous is invalid, cannot compute. Emit NaN, then
+		// reset previous to current if current is valid so the next day can resume.
+		if c.is_nan() || v.is_nan() || prev_close.is_nan() || prev_vol.is_nan() {
+			out[i] = f64::NAN;
+			// reset prev only if current is valid; otherwise keep NaN so the next
+			// day also yields NaN until a valid current arrives.
+			if !c.is_nan() && !v.is_nan() {
+				prev_close = c;
+				prev_vol = v;
 			}
-			out[i] = pvi_current;
+			continue;
 		}
+
+		if v > prev_vol {
+			// Safe because prev_close is finite here
+			let r = (c - prev_close) / prev_close;
+			pvi += r * pvi;
+		}
+		out[i] = pvi;
+
+		prev_close = c;
+		prev_vol = v;
 	}
 }
 
@@ -568,17 +604,11 @@ fn pvi_batch_inner(
 	parallel: bool,
 ) -> Result<PviBatchOutput, PviError> {
 	let combos = expand_grid(sweep);
-	if combos.is_empty() {
-		return Err(PviError::EmptyData);
-	}
-	if close.is_empty() || volume.is_empty() {
-		return Err(PviError::EmptyData);
-	}
-	if close.len() != volume.len() {
-		return Err(PviError::MismatchedLength);
-	}
-	let first_valid_idx = close
-		.iter()
+	if combos.is_empty() { return Err(PviError::EmptyData); }
+	if close.is_empty() || volume.is_empty() { return Err(PviError::EmptyData); }
+	if close.len() != volume.len() { return Err(PviError::MismatchedLength); }
+
+	let first_valid_idx = close.iter()
 		.zip(volume.iter())
 		.position(|(&c, &v)| !c.is_nan() && !v.is_nan())
 		.ok_or(PviError::AllValuesNaN)?;
@@ -588,80 +618,39 @@ fn pvi_batch_inner(
 
 	let rows = combos.len();
 	let cols = close.len();
+
+	// 1) allocate rows×cols uninit
 	let mut buf_mu = make_uninit_matrix(rows, cols);
-	
-	// PVI uses the same warmup period for all rows
-	// For small row counts, use stack allocation to avoid heap allocation
+
+	// 2) write NaN warm prefixes per row
 	if rows <= 32 {
-		let mut warmup_array = [0usize; 32];
-		for i in 0..rows {
-			warmup_array[i] = first_valid_idx;
-		}
-		init_matrix_prefixes(&mut buf_mu, cols, &warmup_array[..rows]);
+		let mut warm = [0usize; 32];
+		for i in 0..rows { warm[i] = first_valid_idx; }
+		init_matrix_prefixes(&mut buf_mu, cols, &warm[..rows]);
 	} else {
-		// For larger row counts, we need a Vec (but this is still O(rows) not O(data))
-		let warmup_periods = vec![first_valid_idx; rows];
-		init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
+		let warm = vec![first_valid_idx; rows];
+		init_matrix_prefixes(&mut buf_mu, cols, &warm);
 	}
-	
-	// Convert to initialized slice
-	let values_guard = unsafe {
-		core::mem::ManuallyDrop::new(
-			Vec::from_raw_parts(buf_mu.as_mut_ptr() as *mut f64, buf_mu.len(), buf_mu.capacity())
-		)
-	};
-	let values = unsafe {
-		core::slice::from_raw_parts_mut(values_guard.as_ptr() as *mut f64, values_guard.len())
-	};
 
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-		let iv = combos[row].initial_value.unwrap_or(1000.0);
-		match kern {
-			Kernel::Scalar => pvi_row_scalar(close, volume, first_valid_idx, iv, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => pvi_row_avx2(close, volume, first_valid_idx, iv, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => pvi_row_avx512(close, volume, first_valid_idx, iv, out_row),
-			_ => unreachable!(),
-		}
-	};
-	if parallel {
-		#[cfg(not(target_arch = "wasm32"))]
-		{
-			values
-				.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
-		}
+	// 3) prevent drop of the allocation while we lend it out
+	let mut guard = core::mem::ManuallyDrop::new(buf_mu);
 
-		#[cfg(target_arch = "wasm32")]
-		{
-			for (row, slice) in values.chunks_mut(cols).enumerate() {
-				do_row(row, slice);
-			}
-		}
-	} else {
-		for (row, slice) in values.chunks_mut(cols).enumerate() {
-			do_row(row, slice);
-		}
-	}
-	
-	// Convert back to Vec
+	// 4) invoke the inner writer on the same allocation, cast as f64*
+	let out_f: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len())
+	};
+	pvi_batch_inner_into(close, volume, sweep, kern, parallel, out_f)?;
+
+	// 5) take ownership of the same allocation as Vec<f64> without copies
 	let values = unsafe {
 		Vec::from_raw_parts(
-			values_guard.as_ptr() as *mut f64,
-			values_guard.len(),
-			values_guard.capacity()
+			guard.as_mut_ptr() as *mut f64,
+			guard.len(),
+			guard.capacity(),
 		)
 	};
-	core::mem::forget(values_guard);
-	
-	Ok(PviBatchOutput {
-		values,
-		combos,
-		rows,
-		cols,
-	})
+
+	Ok(PviBatchOutput { values, combos, rows, cols })
 }
 
 #[inline(always)]
@@ -674,17 +663,11 @@ fn pvi_batch_inner_into(
 	out: &mut [f64],
 ) -> Result<Vec<PviParams>, PviError> {
 	let combos = expand_grid(sweep);
-	if combos.is_empty() {
-		return Err(PviError::EmptyData);
-	}
-	if close.is_empty() || volume.is_empty() {
-		return Err(PviError::EmptyData);
-	}
-	if close.len() != volume.len() {
-		return Err(PviError::MismatchedLength);
-	}
-	let first_valid_idx = close
-		.iter()
+	if combos.is_empty() { return Err(PviError::EmptyData); }
+	if close.is_empty() || volume.is_empty() { return Err(PviError::EmptyData); }
+	if close.len() != volume.len() { return Err(PviError::MismatchedLength); }
+
+	let first_valid_idx = close.iter()
 		.zip(volume.iter())
 		.position(|(&c, &v)| !c.is_nan() && !v.is_nan())
 		.ok_or(PviError::AllValuesNaN)?;
@@ -694,44 +677,50 @@ fn pvi_batch_inner_into(
 
 	let rows = combos.len();
 	let cols = close.len();
-	
-	// Ensure output slice is correct size
-	if out.len() != rows * cols {
-		return Err(PviError::MismatchedLength);
-	}
+	if out.len() != rows * cols { return Err(PviError::MismatchedLength); }
 
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+	// Work on MaybeUninit view to avoid UB
+	let out_mu: &mut [core::mem::MaybeUninit<f64>] = unsafe {
+		core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut core::mem::MaybeUninit<f64>, out.len())
+	};
+
+	let do_row = |row: usize, dst_row_mu: &mut [core::mem::MaybeUninit<f64>]| unsafe {
 		let iv = combos[row].initial_value.unwrap_or(1000.0);
+
+		// reinterpret row as fully-initialized f64s for writing
+		let dst_row: &mut [f64] = core::slice::from_raw_parts_mut(
+			dst_row_mu.as_mut_ptr() as *mut f64,
+			dst_row_mu.len(),
+		);
+
 		match kern {
-			Kernel::Scalar => pvi_row_scalar(close, volume, first_valid_idx, iv, out_row),
+			Kernel::Scalar | Kernel::ScalarBatch => {
+				pvi_row_scalar(close, volume, first_valid_idx, iv, dst_row)
+			}
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => pvi_row_avx2(close, volume, first_valid_idx, iv, out_row),
+			Kernel::Avx2 | Kernel::Avx2Batch => pvi_row_avx2(close, volume, first_valid_idx, iv, dst_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => pvi_row_avx512(close, volume, first_valid_idx, iv, out_row),
-			_ => unreachable!(),
+			Kernel::Avx512 | Kernel::Avx512Batch => pvi_row_avx512(close, volume, first_valid_idx, iv, dst_row),
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+				pvi_row_scalar(close, volume, first_valid_idx, iv, dst_row)
+			}
+			Kernel::Auto => unreachable!("resolved before call"),
 		}
 	};
 
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			out.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
+			use rayon::prelude::*;
+			out_mu.par_chunks_mut(cols).enumerate().for_each(|(r, row)| do_row(r, row));
 		}
-
 		#[cfg(target_arch = "wasm32")]
-		{
-			for (row, slice) in out.chunks_mut(cols).enumerate() {
-				do_row(row, slice);
-			}
-		}
+		for (r, row) in out_mu.chunks_mut(cols).enumerate() { do_row(r, row); }
 	} else {
-		for (row, slice) in out.chunks_mut(cols).enumerate() {
-			do_row(row, slice);
-		}
+		for (r, row) in out_mu.chunks_mut(cols).enumerate() { do_row(r, row); }
 	}
-	
+
 	Ok(combos)
 }
 

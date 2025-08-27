@@ -114,6 +114,34 @@ const EXPECTED_OUTPUTS = {
             59165.14427332
         ]
     },
+    tilson: {
+        defaultParams: { period: 5, volume_factor: 0.0 },
+        last5Values: [
+            59304.716332473254,
+            59283.56868015526,
+            59261.16173577631,
+            59240.25895948583,
+            59203.544843167765
+        ],
+        // Re-input test with period=3, volume_factor=0.7 on first pass results
+        reinputLast5: [
+            59328.94228019944,
+            59292.16983061365,
+            59266.453599233704,
+            59246.38766806718,
+            59223.53114809931
+        ]
+    },
+    dx: {
+        defaultParams: { period: 14 },
+        last5Values: [
+            43.72121533411883,
+            41.47251493226443,
+            43.43041386436222,
+            43.22673458811955,
+            51.65514026197179
+        ]
+    },
     gaussian: {
         defaultParams: { period: 14, poles: 4 },
         last5Values: [
@@ -295,6 +323,11 @@ const EXPECTED_OUTPUTS = {
             59934.26876964316
         ]
     },
+    minmax: {
+        defaultParams: { order: 3 },
+        last5ValuesMin: [57876.0, 57876.0, 57876.0, 57876.0, 57876.0],
+        last5ValuesMax: [60102.0, 60102.0, 60102.0, 60102.0, 60102.0]
+    },
     dema: {
         defaultParams: { period: 30 },
         last5Values: [
@@ -385,6 +418,29 @@ const EXPECTED_OUTPUTS = {
             59172.516765286,
             59167.73471400394,
             59067.97928994083
+        ]
+    },
+    kaufmanstop: {
+        defaultParams: {
+            period: 22,
+            mult: 2.0,
+            direction: 'long',
+            maType: 'sma'
+        },
+        last5Values: [
+            56711.545454545456,
+            57132.72727272727,
+            57015.72727272727,
+            57137.18181818182,
+            56516.09090909091
+        ],
+        warmupPeriod: 21,  // first + period - 1 = 0 + 22 - 1
+        batchDefaultRow: [
+            56711.545454545456,
+            57132.72727272727,
+            57015.72727272727,
+            57137.18181818182,
+            56516.09090909091
         ]
     },
     srwma: {
@@ -591,6 +647,24 @@ const EXPECTED_OUTPUTS = {
             ]
         }
     },
+    maaq: {
+        defaultParams: { period: 11, fast_period: 2, slow_period: 30 },
+        last5Values: [
+            59747.657115949725,
+            59740.803138018055,
+            59724.24153333905,
+            59720.60576365108,
+            59673.9954445178
+        ],
+        warmupPeriod: 10,  // period - 1 = 11 - 1
+        batchDefaultRow: [
+            59747.657115949725,
+            59740.803138018055,
+            59724.24153333905,
+            59720.60576365108,
+            59673.9954445178
+        ]
+    },
     aroon: {
         defaultParams: { length: 14 },
         last5Up: [
@@ -700,6 +774,30 @@ const EXPECTED_OUTPUTS = {
             0.9950545846019277,
             0.984954072979463
         ]
+    },
+    damiani_volatmeter: {
+        defaultParams: {
+            vis_atr: 13,
+            vis_std: 20,
+            sed_atr: 40,
+            sed_std: 100,
+            threshold: 1.4
+        },
+        volLast5Values: [
+            0.8539059,  // These are the actual values when using close-only data
+            0.75935611,
+            0.73610448,
+            0.76744843,
+            0.84842545
+        ],
+        antiLast5Values: [
+            1.1250333,  // These are the actual values when using close-only data
+            1.1325502,
+            1.14038661,
+            1.13929192,
+            1.12982407
+        ],
+        warmupPeriod: 101  // max(vis_atr, vis_std, sed_atr, sed_std, 3) + 1
     },
     di: {
         defaultParams: { period: 14 },

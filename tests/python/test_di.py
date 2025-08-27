@@ -24,7 +24,7 @@ class TestDi:
         return load_test_data()
     
     def test_di_accuracy(self, test_data):
-        """Test DI matches expected values from Rust tests"""
+        """Test DI matches expected values from Rust tests - mirrors check_di_accuracy"""
         expected = EXPECTED_OUTPUTS['di']
         
         # Calculate DI with default parameters
@@ -54,7 +54,7 @@ class TestDi:
         )
     
     def test_di_partial_params(self, test_data):
-        """Test DI with partial parameters"""
+        """Test DI with partial parameters - mirrors check_di_partial_params"""
         # Test with default period (14)
         plus_di, minus_di = ta_indicators.di(
             test_data['high'],
@@ -76,7 +76,7 @@ class TestDi:
         assert len(minus_di_10) == len(test_data['close'])
     
     def test_di_errors(self):
-        """Test error handling"""
+        """Test error handling - mirrors check_di_with_zero_period and check_di_with_period_exceeding_data_length"""
         # Test with zero period
         with pytest.raises(ValueError, match="Invalid period"):
             ta_indicators.di(np.array([10.0, 11.0, 12.0]), 
@@ -94,7 +94,7 @@ class TestDi:
             ta_indicators.di(np.array([]), np.array([]), np.array([]), 14)
     
     def test_di_nan_check(self, test_data):
-        """Test DI NaN handling"""
+        """Test DI NaN handling - mirrors check_di_accuracy_nan_check"""
         plus_di, minus_di = ta_indicators.di(
             test_data['high'],
             test_data['low'],
@@ -135,7 +135,7 @@ class TestDi:
                 assert not np.isnan(minus_di)
     
     def test_di_batch(self, test_data):
-        """Test DI batch processing"""
+        """Test DI batch processing - mirrors check_batch_period_range"""
         # Test batch with single period
         result = ta_indicators.di_batch(
             test_data['high'],
@@ -166,6 +166,64 @@ class TestDi:
         assert result_multi['minus'].shape == (3, len(test_data['close']))
         assert len(result_multi['periods']) == 3
         assert list(result_multi['periods']) == [10, 15, 20]
+    
+    def test_di_very_small_dataset(self):
+        """Test DI fails with insufficient data - mirrors check_di_very_small_data_set"""
+        single_point = np.array([42.0])
+        low_point = np.array([41.0])
+        close_point = np.array([41.5])
+        
+        with pytest.raises(ValueError, match="Invalid period|Not enough valid data"):
+            ta_indicators.di(single_point, low_point, close_point, 14)
+    
+    def test_di_all_nan_input(self):
+        """Test DI with all NaN values"""
+        all_nan = np.full(100, np.nan)
+        
+        with pytest.raises(ValueError, match="All values are NaN"):
+            ta_indicators.di(all_nan, all_nan, all_nan, 14)
+    
+    def test_di_default_candles(self, test_data):
+        """Test DI with default parameters"""
+        # Default period is 14
+        plus_di, minus_di = ta_indicators.di(
+            test_data['high'],
+            test_data['low'],
+            test_data['close'],
+            14  # Default period
+        )
+        assert len(plus_di) == len(test_data['close'])
+        assert len(minus_di) == len(test_data['close'])
+    
+    def test_di_mismatched_lengths(self):
+        """Test DI with mismatched array lengths"""
+        high = np.array([10.0, 11.0, 12.0])
+        low = np.array([9.0, 8.0])  # Different length
+        close = np.array([9.5, 10.0, 11.0])
+        
+        with pytest.raises(ValueError):
+            ta_indicators.di(high, low, close, 2)
+    
+    def test_di_reinput(self, test_data):
+        """Test DI applied twice (re-input) - mirrors check_di_with_slice_data_reinput"""
+        # First pass
+        first_plus, first_minus = ta_indicators.di(
+            test_data['high'],
+            test_data['low'],
+            test_data['close'],
+            14
+        )
+        
+        # Second pass - apply DI to DI output
+        second_plus, second_minus = ta_indicators.di(
+            first_plus,
+            first_minus,
+            test_data['close'],
+            14
+        )
+        
+        assert len(second_plus) == len(first_plus)
+        assert len(second_minus) == len(first_minus)
 
 
 if __name__ == '__main__':

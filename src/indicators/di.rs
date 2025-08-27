@@ -108,6 +108,17 @@ impl<'a> DiInput<'a> {
 	pub fn get_period(&self) -> usize {
 		self.params.period.unwrap_or(14)
 	}
+	#[inline(always)]
+	pub fn as_slices(&self) -> (&'a [f64], &'a [f64], &'a [f64]) {
+		match &self.data {
+			DiData::Candles { candles } => (
+				source_type(candles, "high"),
+				source_type(candles, "low"),
+				source_type(candles, "close"),
+			),
+			DiData::Slices { high, low, close } => (*high, *low, *close),
+		}
+	}
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -501,9 +512,6 @@ pub struct DiStream {
 	prev_high: f64,
 	prev_low: f64,
 	prev_close: f64,
-	plus_dm: f64,
-	minus_dm: f64,
-	tr: f64,
 }
 
 impl DiStream {
@@ -522,9 +530,6 @@ impl DiStream {
 			prev_high: f64::NAN,
 			prev_low: f64::NAN,
 			prev_close: f64::NAN,
-			plus_dm: 0.0,
-			minus_dm: 0.0,
-			tr: 0.0,
 		})
 	}
 
@@ -749,16 +754,22 @@ fn di_batch_inner_into(
 		});
 	}
 
+	let rows = combos.len();
 	let cols = n;
 	
-	// Initialize NaN prefixes for each row
-	for (row, combo) in combos.iter().enumerate() {
-		let warmup = first + combo.period.unwrap() - 1;
-		let row_start = row * cols;
-		for i in 0..warmup {
-			out_plus[row_start + i] = f64::NAN;
-			out_minus[row_start + i] = f64::NAN;
-		}
+	// Initialize NaN prefixes using helper on MaybeUninit views
+	unsafe {
+		let plus_mu = std::slice::from_raw_parts_mut(
+			out_plus.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>,
+			rows * cols,
+		);
+		let minus_mu = std::slice::from_raw_parts_mut(
+			out_minus.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>,
+			rows * cols,
+		);
+		let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
+		init_matrix_prefixes(plus_mu, cols, &warm);
+		init_matrix_prefixes(minus_mu, cols, &warm);
 	}
 
 	let do_row = |row: usize, out_plus: &mut [f64], out_minus: &mut [f64]| unsafe {
@@ -1878,30 +1889,58 @@ pub fn di_batch_py<'py>(
 	let rows = combos.len();
 	let cols = high_slice.len();
 	
-	// Pre-allocate output arrays for batch operations
-	let plus_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-	let minus_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-	let plus_slice = unsafe { plus_arr.as_slice_mut()? };
-	let minus_slice = unsafe { minus_arr.as_slice_mut()? };
+	// Allocate two flat NumPy arrays without zeroing. We will init warmups via init_matrix_prefixes.
+	let out_plus = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let out_minus = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
 	
+	// Get mutable slices before the closure
+	let pl = unsafe { out_plus.as_slice_mut()? };
+	let mi = unsafe { out_minus.as_slice_mut()? };
+	
+	// Warmup vector
+	// Compute 'first' once
+	let first = (0..cols)
+		.find(|&i| !(high_slice[i].is_nan() || low_slice[i].is_nan() || close_slice[i].is_nan()))
+		.ok_or_else(|| PyValueError::new_err("di: All values are NaN"))?;
+	let warm: Vec<usize> = combos.iter().map(|p| first + p.period.unwrap() - 1).collect();
+	
+	// Initialize NaN prefixes using helper on MaybeUninit views
+	unsafe {
+		let plus_mu = std::slice::from_raw_parts_mut(
+			pl.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>,
+			rows * cols,
+		);
+		let minus_mu = std::slice::from_raw_parts_mut(
+			mi.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>,
+			rows * cols,
+		);
+		init_matrix_prefixes(plus_mu, cols, &warm);
+		init_matrix_prefixes(minus_mu, cols, &warm);
+	}
+	
+	// Fill the rest
 	let combos = py.allow_threads(|| {
-		let kernel = match kern {
-			Kernel::Auto => detect_best_batch_kernel(),
-			k => k,
-		};
-		let simd = match kernel {
+		let simd = match kern {
+			Kernel::Auto => {
+				match detect_best_batch_kernel() {
+					Kernel::Avx512Batch => Kernel::Avx512,
+					Kernel::Avx2Batch => Kernel::Avx2,
+					_ => Kernel::Scalar,
+				}
+			}
 			Kernel::Avx512Batch => Kernel::Avx512,
 			Kernel::Avx2Batch => Kernel::Avx2,
 			Kernel::ScalarBatch => Kernel::Scalar,
-			_ => kernel,
+			k => k,
 		};
-		di_batch_inner_into(high_slice, low_slice, close_slice, &sweep, simd, true, plus_slice, minus_slice)
+		
+		di_batch_inner_into(high_slice, low_slice, close_slice, &sweep, simd, true, pl, mi)
 	})
 	.map_err(|e| PyValueError::new_err(e.to_string()))?;
 	
 	let dict = PyDict::new(py);
-	dict.set_item("plus", plus_arr.reshape((rows, cols))?)?;
-	dict.set_item("minus", minus_arr.reshape((rows, cols))?)?;
+	dict.set_item("plus", out_plus.reshape((rows, cols))?)?;
+	dict.set_item("minus", out_minus.reshape((rows, cols))?)?;
 	dict.set_item(
 		"periods",
 		combos.iter()
@@ -1915,42 +1954,26 @@ pub fn di_batch_py<'py>(
 
 // WASM bindings
 #[cfg(feature = "wasm")]
-#[wasm_bindgen]
-pub struct DiJsOutput {
-	plus: Vec<f64>,
-	minus: Vec<f64>,
+#[derive(Serialize, Deserialize)]
+pub struct DiJsResult {
+	pub values: Vec<f64>, // flattened [plus..., minus...]
+	pub rows: usize,      // 2
+	pub cols: usize,      // len
 }
 
 #[cfg(feature = "wasm")]
-#[wasm_bindgen]
-impl DiJsOutput {
-	#[wasm_bindgen(getter)]
-	pub fn plus(&self) -> Vec<f64> {
-		self.plus.clone()
-	}
-	
-	#[wasm_bindgen(getter)]
-	pub fn minus(&self) -> Vec<f64> {
-		self.minus.clone()
-	}
-}
-
-#[cfg(feature = "wasm")]
-#[wasm_bindgen]
-pub fn di_js(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Result<DiJsOutput, JsValue> {
+#[wasm_bindgen(js_name = di)]
+pub fn di_js(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Result<JsValue, JsValue> {
 	let params = DiParams { period: Some(period) };
 	let input = DiInput::from_slices(high, low, close, params);
-	
-	let mut output_plus = vec![0.0; high.len()];
-	let mut output_minus = vec![0.0; high.len()];
-	
-	di_into_slice(&mut output_plus, &mut output_minus, &input, Kernel::Auto)
+	let out = di_with_kernel(&input, crate::utilities::enums::Kernel::Auto)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
-	
-	Ok(DiJsOutput {
-		plus: output_plus,
-		minus: output_minus,
-	})
+	let cols = high.len();
+	let mut values = Vec::with_capacity(2 * cols);
+	values.extend_from_slice(&out.plus);
+	values.extend_from_slice(&out.minus);
+	let result = DiJsResult { values, rows: 2, cols };
+	serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 #[cfg(feature = "wasm")]
@@ -1976,48 +1999,28 @@ pub fn di_into(
 	high_ptr: *const f64,
 	low_ptr: *const f64,
 	close_ptr: *const f64,
-	plus_ptr: *mut f64,
-	minus_ptr: *mut f64,
+	out_ptr: *mut f64,   // expects length = 2 * len
 	len: usize,
 	period: usize,
 ) -> Result<(), JsValue> {
-	if high_ptr.is_null() || low_ptr.is_null() || close_ptr.is_null() || plus_ptr.is_null() || minus_ptr.is_null() {
-		return Err(JsValue::from_str("Null pointer provided"));
+	if high_ptr.is_null() || low_ptr.is_null() || close_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer to di_into"));
 	}
-	
 	unsafe {
-		let high = std::slice::from_raw_parts(high_ptr, len);
-		let low = std::slice::from_raw_parts(low_ptr, len);
-		let close = std::slice::from_raw_parts(close_ptr, len);
+		let h = std::slice::from_raw_parts(high_ptr, len);
+		let l = std::slice::from_raw_parts(low_ptr, len);
+		let c = std::slice::from_raw_parts(close_ptr, len);
 		let params = DiParams { period: Some(period) };
-		let input = DiInput::from_slices(high, low, close, params);
-		
-		// Check for aliasing - any input could be the same as any output
-		let has_aliasing = high_ptr as *const f64 == plus_ptr as *const f64 ||
-						  high_ptr as *const f64 == minus_ptr as *const f64 ||
-						  low_ptr as *const f64 == plus_ptr as *const f64 ||
-						  low_ptr as *const f64 == minus_ptr as *const f64 ||
-						  close_ptr as *const f64 == plus_ptr as *const f64 ||
-						  close_ptr as *const f64 == minus_ptr as *const f64 ||
-						  plus_ptr == minus_ptr;
-		
-		if has_aliasing {
-			// Use temporary buffers
-			let mut temp_plus = vec![0.0; len];
-			let mut temp_minus = vec![0.0; len];
-			di_into_slice(&mut temp_plus, &mut temp_minus, &input, Kernel::Auto)
+		let input = DiInput::from_slices(h, l, c, params);
+
+		// Compute into owned Vecs to avoid aliasing then copy once to user buffer.
+		let DiOutput { plus, minus } =
+			di_with_kernel(&input, crate::utilities::enums::Kernel::Auto)
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
-			
-			let out_plus = std::slice::from_raw_parts_mut(plus_ptr, len);
-			let out_minus = std::slice::from_raw_parts_mut(minus_ptr, len);
-			out_plus.copy_from_slice(&temp_plus);
-			out_minus.copy_from_slice(&temp_minus);
-		} else {
-			let out_plus = std::slice::from_raw_parts_mut(plus_ptr, len);
-			let out_minus = std::slice::from_raw_parts_mut(minus_ptr, len);
-			di_into_slice(out_plus, out_minus, &input, Kernel::Auto)
-				.map_err(|e| JsValue::from_str(&e.to_string()))?;
-		}
+
+		let out = std::slice::from_raw_parts_mut(out_ptr, 2 * len);
+		out[..len].copy_from_slice(&plus);
+		out[len..2 * len].copy_from_slice(&minus);
 		Ok(())
 	}
 }
@@ -2031,33 +2034,42 @@ pub struct DiBatchConfig {
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct DiBatchJsOutput {
-	pub plus: Vec<f64>,
-	pub minus: Vec<f64>,
-	pub periods: Vec<usize>,
-	pub rows: usize,
-	pub cols: usize,
+	pub values: Vec<f64>,     // flattened with row-major: for each combo, plus row then minus row
+	pub rows: usize,          // 2 * combos
+	pub cols: usize,          // len
+	pub periods: Vec<usize>,  // one per combo
 }
 
 #[cfg(feature = "wasm")]
-#[wasm_bindgen(js_name = "di_batch")]
-pub fn di_batch_js(high: &[f64], low: &[f64], close: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
-	let config: DiBatchConfig = serde_wasm_bindgen::from_value(config)
-		.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
-	
-	let sweep = DiBatchRange { period: config.period_range };
-	
-	let output = di_batch_inner(high, low, close, &sweep, Kernel::Auto, false)
+#[wasm_bindgen(js_name = di_batch)]
+pub fn di_batch_unified_js(high: &[f64], low: &[f64], close: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let cfg: DiBatchConfig =
+		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	let sweep = DiBatchRange { period: cfg.period_range };
+	let output = di_batch_slice(high, low, close, &sweep, crate::utilities::enums::Kernel::Scalar)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
-	
-	let js_output = DiBatchJsOutput {
-		plus: output.plus,
-		minus: output.minus,
-		periods: output.combos.iter().map(|p| p.period.unwrap()).collect(),
-		rows: output.rows,
-		cols: output.cols,
+	let rows = output.rows * 2;
+	let cols = output.cols;
+
+	let mut values = Vec::with_capacity(rows * cols);
+	// Interleave per-combo as two rows: plus then minus
+	for combo_idx in 0..output.rows {
+		let start = combo_idx * cols;
+		values.extend_from_slice(&output.plus[start..start + cols]);
+		values.extend_from_slice(&output.minus[start..start + cols]);
+	}
+
+	let js = DiBatchJsOutput {
+		values,
+		rows,
+		cols,
+		periods: output
+			.combos
+			.iter()
+			.map(|p| p.period.unwrap())
+			.collect::<Vec<_>>(),
 	};
-	
-	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&e.to_string()))
+	serde_wasm_bindgen::to_value(&js).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 #[cfg(feature = "wasm")]

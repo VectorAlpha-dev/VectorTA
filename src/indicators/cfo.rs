@@ -206,6 +206,10 @@ pub enum CfoError {
 	NotEnoughValidData { needed: usize, valid: usize },
 	#[error("cfo: No data provided.")]
 	NoData,
+	#[error("cfo: Slice length mismatch: output = {output_len}, input = {input_len}")]
+	SliceLengthMismatch { output_len: usize, input_len: usize },
+	#[error("cfo: Invalid kernel for batch operation. Expected batch kernel, got {kernel:?}")]
+	InvalidBatchKernel { kernel: Kernel },
 }
 
 #[cfg(feature = "wasm")]
@@ -234,9 +238,9 @@ pub fn cfo_into_slice(dst: &mut [f64], input: &CfoInput, kernel: Kernel) -> Resu
 	}
 
 	if dst.len() != data.len() {
-		return Err(CfoError::InvalidPeriod {
-			period: dst.len(),
-			data_len: data.len(),
+		return Err(CfoError::SliceLengthMismatch {
+			output_len: dst.len(),
+			input_len: data.len(),
 		});
 	}
 
@@ -359,9 +363,14 @@ pub fn cfo_scalar(data: &[f64], period: usize, scalar: f64, first_valid: usize, 
 		let a = (sum_y - b * x_f) / period_f;
 		let forecast = a + b * period_f;
 
-		if !val.is_nan() {
-			out[i] = scalar * (val - forecast) / val;
-		}
+		// Always store one value past warmup.
+		let y = if val.is_finite() && val != 0.0 {
+			scalar * (val - forecast) / val
+		} else {
+			f64::NAN
+		};
+		unsafe { *out.get_unchecked_mut(i) = y; }
+
 		sum_xy -= sum_y;
 		let oldest_idx = i - (period - 1);
 		let oldest_val = data[oldest_idx];
@@ -523,7 +532,11 @@ impl CfoStream {
 		let a = (sum_y - b * x_f) / period_f;
 		let forecast = a + b * period_f;
 		let cur = self.buf[(self.idx + n - 1) % n];
-		self.scalar * (cur - forecast) / cur
+		if cur.is_finite() && cur != 0.0 {
+			self.scalar * (cur - forecast) / cur
+		} else {
+			f64::NAN
+		}
 	}
 }
 
@@ -597,7 +610,7 @@ pub fn cfo_batch_with_kernel(data: &[f64], sweep: &CfoBatchRange, k: Kernel) -> 
 	let kernel = match k {
 		Kernel::Auto => detect_best_batch_kernel(),
 		other if other.is_batch() => other,
-		_ => return Err(CfoError::InvalidPeriod { period: 0, data_len: 0 }),
+		other => return Err(CfoError::InvalidBatchKernel { kernel: other }),
 	};
 	let simd = match kernel {
 		Kernel::Avx512Batch => Kernel::Avx512,
@@ -689,6 +702,13 @@ fn cfo_batch_inner(
 	if data.is_empty() {
 		return Err(CfoError::NoData);
 	}
+	// Validate all periods are > 0
+	for combo in &combos {
+		let period = combo.period.unwrap();
+		if period == 0 || period > data.len() {
+			return Err(CfoError::InvalidPeriod { period, data_len: data.len() });
+		}
+	}
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(CfoError::AllValuesNaN)?;
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
 	if data.len() - first < max_p {
@@ -779,6 +799,13 @@ pub fn cfo_batch_inner_into(
 	if data.is_empty() {
 		return Err(CfoError::NoData);
 	}
+	// Validate all periods are > 0
+	for combo in &combos {
+		let period = combo.period.unwrap();
+		if period == 0 || period > data.len() {
+			return Err(CfoError::InvalidPeriod { period, data_len: data.len() });
+		}
+	}
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(CfoError::AllValuesNaN)?;
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
 	if data.len() - first < max_p {
@@ -790,25 +817,27 @@ pub fn cfo_batch_inner_into(
 	let rows = combos.len();
 	let cols = data.len();
 
-	// Initialize NaN prefixes row-wise using helper
+	// Overlay output as MaybeUninit and initialize warmup prefixes with the helper.
+	let out_mu: &mut [core::mem::MaybeUninit<f64>] = unsafe {
+		core::slice::from_raw_parts_mut(output.as_mut_ptr() as *mut core::mem::MaybeUninit<f64>, output.len())
+	};
 	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
-	for (row, &warmup) in warm.iter().enumerate() {
-		let row_start = row * cols;
-		let warmup = warmup.min(cols);
-		output[row_start..row_start + warmup].fill(f64::NAN);
-	}
+	init_matrix_prefixes(out_mu, cols, &warm);
 
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-		let period = combos[row].period.unwrap();
-		let scalar = combos[row].scalar.unwrap();
+	// Per-row compute writes only post-warmup cells.
+	let do_row = |row_idx: usize, dst_mu: &mut [core::mem::MaybeUninit<f64>]| unsafe {
+		let period = combos[row_idx].period.unwrap();
+		let scalar = combos[row_idx].scalar.unwrap();
+		let dst: &mut [f64] = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
+
 		match kern {
-			Kernel::Scalar => cfo_row_scalar(data, first, period, max_p, scalar, out_row),
+			Kernel::Scalar => cfo_row_scalar(data, first, period, max_p, scalar, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => cfo_row_avx2(data, first, period, max_p, scalar, out_row),
+			Kernel::Avx2 => cfo_row_avx2(data, first, period, max_p, scalar, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => cfo_row_avx512(data, first, period, max_p, scalar, out_row),
+			Kernel::Avx512 => cfo_row_avx512(data, first, period, max_p, scalar, dst),
 			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-			Kernel::Avx2 | Kernel::Avx512 => cfo_row_scalar(data, first, period, max_p, scalar, out_row),
+			Kernel::Avx2 | Kernel::Avx512 => cfo_row_scalar(data, first, period, max_p, scalar, dst),
 			_ => unreachable!(),
 		}
 	};
@@ -816,21 +845,21 @@ pub fn cfo_batch_inner_into(
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			output
+			out_mu
 				.par_chunks_mut(cols)
 				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
+				.for_each(|(r, chunk)| do_row(r, chunk));
 		}
 
 		#[cfg(target_arch = "wasm32")]
 		{
-			for (row, slice) in output.chunks_mut(cols).enumerate() {
-				do_row(row, slice);
+			for (r, chunk) in out_mu.chunks_mut(cols).enumerate() {
+				do_row(r, chunk);
 			}
 		}
 	} else {
-		for (row, slice) in output.chunks_mut(cols).enumerate() {
-			do_row(row, slice);
+		for (r, chunk) in out_mu.chunks_mut(cols).enumerate() {
+			do_row(r, chunk);
 		}
 	}
 
@@ -1665,7 +1694,7 @@ pub fn cfo_batch(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
 	};
 
 	// 2. Run the existing core logic
-	let output = cfo_batch_inner(data, &sweep, Kernel::Auto, false).map_err(|e| JsValue::from_str(&e.to_string()))?;
+	let output = cfo_batch_inner(data, &sweep, detect_best_kernel(), false).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	// 3. Create the structured output
 	let js_output = CfoBatchJsOutput {
@@ -1723,14 +1752,17 @@ pub fn cfo_into(
 		};
 		let input = CfoInput::from_slice(data, params);
 
-		if in_ptr == out_ptr {  // CRITICAL: Aliasing check
+		if core::ptr::eq(in_ptr, out_ptr as *const f64) {
+			// alias-safe temp
 			let mut temp = vec![0.0; len];
-			cfo_into_slice(&mut temp, &input, Kernel::Auto)?;
+			cfo_into_slice(&mut temp, &input, detect_best_kernel())
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 			let out = std::slice::from_raw_parts_mut(out_ptr, len);
 			out.copy_from_slice(&temp);
 		} else {
 			let out = std::slice::from_raw_parts_mut(out_ptr, len);
-			cfo_into_slice(out, &input, Kernel::Auto)?;
+			cfo_into_slice(out, &input, detect_best_kernel())
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 		}
 		Ok(())
 	}
@@ -1767,7 +1799,13 @@ pub fn cfo_batch_into(
 
 		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
 
-		cfo_batch_inner_into(data, &sweep, Kernel::Auto, false, out).map_err(|e| JsValue::from_str(&e.to_string()))?;
+		let simd = match detect_best_batch_kernel() {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch => Kernel::Avx2,
+			_ => Kernel::Scalar,
+		};
+		cfo_batch_inner_into(data, &sweep, simd, false, out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 		Ok(rows)
 	}

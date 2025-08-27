@@ -68,6 +68,13 @@ impl<'a> ObvInput<'a> {
 	pub fn with_default_candles(candles: &'a Candles) -> Self {
 		Self::from_candles(candles, ObvParams::default())
 	}
+	#[inline(always)]
+	fn as_refs(&self) -> (&'a [f64], &'a [f64]) {
+		match &self.data {
+			ObvData::Candles { candles } => (source_type(candles, "close"), source_type(candles, "volume")),
+			ObvData::Slices { close, volume } => (*close, *volume),
+		}
+	}
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -130,14 +137,7 @@ pub fn obv(input: &ObvInput) -> Result<ObvOutput, ObvError> {
 }
 
 pub fn obv_with_kernel(input: &ObvInput, kernel: Kernel) -> Result<ObvOutput, ObvError> {
-	let (close, volume) = match &input.data {
-		ObvData::Candles { candles } => {
-			let close = source_type(candles, "close");
-			let volume = source_type(candles, "volume");
-			(close, volume)
-		}
-		ObvData::Slices { close, volume } => (*close, *volume),
-	};
+	let (close, volume) = input.as_refs();
 
 	if close.is_empty() || volume.is_empty() {
 		return Err(ObvError::EmptyData);
@@ -154,11 +154,9 @@ pub fn obv_with_kernel(input: &ObvInput, kernel: Kernel) -> Result<ObvOutput, Ob
 		.position(|(c, v)| !c.is_nan() && !v.is_nan())
 		.ok_or(ObvError::AllValuesNaN)?;
 
+	// single write of warm prefix; no extra NaN sweep
 	let mut out = alloc_with_nan_prefix(close.len(), first);
-	// Fill remaining values with NaN for binding compatibility
-	for i in first..out.len() {
-		out[i] = f64::NAN;
-	}
+
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
 		other => other,
@@ -413,28 +411,35 @@ fn obv_batch_inner(close: &[f64], volume: &[f64], kern: Kernel, _parallel: bool)
 		.position(|(c, v)| !c.is_nan() && !v.is_nan())
 		.ok_or(ObvError::AllValuesNaN)?;
 
-	let mut out = alloc_with_nan_prefix(close.len(), first);
-	// Fill remaining values with NaN for binding compatibility
-	for i in first..out.len() {
-		out[i] = f64::NAN;
-	}
+	let rows = 1usize;
+	let cols = close.len();
+
+	// allocate rows×cols uninit and seed only warm prefixes
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	init_matrix_prefixes(&mut buf_mu, cols, &[first]);
+
+	// compute into the backing slice
+	let mut guard = core::mem::ManuallyDrop::new(buf_mu);
+	let out_slice: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, rows * cols)
+	};
+
 	unsafe {
 		match kern {
-			Kernel::ScalarBatch | Kernel::Scalar => {
-				obv_row_scalar(close, volume, first, 0, 0, std::ptr::null(), 0.0, &mut out)
-			}
+			Kernel::ScalarBatch | Kernel::Scalar => obv_row_scalar(close, volume, first, 0, 0, core::ptr::null(), 0.0, out_slice),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2Batch | Kernel::Avx2 => obv_row_avx2(close, volume, first, 0, 0, std::ptr::null(), 0.0, &mut out),
+			Kernel::Avx2Batch | Kernel::Avx2 => obv_row_avx2(close, volume, first, 0, 0, core::ptr::null(), 0.0, out_slice),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512Batch | Kernel::Avx512 => obv_row_avx512(close, volume, first, 0, 0, std::ptr::null(), 0.0, &mut out),
+			Kernel::Avx512Batch | Kernel::Avx512 => obv_row_avx512(close, volume, first, 0, 0, core::ptr::null(), 0.0, out_slice),
 			_ => unreachable!(),
 		}
 	}
-	Ok(ObvBatchOutput {
-		values: out,
-		rows: 1,
-		cols: close.len(),
-	})
+
+	// materialize Vec<f64> without extra copy
+	let values = unsafe {
+		Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, rows * cols, guard.capacity())
+	};
+	Ok(ObvBatchOutput { values, rows, cols })
 }
 
 #[inline(always)]
@@ -447,10 +452,10 @@ fn obv_batch_inner_into(
 	if close.is_empty() || volume.is_empty() {
 		return Err(ObvError::EmptyData);
 	}
-	if close.len() != volume.len() {
+	if close.len() != volume.len() || out.len() != close.len() {
 		return Err(ObvError::DataLengthMismatch {
 			close_len: close.len(),
-			volume_len: volume.len(),
+			volume_len: out.len(),
 		});
 	}
 	let first = close
@@ -459,19 +464,18 @@ fn obv_batch_inner_into(
 		.position(|(c, v)| !c.is_nan() && !v.is_nan())
 		.ok_or(ObvError::AllValuesNaN)?;
 
+	// seed only warm prefix here since caller buffer is raw
+	for v in &mut out[..first] {
+		*v = f64::NAN;
+	}
+
 	unsafe {
 		match kern {
-			Kernel::ScalarBatch | Kernel::Scalar => {
-				obv_row_scalar(close, volume, first, 0, 0, std::ptr::null(), 0.0, out)
-			}
+			Kernel::ScalarBatch | Kernel::Scalar => obv_row_scalar(close, volume, first, 0, 0, core::ptr::null(), 0.0, out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2Batch | Kernel::Avx2 => {
-				obv_row_avx2(close, volume, first, 0, 0, std::ptr::null(), 0.0, out)
-			}
+			Kernel::Avx2Batch | Kernel::Avx2 => obv_row_avx2(close, volume, first, 0, 0, core::ptr::null(), 0.0, out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512Batch | Kernel::Avx512 => {
-				obv_row_avx512(close, volume, first, 0, 0, std::ptr::null(), 0.0, out)
-			}
+			Kernel::Avx512Batch | Kernel::Avx512 => obv_row_avx512(close, volume, first, 0, 0, core::ptr::null(), 0.0, out),
 			_ => unreachable!(),
 		}
 	}
@@ -932,7 +936,6 @@ pub fn obv_into_slice(dst: &mut [f64], close: &[f64], volume: &[f64], kern: Kern
 		other => other,
 	};
 	
-	// Compute OBV directly into destination
 	unsafe {
 		match chosen {
 			Kernel::Scalar | Kernel::ScalarBatch => obv_scalar(close, volume, first, dst),
@@ -944,6 +947,10 @@ pub fn obv_into_slice(dst: &mut [f64], close: &[f64], volume: &[f64], kern: Kern
 		}
 	}
 	
+	// write only the warmup prefix; no further NaN writes
+	for v in &mut dst[..first] {
+		*v = f64::NAN;
+	}
 	Ok(())
 }
 
@@ -1105,6 +1112,27 @@ pub fn obv_free(ptr: *mut f64, len: usize) {
 			let _ = Vec::from_raw_parts(ptr, len, len);
 		}
 	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn obv_batch_into(
+	close_ptr: *const f64,
+	volume_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+) -> Result<usize, JsValue> {
+	if close_ptr.is_null() || volume_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to obv_batch_into"));
+	}
+	unsafe {
+		let close = std::slice::from_raw_parts(close_ptr, len);
+		let volume = std::slice::from_raw_parts(volume_ptr, len);
+		let out = std::slice::from_raw_parts_mut(out_ptr, len);
+		obv_into_slice(out, close, volume, Kernel::Auto)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	}
+	Ok(1) // rows
 }
 
 #[cfg(feature = "wasm")]

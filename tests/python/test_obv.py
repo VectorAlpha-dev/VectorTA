@@ -46,7 +46,7 @@ class TestObv:
         # Check last 5 values
         for i, expected in enumerate(expected_last_five):
             actual = result[-(5-i)]
-            assert_close(actual, expected, 1e-6, f"OBV mismatch at tail index {i}")
+            assert_close(actual, expected, rtol=1e-6, msg=f"OBV mismatch at tail index {i}")
     
     def test_obv_empty_data(self):
         """Test OBV with empty data"""

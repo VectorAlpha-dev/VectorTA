@@ -35,6 +35,8 @@ use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -187,65 +189,49 @@ pub enum DxError {
 	AllValuesNaN,
 }
 
-#[inline]
-pub fn dx(input: &DxInput) -> Result<DxOutput, DxError> {
-	dx_with_kernel(input, Kernel::Auto)
-}
-
-pub fn dx_with_kernel(input: &DxInput, kernel: Kernel) -> Result<DxOutput, DxError> {
+#[inline(always)]
+fn dx_prepare<'a>(input: &'a DxInput, kernel: Kernel)
+-> Result<(&'a [f64], &'a [f64], &'a [f64], usize, usize, Kernel), DxError> {
 	let (high, low, close) = match &input.data {
 		DxData::Candles { candles } => {
-			let high = candles
-				.select_candle_field("high")
-				.map_err(|e| DxError::SelectCandleFieldError(e.to_string()))?;
-			let low = candles
-				.select_candle_field("low")
-				.map_err(|e| DxError::SelectCandleFieldError(e.to_string()))?;
-			let close = candles
-				.select_candle_field("close")
-				.map_err(|e| DxError::SelectCandleFieldError(e.to_string()))?;
-			(high, low, close)
+			let h = candles.select_candle_field("high").map_err(|e| DxError::SelectCandleFieldError(e.to_string()))?;
+			let l = candles.select_candle_field("low").map_err(|e| DxError::SelectCandleFieldError(e.to_string()))?;
+			let c = candles.select_candle_field("close").map_err(|e| DxError::SelectCandleFieldError(e.to_string()))?;
+			(h, l, c)
 		}
 		DxData::HlcSlices { high, low, close } => (*high, *low, *close),
 	};
-	if high.is_empty() || low.is_empty() || close.is_empty() {
-		return Err(DxError::EmptyData);
-	}
 	let len = high.len().min(low.len()).min(close.len());
+	if len == 0 { return Err(DxError::EmptyData); }
 	let period = input.get_period();
-	if period == 0 || period > len {
-		return Err(DxError::InvalidPeriod { period, data_len: len });
-	}
-	let first_valid_idx = (0..len).find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan());
-	let first_valid_idx = match first_valid_idx {
-		Some(idx) => idx,
-		None => return Err(DxError::AllValuesNaN),
-	};
-	if (len - first_valid_idx) < period {
-		return Err(DxError::NotEnoughValidData {
-			needed: period,
-			valid: len - first_valid_idx,
-		});
-	}
-	let warmup_period = first_valid_idx + period - 1;
-	let mut out = alloc_with_nan_prefix(len, warmup_period);
+	if period == 0 || period > len { return Err(DxError::InvalidPeriod { period, data_len: len }); }
 
-	let chosen = match kernel {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
+	let first = (0..len).find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
+		.ok_or(DxError::AllValuesNaN)?;
+	if len - first < period {
+		return Err(DxError::NotEnoughValidData { needed: period, valid: len - first });
+	}
+	let chosen = match kernel { Kernel::Auto => detect_best_kernel(), k => k };
+	Ok((high, low, close, len, first, chosen))
+}
 
+#[inline]
+pub fn dx(input: &DxInput) -> Result<DxOutput, DxError> { dx_with_kernel(input, Kernel::Auto) }
+
+pub fn dx_with_kernel(input: &DxInput, kernel: Kernel) -> Result<DxOutput, DxError> {
+	let (h, l, c, len, first, chosen) = dx_prepare(input, kernel)?;
+	let warm = first + input.get_period() - 1;
+	let mut out = alloc_with_nan_prefix(len, warm);
 	unsafe {
 		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => dx_scalar(high, low, close, period, first_valid_idx, &mut out),
+			Kernel::Scalar | Kernel::ScalarBatch => dx_scalar(h, l, c, input.get_period(), first, &mut out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => dx_avx2(high, low, close, period, first_valid_idx, &mut out),
+			Kernel::Avx2 | Kernel::Avx2Batch => dx_avx2(h, l, c, input.get_period(), first, &mut out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => dx_avx512(high, low, close, period, first_valid_idx, &mut out),
+			Kernel::Avx512 | Kernel::Avx512Batch => dx_avx512(h, l, c, input.get_period(), first, &mut out),
 			_ => unreachable!(),
 		}
 	}
-
 	Ok(DxOutput { values: out })
 }
 
@@ -253,6 +239,14 @@ pub fn dx_with_kernel(input: &DxInput, kernel: Kernel) -> Result<DxOutput, DxErr
 #[inline]
 pub fn dx_scalar(high: &[f64], low: &[f64], close: &[f64], period: usize, first_valid_idx: usize, out: &mut [f64]) {
 	let len = high.len().min(low.len()).min(close.len());
+	
+	// The warmup period extends from 0 to first_valid_idx + period - 1
+	// These should already be NaN from init_matrix_prefixes, but we ensure it here
+	let warmup_end = (first_valid_idx + period - 1).min(len.saturating_sub(1));
+	for i in 0..warmup_end {
+		out[i] = f64::NAN;
+	}
+	
 	let mut prev_high = high[first_valid_idx];
 	let mut prev_low = low[first_valid_idx];
 	let mut prev_close = close[first_valid_idx];
@@ -593,92 +587,87 @@ pub fn dx_batch_par_slice(
 	dx_batch_inner(high, low, close, sweep, kern, true)
 }
 
-fn dx_batch_inner(
-	high: &[f64],
-	low: &[f64],
-	close: &[f64],
-	sweep: &DxBatchRange,
-	kern: Kernel,
-	parallel: bool,
-) -> Result<DxBatchOutput, DxError> {
+#[inline(always)]
+fn dx_batch_inner_into(
+	high: &[f64], low: &[f64], close: &[f64],
+	sweep: &DxBatchRange, kern: Kernel, parallel: bool,
+	out: &mut [f64]
+) -> Result<Vec<DxParams>, DxError> {
 	let combos = expand_grid(sweep);
-	if combos.is_empty() {
-		return Err(DxError::InvalidPeriod { period: 0, data_len: 0 });
-	}
+	if combos.is_empty() { return Err(DxError::InvalidPeriod { period: 0, data_len: 0 }); }
+
 	let len = high.len().min(low.len()).min(close.len());
-	let first = (0..len)
-		.find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
+	let first = (0..len).find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
 		.ok_or(DxError::AllValuesNaN)?;
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
 	if len - first < max_p {
-		return Err(DxError::NotEnoughValidData {
-			needed: max_p,
-			valid: len - first,
-		});
+		return Err(DxError::NotEnoughValidData { needed: max_p, valid: len - first });
 	}
+
 	let rows = combos.len();
-	let cols = len;
-	
-	// Use uninitialized memory with proper NaN prefixes
-	let mut buf_mu = make_uninit_matrix(rows, cols);
-	let warmup_periods: Vec<usize> = combos.iter()
-		.map(|c| first + c.period.unwrap() - 1)
-		.collect();
-	init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
-	
-	// Convert to mutable slice for computation
-	let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
-	let values: &mut [f64] = unsafe { 
-		core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len()) 
+	if out.len() != rows * len { panic!("out buffer wrong size"); }
+
+	let actual = match kern { Kernel::Auto => detect_best_batch_kernel(), k => k };
+	let simd = match actual {
+		Kernel::ScalarBatch | Kernel::Scalar => Kernel::Scalar,
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))] 
+		Kernel::Avx2Batch | Kernel::Avx2 => Kernel::Avx2,
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))] 
+		Kernel::Avx512Batch | Kernel::Avx512 => Kernel::Avx512,
+		_ => unreachable!(),
 	};
-	
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-		let period = combos[row].period.unwrap();
-		match kern {
-			Kernel::Scalar => dx_row_scalar(high, low, close, first, period, out_row),
+
+	let do_row = |row: usize, dst_row: &mut [f64]| unsafe {
+		let p = combos[row].period.unwrap();
+		match simd {
+			Kernel::Scalar => dx_scalar(high, low, close, p, first, dst_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => dx_row_avx2(high, low, close, first, period, out_row),
+			Kernel::Avx2 => dx_avx2(high, low, close, p, first, dst_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => dx_row_avx512(high, low, close, first, period, out_row),
+			Kernel::Avx512 => dx_avx512(high, low, close, p, first, dst_row),
 			_ => unreachable!(),
 		}
+		// warmup NaNs already placed by init_matrix_prefixes before we were called
 	};
+
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
-		{
-			values
-				.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
-		}
-
+		out.par_chunks_mut(len).enumerate().for_each(|(r, s)| do_row(r, s));
 		#[cfg(target_arch = "wasm32")]
-		{
-			for (row, slice) in values.chunks_mut(cols).enumerate() {
-				do_row(row, slice);
-			}
-		}
+		for (r, s) in out.chunks_mut(len).enumerate() { do_row(r, s); }
 	} else {
-		for (row, slice) in values.chunks_mut(cols).enumerate() {
-			do_row(row, slice);
-		}
+		for (r, s) in out.chunks_mut(len).enumerate() { do_row(r, s); }
 	}
-	
-	// Convert back to Vec from ManuallyDrop
-	let values = unsafe {
-		Vec::from_raw_parts(
-			buf_guard.as_mut_ptr() as *mut f64,
-			buf_guard.len(),
-			buf_guard.capacity(),
-		)
+	Ok(combos)
+}
+
+fn dx_batch_inner(
+	high: &[f64], low: &[f64], close: &[f64],
+	sweep: &DxBatchRange, kern: Kernel, parallel: bool
+) -> Result<DxBatchOutput, DxError> {
+	let combos = expand_grid(sweep);
+	let rows = combos.len();
+	let cols = high.len().min(low.len()).min(close.len());
+	if cols == 0 { return Err(DxError::EmptyData); }
+
+	let first = (0..cols).find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
+		.ok_or(DxError::AllValuesNaN)?;
+	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
+
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	init_matrix_prefixes(&mut buf_mu, cols, &warm);
+
+	let mut guard = core::mem::ManuallyDrop::new(buf_mu);
+	let out_slice: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len())
 	};
-	
-	Ok(DxBatchOutput {
-		values,
-		combos,
-		rows,
-		cols,
-	})
+
+	let _ = dx_batch_inner_into(high, low, close, sweep, kern, parallel, out_slice)?;
+
+	let values = unsafe {
+		Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, guard.len(), guard.capacity())
+	};
+	Ok(DxBatchOutput { values, combos, rows, cols })
 }
 
 #[inline(always)]
@@ -1444,139 +1433,50 @@ mod tests {
 }
 
 #[cfg(feature = "python")]
-#[pyfunction]
-#[pyo3(name = "dx", signature = (high, low, close, period, kernel=None))]
+#[pyfunction(name = "dx")]
+#[pyo3(signature = (high, low, close, period, kernel=None))]
 pub fn dx_py<'py>(
 	py: Python<'py>,
-	high: PyReadonlyArray1<f64>,
-	low: PyReadonlyArray1<f64>,
-	close: PyReadonlyArray1<f64>,
-	period: usize,
-	kernel: Option<&str>,
+	high: PyReadonlyArray1<f64>, low: PyReadonlyArray1<f64>, close: PyReadonlyArray1<f64>,
+	period: usize, kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
-	let high = high.as_slice()?;
-	let low = low.as_slice()?;
-	let close = close.as_slice()?;
-	
-	// Validate kernel parameter if provided
-	let kernel_enum = validate_kernel(kernel, false)?;
-	
-	py.allow_threads(|| {
-		let params = DxParams { period: Some(period) };
-		let input = DxInput::from_hlc_slices(high, low, close, params);
-		let result = dx_with_kernel(&input, kernel_enum)
-			.map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-		Ok(result.values)
-	})
-	.and_then(|values| Ok(values.into_pyarray(py)))
+	let h = high.as_slice()?; let l = low.as_slice()?; let c = close.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	let params = DxParams { period: Some(period) };
+	let inp = DxInput::from_hlc_slices(h, l, c, params);
+	let vec_out: Vec<f64> = py.allow_threads(|| dx_with_kernel(&inp, kern)
+		.map(|o| o.values)).map_err(|e| PyValueError::new_err(e.to_string()))?;
+	Ok(vec_out.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
-#[pyfunction]
-#[pyo3(name = "dx_batch", signature = (high, low, close, period_range))]
+#[pyfunction(name = "dx_batch")]
+#[pyo3(signature = (high, low, close, period_range, kernel=None))]
 pub fn dx_batch_py<'py>(
 	py: Python<'py>,
-	high: PyReadonlyArray1<f64>,
-	low: PyReadonlyArray1<f64>,
-	close: PyReadonlyArray1<f64>,
-	period_range: (usize, usize, usize),
+	high: PyReadonlyArray1<f64>, low: PyReadonlyArray1<f64>, close: PyReadonlyArray1<f64>,
+	period_range: (usize, usize, usize), kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
-	let high_slice = high.as_slice()?;
-	let low_slice = low.as_slice()?;
-	let close_slice = close.as_slice()?;
-	
-	// Calculate parameter combinations
-	let (start, end, step) = period_range;
-	let params = expand_grid(&DxBatchRange { period: (start, end, step) });
-	let rows = params.len();
-	let cols = high_slice.len();
-	
-	// Pre-allocate output array for zero-copy
+	use numpy::{PyArray1, PyArrayMethods};
+	let h = high.as_slice()?; let l = low.as_slice()?; let c = close.as_slice()?;
+	let sweep = DxBatchRange::from_tuple(period_range);
+	let combos = expand_grid(&sweep); let rows = combos.len(); let cols = h.len();
 	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-	let slice_out = unsafe { out_arr.as_slice_mut()? };
-	
-	let combos = py.allow_threads(|| {
-		// Call the optimized inner function
-		dx_batch_inner_into(high_slice, low_slice, close_slice, &params, slice_out)
-			.map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-		
-		Ok::<Vec<DxParams>, pyo3::PyErr>(params)
+	let out_slice = unsafe { out_arr.as_slice_mut()? };
+	let kern = validate_kernel(kernel, true)?;
+	py.allow_threads(|| {
+		dx_batch_inner_into(h, l, c, &sweep, kern, true, out_slice)
+			.map_err(|e| PyValueError::new_err(e.to_string()))
 	})?;
-	
+
 	let dict = PyDict::new(py);
 	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
-	dict.set_item("rows", rows)?;
-	dict.set_item("cols", cols)?;
-	
-	// Create parameter list
-	let py_params = PyList::new(py, combos.iter().map(|p| {
-		let param_dict = PyDict::new(py);
-		param_dict.set_item("period", p.period.unwrap_or(14)).unwrap();
-		param_dict
-	}))?;
-	dict.set_item("params", py_params)?;
-	
+	dict.set_item("periods",
+		combos.iter().map(|p| p.period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py)
+	)?;
 	Ok(dict.into())
 }
 
-// Helper function for batch processing that writes directly to pre-allocated buffer
-#[cfg(feature = "python")]
-fn dx_batch_inner_into(
-	high: &[f64],
-	low: &[f64],
-	close: &[f64],
-	params: &[DxParams],
-	out: &mut [f64],
-) -> Result<(), DxError> {
-	let len = high.len().min(low.len()).min(close.len());
-	let kernel = detect_best_kernel();
-	
-	// Find first valid index
-	let first_valid_idx = (0..len)
-		.find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
-		.ok_or(DxError::AllValuesNaN)?;
-	
-	// Process each parameter combination
-	for (row, p) in params.iter().enumerate() {
-		let period = p.period.unwrap_or(14);
-		
-		// Validate period
-		if period == 0 || period > len {
-			return Err(DxError::InvalidPeriod { period, data_len: len });
-		}
-		
-		if (len - first_valid_idx) < period {
-			return Err(DxError::NotEnoughValidData {
-				needed: period,
-				valid: len - first_valid_idx,
-			});
-		}
-		
-		// Get the output slice for this row
-		let start_idx = row * len;
-		let out_row = &mut out[start_idx..start_idx + len];
-		
-		// Call the appropriate kernel
-		unsafe {
-			match kernel {
-				Kernel::Scalar | Kernel::ScalarBatch => {
-					dx_scalar(high, low, close, period, first_valid_idx, out_row);
-				}
-				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-				Kernel::Avx2 | Kernel::Avx2Batch => {
-					dx_avx2(high, low, close, period, first_valid_idx, out_row);
-				}
-				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-				Kernel::Avx512 | Kernel::Avx512Batch => {
-					dx_avx512(high, low, close, period, first_valid_idx, out_row);
-				}
-				_ => unreachable!(),
-			}
-		}
-	}
-	
-	Ok(())
-}
 
 #[cfg(feature = "python")]
 #[pyclass(name = "DxStream")]
@@ -1602,135 +1502,61 @@ impl DxStreamPy {
 
 // WASM bindings
 
-/// Write directly to output slice - no allocations
+/// Write directly to `dst` with ALMA-style warmup semantics.
 #[inline]
 pub fn dx_into_slice(dst: &mut [f64], input: &DxInput, kern: Kernel) -> Result<(), DxError> {
-	let (high, low, close) = match &input.data {
-		DxData::Candles { candles } => {
-			let high = candles
-				.select_candle_field("high")
-				.map_err(|e| DxError::SelectCandleFieldError(e.to_string()))?;
-			let low = candles
-				.select_candle_field("low")
-				.map_err(|e| DxError::SelectCandleFieldError(e.to_string()))?;
-			let close = candles
-				.select_candle_field("close")
-				.map_err(|e| DxError::SelectCandleFieldError(e.to_string()))?;
-			(high, low, close)
-		}
-		DxData::HlcSlices { high, low, close } => (*high, *low, *close),
-	};
-	
-	let period = input.params.period.unwrap_or(14);
-	let len = high.len();
-	
-	// Validate inputs
-	if len == 0 || low.len() == 0 || close.len() == 0 {
-		return Err(DxError::EmptyData);
-	}
-	
-	if high.len() != low.len() || high.len() != close.len() {
-		return Err(DxError::EmptyData);
-	}
-	
+	let (h, l, c, len, first, chosen) = dx_prepare(input, kern)?;
 	if dst.len() != len {
-		return Err(DxError::InvalidPeriod {
-			period: dst.len(),
-			data_len: len,
-		});
+		return Err(DxError::InvalidPeriod { period: dst.len(), data_len: len });
 	}
-	
-	if period == 0 || period > len {
-		return Err(DxError::InvalidPeriod { period, data_len: len });
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => dx_scalar(h, l, c, input.get_period(), first, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => dx_avx2(h, l, c, input.get_period(), first, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => dx_avx512(h, l, c, input.get_period(), first, dst),
+			_ => unreachable!(),
+		}
 	}
-	
-	let first_valid_idx = high
-		.iter()
-		.zip(low)
-		.zip(close)
-		.position(|((&h, &l), &c)| !h.is_nan() && !l.is_nan() && !c.is_nan())
-		.ok_or(DxError::AllValuesNaN)?;
-		
-	let total_required = first_valid_idx + period;
-	if total_required > len {
-		return Err(DxError::NotEnoughValidData {
-			needed: total_required,
-			valid: len - first_valid_idx,
-		});
-	}
-	
-	let warmup_period = first_valid_idx + period - 1;
-	
-	// Select kernel based on whether batch operations are requested
-	let chosen = match kern {
-		Kernel::Auto => detect_best_kernel(),
-		_ => kern,
-	};
-	
-	// Compute DX values
-	match chosen {
-		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-		Kernel::Avx512 => dx_avx512(high, low, close, period, first_valid_idx, dst),
-		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-		Kernel::Avx2 => dx_avx2(high, low, close, period, first_valid_idx, dst),
-		_ => dx_scalar(high, low, close, period, first_valid_idx, dst),
-	}
-	
-	// Fill warmup with NaN
-	for v in &mut dst[..warmup_period] {
-		*v = f64::NAN;
-	}
-	
+	let warm = first + input.get_period() - 1;
+	for v in &mut dst[..warm] { *v = f64::NAN; }
 	Ok(())
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn dx_js(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
-	let params = DxParams { period: Some(period) };
-	let input = DxInput::from_hlc_slices(high, low, close, params);
-	
-	let mut output = vec![0.0; high.len()];  // Single allocation
-	dx_into_slice(&mut output, &input, Kernel::Auto)
+	let input = DxInput::from_hlc_slices(high, low, close, DxParams { period: Some(period) });
+	let mut out = vec![0.0; high.len().min(low.len()).min(close.len())];
+	dx_into_slice(&mut out, &input, detect_best_kernel())
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
-		
-	Ok(output)
+	Ok(out)
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn dx_into(
-	high_ptr: *const f64,
-	low_ptr: *const f64,
-	close_ptr: *const f64,
-	out_ptr: *mut f64,
-	len: usize,
-	period: usize,
+	h_ptr:*const f64, l_ptr:*const f64, c_ptr:*const f64,
+	out_ptr:*mut f64, len:usize, period:usize
 ) -> Result<(), JsValue> {
-	if high_ptr.is_null() || low_ptr.is_null() || close_ptr.is_null() || out_ptr.is_null() {
-		return Err(JsValue::from_str("Null pointer provided"));
+	if [h_ptr as usize, l_ptr as usize, c_ptr as usize, out_ptr as usize].iter().any(|&p| p==0) {
+		return Err(JsValue::from_str("null pointer"));
 	}
-	
 	unsafe {
-		let high = std::slice::from_raw_parts(high_ptr, len);
-		let low = std::slice::from_raw_parts(low_ptr, len);
-		let close = std::slice::from_raw_parts(close_ptr, len);
-		let params = DxParams { period: Some(period) };
-		let input = DxInput::from_hlc_slices(high, low, close, params);
+		let h = core::slice::from_raw_parts(h_ptr, len);
+		let l = core::slice::from_raw_parts(l_ptr, len);
+		let c = core::slice::from_raw_parts(c_ptr, len);
+		let inp = DxInput::from_hlc_slices(h,l,c, DxParams{period:Some(period)});
 		
-		// CRITICAL: Check aliasing for ALL input pointers
-		if high_ptr == out_ptr || low_ptr == out_ptr || close_ptr == out_ptr {
-			// Aliasing detected - use temporary buffer
-			let mut temp = vec![0.0; len];
-			dx_into_slice(&mut temp, &input, Kernel::Auto)
-				.map_err(|e| JsValue::from_str(&e.to_string()))?;
-			let out = std::slice::from_raw_parts_mut(out_ptr, len);
-			out.copy_from_slice(&temp);
+		if out_ptr==h_ptr as *mut f64 || out_ptr==l_ptr as *mut f64 || out_ptr==c_ptr as *mut f64 {
+			let mut tmp = vec![0.0; len];
+			dx_into_slice(&mut tmp, &inp, detect_best_kernel()).map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let dst = core::slice::from_raw_parts_mut(out_ptr, len);
+			dst.copy_from_slice(&tmp);
 		} else {
-			// No aliasing - write directly
-			let out = std::slice::from_raw_parts_mut(out_ptr, len);
-			dx_into_slice(out, &input, Kernel::Auto)
-				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = core::slice::from_raw_parts_mut(out_ptr, len);
+			dx_into_slice(out, &inp, detect_best_kernel()).map_err(|e| JsValue::from_str(&e.to_string()))?;
 		}
 		Ok(())
 	}
@@ -1769,27 +1595,35 @@ pub struct DxBatchJsOutput {
 }
 
 #[cfg(feature = "wasm")]
-#[wasm_bindgen(js_name = dx_batch)]
-pub fn dx_batch_js(high: &[f64], low: &[f64], close: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
-	let config: DxBatchConfig =
-		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
-		
-	let batch_range = DxBatchRange::from_tuple(config.period_range);
-	let result = dx_batch_with_kernel(high, low, close, &batch_range, Kernel::Auto)
-		.map_err(|e| JsValue::from_str(&e.to_string()))?;
-	
-	// Generate combos for output
-	let combos = DxParams::generate_batch_params(config.period_range);
-		
-	let output = DxBatchJsOutput {
-		values: result.values,
-		combos,
-		rows: result.rows,
-		cols: result.cols,
+#[wasm_bindgen(js_name = "dx_batch")]
+pub fn dx_batch_unified_js(
+	high:&[f64], low:&[f64], close:&[f64], config: JsValue
+) -> Result<JsValue, JsValue> {
+	let cfg: DxBatchConfig = serde_wasm_bindgen::from_value(config)
+		.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	let sweep = DxBatchRange::from_tuple(cfg.period_range);
+
+	// allocate with helpers and compute via inner into
+	let rows = expand_grid(&sweep).len();
+	let cols = high.len().min(low.len()).min(close.len());
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+
+	let first = (0..cols).find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
+		.ok_or_else(|| JsValue::from_str("AllValuesNaN"))?;
+	let warm: Vec<usize> = expand_grid(&sweep).iter().map(|p| first + p.period.unwrap() - 1).collect();
+	init_matrix_prefixes(&mut buf_mu, cols, &warm);
+
+	let mut guard = core::mem::ManuallyDrop::new(buf_mu);
+	let out_slice: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len())
 	};
-	
-	serde_wasm_bindgen::to_value(&output)
-		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+	let combos = dx_batch_inner_into(high, low, close, &sweep, detect_best_batch_kernel(), false, out_slice)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	let values = unsafe {
+		Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, guard.len(), guard.capacity())
+	};
+	let js = DxBatchJsOutput { values, combos, rows, cols };
+	serde_wasm_bindgen::to_value(&js).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 #[cfg(feature = "wasm")]

@@ -19,7 +19,6 @@
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix};
-use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -210,31 +209,52 @@ pub fn medium_ad_with_kernel(input: &MediumAdInput, kernel: Kernel) -> Result<Me
 
 #[inline]
 pub fn medium_ad_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-	// Initialize NaN prefix for initial invalid data
-	for i in 0..first_valid {
-		out[i] = f64::NAN;
+	// alloc_with_nan_prefix already wrote NaNs up to warm = first_valid + period - 1
+	use core::cmp::Ordering;
+
+	let mut buf = vec![0.0; period];
+	let mid = period / 2;
+
+	// helper: total median from select_nth (handles even period)
+	#[inline(always)]
+	fn median_from(buf: &mut [f64], mid: usize) -> f64 {
+		// partition around mid
+		buf.select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+		if (buf.len() & 1) == 1 {
+			buf[mid]
+		} else {
+			// need the max of the lower partition
+			let lo_max = buf[..mid]
+				.iter()
+				.copied()
+				.fold(f64::NEG_INFINITY, f64::max);
+			0.5 * (lo_max + buf[mid])
+		}
 	}
-	
+
 	for i in (first_valid + period - 1)..data.len() {
 		let window = &data[i + 1 - period..=i];
+
+		// Strict NaN policy: any NaN in window -> NaN out (unchanged from your logic)
 		if window.iter().any(|&v| v.is_nan()) {
 			out[i] = f64::NAN;
 			continue;
 		}
-		let mut sorted_window: Vec<f64> = window.to_vec();
-		sorted_window.sort_by(|a, b| a.partial_cmp(b).unwrap());
-		let median_val = if period % 2 == 1 {
-			sorted_window[period / 2]
-		} else {
-			0.5 * (sorted_window[period / 2 - 1] + sorted_window[period / 2])
-		};
-		let mut abs_devs: Vec<f64> = sorted_window.iter().map(|&v| (v - median_val).abs()).collect();
-		abs_devs.sort_by(|a, b| a.partial_cmp(b).unwrap());
-		let mad = if period % 2 == 1 {
-			abs_devs[period / 2]
-		} else {
-			0.5 * (abs_devs[period / 2 - 1] + abs_devs[period / 2])
-		};
+
+		// Copy window into scratch once
+		unsafe {
+			core::ptr::copy_nonoverlapping(window.as_ptr(), buf.as_mut_ptr(), period);
+		}
+
+		// Median of window
+		let med = median_from(&mut buf, mid);
+
+		// In-place absolute deviations, then median again -> MAD
+		for x in &mut buf {
+			*x = (*x - med).abs();
+		}
+		let mad = median_from(&mut buf, mid);
+
 		out[i] = mad;
 	}
 }
@@ -410,81 +430,79 @@ fn medium_ad_batch_inner(
 	if combos.is_empty() {
 		return Err(MediumAdError::InvalidPeriod { period: 0, data_len: 0 });
 	}
-	let first = data
-		.iter()
-		.position(|x| !x.is_nan())
-		.ok_or(MediumAdError::AllValuesNaN)?;
-	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-	if data.len() - first < max_p {
-		return Err(MediumAdError::NotEnoughValidData {
-			needed: max_p,
-			valid: data.len() - first,
-		});
-	}
-	let rows = combos.len();
+
 	let cols = data.len();
-	
+	if cols == 0 {
+		return Err(MediumAdError::AllValuesNaN);
+	}
+
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(MediumAdError::AllValuesNaN)?;
+	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	if cols - first < max_p {
+		return Err(MediumAdError::NotEnoughValidData { needed: max_p, valid: cols - first });
+	}
+
+	let rows = combos.len();
+
+	// rows×cols uninit matrix + warm prefixes
 	let mut buf_mu = make_uninit_matrix(rows, cols);
-	
-	// Calculate warmup periods for each row
-	let warm: Vec<usize> = combos
-		.iter()
-		.map(|c| first + c.period.unwrap() - 1)
-		.collect();
+	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
 	init_matrix_prefixes(&mut buf_mu, cols, &warm);
-	
-	// Convert to Vec<f64> safely
-	let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
-	let values: &mut [f64] = unsafe { core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len()) };
-	
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+
+	// Safe mutable view of MaybeUninit rows
+	let out_mu = buf_mu.as_mut_slice();
+
+	let do_row = |row: usize, dst_mu: &mut [core::mem::MaybeUninit<f64>]| {
+		// Cast this row to &mut [f64] to write initialized values
+		let dst = unsafe {
+			core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len())
+		};
 		let period = combos[row].period.unwrap();
-		match kern {
-			Kernel::Scalar => medium_ad_row_scalar(data, first, period, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => medium_ad_row_avx2(data, first, period, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => medium_ad_row_avx512(data, first, period, out_row),
-			_ => unreachable!(),
+
+		unsafe {
+			match kern {
+				Kernel::Scalar | Kernel::Auto => medium_ad_row_scalar(data, first, period, dst),
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+				Kernel::Avx2 => medium_ad_row_avx2(data, first, period, dst),
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+				Kernel::Avx512 => medium_ad_row_avx512(data, first, period, dst),
+				_ => unreachable!(),
+			}
 		}
 	};
 
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			values
+			use rayon::prelude::*;
+			out_mu
 				.par_chunks_mut(cols)
 				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
+				.for_each(|(row, slice_mu)| do_row(row, slice_mu));
 		}
-
 		#[cfg(target_arch = "wasm32")]
 		{
-			for (row, slice) in values.chunks_mut(cols).enumerate() {
-				do_row(row, slice);
+			for (row, slice_mu) in out_mu.chunks_mut(cols).enumerate() {
+				do_row(row, slice_mu);
 			}
 		}
 	} else {
-		for (row, slice) in values.chunks_mut(cols).enumerate() {
-			do_row(row, slice);
+		for (row, slice_mu) in out_mu.chunks_mut(cols).enumerate() {
+			do_row(row, slice_mu);
 		}
 	}
-	
-	// Convert back to Vec<f64>
+
+	// Transmute the whole matrix once into Vec<f64>
+	let mut guard = core::mem::ManuallyDrop::new(buf_mu);
 	let values = unsafe {
 		Vec::from_raw_parts(
-			buf_guard.as_mut_ptr() as *mut f64,
-			buf_guard.len(),
-			buf_guard.capacity(),
+			guard.as_mut_ptr() as *mut f64,
+			guard.len(),
+			guard.capacity(),
 		)
 	};
-	
-	Ok(MediumAdBatchOutput {
-		values,
-		combos,
-		rows,
-		cols,
-	})
+
+	Ok(MediumAdBatchOutput { values, combos, rows, cols })
 }
 
 #[inline(always)]
@@ -510,6 +528,16 @@ fn medium_ad_batch_inner_into(
 	}
 
 	let cols = data.len();
+	
+	// Initialize warmup periods with NaN for each row
+	for (row, combo) in combos.iter().enumerate() {
+		let warmup = first + combo.period.unwrap() - 1;
+		let row_start = row * cols;
+		for i in 0..warmup.min(cols) {
+			out[row_start + i] = f64::NAN;
+		}
+	}
+	
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
 		match kern {
@@ -547,27 +575,31 @@ fn medium_ad_batch_inner_into(
 
 #[inline(always)]
 unsafe fn medium_ad_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
+	use core::cmp::Ordering;
+	let mut buf = vec![0.0; period];
+	let mid = period / 2;
+
+	#[inline(always)]
+	fn median_from(buf: &mut [f64], mid: usize) -> f64 {
+		buf.select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+		if (buf.len() & 1) == 1 {
+			buf[mid]
+		} else {
+			let lo_max = buf[..mid].iter().copied().fold(f64::NEG_INFINITY, f64::max);
+			0.5 * (lo_max + buf[mid])
+		}
+	}
+
 	for i in (first + period - 1)..data.len() {
 		let window = &data[i + 1 - period..=i];
 		if window.iter().any(|&v| v.is_nan()) {
 			out[i] = f64::NAN;
 			continue;
 		}
-		let mut sorted_window: Vec<f64> = window.to_vec();
-		sorted_window.sort_by(|a, b| a.partial_cmp(b).unwrap());
-		let median_val = if period % 2 == 1 {
-			sorted_window[period / 2]
-		} else {
-			0.5 * (sorted_window[period / 2 - 1] + sorted_window[period / 2])
-		};
-		let mut abs_devs: Vec<f64> = sorted_window.iter().map(|&v| (v - median_val).abs()).collect();
-		abs_devs.sort_by(|a, b| a.partial_cmp(b).unwrap());
-		let mad = if period % 2 == 1 {
-			abs_devs[period / 2]
-		} else {
-			0.5 * (abs_devs[period / 2 - 1] + abs_devs[period / 2])
-		};
-		out[i] = mad;
+		core::ptr::copy_nonoverlapping(window.as_ptr(), buf.as_mut_ptr(), period);
+		let med = median_from(&mut buf, mid);
+		for x in &mut buf { *x = (*x - med).abs(); }
+		out[i] = median_from(&mut buf, mid);
 	}
 }
 
@@ -636,6 +668,10 @@ impl MediumAdStream {
 
 	#[inline(always)]
 	fn compute(&self) -> f64 {
+		// For small periods (typically 5-20), sorting is still very efficient
+		// and simpler than maintaining complex data structures.
+		// The complexity is O(period * log(period)) which is effectively constant
+		// for small periods.
 		let mut sorted = self.buffer.clone();
 		sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
 		let median = if self.period % 2 == 1 {

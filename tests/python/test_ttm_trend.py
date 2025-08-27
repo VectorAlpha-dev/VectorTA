@@ -35,7 +35,7 @@ class TestTtmTrend:
         # Test with default period (None -> 5)
         result = ta.ttm_trend(hl2, close, period=5)
         assert len(result) == len(close)
-        assert result.dtype == np.bool_
+        assert result.dtype == np.float64  # Now returns f64 with 0.0/1.0 values
     
     def test_ttm_trend_accuracy(self, test_data):
         """Test TTM Trend matches expected values from Rust tests - mirrors check_ttm_accuracy"""
@@ -50,8 +50,10 @@ class TestTtmTrend:
         assert len(result) == len(close)
         
         # Check last 5 values match expected from Rust test
+        # Convert f64 (0.0/1.0) to bool for comparison
         expected_last_five = [True, False, False, False, False]
-        assert result[-5:].tolist() == expected_last_five, f"Expected {expected_last_five}, got {result[-5:].tolist()}"
+        actual_last_five = [v == 1.0 for v in result[-5:]]
+        assert actual_last_five == expected_last_five, f"Expected {expected_last_five}, got {actual_last_five}"
     
     def test_ttm_trend_zero_period(self):
         """Test TTM Trend fails with zero period - mirrors check_ttm_zero_period"""
@@ -125,8 +127,9 @@ class TestTtmTrend:
             else:
                 stream_values.append(value)
         
-        # Compare results
-        assert stream_values == batch_result.tolist()
+        # Compare results - convert f64 to bool for stream comparison
+        batch_bool = [False if np.isnan(v) else v == 1.0 for v in batch_result]
+        assert stream_values == batch_bool
     
     def test_ttm_trend_batch_single_period(self, test_data):
         """Test TTM Trend batch with single period"""
@@ -148,7 +151,8 @@ class TestTtmTrend:
         
         assert batch_result['values'].shape[0] == 1  # 1 row
         assert batch_result['values'].shape[1] == len(close)  # n columns
-        assert np.array_equal(batch_result['values'][0], single_result)
+        # Use allclose for f64 comparison with NaN handling
+        assert np.allclose(batch_result['values'][0], single_result, equal_nan=True)
         assert batch_result['periods'].tolist() == [5]
     
     def test_ttm_trend_batch_multiple_periods(self, test_data):
@@ -175,7 +179,8 @@ class TestTtmTrend:
         periods = [5, 10, 15]
         for i, period in enumerate(periods):
             single_result = ta.ttm_trend(hl2, close, period=period)
-            assert np.array_equal(batch_result['values'][i], single_result)
+            # Use allclose for f64 comparison with NaN handling
+            assert np.allclose(batch_result['values'][i], single_result, equal_nan=True)
     
     def test_ttm_trend_batch_invalid_range(self):
         """Test TTM Trend batch with invalid range"""
@@ -203,7 +208,8 @@ class TestTtmTrend:
         result_scalar = ta.ttm_trend(hl2, close, period=5, kernel="scalar")
         
         # Results should be identical regardless of kernel
-        assert np.array_equal(result_auto, result_scalar)
+        # Use allclose for f64 comparison with NaN handling
+        assert np.allclose(result_auto, result_scalar, equal_nan=True)
     
     def test_ttm_trend_batch_with_kernel(self, test_data):
         """Test TTM Trend batch with kernel option"""
@@ -229,7 +235,8 @@ class TestTtmTrend:
         )
         
         # Results should be identical
-        assert np.array_equal(result_auto['values'], result_scalar['values'])
+        # Use allclose for f64 comparison with NaN handling
+        assert np.allclose(result_auto['values'], result_scalar['values'], equal_nan=True)
 
 
 if __name__ == "__main__":

@@ -280,11 +280,11 @@ test('BandPass invalid bandwidth', () => {
     // Bandwidth must be in [0, 1]
     assert.throws(() => {
         wasm.bandpass_js(data, 5, -0.1);
-    }, /Invalid period/);
+    }, /invalid bandwidth/);
     
     assert.throws(() => {
         wasm.bandpass_js(data, 5, 1.5);
-    }, /Invalid period/);
+    }, /invalid bandwidth/);
 });
 
 // Batch API error handling

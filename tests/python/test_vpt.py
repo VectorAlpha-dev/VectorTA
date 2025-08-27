@@ -125,7 +125,10 @@ class TestVPT:
         result = ta_indicators.vpt_batch(close, volume)
         
         assert 'values' in result
-        assert 'params' in result
+        # VPT returns ALMA-compatible keys
+        assert 'periods' in result
+        assert 'offsets' in result
+        assert 'sigmas' in result
         
         # VPT has no parameters, so should have single row
         values_2d = result['values']

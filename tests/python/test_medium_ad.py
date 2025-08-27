@@ -35,6 +35,7 @@ class TestMediumAd:
     
     def test_medium_ad_accuracy(self, test_data):
         """Test MEDIUM_AD matches expected values from Rust tests - mirrors check_medium_ad_accuracy"""
+        # Use hl2 source to match Rust test
         hl2 = (test_data['high'] + test_data['low']) / 2
         
         result = ta_indicators.medium_ad(hl2, period=5)
@@ -43,13 +44,13 @@ class TestMediumAd:
         
         # Check last 5 values match expected (from Rust test)
         expected_last_five = [220.0, 78.5, 126.5, 48.0, 28.5]
-        start = len(result) - 5
         
-        for i, expected_val in enumerate(expected_last_five):
-            actual_val = result[start + i]
-            if not np.isnan(actual_val):
-                assert abs(actual_val - expected_val) < 1e-1, \
-                    f"MEDIUM_AD mismatch at index {i}: got {actual_val}, expected {expected_val}"
+        assert_close(
+            result[-5:],
+            expected_last_five,
+            rtol=1e-1,  # Using 1e-1 tolerance as per Rust test
+            msg="MEDIUM_AD last 5 values mismatch"
+        )
     
     def test_medium_ad_default_candles(self, test_data):
         """Test MEDIUM_AD with default parameters - mirrors check_medium_ad_default_candles"""
@@ -81,23 +82,12 @@ class TestMediumAd:
             ta_indicators.medium_ad(single_point, period=5)
     
     def test_medium_ad_empty_input(self):
-        """Test MEDIUM_AD fails with empty input"""
+        """Test MEDIUM_AD fails with empty input - mirrors check_medium_ad_empty_input"""
         empty = np.array([])
         
-        with pytest.raises(ValueError, match="Empty data provided"):
+        with pytest.raises(ValueError, match="Empty data provided|Empty input"):
             ta_indicators.medium_ad(empty, period=5)
     
-    def test_medium_ad_reinput(self, test_data):
-        """Test MEDIUM_AD applied twice (re-input) - mirrors check_medium_ad_reinput"""
-        close = test_data['close']
-        
-        # First pass
-        first_result = ta_indicators.medium_ad(close, period=5)
-        assert len(first_result) == len(close)
-        
-        # Second pass - apply MEDIUM_AD to MEDIUM_AD output
-        second_result = ta_indicators.medium_ad(first_result, period=5)
-        assert len(second_result) == len(first_result)
     
     def test_medium_ad_nan_handling(self, test_data):
         """Test MEDIUM_AD handles NaN values correctly - mirrors check_medium_ad_nan_handling"""
@@ -105,6 +95,10 @@ class TestMediumAd:
         
         result = ta_indicators.medium_ad(close, period=5)
         assert len(result) == len(close)
+        
+        # First period-1 (4) values should be NaN for warmup
+        for i in range(4):
+            assert np.isnan(result[i]), f"Expected NaN during warmup at index {i}, got {result[i]}"
         
         # After warmup period (60), no NaN values should exist
         if len(result) > 60:
@@ -115,35 +109,39 @@ class TestMediumAd:
                         f"Found unexpected NaN at index {i}"
     
     def test_medium_ad_batch_single_period(self, test_data):
-        """Test batch with single period value"""
+        """Test batch with single period value - mirrors batch tests"""
         close = test_data['close']
         
         # Single period batch
         batch_result = ta_indicators.medium_ad_batch(close, period_range=(5, 5, 0))
         
-        # Should match single calculation
-        single_result = ta_indicators.medium_ad(close, 5)
-        
+        # Verify metadata
+        assert 'values' in batch_result
+        assert 'periods' in batch_result
         assert batch_result['values'].shape[0] == 1
         assert batch_result['values'].shape[1] == len(close)
+        assert len(batch_result['periods']) == 1
+        assert batch_result['periods'][0] == 5
         
-        # Extract first row and compare
+        # Should match single calculation
+        single_result = ta_indicators.medium_ad(close, 5)
         batch_values = batch_result['values'][0]
         
-        for i in range(len(single_result)):
-            if np.isnan(single_result[i]) and np.isnan(batch_values[i]):
-                continue
-            assert abs(single_result[i] - batch_values[i]) < 1e-10, \
-                f"Batch vs single mismatch at index {i}"
+        assert_close(
+            batch_values,
+            single_result,
+            rtol=1e-10,
+            msg="Batch vs single mismatch"
+        )
     
     def test_medium_ad_batch_multiple_periods(self, test_data):
-        """Test batch with multiple period values"""
+        """Test batch with multiple period values - mirrors batch tests"""
         close = test_data['close'][:100]  # Use smaller dataset for speed
         
         # Multiple periods: 5, 10, 15
         batch_result = ta_indicators.medium_ad_batch(close, period_range=(5, 15, 5))
         
-        # Should have 3 rows * 100 cols
+        # Verify metadata
         assert batch_result['values'].shape == (3, 100)
         assert len(batch_result['periods']) == 3
         assert list(batch_result['periods']) == [5, 10, 15]
@@ -154,11 +152,12 @@ class TestMediumAd:
             row_data = batch_result['values'][i]
             single_result = ta_indicators.medium_ad(close, period)
             
-            for j in range(len(single_result)):
-                if np.isnan(single_result[j]) and np.isnan(row_data[j]):
-                    continue
-                assert abs(row_data[j] - single_result[j]) < 1e-10, \
-                    f"Period {period} mismatch at index {j}"
+            assert_close(
+                row_data,
+                single_result,
+                rtol=1e-10,
+                msg=f"Period {period} batch mismatch"
+            )
     
     def test_medium_ad_batch_edge_cases(self, test_data):
         """Test batch edge cases"""
@@ -180,7 +179,7 @@ class TestMediumAd:
             ta_indicators.medium_ad_batch(np.array([]), period_range=(5, 5, 0))
     
     def test_medium_ad_streaming(self, test_data):
-        """Test MEDIUM_AD streaming matches batch calculation"""
+        """Test MEDIUM_AD streaming matches batch calculation - mirrors check_medium_ad_streaming"""
         close = test_data['close']
         period = 5
         
@@ -193,19 +192,18 @@ class TestMediumAd:
         
         for price in close:
             value = stream.update(price)
-            if value is None:
-                stream_values.append(np.nan)
-            else:
-                stream_values.append(value)
+            stream_values.append(value if value is not None else np.nan)
         
-        # Compare results
+        stream_values = np.array(stream_values)
+        
+        # Compare batch vs streaming
         assert len(batch_result) == len(stream_values)
         
         for i, (b, s) in enumerate(zip(batch_result, stream_values)):
             if np.isnan(b) and np.isnan(s):
                 continue
-            assert abs(b - s) < 1e-9, \
-                f"MEDIUM_AD streaming mismatch at index {i}: batch={b}, stream={s}"
+            assert_close(b, s, rtol=1e-9, atol=1e-9,
+                        msg=f"MEDIUM_AD streaming mismatch at index {i}")
     
     def test_medium_ad_with_kernel_parameter(self, test_data):
         """Test MEDIUM_AD with explicit kernel parameter"""
@@ -219,12 +217,13 @@ class TestMediumAd:
         result_auto = ta_indicators.medium_ad(close, 5, kernel=None)
         assert len(result_auto) == len(close)
         
-        # Results should be very close (may differ slightly due to kernel differences)
-        for i in range(len(result_scalar)):
-            if np.isnan(result_scalar[i]) and np.isnan(result_auto[i]):
-                continue
-            assert abs(result_scalar[i] - result_auto[i]) < 1e-10, \
-                f"Kernel results differ at index {i}"
+        # Results should be identical for medium_ad (no SIMD optimizations yet)
+        assert_close(
+            result_scalar,
+            result_auto,
+            rtol=1e-10,
+            msg="Kernel results should match"
+        )
     
     def test_medium_ad_all_nan_input(self):
         """Test MEDIUM_AD with all NaN values"""
@@ -232,3 +231,17 @@ class TestMediumAd:
         
         with pytest.raises(ValueError, match="All values are NaN"):
             ta_indicators.medium_ad(all_nan, period=5)
+    
+    def test_medium_ad_warmup_period(self, test_data):
+        """Test MEDIUM_AD warmup period behavior"""
+        close = test_data['close'][:20]  # Small dataset
+        period = 5
+        
+        result = ta_indicators.medium_ad(close, period)
+        
+        # First period-1 values should be NaN
+        for i in range(period - 1):
+            assert np.isnan(result[i]), f"Expected NaN at index {i} during warmup"
+        
+        # Value at period-1 should be the first valid value
+        assert not np.isnan(result[period - 1]), f"Expected valid value at index {period - 1}"

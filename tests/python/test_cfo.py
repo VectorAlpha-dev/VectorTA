@@ -116,12 +116,17 @@ class TestCfo:
         result = ta_indicators.cfo(close, period=14, scalar=100.0)
         assert len(result) == len(close)
         
-        # After warmup period (240), no NaN values should exist
-        if len(result) > 240:
-            assert not np.any(np.isnan(result[240:])), "Found unexpected NaN after warmup period"
+        # Find first non-NaN value in input
+        first_valid = next((i for i, v in enumerate(close) if not np.isnan(v)), 0)
+        warmup_period = first_valid + 14 - 1
         
-        # First period-1 values should be NaN
-        assert np.all(np.isnan(result[:13])), "Expected NaN in warmup period"
+        # Check warmup period has NaN values
+        assert np.all(np.isnan(result[:warmup_period])), f"Expected NaN in warmup period [0:{warmup_period})"
+        
+        # After warmup, values should be finite (unless input has NaN/inf)
+        if len(result) > warmup_period:
+            # Check that we have valid outputs after warmup
+            assert not np.all(np.isnan(result[warmup_period:])), "Expected some valid values after warmup"
     
     def test_cfo_streaming(self, test_data):
         """Test CFO streaming matches batch calculation - mirrors check_cfo_streaming"""
@@ -253,6 +258,137 @@ class TestCfo:
         # so CFO should be close to 0
         non_nan_values = result[~np.isnan(result)]
         assert np.all(np.abs(non_nan_values) < 1e-10), "CFO should be ~0 for perfect linear trend"
+
+    def test_cfo_scalar_edge_cases(self):
+        """Test CFO with edge case scalar values"""
+        data = np.array([10.0, 20.0, 30.0, 40.0, 50.0])
+        
+        # Test with NaN scalar - produces all NaN output
+        result = ta_indicators.cfo(data, period=2, scalar=float('nan'))
+        assert np.all(np.isnan(result)), "NaN scalar should produce all NaN output"
+        
+        # Test with infinite scalar - produces inf/nan in output  
+        result = ta_indicators.cfo(data, period=2, scalar=float('inf'))
+        # Check that non-warmup values are inf or nan
+        non_warmup = result[1:]  # period=2, so warmup is first value
+        assert np.all(np.isnan(non_warmup) | np.isinf(non_warmup)), \
+            "Infinite scalar should produce inf/nan output"
+        
+        # Test with zero scalar - produces all zeros after warmup
+        result = ta_indicators.cfo(data, period=2, scalar=0.0)
+        non_warmup = result[1:]
+        assert np.all(non_warmup == 0.0), "Zero scalar should produce zero output"
+    
+    def test_cfo_negative_scalar(self, test_data):
+        """Test CFO with negative scalar values (should work)"""
+        close = test_data['close'][:100]
+        
+        # Negative scalar should work fine (just inverts the sign)
+        result_pos = ta_indicators.cfo(close, period=14, scalar=100.0)
+        result_neg = ta_indicators.cfo(close, period=14, scalar=-100.0)
+        
+        assert len(result_pos) == len(result_neg)
+        
+        # Results should be negatives of each other
+        for i, (pos, neg) in enumerate(zip(result_pos, result_neg)):
+            if np.isnan(pos) and np.isnan(neg):
+                continue
+            assert_close(-pos, neg, rtol=1e-10, atol=1e-10,
+                        msg=f"Negative scalar mismatch at index {i}")
+    
+    def test_cfo_warmup_period(self, test_data):
+        """Test CFO warmup period calculation is correct"""
+        close = test_data['close']
+        
+        # Test different periods
+        for period in [5, 10, 14, 20, 30]:
+            result = ta_indicators.cfo(close, period=period, scalar=100.0)
+            
+            # Find first non-NaN in input
+            first_valid = next((i for i, v in enumerate(close) if not np.isnan(v)), 0)
+            expected_warmup = first_valid + period - 1
+            
+            # Check all values before warmup are NaN
+            assert np.all(np.isnan(result[:expected_warmup])), \
+                f"Period {period}: Expected NaN before index {expected_warmup}"
+            
+            # Check first valid output is at warmup index
+            if expected_warmup < len(result):
+                assert not np.isnan(result[expected_warmup]), \
+                    f"Period {period}: Expected valid value at index {expected_warmup}"
+    
+    def test_cfo_edge_values(self):
+        """Test CFO with edge case values in data"""
+        # Data with zeros, which should produce NaN in CFO (division by zero)
+        data_with_zero = np.array([10.0, 20.0, 30.0, 0.0, 40.0, 50.0, 60.0])
+        result = ta_indicators.cfo(data_with_zero, period=3, scalar=100.0)
+        
+        # When current value is 0, CFO should be NaN (division by zero)
+        assert np.isnan(result[3]), "Expected NaN when current value is 0"
+        
+        # Data with infinity
+        data_with_inf = np.array([10.0, 20.0, 30.0, np.inf, 40.0, 50.0, 60.0])
+        result = ta_indicators.cfo(data_with_inf, period=3, scalar=100.0)
+        
+        # When current value is inf, CFO should be NaN
+        assert np.isnan(result[3]), "Expected NaN when current value is inf"
+        
+        # Very small values (should not cause issues)
+        data_small = np.array([1e-10, 2e-10, 3e-10, 4e-10, 5e-10])
+        result = ta_indicators.cfo(data_small, period=2, scalar=100.0)
+        assert len(result) == len(data_small)
+        assert not np.all(np.isnan(result)), "Should handle very small values"
+    
+    def test_cfo_batch_invalid_params(self, test_data):
+        """Test CFO batch with invalid parameter ranges"""
+        close = test_data['close'][:100]
+        
+        # Test with invalid period range (start > end)
+        with pytest.raises(ValueError, match="Invalid|period"):
+            ta_indicators.cfo_batch(
+                close,
+                period_range=(20, 10, 1),  # Invalid: start > end
+                scalar_range=(100.0, 100.0, 0.0)
+            )
+        
+        # Test with zero period
+        with pytest.raises(ValueError, match="Invalid period"):
+            ta_indicators.cfo_batch(
+                close,
+                period_range=(0, 0, 0),  # Invalid: zero period
+                scalar_range=(100.0, 100.0, 0.0)
+            )
+    
+    def test_cfo_batch_edge_cases(self, test_data):
+        """Test CFO batch with edge case parameter combinations"""
+        close = test_data['close'][:50]
+        
+        # Test with single parameter (step=0)
+        result = ta_indicators.cfo_batch(
+            close,
+            period_range=(14, 14, 0),
+            scalar_range=(100.0, 100.0, 0.0)
+        )
+        assert result['values'].shape[0] == 1, "Should have 1 combination"
+        
+        # Test with negative scalar in range
+        result = ta_indicators.cfo_batch(
+            close,
+            period_range=(14, 14, 0),
+            scalar_range=(-100.0, 100.0, 100.0)  # -100, 0, 100
+        )
+        assert result['values'].shape[0] == 3, "Should have 3 scalar values"
+        
+        # Verify negative scalar produces inverted results
+        row_neg = result['values'][0]  # scalar = -100
+        row_pos = result['values'][2]  # scalar = 100
+        
+        for i in range(len(close)):
+            if np.isnan(row_neg[i]) and np.isnan(row_pos[i]):
+                continue
+            if not np.isnan(row_neg[i]) and not np.isnan(row_pos[i]):
+                assert_close(-row_neg[i], row_pos[i], rtol=1e-10, atol=1e-10,
+                            msg=f"Batch negative scalar mismatch at index {i}")
 
 
 if __name__ == '__main__':

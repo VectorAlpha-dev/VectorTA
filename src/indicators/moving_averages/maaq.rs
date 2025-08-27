@@ -296,19 +296,24 @@ fn maaq_compute_into(
 	out: &mut [f64],
 ) -> Result<(), MaaqError> {
 	unsafe {
-		match kernel {
-			Kernel::Scalar | Kernel::ScalarBatch => {
-				maaq_scalar(data, period, fast_p, slow_p, first, out)?;
+		// Fallback to scalar if first > 0 since AVX implementations don't handle it properly
+		if first > 0 {
+			maaq_scalar(data, period, fast_p, slow_p, first, out)?;
+		} else {
+			match kernel {
+				Kernel::Scalar | Kernel::ScalarBatch => {
+					maaq_scalar(data, period, fast_p, slow_p, first, out)?;
+				}
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+				Kernel::Avx2 | Kernel::Avx2Batch => {
+					maaq_avx2(data, period, fast_p, slow_p, first, out)?;
+				}
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+				Kernel::Avx512 | Kernel::Avx512Batch => {
+					maaq_avx512(data, period, fast_p, slow_p, first, out)?;
+				}
+				_ => unreachable!(),
 			}
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => {
-				maaq_avx2(data, period, fast_p, slow_p, first, out)?;
-			}
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => {
-				maaq_avx512(data, period, fast_p, slow_p, first, out)?;
-			}
-			_ => unreachable!(),
 		}
 	}
 	Ok(())
@@ -373,10 +378,16 @@ fn maaq_prepare<'a>(
 pub fn maaq_with_kernel(input: &MaaqInput, kernel: Kernel) -> Result<MaaqOutput, MaaqError> {
 	let (data, period, fast_p, slow_p, first, chosen) = maaq_prepare(input, kernel)?;
 
-	let warm = first + period;
+	let warm = first + period - 1; // ALMA parity: prefix length
 	let mut out = alloc_with_nan_prefix(data.len(), warm);
 
 	maaq_compute_into(data, period, fast_p, slow_p, first, chosen, &mut out)?;
+
+	// ALMA parity: restore NaN prefix (AVX implementations may have written raw prices)
+	let warmup_end = first + period - 1;
+	for v in &mut out[..warmup_end] {
+		*v = f64::NAN;
+	}
 
 	Ok(MaaqOutput { values: out })
 }
@@ -387,46 +398,51 @@ pub fn maaq_scalar(
 	period: usize,
 	fast_p: usize,
 	slow_p: usize,
-	first: usize, // kept for API compatibility; still unused
+	first: usize,
 	out: &mut [f64],
 ) -> Result<(), MaaqError> {
 	let len = data.len();
 	let fast_sc = 2.0 / (fast_p as f64 + 1.0);
 	let slow_sc = 2.0 / (slow_p as f64 + 1.0);
 
-	// pre-compute absolute price differences
-	let mut diff = vec![0.0; len];
-	for i in 1..len {
-		diff[i] = (data[i] - data[i - 1]).abs();
+	// ring buffer of |Δ| for the current window ending at i = first + period - 1
+	let mut diffs = vec![0.0f64; period];
+	let mut vol_sum = 0.0;
+	// fill diffs[1..period-1] over data[first..first+period-1]
+	for j in 1..period {
+		let d = (data[first + j] - data[first + j - 1]).abs();
+		diffs[j] = d;
+		vol_sum += d;
 	}
 
-	// warm-up: the first `period` outputs equal the raw prices
-	out[..period].copy_from_slice(&data[..period]);
+	// first computable index
+	let i0 = first + period - 1;
+	let mut prev_val = data[i0 - 1];
 
-	// rolling sum of |Δprice|
-	let mut rolling_sum = diff[..period].iter().sum::<f64>();
+	let er0 = if vol_sum > f64::EPSILON { (data[i0] - data[first]).abs() / vol_sum } else { 0.0 };
+	let mut sc = fast_sc.mul_add(er0, slow_sc);
+	sc *= sc;
+	prev_val = prev_val + sc * (data[i0] - prev_val);
+	out[i0] = prev_val;
 
-	for i in period..len {
-		// slide the window
-		rolling_sum += diff[i];
-		rolling_sum -= diff[i - period];
+	// head points to the oldest |Δ| (which is diffs[1] now)
+	let mut head = 1usize;
 
-		// efficiency ratio ER = |price[i] − price[i-period]| / Σ|Δprice|
-		let noise = rolling_sum;
-		let signal = (data[i] - data[i - period]).abs();
-		let ratio = if noise.abs() < f64::EPSILON {
-			0.0
-		} else {
-			signal / noise
-		};
+	for i in (i0 + 1)..len {
+		// roll window: drop oldest |Δ|, add newest
+		vol_sum -= diffs[head];
+		let nd = (data[i] - data[i - 1]).abs();
+		diffs[head] = nd;
+		vol_sum += nd;
+		head += 1;
+		if head == period { head = 0; }
 
-		// smoothing constant SC  = (ratio * fast_sc + slow_sc)²   ← no mul_add
-		let sc = ratio * fast_sc + slow_sc;
-		let temp = sc * sc;
+		let er = if vol_sum > f64::EPSILON { (data[i] - data[i - period]).abs() / vol_sum } else { 0.0 };
+		let mut sc = fast_sc.mul_add(er, slow_sc);
+		sc *= sc;
 
-		// adaptive EMA update
-		let prev_val = out[i - 1];
-		out[i] = prev_val + temp * (data[i] - prev_val);
+		prev_val = sc.mul_add(data[i] - prev_val, prev_val);
+		out[i] = prev_val;
 	}
 	Ok(())
 }
@@ -580,7 +596,7 @@ impl MaaqStream {
 			if self.head == 0 {
 				self.filled = true;
 			}
-			return Some(value);
+			return Some(value); // MAAQ returns raw values during warmup
 		}
 		let sum: f64 = self.diff.iter().sum();
 		let noise = sum;
@@ -774,8 +790,8 @@ fn maaq_batch_inner(
 	let rows = combos.len();
 	let cols = data.len();
 
-	// Per-row warm prefix: first non-NaN + that row’s period
-	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
+	// Per-row warm prefix: first non-NaN + that row's period - 1
+	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
 
 	// 1. allocate the matrix as MaybeUninit and write the NaN prefixes
 	let mut raw = make_uninit_matrix(rows, cols);
@@ -821,8 +837,11 @@ fn maaq_batch_inner(
 		}
 	}
 
-	// 4. all elements are now initialised – transmute to Vec<f64>
-	let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
+	// 4. all elements are now initialised – convert to Vec<f64> safely
+	let mut guard = core::mem::ManuallyDrop::new(raw);
+	let values: Vec<f64> = unsafe {
+		Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, guard.len(), guard.capacity())
+	};
 
 	// ---------- 5. package result ----------
 	Ok(MaaqBatchOutput {
@@ -867,8 +886,8 @@ pub fn maaq_batch_inner_into(
 	// Cast output slice to MaybeUninit
 	let out_uninit = unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len()) };
 
-	// Per-row warm prefix: first non-NaN + that row's period
-	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
+	// Per-row warm prefix: first non-NaN + that row's period - 1
+	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
 
 	// 1. Write the NaN prefixes
 	unsafe { init_matrix_prefixes(out_uninit, cols, &warm) };
@@ -1157,7 +1176,13 @@ mod tests {
 			}
 		}
 		assert_eq!(batch_output.len(), stream_values.len());
-		for (i, (&b, &s)) in batch_output.iter().zip(stream_values.iter()).enumerate() {
+		// Compare only after warmup period
+		// Batch uses NaN for warmup (ALMA parity): indices 0 to period-2 are NaN
+		// Stream returns raw values during warmup then switches to MAAQ values
+		// Both should produce the same MAAQ values after index period-1
+		for i in period..batch_output.len() {
+			let b = batch_output[i];
+			let s = stream_values[i];
 			if b.is_nan() && s.is_nan() {
 				continue;
 			}
@@ -1464,16 +1489,14 @@ mod tests {
 				prop_assert_eq!(result.values.len(), data.len(), 
 					"Output length {} doesn't match input length {}", result.values.len(), data.len());
 
-				// Property 2: First 'period' values equal raw prices (warmup)
-				for i in 0..period.min(data.len()) {
-					let expected = data[i];
-					let actual = result.values[i];
-					if expected.is_finite() {
-						prop_assert!(
-							(actual - expected).abs() < 1e-10,
-							"Warmup value at {} incorrect: got {}, expected {}", i, actual, expected
-						);
-					}
+				// Property 2: Warmup values should be NaN (ALMA parity)
+				let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+				let warmup_end = first_valid + period - 1;
+				for i in 0..warmup_end.min(data.len()) {
+					prop_assert!(
+						result.values[i].is_nan(),
+						"Warmup value at {} should be NaN, got {}", i, result.values[i]
+					);
 				}
 
 				// Property 3: SIMD consistency with scalar (ULP tolerance)
@@ -1983,6 +2006,12 @@ pub fn maaq_into_slice(dst: &mut [f64], input: &MaaqInput, kern: Kernel) -> Resu
 
 	// Compute MAAQ values directly into dst
 	maaq_compute_into(data, period, fast_p, slow_p, first, chosen, dst)?;
+
+	// ALMA parity: restore NaN prefix
+	let warmup_end = first + period - 1;
+	for v in &mut dst[..warmup_end] {
+		*v = f64::NAN;
+	}
 
 	Ok(())
 }

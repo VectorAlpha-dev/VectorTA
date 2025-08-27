@@ -113,7 +113,7 @@ use crate::indicators::vpci::{vpci_batch_py, vpci_py};
 use crate::indicators::wclprice::{wclprice_batch_py, wclprice_py, WclpriceStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::damiani_volatmeter::{
-	damiani_volatmeter_batch_py, damiani_volatmeter_py, DamianiVolatmeterStreamPy,
+	damiani_batch_py, damiani_py, DamianiVolatmeterStreamPy, DamianiVolatmeterFeedStreamPy,
 };
 #[cfg(feature = "python")]
 use crate::indicators::emd::{emd_batch_py, emd_py, EmdStreamPy};
@@ -859,9 +859,10 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_class::<WclpriceStreamPy>()?;
 
 	// Register Damiani Volatmeter functions with their user-facing names
-	m.add_function(wrap_pyfunction!(damiani_volatmeter_py, m)?)?;
-	m.add_function(wrap_pyfunction!(damiani_volatmeter_batch_py, m)?)?;
+	m.add_function(wrap_pyfunction!(damiani_py, m)?)?;
+	m.add_function(wrap_pyfunction!(damiani_batch_py, m)?)?;
 	m.add_class::<DamianiVolatmeterStreamPy>()?;
+	m.add_class::<DamianiVolatmeterFeedStreamPy>()?;
 
 	// Register EMD functions with their user-facing names
 	m.add_function(wrap_pyfunction!(emd_py, m)?)?;

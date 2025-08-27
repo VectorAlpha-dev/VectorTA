@@ -32,7 +32,7 @@ class TestVwmacd:
         # Test with all default params
         macd, signal, hist = ta.vwmacd(
             close, volume, 
-            fast_period=12, slow_period=26, signal_period=9
+            12, 26, 9
         )
         assert len(macd) == len(close)
         assert len(signal) == len(close)
@@ -45,7 +45,7 @@ class TestVwmacd:
         
         macd, signal, hist = ta.vwmacd(
             close, volume,
-            fast_period=12, slow_period=26, signal_period=9
+            12, 26, 9
         )
         
         # Expected values from Rust tests
@@ -182,11 +182,9 @@ class TestVwmacd:
         close = test_data['close'][:100]
         zero_volume = np.zeros(100)
         
-        # Should handle zero volume gracefully
-        macd, signal, hist = ta.vwmacd(close, zero_volume, 12, 26, 9)
-        assert len(macd) == len(close)
-        assert len(signal) == len(close)
-        assert len(hist) == len(close)
+        # Should raise an error when all volume is zero
+        with pytest.raises(ValueError, match="MA calculation error"):
+            ta.vwmacd(close, zero_volume, 12, 26, 9)
     
     def test_vwmacd_streaming_basic(self, test_data):
         """Test VWMACD streaming functionality"""

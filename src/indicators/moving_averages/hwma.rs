@@ -24,7 +24,6 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -326,27 +325,40 @@ pub fn hwma_with_kernel_into(input: &HwmaInput, kernel: Kernel, out: &mut [f64])
 		other => other,
 	};
 
-	// NOTE: This function expects the output buffer to be pre-initialized.
-	// The caller is responsible for handling NaN prefix initialization.
-	// This follows the zero-copy philosophy to avoid redundant memory operations.
-
 	unsafe {
 		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => hwma_scalar(data, na, nb, nc, first, out),
+			Kernel::Scalar | Kernel::ScalarBatch => {
+				// For WASM, use SIMD128 when available even for scalar kernel
+				#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+				{
+					hwma_simd128(data, na, nb, nc, first, out);
+				}
+				#[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+				{
+					hwma_scalar(data, na, nb, nc, first, out);
+				}
+			}
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx2 | Kernel::Avx2Batch => hwma_avx2(data, na, nb, nc, first, out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 | Kernel::Avx512Batch => hwma_avx512(data, na, nb, nc, first, out),
 			_ => {
-				// For WASM, use SIMD128 when available
+				// Fallback for any other kernel types
 				#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 				{
 					hwma_simd128(data, na, nb, nc, first, out);
-					return Ok(());
 				}
-				hwma_scalar(data, na, nb, nc, first, out)
+				#[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+				{
+					hwma_scalar(data, na, nb, nc, first, out);
+				}
 			}
 		}
+	}
+
+	// Match ALMA: write only the warmup prefix, no full-vector fill
+	for v in &mut out[..first] {
+		*v = f64::NAN;
 	}
 
 	Ok(())
@@ -609,9 +621,9 @@ pub struct HwmaBatchRange {
 impl Default for HwmaBatchRange {
 	fn default() -> Self {
 		Self {
-			na: (0.2, 6.0, 0.0),
-			nb: (0.1, 4.0, 0.0),
-			nc: (0.1, 4.0, 0.0),
+			na: (0.2, 0.2, 0.0),
+			nb: (0.1, 0.1, 0.0),
+			nc: (0.1, 0.1, 0.0),
 		}
 	}
 }
@@ -677,17 +689,18 @@ impl HwmaBatchBuilder {
 }
 
 pub fn hwma_batch_with_kernel(data: &[f64], sweep: &HwmaBatchRange, k: Kernel) -> Result<HwmaBatchOutput, HwmaError> {
-	let kernel = match k {
-		Kernel::Auto => detect_best_batch_kernel(),
-		other if other.is_batch() => other,
-		_ => return Err(HwmaError::EmptyData),
-	};
-
-	let simd = match kernel {
-		Kernel::Avx512Batch => Kernel::Avx512,
-		Kernel::Avx2Batch => Kernel::Avx2,
-		Kernel::ScalarBatch => Kernel::Scalar,
-		_ => unreachable!(),
+	// Map both batch and non-batch kernels to their regular SIMD equivalents
+	let simd = match k {
+		Kernel::Auto => match detect_best_batch_kernel() {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch => Kernel::Avx2,
+			Kernel::ScalarBatch => Kernel::Scalar,
+			_ => Kernel::Scalar,
+		},
+		Kernel::Avx512Batch | Kernel::Avx512 => Kernel::Avx512,
+		Kernel::Avx2Batch | Kernel::Avx2 => Kernel::Avx2,
+		Kernel::ScalarBatch | Kernel::Scalar => Kernel::Scalar,
+		_ => Kernel::Scalar,
 	};
 	hwma_batch_par_slice(data, sweep, simd)
 }
@@ -973,9 +986,7 @@ pub fn expand_grid_hwma(r: &HwmaBatchRange) -> Vec<HwmaParams> {
 
 // Python bindings
 #[cfg(feature = "python")]
-use numpy::ndarray::{Array1, Array2};
-#[cfg(feature = "python")]
-use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1};
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
@@ -1074,7 +1085,7 @@ pub fn hwma_batch_py<'py>(
 
 	// Use zero-copy for parameter arrays
 	dict.set_item(
-		"na_values",
+		"na",
 		combos_result
 			.iter()
 			.map(|p| p.na.unwrap())
@@ -1082,7 +1093,7 @@ pub fn hwma_batch_py<'py>(
 			.into_pyarray(py),
 	)?;
 	dict.set_item(
-		"nb_values",
+		"nb",
 		combos_result
 			.iter()
 			.map(|p| p.nb.unwrap())
@@ -1090,7 +1101,7 @@ pub fn hwma_batch_py<'py>(
 			.into_pyarray(py),
 	)?;
 	dict.set_item(
-		"nc_values",
+		"nc",
 		combos_result
 			.iter()
 			.map(|p| p.nc.unwrap())
@@ -1188,7 +1199,14 @@ pub fn hwma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, J
 		nc: config.nc_range,
 	};
 
-	let output = hwma_batch_inner(data, &sweep, Kernel::Auto, false).map_err(|e| JsValue::from_str(&e.to_string()))?;
+	// Resolve to a non-batch kernel like ALMA does
+	let simd = match detect_best_batch_kernel() {
+		Kernel::Avx512Batch => Kernel::Avx512,
+		Kernel::Avx2Batch => Kernel::Avx2,
+		_ => Kernel::Scalar,
+	};
+
+	let output = hwma_batch_inner(data, &sweep, simd, false).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	let js_output = HwmaBatchJsOutput {
 		values: output.values,
@@ -1309,8 +1327,13 @@ pub fn hwma_batch_into(
 
 		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
 
-		// Use optimized batch processing
-		hwma_batch_inner_into(data, &sweep, Kernel::Auto, false, out).map_err(|e| JsValue::from_str(&e.to_string()))?;
+		let simd = match detect_best_batch_kernel() {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch => Kernel::Avx2,
+			_ => Kernel::Scalar,
+		};
+
+		hwma_batch_inner_into(data, &sweep, simd, false, out).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 		Ok(rows)
 	}
@@ -1379,6 +1402,7 @@ mod tests {
 	use super::*;
 	use crate::skip_if_unsupported;
 	use crate::utilities::data_loader::read_candles_from_csv;
+	#[cfg(feature = "proptest")]
 	use proptest::prelude::*;
 
 	fn check_hwma_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {

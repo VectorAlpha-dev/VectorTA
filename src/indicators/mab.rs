@@ -217,94 +217,121 @@ fn mab_prepare<'a>(input: &'a MabInput, kernel: Kernel) -> Result<(&'a [f64], us
 	Ok((data, warmup, chosen, fast, slow, devup, devdn))
 }
 
+#[inline(always)]
+fn mab_prepare2<'a>(
+	input: &'a MabInput,
+	kernel: Kernel,
+) -> Result<(&'a [f64], Kernel, usize, usize, usize, f64, f64), MabError> {
+	// Single pass validate + warmup
+	let data = input.as_ref();
+	if data.is_empty() {
+		return Err(MabError::EmptyData);
+	}
+	let fast = input.get_fast_period();
+	let slow = input.get_slow_period();
+	if fast == 0 || slow == 0 || fast > data.len() || slow > data.len() {
+		return Err(MabError::InvalidPeriod { fast, slow, len: data.len() });
+	}
+	let first = data.iter().position(|&x| !x.is_nan()).ok_or(MabError::AllValuesNaN)?;
+	let need = fast.max(slow);
+	// MAB needs additional fast_period samples to compute standard deviation
+	let need_total = need + fast - 1;
+	if data.len() - first < need_total {
+		return Err(MabError::NotEnoughValidData { need: need_total, valid: data.len() - first });
+	}
+	let chosen = match kernel { Kernel::Auto => detect_best_kernel(), k => k };
+	let warmup = first + need_total - 1;
+	Ok((data, chosen, first, warmup, fast, input.get_devup(), input.get_devdn()))
+}
+
+/// Compute MAB directly into caller-owned slices. Zero allocations for outputs.
+/// Warmup prefix is set to NaN in-place.
+pub fn mab_into_slice(
+	upper_dst: &mut [f64],
+	middle_dst: &mut [f64],
+	lower_dst: &mut [f64],
+	input: &MabInput,
+	kern: Kernel,
+) -> Result<(), MabError> {
+	use crate::indicators::ema::{ema, EmaInput, EmaParams};
+	use crate::indicators::sma::{sma, SmaInput, SmaParams};
+
+	let (data, chosen, first, warmup, fast_period, devup, devdn) = mab_prepare2(input, kern)?;
+	let slow_period = input.get_slow_period();
+
+	let n = data.len();
+	if upper_dst.len() != n || middle_dst.len() != n || lower_dst.len() != n {
+		return Err(MabError::InvalidLength {
+			upper_len: upper_dst.len(),
+			middle_len: middle_dst.len(),
+			lower_len: lower_dst.len(),
+			expected: n,
+		});
+	}
+
+	// Fast MA
+	let fast_ma = match input.get_fast_ma_type() {
+		"ema" => {
+			let params = EmaParams { period: Some(fast_period) };
+			ema(&EmaInput::from_slice(data, params)).map_err(|_| MabError::NotEnoughValidData {
+				need: fast_period, valid: n - first
+			})?.values
+		}
+		_ => {
+			let params = SmaParams { period: Some(fast_period) };
+			sma(&SmaInput::from_slice(data, params)).map_err(|_| MabError::NotEnoughValidData {
+				need: fast_period, valid: n - first
+			})?.values
+		}
+	};
+
+	// Slow MA
+	let slow_ma = match input.get_slow_ma_type() {
+		"ema" => {
+			let params = EmaParams { period: Some(slow_period) };
+			ema(&EmaInput::from_slice(data, params)).map_err(|_| MabError::NotEnoughValidData {
+				need: slow_period, valid: n - first
+			})?.values
+		}
+		_ => {
+			let params = SmaParams { period: Some(slow_period) };
+			sma(&SmaInput::from_slice(data, params)).map_err(|_| MabError::NotEnoughValidData {
+				need: slow_period, valid: n - first
+			})?.values
+		}
+	};
+
+	// Set warmup prefix BEFORE computation
+	// warmup is the last NaN index, so we need to set NaN up to and including it
+	let warmup_end = (warmup + 1).min(n);
+	for dst in [&mut *upper_dst, &mut *middle_dst, &mut *lower_dst] {
+		for v in &mut dst[..warmup_end] { *v = f64::NAN; }
+	}
+
+	// Compute directly into provided slices
+	// Pass warmup+1 as the first output index
+	mab_compute_into(
+		&fast_ma, &slow_ma, fast_period, devup, devdn, warmup + 1, chosen,
+		upper_dst, middle_dst, lower_dst,
+	);
+
+	Ok(())
+}
+
 pub fn mab(input: &MabInput) -> Result<MabOutput, MabError> {
 	let (_data, _warmup, kernel, _fast, _slow, _devup, _devdn) = mab_prepare(input, Kernel::Auto)?;
 	mab_with_kernel(input, kernel)
 }
 
 fn mab_with_kernel(input: &MabInput, kernel: Kernel) -> Result<MabOutput, MabError> {
-	let (data, warmup, chosen, fast_period, slow_period, devup, devdn) = mab_prepare(input, kernel)?;
-	let first_valid = mab_validate(input)?;
+	let data = input.as_ref();
+	let (_, _, _, warmup, _, _, _) = mab_prepare2(input, kernel)?; // also validates sizes
 
-	// Get MA types
-	let fast_ma_type = input.get_fast_ma_type();
-	let slow_ma_type = input.get_slow_ma_type();
-
-	// Create inputs for the MAs
-	use crate::indicators::sma::{sma, SmaInput, SmaParams};
-	use crate::indicators::ema::{ema, EmaInput, EmaParams};
-
-	// Compute fast MA
-	let fast_ma = match fast_ma_type {
-		"ema" => {
-			let params = EmaParams {
-				period: Some(fast_period),
-			};
-			let input = EmaInput::from_slice(data, params);
-			let result = ema(&input).map_err(|_| MabError::NotEnoughValidData {
-				need: fast_period,
-				valid: data.len() - first_valid,
-			})?;
-			result.values
-		}
-		_ => {
-			// Default to SMA
-			let params = SmaParams {
-				period: Some(fast_period),
-			};
-			let input = SmaInput::from_slice(data, params);
-			let result = sma(&input).map_err(|_| MabError::NotEnoughValidData {
-				need: fast_period,
-				valid: data.len() - first_valid,
-			})?;
-			result.values
-		}
-	};
-
-	// Compute slow MA
-	let slow_ma = match slow_ma_type {
-		"ema" => {
-			let params = EmaParams {
-				period: Some(slow_period),
-			};
-			let input = EmaInput::from_slice(data, params);
-			let result = ema(&input).map_err(|_| MabError::NotEnoughValidData {
-				need: slow_period,
-				valid: data.len() - first_valid,
-			})?;
-			result.values
-		}
-		_ => {
-			// Default to SMA
-			let params = SmaParams {
-				period: Some(slow_period),
-			};
-			let input = SmaInput::from_slice(data, params);
-			let result = sma(&input).map_err(|_| MabError::NotEnoughValidData {
-				need: slow_period,
-				valid: data.len() - first_valid,
-			})?;
-			result.values
-		}
-	};
-
-	// Use alloc_with_nan_prefix for zero-copy allocation
 	let mut upperband = alloc_with_nan_prefix(data.len(), warmup);
 	let mut middleband = alloc_with_nan_prefix(data.len(), warmup);
 	let mut lowerband = alloc_with_nan_prefix(data.len(), warmup);
 
-	mab_compute_into(
-		&fast_ma,
-		&slow_ma,
-		fast_period,
-		devup,
-		devdn,
-		first_valid,
-		chosen,
-		&mut upperband,
-		&mut middleband,
-		&mut lowerband,
-	);
+	mab_into_slice(&mut upperband, &mut middleband, &mut lowerband, input, kernel)?;
 
 	Ok(MabOutput {
 		upperband,
@@ -320,7 +347,7 @@ fn mab_compute_into(
 	fast_period: usize,
 	devup: f64,
 	devdn: f64,
-	first_valid: usize,
+	first_output: usize,
 	kernel: Kernel,
 	upper: &mut [f64],
 	mid: &mut [f64],
@@ -334,7 +361,7 @@ fn mab_compute_into(
 				fast_period,
 				devup,
 				devdn,
-				first_valid,
+				first_output,
 				upper,
 				mid,
 				lower,
@@ -346,7 +373,7 @@ fn mab_compute_into(
 				fast_period,
 				devup,
 				devdn,
-				first_valid,
+				first_output,
 				upper,
 				mid,
 				lower,
@@ -358,7 +385,7 @@ fn mab_compute_into(
 				fast_period,
 				devup,
 				devdn,
-				first_valid,
+				first_output,
 				upper,
 				mid,
 				lower,
@@ -375,38 +402,43 @@ pub unsafe fn mab_scalar(
 	fast_period: usize,
 	devup: f64,
 	devdn: f64,
-	first: usize,
+	first_output: usize,
 	upper: &mut [f64],
 	mid: &mut [f64],
 	lower: &mut [f64],
 ) {
-	// Compute warmup for MAB specifically
-	let warmup = fast_ma
-		.iter()
-		.take_while(|&&x| x.is_nan())
-		.count()
-		.max(slow_ma.iter().take_while(|&&x| x.is_nan()).count());
-
-	// Main computation
-	let mut diffs: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, fast_period);
-	diffs.resize(fast_period, 0.0);
-
-	for i in warmup..fast_ma.len() {
+	// Initialize sum of squares for the first window
+	let start_idx = if first_output >= fast_period { 
+		first_output - fast_period + 1 
+	} else { 
+		0 
+	};
+	
+	let mut sum_sq = 0.0;
+	for i in start_idx..(start_idx + fast_period).min(fast_ma.len()) {
 		let diff = fast_ma[i] - slow_ma[i];
-		diffs[i % fast_period] = diff;
-
-		if i >= warmup + fast_period - 1 {
-			// Compute mean of diffs
-			let mean = diffs.iter().sum::<f64>() / fast_period as f64;
-
-			// Compute standard deviation
-			let variance = diffs.iter().map(|&d| (d - mean).powi(2)).sum::<f64>() / fast_period as f64;
-			let std_dev = variance.sqrt();
-
-			mid[i] = fast_ma[i];
-			upper[i] = fast_ma[i] + devup * std_dev;
-			lower[i] = fast_ma[i] - devdn * std_dev;
-		}
+		sum_sq += diff * diff;
+	}
+	
+	// Process first valid output
+	if first_output < fast_ma.len() {
+		let dev = (sum_sq / fast_period as f64).sqrt();
+		mid[first_output] = fast_ma[first_output];
+		upper[first_output] = slow_ma[first_output] + devup * dev;
+		lower[first_output] = slow_ma[first_output] - devdn * dev;
+	}
+	
+	// Process remaining values with running sum
+	for i in (first_output + 1)..fast_ma.len() {
+		let old_idx = i - fast_period;
+		let old = fast_ma[old_idx] - slow_ma[old_idx];
+		let new = fast_ma[i] - slow_ma[i];
+		sum_sq += new * new - old * old;
+		let dev = (sum_sq / fast_period as f64).sqrt();
+		
+		mid[i] = fast_ma[i];
+		upper[i] = slow_ma[i] + devup * dev;
+		lower[i] = slow_ma[i] - devdn * dev;
 	}
 }
 
@@ -418,94 +450,13 @@ pub unsafe fn mab_avx2(
 	fast_period: usize,
 	devup: f64,
 	devdn: f64,
-	first: usize,
+	first_output: usize,
 	upper: &mut [f64],
 	mid: &mut [f64],
 	lower: &mut [f64],
 ) {
-	// Compute warmup for MAB specifically
-	let warmup = fast_ma
-		.iter()
-		.take_while(|&&x| x.is_nan())
-		.count()
-		.max(slow_ma.iter().take_while(|&&x| x.is_nan()).count());
-
-	// Main computation
-	let mut diffs: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, fast_period);
-	diffs.resize(fast_period, 0.0);
-
-	let devup_vec = _mm256_set1_pd(devup);
-	let devdn_vec = _mm256_set1_pd(devdn);
-	let period_f64 = fast_period as f64;
-	let inv_period = _mm256_set1_pd(1.0 / period_f64);
-
-	for i in warmup..fast_ma.len() {
-		let diff = fast_ma[i] - slow_ma[i];
-		diffs[i % fast_period] = diff;
-
-		if i >= warmup + fast_period - 1 {
-			// Compute mean of diffs using AVX2
-			let mut sum_vec = _mm256_setzero_pd();
-			let mut j = 0;
-
-			// Process 4 elements at a time
-			while j + 3 < fast_period {
-				let diff_vec = _mm256_loadu_pd(&diffs[j]);
-				sum_vec = _mm256_add_pd(sum_vec, diff_vec);
-				j += 4;
-			}
-
-			// Sum the vector elements
-			let sum_array = std::mem::transmute::<__m256d, [f64; 4]>(sum_vec);
-			let mut sum = sum_array[0] + sum_array[1] + sum_array[2] + sum_array[3];
-
-			// Handle remaining elements
-			while j < fast_period {
-				sum += diffs[j];
-				j += 1;
-			}
-
-			let mean = sum / period_f64;
-			let mean_vec = _mm256_set1_pd(mean);
-
-			// Compute variance using AVX2
-			let mut variance_vec = _mm256_setzero_pd();
-			j = 0;
-
-			while j + 3 < fast_period {
-				let diff_vec = _mm256_loadu_pd(&diffs[j]);
-				let centered = _mm256_sub_pd(diff_vec, mean_vec);
-				let squared = _mm256_mul_pd(centered, centered);
-				variance_vec = _mm256_add_pd(variance_vec, squared);
-				j += 4;
-			}
-
-			// Sum the variance vector
-			let var_array = std::mem::transmute::<__m256d, [f64; 4]>(variance_vec);
-			let mut variance = var_array[0] + var_array[1] + var_array[2] + var_array[3];
-
-			// Handle remaining elements
-			while j < fast_period {
-				let centered = diffs[j] - mean;
-				variance += centered * centered;
-				j += 1;
-			}
-
-			variance /= period_f64;
-			let std_dev = variance.sqrt();
-			let std_dev_vec = _mm256_set1_pd(std_dev);
-
-			// Compute bands
-			let fast_ma_val = _mm256_set1_pd(fast_ma[i]);
-			let upper_val = _mm256_add_pd(fast_ma_val, _mm256_mul_pd(devup_vec, std_dev_vec));
-			let lower_val = _mm256_sub_pd(fast_ma_val, _mm256_mul_pd(devdn_vec, std_dev_vec));
-
-			// Store results
-			mid[i] = fast_ma[i];
-			upper[i] = _mm256_cvtsd_f64(upper_val);
-			lower[i] = _mm256_cvtsd_f64(lower_val);
-		}
-	}
+	// Just call the scalar implementation
+	mab_scalar(fast_ma, slow_ma, fast_period, devup, devdn, first_output, upper, mid, lower);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -516,83 +467,13 @@ pub unsafe fn mab_avx512(
 	fast_period: usize,
 	devup: f64,
 	devdn: f64,
-	first: usize,
+	first_output: usize,
 	upper: &mut [f64],
 	mid: &mut [f64],
 	lower: &mut [f64],
 ) {
-	// Compute warmup for MAB specifically
-	let warmup = fast_ma
-		.iter()
-		.take_while(|&&x| x.is_nan())
-		.count()
-		.max(slow_ma.iter().take_while(|&&x| x.is_nan()).count());
-
-	// Main computation
-	let mut diffs: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, fast_period);
-	diffs.resize(fast_period, 0.0);
-
-	let devup_vec = _mm512_set1_pd(devup);
-	let devdn_vec = _mm512_set1_pd(devdn);
-	let period_f64 = fast_period as f64;
-	let inv_period = _mm512_set1_pd(1.0 / period_f64);
-
-	for i in warmup..fast_ma.len() {
-		let diff = fast_ma[i] - slow_ma[i];
-		diffs[i % fast_period] = diff;
-
-		if i >= warmup + fast_period - 1 {
-			// Compute mean of diffs using AVX512
-			let mut sum_vec = _mm512_setzero_pd();
-			let mut j = 0;
-
-			// Process 8 elements at a time
-			while j + 7 < fast_period {
-				let diff_vec = _mm512_loadu_pd(&diffs[j]);
-				sum_vec = _mm512_add_pd(sum_vec, diff_vec);
-				j += 8;
-			}
-
-			// Sum the vector elements
-			let sum = _mm512_reduce_add_pd(sum_vec) + diffs[j..fast_period].iter().sum::<f64>();
-			let mean = sum / period_f64;
-			let mean_vec = _mm512_set1_pd(mean);
-
-			// Compute variance using AVX512
-			let mut variance_vec = _mm512_setzero_pd();
-			j = 0;
-
-			while j + 7 < fast_period {
-				let diff_vec = _mm512_loadu_pd(&diffs[j]);
-				let centered = _mm512_sub_pd(diff_vec, mean_vec);
-				let squared = _mm512_mul_pd(centered, centered);
-				variance_vec = _mm512_add_pd(variance_vec, squared);
-				j += 8;
-			}
-
-			// Sum the variance and handle remainder
-			let mut variance = _mm512_reduce_add_pd(variance_vec);
-			while j < fast_period {
-				let centered = diffs[j] - mean;
-				variance += centered * centered;
-				j += 1;
-			}
-
-			variance /= period_f64;
-			let std_dev = variance.sqrt();
-			let std_dev_vec = _mm512_set1_pd(std_dev);
-
-			// Compute bands
-			let fast_ma_val = _mm512_set1_pd(fast_ma[i]);
-			let upper_val = _mm512_add_pd(fast_ma_val, _mm512_mul_pd(devup_vec, std_dev_vec));
-			let lower_val = _mm512_sub_pd(fast_ma_val, _mm512_mul_pd(devdn_vec, std_dev_vec));
-
-			// Store results
-			mid[i] = fast_ma[i];
-			upper[i] = _mm512_reduce_add_pd(upper_val) / 8.0;
-			lower[i] = _mm512_reduce_add_pd(lower_val) / 8.0;
-		}
-	}
+	// Just call the scalar implementation
+	mab_scalar(fast_ma, slow_ma, fast_period, devup, devdn, first_output, upper, mid, lower);
 }
 
 // Stream implementation
@@ -967,26 +848,33 @@ fn mab_batch_inner(
 		std::slice::from_raw_parts_mut(lower_buf.as_mut_ptr() as *mut f64, rows * cols)
 	};
 
-	mab_batch_inner_into(input, sweep, simd, parallel, upper_slice, middle_slice, lower_slice)?;
+	let combos = mab_batch_inner_into(input, sweep, simd, parallel, upper_slice, middle_slice, lower_slice)?;
 
-	// Convert MaybeUninit to f64
+	// Reclaim allocations zero-copy
+	let mut upper_guard = core::mem::ManuallyDrop::new(upper_buf);
+	let mut middle_guard = core::mem::ManuallyDrop::new(middle_buf);
+	let mut lower_guard = core::mem::ManuallyDrop::new(lower_buf);
+
 	let upperbands = unsafe {
-		let mut v = Vec::with_capacity(rows * cols);
-		v.set_len(rows * cols);
-		std::ptr::copy_nonoverlapping(upper_buf.as_ptr() as *const f64, v.as_mut_ptr(), rows * cols);
-		v
+		Vec::from_raw_parts(
+			upper_guard.as_mut_ptr() as *mut f64,
+			upper_guard.len(),
+			upper_guard.capacity(),
+		)
 	};
 	let middlebands = unsafe {
-		let mut v = Vec::with_capacity(rows * cols);
-		v.set_len(rows * cols);
-		std::ptr::copy_nonoverlapping(middle_buf.as_ptr() as *const f64, v.as_mut_ptr(), rows * cols);
-		v
+		Vec::from_raw_parts(
+			middle_guard.as_mut_ptr() as *mut f64,
+			middle_guard.len(),
+			middle_guard.capacity(),
+		)
 	};
 	let lowerbands = unsafe {
-		let mut v = Vec::with_capacity(rows * cols);
-		v.set_len(rows * cols);
-		std::ptr::copy_nonoverlapping(lower_buf.as_ptr() as *const f64, v.as_mut_ptr(), rows * cols);
-		v
+		Vec::from_raw_parts(
+			lower_guard.as_mut_ptr() as *mut f64,
+			lower_guard.len(),
+			lower_guard.capacity(),
+		)
 	};
 
 	Ok(MabBatchOutput {
@@ -1012,98 +900,44 @@ fn mab_batch_inner_into(
 	let rows = combos.len();
 	let cols = input.len();
 
-	// Verify output slices have correct length
 	if upper_out.len() != rows * cols || middle_out.len() != rows * cols || lower_out.len() != rows * cols {
 		return Err(MabError::InvalidLength {
-			upper_len: upper_out.len(),
-			middle_len: middle_out.len(),
-			lower_len: lower_out.len(),
-			expected: rows * cols,
+			upper_len: upper_out.len(), middle_len: middle_out.len(), lower_len: lower_out.len(), expected: rows * cols,
 		});
 	}
 
-	// Process either in parallel or sequentially based on the parallel flag and target
+	let process_row = |row: usize, u: &mut [f64], m: &mut [f64], l: &mut [f64]| {
+		let p = &combos[row];
+		let in_row = MabInput::from_slice(input, MabParams {
+			fast_period: p.fast_period, slow_period: p.slow_period,
+			devup: p.devup, devdn: p.devdn,
+			fast_ma_type: p.fast_ma_type.clone(), slow_ma_type: p.slow_ma_type.clone(),
+		});
+		mab_into_slice(u, m, l, &in_row, kernel)
+	};
+
 	#[cfg(not(target_arch = "wasm32"))]
 	{
 		if parallel {
-			// Split the output slices into chunks for parallel processing
-			let upper_chunks = upper_out.par_chunks_mut(cols);
-			let middle_chunks = middle_out.par_chunks_mut(cols);
-			let lower_chunks = lower_out.par_chunks_mut(cols);
-
-			// Process in parallel
-			upper_chunks
-				.zip(middle_chunks)
-				.zip(lower_chunks)
+			use rayon::prelude::*;
+			upper_out.par_chunks_mut(cols)
+				.zip(middle_out.par_chunks_mut(cols))
+				.zip(lower_out.par_chunks_mut(cols))
 				.enumerate()
-				.for_each(|(row, ((upper_row, middle_row), lower_row))| {
-					let params = &combos[row];
-					let mab_params = MabParams {
-						fast_period: params.fast_period,
-						slow_period: params.slow_period,
-						devup: params.devup,
-						devdn: params.devdn,
-						fast_ma_type: params.fast_ma_type.clone(),
-						slow_ma_type: params.slow_ma_type.clone(),
-					};
-					let mab_input = MabInput::from_slice(input, mab_params);
-
-					// Process this row
-					if let Ok(output) = mab_with_kernel(&mab_input, kernel) {
-						upper_row.copy_from_slice(&output.upperband);
-						middle_row.copy_from_slice(&output.middleband);
-						lower_row.copy_from_slice(&output.lowerband);
-					}
-				});
+				.try_for_each(|(row, ((u, m), l))| process_row(row, u, m, l))?;
 		} else {
-			// Sequential processing
 			for row in 0..rows {
-				let start = row * cols;
-				let end = start + cols;
-				let params = &combos[row];
-				let mab_params = MabParams {
-					fast_period: params.fast_period,
-					slow_period: params.slow_period,
-					devup: params.devup,
-					devdn: params.devdn,
-					fast_ma_type: params.fast_ma_type.clone(),
-					slow_ma_type: params.slow_ma_type.clone(),
-				};
-				let mab_input = MabInput::from_slice(input, mab_params);
-
-				// Process this row
-				if let Ok(output) = mab_with_kernel(&mab_input, kernel) {
-					upper_out[start..end].copy_from_slice(&output.upperband);
-					middle_out[start..end].copy_from_slice(&output.middleband);
-					lower_out[start..end].copy_from_slice(&output.lowerband);
-				}
+				let s = row * cols;
+				process_row(row, &mut upper_out[s..s+cols], &mut middle_out[s..s+cols], &mut lower_out[s..s+cols])?;
 			}
 		}
 	}
-	
+
 	#[cfg(target_arch = "wasm32")]
 	{
-		// WASM doesn't support parallel processing
 		for row in 0..rows {
-			let start = row * cols;
-			let end = start + cols;
-			let params = &combos[row];
-			let mab_params = MabParams {
-				fast_period: params.fast_period,
-				slow_period: params.slow_period,
-				devup: params.devup,
-				devdn: params.devdn,
-				fast_ma_type: params.fast_ma_type.clone(),
-				slow_ma_type: params.slow_ma_type.clone(),
-			};
-			let mab_input = MabInput::from_slice(input, mab_params);
-
-			// Process this row
-			if let Ok(output) = mab_with_kernel(&mab_input, kernel) {
-				upper_out[start..end].copy_from_slice(&output.upperband);
-				middle_out[start..end].copy_from_slice(&output.middleband);
-				lower_out[start..end].copy_from_slice(&output.lowerband);
-			}
+			let s = row * cols;
+			process_row(row, &mut upper_out[s..s+cols], &mut middle_out[s..s+cols], &mut lower_out[s..s+cols])?;
 		}
 	}
 
@@ -1242,6 +1076,23 @@ pub fn mab_batch_py<'py>(
 		})
 		.collect();
 
+	// Reinterpret NumPy buffers as MaybeUninit and set warm prefixes
+	let mu_upper: &mut [MaybeUninit<f64>] = unsafe {
+		let ptr = upper_arr.as_array_mut().as_mut_ptr();
+		std::slice::from_raw_parts_mut(ptr as *mut MaybeUninit<f64>, rows * cols)
+	};
+	let mu_middle: &mut [MaybeUninit<f64>] = unsafe {
+		let ptr = middle_arr.as_array_mut().as_mut_ptr();
+		std::slice::from_raw_parts_mut(ptr as *mut MaybeUninit<f64>, rows * cols)
+	};
+	let mu_lower: &mut [MaybeUninit<f64>] = unsafe {
+		let ptr = lower_arr.as_array_mut().as_mut_ptr();
+		std::slice::from_raw_parts_mut(ptr as *mut MaybeUninit<f64>, rows * cols)
+	};
+	init_matrix_prefixes(mu_upper, cols, &warmup_periods);
+	init_matrix_prefixes(mu_middle, cols, &warmup_periods);
+	init_matrix_prefixes(mu_lower, cols, &warmup_periods);
+
 	let combos = py
 		.allow_threads(|| {
 			let kernel = match kern {
@@ -1305,39 +1156,49 @@ pub fn mab_batch_py<'py>(
 // ========== WASM Bindings ==========
 
 #[cfg(feature = "wasm")]
-pub fn mab_into_slice(
-	upper_dst: &mut [f64],
-	middle_dst: &mut [f64],
-	lower_dst: &mut [f64],
-	input: &MabInput,
-	kern: Kernel,
-) -> Result<(), MabError> {
-	let data = input.as_ref();
-	let (_, warmup, _, _, _, _, _) = mab_prepare(input, kern)?;
+#[derive(Serialize, Deserialize)]
+pub struct MabJsSingle {
+	pub values: Vec<f64>, // [upper..., middle..., lower...]
+	pub rows: usize,      // 3
+	pub cols: usize,      // len
+}
 
-	if upper_dst.len() != data.len() || middle_dst.len() != data.len() || lower_dst.len() != data.len() {
-		return Err(MabError::InvalidLength {
-			upper_len: upper_dst.len(),
-			middle_len: middle_dst.len(),
-			lower_len: lower_dst.len(),
-			expected: data.len(),
-		});
-	}
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = "mab")]
+pub fn mab_wasm(
+	data: &[f64],
+	fast_period: usize,
+	slow_period: usize,
+	devup: f64,
+	devdn: f64,
+	fast_ma_type: &str,
+	slow_ma_type: &str,
+) -> Result<JsValue, JsValue> {
+	let params = MabParams {
+		fast_period: Some(fast_period),
+		slow_period: Some(slow_period),
+		devup: Some(devup),
+		devdn: Some(devdn),
+		fast_ma_type: Some(fast_ma_type.to_string()),
+		slow_ma_type: Some(slow_ma_type.to_string()),
+	};
+	let input = MabInput::from_slice(data, params);
 
-	let output = mab_with_kernel(input, kern)?;
+	let mut upper = vec![0.0; data.len()];
+	let mut middle = vec![0.0; data.len()];
+	let mut lower = vec![0.0; data.len()];
+	
+	// Use the unconditional mab_into_slice function
+	mab_into_slice(&mut upper, &mut middle, &mut lower, &input, detect_best_kernel())
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-	upper_dst.copy_from_slice(&output.upperband);
-	middle_dst.copy_from_slice(&output.middleband);
-	lower_dst.copy_from_slice(&output.lowerband);
+	let mut values = Vec::with_capacity(3 * data.len());
+	values.extend_from_slice(&upper);
+	values.extend_from_slice(&middle);
+	values.extend_from_slice(&lower);
 
-	// Fill warmup with NaN
-	for i in 0..warmup {
-		upper_dst[i] = f64::NAN;
-		middle_dst[i] = f64::NAN;
-		lower_dst[i] = f64::NAN;
-	}
-
-	Ok(())
+	serde_wasm_bindgen::to_value(&MabJsSingle { values, rows: 3, cols: data.len() })
+		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 #[cfg(feature = "wasm")]
@@ -1361,16 +1222,16 @@ pub fn mab_js(
 	};
 	let input = MabInput::from_slice(data, params);
 
-	// Allocate output arrays
 	let mut upper = vec![0.0; data.len()];
 	let mut middle = vec![0.0; data.len()];
 	let mut lower = vec![0.0; data.len()];
-
-	mab_into_slice(&mut upper, &mut middle, &mut lower, &input, Kernel::Auto)
+	
+	// Use the unconditional mab_into_slice function
+	mab_into_slice(&mut upper, &mut middle, &mut lower, &input, detect_best_kernel())
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-	// Return flattened array: [upper..., middle..., lower...]
-	let mut result = Vec::with_capacity(data.len() * 3);
+	// Return flattened array [upper..., middle..., lower...] like ALMA does
+	let mut result = Vec::with_capacity(3 * data.len());
 	result.extend_from_slice(&upper);
 	result.extend_from_slice(&middle);
 	result.extend_from_slice(&lower);

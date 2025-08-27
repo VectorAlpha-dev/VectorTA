@@ -180,20 +180,30 @@ test('CMO fast API - basic operation', () => {
     const close = new Float64Array(testData.close);
     const len = close.length;
     
-    // Allocate output buffer
+    // Allocate input and output buffers
+    const inPtr = wasm.cmo_alloc(len);
     const outPtr = wasm.cmo_alloc(len);
     
-    // Compute CMO using fast API
-    wasm.cmo_into(close, outPtr, len, 14);
+    // Copy data into WASM memory
+    const inView = new Float64Array(wasm.__wasm.memory.buffer, inPtr, len);
+    inView.set(close);
     
-    // Create output array view from pointer
-    const result = new Float64Array(wasm.memory.buffer, outPtr, len);
+    // Compute CMO using fast API
+    wasm.cmo_into(inPtr, outPtr, len, 14);
+    
+    // Create output array view from pointer (after computation, in case memory grew)
+    const result = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
+    
+    // Convert to regular array to avoid detached buffer issues
+    const resultArray = Array.from(result);
     
     // Compare with safe API
     const safeResult = wasm.cmo_js(close, 14);
-    assertArrayClose(result, safeResult, 1e-10, "Fast API vs Safe API mismatch");
+    
+    assertArrayClose(resultArray, safeResult, 1e-10, "Fast API vs Safe API mismatch");
     
     // Free memory
+    wasm.cmo_free(inPtr, len);
     wasm.cmo_free(outPtr, len);
 });
 
@@ -204,7 +214,7 @@ test('CMO fast API - in-place operation (aliasing)', () => {
     
     // Allocate buffer and copy data
     const bufPtr = wasm.cmo_alloc(len);
-    const buffer = new Float64Array(wasm.memory.buffer, bufPtr, len);
+    const buffer = new Float64Array(wasm.__wasm.memory.buffer, bufPtr, len);
     buffer.set(data);
     
     // Save expected result from safe API
@@ -366,15 +376,20 @@ test('CMO fast batch API - basic operation', () => {
     const periodStep = 5;
     const expectedRows = 3;
     
+    // Allocate input buffer and copy data
+    const inPtr = wasm.cmo_alloc(len);
+    const inView = new Float64Array(wasm.__wasm.memory.buffer, inPtr, len);
+    inView.set(close);
+    
     // Allocate output buffer for batch
     const outPtr = wasm.cmo_alloc(len * expectedRows);
     
     // Compute batch using fast API
-    const rows = wasm.cmo_batch_into(close, outPtr, len, periodStart, periodEnd, periodStep);
+    const rows = wasm.cmo_batch_into(inPtr, outPtr, len, periodStart, periodEnd, periodStep);
     assert.strictEqual(rows, expectedRows);
     
     // Create output array view
-    const result = new Float64Array(wasm.memory.buffer, outPtr, len * rows);
+    const result = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len * rows);
     
     // Compare with safe batch API
     const safeBatch = wasm.cmo_batch(close, {
@@ -384,6 +399,7 @@ test('CMO fast batch API - basic operation', () => {
     assertArrayClose(result, safeBatch.values, 1e-10, "Fast batch vs safe batch mismatch");
     
     // Free memory
+    wasm.cmo_free(inPtr, len);
     wasm.cmo_free(outPtr, len * rows);
 });
 

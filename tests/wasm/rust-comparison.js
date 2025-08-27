@@ -80,6 +80,55 @@ export async function getRustOutput(indicatorName, source = 'close') {
  */
 export async function compareWithRust(indicatorName, wasmOutput, source = 'close', params = null, tolerance = 1e-8) {
     const rustData = await getRustOutput(indicatorName, source);
+    
+    // Handle special cases for indicators with multiple outputs
+    if (indicatorName === 'damiani_volatmeter' && typeof wasmOutput === 'object' && 'vol' in wasmOutput && 'anti' in wasmOutput) {
+        // Damiani Volatmeter has vol and anti outputs
+        const rustVol = rustData.vol;
+        const rustAnti = rustData.anti;
+        
+        // Verify parameters match if provided
+        if (params) {
+            const rustParams = rustData.params;
+            for (const [key, value] of Object.entries(params)) {
+                if (rustParams[key] !== undefined && rustParams[key] !== value) {
+                    throw new Error(`Parameter mismatch for ${key}: Rust=${rustParams[key]}, WASM=${value}`);
+                }
+            }
+        }
+        
+        // Compare vol values
+        compareArrays(wasmOutput.vol, rustVol, indicatorName + ' vol', tolerance);
+        // Compare anti values
+        compareArrays(wasmOutput.anti, rustAnti, indicatorName + ' anti', tolerance);
+        
+        return true;
+    }
+    
+    if (indicatorName === 'di' && typeof wasmOutput === 'object' && 'plus' in wasmOutput && 'minus' in wasmOutput) {
+        // DI has plus and minus outputs
+        const rustPlus = rustData.plus;
+        const rustMinus = rustData.minus;
+        
+        // Verify parameters match if provided
+        if (params) {
+            const rustParams = rustData.params;
+            for (const [key, value] of Object.entries(params)) {
+                if (rustParams[key] !== undefined && rustParams[key] !== value) {
+                    throw new Error(`Parameter mismatch for ${key}: Rust=${rustParams[key]}, WASM=${value}`);
+                }
+            }
+        }
+        
+        // Compare plus values
+        compareArrays(wasmOutput.plus, rustPlus, indicatorName + ' plus', tolerance);
+        // Compare minus values
+        compareArrays(wasmOutput.minus, rustMinus, indicatorName + ' minus', tolerance);
+        
+        return true;
+    }
+    
+    // Default handling for single-output indicators
     const rustOutput = rustData.values;
     
     // Verify parameters match if provided
@@ -120,6 +169,36 @@ export async function compareWithRust(indicatorName, wasmOutput, source = 'close
     }
     
     return true;
+}
+
+/**
+ * Helper function to compare two arrays
+ */
+function compareArrays(wasmArray, rustArray, name, tolerance) {
+    if (wasmArray.length !== rustArray.length) {
+        throw new Error(`Length mismatch for ${name}: WASM=${wasmArray.length}, Rust=${rustArray.length}`);
+    }
+    
+    for (let i = 0; i < wasmArray.length; i++) {
+        const wasmVal = wasmArray[i];
+        const rustVal = rustArray[i];
+        
+        // Both NaN is ok
+        if (isNaN(wasmVal) && isNaN(rustVal)) {
+            continue;
+        }
+        
+        const diff = Math.abs(wasmVal - rustVal);
+        const tol = tolerance * (1 + Math.abs(rustVal));
+        
+        if (diff > tol) {
+            throw new Error(
+                `${name} mismatch at index ${i}: ` +
+                `WASM=${wasmVal}, Rust=${rustVal}, ` +
+                `diff=${diff}, tol=${tol}`
+            );
+        }
+    }
 }
 
 /**

@@ -107,21 +107,36 @@ test('OBV fast API (in-place)', () => {
     const volume = new Float64Array(testData.volume);
     const len = close.length;
     
-    // Allocate output buffer
+    // Allocate buffers for inputs and output
+    const closePtr = wasm.obv_alloc(len);
+    const volumePtr = wasm.obv_alloc(len);
     const outPtr = wasm.obv_alloc(len);
     
     try {
-        // Use fast API
-        wasm.obv_into(close, volume, outPtr, len);
+        // Create views into WASM memory for inputs
+        let closeView = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
+        let volumeView = new Float64Array(wasm.__wasm.memory.buffer, volumePtr, len);
         
-        // Read result from output buffer
-        const result = new Float64Array(wasm.memory.buffer, outPtr, len);
+        // Copy data into WASM memory
+        closeView.set(close);
+        volumeView.set(volume);
         
-        // Compare with safe API
+        // Get expected result first (before calling obv_into)
         const expected = wasm.obv_js(close, volume);
+        
+        // Use fast API with raw pointers
+        wasm.obv_into(closePtr, volumePtr, outPtr, len);
+        
+        // IMPORTANT: Recreate view after the call as memory may have grown
+        // This invalidates any existing TypedArrays
+        const result = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
+        
+        // Compare results
         assertArrayClose(result, expected, 1e-10, "Fast API should match safe API");
     } finally {
         // Clean up
+        wasm.obv_free(closePtr, len);
+        wasm.obv_free(volumePtr, len);
         wasm.obv_free(outPtr, len);
     }
 });
@@ -131,15 +146,33 @@ test('OBV fast API with aliasing', () => {
     const volume = new Float64Array(testData.volume.slice(0, 100));
     const len = close.length;
     
-    // Create a copy for aliasing test
-    const output = new Float64Array(close);
+    // Allocate buffers for close and volume
+    const closePtr = wasm.obv_alloc(len);
+    const volumePtr = wasm.obv_alloc(len);
     
-    // Test aliasing with close pointer
-    wasm.obv_into(close, volume, output, len);
-    
-    // Should produce correct result despite aliasing
-    const expected = wasm.obv_js(close, volume);
-    assertArrayClose(output, expected, 1e-10, "Fast API should handle aliasing correctly");
+    try {
+        // Create views into WASM memory
+        const closeView = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
+        const volumeView = new Float64Array(wasm.__wasm.memory.buffer, volumePtr, len);
+        
+        // Copy data into WASM memory
+        closeView.set(close);
+        volumeView.set(volume);
+        
+        // Test aliasing - use closePtr as output (overwriting close data)
+        wasm.obv_into(closePtr, volumePtr, closePtr, len);
+        
+        // Read result from close buffer (which now contains OBV output)
+        const result = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
+        
+        // Should produce correct result despite aliasing
+        const expected = wasm.obv_js(close, volume);
+        assertArrayClose(result, expected, 1e-10, "Fast API should handle aliasing correctly");
+    } finally {
+        // Clean up
+        wasm.obv_free(closePtr, len);
+        wasm.obv_free(volumePtr, len);
+    }
 });
 
 test('OBV NaN handling', () => {

@@ -214,6 +214,8 @@ pub enum StochfError {
 	AllValuesNaN,
 	#[error("stochf: Not enough valid data after first valid index (needed={needed}, valid={valid}).")]
 	NotEnoughValidData { needed: usize, valid: usize },
+	#[error("stochf: Invalid output size (expected={expected}, k_got={k_got}, d_got={d_got}).")]
+	InvalidOutputSize { expected: usize, k_got: usize, d_got: usize },
 }
 
 #[inline]
@@ -274,18 +276,6 @@ pub fn stochf_into_slice(
 		});
 	}
 
-	// Initialize warmup periods with NaN
-	let k_warmup = fastk_period - 1;
-	let d_warmup = fastk_period - 1 + fastd_period - 1;
-	
-	for i in 0..k_warmup.min(len) {
-		dst_k[i] = f64::NAN;
-	}
-	
-	for i in 0..d_warmup.min(len) {
-		dst_d[i] = f64::NAN;
-	}
-
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
 		other => other,
@@ -330,6 +320,16 @@ pub fn stochf_into_slice(
 			),
 			_ => unreachable!(),
 		}
+	}
+
+	// Apply NaN masking after computation
+	let k_warmup = (first_valid_idx + fastk_period - 1).min(len);
+	let d_warmup = (first_valid_idx + fastk_period + fastd_period - 2).min(len);
+	for v in &mut dst_k[..k_warmup] {
+		*v = f64::NAN;
+	}
+	for v in &mut dst_d[..d_warmup] {
+		*v = f64::NAN;
 	}
 
 	Ok(())
@@ -379,10 +379,10 @@ pub fn stochf_with_kernel(input: &StochfInput, kernel: Kernel) -> Result<StochfO
 		});
 	}
 
-	let k_warmup = fastk_period - 1;
-	let d_warmup = fastk_period - 1 + fastd_period - 1;
-	let mut k_vals = alloc_with_nan_prefix(len, k_warmup);
-	let mut d_vals = alloc_with_nan_prefix(len, d_warmup);
+	let k_warmup = first_valid_idx + fastk_period - 1;
+	let d_warmup = first_valid_idx + fastk_period + fastd_period - 2;
+	let mut k_vals = alloc_with_nan_prefix(len, k_warmup.min(len));
+	let mut d_vals = alloc_with_nan_prefix(len, d_warmup.min(len));
 
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
@@ -447,16 +447,7 @@ pub unsafe fn stochf_scalar(
 ) {
 	let len = high.len();
 	
-	// Initialize warmup periods with NaN
-	let k_warmup = fastk_period - 1;
-	for i in 0..k_warmup.min(len) {
-		k_vals[i] = f64::NAN;
-	}
-	
-	for i in first_valid_idx..len {
-		if i < first_valid_idx + fastk_period - 1 {
-			continue;
-		}
+	for i in (first_valid_idx + fastk_period - 1)..len {
 		let start = i + 1 - fastk_period;
 		let (mut hh, mut ll) = (f64::NEG_INFINITY, f64::INFINITY);
 		for j in start..=i {
@@ -926,23 +917,28 @@ pub fn stochf_batch_inner_into(
 	let cols = high.len();
 	
 	// Ensure output slices are correct size
-	if k_out.len() != rows * cols || d_out.len() != rows * cols {
-		return Err(StochfError::EmptyData);
+	let expected_size = rows * cols;
+	if k_out.len() != expected_size || d_out.len() != expected_size {
+		return Err(StochfError::InvalidOutputSize {
+			expected: expected_size,
+			k_got: k_out.len(),
+			d_got: d_out.len(),
+		});
 	}
 	
-	// Initialize NaN prefixes for each row based on warmup period
+	// Initialize NaN prefixes for each row based on warmup period including first
 	for (row, combo) in combos.iter().enumerate() {
-		let k_warmup = combo.fastk_period.unwrap() - 1;
-		let d_warmup = combo.fastk_period.unwrap() - 1 + combo.fastd_period.unwrap() - 1;
+		let k_warmup = (first + combo.fastk_period.unwrap() - 1).min(cols);
+		let d_warmup = (first + combo.fastk_period.unwrap() + combo.fastd_period.unwrap() - 2).min(cols);
 		let row_start = row * cols;
 		
 		// Initialize K warmup period with NaN
-		for i in 0..k_warmup.min(cols) {
+		for i in 0..k_warmup {
 			k_out[row_start + i] = f64::NAN;
 		}
 		
 		// Initialize D warmup period with NaN
-		for i in 0..d_warmup.min(cols) {
+		for i in 0..d_warmup {
 			d_out[row_start + i] = f64::NAN;
 		}
 	}
@@ -1022,11 +1018,11 @@ fn stochf_batch_inner(
 	let mut k_buf = make_uninit_matrix(rows, cols);
 	let mut d_buf = make_uninit_matrix(rows, cols);
 	
-	// Calculate warmup periods for each combination
-	let k_warmups: Vec<usize> = combos.iter().map(|c| c.fastk_period.unwrap() - 1).collect();
+	// Calculate warmup periods for each combination including first valid index
+	let k_warmups: Vec<usize> = combos.iter().map(|c| (first + c.fastk_period.unwrap() - 1).min(cols)).collect();
 	let d_warmups: Vec<usize> = combos
 		.iter()
-		.map(|c| c.fastk_period.unwrap() - 1 + c.fastd_period.unwrap() - 1)
+		.map(|c| (first + c.fastk_period.unwrap() + c.fastd_period.unwrap() - 2).min(cols))
 		.collect();
 	
 	// Initialize matrix prefixes with NaN
@@ -1109,16 +1105,7 @@ unsafe fn stochf_row_scalar(
 ) {
 	let len = high.len();
 	
-	// Initialize warmup periods with NaN
-	let k_warmup = fastk_period - 1;
-	for i in 0..k_warmup.min(len) {
-		k_out[i] = f64::NAN;
-	}
-	
-	for i in first..len {
-		if i < first + fastk_period - 1 {
-			continue;
-		}
+	for i in (first + fastk_period - 1)..len {
 		let start = i + 1 - fastk_period;
 		let (mut hh, mut ll) = (f64::NEG_INFINITY, f64::INFINITY);
 		for j in start..=i {
@@ -2174,6 +2161,106 @@ mod tests {
 			}
 		};
 	}
+	#[cfg(feature = "wasm")]
+	#[test]
+	fn test_wasm_batch_warmup_initialization() {
+		// Test that WASM batch function correctly initializes warmup periods
+		// even in the aliasing case where we removed redundant initialization
+		let high = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+		let low = vec![0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5];
+		let close = vec![0.8, 1.8, 2.8, 3.8, 4.8, 5.8, 6.8, 7.8, 8.8, 9.8];
+		
+		// Create output buffers
+		let mut k_out = vec![999.0; 10]; // Fill with non-NaN to verify warmup
+		let mut d_out = vec![999.0; 10];
+		
+		// Call the function (single parameter set for simplicity)
+		let result = unsafe {
+			stochf_batch_into(
+				high.as_ptr(), low.as_ptr(), close.as_ptr(),
+				k_out.as_mut_ptr(), d_out.as_mut_ptr(),
+				10,
+				3, 3, 0,  // fastk: single value 3
+				2, 2, 0,  // fastd: single value 2
+				0,        // matype
+			)
+		};
+		
+		assert!(result.is_ok());
+		assert_eq!(result.unwrap(), 1); // 1 combination
+		
+		// Verify warmup periods are NaN
+		// With first_valid_idx = 0, fastk = 3, fastd = 2:
+		// K warmup should be 0 + 3 - 1 = 2 (indices 0, 1)
+		// D warmup should be 0 + 3 + 2 - 2 = 3 (indices 0, 1, 2)
+		assert!(k_out[0].is_nan(), "K[0] should be NaN");
+		assert!(k_out[1].is_nan(), "K[1] should be NaN");
+		assert!(!k_out[2].is_nan(), "K[2] should have a value");
+		
+		assert!(d_out[0].is_nan(), "D[0] should be NaN");
+		assert!(d_out[1].is_nan(), "D[1] should be NaN");
+		assert!(d_out[2].is_nan(), "D[2] should be NaN");
+		assert!(!d_out[3].is_nan(), "D[3] should have a value");
+	}
+
+	#[test]
+	fn test_batch_invalid_output_size() {
+		// Test that InvalidOutputSize error is properly returned
+		let high = vec![10.0, 20.0, 30.0, 40.0, 50.0];
+		let low = vec![5.0, 15.0, 25.0, 35.0, 45.0];
+		let close = vec![7.0, 17.0, 27.0, 37.0, 47.0];
+		
+		let sweep = StochfBatchRange {
+			fastk_period: (3, 4, 1), // Will create 2 combinations
+			fastd_period: (2, 2, 0),
+		};
+		
+		// Create output buffers with wrong sizes
+		let mut k_out = vec![0.0; 5]; // Should be 2 * 5 = 10
+		let mut d_out = vec![0.0; 5]; // Should be 2 * 5 = 10
+		
+		let result = stochf_batch_inner_into(
+			&high, &low, &close, &sweep, 
+			Kernel::Scalar, false,
+			&mut k_out, &mut d_out
+		);
+		
+		// Should return InvalidOutputSize error
+		assert!(matches!(
+			result,
+			Err(StochfError::InvalidOutputSize { expected: 10, k_got: 5, d_got: 5 })
+		));
+		
+		// Test with correct k_out but wrong d_out
+		let mut k_out = vec![0.0; 10]; // Correct size
+		let mut d_out = vec![0.0; 8];  // Wrong size
+		
+		let result = stochf_batch_inner_into(
+			&high, &low, &close, &sweep,
+			Kernel::Scalar, false,
+			&mut k_out, &mut d_out
+		);
+		
+		// Should return InvalidOutputSize error
+		assert!(matches!(
+			result,
+			Err(StochfError::InvalidOutputSize { expected: 10, k_got: 10, d_got: 8 })
+		));
+		
+		// Test with correct sizes - should succeed
+		let mut k_out = vec![0.0; 10]; // Correct size
+		let mut d_out = vec![0.0; 10]; // Correct size
+		
+		let result = stochf_batch_inner_into(
+			&high, &low, &close, &sweep,
+			Kernel::Scalar, false,
+			&mut k_out, &mut d_out
+		);
+		
+		// Should succeed
+		assert!(result.is_ok());
+	}
+
 	gen_batch_tests!(check_batch_default_row);
 	gen_batch_tests!(check_batch_no_poison);
 }
@@ -2194,15 +2281,14 @@ pub fn stochf_js(
 		fastd_matype: Some(fastd_matype),
 	};
 	let input = StochfInput::from_slices(high, low, close, params);
+	let out = stochf_with_kernel(&input, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))?;
 	
-	// Single allocation for both outputs [k..., d...]
-	let mut output = vec![0.0; high.len() * 2];
-	let (k_out, d_out) = output.split_at_mut(high.len());
+	// Return [K..., D...] concatenated
+	let mut values = Vec::with_capacity(2 * out.k.len());
+	values.extend_from_slice(&out.k);
+	values.extend_from_slice(&out.d);
 	
-	stochf_into_slice(k_out, d_out, &input, Kernel::Auto)
-		.map_err(|e| JsValue::from_str(&e.to_string()))?;
-	
-	Ok(output)
+	Ok(values)
 }
 
 #[cfg(feature = "wasm")]
@@ -2227,25 +2313,26 @@ pub fn stochf_free(ptr: *mut f64, len: usize) {
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn stochf_into(
-	in_high_ptr: *const f64,
-	in_low_ptr: *const f64,
-	in_close_ptr: *const f64,
-	out_k_ptr: *mut f64,
-	out_d_ptr: *mut f64,
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	close_ptr: *const f64,
+	k_out_ptr: *mut f64,
+	d_out_ptr: *mut f64,
 	len: usize,
 	fastk_period: usize,
 	fastd_period: usize,
 	fastd_matype: usize,
 ) -> Result<(), JsValue> {
-	if in_high_ptr.is_null() || in_low_ptr.is_null() || in_close_ptr.is_null() || 
-	   out_k_ptr.is_null() || out_d_ptr.is_null() {
-		return Err(JsValue::from_str("Null pointer provided"));
+	if high_ptr.is_null() || low_ptr.is_null() || close_ptr.is_null() || k_out_ptr.is_null() || d_out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to stochf_into"));
 	}
 	
 	unsafe {
-		let high = std::slice::from_raw_parts(in_high_ptr, len);
-		let low = std::slice::from_raw_parts(in_low_ptr, len);
-		let close = std::slice::from_raw_parts(in_close_ptr, len);
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+		let close = std::slice::from_raw_parts(close_ptr, len);
+		let mut k_out = std::slice::from_raw_parts_mut(k_out_ptr, len);
+		let mut d_out = std::slice::from_raw_parts_mut(d_out_ptr, len);
 		
 		let params = StochfParams {
 			fastk_period: Some(fastk_period),
@@ -2253,31 +2340,8 @@ pub fn stochf_into(
 			fastd_matype: Some(fastd_matype),
 		};
 		let input = StochfInput::from_slices(high, low, close, params);
-		
-		// Check for aliasing - any input pointer equals any output pointer
-		let aliasing = in_high_ptr == out_k_ptr || in_high_ptr == out_d_ptr ||
-		               in_low_ptr == out_k_ptr || in_low_ptr == out_d_ptr ||
-		               in_close_ptr == out_k_ptr || in_close_ptr == out_d_ptr;
-		
-		if aliasing {
-			// Use temporary buffers
-			let mut temp_k = vec![0.0; len];
-			let mut temp_d = vec![0.0; len];
-			stochf_into_slice(&mut temp_k, &mut temp_d, &input, Kernel::Auto)
-				.map_err(|e| JsValue::from_str(&e.to_string()))?;
-			
-			let out_k = std::slice::from_raw_parts_mut(out_k_ptr, len);
-			let out_d = std::slice::from_raw_parts_mut(out_d_ptr, len);
-			out_k.copy_from_slice(&temp_k);
-			out_d.copy_from_slice(&temp_d);
-		} else {
-			let out_k = std::slice::from_raw_parts_mut(out_k_ptr, len);
-			let out_d = std::slice::from_raw_parts_mut(out_d_ptr, len);
-			stochf_into_slice(out_k, out_d, &input, Kernel::Auto)
-				.map_err(|e| JsValue::from_str(&e.to_string()))?;
-		}
-		
-		Ok(())
+		stochf_into_slice(&mut k_out, &mut d_out, &input, detect_best_kernel())
+			.map_err(|e| JsValue::from_str(&e.to_string()))
 	}
 }
 
@@ -2286,17 +2350,16 @@ pub fn stochf_into(
 pub struct StochfBatchConfig {
 	pub fastk_range: (usize, usize, usize),
 	pub fastd_range: (usize, usize, usize),
-	pub fastd_matype: usize,
 }
 
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct StochfBatchJsOutput {
-	pub k_values: Vec<f64>,
-	pub d_values: Vec<f64>,
+	pub k_values: Vec<f64>,      // K values for all combinations
+	pub d_values: Vec<f64>,      // D values for all combinations
+	pub rows: usize,             // number of combinations
+	pub cols: usize,             // data length
 	pub combos: Vec<StochfParams>,
-	pub rows: usize,
-	pub cols: usize,
 }
 
 #[cfg(feature = "wasm")]
@@ -2307,42 +2370,26 @@ pub fn stochf_batch_unified_js(
 	close: &[f64],
 	config: JsValue,
 ) -> Result<JsValue, JsValue> {
-	let config: StochfBatchConfig = serde_wasm_bindgen::from_value(config)
+	let cfg: StochfBatchConfig = serde_wasm_bindgen::from_value(config)
 		.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
 	
 	let sweep = StochfBatchRange {
-		fastk_period: config.fastk_range,
-		fastd_period: config.fastd_range,
+		fastk_period: cfg.fastk_range,
+		fastd_period: cfg.fastd_range,
 	};
 	
-	// Use the inner function that allocates and initializes properly
-	let kernel = detect_best_batch_kernel();
-	// Convert batch kernel to regular kernel for the inner function
-	let simd_kernel = match kernel {
-		Kernel::Avx512Batch => Kernel::Avx512,
-		Kernel::Avx2Batch => Kernel::Avx2,
-		Kernel::ScalarBatch => Kernel::Scalar,
-		_ => Kernel::Scalar,
-	};
-	let output = stochf_batch_inner(high, low, close, &sweep, simd_kernel, false)
+	let out = stochf_batch_inner(high, low, close, &sweep, detect_best_kernel(), false)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 	
-	let k_values = output.k;
-	let d_values = output.d;
-	let combos = output.combos;
-	let rows = output.rows;
-	let cols = output.cols;
-	
-	let js_output = StochfBatchJsOutput {
-		k_values,
-		d_values,
-		combos,
-		rows,
-		cols,
+	// Keep K and D values separate as expected by tests
+	let js = StochfBatchJsOutput { 
+		k_values: out.k,
+		d_values: out.d,
+		rows: out.rows,  // Number of combinations, not doubled
+		cols: out.cols,
+		combos: out.combos 
 	};
-	
-	serde_wasm_bindgen::to_value(&js_output)
-		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+	serde_wasm_bindgen::to_value(&js).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 
@@ -2390,21 +2437,10 @@ pub fn stochf_batch_into(
 		
 		if aliasing {
 			// Use temporary buffers
-			let mut temp_k = make_uninit_matrix(rows, cols);
-			let mut temp_d = make_uninit_matrix(rows, cols);
+			let mut temp_k = vec![0.0; rows * cols];
+			let mut temp_d = vec![0.0; rows * cols];
 			
-			// Initialize with warmup NaNs
-			let warmups: Vec<usize> = combos.iter()
-				.map(|p| p.fastk_period.unwrap_or(5) - 1)
-				.collect();
-			init_matrix_prefixes(&mut temp_k, cols, &warmups);
-			
-			let d_warmups: Vec<usize> = combos.iter()
-				.map(|p| p.fastk_period.unwrap_or(5) + p.fastd_period.unwrap_or(3) - 2)
-				.collect();
-			init_matrix_prefixes(&mut temp_d, cols, &d_warmups);
-			
-			// Compute
+			// Compute - stochf_batch_inner_into will handle NaN initialization with first_valid_idx
 			let kernel = detect_best_batch_kernel();
 			// Convert batch kernel to regular kernel
 			let simd_kernel = match kernel {
@@ -2414,24 +2450,15 @@ pub fn stochf_batch_into(
 				_ => Kernel::Scalar,
 			};
 			
-			// Convert uninitialized memory to slices
-			let temp_k_ptr = temp_k.as_mut_ptr() as *mut f64;
-			let temp_d_ptr = temp_d.as_mut_ptr() as *mut f64;
-			let temp_k_slice = unsafe { std::slice::from_raw_parts_mut(temp_k_ptr, rows * cols) };
-			let temp_d_slice = unsafe { std::slice::from_raw_parts_mut(temp_d_ptr, rows * cols) };
-			
-			stochf_batch_inner_into(high, low, close, &sweep, simd_kernel, false, temp_k_slice, temp_d_slice)
+			stochf_batch_inner_into(high, low, close, &sweep, simd_kernel, false, &mut temp_k, &mut temp_d)
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 			
 			// Copy to output
 			let out_k_slice = std::slice::from_raw_parts_mut(out_k_ptr, rows * cols);
 			let out_d_slice = std::slice::from_raw_parts_mut(out_d_ptr, rows * cols);
 			
-			let temp_k_ptr = temp_k.as_ptr() as *const f64;
-			let temp_d_ptr = temp_d.as_ptr() as *const f64;
-			
-			std::ptr::copy_nonoverlapping(temp_k_ptr, out_k_ptr, rows * cols);
-			std::ptr::copy_nonoverlapping(temp_d_ptr, out_d_ptr, rows * cols);
+			out_k_slice.copy_from_slice(&temp_k);
+			out_d_slice.copy_from_slice(&temp_d);
 		} else {
 			// Direct write to output
 			let out_k_slice = std::slice::from_raw_parts_mut(out_k_ptr, rows * cols);

@@ -170,7 +170,11 @@ pub fn vi(input: &ViInput) -> Result<ViOutput, ViError> {
 	vi_with_kernel(input, Kernel::Auto)
 }
 
-pub fn vi_with_kernel(input: &ViInput, kernel: Kernel) -> Result<ViOutput, ViError> {
+#[inline(always)]
+fn vi_prepare<'a>(
+	input: &'a ViInput,
+	kernel: Kernel,
+) -> Result<(&'a [f64], &'a [f64], &'a [f64], usize, usize, Kernel), ViError> {
 	let (high, low, close) = match &input.data {
 		ViData::Candles { candles } => (
 			source_type(candles, "high"),
@@ -179,48 +183,81 @@ pub fn vi_with_kernel(input: &ViInput, kernel: Kernel) -> Result<ViOutput, ViErr
 		),
 		ViData::Slices { high, low, close } => (*high, *low, *close),
 	};
+
 	if high.is_empty() || low.is_empty() || close.is_empty() {
 		return Err(ViError::EmptyData);
 	}
-	let length = high.len();
-	if length != low.len() || length != close.len() {
+	let len = high.len();
+	if len != low.len() || len != close.len() {
 		return Err(ViError::EmptyData);
 	}
+
 	let period = input.get_period();
-	if period == 0 || period > length {
-		return Err(ViError::InvalidPeriod {
-			period,
-			data_len: length,
-		});
+	if period == 0 || period > len {
+		return Err(ViError::InvalidPeriod { period, data_len: len });
 	}
-	let first_valid_idx = (0..length).find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan());
-	let first = match first_valid_idx {
-		Some(idx) => idx,
-		None => return Err(ViError::AllValuesNaN),
-	};
-	if (length - first) < period {
-		return Err(ViError::NotEnoughValidData {
-			needed: period,
-			valid: length - first,
-		});
+
+	let first = (0..len)
+		.find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
+		.ok_or(ViError::AllValuesNaN)?;
+
+	if len - first < period {
+		return Err(ViError::NotEnoughValidData { needed: period, valid: len - first });
 	}
-	let chosen = match kernel {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
-	let mut plus = alloc_with_nan_prefix(length, first + period - 1);
-	let mut minus = alloc_with_nan_prefix(length, first + period - 1);
+
+	let chosen = match kernel { Kernel::Auto => detect_best_kernel(), k => k };
+	Ok((high, low, close, period, first, chosen))
+}
+
+#[inline(always)]
+fn vi_compute_into(
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	period: usize,
+	first: usize,
+	kernel: Kernel,
+	plus: &mut [f64],
+	minus: &mut [f64],
+) {
 	unsafe {
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => vi_scalar(high, low, close, period, first, &mut plus, &mut minus),
+		match kernel {
+			Kernel::Scalar | Kernel::ScalarBatch => vi_scalar(high, low, close, period, first, plus, minus),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => vi_avx2(high, low, close, period, first, &mut plus, &mut minus),
+			Kernel::Avx2 | Kernel::Avx2Batch => vi_avx2(high, low, close, period, first, plus, minus),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => vi_avx512(high, low, close, period, first, &mut plus, &mut minus),
+			Kernel::Avx512 | Kernel::Avx512Batch => vi_avx512(high, low, close, period, first, plus, minus),
 			_ => unreachable!(),
 		}
 	}
+}
+
+pub fn vi_with_kernel(input: &ViInput, kernel: Kernel) -> Result<ViOutput, ViError> {
+	let (h, l, c, period, first, chosen) = vi_prepare(input, kernel)?;
+	let mut plus  = alloc_with_nan_prefix(h.len(), first + period - 1);
+	let mut minus = alloc_with_nan_prefix(h.len(), first + period - 1);
+	vi_compute_into(h, l, c, period, first, chosen, &mut plus, &mut minus);
 	Ok(ViOutput { plus, minus })
+}
+
+// General, non-wasm into-slice function matching ALMA pattern
+pub fn vi_into_slice(
+	dst_plus: &mut [f64],
+	dst_minus: &mut [f64],
+	input: &ViInput,
+	kernel: Kernel,
+) -> Result<(), ViError> {
+	let (h, l, c, period, first, chosen) = vi_prepare(input, kernel)?;
+	if dst_plus.len() != h.len() || dst_minus.len() != h.len() {
+		return Err(ViError::InvalidPeriod { period: dst_plus.len(), data_len: h.len() });
+	}
+	vi_compute_into(h, l, c, period, first, chosen, dst_plus, dst_minus);
+	let warm = first + period - 1;
+	for i in 0..warm {
+		dst_plus[i] = f64::NAN;
+		dst_minus[i] = f64::NAN;
+	}
+	Ok(())
 }
 
 #[inline]
@@ -463,19 +500,12 @@ impl ViBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid_vi(r: &ViBatchRange) -> Vec<ViParams> {
-	fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-		if step == 0 || start == end {
-			return vec![start];
-		}
-		(start..=end).step_by(step).collect()
+fn expand_grid(r: &ViBatchRange) -> Vec<ViParams> {
+	let (start, end, step) = r.period;
+	if step == 0 || start == end { 
+		return vec![ViParams { period: Some(start) }]; 
 	}
-	let periods = axis_usize(r.period);
-	let mut out = Vec::with_capacity(periods.len());
-	for &p in &periods {
-		out.push(ViParams { period: Some(p) });
-	}
-	out
+	(start..=end).step_by(step).map(|p| ViParams { period: Some(p) }).collect()
 }
 
 pub fn vi_batch_with_kernel(
@@ -528,7 +558,7 @@ fn vi_batch_inner(
 	kern: Kernel,
 	parallel: bool,
 ) -> Result<ViBatchOutput, ViError> {
-	let combos = expand_grid_vi(sweep);
+	let combos = expand_grid(sweep);
 	if combos.is_empty() {
 		return Err(ViError::InvalidPeriod { period: 0, data_len: 0 });
 	}
@@ -574,12 +604,16 @@ fn vi_batch_inner(
 	let do_row = |row: usize, plus_row: &mut [f64], minus_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
 		match kern {
-			Kernel::Scalar => vi_row_scalar(high, low, close, first, period, plus_row, minus_row),
+			Kernel::Scalar | Kernel::ScalarBatch => vi_row_scalar(high, low, close, first, period, plus_row, minus_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => vi_row_avx2(high, low, close, first, period, plus_row, minus_row),
+			Kernel::Avx2 | Kernel::Avx2Batch => vi_row_avx2(high, low, close, first, period, plus_row, minus_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => vi_row_avx512(high, low, close, first, period, plus_row, minus_row),
-			_ => unreachable!(),
+			Kernel::Avx512 | Kernel::Avx512Batch => vi_row_avx512(high, low, close, first, period, plus_row, minus_row),
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+				vi_row_scalar(high, low, close, first, period, plus_row, minus_row)
+			}
+			_ => unreachable!("Unexpected kernel type: {:?}", kern),
 		}
 	};
 	if parallel {
@@ -604,15 +638,20 @@ fn vi_batch_inner(
 	}
 	// Convert ManuallyDrop back to Vec<f64> for the output
 	let plus_vec = unsafe {
-		Vec::from_raw_parts(plus_guard.as_mut_ptr() as *mut f64, plus_guard.len(), plus_guard.len())
+		Vec::from_raw_parts(
+			plus_guard.as_mut_ptr() as *mut f64,
+			plus_guard.len(),
+			plus_guard.capacity(),   // Use capacity, not len
+		)
 	};
 	let minus_vec = unsafe {
-		Vec::from_raw_parts(minus_guard.as_mut_ptr() as *mut f64, minus_guard.len(), minus_guard.len())
+		Vec::from_raw_parts(
+			minus_guard.as_mut_ptr() as *mut f64,
+			minus_guard.len(),
+			minus_guard.capacity(),  // Use capacity, not len
+		)
 	};
-	
-	// Forget the guards to prevent double-free
-	core::mem::forget(plus_guard);
-	core::mem::forget(minus_guard);
+	// DO NOT call core::mem::forget - ManuallyDrop already prevents drop
 	
 	Ok(ViBatchOutput {
 		plus: plus_vec,
@@ -691,10 +730,69 @@ unsafe fn vi_row_avx512_long(
 ) {
 	vi_scalar(high, low, close, period, first, plus, minus);
 }
-#[inline(always)]
-fn expand_grid(_r: &ViBatchRange) -> Vec<ViParams> {
-	// For full parity with ALMA, but VI has only period for batch
-	expand_grid_vi(_r)
+// Helper function for batch processing that writes directly to output slices
+// Now available for both WASM and Python
+fn vi_batch_inner_into(
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	sweep: &ViBatchRange,
+	kernel: Kernel,
+	parallel: bool,
+	out_plus: &mut [f64],
+	out_minus: &mut [f64],
+) -> Result<Vec<ViParams>, ViError> {
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = close.len();
+	if rows == 0 { return Err(ViError::InvalidPeriod { period: 0, data_len: 0 }); }
+	if out_plus.len() != rows * cols || out_minus.len() != rows * cols { return Err(ViError::EmptyData); }
+
+	// find first valid once
+	if high.is_empty() || low.is_empty() || close.is_empty() { return Err(ViError::EmptyData); }
+	let first = (0..high.len())
+		.find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
+		.ok_or(ViError::AllValuesNaN)?;
+	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	if high.len() - first < max_p {
+		return Err(ViError::NotEnoughValidData { needed: max_p, valid: high.len() - first });
+	}
+
+	let do_row = |row: usize, p_row: &mut [f64], m_row: &mut [f64]| {
+		let period = combos[row].period.unwrap();
+		unsafe { 
+			match kernel {
+				Kernel::Scalar | Kernel::ScalarBatch => vi_scalar(high, low, close, period, first, p_row, m_row),
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+				Kernel::Avx2 | Kernel::Avx2Batch => vi_avx2(high, low, close, period, first, p_row, m_row),
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+				Kernel::Avx512 | Kernel::Avx512Batch => vi_avx512(high, low, close, period, first, p_row, m_row),
+				// For WASM or non-x86_64, fallback to scalar
+				_ => vi_scalar(high, low, close, period, first, p_row, m_row),
+			}
+		}
+		for i in 0..(first + period - 1) {
+			p_row[i] = f64::NAN;
+			m_row[i] = f64::NAN;
+		}
+	};
+
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		out_plus.par_chunks_mut(cols)
+			.zip(out_minus.par_chunks_mut(cols))
+			.enumerate()
+			.for_each(|(row, (p, m))| do_row(row, p, m));
+		#[cfg(target_arch = "wasm32")]
+		for ((row, p), m) in out_plus.chunks_mut(cols).enumerate().zip(out_minus.chunks_mut(cols)) {
+			do_row(row, p, m);
+		}
+	} else {
+		for ((row, p), m) in out_plus.chunks_mut(cols).enumerate().zip(out_minus.chunks_mut(cols)) {
+			do_row(row, p, m);
+		}
+	}
+	Ok(combos)
 }
 
 // ==========================
@@ -705,83 +803,6 @@ fn expand_grid(_r: &ViBatchRange) -> Vec<ViParams> {
 use wasm_bindgen::prelude::*;
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
-
-/// Write VI result directly to output slices - no allocations
-#[cfg(feature = "wasm")]
-pub fn vi_into_slice(
-	dst_plus: &mut [f64],
-	dst_minus: &mut [f64],
-	high: &[f64],
-	low: &[f64],
-	close: &[f64],
-	period: usize,
-	kern: Kernel,
-) -> Result<(), ViError> {
-	// Build input without allocating
-	let params = ViParams { period: Some(period) };
-	let data = ViData::Slices { high, low, close };
-	let input = ViInput { data, params };
-	
-	// Validate inputs
-	if high.is_empty() || low.is_empty() || close.is_empty() {
-		return Err(ViError::EmptyData);
-	}
-	
-	if high.len() != low.len() || high.len() != close.len() {
-		return Err(ViError::EmptyData);
-	}
-	
-	if dst_plus.len() != high.len() || dst_minus.len() != high.len() {
-		return Err(ViError::EmptyData);
-	}
-	
-	if period == 0 || period > high.len() {
-		return Err(ViError::InvalidPeriod { period, data_len: high.len() });
-	}
-	
-	// Compute VI directly into the output slices
-	let (h, l, c) = match &input.data {
-		ViData::Candles { .. } => unreachable!(),
-		ViData::Slices { high, low, close } => (*high, *low, *close),
-	};
-	
-	// Find first valid index
-	let first = (0..h.len())
-		.find(|&i| !h[i].is_nan() && !l[i].is_nan() && !c[i].is_nan())
-		.ok_or(ViError::AllValuesNaN)?;
-	
-	if (h.len() - first) < period {
-		return Err(ViError::NotEnoughValidData {
-			needed: period,
-			valid: h.len() - first,
-		});
-	}
-	
-	// Fill warmup period with NaN
-	for i in 0..(first + period - 1) {
-		dst_plus[i] = f64::NAN;
-		dst_minus[i] = f64::NAN;
-	}
-	
-	// Compute directly into the output slices
-	let chosen = match kern {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
-	
-	unsafe {
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => vi_scalar(h, l, c, period, first, dst_plus, dst_minus),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => vi_avx2(h, l, c, period, first, dst_plus, dst_minus),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => vi_avx512(h, l, c, period, first, dst_plus, dst_minus),
-			_ => unreachable!(),
-		}
-	}
-	
-	Ok(())
-}
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
@@ -794,7 +815,7 @@ pub fn vi_js(
 	let mut plus = vec![0.0; high.len()];
 	let mut minus = vec![0.0; high.len()];
 	
-	vi_into_slice(&mut plus, &mut minus, high, low, close, period, Kernel::Auto)
+	vi_into_slice_wasm(&mut plus, &mut minus, high, low, close, period, Kernel::Auto)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 	
 	// Create JS object with plus and minus arrays
@@ -858,7 +879,7 @@ pub fn vi_into(
 			let mut temp_plus = vec![0.0; len];
 			let mut temp_minus = vec![0.0; len];
 			
-			vi_into_slice(&mut temp_plus, &mut temp_minus, high, low, close, period, Kernel::Auto)
+			vi_into_slice_wasm(&mut temp_plus, &mut temp_minus, high, low, close, period, Kernel::Auto)
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 			
 			let plus_out = std::slice::from_raw_parts_mut(plus_ptr, len);
@@ -869,7 +890,7 @@ pub fn vi_into(
 			let plus_out = std::slice::from_raw_parts_mut(plus_ptr, len);
 			let minus_out = std::slice::from_raw_parts_mut(minus_ptr, len);
 			
-			vi_into_slice(plus_out, minus_out, high, low, close, period, Kernel::Auto)
+			vi_into_slice_wasm(plus_out, minus_out, high, low, close, period, Kernel::Auto)
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 		}
 		
@@ -904,9 +925,9 @@ pub fn vi_batch_js(
 	let config: ViBatchConfig = serde_wasm_bindgen::from_value(config)
 		.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
 	
-	// Execute batch
+	// Execute batch - use vi_batch_with_kernel to properly resolve the kernel
 	let sweep = ViBatchRange { period: config.period_range };
-	let output = vi_batch_inner(high, low, close, &sweep, Kernel::Auto, false)
+	let output = vi_batch_with_kernel(high, low, close, &sweep, Kernel::Auto)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 	
 	// Extract periods from combos
@@ -953,76 +974,37 @@ pub fn vi_batch_into(
 		};
 		
 		// Calculate number of combinations
-		let periods = vi_expand_range(&sweep.period);
-		let rows = periods.len();
+		let combos = expand_grid(&sweep);
+		let rows = combos.len();
 		let cols = len;
 		
 		let plus_out = std::slice::from_raw_parts_mut(plus_ptr, rows * cols);
 		let minus_out = std::slice::from_raw_parts_mut(minus_ptr, rows * cols);
 		
 		// Use the vi_batch_inner_into function
-		vi_batch_inner_into(high, low, close, &sweep, Kernel::Auto, false, plus_out, minus_out)
+		let _ = vi_batch_inner_into(high, low, close, &sweep, Kernel::Auto, false, plus_out, minus_out)
 			.map_err(|e| JsValue::from_str(&e.to_string()))?;
 		
 		Ok(rows)
 	}
 }
 
-/// Helper function for batch processing that writes directly to output slices
+// WASM-specific vi_into_slice wrapper for compatibility
 #[cfg(feature = "wasm")]
-fn vi_batch_inner_into(
+pub fn vi_into_slice_wasm(
+	dst_plus: &mut [f64],
+	dst_minus: &mut [f64],
 	high: &[f64],
 	low: &[f64],
 	close: &[f64],
-	sweep: &ViBatchRange,
-	kernel: Kernel,
-	parallel: bool,
-	out_plus: &mut [f64],
-	out_minus: &mut [f64],
+	period: usize,
+	kern: Kernel,
 ) -> Result<(), ViError> {
-	let combos = vi_expand_range(&sweep.period).into_iter()
-		.map(|period| ViParams { period: Some(period) })
-		.collect::<Vec<_>>();
-	
-	let rows = combos.len();
-	let cols = close.len();
-	
-	if out_plus.len() != rows * cols || out_minus.len() != rows * cols {
-		return Err(ViError::EmptyData);
-	}
-	
-	// Process each parameter combination
-	for (idx, params) in combos.iter().enumerate() {
-		let row_start = idx * cols;
-		let row_end = row_start + cols;
-		
-		let plus_slice = &mut out_plus[row_start..row_end];
-		let minus_slice = &mut out_minus[row_start..row_end];
-		
-		// Use vi_into_slice directly with slices (no allocation)
-		vi_into_slice(
-			plus_slice, 
-			minus_slice, 
-			high, 
-			low, 
-			close, 
-			params.period.unwrap_or(14), 
-			kernel
-		)?;
-	}
-	
-	Ok(())
+	let params = ViParams { period: Some(period) };
+	let input = ViInput::from_slices(high, low, close, params);
+	vi_into_slice(dst_plus, dst_minus, &input, kern)
 }
 
-/// Helper function to expand range into a vector
-#[cfg(feature = "wasm")]
-fn vi_expand_range(range: &(usize, usize, usize)) -> Vec<usize> {
-	// Expand grid just returns ViParams, we need periods
-	let sweep = ViBatchRange { period: *range };
-	expand_grid_vi(&sweep).into_iter()
-		.map(|p| p.period.unwrap_or(14))
-		.collect()
-}
 
 #[cfg(test)]
 mod tests {
@@ -1871,8 +1853,13 @@ mod tests {
 }
 
 // =============================================================================
-// Python Bindings
+// Python Bindings  
 // =============================================================================
+// Python bindings have been moved to src/bindings/python.rs for consistency.
+// The following functions are exported and registered there:
+// - vi_py: Single VI calculation
+// - vi_batch_py: Batch VI calculation 
+// - ViStreamPy: Streaming VI interface
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "vi")]
@@ -1885,42 +1872,92 @@ pub fn vi_py<'py>(
 	period: usize,
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
-	use numpy::{IntoPyArray, PyArrayMethods};
-
-	let high_slice = high.as_slice()?;
-	let low_slice = low.as_slice()?;
-	let close_slice = close.as_slice()?;
-	let kern = validate_kernel(kernel, false)?;
-
-	// Validate input lengths
-	if high_slice.len() != low_slice.len() || high_slice.len() != close_slice.len() {
+	let h = high.as_slice()?;
+	let l = low.as_slice()?;
+	let c = close.as_slice()?;
+	
+	// Check for mismatched lengths
+	if h.len() != l.len() || h.len() != c.len() {
 		return Err(PyValueError::new_err(format!(
 			"Input data length mismatch: high={}, low={}, close={}",
-			high_slice.len(),
-			low_slice.len(),
-			close_slice.len()
+			h.len(), l.len(), c.len()
 		)));
 	}
-
+	
 	let params = ViParams { period: Some(period) };
-	let input = ViInput::from_slices(high_slice, low_slice, close_slice, params);
+	let input = ViInput::from_slices(h, l, c, params);
+	let kern = validate_kernel(kernel, false)?;
 
-	// Get result vectors from Rust function
-	let (plus_vec, minus_vec) = py
-		.allow_threads(|| vi_with_kernel(&input, kern).map(|o| (o.plus, o.minus)))
-		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	let (plus, minus) = py
+		.allow_threads(|| {
+			let mut plus = vec![0.0; h.len()];
+			let mut minus = vec![0.0; h.len()];
+			vi_into_slice(&mut plus, &mut minus, &input, kern)
+				.map(|_| (plus, minus))
+		})
+		.map_err(|e: ViError| PyValueError::new_err(e.to_string()))?;
 
-	// Build result dictionary with zero-copy transfers
-	let dict = PyDict::new(py);
-	dict.set_item("plus", plus_vec.into_pyarray(py))?;
-	dict.set_item("minus", minus_vec.into_pyarray(py))?;
+	let d = PyDict::new(py);
+	d.set_item("plus",  plus.into_pyarray(py))?;
+	d.set_item("minus", minus.into_pyarray(py))?;
+	Ok(d)
+}
 
-	Ok(dict)
+#[cfg(feature = "python")]
+#[pyfunction(name = "vi_batch")]
+#[pyo3(signature = (high, low, close, period_range, kernel=None))]
+pub fn vi_batch_py<'py>(
+	py: Python<'py>,
+	high: PyReadonlyArray1<'py, f64>,
+	low: PyReadonlyArray1<'py, f64>,
+	close: PyReadonlyArray1<'py, f64>,
+	period_range: (usize, usize, usize),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	use numpy::PyArray2;
+
+	let h = high.as_slice()?;
+	let l = low.as_slice()?;
+	let c = close.as_slice()?;
+
+	let sweep = ViBatchRange { period: period_range };
+	let kern = validate_kernel(kernel, true)?;
+
+	// expand grid to get rows/cols
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = h.len();
+
+	let out_plus = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let out_minus = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_plus  = unsafe { out_plus.as_slice_mut()? };
+	let slice_minus = unsafe { out_minus.as_slice_mut()? };
+
+	py.allow_threads(|| {
+		let simd = match kern {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch   => Kernel::Avx2,
+			Kernel::ScalarBatch => Kernel::Scalar,
+			Kernel::Auto        => detect_best_batch_kernel().to_scalar_equivalent(),
+			_ => Kernel::Scalar,
+		};
+		// helper to coerce Batch→Scalar like ALMA does
+		vi_batch_inner_into(h, l, c, &sweep, simd, true, slice_plus, slice_minus)
+	})
+	.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	let d = PyDict::new(py);
+	d.set_item("plus",  out_plus.reshape((rows, cols))?)?;
+	d.set_item("minus", out_minus.reshape((rows, cols))?)?;
+	d.set_item("periods",
+		combos.iter().map(|p| p.period.unwrap_or(14) as u64).collect::<Vec<_>>().into_pyarray(py)
+	)?;
+	Ok(d)
 }
 
 #[cfg(feature = "python")]
 #[pyclass(name = "ViStream")]
-pub struct ViStreamPy {
+pub struct ViStreamPy { 
 	stream: ViStream,
 	prev_high: Option<f64>,
 	prev_low: Option<f64>,
@@ -1932,16 +1969,17 @@ pub struct ViStreamPy {
 impl ViStreamPy {
 	#[new]
 	fn new(period: usize) -> PyResult<Self> {
-		let params = ViParams { period: Some(period) };
-		let stream = ViStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
-		Ok(ViStreamPy {
-			stream,
+		let s = ViStream::try_new(ViParams { period: Some(period) })
+			.map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(Self { 
+			stream: s,
 			prev_high: None,
 			prev_low: None,
 			prev_close: None,
 		})
 	}
-
+	
+	// Returns (vi_plus, vi_minus) or None
 	fn update(&mut self, high: f64, low: f64, close: f64) -> Option<(f64, f64)> {
 		// VI Stream requires previous values
 		match (self.prev_high, self.prev_low, self.prev_close) {
@@ -1963,73 +2001,20 @@ impl ViStreamPy {
 	}
 }
 
+// ADD helper on Kernel to match ALMA batch mapping
 #[cfg(feature = "python")]
-#[pyfunction(name = "vi_batch")]
-#[pyo3(signature = (high, low, close, period_range, kernel=None))]
-pub fn vi_batch_py<'py>(
-	py: Python<'py>,
-	high: PyReadonlyArray1<'py, f64>,
-	low: PyReadonlyArray1<'py, f64>,
-	close: PyReadonlyArray1<'py, f64>,
-	period_range: (usize, usize, usize), // (start, end, step)
-	kernel: Option<&str>,
-) -> PyResult<Bound<'py, PyDict>> {
-	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
-
-	let high_slice = high.as_slice()?;
-	let low_slice = low.as_slice()?;
-	let close_slice = close.as_slice()?;
-	let kern = validate_kernel(kernel, true)?;
-
-	// Validate input lengths
-	if high_slice.len() != low_slice.len() || high_slice.len() != close_slice.len() {
-		return Err(PyValueError::new_err(format!(
-			"Input data length mismatch: high={}, low={}, close={}",
-			high_slice.len(),
-			low_slice.len(),
-			close_slice.len()
-		)));
+trait BatchToScalar {
+	fn to_scalar_equivalent(self) -> Kernel;
+}
+#[cfg(feature = "python")]
+impl BatchToScalar for Kernel {
+	fn to_scalar_equivalent(self) -> Kernel {
+		match self {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch   => Kernel::Avx2,
+			Kernel::ScalarBatch => Kernel::Scalar,
+			Kernel::Auto        => Kernel::Scalar,
+			k => k,
+		}
 	}
-
-	let sweep = ViBatchRange { period: period_range };
-
-	// Calculate dimensions
-	let combos = expand_grid_vi(&sweep);
-	let rows = combos.len();
-	let cols = high_slice.len();
-
-	// Pre-allocate output arrays (OK for batch operations)
-	let plus_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-	let minus_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-	let plus_slice = unsafe { plus_arr.as_slice_mut()? };
-	let minus_slice = unsafe { minus_arr.as_slice_mut()? };
-
-	// Compute without GIL
-	let combos = py
-		.allow_threads(|| {
-			// Get the result from vi_batch_with_kernel
-			let result = vi_batch_with_kernel(high_slice, low_slice, close_slice, &sweep, kern)?;
-			
-			// Copy the results to the pre-allocated buffers
-			plus_slice.copy_from_slice(&result.plus);
-			minus_slice.copy_from_slice(&result.minus);
-			
-			Ok::<Vec<ViParams>, ViError>(result.combos)
-		})
-		.map_err(|e| PyValueError::new_err(e.to_string()))?;
-
-	// Build result dictionary
-	let dict = PyDict::new(py);
-	dict.set_item("plus", plus_arr.reshape((rows, cols))?)?;
-	dict.set_item("minus", minus_arr.reshape((rows, cols))?)?;
-	dict.set_item(
-		"periods",
-		combos
-			.iter()
-			.map(|p| p.period.unwrap() as u64)
-			.collect::<Vec<_>>()
-			.into_pyarray(py),
-	)?;
-
-	Ok(dict)
 }
