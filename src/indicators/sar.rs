@@ -40,21 +40,12 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
-use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
-
-impl<'a> AsRef<(Vec<f64>, Vec<f64>)> for SarInput<'a> {
-	#[inline(always)]
-	fn as_ref(&self) -> &(Vec<f64>, Vec<f64>) {
-		unreachable!("Do not use AsRef for SarInput directly")
-	}
-}
 
 #[derive(Debug, Clone)]
 pub enum SarData<'a> {
@@ -202,6 +193,8 @@ pub enum SarError {
 	InvalidAcceleration { acceleration: f64 },
 	#[error("sar: Invalid maximum: {maximum}")]
 	InvalidMaximum { maximum: f64 },
+	#[error("sar: Output length mismatch: got = {got}, expected = {expected}")]
+	LengthMismatch { got: usize, expected: usize },
 }
 
 #[inline]
@@ -218,6 +211,10 @@ pub fn sar_with_kernel(input: &SarInput, kernel: Kernel) -> Result<SarOutput, Sa
 	if high.is_empty() || low.is_empty() {
 		return Err(SarError::EmptyData);
 	}
+
+	// Trim to minimum length to avoid out-of-bounds access
+	let min_len = high.len().min(low.len());
+	let (high, low) = (&high[..min_len], &low[..min_len]);
 
 	let first_valid_idx = high
 		.iter()
@@ -246,7 +243,7 @@ pub fn sar_with_kernel(input: &SarInput, kernel: Kernel) -> Result<SarOutput, Sa
 	}
 
 	// SAR starts calculating from the first valid data point, NaN before that
-	let mut out = alloc_with_nan_prefix(high.len(), first);
+	let mut out = alloc_with_nan_prefix(high.len(), first + 1);
 
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
@@ -281,9 +278,9 @@ pub fn sar_into_slice(dst: &mut [f64], input: &SarInput, kern: Kernel) -> Result
 
 	// Verify output buffer size matches input
 	if dst.len() != high.len() || dst.len() != low.len() {
-		return Err(SarError::NotEnoughValidData {
-			needed: high.len().max(low.len()),
-			valid: dst.len(),
+		return Err(SarError::LengthMismatch {
+			got: dst.len(),
+			expected: high.len().min(low.len()),
 		});
 	}
 
@@ -354,6 +351,10 @@ pub fn sar_scalar(high: &[f64], low: &[f64], first: usize, acceleration: f64, ma
 	let mut ep;
 	let i0 = first;
 	let i1 = i0 + 1;
+	// Ensure i1 is within bounds
+	if i1 >= len || i1 >= low.len() {
+		return; // Can't calculate SAR with less than 2 points
+	}
 	if high[i1] > high[i0] {
 		trend_up = true;
 		sar = low[i0];
@@ -749,6 +750,10 @@ fn sar_batch_inner(
 	if combos.is_empty() {
 		return Err(SarError::EmptyData);
 	}
+	
+	// Trim to minimum length to avoid out-of-bounds access
+	let min_len = high.len().min(low.len());
+	let (high, low) = (&high[..min_len], &low[..min_len]);
 	let first = high
 		.iter()
 		.zip(low.iter())
@@ -902,13 +907,19 @@ pub fn sar_py<'py>(
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
 	let high_slice = high.as_slice()?;
 	let low_slice = low.as_slice()?;
+	
+	// Take the minimum length when arrays have different sizes
+	let min_len = high_slice.len().min(low_slice.len());
+	let high_trimmed = &high_slice[..min_len];
+	let low_trimmed = &low_slice[..min_len];
+	
 	let kern = validate_kernel(kernel, false)?;
 	
 	let params = SarParams {
 		acceleration,
 		maximum,
 	};
-	let input = SarInput::from_slices(high_slice, low_slice, params);
+	let input = SarInput::from_slices(high_trimmed, low_trimmed, params);
 	
 	let result_vec: Vec<f64> = py
 		.allow_threads(|| sar_with_kernel(&input, kern).map(|o| o.values))
@@ -927,6 +938,7 @@ pub struct SarStreamPy {
 #[pymethods]
 impl SarStreamPy {
 	#[new]
+	#[pyo3(signature = (acceleration=None, maximum=None))]
 	fn new(acceleration: Option<f64>, maximum: Option<f64>) -> PyResult<Self> {
 		let params = SarParams {
 			acceleration,
@@ -955,36 +967,32 @@ pub fn sar_batch_py<'py>(
 	let high_slice = high.as_slice()?;
 	let low_slice = low.as_slice()?;
 	
+	// Trim to minimum length to avoid out-of-bounds access
+	let min_len = high_slice.len().min(low_slice.len());
+	let (high_slice, low_slice) = (&high_slice[..min_len], &low_slice[..min_len]);
+
 	let sweep = SarBatchRange {
 		acceleration: acceleration_range,
 		maximum: maximum_range,
 	};
-	
 	let combos = expand_grid(&sweep);
 	let rows = combos.len();
-	let cols = high_slice.len();
-	
+	let cols = min_len;
+
+	// preallocate the NumPy output and write into it directly
 	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
 	let slice_out = unsafe { out_arr.as_slice_mut()? };
-	
+
 	let kern = validate_kernel(kernel, true)?;
-	
-	let combos = py
-		.allow_threads(|| {
-			let kernel = match kern {
-				Kernel::Auto => detect_best_batch_kernel(),
-				k => k,
-			};
-			let simd = match kernel {
-				Kernel::Avx512Batch => Kernel::Avx512,
-				Kernel::Avx2Batch => Kernel::Avx2,
-				Kernel::ScalarBatch => Kernel::Scalar,
-				_ => kernel,
-			};
-			sar_batch_inner_into(high_slice, low_slice, &sweep, simd, true, slice_out)
-		})
-		.map_err(|e| PyValueError::new_err(e.to_string()))?;
-	
+	py.allow_threads(|| {
+		let k = match kern {
+			Kernel::Auto => detect_best_batch_kernel(),
+			k => k,
+		};
+		sar_batch_inner_into_noalloc(high_slice, low_slice, &sweep, k, true, slice_out)
+	})
+	.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
 	let dict = PyDict::new(py);
 	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
 	dict.set_item(
@@ -1003,22 +1011,97 @@ pub fn sar_batch_py<'py>(
 			.collect::<Vec<_>>()
 			.into_pyarray(py),
 	)?;
-	
+
 	Ok(dict)
 }
 
 #[cfg(feature = "python")]
-fn sar_batch_inner_into(
+fn sar_batch_inner_into_noalloc(
 	high: &[f64],
 	low: &[f64],
 	sweep: &SarBatchRange,
-	kernel: Kernel,
+	kern: Kernel,
 	parallel: bool,
-	output: &mut [f64],
+	out: &mut [f64],
 ) -> Result<Vec<SarParams>, SarError> {
-	let batch_output = sar_batch_inner(high, low, sweep, kernel, parallel)?;
-	output.copy_from_slice(&batch_output.values);
-	Ok(batch_output.combos)
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(SarError::EmptyData);
+	}
+
+	let first = high
+		.iter()
+		.zip(low.iter())
+		.position(|(&h, &l)| !h.is_nan() && !l.is_nan())
+		.ok_or(SarError::AllValuesNaN)?;
+	if high.len() - first < 2 {
+		return Err(SarError::NotEnoughValidData {
+			needed: 2,
+			valid: high.len() - first,
+		});
+	}
+
+	let rows = combos.len();
+	let cols = high.len();
+	if out.len() != rows * cols {
+		return Err(SarError::LengthMismatch {
+			got: out.len(),
+			expected: rows * cols,
+		});
+	}
+
+	// poison-safe NaN prefixes without allocation
+	unsafe {
+		let out_mu = std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>, out.len());
+		let warm: Vec<usize> = vec![first + 1; rows];
+		init_matrix_prefixes(out_mu, cols, &warm);
+	}
+
+	let simd = match kern {
+		Kernel::Auto => detect_best_batch_kernel(),
+		k => k,
+	};
+	let exec = |row: usize, row_out: &mut [f64]| {
+		let p = &combos[row];
+		match simd {
+			Kernel::Scalar | Kernel::ScalarBatch => unsafe {
+				sar_row_scalar(high, low, first, p.acceleration.unwrap(), p.maximum.unwrap(), row_out);
+			},
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => unsafe {
+				sar_row_avx2(high, low, first, p.acceleration.unwrap(), p.maximum.unwrap(), row_out);
+			},
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => unsafe {
+				sar_row_avx512(high, low, first, p.acceleration.unwrap(), p.maximum.unwrap(), row_out);
+			},
+			_ => unsafe {
+				sar_row_scalar(high, low, first, p.acceleration.unwrap(), p.maximum.unwrap(), row_out);
+			},
+		}
+	};
+
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			use rayon::prelude::*;
+			out.par_chunks_mut(cols)
+				.enumerate()
+				.for_each(|(row, r)| exec(row, r));
+		}
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, r) in out.chunks_mut(cols).enumerate() {
+				exec(row, r);
+			}
+		}
+	} else {
+		for (row, r) in out.chunks_mut(cols).enumerate() {
+			exec(row, r);
+		}
+	}
+
+	Ok(combos)
 }
 
 // ============ WASM BINDINGS ============
@@ -1026,13 +1109,17 @@ fn sar_batch_inner_into(
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn sar_js(high: &[f64], low: &[f64], acceleration: f64, maximum: f64) -> Result<Vec<f64>, JsValue> {
+	// Trim to minimum length to avoid mismatches
+	let min_len = high.len().min(low.len());
+	let (high, low) = (&high[..min_len], &low[..min_len]);
+	
 	let params = SarParams {
 		acceleration: Some(acceleration),
 		maximum: Some(maximum),
 	};
 	let input = SarInput::from_slices(high, low, params);
 
-	let mut output = vec![0.0; high.len()];
+	let mut output = vec![0.0; min_len];
 
 	sar_into_slice(&mut output, &input, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -1098,6 +1185,117 @@ pub fn sar_free(ptr: *mut f64, len: usize) {
 }
 
 #[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn sar_batch_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	acc_start: f64,
+	acc_end: f64,
+	acc_step: f64,
+	max_start: f64,
+	max_end: f64,
+	max_step: f64,
+) -> Result<usize, JsValue> {
+	if high_ptr.is_null() || low_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to sar_batch_into"));
+	}
+	unsafe {
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+		let sweep = SarBatchRange {
+			acceleration: (acc_start, acc_end, acc_step),
+			maximum: (max_start, max_end, max_step),
+		};
+		let combos = expand_grid(&sweep);
+		let rows = combos.len();
+		let cols = len;
+
+		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+		// Use Scalar kernel for WASM batch operations
+		sar_batch_inner_into_noalloc_wasm(high, low, &sweep, Kernel::Scalar, false, out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		Ok(rows)
+	}
+}
+
+#[cfg(feature = "wasm")]
+fn sar_batch_inner_into_noalloc_wasm(
+	high: &[f64],
+	low: &[f64],
+	sweep: &SarBatchRange,
+	_kern: Kernel, // Unused in WASM, always use scalar
+	parallel: bool,
+	out: &mut [f64],
+) -> Result<Vec<SarParams>, SarError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(SarError::EmptyData);
+	}
+	
+	// Trim to minimum length to avoid out-of-bounds access
+	let min_len = high.len().min(low.len());
+	let (high, low) = (&high[..min_len], &low[..min_len]);
+
+	let first = high
+		.iter()
+		.zip(low.iter())
+		.position(|(&h, &l)| !h.is_nan() && !l.is_nan())
+		.ok_or(SarError::AllValuesNaN)?;
+	if high.len() - first < 2 {
+		return Err(SarError::NotEnoughValidData {
+			needed: 2,
+			valid: high.len() - first,
+		});
+	}
+
+	let rows = combos.len();
+	let cols = high.len();
+	if out.len() != rows * cols {
+		return Err(SarError::LengthMismatch {
+			got: out.len(),
+			expected: rows * cols,
+		});
+	}
+
+	// poison-safe NaN prefixes without allocation
+	unsafe {
+		let out_mu = std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>, out.len());
+		let warm: Vec<usize> = vec![first + 1; rows];
+		init_matrix_prefixes(out_mu, cols, &warm);
+	}
+
+	// For WASM, always use scalar kernel since SIMD isn't fully implemented
+	let exec = |row: usize, row_out: &mut [f64]| unsafe {
+		let p = &combos[row];
+		sar_row_scalar(high, low, first, p.acceleration.unwrap(), p.maximum.unwrap(), row_out);
+	};
+
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			use rayon::prelude::*;
+			out.par_chunks_mut(cols)
+				.enumerate()
+				.for_each(|(row, r)| exec(row, r));
+		}
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, r) in out.chunks_mut(cols).enumerate() {
+				exec(row, r);
+			}
+		}
+	} else {
+		for (row, r) in out.chunks_mut(cols).enumerate() {
+			exec(row, r);
+		}
+	}
+
+	Ok(combos)
+}
+
+#[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct SarBatchConfig {
 	pub acceleration_range: (f64, f64, f64),
@@ -1124,7 +1322,13 @@ pub fn sar_batch_unified_js(high: &[f64], low: &[f64], config: JsValue) -> Resul
 		maximum: config.maximum_range,
 	};
 
-	let output = sar_batch_inner(high, low, &sweep, Kernel::Auto, false).map_err(|e| JsValue::from_str(&e.to_string()))?;
+	// Use Scalar kernel for WASM since SIMD128 is not implemented for batch operations
+	let kernel = if cfg!(target_arch = "wasm32") {
+		Kernel::Scalar
+	} else {
+		detect_best_batch_kernel()
+	};
+	let output = sar_batch_inner(high, low, &sweep, kernel, false).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	let js_output = SarBatchJsOutput {
 		values: output.values,

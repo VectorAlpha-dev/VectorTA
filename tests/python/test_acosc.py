@@ -97,6 +97,75 @@ class TestAcosc:
             assert not np.any(np.isnan(osc[240:])), "Found unexpected NaN in osc after warmup period"
             assert not np.any(np.isnan(change[240:])), "Found unexpected NaN in change after warmup period"
     
+    def test_acosc_leading_nans(self):
+        """Test ACOSC handles leading NaN values correctly"""
+        # Create specific test data with known values
+        high = np.concatenate([np.full(10, np.nan), np.arange(100, 300)])
+        low = np.concatenate([np.full(10, np.nan), np.arange(99, 299)])
+        
+        osc, change = ta_indicators.acosc(high, low)
+        
+        # With leading NaNs, warmup will be first_valid (10) + 38 = 48
+        expected_warmup = 10 + 38
+        
+        # Check warmup period 
+        assert np.all(np.isnan(osc[:expected_warmup])), f"Expected NaN in warmup period [0:{expected_warmup}] for osc"
+        assert np.all(np.isnan(change[:expected_warmup])), f"Expected NaN in warmup period [0:{expected_warmup}] for change"
+        
+        # Should have valid values after warmup
+        assert not np.isnan(osc[expected_warmup]), f"Expected valid value at index {expected_warmup} for osc"
+        assert not np.isnan(change[expected_warmup]), f"Expected valid value at index {expected_warmup} for change"
+    
+    def test_acosc_all_nan_input(self):
+        """Test ACOSC with all NaN values - throws error due to no valid data"""
+        all_nan_high = np.full(100, np.nan)
+        all_nan_low = np.full(100, np.nan)
+        
+        # ACOSC throws error when all input is NaN (no valid data points)
+        with pytest.raises(ValueError, match="Not enough data"):
+            ta_indicators.acosc(all_nan_high, all_nan_low)
+    
+    def test_acosc_single_point(self):
+        """Test ACOSC with single data point"""
+        single_high = np.array([100.0])
+        single_low = np.array([99.0])
+        
+        with pytest.raises(ValueError, match="Not enough data"):
+            ta_indicators.acosc(single_high, single_low)
+    
+    def test_acosc_edge_cases(self, test_data):
+        """Test ACOSC with edge cases - exactly minimum required data"""
+        high = np.array(test_data['high'][:39])  # Exactly 39 points (minimum required)
+        low = np.array(test_data['low'][:39])
+        
+        osc, change = ta_indicators.acosc(high, low)
+        
+        assert len(osc) == 39
+        assert len(change) == 39
+        
+        # First 38 should be NaN
+        assert np.all(np.isnan(osc[:38])), "Expected NaN in first 38 values for osc"
+        assert np.all(np.isnan(change[:38])), "Expected NaN in first 38 values for change"
+        
+        # Last value should be valid
+        assert not np.isnan(osc[38]), "Expected valid value at index 38 for osc"
+        assert not np.isnan(change[38]), "Expected valid value at index 38 for change"
+    
+    def test_acosc_mixed_nan_values(self, test_data):
+        """Test ACOSC with NaN values mixed in the data"""
+        high = np.array(test_data['high'])
+        low = np.array(test_data['low'])
+        
+        # Insert some NaN values in the middle
+        high[50:55] = np.nan
+        low[50:55] = np.nan
+        
+        # This should still work as we have enough valid data
+        osc, change = ta_indicators.acosc(high, low)
+        
+        assert len(osc) == len(high)
+        assert len(change) == len(low)
+    
     def test_acosc_streaming(self, test_data):
         """Test ACOSC streaming matches batch calculation - mirrors check_acosc_streaming"""
         high = test_data['high']

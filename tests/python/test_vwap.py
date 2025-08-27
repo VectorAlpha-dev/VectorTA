@@ -16,7 +16,7 @@ except ImportError:
     except ImportError:
         pytest.skip("Python module not built. Run 'maturin develop --features python' first", allow_module_level=True)
 
-from test_utils import load_test_data, assert_close, EXPECTED_OUTPUTS
+from test_utils import load_test_data, assert_close
 
 
 class TestVwap:
@@ -39,7 +39,15 @@ class TestVwap:
         timestamps = test_data['timestamp']
         volumes = test_data['volume']
         prices = (test_data['high'] + test_data['low'] + test_data['close']) / 3.0  # hlc3
-        expected = EXPECTED_OUTPUTS['vwap']
+        
+        # Expected values from Rust test check_vwap_accuracy
+        expected_last_five = [
+            59353.05963230107,
+            59330.15815713043,
+            59289.94649532547,
+            59274.6155462414,
+            58730.0,
+        ]
         
         result = ta_indicators.vwap(
             timestamps,
@@ -53,7 +61,7 @@ class TestVwap:
         # Check last 5 values match expected
         assert_close(
             result[-5:], 
-            expected['anchor_1D'],
+            expected_last_five,
             rtol=1e-5,  # Using 1e-5 as in Rust test
             msg="VWAP last 5 values mismatch"
         )
@@ -171,6 +179,149 @@ class TestVwap:
         for val in result:
             if not np.isnan(val):
                 assert np.isfinite(val), "Found non-finite value in VWAP output"
+    
+    def test_vwap_all_nan_input(self):
+        """Test VWAP with all NaN values - should handle gracefully"""
+        # Create timestamps and volumes
+        timestamps = np.arange(100, dtype=np.int64) * 1000
+        volumes = np.full(100, 100.0)
+        all_nan = np.full(100, np.nan)
+        
+        # VWAP should produce all NaN output when prices are all NaN
+        result = ta_indicators.vwap(timestamps, volumes, all_nan)
+        assert len(result) == len(all_nan)
+        assert np.all(np.isnan(result)), "Expected all NaN output for all NaN prices"
+    
+    def test_vwap_zero_volume(self, test_data):
+        """Test VWAP behavior with zero volume periods"""
+        timestamps = test_data['timestamp'][:100]
+        prices = test_data['close'][:100]
+        volumes = test_data['volume'][:100].copy()
+        
+        # Set some volumes to zero
+        volumes[10:20] = 0.0
+        
+        result = ta_indicators.vwap(timestamps, volumes, prices)
+        assert len(result) == len(prices)
+        
+        # VWAP should produce NaN when cumulative volume is zero
+        # but continue normally after non-zero volumes appear
+        non_nan_count = np.sum(~np.isnan(result))
+        assert non_nan_count > 0, "Expected some valid VWAP values"
+    
+    def test_vwap_invalid_timestamps(self):
+        """Test VWAP with invalid timestamps"""
+        volumes = np.array([100.0, 200.0, 300.0])
+        prices = np.array([10.0, 20.0, 30.0])
+        
+        # Negative timestamps should still work (pre-epoch)
+        negative_ts = np.array([-1000, -500, 0], dtype=np.int64)
+        result = ta_indicators.vwap(negative_ts, volumes, prices)
+        assert len(result) == len(prices)
+    
+    def test_vwap_warmup_period(self, test_data):
+        """Test VWAP warmup period behavior for different anchors"""
+        timestamps = test_data['timestamp'][:100]
+        volumes = test_data['volume'][:100] 
+        prices = test_data['close'][:100]
+        
+        # Test with minute anchor - should have values from start of first bucket
+        result_1m = ta_indicators.vwap(timestamps, volumes, prices, anchor="1m")
+        assert len(result_1m) == len(prices)
+        
+        # Test with day anchor - values start from first day boundary
+        result_1d = ta_indicators.vwap(timestamps, volumes, prices, anchor="1d")
+        assert len(result_1d) == len(prices)
+        
+        # Both should produce some non-NaN values
+        assert np.any(~np.isnan(result_1m)), "Expected some valid values for 1m anchor"
+        assert np.any(~np.isnan(result_1d)), "Expected some valid values for 1d anchor"
+    
+    def test_vwap_volume_weighting(self):
+        """Test VWAP correctly weights by volume"""
+        # Create simple test case with known result
+        # All in same anchor period (within same day)
+        base_ts = 1609459200000  # Jan 1, 2021 00:00:00 UTC
+        timestamps = np.array([base_ts, base_ts + 3600000, base_ts + 7200000], dtype=np.int64)
+        prices = np.array([100.0, 200.0, 300.0])
+        volumes = np.array([1.0, 2.0, 3.0])
+        
+        result = ta_indicators.vwap(timestamps, volumes, prices, anchor="1d")
+        
+        # Expected VWAP calculations:
+        # Index 0: 100*1 / 1 = 100
+        # Index 1: (100*1 + 200*2) / (1+2) = 500/3 = 166.67
+        # Index 2: (100*1 + 200*2 + 300*3) / (1+2+3) = 1400/6 = 233.33
+        expected = [100.0, 500.0/3.0, 1400.0/6.0]
+        
+        assert_close(result, expected, rtol=1e-9, msg="VWAP volume weighting incorrect")
+    
+    def test_vwap_batch_multi_anchor(self, test_data):
+        """Test VWAP batch with multiple anchor combinations"""
+        timestamps = test_data['timestamp'][:200]
+        volumes = test_data['volume'][:200]
+        prices = test_data['close'][:200]
+        
+        # Test range of anchors
+        result = ta_indicators.vwap_batch(
+            timestamps,
+            volumes,
+            prices,
+            anchor_range=("1h", "4h", 1)
+        )
+        
+        assert 'values' in result
+        assert 'anchors' in result
+        
+        # Should have 4 combinations: 1h, 2h, 3h, 4h
+        assert result['values'].shape[0] == 4
+        assert result['values'].shape[1] == len(prices)
+        assert list(result['anchors']) == ["1h", "2h", "3h", "4h"]
+        
+        # Verify first row (1h) against single calculation
+        single_1h = ta_indicators.vwap(timestamps, volumes, prices, anchor="1h")
+        assert_close(
+            result['values'][0],
+            single_1h,
+            rtol=1e-9,
+            msg="Batch 1h row doesn't match single calculation"
+        )
+        
+        # Verify last row (4h) against single calculation
+        single_4h = ta_indicators.vwap(timestamps, volumes, prices, anchor="4h")
+        assert_close(
+            result['values'][3],
+            single_4h,
+            rtol=1e-9,
+            msg="Batch 4h row doesn't match single calculation"
+        )
+    
+    def test_vwap_batch_static_anchor(self, test_data):
+        """Test VWAP batch with static anchor (single value)"""
+        timestamps = test_data['timestamp'][:100]
+        volumes = test_data['volume'][:100]
+        prices = test_data['close'][:100]
+        
+        # Static anchor - step=0 means single value
+        result = ta_indicators.vwap_batch(
+            timestamps,
+            volumes,
+            prices,
+            anchor_range=("1d", "1d", 0)
+        )
+        
+        assert result['values'].shape[0] == 1
+        assert result['values'].shape[1] == len(prices)
+        assert result['anchors'] == ["1d"]
+        
+        # Should match single calculation
+        single = ta_indicators.vwap(timestamps, volumes, prices, anchor="1d")
+        assert_close(
+            result['values'][0],
+            single,
+            rtol=1e-9,
+            msg="Static batch doesn't match single calculation"
+        )
 
 
 if __name__ == '__main__':

@@ -488,7 +488,268 @@ test('CCI batch - new API error handling', () => {
     }, /Invalid config/);
 });
 
-// Note: Streaming tests would require streaming functions to be exposed in WASM bindings
+// Zero-copy API tests
+test('CCI zero-copy API', () => {
+    const data = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+    const period = 5;
+    
+    // Allocate buffer
+    const ptr = wasm.cci_alloc(data.length);
+    assert(ptr !== 0, 'Failed to allocate memory');
+    
+    // Create view into WASM memory
+    const memView = new Float64Array(
+        wasm.__wasm.memory.buffer,
+        ptr,
+        data.length
+    );
+    
+    // Copy data into WASM memory
+    memView.set(data);
+    
+    // Compute CCI in-place
+    try {
+        wasm.cci_into(ptr, ptr, data.length, period);
+        
+        // Verify results match regular API
+        const regularResult = wasm.cci_js(data, period);
+        for (let i = 0; i < data.length; i++) {
+            if (isNaN(regularResult[i]) && isNaN(memView[i])) {
+                continue; // Both NaN is OK
+            }
+            assert(Math.abs(regularResult[i] - memView[i]) < 1e-10,
+                   `Zero-copy mismatch at index ${i}: regular=${regularResult[i]}, zerocopy=${memView[i]}`);
+        }
+    } finally {
+        // Always free memory
+        wasm.cci_free(ptr, data.length);
+    }
+});
+
+test('CCI zero-copy with large dataset', () => {
+    const size = 10000;
+    const data = new Float64Array(size);
+    for (let i = 0; i < size; i++) {
+        data[i] = 100 + Math.sin(i * 0.01) * 10 + Math.random() * 2;
+    }
+    
+    const ptr = wasm.cci_alloc(size);
+    assert(ptr !== 0, 'Failed to allocate large buffer');
+    
+    try {
+        const memView = new Float64Array(wasm.__wasm.memory.buffer, ptr, size);
+        memView.set(data);
+        
+        wasm.cci_into(ptr, ptr, size, 14);
+        
+        // Recreate view in case memory grew
+        const memView2 = new Float64Array(wasm.__wasm.memory.buffer, ptr, size);
+        
+        // Check warmup period has NaN
+        for (let i = 0; i < 13; i++) {
+            assert(isNaN(memView2[i]), `Expected NaN at warmup index ${i}`);
+        }
+        
+        // Check after warmup has values
+        for (let i = 13; i < Math.min(100, size); i++) {
+            assert(!isNaN(memView2[i]), `Unexpected NaN at index ${i}`);
+        }
+    } finally {
+        wasm.cci_free(ptr, size);
+    }
+});
+
+test('CCI zero-copy error handling', () => {
+    // Test null pointer
+    assert.throws(() => {
+        wasm.cci_into(0, 0, 10, 14);
+    }, /null pointer/i);
+    
+    // Test invalid parameters with allocated memory
+    const ptr = wasm.cci_alloc(10);
+    try {
+        // Invalid period
+        assert.throws(() => {
+            wasm.cci_into(ptr, ptr, 10, 0);
+        }, /Invalid period/);
+        
+        // Period exceeds length
+        assert.throws(() => {
+            wasm.cci_into(ptr, ptr, 10, 20);
+        }, /Invalid period/);
+    } finally {
+        wasm.cci_free(ptr, 10);
+    }
+});
+
+test('CCI zero-copy memory management', () => {
+    // Allocate and free multiple times to ensure no leaks
+    const sizes = [100, 1000, 5000];
+    
+    for (const size of sizes) {
+        const ptr = wasm.cci_alloc(size);
+        assert(ptr !== 0, `Failed to allocate ${size} elements`);
+        
+        // Write pattern to verify memory
+        const memView = new Float64Array(wasm.__wasm.memory.buffer, ptr, size);
+        for (let i = 0; i < Math.min(10, size); i++) {
+            memView[i] = i * 2.5;
+        }
+        
+        // Verify pattern
+        for (let i = 0; i < Math.min(10, size); i++) {
+            assert.strictEqual(memView[i], i * 2.5, `Memory corruption at index ${i}`);
+        }
+        
+        // Free memory
+        wasm.cci_free(ptr, size);
+    }
+});
+
+test('CCI batch zero-copy API', () => {
+    const data = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]);
+    const periodStart = 5;
+    const periodEnd = 7;
+    const periodStep = 1;
+    
+    // Calculate expected output size
+    const numPeriods = Math.floor((periodEnd - periodStart) / periodStep) + 1;
+    const outputSize = numPeriods * data.length;
+    
+    // Allocate input and output buffers
+    const inPtr = wasm.cci_alloc(data.length);
+    const outPtr = wasm.cci_alloc(outputSize);
+    
+    assert(inPtr !== 0, 'Failed to allocate input buffer');
+    assert(outPtr !== 0, 'Failed to allocate output buffer');
+    
+    try {
+        // Copy data to input buffer
+        const inView = new Float64Array(wasm.__wasm.memory.buffer, inPtr, data.length);
+        inView.set(data);
+        
+        // Run batch computation
+        const rows = wasm.cci_batch_into(inPtr, outPtr, data.length, periodStart, periodEnd, periodStep);
+        assert.strictEqual(rows, numPeriods, 'Unexpected number of rows');
+        
+        // Recreate views in case memory grew
+        const outView = new Float64Array(wasm.__wasm.memory.buffer, outPtr, outputSize);
+        
+        // Verify against regular batch API
+        const regularResult = wasm.cci_batch_js(data, periodStart, periodEnd, periodStep);
+        
+        // Check that both have same length
+        assert.strictEqual(regularResult.length, outputSize, 'Length mismatch');
+        
+        // Compare values with proper NaN handling
+        for (let i = 0; i < outputSize; i++) {
+            const regular = regularResult[i];
+            const zeroCopy = outView[i];
+            
+            if (isNaN(regular) && isNaN(zeroCopy)) {
+                continue; // Both NaN is OK
+            }
+            
+            if (isNaN(regular) || isNaN(zeroCopy)) {
+                assert(false, `NaN mismatch at index ${i}: regular=${regular}, zerocopy=${zeroCopy}`);
+            }
+            
+            const diff = Math.abs(regular - zeroCopy);
+            assert(diff < 1e-10,
+                   `Batch zero-copy mismatch at index ${i}: regular=${regular}, zerocopy=${zeroCopy}, diff=${diff}`);
+        }
+    } finally {
+        wasm.cci_free(inPtr, data.length);
+        wasm.cci_free(outPtr, outputSize);
+    }
+});
+
+// SIMD128 consistency test
+test('CCI SIMD128 consistency', () => {
+    // This test verifies SIMD128 produces same results as scalar
+    // It runs automatically when SIMD128 is enabled in WASM
+    const testCases = [
+        { size: 20, period: 5 },
+        { size: 100, period: 14 },
+        { size: 1000, period: 20 },
+        { size: 5000, period: 50 }
+    ];
+    
+    for (const testCase of testCases) {
+        const data = new Float64Array(testCase.size);
+        for (let i = 0; i < testCase.size; i++) {
+            // Generate realistic price data
+            data[i] = 100 + Math.sin(i * 0.1) * 5 + Math.cos(i * 0.05) * 3;
+        }
+        
+        const result = wasm.cci_js(data, testCase.period);
+        
+        // Basic sanity checks
+        assert.strictEqual(result.length, data.length);
+        
+        // Check warmup period
+        for (let i = 0; i < testCase.period - 1; i++) {
+            assert(isNaN(result[i]), `Expected NaN at warmup index ${i} for size=${testCase.size}`);
+        }
+        
+        // Check values exist after warmup
+        let sumAfterWarmup = 0;
+        let countAfterWarmup = 0;
+        for (let i = testCase.period - 1; i < result.length; i++) {
+            assert(!isNaN(result[i]), `Unexpected NaN at index ${i} for size=${testCase.size}`);
+            sumAfterWarmup += result[i];
+            countAfterWarmup++;
+        }
+        
+        // CCI typically ranges between -100 and 100, but can exceed
+        const avgAfterWarmup = sumAfterWarmup / countAfterWarmup;
+        assert(Math.abs(avgAfterWarmup) < 200, `Average CCI value ${avgAfterWarmup} seems unreasonable`);
+    }
+});
+
+test('CCI constant price test', () => {
+    // When all prices are equal, CCI should be 0 (no deviation)
+    const data = new Float64Array(100);
+    data.fill(50.0);
+    
+    const result = wasm.cci_js(data, 14);
+    
+    // After warmup, all values should be 0
+    for (let i = 13; i < result.length; i++) {
+        assert(Math.abs(result[i]) < 1e-9, 
+               `CCI should be ~0 for constant prices, got ${result[i]} at index ${i}`);
+    }
+});
+
+test('CCI extreme values test', () => {
+    // Test with very large values for numerical stability
+    const largeData = new Float64Array([1e10, 1e10 + 1, 1e10 + 2, 1e10 + 3, 1e10 + 4, 1e10 + 5]);
+    const resultLarge = wasm.cci_js(largeData, 3);
+    assert.strictEqual(resultLarge.length, largeData.length);
+    
+    // Check no infinite values
+    for (let i = 0; i < resultLarge.length; i++) {
+        if (!isNaN(resultLarge[i])) {
+            assert(isFinite(resultLarge[i]), `CCI produced infinite value at index ${i}`);
+        }
+    }
+    
+    // Test with very small values
+    const smallData = new Float64Array([1e-10, 2e-10, 3e-10, 4e-10, 5e-10, 6e-10]);
+    const resultSmall = wasm.cci_js(smallData, 3);
+    assert.strictEqual(resultSmall.length, smallData.length);
+    
+    // Check no infinite values
+    for (let i = 0; i < resultSmall.length; i++) {
+        if (!isNaN(resultSmall[i])) {
+            assert(isFinite(resultSmall[i]), `CCI produced infinite value at index ${i}`);
+        }
+    }
+});
+
+// Note: Streaming functionality is available through the Python bindings.
+// For WASM, repeated calculations with same parameters can be achieved using
+// the zero-copy API with persistent buffers.
 
 test.after(() => {
     console.log('CCI WASM tests completed');

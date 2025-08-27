@@ -40,7 +40,6 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -222,40 +221,30 @@ pub fn ppo(input: &PpoInput) -> Result<PpoOutput, PpoError> {
 
 pub fn ppo_with_kernel(input: &PpoInput, kernel: Kernel) -> Result<PpoOutput, PpoError> {
 	let data: &[f64] = input.as_ref();
-
+	let len = data.len();
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(PpoError::AllValuesNaN)?;
 
-	let len = data.len();
 	let fast = input.get_fast_period();
 	let slow = input.get_slow_period();
 	let ma_type = input.get_ma_type();
 
 	if fast == 0 || slow == 0 || fast > len || slow > len {
-		return Err(PpoError::InvalidPeriod {
-			fast,
-			slow,
-			data_len: len,
-		});
+		return Err(PpoError::InvalidPeriod { fast, slow, data_len: len });
 	}
 	if (len - first) < slow {
-		return Err(PpoError::NotEnoughValidData {
-			needed: slow,
-			valid: len - first,
-		});
+		return Err(PpoError::NotEnoughValidData { needed: slow, valid: len - first });
 	}
 
-	let chosen = match kernel {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
+	let chosen = match kernel { Kernel::Auto => detect_best_kernel(), k => k };
 
 	let mut out = alloc_with_nan_prefix(len, first + slow - 1);
+
 	unsafe {
 		match chosen {
 			Kernel::Scalar | Kernel::ScalarBatch => ppo_scalar(data, fast, slow, &ma_type, first, &mut out),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			#[cfg(all(feature="nightly-avx", target_arch="x86_64"))]
 			Kernel::Avx2 | Kernel::Avx2Batch => ppo_avx2(data, fast, slow, &ma_type, first, &mut out),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			#[cfg(all(feature="nightly-avx", target_arch="x86_64"))]
 			Kernel::Avx512 | Kernel::Avx512Batch => ppo_avx512(data, fast, slow, &ma_type, first, &mut out),
 			_ => unreachable!(),
 		}
@@ -267,65 +256,58 @@ pub fn ppo_with_kernel(input: &PpoInput, kernel: Kernel) -> Result<PpoOutput, Pp
 /// Write PPO result directly to output slice - no allocations
 pub fn ppo_into_slice(dst: &mut [f64], input: &PpoInput, kern: Kernel) -> Result<(), PpoError> {
 	let data = input.as_ref();
-	
-	// Validate and prepare parameters
-	let fast = input.params.fast_period.unwrap_or(12);
-	let slow = input.params.slow_period.unwrap_or(26);
-	let ma_type = input.params.ma_type.as_deref().unwrap_or("sma");
-	
-	// Validation
-	if fast == 0 || slow == 0 {
+	if data.is_empty() { return Err(PpoError::AllValuesNaN); }
+
+	let fast = input.get_fast_period();
+	let slow = input.get_slow_period();
+	let ma_type = input.get_ma_type();
+
+	if fast == 0 || slow == 0 || fast > data.len() || slow > data.len() {
 		return Err(PpoError::InvalidPeriod { fast, slow, data_len: data.len() });
 	}
-	if fast >= data.len() || slow >= data.len() {
-		return Err(PpoError::InvalidPeriod { fast, slow, data_len: data.len() });
-	}
-	if data.is_empty() || data.iter().all(|&x| x.is_nan()) {
-		return Err(PpoError::AllValuesNaN);
-	}
-	
-	// Check output length
 	if dst.len() != data.len() {
 		return Err(PpoError::InvalidPeriod { fast, slow, data_len: data.len() });
 	}
-	
-	let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
-	let warmup = first + slow - 1;
-	
-	// Fill warmup with NaN BEFORE computation
-	let warmup_end = warmup.min(dst.len());
-	for v in &mut dst[..warmup_end] {
-		*v = f64::NAN;
+
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(PpoError::AllValuesNaN)?;
+	if data.len() - first < slow {
+		return Err(PpoError::NotEnoughValidData { needed: slow, valid: data.len() - first });
 	}
-	
-	// Select and execute kernel
-	let kernel = kern;
+
+	let chosen = match kern { Kernel::Auto => detect_best_kernel(), k => k };
+
 	unsafe {
-		match kernel {
-			Kernel::Scalar | Kernel::ScalarBatch => ppo_scalar(data, fast, slow, ma_type, first, dst),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => ppo_avx2(data, fast, slow, ma_type, first, dst),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => ppo_avx512(data, fast, slow, ma_type, first, dst),
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => ppo_scalar(data, fast, slow, &ma_type, first, dst),
+			#[cfg(all(feature="nightly-avx", target_arch="x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => ppo_avx2(data, fast, slow, &ma_type, first, dst),
+			#[cfg(all(feature="nightly-avx", target_arch="x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => ppo_avx512(data, fast, slow, &ma_type, first, dst),
 			_ => unreachable!(),
 		}
 	}
-	
+
+	let warmup_end = first + slow - 1;
+	for v in &mut dst[..warmup_end] { *v = f64::NAN; }
 	Ok(())
 }
 
 #[inline]
-pub unsafe fn ppo_scalar(data: &[f64], fast: usize, slow: usize, ma_type: &str, first: usize, out: &mut [f64]) {
-	let fast_ma = ma(ma_type, MaData::Slice(data), fast).expect("ma error");
-	let slow_ma = ma(ma_type, MaData::Slice(data), slow).expect("ma error");
+pub unsafe fn ppo_scalar(
+	data: &[f64], fast: usize, slow: usize, ma_type: &str, first: usize, out: &mut [f64]
+) {
+	// MA failures should be impossible after validation; if they occur, write NaN and return.
+	let fast_ma = match ma(ma_type, MaData::Slice(data), fast) { Ok(v) => v, Err(_) => {
+		for i in (first + slow - 1)..data.len() { out[i] = f64::NAN; } return;
+	}};
+	let slow_ma = match ma(ma_type, MaData::Slice(data), slow) { Ok(v) => v, Err(_) => {
+		for i in (first + slow - 1)..data.len() { out[i] = f64::NAN; } return;
+	}};
+
 	for i in (first + slow - 1)..data.len() {
 		let sf = slow_ma[i];
 		let ff = fast_ma[i];
-		if sf.is_nan() || ff.is_nan() || sf == 0.0 {
-			out[i] = f64::NAN;
-		} else {
-			out[i] = 100.0 * (ff - sf) / sf;
-		}
+		out[i] = if sf.is_nan() || ff.is_nan() || sf == 0.0 { f64::NAN } else { 100.0 * (ff - sf) / sf };
 	}
 }
 
@@ -513,6 +495,7 @@ fn ppo_batch_inner_into(
 			data_len: 0,
 		});
 	}
+
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(PpoError::AllValuesNaN)?;
 	let max_slow = combos.iter().map(|c| c.slow_period.unwrap()).max().unwrap();
 	if data.len() - first < max_slow {
@@ -521,70 +504,39 @@ fn ppo_batch_inner_into(
 			valid: data.len() - first,
 		});
 	}
+
 	let cols = data.len();
-	
-	// Initialize NaN prefixes for each row based on warmup period
-	for (row, combo) in combos.iter().enumerate() {
-		let warmup = first + combo.slow_period.unwrap() - 1;
-		let row_start = row * cols;
-		for i in 0..warmup.min(cols) {
-			out[row_start + i] = f64::NAN;
-		}
-	}
-	
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+	// Treat the destination as uninitialized like ALMA
+	let out_uninit: &mut [MaybeUninit<f64>] = unsafe {
+		std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
+	};
+
+	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
 		let p = &combos[row];
+		let out_row: &mut [f64] = std::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 		match kern {
-			Kernel::Scalar => ppo_row_scalar(
-				data,
-				first,
-				p.fast_period.unwrap(),
-				p.slow_period.unwrap(),
-				p.ma_type.as_ref().unwrap(),
-				out_row,
-			),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => ppo_row_avx2(
-				data,
-				first,
-				p.fast_period.unwrap(),
-				p.slow_period.unwrap(),
-				p.ma_type.as_ref().unwrap(),
-				out_row,
-			),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => ppo_row_avx512(
-				data,
-				first,
-				p.fast_period.unwrap(),
-				p.slow_period.unwrap(),
-				p.ma_type.as_ref().unwrap(),
-				out_row,
-			),
+			Kernel::Scalar => ppo_row_scalar(data, first, p.fast_period.unwrap(), p.slow_period.unwrap(), p.ma_type.as_ref().unwrap(), out_row),
+			#[cfg(all(feature="nightly-avx", target_arch="x86_64"))]
+			Kernel::Avx2 => ppo_row_avx2(data, first, p.fast_period.unwrap(), p.slow_period.unwrap(), p.ma_type.as_ref().unwrap(), out_row),
+			#[cfg(all(feature="nightly-avx", target_arch="x86_64"))]
+			Kernel::Avx512 => ppo_row_avx512(data, first, p.fast_period.unwrap(), p.slow_period.unwrap(), p.ma_type.as_ref().unwrap(), out_row),
 			_ => unreachable!(),
 		}
 	};
-	
+
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			out.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
+			out_uninit.par_chunks_mut(cols).enumerate().for_each(|(row, slice)| do_row(row, slice));
 		}
-		
 		#[cfg(target_arch = "wasm32")]
 		{
-			for (row, slice) in out.chunks_mut(cols).enumerate() {
-				do_row(row, slice);
-			}
+			for (row, slice) in out_uninit.chunks_mut(cols).enumerate() { do_row(row, slice); }
 		}
 	} else {
-		for (row, slice) in out.chunks_mut(cols).enumerate() {
-			do_row(row, slice);
-		}
+		for (row, slice) in out_uninit.chunks_mut(cols).enumerate() { do_row(row, slice); }
 	}
-	
+
 	Ok(combos)
 }
 
@@ -1542,22 +1494,38 @@ pub fn ppo_batch_py<'py>(
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
 	let slice_in = data.as_slice()?;
-	
+
 	let sweep = PpoBatchRange {
 		fast_period: fast_period_range,
 		slow_period: slow_period_range,
 		ma_type: ma_type.unwrap_or("sma").to_string(),
 	};
-	
+
 	let combos = expand_grid(&sweep);
 	let rows = combos.len();
 	let cols = slice_in.len();
-	
+
 	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
 	let slice_out = unsafe { out_arr.as_slice_mut()? };
-	
+
+	// Initialize NaN prefixes directly on the NumPy buffer using helpers
+	let warm: Vec<usize> = combos
+		.iter()
+		.map(|c| {
+			let first = slice_in.iter().position(|x| !x.is_nan()).unwrap_or(0);
+			first + c.slow_period.unwrap() - 1
+		})
+		.collect();
+
+	unsafe {
+		let mu: &mut [MaybeUninit<f64>] = std::slice::from_raw_parts_mut(
+			slice_out.as_mut_ptr() as *mut MaybeUninit<f64>,
+			slice_out.len(),
+		);
+		init_matrix_prefixes(mu, cols, &warm);
+	}
+
 	let kern = validate_kernel(kernel, true)?;
-	
 	let combos = py
 		.allow_threads(|| {
 			let kernel = match kern {
@@ -1574,33 +1542,21 @@ pub fn ppo_batch_py<'py>(
 			ppo_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
 		})
 		.map_err(|e| PyValueError::new_err(e.to_string()))?;
-	
+
 	let dict = PyDict::new(py);
 	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
 	dict.set_item(
 		"fast_periods",
-		combos
-			.iter()
-			.map(|p| p.fast_period.unwrap() as u64)
-			.collect::<Vec<_>>()
-			.into_pyarray(py),
+		combos.iter().map(|p| p.fast_period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py),
 	)?;
 	dict.set_item(
 		"slow_periods",
-		combos
-			.iter()
-			.map(|p| p.slow_period.unwrap() as u64)
-			.collect::<Vec<_>>()
-			.into_pyarray(py),
+		combos.iter().map(|p| p.slow_period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py),
 	)?;
 	dict.set_item(
 		"ma_types",
-		combos
-			.iter()
-			.map(|p| p.ma_type.as_ref().unwrap().clone())
-			.collect::<Vec<_>>(),
+		combos.iter().map(|p| p.ma_type.as_ref().unwrap().clone()).collect::<Vec<_>>(),
 	)?;
-	
 	Ok(dict)
 }
 
@@ -1617,12 +1573,9 @@ pub fn ppo_js(data: &[f64], fast_period: usize, slow_period: usize, ma_type: &st
 		ma_type: Some(ma_type.to_string()),
 	};
 	let input = PpoInput::from_slice(data, params);
-	
-	let mut output = vec![0.0; data.len()];  // Single allocation
-	ppo_into_slice(&mut output, &input, detect_best_kernel())
-		.map_err(|e| JsValue::from_str(&e.to_string()))?;
-	
-	Ok(output)
+	let mut out = vec![0.0; data.len()];
+	ppo_into_slice(&mut out, &input, detect_best_kernel()).map_err(|e| JsValue::from_str(&e.to_string()))?;
+	Ok(out)
 }
 
 #[cfg(feature = "wasm")]
@@ -1646,18 +1599,8 @@ pub fn ppo_free(ptr: *mut f64, len: usize) {
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
-pub fn ppo_into(
-	in_ptr: *const f64,
-	out_ptr: *mut f64,
-	len: usize,
-	fast_period: usize,
-	slow_period: usize,
-	ma_type: &str,
-) -> Result<(), JsValue> {
-	if in_ptr.is_null() || out_ptr.is_null() {
-		return Err(JsValue::from_str("Null pointer provided"));
-	}
-	
+pub fn ppo_into(in_ptr: *const f64, out_ptr: *mut f64, len: usize, fast_period: usize, slow_period: usize, ma_type: &str) -> Result<(), JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() { return Err(JsValue::from_str("null pointer passed to ppo_into")); }
 	unsafe {
 		let data = std::slice::from_raw_parts(in_ptr, len);
 		let params = PpoParams {
@@ -1666,20 +1609,17 @@ pub fn ppo_into(
 			ma_type: Some(ma_type.to_string()),
 		};
 		let input = PpoInput::from_slice(data, params);
-		
-		if in_ptr == out_ptr as *const f64 {  // CRITICAL: Aliasing check
-			let mut temp = vec![0.0; len];
-			ppo_into_slice(&mut temp, &input, detect_best_kernel())
-				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		if in_ptr == out_ptr {
+			let mut tmp = vec![0.0; len];
+			ppo_into_slice(&mut tmp, &input, detect_best_kernel()).map_err(|e| JsValue::from_str(&e.to_string()))?;
 			let out = std::slice::from_raw_parts_mut(out_ptr, len);
-			out.copy_from_slice(&temp);
+			out.copy_from_slice(&tmp);
 		} else {
 			let out = std::slice::from_raw_parts_mut(out_ptr, len);
-			ppo_into_slice(out, &input, detect_best_kernel())
-				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			ppo_into_slice(out, &input, detect_best_kernel()).map_err(|e| JsValue::from_str(&e.to_string()))?;
 		}
-		Ok(())
 	}
+	Ok(())
 }
 
 #[cfg(feature = "wasm")]
@@ -1700,28 +1640,18 @@ pub struct PpoBatchJsOutput {
 }
 
 #[cfg(feature = "wasm")]
-#[wasm_bindgen(js_name = ppo_batch)]
-pub fn ppo_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
-	let config: PpoBatchConfig =
+#[wasm_bindgen(js_name = "ppo_batch")]
+pub fn ppo_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let cfg: PpoBatchConfig =
 		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
-	
 	let sweep = PpoBatchRange {
-		fast_period: config.fast_period_range,
-		slow_period: config.slow_period_range,
-		ma_type: config.ma_type,
+		fast_period: cfg.fast_period_range,
+		slow_period: cfg.slow_period_range,
+		ma_type: cfg.ma_type,
 	};
-	
-	let output = ppo_batch_inner(data, &sweep, detect_best_kernel(), false)
-		.map_err(|e| JsValue::from_str(&e.to_string()))?;
-	
-	let js_output = PpoBatchJsOutput {
-		values: output.values,
-		combos: output.combos,
-		rows: output.rows,
-		cols: output.cols,
-	};
-	
-	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&e.to_string()))
+	let out = ppo_batch_inner(data, &sweep, detect_best_kernel(), false).map_err(|e| JsValue::from_str(&e.to_string()))?;
+	let js = PpoBatchJsOutput { values: out.values, combos: out.combos, rows: out.rows, cols: out.cols };
+	serde_wasm_bindgen::to_value(&js).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 #[cfg(feature = "wasm")]
@@ -1730,36 +1660,23 @@ pub fn ppo_batch_into(
 	in_ptr: *const f64,
 	out_ptr: *mut f64,
 	len: usize,
-	fast_period_start: usize,
-	fast_period_end: usize,
-	fast_period_step: usize,
-	slow_period_start: usize,
-	slow_period_end: usize,
-	slow_period_step: usize,
+	fast_start: usize, fast_end: usize, fast_step: usize,
+	slow_start: usize, slow_end: usize, slow_step: usize,
 	ma_type: &str,
 ) -> Result<usize, JsValue> {
-	if in_ptr.is_null() || out_ptr.is_null() {
-		return Err(JsValue::from_str("Null pointer provided"));
-	}
-	
+	if in_ptr.is_null() || out_ptr.is_null() { return Err(JsValue::from_str("null pointer passed to ppo_batch_into")); }
 	unsafe {
 		let data = std::slice::from_raw_parts(in_ptr, len);
-		
 		let sweep = PpoBatchRange {
-			fast_period: (fast_period_start, fast_period_end, fast_period_step),
-			slow_period: (slow_period_start, slow_period_end, slow_period_step),
+			fast_period: (fast_start, fast_end, fast_step),
+			slow_period: (slow_start, slow_end, slow_step),
 			ma_type: ma_type.to_string(),
 		};
-		
 		let combos = expand_grid(&sweep);
-		let num_combos = combos.len();
-		let total_len = num_combos * len;
-		
-		let out = std::slice::from_raw_parts_mut(out_ptr, total_len);
-		
-		ppo_batch_inner_into(data, &sweep, detect_best_kernel(), false, out)
-			.map_err(|e| JsValue::from_str(&e.to_string()))?;
-		
-		Ok(num_combos)
+		let rows = combos.len();
+		let cols = len;
+		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+		ppo_batch_inner_into(data, &sweep, detect_best_kernel(), false, out).map_err(|e| JsValue::from_str(&e.to_string()))?;
+		Ok(rows)
 	}
 }

@@ -243,6 +243,9 @@ pub fn rvi_with_kernel(input: &RviInput, kernel: Kernel) -> Result<RviOutput, Rv
 	if data.is_empty() {
 		return Err(RviError::EmptyData);
 	}
+	// Check for all NaN values first (before period validation)
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(RviError::AllValuesNaN)?;
+	
 	let period = input.get_period();
 	let ma_len = input.get_ma_len();
 	let matype = input.get_matype();
@@ -254,7 +257,6 @@ pub fn rvi_with_kernel(input: &RviInput, kernel: Kernel) -> Result<RviOutput, Rv
 			data_len: data.len(),
 		});
 	}
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(RviError::AllValuesNaN)?;
 	let max_needed = period.saturating_sub(1) + ma_len.saturating_sub(1);
 	if (data.len() - first) <= max_needed {
 		return Err(RviError::NotEnoughValidData {
@@ -287,6 +289,10 @@ pub fn rvi_into_slice(dst: &mut [f64], input: &RviInput, kern: Kernel) -> Result
 	if data.is_empty() {
 		return Err(RviError::EmptyData);
 	}
+	
+	// Check for all NaN values first (before period validation)
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(RviError::AllValuesNaN)?;
+	
 	let period = input.get_period();
 	let ma_len = input.get_ma_len();
 	let matype = input.get_matype();
@@ -307,8 +313,6 @@ pub fn rvi_into_slice(dst: &mut [f64], input: &RviInput, kern: Kernel) -> Result
 			data_len: data.len(),
 		});
 	}
-	
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(RviError::AllValuesNaN)?;
 	let max_needed = period.saturating_sub(1) + ma_len.saturating_sub(1);
 	if (data.len() - first) <= max_needed {
 		return Err(RviError::NotEnoughValidData {
@@ -701,15 +705,21 @@ fn rvi_batch_inner(
 	let out: &mut [f64] =
 		unsafe { core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len()) };
 	
+	// Resolve Auto kernel to an actual kernel
+	let chosen_kernel = match kern {
+		Kernel::Auto => detect_best_batch_kernel(),
+		other => other,
+	};
+	
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let prm = &combos[row];
-		match kern {
-			Kernel::Scalar => rvi_row_scalar(data, first, prm, out_row),
+		match chosen_kernel {
+			Kernel::Scalar | Kernel::ScalarBatch => rvi_row_scalar(data, first, prm, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => rvi_row_avx2(data, first, prm, out_row),
+			Kernel::Avx2 | Kernel::Avx2Batch => rvi_row_avx2(data, first, prm, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => rvi_row_avx512(data, first, prm, out_row),
-			_ => unreachable!(),
+			Kernel::Avx512 | Kernel::Avx512Batch => rvi_row_avx512(data, first, prm, out_row),
+			_ => rvi_row_scalar(data, first, prm, out_row), // Fallback to scalar
 		}
 	};
 	if parallel {
@@ -776,15 +786,21 @@ fn rvi_batch_inner_into(
 		});
 	}
 	let cols = data.len();
+	// Resolve Auto kernel to an actual kernel
+	let chosen_kernel = match kern {
+		Kernel::Auto => detect_best_batch_kernel(),
+		other => other,
+	};
+	
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let prm = &combos[row];
-		match kern {
-			Kernel::Scalar => rvi_row_scalar(data, first, prm, out_row),
+		match chosen_kernel {
+			Kernel::Scalar | Kernel::ScalarBatch => rvi_row_scalar(data, first, prm, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => rvi_row_avx2(data, first, prm, out_row),
+			Kernel::Avx2 | Kernel::Avx2Batch => rvi_row_avx2(data, first, prm, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => rvi_row_avx512(data, first, prm, out_row),
-			_ => unreachable!(),
+			Kernel::Avx512 | Kernel::Avx512Batch => rvi_row_avx512(data, first, prm, out_row),
+			_ => rvi_row_scalar(data, first, prm, out_row), // Fallback to scalar
 		}
 	};
 	if parallel {

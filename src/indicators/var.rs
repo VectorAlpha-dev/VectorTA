@@ -36,14 +36,12 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
-use std::mem::MaybeUninit;
 use thiserror::Error;
 
 // -- Data Structures --
@@ -233,7 +231,8 @@ pub fn var_with_kernel(input: &VarInput, kernel: Kernel) -> Result<VarOutput, Va
 		other => other,
 	};
 
-	let mut out = alloc_with_nan_prefix(len, period - 1);
+	// key change
+	let mut out = alloc_with_nan_prefix(len, first + period - 1);
 
 	unsafe {
 		match chosen {
@@ -260,11 +259,6 @@ pub fn var_scalar(
 	let len = data.len();
 	let nbdev2 = nbdev * nbdev;
 	let inv_p = 1.0 / (period as f64);
-
-	// Initialize NaN prefix for initial invalid data
-	for i in 0..first {
-		out[i] = f64::NAN;
-	}
 
 	let mut sum = 0.0;
 	let mut sum_sq = 0.0;
@@ -358,6 +352,10 @@ pub fn var_into_slice(dst: &mut [f64], input: &VarInput, kern: Kernel) -> Result
 			_ => unreachable!(),
 		}
 	}
+
+	// key addition
+	let warmup_end = first + period - 1;
+	for v in &mut dst[..warmup_end] { *v = f64::NAN; }
 
 	Ok(())
 }
@@ -580,17 +578,19 @@ fn var_batch_inner(
 		return Err(VarError::InvalidPeriod { period: 0, data_len: 0 });
 	}
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(VarError::AllValuesNaN)?;
-	let max_p = combos.iter().map(|c| round_up8(c.period.unwrap())).max().unwrap();
-	if data.len() - first < max_p {
+	let max_period = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	if data.len() - first < max_period {
 		return Err(VarError::NotEnoughValidData {
-			needed: max_p,
+			needed: max_period,
 			valid: data.len() - first,
 		});
 	}
+	let stride = round_up8(max_period);
 	let rows = combos.len();
 	let cols = data.len();
 	let mut buf_mu = make_uninit_matrix(rows, cols);
-	let warmup_periods: Vec<usize> = combos.iter().map(|c| c.period.unwrap() - 1).collect();
+	// key change: include `first`
+	let warmup_periods: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
 	init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
 	
 	let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
@@ -601,13 +601,13 @@ fn var_batch_inner(
 		let period = combos[row].period.unwrap();
 		let nbdev = combos[row].nbdev.unwrap();
 		match kern {
-			Kernel::Scalar => var_row_scalar(data, first, period, max_p, nbdev, out_row),
+			Kernel::Scalar => var_row_scalar(data, first, period, stride, nbdev, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => var_row_avx2(data, first, period, max_p, nbdev, out_row),
+			Kernel::Avx2 => var_row_avx2(data, first, period, stride, nbdev, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => var_row_avx512(data, first, period, max_p, nbdev, out_row),
+			Kernel::Avx512 => var_row_avx512(data, first, period, stride, nbdev, out_row),
 			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-			Kernel::Avx2 | Kernel::Avx512 => var_row_scalar(data, first, period, max_p, nbdev, out_row),
+			Kernel::Avx2 | Kernel::Avx512 => var_row_scalar(data, first, period, stride, nbdev, out_row),
 			_ => unreachable!(),
 		}
 	};
@@ -868,23 +868,22 @@ pub fn var_batch_into(
 		if combos.is_empty() {
 			return Err(JsValue::from_str("No valid parameter combinations"));
 		}
-
 		let rows = combos.len();
-		let total_size = rows * len;
+		let cols = len;
 
-		// Check for aliasing
-		if in_ptr == out_ptr as *const f64 {
-			// Handle aliasing
-			let mut temp = vec![0.0; total_size];
-			let _ = var_batch_inner_into(data, &sweep, detect_best_kernel(), false, &mut temp)
-				.map_err(|e| JsValue::from_str(&e.to_string()))?;
-			let out = std::slice::from_raw_parts_mut(out_ptr, total_size);
-			out.copy_from_slice(&temp);
-		} else {
-			let out = std::slice::from_raw_parts_mut(out_ptr, total_size);
-			let _ = var_batch_inner_into(data, &sweep, detect_best_kernel(), false, out)
-				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+
+		// key addition: initialize warmup prefixes per row
+		let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+		for (r, prm) in combos.iter().enumerate() {
+			let warm = (first + prm.period.unwrap() - 1).min(cols);
+			let row = &mut out[r * cols .. r * cols + warm];
+			for v in row { *v = f64::NAN; }
 		}
+
+		// compute into the buffer
+		let _ = var_batch_inner_into(data, &sweep, detect_best_kernel(), false, out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 		Ok(rows)
 	}
@@ -1481,6 +1480,49 @@ mod tests {
 	}
 	gen_batch_tests!(check_batch_default_row);
 	gen_batch_tests!(check_batch_no_poison);
+	
+	// Test that periods not divisible by 8 work correctly
+	#[test]
+	fn test_batch_non_aligned_periods() {
+		// Create test data with exactly enough points for period=7
+		let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+		
+		// Test with period=7 (not divisible by 8)
+		let sweep = VarBatchRange {
+			period: (7, 7, 0),  // Single period of 7
+			nbdev: (1.0, 1.0, 0.0),
+		};
+		
+		// This should work with 10 data points (need at least 7)
+		let result = var_batch_slice(&data, &sweep, Kernel::Scalar);
+		assert!(result.is_ok(), "Should handle period=7 with 10 data points");
+		
+		// Test with multiple non-aligned periods
+		let sweep_multi = VarBatchRange {
+			period: (5, 7, 1),  // Periods: 5, 6, 7
+			nbdev: (1.0, 1.0, 0.0),
+		};
+		
+		let result_multi = var_batch_slice(&data, &sweep_multi, Kernel::Scalar);
+		assert!(result_multi.is_ok(), "Should handle periods 5,6,7 with 10 data points");
+		let output = result_multi.unwrap();
+		assert_eq!(output.rows, 3, "Should have 3 rows for periods 5,6,7");
+		
+		// Test that it correctly rejects when data is insufficient
+		let data_short = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];  // Only 6 points
+		let result_short = var_batch_slice(&data_short, &sweep, Kernel::Scalar);
+		assert!(result_short.is_err(), "Should reject when data length (6) < period (7)");
+		
+		// Test edge case: period=15 with exactly 15 data points
+		let data_15 = vec![1.0; 15];
+		let sweep_15 = VarBatchRange {
+			period: (15, 15, 0),
+			nbdev: (1.0, 1.0, 0.0),
+		};
+		
+		let result_15 = var_batch_slice(&data_15, &sweep_15, Kernel::Scalar);
+		assert!(result_15.is_ok(), "Should handle period=15 with exactly 15 data points");
+	}
 }
 
 // Python bindings
@@ -1545,56 +1587,48 @@ pub fn var_batch_py<'py>(
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
 	let slice_in = data.as_slice()?;
-	
 	let sweep = VarBatchRange {
 		period: period_range,
 		nbdev: nbdev_range,
 	};
-	
-	let combos = expand_grid(&sweep);
-	let rows = combos.len();
-	let cols = slice_in.len();
-	
-	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-	let slice_out = unsafe { out_arr.as_slice_mut()? };
-	
+
 	let kern = validate_kernel(kernel, true)?;
-	
-	let combos = py
-		.allow_threads(|| {
-			let kernel = match kern {
-				Kernel::Auto => detect_best_batch_kernel(),
-				k => k,
-			};
-			let simd = match kernel {
-				Kernel::Avx512Batch => Kernel::Avx512,
-				Kernel::Avx2Batch => Kernel::Avx2,
-				Kernel::ScalarBatch => Kernel::Scalar,
-				_ => unreachable!(),
-			};
-			var_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
-		})
+	let kernel = match kern {
+		Kernel::Auto => detect_best_batch_kernel(),
+		k => k,
+	};
+
+	// Use high-level batch that initializes prefixes correctly
+	let simd = match kernel {
+		Kernel::Avx512Batch => Kernel::Avx512,
+		Kernel::Avx2Batch => Kernel::Avx2,
+		Kernel::ScalarBatch => Kernel::Scalar,
+		_ => unreachable!(),
+	};
+
+	let out = py
+		.allow_threads(|| var_batch_par_slice(slice_in, &sweep, simd))
 		.map_err(|e| PyValueError::new_err(e.to_string()))?;
-	
+
+	let rows = out.rows;
+	let cols = out.cols;
+
 	let dict = PyDict::new(py);
-	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	// Convert flat vector to 2D array similar to how ATR does it
+	let values_2d = unsafe { numpy::PyArray2::<f64>::new(py, [rows, cols], false) };
+	let raw_ptr = values_2d.data() as *mut f64;
+	let output_slice = unsafe { std::slice::from_raw_parts_mut(raw_ptr, rows * cols) };
+	output_slice.copy_from_slice(&out.values);
+	
+	dict.set_item("values", values_2d)?;
 	dict.set_item(
 		"periods",
-		combos
-			.iter()
-			.map(|p| p.period.unwrap() as u64)
-			.collect::<Vec<_>>()
-			.into_pyarray(py),
+		out.combos.iter().map(|p| p.period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py),
 	)?;
 	dict.set_item(
 		"nbdevs",
-		combos
-			.iter()
-			.map(|p| p.nbdev.unwrap())
-			.collect::<Vec<_>>()
-			.into_pyarray(py),
+		out.combos.iter().map(|p| p.nbdev.unwrap()).collect::<Vec<_>>().into_pyarray(py),
 	)?;
-	
 	Ok(dict)
 }
 
@@ -1612,26 +1646,27 @@ fn var_batch_inner_into(
 		return Err(VarError::InvalidPeriod { period: 0, data_len: 0 });
 	}
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(VarError::AllValuesNaN)?;
-	let max_p = combos.iter().map(|c| round_up8(c.period.unwrap())).max().unwrap();
-	if data.len() - first < max_p {
+	let max_period = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	if data.len() - first < max_period {
 		return Err(VarError::NotEnoughValidData {
-			needed: max_p,
+			needed: max_period,
 			valid: data.len() - first,
 		});
 	}
+	let stride = round_up8(max_period);
 	let cols = data.len();
 
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
 		let nbdev = combos[row].nbdev.unwrap();
 		match kern {
-			Kernel::Scalar => var_row_scalar(data, first, period, max_p, nbdev, out_row),
+			Kernel::Scalar => var_row_scalar(data, first, period, stride, nbdev, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => var_row_avx2(data, first, period, max_p, nbdev, out_row),
+			Kernel::Avx2 => var_row_avx2(data, first, period, stride, nbdev, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => var_row_avx512(data, first, period, max_p, nbdev, out_row),
+			Kernel::Avx512 => var_row_avx512(data, first, period, stride, nbdev, out_row),
 			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-			Kernel::Avx2 | Kernel::Avx512 => var_row_scalar(data, first, period, max_p, nbdev, out_row),
+			Kernel::Avx2 | Kernel::Avx512 => var_row_scalar(data, first, period, stride, nbdev, out_row),
 			_ => unreachable!(),
 		}
 	};

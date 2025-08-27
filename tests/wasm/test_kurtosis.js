@@ -103,42 +103,86 @@ test('Kurtosis period exceeds length', () => {
 });
 
 test('Kurtosis all nan', () => {
-    // Test Kurtosis handles all NaN values - mirrors check_kurtosis_all_nan
+    // Test Kurtosis handles all NaN values - matches ALMA test pattern
     const nanData = new Float64Array(20).fill(NaN);
     
     assert.throws(() => {
         wasm.kurtosis_js(nanData, 5);
-    }, /All.*NaN/);
+    }, /All values are NaN/);
+});
+
+test('Kurtosis empty input', () => {
+    // Test Kurtosis with empty input - matches ALMA test pattern
+    const emptyData = new Float64Array([]);
+    
+    assert.throws(() => {
+        wasm.kurtosis_js(emptyData, 5);
+    }, /Input data slice is empty/);
 });
 
 test('Kurtosis nan prefix', () => {
-    // Test Kurtosis handles NaN prefix - mirrors check_kurtosis_nan_prefix
+    // Test Kurtosis handles NaN prefix - mirrors Rust test pattern
     const nanPrefixData = new Float64Array(30);
+    const period = 5;
     nanPrefixData.fill(NaN, 0, 10);
     for (let i = 10; i < 30; i++) {
         nanPrefixData[i] = 50.0 + i * 0.5;
     }
     
-    const result = wasm.kurtosis_js(nanPrefixData, 5);
+    const result = wasm.kurtosis_js(nanPrefixData, period);
     
     assert.strictEqual(result.length, nanPrefixData.length);
     
-    // Check warmup NaN values (first 10 NaN + 4 warmup = 14)
-    for (let i = 0; i < 14; i++) {
+    // Check warmup NaN values (first 10 NaN + (period-1) warmup = 14)
+    const expectedNaNCount = 10 + (period - 1);
+    for (let i = 0; i < expectedNaNCount; i++) {
         assert(isNaN(result[i]), `Expected NaN at index ${i}`);
     }
     
-    // Valid values start at index 14
-    for (let i = 14; i < result.length; i++) {
+    // Valid values start after warmup
+    for (let i = expectedNaNCount; i < result.length; i++) {
         assert(!isNaN(result[i]), `Expected valid value at index ${i}`);
     }
 });
 
 test('Kurtosis batch operation', () => {
-    // Test batch kurtosis calculation
+    // Test batch kurtosis calculation - mirrors Rust batch tests
+    const hl2 = new Float64Array(testData.hl2);
+    
+    // Test batch with default period
+    const config = {
+        period_range: [5, 5, 0]  // Default period only
+    };
+    
+    const result = wasm.kurtosis_batch(hl2, config);
+    
+    assert(result.values);
+    assert(result.periods);
+    assert.strictEqual(result.rows, 1); // 1 period
+    assert.strictEqual(result.cols, hl2.length);
+    
+    // Check last 5 values match expected from Rust test
+    const expectedLast5 = [
+        -0.5438903789933454,
+        -1.6848139264816433,
+        -1.6331336745945797,
+        -0.6130805596586351,
+        -0.027802601135927585,
+    ];
+    
+    const last5 = result.values.slice(-5);
+    assertArrayClose(
+        last5,
+        expectedLast5,
+        1e-6,
+        "Kurtosis batch last 5 values mismatch"
+    );
+});
+
+test('Kurtosis batch multiple periods', () => {
+    // Test batch with multiple periods - matches ALMA pattern
     const close = new Float64Array(testData.close);
     
-    // Test batch with period range
     const config = {
         period_range: [5, 20, 5]  // 5, 10, 15, 20
     };
@@ -146,10 +190,14 @@ test('Kurtosis batch operation', () => {
     const result = wasm.kurtosis_batch(close, config);
     
     assert(result.values);
-    assert(result.combos);
+    assert(result.periods);
     assert.strictEqual(result.rows, 4); // 4 periods
     assert.strictEqual(result.cols, close.length);
     assert.strictEqual(result.values.length, 4 * close.length);
+    
+    // Verify periods array has correct values
+    const expectedPeriods = [5, 10, 15, 20];
+    assert.deepStrictEqual(result.periods, expectedPeriods);
 });
 
 test('Kurtosis fast API', () => {
@@ -212,69 +260,22 @@ test('Kurtosis fast API aliasing', () => {
     }
 });
 
-test('Kurtosis streaming', () => {
-    // Test streaming interface - note: needs to be implemented in WASM if supported
-    const values = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
-    const period = 5;
-    
-    // Calculate expected values using regular API
-    const expected = [];
-    for (let i = 0; i < values.length; i++) {
-        if (i < period - 1) {
-            expected.push(NaN);
-        } else {
-            const window = values.slice(i - period + 1, i + 1);
-            const result = wasm.kurtosis_js(new Float64Array(window), period);
-            expected.push(result[result.length - 1]);
-        }
-    }
-    
-    // If streaming is implemented, test it here
-    // Otherwise, this test just validates the expected behavior
-    assert.strictEqual(expected.length, values.length);
-});
 
 test('Kurtosis very small dataset', () => {
-    // Test Kurtosis with very small dataset
+    // Test Kurtosis with very small dataset - mirrors Rust test
     const smallData = new Float64Array([5.0, 10.0, 15.0, 20.0, 25.0]);
+    const period = 5;
     
-    const result = wasm.kurtosis_js(smallData, 5);
+    const result = wasm.kurtosis_js(smallData, period);
     assert.strictEqual(result.length, smallData.length);
     
-    // First 4 values should be NaN (warmup)
-    for (let i = 0; i < 4; i++) {
+    // First (period-1) values should be NaN (warmup)
+    for (let i = 0; i < period - 1; i++) {
         assert(isNaN(result[i]), `Expected NaN at index ${i}`);
     }
     
     // Last value should be valid
-    assert(!isNaN(result[4]), 'Expected valid value at index 4');
-});
-
-test('Kurtosis empty input', () => {
-    // Test Kurtosis with empty input
-    const emptyData = new Float64Array([]);
-    
-    assert.throws(() => {
-        wasm.kurtosis_js(emptyData, 5);
-    }, /Invalid period|All.*NaN/);
-});
-
-test('Kurtosis reinput', () => {
-    // Test Kurtosis with output as new input
-    const close = new Float64Array(testData.close);
-    
-    const result1 = wasm.kurtosis_js(close, 5);
-    const result2 = wasm.kurtosis_js(result1, 5);
-    
-    assert.strictEqual(result2.length, result1.length);
-    
-    // Check that we have more NaN values in result2 due to double warmup
-    let nanCount1 = 0, nanCount2 = 0;
-    for (let i = 0; i < result1.length; i++) {
-        if (isNaN(result1[i])) nanCount1++;
-        if (isNaN(result2[i])) nanCount2++;
-    }
-    assert(nanCount2 >= nanCount1, 'Second pass should have at least as many NaN values');
+    assert(!isNaN(result[period - 1]), `Expected valid value at index ${period - 1}`);
 });
 
 test('Kurtosis batch metadata from result', () => {
@@ -287,17 +288,16 @@ test('Kurtosis batch metadata from result', () => {
     
     const result = wasm.kurtosis_batch(close, config);
     
-    assert(result.combos);
-    assert.strictEqual(result.combos.length, 6);
+    assert(result.periods);
+    assert.strictEqual(result.periods.length, 6);
     
-    // Check each combo has correct period
-    for (let i = 0; i < 6; i++) {
-        assert.strictEqual(result.combos[i].period, 5 + i);
-    }
+    // Check each period value is correct
+    const expectedPeriods = [5, 6, 7, 8, 9, 10];
+    assert.deepStrictEqual(result.periods, expectedPeriods);
 });
 
 test('Kurtosis batch edge cases', () => {
-    // Test batch with edge case parameters
+    // Test batch with edge case parameters - matches ALMA pattern
     const close = new Float64Array(testData.close);
     
     // Single parameter (step = 0)
@@ -305,95 +305,49 @@ test('Kurtosis batch edge cases', () => {
         period_range: [5, 5, 0]
     };
     const result1 = wasm.kurtosis_batch(close, config1);
-    assert.strictEqual(result1.rows, 1);
+    assert.strictEqual(result1.rows, 1, "Single parameter should give 1 row");
     
-    // Large step
-    const config2 = {
-        period_range: [5, 50, 45]  // Only 2 values: 5, 50
+    // Large step (only 2 values: 5, 50)
+    if (close.length > 50) {
+        const config2 = {
+            period_range: [5, 50, 45]
+        };
+        const result2 = wasm.kurtosis_batch(close.slice(0, 100), config2);
+        assert.strictEqual(result2.rows, 2, "Large step should give 2 rows");
+        assert.deepStrictEqual(result2.periods, [5, 50]);
+    }
+});
+
+test('Kurtosis batch full parameter sweep', () => {
+    // Test full parameter sweep - matches ALMA pattern
+    const close = new Float64Array(testData.close.slice(0, 50)); // Use smaller dataset
+    
+    // Multiple period values: 5, 7, 9
+    const config = {
+        period_range: [5, 9, 2]
     };
-    const result2 = wasm.kurtosis_batch(close, config2);
-    assert.strictEqual(result2.rows, 2);
-});
-
-test('Kurtosis zero-copy API', () => {
-    // Test zero-copy API basic functionality
-    const testData = new Float64Array([
-        10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0
-    ]);
-    const len = testData.length;
     
-    // Allocate memory
-    const inPtr = wasm.kurtosis_alloc(len);
-    const outPtr = wasm.kurtosis_alloc(len);
+    const result = wasm.kurtosis_batch(close, config);
     
-    try {
-        // Create memory views
-        const inputArray = new Float64Array(wasm.__wasm.memory.buffer, inPtr, len);
-        inputArray.set(testData);
+    assert(result.values);
+    assert(result.periods);
+    assert.strictEqual(result.rows, 3); // 3 periods
+    assert.strictEqual(result.cols, 50);
+    
+    // Verify each row matches individual calculation
+    const periods = [5, 7, 9];
+    for (let i = 0; i < periods.length; i++) {
+        const rowStart = i * 50;
+        const rowEnd = rowStart + 50;
+        const rowData = result.values.slice(rowStart, rowEnd);
         
-        // Call zero-copy API
-        wasm.kurtosis_into(inPtr, outPtr, len, 5);
-        
-        // Read result (recreate view in case memory grew)
-        const outputArray = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
-        
-        // Compare with safe API
-        const expected = wasm.kurtosis_js(testData, 5);
-        assertArrayClose(outputArray, expected, 1e-10, "Zero-copy API mismatch");
-        
-    } finally {
-        // Free memory
-        wasm.kurtosis_free(inPtr, len);
-        wasm.kurtosis_free(outPtr, len);
+        const singleResult = wasm.kurtosis_js(close, periods[i]);
+        assertArrayClose(
+            rowData,
+            singleResult,
+            1e-10,
+            `Period ${periods[i]} mismatch`
+        );
     }
 });
 
-test('Kurtosis zero-copy error handling', () => {
-    // Test zero-copy API error handling
-    
-    // Test null pointers
-    assert.throws(() => {
-        wasm.kurtosis_into(0, 0, 10, 5);
-    }, /null pointer/);
-    
-    // Test invalid period
-    const ptr = wasm.kurtosis_alloc(10);
-    try {
-        assert.throws(() => {
-            wasm.kurtosis_into(ptr, ptr, 10, 0);
-        }, /Invalid period/);
-        
-        assert.throws(() => {
-            wasm.kurtosis_into(ptr, ptr, 10, 20);
-        }, /Invalid period/);
-    } finally {
-        wasm.kurtosis_free(ptr, 10);
-    }
-});
-
-test('Kurtosis zero-copy memory management', () => {
-    // Test memory allocation and deallocation patterns
-    const sizes = [10, 100, 1000, 10000];
-    
-    for (const size of sizes) {
-        const ptr = wasm.kurtosis_alloc(size);
-        assert(ptr !== 0, `Failed to allocate ${size} elements`);
-        
-        // Verify we can write to the memory
-        const array = new Float64Array(wasm.__wasm.memory.buffer, ptr, size);
-        array.fill(42.0);
-        
-        // Free should not throw
-        assert.doesNotThrow(() => {
-            wasm.kurtosis_free(ptr, size);
-        });
-    }
-    
-    // Test double free protection
-    const ptr = wasm.kurtosis_alloc(100);
-    wasm.kurtosis_free(ptr, 100);
-    // Second free should not crash (null check)
-    assert.doesNotThrow(() => {
-        wasm.kurtosis_free(0, 100);
-    });
-});

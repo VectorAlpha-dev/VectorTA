@@ -215,8 +215,8 @@ pub fn hma_with_kernel(input: &HmaInput, kernel: Kernel) -> Result<HmaOutput, Hm
 		Kernel::Auto => detect_best_kernel(),
 		other => other,
 	};
-	let warm = first + period + sqrt_len - 1;
-	let mut out = alloc_with_nan_prefix(len, warm);
+	let first_out = first + period + sqrt_len - 2;
+	let mut out = alloc_with_nan_prefix(len, first_out);
 	unsafe {
 		match chosen {
 			Kernel::Scalar | Kernel::ScalarBatch => hma_scalar(data, period, first, &mut out),
@@ -236,8 +236,6 @@ fn hma_with_kernel_into(input: &HmaInput, kernel: Kernel, out: &mut [f64]) -> Re
 	if len == 0 {
 		return Err(HmaError::NoData);
 	}
-
-	// Ensure output buffer is the correct size
 	if out.len() != len {
 		return Err(HmaError::InvalidPeriod {
 			period: out.len(),
@@ -256,6 +254,7 @@ fn hma_with_kernel_into(input: &HmaInput, kernel: Kernel, out: &mut [f64]) -> Re
 			valid: len - first,
 		});
 	}
+
 	let half = period / 2;
 	if half == 0 {
 		return Err(HmaError::ZeroHalf { period });
@@ -270,14 +269,11 @@ fn hma_with_kernel_into(input: &HmaInput, kernel: Kernel, out: &mut [f64]) -> Re
 			valid: len - first,
 		});
 	}
+
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
 		other => other,
 	};
-	let warm = first + period + sqrt_len - 1;
-	// Initialize NaN prefix
-	out[..warm].fill(f64::NAN);
-
 	unsafe {
 		match chosen {
 			Kernel::Scalar | Kernel::ScalarBatch => hma_scalar(data, period, first, out),
@@ -288,6 +284,12 @@ fn hma_with_kernel_into(input: &HmaInput, kernel: Kernel, out: &mut [f64]) -> Re
 			_ => unreachable!(),
 		}
 	}
+
+	// write only the prefix now (up to but not including first_out)
+	let first_out = first + period + sqrt_len - 2;
+	for v in &mut out[..first_out] {
+		*v = f64::NAN;
+	}
 	Ok(())
 }
 
@@ -295,7 +297,6 @@ fn hma_with_kernel_into(input: &HmaInput, kernel: Kernel, out: &mut [f64]) -> Re
 pub fn hma_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
 	use std::f64;
 
-	// ------------- validation -------------
 	let len = data.len();
 	if period < 2 || first >= len || period > len - first {
 		return;
@@ -309,53 +310,48 @@ pub fn hma_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
 		return;
 	}
 
+	// first index that receives a value
 	let first_out = first + period + sqrt_len - 2;
 	if first_out >= len {
 		return;
 	}
 
-	for v in &mut out[..] {
-		*v = f64::NAN;
-	}
-
-	// ---------- pre-computed constants ----------
+	// precomputed constants
 	let ws_half = (half_len * (half_len + 1) / 2) as f64;
 	let ws_full = (period * (period + 1) / 2) as f64;
 	let ws_sqrt = (sqrt_len * (sqrt_len + 1) / 2) as f64;
 
-	// ---------- running state ----------
+	// running state
 	let (mut sum_half, mut wsum_half) = (0.0, 0.0);
 	let (mut sum_full, mut wsum_full) = (0.0, 0.0);
 	let (mut wma_half, mut wma_full) = (f64::NAN, f64::NAN);
 
-	// ring buffer for √n intermediate values
+	// √n ring buffer
 	let mut x_buf = vec![0.0; sqrt_len];
 	let mut x_sum = 0.0;
 	let mut x_wsum = 0.0;
 	let mut x_head = 0usize;
 
-	// ---------- main loop ----------
 	let start = first;
 	for j in 0..(len - start) {
 		let idx = start + j;
 		let val = data[idx];
 
-		// ---- WMA(full) ----
+		// WMA(full)
 		if j < period {
-			// window not yet full
 			sum_full += val;
 			wsum_full += (j as f64 + 1.0) * val;
 		} else {
 			let old = data[idx - period];
-			let sum_prev = sum_full; // save old Σ
-			sum_full = sum_prev + val - old; // new Σ
+			let sum_prev = sum_full;
+			sum_full = sum_prev + val - old;
 			wsum_full = wsum_full - sum_prev + (period as f64) * val;
 		}
 		if j + 1 >= period {
 			wma_full = wsum_full / ws_full;
 		}
 
-		// ---- WMA(half) ----
+		// WMA(half)
 		if j < half_len {
 			sum_half += val;
 			wsum_half += (j as f64 + 1.0) * val;
@@ -369,18 +365,18 @@ pub fn hma_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
 			wma_half = wsum_half / ws_half;
 		}
 
-		// ---- combine into X once both WMAs exist ----
+		// Combine when both exist
 		if j + 1 >= period {
 			let x_val = 2.0 * wma_half - wma_full;
 
-			// fill √n buffer first …
+			// fill √n buffer
 			if j + 1 < period + sqrt_len {
 				let pos = j + 1 - period;
 				x_buf[pos] = x_val;
 				x_sum += x_val;
 
 				if pos + 1 == sqrt_len {
-					// buffer full ⇒ first HMA
+					// first HMA value at first_out
 					x_wsum = 0.0;
 					for k in 0..sqrt_len {
 						x_wsum += (k as f64 + 1.0) * x_buf[k];
@@ -388,7 +384,7 @@ pub fn hma_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
 					out[first_out] = x_wsum / ws_sqrt;
 				}
 			} else {
-				// … then do rolling updates
+				// steady state
 				let old_x = x_buf[x_head];
 				x_buf[x_head] = x_val;
 				x_head = (x_head + 1) % sqrt_len;
@@ -959,7 +955,7 @@ fn hma_batch_inner(
 		.map(|c| {
 			let p = c.period.unwrap();
 			let s = (p as f64).sqrt().floor() as usize;
-			first + p + s - 1
+			first + p + s - 2  // first_out index for each period
 		})
 		.collect();
 
@@ -1005,15 +1001,20 @@ fn hma_batch_inner(
 		}
 	}
 
-	// -------- transmute to a normal Vec<f64> -----------
-	let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
+	// finalize like ALMA
+	let rows = combos.len();
+	let cols = data.len();
 
-	Ok(HmaBatchOutput {
-		values,
-		combos,
-		rows,
-		cols,
-	})
+	let mut guard = core::mem::ManuallyDrop::new(raw);
+	let values: Vec<f64> = unsafe {
+		Vec::from_raw_parts(
+			guard.as_mut_ptr() as *mut f64,
+			guard.len(),
+			guard.capacity(),
+		)
+	};
+
+	Ok(HmaBatchOutput { values, combos, rows, cols })
 }
 
 #[inline(always)]
@@ -1053,7 +1054,7 @@ fn hma_batch_inner_into(
 		.map(|c| {
 			let p = c.period.unwrap();
 			let s = (p as f64).sqrt().floor() as usize;
-			first + p + s - 1
+			first + p + s - 2  // first_out index for each period
 		})
 		.collect();
 
@@ -1259,12 +1260,17 @@ pub fn hma_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
 	let params = HmaParams { period: Some(period) };
 	let input = HmaInput::from_slice(data, params);
 
-	// Allocate output buffer once
-	let mut output = vec![0.0; data.len()];
+	// derive warmup cheaply
+	let first = data.iter().position(|x| !x.is_nan()).ok_or_else(|| JsValue::from_str("All NaN"))?;
+	let sqrt_len = (period as f64).sqrt().floor() as usize;
+	if period == 0 || sqrt_len == 0 || data.len() - first < period + sqrt_len - 1 {
+		return Err(JsValue::from_str("Invalid or insufficient data"));
+	}
+	let first_out = first + period + sqrt_len - 2;
 
-	// Compute directly into output buffer
+	// zero-copy style allocation
+	let mut output = alloc_with_nan_prefix(data.len(), first_out);
 	hma_into_slice(&mut output, &input, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))?;
-
 	Ok(output)
 }
 

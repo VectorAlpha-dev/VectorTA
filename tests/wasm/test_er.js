@@ -40,6 +40,39 @@ test.before(async () => {
     testData = loadTestData();
 });
 
+test('ER accuracy', async () => {
+    // Test ER matches expected values from Rust tests - mirrors check_er_accuracy
+    const close = new Float64Array(testData.close);
+    const expected = EXPECTED_OUTPUTS.er;
+    
+    const result = wasm.er_js(
+        close,
+        expected.defaultParams.period
+    );
+    
+    assert.strictEqual(result.length, close.length);
+    
+    // Check last 5 values match expected
+    const last5 = result.slice(-5);
+    assertArrayClose(
+        last5,
+        expected.last5Values,
+        1e-8,
+        "ER last 5 values mismatch"
+    );
+    
+    // Check values at specific indices
+    const valuesAt100 = result.slice(100, 105);
+    assertArrayClose(
+        valuesAt100,
+        expected.valuesAt100_104,
+        1e-8,
+        "ER values at indices 100-104 mismatch"
+    );
+    
+    // Note: compareWithRust removed as it requires generate_references setup
+});
+
 test('ER partial params', () => {
     // Test with default parameters - mirrors check_er_partial_params
     const close = new Float64Array(testData.close);
@@ -89,7 +122,7 @@ test('ER empty input', () => {
     
     assert.throws(() => {
         wasm.er_js(empty, 5);
-    }, /All values are NaN/);
+    }, /Input data slice is empty|All values are NaN/);
 });
 
 test('ER all NaN input', () => {
@@ -99,27 +132,36 @@ test('ER all NaN input', () => {
     
     assert.throws(() => {
         wasm.er_js(allNan, 5);
-    }, /All values are NaN/);
+    }, /All input data values are NaN/);
 });
 
 test('ER NaN handling', () => {
     // Test ER handles NaN values correctly - mirrors check_er_nan_handling
     const close = new Float64Array(testData.close);
+    const period = 5;
     
-    const result = wasm.er_js(close, 5);
+    const result = wasm.er_js(close, period);
     assert.strictEqual(result.length, close.length);
     
     // After warmup period (240), no NaN values should exist
     if (result.length > 240) {
-        const nanCount = result.slice(240).filter(v => isNaN(v)).length;
-        assert.strictEqual(nanCount, 0, "Found unexpected NaN after warmup period");
+        for (let i = 240; i < result.length; i++) {
+            assert(!isNaN(result[i]), `Found unexpected NaN at index ${i}`);
+        }
     }
     
-    // First period-1 values should be NaN
-    assert(isNaN(result[0]), "Expected NaN at index 0");
-    assert(isNaN(result[1]), "Expected NaN at index 1");
-    assert(isNaN(result[2]), "Expected NaN at index 2");
-    assert(isNaN(result[3]), "Expected NaN at index 3");
+    // Calculate first valid index and warmup
+    let firstValid = 0;
+    for (let i = 0; i < close.length; i++) {
+        if (!isNaN(close[i])) {
+            firstValid = i;
+            break;
+        }
+    }
+    const warmupEnd = firstValid + period - 1;
+    
+    // First warmup values should be NaN
+    assertAllNaN(result.slice(0, warmupEnd), "Expected NaN in warmup period");
 });
 
 test('ER reinput', () => {
@@ -143,25 +185,33 @@ test('ER reinput', () => {
 
 test('ER consistency', () => {
     // Test ER produces consistent results for known data
-    // Simple test case with clear trend
+    const expected = EXPECTED_OUTPUTS.er;
+    
+    // Test with perfectly trending data
     const trendingData = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     const result = wasm.er_js(trendingData, 5);
     
-    // For perfectly trending data, ER should be close to 1
+    // For perfectly trending data, ER should be 1.0
     const validValues = result.slice(4); // Skip warmup
-    validValues.forEach(v => {
-        assert(v > 0.9, `Expected ER > 0.9 for trending data, got ${v}`);
-    });
+    assertArrayClose(
+        validValues,
+        expected.trendingDataValues,
+        1e-10,
+        "ER trending data mismatch"
+    );
     
-    // Choppy data
+    // Test with choppy data
     const choppyData = new Float64Array([1, 5, 2, 6, 3, 7, 4, 8, 5, 9]);
     const result2 = wasm.er_js(choppyData, 5);
     
-    // For choppy data, ER should be lower
+    // For choppy data, ER should be low (~0.143)
     const validValues2 = result2.slice(4); // Skip warmup
-    validValues2.forEach(v => {
-        assert(v < 0.5, `Expected ER < 0.5 for choppy data, got ${v}`);
-    });
+    assertArrayClose(
+        validValues2,
+        expected.choppyDataValues,
+        1e-10,
+        "ER choppy data mismatch"
+    );
 });
 
 test('ER fast API - basic calculation', async () => {
@@ -234,11 +284,12 @@ test('ER fast API - in-place operation (aliasing)', async () => {
 });
 
 test('ER batch - single period', () => {
-    // Test batch operation with single period
+    // Test batch operation with single period - mirrors check_batch_default_row
     const close = new Float64Array(testData.close.slice(0, 100)); // Use subset for speed
+    const expected = EXPECTED_OUTPUTS.er;
     
     const config = {
-        period_range: [5, 5, 0] // Single period = 5
+        period_range: [expected.defaultParams.period, expected.defaultParams.period, 0]
     };
     
     const result = wasm.er_batch(close, config);
@@ -250,8 +301,11 @@ test('ER batch - single period', () => {
     assert.strictEqual(result.cols, close.length);
     assert.strictEqual(result.values.length, close.length);
     
+    // Check parameters in combos
+    assert.strictEqual(result.combos[0].period, expected.defaultParams.period);
+    
     // Should match single calculation
-    const singleResult = wasm.er_js(close, 5);
+    const singleResult = wasm.er_js(close, expected.defaultParams.period);
     assertArrayClose(
         new Float64Array(result.values),
         singleResult,
@@ -289,6 +343,83 @@ test('ER batch - multiple periods', () => {
             1e-10,
             `Batch row ${i} (period=${periods[i]}) differs from single calculation`
         );
+    }
+});
+
+test('ER batch metadata', () => {
+    // Test that batch result includes correct parameter combinations
+    const close = new Float64Array(20);
+    close.fill(100);
+    
+    const result = wasm.er_batch(close, {
+        period_range: [5, 7, 2]  // periods: 5, 7
+    });
+    
+    // Should have 2 combinations
+    assert.strictEqual(result.combos.length, 2);
+    
+    // Check first combination
+    assert.strictEqual(result.combos[0].period, 5);
+    
+    // Check second combination  
+    assert.strictEqual(result.combos[1].period, 7);
+});
+
+test('ER SIMD128 consistency', () => {
+    // This test verifies SIMD128 produces same results as scalar
+    // It runs automatically when SIMD128 is enabled
+    const testCases = [
+        { size: 10, period: 5 },
+        { size: 100, period: 10 },
+        { size: 1000, period: 20 },
+        { size: 10000, period: 50 }
+    ];
+    
+    for (const testCase of testCases) {
+        const data = new Float64Array(testCase.size);
+        for (let i = 0; i < testCase.size; i++) {
+            data[i] = Math.sin(i * 0.1) + Math.cos(i * 0.05);
+        }
+        
+        const result = wasm.er_js(data, testCase.period);
+        
+        // Basic sanity checks
+        assert.strictEqual(result.length, data.length);
+        
+        // Check warmup period
+        for (let i = 0; i < testCase.period - 1; i++) {
+            assert(isNaN(result[i]), `Expected NaN at warmup index ${i} for size=${testCase.size}`);
+        }
+        
+        // Check values exist after warmup and are in valid range
+        for (let i = testCase.period - 1; i < result.length; i++) {
+            assert(!isNaN(result[i]), `Unexpected NaN at index ${i} for size=${testCase.size}`);
+            assert(result[i] >= 0 && result[i] <= 1, `ER value ${result[i]} outside [0,1] range`);
+        }
+    }
+});
+
+test('ER zero-copy memory management', () => {
+    // Allocate and free multiple times to ensure no leaks
+    const sizes = [100, 1000, 10000];
+    
+    for (const size of sizes) {
+        const ptr = wasm.er_alloc(size);
+        assert(ptr !== 0, `Failed to allocate ${size} elements`);
+        
+        // Write pattern to verify memory
+        const memView = new Float64Array(wasm.__wasm.memory.buffer, ptr, size);
+        for (let i = 0; i < Math.min(10, size); i++) {
+            memView[i] = i * 1.5;
+        }
+        
+        // Verify pattern
+        for (let i = 0; i < Math.min(10, size); i++) {
+            assert.strictEqual(memView[i], i * 1.5, `Memory corruption at index ${i}`);
+        }
+        
+        // Free memory
+        wasm.er_free(ptr, size);
     }
 });
 

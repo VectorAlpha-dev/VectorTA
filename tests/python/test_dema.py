@@ -128,6 +128,29 @@ class TestDema:
         if len(result) > 240:
             assert not np.any(np.isnan(result[240:])), "Found unexpected NaN after warmup period"
     
+    def test_dema_warmup_period(self, test_data):
+        """Test DEMA warmup period validation - mirrors check_dema_warmup_nan_preservation"""
+        close = test_data['close']
+        
+        # Test with different periods to ensure warmup NaNs are preserved
+        test_periods = [10, 20, 30, 50]
+        
+        for period in test_periods:
+            result = ta_indicators.dema(close, period=period)
+            
+            # DEMA warmup period is period - 1
+            warmup = period - 1
+            
+            # Check that all values before warmup are NaN
+            for i in range(warmup):
+                assert np.isnan(result[i]), \
+                    f"Expected NaN at index {i} (warmup={warmup}) for period={period}, got {result[i]}"
+            
+            # Check that values after warmup are not NaN (at least first 10 after warmup)
+            for i in range(warmup, min(warmup + 10, len(result))):
+                assert not np.isnan(result[i]), \
+                    f"Expected non-NaN at index {i} (warmup={warmup}) for period={period}, got NaN"
+    
     def test_dema_streaming(self, test_data):
         """Test DEMA streaming matches batch calculation - mirrors check_dema_streaming"""
         close = test_data['close']
@@ -194,6 +217,83 @@ class TestDema:
             msg="DEMA batch default row mismatch"
         )
     
+    def test_dema_batch_multiple_periods(self, test_data):
+        """Test DEMA batch with multiple period combinations"""
+        close = test_data['close'][:200]  # Use smaller subset for speed
+        
+        result = ta_indicators.dema_batch(
+            close,
+            period_range=(10, 30, 10),  # periods: 10, 20, 30
+        )
+        
+        assert 'values' in result
+        assert 'periods' in result
+        
+        # Should have 3 combinations
+        assert result['values'].shape[0] == 3
+        assert result['values'].shape[1] == len(close)
+        assert len(result['periods']) == 3
+        assert list(result['periods']) == [10, 20, 30]
+        
+        # Verify each row matches single calculation
+        for i, period in enumerate([10, 20, 30]):
+            batch_row = result['values'][i]
+            single_result = ta_indicators.dema(close, period=period)
+            
+            assert_close(
+                batch_row,
+                single_result,
+                rtol=1e-10,
+                msg=f"DEMA batch row {i} (period={period}) doesn't match single calculation"
+            )
+    
+    def test_dema_batch_warmup_periods(self, test_data):
+        """Test DEMA batch correctly handles warmup periods for each row"""
+        close = test_data['close'][:100]
+        
+        result = ta_indicators.dema_batch(
+            close,
+            period_range=(10, 30, 10),  # periods: 10, 20, 30
+        )
+        
+        # Check warmup for each row
+        periods = [10, 20, 30]
+        for row_idx, period in enumerate(periods):
+            warmup = period - 1
+            row_data = result['values'][row_idx]
+            
+            # Check warmup NaNs
+            for i in range(warmup):
+                assert np.isnan(row_data[i]), \
+                    f"Batch row {row_idx} (period={period}): Expected NaN at index {i}, got {row_data[i]}"
+            
+            # Check non-NaN after warmup
+            for i in range(warmup, min(warmup + 10, len(row_data))):
+                assert not np.isnan(row_data[i]), \
+                    f"Batch row {row_idx} (period={period}): Expected non-NaN at index {i}, got NaN"
+    
+    def test_dema_batch_vs_single_consistency(self, test_data):
+        """Test batch processing produces identical results to single calls"""
+        close = test_data['close'][:150]
+        
+        # Test with multiple periods
+        periods = [5, 10, 15, 20, 25]
+        
+        # Batch calculation
+        batch_result = ta_indicators.dema_batch(
+            close,
+            period_range=(5, 25, 5),
+        )
+        
+        # Verify batch vs single for each period
+        for i, period in enumerate(periods):
+            batch_row = batch_result['values'][i]
+            single_result = ta_indicators.dema(close, period=period)
+            
+            # Should be exactly equal (not just close)
+            assert np.array_equal(batch_row, single_result, equal_nan=True), \
+                f"Batch and single results differ for period={period}"
+    
     def test_dema_all_nan_input(self):
         """Test DEMA with all NaN values"""
         all_nan = np.full(100, np.nan)
@@ -208,6 +308,36 @@ class TestDema:
         
         with pytest.raises(ValueError, match="Not enough valid data"):
             ta_indicators.dema(data, period=3)
+    
+    def test_dema_period_one(self):
+        """Test DEMA with period=1 edge case - should pass through input values"""
+        data = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0])
+        
+        result = ta_indicators.dema(data, period=1)
+        assert len(result) == len(data)
+        
+        # With period=1, DEMA should equal input values (no warmup)
+        for i in range(len(data)):
+            assert_close(result[i], data[i], rtol=1e-9, atol=1e-9,
+                        msg=f"DEMA period=1 mismatch at index {i}")
+    
+    def test_dema_intermediate_values(self, test_data):
+        """Test DEMA intermediate values, not just last 5"""
+        close = test_data['close']
+        period = 30
+        
+        result = ta_indicators.dema(close, period=period)
+        
+        # Check some intermediate values (after warmup)
+        # These values should be validated against Rust output
+        if len(result) > 100:
+            # Check values at indices 50, 100, 150
+            test_indices = [50, 100, 150]
+            for idx in test_indices:
+                if idx < len(result):
+                    assert not np.isnan(result[idx]), f"Unexpected NaN at index {idx}"
+                    # Value should be within reasonable range of input data
+                    assert 0 < result[idx] < 1000000, f"Unreasonable value {result[idx]} at index {idx}"
 
 
 if __name__ == '__main__':

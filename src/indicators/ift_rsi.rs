@@ -193,6 +193,10 @@ pub enum IftRsiError {
 	RsiCalculationError(String),
 	#[error("ift_rsi: WMA calculation error: {0}")]
 	WmaCalculationError(String),
+	#[error("ift_rsi: Length mismatch: dst_len = {dst_len}, data_len = {data_len}")]
+	LengthMismatch { dst_len: usize, data_len: usize },
+	#[error("ift_rsi: Wrong kernel for batch operation. Use a batch kernel variant.")]
+	WrongKernelForBatch,
 }
 
 #[inline]
@@ -232,8 +236,8 @@ pub fn ift_rsi_with_kernel(input: &IftRsiInput, kernel: Kernel) -> Result<IftRsi
 		other => other,
 	};
 
-	// Calculate warmup period: rsi_period + wma_period - 1
-	let warmup_period = rsi_period + wma_period - 1;
+	// Calculate warmup period: first + rsi_period + wma_period - 1
+	let warmup_period = first + rsi_period + wma_period - 1;
 	let mut out = alloc_with_nan_prefix(len, warmup_period);
 
 	unsafe {
@@ -291,10 +295,7 @@ fn ift_rsi_compute_into(
 
 	for (i, &w) in wma_values.iter().enumerate() {
 		if !w.is_nan() {
-			let two_w = 2.0 * w;
-			let numerator = two_w * two_w - 1.0;
-			let denominator = two_w * two_w + 1.0;
-			out[first_valid + i] = numerator / denominator;
+			out[first_valid + i] = w.tanh();
 		}
 	}
 	Ok(())
@@ -307,9 +308,8 @@ pub fn ift_rsi_scalar(
 	wma_period: usize,
 	first_valid: usize,
 	out: &mut [f64],
-) -> Result<IftRsiOutput, IftRsiError> {
-	ift_rsi_compute_into(data, rsi_period, wma_period, first_valid, out)?;
-	Ok(IftRsiOutput { values: out.to_vec() })
+) -> Result<(), IftRsiError> {
+	ift_rsi_compute_into(data, rsi_period, wma_period, first_valid, out)
 }
 
 /// Write directly to output slice - no allocations
@@ -328,9 +328,8 @@ pub fn ift_rsi_into_slice(
 	}
 
 	if dst.len() != data.len() {
-		return Err(IftRsiError::InvalidPeriod {
-			rsi_period: input.get_rsi_period(),
-			wma_period: input.get_wma_period(),
+		return Err(IftRsiError::LengthMismatch {
+			dst_len: dst.len(),
 			data_len: data.len(),
 		});
 	}
@@ -348,7 +347,7 @@ pub fn ift_rsi_into_slice(
 	}
 
 	// Initialize dst with NaN for warmup period (matching alma.rs pattern)
-	let warmup_period = rsi_period + wma_period - 1;
+	let warmup_period = (first + rsi_period + wma_period - 1).min(dst.len());
 	for v in &mut dst[..warmup_period] {
 		*v = f64::NAN;
 	}
@@ -382,7 +381,7 @@ pub fn ift_rsi_avx512(
 	wma_period: usize,
 	first_valid: usize,
 	out: &mut [f64],
-) -> Result<IftRsiOutput, IftRsiError> {
+) -> Result<(), IftRsiError> {
 	ift_rsi_scalar(data, rsi_period, wma_period, first_valid, out)
 }
 
@@ -394,7 +393,7 @@ pub fn ift_rsi_avx2(
 	wma_period: usize,
 	first_valid: usize,
 	out: &mut [f64],
-) -> Result<IftRsiOutput, IftRsiError> {
+) -> Result<(), IftRsiError> {
 	ift_rsi_scalar(data, rsi_period, wma_period, first_valid, out)
 }
 
@@ -406,7 +405,7 @@ pub fn ift_rsi_avx512_short(
 	wma_period: usize,
 	first_valid: usize,
 	out: &mut [f64],
-) -> Result<IftRsiOutput, IftRsiError> {
+) -> Result<(), IftRsiError> {
 	ift_rsi_avx512(data, rsi_period, wma_period, first_valid, out)
 }
 
@@ -418,7 +417,7 @@ pub fn ift_rsi_avx512_long(
 	wma_period: usize,
 	first_valid: usize,
 	out: &mut [f64],
-) -> Result<IftRsiOutput, IftRsiError> {
+) -> Result<(), IftRsiError> {
 	ift_rsi_avx512(data, rsi_period, wma_period, first_valid, out)
 }
 
@@ -432,11 +431,7 @@ pub fn ift_rsi_batch_with_kernel(
 		Kernel::Auto => detect_best_batch_kernel(),
 		other if other.is_batch() => other,
 		_ => {
-			return Err(IftRsiError::InvalidPeriod {
-				rsi_period: 0,
-				wma_period: 0,
-				data_len: 0,
-			})
+			return Err(IftRsiError::WrongKernelForBatch)
 		}
 	};
 	let simd = match kernel {
@@ -608,7 +603,7 @@ fn ift_rsi_batch_inner(
 	// Calculate warmup periods for each parameter combination
 	let warmup_periods: Vec<usize> = combos
 		.iter()
-		.map(|c| c.rsi_period.unwrap() + c.wma_period.unwrap() - 1)
+		.map(|c| first + c.rsi_period.unwrap() + c.wma_period.unwrap() - 1)
 		.collect();
 	
 	// Use uninitialized memory with proper NaN prefixes
@@ -704,9 +699,9 @@ fn ift_rsi_batch_inner_into(
 
 	// Initialize NaN prefixes for each row based on warmup period
 	for (row, combo) in combos.iter().enumerate() {
-		let warmup = combo.rsi_period.unwrap() + combo.wma_period.unwrap() - 1;
+		let warmup = (first + combo.rsi_period.unwrap() + combo.wma_period.unwrap() - 1).min(cols);
 		let row_start = row * cols;
-		for i in 0..warmup.min(cols) {
+		for i in 0..warmup {
 			out[row_start + i] = f64::NAN;
 		}
 	}
@@ -782,12 +777,9 @@ unsafe fn ift_rsi_row_scalar(data: &[f64], first: usize, rsi_period: usize, wma_
 	// The warmup period has already been initialized with NaN by init_matrix_prefixes
 	for (i, &w) in wma_values.iter().enumerate() {
 		if !w.is_nan() {
-			let two_w = 2.0 * w;
-			let numerator = two_w * two_w - 1.0;
-			let denominator = two_w * two_w + 1.0;
 			// Write at position first + i in the output row
 			// (out is already a row slice, so we write directly at the correct index)
-			out[first + i] = numerator / denominator;
+			out[first + i] = w.tanh();
 		}
 	}
 }
@@ -934,10 +926,7 @@ impl IftRsiStream {
 		if wma_val.is_nan() {
 			None
 		} else {
-			let two_w = 2.0 * wma_val;
-			let numerator = two_w * two_w - 1.0;
-			let denominator = two_w * two_w + 1.0;
-			Some(numerator / denominator)
+			Some(wma_val.tanh())
 		}
 	}
 }
@@ -968,12 +957,14 @@ mod tests {
 		let candles = read_candles_from_csv(file_path)?;
 		let input = IftRsiInput::from_candles(&candles, "close", IftRsiParams::default());
 		let result = ift_rsi_with_kernel(&input, kernel)?;
+		
+		// Updated reference values using correct tanh formula
 		let expected_last_five = [
-			-0.27763026899967286,
-			-0.367418234207824,
-			-0.1650156844504996,
-			-0.26631220621545837,
-			0.28324385010826775,
+			-0.35919800205778424,
+			-0.3275464113984847,
+			-0.39970276998138216,
+			-0.36321812798797737,
+			-0.5843346528346959,
 		];
 		let start = result.values.len().saturating_sub(5);
 		for (i, &val) in result.values[start..].iter().enumerate() {
@@ -1709,6 +1700,8 @@ pub fn ift_rsi_batch_py<'py>(
 			.collect::<Vec<_>>()
 			.into_pyarray(py),
 	)?;
+	dict.set_item("rows", rows)?;
+	dict.set_item("cols", cols)?;
 
 	Ok(dict)
 }
@@ -1837,4 +1830,45 @@ pub fn ift_rsi_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue
 	
 	serde_wasm_bindgen::to_value(&js_output)
 		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ift_rsi_batch_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	rsi_start: usize,
+	rsi_end: usize,
+	rsi_step: usize,
+	wma_start: usize,
+	wma_end: usize,
+	wma_step: usize,
+) -> Result<usize, JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to ift_rsi_batch_into"));
+	}
+	
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		let sweep = IftRsiBatchRange {
+			rsi_period: (rsi_start, rsi_end, rsi_step),
+			wma_period: (wma_start, wma_end, wma_step),
+		};
+		
+		let combos = expand_grid(&sweep);
+		let rows = combos.len();
+		let cols = len;
+		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+		
+		#[cfg(target_arch = "wasm32")]
+		let kernel = detect_best_kernel();
+		#[cfg(not(target_arch = "wasm32"))]
+		let kernel = Kernel::Scalar;
+		
+		ift_rsi_batch_inner_into(data, &sweep, kernel, false, out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		
+		Ok(rows)
+	}
 }

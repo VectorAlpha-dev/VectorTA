@@ -85,6 +85,163 @@ EXPECTED_OUTPUTS = {
             59165.14427332
         ]
     },
+    'frama': {
+        'default_params': {'window': 10, 'sc': 300, 'fc': 1},
+        'last_5_values': [
+            59337.23056930512,
+            59321.607512374605,
+            59286.677929994796,
+            59268.00202402624,
+            59160.03888720062
+        ]
+    },
+    'cci': {
+        'default_params': {'period': 14},
+        'last_5_values': [
+            -51.55252564125841,
+            -43.50326506381541,
+            -64.05117302269149,
+            -39.05150631680948,
+            -152.50523930896998
+        ]
+    },
+    'hma': {
+        'default_params': {'period': 5},
+        'last_5_values': [
+            59334.13333336847,
+            59201.4666667018,
+            59047.77777781293,
+            59048.71111114628,
+            58803.44444447962
+        ],
+        # Warmup period = first + period + sqrt(period) - 2
+        # For period=5: sqrt(5) = 2 (floor), so warmup = 0 + 5 + 2 - 2 = 5
+        'warmup_period': 5
+    },
+    'rocr': {
+        'default_params': {'period': 10},
+        'last_5_values': [
+            0.9977448290950706,
+            0.9944380965183492,
+            0.9967247986764135,
+            0.9950545846019277,
+            0.984954072979463
+        ]
+    },
+    'devstop': {
+        'default_params': {
+            'period': 20,
+            'mult': 0.0,
+            'devtype': 0,
+            'direction': 'long',
+            'ma_type': 'sma'
+        },
+        'last_5_values': [
+            59774.25,
+            59774.25,
+            59774.25,
+            59774.25,
+            59774.25
+        ]
+    },
+    'er': {
+        'default_params': {'period': 5},
+        'last_5_values': [
+            0.5660919540229885,
+            0.30434782608695654,
+            0.941320293398533,
+            0.3155080213903743,
+            0.7308584686774942
+        ],
+        # Values at specific indices for validation
+        'values_at_100_104': [
+            0.2715789473684199,
+            0.35274356103023446,
+            0.11690821256038508,
+            0.7715877437325899,
+            0.6793743890518072
+        ],
+        # Expected values for perfectly trending data [1,2,3,4,5,6,7,8,9,10]
+        'trending_data_values': [1.0] * 6,  # ER should be 1.0 for perfect trend after warmup
+        # Expected values for choppy data [1,5,2,6,3,7,4,8,5,9]
+        'choppy_data_values': [0.14285714285714285] * 6,  # Low ER for choppy market
+        # Warmup period for default params (first valid index)
+        'warmup_period': 4  # period - 1 = 5 - 1 = 4
+    },
+    'pwma': {
+        'default_params': {'period': 5},
+        'last_5_values': [
+            59313.25,
+            59309.6875,
+            59249.3125,
+            59175.625,
+            59094.875
+        ],
+        'warmup_period': 244,  # first_valid (240) + period - 1 = 240 + 5 - 1 = 244
+        # Values for re-input test (applying PWMA twice)
+        'reinput_periods': {'first': 5, 'second': 3},
+        'reinput_warmup': 246,  # 240 + (5 - 1) + (3 - 1) = 246
+        # Values for constant input test (all values = 50.0)
+        'constant_value': 50.0,
+        # Values for simple formula verification test
+        'formula_test': {
+            'data': [1.0, 2.0, 3.0, 4.0, 5.0],
+            'period': 3,
+            # For period=3: weights = [1, 2, 1] / 4 = [0.25, 0.5, 0.25]
+            'expected': [float('nan'), float('nan'), 2.0, 3.0, 4.0]
+        },
+        # Batch test parameters
+        'batch_periods': [3, 5, 7, 9],
+        'batch_range': (3, 10, 2)
+    },
+    'tema': {
+        'default_params': {'period': 9},
+        'last_5_values': [
+            59281.895570662884,
+            59257.25021607971,
+            59172.23342859784,
+            59175.218345941066,
+            58934.24395798363
+        ],
+        'warmup_period': 24  # (period - 1) * 3 = (9 - 1) * 3 = 24
+    },
+    'lrsi': {
+        'default_params': {'alpha': 0.2},
+        # LRSI is a momentum oscillator that produces values in [0,1] range
+        # Actual values depend on market conditions and cannot be predetermined
+    },
+    'ift_rsi': {
+        'default_params': {'rsi_period': 5, 'wma_period': 9},
+        'last_5_values': [
+            -0.35919800205778424,
+            -0.3275464113984847,
+            -0.39970276998138216,
+            -0.36321812798797737,
+            -0.5843346528346959
+        ],
+        'warmup_period': 13,  # first + rsi_period + wma_period - 1 (0 + 5 + 9 - 1)
+        'parameter_combinations': [
+            {'rsi_period': 2, 'wma_period': 2},
+            {'rsi_period': 3, 'wma_period': 5},
+            {'rsi_period': 7, 'wma_period': 14},
+            {'rsi_period': 14, 'wma_period': 21},
+            {'rsi_period': 21, 'wma_period': 9},
+            {'rsi_period': 50, 'wma_period': 50}
+        ]
+    },
+    'cvi': {
+        'default_params': {'period': 10},
+        'accuracy_params': {'period': 5},
+        'last_5_values': [  # For period=5
+            -52.96320026271643,
+            -64.39616778235792,
+            -59.4830094380472,
+            -52.4690724045071,
+            -11.858704179539174
+        ],
+        'warmup_period': 19,  # 2 * period - 1 = 2 * 10 - 1 = 19 for default
+        'accuracy_warmup': 9  # 2 * 5 - 1 = 9 for accuracy test
+    },
     'cg': {
         'default_params': {'period': 10},
         'last_5_values': [
@@ -104,6 +261,23 @@ EXPECTED_OUTPUTS = {
             0.9915438003818791,
             0.8460608423095615
         ]
+    },
+    'linreg': {
+        'default_params': {'period': 14},
+        'last_5_values': [
+            58929.37142857143,
+            58899.42857142857,
+            58918.857142857145,
+            59100.6,
+            58987.94285714286,
+        ],
+        'warmup_period': 13,  # first + period - 1 = 0 + 14 - 1 = 13
+        # Values for re-input test (applying LinReg twice)
+        'reinput_periods': {'first': 14, 'second': 10},
+        'reinput_warmup': 23,  # 0 + (14 - 1) + (10 - 1) = 22, but since the second starts with NaN from first, it's 23
+        # Batch test parameters
+        'batch_periods': [10, 20, 30, 40],
+        'batch_range': (10, 40, 10)
     },
     'cfo': {
         'default_params': {'period': 14, 'scalar': 100.0},

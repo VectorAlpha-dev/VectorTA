@@ -30,6 +30,7 @@ pub use correlation_cycle::{
     CorrelationCycleBatchBuilder, CorrelationCycleBatchOutput, CorrelationCycleBatchRange,
 };
 pub mod cvi;
+pub use cvi::{cvi, CviInput, CviOutput, CviParams, CviError, CviData, CviBuilder, CviStream, CviBatchOutput, CviBatchBuilder, CviBatchRange};
 pub mod damiani_volatmeter;
 pub mod dec_osc;
 pub mod decycler;

@@ -216,10 +216,17 @@ fn pwma_compute_into(data: &[f64], weights: &[f64], period: usize, first: usize,
 	unsafe {
 		match kernel {
 			Kernel::Scalar | Kernel::ScalarBatch => pwma_scalar(data, weights, period, first, out),
+
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx2 | Kernel::Avx2Batch => pwma_avx2(data, weights, period, first, out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 | Kernel::Avx512Batch => pwma_avx512(data, weights, period, first, out),
+
+			// Fallbacks when AVX code is not compiled in:
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+				pwma_scalar(data, weights, period, first, out)
+			}
 			_ => unreachable!(),
 		}
 	}
@@ -290,6 +297,7 @@ pub fn pwma_avx512(data: &[f64], weights: &[f64], period: usize, first: usize, o
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
+#[target_feature(enable = "avx2,fma")]
 pub unsafe fn pwma_avx2(data: &[f64], weights: &[f64], period: usize, first: usize, out: &mut [f64]) {
     let len = data.len();
     let vecs = period / 4;  // AVX2 processes 4 doubles per vector
@@ -668,10 +676,13 @@ fn pwma_batch_inner(
 			weights[row * max_p + i] = *w;
 		}
 	}
-	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
+	let warm: Vec<usize> = combos
+		.iter()
+		.map(|c| first + c.period.unwrap() - 1)
+		.collect();
 
 	let mut raw = make_uninit_matrix(rows, cols); // Vec<MaybeUninit<f64>>
-	unsafe { init_matrix_prefixes(&mut raw, cols, &warm) }; // write NaN prefixes
+	init_matrix_prefixes(&mut raw, cols, &warm); // write NaN prefixes
 
 	// --- closure that fills a single row -------------------------------------
 	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
@@ -712,8 +723,13 @@ fn pwma_batch_inner(
 		}
 	}
 
-	// --- transmute to fully-initialised Vec<f64> ------------------------------
-	let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
+	// --- convert to fully-initialised Vec<f64> without UB --------------------
+	use core::mem::ManuallyDrop;
+	let mut guard = ManuallyDrop::new(raw);
+	let ptr = guard.as_mut_ptr() as *mut f64;
+	let len = guard.len();
+	let cap = guard.capacity();
+	let values: Vec<f64> = unsafe { Vec::from_raw_parts(ptr, len, cap) };
 
 	Ok(PwmaBatchOutput {
 		values,
@@ -757,12 +773,15 @@ fn pwma_batch_inner_into(
 		}
 	}
 
-	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
+	let warm: Vec<usize> = combos
+		.iter()
+		.map(|c| first + c.period.unwrap() - 1)
+		.collect();
 
 	// SAFETY: We're reinterpreting the output slice as MaybeUninit
 	let out_uninit = unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len()) };
 
-	unsafe { init_matrix_prefixes(out_uninit, cols, &warm) };
+	init_matrix_prefixes(out_uninit, cols, &warm);
 
 	// Closure that fills a single row
 	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
@@ -826,6 +845,7 @@ unsafe fn pwma_row_scalar(
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
+#[target_feature(enable = "avx2,fma")]
 unsafe fn pwma_row_avx2(data: &[f64], first: usize, period: usize, stride: usize, w_ptr: *const f64, out: &mut [f64]) {
 	// Create a slice from the weight pointer for pwma_avx2
 	let weights = std::slice::from_raw_parts(w_ptr, period);
@@ -1719,11 +1739,9 @@ pub fn pwma_batch_rows_cols_js(
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn pwma_alloc(len: usize) -> *mut f64 {
-	// Allocate aligned memory for performance
-	let mut buf = Vec::<f64>::with_capacity(len);
-	buf.resize(len, 0.0);
-	let ptr = buf.as_mut_ptr();
-	std::mem::forget(buf);
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	core::mem::forget(vec);
 	ptr
 }
 

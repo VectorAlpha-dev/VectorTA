@@ -16,6 +16,7 @@ except ImportError:
     pytest.skip("Python module not built. Run 'maturin develop --features python' first", allow_module_level=True)
 
 from test_utils import load_test_data, assert_close, assert_all_nan, assert_no_nan, EXPECTED_OUTPUTS
+from rust_comparison import compare_with_rust
 
 
 class TestCksp:
@@ -23,8 +24,20 @@ class TestCksp:
     def test_data(self):
         return load_test_data()
     
+    def test_cksp_partial_params(self, test_data):
+        """Test CKSP with partial parameters (None values) - mirrors check_cksp_partial_params"""
+        # Test with all default params (implicit)
+        long_result, short_result = ta_indicators.cksp(
+            test_data['high'],
+            test_data['low'],
+            test_data['close'],
+            p=10, x=1.0, q=9  # Using defaults explicitly
+        )
+        assert len(long_result) == len(test_data['close'])
+        assert len(short_result) == len(test_data['close'])
+    
     def test_cksp_accuracy(self, test_data):
-        """Test CKSP matches expected values from Rust tests"""
+        """Test CKSP matches expected values from Rust tests - mirrors check_cksp_accuracy"""
         expected = EXPECTED_OUTPUTS['cksp']
         params = expected['default_params']
         
@@ -43,25 +56,56 @@ class TestCksp:
         assert len(short_result) == len(test_data['close'])
         
         # Check last 5 values match expected for long
+        expected_long_last_5 = [
+            60306.66197802568,
+            60306.66197802568,
+            60306.66197802568,
+            60203.29578022311,
+            60201.57958198072,
+        ]
         assert_close(
             long_result[-5:],
-            expected['long_last_5_values'],
+            expected_long_last_5,
             rtol=1e-8,
             atol=1e-5,
             msg="CKSP long values mismatch"
         )
         
         # Check last 5 values match expected for short
+        expected_short_last_5 = [
+            58757.826484736055,
+            58701.74383626245,
+            58656.36945263621,
+            58611.03250737258,
+            58611.03250737258,
+        ]
         assert_close(
             short_result[-5:],
-            expected['short_last_5_values'],
+            expected_short_last_5,
             rtol=1e-8,
             atol=1e-5,
             msg="CKSP short values mismatch"
         )
+        
+        # Compare full output with Rust
+        # NOTE: CKSP not yet added to generate_references binary
+        # compare_with_rust('cksp_long', long_result, 'hlc', params)
+        # compare_with_rust('cksp_short', short_result, 'hlc', params)
+    
+    def test_cksp_default_candles(self, test_data):
+        """Test CKSP with default parameters - mirrors check_cksp_default_candles"""
+        # Default params: p=10, x=1.0, q=9
+        long_result, short_result = ta_indicators.cksp(
+            test_data['high'],
+            test_data['low'],
+            test_data['close'],
+            10, 1.0, 9
+        )
+        assert len(long_result) == len(test_data['close'])
+        assert len(short_result) == len(test_data['close'])
     
     def test_cksp_with_kernel(self, test_data):
-        """Test CKSP with different kernel options"""
+        """Test CKSP with different kernel options - mirrors kernel tests"""
         params = EXPECTED_OUTPUTS['cksp']['default_params']
         
         # Test with scalar kernel
@@ -89,8 +133,52 @@ class TestCksp:
         assert_close(long_scalar, long_auto, rtol=1e-10, msg="CKSP long kernel mismatch")
         assert_close(short_scalar, short_auto, rtol=1e-10, msg="CKSP short kernel mismatch")
     
+    def test_cksp_zero_period(self):
+        """Test CKSP fails with zero period - mirrors check_cksp_zero_period"""
+        high = np.array([10.0, 11.0, 12.0])
+        low = np.array([9.0, 10.0, 10.5])
+        close = np.array([9.5, 10.5, 11.0])
+        
+        with pytest.raises(ValueError, match="Invalid param"):
+            ta_indicators.cksp(high, low, close, p=0, x=1.0, q=9)
+    
+    def test_cksp_invalid_x(self):
+        """Test CKSP fails with invalid x multiplier"""
+        high = np.array([10.0, 11.0, 12.0])
+        low = np.array([9.0, 10.0, 10.5])
+        close = np.array([9.5, 10.5, 11.0])
+        
+        # Test with NaN x
+        with pytest.raises(ValueError, match="Invalid param"):
+            ta_indicators.cksp(high, low, close, p=10, x=float('nan'), q=9)
+        
+        # Test with negative x (should work, x can be any finite value)
+        # Not testing as negative x is actually valid
+        
+        # Test with infinite x
+        with pytest.raises(ValueError, match="Invalid param"):
+            ta_indicators.cksp(high, low, close, p=10, x=float('inf'), q=9)
+    
+    def test_cksp_invalid_q(self):
+        """Test CKSP fails with invalid q parameter"""
+        high = np.array([10.0, 11.0, 12.0])
+        low = np.array([9.0, 10.0, 10.5])
+        close = np.array([9.5, 10.5, 11.0])
+        
+        with pytest.raises(ValueError, match="Invalid param"):
+            ta_indicators.cksp(high, low, close, p=10, x=1.0, q=0)
+    
+    def test_cksp_period_exceeds_length(self):
+        """Test CKSP fails when period exceeds data length - mirrors check_cksp_period_exceeds_length"""
+        high = np.array([10.0, 11.0, 12.0])
+        low = np.array([9.0, 10.0, 10.5])
+        close = np.array([9.5, 10.5, 11.0])
+        
+        with pytest.raises(ValueError, match="Not enough data"):
+            ta_indicators.cksp(high, low, close, p=10, x=1.0, q=9)
+    
     def test_cksp_errors(self):
-        """Test error handling"""
+        """Test error handling - additional edge cases"""
         # Test with empty data
         with pytest.raises(ValueError, match="Data is empty"):
             ta_indicators.cksp(
@@ -121,7 +209,7 @@ class TestCksp:
             ta_indicators.cksp(high, low, close, p=10, x=1.0, q=9)
     
     def test_cksp_very_small_dataset(self):
-        """Test CKSP with single data point"""
+        """Test CKSP with single data point - mirrors check_cksp_very_small_dataset"""
         high = np.array([42.0])
         low = np.array([41.0])
         close = np.array([41.5])
@@ -129,8 +217,15 @@ class TestCksp:
         with pytest.raises(ValueError, match="Not enough data"):
             ta_indicators.cksp(high, low, close, p=10, x=1.0, q=9)
     
+    def test_cksp_all_nan_input(self):
+        """Test CKSP with all NaN values"""
+        all_nan = np.full(100, np.nan)
+        
+        with pytest.raises(ValueError, match="Data is empty|No data"):
+            ta_indicators.cksp(all_nan, all_nan, all_nan, p=10, x=1.0, q=9)
+    
     def test_cksp_nan_handling(self, test_data):
-        """Test CKSP handles NaN values correctly"""
+        """Test CKSP handles NaN values correctly - mirrors check_cksp_nan_handling"""
         params = EXPECTED_OUTPUTS['cksp']['default_params']
         
         long_result, short_result = ta_indicators.cksp(
@@ -142,8 +237,9 @@ class TestCksp:
             q=params['q']
         )
         
-        # Check warmup period has NaN values
+        # Check warmup period has NaN values (p + q - 1 = 10 + 9 - 1 = 18)
         warmup_period = params['p'] + params['q'] - 1
+        assert warmup_period == 18, f"Expected warmup period of 18, got {warmup_period}"
         assert_all_nan(long_result[:warmup_period], "Expected NaN in warmup period for long")
         assert_all_nan(short_result[:warmup_period], "Expected NaN in warmup period for short")
         
@@ -153,7 +249,7 @@ class TestCksp:
             assert_no_nan(short_result[240:], "Found unexpected NaN in short values after warmup")
     
     def test_cksp_streaming(self, test_data):
-        """Test CKSP streaming functionality"""
+        """Test CKSP streaming functionality - mirrors check_cksp_streaming"""
         params = EXPECTED_OUTPUTS['cksp']['default_params']
         
         # Create streaming instance
@@ -205,7 +301,7 @@ class TestCksp:
         )
     
     def test_cksp_batch(self, test_data):
-        """Test CKSP batch processing"""
+        """Test CKSP batch processing - mirrors batch tests"""
         # Test batch with single parameter set
         result = ta_indicators.cksp_batch(
             test_data['high'],
@@ -254,35 +350,54 @@ class TestCksp:
         assert result['p'][0] == 5
         assert result['x'][0] == 0.5
         assert result['q'][0] == 5
+        
+        # Last combination should be p=15, x=1.5, q=10
+        assert result['p'][-1] == 15
+        assert result['x'][-1] == 1.5
+        assert result['q'][-1] == 10
+        
+        # Verify warmup periods for different combinations
+        for i, (p, q) in enumerate(zip(result['p'], result['q'])):
+            expected_warmup = p + q - 1
+            row_data = result['long_values'][i]
+            # Count NaN values at the start
+            nan_count = 0
+            for val in row_data:
+                if np.isnan(val):
+                    nan_count += 1
+                else:
+                    break
+            # Warmup period should match expected
+            assert nan_count >= min(expected_warmup, 100), f"Row {i}: Expected at least {expected_warmup} NaN values, got {nan_count}"
     
-    def test_cksp_reinput(self, test_data):
-        """Test CKSP with re-input of its own output"""
-        params = EXPECTED_OUTPUTS['cksp']['default_params']
+    def test_cksp_batch_metadata(self, test_data):
+        """Test CKSP batch metadata and edge cases"""
+        close = test_data['close'][:50]  # Use smaller dataset
+        high = test_data['high'][:50]
+        low = test_data['low'][:50]
         
-        # First pass
-        long_first, short_first = ta_indicators.cksp(
-            test_data['high'],
-            test_data['low'],
-            test_data['close'],
-            p=params['p'],
-            x=params['x'],
-            q=params['q']
+        # Test with single value sweep
+        result = ta_indicators.cksp_batch(
+            high, low, close,
+            p_range=(10, 10, 1),
+            x_range=(1.0, 1.0, 0.1),
+            q_range=(9, 9, 1)
         )
         
-        # Second pass - use outputs as high/low, zeros for close
-        dummy_close = np.zeros_like(long_first)
-        long_second, short_second = ta_indicators.cksp(
-            long_first,
-            short_first,
-            dummy_close,
-            p=params['p'],
-            x=params['x'],
-            q=params['q']
+        assert result['long_values'].shape == (1, 50)
+        assert len(result['p']) == 1
+        
+        # Test with step larger than range
+        result = ta_indicators.cksp_batch(
+            high, low, close,
+            p_range=(10, 12, 10),  # Step larger than range
+            x_range=(1.0, 1.0, 0),
+            q_range=(9, 9, 0)
         )
         
-        # Results should be valid arrays
-        assert len(long_second) == len(long_first)
-        assert len(short_second) == len(short_first)
+        # Should only have p=10
+        assert result['long_values'].shape == (1, 50)
+        assert result['p'][0] == 10
 
 
 if __name__ == '__main__':

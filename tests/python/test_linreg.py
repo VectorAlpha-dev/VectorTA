@@ -4,7 +4,8 @@ These tests mirror the Rust unit tests to ensure Python bindings work correctly.
 """
 import pytest
 import numpy as np
-from test_utils import load_test_data, assert_close
+from test_utils import load_test_data, assert_close, EXPECTED_OUTPUTS
+from rust_comparison import compare_with_rust
 
 # Import LinReg functions - they'll be available after building with maturin
 try:
@@ -31,33 +32,28 @@ def test_linreg_accuracy():
     """Test LinReg matches expected values from Rust tests - mirrors check_linreg_accuracy"""
     data = load_test_data()
     close = np.array(data['close'], dtype=np.float64)
+    expected = EXPECTED_OUTPUTS['linreg']
     
-    # Period 14 (default)
-    result = linreg(close, 14)
-    
-    # Expected last 5 values from Rust test
-    expected_last_five = [
-        58929.37142857143,
-        58899.42857142857,
-        58918.857142857145,
-        59100.6,
-        58987.94285714286,
-    ]
+    # Use period from expected outputs
+    result = linreg(close, expected['default_params']['period'])
     
     # Check last 5 values match expected
     assert_close(
         result[-5:], 
-        expected_last_five, 
+        expected['last_5_values'], 
         atol=1e-1,
         msg="LinReg last 5 values mismatch"
     )
+    
+    # Compare full output with Rust
+    compare_with_rust('linreg', result, 'close', expected['default_params'])
 
 
 def test_linreg_zero_period():
     """Test LinReg fails with zero period - mirrors check_linreg_zero_period"""
     input_data = np.array([10.0, 20.0, 30.0], dtype=np.float64)
     
-    with pytest.raises(ValueError, match="linreg:"):
+    with pytest.raises(ValueError, match="Invalid period"):
         linreg(input_data, 0)
 
 
@@ -65,7 +61,7 @@ def test_linreg_period_exceeds_length():
     """Test LinReg fails with period exceeding data length - mirrors check_linreg_period_exceeds_length"""
     data_small = np.array([10.0, 20.0, 30.0], dtype=np.float64)
     
-    with pytest.raises(ValueError, match="linreg:"):
+    with pytest.raises(ValueError, match="Invalid period|Not enough valid data"):
         linreg(data_small, 10)
 
 
@@ -73,7 +69,7 @@ def test_linreg_very_small_dataset():
     """Test LinReg fails with insufficient data - mirrors check_linreg_very_small_dataset"""
     single_point = np.array([42.0], dtype=np.float64)
     
-    with pytest.raises(ValueError, match="linreg:"):
+    with pytest.raises(ValueError, match="Invalid period|Not enough valid data"):
         linreg(single_point, 14)
 
 
@@ -81,7 +77,7 @@ def test_linreg_empty_input():
     """Test LinReg with empty input"""
     data_empty = np.array([], dtype=np.float64)
     
-    with pytest.raises(ValueError, match="linreg:"):
+    with pytest.raises(ValueError, match="Input data slice is empty"):
         linreg(data_empty, 14)
 
 
@@ -89,7 +85,7 @@ def test_linreg_all_nan():
     """Test LinReg with all NaN input"""
     data = np.array([np.nan, np.nan, np.nan, np.nan, np.nan], dtype=np.float64)
     
-    with pytest.raises(ValueError, match="linreg:"):
+    with pytest.raises(ValueError, match="All values are NaN"):
         linreg(data, 3)
 
 
@@ -118,11 +114,16 @@ def test_linreg_nan_handling():
     """Test LinReg handling of NaN values - mirrors check_linreg_nan_handling"""
     data = load_test_data()
     close = np.array(data['close'], dtype=np.float64)
+    expected = EXPECTED_OUTPUTS['linreg']
     
     # Use clean data like the Rust test does
-    result = linreg(close, 14)
+    result = linreg(close, expected['default_params']['period'])
     
     assert len(result) == len(close)
+    
+    # Check warmup period is correct (first + period - 1)
+    first_valid = next((i for i, x in enumerate(result) if not np.isnan(x)), None)
+    assert first_valid == expected['warmup_period'], f"Expected warmup at {expected['warmup_period']}, got {first_valid}"
     
     # The Rust test checks that after index 240, there are no NaN values
     # This implies the warmup period creates NaN values at the beginning
@@ -323,28 +324,28 @@ def test_linreg_two_values():
 
 
 def test_linreg_warmup_period():
-    """Test that warmup period is correctly calculated"""
+    """Test that warmup period is correctly calculated (first + period - 1)"""
     data = load_test_data()
     close = np.array(data['close'][:50], dtype=np.float64)
     
     test_cases = [
-        (5, 4),    # period=5, warmup=4 (first output at index 4)
-        (10, 9),   # period=10, warmup=9 (first output at index 9)
-        (20, 19),  # period=20, warmup=19 (first output at index 19)
-        (30, 29),  # period=30, warmup=29 (first output at index 29)
+        (5, 4),    # period=5, warmup=first + period - 1 = 0 + 5 - 1 = 4
+        (10, 9),   # period=10, warmup=first + period - 1 = 0 + 10 - 1 = 9
+        (20, 19),  # period=20, warmup=first + period - 1 = 0 + 20 - 1 = 19
+        (30, 29),  # period=30, warmup=first + period - 1 = 0 + 30 - 1 = 29
     ]
     
     for period, expected_warmup in test_cases:
         result = linreg(close, period)
         
         # LinReg has NaN values for the first 'period-1' indices
-        for i in range(period - 1):
+        for i in range(expected_warmup):
             assert np.isnan(result[i]), f"Expected NaN at index {i} for period={period}"
         
         # First valid value should be at index 'period-1'
-        if period - 1 < len(result):
-            assert not np.isnan(result[period - 1]), \
-                f"Expected valid value at index {period - 1} for period={period}"
+        if expected_warmup < len(result):
+            assert not np.isnan(result[expected_warmup]), \
+                f"Expected valid value at index {expected_warmup} for period={period}"
 
 
 def test_linreg_consistency():
@@ -383,17 +384,17 @@ def test_linreg_batch_error_handling():
     """Test LinReg batch error handling"""
     # Test with empty data
     empty = np.array([], dtype=np.float64)
-    with pytest.raises(ValueError, match="linreg:"):
+    with pytest.raises(ValueError, match="Input data slice is empty|All values are NaN"):
         linreg_batch(empty, (10, 20, 10))
     
     # Test with all NaN data
     all_nan = np.full(100, np.nan, dtype=np.float64)
-    with pytest.raises(ValueError, match="linreg:"):
+    with pytest.raises(ValueError, match="All values are NaN"):
         linreg_batch(all_nan, (10, 20, 10))
     
     # Test with period exceeding data length
     small_data = np.array([1.0, 2.0, 3.0], dtype=np.float64)
-    with pytest.raises(ValueError, match="linreg:"):
+    with pytest.raises(ValueError, match="Not enough valid data"):
         linreg_batch(small_data, (5, 10, 5))
 
 
@@ -453,30 +454,42 @@ def test_linreg_batch_warmup_consistency():
         assert np.all(~np.isnan(row[period-1:])), f"Expected values after warmup for period {period}"
 
 
-def test_linreg_stream_error_handling():
-    """Test LinReg stream error handling"""
-    # Test with invalid period
-    with pytest.raises(ValueError, match="LinRegStream error:"):
-        LinRegStream(0)
-    
-    # Test stream matches batch
+def test_linreg_streaming():
+    """Test LinReg streaming matches batch calculation - mirrors check_linreg_streaming"""
     data = load_test_data()
     close = np.array(data['close'][:100], dtype=np.float64)
-    period = 14
+    expected = EXPECTED_OUTPUTS['linreg']
+    period = expected['default_params']['period']
     
+    # Batch calculation
     batch_result = linreg(close, period)
+    
+    # Streaming calculation
     stream = LinRegStream(period)
-    stream_results = []
+    stream_values = []
     
     for price in close:
         result = stream.update(price)
-        stream_results.append(result if result is not None else np.nan)
+        stream_values.append(result if result is not None else np.nan)
     
-    # After warmup, values should match
-    for i in range(period - 1, len(close)):
-        if not np.isnan(batch_result[i]):
-            assert_close(stream_results[i], batch_result[i], atol=1e-6,
-                        msg=f"Stream mismatch at index {i}")
+    stream_values = np.array(stream_values)
+    
+    # Compare batch vs streaming
+    assert len(batch_result) == len(stream_values)
+    
+    # Compare values where both are not NaN
+    for i, (b, s) in enumerate(zip(batch_result, stream_values)):
+        if np.isnan(b) and np.isnan(s):
+            continue
+        assert_close(b, s, rtol=1e-9, atol=1e-9,
+                    msg=f"LinReg streaming mismatch at index {i}")
+
+
+def test_linreg_stream_error_handling():
+    """Test LinReg stream error handling"""
+    # Test with invalid period
+    with pytest.raises(ValueError, match="LinRegStream error|Invalid period"):
+        LinRegStream(0)
 
 
 if __name__ == "__main__":

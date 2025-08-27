@@ -21,11 +21,27 @@
 //! - **Ok(StochOutput)** on success. `k` and `d` fields have same length as input.
 //! - **Err(StochError)** otherwise.
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::{exceptions::PyValueError, prelude::*};
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 use crate::indicators::moving_averages::ma::{ma, MaData};
 use crate::indicators::utility_functions::{max_rolling, min_rolling};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -56,6 +72,7 @@ pub struct StochOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct StochParams {
 	pub fastk_period: Option<usize>,
 	pub slowk_period: Option<usize>,
@@ -308,8 +325,9 @@ pub fn stoch_with_kernel(input: &StochInput, kernel: Kernel) -> Result<StochOutp
 		});
 	}
 
-	let mut hh = vec![f64::NAN; data_len];
-	let mut ll = vec![f64::NAN; data_len];
+	// Use alloc_with_nan_prefix for zero-copy allocation
+	let mut hh = alloc_with_nan_prefix(data_len, first_valid_idx + fastk_period - 1);
+	let mut ll = alloc_with_nan_prefix(data_len, first_valid_idx + fastk_period - 1);
 
 	let max_vals = max_rolling(&high[first_valid_idx..], fastk_period).map_err(|e| StochError::Other(e.to_string()))?;
 	let min_vals = min_rolling(&low[first_valid_idx..], fastk_period).map_err(|e| StochError::Other(e.to_string()))?;
@@ -321,7 +339,8 @@ pub fn stoch_with_kernel(input: &StochInput, kernel: Kernel) -> Result<StochOutp
 		ll[i + first_valid_idx] = val;
 	}
 
-	let mut k_raw = vec![f64::NAN; data_len];
+	// Use alloc_with_nan_prefix for zero-copy allocation
+	let mut k_raw = alloc_with_nan_prefix(data_len, first_valid_idx + fastk_period - 1);
 
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
@@ -351,6 +370,22 @@ pub fn stoch_with_kernel(input: &StochInput, kernel: Kernel) -> Result<StochOutp
 	let d_vec =
 		ma(&slowd_ma_type, MaData::Slice(&k_vec), slowd_period).map_err(|e| StochError::Other(e.to_string()))?;
 	Ok(StochOutput { k: k_vec, d: d_vec })
+}
+
+// New: write into user buffers, ALMA-style
+pub fn stoch_into_slices(
+	out_k: &mut [f64],
+	out_d: &mut [f64],
+	input: &StochInput,
+	kernel: Kernel,
+) -> Result<(), StochError> {
+	let StochOutput { k, d } = stoch_with_kernel(input, kernel)?;
+	if out_k.len() != k.len() || out_d.len() != d.len() {
+		return Err(StochError::MismatchedLength);
+	}
+	out_k.copy_from_slice(&k);
+	out_d.copy_from_slice(&d);
+	Ok(())
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -644,91 +679,104 @@ fn stoch_batch_inner(
 	if combos.is_empty() {
 		return Err(StochError::InvalidPeriod { period: 0, data_len: 0 });
 	}
+	
+	let n = high.len();
+	if n == 0 || low.len() != n || close.len() != n {
+		return Err(StochError::MismatchedLength);
+	}
+	
 	let first = high
 		.iter()
 		.zip(low.iter())
 		.zip(close.iter())
 		.position(|((h, l), c)| !h.is_nan() && !l.is_nan() && !c.is_nan())
 		.ok_or(StochError::AllValuesNaN)?;
-	let max_p = combos.iter().map(|c| c.fastk_period.unwrap()).max().unwrap();
-	if high.len() - first < max_p {
+	let max_fkp = combos.iter().map(|c| c.fastk_period.unwrap()).max().unwrap();
+	if n - first < max_fkp {
 		return Err(StochError::NotEnoughValidData {
-			needed: max_p,
-			valid: high.len() - first,
+			needed: max_fkp,
+			valid: n - first,
 		});
 	}
+
+	// Allocate K and D matrices uninitialized
 	let rows = combos.len();
-	let cols = high.len();
-	let mut k_mat = vec![f64::NAN; rows * cols];
-	let mut d_mat = vec![f64::NAN; rows * cols];
-	let do_row = |row: usize, outk: &mut [f64], outd: &mut [f64]| unsafe {
+	let cols = n;
+
+	let mut k_mu = make_uninit_matrix(rows, cols);
+	let mut d_mu = make_uninit_matrix(rows, cols);
+
+	// Warmup for raw %K. Further MA warmups are handled by ma.rs and copied over.
+	let warm_k: Vec<usize> = combos.iter().map(|c| first + c.fastk_period.unwrap() - 1).collect();
+	init_matrix_prefixes(&mut k_mu, cols, &warm_k);
+	init_matrix_prefixes(&mut d_mu, cols, &warm_k); // at least as conservative for %D
+
+	// Convert to &mut [f64] to write final values
+	let mut k_guard = core::mem::ManuallyDrop::new(k_mu);
+	let mut d_guard = core::mem::ManuallyDrop::new(d_mu);
+	let k_mat: &mut [f64] = unsafe { core::slice::from_raw_parts_mut(k_guard.as_mut_ptr() as *mut f64, k_guard.len()) };
+	let d_mat: &mut [f64] = unsafe { core::slice::from_raw_parts_mut(d_guard.as_mut_ptr() as *mut f64, d_guard.len()) };
+	let do_row = |row: usize, dst_k: &mut [f64], dst_d: &mut [f64]| {
 		let prm = &combos[row];
-		let mut hh = vec![f64::NAN; cols];
-		let mut ll = vec![f64::NAN; cols];
-		let max_vals = max_rolling(&high[first..], prm.fastk_period.unwrap())
-			.map_err(|e| StochError::Other(e.to_string()))
-			.unwrap();
-		let min_vals = min_rolling(&low[first..], prm.fastk_period.unwrap())
-			.map_err(|e| StochError::Other(e.to_string()))
-			.unwrap();
-		for (i, &val) in max_vals.iter().enumerate() {
-			hh[i + first] = val;
+
+		// Build hh/ll with a single NaN prefix alloc per row
+		let mut hh = alloc_with_nan_prefix(cols, first + prm.fastk_period.unwrap() - 1);
+		let mut ll = alloc_with_nan_prefix(cols, first + prm.fastk_period.unwrap() - 1);
+		let highs = max_rolling(&high[first..], prm.fastk_period.unwrap()).unwrap();
+		let lows = min_rolling(&low[first..], prm.fastk_period.unwrap()).unwrap();
+		for (i, &v) in highs.iter().enumerate() {
+			hh[first + i] = v;
 		}
-		for (i, &val) in min_vals.iter().enumerate() {
-			ll[i + first] = val;
+		for (i, &v) in lows.iter().enumerate() {
+			ll[first + i] = v;
 		}
-		let mut kraw = vec![f64::NAN; cols];
-		match kern {
-			Kernel::Scalar => stoch_row_scalar(high, low, close, &hh, &ll, prm.fastk_period.unwrap(), first, &mut kraw),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => stoch_row_avx2(high, low, close, &hh, &ll, prm.fastk_period.unwrap(), first, &mut kraw),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => stoch_row_avx512(high, low, close, &hh, &ll, prm.fastk_period.unwrap(), first, &mut kraw),
-			_ => unreachable!(),
+
+		let mut k_raw = alloc_with_nan_prefix(cols, first + prm.fastk_period.unwrap() - 1);
+		unsafe {
+			match kern {
+				Kernel::Scalar => stoch_row_scalar(high, low, close, &hh, &ll, prm.fastk_period.unwrap(), first, &mut k_raw),
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+				Kernel::Avx2 => stoch_row_avx2(high, low, close, &hh, &ll, prm.fastk_period.unwrap(), first, &mut k_raw),
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+				Kernel::Avx512 => stoch_row_avx512(high, low, close, &hh, &ll, prm.fastk_period.unwrap(), first, &mut k_raw),
+				_ => unreachable!(),
+			}
 		}
-		let k = ma(
-			&prm.slowk_ma_type.clone().unwrap(),
-			MaData::Slice(&kraw),
+
+		let k_vec = ma(
+			prm.slowk_ma_type.as_ref().unwrap(),
+			MaData::Slice(&k_raw),
 			prm.slowk_period.unwrap(),
-		)
-		.unwrap();
-		let d = ma(
-			&prm.slowd_ma_type.clone().unwrap(),
-			MaData::Slice(&k),
+		).unwrap();
+		let d_vec = ma(
+			prm.slowd_ma_type.as_ref().unwrap(),
+			MaData::Slice(&k_vec),
 			prm.slowd_period.unwrap(),
-		)
-		.unwrap();
-		outk.copy_from_slice(&k);
-		outd.copy_from_slice(&d);
+		).unwrap();
+
+		dst_k.copy_from_slice(&k_vec);
+		dst_d.copy_from_slice(&d_vec);
 	};
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
-		{
-			k_mat
-				.par_chunks_mut(cols)
-				.zip(d_mat.par_chunks_mut(cols))
-				.enumerate()
-				.for_each(|(row, (k, d))| do_row(row, k, d));
-		}
-
+		k_mat.par_chunks_mut(cols).zip(d_mat.par_chunks_mut(cols)).enumerate()
+			.for_each(|(row, (krow, drow))| do_row(row, krow, drow));
 		#[cfg(target_arch = "wasm32")]
-		{
-			for (row, (k, d)) in k_mat.chunks_mut(cols).zip(d_mat.chunks_mut(cols)).enumerate() {
-				do_row(row, k, d);
-			}
+		for (row, (krow, drow)) in k_mat.chunks_mut(cols).zip(d_mat.chunks_mut(cols)).enumerate() {
+			do_row(row, krow, drow);
 		}
 	} else {
-		for (row, (k, d)) in k_mat.chunks_mut(cols).zip(d_mat.chunks_mut(cols)).enumerate() {
-			do_row(row, k, d);
+		for (row, (krow, drow)) in k_mat.chunks_mut(cols).zip(d_mat.chunks_mut(cols)).enumerate() {
+			do_row(row, krow, drow);
 		}
 	}
-	Ok(StochBatchOutput {
-		k: k_mat,
-		d: d_mat,
-		combos,
-		rows,
-		cols,
-	})
+
+	let k = unsafe { Vec::from_raw_parts(k_guard.as_mut_ptr() as *mut f64, k_guard.len(), k_guard.capacity()) };
+	let d = unsafe { Vec::from_raw_parts(d_guard.as_mut_ptr() as *mut f64, d_guard.len(), d_guard.capacity()) };
+	core::mem::forget(k_guard);
+	core::mem::forget(d_guard);
+
+	Ok(StochBatchOutput { k, d, combos, rows, cols })
 }
 
 #[inline(always)]
@@ -889,8 +937,13 @@ impl StochStream {
 		k_vec.remove(0);
 		k_vec.push(k_val);
 		self.k_stream = Some(k_vec.clone());
-		let slowk = ma(&self.slowk_ma_type, MaData::Slice(&k_vec), self.slowk_period).unwrap();
-		let k_last = *slowk.last().unwrap_or(&f64::NAN);
+		
+		// Try to calculate smoothed K, if fails use raw value
+		let k_last = match ma(&self.slowk_ma_type, MaData::Slice(&k_vec), self.slowk_period) {
+			Ok(slowk) => *slowk.last().unwrap_or(&f64::NAN),
+			Err(_) => k_val,  // If MA fails (e.g., not enough valid data), use raw value
+		};
+		
 		let mut d_vec = self
 			.d_stream
 			.take()
@@ -898,9 +951,242 @@ impl StochStream {
 		d_vec.remove(0);
 		d_vec.push(k_last);
 		self.d_stream = Some(d_vec.clone());
-		let slowd = ma(&self.slowd_ma_type, MaData::Slice(&d_vec), self.slowd_period).unwrap();
-		let d_last = *slowd.last().unwrap_or(&f64::NAN);
+		
+		// Try to calculate smoothed D, if fails use K value
+		let d_last = match ma(&self.slowd_ma_type, MaData::Slice(&d_vec), self.slowd_period) {
+			Ok(slowd) => *slowd.last().unwrap_or(&f64::NAN),
+			Err(_) => k_last,  // If MA fails (e.g., not enough valid data), use K value
+		};
+		
 		Some((k_last, d_last))
+	}
+}
+
+// === Python Bindings ===
+
+#[cfg(feature = "python")]
+#[pyfunction(name="stoch")]
+#[pyo3(signature = (high, low, close, fastk_period=14, slowk_period=3, slowk_ma_type="sma", slowd_period=3, slowd_ma_type="sma", kernel=None))]
+pub fn stoch_py<'py>(
+	py: Python<'py>,
+	high: PyReadonlyArray1<'py, f64>,
+	low:  PyReadonlyArray1<'py, f64>,
+	close:PyReadonlyArray1<'py, f64>,
+	fastk_period: usize,
+	slowk_period: usize,
+	slowk_ma_type: &str,
+	slowd_period: usize,
+	slowd_ma_type: &str,
+	kernel: Option<&str>,
+) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
+	let hi = high.as_slice()?;
+	let lo = low.as_slice()?;
+	let cl = close.as_slice()?;
+	let params = StochParams {
+		fastk_period: Some(fastk_period),
+		slowk_period: Some(slowk_period),
+		slowk_ma_type: Some(slowk_ma_type.to_string()),
+		slowd_period: Some(slowd_period),
+		slowd_ma_type: Some(slowd_ma_type.to_string()),
+	};
+	let kern = validate_kernel(kernel, false)?;
+	let input = StochInput::from_slices(hi, lo, cl, params);
+	let out = py.allow_threads(|| stoch_with_kernel(&input, kern))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	Ok((out.k.into_pyarray(py), out.d.into_pyarray(py)))
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name="stoch_batch")]
+#[pyo3(signature = (high, low, close, fastk_range, slowk_range, slowk_ma_type, slowd_range, slowd_ma_type, kernel=None))]
+pub fn stoch_batch_py<'py>(
+	py: Python<'py>,
+	high: PyReadonlyArray1<'py, f64>,
+	low:  PyReadonlyArray1<'py, f64>,
+	close:PyReadonlyArray1<'py, f64>,
+	fastk_range: (usize, usize, usize),
+	slowk_range: (usize, usize, usize),
+	slowk_ma_type: &str, // static in sweep
+	slowd_range: (usize, usize, usize),
+	slowd_ma_type: &str, // static in sweep
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	let hi = high.as_slice()?;
+	let lo = low.as_slice()?;
+	let cl = close.as_slice()?;
+
+	let sweep = StochBatchRange {
+		fastk_period: fastk_range,
+		slowk_period: slowk_range,
+		slowk_ma_type: (slowk_ma_type.to_string(), slowk_ma_type.to_string(), 0.0),
+		slowd_period: slowd_range,
+		slowd_ma_type: (slowd_ma_type.to_string(), slowd_ma_type.to_string(), 0.0),
+	};
+
+	let kern = validate_kernel(kernel, true)?;
+	let out = py.allow_threads(|| stoch_batch_with_kernel(hi, lo, cl, &sweep, kern))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	let rows = out.rows;
+	let cols = out.cols;
+
+	let dict = PyDict::new(py);
+
+	// 2D shape views for convenience; still contiguous
+	let k_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let d_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	unsafe { k_arr.as_slice_mut()? }.copy_from_slice(&out.k);
+	unsafe { d_arr.as_slice_mut()? }.copy_from_slice(&out.d);
+
+	dict.set_item("k", k_arr.reshape((rows, cols))?)?;
+	dict.set_item("d", d_arr.reshape((rows, cols))?)?;
+	dict.set_item("fastk_periods", out.combos.iter().map(|p| p.fastk_period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+	dict.set_item("slowk_periods", out.combos.iter().map(|p| p.slowk_period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+	dict.set_item("slowk_types",  out.combos.iter().map(|p| p.slowk_ma_type.as_deref().unwrap_or("sma")).collect::<Vec<_>>())?;
+	dict.set_item("slowd_periods", out.combos.iter().map(|p| p.slowd_period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+	dict.set_item("slowd_types",  out.combos.iter().map(|p| p.slowd_ma_type.as_deref().unwrap_or("sma")).collect::<Vec<_>>())?;
+
+	Ok(dict)
+}
+
+// Optional: streaming wrapper parity with ALMA
+#[cfg(feature = "python")]
+#[pyclass(name="StochStream")]
+pub struct StochStreamPy { 
+	stream: StochStream 
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl StochStreamPy {
+	#[new]
+	fn new(fastk_period: usize, slowk_period: usize, slowk_ma_type: &str, slowd_period: usize, slowd_ma_type: &str) -> PyResult<Self> {
+		let params = StochParams {
+			fastk_period: Some(fastk_period),
+			slowk_period: Some(slowk_period),
+			slowk_ma_type: Some(slowk_ma_type.to_string()),
+			slowd_period: Some(slowd_period),
+			slowd_ma_type: Some(slowd_ma_type.to_string()),
+		};
+		Ok(Self { stream: StochStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))? })
+	}
+	fn update(&mut self, high: f64, low: f64, close: f64) -> Option<(f64, f64)> {
+		self.stream.update(high, low, close)
+	}
+}
+
+// === WASM Bindings ===
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct StochResult {
+	pub values: Vec<f64>, // [k..., d...]
+	pub rows: usize,      // 2
+	pub cols: usize,      // data length
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = stoch)]
+pub fn stoch_js(high: &[f64], low: &[f64], close: &[f64],
+				fastk_period: usize, slowk_period: usize, slowk_ma_type: &str,
+				slowd_period: usize, slowd_ma_type: &str) -> Result<JsValue, JsValue> {
+	let params = StochParams {
+		fastk_period: Some(fastk_period),
+		slowk_period: Some(slowk_period),
+		slowk_ma_type: Some(slowk_ma_type.to_string()),
+		slowd_period: Some(slowd_period),
+		slowd_ma_type: Some(slowd_ma_type.to_string()),
+	};
+	let input = StochInput::from_slices(high, low, close, params);
+	let out = stoch_with_kernel(&input, detect_best_kernel()).map_err(|e| JsValue::from_str(&e.to_string()))?;
+	let mut values = out.k;
+	values.extend_from_slice(&out.d);
+	serde_wasm_bindgen::to_value(&StochResult { values, rows: 2, cols: high.len() })
+		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct StochBatchJsOutput {
+	pub values: Vec<f64>,        // [all K rows..., then all D rows...]
+	pub combos: Vec<StochParams>,
+	pub rows_per_combo: usize,   // 2
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = stoch_batch)]
+pub fn stoch_batch_unified_js(
+	high: &[f64], low: &[f64], close: &[f64],
+	fastk_start: usize, fastk_end: usize, fastk_step: usize,
+	slowk_start: usize, slowk_end: usize, slowk_step: usize,
+	slowk_ma_type: &str,
+	slowd_start: usize, slowd_end: usize, slowd_step: usize,
+	slowd_ma_type: &str,
+) -> Result<JsValue, JsValue> {
+	let sweep = StochBatchRange {
+		fastk_period: (fastk_start, fastk_end, fastk_step),
+		slowk_period: (slowk_start, slowk_end, slowk_step),
+		slowk_ma_type: (slowk_ma_type.to_string(), slowk_ma_type.to_string(), 0.0),
+		slowd_period: (slowd_start, slowd_end, slowd_step),
+		slowd_ma_type: (slowd_ma_type.to_string(), slowd_ma_type.to_string(), 0.0),
+	};
+	let out = stoch_batch_inner(high, low, close, &sweep, detect_best_kernel(), false)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	let mut values = out.k.clone();
+	values.extend_from_slice(&out.d);
+	let js = StochBatchJsOutput {
+		values,
+		combos: out.combos,
+		rows_per_combo: 2,
+		cols: out.cols,
+	};
+	serde_wasm_bindgen::to_value(&js).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+// Optional: raw pointers API to avoid extra allocations in tight loops
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn stoch_alloc(len: usize) -> *mut f64 {
+	let mut v = Vec::<f64>::with_capacity(len);
+	let ptr = v.as_mut_ptr();
+	core::mem::forget(v);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn stoch_free(ptr: *mut f64, len: usize) { 
+	unsafe { let _ = Vec::from_raw_parts(ptr, len, len); } 
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = stoch_into)]
+pub fn stoch_into_js(
+	high_ptr: *const f64, low_ptr: *const f64, close_ptr: *const f64, len: usize,
+	fastk_period: usize, slowk_period: usize, slowk_ma_type: &str,
+	slowd_period: usize, slowd_ma_type: &str,
+	out_k_ptr: *mut f64, out_d_ptr: *mut f64
+) -> Result<(), JsValue> {
+	if [high_ptr, low_ptr, close_ptr, out_k_ptr, out_d_ptr].iter().any(|p| p.is_null()) {
+		return Err(JsValue::from_str("null pointer"));
+	}
+	unsafe {
+		let hi = core::slice::from_raw_parts(high_ptr, len);
+		let lo = core::slice::from_raw_parts(low_ptr, len);
+		let cl = core::slice::from_raw_parts(close_ptr, len);
+		let mut ok = core::slice::from_raw_parts_mut(out_k_ptr, len);
+		let mut od = core::slice::from_raw_parts_mut(out_d_ptr, len);
+		let params = StochParams {
+			fastk_period: Some(fastk_period),
+			slowk_period: Some(slowk_period),
+			slowk_ma_type: Some(slowk_ma_type.to_string()),
+			slowd_period: Some(slowd_period),
+			slowd_ma_type: Some(slowd_ma_type.to_string()),
+		};
+		let input = StochInput::from_slices(hi, lo, cl, params);
+		stoch_into_slices(&mut ok, &mut od, &input, detect_best_kernel())
+			.map_err(|e| JsValue::from_str(&e.to_string()))
 	}
 }
 

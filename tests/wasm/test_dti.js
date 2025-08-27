@@ -142,14 +142,18 @@ test('DTI batch operation', () => {
     assert.strictEqual(result.rows, 27);
     assert.strictEqual(result.cols, high.length);
     assert.strictEqual(result.values.length, 27 * high.length);
-    assert.strictEqual(result.r_values.length, 27);
-    assert.strictEqual(result.s_values.length, 27);
-    assert.strictEqual(result.u_values.length, 27);
+    assert.strictEqual(result.combos.length, 27);
     
-    // Verify parameter arrays
-    assert.deepStrictEqual(result.r_values.slice(0, 9), [10, 10, 10, 10, 10, 10, 10, 10, 10]);
-    assert.deepStrictEqual(result.s_values.slice(0, 3), [8, 8, 8]);
-    assert.deepStrictEqual(result.u_values.slice(0, 3), [4, 5, 6]);
+    // Verify parameter combos
+    assert.strictEqual(result.combos[0].r, 10);
+    assert.strictEqual(result.combos[0].s, 8);
+    assert.strictEqual(result.combos[0].u, 4);
+    assert.strictEqual(result.combos[1].r, 10);
+    assert.strictEqual(result.combos[1].s, 8);
+    assert.strictEqual(result.combos[1].u, 5);
+    assert.strictEqual(result.combos[2].r, 10);
+    assert.strictEqual(result.combos[2].s, 8);
+    assert.strictEqual(result.combos[2].u, 6);
 });
 
 test('DTI batch single params', () => {

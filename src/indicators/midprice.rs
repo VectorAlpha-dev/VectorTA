@@ -153,7 +153,7 @@ impl MidpriceBuilder {
 	#[inline(always)]
 	pub fn apply(self, c: &Candles) -> Result<MidpriceOutput, MidpriceError> {
 		let p = MidpriceParams { period: self.period };
-		let i = MidpriceInput::with_default_candles(c);
+		let i = MidpriceInput::from_candles(c, "high", "low", p);
 		midprice_with_kernel(&i, self.kernel)
 	}
 	#[inline(always)]
@@ -209,7 +209,10 @@ pub fn midprice_with_kernel(input: &MidpriceInput, kernel: Kernel) -> Result<Mid
 		return Err(MidpriceError::EmptyData);
 	}
 	if high.len() != low.len() {
-		return Err(MidpriceError::EmptyData);
+		return Err(MidpriceError::MismatchedDataLength {
+			high_len: high.len(),
+			low_len: low.len(),
+		});
 	}
 	let period = input.get_period();
 	if period == 0 || period > high.len() {
@@ -229,10 +232,6 @@ pub fn midprice_with_kernel(input: &MidpriceInput, kernel: Kernel) -> Result<Mid
 		});
 	}
 	let mut out = alloc_with_nan_prefix(high.len(), first_valid_idx + period - 1);
-	// Fill remaining values with NaN for binding compatibility
-	for i in (first_valid_idx + period - 1)..out.len() {
-		out[i] = f64::NAN;
-	}
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
 		other => other,
@@ -244,7 +243,11 @@ pub fn midprice_with_kernel(input: &MidpriceInput, kernel: Kernel) -> Result<Mid
 			Kernel::Avx2 | Kernel::Avx2Batch => midprice_avx2(high, low, period, first_valid_idx, &mut out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 | Kernel::Avx512Batch => midprice_avx512(high, low, period, first_valid_idx, &mut out),
-			_ => unreachable!(),
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+				midprice_scalar(high, low, period, first_valid_idx, &mut out)
+			}
+			Kernel::Auto => midprice_scalar(high, low, period, first_valid_idx, &mut out), // Shouldn't happen but handle it
 		}
 	}
 	Ok(MidpriceOutput { values: out })
@@ -425,7 +428,7 @@ pub fn midprice_batch_with_kernel(
 		Kernel::Avx512Batch => Kernel::Avx512,
 		Kernel::Avx2Batch => Kernel::Avx2,
 		Kernel::ScalarBatch => Kernel::Scalar,
-		_ => unreachable!(),
+		_ => Kernel::Scalar, // Fallback to scalar
 	};
 	midprice_batch_par_slice(high, low, sweep, simd)
 }
@@ -524,12 +527,16 @@ fn midprice_batch_inner_into(
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
 		match kern {
-			Kernel::Scalar => midprice_row_scalar(high, low, first, period, out_row),
+			Kernel::Scalar | Kernel::ScalarBatch => midprice_row_scalar(high, low, first, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => midprice_row_avx2(high, low, first, period, out_row),
+			Kernel::Avx2 | Kernel::Avx2Batch => midprice_row_avx2(high, low, first, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => midprice_row_avx512(high, low, first, period, out_row),
-			_ => unreachable!(),
+			Kernel::Avx512 | Kernel::Avx512Batch => midprice_row_avx512(high, low, first, period, out_row),
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+				midprice_row_scalar(high, low, first, period, out_row)
+			}
+			Kernel::Auto => midprice_row_scalar(high, low, first, period, out_row), // Shouldn't happen but handle it
 		}
 	};
 	
@@ -565,68 +572,42 @@ fn midprice_batch_inner(
 	parallel: bool,
 ) -> Result<MidpriceBatchOutput, MidpriceError> {
 	let combos = expand_grid(sweep);
-	if combos.is_empty() {
-		return Err(MidpriceError::InvalidPeriod { period: 0, data_len: 0 });
-	}
-	if high.is_empty() || low.is_empty() {
-		return Err(MidpriceError::EmptyData);
-	}
+	if combos.is_empty() { return Err(MidpriceError::InvalidPeriod { period: 0, data_len: 0 }); }
+	if high.is_empty() || low.is_empty() { return Err(MidpriceError::EmptyData); }
 	if high.len() != low.len() {
-		return Err(MidpriceError::EmptyData);
+		return Err(MidpriceError::MismatchedDataLength { high_len: high.len(), low_len: low.len() });
 	}
+
 	let first = (0..high.len())
 		.find(|&i| !high[i].is_nan() && !low[i].is_nan())
 		.ok_or(MidpriceError::AllValuesNaN)?;
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
 	if high.len() - first < max_p {
-		return Err(MidpriceError::NotEnoughValidData {
-			needed: max_p,
-			valid: high.len() - first,
-		});
+		return Err(MidpriceError::NotEnoughValidData { needed: max_p, valid: high.len() - first });
 	}
+
 	let rows = combos.len();
 	let cols = high.len();
-	
-	// Use make_uninit_matrix for better memory allocation
+
+	// 1) allocate uninit
 	let mut buf_mu = make_uninit_matrix(rows, cols);
-	
-	// Calculate warmup periods for each parameter combination
-	let warmup_periods: Vec<usize> = combos
-		.iter()
-		.map(|c| first + c.period.unwrap() - 1)
-		.collect();
-	
-	// Initialize matrix with NaN prefixes based on warmup periods
-	init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
-	
-	// Convert to mutable slice
-	let values = unsafe {
-		std::slice::from_raw_parts_mut(buf_mu.as_mut_ptr() as *mut f64, rows * cols)
+	// 2) set only warm prefixes to NaN
+	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
+	init_matrix_prefixes(&mut buf_mu, cols, &warm);
+
+	// 3) compute directly into the same allocation
+	let mut guard = core::mem::ManuallyDrop::new(buf_mu);
+	let out: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len())
 	};
-	
-	// Fill remaining values with NaN for binding compatibility
-	for (row_idx, warmup) in warmup_periods.iter().enumerate() {
-		let row_start = row_idx * cols;
-		for col in *warmup..cols {
-			values[row_start + col] = f64::NAN;
-		}
-	}
-	
-	// Use the new _into function
-	let combos = midprice_batch_inner_into(high, low, sweep, kern, parallel, values)?;
-	
-	// Convert back to Vec
+	let combos = midprice_batch_inner_into(high, low, sweep, kern, parallel, out)?;
+
+	// 4) return the very same buffer as Vec<f64>
 	let values = unsafe {
-		Vec::from_raw_parts(buf_mu.as_mut_ptr() as *mut f64, rows * cols, rows * cols)
+		Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, guard.len(), guard.capacity())
 	};
-	std::mem::forget(buf_mu);
-	
-	Ok(MidpriceBatchOutput {
-		values,
-		combos,
-		rows,
-		cols,
-	})
+
+	Ok(MidpriceBatchOutput { values, combos, rows, cols })
 }
 
 #[inline(always)]
@@ -710,46 +691,51 @@ pub fn midprice_batch_py<'py>(
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
 	let high_slice = high.as_slice()?;
-	let low_slice = low.as_slice()?;
+	let low_slice  = low.as_slice()?;
 	let kern = validate_kernel(kernel, true)?;
 	let sweep = MidpriceBatchRange { period: period_range };
-	
+
+	let cols = high_slice.len();
+	if cols == 0 { return Err(PyValueError::new_err("midprice: empty data")); }
+	if cols != low_slice.len() {
+		return Err(PyValueError::new_err(format!(
+			"midprice: length mismatch: high={}, low={}", cols, low_slice.len()
+		)));
+	}
+	let first = (0..cols)
+		.find(|&i| !high_slice[i].is_nan() && !low_slice[i].is_nan())
+		.ok_or_else(|| PyValueError::new_err("midprice: All values are NaN"))?;
+
 	let combos = expand_grid(&sweep);
 	let rows = combos.len();
-	let cols = high_slice.len();
-	
+
 	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
 	let slice_out = unsafe { out_arr.as_slice_mut()? };
-	
-	let combos = py.allow_threads(|| -> Result<Vec<MidpriceParams>, MidpriceError> {
-		let kernel = match kern {
-			Kernel::Auto => detect_best_batch_kernel(),
-			k => k,
-		};
-		
-		// Map batch kernels to regular kernels
-		let simd = match kernel {
-			Kernel::Avx512Batch => Kernel::Avx512,
-			Kernel::Avx2Batch => Kernel::Avx2,
-			Kernel::ScalarBatch => Kernel::Scalar,
-			_ => unreachable!(),
-		};
-		
-		midprice_batch_inner_into(high_slice, low_slice, &sweep, simd, true, slice_out)
-	})
-	.map_err(|e| PyValueError::new_err(e.to_string()))?;
-	
+
+	// warm NaN prefixes in-place (no extra buffer)
+	let warm: Vec<usize> = combos.iter().map(|p| first + p.period.unwrap() - 1).collect();
+	let out_mu = unsafe {
+		std::slice::from_raw_parts_mut(slice_out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>, rows * cols)
+	};
+	init_matrix_prefixes(out_mu, cols, &warm);
+
+	// compute
+	let combos = py
+		.allow_threads(|| {
+			let kernel = match kern { Kernel::Auto => detect_best_batch_kernel(), k => k };
+			let simd = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch   => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => Kernel::Scalar, // Fallback to scalar for any other kernel type
+			};
+			midprice_batch_inner_into(high_slice, low_slice, &sweep, simd, true, slice_out)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
 	let dict = PyDict::new(py);
 	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
-	dict.set_item(
-		"periods",
-		combos
-			.iter()
-			.map(|p| p.period.unwrap() as u64)
-			.collect::<Vec<_>>()
-			.into_pyarray(py),
-	)?;
-	
+	dict.set_item("periods", combos.iter().map(|p| p.period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
 	Ok(dict)
 }
 
@@ -841,7 +827,11 @@ pub fn midprice_into_slice(
 		Kernel::Avx2 | Kernel::Avx2Batch => midprice_avx2(high, low, period, first_valid_idx, dst),
 		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 		Kernel::Avx512 | Kernel::Avx512Batch => midprice_avx512(high, low, period, first_valid_idx, dst),
-		_ => unreachable!(),
+		#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+		Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+			midprice_scalar(high, low, period, first_valid_idx, dst)
+		}
+		Kernel::Auto => midprice_scalar(high, low, period, first_valid_idx, dst), // Shouldn't happen but handle it
 	}
 
 	Ok(())
@@ -945,10 +935,14 @@ pub fn midprice_batch_js(high: &[f64], low: &[f64], config: JsValue) -> Result<J
 	// Convert output to flat array with period values
 	let mut periods = Vec::new();
 	let (start, end, step) = config.period_range;
-	let mut current = start;
-	while current <= end {
-		periods.push(current);
-		current += step;
+	if step == 0 || start == end {
+		periods.push(start);
+	} else {
+		let mut current = start;
+		while current <= end {
+			periods.push(current);
+			current += step;
+		}
 	}
 
 	let js_output = MidpriceBatchJsOutput {
@@ -972,37 +966,36 @@ pub fn midprice_batch_into(
 	period_end: usize,
 	period_step: usize,
 ) -> Result<usize, JsValue> {
-	if in_high_ptr.is_null() || in_low_ptr.is_null() || out_ptr.is_null() {
-		return Err(JsValue::from_str("null pointer passed to midprice_batch_into"));
-	}
-
 	unsafe {
 		let high = std::slice::from_raw_parts(in_high_ptr, len);
-		let low = std::slice::from_raw_parts(in_low_ptr, len);
+		let low  = std::slice::from_raw_parts(in_low_ptr, len);
 
-		let range = MidpriceBatchRange {
-			period: (period_start, period_end, period_step),
-		};
+		let range  = MidpriceBatchRange { period: (period_start, period_end, period_step) };
+		let combos = expand_grid(&range);
+		let rows   = combos.len();
+		let total  = rows * len;
 
-		// Calculate number of rows
-		let num_rows = ((period_end - period_start) / period_step + 1) as usize;
-		let total_size = num_rows * len;
+		let first = (0..len)
+			.find(|&i| !high[i].is_nan() && !low[i].is_nan())
+			.ok_or_else(|| JsValue::from_str("All values are NaN"))?;
+		let warm: Vec<usize> = combos.iter().map(|p| first + p.period.unwrap() - 1).collect();
 
-		// Check for aliasing
 		if in_high_ptr == out_ptr || in_low_ptr == out_ptr {
-			// Use temporary buffer
-			let mut temp = vec![0.0; total_size];
+			let mut temp: Vec<f64> = Vec::with_capacity(total);
+			temp.set_len(total);
+			let mu = std::slice::from_raw_parts_mut(temp.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>, total);
+			init_matrix_prefixes(mu, len, &warm);
 			midprice_batch_inner_into(high, low, &range, Kernel::Auto, false, &mut temp)
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
-			let out = std::slice::from_raw_parts_mut(out_ptr, total_size);
-			out.copy_from_slice(&temp);
-			Ok(num_rows)
+			std::slice::from_raw_parts_mut(out_ptr, total).copy_from_slice(&temp);
 		} else {
-			let out = std::slice::from_raw_parts_mut(out_ptr, total_size);
+			let out = std::slice::from_raw_parts_mut(out_ptr, total);
+			let mu  = std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>, total);
+			init_matrix_prefixes(mu, len, &warm);
 			midprice_batch_inner_into(high, low, &range, Kernel::Auto, false, out)
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
-			Ok(num_rows)
 		}
+		Ok(rows)
 	}
 }
 

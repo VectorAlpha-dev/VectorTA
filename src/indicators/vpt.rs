@@ -19,11 +19,8 @@ use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
 	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
-use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
-#[cfg(not(target_arch = "wasm32"))]
-use rayon::prelude::*;
 use std::error::Error;
 use thiserror::Error;
 
@@ -135,6 +132,24 @@ pub enum VptError {
 	AllValuesNaN,
 	#[error("vpt: Not enough valid data (fewer than 2 valid points).")]
 	NotEnoughValidData,
+	#[error("vpt: Invalid output length. expected={expected}, got={got}")]
+	InvalidLength { expected: usize, got: usize },
+}
+
+#[inline]
+fn vpt_first_valid(price: &[f64], volume: &[f64]) -> Option<usize> {
+	// VPT always has NaN at index 0, so warmup is at least 1
+	// Find earliest i >= 1 where the formula can produce a finite value
+	// needs p[i-1] finite and != 0, p[i] finite, v[i] finite
+	for i in 1..price.len() {
+		let p0 = price[i - 1];
+		let p1 = price[i];
+		let v1 = volume[i];
+		if p0.is_finite() && p0 != 0.0 && p1.is_finite() && v1.is_finite() {
+			return Some(i);
+		}
+	}
+	None
 }
 
 #[inline]
@@ -189,35 +204,27 @@ pub fn vpt_with_kernel(input: &VptInput, kernel: Kernel) -> Result<VptOutput, Vp
 #[inline]
 pub unsafe fn vpt_scalar(price: &[f64], volume: &[f64]) -> Result<VptOutput, VptError> {
 	let n = price.len();
-	let mut res = alloc_with_nan_prefix(n, 1);
-	
-	// VPT uses "shifted array approach": output[i] = vpt_val[i] + vpt_val[i-1]
-	// Start with 0.0 for cumulative calculation
-	let mut prev_vpt_val = 0.0;
-	
-	for i in 1..n {
+	let first = vpt_first_valid(price, volume).ok_or(VptError::NotEnoughValidData)?;
+	let mut res = alloc_with_nan_prefix(n, first + 1);
+
+	// seed cumulative with vpt_val at `first`
+	let p0 = price[first - 1];
+	let p1 = price[first];
+	let v1 = volume[first];
+	let mut prev_cum = v1 * ((p1 - p0) / p0);
+
+	for i in (first + 1)..n {
 		let p0 = price[i - 1];
 		let p1 = price[i];
 		let v1 = volume[i];
-		
-		// Calculate current VPT value (change for this period)
-		let vpt_val = if p0.is_nan() || p0 == 0.0 || p1.is_nan() || v1.is_nan() {
+		let cur = if p0.is_nan() || p0 == 0.0 || p1.is_nan() || v1.is_nan() {
 			f64::NAN
 		} else {
 			v1 * ((p1 - p0) / p0)
 		};
-		
-		// Calculate cumulative VPT
-		res[i] = if vpt_val.is_nan() {
-			f64::NAN
-		} else {
-			vpt_val + prev_vpt_val
-		};
-		
-		// Save cumulative value for next iteration
-		prev_vpt_val = res[i];  // Keep NaN to propagate it forward
+		res[i] = if cur.is_nan() || prev_cum.is_nan() { f64::NAN } else { cur + prev_cum };
+		prev_cum = res[i];
 	}
-	
 	Ok(VptOutput { values: res })
 }
 
@@ -338,9 +345,7 @@ pub fn vpt_indicator_scalar(input: &VptInput) -> Result<VptOutput, VptError> {
 
 #[inline]
 pub fn vpt_expand_grid() -> Vec<VptParams> {
-	// VPT has no parameters, return single empty params
-	// Using array instead of vec! to avoid allocation
-	[VptParams].to_vec()
+	vec![VptParams::default()]
 }
 
 /// Write VPT directly to output slice - no allocations
@@ -350,7 +355,7 @@ pub fn vpt_into_slice(dst: &mut [f64], price: &[f64], volume: &[f64], kern: Kern
 	}
 	
 	if dst.len() != price.len() {
-		return Err(VptError::EmptyData); // Using EmptyData as we don't have InvalidLength
+		return Err(VptError::InvalidLength { expected: price.len(), got: dst.len() });
 	}
 	
 	let valid_count = price
@@ -366,18 +371,18 @@ pub fn vpt_into_slice(dst: &mut [f64], price: &[f64], volume: &[f64], kern: Kern
 		return Err(VptError::NotEnoughValidData);
 	}
 	
-	// Use the row version which writes directly to output
+	let first = vpt_first_valid(price, volume).ok_or(VptError::NotEnoughValidData)?;
 	unsafe {
 		match kern {
-			Kernel::Scalar | Kernel::ScalarBatch | Kernel::Auto => vpt_row_scalar(price, volume, dst),
+			Kernel::Scalar | Kernel::ScalarBatch | Kernel::Auto => vpt_row_scalar_from(price, volume, first + 1, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => vpt_row_avx2(price, volume, dst),
+			Kernel::Avx2 | Kernel::Avx2Batch => vpt_row_avx2_from(price, volume, first + 1, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => vpt_row_avx512(price, volume, dst),
-			_ => vpt_row_scalar(price, volume, dst),
+			Kernel::Avx512 | Kernel::Avx512Batch => vpt_row_avx512_from(price, volume, first + 1, dst),
+			_ => vpt_row_scalar_from(price, volume, first + 1, dst),
 		}
 	}
-	
+	for v in &mut dst[..=first] { *v = f64::NAN; }
 	Ok(())
 }
 
@@ -392,20 +397,23 @@ pub fn vpt_batch_inner_into(
 	if price.is_empty() || volume.is_empty() || price.len() != volume.len() {
 		return Err(VptError::EmptyData);
 	}
+	let combos = vec![VptParams::default()];
+	let cols = price.len();
+	if out.len() != cols { return Err(VptError::InvalidLength { expected: cols, got: out.len() }); }
 
-	// VPT has no parameters, so only one "combo"
-	let combos = vec![VptParams];
-	
-	// Single row output
-	match kern {
-		Kernel::Scalar | Kernel::ScalarBatch => unsafe { vpt_row_scalar(price, volume, out) },
-		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-		Kernel::Avx2 | Kernel::Avx2Batch => unsafe { vpt_row_avx2(price, volume, out) },
-		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-		Kernel::Avx512 | Kernel::Avx512Batch => unsafe { vpt_row_avx512(price, volume, out) },
-		_ => unsafe { vpt_row_scalar(price, volume, out) },
+	let first = vpt_first_valid(price, volume).ok_or(VptError::NotEnoughValidData)?;
+
+	// change calls to start at first + 1
+	unsafe {
+		match kern {
+			Kernel::Scalar | Kernel::ScalarBatch | Kernel::Auto => vpt_row_scalar_from(price, volume, first + 1, out),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => vpt_row_avx2_from(price, volume, first + 1, out),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => vpt_row_avx512_from(price, volume, first + 1, out),
+			_ => vpt_row_scalar_from(price, volume, first + 1, out),
+		}
 	}
-
 	Ok(combos)
 }
 
@@ -524,59 +532,79 @@ pub fn vpt_batch_par_slice(price: &[f64], volume: &[f64], kern: Kernel) -> Resul
 
 #[inline(always)]
 fn vpt_batch_inner(price: &[f64], volume: &[f64], kern: Kernel, _parallel: bool) -> Result<VptBatchOutput, VptError> {
+	if price.is_empty() || volume.is_empty() || price.len() != volume.len() {
+		return Err(VptError::EmptyData);
+	}
+
 	let combos = vpt_expand_grid();
-	let rows = 1;
+	let rows = 1usize;
 	let cols = price.len();
 
-	let output = match kern {
-		Kernel::Scalar | Kernel::ScalarBatch => unsafe { vpt_scalar(price, volume)? },
-		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-		Kernel::Avx2 | Kernel::Avx2Batch => unsafe { vpt_avx2(price, volume)? },
-		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-		Kernel::Avx512 | Kernel::Avx512Batch => unsafe { vpt_avx512(price, volume)? },
-		_ => unreachable!(),
+	// uninit matrix, then fill warmup prefixes with NaN
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+
+	// For VPT, warmup is always at least 1 (index 0 is always NaN)
+	// but might be more if there are NaN values in the data
+	let first_valid = vpt_first_valid(price, volume).ok_or(VptError::NotEnoughValidData)?;
+	let warm = vec![first_valid];
+	init_matrix_prefixes(&mut buf_mu, cols, &warm);
+
+	// get &mut [f64] view over MaybeUninit<f64> buffer
+	let mut guard = core::mem::ManuallyDrop::new(buf_mu);
+	let out: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len())
 	};
 
-	Ok(VptBatchOutput {
-		values: output.values,
-		combos,
-		rows,
-		cols,
-	})
+	vpt_batch_inner_into(price, volume, &VptBatchRange, kern, _parallel, out)?;
+
+	let values = unsafe {
+		Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, guard.len(), guard.capacity())
+	};
+
+	Ok(VptBatchOutput { values, combos, rows, cols })
 }
 
 #[inline(always)]
 pub unsafe fn vpt_row_scalar(price: &[f64], volume: &[f64], out: &mut [f64]) {
+	// full coverage writer for python path
+	// Find first valid index and set everything before and including it to NaN
 	let n = price.len();
-	
-	// First value is always NaN
-	out[0] = f64::NAN;
-	
-	// VPT uses "shifted array approach": output[i] = vpt_val[i] + vpt_val[i-1]
-	// Start with 0.0 for cumulative calculation
-	let mut prev_vpt_val = 0.0;
-	
-	for i in 1..n {
+	if let Some(first) = vpt_first_valid(price, volume) {
+		// Set warmup prefix to NaN
+		for i in 0..=first {
+			out[i] = f64::NAN;
+		}
+		// Use the _from variant starting at first + 1
+		vpt_row_scalar_from(price, volume, first + 1, out);
+	} else {
+		// No valid data, all NaN
+		for i in 0..n {
+			out[i] = f64::NAN;
+		}
+	}
+}
+
+#[inline(always)]
+pub unsafe fn vpt_row_scalar_from(price: &[f64], volume: &[f64], start_i: usize, out: &mut [f64]) {
+	let n = price.len();
+	// seed = VPT value at index (start_i - 1); not written to out
+	let mut prev_vpt_val = if start_i >= 2 {
+		let k = start_i - 1;
+		let p0 = price[k - 1];
+		let p1 = price[k];
+		let v1 = volume[k];
+		if p0.is_nan() || p0 == 0.0 || p1.is_nan() || v1.is_nan() { f64::NAN } else { v1 * ((p1 - p0) / p0) }
+	} else {
+		0.0
+	};
+
+	for i in start_i..n {
 		let p0 = price[i - 1];
 		let p1 = price[i];
 		let v1 = volume[i];
-		
-		// Calculate current VPT value (change for this period)
-		let vpt_val = if p0.is_nan() || p0 == 0.0 || p1.is_nan() || v1.is_nan() {
-			f64::NAN
-		} else {
-			v1 * ((p1 - p0) / p0)
-		};
-		
-		// Calculate cumulative VPT
-		out[i] = if vpt_val.is_nan() {
-			f64::NAN
-		} else {
-			vpt_val + prev_vpt_val
-		};
-		
-		// Save cumulative value for next iteration
-		prev_vpt_val = out[i];  // Keep NaN to propagate it forward
+		let cur = if p0.is_nan() || p0 == 0.0 || p1.is_nan() || v1.is_nan() { f64::NAN } else { v1 * ((p1 - p0) / p0) };
+		out[i] = if cur.is_nan() || prev_vpt_val.is_nan() { f64::NAN } else { cur + prev_vpt_val };
+		prev_vpt_val = out[i];
 	}
 }
 
@@ -588,8 +616,20 @@ pub unsafe fn vpt_row_avx2(price: &[f64], volume: &[f64], out: &mut [f64]) {
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
+pub unsafe fn vpt_row_avx2_from(price: &[f64], volume: &[f64], start_i: usize, out: &mut [f64]) {
+	vpt_row_scalar_from(price, volume, start_i, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
 pub unsafe fn vpt_row_avx512(price: &[f64], volume: &[f64], out: &mut [f64]) {
 	vpt_row_scalar(price, volume, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+pub unsafe fn vpt_row_avx512_from(price: &[f64], volume: &[f64], start_i: usize, out: &mut [f64]) {
+	vpt_row_scalar_from(price, volume, start_i, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -666,6 +706,15 @@ pub fn vpt_batch_py<'py>(
 
 	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
 	let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+	// Initialize NaN prefix for VPT (indices 0..=first_valid)
+	let first_valid = vpt_first_valid(price_slice, volume_slice)
+		.ok_or_else(|| PyValueError::new_err("Not enough valid data"))?;
+	
+	// set [0..=first_valid] to NaN
+	for i in 0..=first_valid {
+		slice_out[i] = f64::NAN;
+	}
 
 	let _combos = py
 		.allow_threads(|| {
@@ -761,6 +810,7 @@ pub struct VptBatchConfig {
 #[derive(Serialize, Deserialize)]
 pub struct VptBatchJsOutput {
 	pub values: Vec<f64>,
+	pub combos: Vec<VptParams>,
 	pub rows: usize,
 	pub cols: usize,
 }
@@ -774,8 +824,9 @@ pub fn vpt_batch_js(price: &[f64], volume: &[f64], _config: JsValue) -> Result<J
 	
 	let js_output = VptBatchJsOutput {
 		values: output.values,
-		rows: 1,
-		cols: price.len(),
+		combos: output.combos,
+		rows: output.rows,
+		cols: output.cols,
 	};
 	
 	serde_wasm_bindgen::to_value(&js_output)

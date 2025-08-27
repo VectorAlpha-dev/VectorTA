@@ -106,7 +106,7 @@ test('VAR very small dataset', () => {
     
     assert.throws(() => {
         wasm.var_js(singlePoint, 14, 1.0);
-    }, /Not enough valid data/);
+    }, /Invalid period/);
 });
 
 test('VAR empty input', () => {
@@ -194,14 +194,14 @@ test('VAR fast API (in-place)', async () => {
     
     try {
         // Create input data
-        const inData = new Float64Array(wasm.memory.buffer, outPtr, len);
+        const inData = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
         inData.set(close);
         
         // Apply VAR in-place (same pointer for input and output)
         wasm.var_into(outPtr, outPtr, len, 14, 1.0);
         
         // Read result
-        const result = new Float64Array(wasm.memory.buffer, outPtr, len);
+        const result = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
         
         // Compare with safe API
         const expected = wasm.var_js(close, 14, 1.0);
@@ -224,14 +224,14 @@ test('VAR fast API (separate buffers)', async () => {
     
     try {
         // Create input data
-        const inData = new Float64Array(wasm.memory.buffer, inPtr, len);
+        const inData = new Float64Array(wasm.__wasm.memory.buffer, inPtr, len);
         inData.set(close);
         
         // Apply VAR with separate buffers
         wasm.var_into(inPtr, outPtr, len, 14, 1.0);
         
         // Read result
-        const result = new Float64Array(wasm.memory.buffer, outPtr, len);
+        const result = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
         
         // Compare with safe API
         const expected = wasm.var_js(close, 14, 1.0);

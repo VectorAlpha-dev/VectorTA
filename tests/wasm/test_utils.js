@@ -106,6 +106,143 @@ const EXPECTED_OUTPUTS = {
             59165.14427332
         ]
     },
+    hma: {
+        defaultParams: { period: 5 },
+        last5Values: [
+            59334.13333336847,
+            59201.4666667018,
+            59047.77777781293,
+            59048.71111114628,
+            58803.44444447962
+        ],
+        // Warmup period = first + period + sqrt(period) - 2
+        // For period=5: sqrt(5) = 2 (floor), so warmup = 0 + 5 + 2 - 2 = 5
+        warmupPeriod: 5
+    },
+    pwma: {
+        defaultParams: { period: 5 },
+        last5Values: [
+            59313.25,
+            59309.6875,
+            59249.3125,
+            59175.625,
+            59094.875
+        ],
+        warmupPeriod: 244,  // first_valid (240) + period - 1 = 240 + 5 - 1 = 244
+        // Values for re-input test (applying PWMA twice)
+        reinputPeriods: { first: 5, second: 3 },
+        reinputWarmup: 246,  // 240 + (5 - 1) + (3 - 1) = 246
+        // Values for constant input test (all values = 50.0)
+        constantValue: 50.0,
+        // Values for simple formula verification test
+        formulaTest: {
+            data: [1.0, 2.0, 3.0, 4.0, 5.0],
+            period: 3,
+            // For period=3: weights = [1, 2, 1] / 4 = [0.25, 0.5, 0.25]
+            expected: [NaN, NaN, 2.0, 3.0, 4.0]
+        },
+        // Batch test parameters
+        batchPeriods: [3, 5, 7, 9],
+        batchRange: { start: 3, end: 10, step: 2 }
+    },
+    cci: {
+        defaultParams: { period: 14 },
+        last5Values: [
+            -51.55252564125841,
+            -43.50326506381541,
+            -64.05117302269149,
+            -39.05150631680948,
+            -152.50523930896998
+        ]
+    },
+    devstop: {
+        defaultParams: {
+            period: 20,
+            mult: 0.0,
+            devtype: 0,
+            direction: 'long',
+            maType: 'sma'
+        },
+        last5Values: [
+            59774.25,
+            59774.25,
+            59774.25,
+            59774.25,
+            59774.25
+        ]
+    },
+    er: {
+        defaultParams: { period: 5 },
+        last5Values: [
+            0.5660919540229885,
+            0.30434782608695654,
+            0.941320293398533,
+            0.3155080213903743,
+            0.7308584686774942
+        ],
+        // Values at specific indices for validation
+        valuesAt100_104: [
+            0.2715789473684199,
+            0.35274356103023446,
+            0.11690821256038508,
+            0.7715877437325899,
+            0.6793743890518072
+        ],
+        // Expected values for perfectly trending data [1,2,3,4,5,6,7,8,9,10]
+        trendingDataValues: Array(6).fill(1.0),  // ER should be 1.0 for perfect trend after warmup
+        // Expected values for choppy data [1,5,2,6,3,7,4,8,5,9]
+        choppyDataValues: Array(6).fill(0.14285714285714285),  // Low ER for choppy market
+        // Warmup period for default params (first valid index)
+        warmupPeriod: 4  // period - 1 = 5 - 1 = 4
+    },
+    cvi: {
+        defaultParams: { period: 10 },
+        accuracyParams: { period: 5 },
+        last5Values: [  // For period=5
+            -52.96320026271643,
+            -64.39616778235792,
+            -59.4830094380472,
+            -52.4690724045071,
+            -11.858704179539174
+        ],
+        warmupPeriod: 19,  // 2 * period - 1 = 2 * 10 - 1 = 19 for default
+        accuracyWarmup: 9  // 2 * 5 - 1 = 9 for accuracy test
+    },
+    tema: {
+        defaultParams: { period: 9 },
+        last5Values: [
+            59281.895570662884,
+            59257.25021607971,
+            59172.23342859784,
+            59175.218345941066,
+            58934.24395798363
+        ],
+        warmupPeriod: 24  // (period - 1) * 3 = (9 - 1) * 3 = 24
+    },
+    lrsi: {
+        defaultParams: { alpha: 0.2 },
+        // LRSI is a momentum oscillator that produces values in [0,1] range
+        // Actual values depend on market conditions and cannot be predetermined
+    },
+    iftRsi: {
+        defaultParams: { rsiPeriod: 5, wmaPeriod: 9 },
+        last5Values: [
+            -0.27763026899967286,
+            -0.367418234207824,
+            -0.1650156844504996,
+            -0.26631220621545837,
+            0.28324385010826775
+        ],
+        warmupPeriod: 13,  // first + rsi_period + wma_period - 1 (0 + 5 + 9 - 1)
+        parameterCombinations: [
+            { rsiPeriod: 2, wmaPeriod: 2 },
+            { rsiPeriod: 3, wmaPeriod: 5 },
+            { rsiPeriod: 7, wmaPeriod: 14 },
+            { rsiPeriod: 14, wmaPeriod: 21 },
+            { rsiPeriod: 21, wmaPeriod: 9 },
+            { rsiPeriod: 50, wmaPeriod: 50 }
+        ]
+    },
     cg: {
         defaultParams: { period: 10 },
         last5Values: [
@@ -115,6 +252,23 @@ const EXPECTED_OUTPUTS = {
             -4.9928483984587295,
             -5.004210799262688
         ]
+    },
+    linreg: {
+        defaultParams: { period: 14 },
+        last5Values: [
+            58929.37142857143,
+            58899.42857142857,
+            58918.857142857145,
+            59100.6,
+            58987.94285714286
+        ],
+        warmupPeriod: 13,  // first + period - 1 = 0 + 14 - 1 = 13
+        // Values for re-input test (applying LinReg twice)
+        reinputPeriods: { first: 14, second: 10 },
+        reinputWarmup: 23,  // 0 + (14 - 1) + (10 - 1) = 22, but since the second starts with NaN from first, it's 23
+        // Batch test parameters
+        batchPeriods: [10, 20, 30, 40],
+        batchRange: [10, 40, 10]
     },
     cfo: {
         defaultParams: { period: 14, scalar: 100.0 },

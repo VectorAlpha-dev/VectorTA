@@ -243,63 +243,39 @@ test.describe('TEMA (Triple Exponential Moving Average)', () => {
         assert(!isNaN(result[warmup]), 'First non-NaN value should be at warmup index');
     });
     
-    test('reinput - using output as input', async () => {
-        const close = new Float64Array(testData.close);
+    test('all NaN input', () => {
+        const allNan = new Float64Array(100).fill(NaN);
         
-        // First TEMA with period 9
-        const firstPeriod = 9;
-        const firstResult = wasm.tema_js(close, firstPeriod);
-        assert.strictEqual(firstResult.length, close.length);
-        
-        // Use first result as input for second TEMA with period 5
-        const secondPeriod = 5;
-        const secondResult = wasm.tema_js(firstResult, secondPeriod);
-        assert.strictEqual(secondResult.length, firstResult.length);
-        
-        // Verify second result is not all NaN
-        // First TEMA has warmup of (9-1)*3 = 24
-        // Second TEMA adds warmup of (5-1)*3 = 12
-        // So total warmup should be 24 + 12 = 36
-        for (let i = 0; i < 36; i++) {
-            assert(isNaN(secondResult[i]), `Index ${i} should be NaN`);
-        }
-        for (let i = 36; i < secondResult.length; i++) {
-            assert(!isNaN(secondResult[i]), `Index ${i} should not be NaN`);
-        }
-        
-        // Verify the output values are reasonable
-        const validValues = secondResult.slice(36);
-        const uniqueValues = new Set(validValues);
-        assert(uniqueValues.size > 1, 'Should have multiple different values');
-        
-        // Check all values are finite
-        for (const val of validValues) {
-            assert(Number.isFinite(val), 'All values should be finite');
-        }
-        
-        // Check has variance
-        const mean = validValues.reduce((a, b) => a + b, 0) / validValues.length;
-        const variance = validValues.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / validValues.length;
-        assert(variance > 0, 'Should have non-zero variance');
+        assert.throws(
+            () => wasm.tema_js(allNan, 9),
+            /All values are NaN/,
+            'Should throw error for all NaN input'
+        );
     });
     
-    test('accuracy check with simple data', () => {
-        // Simple test data where we can verify calculations
-        const data = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
-        const period = 3;
+    test('accuracy check with expected values', () => {
+        const close = new Float64Array(testData.close);
+        const expected = EXPECTED_OUTPUTS.tema;
         
-        const result = wasm.tema_js(data, period);
+        const result = wasm.tema_js(close, expected.defaultParams.period);
         
-        // Warmup period is (3-1)*3 = 6
-        for (let i = 0; i < 6; i++) {
-            assert(isNaN(result[i]), `Index ${i} should be NaN`);
+        // Check last 5 values match expected
+        const last5 = result.slice(-5);
+        assertArrayClose(
+            last5,
+            expected.last5Values,
+            1e-8,
+            "TEMA last 5 values mismatch"
+        );
+        
+        // Verify warmup period
+        const warmup = expected.warmupPeriod;
+        for (let i = 0; i < warmup; i++) {
+            assert(isNaN(result[i]), `Expected NaN at index ${i} during warmup`);
         }
-        
-        // First valid values should be reasonable
-        assert(result[6] > 6.0 && result[6] < 8.0, 'First valid value should be near trend');
-        assert(result[7] > 7.0 && result[7] < 9.0, 'Second valid value should be near trend');
-        assert(result[8] > 8.0 && result[8] < 10.0, 'Third valid value should be near trend');
-        assert(result[9] > 9.0 && result[9] < 11.0, 'Fourth valid value should be near trend');
+        for (let i = warmup; i < result.length; i++) {
+            assert(!isNaN(result[i]), `Unexpected NaN at index ${i} after warmup`);
+        }
     });
     
     test('batch metadata structure', () => {

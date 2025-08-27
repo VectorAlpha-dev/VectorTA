@@ -22,65 +22,97 @@ def test_data():
     return data['close']
 
 class TestER:
-    """Test cases for ER (Kaufman Efficiency Ratio) indicator"""
+    """Test cases for ER (Kaufman Efficiency Ratio) indicator.
+    These tests mirror the Rust unit tests to ensure Python bindings work correctly.
+    """
     
-    def test_er_basic(self, test_data):
-        """Test basic ER calculation"""
+    def test_er_accuracy(self, test_data):
+        """Test ER matches expected values from Rust tests - mirrors check_er_accuracy"""
+        from test_utils import EXPECTED_OUTPUTS
+        
+        expected = EXPECTED_OUTPUTS['er']
+        result = ta.er(test_data, period=expected['default_params']['period'])
+        
+        assert len(result) == len(test_data)
+        
+        # Check last 5 values match expected
+        assert_array_almost_equal(
+            result[-5:], 
+            expected['last_5_values'],
+            decimal=8,
+            err_msg="ER last 5 values mismatch"
+        )
+        
+        # Check values at specific indices
+        assert_array_almost_equal(
+            result[100:105],
+            expected['values_at_100_104'],
+            decimal=8,
+            err_msg="ER values at indices 100-104 mismatch"
+        )
+    
+    def test_er_partial_params(self, test_data):
+        """Test ER with partial parameters - mirrors check_er_partial_params"""
+        # ER has no optional params, but test with defaults
         result = ta.er(test_data, period=5)
         assert isinstance(result, np.ndarray)
         assert len(result) == len(test_data)
-        
-        # Check that first period-1 values are NaN
-        assert all(np.isnan(result[:4]))
-        
-        # Check that remaining values are between 0 and 1
-        valid_values = result[4:]
-        assert all((v >= 0.0 and v <= 1.0) or np.isnan(v) for v in valid_values)
     
-    def test_er_with_different_periods(self, test_data):
-        """Test ER with various period values"""
-        for period in [5, 10, 20, 50]:
-            result = ta.er(test_data, period=period)
-            assert len(result) == len(test_data)
-            # Check warmup period
-            assert all(np.isnan(result[:period-1]))
+    def test_er_default_candles(self, test_data):
+        """Test ER with default parameters - mirrors check_er_default_candles"""
+        # Test with default period = 5
+        result = ta.er(test_data, period=5)
+        assert len(result) == len(test_data)
+        
+        # Calculate first valid index: first_non_nan + period - 1
+        first_valid = np.where(~np.isnan(test_data))[0][0] if np.any(~np.isnan(test_data)) else 0
+        warmup_end = first_valid + 5 - 1
+        
+        # Check warmup period has NaN values
+        assert all(np.isnan(result[:warmup_end]))
     
     def test_er_zero_period(self, test_data):
-        """Test ER fails with zero period"""
-        with pytest.raises(Exception, match="Invalid period"):
+        """Test ER fails with zero period - mirrors check_er_zero_period"""
+        with pytest.raises(ValueError, match="Invalid period"):
             ta.er(test_data, period=0)
     
     def test_er_period_exceeds_length(self):
-        """Test ER fails when period exceeds data length"""
+        """Test ER fails when period exceeds data length - mirrors check_er_period_exceeds_length"""
         small_data = np.array([10.0, 20.0, 30.0])
-        with pytest.raises(Exception, match="Invalid period|Not enough valid data"):
+        with pytest.raises(ValueError, match="Invalid period|Not enough valid data"):
             ta.er(small_data, period=10)
     
     def test_er_very_small_dataset(self):
-        """Test ER fails with insufficient data"""
+        """Test ER fails with insufficient data - mirrors check_er_very_small_dataset"""
         single_point = np.array([42.0])
-        with pytest.raises(Exception, match="Invalid period|Not enough valid data"):
+        with pytest.raises(ValueError, match="Invalid period|Not enough valid data"):
             ta.er(single_point, period=5)
     
     def test_er_empty_input(self):
-        """Test ER fails with empty input"""
+        """Test ER fails with empty input - mirrors check_er_empty_input"""
         empty = np.array([])
-        with pytest.raises(Exception, match="All values are NaN"):
+        with pytest.raises(ValueError, match="Input data slice is empty|All values are NaN"):
             ta.er(empty, period=5)
     
     def test_er_all_nan_input(self):
         """Test ER fails with all NaN values"""
         all_nan = np.full(100, np.nan)
-        with pytest.raises(Exception, match="All values are NaN"):
+        with pytest.raises(ValueError, match="All input data values are NaN"):
             ta.er(all_nan, period=5)
     
     def test_er_nan_handling(self, test_data):
-        """Test ER handles NaN values correctly"""
+        """Test ER handles NaN values correctly - mirrors check_er_nan_handling"""
         result = ta.er(test_data, period=5)
+        assert len(result) == len(test_data)
         
         # After warmup period (240), no NaN values should exist
         if len(result) > 240:
-            assert not any(np.isnan(result[240:]))
+            assert not any(np.isnan(result[240:])), "Found unexpected NaN after warmup period"
+        
+        # First period-1 values should be NaN (accounting for first valid data)
+        first_valid = np.where(~np.isnan(test_data))[0][0] if np.any(~np.isnan(test_data)) else 0
+        warmup_end = first_valid + 5 - 1
+        assert all(np.isnan(result[:warmup_end])), "Expected NaN in warmup period"
     
     def test_er_reinput(self, test_data):
         """Test ER applied twice (re-input)"""
@@ -118,22 +150,22 @@ class TestER:
         assert_array_almost_equal(batch_result, stream_result, decimal=10)
     
     def test_er_batch_single_period(self, test_data):
-        """Test batch ER with single period"""
+        """Test batch ER with single period - mirrors check_batch_default_row"""
         result = ta.er_batch(test_data, period_range=(5, 5, 0))
         
         assert 'values' in result
         assert 'periods' in result
-        assert 'rows' in result
+        assert 'rows' in result  
         assert 'cols' in result
         
         assert result['rows'] == 1
         assert result['cols'] == len(test_data)
-        assert len(result['values']) == len(test_data)
-        assert result['periods'] == [5]
+        assert result['values'].shape == (1, len(test_data))  # Should be 2D
+        assert list(result['periods']) == [5]
         
         # Should match single calculation
         single_result = ta.er(test_data, period=5)
-        assert_array_almost_equal(result['values'], single_result, decimal=10)
+        assert_array_almost_equal(result['values'][0], single_result, decimal=10)
     
     def test_er_batch_multiple_periods(self, test_data):
         """Test batch ER with multiple periods"""
@@ -145,14 +177,12 @@ class TestER:
         
         assert result['rows'] == 3
         assert result['cols'] == 100
-        assert len(result['values']) == 300
-        assert result['periods'] == [5, 10, 15]
+        assert result['values'].shape == (3, 100)  # Should be 2D array
+        assert list(result['periods']) == [5, 10, 15]
         
         # Verify each row matches individual calculation
         for i, period in enumerate([5, 10, 15]):
-            row_start = i * 100
-            row_end = row_start + 100
-            row_data = result['values'][row_start:row_end]
+            row_data = result['values'][i]
             
             single_result = ta.er(data_subset, period=period)
             assert_array_almost_equal(row_data, single_result, decimal=10)
@@ -163,14 +193,14 @@ class TestER:
         
         # Single value sweep
         result = ta.er_batch(data, period_range=(5, 5, 1))
-        assert len(result['values']) == 10
-        assert result['periods'] == [5]
+        assert result['values'].shape == (1, 10)  # 2D array with 1 row
+        assert list(result['periods']) == [5]
         
         # Step larger than range
         result = ta.er_batch(data, period_range=(5, 7, 10))
         # Should only have period=5
-        assert len(result['values']) == 10
-        assert result['periods'] == [5]
+        assert result['values'].shape == (1, 10)  # 2D array with 1 row
+        assert list(result['periods']) == [5]
     
     def test_er_with_kernel_parameter(self, test_data):
         """Test ER with different kernel parameters"""
@@ -185,18 +215,31 @@ class TestER:
     
     def test_er_consistency(self):
         """Test ER produces consistent results for known data"""
-        # Simple test case with clear trend
+        from test_utils import EXPECTED_OUTPUTS
+        expected = EXPECTED_OUTPUTS['er']
+        
+        # Test with perfectly trending data
         trending_data = np.array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], dtype=np.float64)
         result = ta.er(trending_data, period=5)
         
-        # For perfectly trending data, ER should be close to 1
+        # For perfectly trending data, ER should be 1.0
         valid_values = result[4:]  # Skip warmup
-        assert all(v > 0.9 for v in valid_values)
+        assert_array_almost_equal(
+            valid_values,
+            expected['trending_data_values'],
+            decimal=10,
+            err_msg="ER trending data mismatch"
+        )
         
-        # Choppy data
+        # Test with choppy data
         choppy_data = np.array([1, 5, 2, 6, 3, 7, 4, 8, 5, 9], dtype=np.float64)
         result = ta.er(choppy_data, period=5)
         
-        # For choppy data, ER should be lower
+        # For choppy data, ER should be low (~0.143)
         valid_values = result[4:]  # Skip warmup
-        assert all(v < 0.5 for v in valid_values)
+        assert_array_almost_equal(
+            valid_values,
+            expected['choppy_data_values'],
+            decimal=10,
+            err_msg="ER choppy data mismatch"
+        )

@@ -4,7 +4,7 @@
 //! and the price `period` bars ago. Centered around 1.0; >1 means increase, <1 decrease.
 //!
 //! ## Parameters
-//! - **period**: Lookback window (number of data points), default 9.
+//! - **period**: Lookback window (number of data points), default 10.
 //!
 //! ## Errors
 //! - **EmptyData**: rocr: Input data slice is empty.
@@ -79,7 +79,7 @@ pub struct RocrParams {
 
 impl Default for RocrParams {
 	fn default() -> Self {
-		Self { period: Some(10) }
+		Self { period: Some(DEFAULT_PERIOD) }
 	}
 }
 
@@ -110,7 +110,7 @@ impl<'a> RocrInput<'a> {
 	}
 	#[inline]
 	pub fn get_period(&self) -> usize {
-		self.params.period.unwrap_or(9)
+		self.params.period.unwrap_or(DEFAULT_PERIOD)
 	}
 }
 
@@ -175,43 +175,45 @@ pub enum RocrError {
 	AllValuesNaN,
 }
 
-#[inline]
-pub fn rocr(input: &RocrInput) -> Result<RocrOutput, RocrError> {
-	rocr_with_kernel(input, Kernel::Auto)
-}
-
-pub fn rocr_with_kernel(input: &RocrInput, kernel: Kernel) -> Result<RocrOutput, RocrError> {
-	let data: &[f64] = match &input.data {
-		RocrData::Candles { candles, source } => source_type(candles, source),
-		RocrData::Slice(sl) => sl,
-	};
-
-	if data.is_empty() {
+#[inline(always)]
+fn rocr_prepare<'a>(
+	input: &'a RocrInput,
+	kern: Kernel,
+) -> Result<(&'a [f64], usize, usize, Kernel), RocrError> {
+	let data: &[f64] = input.as_ref();
+	let len = data.len();
+	if len == 0 {
 		return Err(RocrError::EmptyData);
 	}
 
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(RocrError::AllValuesNaN)?;
-
-	let len = data.len();
 	let period = input.get_period();
 
 	if period == 0 || period > len {
 		return Err(RocrError::InvalidPeriod { period, data_len: len });
 	}
-	if (len - first) < period {
+	if len - first < period {
 		return Err(RocrError::NotEnoughValidData {
 			needed: period,
 			valid: len - first,
 		});
 	}
 
-	let mut out = alloc_with_nan_prefix(len, first + period);
-
-	let chosen = match kernel {
+	let chosen = match kern {
 		Kernel::Auto => detect_best_kernel(),
-		other => other,
+		k => k,
 	};
+	Ok((data, period, first, chosen))
+}
 
+#[inline]
+pub fn rocr(input: &RocrInput) -> Result<RocrOutput, RocrError> {
+	rocr_with_kernel(input, Kernel::Auto)
+}
+
+pub fn rocr_with_kernel(input: &RocrInput, kernel: Kernel) -> Result<RocrOutput, RocrError> {
+	let (data, period, first, chosen) = rocr_prepare(input, kernel)?;
+	let mut out = alloc_with_nan_prefix(data.len(), first + period);
 	unsafe {
 		match chosen {
 			Kernel::Scalar | Kernel::ScalarBatch => rocr_scalar(data, period, first, &mut out),
@@ -222,24 +224,12 @@ pub fn rocr_with_kernel(input: &RocrInput, kernel: Kernel) -> Result<RocrOutput,
 			_ => unreachable!(),
 		}
 	}
-
 	Ok(RocrOutput { values: out })
 }
 
 /// Write ROCR directly to output slice - zero allocations (for WASM optimization)
 pub fn rocr_into_slice(dst: &mut [f64], input: &RocrInput, kern: Kernel) -> Result<(), RocrError> {
-	let (data, period) = match &input.data {
-		RocrData::Candles { candles, source } => {
-			let src = source_type(candles, source);
-			(src, input.params.period.unwrap_or(DEFAULT_PERIOD))
-		}
-		RocrData::Slice(slice) => (*slice, input.params.period.unwrap_or(DEFAULT_PERIOD)),
-	};
-
-	if data.is_empty() {
-		return Err(RocrError::EmptyData);
-	}
-
+	let (data, period, first, chosen) = rocr_prepare(input, kern)?;
 	if dst.len() != data.len() {
 		return Err(RocrError::InvalidPeriod {
 			period: dst.len(),
@@ -247,28 +237,6 @@ pub fn rocr_into_slice(dst: &mut [f64], input: &RocrInput, kern: Kernel) -> Resu
 		});
 	}
 
-	if period == 0 || period > data.len() {
-		return Err(RocrError::InvalidPeriod {
-			period,
-			data_len: data.len(),
-		});
-	}
-
-	let first = data.iter().position(|&x| !x.is_nan()).ok_or(RocrError::AllValuesNaN)?;
-
-	if data.len() - first < period {
-		return Err(RocrError::NotEnoughValidData {
-			needed: period,
-			valid: data.len() - first,
-		});
-	}
-
-	let chosen = match kern {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
-
-	// Compute ROCR values directly into dst
 	unsafe {
 		match chosen {
 			Kernel::Scalar | Kernel::ScalarBatch => rocr_scalar(data, period, first, dst),
@@ -280,24 +248,19 @@ pub fn rocr_into_slice(dst: &mut [f64], input: &RocrInput, kern: Kernel) -> Resu
 		}
 	}
 
+	// Warmup prefix = NaN, inclusive of first..first+period
+	let warm = first + period;
+	for v in &mut dst[..warm] {
+		*v = f64::NAN;
+	}
 	Ok(())
 }
 
 #[inline]
 pub fn rocr_scalar(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) {
-	// Initialize NaN prefix for initial invalid data
-	for i in 0..first_val {
-		out[i] = f64::NAN;
-	}
-	
 	for i in (first_val + period)..data.len() {
-		let current = data[i];
 		let past = data[i - period];
-		out[i] = if past == 0.0 || past.is_nan() {
-			0.0
-		} else {
-			current / past
-		};
+		out[i] = if past == 0.0 || past.is_nan() { 0.0 } else { data[i] / past };
 	}
 }
 
@@ -334,7 +297,7 @@ pub struct RocrStream {
 
 impl RocrStream {
 	pub fn try_new(params: RocrParams) -> Result<Self, RocrError> {
-		let period = params.period.unwrap_or(9);
+		let period = params.period.unwrap_or(DEFAULT_PERIOD);
 		if period == 0 {
 			return Err(RocrError::InvalidPeriod { period, data_len: 0 });
 		}
@@ -350,19 +313,18 @@ impl RocrStream {
 	pub fn update(&mut self, value: f64) -> Option<f64> {
 		let out = if self.filled {
 			let prev = self.buffer[self.head];
-			if prev == 0.0 || prev.is_nan() {
-				0.0
-			} else {
-				value / prev
-			}
+			if prev == 0.0 || prev.is_nan() { 0.0 } else { value / prev }
 		} else {
-			f64::NAN
+			// do not emit until filled
+			self.buffer[self.head] = value;
+			self.head = (self.head + 1) % self.period;
+			if !self.filled && self.head == 0 { self.filled = true; }
+			return None;
 		};
+
 		self.buffer[self.head] = value;
 		self.head = (self.head + 1) % self.period;
-		if !self.filled && self.head == 0 {
-			self.filled = true;
-		}
+		if !self.filled && self.head == 0 { self.filled = true; }
 		Some(out)
 	}
 }
@@ -685,7 +647,7 @@ pub fn expand_grid_rocr(r: &RocrBatchRange) -> Vec<RocrParams> {
 // Python bindings
 #[cfg(feature = "python")]
 #[pyfunction(name = "rocr")]
-#[pyo3(signature = (data, period=9, kernel=None))]
+#[pyo3(signature = (data, period=DEFAULT_PERIOD, kernel=None))]
 pub fn rocr_py<'py>(
 	py: Python<'py>,
 	data: numpy::PyReadonlyArray1<'py, f64>,
@@ -742,45 +704,53 @@ pub fn rocr_batch_py<'py>(
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
 	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
 	use pyo3::types::PyDict;
+	use std::mem::MaybeUninit;
 
 	let slice_in = data.as_slice()?;
-
 	let sweep = RocrBatchRange {
 		period: period_range,
 	};
 
+	// Build combos up front to compute warmprefix per row
 	let combos = expand_grid(&sweep);
 	let rows = combos.len();
 	let cols = slice_in.len();
 
-	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-	let slice_out = unsafe { out_arr.as_slice_mut()? };
-
 	let kern = validate_kernel(kernel, true)?;
+	let simd = match match kern {
+		Kernel::Auto => detect_best_batch_kernel(),
+		k => k,
+	} {
+		Kernel::Avx512Batch => Kernel::Avx512,
+		Kernel::Avx2Batch => Kernel::Avx2,
+		Kernel::ScalarBatch => Kernel::Scalar,
+		_ => unreachable!(),
+	};
 
-	let combos = py
-		.allow_threads(|| {
-			let kernel = match kern {
-				Kernel::Auto => detect_best_batch_kernel(),
-				k => k,
-			};
-			let simd = match kernel {
-				Kernel::Avx512Batch => Kernel::Avx512,
-				Kernel::Avx2Batch => Kernel::Avx2,
-				Kernel::ScalarBatch => Kernel::Scalar,
-				_ => unreachable!(),
-			};
-			
-			// Write directly to the output buffer to avoid extra allocation
-			rocr_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
-		})
+	// Allocate uninitialized Python array, then prefill warm prefixes via helper
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let first = slice_in.iter().position(|x| !x.is_nan()).unwrap_or(cols);
+	let warms: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
+
+	// Cast to MaybeUninit and initialize only warm prefixes with NaN (zero extra copies)
+	unsafe {
+		let mu: &mut [MaybeUninit<f64>] = std::slice::from_raw_parts_mut(
+			out_arr.as_ptr() as *mut MaybeUninit<f64>,
+			rows * cols
+		);
+		init_matrix_prefixes(mu, cols, &warms);
+	}
+
+	// Now compute rows directly into the same buffer
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+	let combos_result = py.allow_threads(|| rocr_batch_inner_into(slice_in, &sweep, simd, true, slice_out))
 		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
 	let dict = PyDict::new(py);
 	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
 	dict.set_item(
 		"periods",
-		combos.iter()
+		combos_result.iter()
 			.map(|p| p.period.unwrap() as u64)
 			.collect::<Vec<_>>()
 			.into_pyarray(py),
@@ -885,7 +855,7 @@ pub fn rocr_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> 
 		period: config.period_range,
 	};
 
-	let output = rocr_batch_inner(data, &sweep, Kernel::Auto, false)
+	let output = rocr_batch_with_kernel(data, &sweep, Kernel::Auto)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	let js_output = RocrBatchJsOutput {
@@ -932,7 +902,12 @@ pub fn rocr_batch_into(
 		};
 		
 		// Compute batch directly into output buffer
-		let combos = rocr_batch_inner_into(data, &sweep, Kernel::Auto, false, out)
+		let simd = match detect_best_batch_kernel() {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch => Kernel::Avx2,
+			_ => Kernel::Scalar,
+		};
+		let combos = rocr_batch_inner_into(data, &sweep, simd, false, out)
 			.map_err(|e| JsValue::from_str(&e.to_string()))?;
 		
 		Ok(combos.len())

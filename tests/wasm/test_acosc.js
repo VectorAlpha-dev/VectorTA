@@ -131,6 +131,68 @@ test('ACOSC NaN handling', () => {
     }
 });
 
+test('ACOSC leading NaNs', () => {
+    // Test ACOSC handles leading NaN values correctly
+    // Create specific test data with known values
+    const nanArray = new Float64Array(10);
+    nanArray.fill(NaN);
+    const dataArray = new Float64Array(200);
+    for (let i = 0; i < 200; i++) {
+        dataArray[i] = 100 + i;
+    }
+    
+    const high = new Float64Array(210);
+    high.set(nanArray, 0);
+    high.set(dataArray, 10);
+    
+    const low = new Float64Array(210);
+    low.set(nanArray, 0);
+    const lowData = new Float64Array(200);
+    for (let i = 0; i < 200; i++) {
+        lowData[i] = 99 + i;
+    }
+    low.set(lowData, 10);
+    
+    const result = wasm.acosc_js(high, low);
+    const len = high.length;
+    const osc = result.slice(0, len);
+    const change = result.slice(len, len * 2);
+    
+    // Warmup should be first_valid (10) + 38 = 48
+    const expectedWarmup = 10 + 38;
+    
+    // Check warmup period
+    assertAllNaN(osc.slice(0, expectedWarmup), `Expected NaN in warmup period [0:${expectedWarmup}] for osc`);
+    assertAllNaN(change.slice(0, expectedWarmup), `Expected NaN in warmup period [0:${expectedWarmup}] for change`);
+    
+    // Should have valid values after warmup
+    assert(!isNaN(osc[expectedWarmup]), `Expected valid value at index ${expectedWarmup} for osc`);
+    assert(!isNaN(change[expectedWarmup]), `Expected valid value at index ${expectedWarmup} for change`);
+});
+
+test('ACOSC all NaN input', () => {
+    // Test ACOSC with all NaN values - throws error due to no valid data
+    const allNanHigh = new Float64Array(100);
+    const allNanLow = new Float64Array(100);
+    allNanHigh.fill(NaN);
+    allNanLow.fill(NaN);
+    
+    // ACOSC throws error when all input is NaN (no valid data points)
+    assert.throws(() => {
+        wasm.acosc_js(allNanHigh, allNanLow);
+    }, /Not enough data/);
+});
+
+test('ACOSC single point', () => {
+    // Test ACOSC with single data point
+    const singleHigh = new Float64Array([100.0]);
+    const singleLow = new Float64Array([99.0]);
+    
+    assert.throws(() => {
+        wasm.acosc_js(singleHigh, singleLow);
+    }, /Not enough data/);
+});
+
 test('ACOSC batch single result', () => {
     // Test batch with single result (since ACOSC has no parameters)
     const high = new Float64Array(testData.high);
@@ -153,23 +215,49 @@ test('ACOSC batch metadata', () => {
 });
 
 test('ACOSC edge cases', () => {
-    // Test edge cases
-    const smallHigh = new Float64Array(40); // Just enough data
-    const smallLow = new Float64Array(40);
+    // Test with exactly minimum required data (39 points)
+    const high = new Float64Array(testData.high.slice(0, 39));
+    const low = new Float64Array(testData.low.slice(0, 39));
     
-    // Fill with test data
-    for (let i = 0; i < 40; i++) {
-        smallHigh[i] = 100 + i;
-        smallLow[i] = 95 + i;
-    }
+    const result = wasm.acosc_js(high, low);
+    assert.strictEqual(result.length, 78); // 39 osc + 39 change
     
-    const result = wasm.acosc_js(smallHigh, smallLow);
-    assert.strictEqual(result.length, 80); // 40 osc + 40 change
+    const osc = result.slice(0, 39);
+    const change = result.slice(39, 78);
+    
+    // First 38 should be NaN
+    assertAllNaN(osc.slice(0, 38), "Expected NaN in first 38 values for osc");
+    assertAllNaN(change.slice(0, 38), "Expected NaN in first 38 values for change");
+    
+    // Last value should be valid
+    assert(!isNaN(osc[38]), "Expected valid value at index 38 for osc");
+    assert(!isNaN(change[38]), "Expected valid value at index 38 for change");
+    
+    // Test with 38 points (one less than minimum) - should throw
+    const tooSmallHigh = new Float64Array(testData.high.slice(0, 38));
+    const tooSmallLow = new Float64Array(testData.low.slice(0, 38));
+    
+    assert.throws(() => {
+        wasm.acosc_js(tooSmallHigh, tooSmallLow);
+    }, /Not enough data/);
     
     // Empty data should throw
     assert.throws(() => {
         wasm.acosc_js(new Float64Array([]), new Float64Array([]));
     }, /Not enough data/);
+});
+
+test('ACOSC batch returns same as single', () => {
+    // Test that batch returns the same result as single API
+    const high = new Float64Array(testData.high.slice(0, 100));
+    const low = new Float64Array(testData.low.slice(0, 100));
+    
+    const singleResult = wasm.acosc_js(high, low);
+    const batchResult = wasm.acosc_batch_js(high, low);
+    
+    // Both should return the same values
+    assert.strictEqual(singleResult.length, batchResult.length);
+    assertArrayClose(singleResult, batchResult, 1e-10, "Batch should match single result");
 });
 
 test.after(() => {

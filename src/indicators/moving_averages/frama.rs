@@ -21,7 +21,6 @@
 //! - **`Ok(FramaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
 //! - **`Err(FramaError)`** otherwise.
 
-use crate::utilities::aligned_vector::AlignedVec;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -276,9 +275,14 @@ fn frama_prepare<'a>(
 	if window == 0 || window > len {
 		return Err(FramaError::InvalidWindow { window, data_len: len });
 	}
-	if (len - first) < window {
+	
+	// Validate against the evenized window
+	let mut win = window;
+	if win & 1 == 1 { win += 1; }
+	
+	if (len - first) < win {
 		return Err(FramaError::NotEnoughValidData {
-			needed: window,
+			needed: win,
 			valid: len - first,
 		});
 	}
@@ -288,7 +292,7 @@ fn frama_prepare<'a>(
 		other => other,
 	};
 
-	let warm = first + window;
+	let warm = first + win - 1;
 
 	Ok(((high, low, close), window, sc, fc, first, len, warm, chosen))
 }
@@ -579,7 +583,11 @@ pub fn frama_scalar(
 	first: usize,
 	len: usize,
 ) -> Result<FramaOutput, FramaError> {
-	let warm = first + window;
+	// Compute warm with evenized window for consistency
+	let mut win = window;
+	if win & 1 == 1 { win += 1; }
+	let warm = first + win - 1;
+	
 	let mut out = alloc_with_nan_prefix(len, warm);
 	frama_compute_into(
 		high,
@@ -934,27 +942,17 @@ unsafe fn frama_avx2_into(
 		win += 1;
 	}
 
-	// Call the appropriate AVX2 function directly on the output buffer
-	if window <= 32 && window & 1 == 0 {
-		match window {
+	// Call the appropriate AVX2 function directly on the output buffer using evenized window
+	if win <= 32 {
+		match win {
 			10 => unsafe { frama_avx2_small::<10>(high, low, close, sc, fc, first, len, out) },
 			14 => unsafe { frama_avx2_small::<14>(high, low, close, sc, fc, first, len, out) },
 			20 => unsafe { frama_avx2_small::<20>(high, low, close, sc, fc, first, len, out) },
 			32 => unsafe { frama_avx2_small::<32>(high, low, close, sc, fc, first, len, out) },
-			_ => {
-				if window <= 32 {
-					unsafe { frama_small_scan(high, low, close, window, sc, fc, first, len, out)? };
-				} else {
-					frama_scalar_deque(high, low, close, window, sc, fc, first, len, out)?;
-				}
-			}
+			_ => unsafe { frama_small_scan(high, low, close, win, sc, fc, first, len, out)? },
 		}
 	} else {
-		if window <= 32 {
-			unsafe { frama_small_scan(high, low, close, window, sc, fc, first, len, out)? };
-		} else {
-			frama_scalar_deque(high, low, close, window, sc, fc, first, len, out)?;
-		}
+		frama_scalar_deque(high, low, close, win, sc, fc, first, len, out)?;
 	}
 	Ok(())
 }
@@ -978,27 +976,17 @@ unsafe fn frama_avx512_into(
 		win += 1;
 	}
 
-	// Call the appropriate AVX512 function directly on the output buffer
-	if window <= 32 && window & 1 == 0 {
-		match window {
+	// Call the appropriate AVX512 function directly on the output buffer using evenized window
+	if win <= 32 {
+		match win {
 			10 => unsafe { frama_avx512_small::<10>(high, low, close, sc, fc, first, len, out) },
 			14 => unsafe { frama_avx512_small::<14>(high, low, close, sc, fc, first, len, out) },
 			20 => unsafe { frama_avx512_small::<20>(high, low, close, sc, fc, first, len, out) },
 			32 => unsafe { frama_avx512_small::<32>(high, low, close, sc, fc, first, len, out) },
-			_ => {
-				if window <= 32 {
-					unsafe { frama_small_scan(high, low, close, window, sc, fc, first, len, out)? };
-				} else {
-					frama_scalar_deque(high, low, close, window, sc, fc, first, len, out)?;
-				}
-			}
+			_ => unsafe { frama_small_scan(high, low, close, win, sc, fc, first, len, out)? },
 		}
 	} else {
-		if window <= 32 {
-			unsafe { frama_small_scan(high, low, close, window, sc, fc, first, len, out)? };
-		} else {
-			frama_scalar_deque(high, low, close, window, sc, fc, first, len, out)?;
-		}
+		frama_scalar_deque(high, low, close, win, sc, fc, first, len, out)?;
 	}
 	Ok(())
 }
@@ -1262,10 +1250,15 @@ fn frama_batch_inner_into(
 		.find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
 		.ok_or(FramaError::AllValuesNaN)?;
 
-	let max_w = combos.iter().map(|c| c.window.unwrap()).max().unwrap();
-	if len - first < max_w {
+	// Calculate max evenized window for validation
+	let max_even_w = combos.iter().map(|c| {
+		let w = c.window.unwrap();
+		if w & 1 == 1 { w + 1 } else { w }
+	}).max().unwrap();
+	
+	if len - first < max_even_w {
 		return Err(FramaError::NotEnoughValidData {
-			needed: max_w,
+			needed: max_even_w,
 			valid: len - first,
 		});
 	}
@@ -1451,18 +1444,18 @@ pub unsafe fn frama_row_scalar(
 	// Note: NaN prefix has already been initialized by init_matrix_prefixes
 	// We just need to compute the values starting from the seed
 
-	// Initialize seed value
+	// Initialize seed value with evenized window
 	let mut win = window;
 	if win & 1 == 1 {
 		win += 1;
 	}
 	seed_sma(close, first, win, out);
 
-	// Use the appropriate scalar function
-	if window <= 32 {
-		frama_small_scan(high, low, close, window, sc, fc, first, len, out).unwrap();
+	// Use the appropriate scalar function with evenized window
+	if win <= 32 {
+		frama_small_scan(high, low, close, win, sc, fc, first, len, out).unwrap();
 	} else {
-		frama_scalar_deque(high, low, close, window, sc, fc, first, len, out).unwrap();
+		frama_scalar_deque(high, low, close, win, sc, fc, first, len, out).unwrap();
 	}
 }
 
@@ -1478,17 +1471,22 @@ pub unsafe fn frama_row_avx2(
 	sc: usize,
 	fc: usize,
 ) {
-	if window <= 32 && window & 1 == 0 {
-		seed_sma(close, first, window, out);
-		match window {
+	// Evenize the window first
+	let mut win = window;
+	if win & 1 == 1 { win += 1; }
+	
+	seed_sma(close, first, win, out);
+	
+	if win <= 32 {
+		match win {
 			10 => frama_avx2_small::<10>(high, low, close, sc, fc, first, high.len(), out),
 			14 => frama_avx2_small::<14>(high, low, close, sc, fc, first, high.len(), out),
 			20 => frama_avx2_small::<20>(high, low, close, sc, fc, first, high.len(), out),
 			32 => frama_avx2_small::<32>(high, low, close, sc, fc, first, high.len(), out),
-			_ => frama_row_scalar(high, low, close, first, window, out, sc, fc),
+			_ => frama_small_scan(high, low, close, win, sc, fc, first, high.len(), out).unwrap(),
 		}
 	} else {
-		frama_row_scalar(high, low, close, first, window, out, sc, fc)
+		frama_scalar_deque(high, low, close, win, sc, fc, first, high.len(), out).unwrap();
 	}
 }
 
@@ -1504,17 +1502,22 @@ pub unsafe fn frama_row_avx512(
 	sc: usize,
 	fc: usize,
 ) {
-	if window <= 32 && window & 1 == 0 {
-		seed_sma(close, first, window, out);
-		match window {
+	// Evenize the window first
+	let mut win = window;
+	if win & 1 == 1 { win += 1; }
+	
+	seed_sma(close, first, win, out);
+	
+	if win <= 32 {
+		match win {
 			10 => frama_avx512_small::<10>(high, low, close, sc, fc, first, high.len(), out),
 			14 => frama_avx512_small::<14>(high, low, close, sc, fc, first, high.len(), out),
 			20 => frama_avx512_small::<20>(high, low, close, sc, fc, first, high.len(), out),
 			32 => frama_avx512_small::<32>(high, low, close, sc, fc, first, high.len(), out),
-			_ => frama_row_scalar(high, low, close, first, window, out, sc, fc),
+			_ => frama_small_scan(high, low, close, win, sc, fc, first, high.len(), out).unwrap(),
 		}
 	} else {
-		frama_row_scalar(high, low, close, first, window, out, sc, fc)
+		frama_scalar_deque(high, low, close, win, sc, fc, first, high.len(), out).unwrap();
 	}
 }
 
@@ -2186,30 +2189,30 @@ use pyo3::types::PyDict;
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "frama")]
-#[pyo3(signature = (high, low, close, window=None, sc=None, fc=None, kernel=None))]
+#[pyo3(signature = (high, low, close, window, sc=300, fc=1, kernel=None))]
 pub fn frama_py<'py>(
 	py: Python<'py>,
 	high: PyReadonlyArray1<'py, f64>,
 	low: PyReadonlyArray1<'py, f64>,
 	close: PyReadonlyArray1<'py, f64>,
-	window: Option<usize>,
-	sc: Option<usize>,
-	fc: Option<usize>,
+	window: usize,
+	sc: usize,
+	fc: usize,
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
-	let high_slice = high.as_slice()?;
-	let low_slice = low.as_slice()?;
-	let close_slice = close.as_slice()?;
+	let h = high.as_slice()?;
+	let l = low.as_slice()?;
+	let c = close.as_slice()?;
+
+	let params = FramaParams { window: Some(window), sc: Some(sc), fc: Some(fc) };
+	let input = FramaInput::from_slices(h, l, c, params);
 	let kern = validate_kernel(kernel, false)?;
 
-	let params = FramaParams { window, sc, fc };
-	let input = FramaInput::from_slices(high_slice, low_slice, close_slice, params);
-
-	let result_vec: Vec<f64> = py
-		.allow_threads(|| frama_with_kernel(&input, kern).map(|o| o.values))
+	let out: Vec<f64> = py.allow_threads(|| frama_with_kernel(&input, kern)
+		.map(|o| o.values))
 		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-	Ok(result_vec.into_pyarray(py))
+	Ok(out.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
@@ -2320,13 +2323,11 @@ pub struct FramaStreamPy {
 #[pymethods]
 impl FramaStreamPy {
 	#[new]
-	#[pyo3(signature = (window=None, sc=None, fc=None))]
-	fn new(window: Option<usize>, sc: Option<usize>, fc: Option<usize>) -> PyResult<Self> {
-		let params = FramaParams { window, sc, fc };
-		match FramaStream::try_new(params) {
-			Ok(stream) => Ok(Self { inner: stream }),
-			Err(e) => Err(PyValueError::new_err(e.to_string())),
-		}
+	fn new(window: usize, sc: usize, fc: usize) -> PyResult<Self> {
+		Ok(Self { 
+			inner: FramaStream::try_new(FramaParams{window:Some(window),sc:Some(sc),fc:Some(fc)})
+				.map_err(|e| PyValueError::new_err(e.to_string()))? 
+		})
 	}
 
 	fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
@@ -2343,7 +2344,7 @@ use wasm_bindgen::prelude::*;
 /// Write FRAMA directly to output slice - no allocations
 #[inline]
 pub fn frama_into_slice(dst: &mut [f64], input: &FramaInput, kern: Kernel) -> Result<(), FramaError> {
-	let ((high, low, close), window, sc, fc, first, len, warm, chosen) = frama_prepare(input, kern)?;
+	let ((high, low, close), window, sc, fc, first, len, _warm_from_prepare, chosen) = frama_prepare(input, kern)?;
 
 	// Verify output buffer size matches input
 	if dst.len() != len {
@@ -2353,13 +2354,18 @@ pub fn frama_into_slice(dst: &mut [f64], input: &FramaInput, kern: Kernel) -> Re
 		});
 	}
 
-	// Compute FRAMA directly into output slice
-	frama_compute_into(high, low, close, window, sc, fc, first, len, warm, chosen, dst)?;
+	// evenized warm prefix like ALMA
+	let mut win = window;
+	if win & 1 == 1 { win += 1; }
+	let warm = first + win - 1;
 
-	// Fill warmup with NaN (already done in frama_compute_into via alloc_with_nan_prefix)
+	// Prefill NaN values before computation to avoid overwriting the seed
 	for v in &mut dst[..warm] {
 		*v = f64::NAN;
 	}
+
+	// Compute FRAMA directly into output slice (this will place the seed at index warm)
+	frama_compute_into(high, low, close, window, sc, fc, first, len, warm, chosen, dst)?;
 
 	Ok(())
 }
@@ -2370,20 +2376,17 @@ pub fn frama_js(
 	high: &[f64],
 	low: &[f64],
 	close: &[f64],
-	window: Option<usize>,
-	sc: Option<usize>,
-	fc: Option<usize>,
+	window: usize,
+	sc: usize,
+	fc: usize,
 ) -> Result<Vec<f64>, JsValue> {
-	let params = FramaParams { window, sc, fc };
-	let input = FramaInput::from_slices(high, low, close, params);
-
-	// Allocate output buffer once
-	let mut output = vec![0.0; high.len()];
-
-	// Compute directly into output buffer - no allocations
-	frama_into_slice(&mut output, &input, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))?;
-
-	Ok(output)
+	let input = FramaInput::from_slices(high, low, close, FramaParams{
+		window: Some(window), sc: Some(sc), fc: Some(fc)
+	});
+	let mut out = vec![0.0; close.len()];
+	frama_into_slice(&mut out, &input, detect_best_kernel())
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	Ok(out)
 }
 
 #[cfg(feature = "wasm")]
@@ -2469,16 +2472,16 @@ pub fn frama_free(ptr: *mut f64, len: usize) {
 }
 
 #[cfg(feature = "wasm")]
-#[wasm_bindgen]
-pub fn frama_into(
+#[wasm_bindgen(js_name = frama_into)]
+pub fn frama_into_js(
 	high_ptr: *const f64,
 	low_ptr: *const f64,
 	close_ptr: *const f64,
 	out_ptr: *mut f64,
 	len: usize,
-	window: Option<usize>,
-	sc: Option<usize>,
-	fc: Option<usize>,
+	window: usize,
+	sc: usize,
+	fc: usize,
 ) -> Result<(), JsValue> {
 	// Check for null pointers
 	if high_ptr.is_null() || low_ptr.is_null() || close_ptr.is_null() || out_ptr.is_null() {
@@ -2486,28 +2489,25 @@ pub fn frama_into(
 	}
 
 	unsafe {
-		let high = std::slice::from_raw_parts(high_ptr, len);
-		let low = std::slice::from_raw_parts(low_ptr, len);
-		let close = std::slice::from_raw_parts(close_ptr, len);
-		let params = FramaParams { window, sc, fc };
-		let input = FramaInput::from_slices(high, low, close, params);
+		let h = std::slice::from_raw_parts(high_ptr, len);
+		let l = std::slice::from_raw_parts(low_ptr, len);
+		let c = std::slice::from_raw_parts(close_ptr, len);
+		let out = std::slice::from_raw_parts_mut(out_ptr, len);
 
-		// CRITICAL: Check aliasing for all input pointers
-		let needs_temp = high_ptr == out_ptr || low_ptr == out_ptr || close_ptr == out_ptr;
+		let input = FramaInput::from_slices(h, l, c, FramaParams{ window: Some(window), sc: Some(sc), fc: Some(fc) });
 
-		if needs_temp {
-			// One of the inputs aliases with output - use temp buffer
-			let mut temp = vec![0.0; len];
-			frama_into_slice(&mut temp, &input, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))?;
-			let out = std::slice::from_raw_parts_mut(out_ptr, len);
-			out.copy_from_slice(&temp);
+		// handle aliasing
+		if out_ptr as *const f64 == high_ptr || out_ptr as *const f64 == low_ptr || out_ptr as *const f64 == close_ptr {
+			let mut tmp = vec![0.0; len];
+			frama_into_slice(&mut tmp, &input, detect_best_kernel())
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			out.copy_from_slice(&tmp);
 		} else {
-			// No aliasing - compute directly into output
-			let out = std::slice::from_raw_parts_mut(out_ptr, len);
-			frama_into_slice(out, &input, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))?;
+			frama_into_slice(out, &input, detect_best_kernel())
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 		}
-		Ok(())
 	}
+	Ok(())
 }
 
 // ================== Batch Processing with Serialization ==================
@@ -2557,53 +2557,39 @@ pub fn frama_batch_unified_js(high: &[f64], low: &[f64], close: &[f64], config: 
 // ================== Optimized Batch Processing ==================
 
 #[cfg(feature = "wasm")]
-#[wasm_bindgen]
-pub fn frama_batch_into(
+#[wasm_bindgen(js_name = frama_batch_into)]
+pub fn frama_batch_into_js(
 	high_ptr: *const f64,
 	low_ptr: *const f64,
 	close_ptr: *const f64,
 	out_ptr: *mut f64,
 	len: usize,
-	window_start: usize,
-	window_end: usize,
-	window_step: usize,
-	sc_start: usize,
-	sc_end: usize,
-	sc_step: usize,
-	fc_start: usize,
-	fc_end: usize,
-	fc_step: usize,
+	w0: usize,
+	w1: usize,
+	ws: usize,
+	s0: usize,
+	s1: usize,
+	ss: usize,
+	f0: usize,
+	f1: usize,
+	fs: usize,
 ) -> Result<usize, JsValue> {
 	if high_ptr.is_null() || low_ptr.is_null() || close_ptr.is_null() || out_ptr.is_null() {
 		return Err(JsValue::from_str("null pointer passed to frama_batch_into"));
 	}
 
 	unsafe {
-		let high = std::slice::from_raw_parts(high_ptr, len);
-		let low = std::slice::from_raw_parts(low_ptr, len);
-		let close = std::slice::from_raw_parts(close_ptr, len);
-
-		let sweep = FramaBatchRange {
-			window: (window_start, window_end, window_step),
-			sc: (sc_start, sc_end, sc_step),
-			fc: (fc_start, fc_end, fc_step),
-		};
+		let h = std::slice::from_raw_parts(high_ptr, len);
+		let l = std::slice::from_raw_parts(low_ptr, len);
+		let c = std::slice::from_raw_parts(close_ptr, len);
+		let sweep = FramaBatchRange { window:(w0,w1,ws), sc:(s0,s1,ss), fc:(f0,f1,fs) };
 
 		let combos = expand_grid(&sweep);
 		let rows = combos.len();
 		let cols = len;
-
-		// Check if output buffer is large enough
-		let required_size = rows * cols;
-		let out_slice = std::slice::from_raw_parts_mut(out_ptr, required_size);
-
-		// Use manual kernel selection for WASM (no parallel processing)
-		let kernel = detect_best_kernel();
-
-		// Process batch directly into output buffer
-		frama_batch_inner_into(high, low, close, &sweep, kernel, false, out_slice)
+		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+		frama_batch_inner_into(h, l, c, &sweep, detect_best_kernel(), false, out)
 			.map_err(|e| JsValue::from_str(&e.to_string()))?;
-
 		Ok(rows)
 	}
 }

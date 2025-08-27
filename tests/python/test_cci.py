@@ -78,8 +78,7 @@ class TestCci:
             assert np.isnan(result[i]), f"Expected NaN at index {i} for initial period warm-up"
         
         # Compare full output with Rust
-        # TODO: Add CCI to generate_references binary
-        # compare_with_rust('cci', result, 'hlc3', expected['default_params'])
+        compare_with_rust('cci', result, 'hlc3', expected['default_params'])
     
     def test_cci_default_candles(self, test_data):
         """Test CCI with default parameters - mirrors check_cci_default_candles"""
@@ -135,6 +134,7 @@ class TestCci:
         assert len(second_result) == len(first_result)
         
         # After warmup period (28), no NaN values should exist
+        # Note: CCI warmup is period-1, so after two passes it's (14-1)*2 = 26, but we use 28 for safety
         if len(second_result) > 28:
             for i in range(28, len(second_result)):
                 assert not np.isnan(second_result[i]), f"Expected no NaN after index 28, found NaN at index {i}"
@@ -299,6 +299,66 @@ class TestCci:
         
         with pytest.raises(ValueError, match="Unknown kernel"):
             ta_indicators.cci(data, 2, kernel='invalid_kernel')
+    
+    def test_cci_large_period(self, test_data):
+        """Test CCI with very large period"""
+        close = test_data['close'][:200]  # Use subset for large period test
+        
+        # Test with large period (100)
+        result = ta_indicators.cci(close, period=100)
+        assert len(result) == len(close)
+        
+        # First 99 values should be NaN
+        assert np.all(np.isnan(result[:99])), "Expected NaN in warmup period for large period"
+        
+        # After warmup should have values
+        assert not np.isnan(result[99]), "Expected valid value after warmup"
+    
+    def test_cci_extreme_values(self):
+        """Test CCI with extreme input values for numerical stability"""
+        # Test with very large values
+        large_data = np.array([1e10, 1e10 + 1, 1e10 + 2, 1e10 + 3, 1e10 + 4])
+        result_large = ta_indicators.cci(large_data, period=3)
+        assert len(result_large) == len(large_data)
+        assert not np.any(np.isinf(result_large)), "CCI should not produce infinite values"
+        
+        # Test with very small values
+        small_data = np.array([1e-10, 2e-10, 3e-10, 4e-10, 5e-10])
+        result_small = ta_indicators.cci(small_data, period=3)
+        assert len(result_small) == len(small_data)
+        assert not np.any(np.isinf(result_small)), "CCI should not produce infinite values"
+    
+    def test_cci_constant_values(self):
+        """Test CCI with constant input values"""
+        # When all prices are equal, CCI should be 0 (no deviation)
+        constant_data = np.full(100, 50.0)
+        result = ta_indicators.cci(constant_data, period=14)
+        
+        # After warmup, all values should be 0
+        for i in range(13, len(result)):
+            assert abs(result[i]) < 1e-9, f"CCI should be ~0 for constant prices, got {result[i]} at index {i}"
+    
+    def test_cci_batch_edge_cases(self, test_data):
+        """Test CCI batch with edge case parameters"""
+        close = test_data['close'][:50]
+        
+        # Test with step size of 0 (single period)
+        result_single = ta_indicators.cci_batch(
+            close,
+            period_range=(14, 14, 0)
+        )
+        assert result_single['values'].shape[0] == 1
+        assert len(result_single['periods']) == 1
+        assert result_single['periods'][0] == 14
+        
+        # Test with step larger than range
+        result_large_step = ta_indicators.cci_batch(
+            close,
+            period_range=(10, 12, 5)  # Step > range
+        )
+        # Should only have period=10
+        assert result_large_step['values'].shape[0] == 1
+        assert result_large_step['periods'][0] == 10
 
 
 if __name__ == '__main__':
