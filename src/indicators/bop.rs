@@ -8,8 +8,8 @@
 //! None currently required; see `BopParams` for future extensibility.
 //!
 //! ## Errors
-//! - **EmptyData**: bop: No data provided.
-//! - **InconsistentLengths**: bop: Input arrays have different lengths.
+//! - **EmptyData**: bop: Input data is empty.
+//! - **InputLengthsMismatch**: bop: Input arrays have different lengths with specific details.
 //!
 //! ## Returns
 //! - **`Ok(BopOutput)`** on success, containing a `Vec<f64>` with the BOP values.
@@ -43,7 +43,10 @@ use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel,
+	init_matrix_prefixes, make_uninit_matrix,
+};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -103,12 +106,8 @@ pub struct BopOutput {
 
 #[derive(Debug, Error)]
 pub enum BopError {
-	#[error("bop: Data is empty.")]
+	#[error("bop: Input data is empty.")]
 	EmptyData,
-	#[error("bop: Data is empty.")]
-	DataIsEmpty,
-	#[error("bop: Inconsistent lengths.")]
-	InconsistentLengths,
 	#[error("bop: Input lengths mismatch - open: {open_len}, high: {high_len}, low: {low_len}, close: {close_len}")]
 	InputLengthsMismatch {
 		open_len: usize,
@@ -116,8 +115,6 @@ pub enum BopError {
 		low_len: usize,
 		close_len: usize,
 	},
-	#[error("bop: Candle field error: {0}")]
-	CandleFieldError(String),
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -167,21 +164,12 @@ pub fn bop(input: &BopInput) -> Result<BopOutput, BopError> {
 
 pub fn bop_with_kernel(input: &BopInput, kernel: Kernel) -> Result<BopOutput, BopError> {
 	let (open, high, low, close): (&[f64], &[f64], &[f64], &[f64]) = match &input.data {
-		BopData::Candles { candles } => {
-			let open = candles
-				.select_candle_field("open")
-				.map_err(|e| BopError::CandleFieldError(e.to_string()))?;
-			let high = candles
-				.select_candle_field("high")
-				.map_err(|e| BopError::CandleFieldError(e.to_string()))?;
-			let low = candles
-				.select_candle_field("low")
-				.map_err(|e| BopError::CandleFieldError(e.to_string()))?;
-			let close = candles
-				.select_candle_field("close")
-				.map_err(|e| BopError::CandleFieldError(e.to_string()))?;
-			(open, high, low, close)
-		}
+		BopData::Candles { candles } => (
+			source_type(candles, "open"),
+			source_type(candles, "high"),
+			source_type(candles, "low"),
+			source_type(candles, "close"),
+		),
 		BopData::Slices { open, high, low, close } => (open, high, low, close),
 	};
 
@@ -189,12 +177,16 @@ pub fn bop_with_kernel(input: &BopInput, kernel: Kernel) -> Result<BopOutput, Bo
 	if len == 0 {
 		return Err(BopError::EmptyData);
 	}
-	if len != high.len() || len != low.len() || len != close.len() {
-		return Err(BopError::InconsistentLengths);
+	if high.len() != len || low.len() != len || close.len() != len {
+		return Err(BopError::InputLengthsMismatch {
+			open_len: len,
+			high_len: high.len(),
+			low_len: low.len(),
+			close_len: close.len(),
+		});
 	}
 
-	// Calculate the warmup period - first index where all arrays have valid values
-	let warmup_period = (0..len)
+	let first = (0..len)
 		.find(|&i| !open[i].is_nan() && !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
 		.unwrap_or(len);
 
@@ -203,62 +195,77 @@ pub fn bop_with_kernel(input: &BopInput, kernel: Kernel) -> Result<BopOutput, Bo
 		k => k,
 	};
 
-	// Use zero-copy allocation with NaN prefix
-	let mut out = alloc_with_nan_prefix(len, warmup_period);
-
+	let mut out = alloc_with_nan_prefix(len, first);
 	unsafe {
 		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => bop_scalar(open, high, low, close, &mut out),
+			Kernel::Scalar | Kernel::ScalarBatch => bop_scalar_from(open, high, low, close, first, &mut out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => bop_avx2(open, high, low, close, &mut out),
+			Kernel::Avx2 | Kernel::Avx2Batch => bop_scalar_from(open, high, low, close, first, &mut out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => bop_avx512(open, high, low, close, &mut out),
+			Kernel::Avx512 | Kernel::Avx512Batch => bop_scalar_from(open, high, low, close, first, &mut out),
 			_ => unreachable!(),
 		}
 	}
 	Ok(BopOutput { values: out })
 }
 
-#[inline]
+#[inline(always)]
+unsafe fn bop_scalar_from(
+	open: &[f64], high: &[f64], low: &[f64], close: &[f64],
+	first: usize, out: &mut [f64],
+) {
+	for i in first..open.len() {
+		let denom = high[i] - low[i];
+		out[i] = if denom <= 0.0 { 0.0 } else { (close[i] - open[i]) / denom };
+	}
+}
+
+// keep this thin wrapper only if other call sites need it
 pub unsafe fn bop_scalar(open: &[f64], high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]) {
-	// Find the first valid index where all arrays have non-NaN values
-	let first_valid = (0..open.len())
+	let first = (0..open.len())
 		.find(|&i| !open[i].is_nan() && !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
 		.unwrap_or(open.len());
-
-	// Only compute values starting from the first valid index
-	for i in first_valid..open.len() {
-		let denom = high[i] - low[i];
-		out[i] = if denom <= 0.0 {
-			0.0
-		} else {
-			(close[i] - open[i]) / denom
-		};
-	}
+	bop_scalar_from(open, high, low, close, first, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn bop_avx2(open: &[f64], high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]) {
-	bop_scalar(open, high, low, close, out)
+	// BOP is too cheap to vectorize; map AVX→scalar intentionally
+	let first = (0..open.len())
+		.find(|&i| !open[i].is_nan() && !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
+		.unwrap_or(open.len());
+	bop_scalar_from(open, high, low, close, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn bop_avx512(open: &[f64], high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]) {
-	bop_scalar(open, high, low, close, out)
+	// BOP is too cheap to vectorize; map AVX→scalar intentionally
+	let first = (0..open.len())
+		.find(|&i| !open[i].is_nan() && !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
+		.unwrap_or(open.len());
+	bop_scalar_from(open, high, low, close, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn bop_avx512_short(open: &[f64], high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]) {
-	bop_scalar(open, high, low, close, out)
+	// BOP is too cheap to vectorize; map AVX→scalar intentionally
+	let first = (0..open.len())
+		.find(|&i| !open[i].is_nan() && !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
+		.unwrap_or(open.len());
+	bop_scalar_from(open, high, low, close, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn bop_avx512_long(open: &[f64], high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]) {
-	bop_scalar(open, high, low, close, out)
+	// BOP is too cheap to vectorize; map AVX→scalar intentionally
+	let first = (0..open.len())
+		.find(|&i| !open[i].is_nan() && !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
+		.unwrap_or(open.len());
+	bop_scalar_from(open, high, low, close, first, out)
 }
 
 #[inline]
@@ -377,38 +384,56 @@ pub fn bop_batch_with_kernel(
 	kernel: Kernel,
 ) -> Result<BopBatchOutput, BopError> {
 	let len = open.len();
-	if len == 0 || high.len() != len || low.len() != len || close.len() != len {
-		return Err(BopError::InconsistentLengths);
+	if len == 0 {
+		return Err(BopError::EmptyData);
+	}
+	if high.len() != len || low.len() != len || close.len() != len {
+		return Err(BopError::InputLengthsMismatch {
+			open_len: len,
+			high_len: high.len(),
+			low_len: low.len(),
+			close_len: close.len(),
+		});
 	}
 
-	// Calculate the warmup period - first index where all arrays have valid values
-	let warmup_period = (0..len)
+	let first = (0..len)
 		.find(|&i| !open[i].is_nan() && !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
 		.unwrap_or(len);
+
+	let rows = 1usize;
+	let cols = len;
+
+	// 1×N matrix, zero extra copies
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	init_matrix_prefixes(&mut buf_mu, cols, &[first]);
+
+	use core::mem::ManuallyDrop;
+	let mut guard = ManuallyDrop::new(buf_mu);
+	let out_f64: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len())
+	};
 
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_batch_kernel(),
 		k => k,
 	};
-
-	// Use zero-copy allocation with NaN prefix
-	let mut values = alloc_with_nan_prefix(len, warmup_period);
-
 	unsafe {
 		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => bop_scalar(open, high, low, close, &mut values),
+			Kernel::Scalar | Kernel::ScalarBatch => bop_scalar_from(open, high, low, close, first, out_f64),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => bop_avx2(open, high, low, close, &mut values),
+			Kernel::Avx2 | Kernel::Avx2Batch => bop_scalar_from(open, high, low, close, first, out_f64),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => bop_avx512(open, high, low, close, &mut values),
+			Kernel::Avx512 | Kernel::Avx512Batch => bop_scalar_from(open, high, low, close, first, out_f64),
 			_ => unreachable!(),
 		}
 	}
-	Ok(BopBatchOutput {
-		values,
-		rows: 1,
-		cols: len,
-	})
+
+	let values = unsafe {
+		Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, guard.len(), guard.capacity())
+	};
+	core::mem::forget(guard);
+
+	Ok(BopBatchOutput { values, rows, cols })
 }
 
 /// Internal function that writes directly into a provided output slice for zero-copy Python bindings
@@ -422,11 +447,24 @@ fn bop_batch_inner_into(
 	out: &mut [f64],
 ) -> Result<(), BopError> {
 	let len = open.len();
-	if len == 0 || high.len() != len || low.len() != len || close.len() != len {
-		return Err(BopError::InconsistentLengths);
+	if len == 0 {
+		return Err(BopError::EmptyData);
+	}
+	if high.len() != len || low.len() != len || close.len() != len {
+		return Err(BopError::InputLengthsMismatch {
+			open_len: len,
+			high_len: high.len(),
+			low_len: low.len(),
+			close_len: close.len(),
+		});
 	}
 	if out.len() != len {
-		return Err(BopError::InconsistentLengths);
+		return Err(BopError::InputLengthsMismatch {
+			open_len: len,
+			high_len: high.len(),
+			low_len: low.len(),
+			close_len: out.len(),
+		});
 	}
 
 	// Calculate the warmup period - first index where all arrays have valid values
@@ -1176,40 +1214,29 @@ pub fn bop_batch_py<'py>(
 	let slice_out = unsafe { out_arr.as_slice_mut()? };
 
 	// Compute without GIL - write directly to pre-allocated array
-	py.allow_threads(|| -> Result<(), BopError> {
-		// Use the zero-copy inner function that writes directly to output
-		bop_batch_inner_into(open_slice, high_slice, low_slice, close_slice, kern, slice_out)
-	})
-	.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	py.allow_threads(|| bop_batch_inner_into(open_slice, high_slice, low_slice, close_slice, kern, slice_out))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-	// Build result dictionary
-	let dict = PyDict::new(py);
-	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
-	dict.set_item("rows", rows)?;
-	dict.set_item("cols", cols)?;
-
-	// BOP has no parameters, so we return empty arrays - matching ALMA pattern
-	dict.set_item("params", Vec::<f64>::new().into_pyarray(py))?;
-
-	Ok(dict)
+	let d = PyDict::new(py);
+	d.set_item("values", out_arr.reshape((rows, cols))?)?;
+	// Include both old-style keys for backward compatibility and alma-style keys
+	d.set_item("rows", rows)?;
+	d.set_item("cols", cols)?;
+	d.set_item("params", Vec::<f64>::new().into_pyarray(py))?;
+	// Also include alma-style metadata keys; empty because no params
+	d.set_item("periods", Vec::<u64>::new().into_pyarray(py))?;
+	d.set_item("offsets", Vec::<f64>::new().into_pyarray(py))?;
+	d.set_item("sigmas",  Vec::<f64>::new().into_pyarray(py))?;
+	Ok(d)
 }
 
 /// Write directly to output slice - no allocations
-#[inline]
 pub fn bop_into_slice(
-	dst: &mut [f64],
-	open: &[f64],
-	high: &[f64],
-	low: &[f64],
-	close: &[f64],
-	kern: Kernel,
+	dst: &mut [f64], open: &[f64], high: &[f64], low: &[f64], close: &[f64], kern: Kernel,
 ) -> Result<(), BopError> {
-	// Validate inputs
 	let len = open.len();
-	if len == 0 {
-		return Err(BopError::DataIsEmpty);
-	}
-	if high.len() != len || low.len() != len || close.len() != len {
+	if len == 0 { return Err(BopError::EmptyData); }
+	if high.len() != len || low.len() != len || close.len() != len || dst.len() != len {
 		return Err(BopError::InputLengthsMismatch {
 			open_len: len,
 			high_len: high.len(),
@@ -1217,48 +1244,25 @@ pub fn bop_into_slice(
 			close_len: close.len(),
 		});
 	}
-	if dst.len() != len {
-		return Err(BopError::InputLengthsMismatch {
-			open_len: len,
-			high_len: high.len(),
-			low_len: low.len(),
-			close_len: dst.len(),
-		});
-	}
 
-	// Find warmup period
-	let warmup_period = (0..len)
+	let first = (0..len)
 		.find(|&i| !open[i].is_nan() && !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
 		.unwrap_or(len);
 
-	// Only initialize the warmup period with NaN, not the entire buffer
-	// This matches the optimization pattern used in ALMA
-	for v in &mut dst[..warmup_period] {
-		*v = f64::NAN;
-	}
+	let chosen = match kern { Kernel::Auto => detect_best_kernel(), k => k };
 
-	// Select kernel
-	let chosen = match kern {
-		Kernel::Auto => detect_best_kernel(),
-		k => k,
-	};
-
-	// Compute directly into output
 	unsafe {
 		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => bop_scalar(open, high, low, close, dst),
+			Kernel::Scalar | Kernel::ScalarBatch => bop_scalar_from(open, high, low, close, first, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => bop_avx2(open, high, low, close, dst),
+			Kernel::Avx2 | Kernel::Avx2Batch => bop_scalar_from(open, high, low, close, first, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => bop_avx512(open, high, low, close, dst),
-			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
-				bop_scalar(open, high, low, close, dst)
-			}
+			Kernel::Avx512 | Kernel::Avx512Batch => bop_scalar_from(open, high, low, close, first, dst),
 			_ => unreachable!(),
 		}
 	}
 
+	for v in &mut dst[..first] { *v = f64::NAN; }
 	Ok(())
 }
 
@@ -1419,23 +1423,10 @@ pub struct BopBatchJsOutput {
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = bop_batch)]
 pub fn bop_batch_unified_js(
-	open: &[f64],
-	high: &[f64],
-	low: &[f64],
-	close: &[f64],
-	_config: JsValue, // Unused but kept for API consistency
+	open: &[f64], high: &[f64], low: &[f64], close: &[f64], _config: JsValue,
 ) -> Result<JsValue, JsValue> {
-	// Run the BOP calculation
-	let output =
-		bop_batch_with_kernel(open, high, low, close, Kernel::Scalar).map_err(|e| JsValue::from_str(&e.to_string()))?;
-
-	// Create the structured output
-	let js_output = BopBatchJsOutput {
-		values: output.values,
-		rows: output.rows,
-		cols: output.cols,
-	};
-
-	// Serialize the output struct into a JavaScript object
-	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+	let out = bop_batch_with_kernel(open, high, low, close, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	let js = BopBatchJsOutput { values: out.values, rows: out.rows, cols: out.cols };
+	serde_wasm_bindgen::to_value(&js).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }

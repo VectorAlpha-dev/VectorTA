@@ -246,6 +246,25 @@ pub enum GatorOscError {
 	NotEnoughValidData { needed: usize, valid: usize },
 }
 
+#[inline(always)]
+fn gator_warmups(
+	first: usize,
+	jl: usize, js: usize,
+	tl: usize, ts: usize,
+	ll: usize, ls: usize,
+) -> (usize, usize, usize, usize) {
+	// bars required for EMA pairs + their display shifts
+	let upper_needed = jl.max(tl) + js.max(ts);
+	let lower_needed = tl.max(ll) + ts.max(ls);
+
+	let upper_warmup        = first + upper_needed.saturating_sub(1);
+	let lower_warmup        = first + lower_needed.saturating_sub(1);
+	let upper_change_warmup = upper_warmup + 1;
+	let lower_change_warmup = lower_warmup + 1;
+
+	(upper_warmup, lower_warmup, upper_change_warmup, lower_change_warmup)
+}
+
 #[inline]
 pub fn gatorosc(input: &GatorOscInput) -> Result<GatorOscOutput, GatorOscError> {
 	gatorosc_with_kernel(input, Kernel::Auto)
@@ -255,12 +274,8 @@ pub fn gatorosc_with_kernel(input: &GatorOscInput, kernel: Kernel) -> Result<Gat
 	let (data, jaws_length, jaws_shift, teeth_length, teeth_shift, lips_length, lips_shift, first, chosen) = 
 		gatorosc_prepare(input, kernel)?;
 
-	// Correct warmup calculation must account for shifts
-	let upper_warmup = first + jaws_shift.max(teeth_shift);
-	let lower_warmup = first + teeth_shift.max(lips_shift);
-	// Change values need one more period
-	let upper_change_warmup = upper_warmup + 1;
-	let lower_change_warmup = lower_warmup + 1;
+	let (upper_warmup, lower_warmup, upper_change_warmup, lower_change_warmup) = 
+		gator_warmups(first, jaws_length, jaws_shift, teeth_length, teeth_shift, lips_length, lips_shift);
 	
 	let mut upper = alloc_with_nan_prefix(data.len(), upper_warmup);
 	let mut lower = alloc_with_nan_prefix(data.len(), lower_warmup);
@@ -282,6 +297,20 @@ pub fn gatorosc_with_kernel(input: &GatorOscInput, kernel: Kernel) -> Result<Gat
 		&mut upper_change,
 		&mut lower_change,
 	);
+	
+	// Re-mask prefixes to ensure NaN consistency
+	for v in &mut upper[..upper_warmup] {
+		*v = f64::NAN;
+	}
+	for v in &mut lower[..lower_warmup] {
+		*v = f64::NAN;
+	}
+	for v in &mut upper_change[..upper_change_warmup] {
+		*v = f64::NAN;
+	}
+	for v in &mut lower_change[..lower_change_warmup] {
+		*v = f64::NAN;
+	}
 	
 	Ok(GatorOscOutput {
 		upper,
@@ -307,9 +336,9 @@ pub unsafe fn gatorosc_scalar(
 	lower_change: &mut [f64],
 ) {
 	// Compute EMAs on-the-fly without allocations
-	let jaws_alpha = 1.0 / jaws_length as f64;
-	let teeth_alpha = 1.0 / teeth_length as f64;
-	let lips_alpha = 1.0 / lips_length as f64;
+	let jaws_alpha = 2.0 / (jaws_length as f64 + 1.0);
+	let teeth_alpha = 2.0 / (teeth_length as f64 + 1.0);
+	let lips_alpha = 2.0 / (lips_length as f64 + 1.0);
 	
 	// Initialize EMA states
 	let mut jaws_ema = if data[first_valid].is_nan() { 0.0 } else { data[first_valid] };
@@ -586,22 +615,15 @@ fn gatorosc_prepare<'a>(
 	let lips_shift = input.get_lips_shift();
 
 	if jaws_length == 0
-		|| jaws_shift == 0
 		|| teeth_length == 0
-		|| teeth_shift == 0
 		|| lips_length == 0
-		|| lips_shift == 0
 	{
 		return Err(GatorOscError::InvalidSettings);
 	}
 
-	let needed = jaws_length
-		.max(teeth_length)
-		.max(lips_length)
-		.saturating_add(jaws_shift.max(teeth_shift).max(lips_shift));
-	let valid = data.iter().skip(first).filter(|v| !v.is_nan()).count();
-	if valid < needed {
-		return Err(GatorOscError::NotEnoughValidData { needed, valid });
+	let needed = jaws_length.max(teeth_length).max(lips_length) + jaws_shift.max(teeth_shift).max(lips_shift);
+	if data.len() - first < needed {
+		return Err(GatorOscError::NotEnoughValidData { needed, valid: data.len() - first });
 	}
 
 	let chosen = match kernel {
@@ -630,24 +652,28 @@ fn gatorosc_compute_into(
 	lower_change: &mut [f64],
 ) {
 	unsafe {
+		#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+		{
+			if matches!(kernel, Kernel::Scalar | Kernel::ScalarBatch) {
+				gatorosc_simd128(
+					data,
+					jaws_length,
+					jaws_shift,
+					teeth_length,
+					teeth_shift,
+					lips_length,
+					lips_shift,
+					first,
+					upper,
+					lower,
+					upper_change,
+					lower_change,
+				);
+				return;
+			}
+		}
 		match kernel {
 			Kernel::Scalar | Kernel::ScalarBatch => gatorosc_scalar(
-				data,
-				jaws_length,
-				jaws_shift,
-				teeth_length,
-				teeth_shift,
-				lips_length,
-				lips_shift,
-				first,
-				upper,
-				lower,
-				upper_change,
-				lower_change,
-			),
-			// WASM SIMD is handled via Scalar kernel with SIMD128 optimizations
-			#[cfg(all(target_feature = "simd128", target_arch = "wasm32"))]
-			Kernel::Scalar | Kernel::ScalarBatch if cfg!(all(target_feature = "simd128", target_arch = "wasm32")) => gatorosc_simd128(
 				data,
 				jaws_length,
 				jaws_shift,
@@ -730,11 +756,8 @@ pub fn gatorosc_into_slice(
 		lower_change_dst,
 	);
 	
-	// Fill warmup period with NaN for all outputs
-	let upper_warmup = first + jaws_length.max(teeth_length) - 1;
-	let lower_warmup = first + teeth_length.max(lips_length) - 1;
-	let upper_change_warmup = first + jaws_length.max(teeth_length);
-	let lower_change_warmup = first + teeth_length.max(lips_length);
+	let (upper_warmup, lower_warmup, upper_change_warmup, lower_change_warmup) = 
+		gator_warmups(first, jaws_length, jaws_shift, teeth_length, teeth_shift, lips_length, lips_shift);
 	
 	for v in &mut upper_dst[..upper_warmup] {
 		*v = f64::NAN;
@@ -775,19 +798,17 @@ impl GatorOscStream {
 		let lips_shift = params.lips_shift.unwrap_or(3);
 
 		if jaws_length == 0
-			|| jaws_shift == 0
 			|| teeth_length == 0
-			|| teeth_shift == 0
 			|| lips_length == 0
-			|| lips_shift == 0
 		{
 			return Err(GatorOscError::InvalidSettings);
 		}
 		
-		// Calculate the warmup period: maximum of all lengths plus their shifts
-		let warmup_period = (jaws_length + jaws_shift)
-			.max(teeth_length + teeth_shift)
-			.max(lips_length + lips_shift);
+		// Calculate the warmup period using gator_warmups logic
+		// Note: we use 0 as first since stream starts from index 0
+		let (_, _, _, lcw) = gator_warmups(0, jaws_length, jaws_shift, teeth_length, teeth_shift, lips_length, lips_shift);
+		// Use the maximum warmup period (lower_change_warmup is always the largest)
+		let warmup_period = lcw;
 		
 		Ok(Self {
 			jaws: EmaStream::new(jaws_length),
@@ -878,7 +899,7 @@ struct EmaStream {
 impl EmaStream {
 	fn new(period: usize) -> Self {
 		Self {
-			alpha: 1.0 / period as f64,
+			alpha: 2.0 / (period as f64 + 1.0),
 			state: Vec::new(),
 			period,
 			idx: 0,
@@ -1065,49 +1086,75 @@ fn gatorosc_batch_inner(
 	let max_ts = combos.iter().map(|c| c.teeth_shift.unwrap()).max().unwrap();
 	let max_ll = combos.iter().map(|c| c.lips_length.unwrap()).max().unwrap();
 	let max_ls = combos.iter().map(|c| c.lips_shift.unwrap()).max().unwrap();
-	let needed = max_jl
-		.max(max_tl)
-		.max(max_ll)
-		.saturating_add(max_js.max(max_ts).max(max_ls));
-	let valid = data.iter().skip(first).filter(|v| !v.is_nan()).count();
-	if valid < needed {
-		return Err(GatorOscError::NotEnoughValidData { needed, valid });
+	let needed = max_jl.max(max_tl).max(max_ll) + max_js.max(max_ts).max(max_ls);
+	if data.len() - first < needed {
+		return Err(GatorOscError::NotEnoughValidData { needed, valid: data.len() - first });
 	}
 	let rows = combos.len();
 	let cols = data.len();
 	
 	// Use make_uninit_matrix for efficient allocation
-	let mut upper_buf = make_uninit_matrix(rows, cols);
-	let mut lower_buf = make_uninit_matrix(rows, cols);
-	let mut upper_change_buf = make_uninit_matrix(rows, cols);
-	let mut lower_change_buf = make_uninit_matrix(rows, cols);
+	let mut upper_mu = make_uninit_matrix(rows, cols);
+	let mut lower_mu = make_uninit_matrix(rows, cols);
+	let mut upper_change_mu = make_uninit_matrix(rows, cols);
+	let mut lower_change_mu = make_uninit_matrix(rows, cols);
 	
-	// Initialize prefixes with NaN based on warmup periods (must account for shifts)
-	let warmup_periods: Vec<usize> = combos.iter().map(|c| {
-		first + c.jaws_shift.unwrap().max(c.teeth_shift.unwrap())
+	// Initialize prefixes with NaN based on warmup periods using gator_warmups
+	let warm_upper: Vec<usize> = combos.iter().map(|c| {
+		let (uw,_,_,_) = gator_warmups(first,
+			c.jaws_length.unwrap(), c.jaws_shift.unwrap(),
+			c.teeth_length.unwrap(), c.teeth_shift.unwrap(),
+			c.lips_length.unwrap(), c.lips_shift.unwrap());
+		uw
 	}).collect();
-	init_matrix_prefixes(&mut upper_buf, cols, &warmup_periods);
 	
-	let warmup_periods_lower: Vec<usize> = combos.iter().map(|c| {
-		first + c.teeth_shift.unwrap().max(c.lips_shift.unwrap())
+	let warm_lower: Vec<usize> = combos.iter().map(|c| {
+		let (_,lw,_,_) = gator_warmups(first,
+			c.jaws_length.unwrap(), c.jaws_shift.unwrap(),
+			c.teeth_length.unwrap(), c.teeth_shift.unwrap(),
+			c.lips_length.unwrap(), c.lips_shift.unwrap());
+		lw
 	}).collect();
-	init_matrix_prefixes(&mut lower_buf, cols, &warmup_periods_lower);
 	
-	let warmup_periods_upper_change: Vec<usize> = combos.iter().map(|c| {
-		first + c.jaws_shift.unwrap().max(c.teeth_shift.unwrap()) + 1
+	let warm_uc: Vec<usize> = combos.iter().map(|c| {
+		let (_,_,ucw,_) = gator_warmups(first,
+			c.jaws_length.unwrap(), c.jaws_shift.unwrap(),
+			c.teeth_length.unwrap(), c.teeth_shift.unwrap(),
+			c.lips_length.unwrap(), c.lips_shift.unwrap());
+		ucw
 	}).collect();
-	init_matrix_prefixes(&mut upper_change_buf, cols, &warmup_periods_upper_change);
 	
-	let warmup_periods_lower_change: Vec<usize> = combos.iter().map(|c| {
-		first + c.teeth_shift.unwrap().max(c.lips_shift.unwrap()) + 1
+	let warm_lc: Vec<usize> = combos.iter().map(|c| {
+		let (_,_,_,lcw) = gator_warmups(first,
+			c.jaws_length.unwrap(), c.jaws_shift.unwrap(),
+			c.teeth_length.unwrap(), c.teeth_shift.unwrap(),
+			c.lips_length.unwrap(), c.lips_shift.unwrap());
+		lcw
 	}).collect();
-	init_matrix_prefixes(&mut lower_change_buf, cols, &warmup_periods_lower_change);
 	
-	// Convert to initialized vectors
-	let mut upper = upper_buf.into_iter().map(|mu| unsafe { mu.assume_init() }).collect::<Vec<_>>();
-	let mut lower = lower_buf.into_iter().map(|mu| unsafe { mu.assume_init() }).collect::<Vec<_>>();
-	let mut upper_change = upper_change_buf.into_iter().map(|mu| unsafe { mu.assume_init() }).collect::<Vec<_>>();
-	let mut lower_change = lower_change_buf.into_iter().map(|mu| unsafe { mu.assume_init() }).collect::<Vec<_>>();
+	init_matrix_prefixes(&mut upper_mu, cols, &warm_upper);
+	init_matrix_prefixes(&mut lower_mu, cols, &warm_lower);
+	init_matrix_prefixes(&mut upper_change_mu, cols, &warm_uc);
+	init_matrix_prefixes(&mut lower_change_mu, cols, &warm_lc);
+	
+	// Zero-copy convert using ManuallyDrop
+	let mut u_guard  = core::mem::ManuallyDrop::new(upper_mu);
+	let mut l_guard  = core::mem::ManuallyDrop::new(lower_mu);
+	let mut uc_guard = core::mem::ManuallyDrop::new(upper_change_mu);
+	let mut lc_guard = core::mem::ManuallyDrop::new(lower_change_mu);
+	
+	let upper: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(u_guard.as_mut_ptr() as *mut f64, u_guard.len())
+	};
+	let lower: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(l_guard.as_mut_ptr() as *mut f64, l_guard.len())
+	};
+	let upper_change: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(uc_guard.as_mut_ptr() as *mut f64, uc_guard.len())
+	};
+	let lower_change: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(lc_guard.as_mut_ptr() as *mut f64, lc_guard.len())
+	};
 
 	let do_row = |row: usize, u: &mut [f64], l: &mut [f64], uc: &mut [f64], lc: &mut [f64]| {
 		let prm = &combos[row];
@@ -1154,6 +1201,12 @@ fn gatorosc_batch_inner(
 			);
 		}
 	}
+
+	// Convert back to owned vectors without copying
+	let upper = unsafe { Vec::from_raw_parts(u_guard.as_mut_ptr() as *mut f64, u_guard.len(), u_guard.capacity()) };
+	let lower = unsafe { Vec::from_raw_parts(l_guard.as_mut_ptr() as *mut f64, l_guard.len(), l_guard.capacity()) };
+	let upper_change = unsafe { Vec::from_raw_parts(uc_guard.as_mut_ptr() as *mut f64, uc_guard.len(), uc_guard.capacity()) };
+	let lower_change = unsafe { Vec::from_raw_parts(lc_guard.as_mut_ptr() as *mut f64, lc_guard.len(), lc_guard.capacity()) };
 
 	Ok(GatorOscBatchOutput {
 		upper,
@@ -1204,15 +1257,13 @@ pub fn gatorosc_batch_inner_into(
 	// Initialize NaN prefixes for each row based on warmup periods
 	// This is critical for externally-provided buffers from Python/WASM
 	for (row, combo) in combos.iter().enumerate() {
-		let jaws_shift = combo.jaws_shift.unwrap();
-		let teeth_shift = combo.teeth_shift.unwrap();
-		let lips_shift = combo.lips_shift.unwrap();
-		
-		// Calculate warmup periods for each output (must account for shifts)
-		let upper_warmup = first + jaws_shift.max(teeth_shift);
-		let lower_warmup = first + teeth_shift.max(lips_shift);
-		let upper_change_warmup = upper_warmup + 1;
-		let lower_change_warmup = lower_warmup + 1;
+		// Calculate warmup periods for each output using gator_warmups
+		let (upper_warmup, lower_warmup, upper_change_warmup, lower_change_warmup) = gator_warmups(
+			first,
+			combo.jaws_length.unwrap(), combo.jaws_shift.unwrap(),
+			combo.teeth_length.unwrap(), combo.teeth_shift.unwrap(),
+			combo.lips_length.unwrap(), combo.lips_shift.unwrap(),
+		);
 		
 		let row_start = row * cols;
 		
@@ -1490,52 +1541,68 @@ pub fn gatorosc_batch_par_slice(
 	let cols = data.len();
 	
 	// Use helper functions for zero-allocation
-	let mut upper_buf = make_uninit_matrix(rows, cols);
-	let mut lower_buf = make_uninit_matrix(rows, cols);
-	let mut upper_change_buf = make_uninit_matrix(rows, cols);
-	let mut lower_change_buf = make_uninit_matrix(rows, cols);
+	let mut upper_mu = make_uninit_matrix(rows, cols);
+	let mut lower_mu = make_uninit_matrix(rows, cols);
+	let mut upper_change_mu = make_uninit_matrix(rows, cols);
+	let mut lower_change_mu = make_uninit_matrix(rows, cols);
 	
-	// Calculate warmup periods for each combo (must account for shifts)
-	let warmup_periods_upper: Vec<usize> = combos.iter().map(|p| {
-		first + p.jaws_shift.unwrap().max(p.teeth_shift.unwrap())
+	// Calculate warmup periods using gator_warmups helper
+	let warm_upper: Vec<usize> = combos.iter().map(|c| {
+		let (uw,_,_,_) = gator_warmups(first,
+			c.jaws_length.unwrap(), c.jaws_shift.unwrap(),
+			c.teeth_length.unwrap(), c.teeth_shift.unwrap(),
+			c.lips_length.unwrap(), c.lips_shift.unwrap());
+		uw
 	}).collect();
 	
-	let warmup_periods_lower: Vec<usize> = combos.iter().map(|p| {
-		first + p.teeth_shift.unwrap().max(p.lips_shift.unwrap())
+	let warm_lower: Vec<usize> = combos.iter().map(|c| {
+		let (_,lw,_,_) = gator_warmups(first,
+			c.jaws_length.unwrap(), c.jaws_shift.unwrap(),
+			c.teeth_length.unwrap(), c.teeth_shift.unwrap(),
+			c.lips_length.unwrap(), c.lips_shift.unwrap());
+		lw
 	}).collect();
 	
-	let warmup_periods_upper_change: Vec<usize> = warmup_periods_upper.iter().map(|&w| w + 1).collect();
-	let warmup_periods_lower_change: Vec<usize> = warmup_periods_lower.iter().map(|&w| w + 1).collect();
+	let warm_uc: Vec<usize> = combos.iter().map(|c| {
+		let (_,_,ucw,_) = gator_warmups(first,
+			c.jaws_length.unwrap(), c.jaws_shift.unwrap(),
+			c.teeth_length.unwrap(), c.teeth_shift.unwrap(),
+			c.lips_length.unwrap(), c.lips_shift.unwrap());
+		ucw
+	}).collect();
+	
+	let warm_lc: Vec<usize> = combos.iter().map(|c| {
+		let (_,_,_,lcw) = gator_warmups(first,
+			c.jaws_length.unwrap(), c.jaws_shift.unwrap(),
+			c.teeth_length.unwrap(), c.teeth_shift.unwrap(),
+			c.lips_length.unwrap(), c.lips_shift.unwrap());
+		lcw
+	}).collect();
 	
 	// Initialize with NaN prefixes
-	init_matrix_prefixes(&mut upper_buf, cols, &warmup_periods_upper);
-	init_matrix_prefixes(&mut lower_buf, cols, &warmup_periods_lower);
-	init_matrix_prefixes(&mut upper_change_buf, cols, &warmup_periods_upper_change);
-	init_matrix_prefixes(&mut lower_change_buf, cols, &warmup_periods_lower_change);
+	init_matrix_prefixes(&mut upper_mu, cols, &warm_upper);
+	init_matrix_prefixes(&mut lower_mu, cols, &warm_lower);
+	init_matrix_prefixes(&mut upper_change_mu, cols, &warm_uc);
+	init_matrix_prefixes(&mut lower_change_mu, cols, &warm_lc);
 	
-	// Convert to initialized slices using transmute
-	let mut upper = unsafe {
-		let ptr = upper_buf.as_mut_ptr() as *mut f64;
-		Vec::from_raw_parts(ptr, rows * cols, rows * cols)
-	};
-	let mut lower = unsafe {
-		let ptr = lower_buf.as_mut_ptr() as *mut f64;
-		Vec::from_raw_parts(ptr, rows * cols, rows * cols)
-	};
-	let mut upper_change = unsafe {
-		let ptr = upper_change_buf.as_mut_ptr() as *mut f64;
-		Vec::from_raw_parts(ptr, rows * cols, rows * cols)
-	};
-	let mut lower_change = unsafe {
-		let ptr = lower_change_buf.as_mut_ptr() as *mut f64;
-		Vec::from_raw_parts(ptr, rows * cols, rows * cols)
-	};
+	// Zero-copy convert using ManuallyDrop
+	let mut u_guard  = core::mem::ManuallyDrop::new(upper_mu);
+	let mut l_guard  = core::mem::ManuallyDrop::new(lower_mu);
+	let mut uc_guard = core::mem::ManuallyDrop::new(upper_change_mu);
+	let mut lc_guard = core::mem::ManuallyDrop::new(lower_change_mu);
 	
-	// Forget the original buffers to avoid double-free
-	std::mem::forget(upper_buf);
-	std::mem::forget(lower_buf);
-	std::mem::forget(upper_change_buf);
-	std::mem::forget(lower_change_buf);
+	let upper: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(u_guard.as_mut_ptr() as *mut f64, u_guard.len())
+	};
+	let lower: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(l_guard.as_mut_ptr() as *mut f64, l_guard.len())
+	};
+	let upper_change: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(uc_guard.as_mut_ptr() as *mut f64, uc_guard.len())
+	};
+	let lower_change: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(lc_guard.as_mut_ptr() as *mut f64, lc_guard.len())
+	};
 	#[cfg(not(target_arch = "wasm32"))]
 	use rayon::prelude::*;
 
@@ -1592,6 +1659,12 @@ pub fn gatorosc_batch_par_slice(
 		}
 	}
 
+	// Convert back to owned vectors without copying
+	let upper = unsafe { Vec::from_raw_parts(u_guard.as_mut_ptr() as *mut f64, u_guard.len(), u_guard.capacity()) };
+	let lower = unsafe { Vec::from_raw_parts(l_guard.as_mut_ptr() as *mut f64, l_guard.len(), l_guard.capacity()) };
+	let upper_change = unsafe { Vec::from_raw_parts(uc_guard.as_mut_ptr() as *mut f64, uc_guard.len(), uc_guard.capacity()) };
+	let lower_change = unsafe { Vec::from_raw_parts(lc_guard.as_mut_ptr() as *mut f64, lc_guard.len(), lc_guard.capacity()) };
+
 	Ok(GatorOscBatchOutput {
 		upper,
 		lower,
@@ -1603,10 +1676,6 @@ pub fn gatorosc_batch_par_slice(
 	})
 }
 
-#[inline(always)]
-pub fn expand_grid(r: &GatorOscBatchRange) -> Vec<GatorOscParams> {
-	expand_grid_gatorosc(r)
-}
 
 //======= WASM Bindings =======
 
@@ -1810,7 +1879,7 @@ pub fn gatorosc_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsVal
 	};
 
 	// Calculate total combinations
-	let combos = expand_grid(&sweep);
+	let combos = expand_grid_gatorosc(&sweep);
 	let n_combos = combos.len();
 	let len = data.len();
 
@@ -1891,7 +1960,7 @@ pub fn gatorosc_batch_into(
 		};
 
 		// Calculate number of combinations
-		let combos = expand_grid(&sweep);
+		let combos = expand_grid_gatorosc(&sweep);
 		let n_combos = combos.len();
 		let total_size = n_combos * len;
 

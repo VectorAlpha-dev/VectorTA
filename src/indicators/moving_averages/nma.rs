@@ -213,11 +213,11 @@ fn nma_prepare<'a>(
 	}
 
 	// Pre-compute sqrt differences - small vector, regular Vec is OK
-	let mut sqrt_diffs = Vec::with_capacity(period);
+	let mut sqrt_diffs = vec![0.0; period];
 	for i in 0..period {
 		let s0 = (i as f64).sqrt();
 		let s1 = ((i + 1) as f64).sqrt();
-		sqrt_diffs.push(s1 - s0);
+		sqrt_diffs[i] = s1 - s0;
 	}
 
 	let chosen = match kernel {
@@ -293,11 +293,11 @@ pub fn nma_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
 	}
 
 	// Small vector, regular Vec is OK
-	let mut sqrt_diffs = Vec::with_capacity(period);
+	let mut sqrt_diffs = vec![0.0; period];
 	for i in 0..period {
 		let s0 = (i as f64).sqrt();
 		let s1 = ((i + 1) as f64).sqrt();
-		sqrt_diffs.push(s1 - s0);
+		sqrt_diffs[i] = s1 - s0;
 	}
 
 	for j in (first + period)..len {
@@ -1184,6 +1184,84 @@ fn round_up8(x: usize) -> usize {
 }
 
 #[inline(always)]
+fn nma_batch_inner_into_scalar_reuse(
+	data: &[f64],
+	sweep: &NmaBatchRange,
+	parallel: bool,
+	out: &mut [f64],
+) -> Result<Vec<NmaParams>, NmaError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() { return Err(NmaError::InvalidPeriod{ period:0, data_len:0 }); }
+
+	let len = data.len();
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(NmaError::AllValuesNaN)?;
+	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	if len - first < max_p + 1 {
+		return Err(NmaError::NotEnoughValidData { needed: max_p + 1, valid: len - first });
+	}
+
+	// Prepare output as MaybeUninit and seed warm prefixes with NaN
+	let rows = combos.len();
+	let cols = len;
+	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
+	let out_mu = unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len()) };
+	unsafe { init_matrix_prefixes(out_mu, cols, &warm) };
+
+	// Precompute ln and window diffs once: d[k] = |ln(x[k+1]) - ln(x[k])|
+	let mut ln = alloc_with_nan_prefix(len, 0);
+	for i in 0..len { ln[i] = data[i].max(1e-10).ln(); }
+	for i in 0..len.saturating_sub(1) { ln[i] = (ln[i+1] - ln[i]).abs(); }
+	ln[len.saturating_sub(1)] = 0.0;
+	let d = &ln;
+
+	// Prefix sums S for O(1) denominators
+	let mut s = alloc_with_nan_prefix(len + 1, 0);
+	s[0] = 0.0;
+	for i in 0..len { s[i+1] = s[i] + d[i]; }
+
+	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| {
+		let p = combos[row].period.unwrap();
+		let warm = first + p;
+		// small weight vector on stack-capacity Vec
+		let mut w_rev = Vec::with_capacity(p);
+		for i in 0..p {
+			let s0 = ((p - 1 - i) as f64).sqrt();
+			let s1 = ((p - i) as f64).sqrt();
+			w_rev.push(s1 - s0);
+		}
+		let dst = unsafe { std::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len()) };
+
+		for j in warm..len {
+			let base = j - p;
+			let denom = s[j] - s[j - p];
+
+			let mut num = 0.0;
+			// dot(d[base..base+p], w_rev)
+			for t in 0..p { num += d[base + t] * w_rev[t]; }
+
+			let ratio = if denom == 0.0 { 0.0 } else { num / denom };
+			let x2 = data[j - p];              // older
+			let x1 = data[j - p + 1];          // newer
+			dst[j] = ratio.mul_add(x1 - x2, x2);
+		}
+	};
+
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			use rayon::prelude::*;
+			out_mu.par_chunks_mut(cols).enumerate().for_each(|(r, row)| do_row(r, row));
+		}
+		#[cfg(target_arch = "wasm32")]
+		for (r, row) in out_mu.chunks_mut(cols).enumerate() { do_row(r, row); }
+	} else {
+		for (r, row) in out_mu.chunks_mut(cols).enumerate() { do_row(r, row); }
+	}
+
+	Ok(combos)
+}
+
+#[inline(always)]
 pub fn nma_batch_slice(data: &[f64], sweep: &NmaBatchRange, kern: Kernel) -> Result<NmaBatchOutput, NmaError> {
 	nma_batch_inner(data, sweep, kern, false)
 }
@@ -1211,6 +1289,29 @@ fn nma_batch_inner(
 	if combos.is_empty() {
 		return Err(NmaError::InvalidPeriod { period: 0, data_len: 0 });
 	}
+	let rows = combos.len();
+	let cols = data.len();
+
+	// Select backend for scalar kernel
+	if kern == Kernel::Scalar {
+		// Allocate matrix once and init warm prefixes
+		let first = data.iter().position(|x| !x.is_nan()).ok_or(NmaError::AllValuesNaN)?;
+		let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
+		let mut raw = make_uninit_matrix(rows, cols);
+		unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
+		
+		// Fill in-place using the scalar reuse backend
+		let out: &mut [f64] = unsafe {
+			std::slice::from_raw_parts_mut(raw.as_mut_ptr() as *mut f64, raw.len())
+		};
+		let combos = nma_batch_inner_into_scalar_reuse(data, sweep, parallel, out)?;
+		// Convert to Vec<f64> without copy (ALMA-style)
+		let mut guard = core::mem::ManuallyDrop::new(raw);
+		let values = unsafe {
+			Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, guard.len(), guard.capacity())
+		};
+		return Ok(NmaBatchOutput { values, combos, rows, cols });
+	}
 
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(NmaError::AllValuesNaN)?;
 	let max_p = combos.iter().map(|c| round_up8(c.period.unwrap())).max().unwrap();
@@ -1221,9 +1322,6 @@ fn nma_batch_inner(
 		});
 	}
 
-	let rows = combos.len();
-	let cols = data.len();
-
 	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
 
 	let mut raw = make_uninit_matrix(rows, cols);
@@ -1231,18 +1329,18 @@ fn nma_batch_inner(
 
 	// ---------------------------------------------------------------------
 	// 2. closure that fills one row (works with MaybeUninit<f64>)
-	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
+	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| {
 		let period = combos[row].period.unwrap();
 
 		// cast just this row to &mut [f64] so we can call the usual kernel
-		let out_row = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
+		let out_row = unsafe { core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len()) };
 
 		match kern {
 			Kernel::Scalar => nma_row_scalar(data, first, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => nma_row_avx2(data, first, period, out_row),
+			Kernel::Avx2 => unsafe { nma_row_avx2(data, first, period, out_row) },
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => nma_row_avx512(data, first, period, out_row),
+			Kernel::Avx512 => unsafe { nma_row_avx512(data, first, period, out_row) },
 			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
 			Kernel::Avx2 | Kernel::Avx512 => nma_row_scalar(data, first, period, out_row),
 			_ => nma_row_scalar(data, first, period, out_row),
@@ -1273,8 +1371,15 @@ fn nma_batch_inner(
 	}
 
 	// ---------------------------------------------------------------------
-	// 4. everything is now initialised – transmute to Vec<f64>
-	let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
+	// 4. everything is now initialised – convert to Vec<f64> using ALMA's safer pattern
+	let mut guard = core::mem::ManuallyDrop::new(raw);
+	let values = unsafe {
+		Vec::from_raw_parts(
+			guard.as_mut_ptr() as *mut f64,
+			guard.len(),
+			guard.capacity(),
+		)
+	};
 
 	Ok(NmaBatchOutput {
 		values,
@@ -1317,18 +1422,18 @@ fn nma_batch_inner_into(
 	unsafe { init_matrix_prefixes(out_uninit, cols, &warm) };
 
 	// Closure that writes ONE row
-	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
+	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| {
 		let period = combos[row].period.unwrap();
 
 		// Cast this row to &mut [f64]
-		let out_row = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
+		let out_row = unsafe { core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len()) };
 
 		match kern {
 			Kernel::Scalar => nma_row_scalar(data, first, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => nma_row_avx2(data, first, period, out_row),
+			Kernel::Avx2 => unsafe { nma_row_avx2(data, first, period, out_row) },
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => nma_row_avx512(data, first, period, out_row),
+			Kernel::Avx512 => unsafe { nma_row_avx512(data, first, period, out_row) },
 			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
 			Kernel::Avx2 | Kernel::Avx512 => nma_row_scalar(data, first, period, out_row),
 			_ => nma_row_scalar(data, first, period, out_row),
@@ -1360,7 +1465,7 @@ fn nma_batch_inner_into(
 }
 
 #[inline(always)]
-unsafe fn nma_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
+fn nma_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
 	nma_scalar(data, period, first, out)
 }
 
@@ -1671,8 +1776,8 @@ pub fn nma_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
 	// Allocate output buffer once
 	let mut output = vec![0.0; data.len()];
 
-	// Compute directly into output buffer (use Scalar for WASM)
-	nma_into_slice(&mut output, &input, Kernel::Scalar).map_err(|e| JsValue::from_str(&e.to_string()))?;
+	// Compute directly into output buffer (use best kernel for WASM)
+	nma_into_slice(&mut output, &input, detect_best_kernel()).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	Ok(output)
 }

@@ -139,14 +139,22 @@ test('SafeZoneStop fast API (into)', () => {
     const low = new Float64Array(testData.low);
     const len = high.length;
     
-    // Allocate output buffer
+    // Allocate buffers for inputs and output
+    const highPtr = wasm.safezonestop_alloc(len);
+    const lowPtr = wasm.safezonestop_alloc(len);
     const outPtr = wasm.safezonestop_alloc(len);
     
     try {
-        // Call fast API
+        // Copy input data to WASM memory
+        const highMem = new Float64Array(wasm.__wasm.memory.buffer, highPtr, len);
+        const lowMem = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, len);
+        highMem.set(high);
+        lowMem.set(low);
+        
+        // Call fast API with pointers
         wasm.safezonestop_into(
-            high,
-            low,
+            highPtr,
+            lowPtr,
             outPtr,
             len,
             22,
@@ -156,7 +164,7 @@ test('SafeZoneStop fast API (into)', () => {
         );
         
         // Read result
-        const memory = new Float64Array(wasm.memory.buffer, outPtr, len);
+        const memory = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
         const result = Array.from(memory);
         
         // Compare with safe API
@@ -164,6 +172,8 @@ test('SafeZoneStop fast API (into)', () => {
         assertArrayClose(result, safeResult, 1e-10, "Fast API mismatch");
     } finally {
         // Clean up
+        wasm.safezonestop_free(highPtr, len);
+        wasm.safezonestop_free(lowPtr, len);
         wasm.safezonestop_free(outPtr, len);
     }
 });
@@ -177,21 +187,40 @@ test('SafeZoneStop fast API aliasing - high', () => {
     // Create a copy for verification
     const highCopy = new Float64Array(high);
     
-    // Call fast API with output aliasing high input
-    wasm.safezonestop_into(
-        high,
-        low,
-        high, // Output aliases with high input
-        len,
-        22,
-        2.5,
-        3,
-        "long"
-    );
+    // Allocate buffers
+    const highPtr = wasm.safezonestop_alloc(len);
+    const lowPtr = wasm.safezonestop_alloc(len);
     
-    // Verify result by comparing with safe API
-    const expected = wasm.safezonestop_js(highCopy, low, 22, 2.5, 3, "long");
-    assertArrayClose(high, expected, 1e-10, "Aliasing test failed");
+    try {
+        // Copy input data to WASM memory
+        const highMem = new Float64Array(wasm.__wasm.memory.buffer, highPtr, len);
+        const lowMem = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, len);
+        highMem.set(high);
+        lowMem.set(low);
+        
+        // Call fast API with output aliasing high input
+        wasm.safezonestop_into(
+            highPtr,
+            lowPtr,
+            highPtr, // Output aliases with high input
+            len,
+            22,
+            2.5,
+            3,
+            "long"
+        );
+        
+        // Read result
+        const result = Array.from(new Float64Array(wasm.__wasm.memory.buffer, highPtr, len));
+        
+        // Verify result by comparing with safe API
+        const expected = wasm.safezonestop_js(highCopy, low, 22, 2.5, 3, "long");
+        assertArrayClose(result, expected, 1e-10, "Aliasing test failed");
+    } finally {
+        // Clean up
+        wasm.safezonestop_free(highPtr, len);
+        wasm.safezonestop_free(lowPtr, len);
+    }
 });
 
 test('SafeZoneStop batch API', () => {
@@ -257,7 +286,7 @@ test('SafeZoneStop memory allocation/deallocation', () => {
     assert(ptr > 0, "Invalid pointer returned");
     
     // Write some data
-    const memory = new Float64Array(wasm.memory.buffer, ptr, len);
+    const memory = new Float64Array(wasm.__wasm.memory.buffer, ptr, len);
     for (let i = 0; i < len; i++) {
         memory[i] = i * 1.5;
     }

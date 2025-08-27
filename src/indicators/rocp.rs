@@ -9,7 +9,7 @@
 //! This indicator is centered around 0 and can be positive or negative.
 //!
 //! ## Parameters
-//! - **period**: The lookback window (number of data points). Defaults to 9.
+//! - **period**: The lookback window (number of data points). Defaults to 10.
 //!
 //! ## Errors
 //! - **AllValuesNaN**: rocp: All input data values are `NaN`.
@@ -169,6 +169,8 @@ impl RocpBuilder {
 
 #[derive(Debug, Error)]
 pub enum RocpError {
+	#[error("rocp: Input data slice is empty.")]
+	EmptyInputData,
 	#[error("rocp: All values are NaN.")]
 	AllValuesNaN,
 	#[error("rocp: Invalid period: period = {period}, data length = {data_len}")]
@@ -188,9 +190,12 @@ pub fn rocp_with_kernel(input: &RocpInput, kernel: Kernel) -> Result<RocpOutput,
 		RocpData::Slice(sl) => sl,
 	};
 
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(RocpError::AllValuesNaN)?;
-
 	let len = data.len();
+	if len == 0 {
+		return Err(RocpError::EmptyInputData);
+	}
+
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(RocpError::AllValuesNaN)?;
 	let period = input.get_period();
 
 	if period == 0 || period > len {
@@ -231,9 +236,12 @@ pub fn rocp_into_slice(dst: &mut [f64], input: &RocpInput, kern: Kernel) -> Resu
 		RocpData::Slice(sl) => sl,
 	};
 
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(RocpError::AllValuesNaN)?;
-
 	let len = data.len();
+	if len == 0 {
+		return Err(RocpError::EmptyInputData);
+	}
+
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(RocpError::AllValuesNaN)?;
 	let period = input.get_period();
 
 	if period == 0 || period > len {
@@ -246,15 +254,12 @@ pub fn rocp_into_slice(dst: &mut [f64], input: &RocpInput, kern: Kernel) -> Resu
 		});
 	}
 
-	if dst.len() != data.len() {
+	if dst.len() != len {
 		return Err(RocpError::InvalidPeriod {
 			period: dst.len(),
-			data_len: data.len(),
+			data_len: len,
 		});
 	}
-
-	// Fill with NaN first
-	dst.fill(f64::NAN);
 
 	let chosen = match kern {
 		Kernel::Auto => detect_best_kernel(),
@@ -270,6 +275,11 @@ pub fn rocp_into_slice(dst: &mut [f64], input: &RocpInput, kern: Kernel) -> Resu
 			Kernel::Avx512 | Kernel::Avx512Batch => rocp_avx512(data, period, first, dst),
 			_ => rocp_scalar(data, period, first, dst),
 		}
+	}
+
+	// Prefix-only warmup NaNs (ROCP first output at index first + period)
+	for v in &mut dst[..(first + period)] {
+		*v = f64::NAN;
 	}
 
 	Ok(())
@@ -324,7 +334,7 @@ pub struct RocpStream {
 
 impl RocpStream {
 	pub fn try_new(params: RocpParams) -> Result<Self, RocpError> {
-		let period = params.period.unwrap_or(9);
+		let period = params.period.unwrap_or(10);
 		if period == 0 {
 			return Err(RocpError::InvalidPeriod { period, data_len: 0 });
 		}
@@ -418,8 +428,8 @@ pub fn rocp_batch_with_kernel(data: &[f64], sweep: &RocpBatchRange, k: Kernel) -
 	let simd = match kernel {
 		Kernel::Avx512Batch => Kernel::Avx512,
 		Kernel::Avx2Batch => Kernel::Avx2,
-		Kernel::ScalarBatch | Kernel::Scalar => Kernel::Scalar,
-		_ => Kernel::Scalar,
+		Kernel::ScalarBatch => Kernel::Scalar,
+		_ => unreachable!(),
 	};
 	rocp_batch_par_slice(data, sweep, simd)
 }
@@ -435,7 +445,7 @@ impl RocpBatchOutput {
 	pub fn row_for_params(&self, p: &RocpParams) -> Option<usize> {
 		self.combos
 			.iter()
-			.position(|c| c.period.unwrap_or(9) == p.period.unwrap_or(9))
+			.position(|c| c.period.unwrap_or(10) == p.period.unwrap_or(10))
 	}
 
 	pub fn values_for(&self, p: &RocpParams) -> Option<&[f64]> {
@@ -507,13 +517,12 @@ fn rocp_batch_inner(
 	
 	init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
 	
-	// SAFETY: Convert MaybeUninit to mutable slice
-	let out = unsafe {
-		std::slice::from_raw_parts_mut(
-			buf_mu.as_mut_ptr() as *mut f64,
-			buf_mu.len(),
-		)
+	// Use ManuallyDrop for safer ownership transfer
+	let mut guard = core::mem::ManuallyDrop::new(buf_mu);
+	let out: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len())
 	};
+	
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
 		match kern {
@@ -549,14 +558,11 @@ fn rocp_batch_inner(
 	// SAFETY: Convert the buffer back to Vec
 	let values = unsafe {
 		Vec::from_raw_parts(
-			buf_mu.as_mut_ptr() as *mut f64,
-			buf_mu.len(),
-			buf_mu.capacity(),
+			guard.as_mut_ptr() as *mut f64,
+			guard.len(),
+			guard.capacity(),
 		)
 	};
-	
-	// Prevent double-free
-	std::mem::forget(buf_mu);
 
 	Ok(RocpBatchOutput {
 		values,
@@ -602,20 +608,6 @@ pub unsafe fn rocp_row_avx512_long(data: &[f64], first: usize, period: usize, ou
 	rocp_row_scalar(data, first, period, out)
 }
 
-#[inline(always)]
-fn expand_grid_rocp(r: &RocpBatchRange) -> Vec<RocpParams> {
-	fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-		if step == 0 || start == end {
-			return vec![start];
-		}
-		(start..=end).step_by(step).collect()
-	}
-	axis_usize(r.period)
-		.into_iter()
-		.map(|p| RocpParams { period: Some(p) })
-		.collect()
-}
-
 // No changes to tests required; batch and scalar logic are unified.
 
 #[inline(always)]
@@ -626,6 +618,8 @@ pub fn rocp_batch_inner_into(
 	parallel: bool,
 	out: &mut [f64],
 ) -> Result<Vec<RocpParams>, RocpError> {
+	use core::mem::MaybeUninit;
+
 	let combos = expand_grid(sweep);
 	if combos.is_empty() {
 		return Err(RocpError::InvalidPeriod { period: 0, data_len: 0 });
@@ -641,40 +635,42 @@ pub fn rocp_batch_inner_into(
 	}
 
 	let cols = data.len();
-	
-	// Fill with NaN first
-	out.fill(f64::NAN);
-	
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+
+	// 1) Work in uninitialized space
+	let out_mu: &mut [MaybeUninit<f64>] = unsafe {
+		core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
+	};
+
+	// 2) Warmup NaN prefixes per row (ROCP warm = first + period)
+	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
+	init_matrix_prefixes(out_mu, cols, &warm);
+
+	// 3) Row writer: take MU row, view as f64, compute into it
+	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
 		let period = combos[row].period.unwrap();
+		let dst: &mut [f64] = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
+
 		match kern {
-			Kernel::Scalar => rocp_row_scalar(data, first, period, out_row),
+			Kernel::Scalar | Kernel::ScalarBatch => rocp_row_scalar(data, first, period, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => rocp_row_avx2(data, first, period, out_row),
+			Kernel::Avx2 | Kernel::Avx2Batch => rocp_row_avx2(data, first, period, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => rocp_row_avx512(data, first, period, out_row),
-			_ => rocp_row_scalar(data, first, period, out_row),
+			Kernel::Avx512 | Kernel::Avx512Batch => rocp_row_avx512(data, first, period, dst),
+			_ => rocp_row_scalar(data, first, period, dst),
 		}
 	};
 
+	// 4) Iterate by MU rows
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			out.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
+			use rayon::prelude::*;
+			out_mu.par_chunks_mut(cols).enumerate().for_each(|(r, s)| do_row(r, s));
 		}
-
 		#[cfg(target_arch = "wasm32")]
-		{
-			for (row, slice) in out.chunks_mut(cols).enumerate() {
-				do_row(row, slice);
-			}
-		}
+		for (r, s) in out_mu.chunks_mut(cols).enumerate() { do_row(r, s); }
 	} else {
-		for (row, slice) in out.chunks_mut(cols).enumerate() {
-			do_row(row, slice);
-		}
+		for (r, s) in out_mu.chunks_mut(cols).enumerate() { do_row(r, s); }
 	}
 
 	Ok(combos)
@@ -755,14 +751,14 @@ pub fn rocp_batch_py<'py>(
 			let kernel = match kern {
 				Kernel::Auto => detect_best_batch_kernel(),
 				other if other.is_batch() => other,
-				k => return Err(RocpError::InvalidPeriod { period: 0, data_len: 0 }),
+				_ => return Err(RocpError::InvalidPeriod { period: 0, data_len: 0 }),
 			};
 
 			let simd = match kernel {
 				Kernel::Avx512Batch => Kernel::Avx512,
 				Kernel::Avx2Batch => Kernel::Avx2,
-				Kernel::ScalarBatch | Kernel::Scalar => Kernel::Scalar,
-				_ => Kernel::Scalar,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => unreachable!(),
 			};
 
 			rocp_batch_inner_into(slice_in, &sweep, simd, true, slice_out)

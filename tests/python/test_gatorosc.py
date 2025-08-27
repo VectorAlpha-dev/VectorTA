@@ -71,9 +71,11 @@ def test_gatorosc_stream():
     stream = ta.GatorOscStream()
     
     # Initial updates should return None
+    # With default params: jaws_length=13, jaws_shift=8, teeth_length=8, teeth_shift=5, lips_length=5, lips_shift=3
+    # lower_change_warmup = 13, so first output at index 12
     for i in range(20):
         result = stream.update(50.0 + i)
-        if i < 13:  # Before minimum warmup
+        if i < 12:  # Before minimum warmup (lower_change_warmup = 13, first output at index 12)
             assert result is None
     
     # Eventually should get results

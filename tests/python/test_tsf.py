@@ -68,8 +68,15 @@ class TestTsf:
         """Test TSF with zero period - should raise error"""
         close = test_data['close']
         
-        with pytest.raises(ValueError, match="Invalid period"):
+        with pytest.raises(ValueError, match="Period must be at least 2"):
             ta_indicators.tsf(close, 0)
+    
+    def test_tsf_period_one(self, test_data):
+        """Test TSF with period=1 - should raise error"""
+        close = test_data['close']
+        
+        with pytest.raises(ValueError, match="Period must be at least 2"):
+            ta_indicators.tsf(close, 1)
     
     def test_tsf_period_exceeds_length(self):
         """Test TSF when period exceeds data length - should raise error"""

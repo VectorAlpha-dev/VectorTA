@@ -94,48 +94,101 @@ test('ULTOSC fast API', () => {
     const high = new Float64Array(testData.high);
     const low = new Float64Array(testData.low);
     const close = new Float64Array(testData.close);
-    const output = new Float64Array(close.length);
+    const len = close.length;
     
-    // Test non-aliasing case
-    wasm.ultosc_into(
-        high.buffer,
-        low.buffer,
-        close.buffer,
-        output.buffer,
-        close.length,
-        7,
-        14,
-        28
-    );
+    // Allocate memory for all arrays
+    const highPtr = wasm.ultosc_alloc(len);
+    const lowPtr = wasm.ultosc_alloc(len);
+    const closePtr = wasm.ultosc_alloc(len);
+    const outPtr = wasm.ultosc_alloc(len);
     
-    // Should match safe API result
-    const safeResult = wasm.ultosc_js(high, low, close, 7, 14, 28);
-    assertArrayClose(output, safeResult, 1e-10);
+    try {
+        // Create views and copy data
+        const highView = new Float64Array(wasm.__wasm.memory.buffer, highPtr, len);
+        const lowView = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, len);
+        const closeView = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
+        
+        highView.set(high);
+        lowView.set(low);
+        closeView.set(close);
+        
+        // Test non-aliasing case
+        wasm.ultosc_into(
+            highPtr,
+            lowPtr,
+            closePtr,
+            outPtr,
+            len,
+            7,
+            14,
+            28
+        );
+        
+        // Read output
+        const outView = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
+        const output = new Float64Array(outView);
+        
+        // Should match safe API result
+        const safeResult = wasm.ultosc_js(high, low, close, 7, 14, 28);
+        assertArrayClose(output, safeResult, 1e-10);
+    } finally {
+        // Clean up
+        wasm.ultosc_free(highPtr, len);
+        wasm.ultosc_free(lowPtr, len);
+        wasm.ultosc_free(closePtr, len);
+        wasm.ultosc_free(outPtr, len);
+    }
 });
 
 test('ULTOSC fast API with aliasing', () => {
     const high = new Float64Array(testData.high);
     const low = new Float64Array(testData.low);
     const close = new Float64Array(testData.close);
+    const len = close.length;
     
     // Create a copy for comparison
     const closeCopy = new Float64Array(close);
     
-    // Test aliasing - output overwrites close array
-    wasm.ultosc_into(
-        high.buffer,
-        low.buffer,
-        close.buffer,
-        close.buffer, // Same as input!
-        close.length,
-        7,
-        14,
-        28
-    );
+    // Allocate memory
+    const highPtr = wasm.ultosc_alloc(len);
+    const lowPtr = wasm.ultosc_alloc(len);
+    const closePtr = wasm.ultosc_alloc(len);
     
-    // Should produce correct results despite aliasing
-    const expectedResult = wasm.ultosc_js(high, low, closeCopy, 7, 14, 28);
-    assertArrayClose(close, expectedResult, 1e-10);
+    try {
+        // Create views and copy data
+        const highView = new Float64Array(wasm.__wasm.memory.buffer, highPtr, len);
+        const lowView = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, len);
+        const closeView = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
+        
+        highView.set(high);
+        lowView.set(low);
+        closeView.set(close);
+        
+        // Test aliasing - output overwrites close array
+        wasm.ultosc_into(
+            highPtr,
+            lowPtr,
+            closePtr,
+            closePtr, // Same as input!
+            len,
+            7,
+            14,
+            28
+        );
+        
+        // Read the modified close array
+        const modifiedClose = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
+        const result = new Float64Array(modifiedClose);
+        
+        // Should produce correct results despite aliasing
+        const expectedResult = wasm.ultosc_js(high, low, closeCopy, 7, 14, 28);
+        assertArrayClose(result, expectedResult, 1e-10);
+    } finally {
+        // Clean up
+        wasm.ultosc_free(highPtr, len);
+        wasm.ultosc_free(lowPtr, len);
+        wasm.ultosc_free(closePtr, len);
+    }
 });
 
 test('ULTOSC batch calculation', async () => {
@@ -215,7 +268,7 @@ test('ULTOSC error handling - period exceeding data length', () => {
     
     assert.throws(() => {
         wasm.ultosc_js(high, low, close, 7, 14, 50);
-    }, /Period exceeds data length|InvalidPeriods/);
+    }, /Period exceeds data length|Invalid periods/i);
 });
 
 test('ULTOSC NaN handling', () => {
@@ -255,7 +308,8 @@ test('ULTOSC consistency', () => {
 
 test('ULTOSC edge case - minimum data', () => {
     // Test with exactly the minimum required data
-    const size = 28; // Largest period
+    // Need largest period (28) + 1 because first_valid requires both i-1 and i to be valid
+    const size = 29; // Largest period + 1
     const high = new Float64Array(size);
     const low = new Float64Array(size); 
     const close = new Float64Array(size);

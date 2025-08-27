@@ -10,10 +10,10 @@
 //! - **period**: Core lookback length for the KAMA calculation (defaults to 30).
 //!
 //! ## Errors
-//! - **NoData**: kama: No input data was provided.
+//! - **EmptyInputData**: kama: Input data slice is empty.
 //! - **AllValuesNaN**: kama: All input data is `NaN`.
 //! - **InvalidPeriod**: kama: `period` is zero or exceeds the data length.
-//! - **NotEnoughData**: kama: Not enough data to calculate KAMA for the requested `period`.
+//! - **NotEnoughValidData**: kama: Not enough valid data to calculate KAMA for the requested `period`.
 //!
 //! ## Returns
 //! - **`Ok(KamaOutput)`** on success, containing a `Vec<f64>` with length matching the input.
@@ -24,7 +24,6 @@ use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
 	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
-use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -149,14 +148,18 @@ impl KamaBuilder {
 
 #[derive(Debug, Error)]
 pub enum KamaError {
-	#[error("kama: No data provided for KAMA.")]
-	NoData,
+	#[error("kama: Input data slice is empty.")]
+	EmptyInputData,
 	#[error("kama: All values are NaN.")]
 	AllValuesNaN,
 	#[error("kama: Invalid period: period = {period}, data length = {data_len}")]
 	InvalidPeriod { period: usize, data_len: usize },
 	#[error("kama: Not enough valid data: needed = {needed}, valid = {valid}")]
-	NotEnoughData { needed: usize, valid: usize },
+	NotEnoughValidData { needed: usize, valid: usize },
+	#[error("kama: Buffer length mismatch: expected = {expected}, got = {got}")]
+	BufferLengthMismatch { expected: usize, got: usize },
+	#[error("kama: Invalid kernel: batch operations require batch kernels")]
+	InvalidKernel,
 }
 
 #[inline]
@@ -184,7 +187,7 @@ fn kama_prepare<'a>(
 	let data: &[f64] = input.as_ref();
 	let len = data.len();
 	if len == 0 {
-		return Err(KamaError::NoData);
+		return Err(KamaError::EmptyInputData);
 	}
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(KamaError::AllValuesNaN)?;
 	let period = input.get_period();
@@ -193,7 +196,7 @@ fn kama_prepare<'a>(
 		return Err(KamaError::InvalidPeriod { period, data_len: len });
 	}
 	if (len - first) <= period {
-		return Err(KamaError::NotEnoughData {
+		return Err(KamaError::NotEnoughValidData {
 			needed: period + 1,
 			valid: len - first,
 		});
@@ -240,9 +243,9 @@ pub fn kama_into_slice(dst: &mut [f64], input: &KamaInput, kern: Kernel) -> Resu
 
 	// Verify output buffer size matches input
 	if dst.len() != data.len() {
-		return Err(KamaError::InvalidPeriod {
-			period: dst.len(),
-			data_len: data.len(),
+		return Err(KamaError::BufferLengthMismatch {
+			expected: data.len(),
+			got: dst.len(),
 		});
 	}
 
@@ -260,7 +263,7 @@ pub fn kama_into_slice(dst: &mut [f64], input: &KamaInput, kern: Kernel) -> Resu
 
 #[inline]
 pub fn kama_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-	assert!(out.len() >= data.len(), "`out` must be at least as long as `data`");
+	assert_eq!(out.len(), data.len(), "`out` must be the same length as `data`");
 
 	let len = data.len();
 	let lookback = period.saturating_sub(1);
@@ -343,7 +346,7 @@ pub unsafe fn kama_avx2(data: &[f64], period: usize, first_valid: usize, out: &m
 		let hi = _mm256_extractf128_pd::<1>(sumv); // upper 2
 		let lo = _mm256_castpd256_pd128(sumv); // lower 2
 		let pair = _mm_add_pd(lo, hi); // 2-lanes
-		sum_roc1 = _mm_cvtsd_f64(pair) + _mm_cvtsd_f64(_mm_unpackhi_pd(pair, pair)); // scalar :contentReference[oaicite:0]{index=0}
+		sum_roc1 = _mm_cvtsd_f64(pair) + _mm_cvtsd_f64(_mm_unpackhi_pd(pair, pair)); // scalar
 
 		// scalar tail (<16)
 		while idx <= lookback {
@@ -384,18 +387,18 @@ pub unsafe fn kama_avx2(data: &[f64], period: usize, first_valid: usize, out: &m
 		tail_val = next_tail;
 		tail_idx += 1;
 
-		// smoothing constant (square cheaper than powi) :contentReference[oaicite:1]{index=1}
+		// smoothing constant (square cheaper than powi)
 		let direction = (price - *data.get_unchecked(tail_idx)).abs();
 		let er = if sum_roc1 == 0.0 { 0.0 } else { direction / sum_roc1 };
-		let t = er.mul_add(const_diff, const_max); // one FMA, one round :contentReference[oaicite:2]{index=2}
+		let t = er.mul_add(const_diff, const_max); // one FMA, one round
 		let sc = t * t;
 
-		// KAMA recurrence – compiler emits vfmadd132sd on AVX2 targets :contentReference[oaicite:3]{index=3}
+		// KAMA recurrence – compiler emits vfmadd132sd on AVX2 targets
 		kama = (price - kama).mul_add(sc, kama);
 
 		*out.get_unchecked_mut(i) = kama; // scalar store
 
-		// Prefetch 128 B ahead into L2 (T1 hint) :contentReference[oaicite:4]{index=4}
+		// Prefetch 128 B ahead into L2 (T1 hint)
 		_mm_prefetch(data.as_ptr().add(i + 128) as *const i8, _MM_HINT_T1);
 	}
 }
@@ -441,7 +444,7 @@ pub unsafe fn kama_avx512(data: &[f64], period: usize, first_valid: usize, out: 
 			j += 32;
 		}
 		let acc_all = _mm512_add_pd(_mm512_add_pd(acc0, acc1), _mm512_add_pd(acc2, acc3));
-		sum_roc1 = _mm512_reduce_add_pd(acc_all); // horizontal sum :contentReference[oaicite:0]{index=0}
+		sum_roc1 = _mm512_reduce_add_pd(acc_all); // horizontal sum
 
 		while j <= lookback {
 			sum_roc1 += (*base.add(j + 1) - *base.add(j)).abs();
@@ -485,17 +488,17 @@ pub unsafe fn kama_avx512(data: &[f64], period: usize, first_valid: usize, out: 
 		let direction = (price - *data.get_unchecked(tail_idx)).abs();
 		let er = if sum_roc1 == 0.0 { 0.0 } else { direction / sum_roc1 };
 
-		// fused multiply-add → one FMA µ-op; square via multiplication (faster than powi) :contentReference[oaicite:1]{index=1}
+		// fused multiply-add → one FMA µ-op; square via multiplication (faster than powi)
 		let t = er.mul_add(const_diff, const_max);
 		let sc = t * t;
 
 		// ---- KAMA recurrence ----
-		// compiler lowers mul_add to `vfmadd132sd` on AVX-512 targets :contentReference[oaicite:2]{index=2}
+		// compiler lowers mul_add to `vfmadd132sd` on AVX-512 targets
 		kama = (price - kama).mul_add(sc, kama);
 
-		*out.get_unchecked_mut(i) = kama; // regular scalar store (no NT store) :contentReference[oaicite:3]{index=3}
+		*out.get_unchecked_mut(i) = kama; // regular scalar store (no NT store)
 
-		// Prefetch two cache lines ahead; _MM_HINT_T1 prefers L2 :contentReference[oaicite:4]{index=4}
+		// Prefetch two cache lines ahead; _MM_HINT_T1 prefers L2
 		_mm_prefetch(data.as_ptr().add(i + 128) as *const i8, _MM_HINT_T1);
 	}
 }
@@ -628,15 +631,13 @@ pub fn kama_batch_with_kernel(data: &[f64], sweep: &KamaBatchRange, k: Kernel) -
 	let kernel = match k {
 		Kernel::Auto => detect_best_batch_kernel(),
 		other if other.is_batch() => other,
-		_ => return Err(KamaError::InvalidPeriod { period: 0, data_len: 0 }),
+		_ => return Err(KamaError::InvalidKernel),
 	};
 	let simd = match kernel {
 		Kernel::Avx512Batch => Kernel::Avx512,
 		Kernel::Avx2Batch => Kernel::Avx2,
 		Kernel::ScalarBatch => Kernel::Scalar,
-		// In WASM, detect_best_batch_kernel might return Scalar instead of ScalarBatch
-		Kernel::Scalar => Kernel::Scalar,
-		_ => Kernel::Scalar, // Fallback to scalar for safety
+		_ => unreachable!(),
 	};
 	kama_batch_par_slice(data, sweep, simd)
 }
@@ -697,7 +698,7 @@ fn kama_batch_inner(
 	let rows = combos.len();
 
 	if cols == 0 {
-		return Err(KamaError::NoData);
+		return Err(KamaError::EmptyInputData);
 	}
 
 	// Step 1: Allocate uninitialized matrix
@@ -709,7 +710,7 @@ fn kama_batch_inner(
 	// Validate that no period exceeds data length
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
 	if data.len() - first <= max_p {
-		return Err(KamaError::NotEnoughData {
+		return Err(KamaError::NotEnoughValidData {
 			needed: max_p + 1,
 			valid: data.len() - first,
 		});
@@ -760,7 +761,7 @@ fn kama_batch_inner_into(
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(KamaError::AllValuesNaN)?;
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
 	if data.len() - first <= max_p {
-		return Err(KamaError::NotEnoughData {
+		return Err(KamaError::NotEnoughValidData {
 			needed: max_p + 1,
 			valid: data.len() - first,
 		});
@@ -838,10 +839,6 @@ pub unsafe fn kama_row_avx512(data: &[f64], first: usize, period: usize, out: &m
 	kama_avx512(data, period, first, out)
 }
 
-#[inline(always)]
-pub fn expand_grid_kama(r: &KamaBatchRange) -> Vec<KamaParams> {
-	expand_grid(r)
-}
 
 // Python bindings
 #[cfg(feature = "python")]
@@ -892,6 +889,12 @@ pub fn kama_batch_py<'py>(
 	let slice_in = data.as_slice()?;
 	let kern = validate_kernel(kernel, true)?;
 
+	// Check for all-NaN early before allocating output
+	let first = slice_in
+		.iter()
+		.position(|x| !x.is_nan())
+		.ok_or_else(|| PyValueError::new_err("kama: All values are NaN."))?;
+
 	let sweep = KamaBatchRange { period: period_range };
 
 	let combos = expand_grid(&sweep);
@@ -902,15 +905,14 @@ pub fn kama_batch_py<'py>(
 	let slice_out = unsafe { out_arr.as_slice_mut()? };
 
 	// Initialize NaN prefixes before computation
-	let first = slice_in.iter().position(|x| !x.is_nan()).unwrap_or(0);
 	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
 
 	// Initialize NaN values for warmup periods
 	for (row, &warmup) in warm.iter().enumerate() {
-		let row_start = row * cols;
-		let row_warmup = row_start + warmup;
-		for i in row_start..row_warmup.min(row_start + cols) {
-			slice_out[i] = f64::NAN;
+		let start = row * cols;
+		let end = start + warmup.min(cols);
+		for v in &mut slice_out[start..end] {
+			*v = f64::NAN;
 		}
 	}
 

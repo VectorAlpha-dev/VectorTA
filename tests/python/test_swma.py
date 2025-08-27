@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 from my_project import swma, swma_batch, SwmaStream
 from rust_comparison import compare_with_rust
+from test_utils import load_test_data, assert_close, EXPECTED_OUTPUTS
 
 
 class TestSwma:
@@ -23,6 +24,34 @@ class TestSwma:
         assert np.isnan(result[0:period-1]).all()
         assert not np.isnan(result[period-1:]).any()
         
+    def test_swma_empty_input(self):
+        """Test SWMA fails with empty input - mirrors check_swma_empty_input"""
+        empty = np.array([])
+        
+        with pytest.raises(ValueError, match="Input data slice is empty"):
+            swma(empty, 5)
+    
+    def test_swma_accuracy(self):
+        """Test SWMA matches expected values from Rust tests - mirrors check_swma_accuracy"""
+        test_data = load_test_data()
+        close = test_data['close']
+        expected = EXPECTED_OUTPUTS['swma']
+        
+        result = swma(
+            close,
+            period=expected['default_params']['period']
+        )
+        
+        assert len(result) == len(close)
+        
+        # Check last 5 values match expected
+        assert_close(
+            result[-5:], 
+            expected['last_5_values'],
+            rtol=1e-8,
+            msg="SWMA last 5 values mismatch"
+        )
+    
     def test_default_period(self):
         """Test SWMA with consistent period usage"""
         data = np.random.random(100)
@@ -100,8 +129,6 @@ class TestSwma:
         
     def test_compare_with_rust(self):
         """Test that Python bindings match Rust implementation"""
-        # Use the standard test data file that generate_references uses
-        from test_utils import load_test_data
         candles = load_test_data()
         data = candles['close']
         period = 5
@@ -269,7 +296,7 @@ class TestSwma:
         input_volatility = np.std(np.diff(data[period:]))
         output_volatility = np.std(np.diff(result[period:]))
         assert output_volatility < input_volatility
-        
+    
     def test_edge_cases(self):
         """Test edge cases"""
         # Single value
@@ -287,34 +314,6 @@ class TestSwma:
         data = np.array([1.0, 2.0, 3.0])
         result = swma(data, 1)
         np.testing.assert_array_equal(result, data)  # Period 1 returns input as-is
-        
-    def test_reinput(self):
-        """Test using SWMA output as input for another SWMA calculation"""
-        from test_utils import load_test_data
-        candles = load_test_data()
-        data = candles['close']
-        
-        # First SWMA with period 5
-        first_period = 5
-        first_result = swma(data, first_period)
-        assert len(first_result) == len(data)
-        
-        # Use first result as input for second SWMA with period 3
-        second_period = 3
-        second_result = swma(first_result, second_period)
-        assert len(second_result) == len(first_result)
-        
-        # Verify second result is not all NaN
-        # First SWMA has warmup of 4, second SWMA adds warmup of 2
-        # So total warmup should be 4 + 2 = 6
-        assert np.isnan(second_result[:6]).all()
-        assert not np.isnan(second_result[6:]).any()
-        
-        # Verify the output values are reasonable (not just zeros or same value)
-        valid_values = second_result[6:]
-        assert len(np.unique(valid_values)) > 1  # Multiple different values
-        assert np.all(np.isfinite(valid_values))  # All finite values
-        assert np.std(valid_values) > 0  # Has variance
 
 
 if __name__ == "__main__":

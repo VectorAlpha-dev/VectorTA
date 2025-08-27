@@ -21,9 +21,6 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-use aligned_vec::{AVec, CACHELINE_ALIGN};
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-use core::arch::x86_64::*;
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
@@ -158,10 +155,33 @@ impl ZlemaBuilder {
 
 #[derive(Debug, Error)]
 pub enum ZlemaError {
+	#[error("zlema: Input data slice is empty.")]
+	EmptyInputData,
 	#[error("zlema: All values are NaN.")]
 	AllValuesNaN,
 	#[error("zlema: Invalid period: period = {period}, data length = {data_len}")]
 	InvalidPeriod { period: usize, data_len: usize },
+	#[error("zlema: Not enough valid data: needed = {needed}, valid = {valid}")]
+	NotEnoughValidData { needed: usize, valid: usize },
+}
+
+#[inline(always)]
+fn zlema_validate<'a>(input: &'a ZlemaInput) -> Result<(&'a [f64], usize, usize, usize), ZlemaError> {
+	let data: &'a [f64] = input.as_ref();
+	let len = data.len();
+	if len == 0 {
+		return Err(ZlemaError::EmptyInputData);
+	}
+	let period = input.get_period();
+	if period == 0 || period > len {
+		return Err(ZlemaError::InvalidPeriod { period, data_len: len });
+	}
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(ZlemaError::AllValuesNaN)?;
+	if len - first < period {
+		return Err(ZlemaError::NotEnoughValidData { needed: period, valid: len - first });
+	}
+	let warm = first + period - 1;
+	Ok((data, first, period, warm))
 }
 
 #[inline]
@@ -170,53 +190,21 @@ pub fn zlema(input: &ZlemaInput) -> Result<ZlemaOutput, ZlemaError> {
 }
 
 pub fn zlema_with_kernel(input: &ZlemaInput, kernel: Kernel) -> Result<ZlemaOutput, ZlemaError> {
-	let data: &[f64] = match &input.data {
-		ZlemaData::Candles { candles, source } => source_type(candles, source),
-		ZlemaData::Slice(sl) => sl,
-	};
-
-	let len = data.len();
-	let period = input.get_period();
-
-	// Check for empty data first - treat as "all values are NaN"
-	if len == 0 {
-		return Err(ZlemaError::AllValuesNaN);
-	}
-
-	if period == 0 || period > len {
-		return Err(ZlemaError::InvalidPeriod { period, data_len: len });
-	}
-
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(ZlemaError::AllValuesNaN)?;
-	if (len - first) < period {
-		return Err(ZlemaError::InvalidPeriod {
-			period,
-			data_len: len - first,
-		});
-	}
-
-	let warm = first + period;
-	let mut out = alloc_with_nan_prefix(len, warm);
+	let (data, first, period, warm) = zlema_validate(input)?;
+	let mut out = alloc_with_nan_prefix(data.len(), warm);
 
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
-		other => other,
+		k => k,
 	};
 
-	// NB: every kernel variant just fills `out` in-place.
 	unsafe {
 		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => {
-				zlema_scalar(data, period, first, &mut out);
-			}
+			Kernel::Scalar | Kernel::ScalarBatch => zlema_scalar(data, period, first, &mut out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => {
-				zlema_avx2(data, period, first, &mut out);
-			}
+			Kernel::Avx2 | Kernel::Avx2Batch => zlema_avx2(data, period, first, &mut out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => {
-				zlema_avx512(data, period, first, &mut out);
-			}
+			Kernel::Avx512 | Kernel::Avx512Batch => zlema_avx512(data, period, first, &mut out),
 			_ => unreachable!(),
 		}
 	}
@@ -230,17 +218,28 @@ pub fn zlema_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) 
 	let lag = (period - 1) / 2;
 	let alpha = 2.0 / (period as f64 + 1.0);
 
-	let mut last_ema = data[first];
-	out[first] = last_ema;
+	let warm = first + period - 1;
 
-	for i in (first + 1)..len {
-		let val = if i < lag {
-			data[i]
-		} else {
-			2.0 * data[i] - data[i - lag]
-		};
-		last_ema = alpha * val + (1.0 - alpha) * last_ema;
-		out[i] = last_ema;
+	// Initialize EMA with first valid value
+	let mut last_ema = data[first];
+	
+	// Process all values starting from first
+	for i in first..len {
+		if i > first {
+			// For de-lagging, we need to ensure we're not accessing NaN values
+			// We can only de-lag if we have enough valid history
+			let val = if i < first + lag {
+				// Not enough valid history for de-lagging, use regular value
+				data[i]
+			} else {
+				// Apply de-lagging formula
+				2.0 * data[i] - data[i - lag]
+			};
+			last_ema = alpha * val + (1.0 - alpha) * last_ema;
+		}
+		if i >= warm {
+			out[i] = last_ema;
+		}
 	}
 }
 
@@ -281,16 +280,27 @@ pub fn zlema_row_scalar(
 	let len = data.len();
 	let lag = (period - 1) / 2;
 	let alpha = 2.0 / (period as f64 + 1.0);
+	let warm = first + period - 1;
+
 	let mut last_ema = data[first];
-	out[first] = last_ema;
-	for i in (first + 1)..len {
-		let val = if i < lag {
-			data[i]
-		} else {
-			2.0 * data[i] - data[i - lag]
-		};
-		last_ema = alpha * val + (1.0 - alpha) * last_ema;
-		out[i] = last_ema;
+	
+	// Process all values starting from first
+	for i in first..len {
+		if i > first {
+			// For de-lagging, we need to ensure we're not accessing NaN values
+			// We can only de-lag if we have enough valid history
+			let val = if i < first + lag {
+				// Not enough valid history for de-lagging, use regular value
+				data[i]
+			} else {
+				// Apply de-lagging formula
+				2.0 * data[i] - data[i - lag]
+			};
+			last_ema = alpha * val + (1.0 - alpha) * last_ema;
+		}
+		if i >= warm {
+			out[i] = last_ema;
+		}
 	}
 }
 
@@ -379,43 +389,76 @@ impl ZlemaStream {
 	}
 	#[inline(always)]
 	pub fn update(&mut self, value: f64) -> Option<f64> {
+		// Match batch behavior: NaN taints the EMA state
 		if value.is_nan() {
-			return None; // propagate NaNs exactly like the batch version
+			// Store NaN in buffer to propagate through de-lagging
+			self.buffer[self.head] = value;
+			
+			// Advance head pointer
+			self.head = (self.head + 1) % self.period;
+			if !self.filled && self.head == 0 {
+				self.filled = true;
+			}
+			
+			// Taint the EMA state
+			self.last_ema = f64::NAN;
+			
+			// Count this as a processed sample
+			let samples_seen = if !self.filled {
+				self.head
+			} else {
+				self.period + self.head
+			};
+			
+			// Return NaN after warmup, None during warmup
+			if samples_seen < self.period {
+				None
+			} else {
+				Some(self.last_ema)
+			}
+		} else {
+			// 1. store the new price in the circular buffer
+			self.buffer[self.head] = value;
+
+			// 2. how many *valid* samples have we processed so far?
+			let samples_seen = if !self.filled {
+				self.head + 1 // 0-based → count
+			} else {
+				self.period + self.head + 1 // already wrapped at least once
+			};
+
+			// 3. advance the head pointer & check wrap-around
+			self.head = (self.head + 1) % self.period;
+			if !self.filled && self.head == 0 {
+				self.filled = true;
+			}
+
+			// 4. choose the correct input for the EMA core
+			let val = if samples_seen <= self.lag {
+				// still in the warm-up zone: no de-lagging yet
+				value
+			} else {
+				let lag_idx = (self.head + self.period - self.lag - 1) % self.period;
+				2.0 * value - self.buffer[lag_idx]
+			};
+
+			// 5. standard EMA recurrence
+			// Initialize on first value, but once tainted with NaN, it stays NaN (matches batch behavior)
+			if self.last_ema.is_nan() && samples_seen == 1 {
+				// First value initialization (not tainted case)
+				self.last_ema = val;
+			} else {
+				// Standard recurrence (preserves NaN if tainted)
+				self.last_ema = self.alpha * val + (1.0 - self.alpha) * self.last_ema;
+			}
+
+			// 6. Only return values after warmup period (period - 1 samples)
+			if samples_seen < self.period {
+				None
+			} else {
+				Some(self.last_ema)
+			}
 		}
-
-		// 1. store the new price in the circular buffer
-		self.buffer[self.head] = value;
-
-		// 2. how many *valid* samples have we processed so far?
-		let samples_seen = if !self.filled {
-			self.head + 1 // 0-based → count
-		} else {
-			self.period + self.head + 1 // already wrapped at least once
-		};
-
-		// 3. advance the head pointer & check wrap-around
-		self.head = (self.head + 1) % self.period;
-		if !self.filled && self.head == 0 {
-			self.filled = true;
-		}
-
-		// 4. choose the correct input for the EMA core
-		let val = if samples_seen <= self.lag {
-			// still in the warm-up zone: no de-lagging yet
-			value
-		} else {
-			let lag_idx = (self.head + self.period - self.lag - 1) % self.period;
-			2.0 * value - self.buffer[lag_idx]
-		};
-
-		// 5. standard EMA recurrence
-		self.last_ema = if self.last_ema.is_nan() {
-			val // first EMA = first value
-		} else {
-			self.alpha * val + (1.0 - self.alpha) * self.last_ema
-		};
-
-		Some(self.last_ema)
 	}
 }
 
@@ -474,12 +517,14 @@ pub fn zlema_batch_with_kernel(
 	sweep: &ZlemaBatchRange,
 	k: Kernel,
 ) -> Result<ZlemaBatchOutput, ZlemaError> {
+	// Auto-map non-batch kernels to their batch equivalents for better UX
 	let kernel = match k {
 		Kernel::Auto => detect_best_batch_kernel(),
+		Kernel::Scalar => Kernel::ScalarBatch,
+		Kernel::Avx2 => Kernel::Avx2Batch,
+		Kernel::Avx512 => Kernel::Avx512Batch,
 		other if other.is_batch() => other,
-		_ => {
-			return Err(ZlemaError::InvalidPeriod { period: 0, data_len: 0 });
-		}
+		_ => Kernel::ScalarBatch, // Fallback for any unknown kernels
 	};
 
 	let simd = match kernel {
@@ -550,75 +595,66 @@ fn zlema_batch_inner(
 	kern: Kernel,
 	parallel: bool,
 ) -> Result<ZlemaBatchOutput, ZlemaError> {
+	// grid
 	let combos = expand_grid(sweep);
 	if combos.is_empty() {
 		return Err(ZlemaError::InvalidPeriod { period: 0, data_len: 0 });
 	}
 
-	// Check for empty data first - treat as "all values are NaN"
 	if data.is_empty() {
-		return Err(ZlemaError::AllValuesNaN);
+		return Err(ZlemaError::EmptyInputData);
 	}
-
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(ZlemaError::AllValuesNaN)?;
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
 	if data.len() - first < max_p {
-		return Err(ZlemaError::InvalidPeriod {
-			period: max_p,
-			data_len: data.len() - first,
+		return Err(ZlemaError::NotEnoughValidData {
+			needed: max_p,
+			valid: data.len() - first,
 		});
 	}
+
 	let rows = combos.len();
 	let cols = data.len();
-	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
 
-	let mut raw = make_uninit_matrix(rows, cols);
-	unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
+	// allocate uninit and stamp only warm prefixes
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
+	init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
-		let period = combos[row].period.unwrap();
+	// reinterpret once
+	let mut guard = core::mem::ManuallyDrop::new(buf_mu);
+	let out: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len())
+	};
 
-		// transmute the single row to &mut [f64]
-		let out_row = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
-
+	// write rows without touching the warm prefix
+	let do_row = |row: usize, dst: &mut [f64]| {
+		let p = combos[row].period.unwrap();
 		match kern {
-			Kernel::Scalar => zlema_row_scalar(data, first, period, 0, std::ptr::null(), 0.0, out_row),
+			Kernel::Scalar => zlema_row_scalar(data, first, p, 0, core::ptr::null(), 0.0, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => zlema_row_avx2(data, first, period, 0, std::ptr::null(), 0.0, out_row),
+			Kernel::Avx2   => zlema_row_avx2  (data, first, p, 0, core::ptr::null(), 0.0, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => zlema_row_avx512(data, first, period, 0, std::ptr::null(), 0.0, out_row),
+			Kernel::Avx512 => zlema_row_avx512(data, first, p, 0, core::ptr::null(), 0.0, dst),
 			_ => unreachable!(),
 		}
 	};
 
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
-		{
-			raw.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(r, slice)| do_row(r, slice));
-		}
-
+		out.par_chunks_mut(cols).enumerate().for_each(|(r,s)| do_row(r,s));
 		#[cfg(target_arch = "wasm32")]
-		{
-			for (r, slice) in raw.chunks_mut(cols).enumerate() {
-				do_row(r, slice);
-			}
-		}
+		for (r,s) in out.chunks_mut(cols).enumerate() { do_row(r,s); }
 	} else {
-		for (r, slice) in raw.chunks_mut(cols).enumerate() {
-			do_row(r, slice);
-		}
+		for (r,s) in out.chunks_mut(cols).enumerate() { do_row(r,s); }
 	}
 
-	let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
+	// move out the flat f64 buffer safely
+	let values = unsafe {
+		Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, guard.len(), guard.capacity())
+	};
 
-	Ok(ZlemaBatchOutput {
-		values,
-		combos,
-		rows,
-		cols,
-	})
+	Ok(ZlemaBatchOutput { values, combos, rows, cols })
 }
 
 #[inline(always)]
@@ -639,63 +675,50 @@ pub fn zlema_batch_inner_into(
 	if combos.is_empty() {
 		return Err(ZlemaError::InvalidPeriod { period: 0, data_len: 0 });
 	}
-
-	// Check for empty data first - treat as "all values are NaN"
 	if data.is_empty() {
-		return Err(ZlemaError::AllValuesNaN);
+		return Err(ZlemaError::EmptyInputData);
 	}
 
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(ZlemaError::AllValuesNaN)?;
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
 	if data.len() - first < max_p {
-		return Err(ZlemaError::InvalidPeriod {
-			period: max_p,
-			data_len: data.len() - first,
+		return Err(ZlemaError::NotEnoughValidData {
+			needed: max_p,
+			valid: data.len() - first,
 		});
 	}
 
 	let rows = combos.len();
 	let cols = data.len();
-	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
 
-	// Initialize warmup periods with NaN
-	for (row, &warmup) in warm.iter().enumerate() {
-		let row_start = row * cols;
-		out[row_start..row_start + warmup].fill(f64::NAN);
-	}
+	// Reinterpret the target as MaybeUninit and stamp ONLY warm prefixes once.
+	let out_mu: &mut [MaybeUninit<f64>] = unsafe {
+		core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
+	};
+	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
+	init_matrix_prefixes(out_mu, cols, &warm);
 
-	let do_row = |row: usize, dst: &mut [f64]| {
-		let period = combos[row].period.unwrap();
-
+	// Now write rows beyond warm
+	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| {
+		let p = combos[row].period.unwrap();
+		let dst = unsafe { core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len()) };
 		match kern {
-			Kernel::Scalar => zlema_row_scalar(data, first, period, 0, std::ptr::null(), 0.0, dst),
+			Kernel::Scalar => zlema_row_scalar(data, first, p, 0, core::ptr::null(), 0.0, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => zlema_row_avx2(data, first, period, 0, std::ptr::null(), 0.0, dst),
+			Kernel::Avx2   => zlema_row_avx2  (data, first, p, 0, core::ptr::null(), 0.0, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => zlema_row_avx512(data, first, period, 0, std::ptr::null(), 0.0, dst),
+			Kernel::Avx512 => zlema_row_avx512(data, first, p, 0, core::ptr::null(), 0.0, dst),
 			_ => unreachable!(),
 		}
 	};
 
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
-		{
-			use rayon::prelude::*;
-			out.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(r, slice)| do_row(r, slice));
-		}
-
+		out_mu.par_chunks_mut(cols).enumerate().for_each(|(r,s)| do_row(r,s));
 		#[cfg(target_arch = "wasm32")]
-		{
-			for (r, slice) in out.chunks_mut(cols).enumerate() {
-				do_row(r, slice);
-			}
-		}
+		for (r,s) in out_mu.chunks_mut(cols).enumerate() { do_row(r,s); }
 	} else {
-		for (r, slice) in out.chunks_mut(cols).enumerate() {
-			do_row(r, slice);
-		}
+		for (r,s) in out_mu.chunks_mut(cols).enumerate() { do_row(r,s); }
 	}
 
 	Ok(combos)
@@ -786,7 +809,10 @@ mod tests {
 		let second_input = ZlemaInput::from_slice(&first_result.values, second_params);
 		let second_result = zlema_with_kernel(&second_input, kernel)?;
 		assert_eq!(second_result.values.len(), first_result.values.len());
-		for (idx, &val) in second_result.values.iter().enumerate().skip(14) {
+		// First result has warmup at index 20 (period 21 - 1)
+		// So second calculation starts from index 20 and has warmup at 20 + 14 - 1 = 33
+		// Values should be valid from index 33 onwards
+		for (idx, &val) in second_result.values.iter().enumerate().skip(34) {
 			assert!(val.is_finite(), "NaN found at index {}", idx);
 		}
 		Ok(())
@@ -946,9 +972,9 @@ mod tests {
 
 				// Property 2: Warmup period check
 				// ZLEMA starts calculating from the first non-NaN value, but uses a warmup period
-				// The actual warmup is first + period, where first is the first non-NaN index
+				// The actual warmup is first + period - 1, where first is the first non-NaN index
 				let first_non_nan = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
-				let warmup = first_non_nan + period;
+				let warmup = first_non_nan + period - 1;
 				
 				// Essential: Values before first_non_nan input must be NaN
 				for i in 0..first_non_nan.min(data.len()) {
@@ -1221,26 +1247,10 @@ mod tests {
 /// Zero-copy version that writes directly into a provided buffer
 #[inline]
 pub fn zlema_compute_into(input: &ZlemaInput, kernel: Kernel, out: &mut [f64]) -> Result<(), ZlemaError> {
-	let data: &[f64] = match &input.data {
-		ZlemaData::Candles { candles, source } => source_type(candles, source),
-		ZlemaData::Slice(sl) => sl,
-	};
-
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(ZlemaError::AllValuesNaN)?;
-	let len = data.len();
-	let period = input.get_period();
-
-	if period == 0 || period > len {
-		return Err(ZlemaError::InvalidPeriod { period, data_len: len });
+	let (data, first, period, warm) = zlema_validate(input)?;
+	if out.len() != data.len() {
+		return Err(ZlemaError::InvalidPeriod { period: out.len(), data_len: data.len() });
 	}
-	if (len - first) < period {
-		return Err(ZlemaError::InvalidPeriod {
-			period,
-			data_len: len - first,
-		});
-	}
-
-	let warm = first + period;
 
 	// Initialize the warmup period with NaN
 	out[..warm].fill(f64::NAN);
@@ -1274,65 +1284,24 @@ pub fn zlema_compute_into(input: &ZlemaInput, kernel: Kernel, out: &mut [f64]) -
 /// WASM-optimized helper function that writes directly to output slice - no allocations
 #[inline]
 pub fn zlema_into_slice(dst: &mut [f64], input: &ZlemaInput, kern: Kernel) -> Result<(), ZlemaError> {
-	let data: &[f64] = match &input.data {
-		ZlemaData::Candles { candles, source } => source_type(candles, source),
-		ZlemaData::Slice(sl) => sl,
-	};
-
-	let len = data.len();
-	let period = input.get_period();
-
-	// Check for empty data first - treat as "all values are NaN"
-	if len == 0 {
-		return Err(ZlemaError::AllValuesNaN);
+	let (data, first, period, warm) = zlema_validate(input)?;
+	if dst.len() != data.len() {
+		return Err(ZlemaError::InvalidPeriod { period: dst.len(), data_len: data.len() });
 	}
+	// Initialize only the prefix, zero-copy style
+	for v in &mut dst[..warm] { *v = f64::NAN; }
 
-	if dst.len() != len {
-		return Err(ZlemaError::InvalidPeriod {
-			period: dst.len(),
-			data_len: len,
-		});
-	}
-
-	if period == 0 || period > len {
-		return Err(ZlemaError::InvalidPeriod { period, data_len: len });
-	}
-
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(ZlemaError::AllValuesNaN)?;
-	if (len - first) < period {
-		return Err(ZlemaError::InvalidPeriod {
-			period,
-			data_len: len - first,
-		});
-	}
-
-	let warm = first + period;
-	let chosen = match kern {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
-
-	// Compute directly into dst
-	match chosen {
-		Kernel::Scalar | Kernel::ScalarBatch => {
-			zlema_scalar(data, period, first, dst);
+	let chosen = match kern { Kernel::Auto => detect_best_kernel(), k => k };
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => zlema_scalar(data, period, first, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => zlema_avx2(data, period, first, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => zlema_avx512(data, period, first, dst),
+			_ => unreachable!(),
 		}
-		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-		Kernel::Avx2 | Kernel::Avx2Batch => {
-			zlema_avx2(data, period, first, dst);
-		}
-		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-		Kernel::Avx512 | Kernel::Avx512Batch => {
-			zlema_avx512(data, period, first, dst);
-		}
-		_ => unreachable!(),
 	}
-
-	// Fill warmup with NaN
-	for v in &mut dst[..warm] {
-		*v = f64::NAN;
-	}
-
 	Ok(())
 }
 

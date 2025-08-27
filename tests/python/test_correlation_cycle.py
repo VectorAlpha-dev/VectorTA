@@ -24,7 +24,7 @@ class TestCorrelationCycle:
         return load_test_data()
     
     def test_correlation_cycle_accuracy(self, test_data):
-        """Test CORRELATION_CYCLE matches expected values from Rust tests"""
+        """Test CORRELATION_CYCLE matches expected values from Rust tests - mirrors check_cc_accuracy"""
         close = test_data['close']
         
         # Test with default parameters
@@ -69,11 +69,19 @@ class TestCorrelationCycle:
             -81.32373697835556,
         ]
         
-        # Check last 5 values
+        # Check last 5 values for all outputs including state
         for i in range(5):
-            assert_close(result['real'][-5 + i], expected_last_five_real[i], rtol=1e-8)
-            assert_close(result['imag'][-5 + i], expected_last_five_imag[i], rtol=1e-8)
-            assert_close(result['angle'][-5 + i], expected_last_five_angle[i], rtol=1e-8)
+            assert_close(result['real'][-5 + i], expected_last_five_real[i], rtol=1e-8, atol=1e-10,
+                        msg=f"Real value mismatch at index {i}")
+            assert_close(result['imag'][-5 + i], expected_last_five_imag[i], rtol=1e-8, atol=1e-10,
+                        msg=f"Imag value mismatch at index {i}")
+            assert_close(result['angle'][-5 + i], expected_last_five_angle[i], rtol=1e-8, atol=1e-10,
+                        msg=f"Angle value mismatch at index {i}")
+        
+        # Verify state values are -1, 0, or 1 after warmup
+        warmup = 20  # period
+        for i in range(warmup + 1, len(result['state'])):
+            assert result['state'][i] in [-1.0, 0.0, 1.0], f"State at index {i} should be -1, 0 or 1, got {result['state'][i]}"
     
     def test_correlation_cycle_partial_params(self, test_data):
         """Test with partial parameters"""
@@ -164,20 +172,190 @@ class TestCorrelationCycle:
             assert len(results[i]) == 4  # real, imag, angle, state
     
     def test_correlation_cycle_nan_handling(self, test_data):
-        """Test handling of NaN values in input"""
+        """Test handling of NaN values in input - mirrors check_cc_nan_handling"""
         close = test_data['close'].copy()
         
         # Insert some NaN values
         close[10:15] = np.nan
         
         # Should still work
-        result = ta_indicators.correlation_cycle(close)
+        result = ta_indicators.correlation_cycle(close, period=20, threshold=9.0)
         assert len(result['real']) == len(close)
         
         # Check that warmup period has NaN values
         assert np.isnan(result['real'][0])
         assert np.isnan(result['imag'][0])
         assert np.isnan(result['angle'][0])
+        
+        # After sufficient data (beyond NaN region + warmup), should have valid values
+        if len(result['real']) > 40:
+            # Check no unexpected NaN values after position 40
+            for i in range(40, min(50, len(result['real']))):
+                assert not np.isnan(result['real'][i]), f"Unexpected NaN in real at index {i}"
+                assert not np.isnan(result['imag'][i]), f"Unexpected NaN in imag at index {i}"
+                assert not np.isnan(result['angle'][i]), f"Unexpected NaN in angle at index {i}"
+    
+    def test_correlation_cycle_default_candles(self, test_data):
+        """Test CORRELATION_CYCLE with default parameters - mirrors check_cc_default_candles"""
+        close = test_data['close']
+        
+        # Default params: period=20, threshold=9.0
+        result = ta_indicators.correlation_cycle(close)
+        assert len(result['real']) == len(close)
+        assert len(result['imag']) == len(close)
+        assert len(result['angle']) == len(close)
+        assert len(result['state']) == len(close)
+    
+    def test_correlation_cycle_zero_period(self):
+        """Test CORRELATION_CYCLE fails with zero period - mirrors check_cc_zero_period"""
+        input_data = np.array([10.0, 20.0, 30.0])
+        
+        with pytest.raises(ValueError, match="Invalid period"):
+            ta_indicators.correlation_cycle(input_data, period=0)
+    
+    def test_correlation_cycle_period_exceeds_length(self):
+        """Test CORRELATION_CYCLE fails when period exceeds data length - mirrors check_cc_period_exceeds_length"""
+        data_small = np.array([10.0, 20.0, 30.0])
+        
+        with pytest.raises(ValueError, match="Invalid period"):
+            ta_indicators.correlation_cycle(data_small, period=10)
+    
+    def test_correlation_cycle_very_small_dataset(self):
+        """Test CORRELATION_CYCLE fails with insufficient data - mirrors check_cc_very_small_dataset"""
+        single_point = np.array([42.0])
+        
+        with pytest.raises(ValueError, match="Invalid period|Not enough valid data"):
+            ta_indicators.correlation_cycle(single_point, period=20)
+    
+    def test_correlation_cycle_empty_input(self):
+        """Test CORRELATION_CYCLE fails with empty input"""
+        empty = np.array([])
+        
+        with pytest.raises(ValueError, match="Empty data"):
+            ta_indicators.correlation_cycle(empty)
+    
+    def test_correlation_cycle_invalid_threshold(self):
+        """Test CORRELATION_CYCLE with invalid threshold values"""
+        data = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0])
+        
+        # Test with NaN threshold - should use default
+        result = ta_indicators.correlation_cycle(data, period=3, threshold=float('nan'))
+        assert len(result['real']) == len(data)
+        
+        # Test with negative threshold - should work (no restriction in Rust)
+        result = ta_indicators.correlation_cycle(data, period=3, threshold=-1.0)
+        assert len(result['real']) == len(data)
+        
+        # Test with zero threshold - should work
+        result = ta_indicators.correlation_cycle(data, period=3, threshold=0.0)
+        assert len(result['real']) == len(data)
+    
+    def test_correlation_cycle_reinput(self, test_data):
+        """Test CORRELATION_CYCLE applied twice (re-input) - mirrors check_cc_reinput"""
+        # Use smaller dataset for reinput test
+        data = np.array([10.0, 10.5, 11.0, 11.5, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0])
+        
+        # First pass
+        first_result = ta_indicators.correlation_cycle(data, period=4, threshold=2.0)
+        assert len(first_result['real']) == len(data)
+        
+        # Second pass - apply correlation_cycle to real output
+        second_result = ta_indicators.correlation_cycle(first_result['real'], period=4, threshold=2.0)
+        assert len(second_result['real']) == len(data)
+        
+        # Both should have proper structure
+        assert len(first_result['real']) == len(second_result['real'])
+        assert len(first_result['imag']) == len(second_result['imag'])
+    
+    def test_correlation_cycle_all_nan_input(self):
+        """Test CORRELATION_CYCLE with all NaN values"""
+        all_nan = np.full(100, np.nan)
+        
+        with pytest.raises(ValueError, match="All values are NaN"):
+            ta_indicators.correlation_cycle(all_nan)
+    
+    def test_correlation_cycle_batch_accuracy(self, test_data):
+        """Test CORRELATION_CYCLE batch processing accuracy - mirrors check_batch_default_row"""
+        close = test_data['close']
+        expected = EXPECTED_OUTPUTS['correlation_cycle']
+        
+        # Test batch with default parameters only
+        result = ta_indicators.correlation_cycle_batch(
+            close,
+            period_range=(20, 20, 0),  # Default period only
+            threshold_range=(9.0, 9.0, 0.0)  # Default threshold only
+        )
+        
+        assert 'real' in result
+        assert 'imag' in result
+        assert 'angle' in result
+        assert 'state' in result
+        assert 'periods' in result
+        assert 'thresholds' in result
+        
+        # Should have 1 combination (default params)
+        assert result['real'].shape[0] == 1
+        assert result['real'].shape[1] == len(close)
+        
+        # Extract the single row for each output
+        default_real = result['real'][0]
+        default_imag = result['imag'][0]
+        default_angle = result['angle'][0]
+        
+        # Check last 5 values match expected
+        assert_close(
+            default_real[-5:],
+            expected['last_5_values']['real'],
+            rtol=1e-8,
+            msg="Batch real output mismatch"
+        )
+        assert_close(
+            default_imag[-5:],
+            expected['last_5_values']['imag'],
+            rtol=1e-8,
+            msg="Batch imag output mismatch"
+        )
+        assert_close(
+            default_angle[-5:],
+            expected['last_5_values']['angle'],
+            rtol=1e-8,
+            msg="Batch angle output mismatch"
+        )
+    
+    def test_correlation_cycle_batch_edge_cases(self, test_data):
+        """Test batch edge cases"""
+        close = test_data['close'][:50]  # Use smaller dataset
+        
+        # Single value sweep
+        result = ta_indicators.correlation_cycle_batch(
+            close,
+            period_range=(10, 10, 1),
+            threshold_range=(5.0, 5.0, 1.0)
+        )
+        
+        # Should have 1 combination
+        assert result['real'].shape[0] == 1
+        assert result['periods'][0] == 10
+        assert result['thresholds'][0] == 5.0
+        
+        # Step larger than range
+        result = ta_indicators.correlation_cycle_batch(
+            close,
+            period_range=(10, 15, 10),  # Step larger than range
+            threshold_range=(5.0, 5.0, 0.0)
+        )
+        
+        # Should only have period=10
+        assert result['real'].shape[0] == 1
+        assert result['periods'][0] == 10
+        
+        # Empty data should throw
+        with pytest.raises(ValueError):
+            ta_indicators.correlation_cycle_batch(
+                np.array([]),
+                period_range=(10, 10, 0),
+                threshold_range=(5.0, 5.0, 0.0)
+            )
 
 
 if __name__ == '__main__':

@@ -42,50 +42,44 @@ test.before(async () => {
 test('HighPass partial params', () => {
     // Test with default parameters - mirrors check_highpass_partial_params
     const close = new Float64Array(testData.close);
+    const expected = EXPECTED_OUTPUTS.highpass;
     
-    const result = wasm.highpass_js(close, 48);
+    const result = wasm.highpass_js(close, expected.defaultParams.period);
     assert.strictEqual(result.length, close.length);
 });
 
 test('HighPass accuracy', async () => {
     // Test HighPass matches expected values from Rust tests - mirrors check_highpass_accuracy
     const close = new Float64Array(testData.close);
+    const expected = EXPECTED_OUTPUTS.highpass;
     
-    const result = wasm.highpass_js(close, 48);
+    const result = wasm.highpass_js(close, expected.defaultParams.period);
     
     assert.strictEqual(result.length, close.length);
-    
-    // Expected last 5 values from Rust test
-    const expectedLastFive = [
-        -265.1027020005024,
-        -330.0916060058495,
-        -422.7478979710918,
-        -261.87532144673423,
-        -698.9026088956363,
-    ];
     
     // Check last 5 values match expected
     const last5 = result.slice(-5);
     assertArrayClose(
         last5,
-        expectedLastFive,
+        expected.last5Values,
         1e-6,  // Using 1e-6 as in Rust test
         "HighPass last 5 values mismatch"
     );
     
     // Compare full output with Rust
-    await compareWithRust('highpass', result, 'close', { period: 48 });
+    await compareWithRust('highpass', result, 'close', expected.defaultParams);
 });
 
 test('HighPass default candles', async () => {
     // Test HighPass with default parameters - mirrors check_highpass_default_candles
     const close = new Float64Array(testData.close);
+    const expected = EXPECTED_OUTPUTS.highpass;
     
-    const result = wasm.highpass_js(close, 48);
+    const result = wasm.highpass_js(close, expected.defaultParams.period);
     assert.strictEqual(result.length, close.length);
     
     // Compare with Rust
-    await compareWithRust('highpass', result, 'close', { period: 48 });
+    await compareWithRust('highpass', result, 'close', expected.defaultParams);
 });
 
 test('HighPass zero period', () => {
@@ -164,52 +158,121 @@ test('HighPass reinput', () => {
 test('HighPass NaN handling', () => {
     // Test HighPass handling of NaN values - mirrors check_highpass_nan_handling
     const close = new Float64Array(testData.close);
-    const period = 48;
+    const expected = EXPECTED_OUTPUTS.highpass;
+    const period = expected.defaultParams.period;
     
     const result = wasm.highpass_js(close, period);
     
     assert.strictEqual(result.length, close.length);
     
-    // The highpass filter copies the first value directly, so no NaN expected
+    // HighPass has no warmup period - should produce values from index 0
+    // Verify no NaN values at the start (unlike ALMA which has warmup NaNs)
+    assert(!isNaN(result[0]), "HighPass should produce value at index 0");
+    
+    // Verify all values are not NaN
     for (let i = 0; i < result.length; i++) {
         assert(!isNaN(result[i]), `Unexpected NaN at index ${i}`);
     }
 });
 
-test('HighPass batch', () => {
-    // Test HighPass batch computation
+test('HighPass warmup period', () => {
+    // Test that HighPass has no warmup period - starts from index 0
     const close = new Float64Array(testData.close);
+    const expected = EXPECTED_OUTPUTS.highpass;
     
-    // Test period range 30-60 step 10
-    const period_start = 30;
-    const period_end = 60;
-    const period_step = 10;  // periods: 30, 40, 50, 60
+    const result = wasm.highpass_js(close, expected.defaultParams.period);
     
-    const batch_result = wasm.highpass_batch_js(
-        close, 
-        period_start, period_end, period_step
-    );
-    const metadata = wasm.highpass_batch_metadata_js(
-        period_start, period_end, period_step
-    );
+    // Verify HighPass produces a value from the very first index
+    assert(!isNaN(result[0]), "HighPass should produce value at index 0 (no warmup)");
     
-    // Metadata should contain period values
-    assert.strictEqual(metadata.length, 4);  // 4 periods
+    // Verify no warmup NaN values (unlike indicators with warmup periods)
+    assert.strictEqual(expected.hasWarmup, false, "HighPass should have no warmup period");
+    assert.strictEqual(expected.warmupLength, 0, "HighPass warmup length should be 0");
     
-    // Batch result should contain all individual results flattened
-    assert.strictEqual(batch_result.length, 4 * close.length);  // 4 periods
+    // All values should be valid numbers
+    assertNoNaN(result, "HighPass should have no NaN values");
+});
+
+test('HighPass leading NaN input', () => {
+    // Test HighPass with leading NaN values in input
+    const close = new Float64Array(testData.close.slice(0, 100));
+    
+    // Insert NaN values at the beginning
+    for (let i = 0; i < 5; i++) {
+        close[i] = NaN;
+    }
+    
+    // HighPass is an IIR filter - NaN values propagate through the entire output
+    const result = wasm.highpass_js(close, 48);
+    assert.strictEqual(result.length, close.length);
+    
+    // With leading NaN, the IIR filter propagates NaN through all outputs
+    // This is expected behavior for IIR filters with NaN contamination
+    for (let i = 0; i < result.length; i++) {
+        assert(isNaN(result[i]), `Expected NaN at index ${i} due to IIR filter NaN propagation`);
+    }
+});
+
+test('HighPass batch', () => {
+    // Test HighPass batch computation with ergonomic API
+    const close = new Float64Array(testData.close.slice(0, 500)); // Smaller dataset for speed
+    
+    // Test using new ergonomic batch API (like ALMA)
+    const batchResult = wasm.highpass_batch(close, {
+        period_range: [30, 60, 10]  // periods: 30, 40, 50, 60
+    });
+    
+    // Should have correct structure
+    assert(batchResult.values, "Batch result should have values");
+    assert(batchResult.combos, "Batch result should have combos");
+    assert.strictEqual(batchResult.rows, 4, "Should have 4 rows");
+    assert.strictEqual(batchResult.cols, close.length, "Should have cols equal to data length");
+    
+    // Verify each row has no warmup NaN (highpass starts from index 0)
+    for (let row = 0; row < 4; row++) {
+        const rowStart = row * close.length;
+        assert(!isNaN(batchResult.values[rowStart]), `Row ${row} should have value at index 0`);
+    }
     
     // Verify each row matches individual calculation
-    let row_idx = 0;
-    for (const period of [30, 40, 50, 60]) {
-        const individual_result = wasm.highpass_js(close, period);
+    const periods = [30, 40, 50, 60];
+    for (let i = 0; i < periods.length; i++) {
+        const rowStart = i * close.length;
+        const rowEnd = rowStart + close.length;
+        const rowData = batchResult.values.slice(rowStart, rowEnd);
         
-        // Extract row from batch result
-        const row_start = row_idx * close.length;
-        const row = batch_result.slice(row_start, row_start + close.length);
-        
-        assertArrayClose(row, individual_result, 1e-9, `Period ${period}`);
-        row_idx++;
+        const individualResult = wasm.highpass_js(close, periods[i]);
+        assertArrayClose(rowData, individualResult, 1e-9, `Period ${periods[i]} mismatch`);
+    }
+});
+
+test('HighPass edge cases', () => {
+    // Test HighPass with edge case inputs
+    const period = 10;
+    
+    // Test with exactly period-sized data
+    const dataExact = new Float64Array(testData.close.slice(0, period));
+    const resultExact = wasm.highpass_js(dataExact, period);
+    assert.strictEqual(resultExact.length, dataExact.length);
+    assert(!isNaN(resultExact[0]), "Should have value at index 0");
+    
+    // Test with period+1 data points
+    const dataPlusOne = new Float64Array(testData.close.slice(0, period + 1));
+    const resultPlusOne = wasm.highpass_js(dataPlusOne, period);
+    assert.strictEqual(resultPlusOne.length, dataPlusOne.length);
+    assert(!isNaN(resultPlusOne[0]), "Should have value at index 0");
+    
+    // Test with constant data (DC signal)
+    const constantData = new Float64Array(100);
+    constantData.fill(50.0);
+    const resultConstant = wasm.highpass_js(constantData, 20);
+    
+    // After stabilization, highpass should remove DC component (approach zero)
+    // Check values after 3*period are near zero
+    const stabilizedStart = 3 * 20;
+    for (let i = stabilizedStart; i < resultConstant.length; i++) {
+        assert(Math.abs(resultConstant[i]) < 1e-3, 
+            `DC component not removed at index ${i}: ${resultConstant[i]}`);
     }
 });
 
@@ -238,6 +301,31 @@ test('HighPass different periods', () => {
         for (let i = firstValid; i < result.length; i++) {
             assert(!isNaN(result[i]), `Unexpected NaN at index ${i} for period=${period}`);
         }
+    }
+});
+
+test('HighPass batch multiple parameters', () => {
+    // Test HighPass batch with multiple parameter combinations
+    const close = new Float64Array(testData.close.slice(0, 200)); // Smaller dataset
+    
+    // Test multiple periods using old API for compatibility
+    const periods = [10, 20, 30, 40, 50];
+    const batchResult = wasm.highpass_batch_js(close, 10, 50, 10);
+    const metadata = wasm.highpass_batch_metadata_js(10, 50, 10);
+    
+    assert.strictEqual(metadata.length, 5); // 5 periods
+    assert.strictEqual(batchResult.length, 5 * close.length);
+    
+    // Verify each row has no warmup NaN
+    for (let row = 0; row < 5; row++) {
+        const rowStart = row * close.length;
+        assert(!isNaN(batchResult[rowStart]), `Row ${row} should have value at index 0`);
+        
+        // Compare with individual calculation
+        const individualResult = wasm.highpass_js(close, periods[row]);
+        const rowData = batchResult.slice(rowStart, rowStart + close.length);
+        assertArrayClose(rowData, individualResult, 1e-9, 
+            `Batch row ${row} (period=${periods[row]}) mismatch`);
     }
 });
 

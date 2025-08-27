@@ -54,6 +54,9 @@ test('BOP partial params', () => {
 
 test('BOP accuracy', async () => {
     // Test BOP matches expected values from Rust tests - mirrors check_bop_accuracy
+    // Expected values from src/indicators/bop.rs::check_bop_accuracy:
+    // [0.045454545454545456, -0.32398753894080995, -0.3844086021505376,
+    //  0.3547400611620795, -0.5336179295624333]
     const open = new Float64Array(testData.open);
     const high = new Float64Array(testData.high);
     const low = new Float64Array(testData.low);
@@ -64,7 +67,7 @@ test('BOP accuracy', async () => {
     
     assert.strictEqual(result.length, close.length);
     
-    // Check last 5 values match expected
+    // Check last 5 values match expected from Rust tests
     const last5 = result.slice(-5);
     assertArrayClose(
         last5,
@@ -94,7 +97,7 @@ test('BOP with empty data', () => {
     
     assert.throws(() => {
         wasm.bop_js(empty, empty, empty, empty);
-    }, /Data is empty/);
+    }, /Input data is empty/);
 });
 
 test('BOP with inconsistent lengths', () => {
@@ -445,6 +448,139 @@ test('BOP fast API error handling', () => {
         }, /Null pointer/i);
     } finally {
         wasm.bop_free(ptr, 10);
+    }
+});
+
+test('BOP all NaN input', () => {
+    // Test BOP with all NaN values - mirrors ALMA's test
+    const size = 100;
+    const allNaN = new Float64Array(size);
+    for (let i = 0; i < size; i++) {
+        allNaN[i] = NaN;
+    }
+    
+    // BOP should handle all NaN gracefully - likely returning all NaN
+    const result = wasm.bop_js(allNaN, allNaN, allNaN, allNaN);
+    assert.strictEqual(result.length, size);
+    assertAllNaN(result, "Expected all NaN output for all NaN input");
+});
+
+test('BOP with NaN in middle', () => {
+    // Test BOP handles NaN values in the middle of data
+    const size = 200;
+    const open = new Float64Array(size);
+    const high = new Float64Array(size);
+    const low = new Float64Array(size);
+    const close = new Float64Array(size);
+    
+    // Fill with valid data
+    for (let i = 0; i < size; i++) {
+        open[i] = 100.0;
+        high[i] = 110.0;
+        low[i] = 90.0;
+        close[i] = 105.0;
+    }
+    
+    // Inject NaN in the middle (indices 100-110)
+    for (let i = 100; i < 110; i++) {
+        open[i] = NaN;
+        high[i] = NaN;
+        low[i] = NaN;
+        close[i] = NaN;
+    }
+    
+    const result = wasm.bop_js(open, high, low, close);
+    assert.strictEqual(result.length, size);
+    
+    // Check that NaN appears where expected
+    for (let i = 100; i < 110; i++) {
+        assert(isNaN(result[i]), `Expected NaN at index ${i}`);
+    }
+    
+    // Check that values before and after NaN region are calculated
+    // BOP = (105 - 100) / (110 - 90) = 5/20 = 0.25
+    if (!isNaN(result[99])) {
+        assertClose(result[99], 0.25, 1e-10, "Value before NaN region");
+    }
+    if (!isNaN(result[110])) {
+        assertClose(result[110], 0.25, 1e-10, "Value after NaN region");
+    }
+});
+
+test('BOP with leading NaN', () => {
+    // Test BOP with leading NaN values (warmup period simulation)
+    const size = 100;
+    const nanPeriod = 10;
+    const open = new Float64Array(size);
+    const high = new Float64Array(size);
+    const low = new Float64Array(size);
+    const close = new Float64Array(size);
+    
+    // Fill with valid data
+    for (let i = 0; i < size; i++) {
+        open[i] = 100.0;
+        high[i] = 110.0;
+        low[i] = 90.0;
+        close[i] = 105.0;
+    }
+    
+    // Set first 10 values to NaN
+    for (let i = 0; i < nanPeriod; i++) {
+        open[i] = NaN;
+        high[i] = NaN;
+        low[i] = NaN;
+        close[i] = NaN;
+    }
+    
+    const result = wasm.bop_js(open, high, low, close);
+    assert.strictEqual(result.length, size);
+    
+    // First 10 values should be NaN
+    for (let i = 0; i < nanPeriod; i++) {
+        assert(isNaN(result[i]), `Expected NaN at index ${i}`);
+    }
+    
+    // After NaN period, values should be calculated
+    // BOP = (105 - 100) / (110 - 90) = 5/20 = 0.25
+    const expectedValue = 0.25;
+    for (let i = nanPeriod; i < size; i++) {
+        assertClose(result[i], expectedValue, 1e-10, 
+                   `BOP value mismatch at index ${i}`);
+    }
+});
+
+test('BOP formula edge cases', () => {
+    // Test BOP formula edge cases and boundary conditions
+    // Test when close == open (BOP should be 0)
+    const openEqual = new Float64Array([100.0, 200.0, 300.0]);
+    const high = new Float64Array([110.0, 210.0, 310.0]);
+    const low = new Float64Array([90.0, 190.0, 290.0]);
+    const closeEqual = new Float64Array([100.0, 200.0, 300.0]);  // Same as open
+    
+    let result = wasm.bop_js(openEqual, high, low, closeEqual);
+    for (let i = 0; i < result.length; i++) {
+        assertClose(result[i], 0.0, 1e-15, 
+                   `Expected BOP=0 when close==open at index ${i}`);
+    }
+    
+    // Test maximum BOP (close at high, open at low)
+    const openAtLow = new Float64Array([90.0, 190.0, 290.0]);  // At low
+    const closeAtHigh = new Float64Array([110.0, 210.0, 310.0]);  // At high
+    
+    result = wasm.bop_js(openAtLow, high, low, closeAtHigh);
+    for (let i = 0; i < result.length; i++) {
+        assertClose(result[i], 1.0, 1e-15, 
+                   `Expected BOP=1 when close=high and open=low at index ${i}`);
+    }
+    
+    // Test minimum BOP (close at low, open at high)
+    const openAtHigh = new Float64Array([110.0, 210.0, 310.0]);  // At high
+    const closeAtLow = new Float64Array([90.0, 190.0, 290.0]);  // At low
+    
+    result = wasm.bop_js(openAtHigh, high, low, closeAtLow);
+    for (let i = 0; i < result.length; i++) {
+        assertClose(result[i], -1.0, 1e-15, 
+                   `Expected BOP=-1 when close=low and open=high at index ${i}`);
     }
 });
 

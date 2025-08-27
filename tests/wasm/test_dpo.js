@@ -136,15 +136,19 @@ test('DPO fast API (in-place)', () => {
     
     try {
         // Copy input to output buffer for in-place operation
-        const output = new Float64Array(wasm.memory.buffer, outputPtr, close.length);
-        output.set(close);
+        const outputInitial = new Float64Array(wasm.__wasm.memory.buffer, outputPtr, close.length);
+        outputInitial.set(close);
         
         // Perform in-place DPO
         wasm.dpo_into(outputPtr, outputPtr, close.length, period);
         
         // Compare with regular API
         const expected = wasm.dpo_js(close, period);
-        assertArrayClose(output, expected, 1e-10, "Fast API in-place mismatch");
+        
+        // Get fresh view of output after computation
+        const outputResult = new Float64Array(wasm.__wasm.memory.buffer, outputPtr, close.length);
+        
+        assertArrayClose(outputResult, expected, 1e-10, "Fast API in-place mismatch");
     } finally {
         // Clean up
         wasm.dpo_free(outputPtr, close.length);
@@ -162,18 +166,19 @@ test('DPO fast API (separate buffers)', () => {
     
     try {
         // Copy input data
-        const input = new Float64Array(wasm.memory.buffer, inputPtr, close.length);
+        const input = new Float64Array(wasm.__wasm.memory.buffer, inputPtr, close.length);
         input.set(close);
         
         // Perform DPO
         wasm.dpo_into(inputPtr, outputPtr, close.length, period);
         
-        // Get output
-        const output = new Float64Array(wasm.memory.buffer, outputPtr, close.length);
-        
         // Compare with regular API
         const expected = wasm.dpo_js(close, period);
-        assertArrayClose(output, expected, 1e-10, "Fast API separate buffers mismatch");
+        
+        // Get output (create view after computation)
+        const outputResult = new Float64Array(wasm.__wasm.memory.buffer, outputPtr, close.length);
+        
+        assertArrayClose(outputResult, expected, 1e-10, "Fast API separate buffers mismatch");
     } finally {
         // Clean up
         wasm.dpo_free(inputPtr, close.length);
@@ -264,7 +269,7 @@ test('DPO batch into (fast batch API)', () => {
     
     try {
         // Copy input data
-        const input = new Float64Array(wasm.memory.buffer, inputPtr, close.length);
+        const input = new Float64Array(wasm.__wasm.memory.buffer, inputPtr, close.length);
         input.set(close);
         
         // Perform batch DPO
@@ -280,7 +285,7 @@ test('DPO batch into (fast batch API)', () => {
         assert.strictEqual(rows, expectedRows);
         
         // Get output
-        const output = new Float64Array(wasm.memory.buffer, outputPtr, rows * cols);
+        const output = new Float64Array(wasm.__wasm.memory.buffer, outputPtr, rows * cols);
         
         // Verify against regular batch API
         const config = {

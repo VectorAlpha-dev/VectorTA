@@ -252,12 +252,10 @@ pub fn pma_scalar(data: &[f64], first_valid_idx: usize) -> Result<PmaOutput, Pma
 fn pma_compute_into(
 	data: &[f64],
 	first_valid_idx: usize,
-	kernel: Kernel,
+	_kernel: Kernel,
 	predict_out: &mut [f64],
 	trigger_out: &mut [f64],
 ) {
-	let warmup_period = first_valid_idx + 7;
-	
 	// Use a sliding window for wma1 values - only need last 7 values
 	let mut wma1_window = [0.0; 7];
 	
@@ -306,8 +304,8 @@ fn pma_compute_into(
 		let predict_j = (2.0 * wma1_j) - wma2;
 		predict_out[j] = predict_j;
 
-		let trigger_j = if j >= 3 {
-			((4.0 * predict_j) + (3.0 * predict_out[j - 1]) + (2.0 * predict_out[j - 2]) + predict_out[j - 3]) / 10.0
+		let trigger_j = if j >= first_valid_idx + 9 {
+			((4.0 * predict_out[j]) + (3.0 * predict_out[j - 1]) + (2.0 * predict_out[j - 2]) + predict_out[j - 3]) / 10.0
 		} else {
 			f64::NAN
 		};
@@ -354,12 +352,60 @@ pub fn pma_batch_with_kernel(data: &[f64], sweep: &PmaBatchRange, k: Kernel) -> 
 	pma_batch_par_slice(data, sweep, simd)
 }
 
+#[inline]
+pub fn pma_batch_unified_with_kernel(data: &[f64], k: Kernel) -> Result<PmaBatchOutputUnified, PmaError> {
+	let kernel = match k {
+		Kernel::Auto => detect_best_batch_kernel(),
+		other if other.is_batch() => other,
+		_ => Kernel::ScalarBatch,
+	};
+	pma_batch_unified_inner(data, kernel)
+}
+
+#[inline]
+fn pma_batch_unified_inner(data: &[f64], kern: Kernel) -> Result<PmaBatchOutputUnified, PmaError> {
+	if data.is_empty() { return Err(PmaError::EmptyData); }
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(PmaError::AllValuesNaN)?;
+	if (data.len() - first) < 7 { return Err(PmaError::NotEnoughValidData { valid: data.len() - first }); }
+	
+	let rows = 2usize;
+	let cols = data.len();
+	
+	// Allocate rows×cols uninitialized and write NaN prefixes exactly
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	let warm = [first + 7 - 1; 2];
+	init_matrix_prefixes(&mut buf_mu, cols, &warm);
+	
+	// Write into the matrix without extra allocations/copies
+	let mut guard = core::mem::ManuallyDrop::new(buf_mu);
+	let outf: &mut [f64] =
+		unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
+	
+	let (row0, row1) = outf.split_at_mut(cols);
+	pma_compute_into(data, first, match kern {
+		Kernel::ScalarBatch => Kernel::Scalar,
+		Kernel::Avx2Batch   => Kernel::Avx2,
+		Kernel::Avx512Batch => Kernel::Avx512,
+		_ => Kernel::Scalar,
+	}, row0, row1);
+	
+	// Turn the backing buffer into Vec<f64> without copy
+	let values = unsafe {
+		Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, guard.len(), guard.capacity())
+	};
+	Ok(PmaBatchOutputUnified { values, rows, cols })
+}
+
 #[derive(Debug, Clone)]
 pub struct PmaStream {
 	buffer: [f64; 7],
 	wma1: [f64; 7],
 	idx: usize,
-	filled: bool,
+	filled7: bool,
+	// Keep last 4 predictions for trigger calculation
+	pred4: [f64; 4],
+	pred_idx: usize,
+	pred_filled: bool,
 }
 
 impl PmaStream {
@@ -368,48 +414,43 @@ impl PmaStream {
 			buffer: [f64::NAN; 7],
 			wma1: [0.0; 7],
 			idx: 0,
-			filled: false,
+			filled7: false,
+			pred4: [f64::NAN; 4],
+			pred_idx: 0,
+			pred_filled: false,
 		})
 	}
 	#[inline(always)]
 	pub fn update(&mut self, value: f64) -> Option<(f64, f64)> {
 		self.buffer[self.idx] = value;
 		self.idx = (self.idx + 1) % 7;
-		if !self.filled && self.idx == 0 {
-			self.filled = true;
-		}
-		if !self.filled {
-			return None;
-		}
-		let j = self.idx;
-		let slice = |k| self.buffer[(j + k) % 7];
-
-		let wma1_j = (7.0 * slice(6)
-			+ 6.0 * slice(5)
-			+ 5.0 * slice(4)
-			+ 4.0 * slice(3)
-			+ 3.0 * slice(2)
-			+ 2.0 * slice(1)
-			+ slice(0))
-			/ 28.0;
+		if !self.filled7 && self.idx == 0 { self.filled7 = true; }
+		if !self.filled7 { return None; }
+		
+		let s = |k: usize| self.buffer[(self.idx + k) % 7];
+		let wma1_j = (7.0*s(6)+6.0*s(5)+5.0*s(4)+4.0*s(3)+3.0*s(2)+2.0*s(1)+s(0))/28.0;
 		self.wma1[self.idx] = wma1_j;
-
-		let wma2 = (7.0 * self.wma1[(self.idx + 6) % 7]
-			+ 6.0 * self.wma1[(self.idx + 5) % 7]
-			+ 5.0 * self.wma1[(self.idx + 4) % 7]
-			+ 4.0 * self.wma1[(self.idx + 3) % 7]
-			+ 3.0 * self.wma1[(self.idx + 2) % 7]
-			+ 2.0 * self.wma1[(self.idx + 1) % 7]
-			+ self.wma1[self.idx])
-			/ 28.0;
-
-		let predict_j = 2.0 * wma1_j - wma2;
-		let t3 = predict_j;
-		let t2 = predict_j; // Not enough context for previous predictions in stream
-		let t1 = predict_j;
-		let t0 = predict_j;
-		let trigger_j = (4.0 * t3 + 3.0 * t2 + 2.0 * t1 + t0) / 10.0;
-		Some((predict_j, trigger_j))
+		
+		let w = |k: usize| self.wma1[(self.idx + k) % 7];
+		let wma2 = (7.0*w(6)+6.0*w(5)+5.0*w(4)+4.0*w(3)+3.0*w(2)+2.0*w(1)+w(0))/28.0;
+		
+		let predict = 2.0*wma1_j - wma2;
+		
+		// Ring of the last 4 predicts
+		self.pred4[self.pred_idx] = predict;
+		self.pred_idx = (self.pred_idx + 1) % 4;
+		if !self.pred_filled && self.pred_idx == 0 { self.pred_filled = true; }
+		
+		let trigger = if self.pred_filled {
+			// Order: [t3,t2,t1,t0] == [current, -1, -2, -3]
+			let t3 = self.pred4[(self.pred_idx + 3) % 4];
+			let t2 = self.pred4[(self.pred_idx + 2) % 4];
+			let t1 = self.pred4[(self.pred_idx + 1) % 4];
+			let t0 = self.pred4[(self.pred_idx + 0) % 4];
+			(4.0*t3 + 3.0*t2 + 2.0*t1 + t0)/10.0
+		} else { f64::NAN };
+		
+		Some((predict, trigger))
 	}
 }
 
@@ -466,6 +507,14 @@ impl PmaBatchOutput {
 	pub fn values_for(&self, _dummy: &PmaParams) -> Option<(&[f64], &[f64])> {
 		Some((&self.predict[..], &self.trigger[..]))
 	}
+}
+
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+pub struct PmaBatchOutputUnified {
+	pub values: Vec<f64>, // row-major: row0=predict, row1=trigger
+	pub rows: usize,      // 2
+	pub cols: usize,      // data.len()
 }
 
 #[inline(always)]
@@ -578,10 +627,8 @@ pub unsafe fn pma_row_avx512_long(
 	pma_row_scalar(data, first, stride, dummy, inv_n, out_predict, out_trigger);
 }
 
-//--------------------------
-// WASM Bindings
-//--------------------------
-#[cfg(feature = "wasm")]
+// Move pma_into_slice outside of #[cfg(feature = "wasm")] so it's always available
+#[inline]
 pub fn pma_into_slice(
 	predict_dst: &mut [f64],
 	trigger_dst: &mut [f64],
@@ -591,7 +638,7 @@ pub fn pma_into_slice(
 	let data = input.as_ref();
 	
 	if predict_dst.len() != data.len() || trigger_dst.len() != data.len() {
-		return Err(PmaError::EmptyData); // Using existing error type
+		return Err(PmaError::EmptyData);
 	}
 	
 	if data.is_empty() {
@@ -608,29 +655,40 @@ pub fn pma_into_slice(
 	
 	let chosen = match kern {
 		Kernel::Auto => detect_best_kernel(),
-		other => other,
+		k => k,
 	};
 	
-	// Direct computation into output slices - no allocation!
+	// Compute into provided buffers
 	pma_compute_into(data, first, chosen, predict_dst, trigger_dst);
+	
+	// Write warmup NaNs (prefix only)
+	let warm_end = first + 7 - 1;
+	for v in &mut predict_dst[..warm_end] {
+		*v = f64::NAN;
+	}
+	for v in &mut trigger_dst[..warm_end] {
+		*v = f64::NAN;
+	}
 	
 	Ok(())
 }
 
+//--------------------------
+// WASM Bindings
+//--------------------------
+
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn pma_js(data: &[f64]) -> Result<Vec<f64>, JsValue> {
-	let params = PmaParams {};
-	let input = PmaInput::from_slice(data, params);
-	
-	// Single allocation for flattened output
-	let mut result = vec![0.0; data.len() * 2];
-	let (predict_part, trigger_part) = result.split_at_mut(data.len());
-	
-	pma_into_slice(predict_part, trigger_part, &input, Kernel::Auto)
-		.map_err(|e| JsValue::from_str(&e.to_string()))?;
-	
-	Ok(result)
+	let input = PmaInput::from_slice(data, PmaParams{});
+	let mut values = vec![0.0; 2 * data.len()];
+	{
+		let (pred, trig) = values.split_at_mut(data.len());
+		pma_into_slice(pred, trig, &input, detect_best_kernel())
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	}
+	// Return flat array [predict..., trigger...]
+	Ok(values)
 }
 
 #[cfg(feature = "wasm")]
@@ -705,6 +763,14 @@ pub struct PmaBatchConfig {
 
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
+pub struct PmaJsOutput {
+	pub values: Vec<f64>, // [predict..., trigger...]
+	pub rows: usize,      // 2
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
 pub struct PmaBatchJsOutput {
 	pub predict: Vec<f64>,
 	pub trigger: Vec<f64>,
@@ -713,24 +779,40 @@ pub struct PmaBatchJsOutput {
 }
 
 #[cfg(feature = "wasm")]
-#[wasm_bindgen(js_name = pma_batch)]
-pub fn pma_batch_js(data: &[f64], _config: JsValue) -> Result<JsValue, JsValue> {
-	// PMA has no parameters to sweep, so we just return a single result
-	let params = PmaParams {};
-	let input = PmaInput::from_slice(data, params);
+#[wasm_bindgen]
+pub fn pma_batch(data: &[f64]) -> Result<JsValue, JsValue> {
+	// PMA has no parameters, so batch just returns single run
+	let input = PmaInput::from_slice(data, PmaParams{});
+	let mut predict = vec![0.0; data.len()];
+	let mut trigger = vec![0.0; data.len()];
 	
-	let output = pma_with_kernel(&input, Kernel::Auto)
+	pma_into_slice(&mut predict, &mut trigger, &input, detect_best_kernel())
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 	
-	let js_output = PmaBatchJsOutput {
-		predict: output.predict,
-		trigger: output.trigger,
-		rows: 1,
+	let output = PmaBatchJsOutput {
+		predict,
+		trigger,
+		rows: 1,  // No parameter sweep
 		cols: data.len(),
 	};
 	
-	serde_wasm_bindgen::to_value(&js_output)
-		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+	serde_wasm_bindgen::to_value(&output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+// Optional pointer-based unified INTO for flat output
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn pma_unified_into(in_ptr: *const f64, out_ptr: *mut f64, len: usize) -> Result<usize, JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() { return Err(JsValue::from_str("null pointer")); }
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		let out  = std::slice::from_raw_parts_mut(out_ptr, 2 * len);
+		let input = PmaInput::from_slice(data, PmaParams{});
+		let (pred, trig) = out.split_at_mut(len);
+		pma_into_slice(pred, trig, &input, detect_best_kernel())
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	}
+	Ok(2) // rows
 }
 
 #[cfg(feature = "wasm")]
@@ -782,20 +864,8 @@ use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
-
 #[cfg(feature = "python")]
-fn validate_kernel(kernel: Option<&str>, _batch: bool) -> PyResult<Kernel> {
-	match kernel {
-		None => Ok(Kernel::Auto),
-		Some(k) => match k {
-			"auto" => Ok(Kernel::Auto),
-			"scalar" => Ok(Kernel::Scalar),
-			"avx2" => Ok(Kernel::Avx2),
-			"avx512" => Ok(Kernel::Avx512),
-			_ => Err(PyValueError::new_err(format!("Invalid kernel: {}", k))),
-		},
-	}
-}
+use crate::utilities::kernel_validation::validate_kernel;
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "pma")]
@@ -804,22 +874,18 @@ pub fn pma_py<'py>(
 	py: Python<'py>,
 	data: PyReadonlyArray1<'py, f64>,
 	kernel: Option<&str>,
-) -> PyResult<Bound<'py, PyDict>> {
+) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
 	let slice_in = data.as_slice()?;
 	let kern = validate_kernel(kernel, false)?;
 	
-	let params = PmaParams {};
-	let pma_in = PmaInput::from_slice(slice_in, params);
+	let input = PmaInput::from_slice(slice_in, PmaParams {});
 	
-	let output = py
-		.allow_threads(|| pma_with_kernel(&pma_in, kern))
+	// Zero-copy: Vec<f64> -> PyArray1 via into_pyarray
+	let out = py
+		.allow_threads(|| pma_with_kernel(&input, kern))
 		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 	
-	let dict = PyDict::new(py);
-	dict.set_item("predict", output.predict.into_pyarray(py))?;
-	dict.set_item("trigger", output.trigger.into_pyarray(py))?;
-	
-	Ok(dict)
+	Ok((out.predict.into_pyarray(py), out.trigger.into_pyarray(py)))
 }
 
 #[cfg(feature = "python")]
@@ -845,57 +911,49 @@ impl PmaStreamPy {
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "pma_batch")]
-#[pyo3(signature = (data, dummy_range=None, kernel=None))]
+#[pyo3(signature = (data, kernel=None))]
 pub fn pma_batch_py<'py>(
 	py: Python<'py>,
 	data: PyReadonlyArray1<'py, f64>,
-	dummy_range: Option<(usize, usize, usize)>,
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
 	let slice_in = data.as_slice()?;
-	
-	let sweep = PmaBatchRange {
-		dummy: dummy_range.unwrap_or((0, 0, 0)),
-	};
-	
-	let combos = expand_grid(&sweep);
-	let rows = combos.len();
-	let cols = slice_in.len();
-	
-	// Pre-allocate flattened output arrays
-	let predict_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-	let trigger_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-	let predict_slice = unsafe { predict_arr.as_slice_mut()? };
-	let trigger_slice = unsafe { trigger_arr.as_slice_mut()? };
-	
 	let kern = validate_kernel(kernel, true)?;
+	let (rows, cols) = (2usize, slice_in.len());
+	
+	// Preallocate one flat array; fill directly with our unified inner
+	let values_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let values_slice = unsafe { values_arr.as_slice_mut()? };
 	
 	py.allow_threads(|| {
-		let kernel = match kern {
-			Kernel::Auto => detect_best_batch_kernel(),
-			k => k,
-		};
-		let simd = match kernel {
-			Kernel::Avx512Batch => Kernel::Avx512,
-			Kernel::Avx2Batch => Kernel::Avx2,
-			Kernel::ScalarBatch => Kernel::Scalar,
-			_ => kernel,
-		};
+		// Compute directly into values_slice without intermediate copies
+		let first = slice_in.iter().position(|x| !x.is_nan()).ok_or_else(|| PyValueError::new_err("All NaN"))?;
+		if (slice_in.len() - first) < 7 {
+			return Err(PyValueError::new_err("Not enough valid data"));
+		}
 		
-		// Since PMA has no real parameters to sweep, just compute once
-		let result = pma_with_kernel(&PmaInput::from_slice(slice_in, PmaParams {}), simd)
-			.map_err(|e| PyValueError::new_err(e.to_string()))?;
+		// NaN warmup for both rows
+		let warm = first + 7 - 1;
+		for v in &mut values_slice[..warm] { *v = f64::NAN; }
+		for v in &mut values_slice[cols..cols+warm] { *v = f64::NAN; }
 		
-		predict_slice.copy_from_slice(&result.predict);
-		trigger_slice.copy_from_slice(&result.trigger);
-		
-		Ok::<(), PyErr>(())
+		let (row0, row1) = values_slice.split_at_mut(cols);
+		pma_compute_into(slice_in, first,
+			match kern {
+				Kernel::Auto => detect_best_kernel(),
+				Kernel::ScalarBatch => Kernel::Scalar,
+				Kernel::Avx2Batch   => Kernel::Avx2,
+				Kernel::Avx512Batch => Kernel::Avx512,
+				_ => Kernel::Scalar,
+			},
+			row0, row1);
+		Ok(())
 	})?;
 	
 	let dict = PyDict::new(py);
-	dict.set_item("predict", predict_arr.reshape((rows, cols))?)?;
-	dict.set_item("trigger", trigger_arr.reshape((rows, cols))?)?;
-	
+	dict.set_item("values", values_arr.reshape((rows, cols))?)?;
+	dict.set_item("rows", rows)?;
+	dict.set_item("cols", cols)?;
 	Ok(dict)
 }
 

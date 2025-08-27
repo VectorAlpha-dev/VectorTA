@@ -35,9 +35,6 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-use aligned_vec::{AVec, CACHELINE_ALIGN};
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
@@ -512,86 +509,66 @@ fn midpoint_batch_inner(
 	if combos.is_empty() {
 		return Err(MidpointError::InvalidPeriod { period: 0, data_len: 0 });
 	}
-	let first = data
-		.iter()
-		.position(|x| !x.is_nan())
-		.ok_or(MidpointError::AllValuesNaN)?;
+
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(MidpointError::AllValuesNaN)?;
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
 	if data.len() - first < max_p {
-		return Err(MidpointError::NotEnoughValidData {
-			needed: max_p,
-			valid: data.len() - first,
-		});
+		return Err(MidpointError::NotEnoughValidData { needed: max_p, valid: data.len() - first });
 	}
+
 	let rows = combos.len();
 	let cols = data.len();
-	
-	// Use uninitialized memory allocation like ALMA
+
+	// Allocate uninitialized matrix and initialize only warm prefixes
 	let mut buf_mu = make_uninit_matrix(rows, cols);
-	
-	// Calculate warmup periods for each combo
-	let warmup_periods: Vec<usize> = combos
-		.iter()
-		.map(|c| first + c.period.unwrap() - 1)
-		.collect();
-	
-	// Initialize NaN prefixes
-	init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
-	
-	// Convert to regular slice
-	let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
-	let values: &mut [f64] = unsafe { 
-		core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len()) 
+	let warm_prefixes: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
+	init_matrix_prefixes(&mut buf_mu, cols, &warm_prefixes);
+
+	// Work in MaybeUninit space; no &mut [f64] until after writes
+	let mut guard = core::mem::ManuallyDrop::new(buf_mu);
+	let out_mu: &mut [MaybeUninit<f64>] = unsafe {
+		core::slice::from_raw_parts_mut(guard.as_mut_ptr(), guard.len())
 	};
-	
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+
+	let do_row = |row: usize, row_mu: &mut [MaybeUninit<f64>]| unsafe {
 		let period = combos[row].period.unwrap();
+
+		// Transmute row view to f64 for writes only
+		let row_out: &mut [f64] = core::slice::from_raw_parts_mut(row_mu.as_mut_ptr() as *mut f64, row_mu.len());
+
 		match kern {
-			Kernel::Scalar => midpoint_row_scalar(data, first, period, out_row),
+			Kernel::Scalar => midpoint_row_scalar(data, first, period, row_out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => midpoint_row_avx2(data, first, period, out_row),
+			Kernel::Avx2 => midpoint_row_avx2(data, first, period, row_out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => midpoint_row_avx512(data, first, period, out_row),
+			Kernel::Avx512 => midpoint_row_avx512(data, first, period, row_out),
 			_ => unreachable!(),
 		}
 	};
+
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			values
-				.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
+			out_mu.par_chunks_mut(cols).enumerate().for_each(|(row, slice)| do_row(row, slice));
 		}
-
 		#[cfg(target_arch = "wasm32")]
 		{
-			for (row, slice) in values.chunks_mut(cols).enumerate() {
+			for (row, slice) in out_mu.chunks_mut(cols).enumerate() {
 				do_row(row, slice);
 			}
 		}
 	} else {
-		for (row, slice) in values.chunks_mut(cols).enumerate() {
+		for (row, slice) in out_mu.chunks_mut(cols).enumerate() {
 			do_row(row, slice);
 		}
 	}
-	
-	// Convert uninitialized buffer back to Vec
-	let values = unsafe {
-		Vec::from_raw_parts(
-			buf_guard.as_mut_ptr() as *mut f64,
-			buf_guard.len(),
-			buf_guard.capacity()
-		)
+
+	// Reclaim as Vec<f64> without extra copy
+	let values: Vec<f64> = unsafe {
+		Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, guard.len(), guard.capacity())
 	};
-	core::mem::forget(buf_guard);
-	
-	Ok(MidpointBatchOutput {
-		values,
-		combos,
-		rows,
-		cols,
-	})
+
+	Ok(MidpointBatchOutput { values, combos, rows, cols })
 }
 
 // --- ROW KERNELS ---
@@ -772,6 +749,222 @@ mod tests {
 				b,
 				s,
 				diff
+			);
+		}
+		Ok(())
+	}
+
+	fn check_midpoint_constant_data(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		// Test with constant value - midpoint should be that constant
+		let constant_val = 42.5;
+		let data = vec![constant_val; 100];
+		let params = MidpointParams { period: Some(10) };
+		let input = MidpointInput::from_slice(&data, params);
+		let result = midpoint_with_kernel(&input, kernel)?;
+		
+		// After warmup, all values should be the constant
+		for i in 9..100 {
+			assert!(
+				(result.values[i] - constant_val).abs() < 1e-10,
+				"[{}] Constant data should produce constant midpoint at index {}: expected {}, got {}",
+				test_name, i, constant_val, result.values[i]
+			);
+		}
+		Ok(())
+	}
+
+	fn check_midpoint_monotonic_increasing(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		// Create monotonically increasing data
+		let data: Vec<f64> = (0..100).map(|i| i as f64).collect();
+		let period = 10;
+		let params = MidpointParams { period: Some(period) };
+		let input = MidpointInput::from_slice(&data, params);
+		let result = midpoint_with_kernel(&input, kernel)?;
+		
+		// For monotonic increasing data with period p, midpoint at index i should be:
+		// (data[i-p+1] + data[i]) / 2
+		for i in (period - 1)..data.len() {
+			let expected = (data[i + 1 - period] + data[i]) / 2.0;
+			assert!(
+				(result.values[i] - expected).abs() < 1e-10,
+				"[{}] Monotonic increasing midpoint mismatch at index {}: expected {}, got {}",
+				test_name, i, expected, result.values[i]
+			);
+		}
+		Ok(())
+	}
+
+	fn check_midpoint_monotonic_decreasing(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		// Create monotonically decreasing data
+		let data: Vec<f64> = (0..100).map(|i| 100.0 - i as f64).collect();
+		let period = 10;
+		let params = MidpointParams { period: Some(period) };
+		let input = MidpointInput::from_slice(&data, params);
+		let result = midpoint_with_kernel(&input, kernel)?;
+		
+		// For monotonic decreasing data with period p, midpoint at index i should be:
+		// (data[i] + data[i-p+1]) / 2
+		for i in (period - 1)..data.len() {
+			let expected = (data[i] + data[i + 1 - period]) / 2.0;
+			assert!(
+				(result.values[i] - expected).abs() < 1e-10,
+				"[{}] Monotonic decreasing midpoint mismatch at index {}: expected {}, got {}",
+				test_name, i, expected, result.values[i]
+			);
+		}
+		Ok(())
+	}
+
+	fn check_midpoint_alternating_extremes(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		// Create alternating high/low pattern
+		let mut data = Vec::with_capacity(100);
+		for i in 0..100 {
+			data.push(if i % 2 == 0 { 100.0 } else { 0.0 });
+		}
+		let period = 5;
+		let params = MidpointParams { period: Some(period) };
+		let input = MidpointInput::from_slice(&data, params);
+		let result = midpoint_with_kernel(&input, kernel)?;
+		
+		// With alternating 100/0, midpoint should always be 50
+		for i in (period - 1)..data.len() {
+			assert!(
+				(result.values[i] - 50.0).abs() < 1e-10,
+				"[{}] Alternating extremes midpoint should be 50 at index {}: got {}",
+				test_name, i, result.values[i]
+			);
+		}
+		Ok(())
+	}
+
+	fn check_midpoint_single_spike(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		// Create data with a single spike
+		let mut data = vec![10.0; 100];
+		data[50] = 100.0; // Single spike
+		
+		let period = 5;
+		let params = MidpointParams { period: Some(period) };
+		let input = MidpointInput::from_slice(&data, params);
+		let result = midpoint_with_kernel(&input, kernel)?;
+		
+		// Before spike window (spike at 50, period 5, so window includes spike starting at index 50)
+		for i in (period - 1)..50 {
+			assert!(
+				(result.values[i] - 10.0).abs() < 1e-10,
+				"[{}] Before spike, midpoint should be 10 at index {}: got {}",
+				test_name, i, result.values[i]
+			);
+		}
+		
+		// During spike window (indices 50-54, window includes the spike)
+		for i in 50..55 {
+			let expected = 55.0; // (100 + 10) / 2
+			assert!(
+				(result.values[i] - expected).abs() < 1e-10,
+				"[{}] During spike window, midpoint should be 55 at index {}: got {}",
+				test_name, i, result.values[i]
+			);
+		}
+		
+		// After spike exits window (indices >= 55)
+		for i in 55..data.len() {
+			assert!(
+				(result.values[i] - 10.0).abs() < 1e-10,
+				"[{}] Well after spike, midpoint should be 10 at index {}: got {}",
+				test_name, i, result.values[i]
+			);
+		}
+		Ok(())
+	}
+
+	fn check_midpoint_boundary_values(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		// Test with extreme values
+		let data = vec![f64::MAX, f64::MIN, 0.0, 1e-300, 1e300];
+		let params = MidpointParams { period: Some(2) };
+		let input = MidpointInput::from_slice(&data, params.clone());
+		let result = midpoint_with_kernel(&input, kernel)?;
+		
+		// Check that we handle extreme values without overflow/underflow
+		assert!(result.values[1].is_finite(), "[{}] Result should be finite for extreme values", test_name);
+		
+		// Test with very small positive values
+		let small_data = vec![1e-300, 2e-300, 3e-300, 4e-300, 5e-300];
+		let input_small = MidpointInput::from_slice(&small_data, params);
+		let result_small = midpoint_with_kernel(&input_small, kernel)?;
+		
+		for i in 1..small_data.len() {
+			assert!(
+				result_small.values[i] > 0.0 && result_small.values[i].is_finite(),
+				"[{}] Should handle very small values at index {}",
+				test_name, i
+			);
+		}
+		Ok(())
+	}
+
+	fn check_midpoint_period_one(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		// With period=1, midpoint should equal the input values
+		let data = vec![1.0, 5.0, 3.0, 7.0, 2.0, 9.0, 4.0];
+		let params = MidpointParams { period: Some(1) };
+		let input = MidpointInput::from_slice(&data, params);
+		let result = midpoint_with_kernel(&input, kernel)?;
+		
+		// Each output should equal the corresponding input
+		for i in 0..data.len() {
+			assert!(
+				(result.values[i] - data[i]).abs() < 1e-10,
+				"[{}] Period=1 should return input value at index {}: expected {}, got {}",
+				test_name, i, data[i], result.values[i]
+			);
+		}
+		Ok(())
+	}
+
+	fn check_midpoint_all_same_except_one(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		// All values same except one outlier
+		let mut data = vec![50.0; 100];
+		data[30] = 150.0; // Single outlier
+		
+		let period = 20;
+		let params = MidpointParams { period: Some(period) };
+		let input = MidpointInput::from_slice(&data, params);
+		let result = midpoint_with_kernel(&input, kernel)?;
+		
+		// Before outlier affects window (where spike is not in window)
+		// With spike at index 30 and period 20, window at index i includes indices [i-19..i]
+		// Spike enters window when i >= 30
+		for i in (period - 1)..30 {
+			assert!(
+				(result.values[i] - 50.0).abs() < 1e-10,
+				"[{}] Before outlier window, midpoint should be 50 at index {}: got {}",
+				test_name, i, result.values[i]
+			);
+		}
+		
+		// When outlier is in window (indices 30..49, since window size is 20)
+		for i in 30..50 {
+			let expected = 100.0; // (150 + 50) / 2
+			assert!(
+				(result.values[i] - expected).abs() < 1e-10,
+				"[{}] With outlier in window, midpoint should be 100 at index {}: got {}",
+				test_name, i, result.values[i]
+			);
+		}
+		
+		// After outlier exits window (indices >= 50)
+		for i in 50..data.len() {
+			assert!(
+				(result.values[i] - 50.0).abs() < 1e-10,
+				"[{}] Well after outlier, midpoint should be 50 at index {}: got {}",
+				test_name, i, result.values[i]
 			);
 		}
 		Ok(())
@@ -1108,7 +1301,15 @@ mod tests {
 		check_midpoint_reinput,
 		check_midpoint_nan_handling,
 		check_midpoint_streaming,
-		check_midpoint_no_poison
+		check_midpoint_no_poison,
+		check_midpoint_constant_data,
+		check_midpoint_monotonic_increasing,
+		check_midpoint_monotonic_decreasing,
+		check_midpoint_alternating_extremes,
+		check_midpoint_single_spike,
+		check_midpoint_boundary_values,
+		check_midpoint_period_one,
+		check_midpoint_all_same_except_one
 	);
 	
 	#[cfg(feature = "proptest")]
@@ -1130,6 +1331,78 @@ mod tests {
 				"[{test}] default-row mismatch at idx {i}: {v} vs {expected:?}"
 			);
 		}
+		Ok(())
+	}
+
+	fn check_batch_multiple_periods(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+		let data: Vec<f64> = (0..100).map(|i| i as f64).collect();
+		
+		// Test with multiple periods
+		let output = MidpointBatchBuilder::new()
+			.kernel(kernel)
+			.period_range(5, 15, 5)  // periods: 5, 10, 15
+			.apply_slice(&data)?;
+		
+		assert_eq!(output.rows, 3);
+		assert_eq!(output.cols, 100);
+		assert_eq!(output.combos.len(), 3);
+		
+		// Verify each row independently
+		let periods = [5, 10, 15];
+		for (row_idx, &period) in periods.iter().enumerate() {
+			let row = output.values_for(&MidpointParams { period: Some(period) })
+				.expect(&format!("Missing row for period {}", period));
+			
+			// Verify warmup period
+			for i in 0..(period - 1) {
+				assert!(row[i].is_nan(), "[{}] Expected NaN at index {} for period {}", test, i, period);
+			}
+			
+			// Verify computed values for monotonic data
+			for i in (period - 1)..100 {
+				let expected = (data[i + 1 - period] + data[i]) / 2.0;
+				assert!(
+					(row[i] - expected).abs() < 1e-10,
+					"[{}] Period {} mismatch at index {}: expected {}, got {}",
+					test, period, i, expected, row[i]
+				);
+			}
+		}
+		Ok(())
+	}
+
+	fn check_batch_edge_cases(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+		
+		// Test 1: Step larger than range (should give single value)
+		let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+		let output = MidpointBatchBuilder::new()
+			.kernel(kernel)
+			.period_range(3, 5, 10)  // Step > range
+			.apply_slice(&data)?;
+		
+		assert_eq!(output.rows, 1, "[{}] Step > range should give single row", test);
+		assert_eq!(output.combos[0].period, Some(3));
+		
+		// Test 2: Single period (step = 0)
+		let output2 = MidpointBatchBuilder::new()
+			.kernel(kernel)
+			.period_static(3)
+			.apply_slice(&data)?;
+		
+		assert_eq!(output2.rows, 1, "[{}] Static period should give single row", test);
+		assert_eq!(output2.combos[0].period, Some(3));
+		
+		// Test 3: Empty data should fail
+		let empty_data: Vec<f64> = vec![];
+		let result = MidpointBatchBuilder::new()
+			.kernel(kernel)
+			.period_static(3)
+			.apply_slice(&empty_data);
+		
+		assert!(result.is_err(), "[{}] Empty data should fail", test);
+		
 		Ok(())
 	}
 
@@ -1216,6 +1489,8 @@ mod tests {
     }
 	gen_batch_tests!(check_batch_default_row);
 	gen_batch_tests!(check_batch_no_poison);
+	gen_batch_tests!(check_batch_multiple_periods);
+	gen_batch_tests!(check_batch_edge_cases);
 }
 
 // --- BATCH INNER INTO ---
@@ -1232,59 +1507,56 @@ pub fn midpoint_batch_inner_into(
 	if combos.is_empty() {
 		return Err(MidpointError::InvalidPeriod { period: 0, data_len: 0 });
 	}
-	let first = data
-		.iter()
-		.position(|x| !x.is_nan())
-		.ok_or(MidpointError::AllValuesNaN)?;
+
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(MidpointError::AllValuesNaN)?;
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
 	if data.len() - first < max_p {
-		return Err(MidpointError::NotEnoughValidData {
-			needed: max_p,
-			valid: data.len() - first,
-		});
+		return Err(MidpointError::NotEnoughValidData { needed: max_p, valid: data.len() - first });
 	}
+
 	let rows = combos.len();
 	let cols = data.len();
-	
 	if out.len() != rows * cols {
 		return Err(MidpointError::InvalidPeriod { period: out.len(), data_len: rows * cols });
 	}
-	
-	// Initialize output with NaN
-	out.fill(f64::NAN);
-	
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+
+	// View caller buffer as MaybeUninit and set only warm prefixes
+	let out_mu: &mut [MaybeUninit<f64>] = unsafe {
+		core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
+	};
+	let warm_prefixes: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
+	init_matrix_prefixes(out_mu, cols, &warm_prefixes);
+
+	let do_row = |row: usize, row_mu: &mut [MaybeUninit<f64>]| unsafe {
 		let period = combos[row].period.unwrap();
+		let row_out: &mut [f64] = core::slice::from_raw_parts_mut(row_mu.as_mut_ptr() as *mut f64, row_mu.len());
 		match kern {
-			Kernel::Scalar => midpoint_row_scalar(data, first, period, out_row),
+			Kernel::Scalar => midpoint_row_scalar(data, first, period, row_out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => midpoint_row_avx2(data, first, period, out_row),
+			Kernel::Avx2 => midpoint_row_avx2(data, first, period, row_out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => midpoint_row_avx512(data, first, period, out_row),
+			Kernel::Avx512 => midpoint_row_avx512(data, first, period, row_out),
 			_ => unreachable!(),
 		}
 	};
-	
+
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			out.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
+			out_mu.par_chunks_mut(cols).enumerate().for_each(|(row, slice)| do_row(row, slice));
 		}
-
 		#[cfg(target_arch = "wasm32")]
 		{
-			for (row, slice) in out.chunks_mut(cols).enumerate() {
+			for (row, slice) in out_mu.chunks_mut(cols).enumerate() {
 				do_row(row, slice);
 			}
 		}
 	} else {
-		for (row, slice) in out.chunks_mut(cols).enumerate() {
+		for (row, slice) in out_mu.chunks_mut(cols).enumerate() {
 			do_row(row, slice);
 		}
 	}
-	
+
 	Ok(combos)
 }
 

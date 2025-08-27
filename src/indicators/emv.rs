@@ -13,15 +13,15 @@
 //! - **`Err(EmvError)`** otherwise
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::error::Error;
+use std::mem::MaybeUninit;
 use thiserror::Error;
 
 #[cfg(feature = "python")]
@@ -37,8 +37,6 @@ use pyo3::types::PyDict;
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
-#[cfg(target_arch = "wasm32")]
-use crate::utilities::helpers::detect_wasm_kernel;
 
 #[derive(Debug, Clone)]
 pub enum EmvData<'a> {
@@ -59,6 +57,7 @@ pub struct EmvOutput {
 }
 
 #[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct EmvParams;
 
 #[derive(Debug, Clone)]
@@ -433,8 +432,17 @@ pub fn emv_batch_with_kernel(
 #[derive(Clone, Debug)]
 pub struct EmvBatchOutput {
 	pub values: Vec<f64>,
+	pub combos: Vec<EmvParams>, // parity with alma.rs
 	pub rows: usize,
 	pub cols: usize,
+}
+
+impl EmvBatchOutput {
+	#[inline]
+	pub fn single_row(&self) -> &[f64] {
+		debug_assert_eq!(self.rows, 1);
+		&self.values[..self.cols]
+	}
 }
 
 #[inline(always)]
@@ -462,38 +470,62 @@ fn emv_batch_inner(
 	low: &[f64],
 	volume: &[f64],
 	kern: Kernel,
-	_parallel: bool,
+	_parallel: bool, // no-op for EMV
 ) -> Result<EmvBatchOutput, EmvError> {
 	let len = high.len().min(low.len()).min(volume.len());
-	let first = (0..len).find(|&i| !(high[i].is_nan() || low[i].is_nan() || volume[i].is_nan()));
-	let first = match first {
-		Some(idx) => idx,
-		None => return Err(EmvError::AllValuesNaN),
-	};
-	
-	let mut out = alloc_with_nan_prefix(len, first + 1);
+	if len == 0 {
+		return Err(EmvError::EmptyData);
+	}
 
+	let first = (0..len)
+		.find(|&i| !(high[i].is_nan() || low[i].is_nan() || volume[i].is_nan()))
+		.ok_or(EmvError::AllValuesNaN)?;
+
+	// Validate we have at least two valid points
+	let valid = (first..len).filter(|&i| !(high[i].is_nan() || low[i].is_nan() || volume[i].is_nan())).count();
+	if valid < 2 {
+		return Err(EmvError::NotEnoughData { valid });
+	}
+
+	// 1 row x len cols
+	let rows = 1usize;
+	let cols = len;
+
+	// Uninitialized matrix + warmup NaNs only for the needed prefix
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	init_matrix_prefixes(&mut buf_mu, cols, &[first + 1]);
+
+	// Safely reinterpret to &mut [f64] without extra allocs or copies
+	let mut guard = core::mem::ManuallyDrop::new(buf_mu);
+	let out: &mut [f64] =
+		unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
+
+	// Compute into output
 	unsafe {
 		match kern {
-			Kernel::ScalarBatch | Kernel::Scalar => {
-				emv_scalar(high, low, volume, first, &mut out);
-			}
+			Kernel::Scalar | Kernel::ScalarBatch => emv_scalar(high, low, volume, first, out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2Batch | Kernel::Avx2 => {
-				emv_avx2(high, low, volume, first, &mut out);
-			}
+			Kernel::Avx2 | Kernel::Avx2Batch => emv_avx2(high, low, volume, first, out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512Batch | Kernel::Avx512 => {
-				emv_avx512(high, low, volume, first, &mut out);
-			}
-			_ => unreachable!(),
+			Kernel::Avx512 | Kernel::Avx512Batch => emv_avx512(high, low, volume, first, out),
+			_ => emv_scalar(high, low, volume, first, out),
 		}
 	}
 
+	// Move buffer out as Vec<f64> with zero copy
+	let values = unsafe {
+		Vec::from_raw_parts(
+			guard.as_mut_ptr() as *mut f64,
+			guard.len(),
+			guard.capacity(),
+		)
+	};
+
 	Ok(EmvBatchOutput {
-		values: out,
-		rows: 1,
-		cols: len,
+		values,
+		combos: vec![EmvParams], // single combination
+		rows,
+		cols,
 	})
 }
 
@@ -615,34 +647,32 @@ fn emv_batch_inner_into(
 	out: &mut [f64],
 ) -> Vec<EmvParams> {
 	let len = high.len().min(low.len()).min(volume.len());
+	// Treat NumPy-owned memory as MaybeUninit to set only warm prefixes
+	let out_mu: &mut [MaybeUninit<f64>] = unsafe {
+		core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
+	};
+
 	let first = (0..len).find(|&i| !(high[i].is_nan() || low[i].is_nan() || volume[i].is_nan())).unwrap_or(0);
-	
-	// Fill warmup period with NaN
-	for i in 0..(first + 1).min(len) {
-		out[i] = f64::NAN;
-	}
-	
-	// EMV has no parameters, so we just compute once
+
+	// Warm prefix NaNs without extra passes
+	init_matrix_prefixes(out_mu, len, &[first + 1]);
+
+	// Reinterpret back to f64 for compute
+	let out_f: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(out_mu.as_mut_ptr() as *mut f64, out_mu.len())
+	};
+
 	unsafe {
 		match kern {
-			Kernel::ScalarBatch | Kernel::Scalar => {
-				emv_scalar(high, low, volume, first, out);
-			}
+			Kernel::Scalar | Kernel::ScalarBatch => emv_scalar(high, low, volume, first, out_f),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2Batch | Kernel::Avx2 => {
-				emv_avx2(high, low, volume, first, out);
-			}
+			Kernel::Avx2 | Kernel::Avx2Batch => emv_avx2(high, low, volume, first, out_f),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512Batch | Kernel::Avx512 => {
-				emv_avx512(high, low, volume, first, out);
-			}
-			_ => {
-				emv_scalar(high, low, volume, first, out);
-			}
+			Kernel::Avx512 | Kernel::Avx512Batch => emv_avx512(high, low, volume, first, out_f),
+			_ => emv_scalar(high, low, volume, first, out_f),
 		}
 	}
-	
-	// Return single empty params since EMV has no parameters
+
 	vec![EmvParams]
 }
 
@@ -773,6 +803,7 @@ pub struct EmvBatchConfig {
 #[derive(Serialize, Deserialize)]
 pub struct EmvBatchJsOutput {
 	pub values: Vec<f64>,
+	pub combos: Vec<EmvParams>, // add combos for parity
 	pub rows: usize,
 	pub cols: usize,
 }
@@ -791,6 +822,7 @@ pub fn emv_batch_js(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], _c
 	
 	let js_output = EmvBatchJsOutput {
 		values: output,
+		combos: vec![EmvParams], // single combo, EMV has no params
 		rows: 1,
 		cols: len,
 	};

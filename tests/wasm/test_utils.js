@@ -96,6 +96,17 @@ function assertNoNaN(array, msg = "") {
 
 // Expected outputs from Rust tests - these must match EXACTLY
 const EXPECTED_OUTPUTS = {
+    mass: {
+        defaultParams: { period: 5 },
+        last5Values: [
+            4.512263952194651,
+            4.126178935431121,
+            3.838738456245828,
+            3.6450956734739375,
+            3.6748009093527125
+        ],
+        warmupPeriod: 20  // 16 + period - 1 = 16 + 5 - 1 = 20
+    },
     alma: {
         defaultParams: { period: 9, offset: 0.85, sigma: 6.0 },
         last5Values: [
@@ -112,6 +123,39 @@ const EXPECTED_OUTPUTS = {
             59238.16030697,
             59222.63528822,
             59165.14427332
+        ]
+    },
+    highpass: {
+        defaultParams: { period: 48 },
+        last5Values: [
+            -265.1027020005024,
+            -330.0916060058495,
+            -422.7478979710918,
+            -261.87532144673423,
+            -698.9026088956363
+        ],
+        // Highpass has no warmup period - produces values from index 0
+        hasWarmup: false,
+        warmupLength: 0
+    },
+    kama: {
+        defaultParams: { period: 30 },
+        last5Values: [
+            60234.925553804125,
+            60176.838757545665,
+            60115.177367962766,
+            60071.37070833558,
+            59992.79386218023
+        ]
+    },
+    swma: {
+        defaultParams: { period: 5 },
+        last5Values: [
+            59288.22222222222,
+            59301.99999999999,
+            59247.33333333333,
+            59179.88888888889,
+            59080.99999999999
         ]
     },
     hma: {
@@ -409,6 +453,24 @@ const EXPECTED_OUTPUTS = {
             -5.004210799262688
         ]
     },
+    nma: {
+        defaultParams: { period: 40 },
+        last5Values: [
+            64320.486018271724,
+            64227.95719984426,
+            64180.9249333126,
+            63966.35530620797,
+            64039.04719192334
+        ],
+        // Batch test - single parameter (default)
+        batchDefaultRow: [
+            64320.486018271724,
+            64227.95719984426,
+            64180.9249333126,
+            63966.35530620797,
+            64039.04719192334
+        ]
+    },
     linreg: {
         defaultParams: { period: 14 },
         last5Values: [
@@ -465,7 +527,9 @@ const EXPECTED_OUTPUTS = {
             59171.21190130624,
             59167.01279027576,
             59039.413552249636
-        ]
+        ],
+        // Warmup period is period - 1
+        warmupPeriod: 13
     },
     decycler: {
         defaultParams: { hp_period: 125, k: 0.707 },
@@ -970,6 +1034,30 @@ const EXPECTED_OUTPUTS = {
             30.748897303623057
         ]
     },
+    kst: {
+        defaultParams: {
+            sma_period1: 10, sma_period2: 10, sma_period3: 10, sma_period4: 15,
+            roc_period1: 10, roc_period2: 15, roc_period3: 20, roc_period4: 30,
+            signal_period: 9
+        },
+        last5Values: {
+            line: [
+                -47.38570195278667,
+                -44.42926180347176,
+                -42.185693049429034,
+                -40.10697793942024,
+                -40.17466795905724
+            ],
+            signal: [
+                -52.66743277411538,
+                -51.559775662725556,
+                -50.113844191238954,
+                -48.58923772989874,
+                -47.01112630514571
+            ]
+        },
+        warmupPeriod: 44  // max(roc_period4 + sma_period4 - 1) = 30 + 15 - 1 = 44
+    },
     efi: {
         defaultParams: { period: 13 },
         last5Values: [
@@ -1008,6 +1096,16 @@ const EXPECTED_OUTPUTS = {
             -194.0,
             -294.0,
             -896.0
+        ]
+    },
+    natr: {
+        default_params: { period: 14 },
+        last_5_values: [
+            1.5465877404905772,
+            1.4773840355794576,
+            1.4201627494720954,
+            1.3556212509014807,
+            1.3836271128536142
         ]
     },
     chande: {

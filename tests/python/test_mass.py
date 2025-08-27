@@ -38,16 +38,7 @@ class TestMass:
         """Test Mass Index matches expected values from Rust tests - mirrors check_mass_accuracy"""
         high = test_data['high']
         low = test_data['low']
-        expected = EXPECTED_OUTPUTS.get('mass', {
-            'default_params': {'period': 5},
-            'last_5_values': [
-                4.512263952194651,
-                4.126178935431121,
-                3.838738456245828,
-                3.6450956734739375,
-                3.6748009093527125
-            ]
-        })
+        expected = EXPECTED_OUTPUTS['mass']
         
         result = ta_indicators.mass(
             high,
@@ -133,11 +124,19 @@ class TestMass:
         """Test Mass Index handles NaN values correctly - mirrors check_mass_nan_handling"""
         high = test_data['high']
         low = test_data['low']
+        expected = EXPECTED_OUTPUTS['mass']
         
         result = ta_indicators.mass(high, low, period=5)
         assert len(result) == len(high)
         
-        # After warmup period (16 + period - 1 = 20), no NaN values should exist
+        # Check warmup period has NaN values (first 20 values for period=5)
+        warmup = expected['warmup_period']
+        assert np.all(np.isnan(result[:warmup])), f"Expected NaN in first {warmup} values (warmup period)"
+        
+        # After warmup, values should be valid
+        assert not np.isnan(result[warmup]), f"Expected valid value at index {warmup} (first valid index)"
+        
+        # After index 240, no NaN values should exist
         if len(result) > 240:
             for i in range(240, len(result)):
                 assert not np.isnan(result[i]), f"Found unexpected NaN at index {i}"
@@ -263,3 +262,64 @@ class TestMass:
             rtol=1e-10,
             msg="Auto vs Scalar kernel mismatch"
         )
+    
+    def test_mass_all_nan_input(self):
+        """Test Mass Index with all NaN values - mirrors ALMA test coverage"""
+        all_nan = np.full(100, np.nan)
+        
+        with pytest.raises(ValueError, match="All values are NaN"):
+            ta_indicators.mass(all_nan, all_nan, period=5)
+    
+    def test_mass_batch_metadata(self, test_data):
+        """Test Mass batch includes correct metadata - mirrors ALMA batch tests"""
+        high = test_data['high'][:50]  # Use smaller dataset
+        low = test_data['low'][:50]
+        
+        # Test with multiple periods
+        batch_result = ta_indicators.mass_batch(
+            high,
+            low,
+            period_range=(5, 10, 5)  # periods: 5, 10
+        )
+        
+        # Verify metadata structure
+        assert 'values' in batch_result
+        assert 'periods' in batch_result
+        assert batch_result['values'].shape == (2, 50)
+        assert len(batch_result['periods']) == 2
+        assert list(batch_result['periods']) == [5, 10]
+        
+        # Verify each row has correct warmup
+        for i, period in enumerate([5, 10]):
+            row = batch_result['values'][i]
+            warmup = 16 + period - 1
+            # Check warmup period has NaN
+            assert np.all(np.isnan(row[:warmup])), f"Expected NaN in warmup for period {period}"
+            # Check after warmup has values
+            if warmup < len(row):
+                assert not np.isnan(row[warmup]), f"Expected valid value after warmup for period {period}"
+    
+    def test_mass_batch_parameter_sweep(self, test_data):
+        """Test Mass batch with full parameter sweep"""
+        high = test_data['high'][:30]  # Small dataset for testing
+        low = test_data['low'][:30]
+        
+        # Test sweep with step
+        batch_result = ta_indicators.mass_batch(
+            high,
+            low,
+            period_range=(3, 7, 2)  # periods: 3, 5, 7
+        )
+        
+        assert batch_result['values'].shape == (3, 30)
+        assert list(batch_result['periods']) == [3, 5, 7]
+        
+        # Verify each row matches single calculation
+        for i, period in enumerate([3, 5, 7]):
+            single = ta_indicators.mass(high, low, period)
+            assert_close(
+                batch_result['values'][i],
+                single,
+                rtol=1e-10,
+                msg=f"Batch row {i} (period={period}) doesn't match single calculation"
+            )

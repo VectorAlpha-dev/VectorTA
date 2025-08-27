@@ -193,8 +193,18 @@ pub fn natr_with_kernel(input: &NatrInput, kernel: Kernel) -> Result<NatrOutput,
 		return Err(NatrError::EmptyData);
 	}
 
+	let len_h = high.len();
+	let len_l = low.len();
+	let len_c = close.len();
+	if len_h != len_l || len_h != len_c {
+		return Err(NatrError::MismatchedLength {
+			expected: len_h,
+			actual: if len_l != len_h { len_l } else { len_c },
+		});
+	}
+	let len = len_h;
+
 	let period = input.get_period();
-	let len = high.len().min(low.len()).min(close.len());
 	if period == 0 || period > len {
 		return Err(NatrError::InvalidPeriod { period, data_len: len });
 	}
@@ -267,7 +277,7 @@ pub fn natr_scalar(high: &[f64], low: &[f64], close: &[f64], period: usize, firs
 				if c.is_finite() && c != 0.0 {
 					out[i] = (prev_atr / c) * 100.0;
 				} else {
-					out[i] = 0.0;
+					out[i] = f64::NAN;
 				}
 			}
 		} else {
@@ -278,7 +288,7 @@ pub fn natr_scalar(high: &[f64], low: &[f64], close: &[f64], period: usize, firs
 			if c.is_finite() && c != 0.0 {
 				out[i] = (new_atr / c) * 100.0;
 			} else {
-				out[i] = 0.0;
+				out[i] = f64::NAN;
 			}
 		}
 
@@ -380,7 +390,7 @@ impl NatrStream {
 				if close.is_finite() && close != 0.0 {
 					return Some((self.prev_atr / close) * 100.0);
 				} else {
-					return Some(0.0);
+					return Some(f64::NAN);
 				}
 			}
 			return None;
@@ -390,7 +400,7 @@ impl NatrStream {
 			if close.is_finite() && close != 0.0 {
 				return Some((new_atr / close) * 100.0);
 			} else {
-				return Some(0.0);
+				return Some(f64::NAN);
 			}
 		}
 	}
@@ -538,6 +548,18 @@ fn natr_batch_inner(
 	if combos.is_empty() {
 		return Err(NatrError::InvalidPeriod { period: 0, data_len: 0 });
 	}
+	
+	let len_h = high.len();
+	let len_l = low.len();
+	let len_c = close.len();
+	if len_h != len_l || len_h != len_c {
+		return Err(NatrError::MismatchedLength {
+			expected: len_h,
+			actual: if len_l != len_h { len_l } else { len_c },
+		});
+	}
+	let len = len_h;
+	
 	let first = high
 		.iter()
 		.position(|x| !x.is_nan())
@@ -545,7 +567,6 @@ fn natr_batch_inner(
 		.max(low.iter().position(|x| !x.is_nan()).unwrap_or(0))
 		.max(close.iter().position(|x| !x.is_nan()).unwrap_or(0));
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-	let len = high.len().min(low.len()).min(close.len());
 	if len - first < max_p {
 		return Err(NatrError::NotEnoughValidData {
 			needed: max_p,
@@ -629,6 +650,18 @@ fn natr_batch_inner_into(
 	if combos.is_empty() {
 		return Err(NatrError::InvalidPeriod { period: 0, data_len: 0 });
 	}
+	
+	let len_h = high.len();
+	let len_l = low.len();
+	let len_c = close.len();
+	if len_h != len_l || len_h != len_c {
+		return Err(NatrError::MismatchedLength {
+			expected: len_h,
+			actual: if len_l != len_h { len_l } else { len_c },
+		});
+	}
+	let len = len_h;
+	
 	let first = high
 		.iter()
 		.position(|x| !x.is_nan())
@@ -636,7 +669,6 @@ fn natr_batch_inner_into(
 		.max(low.iter().position(|x| !x.is_nan()).unwrap_or(0))
 		.max(close.iter().position(|x| !x.is_nan()).unwrap_or(0));
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-	let len = high.len().min(low.len()).min(close.len());
 	if len - first < max_p {
 		return Err(NatrError::NotEnoughValidData {
 			needed: max_p,
@@ -645,6 +677,16 @@ fn natr_batch_inner_into(
 	}
 	let rows = combos.len();
 	let cols = len;
+
+	// Initialize warmup positions with NaN for each row
+	for (row, combo) in combos.iter().enumerate() {
+		let period = combo.period.unwrap();
+		let warmup_end = first + period - 1;
+		let row_start = row * cols;
+		for i in 0..warmup_end.min(cols) {
+			out[row_start + i] = f64::NAN;
+		}
+	}
 
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
@@ -1424,13 +1466,15 @@ pub fn natr_batch_py<'py>(
 	let high_slice = high.as_slice()?;
 	let low_slice = low.as_slice()?;
 	let close_slice = close.as_slice()?;
+	if high_slice.len() != low_slice.len() || high_slice.len() != close_slice.len() {
+		return Err(PyValueError::new_err("natr: Mismatched input lengths"));
+	}
+	let cols = high_slice.len();
+	
 	let kern = validate_kernel(kernel, true)?;
-
 	let sweep = NatrBatchRange { period: period_range };
-
 	let combos = expand_grid(&sweep);
 	let rows = combos.len();
-	let cols = high_slice.len().min(low_slice.len()).min(close_slice.len());
 
 	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
 	let slice_out = unsafe { out_arr.as_slice_mut()? };
@@ -1580,13 +1624,14 @@ pub fn natr_into_slice(
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn natr_js(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+	if high.len() != low.len() || high.len() != close.len() {
+		return Err(JsValue::from_str("natr: Mismatched input lengths"));
+	}
 	let params = NatrParams { period: Some(period) };
 	let input = NatrInput::from_slices(high, low, close, params);
-	
-	let mut output = vec![0.0; high.len().min(low.len()).min(close.len())];
+	let mut output = vec![0.0; high.len()];
 	natr_into_slice(&mut output, &input, detect_best_kernel())
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
-	
 	Ok(output)
 }
 
@@ -1661,25 +1706,25 @@ pub struct NatrBatchJsOutput {
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = natr_batch)]
-pub fn natr_batch_js(high: &[f64], low: &[f64], close: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
-	let config: NatrBatchConfig = 
-		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
-	
-	let sweep = NatrBatchRange {
-		period: config.period_range,
-	};
-	
-	let output = natr_batch_inner(high, low, close, &sweep, detect_best_kernel(), false)
+pub fn natr_batch_unified_js(
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	config: JsValue
+) -> Result<JsValue, JsValue> {
+	if high.len() != low.len() || high.len() != close.len() {
+		return Err(JsValue::from_str("natr: Mismatched input lengths"));
+	}
+	let cfg: NatrBatchConfig = serde_wasm_bindgen::from_value(config)
+		.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+	let sweep = NatrBatchRange { period: cfg.period_range };
+
+	let out = natr_batch_inner(high, low, close, &sweep, detect_best_kernel(), false)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
-	
-	let js_output = NatrBatchJsOutput {
-		values: output.values,
-		combos: output.combos,
-		rows: output.rows,
-		cols: output.cols,
-	};
-	
-	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+
+	let js = NatrBatchJsOutput { values: out.values, combos: out.combos, rows: out.rows, cols: out.cols };
+	serde_wasm_bindgen::to_value(&js).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 #[cfg(feature = "wasm")]

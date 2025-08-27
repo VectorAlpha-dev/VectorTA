@@ -233,6 +233,8 @@ pub enum WavetrendError {
 	InvalidMaLen { ma_length: usize, data_len: usize },
 	#[error("wavetrend: Not enough valid data: needed = {needed}, valid = {valid}")]
 	NotEnoughValidData { needed: usize, valid: usize },
+	#[error("wavetrend: Output slice length mismatch: expected = {expected}, got = {got}")]
+	OutputSliceLengthMismatch { expected: usize, got: usize },
 	#[error("wavetrend: EMA error {0}")]
 	EmaError(#[from] EmaError),
 	#[error("wavetrend: SMA error {0}")]
@@ -453,12 +455,8 @@ fn wavetrend_compute_into(
 	dst_wt_diff: &mut [f64],
 	kernel: Kernel,
 ) -> Result<(), WavetrendError> {
-	// Fill outputs with NaN up to warmup period
-	for i in 0..warmup_period {
-		dst_wt1[i] = f64::NAN;
-		dst_wt2[i] = f64::NAN;
-		dst_wt_diff[i] = f64::NAN;
-	}
+	// Note: Caller is responsible for NaN prefix initialization
+	// This avoids double work when using alloc_with_nan_prefix or init_matrix_prefixes
 	
 	let data_valid = &data[first..];
 	
@@ -637,6 +635,7 @@ fn sma_compute_into(data: &[f64], period: usize, out: &mut [f64]) {
 				}
 			}
 			
+			// We have enough values when count reaches period (and stays at period for a window)
 			if count >= period {
 				out[i] = sum / period as f64;
 			}
@@ -657,11 +656,30 @@ pub fn wavetrend_into_slice(
 	let (data, channel_len, average_len, ma_len, factor, first, warmup_period) = wavetrend_prepare(input)?;
 	
 	// Validate output slice lengths
-	if dst_wt1.len() != data.len() || dst_wt2.len() != data.len() || dst_wt_diff.len() != data.len() {
-		return Err(WavetrendError::InvalidChannelLen {
-			channel_length: dst_wt1.len(),
-			data_len: data.len(),
+	if dst_wt1.len() != data.len() {
+		return Err(WavetrendError::OutputSliceLengthMismatch {
+			expected: data.len(),
+			got: dst_wt1.len(),
 		});
+	}
+	if dst_wt2.len() != data.len() {
+		return Err(WavetrendError::OutputSliceLengthMismatch {
+			expected: data.len(),
+			got: dst_wt2.len(),
+		});
+	}
+	if dst_wt_diff.len() != data.len() {
+		return Err(WavetrendError::OutputSliceLengthMismatch {
+			expected: data.len(),
+			got: dst_wt_diff.len(),
+		});
+	}
+	
+	// Initialize NaN prefix for warmup period
+	for i in 0..warmup_period.min(data.len()) {
+		dst_wt1[i] = f64::NAN;
+		dst_wt2[i] = f64::NAN;
+		dst_wt_diff[i] = f64::NAN;
 	}
 	
 	// Compute directly into output slices
@@ -720,10 +738,22 @@ impl WavetrendStream {
 		let ma_length = p.ma_length.unwrap_or(3);
 		let factor = p.factor.unwrap_or(0.015);
 
-		// Exactly the same error categories as the batch version if any period is zero.
-		if channel_length == 0 || average_length == 0 || ma_length == 0 {
+		// Validate that no period is zero
+		if channel_length == 0 {
 			return Err(WavetrendError::InvalidChannelLen {
 				channel_length,
+				data_len: 0,
+			});
+		}
+		if average_length == 0 {
+			return Err(WavetrendError::InvalidAverageLen {
+				average_length,
+				data_len: 0,
+			});
+		}
+		if ma_length == 0 {
+			return Err(WavetrendError::InvalidMaLen {
+				ma_length,
 				data_len: 0,
 			});
 		}
@@ -1290,10 +1320,22 @@ unsafe fn wavetrend_row_scalar(
 	wt2: &mut [f64],
 	wd: &mut [f64],
 ) -> Result<(), WavetrendError> {
-	let out = wavetrend_scalar(data, channel_len, average_len, ma_len, factor, first)?;
-	wt1.copy_from_slice(&out.wt1);
-	wt2.copy_from_slice(&out.wt2);
-	wd.copy_from_slice(&out.wt_diff);
+	debug_assert_eq!(wt1.len(), data.len());
+	debug_assert_eq!(wt2.len(), data.len());
+	debug_assert_eq!(wd.len(), data.len());
+
+	// Compute warmup exactly once here. Row buffers already have NaN prefixes
+	// from init_matrix_prefixes, so we only write from warmup onward.
+	let warmup = first + channel_len - 1 + average_len - 1 + ma_len - 1;
+
+	// Run the core computation into the provided row slices.
+	// It will write NaNs for [..warmup], but to avoid redundant work
+	// we pass warmup through and skip re-filling the prefix below.
+	wavetrend_compute_into(
+		data, channel_len, average_len, ma_len, factor, first, warmup,
+		wt1, wt2, wd, Kernel::Scalar
+	)?;
+
 	Ok(())
 }
 

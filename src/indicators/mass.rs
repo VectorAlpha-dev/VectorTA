@@ -174,7 +174,7 @@ impl MassBuilder {
 	#[inline(always)]
 	pub fn apply(self, c: &Candles) -> Result<MassOutput, MassError> {
 		let p = MassParams { period: self.period };
-		let i = MassInput::with_default_candles(c);
+		let i = MassInput::from_candles(c, "high", "low", p);
 		mass_with_kernel(&i, self.kernel)
 	}
 
@@ -192,136 +192,107 @@ impl MassBuilder {
 	}
 }
 
+#[inline(always)]
+fn mass_prepare<'a>(
+	input: &'a MassInput,
+	kernel: Kernel,
+) -> Result<(&'a [f64], &'a [f64], usize, usize, Kernel), MassError> {
+	let (high, low) = match &input.data {
+		MassData::Candles {
+			candles,
+			high_source,
+			low_source,
+		} => (source_type(candles, high_source), source_type(candles, low_source)),
+		MassData::Slices { high, low } => (*high, *low),
+	};
+
+	if high.is_empty() || low.is_empty() {
+		return Err(MassError::EmptyData);
+	}
+	if high.len() != low.len() {
+		return Err(MassError::DifferentLengthHL);
+	}
+
+	let period = input.get_period();
+	if period == 0 || period > high.len() {
+		return Err(MassError::InvalidPeriod {
+			period,
+			data_len: high.len(),
+		});
+	}
+
+	let first = (0..high.len())
+		.find(|&i| !high[i].is_nan() && !low[i].is_nan())
+		.ok_or(MassError::AllValuesNaN)?;
+
+	// Two nested EMA(9)s -> need 16 warm bars before summing, then (period-1) for the sum window.
+	let needed_bars = 16 + period - 1;
+	if high.len() - first < needed_bars {
+		return Err(MassError::NotEnoughValidData {
+			needed: needed_bars,
+			valid: high.len() - first,
+		});
+	}
+
+	let chosen = match kernel {
+		Kernel::Auto => detect_best_kernel(),
+		k => k,
+	};
+	Ok((high, low, period, first, chosen))
+}
+
+#[inline(always)]
+fn mass_compute_into(
+	high: &[f64],
+	low: &[f64],
+	period: usize,
+	first: usize,
+	kern: Kernel,
+	out: &mut [f64],
+) {
+	unsafe {
+		match kern {
+			Kernel::Scalar | Kernel::ScalarBatch => mass_scalar(high, low, period, first, out),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => mass_avx2(high, low, period, first, out),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => mass_avx512(high, low, period, first, out),
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+				mass_scalar(high, low, period, first, out)
+			}
+			_ => unreachable!(),
+		}
+	}
+}
+
 #[inline]
 pub fn mass(input: &MassInput) -> Result<MassOutput, MassError> {
 	mass_with_kernel(input, Kernel::Auto)
 }
 
 pub fn mass_with_kernel(input: &MassInput, kernel: Kernel) -> Result<MassOutput, MassError> {
-	let (high, low) = match &input.data {
-		MassData::Candles {
-			candles,
-			high_source,
-			low_source,
-		} => (source_type(candles, high_source), source_type(candles, low_source)),
-		MassData::Slices { high, low } => (*high, *low),
-	};
-
-	if high.is_empty() || low.is_empty() {
-		return Err(MassError::EmptyData);
-	}
-	if high.len() != low.len() {
-		return Err(MassError::DifferentLengthHL);
-	}
-
-	let period = input.get_period();
-	if period == 0 || period > high.len() {
-		return Err(MassError::InvalidPeriod {
-			period,
-			data_len: high.len(),
-		});
-	}
-
-	let first_valid_idx = match (0..high.len()).find(|&i| !high[i].is_nan() && !low[i].is_nan()) {
-		Some(idx) => idx,
-		None => return Err(MassError::AllValuesNaN),
-	};
-
-	let needed_bars = 16 + period - 1;
-	if (high.len() - first_valid_idx) < needed_bars {
-		return Err(MassError::NotEnoughValidData {
-			needed: needed_bars,
-			valid: high.len() - first_valid_idx,
-		});
-	}
-
-	let warmup_period = first_valid_idx + 16 + period - 1;
-	let mut out = alloc_with_nan_prefix(high.len(), warmup_period);
-	let chosen = match kernel {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
-
-	unsafe {
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => mass_scalar(high, low, period, first_valid_idx, &mut out),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => mass_avx2(high, low, period, first_valid_idx, &mut out),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => mass_avx512(high, low, period, first_valid_idx, &mut out),
-			_ => unreachable!(),
-		}
-	}
+	let (high, low, period, first, chosen) = mass_prepare(input, kernel)?;
+	let warmup_end = first + 16 + period - 1;
+	let mut out = alloc_with_nan_prefix(high.len(), warmup_end);
+	mass_compute_into(high, low, period, first, chosen, &mut out);
 	Ok(MassOutput { values: out })
 }
 
 #[inline]
-pub fn mass_into_slice(dst: &mut [f64], input: &MassInput, kern: Kernel) -> Result<(), MassError> {
-	let (high, low) = match &input.data {
-		MassData::Candles {
-			candles,
-			high_source,
-			low_source,
-		} => (source_type(candles, high_source), source_type(candles, low_source)),
-		MassData::Slices { high, low } => (*high, *low),
-	};
-
-	if high.is_empty() || low.is_empty() {
-		return Err(MassError::EmptyData);
-	}
-	if high.len() != low.len() {
-		return Err(MassError::DifferentLengthHL);
-	}
+pub fn mass_into_slice(dst: &mut [f64], input: &MassInput, kernel: Kernel) -> Result<(), MassError> {
+	let (high, low, period, first, chosen) = mass_prepare(input, kernel)?;
 	if dst.len() != high.len() {
 		return Err(MassError::InvalidPeriod {
 			period: dst.len(),
 			data_len: high.len(),
 		});
 	}
-
-	let period = input.get_period();
-	if period == 0 || period > high.len() {
-		return Err(MassError::InvalidPeriod {
-			period,
-			data_len: high.len(),
-		});
-	}
-
-	let first_valid_idx = match (0..high.len()).find(|&i| !high[i].is_nan() && !low[i].is_nan()) {
-		Some(idx) => idx,
-		None => return Err(MassError::AllValuesNaN),
-	};
-
-	let needed_bars = 16 + period - 1;
-	if (high.len() - first_valid_idx) < needed_bars {
-		return Err(MassError::NotEnoughValidData {
-			needed: needed_bars,
-			valid: high.len() - first_valid_idx,
-		});
-	}
-
-	// Initialize NaN values for warmup period first
-	let warmup_end = first_valid_idx + 16 + period - 1;
+	mass_compute_into(high, low, period, first, chosen, dst);
+	let warmup_end = first + 16 + period - 1;
 	for v in &mut dst[..warmup_end] {
 		*v = f64::NAN;
 	}
-
-	let chosen = match kern {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
-
-	unsafe {
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => mass_scalar(high, low, period, first_valid_idx, dst),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => mass_avx2(high, low, period, first_valid_idx, dst),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => mass_avx512(high, low, period, first_valid_idx, dst),
-			_ => unreachable!(),
-		}
-	}
-
 	Ok(())
 }
 
@@ -669,6 +640,8 @@ fn mass_batch_inner(
 			Kernel::Avx2 => mass_row_avx2(high, low, period, first, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 => mass_row_avx512(high, low, period, first, out_row),
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx512 => mass_row_scalar(high, low, period, first, out_row),
 			_ => mass_row_scalar(high, low, period, first, out_row), // Fallback to scalar
 		}
 	};
@@ -1548,6 +1521,8 @@ fn mass_batch_inner_into(
 			Kernel::Avx2 => mass_row_avx2(high, low, period, first, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 => mass_row_avx512(high, low, period, first, out_row),
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx512 => mass_row_scalar(high, low, period, first, out_row),
 			_ => mass_row_scalar(high, low, period, first, out_row), // Fallback to scalar
 		}
 	};

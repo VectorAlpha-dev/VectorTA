@@ -71,7 +71,16 @@ test('TSF zero period', () => {
     
     assert.throws(() => {
         wasm.tsf_js(data, 0);
-    }, /Invalid period/, 'TSF should fail with zero period');
+    }, /Period must be at least 2/, 'TSF should fail with zero period');
+});
+
+test('TSF period one', () => {
+    // Test TSF with period=1 - should throw error
+    const data = new Float64Array([10.0, 20.0, 30.0, 40.0, 50.0]);
+    
+    assert.throws(() => {
+        wasm.tsf_js(data, 1);
+    }, /Period must be at least 2/, 'TSF should fail with period=1');
 });
 
 test('TSF period exceeds length', () => {

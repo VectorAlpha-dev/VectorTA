@@ -5,3 +5,5 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 5471c6e5bec2391956b2afd34aab7fd0306006a7d5e30729d5ceccd58b8756f0 # shrinks to data = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, NaN, 0.0, -0.0, 0.0, 0.0, -0.0, 0.0], period = 2, devtype = 0
+cc 11b7df0ab80d19f17d0c802b292433e42672fa47272fada2e93ca088cfb82024 # shrinks to data = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.0, -0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.0, 0.0, 0.0, 0.0, 0.0, -1.534588609945664e244, 0.0, 0.0, 0.0], period = 2, devtype = 0
+cc 416c8c758a4d3e94ac8a8377b7c8333a0c032abb86d2f9c74cfada50bf92e92a # shrinks to data = [-inf, -inf, 0.0, 0.0, 0.0, 0.0, -0.0, 0.0, 0.0, 0.0], period = 2, devtype = 2

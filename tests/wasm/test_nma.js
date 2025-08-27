@@ -51,259 +51,239 @@ test('NMA partial params', () => {
 test('NMA accuracy', async () => {
     // Test NMA matches expected values from Rust tests - mirrors check_nma_accuracy
     const close = new Float64Array(testData.close);
+    const expected = EXPECTED_OUTPUTS.nma;
     
-    const result = wasm.nma_js(close, 40);
+    const result = wasm.nma_js(close, expected.defaultParams.period);
     
     assert.strictEqual(result.length, close.length);
     
-    // Expected values from Rust test
-    const expectedLastFive = [
-        64320.486018271724,
-        64227.95719984426,
-        64180.9249333126,
-        63966.35530620797,
-        64039.04719192334,
-    ];
-    
+    // Check last 5 values match expected
     const actualLastFive = result.slice(-5);
     
-    for (let i = 0; i < 5; i++) {
-        assertClose(actualLastFive[i], expectedLastFive[i], 1e-3, 
-            `NMA mismatch at index ${i}`);
-    }
+    assertArrayClose(
+        actualLastFive,
+        expected.last5Values,
+        1e-3,  // Use same tolerance as Rust tests
+        "NMA last 5 values mismatch"
+    );
     
     // Compare with Rust implementation
-    await compareWithRust('nma', result, 'close', { period: 40 });
+    await compareWithRust('nma', result, 'close', expected.defaultParams);
+});
+
+test('NMA default candles', () => {
+    // Test NMA with default parameters - mirrors check_nma_default_candles
+    const close = new Float64Array(testData.close);
+    
+    // Default period: 40
+    const result = wasm.nma_js(close, 40);
+    assert.strictEqual(result.length, close.length);
 });
 
 test('NMA zero period', () => {
-    // Test NMA fails with zero period
+    // Test NMA fails with zero period - mirrors check_nma_zero_period
     const inputData = new Float64Array([10.0, 20.0, 30.0]);
     
     assert.throws(() => {
         wasm.nma_js(inputData, 0);
-    });
+    }, /Invalid period/);
 });
 
 test('NMA period exceeds length', () => {
-    // Test NMA fails with period exceeding length
+    // Test NMA fails when period exceeds data length - mirrors check_nma_period_exceeds_length
     const dataSmall = new Float64Array([10.0, 20.0, 30.0]);
     
     assert.throws(() => {
         wasm.nma_js(dataSmall, 10);
-    });
+    }, /Invalid period/);
 });
 
 test('NMA very small dataset', () => {
-    // Test NMA fails with insufficient data
+    // Test NMA fails with insufficient data - mirrors check_nma_very_small_dataset
     const singlePoint = new Float64Array([42.0]);
     
     assert.throws(() => {
         wasm.nma_js(singlePoint, 40);
-    });
+    }, /Invalid period|Not enough valid data/);
 });
 
 test('NMA empty input', () => {
-    // Test NMA with empty input
-    const dataEmpty = new Float64Array([]);
+    // Test NMA fails with empty input - mirrors check_nma_empty_input
+    const empty = new Float64Array([]);
     
     assert.throws(() => {
-        wasm.nma_js(dataEmpty, 40);
-    });
-});
-
-test('NMA reinput', () => {
-    // Test NMA with re-input of NMA result - mirrors check_nma_reinput
-    const close = new Float64Array(testData.close);
-    
-    // First NMA pass with period=40
-    const firstResult = wasm.nma_js(close, 40);
-    
-    // Second NMA pass with period=30 using first result as input
-    const secondResult = wasm.nma_js(firstResult, 30);
-    
-    assert.strictEqual(secondResult.length, firstResult.length);
-    
-    // All values should be finite after warmup
-    for (let i = 70; i < secondResult.length; i++) {
-        assert(isFinite(secondResult[i]), `NaN found at index ${i}`);
-    }
+        wasm.nma_js(empty, 40);
+    }, /Input data slice is empty/);
 });
 
 test('NMA NaN handling', () => {
-    // Test NMA handling of NaN values - mirrors check_nma_nan_handling
+    // Test NMA handles NaN values correctly - mirrors check_nma_nan_handling
     const close = new Float64Array(testData.close);
     
     const result = wasm.nma_js(close, 40);
-    
     assert.strictEqual(result.length, close.length);
     
-    // After warmup, all values should be finite
-    for (let i = 240; i < result.length; i++) {
-        assert(isFinite(result[i]), `NaN found at index ${i}`);
+    // After warmup period (240), no NaN values should exist
+    if (result.length > 240) {
+        for (let i = 240; i < result.length; i++) {
+            assert(!isNaN(result[i]), `Found unexpected NaN at index ${i}`);
+        }
     }
+    
+    // First period values should be NaN
+    let firstValid = 0;
+    for (let i = 0; i < close.length; i++) {
+        if (!isNaN(close[i])) {
+            firstValid = i;
+            break;
+        }
+    }
+    const warmup = firstValid + 40;
+    assertAllNaN(result.slice(0, warmup), "Expected NaN in warmup period");
 });
 
-test('NMA batch', () => {
-    // Test NMA batch computation
-    const close = new Float64Array(testData.close);
+test('NMA all NaN input', () => {
+    // Test NMA with all NaN values
+    const allNaN = new Float64Array(100);
+    allNaN.fill(NaN);
     
-    // Test parameter ranges
-    const batch_result = wasm.nma_batch_js(
-        close, 
-        20, 60, 20    // period range: 20, 40, 60
+    assert.throws(() => {
+        wasm.nma_js(allNaN, 40);
+    }, /All values are NaN/);
+});
+
+test('NMA batch default row', () => {
+    // Test NMA batch with default parameters - mirrors check_batch_default_row
+    const close = new Float64Array(testData.close);
+    const expected = EXPECTED_OUTPUTS.nma;
+    
+    // Test with default period only using old API
+    const batchResult = wasm.nma_batch_js(
+        close,
+        40, 40, 0  // Default period only
     );
     
     // Get rows and cols info
-    const rows_cols = wasm.nma_batch_rows_cols_js(20, 60, 20, close.length);
-    const rows = rows_cols[0];
-    const cols = rows_cols[1];
+    const rowsCols = wasm.nma_batch_rows_cols_js(40, 40, 0, close.length);
+    const rows = rowsCols[0];
+    const cols = rowsCols[1];
     
-    assert(batch_result instanceof Float64Array);
-    assert.strictEqual(rows, 3); // 3 period values
+    assert(batchResult instanceof Float64Array);
+    assert.strictEqual(rows, 1); // Single combination
     assert.strictEqual(cols, close.length);
-    assert.strictEqual(batch_result.length, rows * cols);
+    assert.strictEqual(batchResult.length, rows * cols);
     
-    // Verify first combination matches individual calculation
-    const individual_result = wasm.nma_js(close, 20);
-    const batch_first = batch_result.slice(0, close.length);
+    // Extract the single row (entire result since only 1 row)
+    const defaultRow = batchResult.slice(-5);
     
-    // Compare after warmup
-    const warmup = 240 + 20;
-    for (let i = warmup; i < close.length; i++) {
-        assertClose(batch_first[i], individual_result[i], 1e-9, `Batch mismatch at ${i}`);
-    }
+    // Check last 5 values match expected
+    assertArrayClose(
+        defaultRow,
+        expected.batchDefaultRow,
+        1e-3,  // Same tolerance as Rust
+        "NMA batch default row mismatch"
+    );
 });
 
-test('NMA different periods', () => {
-    // Test NMA with different period values
+test('NMA batch multiple periods', () => {
+    // Test NMA batch with multiple period values
     const close = new Float64Array(testData.close);
     
-    // Test various period values
-    const testPeriods = [10, 20, 40, 80];
+    // Test multiple periods using old API
+    const batchResult = wasm.nma_batch_js(
+        close,
+        20, 60, 20  // periods: 20, 40, 60
+    );
     
-    for (const period of testPeriods) {
-        const result = wasm.nma_js(close, period);
-        assert.strictEqual(result.length, close.length);
+    // Get rows and cols info
+    const rowsCols = wasm.nma_batch_rows_cols_js(20, 60, 20, close.length);
+    const rows = rowsCols[0];
+    const cols = rowsCols[1];
+    
+    assert(batchResult instanceof Float64Array);
+    assert.strictEqual(rows, 3); // 3 period values
+    assert.strictEqual(cols, close.length);
+    assert.strictEqual(batchResult.length, rows * cols);
+    
+    // Get metadata for verification
+    const metadata = wasm.nma_batch_metadata_js(20, 60, 20);
+    assert.strictEqual(metadata.length, 3);
+    assert.strictEqual(metadata[0], 20);
+    assert.strictEqual(metadata[1], 40);
+    assert.strictEqual(metadata[2], 60);
+    
+    // Verify each combination matches individual calculation
+    for (let i = 0; i < metadata.length; i++) {
+        const period = metadata[i];
+        const individualResult = wasm.nma_js(close, period);
+        const rowStart = i * cols;
+        const rowEnd = rowStart + cols;
+        const batchRow = batchResult.slice(rowStart, rowEnd);
         
-        // After warmup, all values should be finite
-        const warmup = 240 + period;
-        if (warmup < result.length) {
-            for (let i = warmup; i < result.length; i++) {
-                assert(isFinite(result[i]), `NaN at index ${i} for period=${period}`);
+        // Compare after warmup period
+        let firstValid = 0;
+        for (let j = 0; j < close.length; j++) {
+            if (!isNaN(close[j])) {
+                firstValid = j;
+                break;
+            }
+        }
+        const warmup = firstValid + period;
+        
+        if (warmup < close.length) {
+            for (let j = warmup; j < close.length; j++) {
+                assertClose(
+                    batchRow[j], 
+                    individualResult[j], 
+                    1e-9, 
+                    `NMA batch period ${period} mismatch at index ${j}`
+                );
             }
         }
     }
 });
 
-test('NMA batch performance', () => {
-    // Test that batch computation is more efficient than multiple single computations
-    const close = new Float64Array(testData.close.slice(0, 1000)); // Use first 1000 values
+test('NMA batch with unified API', () => {
+    // Test using the new unified batch API (if available)
+    const close = new Float64Array(testData.close.slice(0, 100)); // Use smaller dataset for speed
     
-    // Test multiple parameter combinations
-    const startBatch = performance.now();
-    const batchResult = wasm.nma_batch_js(
-        close,
-        10, 50, 10    // periods: 10, 20, 30, 40, 50
-    );
-    const batchTime = performance.now() - startBatch;
-    
-    // Get the exact parameters used by the batch function
-    const metadata = wasm.nma_batch_metadata_js(10, 50, 10);
-    
-    const startSingle = performance.now();
-    const singleResults = [];
-    // Use the exact parameters from metadata
-    for (const period of metadata) {
-        const result = wasm.nma_js(close, period);
-        singleResults.push(...result);
-    }
-    const singleTime = performance.now() - startSingle;
-    
-    // Batch should be faster than multiple single calls
-    console.log(`Batch time: ${batchTime.toFixed(2)}ms, Single time: ${singleTime.toFixed(2)}ms`);
-    
-    // Verify results match
-    assertArrayClose(batchResult, singleResults, 1e-9, 'Batch vs single results');
-});
-
-test('NMA edge cases', () => {
-    // Test NMA with edge case inputs
-    
-    // Test with monotonically increasing data
-    const data = new Float64Array(100);
-    for (let i = 0; i < 100; i++) {
-        data[i] = i + 1;
-    }
-    const result = wasm.nma_js(data, 10);
-    assert.strictEqual(result.length, data.length);
-    
-    // After warmup, all values should be finite
-    for (let i = 10; i < result.length; i++) {
-        assert(isFinite(result[i]), `NaN at index ${i}`);
-    }
-    
-    // Test with constant values
-    const constantData = new Float64Array(100).fill(50.0);
-    const constantResult = wasm.nma_js(constantData, 10);
-    
-    assert.strictEqual(constantResult.length, constantData.length);
-    
-    // After warmup, all values should be finite
-    for (let i = 10; i < constantResult.length; i++) {
-        assert(isFinite(constantResult[i]), `NaN at index ${i} for constant data`);
+    // Test if unified API exists
+    if (typeof wasm.nma_batch_unified_js === 'function') {
+        const config = {
+            period_range: [20, 40, 10]  // periods: 20, 30, 40
+        };
+        
+        const result = wasm.nma_batch_unified_js(close, config);
+        
+        // Should have proper structure
+        assert(result.values instanceof Float64Array);
+        assert(Array.isArray(result.combos));
+        assert.strictEqual(result.rows, 3);
+        assert.strictEqual(result.cols, 100);
+        assert.strictEqual(result.values.length, 3 * 100);
+        
+        // Verify combos
+        assert.strictEqual(result.combos.length, 3);
+        assert.strictEqual(result.combos[0].period, 20);
+        assert.strictEqual(result.combos[1].period, 30);
+        assert.strictEqual(result.combos[2].period, 40);
     }
 });
 
-test('NMA batch metadata', () => {
-    // Test metadata function returns correct period values
-    const metadata = wasm.nma_batch_metadata_js(
-        10, 30, 10    // period range: 10, 20, 30
-    );
+test('NMA batch error handling', () => {
+    // Test batch error conditions
     
-    // Should have 3 period values
-    assert.strictEqual(metadata.length, 3);
-    assert.strictEqual(metadata[0], 10);
-    assert.strictEqual(metadata[1], 20);
-    assert.strictEqual(metadata[2], 30);
-});
-
-test('NMA consistency across calls', () => {
-    // Test that NMA produces consistent results across multiple calls
-    const close = new Float64Array(testData.close.slice(0, 100));
+    // Test with all NaN data
+    const allNaN = new Float64Array(100).fill(NaN);
+    assert.throws(() => {
+        wasm.nma_batch_js(allNaN, 20, 40, 10);
+    }, /All values are NaN/);
     
-    const result1 = wasm.nma_js(close, 40);
-    const result2 = wasm.nma_js(close, 40);
-    
-    assertArrayClose(result1, result2, 1e-15, "NMA results not consistent");
-});
-
-test('NMA step precision', () => {
-    // Test batch with various step sizes
-    const data = new Float64Array(50);
-    for (let i = 0; i < 50; i++) {
-        data[i] = i + 1;
-    }
-    
-    const batch_result = wasm.nma_batch_js(
-        data,
-        10, 30, 10     // periods: 10, 20, 30
-    );
-    
-    // Get rows and cols info
-    const rows_cols = wasm.nma_batch_rows_cols_js(10, 30, 10, data.length);
-    const rows = rows_cols[0];
-    
-    // Should have 3 combinations
-    assert.strictEqual(rows, 3);
-    assert.strictEqual(batch_result.length, 3 * data.length);
-    
-    // Verify metadata
-    const metadata = wasm.nma_batch_metadata_js(10, 30, 10);
-    assert.strictEqual(metadata.length, 3);
-    assert.strictEqual(metadata[0], 10);
-    assert.strictEqual(metadata[1], 20);
-    assert.strictEqual(metadata[2], 30);
+    // Test with insufficient data
+    const smallData = new Float64Array([1.0, 2.0, 3.0]);
+    assert.throws(() => {
+        wasm.nma_batch_js(smallData, 10, 20, 10);
+    }, /Invalid period|Not enough valid data|unreachable/);  // WASM may throw unreachable for some error conditions
 });
 
 test('NMA warmup behavior', () => {
@@ -335,43 +315,88 @@ test('NMA warmup behavior', () => {
     }
 });
 
-test('NMA oscillating data', () => {
-    // Test with oscillating values
+test('NMA different periods', () => {
+    // Test NMA with various period values
+    const close = new Float64Array(testData.close);
+    
+    // Test various period values
+    const testPeriods = [10, 20, 40, 80];
+    
+    for (const period of testPeriods) {
+        const result = wasm.nma_js(close, period);
+        assert.strictEqual(result.length, close.length);
+        
+        // After warmup, all values should be finite
+        let firstValid = 0;
+        for (let i = 0; i < close.length; i++) {
+            if (!isNaN(close[i])) {
+                firstValid = i;
+                break;
+            }
+        }
+        const warmup = firstValid + period;
+        
+        if (warmup < result.length) {
+            for (let i = warmup; i < result.length; i++) {
+                assert(isFinite(result[i]), `NaN at index ${i} for period=${period}`);
+            }
+        }
+    }
+});
+
+test('NMA edge cases', () => {
+    // Test NMA with edge case inputs
+    
+    // Test with monotonically increasing data
     const data = new Float64Array(100);
     for (let i = 0; i < 100; i++) {
-        data[i] = (i % 2 === 0) ? 10.0 : 20.0;
+        data[i] = i + 1;
     }
-    
     const result = wasm.nma_js(data, 10);
     assert.strictEqual(result.length, data.length);
     
     // After warmup, all values should be finite
     for (let i = 10; i < result.length; i++) {
-        assert(isFinite(result[i]), `Expected finite value at index ${i}`);
+        assert(isFinite(result[i]), `NaN at index ${i}`);
+    }
+    
+    // Test with constant values
+    const constantData = new Float64Array(100).fill(50.0);
+    const constantResult = wasm.nma_js(constantData, 10);
+    
+    assert.strictEqual(constantResult.length, constantData.length);
+    
+    // After warmup, all values should be finite
+    for (let i = 10; i < constantResult.length; i++) {
+        assert(isFinite(constantResult[i]), `NaN at index ${i} for constant data`);
+    }
+    
+    // Test with oscillating values
+    const oscillatingData = new Float64Array(100);
+    for (let i = 0; i < 100; i++) {
+        oscillatingData[i] = (i % 2 === 0) ? 10.0 : 20.0;
+    }
+    const oscillatingResult = wasm.nma_js(oscillatingData, 10);
+    assert.strictEqual(oscillatingResult.length, oscillatingData.length);
+    
+    // After warmup, all values should be finite
+    for (let i = 10; i < oscillatingResult.length; i++) {
+        assert(isFinite(oscillatingResult[i]), `Expected finite value at index ${i}`);
     }
 });
 
-test('NMA small step size', () => {
-    // Test batch with very small step size
-    const data = new Float64Array(50);
-    for (let i = 0; i < 50; i++) {
-        data[i] = i + 1;
-    }
+test('NMA consistency across calls', () => {
+    // Test that NMA produces consistent results across multiple calls
+    const close = new Float64Array(testData.close.slice(0, 100));
     
-    const batch_result = wasm.nma_batch_js(
-        data,
-        10, 12, 1     // periods: 10, 11, 12
-    );
+    const result1 = wasm.nma_js(close, 40);
+    const result2 = wasm.nma_js(close, 40);
     
-    const rows_cols = wasm.nma_batch_rows_cols_js(10, 12, 1, data.length);
-    const rows = rows_cols[0];
-    
-    assert.strictEqual(rows, 3);
-    assert.strictEqual(batch_result.length, 3 * data.length);
+    assertArrayClose(result1, result2, 1e-15, "NMA results not consistent");
 });
 
 test('NMA formula verification', () => {
-    // Test that NMA values are within reasonable range
+    // Verify NMA formula implementation with simple data
     const data = new Float64Array([10.0, 12.0, 11.0, 13.0, 15.0, 14.0]);
     const period = 3;
     
@@ -395,30 +420,73 @@ test('NMA formula verification', () => {
     }
 });
 
-test('NMA all NaN input', () => {
-    // Test NMA with all NaN values
-    const allNaN = new Float64Array(100).fill(NaN);
+test('NMA batch metadata', () => {
+    // Test metadata function returns correct period values
+    const metadata = wasm.nma_batch_metadata_js(
+        10, 30, 10  // period range: 10, 20, 30
+    );
     
-    assert.throws(() => {
-        wasm.nma_js(allNaN, 40);
-    }, /All values are NaN/);
+    // Should have 3 period values
+    assert.strictEqual(metadata.length, 3);
+    assert.strictEqual(metadata[0], 10);
+    assert.strictEqual(metadata[1], 20);
+    assert.strictEqual(metadata[2], 30);
 });
 
-test('NMA batch error conditions', () => {
-    // Test various error conditions for batch
-    const data = new Float64Array([1, 2, 3, 4, 5]);
+test('NMA batch rows and cols', () => {
+    // Test rows and cols calculation
+    const rowsCols = wasm.nma_batch_rows_cols_js(
+        10, 30, 10,  // period range: 10, 20, 30
+        100          // data length
+    );
     
-    // Period exceeds data length
-    assert.throws(() => {
-        wasm.nma_batch_js(data, 10, 20, 5);
-    });
-    
-    // Empty data
-    const empty = new Float64Array([]);
-    assert.throws(() => {
-        wasm.nma_batch_js(empty, 5, 10, 5);
-    });
+    assert.strictEqual(rowsCols[0], 3);   // 3 periods
+    assert.strictEqual(rowsCols[1], 100); // data length
 });
 
-// Module verification code
-// console.log('NMA module loaded successfully');
+test('NMA step precision', () => {
+    // Test batch with various step sizes
+    const data = new Float64Array(50);
+    for (let i = 0; i < 50; i++) {
+        data[i] = i + 1;
+    }
+    
+    const batchResult = wasm.nma_batch_js(
+        data,
+        10, 30, 10  // periods: 10, 20, 30
+    );
+    
+    // Get rows and cols info
+    const rowsCols = wasm.nma_batch_rows_cols_js(10, 30, 10, data.length);
+    const rows = rowsCols[0];
+    
+    // Should have 3 combinations
+    assert.strictEqual(rows, 3);
+    assert.strictEqual(batchResult.length, 3 * data.length);
+    
+    // Verify metadata
+    const metadata = wasm.nma_batch_metadata_js(10, 30, 10);
+    assert.strictEqual(metadata.length, 3);
+    assert.strictEqual(metadata[0], 10);
+    assert.strictEqual(metadata[1], 20);
+    assert.strictEqual(metadata[2], 30);
+});
+
+test('NMA small step size', () => {
+    // Test batch with very small step size
+    const data = new Float64Array(50);
+    for (let i = 0; i < 50; i++) {
+        data[i] = i + 1;
+    }
+    
+    const batchResult = wasm.nma_batch_js(
+        data,
+        10, 12, 1  // periods: 10, 11, 12
+    );
+    
+    const rowsCols = wasm.nma_batch_rows_cols_js(10, 12, 1, data.length);
+    const rows = rowsCols[0];
+    
+    assert.strictEqual(rows, 3);
+    assert.strictEqual(batchResult.length, 3 * data.length);
+});

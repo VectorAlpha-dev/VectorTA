@@ -26,18 +26,18 @@ class TestEpma:
         return load_test_data()
     
     def test_epma_partial_params(self, test_data):
-        """Test EPMA with partial parameters (None values) - mirrors check_epma_partial_params"""
+        """Test EPMA with partial parameters - mirrors check_epma_partial_params"""
         close = test_data['close']
         
-        # Test with all default params (None)
-        result = ta_indicators.epma(close, None, None)
+        # Test with default params (period=11, offset=4)
+        result = ta_indicators.epma(close, 11, 4)
         assert len(result) == len(close)
         
-        # Test with partial custom parameters
-        result = ta_indicators.epma(close, 15, None)  # Custom period, default offset
+        # Test with custom parameters
+        result = ta_indicators.epma(close, 15, 6)  # Custom period and offset
         assert len(result) == len(close)
         
-        result = ta_indicators.epma(close, None, 3)  # Default period, custom offset
+        result = ta_indicators.epma(close, 9, 3)  # Different custom values
         assert len(result) == len(close)
     
     def test_epma_accuracy(self, test_data):
@@ -76,9 +76,9 @@ class TestEpma:
         """Test EPMA fails with zero period - mirrors check_epma_zero_period"""
         input_data = np.array([10.0, 20.0, 30.0])
         
-        # With period=0 and default offset=4, it will fail with "Invalid offset"
+        # With period=0 and offset=4, it will fail with "Invalid offset"
         with pytest.raises(ValueError, match="Invalid offset"):
-            ta_indicators.epma(input_data, period=0, offset=None)
+            ta_indicators.epma(input_data, period=0, offset=4)
         
         # With period=0 and offset=0, it will fail with "Invalid offset" because 0 >= 0
         with pytest.raises(ValueError, match="Invalid offset"):
@@ -89,21 +89,21 @@ class TestEpma:
         data_small = np.array([10.0, 20.0, 30.0])
         
         with pytest.raises(ValueError, match="Invalid period"):
-            ta_indicators.epma(data_small, period=10, offset=None)
+            ta_indicators.epma(data_small, period=10, offset=4)
     
     def test_epma_very_small_dataset(self):
         """Test EPMA fails with insufficient data - mirrors check_epma_very_small_dataset"""
         single_point = np.array([42.0])
         
         with pytest.raises(ValueError, match="Invalid period|Not enough valid data"):
-            ta_indicators.epma(single_point, period=9, offset=None)
+            ta_indicators.epma(single_point, period=9, offset=4)
     
     def test_epma_empty_input(self):
         """Test EPMA fails with empty input - mirrors check_epma_empty_input"""
         empty = np.array([])
         
         with pytest.raises(ValueError, match="Input data slice is empty"):
-            ta_indicators.epma(empty, period=None, offset=None)
+            ta_indicators.epma(empty, period=11, offset=4)
     
     def test_epma_invalid_offset(self):
         """Test EPMA fails with invalid offset - mirrors check_epma_invalid_offset"""
@@ -120,13 +120,19 @@ class TestEpma:
         """Test EPMA applied twice (re-input) - mirrors check_epma_reinput"""
         close = test_data['close']
         
-        # First pass
-        first_result = ta_indicators.epma(close, period=9, offset=None)
+        # First pass with period=9, offset=4 (default)
+        first_result = ta_indicators.epma(close, period=9, offset=4)
         assert len(first_result) == len(close)
         
         # Second pass - apply EPMA to EPMA output with period=3, offset=0
         second_result = ta_indicators.epma(first_result, period=3, offset=0)
         assert len(second_result) == len(first_result)
+        
+        # Check that warmup periods are respected
+        # First pass warmup: 9 + 4 + 1 = 14
+        assert np.all(np.isnan(first_result[:14]))
+        # Second pass warmup: 3 + 0 + 1 = 4  
+        assert np.all(np.isnan(second_result[:4]))
     
     def test_epma_nan_handling(self, test_data):
         """Test EPMA handles NaN values correctly - mirrors check_epma_nan_handling"""
@@ -266,9 +272,9 @@ class TestEpma:
         """Test EPMA fails with period < 2"""
         data = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
         
-        # With period=1 and default offset=4, it will fail with "Invalid offset"
+        # With period=1 and offset=4, it will fail with "Invalid offset"
         with pytest.raises(ValueError, match="Invalid offset"):
-            ta_indicators.epma(data, period=1, offset=None)
+            ta_indicators.epma(data, period=1, offset=4)
         
         # With period=1 and offset=0, it will fail with "Invalid period"
         with pytest.raises(ValueError, match="Invalid period"):
@@ -281,6 +287,81 @@ class TestEpma:
         # With period=3, offset=2, needs period+offset+1=6 valid values
         with pytest.raises(ValueError, match="Not enough valid data"):
             ta_indicators.epma(data, period=3, offset=2)
+    
+    def test_epma_with_kernel_parameter(self, test_data):
+        """Test EPMA with different kernel parameters"""
+        close = test_data['close']
+        
+        # Test with explicit scalar kernel
+        result_scalar = ta_indicators.epma(close, 11, 4, kernel='scalar')
+        assert len(result_scalar) == len(close)
+        
+        # Test with auto kernel (default)
+        result_auto = ta_indicators.epma(close, 11, 4, kernel='auto')
+        assert len(result_auto) == len(close)
+        
+        # Test with None kernel (uses auto)
+        result_none = ta_indicators.epma(close, 11, 4, kernel=None)
+        assert len(result_none) == len(close)
+        
+        # Results should be very close regardless of kernel
+        assert_close(result_scalar[-5:], result_auto[-5:], rtol=1e-9, 
+                    msg="Scalar vs Auto kernel mismatch")
+    
+    def test_epma_batch_with_kernel(self, test_data):
+        """Test EPMA batch with kernel parameter"""
+        close = test_data['close'][:100]
+        
+        # Test batch with explicit kernel
+        result_scalar = ta_indicators.epma_batch(
+            close,
+            period_range=(11, 11, 0),
+            offset_range=(4, 4, 0),
+            kernel='scalar'
+        )
+        
+        result_auto = ta_indicators.epma_batch(
+            close,
+            period_range=(11, 11, 0),
+            offset_range=(4, 4, 0),
+            kernel='auto'
+        )
+        
+        # Should produce same results
+        assert_close(
+            result_scalar['values'][0],
+            result_auto['values'][0],
+            rtol=1e-9,
+            msg="Batch scalar vs auto kernel mismatch"
+        )
+    
+    def test_epma_batch_edge_cases(self, test_data):
+        """Test batch processing edge cases"""
+        close = test_data['close'][:50]
+        
+        # Step = 0 with start = end
+        result = ta_indicators.epma_batch(
+            close,
+            period_range=(7, 7, 0),
+            offset_range=(2, 2, 0)
+        )
+        assert result['values'].shape == (1, 50)
+        
+        # Step larger than range
+        result = ta_indicators.epma_batch(
+            close,
+            period_range=(5, 7, 10),  # Step > range
+            offset_range=(2, 2, 0)
+        )
+        assert result['values'].shape == (1, 50)  # Only period=5
+        
+        # Multiple parameter combinations
+        result = ta_indicators.epma_batch(
+            close,
+            period_range=(5, 7, 1),   # 5, 6, 7
+            offset_range=(1, 2, 1)     # 1, 2
+        )
+        assert result['values'].shape == (6, 50)  # 3 periods x 2 offsets
 
 
 if __name__ == '__main__':

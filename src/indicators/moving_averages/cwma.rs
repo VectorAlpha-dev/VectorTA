@@ -109,7 +109,6 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 #[cfg(not(target_arch = "wasm32"))]
-#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
@@ -285,9 +284,9 @@ fn cwma_prepare<'a>(
 		});
 	}
 
-	let mut weights = Vec::with_capacity(period - 1);
+	let mut weights = Vec::with_capacity(period);
 	let mut norm = 0.0;
-	for i in 0..period - 1 {
+	for i in 0..period {
 		let w = ((period - i) as f64).powi(3);
 		weights.push(w);
 		norm += w;
@@ -295,7 +294,7 @@ fn cwma_prepare<'a>(
 	let mut inv_norm = 1.0 / norm;
 	inv_norm = inv_norm * (2.0 - norm * inv_norm);
 
-	let warm = first + weights.len();
+	let warm = first + period - 1;
 
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
@@ -376,7 +375,7 @@ pub unsafe fn cwma_scalar(
 	out: &mut [f64],
 ) {
 	let wlen = weights.len();
-	for i in (first_val + wlen)..data.len() {
+	for i in (first_val + wlen - 1)..data.len() {
 		let mut acc = 0.0;
 		for (k, &w) in weights.iter().enumerate() {
 			acc = data[i - k].mul_add(w, acc);
@@ -396,7 +395,7 @@ pub unsafe fn cwma_scalar(
 	out: &mut [f64],
 ) {
 	let wlen = weights.len();
-	for i in (first_val + wlen)..data.len() {
+	for i in (first_val + wlen - 1)..data.len() {
 		let mut acc = 0.0;
 		for (k, &w) in weights.iter().enumerate() {
 			// Fallback for architectures without mul_add
@@ -421,7 +420,7 @@ pub unsafe fn cwma_avx2(
 	let wlen = weights.len();
 	let chunks = wlen / STEP;
 	let tail = wlen % STEP;
-	let first_out = first_valid + wlen;
+	let first_out = first_valid + wlen - 1;
 
 	for i in first_out..data.len() {
 		let mut acc = _mm256_setzero_pd();
@@ -495,13 +494,13 @@ pub unsafe fn cwma_avx512_short(
 	out: &mut [f64],
 ) {
 	debug_assert!(period <= 32);
-	debug_assert_eq!(weights.len(), period - 1);
+	debug_assert_eq!(weights.len(), period);
 
 	const STEP: usize = 8;
 	let wlen = weights.len();
 	let chunks = wlen / STEP;
 	let tail = wlen % STEP;
-	let first_out = first_valid + wlen;
+	let first_out = first_valid + wlen - 1;
 
 	let mut wv: [__m512d; 4] = [_mm512_setzero_pd(); 4];
 	if chunks >= 1 {
@@ -566,7 +565,7 @@ pub unsafe fn cwma_avx512_long(
 	let wlen = weights.len();
 	let chunks = wlen / STEP;
 	let tail = wlen % STEP;
-	let first_out = first_valid + wlen;
+	let first_out = first_valid + wlen - 1;
 
 	if wlen < 24 {
 		cwma_avx2(data, weights, _period, first_valid, inv_norm, out);
@@ -630,12 +629,12 @@ pub struct CwmaStream {
 impl CwmaStream {
 	pub fn try_new(params: CwmaParams) -> Result<Self, CwmaError> {
 		let period = params.period.unwrap_or(14);
-		if period == 0 {
+		if period <= 1 {
 			return Err(CwmaError::InvalidPeriod { period, data_len: 0 });
 		}
 
-		let mut weights = Vec::with_capacity(period - 1);
-		for i in 0..period - 1 {
+		let mut weights = Vec::with_capacity(period);
+		for i in 0..period {
 			weights.push(((period - i) as f64).powi(3));
 		}
 		let inv_norm = 1.0 / weights.iter().sum::<f64>();
@@ -670,7 +669,7 @@ impl CwmaStream {
 		}
 
 		let mut sum = 0.0;
-		for k in 0..self.period - 1 {
+		for k in 0..self.period {
 			let ring_idx = (self.head + self.period - 1 - k) % self.period;
 			sum += self.ring[ring_idx] * self.weights[k];
 		}
@@ -884,7 +883,7 @@ fn cwma_batch_inner_into(
 	// Note: Input validation and warmup initialization already done in cwma_batch_inner
 	let combos = expand_grid(sweep);
 
-	let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0); // Already validated in cwma_batch_inner
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(CwmaError::AllValuesNaN)?;
 
 	let max_p = combos.iter().map(|c| round_up8(c.period.unwrap())).max().unwrap();
 
@@ -899,7 +898,7 @@ fn cwma_batch_inner_into(
 	for (row, prm) in combos.iter().enumerate() {
 		let period = prm.period.unwrap();
 		let mut norm = 0.0;
-		for i in 0..period - 1 {
+		for i in 0..period {
 			let w = ((period - i) as f64).powi(3);
 			flat_w[row * max_p + i] = w;
 			norm += w;
@@ -1271,6 +1270,16 @@ pub fn cwma_batch_py<'py>(
 
 	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
 	let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+	// Initialize NaN prefixes for each row based on warmup period
+	let first = slice_in.iter().position(|x| !x.is_nan()).unwrap_or(slice_in.len());
+	for (row, combo) in combos.iter().enumerate() {
+		let warmup = first + combo.period.unwrap() - 1;
+		let row_start = row * cols;
+		for i in 0..warmup.min(cols) {
+			slice_out[row_start + i] = f64::NAN;
+		}
+	}
 
 	let combos = py
 		.allow_threads(|| {

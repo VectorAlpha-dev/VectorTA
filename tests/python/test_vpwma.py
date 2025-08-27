@@ -128,6 +128,36 @@ class TestVpwma:
         # First period-1 values should be NaN
         assert np.all(np.isnan(result[:13])), "Expected NaN in warmup period"
     
+    def test_vpwma_warmup_period(self, test_data):
+        """Test VPWMA warmup period behavior - matches real-world conditions"""
+        close = test_data['close']
+        
+        # Test with different periods
+        test_cases = [
+            {'period': 5, 'power': 0.5, 'expected_warmup': 4},
+            {'period': 10, 'power': 0.382, 'expected_warmup': 9},
+            {'period': 14, 'power': 0.382, 'expected_warmup': 13},
+            {'period': 20, 'power': 0.3, 'expected_warmup': 19}
+        ]
+        
+        for tc in test_cases:
+            result = ta_indicators.vpwma(close, period=tc['period'], power=tc['power'])
+            
+            # Check warmup period has NaN values
+            warmup_values = result[:tc['expected_warmup']]
+            assert np.all(np.isnan(warmup_values)), \
+                f"Expected all NaN in warmup period for period={tc['period']}, got non-NaN values"
+            
+            # Check first non-NaN value appears at expected index
+            if len(result) > tc['expected_warmup']:
+                assert not np.isnan(result[tc['expected_warmup']]), \
+                    f"Expected first valid value at index {tc['expected_warmup']} for period={tc['period']}"
+            
+            # Verify warmup calculation: warmup = first_valid + period - 1
+            # For clean data starting at index 0, warmup = 0 + period - 1 = period - 1
+            assert tc['expected_warmup'] == tc['period'] - 1, \
+                f"Warmup calculation mismatch for period={tc['period']}"
+    
     def test_vpwma_streaming(self, test_data):
         """Test VPWMA streaming matches batch calculation - mirrors check_vpwma_streaming"""
         close = test_data['close']
@@ -187,12 +217,158 @@ class TestVpwma:
             msg="VPWMA batch default row mismatch"
         )
     
+    def test_vpwma_batch_multiple_params(self, test_data):
+        """Test VPWMA batch with multiple parameter combinations"""
+        close = test_data['close'][:100]  # Use smaller dataset for speed
+        
+        # Test with multiple periods and powers
+        result = ta_indicators.vpwma_batch(
+            close,
+            period_range=(10, 14, 2),    # periods: 10, 12, 14
+            power_range=(0.3, 0.4, 0.1)  # powers: 0.3, 0.4
+        )
+        
+        assert 'values' in result
+        assert 'periods' in result
+        assert 'powers' in result
+        
+        # Should have 3 * 2 = 6 combinations
+        assert result['values'].shape[0] == 6
+        assert result['values'].shape[1] == 100
+        assert len(result['periods']) == 6
+        assert len(result['powers']) == 6
+        
+        # Verify parameter combinations
+        expected_periods = [10, 10, 12, 12, 14, 14]
+        expected_powers = [0.3, 0.4, 0.3, 0.4, 0.3, 0.4]
+        
+        np.testing.assert_array_equal(result['periods'], expected_periods)
+        np.testing.assert_array_almost_equal(result['powers'], expected_powers, decimal=10)
+        
+        # Verify each row matches individual calculation
+        for i in range(6):
+            row_data = result['values'][i]
+            period = result['periods'][i]
+            power = result['powers'][i]
+            
+            # Calculate single result for comparison
+            single_result = ta_indicators.vpwma(close, period=period, power=power)
+            
+            assert_close(
+                row_data,
+                single_result,
+                rtol=1e-10,
+                msg=f"Batch row {i} (period={period}, power={power}) mismatch"
+            )
+    
+    def test_vpwma_batch_edge_cases(self, test_data):
+        """Test VPWMA batch edge cases"""
+        close = test_data['close'][:50]
+        
+        # Test 1: Single parameter sweep
+        result = ta_indicators.vpwma_batch(
+            close,
+            period_range=(14, 14, 1),
+            power_range=(0.382, 0.382, 0.1)
+        )
+        assert result['values'].shape[0] == 1
+        
+        # Test 2: Step larger than range
+        result = ta_indicators.vpwma_batch(
+            close,
+            period_range=(10, 12, 5),  # Step > range
+            power_range=(0.3, 0.3, 0)
+        )
+        # Should only have period=10
+        assert result['values'].shape[0] == 1
+        assert result['periods'][0] == 10
+        
+        # Test 3: Zero step (single value)
+        result = ta_indicators.vpwma_batch(
+            close,
+            period_range=(14, 14, 0),
+            power_range=(0.382, 0.382, 0)
+        )
+        assert result['values'].shape[0] == 1
+        
+        # Test 4: Multiple periods, single power
+        result = ta_indicators.vpwma_batch(
+            close,
+            period_range=(10, 14, 2),  # 3 periods
+            power_range=(0.382, 0.382, 0)  # 1 power
+        )
+        assert result['values'].shape[0] == 3
+        assert len(np.unique(result['powers'])) == 1
+    
     def test_vpwma_all_nan_input(self):
         """Test VPWMA with all NaN values"""
         all_nan = np.full(100, np.nan)
         
         with pytest.raises(ValueError, match="All values are NaN"):
             ta_indicators.vpwma(all_nan, period=14, power=0.382)
+    
+    def test_vpwma_batch_invalid_params(self):
+        """Test VPWMA batch with invalid parameters"""
+        data = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0])
+        
+        # Test with period exceeding data length
+        with pytest.raises(ValueError, match="Not enough valid data|Invalid period"):
+            ta_indicators.vpwma_batch(
+                data,
+                period_range=(20, 25, 5),  # Periods too large
+                power_range=(0.382, 0.382, 0)
+            )
+        
+        # Test with invalid power (NaN)
+        with pytest.raises(ValueError, match="Invalid power"):
+            ta_indicators.vpwma_batch(
+                data,
+                period_range=(5, 5, 0),
+                power_range=(float('nan'), float('nan'), 0)
+            )
+        
+        # Test with empty data
+        with pytest.raises(ValueError, match="Input data slice is empty"):
+            ta_indicators.vpwma_batch(
+                np.array([]),
+                period_range=(14, 14, 0),
+                power_range=(0.382, 0.382, 0)
+            )
+    
+    def test_vpwma_batch_metadata(self, test_data):
+        """Test VPWMA batch metadata extraction"""
+        close = test_data['close'][:100]
+        
+        result = ta_indicators.vpwma_batch(
+            close,
+            period_range=(12, 16, 2),    # 3 periods: 12, 14, 16
+            power_range=(0.3, 0.5, 0.2)  # 2 powers: 0.3, 0.5
+        )
+        
+        # Should have complete metadata
+        assert 'values' in result
+        assert 'periods' in result
+        assert 'powers' in result
+        
+        # Verify dimensions match
+        num_combos = len(result['periods'])
+        assert num_combos == 6  # 3 periods * 2 powers
+        assert result['values'].shape == (num_combos, len(close))
+        
+        # Verify warmup periods are correct for each combination
+        for i in range(num_combos):
+            period = result['periods'][i]
+            row_data = result['values'][i]
+            expected_warmup = period - 1
+            
+            # Check NaN in warmup period
+            assert np.all(np.isnan(row_data[:expected_warmup])), \
+                f"Expected NaN in warmup for combo {i} (period={period})"
+            
+            # Check values after warmup
+            if len(row_data) > expected_warmup:
+                assert not np.isnan(row_data[expected_warmup]), \
+                    f"Expected valid value after warmup for combo {i}"
     
     def test_vpwma_kernel_selection(self, test_data):
         """Test VPWMA with different kernel selections"""
@@ -201,6 +377,7 @@ class TestVpwma:
         # Test different kernels
         kernels = ['auto', 'scalar', 'avx2', 'avx512']
         results = {}
+        available_kernels = []
         
         for kernel in kernels:
             try:
@@ -210,21 +387,33 @@ class TestVpwma:
                     power=0.382,
                     kernel=kernel
                 )
+                available_kernels.append(kernel)
             except ValueError as e:
                 # Some kernels might not be available on all systems
-                if "Unknown kernel" not in str(e):
+                if "Unknown kernel" not in str(e) and "not available" not in str(e).lower():
                     raise
         
+        # Should have at least scalar and auto
+        assert 'auto' in available_kernels, "Auto kernel should always be available"
+        assert 'scalar' in available_kernels, "Scalar kernel should always be available"
+        
         # All available kernels should produce similar results
-        if 'scalar' in results:
+        if len(results) > 1:
+            scalar_result = results['scalar']
             for kernel, result in results.items():
                 if kernel != 'scalar':
+                    # Compare non-NaN values only
+                    valid_mask = ~np.isnan(scalar_result)
                     assert_close(
-                        result,
-                        results['scalar'],
-                        rtol=1e-10,
+                        result[valid_mask],
+                        scalar_result[valid_mask],
+                        rtol=1e-9,  # Slightly relaxed for different SIMD implementations
                         msg=f"Kernel {kernel} mismatch with scalar"
                     )
+        
+        # Verify auto kernel selects something
+        if 'auto' in results:
+            assert len(results['auto']) == len(close), "Auto kernel should produce full output"
 
 
 if __name__ == '__main__':

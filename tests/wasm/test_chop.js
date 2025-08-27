@@ -40,6 +40,126 @@ test.before(async () => {
     testData = loadTestData();
 });
 
+test('CHOP partial params', () => {
+    // Test with partial parameters - mirrors check_chop_partial_params
+    const high = new Float64Array(testData.high);
+    const low = new Float64Array(testData.low);
+    const close = new Float64Array(testData.close);
+    
+    // Test with period specified, others default
+    const result = wasm.chop_js(high, low, close, 30, 100.0, 1);
+    assert.strictEqual(result.length, close.length);
+    
+    // First period-1 values should be NaN
+    for (let i = 0; i < 29; i++) {
+        assert.ok(isNaN(result[i]), `Expected NaN at index ${i}`);
+    }
+    
+    // Should have valid values after warmup
+    const validValues = result.slice(29).filter(v => !isNaN(v));
+    assert.ok(validValues.length > 0, "Should have valid values after warmup");
+});
+
+test('CHOP accuracy', async () => {
+    // Test CHOP matches expected values from Rust tests - mirrors check_chop_accuracy
+    const high = new Float64Array(testData.high);
+    const low = new Float64Array(testData.low);
+    const close = new Float64Array(testData.close);
+    
+    // Expected values from Rust tests
+    const expectedLast5 = [
+        49.98214330294626,
+        48.90450693742312,
+        46.63648608318844,
+        46.19823574588033,
+        56.22876423352909,
+    ];
+    
+    const result = wasm.chop_js(high, low, close, 14, 100.0, 1);
+    
+    assert.strictEqual(result.length, close.length);
+    
+    // Check last 5 values match expected
+    const last5 = result.slice(-5);
+    assertArrayClose(
+        last5,
+        expectedLast5,
+        1e-8,
+        "CHOP last 5 values mismatch"
+    );
+    
+    // Compare full output with Rust
+    await compareWithRust('chop', result, 'hlc', {period: 14, scalar: 100.0, drift: 1});
+});
+
+test('CHOP default candles', () => {
+    // Test CHOP with default parameters - mirrors check_chop_default_candles
+    const high = new Float64Array(testData.high);
+    const low = new Float64Array(testData.low);
+    const close = new Float64Array(testData.close);
+    
+    const result = wasm.chop_js(high, low, close, 14, 100.0, 1);
+    assert.strictEqual(result.length, close.length);
+    
+    // First period-1 values should be NaN
+    assertAllNaN(result.slice(0, 13), "Expected NaN in warmup period");
+});
+
+test('CHOP zero period', () => {
+    // Test CHOP fails with zero period - mirrors check_chop_zero_period
+    const data = new Float64Array([10.0, 20.0, 30.0]);
+    
+    assert.throws(() => {
+        wasm.chop_js(data, data, data, 0, 100.0, 1);
+    }, /Invalid period/);
+});
+
+test('CHOP period exceeds length', () => {
+    // Test CHOP fails when period exceeds data length - mirrors check_chop_period_exceeds_length
+    const smallData = new Float64Array([10.0, 20.0, 30.0]);
+    
+    assert.throws(() => {
+        wasm.chop_js(smallData, smallData, smallData, 10, 100.0, 1);
+    }, /Invalid period/);
+});
+
+test('CHOP very small dataset', () => {
+    // Test CHOP fails with insufficient data
+    const singlePoint = new Float64Array([42.0]);
+    
+    assert.throws(() => {
+        wasm.chop_js(singlePoint, singlePoint, singlePoint, 14, 100.0, 1);
+    }, /Invalid period|Not enough valid data/);
+});
+
+test('CHOP empty input', () => {
+    // Test CHOP fails with empty input
+    const empty = new Float64Array([]);
+    
+    assert.throws(() => {
+        wasm.chop_js(empty, empty, empty, 14, 100.0, 1);
+    }, /Empty|empty/);
+});
+
+test('CHOP invalid drift', () => {
+    // Test CHOP fails with invalid drift
+    const data = new Float64Array([1.0, 2.0, 3.0, 4.0, 5.0]);
+    
+    assert.throws(() => {
+        wasm.chop_js(data, data, data, 3, 100.0, 0);
+    }, /Invalid drift|drift/);
+});
+
+test('CHOP all NaN input', () => {
+    // Test CHOP with all NaN values
+    const allNaN = new Float64Array(100);
+    allNaN.fill(NaN);
+    
+    assert.throws(() => {
+        wasm.chop_js(allNaN, allNaN, allNaN, 14, 100.0, 1);
+    }, /All.*NaN/);
+});
+
 test('CHOP basic functionality', () => {
     // Test basic CHOP functionality
     const high = new Float64Array(testData.high);
@@ -66,6 +186,31 @@ test('CHOP basic functionality', () => {
         assert.ok(val >= 0, `CHOP value ${val} should be non-negative`);
         assert.ok(val <= 200, `CHOP value ${val} seems too large`);
     }
+});
+
+test('CHOP nan handling', () => {
+    // Test CHOP handles NaN values correctly - mirrors check_chop_nan_handling
+    const high = new Float64Array(testData.high);
+    const low = new Float64Array(testData.low);
+    const close = new Float64Array(testData.close);
+    
+    const result = wasm.chop_js(high, low, close, 14, 100.0, 1);
+    assert.strictEqual(result.length, close.length);
+    
+    // After warmup period (240), should have some non-NaN values
+    if (result.length > 240) {
+        let hasValidValues = false;
+        for (let i = 240; i < result.length; i++) {
+            if (!isNaN(result[i])) {
+                hasValidValues = true;
+                break;
+            }
+        }
+        assert.ok(hasValidValues, "Should have some valid values after index 240");
+    }
+    
+    // First period-1 values should be NaN
+    assertAllNaN(result.slice(0, 13), "Expected NaN in warmup period");
 });
 
 test('CHOP with custom parameters', () => {
@@ -100,24 +245,7 @@ test('CHOP with custom parameters', () => {
     assert.ok(differentCount > 0, "Custom parameters should produce different results");
 });
 
-test('CHOP edge cases', () => {
-    // Empty arrays
-    assert.throws(() => {
-        wasm.chop_js(new Float64Array([]), new Float64Array([]), new Float64Array([]), 14, 100.0, 1);
-    }, /EmptyData|empty/i);
-    
-    // Period exceeds data length
-    const smallData = new Float64Array([1.0, 2.0, 3.0]);
-    assert.throws(() => {
-        wasm.chop_js(smallData, smallData, smallData, 10, 100.0, 1);
-    }, /Invalid period/);
-    
-    // Zero period
-    const data = new Float64Array(100).fill(50.0);
-    assert.throws(() => {
-        wasm.chop_js(data, data, data, 0, 100.0, 1);
-    }, /Invalid period/);
-});
+// Edge cases are now covered in individual tests above
 
 test('CHOP fast API (in-place)', () => {
     // Test the fast API with in-place operation
@@ -152,8 +280,8 @@ test('CHOP fast API (in-place)', () => {
             14, 100.0, 1
         );
         
-        // Read result
-        const result = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
+        // Read result (recreate view in case memory grew)
+        const result = Array.from(new Float64Array(wasm.__wasm.memory.buffer, outPtr, len));
         
         // Compare with safe API
         const expected = wasm.chop_js(high, low, close, 14, 100.0, 1);
@@ -169,8 +297,8 @@ test('CHOP fast API (in-place)', () => {
             14, 100.0, 1
         );
         
-        // Verify in-place result
-        const closeResult = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
+        // Verify in-place result (recreate view in case memory grew)
+        const closeResult = Array.from(new Float64Array(wasm.__wasm.memory.buffer, closePtr, len));
         assertArrayClose(closeResult, expected, 1e-10, "In-place operation should match safe API");
         
     } finally {
@@ -275,25 +403,143 @@ test('CHOP batch fast API', () => {
     }
 });
 
-test('CHOP accuracy', () => {
-    // Test CHOP accuracy against expected values
-    const high = new Float64Array(testData.high);
-    const low = new Float64Array(testData.low);
-    const close = new Float64Array(testData.close);
+test('CHOP batch metadata verification', () => {
+    // Test batch processing metadata - more comprehensive than before
+    const high = new Float64Array(testData.high.slice(0, 50));
+    const low = new Float64Array(testData.low.slice(0, 50));
+    const close = new Float64Array(testData.close.slice(0, 50));
     
-    const result = wasm.chop_js(high, low, close, 14, 100.0, 1);
+    const config = {
+        period_range: [10, 15, 5],    // 10, 15
+        scalar_range: [50.0, 100.0, 50.0], // 50, 100
+        drift_range: [1, 2, 1]        // 1, 2
+    };
     
-    // Expected last 5 values from Python test
-    const expectedLast5 = [
-        49.98214330294626,
-        48.90450693742312,
-        46.63648608318844,
-        46.19823574588033,
-        56.22876423352909,
-    ];
+    const result = wasm.chop_batch(high, low, close, config);
     
-    const last5 = result.slice(-5);
-    assertArrayClose(last5, expectedLast5, 1e-4, "CHOP last 5 values should match expected");
+    // Should have 2 * 2 * 2 = 8 combinations
+    assert.strictEqual(result.rows, 8);
+    assert.strictEqual(result.cols, close.length);
+    assert.strictEqual(result.combos.length, 8);
+    
+    // Verify first combination
+    assert.strictEqual(result.combos[0].period, 10);
+    assert.strictEqual(result.combos[0].scalar, 50.0);
+    assert.strictEqual(result.combos[0].drift, 1);
+    
+    // Verify last combination
+    assert.strictEqual(result.combos[7].period, 15);
+    assert.strictEqual(result.combos[7].scalar, 100.0);
+    assert.strictEqual(result.combos[7].drift, 2);
+    
+    // Verify one row matches single calculation
+    const firstRow = result.values.slice(0, close.length);
+    const expected = wasm.chop_js(high, low, close, 10, 50.0, 1);
+    assertArrayClose(firstRow, expected, 1e-10, "First batch row should match single calculation");
+});
+
+test('CHOP batch single parameter set', () => {
+    // Test batch with single parameter combination
+    const high = new Float64Array(testData.high.slice(0, 100));
+    const low = new Float64Array(testData.low.slice(0, 100));
+    const close = new Float64Array(testData.close.slice(0, 100));
+    
+    const config = {
+        period_range: [14, 14, 0],
+        scalar_range: [100.0, 100.0, 0],
+        drift_range: [1, 1, 0]
+    };
+    
+    const batchResult = wasm.chop_batch(high, low, close, config);
+    
+    // Should match single calculation
+    const singleResult = wasm.chop_js(high, low, close, 14, 100.0, 1);
+    
+    assert.strictEqual(batchResult.values.length, singleResult.length);
+    assertArrayClose(batchResult.values, singleResult, 1e-10, "Batch vs single mismatch");
+});
+
+test('CHOP batch parameter sweep', () => {
+    // Test comprehensive parameter sweep
+    const high = new Float64Array(testData.high.slice(0, 50));
+    const low = new Float64Array(testData.low.slice(0, 50));
+    const close = new Float64Array(testData.close.slice(0, 50));
+    
+    const config = {
+        period_range: [10, 20, 5],      // 10, 15, 20
+        scalar_range: [50.0, 100.0, 50.0], // 50, 100
+        drift_range: [1, 2, 1]           // 1, 2
+    };
+    
+    const result = wasm.chop_batch(high, low, close, config);
+    
+    // Should have 3 * 2 * 2 = 12 combinations
+    assert.strictEqual(result.rows, 12);
+    assert.strictEqual(result.cols, close.length);
+    
+    // Verify each combination exists
+    const periods = new Set(result.combos.map(c => c.period));
+    const scalars = new Set(result.combos.map(c => c.scalar));
+    const drifts = new Set(result.combos.map(c => c.drift));
+    
+    assert.deepStrictEqual([...periods].sort(), [10, 15, 20]);
+    assert.deepStrictEqual([...scalars].sort((a,b) => a-b), [50.0, 100.0]);
+    assert.deepStrictEqual([...drifts].sort(), [1, 2]);
+    
+    // Verify specific combination matches single
+    for (let i = 0; i < result.combos.length; i++) {
+        if (result.combos[i].period === 10 &&
+            result.combos[i].scalar === 50.0 &&
+            result.combos[i].drift === 1) {
+            const rowStart = i * close.length;
+            const rowEnd = rowStart + close.length;
+            const rowData = result.values.slice(rowStart, rowEnd);
+            const expected = wasm.chop_js(high, low, close, 10, 50.0, 1);
+            assertArrayClose(rowData, expected, 1e-10, "Batch row should match single");
+            break;
+        }
+    }
+});
+
+test('CHOP consistency check', () => {
+    // Verify WASM results match expected patterns
+    const high = new Float64Array(testData.high.slice(0, 100));
+    const low = new Float64Array(testData.low.slice(0, 100));
+    const close = new Float64Array(testData.close.slice(0, 100));
+    
+    // Test different parameter combinations produce different results
+    const result1 = wasm.chop_js(high, low, close, 14, 100.0, 1);
+    const result2 = wasm.chop_js(high, low, close, 20, 50.0, 2);
+    
+    let differentCount = 0;
+    for (let i = 20; i < result1.length; i++) {
+        if (!isNaN(result1[i]) && !isNaN(result2[i]) &&
+            Math.abs(result1[i] - result2[i]) > 1e-10) {
+            differentCount++;
+        }
+    }
+    assert.ok(differentCount > 0, "Different parameters should produce different results");
+    
+    // Verify warmup period consistency
+    const periods = [10, 14, 20, 30];
+    for (const period of periods) {
+        const result = wasm.chop_js(high, low, close, period, 100.0, 1);
+        
+        // First period-1 values should be NaN
+        for (let i = 0; i < period - 1; i++) {
+            assert.ok(isNaN(result[i]), `Expected NaN at index ${i} for period ${period}`);
+        }
+        
+        // Should have some valid values after warmup
+        let hasValid = false;
+        for (let i = period; i < Math.min(period + 10, result.length); i++) {
+            if (!isNaN(result[i])) {
+                hasValid = true;
+                break;
+            }
+        }
+        assert.ok(hasValid, `Should have valid values after warmup for period ${period}`);
+    }
 });
 
 test('CHOP memory management', () => {
@@ -340,7 +586,7 @@ test('CHOP null pointer handling', () => {
     }
 });
 
-test('CHOP NaN handling', () => {
+test('CHOP NaN input handling', () => {
     // Test with NaN values in input
     const high = new Float64Array(testData.high);
     const low = new Float64Array(testData.low);

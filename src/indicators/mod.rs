@@ -9,7 +9,6 @@ pub mod apo;
 pub mod aroon;
 pub mod aroonosc;
 pub mod atr;
-pub mod avgprice;
 pub mod bandpass;
 pub mod bollinger_bands;
 pub mod bollinger_bands_width;
@@ -35,6 +34,7 @@ pub mod damiani_volatmeter;
 pub mod dec_osc;
 pub mod decycler;
 pub mod deviation;
+pub use deviation::{deviation, DeviationInput, DeviationOutput, DeviationParams};
 pub mod devstop;
 pub mod di;
 pub mod dm;
@@ -50,13 +50,6 @@ pub mod eri;
 pub mod fisher;
 pub mod fosc;
 pub mod gatorosc;
-pub mod heikin_ashi_candles;
-pub mod ht_dcperiod;
-pub mod ht_dcphase;
-pub mod ht_phasor;
-pub mod ht_sine;
-pub mod ht_trendline;
-pub mod ht_trendmode;
 pub mod ift_rsi;
 pub mod kaufmanstop;
 pub mod kdj;
@@ -138,7 +131,12 @@ pub use vpci::{vpci, VpciInput, VpciOutput, VpciParams, VpciError, VpciData, Vpc
 #[cfg(feature = "python")]
 pub use vpci::{vpci_py, vpci_batch_py, VpciStreamPy};
 #[cfg(feature = "wasm")]
-pub use vpci::{vpci_js, vpci_into, vpci_alloc, vpci_free, vpci_batch_js, vpci_batch_into, VpciContext};
+pub use vpci::{vpci_js, vpci_into, vpci_alloc, vpci_free, vpci_batch_unified_js, vpci_batch_into, VpciContext};
+pub use vidya::{vidya, VidyaInput, VidyaOutput, VidyaParams, VidyaError, VidyaData, VidyaStream, VidyaBatchOutput, VidyaBatchBuilder, VidyaBatchRange, VidyaBuilder};
+#[cfg(feature = "python")]
+pub use vidya::{vidya_py, vidya_batch_py, VidyaStreamPy};
+#[cfg(feature = "wasm")]
+pub use vidya::{vidya_js, vidya_into, vidya_alloc, vidya_free, vidya_batch_js, vidya_batch_into};
 pub use apo::{apo, ApoInput, ApoOutput, ApoParams};
 pub use cci::{cci, CciInput, CciOutput, CciParams};
 pub use cfo::{cfo, CfoInput, CfoOutput, CfoParams};

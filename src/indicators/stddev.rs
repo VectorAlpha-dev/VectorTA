@@ -4,9 +4,14 @@
 //! scaled by `nbdev`. Parameters `period` and `nbdev` control the window size and deviation scale.
 //! Features include AVX2/AVX512 API parity, streaming computation, and parameter grid batching.
 //!
+//! ## Variance Calculation
+//! This implementation uses **population variance** (dividing by n) rather than sample variance
+//! (dividing by n-1). This is standard for technical indicators where the window is considered
+//! the entire population of interest.
+//!
 //! ## Parameters
 //! - **period**: Window size (number of data points).
-//! - **nbdev**: Multiplier for standard deviations (default: 1.0).
+//! - **nbdev**: Non-negative multiplier for standard deviations (default: 1.0). Must be ≥ 0.
 //!
 //! ## Errors
 //! - **AllValuesNaN**: stddev: All input values are `NaN`.
@@ -38,7 +43,7 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-use aligned_vec::{AVec, CACHELINE_ALIGN};
+// Note: AVec and CACHELINE_ALIGN not needed for stddev as we don't use cache-aligned buffers
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -70,6 +75,7 @@ pub struct StdDevOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct StdDevParams {
 	pub period: Option<usize>,
 	pub nbdev: Option<f64>,
@@ -186,12 +192,20 @@ impl StdDevBuilder {
 
 #[derive(Debug, Error)]
 pub enum StdDevError {
+	#[error("stddev: Input data slice is empty.")]
+	EmptyInputData,
 	#[error("stddev: All values are NaN.")]
 	AllValuesNaN,
 	#[error("stddev: Invalid period: period = {period}, data length = {data_len}")]
 	InvalidPeriod { period: usize, data_len: usize },
 	#[error("stddev: Not enough valid data: needed = {needed}, valid = {valid}")]
 	NotEnoughValidData { needed: usize, valid: usize },
+	#[error("stddev: Invalid nbdev: {nbdev}. Must be non-negative and finite.")]
+	InvalidNbdev { nbdev: f64 },
+	#[error("stddev: Output length mismatch: dst = {dst_len}, expected = {expected_len}")]
+	MismatchedOutputLen { dst_len: usize, expected_len: usize },
+	#[error("stddev: Invalid kernel type: {msg}")]
+	InvalidKernel { msg: String },
 }
 
 #[inline]
@@ -200,17 +214,15 @@ pub fn stddev(input: &StdDevInput) -> Result<StdDevOutput, StdDevError> {
 }
 
 pub fn stddev_with_kernel(input: &StdDevInput, kernel: Kernel) -> Result<StdDevOutput, StdDevError> {
-	let data: &[f64] = match &input.data {
-		StdDevData::Candles { candles, source } => source_type(candles, source),
-		StdDevData::Slice(sl) => sl,
-	};
+	let data: &[f64] = input.as_ref();
+	let len = data.len();
+	if len == 0 { return Err(StdDevError::EmptyInputData); }
 
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(StdDevError::AllValuesNaN)?;
-
-	let len = data.len();
 	let period = input.get_period();
 	let nbdev = input.get_nbdev();
 
+	if !nbdev.is_finite() || nbdev < 0.0 { return Err(StdDevError::InvalidNbdev { nbdev }); }
 	if period == 0 || period > len {
 		return Err(StdDevError::InvalidPeriod { period, data_len: len });
 	}
@@ -226,7 +238,7 @@ pub fn stddev_with_kernel(input: &StdDevInput, kernel: Kernel) -> Result<StdDevO
 
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
-		other => other,
+		k => k,
 	};
 
 	unsafe {
@@ -236,6 +248,11 @@ pub fn stddev_with_kernel(input: &StdDevInput, kernel: Kernel) -> Result<StdDevO
 			Kernel::Avx2 | Kernel::Avx2Batch => stddev_avx2(data, period, first, nbdev, &mut out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 | Kernel::Avx512Batch => stddev_avx512(data, period, first, nbdev, &mut out),
+			// fallback parity with alma.rs
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+				stddev_scalar(data, period, first, nbdev, &mut out)
+			}
 			_ => unreachable!(),
 		}
 	}
@@ -246,17 +263,15 @@ pub fn stddev_with_kernel(input: &StdDevInput, kernel: Kernel) -> Result<StdDevO
 /// Write StdDev directly to output slice - no allocations (WASM optimization)
 #[inline]
 pub fn stddev_into_slice(dst: &mut [f64], input: &StdDevInput, kern: Kernel) -> Result<(), StdDevError> {
-	let data: &[f64] = match &input.data {
-		StdDevData::Candles { candles, source } => source_type(candles, source),
-		StdDevData::Slice(sl) => sl,
-	};
+	let data: &[f64] = input.as_ref();
+	let len = data.len();
+	if len == 0 { return Err(StdDevError::EmptyInputData); }
 
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(StdDevError::AllValuesNaN)?;
-
-	let len = data.len();
 	let period = input.get_period();
 	let nbdev = input.get_nbdev();
 
+	if !nbdev.is_finite() || nbdev < 0.0 { return Err(StdDevError::InvalidNbdev { nbdev }); }
 	if period == 0 || period > len {
 		return Err(StdDevError::InvalidPeriod { period, data_len: len });
 	}
@@ -266,24 +281,15 @@ pub fn stddev_into_slice(dst: &mut [f64], input: &StdDevInput, kern: Kernel) -> 
 			valid: len - first,
 		});
 	}
-	
-	// Check output slice length
 	if dst.len() != len {
-		return Err(StdDevError::InvalidPeriod { period, data_len: len });
+		return Err(StdDevError::MismatchedOutputLen { dst_len: dst.len(), expected_len: len });
 	}
 
+	// warmup fill
 	let warmup = first + period - 1;
-	
-	// Fill warmup with NaN
-	for v in &mut dst[..warmup] {
-		*v = f64::NAN;
-	}
+	for v in &mut dst[..warmup] { *v = f64::NAN; }
 
-	let chosen = match kern {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
-
+	let chosen = match kern { Kernel::Auto => detect_best_kernel(), k => k };
 	unsafe {
 		match chosen {
 			Kernel::Scalar | Kernel::ScalarBatch => stddev_scalar(data, period, first, nbdev, dst),
@@ -291,6 +297,10 @@ pub fn stddev_into_slice(dst: &mut [f64], input: &StdDevInput, kern: Kernel) -> 
 			Kernel::Avx2 | Kernel::Avx2Batch => stddev_avx2(data, period, first, nbdev, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 | Kernel::Avx512Batch => stddev_avx512(data, period, first, nbdev, dst),
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+				stddev_scalar(data, period, first, nbdev, dst)
+			}
 			_ => unreachable!(),
 		}
 	}
@@ -371,6 +381,9 @@ impl StdDevStream {
 			return Err(StdDevError::InvalidPeriod { period, data_len: 0 });
 		}
 		let nbdev = params.nbdev.unwrap_or(1.0);
+		if !nbdev.is_finite() || nbdev < 0.0 {
+			return Err(StdDevError::InvalidNbdev { nbdev });
+		}
 		Ok(Self {
 			period,
 			nbdev,
@@ -480,7 +493,7 @@ pub fn stddev_batch_with_kernel(
 	let kernel = match k {
 		Kernel::Auto => detect_best_batch_kernel(),
 		other if other.is_batch() => other,
-		_ => return Err(StdDevError::InvalidPeriod { period: 0, data_len: 0 }),
+		_ => return Err(StdDevError::InvalidKernel { msg: "Expected batch kernel type".to_string() }),
 	};
 
 	let simd = match kernel {
@@ -578,16 +591,19 @@ fn stddev_batch_inner(
 	if combos.is_empty() {
 		return Err(StdDevError::InvalidPeriod { period: 0, data_len: 0 });
 	}
+	let len = data.len();
+	if len == 0 { return Err(StdDevError::EmptyInputData); }
+	
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(StdDevError::AllValuesNaN)?;
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-	if data.len() - first < max_p {
+	if len - first < max_p {
 		return Err(StdDevError::NotEnoughValidData {
 			needed: max_p,
-			valid: data.len() - first,
+			valid: len - first,
 		});
 	}
 	let rows = combos.len();
-	let cols = data.len();
+	let cols = len;
 	
 	// Calculate warmup periods for each row
 	let warm: Vec<usize> = combos
@@ -618,6 +634,8 @@ fn stddev_batch_inner(
 			Kernel::Avx2 => stddev_row_avx2(data, first, period, nbdev, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 => stddev_row_avx512(data, first, period, nbdev, out_row),
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx512 => stddev_row_scalar(data, first, period, nbdev, out_row),
 			_ => unreachable!(),
 		}
 	};
@@ -697,35 +715,40 @@ pub fn stddev_batch_inner_into(
 		return Err(StdDevError::InvalidPeriod { period: 0, data_len: 0 });
 	}
 	
+	let len = data.len();
+	if len == 0 { return Err(StdDevError::EmptyInputData); }
+	
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(StdDevError::AllValuesNaN)?;
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-	if data.len() - first < max_p {
+	if len - first < max_p {
 		return Err(StdDevError::NotEnoughValidData {
 			needed: max_p,
-			valid: data.len() - first,
+			valid: len - first,
 		});
 	}
 	
 	let rows = combos.len();
-	let cols = data.len();
+	let cols = len;
+	debug_assert_eq!(out.len(), rows * cols);
 	
-	for (row, combo) in combos.iter().enumerate() {
-		let warmup = first + combo.period.unwrap() - 1;
-		let row_start = row * cols;
-		for i in 0..warmup {
-			out[row_start + i] = f64::NAN;
-		}
-	}
+	// warmup vector and helper init
+	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
+	let out_mu: &mut [MaybeUninit<f64>] = unsafe {
+		std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
+	};
+	init_matrix_prefixes(out_mu, cols, &warm);
 	
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
-		let nbdev = combos[row].nbdev.unwrap();
+		let nbdev  = combos[row].nbdev.unwrap();
 		match kern {
 			Kernel::Scalar => stddev_row_scalar(data, first, period, nbdev, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => stddev_row_avx2(data, first, period, nbdev, out_row),
+			Kernel::Avx2    => stddev_row_avx2(data, first, period, nbdev, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => stddev_row_avx512(data, first, period, nbdev, out_row),
+			Kernel::Avx512  => stddev_row_avx512(data, first, period, nbdev, out_row),
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx512 => stddev_row_scalar(data, first, period, nbdev, out_row),
 			_ => unreachable!(),
 		}
 	};
@@ -958,6 +981,8 @@ pub struct StdDevBatchConfig {
 #[derive(Serialize, Deserialize)]
 pub struct StdDevBatchJsOutput {
 	pub values: Vec<f64>,
+	pub combos: Vec<StdDevParams>,
+	// Legacy fields for backward compatibility
 	pub periods: Vec<usize>,
 	pub nbdevs: Vec<f64>,
 	pub rows: usize,
@@ -967,36 +992,69 @@ pub struct StdDevBatchJsOutput {
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = stddev_batch)]
 pub fn stddev_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
-	let config: StdDevBatchConfig = serde_wasm_bindgen::from_value(config)
-		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	let config: StdDevBatchConfig =
+		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
 
 	let sweep = StdDevBatchRange {
 		period: config.period_range,
-		nbdev: config.nbdev_range,
+		nbdev:  config.nbdev_range,
 	};
-
-	let combos = expand_grid(&sweep);
-	if combos.is_empty() {
-		return Err(JsValue::from_str("No parameter combinations generated"));
-	}
 
 	let output = stddev_batch_inner(data, &sweep, detect_best_kernel(), false)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-	let result = StdDevBatchJsOutput {
+	let js_output = StdDevBatchJsOutput {
 		values: output.values,
 		periods: output.combos.iter().map(|p| p.period.unwrap()).collect(),
 		nbdevs: output.combos.iter().map(|p| p.nbdev.unwrap()).collect(),
-		rows: output.rows,
-		cols: output.cols,
+		combos: output.combos,
+		rows:   output.rows,
+		cols:   output.cols,
 	};
 
-	serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&e.to_string()))
+	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
+// add ALMA-parity batch_into
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn stddev_batch_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+	nbdev_start: f64,
+	nbdev_end: f64,
+	nbdev_step: f64,
+) -> Result<usize, JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to stddev_batch_into"));
+	}
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		let sweep = StdDevBatchRange {
+			period: (period_start, period_end, period_step),
+			nbdev:  (nbdev_start,   nbdev_end,   nbdev_step),
+		};
+
+		let combos = expand_grid(&sweep);
+		let rows = combos.len();
+		let cols = len;
+		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+
+		stddev_batch_inner_into(data, &sweep, detect_best_kernel(), false, out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+		Ok(rows)
+	}
+}
+
+// keep your existing config-based entrypoint but rename
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn stddev_batch_into_cfg(
 	in_ptr: *const f64,
 	out_ptr: *mut f64,
 	len: usize,
@@ -1034,6 +1092,7 @@ pub fn stddev_batch_into(
 			values: vec![],  // Empty, data is already in out_ptr
 			periods: params.iter().map(|p| p.period.unwrap()).collect(),
 			nbdevs: params.iter().map(|p| p.nbdev.unwrap()).collect(),
+			combos: params,
 			rows,
 			cols,
 		};
@@ -1047,6 +1106,83 @@ mod tests {
 	use super::*;
 	use crate::skip_if_unsupported;
 	use crate::utilities::data_loader::read_candles_from_csv;
+
+	fn check_stddev_empty_input(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+		let empty: [f64; 0] = [];
+		let input = StdDevInput::from_slice(&empty, StdDevParams::default());
+		let res = stddev_with_kernel(&input, kernel);
+		assert!(matches!(res, Err(StdDevError::EmptyInputData)));
+		Ok(())
+	}
+
+	fn check_stddev_invalid_batch_kernel(test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		// Test that non-batch kernels are rejected in batch functions
+		let data = [1.0, 2.0, 3.0, 4.0, 5.0];
+		let sweep = StdDevBatchRange::default();
+		
+		// Try using a non-batch kernel
+		let res = stddev_batch_with_kernel(&data, &sweep, Kernel::Scalar);
+		assert!(matches!(res, Err(StdDevError::InvalidKernel { .. })));
+		
+		// Also test with other non-batch kernels
+		let res2 = stddev_batch_with_kernel(&data, &sweep, Kernel::Avx2);
+		assert!(matches!(res2, Err(StdDevError::InvalidKernel { .. })));
+		Ok(())
+	}
+	
+	fn check_stddev_mismatched_output_len(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+		let data = [1.0, 2.0, 3.0, 4.0, 5.0];
+		let params = StdDevParams::default();
+		let input = StdDevInput::from_slice(&data, params);
+		
+		// Create a mismatched output buffer
+		let mut wrong_size_output = vec![0.0; 10]; // Wrong size: data is 5, output is 10
+		let res = stddev_into_slice(&mut wrong_size_output, &input, kernel);
+		assert!(matches!(res, Err(StdDevError::MismatchedOutputLen { .. })));
+		
+		// Also test with smaller buffer
+		let mut small_output = vec![0.0; 3]; // Too small
+		let res2 = stddev_into_slice(&mut small_output, &input, kernel);
+		assert!(matches!(res2, Err(StdDevError::MismatchedOutputLen { .. })));
+		Ok(())
+	}
+	
+	fn check_stddev_negative_nbdev(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+		let data = [1.0, 2.0, 3.0, 4.0, 5.0];
+		let params = StdDevParams {
+			period: Some(3),
+			nbdev: Some(-1.0),  // Negative nbdev should be rejected
+		};
+		let input = StdDevInput::from_slice(&data, params.clone());
+		let res = stddev_with_kernel(&input, kernel);
+		assert!(matches!(res, Err(StdDevError::InvalidNbdev { .. })));
+		
+		// Also test with stream
+		let stream_res = StdDevStream::try_new(params);
+		assert!(matches!(stream_res, Err(StdDevError::InvalidNbdev { .. })));
+		
+		// Test infinite nbdev
+		let inf_params = StdDevParams {
+			period: Some(3),
+			nbdev: Some(f64::INFINITY),
+		};
+		let inf_input = StdDevInput::from_slice(&data, inf_params);
+		let inf_res = stddev_with_kernel(&inf_input, kernel);
+		assert!(matches!(inf_res, Err(StdDevError::InvalidNbdev { .. })));
+		
+		// Test NaN nbdev
+		let nan_params = StdDevParams {
+			period: Some(3),
+			nbdev: Some(f64::NAN),
+		};
+		let nan_input = StdDevInput::from_slice(&data, nan_params);
+		let nan_res = stddev_with_kernel(&nan_input, kernel);
+		assert!(matches!(nan_res, Err(StdDevError::InvalidNbdev { .. })));
+		Ok(())
+	}
 
 	fn check_stddev_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test_name);
@@ -1618,6 +1754,10 @@ mod tests {
         }
     }
 	generate_all_stddev_tests!(
+		check_stddev_empty_input,
+		check_stddev_invalid_batch_kernel,
+		check_stddev_mismatched_output_len,
+		check_stddev_negative_nbdev,
 		check_stddev_partial_params,
 		check_stddev_accuracy,
 		check_stddev_default_candles,
