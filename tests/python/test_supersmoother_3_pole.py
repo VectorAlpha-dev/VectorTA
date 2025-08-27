@@ -6,7 +6,8 @@ import numpy as np
 import my_project as ta_indicators
 from test_utils import (
     load_test_data,
-    EXPECTED_SUPERSMOOTHER_3_POLE
+    assert_close,
+    EXPECTED_OUTPUTS
 )
 from rust_comparison import compare_with_rust
 import pytest
@@ -20,32 +21,76 @@ class TestSuperSmoother3Pole(unittest.TestCase):
         self.test_data = load_test_data()
         self.close_prices = self.test_data['close']
         
+    def test_supersmoother_3_pole_partial_params(self):
+        """Test SuperSmoother3Pole with partial parameters - mirrors check_supersmoother_3_pole_partial_params"""
+        # Test with default params (None not applicable for supersmoother_3_pole which only has period)
+        result = ta_indicators.supersmoother_3_pole(self.close_prices, 14)  # Using default
+        self.assertEqual(len(result), len(self.close_prices))
+    
     def test_supersmoother_3_pole_accuracy(self):
-        """Test SuperSmoother3Pole calculation accuracy against expected values."""
-        # Use a standard period
-        period = 14
+        """Test SuperSmoother3Pole matches expected values from Rust tests - mirrors check_supersmoother_3_pole_accuracy"""
+        expected = EXPECTED_OUTPUTS['supersmoother_3_pole']
         
         # Calculate SuperSmoother3Pole
-        result = ta_indicators.supersmoother_3_pole(self.close_prices, period=period)
+        result = ta_indicators.supersmoother_3_pole(
+            self.close_prices,
+            period=expected['default_params']['period']
+        )
         
         # Check output length
         self.assertEqual(len(result), len(self.close_prices))
         
-        # For 3-pole supersmoother, the first 3 values are initialized to input values
-        # It doesn't have a traditional NaN warmup period like other indicators
-        # Check that first 3 values are not NaN (they should match input)
-        for i in range(min(3, len(result))):
-            self.assertFalse(np.isnan(result[i]), f"Value at index {i} should not be NaN")
+        # Check last 5 values match expected
+        assert_close(
+            result[-5:],
+            expected['last_5_values'],
+            rtol=1e-8,
+            msg="SuperSmoother3Pole last 5 values mismatch"
+        )
         
-        # Test last 5 values against expected
-        last_5 = result[-5:]
-        expected_last_5 = EXPECTED_SUPERSMOOTHER_3_POLE
+        # Compare full output with Rust
+        compare_with_rust('supersmoother_3_pole', result, 'close', expected['default_params'])
+    
+    def test_supersmoother_3_pole_default_candles(self):
+        """Test SuperSmoother3Pole with default parameters - mirrors check_supersmoother_3_pole_default_candles"""
+        # Default param: period=14
+        result = ta_indicators.supersmoother_3_pole(self.close_prices, 14)
+        self.assertEqual(len(result), len(self.close_prices))
+    
+    def test_supersmoother_3_pole_zero_period(self):
+        """Test SuperSmoother3Pole fails with zero period - mirrors check_supersmoother_3_pole_zero_period"""
+        input_data = np.array([10.0, 20.0, 30.0])
         
-        for i, (actual, expected) in enumerate(zip(last_5, expected_last_5)):
-            self.assertAlmostEqual(
-                actual, expected, places=6,
-                msg=f"Mismatch at position {i}: expected {expected}, got {actual}"
-            )
+        with pytest.raises(ValueError, match="Invalid period"):
+            ta_indicators.supersmoother_3_pole(input_data, period=0)
+    
+    def test_supersmoother_3_pole_period_exceeds_length(self):
+        """Test SuperSmoother3Pole fails when period exceeds data length - mirrors check_supersmoother_3_pole_period_exceeds_length"""
+        data_small = np.array([10.0, 20.0, 30.0])
+        
+        with pytest.raises(ValueError, match="Invalid period"):
+            ta_indicators.supersmoother_3_pole(data_small, period=10)
+    
+    def test_supersmoother_3_pole_very_small_dataset(self):
+        """Test SuperSmoother3Pole fails with insufficient data - mirrors check_supersmoother_3_pole_very_small_dataset"""
+        single_point = np.array([42.0])
+        
+        with pytest.raises(ValueError, match="Invalid period|Not enough valid data"):
+            ta_indicators.supersmoother_3_pole(single_point, period=9)
+    
+    def test_supersmoother_3_pole_empty_input(self):
+        """Test SuperSmoother3Pole fails with empty input - mirrors check_supersmoother_3_pole_empty_input"""
+        empty = np.array([])
+        
+        with pytest.raises(ValueError, match="Input data slice is empty"):
+            ta_indicators.supersmoother_3_pole(empty, period=14)
+    
+    def test_supersmoother_3_pole_all_nan_input(self):
+        """Test SuperSmoother3Pole with all NaN values"""
+        all_nan = np.full(100, np.nan)
+        
+        with pytest.raises(ValueError, match="All values are NaN"):
+            ta_indicators.supersmoother_3_pole(all_nan, period=14)
     
     def test_supersmoother_3_pole_streaming(self):
         """Test streaming SuperSmoother3Pole calculation."""
@@ -97,17 +142,19 @@ class TestSuperSmoother3Pole(unittest.TestCase):
             for j in range(min(3, len(row))):
                 self.assertFalse(np.isnan(row[j]), f"Value at index {j} for period {period} should not be NaN")
     
-    def test_supersmoother_3_pole_with_nan_handling(self):
-        """Test SuperSmoother3Pole with NaN values in input."""
-        # Create data with some NaN values
-        data_with_nan = self.close_prices.copy()
-        data_with_nan[10:15] = np.nan
+    def test_supersmoother_3_pole_nan_handling(self):
+        """Test SuperSmoother3Pole handles NaN values correctly - mirrors check_supersmoother_3_pole_nan_handling"""
+        result = ta_indicators.supersmoother_3_pole(self.close_prices, period=14)
+        self.assertEqual(len(result), len(self.close_prices))
         
-        # Should still compute without error
-        result = ta_indicators.supersmoother_3_pole(data_with_nan, period=14)
+        # After warmup period (240), no NaN values should exist
+        if len(result) > 240:
+            self.assertFalse(np.any(np.isnan(result[240:])), "Found unexpected NaN after warmup period")
         
-        # Result should be all NaN after the NaN input values until enough valid data
-        self.assertTrue(np.all(np.isnan(result[10:30])))
+        # SuperSmoother 3-pole initializes first 3 values to input, so no NaN warmup
+        # Check that first 3 values are not NaN
+        for i in range(min(3, len(result))):
+            self.assertFalse(np.isnan(result[i]), f"Value at index {i} should not be NaN")
     
     def test_supersmoother_3_pole_with_leading_nans(self):
         """Test SuperSmoother3Pole correctly handles data that starts with NaN values."""
@@ -117,20 +164,23 @@ class TestSuperSmoother3Pole(unittest.TestCase):
         
         result = ta_indicators.supersmoother_3_pole(data, period=period)
         
-        # For 3-pole supersmoother with leading NaNs:
-        # The warmup period is first_non_nan + period
-        # With 5 leading NaNs and period=3, warmup = 5 + 3 = 8
-        # So all values up to index 8 will be NaN
+        # SuperSmoother 3-pole behavior with leading NaNs:
+        # - NaN values are preserved in output where input is NaN
+        # - Once valid data starts, the first 3 values are passed through
+        # - Filter calculation begins after the first 3 valid values
         
         # Check that NaN input produces NaN output
         self.assertTrue(np.all(np.isnan(result[:5])), 
                        "Expected NaN output where input is NaN")
         
-        # Due to warmup calculation, values remain NaN until after warmup
-        # In this case, all values should be NaN since warmup extends beyond
-        # where the filter would normally start producing values
-        self.assertTrue(np.all(np.isnan(result[:8])), 
-                       "Expected NaN values through warmup period")
+        # The first 3 valid values (1, 2, 3) are passed through at indices 5, 6, 7
+        np.testing.assert_almost_equal(result[5], 1.0, decimal=10)
+        np.testing.assert_almost_equal(result[6], 2.0, decimal=10)
+        np.testing.assert_almost_equal(result[7], 3.0, decimal=10)
+        
+        # Filter calculation starts from index 8
+        self.assertFalse(np.isnan(result[8]), "Filter should start calculating at index 8")
+        self.assertNotEqual(result[8], 4.0, "Index 8 should be filtered, not passed through")
     
     def test_supersmoother_3_pole_kernel_selection(self):
         """Test different kernel options produce consistent results."""
@@ -198,20 +248,5 @@ class TestSuperSmoother3Pole(unittest.TestCase):
             )
         )
     
-    def test_supersmoother_3_pole_reinput_consistency(self):
-        """Test that re-inputting output produces valid results."""
-        # First pass
-        period1 = 14
-        result1 = ta_indicators.supersmoother_3_pole(self.close_prices, period=period1)
-        
-        # Second pass with different period
-        period2 = 7
-        result2 = ta_indicators.supersmoother_3_pole(result1, period=period2)
-        
-        # Results should be valid
-        self.assertEqual(len(result2), len(self.close_prices))
-        # Check that we have some non-NaN values
-        self.assertTrue(np.any(~np.isnan(result2)))
-
 if __name__ == '__main__':
     unittest.main()

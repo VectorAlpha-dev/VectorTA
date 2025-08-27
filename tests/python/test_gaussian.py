@@ -113,6 +113,13 @@ class TestGaussian:
         with pytest.raises(ValueError):
             ta_indicators.gaussian(data, period=3, poles=5)
     
+    def test_gaussian_period_one(self):
+        """Test Gaussian fails with period=1 (degenerate case) - mirrors check_gaussian_period_one_degenerate"""
+        data = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+        
+        with pytest.raises(ValueError, match="Period of 1 causes degenerate"):
+            ta_indicators.gaussian(data, period=1, poles=2)
+    
     def test_gaussian_all_nan(self):
         """Test Gaussian with all NaN input - mirrors check_gaussian_all_nan"""
         data = np.array([np.nan, np.nan, np.nan, np.nan, np.nan])
@@ -150,6 +157,39 @@ class TestGaussian:
         for i in range(skip, len(result)):
             assert np.isfinite(result[i]), f"Non-finite value found at index {i}"
     
+    def test_gaussian_warmup_period(self, test_data):
+        """Test that Gaussian correctly handles warmup period and NaN propagation"""
+        close = test_data['close']
+        period = 14
+        poles = 4
+        
+        result = ta_indicators.gaussian(close, period=period, poles=poles)
+        
+        # Gaussian filter produces actual values immediately when input has no NaNs
+        assert len(result) == len(close)
+        
+        # Check that all values are finite (no NaN or Inf) when input is clean
+        assert np.all(np.isfinite(result)), "Expected all finite values for clean input data"
+        
+        # Test with NaN in the middle (not at beginning) to avoid full propagation
+        close_with_nan = np.copy(close)
+        nan_start = 100
+        nan_end = 105
+        close_with_nan[nan_start:nan_end] = np.nan  # Add NaNs in the middle
+        
+        result_with_nan = ta_indicators.gaussian(close_with_nan, period=period, poles=poles)
+        
+        # Before the NaN region, we should have valid values
+        assert np.all(np.isfinite(result_with_nan[:nan_start])), f"Expected finite values before NaN region"
+        
+        # The NaN region and warmup after it should be NaN
+        # Due to recursive nature, NaNs propagate through the filter
+        warmup_end = nan_end + period
+        assert np.all(np.isnan(result_with_nan[nan_start:warmup_end])), f"Expected NaN values during and after NaN input"
+        
+        # Note: Gaussian is a recursive filter, so NaN values can propagate indefinitely
+        # depending on the implementation. This is expected behavior for IIR filters.
+    
     def test_gaussian_streaming(self, test_data):
         """Test Gaussian streaming vs batch calculation - mirrors check_gaussian_streaming"""
         close = test_data['close'][:100]  # Use first 100 values for testing
@@ -165,7 +205,7 @@ class TestGaussian:
         
         for val in close:
             result = stream.update(val)
-            stream_results.append(result if result is not None else np.nan)
+            stream_results.append(result)
         
         stream_results = np.array(stream_results)
         

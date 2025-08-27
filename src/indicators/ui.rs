@@ -9,9 +9,11 @@
 //! - **scalar**: Multiplier applied to drawdown, default 100.0.
 //!
 //! ## Errors
-//! - **UiAllValuesNaN**: All input values are NaN.
-//! - **UiInvalidPeriod**: `period` is zero or exceeds data length.
-//! - **UiNotEnoughValidData**: Not enough valid data points for period.
+//! - **AllValuesNaN**: All input values are NaN or infinite.
+//! - **InvalidPeriod**: `period` is zero or exceeds data length.
+//! - **NotEnoughValidData**: Not enough valid data points for period.
+//! - **InvalidScalar**: `scalar` is NaN or infinite.
+//! - **InvalidLength**: Output buffer length doesn't match input length.
 //!
 //! ## Returns
 //! - **Ok(UiOutput)** on success, containing a Vec<f64> matching the input length.
@@ -192,6 +194,8 @@ pub enum UiError {
 	NotEnoughValidData { needed: usize, valid: usize },
 	#[error("ui: Invalid length: expected = {expected}, actual = {actual}")]
 	InvalidLength { expected: usize, actual: usize },
+	#[error("ui: Invalid scalar: {scalar}")]
+	InvalidScalar { scalar: f64 },
 }
 
 #[inline]
@@ -202,13 +206,9 @@ pub fn ui(input: &UiInput) -> Result<UiOutput, UiError> {
 pub fn ui_with_kernel(input: &UiInput, kernel: Kernel) -> Result<UiOutput, UiError> {
 	let data: &[f64] = input.as_ref();
 	let len = data.len();
-	
-	// Check for empty input first
-	if len == 0 {
-		return Err(UiError::EmptyInput);
-	}
-	
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(UiError::AllValuesNaN)?;
+	if len == 0 { return Err(UiError::EmptyInput); }
+
+	let first = data.iter().position(|x| x.is_finite()).ok_or(UiError::AllValuesNaN)?;
 	let period = input.get_period();
 	let scalar = input.get_scalar();
 
@@ -216,130 +216,85 @@ pub fn ui_with_kernel(input: &UiInput, kernel: Kernel) -> Result<UiOutput, UiErr
 		return Err(UiError::InvalidPeriod { period, data_len: len });
 	}
 	if (len - first) < period {
-		return Err(UiError::NotEnoughValidData {
-			needed: period,
-			valid: len - first,
-		});
+		return Err(UiError::NotEnoughValidData { needed: period, valid: len - first });
+	}
+	if !scalar.is_finite() {
+		return Err(UiError::InvalidScalar { scalar });
 	}
 
-	let chosen = match kernel {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
+	let chosen = match kernel { Kernel::Auto => detect_best_kernel(), other => other };
 
-	let warmup_period = period * 2 - 2;
-	let mut out = alloc_with_nan_prefix(len, warmup_period);
+	let warmup = first + (period * 2 - 2);
+	let mut out = alloc_with_nan_prefix(len, warmup.min(len));
 
-	unsafe {
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => ui_scalar(data, period, scalar, first, &mut out),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => ui_avx2(data, period, scalar, first, &mut out),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => ui_avx512(data, period, scalar, first, &mut out),
-			_ => ui_scalar(data, period, scalar, first, &mut out),
-		}
+	// no extra clearing needed; prefix already set
+	match chosen {
+		Kernel::Scalar | Kernel::ScalarBatch => ui_scalar(data, period, scalar, first, &mut out),
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx2 | Kernel::Avx2Batch => ui_avx2(data, period, scalar, first, &mut out),
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx512 | Kernel::Avx512Batch => ui_avx512(data, period, scalar, first, &mut out),
+		_ => ui_scalar(data, period, scalar, first, &mut out),
 	}
 
 	Ok(UiOutput { values: out })
 }
 
-#[inline]
 pub fn ui_scalar(data: &[f64], period: usize, scalar: f64, first: usize, out: &mut [f64]) {
+	use std::collections::VecDeque;
+
 	let len = data.len();
-	
-	// Ensure output buffer is the right size
-	debug_assert_eq!(out.len(), len, "Output buffer must match data length");
-	
-	// We'll use the output buffer to store intermediate values
-	// Layout: out[0..len] will temporarily hold rolling max values
-	// Then we'll compute UI values in-place
-	
-	// Step 1: Compute rolling max into output buffer
-	for i in first..len {
-		if i < period - 1 {
-			out[i] = f64::NAN;
-			continue;
-		}
-		let mut max = f64::NAN;
-		for j in (i + 1 - period)..=i {
-			let v = data[j];
-			if !v.is_nan() && (max.is_nan() || v > max) {
-				max = v;
-			}
-		}
-		out[i] = max;
-	}
-	
-	
-	// Step 2: Compute UI using a rolling window of squared drawdowns
-	// We only need to keep track of 'period' squared drawdowns at a time
-	let mut squared_dd_window: AVec<f64, aligned_vec::ConstAlign<CACHELINE_ALIGN>> = 
-		AVec::with_capacity(CACHELINE_ALIGN, period);
-	squared_dd_window.resize(period, f64::NAN);
-	let mut window_idx = 0;
-	let mut sum = 0.0;
+	debug_assert_eq!(out.len(), len);
+
+	// Monotonic deque of indices for rolling max over last `period`
+	let mut deq: VecDeque<usize> = VecDeque::with_capacity(period);
+
+	// Sliding window over last `period` squared drawdowns
+	let mut sq_ring = vec![f64::NAN; period];
+	let mut ring_idx = 0usize;
+	let mut sum = 0.0f64;
 	let mut count = 0usize;
-	
-	// Initialize the window with the first 'period' squared drawdowns
-	for i in (first + period - 1)..(first + period * 2 - 1).min(len) {
-		let rolling_max = out[i];
-		if !rolling_max.is_nan() && !data[i].is_nan() && rolling_max != 0.0 {
-			let dd = scalar * (data[i] - rolling_max) / rolling_max;
-			let squared_dd = dd * dd;
-			squared_dd_window[window_idx] = squared_dd;
-			sum += squared_dd;
-			count += 1;
-		} else {
-			squared_dd_window[window_idx] = f64::NAN;
+
+	for i in first..len {
+		// expire indices older than window start
+		let start = i.saturating_add(1).saturating_sub(period);
+		while let Some(&j) = deq.front() {
+			if j < start { deq.pop_front(); } else { break; }
 		}
-		window_idx = (window_idx + 1) % period;
-	}
-	
-	// Calculate first UI value
-	if count == period {
-		let ui_value = (sum / period as f64).sqrt();
-		// Store UI value, but need to preserve rolling max for next iterations
-		let temp_max = out[first + period * 2 - 2];
-		out[first + period * 2 - 2] = ui_value;
-		
-		// Continue with sliding window
-		for i in (first + period * 2 - 1)..len {
-			let rolling_max = out[i];
-			let old_dd = squared_dd_window[window_idx];
-			
-			if !rolling_max.is_nan() && !data[i].is_nan() && rolling_max != 0.0 {
-				let dd = scalar * (data[i] - rolling_max) / rolling_max;
-				let new_squared_dd = dd * dd;
-				squared_dd_window[window_idx] = new_squared_dd;
-				
-				if !old_dd.is_nan() {
-					sum = sum - old_dd + new_squared_dd;
-				} else {
-					sum += new_squared_dd;
-					count += 1;
-				}
-			} else {
-				squared_dd_window[window_idx] = f64::NAN;
-				if !old_dd.is_nan() {
-					sum -= old_dd;
-					count -= 1;
-				}
+		// push current if finite
+		let xi = data[i];
+		if xi.is_finite() {
+			while let Some(&j) = deq.back() {
+				let xj = data[j];
+				if !xj.is_finite() || xj <= xi { deq.pop_back(); } else { break; }
 			}
-			
-			window_idx = (window_idx + 1) % period;
-			
-			if count == period {
-				out[i] = (sum / period as f64).sqrt();
-			} else {
-				out[i] = f64::NAN;
-			}
+			deq.push_back(i);
 		}
-	}
-	
-	// Clear the values before warmup period that were used for rolling max
-	for i in first..(first + period * 2 - 2).min(len) {
-		out[i] = f64::NAN;
+
+		// squared drawdown only once we have at least `period` samples since `first`
+		let dd_sq = if i + 1 >= first + period {
+			if let Some(&jmax) = deq.front() {
+				let m = data[jmax];
+				if m.abs() > f64::EPSILON && m.is_finite() && xi.is_finite() {
+					let dd = scalar * (xi - m) / m;
+					dd * dd
+				} else { f64::NAN }
+			} else { f64::NAN }
+		} else { f64::NAN };
+
+		// update ring and running sum
+		let old = sq_ring[ring_idx];
+		sq_ring[ring_idx] = dd_sq;
+		ring_idx = (ring_idx + 1) % period;
+
+		if old.is_finite() { sum -= old; count -= 1; }
+		if dd_sq.is_finite() { sum += dd_sq; count += 1; }
+
+		// emit once past warmup
+		let warmup_end = first + (period * 2 - 2);
+		if i >= warmup_end {
+			out[i] = if count == period { (sum / period as f64).sqrt() } else { f64::NAN };
+		}
 	}
 }
 
@@ -385,6 +340,9 @@ impl UiStream {
 		let scalar = params.scalar.unwrap_or(100.0);
 		if period == 0 {
 			return Err(UiError::InvalidPeriod { period, data_len: 0 });
+		}
+		if !scalar.is_finite() {
+			return Err(UiError::InvalidScalar { scalar });
 		}
 		Ok(Self {
 			period,
@@ -576,11 +534,18 @@ fn expand_grid(r: &UiBatchRange) -> Vec<UiParams> {
 		if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
 			return vec![start];
 		}
+		// Guard against invalid steps that could cause infinite loops
+		if (start < end && step <= 0.0) || (start > end && step >= 0.0) {
+			return vec![start];
+		}
 		let mut v = Vec::new();
 		let mut x = start;
-		while x <= end + 1e-12 {
+		let max_iterations = 10000; // Safety limit
+		let mut iterations = 0;
+		while x <= end + 1e-12 && iterations < max_iterations {
 			v.push(x);
 			x += step;
+			iterations += 1;
 		}
 		v
 	}
@@ -626,37 +591,27 @@ fn ui_batch_inner(data: &[f64], sweep: &UiBatchRange, kern: Kernel, parallel: bo
 		other => other,
 	};
 
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(UiError::AllValuesNaN)?;
+	let first = data.iter().position(|x| x.is_finite()).ok_or(UiError::AllValuesNaN)?;
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-	// UI requires period * 2 - 2 warmup period
-	let max_warmup = max_p * 2 - 2;
-	if data.len() - first < max_warmup + 1 {
-		return Err(UiError::NotEnoughValidData {
-			needed: max_warmup + 1,
-			valid: data.len() - first,
-		});
+	let max_warmup = first + (max_p * 2 - 2);
+	if data.len() <= max_warmup {
+		return Err(UiError::NotEnoughValidData { needed: max_warmup + 1, valid: data.len() - first });
 	}
 
 	let rows = combos.len();
 	let cols = data.len();
-	
-	// Use uninitialized memory with proper prefixes, matching ALMA pattern
 	let mut buf_mu = make_uninit_matrix(rows, cols);
-	
-	// Calculate warmup periods for each parameter combination
-	let warmup_periods: Vec<usize> = combos
-		.iter()
-		.map(|c| c.period.unwrap() * 2 - 2)
-		.collect();
-	
-	init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
+
+	// per-row warmups include `first`
+	let warm: Vec<usize> = combos.iter().map(|c| first + (c.period.unwrap() * 2 - 2)).collect();
+	init_matrix_prefixes(&mut buf_mu, cols, &warm);
 	
 	let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
 	let values: &mut [f64] = unsafe { 
 		core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len()) 
 	};
 
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+	let do_row = |row: usize, out_row: &mut [f64]| {
 		let period = combos[row].period.unwrap();
 		let scalar = combos[row].scalar.unwrap();
 		match kern {
@@ -708,24 +663,14 @@ fn ui_batch_inner(data: &[f64], sweep: &UiBatchRange, kern: Kernel, parallel: bo
 }
 
 #[inline(always)]
-unsafe fn ui_row_scalar(data: &[f64], first: usize, period: usize, scalar: f64, out: &mut [f64]) {
-	// For batch processing, we need to avoid using output as temp storage
-	// This allocates a temporary buffer but ensures correctness
-	// The allocation is acceptable as it's only for batch operations
-	// and is reused across the row computation
-	let len = data.len();
-	let mut temp = vec![f64::NAN; len];
-	
-	// Call regular ui_scalar with temp buffer
-	ui_scalar(data, period, scalar, first, &mut temp);
-	
-	// Copy results to output
-	out.copy_from_slice(&temp);
+fn ui_row_scalar(data: &[f64], first: usize, period: usize, scalar: f64, out: &mut [f64]) {
+	// `out` already has NaN prefix from init_matrix_prefixes
+	ui_scalar(data, period, scalar, first, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-unsafe fn ui_row_avx2(data: &[f64], first: usize, period: usize, scalar: f64, out: &mut [f64]) {
+fn ui_row_avx2(data: &[f64], first: usize, period: usize, scalar: f64, out: &mut [f64]) {
 	// TODO: Implement actual AVX2 optimizations
 	// For now, use the optimized scalar batch version
 	ui_row_scalar(data, first, period, scalar, out)
@@ -733,7 +678,7 @@ unsafe fn ui_row_avx2(data: &[f64], first: usize, period: usize, scalar: f64, ou
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-unsafe fn ui_row_avx512(data: &[f64], first: usize, period: usize, scalar: f64, out: &mut [f64]) {
+fn ui_row_avx512(data: &[f64], first: usize, period: usize, scalar: f64, out: &mut [f64]) {
 	// TODO: Implement actual AVX512 optimizations
 	// For now, use the optimized scalar batch version
 	ui_row_scalar(data, first, period, scalar, out)
@@ -741,7 +686,7 @@ unsafe fn ui_row_avx512(data: &[f64], first: usize, period: usize, scalar: f64, 
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-unsafe fn ui_row_avx512_short(data: &[f64], first: usize, period: usize, scalar: f64, out: &mut [f64]) {
+fn ui_row_avx512_short(data: &[f64], first: usize, period: usize, scalar: f64, out: &mut [f64]) {
 	// TODO: Implement actual AVX512 optimizations for short periods
 	// For now, use the optimized scalar batch version
 	ui_row_scalar(data, first, period, scalar, out)
@@ -749,7 +694,7 @@ unsafe fn ui_row_avx512_short(data: &[f64], first: usize, period: usize, scalar:
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-unsafe fn ui_row_avx512_long(data: &[f64], first: usize, period: usize, scalar: f64, out: &mut [f64]) {
+fn ui_row_avx512_long(data: &[f64], first: usize, period: usize, scalar: f64, out: &mut [f64]) {
 	// TODO: Implement actual AVX512 optimizations for long periods
 	// For now, use the optimized scalar batch version
 	ui_row_scalar(data, first, period, scalar, out)
@@ -887,30 +832,21 @@ fn ui_batch_inner_into(
 		return Err(UiError::InvalidPeriod { period: 0, data_len: 0 });
 	}
 
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(UiError::AllValuesNaN)?;
+	let first = data.iter().position(|x| x.is_finite()).ok_or(UiError::AllValuesNaN)?;
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-	// UI requires period * 2 - 2 warmup period
-	let max_warmup = max_p * 2 - 2;
-	if data.len() - first < max_warmup + 1 {
-		return Err(UiError::NotEnoughValidData {
-			needed: max_warmup + 1,
-			valid: data.len() - first,
-		});
+	let max_warmup = first + (max_p * 2 - 2);
+	if data.len() <= max_warmup {
+		return Err(UiError::NotEnoughValidData { needed: max_warmup + 1, valid: data.len() - first });
 	}
 
 	let cols = data.len();
-
-	// Initialize NaN prefixes for each row based on warmup period
-	// This is critical for externally-provided buffers from Python/WASM
 	for (row, combo) in combos.iter().enumerate() {
-		let warmup = combo.period.unwrap() * 2 - 2;
+		let warmup = first + (combo.period.unwrap() * 2 - 2);
 		let row_start = row * cols;
-		for i in 0..warmup.min(cols) {
-			out[row_start + i] = f64::NAN;
-		}
+		for i in 0..warmup.min(cols) { out[row_start + i] = f64::NAN; }
 	}
 
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+	let do_row = |row: usize, out_row: &mut [f64]| {
 		let period = combos[row].period.unwrap();
 		let scalar = combos[row].scalar.unwrap();
 		match kern {
@@ -956,50 +892,32 @@ use wasm_bindgen::prelude::*;
 pub fn ui_into_slice(dst: &mut [f64], input: &UiInput, kern: Kernel) -> Result<(), UiError> {
 	let data: &[f64] = input.as_ref();
 	let len = data.len();
-	
-	// Check for empty input first
-	if len == 0 {
-		return Err(UiError::EmptyInput);
-	}
-	
-	let period = input.get_period();
-	let scalar = input.get_scalar();
+	if len == 0 { return Err(UiError::EmptyInput); }
 
 	if dst.len() != len {
-		return Err(UiError::InvalidLength {
-			expected: len,
-			actual: dst.len(),
-		});
+		return Err(UiError::InvalidLength { expected: len, actual: dst.len() });
 	}
 
-	// Validate parameters
+	let period = input.get_period();
+	let scalar = input.get_scalar();
 	if period == 0 || period > len {
 		return Err(UiError::InvalidPeriod { period, data_len: len });
 	}
+	if !scalar.is_finite() {
+		return Err(UiError::InvalidScalar { scalar });
+	}
 
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(UiError::AllValuesNaN)?;
-
+	let first = data.iter().position(|x| x.is_finite()).ok_or(UiError::AllValuesNaN)?;
 	if (len - first) < period {
-		return Err(UiError::NotEnoughValidData {
-			needed: period,
-			valid: len - first,
-		});
+		return Err(UiError::NotEnoughValidData { needed: period, valid: len - first });
 	}
 
-	// Choose kernel
-	let chosen = match kern {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
+	let chosen = match kern { Kernel::Auto => detect_best_kernel(), other => other };
 
-	// Initialize warmup with NaN BEFORE computation
-	// This is critical for external buffers that may contain garbage
-	let warmup_period = period * 2 - 2;
-	for v in &mut dst[..warmup_period.min(len)] {
-		*v = f64::NAN;
-	}
+	// correct prefix
+	let warmup = first + (period * 2 - 2);
+	for v in &mut dst[..warmup.min(len)] { *v = f64::NAN; }
 
-	// Compute directly into dst
 	match chosen {
 		Kernel::Scalar | Kernel::ScalarBatch => ui_scalar(data, period, scalar, first, dst),
 		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1008,7 +926,6 @@ pub fn ui_into_slice(dst: &mut [f64], input: &UiInput, kern: Kernel) -> Result<(
 		Kernel::Avx512 | Kernel::Avx512Batch => ui_avx512(data, period, scalar, first, dst),
 		_ => ui_scalar(data, period, scalar, first, dst),
 	}
-
 	Ok(())
 }
 
@@ -1016,6 +933,9 @@ pub fn ui_into_slice(dst: &mut [f64], input: &UiInput, kern: Kernel) -> Result<(
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn ui_js(data: &[f64], period: usize, scalar: f64) -> Result<Vec<f64>, JsValue> {
+	if !scalar.is_finite() {
+		return Err(JsValue::from_str(&format!("Invalid scalar: {}", scalar)));
+	}
 	let params = UiParams {
 		period: Some(period),
 		scalar: Some(scalar),
@@ -1041,6 +961,9 @@ pub fn ui_into(
 ) -> Result<(), JsValue> {
 	if in_ptr.is_null() || out_ptr.is_null() {
 		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	if !scalar.is_finite() {
+		return Err(JsValue::from_str(&format!("Invalid scalar: {}", scalar)));
 	}
 
 	unsafe {

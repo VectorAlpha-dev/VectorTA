@@ -19,7 +19,6 @@ use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
 	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
-use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -148,12 +147,18 @@ impl SuperSmoother3PoleBuilder {
 
 #[derive(Debug, Error)]
 pub enum SuperSmoother3PoleError {
+	#[error("supersmoother_3_pole: Input data slice is empty.")]
+	EmptyInputData,
 	#[error("supersmoother_3_pole: All values are NaN.")]
 	AllValuesNaN,
 	#[error("supersmoother_3_pole: Invalid period: period = {period}")]
 	InvalidPeriod { period: usize },
 	#[error("supersmoother_3_pole: Not enough valid data: needed = {needed}, valid = {valid}")]
 	NotEnoughValidData { needed: usize, valid: usize },
+	#[error("supersmoother_3_pole: Output length mismatch: expected = {expected}, actual = {actual}")]
+	OutputLengthMismatch { expected: usize, actual: usize },
+	#[error("supersmoother_3_pole: Invalid kernel for batch operation")]
+	InvalidKernel,
 }
 
 // Main Entrypoint
@@ -170,11 +175,15 @@ pub fn supersmoother_3_pole_with_kernel(
 	kernel: Kernel,
 ) -> Result<SuperSmoother3PoleOutput, SuperSmoother3PoleError> {
 	let data: &[f64] = input.as_ref();
+	let len = data.len();
+	if len == 0 {
+		return Err(SuperSmoother3PoleError::EmptyInputData);
+	}
+	
 	let first = data
 		.iter()
 		.position(|x| !x.is_nan())
 		.ok_or(SuperSmoother3PoleError::AllValuesNaN)?;
-	let len = data.len();
 	let period = input.get_period();
 
 	if period == 0 || period > len {
@@ -191,8 +200,8 @@ pub fn supersmoother_3_pole_with_kernel(
 		Kernel::Auto => detect_best_kernel(),
 		other => other,
 	};
-	let warm = first + period;
-	let mut out = alloc_with_nan_prefix(len, warm);
+	// Use alloc_with_nan_prefix to ensure [0..first) is NaN
+	let mut out = alloc_with_nan_prefix(len, first);
 
 	unsafe {
 		match chosen {
@@ -208,33 +217,47 @@ pub fn supersmoother_3_pole_with_kernel(
 	Ok(SuperSmoother3PoleOutput { values: out })
 }
 
-// Scalar reference implementation (original logic)
+// Compute function for SuperSmoother 3-pole respecting first index
 #[inline(always)]
-pub unsafe fn supersmoother_3_pole_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
+pub unsafe fn supersmoother_3_pole_compute_into(
+	data: &[f64],
+	period: usize,
+	first: usize,
+	_warm_end: usize,  // Not used, kept for API compatibility
+	out: &mut [f64],
+) {
 	let n = data.len();
-	if n == 0 {
+	if n == 0 || first >= n {
 		return;
 	}
 
+	// Calculate coefficients
 	let a = (-PI / period as f64).exp();
 	let b = 2.0 * a * (1.738_f64 * PI / period as f64).cos();
 	let c = a * a;
-
 	let coef_source = 1.0 - c * c - b + b * c;
 	let coef_prev1 = b + c;
 	let coef_prev2 = -c - b * c;
 	let coef_prev3 = c * c;
 
-	if n > 0 {
-		out[0] = data[0];
+	// Pass through first 3 values starting from 'first'
+	// Do not write below 'first' - preserve NaN prefix
+	if first < n {
+		out[first] = data[first];
 	}
-	if n > 1 {
-		out[1] = data[1];
+	if first + 1 < n {
+		out[first + 1] = data[first + 1];
 	}
-	if n > 2 {
-		out[2] = data[2];
+	if first + 2 < n {
+		out[first + 2] = data[first + 2];
 	}
-	for i in 3..n {
+
+	// Recursive calculation from index first+3 onwards
+	if first + 3 >= n {
+		return;
+	}
+
+	for i in (first + 3)..n {
 		let d_i = data[i];
 		let o_im1 = out[i - 1];
 		let o_im2 = out[i - 2];
@@ -243,7 +266,13 @@ pub unsafe fn supersmoother_3_pole_scalar(data: &[f64], period: usize, first: us
 	}
 }
 
-// AVX2/AVX512 stubs (point to scalar)
+// Scalar kernel wrapper
+#[inline(always)]
+pub unsafe fn supersmoother_3_pole_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
+	supersmoother_3_pole_compute_into(data, period, first, 0, out);
+}
+
+// AVX2/AVX512 stubs (forward to scalar)
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn supersmoother_3_pole_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
@@ -252,23 +281,7 @@ pub unsafe fn supersmoother_3_pole_avx2(data: &[f64], period: usize, first: usiz
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-pub fn supersmoother_3_pole_avx512(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-	if period <= 32 {
-		unsafe { supersmoother_3_pole_avx512_short(data, period, first, out) }
-	} else {
-		unsafe { supersmoother_3_pole_avx512_long(data, period, first, out) }
-	}
-}
-
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
-pub unsafe fn supersmoother_3_pole_avx512_short(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-	supersmoother_3_pole_scalar(data, period, first, out)
-}
-
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
-pub unsafe fn supersmoother_3_pole_avx512_long(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
+pub unsafe fn supersmoother_3_pole_avx512(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
 	supersmoother_3_pole_scalar(data, period, first, out)
 }
 
@@ -283,7 +296,7 @@ pub unsafe fn supersmoother_3_pole_row_scalar(
 	_inv_n: f64,
 	out: &mut [f64],
 ) {
-	supersmoother_3_pole_scalar(data, period, first, out)
+	supersmoother_3_pole_scalar(data, period, first, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -347,12 +360,11 @@ pub unsafe fn supersmoother_3_pole_row_avx512_long(
 #[derive(Debug, Clone)]
 pub struct SuperSmoother3PoleStream {
 	period: usize,
-	buffer: Vec<f64>,
-	idx: usize,
-	filled: usize,
-	a: f64,
-	b: f64,
-	c: f64,
+	// Maintain last 3 outputs
+	y0: f64,
+	y1: f64,
+	y2: f64,
+	filled: usize, // How many outputs established
 	coef_source: f64,
 	coef_prev1: f64,
 	coef_prev2: f64,
@@ -368,38 +380,47 @@ impl SuperSmoother3PoleStream {
 		let a = (-PI / period as f64).exp();
 		let b = 2.0 * a * (1.738_f64 * PI / period as f64).cos();
 		let c = a * a;
-		let coef_source = 1.0 - c * c - b + b * c;
-		let coef_prev1 = b + c;
-		let coef_prev2 = -c - b * c;
-		let coef_prev3 = c * c;
 		Ok(Self {
 			period,
-			buffer: vec![f64::NAN; 3],
-			idx: 0,
+			y0: f64::NAN,
+			y1: f64::NAN,
+			y2: f64::NAN,
 			filled: 0,
-			a,
-			b,
-			c,
-			coef_source,
-			coef_prev1,
-			coef_prev2,
-			coef_prev3,
+			coef_source: 1.0 - c * c - b + b * c,
+			coef_prev1: b + c,
+			coef_prev2: -c - b * c,
+			coef_prev3: c * c,
 		})
 	}
+	
 	#[inline(always)]
 	pub fn update(&mut self, value: f64) -> f64 {
-		if self.filled < 3 {
-			self.buffer[self.filled] = value;
-			self.filled += 1;
-			return value;
+		match self.filled {
+			0 => {
+				self.y0 = value;
+				self.filled = 1;
+				return value;  // Pass through first value
+			}
+			1 => {
+				self.y1 = value;
+				self.filled = 2;
+				return value;  // Pass through second value
+			}
+			2 => {
+				self.y2 = value;
+				self.filled = 3;
+				return value;  // Pass through third value
+			}
+			_ => {}
 		}
-		let next = self.coef_source * value
-			+ self.coef_prev1 * self.buffer[(self.idx + 2) % 3]
-			+ self.coef_prev2 * self.buffer[(self.idx + 1) % 3]
-			+ self.coef_prev3 * self.buffer[self.idx % 3];
-		self.buffer[self.idx] = next;
-		self.idx = (self.idx + 1) % 3;
-		next
+		let y_next = self.coef_source * value
+			+ self.coef_prev1 * self.y2
+			+ self.coef_prev2 * self.y1
+			+ self.coef_prev3 * self.y0;
+		self.y0 = self.y1;
+		self.y1 = self.y2;
+		self.y2 = y_next;
+		y_next
 	}
 }
 
@@ -472,7 +493,7 @@ pub fn supersmoother_3_pole_batch_with_kernel(
 	let kernel = match k {
 		Kernel::Auto => detect_best_batch_kernel(),
 		other if other.is_batch() => other,
-		_ => return Err(SuperSmoother3PoleError::InvalidPeriod { period: 0 }),
+		_ => return Err(SuperSmoother3PoleError::InvalidKernel),
 	};
 	let simd = match kernel {
 		Kernel::Avx512Batch => Kernel::Avx512,
@@ -562,7 +583,7 @@ fn supersmoother_3_pole_batch_inner(
 	}
 	let rows = combos.len();
 	let cols = data.len();
-	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
+	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
 
 	let mut raw = make_uninit_matrix(rows, cols);
 	unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
@@ -669,21 +690,6 @@ pub fn supersmoother_3_pole_batch_inner_into(
 	}
 
 	// No return value needed - everything is written to output
-}
-
-#[inline(always)]
-fn expand_grid_supersmoother(r: &SuperSmoother3PoleBatchRange) -> Vec<SuperSmoother3PoleParams> {
-	fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-		if step == 0 || start == end {
-			return vec![start];
-		}
-		(start..=end).step_by(step).collect()
-	}
-	let periods = axis_usize(r.period);
-	periods
-		.into_iter()
-		.map(|p| SuperSmoother3PoleParams { period: Some(p) })
-		.collect()
 }
 
 #[cfg(test)]
@@ -1362,7 +1368,7 @@ pub fn supersmoother_3_pole_batch_py<'py>(
 
 	let rows = combos.len();
 	let cols = slice_in.len();
-	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
+	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
 
 	// Pre-allocate output array (OK for batch operations)
 	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
@@ -1409,11 +1415,15 @@ pub fn supersmoother_3_pole_into_slice(
 	kern: Kernel,
 ) -> Result<(), SuperSmoother3PoleError> {
 	let data: &[f64] = input.as_ref();
+	let len = data.len();
+	if len == 0 {
+		return Err(SuperSmoother3PoleError::EmptyInputData);
+	}
+
 	let first = data
 		.iter()
 		.position(|x| !x.is_nan())
 		.ok_or(SuperSmoother3PoleError::AllValuesNaN)?;
-	let len = data.len();
 	let period = input.get_period();
 
 	if period == 0 || period > len {
@@ -1428,19 +1438,16 @@ pub fn supersmoother_3_pole_into_slice(
 
 	// Verify output buffer size matches input
 	if dst.len() != data.len() {
-		return Err(SuperSmoother3PoleError::InvalidPeriod { period: dst.len() });
+		return Err(SuperSmoother3PoleError::OutputLengthMismatch {
+			expected: data.len(),
+			actual: dst.len(),
+		});
 	}
 
 	let chosen = match kern {
 		Kernel::Auto => detect_best_kernel(),
 		other => other,
 	};
-
-	// Fill warmup period with NaN first
-	let warmup_end = first + period;
-	for v in &mut dst[..warmup_end] {
-		*v = f64::NAN;
-	}
 
 	// Compute SuperSmoother values directly into dst
 	unsafe {
@@ -1532,7 +1539,7 @@ pub fn supersmoother_3_pole_batch(data: &[f64], config: JsValue) -> Result<JsVal
 		_ => chosen,
 	};
 
-	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
+	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
 
 	supersmoother_3_pole_batch_inner_into(data, &combos, first, &warm, cols, simd, false, &mut output);
 
@@ -1711,7 +1718,7 @@ pub fn supersmoother_3_pole_batch_into(
 			_ => chosen,
 		};
 
-		let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
+		let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
 
 		supersmoother_3_pole_batch_inner_into(data, &combos, first, &warm, cols, simd, false, out);
 

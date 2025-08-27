@@ -237,6 +237,8 @@ pub enum SrsiError {
 	AllValuesNaN,
 	#[error("srsi: Not enough valid data for the requested period.")]
 	NotEnoughValidData,
+	#[error("srsi: Size mismatch - destination buffers must match input data length. Expected {expected}, got k={k_len}, d={d_len}")]
+	SizeMismatch { expected: usize, k_len: usize, d_len: usize },
 }
 
 #[inline]
@@ -475,22 +477,10 @@ impl SrsiStream {
 		})
 	}
 	
-	pub fn update(&mut self, value: f64) -> Option<(f64, f64)> {
-		// Simplified implementation - in production would need full RSI/Stoch streaming
-		self.rsi_buffer[self.head % self.rsi_period] = value;
-		self.stoch_buffer[self.head % self.stoch_period] = value;
-		self.k_buffer[self.head % self.k_period] = value;
-		
-		self.head += 1;
-		self.filled = self.filled.max(self.head);
-		
-		let min_required = self.rsi_period.max(self.stoch_period).max(self.k_period).max(self.d_period);
-		if self.filled < min_required {
-			return None;
-		}
-		
-		// Placeholder calculation - would compute actual SRSI values
-		Some((50.0, 50.0))
+	pub fn update(&mut self, _value: f64) -> Option<(f64, f64)> {
+		// Proper implementation would require full RSI + Stoch ring buffers
+		// Currently unimplemented to avoid misleading results
+		None
 	}
 }
 
@@ -656,6 +646,17 @@ fn srsi_batch_inner_into(
 	}
 	
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(SrsiError::AllValuesNaN)?;
+	
+	// Precompute RSI once per unique rsi_period to avoid redundant calculations
+	use std::collections::{BTreeSet, BTreeMap};
+	let mut rsi_cache: BTreeMap<usize, Vec<f64>> = BTreeMap::new();
+	let uniq_rsi: BTreeSet<usize> = combos.iter().map(|c| c.rsi_period.unwrap()).collect();
+	for rp in uniq_rsi {
+		let rsi_in = RsiInput::from_slice(data, RsiParams { period: Some(rp) });
+		let rsi_out = rsi(&rsi_in)?;  // one allocation per distinct rp
+		rsi_cache.insert(rp, rsi_out.values);
+	}
+	
 	let max_period = combos
 		.iter()
 		.map(|c| {
@@ -674,17 +675,28 @@ fn srsi_batch_inner_into(
 	
 	let cols = data.len();
 	
-	let do_row = |row: usize, k_row: &mut [f64], d_row: &mut [f64]| unsafe {
+	// Replace do_row to reuse cached RSI and avoid calling srsi_scalar
+	let do_row = |row: usize, k_row: &mut [f64], d_row: &mut [f64]| -> Result<(), SrsiError> {
 		let prm = &combos[row];
-		srsi_row_scalar(
-			data,
-			prm.rsi_period.unwrap(),
-			prm.stoch_period.unwrap(),
-			prm.k.unwrap(),
-			prm.d.unwrap(),
-			k_row,
-			d_row,
-		);
+		let rsi_vals = rsi_cache.get(&prm.rsi_period.unwrap()).expect("cached rsi");
+		let st_in = StochInput {
+			data: crate::indicators::stoch::StochData::Slices { 
+				high: rsi_vals, 
+				low: rsi_vals, 
+				close: rsi_vals 
+			},
+			params: StochParams {
+				fastk_period: prm.stoch_period,
+				slowk_period: prm.k,
+				slowk_ma_type: Some("sma".to_string()),
+				slowd_period: prm.d,
+				slowd_ma_type: Some("sma".to_string()),
+			},
+		};
+		let st = stoch(&st_in)?;  // allocates once per row
+		k_row.copy_from_slice(&st.k);
+		d_row.copy_from_slice(&st.d);
+		Ok(())
 	};
 	
 	if parallel {
@@ -693,18 +705,18 @@ fn srsi_batch_inner_into(
 			k_out.par_chunks_mut(cols)
 				.zip(d_out.par_chunks_mut(cols))
 				.enumerate()
-				.for_each(|(row, (k_row, d_row))| do_row(row, k_row, d_row));
+				.try_for_each(|(row, (k_row, d_row))| do_row(row, k_row, d_row))?;
 		}
 		
 		#[cfg(target_arch = "wasm32")]
 		{
 			for (row, (k_row, d_row)) in k_out.chunks_mut(cols).zip(d_out.chunks_mut(cols)).enumerate() {
-				do_row(row, k_row, d_row);
+				do_row(row, k_row, d_row)?;
 			}
 		}
 	} else {
 		for (row, (k_row, d_row)) in k_out.chunks_mut(cols).zip(d_out.chunks_mut(cols)).enumerate() {
-			do_row(row, k_row, d_row);
+			do_row(row, k_row, d_row)?;
 		}
 	}
 	
@@ -742,15 +754,19 @@ fn srsi_batch_inner(
 	let mut k_vals = make_uninit_matrix(rows, cols);
 	let mut d_vals = make_uninit_matrix(rows, cols);
 	
-	// Initialize NaN prefixes for warmup periods
-	let warmup_periods: Vec<usize> = combos.iter()
-		.map(|c| {
-			let rsi_p = c.rsi_period.unwrap();
-			let stoch_p = c.stoch_period.unwrap();
-			let k_p = c.k.unwrap();
-			let d_p = c.d.unwrap();
-			rsi_p.max(stoch_p).max(k_p).max(d_p)
-		})
+	// Calculate proper warmup periods for chained pipeline
+	fn warm_for(c: &SrsiParams, first: usize) -> usize {
+		let rp = c.rsi_period.unwrap();
+		let sp = c.stoch_period.unwrap();
+		let kp = c.k.unwrap();
+		let dp = c.d.unwrap();
+		// RSI needs rp-1, then Stoch needs sp-1, then smoothing needs max(k,d)-1
+		first + rp - 1 + sp - 1 + kp.max(dp) - 1
+	}
+	
+	let warmup_periods: Vec<usize> = combos
+		.iter()
+		.map(|c| warm_for(c, first).min(cols))
 		.collect();
 	
 	init_matrix_prefixes(&mut k_vals, cols, &warmup_periods);
@@ -765,17 +781,37 @@ fn srsi_batch_inner(
 	let d_out: &mut [f64] =
 		unsafe { core::slice::from_raw_parts_mut(d_guard.as_mut_ptr() as *mut f64, d_guard.len()) };
 
-	let do_row = |row: usize, k_out: &mut [f64], d_out: &mut [f64]| unsafe {
+	// Precompute RSI once per unique rsi_period to avoid redundant calculations
+	use std::collections::{BTreeSet, BTreeMap};
+	let mut rsi_cache: BTreeMap<usize, Vec<f64>> = BTreeMap::new();
+	let uniq_rsi: BTreeSet<usize> = combos.iter().map(|c| c.rsi_period.unwrap()).collect();
+	for rp in uniq_rsi {
+		let rsi_in = RsiInput::from_slice(data, RsiParams { period: Some(rp) });
+		let rsi_out = rsi(&rsi_in).map_err(|_| SrsiError::AllValuesNaN)?;  // one allocation per distinct rp
+		rsi_cache.insert(rp, rsi_out.values);
+	}
+	
+	let do_row = |row: usize, k_out: &mut [f64], d_out: &mut [f64]| {
 		let prm = &combos[row];
-		srsi_row_scalar(
-			data,
-			prm.rsi_period.unwrap(),
-			prm.stoch_period.unwrap(),
-			prm.k.unwrap(),
-			prm.d.unwrap(),
-			k_out,
-			d_out,
-		);
+		let rsi_vals = rsi_cache.get(&prm.rsi_period.unwrap()).expect("cached rsi");
+		let st_in = StochInput {
+			data: crate::indicators::stoch::StochData::Slices { 
+				high: rsi_vals, 
+				low: rsi_vals, 
+				close: rsi_vals 
+			},
+			params: StochParams {
+				fastk_period: prm.stoch_period,
+				slowk_period: prm.k,
+				slowk_ma_type: Some("sma".to_string()),
+				slowd_period: prm.d,
+				slowd_ma_type: Some("sma".to_string()),
+			},
+		};
+		if let Ok(st) = stoch(&st_in) {  // allocates once per row
+			k_out.copy_from_slice(&st.k);
+			d_out.copy_from_slice(&st.d);
+		}
 	};
 
 	if parallel {
@@ -974,27 +1010,26 @@ pub fn srsi_batch_py<'py>(
 }
 
 /// Write SRSI outputs directly to slices - no allocations
-#[cfg(feature = "wasm")]
 pub fn srsi_into_slice(
 	dst_k: &mut [f64],
 	dst_d: &mut [f64],
 	input: &SrsiInput,
 	kern: Kernel,
 ) -> Result<(), SrsiError> {
-	let data: &[f64] = match &input.data {
-		SrsiData::Candles { candles, source } => source_type(candles, source),
-		SrsiData::Slice(sl) => sl,
-	};
+	let data: &[f64] = input.as_ref();
 	
 	if dst_k.len() != data.len() || dst_d.len() != data.len() {
-		return Err(SrsiError::NotEnoughValidData);
+		return Err(SrsiError::SizeMismatch {
+			expected: data.len(),
+			k_len: dst_k.len(),
+			d_len: dst_d.len(),
+		});
 	}
 	
-	let output = srsi_with_kernel(input, kern)?;
-	
-	// Copy results to destination slices
-	dst_k.copy_from_slice(&output.k);
-	dst_d.copy_from_slice(&output.d);
+	// Compute once, then copy into the provided buffers
+	let out = srsi_with_kernel(input, kern)?;
+	dst_k.copy_from_slice(&out.k);
+	dst_d.copy_from_slice(&out.d);
 	
 	Ok(())
 }
@@ -1008,6 +1043,14 @@ pub fn srsi_js(
 	k: usize, 
 	d: usize
 ) -> Result<Vec<f64>, JsValue> {
+	if data.is_empty() {
+		return Err(JsValue::from_str("srsi: Input data is empty"));
+	}
+	
+	if rsi_period == 0 || stoch_period == 0 || k == 0 || d == 0 {
+		return Err(JsValue::from_str("srsi: Invalid period"));
+	}
+	
 	let params = SrsiParams {
 		rsi_period: Some(rsi_period),
 		stoch_period: Some(stoch_period),
@@ -1016,15 +1059,15 @@ pub fn srsi_js(
 		source: None,
 	};
 	let input = SrsiInput::from_slice(data, params);
+	let out = srsi_with_kernel(&input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&format!("srsi: {}", e)))?;
 	
-	// Allocate output buffer for both k and d
-	let mut output = vec![0.0; data.len() * 2];
-	let (k_dst, d_dst) = output.split_at_mut(data.len());
+	// Return flattened array [k..., d...]
+	let mut values = Vec::with_capacity(2 * data.len());
+	values.extend_from_slice(&out.k);
+	values.extend_from_slice(&out.d);
 	
-	srsi_into_slice(k_dst, d_dst, &input, Kernel::Auto)
-		.map_err(|e| JsValue::from_str(&e.to_string()))?;
-	
-	Ok(output)
+	Ok(values)
 }
 
 #[cfg(feature = "wasm")]
@@ -1047,21 +1090,17 @@ pub fn srsi_free(ptr: *mut f64, len: usize) {
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn srsi_into(
-	in_ptr: *const f64,
-	k_ptr: *mut f64,
-	d_ptr: *mut f64,
+	in_ptr: usize,
+	k_ptr: usize,
+	d_ptr: usize,
 	len: usize,
 	rsi_period: usize,
 	stoch_period: usize,
 	k: usize,
 	d: usize,
 ) -> Result<(), JsValue> {
-	if in_ptr.is_null() || k_ptr.is_null() || d_ptr.is_null() {
-		return Err(JsValue::from_str("null pointer passed to srsi_into"));
-	}
-	
 	unsafe {
-		let data = std::slice::from_raw_parts(in_ptr, len);
+		let data = std::slice::from_raw_parts(in_ptr as *const f64, len);
 		
 		if rsi_period == 0 || stoch_period == 0 || k == 0 || d == 0 {
 			return Err(JsValue::from_str("Invalid period"));
@@ -1085,13 +1124,13 @@ pub fn srsi_into(
 			srsi_into_slice(&mut temp_k, &mut temp_d, &input, Kernel::Auto)
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 			
-			let k_out = std::slice::from_raw_parts_mut(k_ptr, len);
-			let d_out = std::slice::from_raw_parts_mut(d_ptr, len);
+			let k_out = std::slice::from_raw_parts_mut(k_ptr as *mut f64, len);
+			let d_out = std::slice::from_raw_parts_mut(d_ptr as *mut f64, len);
 			k_out.copy_from_slice(&temp_k);
 			d_out.copy_from_slice(&temp_d);
 		} else {
-			let k_out = std::slice::from_raw_parts_mut(k_ptr, len);
-			let d_out = std::slice::from_raw_parts_mut(d_ptr, len);
+			let k_out = std::slice::from_raw_parts_mut(k_ptr as *mut f64, len);
+			let d_out = std::slice::from_raw_parts_mut(d_ptr as *mut f64, len);
 			srsi_into_slice(k_out, d_out, &input, Kernel::Auto)
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 		}
@@ -1112,46 +1151,46 @@ pub struct SrsiBatchConfig {
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct SrsiBatchJsOutput {
-	pub k_values: Vec<f64>,
-	pub d_values: Vec<f64>,
+	pub k_values: Vec<f64>,     // All K values flattened
+	pub d_values: Vec<f64>,     // All D values flattened
+	pub rows: usize,            // Number of parameter combinations
+	pub cols: usize,            // Data length
 	pub combos: Vec<SrsiParams>,
-	pub rows: usize,
-	pub cols: usize,
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = srsi_batch)]
-pub fn srsi_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
-	let config: SrsiBatchConfig = 
+pub fn srsi_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let cfg: SrsiBatchConfig = 
 		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
 	
 	let sweep = SrsiBatchRange {
-		rsi_period: config.rsi_period_range,
-		stoch_period: config.stoch_period_range,
-		k: config.k_range,
-		d: config.d_range,
+		rsi_period: cfg.rsi_period_range,
+		stoch_period: cfg.stoch_period_range,
+		k: cfg.k_range,
+		d: cfg.d_range,
 	};
 	
-	let output = srsi_batch_inner(data, &sweep, Kernel::Auto, false)
+	let out = srsi_batch_inner(data, &sweep, Kernel::Auto, false)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 	
-	let js_output = SrsiBatchJsOutput {
-		k_values: output.k,
-		d_values: output.d,
-		combos: output.combos,
-		rows: output.rows,
-		cols: output.cols,
+	let res = SrsiBatchJsOutput { 
+		k_values: out.k,
+		d_values: out.d,
+		rows: out.rows,
+		cols: out.cols,
+		combos: out.combos 
 	};
 	
-	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+	serde_wasm_bindgen::to_value(&res).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn srsi_batch_into(
-	in_ptr: *const f64,
-	k_ptr: *mut f64,
-	d_ptr: *mut f64,
+	in_ptr: usize,
+	k_ptr: usize,
+	d_ptr: usize,
 	len: usize,
 	rsi_period_start: usize,
 	rsi_period_end: usize,
@@ -1166,12 +1205,8 @@ pub fn srsi_batch_into(
 	d_end: usize,
 	d_step: usize,
 ) -> Result<usize, JsValue> {
-	if in_ptr.is_null() || k_ptr.is_null() || d_ptr.is_null() {
-		return Err(JsValue::from_str("null pointer passed to srsi_batch_into"));
-	}
-	
 	unsafe {
-		let data = std::slice::from_raw_parts(in_ptr, len);
+		let data = std::slice::from_raw_parts(in_ptr as *const f64, len);
 		
 		let sweep = SrsiBatchRange {
 			rsi_period: (rsi_period_start, rsi_period_end, rsi_period_step),
@@ -1184,8 +1219,8 @@ pub fn srsi_batch_into(
 		let rows = combos.len();
 		let cols = len;
 		
-		let k_out = std::slice::from_raw_parts_mut(k_ptr, rows * cols);
-		let d_out = std::slice::from_raw_parts_mut(d_ptr, rows * cols);
+		let k_out = std::slice::from_raw_parts_mut(k_ptr as *mut f64, rows * cols);
+		let d_out = std::slice::from_raw_parts_mut(d_ptr as *mut f64, rows * cols);
 		
 		srsi_batch_inner_into(data, &sweep, Kernel::Auto, false, k_out, d_out)
 			.map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1715,6 +1750,61 @@ mod tests {
 		check_srsi_from_slice,
 		check_srsi_no_poison
 	);
+	
+	#[test]
+	fn test_srsi_into_slice_size_mismatch() {
+		// Test that srsi_into_slice returns SizeMismatch error when buffer sizes don't match
+		// Generate enough data for default parameters (rsi_period=14, stoch_period=14, k=3, d=3)
+		let data: Vec<f64> = (1..=50).map(|x| x as f64).collect();
+		let data_len = data.len();
+		let params = SrsiParams::default();
+		let input = SrsiInput::from_slice(&data, params);
+		
+		// Test with k buffer too small
+		let mut k_small = vec![0.0; 30];  // Wrong size
+		let mut d_correct = vec![0.0; data_len]; // Correct size
+		let result = srsi_into_slice(&mut k_small, &mut d_correct, &input, Kernel::Scalar);
+		match result {
+			Err(SrsiError::SizeMismatch { expected, k_len, d_len }) => {
+				assert_eq!(expected, data_len);
+				assert_eq!(k_len, 30);
+				assert_eq!(d_len, data_len);
+			}
+			_ => panic!("Expected SizeMismatch error with k buffer too small"),
+		}
+		
+		// Test with d buffer too small
+		let mut k_correct = vec![0.0; data_len]; // Correct size
+		let mut d_small = vec![0.0; 35];    // Wrong size
+		let result = srsi_into_slice(&mut k_correct, &mut d_small, &input, Kernel::Scalar);
+		match result {
+			Err(SrsiError::SizeMismatch { expected, k_len, d_len }) => {
+				assert_eq!(expected, data_len);
+				assert_eq!(k_len, data_len);
+				assert_eq!(d_len, 35);
+			}
+			_ => panic!("Expected SizeMismatch error with d buffer too small"),
+		}
+		
+		// Test with both buffers wrong size
+		let mut k_wrong = vec![0.0; 60];  // Wrong size
+		let mut d_wrong = vec![0.0; 70];  // Wrong size
+		let result = srsi_into_slice(&mut k_wrong, &mut d_wrong, &input, Kernel::Scalar);
+		match result {
+			Err(SrsiError::SizeMismatch { expected, k_len, d_len }) => {
+				assert_eq!(expected, data_len);
+				assert_eq!(k_len, 60);
+				assert_eq!(d_len, 70);
+			}
+			_ => panic!("Expected SizeMismatch error with both buffers wrong size"),
+		}
+		
+		// Test with correct sizes - should succeed
+		let mut k_ok = vec![0.0; data_len];
+		let mut d_ok = vec![0.0; data_len];
+		let result = srsi_into_slice(&mut k_ok, &mut d_ok, &input, Kernel::Scalar);
+		assert!(result.is_ok(), "Should succeed with correct buffer sizes. Error: {:?}", result);
+	}
 
 	#[cfg(feature = "proptest")]
 	generate_all_srsi_tests!(check_srsi_property);

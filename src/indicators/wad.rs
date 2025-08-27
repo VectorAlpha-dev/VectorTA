@@ -33,7 +33,8 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel,
+	init_matrix_prefixes, make_uninit_matrix
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -43,6 +44,7 @@ use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::error::Error;
+use std::mem::ManuallyDrop;
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
@@ -128,6 +130,8 @@ pub enum WadError {
 	EmptyData,
 	#[error("wad: All values are NaN.")]
 	AllValuesNaN,
+	#[error("wad: Invalid batch kernel.")]
+	InvalidKernel,
 }
 
 #[inline]
@@ -334,7 +338,7 @@ pub fn wad_batch_with_kernel(high: &[f64], low: &[f64], close: &[f64], k: Kernel
 	let kernel = match k {
 		Kernel::Auto => detect_best_batch_kernel(),
 		other if other.is_batch() => other,
-		_ => Kernel::ScalarBatch,
+		_ => return Err(WadError::InvalidKernel),
 	};
 	wad_batch_par_slice(high, low, close, kernel)
 }
@@ -390,22 +394,69 @@ fn wad_batch_inner(
 	if high.iter().all(|x| x.is_nan()) || low.iter().all(|x| x.is_nan()) || close.iter().all(|x| x.is_nan()) {
 		return Err(WadError::AllValuesNaN);
 	}
-	let mut values = alloc_with_nan_prefix(len, 0);
-	unsafe {
-		match kern {
-			Kernel::Scalar | Kernel::ScalarBatch => wad_row_scalar(high, low, close, &mut values),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => wad_row_avx2(high, low, close, &mut values),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => wad_row_avx512(high, low, close, &mut values),
-			_ => unreachable!(),
-		}
-	}
+
+	// Use uninit matrix + prefix init, parity with ALMA
+	let mut buf_mu = make_uninit_matrix(1, len);
+	init_matrix_prefixes(&mut buf_mu, len, &[0]); // WAD warmup = 0
+
+	let mut guard = ManuallyDrop::new(buf_mu);
+	let out: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len())
+	};
+
+	// Write in place
+	wad_batch_inner_into(high, low, close, kern, false, out)?;
+
+	// Turn matrix back into Vec without copy
+	let values = unsafe {
+		Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, guard.len(), guard.capacity())
+	};
+
 	Ok(WadBatchOutput {
 		values,
 		rows: 1,
 		cols: len,
 	})
+}
+
+#[inline(always)]
+fn wad_batch_inner_into(
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	kern: Kernel,
+	_parallel: bool,
+	out: &mut [f64],
+) -> Result<(), WadError> {
+	if high.is_empty() || low.is_empty() || close.is_empty() {
+		return Err(WadError::EmptyData);
+	}
+	let len = high.len();
+	if len != low.len() || len != close.len() {
+		return Err(WadError::EmptyData);
+	}
+	if high.iter().all(|x| x.is_nan()) || low.iter().all(|x| x.is_nan()) || close.iter().all(|x| x.is_nan()) {
+		return Err(WadError::AllValuesNaN);
+	}
+	if out.len() != len {
+		return Err(WadError::EmptyData); // length guard
+	}
+
+	let actual = match kern {
+		Kernel::Auto => detect_best_batch_kernel(),
+		k => k,
+	};
+	unsafe {
+		match actual {
+			Kernel::Scalar | Kernel::ScalarBatch => wad_row_scalar(high, low, close, out),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => wad_row_avx2(high, low, close, out),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => wad_row_avx512(high, low, close, out),
+			_ => unreachable!(),
+		}
+	}
+	Ok(())
 }
 
 #[cfg(test)]
@@ -1027,39 +1078,24 @@ pub fn wad_batch_py<'py>(
 	close: PyReadonlyArray1<'py, f64>,
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
+	use pyo3::types::PyDict;
+
 	let high_slice = high.as_slice()?;
 	let low_slice = low.as_slice()?;
 	let close_slice = close.as_slice()?;
-	
-	let kern = validate_kernel(kernel, true)?;
-	
-	// WAD has no parameters, so this is simplified
+
 	let cols = high_slice.len();
-	let rows = 1; // Only one combination since no parameters
-	
-	// Pre-allocate output array
-	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-	let slice_out = unsafe { out_arr.as_slice_mut()? };
-	
-	py.allow_threads(|| {
-		let kernel = match kern {
-			Kernel::Auto => detect_best_batch_kernel(),
-			k => k,
-		};
-		
-		// Call the batch function directly
-		wad_batch_with_kernel(high_slice, low_slice, close_slice, kernel)
-			.map(|output| {
-				slice_out.copy_from_slice(&output.values);
-			})
-	})
-	.map_err(|e| PyValueError::new_err(e.to_string()))?;
-	
-	// Build result dictionary
+	let rows = 1usize;
+
+	let out_arr = unsafe { numpy::PyArray1::<f64>::new(py, [rows * cols], false) };
+	let out_slice = unsafe { out_arr.as_slice_mut()? };
+
+	let kern = validate_kernel(kernel, true)?;
+	py.allow_threads(|| wad_batch_inner_into(high_slice, low_slice, close_slice, kern, true, out_slice))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
 	let dict = PyDict::new(py);
 	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
-	// No parameter arrays since WAD has no parameters
-	
 	Ok(dict)
 }
 
@@ -1136,6 +1172,29 @@ pub fn wad_into(
 }
 
 #[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn wad_batch_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	close_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+) -> Result<usize, JsValue> {
+	if high_ptr.is_null() || low_ptr.is_null() || close_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to wad_batch_into"));
+	}
+	unsafe {
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+		let close = std::slice::from_raw_parts(close_ptr, len);
+		let out = std::slice::from_raw_parts_mut(out_ptr, len);
+		wad_batch_inner_into(high, low, close, detect_best_kernel(), false, out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		Ok(1) // rows
+	}
+}
+
+#[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct WadBatchConfig {
 	// WAD has no parameters, but we keep the structure for consistency
@@ -1152,16 +1211,14 @@ pub struct WadBatchJsOutput {
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = wad_batch)]
-pub fn wad_batch_js(high: &[f64], low: &[f64], close: &[f64], _config: JsValue) -> Result<JsValue, JsValue> {
-	// WAD has no parameters, so batch processing returns single row
-	let result = wad_js(high, low, close)?;
-	
-	let js_output = WadBatchJsOutput {
-		values: result,
-		rows: 1,
-		cols: high.len(),
-	};
-	
-	serde_wasm_bindgen::to_value(&js_output)
-		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+pub fn wad_batch_unified_js(
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	_config: JsValue, // accept and ignore, WAD has no params
+) -> Result<JsValue, JsValue> {
+	let out = wad_batch_inner(high, low, close, detect_best_kernel(), false)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	let js = WadBatchJsOutput { values: out.values, rows: out.rows, cols: out.cols };
+	serde_wasm_bindgen::to_value(&js).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }

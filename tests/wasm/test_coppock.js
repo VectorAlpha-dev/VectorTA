@@ -67,13 +67,23 @@ test('COPPOCK accuracy', () => {
 test('COPPOCK default parameters', () => {
     // Test with default parameters
     const close = new Float64Array(testData.close);
+    const expected = EXPECTED_OUTPUTS.coppock;
     
-    const result = wasm.coppock_js(close, 11, 14, 10, "wma");
+    const result = wasm.coppock_js(
+        close, 
+        expected.defaultParams.short,
+        expected.defaultParams.long,
+        expected.defaultParams.ma,
+        expected.defaultParams.ma_type
+    );
     assert.strictEqual(result.length, close.length);
+    
+    // Calculate warmup period: max(short, long) + (ma - 1)
+    const warmup = Math.max(expected.defaultParams.short, expected.defaultParams.long) + (expected.defaultParams.ma - 1);
     
     // After warmup period, values should be present
     let foundNonNaN = false;
-    for (let i = 30; i < result.length; i++) {
+    for (let i = warmup; i < result.length; i++) {
         if (!isNaN(result[i])) {
             foundNonNaN = true;
             break;
@@ -248,22 +258,40 @@ test('COPPOCK supported MA types', () => {
     // Test that different MA types work
     const close = new Float64Array(testData.close.slice(0, 100));
     
-    const maTypes = ['sma', 'ema', 'wma', 'hma', 'rma', 'tema'];
+    // Only test MA types that are actually supported
+    const maTypes = ['sma', 'ema', 'wma'];
+    const results = {};
     
     for (const maType of maTypes) {
         const result = wasm.coppock_js(close, 11, 14, 10, maType);
         assert.strictEqual(result.length, close.length);
         
+        // Calculate warmup period
+        const warmup = Math.max(11, 14) + (10 - 1);
+        
         // After warmup, should have values
         let foundValid = false;
-        for (let i = 30; i < result.length; i++) {
+        for (let i = warmup; i < result.length; i++) {
             if (!isNaN(result[i])) {
                 foundValid = true;
                 break;
             }
         }
         assert(foundValid, `No valid values for MA type ${maType}`);
+        results[maType] = result;
     }
+    
+    // Verify different MA types produce different results
+    let allSame = true;
+    for (let i = 30; i < 100; i++) {
+        if (!isNaN(results['sma'][i]) && !isNaN(results['ema'][i])) {
+            if (Math.abs(results['sma'][i] - results['ema'][i]) > 1e-10) {
+                allSame = false;
+                break;
+            }
+        }
+    }
+    assert(!allSame, "Different MA types should produce different results");
 });
 
 test('COPPOCK memory leak prevention', () => {

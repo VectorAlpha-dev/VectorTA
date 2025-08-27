@@ -8,8 +8,11 @@
 //!
 //! ## Errors
 //! - **AllValuesNaN**: All input data values are `NaN`.
-//! - **InvalidPeriod**: `period` is zero or exceeds data length.
+//! - **InvalidPeriod**: `period` is less than 2 or exceeds data length.
 //! - **NotEnoughValidData**: Not enough valid data for `period`.
+//! - **EmptyData**: Input data slice is empty.
+//! - **OutputLengthMismatch**: Output buffer length doesn't match input length.
+//! - **InvalidKernelType**: Kernel type mismatch for batch operations.
 //!
 //! ## Returns
 //! - **`Ok(Linearreg_angleOutput)`** on success with `.values` field.
@@ -36,7 +39,6 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -169,6 +171,10 @@ pub enum Linearreg_angleError {
 	NotEnoughValidData { needed: usize, valid: usize },
 	#[error("linearreg_angle: Empty data slice.")]
 	EmptyData,
+	#[error("linearreg_angle: Output length mismatch: expected = {expected}, actual = {actual}")]
+	OutputLengthMismatch { expected: usize, actual: usize },
+	#[error("linearreg_angle: Invalid kernel type for batch operation: {kernel:?}")]
+	InvalidKernelType { kernel: String },
 }
 
 #[cfg(feature = "wasm")]
@@ -199,7 +205,7 @@ pub fn linearreg_angle_with_kernel(
 	let len = data.len();
 	let period = input.get_period();
 
-	if period == 0 || period > len {
+	if period < 2 || period > len {
 		return Err(Linearreg_angleError::InvalidPeriod { period, data_len: len });
 	}
 	if (len - first) < period {
@@ -298,12 +304,14 @@ pub struct Linearreg_angleStream {
 	sum_x_sqr: f64,
 	divisor: f64,
 	count: usize,  // Track total values seen for correct indexing
+	sum_y: f64,   // Running sum of y values
+	sum_kd: f64,  // Running sum of k*d values
 }
 
 impl Linearreg_angleStream {
 	pub fn try_new(params: Linearreg_angleParams) -> Result<Self, Linearreg_angleError> {
 		let period = params.period.unwrap_or(14);
-		if period == 0 {
+		if period < 2 {
 			return Err(Linearreg_angleError::InvalidPeriod { period, data_len: 0 });
 		}
 
@@ -320,10 +328,13 @@ impl Linearreg_angleStream {
 			sum_x_sqr,
 			divisor,
 			count: 0,
+			sum_y: 0.0,
+			sum_kd: 0.0,
 		})
 	}
 	#[inline(always)]
 	pub fn update(&mut self, value: f64) -> Option<f64> {
+		let old_value = self.buffer[self.head];
 		self.buffer[self.head] = value;
 		self.head = (self.head + 1) % self.period;
 		self.count += 1;
@@ -331,28 +342,35 @@ impl Linearreg_angleStream {
 		if !self.filled && self.head == 0 {
 			self.filled = true;
 		}
-		if !self.filled {
+		
+		if self.filled {
+			// Update running sums incrementally
+			// Remove old value contribution
+			if !old_value.is_nan() {
+				self.sum_y -= old_value;
+			}
+			// Add new value contribution  
+			self.sum_y += value;
+			
+			// For sum_kd: when window slides, all indices effectively decrease by 1
+			// So we subtract sum_y (equivalent to decreasing all indices by 1)
+			// Then add the new value at index (period-1)
+			self.sum_kd -= self.sum_y;
+			self.sum_kd += value * (self.period as f64 - 1.0);
+		} else {
+			// Still filling the buffer - just accumulate
+			if !value.is_nan() {
+				self.sum_y += value;
+				// Position in buffer is (self.count - 1)
+				self.sum_kd += value * ((self.count - 1) as f64);
+			}
 			return None;
 		}
 		
-		// Calculate sum_y and sum_kd for the window
-		let mut sum_y = 0.0;
-		let mut sum_kd = 0.0;
-		
-		// The buffer contains the last 'period' values in circular order
-		// We need to calculate the proper indices for the linear regression
-		let start_idx = self.count - self.period;
-		
-		for j in 0..self.period {
-			let buf_idx = (self.head + j) % self.period;
-			let actual_idx = start_idx + j;
-			sum_y += self.buffer[buf_idx];
-			sum_kd += (actual_idx as f64) * self.buffer[buf_idx];
-		}
-		
 		let current_idx = self.count - 1;
-		let sum_xy = (current_idx as f64) * sum_y - sum_kd;
-		let slope = ((self.period as f64) * sum_xy - self.sum_x * sum_y) / self.divisor;
+		let start_idx = current_idx - self.period + 1;
+		let sum_xy = (current_idx as f64) * self.sum_y - self.sum_kd - (start_idx as f64) * self.sum_y;
+		let slope = ((self.period as f64) * sum_xy - self.sum_x * self.sum_y) / self.divisor;
 		Some(slope.atan() * (180.0 / PI))
 	}
 }
@@ -417,7 +435,7 @@ pub fn linearreg_angle_batch_with_kernel(
 	let kernel = match k {
 		Kernel::Auto => detect_best_batch_kernel(),
 		other if other.is_batch() => other,
-		_ => return Err(Linearreg_angleError::InvalidPeriod { period: 0, data_len: 0 }),
+		_ => return Err(Linearreg_angleError::InvalidKernelType { kernel: format!("{:?}", k) }),
 	};
 	let simd = match kernel {
 		Kernel::Avx512Batch => Kernel::Avx512,
@@ -606,19 +624,6 @@ unsafe fn linearreg_angle_row_avx512_long(data: &[f64], first: usize, period: us
 	linearreg_angle_scalar(data, period, first, out)
 }
 
-#[inline(always)]
-fn expand_grid_lra(r: &Linearreg_angleBatchRange) -> Vec<Linearreg_angleParams> {
-	fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-		if step == 0 || start == end {
-			return vec![start];
-		}
-		(start..=end).step_by(step).collect()
-	}
-	axis_usize(r.period)
-		.into_iter()
-		.map(|p| Linearreg_angleParams { period: Some(p) })
-		.collect()
-}
 
 #[cfg(test)]
 mod tests {
@@ -1320,7 +1325,7 @@ pub fn linearreg_angle_into_slice(
 	let len = data.len();
 	let period = input.get_period();
 
-	if period == 0 || period > len {
+	if period < 2 || period > len {
 		return Err(Linearreg_angleError::InvalidPeriod { period, data_len: len });
 	}
 	if (len - first) < period {
@@ -1331,9 +1336,9 @@ pub fn linearreg_angle_into_slice(
 	}
 
 	if dst.len() != len {
-		return Err(Linearreg_angleError::InvalidPeriod {
-			period: dst.len(),
-			data_len: len,
+		return Err(Linearreg_angleError::OutputLengthMismatch {
+			expected: len,
+			actual: dst.len(),
 		});
 	}
 
@@ -1417,47 +1422,57 @@ pub fn linearreg_angle_batch_py<'py>(
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
 	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
 	use pyo3::types::PyDict;
+	use std::mem::MaybeUninit;
 
 	let slice_in = data.as_slice()?;
 
 	let sweep = Linearreg_angleBatchRange { period: period_range };
-
 	let combos = expand_grid(&sweep);
+	if combos.is_empty() {
+		return Err(PyValueError::new_err("linearreg_angle_batch: empty grid"));
+	}
 	let rows = combos.len();
 	let cols = slice_in.len();
 
+	// Allocate uninitialized flat output (rows*cols), like alma.rs
 	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
 	let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-	let kern = validate_kernel(kernel, true)?;
+	// Warmup prefixes via helper, zero-copy, before compute
+	let first = slice_in.iter().position(|x| !x.is_nan()).ok_or_else(|| PyValueError::new_err("AllValuesNaN"))?;
+	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
 
-	let combos = py
-		.allow_threads(|| {
-			let kernel = match kern {
-				Kernel::Auto => detect_best_batch_kernel(),
-				k => k,
-			};
-			let simd = match kernel {
-				Kernel::Avx512Batch => Kernel::Avx512,
-				Kernel::Avx2Batch => Kernel::Avx2,
-				Kernel::ScalarBatch => Kernel::Scalar,
-				_ => unreachable!(),
-			};
-			linearreg_angle_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
-		})
-		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	// Reinterpret NumPy memory as MaybeUninit<f64> and initialize prefixes with NaN
+	let mu: &mut [MaybeUninit<f64>] = unsafe {
+		core::slice::from_raw_parts_mut(slice_out.as_mut_ptr() as *mut MaybeUninit<f64>, slice_out.len())
+	};
+	init_matrix_prefixes(mu, cols, &warm);
+
+	// Resolve kernel once, map batch→simd
+	let kern = validate_kernel(kernel, true)?;
+	let resolved = match kern {
+		Kernel::Auto => detect_best_batch_kernel(),
+		k => k,
+	};
+	let simd = match resolved {
+		Kernel::Avx512Batch => Kernel::Avx512,
+		Kernel::Avx2Batch => Kernel::Avx2,
+		Kernel::ScalarBatch => Kernel::Scalar,
+		_ => unreachable!(),
+	};
+
+	// Compute into pre-initialized buffer
+	py.allow_threads(|| {
+		linearreg_angle_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+	})
+	.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
 	let dict = PyDict::new(py);
 	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
 	dict.set_item(
 		"periods",
-		combos
-			.iter()
-			.map(|p| p.period.unwrap() as u64)
-			.collect::<Vec<_>>()
-			.into_pyarray(py),
+		combos.iter().map(|p| p.period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py),
 	)?;
-
 	Ok(dict)
 }
 
@@ -1473,10 +1488,8 @@ fn linearreg_angle_batch_inner_into(
 	if combos.is_empty() {
 		return Err(Linearreg_angleError::InvalidPeriod { period: 0, data_len: 0 });
 	}
-	let first = data
-		.iter()
-		.position(|x| !x.is_nan())
-		.ok_or(Linearreg_angleError::AllValuesNaN)?;
+
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(Linearreg_angleError::AllValuesNaN)?;
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
 	if data.len() - first < max_p {
 		return Err(Linearreg_angleError::NotEnoughValidData {
@@ -1484,48 +1497,49 @@ fn linearreg_angle_batch_inner_into(
 			valid: data.len() - first,
 		});
 	}
-	let rows = combos.len();
+
 	let cols = data.len();
-	
-	// Initialize NaN prefixes for each row based on warmup period
-	for (row, combo) in combos.iter().enumerate() {
-		let warmup = first + combo.period.unwrap() - 1;
-		let row_start = row * cols;
-		for i in 0..warmup.min(cols) {
-			out[row_start + i] = f64::NAN;
-		}
-	}
-	
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+
+	// Treat out as uninitialized to avoid UB and copies, like alma.rs
+	let out_uninit: &mut [core::mem::MaybeUninit<f64>] = unsafe {
+		core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut core::mem::MaybeUninit<f64>, out.len())
+	};
+
+	let do_row = |row: usize, dst_mu: &mut [core::mem::MaybeUninit<f64>]| unsafe {
 		let period = combos[row].period.unwrap();
+		// Temporarily view as f64 for kernel write
+		let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 		match kern {
-			Kernel::Scalar => linearreg_angle_row_scalar(data, first, period, out_row),
+			Kernel::Scalar | Kernel::ScalarBatch => linearreg_angle_row_scalar(data, first, period, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => linearreg_angle_row_avx2(data, first, period, out_row),
+			Kernel::Avx2 | Kernel::Avx2Batch => linearreg_angle_row_avx2(data, first, period, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => linearreg_angle_row_avx512(data, first, period, out_row),
-			_ => unreachable!(),
+			Kernel::Avx512 | Kernel::Avx512Batch => linearreg_angle_row_avx512(data, first, period, dst),
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+				linearreg_angle_row_scalar(data, first, period, dst)
+			}
+			Kernel::Auto => unreachable!("resolve kernel before calling inner_into"),
 		}
 	};
+
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			out.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
+			out_uninit.par_chunks_mut(cols).enumerate().for_each(|(row, slice)| do_row(row, slice));
 		}
-
 		#[cfg(target_arch = "wasm32")]
 		{
-			for (row, slice) in out.chunks_mut(cols).enumerate() {
+			for (row, slice) in out_uninit.chunks_mut(cols).enumerate() {
 				do_row(row, slice);
 			}
 		}
 	} else {
-		for (row, slice) in out.chunks_mut(cols).enumerate() {
+		for (row, slice) in out_uninit.chunks_mut(cols).enumerate() {
 			do_row(row, slice);
 		}
 	}
+
 	Ok(combos)
 }
 
@@ -1630,7 +1644,17 @@ pub fn linearreg_angle_batch_js(data: &[f64], config: JsValue) -> Result<JsValue
 		period: config.period_range,
 	};
 
-	let output = linearreg_angle_batch_inner(data, &sweep, Kernel::Scalar, false)
+	// Use same kernel resolution as Python binding for consistency
+	let kernel = detect_best_batch_kernel();
+	let simd = match kernel {
+		Kernel::Avx512Batch => Kernel::Avx512,
+		Kernel::Avx2Batch => Kernel::Avx2,
+		Kernel::ScalarBatch => Kernel::Scalar,
+		_ => Kernel::Scalar,
+	};
+	
+	// Use same inner that does make_uninit_matrix + init_matrix_prefixes
+	let output = linearreg_angle_batch_inner(data, &sweep, simd, false)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	let js_output = Linearreg_angleBatchJsOutput {

@@ -1,10 +1,10 @@
 //! # Sine Weighted Moving Average (SINWMA)
 //!
-//! A specialized weighted moving average that applies sine coefficients to
-//! the most recent data points. The sine values decrease from `sin(π/(period+1))`
-//! at the earliest point up to `sin(π * period / (period+1))` at the most recent
-//! point in the window, emphasizing nearer data. This approach can offer a smooth
-//! yet responsive curve.
+//! A specialized weighted moving average that applies sine coefficients to create
+//! a symmetric bell-shaped weighting curve. The weights follow the pattern
+//! `sin((k+1)π/(period+1))` for k=0 to period-1, forming a sine window that
+//! peaks at the center of the data window. This creates a smooth, balanced
+//! weighting that reduces edge effects while maintaining responsiveness.
 //!
 //! ## Parameters
 //! - **period**: Number of data points to include in each weighted sum (defaults to 14).
@@ -247,10 +247,6 @@ fn sinwma_prepare<'a>(
 		return Err(SinWmaError::EmptyInputData);
 	}
 
-	if data.is_empty() {
-		return Err(SinWmaError::EmptyInputData);
-	}
-
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(SinWmaError::AllValuesNaN)?;
 
 	let period = input.get_period();
@@ -303,6 +299,10 @@ fn sinwma_compute_into(data: &[f64], weights: &[f64], period: usize, first: usiz
 			Kernel::Avx2 | Kernel::Avx2Batch => sinwma_avx2(data, weights, period, first, out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 | Kernel::Avx512Batch => sinwma_avx512(data, weights, period, first, out),
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+				sinwma_scalar(data, weights, period, first, out)
+			}
 			_ => unreachable!(),
 		}
 	}
@@ -547,6 +547,29 @@ fn expand_grid(r: &SinWmaBatchRange) -> Vec<SinWmaParams> {
 	out
 }
 
+#[inline]
+fn round_up8(x: usize) -> usize {
+	(x + 7) & !7
+}
+
+#[inline(always)]
+pub unsafe fn sinwma_row_dispatch(
+	data: &[f64], first: usize, period: usize, w_ptr: *const f64, out: &mut [f64], kern: Kernel
+) {
+	match kern {
+		Kernel::Scalar | Kernel::ScalarBatch => sinwma_row_scalar(data, first, period, w_ptr, out),
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx2 | Kernel::Avx2Batch => sinwma_row_avx2(data, first, period, w_ptr, out),
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx512 | Kernel::Avx512Batch => sinwma_row_avx512(data, first, period, w_ptr, out),
+		#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+		Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+			sinwma_row_scalar(data, first, period, w_ptr, out)
+		}
+		_ => unreachable!(),
+	}
+}
+
 #[inline(always)]
 pub fn sinwma_batch_slice(
 	data: &[f64],
@@ -594,43 +617,40 @@ fn sinwma_batch_inner(
 	let cols = data.len();
 	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
 
-	let mut raw = make_uninit_matrix(rows, cols); // Vec<MaybeUninit<f64>>
-	unsafe { init_matrix_prefixes(&mut raw, cols, &warm) }; // fill per-row NaNs
+	let mut raw = make_uninit_matrix(rows, cols);
+	init_matrix_prefixes(&mut raw, cols, &warm);
 
-	// ---------- closure that fills one row ----------
-	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
-		let period = combos[row].period.unwrap();
+	// Precompute normalized sine weights into flat buffer with padded stride
+	let stride = round_up8(max_p);
+	let cap = rows * stride;
+	let mut flat_w = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cap);
+	flat_w.resize(cap, 0.0);
 
-		// build the (normalised) sine-weight vector for this period …
-		let mut sines: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, period);
-		sines.resize(period, 0.0);
+	for (row, prm) in combos.iter().enumerate() {
+		let p = prm.period.unwrap();
+		let base = row * stride;
 		let mut sum = 0.0;
-		for k in 0..period {
-			let a = (k as f64 + 1.0) * PI / (period as f64 + 1.0);
+		for k in 0..p {
+			let a = (k as f64 + 1.0) * PI / (p as f64 + 1.0);
 			let v = a.sin();
-			sines[k] = v;
+			flat_w[base + k] = v;
 			sum += v;
 		}
-		let inv_sum = 1.0 / sum;
-		for w in &mut sines[..] {
-			// or `for w in sines.iter_mut() {`
-			*w *= inv_sum;
+		let inv = 1.0 / sum;
+		for k in 0..p {
+			flat_w[base + k] *= inv;
 		}
+	}
 
-		// reinterpret *just this row* as &mut [f64]
-		let out_row = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
-
-		match kern {
-			Kernel::Scalar => sinwma_row_scalar(data, first, period, sines.as_ptr(), out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => sinwma_row_avx2(data, first, period, sines.as_ptr(), out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => sinwma_row_avx512(data, first, period, sines.as_ptr(), out_row),
-			_ => unreachable!(),
-		}
+	// Closure that fills one row
+	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
+		let p = combos[row].period.unwrap();
+		let w_ptr = flat_w.as_ptr().add(row * stride);
+		let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
+		sinwma_row_dispatch(data, first, p, w_ptr, dst, kern);
 	};
 
-	// ---------- run every row directly into `raw` ----------
+	// Run every row directly into `raw`
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
@@ -649,8 +669,11 @@ fn sinwma_batch_inner(
 		}
 	}
 
-	// ---------- transmute to finished matrix ----------
-	let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
+	// Finalize matrix like ALMA (no transmute)
+	let mut guard = core::mem::ManuallyDrop::new(raw);
+	let values = unsafe {
+		Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, guard.len(), guard.capacity())
+	};
 
 	Ok(SinWmaBatchOutput {
 		values,
@@ -688,68 +711,59 @@ fn sinwma_batch_inner_into(
 
 	let rows = combos.len();
 	let cols = data.len();
-
-	// Collect warm-up lengths per row once
 	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
 
-	// SAFETY: We're reinterpreting the output slice as MaybeUninit to use the efficient
-	// init_matrix_prefixes function. This is safe because:
-	// 1. MaybeUninit<T> has the same layout as T
-	// 2. We ensure all values are written before the slice is used again
-	let out_uninit = unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len()) };
+	// Cast output to MaybeUninit and prefix NaNs
+	let out_mu = unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len()) };
+	init_matrix_prefixes(out_mu, cols, &warm);
 
-	unsafe { init_matrix_prefixes(out_uninit, cols, &warm) };
+	// Precompute normalized sine weights into flat buffer with padded stride
+	let stride = round_up8(max_p);
+	let cap = rows * stride;
+	let mut flat_w = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cap);
+	flat_w.resize(cap, 0.0);
 
-	// Closure that writes one row; it receives &mut [MaybeUninit<f64>]
-	// and casts *only* that slice to &mut [f64] for the kernel call
-	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
-		let period = combos[row].period.unwrap();
-
-		// Build the (normalised) sine-weight vector for this period
-		let mut sines: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, period);
-		sines.resize(period, 0.0);
+	for (row, prm) in combos.iter().enumerate() {
+		let p = prm.period.unwrap();
+		let base = row * stride;
 		let mut sum = 0.0;
-		for k in 0..period {
-			let a = (k as f64 + 1.0) * PI / (period as f64 + 1.0);
+		for k in 0..p {
+			let a = (k as f64 + 1.0) * PI / (p as f64 + 1.0);
 			let v = a.sin();
-			sines[k] = v;
+			flat_w[base + k] = v;
 			sum += v;
 		}
-		let inv_sum = 1.0 / sum;
-		for w in &mut sines[..] {
-			*w *= inv_sum;
+		let inv = 1.0 / sum;
+		for k in 0..p {
+			flat_w[base + k] *= inv;
 		}
+	}
 
-		// Cast the row slice (which is definitely ours to mutate) to f64
+	// Row closure now reuses the table
+	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
+		let p = combos[row].period.unwrap();
+		let w_ptr = flat_w.as_ptr().add(row * stride);
 		let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
-
-		match kern {
-			Kernel::Scalar | Kernel::ScalarBatch => sinwma_row_scalar(data, first, period, sines.as_ptr(), dst),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => sinwma_row_avx2(data, first, period, sines.as_ptr(), dst),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => sinwma_row_avx512(data, first, period, sines.as_ptr(), dst),
-			_ => unreachable!(),
-		}
+		sinwma_row_dispatch(data, first, p, w_ptr, dst, kern);
 	};
 
 	// Run every row directly into the output buffer
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			out_uninit
+			out_mu
 				.par_chunks_mut(cols)
 				.enumerate()
 				.for_each(|(r, sl)| do_row(r, sl));
 		}
 		#[cfg(target_arch = "wasm32")]
 		{
-			for (r, sl) in out_uninit.chunks_mut(cols).enumerate() {
+			for (r, sl) in out_mu.chunks_mut(cols).enumerate() {
 				do_row(r, sl);
 			}
 		}
 	} else {
-		for (r, sl) in out_uninit.chunks_mut(cols).enumerate() {
+		for (r, sl) in out_mu.chunks_mut(cols).enumerate() {
 			do_row(r, sl);
 		}
 	}
@@ -1449,7 +1463,7 @@ mod tests {
 /// data : numpy.ndarray
 ///     Input data array
 /// period : int
-///     The period for the SINWMA calculation (must be >= 2)
+///     The period for the SINWMA calculation (must be >= 1)
 /// kernel : str, optional
 ///     Kernel to use: 'auto' (default), 'scalar', 'avx2', 'avx512'
 ///
@@ -1754,4 +1768,37 @@ pub fn sinwma_batch_rows_cols_js(
 
 	let combos = expand_grid(&sweep);
 	vec![combos.len() as u32, data_len as u32]
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn sinwma_batch_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+) -> Result<usize, JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to sinwma_batch_into"));
+	}
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		let sweep = SinWmaBatchRange { period: (period_start, period_end, period_step) };
+		let combos = expand_grid(&sweep);
+		let rows = combos.len();
+		let cols = len;
+
+		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+		// Map batch kernel -> base kernel and compute directly into `out`
+		let simd = match detect_best_batch_kernel() {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch   => Kernel::Avx2,
+			_                   => Kernel::Scalar,
+		};
+		sinwma_batch_inner_into(data, &sweep, simd, false, out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		Ok(rows)
+	}
 }

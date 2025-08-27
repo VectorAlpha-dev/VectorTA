@@ -172,11 +172,7 @@ pub fn trendflex(input: &TrendFlexInput) -> Result<TrendFlexOutput, TrendFlexErr
 }
 
 pub fn trendflex_with_kernel(input: &TrendFlexInput, kernel: Kernel) -> Result<TrendFlexOutput, TrendFlexError> {
-	let data: &[f64] = match &input.data {
-		TrendFlexData::Candles { candles, source } => source_type(candles, source),
-		TrendFlexData::Slice(sl) => sl,
-	};
-
+	let data: &[f64] = input.as_ref();
 	let len = data.len();
 	if len == 0 {
 		return Err(TrendFlexError::NoDataProvided);
@@ -186,10 +182,14 @@ pub fn trendflex_with_kernel(input: &TrendFlexInput, kernel: Kernel) -> Result<T
 	if period == 0 {
 		return Err(TrendFlexError::ZeroTrendFlexPeriod { period });
 	}
-	if period > len {
+	if period >= len {
 		return Err(TrendFlexError::TrendFlexPeriodExceedsData { period, data_len: len });
 	}
 
+	let first = data
+		.iter()
+		.position(|x| !x.is_nan())
+		.ok_or(TrendFlexError::AllValuesNaN)?;
 	let ss_period = ((period as f64) / 2.0).round() as usize;
 	if ss_period > len {
 		return Err(TrendFlexError::SmootherPeriodExceedsData {
@@ -198,88 +198,130 @@ pub fn trendflex_with_kernel(input: &TrendFlexInput, kernel: Kernel) -> Result<T
 		});
 	}
 
-	let first = data
-		.iter()
-		.position(|x| !x.is_nan())
-		.ok_or(TrendFlexError::AllValuesNaN)?;
-
-	let warm = first + period; // identical to streaming impl
+	let warm = first + period;
 	let mut out = alloc_with_nan_prefix(len, warm);
 
-	// --- choose kernel & run ---------------------------------------------------
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
 		k => k,
 	};
 
-	// all kernel stubs still call `trendflex_scalar / _avx*`, but
-	// we copy their **computed part** into our pre-allocated buffer
+	// Compute directly into `out` past the warmup prefix.
 	unsafe {
-		let calc = match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => trendflex_scalar(data, period, first, &mut out)?,
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => trendflex_scalar_into(data, period, ss_period, first, &mut out)?,
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => trendflex_avx2(data, period, first, &mut out)?,
+			Kernel::Avx2 | Kernel::Avx2Batch => trendflex_scalar_into(data, period, ss_period, first, &mut out)?,
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => trendflex_avx512(data, period, first, &mut out)?,
+			Kernel::Avx512 | Kernel::Avx512Batch => trendflex_scalar_into(data, period, ss_period, first, &mut out)?,
 			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-			Kernel::Avx2 | Kernel::Avx512 | Kernel::Avx2Batch | Kernel::Avx512Batch => {
-				// Fallback to scalar when AVX is not available
-				trendflex_scalar(data, period, first, &mut out)?
+			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+				trendflex_scalar_into(data, period, ss_period, first, &mut out)?
 			}
-			_ => unreachable!(),
-		};
-		// preserve the NaN prefix we just allocated
-		out[warm..].copy_from_slice(&calc.values[warm..]);
+			Kernel::Auto => unreachable!(),
+		}
 	}
 
 	Ok(TrendFlexOutput { values: out })
 }
 
 pub fn trendflex_into_slice(
-	out: &mut [f64],
+	dst: &mut [f64],
 	input: &TrendFlexInput,
 	kernel: Kernel,
 ) -> Result<(), TrendFlexError> {
-	let result = trendflex_with_kernel(input, kernel)?;
-	out.copy_from_slice(&result.values);
+	let data: &[f64] = input.as_ref();
+	let len = data.len();
+	if dst.len() != len {
+		return Err(TrendFlexError::TrendFlexPeriodExceedsData {
+			period: dst.len(),
+			data_len: len,
+		});
+	}
+	if len == 0 {
+		return Err(TrendFlexError::NoDataProvided);
+	}
+	let period = input.get_period();
+	if period == 0 {
+		return Err(TrendFlexError::ZeroTrendFlexPeriod { period });
+	}
+	if period >= len {
+		return Err(TrendFlexError::TrendFlexPeriodExceedsData { period, data_len: len });
+	}
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(TrendFlexError::AllValuesNaN)?;
+	let ss_period = ((period as f64) / 2.0).round() as usize;
+	if ss_period > data.len() {
+		return Err(TrendFlexError::SmootherPeriodExceedsData {
+			ss_period,
+			data_len: data.len(),
+		});
+	}
+
+	let chosen = match kernel {
+		Kernel::Auto => detect_best_kernel(),
+		k => k,
+	};
+
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => trendflex_scalar_into(data, period, ss_period, first, dst)?,
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch |
+			Kernel::Avx512 | Kernel::Avx512Batch => trendflex_scalar_into(data, period, ss_period, first, dst)?,
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+				trendflex_scalar_into(data, period, ss_period, first, dst)?
+			}
+			Kernel::Auto => unreachable!(),
+		}
+	}
+
+	let warmup_end = first + period;
+	for v in &mut dst[..warmup_end] {
+		*v = f64::NAN;
+	}
 	Ok(())
 }
 
-// Scalar solution, called by all AVX stubs too
+// In-place scalar kernel that writes directly into output slice
 #[inline]
-pub unsafe fn trendflex_scalar(
+unsafe fn trendflex_scalar_into(
 	data: &[f64],
 	period: usize,
+	ss_period: usize,
 	first_valid: usize,
 	out: &mut [f64],
-) -> Result<TrendFlexOutput, TrendFlexError> {
+) -> Result<(), TrendFlexError> {
 	use std::f64::consts::PI;
 
 	let len = data.len();
-	let ss_period = ((period as f64) / 2.0).round() as usize;
 	let warm = first_valid + period;
-	let mut tf = alloc_with_nan_prefix(len, warm);
+	
+	// Ensure NaN prefix is set for warmup period
+	for i in 0..warm {
+		out[i] = f64::NAN;
+	}
 
 	if first_valid == 0 {
-		let mut ssf: AVec<f64, ConstAlign<CACHELINE_ALIGN>> = AVec::with_capacity(CACHELINE_ALIGN, len);
-		ssf.resize(len, 0.0);
+		// super smoother over full series
+		let mut ssf = vec![0.0; len];
 		ssf[0] = data[0];
 		if len > 1 {
 			ssf[1] = data[1];
 		}
 
-		let a = (-1.414_f64 * PI / (ss_period as f64)).exp();
+		let a = (-1.414_f64 * PI / ss_period as f64).exp();
 		let a_sq = a * a;
-		let b = 2.0 * a * (1.414_f64 * PI / (ss_period as f64)).cos();
+		let b = 2.0 * a * (1.414_f64 * PI / ss_period as f64).cos();
 		let c = (1.0 + a_sq - b) * 0.5;
 
 		for i in 2..len {
 			ssf[i] = c * (data[i] + data[i - 1]) + b * ssf[i - 1] - a_sq * ssf[i - 2];
 		}
 
-		let mut ms_prev = 0.0;
 		let tp_f = period as f64;
 		let inv_tp = 1.0 / tp_f;
+		let mut ms_prev = 0.0;
 		let mut rolling_sum = ssf[..period].iter().sum::<f64>();
 
 		for i in period..len {
@@ -287,121 +329,119 @@ pub unsafe fn trendflex_scalar(
 			let ms_current = 0.04 * my_sum * my_sum + 0.96 * ms_prev;
 			ms_prev = ms_current;
 
-			tf[i] = if ms_current != 0.0 {
+			out[i] = if ms_current != 0.0 {
 				my_sum / ms_current.sqrt()
 			} else {
 				0.0
 			};
 			rolling_sum += ssf[i] - ssf[i - period];
 		}
-	} else {
-		let m = len - first_valid;
-		if m < period {
-			return Ok(TrendFlexOutput {
-				values: alloc_with_nan_prefix(len, len),
-			});
-		}
-		if m < ss_period {
-			return Err(TrendFlexError::SmootherPeriodExceedsData { ss_period, data_len: m });
-		}
-		let mut tmp_data: AVec<f64, ConstAlign<CACHELINE_ALIGN>> = AVec::with_capacity(CACHELINE_ALIGN, m);
-		tmp_data.resize(m, 0.0);
-		tmp_data.copy_from_slice(&data[first_valid..]);
-
-		let mut tmp_ssf: AVec<f64, ConstAlign<CACHELINE_ALIGN>> = AVec::with_capacity(CACHELINE_ALIGN, m);
-		tmp_ssf.resize(m, 0.0);
-		tmp_ssf[0] = tmp_data[0];
-		if m > 1 {
-			tmp_ssf[1] = tmp_data[1];
-		}
-
-		let a = (-1.414_f64 * PI / (ss_period as f64)).exp();
-		let a_sq = a * a;
-		let b = 2.0 * a * (1.414_f64 * PI / (ss_period as f64)).cos();
-		let c = (1.0 + a_sq - b) * 0.5;
-
-		for i in 2..m {
-			tmp_ssf[i] = c * (tmp_data[i] + tmp_data[i - 1]) + b * tmp_ssf[i - 1] - a_sq * tmp_ssf[i - 2];
-		}
-
-		let mut ms_prev = 0.0;
-		let tp_f = period as f64;
-		let inv_tp = 1.0 / tp_f;
-		let mut rolling_sum = tmp_ssf[..period].iter().sum::<f64>();
-
-		let mut tmp_tf: AVec<f64, ConstAlign<CACHELINE_ALIGN>> = AVec::with_capacity(CACHELINE_ALIGN, m);
-		tmp_tf.resize(m, f64::NAN);
-
-		for i in period..m {
-			let my_sum = (tp_f * tmp_ssf[i] - rolling_sum) * inv_tp;
-			let ms_current = 0.04 * (my_sum * my_sum) + 0.96 * ms_prev;
-			ms_prev = ms_current;
-			tmp_tf[i] = if ms_current != 0.0 {
-				my_sum / ms_current.sqrt()
-			} else {
-				0.0
-			};
-			rolling_sum += tmp_ssf[i] - tmp_ssf[i - period];
-		}
-		for i in 0..m {
-			tf[first_valid + i] = tmp_tf[i];
-		}
+		// prefix [..warm) already NaN via alloc_with_nan_prefix
+		return Ok(());
 	}
 
-	Ok(TrendFlexOutput { values: tf })
+	// first_valid > 0: operate on tail, write back in-place to `out[first_valid..]`
+	let m = len - first_valid;
+	if m < period {
+		// nothing to compute; leave out as-is (NaN prefix covers entire tail)
+		return Ok(());
+	}
+	if m < ss_period {
+		return Err(TrendFlexError::SmootherPeriodExceedsData { ss_period, data_len: m });
+	}
+
+	let tail = &data[first_valid..];
+	let mut ssf = vec![0.0; m];
+	ssf[0] = tail[0];
+	if m > 1 {
+		ssf[1] = tail[1];
+	}
+
+	let a = (-1.414_f64 * PI / ss_period as f64).exp();
+	let a_sq = a * a;
+	let b = 2.0 * a * (1.414_f64 * PI / ss_period as f64).cos();
+	let c = (1.0 + a_sq - b) * 0.5;
+
+	for i in 2..m {
+		ssf[i] = c * (tail[i] + tail[i - 1]) + b * ssf[i - 1] - a_sq * ssf[i - 2];
+	}
+
+	let tp_f = period as f64;
+	let inv_tp = 1.0 / tp_f;
+	let mut ms_prev = 0.0;
+	let mut rolling_sum = ssf[..period].iter().sum::<f64>();
+
+	for i in period..m {
+		let my_sum = (tp_f * ssf[i] - rolling_sum) * inv_tp;
+		let ms_current = 0.04 * my_sum * my_sum + 0.96 * ms_prev;
+		ms_prev = ms_current;
+
+		out[first_valid + i] = if ms_current != 0.0 {
+			my_sum / ms_current.sqrt()
+		} else {
+			0.0
+		};
+		rolling_sum += ssf[i] - ssf[i - period];
+	}
+
+	Ok(())
 }
 
 // AVX2 stub
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub unsafe fn trendflex_avx2(
+unsafe fn trendflex_avx2_into(
 	data: &[f64],
 	period: usize,
+	ss_period: usize,
 	first_valid: usize,
 	out: &mut [f64],
-) -> Result<TrendFlexOutput, TrendFlexError> {
+) -> Result<(), TrendFlexError> {
 	// Calls scalar solution, maintains API
-	trendflex_scalar(data, period, first_valid, out)
+	trendflex_scalar_into(data, period, ss_period, first_valid, out)
 }
 
 // AVX512 stub
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub unsafe fn trendflex_avx512(
+unsafe fn trendflex_avx512_into(
 	data: &[f64],
 	period: usize,
+	ss_period: usize,
 	first_valid: usize,
 	out: &mut [f64],
-) -> Result<TrendFlexOutput, TrendFlexError> {
+) -> Result<(), TrendFlexError> {
 	if period <= 32 {
-		trendflex_avx512_short(data, period, first_valid, out)
+		trendflex_avx512_short_into(data, period, ss_period, first_valid, out)
 	} else {
-		trendflex_avx512_long(data, period, first_valid, out)
+		trendflex_avx512_long_into(data, period, ss_period, first_valid, out)
 	}
 }
 
 // AVX512 short stub
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub unsafe fn trendflex_avx512_short(
+unsafe fn trendflex_avx512_short_into(
 	data: &[f64],
 	period: usize,
+	ss_period: usize,
 	first_valid: usize,
 	out: &mut [f64],
-) -> Result<TrendFlexOutput, TrendFlexError> {
-	trendflex_scalar(data, period, first_valid, out)
+) -> Result<(), TrendFlexError> {
+	trendflex_scalar_into(data, period, ss_period, first_valid, out)
 }
 
 // AVX512 long stub
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub unsafe fn trendflex_avx512_long(
+unsafe fn trendflex_avx512_long_into(
 	data: &[f64],
 	period: usize,
+	ss_period: usize,
 	first_valid: usize,
 	out: &mut [f64],
-) -> Result<TrendFlexOutput, TrendFlexError> {
-	trendflex_scalar(data, period, first_valid, out)
+) -> Result<(), TrendFlexError> {
+	trendflex_scalar_into(data, period, ss_period, first_valid, out)
 }
 
 // Streaming implementation
@@ -658,10 +698,14 @@ pub fn trendflex_batch_with_kernel(
 	sweep: &TrendFlexBatchRange,
 	k: Kernel,
 ) -> Result<TrendFlexBatchOutput, TrendFlexError> {
+	// Coerce non-batch kernels to their batch equivalents
 	let kernel = match k {
 		Kernel::Auto => detect_best_batch_kernel(),
+		Kernel::Scalar => Kernel::ScalarBatch,
+		Kernel::Avx2 => Kernel::Avx2Batch,
+		Kernel::Avx512 => Kernel::Avx512Batch,
 		other if other.is_batch() => other,
-		_ => return Err(TrendFlexError::NoDataProvided),
+		_ => Kernel::ScalarBatch, // Fallback for any unexpected kernel
 	};
 
 	let simd = match kernel {
@@ -809,8 +853,12 @@ fn trendflex_batch_inner(
 		}
 	}
 
-	// 5. all elements are now initialised → transmute to Vec<f64>
-	let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
+	// 5. all elements are now initialised → convert to Vec<f64> using ManuallyDrop + from_raw_parts
+	use core::mem::ManuallyDrop;
+	let mut guard = ManuallyDrop::new(raw);
+	let values: Vec<f64> = unsafe {
+		Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, guard.len(), guard.capacity())
+	};
 
 	Ok(TrendFlexBatchOutput {
 		values,
@@ -822,35 +870,34 @@ fn trendflex_batch_inner(
 
 // Row functions -- AVX variants are just stubs to scalar
 #[inline(always)]
-unsafe fn trendflex_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-	let res = trendflex_scalar(data, period, first, out);
-	if let Ok(v) = res {
-		out.copy_from_slice(&v.values);
-	}
+unsafe fn trendflex_row_scalar(data: &[f64], first: usize, period: usize, out_row: &mut [f64]) {
+	let ss_period = ((period as f64) / 2.0).round() as usize;
+	let _ = trendflex_scalar_into(data, period, ss_period, first, out_row);
+	// NaN prefixes per-row are already set by init_matrix_prefixes before this call.
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-unsafe fn trendflex_row_avx2(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-	trendflex_row_scalar(data, first, period, out);
+unsafe fn trendflex_row_avx2(data: &[f64], first: usize, period: usize, out_row: &mut [f64]) {
+	trendflex_row_scalar(data, first, period, out_row);
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-unsafe fn trendflex_row_avx512(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
+unsafe fn trendflex_row_avx512(data: &[f64], first: usize, period: usize, out_row: &mut [f64]) {
 	if period <= 32 {
-		trendflex_row_avx512_short(data, first, period, out);
+		trendflex_row_avx512_short(data, first, period, out_row);
 	} else {
-		trendflex_row_avx512_long(data, first, period, out);
+		trendflex_row_avx512_long(data, first, period, out_row);
 	}
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-unsafe fn trendflex_row_avx512_short(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-	trendflex_row_scalar(data, first, period, out);
+unsafe fn trendflex_row_avx512_short(data: &[f64], first: usize, period: usize, out_row: &mut [f64]) {
+	trendflex_row_scalar(data, first, period, out_row);
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-unsafe fn trendflex_row_avx512_long(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-	trendflex_row_scalar(data, first, period, out);
+unsafe fn trendflex_row_avx512_long(data: &[f64], first: usize, period: usize, out_row: &mut [f64]) {
+	trendflex_row_scalar(data, first, period, out_row);
 }
 
 // Test coverage -- use alma.rs style macros and patterns
@@ -1343,6 +1390,87 @@ mod tests {
 	#[cfg(feature = "proptest")]
 	generate_all_trendflex_tests!(check_trendflex_property);
 
+	// Test for trendflex_into_slice validation (prevents panic when period > data.len())
+	#[test]
+	fn test_trendflex_into_slice_validation() {
+		// Test case 1: period exceeds data length
+		let data = vec![1.0, 2.0, 3.0];
+		let params = TrendFlexParams { period: Some(10) };
+		let input = TrendFlexInput::from_slice(&data, params);
+		let mut out = vec![0.0; data.len()];
+		
+		let result = trendflex_into_slice(&mut out, &input, Kernel::Scalar);
+		assert!(result.is_err());
+		match result {
+			Err(TrendFlexError::TrendFlexPeriodExceedsData { period, data_len }) => {
+				assert_eq!(period, 10);
+				assert_eq!(data_len, 3);
+			}
+			_ => panic!("Expected TrendFlexPeriodExceedsData error"),
+		}
+		
+		// Test case 2: empty data
+		let empty_data: Vec<f64> = vec![];
+		let params = TrendFlexParams { period: Some(5) };
+		let input = TrendFlexInput::from_slice(&empty_data, params);
+		let mut out = vec![];
+		
+		let result = trendflex_into_slice(&mut out, &input, Kernel::Scalar);
+		assert!(result.is_err());
+		match result {
+			Err(TrendFlexError::NoDataProvided) => {},
+			_ => panic!("Expected NoDataProvided error"),
+		}
+		
+		// Test case 3: zero period
+		let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+		let params = TrendFlexParams { period: Some(0) };
+		let input = TrendFlexInput::from_slice(&data, params);
+		let mut out = vec![0.0; data.len()];
+		
+		let result = trendflex_into_slice(&mut out, &input, Kernel::Scalar);
+		assert!(result.is_err());
+		match result {
+			Err(TrendFlexError::ZeroTrendFlexPeriod { period }) => {
+				assert_eq!(period, 0);
+			}
+			_ => panic!("Expected ZeroTrendFlexPeriod error"),
+		}
+		
+		// Test case 4: valid input should work
+		let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+		let params = TrendFlexParams { period: Some(3) };
+		let input = TrendFlexInput::from_slice(&data, params);
+		let mut out = vec![0.0; data.len()];
+		
+		let result = trendflex_into_slice(&mut out, &input, Kernel::Scalar);
+		assert!(result.is_ok());
+	}
+
+	// Test for batch kernel coercion
+	#[test]
+	fn test_trendflex_batch_kernel_coercion() {
+		let data = vec![1.0; 50];
+		let sweep = TrendFlexBatchRange { period: (5, 10, 1) };
+		
+		// Test that non-batch kernels are coerced to batch kernels
+		let result_scalar = trendflex_batch_with_kernel(&data, &sweep, Kernel::Scalar);
+		assert!(result_scalar.is_ok());
+		
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		{
+			let result_avx2 = trendflex_batch_with_kernel(&data, &sweep, Kernel::Avx2);
+			assert!(result_avx2.is_ok());
+			
+			let result_avx512 = trendflex_batch_with_kernel(&data, &sweep, Kernel::Avx512);
+			assert!(result_avx512.is_ok());
+		}
+		
+		// Test that batch kernels still work
+		let result_scalar_batch = trendflex_batch_with_kernel(&data, &sweep, Kernel::ScalarBatch);
+		assert!(result_scalar_batch.is_ok());
+	}
+
 	generate_all_trendflex_tests!(
 		check_trendflex_partial_params,
 		check_trendflex_accuracy,
@@ -1779,23 +1907,23 @@ pub fn trendflex_into(
 	if in_ptr.is_null() || out_ptr.is_null() {
 		return Err(JsValue::from_str("null pointer passed to trendflex_into"));
 	}
-
 	unsafe {
 		let data = std::slice::from_raw_parts(in_ptr, len);
-
-		if period == 0 || period > len {
+		if period == 0 || period >= len {
 			return Err(JsValue::from_str("Invalid period"));
 		}
-
-		let params = TrendFlexParams {
-			period: Some(period),
-		};
-
-		let input = TrendFlexInput::from_slice(data, params);
-		let out_slice = std::slice::from_raw_parts_mut(out_ptr, len);
-
-		trendflex_into_slice(out_slice, &input, Kernel::Auto)
-			.map_err(|e| JsValue::from_str(&e.to_string()))
+		let input = TrendFlexInput::from_slice(data, TrendFlexParams { period: Some(period) });
+		if in_ptr == out_ptr {
+			let mut tmp = vec![0.0; len];
+			trendflex_into_slice(&mut tmp, &input, detect_best_kernel())
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			std::slice::from_raw_parts_mut(out_ptr, len).copy_from_slice(&tmp);
+		} else {
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			trendflex_into_slice(out, &input, detect_best_kernel())
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		Ok(())
 	}
 }
 

@@ -220,10 +220,6 @@ pub fn qstick_with_kernel(input: &QstickInput, kernel: Kernel) -> Result<QstickO
 	}
 
 	let mut out = alloc_with_nan_prefix(len, first + period - 1);
-	// Fill remaining values with NaN for binding compatibility
-	for i in (first + period - 1)..out.len() {
-		out[i] = f64::NAN;
-	}
 
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
@@ -466,14 +462,6 @@ fn qstick_batch_inner(
 	let out: &mut [f64] =
 		unsafe { core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len()) };
 	
-	// Fill remaining values with NaN for binding compatibility
-	for (row_idx, warmup) in warm.iter().enumerate() {
-		let row_start = row_idx * cols;
-		for col in *warmup..cols {
-			out[row_start + col] = f64::NAN;
-		}
-	}
-	
 	qstick_batch_inner_into(open, close, sweep, kern, parallel, out)?;
 	
 	// Take ownership of the buffer
@@ -484,7 +472,6 @@ fn qstick_batch_inner(
 			buf_guard.capacity()
 		)
 	};
-	core::mem::forget(buf_guard);
 	
 	Ok(QstickBatchOutput {
 		values,
@@ -504,21 +491,26 @@ fn qstick_batch_inner_into(
 	out: &mut [f64],
 ) -> Result<Vec<QstickParams>, QstickError> {
 	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(QstickError::InvalidPeriod { period: 0, data_len: 0 });
+	}
+
 	let len = open.len().min(close.len());
 	let cols = len;
-	
-	// Find first valid index
-	let mut first = 0;
-	for i in 0..len {
-		if !open[i].is_nan() && !close[i].is_nan() {
-			first = i;
-			break;
-		}
-		if i == len - 1 {
-			return Err(QstickError::AllValuesNaN);
-		}
+
+	// first valid across both inputs
+	let first = (0..len)
+		.find(|&i| !open[i].is_nan() && !close[i].is_nan())
+		.ok_or(QstickError::AllValuesNaN)?;
+
+	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	if len - first < max_p {
+		return Err(QstickError::NotEnoughValidData {
+			needed: max_p,
+			valid: len - first,
+		});
 	}
-	
+
 	// Initialize NaN prefixes for each row based on warmup period
 	for (row, combo) in combos.iter().enumerate() {
 		let warmup = first + combo.period.unwrap() - 1;
@@ -527,40 +519,46 @@ fn qstick_batch_inner_into(
 			out[row_start + i] = f64::NAN;
 		}
 	}
-	
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+
+	// Treat output as uninitialized, like alma_batch_inner_into
+	let out_mu: &mut [MaybeUninit<f64>] = unsafe {
+		std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
+	};
+
+	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
 		let period = combos[row].period.unwrap();
+		// cast current row to f64 slice
+		let dst: &mut [f64] =
+			std::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
+
 		match kern {
-			Kernel::Scalar | Kernel::ScalarBatch | Kernel::Auto => qstick_row_scalar(open, close, first, period, out_row),
+			Kernel::Scalar | Kernel::ScalarBatch | Kernel::Auto =>
+				qstick_scalar(open, close, period, first, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => qstick_row_avx2(open, close, first, period, out_row),
+			Kernel::Avx2 | Kernel::Avx2Batch =>
+				qstick_avx2(open, close, period, first, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => qstick_row_avx512(open, close, first, period, out_row),
+			Kernel::Avx512 | Kernel::Avx512Batch =>
+				qstick_avx512(open, close, period, first, dst),
 			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-			_ => qstick_row_scalar(open, close, first, period, out_row),
+			_ => qstick_scalar(open, close, period, first, dst),
 		}
 	};
-	
+
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			out.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
+			use rayon::prelude::*;
+			out_mu.par_chunks_mut(cols).enumerate().for_each(|(row, slice)| do_row(row, slice));
 		}
-
 		#[cfg(target_arch = "wasm32")]
 		{
-			for (row, slice) in out.chunks_mut(cols).enumerate() {
-				do_row(row, slice);
-			}
+			for (row, slice) in out_mu.chunks_mut(cols).enumerate() { do_row(row, slice); }
 		}
 	} else {
-		for (row, slice) in out.chunks_mut(cols).enumerate() {
-			do_row(row, slice);
-		}
+		for (row, slice) in out_mu.chunks_mut(cols).enumerate() { do_row(row, slice); }
 	}
-	
+
 	Ok(combos)
 }
 
@@ -1280,12 +1278,6 @@ pub fn qstick_into_slice(
 		k => k,
 	};
 	
-	// Initialize warmup period with NaN
-	let warmup_end = first_valid + period - 1;
-	for i in 0..warmup_end {
-		dst[i] = f64::NAN;
-	}
-	
 	match kernel {
 		Kernel::Scalar | Kernel::ScalarBatch => qstick_scalar(open, close, period, first_valid, dst),
 		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1294,6 +1286,10 @@ pub fn qstick_into_slice(
 		Kernel::Avx512 | Kernel::Avx512Batch => qstick_avx512(open, close, period, first_valid, dst),
 		_ => unreachable!(),
 	}
+	
+	// match alma.rs: apply warmup NaNs after compute
+	let warmup_end = first_valid + period - 1;
+	for v in &mut dst[..warmup_end] { *v = f64::NAN; }
 	
 	Ok(())
 }

@@ -45,13 +45,15 @@ test('SuperTrend partial params', () => {
     const low = new Float64Array(testData.low);
     const close = new Float64Array(testData.close);
     
-    // Result is flattened: [trend..., changed...]
-    const result = wasm.supertrend_js(high, low, close, 10, 3.0);
-    assert.strictEqual(result.length, high.length * 2, 'Result should be 2x input length');
+    // Result is structured: { values: [trend..., changed...], rows: 2, cols: len }
+    const result = wasm.supertrend(high, low, close, 10, 3.0);
+    assert.strictEqual(result.values.length, high.length * 2, 'Result should be 2x input length');
+    assert.strictEqual(result.rows, 2, 'Should have 2 rows');
+    assert.strictEqual(result.cols, high.length, 'Cols should match input length');
     
     // Extract trend and changed
-    const trend = result.slice(0, high.length);
-    const changed = result.slice(high.length);
+    const trend = result.values.slice(0, high.length);
+    const changed = result.values.slice(high.length);
     
     assert.strictEqual(trend.length, high.length);
     assert.strictEqual(changed.length, high.length);
@@ -63,11 +65,11 @@ test('SuperTrend accuracy', async () => {
     const low = new Float64Array(testData.low);
     const close = new Float64Array(testData.close);
     
-    const result = wasm.supertrend_js(high, low, close, 10, 3.0);
+    const result = wasm.supertrend(high, low, close, 10, 3.0);
     
     // Extract trend and changed
-    const trend = result.slice(0, high.length);
-    const changed = result.slice(high.length);
+    const trend = result.values.slice(0, high.length);
+    const changed = result.values.slice(high.length);
     
     // Check last 5 values match expected from Rust tests
     const expectedLastFiveTrend = [
@@ -101,7 +103,7 @@ test('SuperTrend zero period', () => {
     const close = new Float64Array([9.5, 11.5, 13.0]);
     
     assert.throws(() => {
-        wasm.supertrend_js(high, low, close, 0, 3.0);
+        wasm.supertrend(high, low, close, 0, 3.0);
     }, /Invalid period/);
 });
 
@@ -112,7 +114,7 @@ test('SuperTrend period exceeds length', () => {
     const close = new Float64Array([9.5, 11.5, 13.0]);
     
     assert.throws(() => {
-        wasm.supertrend_js(high, low, close, 10, 3.0);
+        wasm.supertrend(high, low, close, 10, 3.0);
     }, /Invalid period/);
 });
 
@@ -123,7 +125,7 @@ test('SuperTrend very small dataset', () => {
     const close = new Float64Array([41.0]);
     
     assert.throws(() => {
-        wasm.supertrend_js(high, low, close, 10, 3.0);
+        wasm.supertrend(high, low, close, 10, 3.0);
     }, /Invalid period|Not enough valid data/);
 });
 
@@ -132,7 +134,7 @@ test('SuperTrend empty input', () => {
     const empty = new Float64Array([]);
     
     assert.throws(() => {
-        wasm.supertrend_js(empty, empty, empty, 10, 3.0);
+        wasm.supertrend(empty, empty, empty, 10, 3.0);
     }, /Empty data/);
 });
 
@@ -144,7 +146,7 @@ test('SuperTrend all NaN', () => {
     const close = new Float64Array(size).fill(NaN);
     
     assert.throws(() => {
-        wasm.supertrend_js(high, low, close, 10, 3.0);
+        wasm.supertrend(high, low, close, 10, 3.0);
     }, /All values are NaN/);
 });
 
@@ -161,9 +163,9 @@ test('SuperTrend NaN handling', () => {
         close[i] = NaN;
     }
     
-    const result = wasm.supertrend_js(high, low, close, 10, 3.0);
-    const trend = result.slice(0, high.length);
-    const changed = result.slice(high.length);
+    const result = wasm.supertrend(high, low, close, 10, 3.0);
+    const trend = result.values.slice(0, high.length);
+    const changed = result.values.slice(high.length);
     
     assert.strictEqual(trend.length, high.length);
     assert.strictEqual(changed.length, high.length);
@@ -181,13 +183,13 @@ test('SuperTrend reinput', () => {
     const close = new Float64Array(testData.close);
     
     // First pass
-    const result1 = wasm.supertrend_js(high, low, close, 10, 3.0);
-    const trend1 = result1.slice(0, high.length);
+    const result1 = wasm.supertrend(high, low, close, 10, 3.0);
+    const trend1 = result1.values.slice(0, high.length);
     
     // Second pass - apply SuperTrend to trend output
-    const result2 = wasm.supertrend_js(trend1, trend1, trend1, 5, 2.0);
-    const trend2 = result2.slice(0, trend1.length);
-    const changed2 = result2.slice(trend1.length);
+    const result2 = wasm.supertrend(trend1, trend1, trend1, 5, 2.0);
+    const trend2 = result2.values.slice(0, trend1.length);
+    const changed2 = result2.values.slice(trend1.length);
     
     assert.strictEqual(trend2.length, trend1.length);
     assert.strictEqual(changed2.length, trend1.length);
@@ -245,9 +247,9 @@ test('SuperTrend fast API (no aliasing)', () => {
         }
         
         // Compare with safe API
-        const safeResult = wasm.supertrend_js(high, low, close, 5, 2.0);
-        const safeTrend = safeResult.slice(0, size);
-        const safeChanged = safeResult.slice(size);
+        const safeResult = wasm.supertrend(high, low, close, 5, 2.0);
+        const safeTrend = safeResult.values.slice(0, size);
+        const safeChanged = safeResult.values.slice(size);
         
         assertArrayClose(trend, safeTrend, 1e-10, "Fast vs Safe trend mismatch");
         assertArrayClose(changed, safeChanged, 1e-10, "Fast vs Safe changed mismatch");
@@ -326,11 +328,10 @@ test('SuperTrend batch API', () => {
     
     const result = wasm.supertrend_batch(high, low, close, config);
     
-    // Should have 3 * 3 = 9 combinations
-    assert.strictEqual(result.rows, 9, 'Should have 9 parameter combinations');
+    // Should have 3 * 3 = 9 combinations, but rows = 2 * combos (trend and changed interleaved)
+    assert.strictEqual(result.rows, 18, 'Should have 18 rows (2 * 9 combinations)');
     assert.strictEqual(result.cols, 100, 'Should have same length as input');
-    assert.strictEqual(result.trend.length, 900, 'Trend should have rows*cols values');
-    assert.strictEqual(result.changed.length, 900, 'Changed should have rows*cols values');
+    assert.strictEqual(result.values.length, 1800, 'Values should have rows*cols values');
     assert.strictEqual(result.periods.length, 9, 'Should have 9 period values');
     assert.strictEqual(result.factors.length, 9, 'Should have 9 factor values');
     
@@ -342,11 +343,13 @@ test('SuperTrend batch API', () => {
     assertArrayClose(result.factors, expectedFactors, 1e-10, "Batch factors mismatch");
     
     // Verify one specific combination matches single calculation
-    const singleResult = wasm.supertrend_js(high, low, close, 10, 2.5);
-    const singleTrend = singleResult.slice(0, 100);
+    const singleResult = wasm.supertrend(high, low, close, 10, 2.5);
+    const singleTrend = singleResult.values.slice(0, 100);
     
-    // Row 4 should be period=10, factor=2.5 (index 4 in flattened array)
-    const batchTrend = result.trend.slice(4 * 100, 5 * 100);
+    // Find period=10, factor=2.5 (combo index 4, but in flattened array it's at row 8 for trend, 9 for changed)
+    const comboIdx = 4;
+    const trendRowIdx = comboIdx * 2;
+    const batchTrend = result.values.slice(trendRowIdx * 100, (trendRowIdx + 1) * 100);
     assertArrayClose(batchTrend, singleTrend, 1e-10, "Batch vs single trend mismatch");
 });
 
@@ -356,17 +359,17 @@ test('SuperTrend edge cases', () => {
     const low = new Float64Array([99.0, 100.0, 101.0, 100.5, 99.5]);
     const close = new Float64Array([99.5, 100.5, 101.5, 101.0, 100.0]);
     
-    const result1 = wasm.supertrend_js(high, low, close, 2, 0.1);
-    const trend1 = result1.slice(0, high.length);
-    const changed1 = result1.slice(high.length);
+    const result1 = wasm.supertrend(high, low, close, 2, 0.1);
+    const trend1 = result1.values.slice(0, high.length);
+    const changed1 = result1.values.slice(high.length);
     
     assert.strictEqual(trend1.length, high.length);
     assert.strictEqual(changed1.length, high.length);
     
     // Test with large factor
-    const result2 = wasm.supertrend_js(high, low, close, 2, 10.0);
-    const trend2 = result2.slice(0, high.length);
-    const changed2 = result2.slice(high.length);
+    const result2 = wasm.supertrend(high, low, close, 2, 10.0);
+    const trend2 = result2.values.slice(0, high.length);
+    const changed2 = result2.values.slice(high.length);
     
     assert.strictEqual(trend2.length, high.length);
     assert.strictEqual(changed2.length, high.length);

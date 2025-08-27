@@ -44,6 +44,19 @@ use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
 
+#[inline(always)]
+fn first_valid_diff_index(price: &[f64], volume: &[f64], first_valid_idx: usize) -> usize {
+	let mut i = first_valid_idx.saturating_add(1);
+	while i < price.len() {
+		// diff computable at i if price[i], price[i-1], volume[i] are all non-NaN
+		if !price[i].is_nan() && !price[i - 1].is_nan() && !volume[i].is_nan() {
+			return i;
+		}
+		i += 1;
+	}
+	price.len() // no computable diff in range
+}
+
 impl<'a> AsRef<[f64]> for EfiInput<'a> {
 	#[inline(always)]
 	fn as_ref(&self) -> &[f64] {
@@ -179,11 +192,7 @@ pub fn efi(input: &EfiInput) -> Result<EfiOutput, EfiError> {
 
 pub fn efi_with_kernel(input: &EfiInput, kernel: Kernel) -> Result<EfiOutput, EfiError> {
 	let (price, volume): (&[f64], &[f64]) = match &input.data {
-		EfiData::Candles { candles, source } => {
-			let p = source_type(candles, source);
-			let v = &candles.volume;
-			(p, v)
-		}
+		EfiData::Candles { candles, source } => (source_type(candles, source), &candles.volume),
 		EfiData::Slice { price, volume } => (price, volume),
 	};
 
@@ -193,41 +202,32 @@ pub fn efi_with_kernel(input: &EfiInput, kernel: Kernel) -> Result<EfiOutput, Ef
 
 	let len = price.len();
 	let period = input.get_period();
-
 	if period == 0 || period > len {
 		return Err(EfiError::InvalidPeriod { period, data_len: len });
 	}
 
-	let first_valid_idx = price
+	let first = price
 		.iter()
 		.zip(volume.iter())
-		.position(|(p, v)| !p.is_nan() && !v.is_nan());
-	if first_valid_idx.is_none() {
-		return Err(EfiError::AllValuesNaN);
-	}
-	let first_valid_idx = first_valid_idx.unwrap();
+		.position(|(p, v)| !p.is_nan() && !v.is_nan())
+		.ok_or(EfiError::AllValuesNaN)?;
 
-	if (len - first_valid_idx) < 2 {
-		return Err(EfiError::NotEnoughValidData {
-			needed: 2,
-			valid: len - first_valid_idx,
-		});
+	if len - first < 2 {
+		return Err(EfiError::NotEnoughValidData { needed: 2, valid: len - first });
 	}
 
-	let chosen = match kernel {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
+	let warm = first_valid_diff_index(price, volume, first); // exact warmup prefix
+	let chosen = match kernel { Kernel::Auto => detect_best_kernel(), other => other };
 
-	// EFI warmup period is 1 (we need at least 2 values to compute a difference)
-	let mut out = alloc_with_nan_prefix(len, 1);
+	let mut out = alloc_with_nan_prefix(len, warm);
+
 	unsafe {
 		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => efi_scalar(price, volume, period, first_valid_idx, &mut out),
+			Kernel::Scalar | Kernel::ScalarBatch => efi_scalar(price, volume, period, first, &mut out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => efi_avx2(price, volume, period, first_valid_idx, &mut out),
+			Kernel::Avx2 | Kernel::Avx2Batch => efi_avx2(price, volume, period, first, &mut out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => efi_avx512(price, volume, period, first_valid_idx, &mut out),
+			Kernel::Avx512 | Kernel::Avx512Batch => efi_avx512(price, volume, period, first, &mut out),
 			_ => unreachable!(),
 		}
 	}
@@ -237,18 +237,13 @@ pub fn efi_with_kernel(input: &EfiInput, kernel: Kernel) -> Result<EfiOutput, Ef
 /// Write EFI directly to output slice - no allocations
 pub fn efi_into_slice(dst: &mut [f64], input: &EfiInput, kern: Kernel) -> Result<(), EfiError> {
 	let (price, volume): (&[f64], &[f64]) = match &input.data {
-		EfiData::Candles { candles, source } => {
-			let p = source_type(candles, source);
-			let v = &candles.volume;
-			(p, v)
-		}
+		EfiData::Candles { candles, source } => (source_type(candles, source), &candles.volume),
 		EfiData::Slice { price, volume } => (price, volume),
 	};
 
 	if price.is_empty() || volume.is_empty() || price.len() != volume.len() {
 		return Err(EfiError::EmptyData);
 	}
-
 	let len = price.len();
 	if dst.len() != len {
 		return Err(EfiError::InvalidPeriod { period: dst.len(), data_len: len });
@@ -259,41 +254,32 @@ pub fn efi_into_slice(dst: &mut [f64], input: &EfiInput, kern: Kernel) -> Result
 		return Err(EfiError::InvalidPeriod { period, data_len: len });
 	}
 
-	let first_valid_idx = price
+	let first = price
 		.iter()
 		.zip(volume.iter())
-		.position(|(p, v)| !p.is_nan() && !v.is_nan());
-	if first_valid_idx.is_none() {
-		return Err(EfiError::AllValuesNaN);
-	}
-	let first_valid_idx = first_valid_idx.unwrap();
+		.position(|(p, v)| !p.is_nan() && !v.is_nan())
+		.ok_or(EfiError::AllValuesNaN)?;
 
-	if (len - first_valid_idx) < 2 {
-		return Err(EfiError::NotEnoughValidData {
-			needed: 2,
-			valid: len - first_valid_idx,
-		});
+	if len - first < 2 {
+		return Err(EfiError::NotEnoughValidData { needed: 2, valid: len - first });
 	}
 
-	let chosen = match kern {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
-
-	// Initialize the first value as NaN (warmup period is 1 for EFI)
-	dst[0] = f64::NAN;
+	let warm = first_valid_diff_index(price, volume, first);
+	let chosen = match kern { Kernel::Auto => detect_best_kernel(), other => other };
 
 	unsafe {
 		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => efi_scalar(price, volume, period, first_valid_idx, dst),
+			Kernel::Scalar | Kernel::ScalarBatch => efi_scalar(price, volume, period, first, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => efi_avx2(price, volume, period, first_valid_idx, dst),
+			Kernel::Avx2 | Kernel::Avx2Batch => efi_avx2(price, volume, period, first, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => efi_avx512(price, volume, period, first_valid_idx, dst),
+			Kernel::Avx512 | Kernel::Avx512Batch => efi_avx512(price, volume, period, first, dst),
 			_ => unreachable!(),
 		}
 	}
 
+	// Set exact warmup prefix after compute (ALMA pattern)
+	for v in &mut dst[..warm] { *v = f64::NAN; }
 	Ok(())
 }
 
@@ -554,76 +540,38 @@ fn efi_batch_inner(
 	if combos.is_empty() {
 		return Err(EfiError::InvalidPeriod { period: 0, data_len: 0 });
 	}
+
 	let first = price
 		.iter()
 		.zip(volume.iter())
 		.position(|(p, v)| !p.is_nan() && !v.is_nan())
 		.ok_or(EfiError::AllValuesNaN)?;
-	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-	if price.len() - first < max_p {
-		return Err(EfiError::NotEnoughValidData {
-			needed: max_p,
-			valid: price.len() - first,
-		});
+
+	if price.len() - first < 2 {
+		return Err(EfiError::NotEnoughValidData { needed: 2, valid: price.len() - first });
 	}
+
 	let rows = combos.len();
 	let cols = price.len();
-	
-	// Use uninitialized matrix for better performance
+
+	let warm = first_valid_diff_index(price, volume, first);
 	let mut buf_mu = make_uninit_matrix(rows, cols);
-	
-	// Initialize NaN prefixes based on warmup periods (1 for EFI)
-	let warmup_periods: Vec<usize> = vec![1; rows];
-	init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
-	
-	// Convert to regular Vec<f64> for processing
-	let mut values = unsafe {
-		let ptr = buf_mu.as_mut_ptr() as *mut f64;
-		let len = buf_mu.len();
-		let cap = buf_mu.capacity();
-		std::mem::forget(buf_mu);
-		Vec::from_raw_parts(ptr, len, cap)
+	let warm_prefixes = vec![warm; rows];
+	init_matrix_prefixes(&mut buf_mu, cols, &warm_prefixes);
+
+	// expose as &mut [f64] without copying
+	let mut guard = core::mem::ManuallyDrop::new(buf_mu);
+	let out: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len())
 	};
 
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-		let period = combos[row].period.unwrap();
-		match kern {
-			Kernel::Scalar => efi_row_scalar(price, volume, first, period, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => efi_row_avx2(price, volume, first, period, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => efi_row_avx512(price, volume, first, period, out_row),
-			_ => unreachable!(),
-		}
+	efi_batch_inner_into(price, volume, sweep, kern, parallel, out)?;
+
+	let values = unsafe {
+		Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, guard.len(), guard.capacity())
 	};
 
-	if parallel {
-		#[cfg(not(target_arch = "wasm32"))]
-		{
-			values
-				.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
-		}
-
-		#[cfg(target_arch = "wasm32")]
-		{
-			for (row, slice) in values.chunks_mut(cols).enumerate() {
-				do_row(row, slice);
-			}
-		}
-	} else {
-		for (row, slice) in values.chunks_mut(cols).enumerate() {
-			do_row(row, slice);
-		}
-	}
-
-	Ok(EfiBatchOutput {
-		values,
-		combos,
-		rows,
-		cols,
-	})
+	Ok(EfiBatchOutput { values, combos, rows, cols })
 }
 
 #[inline(always)]
@@ -722,59 +670,59 @@ fn efi_batch_inner_into(
 	if combos.is_empty() {
 		return Err(EfiError::InvalidPeriod { period: 0, data_len: 0 });
 	}
+
 	let first = price
 		.iter()
 		.zip(volume.iter())
 		.position(|(p, v)| !p.is_nan() && !v.is_nan())
 		.ok_or(EfiError::AllValuesNaN)?;
-	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-	if price.len() - first < max_p {
-		return Err(EfiError::NotEnoughValidData {
-			needed: max_p,
-			valid: price.len() - first,
-		});
+
+	if price.len() - first < 2 {
+		return Err(EfiError::NotEnoughValidData { needed: 2, valid: price.len() - first });
 	}
-	let rows = combos.len();
+
 	let cols = price.len();
-
-	// Initialize NaN prefixes for each row based on warmup period (1 for EFI)
-	// EFI needs at least 2 values to compute a difference, so warmup is 1
-	for row in 0..rows {
+	let warm = first_valid_diff_index(price, volume, first);
+	
+	// Initialize NaN prefixes for each row based on warmup period (like ALMA does)
+	for row in 0..combos.len() {
 		let row_start = row * cols;
-		// Initialize first value as NaN (warmup period is 1)
-		out[row_start] = f64::NAN;
+		for i in 0..warm.min(cols) {
+			out[row_start + i] = f64::NAN;
+		}
 	}
+	
+	// treat destination as uninitialized to avoid redundant writes (after setting prefixes)
+	let out_mu: &mut [std::mem::MaybeUninit<f64>] = unsafe {
+		std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>, out.len())
+	};
 
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+	let actual = match kern { Kernel::Auto => detect_best_batch_kernel(), k => k };
+	let row_fn = |row: usize, dst_row_mu: &mut [std::mem::MaybeUninit<f64>]| unsafe {
 		let period = combos[row].period.unwrap();
-		match kern {
-			Kernel::Scalar => efi_row_scalar(price, volume, first, period, out_row),
+		let dst: &mut [f64] = std::slice::from_raw_parts_mut(dst_row_mu.as_mut_ptr() as *mut f64, dst_row_mu.len());
+		match actual {
+			Kernel::Scalar | Kernel::ScalarBatch => efi_row_scalar(price, volume, first, period, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => efi_row_avx2(price, volume, first, period, out_row),
+			Kernel::Avx2 | Kernel::Avx2Batch => efi_row_avx2(price, volume, first, period, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => efi_row_avx512(price, volume, first, period, out_row),
-			_ => unreachable!(),
+			Kernel::Avx512 | Kernel::Avx512Batch => efi_row_avx512(price, volume, first, period, dst),
+			#[allow(unreachable_patterns)]
+			_ => efi_row_scalar(price, volume, first, period, dst),
 		}
 	};
 
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			out.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
+			out_mu.par_chunks_mut(cols).enumerate().for_each(|(r, s)| row_fn(r, s));
 		}
-
 		#[cfg(target_arch = "wasm32")]
 		{
-			for (row, slice) in out.chunks_mut(cols).enumerate() {
-				do_row(row, slice);
-			}
+			for (r, s) in out_mu.chunks_mut(cols).enumerate() { row_fn(r, s); }
 		}
 	} else {
-		for (row, slice) in out.chunks_mut(cols).enumerate() {
-			do_row(row, slice);
-		}
+		for (r, s) in out_mu.chunks_mut(cols).enumerate() { row_fn(r, s); }
 	}
 
 	Ok(combos)
@@ -968,6 +916,23 @@ pub fn efi_batch_into(
 		let cols = len;
 		
 		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+		
+		// Find first valid index and calculate warmup
+		let first = price
+			.iter()
+			.zip(volume.iter())
+			.position(|(p, v)| !p.is_nan() && !v.is_nan())
+			.ok_or_else(|| JsValue::from_str("All values are NaN"))?;
+		
+		let warm = first_valid_diff_index(price, volume, first);
+		
+		// Initialize NaN prefixes for each row (matching efi_batch_inner pattern)
+		for row in 0..rows {
+			let row_start = row * cols;
+			for i in 0..warm.min(cols) {
+				out[row_start + i] = f64::NAN;
+			}
+		}
 		
 		efi_batch_inner_into(price, volume, &sweep, Kernel::Auto, false, out)
 			.map_err(|e| JsValue::from_str(&e.to_string()))?;

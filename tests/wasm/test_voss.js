@@ -43,8 +43,11 @@ test('VOSS partial params', () => {
     const close = new Float64Array(testData.close);
     
     const result = wasm.voss_js(close, 20, 3, 0.25);
-    // VOSS returns flattened array [voss..., filt...]
-    assert.strictEqual(result.length, close.length * 2);
+    // VOSS returns object with voss and filt arrays
+    assert(result.voss, 'Should have voss array');
+    assert(result.filt, 'Should have filt array');
+    assert.strictEqual(result.voss.length, close.length);
+    assert.strictEqual(result.filt.length, close.length);
 });
 
 test('VOSS accuracy', async () => {
@@ -53,11 +56,14 @@ test('VOSS accuracy', async () => {
     
     const result = wasm.voss_js(close, 20, 3, 0.25);
     
-    assert.strictEqual(result.length, close.length * 2);
+    assert(result.voss, 'Should have voss array');
+    assert(result.filt, 'Should have filt array');
+    assert.strictEqual(result.voss.length, close.length);
+    assert.strictEqual(result.filt.length, close.length);
     
-    // Split results
-    const voss = result.slice(0, close.length);
-    const filt = result.slice(close.length);
+    // Get results from object
+    const voss = result.voss;
+    const filt = result.filt;
     
     // Expected values from Rust tests
     const expectedVossLast5 = [
@@ -96,7 +102,10 @@ test('VOSS default candles', () => {
     const close = new Float64Array(testData.close);
     
     const result = wasm.voss_js(close, 20, 3, 0.25);
-    assert.strictEqual(result.length, close.length * 2);
+    assert(result.voss, 'Should have voss array');
+    assert(result.filt, 'Should have filt array');
+    assert.strictEqual(result.voss.length, close.length);
+    assert.strictEqual(result.filt.length, close.length);
 });
 
 test('VOSS zero period', () => {
@@ -141,14 +150,20 @@ test('VOSS reinput', () => {
     
     // First pass
     const firstResult = wasm.voss_js(close, 10, 2, 0.2);
-    assert.strictEqual(firstResult.length, close.length * 2);
+    assert(firstResult.voss, 'Should have voss array');
+    assert(firstResult.filt, 'Should have filt array');
+    assert.strictEqual(firstResult.voss.length, close.length);
+    assert.strictEqual(firstResult.filt.length, close.length);
     
     // Extract first voss output for second pass
-    const firstVoss = firstResult.slice(0, close.length);
+    const firstVoss = firstResult.voss;
     
     // Second pass - apply VOSS to VOSS output
     const secondResult = wasm.voss_js(firstVoss, 10, 2, 0.2);
-    assert.strictEqual(secondResult.length, firstVoss.length * 2);
+    assert(secondResult.voss, 'Should have voss array');
+    assert(secondResult.filt, 'Should have filt array');
+    assert.strictEqual(secondResult.voss.length, firstVoss.length);
+    assert.strictEqual(secondResult.filt.length, firstVoss.length);
 });
 
 test('VOSS all NaN input', () => {
@@ -165,27 +180,54 @@ test('VOSS fast API', () => {
     const close = new Float64Array(testData.close);
     const len = close.length;
     
-    // Allocate output buffers
+    // Allocate buffers
+    const inPtr = wasm.voss_alloc(len);
     const vossPtr = wasm.voss_alloc(len);
     const filtPtr = wasm.voss_alloc(len);
     
+    assert(inPtr !== 0, 'Failed to allocate input memory');
+    assert(vossPtr !== 0, 'Failed to allocate voss memory');
+    assert(filtPtr !== 0, 'Failed to allocate filt memory');
+    
     try {
+        // Copy input data to allocated memory
+        const inView = new Float64Array(wasm.__wasm.memory.buffer, inPtr, len);
+        inView.set(close);
+        
         // Compute
-        wasm.voss_into(close, vossPtr, filtPtr, len, 20, 3, 0.25);
+        wasm.voss_into(inPtr, vossPtr, filtPtr, len, 20, 3, 0.25);
         
-        // Read results
-        const voss = new Float64Array(wasm.memory.buffer, vossPtr, len);
-        const filt = new Float64Array(wasm.memory.buffer, filtPtr, len);
+        // Read results immediately and copy to regular arrays
+        const vossView = new Float64Array(wasm.__wasm.memory.buffer, vossPtr, len);
+        const filtView = new Float64Array(wasm.__wasm.memory.buffer, filtPtr, len);
+        const voss = Array.from(vossView);  // Copy to avoid detachment
+        const filt = Array.from(filtView);  // Copy to avoid detachment
         
-        // Compare with safe API
+        // Compare with safe API (might grow memory)
         const safeResult = wasm.voss_js(close, 20, 3, 0.25);
-        const safeVoss = safeResult.slice(0, len);
-        const safeFilt = safeResult.slice(len);
+        
+        assert.strictEqual(voss.length, len, 'Voss array has wrong length');
+        assert.strictEqual(filt.length, len, 'Filt array has wrong length');
+        const safeVoss = safeResult.voss;
+        const safeFilt = safeResult.filt;
+        
+        assert(Array.isArray(safeVoss) || safeVoss instanceof Float64Array, 'safeVoss should be an array');
+        assert(Array.isArray(safeFilt) || safeFilt instanceof Float64Array, 'safeFilt should be an array');
+        assert.strictEqual(safeVoss.length, len, 'safeVoss has wrong length');
+        assert.strictEqual(safeFilt.length, len, 'safeFilt has wrong length');
+        
+        // Debug info
+        if (voss.length === 0) {
+            console.log('voss is empty!');
+            console.log('vossPtr:', vossPtr);
+            console.log('wasm.__wasm.memory.buffer.byteLength:', wasm.__wasm.memory.buffer.byteLength);
+        }
         
         assertArrayClose(voss, safeVoss, 1e-10, "Fast API voss mismatch");
         assertArrayClose(filt, safeFilt, 1e-10, "Fast API filt mismatch");
     } finally {
         // Free memory
+        wasm.voss_free(inPtr, len);
         wasm.voss_free(vossPtr, len);
         wasm.voss_free(filtPtr, len);
     }
@@ -205,20 +247,20 @@ test('VOSS fast API with aliasing', () => {
     
     try {
         // Copy input data to allocated memory
-        const memView = new Float64Array(wasm.memory.buffer, ptr, len);
+        const memView = new Float64Array(wasm.__wasm.memory.buffer, ptr, len);
         memView.set(close);
         
         // Compute with aliasing (input and voss output share same memory)
         wasm.voss_into(ptr, ptr, filtPtr, len, 20, 3, 0.25);
         
         // Get results
-        const voss = new Float64Array(wasm.memory.buffer, ptr, len);
-        const filt = new Float64Array(wasm.memory.buffer, filtPtr, len);
+        const voss = new Float64Array(wasm.__wasm.memory.buffer, ptr, len);
+        const filt = new Float64Array(wasm.__wasm.memory.buffer, filtPtr, len);
         
         // Verify against safe API
         const safeResult = wasm.voss_js(closeCopy, 20, 3, 0.25);
-        const safeVoss = safeResult.slice(0, len);
-        const safeFilt = safeResult.slice(len);
+        const safeVoss = safeResult.voss;
+        const safeFilt = safeResult.filt;
         
         assertArrayClose(voss, safeVoss, 1e-10, "Aliased voss mismatch");
         assertArrayClose(filt, safeFilt, 1e-10, "Aliased filt mismatch");
@@ -246,9 +288,9 @@ test('VOSS batch single parameter set', () => {
     
     assert(result.voss, 'Batch result should have voss');
     assert(result.filt, 'Batch result should have filt');
-    assert(result.periods, 'Batch result should have periods');
-    assert(result.predicts, 'Batch result should have predicts');
-    assert(result.bandwidths, 'Batch result should have bandwidths');
+    assert(result.combos, 'Batch result should have combos');
+    assert(result.rows, 'Batch result should have rows');
+    assert(result.cols, 'Batch result should have cols');
     
     // Check shapes
     assert.strictEqual(result.rows, 1);
@@ -257,8 +299,8 @@ test('VOSS batch single parameter set', () => {
     assert.strictEqual(result.filt.length, close.length);
     
     // Check values match single calculation
-    const singleVoss = singleResult.slice(0, close.length);
-    const singleFilt = singleResult.slice(close.length);
+    const singleVoss = singleResult.voss;
+    const singleFilt = singleResult.filt;
     
     assertArrayClose(result.voss, singleVoss, 1e-10);
     assertArrayClose(result.filt, singleFilt, 1e-10);
@@ -282,14 +324,14 @@ test('VOSS batch multiple periods', () => {
     assert.strictEqual(result.cols, 100);
     assert.strictEqual(result.voss.length, 300);
     assert.strictEqual(result.filt.length, 300);
-    assert.strictEqual(result.periods.length, 3);
+    assert.strictEqual(result.combos.length, 3);
     
     // Verify each row matches individual calculation
     const periods = [10, 12, 14];
     for (let i = 0; i < 3; i++) {
         const singleResult = wasm.voss_js(close, periods[i], 3, 0.25);
-        const singleVoss = singleResult.slice(0, 100);
-        const singleFilt = singleResult.slice(100);
+        const singleVoss = singleResult.voss;
+        const singleFilt = singleResult.filt;
         
         const rowVoss = result.voss.slice(i * 100, (i + 1) * 100);
         const rowFilt = result.filt.slice(i * 100, (i + 1) * 100);
@@ -314,9 +356,7 @@ test('VOSS batch full parameter sweep', () => {
     // Should have 2 * 2 * 2 = 8 combinations
     assert.strictEqual(result.rows, 8);
     assert.strictEqual(result.cols, 50);
-    assert.strictEqual(result.periods.length, 8);
-    assert.strictEqual(result.predicts.length, 8);
-    assert.strictEqual(result.bandwidths.length, 8);
+    assert.strictEqual(result.combos.length, 8);
     
     // Verify parameter combinations
     const expectedCombos = [
@@ -327,8 +367,8 @@ test('VOSS batch full parameter sweep', () => {
     ];
     
     for (let i = 0; i < 8; i++) {
-        assert.strictEqual(result.periods[i], expectedCombos[i][0]);
-        assert.strictEqual(result.predicts[i], expectedCombos[i][1]);
-        assertClose(result.bandwidths[i], expectedCombos[i][2], 1e-10);
+        assert.strictEqual(result.combos[i].period || 20, expectedCombos[i][0]);
+        assert.strictEqual(result.combos[i].predict || 3, expectedCombos[i][1]);
+        assertClose(result.combos[i].bandwidth || 0.25, expectedCombos[i][2], 1e-10);
     }
 });

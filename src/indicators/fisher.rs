@@ -37,7 +37,7 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-use aligned_vec::{AVec, CACHELINE_ALIGN};
+// Note: AVec and CACHELINE_ALIGN are not used by Fisher itself, only by helper functions
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -185,6 +185,8 @@ pub enum FisherError {
 	AllValuesNaN,
 	#[error("fisher: Invalid output length: expected = {expected}, actual = {actual}")]
 	InvalidLength { expected: usize, actual: usize },
+	#[error("fisher: Mismatched data length: high={high}, low={low}")]
+	MismatchedDataLength { high: usize, low: usize },
 }
 
 #[inline]
@@ -198,9 +200,15 @@ pub fn fisher_with_kernel(input: &FisherInput, kernel: Kernel) -> Result<FisherO
 	if high.is_empty() || low.is_empty() {
 		return Err(FisherError::EmptyData);
 	}
+	if high.len() != low.len() {
+		return Err(FisherError::MismatchedDataLength {
+			high: high.len(),
+			low: low.len(),
+		});
+	}
 
 	let period = input.get_period();
-	let data_len = high.len().min(low.len());
+	let data_len = high.len();
 	if period == 0 || period > data_len {
 		return Err(FisherError::InvalidPeriod { period, data_len });
 	}
@@ -332,13 +340,18 @@ pub fn fisher_into_slice(
 	kern: Kernel,
 ) -> Result<(), FisherError> {
 	let (high, low) = input.as_ref();
-	let data_len = high.len().min(low.len());
-	let period = input.params.period.unwrap_or(9);
-	
-	// Check for empty data first
-	if data_len == 0 {
+	if high.is_empty() || low.is_empty() {
 		return Err(FisherError::EmptyData);
 	}
+	if high.len() != low.len() {
+		return Err(FisherError::MismatchedDataLength {
+			high: high.len(),
+			low: low.len(),
+		});
+	}
+	
+	let data_len = high.len();
+	let period = input.params.period.unwrap_or(9);
 	
 	// Find first valid index by checking both high and low
 	let mut first = None;
@@ -354,16 +367,10 @@ pub fn fisher_into_slice(
 	if period == 0 || period > data_len {
 		return Err(FisherError::InvalidPeriod { period, data_len });
 	}
-	if data_len < period {
-		return Err(FisherError::NotEnoughValidData {
-			needed: period,
-			valid: data_len,
-		});
-	}
 	if fisher_dst.len() != data_len || signal_dst.len() != data_len {
 		return Err(FisherError::InvalidLength {
 			expected: data_len,
-			actual: fisher_dst.len(),
+			actual: fisher_dst.len().min(signal_dst.len()),
 		});
 	}
 
@@ -586,7 +593,18 @@ fn fisher_batch_inner(
 	
 	let do_row = |row: usize, out_fish: &mut [f64], out_signal: &mut [f64]| {
 		let period = combos[row].period.unwrap();
-		fisher_row_scalar_direct(high, low, first, period, out_fish, out_signal)
+		match kern {
+			Kernel::Scalar | Kernel::ScalarBatch => fisher_row_scalar_direct(high, low, first, period, out_fish, out_signal),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => fisher_row_avx2_direct(high, low, first, period, out_fish, out_signal),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => fisher_row_avx512_direct(high, low, first, period, out_fish, out_signal),
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+				fisher_row_scalar_direct(high, low, first, period, out_fish, out_signal)
+			}
+			Kernel::Auto => fisher_row_scalar_direct(high, low, first, period, out_fish, out_signal), // Should be resolved before here
+		}
 	};
 
 	if parallel {
@@ -690,7 +708,18 @@ fn fisher_batch_inner_into(
 	
 	let do_row = |row: usize, out_fish: &mut [f64], out_signal: &mut [f64]| {
 		let period = combos[row].period.unwrap();
-		fisher_row_scalar_direct(high, low, first, period, out_fish, out_signal)
+		match kern {
+			Kernel::Scalar | Kernel::ScalarBatch => fisher_row_scalar_direct(high, low, first, period, out_fish, out_signal),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => fisher_row_avx2_direct(high, low, first, period, out_fish, out_signal),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => fisher_row_avx512_direct(high, low, first, period, out_fish, out_signal),
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+				fisher_row_scalar_direct(high, low, first, period, out_fish, out_signal)
+			}
+			Kernel::Auto => fisher_row_scalar_direct(high, low, first, period, out_fish, out_signal), // Should be resolved before here
+		}
 	};
 
 	if parallel {
@@ -1599,6 +1628,45 @@ mod tests {
 	}
 	gen_batch_tests!(check_batch_default_row);
 	gen_batch_tests!(check_batch_no_poison);
+	
+	#[test]
+	fn check_batch_kernel_dispatch() -> Result<(), Box<dyn Error>> {
+		// Test that batch functions correctly dispatch to different kernel row functions
+		let high = vec![10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 22.0, 24.0, 26.0, 28.0];
+		let low = vec![5.0, 7.0, 9.0, 10.0, 13.0, 15.0, 17.0, 19.0, 21.0, 23.0];
+		let sweep = FisherBatchRange {
+			period: (3, 5, 1),  // Small periods that fit our test data
+		};
+		
+		// Test scalar kernel
+		let scalar_result = fisher_batch_slice(&high, &low, &sweep, Kernel::Scalar)?;
+		
+		// Test AVX2 kernel (if available)
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		if is_x86_feature_detected!("avx2") {
+			let avx2_result = fisher_batch_slice(&high, &low, &sweep, Kernel::Avx2)?;
+			// Results should be identical regardless of kernel
+			for i in 0..scalar_result.fisher.len() {
+				let diff = (scalar_result.fisher[i] - avx2_result.fisher[i]).abs();
+				assert!(diff < 1e-10 || (scalar_result.fisher[i].is_nan() && avx2_result.fisher[i].is_nan()),
+					"Fisher mismatch at {}: scalar={}, avx2={}", i, scalar_result.fisher[i], avx2_result.fisher[i]);
+			}
+		}
+		
+		// Test AVX512 kernel (if available)
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		if is_x86_feature_detected!("avx512f") {
+			let avx512_result = fisher_batch_slice(&high, &low, &sweep, Kernel::Avx512)?;
+			// Results should be identical regardless of kernel
+			for i in 0..scalar_result.fisher.len() {
+				let diff = (scalar_result.fisher[i] - avx512_result.fisher[i]).abs();
+				assert!(diff < 1e-10 || (scalar_result.fisher[i].is_nan() && avx512_result.fisher[i].is_nan()),
+					"Fisher mismatch at {}: scalar={}, avx512={}", i, scalar_result.fisher[i], avx512_result.fisher[i]);
+			}
+		}
+		
+		Ok(())
+	}
 }
 
 #[cfg(feature = "python")]
@@ -1674,22 +1742,45 @@ pub fn fisher_batch_py<'py>(
 	
 	let high_slice = high.as_slice()?;
 	let low_slice = low.as_slice()?;
-	let kern = validate_kernel(kernel, true)?;
+	if high_slice.len() != low_slice.len() {
+		return Err(PyValueError::new_err(format!(
+			"Mismatched data length: high={}, low={}", high_slice.len(), low_slice.len()
+		)));
+	}
 	
+	let kern = validate_kernel(kernel, true)?;
 	let sweep = FisherBatchRange { period: period_range };
 	
 	let combos = expand_grid(&sweep);
 	let rows = combos.len();
 	let cols = high_slice.len();
 	
-	// Pre-allocate output arrays for batch operations
+	// Pre-allocate uninitialized NumPy arrays (no copy)
 	let fisher_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
 	let signal_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-	let fisher_slice = unsafe { fisher_arr.as_slice_mut()? };
-	let signal_slice = unsafe { signal_arr.as_slice_mut()? };
 	
-	// Compute batch results directly into pre-allocated arrays
-	let combos = py.allow_threads(|| {
+	// Compute first valid and warmups
+	let first = (0..cols).find(|&i| !high_slice[i].is_nan() && !low_slice[i].is_nan())
+		.ok_or_else(|| PyValueError::new_err("All values are NaN"))?;
+	let warmups: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
+	
+	// Initialize only warm prefixes using helpers, zero extra copies
+	unsafe {
+		let fisher_mu = std::slice::from_raw_parts_mut(
+			fisher_arr.as_slice_mut()?.as_mut_ptr() as *mut MaybeUninit<f64>, rows * cols);
+		let signal_mu = std::slice::from_raw_parts_mut(
+			signal_arr.as_slice_mut()?.as_mut_ptr() as *mut MaybeUninit<f64>, rows * cols);
+		init_matrix_prefixes(fisher_mu, cols, &warmups);
+		init_matrix_prefixes(signal_mu, cols, &warmups);
+	}
+	
+	// Get raw pointers before entering allow_threads (convert to usize for Send)
+	let fisher_ptr = unsafe { fisher_arr.as_slice_mut()?.as_mut_ptr() } as usize;
+	let signal_ptr = unsafe { signal_arr.as_slice_mut()?.as_mut_ptr() } as usize;
+	let total_len = rows * cols;
+	
+	// Compute directly into the same buffers
+	py.allow_threads(move || {
 		let kernel = match kern {
 			Kernel::Auto => detect_best_batch_kernel(),
 			k => k,
@@ -1700,11 +1791,14 @@ pub fn fisher_batch_py<'py>(
 			Kernel::ScalarBatch => Kernel::Scalar,
 			_ => kernel,
 		};
-		
-		// Use the new function that writes directly to pre-allocated arrays
-		fisher_batch_inner_into(high_slice, low_slice, &sweep, simd, true, fisher_slice, signal_slice)
+		// Use existing in-place writer (convert back from usize)
+		unsafe {
+			let fisher_slice = std::slice::from_raw_parts_mut(fisher_ptr as *mut f64, total_len);
+			let signal_slice = std::slice::from_raw_parts_mut(signal_ptr as *mut f64, total_len);
+			fisher_batch_inner_into(high_slice, low_slice, &sweep, simd, true, fisher_slice, signal_slice)
+		}
 	})
-	.map_err(|e: FisherError| PyValueError::new_err(e.to_string()))?;
+	.map_err(|e| PyValueError::new_err(e.to_string()))?;
 	
 	// Build result dictionary
 	let dict = PyDict::new(py);
@@ -1725,22 +1819,52 @@ pub fn fisher_batch_py<'py>(
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
-pub fn fisher_js(high: &[f64], low: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+pub struct FisherResult {
+	values: Vec<f64>, // layout: [fisher(0..len), signal(0..len)]
+	rows: usize,      // 2
+	cols: usize,      // len
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+impl FisherResult {
+	#[wasm_bindgen(getter)]
+	pub fn values(&self) -> Vec<f64> {
+		self.values.clone()
+	}
+
+	#[wasm_bindgen(getter)]
+	pub fn rows(&self) -> usize {
+		self.rows
+	}
+
+	#[wasm_bindgen(getter)]
+	pub fn cols(&self) -> usize {
+		self.cols
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn fisher_js(high: &[f64], low: &[f64], period: usize) -> Result<FisherResult, JsValue> {
+	if high.len() != low.len() {
+		return Err(JsValue::from_str("Mismatched data length"));
+	}
+	let len = high.len();
 	let params = FisherParams { period: Some(period) };
 	let input = FisherInput::from_slices(high, low, params);
 	
-	// Single allocation for both outputs
-	let data_len = high.len().min(low.len());
-	let mut output = vec![0.0; data_len * 2];
+	let mut out = vec![0.0_f64; len * 2];
+	let (fisher_out, signal_out) = out.split_at_mut(len);
 	
-	// Split the output vector into two mutable slices
-	let (fisher_out, signal_out) = output.split_at_mut(data_len);
-	
-	// Compute Fisher Transform directly into the output slices
-	fisher_into_slice(fisher_out, signal_out, &input, Kernel::Auto)
+	fisher_into_slice(fisher_out, signal_out, &input, detect_best_kernel())
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 	
-	Ok(output)
+	Ok(FisherResult {
+		values: out,
+		rows: 2,
+		cols: len,
+	})
 }
 
 #[cfg(feature = "wasm")]
@@ -1748,57 +1872,27 @@ pub fn fisher_js(high: &[f64], low: &[f64], period: usize) -> Result<Vec<f64>, J
 pub fn fisher_into(
 	high_ptr: *const f64,
 	low_ptr: *const f64,
-	fisher_ptr: *mut f64,
-	signal_ptr: *mut f64,
+	out_ptr: *mut f64,
 	len: usize,
 	period: usize,
 ) -> Result<(), JsValue> {
-	if high_ptr.is_null() || low_ptr.is_null() || fisher_ptr.is_null() || signal_ptr.is_null() {
-		return Err(JsValue::from_str("Null pointer provided"));
+	if high_ptr.is_null() || low_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to fisher_into"));
 	}
-	
 	unsafe {
 		let high = std::slice::from_raw_parts(high_ptr, len);
 		let low = std::slice::from_raw_parts(low_ptr, len);
+		if high.len() != low.len() {
+			return Err(JsValue::from_str("Mismatched data length"));
+		}
+		let out = std::slice::from_raw_parts_mut(out_ptr, len * 2);
+		let (fisher_out, signal_out) = out.split_at_mut(len);
 		
 		let params = FisherParams { period: Some(period) };
 		let input = FisherInput::from_slices(high, low, params);
 		
-		// Check for aliasing between any pair of pointers
-		let high_addr = high_ptr as usize;
-		let low_addr = low_ptr as usize;
-		let fisher_addr = fisher_ptr as usize;
-		let signal_addr = signal_ptr as usize;
-		
-		// Check if any output pointer aliases with any input or other output pointer
-		let has_aliasing = 
-			high_addr == fisher_addr || high_addr == signal_addr ||
-			low_addr == fisher_addr || low_addr == signal_addr ||
-			fisher_addr == signal_addr;
-		
-		if has_aliasing {
-			// Use single temporary buffer for aliasing case
-			let mut temp = vec![0.0; len * 2];
-			let (temp_fisher, temp_signal) = temp.split_at_mut(len);
-			
-			fisher_into_slice(temp_fisher, temp_signal, &input, Kernel::Auto)
-				.map_err(|e| JsValue::from_str(&e.to_string()))?;
-			
-			let fisher_out = std::slice::from_raw_parts_mut(fisher_ptr, len);
-			let signal_out = std::slice::from_raw_parts_mut(signal_ptr, len);
-			
-			fisher_out.copy_from_slice(temp_fisher);
-			signal_out.copy_from_slice(temp_signal);
-		} else {
-			// Direct write when no aliasing
-			let fisher_out = std::slice::from_raw_parts_mut(fisher_ptr, len);
-			let signal_out = std::slice::from_raw_parts_mut(signal_ptr, len);
-			
-			fisher_into_slice(fisher_out, signal_out, &input, Kernel::Auto)
-				.map_err(|e| JsValue::from_str(&e.to_string()))?;
-		}
-		
-		Ok(())
+		fisher_into_slice(fisher_out, signal_out, &input, detect_best_kernel())
+			.map_err(|e| JsValue::from_str(&e.to_string()))
 	}
 }
 
@@ -1830,15 +1924,18 @@ pub struct FisherBatchConfig {
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct FisherBatchJsOutput {
-	pub values: Vec<f64>,  // Flattened [fisher_row1..., signal_row1..., fisher_row2..., signal_row2..., ...]
-	pub combos: Vec<FisherParams>,
-	pub rows: usize,
+	pub values: Vec<f64>,  // layout per combo: [fisher row, signal row] each of length cols
+	pub rows: usize,       // 2 * combos.len()
 	pub cols: usize,
+	pub combos: Vec<FisherParams>,
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = fisher_batch)]
-pub fn fisher_batch_js(high: &[f64], low: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+pub fn fisher_batch_unified_js(high: &[f64], low: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	if high.len() != low.len() {
+		return Err(JsValue::from_str("Mismatched data length"));
+	}
 	let config: FisherBatchConfig = serde_wasm_bindgen::from_value(config)
 		.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
 	
@@ -1846,29 +1943,31 @@ pub fn fisher_batch_js(high: &[f64], low: &[f64], config: JsValue) -> Result<JsV
 		period: config.period_range,
 	};
 	
-	let output = fisher_batch_inner(high, low, &sweep, Kernel::Auto, false)
+	let combos = expand_grid(&sweep);
+	let cols = high.len();
+	let rows = combos.len();
+	
+	// Allocate combined buffer: fisher(rows*cols) + signal(rows*cols)
+	let mut fisher = vec![0.0; rows * cols];
+	let mut signal = vec![0.0; rows * cols];
+	
+	fisher_batch_inner_into(high, low, &sweep, detect_best_kernel(), false, &mut fisher, &mut signal)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 	
-	// Flatten the output: interleave fisher and signal for each row
-	let rows = output.combos.len();
-	let cols = high.len();
-	let mut values = Vec::with_capacity(rows * cols * 2);
-	
-	for i in 0..rows {
-		let start_idx = i * cols;
-		let end_idx = start_idx + cols;
-		values.extend_from_slice(&output.fisher[start_idx..end_idx]);
-		values.extend_from_slice(&output.signal[start_idx..end_idx]);
+	// Interleave per combo without extra allocs
+	let mut values = Vec::with_capacity(2 * rows * cols);
+	for r in 0..rows {
+		values.extend_from_slice(&fisher[r*cols .. (r+1)*cols]);
+		values.extend_from_slice(&signal[r*cols .. (r+1)*cols]);
 	}
 	
-	let js_output = FisherBatchJsOutput {
+	let js = FisherBatchJsOutput {
 		values,
-		combos: output.combos,
-		rows,
+		rows: 2 * rows,
 		cols,
+		combos,
 	};
-	
-	serde_wasm_bindgen::to_value(&js_output)
+	serde_wasm_bindgen::to_value(&js)
 		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 

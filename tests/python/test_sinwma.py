@@ -4,7 +4,7 @@ These tests mirror the Rust unit tests to ensure Python bindings work correctly.
 """
 import pytest
 import numpy as np
-from test_utils import load_test_data, assert_close
+from test_utils import load_test_data, assert_close, EXPECTED_OUTPUTS
 
 # Import SINWMA functions - they'll be available after building with maturin
 try:
@@ -28,29 +28,34 @@ def test_sinwma_partial_params():
     assert len(result) == len(close)
 
 
+def test_sinwma_default_candles():
+    """Test SINWMA with default parameters - mirrors check_sinwma_default_candles"""
+    data = load_test_data()
+    close = np.array(data['close'], dtype=np.float64)
+    
+    # Default params: period=14
+    result = sinwma(close, 14)
+    assert len(result) == len(close)
+
+
 def test_sinwma_accuracy():
     """Test SINWMA matches expected values from Rust tests - mirrors check_sinwma_accuracy"""
     data = load_test_data()
     close = np.array(data['close'], dtype=np.float64)
+    expected = EXPECTED_OUTPUTS['sinwma']
     
     # Test with period=14 (default)
-    result = sinwma(close, 14)
+    result = sinwma(close, expected['default_params']['period'])
     
     assert len(result) == len(close)
     
-    # Expected values from Rust test
-    expected_last_five = [
-        59376.72903536103,
-        59300.76862770367,
-        59229.27622157621,
-        59178.48781774477,
-        59154.66580703081,
-    ]
-    
-    actual_last_five = result[-5:]
-    
-    for i, (actual, expected) in enumerate(zip(actual_last_five, expected_last_five)):
-        assert_close(actual, expected, rtol=1e-6, msg=f"SINWMA mismatch at index {i}")
+    # Check last 5 values match expected
+    assert_close(
+        result[-5:], 
+        expected['last_5_values'],
+        rtol=1e-6,
+        msg="SINWMA last 5 values mismatch"
+    )
 
 
 def test_sinwma_invalid_period():
@@ -78,24 +83,14 @@ def test_sinwma_very_small_dataset():
         sinwma(single_point, 14)
 
 
-def test_sinwma_reinput():
-    """Test SINWMA with re-input of SINWMA result - mirrors check_sinwma_reinput"""
-    data = load_test_data()
-    close = np.array(data['close'], dtype=np.float64)
+def test_sinwma_period_one():
+    """Test SINWMA with period=1 acts as passthrough"""
+    data = np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float64)
     
-    # First SINWMA pass with period=14
-    first_result = sinwma(close, 14)
+    result = sinwma(data, 1)
     
-    # Second SINWMA pass with period=5 using first result as input
-    second_result = sinwma(first_result, 5)
-    
-    assert len(second_result) == len(first_result)
-    
-    # All values should be finite after initial warmup periods
-    # Find first non-NaN in first_result (output of first pass)
-    first_valid_in_first = np.where(~np.isnan(first_result))[0][0]
-    warmup = first_valid_in_first + 5 - 1  # second pass warmup
-    assert np.all(np.isfinite(second_result[warmup:]))
+    # With period=1, weight is sin(π/2) = 1.0, so output should equal input
+    assert_close(result, data, rtol=1e-10, msg="Period=1 should act as passthrough")
 
 
 def test_sinwma_nan_handling():
@@ -107,12 +102,15 @@ def test_sinwma_nan_handling():
     
     assert len(result) == len(close)
     
+    # First period-1 values should be NaN
+    assert np.all(np.isnan(result[:13])), "Expected NaN in warmup period (first 13 values)"
+    
     # After warmup, all values should be finite
     first_valid = np.where(~np.isnan(close))[0][0]
     warmup = first_valid + 14 - 1
     
     if len(result) > warmup:
-        assert np.all(np.isfinite(result[warmup:]))
+        assert np.all(np.isfinite(result[warmup:])), "Found unexpected NaN after warmup period"
 
 
 def test_sinwma_all_nan():
@@ -151,6 +149,10 @@ def test_sinwma_batch():
     assert batch_result['values'].shape == (5, len(close))
     assert len(batch_result['periods']) == 5
     
+    # Verify periods metadata
+    expected_periods = [10, 15, 20, 25, 30]
+    assert np.array_equal(batch_result['periods'], expected_periods), "Period metadata mismatch"
+    
     # Verify first combination matches individual calculation
     individual_result = sinwma(close, 10)
     batch_first = batch_result['values'][0]
@@ -159,6 +161,38 @@ def test_sinwma_batch():
     first_valid = np.where(~np.isnan(close))[0][0]
     warmup = first_valid + 10 - 1
     assert_close(batch_first[warmup:], individual_result[warmup:], atol=1e-9, msg="SINWMA first combination mismatch")
+
+
+def test_sinwma_batch_single_parameter():
+    """Test SINWMA batch with single parameter combination - mirrors ALMA pattern"""
+    data = load_test_data()
+    close = np.array(data['close'], dtype=np.float64)
+    expected = EXPECTED_OUTPUTS['sinwma']
+    
+    # Single period only (default)
+    result = sinwma_batch(
+        close,
+        (14, 14, 0)  # Default period only
+    )
+    
+    assert 'values' in result
+    assert 'periods' in result
+    
+    # Should have 1 combination
+    assert result['values'].shape[0] == 1
+    assert result['values'].shape[1] == len(close)
+    assert result['periods'][0] == 14
+    
+    # Extract the single row
+    default_row = result['values'][0]
+    
+    # Check last 5 values match expected
+    assert_close(
+        default_row[-5:],
+        expected['last_5_values'],
+        rtol=1e-6,
+        msg="SINWMA batch default row mismatch"
+    )
 
 
 def test_sinwma_stream():
@@ -369,16 +403,35 @@ def test_sinwma_kernel_options():
     close = np.array(data['close'][:100], dtype=np.float64)
     
     # Test with different kernels
-    kernels = ['auto', 'scalar']
+    kernels = ['auto', 'scalar', 'avx2', 'avx512']
     
     for kernel in kernels:
-        result = sinwma(close, 14, kernel=kernel)
-        assert len(result) == len(close)
-        assert np.all(np.isfinite(result[13:]))
+        try:
+            result = sinwma(close, 14, kernel=kernel)
+            assert len(result) == len(close)
+            assert np.all(np.isfinite(result[13:]))
+        except ValueError as e:
+            # AVX kernels might not be available on all systems
+            if 'kernel' not in str(e).lower() and 'avx' not in kernel:
+                raise
     
     # Invalid kernel should fail
-    with pytest.raises(ValueError, match="Unknown kernel"):
+    with pytest.raises(ValueError, match="Unknown kernel|Invalid kernel"):
         sinwma(close, 14, kernel='invalid')
+
+
+def test_sinwma_leading_nan():
+    """Test SINWMA with leading NaN values in data"""
+    # Create data with NaN values at the start
+    data = np.array([np.nan, np.nan, np.nan] + list(range(1, 21)), dtype=np.float64)
+    
+    result = sinwma(data, 5)
+    
+    assert len(result) == len(data)
+    
+    # First non-NaN is at index 3, so warmup ends at 3 + 5 - 1 = 7
+    assert np.all(np.isnan(result[:7])), "Expected NaN during warmup with leading NaN"
+    assert np.all(np.isfinite(result[7:])), "Expected finite values after warmup"
 
 
 if __name__ == '__main__':

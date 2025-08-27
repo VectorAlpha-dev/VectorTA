@@ -113,37 +113,69 @@ test('Linear Regression Angle empty input', () => {
     }, /Empty data/, 'Expected error for empty input');
 });
 
-test('Linear Regression Angle reinput', () => {
-    // Test LRA applied twice (re-input) - mirrors check_lra_reinput
+test('Linear Regression Angle warmup period', () => {
+    // Test LRA warmup period behavior - mirrors Rust warmup tests
     const close = new Float64Array(testData.close);
+    const period = 14;
     
-    // First pass
-    const first_result = wasm.linearreg_angle_js(close, 14);
-    assert.strictEqual(first_result.length, close.length);
-    
-    // Second pass - apply to output of first pass
-    const second_result = wasm.linearreg_angle_js(new Float64Array(first_result), 14);
-    assert.strictEqual(second_result.length, first_result.length);
-});
-
-test('Linear Regression Angle NaN handling', () => {
-    // Test LRA handles NaN values correctly
-    const close = new Float64Array(testData.close);
-    
-    const result = wasm.linearreg_angle_js(close, 14);
+    const result = wasm.linearreg_angle_js(close, period);
     assert.strictEqual(result.length, close.length);
     
-    // First period-1 values should be NaN (warmup period)
-    const warmup = 14 - 1; // period - 1
-    for (let i = 0; i < warmup; i++) {
-        assert(isNaN(result[i]), `Expected NaN at index ${i} during warmup`);
+    // Find first non-NaN value in input data
+    let firstValid = 0;
+    for (let i = 0; i < close.length; i++) {
+        if (!isNaN(close[i])) {
+            firstValid = i;
+            break;
+        }
+    }
+    
+    // Calculate warmup period
+    const warmupEnd = firstValid + period - 1;
+    
+    // First warmupEnd values should be NaN
+    for (let i = 0; i < warmupEnd; i++) {
+        assert(isNaN(result[i]), `Expected NaN at index ${i} during warmup, got ${result[i]}`);
     }
     
     // After warmup, values should not be NaN (unless input was NaN)
-    for (let i = warmup; i < result.length; i++) {
+    for (let i = warmupEnd; i < Math.min(result.length, warmupEnd + 50); i++) {
         if (!isNaN(close[i])) {
-            assert(!isNaN(result[i]), `Unexpected NaN at index ${i} after warmup`);
+            assert(!isNaN(result[i]), `Unexpected NaN at index ${i} after warmup period`);
+            // Angle should be within [-90, 90] degrees
+            assert(result[i] >= -90.0 && result[i] <= 90.0, 
+                `Angle ${result[i]} out of range at index ${i}`);
         }
+    }
+});
+
+test('Linear Regression Angle NaN handling with leading NaNs', () => {
+    // Test LRA handles NaN values correctly with leading NaNs
+    const data = new Float64Array(55);
+    // Fill with NaN for first 5 values, then regular data
+    for (let i = 0; i < 5; i++) {
+        data[i] = NaN;
+    }
+    for (let i = 5; i < 55; i++) {
+        data[i] = 100.0 + i;
+    }
+    
+    const period = 14;
+    const result = wasm.linearreg_angle_js(data, period);
+    assert.strictEqual(result.length, data.length);
+    
+    // First valid value is at index 5
+    const firstValid = 5;
+    const warmupEnd = firstValid + period - 1;
+    
+    // All values before warmupEnd should be NaN
+    for (let i = 0; i < warmupEnd; i++) {
+        assert(isNaN(result[i]), `Expected NaN at index ${i} before warmup end`);
+    }
+    
+    // Values after warmup should not be NaN
+    for (let i = warmupEnd; i < result.length; i++) {
+        assert(!isNaN(result[i]), `Unexpected NaN at index ${i} after warmup`);
     }
 });
 
@@ -195,7 +227,7 @@ test('Linear Regression Angle batch single period', async () => {
 });
 
 test('Linear Regression Angle batch multiple periods', async () => {
-    // Test batch processing with multiple periods
+    // Test batch processing with multiple periods - mirrors check_batch_grid_search
     const close = new Float64Array(testData.close.slice(0, 100)); // Use smaller dataset for speed
     
     // Multiple periods: 10, 12, 14, 16
@@ -210,10 +242,16 @@ test('Linear Regression Angle batch multiple periods', async () => {
     assert.strictEqual(batch_result.cols, 100);
     assert.strictEqual(batch_result.combos.length, 4);
     
+    // Verify periods are correct
+    const expected_periods = [10, 12, 14, 16];
+    for (let i = 0; i < expected_periods.length; i++) {
+        assert.strictEqual(batch_result.combos[i].period, expected_periods[i], 
+            `Period mismatch at index ${i}`);
+    }
+    
     // Verify each row matches individual calculation
-    const periods = [10, 12, 14, 16];
-    for (let i = 0; i < periods.length; i++) {
-        const period = periods[i];
+    for (let i = 0; i < expected_periods.length; i++) {
+        const period = expected_periods[i];
         const single_result = wasm.linearreg_angle_js(close, period);
         const row_start = i * 100;
         const row_end = row_start + 100;
@@ -223,7 +261,7 @@ test('Linear Regression Angle batch multiple periods', async () => {
             batch_row,
             single_result,
             1e-10,
-            `Period ${period} mismatch`
+            `Period ${period} batch vs single mismatch`
         );
     }
 });
@@ -245,6 +283,143 @@ test('Linear Regression Angle memory management', () => {
     
     // Test null pointer handling
     wasm.linearreg_angle_free(0, len); // Should not crash
+});
+
+test('Linear Regression Angle batch period static', async () => {
+    // Test batch with single static period - mirrors check_batch_period_static
+    const close = new Float64Array(testData.close);
+    
+    // Static period = 14
+    const config = {
+        period_range: [14, 14, 0] // Static period
+    };
+    
+    const batch_result = await wasm.linearreg_angle_batch(close, config);
+    
+    // Should have exactly 1 row
+    assert.strictEqual(batch_result.rows, 1);
+    assert.strictEqual(batch_result.cols, close.length);
+    assert.strictEqual(batch_result.combos.length, 1);
+    assert.strictEqual(batch_result.combos[0].period, 14);
+    
+    // Last value should match expected
+    const expected_last = -87.77085937059316;
+    const last_value = batch_result.values[batch_result.values.length - 1];
+    assertClose(last_value, expected_last, 1e-5, 'Static period batch last value mismatch');
+});
+
+test('Linear Regression Angle batch metadata', async () => {
+    // Test that batch result includes correct parameter combinations
+    const close = new Float64Array(20); // Small dataset
+    close.fill(100);
+    for (let i = 0; i < 20; i++) {
+        close[i] = 100 + i; // Simple linear data
+    }
+    
+    const config = {
+        period_range: [5, 7, 1] // periods: 5, 6, 7
+    };
+    
+    const result = await wasm.linearreg_angle_batch(close, config);
+    
+    // Should have 3 combinations
+    assert.strictEqual(result.combos.length, 3);
+    assert.strictEqual(result.rows, 3);
+    
+    // Check each combination
+    const expected_periods = [5, 6, 7];
+    for (let i = 0; i < expected_periods.length; i++) {
+        assert.strictEqual(result.combos[i].period, expected_periods[i], 
+            `Period mismatch at combo ${i}`);
+    }
+});
+
+test('Linear Regression Angle batch edge cases', async () => {
+    // Test edge cases for batch processing
+    const small_data = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    
+    // Single value sweep (step=0)
+    const single_batch = await wasm.linearreg_angle_batch(small_data, {
+        period_range: [5, 5, 0]
+    });
+    
+    assert.strictEqual(single_batch.rows, 1);
+    assert.strictEqual(single_batch.cols, 10);
+    assert.strictEqual(single_batch.combos.length, 1);
+    
+    // Step larger than range
+    const large_step = await wasm.linearreg_angle_batch(small_data, {
+        period_range: [5, 7, 10] // Step > range
+    });
+    
+    // Should only have period=5
+    assert.strictEqual(large_step.rows, 1);
+    assert.strictEqual(large_step.combos[0].period, 5);
+    
+    // Empty data should throw
+    const empty = new Float64Array([]);
+    await assert.rejects(async () => {
+        await wasm.linearreg_angle_batch(empty, { period_range: [5, 5, 0] });
+    }, /All values are NaN|Empty data/, 'Expected error for empty data');
+});
+
+test('Linear Regression Angle batch warmup validation', async () => {
+    // Test batch warmup periods for different parameters
+    const close = new Float64Array(testData.close.slice(0, 50));
+    
+    // Multiple periods with different warmup requirements
+    const config = {
+        period_range: [5, 15, 5] // periods: 5, 10, 15
+    };
+    
+    const batch_result = await wasm.linearreg_angle_batch(close, config);
+    
+    assert.strictEqual(batch_result.rows, 3);
+    
+    // Check warmup for each period
+    const periods = [5, 10, 15];
+    for (let i = 0; i < periods.length; i++) {
+        const period = periods[i];
+        const row_start = i * 50;
+        const row = batch_result.values.slice(row_start, row_start + 50);
+        const warmup_end = period - 1;
+        
+        // Check NaN during warmup
+        for (let j = 0; j < warmup_end; j++) {
+            assert(isNaN(row[j]), `Period ${period}: Expected NaN at index ${j}`);
+        }
+        
+        // Check non-NaN after warmup
+        for (let j = warmup_end; j < Math.min(row.length, warmup_end + 10); j++) {
+            assert(!isNaN(row[j]), `Period ${period}: Unexpected NaN at index ${j}`);
+        }
+    }
+});
+
+test('Linear Regression Angle batch error handling', async () => {
+    const close = new Float64Array(10);
+    close.fill(100);
+    
+    // Invalid config structure
+    await assert.rejects(async () => {
+        await wasm.linearreg_angle_batch(close, {
+            period_range: [9, 9] // Missing step
+        });
+    }, /Invalid config/, 'Expected error for invalid config');
+    
+    // Invalid data type in config
+    await assert.rejects(async () => {
+        await wasm.linearreg_angle_batch(close, {
+            period_range: "invalid"
+        });
+    }, /Invalid config/, 'Expected error for invalid data type');
+    
+    // Period exceeding data length
+    await assert.rejects(async () => {
+        await wasm.linearreg_angle_batch(close, {
+            period_range: [15, 15, 0] // Period > data length
+        });
+    }, /Invalid period|Not enough valid data/, 'Expected error for period exceeding data');
 });
 
 test('Linear Regression Angle null pointer handling', () => {

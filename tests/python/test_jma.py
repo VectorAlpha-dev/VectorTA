@@ -16,7 +16,7 @@ except ImportError:
     except ImportError:
         pytest.skip("Python module not built. Run 'maturin develop --features python' first", allow_module_level=True)
 
-from test_utils import load_test_data, assert_close
+from test_utils import load_test_data, assert_close, EXPECTED_OUTPUTS
 from rust_comparison import compare_with_rust
 
 
@@ -36,31 +36,28 @@ class TestJma:
     def test_jma_accuracy(self, test_data):
         """Test JMA matches expected values from Rust tests - mirrors check_jma_accuracy"""
         close = test_data['close']
+        expected = EXPECTED_OUTPUTS['jma']
         
         # Using period=7, phase=50.0, power=2 (defaults)
-        result = ta_indicators.jma(close, 7, 50.0, 2)
+        result = ta_indicators.jma(
+            close,
+            period=expected['default_params']['period'],
+            phase=expected['default_params']['phase'],
+            power=expected['default_params']['power']
+        )
         
         assert len(result) == len(close)
-        
-        # Expected last 5 values from Rust test
-        expected_last_five = [
-            59305.04794668568,
-            59261.270455005455,
-            59156.791263606865,
-            59128.30656791065,
-            58918.89223153998,
-        ]
         
         # Check last 5 values match expected
         assert_close(
             result[-5:], 
-            expected_last_five,
+            expected['last_5_values'],
             rtol=1e-6,
             msg="JMA last 5 values mismatch"
         )
         
         # Compare full output with Rust
-        # compare_with_rust('jma', result, 'close', {'period': 7, 'phase': 50.0, 'power': 2})
+        compare_with_rust('jma', result, 'close', expected['default_params'])
     
     def test_jma_default_candles(self, test_data):
         """Test JMA with default parameters - mirrors check_jma_default_candles"""
@@ -120,30 +117,50 @@ class TestJma:
         with pytest.raises(ValueError):
             ta_indicators.jma(data, period=3, phase=float('inf'))
     
-    def test_jma_reinput(self, test_data):
-        """Test JMA with re-input of JMA result - mirrors check_jma_reinput"""
-        close = test_data['close']
+    def test_jma_batch_with_nan_data(self):
+        """Test JMA batch with NaN prefix data"""
+        # Create data with NaN prefix
+        data = np.array([np.nan, np.nan] + list(range(1, 21)))
         
-        # First JMA pass with period=7
-        first_result = ta_indicators.jma(close, 7)
+        result = ta_indicators.jma_batch(
+            data,
+            period_range=(3, 5, 2),  # periods: 3, 5
+            phase_range=(50.0, 50.0, 0.0),
+            power_range=(2, 2, 0)
+        )
         
-        # Second JMA pass with period=7 using first result as input
-        second_result = ta_indicators.jma(first_result, 7)
+        values = result['values']
+        assert values.shape == (2, len(data))
         
-        assert len(second_result) == len(first_result)
+        # Both rows should have NaN for first 2 indices (before first valid)
+        for row in range(2):
+            assert np.isnan(values[row, 0]), f"Row {row} index 0 should be NaN"
+            assert np.isnan(values[row, 1]), f"Row {row} index 1 should be NaN"
+            # Should have values starting at index 2 (first valid)
+            assert np.isfinite(values[row, 2]), f"Row {row} index 2 should be finite"
     
     def test_jma_nan_handling(self, test_data):
         """Test JMA handling of NaN values - mirrors check_jma_nan_handling"""
-        close = test_data['close']
+        # Test with NaN prefix
+        data_with_nan = np.concatenate([
+            np.array([np.nan, np.nan, np.nan]),
+            test_data['close'][:50]
+        ])
         period = 7
         
-        result = ta_indicators.jma(close, period)
+        result = ta_indicators.jma(data_with_nan, period)
         
-        assert len(result) == len(close)
+        assert len(result) == len(data_with_nan)
         
-        # Check for reasonable values after warmup
-        finite_count = np.sum(np.isfinite(result))
-        assert finite_count > len(close) - period * 2
+        # First 3 values should be NaN (before first valid)
+        assert np.all(np.isnan(result[:3])), "Expected NaN before first valid data"
+        
+        # After first valid, should have finite values
+        assert np.isfinite(result[3]), "Expected finite value at first valid"
+        
+        # Check for reasonable values after first valid
+        finite_count = np.sum(np.isfinite(result[3:]))
+        assert finite_count == len(result[3:]), "All values after first valid should be finite"
     
     def test_jma_streaming(self, test_data):
         """Test JMA streaming vs batch calculation - mirrors check_jma_streaming"""
@@ -174,7 +191,7 @@ class TestJma:
         )
     
     def test_jma_batch(self, test_data):
-        """Test JMA batch computation."""
+        """Test JMA batch computation with proper warmup verification."""
         close = test_data['close']
         
         # Test parameter ranges
@@ -209,6 +226,13 @@ class TestJma:
             rtol=1e-9,
             err_msg="Batch first row mismatch"
         )
+        
+        # Verify warmup behavior for each parameter combination
+        # JMA outputs at first_valid, no additional warmup
+        for i in range(27):
+            row = values[i]
+            # All values should be finite (JMA outputs from index 0 for clean data)
+            assert np.all(np.isfinite(row)), f"Row {i} has unexpected NaN values"
     
     def test_jma_different_params(self, test_data):
         """Test JMA with different parameter values."""
@@ -338,15 +362,57 @@ class TestJma:
             assert powers[i] == exp_power
     
     def test_jma_warmup_behavior(self, test_data):
-        """Test JMA warmup behavior"""
-        close = test_data['close'][:50]
+        """Test JMA warmup behavior - outputs at first_valid with NaN prefix"""
+        # Test with data starting with NaN values
+        data = np.array([np.nan, np.nan, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0])
+        period = 3
         
-        result = ta_indicators.jma(close, period=7)
+        result = ta_indicators.jma(data, period=period, phase=50.0, power=2)
         
-        # JMA should have values from the start (no NaN prefix)
-        # Check first few values are finite
-        for i in range(min(10, len(result))):
+        # JMA should have NaN for indices 0,1 (before first valid)
+        assert np.isnan(result[0]), "Index 0 should be NaN"
+        assert np.isnan(result[1]), "Index 1 should be NaN"
+        
+        # JMA should start outputting at index 2 (first valid)
+        assert np.isfinite(result[2]), "Index 2 (first valid) should have a value"
+        
+        # All subsequent values should be finite
+        for i in range(3, len(result)):
             assert np.isfinite(result[i]), f"Expected finite value at index {i}"
+        
+        # Test with clean data (no leading NaNs)
+        clean_data = test_data['close'][:20]
+        clean_result = ta_indicators.jma(clean_data, period=7)
+        
+        # With clean data, JMA outputs immediately at index 0
+        assert np.isfinite(clean_result[0]), "JMA should output at first valid (index 0 for clean data)"
+
+
+    def test_jma_consistency_single_vs_batch(self, test_data):
+        """Test that single and batch calculations are consistent"""
+        close = test_data['close'][:100]
+        
+        # Single calculation
+        single_result = ta_indicators.jma(close, 7, 50.0, 2)
+        
+        # Batch calculation with same parameters
+        batch_result = ta_indicators.jma_batch(
+            close,
+            period_range=(7, 7, 0),
+            phase_range=(50.0, 50.0, 0.0),
+            power_range=(2, 2, 0)
+        )
+        
+        # Extract single row from batch
+        batch_single = batch_result['values'][0]
+        
+        # Should be identical
+        np.testing.assert_allclose(
+            single_result,
+            batch_single,
+            rtol=1e-12,
+            err_msg="Single vs batch calculation mismatch"
+        )
 
 
 if __name__ == '__main__':

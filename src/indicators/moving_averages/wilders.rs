@@ -38,7 +38,6 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -167,12 +166,18 @@ impl WildersBuilder {
 
 #[derive(Debug, Error)]
 pub enum WildersError {
+	#[error("wilders: Input data slice is empty.")]
+	EmptyInputData,
 	#[error("wilders: All values are NaN.")]
 	AllValuesNaN,
 	#[error("wilders: Invalid period: period = {period}, data length = {data_len}")]
 	InvalidPeriod { period: usize, data_len: usize },
 	#[error("wilders: Not enough valid data: needed = {needed}, valid = {valid}")]
 	NotEnoughValidData { needed: usize, valid: usize },
+	#[error("wilders: Output length mismatch: output = {output_len}, data = {data_len}")]
+	OutputLengthMismatch { output_len: usize, data_len: usize },
+	#[error("wilders: Invalid kernel type for batch operation: {kernel}")]
+	InvalidKernelType { kernel: String },
 }
 
 // --- API parity main function & kernel dispatch ---
@@ -185,6 +190,9 @@ pub fn wilders(input: &WildersInput) -> Result<WildersOutput, WildersError> {
 pub fn wilders_with_kernel(input: &WildersInput, kernel: Kernel) -> Result<WildersOutput, WildersError> {
 	let data: &[f64] = input.as_ref();
 	let len = data.len();
+	if len == 0 {
+		return Err(WildersError::EmptyInputData);
+	}
 	let period = input.get_period();
 
 	let first = data
@@ -200,6 +208,16 @@ pub fn wilders_with_kernel(input: &WildersInput, kernel: Kernel) -> Result<Wilde
 			valid: len - first,
 		});
 	}
+	
+	// Check that all values in the initial window are finite
+	for i in 0..period {
+		if !data[first + i].is_finite() {
+			return Err(WildersError::NotEnoughValidData {
+				needed: period,
+				valid: i,
+			});
+		}
+	}
 
 	let warm = first + period - 1;
 	let mut out = alloc_with_nan_prefix(len, warm);
@@ -214,6 +232,10 @@ pub fn wilders_with_kernel(input: &WildersInput, kernel: Kernel) -> Result<Wilde
 			Kernel::Avx2 | Kernel::Avx2Batch => wilders_avx2(data, period, first, &mut out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 | Kernel::Avx512Batch => wilders_avx512(data, period, first, &mut out),
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+				wilders_scalar(data, period, first, &mut out)
+			}
 			_ => unreachable!(),
 		}
 	}
@@ -243,12 +265,15 @@ pub fn wilders_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut
 /// Write directly to output slice - no allocations
 pub fn wilders_into_slice(dst: &mut [f64], input: &WildersInput, kern: Kernel) -> Result<(), WildersError> {
 	let data: &[f64] = input.as_ref();
+	if data.is_empty() {
+		return Err(WildersError::EmptyInputData);
+	}
 	let len = data.len();
 	let period = input.get_period();
 	
 	if dst.len() != data.len() {
-		return Err(WildersError::InvalidPeriod {
-			period: dst.len(),
+		return Err(WildersError::OutputLengthMismatch {
+			output_len: dst.len(),
 			data_len: data.len(),
 		});
 	}
@@ -266,6 +291,16 @@ pub fn wilders_into_slice(dst: &mut [f64], input: &WildersInput, kern: Kernel) -
 			valid: len - first,
 		});
 	}
+	
+	// Check that all values in the initial window are finite
+	for i in 0..period {
+		if !data[first + i].is_finite() {
+			return Err(WildersError::NotEnoughValidData {
+				needed: period,
+				valid: i,
+			});
+		}
+	}
 
 	let chosen = match kern {
 		Kernel::Auto => detect_best_kernel(),
@@ -279,6 +314,10 @@ pub fn wilders_into_slice(dst: &mut [f64], input: &WildersInput, kern: Kernel) -
 			Kernel::Avx2 | Kernel::Avx2Batch => wilders_avx2(data, period, first, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 | Kernel::Avx512Batch => wilders_avx512(data, period, first, dst),
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+				wilders_scalar(data, period, first, dst)
+			}
 			_ => unreachable!(),
 		}
 	}
@@ -438,7 +477,7 @@ pub fn wilders_batch_with_kernel(
 	let kernel = match k {
 		Kernel::Auto => detect_best_batch_kernel(),
 		other if other.is_batch() => other,
-		_ => return Err(WildersError::InvalidPeriod { period: 0, data_len: 0 }),
+		_ => return Err(WildersError::InvalidKernelType { kernel: format!("{:?}", k) }),
 	};
 	let simd = match kernel {
 		Kernel::Avx512Batch => Kernel::Avx512,
@@ -537,7 +576,7 @@ fn wilders_batch_inner(
 	//    and paint the NaN prefixes
 	// -----------------------------------------
 	let mut raw = make_uninit_matrix(rows, cols);
-	unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
+	init_matrix_prefixes(&mut raw, cols, &warm);
 
 	// -----------------------------------------
 	// 3. helper that fills a single row
@@ -554,6 +593,8 @@ fn wilders_batch_inner(
 			Kernel::Avx2 => wilders_row_avx2(data, first, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 => wilders_row_avx512(data, first, period, out_row),
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx512 => wilders_row_scalar(data, first, period, out_row),
 			_ => unreachable!(),
 		}
 	};
@@ -606,7 +647,7 @@ pub fn wilders_batch_inner_into(
 	if combos.is_empty() {
 		return Err(WildersError::InvalidPeriod { period: 0, data_len: 0 });
 	}
-	
+
 	let first = data
 		.iter()
 		.position(|x| !x.is_nan())
@@ -621,51 +662,43 @@ pub fn wilders_batch_inner_into(
 
 	let rows = combos.len();
 	let cols = data.len();
+
+	// 1) Cast to MaybeUninit and paint warm prefixes via helper
+	let out_mu: &mut [MaybeUninit<f64>] = unsafe {
+		std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
+	};
 	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
+	init_matrix_prefixes(out_mu, cols, &warm);
 
-	// Initialize NaN prefixes
-	for (row, &warm_idx) in warm.iter().enumerate() {
-		let row_start = row * cols;
-		out[row_start..row_start + warm_idx].fill(f64::NAN);
-	}
-
-	// Kernel should already be resolved to non-batch variant
-	let simd = kern;
-
-	// Helper that fills a single row
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+	// 2) Row writer that fills post-warm cells
+	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
 		let period = combos[row].period.unwrap();
-		match simd {
-			Kernel::Scalar => wilders_row_scalar(data, first, period, out_row),
+		let dst: &mut [f64] = std::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
+		match kern {
+			Kernel::Scalar => wilders_row_scalar(data, first, period, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => wilders_row_avx2(data, first, period, out_row),
+			Kernel::Avx2 => wilders_row_avx2(data, first, period, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => wilders_row_avx512(data, first, period, out_row),
+			Kernel::Avx512 => wilders_row_avx512(data, first, period, dst),
 			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-			Kernel::Avx2 | Kernel::Avx512 => wilders_row_scalar(data, first, period, out_row),
+			Kernel::Avx2 | Kernel::Avx512 => wilders_row_scalar(data, first, period, dst),
 			_ => unreachable!(),
 		}
 	};
 
-	// Run every row
+	// 3) Iterate by rows
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			out.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
+			use rayon::prelude::*;
+			out_mu.par_chunks_mut(cols).enumerate().for_each(|(r, row)| do_row(r, row));
 		}
-
 		#[cfg(target_arch = "wasm32")]
 		{
-			for (row, slice) in out.chunks_mut(cols).enumerate() {
-				do_row(row, slice);
-			}
+			for (r, row) in out_mu.chunks_mut(cols).enumerate() { do_row(r, row); }
 		}
 	} else {
-		for (row, slice) in out.chunks_mut(cols).enumerate() {
-			do_row(row, slice);
-		}
+		for (r, row) in out_mu.chunks_mut(cols).enumerate() { do_row(r, row); }
 	}
 
 	Ok(combos)
@@ -845,6 +878,67 @@ mod tests {
 				);
 			}
 		}
+		Ok(())
+	}
+
+	fn check_wilders_empty_input(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		let empty: [f64; 0] = [];
+		let input = WildersInput::from_slice(&empty, WildersParams::default());
+		let res = wilders_with_kernel(&input, kernel);
+		assert!(
+			matches!(res, Err(WildersError::EmptyInputData)),
+			"[{}] Wilders should fail with empty input",
+			test_name
+		);
+		Ok(())
+	}
+
+	fn check_wilders_nan_in_initial_window(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		// Data with NaN in the initial window after first valid value
+		let data = vec![1.0, 2.0, f64::NAN, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+		let params = WildersParams { period: Some(5) };
+		let input = WildersInput::from_slice(&data, params);
+		let res = wilders_with_kernel(&input, kernel);
+		assert!(
+			matches!(res, Err(WildersError::NotEnoughValidData { needed: 5, valid: 2 })),
+			"[{}] Wilders should fail with NaN in initial window, got: {:?}",
+			test_name,
+			res
+		);
+		Ok(())
+	}
+
+	fn check_wilders_output_mismatch(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+		let params = WildersParams { period: Some(3) };
+		let input = WildersInput::from_slice(&data, params);
+		
+		// Create a mismatched output buffer
+		let mut out = vec![0.0; 10]; // Wrong size
+		let res = wilders_into_slice(&mut out, &input, kernel);
+		assert!(
+			matches!(res, Err(WildersError::OutputLengthMismatch { output_len: 10, data_len: 5 })),
+			"[{}] Wilders should fail with output length mismatch, got: {:?}",
+			test_name,
+			res
+		);
+		Ok(())
+	}
+
+	fn check_wilders_invalid_kernel_batch() -> Result<(), Box<dyn Error>> {
+		let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+		let sweep = WildersBatchRange { period: (3, 5, 1) };
+		
+		// Try to use a non-batch kernel for batch operation
+		let res = wilders_batch_with_kernel(&data, &sweep, Kernel::Scalar);
+		assert!(
+			matches!(res, Err(WildersError::InvalidKernelType { .. })),
+			"Wilders batch should fail with non-batch kernel, got: {:?}",
+			res
+		);
 		Ok(())
 	}
 
@@ -1121,10 +1215,47 @@ mod tests {
 		check_wilders_very_small_dataset,
 		check_wilders_reinput,
 		check_wilders_nan_handling,
+		check_wilders_empty_input,
+		check_wilders_nan_in_initial_window,
+		check_wilders_output_mismatch,
 		check_wilders_streaming,
 		check_wilders_no_poison,
 		check_wilders_property
 	);
+	
+	// Test invalid kernel batch separately (doesn't need kernel variants)
+	#[test]
+	fn test_wilders_invalid_kernel_batch() {
+		let _ = check_wilders_invalid_kernel_batch();
+	}
+	
+	// Test that NaN in initial window is caught and doesn't poison the series
+	#[test]
+	fn test_wilders_nan_poisoning_prevented() {
+		// Create data with NaN in position 2 (within initial window for period=5)
+		let data = vec![1.0, 2.0, f64::NAN, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+		let params = WildersParams { period: Some(5) };
+		let input = WildersInput::from_slice(&data, params);
+		
+		// This should fail with NotEnoughValidData, not produce a poisoned series
+		let result = wilders(&input);
+		assert!(result.is_err(), "Should fail with NaN in initial window");
+		
+		// Now test with clean data to ensure normal operation works
+		let clean_data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+		let clean_params = WildersParams { period: Some(5) };
+		let clean_input = WildersInput::from_slice(&clean_data, clean_params);
+		let clean_result = wilders(&clean_input).unwrap();
+		
+		// Check that values after warmup are finite (not NaN-poisoned)
+		for i in 5..clean_result.values.len() {
+			assert!(
+				clean_result.values[i].is_finite(),
+				"Value at index {} should be finite, got {}",
+				i, clean_result.values[i]
+			);
+		}
+	}
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);

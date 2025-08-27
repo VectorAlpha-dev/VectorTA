@@ -19,14 +19,19 @@
 //! - **`Ok(DmOutput)`** on success, containing two `Vec<f64>` matching the input length.
 //! - **`Err(DmError)`** otherwise.
 
-use crate::utilities::data_loader::{source_type, Candles};
+use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
-use aligned_vec::{AVec, CACHELINE_ALIGN};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix,
+	detect_best_batch_kernel, detect_best_kernel,
+};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
+use std::mem::MaybeUninit;
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
@@ -157,12 +162,16 @@ pub fn dm(input: &DmInput) -> Result<DmOutput, DmError> {
 	dm_with_kernel(input, Kernel::Auto)
 }
 
-pub fn dm_with_kernel(input: &DmInput, kernel: Kernel) -> Result<DmOutput, DmError> {
+#[inline(always)]
+fn dm_prepare<'a>(
+	input: &'a DmInput,
+	kernel: Kernel,
+) -> Result<(&'a [f64], &'a [f64], usize, usize, Kernel), DmError> {
 	let (high, low) = match &input.data {
 		DmData::Candles { candles } => {
-			let high = candles.select_candle_field("high").map_err(|_| DmError::EmptyData)?;
-			let low = candles.select_candle_field("low").map_err(|_| DmError::EmptyData)?;
-			(high, low)
+			let h = candles.select_candle_field("high").map_err(|_| DmError::EmptyData)?;
+			let l = candles.select_candle_field("low").map_err(|_| DmError::EmptyData)?;
+			(h, l)
 		}
 		DmData::Slices { high, low } => (*high, *low),
 	};
@@ -173,40 +182,95 @@ pub fn dm_with_kernel(input: &DmInput, kernel: Kernel) -> Result<DmOutput, DmErr
 
 	let period = input.get_period();
 	if period == 0 || period > high.len() {
-		return Err(DmError::InvalidPeriod {
-			period,
-			data_len: high.len(),
-		});
+		return Err(DmError::InvalidPeriod { period, data_len: high.len() });
 	}
 
-	let first_valid_idx = high
-		.iter()
-		.zip(low.iter())
-		.position(|(&h, &l)| !h.is_nan() && !l.is_nan())
+	let first = high.iter().zip(low.iter())
+		.position(|(&h,&l)| !h.is_nan() && !l.is_nan())
 		.ok_or(DmError::AllValuesNaN)?;
 
-	if (high.len() - first_valid_idx) < period {
-		return Err(DmError::NotEnoughValidData {
-			needed: period,
-			valid: high.len() - first_valid_idx,
-		});
+	if high.len() - first < period {
+		return Err(DmError::NotEnoughValidData { needed: period, valid: high.len() - first });
 	}
 
-	let chosen = match kernel {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
+	let chosen = match kernel { Kernel::Auto => detect_best_kernel(), k => k };
+	Ok((high, low, period, first, chosen))
+}
 
-	unsafe {
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => dm_scalar(high, low, period, first_valid_idx),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => dm_avx2(high, low, period, first_valid_idx),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => dm_avx512(high, low, period, first_valid_idx),
-			_ => unreachable!(),
-		}
+#[inline(always)]
+fn dm_compute_into_scalar(
+	high: &[f64],
+	low: &[f64],
+	period: usize,
+	first: usize,
+	plus_out: &mut [f64],
+	minus_out: &mut [f64],
+) {
+	let mut prev_high = high[first];
+	let mut prev_low  = low[first];
+	let mut sum_plus = 0.0;
+	let mut sum_minus = 0.0;
+
+	let end_init = first + period - 1;
+
+	for i in (first + 1)..=end_init {
+		let diff_p = high[i] - prev_high;
+		let diff_m = prev_low - low[i];
+		prev_high = high[i];
+		prev_low = low[i];
+		let p = if diff_p > 0.0 && diff_p > diff_m { diff_p } else { 0.0 };
+		let m = if diff_m > 0.0 && diff_m > diff_p { diff_m } else { 0.0 };
+		sum_plus += p;
+		sum_minus += m;
 	}
+	plus_out[end_init]  = sum_plus;
+	minus_out[end_init] = sum_minus;
+
+	let inv_period = 1.0 / (period as f64);
+	for i in (end_init + 1)..high.len() {
+		let diff_p = high[i] - prev_high;
+		let diff_m = prev_low - low[i];
+		prev_high = high[i];
+		prev_low  = low[i];
+		let p = if diff_p > 0.0 && diff_p > diff_m { diff_p } else { 0.0 };
+		let m = if diff_m > 0.0 && diff_m > diff_p { diff_m } else { 0.0 };
+		sum_plus  = sum_plus  - (sum_plus  * inv_period) + p;
+		sum_minus = sum_minus - (sum_minus * inv_period) + m;
+		plus_out[i]  = sum_plus;
+		minus_out[i] = sum_minus;
+	}
+}
+
+#[inline(always)]
+fn dm_compute_into(
+	high: &[f64],
+	low: &[f64],
+	period: usize,
+	first: usize,
+	kernel: Kernel,
+	plus_out: &mut [f64],
+	minus_out: &mut [f64],
+) {
+	match kernel {
+		Kernel::Scalar | Kernel::ScalarBatch => dm_compute_into_scalar(high, low, period, first, plus_out, minus_out),
+		#[cfg(all(feature="nightly-avx", target_arch="x86_64"))]
+		Kernel::Avx2 | Kernel::Avx2Batch => dm_compute_into_scalar(high, low, period, first, plus_out, minus_out),
+		#[cfg(all(feature="nightly-avx", target_arch="x86_64"))]
+		Kernel::Avx512 | Kernel::Avx512Batch => dm_compute_into_scalar(high, low, period, first, plus_out, minus_out),
+		_ => unreachable!(),
+	}
+}
+
+pub fn dm_with_kernel(input: &DmInput, kernel: Kernel) -> Result<DmOutput, DmError> {
+	let (high, low, period, first, chosen) = dm_prepare(input, kernel)?;
+	let warm = first + period - 1;
+
+	// allocate without full init
+	let mut plus  = alloc_with_nan_prefix(high.len(), warm);
+	let mut minus = alloc_with_nan_prefix(high.len(), warm);
+
+	dm_compute_into(high, low, period, first, chosen, &mut plus, &mut minus);
+	Ok(DmOutput { plus, minus })
 }
 
 #[inline]
@@ -216,124 +280,26 @@ pub fn dm_into_slice(
 	input: &DmInput,
 	kernel: Kernel,
 ) -> Result<(), DmError> {
-	let (high, low) = match &input.data {
-		DmData::Candles { candles } => {
-			let high = candles.select_candle_field("high").map_err(|_| DmError::EmptyData)?;
-			let low = candles.select_candle_field("low").map_err(|_| DmError::EmptyData)?;
-			(high, low)
-		}
-		DmData::Slices { high, low } => (*high, *low),
-	};
-
-	if high.is_empty() || low.is_empty() || high.len() != low.len() {
-		return Err(DmError::EmptyData);
-	}
-	
+	let (high, low, period, first, chosen) = dm_prepare(input, kernel)?;
 	if plus_dst.len() != high.len() || minus_dst.len() != high.len() {
-		return Err(DmError::InvalidPeriod {
-			period: plus_dst.len(),
-			data_len: high.len(),
-		});
+		return Err(DmError::InvalidPeriod { period: period, data_len: high.len() });
 	}
 
-	let period = input.get_period();
-	if period == 0 || period > high.len() {
-		return Err(DmError::InvalidPeriod {
-			period,
-			data_len: high.len(),
-		});
-	}
+	dm_compute_into(high, low, period, first, chosen, plus_dst, minus_dst);
 
-	let first_valid_idx = high
-		.iter()
-		.zip(low.iter())
-		.position(|(&h, &l)| !h.is_nan() && !l.is_nan())
-		.ok_or(DmError::AllValuesNaN)?;
-
-	if (high.len() - first_valid_idx) < period {
-		return Err(DmError::NotEnoughValidData {
-			needed: period,
-			valid: high.len() - first_valid_idx,
-		});
-	}
-
-	let chosen = match kernel {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
-
-	// Call the regular dm function to get results
-	let result = unsafe {
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => dm_scalar(high, low, period, first_valid_idx),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => dm_avx2(high, low, period, first_valid_idx),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => dm_avx512(high, low, period, first_valid_idx),
-			_ => unreachable!(),
-		}
-	}?;
-
-	// Copy results to output slices
-	plus_dst.copy_from_slice(&result.plus);
-	minus_dst.copy_from_slice(&result.minus);
-	
-	// Fill warmup period with NaN
-	let warmup_period = first_valid_idx + period;
-	for v in &mut plus_dst[..warmup_period] {
-		*v = f64::NAN;
-	}
-	for v in &mut minus_dst[..warmup_period] {
-		*v = f64::NAN;
-	}
-	
+	let warm = first + period - 1;
+	for v in &mut plus_dst[..warm]  { *v = f64::NAN; }
+	for v in &mut minus_dst[..warm] { *v = f64::NAN; }
 	Ok(())
 }
 
 #[inline]
 pub unsafe fn dm_scalar(high: &[f64], low: &[f64], period: usize, first_valid_idx: usize) -> Result<DmOutput, DmError> {
-	let mut plus_dm = vec![f64::NAN; high.len()];
-	let mut minus_dm = vec![f64::NAN; high.len()];
+	let warm = first_valid_idx + period - 1;
+	let mut plus_dm = alloc_with_nan_prefix(high.len(), warm);
+	let mut minus_dm = alloc_with_nan_prefix(high.len(), warm);
 
-	let mut prev_high = high[first_valid_idx];
-	let mut prev_low = low[first_valid_idx];
-	let mut sum_plus = 0.0;
-	let mut sum_minus = 0.0;
-
-	let end_init = first_valid_idx + period - 1;
-	for i in (first_valid_idx + 1)..=end_init {
-		let diff_p = high[i] - prev_high;
-		let diff_m = prev_low - low[i];
-		prev_high = high[i];
-		prev_low = low[i];
-
-		let plus_val = if diff_p > 0.0 && diff_p > diff_m { diff_p } else { 0.0 };
-		let minus_val = if diff_m > 0.0 && diff_m > diff_p { diff_m } else { 0.0 };
-
-		sum_plus += plus_val;
-		sum_minus += minus_val;
-	}
-
-	plus_dm[end_init] = sum_plus;
-	minus_dm[end_init] = sum_minus;
-
-	let inv_period = 1.0 / (period as f64);
-
-	for i in (end_init + 1)..high.len() {
-		let diff_p = high[i] - prev_high;
-		let diff_m = prev_low - low[i];
-		prev_high = high[i];
-		prev_low = low[i];
-
-		let plus_val = if diff_p > 0.0 && diff_p > diff_m { diff_p } else { 0.0 };
-		let minus_val = if diff_m > 0.0 && diff_m > diff_p { diff_m } else { 0.0 };
-
-		sum_plus = sum_plus - (sum_plus * inv_period) + plus_val;
-		sum_minus = sum_minus - (sum_minus * inv_period) + minus_val;
-
-		plus_dm[i] = sum_plus;
-		minus_dm[i] = sum_minus;
-	}
+	dm_compute_into_scalar(high, low, period, first_valid_idx, &mut plus_dm, &mut minus_dm);
 
 	Ok(DmOutput {
 		plus: plus_dm,
@@ -379,10 +345,6 @@ pub unsafe fn dm_avx512_long(
 #[derive(Debug, Clone)]
 pub struct DmStream {
 	period: usize,
-	buf_high: Vec<f64>,
-	buf_low: Vec<f64>,
-	idx: usize,
-	filled: bool,
 	sum_plus: f64,
 	sum_minus: f64,
 	prev_high: f64,
@@ -398,10 +360,6 @@ impl DmStream {
 		}
 		Ok(Self {
 			period,
-			buf_high: vec![f64::NAN; period],
-			buf_low: vec![f64::NAN; period],
-			idx: 0,
-			filled: false,
 			sum_plus: 0.0,
 			sum_minus: 0.0,
 			prev_high: f64::NAN,
@@ -562,6 +520,60 @@ pub fn dm_batch_par_slice(
 }
 
 #[inline(always)]
+fn dm_batch_inner_into(
+	high: &[f64],
+	low: &[f64],
+	sweep: &DmBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	first: usize,
+	plus_out: &mut [f64],
+	minus_out: &mut [f64],
+) -> Result<Vec<DmParams>, DmError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() { return Err(DmError::InvalidPeriod { period: 0, data_len: 0 }); }
+
+	let rows = combos.len();
+	let cols = high.len();
+	let chosen = match kern { Kernel::Auto => detect_best_batch_kernel(), k => k };
+
+	let do_row = |row: usize, plus_row: &mut [f64], minus_row: &mut [f64]| {
+		let p = combos[row].period.unwrap();
+		dm_compute_into(high, low, p, first,
+			match chosen {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch   => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				k => k,
+			},
+			plus_row, minus_row);
+	};
+
+	if parallel {
+		#[cfg(not(target_arch="wasm32"))]
+		{
+			use rayon::prelude::*;
+			plus_out.par_chunks_mut(cols)
+				.zip(minus_out.par_chunks_mut(cols))
+				.enumerate()
+				.for_each(|(r,(pr,mr))| do_row(r, pr, mr));
+		}
+		#[cfg(target_arch="wasm32")]
+		{
+			for (r,(pr,mr)) in plus_out.chunks_mut(cols).zip(minus_out.chunks_mut(cols)).enumerate() {
+				do_row(r, pr, mr);
+			}
+		}
+	} else {
+		for (r,(pr,mr)) in plus_out.chunks_mut(cols).zip(minus_out.chunks_mut(cols)).enumerate() {
+			do_row(r, pr, mr);
+		}
+	}
+
+	Ok(combos)
+}
+
+#[inline(always)]
 fn dm_batch_inner(
 	high: &[f64],
 	low: &[f64],
@@ -570,68 +582,42 @@ fn dm_batch_inner(
 	parallel: bool,
 ) -> Result<DmBatchOutput, DmError> {
 	let combos = expand_grid(sweep);
-	if combos.is_empty() {
-		return Err(DmError::InvalidPeriod { period: 0, data_len: 0 });
-	}
+	if combos.is_empty() { return Err(DmError::InvalidPeriod { period: 0, data_len: 0 }); }
 
-	let first = high
-		.iter()
-		.zip(low.iter())
-		.position(|(&h, &l)| !h.is_nan() && !l.is_nan())
+	let first = high.iter().zip(low.iter())
+		.position(|(&h,&l)| !h.is_nan() && !l.is_nan())
 		.ok_or(DmError::AllValuesNaN)?;
+	
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
 	if high.len() - first < max_p {
-		return Err(DmError::NotEnoughValidData {
-			needed: max_p,
-			valid: high.len() - first,
-		});
+		return Err(DmError::NotEnoughValidData { needed: max_p, valid: high.len() - first });
 	}
-
+	
 	let rows = combos.len();
 	let cols = high.len();
-	let mut plus = vec![f64::NAN; rows * cols];
-	let mut minus = vec![f64::NAN; rows * cols];
 
-	let do_row = |row: usize, plus_row: &mut [f64], minus_row: &mut [f64]| unsafe {
-		let period = combos[row].period.unwrap();
-		match kern {
-			Kernel::Scalar => dm_row_scalar(high, low, first, period, plus_row, minus_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => dm_row_avx2(high, low, first, period, plus_row, minus_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => dm_row_avx512(high, low, first, period, plus_row, minus_row),
-			_ => unreachable!(),
-		}
-	};
+	// allocate uninit matrices
+	let mut plus_mu  = make_uninit_matrix(rows, cols);
+	let mut minus_mu = make_uninit_matrix(rows, cols);
 
-	if parallel {
-		#[cfg(not(target_arch = "wasm32"))]
-		{
-			plus.par_chunks_mut(cols)
-				.zip(minus.par_chunks_mut(cols))
-				.enumerate()
-				.for_each(|(row, (plus_row, minus_row))| do_row(row, plus_row, minus_row));
-		}
+	// warm prefixes per row
+	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
+	init_matrix_prefixes(&mut plus_mu,  cols, &warm);
+	init_matrix_prefixes(&mut minus_mu, cols, &warm);
 
-		#[cfg(target_arch = "wasm32")]
-		{
-			for (row, (plus_row, minus_row)) in plus.chunks_mut(cols).zip(minus.chunks_mut(cols)).enumerate() {
-				do_row(row, plus_row, minus_row);
-			}
-		}
-	} else {
-		for (row, (plus_row, minus_row)) in plus.chunks_mut(cols).zip(minus.chunks_mut(cols)).enumerate() {
-			do_row(row, plus_row, minus_row);
-		}
-	}
+	// alias as &mut [f64] safely
+	let mut plus_guard  = core::mem::ManuallyDrop::new(plus_mu);
+	let mut minus_guard = core::mem::ManuallyDrop::new(minus_mu);
+	let plus_out:  &mut [f64] = unsafe { core::slice::from_raw_parts_mut(plus_guard.as_mut_ptr()  as *mut f64, plus_guard.len()) };
+	let minus_out: &mut [f64] = unsafe { core::slice::from_raw_parts_mut(minus_guard.as_mut_ptr() as *mut f64, minus_guard.len()) };
 
-	Ok(DmBatchOutput {
-		plus,
-		minus,
-		combos,
-		rows,
-		cols,
-	})
+	let combos = dm_batch_inner_into(high, low, sweep, kern, parallel, first, plus_out, minus_out)?;
+
+	// take ownership of filled buffers
+	let plus  = unsafe { Vec::from_raw_parts(plus_guard.as_mut_ptr()  as *mut f64, plus_guard.len(),  plus_guard.capacity()) };
+	let minus = unsafe { Vec::from_raw_parts(minus_guard.as_mut_ptr() as *mut f64, minus_guard.len(), minus_guard.capacity()) };
+
+	Ok(DmBatchOutput { plus, minus, combos, rows, cols })
 }
 
 #[inline(always)]
@@ -1355,4 +1341,202 @@ mod tests {
 	}
 	gen_batch_tests!(check_batch_default_row);
 	gen_batch_tests!(check_batch_no_poison);
+}
+
+#[cfg(feature = "python")]
+use numpy::{PyArray1, PyReadonlyArray1, IntoPyArray, PyArrayMethods};
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "dm")]
+#[pyo3(signature = (high, low, period, kernel=None))]
+pub fn dm_py<'py>(
+	py: Python<'py>,
+	high: PyReadonlyArray1<'py, f64>,
+	low:  PyReadonlyArray1<'py,  f64>,
+	period: usize,
+	kernel: Option<&str>,
+) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
+	let h = high.as_slice()?;
+	let l = low.as_slice()?;
+	if h.len() != l.len() { return Err(PyValueError::new_err("high/low length mismatch")); }
+
+	let params = DmParams { period: Some(period) };
+	let input  = DmInput::from_slices(h, l, params);
+	let kern   = validate_kernel(kernel, false)?;
+
+	// pre-allocate numpy outputs, then compute into them
+	let out_plus  = unsafe { PyArray1::<f64>::new(py, [h.len()], false) };
+	let out_minus = unsafe { PyArray1::<f64>::new(py, [h.len()], false) };
+	let plus_slice  = unsafe { out_plus.as_slice_mut()? };
+	let minus_slice = unsafe { out_minus.as_slice_mut()? };
+
+	py.allow_threads(|| dm_into_slice(plus_slice, minus_slice, &input, kern))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	Ok((out_plus, out_minus))
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "dm_batch")]
+#[pyo3(signature = (high, low, period_range, kernel=None))]
+pub fn dm_batch_py<'py>(
+	py: Python<'py>,
+	high: PyReadonlyArray1<'py, f64>,
+	low:  PyReadonlyArray1<'py,  f64>,
+	period_range: (usize, usize, usize),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	let h = high.as_slice()?;
+	let l = low.as_slice()?;
+	if h.len() != l.len() { return Err(PyValueError::new_err("high/low length mismatch")); }
+
+	let sweep = DmBatchRange { period: period_range };
+	let kern  = validate_kernel(kernel, true)?;
+
+	let output = py.allow_threads(|| dm_batch_with_kernel(h, l, &sweep, kern))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	// reshape into (rows, cols) without extra copies
+	let plus  = unsafe { PyArray1::from_vec(py, output.plus).reshape((output.rows, output.cols))? };
+	let minus = unsafe { PyArray1::from_vec(py, output.minus).reshape((output.rows, output.cols))? };
+
+	let dict = PyDict::new(py);
+	dict.set_item("plus",  plus)?;
+	dict.set_item("minus", minus)?;
+	dict.set_item("periods",
+		output.combos.iter().map(|p| p.period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py)
+	)?;
+	Ok(dict)
+}
+
+// Optional: streaming
+#[cfg(feature = "python")]
+#[pyclass(name = "DmStream")]
+pub struct DmStreamPy { stream: DmStream }
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl DmStreamPy {
+	#[new]
+	fn new(period: usize) -> PyResult<Self> {
+		let s = DmStream::try_new(DmParams { period: Some(period) })
+			.map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(Self { stream: s })
+	}
+	fn update(&mut self, high: f64, low: f64) -> Option<(f64,f64)> {
+		self.stream.update(high, low)
+	}
+}
+
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct DmJsOutput {
+	pub values: Vec<f64>, // [plus..., minus...]
+	pub rows: usize,      // 2
+	pub cols: usize,      // len
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = dm)]
+pub fn dm_js(high: &[f64], low: &[f64], period: usize) -> Result<JsValue, JsValue> {
+	if high.len() != low.len() { return Err(JsValue::from_str("length mismatch")); }
+	let input = DmInput::from_slices(high, low, DmParams { period: Some(period) });
+
+	let mut plus  = vec![0.0; high.len()];
+	let mut minus = vec![0.0; high.len()];
+	dm_into_slice(&mut plus, &mut minus, &input, detect_best_kernel())
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	let mut values = plus;
+	values.extend_from_slice(&minus);
+
+	let output = DmJsOutput { values, rows: 2, cols: high.len() };
+	serde_wasm_bindgen::to_value(&output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct DmBatchConfig { pub period_range: (usize,usize,usize) }
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct DmBatchJsOutput {
+	pub values: Vec<f64>,   // rows = 2 * combos, each row length = cols
+	pub rows: usize,        // 2*combos
+	pub cols: usize,
+	pub periods: Vec<usize>
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = dm_batch)]
+pub fn dm_batch_unified_js(high: &[f64], low: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	if high.len() != low.len() { return Err(JsValue::from_str("length mismatch")); }
+	let cfg: DmBatchConfig = serde_wasm_bindgen::from_value(config)
+		.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+	let sweep = DmBatchRange { period: cfg.period_range };
+	let out = dm_batch_inner(high, low, &sweep, detect_best_kernel(), false)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	// flatten to 2*rows
+	let mut values = Vec::with_capacity(out.plus.len() + out.minus.len());
+	values.extend_from_slice(&out.plus);
+	values.extend_from_slice(&out.minus);
+
+	let periods = out.combos.iter().map(|p| p.period.unwrap()).collect::<Vec<_>>();
+
+	let js = DmBatchJsOutput {
+		values,
+		rows: out.rows * 2,
+		cols: out.cols,
+		periods,
+	};
+	serde_wasm_bindgen::to_value(&js).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+// Optional low-level pointers for zero-copy JS interop (parity with ALMA)
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn dm_alloc(len: usize) -> *mut f64 {
+	let mut v = Vec::<f64>::with_capacity(len);
+	let p = v.as_mut_ptr();
+	std::mem::forget(v);
+	p
+}
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn dm_free(ptr: *mut f64, len: usize) { unsafe { let _ = Vec::from_raw_parts(ptr, len, len); } }
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = dm_into)]
+pub fn dm_into_js(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	plus_ptr: *mut f64,
+	minus_ptr: *mut f64,
+	len: usize,
+	period: usize,
+) -> Result<(), JsValue> {
+	if high_ptr.is_null() || low_ptr.is_null() || plus_ptr.is_null() || minus_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer"));
+	}
+	unsafe {
+		let h = std::slice::from_raw_parts(high_ptr, len);
+		let l = std::slice::from_raw_parts(low_ptr, len);
+		let input = DmInput::from_slices(h, l, DmParams { period: Some(period) });
+		let plus  = std::slice::from_raw_parts_mut(plus_ptr, len);
+		let minus = std::slice::from_raw_parts_mut(minus_ptr, len);
+		dm_into_slice(plus, minus, &input, detect_best_kernel()).map_err(|e| JsValue::from_str(&e.to_string()))
+	}
 }

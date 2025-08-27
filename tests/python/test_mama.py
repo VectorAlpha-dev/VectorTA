@@ -23,12 +23,11 @@ def test_mama_partial_params():
     close = np.array(data['close'], dtype=np.float64)
     
     # Test with default parameters (0.5, 0.05)
-    result = mama(close, 0.5, 0.05)
-    assert isinstance(result, dict)
-    assert 'mama' in result
-    assert 'fama' in result
-    assert len(result['mama']) == len(close)
-    assert len(result['fama']) == len(close)
+    mama_vals, fama_vals = mama(close, 0.5, 0.05)
+    assert isinstance(mama_vals, np.ndarray)
+    assert isinstance(fama_vals, np.ndarray)
+    assert len(mama_vals) == len(close)
+    assert len(fama_vals) == len(close)
 
 
 def test_mama_accuracy():
@@ -37,17 +36,27 @@ def test_mama_accuracy():
     close = np.array(data['close'], dtype=np.float64)
     
     # Default parameters
-    result = mama(close, 0.5, 0.05)
-    mama_vals = result['mama']
-    fama_vals = result['fama']
+    mama_vals, fama_vals = mama(close, 0.5, 0.05)
     
     assert len(mama_vals) == len(close)
     assert len(fama_vals) == len(close)
+    
+    # Check warmup period - first 10 values should be NaN
+    for i in range(10):
+        assert np.isnan(mama_vals[i]), f"Expected NaN at warmup index {i} for MAMA"
+        assert np.isnan(fama_vals[i]), f"Expected NaN at warmup index {i} for FAMA"
     
     # Check that after warmup period (10), we have valid values
     for i in range(10, min(20, len(mama_vals))):
         assert np.isfinite(mama_vals[i]), f"MAMA NaN at index {i}"
         assert np.isfinite(fama_vals[i]), f"FAMA NaN at index {i}"
+    
+    # Test specific reference values (last 5 values from Rust)
+    expected_mama_last5 = [10341.56, 10336.879606445793, 10332.334896212438, 10327.910940846373, 10323.603219388177]
+    expected_fama_last5 = [10341.56, 10340.297787601206, 10339.10104651456, 10337.948090678695, 10336.839444223116]
+    
+    assert_close(mama_vals[-5:], expected_mama_last5, rtol=1e-6, msg="MAMA last 5 values mismatch")
+    assert_close(fama_vals[-5:], expected_fama_last5, rtol=1e-6, msg="FAMA last 5 values mismatch")
 
 
 def test_mama_invalid_fast_limit():
@@ -97,9 +106,14 @@ def test_mama_very_small_dataset():
     # MAMA requires at least 10 data points
     data_min = np.array([42.0] * 10, dtype=np.float64)
     
-    result = mama(data_min, 0.5, 0.05)
-    assert len(result['mama']) == 10
-    assert len(result['fama']) == 10
+    mama_vals, fama_vals = mama(data_min, 0.5, 0.05)
+    assert len(mama_vals) == 10
+    assert len(fama_vals) == 10
+    
+    # First 10 values should be NaN due to warmup
+    for i in range(10):
+        assert np.isnan(mama_vals[i]), f"Expected NaN at index {i} for MAMA"
+        assert np.isnan(fama_vals[i]), f"Expected NaN at index {i} for FAMA"
 
 
 def test_mama_empty_input():
@@ -116,13 +130,13 @@ def test_mama_reinput():
     close = np.array(data['close'], dtype=np.float64)
     
     # First MAMA pass with default params
-    first_result = mama(close, 0.5, 0.05)
+    first_mama, first_fama = mama(close, 0.5, 0.05)
     
     # Second MAMA pass with different params using first MAMA result as input
-    second_result = mama(first_result['mama'], 0.7, 0.1)
+    second_mama, second_fama = mama(first_mama, 0.7, 0.1)
     
-    assert len(second_result['mama']) == len(first_result['mama'])
-    assert len(second_result['fama']) == len(first_result['mama'])
+    assert len(second_mama) == len(first_mama)
+    assert len(second_fama) == len(first_mama)
 
 
 def test_mama_nan_handling():
@@ -130,16 +144,19 @@ def test_mama_nan_handling():
     data = load_test_data()
     close = np.array(data['close'], dtype=np.float64)
     
-    result = mama(close, 0.5, 0.05)
-    mama_vals = result['mama']
-    fama_vals = result['fama']
+    mama_vals, fama_vals = mama(close, 0.5, 0.05)
     
     assert len(mama_vals) == len(close)
     assert len(fama_vals) == len(close)
     
+    # First 10 values should be NaN (warmup period)
+    for i in range(10):
+        assert np.isnan(mama_vals[i]), f"Expected NaN at warmup index {i} for MAMA"
+        assert np.isnan(fama_vals[i]), f"Expected NaN at warmup index {i} for FAMA"
+    
     # Check that after warmup period, there are valid values
-    if len(mama_vals) > 20:
-        for i in range(20, len(mama_vals)):
+    if len(mama_vals) > 10:
+        for i in range(10, len(mama_vals)):
             assert np.isfinite(mama_vals[i]), f"MAMA NaN at index {i}"
             assert np.isfinite(fama_vals[i]), f"FAMA NaN at index {i}"
 
@@ -156,25 +173,28 @@ def test_mama_batch():
         (0.03, 0.07, 0.02)  # slow_limit range: 0.03, 0.05, 0.07
     )
     
-    # Check result is a dict with the expected keys
+    # Check result is a dict with the expected keys (following ALMA pattern)
     assert isinstance(batch_result, dict)
-    assert 'mama_values' in batch_result
-    assert 'fama_values' in batch_result
+    assert 'values' in batch_result  # Combined [mama_values, fama_values]
     assert 'fast_limits' in batch_result
     assert 'slow_limits' in batch_result
     
     # Should have 3 * 3 = 9 combinations
-    assert batch_result['mama_values'].shape == (9, len(close))
-    assert batch_result['fama_values'].shape == (9, len(close))
+    # values contains both mama and fama stacked: shape = (18, len(close))
+    assert batch_result['values'].shape == (18, len(close))  # 9 mama + 9 fama
     assert len(batch_result['fast_limits']) == 9
     assert len(batch_result['slow_limits']) == 9
     
+    # Extract mama and fama from combined values
+    batch_mama_values = batch_result['values'][:9]  # First 9 rows are mama
+    batch_fama_values = batch_result['values'][9:]  # Last 9 rows are fama
+    
     # Verify first combination matches individual calculation
-    individual_result = mama(close, 0.3, 0.03)
-    batch_first_mama = batch_result['mama_values'][0]
-    batch_first_fama = batch_result['fama_values'][0]
-    assert_close(batch_first_mama, individual_result['mama'], atol=1e-9, msg="MAMA first combination mismatch")
-    assert_close(batch_first_fama, individual_result['fama'], atol=1e-9, msg="FAMA first combination mismatch")
+    individual_mama, individual_fama = mama(close, 0.3, 0.03)
+    batch_first_mama = batch_mama_values[0]
+    batch_first_fama = batch_fama_values[0]
+    assert_close(batch_first_mama, individual_mama, atol=1e-9, msg="MAMA first combination mismatch")
+    assert_close(batch_first_fama, individual_fama, atol=1e-9, msg="FAMA first combination mismatch")
 
 
 
@@ -189,9 +209,7 @@ def test_mama_stream():
     
     # Calculate batch result for comparison
     close_array = np.array(close, dtype=np.float64)
-    batch_result = mama(close_array, fast_limit, slow_limit)
-    batch_mama = batch_result['mama']
-    batch_fama = batch_result['fama']
+    batch_mama, batch_fama = mama(close_array, fast_limit, slow_limit)
     
     # Test streaming
     stream = MamaStream(fast_limit, slow_limit)
@@ -206,15 +224,13 @@ def test_mama_stream():
         assert stream_results[i] is None, f"Expected None at index {i}"
     
     # From index 9 onwards, we should get values
-    # The streaming implementation uses a 10-value window, so at index 9 we get the first result
-    # This result is based on the window [0:10]
-    for i in range(9, len(close)):
+    # The streaming implementation should return None for first 10 values (warmup)
+    # Then start returning (mama, fama) tuples
+    for i in range(10, len(close)):
         assert stream_results[i] is not None, f"Expected value at index {i}"
         stream_mama, stream_fama = stream_results[i]
         
-        # The streaming value at index i corresponds to a calculation on the window ending at i
-        # Since streaming uses a rolling 10-value window, we can't directly compare with batch
-        # Instead, just verify the values are reasonable
+        # Verify the values are reasonable
         assert np.isfinite(stream_mama), f"MAMA NaN at index {i}"
         assert np.isfinite(stream_fama), f"FAMA NaN at index {i}"
 
@@ -233,19 +249,19 @@ def test_mama_different_params():
     ]
     
     for fast_lim, slow_lim in test_cases:
-        result = mama(close, fast_lim, slow_lim)
-        mama_vals = result['mama']
-        fama_vals = result['fama']
+        mama_vals, fama_vals = mama(close, fast_lim, slow_lim)
         assert len(mama_vals) == len(close)
         assert len(fama_vals) == len(close)
         
-        # Count valid values after warmup
-        mama_valid = np.sum(np.isfinite(mama_vals[10:]))
-        fama_valid = np.sum(np.isfinite(fama_vals[10:]))
-        assert mama_valid == len(close) - 10, \
-            f"Too many NaN values in MAMA for params=({fast_lim}, {slow_lim})"
-        assert fama_valid == len(close) - 10, \
-            f"Too many NaN values in FAMA for params=({fast_lim}, {slow_lim})"
+        # First 10 should be NaN, rest should be valid
+        assert np.all(np.isnan(mama_vals[:10])), \
+            f"Expected NaN in warmup for MAMA with params=({fast_lim}, {slow_lim})"
+        assert np.all(np.isnan(fama_vals[:10])), \
+            f"Expected NaN in warmup for FAMA with params=({fast_lim}, {slow_lim})"
+        assert np.all(np.isfinite(mama_vals[10:])), \
+            f"Found NaN after warmup in MAMA for params=({fast_lim}, {slow_lim})"
+        assert np.all(np.isfinite(fama_vals[10:])), \
+            f"Found NaN after warmup in FAMA for params=({fast_lim}, {slow_lim})"
 
 
 def test_mama_batch_performance():
@@ -261,16 +277,20 @@ def test_mama_batch_performance():
     )
     
     # Should have 5 * 3 = 15 combinations
-    assert batch_result['mama_values'].shape == (15, len(close))
-    assert batch_result['fama_values'].shape == (15, len(close))
+    # values contains both mama and fama: shape = (30, len(close))
+    assert batch_result['values'].shape == (30, len(close))  # 15 mama + 15 fama
+    
+    # Extract mama and fama from combined values
+    batch_mama_values = batch_result['values'][:15]  # First 15 rows are mama
+    batch_fama_values = batch_result['values'][15:]  # Last 15 rows are fama
     
     # Verify first combination (0.3, 0.04)
-    individual_result = mama(close, 0.3, 0.04)
-    batch_first_mama = batch_result['mama_values'][0]
-    batch_first_fama = batch_result['fama_values'][0]
-    assert_close(batch_first_mama, individual_result['mama'], atol=1e-9, 
+    individual_mama, individual_fama = mama(close, 0.3, 0.04)
+    batch_first_mama = batch_mama_values[0]
+    batch_first_fama = batch_fama_values[0]
+    assert_close(batch_first_mama, individual_mama, atol=1e-9, 
                 msg=f"MAMA batch mismatch for params=(0.3, 0.04)")
-    assert_close(batch_first_fama, individual_result['fama'], atol=1e-9, 
+    assert_close(batch_first_fama, individual_fama, atol=1e-9, 
                 msg=f"FAMA batch mismatch for params=(0.3, 0.04)")
 
 
@@ -278,27 +298,25 @@ def test_mama_edge_cases():
     """Test MAMA with edge case inputs"""
     # Test with monotonically increasing data
     data = np.arange(1.0, 101.0, dtype=np.float64)
-    result = mama(data, 0.5, 0.05)
-    mama_vals = result['mama']
-    fama_vals = result['fama']
+    mama_vals, fama_vals = mama(data, 0.5, 0.05)
     assert len(mama_vals) == len(data)
     assert len(fama_vals) == len(data)
     
-    # After warmup, values should be valid
+    # First 10 should be NaN (warmup), rest should be valid
+    assert np.all(np.isnan(mama_vals[:10]))
+    assert np.all(np.isnan(fama_vals[:10]))
     assert np.all(np.isfinite(mama_vals[10:]))
     assert np.all(np.isfinite(fama_vals[10:]))
     
     # Test with oscillating values
     data = np.array([10.0, 20.0, 10.0, 20.0] * 25, dtype=np.float64)
-    result = mama(data, 0.5, 0.05)
-    assert len(result['mama']) == len(data)
-    assert len(result['fama']) == len(data)
+    mama_vals2, fama_vals2 = mama(data, 0.5, 0.05)
+    assert len(mama_vals2) == len(data)
+    assert len(fama_vals2) == len(data)
     
     # Test with constant values
     data = np.array([50.0] * 100, dtype=np.float64)
-    result = mama(data, 0.5, 0.05)
-    mama_vals = result['mama']
-    fama_vals = result['fama']
+    mama_vals, fama_vals = mama(data, 0.5, 0.05)
     assert len(mama_vals) == len(data)
     assert len(fama_vals) == len(data)
     
@@ -313,23 +331,21 @@ def test_mama_warmup_period():
     data = load_test_data()
     close = np.array(data['close'][:50], dtype=np.float64)
     
-    result = mama(close, 0.5, 0.05)
-    mama_vals = result['mama']
-    fama_vals = result['fama']
+    mama_vals, fama_vals = mama(close, 0.5, 0.05)
     
-    # MAMA produces values from the first data point
-    # It uses adaptive algorithms that start immediately but improve accuracy
-    # as more data becomes available (after ~10 data points)
+    # MAMA has a 10-sample warmup period
     assert len(mama_vals) == len(close)
     assert len(fama_vals) == len(close)
     
-    # All values should be finite - MAMA doesn't output NaN during warmup
-    for i in range(len(mama_vals)):
+    # First 10 values should be NaN (warmup period)
+    for i in range(10):
+        assert np.isnan(mama_vals[i]), f"Expected NaN at warmup index {i} for MAMA"
+        assert np.isnan(fama_vals[i]), f"Expected NaN at warmup index {i} for FAMA"
+    
+    # After warmup period, values should be finite
+    for i in range(10, len(mama_vals)):
         assert np.isfinite(mama_vals[i]), f"Expected finite value at index {i} for MAMA"
         assert np.isfinite(fama_vals[i]), f"Expected finite value at index {i} for FAMA"
-    
-    # The early values exist but may be less accurate until the adaptive
-    # algorithm has sufficient data (typically after 10+ points)
 
 
 def test_mama_consistency():
@@ -337,11 +353,11 @@ def test_mama_consistency():
     data = load_test_data()
     close = np.array(data['close'][:100], dtype=np.float64)
     
-    result1 = mama(close, 0.5, 0.05)
-    result2 = mama(close, 0.5, 0.05)
+    mama1, fama1 = mama(close, 0.5, 0.05)
+    mama2, fama2 = mama(close, 0.5, 0.05)
     
-    assert_close(result1['mama'], result2['mama'], atol=1e-15, msg="MAMA results not consistent")
-    assert_close(result1['fama'], result2['fama'], atol=1e-15, msg="FAMA results not consistent")
+    assert_close(mama1, mama2, atol=1e-15, msg="MAMA results not consistent")
+    assert_close(fama1, fama2, atol=1e-15, msg="FAMA results not consistent")
 
 
 def test_mama_step_precision():
@@ -361,8 +377,8 @@ def test_mama_step_precision():
         (0.4, 0.04), (0.4, 0.05),
         (0.5, 0.04), (0.5, 0.05)
     ]
-    assert batch_result['mama_values'].shape == (4, len(data))
-    assert batch_result['fama_values'].shape == (4, len(data))
+    # values contains both mama and fama: shape = (8, len(data))
+    assert batch_result['values'].shape == (8, len(data))  # 4 mama + 4 fama
 
 
 def test_mama_fama_relationship():
@@ -370,14 +386,12 @@ def test_mama_fama_relationship():
     data = load_test_data()
     close = np.array(data['close'][:200], dtype=np.float64)
     
-    result = mama(close, 0.5, 0.05)
-    mama_vals = result['mama']
-    fama_vals = result['fama']
+    mama_vals, fama_vals = mama(close, 0.5, 0.05)
     
     # FAMA should be a smoother version of MAMA
     # After warmup, check that FAMA has less variance than MAMA
-    mama_var = np.var(mama_vals[20:])
-    fama_var = np.var(fama_vals[20:])
+    mama_var = np.var(mama_vals[10:])
+    fama_var = np.var(fama_vals[10:])
     
     # FAMA should generally have lower variance (be smoother)
     assert fama_var < mama_var * 1.1, "FAMA should be smoother than MAMA"
@@ -448,25 +462,74 @@ def test_mama_batch_warmup_consistency():
     
     result = mama_batch(data, (0.3, 0.7, 0.2), (0.03, 0.07, 0.02))
     
+    # Extract mama and fama from combined values
+    n_combos = len(result['fast_limits'])
+    mama_values = result['values'][:n_combos]
+    fama_values = result['values'][n_combos:]
+    
     # Each row should produce values for all data points
-    for i in range(result['mama_values'].shape[0]):
-        mama_row = result['mama_values'][i]
-        fama_row = result['fama_values'][i]
+    for i in range(n_combos):
+        mama_row = mama_values[i]
+        fama_row = fama_values[i]
         
-        # MAMA produces values from the first data point
-        # All values should be finite
-        for j in range(len(data)):
+        # First 10 values should be NaN (warmup), rest should be finite
+        for j in range(10):
+            assert np.isnan(mama_row[j]), f"Expected NaN at warmup index {j} for row {i}"
+            assert np.isnan(fama_row[j]), f"Expected NaN at warmup index {j} for row {i}"
+        for j in range(10, len(data)):
             assert np.isfinite(mama_row[j]), f"Expected finite value at index {j} for row {i}"
             assert np.isfinite(fama_row[j]), f"Expected finite value at index {j} for row {i}"
         
         # Verify each batch row matches individual computation
         fast_limit = result['fast_limits'][i]
         slow_limit = result['slow_limits'][i]
-        individual_result = mama(data, fast_limit, slow_limit)
-        assert_close(mama_row, individual_result['mama'], atol=1e-9, 
+        individual_mama, individual_fama = mama(data, fast_limit, slow_limit)
+        assert_close(mama_row, individual_mama, atol=1e-9, 
                     msg=f"Batch row {i} doesn't match individual computation")
-        assert_close(fama_row, individual_result['fama'], atol=1e-9, 
+        assert_close(fama_row, individual_fama, atol=1e-9, 
                     msg=f"Batch row {i} doesn't match individual computation")
+
+
+def test_mama_all_nan_input():
+    """Test MAMA with all NaN values"""
+    all_nan = np.full(100, np.nan)
+    
+    with pytest.raises(ValueError, match="All values are NaN|mama:"):
+        mama(all_nan, 0.5, 0.05)
+
+
+def test_mama_zero_period():
+    """Test MAMA fails with zero period (invalid parameter)"""
+    input_data = np.array([10.0, 20.0, 30.0] * 10, dtype=np.float64)
+    
+    # MAMA doesn't have a period parameter, but zero fast/slow limits are invalid
+    # This test verifies parameter validation
+    pass  # Already covered by test_mama_invalid_fast_limit and test_mama_invalid_slow_limit
+
+
+def test_mama_period_exceeds_length():
+    """Test MAMA with parameters that would require more data than available"""
+    # MAMA requires at least 10 data points
+    data_small = np.array([10.0, 20.0, 30.0], dtype=np.float64)
+    
+    with pytest.raises(ValueError, match="mama:"):
+        mama(data_small, 0.5, 0.05)
+
+
+def test_mama_default_candles():
+    """Test MAMA with default parameters - mirrors check_mama_default_candles"""
+    data = load_test_data()
+    close = np.array(data['close'], dtype=np.float64)
+    
+    # Default params: fast_limit=0.5, slow_limit=0.05
+    mama_vals, fama_vals = mama(close, 0.5, 0.05)
+    assert len(mama_vals) == len(close)
+    assert len(fama_vals) == len(close)
+    
+    # Check warmup period
+    for i in range(10):
+        assert np.isnan(mama_vals[i])
+        assert np.isnan(fama_vals[i])
 
 
 if __name__ == "__main__":

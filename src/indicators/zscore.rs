@@ -40,7 +40,7 @@ use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyList};
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
@@ -297,8 +297,10 @@ pub unsafe fn zscore_scalar(
 	for v in &mut sigmas {
 		*v *= nbdev;
 	}
-	let mut out = alloc_with_nan_prefix(data.len(), first + period);
-	for i in (first + period)..data.len() {
+
+	let warmup_end = first + period - 1;
+	let mut out = alloc_with_nan_prefix(data.len(), warmup_end);
+	for i in warmup_end..data.len() {
 		let mean = means[i];
 		let sigma = sigmas[i];
 		let value = data[i];
@@ -677,7 +679,7 @@ fn zscore_batch_inner(
 	// Calculate warmup periods for each combination
 	let warmup_periods: Vec<usize> = combos
 		.iter()
-		.map(|c| first + c.period.unwrap())
+		.map(|c| first + c.period.unwrap() - 1)
 		.collect();
 	
 	// Initialize NaN prefixes for each row
@@ -777,7 +779,8 @@ unsafe fn zscore_row_scalar(
 	for v in &mut sigmas {
 		*v *= nbdev;
 	}
-	for i in (first + period)..data.len() {
+	let warmup_end = first + period - 1;
+	for i in warmup_end..data.len() {
 		let mean = means[i];
 		let sigma = sigmas[i];
 		let value = data[i];
@@ -849,10 +852,6 @@ unsafe fn zscore_row_avx512_long(
 	zscore_row_scalar(data, first, period, ma_type, nbdev, devtype, out)
 }
 
-#[inline(always)]
-fn expand_grid_zscore(r: &ZscoreBatchRange) -> Vec<ZscoreParams> {
-	expand_grid(r)
-}
 
 #[inline(always)]
 pub fn zscore_batch_inner_into(
@@ -881,7 +880,7 @@ pub fn zscore_batch_inner_into(
 	// Initialize NaN prefixes for each row based on warmup period
 	// This is critical for external buffers from Python/WASM that contain garbage
 	for (row, combo) in combos.iter().enumerate() {
-		let warmup = first + combo.period.unwrap();
+		let warmup = first + combo.period.unwrap() - 1;
 		let row_start = row * cols;
 		for i in 0..warmup.min(cols) {
 			out[row_start + i] = f64::NAN;
@@ -1042,6 +1041,15 @@ pub fn zscore_batch_py<'py>(
 			.into_pyarray(py),
 	)?;
 	dict.set_item(
+		"ma_types",
+		PyList::new(
+			py,
+			combos
+				.iter()
+				.map(|p| p.ma_type.as_ref().unwrap().clone()),
+		)?,
+	)?;
+	dict.set_item(
 		"nbdevs",
 		combos
 			.iter()
@@ -1072,9 +1080,9 @@ pub fn zscore_into_slice(
 	let data: &[f64] = input.as_ref();
 	
 	if dst.len() != data.len() {
-		return Err(ZscoreError::InvalidPeriod { 
-			period: 0, 
-			data_len: dst.len() 
+		return Err(ZscoreError::InvalidPeriod {
+			period: dst.len(),
+			data_len: data.len(),
 		});
 	}
 	
@@ -1124,8 +1132,8 @@ unsafe fn zscore_compute_into_scalar(
 	devtype: usize,
 	out: &mut [f64],
 ) -> Result<(), ZscoreError> {
-	// Fill warmup with NaN
-	for v in &mut out[..(first + period)] {
+	let warmup_end = first + period - 1;
+	for v in &mut out[..warmup_end] {
 		*v = f64::NAN;
 	}
 
@@ -1142,8 +1150,8 @@ unsafe fn zscore_compute_into_scalar(
 	for v in &mut sigmas {
 		*v *= nbdev;
 	}
-	
-	for i in (first + period)..data.len() {
+
+	for i in warmup_end..data.len() {
 		let mean = means[i];
 		let sigma = sigmas[i];
 		let value = data[i];
