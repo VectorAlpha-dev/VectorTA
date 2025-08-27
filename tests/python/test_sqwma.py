@@ -92,17 +92,26 @@ class TestSqwma:
     def test_sqwma_nan_handling(self, test_data):
         """Test SQWMA handles NaN values correctly - mirrors check_sqwma_nan_handling"""
         close = test_data['close']
+        period = 14
         
-        result = ta_indicators.sqwma(close, period=14)
+        result = ta_indicators.sqwma(close, period=period)
         assert len(result) == len(close)
         
-        # After warmup period (240), no NaN values should exist
-        if len(result) > 240:
-            assert not np.any(np.isnan(result[240:])), "Found unexpected NaN after warmup period"
+        # Find first non-NaN in input data
+        first_valid = next((i for i, v in enumerate(close) if not np.isnan(v)), 0)
         
-        # Check warmup period - SQWMA needs period + 1 values before producing output
-        # First period values should be NaN
-        assert np.all(np.isnan(result[:15])), "Expected NaN in warmup period (first period+1 values)"
+        # SQWMA warmup period: first_non_nan + period + 1
+        warmup_end = first_valid + period + 1
+        
+        # Check warmup period has NaN values
+        assert np.all(np.isnan(result[:warmup_end])), f"Expected NaN in warmup period (indices 0-{warmup_end-1})"
+        
+        # After warmup period, no NaN values should exist (if we have enough data)
+        if len(result) > warmup_end:
+            # Check a reasonable range after warmup
+            check_start = min(warmup_end, 240)
+            if len(result) > check_start:
+                assert not np.any(np.isnan(result[check_start:])), f"Found unexpected NaN after index {check_start}"
     
     def test_sqwma_streaming(self, test_data):
         """Test SQWMA streaming matches batch calculation - mirrors check_sqwma_streaming"""
@@ -165,6 +174,13 @@ class TestSqwma:
             rtol=1e-8,
             msg="SQWMA batch default row mismatch"
         )
+    
+    def test_sqwma_empty_input(self):
+        """Test SQWMA fails with empty input - mirrors check_sqwma_empty_input"""
+        empty = np.array([])
+        
+        with pytest.raises(ValueError, match="Input data slice is empty"):
+            ta_indicators.sqwma(empty, period=14)
     
     def test_sqwma_all_nan_input(self):
         """Test SQWMA with all NaN values"""
@@ -256,6 +272,67 @@ class TestSqwma:
             result_k = ta_indicators.sqwma(data, period=3, kernel=kernel)
             assert np.all(np.isnan(result_k[:9])), f"Kernel {kernel}: Expected NaN in warmup"
             assert not np.any(np.isnan(result_k[9:])), f"Kernel {kernel}: Expected valid values after warmup"
+    
+    def test_sqwma_boundary_conditions(self):
+        """Test SQWMA with boundary conditions"""
+        # Test with exact minimum data (period = data length)
+        period = 5
+        data = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+        
+        result = ta_indicators.sqwma(data, period=period)
+        assert len(result) == len(data)
+        # All should be NaN since warmup = 0 + period + 1 = 6, which exceeds data length
+        assert np.all(np.isnan(result)), "Expected all NaN when data length equals period"
+        
+        # Test with just enough data for one output
+        data_extended = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0])  # length = 7
+        period = 3  # warmup = 0 + 3 + 1 = 4, so we get output at indices 4,5,6
+        
+        result = ta_indicators.sqwma(data_extended, period=period)
+        assert len(result) == len(data_extended)
+        assert np.all(np.isnan(result[:4])), "Expected NaN in warmup period"
+        assert not np.any(np.isnan(result[4:])), "Expected valid values after warmup"
+        
+        # Test with period = 2 (minimum valid period)
+        data_min = np.array([1.0, 2.0, 3.0, 4.0])
+        result = ta_indicators.sqwma(data_min, period=2)
+        assert len(result) == len(data_min)
+        # Warmup = 0 + 2 + 1 = 3
+        assert np.all(np.isnan(result[:3])), "Expected NaN in first 3 values for period=2"
+        assert not np.isnan(result[3]), "Expected valid value at index 3 for period=2"
+    
+    def test_sqwma_batch_parameter_sweep(self, test_data):
+        """Test SQWMA batch with comprehensive parameter sweep"""
+        close = test_data['close'][:100]  # Use smaller dataset for speed
+        
+        # Test with multiple period combinations
+        result = ta_indicators.sqwma_batch(
+            close,
+            period_range=(5, 25, 5),  # periods: 5, 10, 15, 20, 25
+        )
+        
+        assert 'values' in result
+        assert 'periods' in result
+        
+        # Should have 5 combinations
+        assert result['values'].shape[0] == 5
+        assert result['values'].shape[1] == len(close)
+        
+        # Check periods array
+        expected_periods = [5, 10, 15, 20, 25]
+        assert np.array_equal(result['periods'], expected_periods)
+        
+        # Verify each row against single calculation
+        for i, period in enumerate(expected_periods):
+            row = result['values'][i]
+            single_result = ta_indicators.sqwma(close, period=period)
+            
+            # Compare where both are valid
+            for j in range(len(row)):
+                if np.isnan(row[j]) and np.isnan(single_result[j]):
+                    continue
+                assert_close(row[j], single_result[j], rtol=1e-10, atol=1e-10,
+                           msg=f"Batch vs single mismatch for period {period} at index {j}")
 
 
 if __name__ == '__main__':

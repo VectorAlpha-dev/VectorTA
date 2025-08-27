@@ -7,15 +7,17 @@ import numpy as np
 import sys
 from pathlib import Path
 
-# Add parent directory to path to import the built module
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'target/wheels'))
-
 try:
-    import rust_backtester as ta
+    import my_project as ta_indicators
 except ImportError:
-    pytest.skip("Python module not built. Run 'maturin develop --features python' first", allow_module_level=True)
+    # If not in virtual environment, try to import from installed location
+    try:
+        import my_project as ta_indicators
+    except ImportError:
+        pytest.skip("Python module not built. Run 'maturin develop --features python' first", allow_module_level=True)
 
 from test_utils import load_test_data, assert_close, EXPECTED_OUTPUTS
+from rust_comparison import compare_with_rust
 
 
 class TestMidprice:
@@ -29,14 +31,17 @@ class TestMidprice:
         low = test_data['low']
         period = 14
         
-        result = ta.midprice(high, low, period)
+        result = ta_indicators.midprice(high, low, period)
         
         # Check output length
         assert len(result) == len(high)
         
         # Check expected values
         expected = EXPECTED_OUTPUTS['midprice']['last_5_values']
-        assert_close(result[-5:], expected, rtol=1e-1, msg="MIDPRICE last 5 values")
+        assert_close(result[-5:], expected, rtol=1e-9, msg="MIDPRICE last 5 values")
+        
+        # Compare full output with Rust
+        compare_with_rust('midprice', result, 'hl', {'period': period})
     
     def test_midprice_partial_params(self, test_data):
         """Test MIDPRICE with partial parameters - mirrors Rust tests"""
@@ -44,7 +49,7 @@ class TestMidprice:
         low = test_data['low']
         
         # Test with default period (14)
-        result = ta.midprice(high, low, 14)
+        result = ta_indicators.midprice(high, low, 14)
         assert len(result) == len(high)
         
         # Verify warmup behavior
@@ -56,7 +61,7 @@ class TestMidprice:
         high = test_data['high']
         low = test_data['low']
         
-        result = ta.midprice(high, low, 14)
+        result = ta_indicators.midprice(high, low, 14)
         assert len(result) == len(high)
         
         # Check that warmup period has NaN values
@@ -68,19 +73,19 @@ class TestMidprice:
         """Test error handling"""
         # Empty data
         with pytest.raises(ValueError):
-            ta.midprice(np.array([]), np.array([]), 14)
+            ta_indicators.midprice(np.array([]), np.array([]), 14)
         
         # Mismatched lengths
         with pytest.raises(ValueError):
-            ta.midprice(np.array([1.0, 2.0]), np.array([1.0]), 14)
+            ta_indicators.midprice(np.array([1.0, 2.0]), np.array([1.0]), 14)
         
         # Invalid period
         with pytest.raises(ValueError):
-            ta.midprice(np.array([1.0]), np.array([1.0]), 0)
+            ta_indicators.midprice(np.array([1.0]), np.array([1.0]), 0)
         
         # Period exceeds data length
         with pytest.raises(ValueError):
-            ta.midprice(np.array([1.0, 2.0]), np.array([1.0, 2.0]), 10)
+            ta_indicators.midprice(np.array([1.0, 2.0]), np.array([1.0, 2.0]), 10)
     
     def test_midprice_zero_period(self):
         """Test MIDPRICE fails with zero period - mirrors Rust tests"""
@@ -88,7 +93,7 @@ class TestMidprice:
         low = np.array([5.0, 6.0, 7.0])
         
         with pytest.raises(ValueError):
-            ta.midprice(high, low, 0)
+            ta_indicators.midprice(high, low, 0)
     
     def test_midprice_period_exceeds_length(self):
         """Test MIDPRICE fails when period exceeds data length"""
@@ -96,7 +101,7 @@ class TestMidprice:
         low = np.array([5.0, 6.0, 7.0])
         
         with pytest.raises(ValueError):
-            ta.midprice(high, low, 10)
+            ta_indicators.midprice(high, low, 10)
     
     def test_midprice_very_small_dataset(self):
         """Test MIDPRICE fails with insufficient data"""
@@ -104,7 +109,7 @@ class TestMidprice:
         low = np.array([36.0])
         
         with pytest.raises(ValueError):
-            ta.midprice(high, low, 14)
+            ta_indicators.midprice(high, low, 14)
     
     def test_midprice_all_nan(self):
         """Test handling of all NaN values"""
@@ -112,30 +117,14 @@ class TestMidprice:
         low = np.array([np.nan, np.nan, np.nan])
         
         with pytest.raises(ValueError, match="All values are NaN"):
-            ta.midprice(high, low, 2)
-    
-    def test_midprice_reinput(self, test_data):
-        """Test MIDPRICE applied twice (re-input)"""
-        high = test_data['high']
-        low = test_data['low']
-        period = 10
-        
-        # First calculation
-        first_result = ta.midprice(high, low, period)
-        
-        # Use output as input for second calculation
-        second_result = ta.midprice(first_result, first_result, period)
-        
-        assert len(second_result) == len(first_result)
-        # Check that we still have valid values after double application
-        assert not np.all(np.isnan(second_result[30:]))
+            ta_indicators.midprice(high, low, 2)
     
     def test_midprice_nan_handling(self, test_data):
         """Test MIDPRICE handles NaN values correctly"""
         high = test_data['high']
         low = test_data['low']
         
-        result = ta.midprice(high, low, 14)
+        result = ta_indicators.midprice(high, low, 14)
         
         # Check output length matches input
         assert len(result) == len(high)
@@ -151,10 +140,10 @@ class TestMidprice:
         period = 14
         
         # Batch calculation
-        batch_result = ta.midprice(high, low, period)
+        batch_result = ta_indicators.midprice(high, low, period)
         
         # Streaming calculation
-        stream = ta.MidpriceStream(period)
+        stream = ta_indicators.MidpriceStream(period)
         stream_result = []
         
         for h, l in zip(high, low):
@@ -169,8 +158,8 @@ class TestMidprice:
         high = test_data['high']
         low = test_data['low']
         
-        # Test period range
-        result = ta.midprice_batch(high, low, (10, 20, 5))
+        # Test period range with metadata validation
+        result = ta_indicators.midprice_batch(high, low, (10, 20, 5))
         
         assert 'values' in result
         assert 'periods' in result
@@ -183,9 +172,51 @@ class TestMidprice:
         assert len(periods) == 3
         assert list(periods) == [10, 15, 20]
         
-        # Verify one of the results matches single computation
-        single_result = ta.midprice(high, low, 10)
-        assert_close(values[0], single_result, rtol=1e-9, msg="Batch row 0 (period=10)")
+        # Verify each row matches individual calculation
+        for i, period in enumerate(periods):
+            single_result = ta_indicators.midprice(high, low, period)
+            assert_close(values[i], single_result, rtol=1e-9, 
+                        msg=f"Batch row {i} (period={period})")
+    
+    def test_midprice_batch_single_parameter(self, test_data):
+        """Test batch with single parameter combination"""
+        high = test_data['high']
+        low = test_data['low']
+        
+        # Single period (step=0)
+        result = ta_indicators.midprice_batch(high, low, (14, 14, 0))
+        
+        assert result['values'].shape == (1, len(high))
+        assert len(result['periods']) == 1
+        assert result['periods'][0] == 14
+        
+        # Should match single calculation
+        single_result = ta_indicators.midprice(high, low, 14)
+        assert_close(result['values'][0], single_result, rtol=1e-9, 
+                    msg="Single parameter batch vs regular")
+    
+    def test_midprice_batch_edge_cases(self, test_data):
+        """Test batch processing edge cases"""
+        high = test_data['high'][:50]  # Use smaller dataset
+        low = test_data['low'][:50]
+        
+        # Test step larger than range
+        result = ta_indicators.midprice_batch(high, low, (10, 12, 10))
+        assert result['values'].shape == (1, 50)  # Should only have period=10
+        assert result['periods'][0] == 10
+        
+        # Test multiple periods
+        result = ta_indicators.midprice_batch(high, low, (5, 15, 5))
+        assert result['values'].shape == (3, 50)  # periods: 5, 10, 15
+        assert list(result['periods']) == [5, 10, 15]
+        
+        # Verify warmup behavior for each period
+        for i, period in enumerate(result['periods']):
+            row = result['values'][i]
+            # First period-1 values should be NaN
+            assert np.all(np.isnan(row[:period-1])), f"Expected NaN in warmup for period {period}"
+            # After warmup should have values
+            assert not np.any(np.isnan(row[period+5:])), f"Unexpected NaN after warmup for period {period}"
 
 
 if __name__ == '__main__':

@@ -50,7 +50,6 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
-use std::mem;
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
@@ -211,6 +210,8 @@ pub enum DtiError {
 	NotEnoughValidData { needed: usize, valid: usize },
 	#[error("dti: All high/low values are NaN.")]
 	AllValuesNaN,
+	#[error("dti: Length mismatch: high length = {high}, low length = {low}")]
+	LengthMismatch { high: usize, low: usize },
 }
 
 #[inline]
@@ -219,7 +220,7 @@ pub fn dti(input: &DtiInput) -> Result<DtiOutput, DtiError> {
 }
 
 #[inline]
-pub fn dti_into_slice(out: &mut [f64], input: &DtiInput, kernel: Kernel) -> Result<(), DtiError> {
+pub fn dti_into_slice(dst: &mut [f64], input: &DtiInput, kern: Kernel) -> Result<(), DtiError> {
 	let (high, low) = match &input.data {
 		DtiData::Candles { candles } => {
 			let high = candles
@@ -237,58 +238,53 @@ pub fn dti_into_slice(out: &mut [f64], input: &DtiInput, kernel: Kernel) -> Resu
 		return Err(DtiError::EmptyData);
 	}
 	let len = high.len();
-	if low.len() != len || out.len() != len {
-		return Err(DtiError::EmptyData);
+	if low.len() != len {
+		return Err(DtiError::LengthMismatch { high: high.len(), low: low.len() });
+	}
+	if dst.len() != len {
+		return Err(DtiError::InvalidPeriod { period: dst.len(), data_len: len });
 	}
 
-	let first_valid_idx = match (0..len).find(|&i| !high[i].is_nan() && !low[i].is_nan()) {
-		Some(idx) => idx,
-		None => return Err(DtiError::AllValuesNaN),
-	};
+	let first_valid_idx = (0..len)
+		.find(|&i| !high[i].is_nan() && !low[i].is_nan())
+		.ok_or(DtiError::AllValuesNaN)?;
 
 	let r = input.get_r();
 	let s = input.get_s();
 	let u = input.get_u();
-
-	for &period in &[r, s, u] {
-		if period == 0 || period > len {
-			return Err(DtiError::InvalidPeriod { period, data_len: len });
+	for &p in &[r, s, u] {
+		if p == 0 || p > len {
+			return Err(DtiError::InvalidPeriod { period: p, data_len: len });
 		}
-		if (len - first_valid_idx) < period {
-			return Err(DtiError::NotEnoughValidData {
-				needed: period,
-				valid: len - first_valid_idx,
-			});
+		if len - first_valid_idx < p {
+			return Err(DtiError::NotEnoughValidData { needed: p, valid: len - first_valid_idx });
 		}
 	}
 
-	let chosen = match kernel {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
-
-	// Fill with NaN up to first valid index + 1
-	for i in 0..=first_valid_idx.min(len - 1) {
-		out[i] = f64::NAN;
-	}
+	let chosen = match kern { Kernel::Auto => detect_best_kernel(), k => k };
 
 	unsafe {
 		#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 		{
-			if matches!(chosen, Kernel::Scalar | Kernel::ScalarBatch) {
-				dti_simd128(high, low, r, s, u, first_valid_idx, out);
-				return Ok(());
+			match chosen {
+				Kernel::Scalar | Kernel::ScalarBatch => dti_simd128(high, low, r, s, u, first_valid_idx, dst),
+				_ => dti_scalar(high, low, r, s, u, first_valid_idx, dst), // graceful fallback on WASM
 			}
 		}
-		
+		#[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
 		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => dti_scalar(high, low, r, s, u, first_valid_idx, out),
+			Kernel::Scalar | Kernel::ScalarBatch => dti_scalar(high, low, r, s, u, first_valid_idx, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => dti_avx2(high, low, r, s, u, first_valid_idx, out),
+			Kernel::Avx2 | Kernel::Avx2Batch => dti_avx2(high, low, r, s, u, first_valid_idx, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => dti_avx512(high, low, r, s, u, first_valid_idx, out),
+			Kernel::Avx512 | Kernel::Avx512Batch => dti_avx512(high, low, r, s, u, first_valid_idx, dst),
 			_ => unreachable!(),
 		}
+	}
+
+	// Warmup prefix: only set what must be NaN
+	for v in &mut dst[..=first_valid_idx] {
+		*v = f64::NAN;
 	}
 	Ok(())
 }
@@ -312,7 +308,7 @@ pub fn dti_with_kernel(input: &DtiInput, kernel: Kernel) -> Result<DtiOutput, Dt
 	}
 	let len = high.len();
 	if low.len() != len {
-		return Err(DtiError::EmptyData);
+		return Err(DtiError::LengthMismatch { high: high.len(), low: low.len() });
 	}
 
 	let first_valid_idx = match (0..len).find(|&i| !high[i].is_nan() && !low[i].is_nan()) {
@@ -345,12 +341,14 @@ pub fn dti_with_kernel(input: &DtiInput, kernel: Kernel) -> Result<DtiOutput, Dt
 	unsafe {
 		#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 		{
-			if matches!(chosen, Kernel::Scalar | Kernel::ScalarBatch) {
-				dti_simd128(high, low, r, s, u, first_valid_idx, &mut out);
-				return Ok(DtiOutput { values: out });
+			match chosen {
+				Kernel::Scalar | Kernel::ScalarBatch => dti_simd128(high, low, r, s, u, first_valid_idx, &mut out),
+				_ => dti_scalar(high, low, r, s, u, first_valid_idx, &mut out), // graceful fallback on WASM
 			}
+			return Ok(DtiOutput { values: out });
 		}
 		
+		#[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
 		match chosen {
 			Kernel::Scalar | Kernel::ScalarBatch => dti_scalar(high, low, r, s, u, first_valid_idx, &mut out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -921,31 +919,9 @@ pub fn dti_batch_py<'py>(
 
 	let dict = PyDict::new(py);
 	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
-	dict.set_item(
-		"r_values",
-		combos
-			.iter()
-			.map(|p| p.r.unwrap() as u64)
-			.collect::<Vec<_>>()
-			.into_pyarray(py),
-	)?;
-	dict.set_item(
-		"s_values",
-		combos
-			.iter()
-			.map(|p| p.s.unwrap() as u64)
-			.collect::<Vec<_>>()
-			.into_pyarray(py),
-	)?;
-	dict.set_item(
-		"u_values",
-		combos
-			.iter()
-			.map(|p| p.u.unwrap() as u64)
-			.collect::<Vec<_>>()
-			.into_pyarray(py),
-	)?;
-
+	dict.set_item("r", combos.iter().map(|p| p.r.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+	dict.set_item("s", combos.iter().map(|p| p.s.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+	dict.set_item("u", combos.iter().map(|p| p.u.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
 	Ok(dict)
 }
 
@@ -1162,7 +1138,7 @@ fn dti_batch_inner(
 	}
 	let len = high.len();
 	if low.len() != len {
-		return Err(DtiError::EmptyData);
+		return Err(DtiError::LengthMismatch { high: high.len(), low: low.len() });
 	}
 	let first_valid = (0..len)
 		.find(|&i| !high[i].is_nan() && !low[i].is_nan())
@@ -1305,117 +1281,62 @@ pub fn dti_batch_inner_into(
 	}
 	let len = high.len();
 	if low.len() != len {
-		return Err(DtiError::EmptyData);
+		return Err(DtiError::LengthMismatch { high: high.len(), low: low.len() });
 	}
 	let first_valid = (0..len)
 		.find(|&i| !high[i].is_nan() && !low[i].is_nan())
 		.ok_or(DtiError::AllValuesNaN)?;
-	let max_p = combos
-		.iter()
-		.map(|c| c.r.unwrap().max(c.s.unwrap()).max(c.u.unwrap()))
-		.max()
-		.unwrap();
+	let max_p = combos.iter().map(|c| c.r.unwrap().max(c.s.unwrap()).max(c.u.unwrap())).max().unwrap();
 	if len - first_valid < max_p {
-		return Err(DtiError::NotEnoughValidData {
-			needed: max_p,
-			valid: len - first_valid,
-		});
+		return Err(DtiError::NotEnoughValidData { needed: max_p, valid: len - first_valid });
 	}
+
 	let rows = combos.len();
 	let cols = len;
-	
 	if out.len() != rows * cols {
-		return Err(DtiError::EmptyData);
+		return Err(DtiError::InvalidPeriod { period: out.len(), data_len: rows * cols });
 	}
-	
-	// Initialize NaN prefixes for each row
-	for row in 0..rows {
-		let row_offset = row * cols;
-		for i in 0..=first_valid.min(cols - 1) {
-			out[row_offset + i] = f64::NAN;
-		}
-	}
-	
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+
+	// Prefix-init using helpers, zero extra copies
+	let warm: Vec<usize> = vec![first_valid + 1; rows];
+	let out_mu: &mut [std::mem::MaybeUninit<f64>] = unsafe {
+		std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>, out.len())
+	};
+	init_matrix_prefixes(out_mu, cols, &warm);
+
+	// Compute into the same buffer
+	let values: &mut [f64] = unsafe {
+		std::slice::from_raw_parts_mut(out_mu.as_mut_ptr() as *mut f64, out_mu.len())
+	};
+
+	let do_row = |row: usize, row_slice: &mut [f64]| unsafe {
 		let prm = &combos[row];
 		#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 		{
 			if matches!(kern, Kernel::Scalar | Kernel::Auto) {
-				dti_row_simd128(
-					high,
-					low,
-					prm.r.unwrap(),
-					prm.s.unwrap(),
-					prm.u.unwrap(),
-					first_valid,
-					out_row,
-				);
+				dti_row_simd128(high, low, prm.r.unwrap(), prm.s.unwrap(), prm.u.unwrap(), first_valid, row_slice);
 				return;
 			}
 		}
-		
 		match kern {
-			Kernel::Scalar | Kernel::Auto => dti_row_scalar(
-				high,
-				low,
-				prm.r.unwrap(),
-				prm.s.unwrap(),
-				prm.u.unwrap(),
-				first_valid,
-				out_row,
-			),
+			Kernel::Scalar | Kernel::Auto => dti_row_scalar(high, low, prm.r.unwrap(), prm.s.unwrap(), prm.u.unwrap(), first_valid, row_slice),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => dti_row_avx2(
-				high,
-				low,
-				prm.r.unwrap(),
-				prm.s.unwrap(),
-				prm.u.unwrap(),
-				first_valid,
-				out_row,
-			),
+			Kernel::Avx2 => dti_row_avx2(high, low, prm.r.unwrap(), prm.s.unwrap(), prm.u.unwrap(), first_valid, row_slice),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => dti_row_avx512(
-				high,
-				low,
-				prm.r.unwrap(),
-				prm.s.unwrap(),
-				prm.u.unwrap(),
-				first_valid,
-				out_row,
-			),
-			_ => dti_row_scalar(
-				high,
-				low,
-				prm.r.unwrap(),
-				prm.s.unwrap(),
-				prm.u.unwrap(),
-				first_valid,
-				out_row,
-			),
+			Kernel::Avx512 => dti_row_avx512(high, low, prm.r.unwrap(), prm.s.unwrap(), prm.u.unwrap(), first_valid, row_slice),
+			_ => dti_row_scalar(high, low, prm.r.unwrap(), prm.s.unwrap(), prm.u.unwrap(), first_valid, row_slice),
 		}
 	};
-	
+
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
-		{
-			out.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
-		}
-
+		values.par_chunks_mut(cols).enumerate().for_each(|(row, sl)| do_row(row, sl));
 		#[cfg(target_arch = "wasm32")]
-		{
-			for (row, slice) in out.chunks_mut(cols).enumerate() {
-				do_row(row, slice);
-			}
-		}
+		for (row, sl) in values.chunks_mut(cols).enumerate() { do_row(row, sl); }
 	} else {
-		for (row, slice) in out.chunks_mut(cols).enumerate() {
-			do_row(row, slice);
-		}
+		for (row, sl) in values.chunks_mut(cols).enumerate() { do_row(row, sl); }
 	}
-	
+
 	Ok(combos)
 }
 
@@ -1519,9 +1440,7 @@ pub struct DtiBatchConfig {
 #[derive(Serialize, Deserialize)]
 pub struct DtiBatchJsOutput {
 	pub values: Vec<f64>,
-	pub r_values: Vec<usize>,
-	pub s_values: Vec<usize>,
-	pub u_values: Vec<usize>,
+	pub combos: Vec<DtiParams>,
 	pub rows: usize,
 	pub cols: usize,
 }
@@ -1529,29 +1448,25 @@ pub struct DtiBatchJsOutput {
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = dti_batch)]
 pub fn dti_batch_js(high: &[f64], low: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
-	let config: DtiBatchConfig = serde_wasm_bindgen::from_value(config)
-		.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
-	
+	let config: DtiBatchConfig =
+		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
 	let sweep = DtiBatchRange {
 		r: config.r_range,
 		s: config.s_range,
 		u: config.u_range,
 	};
-	
-	let result = dti_batch_slice(high, low, &sweep, Kernel::Auto)
+
+	let out = dti_batch_inner(high, low, &sweep, detect_best_kernel(), false)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
-	
-	let js_output = DtiBatchJsOutput {
-		values: result.values,
-		r_values: result.combos.iter().map(|c| c.r.unwrap()).collect(),
-		s_values: result.combos.iter().map(|c| c.s.unwrap()).collect(),
-		u_values: result.combos.iter().map(|c| c.u.unwrap()).collect(),
-		rows: result.rows,
-		cols: result.cols,
+
+	let js_out = DtiBatchJsOutput {
+		values: out.values,
+		combos: out.combos,
+		rows: out.rows,
+		cols: out.cols,
 	};
-	
-	serde_wasm_bindgen::to_value(&js_output)
-		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+	serde_wasm_bindgen::to_value(&js_out).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 #[cfg(feature = "wasm")]
@@ -1751,6 +1666,108 @@ mod tests {
 			);
 		}
 		Ok(())
+	}
+	
+	fn check_dti_length_mismatch(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		// Test length mismatch between high and low arrays
+		let high = vec![10.0, 11.0, 12.0];
+		let low = vec![9.0, 10.0]; // Different length
+		let params = DtiParams::default();
+		let input = DtiInput::from_slices(&high, &low, params);
+		
+		// Test dti_with_kernel
+		let result = dti_with_kernel(&input, kernel);
+		assert!(result.is_err(), "[{}] Should fail with mismatched lengths", test_name);
+		
+		match result.unwrap_err() {
+			DtiError::LengthMismatch { high: h, low: l } => {
+				assert_eq!(h, 3, "[{}] High length should be 3", test_name);
+				assert_eq!(l, 2, "[{}] Low length should be 2", test_name);
+			}
+			e => panic!("[{}] Expected LengthMismatch error, got: {:?}", test_name, e),
+		}
+		
+		// Test dti_into_slice
+		let mut out = vec![0.0; high.len()];
+		let result = dti_into_slice(&mut out, &input, kernel);
+		assert!(result.is_err(), "[{}] dti_into_slice should fail with mismatched lengths", test_name);
+		
+		match result.unwrap_err() {
+			DtiError::LengthMismatch { high: h, low: l } => {
+				assert_eq!(h, 3, "[{}] High length should be 3", test_name);
+				assert_eq!(l, 2, "[{}] Low length should be 2", test_name);
+			}
+			e => panic!("[{}] Expected LengthMismatch error from dti_into_slice, got: {:?}", test_name, e),
+		}
+		
+		// Test batch functions
+		let sweep = DtiBatchRange::default();
+		let result = dti_batch_inner(&high, &low, &sweep, kernel, false);
+		assert!(result.is_err(), "[{}] Batch should fail with mismatched lengths", test_name);
+		
+		match result.unwrap_err() {
+			DtiError::LengthMismatch { high: h, low: l } => {
+				assert_eq!(h, 3, "[{}] Batch high length should be 3", test_name);
+				assert_eq!(l, 2, "[{}] Batch low length should be 2", test_name);
+			}
+			e => panic!("[{}] Expected LengthMismatch error from batch, got: {:?}", test_name, e),
+		}
+		
+		Ok(())
+	}
+	
+	#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+	fn check_dti_wasm_kernel_fallback(test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		// Test that on WASM, passing AVX kernels gracefully falls back to scalar
+		let high = vec![10.0, 11.0, 12.0, 13.0, 14.0];
+		let low = vec![9.0, 10.0, 11.0, 12.0, 13.0];
+		let params = DtiParams::default();
+		let input = DtiInput::from_slices(&high, &low, params);
+		
+		// Get reference result using scalar kernel
+		let scalar_result = dti_with_kernel(&input, Kernel::Scalar)?;
+		
+		// Try with AVX2 kernel - should fallback to scalar on WASM and not panic
+		let avx2_result = dti_with_kernel(&input, Kernel::Avx2)?;
+		assert_eq!(scalar_result.values.len(), avx2_result.values.len(), 
+			"[{}] AVX2 fallback length mismatch", test_name);
+		for (i, (s, a)) in scalar_result.values.iter().zip(avx2_result.values.iter()).enumerate() {
+			if s.is_nan() && a.is_nan() { continue; }
+			assert!((s - a).abs() < 1e-10, 
+				"[{}] AVX2 fallback mismatch at {}: scalar={}, avx2={}", test_name, i, s, a);
+		}
+		
+		// Try with AVX512 kernel - should fallback to scalar on WASM and not panic
+		let avx512_result = dti_with_kernel(&input, Kernel::Avx512)?;
+		assert_eq!(scalar_result.values.len(), avx512_result.values.len(), 
+			"[{}] AVX512 fallback length mismatch", test_name);
+		for (i, (s, a)) in scalar_result.values.iter().zip(avx512_result.values.iter()).enumerate() {
+			if s.is_nan() && a.is_nan() { continue; }
+			assert!((s - a).abs() < 1e-10, 
+				"[{}] AVX512 fallback mismatch at {}: scalar={}, avx512={}", test_name, i, s, a);
+		}
+		
+		// Also test dti_into_slice
+		let mut out_scalar = vec![0.0; high.len()];
+		let mut out_avx = vec![0.0; high.len()];
+		
+		dti_into_slice(&mut out_scalar, &input, Kernel::Scalar)?;
+		dti_into_slice(&mut out_avx, &input, Kernel::Avx2)?; // Should not panic
+		
+		for (i, (s, a)) in out_scalar.iter().zip(out_avx.iter()).enumerate() {
+			if s.is_nan() && a.is_nan() { continue; }
+			assert!((s - a).abs() < 1e-10, 
+				"[{}] dti_into_slice AVX2 fallback mismatch at {}", test_name, i);
+		}
+		
+		Ok(())
+	}
+	
+	#[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+	fn check_dti_wasm_kernel_fallback(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // Skip on non-WASM targets
 	}
 	
 	#[cfg(debug_assertions)]
@@ -2210,6 +2227,8 @@ mod tests {
 		check_dti_all_nan,
 		check_dti_empty_data,
 		check_dti_streaming,
+		check_dti_length_mismatch,
+		check_dti_wasm_kernel_fallback,
 		check_dti_no_poison,
 		check_dti_property
 	);

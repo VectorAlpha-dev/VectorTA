@@ -169,6 +169,34 @@ pub enum AtrError {
 	NotEnoughData { length: usize, data_len: usize },
 }
 
+#[inline(always)]
+fn first_valid_hlc(high: &[f64], low: &[f64], close: &[f64]) -> usize {
+	let len = close.len();
+	let mut i = 0;
+	while i < len {
+		// valid only if all three are not NaN at i
+		if !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan() { break; }
+		i += 1;
+	}
+	i.min(len)
+}
+
+#[inline(always)]
+fn atr_prepare_full<'a>(
+	high: &'a [f64],
+	low:  &'a [f64],
+	close: &'a [f64],
+	length: usize,
+) -> Result<(&'a [f64], &'a [f64], &'a [f64], usize, usize), AtrError> {
+	let (high, low, close, length) = atr_prepare(high, low, close, length)?;
+	let first = first_valid_hlc(high, low, close);
+	if close.len().saturating_sub(first) < length {
+		return Err(AtrError::NotEnoughData { length, data_len: close.len() });
+	}
+	let warmup = first + length - 1;
+	Ok((high, low, close, first, warmup))
+}
+
 #[inline]
 pub fn atr(input: &AtrInput) -> Result<AtrOutput, AtrError> {
 	atr_with_kernel(input, Kernel::Auto)
@@ -210,66 +238,80 @@ pub fn atr_with_kernel(input: &AtrInput, kernel: Kernel) -> Result<AtrOutput, At
 	if length > len {
 		return Err(AtrError::NotEnoughData { length, data_len: len });
 	}
+	
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
-		other => other,
+		k => k,
 	};
 
-	// Find first valid index across all three arrays
-	let first_valid = (0..len)
-		.find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
-		.unwrap_or(0);
-
-	// Calculate warmup period: ATR needs at least 'length' values from first valid index
-	let warmup_period = first_valid + length - 1;
-	let mut out = alloc_with_nan_prefix(len, warmup_period);
-	unsafe {
-		#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-		{
-			if matches!(chosen, Kernel::Scalar | Kernel::ScalarBatch) {
-				atr_simd128(high, low, close, length, &mut out);
-				return Ok(AtrOutput { values: out });
-			}
-		}
-		
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => atr_scalar(high, low, close, length, &mut out),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => atr_avx2(high, low, close, length, &mut out),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => atr_avx512(high, low, close, length, &mut out),
-			_ => unreachable!(),
-		}
-	}
+	let (_,_,_, first, warmup) = atr_prepare_full(high, low, close, length)?;
+	let mut out = alloc_with_nan_prefix(len, warmup);
+	atr_compute_into(high, low, close, length, first, chosen, &mut out);
 	Ok(AtrOutput { values: out })
 }
 
-#[inline]
-pub fn atr_scalar(high: &[f64], low: &[f64], close: &[f64], length: usize, out: &mut [f64]) {
-	let len = close.len();
+#[inline(always)]
+fn atr_compute_into_scalar(
+	high: &[f64], low: &[f64], close: &[f64],
+	length: usize, first: usize, out: &mut [f64]
+) {
 	let alpha = 1.0 / length as f64;
+	let warm = first + length - 1;
+
+	// seed RMA at warm
 	let mut sum_tr = 0.0;
-	let mut rma = f64::NAN;
-	for i in 0..len {
-		let tr = if i == 0 {
-			high[0] - low[0]
+	for i in first..=warm {
+		let tr = if i == first {
+			high[i] - low[i]
 		} else {
 			let hl = high[i] - low[i];
 			let hc = (high[i] - close[i - 1]).abs();
 			let lc = (low[i] - close[i - 1]).abs();
 			hl.max(hc).max(lc)
 		};
-		if i < length {
-			sum_tr += tr;
-			if i == length - 1 {
-				rma = sum_tr / length as f64;
-				out[i] = rma;
-			} else {
-				out[i] = f64::NAN;
+		sum_tr += tr;
+	}
+	let mut rma = sum_tr / length as f64;
+	out[warm] = rma;
+
+	// rolling RMA
+	for i in (warm + 1)..out.len() {
+		let hl = high[i] - low[i];
+		let hc = (high[i] - close[i - 1]).abs();
+		let lc = (low[i] - close[i - 1]).abs();
+		let tr = hl.max(hc).max(lc);
+		rma += alpha * (tr - rma);
+		out[i] = rma;
+	}
+}
+
+#[inline]
+pub fn atr_scalar(high: &[f64], low: &[f64], close: &[f64], length: usize, out: &mut [f64]) {
+	// default to first=0 warmup=length-1; assume caller prepared prefix
+	atr_compute_into_scalar(high, low, close, length, 0, out);
+}
+
+#[inline(always)]
+fn atr_compute_into(
+	high: &[f64], low: &[f64], close: &[f64],
+	length: usize, first: usize, kern: Kernel, out: &mut [f64]
+) {
+	unsafe {
+		#[cfg(all(target_arch="wasm32", target_feature="simd128"))]
+		{
+			if matches!(kern, Kernel::Scalar | Kernel::ScalarBatch) {
+				// keep scalar path until you add true SIMD128
+				atr_compute_into_scalar(high, low, close, length, first, out);
+				return;
 			}
-		} else {
-			rma += alpha * (tr - rma);
-			out[i] = rma;
+		}
+		match kern {
+			Kernel::Scalar | Kernel::ScalarBatch => atr_compute_into_scalar(high, low, close, length, first, out),
+			#[cfg(all(feature="nightly-avx", target_arch="x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => atr_compute_into_scalar(high, low, close, length, first, out),
+			#[cfg(all(feature="nightly-avx", target_arch="x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => atr_compute_into_scalar(high, low, close, length, first, out),
+			_ => unreachable!(),
 		}
 	}
 }
@@ -506,78 +548,37 @@ fn atr_batch_inner_into(
 	}
 	let rows = combos.len();
 	let cols = high.len();
-	let expected_len = rows * cols;
-	
-	if out.len() != expected_len {
-		return Err(AtrError::NotEnoughData {
-			length: expected_len,
-			data_len: out.len(),
-		});
+	if out.len() != rows * cols {
+		return Err(AtrError::NotEnoughData { length: rows * cols, data_len: out.len() });
 	}
 
-	// Map batch kernels to regular kernels
-	let k = match kern {
-		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-		Kernel::Avx512Batch => Kernel::Avx512,
-		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-		Kernel::Avx2Batch => Kernel::Avx2,
-		Kernel::ScalarBatch => Kernel::Scalar,
-		_ => kern,
+	let first = first_valid_hlc(high, low, close);
+
+	let do_row = |row: usize, dst: &mut [f64]| {
+		let length = combos[row].length.unwrap();
+		// set warmup prefix once
+		let warm = first + length - 1;
+		for v in &mut dst[..warm] { *v = f64::NAN; }
+		atr_compute_into(high, low, close, length, first, kern_to_simd(kern), dst);
 	};
 
-	// Pre-calculate warmup periods for each combination
-	let warmup_periods: Vec<usize> = combos.iter().map(|p| p.length.unwrap_or(14) - 1).collect();
-
-	// Process each parameter combination
-	#[cfg(not(target_arch = "wasm32"))]
-	if parallel {
-		out.par_chunks_mut(cols)
-			.zip(combos.par_iter())
-			.zip(warmup_periods.par_iter())
-			.try_for_each(|((row_slice, params), &warmup)| -> Result<(), AtrError> {
-				// Validate parameters
-				let length = params.length.unwrap_or(14);
-				let _ = atr_prepare(high, low, close, length)?;
-				
-				// Compute ATR for this parameter set
-				match k {
-					#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-					Kernel::Avx512 => atr_avx512(high, low, close, length, row_slice),
-					#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-					Kernel::Avx2 => atr_avx2(high, low, close, length, row_slice),
-					_ => atr_scalar(high, low, close, length, row_slice),
-				}
-				
-				// Fill warmup with NaN
-				for v in &mut row_slice[..warmup] {
-					*v = f64::NAN;
-				}
-				
-				Ok(())
-			})?;
-	} else {
-		for (i, (params, &warmup)) in combos.iter().zip(warmup_periods.iter()).enumerate() {
-			let row_start = i * cols;
-			let row_slice = &mut out[row_start..row_start + cols];
-			
-			// Validate parameters
-			let length = params.length.unwrap_or(14);
-			let _ = atr_prepare(high, low, close, length)?;
-			
-			// Compute ATR for this parameter set
-			match k {
-				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-				Kernel::Avx512 => atr_avx512(high, low, close, length, row_slice),
-				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-				Kernel::Avx2 => atr_avx2(high, low, close, length, row_slice),
-				_ => atr_scalar(high, low, close, length, row_slice),
-			}
-			
-			// Fill warmup with NaN
-			for v in &mut row_slice[..warmup] {
-				*v = f64::NAN;
-			}
+	#[inline(always)]
+	fn kern_to_simd(k: Kernel) -> Kernel {
+		match k {
+			#[cfg(all(feature="nightly-avx", target_arch="x86_64"))] Kernel::Avx512Batch => Kernel::Avx512,
+			#[cfg(all(feature="nightly-avx", target_arch="x86_64"))] Kernel::Avx2Batch   => Kernel::Avx2,
+			Kernel::ScalarBatch => Kernel::Scalar,
+			other => other,
 		}
+	}
+
+	if parallel {
+		#[cfg(not(target_arch="wasm32"))]
+		out.par_chunks_mut(cols).enumerate().for_each(|(r, row)| do_row(r, row));
+		#[cfg(target_arch="wasm32")]
+		for (r,row) in out.chunks_mut(cols).enumerate() { do_row(r,row); }
+	} else {
+		for (r,row) in out.chunks_mut(cols).enumerate() { do_row(r,row); }
 	}
 
 	Ok(combos)
@@ -603,9 +604,7 @@ fn atr_batch_inner(
 	let mut buf_mu = make_uninit_matrix(rows, cols);
 
 	// Find first valid index across all three arrays
-	let first_valid = (0..len)
-		.find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
-		.unwrap_or(0);
+	let first_valid = first_valid_hlc(high, low, close);
 
 	// Step 2: Calculate warmup periods for each row
 	let warm: Vec<usize> = combos
@@ -621,16 +620,9 @@ fn atr_batch_inner(
 	let values: &mut [f64] =
 		unsafe { std::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len()) };
 
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+	let do_row = |row: usize, out_row: &mut [f64]| {
 		let length = combos[row].length.unwrap();
-		match kern {
-			Kernel::Scalar => atr_row_scalar(high, low, close, length, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => atr_row_avx2(high, low, close, length, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => atr_row_avx512(high, low, close, length, out_row),
-			_ => unreachable!(),
-		}
+		atr_compute_into(high, low, close, length, first_valid, kern, out_row);
 	};
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
@@ -672,13 +664,15 @@ fn atr_batch_inner(
 
 #[inline(always)]
 unsafe fn atr_row_scalar(high: &[f64], low: &[f64], close: &[f64], length: usize, out: &mut [f64]) {
-	atr_scalar(high, low, close, length, out);
+	let first = first_valid_hlc(high, low, close);
+	atr_compute_into(high, low, close, length, first, Kernel::Scalar, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn atr_row_avx2(high: &[f64], low: &[f64], close: &[f64], length: usize, out: &mut [f64]) {
-	atr_scalar(high, low, close, length, out);
+	let first = first_valid_hlc(high, low, close);
+	atr_compute_into(high, low, close, length, first, Kernel::Avx2, out);
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
@@ -692,12 +686,14 @@ pub unsafe fn atr_row_avx512(high: &[f64], low: &[f64], close: &[f64], length: u
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn atr_row_avx512_short(high: &[f64], low: &[f64], close: &[f64], length: usize, out: &mut [f64]) {
-	atr_scalar(high, low, close, length, out);
+	let first = first_valid_hlc(high, low, close);
+	atr_compute_into(high, low, close, length, first, Kernel::Avx512, out);
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn atr_row_avx512_long(high: &[f64], low: &[f64], close: &[f64], length: usize, out: &mut [f64]) {
-	atr_scalar(high, low, close, length, out);
+	let first = first_valid_hlc(high, low, close);
+	atr_compute_into(high, low, close, length, first, Kernel::Avx512, out);
 }
 
 #[cfg(test)]
@@ -1441,64 +1437,41 @@ pub fn atr_batch_py<'py>(
 ) -> PyResult<Bound<'py, PyDict>> {
 	use numpy::{IntoPyArray, PyArrayMethods};
 
-	// Validate kernel outside allow_threads
-	let kernel_enum = validate_kernel(kernel, true)?; // true for batch operation
-
-	// Get slices from numpy arrays - zero copy
-	let high_slice = high.as_slice()?;
-	let low_slice = low.as_slice()?;
-	let close_slice = close.as_slice()?;
+	let k = validate_kernel(kernel, true)?; // batch
+	let hs = high.as_slice()?; let ls = low.as_slice()?; let cs = close.as_slice()?;
 
 	let range = AtrBatchRange { length: length_range };
-
-	// First expand grid to know dimensions
 	let combos = expand_grid(&range);
 	let rows = combos.len();
-	let cols = close_slice.len();
+	let cols = cs.len();
 
-	// Pre-allocate 2D NumPy array (this is acceptable for batch operations)
-	let values_2d = unsafe { numpy::PyArray2::new(py, [rows, cols], false) };
+	// flat 1D buffer like ALMA, then reshape without copy
+	let out_arr = unsafe { numpy::PyArray1::<f64>::new(py, [rows * cols], false) };
+	let buf = unsafe { out_arr.as_slice_mut()? };
 
-	// Get mutable slice for direct writing
-	let raw_ptr = values_2d.data() as *mut f64;
-	let output_slice = unsafe { std::slice::from_raw_parts_mut(raw_ptr, rows * cols) };
-
-	// Compute batch results
 	py.allow_threads(|| {
-		let batch_kernel = match kernel_enum {
+		let simd = match match k {
 			Kernel::Auto => detect_best_batch_kernel(),
-			Kernel::Scalar => Kernel::ScalarBatch,
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => Kernel::Avx2Batch,
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => Kernel::Avx512Batch,
 			k if k.is_batch() => k,
-			_ => return Err(AtrError::InvalidLength { length: 0 }),
-		};
-
-		// Map batch kernel to SIMD kernel
-		let simd = match batch_kernel {
+			Kernel::Scalar => Kernel::ScalarBatch,
+			#[cfg(all(feature="nightly-avx", target_arch="x86_64"))] Kernel::Avx2 => Kernel::Avx2Batch,
+			#[cfg(all(feature="nightly-avx", target_arch="x86_64"))] Kernel::Avx512 => Kernel::Avx512Batch,
+			_ => Kernel::ScalarBatch,
+		} {
 			Kernel::Avx512Batch => Kernel::Avx512,
-			Kernel::Avx2Batch => Kernel::Avx2,
+			Kernel::Avx2Batch   => Kernel::Avx2,
 			Kernel::ScalarBatch => Kernel::Scalar,
 			_ => unreachable!(),
 		};
-
-		// Compute directly into the output slice
-		let batch_result = atr_batch_inner(high_slice, low_slice, close_slice, &range, simd, true)?;
-		output_slice.copy_from_slice(&batch_result.values);
-		Ok(())
+		atr_batch_inner_into(hs, ls, cs, &range, simd, true, buf)
+			.map(|_| ())
+			.map_err(|e| e)
 	})
 	.map_err(|e: AtrError| PyValueError::new_err(e.to_string()))?;
 
-	// Build result dictionary
 	let dict = PyDict::new(py);
-	dict.set_item("values", values_2d)?;
-
-	// Extract lengths from combos and use into_pyarray for zero-copy
-	let lengths: Vec<usize> = combos.iter().map(|p| p.length.unwrap_or(14)).collect();
-	dict.set_item("lengths", lengths.into_pyarray(py))?;
-
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item("lengths", combos.iter().map(|p| p.length.unwrap()).collect::<Vec<_>>().into_pyarray(py))?;
 	Ok(dict.into())
 }
 
@@ -1506,54 +1479,33 @@ pub fn atr_batch_py<'py>(
 
 /// Write directly to output slice - no allocations
 #[cfg(feature = "wasm")]
-pub fn atr_into_slice(
-	dst: &mut [f64], 
-	input: &AtrInput, 
-	kern: Kernel
-) -> Result<(), AtrError> {
-	let (high, low, close, length, warmup) = atr_prepare_from_input(input)?;
-	
-	if dst.len() != high.len() {
-		return Err(AtrError::InconsistentSliceLengths {
-			high_len: high.len(),
-			low_len: low.len(),
-			close_len: dst.len(),
-		});
-	}
-	
-	// Select kernel based on input
-	let kernel = match kern {
-		Kernel::Auto => detect_best_kernel(),
-		k => k,
+pub fn atr_into_slice(dst: &mut [f64], input: &AtrInput, kern: Kernel) -> Result<(), AtrError> {
+	let (high, low, close) = match &input.data {
+		AtrData::Candles { candles } => {
+			(&candles.high[..], &candles.low[..], &candles.close[..])
+		}
+		AtrData::Slices { high, low, close } => (*high, *low, *close),
 	};
 	
-	// Compute ATR based on kernel
-	unsafe {
-		#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-		{
-			if matches!(kernel, Kernel::Scalar | Kernel::ScalarBatch) {
-				atr_simd128(high, low, close, length, dst);
-				// Fill warmup with NaN
-				for v in &mut dst[..warmup] {
-					*v = f64::NAN;
-				}
-				return Ok(());
-			}
-		}
-		
-		match kernel {
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => atr_avx512(high, low, close, length, dst),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => atr_avx2(high, low, close, length, dst),
-			_ => atr_scalar(high, low, close, length, dst),
-		}
+	let length = input.params.length.unwrap_or(14);
+	let (high, low, close, length) = atr_prepare(high, low, close, length)?;
+	let first = first_valid_hlc(high, low, close);
+	if close.len().saturating_sub(first) < length {
+		return Err(AtrError::NotEnoughData { length, data_len: close.len() });
 	}
-	
-	// Fill warmup with NaN
-	for v in &mut dst[..warmup] {
-		*v = f64::NAN;
+	let warm = first + length - 1;
+
+	if dst.len() != close.len() {
+		return Err(AtrError::InconsistentSliceLengths {
+			high_len: high.len(), low_len: low.len(), close_len: dst.len()
+		});
 	}
+
+	// only once: set prefix NaNs
+	for v in &mut dst[..warm] { *v = f64::NAN; }
+
+	let k = match kern { Kernel::Auto => detect_best_kernel(), k => k };
+	atr_compute_into(high, low, close, length, first, k, dst);
 	Ok(())
 }
 

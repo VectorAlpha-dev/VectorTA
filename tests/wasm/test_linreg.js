@@ -50,31 +50,23 @@ test('LinReg partial params', () => {
 test('LinReg accuracy', async () => {
     // Test LinReg matches expected values from Rust tests - mirrors check_linreg_accuracy
     const close = new Float64Array(testData.close);
+    const expected = EXPECTED_OUTPUTS.linreg;
     
-    const result = wasm.linreg_js(close, 14);
+    const result = wasm.linreg_js(close, expected.defaultParams.period);
     
     assert.strictEqual(result.length, close.length);
-    
-    // Expected last 5 values from Rust test
-    const expectedLastFive = [
-        58929.37142857143,
-        58899.42857142857,
-        58918.857142857145,
-        59100.6,
-        58987.94285714286,
-    ];
     
     // Check last 5 values match expected
     const last5 = result.slice(-5);
     assertArrayClose(
         last5,
-        expectedLastFive,
+        expected.last5Values,
         0.1,
         "LinReg last 5 values mismatch"
     );
     
     // Compare full output with Rust
-    await compareWithRust('linreg', result, 'close', { period: 14 });
+    await compareWithRust('linreg', result, 'close', expected.defaultParams);
 });
 
 test('LinReg default candles', async () => {
@@ -94,7 +86,7 @@ test('LinReg zero period', () => {
     
     assert.throws(() => {
         wasm.linreg_js(inputData, 0);
-    });
+    }, /Invalid period/);
 });
 
 test('LinReg period exceeds length', () => {
@@ -103,7 +95,7 @@ test('LinReg period exceeds length', () => {
     
     assert.throws(() => {
         wasm.linreg_js(dataSmall, 10);
-    });
+    }, /Invalid period|Not enough valid data/);
 });
 
 test('LinReg very small dataset', () => {
@@ -112,7 +104,7 @@ test('LinReg very small dataset', () => {
     
     assert.throws(() => {
         wasm.linreg_js(dataSingle, 14);
-    });
+    }, /Invalid period|Not enough valid data/);
 });
 
 test('LinReg empty input', () => {
@@ -121,7 +113,7 @@ test('LinReg empty input', () => {
     
     assert.throws(() => {
         wasm.linreg_js(dataEmpty, 14);
-    });
+    }, /Input data slice is empty|All values are NaN/);
 });
 
 test('LinReg all NaN', () => {
@@ -130,7 +122,7 @@ test('LinReg all NaN', () => {
     
     assert.throws(() => {
         wasm.linreg_js(data, 3);
-    });
+    }, /All values are NaN/);
 });
 
 test('LinReg reinput', () => {
@@ -435,4 +427,223 @@ test('LinReg large period', () => {
     // Values from index 98 onwards should be valid
     assert(isFinite(result[98]), "Expected finite value at index 98");
     assert(isFinite(result[99]), "Expected finite value at last index");
+});
+
+// ====================== Zero-Copy API Tests ======================
+
+test('LinReg zero-copy basic', () => {
+    // Test zero-copy API for LinReg
+    const data = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    const period = 3;
+    
+    // Allocate memory
+    const ptr = wasm.linreg_alloc(data.length);
+    assert(ptr !== 0, 'Failed to allocate memory');
+    
+    // Create view of WASM memory
+    const memView = new Float64Array(wasm.__wasm.memory.buffer, ptr, data.length);
+    
+    // Copy data to WASM memory
+    memView.set(data);
+    
+    // Compute LinReg in-place
+    try {
+        wasm.linreg_into(ptr, ptr, data.length, period);
+        
+        // Verify results match regular API
+        const regularResult = wasm.linreg_js(data, period);
+        for (let i = 0; i < data.length; i++) {
+            if (isNaN(regularResult[i]) && isNaN(memView[i])) {
+                continue; // Both NaN is OK
+            }
+            assert(Math.abs(regularResult[i] - memView[i]) < 1e-10,
+                   `Zero-copy mismatch at index ${i}: regular=${regularResult[i]}, zerocopy=${memView[i]}`);
+        }
+    } finally {
+        // Always free memory
+        wasm.linreg_free(ptr, data.length);
+    }
+});
+
+test('LinReg zero-copy with large dataset', () => {
+    const size = 100000;
+    const data = new Float64Array(size);
+    for (let i = 0; i < size; i++) {
+        data[i] = Math.sin(i * 0.01) + Math.random() * 0.1;
+    }
+    
+    const ptr = wasm.linreg_alloc(size);
+    assert(ptr !== 0, 'Failed to allocate large buffer');
+    
+    try {
+        const memView = new Float64Array(wasm.__wasm.memory.buffer, ptr, size);
+        memView.set(data);
+        
+        wasm.linreg_into(ptr, ptr, size, 14);
+        
+        // Recreate view in case memory grew
+        const memView2 = new Float64Array(wasm.__wasm.memory.buffer, ptr, size);
+        
+        // Check warmup period has NaN (first + period - 1 = 0 + 14 - 1 = 13)
+        for (let i = 0; i < 13; i++) {
+            assert(isNaN(memView2[i]), `Expected NaN at warmup index ${i}`);
+        }
+        
+        // Check after warmup has values
+        for (let i = 13; i < Math.min(100, size); i++) {
+            assert(!isNaN(memView2[i]), `Unexpected NaN at index ${i}`);
+        }
+    } finally {
+        wasm.linreg_free(ptr, size);
+    }
+});
+
+test('LinReg zero-copy error handling', () => {
+    // Test null pointer
+    assert.throws(() => {
+        wasm.linreg_into(0, 0, 10, 5);
+    }, /null pointer/);
+    
+    // Test invalid period
+    const ptr = wasm.linreg_alloc(10);
+    try {
+        assert.throws(() => {
+            wasm.linreg_into(ptr, ptr, 10, 0);
+        }, /Invalid period/);
+    } finally {
+        wasm.linreg_free(ptr, 10);
+    }
+});
+
+test('LinReg zero-copy batch API', () => {
+    const size = 100;
+    const data = new Float64Array(size);
+    for (let i = 0; i < size; i++) {
+        data[i] = Math.sin(i * 0.1) * 10;
+    }
+    
+    // Test batch with zero-copy
+    const periods = 3;
+    const totalSize = periods * size;
+    const inPtr = wasm.linreg_alloc(size);
+    const outPtr = wasm.linreg_alloc(totalSize);
+    
+    try {
+        const inView = new Float64Array(wasm.__wasm.memory.buffer, inPtr, size);
+        inView.set(data);
+        
+        const rows = wasm.linreg_batch_into(inPtr, outPtr, size, 10, 30, 10);
+        assert.strictEqual(rows, 3, 'Expected 3 rows');
+        
+        const outView = new Float64Array(wasm.__wasm.memory.buffer, outPtr, totalSize);
+        
+        // Verify each row matches individual calculation
+        const periodValues = [10, 20, 30];
+        for (let i = 0; i < periods; i++) {
+            const period = periodValues[i];
+            const individual = wasm.linreg_js(data, period);
+            const rowStart = i * size;
+            const row = Array.from(outView.slice(rowStart, rowStart + size));
+            
+            assertArrayClose(row, individual, 1e-9, `Batch row ${i} mismatch`);
+        }
+    } finally {
+        wasm.linreg_free(inPtr, size);
+        wasm.linreg_free(outPtr, totalSize);
+    }
+});
+
+// ====================== SIMD Consistency Tests ======================
+
+test('LinReg SIMD consistency', () => {
+    // This test verifies different kernels produce same results
+    // WASM uses scalar kernel, but we verify consistency
+    const testCases = [
+        { size: 10, period: 5 },
+        { size: 100, period: 14 },
+        { size: 1000, period: 20 },
+        { size: 10000, period: 50 }
+    ];
+    
+    for (const testCase of testCases) {
+        const data = new Float64Array(testCase.size);
+        for (let i = 0; i < testCase.size; i++) {
+            data[i] = Math.sin(i * 0.1) + Math.cos(i * 0.05);
+        }
+        
+        const result = wasm.linreg_js(data, testCase.period);
+        
+        // Basic sanity checks
+        assert.strictEqual(result.length, data.length);
+        
+        // Check warmup period (first + period - 1)
+        for (let i = 0; i < testCase.period - 1; i++) {
+            assert(isNaN(result[i]), `Expected NaN at warmup index ${i} for size=${testCase.size}`);
+        }
+        
+        // Check values exist after warmup
+        let sumAfterWarmup = 0;
+        let countAfterWarmup = 0;
+        for (let i = testCase.period - 1; i < result.length; i++) {
+            assert(!isNaN(result[i]), `Unexpected NaN at index ${i} for size=${testCase.size}`);
+            sumAfterWarmup += result[i];
+            countAfterWarmup++;
+        }
+        
+        // Verify reasonable values
+        const avgAfterWarmup = sumAfterWarmup / countAfterWarmup;
+        assert(Math.abs(avgAfterWarmup) < 1000, `Average value ${avgAfterWarmup} seems unreasonable`);
+    }
+});
+
+// ====================== Advanced Batch Tests ======================
+
+test('LinReg batch metadata validation', () => {
+    // Test that batch result includes correct parameter combinations
+    const close = new Float64Array(50);
+    close.fill(100);
+    
+    const result = wasm.linreg_batch(close, {
+        period_range: [10, 30, 10]  // periods: 10, 20, 30
+    });
+    
+    // Should have 3 combinations
+    assert.strictEqual(result.combos.length, 3);
+    assert.strictEqual(result.rows, 3);
+    assert.strictEqual(result.cols, 50);
+    
+    // Check combinations
+    assert.strictEqual(result.combos[0].period, 10);
+    assert.strictEqual(result.combos[1].period, 20);
+    assert.strictEqual(result.combos[2].period, 30);
+});
+
+test('LinReg batch warmup consistency', () => {
+    // Test that each batch row has correct warmup period
+    const data = new Float64Array(100);
+    for (let i = 0; i < 100; i++) {
+        data[i] = Math.random() * 100;
+    }
+    
+    const result = wasm.linreg_batch(data, {
+        period_range: [5, 15, 5]  // periods: 5, 10, 15
+    });
+    
+    const periods = [5, 10, 15];
+    for (let row = 0; row < periods.length; row++) {
+        const period = periods[row];
+        const rowStart = row * 100;
+        const rowData = result.values.slice(rowStart, rowStart + 100);
+        
+        // Check warmup period (first + period - 1)
+        const expectedWarmup = period - 1;
+        for (let i = 0; i < expectedWarmup; i++) {
+            assert(isNaN(rowData[i]), `Row ${row}: Expected NaN at index ${i}`);
+        }
+        
+        // Check values after warmup
+        for (let i = expectedWarmup; i < rowData.length; i++) {
+            assert(!isNaN(rowData[i]), `Row ${row}: Unexpected NaN at index ${i}`);
+        }
+    }
 });

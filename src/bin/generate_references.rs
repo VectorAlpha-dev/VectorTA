@@ -18,9 +18,11 @@ use my_project::indicators::bop::{bop, BopInput, BopParams};
 use my_project::indicators::cci::{cci, CciInput, CciParams};
 use my_project::indicators::cfo::{cfo, CfoInput, CfoParams};
 use my_project::indicators::cg::{cg, CgInput, CgParams};
+use my_project::indicators::cvi::{cvi, CviInput, CviParams};
 use my_project::indicators::fisher::{fisher, FisherInput, FisherParams};
 use my_project::indicators::kurtosis::{kurtosis, KurtosisInput, KurtosisParams};
 use my_project::indicators::midpoint::{midpoint, MidpointInput, MidpointParams};
+use my_project::indicators::midprice::{midprice, MidpriceInput, MidpriceParams};
 use my_project::indicators::chande::{chande, ChandeData, ChandeInput, ChandeParams};
 use my_project::indicators::cmo::{cmo, CmoInput, CmoParams};
 use my_project::indicators::correl_hl::{correl_hl, CorrelHlData, CorrelHlInput, CorrelHlParams};
@@ -35,6 +37,8 @@ use my_project::indicators::mass::{mass, MassInput, MassParams};
 /// This is used by Python and WASM tests to verify their outputs match Rust
 use my_project::indicators::damiani_volatmeter::{damiani_volatmeter, DamianiVolatmeterInput, DamianiVolatmeterParams, DamianiVolatmeterData};
 use my_project::indicators::decycler::{decycler, DecyclerInput, DecyclerParams};
+use my_project::indicators::devstop::{devstop, DevStopInput, DevStopParams, DevStopData};
+use my_project::indicators::er::{er, ErInput, ErParams};
 use my_project::indicators::di::{di, DiData, DiInput, DiParams};
 use my_project::indicators::eri::{eri, EriData, EriInput, EriParams};
 use my_project::indicators::moving_averages::alma::{alma, AlmaInput, AlmaParams};
@@ -90,7 +94,8 @@ use my_project::indicators::moving_averages::zlema::{zlema, ZlemaInput, ZlemaPar
 use my_project::indicators::vpci::{vpci, VpciInput, VpciParams};
 use my_project::indicators::vpt::{vpt, VptInput};
 use my_project::indicators::stddev::{stddev, StdDevInput, StdDevParams};
-use my_project::indicators::wclprice::{wclprice, WclpriceData, WclpriceInput, WclpriceParams};
+use my_project::indicators::var::{var, VarInput, VarParams};
+use my_project::indicators::wclprice::{wclprice, WclpriceInput};
 use my_project::utilities::data_loader::read_candles_from_csv;
 use serde_json::json;
 use std::env;
@@ -99,7 +104,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	let args: Vec<String> = env::args().collect();
 	if args.len() < 2 {
 		eprintln!("Usage: {} <indicator_name> [source]", args[0]);
-		eprintln!("Available indicators: ad, acosc, adx, adosc, adxr, alligator, alma, ao, apo, aroon, aroonosc, atr, bandpass, bollinger_bands, bollinger_bands_width, bop, cci, cfo, cg, cwma, decycler, dema, di, edcf, ehlers_itrend, ema, epma, eri, fisher, frama, fwma, gaussian, highpass_2_pole, highpass, hma, hwma, jma, jsa, kama, kurtosis, linreg, maaq, mama, marketefi, mfi, mwdx, nma, ppo, rsx, pwma, reflex, roc, rocp, rsi, rvi, sinwma, sma, smma, squeeze_momentum, sqwma, srwma, stddev, supersmoother_3_pole, supersmoother, swma, tema, tilson, trendflex, trima, vpci, tsf, ui, vwap, vwma, vpwma, wclprice, wilders, wma, zlema");
+		eprintln!("Available indicators: ad, acosc, adx, adosc, adxr, alligator, alma, ao, apo, aroon, aroonosc, atr, bandpass, bollinger_bands, bollinger_bands_width, bop, cci, cfo, cg, cwma, decycler, dema, devstop, di, edcf, ehlers_itrend, ema, epma, eri, fisher, frama, fwma, gaussian, highpass_2_pole, highpass, hma, hwma, jma, jsa, kama, kurtosis, linreg, maaq, mama, marketefi, midpoint, midprice, mfi, mwdx, nma, ppo, rsx, pwma, reflex, roc, rocp, rsi, rvi, rvi, sinwma, sma, smma, squeeze_momentum, sqwma, srwma, stddev, supersmoother_3_pole, supersmoother, swma, tema, tilson, trendflex, trima, var, vpci, tsf, ui, vwap, vwma, vpwma, wclprice, wilders, wma, zlema");
 		eprintln!("Available sources: open, high, low, close, volume, hl2, hlc3, ohlc4, hlcc4");
 		std::process::exit(1);
 	}
@@ -157,6 +162,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 				"params": {
 					"hp_period": hp_period,
 					"k": k
+				},
+				"values": result.values,
+				"length": result.values.len()
+			})
+		}
+		"devstop" => {
+			// DevStop requires high/low data
+			let params = DevStopParams::default();
+			let period = params.period.unwrap_or(20);
+			let mult = params.mult.unwrap_or(0.0);
+			let devtype = params.devtype.unwrap_or(0);
+			let direction = params.direction.clone().unwrap_or("long".to_string());
+			let ma_type = params.ma_type.clone().unwrap_or("sma".to_string());
+			
+			let high = &candles.high;
+			let low = &candles.low;
+			let input = DevStopInput {
+				data: DevStopData::SliceHL(high, low),
+				params,
+			};
+			let result = devstop(&input)?;
+			json!({
+				"indicator": "devstop",
+				"source": "hl",
+				"params": {
+					"period": period,
+					"mult": mult,
+					"devtype": devtype,
+					"direction": direction,
+					"ma_type": ma_type
+				},
+				"values": result.values,
+				"length": result.values.len()
+			})
+		}
+		"er" => {
+			let params = ErParams::default();
+			let period = params.period.unwrap_or(5);
+			let input = ErInput::from_candles(&candles, source, params);
+			let result = er(&input)?;
+			json!({
+				"indicator": "er",
+				"source": source,
+				"params": {
+					"period": period
 				},
 				"values": result.values,
 				"length": result.values.len()
@@ -588,6 +638,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 				"length": result.values.len()
 			})
 		}
+		"midprice" => {
+			if source != "hl" {
+				eprintln!("Midprice indicator requires 'hl' source");
+				std::process::exit(1);
+			}
+			let params = MidpriceParams::default();
+			let period = params.period.unwrap_or(14);
+			let input = MidpriceInput::from_candles(&candles, "high", "low", params);
+			let result = midprice(&input)?;
+			json!({
+				"indicator": "midprice",
+				"source": source,
+				"params": {
+					"period": period
+				},
+				"values": result.values,
+				"length": result.values.len()
+			})
+		}
 		"marketefi" => {
 			if source != "hlv" {
 				eprintln!("MarketEFI indicator requires 'hlv' source");
@@ -843,6 +912,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 			let result = stddev(&input)?;
 			json!({
 				"indicator": "stddev",
+				"source": source,
+				"params": {
+					"period": period,
+					"nbdev": nbdev
+				},
+				"values": result.values,
+				"length": result.values.len()
+			})
+		}
+		"var" => {
+			let params = VarParams::default();
+			let period = params.period.unwrap_or(14);
+			let nbdev = params.nbdev.unwrap_or(1.0);
+			let input = VarInput::from_candles(&candles, source, params);
+			let result = var(&input)?;
+			json!({
+				"indicator": "var",
 				"source": source,
 				"params": {
 					"period": period,
@@ -1556,16 +1642,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 				"length": result.values.len()
 			})
 		}
+		"cvi" => {
+			if source != "hl" {
+				eprintln!("CVI indicator requires 'hl' source");
+				std::process::exit(1);
+			}
+			let params = CviParams::default();
+			let period = params.period.unwrap_or(10);
+			let input = CviInput::from_candles(&candles, params);
+			let result = cvi(&input)?;
+			json!({
+				"indicator": "cvi",
+				"source": source,
+				"params": {
+					"period": period
+				},
+				"values": result.values,
+				"length": result.values.len()
+			})
+		}
 		"wclprice" => {
 			if source != "hlc" {
 				eprintln!("WCLPRICE indicator requires 'hlc' source");
 				std::process::exit(1);
 			}
-			let params = WclpriceParams::default();
-			let input = WclpriceInput {
-				data: WclpriceData::Candles { candles: &candles },
-				params,
-			};
+			let input = WclpriceInput::from_candles(&candles);
 			let result = wclprice(&input)?;
 			json!({
 				"indicator": "wclprice",

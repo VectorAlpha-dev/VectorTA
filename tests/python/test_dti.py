@@ -164,12 +164,12 @@ class TestDTI:
         assert result['values'].shape == (27, len(high))
         
         # Check parameter arrays
-        assert 'r_values' in result
-        assert 's_values' in result
-        assert 'u_values' in result
-        assert len(result['r_values']) == 27
-        assert len(result['s_values']) == 27
-        assert len(result['u_values']) == 27
+        assert 'r' in result
+        assert 's' in result
+        assert 'u' in result
+        assert len(result['r']) == 27
+        assert len(result['s']) == 27
+        assert len(result['u']) == 27
         
     def test_dti_streaming(self):
         """Test DTI streaming calculation"""

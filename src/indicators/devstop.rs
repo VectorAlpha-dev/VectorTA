@@ -21,16 +21,29 @@
 
 use crate::indicators::deviation::{deviation, DevInput, DevParams};
 use crate::indicators::moving_averages::ma::{ma, MaData};
-use crate::indicators::utility_functions::{max_rolling, min_rolling};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
-use aligned_vec::{AVec, CACHELINE_ALIGN};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix,
+	detect_best_batch_kernel, detect_best_kernel,
+};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use thiserror::Error;
+
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::{prelude::*, exceptions::PyValueError};
+
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+#[cfg(feature = "wasm")]
+use serde::{Serialize, Deserialize};
 
 #[derive(Debug, Clone)]
 pub enum DevStopData<'a> {
@@ -48,6 +61,7 @@ pub struct DevStopOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct DevStopParams {
 	pub period: Option<usize>,
 	pub mult: Option<f64>,
@@ -236,146 +250,238 @@ pub fn devstop(input: &DevStopInput) -> Result<DevStopOutput, DevStopError> {
 	devstop_with_kernel(input, Kernel::Auto)
 }
 
-pub fn devstop_with_kernel(input: &DevStopInput, kernel: Kernel) -> Result<DevStopOutput, DevStopError> {
+#[inline(always)]
+fn devstop_warmup(first: usize, period: usize) -> usize {
+	// high/low rolling(2) warm = first + (2-1)
+	// MA(deviation) over range adds + (period-1)
+	// final rolling extrema over base adds + (period-1)
+	first + 2*period - 1
+}
+
+#[inline(always)]
+fn devstop_prepare<'a>(
+	input: &'a DevStopInput,
+	kernel: Kernel,
+) -> Result<(&'a [f64], &'a [f64], usize, usize, f64, usize, bool, String, Kernel), DevStopError> {
 	let (high, low) = match &input.data {
-		DevStopData::Candles {
-			candles,
-			source_high,
-			source_low,
-		} => (source_type(candles, source_high), source_type(candles, source_low)),
+		DevStopData::Candles { candles, source_high, source_low } => {
+			(source_type(candles, source_high), source_type(candles, source_low))
+		}
 		DevStopData::SliceHL(h, l) => (*h, *l),
 	};
-
-	let first_valid_high = high.iter().position(|&x| !x.is_nan());
-	let first_valid_low = low.iter().position(|&x| !x.is_nan());
-	let first = match (first_valid_high, first_valid_low) {
-		(Some(h), Some(l)) => h.min(l),
-		_ => return Err(DevStopError::AllValuesNaN),
-	};
-
 	let len = high.len();
+	if len == 0 || low.len() == 0 {
+		return Err(DevStopError::AllValuesNaN);
+	}
+	let fh = high.iter().position(|x| !x.is_nan());
+	let fl = low.iter().position(|x| !x.is_nan());
+	let first = match (fh, fl) { (Some(h), Some(l)) => h.min(l), _ => return Err(DevStopError::AllValuesNaN) };
+
 	let period = input.get_period();
 	if period == 0 || period > len || period > low.len() {
-		return Err(DevStopError::InvalidPeriod {
-			period,
-			data_len: len.min(low.len()),
-		});
+		return Err(DevStopError::InvalidPeriod { period, data_len: len.min(low.len()) });
 	}
 	if (len - first) < period || (low.len() - first) < period {
 		return Err(DevStopError::NotEnoughValidData {
 			needed: period,
-			valid: (len - first).min(low.len() - first),
+			valid: (len-first).min(low.len()-first),
 		});
 	}
 
-	let chosen = match kernel {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
+	let mult = input.get_mult();
+	let devtype = input.get_devtype();
+	if devtype > 2 {
+		return Err(DevStopError::DevStopCalculation(format!("invalid devtype {}", devtype)));
+	}
+	let is_long = input.get_direction().eq_ignore_ascii_case("long");
+	let ma_type = input.get_ma_type();
+
+	let chosen = match kernel { Kernel::Auto => detect_best_kernel(), k => k };
+	Ok((high, low, len, first, mult, devtype, is_long, ma_type, chosen))
+}
+
+#[inline]
+pub fn devstop_into_slice(dst: &mut [f64], input: &DevStopInput, _kernel: Kernel) -> Result<(), DevStopError> {
+	// Extract data without re-validating (caller should have validated)
+	let (high, low) = match &input.data {
+		DevStopData::Candles { candles, source_high, source_low } => {
+			(source_type(candles, source_high), source_type(candles, source_low))
+		}
+		DevStopData::SliceHL(h, l) => (*h, *l),
+	};
+	let len = high.len();
+	
+	// Quick validation of dst length
+	if dst.len() != len { return Err(DevStopError::InvalidPeriod { period: dst.len(), data_len: len }); }
+	
+	// Find first valid index
+	let fh = high.iter().position(|x| !x.is_nan()).unwrap_or(0);
+	let fl = low.iter().position(|x| !x.is_nan()).unwrap_or(0);
+	let first = fh.min(fl);
+	
+	// Get parameters
+	let period = input.get_period();
+	let mult = input.get_mult();
+	let devtype = input.get_devtype();
+	let is_long = input.get_direction().eq_ignore_ascii_case("long");
+	let ma_type = input.get_ma_type();
+
+	// Build range with warm prefix only, no full NaN fill
+	let mut range = alloc_with_nan_prefix(len, first + 1);
+	// rolling(2) max/min without allocating temp vectors
+	if first + 1 < len {
+		let mut prev_h = high[first];
+		let mut prev_l = low[first];
+		for i in (first+1)..len {
+			let h = high[i];
+			let l = low[i];
+			if !h.is_nan() && !prev_h.is_nan() && !l.is_nan() && !prev_l.is_nan() {
+				let hi2 = if h > prev_h { h } else { prev_h };
+				let lo2 = if l < prev_l { l } else { prev_l };
+				range[i] = hi2 - lo2;
+			}
+			prev_h = h;
+			prev_l = l;
+		}
+	}
+
+	// These produce one allocation each; unavoidable given their APIs
+	let avtr = ma(&ma_type, MaData::Slice(&range), input.get_period())
+		.map_err(|e| DevStopError::DevStopCalculation(format!("ma: {e:?}")))?;
+	let dev_values = {
+		let di = DevInput::from_slice(
+			&range,
+			DevParams { period: Some(input.get_period()), devtype: Some(devtype) },
+		);
+		deviation(&di).map_err(|e| DevStopError::DevStopCalculation(format!("deviation: {e:?}")))?
 	};
 
-	let mut out = vec![f64::NAN; len];
+	// Stream final into dst with a deque. No `base` or `final_values` Vec.
+	// Keep only last `period` base values in a small ring.
+	use std::collections::VecDeque;
+	let period = input.get_period();
+	let start_base = first + period;                 // base becomes defined here
+	let start_final = start_base + period - 1;       // final rolling extrema defined here
+	let warm = devstop_warmup(first, period);
+
+	// dst already allocated by caller; write only valid tail, leave warmup untouched.
+	// For Python/WASM paths we'll allocate dst via alloc_with_nan_prefix(warm) to avoid writes here.
+	let mut dq: VecDeque<usize> = VecDeque::with_capacity(period+1);
+	let mut ring: Vec<f64> = vec![f64::NAN; period];
+
+	for i in start_base..len {
+		let base = if is_long {
+			// long: high - avtr - mult*dev
+			if high[i].is_nan() || avtr[i].is_nan() || dev_values[i].is_nan() { f64::NAN }
+			else { high[i] - avtr[i] - mult * dev_values[i] }
+		} else {
+			// short: low + avtr + mult*dev
+			if low[i].is_nan() || avtr[i].is_nan() || dev_values[i].is_nan() { f64::NAN }
+			else { low[i] + avtr[i] + mult * dev_values[i] }
+		};
+
+		// store in ring
+		ring[i % period] = base;
+
+		// update deque for rolling max/min over `base`
+		if is_long {
+			while let Some(&j) = dq.back() {
+				let bj = ring[j % period];
+				if bj.is_nan() || bj <= base { dq.pop_back(); } else { break; }
+			}
+		} else {
+			while let Some(&j) = dq.back() {
+				let bj = ring[j % period];
+				if bj.is_nan() || bj >= base { dq.pop_back(); } else { break; }
+			}
+		}
+		dq.push_back(i);
+		// drop out-of-window
+		let cut = i + 1 - period;
+		while let Some(&j) = dq.front() { if j < cut { dq.pop_front(); } else { break; } }
+
+		if i >= start_final {
+			if let Some(&j) = dq.front() {
+				dst[i] = ring[j % period];
+			} else {
+				// If deque is empty (all NaN or insufficient data), output NaN
+				dst[i] = f64::NAN;
+			}
+		}
+	}
+
+	// Ensure warm prefix stays NaN
+	for v in &mut dst[..warm.min(len)] { *v = f64::NAN; }
+	Ok(())
+}
+
+pub fn devstop_with_kernel(input: &DevStopInput, kernel: Kernel) -> Result<DevStopOutput, DevStopError> {
+	// Validate input once to get length and first
+	let (high, low) = match &input.data {
+		DevStopData::Candles { candles, source_high, source_low } => {
+			(source_type(candles, source_high), source_type(candles, source_low))
+		}
+		DevStopData::SliceHL(h, l) => (*h, *l),
+	};
+	let len = high.len();
+	if len == 0 || low.len() == 0 {
+		return Err(DevStopError::AllValuesNaN);
+	}
+	let fh = high.iter().position(|x| !x.is_nan());
+	let fl = low.iter().position(|x| !x.is_nan());
+	let first = match (fh, fl) { (Some(h), Some(l)) => h.min(l), _ => return Err(DevStopError::AllValuesNaN) };
+	
+	let period = input.get_period();
+	if period == 0 || period > len || period > low.len() {
+		return Err(DevStopError::InvalidPeriod { period, data_len: len.min(low.len()) });
+	}
+	if (len - first) < period || (low.len() - first) < period {
+		return Err(DevStopError::NotEnoughValidData {
+			needed: period,
+			valid: (len-first).min(low.len()-first),
+		});
+	}
+	
+	// Resolve kernel once
+	let chosen = match kernel { Kernel::Auto => detect_best_kernel(), k => k };
+	
+	// Allocate output without NaN prefix (devstop_into_slice will handle it)
+	let warm = devstop_warmup(first, period);
+	let mut out = vec![0.0; len];
+	
+	// Pass resolved kernel directly
 	unsafe {
 		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => devstop_scalar(high, low, period, first, &input, &mut out),
+			Kernel::Scalar | Kernel::ScalarBatch => devstop_into_slice(&mut out, input, Kernel::Scalar)?,
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => devstop_avx2(high, low, period, first, &input, &mut out),
+			Kernel::Avx2 | Kernel::Avx2Batch => devstop_into_slice(&mut out, input, Kernel::Avx2)?,
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => devstop_avx512(high, low, period, first, &input, &mut out),
-			_ => unreachable!(),
+			Kernel::Avx512 | Kernel::Avx512Batch => devstop_into_slice(&mut out, input, Kernel::Avx512)?,
+			_ => devstop_into_slice(&mut out, input, Kernel::Scalar)?,
 		}
 	}
 	Ok(DevStopOutput { values: out })
 }
 
+// Old scalar implementation - kept for reference but not used
 #[inline]
 pub fn devstop_scalar(high: &[f64], low: &[f64], period: usize, first: usize, input: &DevStopInput, out: &mut [f64]) {
-	let high2 = match max_rolling(high, 2) {
-		Ok(v) => v,
-		Err(_) => {
-			return;
-		}
-	};
-	let low2 = match min_rolling(low, 2) {
-		Ok(v) => v,
-		Err(_) => {
-			return;
-		}
-	};
-
-	let mut range = vec![f64::NAN; high.len()];
-	for i in 0..high.len() {
-		if !high2[i].is_nan() && !low2[i].is_nan() {
-			range[i] = high2[i] - low2[i];
-		}
-	}
-
-	let avtr = match ma(&input.get_ma_type(), MaData::Slice(&range), period) {
-		Ok(v) => v,
-		Err(_) => {
-			return;
-		}
-	};
-	let dev_values = {
-		let dev_input = DevInput::from_slice(
-			&range,
-			DevParams {
-				period: Some(period),
-				devtype: Some(input.get_devtype()),
-			},
-		);
-		match deviation(&dev_input) {
-			Ok(v) => v,
-			Err(_) => {
-				return;
-			}
-		}
-	};
-
-	let mult = input.get_mult();
-	let direction = input.get_direction();
-
-	let mut base = vec![f64::NAN; high.len()];
-	for i in 0..high.len() {
-		if direction.eq_ignore_ascii_case("long") {
-			if !high[i].is_nan() && !avtr[i].is_nan() && !dev_values[i].is_nan() {
-				base[i] = high[i] - avtr[i] - mult * dev_values[i];
-			}
-		} else {
-			if !low[i].is_nan() && !avtr[i].is_nan() && !dev_values[i].is_nan() {
-				base[i] = low[i] + avtr[i] + mult * dev_values[i];
-			}
-		}
-	}
-
-	let final_values = if direction.eq_ignore_ascii_case("long") {
-		match max_rolling(&base, period) {
-			Ok(v) => v,
-			Err(_) => vec![f64::NAN; high.len()],
-		}
-	} else {
-		match min_rolling(&base, period) {
-			Ok(v) => v,
-			Err(_) => vec![f64::NAN; high.len()],
-		}
-	};
-
-	out.copy_from_slice(&final_values);
+	let _ = (high, low, period, first);
+	let _ = devstop_into_slice(out, input, Kernel::Scalar);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn devstop_avx2(high: &[f64], low: &[f64], period: usize, first: usize, input: &DevStopInput, out: &mut [f64]) {
-	devstop_scalar(high, low, period, first, input, out)
+	let _ = (high, low, period, first);
+	let _ = devstop_into_slice(out, input, Kernel::Avx2);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn devstop_avx512(high: &[f64], low: &[f64], period: usize, first: usize, input: &DevStopInput, out: &mut [f64]) {
-	if period <= 32 {
-		unsafe { devstop_avx512_short(high, low, period, first, input, out) }
-	} else {
-		unsafe { devstop_avx512_long(high, low, period, first, input, out) }
-	}
+	let _ = (high, low, period, first);
+	let _ = devstop_into_slice(out, input, Kernel::Avx512);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -388,7 +494,8 @@ pub unsafe fn devstop_avx512_short(
 	input: &DevStopInput,
 	out: &mut [f64],
 ) {
-	devstop_scalar(high, low, period, first, input, out)
+	let _ = (high, low, period, first);
+	let _ = devstop_into_slice(out, input, Kernel::Avx512);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -401,7 +508,8 @@ pub unsafe fn devstop_avx512_long(
 	input: &DevStopInput,
 	out: &mut [f64],
 ) {
-	devstop_scalar(high, low, period, first, input, out)
+	let _ = (high, low, period, first);
+	let _ = devstop_into_slice(out, input, Kernel::Avx512);
 }
 
 #[inline(always)]
@@ -417,10 +525,12 @@ pub fn devstop_batch_with_kernel(
 		_ => return Err(DevStopError::InvalidPeriod { period: 0, data_len: 0 }),
 	};
 	let simd = match chosen {
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 		Kernel::Avx512Batch => Kernel::Avx512,
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 		Kernel::Avx2Batch => Kernel::Avx2,
 		Kernel::ScalarBatch => Kernel::Scalar,
-		_ => unreachable!(),
+		_ => Kernel::Scalar,  // Default to Scalar for any other kernel
 	};
 	devstop_batch_par_slice(high, low, sweep, simd)
 }
@@ -590,67 +700,85 @@ fn devstop_batch_inner(
 		return Err(DevStopError::InvalidPeriod { period: 0, data_len: 0 });
 	}
 
-	let first_high = high
-		.iter()
-		.position(|x| !x.is_nan())
-		.ok_or(DevStopError::AllValuesNaN)?;
-	let first_low = low.iter().position(|x| !x.is_nan()).ok_or(DevStopError::AllValuesNaN)?;
-	let first = first_high.min(first_low);
+	let fh = high.iter().position(|x| !x.is_nan()).ok_or(DevStopError::AllValuesNaN)?;
+	let fl = low.iter().position(|x| !x.is_nan()).ok_or(DevStopError::AllValuesNaN)?;
+	let first = fh.min(fl);
+	
+	// Check we have enough data for the largest period's warmup
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-	if high.len() - first < max_p || low.len() - first < max_p {
+	let max_warmup = devstop_warmup(first, max_p);
+	if high.len() <= max_warmup || low.len() <= max_warmup {
 		return Err(DevStopError::NotEnoughValidData {
-			needed: max_p,
-			valid: (high.len() - first).min(low.len() - first),
+			needed: max_warmup + 1,
+			valid: high.len().min(low.len()),
 		});
 	}
 
 	let rows = combos.len();
 	let cols = high.len();
-	let mut values = vec![f64::NAN; rows * cols];
 
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+	// Uninitialized matrix, then warm prefixes per row
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	let warms: Vec<usize> = combos.iter().map(|c| devstop_warmup(first, c.period.unwrap())).collect();
+	init_matrix_prefixes(&mut buf_mu, cols, &warms);
+
+	// Into-slice compute per row without touching warm prefix again
+	let mut guard = core::mem::ManuallyDrop::new(buf_mu);
+	let out: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len())
+	};
+
+	// Convert batch kernel to regular kernel for row processing
+	let simd_kern = match kern {
+		Kernel::ScalarBatch => Kernel::Scalar,
+		Kernel::Avx512Batch => {
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			{ Kernel::Avx512 }
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			{ Kernel::Scalar }
+		},
+		Kernel::Avx2Batch => {
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			{ Kernel::Avx2 }
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			{ Kernel::Scalar }
+		},
+		k => k,  // Pass through non-batch kernels
+	};
+	
+	let do_row = |row: usize, dst_row_mu: &mut [f64]| -> Result<(), DevStopError> {
 		let prm = &combos[row];
-		let period = prm.period.unwrap();
 		let input = DevStopInput {
 			data: DevStopData::SliceHL(high, low),
 			params: prm.clone(),
 		};
-		match kern {
-			Kernel::Scalar => devstop_row_scalar(high, low, first, period, &input, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => devstop_row_avx2(high, low, first, period, &input, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => devstop_row_avx512(high, low, first, period, &input, out_row),
-			_ => unreachable!(),
-		}
+		// compute only; warm prefix already set by init_matrix_prefixes
+		devstop_into_slice(dst_row_mu, &input, simd_kern)?;
+		Ok(())
 	};
 
 	if parallel {
-		#[cfg(not(target_arch = "wasm32"))]
+		#[cfg(not(target_arch="wasm32"))]
 		{
-			values
-				.par_chunks_mut(cols)
+			use rayon::prelude::*;
+			out.par_chunks_mut(cols)
 				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
+				.try_for_each(|(r, sl)| do_row(r, sl))?;  // propagate error
 		}
-
-		#[cfg(target_arch = "wasm32")]
+		#[cfg(target_arch="wasm32")]
 		{
-			for (row, slice) in values.chunks_mut(cols).enumerate() {
-				do_row(row, slice);
-			}
+			for (r, sl) in out.chunks_mut(cols).enumerate() { do_row(r, sl)?; }
 		}
 	} else {
-		for (row, slice) in values.chunks_mut(cols).enumerate() {
-			do_row(row, slice);
-		}
+		for (r, sl) in out.chunks_mut(cols).enumerate() { do_row(r, sl)?; }
 	}
-	Ok(DevStopBatchOutput {
-		values,
-		combos,
-		rows,
-		cols,
-	})
+
+	let values = unsafe {
+		Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, guard.len(), guard.capacity())
+	};
+	core::mem::forget(guard);
+
+	Ok(DevStopBatchOutput { values, combos, rows, cols })
 }
 
 #[inline(always)]
@@ -662,7 +790,8 @@ pub unsafe fn devstop_row_scalar(
 	input: &DevStopInput,
 	out: &mut [f64],
 ) {
-	devstop_scalar(high, low, period, first, input, out)
+	let _ = (high, low, period, first);
+	let _ = devstop_into_slice(out, input, Kernel::Scalar);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -675,7 +804,8 @@ pub unsafe fn devstop_row_avx2(
 	input: &DevStopInput,
 	out: &mut [f64],
 ) {
-	devstop_row_scalar(high, low, first, period, input, out)
+	let _ = (high, low, first, period);
+	let _ = devstop_into_slice(out, input, Kernel::Avx2);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -688,11 +818,8 @@ pub unsafe fn devstop_row_avx512(
 	input: &DevStopInput,
 	out: &mut [f64],
 ) {
-	if period <= 32 {
-		devstop_row_avx512_short(high, low, first, period, input, out);
-	} else {
-		devstop_row_avx512_long(high, low, first, period, input, out);
-	}
+	let _ = (high, low, first, period);
+	let _ = devstop_into_slice(out, input, Kernel::Avx512);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -705,7 +832,8 @@ pub unsafe fn devstop_row_avx512_short(
 	input: &DevStopInput,
 	out: &mut [f64],
 ) {
-	devstop_row_scalar(high, low, first, period, input, out)
+	let _ = (high, low, first, period);
+	let _ = devstop_into_slice(out, input, Kernel::Avx512);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -718,7 +846,8 @@ pub unsafe fn devstop_row_avx512_long(
 	input: &DevStopInput,
 	out: &mut [f64],
 ) {
-	devstop_row_scalar(high, low, first, period, input, out)
+	let _ = (high, low, first, period);
+	let _ = devstop_into_slice(out, input, Kernel::Avx512);
 }
 
 #[derive(Debug, Clone)]
@@ -726,12 +855,19 @@ pub struct DevStopStream {
 	period: usize,
 	buffer_high: Vec<f64>,
 	buffer_low: Vec<f64>,
+	range_buffer: Vec<f64>,     // Store 2-bar range values
+	base_buffer: Vec<f64>,      // Store base values for final rolling extrema
+	prev_high: f64,              // Previous high for 2-bar range
+	prev_low: f64,               // Previous low for 2-bar range
 	mult: f64,
 	devtype: usize,
 	direction: String,
 	ma_type: String,
 	head: usize,
 	filled: bool,
+	warmup_counter: usize,       // Track warmup period
+	range_filled: bool,          // Track when range buffer is filled
+	base_filled: bool,           // Track when base buffer is filled
 }
 
 impl DevStopStream {
@@ -744,78 +880,515 @@ impl DevStopStream {
 			period,
 			buffer_high: vec![f64::NAN; period],
 			buffer_low: vec![f64::NAN; period],
+			range_buffer: vec![f64::NAN; period],
+			base_buffer: vec![f64::NAN; period],
+			prev_high: f64::NAN,
+			prev_low: f64::NAN,
 			mult: params.mult.unwrap_or(0.0),
 			devtype: params.devtype.unwrap_or(0),
 			direction: params.direction.unwrap_or_else(|| "long".to_string()),
 			ma_type: params.ma_type.unwrap_or_else(|| "sma".to_string()),
 			head: 0,
 			filled: false,
+			warmup_counter: 0,
+			range_filled: false,
+			base_filled: false,
 		})
 	}
 	pub fn update(&mut self, high: f64, low: f64) -> Option<f64> {
+		self.warmup_counter += 1;
+		
+		// Compute 2-bar range
+		let range = if !self.prev_high.is_nan() && !self.prev_low.is_nan() && !high.is_nan() && !low.is_nan() {
+			let high2 = if high > self.prev_high { high } else { self.prev_high };
+			let low2 = if low < self.prev_low { low } else { self.prev_low };
+			high2 - low2
+		} else {
+			f64::NAN
+		};
+		
+		// Store current as previous for next iteration
+		self.prev_high = high;
+		self.prev_low = low;
+		
+		// Store range in circular buffer
+		self.range_buffer[self.head] = range;
 		self.buffer_high[self.head] = high;
 		self.buffer_low[self.head] = low;
+		
 		self.head = (self.head + 1) % self.period;
 		if !self.filled && self.head == 0 {
 			self.filled = true;
 		}
-		if !self.filled {
+		if !self.range_filled && self.warmup_counter >= self.period + 1 {
+			self.range_filled = true;
+		}
+		
+		// Need at least period+1 for range MA calculation
+		if self.warmup_counter < self.period + 1 {
 			return None;
 		}
-		Some(self.compute())
+		
+		// Compute base value
+		let base = self.compute_base();
+		if base.is_nan() {
+			return None;
+		}
+		
+		// Store base in circular buffer
+		let base_idx = (self.warmup_counter - self.period - 1) % self.period;
+		self.base_buffer[base_idx] = base;
+		
+		if !self.base_filled && self.warmup_counter >= 2 * self.period {
+			self.base_filled = true;
+		}
+		
+		// Need full warmup period: first + 2*period - 1 where first=0 for streaming
+		let required_warmup = 2 * self.period - 1;
+		if self.warmup_counter < required_warmup {
+			return None;
+		}
+		
+		// Compute rolling extrema over base values
+		Some(self.compute_final())
 	}
-	fn compute(&self) -> f64 {
-		let mut buf_h = vec![0.0; self.period];
-		let mut buf_l = vec![0.0; self.period];
+	fn compute_base(&self) -> f64 {
+		// Extract range values in order
+		let mut range_ordered = vec![0.0; self.period];
+		let mut high_ordered = vec![0.0; self.period];
+		let mut low_ordered = vec![0.0; self.period];
 		let mut idx = self.head;
 		for i in 0..self.period {
-			buf_h[i] = self.buffer_high[idx];
-			buf_l[i] = self.buffer_low[idx];
+			range_ordered[i] = self.range_buffer[idx];
+			high_ordered[i] = self.buffer_high[idx];
+			low_ordered[i] = self.buffer_low[idx];
 			idx = (idx + 1) % self.period;
 		}
-		let high2 = *buf_h
-			.iter()
-			.max_by(|a, b| a.partial_cmp(b).unwrap())
-			.unwrap_or(&f64::NAN);
-		let low2 = *buf_l
-			.iter()
-			.min_by(|a, b| a.partial_cmp(b).unwrap())
-			.unwrap_or(&f64::NAN);
-		let range = high2 - low2;
-		let avtr = range;
-		let dev = match self.devtype {
+		
+		// Apply MA to range
+		let avtr = {
+			let input = MaData::Slice(&range_ordered);
+			match ma(&self.ma_type, input, self.period) {
+				Ok(ma_result) => ma_result,
+				Err(_) => return f64::NAN,
+			}
+		};
+		
+		// Get the last MA value
+		let avtr_value = avtr.last().copied().unwrap_or(f64::NAN);
+		if avtr_value.is_nan() {
+			return f64::NAN;
+		}
+		
+		// Compute deviation on range values
+		let dev_value = match self.devtype {
 			0 => {
-				let mean = (high2 + low2) / 2.0;
-				buf_h
+				// Standard deviation with sqrt
+				let mean = range_ordered.iter().sum::<f64>() / self.period as f64;
+				let variance = range_ordered
 					.iter()
-					.chain(buf_l.iter())
 					.map(|x| (x - mean).powi(2))
-					.sum::<f64>() / (2.0 * self.period as f64)
+					.sum::<f64>() / self.period as f64;
+				variance.sqrt()
 			}
 			1 => {
-				let mean = (high2 + low2) / 2.0;
-				buf_h.iter().chain(buf_l.iter()).map(|x| (x - mean).abs()).sum::<f64>() / (2.0 * self.period as f64)
+				// Mean absolute deviation
+				let mean = range_ordered.iter().sum::<f64>() / self.period as f64;
+				range_ordered
+					.iter()
+					.map(|x| (x - mean).abs())
+					.sum::<f64>() / self.period as f64
 			}
 			2 => {
-				let mut v = buf_h.clone();
-				v.extend_from_slice(&buf_l);
-				v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-				let mid = v.len() / 2;
-				if v.len() % 2 == 0 {
-					(v[mid - 1] + v[mid]) / 2.0
+				// Median absolute deviation (MAD)
+				let mut sorted = range_ordered.clone();
+				sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+				let median = if self.period % 2 == 0 {
+					(sorted[self.period / 2 - 1] + sorted[self.period / 2]) / 2.0
 				} else {
-					v[mid]
+					sorted[self.period / 2]
+				};
+				
+				// Compute absolute deviations from median
+				let mut abs_devs: Vec<f64> = range_ordered
+					.iter()
+					.map(|x| (x - median).abs())
+					.collect();
+				abs_devs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+				
+				// Return median of absolute deviations
+				if self.period % 2 == 0 {
+					(abs_devs[self.period / 2 - 1] + abs_devs[self.period / 2]) / 2.0
+				} else {
+					abs_devs[self.period / 2]
 				}
 			}
 			_ => f64::NAN,
 		};
+		
+		// Get most recent high/low
+		let current_high = high_ordered.last().copied().unwrap_or(f64::NAN);
+		let current_low = low_ordered.last().copied().unwrap_or(f64::NAN);
+		
+		// Compute base value
 		if self.direction.eq_ignore_ascii_case("long") {
-			high2 - avtr - self.mult * dev
+			// long: high - avtr - mult*dev
+			if current_high.is_nan() || avtr_value.is_nan() || dev_value.is_nan() {
+				f64::NAN
+			} else {
+				current_high - avtr_value - self.mult * dev_value
+			}
 		} else {
-			low2 + avtr + self.mult * dev
+			// short: low + avtr + mult*dev
+			if current_low.is_nan() || avtr_value.is_nan() || dev_value.is_nan() {
+				f64::NAN
+			} else {
+				current_low + avtr_value + self.mult * dev_value
+			}
+		}
+	}
+	
+	fn compute_final(&self) -> f64 {
+		// Compute rolling extrema over base values
+		if self.direction.eq_ignore_ascii_case("long") {
+			// For long: find max of base values
+			let mut max_base = f64::NEG_INFINITY;
+			for i in 0..self.period {
+				let val = self.base_buffer[i];
+				if !val.is_nan() && val > max_base {
+					max_base = val;
+				}
+			}
+			if max_base == f64::NEG_INFINITY {
+				f64::NAN
+			} else {
+				max_base
+			}
+		} else {
+			// For short: find min of base values
+			let mut min_base = f64::INFINITY;
+			for i in 0..self.period {
+				let val = self.base_buffer[i];
+				if !val.is_nan() && val < min_base {
+					min_base = val;
+				}
+			}
+			if min_base == f64::INFINITY {
+				f64::NAN
+			} else {
+				min_base
+			}
 		}
 	}
 }
+
+// Python bindings
+#[cfg(feature = "python")]
+#[pyfunction(name = "devstop")]
+#[pyo3(signature = (high, low, period, mult, devtype, direction, ma_type, kernel=None))]
+pub fn devstop_py<'py>(
+	py: Python<'py>,
+	high: PyReadonlyArray1<'py, f64>,
+	low:  PyReadonlyArray1<'py, f64>,
+	period: usize,
+	mult: f64,
+	devtype: usize,
+	direction: &str,
+	ma_type: &str,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+	let h = high.as_slice()?;
+	let l = low.as_slice()?;
+	if h.len() != l.len() { return Err(PyValueError::new_err("high/low length mismatch")); }
+
+	// Check for all NaN input early
+	if h.iter().all(|&x| x.is_nan()) && l.iter().all(|&x| x.is_nan()) {
+		return Err(PyValueError::new_err("All values are NaN"));
+	}
+	
+	// Validate period early
+	if period == 0 {
+		return Err(PyValueError::new_err("Invalid period"));
+	}
+	
+	let len = h.len();
+	if period > len {
+		return Err(PyValueError::new_err("Invalid period"));
+	}
+	
+	// Find first valid value
+	let fh = h.iter().position(|x| !x.is_nan());
+	let fl = l.iter().position(|x| !x.is_nan());
+	let first = match (fh, fl) {
+		(Some(h), Some(l)) => h.min(l),
+		_ => return Err(PyValueError::new_err("All values are NaN")),
+	};
+	
+	if len - first < period {
+		return Err(PyValueError::new_err("Not enough valid data"));
+	}
+
+	let params = DevStopParams {
+		period: Some(period),
+		mult: Some(mult),
+		devtype: Some(devtype),
+		direction: Some(direction.to_string()),
+		ma_type: Some(ma_type.to_string()),
+	};
+	let input = DevStopInput::from_slices(h, l, params);
+
+	let kern = validate_kernel(kernel, false)?;
+	let warm = devstop_warmup(first, period);
+
+	let out = unsafe { PyArray1::<f64>::new(py, [h.len()], false) };
+	let slice_out = unsafe { out.as_slice_mut()? };
+	// prefill warm prefix only
+	let slice_len = slice_out.len();
+	for v in &mut slice_out[..warm.min(slice_len)] { *v = f64::NAN; }
+
+	py.allow_threads(|| devstop_into_slice(slice_out, &input, kern))
+		.map_err(|e| {
+			let msg = e.to_string();
+			if msg.contains("InvalidPeriod") {
+				PyValueError::new_err("Invalid period")
+			} else if msg.contains("NotEnoughValidData") {
+				PyValueError::new_err("Not enough valid data")
+			} else if msg.contains("AllValuesNaN") {
+				PyValueError::new_err("All values are NaN")
+			} else {
+				PyValueError::new_err(msg)
+			}
+		})?;
+
+	Ok(out)
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "devstop_batch")]
+#[pyo3(signature = (high, low, period_range, mult_range, devtype_range, kernel=None))]
+pub fn devstop_batch_py<'py>(
+	py: Python<'py>,
+	high: PyReadonlyArray1<'py, f64>,
+	low:  PyReadonlyArray1<'py, f64>,
+	period_range: (usize, usize, usize),
+	mult_range:   (f64, f64, f64),
+	devtype_range:(usize, usize, usize),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+	use pyo3::types::PyDict;
+	let h = high.as_slice()?;
+	let l = low.as_slice()?;
+	if h.len() != l.len() { return Err(PyValueError::new_err("high/low length mismatch")); }
+
+	let sweep = DevStopBatchRange { period: period_range, mult: mult_range, devtype: devtype_range };
+	let kern = validate_kernel(kernel, true)?;
+
+	let combos = expand_grid_devstop(&sweep);
+	let rows = combos.len();
+	let cols = h.len();
+
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+	py.allow_threads(|| {
+		let k = match kern {
+			Kernel::Auto => detect_best_batch_kernel(),
+			k => k,
+		};
+		let simd = match k {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch => Kernel::Avx2,
+			Kernel::ScalarBatch => Kernel::Scalar,
+			_ => Kernel::Scalar,  // Default to Scalar for any other kernel
+		};
+		// Compute into `slice_out` directly:
+		for (row, combo) in combos.iter().enumerate() {
+			let start = row * cols;
+			let input = DevStopInput {
+				data: DevStopData::SliceHL(h, l),
+				params: combo.clone(),
+			};
+			let warm = {
+				let fh = h.iter().position(|x| !x.is_nan()).unwrap_or(0);
+				let fl = l.iter().position(|x| !x.is_nan()).unwrap_or(0);
+				devstop_warmup(fh.min(fl), combo.period.unwrap())
+			};
+			let dst = &mut slice_out[start..start+cols];
+			for v in &mut dst[..warm.min(cols)] { *v = f64::NAN; }
+			devstop_into_slice(dst, &input, simd).map_err(|e| format!("{}", e))?;
+		}
+		Ok::<(), String>(())
+	}).map_err(|e: String| PyValueError::new_err(e))?;
+
+	let d = PyDict::new(py);
+	d.set_item("values", out_arr.reshape((rows, cols))?)?;
+	d.set_item("periods", combos.iter().map(|p| p.period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+	d.set_item("mults",   combos.iter().map(|p| p.mult.unwrap()).collect::<Vec<_>>().into_pyarray(py))?;
+	d.set_item("devtypes",combos.iter().map(|p| p.devtype.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+	Ok(d)
+}
+
+// WASM bindings
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = devstop)]
+pub fn devstop_js(
+	high: &[f64],
+	low:  &[f64],
+	period: usize,
+	mult: f64,
+	devtype: usize,
+	direction: &str,
+	ma_type: &str,
+) -> Result<Vec<f64>, JsValue> {
+	if high.len() != low.len() { return Err(JsValue::from_str("length mismatch")); }
+	
+	// Check for all NaN input early
+	if high.iter().all(|&x| x.is_nan()) && low.iter().all(|&x| x.is_nan()) {
+		return Err(JsValue::from_str("All values are NaN"));
+	}
+	
+	// Validate period early
+	if period == 0 {
+		return Err(JsValue::from_str("Invalid period"));
+	}
+	
+	let len = high.len();
+	if period > len {
+		return Err(JsValue::from_str("Invalid period"));
+	}
+	
+	// Find first valid value
+	let fh = high.iter().position(|x| !x.is_nan());
+	let fl = low.iter().position(|x| !x.is_nan());
+	let first = match (fh, fl) {
+		(Some(h), Some(l)) => h.min(l),
+		_ => return Err(JsValue::from_str("All values are NaN")),
+	};
+	
+	if len - first < period {
+		return Err(JsValue::from_str("Not enough valid data"));
+	}
+	
+	let params = DevStopParams {
+		period: Some(period),
+		mult: Some(mult),
+		devtype: Some(devtype),
+		direction: Some(direction.to_string()),
+		ma_type: Some(ma_type.to_string()),
+	};
+	let input = DevStopInput::from_slices(high, low, params);
+	let mut out = vec![0.0; high.len()];
+	// In WASM, always use Scalar kernel since SIMD isn't available
+	let kernel = if cfg!(target_arch = "wasm32") {
+		Kernel::Scalar
+	} else {
+		detect_best_kernel()
+	};
+	devstop_into_slice(&mut out, &input, kernel).map_err(|e| {
+		// Convert error messages to match test expectations
+		let msg = e.to_string();
+		if msg.contains("InvalidPeriod") {
+			JsValue::from_str("Invalid period")
+		} else if msg.contains("NotEnoughValidData") {
+			JsValue::from_str("Not enough valid data")
+		} else if msg.contains("AllValuesNaN") {
+			JsValue::from_str("All values are NaN")
+		} else {
+			JsValue::from_str(&msg)
+		}
+	})?;
+	Ok(out)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn devstop_alloc(len: usize) -> *mut f64 {
+	let mut v = Vec::<f64>::with_capacity(len);
+	let p = v.as_mut_ptr();
+	std::mem::forget(v);
+	p
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn devstop_free(ptr:*mut f64, len:usize){ unsafe{ let _ = Vec::from_raw_parts(ptr, len, len); } }
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = devstop_into)]
+pub fn devstop_into_js(
+	high_ptr: *const f64,
+	low_ptr:  *const f64,
+	out_ptr:  *mut f64,
+	len: usize,
+	period: usize,
+	mult: f64,
+	devtype: usize,
+	direction: &str,
+	ma_type: &str,
+) -> Result<(), JsValue> {
+	if high_ptr.is_null() || low_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer"));
+	}
+	unsafe {
+		let h = std::slice::from_raw_parts(high_ptr, len);
+		let l = std::slice::from_raw_parts(low_ptr, len);
+		let out = std::slice::from_raw_parts_mut(out_ptr, len);
+		let params = DevStopParams {
+			period: Some(period),
+			mult: Some(mult),
+			devtype: Some(devtype),
+			direction: Some(direction.to_string()),
+			ma_type: Some(ma_type.to_string()),
+		};
+		let input = DevStopInput::from_slices(h, l, params);
+		// In WASM, always use Scalar kernel since SIMD isn't available
+		let kernel = if cfg!(target_arch = "wasm32") {
+			Kernel::Scalar
+		} else {
+			detect_best_kernel()
+		};
+		devstop_into_slice(out, &input, kernel).map_err(|e| JsValue::from_str(&e.to_string()))
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct DevStopBatchConfig {
+	pub period_range: (usize, usize, usize),
+	pub mult_range:   (f64, f64, f64),
+	pub devtype_range:(usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct DevStopBatchJsOutput {
+	pub values: Vec<f64>,
+	pub combos: Vec<DevStopParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = devstop_batch)]
+pub fn devstop_batch_unified_js(high:&[f64], low:&[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	if high.len() != low.len() { return Err(JsValue::from_str("length mismatch")); }
+	let cfg: DevStopBatchConfig = serde_wasm_bindgen::from_value(config)
+		.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	let sweep = DevStopBatchRange {
+		period: cfg.period_range, mult: cfg.mult_range, devtype: cfg.devtype_range
+	};
+	// In WASM, always use ScalarBatch kernel since SIMD isn't available
+	let kernel = if cfg!(target_arch = "wasm32") {
+		Kernel::ScalarBatch
+	} else {
+		detect_best_batch_kernel()
+	};
+	let out = devstop_batch_inner(high, low, &sweep, kernel, false)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	let js = DevStopBatchJsOutput { values: out.values, combos: out.combos, rows: out.rows, cols: out.cols };
+	serde_wasm_bindgen::to_value(&js).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;

@@ -12,8 +12,7 @@ import {
     assertClose,
     isNaN,
     assertAllNaN,
-    assertNoNaN,
-    EXPECTED_OUTPUTS 
+    assertNoNaN
 } from './test_utils.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -63,7 +62,15 @@ test('VWAP accuracy', () => {
     const prices = testData.high.map((h, i) => 
         (h + testData.low[i] + testData.close[i]) / 3.0
     );
-    const expected = EXPECTED_OUTPUTS.vwap;
+    
+    // Expected values from Rust test check_vwap_accuracy
+    const expectedLastFive = [
+        59353.05963230107,
+        59330.15815713043,
+        59289.94649532547,
+        59274.6155462414,
+        58730.0
+    ];
     
     const result = wasm.vwap_js(timestamps, volumes, prices, "1D", undefined);
     
@@ -71,7 +78,7 @@ test('VWAP accuracy', () => {
     
     // Check last 5 values match expected
     const last5 = result.slice(-5);
-    assertArrayClose(last5, expected.anchor1D, 1e-5, 'VWAP last 5 values mismatch');
+    assertArrayClose(last5, expectedLastFive, 1e-5, 'VWAP last 5 values mismatch');
 });
 
 test('VWAP anchor parsing error', () => {
@@ -343,6 +350,147 @@ test('VWAP batch_into API', () => {
         wasm.vwap_free(pricesPtr, len);
         wasm.vwap_free(outPtr, totalSize);
     }
+});
+
+test('VWAP all NaN input', () => {
+    // Test VWAP with all NaN values - should handle gracefully
+    const timestamps = Array.from({length: 100}, (_, i) => i * 1000);
+    const volumes = new Array(100).fill(100.0);
+    const allNaN = new Array(100).fill(NaN);
+    
+    // VWAP should produce all NaN output when prices are all NaN
+    const result = wasm.vwap_js(timestamps, volumes, allNaN);
+    assert.strictEqual(result.length, allNaN.length, 'Output length should match input');
+    assertAllNaN(result, 'Expected all NaN output for all NaN prices');
+});
+
+test('VWAP zero volume', () => {
+    // Test VWAP behavior with zero volume periods
+    const timestamps = testData.timestamp.slice(0, 100);
+    const prices = testData.close.slice(0, 100);
+    const volumes = [...testData.volume.slice(0, 100)];
+    
+    // Set some volumes to zero
+    for (let i = 10; i < 20; i++) {
+        volumes[i] = 0.0;
+    }
+    
+    const result = wasm.vwap_js(timestamps, volumes, prices);
+    assert.strictEqual(result.length, prices.length, 'Output length should match input');
+    
+    // VWAP should handle zero volumes gracefully
+    // Check that we have some valid values
+    let nonNanCount = 0;
+    for (let i = 0; i < result.length; i++) {
+        if (!isNaN(result[i])) {
+            nonNanCount++;
+        }
+    }
+    assert(nonNanCount > 0, 'Expected some valid VWAP values');
+});
+
+test('VWAP warmup period', () => {
+    // Test VWAP warmup period behavior for different anchors
+    const timestamps = testData.timestamp.slice(0, 100);
+    const volumes = testData.volume.slice(0, 100);
+    const prices = testData.close.slice(0, 100);
+    
+    // Test with minute anchor - should have values from start of first bucket
+    const result1m = wasm.vwap_js(timestamps, volumes, prices, "1m");
+    assert.strictEqual(result1m.length, prices.length, 'Output length should match input');
+    
+    // Test with day anchor - values start from first day boundary
+    const result1d = wasm.vwap_js(timestamps, volumes, prices, "1d");
+    assert.strictEqual(result1d.length, prices.length, 'Output length should match input');
+    
+    // Both should produce some non-NaN values
+    let nonNan1m = false;
+    let nonNan1d = false;
+    for (let i = 0; i < result1m.length; i++) {
+        if (!isNaN(result1m[i])) nonNan1m = true;
+        if (!isNaN(result1d[i])) nonNan1d = true;
+    }
+    assert(nonNan1m, 'Expected some valid values for 1m anchor');
+    assert(nonNan1d, 'Expected some valid values for 1d anchor');
+});
+
+test('VWAP volume weighting', () => {
+    // Test VWAP correctly weights by volume
+    // Create simple test case with known result
+    const baseTs = 1609459200000; // Jan 1, 2021 00:00:00 UTC
+    const timestamps = [baseTs, baseTs + 3600000, baseTs + 7200000];
+    const prices = [100.0, 200.0, 300.0];
+    const volumes = [1.0, 2.0, 3.0];
+    
+    const result = wasm.vwap_js(timestamps, volumes, prices, "1d");
+    
+    // Expected VWAP calculations:
+    // Index 0: 100*1 / 1 = 100
+    // Index 1: (100*1 + 200*2) / (1+2) = 500/3 = 166.67
+    // Index 2: (100*1 + 200*2 + 300*3) / (1+2+3) = 1400/6 = 233.33
+    const expected = [100.0, 500.0/3.0, 1400.0/6.0];
+    
+    assertArrayClose(result, expected, 1e-9, 'VWAP volume weighting incorrect');
+});
+
+test('VWAP batch multi-anchor', () => {
+    // Test VWAP batch with multiple anchor combinations
+    const timestamps = testData.timestamp.slice(0, 200);
+    const volumes = testData.volume.slice(0, 200);
+    const prices = testData.close.slice(0, 200);
+    
+    // Test range of anchors using new unified batch API
+    const result = wasm.vwap_batch(
+        timestamps,
+        volumes,
+        prices,
+        "1h", "4h", 1
+    );
+    
+    assert(result.values, 'Result should have values array');
+    assert(result.combos, 'Result should have combos array');
+    
+    // Should have 4 combinations: 1h, 2h, 3h, 4h
+    assert.strictEqual(result.rows, 4, 'Should have 4 rows');
+    assert.strictEqual(result.cols, prices.length, 'Cols should match input length');
+    
+    // Check combos contain expected anchors
+    const anchors = result.combos.map(c => c.anchor);
+    assert.deepStrictEqual(anchors, ["1h", "2h", "3h", "4h"], 'Anchors should match expected');
+    
+    // Verify first row (1h) against single calculation
+    const single1h = wasm.vwap_js(timestamps, volumes, prices, "1h");
+    const firstRow = result.values.slice(0, prices.length);
+    assertArrayClose(firstRow, single1h, 1e-9, "Batch 1h row doesn't match single calculation");
+    
+    // Verify last row (4h) against single calculation
+    const single4h = wasm.vwap_js(timestamps, volumes, prices, "4h");
+    const lastRowStart = 3 * prices.length;
+    const lastRow = result.values.slice(lastRowStart, lastRowStart + prices.length);
+    assertArrayClose(lastRow, single4h, 1e-9, "Batch 4h row doesn't match single calculation");
+});
+
+test('VWAP batch static anchor', () => {
+    // Test VWAP batch with static anchor (single value)
+    const timestamps = testData.timestamp.slice(0, 100);
+    const volumes = testData.volume.slice(0, 100);
+    const prices = testData.close.slice(0, 100);
+    
+    // Static anchor - step=0 means single value
+    const result = wasm.vwap_batch(
+        timestamps,
+        volumes,
+        prices,
+        "1d", "1d", 0
+    );
+    
+    assert.strictEqual(result.rows, 1, 'Should have 1 row');
+    assert.strictEqual(result.cols, prices.length, 'Cols should match input length');
+    assert.strictEqual(result.combos[0].anchor, "1d", 'Anchor should be 1d');
+    
+    // Should match single calculation
+    const single = wasm.vwap_js(timestamps, volumes, prices, "1d");
+    assertArrayClose(result.values, single, 1e-9, "Static batch doesn't match single calculation");
 });
 
 test.after(() => {

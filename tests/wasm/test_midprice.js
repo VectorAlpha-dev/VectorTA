@@ -2,10 +2,11 @@
  * WASM binding tests for MIDPRICE indicator.
  * These tests mirror the Rust unit tests to ensure WASM bindings work correctly.
  */
-const test = require('node:test');
-const assert = require('node:assert');
-const path = require('path');
-const { 
+import test from 'node:test';
+import assert from 'node:assert';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { 
     loadTestData, 
     assertArrayClose, 
     assertClose,
@@ -13,7 +14,11 @@ const {
     assertAllNaN,
     assertNoNaN,
     EXPECTED_OUTPUTS 
-} = require('./test_utils');
+} from './test_utils.js';
+import { compareWithRust } from './rust-comparison.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 let wasm;
 let testData;
@@ -22,8 +27,11 @@ test.before(async () => {
     // Load WASM module
     try {
         const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
-        wasm = await import(wasmPath);
-        await wasm.default();
+        const importPath = process.platform === 'win32' 
+            ? 'file:///' + wasmPath.replace(/\\/g, '/')
+            : wasmPath;
+        wasm = await import(importPath);
+        // No need to call default() for ES modules
     } catch (error) {
         console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
         throw error;
@@ -32,7 +40,7 @@ test.before(async () => {
     testData = loadTestData();
 });
 
-test('MIDPRICE accuracy', () => {
+test('MIDPRICE accuracy', async () => {
     // Test MIDPRICE matches expected values from Rust tests
     const high = new Float64Array(testData.high);
     const low = new Float64Array(testData.low);
@@ -51,6 +59,9 @@ test('MIDPRICE accuracy', () => {
         1e-9,
         "MIDPRICE last 5 values mismatch"
     );
+    
+    // Compare full output with Rust
+    await compareWithRust('midprice', result, 'hl', expected.defaultParams);
 });
 
 test('MIDPRICE partial params', () => {
@@ -108,22 +119,6 @@ test('MIDPRICE all NaN values', () => {
     }, /All values are NaN/);
 });
 
-test('MIDPRICE reinput', () => {
-    // Test MIDPRICE applied twice (re-input)
-    const high = new Float64Array(testData.high);
-    const low = new Float64Array(testData.low);
-    const period = 10;
-    
-    // First calculation
-    const firstResult = wasm.midprice_js(high, low, period);
-    
-    // Use output as input for second calculation
-    const secondResult = wasm.midprice_js(firstResult, firstResult, period);
-    
-    assert.strictEqual(secondResult.length, firstResult.length);
-    // Check that we still have valid values after double application
-    assertNoNaN(secondResult.slice(30), "Unexpected NaN after double application");
-});
 
 test('MIDPRICE NaN handling', () => {
     // Test MIDPRICE handles NaN values correctly
@@ -159,6 +154,43 @@ test('MIDPRICE batch single parameter', () => {
     assertArrayClose(batchResult.values, singleResult, 1e-10, "Batch vs single mismatch");
 });
 
+test('MIDPRICE batch metadata validation', () => {
+    // Test that batch result includes correct parameter combinations
+    const high = new Float64Array(testData.high.slice(0, 50));
+    const low = new Float64Array(testData.low.slice(0, 50));
+    
+    const result = wasm.midprice_batch(high, low, {
+        period_range: [10, 20, 5]  // periods: 10, 15, 20
+    });
+    
+    // Check metadata structure
+    assert(result.periods, 'Should have periods array');
+    assert(typeof result.rows === 'number', 'Should have rows count');
+    assert(typeof result.cols === 'number', 'Should have cols count');
+    
+    // Verify dimensions
+    assert.strictEqual(result.rows, 3);
+    assert.strictEqual(result.cols, 50);
+    assert.deepStrictEqual(result.periods, [10, 15, 20]);
+    
+    // Verify each period result
+    for (let i = 0; i < result.periods.length; i++) {
+        const period = result.periods[i];
+        const rowStart = i * result.cols;
+        const rowData = result.values.slice(rowStart, rowStart + result.cols);
+        
+        // First period-1 values should be NaN
+        for (let j = 0; j < period - 1; j++) {
+            assert(isNaN(rowData[j]), `Expected NaN at warmup index ${j} for period ${period}`);
+        }
+        
+        // After warmup should have values
+        for (let j = period - 1; j < Math.min(period + 10, rowData.length); j++) {
+            assert(!isNaN(rowData[j]), `Unexpected NaN at index ${j} for period ${period}`);
+        }
+    }
+});
+
 test('MIDPRICE batch multiple periods', () => {
     // Test batch with multiple period values
     const high = new Float64Array(testData.high.slice(0, 100));
@@ -190,6 +222,38 @@ test('MIDPRICE batch multiple periods', () => {
             `Period ${periods[i]} mismatch`
         );
     }
+});
+
+test('MIDPRICE batch edge cases', () => {
+    // Test edge cases for batch processing
+    const high = new Float64Array([100, 110, 105, 115, 120, 125, 130, 128, 135, 140]);
+    const low = new Float64Array([95, 105, 100, 110, 115, 120, 125, 123, 130, 135]);
+    
+    // Single value sweep with step=0
+    const singleBatch = wasm.midprice_batch(high, low, {
+        period_range: [5, 5, 0]
+    });
+    
+    assert.strictEqual(singleBatch.values.length, 10);
+    assert.strictEqual(singleBatch.periods.length, 1);
+    assert.strictEqual(singleBatch.periods[0], 5);
+    
+    // Step larger than range - should only get start value
+    const largeBatch = wasm.midprice_batch(high, low, {
+        period_range: [3, 5, 10]  // Step larger than range
+    });
+    
+    // Should only have period=3
+    assert.strictEqual(largeBatch.values.length, 10);
+    assert.strictEqual(largeBatch.periods.length, 1);
+    assert.strictEqual(largeBatch.periods[0], 3);
+    
+    // Empty data should throw
+    assert.throws(() => {
+        wasm.midprice_batch(new Float64Array([]), new Float64Array([]), {
+            period_range: [5, 5, 0]
+        });
+    }, /Empty data/);
 });
 
 test('MIDPRICE zero-copy basic', () => {

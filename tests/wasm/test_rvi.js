@@ -130,7 +130,8 @@ test('RVI all NaN input', () => {
 
 test('RVI not enough valid data', () => {
     // Test RVI with not enough valid data - mirrors check_rvi_not_enough_valid_data
-    const data = new Float64Array([NaN, 1.0, 2.0, 3.0]);
+    // Create a dataset with enough total length but not enough valid data after first NaN
+    const data = new Float64Array([NaN, NaN, NaN, 1.0, 2.0, 3.0, 4.0, 5.0]);
     
     assert.throws(() => {
         wasm.rvi_js(data, 3, 5, 1, 0);
@@ -158,7 +159,9 @@ test('RVI batch single parameter set', () => {
         devtype_range: [0, 0, 0]
     };
     
-    const batchResult = wasm.rvi_batch(close, config);
+    const batchResultMap = wasm.rvi_batch(close, config);
+    // Convert Map to object for easier access
+    const batchResult = Object.fromEntries(batchResultMap);
     const singleResult = wasm.rvi_js(close, 10, 14, 1, 0);
     
     assert.strictEqual(batchResult.rows, 1);
@@ -186,7 +189,8 @@ test('RVI batch multiple periods', () => {
         devtype_range: [0, 0, 0]
     };
     
-    const batchResult = wasm.rvi_batch(close, config);
+    const batchResultMap = wasm.rvi_batch(close, config);
+    const batchResult = Object.fromEntries(batchResultMap);
     
     // Should have 3 rows * 100 cols
     assert.strictEqual(batchResult.rows, 3);
@@ -222,7 +226,8 @@ test('RVI batch full parameter sweep', () => {
         devtype_range: [0, 1, 1]     // 2 devtypes
     };
     
-    const batchResult = wasm.rvi_batch(close, config);
+    const batchResultMap = wasm.rvi_batch(close, config);
+    const batchResult = Object.fromEntries(batchResultMap);
     
     // Should have 3 * 2 * 2 * 2 = 24 combinations
     assert.strictEqual(batchResult.rows, 24);
@@ -300,6 +305,7 @@ test('RVI zero-copy API', () => {
     } finally {
         // Clean up
         wasm.rvi_free(inPtr, len);
+        wasm.rvi_free(inPtr, len);
         wasm.rvi_free(outPtr, len);
     }
 });
@@ -315,7 +321,11 @@ test('RVI zero-copy in-place', () => {
     try {
         // Copy input data to WASM memory
         const wasmData = new Float64Array(wasm.__wasm.memory.buffer, ptr, len);
+        const wasmData = new Float64Array(wasm.__wasm.memory.buffer, ptr, len);
         wasmData.set(data);
+        
+        // Get expected result before overwriting
+        const expected = wasm.rvi_js(data, 10, 14, 1, 0);
         
         // Call with same pointer for input and output (in-place)
         wasm.rvi_into(
@@ -329,7 +339,6 @@ test('RVI zero-copy in-place', () => {
         const wasmDataAfter = new Float64Array(wasm.__wasm.memory.buffer, ptr, len);
         
         // Compare with JS version
-        const expected = wasm.rvi_js(data, 10, 14, 1, 0);
         assertArrayClose(
             Array.from(wasmDataAfter),
             expected,

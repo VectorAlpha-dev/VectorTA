@@ -28,8 +28,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
-use crate::indicators::ema::{ema, EmaError, EmaInput, EmaOutput, EmaParams};
-use crate::indicators::mom::{mom, MomError, MomInput, MomOutput, MomParams};
+use crate::indicators::ema::{EmaError, EmaParams, EmaStream};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -37,7 +36,6 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -199,8 +197,72 @@ pub enum TsiError {
 	NotEnoughValidData { needed: usize, valid: usize },
 	#[error("tsi: EMA sub-error: {0}")]
 	EmaSubError(#[from] EmaError),
-	#[error("tsi: MOM sub-error: {0}")]
-	MomSubError(#[from] MomError),
+}
+
+#[inline(always)]
+fn tsi_prepare<'a>(
+	input: &'a TsiInput,
+) -> Result<(&'a [f64], usize, usize, usize), TsiError> {
+	let data: &[f64] = input.as_ref();
+	let len = data.len();
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(TsiError::AllValuesNaN)?;
+	let long = input.get_long_period();
+	let short = input.get_short_period();
+
+	if long == 0 || short == 0 || long > len || short > len {
+		return Err(TsiError::InvalidPeriod { long_period: long, short_period: short, data_len: len });
+	}
+	let needed = 1 + long + short;
+	if len - first < needed {
+		return Err(TsiError::NotEnoughValidData { needed, valid: len - first });
+	}
+
+	Ok((data, long, short, first))
+}
+
+#[inline(always)]
+fn tsi_compute_into_streaming(
+	data: &[f64],
+	long: usize,
+	short: usize,
+	first: usize,
+	out: &mut [f64],
+) -> Result<(), TsiError> {
+	let mut ema_long_num = EmaStream::try_new(EmaParams { period: Some(long) })?;
+	let mut ema_short_num = EmaStream::try_new(EmaParams { period: Some(short) })?;
+	let mut ema_long_den = EmaStream::try_new(EmaParams { period: Some(long) })?;
+	let mut ema_short_den = EmaStream::try_new(EmaParams { period: Some(short) })?;
+
+	let warmup_end = first + long + short;
+	if out.len() != data.len() { return Err(TsiError::InvalidPeriod { long_period: out.len(), short_period: 0, data_len: data.len() }); }
+
+	// keep prefix NaNs; start from first+1 because mom needs previous
+	if first + 1 >= data.len() { return Ok(()); }
+	let mut prev = data[first];
+
+	for i in (first + 1)..data.len() {
+		let cur = data[i];
+		if !cur.is_finite() { continue; }  // skip NaN/inf without poisoning prev
+		
+		let m = cur - prev;
+		prev = cur;
+
+		// numerator path
+		let n1 = match ema_long_num.update(m) { Some(v) => v, None => { continue; } };
+		let n2 = match ema_short_num.update(n1) { Some(v) => v, None => { continue; } };
+
+		// denominator path
+		let d1 = match ema_long_den.update(m.abs()) { Some(v) => v, None => { continue; } };
+		let d2 = match ema_short_den.update(d1) { Some(v) => v, None => { continue; } };
+
+		// Always compute TSI when we have both EMAs, but respect warmup
+		if i >= warmup_end {
+			out[i] = if d2 == 0.0 { f64::NAN } else { 100.0 * (n2 / d2) };
+		}
+	}
+
+	// NaNs already set by alloc_with_nan_prefix or by caller
+	Ok(())
 }
 
 #[inline]
@@ -208,150 +270,39 @@ pub fn tsi(input: &TsiInput) -> Result<TsiOutput, TsiError> {
 	tsi_with_kernel(input, Kernel::Auto)
 }
 
-pub fn tsi_with_kernel(input: &TsiInput, kernel: Kernel) -> Result<TsiOutput, TsiError> {
-	let data: &[f64] = match &input.data {
-		TsiData::Candles { candles, source } => source_type(candles, source),
-		TsiData::Slice(sl) => sl,
-	};
-
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(TsiError::AllValuesNaN)?;
-	let len = data.len();
-	let long = input.get_long_period();
-	let short = input.get_short_period();
-
-	if long == 0 || short == 0 || long > len || short > len {
-		return Err(TsiError::InvalidPeriod {
-			long_period: long,
-			short_period: short,
-			data_len: len,
-		});
-	}
-	let needed = 1 + long + short;
-	if (len - first) < needed {
-		return Err(TsiError::NotEnoughValidData {
-			needed,
-			valid: len - first,
-		});
-	}
-
-	let chosen = match kernel {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
-
-	unsafe {
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => tsi_scalar(data, long, short, first),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => tsi_avx2(data, long, short, first),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => tsi_avx512(data, long, short, first),
-			_ => unreachable!(),
-		}
-	}
+pub fn tsi_with_kernel(input: &TsiInput, _kernel: Kernel) -> Result<TsiOutput, TsiError> {
+	let (data, long, short, first) = tsi_prepare(input)?;
+	let warmup_end = first + long + short;
+	let mut out = alloc_with_nan_prefix(data.len(), warmup_end);
+	// no SIMD specialization here; streams are scalar
+	tsi_compute_into_streaming(data, long, short, first, &mut out)?;
+	Ok(TsiOutput { values: out })
 }
 
 #[inline]
-pub fn tsi_into_slice(dst: &mut [f64], input: &TsiInput, kern: Kernel) -> Result<(), TsiError> {
-	let data: &[f64] = match &input.data {
-		TsiData::Candles { candles, source } => source_type(candles, source),
-		TsiData::Slice(sl) => sl,
-	};
-
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(TsiError::AllValuesNaN)?;
-	let len = data.len();
-	let long = input.get_long_period();
-	let short = input.get_short_period();
-
-	if dst.len() != data.len() {
-		return Err(TsiError::InvalidPeriod {
-			long_period: dst.len(),
-			short_period: 0,
-			data_len: data.len(),
-		});
-	}
-
-	if long == 0 || short == 0 || long > len || short > len {
-		return Err(TsiError::InvalidPeriod {
-			long_period: long,
-			short_period: short,
-			data_len: len,
-		});
-	}
-	let needed = 1 + long + short;
-	if (len - first) < needed {
-		return Err(TsiError::NotEnoughValidData {
-			needed,
-			valid: len - first,
-		});
-	}
-
-	let chosen = match kern {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
-
-	// Compute TSI using existing kernels
-	let result = unsafe {
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => tsi_scalar(data, long, short, first),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => tsi_avx2(data, long, short, first),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => tsi_avx512(data, long, short, first),
-			_ => unreachable!(),
-		}
-	}?;
-
-	// Copy result to destination
-	dst.copy_from_slice(&result.values);
-
+pub fn tsi_into_slice(dst: &mut [f64], input: &TsiInput, _kern: Kernel) -> Result<(), TsiError> {
+	let (data, long, short, first) = tsi_prepare(input)?;
+	let warmup_end = first + long + short;
+	// Caller's buffer may not have NaNs set, so set them
+	let end = warmup_end.min(dst.len());
+	for v in &mut dst[..end] { *v = f64::NAN; }
+	tsi_compute_into_streaming(data, long, short, first, dst)?;
 	Ok(())
 }
 
+// Keep these stubs for compatibility but have them use the streaming version
 #[inline]
 pub unsafe fn tsi_scalar(data: &[f64], long: usize, short: usize, first: usize) -> Result<TsiOutput, TsiError> {
-	let warmup_period = first + 1 + long + short - 1;
-	let mut out = alloc_with_nan_prefix(data.len(), warmup_period);
-
-	let mom_input = MomInput::from_slice(&data[first..], MomParams { period: Some(1) });
-	let mom_output: MomOutput = mom(&mom_input)?;
-	
-	// Avoid allocation by computing abs_mom on the fly when needed
-	let mut abs_mom = alloc_with_nan_prefix(mom_output.values.len(), 0);
-	for (i, &v) in mom_output.values.iter().enumerate() {
-		abs_mom[i] = if v.is_nan() { f64::NAN } else { v.abs() };
-	}
-
-	let ema_long_numer = EmaInput::from_slice(&mom_output.values, EmaParams { period: Some(long) });
-	let ema_long_numer: EmaOutput = ema(&ema_long_numer)?;
-
-	let ema_short_numer = EmaInput::from_slice(&ema_long_numer.values, EmaParams { period: Some(short) });
-	let ema_short_numer: EmaOutput = ema(&ema_short_numer)?;
-
-	let ema_long_denom = EmaInput::from_slice(&abs_mom, EmaParams { period: Some(long) });
-	let ema_long_denom: EmaOutput = ema(&ema_long_denom)?;
-
-	let ema_short_denom = EmaInput::from_slice(&ema_long_denom.values, EmaParams { period: Some(short) });
-	let ema_short_denom: EmaOutput = ema(&ema_short_denom)?;
-
-	for i in first..data.len() {
-		let idx = i - first;
-		let numer = ema_short_numer.values[idx];
-		let denom = ema_short_denom.values[idx];
-		if numer.is_nan() || denom.is_nan() || denom == 0.0 {
-			out[i] = f64::NAN;
-		} else {
-			out[i] = 100.0 * (numer / denom);
-		}
-	}
+	let warmup_end = first + long + short;
+	let mut out = alloc_with_nan_prefix(data.len(), warmup_end);
+	tsi_compute_into_streaming(data, long, short, first, &mut out)?;
 	Ok(TsiOutput { values: out })
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn tsi_avx2(data: &[f64], long: usize, short: usize, first: usize) -> Result<TsiOutput, TsiError> {
-	// Stub, use scalar
+	// Stub, use streaming
 	tsi_scalar(data, long, short, first)
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -367,13 +318,13 @@ pub unsafe fn tsi_avx512(data: &[f64], long: usize, short: usize, first: usize) 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn tsi_avx512_short(data: &[f64], long: usize, short: usize, first: usize) -> Result<TsiOutput, TsiError> {
-	// Stub, use scalar
+	// Stub, use streaming
 	tsi_scalar(data, long, short, first)
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn tsi_avx512_long(data: &[f64], long: usize, short: usize, first: usize) -> Result<TsiOutput, TsiError> {
-	// Stub, use scalar
+	// Stub, use streaming
 	tsi_scalar(data, long, short, first)
 }
 
@@ -384,11 +335,10 @@ pub struct TsiStream {
 	short: usize,
 	buffer: Vec<f64>,
 	idx: usize,
-	filled: bool,
-	ema_long_num: crate::indicators::ema::EmaStream,
-	ema_short_num: crate::indicators::ema::EmaStream,
-	ema_long_den: crate::indicators::ema::EmaStream,
-	ema_short_den: crate::indicators::ema::EmaStream,
+	ema_long_num: EmaStream,
+	ema_short_num: EmaStream,
+	ema_long_den: EmaStream,
+	ema_short_den: EmaStream,
 }
 impl TsiStream {
 	pub fn try_new(params: TsiParams) -> Result<Self, TsiError> {
@@ -399,11 +349,10 @@ impl TsiStream {
 			short,
 			buffer: vec![f64::NAN; 1], // Small buffer, OK
 			idx: 0,
-			filled: false,
-			ema_long_num: crate::indicators::ema::EmaStream::try_new(EmaParams { period: Some(long) })?,
-			ema_short_num: crate::indicators::ema::EmaStream::try_new(EmaParams { period: Some(short) })?,
-			ema_long_den: crate::indicators::ema::EmaStream::try_new(EmaParams { period: Some(long) })?,
-			ema_short_den: crate::indicators::ema::EmaStream::try_new(EmaParams { period: Some(short) })?,
+			ema_long_num: EmaStream::try_new(EmaParams { period: Some(long) })?,
+			ema_short_num: EmaStream::try_new(EmaParams { period: Some(short) })?,
+			ema_long_den: EmaStream::try_new(EmaParams { period: Some(long) })?,
+			ema_short_den: EmaStream::try_new(EmaParams { period: Some(short) })?,
 		})
 	}
 	#[inline(always)]
@@ -575,9 +524,9 @@ fn tsi_batch_inner(
 	let combos = expand_grid(sweep);
 	if combos.is_empty() {
 		return Err(TsiError::InvalidPeriod {
-			long_period: 0,
-			short_period: 0,
-			data_len: 0,
+			long_period: sweep.long_period.0,
+			short_period: sweep.short_period.0,
+			data_len: data.len(),
 		});
 	}
 
@@ -609,16 +558,18 @@ fn tsi_batch_inner(
 		core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len()) 
 	};
 
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+	let do_row = |row: usize, out_row: &mut [f64]| {
 		let p = &combos[row];
+		let l = p.long_period.unwrap();
+		let s = p.short_period.unwrap();
 		match kern {
-			Kernel::Scalar => tsi_row_scalar(data, p.long_period.unwrap(), p.short_period.unwrap(), first, out_row),
+			Kernel::Scalar => unsafe { tsi_row_scalar_into(data, l, s, first, out_row) },
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => tsi_row_avx2(data, p.long_period.unwrap(), p.short_period.unwrap(), first, out_row),
+			Kernel::Avx2 => unsafe { tsi_row_avx2_into(data, l, s, first, out_row) },
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => tsi_row_avx512(data, p.long_period.unwrap(), p.short_period.unwrap(), first, out_row),
+			Kernel::Avx512 => unsafe { tsi_row_avx512_into(data, l, s, first, out_row) },
 			_ => unreachable!(),
-		}
+		}.unwrap();
 	};
 
 	if parallel {
@@ -670,9 +621,9 @@ fn tsi_batch_inner_into(
 	let combos = expand_grid(sweep);
 	if combos.is_empty() {
 		return Err(TsiError::InvalidPeriod {
-			long_period: 0,
-			short_period: 0,
-			data_len: 0,
+			long_period: sweep.long_period.0,
+			short_period: sweep.short_period.0,
+			data_len: data.len(),
 		});
 	}
 
@@ -690,16 +641,18 @@ fn tsi_batch_inner_into(
 	let rows = combos.len();
 	let cols = data.len();
 
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+	let do_row = |row: usize, out_row: &mut [f64]| {
 		let p = &combos[row];
+		let l = p.long_period.unwrap();
+		let s = p.short_period.unwrap();
 		match kern {
-			Kernel::Scalar => tsi_row_scalar(data, p.long_period.unwrap(), p.short_period.unwrap(), first, out_row),
+			Kernel::Scalar => unsafe { tsi_row_scalar_into(data, l, s, first, out_row) },
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => tsi_row_avx2(data, p.long_period.unwrap(), p.short_period.unwrap(), first, out_row),
+			Kernel::Avx2 => unsafe { tsi_row_avx2_into(data, l, s, first, out_row) },
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => tsi_row_avx512(data, p.long_period.unwrap(), p.short_period.unwrap(), first, out_row),
+			Kernel::Avx512 => unsafe { tsi_row_avx512_into(data, l, s, first, out_row) },
 			_ => unreachable!(),
-		}
+		}.unwrap();
 	};
 
 	if parallel {
@@ -725,36 +678,21 @@ fn tsi_batch_inner_into(
 }
 
 #[inline(always)]
-pub unsafe fn tsi_row_scalar(data: &[f64], long: usize, short: usize, first: usize, out: &mut [f64]) {
-	let r = tsi_scalar(data, long, short, first).unwrap();
-	out.copy_from_slice(&r.values);
+pub unsafe fn tsi_row_scalar_into(data: &[f64], long: usize, short: usize, first: usize, out_row: &mut [f64]) -> Result<(), TsiError> {
+	// out_row length equals data.len(); NaN prefixes already set by init_matrix_prefixes
+	tsi_compute_into_streaming(data, long, short, first, out_row)
 }
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-pub unsafe fn tsi_row_avx2(data: &[f64], long: usize, short: usize, first: usize, out: &mut [f64]) {
-	let r = tsi_avx2(data, long, short, first).unwrap();
-	out.copy_from_slice(&r.values);
+pub unsafe fn tsi_row_avx2_into(data: &[f64], long: usize, short: usize, first: usize, out_row: &mut [f64]) -> Result<(), TsiError> {
+	tsi_compute_into_streaming(data, long, short, first, out_row)
 }
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-pub unsafe fn tsi_row_avx512(data: &[f64], long: usize, short: usize, first: usize, out: &mut [f64]) {
-	if long <= 32 && short <= 32 {
-		tsi_row_avx512_short(data, long, short, first, out);
-	} else {
-		tsi_row_avx512_long(data, long, short, first, out);
-	}
-}
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
-pub unsafe fn tsi_row_avx512_short(data: &[f64], long: usize, short: usize, first: usize, out: &mut [f64]) {
-	let r = tsi_avx512_short(data, long, short, first).unwrap();
-	out.copy_from_slice(&r.values);
-}
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
-pub unsafe fn tsi_row_avx512_long(data: &[f64], long: usize, short: usize, first: usize, out: &mut [f64]) {
-	let r = tsi_avx512_long(data, long, short, first).unwrap();
-	out.copy_from_slice(&r.values);
+pub unsafe fn tsi_row_avx512_into(data: &[f64], long: usize, short: usize, first: usize, out_row: &mut [f64]) -> Result<(), TsiError> {
+	tsi_compute_into_streaming(data, long, short, first, out_row)
 }
 
 #[cfg(test)]
@@ -1742,7 +1680,13 @@ pub fn tsi_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
 		short_period: config.short_period_range,
 	};
 
-	let result = tsi_batch_slice(data, &sweep, Kernel::Auto)
+	// For WASM, use scalar kernel
+	let kernel = if cfg!(target_arch = "wasm32") {
+		Kernel::Scalar
+	} else {
+		detect_best_kernel()
+	};
+	let result = tsi_batch_slice(data, &sweep, kernel)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	let js_output = TsiBatchJsOutput {
@@ -1789,7 +1733,13 @@ pub fn tsi_batch_into(
 		let out_slice = std::slice::from_raw_parts_mut(out_ptr, total_size);
 
 		// Use the batch_inner_into function to compute directly into output
-		match tsi_batch_inner_into(data, &sweep, Kernel::Auto, false, out_slice) {
+		// For WASM, use scalar kernel
+		let kernel = if cfg!(target_arch = "wasm32") {
+			Kernel::Scalar
+		} else {
+			detect_best_kernel()
+		};
+		match tsi_batch_inner_into(data, &sweep, kernel, false, out_slice) {
 			Ok(_) => Ok(rows),
 			Err(e) => Err(JsValue::from_str(&e.to_string())),
 		}

@@ -17,14 +17,11 @@
 //! ## Returns
 //! - **`Ok(CkspOutput)`** on success, containing two `Vec<f64>` of length matching the input
 //! - **`Err(CkspError)`** otherwise
-use crate::utilities::data_loader::{source_type, Candles};
+use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
 	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
-use aligned_vec::{AVec, CACHELINE_ALIGN};
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
@@ -261,19 +258,22 @@ pub fn cksp_with_kernel(input: &CkspInput, kernel: Kernel) -> Result<CkspOutput,
 	let p = input.get_p();
 	let x = input.get_x();
 	let q = input.get_q();
-	let size = close.len();
-
-	if size == 0 {
-		return Err(CkspError::NoData);
-	}
+	
+	// Validate parameters first (before data checks)
 	if p == 0 || q == 0 {
 		return Err(CkspError::InvalidParam { param: "p/q" });
 	}
-	if p > size || q > size {
-		return Err(CkspError::NotEnoughData { p, q, data_len: size });
-	}
 	if !(x.is_finite()) || x.is_nan() {
 		return Err(CkspError::InvalidParam { param: "x" });
+	}
+	
+	// Now check data
+	let size = close.len();
+	if size == 0 {
+		return Err(CkspError::NoData);
+	}
+	if p > size || q > size {
+		return Err(CkspError::NotEnoughData { p, q, data_len: size });
 	}
 
 	let first_valid_idx = match close.iter().position(|&v| !v.is_nan()) {
@@ -296,6 +296,54 @@ pub fn cksp_with_kernel(input: &CkspInput, kernel: Kernel) -> Result<CkspOutput,
 			_ => unreachable!(),
 		}
 	}
+}
+
+#[inline]
+pub fn cksp_into_slices(
+	out_long: &mut [f64],
+	out_short: &mut [f64],
+	input: &CkspInput,
+	kern: Kernel,
+) -> Result<(), CkspError> {
+	// Resolve inputs
+	let (high, low, close) = match &input.data {
+		CkspData::Candles { candles } => (
+			candles.select_candle_field("high").map_err(|e| CkspError::CandleFieldError(e.to_string()))?,
+			candles.select_candle_field("low").map_err(|e| CkspError::CandleFieldError(e.to_string()))?,
+			candles.select_candle_field("close").map_err(|e| CkspError::CandleFieldError(e.to_string()))?,
+		),
+		CkspData::Slices { high, low, close } => (*high, *low, *close),
+	};
+	if high.len() != low.len() || low.len() != close.len() {
+		return Err(CkspError::InconsistentLengths);
+	}
+	if out_long.len() != close.len() || out_short.len() != close.len() {
+		return Err(CkspError::InconsistentLengths);  // Fixed: was NotEnoughData
+	}
+
+	let p = input.get_p();
+	let q = input.get_q();
+	let x = input.get_x();
+	if p == 0 || q == 0 { return Err(CkspError::InvalidParam { param: "p/q" }); }
+	if !x.is_finite() { return Err(CkspError::InvalidParam { param: "x" }); }
+
+	let first_valid = close.iter().position(|v| !v.is_nan()).ok_or(CkspError::NoData)?;
+	let chosen = match kern { Kernel::Auto => detect_best_kernel(), k => k };
+
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch =>
+				cksp_row_scalar(high, low, close, p, x, q, first_valid, out_long, out_short),
+			#[cfg(all(feature="nightly-avx", target_arch="x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch =>
+				cksp_row_avx2(high, low, close, p, x, q, first_valid, out_long, out_short),
+			#[cfg(all(feature="nightly-avx", target_arch="x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch =>
+				cksp_row_avx512(high, low, close, p, x, q, first_valid, out_long, out_short),
+			_ => unreachable!(),
+		}
+	}
+	Ok(())
 }
 
 // ========================= Scalar Logic =========================
@@ -708,7 +756,6 @@ pub unsafe fn cksp_row_avx512_long(
 
 // ========================= Stream API =========================
 
-use crate::indicators::atr::{AtrParams, AtrStream};
 use std::collections::VecDeque;
 
 #[derive(Debug, Clone)]
@@ -2312,6 +2359,15 @@ fn cksp_prepare(
 	q: usize,
 	kernel: Kernel,
 ) -> Result<(usize, Kernel), CkspError> {
+	// Validate parameters first (before data checks)
+	if p == 0 || q == 0 {
+		return Err(CkspError::InvalidParam { param: "p/q" });
+	}
+	if !x.is_finite() || x.is_nan() {
+		return Err(CkspError::InvalidParam { param: "x" });
+	}
+	
+	// Now check data
 	let size = close.len();
 	if size == 0 {
 		return Err(CkspError::NoData);
@@ -2319,14 +2375,8 @@ fn cksp_prepare(
 	if high.len() != low.len() || low.len() != close.len() {
 		return Err(CkspError::InconsistentLengths);
 	}
-	if p == 0 || q == 0 {
-		return Err(CkspError::InvalidParam { param: "p/q" });
-	}
 	if p > size || q > size {
 		return Err(CkspError::NotEnoughData { p, q, data_len: size });
-	}
-	if !x.is_finite() || x.is_nan() {
-		return Err(CkspError::InvalidParam { param: "x" });
 	}
 	
 	let first_valid_idx = match close.iter().position(|&v| !v.is_nan()) {
@@ -2435,20 +2485,17 @@ fn cksp_batch_inner_into(
 
 	let rows = combos.len();
 	let cols = size;
+	if long_out.len() != rows * cols || short_out.len() != rows * cols {
+		return Err(CkspError::NotEnoughData { p: 0, q: 0, data_len: cols });
+	}
 
-	// Calculate warmup periods for each row
-	let warmup_periods: Vec<usize> = combos
-		.iter()
-		.map(|c| first_valid + c.p.unwrap() + c.q.unwrap() - 1)
-		.collect();
-
-	// Initialize NaN prefixes for each row
-	for (row, &warmup) in warmup_periods.iter().enumerate() {
-		let row_start = row * cols;
-		for i in 0..warmup.min(cols) {
-			long_out[row_start + i] = f64::NAN;
-			short_out[row_start + i] = f64::NAN;
-		}
+	// Initialize warm prefixes in-place via MaybeUninit view (debug poison supported)
+	unsafe {
+		let mut long_mu = core::slice::from_raw_parts_mut(long_out.as_mut_ptr() as *mut MaybeUninit<f64>, long_out.len());
+		let mut short_mu = core::slice::from_raw_parts_mut(short_out.as_mut_ptr() as *mut MaybeUninit<f64>, short_out.len());
+		let warm: Vec<usize> = combos.iter().map(|c| first_valid + c.p.unwrap() + c.q.unwrap() - 1).collect();
+		init_matrix_prefixes(&mut long_mu, cols, &warm);
+		init_matrix_prefixes(&mut short_mu, cols, &warm);
 	}
 
 	let do_row = |row: usize, out_long: &mut [f64], out_short: &mut [f64]| unsafe {
@@ -2533,26 +2580,6 @@ pub fn cksp_batch_py<'py>(
 	let short_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
 	let long_slice = unsafe { long_arr.as_slice_mut()? };
 	let short_slice = unsafe { short_arr.as_slice_mut()? };
-	
-	// Find first valid index
-	let first = close_slice
-		.iter()
-		.position(|&x| !x.is_nan())
-		.unwrap_or(0);
-	
-	// Calculate warmup periods for each row and initialize NaN prefixes
-	let warmup_periods: Vec<usize> = combos.iter().map(|c| {
-		first + c.p.unwrap() + c.q.unwrap() - 1
-	}).collect();
-	
-	// Initialize NaN prefixes for both arrays
-	for (row_idx, &warmup) in warmup_periods.iter().enumerate() {
-		let row_start = row_idx * cols;
-		for col_idx in 0..warmup.min(cols) {
-			long_slice[row_start + col_idx] = f64::NAN;
-			short_slice[row_start + col_idx] = f64::NAN;
-		}
-	}
 	
 	// Compute without GIL
 	let combos = py.allow_threads(|| {
@@ -2668,24 +2695,22 @@ pub fn cksp_js(
 	x: f64,
 	q: usize,
 ) -> Result<Vec<f64>, JsValue> {
-	let len = close.len();
-	
-	// Single allocation for both outputs
-	let mut output = vec![0.0; len * 2]; // [long_values..., short_values...]
-	let (long_part, short_part) = output.split_at_mut(len);
-	
-	cksp_into_slice(long_part, short_part, high, low, close, p, x, q, Kernel::Auto)
+	let input = CkspInput::from_slices(high, low, close, CkspParams{ p: Some(p), x: Some(x), q: Some(q) });
+	let out = cksp_with_kernel(&input, detect_best_kernel())
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
-	
-	Ok(output)
+	let cols = close.len();
+	let mut values = Vec::with_capacity(2 * cols);
+	values.extend_from_slice(&out.long_values);
+	values.extend_from_slice(&out.short_values);
+	Ok(values)
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn cksp_into(
-	high_ptr: *const f64,
-	low_ptr: *const f64,
-	close_ptr: *const f64,
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
 	long_ptr: *mut f64,
 	short_ptr: *mut f64,
 	len: usize,
@@ -2693,15 +2718,19 @@ pub fn cksp_into(
 	x: f64,
 	q: usize,
 ) -> Result<(), JsValue> {
-	if high_ptr.is_null() || low_ptr.is_null() || close_ptr.is_null() || 
-	   long_ptr.is_null() || short_ptr.is_null() {
+	if long_ptr.is_null() || short_ptr.is_null() {
 		return Err(JsValue::from_str("Null pointer provided"));
 	}
 	
+	if high.len() != len || low.len() != len || close.len() != len {
+		return Err(JsValue::from_str("Input length mismatch"));
+	}
+	
 	unsafe {
-		let high = std::slice::from_raw_parts(high_ptr, len);
-		let low = std::slice::from_raw_parts(low_ptr, len);
-		let close = std::slice::from_raw_parts(close_ptr, len);
+		// Get pointers from slices for aliasing check
+		let high_ptr = high.as_ptr();
+		let low_ptr = low.as_ptr();
+		let close_ptr = close.as_ptr();
 		
 		// Check for any aliasing between inputs and outputs
 		let has_aliasing = (high_ptr as *const f64 == long_ptr as *const f64) ||
@@ -2758,6 +2787,14 @@ pub fn cksp_free(ptr: *mut f64, len: usize) {
 
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
+pub struct CkspJsResult {
+	pub values: Vec<f64>, // [long..., short...]
+	pub rows: usize,      // 2
+	pub cols: usize,      // len
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
 pub struct CkspBatchConfig {
 	pub p_range: (usize, usize, usize),
 	pub x_range: (f64, f64, f64),
@@ -2799,8 +2836,16 @@ pub fn cksp_batch_js(
 	let mut long_values = vec![0.0; rows * cols];
 	let mut short_values = vec![0.0; rows * cols];
 	
-	// Compute batch results
-	cksp_batch_inner_into(high, low, close, &sweep, Kernel::Auto, false, &mut long_values, &mut short_values)
+	// Compute batch results with appropriate kernel for WASM
+	let kernel = detect_best_batch_kernel();
+	let simd = match kernel {
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx512Batch => Kernel::Avx512,
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx2Batch => Kernel::Avx2,
+		Kernel::ScalarBatch | _ => Kernel::Scalar,
+	};
+	cksp_batch_inner_into(high, low, close, &sweep, simd, false, &mut long_values, &mut short_values)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 	
 	let js_output = CkspBatchJsOutput {
@@ -2857,7 +2902,16 @@ pub fn cksp_batch_into(
 		let long_out = std::slice::from_raw_parts_mut(long_ptr, rows * cols);
 		let short_out = std::slice::from_raw_parts_mut(short_ptr, rows * cols);
 		
-		cksp_batch_inner_into(high, low, close, &sweep, Kernel::Auto, false, long_out, short_out)
+		// Use appropriate kernel for WASM
+		let kernel = detect_best_batch_kernel();
+		let simd = match kernel {
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512Batch => Kernel::Avx512,
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2Batch => Kernel::Avx2,
+			Kernel::ScalarBatch | _ => Kernel::Scalar,
+		};
+		cksp_batch_inner_into(high, low, close, &sweep, simd, false, long_out, short_out)
 			.map_err(|e| JsValue::from_str(&e.to_string()))?;
 		
 		Ok(rows)

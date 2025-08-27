@@ -752,6 +752,9 @@ pub struct AroonOscStream {
 	low_buffer: Vec<f64>,
 	head: usize,
 	filled: bool,
+	// Track max/min indices for O(1) updates
+	highest_idx: usize,
+	lowest_idx: usize,
 }
 
 impl AroonOscStream {
@@ -766,48 +769,102 @@ impl AroonOscStream {
 			low_buffer: vec![f64::NAN; length + 1],
 			head: 0,
 			filled: false,
+			highest_idx: 0,
+			lowest_idx: 0,
 		})
 	}
 	#[inline(always)]
 	pub fn update(&mut self, high: f64, low: f64) -> Option<f64> {
 		let window = self.length + 1;
+		let old_head = self.head;
+		
 		self.high_buffer[self.head] = high;
 		self.low_buffer[self.head] = low;
+		
+		if self.filled {
+			// Check if we need to update highest/lowest indices
+			// If the value being overwritten is the current max/min, we need to rescan
+			if self.highest_idx == old_head || high >= self.high_buffer[self.highest_idx] {
+				// Need to find new highest
+				self.update_highest_idx();
+			}
+			
+			if self.lowest_idx == old_head || low <= self.low_buffer[self.lowest_idx] {
+				// Need to find new lowest
+				self.update_lowest_idx();
+			}
+		}
+		
 		self.head = (self.head + 1) % window;
 		if !self.filled && self.head == 0 {
 			self.filled = true;
+			// Initialize indices when first filled
+			self.update_highest_idx();
+			self.update_lowest_idx();
 		}
 		if !self.filled {
 			return None;
 		}
-		Some(self.calc_ring())
+		Some(self.calc_ring_fast())
 	}
 	#[inline(always)]
-	fn calc_ring(&self) -> f64 {
+	fn update_highest_idx(&mut self) {
 		let window = self.length + 1;
-		let mut highest_val = self.high_buffer[0];
-		let mut lowest_val = self.low_buffer[0];
+		let mut highest_val = f64::NEG_INFINITY;
 		let mut highest_idx = 0;
-		let mut lowest_idx = 0;
-		for i in 1..window {
-			let idx = (self.head + i) % window;
-			let h_val = self.high_buffer[idx];
-			if h_val > highest_val {
-				highest_val = h_val;
+		for i in 0..window {
+			let val = self.high_buffer[i];
+			if val >= highest_val {
+				highest_val = val;
 				highest_idx = i;
 			}
-			let l_val = self.low_buffer[idx];
-			if l_val < lowest_val {
-				lowest_val = l_val;
+		}
+		self.highest_idx = highest_idx;
+	}
+	
+	#[inline(always)]
+	fn update_lowest_idx(&mut self) {
+		let window = self.length + 1;
+		let mut lowest_val = f64::INFINITY;
+		let mut lowest_idx = 0;
+		for i in 0..window {
+			let val = self.low_buffer[i];
+			if val <= lowest_val {
+				lowest_val = val;
 				lowest_idx = i;
 			}
 		}
-		let offset_highest = self.length - highest_idx;
-		let offset_lowest = self.length - lowest_idx;
+		self.lowest_idx = lowest_idx;
+	}
+	
+	#[inline(always)]
+	fn calc_ring_fast(&self) -> f64 {
+		let window = self.length + 1;
+		// Calculate how many bars ago the highest/lowest occurred
+		let bars_since_high = if self.highest_idx >= self.head {
+			self.highest_idx - self.head
+		} else {
+			window - self.head + self.highest_idx
+		};
+		
+		let bars_since_low = if self.lowest_idx >= self.head {
+			self.lowest_idx - self.head
+		} else {
+			window - self.head + self.lowest_idx
+		};
+		
+		let offset_highest = self.length - bars_since_high;
+		let offset_lowest = self.length - bars_since_low;
 		let inv_length = 1.0 / self.length as f64;
 		let up = (self.length as f64 - offset_highest as f64) * inv_length * 100.0;
 		let down = (self.length as f64 - offset_lowest as f64) * inv_length * 100.0;
 		up - down
+	}
+	
+	// Keep original for compatibility if needed
+	#[inline(always)]
+	fn calc_ring(&self) -> f64 {
+		self.calc_ring_fast()
 	}
 }
 

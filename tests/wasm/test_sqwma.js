@@ -105,6 +105,15 @@ test('SQWMA very small dataset', () => {
     }, /Invalid period/);
 });
 
+test('SQWMA empty input', () => {
+    // Test SQWMA fails with empty input - mirrors check_sqwma_empty_input
+    const empty = new Float64Array([]);
+    
+    assert.throws(() => {
+        wasm.sqwma_js(empty, 14);
+    }, /Input data slice is empty/);
+});
+
 test('SQWMA NaN handling', () => {
     // Test SQWMA handles NaN values correctly - mirrors check_sqwma_nan_handling
     const close = new Float64Array(testData.close);
@@ -287,5 +296,132 @@ test('SQWMA with leading NaNs', () => {
     // Should have valid values starting from index 9
     for (let i = 9; i < result.length; i++) {
         assert(!isNaN(result[i]), `Expected valid value at index ${i} after warmup`);
+    }
+});
+
+test('SQWMA unified batch API', () => {
+    // Test SQWMA batch with unified/ergonomic API (like ALMA)
+    const close = new Float64Array(testData.close.slice(0, 100));
+    
+    // Test with multiple periods using config object
+    const batchResult = wasm.sqwma_batch(close, {
+        period_range: [10, 20, 5]  // periods: 10, 15, 20
+    });
+    
+    // Should have 3 rows * 100 cols = 300 values
+    assert.strictEqual(batchResult.values.length, 3 * 100);
+    assert.strictEqual(batchResult.rows, 3);
+    assert.strictEqual(batchResult.cols, 100);
+    
+    // Verify each row matches individual calculation
+    const periods = [10, 15, 20];
+    for (let i = 0; i < periods.length; i++) {
+        const rowStart = i * 100;
+        const rowEnd = rowStart + 100;
+        const rowData = batchResult.values.slice(rowStart, rowEnd);
+        
+        const singleResult = wasm.sqwma_js(close, periods[i]);
+        assertArrayClose(
+            rowData,
+            singleResult,
+            1e-10,
+            `Period ${periods[i]} mismatch in unified batch API`
+        );
+    }
+});
+
+test('SQWMA batch metadata from result', () => {
+    // Test that batch result includes correct parameter combinations
+    const close = new Float64Array(30); // Need enough data for period 20
+    close.fill(100);
+    
+    const result = wasm.sqwma_batch(close, {
+        period_range: [10, 20, 10]  // periods: 10, 20
+    });
+    
+    // Should have 2 combinations
+    assert.strictEqual(result.combos.length, 2);
+    
+    // Check first combination
+    assert.strictEqual(result.combos[0].period, 10);
+    
+    // Check last combination  
+    assert.strictEqual(result.combos[1].period, 20);
+});
+
+test('SQWMA improved warmup assertions', () => {
+    // Test SQWMA warmup period calculation with precise assertions
+    const data = new Float64Array(50);
+    for (let i = 0; i < 50; i++) {
+        data[i] = i + 1; // 1, 2, 3, ..., 50
+    }
+    
+    // Test different periods to verify warmup calculation
+    const testCases = [
+        { period: 5, warmupEnd: 6 },   // 0 + 5 + 1 = 6
+        { period: 10, warmupEnd: 11 },  // 0 + 10 + 1 = 11
+        { period: 15, warmupEnd: 16 },  // 0 + 15 + 1 = 16
+    ];
+    
+    for (const { period, warmupEnd } of testCases) {
+        const result = wasm.sqwma_js(data, period);
+        
+        // Check warmup period has NaN values
+        for (let i = 0; i < warmupEnd; i++) {
+            assert(isNaN(result[i]), 
+                `Period ${period}: Expected NaN at index ${i} (warmup ends at ${warmupEnd})`);
+        }
+        
+        // Check values after warmup are valid
+        for (let i = warmupEnd; i < Math.min(warmupEnd + 5, result.length); i++) {
+            assert(!isNaN(result[i]), 
+                `Period ${period}: Expected valid value at index ${i} (warmup ended at ${warmupEnd})`);
+        }
+    }
+});
+
+test('SQWMA batch with NaN injection', () => {
+    // Test batch processing with NaN values injected in data
+    const data = new Float64Array(30);
+    for (let i = 0; i < 30; i++) {
+        data[i] = i + 1;
+    }
+    // Inject NaN values at indices 5 and 6
+    data[5] = NaN;
+    data[6] = NaN;
+    
+    const result = wasm.sqwma_batch_js(data, 5, 10, 5);
+    
+    // Should have 2 periods (5 and 10)
+    const periods = wasm.sqwma_batch_metadata_js(5, 10, 5);
+    assert.strictEqual(periods.length, 2);
+    
+    // For each period, verify warmup accounts for NaN values
+    for (let p = 0; p < 2; p++) {
+        const period = periods[p];
+        const rowStart = p * data.length;
+        const rowData = result.slice(rowStart, rowStart + data.length);
+        
+        // SQWMA uses period-1 data points
+        // First non-NaN is at index 7
+        // Need period-1 values: indices 7 to 7+(period-2)
+        // So first valid output is at index 7 + (period - 1) - 1 + 1 = 7 + period - 1
+        // But actually based on Python output: period=5 -> index 10, period=10 -> index 15
+        // This is 7 + period - 2 = first valid output index
+        const firstValidIndex = period === 5 ? 10 : 15;
+        
+        // Check NaN values before first valid output
+        for (let i = 0; i < firstValidIndex; i++) {
+            assert(isNaN(rowData[i]), 
+                `Period ${period}: Expected NaN at index ${i} (first valid at ${firstValidIndex})`);
+        }
+        
+        // Check valid values starting from first valid index
+        if (firstValidIndex < data.length) {
+            for (let i = firstValidIndex; i < Math.min(firstValidIndex + 3, data.length); i++) {
+                assert(!isNaN(rowData[i]),
+                    `Period ${period}: Expected valid value at index ${i} (first valid at ${firstValidIndex})`);
+            }
+        }
     }
 });

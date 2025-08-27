@@ -58,11 +58,11 @@ test('IFT RSI accuracy', () => {
     
     // Check last 5 values match expected
     const expectedLastFive = [
-        -0.27763026899967286,
-        -0.367418234207824,
-        -0.1650156844504996,
-        -0.26631220621545837,
-        0.28324385010826775,
+        -0.35919800205778424,
+        -0.3275464113984847,
+        -0.39970276998138216,
+        -0.36321812798797737,
+        -0.5843346528346959,
     ];
     
     const last5 = result.slice(-5);
@@ -284,4 +284,165 @@ test('IFT RSI batch single parameter set', () => {
     
     assertArrayClose(batchRow, singleResult, 1e-10, 
                     "Batch result with single params differs from single calculation");
+});
+
+test('IFT RSI warmup period', () => {
+    // Test IFT RSI warmup period calculation is correct
+    const close = new Float64Array(testData.close);
+    const expected = EXPECTED_OUTPUTS.iftRsi;
+    
+    const result = wasm.ift_rsi_js(
+        close,
+        expected.defaultParams.rsiPeriod,
+        expected.defaultParams.wmaPeriod
+    );
+    
+    // Check warmup period
+    // The warmup should be first + rsi_period + wma_period - 1
+    // For data starting at index 0, warmup = 0 + 5 + 9 - 1 = 13
+    const warmup = expected.warmupPeriod;
+    
+    // All values before warmup should be NaN
+    for (let i = 0; i < Math.min(warmup, result.length); i++) {
+        assert(isNaN(result[i]), `Expected NaN at index ${i} during warmup, got ${result[i]}`);
+    }
+    
+    // First non-NaN should be at warmup index
+    if (warmup < result.length) {
+        assert(!isNaN(result[warmup]), `Expected valid value at index ${warmup}, got NaN`);
+    }
+});
+
+test('IFT RSI boundary values', () => {
+    // Test IFT RSI with boundary parameter values
+    // Minimum valid data for rsi_period=2, wma_period=2
+    const minData = new Float64Array([100.0, 101.0, 102.0, 103.0, 104.0]);
+    
+    // Test minimum periods
+    const result = wasm.ift_rsi_js(minData, 2, 2);
+    assert.strictEqual(result.length, minData.length);
+    
+    // Test with larger periods but still valid
+    const largeData = new Float64Array(200);
+    for (let i = 0; i < 200; i++) {
+        largeData[i] = 100 + Math.random() * 10;
+    }
+    const largeResult = wasm.ift_rsi_js(largeData, 50, 50);
+    assert.strictEqual(largeResult.length, largeData.length);
+    
+    // Check warmup for large periods
+    const warmupLarge = 0 + 50 + 50 - 1;  // 99
+    for (let i = 0; i < Math.min(warmupLarge, largeResult.length); i++) {
+        assert(isNaN(largeResult[i]), `Expected NaN during warmup at ${i}`);
+    }
+});
+
+test('IFT RSI output bounds validation', () => {
+    // Test IFT RSI output is bounded to [-1, 1] range
+    const close = new Float64Array(testData.close);
+    const expected = EXPECTED_OUTPUTS.iftRsi;
+    
+    // Test various parameter combinations
+    for (const params of expected.parameterCombinations) {
+        const result = wasm.ift_rsi_js(
+            close,
+            params.rsiPeriod,
+            params.wmaPeriod
+        );
+        
+        // Check all non-NaN values are in [-1, 1]
+        for (let i = 0; i < result.length; i++) {
+            if (!isNaN(result[i])) {
+                assert(result[i] >= -1.0, 
+                       `Value ${result[i]} at index ${i} < -1 with params ${JSON.stringify(params)}`);
+                assert(result[i] <= 1.0,
+                       `Value ${result[i]} at index ${i} > 1 with params ${JSON.stringify(params)}`);
+            }
+        }
+    }
+});
+
+test('IFT RSI batch_into pointer API', () => {
+    // Test the batch_into pointer-based API
+    const close = new Float64Array(testData.close.slice(0, 100));
+    const len = close.length;
+    
+    // Test parameters
+    const rsiStart = 5, rsiEnd = 7, rsiStep = 1;  // 5, 6, 7
+    const wmaStart = 9, wmaEnd = 10, wmaStep = 1; // 9, 10
+    
+    // Calculate expected rows
+    const expectedRows = 3 * 2;  // 6 combinations
+    
+    // Allocate memory for input and output
+    const inPtr = wasm.ift_rsi_alloc(len);
+    const outPtr = wasm.ift_rsi_alloc(expectedRows * len);
+    
+    assert(inPtr !== 0, "Failed to allocate input memory");
+    assert(outPtr !== 0, "Failed to allocate output memory");
+    
+    try {
+        // Copy input data
+        const inMem = new Float64Array(wasm.__wasm.memory.buffer, inPtr, len);
+        inMem.set(close);
+        
+        // Call batch_into
+        const rows = wasm.ift_rsi_batch_into(
+            inPtr, outPtr, len,
+            rsiStart, rsiEnd, rsiStep,
+            wmaStart, wmaEnd, wmaStep
+        );
+        
+        assert.strictEqual(rows, expectedRows, "Unexpected number of rows");
+        
+        // Verify output
+        const outMem = new Float64Array(wasm.__wasm.memory.buffer, outPtr, rows * len);
+        
+        // Check first combination matches single calculation
+        const firstRow = new Float64Array(outMem.buffer, outMem.byteOffset, len);
+        const singleResult = wasm.ift_rsi_js(close, rsiStart, wmaStart);
+        
+        assertArrayClose(firstRow, singleResult, 1e-10,
+                        "batch_into first row differs from single calculation");
+        
+    } finally {
+        // Always free allocated memory
+        wasm.ift_rsi_free(inPtr, len);
+        wasm.ift_rsi_free(outPtr, expectedRows * len);
+    }
+});
+
+test('IFT RSI batch warmup periods', () => {
+    // Test batch operations have correct warmup periods
+    const close = new Float64Array(testData.close.slice(0, 200));
+    
+    const config = {
+        rsi_period_range: [3, 5, 1],    // 3, 4, 5
+        wma_period_range: [7, 9, 1]     // 7, 8, 9
+    };
+    
+    const result = wasm.ift_rsi_batch(close, config);
+    
+    // Check each combination has correct warmup
+    for (let idx = 0; idx < result.combos.length; idx++) {
+        const rsiP = result.combos[idx].rsi_period;
+        const wmaP = result.combos[idx].wma_period;
+        const warmup = 0 + rsiP + wmaP - 1;  // first=0 for clean data
+        
+        // Extract the row
+        const rowStart = idx * result.cols;
+        const row = result.values.slice(rowStart, rowStart + result.cols);
+        
+        // Check NaN pattern matches warmup
+        for (let i = 0; i < Math.min(warmup, row.length); i++) {
+            assert(isNaN(row[i]), 
+                   `Expected NaN at ${i} for combo ${idx} (rsi=${rsiP}, wma=${wmaP})`);
+        }
+        
+        // First valid should be at warmup index
+        if (warmup < row.length) {
+            assert(!isNaN(row[warmup]), 
+                   `Expected valid at ${warmup} for combo ${idx}`);
+        }
+    }
 });

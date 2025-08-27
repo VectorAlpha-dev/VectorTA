@@ -20,24 +20,18 @@ use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::PyDict;
 
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
-use crate::utilities::data_loader::{source_type, Candles};
+use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-use aligned_vec::{AVec, CACHELINE_ALIGN};
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-use core::arch::x86_64::*;
-#[cfg(not(target_arch = "wasm32"))]
-use rayon::prelude::*;
-use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
 
@@ -135,10 +129,53 @@ impl WclpriceBuilder {
 
 #[derive(Debug, Error)]
 pub enum WclpriceError {
-	#[error("wclprice: Empty data provided.")]
+	#[error("wclprice: empty input")]
 	EmptyData,
-	#[error("wclprice: All values are NaN.")]
+	#[error("wclprice: all values are NaN")]
 	AllValuesNaN,
+	#[error("wclprice: output len {out} must equal min(high,low,close)={min_len}")]
+	InvalidOutputLen { out: usize, min_len: usize },
+	#[error("wclprice: missing candle field '{field}'")]
+	MissingField { field: &'static str },
+	#[error("wclprice: invalid kernel for batch mode: {0:?}")]
+	InvalidBatchKernel(Kernel),
+}
+
+#[inline(always)]
+fn wclprice_prepare<'a>(
+	input: &'a WclpriceInput<'a>,
+	kernel: Kernel,
+) -> Result<(&'a [f64], &'a [f64], &'a [f64], usize, usize, Kernel), WclpriceError> {
+	let (high, low, close) = match &input.data {
+		WclpriceData::Candles { candles } => {
+			let h = candles.select_candle_field("high").map_err(|_| WclpriceError::MissingField{field:"high"})?;
+			let l = candles.select_candle_field("low").map_err(|_| WclpriceError::MissingField{field:"low"})?;
+			let c = candles.select_candle_field("close").map_err(|_| WclpriceError::MissingField{field:"close"})?;
+			(h, l, c)
+		}
+		WclpriceData::Slices { high, low, close } => (*high, *low, *close),
+	};
+
+	if high.is_empty() || low.is_empty() || close.is_empty() {
+		return Err(WclpriceError::EmptyData);
+	}
+	let lh = high.len();
+	let ll = low.len();
+	let lc = close.len();
+	let len = lh.min(ll).min(lc);
+	// Note: We compute on min(len) for compatibility, though ideally all lengths should match
+	let first = (0..len)
+		.find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
+		.ok_or(WclpriceError::AllValuesNaN)?;
+
+	let chosen = match kernel {
+		Kernel::Auto => detect_best_kernel(),
+		Kernel::Avx2Batch => Kernel::Avx2,
+		Kernel::Avx512Batch => Kernel::Avx512,
+		Kernel::ScalarBatch => Kernel::Scalar,
+		k => k,
+	};
+	Ok((high, low, close, len, first, chosen))
 }
 
 #[inline]
@@ -147,32 +184,8 @@ pub fn wclprice(input: &WclpriceInput) -> Result<WclpriceOutput, WclpriceError> 
 }
 
 pub fn wclprice_with_kernel(input: &WclpriceInput, kernel: Kernel) -> Result<WclpriceOutput, WclpriceError> {
-	let (high, low, close) = match &input.data {
-		WclpriceData::Candles { candles } => {
-			let high = candles.select_candle_field("high").unwrap();
-			let low = candles.select_candle_field("low").unwrap();
-			let close = candles.select_candle_field("close").unwrap();
-			(high, low, close)
-		}
-		WclpriceData::Slices { high, low, close } => (*high, *low, *close),
-	};
-
-	if high.is_empty() || low.is_empty() || close.is_empty() {
-		return Err(WclpriceError::EmptyData);
-	}
-	let len = high.len().min(low.len()).min(close.len());
-	if len == 0 {
-		return Err(WclpriceError::EmptyData);
-	}
-	let first = (0..len)
-		.find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
-		.ok_or(WclpriceError::AllValuesNaN)?;
-
+	let (high, low, close, len, first, chosen) = wclprice_prepare(input, kernel)?;
 	let mut out = alloc_with_nan_prefix(len, first);
-	let chosen = match kernel {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
 	unsafe {
 		match chosen {
 			Kernel::Scalar | Kernel::ScalarBatch => wclprice_scalar(high, low, close, first, &mut out),
@@ -180,7 +193,7 @@ pub fn wclprice_with_kernel(input: &WclpriceInput, kernel: Kernel) -> Result<Wcl
 			Kernel::Avx2 | Kernel::Avx2Batch => wclprice_avx2(high, low, close, first, &mut out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 | Kernel::Avx512Batch => wclprice_avx512(high, low, close, first, &mut out),
-			_ => unreachable!(),
+			_ => wclprice_scalar(high, low, close, first, &mut out),
 		}
 	}
 	Ok(WclpriceOutput { values: out })
@@ -188,43 +201,12 @@ pub fn wclprice_with_kernel(input: &WclpriceInput, kernel: Kernel) -> Result<Wcl
 
 #[inline]
 pub fn wclprice_into_slice(dst: &mut [f64], input: &WclpriceInput, kern: Kernel) -> Result<(), WclpriceError> {
-	let (high, low, close) = match &input.data {
-		WclpriceData::Candles { candles } => {
-			let high = candles.select_candle_field("high").unwrap();
-			let low = candles.select_candle_field("low").unwrap();
-			let close = candles.select_candle_field("close").unwrap();
-			(high, low, close)
-		}
-		WclpriceData::Slices { high, low, close } => (*high, *low, *close),
-	};
-
-	if high.is_empty() || low.is_empty() || close.is_empty() {
-		return Err(WclpriceError::EmptyData);
-	}
-	
-	let len = high.len().min(low.len()).min(close.len());
-	if len == 0 {
-		return Err(WclpriceError::EmptyData);
-	}
-	
+	let (high, low, close, len, first, chosen) = wclprice_prepare(input, kern)?;
 	if dst.len() != len {
-		return Err(WclpriceError::EmptyData); // Should have a better error, but maintaining compatibility
+		return Err(WclpriceError::InvalidOutputLen { out: dst.len(), min_len: len });
 	}
-	
-	let first = (0..len)
-		.find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
-		.ok_or(WclpriceError::AllValuesNaN)?;
-
-	// Fill warmup with NaN
-	for v in &mut dst[..first] {
-		*v = f64::NAN;
-	}
-
-	let chosen = match kern {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
-	
+	// warmup prefix
+	if first > 0 { dst[..first].fill(f64::NAN); }
 	unsafe {
 		match chosen {
 			Kernel::Scalar | Kernel::ScalarBatch => wclprice_scalar(high, low, close, first, dst),
@@ -232,10 +214,9 @@ pub fn wclprice_into_slice(dst: &mut [f64], input: &WclpriceInput, kern: Kernel)
 			Kernel::Avx2 | Kernel::Avx2Batch => wclprice_avx2(high, low, close, first, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 | Kernel::Avx512Batch => wclprice_avx512(high, low, close, first, dst),
-			_ => unreachable!(),
+			_ => wclprice_scalar(high, low, close, first, dst),
 		}
 	}
-	
 	Ok(())
 }
 
@@ -332,10 +313,10 @@ impl WclpriceBatchBuilder {
 		wclprice_batch_with_kernel(high, low, close, self.kernel)
 	}
 	pub fn apply_candles(self, c: &Candles) -> Result<WclpriceBatchOutput, WclpriceError> {
-		let high = c.select_candle_field("high").unwrap();
-		let low = c.select_candle_field("low").unwrap();
-		let close = c.select_candle_field("close").unwrap();
-		self.apply_slices(high, low, close)
+		let h = c.select_candle_field("high").map_err(|_| WclpriceError::MissingField{ field:"high" })?;
+		let l = c.select_candle_field("low").map_err(|_| WclpriceError::MissingField{ field:"low" })?;
+		let cl = c.select_candle_field("close").map_err(|_| WclpriceError::MissingField{ field:"close" })?;
+		self.apply_slices(h, l, cl)
 	}
 	pub fn with_default_candles(c: &Candles) -> Result<WclpriceBatchOutput, WclpriceError> {
 		WclpriceBatchBuilder::new().apply_candles(c)
@@ -351,7 +332,7 @@ pub fn wclprice_batch_with_kernel(
 	let kernel = match k {
 		Kernel::Auto => detect_best_batch_kernel(),
 		other if other.is_batch() => other,
-		_ => Kernel::ScalarBatch,
+		other => return Err(WclpriceError::InvalidBatchKernel(other)),
 	};
 	wclprice_batch_par_slice(high, low, close, kernel)
 }
@@ -392,7 +373,7 @@ pub fn wclprice_batch_par_slice(
 	wclprice_batch_inner(high, low, close, kern, true)
 }
 #[inline(always)]
-fn wclprice_batch_inner(
+pub fn wclprice_batch_inner(
 	high: &[f64],
 	low: &[f64],
 	close: &[f64],
@@ -406,21 +387,36 @@ fn wclprice_batch_inner(
 	let first = (0..len)
 		.find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
 		.ok_or(WclpriceError::AllValuesNaN)?;
-	let mut values = alloc_with_nan_prefix(len, first);
-	unsafe {
-		match kern {
-			Kernel::ScalarBatch | Kernel::Scalar => wclprice_row_scalar(high, low, close, first, &mut values),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2Batch | Kernel::Avx2 => wclprice_row_avx2(high, low, close, first, &mut values),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512Batch | Kernel::Avx512 => wclprice_row_avx512(high, low, close, first, &mut values),
-			_ => unreachable!(),
-		}
-	}
-	let combos = expand_grid(&WclpriceBatchRange);
+
+	// 1 row matrix
+	let mut buf_mu = make_uninit_matrix(1, len);
+	init_matrix_prefixes(&mut buf_mu, len, &[first]);
+
+	let mut guard = core::mem::ManuallyDrop::new(buf_mu);
+	let out_slice: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len())
+	};
+
+	let simd = match kern {
+		Kernel::Auto => detect_best_batch_kernel(),
+		k => k,
+	};
+	let map = match simd {
+		Kernel::Avx512Batch => Kernel::Avx512,
+		Kernel::Avx2Batch => Kernel::Avx2,
+		Kernel::ScalarBatch => Kernel::Scalar,
+		other => other,
+	};
+
+	wclprice_batch_inner_into(high, low, close, map, _parallel, out_slice)?;
+
+	let values = unsafe {
+		Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, guard.len(), guard.capacity())
+	};
+
 	Ok(WclpriceBatchOutput {
 		values,
-		combos,
+		combos: vec![WclpriceParams],
 		rows: 1,
 		cols: len,
 	})
@@ -444,6 +440,9 @@ fn wclprice_batch_inner_into(
 		return Err(WclpriceError::EmptyData);
 	}
 	let len = high.len().min(low.len()).min(close.len());
+	if out.len() < len {
+		return Err(WclpriceError::InvalidOutputLen { out: out.len(), min_len: len });
+	}
 	let first = (0..len)
 		.find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
 		.ok_or(WclpriceError::AllValuesNaN)?;
@@ -456,12 +455,12 @@ fn wclprice_batch_inner_into(
 	
 	unsafe {
 		match kern {
-			Kernel::ScalarBatch | Kernel::Scalar => wclprice_row_scalar(high, low, close, first, out),
+			Kernel::Scalar => wclprice_row_scalar(high, low, close, first, out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2Batch | Kernel::Avx2 => wclprice_row_avx2(high, low, close, first, out),
+			Kernel::Avx2 => wclprice_row_avx2(high, low, close, first, out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512Batch | Kernel::Avx512 => wclprice_row_avx512(high, low, close, first, out),
-			_ => unreachable!(),
+			Kernel::Avx512 => wclprice_row_avx512(high, low, close, first, out),
+			_ => wclprice_row_scalar(high, low, close, first, out),
 		}
 	}
 	
@@ -496,26 +495,18 @@ pub fn wclprice_py<'py>(
 	close: numpy::PyReadonlyArray1<'py, f64>,
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
-	use numpy::{IntoPyArray, PyArrayMethods};
-
-	let high_slice = high.as_slice()?;
-	let low_slice = low.as_slice()?;
-	let close_slice = close.as_slice()?;
-	let len = high_slice.len().min(low_slice.len()).min(close_slice.len());
+	use numpy::{PyArray1, PyArrayMethods};
+	let hs = high.as_slice()?;
+	let ls = low.as_slice()?;
+	let cs = close.as_slice()?;
+	let len = hs.len().min(ls.len()).min(cs.len());
+	let out = unsafe { PyArray1::<f64>::new(py, [len], false) };
+	let out_slice = unsafe { out.as_slice_mut()? };
+	let input = WclpriceInput::from_slices(hs, ls, cs);
 	let kern = validate_kernel(kernel, false)?;
-
-	let input = WclpriceInput::from_slices(high_slice, low_slice, close_slice);
-
-	// Allocate output array with uninitialized memory
-	let output = unsafe { PyArray1::<f64>::new(py, [len], false) };
-	let slice_out = unsafe { output.as_slice_mut()? };
-	
-	py.allow_threads(|| {
-		wclprice_into_slice(slice_out, &input, kern)
-	})
-	.map_err(|e| PyValueError::new_err(e.to_string()))?;
-	
-	Ok(output.to_owned())
+	py.allow_threads(|| wclprice_into_slice(out_slice, &input, kern))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	Ok(out)
 }
 
 #[cfg(feature = "python")]
@@ -552,49 +543,36 @@ pub fn wclprice_batch_py<'py>(
 	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
 	use pyo3::types::PyDict;
 
-	let high_slice = high.as_slice()?;
-	let low_slice = low.as_slice()?;
-	let close_slice = close.as_slice()?;
-	let kern = validate_kernel(kernel, true)?;
+	let hs = high.as_slice()?;
+	let ls = low.as_slice()?;
+	let cs = close.as_slice()?;
 
-	// WCLPRICE has no parameters, so there's only one combination
-	let rows = 1;
-	let cols = high_slice.len().min(low_slice.len()).min(close_slice.len());
+	let rows = 1usize;
+	let cols = hs.len().min(ls.len()).min(cs.len());
 
 	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-	let slice_out = unsafe { out_arr.as_slice_mut()? };
+	let out_slice = unsafe { out_arr.as_slice_mut()? };
 
-	let combos = py.allow_threads(|| {
-		let batch_kernel = match kern {
-			Kernel::Auto => detect_best_batch_kernel(),
-			k => k,
-		};
-		
-		// Map batch kernels to regular kernels
+	let kern = validate_kernel(kernel, true)?;
+	py.allow_threads(|| {
+		let batch_kernel = match kern { Kernel::Auto => detect_best_batch_kernel(), k => k };
 		let simd = match batch_kernel {
 			Kernel::Avx512Batch => Kernel::Avx512,
-			Kernel::Avx2Batch => Kernel::Avx2,
+			Kernel::Avx2Batch   => Kernel::Avx2,
 			Kernel::ScalarBatch => Kernel::Scalar,
-			_ => batch_kernel,
+			other               => other,
 		};
-
-		// Write directly to the output buffer - zero copy
-		wclprice_batch_inner_into(high_slice, low_slice, close_slice, simd, true, slice_out)
+		wclprice_batch_inner_into(hs, ls, cs, simd, true, out_slice)
 	})
 	.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-	let result = PyDict::new(py);
-	result.set_item("values", out_arr)?;
-	result.set_item("rows", rows)?;
-	result.set_item("cols", cols)?;
-
-	// Create params list (empty for WCLPRICE)
-	let params_list = PyList::empty(py);
-	let params = PyDict::new(py);
-	params_list.append(params)?;
-	result.set_item("params", params_list)?;
-
-	Ok(result)
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	// Alma-compatible param vectors: single row, so length-1 placeholders
+	dict.set_item("periods", vec![0u64].into_pyarray(py))?;
+	dict.set_item("offsets", vec![0.0f64].into_pyarray(py))?;
+	dict.set_item("sigmas",  vec![0.0f64].into_pyarray(py))?;
+	Ok(dict)
 }
 
 #[cfg(feature = "wasm")]
@@ -672,7 +650,7 @@ pub fn wclprice_into(
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct WclpriceBatchConfig {
-	// WCLPRICE has no parameters, so this is empty
+	// intentionally empty; reserved for future
 }
 
 #[cfg(feature = "wasm")]
@@ -686,23 +664,18 @@ pub struct WclpriceBatchJsOutput {
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = wclprice_batch)]
-pub fn wclprice_batch_js(high: &[f64], low: &[f64], close: &[f64], _config: JsValue) -> Result<JsValue, JsValue> {
-	if high.is_empty() || low.is_empty() || close.is_empty() {
-		return Err(JsValue::from_str("wclprice: Empty data provided"));
-	}
-	
-	// Use the proper batch infrastructure
-	let output = wclprice_batch_inner(high, low, close, detect_best_kernel(), false)
+pub fn wclprice_batch_unified_js(high: &[f64], low: &[f64], close: &[f64], cfg: JsValue) -> Result<JsValue, JsValue> {
+	let _cfg: WclpriceBatchConfig =
+		serde_wasm_bindgen::from_value(cfg).unwrap_or(WclpriceBatchConfig{});
+	let out = wclprice_batch_inner(high, low, close, detect_best_kernel(), false)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
-	
-	let js_output = WclpriceBatchJsOutput {
-		values: output.values,
-		combos: output.combos,
-		rows: output.rows,
-		cols: output.cols,
+	let js = WclpriceBatchJsOutput {
+		values: out.values,
+		combos: out.combos,
+		rows: out.rows,
+		cols: out.cols,
 	};
-	
-	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&e.to_string()))
+	serde_wasm_bindgen::to_value(&js).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 #[cfg(feature = "wasm")]

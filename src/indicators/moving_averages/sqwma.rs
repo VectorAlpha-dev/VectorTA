@@ -1,12 +1,13 @@
 //! # Square Weighted Moving Average (SQWMA)
 //!
 //! A specialized moving average that applies squared weights to recent data
-//! points. The most recent value receives `(period)^2` weight, and each
-//! preceding value’s weight decreases quadratically. This approach enhances
-//! sensitivity to current price changes while still smoothing out older noise.
+//! points. Uses `period - 1` data points with weights from `period^2` down to `2^2`.
+//! The most recent value receives `(period)^2` weight, and each preceding value's 
+//! weight decreases quadratically. This approach enhances sensitivity to current 
+//! price changes while still smoothing out older noise.
 //!
 //! ## Parameters
-//! - **period**: Window size (number of data points, must be ≥ 2).
+//! - **period**: Defines the weight range; uses `period - 1` data points (must be ≥ 2).
 //!
 //! ## Errors
 //! - **AllValuesNaN**: sqwma: All input data values are `NaN`.
@@ -38,7 +39,6 @@ use crate::utilities::helpers::{
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
-#[cfg(not(target_arch = "wasm32"))]
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
@@ -163,6 +163,8 @@ impl SqwmaBuilder {
 
 #[derive(Debug, Error)]
 pub enum SqwmaError {
+	#[error("sqwma: Input data slice is empty.")]
+	EmptyInputData,
 	#[error("sqwma: All values are NaN.")]
 	AllValuesNaN,
 	#[error("sqwma: Invalid period: period = {period}, data length = {data_len}")]
@@ -181,8 +183,11 @@ pub fn sqwma_with_kernel(input: &SqwmaInput, kernel: Kernel) -> Result<SqwmaOutp
 		SqwmaData::Candles { candles, source } => source_type(candles, source),
 		SqwmaData::Slice(sl) => sl,
 	};
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(SqwmaError::AllValuesNaN)?;
 	let len = data.len();
+	if len == 0 {
+		return Err(SqwmaError::EmptyInputData);
+	}
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(SqwmaError::AllValuesNaN)?;
 	let period = input.get_period();
 	if period < 2 || period > len {
 		return Err(SqwmaError::InvalidPeriod { period, data_len: len });
@@ -469,6 +474,82 @@ fn expand_grid(r: &SqwmaBatchRange) -> Vec<SqwmaParams> {
 }
 
 #[inline(always)]
+fn sqwma_build_flat_weights(
+	combos: &[SqwmaParams],
+	max_p: usize,
+) -> (AVec<f64>, Vec<f64>) {
+	let rows = combos.len();
+	let cap = rows * max_p;
+	let mut flat_w = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cap);
+	flat_w.resize(cap, 0.0);
+	let mut sums = vec![0.0; rows];
+
+	for (row, prm) in combos.iter().enumerate() {
+		let p = prm.period.unwrap();
+		for i in 0..(p - 1) {
+			flat_w[row * max_p + i] = (p as f64 - i as f64).powi(2);
+		}
+		let s = &flat_w[row * max_p .. row * max_p + (p - 1)];
+		sums[row] = s.iter().sum();
+	}
+	(flat_w, sums)
+}
+
+#[inline(always)]
+fn sqwma_batch_inner_into(
+	data: &[f64],
+	combos: &[SqwmaParams],
+	kern: Kernel,
+	first: usize,
+	max_p: usize,
+	parallel: bool,
+	out: &mut [f64],
+) -> Result<(), SqwmaError> {
+	let rows = combos.len();
+	let cols = data.len();
+	let (flat_w, sums) = sqwma_build_flat_weights(combos, max_p);
+
+	let actual = match kern {
+		Kernel::Auto => detect_best_batch_kernel(),
+		k => k,
+	};
+	let simd = match actual {
+		Kernel::Avx512Batch => Kernel::Avx512,
+		Kernel::Avx2Batch => Kernel::Avx2,
+		Kernel::ScalarBatch => Kernel::Scalar,
+		_ => actual,
+	};
+
+	let work = |row: usize, dst: &mut [f64]| unsafe {
+		let p = combos[row].period.unwrap();
+		let w_ptr = flat_w.as_ptr().add(row * max_p);
+		let w_sum = *sums.get_unchecked(row);
+		match simd {
+			Kernel::Scalar => sqwma_row_scalar(data, first, p, p - 1, w_ptr, w_sum, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => sqwma_row_avx2(data, first, p, p - 1, w_ptr, w_sum, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => sqwma_row_avx512(data, first, p, p - 1, w_ptr, w_sum, dst),
+			_ => unreachable!(),
+		}
+	};
+
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		out.par_chunks_mut(cols).enumerate().for_each(|(r, s)| work(r, s));
+		#[cfg(target_arch = "wasm32")]
+		for (r, s) in out.chunks_mut(cols).enumerate() {
+			work(r, s);
+		}
+	} else {
+		for (r, s) in out.chunks_mut(cols).enumerate() {
+			work(r, s);
+		}
+	}
+	Ok(())
+}
+
+#[inline(always)]
 pub fn sqwma_batch_slice(data: &[f64], sweep: &SqwmaBatchRange, kern: Kernel) -> Result<SqwmaBatchOutput, SqwmaError> {
 	sqwma_batch_inner(data, sweep, kern, false)
 }
@@ -493,96 +574,42 @@ fn sqwma_batch_inner(
 	if combos.is_empty() {
 		return Err(SqwmaError::InvalidPeriod { period: 0, data_len: 0 });
 	}
+	let cols = data.len();
+	if cols == 0 {
+		return Err(SqwmaError::EmptyInputData);
+	}
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(SqwmaError::AllValuesNaN)?;
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-	if data.len() - first < max_p {
+	if cols - first < max_p {
 		return Err(SqwmaError::NotEnoughValidData {
 			needed: max_p,
-			valid: data.len() - first,
+			valid: cols - first,
 		});
 	}
 	let rows = combos.len();
-	let cols = data.len();
 
-	// ─── BUILD FLAT WEIGHTS ───
-	// Allocate a flat array of size rows * max_p, but each row uses only (period - 1) slots.
-	let mut weight_sums = vec![0.0; rows];
-	let cap = rows * max_p;
-	let mut flat_w = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cap);
-	flat_w.resize(cap, 0.0);
+	// Allocate uninit matrix
+	let mut buf_mu = make_uninit_matrix(rows, cols);
 
-	for (row, prm) in combos.iter().enumerate() {
-		let period = prm.period.unwrap();
-		// Fill exactly period - 1 weights: (period)^2, ..., (2)^2
-		for i in 0..(period - 1) {
-			flat_w[row * max_p + i] = (period as f64 - i as f64).powi(2);
-		}
-		// Sum only those period - 1 entries
-		let start = row * max_p;
-		let end = start + (period - 1);
-		weight_sums[row] = flat_w[start..end].iter().sum();
-	}
-	// ──────────────────────────
+	// Warm prefixes per row (SQWMA warm = first + period + 1)
+	let warm: Vec<usize> = combos.iter().map(|c| (first + c.period.unwrap() + 1).min(cols)).collect();
+	init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-	let warm: Vec<usize> = combos
-		.iter()
-		.map(|c| (first + c.period.unwrap() + 1).min(cols))
-		.collect();
-
-	// Uninitialised buffer, but every row’s prefix is eagerly filled with quiet-NaNs.
-	let mut raw: Vec<MaybeUninit<f64>> = make_uninit_matrix(rows, cols);
-	unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
-
-	// ---------- 2. per-row worker ----------
-	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
-		let period = combos[row].period.unwrap();
-		let w_ptr = flat_w.as_ptr().add(row * max_p);
-		let w_sum = *weight_sums.get_unchecked(row);
-		let p_minus = period - 1;
-
-		// Cast just this row to &mut [f64] before calling the kernels.
-		let out_row = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
-
-		match kern {
-			Kernel::Scalar => sqwma_row_scalar(data, first, period, p_minus, w_ptr, w_sum, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => sqwma_row_avx2(data, first, period, p_minus, w_ptr, w_sum, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => sqwma_row_avx512(data, first, period, p_minus, w_ptr, w_sum, out_row),
-			_ => unreachable!(),
-		}
+	// View as &mut [f64] for compute
+	let mut guard = core::mem::ManuallyDrop::new(buf_mu);
+	let out: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len())
 	};
 
-	// ---------- 3. run every row ----------
-	if parallel {
-		#[cfg(not(target_arch = "wasm32"))]
-		{
-			raw.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
-		}
+	// Fill rows
+	sqwma_batch_inner_into(data, &combos, kern, first, max_p, parallel, out)?;
 
-		#[cfg(target_arch = "wasm32")]
-		{
-			for (row, slice) in raw.chunks_mut(cols).enumerate() {
-				do_row(row, slice);
-			}
-		}
-	} else {
-		for (row, slice) in raw.chunks_mut(cols).enumerate() {
-			do_row(row, slice);
-		}
-	}
+	// Take ownership of initialized f64 buffer
+	let values = unsafe {
+		Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, guard.len(), guard.capacity())
+	};
 
-	// ---------- 4. all cells initialised – transmute to `Vec<f64>` ----------
-	let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
-
-	Ok(SqwmaBatchOutput {
-		values,
-		combos,
-		rows,
-		cols,
-	})
+	Ok(SqwmaBatchOutput { values, combos, rows, cols })
 }
 
 #[inline(always)]
@@ -1321,109 +1348,39 @@ pub fn sqwma_batch_py<'py>(
 	use pyo3::types::PyDict;
 
 	let slice_in = data.as_slice()?;
-	let kern = validate_kernel(kernel, true)?; // true for batch operations
 	let sweep = SqwmaBatchRange { period: period_range };
-
-	// Calculate dimensions
 	let combos = expand_grid(&sweep);
 	let rows = combos.len();
 	let cols = slice_in.len();
+	if rows == 0 {
+		return Err(PyValueError::new_err("empty period grid"));
+	}
 
-	// Pre-allocate output array (OK for batch operations)
 	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
 	let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-	// Compute without GIL
-	let combos = py
-		.allow_threads(|| {
-			// Handle kernel selection for batch operations
-			let kernel = match kern {
-				Kernel::Auto => detect_best_batch_kernel(),
-				k => k,
-			};
+	let kern = validate_kernel(kernel, true)?;
+	py.allow_threads(|| {
+		// Warm prefixes in the Python buffer
+		let first = slice_in.iter().position(|x| !x.is_nan()).ok_or(SqwmaError::AllValuesNaN)?;
+		let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+		if slice_in.len() - first < max_p {
+			return Err(SqwmaError::NotEnoughValidData {
+				needed: max_p,
+				valid: slice_in.len() - first,
+			});
+		}
+		// Init NaN prefixes
+		let warm: Vec<usize> = combos.iter().map(|c| (first + c.period.unwrap() + 1).min(cols)).collect();
+		let mu = unsafe {
+			std::slice::from_raw_parts_mut(slice_out.as_mut_ptr() as *mut MaybeUninit<f64>, slice_out.len())
+		};
+		init_matrix_prefixes(mu, cols, &warm);
 
-			// Map batch kernels to regular kernels
-			let simd = match kernel {
-				Kernel::Avx512Batch => Kernel::Avx512,
-				Kernel::Avx2Batch => Kernel::Avx2,
-				Kernel::ScalarBatch => Kernel::Scalar,
-				_ => kernel,
-			};
+		sqwma_batch_inner_into(slice_in, &combos, kern, first, max_p, true, slice_out)
+	})
+	.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-			// Inline batch processing logic to write directly to our pre-allocated buffer
-			let combos = expand_grid(&sweep);
-			if combos.is_empty() {
-				return Err(SqwmaError::InvalidPeriod { period: 0, data_len: 0 });
-			}
-
-			let first = slice_in
-				.iter()
-				.position(|x| !x.is_nan())
-				.ok_or(SqwmaError::AllValuesNaN)?;
-			let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-			if slice_in.len() - first < max_p {
-				return Err(SqwmaError::NotEnoughValidData {
-					needed: max_p,
-					valid: slice_in.len() - first,
-				});
-			}
-
-			// Build flat weights
-			let mut weight_sums = vec![0.0; rows];
-			let cap = rows * max_p;
-			let mut flat_w = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cap);
-			flat_w.resize(cap, 0.0);
-
-			for (row, prm) in combos.iter().enumerate() {
-				let period = prm.period.unwrap();
-				for i in 0..(period - 1) {
-					flat_w[row * max_p + i] = (period as f64 - i as f64).powi(2);
-				}
-				let start = row * max_p;
-				let end = start + (period - 1);
-				weight_sums[row] = flat_w[start..end].iter().sum();
-			}
-
-			// Initialize with NaN prefixes
-			let warm: Vec<usize> = combos
-				.iter()
-				.map(|c| (first + c.period.unwrap() + 1).min(cols))
-				.collect();
-
-			// Convert output to uninit for prefix initialization
-			let slice_mu = unsafe {
-				std::slice::from_raw_parts_mut(slice_out.as_mut_ptr() as *mut MaybeUninit<f64>, slice_out.len())
-			};
-			unsafe {
-				init_matrix_prefixes(slice_mu, cols, &warm);
-			}
-
-			// Process each row
-			for (row, _) in combos.iter().enumerate() {
-				let period = combos[row].period.unwrap();
-				let w_ptr = unsafe { flat_w.as_ptr().add(row * max_p) };
-				let w_sum = weight_sums[row];
-				let p_minus = period - 1;
-
-				let out_row = &mut slice_out[row * cols..(row + 1) * cols];
-
-				unsafe {
-					match simd {
-						Kernel::Scalar => sqwma_row_scalar(slice_in, first, period, p_minus, w_ptr, w_sum, out_row),
-						#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-						Kernel::Avx2 => sqwma_row_avx2(slice_in, first, period, p_minus, w_ptr, w_sum, out_row),
-						#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-						Kernel::Avx512 => sqwma_row_avx512(slice_in, first, period, p_minus, w_ptr, w_sum, out_row),
-						_ => unreachable!(),
-					}
-				}
-			}
-
-			Ok(combos)
-		})
-		.map_err(|e| PyValueError::new_err(e.to_string()))?;
-
-	// Build result dictionary
 	let dict = PyDict::new(py);
 	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
 	dict.set_item(
@@ -1434,7 +1391,6 @@ pub fn sqwma_batch_py<'py>(
 			.collect::<Vec<_>>()
 			.into_pyarray(py),
 	)?;
-
 	Ok(dict)
 }
 
@@ -1496,6 +1452,9 @@ pub fn sqwma_into_slice(dst: &mut [f64], input: &SqwmaInput, kernel: Kernel) -> 
 		SqwmaData::Candles { candles, source } => source_type(candles, source),
 		SqwmaData::Slice(sl) => sl,
 	};
+	if data.is_empty() {
+		return Err(SqwmaError::EmptyInputData);
+	}
 	let period = input.params.period.unwrap_or(14);
 
 	if dst.len() != data.len() {
@@ -1670,75 +1629,32 @@ pub fn sqwma_batch_into(
 	if in_ptr.is_null() || out_ptr.is_null() {
 		return Err(JsValue::from_str("null pointer passed to sqwma_batch_into"));
 	}
-
 	unsafe {
 		let data = std::slice::from_raw_parts(in_ptr, len);
-
-		let sweep = SqwmaBatchRange {
-			period: (period_start, period_end, period_step),
-		};
-
+		let sweep = SqwmaBatchRange { period: (period_start, period_end, period_step) };
 		let combos = expand_grid(&sweep);
 		let rows = combos.len();
+		if rows == 0 {
+			return Err(JsValue::from_str("empty period grid"));
+		}
 		let cols = len;
 
 		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
 
-		// Use optimized batch processing
-		let first = data
-			.iter()
-			.position(|x| !x.is_nan())
-			.ok_or(JsValue::from_str("All values are NaN"))?;
+		let first = data.iter().position(|x| !x.is_nan()).ok_or_else(|| JsValue::from_str("All values are NaN"))?;
 		let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
 		if data.len() - first < max_p {
 			return Err(JsValue::from_str("Not enough valid data"));
 		}
 
-		// Build flat weights
-		let mut weight_sums = vec![0.0; rows];
-		let cap = rows * max_p;
-		let mut flat_w = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cap);
-		flat_w.resize(cap, 0.0);
+		// Init NaN prefixes in-place
+		let warm: Vec<usize> = combos.iter().map(|c| (first + c.period.unwrap() + 1).min(cols)).collect();
+		let mu = std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len());
+		init_matrix_prefixes(mu, cols, &warm);
 
-		for (row, prm) in combos.iter().enumerate() {
-			let period = prm.period.unwrap();
-			for i in 0..(period - 1) {
-				flat_w[row * max_p + i] = (period as f64 - i as f64).powi(2);
-			}
-			let start = row * max_p;
-			let end = start + (period - 1);
-			weight_sums[row] = flat_w[start..end].iter().sum();
-		}
-
-		// Initialize with NaN prefixes
-		let warm: Vec<usize> = combos
-			.iter()
-			.map(|c| (first + c.period.unwrap() + 1).min(cols))
-			.collect();
-
-		// Convert output to uninit for prefix initialization
-		let slice_mu = std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len());
-		init_matrix_prefixes(slice_mu, cols, &warm);
-
-		// Process each row
-		let simd = detect_best_kernel();
-		for (row, _) in combos.iter().enumerate() {
-			let period = combos[row].period.unwrap();
-			let w_ptr = flat_w.as_ptr().add(row * max_p);
-			let w_sum = weight_sums[row];
-			let p_minus = period - 1;
-
-			let out_row = &mut out[row * cols..(row + 1) * cols];
-
-			match simd {
-				Kernel::Scalar => sqwma_row_scalar(data, first, period, p_minus, w_ptr, w_sum, out_row),
-				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-				Kernel::Avx2 => sqwma_row_avx2(data, first, period, p_minus, w_ptr, w_sum, out_row),
-				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-				Kernel::Avx512 => sqwma_row_avx512(data, first, period, p_minus, w_ptr, w_sum, out_row),
-				_ => unreachable!(),
-			}
-		}
+		// Compute into out
+		sqwma_batch_inner_into(data, &combos, Kernel::Auto, first, max_p, false, out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 		Ok(rows)
 	}

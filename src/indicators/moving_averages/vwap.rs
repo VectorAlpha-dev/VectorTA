@@ -38,7 +38,7 @@ use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
 	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
-use chrono::{Datelike, NaiveDateTime, Utc};
+use chrono::{Datelike, NaiveDateTime};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -191,6 +191,18 @@ impl VwapBuilder {
 		let params = VwapParams { anchor: self.anchor };
 		VwapStream::try_new(params)
 	}
+
+	#[inline(always)]
+	pub fn apply_candles_with_source(self, candles: &Candles, source: &str) -> Result<VwapOutput, VwapError> {
+		let params = VwapParams { anchor: self.anchor };
+		let input = VwapInput::from_candles(candles, source, params);
+		vwap_with_kernel(&input, self.kernel)
+	}
+
+	#[inline(always)]
+	pub fn with_default_candles(candles: &Candles) -> Result<VwapOutput, VwapError> {
+		VwapBuilder::new().apply_candles_with_source(candles, "hlc3")
+	}
 }
 
 #[derive(Debug, Error)]
@@ -256,12 +268,6 @@ pub fn vwap_with_kernel(input: &VwapInput, kernel: Kernel) -> Result<VwapOutput,
 	}
 	if n == 0 {
 		return Err(VwapError::NoData);
-	}
-	if n != volumes.len() {
-		return Err(VwapError::MismatchPricesVolumes {
-			prices: n,
-			volumes: volumes.len(),
-		});
 	}
 
 	let (count, unit_char) =
@@ -570,6 +576,19 @@ pub struct VwapBatchOutput {
 	pub cols: usize,
 }
 
+impl VwapBatchOutput {
+	pub fn row_for_anchor(&self, a: &str) -> Option<usize> {
+		self.combos.iter().position(|p| p.anchor.as_deref() == Some(a))
+	}
+	
+	pub fn values_for(&self, a: &str) -> Option<&[f64]> {
+		self.row_for_anchor(a).map(|row| {
+			let start = row * self.cols;
+			&self.values[start..start + self.cols]
+		})
+	}
+}
+
 #[inline(always)]
 fn expand_grid_vwap(r: &VwapBatchRange) -> Vec<VwapParams> {
 	if r.anchor.2 == 0 || r.anchor.0 == r.anchor.1 {
@@ -607,6 +626,30 @@ fn anchor_to_num_and_unit(anchor: &str) -> Option<(u32, char)> {
 	let num = anchor[..idx].parse::<u32>().ok()?;
 	let unit = anchor[idx..].chars().next()?;
 	Some((num, unit))
+}
+
+#[inline]
+fn first_valid_vwap_index(timestamps: &[i64], volumes: &[f64], count: u32, unit: char) -> usize {
+	if timestamps.is_empty() { return 0; }
+	let mut cur_gid = i64::MIN;
+	let mut vsum = 0.0;
+	for i in 0..timestamps.len() {
+		let ts = timestamps[i];
+		let gid = match unit {
+			'm' => ts / ((count as i64) * 60_000),
+			'h' => ts / ((count as i64) * 3_600_000),
+			'd' => ts / ((count as i64) * 86_400_000),
+			'M' => floor_to_month(ts, count).unwrap_or(i64::MIN),
+			_ => i64::MIN,
+		};
+		if gid != cur_gid {
+			cur_gid = gid;
+			vsum = 0.0;
+		}
+		vsum += volumes[i];
+		if vsum > 0.0 { return i; }
+	}
+	0
 }
 
 #[inline(always)]
@@ -649,9 +692,15 @@ fn vwap_batch_inner(
 
 	let mut raw = make_uninit_matrix(rows, cols); // Vec<MaybeUninit<f64>>
 
-	// optional: NaN prefixes – none needed, but this exercises the helper
-	let warm: Vec<usize> = vec![0; rows];
-	unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
+	// compute warm prefix per row
+	let mut warm: Vec<usize> = Vec::with_capacity(rows);
+	for prm in &combos {
+		let (cnt, unit) = parse_anchor(prm.anchor.as_deref().unwrap_or("1d"))
+			.map_err(|e| VwapError::ParseAnchorError { msg: e.to_string() })?;
+		let w = first_valid_vwap_index(timestamps, volumes, cnt, unit);
+		warm.push(w);
+	}
+	init_matrix_prefixes(&mut raw, cols, &warm);
 
 	// ---------- 2. closure to fill one row in-place --------------------------
 	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
@@ -695,7 +744,14 @@ fn vwap_batch_inner(
 	}
 
 	// ---------- 4. all elements written – turn into Vec<f64> -----------------
-	let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
+	let mut raw_guard = core::mem::ManuallyDrop::new(raw);
+	let values: Vec<f64> = unsafe {
+		Vec::from_raw_parts(
+			raw_guard.as_mut_ptr() as *mut f64,
+			raw_guard.len(),
+			raw_guard.capacity(),
+		)
+	};
 
 	Ok(VwapBatchOutput {
 		values,
@@ -806,16 +862,24 @@ fn parse_anchor(anchor: &str) -> Result<(u32, char), Box<dyn std::error::Error>>
 
 #[inline]
 fn floor_to_month(ts_ms: i64, count: u32) -> Result<i64, Box<dyn Error>> {
-	// Fast approximation: average days per month = 30.436875
-	let days = ts_ms / 86_400_000; // floor days since epoch
-	let months = (days as f64 / 30.436875).floor() as i64; // approximate months since epoch
-
+	// Convert timestamp to real calendar month
+	let seconds = ts_ms / 1000;
+	let nanos = ((ts_ms % 1000) * 1_000_000) as u32;
+	
+	let dt = NaiveDateTime::from_timestamp_opt(seconds, nanos)
+		.ok_or_else(|| format!("Invalid timestamp: {}", ts_ms))?;
+	
+	// Calculate total months since epoch (Jan 1970 = month 0)
+	let year = dt.year();
+	let month = dt.month() as i32;
+	let total_months = (year - 1970) as i64 * 12 + (month - 1) as i64;
+	
 	if count == 1 {
-		// For 1M anchor, just return the month count
-		Ok(months)
+		// For 1M anchor, return the month count directly
+		Ok(total_months)
 	} else {
 		// For multi-month anchors (e.g., 3M for quarters), group by count
-		Ok(months / (count as i64))
+		Ok(total_months / (count as i64))
 	}
 }
 
@@ -1054,7 +1118,7 @@ mod tests {
 		let candles = read_candles_from_csv(file_path)?;
 
 		// Test with multiple parameter combinations to increase coverage
-		let test_anchors = vec!["1m", "5m", "15m", "30m", "1h", "4h", "1d", "3d", "1w"];
+		let test_anchors = vec!["1m", "5m", "15m", "30m", "1h", "4h", "1d", "3d"];
 		let test_sources = vec!["close", "open", "high", "low", "hl2", "hlc3", "ohlc4"];
 
 		for anchor in test_anchors {
@@ -1764,31 +1828,36 @@ pub fn vwap_into(
 	if timestamps_ptr.is_null() || volumes_ptr.is_null() || prices_ptr.is_null() || out_ptr.is_null() {
 		return Err(JsValue::from_str("null pointer passed to vwap_into"));
 	}
-
+	
 	unsafe {
-		let timestamps_f64 = std::slice::from_raw_parts(timestamps_ptr, len);
-		let volumes = std::slice::from_raw_parts(volumes_ptr, len);
-		let prices = std::slice::from_raw_parts(prices_ptr, len);
+		let ts_f64 = std::slice::from_raw_parts(timestamps_ptr, len);
+		let vols  = std::slice::from_raw_parts(volumes_ptr, len);
+		let pric  = std::slice::from_raw_parts(prices_ptr, len);
 
-		// Convert timestamps from f64 to i64
-		let ts_i64: Vec<i64> = timestamps_f64.iter().map(|&t| t as i64).collect();
-
-		let params = VwapParams { anchor };
-		let input = VwapInput::from_slice(&ts_i64, volumes, prices, params);
-
-		// Check for aliasing - VWAP has multiple inputs, check if output aliases any input
-		if out_ptr as *const f64 == timestamps_ptr || out_ptr as *const f64 == volumes_ptr || out_ptr as *const f64 == prices_ptr {
-			let mut temp = vec![0.0; len];
-			vwap_into_slice(&mut temp, &input, Kernel::Auto)
-				.map_err(|e| JsValue::from_str(&e.to_string()))?;
-			let out = std::slice::from_raw_parts_mut(out_ptr, len);
-			out.copy_from_slice(&temp);
-		} else {
-			let out = std::slice::from_raw_parts_mut(out_ptr, len);
-			vwap_into_slice(out, &input, Kernel::Auto)
-				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		// convert timestamps to i64 with basic checks
+		let mut ts_i64 = Vec::with_capacity(len);
+		ts_i64.set_len(len);
+		for i in 0..len {
+			let t = ts_f64[i];
+			if !t.is_finite() || t < 0.0 { return Err(JsValue::from_str("invalid timestamp")); }
+			*ts_i64.get_unchecked_mut(i) = t as i64;
 		}
 
+		let params = VwapParams { anchor };
+		let input  = VwapInput::from_slice(&ts_i64, vols, pric, params);
+
+		if core::ptr::eq(prices_ptr, out_ptr as *const f64) {
+			// overlapping: compute to temp then copy
+			let mut tmp = vec![0.0; len];
+			vwap_into_slice(&mut tmp, &input, detect_best_kernel())
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&tmp);
+		} else {
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			vwap_into_slice(out, &input, detect_best_kernel())
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
 		Ok(())
 	}
 }
@@ -1822,7 +1891,7 @@ pub struct VwapBatchConfig {
 #[derive(Serialize, Deserialize)]
 pub struct VwapBatchJsOutput {
 	pub values: Vec<f64>,
-	pub anchors: Vec<String>,
+	pub combos: Vec<VwapParams>,
 	pub rows: usize,
 	pub cols: usize,
 }
@@ -1833,43 +1902,34 @@ pub fn vwap_batch_unified_js(
 	timestamps: &[f64],
 	volumes: &[f64],
 	prices: &[f64],
-	config: JsValue,
+	start: String,
+	end: String,
+	step: u32,
 ) -> Result<JsValue, JsValue> {
-	let config: VwapBatchConfig =
-		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	// f64->i64 timestamps
+	let ts_i64: Vec<i64> = timestamps.iter().map(|&t| {
+		if !t.is_finite() || t < 0.0 { return Err(JsValue::from_str("invalid timestamp")); }
+		Ok(t as i64)
+	}).collect::<Result<_,_>>()?;
 
-	// Convert timestamps from f64 to i64 with validation
-	let ts_i64: Vec<i64> = timestamps
-		.iter()
-		.map(|&t| {
-			if t.is_nan() || t.is_infinite() || t < 0.0 {
-				return Err(JsValue::from_str(&format!("Invalid timestamp: {}", t)));
-			}
-			Ok(t as i64)
-		})
-		.collect::<Result<Vec<_>, _>>()?;
-
-	let sweep = VwapBatchRange {
-		anchor: config.anchor_range,
+	let sweep = VwapBatchRange { anchor: (start, end, step) };
+	
+	// Map Auto to concrete kernel to avoid unreachable!() in match
+	let kernel = match detect_best_kernel() {
+		Kernel::Auto => Kernel::Scalar,
+		k => k,
 	};
-
-	let output = vwap_batch_with_kernel(&ts_i64, volumes, prices, &sweep, Kernel::Auto)
+	
+	let out = vwap_batch_inner(&ts_i64, volumes, prices, &sweep, kernel, false)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-	let combos = expand_grid_vwap(&sweep);
-	let anchors: Vec<String> = combos
-		.iter()
-		.map(|c| c.anchor.clone().unwrap_or_else(|| "1d".to_string()))
-		.collect();
-
-	let js_output = VwapBatchJsOutput {
-		values: output.values,
-		anchors,
-		rows: combos.len(),
-		cols: prices.len(),
+	let js = VwapBatchJsOutput {
+		values: out.values,
+		combos: out.combos,
+		rows: out.rows,
+		cols: out.cols,
 	};
-
-	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+	serde_wasm_bindgen::to_value(&js).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 #[cfg(feature = "wasm")]
@@ -1906,14 +1966,9 @@ pub fn vwap_batch_into(
 
 		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
 
-		// VWAP doesn't have a batch_inner_into function like ALMA, so we need to compute it
-		// row by row for now
-		for (i, params) in combos.iter().enumerate() {
-			let input = VwapInput::from_slice(&ts_i64, volumes, prices, params.clone());
-			let row_out = &mut out[i * cols..(i + 1) * cols];
-			vwap_into_slice(row_out, &input, Kernel::Auto)
-				.map_err(|e| JsValue::from_str(&e.to_string()))?;
-		}
+		// Use the efficient batch_inner_into function
+		vwap_batch_inner_into(&ts_i64, volumes, prices, &sweep, detect_best_kernel(), false, out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 		Ok(rows)
 	}

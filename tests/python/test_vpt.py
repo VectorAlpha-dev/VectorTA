@@ -40,10 +40,11 @@ class TestVPT:
         result = ta_indicators.vpt(price, volume)
         assert len(result) == len(price)
         
-        # First value should be NaN
+        # First two values should be NaN (warmup through first_valid)
         assert np.isnan(result[0])
+        assert np.isnan(result[1])
         # Rest should have values
-        assert not np.isnan(result[1])
+        assert not np.isnan(result[2])
     
     def test_vpt_accuracy_from_csv(self, test_data):
         """Test VPT matches expected values from Rust tests - mirrors check_vpt_accuracy_from_csv"""

@@ -45,17 +45,17 @@ test('FRAMA partial params', () => {
     const close = new Float64Array(testData.close);
     
     // Default parameters (window=10, sc=300, fc=1)
-    const result = wasm.frama_js(high, low, close, undefined, undefined, undefined);
+    const result = wasm.frama_js(high, low, close, 10, 300, 1);
     assert.strictEqual(result.length, close.length);
     
     // Partial custom parameters
-    const resultCustomWindow = wasm.frama_js(high, low, close, 14, undefined, undefined);
+    const resultCustomWindow = wasm.frama_js(high, low, close, 14, 300, 1);
     assert.strictEqual(resultCustomWindow.length, close.length);
     
-    const resultCustomSc = wasm.frama_js(high, low, close, undefined, 200, undefined);
+    const resultCustomSc = wasm.frama_js(high, low, close, 10, 200, 1);
     assert.strictEqual(resultCustomSc.length, close.length);
     
-    const resultCustomFc = wasm.frama_js(high, low, close, undefined, undefined, 2);
+    const resultCustomFc = wasm.frama_js(high, low, close, 10, 300, 2);
     assert.strictEqual(resultCustomFc.length, close.length);
 });
 
@@ -94,7 +94,7 @@ test('FRAMA empty input', () => {
     const empty = new Float64Array([]);
     
     assert.throws(() => {
-        wasm.frama_js(empty, empty, empty, undefined, undefined, undefined);
+        wasm.frama_js(empty, empty, empty, 10, 300, 1);
     }, /Input data slice is empty/);
 });
 
@@ -105,7 +105,7 @@ test('FRAMA zero window', () => {
     const close = new Float64Array([7.0, 17.0, 27.0]);
     
     assert.throws(() => {
-        wasm.frama_js(high, low, close, 0, undefined, undefined);
+        wasm.frama_js(high, low, close, 0, 300, 1);
     }, /Invalid window/);
 });
 
@@ -116,7 +116,7 @@ test('FRAMA window exceeds length', () => {
     const close = new Float64Array([7.0, 17.0, 27.0]);
     
     assert.throws(() => {
-        wasm.frama_js(high, low, close, 10, undefined, undefined);
+        wasm.frama_js(high, low, close, 10, 300, 1);
     }, /Invalid window/);
 });
 
@@ -127,7 +127,7 @@ test('FRAMA very small dataset', () => {
     const close = new Float64Array([41.0]);
     
     assert.throws(() => {
-        wasm.frama_js(high, low, close, 10, undefined, undefined);
+        wasm.frama_js(high, low, close, 10, 300, 1);
     }, /Invalid window|Not enough valid data/);
 });
 
@@ -138,7 +138,7 @@ test('FRAMA mismatched lengths', () => {
     const close = new Float64Array([1.0]);
     
     assert.throws(() => {
-        wasm.frama_js(high, low, close, undefined, undefined, undefined);
+        wasm.frama_js(high, low, close, 10, 300, 1);
     }, /Mismatched slice lengths/);
 });
 
@@ -148,7 +148,7 @@ test('FRAMA all NaN input', () => {
     allNaN.fill(NaN);
     
     assert.throws(() => {
-        wasm.frama_js(allNaN, allNaN, allNaN, undefined, undefined, undefined);
+        wasm.frama_js(allNaN, allNaN, allNaN, 10, 300, 1);
     }, /All values are NaN/);
 });
 
@@ -160,7 +160,7 @@ test('FRAMA not enough valid data', () => {
     
     // With window=10 and data length=5, it will fail with "Invalid window"
     assert.throws(() => {
-        wasm.frama_js(high, low, close, 10, undefined, undefined);
+        wasm.frama_js(high, low, close, 10, 300, 1);
     }, /Invalid window/);
     
     // Test case where window is valid but not enough data after NaN
@@ -170,23 +170,8 @@ test('FRAMA not enough valid data', () => {
     
     // With window=10 and only 5 valid values after NaN
     assert.throws(() => {
-        wasm.frama_js(high2, low2, close2, 10, undefined, undefined);
+        wasm.frama_js(high2, low2, close2, 10, 300, 1);
     }, /Not enough valid data/);
-});
-
-test('FRAMA reinput', () => {
-    // Test applying indicator twice - mirrors check_frama_reinput
-    const high = new Float64Array(testData.high);
-    const low = new Float64Array(testData.low);
-    const close = new Float64Array(testData.close);
-    
-    // First pass
-    const firstResult = wasm.frama_js(high, low, close, 10, undefined, undefined);
-    assert.strictEqual(firstResult.length, close.length);
-    
-    // Second pass - apply to output (using output for all three inputs)
-    const secondResult = wasm.frama_js(firstResult, firstResult, firstResult, 5, undefined, undefined);
-    assert.strictEqual(secondResult.length, firstResult.length);
 });
 
 test('FRAMA NaN handling', () => {

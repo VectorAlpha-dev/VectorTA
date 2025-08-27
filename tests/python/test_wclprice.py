@@ -55,7 +55,7 @@ class TestWclprice:
         low = np.array([])
         close = np.array([])
         
-        with pytest.raises(ValueError, match="Empty data"):
+        with pytest.raises(ValueError, match="empty input"):
             ta_indicators.wclprice(high, low, close)
     
     def test_wclprice_all_nan(self):
@@ -64,7 +64,7 @@ class TestWclprice:
         low = np.array([np.nan, np.nan])
         close = np.array([np.nan, np.nan])
         
-        with pytest.raises(ValueError, match="All values are NaN"):
+        with pytest.raises(ValueError, match="all values are NaN"):
             ta_indicators.wclprice(high, low, close)
     
     def test_wclprice_partial_nan(self):
@@ -131,21 +131,21 @@ class TestWclprice:
         
         batch_result = ta_indicators.wclprice_batch(high, low, close)
         
-        # Check batch result structure
+        # Check batch result structure - ALMA-compatible format
         assert 'values' in batch_result
-        assert 'rows' in batch_result
-        assert 'cols' in batch_result
-        assert 'params' in batch_result
+        assert 'periods' in batch_result
+        assert 'offsets' in batch_result
+        assert 'sigmas' in batch_result
         
-        # WCLPRICE has no parameters, so should have 1 row
-        assert batch_result['rows'] == 1
-        assert batch_result['cols'] == 100
-        assert len(batch_result['values']) == 100
+        # WCLPRICE has no parameters, so param arrays are placeholders
+        # Values is a 2D array with shape (1, 100), flatten for comparison
+        batch_values = batch_result['values'].flatten() if batch_result['values'].ndim > 1 else batch_result['values']
+        assert len(batch_values) == 100
         
         # Compare with single calculation
         single_result = ta_indicators.wclprice(high, low, close)
         assert_close(
-            batch_result['values'],
+            batch_values,
             single_result,
             rtol=1e-10,
             msg="Batch result doesn't match single calculation"

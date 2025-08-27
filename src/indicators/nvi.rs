@@ -25,14 +25,11 @@ use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{alloc_with_nan_prefix, detect_best_kernel};
+use crate::utilities::helpers::{alloc_with_nan_prefix, detect_best_kernel, detect_best_batch_kernel, make_uninit_matrix, init_matrix_prefixes};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
-#[cfg(not(target_arch = "wasm32"))]
-use rayon::prelude::*;
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
@@ -92,6 +89,10 @@ pub enum NviError {
 	AllVolumeValuesNaN,
 	#[error("nvi: Not enough valid data: needed = {needed}, valid = {valid}")]
 	NotEnoughValidData { needed: usize, valid: usize },
+	#[error("nvi: Close and volume length mismatch: close={close_len}, volume={volume_len}")]
+	MismatchedLength { close_len: usize, volume_len: usize },
+	#[error("nvi: Destination length mismatch: dst={dst_len}, close={close_len}, volume={volume_len}")]
+	DestinationLengthMismatch { dst_len: usize, close_len: usize, volume_len: usize },
 }
 
 #[derive(Copy, Clone, Debug, Default)]
@@ -165,6 +166,13 @@ impl NviStream {
 	}
 }
 
+#[derive(Clone, Debug)]
+pub struct NviBatchOutput {
+	pub values: Vec<f64>, // flattened 1 × cols
+	pub rows: usize,      // 1
+	pub cols: usize,      // data length
+}
+
 #[inline]
 pub fn nvi(input: &NviInput) -> Result<NviOutput, NviError> {
 	nvi_with_kernel(input, Kernel::Auto)
@@ -182,9 +190,12 @@ pub fn nvi_with_kernel(input: &NviInput, kernel: Kernel) -> Result<NviOutput, Nv
 	if close.is_empty() || volume.is_empty() {
 		return Err(NviError::EmptyData);
 	}
-	let first_valid_idx = close
+	if close.len() != volume.len() {
+		return Err(NviError::MismatchedLength { close_len: close.len(), volume_len: volume.len() });
+	}
+	let first = close
 		.iter()
-		.zip(volume.iter())
+		.zip(volume)
 		.position(|(&c, &v)| !c.is_nan() && !v.is_nan())
 		.ok_or_else(|| {
 			if close.iter().all(|&c| c.is_nan()) {
@@ -193,24 +204,24 @@ pub fn nvi_with_kernel(input: &NviInput, kernel: Kernel) -> Result<NviOutput, Nv
 				NviError::AllVolumeValuesNaN
 			}
 		})?;
-	if (close.len() - first_valid_idx) < 2 {
+	if close.len() - first < 2 {
 		return Err(NviError::NotEnoughValidData {
 			needed: 2,
-			valid: close.len() - first_valid_idx,
+			valid: close.len() - first,
 		});
 	}
-	let mut out = alloc_with_nan_prefix(close.len(), first_valid_idx);
+	let mut out = alloc_with_nan_prefix(close.len(), first);
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
 		other => other,
 	};
 	unsafe {
 		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => nvi_scalar(close, volume, first_valid_idx, &mut out),
+			Kernel::Scalar | Kernel::ScalarBatch => nvi_scalar(close, volume, first, &mut out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => nvi_avx2(close, volume, first_valid_idx, &mut out),
+			Kernel::Avx2 | Kernel::Avx2Batch => nvi_avx2(close, volume, first, &mut out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => nvi_avx512(close, volume, first_valid_idx, &mut out),
+			Kernel::Avx512 | Kernel::Avx512Batch => nvi_avx512(close, volume, first, &mut out),
 			_ => unreachable!(),
 		}
 	}
@@ -227,17 +238,16 @@ pub fn nvi_into_slice(
 	if close.is_empty() || volume.is_empty() {
 		return Err(NviError::EmptyData);
 	}
-	
-	if dst.len() != close.len() || dst.len() != volume.len() {
-		return Err(NviError::NotEnoughValidData {
-			needed: close.len(),
-			valid: dst.len(),
-		});
+	if close.len() != volume.len() {
+		return Err(NviError::MismatchedLength { close_len: close.len(), volume_len: volume.len() });
+	}
+	if dst.len() != close.len() {
+		return Err(NviError::DestinationLengthMismatch { dst_len: dst.len(), close_len: close.len(), volume_len: volume.len() });
 	}
 	
-	let first_valid_idx = close
+	let first = close
 		.iter()
-		.zip(volume.iter())
+		.zip(volume)
 		.position(|(&c, &v)| !c.is_nan() && !v.is_nan())
 		.ok_or_else(|| {
 			if close.iter().all(|&c| c.is_nan()) {
@@ -247,10 +257,10 @@ pub fn nvi_into_slice(
 			}
 		})?;
 		
-	if (close.len() - first_valid_idx) < 2 {
+	if close.len() - first < 2 {
 		return Err(NviError::NotEnoughValidData {
 			needed: 2,
-			valid: close.len() - first_valid_idx,
+			valid: close.len() - first,
 		});
 	}
 	
@@ -261,17 +271,17 @@ pub fn nvi_into_slice(
 	
 	unsafe {
 		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => nvi_scalar(close, volume, first_valid_idx, dst),
+			Kernel::Scalar | Kernel::ScalarBatch => nvi_scalar(close, volume, first, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => nvi_avx2(close, volume, first_valid_idx, dst),
+			Kernel::Avx2 | Kernel::Avx2Batch => nvi_avx2(close, volume, first, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => nvi_avx512(close, volume, first_valid_idx, dst),
+			Kernel::Avx512 | Kernel::Avx512Batch => nvi_avx512(close, volume, first, dst),
 			_ => unreachable!(),
 		}
 	}
 	
 	// Fill warmup period with NaN
-	for v in &mut dst[..first_valid_idx] {
+	for v in &mut dst[..first] {
 		*v = f64::NAN;
 	}
 	
@@ -340,6 +350,76 @@ pub unsafe fn nvi_avx512_short(close: &[f64], volume: &[f64], first: usize, out:
 #[inline]
 pub unsafe fn nvi_avx512_long(close: &[f64], volume: &[f64], first: usize, out: &mut [f64]) {
 	nvi_scalar(close, volume, first, out)
+}
+
+#[inline(always)]
+pub fn nvi_batch_with_kernel(close: &[f64], volume: &[f64], k: Kernel) -> Result<NviBatchOutput, NviError> {
+	if close.is_empty() || volume.is_empty() { 
+		return Err(NviError::EmptyData); 
+	}
+	if close.len() != volume.len() {
+		return Err(NviError::MismatchedLength { close_len: close.len(), volume_len: volume.len() });
+	}
+
+	let cols = close.len();
+	let first = close.iter().zip(volume).position(|(&c,&v)| !c.is_nan() && !v.is_nan())
+		.ok_or_else(|| if close.iter().all(|&c| c.is_nan()) { NviError::AllCloseValuesNaN } else { NviError::AllVolumeValuesNaN })?;
+	if cols - first < 2 {
+		return Err(NviError::NotEnoughValidData { needed: 2, valid: cols - first });
+	}
+
+	// 1×N matrix, prefill warm prefix with NaN without copying the rest.
+	let mut buf_mu = make_uninit_matrix(1, cols);
+	init_matrix_prefixes(&mut buf_mu, cols, &[first]);
+
+	// Convert to &mut [f64] without copy.
+	let mut guard = core::mem::ManuallyDrop::new(buf_mu);
+	let out: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len())
+	};
+
+	// Compute into row 0.
+	let chosen = match k {
+		Kernel::Auto => detect_best_batch_kernel(), // maps to Scalar/Avx2/Avx512 row kernels
+		other => other,
+	};
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => nvi_row_scalar(close, volume, first, out),
+			#[cfg(all(feature="nightly-avx", target_arch="x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => nvi_row_scalar(close, volume, first, out),   // stubbed
+			#[cfg(all(feature="nightly-avx", target_arch="x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => nvi_row_scalar(close, volume, first, out),// stubbed
+			_ => unreachable!(),
+		}
+	}
+
+	// Reclaim Vec<f64> without copy.
+	let values = unsafe {
+		Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, guard.len(), guard.capacity())
+	};
+	Ok(NviBatchOutput { values, rows: 1, cols })
+}
+
+#[inline(always)]
+unsafe fn nvi_row_scalar(close: &[f64], volume: &[f64], first: usize, row_out_flat: &mut [f64]) {
+	let len = close.len();
+	let out = &mut row_out_flat[..len]; // single row
+	let mut nvi_val = 1000.0;
+	out[first] = nvi_val;
+
+	let mut prev_close = close[first];
+	let mut prev_volume = volume[first];
+
+	for i in (first + 1)..len {
+		if volume[i] < prev_volume {
+			let pct = (close[i] - prev_close) / prev_close;
+			nvi_val += nvi_val * pct;
+		}
+		out[i] = nvi_val;
+		prev_close = close[i];
+		prev_volume = volume[i];
+	}
 }
 
 #[cfg(test)]
@@ -820,6 +900,53 @@ pub fn nvi_py<'py>(
 	Ok(result_vec.into_pyarray(py))
 }
 
+#[cfg(feature = "python")]
+#[pyfunction(name = "nvi_batch")]
+#[pyo3(signature = (close, volume, kernel=None))]
+pub fn nvi_batch_py<'py>(
+	py: Python<'py>,
+	close: PyReadonlyArray1<'py, f64>,
+	volume: PyReadonlyArray1<'py, f64>,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+	use pyo3::types::PyDict;
+
+	let close_slice = close.as_slice()?;
+	let volume_slice = volume.as_slice()?;
+	let kern = validate_kernel(kernel, true)?;
+
+	// Allocate NumPy buffer once and fill without extra copies.
+	let rows = 1usize;
+	let cols = close_slice.len();
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let out_slice = unsafe { out_arr.as_slice_mut()? };
+
+	// Compute inside GIL-free region. Prefill warm prefix manually since we hold f64, not MaybeUninit.
+	py.allow_threads(|| -> Result<(), NviError> {
+		if close_slice.len() != volume_slice.len() {
+			return Err(NviError::MismatchedLength { close_len: close_slice.len(), volume_len: volume_slice.len() });
+		}
+		let first = close_slice.iter().zip(volume_slice).position(|(&c,&v)| !c.is_nan() && !v.is_nan())
+			.ok_or_else(|| if close_slice.iter().all(|&c| c.is_nan()) { NviError::AllCloseValuesNaN } else { NviError::AllVolumeValuesNaN })?;
+		if cols - first < 2 {
+			return Err(NviError::NotEnoughValidData { needed: 2, valid: cols - first });
+		}
+		// Warm prefix NaNs for row 0 only.
+		for v in &mut out_slice[..first] { *v = f64::NAN; }
+
+		// Row compute.
+		unsafe { nvi_row_scalar(close_slice, volume_slice, first, out_slice) };
+		Ok(())
+	}).map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	let d = PyDict::new(py);
+	d.set_item("values", out_arr.reshape((rows, cols))?)?;
+	d.set_item("rows", rows)?;
+	d.set_item("cols", cols)?;
+	Ok(d)
+}
+
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn nvi_js(close: &[f64], volume: &[f64]) -> Result<Vec<f64>, JsValue> {
@@ -880,5 +1007,37 @@ pub fn nvi_free(ptr: *mut f64, len: usize) {
 		unsafe {
 			let _ = Vec::from_raw_parts(ptr, len, len);
 		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn nvi_batch_into(
+	close_ptr: *const f64,
+	volume_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+) -> Result<usize, JsValue> {
+	if close_ptr.is_null() || volume_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	unsafe {
+		let close = std::slice::from_raw_parts(close_ptr, len);
+		let volume = std::slice::from_raw_parts(volume_ptr, len);
+		let out = std::slice::from_raw_parts_mut(out_ptr, len); // 1×len
+
+		if close.len() != volume.len() {
+			return Err(JsValue::from_str("Length mismatch"));
+		}
+		let first = close.iter().zip(volume).position(|(&c,&v)| !c.is_nan() && !v.is_nan())
+			.ok_or_else(|| JsValue::from_str("All values NaN in one or both inputs"))?;
+		if len - first < 2 {
+			return Err(JsValue::from_str("Not enough valid data"));
+		}
+
+		// Warm prefix NaNs then compute row.
+		for v in &mut out[..first] { *v = f64::NAN; }
+		nvi_row_scalar(close, volume, first, out);
+		Ok(1) // rows
 	}
 }

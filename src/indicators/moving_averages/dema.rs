@@ -19,7 +19,6 @@
 
 //! Scalar Only
 
-use crate::utilities::aligned_vector::AlignedVec;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -33,7 +32,6 @@ use core::arch::x86_64::*;
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
-#[cfg(not(target_arch = "wasm32"))]
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 #[cfg(feature = "wasm")]
@@ -165,13 +163,10 @@ pub enum DemaError {
 	EmptyInputData,
 	#[error("dema: All values are NaN.")]
 	AllValuesNaN,
-
-	#[error("dema: Invalid period: period = {period}")]
-	InvalidPeriod { period: usize },
-
+	#[error("dema: Invalid period: period = {period}, data length = {data_len}")]
+	InvalidPeriod { period: usize, data_len: usize },
 	#[error("dema: Not enough data: needed = {needed}, valid = {valid}")]
 	NotEnoughData { needed: usize, valid: usize },
-
 	#[error("dema: Not enough valid data: needed = {needed}, valid = {valid}")]
 	NotEnoughValidData { needed: usize, valid: usize },
 }
@@ -201,7 +196,7 @@ fn dema_prepare<'a>(
 	let period = input.get_period();
 
 	if period < 1 || period > len {
-		return Err(DemaError::InvalidPeriod { period });
+		return Err(DemaError::InvalidPeriod { period, data_len: len });
 	}
 	let needed = 2 * (period - 1);
 	if len < needed {
@@ -240,6 +235,8 @@ pub fn dema_with_kernel(input: &DemaInput, kernel: Kernel) -> Result<DemaOutput,
 	let len = data.len();
 	let mut out = alloc_with_nan_prefix(len, warm);
 	dema_compute_into(data, period, first, chosen, &mut out);
+	// Enforce warmup NaNs (keeps ALMA parity)
+	out[..warm].fill(f64::NAN);
 	Ok(DemaOutput { values: out })
 }
 
@@ -252,9 +249,9 @@ pub fn dema_into_slice(dst: &mut [f64], input: &DemaInput, kern: Kernel) -> Resu
 
 	// Verify output buffer size matches input
 	if dst.len() != data.len() {
-		return Err(DemaError::NotEnoughData {
-			needed: data.len(),
-			valid: dst.len(),
+		return Err(DemaError::InvalidPeriod {
+			period: dst.len(),
+			data_len: data.len(),
 		});
 	}
 
@@ -364,7 +361,7 @@ impl DemaStream {
 	pub fn try_new(params: DemaParams) -> Result<Self, DemaError> {
 		let period = params.period.unwrap_or(30);
 		if period < 1 {
-			return Err(DemaError::InvalidPeriod { period });
+			return Err(DemaError::InvalidPeriod { period, data_len: 0 });
 		}
 		Ok(Self {
 			period,
@@ -382,18 +379,22 @@ impl DemaStream {
 		if self.filled == 0 {
 			self.ema = value;
 			self.ema2 = value;
-		} else {
-			self.ema = self.ema * self.alpha_1 + value * self.alpha;
-			self.ema2 = self.ema2 * self.alpha_1 + self.ema * self.alpha;
+			self.filled = 1;
+			// For period=1, return value immediately (no warmup needed)
+			// Otherwise return None during warmup period, matching ALMA's API
+			return if self.period == 1 { Some(value) } else { None };
 		}
-		let out = if self.filled >= self.nan_fill {
-			(2.0 * self.ema) - self.ema2
-		} else {
-			f64::NAN
-		};
+		
+		self.ema = self.ema * self.alpha_1 + value * self.alpha;
+		self.ema2 = self.ema2 * self.alpha_1 + self.ema * self.alpha;
 
+		let y = (2.0 * self.ema) - self.ema2;
 		self.filled += 1;
-		Some(out)
+		
+		// Return value once warmup period is complete (after period-1 None values)
+		// This means we start returning values at index period-1
+		let out = if self.filled > self.nan_fill { Some(y) } else { None };
+		out
 	}
 }
 
@@ -499,7 +500,7 @@ fn dema_batch_with_kernel(data: &[f64], sweep: &DemaBatchRange, k: Kernel) -> Re
 	let kernel = match k {
 		Kernel::Auto => detect_best_batch_kernel(),
 		other if other.is_batch() => other,
-		_ => return Err(DemaError::InvalidPeriod { period: 0 }),
+		_ => return Err(DemaError::InvalidPeriod { period: 0, data_len: 0 }),
 	};
 	let simd = match kernel {
 		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -577,7 +578,7 @@ fn dema_batch_inner_into(
 	// ── 1. validation ──────────────────────────────────────────────────────
 	let combos = expand_grid(sweep);
 	if combos.is_empty() {
-		return Err(DemaError::InvalidPeriod { period: 0 });
+		return Err(DemaError::InvalidPeriod { period: 0, data_len: 0 });
 	}
 
 	if data.is_empty() {
@@ -604,14 +605,11 @@ fn dema_batch_inner_into(
 
 	// Verify output buffer size
 	if out.len() != rows * cols {
-		return Err(DemaError::InvalidPeriod { period: 0 }); // TODO: better error
+		return Err(DemaError::InvalidPeriod {
+			period: out.len(),
+			data_len: rows * cols,
+		});
 	}
-
-	// ── 2. Calculate warmup periods (NaN prefixes already initialized by caller) ─────
-	let warm: Vec<usize> = combos
-		.iter()
-		.map(|c| first + c.period.unwrap() - 1) // DEMA warmup is period - 1
-		.collect();
 
 	// ── 3. per-row kernel closure; dst is &mut [f64] ─────
 	let do_row = |row: usize, dst: &mut [f64]| unsafe {
@@ -624,6 +622,9 @@ fn dema_batch_inner_into(
 			Kernel::Avx2 => dema_row_avx2(data, first, p, dst),
 			_ => dema_row_scalar(data, first, p, dst),
 		}
+		// Enforce warmup NaNs for this row
+		let warm = first + p - 1;
+		dst[..warm].fill(f64::NAN);
 	};
 
 	// ── 4. run every row kernel, parallel or sequential ────────────────────
@@ -866,6 +867,7 @@ mod tests {
 						let DemaOutput { values: rref } = reference;
 
 						// Streaming version (for parity check)
+						// Note: Stream returns None during warmup (first period-1 values) for API consistency
 						let mut stream = DemaStream::try_new(params.clone()).unwrap();
 						let mut s_out = Vec::with_capacity(data.len());
 						for &v in &data {
@@ -889,10 +891,16 @@ mod tests {
 								prop_assert!(approx_eq!(f64, y, data[i], ulps = 2));
 							}
 
-							// 2️⃣ Constant-series invariance (when the window is flat)
-							let window = &data[i.saturating_sub(period - 1)..=i];
-							if window.iter().all(|v| *v == window[0]) {
-								prop_assert!(approx_eq!(f64, y, window[0], epsilon = 1e-9));
+							// 2️⃣ Constant-series invariance (when the window is flat, after warmup)
+							// During warmup, output should be NaN regardless of window values
+							if i >= period - 1 {
+								let window = &data[i.saturating_sub(period - 1)..=i];
+								if window.iter().all(|v| *v == window[0]) {
+									prop_assert!(approx_eq!(f64, y, window[0], epsilon = 1e-9));
+								}
+							} else {
+								// During warmup period, output should be NaN
+								prop_assert!(y.is_nan(), "Expected NaN during warmup at index {i}");
 							}
 
 							// 3️⃣ Affine equivariance
@@ -924,11 +932,27 @@ mod tests {
 								"idx {i}: fast={y} ref={yr} ULP={ulp}"
 							);
 
-							// 5️⃣ Streaming parity (after nan_fill)
-							if i >= nan_fill {
+							// 5️⃣ Streaming parity 
+							// Stream returns None (converted to NaN) during first period-1 calls for API consistency
+							// Batch outputs values from the start
+							// For period=1, stream returns value immediately
+							if period == 1 {
+								// Period=1: stream and batch should match
 								prop_assert!(
 									(y - ys).abs() <= 1e-9 || (y.is_nan() && ys.is_nan()),
-									"idx {i}: stream mismatch"
+									"idx {i}: stream mismatch for period=1 - batch={y}, stream={ys}"
+								);
+							} else if i < period - 1 {
+								// During warmup (first period-1 values), stream returns NaN
+								prop_assert!(
+									ys.is_nan(),
+									"idx {i}: stream should return NaN during warmup, got {ys}"
+								);
+							} else {
+								// After warmup, values should match
+								prop_assert!(
+									(y - ys).abs() <= 1e-9 || (y.is_nan() && ys.is_nan()),
+									"idx {i}: stream mismatch - batch={y}, stream={ys}"
 								);
 							}
 						}
@@ -961,7 +985,7 @@ mod tests {
 		let mut stream = DemaStream::try_new(DemaParams { period: Some(period) })?;
 		let mut stream_values = Vec::with_capacity(candles.close.len());
 		for &price in &candles.close {
-			stream_values.push(stream.update(price).unwrap());
+			stream_values.push(stream.update(price).unwrap_or(f64::NAN));
 		}
 
 		assert_eq!(batch_output.len(), stream_values.len());
@@ -1102,6 +1126,41 @@ mod tests {
         }
     }
 
+	fn check_dema_warmup_nan_preservation(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+
+		// Test with different periods to ensure warmup NaNs are preserved
+		let test_periods = vec![10, 20, 30, 50];
+		
+		for period in test_periods {
+			let params = DemaParams { period: Some(period) };
+			let input = DemaInput::from_candles(&candles, "close", params);
+			let result = dema_with_kernel(&input, kernel)?;
+			
+			// Check that all values before warmup are NaN
+			let warmup = period - 1;
+			for i in 0..warmup {
+				assert!(
+					result.values[i].is_nan(),
+					"[{}] Expected NaN at index {} (warmup={}) for period={}, got {}",
+					test_name, i, warmup, period, result.values[i]
+				);
+			}
+			
+			// Check that values after warmup are not NaN
+			for i in warmup..warmup + 10 {
+				assert!(
+					!result.values[i].is_nan(),
+					"[{}] Expected non-NaN at index {} (warmup={}) for period={}, got NaN",
+					test_name, i, warmup, period
+				);
+			}
+		}
+		Ok(())
+	}
+
 	generate_all_dema_tests!(
 		check_dema_partial_params,
 		check_dema_accuracy,
@@ -1115,7 +1174,8 @@ mod tests {
 		check_dema_nan_handling,
 		check_dema_streaming,
 		check_dema_property,
-		check_dema_no_poison
+		check_dema_no_poison,
+		check_dema_warmup_nan_preservation
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -1277,8 +1337,50 @@ mod tests {
 			}
 		};
 	}
+	fn check_batch_warmup_nan_preservation(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+
+		// Test batch with multiple periods
+		let output = DemaBatchBuilder::new()
+			.kernel(kernel)
+			.period_range(10, 30, 10)
+			.apply_candles(&c, "close")?;
+
+		// Check each row for proper NaN preservation
+		for (row_idx, combo) in output.combos.iter().enumerate() {
+			let period = combo.period.unwrap_or(30);
+			let warmup = period - 1;
+			let row_start = row_idx * output.cols;
+			
+			// Check warmup NaNs
+			for i in 0..warmup {
+				let val = output.values[row_start + i];
+				assert!(
+					val.is_nan(),
+					"[{}] Batch row {} (period={}): Expected NaN at index {}, got {}",
+					test, row_idx, period, i, val
+				);
+			}
+			
+			// Check non-NaN after warmup
+			for i in warmup..warmup.min(output.cols).min(warmup + 10) {
+				let val = output.values[row_start + i];
+				assert!(
+					!val.is_nan(),
+					"[{}] Batch row {} (period={}): Expected non-NaN at index {}, got NaN",
+					test, row_idx, period, i
+				);
+			}
+		}
+		Ok(())
+	}
+
 	gen_batch_tests!(check_batch_default_row);
 	gen_batch_tests!(check_batch_no_poison);
+	gen_batch_tests!(check_batch_warmup_nan_preservation);
 }
 
 #[cfg(feature = "python")]
@@ -1337,46 +1439,59 @@ pub fn dema_batch_py<'py>(
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
 	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
 	use pyo3::types::PyDict;
+	use std::mem::ManuallyDrop;
 
 	let slice_in = data.as_slice()?;
+	let sweep = DemaBatchRange { period: period_range };
 	let kern = validate_kernel(kernel, true)?;
 
-	let sweep = DemaBatchRange { period: period_range };
-
+	// build grid + dims
 	let combos = expand_grid(&sweep);
 	let rows = combos.len();
 	let cols = slice_in.len();
 
-	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-	let slice_out = unsafe { out_arr.as_slice_mut()? };
+	// allocate uninit matrix and initialize NaN prefixes
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	let first = slice_in.iter().position(|x| !x.is_nan()).unwrap_or(0);
+	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
+	init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
+	// expose as &mut [f64] for compute
+	let mut guard = ManuallyDrop::new(buf_mu);
+	let out: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len())
+	};
+
+	// choose simd flag like ALMA does
+	let simd = match match kern {
+		Kernel::Auto => detect_best_batch_kernel(),
+		k => k,
+	} {
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx512Batch => Kernel::Avx512,
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx2Batch => Kernel::Avx2,
+		Kernel::ScalarBatch => Kernel::Scalar,
+		_ => unreachable!(),
+	};
+
+	// run
 	let combos = py
-		.allow_threads(|| {
-			let kernel = match kern {
-				Kernel::Auto => detect_best_batch_kernel(),
-				k => k,
-			};
-			let simd = match kernel {
-				Kernel::Avx512Batch => Kernel::Avx512,
-				Kernel::Avx2Batch => Kernel::Avx2,
-				Kernel::ScalarBatch => Kernel::Scalar,
-				_ => unreachable!(),
-			};
-			dema_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
-		})
+		.allow_threads(|| dema_batch_inner_into(slice_in, &sweep, simd, true, out))
 		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
+	// reclaim Vec<f64> without copy and hand to NumPy
+	let values: Vec<f64> = unsafe {
+		Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, guard.len(), guard.capacity())
+	};
+	let arr = values.into_pyarray(py).reshape((rows, cols))?;
+
 	let dict = PyDict::new(py);
-	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item("values", arr)?;
 	dict.set_item(
 		"periods",
-		combos
-			.iter()
-			.map(|p| p.period.unwrap() as u64)
-			.collect::<Vec<_>>()
-			.into_pyarray(py),
+		combos.iter().map(|p| p.period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py),
 	)?;
-
 	Ok(dict)
 }
 

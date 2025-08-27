@@ -13,19 +13,14 @@
 //! ## Returns
 //! - `Ok(AcoscOutput)` with vectors of `osc` and `change`
 
-use crate::utilities::data_loader::{source_type, Candles};
+use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
 	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
-use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
-#[cfg(not(target_arch = "wasm32"))]
-use rayon::prelude::*;
-use std::convert::AsRef;
-use std::error::Error;
-use std::mem::{ManuallyDrop, MaybeUninit};
+use std::mem::ManuallyDrop;
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
@@ -80,6 +75,8 @@ pub enum AcoscError {
 	LengthMismatch { high_len: usize, low_len: usize },
 	#[error("acosc: Not enough data points: required={required}, actual={actual}")]
 	NotEnoughData { required: usize, actual: usize },
+	#[error("acosc: Invalid kernel for batch operation. Expected batch kernel, got: {kernel:?}")]
+	InvalidBatchKernel { kernel: Kernel },
 }
 
 #[inline]
@@ -88,7 +85,10 @@ pub fn acosc(input: &AcoscInput) -> Result<AcoscOutput, AcoscError> {
 }
 
 #[inline(always)]
-fn acosc_prepare<'a>(input: &'a AcoscInput, kernel: Kernel) -> Result<(&'a [f64], &'a [f64], Kernel), AcoscError> {
+fn acosc_prepare<'a>(
+	input: &'a AcoscInput,
+	kernel: Kernel,
+) -> Result<(&'a [f64], &'a [f64], usize, Kernel), AcoscError> {
 	let (high, low) = match &input.data {
 		AcoscData::Candles { candles } => {
 			let h = candles
@@ -103,43 +103,47 @@ fn acosc_prepare<'a>(input: &'a AcoscInput, kernel: Kernel) -> Result<(&'a [f64]
 	};
 
 	if high.len() != low.len() {
-		return Err(AcoscError::LengthMismatch {
-			high_len: high.len(),
-			low_len: low.len(),
-		});
+		return Err(AcoscError::LengthMismatch { high_len: high.len(), low_len: low.len() });
 	}
 
-	let len = low.len();
-	const REQUIRED_LENGTH: usize = 39; // PERIOD_SMA34 + PERIOD_SMA5
-	if len < REQUIRED_LENGTH {
-		return Err(AcoscError::NotEnoughData {
-			required: REQUIRED_LENGTH,
-			actual: len,
-		});
+	let len = high.len();
+	const REQUIRED_LENGTH: usize = 39; // 34 + 5
+
+	// first index where BOTH high and low are non-NaN
+	let first = (0..len).find(|&i| !high[i].is_nan() && !low[i].is_nan()).unwrap_or(len);
+	let valid = len.saturating_sub(first);
+	if valid < REQUIRED_LENGTH {
+		return Err(AcoscError::NotEnoughData { required: REQUIRED_LENGTH, actual: valid });
 	}
 
-	let chosen = match kernel {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
-
-	Ok((high, low, chosen))
+	let chosen = match kernel { Kernel::Auto => detect_best_kernel(), other => other };
+	Ok((high, low, first, chosen))
 }
 pub fn acosc_with_kernel(input: &AcoscInput, kernel: Kernel) -> Result<AcoscOutput, AcoscError> {
-	let (high, low, chosen) = acosc_prepare(input, kernel)?;
+	let (high, low, first, chosen) = acosc_prepare(input, kernel)?;
 
 	let len = low.len();
-	const REQUIRED_LENGTH: usize = 39; // PERIOD_SMA34 + PERIOD_SMA5
+	const WARMUP: usize = 38; // 34 + 5 - 1
+	let warmup_end = first + WARMUP;
 
-	// Calculate warmup period (ACOSC needs 39 data points before producing values)
-	let warmup_period = REQUIRED_LENGTH - 1; // 38 (since we start producing at index 38)
+	let mut osc    = alloc_with_nan_prefix(len, warmup_end);
+	let mut change = alloc_with_nan_prefix(len, warmup_end);
 
-	// Use zero-copy allocation
-	let mut osc = alloc_with_nan_prefix(len, warmup_period);
-	let mut change = alloc_with_nan_prefix(len, warmup_period);
+	// The compute function writes to indices [38..] of its input, where the input is the sliced data
+	// We pass &high[first..] which has length (len - first)
+	// The compute writes to indices [38..] of the output which we also slice
+	// So we pass &mut osc[first..] and it writes starting at index 38 of that slice
+	// This means it writes to osc[first + 38] and beyond in the original array
+	if first < len {
+		let valid_len = len - first;
+		if valid_len > WARMUP {
+			// Pass sliced inputs and outputs, the compute function handles its own warmup
+			// It will write to indices [38..] of the sliced output, which corresponds to
+			// indices [first + 38..] in the original arrays
+			acosc_compute_into(&high[first..], &low[first..], chosen, &mut osc[first..], &mut change[first..]);
+		}
+	}
 
-	// Use the compute_into pattern for consistency with ALMA
-	acosc_compute_into(high, low, chosen, &mut osc, &mut change);
 	Ok(AcoscOutput { osc, change })
 }
 
@@ -384,12 +388,7 @@ pub fn acosc_batch_with_kernel(high: &[f64], low: &[f64], k: Kernel) -> Result<A
 	let kernel = match k {
 		Kernel::Auto => detect_best_batch_kernel(),
 		other if other.is_batch() => other,
-		_ => {
-			return Err(AcoscError::NotEnoughData {
-				required: 39,
-				actual: 0,
-			})
-		}
+		_ => return Err(AcoscError::InvalidBatchKernel { kernel: k }),
 	};
 	let simd = match kernel {
 		Kernel::Avx512Batch => Kernel::Avx512,
@@ -408,67 +407,65 @@ pub fn acosc_batch_par_slice(high: &[f64], low: &[f64], kern: Kernel) -> Result<
 	acosc_batch_inner(high, low, kern, true)
 }
 #[inline(always)]
-fn acosc_batch_inner(high: &[f64], low: &[f64], kern: Kernel, _parallel: bool) -> Result<AcoscBatchOutput, AcoscError> {
+fn acosc_batch_inner(
+	high: &[f64],
+	low: &[f64],
+	kern: Kernel,
+	_parallel: bool,
+) -> Result<AcoscBatchOutput, AcoscError> {
 	let cols = high.len();
-	let rows = 1; // ACOSC has no parameters, so always 1 row
+	let rows = 1;
 
-	// Check for minimum data length
-	const REQUIRED_LENGTH: usize = 39; // PERIOD_SMA34 + PERIOD_SMA5
-	if cols < REQUIRED_LENGTH {
-		return Err(AcoscError::NotEnoughData {
-			required: REQUIRED_LENGTH,
-			actual: cols,
-		});
+	// find first valid pair
+	let first = (0..cols).find(|&i| !high[i].is_nan() && !low[i].is_nan()).unwrap_or(cols);
+	const REQUIRED_LENGTH: usize = 39;
+	let valid = cols.saturating_sub(first);
+	if valid < REQUIRED_LENGTH {
+		return Err(AcoscError::NotEnoughData { required: REQUIRED_LENGTH, actual: valid });
 	}
 
-	// Step 1: Allocate uninitialized matrices for both outputs
-	let mut buf_osc_mu = make_uninit_matrix(rows, cols);
+	// allocate uninit matrices and initialize NaN prefixes like alma.rs
+	let mut buf_osc_mu    = make_uninit_matrix(rows, cols);
 	let mut buf_change_mu = make_uninit_matrix(rows, cols);
 
-	// Step 2: Calculate warmup periods (constant for ACOSC)
-	const WARMUP_PERIOD: usize = 38; // PERIOD_SMA34 + PERIOD_SMA5 - 1
-	let warmup_periods = vec![WARMUP_PERIOD]; // Single row
+	const WARMUP: usize = 38;
+	let warmups = vec![first + WARMUP];
+	init_matrix_prefixes(&mut buf_osc_mu, cols, &warmups);
+	init_matrix_prefixes(&mut buf_change_mu, cols, &warmups);
 
-	// Step 3: Initialize NaN prefixes for each matrix
-	init_matrix_prefixes(&mut buf_osc_mu, cols, &warmup_periods);
-	init_matrix_prefixes(&mut buf_change_mu, cols, &warmup_periods);
+	// turn into &mut [f64] without copy
+	let mut osc_guard    = core::mem::ManuallyDrop::new(buf_osc_mu);
+	let mut change_guard = core::mem::ManuallyDrop::new(buf_change_mu);
 
-	// Step 4: Convert to mutable slices for computation
-	let mut buf_osc_guard = ManuallyDrop::new(buf_osc_mu);
-	let mut buf_change_guard = ManuallyDrop::new(buf_change_mu);
+	let osc_slice: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(osc_guard.as_mut_ptr() as *mut f64, osc_guard.len())
+	};
+	let change_slice: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(change_guard.as_mut_ptr() as *mut f64, change_guard.len())
+	};
 
-	let osc_slice: &mut [f64] =
-		unsafe { core::slice::from_raw_parts_mut(buf_osc_guard.as_mut_ptr() as *mut f64, buf_osc_guard.len()) };
+	// compute only on valid tail
+	let simd = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+	// The compute function writes to indices [38..] of its input slice
+	if first < cols {
+		let valid_len = cols - first;
+		if valid_len > WARMUP {
+			acosc_compute_into(&high[first..], &low[first..], simd, &mut osc_slice[first..], &mut change_slice[first..]);
+		}
+	}
 
-	let change_slice: &mut [f64] =
-		unsafe { core::slice::from_raw_parts_mut(buf_change_guard.as_mut_ptr() as *mut f64, buf_change_guard.len()) };
-
-	// Step 5: Compute into the buffers
-	acosc_compute_into(high, low, kern, osc_slice, change_slice);
-
-	// Step 6: Reclaim as Vec<f64>
+	// reclaim as Vec<f64> without copy
 	let osc = unsafe {
-		Vec::from_raw_parts(
-			buf_osc_guard.as_mut_ptr() as *mut f64,
-			buf_osc_guard.len(),
-			buf_osc_guard.capacity(),
-		)
+		Vec::from_raw_parts(osc_guard.as_mut_ptr() as *mut f64, osc_guard.len(), osc_guard.capacity())
 	};
-
 	let change = unsafe {
-		Vec::from_raw_parts(
-			buf_change_guard.as_mut_ptr() as *mut f64,
-			buf_change_guard.len(),
-			buf_change_guard.capacity(),
-		)
+		Vec::from_raw_parts(change_guard.as_mut_ptr() as *mut f64, change_guard.len(), change_guard.capacity())
 	};
 
-	Ok(AcoscBatchOutput {
-		osc,
-		change,
-		rows,
-		cols,
-	})
+	Ok(AcoscBatchOutput { osc, change, rows, cols })
 }
 #[inline(always)]
 pub fn expand_grid(_r: &AcoscBatchRange) -> Vec<AcoscParams> {
@@ -620,75 +617,67 @@ impl AcoscStreamPy {
 #[cfg(feature = "python")]
 #[pyfunction(name = "acosc_batch")]
 #[pyo3(signature = (high, low, kernel=None))]
-/// Compute ACOSC in batch mode (since ACOSC has no parameters, this is equivalent to single mode).
-///
-/// Parameters:
-/// -----------
-/// high : np.ndarray
-///     Array of high prices (float64).
-/// low : np.ndarray
-///     Array of low prices (float64).
-/// kernel : str, optional
-///     Computation kernel: 'auto', 'scalar', 'avx2', 'avx512'.
-///     Default is 'auto' which auto-detects the best available.
-///
-/// Returns:
-/// --------
-/// dict
-///     Dictionary with 'osc' and 'change' arrays (2D with 1 row).
 pub fn acosc_batch_py<'py>(
 	py: Python<'py>,
 	high: PyReadonlyArray1<'py, f64>,
-	low: PyReadonlyArray1<'py, f64>,
+	low:  PyReadonlyArray1<'py,  f64>,
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
 	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
 
-	let high_slice = high.as_slice()?;
-	let low_slice = low.as_slice()?;
+	let h = high.as_slice()?;
+	let l = low.as_slice()?;
 	let kern = crate::utilities::kernel_validation::validate_kernel(kernel, true)?;
 
-	// Since ACOSC has no parameters, we always have 1 row
-	let rows = 1;
-	let cols = high_slice.len();
+	let rows = 1usize;
+	let cols = h.len();
 
-	// Pre-allocate output arrays for batch (this is acceptable for batch operations)
-	let out_osc = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	// 1D buffers that we will reshape to (1, cols)
+	let out_osc    = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
 	let out_change = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-	let slice_osc = unsafe { out_osc.as_slice_mut()? };
+	let slice_osc    = unsafe { out_osc.as_slice_mut()? };
 	let slice_change = unsafe { out_change.as_slice_mut()? };
 
-	// Heavy work without the GIL
 	py.allow_threads(|| -> Result<(), AcoscError> {
-		// Resolve Kernel::Auto to a specific kernel
-		let kernel = match kern {
+		// resolve to non-batch kernel for compute_into
+		let simd = match kern {
 			Kernel::Auto => detect_best_batch_kernel(),
 			k => k,
 		};
-		let simd = match kernel {
+		let simd = match simd {
 			Kernel::Avx512Batch => Kernel::Avx512,
-			Kernel::Avx2Batch => Kernel::Avx2,
+			Kernel::Avx2Batch   => Kernel::Avx2,
 			Kernel::ScalarBatch => Kernel::Scalar,
-			_ => unreachable!(),
+			_ => simd, // already non-batch
 		};
 
-		// Call the batch function that will handle NaN initialization internally
-		let batch_output = acosc_batch_with_kernel(high_slice, low_slice, kern)?;
-		
-		// Copy results to pre-allocated arrays
-		slice_osc.copy_from_slice(&batch_output.osc);
-		slice_change.copy_from_slice(&batch_output.change);
-		
+		// first valid + warmup, then compute into the Py buffers directly
+		let first = (0..cols).find(|&i| !h[i].is_nan() && !l[i].is_nan()).unwrap_or(cols);
+		const REQUIRED_LENGTH: usize = 39;
+		let valid = cols.saturating_sub(first);
+		if valid < REQUIRED_LENGTH {
+			return Err(AcoscError::NotEnoughData { required: REQUIRED_LENGTH, actual: valid });
+		}
+
+		const WARMUP: usize = 38;
+		let warm = first + WARMUP;
+		// set NaN prefixes only; no whole-buffer fill
+		for i in 0..warm.min(cols) {
+			slice_osc[i] = f64::from_bits(0x7ff8_0000_0000_0000);
+			slice_change[i] = f64::from_bits(0x7ff8_0000_0000_0000);
+		}
+
+		// The compute function writes to indices [38..] of its input slice
+		if first < cols && valid > WARMUP {
+			acosc_compute_into(&h[first..], &l[first..], simd, &mut slice_osc[first..], &mut slice_change[first..])
+		};
 		Ok(())
-	})
-	.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	}).map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-	// Build dict with the GIL
-	let dict = PyDict::new(py);
-	dict.set_item("osc", out_osc.reshape((rows, cols))?)?;
-	dict.set_item("change", out_change.reshape((rows, cols))?)?;
-
-	Ok(dict)
+	let d = PyDict::new(py);
+	d.set_item("osc",    out_osc.reshape((rows, cols))?)?;
+	d.set_item("change", out_change.reshape((rows, cols))?)?;
+	Ok(d)
 }
 
 #[cfg(feature = "wasm")]
@@ -770,33 +759,30 @@ pub fn acosc_batch_metadata_js() -> Result<Vec<f64>, JsValue> {
 }
 
 /// Helper function for zero-copy WASM transfers - writes directly to output slices
-#[cfg(feature = "wasm")]
 pub fn acosc_into_slice(
 	osc_dst: &mut [f64],
 	change_dst: &mut [f64],
 	input: &AcoscInput,
 	kern: Kernel,
 ) -> Result<(), AcoscError> {
-	let (high, low, kernel) = acosc_prepare(input, kern)?;
-	
-	// Validate output lengths
+	let (high, low, first, kernel) = acosc_prepare(input, kern)?;
+
 	if osc_dst.len() != high.len() || change_dst.len() != high.len() {
-		return Err(AcoscError::LengthMismatch {
-			high_len: high.len(),
-			low_len: osc_dst.len(),
-		});
+		return Err(AcoscError::LengthMismatch { high_len: high.len(), low_len: osc_dst.len() });
 	}
-	
-	// Compute directly into output slices
-	acosc_compute_into(high, low, kernel, osc_dst, change_dst);
-	
-	// Fill warmup period with NaN (first 38 values)
-	const WARMUP_PERIOD: usize = 38; // PERIOD_SMA34 + PERIOD_SMA5 - 1
-	for i in 0..WARMUP_PERIOD.min(osc_dst.len()) {
-		osc_dst[i] = f64::NAN;
-		change_dst[i] = f64::NAN;
+
+	const WARMUP: usize = 38;
+	let warm = first + WARMUP;
+	for i in 0..warm.min(osc_dst.len()) {
+		osc_dst[i] = f64::from_bits(0x7ff8_0000_0000_0000);
+		change_dst[i] = f64::from_bits(0x7ff8_0000_0000_0000);
 	}
-	
+
+	// The compute function writes to indices [38..] of its input slice
+	let valid = high.len() - first;
+	if first < high.len() && valid > WARMUP {
+		acosc_compute_into(&high[first..], &low[first..], kernel, &mut osc_dst[first..], &mut change_dst[first..]);
+	}
 	Ok(())
 }
 
@@ -879,6 +865,7 @@ mod tests {
 	use super::*;
 	use crate::skip_if_unsupported;
 	use crate::utilities::data_loader::read_candles_from_csv;
+	use std::error::Error;
 
 	fn check_acosc_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test_name);
@@ -1435,4 +1422,27 @@ mod tests {
 	}
 	gen_batch_tests!(check_batch_default_row);
 	gen_batch_tests!(check_batch_no_poison);
+
+	#[test]
+	fn test_batch_kernel_error() {
+		// Test that passing a non-batch kernel to acosc_batch_with_kernel returns the correct error
+		let high = vec![100.0; 50];
+		let low = vec![99.0; 50];
+		
+		// Try with a non-batch kernel
+		let result = acosc_batch_with_kernel(&high, &low, Kernel::Scalar);
+		assert!(result.is_err());
+		
+		// Verify it's the correct error type
+		match result.unwrap_err() {
+			AcoscError::InvalidBatchKernel { kernel } => {
+				assert_eq!(kernel, Kernel::Scalar);
+			}
+			_ => panic!("Expected InvalidBatchKernel error"),
+		}
+		
+		// Test with Avx2 (non-batch)
+		let result = acosc_batch_with_kernel(&high, &low, Kernel::Avx2);
+		assert!(matches!(result, Err(AcoscError::InvalidBatchKernel { kernel: Kernel::Avx2 })));
+	}
 }

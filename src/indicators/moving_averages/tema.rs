@@ -20,10 +20,8 @@ use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
 	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
-use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
-#[cfg(not(target_arch = "wasm32"))]
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
@@ -189,51 +187,12 @@ pub fn tema(input: &TemaInput) -> Result<TemaOutput, TemaError> {
 }
 
 pub fn tema_with_kernel(input: &TemaInput, kernel: Kernel) -> Result<TemaOutput, TemaError> {
-	let data: &[f64] = match &input.data {
-		TemaData::Candles { candles, source } => source_type(candles, source),
-		TemaData::Slice(sl) => sl,
-	};
-
-	if data.is_empty() {
-		return Err(TemaError::EmptyInputData);
-	}
-
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(TemaError::AllValuesNaN)?;
-	let len = data.len();
-	let period = input.get_period();
-
-	if period == 0 || period > len {
-		return Err(TemaError::InvalidPeriod { period, data_len: len });
-	}
-	if (len - first) < period {
-		return Err(TemaError::NotEnoughValidData {
-			needed: period,
-			valid: len - first,
-		});
-	}
-
-	let chosen = match kernel {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
-
+	let (data, period, first, len, chosen) = tema_prepare(input, kernel)?;
 	let lookback = (period - 1) * 3;
 	let warm = first + lookback;
 
 	let mut out = alloc_with_nan_prefix(len, warm);
-	unsafe {
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => tema_scalar(data, period, first, &mut out),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => tema_avx2(data, period, first, &mut out),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => tema_avx512(data, period, first, &mut out),
-			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => tema_scalar(data, period, first, &mut out),
-			Kernel::Auto => unreachable!("Auto kernel should have been resolved"),
-		}
-	}
-
+	tema_compute_into(data, period, first, chosen, &mut out);
 	Ok(TemaOutput { values: out })
 }
 
@@ -436,18 +395,13 @@ pub fn tema_batch_with_kernel(data: &[f64], sweep: &TemaBatchRange, k: Kernel) -
 	let kernel = match k {
 		Kernel::Auto => detect_best_batch_kernel(),
 		other if other.is_batch() => other,
-		_ => {
-			return Err(TemaError::InvalidPeriod { period: 0, data_len: 0 });
-		}
+		_ => return Err(TemaError::InvalidPeriod { period: 0, data_len: 0 }),
 	};
 	let simd = match kernel {
 		Kernel::Avx512Batch => Kernel::Avx512,
 		Kernel::Avx2Batch => Kernel::Avx2,
 		Kernel::ScalarBatch => Kernel::Scalar,
-		Kernel::Avx512 => Kernel::Avx512,
-		Kernel::Avx2 => Kernel::Avx2,
-		Kernel::Scalar => Kernel::Scalar,
-		Kernel::Auto => detect_best_kernel(),
+		_ => unreachable!(),
 	};
 	tema_batch_par_slice(data, sweep, simd)
 }
@@ -581,8 +535,15 @@ fn tema_batch_inner(
 		}
 	}
 
-	// ---------- 6. transmute to fully-initialised Vec<f64> ----------
-	let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
+	// ---------- 6. safe Vec rebind like ALMA ----------
+	let mut guard = core::mem::ManuallyDrop::new(raw);
+	let values: Vec<f64> = unsafe {
+		Vec::from_raw_parts(
+			guard.as_mut_ptr() as *mut f64,
+			guard.len(),
+			guard.capacity(),
+		)
+	};
 
 	// ---------- 7. package ----------
 	Ok(TemaBatchOutput {
@@ -626,21 +587,6 @@ unsafe fn tema_row_avx512_long(data: &[f64], first: usize, period: usize, out: &
 	tema_scalar(data, period, first, out)
 }
 
-#[inline(always)]
-fn expand_grid_tema(r: &TemaBatchRange) -> Vec<TemaParams> {
-	let mut out = Vec::new();
-	let (start, end, step) = r.period;
-	if step == 0 || start == end {
-		out.push(TemaParams { period: Some(start) });
-	} else {
-		let mut p = start;
-		while p <= end {
-			out.push(TemaParams { period: Some(p) });
-			p += step;
-		}
-	}
-	out
-}
 
 // ========== Unit Tests ==========
 
@@ -1553,63 +1499,13 @@ pub fn tema_batch_py<'py>(
 
 #[inline]
 pub fn tema_into_slice(dst: &mut [f64], input: &TemaInput, kern: Kernel) -> Result<(), TemaError> {
-	let data: &[f64] = match &input.data {
-		TemaData::Candles { candles, source } => source_type(candles, source),
-		TemaData::Slice(sl) => sl,
-	};
-
-	if data.is_empty() {
-		return Err(TemaError::EmptyInputData);
+	let (data, period, first, len, chosen) = tema_prepare(input, kern)?;
+	if dst.len() != len {
+		return Err(TemaError::InvalidPeriod { period: dst.len(), data_len: len });
 	}
-
-	if dst.len() != data.len() {
-		return Err(TemaError::InvalidPeriod {
-			period: dst.len(),
-			data_len: data.len(),
-		});
-	}
-
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(TemaError::AllValuesNaN)?;
-	let len = data.len();
-	let period = input.get_period();
-
-	if period == 0 || period > len {
-		return Err(TemaError::InvalidPeriod { period, data_len: len });
-	}
-	if (len - first) < period {
-		return Err(TemaError::NotEnoughValidData {
-			needed: period,
-			valid: len - first,
-		});
-	}
-
-	let chosen = match kern {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
-
-	let lookback = (period - 1) * 3;
-	let warm = first + lookback;
-
-	// Initialize warmup period with NaN
-	for i in 0..warm {
-		dst[i] = f64::NAN;
-	}
-
-	// Compute TEMA directly into dst
-	unsafe {
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => tema_scalar(data, period, first, dst),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => tema_avx2(data, period, first, dst),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => tema_avx512(data, period, first, dst),
-			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => tema_scalar(data, period, first, dst),
-			Kernel::Auto => unreachable!(),
-		}
-	}
-
+	tema_compute_into(data, period, first, chosen, dst);
+	let warm = first + (period - 1) * 3;
+	for v in &mut dst[..warm] { *v = f64::NAN; }
 	Ok(())
 }
 

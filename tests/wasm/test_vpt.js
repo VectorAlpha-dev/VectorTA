@@ -57,10 +57,11 @@ test('VPT basic slices', () => {
     const result = wasm.vpt_js(price, volume);
     assert.strictEqual(result.length, price.length);
     
-    // First value should be NaN
+    // First two values should be NaN (warmup through first_valid)
     assert(isNaN(result[0]), 'First value should be NaN');
+    assert(isNaN(result[1]), 'Second value should be NaN');
     // Rest should have values
-    assert(!isNaN(result[1]), 'Second value should not be NaN');
+    assert(!isNaN(result[2]), 'Third value should not be NaN');
 });
 
 test('VPT accuracy from CSV', async () => {
@@ -164,8 +165,10 @@ test('VPT in-place operation', () => {
     // Clean up volume allocation
     wasm.vpt_free(vol_ptr, len);
     
-    // Should have results
-    assert(!isNaN(output[1]), 'Should have computed values after in-place operation');
+    // Should have results (first two are NaN due to warmup)
+    assert(isNaN(output[0]), 'First value should be NaN');
+    assert(isNaN(output[1]), 'Second value should be NaN');
+    assert(!isNaN(output[2]), 'Should have computed values after in-place operation');
     
     // Clean up
     wasm.vpt_free(out_ptr, len);

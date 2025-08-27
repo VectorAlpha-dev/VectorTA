@@ -90,24 +90,31 @@ class TestKurtosis:
         with pytest.raises(ValueError, match="Invalid period|Not enough valid data"):
             ta_indicators.kurtosis(single_point, period=5)
     
-    def test_kurtosis_reinput(self, test_data):
-        """Test Kurtosis on its own output - mirrors check_kurtosis_reinput"""
-        close = test_data['close']
+    def test_kurtosis_empty_input(self):
+        """Test Kurtosis fails with empty input - matches ALMA test pattern"""
+        empty = np.array([])
         
-        # First pass
-        first_result = ta_indicators.kurtosis(close, period=5)
+        with pytest.raises(ValueError, match="Input data slice is empty"):
+            ta_indicators.kurtosis(empty, period=5)
+    
+    def test_kurtosis_all_nan_input(self):
+        """Test Kurtosis fails with all NaN values - matches ALMA test pattern"""
+        all_nan = np.full(100, np.nan)
         
-        # Second pass on the output
-        second_result = ta_indicators.kurtosis(first_result, period=5)
-        
-        assert len(second_result) == len(first_result)
+        with pytest.raises(ValueError, match="All values are NaN"):
+            ta_indicators.kurtosis(all_nan, period=5)
+    
     
     def test_kurtosis_nan_handling(self, test_data):
         """Test Kurtosis NaN handling - mirrors check_kurtosis_nan_handling"""
         close = test_data['close']
+        period = 5
         
-        result = ta_indicators.kurtosis(close, period=5)
+        result = ta_indicators.kurtosis(close, period=period)
         assert len(result) == len(close)
+        
+        # First (period-1) values should be NaN for warmup
+        assert np.all(np.isnan(result[:period-1])), f"Expected NaN in first {period-1} warmup values"
         
         # After warmup period (first 20 values), should not have NaN
         if len(result) > 20:
@@ -204,6 +211,48 @@ class TestKurtosis:
             # First (period-1) values should be NaN
             nan_count = np.sum(np.isnan(values[i, :period-1]))
             assert nan_count == period - 1, f"Expected {period-1} NaN values for period {period}"
+    
+    def test_kurtosis_batch_edge_cases(self, test_data):
+        """Test Kurtosis batch with edge case parameters - matches ALMA pattern"""
+        close = test_data['close']
+        
+        # Single parameter (step = 0)
+        result1 = ta_indicators.kurtosis_batch(close, period_range=(5, 5, 0))
+        assert result1['values'].shape[0] == 1, "Single parameter should give 1 row"
+        
+        # Large step (only 2 values: 5, 50)
+        if len(close) > 50:
+            result2 = ta_indicators.kurtosis_batch(close[:100], period_range=(5, 50, 45))
+            assert result2['values'].shape[0] == 2, "Large step should give 2 rows"
+            assert list(result2['periods']) == [5, 50], "Periods should be [5, 50]"
+    
+    def test_kurtosis_batch_full_sweep(self, test_data):
+        """Test Kurtosis batch full parameter sweep - matches ALMA pattern"""
+        close = test_data['close'][:50]  # Use smaller dataset for speed
+        
+        # Multiple period values: 5, 7, 9
+        result = ta_indicators.kurtosis_batch(close, period_range=(5, 9, 2))
+        
+        assert 'values' in result
+        assert 'periods' in result
+        
+        values = result['values']
+        periods = result['periods']
+        
+        # Should have 3 rows
+        assert values.shape[0] == 3
+        assert values.shape[1] == 50
+        assert list(periods) == [5, 7, 9]
+        
+        # Verify each row matches individual calculation
+        for i, period in enumerate(periods):
+            single_result = ta_indicators.kurtosis(close, period=period)
+            assert_close(
+                values[i, :],
+                single_result,
+                rtol=1e-10,
+                msg=f"Batch row {i} (period={period}) doesn't match single calculation"
+            )
     
     def test_kurtosis_kernel_parameter(self, test_data):
         """Test Kurtosis with different kernel parameters"""

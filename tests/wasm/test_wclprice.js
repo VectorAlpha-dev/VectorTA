@@ -88,7 +88,7 @@ test('WCLPRICE all NaN', () => {
     
     assert.throws(() => {
         wasm.wclprice_js(high, low, close);
-    }, /All values are NaN/);
+    }, /all values are NaN/);
 });
 
 test('WCLPRICE partial NaN', () => {

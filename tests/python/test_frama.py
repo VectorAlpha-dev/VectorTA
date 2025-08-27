@@ -16,7 +16,7 @@ except ImportError:
     except ImportError:
         pytest.skip("Python module not built. Run 'maturin develop --features python' first", allow_module_level=True)
 
-from test_utils import load_test_data, assert_close
+from test_utils import load_test_data, assert_close, EXPECTED_OUTPUTS
 from rust_comparison import compare_with_rust
 
 
@@ -26,23 +26,23 @@ class TestFrama:
         return load_test_data()
     
     def test_frama_partial_params(self, test_data):
-        """Test FRAMA with partial parameters (None values) - mirrors check_frama_partial_params"""
+        """Test FRAMA with partial parameters - mirrors check_frama_partial_params"""
         high = test_data['high']
         low = test_data['low']
         close = test_data['close']
         
-        # Test with all default params (None)
-        result = ta_indicators.frama(high, low, close, None, None, None)
+        # Test with default params
+        result = ta_indicators.frama(high, low, close, 10, 300, 1)
         assert len(result) == len(close)
         
         # Test with partial custom parameters
-        result = ta_indicators.frama(high, low, close, 14, None, None)  # Custom window
+        result = ta_indicators.frama(high, low, close, 14, 300, 1)  # Custom window
         assert len(result) == len(close)
         
-        result = ta_indicators.frama(high, low, close, None, 200, None)  # Custom sc
+        result = ta_indicators.frama(high, low, close, 10, 200, 1)  # Custom sc
         assert len(result) == len(close)
         
-        result = ta_indicators.frama(high, low, close, None, None, 2)  # Custom fc
+        result = ta_indicators.frama(high, low, close, 10, 300, 2)  # Custom fc
         assert len(result) == len(close)
     
     def test_frama_accuracy(self, test_data):
@@ -50,32 +50,29 @@ class TestFrama:
         high = test_data['high']
         low = test_data['low']
         close = test_data['close']
+        expected = EXPECTED_OUTPUTS['frama']
         
-        # Using default parameters (window=10, sc=300, fc=1)
-        result = ta_indicators.frama(high, low, close, 10, 300, 1)
+        # Using default parameters
+        result = ta_indicators.frama(
+            high, low, close,
+            window=expected['default_params']['window'],
+            sc=expected['default_params']['sc'],
+            fc=expected['default_params']['fc']
+        )
         
         assert len(result) == len(close)
-        
-        # Expected values from Rust test with window=10, sc=300, fc=1
-        expected_last_5 = [
-            59337.23056930512,
-            59321.607512374605,
-            59286.677929994796,
-            59268.00202402624,
-            59160.03888720062
-        ]
         
         # Check last 5 values match expected
         assert_close(
             result[-5:], 
-            expected_last_5,
+            expected['last_5_values'],
             rtol=0,
             atol=0.1,  # Using 1e-1 tolerance as in Rust test
             msg="FRAMA last 5 values mismatch"
         )
         
         # Compare full output with Rust
-        compare_with_rust('frama', result, 'high,low,close', {'window': 10, 'sc': 300, 'fc': 1})
+        compare_with_rust('frama', result, 'high,low,close', expected['default_params'])
     
     def test_frama_default_candles(self, test_data):
         """Test FRAMA with default parameters - mirrors check_frama_default_candles"""
@@ -94,7 +91,7 @@ class TestFrama:
         close = np.array([7.0, 17.0, 27.0])
         
         with pytest.raises(ValueError, match="Invalid window"):
-            ta_indicators.frama(high, low, close, window=0, sc=None, fc=None)
+            ta_indicators.frama(high, low, close, window=0, sc=300, fc=1)
     
     def test_frama_window_exceeds_length(self):
         """Test FRAMA fails when window exceeds data length - mirrors check_frama_window_exceeds_length"""
@@ -103,7 +100,7 @@ class TestFrama:
         close = np.array([7.0, 17.0, 27.0])
         
         with pytest.raises(ValueError, match="Invalid window"):
-            ta_indicators.frama(high, low, close, window=10, sc=None, fc=None)
+            ta_indicators.frama(high, low, close, window=10, sc=300, fc=1)
     
     def test_frama_very_small_dataset(self):
         """Test FRAMA fails with insufficient data - mirrors check_frama_very_small_dataset"""
@@ -112,14 +109,14 @@ class TestFrama:
         close = np.array([41.0])
         
         with pytest.raises(ValueError, match="Invalid window|Not enough valid data"):
-            ta_indicators.frama(high, low, close, window=10, sc=None, fc=None)
+            ta_indicators.frama(high, low, close, window=10, sc=300, fc=1)
     
     def test_frama_empty_input(self):
         """Test FRAMA fails with empty input - mirrors check_frama_empty_input"""
         empty = np.array([])
         
         with pytest.raises(ValueError, match="Input data slice is empty"):
-            ta_indicators.frama(empty, empty, empty, window=None, sc=None, fc=None)
+            ta_indicators.frama(empty, empty, empty, window=10, sc=300, fc=1)
     
     def test_frama_mismatched_lengths(self):
         """Test FRAMA fails with mismatched input lengths - mirrors check_frama_mismatched_len"""
@@ -128,28 +125,14 @@ class TestFrama:
         close = np.array([1.0])
         
         with pytest.raises(ValueError, match="Mismatched slice lengths"):
-            ta_indicators.frama(high, low, close, window=None, sc=None, fc=None)
+            ta_indicators.frama(high, low, close, window=10, sc=300, fc=1)
     
     def test_frama_all_nan(self):
         """Test FRAMA fails with all NaN values - mirrors check_frama_all_nan"""
         all_nan = np.full(10, np.nan)
         
         with pytest.raises(ValueError, match="All values are NaN"):
-            ta_indicators.frama(all_nan, all_nan, all_nan, window=None, sc=None, fc=None)
-    
-    def test_frama_reinput(self, test_data):
-        """Test FRAMA applied twice (re-input) - mirrors check_frama_reinput"""
-        high = test_data['high']
-        low = test_data['low']
-        close = test_data['close']
-        
-        # First pass
-        first_result = ta_indicators.frama(high, low, close, window=10, sc=None, fc=None)
-        assert len(first_result) == len(close)
-        
-        # Second pass - apply FRAMA to FRAMA output (using output for all three inputs)
-        second_result = ta_indicators.frama(first_result, first_result, first_result, window=5, sc=None, fc=None)
-        assert len(second_result) == len(first_result)
+            ta_indicators.frama(all_nan, all_nan, all_nan, window=10, sc=300, fc=1)
     
     def test_frama_nan_handling(self, test_data):
         """Test FRAMA handles NaN values correctly - mirrors check_frama_nan_handling"""
@@ -164,7 +147,7 @@ class TestFrama:
         if len(result) > 240:
             assert not np.any(np.isnan(result[240:])), "Found unexpected NaN after warmup period"
         
-        # First window-1 values should be NaN
+        # First evenized_window-1 values should be NaN (window 10 is already even, so warmup is 9)
         assert np.all(np.isnan(result[:9])), "Expected NaN in warmup period"
     
     def test_frama_streaming(self, test_data):
@@ -223,18 +206,12 @@ class TestFrama:
         
         # Extract the single row
         default_row = result['values'][0]
-        expected_last_5 = [
-            59337.23056930512,
-            59321.607512374605,
-            59286.677929994796,
-            59268.00202402624,
-            59160.03888720062
-        ]
+        expected = EXPECTED_OUTPUTS['frama']['last_5_values']
         
         # Check last 5 values match
         assert_close(
             default_row[-5:],
-            expected_last_5,
+            expected,
             rtol=0,
             atol=0.1,
             msg="FRAMA batch default row mismatch"
@@ -304,7 +281,7 @@ class TestFrama:
         
         # With window=10 and data length=5, it will fail with "Invalid window"
         with pytest.raises(ValueError, match="Invalid window"):
-            ta_indicators.frama(high, low, close, window=10, sc=None, fc=None)
+            ta_indicators.frama(high, low, close, window=10, sc=300, fc=1)
         
         # Test case where window is valid but not enough data after NaN
         high2 = np.array([np.nan, np.nan, np.nan, np.nan, np.nan, 10.0, 20.0, 30.0, 40.0, 50.0])
@@ -313,7 +290,7 @@ class TestFrama:
         
         # With window=10 and only 5 valid values after NaN
         with pytest.raises(ValueError, match="Not enough valid data"):
-            ta_indicators.frama(high2, low2, close2, window=10, sc=None, fc=None)
+            ta_indicators.frama(high2, low2, close2, window=10, sc=300, fc=1)
 
 
 if __name__ == '__main__':

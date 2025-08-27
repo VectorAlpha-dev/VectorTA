@@ -77,7 +77,7 @@ class TestVar:
             ta_indicators.var(np.array([10.0, 20.0, 30.0]), 10)
         
         # Test very small dataset
-        with pytest.raises(ValueError, match="Not enough valid data"):
+        with pytest.raises(ValueError, match="Invalid period"):
             ta_indicators.var(np.array([42.0]), 14)
         
         # Test empty data

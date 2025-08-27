@@ -68,6 +68,8 @@ use crate::indicators::kdj::{kdj_batch_py, kdj_py, KdjStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::decycler::{decycler_batch_py, decycler_py, DecyclerStreamPy};
 #[cfg(feature = "python")]
+use crate::indicators::devstop::{devstop_batch_py, devstop_py};
+#[cfg(feature = "python")]
 use crate::indicators::dpo::{dpo_batch_py, dpo_py, DpoStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::er::{er_batch_py, er_py, ErStreamPy};
@@ -165,6 +167,8 @@ use crate::indicators::pivot::{pivot_batch_py, pivot_py, PivotStreamPy};
 use crate::indicators::rocp::{rocp_batch_py, rocp_py, RocpStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::safezonestop::{safezonestop_batch_py, safezonestop_py, SafeZoneStopStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::stoch::{stoch_batch_py, stoch_py, StochStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::stochf::{stochf_batch_py, stochf_py, StochfStreamPy};
 #[cfg(feature = "python")]
@@ -306,7 +310,7 @@ use crate::indicators::vidya::{vidya_batch_py, vidya_py, VidyaStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::willr::{willr_batch_py, willr_py, WillrStreamPy};
 #[cfg(feature = "python")]
-use crate::indicators::nvi::{nvi_py, NviStreamPy};
+use crate::indicators::nvi::{nvi_py, nvi_batch_py, NviStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::pvi::{pvi_batch_py, pvi_py, PviStreamPy};
 #[cfg(feature = "python")]
@@ -509,6 +513,7 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
 	// Register NVI functions with their user-facing names
 	m.add_function(wrap_pyfunction!(nvi_py, m)?)?;
+	m.add_function(wrap_pyfunction!(nvi_batch_py, m)?)?;
 	m.add_class::<NviStreamPy>()?;
 
 	// Register PVI functions with their user-facing names
@@ -748,6 +753,10 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(decycler_py, m)?)?;
 	m.add_function(wrap_pyfunction!(decycler_batch_py, m)?)?;
 	m.add_class::<DecyclerStreamPy>()?;
+
+	// Register DevStop functions with their user-facing names
+	m.add_function(wrap_pyfunction!(devstop_py, m)?)?;
+	m.add_function(wrap_pyfunction!(devstop_batch_py, m)?)?;
 
 	// Register DPO functions with their user-facing names
 	m.add_function(wrap_pyfunction!(dpo_py, m)?)?;
@@ -1088,6 +1097,11 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(safezonestop_py, m)?)?;
 	m.add_function(wrap_pyfunction!(safezonestop_batch_py, m)?)?;
 	m.add_class::<SafeZoneStopStreamPy>()?;
+
+	// Register Stoch functions with their user-facing names
+	m.add_function(wrap_pyfunction!(stoch_py, m)?)?;
+	m.add_function(wrap_pyfunction!(stoch_batch_py, m)?)?;
+	m.add_class::<StochStreamPy>()?;
 
 	// Register StochF functions with their user-facing names
 	m.add_function(wrap_pyfunction!(stochf_py, m)?)?;
