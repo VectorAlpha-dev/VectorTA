@@ -26,11 +26,11 @@ class TestVoss:
         return load_test_data()
     
     def test_voss_partial_params(self, test_data):
-        """Test VOSS with partial parameters (None values) - mirrors check_voss_partial_params"""
+        """Test VOSS with partial parameters (using defaults) - mirrors check_voss_partial_params"""
         close = test_data['close']
         
-        # Test with some default params (None)
-        voss_result, filt_result = ta_indicators.voss(close, period=None, predict=2, bandwidth=None)
+        # Test with only specifying predict parameter, others use defaults
+        voss_result, filt_result = ta_indicators.voss(close, predict=2)
         assert len(voss_result) == len(close)
         assert len(filt_result) == len(close)
     
@@ -113,7 +113,7 @@ class TestVoss:
         """Test VOSS fails with empty input"""
         empty = np.array([])
         
-        with pytest.raises(ValueError, match="Empty data"):
+        with pytest.raises(ValueError, match="Input data slice is empty"):
             ta_indicators.voss(empty, period=20, predict=3, bandwidth=0.25)
     
     def test_voss_reinput(self, test_data):

@@ -21,7 +21,6 @@ use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
 	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
-use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -144,6 +143,8 @@ impl MomBuilder {
 
 #[derive(Debug, Error)]
 pub enum MomError {
+	#[error("mom: Input data slice is empty.")]
+	EmptyInputData,
 	#[error("mom: All values are NaN.")]
 	AllValuesNaN,
 
@@ -159,45 +160,63 @@ pub fn mom(input: &MomInput) -> Result<MomOutput, MomError> {
 	mom_with_kernel(input, Kernel::Auto)
 }
 
-pub fn mom_with_kernel(input: &MomInput, kernel: Kernel) -> Result<MomOutput, MomError> {
-	let data: &[f64] = match &input.data {
-		MomData::Candles { candles, source } => source_type(candles, source),
-		MomData::Slice(sl) => sl,
-	};
-
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(MomError::AllValuesNaN)?;
-
+// New helper function (mirror ALMA pattern)
+#[inline(always)]
+fn mom_prepare<'a>(
+	input: &'a MomInput,
+	kernel: Kernel,
+) -> Result<(&'a [f64], usize, usize, Kernel), MomError> {
+	let data: &[f64] = input.as_ref();
 	let len = data.len();
+	if len == 0 {
+		return Err(MomError::EmptyInputData);
+	}
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(MomError::AllValuesNaN)?;
 	let period = input.get_period();
 
 	if period == 0 || period > len {
 		return Err(MomError::InvalidPeriod { period, data_len: len });
 	}
-	if (len - first) < period {
-		return Err(MomError::NotEnoughValidData {
-			needed: period,
-			valid: len - first,
+	if len - first < period {
+		return Err(MomError::NotEnoughValidData { 
+			needed: period, 
+			valid: len - first 
 		});
 	}
 
-	let warmup_period = first + period;
-	let mut out = alloc_with_nan_prefix(len, warmup_period);
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
-		other => other,
+		k => k,
 	};
+	Ok((data, period, first, chosen))
+}
 
+#[inline(always)]
+fn mom_compute_into(
+	data: &[f64],
+	period: usize,
+	first: usize,
+	kernel: Kernel,
+	out: &mut [f64],
+) {
 	unsafe {
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => mom_scalar(data, period, first, &mut out),
+		match kernel {
+			Kernel::Scalar | Kernel::ScalarBatch => mom_scalar(data, period, first, out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => mom_avx2(data, period, first, &mut out),
+			Kernel::Avx2 | Kernel::Avx2Batch => mom_avx2(data, period, first, out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => mom_avx512(data, period, first, &mut out),
+			Kernel::Avx512 | Kernel::Avx512Batch => mom_avx512(data, period, first, out),
 			_ => unreachable!(),
 		}
 	}
+}
 
+// Refactored mom_with_kernel to use the helpers
+pub fn mom_with_kernel(input: &MomInput, kernel: Kernel) -> Result<MomOutput, MomError> {
+	let (data, period, first, chosen) = mom_prepare(input, kernel)?;
+	let warm = first + period;
+	let mut out = alloc_with_nan_prefix(data.len(), warm);
+	mom_compute_into(data, period, first, chosen, &mut out);
 	Ok(MomOutput { values: out })
 }
 
@@ -405,79 +424,63 @@ fn mom_batch_inner(
 	if combos.is_empty() {
 		return Err(MomError::InvalidPeriod { period: 0, data_len: 0 });
 	}
+	let len = data.len();
+	if len == 0 {
+		return Err(MomError::EmptyInputData);
+	}
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(MomError::AllValuesNaN)?;
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-	if data.len() - first < max_p {
+	if len - first < max_p {
 		return Err(MomError::NotEnoughValidData {
 			needed: max_p,
-			valid: data.len() - first,
+			valid: len - first,
 		});
 	}
+	
 	let rows = combos.len();
-	let cols = data.len();
+	let cols = len;
 	
-	// Use uninitialized memory with proper warmup periods
+	// allocate uninit and write NaN warm prefixes
 	let mut buf_mu = make_uninit_matrix(rows, cols);
-	
-	let warm: Vec<usize> = combos
-		.iter()
-		.map(|c| first + c.period.unwrap())
-		.collect();
+	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
 	init_matrix_prefixes(&mut buf_mu, cols, &warm);
 	
-	let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
-	let values: &mut [f64] =
-		unsafe { core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len()) };
-
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-		let period = combos[row].period.unwrap();
-		match kern {
-			Kernel::Scalar => mom_row_scalar(data, first, period, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => mom_row_avx2(data, first, period, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => mom_row_avx512(data, first, period, out_row),
-			_ => unreachable!(),
-		}
+	// keep MaybeUninit for compute to avoid any UB window
+	let mut guard = core::mem::ManuallyDrop::new(buf_mu);
+	let out_mu: &mut [std::mem::MaybeUninit<f64>] = unsafe {
+		core::slice::from_raw_parts_mut(guard.as_mut_ptr(), guard.len())
 	};
-
+	
+	let simd = match kern {
+		Kernel::Auto => detect_best_batch_kernel(),
+		Kernel::Avx512Batch => Kernel::Avx512,
+		Kernel::Avx2Batch => Kernel::Avx2,
+		Kernel::ScalarBatch => Kernel::Scalar,
+		k if !k.is_batch() => k,
+		_ => unreachable!(),
+	};
+	
+	let do_row = |row: usize, row_mu: &mut [std::mem::MaybeUninit<f64>]| {
+		let period = combos[row].period.unwrap();
+		let dst = unsafe { core::slice::from_raw_parts_mut(row_mu.as_mut_ptr() as *mut f64, row_mu.len()) };
+		mom_compute_into(data, period, first, simd, dst);
+	};
+	
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
-		{
-			values
-				.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
-		}
-
+		out_mu.par_chunks_mut(cols).enumerate().for_each(|(r, mu)| do_row(r, mu));
 		#[cfg(target_arch = "wasm32")]
-		{
-			for (row, slice) in values.chunks_mut(cols).enumerate() {
-				do_row(row, slice);
-			}
-		}
+		for (r, mu) in out_mu.chunks_mut(cols).enumerate() { do_row(r, mu); }
 	} else {
-		for (row, slice) in values.chunks_mut(cols).enumerate() {
-			do_row(row, slice);
-		}
+		for (r, mu) in out_mu.chunks_mut(cols).enumerate() { do_row(r, mu); }
 	}
-
-	// Convert uninitialized memory to Vec
+	
+	// materialize Vec<f64> without copy
 	let values = unsafe {
-		Vec::from_raw_parts(
-			buf_guard.as_mut_ptr() as *mut f64,
-			buf_guard.len(),
-			buf_guard.capacity(),
-		)
+		Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, guard.len(), guard.capacity())
 	};
-	core::mem::forget(buf_guard);
-
-	Ok(MomBatchOutput {
-		values,
-		combos,
-		rows,
-		cols,
-	})
+	
+	Ok(MomBatchOutput { values, combos, rows, cols })
 }
 
 #[inline(always)]
@@ -528,27 +531,29 @@ pub fn mom_batch_inner_into(
 	if combos.is_empty() {
 		return Err(MomError::InvalidPeriod { period: 0, data_len: 0 });
 	}
-	
+	let len = data.len();
+	if len == 0 {
+		return Err(MomError::EmptyInputData);
+	}
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(MomError::AllValuesNaN)?;
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-	if data.len() - first < max_p {
+	if len - first < max_p {
 		return Err(MomError::NotEnoughValidData {
 			needed: max_p,
-			valid: data.len() - first,
+			valid: len - first,
 		});
 	}
 	
 	let rows = combos.len();
-	let cols = data.len();
+	let cols = len;
+	assert_eq!(output.len(), rows * cols, "output length mismatch");
 	
-	// Initialize warmup periods with NaN
-	for (row, combo) in combos.iter().enumerate() {
-		let warmup = first + combo.period.unwrap();
-		let row_start = row * cols;
-		for i in 0..warmup {
-			output[row_start + i] = f64::NAN;
-		}
-	}
+	// view caller buffer as MaybeUninit and write NaN warm prefixes via helper
+	let out_mu: &mut [std::mem::MaybeUninit<f64>] = unsafe {
+		core::slice::from_raw_parts_mut(output.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>, output.len())
+	};
+	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
+	init_matrix_prefixes(out_mu, cols, &warm);
 	
 	let simd = match kern {
 		Kernel::Auto => detect_best_batch_kernel(),
@@ -559,37 +564,19 @@ pub fn mom_batch_inner_into(
 		_ => unreachable!(),
 	};
 	
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+	let do_row = |row: usize, row_mu: &mut [std::mem::MaybeUninit<f64>]| {
 		let period = combos[row].period.unwrap();
-		match simd {
-			Kernel::Scalar => mom_row_scalar(data, first, period, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => mom_row_avx2(data, first, period, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => mom_row_avx512(data, first, period, out_row),
-			_ => unreachable!(),
-		}
+		let dst = unsafe { core::slice::from_raw_parts_mut(row_mu.as_mut_ptr() as *mut f64, row_mu.len()) };
+		mom_compute_into(data, period, first, simd, dst);
 	};
 	
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
-		{
-			output
-				.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
-		}
-		
+		out_mu.par_chunks_mut(cols).enumerate().for_each(|(r, mu)| do_row(r, mu));
 		#[cfg(target_arch = "wasm32")]
-		{
-			for (row, slice) in output.chunks_mut(cols).enumerate() {
-				do_row(row, slice);
-			}
-		}
+		for (r, mu) in out_mu.chunks_mut(cols).enumerate() { do_row(r, mu); }
 	} else {
-		for (row, slice) in output.chunks_mut(cols).enumerate() {
-			do_row(row, slice);
-		}
+		for (r, mu) in out_mu.chunks_mut(cols).enumerate() { do_row(r, mu); }
 	}
 	
 	Ok(combos)
@@ -1158,55 +1145,19 @@ mod tests {
 /// Core helper for zero-allocation WASM API
 /// Writes directly to output slice - no intermediate allocations
 #[inline(always)]
-pub fn mom_into_slice(dst: &mut [f64], input: &MomInput, kern: Kernel) -> Result<(), MomError> {
-	let data: &[f64] = match &input.data {
-		MomData::Candles { candles, source } => source_type(candles, source),
-		MomData::Slice(sl) => sl,
-	};
-
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(MomError::AllValuesNaN)?;
-	let len = data.len();
-	let period = input.get_period();
-
-	if period == 0 || period > len {
-		return Err(MomError::InvalidPeriod { period, data_len: len });
-	}
-	if (len - first) < period {
-		return Err(MomError::NotEnoughValidData {
-			needed: period,
-			valid: len - first,
-		});
-	}
-	
+pub fn mom_into_slice(dst: &mut [f64], input: &MomInput, kernel: Kernel) -> Result<(), MomError> {
+	let (data, period, first, chosen) = mom_prepare(input, kernel)?;
 	if dst.len() != data.len() {
 		return Err(MomError::InvalidPeriod { 
 			period: dst.len(), 
 			data_len: data.len() 
 		});
 	}
-
-	let warmup_period = first + period;
-	let chosen = match kern {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
-
-	// Fill warmup with NaN
-	for v in &mut dst[..warmup_period] {
+	let warm = first + period;
+	for v in &mut dst[..warm] {
 		*v = f64::NAN;
 	}
-
-	unsafe {
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => mom_scalar(data, period, first, dst),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => mom_avx2(data, period, first, dst),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => mom_avx512(data, period, first, dst),
-			_ => unreachable!(),
-		}
-	}
-
+	mom_compute_into(data, period, first, chosen, dst);
 	Ok(())
 }
 

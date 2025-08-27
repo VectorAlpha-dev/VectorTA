@@ -30,9 +30,7 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-use aligned_vec::{AVec, CACHELINE_ALIGN};
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-use core::arch::x86_64::*;
+// AVec and CACHELINE_ALIGN removed - not needed with current implementation
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -40,13 +38,12 @@ use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyList};
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
-#[cfg(not(target_arch = "wasm32"))]
-use rayon::prelude::*;
+// rayon imported inline where needed
 use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
@@ -158,6 +155,8 @@ pub enum KdjError {
 	NotEnoughValidData { needed: usize, valid: usize },
 	#[error("kdj: All values are NaN.")]
 	AllValuesNaN,
+	#[error("kdj: Buffer size mismatch: expected = {expected}, got = {got}")]
+	BufferSizeMismatch { expected: usize, got: usize },
 	#[error("kdj: Rolling error {0}")]
 	RollingError(#[from] RollingError),
 	#[error("kdj: MA error {0}")]
@@ -325,6 +324,137 @@ pub fn kdj_scalar(
 	Ok(KdjOutput { k, d, j })
 }
 
+// =========== In-place Core API ===========
+
+#[inline]
+pub fn kdj_into_slices(
+	k_out: &mut [f64],
+	d_out: &mut [f64],
+	j_out: &mut [f64],
+	input: &KdjInput,
+	kern: Kernel,
+) -> Result<(), KdjError> {
+	let (high, low, close) = match &input.data {
+		KdjData::Candles { candles } => (
+			source_type(candles, "high"),
+			source_type(candles, "low"),
+			source_type(candles, "close"),
+		),
+		KdjData::Slices { high, low, close } => (*high, *low, *close),
+	};
+	if high.is_empty() || low.is_empty() || close.is_empty() {
+		return Err(KdjError::EmptyData);
+	}
+	let len = high.len();
+	if k_out.len() != len {
+		return Err(KdjError::BufferSizeMismatch { expected: len, got: k_out.len() });
+	}
+	if d_out.len() != len {
+		return Err(KdjError::BufferSizeMismatch { expected: len, got: d_out.len() });
+	}
+	if j_out.len() != len {
+		return Err(KdjError::BufferSizeMismatch { expected: len, got: j_out.len() });
+	}
+
+	let fast_k = input.get_fast_k_period();
+	if fast_k == 0 || fast_k > len {
+		return Err(KdjError::InvalidPeriod { period: fast_k, data_len: len });
+	}
+
+	let first = high.iter()
+		.zip(low.iter()).zip(close.iter())
+		.position(|((&h,&l),&c)| !h.is_nan() && !l.is_nan() && !c.is_nan())
+		.ok_or(KdjError::AllValuesNaN)?;
+
+	if len - first < fast_k {
+		return Err(KdjError::NotEnoughValidData { needed: fast_k, valid: len - first });
+	}
+
+	let slow_k = input.get_slow_k_period();
+	let slow_d = input.get_slow_d_period();
+	let slow_k_ma = input.get_slow_k_ma_type();
+	let slow_d_ma = input.get_slow_d_ma_type();
+
+	let chosen = match kern { Kernel::Auto => detect_best_kernel(), k => k };
+
+	match chosen {
+		Kernel::Scalar | Kernel::ScalarBatch => {
+			kdj_compute_into_scalar(
+				high, low, close, first,
+				fast_k, slow_k, slow_k_ma, slow_d, slow_d_ma,
+				k_out, d_out, j_out,
+			)
+		}
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx2 | Kernel::Avx2Batch => {
+			// TODO: Implement AVX2-specific compute_into function
+			// For now, fall back to scalar
+			kdj_compute_into_scalar(
+				high, low, close, first,
+				fast_k, slow_k, slow_k_ma, slow_d, slow_d_ma,
+				k_out, d_out, j_out,
+			)
+		}
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx512 | Kernel::Avx512Batch => {
+			// TODO: Implement AVX512-specific compute_into function
+			// For now, fall back to scalar
+			kdj_compute_into_scalar(
+				high, low, close, first,
+				fast_k, slow_k, slow_k_ma, slow_d, slow_d_ma,
+				k_out, d_out, j_out,
+			)
+		}
+		_ => {
+			// Fallback for non-x86_64 or when nightly-avx is not enabled
+			kdj_compute_into_scalar(
+				high, low, close, first,
+				fast_k, slow_k, slow_k_ma, slow_d, slow_d_ma,
+				k_out, d_out, j_out,
+			)
+		}
+	}
+}
+
+#[inline]
+fn kdj_compute_into_scalar(
+	high: &[f64], low: &[f64], close: &[f64], first: usize,
+	fast_k: usize, slow_k: usize, slow_k_ma: &str, slow_d: usize, slow_d_ma: &str,
+	k_out: &mut [f64], d_out: &mut [f64], j_out: &mut [f64],
+) -> Result<(), KdjError> {
+	let hh = max_rolling(high, fast_k)?;
+	let ll = min_rolling(low,  fast_k)?;
+
+	let stoch_warm = first + fast_k - 1;
+	let mut stoch = alloc_with_nan_prefix(high.len(), stoch_warm);
+	for i in stoch_warm..high.len() {
+		let denom = hh[i] - ll[i];
+		stoch[i] = if denom == 0.0 || denom.is_nan() {
+			f64::NAN
+		} else {
+			100.0 * ((close[i] - ll[i]) / denom)
+		};
+	}
+
+	// Unavoidable Vecs from dynamic MA selection.
+	let k_vec = ma(slow_k_ma, MaData::Slice(&stoch), slow_k)
+		.map_err(|e| KdjError::MaError(e.to_string().into()))?;
+	let d_vec = ma(slow_d_ma, MaData::Slice(&k_vec), slow_d)
+		.map_err(|e| KdjError::MaError(e.to_string().into()))?;
+
+	// Copy once into caller's buffers.
+	k_out.copy_from_slice(&k_vec);
+	d_out.copy_from_slice(&d_vec);
+
+	// J warmup equals D warmup.
+	let j_warm = stoch_warm + slow_k - 1 + slow_d - 1;
+	for i in 0..j_warm.min(j_out.len()) { j_out[i] = f64::NAN; }
+	for i in j_warm..j_out.len() {
+		j_out[i] = if k_out[i].is_nan() || d_out[i].is_nan() { f64::NAN } else { 3.0*k_out[i] - 2.0*d_out[i] };
+	}
+	Ok(())
+}
+
 // =========== SIMD Stubs ===========
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -383,6 +513,7 @@ pub fn kdj_avx2(
 	slow_d_ma_type: &str,
 	first_valid_idx: usize,
 ) -> Result<KdjOutput, KdjError> {
+	// TODO: Implement actual AVX2 SIMD optimizations for KDJ calculation
 	// AVX2 stub, points to scalar
 	kdj_scalar(
 		high,
@@ -410,6 +541,7 @@ pub unsafe fn kdj_avx512_short(
 	slow_d_ma_type: &str,
 	first_valid_idx: usize,
 ) -> Result<KdjOutput, KdjError> {
+	// TODO: Implement actual AVX512 SIMD optimizations for KDJ calculation (short period)
 	// AVX512 short stub, points to scalar
 	kdj_scalar(
 		high,
@@ -437,6 +569,7 @@ pub unsafe fn kdj_avx512_long(
 	slow_d_ma_type: &str,
 	first_valid_idx: usize,
 ) -> Result<KdjOutput, KdjError> {
+	// TODO: Implement actual AVX512 SIMD optimizations for KDJ calculation (long period)
 	// AVX512 long stub, points to scalar
 	kdj_scalar(
 		high,
@@ -595,6 +728,13 @@ pub struct KdjStream {
 	close_buf: Vec<f64>,
 	head: usize,
 	filled: bool,
+	// Rolling buffers for smoothing
+	stoch_buf: Vec<f64>,  // For slow K smoothing
+	k_buf: Vec<f64>,       // For slow D smoothing
+	stoch_idx: usize,
+	k_idx: usize,
+	stoch_filled: bool,
+	k_filled: bool,
 }
 
 impl KdjStream {
@@ -622,6 +762,12 @@ impl KdjStream {
 			close_buf: vec![f64::NAN; fast_k_period],
 			head: 0,
 			filled: false,
+			stoch_buf: vec![f64::NAN; slow_k_period],
+			k_buf: vec![f64::NAN; slow_d_period],
+			stoch_idx: 0,
+			k_idx: 0,
+			stoch_filled: false,
+			k_filled: false,
 		})
 	}
 
@@ -647,10 +793,44 @@ impl KdjStream {
 			100.0 * ((close - ll) / (hh - ll))
 		};
 
-		// Streaming K/D via SMA (can be improved for EMA if needed)
-		// For now, not stateful. Only last value available.
-		let k = stoch;
-		let d = k;
+		// Update stoch buffer for slow K smoothing
+		self.stoch_buf[self.stoch_idx] = stoch;
+		self.stoch_idx = (self.stoch_idx + 1) % self.slow_k_period;
+		if !self.stoch_filled && self.stoch_idx == 0 {
+			self.stoch_filled = true;
+		}
+		if !self.stoch_filled {
+			return None;
+		}
+
+		// Calculate K using SMA of stoch (for now, EMA can be added later)
+		let k = if self.slow_k_ma_type == "sma" {
+			self.stoch_buf.iter().sum::<f64>() / self.slow_k_period as f64
+		} else {
+			// For now, fall back to SMA for other MA types
+			// TODO: Implement EMA and other MA types with proper state
+			self.stoch_buf.iter().sum::<f64>() / self.slow_k_period as f64
+		};
+
+		// Update k buffer for slow D smoothing
+		self.k_buf[self.k_idx] = k;
+		self.k_idx = (self.k_idx + 1) % self.slow_d_period;
+		if !self.k_filled && self.k_idx == 0 {
+			self.k_filled = true;
+		}
+		if !self.k_filled {
+			return None;
+		}
+
+		// Calculate D using SMA of K
+		let d = if self.slow_d_ma_type == "sma" {
+			self.k_buf.iter().sum::<f64>() / self.slow_d_period as f64
+		} else {
+			// For now, fall back to SMA for other MA types
+			// TODO: Implement EMA and other MA types with proper state
+			self.k_buf.iter().sum::<f64>() / self.slow_d_period as f64
+		};
+
 		let j = 3.0 * k - 2.0 * d;
 		Some((k, d, j))
 	}
@@ -906,112 +1086,93 @@ fn kdj_batch_inner(
 	init_matrix_prefixes(&mut d_mu, cols, &warmup_periods);
 	init_matrix_prefixes(&mut j_mu, cols, &warmup_periods);
 	
-	// Convert to regular Vec for processing
+	// Safe &mut [f64] views over MaybeUninit<f64>
 	let mut k_guard = core::mem::ManuallyDrop::new(k_mu);
 	let mut d_guard = core::mem::ManuallyDrop::new(d_mu);
 	let mut j_guard = core::mem::ManuallyDrop::new(j_mu);
-	
-	let k_vals = unsafe { &mut *(&mut **k_guard as *mut [MaybeUninit<f64>] as *mut [f64]) };
-	let d_vals = unsafe { &mut *(&mut **d_guard as *mut [MaybeUninit<f64>] as *mut [f64]) };
-	let j_vals = unsafe { &mut *(&mut **j_guard as *mut [MaybeUninit<f64>] as *mut [f64]) };
 
-	let do_row = |row: usize, out_k: &mut [f64], out_d: &mut [f64], out_j: &mut [f64]| unsafe {
+	let k_vals: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(k_guard.as_mut_ptr() as *mut f64, k_guard.len())
+	};
+	let d_vals: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(d_guard.as_mut_ptr() as *mut f64, d_guard.len())
+	};
+	let j_vals: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(j_guard.as_mut_ptr() as *mut f64, j_guard.len())
+	};
+
+	let chosen = match kern { Kernel::Auto => detect_best_batch_kernel(), k => k };
+
+	let do_row = |row: usize, out_k: &mut [f64], out_d: &mut [f64], out_j: &mut [f64]| -> Result<(), KdjError> {
 		let prm = &combos[row];
-		let res = kdj_row_scalar(
-			high,
-			low,
-			close,
-			first,
-			prm.fast_k_period.unwrap(),
-			prm.slow_k_period.unwrap(),
-			prm.slow_k_ma_type.as_deref().unwrap_or("sma"),
-			prm.slow_d_period.unwrap(),
-			prm.slow_d_ma_type.as_deref().unwrap_or("sma"),
-			out_k,
-			out_d,
-			out_j,
-		);
-		res
+		let fast_k = prm.fast_k_period.unwrap();
+		let slow_k = prm.slow_k_period.unwrap();
+		let slow_k_ma = prm.slow_k_ma_type.as_deref().unwrap_or("sma");
+		let slow_d = prm.slow_d_period.unwrap();
+		let slow_d_ma = prm.slow_d_ma_type.as_deref().unwrap_or("sma");
+		
+		// Use the chosen kernel for batch processing
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => {
+				kdj_row_scalar(high, low, close, first, fast_k, slow_k, slow_k_ma, slow_d, slow_d_ma, out_k, out_d, out_j)
+			}
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => unsafe {
+				kdj_row_avx2(high, low, close, first, fast_k, slow_k, slow_k_ma, slow_d, slow_d_ma, out_k, out_d, out_j)
+			}
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => unsafe {
+				kdj_row_avx512(high, low, close, first, fast_k, slow_k, slow_k_ma, slow_d, slow_d_ma, out_k, out_d, out_j)
+			}
+			_ => {
+				kdj_row_scalar(high, low, close, first, fast_k, slow_k, slow_k_ma, slow_d, slow_d_ma, out_k, out_d, out_j)
+			}
+		}
 	};
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			k_vals
-				.par_chunks_mut(cols)
+			use rayon::prelude::*;
+			k_vals.par_chunks_mut(cols)
 				.zip(d_vals.par_chunks_mut(cols))
 				.zip(j_vals.par_chunks_mut(cols))
 				.enumerate()
-				.for_each(|(row, ((out_k, out_d), out_j))| {
-					let _ = do_row(row, out_k, out_d, out_j);
-				});
+				.try_for_each(|(row, ((ok, od), oj))| do_row(row, ok, od, oj))?;
 		}
 		#[cfg(target_arch = "wasm32")]
 		{
-			for (row, ((out_k, out_d), out_j)) in k_vals
+			for (row, ((ok, od), oj)) in k_vals
 				.chunks_mut(cols)
 				.zip(d_vals.chunks_mut(cols))
 				.zip(j_vals.chunks_mut(cols))
 				.enumerate()
 			{
-				let _ = do_row(row, out_k, out_d, out_j);
+				do_row(row, ok, od, oj)?;
 			}
 		}
 	} else {
-		for (row, ((out_k, out_d), out_j)) in k_vals
+		for (row, ((ok, od), oj)) in k_vals
 			.chunks_mut(cols)
 			.zip(d_vals.chunks_mut(cols))
 			.zip(j_vals.chunks_mut(cols))
 			.enumerate()
 		{
-			let _ = do_row(row, out_k, out_d, out_j);
+			do_row(row, ok, od, oj)?;
 		}
 	}
 	
-	// Convert ManuallyDrop back to Vec
-	let k_vec = unsafe {
-		let vec = Vec::from_raw_parts(
-			(&mut **k_guard).as_mut_ptr() as *mut f64,
-			rows * cols,
-			rows * cols,
-		);
-		core::mem::forget(k_guard);
-		vec
-	};
+	// Move out Vec<f64> without copy
+	let k_vec = unsafe { Vec::from_raw_parts(k_guard.as_mut_ptr() as *mut f64, k_guard.len(), k_guard.capacity()) };
+	let d_vec = unsafe { Vec::from_raw_parts(d_guard.as_mut_ptr() as *mut f64, d_guard.len(), d_guard.capacity()) };
+	let j_vec = unsafe { Vec::from_raw_parts(j_guard.as_mut_ptr() as *mut f64, j_guard.len(), j_guard.capacity()) };
 	
-	let d_vec = unsafe {
-		let vec = Vec::from_raw_parts(
-			(&mut **d_guard).as_mut_ptr() as *mut f64,
-			rows * cols,
-			rows * cols,
-		);
-		core::mem::forget(d_guard);
-		vec
-	};
-	
-	let j_vec = unsafe {
-		let vec = Vec::from_raw_parts(
-			(&mut **j_guard).as_mut_ptr() as *mut f64,
-			rows * cols,
-			rows * cols,
-		);
-		core::mem::forget(j_guard);
-		vec
-	};
-	
-	Ok(KdjBatchOutput {
-		k: k_vec,
-		d: d_vec,
-		j: j_vec,
-		combos,
-		rows,
-		cols,
-	})
+	Ok(KdjBatchOutput { k: k_vec, d: d_vec, j: j_vec, combos, rows, cols })
 }
 
 // ========== Row Scalar/AVX ==========
 
 #[inline(always)]
-unsafe fn kdj_row_scalar(
+fn kdj_row_scalar(
 	high: &[f64],
 	low: &[f64],
 	close: &[f64],
@@ -1025,42 +1186,13 @@ unsafe fn kdj_row_scalar(
 	out_d: &mut [f64],
 	out_j: &mut [f64],
 ) -> Result<(), KdjError> {
-	let hh = max_rolling(high, fast_k_period)?;
-	let ll = min_rolling(low, fast_k_period)?;
-	
-	// Calculate warmup period for stoch
-	let stoch_warmup = first + fast_k_period - 1;
-	
-	// Use alloc_with_nan_prefix instead of vec!
-	let mut stoch = alloc_with_nan_prefix(high.len(), stoch_warmup);
-	for i in stoch_warmup..high.len() {
-		let denom = hh[i] - ll[i];
-		if denom == 0.0 || denom.is_nan() {
-			stoch[i] = f64::NAN;
-		} else {
-			stoch[i] = 100.0 * ((close[i] - ll[i]) / denom);
-		}
-	}
-	
-	// MA calls return Vec<f64> - unavoidable for dynamic MA selection
-	let k = ma(slow_k_ma_type, MaData::Slice(&stoch), slow_k_period)
-		.map_err(|e| KdjError::MaError(e.to_string().into()))?;
-	let d =
-		ma(slow_d_ma_type, MaData::Slice(&k), slow_d_period).map_err(|e| KdjError::MaError(e.to_string().into()))?;
-	
-	// Copy to output buffers
-	out_k.copy_from_slice(&k);
-	out_d.copy_from_slice(&d);
-	
-	// Calculate J values directly into output
-	for i in 0..high.len() {
-		out_j[i] = if k[i].is_nan() || d[i].is_nan() {
-			f64::NAN
-		} else {
-			3.0 * k[i] - 2.0 * d[i]
-		};
-	}
-	Ok(())
+	// Delegate to the new kdj_compute_into_scalar function
+	kdj_compute_into_scalar(
+		high, low, close, first,
+		fast_k_period, slow_k_period, slow_k_ma_type,
+		slow_d_period, slow_d_ma_type,
+		out_k, out_d, out_j,
+	)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1079,6 +1211,7 @@ unsafe fn kdj_row_avx2(
 	out_d: &mut [f64],
 	out_j: &mut [f64],
 ) -> Result<(), KdjError> {
+	// TODO: Implement actual AVX2 SIMD optimizations for batch row processing
 	kdj_row_scalar(
 		high,
 		low,
@@ -1160,6 +1293,7 @@ unsafe fn kdj_row_avx512_short(
 	out_d: &mut [f64],
 	out_j: &mut [f64],
 ) -> Result<(), KdjError> {
+	// TODO: Implement actual AVX512 SIMD optimizations for batch row processing (short period)
 	kdj_row_scalar(
 		high,
 		low,
@@ -1192,6 +1326,7 @@ unsafe fn kdj_row_avx512_long(
 	out_d: &mut [f64],
 	out_j: &mut [f64],
 ) -> Result<(), KdjError> {
+	// TODO: Implement actual AVX512 SIMD optimizations for batch row processing (long period)
 	kdj_row_scalar(
 		high,
 		low,
@@ -2373,16 +2508,11 @@ pub fn kdj_py<'py>(
 	slow_d_ma_type: &str,
 	kernel: Option<&str>,
 ) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
-	let high_slice = high.as_slice()?;
-	let low_slice = low.as_slice()?;
-	let close_slice = close.as_slice()?;
-	let kern = validate_kernel(kernel, false)?;
+	use numpy::PyArray1;
 
-	// Validate inputs have same length
-	if high_slice.len() != low_slice.len() || high_slice.len() != close_slice.len() {
-		return Err(PyValueError::new_err("High, low, and close arrays must have the same length"));
-	}
-
+	let h = high.as_slice()?;
+	let l = low.as_slice()?;
+	let c = close.as_slice()?;
 	let params = KdjParams {
 		fast_k_period: Some(fast_k_period),
 		slow_k_period: Some(slow_k_period),
@@ -2390,22 +2520,22 @@ pub fn kdj_py<'py>(
 		slow_d_period: Some(slow_d_period),
 		slow_d_ma_type: Some(slow_d_ma_type.to_string()),
 	};
-	let input = KdjInput::from_slices(high_slice, low_slice, close_slice, params);
+	let inp = KdjInput::from_slices(h, l, c, params);
+	let kern = validate_kernel(kernel, false)?;
 
-	// Get Vec<f64> from Rust function
-	let (k_vec, d_vec, j_vec) = py
-		.allow_threads(|| {
-			kdj_with_kernel(&input, kern)
-				.map(|output| (output.k, output.d, output.j))
-		})
+	let (rows, cols) = (1, c.len());
+	let k_arr = unsafe { PyArray1::<f64>::new(py, [rows*cols], false) };
+	let d_arr = unsafe { PyArray1::<f64>::new(py, [rows*cols], false) };
+	let j_arr = unsafe { PyArray1::<f64>::new(py, [rows*cols], false) };
+
+	let k_slice = unsafe { k_arr.as_slice_mut()? };
+	let d_slice = unsafe { d_arr.as_slice_mut()? };
+	let j_slice = unsafe { j_arr.as_slice_mut()? };
+
+	py.allow_threads(|| kdj_into_slices(k_slice, d_slice, j_slice, &inp, kern))
 		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-	// Zero-copy transfer to NumPy
-	Ok((
-		k_vec.into_pyarray(py),
-		d_vec.into_pyarray(py),
-		j_vec.into_pyarray(py),
-	))
+	Ok((k_arr, d_arr, j_arr))
 }
 
 #[cfg(feature = "python")]
@@ -2443,215 +2573,101 @@ impl KdjStreamPy {
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "kdj_batch")]
-#[pyo3(signature = (high, low, close, fast_k_period_range, slow_k_period_range=(3, 3, 0), slow_k_ma_type="sma", slow_d_period_range=(3, 3, 0), slow_d_ma_type="sma", kernel=None))]
+#[pyo3(signature = (high, low, close,
+                    fast_k_range, slow_k_range, slow_k_ma_type,
+                    slow_d_range, slow_d_ma_type, kernel=None))]
 pub fn kdj_batch_py<'py>(
 	py: Python<'py>,
 	high: PyReadonlyArray1<'py, f64>,
 	low: PyReadonlyArray1<'py, f64>,
 	close: PyReadonlyArray1<'py, f64>,
-	fast_k_period_range: (usize, usize, usize),
-	slow_k_period_range: (usize, usize, usize),
+	fast_k_range: (usize, usize, usize),
+	slow_k_range: (usize, usize, usize),
 	slow_k_ma_type: &str,
-	slow_d_period_range: (usize, usize, usize),
+	slow_d_range: (usize, usize, usize),
 	slow_d_ma_type: &str,
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
-	let high_slice = high.as_slice()?;
-	let low_slice = low.as_slice()?;
-	let close_slice = close.as_slice()?;
+	use numpy::{PyArray1, PyArrayMethods};
 
-	// Validate inputs have same length
-	if high_slice.len() != low_slice.len() || high_slice.len() != close_slice.len() {
-		return Err(PyValueError::new_err("High, low, and close arrays must have the same length"));
-	}
+	let h = high.as_slice()?;
+	let l = low.as_slice()?;
+	let c = close.as_slice()?;
 
-	let sweep = KdjBatchRange {
-		fast_k_period: fast_k_period_range,
-		slow_k_period: slow_k_period_range,
+	let range = KdjBatchRange {
+		fast_k_period: fast_k_range,
+		slow_k_period: slow_k_range,
 		slow_k_ma_type: (slow_k_ma_type.to_string(), slow_k_ma_type.to_string(), "".to_string()),
-		slow_d_period: slow_d_period_range,
+		slow_d_period: slow_d_range,
 		slow_d_ma_type: (slow_d_ma_type.to_string(), slow_d_ma_type.to_string(), "".to_string()),
 	};
 
-	let combos = expand_grid(&sweep);
-	let rows = combos.len();
-	let cols = high_slice.len();
-
-	// Pre-allocate output arrays
-	let k_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-	let d_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-	let j_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-	let k_slice = unsafe { k_arr.as_slice_mut()? };
-	let d_slice = unsafe { d_arr.as_slice_mut()? };
-	let j_slice = unsafe { j_arr.as_slice_mut()? };
-
 	let kern = validate_kernel(kernel, true)?;
+	let combos;
+	let rows;
+	let cols = c.len();
 
-	// Compute without GIL
-	let combos = py
-		.allow_threads(|| {
-			let kernel = match kern {
-				Kernel::Auto => detect_best_batch_kernel(),
-				k => k,
-			};
-			let simd = match kernel {
-				Kernel::Avx512Batch => Kernel::Avx512,
-				Kernel::Avx2Batch => Kernel::Avx2,
-				Kernel::ScalarBatch => Kernel::Scalar,
-				_ => kernel,
-			};
+	let k_arr = unsafe { PyArray1::<f64>::new(py, [1], false) }; // placeholder shape
+	let d_arr = unsafe { PyArray1::<f64>::new(py, [1], false) };
+	let j_arr = unsafe { PyArray1::<f64>::new(py, [1], false) };
 
-			// Use the batch function to compute all combinations
-			let result = kdj_batch_with_kernel(high_slice, low_slice, close_slice, &sweep, kernel)?;
-			
-			// Copy results to pre-allocated arrays
-			k_slice.copy_from_slice(&result.k);
-			d_slice.copy_from_slice(&result.d);
-			j_slice.copy_from_slice(&result.j);
+	let (k_vec, d_vec, j_vec, cmbs, rws) = py.allow_threads(|| {
+		// Use the batch helper that allocates with make_uninit_matrix and returns Vecs without extra copy.
+		let out = kdj_batch_inner(h, l, c, &range, match kern {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch   => Kernel::Avx2,
+			Kernel::ScalarBatch => Kernel::Scalar,
+			Kernel::Auto => detect_best_batch_kernel(),
+			_ => kern,
+		}, true)?;
+		Ok::<_, KdjError>((out.k, out.d, out.j, out.combos, out.rows))
+	}).map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-			Ok::<Vec<KdjParams>, KdjError>(result.combos)
-		})
-		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	combos = cmbs; rows = rws;
 
-	// Build result dictionary
+	let k_arr = k_vec.into_pyarray(py).reshape((rows, cols))?;
+	let d_arr = d_vec.into_pyarray(py).reshape((rows, cols))?;
+	let j_arr = j_vec.into_pyarray(py).reshape((rows, cols))?;
+
 	let dict = PyDict::new(py);
-	dict.set_item("k_values", k_arr.reshape((rows, cols))?)?;
-	dict.set_item("d_values", d_arr.reshape((rows, cols))?)?;
-	dict.set_item("j_values", j_arr.reshape((rows, cols))?)?;
+	dict.set_item("k", k_arr)?; 
+	dict.set_item("d", d_arr)?; 
+	dict.set_item("j", j_arr)?;
+	dict.set_item("fast_k_periods", combos.iter().map(|p| p.fast_k_period.unwrap()).collect::<Vec<_>>().into_pyarray(py))?;
+	dict.set_item("slow_k_periods", combos.iter().map(|p| p.slow_k_period.unwrap()).collect::<Vec<_>>().into_pyarray(py))?;
+	dict.set_item("slow_d_periods", combos.iter().map(|p| p.slow_d_period.unwrap()).collect::<Vec<_>>().into_pyarray(py))?;
 	
-	// Add parameter arrays
-	dict.set_item(
-		"fast_k_periods",
-		combos
-			.iter()
-			.map(|p| p.fast_k_period.unwrap() as u64)
-			.collect::<Vec<_>>()
-			.into_pyarray(py),
-	)?;
-	dict.set_item(
-		"slow_k_periods",
-		combos
-			.iter()
-			.map(|p| p.slow_k_period.unwrap() as u64)
-			.collect::<Vec<_>>()
-			.into_pyarray(py),
-	)?;
-	dict.set_item(
-		"slow_d_periods",
-		combos
-			.iter()
-			.map(|p| p.slow_d_period.unwrap() as u64)
-			.collect::<Vec<_>>()
-			.into_pyarray(py),
-	)?;
-
+	// Add full combos for API parity with ALMA
+	let combo_list = PyList::new(py, combos.iter().map(|c| {
+		let combo_dict = PyDict::new(py);
+		combo_dict.set_item("fast_k_period", c.fast_k_period.unwrap()).unwrap();
+		combo_dict.set_item("slow_k_period", c.slow_k_period.unwrap()).unwrap();
+		combo_dict.set_item("slow_k_ma_type", c.slow_k_ma_type.as_ref().unwrap().as_str()).unwrap();
+		combo_dict.set_item("slow_d_period", c.slow_d_period.unwrap()).unwrap();
+		combo_dict.set_item("slow_d_ma_type", c.slow_d_ma_type.as_ref().unwrap().as_str()).unwrap();
+		combo_dict
+	}))?;
+	dict.set_item("combos", combo_list)?;
+	
 	Ok(dict)
 }
 
 // ========== WASM Bindings ==========
 
-/// Helper function for zero-allocation WASM implementation
-/// Writes K, D, J values directly to output slices without intermediate allocations
-pub fn kdj_into_slice(
-	k_dst: &mut [f64],
-	d_dst: &mut [f64],
-	j_dst: &mut [f64],
-	input: &KdjInput,
-	kern: Kernel,
-) -> Result<(), KdjError> {
-	// Get the data slices
-	let (high, low, close, first_valid_idx) = match &input.data {
-		KdjData::Candles { candles } => {
-			let high = source_type(candles, "high");
-			let low = source_type(candles, "low");
-			let close = source_type(candles, "close");
-			// Find first index where all three values are valid
-			let first_valid_idx = high.iter()
-				.zip(low.iter())
-				.zip(close.iter())
-				.position(|((&h, &l), &c)| !h.is_nan() && !l.is_nan() && !c.is_nan())
-				.ok_or(KdjError::AllValuesNaN)?;
-			(high, low, close, first_valid_idx)
-		}
-		KdjData::Slices { high, low, close } => {
-			// Find first index where all three values are valid
-			let first_valid_idx = high.iter()
-				.zip(low.iter())
-				.zip(close.iter())
-				.position(|((&h, &l), &c)| !h.is_nan() && !l.is_nan() && !c.is_nan())
-				.ok_or(KdjError::AllValuesNaN)?;
-			(*high, *low, *close, first_valid_idx)
-		}
-	};
-
-	// Validate output slice lengths
-	if k_dst.len() != high.len() || d_dst.len() != high.len() || j_dst.len() != high.len() {
-		return Err(KdjError::InvalidPeriod {
-			period: k_dst.len(),
-			data_len: high.len(),
-		});
-	}
-
-	// Get parameters
-	let fast_k_period = input.params.fast_k_period.unwrap_or(9);
-	let slow_k_period = input.params.slow_k_period.unwrap_or(3);
-	let slow_k_ma_type = input.params.slow_k_ma_type.as_deref().unwrap_or("sma");
-	let slow_d_period = input.params.slow_d_period.unwrap_or(3);
-	let slow_d_ma_type = input.params.slow_d_ma_type.as_deref().unwrap_or("sma");
-
-	// Calculate using scalar implementation (most compatible for WASM)
-	let result = kdj_scalar(
-		high,
-		low,
-		close,
-		fast_k_period,
-		slow_k_period,
-		slow_k_ma_type,
-		slow_d_period,
-		slow_d_ma_type,
-		first_valid_idx,
-	)?;
-
-	// Copy results to output slices
-	k_dst.copy_from_slice(&result.k);
-	d_dst.copy_from_slice(&result.d);
-	j_dst.copy_from_slice(&result.j);
-
-	// Calculate warmup periods
-	let k_warmup = first_valid_idx + fast_k_period + slow_k_period - 2;
-	let d_warmup = k_warmup + slow_d_period - 1;
-	
-	// Fill warmup periods with NaN
-	for i in 0..k_warmup.min(k_dst.len()) {
-		k_dst[i] = f64::NAN;
-	}
-	for i in 0..d_warmup.min(d_dst.len()) {
-		d_dst[i] = f64::NAN;
-		j_dst[i] = f64::NAN;
-	}
-
-	Ok(())
-}
-
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
-pub struct KdjResult {
-	pub values: Vec<f64>, // Flattened array: [k_values..., d_values..., j_values...]
-	pub rows: usize,      // 3 (for K, D, J)
-	pub cols: usize,      // data length
+pub struct KdjJsOutput {
+	pub values: Vec<f64>, // [k..., d..., j...]
+	pub rows: usize,      // 3
+	pub cols: usize,      // len
 }
 
 #[cfg(feature = "wasm")]
-#[wasm_bindgen]
+#[wasm_bindgen(js_name = "kdj")]
 pub fn kdj_js(
-	high: &[f64],
-	low: &[f64],
-	close: &[f64],
-	fast_k_period: usize,
-	slow_k_period: usize,
-	slow_k_ma_type: &str,
-	slow_d_period: usize,
-	slow_d_ma_type: &str,
+	high: &[f64], low: &[f64], close: &[f64],
+	fast_k_period: usize, slow_k_period: usize, slow_k_ma_type: &str,
+	slow_d_period: usize, slow_d_ma_type: &str,
 ) -> Result<JsValue, JsValue> {
 	let params = KdjParams {
 		fast_k_period: Some(fast_k_period),
@@ -2662,71 +2678,54 @@ pub fn kdj_js(
 	};
 	let input = KdjInput::from_slices(high, low, close, params);
 
-	// Use helper function for zero-copy allocation
-	let total_len = high.len() * 3;
-	let mut values = alloc_with_nan_prefix(total_len, 0);
-	
-	// Split the single allocation into three slices
-	let (k_slice, rest) = values.split_at_mut(high.len());
-	let (d_slice, j_slice) = rest.split_at_mut(high.len());
-
-	kdj_into_slice(k_slice, d_slice, j_slice, &input, Kernel::Auto)
+	let mut k = vec![0.0; close.len()];
+	let mut d = vec![0.0; close.len()];
+	let mut j = vec![0.0; close.len()];
+	kdj_into_slices(&mut k, &mut d, &mut j, &input, detect_best_kernel())
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-	let result = KdjResult {
-		values,
-		rows: 3,
-		cols: high.len(),
-	};
-	
-	serde_wasm_bindgen::to_value(&result)
-		.map_err(|e| JsValue::from_str(&e.to_string()))
+	let mut values = Vec::with_capacity(3 * close.len());
+	values.extend_from_slice(&k);
+	values.extend_from_slice(&d);
+	values.extend_from_slice(&j);
+	let result = KdjJsOutput { values, rows: 3, cols: close.len() };
+	serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 #[cfg(feature = "wasm")]
-#[wasm_bindgen]
+#[wasm_bindgen(js_name = "kdj_alloc")]
 pub fn kdj_alloc(len: usize) -> *mut f64 {
-	let mut vec = Vec::<f64>::with_capacity(len);
-	let ptr = vec.as_mut_ptr();
-	std::mem::forget(vec);
-	ptr
+	let mut v: Vec<f64> = Vec::with_capacity(len);
+	let p = v.as_mut_ptr();
+	std::mem::forget(v);
+	p
 }
 
 #[cfg(feature = "wasm")]
-#[wasm_bindgen]
+#[wasm_bindgen(js_name = "kdj_free")]
 pub fn kdj_free(ptr: *mut f64, len: usize) {
-	if !ptr.is_null() {
-		unsafe {
-			let _ = Vec::from_raw_parts(ptr, len, len);
-		}
-	}
+	unsafe { let _ = Vec::from_raw_parts(ptr, len, len); }
 }
 
 #[cfg(feature = "wasm")]
-#[wasm_bindgen]
+#[wasm_bindgen(js_name = "kdj_into")]
 pub fn kdj_into(
-	high_ptr: *const f64,
-	low_ptr: *const f64,
-	close_ptr: *const f64,
-	k_ptr: *mut f64,
-	d_ptr: *mut f64,
-	j_ptr: *mut f64,
+	high_ptr: *const f64, low_ptr: *const f64, close_ptr: *const f64,
+	k_ptr: *mut f64, d_ptr: *mut f64, j_ptr: *mut f64,
 	len: usize,
-	fast_k_period: usize,
-	slow_k_period: usize,
-	slow_k_ma_type: &str,
-	slow_d_period: usize,
-	slow_d_ma_type: &str,
+	fast_k_period: usize, slow_k_period: usize, slow_k_ma_type: &str,
+	slow_d_period: usize, slow_d_ma_type: &str,
 ) -> Result<(), JsValue> {
-	if high_ptr.is_null() || low_ptr.is_null() || close_ptr.is_null() ||
-	   k_ptr.is_null() || d_ptr.is_null() || j_ptr.is_null() {
-		return Err(JsValue::from_str("Null pointer provided"));
+	if [high_ptr as usize, low_ptr as usize, close_ptr as usize, k_ptr as usize, d_ptr as usize, j_ptr as usize].iter().any(|&p| p == 0) {
+		return Err(JsValue::from_str("null pointer passed to kdj_into"));
 	}
-
 	unsafe {
-		let high = std::slice::from_raw_parts(high_ptr, len);
-		let low = std::slice::from_raw_parts(low_ptr, len);
-		let close = std::slice::from_raw_parts(close_ptr, len);
+		let h = std::slice::from_raw_parts(high_ptr, len);
+		let l = std::slice::from_raw_parts(low_ptr, len);
+		let c = std::slice::from_raw_parts(close_ptr, len);
+		let k = std::slice::from_raw_parts_mut(k_ptr, len);
+		let d = std::slice::from_raw_parts_mut(d_ptr, len);
+		let j = std::slice::from_raw_parts_mut(j_ptr, len);
 
 		let params = KdjParams {
 			fast_k_period: Some(fast_k_period),
@@ -2735,158 +2734,55 @@ pub fn kdj_into(
 			slow_d_period: Some(slow_d_period),
 			slow_d_ma_type: Some(slow_d_ma_type.to_string()),
 		};
-		let input = KdjInput::from_slices(high, low, close, params);
-
-		// Check for aliasing - any input pointer equals any output pointer
-		let input_ptrs = [high_ptr as *const u8, low_ptr as *const u8, close_ptr as *const u8];
-		let output_ptrs = [k_ptr as *const u8, d_ptr as *const u8, j_ptr as *const u8];
-		
-		let has_aliasing = input_ptrs.iter().any(|&inp| {
-			output_ptrs.iter().any(|&out| inp == out)
-		});
-
-		if has_aliasing {
-			// Use helper functions for temporary buffers to avoid allocation
-			let mut temp_buf = alloc_with_nan_prefix(len * 3, 0);
-			let (k_temp, rest) = temp_buf.split_at_mut(len);
-			let (d_temp, j_temp) = rest.split_at_mut(len);
-			
-			kdj_into_slice(k_temp, d_temp, j_temp, &input, Kernel::Auto)
-				.map_err(|e| JsValue::from_str(&e.to_string()))?;
-			
-			let k_out = std::slice::from_raw_parts_mut(k_ptr, len);
-			let d_out = std::slice::from_raw_parts_mut(d_ptr, len);
-			let j_out = std::slice::from_raw_parts_mut(j_ptr, len);
-			
-			k_out.copy_from_slice(k_temp);
-			d_out.copy_from_slice(d_temp);
-			j_out.copy_from_slice(j_temp);
-		} else {
-			let k_out = std::slice::from_raw_parts_mut(k_ptr, len);
-			let d_out = std::slice::from_raw_parts_mut(d_ptr, len);
-			let j_out = std::slice::from_raw_parts_mut(j_ptr, len);
-			
-			kdj_into_slice(k_out, d_out, j_out, &input, Kernel::Auto)
-				.map_err(|e| JsValue::from_str(&e.to_string()))?;
-		}
-
-		Ok(())
+		let input = KdjInput::from_slices(h, l, c, params);
+		kdj_into_slices(k, d, j, &input, detect_best_kernel())
+			.map_err(|e| JsValue::from_str(&e.to_string()))
 	}
 }
 
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct KdjBatchConfig {
-	pub fast_k_period_range: (usize, usize, usize),
-	pub slow_k_period_range: (usize, usize, usize),
+	pub fast_k_period: (usize, usize, usize),
+	pub slow_k_period: (usize, usize, usize),
 	pub slow_k_ma_type: String,
-	pub slow_d_period_range: (usize, usize, usize),
+	pub slow_d_period: (usize, usize, usize),
 	pub slow_d_ma_type: String,
 }
 
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct KdjBatchJsOutput {
-	pub values: Vec<f64>, // Flattened array: all K values, then all D values, then all J values
+	pub values: Vec<f64>, // concatenated per combo: [k..., d..., j..., k..., d..., j..., ...]
 	pub combos: Vec<KdjParams>,
-	pub rows: usize, // Number of parameter combinations
-	pub cols: usize, // Data length
+	pub rows: usize, // combos * 3
+	pub cols: usize, // len
 }
 
 #[cfg(feature = "wasm")]
-#[wasm_bindgen(js_name = kdj_batch)]
-pub fn kdj_batch_js(
-	high: &[f64],
-	low: &[f64],
-	close: &[f64],
-	config: JsValue,
-) -> Result<JsValue, JsValue> {
-	let config: KdjBatchConfig =
-		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
-
+#[wasm_bindgen(js_name = "kdj_batch")]
+pub fn kdj_batch_unified_js(high: &[f64], low: &[f64], close: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let cfg: KdjBatchConfig = serde_wasm_bindgen::from_value(config)
+		.map_err(|e| JsValue::from_str(&format!("Invalid config: {e}")))?;
 	let sweep = KdjBatchRange {
-		fast_k_period: config.fast_k_period_range,
-		slow_k_period: config.slow_k_period_range,
-		slow_k_ma_type: (config.slow_k_ma_type.clone(), config.slow_k_ma_type.clone(), "".to_string()),
-		slow_d_period: config.slow_d_period_range,
-		slow_d_ma_type: (config.slow_d_ma_type.clone(), config.slow_d_ma_type.clone(), "".to_string()),
+		fast_k_period: cfg.fast_k_period,
+		slow_k_period: cfg.slow_k_period,
+		slow_k_ma_type: (cfg.slow_k_ma_type.clone(), cfg.slow_k_ma_type, "".to_string()),
+		slow_d_period: cfg.slow_d_period,
+		slow_d_ma_type: (cfg.slow_d_ma_type.clone(), cfg.slow_d_ma_type, "".to_string()),
 	};
-
-	let output = kdj_batch_inner(high, low, close, &sweep, Kernel::Auto, false)
+	let out = kdj_batch_inner(high, low, close, &sweep, detect_best_kernel(), false)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-	// Flatten the K, D, J arrays into a single array
-	let mut values = Vec::with_capacity(output.rows * output.cols * 3);
-	values.extend_from_slice(&output.k);
-	values.extend_from_slice(&output.d);
-	values.extend_from_slice(&output.j);
-
-	let js_output = KdjBatchJsOutput {
-		values,
-		combos: output.combos,
-		rows: output.rows,
-		cols: output.cols,
-	};
-
-	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+	let mut values = Vec::with_capacity(out.rows * 3 * out.cols);
+	for row in 0..out.rows {
+		let s = row * out.cols;
+		values.extend_from_slice(&out.k[s..s + out.cols]);
+		values.extend_from_slice(&out.d[s..s + out.cols]);
+		values.extend_from_slice(&out.j[s..s + out.cols]);
+	}
+	let js = KdjBatchJsOutput { values, combos: out.combos, rows: out.rows * 3, cols: out.cols };
+	serde_wasm_bindgen::to_value(&js).map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
 }
 
-#[cfg(feature = "wasm")]
-#[wasm_bindgen]
-pub fn kdj_batch_into(
-	high_ptr: *const f64,
-	low_ptr: *const f64,
-	close_ptr: *const f64,
-	k_out_ptr: *mut f64,
-	d_out_ptr: *mut f64,
-	j_out_ptr: *mut f64,
-	len: usize,
-	fast_k_start: usize,
-	fast_k_end: usize,
-	fast_k_step: usize,
-	slow_k_start: usize,
-	slow_k_end: usize,
-	slow_k_step: usize,
-	slow_k_ma_type: &str,
-	slow_d_start: usize,
-	slow_d_end: usize,
-	slow_d_step: usize,
-	slow_d_ma_type: &str,
-) -> Result<usize, JsValue> {
-	if high_ptr.is_null() || low_ptr.is_null() || close_ptr.is_null() ||
-	   k_out_ptr.is_null() || d_out_ptr.is_null() || j_out_ptr.is_null() {
-		return Err(JsValue::from_str("Null pointer passed to kdj_batch_into"));
-	}
-
-	unsafe {
-		let high = std::slice::from_raw_parts(high_ptr, len);
-		let low = std::slice::from_raw_parts(low_ptr, len);
-		let close = std::slice::from_raw_parts(close_ptr, len);
-
-		let sweep = KdjBatchRange {
-			fast_k_period: (fast_k_start, fast_k_end, fast_k_step),
-			slow_k_period: (slow_k_start, slow_k_end, slow_k_step),
-			slow_k_ma_type: (slow_k_ma_type.to_string(), slow_k_ma_type.to_string(), "".to_string()),
-			slow_d_period: (slow_d_start, slow_d_end, slow_d_step),
-			slow_d_ma_type: (slow_d_ma_type.to_string(), slow_d_ma_type.to_string(), "".to_string()),
-		};
-
-		let output = kdj_batch_inner(high, low, close, &sweep, Kernel::Auto, false)
-			.map_err(|e| JsValue::from_str(&e.to_string()))?;
-
-		let n_combos = output.rows;
-		let expected_size = n_combos * len;
-
-		// Extract K, D, J values from the flattened output
-		let k_slice = std::slice::from_raw_parts_mut(k_out_ptr, expected_size);
-		let d_slice = std::slice::from_raw_parts_mut(d_out_ptr, expected_size);
-		let j_slice = std::slice::from_raw_parts_mut(j_out_ptr, expected_size);
-
-		// Copy data directly from the batch output
-		k_slice.copy_from_slice(&output.k);
-		d_slice.copy_from_slice(&output.d);
-		j_slice.copy_from_slice(&output.j);
-
-		Ok(n_combos)
-	}
-}
+// kdj_batch_into removed - use kdj_batch instead

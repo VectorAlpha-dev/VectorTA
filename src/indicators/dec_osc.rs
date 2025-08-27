@@ -250,7 +250,7 @@ fn dec_osc_prepare<'a>(
 pub fn dec_osc_with_kernel(input: &DecOscInput, kernel: Kernel) -> Result<DecOscOutput, DecOscError> {
 	let (data, period, k_val, first, chosen) = dec_osc_prepare(input, kernel)?;
 	
-	let mut out = alloc_with_nan_prefix(data.len(), first + 1);
+	let mut out = alloc_with_nan_prefix(data.len(), first + 2);
 
 	unsafe {
 		match chosen {
@@ -289,7 +289,7 @@ pub fn dec_osc_into_slice(dst: &mut [f64], input: &DecOscInput, kern: Kernel) ->
 	}
 
 	// Ensure warmup period is filled with NaN
-	let warmup_end = first + 1;
+	let warmup_end = first + 2;
 	for v in &mut dst[..warmup_end] {
 		*v = f64::NAN;
 	}
@@ -593,7 +593,7 @@ fn dec_osc_batch_inner(
 	let mut buf_mu = make_uninit_matrix(rows, cols);
 	
 	// Calculate warmup periods for each parameter combination
-	let warmup_periods: Vec<usize> = combos.iter().map(|_| first + 1).collect();
+	let warmup_periods: Vec<usize> = combos.iter().map(|_| first + 2).collect();
 	
 	// Initialize matrix prefixes with NaN for warmup periods
 	init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
@@ -688,24 +688,25 @@ pub fn dec_osc_batch_inner_into(
 		});
 	}
 
-	// Initialize NaN prefixes for each row based on warmup period
-	for (row, _combo) in combos.iter().enumerate() {
-		let warmup = first + 1; // DEC_OSC warmup is first + 1
-		let row_start = row * cols;
-		for i in 0..warmup.min(cols) {
-			out[row_start + i] = f64::NAN;
-		}
-	}
+	// Cast out -> MaybeUninit and initialize prefixes via helper
+	let warmups: Vec<usize> = combos.iter().map(|_| first + 2).collect();
 
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+	let out_mu: &mut [MaybeUninit<f64>] = unsafe {
+		core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
+	};
+	init_matrix_prefixes(out_mu, cols, &warmups);
+
+	// Compute rows
+	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
+		let dst: &mut [f64] = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 		let period = combos[row].hp_period.unwrap();
 		let k_val = combos[row].k.unwrap();
 		match kern {
-			Kernel::Scalar => dec_osc_row_scalar(data, first, period, k_val, out_row),
+			Kernel::Scalar => dec_osc_row_scalar(data, first, period, k_val, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => dec_osc_row_avx2(data, first, period, k_val, out_row),
+			Kernel::Avx2 => dec_osc_row_avx2(data, first, period, k_val, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => dec_osc_row_avx512(data, first, period, k_val, out_row),
+			Kernel::Avx512 => dec_osc_row_avx512(data, first, period, k_val, dst),
 			_ => unreachable!(),
 		}
 	};
@@ -713,19 +714,19 @@ pub fn dec_osc_batch_inner_into(
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			out.par_chunks_mut(cols)
+			out_mu.par_chunks_mut(cols)
 				.enumerate()
 				.for_each(|(row, slice)| do_row(row, slice));
 		}
 
 		#[cfg(target_arch = "wasm32")]
 		{
-			for (row, slice) in out.chunks_mut(cols).enumerate() {
+			for (row, slice) in out_mu.chunks_mut(cols).enumerate() {
 				do_row(row, slice);
 			}
 		}
 	} else {
-		for (row, slice) in out.chunks_mut(cols).enumerate() {
+		for (row, slice) in out_mu.chunks_mut(cols).enumerate() {
 			do_row(row, slice);
 		}
 	}
@@ -1366,7 +1367,7 @@ mod tests {
 
 				// Find first non-NaN value
 				let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
-				let warmup_end = first + 2; // DEC_OSC needs at least 2 values after first
+				let warmup_end = first + 2; // DEC_OSC needs two seeded samples
 
 				// Property validations
 				for i in warmup_end..data.len() {
@@ -1590,7 +1591,7 @@ pub fn dec_osc_batch_py<'py>(
 			.into_pyarray(py)
 	)?;
 	dict.set_item(
-		"k_values",
+		"ks",
 		combos.iter()
 			.map(|p| p.k.unwrap())
 			.collect::<Vec<_>>()
@@ -1725,4 +1726,40 @@ pub fn dec_osc_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValu
 	};
 
 	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn dec_osc_batch_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	hp_start: usize,
+	hp_end: usize,
+	hp_step: usize,
+	k_start: f64,
+	k_end: f64,
+	k_step: f64,
+) -> Result<usize, JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer"));
+	}
+	
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		let sweep = DecOscBatchRange {
+			hp_period: (hp_start, hp_end, hp_step),
+			k: (k_start, k_end, k_step),
+		};
+		
+		let combos = expand_grid(&sweep);
+		let rows = combos.len();
+		let cols = len;
+		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+		
+		dec_osc_batch_inner_into(data, &sweep, detect_best_kernel(), false, out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		
+		Ok(rows)
+	}
 }

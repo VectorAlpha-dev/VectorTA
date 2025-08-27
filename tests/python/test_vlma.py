@@ -73,7 +73,7 @@ class TestVlma:
             ta_indicators.vlma(input_data, min_period=10, max_period=5)
         
         # Test zero max_period
-        with pytest.raises(ValueError, match="Invalid period"):
+        with pytest.raises(ValueError, match="(Invalid period|greater than max_period)"):
             ta_indicators.vlma(input_data, min_period=5, max_period=0)
     
     def test_vlma_not_enough_data(self):

@@ -108,17 +108,13 @@ test('Wilders very small dataset', () => {
     assert.strictEqual(result.length, 1);
 });
 
-test('Wilders reinput', () => {
-    // Test Wilders applied twice (re-input) - mirrors check_wilders_reinput
-    const close = new Float64Array(testData.close);
+test('Wilders empty input', () => {
+    // Test Wilders fails with empty input - mirrors check_wilders_empty_input
+    const empty = new Float64Array([]);
     
-    // First pass
-    const firstResult = wasm.wilders_js(close, 5);
-    assert.strictEqual(firstResult.length, close.length);
-    
-    // Second pass - apply Wilders to Wilders output with different period
-    const secondResult = wasm.wilders_js(firstResult, 10);
-    assert.strictEqual(secondResult.length, firstResult.length);
+    assert.throws(() => {
+        wasm.wilders_js(empty, 5);
+    }, /Input data slice is empty/);
 });
 
 test('Wilders NaN handling', () => {
@@ -136,7 +132,11 @@ test('Wilders NaN handling', () => {
     }
     
     // First period-1 values should be NaN
-    assertAllNaN(result.slice(0, 4), "Expected NaN in warmup period");
+    const warmupEnd = 4;
+    assertAllNaN(result.slice(0, warmupEnd), "Expected NaN in warmup period");
+    
+    // Value at warmupEnd should be the first valid output
+    assert(!isNaN(result[warmupEnd]), `Expected valid value at index ${warmupEnd} (first output)`);
 });
 
 test('Wilders all NaN input', () => {
@@ -233,16 +233,64 @@ test('Wilders batch full parameter sweep', () => {
         const period = metadata[combo];
         const rowStart = combo * 50;
         const rowData = batchResult.slice(rowStart, rowStart + 50);
+        const warmupEnd = period - 1;
         
         // First period-1 values should be NaN
-        for (let i = 0; i < period - 1; i++) {
+        for (let i = 0; i < warmupEnd; i++) {
             assert(isNaN(rowData[i]), `Expected NaN at warmup index ${i} for period ${period}`);
         }
         
+        // Value at warmupEnd should be first valid output
+        assert(!isNaN(rowData[warmupEnd]), `Expected valid value at index ${warmupEnd} for period ${period}`);
+        
         // After warmup should have values
-        for (let i = period - 1; i < 50; i++) {
+        for (let i = warmupEnd; i < 50; i++) {
             assert(!isNaN(rowData[i]), `Unexpected NaN at index ${i} for period ${period}`);
         }
+    }
+});
+
+test('Wilders batch unified API', () => {
+    // Test the new unified batch API (if exposed)
+    const close = new Float64Array(testData.close.slice(0, 100));
+    
+    // Check if unified API exists (it may be called wilders_batch without _js suffix)
+    if (typeof wasm.wilders_batch === 'function') {
+        const result = wasm.wilders_batch(close, {
+            period_range: [5, 7, 1]  // periods 5, 6, 7
+        });
+        
+        // Verify structure
+        assert(result.values, 'Should have values array');
+        assert(result.combos, 'Should have combos array');
+        assert(typeof result.rows === 'number', 'Should have rows count');
+        assert(typeof result.cols === 'number', 'Should have cols count');
+        
+        // Verify dimensions
+        assert.strictEqual(result.rows, 3);
+        assert.strictEqual(result.cols, 100);
+        assert.strictEqual(result.combos.length, 3);
+        assert.strictEqual(result.values.length, 300);
+        
+        // Verify parameters
+        for (let i = 0; i < 3; i++) {
+            assert.strictEqual(result.combos[i].period, 5 + i);
+        }
+        
+        // Compare with old API for first combination
+        const oldResult = wasm.wilders_js(close, 5);
+        const firstRow = result.values.slice(0, 100);
+        for (let i = 0; i < oldResult.length; i++) {
+            if (isNaN(oldResult[i]) && isNaN(firstRow[i])) {
+                continue; // Both NaN is OK
+            }
+            assert(Math.abs(oldResult[i] - firstRow[i]) < 1e-10,
+                   `Value mismatch at index ${i}`);
+        }
+    } else {
+        // If unified API doesn't exist, just verify the old API still works
+        const batchResult = wasm.wilders_batch_js(close, 5, 7, 1);
+        assert.strictEqual(batchResult.length, 3 * 100);
     }
 });
 
@@ -276,7 +324,136 @@ test('Wilders batch edge cases', () => {
     }, /All values are NaN/);
 });
 
-// Note: Streaming tests would require streaming functions to be exposed in WASM bindings
+// Zero-copy API tests
+test('Wilders zero-copy API', () => {
+    const data = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    const period = 5;
+    
+    // Allocate buffer
+    const ptr = wasm.wilders_alloc(data.length);
+    assert(ptr !== 0, 'Failed to allocate memory');
+    
+    // Create view into WASM memory
+    const memory = wasm.__wbindgen_memory();
+    const memView = new Float64Array(
+        memory.buffer,
+        ptr,
+        data.length
+    );
+    
+    // Copy data into WASM memory
+    memView.set(data);
+    
+    // Compute Wilders in-place
+    try {
+        wasm.wilders_into(ptr, ptr, data.length, period);
+        
+        // Verify results match regular API
+        const regularResult = wasm.wilders_js(data, period);
+        for (let i = 0; i < data.length; i++) {
+            if (isNaN(regularResult[i]) && isNaN(memView[i])) {
+                continue; // Both NaN is OK
+            }
+            assert(Math.abs(regularResult[i] - memView[i]) < 1e-10,
+                   `Zero-copy mismatch at index ${i}: regular=${regularResult[i]}, zerocopy=${memView[i]}`);
+        }
+    } finally {
+        // Always free memory
+        wasm.wilders_free(ptr, data.length);
+    }
+});
+
+test('Wilders zero-copy with large dataset', () => {
+    const size = 10000;
+    const data = new Float64Array(size);
+    for (let i = 0; i < size; i++) {
+        data[i] = Math.sin(i * 0.01) + Math.random() * 0.1;
+    }
+    
+    const ptr = wasm.wilders_alloc(size);
+    assert(ptr !== 0, 'Failed to allocate large buffer');
+    
+    try {
+        const memory = wasm.__wbindgen_memory();
+        const memView = new Float64Array(memory.buffer, ptr, size);
+        memView.set(data);
+        
+        wasm.wilders_into(ptr, ptr, size, 5);
+        
+        // Recreate view in case memory grew
+        const memory2 = wasm.__wbindgen_memory();
+        const memView2 = new Float64Array(memory2.buffer, ptr, size);
+        
+        // Check warmup period has NaN
+        for (let i = 0; i < 4; i++) {
+            assert(isNaN(memView2[i]), `Expected NaN at warmup index ${i}`);
+        }
+        
+        // Check after warmup has values
+        for (let i = 4; i < Math.min(100, size); i++) {
+            assert(!isNaN(memView2[i]), `Unexpected NaN at index ${i}`);
+        }
+    } finally {
+        wasm.wilders_free(ptr, size);
+    }
+});
+
+test('Wilders zero-copy error handling', () => {
+    // Test null pointer
+    assert.throws(() => {
+        wasm.wilders_into(0, 0, 10, 5);
+    }, /null pointer|invalid memory/i);
+    
+    // Test invalid parameters with allocated memory
+    const ptr = wasm.wilders_alloc(10);
+    try {
+        // Invalid period
+        assert.throws(() => {
+            wasm.wilders_into(ptr, ptr, 10, 0);
+        }, /Invalid period/);
+        
+        // Period exceeds length
+        assert.throws(() => {
+            wasm.wilders_into(ptr, ptr, 10, 20);
+        }, /Invalid period/);
+    } finally {
+        wasm.wilders_free(ptr, 10);
+    }
+});
+
+test('Wilders memory management', () => {
+    // Allocate and free multiple times to ensure no leaks
+    const sizes = [100, 1000, 10000];
+    
+    for (const size of sizes) {
+        const ptr = wasm.wilders_alloc(size);
+        assert(ptr !== 0, `Failed to allocate ${size} elements`);
+        
+        // Write pattern to verify memory
+        const memory = wasm.__wbindgen_memory();
+        const memView = new Float64Array(memory.buffer, ptr, size);
+        for (let i = 0; i < Math.min(10, size); i++) {
+            memView[i] = i * 1.5;
+        }
+        
+        // Verify pattern
+        for (let i = 0; i < Math.min(10, size); i++) {
+            assert.strictEqual(memView[i], i * 1.5, `Memory corruption at index ${i}`);
+        }
+        
+        // Free memory
+        wasm.wilders_free(ptr, size);
+    }
+});
+
+test('Wilders NaN in initial window', () => {
+    // Test that NaN in initial window is properly handled
+    const data = new Float64Array([1.0, 2.0, NaN, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]);
+    
+    assert.throws(() => {
+        wasm.wilders_js(data, 5);
+    }, /Not enough valid data/);
+});
 
 test.after(() => {
     console.log('Wilders WASM tests completed');

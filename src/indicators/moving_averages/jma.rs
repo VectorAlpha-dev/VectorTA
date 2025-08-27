@@ -24,7 +24,6 @@ use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
 	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
-use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -217,8 +216,11 @@ pub fn jma_with_kernel(input: &JmaInput, kernel: Kernel) -> Result<JmaOutput, Jm
 		JmaData::Candles { candles, source } => source_type(candles, source),
 		JmaData::Slice(sl) => sl,
 	};
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(JmaError::AllValuesNaN)?;
 	let len = data.len();
+	if len == 0 {
+		return Err(JmaError::InvalidPeriod { period: 0, data_len: 0 });
+	}
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(JmaError::AllValuesNaN)?;
 	let period = input.get_period();
 	let phase = input.get_phase();
 	let power = input.get_power();
@@ -241,8 +243,8 @@ pub fn jma_with_kernel(input: &JmaInput, kernel: Kernel) -> Result<JmaOutput, Jm
 		other => other,
 	};
 
-	let warm = first + period; // first valid + look-back window
-	let mut out = alloc_with_nan_prefix(len, warm);
+	// JMA outputs at `first`, so only prefix up to `first`
+	let mut out = alloc_with_nan_prefix(len, first);
 	unsafe {
 		match chosen {
 			Kernel::Scalar | Kernel::ScalarBatch => jma_scalar(data, period, phase, power, first, &mut out),
@@ -270,6 +272,9 @@ pub fn jma_with_kernel_into(input: &JmaInput, kernel: Kernel, out: &mut [f64]) -
 			actual: out.len(),
 		});
 	}
+	if len == 0 {
+		return Err(JmaError::InvalidPeriod { period: 0, data_len: 0 });
+	}
 
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(JmaError::AllValuesNaN)?;
 	let period = input.get_period();
@@ -294,9 +299,8 @@ pub fn jma_with_kernel_into(input: &JmaInput, kernel: Kernel, out: &mut [f64]) -
 		other => other,
 	};
 
-	let warm = first + period;
-	// Initialize NaN prefix
-	out[..warm].fill(f64::NAN);
+	// Only set the true NaN prefix
+	out[..first].fill(f64::NAN);
 
 	unsafe {
 		match chosen {
@@ -755,6 +759,10 @@ fn jma_batch_inner(
 	if combos.is_empty() {
 		return Err(JmaError::InvalidPeriod { period: 0, data_len: 0 });
 	}
+	let cols = data.len();
+	if cols == 0 {
+		return Err(JmaError::AllValuesNaN);
+	}
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(JmaError::AllValuesNaN)?;
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
 	if data.len() - first < max_p {
@@ -764,11 +772,12 @@ fn jma_batch_inner(
 		});
 	}
 	let rows = combos.len();
-	let cols = data.len();
-	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
+
+	// JMA has no additional warmup beyond `first`
+	let warm: Vec<usize> = vec![first; rows];
 
 	let mut raw = make_uninit_matrix(rows, cols);
-	unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
+	init_matrix_prefixes(&mut raw, cols, &warm);
 
 	// ---------- 2. closure that fills ONE row ---------------------------
 	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
@@ -811,8 +820,15 @@ fn jma_batch_inner(
 		}
 	}
 
-	// ---------- 4. transmute into fully-initialised Vec<f64> -------------
-	let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
+	// ---------- 4. Safe handoff to Vec<f64> (parity with alma.rs) -------------
+	let mut guard = core::mem::ManuallyDrop::new(raw);
+	let values = unsafe {
+		Vec::from_raw_parts(
+			guard.as_mut_ptr() as *mut f64,
+			guard.len(),
+			guard.capacity(),
+		)
+	};
 
 	Ok(JmaBatchOutput {
 		values,
@@ -834,16 +850,19 @@ fn jma_batch_inner_into(
 	if combos.is_empty() {
 		return Err(JmaError::InvalidPeriod { period: 0, data_len: 0 });
 	}
+	let cols = data.len();
+	if cols == 0 {
+		return Err(JmaError::AllValuesNaN);
+	}
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(JmaError::AllValuesNaN)?;
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-	if data.len() - first < max_p {
+	if cols - first < max_p {
 		return Err(JmaError::NotEnoughValidData {
 			needed: max_p,
-			valid: data.len() - first,
+			valid: cols - first,
 		});
 	}
 	let rows = combos.len();
-	let cols = data.len();
 
 	// Ensure output buffer is the correct size
 	if out.len() != rows * cols {
@@ -853,11 +872,10 @@ fn jma_batch_inner_into(
 		});
 	}
 
-	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
-
-	// Cast output to MaybeUninit for initialization
+	// initialize only the true warmup prefix per row
+	let warm: Vec<usize> = vec![first; rows];
 	let out_uninit = unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len()) };
-	unsafe { init_matrix_prefixes(out_uninit, cols, &warm) };
+	init_matrix_prefixes(out_uninit, cols, &warm);
 
 	// ---------- closure that fills ONE row ---------------------------
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
@@ -2101,7 +2119,15 @@ pub fn jma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, Js
 		power: config.power_range,
 	};
 
-	let output = jma_batch_inner(data, &sweep, Kernel::Scalar, false).map_err(|e| JsValue::from_str(&e.to_string()))?;
+	// parity with alma.rs: detect then map to single kernel
+	let simd = match detect_best_batch_kernel() {
+		Kernel::Avx512Batch => Kernel::Avx512,
+		Kernel::Avx2Batch => Kernel::Avx2,
+		Kernel::ScalarBatch => Kernel::Scalar,
+		_ => Kernel::Scalar,
+	};
+
+	let output = jma_batch_inner(data, &sweep, simd, false).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	let js_output = JmaBatchJsOutput {
 		values: output.values,

@@ -53,13 +53,13 @@ test('ZSCORE with custom parameters', () => {
     const result = wasm.zscore_js(close, 20, "ema", 2.0, 0);
     assert.strictEqual(result.length, close.length);
     
-    // Check that warmup period values are NaN
-    for (let i = 0; i < 20; i++) {
+    // Check that warmup period values are NaN (first period-1 values)
+    for (let i = 0; i < 19; i++) {
         assert(isNaN(result[i]));
     }
     
     // After warmup, should have values
-    assert(!isNaN(result[20]));
+    assert(!isNaN(result[19]));
 });
 
 test('ZSCORE zero period', () => {
@@ -203,7 +203,7 @@ test('ZSCORE batch processing', async () => {
                     break;
                 }
             }
-            assert(firstNonNaN >= 10, 'First row should have warmup period of at least 10');
+            assert(firstNonNaN >= 9, 'First row should have warmup period of at least 9 (period-1)');
             
         } finally {
             wasm.zscore_free(outPtr, nCombos * close.length);

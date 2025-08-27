@@ -147,6 +147,15 @@ test('Gaussian invalid poles', () => {
     });
 });
 
+test('Gaussian period one', () => {
+    // Test Gaussian fails with period=1 (degenerate case) - mirrors check_gaussian_period_one_degenerate
+    const data = new Float64Array([1.0, 2.0, 3.0, 4.0, 5.0]);
+    
+    assert.throws(() => {
+        wasm.gaussian_js(data, 1, 2);
+    }, /Period of 1 causes degenerate/);
+});
+
 test('Gaussian all NaN', () => {
     // Test Gaussian with all NaN input - mirrors check_gaussian_all_nan
     const data = new Float64Array([NaN, NaN, NaN, NaN, NaN]);
@@ -189,6 +198,48 @@ test('Gaussian NaN handling', () => {
     for (let i = skip; i < result.length; i++) {
         assert(isFinite(result[i]), `Non-finite value found at index ${i}`);
     }
+});
+
+test('Gaussian warmup period', () => {
+    // Test that Gaussian correctly handles warmup period and NaN propagation
+    const close = new Float64Array(testData.close);
+    const period = 14;
+    const poles = 4;
+    
+    const result = wasm.gaussian_js(close, period, poles);
+    
+    // Gaussian filter produces actual values immediately when input has no NaNs
+    assert.strictEqual(result.length, close.length);
+    
+    // Check that all values are finite (no NaN or Inf) when input is clean
+    for (let i = 0; i < result.length; i++) {
+        assert(isFinite(result[i]), `Expected finite value at index ${i}`);
+    }
+    
+    // Test with NaN in the middle (not at beginning) to avoid full propagation
+    const closeWithNaN = new Float64Array(close);
+    const nanStart = 100;
+    const nanEnd = 105;
+    for (let i = nanStart; i < nanEnd; i++) {
+        closeWithNaN[i] = NaN;
+    }
+    
+    const resultWithNaN = wasm.gaussian_js(closeWithNaN, period, poles);
+    
+    // Before the NaN region, we should have valid values
+    for (let i = 0; i < nanStart; i++) {
+        assert(isFinite(resultWithNaN[i]), `Expected finite value at index ${i} before NaN region`);
+    }
+    
+    // The NaN region and warmup after it should be NaN
+    // Due to recursive nature, NaNs propagate through the filter
+    const warmupEnd = nanEnd + period;
+    for (let i = nanStart; i < warmupEnd && i < resultWithNaN.length; i++) {
+        assert(isNaN(resultWithNaN[i]), `Expected NaN at index ${i} during and after NaN input`);
+    }
+    
+    // Note: Gaussian is a recursive filter, so NaN values can propagate indefinitely
+    // depending on the implementation. This is expected behavior for IIR filters.
 });
 
 test('Gaussian batch', () => {

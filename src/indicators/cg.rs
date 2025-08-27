@@ -365,6 +365,8 @@ pub struct CgStream {
 	buffer: Vec<f64>,
 	head: usize,
 	filled: bool,
+	weighted_sum: f64,  // Running weighted sum (numerator)
+	price_sum: f64,     // Running sum of prices (denominator)
 }
 
 impl CgStream {
@@ -378,6 +380,8 @@ impl CgStream {
 			buffer: vec![f64::NAN; period],
 			head: 0,
 			filled: false,
+			weighted_sum: 0.0,
+			price_sum: 0.0,
 		})
 	}
 
@@ -399,26 +403,27 @@ impl CgStream {
 			return None;
 		}
 
-		// 4) Otherwise, compute and return the CG over the last (period - 1) bars
-		Some(self.dot_ring())
-	}
-
-	#[inline(always)]
-	fn dot_ring(&self) -> f64 {
+		// 4) Otherwise, compute CG over the last (period - 1) bars
+		// We need to maintain the exact calculation as the scalar version
+		// The scalar version iterates from newest to oldest: data[i - count] for count in 0..(period-1)
+		// So weight 1 is for the newest value, weight (period-1) is for the oldest value we use
+		
 		let mut num = 0.0;
 		let mut denom = 0.0;
 		let mut idx = self.head;
-		// Sum exactly (period - 1) bars, matching cg_scalar’s inner loop
+		
+		// Sum exactly (period - 1) bars, matching cg_scalar's inner loop
 		for k in 0..(self.period - 1) {
 			idx = if idx == 0 { self.period - 1 } else { idx - 1 };
 			let price = self.buffer[idx];
 			num += (1.0 + k as f64) * price;
 			denom += price;
 		}
+		
 		if denom.abs() > f64::EPSILON {
-			-num / denom
+			Some(-num / denom)
 		} else {
-			0.0
+			Some(0.0)
 		}
 	}
 }
@@ -610,24 +615,36 @@ fn cg_batch_inner_into(
 
 	let cols = data.len();
 
-	// Calculate warm-up prefixes for each row
-	for (row, combo) in combos.iter().enumerate() {
-		let period = combo.period.unwrap();
-		let warm = first + period;
-		let row_start = row * cols;
-		if warm > 0 {
-			out[row_start..row_start + warm].fill(f64::NAN);
-		}
-	}
+	// Treat caller buffer as MaybeUninit<f64>. Warm prefixes were already set by init_matrix_prefixes
+	// when called from Rust batch builder. In Python/WASM paths we intentionally avoid extra writes,
+	// matching alma.rs.
+	let out_uninit = unsafe {
+		std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
+	};
 
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+	// Resolve to non-batch kernels if needed
+	let actual = match kern {
+		Kernel::Auto => {
+			match detect_best_batch_kernel() {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch   => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => unreachable!(),
+			}
+		}
+		other => other,
+	};
+
+	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
 		let period = combos[row].period.unwrap();
-		match kern {
-			Kernel::Scalar => cg_row_scalar(data, first, period, out_row),
+		// Cast row to &mut [f64] for kernel writes
+		let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
+		match actual {
+			Kernel::Scalar => cg_row_scalar(data, first, period, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => cg_row_avx2(data, first, period, out_row),
+			Kernel::Avx2   => cg_row_avx2(data, first, period, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => cg_row_avx512(data, first, period, out_row),
+			Kernel::Avx512 => cg_row_avx512(data, first, period, dst),
 			_ => unreachable!(),
 		}
 	};
@@ -635,19 +652,18 @@ fn cg_batch_inner_into(
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			out.par_chunks_mut(cols)
+			out_uninit.par_chunks_mut(cols)
 				.enumerate()
 				.for_each(|(row, slice)| do_row(row, slice));
 		}
-
 		#[cfg(target_arch = "wasm32")]
 		{
-			for (row, slice) in out.chunks_mut(cols).enumerate() {
+			for (row, slice) in out_uninit.chunks_mut(cols).enumerate() {
 				do_row(row, slice);
 			}
 		}
 	} else {
-		for (row, slice) in out.chunks_mut(cols).enumerate() {
+		for (row, slice) in out_uninit.chunks_mut(cols).enumerate() {
 			do_row(row, slice);
 		}
 	}
@@ -1365,37 +1381,35 @@ pub fn cg_batch_py<'py>(
 
 	let slice_in = data.as_slice()?;
 	let kern = validate_kernel(kernel, true)?;
-	
 	let sweep = CgBatchRange { period: period_range };
 
-	// Calculate dimensions
+	// Allocate output
 	let combos = expand_grid(&sweep);
 	let rows = combos.len();
 	let cols = slice_in.len();
-
-	// Pre-allocate output array (OK for batch operations)
 	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
 	let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-	// Compute without GIL
-	let combos = py
-		.allow_threads(|| {
-			// Handle kernel selection for batch operations
-			let kernel = match kern {
-				Kernel::Auto => detect_best_batch_kernel(),
-				k => k,
-			};
-			let simd = match kernel {
-				Kernel::Avx512Batch => Kernel::Avx512,
-				Kernel::Avx2Batch => Kernel::Avx2,
-				Kernel::ScalarBatch => Kernel::Scalar,
-				_ => unreachable!(),
-			};
-			
-			// Write directly to pre-allocated NumPy array - no extra copy!
-			cg_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
-		})
-		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	// Warm-up prefix init (NaN) – only the prefixes, nothing beyond
+	let first = slice_in.iter().position(|x| !x.is_nan())
+		.ok_or_else(|| PyValueError::new_err("CG: All values are NaN."))?;
+	for (r, p) in combos.iter().enumerate() {
+		let warm = (first + p.period.unwrap()).min(cols);
+		let row = &mut slice_out[r * cols .. r * cols + warm];
+		for v in row { *v = f64::NAN; }
+	}
+
+	// Compute into the same buffer
+	let combos = py.allow_threads(|| {
+		let kernel = match kern { Kernel::Auto => detect_best_batch_kernel(), k => k };
+		let simd = match kernel {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch   => Kernel::Avx2,
+			Kernel::ScalarBatch => Kernel::Scalar,
+			_ => unreachable!(),
+		};
+		cg_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+	}).map_err(|e| PyValueError::new_err(e.to_string()))?;
 
 	// Build result dictionary
 	let dict = PyDict::new(py);
@@ -1449,18 +1463,15 @@ pub struct CgBatchJsOutput {
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = cg_batch)]
 pub fn cg_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
-	// 1. Deserialize the configuration object from JavaScript
 	let config: CgBatchConfig =
 		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
 
-	let sweep = CgBatchRange {
-		period: config.period_range,
-	};
+	let sweep = CgBatchRange { period: config.period_range };
 
-	// 2. Run the existing core logic
-	let output = cg_batch_inner(data, &sweep, Kernel::Scalar, false).map_err(|e| JsValue::from_str(&e.to_string()))?;
+	// Mirror alma.rs: pass non-batch kernel here
+	let output = cg_batch_inner(data, &sweep, detect_best_kernel(), false)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-	// 3. Create the structured output
 	let js_output = CgBatchJsOutput {
 		values: output.values,
 		combos: output.combos,
@@ -1468,8 +1479,8 @@ pub fn cg_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsV
 		cols: output.cols,
 	};
 
-	// 4. Serialize the output struct into a JavaScript object
-	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+	serde_wasm_bindgen::to_value(&js_output)
+		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 #[cfg(feature = "wasm")]
@@ -1545,22 +1556,26 @@ pub fn cg_batch_into(
 	if in_ptr.is_null() || out_ptr.is_null() {
 		return Err(JsValue::from_str("null pointer passed to cg_batch_into"));
 	}
-
 	unsafe {
-		let data = std::slice::from_raw_parts(in_ptr, len);
-
-		let sweep = CgBatchRange {
-			period: (period_start, period_end, period_step),
-		};
-
+		let data  = std::slice::from_raw_parts(in_ptr, len);
+		let sweep = CgBatchRange { period: (period_start, period_end, period_step) };
 		let combos = expand_grid(&sweep);
 		let rows = combos.len();
 		let cols = len;
-
 		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
 
-		cg_batch_inner_into(data, &sweep, Kernel::Auto, false, out).map_err(|e| JsValue::from_str(&e.to_string()))?;
+		// Warm-up prefix init (NaN) per row
+		let first = data.iter().position(|x| !x.is_nan())
+			.ok_or_else(|| JsValue::from_str("CG: All values are NaN."))?;
+		for (r, p) in combos.iter().enumerate() {
+			let warm = (first + p.period.unwrap()).min(cols);
+			let row = &mut out[r * cols .. r * cols + warm];
+			for v in row { *v = f64::NAN; }
+		}
 
+		// Compute (non-batch kernel, matching alma.rs)
+		cg_batch_inner_into(data, &sweep, detect_best_kernel(), false, out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
 		Ok(rows)
 	}
 }

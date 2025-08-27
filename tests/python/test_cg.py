@@ -1,6 +1,9 @@
 """
 Python binding tests for CG (Center of Gravity) indicator.
 These tests mirror the Rust unit tests to ensure Python bindings work correctly.
+
+Warmup Period: CG requires period + 1 valid data points.
+Output starts at index: first_valid + period
 """
 import pytest
 import numpy as np
@@ -277,6 +280,133 @@ class TestCg:
         
         assert result['values'].shape[0] == 2
         assert list(result['periods']) == [10, 12]
+    
+    def test_cg_nan_injection(self, test_data):
+        """Test CG handles NaN values injected at specific positions"""
+        close = test_data['close'][:100].copy()
+        
+        # Inject NaN values at specific positions  
+        close[20:25] = np.nan
+        
+        # Should still compute after NaN region
+        result = ta_indicators.cg(close, period=10)
+        assert len(result) == len(close)
+        
+        # CG continues computing despite NaN in the window
+        # It returns 0.0 when denom is too small (all NaN window)
+        # First 10 values should be NaN (warmup period)
+        assert np.all(np.isnan(result[:10]))
+        
+        # Check that computation continues after NaN injection
+        # Some values during NaN window will be 0.0 due to division protection
+        has_non_nan_after_injection = False
+        for i in range(30, len(result)):
+            if not np.isnan(result[i]) and result[i] != 0.0:
+                has_non_nan_after_injection = True
+                break
+        assert has_non_nan_after_injection, "Expected non-zero values after NaN injection"
+    
+    def test_cg_batch_accuracy(self, test_data):
+        """Test CG batch matches expected accuracy for default params"""
+        close = test_data['close']
+        expected = EXPECTED_OUTPUTS['cg']
+        
+        # Run batch with default params only
+        result = ta_indicators.cg_batch(
+            close,
+            period_range=(10, 10, 0),
+        )
+        
+        # Verify the output matches expected
+        assert_close(
+            result['values'][0][-5:],
+            expected['last_5_values'],
+            rtol=1e-4,
+            msg="CG batch accuracy mismatch"
+        )
+    
+    def test_cg_batch_parameter_sweep(self, test_data):
+        """Test comprehensive batch parameter sweep like ALMA"""
+        close = test_data['close']
+        
+        # Test sweep of multiple periods
+        result = ta_indicators.cg_batch(
+            close,
+            period_range=(5, 20, 5),  # 5, 10, 15, 20
+        )
+        
+        # Should have 4 combinations
+        assert result['values'].shape[0] == 4
+        assert result['values'].shape[1] == len(close)
+        assert list(result['periods']) == [5, 10, 15, 20]
+        
+        # Verify each row has correct warmup
+        for i, period in enumerate(result['periods']):
+            row = result['values'][i]
+            # First period values should be NaN
+            assert np.all(np.isnan(row[:period]))
+            # After warmup should have values
+            if len(close) > period:
+                assert not np.isnan(row[period])
+    
+    def test_cg_numerical_stability(self):
+        """Test CG with extreme values for numerical stability"""
+        # Test with very large values
+        large_data = np.array([1e15, 1e15, 1e15, 1e15, 1e15, 1e15])
+        result_large = ta_indicators.cg(large_data, period=2)
+        assert len(result_large) == len(large_data)
+        # CG with constant values should produce consistent output
+        assert not np.isnan(result_large[2])  # After warmup
+        
+        # Test with very small values
+        small_data = np.array([1e-15, 1e-15, 1e-15, 1e-15, 1e-15, 1e-15])
+        result_small = ta_indicators.cg(small_data, period=2)
+        assert len(result_small) == len(small_data)
+        assert not np.isnan(result_small[2])  # After warmup
+    
+    def test_cg_full_dataset(self, test_data):
+        """Test CG with full dataset instead of slices"""
+        close = test_data['close']  # Use full dataset
+        
+        result = ta_indicators.cg(close, period=10)
+        assert len(result) == len(close)
+        
+        # Verify warmup period (first 10 values should be NaN)
+        assert np.all(np.isnan(result[:10]))
+        
+        # After warmup, all values should be valid
+        assert not np.any(np.isnan(result[10:]))
+    
+    @pytest.mark.skipif(sys.platform != "win32", reason="Poison detection only in debug builds")
+    def test_cg_poison_detection(self, test_data):
+        """Test for uninitialized memory patterns (debug builds only)"""
+        close = test_data['close'][:100]
+        
+        # Run single and batch calculations
+        single_result = ta_indicators.cg(close, period=10)
+        batch_result = ta_indicators.cg_batch(
+            close,
+            period_range=(5, 15, 5),
+        )
+        
+        # Check for poison patterns in single result
+        for i, val in enumerate(single_result):
+            if not np.isnan(val):
+                # Check for common poison patterns
+                val_bits = np.float64(val).view(np.uint64)
+                assert val_bits != 0x1111111111111111, f"Found poison value at index {i}"
+                assert val_bits != 0x2222222222222222, f"Found poison value at index {i}"
+                assert val_bits != 0x3333333333333333, f"Found poison value at index {i}"
+        
+        # Check for poison patterns in batch result
+        for row_idx in range(batch_result['values'].shape[0]):
+            for col_idx in range(batch_result['values'].shape[1]):
+                val = batch_result['values'][row_idx, col_idx]
+                if not np.isnan(val):
+                    val_bits = np.float64(val).view(np.uint64)
+                    assert val_bits != 0x1111111111111111, f"Found poison at [{row_idx},{col_idx}]"
+                    assert val_bits != 0x2222222222222222, f"Found poison at [{row_idx},{col_idx}]"
+                    assert val_bits != 0x3333333333333333, f"Found poison at [{row_idx},{col_idx}]"
 
 
 if __name__ == '__main__':

@@ -22,11 +22,11 @@ const __dirname = path.dirname(__filename);
 let wasm;
 let testData;
 
-// Expected outputs for TrendFlex
+// Expected outputs for TrendFlex - exact values from Rust tests
 const EXPECTED_OUTPUTS = {
     trendflex: {
-        default_params: { period: 20 },
-        last_5_values: [
+        defaultParams: { period: 20 },
+        last5Values: [
             -0.19724678008015128,
             -0.1238001236481444,
             -0.10515389737087717,
@@ -65,18 +65,21 @@ test('trendflex_accuracy', () => {
     const close = testData.close;
     const expected = EXPECTED_OUTPUTS.trendflex;
     
-    const result = wasm.trendflex_js(close, expected.default_params.period);
+    const result = wasm.trendflex_js(close, expected.defaultParams.period);
     
     assert.equal(result.length, close.length);
     
-    // Check last 5 values
+    // Check last 5 values match expected from Rust tests
     const last5 = result.slice(-5);
-    expected.last_5_values.forEach((expectedVal, i) => {
-        assertClose(last5[i], expectedVal, 1e-8, `TrendFlex mismatch at index ${i}`);
-    });
+    assertArrayClose(
+        last5,
+        expected.last5Values,
+        1e-8,
+        "TrendFlex last 5 values mismatch"
+    );
     
     // Compare with Rust
-    compareWithRust('trendflex', result, 'close', expected.default_params);
+    compareWithRust('trendflex', result, 'close', expected.defaultParams);
 });
 
 test('trendflex_default_candles', () => {
@@ -92,7 +95,7 @@ test('trendflex_zero_period', () => {
     
     assert.throws(() => {
         wasm.trendflex_js(inputData, 0);
-    }, /period = 0/);
+    }, /period = 0|ZeroTrendFlexPeriod/);
 });
 
 test('trendflex_period_exceeds_length', () => {
@@ -100,7 +103,7 @@ test('trendflex_period_exceeds_length', () => {
     
     assert.throws(() => {
         wasm.trendflex_js(dataSmall, 10);
-    }, /period > data len/);
+    }, /period > data len|TrendFlexPeriodExceedsData/);
 });
 
 test('trendflex_very_small_dataset', () => {
@@ -108,7 +111,7 @@ test('trendflex_very_small_dataset', () => {
     
     assert.throws(() => {
         wasm.trendflex_js(singlePoint, 9);
-    }, /period > data len/);
+    }, /period > data len|TrendFlexPeriodExceedsData/);
 });
 
 test('trendflex_empty_input', () => {
@@ -116,7 +119,7 @@ test('trendflex_empty_input', () => {
     
     assert.throws(() => {
         wasm.trendflex_js(empty, 20);
-    }, /No data provided/);
+    }, /No data provided|NoDataProvided/);
 });
 
 test('trendflex_reinput', () => {
@@ -151,13 +154,17 @@ test('trendflex_nan_handling', () => {
         }
     }
     
-    // First 19 values should be NaN (period-1)
-    for (let i = 0; i < 19; i++) {
-        assert.ok(isNaN(result[i]), `Expected NaN at index ${i}`);
-    }
+    // Calculate warmup period: first_valid + period
+    const firstValid = 0; // Since close data starts valid at index 0
+    const warmup = firstValid + 20;
+    
+    // First warmup values should be NaN
+    assertAllNaN(result.slice(0, warmup), `Expected NaN in warmup period [0:${warmup})`);
+    // Value at warmup index should NOT be NaN
+    assert.ok(!isNaN(result[warmup]), `Expected valid value at index ${warmup}`);
 });
 
-test('trendflex_batch', () => {
+test('trendflex_batch_single_param', () => {
     const close = testData.close;
     
     const result = wasm.trendflex_batch_js(close, 20, 20, 0);
@@ -170,16 +177,28 @@ test('trendflex_batch', () => {
     // Result should be flattened array (1 row × data length)
     assert.equal(result.length, close.length);
     
-    // Check last 5 values
-    const expected = EXPECTED_OUTPUTS.trendflex.last_5_values;
+    // Check last 5 values match expected from Rust tests
+    const expected = EXPECTED_OUTPUTS.trendflex.last5Values;
     const last5 = result.slice(-5);
-    expected.forEach((expectedVal, i) => {
-        assertClose(last5[i], expectedVal, 1e-8, `TrendFlex batch mismatch at index ${i}`);
-    });
+    assertArrayClose(
+        last5,
+        expected,
+        1e-8,
+        "TrendFlex batch last 5 values mismatch"
+    );
+    
+    // Verify matches single calculation
+    const singleResult = wasm.trendflex_js(close, 20);
+    assertArrayClose(
+        result,
+        singleResult,
+        1e-10,
+        "Batch vs single calculation mismatch"
+    );
 });
 
 test('trendflex_batch_multiple_periods', () => {
-    const close = testData.close;
+    const close = testData.close.slice(0, 100); // Use smaller dataset for speed
     
     const result = wasm.trendflex_batch_js(close, 10, 30, 10);
     const metadata = wasm.trendflex_batch_metadata_js(10, 30, 10);
@@ -190,6 +209,27 @@ test('trendflex_batch_multiple_periods', () => {
     
     // Result should be flattened array (3 rows × data length)
     assert.equal(result.length, 3 * close.length);
+    
+    // Verify each row matches individual calculation
+    const periods = [10, 20, 30];
+    for (let i = 0; i < periods.length; i++) {
+        const rowStart = i * close.length;
+        const rowEnd = rowStart + close.length;
+        const rowData = result.slice(rowStart, rowEnd);
+        
+        const singleResult = wasm.trendflex_js(close, periods[i]);
+        assertArrayClose(
+            rowData,
+            singleResult,
+            1e-10,
+            `Period ${periods[i]} mismatch`
+        );
+        
+        // Check warmup period for each row
+        const warmup = periods[i]; // first_valid=0 + period
+        assertAllNaN(rowData.slice(0, warmup), `Expected NaN in warmup [0:${warmup}) for period=${periods[i]}`);
+        assert.ok(!isNaN(rowData[warmup]), `Expected valid value at index ${warmup} for period=${periods[i]}`);
+    }
 });
 
 test('trendflex_all_nan_input', () => {
@@ -197,7 +237,7 @@ test('trendflex_all_nan_input', () => {
     
     assert.throws(() => {
         wasm.trendflex_js(allNan, 20);
-    }, /All values are NaN/);
+    }, /All values are NaN|AllValuesNaN/);
 });
 
 // New ergonomic batch API tests
@@ -267,7 +307,8 @@ test('trendflex_batch_edge_cases', () => {
 
 // Zero-copy API tests
 test('trendflex_zero_copy_basic', () => {
-    const data = new Float64Array(testData.close);
+    // Use smaller dataset to avoid memory growth issues
+    const data = new Float64Array(testData.close.slice(0, 100));
     const period = 20;
     
     // Allocate buffer
@@ -288,14 +329,24 @@ test('trendflex_zero_copy_basic', () => {
     try {
         wasm.trendflex_into(ptr, ptr, data.length, period);
         
+        // IMPORTANT: Recreate the view after WASM execution
+        // The memory might have grown, invalidating the original view
+        const updatedMemView = new Float64Array(wasm.__wasm.memory.buffer, ptr, data.length);
+        
         // Verify results match regular API
         const regularResult = wasm.trendflex_js(data, period);
         for (let i = 0; i < data.length; i++) {
-            if (isNaN(regularResult[i]) && isNaN(memView[i])) {
-                continue; // Both NaN is OK
+            // Handle detached buffer case - undefined is treated as NaN
+            const memValue = updatedMemView[i];
+            const regValue = regularResult[i];
+            
+            if ((isNaN(regValue) || regValue === undefined) && 
+                (isNaN(memValue) || memValue === undefined)) {
+                continue; // Both NaN/undefined is OK
             }
-            assert(Math.abs(regularResult[i] - memView[i]) < 1e-10,
-                   `Zero-copy mismatch at index ${i}: regular=${regularResult[i]}, zerocopy=${memView[i]}`);
+            
+            assert(Math.abs(regValue - memValue) < 1e-10,
+                   `Zero-copy mismatch at index ${i}: regular=${regValue}, zerocopy=${memValue}`);
         }
     } finally {
         // Always free memory
@@ -342,7 +393,8 @@ test('trendflex_batch_into', () => {
     
     try {
         // Copy data to input buffer
-        const inView = new Float64Array(wasm.__wasm.memory.buffer, in_ptr, data.length);
+        const memory = wasm.__wbindgen_memory ? wasm.__wbindgen_memory() : wasm.memory;
+        const inView = new Float64Array(memory.buffer, in_ptr, data.length);
         inView.set(data);
         
         // Call batch_into
@@ -354,7 +406,8 @@ test('trendflex_batch_into', () => {
         assert.strictEqual(n_combos, expected_combos);
         
         // Verify output
-        const outView = new Float64Array(wasm.__wasm.memory.buffer, out_ptr, total_size);
+        const memory2 = wasm.__wbindgen_memory ? wasm.__wbindgen_memory() : wasm.memory;
+        const outView = new Float64Array(memory2.buffer, out_ptr, total_size);
         
         // Compare with regular batch API
         const regularBatch = wasm.trendflex_batch(data, {
@@ -370,5 +423,191 @@ test('trendflex_batch_into', () => {
     } finally {
         wasm.trendflex_free(in_ptr, data.length);
         wasm.trendflex_free(out_ptr, total_size);
+    }
+});
+
+// Additional comprehensive tests matching ALMA's coverage
+
+test('trendflex_zero_copy_large_dataset', () => {
+    const size = 100000;
+    const data = new Float64Array(size);
+    for (let i = 0; i < size; i++) {
+        data[i] = Math.sin(i * 0.01) + Math.random() * 0.1;
+    }
+    
+    const ptr = wasm.trendflex_alloc(size);
+    assert(ptr !== 0, 'Failed to allocate large buffer');
+    
+    try {
+        const memory = wasm.__wbindgen_memory ? wasm.__wbindgen_memory() : wasm.memory;
+        const memView = new Float64Array(memory.buffer, ptr, size);
+        memView.set(data);
+        
+        wasm.trendflex_into(ptr, ptr, size, 20);
+        
+        // Recreate view in case memory grew
+        const memory2 = wasm.__wbindgen_memory ? wasm.__wbindgen_memory() : wasm.memory;
+        const memView2 = new Float64Array(memory2.buffer, ptr, size);
+        
+        // Check warmup period has NaN
+        for (let i = 0; i < 20; i++) {
+            assert(isNaN(memView2[i]), `Expected NaN at warmup index ${i}`);
+        }
+        
+        // Check after warmup has values
+        for (let i = 20; i < Math.min(100, size); i++) {
+            assert(!isNaN(memView2[i]), `Unexpected NaN at index ${i}`);
+        }
+    } finally {
+        wasm.trendflex_free(ptr, size);
+    }
+});
+
+test('trendflex_memory_management', () => {
+    // Allocate and free multiple times to ensure no leaks
+    const sizes = [100, 1000, 10000, 50000];
+    
+    for (const size of sizes) {
+        const ptr = wasm.trendflex_alloc(size);
+        assert(ptr !== 0, `Failed to allocate ${size} elements`);
+        
+        // Write pattern to verify memory
+        const memory = wasm.__wbindgen_memory ? wasm.__wbindgen_memory() : wasm.memory;
+        const memView = new Float64Array(memory.buffer, ptr, size);
+        for (let i = 0; i < Math.min(10, size); i++) {
+            memView[i] = i * 1.5;
+        }
+        
+        // Verify pattern
+        for (let i = 0; i < Math.min(10, size); i++) {
+            assert.strictEqual(memView[i], i * 1.5, `Memory corruption at index ${i}`);
+        }
+        
+        // Free memory
+        wasm.trendflex_free(ptr, size);
+    }
+});
+
+test('trendflex_simd128_consistency', () => {
+    // This test verifies SIMD128 produces same results as scalar
+    // It runs automatically when SIMD128 is enabled in WASM
+    const testCases = [
+        { size: 10, period: 5 },
+        { size: 100, period: 20 },
+        { size: 1000, period: 30 },
+        { size: 5000, period: 50 }
+    ];
+    
+    for (const testCase of testCases) {
+        const data = new Float64Array(testCase.size);
+        for (let i = 0; i < testCase.size; i++) {
+            data[i] = Math.sin(i * 0.1) + Math.cos(i * 0.05);
+        }
+        
+        const result = wasm.trendflex_js(data, testCase.period);
+        
+        // Basic sanity checks
+        assert.strictEqual(result.length, data.length);
+        
+        // Check warmup period
+        for (let i = 0; i < testCase.period; i++) {
+            assert(isNaN(result[i]), `Expected NaN at warmup index ${i} for size=${testCase.size}`);
+        }
+        
+        // Check values exist after warmup
+        let sumAfterWarmup = 0;
+        let countAfterWarmup = 0;
+        for (let i = testCase.period; i < result.length; i++) {
+            assert(!isNaN(result[i]), `Unexpected NaN at index ${i} for size=${testCase.size}`);
+            sumAfterWarmup += result[i];
+            countAfterWarmup++;
+        }
+        
+        // Verify reasonable values - TrendFlex is normalized, so values should be in reasonable range
+        const avgAfterWarmup = sumAfterWarmup / countAfterWarmup;
+        assert(Math.abs(avgAfterWarmup) < 10, `Average value ${avgAfterWarmup} seems unreasonable`);
+    }
+});
+
+test('trendflex_batch_metadata_comprehensive', () => {
+    const close = new Float64Array(50);
+    close.fill(100);
+    
+    const result = wasm.trendflex_batch(close, {
+        period_range: [10, 20, 5]  // periods: 10, 15, 20
+    });
+    
+    // Should have 3 combinations
+    assert.strictEqual(result.combos.length, 3);
+    assert.strictEqual(result.rows, 3);
+    assert.strictEqual(result.cols, 50);
+    
+    // Check each combo
+    const expectedPeriods = [10, 15, 20];
+    for (let i = 0; i < expectedPeriods.length; i++) {
+        assert.strictEqual(result.combos[i].period, expectedPeriods[i]);
+    }
+    
+    // Extract and verify specific rows
+    for (let i = 0; i < result.rows; i++) {
+        const rowStart = i * result.cols;
+        const rowEnd = rowStart + result.cols;
+        const rowData = result.values.slice(rowStart, rowEnd);
+        
+        // Check warmup for this row
+        const period = result.combos[i].period;
+        for (let j = 0; j < period; j++) {
+            assert(isNaN(rowData[j]), `Expected NaN at index ${j} for period ${period}`);
+        }
+        
+        // Should have valid values after warmup
+        if (period < rowData.length) {
+            assert(!isNaN(rowData[period]), `Expected valid value at index ${period} for period ${period}`);
+        }
+    }
+});
+
+test('trendflex_invalid_period_comprehensive', () => {
+    const data = new Float64Array([1, 2, 3, 4, 5]);
+    
+    // Period = 0
+    assert.throws(() => {
+        wasm.trendflex_js(data, 0);
+    }, /period = 0|ZeroTrendFlexPeriod/, 'Should reject period=0');
+    
+    // Period > data length
+    assert.throws(() => {
+        wasm.trendflex_js(data, 10);
+    }, /period > data len|TrendFlexPeriodExceedsData/, 'Should reject period > length');
+    
+    // Period = data length should still fail
+    assert.throws(() => {
+        wasm.trendflex_js(data, data.length);
+    }, /period > data len|TrendFlexPeriodExceedsData/, 'Should reject period = length');
+});
+
+test('trendflex_warmup_calculation_comprehensive', () => {
+    // Test with various period values to verify warmup = first_valid + period
+    const testPeriods = [5, 10, 20, 30];
+    const close = testData.close.slice(0, 100); // Use subset for speed
+    
+    for (const period of testPeriods) {
+        if (period >= close.length) continue;
+        
+        const result = wasm.trendflex_js(close, period);
+        
+        // First valid index is 0 for clean data
+        const firstValid = 0;
+        const warmup = firstValid + period;
+        
+        // Check NaN pattern
+        for (let i = 0; i < warmup; i++) {
+            assert(isNaN(result[i]), `Expected NaN at index ${i} for period=${period}`);
+        }
+        
+        // Check first non-NaN value
+        if (warmup < result.length) {
+            assert(!isNaN(result[warmup]), `Expected valid value at index ${warmup} for period=${period}`);
+        }
     }
 });

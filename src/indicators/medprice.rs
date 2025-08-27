@@ -232,13 +232,8 @@ pub fn medprice_compute_into(high: &[f64], low: &[f64], kernel: Kernel, out: &mu
 		});
 	}
 
-	let first_valid_idx = match (0..high.len()).find(|&i| !high[i].is_nan() && !low[i].is_nan()) {
-		Some(idx) => idx,
-		None => return Err(MedpriceError::AllValuesNaN),
-	};
-
-	// Initialize prefix with NaN
-	out[..first_valid_idx].fill(f64::NAN);
+	let first = (0..high.len()).find(|&i| !high[i].is_nan() && !low[i].is_nan())
+		.ok_or(MedpriceError::AllValuesNaN)?;
 
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
@@ -247,25 +242,27 @@ pub fn medprice_compute_into(high: &[f64], low: &[f64], kernel: Kernel, out: &mu
 
 	unsafe {
 		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => medprice_scalar(high, low, first_valid_idx, out),
+			Kernel::Scalar | Kernel::ScalarBatch => medprice_scalar(high, low, first, out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => medprice_avx2(high, low, first_valid_idx, out),
+			Kernel::Avx2 | Kernel::Avx2Batch => medprice_avx2(high, low, first, out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => medprice_avx512(high, low, first_valid_idx, out),
+			Kernel::Avx512 | Kernel::Avx512Batch => medprice_avx512(high, low, first, out),
 			_ => unreachable!(),
 		}
 	}
 
+	// Warm prefix NaNs after compute, like ALMA
+	out[..first].fill(f64::NAN);
 	Ok(())
 }
 
 #[inline]
 pub fn medprice_scalar(high: &[f64], low: &[f64], first: usize, out: &mut [f64]) {
+	// Write every index >= first. NaN input => NaN output.
 	for i in first..high.len() {
-		if high[i].is_nan() || low[i].is_nan() {
-			continue;
-		}
-		out[i] = (high[i] + low[i]) * 0.5;
+		let h = high[i];
+		let l = low[i];
+		out[i] = if h.is_nan() || l.is_nan() { f64::NAN } else { (h + l) * 0.5 };
 	}
 }
 
@@ -374,7 +371,19 @@ impl MedpriceBatchBuilder {
 }
 
 pub fn medprice_batch_with_kernel(high: &[f64], low: &[f64], k: Kernel) -> Result<MedpriceBatchOutput, MedpriceError> {
-	medprice_batch_par_slice(high, low, k)
+	let simd = match k {
+		Kernel::Auto => match detect_best_batch_kernel() {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch => Kernel::Avx2,
+			Kernel::ScalarBatch => Kernel::Scalar,
+			_ => unreachable!(),
+		},
+		Kernel::Avx512Batch => Kernel::Avx512,
+		Kernel::Avx2Batch => Kernel::Avx2,
+		Kernel::ScalarBatch => Kernel::Scalar,
+		other => other, // allow direct simd or scalar for tests
+	};
+	medprice_batch_par_slice(high, low, simd)
 }
 
 #[derive(Clone, Debug)]
@@ -498,49 +507,7 @@ fn medprice_batch_inner_into(
 
 #[inline]
 pub fn medprice_into_slice_raw(dst: &mut [f64], high: &[f64], low: &[f64], kern: Kernel) -> Result<(), MedpriceError> {
-	if high.is_empty() || low.is_empty() {
-		return Err(MedpriceError::EmptyData);
-	}
-	if high.len() != low.len() {
-		return Err(MedpriceError::DifferentLength {
-			high_len: high.len(),
-			low_len: low.len(),
-		});
-	}
-	if dst.len() != high.len() {
-		return Err(MedpriceError::DifferentLength {
-			high_len: high.len(),
-			low_len: dst.len(),
-		});
-	}
-
-	let first_valid_idx = match (0..high.len()).find(|&i| !high[i].is_nan() && !low[i].is_nan()) {
-		Some(idx) => idx,
-		None => return Err(MedpriceError::AllValuesNaN),
-	};
-
-	// Initialize prefix with NaN
-	for v in &mut dst[..first_valid_idx] {
-		*v = f64::NAN;
-	}
-
-	let chosen = match kern {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
-
-	unsafe {
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => medprice_scalar(high, low, first_valid_idx, dst),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => medprice_avx2(high, low, first_valid_idx, dst),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => medprice_avx512(high, low, first_valid_idx, dst),
-			_ => unreachable!(),
-		}
-	}
-
-	Ok(())
+	medprice_compute_into(high, low, kern, dst)
 }
 
 /// Write medprice results directly into pre-allocated slice.

@@ -104,6 +104,17 @@ impl<'a> SuperTrendInput<'a> {
 	pub fn get_factor(&self) -> f64 {
 		self.params.factor.unwrap_or(3.0)
 	}
+	#[inline(always)]
+	fn as_hlc(&self) -> (&[f64], &[f64], &[f64]) {
+		match &self.data {
+			SuperTrendData::Candles { candles } => (
+				source_type(candles, "high"),
+				source_type(candles, "low"),
+				source_type(candles, "close"),
+			),
+			SuperTrendData::Slices { high, low, close } => (*high, *low, *close),
+		}
+	}
 }
 
 #[derive(Debug, Clone)]
@@ -185,6 +196,8 @@ pub enum SuperTrendError {
 	InvalidPeriod { period: usize, data_len: usize },
 	#[error("supertrend: Not enough valid data: needed = {needed}, valid = {valid}")]
 	NotEnoughValidData { needed: usize, valid: usize },
+	#[error("supertrend: Output slice length mismatch: expected = {expected}, got = {got}")]
+	OutputLengthMismatch { expected: usize, got: usize },
 	#[error(transparent)]
 	AtrError(#[from] AtrError),
 }
@@ -208,14 +221,7 @@ fn supertrend_prepare<'a>(
 	Vec<f64>,   // atr_values
 	Kernel,     // chosen kernel
 ), SuperTrendError> {
-	let (high, low, close) = match &input.data {
-		SuperTrendData::Candles { candles } => (
-			source_type(candles, "high"),
-			source_type(candles, "low"),
-			source_type(candles, "close"),
-		),
-		SuperTrendData::Slices { high, low, close } => (*high, *low, *close),
-	};
+	let (high, low, close) = input.as_hlc();
 
 	if high.is_empty() || low.is_empty() || close.is_empty() {
 		return Err(SuperTrendError::EmptyData);
@@ -859,29 +865,28 @@ fn supertrend_batch_inner(
 	let rows = combos.len();
 	let cols = len;
 	
-	// For batch operations, we need to properly initialize both matrices
-	let mut trend_uninit = make_uninit_matrix(rows, cols);
-	let mut changed_uninit = make_uninit_matrix(rows, cols);
+	// For batch operations, use ManuallyDrop pattern like ALMA
+	let mut trend_mu = make_uninit_matrix(rows, cols);
+	let mut changed_mu = make_uninit_matrix(rows, cols);
 	
-	// Initialize warmup periods for each row
-	let warmup_periods: Vec<usize> = combos.iter().map(|c| first_valid_idx + c.period.unwrap_or(10) - 1).collect();
-	init_matrix_prefixes(&mut trend_uninit, cols, &warmup_periods);
-	init_matrix_prefixes(&mut changed_uninit, cols, &warmup_periods);
+	let warm: Vec<usize> = combos
+		.iter()
+		.map(|c| first_valid_idx + c.period.unwrap_or(10) - 1)
+		.collect();
 	
-	// SAFETY: After init_matrix_prefixes, the memory is properly initialized with NaN prefixes
-	let mut trend = unsafe {
-		let len = rows * cols;
-		let ptr = trend_uninit.as_mut_ptr() as *mut f64;
-		Vec::from_raw_parts(ptr, len, len)
+	init_matrix_prefixes(&mut trend_mu, cols, &warm);
+	init_matrix_prefixes(&mut changed_mu, cols, &warm);
+	
+	// SAFETY: we will fully write post-warmup; warmup already initialized to NaN.
+	let mut trend_guard = core::mem::ManuallyDrop::new(trend_mu);
+	let mut changed_guard = core::mem::ManuallyDrop::new(changed_mu);
+	
+	let trend: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(trend_guard.as_mut_ptr() as *mut f64, trend_guard.len())
 	};
-	std::mem::forget(trend_uninit);
-	
-	let mut changed = unsafe {
-		let len = rows * cols;
-		let ptr = changed_uninit.as_mut_ptr() as *mut f64;
-		Vec::from_raw_parts(ptr, len, len)
+	let changed: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(changed_guard.as_mut_ptr() as *mut f64, changed_guard.len())
 	};
-	std::mem::forget(changed_uninit);
 
 	let do_row = |row: usize, trend_row: &mut [f64], changed_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
@@ -954,9 +959,26 @@ fn supertrend_batch_inner(
 			do_row(row, tr, ch);
 		}
 	}
+	
+	// Convert back to Vec with proper capacity preservation
+	let trend_vec = unsafe {
+		Vec::from_raw_parts(
+			trend_guard.as_mut_ptr() as *mut f64,
+			trend_guard.len(),
+			trend_guard.capacity(),
+		)
+	};
+	let changed_vec = unsafe {
+		Vec::from_raw_parts(
+			changed_guard.as_mut_ptr() as *mut f64,
+			changed_guard.len(),
+			changed_guard.capacity(),
+		)
+	};
+	
 	Ok(SuperTrendBatchOutput {
-		trend,
-		changed,
+		trend: trend_vec,
+		changed: changed_vec,
 		combos,
 		rows,
 		cols,
@@ -1340,6 +1362,8 @@ pub fn supertrend_batch_py<'py>(
 		"factors",
 		combos.iter().map(|p| p.factor.unwrap()).collect::<Vec<_>>().into_pyarray(py),
 	)?;
+	dict.set_item("rows", rows)?;
+	dict.set_item("cols", cols)?;
 
 	Ok(dict)
 }
@@ -1384,10 +1408,16 @@ pub fn supertrend_into_slice(
 		supertrend_prepare(input, kern)?;
 	
 	let len = high.len();
-	if trend_dst.len() != len || changed_dst.len() != len {
-		return Err(SuperTrendError::InvalidPeriod {
-			period: trend_dst.len(),
-			data_len: len,
+	if trend_dst.len() != len {
+		return Err(SuperTrendError::OutputLengthMismatch {
+			expected: len,
+			got: trend_dst.len(),
+		});
+	}
+	if changed_dst.len() != len {
+		return Err(SuperTrendError::OutputLengthMismatch {
+			expected: len,
+			got: changed_dst.len(),
 		});
 	}
 	
@@ -1417,32 +1447,37 @@ pub fn supertrend_into_slice(
 }
 
 #[cfg(feature = "wasm")]
-#[wasm_bindgen]
+#[derive(Serialize, Deserialize)]
+pub struct SuperTrendJsResult {
+	pub values: Vec<f64>, // [trend..., changed...]
+	pub rows: usize,      // 2
+	pub cols: usize,      // len
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = supertrend)]
 pub fn supertrend_js(
 	high: &[f64],
 	low: &[f64],
 	close: &[f64],
 	period: usize,
 	factor: f64,
-) -> Result<Vec<f64>, JsValue> {
+) -> Result<JsValue, JsValue> {
+	let len = high.len();
 	let params = SuperTrendParams {
 		period: Some(period),
 		factor: Some(factor),
 	};
 	let input = SuperTrendInput::from_slices(high, low, close, params);
 	
-	// Allocate output array once - flattened as [trend..., changed...]
-	let len = high.len();
-	let mut output = vec![0.0; len * 2];
-	
-	// Split the output into trend and changed slices
-	let (trend_slice, changed_slice) = output.split_at_mut(len);
-	
-	// Compute directly into the pre-allocated slices
-	supertrend_into_slice(trend_slice, changed_slice, &input, detect_best_kernel())
+	// Compute directly into two slices of one flat buffer
+	let mut values = vec![0.0; len * 2];
+	let (trend_slice, changed_slice) = values.split_at_mut(len);
+	supertrend_into_slice(trend_slice, changed_slice, &input, Kernel::Auto)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 	
-	Ok(output)
+	let out = SuperTrendJsResult { values, rows: 2, cols: len };
+	serde_wasm_bindgen::to_value(&out).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 #[cfg(feature = "wasm")]
@@ -1533,11 +1568,10 @@ pub struct SuperTrendBatchConfig {
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct SuperTrendBatchJsOutput {
-	pub trend: Vec<f64>,
-	pub changed: Vec<f64>,
+	pub values: Vec<f64>,   // rows = 2 * combos, each row has `cols`
 	pub periods: Vec<usize>,
 	pub factors: Vec<f64>,
-	pub rows: usize,
+	pub rows: usize,        // 2 * combos
 	pub cols: usize,
 }
 
@@ -1549,35 +1583,36 @@ pub fn supertrend_batch_js(
 	close: &[f64],
 	config: JsValue,
 ) -> Result<JsValue, JsValue> {
-	let config: SuperTrendBatchConfig = serde_wasm_bindgen::from_value(config)
-		.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	let cfg: SuperTrendBatchConfig =
+		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
 	
 	let sweep = SuperTrendBatchRange {
-		period: config.period_range,
-		factor: config.factor_range,
+		period: cfg.period_range,
+		factor: cfg.factor_range,
 	};
 	
-	let batch_output = supertrend_batch_with_kernel(high, low, close, &sweep, Kernel::Auto)
+	let batch = supertrend_batch_with_kernel(high, low, close, &sweep, Kernel::Auto)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 	
-	let periods: Vec<usize> = batch_output.combos.iter()
-		.map(|c| c.period.unwrap_or(10))
-		.collect();
-	let factors: Vec<f64> = batch_output.combos.iter()
-		.map(|c| c.factor.unwrap_or(3.0))
-		.collect();
+	// flatten to [trend(row0), changed(row0), trend(row1), changed(row1), ...]
+	let mut values = Vec::with_capacity(batch.rows * 2 * batch.cols);
+	for r in 0..batch.rows {
+		let rs = r * batch.cols;
+		values.extend_from_slice(&batch.trend[rs..rs + batch.cols]);
+		values.extend_from_slice(&batch.changed[rs..rs + batch.cols]);
+	}
 	
-	let output = SuperTrendBatchJsOutput {
-		trend: batch_output.trend,
-		changed: batch_output.changed,
+	let periods: Vec<usize> = batch.combos.iter().map(|c| c.period.unwrap_or(10)).collect();
+	let factors: Vec<f64> = batch.combos.iter().map(|c| c.factor.unwrap_or(3.0)).collect();
+	
+	let out = SuperTrendBatchJsOutput {
+		values,
 		periods,
 		factors,
-		rows: batch_output.rows,
-		cols: batch_output.cols,
+		rows: batch.rows * 2,
+		cols: batch.cols,
 	};
-	
-	serde_wasm_bindgen::to_value(&output)
-		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+	serde_wasm_bindgen::to_value(&out).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 #[cfg(test)]

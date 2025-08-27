@@ -118,14 +118,14 @@ class TestSrsi:
         """Test SRSI fails with insufficient data"""
         input_data = np.array([42.0])
         
-        with pytest.raises(ValueError, match="Not enough data"):
+        with pytest.raises(ValueError, match="Not enough valid data for the requested period"):
             ta_indicators.srsi(input_data, rsi_period=90, stoch_period=3, k=20, d=20)
     
     def test_srsi_all_nan_input(self):
         """Test SRSI with all NaN values"""
         all_nan = np.full(100, np.nan)
         
-        with pytest.raises(ValueError, match="All values are NaN"):
+        with pytest.raises(ValueError, match="All input data values are NaN"):
             ta_indicators.srsi(all_nan, rsi_period=2, stoch_period=1, k=1, d=1)
     
     def test_srsi_streaming(self, test_data):

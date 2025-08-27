@@ -18,6 +18,7 @@ use my_project::indicators::bop::{bop, BopInput, BopParams};
 use my_project::indicators::cci::{cci, CciInput, CciParams};
 use my_project::indicators::cfo::{cfo, CfoInput, CfoParams};
 use my_project::indicators::cg::{cg, CgInput, CgParams};
+use my_project::indicators::fisher::{fisher, FisherInput, FisherParams};
 use my_project::indicators::kurtosis::{kurtosis, KurtosisInput, KurtosisParams};
 use my_project::indicators::midpoint::{midpoint, MidpointInput, MidpointParams};
 use my_project::indicators::chande::{chande, ChandeData, ChandeInput, ChandeParams};
@@ -89,7 +90,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	let args: Vec<String> = env::args().collect();
 	if args.len() < 2 {
 		eprintln!("Usage: {} <indicator_name> [source]", args[0]);
-		eprintln!("Available indicators: ad, acosc, adx, adosc, adxr, alligator, alma, ao, apo, aroon, aroonosc, atr, bandpass, bollinger_bands, bollinger_bands_width, bop, cci, cfo, cg, cwma, decycler, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass_2_pole, highpass, hma, hwma, jma, jsa, kama, kurtosis, linreg, maaq, mama, marketefi, mwdx, nma, ppo, rsx, pwma, reflex, rocp, rsi, sinwma, sma, smma, squeeze_momentum, sqwma, srwma, stddev, supersmoother_3_pole, supersmoother, swma, tema, tilson, trendflex, trima, vpci, tsf, ui, vwap, vwma, vpwma, wclprice, wilders, wma, zlema");
+		eprintln!("Available indicators: ad, acosc, adx, adosc, adxr, alligator, alma, ao, apo, aroon, aroonosc, atr, bandpass, bollinger_bands, bollinger_bands_width, bop, cci, cfo, cg, cwma, decycler, dema, edcf, ehlers_itrend, ema, epma, fisher, frama, fwma, gaussian, highpass_2_pole, highpass, hma, hwma, jma, jsa, kama, kurtosis, linreg, maaq, mama, marketefi, mwdx, nma, ppo, rsx, pwma, reflex, rocp, rsi, sinwma, sma, smma, squeeze_momentum, sqwma, srwma, stddev, supersmoother_3_pole, supersmoother, swma, tema, tilson, trendflex, trima, vpci, tsf, ui, vwap, vwma, vpwma, wclprice, wilders, wma, zlema");
 		eprintln!("Available sources: open, high, low, close, volume, hl2, hlc3, ohlc4, hlcc4");
 		std::process::exit(1);
 	}
@@ -229,6 +230,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 				},
 				"values": result.values,
 				"length": result.values.len()
+			})
+		}
+		"fisher" => {
+			let params = FisherParams::default();
+			let period = params.period.unwrap_or(9);
+			let input = FisherInput::from_candles(&candles, params);
+			let result = fisher(&input)?;
+			json!({
+				"indicator": "fisher",
+				"source": "high,low",  // Fisher uses high and low
+				"params": {
+					"period": period
+				},
+				"fisher": result.fisher,
+				"signal": result.signal,
+				"length": result.fisher.len()
 			})
 		}
 		"frama" => {

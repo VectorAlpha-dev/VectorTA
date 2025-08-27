@@ -844,16 +844,7 @@ pub fn ma<'a>(ma_type: &str, data: MaData<'a>, period: usize) -> Result<Vec<f64>
 		}
 
 		_ => {
-			eprintln!("Unknown indicator '{ma_type}'. Defaulting to 'sma'.");
-
-			let input = match data {
-				MaData::Candles { candles, source } => {
-					SmaInput::from_candles(candles, source, SmaParams { period: Some(period) })
-				}
-				MaData::Slice(slice) => SmaInput::from_slice(slice, SmaParams { period: Some(period) }),
-			};
-			let output = sma(&input)?;
-			Ok(output.values)
+			return Err(format!("Unknown moving average type: {}", ma_type).into());
 		}
 	}
 }

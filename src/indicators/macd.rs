@@ -123,6 +123,16 @@ impl<'a> MacdInput<'a> {
 	}
 }
 
+impl<'a> AsRef<[f64]> for MacdInput<'a> {
+	#[inline(always)]
+	fn as_ref(&self) -> &[f64] {
+		match &self.data {
+			MacdData::Slice(s) => s,
+			MacdData::Candles { candles, source } => source_type(candles, source),
+		}
+	}
+}
+
 #[derive(Clone, Debug)]
 pub struct MacdBuilder {
 	fast_period: Option<usize>,
@@ -150,17 +160,17 @@ impl MacdBuilder {
 		Self::default()
 	}
 	#[inline]
-	pub fn get_fast_period(mut self, n: usize) -> Self {
+	pub fn fast_period(mut self, n: usize) -> Self {
 		self.fast_period = Some(n);
 		self
 	}
 	#[inline]
-	pub fn get_slow_period(mut self, n: usize) -> Self {
+	pub fn slow_period(mut self, n: usize) -> Self {
 		self.slow_period = Some(n);
 		self
 	}
 	#[inline]
-	pub fn get_signal_period(mut self, n: usize) -> Self {
+	pub fn signal_period(mut self, n: usize) -> Self {
 		self.signal_period = Some(n);
 		self
 	}
@@ -215,6 +225,71 @@ pub enum MacdError {
 	NotEnoughValidData { needed: usize, valid: usize },
 	#[error("macd: Unknown MA type: {0}")]
 	UnknownMA(String),
+	#[error("macd: Invalid kernel for batch operation: {0}")]
+	InvalidKernel(String),
+}
+
+pub struct MacdStream {
+	fast: usize, 
+	slow: usize, 
+	signal: usize,
+	ma_type: String,
+	ema_fast: Option<f64>,
+	ema_slow: Option<f64>,
+	ema_signal: Option<f64>,
+	count: usize,
+}
+
+impl MacdStream {
+	pub fn new(fast: usize, slow: usize, signal: usize, ma_type: &str) -> Self {
+		Self { 
+			fast, 
+			slow, 
+			signal, 
+			ma_type: ma_type.to_string(), 
+			ema_fast: None, 
+			ema_slow: None, 
+			ema_signal: None, 
+			count: 0 
+		}
+	}
+	
+	pub fn update(&mut self, x: f64) -> Option<(f64,f64,f64)> {
+		self.count += 1;
+		if !self.ma_type.eq_ignore_ascii_case("ema") { 
+			return None; // Only optimized for EMA
+		}
+
+		let af = 2.0/(self.fast as f64 + 1.0);
+		let aslow = 2.0/(self.slow as f64 + 1.0);
+		let asig = 2.0/(self.signal as f64 + 1.0);
+
+		self.ema_fast = Some(match self.ema_fast { 
+			None => x, 
+			Some(p) => af*x + (1.0-af)*p 
+		});
+		self.ema_slow = Some(match self.ema_slow { 
+			None => x, 
+			Some(p) => aslow*x + (1.0-aslow)*p 
+		});
+
+		// warmups
+		let macd_ready = self.count >= self.slow;
+		if !macd_ready { return None; }
+
+		let macd = self.ema_fast.unwrap() - self.ema_slow.unwrap();
+		self.ema_signal = Some(match self.ema_signal { 
+			None => macd, 
+			Some(p) => asig*macd + (1.0-asig)*p 
+		});
+
+		let sig_ready = self.count >= self.slow + self.signal - 1;
+		if !sig_ready { return None; }
+
+		let signal = self.ema_signal.unwrap();
+		let hist = macd - signal;
+		Some((macd, signal, hist))
+	}
 }
 
 #[inline]
@@ -222,12 +297,12 @@ pub fn macd(input: &MacdInput) -> Result<MacdOutput, MacdError> {
 	macd_with_kernel(input, Kernel::Auto)
 }
 
-pub fn macd_with_kernel(input: &MacdInput, kernel: Kernel) -> Result<MacdOutput, MacdError> {
-	let data: &[f64] = match &input.data {
-		MacdData::Candles { candles, source } => source_type(candles, source),
-		MacdData::Slice(sl) => sl,
-	};
-
+#[inline(always)]
+fn macd_prepare<'a>(
+	input: &'a MacdInput,
+	kernel: Kernel,
+) -> Result<(&'a [f64], usize, usize, usize, String, usize, usize, Kernel), MacdError> {
+	let data = input.as_ref();
 	let len = data.len();
 	let fast = input.get_fast_period();
 	let slow = input.get_slow_period();
@@ -236,34 +311,139 @@ pub fn macd_with_kernel(input: &MacdInput, kernel: Kernel) -> Result<MacdOutput,
 
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(MacdError::AllValuesNaN)?;
 	if fast == 0 || slow == 0 || signal == 0 || fast > len || slow > len || signal > len {
-		return Err(MacdError::InvalidPeriod {
-			fast,
-			slow,
-			signal,
-			data_len: len,
-		});
+		return Err(MacdError::InvalidPeriod { fast, slow, signal, data_len: len });
 	}
-	if (len - first) < slow {
-		return Err(MacdError::NotEnoughValidData {
-			needed: slow,
-			valid: len - first,
-		});
+	if len - first < slow {
+		return Err(MacdError::NotEnoughValidData { needed: slow, valid: len - first });
 	}
+
+	let macd_warmup = first + slow - 1;
+	let signal_warmup = first + slow + signal - 2;
 
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
-		other => other,
+		k => k,
 	};
-	unsafe {
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => macd_scalar(data, fast, slow, signal, &ma_type, first),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => macd_avx2(data, fast, slow, signal, &ma_type, first),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => macd_avx512(data, fast, slow, signal, &ma_type, first),
-			_ => unreachable!(),
+	Ok((data, fast, slow, signal, ma_type, macd_warmup, signal_warmup, chosen))
+}
+
+#[inline(always)]
+fn macd_compute_into(
+	data: &[f64],
+	fast: usize,
+	slow: usize,
+	signal: usize,
+	ma_type: &str,
+	first: usize,
+	macd_out: &mut [f64],
+	signal_out: &mut [f64],
+	hist_out: &mut [f64],
+) -> Result<(), MacdError> {
+	use crate::indicators::moving_averages::ma::{ma, MaData};
+
+	debug_assert_eq!(macd_out.len(), data.len());
+	debug_assert_eq!(signal_out.len(), data.len());
+	debug_assert_eq!(hist_out.len(), data.len());
+
+	// 1) Fast/slow MA (Vecs returned by ma.rs)
+	let fast_ma = ma(&ma_type, MaData::Slice(data), fast).map_err(|e| {
+		// Check if it's actually an unknown MA type or another error
+		if e.to_string().contains("Unknown moving average type") || e.to_string().contains("Unsupported") {
+			MacdError::UnknownMA(ma_type.to_string())
+		} else if e.to_string().contains("All values are NaN") {
+			MacdError::AllValuesNaN
+		} else {
+			// For other errors like invalid period, propagate the original message
+			MacdError::UnknownMA(format!("{}: {}", ma_type, e))
 		}
+	})?;
+	let slow_ma = ma(&ma_type, MaData::Slice(data), slow).map_err(|e| {
+		if e.to_string().contains("Unknown moving average type") || e.to_string().contains("Unsupported") {
+			MacdError::UnknownMA(ma_type.to_string())
+		} else if e.to_string().contains("All values are NaN") {
+			MacdError::AllValuesNaN
+		} else {
+			MacdError::UnknownMA(format!("{}: {}", ma_type, e))
+		}
+	})?;
+
+	// 2) macd = fast - slow written directly to macd_out
+	let macd_warmup = first + slow - 1;
+	for i in macd_warmup..data.len() {
+		let f = fast_ma[i];
+		let s = slow_ma[i];
+		if f.is_nan() || s.is_nan() { continue; }
+		macd_out[i] = f - s;
 	}
+
+	// 3) signal and hist with minimal copies
+	let signal_warmup = first + slow + signal - 2;
+	if ma_type.eq_ignore_ascii_case("ema") {
+		// In-place EMA of macd_out without allocating signal Vec
+		// Standard EMA: alpha = 2/(n+1)
+		let alpha = 2.0 / (signal as f64 + 1.0);
+		// Start EMA after we have enough MACD values (signal period)
+		let signal_start = macd_warmup + signal - 1;
+		if signal_start < data.len() {
+			// Find first non-NaN MACD value to seed with
+			let mut seed_idx = signal_start;
+			while seed_idx < data.len() && macd_out[seed_idx].is_nan() {
+				seed_idx += 1;
+			}
+			
+			// If we found a valid seed value, start EMA from there
+			if seed_idx < data.len() {
+				let mut prev = macd_out[seed_idx];
+				signal_out[seed_idx] = prev;
+				
+				for i in (seed_idx + 1)..data.len() {
+					let x = macd_out[i];
+					if !x.is_nan() {
+						prev = alpha * x + (1.0 - alpha) * prev;
+						signal_out[i] = prev;
+					}
+				}
+			}
+		}
+	} else {
+		// Fallback: one temporary vector, then copy into signal_out segment
+		let sig_tmp = ma(&ma_type, MaData::Slice(macd_out), signal)
+			.map_err(|e| {
+				if e.to_string().contains("Unknown moving average type") || e.to_string().contains("Unsupported") {
+					MacdError::UnknownMA(ma_type.to_string())
+				} else if e.to_string().contains("All values are NaN") {
+					MacdError::AllValuesNaN
+				} else {
+					MacdError::UnknownMA(format!("{}: {}", ma_type, e))
+				}
+			})?;
+		// Copy only the valid suffix; prefixes are already NaN via alloc_with_nan_prefix
+		signal_out[signal_warmup..].copy_from_slice(&sig_tmp[signal_warmup..]);
+	}
+
+	// 4) hist = macd - signal directly
+	for i in signal_warmup..data.len() {
+		let m = macd_out[i];
+		let s = signal_out[i];
+		if m.is_nan() || s.is_nan() { continue; }
+		hist_out[i] = m - s;
+	}
+	Ok(())
+}
+
+pub fn macd_with_kernel(input: &MacdInput, kernel: Kernel) -> Result<MacdOutput, MacdError> {
+	let (data, fast, slow, signal, ma_type, macd_warmup, signal_warmup, _chosen) = macd_prepare(input, kernel)?;
+	let len = data.len();
+
+	let mut macd = alloc_with_nan_prefix(len, macd_warmup);
+	let mut signal_vec = alloc_with_nan_prefix(len, signal_warmup);
+	let mut hist = alloc_with_nan_prefix(len, signal_warmup);
+
+	// Use the first value for compute_into
+	let first = macd_warmup + 1 - slow;
+	macd_compute_into(data, fast, slow, signal, &ma_type, first, &mut macd, &mut signal_vec, &mut hist)?;
+
+	Ok(MacdOutput { macd, signal: signal_vec, hist })
 }
 
 #[inline(always)]
@@ -494,12 +674,7 @@ pub fn macd_batch_with_kernel(data: &[f64], sweep: &MacdBatchRange, k: Kernel) -
 		Kernel::Auto => detect_best_batch_kernel(),
 		other if other.is_batch() => other,
 		_ => {
-			return Err(MacdError::InvalidPeriod {
-				fast: 0,
-				slow: 0,
-				signal: 0,
-				data_len: 0,
-			})
+			return Err(MacdError::InvalidKernel(format!("{:?} is not a valid batch kernel", k)));
 		}
 	};
 	let simd = match kernel {
@@ -552,122 +727,76 @@ pub fn expand_grid(r: &MacdBatchRange) -> Vec<MacdParams> {
 	combos
 }
 
-pub fn macd_batch_par_slice(data: &[f64], sweep: &MacdBatchRange, simd: Kernel) -> Result<MacdBatchOutput, MacdError> {
+pub fn macd_batch_par_slice(data: &[f64], sweep: &MacdBatchRange, _simd: Kernel) -> Result<MacdBatchOutput, MacdError> {
 	let combos = expand_grid(sweep);
 	let rows = combos.len();
 	let cols = data.len();
-	
-	if cols == 0 {
-		return Err(MacdError::AllValuesNaN);
-	}
+	if cols == 0 { return Err(MacdError::AllValuesNaN); }
 
-	// Use uninitialized memory for optimal performance
-	let mut macd_buf = make_uninit_matrix(rows, cols);
-	let mut signal_buf = make_uninit_matrix(rows, cols);
-	let mut hist_buf = make_uninit_matrix(rows, cols);
+	// allocate 3 matrices uninitialized
+	let mut macd_mu = make_uninit_matrix(rows, cols);
+	let mut sig_mu  = make_uninit_matrix(rows, cols);
+	let mut hist_mu = make_uninit_matrix(rows, cols);
 
-	// Calculate warmup periods for each combination
+	// warmups per row
 	let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
-	let warmup_periods: Vec<usize> = combos
-		.iter()
-		.map(|p| {
-			let slow = p.slow_period.unwrap_or(26);
-			let signal = p.signal_period.unwrap_or(9);
-			// Signal warmup is MACD warmup + signal period - 1
-			first + slow + signal - 2
-		})
-		.collect();
-
-	// Initialize NaN prefixes for warmup periods
-	init_matrix_prefixes(&mut macd_buf, cols, &warmup_periods);
-	init_matrix_prefixes(&mut signal_buf, cols, &warmup_periods);
-	init_matrix_prefixes(&mut hist_buf, cols, &warmup_periods);
-
-	// Convert to mutable slices for computation
-	let mut macd_guard = core::mem::ManuallyDrop::new(macd_buf);
-	let mut signal_guard = core::mem::ManuallyDrop::new(signal_buf);
-	let mut hist_guard = core::mem::ManuallyDrop::new(hist_buf);
-	
-	let macd_out: &mut [f64] = unsafe {
-		core::slice::from_raw_parts_mut(macd_guard.as_mut_ptr() as *mut f64, macd_guard.len())
-	};
-	let signal_out: &mut [f64] = unsafe {
-		core::slice::from_raw_parts_mut(signal_guard.as_mut_ptr() as *mut f64, signal_guard.len())
-	};
-	let hist_out: &mut [f64] = unsafe {
-		core::slice::from_raw_parts_mut(hist_guard.as_mut_ptr() as *mut f64, hist_guard.len())
-	};
-
-	// Process each parameter combination
-	for (idx, p) in combos.iter().enumerate() {
-		let fast = p.fast_period.unwrap_or(12);
+	let macd_warm: Vec<usize> = combos.iter().map(|p| {
 		let slow = p.slow_period.unwrap_or(26);
-		let sig = p.signal_period.unwrap_or(9);
-		let ma_type = p.ma_type.clone().unwrap_or_else(|| "ema".to_string());
-		
-		let row_start = idx * cols;
-		let row_end = row_start + cols;
-		
-		let out = match unsafe {
-			match simd {
-				Kernel::Scalar => macd_scalar(data, fast, slow, sig, &ma_type, first),
-				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-				Kernel::Avx2 => macd_avx2(data, fast, slow, sig, &ma_type, first),
-				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-				Kernel::Avx512 => macd_avx512(data, fast, slow, sig, &ma_type, first),
-				_ => unreachable!(),
-			}
-		} {
-			Ok(out) => {
-				macd_out[row_start..row_end].copy_from_slice(&out.macd);
-				signal_out[row_start..row_end].copy_from_slice(&out.signal);
-				hist_out[row_start..row_end].copy_from_slice(&out.hist);
-			}
-			Err(_) => {
-				// Already filled with NaN by init_matrix_prefixes
-			}
-		};
+		first + slow - 1
+	}).collect();
+	let warm: Vec<usize> = combos.iter().map(|p| {
+		let slow = p.slow_period.unwrap_or(26);
+		let signal = p.signal_period.unwrap_or(9);
+		first + slow + signal - 2
+	}).collect();
+
+	init_matrix_prefixes(&mut macd_mu, cols, &macd_warm);
+	init_matrix_prefixes(&mut sig_mu,  cols, &warm);
+	init_matrix_prefixes(&mut hist_mu, cols, &warm);
+
+	// cast to &mut [f64]
+	let mut macd_guard = core::mem::ManuallyDrop::new(macd_mu);
+	let mut sig_guard  = core::mem::ManuallyDrop::new(sig_mu);
+	let mut hist_guard = core::mem::ManuallyDrop::new(hist_mu);
+
+	let macd_out: &mut [f64] = unsafe { core::slice::from_raw_parts_mut(macd_guard.as_mut_ptr() as *mut f64, macd_guard.len()) };
+	let sig_out:  &mut [f64] = unsafe { core::slice::from_raw_parts_mut(sig_guard.as_mut_ptr()  as *mut f64, sig_guard.len())  };
+	let hist_out: &mut [f64] = unsafe { core::slice::from_raw_parts_mut(hist_guard.as_mut_ptr() as *mut f64, hist_guard.len()) };
+
+	// row-wise direct compute, no extra Vecs copied back
+	for (row, prm) in combos.iter().enumerate() {
+		let fast   = prm.fast_period.unwrap_or(12);
+		let slow   = prm.slow_period.unwrap_or(26);
+		let signal = prm.signal_period.unwrap_or(9);
+		let ma_t   = prm.ma_type.as_deref().unwrap_or("ema");
+
+		let r0 = row * cols;
+		let r1 = r0 + cols;
+
+		// Ignore errors for individual rows - they're already NaN-filled
+		let _ = macd_compute_into(
+			data, fast, slow, signal, ma_t,
+			first,
+			&mut macd_out[r0..r1],
+			&mut sig_out[r0..r1],
+			&mut hist_out[r0..r1],
+		);
 	}
 
-	// Convert back to Vec for output
-	let macd = unsafe {
-		Vec::from_raw_parts(
-			macd_guard.as_mut_ptr() as *mut f64,
-			macd_guard.len(),
-			macd_guard.capacity(),
-		)
-	};
-	let signal = unsafe {
-		Vec::from_raw_parts(
-			signal_guard.as_mut_ptr() as *mut f64,
-			signal_guard.len(),
-			signal_guard.capacity(),
-		)
-	};
-	let hist = unsafe {
-		Vec::from_raw_parts(
-			hist_guard.as_mut_ptr() as *mut f64,
-			hist_guard.len(),
-			hist_guard.capacity(),
-		)
-	};
+	// turn matrices into Vecs
+	let macd = unsafe { Vec::from_raw_parts(macd_guard.as_mut_ptr() as *mut f64, macd_guard.len(), macd_guard.capacity()) };
+	let signal = unsafe { Vec::from_raw_parts(sig_guard.as_mut_ptr() as *mut f64, sig_guard.len(), sig_guard.capacity()) };
+	let hist = unsafe { Vec::from_raw_parts(hist_guard.as_mut_ptr() as *mut f64, hist_guard.len(), hist_guard.capacity()) };
 
-	Ok(MacdBatchOutput {
-		macd,
-		signal,
-		hist,
-		combos,
-		rows,
-		cols,
-	})
+	Ok(MacdBatchOutput { macd, signal, hist, combos, rows, cols })
 }
 
 #[cfg(any(feature = "python", feature = "wasm"))]
 pub fn macd_batch_inner_into(
 	data: &[f64],
 	sweep: &MacdBatchRange,
-	simd: Kernel,
-	_fill_invalid: bool,  // Not needed since we pre-fill with NaN
+	_simd: Kernel,
+	_fill_invalid: bool,
 	macd_out: &mut [f64],
 	signal_out: &mut [f64],
 	hist_out: &mut [f64],
@@ -675,50 +804,43 @@ pub fn macd_batch_inner_into(
 	let combos = expand_grid(sweep);
 	let rows = combos.len();
 	let cols = data.len();
+	if macd_out.len() != rows*cols || signal_out.len() != rows*cols || hist_out.len() != rows*cols {
+		return Err(MacdError::InvalidPeriod { fast: 0, slow: 0, signal: 0, data_len: data.len() });
+	}
 	let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
-	
-	// Ensure output buffers are correct size
-	if macd_out.len() != rows * cols || signal_out.len() != rows * cols || hist_out.len() != rows * cols {
-		return Err(MacdError::InvalidPeriod {
-			fast: 0,
-			slow: 0,
-			signal: 0,
-			data_len: data.len(),
-		});
-	}
-	
-	// Process each parameter combination
-	for (idx, p) in combos.iter().enumerate() {
-		let fast = p.fast_period.unwrap_or(12);
-		let slow = p.slow_period.unwrap_or(26);
-		let sig = p.signal_period.unwrap_or(9);
-		let ma_type = p.ma_type.clone().unwrap_or_else(|| "ema".to_string());
+
+	for (row, prm) in combos.iter().enumerate() {
+		let r0 = row*cols; 
+		let r1 = r0+cols;
 		
-		let row_start = idx * cols;
-		let row_end = row_start + cols;
+		// Initialize the row with NaN first
+		let fast_period = prm.fast_period.unwrap_or(12);
+		let slow_period = prm.slow_period.unwrap_or(26);
+		let signal_period = prm.signal_period.unwrap_or(9);
+		let macd_warmup = first + slow_period - 1;
+		let signal_warmup = first + slow_period + signal_period - 2;
 		
-		match unsafe {
-			match simd {
-				Kernel::Scalar => macd_scalar(data, fast, slow, sig, &ma_type, first),
-				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-				Kernel::Avx2 => macd_avx2(data, fast, slow, sig, &ma_type, first),
-				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-				Kernel::Avx512 => macd_avx512(data, fast, slow, sig, &ma_type, first),
-				_ => unreachable!(),
-			}
-		} {
-			Ok(out) => {
-				macd_out[row_start..row_end].copy_from_slice(&out.macd);
-				signal_out[row_start..row_end].copy_from_slice(&out.signal);
-				hist_out[row_start..row_end].copy_from_slice(&out.hist);
-			}
-			Err(_) => {
-				// Output buffers should already be pre-filled with NaN by the caller
-				// for the appropriate warmup periods, so we don't need to do anything here
-			}
-		};
+		// Fill with NaN up to warmup periods
+		for i in 0..macd_warmup.min(cols) {
+			macd_out[r0 + i] = f64::NAN;
+		}
+		for i in 0..signal_warmup.min(cols) {
+			signal_out[r0 + i] = f64::NAN;
+			hist_out[r0 + i] = f64::NAN;
+		}
+		
+		let _ = macd_compute_into(
+			data,
+			fast_period,
+			slow_period,
+			signal_period,
+			prm.ma_type.as_deref().unwrap_or("ema"),
+			first,
+			&mut macd_out[r0..r1],
+			&mut signal_out[r0..r1],
+			&mut hist_out[r0..r1],
+		);
 	}
-	
 	Ok(combos)
 }
 
@@ -734,11 +856,42 @@ pub fn macd_py<'py>(
 	ma_type: &str,
 	kernel: Option<&str>,
 ) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
-	use numpy::{IntoPyArray, PyArrayMethods};
+	use numpy::PyArray1;
 
 	let slice_in = data.as_slice()?;
-	let kern = validate_kernel(kernel, false)?;
+	let len = slice_in.len();
 
+	// Prepare warmups exactly once
+	let first = slice_in.iter().position(|x| !x.is_nan()).unwrap_or(0);
+	let macd_warmup   = first + slow_period - 1;
+	let signal_warmup = first + slow_period + signal_period - 2;
+
+	// Allocate Py arrays and mark warm prefixes via our helper outputs
+	let macd_arr   = unsafe { PyArray1::<f64>::new(py, [len], false) };
+	let signal_arr = unsafe { PyArray1::<f64>::new(py, [len], false) };
+	let hist_arr   = unsafe { PyArray1::<f64>::new(py, [len], false) };
+
+	let macd_slice   = unsafe { macd_arr.as_slice_mut()? };
+	let signal_slice = unsafe { signal_arr.as_slice_mut()? };
+	let hist_slice   = unsafe { hist_arr.as_slice_mut()? };
+
+	// Initialize prefixes with our allocator semantics (check bounds)
+	if macd_warmup <= len {
+		macd_slice[..macd_warmup].fill(f64::from_bits(0x7ff8_0000_0000_0000));
+	} else {
+		macd_slice.fill(f64::from_bits(0x7ff8_0000_0000_0000));
+	}
+	if signal_warmup <= len {
+		signal_slice[..signal_warmup].fill(f64::from_bits(0x7ff8_0000_0000_0000));
+		hist_slice[..signal_warmup].fill(f64::from_bits(0x7ff8_0000_0000_0000));
+	} else {
+		signal_slice.fill(f64::from_bits(0x7ff8_0000_0000_0000));
+		hist_slice.fill(f64::from_bits(0x7ff8_0000_0000_0000));
+	}
+
+	let kern = validate_kernel(kernel, false)?;
+	
+	// Create MacdInput and call macd_with_kernel to respect kernel parameter
 	let params = MacdParams {
 		fast_period: Some(fast_period),
 		slow_period: Some(slow_period),
@@ -746,29 +899,28 @@ pub fn macd_py<'py>(
 		ma_type: Some(ma_type.to_string()),
 	};
 	let input = MacdInput::from_slice(slice_in, params);
+	
+	let result = py.allow_threads(|| {
+		macd_with_kernel(&input, kern)
+	}).map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	// Copy results to pre-allocated arrays
+	macd_slice.copy_from_slice(&result.macd);
+	signal_slice.copy_from_slice(&result.signal);
+	hist_slice.copy_from_slice(&result.hist);
 
-	let (macd_vec, signal_vec, hist_vec) = py
-		.allow_threads(|| {
-			macd_with_kernel(&input, kern)
-				.map(|o| (o.macd, o.signal, o.hist))
-		})
-		.map_err(|e| PyValueError::new_err(e.to_string()))?;
-
-	Ok((
-		macd_vec.into_pyarray(py),
-		signal_vec.into_pyarray(py),
-		hist_vec.into_pyarray(py),
-	))
+	Ok((macd_arr, signal_arr, hist_arr))
 }
 
 #[cfg(feature = "python")]
 #[pyclass(name = "MacdStream")]
 pub struct MacdStreamPy {
+	stream: MacdStream,
+	data_buffer: Vec<f64>, // Keep buffer for non-EMA fallback
 	fast_period: usize,
 	slow_period: usize,
 	signal_period: usize,
 	ma_type: String,
-	data_buffer: Vec<f64>,
 }
 
 #[cfg(feature = "python")]
@@ -777,38 +929,49 @@ impl MacdStreamPy {
 	#[new]
 	fn new(fast_period: usize, slow_period: usize, signal_period: usize, ma_type: &str) -> PyResult<Self> {
 		Ok(MacdStreamPy {
+			stream: MacdStream::new(fast_period, slow_period, signal_period, ma_type),
+			data_buffer: Vec::new(),
 			fast_period,
 			slow_period,
 			signal_period,
 			ma_type: ma_type.to_string(),
-			data_buffer: Vec::new(),
 		})
 	}
 
 	fn update(&mut self, value: f64) -> Option<(f64, f64, f64)> {
-		self.data_buffer.push(value);
-		
-		// Need at least slow_period + signal_period - 1 values
-		let min_needed = self.slow_period + self.signal_period - 1;
-		if self.data_buffer.len() < min_needed {
-			return None;
+		// Try optimized EMA stream first
+		if let Some(result) = self.stream.update(value) {
+			return Some(result);
 		}
 		
-		// Calculate MACD on the buffer
-		let params = MacdParams {
-			fast_period: Some(self.fast_period),
-			slow_period: Some(self.slow_period),
-			signal_period: Some(self.signal_period),
-			ma_type: Some(self.ma_type.clone()),
-		};
-		let input = MacdInput::from_slice(&self.data_buffer, params);
-		
-		match macd(&input) {
-			Ok(output) => {
-				let last_idx = output.macd.len() - 1;
-				Some((output.macd[last_idx], output.signal[last_idx], output.hist[last_idx]))
+		// Fallback for non-EMA MA types
+		if !self.ma_type.eq_ignore_ascii_case("ema") {
+			self.data_buffer.push(value);
+			
+			// Need at least slow_period + signal_period - 1 values
+			let min_needed = self.slow_period + self.signal_period - 1;
+			if self.data_buffer.len() < min_needed {
+				return None;
 			}
-			Err(_) => None,
+			
+			// Calculate MACD on the buffer
+			let params = MacdParams {
+				fast_period: Some(self.fast_period),
+				slow_period: Some(self.slow_period),
+				signal_period: Some(self.signal_period),
+				ma_type: Some(self.ma_type.clone()),
+			};
+			let input = MacdInput::from_slice(&self.data_buffer, params);
+			
+			match macd(&input) {
+				Ok(output) => {
+					let last_idx = output.macd.len() - 1;
+					Some((output.macd[last_idx], output.signal[last_idx], output.hist[last_idx]))
+				}
+				Err(_) => None,
+			}
+		} else {
+			None
 		}
 	}
 }
@@ -829,6 +992,17 @@ pub fn macd_batch_py<'py>(
 	use pyo3::types::PyDict;
 
 	let slice_in = data.as_slice()?;
+	
+	// Check for empty input
+	if slice_in.is_empty() {
+		return Err(PyValueError::new_err("macd: Input data slice is empty"));
+	}
+	
+	// Check if all values are NaN
+	if slice_in.iter().all(|x| x.is_nan()) {
+		return Err(PyValueError::new_err("macd: All values are NaN"));
+	}
+	
 	let kern = validate_kernel(kernel, true)?;
 
 	let sweep = MacdBatchRange {
@@ -892,44 +1066,6 @@ pub fn macd_batch_py<'py>(
 // =============================================================================
 
 #[cfg(feature = "wasm")]
-/// Write MACD directly to output slices - no allocations
-pub fn macd_into_slices(
-	macd_dst: &mut [f64],
-	signal_dst: &mut [f64], 
-	hist_dst: &mut [f64],
-	input: &MacdInput,
-	kern: Kernel,
-) -> Result<(), MacdError> {
-	// Get data from input
-	let data: &[f64] = match &input.data {
-		MacdData::Candles { candles, source } => source_type(candles, source),
-		MacdData::Slice(sl) => sl,
-	};
-	
-	let len = data.len();
-	
-	// Validate output slice lengths
-	if macd_dst.len() != len || signal_dst.len() != len || hist_dst.len() != len {
-		return Err(MacdError::InvalidPeriod {
-			fast: 0,
-			slow: 0, 
-			signal: 0,
-			data_len: len,
-		});
-	}
-	
-	// Compute MACD values
-	let result = macd_with_kernel(input, kern)?;
-	
-	// Copy results to output slices
-	macd_dst.copy_from_slice(&result.macd);
-	signal_dst.copy_from_slice(&result.signal);
-	hist_dst.copy_from_slice(&result.hist);
-	
-	Ok(())
-}
-
-#[cfg(feature = "wasm")]
 #[wasm_bindgen]
 #[derive(Serialize, Deserialize)]
 pub struct MacdResult {
@@ -966,38 +1102,27 @@ pub fn macd_js(
 	signal_period: usize,
 	ma_type: &str,
 ) -> Result<MacdResult, JsValue> {
-	let params = MacdParams {
-		fast_period: Some(fast_period),
-		slow_period: Some(slow_period),
-		signal_period: Some(signal_period),
-		ma_type: Some(ma_type.to_string()),
-	};
-	let input = MacdInput::from_slice(data, params);
-	
-	// Calculate warmup periods
+	let len = data.len();
 	let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
-	let macd_warmup = first + slow_period - 1;
+	let macd_warmup   = first + slow_period - 1;
 	let signal_warmup = first + slow_period + signal_period - 2;
-	
-	// Allocate with proper NaN prefixes
-	let mut macd_vec = alloc_with_nan_prefix(data.len(), macd_warmup);
-	let mut signal_vec = alloc_with_nan_prefix(data.len(), signal_warmup);
-	let mut hist_vec = alloc_with_nan_prefix(data.len(), signal_warmup);
-	
-	macd_into_slices(&mut macd_vec, &mut signal_vec, &mut hist_vec, &input, detect_best_kernel())
-		.map_err(|e| JsValue::from_str(&e.to_string()))?;
-	
-	// Combine into single allocation for WASM return
-	let mut values = Vec::with_capacity(data.len() * 3);
-	values.extend_from_slice(&macd_vec);
-	values.extend_from_slice(&signal_vec);
-	values.extend_from_slice(&hist_vec);
-	
-	Ok(MacdResult {
-		values,
-		rows: 3,
-		cols: data.len(),
-	})
+
+	let mut macd   = alloc_with_nan_prefix(len, macd_warmup);
+	let mut signal = alloc_with_nan_prefix(len, signal_warmup);
+	let mut hist   = alloc_with_nan_prefix(len, signal_warmup);
+
+	macd_compute_into(
+		data, fast_period, slow_period, signal_period, ma_type,
+		first, &mut macd, &mut signal, &mut hist,
+	).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	// concatenate without extra work
+	let mut values = Vec::with_capacity(3*len);
+	values.extend_from_slice(&macd);
+	values.extend_from_slice(&signal);
+	values.extend_from_slice(&hist);
+
+	Ok(MacdResult { values, rows: 3, cols: len })
 }
 
 #[cfg(feature = "wasm")]
@@ -1060,7 +1185,8 @@ pub fn macd_into(
 			let mut temp_signal = alloc_with_nan_prefix(len, signal_warmup);
 			let mut temp_hist = alloc_with_nan_prefix(len, signal_warmup);
 			
-			macd_into_slices(&mut temp_macd, &mut temp_signal, &mut temp_hist, &input, detect_best_kernel())
+			macd_compute_into(data, fast_period, slow_period, signal_period, ma_type, first, 
+				&mut temp_macd, &mut temp_signal, &mut temp_hist)
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 			
 			// Copy results to output pointers
@@ -1072,13 +1198,18 @@ pub fn macd_into(
 			signal_out.copy_from_slice(&temp_signal);
 			hist_out.copy_from_slice(&temp_hist);
 		} else {
-			// Direct write to output slices
+			// Non-aliasing case: call macd() and copy results directly
+			// This is simpler and avoids issues with macd_compute_into expectations
+			let result = macd(&input).map_err(|e| JsValue::from_str(&e.to_string()))?;
+			
+			// Copy results to output pointers
 			let macd_out = std::slice::from_raw_parts_mut(macd_ptr, len);
 			let signal_out = std::slice::from_raw_parts_mut(signal_ptr, len);
 			let hist_out = std::slice::from_raw_parts_mut(hist_ptr, len);
 			
-			macd_into_slices(macd_out, signal_out, hist_out, &input, detect_best_kernel())
-				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			macd_out.copy_from_slice(&result.macd);
+			signal_out.copy_from_slice(&result.signal);
+			hist_out.copy_from_slice(&result.hist);
 		}
 		
 		Ok(())
@@ -1097,10 +1228,8 @@ pub struct MacdBatchConfig {
 
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
-pub struct MacdBatchJsResult {
-	pub macd: Vec<f64>,
-	pub signal: Vec<f64>,
-	pub hist: Vec<f64>,
+pub struct MacdBatchJsOutput {
+	pub values: Vec<f64>,   // [macd block | signal block | hist block], each length rows*cols
 	pub rows: usize,
 	pub cols: usize,
 	pub fast_periods: Vec<usize>,
@@ -1111,105 +1240,70 @@ pub struct MacdBatchJsResult {
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = macd_batch)]
 pub fn macd_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	// Check for empty input
+	if data.is_empty() {
+		return Err(JsValue::from_str("macd: Input data slice is empty"));
+	}
+	
+	// Check if all values are NaN
+	if data.iter().all(|x| x.is_nan()) {
+		return Err(JsValue::from_str("macd: All values are NaN"));
+	}
+	
 	let config: MacdBatchConfig = serde_wasm_bindgen::from_value(config)
 		.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
-	
 	let sweep = MacdBatchRange {
 		fast_period: config.fast_period_range,
 		slow_period: config.slow_period_range,
 		signal_period: config.signal_period_range,
 		ma_type: (config.ma_type.clone(), config.ma_type.clone(), String::new()),
 	};
-	
 	let combos = expand_grid(&sweep);
 	let rows = combos.len();
 	let cols = data.len();
-	
-	// Calculate warmup periods for each combination
+
+	// pre-alloc three matrices via helpers (+ NaN prefixes in caller if desired)
 	let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
-	let warmup_periods: Vec<usize> = combos
-		.iter()
-		.map(|p| {
-			let slow = p.slow_period.unwrap_or(26);
-			let signal = p.signal_period.unwrap_or(9);
-			// Signal warmup is MACD warmup + signal period - 1
-			first + slow + signal - 2
-		})
-		.collect();
-	
-	// Use uninitialized memory with NaN prefixes
-	let mut macd_buf = make_uninit_matrix(rows, cols);
-	let mut signal_buf = make_uninit_matrix(rows, cols);
-	let mut hist_buf = make_uninit_matrix(rows, cols);
-	
-	// Initialize NaN prefixes for warmup periods
-	init_matrix_prefixes(&mut macd_buf, cols, &warmup_periods);
-	init_matrix_prefixes(&mut signal_buf, cols, &warmup_periods);
-	init_matrix_prefixes(&mut hist_buf, cols, &warmup_periods);
-	
-	// Convert to mutable slices for computation
-	let mut macd_guard = core::mem::ManuallyDrop::new(macd_buf);
-	let mut signal_guard = core::mem::ManuallyDrop::new(signal_buf);
-	let mut hist_guard = core::mem::ManuallyDrop::new(hist_buf);
-	
-	let macd: &mut [f64] = unsafe {
-		core::slice::from_raw_parts_mut(macd_guard.as_mut_ptr() as *mut f64, macd_guard.len())
-	};
-	let signal: &mut [f64] = unsafe {
-		core::slice::from_raw_parts_mut(signal_guard.as_mut_ptr() as *mut f64, signal_guard.len())
-	};
-	let hist: &mut [f64] = unsafe {
-		core::slice::from_raw_parts_mut(hist_guard.as_mut_ptr() as *mut f64, hist_guard.len())
-	};
-	
-	// Use the shared batch function
-	let kernel = detect_best_batch_kernel();
-	let simd = match kernel {
-		Kernel::Avx512Batch => Kernel::Avx512,
-		Kernel::Avx2Batch => Kernel::Avx2,
-		Kernel::ScalarBatch => Kernel::Scalar,
-		_ => Kernel::Scalar,
-	};
-	
-	let result_combos = macd_batch_inner_into(data, &sweep, simd, true, macd, signal, hist)
+	let macd_warm: Vec<usize> = combos.iter().map(|p| first + p.slow_period.unwrap_or(26) - 1).collect();
+	let sig_warm: Vec<usize>  = combos.iter().map(|p| first + p.slow_period.unwrap_or(26) + p.signal_period.unwrap_or(9) - 2).collect();
+
+	let mut macd_mu = make_uninit_matrix(rows, cols);
+	let mut sig_mu  = make_uninit_matrix(rows, cols);
+	let mut hist_mu = make_uninit_matrix(rows, cols);
+
+	init_matrix_prefixes(&mut macd_mu, cols, &macd_warm);
+	init_matrix_prefixes(&mut sig_mu,  cols, &sig_warm);
+	init_matrix_prefixes(&mut hist_mu, cols, &sig_warm);
+
+	let mut macd_guard = core::mem::ManuallyDrop::new(macd_mu);
+	let mut sig_guard  = core::mem::ManuallyDrop::new(sig_mu);
+	let mut hist_guard = core::mem::ManuallyDrop::new(hist_mu);
+
+	let macd_out: &mut [f64] = unsafe { core::slice::from_raw_parts_mut(macd_guard.as_mut_ptr() as *mut f64, macd_guard.len()) };
+	let sig_out:  &mut [f64] = unsafe { core::slice::from_raw_parts_mut(sig_guard.as_mut_ptr()  as *mut f64, sig_guard.len())  };
+	let hist_out: &mut [f64] = unsafe { core::slice::from_raw_parts_mut(hist_guard.as_mut_ptr() as *mut f64, hist_guard.len()) };
+
+	macd_batch_inner_into(data, &sweep, detect_best_kernel(), true, macd_out, sig_out, hist_out)
 		.map_err(|e| JsValue::from_str(&format!("Batch computation error: {}", e)))?;
-	
-	// Convert to owned vectors for return
-	let macd_vec = unsafe {
-		let ptr = macd_guard.as_mut_ptr() as *mut f64;
-		let len = macd_guard.len();
-		let cap = macd_guard.capacity();
-		core::mem::forget(macd_guard);
-		Vec::from_raw_parts(ptr, len, cap)
-	};
-	let signal_vec = unsafe {
-		let ptr = signal_guard.as_mut_ptr() as *mut f64;
-		let len = signal_guard.len();
-		let cap = signal_guard.capacity();
-		core::mem::forget(signal_guard);
-		Vec::from_raw_parts(ptr, len, cap)
-	};
-	let hist_vec = unsafe {
-		let ptr = hist_guard.as_mut_ptr() as *mut f64;
-		let len = hist_guard.len();
-		let cap = hist_guard.capacity();
-		core::mem::forget(hist_guard);
-		Vec::from_raw_parts(ptr, len, cap)
-	};
-	
-	let js_output = MacdBatchJsResult {
-		macd: macd_vec,
-		signal: signal_vec,
-		hist: hist_vec,
+
+	let macd = unsafe { Vec::from_raw_parts(macd_guard.as_mut_ptr() as *mut f64, macd_guard.len(), macd_guard.capacity()) };
+	let sig  = unsafe { Vec::from_raw_parts(sig_guard.as_mut_ptr()  as *mut f64, sig_guard.len(),  sig_guard.capacity())  };
+	let hist = unsafe { Vec::from_raw_parts(hist_guard.as_mut_ptr() as *mut f64, hist_guard.len(), hist_guard.capacity()) };
+
+	let mut values = Vec::with_capacity(3*rows*cols);
+	values.extend_from_slice(&macd);
+	values.extend_from_slice(&sig);
+	values.extend_from_slice(&hist);
+
+	let out = MacdBatchJsOutput {
+		values,
 		rows,
 		cols,
-		fast_periods: result_combos.iter().map(|p| p.fast_period.unwrap()).collect(),
-		slow_periods: result_combos.iter().map(|p| p.slow_period.unwrap()).collect(),
-		signal_periods: result_combos.iter().map(|p| p.signal_period.unwrap()).collect(),
+		fast_periods: combos.iter().map(|p| p.fast_period.unwrap()).collect(),
+		slow_periods: combos.iter().map(|p| p.slow_period.unwrap()).collect(),
+		signal_periods: combos.iter().map(|p| p.signal_period.unwrap()).collect(),
 	};
-	
-	serde_wasm_bindgen::to_value(&js_output)
-		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+	serde_wasm_bindgen::to_value(&out).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 #[cfg(test)]

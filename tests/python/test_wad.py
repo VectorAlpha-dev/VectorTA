@@ -26,9 +26,9 @@ class TestWad:
     def test_wad_accuracy(self, test_data):
         """Test WAD matches expected values from Rust tests"""
         # Extract price data
-        high = test_data.high
-        low = test_data.low
-        close = test_data.close
+        high = test_data['high']
+        low = test_data['low']
+        close = test_data['close']
         
         # Run WAD calculation
         result = ta_indicators.wad(high, low, close)
@@ -65,9 +65,9 @@ class TestWad:
     
     def test_wad_batch(self, test_data):
         """Test WAD batch calculation"""
-        high = test_data.high
-        low = test_data.low
-        close = test_data.close
+        high = test_data['high']
+        low = test_data['low']
+        close = test_data['close']
         
         # Run batch calculation (WAD has no parameters, so this is simplified)
         result = ta_indicators.wad_batch(high, low, close)

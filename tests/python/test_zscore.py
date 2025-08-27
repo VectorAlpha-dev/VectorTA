@@ -40,12 +40,12 @@ class TestZscore:
         result = ta_indicators.zscore(close, period=20, ma_type="ema", nbdev=2.0, devtype=0)
         assert len(result) == len(close)
         
-        # Check that warmup period values are NaN
-        for i in range(20):
+        # Check that warmup period values are NaN (first period-1 values)
+        for i in range(19):
             assert np.isnan(result[i])
         
         # After warmup, should have values
-        assert not np.isnan(result[20])
+        assert not np.isnan(result[19])
     
     def test_zscore_zero_period(self):
         """Test ZSCORE fails with zero period - mirrors check_zscore_with_zero_period"""

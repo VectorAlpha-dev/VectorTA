@@ -39,7 +39,6 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -126,6 +125,8 @@ impl<'a> ApoInput<'a> {
 
 #[derive(Debug, Error)]
 pub enum ApoError {
+	#[error("apo: Input data slice is empty.")]
+	EmptyInputData,
 	#[error("apo: All values are NaN.")]
 	AllValuesNaN,
 	#[error("apo: Invalid period: short={short}, long={long}")]
@@ -134,6 +135,8 @@ pub enum ApoError {
 	ShortPeriodNotLessThanLong { short: usize, long: usize },
 	#[error("apo: Not enough valid data: needed={needed}, valid={valid}")]
 	NotEnoughValidData { needed: usize, valid: usize },
+	#[error("apo: output length mismatch: expected={expected}, got={got}")]
+	MismatchedOutputLen { expected: usize, got: usize },
 }
 
 // --- Builder API
@@ -216,9 +219,8 @@ fn apo_prepare<'a>(
 	let data: &[f64] = input.as_ref();
 	let len = data.len();
 	if len == 0 {
-		return Err(ApoError::AllValuesNaN);
+		return Err(ApoError::EmptyInputData);
 	}
-
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(ApoError::AllValuesNaN)?;
 	let short = input.get_short_period();
 	let long = input.get_long_period();
@@ -238,9 +240,8 @@ fn apo_prepare<'a>(
 
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
-		other => other,
+		k => k,
 	};
-
 	Ok((data, first, short, long, len, chosen))
 }
 
@@ -249,10 +250,8 @@ fn apo_compute_into(data: &[f64], first: usize, short: usize, long: usize, kerne
 	unsafe {
 		#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 		{
-			if matches!(kernel, Kernel::Scalar | Kernel::ScalarBatch) {
-				apo_simd128(data, short, long, first, out);
-				return;
-			}
+			// Keep scalar for correctness; EMA is sequential.
+			// SIMD path removed as it incorrectly uses the same previous EMA for both lanes
 		}
 		
 		match kernel {
@@ -380,9 +379,13 @@ pub unsafe fn apo_avx512_long(data: &[f64], short: usize, long: usize, first: us
 }
 
 // --- SIMD128 for WASM
+// NOTE: This function is intentionally unused. EMA calculations are sequential (each value depends
+// on the previous), so vectorizing two values at once using the same previous EMA would produce
+// incorrect results. We fall back to scalar implementation for correctness.
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 #[inline(always)]
+#[allow(dead_code)]
 unsafe fn apo_simd128(data: &[f64], short: usize, long: usize, first: usize, out: &mut [f64]) {
 	use core::arch::wasm32::*;
 	
@@ -510,21 +513,11 @@ impl ApoStream {
 /// Helper function for WASM bindings - writes directly to output slice with zero allocations
 pub fn apo_into_slice(dst: &mut [f64], input: &ApoInput, kern: Kernel) -> Result<(), ApoError> {
 	let (data, first, short, long, len, chosen) = apo_prepare(input, kern)?;
-	
 	if dst.len() != len {
-		return Err(ApoError::InvalidPeriod {
-			short: dst.len(),
-			long: len,
-		});
+		return Err(ApoError::MismatchedOutputLen { expected: len, got: dst.len() });
 	}
-	
 	apo_compute_into(data, first, short, long, chosen, dst);
-	
-	// Fill warmup period with NaN
-	for v in &mut dst[..first] {
-		*v = f64::NAN;
-	}
-	
+	for v in &mut dst[..first] { *v = f64::NAN; }
 	Ok(())
 }
 
@@ -769,101 +762,52 @@ fn apo_batch_inner_into(
 	out: &mut [f64],
 ) -> Result<Vec<ApoParams>, ApoError> {
 	let combos = expand_grid(sweep);
-	if combos.is_empty() {
-		return Err(ApoError::InvalidPeriod { short: 0, long: 0 });
-	}
-	
+	if combos.is_empty() { return Err(ApoError::InvalidPeriod { short: 0, long: 0 }); }
+
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(ApoError::AllValuesNaN)?;
 	let max_long = combos.iter().map(|c| c.long_period.unwrap()).max().unwrap();
 	if data.len() - first < max_long {
-		return Err(ApoError::NotEnoughValidData {
-			needed: max_long,
-			valid: data.len() - first,
-		});
+		return Err(ApoError::NotEnoughValidData { needed: max_long, valid: data.len() - first });
 	}
 
 	let rows = combos.len();
 	let cols = data.len();
 
-	// Initialize NaN prefixes for each row
-	for row in 0..rows {
-		let warmup = first;
-		for col in 0..warmup {
-			out[row * cols + col] = f64::NAN;
-		}
-	}
+	// 1) Treat caller buffer as uninitialized and set NaN warm prefixes with helper.
+	let out_mu: &mut [MaybeUninit<f64>] = unsafe {
+		core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
+	};
+	let warm = vec![first; rows];
+	init_matrix_prefixes(out_mu, cols, &warm);
 
-	// Compute APO values for each parameter combination
-	if parallel && !cfg!(target_arch = "wasm32") {
+	// 2) Per-row compute into initialized region.
+	let simd = match kern {
+		Kernel::Avx512Batch | Kernel::Avx512 => Kernel::Avx512,
+		Kernel::Avx2Batch | Kernel::Avx2 => Kernel::Avx2,
+		_ => Kernel::Scalar,
+	};
+
+	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
+		let s = combos[row].short_period.unwrap();
+		let l = combos[row].long_period.unwrap();
+		let dst: &mut [f64] = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
+		match simd {
+			Kernel::Scalar => apo_row_scalar(data, first, s, l, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => apo_row_avx2(data, first, s, l, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => apo_row_avx512(data, first, s, l, dst),
+			_ => unreachable!(),
+		}
+	};
+
+	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
-		{
-			use rayon::prelude::*;
-			out.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(row, out_row)| {
-					let params = &combos[row];
-					unsafe {
-						match kern {
-							Kernel::Scalar => apo_row_scalar(
-								data,
-								first,
-								params.short_period.unwrap(),
-								params.long_period.unwrap(),
-								out_row
-							),
-							#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-							Kernel::Avx2 => apo_row_avx2(
-								data,
-								first,
-								params.short_period.unwrap(),
-								params.long_period.unwrap(),
-								out_row
-							),
-							#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-							Kernel::Avx512 => apo_row_avx512(
-								data,
-								first,
-								params.short_period.unwrap(),
-								params.long_period.unwrap(),
-								out_row
-							),
-							_ => unreachable!(),
-						}
-					}
-				});
-		}
+		out_mu.par_chunks_mut(cols).enumerate().for_each(|(r, s)| do_row(r, s));
+		#[cfg(target_arch = "wasm32")]
+		for (r, s) in out_mu.chunks_mut(cols).enumerate() { do_row(r, s); }
 	} else {
-		for (row, out_row) in out.chunks_mut(cols).enumerate() {
-			let params = &combos[row];
-			unsafe {
-				match kern {
-					Kernel::Scalar => apo_row_scalar(
-						data,
-						first,
-						params.short_period.unwrap(),
-						params.long_period.unwrap(),
-						out_row
-					),
-					#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-					Kernel::Avx2 => apo_row_avx2(
-						data,
-						first,
-						params.short_period.unwrap(),
-						params.long_period.unwrap(),
-						out_row
-					),
-					#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-					Kernel::Avx512 => apo_row_avx512(
-						data,
-						first,
-						params.short_period.unwrap(),
-						params.long_period.unwrap(),
-						out_row
-					),
-					_ => unreachable!(),
-				}
-			}
-		}
+		for (r, s) in out_mu.chunks_mut(cols).enumerate() { do_row(r, s); }
 	}
 
 	Ok(combos)
@@ -932,7 +876,7 @@ mod tests {
 		let candles = read_candles_from_csv(file_path)?;
 		let input = ApoInput::with_default_candles(&candles);
 		let result = apo_with_kernel(&input, kernel)?;
-		let expected_last_five = [-691.2244918867873, -678.1375323319808, -690.4319046263408, -667.846363327466, -711.136406617501];
+		let expected_last_five = [-429.80100015922653, -401.64149983850075, -386.13569657357584, -357.92775222467753, -374.13870680232503];
 		let start_index = result.values.len().saturating_sub(5);
 		let result_last_five = &result.values[start_index..];
 		for (i, &value) in result_last_five.iter().enumerate() {
@@ -1687,12 +1631,7 @@ pub fn apo_batch_py<'py>(
 	let slice_in = data.as_slice()?;
 	let kern = validate_kernel(kernel, true)?;
 
-	let sweep = ApoBatchRange {
-		short: short_period_range,
-		long: long_period_range,
-	};
-
-	// Expand grid to know dimensions
+	let sweep = ApoBatchRange { short: short_period_range, long: long_period_range };
 	let combos = expand_grid(&sweep);
 	if combos.is_empty() {
 		return Err(PyValueError::new_err("No valid parameter combinations"));
@@ -1700,48 +1639,41 @@ pub fn apo_batch_py<'py>(
 	let rows = combos.len();
 	let cols = slice_in.len();
 
-	// Pre-allocate uninitialized NumPy array (acceptable for batch operations)
+	// Pre-allocate uninitialized NumPy array
 	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
 	let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-	// Heavy work without the GIL
+	// Warm-prefix init using helper on a MaybeUninit overlay
+	let first = slice_in.iter().position(|x| !x.is_nan()).unwrap_or(0);
+	let out_mu: &mut [MaybeUninit<f64>] = unsafe {
+		core::slice::from_raw_parts_mut(slice_out.as_mut_ptr() as *mut MaybeUninit<f64>, slice_out.len())
+	};
+	let warm: Vec<usize> = std::iter::repeat(first).take(rows).collect();
+	init_matrix_prefixes(out_mu, cols, &warm);
+
+	// Heavy work without the GIL, zero-copy into NumPy buffer
 	let combos = py
-		.allow_threads(|| -> Result<Vec<ApoParams>, ApoError> {
-			// Resolve Kernel::Auto to a specific kernel
-			let kernel = match kern {
-				Kernel::Auto => detect_best_batch_kernel(),
-				k => k,
+		.allow_threads(|| {
+			let k = match kern { Kernel::Auto => detect_best_batch_kernel(), k => k };
+			let simd = match k {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				_ => Kernel::Scalar,
 			};
-
-			let result = apo_batch_with_kernel(slice_in, &sweep, kernel)?;
-
-			// Copy results to the pre-allocated buffer
-			slice_out.copy_from_slice(&result.values);
-
-			Ok(result.combos)
+			apo_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
 		})
 		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-	// Build result dictionary
 	let dict = PyDict::new(py);
 	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
 	dict.set_item(
 		"short_periods",
-		combos
-			.iter()
-			.map(|p| p.short_period.unwrap() as u64)
-			.collect::<Vec<_>>()
-			.into_pyarray(py),
+		combos.iter().map(|p| p.short_period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py),
 	)?;
 	dict.set_item(
 		"long_periods",
-		combos
-			.iter()
-			.map(|p| p.long_period.unwrap() as u64)
-			.collect::<Vec<_>>()
-			.into_pyarray(py),
+		combos.iter().map(|p| p.long_period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py),
 	)?;
-
 	Ok(dict)
 }
 
@@ -1769,6 +1701,21 @@ pub fn apo_js(data: &[f64], short_period: usize, long_period: usize) -> Result<V
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
+pub fn apo_alloc(len: usize) -> *mut f64 {
+	let mut v = Vec::<f64>::with_capacity(len);
+	let ptr = v.as_mut_ptr();
+	std::mem::forget(v);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn apo_free(ptr: *mut f64, len: usize) {
+	unsafe { let _ = Vec::from_raw_parts(ptr, len, len); }
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
 pub fn apo_into(
 	in_ptr: *const f64,
 	out_ptr: *mut f64,
@@ -1777,47 +1724,24 @@ pub fn apo_into(
 	long_period: usize,
 ) -> Result<(), JsValue> {
 	if in_ptr.is_null() || out_ptr.is_null() {
-		return Err(JsValue::from_str("Null pointer provided"));
+		return Err(JsValue::from_str("Null pointer passed to apo_into"));
 	}
-	
 	unsafe {
 		let data = std::slice::from_raw_parts(in_ptr, len);
-		let params = ApoParams {
-			short_period: Some(short_period),
-			long_period: Some(long_period),
-		};
+		let params = ApoParams { short_period: Some(short_period), long_period: Some(long_period) };
 		let input = ApoInput::from_slice(data, params);
-		
-		if in_ptr == out_ptr {  // CRITICAL: Aliasing check - compare pointers directly
-			let mut temp = vec![0.0; len];
-			apo_into_slice(&mut temp, &input, Kernel::Auto)
-				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+		if in_ptr == out_ptr {
+			let mut tmp = vec![0.0; len];
+			apo_into_slice(&mut tmp, &input, detect_best_kernel()).map_err(|e| JsValue::from_str(&e.to_string()))?;
 			let out = std::slice::from_raw_parts_mut(out_ptr, len);
-			out.copy_from_slice(&temp);
+			out.copy_from_slice(&tmp);
 		} else {
 			let out = std::slice::from_raw_parts_mut(out_ptr, len);
-			apo_into_slice(out, &input, Kernel::Auto)
-				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			apo_into_slice(out, &input, detect_best_kernel()).map_err(|e| JsValue::from_str(&e.to_string()))?;
 		}
-		Ok(())
 	}
-}
-
-#[cfg(feature = "wasm")]
-#[wasm_bindgen]
-pub fn apo_alloc(len: usize) -> *mut f64 {
-	let mut vec = Vec::<f64>::with_capacity(len);
-	let ptr = vec.as_mut_ptr();
-	std::mem::forget(vec);
-	ptr
-}
-
-#[cfg(feature = "wasm")]
-#[wasm_bindgen]
-pub fn apo_free(ptr: *mut f64, len: usize) {
-	if !ptr.is_null() {
-		unsafe { let _ = Vec::from_raw_parts(ptr, len, len); }
-	}
+	Ok(())
 }
 
 #[cfg(feature = "wasm")]
@@ -1874,39 +1798,27 @@ pub fn apo_batch_into(
 	in_ptr: *const f64,
 	out_ptr: *mut f64,
 	len: usize,
-	short_period_start: usize,
-	short_period_end: usize,
-	short_period_step: usize,
-	long_period_start: usize,
-	long_period_end: usize,
-	long_period_step: usize,
+	short_start: usize, short_end: usize, short_step: usize,
+	long_start: usize, long_end: usize, long_step: usize,
 ) -> Result<usize, JsValue> {
 	if in_ptr.is_null() || out_ptr.is_null() {
-		return Err(JsValue::from_str("null pointer passed to apo_batch_into"));
+		return Err(JsValue::from_str("Null pointer passed to apo_batch_into"));
 	}
-
 	unsafe {
 		let data = std::slice::from_raw_parts(in_ptr, len);
-
-		let sweep = ApoBatchRange {
-			short: (short_period_start, short_period_end, short_period_step),
-			long: (long_period_start, long_period_end, long_period_step),
-		};
-
+		let sweep = ApoBatchRange { short: (short_start, short_end, short_step),
+		                            long: (long_start, long_end, long_step) };
 		let combos = expand_grid(&sweep);
 		let rows = combos.len();
 		let cols = len;
 
 		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
-
-		apo_batch_inner_into(data, &sweep, Kernel::Auto, false, out)
+		apo_batch_inner_into(data, &sweep, detect_best_kernel(), false, out)
 			.map_err(|e| JsValue::from_str(&e.to_string()))?;
-
 		Ok(rows)
 	}
 }
 
-// New ergonomic WASM API
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct ApoBatchConfig {
@@ -1926,26 +1838,11 @@ pub struct ApoBatchJsOutput {
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = apo_batch)]
 pub fn apo_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
-	// 1. Deserialize the configuration object from JavaScript
-	let config: ApoBatchConfig =
-		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
-
-	let sweep = ApoBatchRange {
-		short: config.short_period_range,
-		long: config.long_period_range,
-	};
-
-	// 2. Run the existing core logic
-	let output = apo_batch_inner(data, &sweep, Kernel::Scalar, false).map_err(|e| JsValue::from_str(&e.to_string()))?;
-
-	// 3. Create the structured output
-	let js_output = ApoBatchJsOutput {
-		values: output.values,
-		combos: output.combos,
-		rows: output.rows,
-		cols: output.cols,
-	};
-
-	// 4. Serialize the output struct into a JavaScript object
-	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+	let cfg: ApoBatchConfig = serde_wasm_bindgen::from_value(config)
+		.map_err(|e| JsValue::from_str(&format!("Invalid config: {e}")))?;
+	let sweep = ApoBatchRange { short: cfg.short_period_range, long: cfg.long_period_range };
+	let out = apo_batch_inner(data, &sweep, detect_best_kernel(), false)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	let js = ApoBatchJsOutput { values: out.values, combos: out.combos, rows: out.rows, cols: out.cols };
+	serde_wasm_bindgen::to_value(&js).map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
 }

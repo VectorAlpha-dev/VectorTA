@@ -50,31 +50,28 @@ test('JMA partial params', () => {
 test('JMA accuracy', async () => {
     // Test JMA matches expected values from Rust tests - mirrors check_jma_accuracy
     const close = new Float64Array(testData.close);
+    const expected = EXPECTED_OUTPUTS.jma;
     
-    const result = wasm.jma_js(close, 7, 50.0, 2);
+    const result = wasm.jma_js(
+        close,
+        expected.defaultParams.period,
+        expected.defaultParams.phase,
+        expected.defaultParams.power
+    );
     
     assert.strictEqual(result.length, close.length);
-    
-    // Expected last 5 values from Rust test
-    const expectedLastFive = [
-        59305.04794668568,
-        59261.270455005455,
-        59156.791263606865,
-        59128.30656791065,
-        58918.89223153998,
-    ];
     
     // Check last 5 values match expected
     const last5 = result.slice(-5);
     assertArrayClose(
         last5,
-        expectedLastFive,
+        expected.last5Values,
         1e-6,
         "JMA last 5 values mismatch"
     );
     
     // Compare full output with Rust
-    // await compareWithRust('jma', result, 'close', { period: 7, phase: 50.0, power: 2 });
+    await compareWithRust('jma', result, 'close', expected.defaultParams);
 });
 
 test('JMA default candles', async () => {
@@ -162,6 +159,27 @@ test('JMA reinput', () => {
 });
 
 test('JMA NaN handling', () => {
+    // Test JMA handling of NaN values with NaN prefix
+    const dataWithNan = new Float64Array([NaN, NaN, NaN, ...testData.close.slice(0, 50)]);
+    const period = 7;
+    
+    const result = wasm.jma_js(dataWithNan, period, 50.0, 2);
+    
+    assert.strictEqual(result.length, dataWithNan.length);
+    
+    // First 3 values should be NaN (before first valid)
+    assertAllNaN(result.slice(0, 3), "Expected NaN before first valid data");
+    
+    // After first valid, should have finite values
+    assert(isFinite(result[3]), "Expected finite value at first valid");
+    
+    // Check all values after first valid are finite
+    for (let i = 3; i < result.length; i++) {
+        assert(isFinite(result[i]), `Expected finite value at index ${i}`);
+    }
+});
+
+test('JMA NaN handling (original)', () => {
     // Test JMA handling of NaN values - mirrors check_jma_nan_handling
     const close = new Float64Array(testData.close);
     const period = 7;
@@ -363,16 +381,31 @@ test('JMA batch metadata', () => {
 });
 
 test('JMA warmup behavior', () => {
-    // Test JMA warmup behavior
-    const close = new Float64Array(testData.close.slice(0, 50));
+    // Test JMA warmup behavior - outputs at first_valid with NaN prefix
+    // Test with data starting with NaN values
+    const data = new Float64Array([NaN, NaN, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]);
+    const period = 3;
     
-    const result = wasm.jma_js(close, 7, 50.0, 2);
+    const result = wasm.jma_js(data, period, 50.0, 2);
     
-    // JMA should have values from the start (no NaN prefix)
-    // Check first few values are finite
-    for (let i = 0; i < Math.min(10, result.length); i++) {
+    // JMA should have NaN for indices 0,1 (before first valid)
+    assert(isNaN(result[0]), "Index 0 should be NaN");
+    assert(isNaN(result[1]), "Index 1 should be NaN");
+    
+    // JMA should start outputting at index 2 (first valid)
+    assert(isFinite(result[2]), "Index 2 (first valid) should have a value");
+    
+    // All subsequent values should be finite
+    for (let i = 3; i < result.length; i++) {
         assert(isFinite(result[i]), `Expected finite value at index ${i}`);
     }
+    
+    // Test with clean data (no leading NaNs)
+    const cleanData = new Float64Array(testData.close.slice(0, 20));
+    const cleanResult = wasm.jma_js(cleanData, 7, 50.0, 2);
+    
+    // With clean data, JMA outputs immediately at index 0
+    assert(isFinite(cleanResult[0]), "JMA should output at first valid (index 0 for clean data)");
 });
 
 test('JMA consistency across calls', () => {
@@ -397,4 +430,215 @@ test('JMA parameter boundaries', () => {
     const smallData = new Float64Array([1, 2, 3, 4, 5]);
     const result2 = wasm.jma_js(smallData, 4, 50.0, 2);
     assert.strictEqual(result2.length, smallData.length);
+});
+
+// Zero-copy API tests
+test('JMA zero-copy API', () => {
+    const data = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    const period = 3;
+    const phase = 50.0;
+    const power = 2;
+    
+    // Allocate buffer
+    const ptr = wasm.jma_alloc(data.length);
+    assert(ptr !== 0, 'Failed to allocate memory');
+    
+    // Create view into WASM memory
+    const memory = wasm.__wbindgen_memory();
+    const memView = new Float64Array(
+        memory.buffer,
+        ptr,
+        data.length
+    );
+    
+    // Copy data into WASM memory
+    memView.set(data);
+    
+    // Compute JMA in-place
+    try {
+        wasm.jma_into(ptr, ptr, data.length, period, phase, power);
+        
+        // Verify results match regular API
+        const regularResult = wasm.jma_js(data, period, phase, power);
+        for (let i = 0; i < data.length; i++) {
+            if (isNaN(regularResult[i]) && isNaN(memView[i])) {
+                continue; // Both NaN is OK
+            }
+            assert(Math.abs(regularResult[i] - memView[i]) < 1e-10,
+                   `Zero-copy mismatch at index ${i}: regular=${regularResult[i]}, zerocopy=${memView[i]}`);
+        }
+    } finally {
+        // Always free memory
+        wasm.jma_free(ptr, data.length);
+    }
+});
+
+test('JMA zero-copy with NaN data', () => {
+    const data = new Float64Array([NaN, NaN, 1, 2, 3, 4, 5, 6, 7, 8]);
+    const period = 3;
+    const phase = 50.0;
+    const power = 2;
+    
+    const ptr = wasm.jma_alloc(data.length);
+    assert(ptr !== 0, 'Failed to allocate memory');
+    
+    try {
+        const memory = wasm.__wbindgen_memory();
+        const memView = new Float64Array(memory.buffer, ptr, data.length);
+        memView.set(data);
+        
+        wasm.jma_into(ptr, ptr, data.length, period, phase, power);
+        
+        // Recreate view in case memory grew
+        const memory2 = wasm.__wbindgen_memory();
+        const memView2 = new Float64Array(memory2.buffer, ptr, data.length);
+        
+        // Check first 2 values are NaN (before first valid)
+        assert(isNaN(memView2[0]), "Expected NaN at index 0");
+        assert(isNaN(memView2[1]), "Expected NaN at index 1");
+        
+        // Check value at index 2 (first valid)
+        assert(isFinite(memView2[2]), "Expected finite value at first valid (index 2)");
+    } finally {
+        wasm.jma_free(ptr, data.length);
+    }
+});
+
+test('JMA zero-copy error handling', () => {
+    // Test null pointer
+    assert.throws(() => {
+        wasm.jma_into(0, 0, 10, 3, 50.0, 2);
+    }, /null pointer/i);
+    
+    // Test invalid parameters with allocated memory
+    const ptr = wasm.jma_alloc(10);
+    try {
+        // Invalid period
+        assert.throws(() => {
+            wasm.jma_into(ptr, ptr, 10, 0, 50.0, 2);
+        }, /Invalid period/);
+        
+        // Invalid phase (NaN)
+        assert.throws(() => {
+            wasm.jma_into(ptr, ptr, 10, 3, NaN, 2);
+        }, /Invalid phase/);
+    } finally {
+        wasm.jma_free(ptr, 10);
+    }
+});
+
+test('JMA zero-copy memory management', () => {
+    // Allocate and free multiple times to ensure no leaks
+    const sizes = [100, 1000, 10000];
+    
+    for (const size of sizes) {
+        const ptr = wasm.jma_alloc(size);
+        assert(ptr !== 0, `Failed to allocate ${size} elements`);
+        
+        // Write pattern to verify memory
+        const memory = wasm.__wbindgen_memory();
+        const memView = new Float64Array(memory.buffer, ptr, size);
+        for (let i = 0; i < Math.min(10, size); i++) {
+            memView[i] = i * 1.5;
+        }
+        
+        // Verify pattern
+        for (let i = 0; i < Math.min(10, size); i++) {
+            assert.strictEqual(memView[i], i * 1.5, `Memory corruption at index ${i}`);
+        }
+        
+        // Free memory
+        wasm.jma_free(ptr, size);
+    }
+});
+
+// New batch API tests
+test('JMA batch - new ergonomic API with single parameter', () => {
+    const close = new Float64Array(testData.close.slice(0, 100));
+    
+    const result = wasm.jma_batch(close, {
+        period_range: [7, 7, 0],
+        phase_range: [50.0, 50.0, 0],
+        power_range: [2, 2, 0]
+    });
+    
+    // Verify structure
+    assert(result.values, 'Should have values array');
+    assert(result.combos, 'Should have combos array');
+    assert(typeof result.rows === 'number', 'Should have rows count');
+    assert(typeof result.cols === 'number', 'Should have cols count');
+    
+    // Verify dimensions
+    assert.strictEqual(result.rows, 1);
+    assert.strictEqual(result.cols, close.length);
+    assert.strictEqual(result.combos.length, 1);
+    assert.strictEqual(result.values.length, close.length);
+    
+    // Verify parameters
+    const combo = result.combos[0];
+    assert.strictEqual(combo.period, 7);
+    assert.strictEqual(combo.phase, 50.0);
+    assert.strictEqual(combo.power, 2);
+    
+    // Compare with single calculation
+    const singleResult = wasm.jma_js(close, 7, 50.0, 2);
+    assertArrayClose(result.values, singleResult, 1e-10, 'Batch vs single mismatch');
+});
+
+test('JMA batch - new API with multiple parameters', () => {
+    const close = new Float64Array(testData.close.slice(0, 50));
+    
+    const result = wasm.jma_batch(close, {
+        period_range: [5, 7, 2],      // 5, 7
+        phase_range: [40.0, 50.0, 10.0], // 40, 50
+        power_range: [2, 2, 0]         // 2
+    });
+    
+    // Should have 2 * 2 * 1 = 4 combinations
+    assert.strictEqual(result.rows, 4);
+    assert.strictEqual(result.cols, 50);
+    assert.strictEqual(result.combos.length, 4);
+    assert.strictEqual(result.values.length, 200);
+    
+    // Verify each combo
+    const expectedCombos = [
+        { period: 5, phase: 40.0, power: 2 },
+        { period: 5, phase: 50.0, power: 2 },
+        { period: 7, phase: 40.0, power: 2 },
+        { period: 7, phase: 50.0, power: 2 }
+    ];
+    
+    for (let i = 0; i < expectedCombos.length; i++) {
+        assert.strictEqual(result.combos[i].period, expectedCombos[i].period);
+        assert.strictEqual(result.combos[i].phase, expectedCombos[i].phase);
+        assert.strictEqual(result.combos[i].power, expectedCombos[i].power);
+    }
+    
+    // Verify first row matches single calculation
+    const firstRow = result.values.slice(0, result.cols);
+    const singleResult = wasm.jma_js(close, 5, 40.0, 2);
+    assertArrayClose(firstRow, singleResult, 1e-10, 'First row mismatch');
+});
+
+test('JMA batch - with NaN data', () => {
+    // Create data with NaN prefix
+    const data = new Float64Array([NaN, NaN, ...Array.from({length: 20}, (_, i) => i + 1)]);
+    
+    const result = wasm.jma_batch(data, {
+        period_range: [3, 5, 2],  // periods: 3, 5
+        phase_range: [50.0, 50.0, 0],
+        power_range: [2, 2, 0]
+    });
+    
+    assert.strictEqual(result.rows, 2);
+    assert.strictEqual(result.cols, data.length);
+    
+    // Both rows should have NaN for first 2 indices (before first valid)
+    for (let row = 0; row < 2; row++) {
+        const rowStart = row * data.length;
+        assert(isNaN(result.values[rowStart]), `Row ${row} index 0 should be NaN`);
+        assert(isNaN(result.values[rowStart + 1]), `Row ${row} index 1 should be NaN`);
+        // Should have values starting at index 2 (first valid)
+        assert(isFinite(result.values[rowStart + 2]), `Row ${row} index 2 should be finite`);
+    }
 });

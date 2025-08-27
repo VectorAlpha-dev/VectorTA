@@ -488,8 +488,9 @@ test('ALMA zero-copy API', () => {
     assert(ptr !== 0, 'Failed to allocate memory');
     
     // Create view into WASM memory
+    const memory = wasm.__wbindgen_memory();
     const memView = new Float64Array(
-        wasm.__wasm.memory.buffer,
+        memory.buffer,
         ptr,
         data.length
     );
@@ -527,13 +528,15 @@ test('ALMA zero-copy with large dataset', () => {
     assert(ptr !== 0, 'Failed to allocate large buffer');
     
     try {
-        const memView = new Float64Array(wasm.__wasm.memory.buffer, ptr, size);
+        const memory = wasm.__wbindgen_memory();
+        const memView = new Float64Array(memory.buffer, ptr, size);
         memView.set(data);
         
         wasm.alma_into(ptr, ptr, size, 9, 0.85, 6.0);
         
         // Recreate view in case memory grew
-        const memView2 = new Float64Array(wasm.__wasm.memory.buffer, ptr, size);
+        const memory2 = wasm.__wbindgen_memory();
+        const memView2 = new Float64Array(memory2.buffer, ptr, size);
         
         // Check warmup period has NaN
         for (let i = 0; i < 8; i++) {
@@ -628,7 +631,8 @@ test('ALMA zero-copy memory management', () => {
         assert(ptr !== 0, `Failed to allocate ${size} elements`);
         
         // Write pattern to verify memory
-        const memView = new Float64Array(wasm.__wasm.memory.buffer, ptr, size);
+        const memory = wasm.__wbindgen_memory();
+        const memView = new Float64Array(memory.buffer, ptr, size);
         for (let i = 0; i < Math.min(10, size); i++) {
             memView[i] = i * 1.5;
         }

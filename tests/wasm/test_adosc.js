@@ -56,17 +56,17 @@ test('ADOSC with default parameters', () => {
 
 test('ADOSC matches expected values from Rust tests', () => {
     const { high, low, close, volume } = testData;
-    const expected = EXPECTED_OUTPUTS.adosc;
     
     const result = wasm.adosc_js(
         high, low, close, volume,
-        expected.defaultParams.short_period,
-        expected.defaultParams.long_period
+        3,  // Default short period
+        10  // Default long period
     );
     
-    // Check last 5 values match expected with tolerance
+    // Check last 5 values match expected from Rust tests
+    const expectedLastFive = [-166.2175, -148.9983, -144.9052, -128.5921, -142.0772];
     const last5 = Array.from(result.slice(-5));
-    assertArrayClose(last5, expected.last5Values, 1e-1, 'ADOSC last 5 values mismatch');
+    assertArrayClose(last5, expectedLastFive, 1e-1, 'ADOSC last 5 values mismatch');
 });
 
 test('ADOSC fails with zero period', () => {
@@ -167,6 +167,16 @@ test('ADOSC calculates from the first value (no warmup period)', () => {
     assert.ok(!isNaN(result[0]), 'First ADOSC value should not be NaN');
 });
 
+test('ADOSC all NaN input', () => {
+    // Test ADOSC with all NaN values
+    const allNaN = new Float64Array(100);
+    allNaN.fill(NaN);
+    
+    assert.throws(() => {
+        wasm.adosc_js(allNaN, allNaN, allNaN, allNaN, 3, 10);
+    }, /All values are NaN/);
+});
+
 test('ADOSC batch calculation with default parameters', () => {
     const { high, low, close, volume } = testData;
     
@@ -219,15 +229,14 @@ test('ADOSC batch metadata', () => {
 
 test('ADOSC comparison with Rust', () => {
     const { high, low, close, volume } = testData;
-    const expected = EXPECTED_OUTPUTS.adosc;
     
     const result = wasm.adosc_js(
         high, low, close, volume,
-        expected.defaultParams.short_period,
-        expected.defaultParams.long_period
+        3,  // Default short period
+        10  // Default long period
     );
     
-    compareWithRust('adosc', Array.from(result), 'hlcv', expected.defaultParams);
+    compareWithRust('adosc', Array.from(result), 'hlcv', { short_period: 3, long_period: 10 });
 });
 
 test('ADOSC fast API - allocation and deallocation', () => {
@@ -252,11 +261,12 @@ test('ADOSC fast API - basic computation', () => {
     const outPtr = wasm.adosc_alloc(len);
     
     try {
-        // Create views into WASM memory
-        const highView = new Float64Array(wasm.__wasm.memory.buffer, highPtr, len);
-        const lowView = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, len);
-        const closeView = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
-        const volumeView = new Float64Array(wasm.__wasm.memory.buffer, volumePtr, len);
+        // Create views into WASM memory - use proper memory accessor
+        const memory = wasm.__wbindgen_memory ? wasm.__wbindgen_memory() : wasm.memory;
+        const highView = new Float64Array(memory.buffer, highPtr, len);
+        const lowView = new Float64Array(memory.buffer, lowPtr, len);
+        const closeView = new Float64Array(memory.buffer, closePtr, len);
+        const volumeView = new Float64Array(memory.buffer, volumePtr, len);
         
         // Copy data into WASM memory
         highView.set(high);
@@ -276,8 +286,9 @@ test('ADOSC fast API - basic computation', () => {
             10  // long_period
         );
         
-        // Read results from output buffer
-        const result = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
+        // Read results from output buffer - recreate view after computation
+        const memory2 = wasm.__wbindgen_memory ? wasm.__wbindgen_memory() : wasm.memory;
+        const result = new Float64Array(memory2.buffer, outPtr, len);
         
         // Verify results match safe API
         const safeResult = wasm.adosc_js(high, low, close, volume, 3, 10);
@@ -306,11 +317,12 @@ test('ADOSC fast API - in-place computation (aliasing)', () => {
     const volumePtr = wasm.adosc_alloc(len);
     
     try {
-        // Create views into WASM memory
-        const highView = new Float64Array(wasm.__wasm.memory.buffer, highPtr, len);
-        const lowView = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, len);
-        const closeView = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
-        const volumeView = new Float64Array(wasm.__wasm.memory.buffer, volumePtr, len);
+        // Create views into WASM memory - use proper memory accessor
+        const memory = wasm.__wbindgen_memory ? wasm.__wbindgen_memory() : wasm.memory;
+        const highView = new Float64Array(memory.buffer, highPtr, len);
+        const lowView = new Float64Array(memory.buffer, lowPtr, len);
+        const closeView = new Float64Array(memory.buffer, closePtr, len);
+        const volumeView = new Float64Array(memory.buffer, volumePtr, len);
         
         // Copy data into WASM memory
         highView.set(high);
@@ -334,7 +346,8 @@ test('ADOSC fast API - in-place computation (aliasing)', () => {
         const expected = wasm.adosc_js(high, low, close, volume, 3, 10);
         
         // closeView might be invalid after memory growth, so recreate
-        const resultView = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
+        const memory3 = wasm.__wbindgen_memory ? wasm.__wbindgen_memory() : wasm.memory;
+        const resultView = new Float64Array(memory3.buffer, closePtr, len);
         
         for (let i = 0; i < len; i++) {
             assertClose(resultView[i], expected[i], 1e-10, `In-place computation mismatch at index ${i}`);
@@ -364,4 +377,205 @@ test('ADOSC fast API - null pointer handling', () => {
         /Null pointer/
     );
     wasm.adosc_free(dummyPtr, len);
+});
+
+// New ergonomic batch API tests
+test('ADOSC batch - ergonomic API with single parameter', () => {
+    const { high, low, close, volume } = testData;
+    
+    const result = wasm.adosc_batch(high, low, close, volume, {
+        short_period_range: [3, 3, 0],
+        long_period_range: [10, 10, 0]
+    });
+    
+    // Verify structure
+    assert(result.values, 'Should have values array');
+    assert(result.combos, 'Should have combos array');
+    assert(typeof result.rows === 'number', 'Should have rows count');
+    assert(typeof result.cols === 'number', 'Should have cols count');
+    
+    // Verify dimensions
+    assert.strictEqual(result.rows, 1);
+    assert.strictEqual(result.cols, close.length);
+    assert.strictEqual(result.combos.length, 1);
+    assert.strictEqual(result.values.length, close.length);
+    
+    // Verify parameters
+    const combo = result.combos[0];
+    assert.strictEqual(combo.short_period, 3);
+    assert.strictEqual(combo.long_period, 10);
+    
+    // Compare with old API
+    const oldResult = wasm.adosc_js(high, low, close, volume, 3, 10);
+    for (let i = 0; i < oldResult.length; i++) {
+        assertClose(oldResult[i], result.values[i], 1e-10,
+                   `Value mismatch at index ${i}`);
+    }
+});
+
+test('ADOSC batch - ergonomic API with multiple parameters', () => {
+    const { high, low, close, volume } = testData;
+    const testSlice = high.slice(0, 50); // Use smaller dataset
+    
+    const result = wasm.adosc_batch(
+        high.slice(0, 50),
+        low.slice(0, 50),
+        close.slice(0, 50),
+        volume.slice(0, 50),
+        {
+            short_period_range: [2, 4, 1],   // 2, 3, 4
+            long_period_range: [5, 7, 1]     // 5, 6, 7
+        }
+    );
+    
+    // Should have 3 * 3 = 9 combinations
+    assert.strictEqual(result.rows, 9);
+    assert.strictEqual(result.cols, 50);
+    assert.strictEqual(result.combos.length, 9);
+    assert.strictEqual(result.values.length, 450);
+    
+    // Verify each combo
+    const expectedCombos = [];
+    for (let s = 2; s <= 4; s++) {
+        for (let l = 5; l <= 7; l++) {
+            expectedCombos.push({ short_period: s, long_period: l });
+        }
+    }
+    
+    for (let i = 0; i < expectedCombos.length; i++) {
+        assert.strictEqual(result.combos[i].short_period, expectedCombos[i].short_period);
+        assert.strictEqual(result.combos[i].long_period, expectedCombos[i].long_period);
+    }
+    
+    // Compare first row with single calculation
+    const oldResult = wasm.adosc_js(
+        high.slice(0, 50),
+        low.slice(0, 50),
+        close.slice(0, 50),
+        volume.slice(0, 50),
+        2, 5
+    );
+    const firstRow = result.values.slice(0, result.cols);
+    for (let i = 0; i < oldResult.length; i++) {
+        assertClose(oldResult[i], firstRow[i], 1e-10,
+                   `Value mismatch at index ${i}`);
+    }
+});
+
+test('ADOSC batch - error handling', () => {
+    const { high, low, close, volume } = testData;
+    
+    // Invalid config structure
+    assert.throws(() => {
+        wasm.adosc_batch(high, low, close, volume, {
+            short_period_range: [3, 3], // Missing step
+            long_period_range: [10, 10, 0]
+        });
+    }, /Invalid config/);
+    
+    // Missing required field
+    assert.throws(() => {
+        wasm.adosc_batch(high, low, close, volume, {
+            short_period_range: [3, 3, 0]
+            // Missing long_period_range
+        });
+    }, /Invalid config/);
+    
+    // Invalid data type
+    assert.throws(() => {
+        wasm.adosc_batch(high, low, close, volume, {
+            short_period_range: "invalid",
+            long_period_range: [10, 10, 0]
+        });
+    }, /Invalid config/);
+});
+
+test('ADOSC batch - edge cases', () => {
+    const data = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    
+    // Single value sweep
+    const singleBatch = wasm.adosc_batch(data, data, data, data, {
+        short_period_range: [2, 2, 1],
+        long_period_range: [5, 5, 1]
+    });
+    
+    assert.strictEqual(singleBatch.values.length, 10);
+    assert.strictEqual(singleBatch.combos.length, 1);
+    
+    // Step larger than range
+    const largeBatch = wasm.adosc_batch(data, data, data, data, {
+        short_period_range: [2, 3, 10], // Step larger than range
+        long_period_range: [5, 5, 0]
+    });
+    
+    // Should only have short_period=2
+    assert.strictEqual(largeBatch.values.length, 10);
+    assert.strictEqual(largeBatch.combos.length, 1);
+    
+    // Empty data should throw
+    assert.throws(() => {
+        wasm.adosc_batch(new Float64Array([]), new Float64Array([]), 
+                        new Float64Array([]), new Float64Array([]), {
+            short_period_range: [3, 3, 0],
+            long_period_range: [10, 10, 0]
+        });
+    }, /empty/);
+});
+
+test('ADOSC batch into - fast API for batch computation', () => {
+    const { high, low, close, volume } = testData;
+    const len = high.length;
+    
+    // Calculate expected output size
+    const shortPeriods = 3; // 2, 3, 4
+    const longPeriods = 2;  // 5, 6
+    const rows = shortPeriods * longPeriods;
+    const totalSize = rows * len;
+    
+    // Allocate all buffers
+    const highPtr = wasm.adosc_alloc(len);
+    const lowPtr = wasm.adosc_alloc(len);
+    const closePtr = wasm.adosc_alloc(len);
+    const volumePtr = wasm.adosc_alloc(len);
+    const outPtr = wasm.adosc_alloc(totalSize);
+    
+    try {
+        // Copy data into WASM memory
+        const memory = wasm.__wbindgen_memory ? wasm.__wbindgen_memory() : wasm.memory;
+        const highView = new Float64Array(memory.buffer, highPtr, len);
+        const lowView = new Float64Array(memory.buffer, lowPtr, len);
+        const closeView = new Float64Array(memory.buffer, closePtr, len);
+        const volumeView = new Float64Array(memory.buffer, volumePtr, len);
+        
+        highView.set(high);
+        lowView.set(low);
+        closeView.set(close);
+        volumeView.set(volume);
+        
+        // Compute batch
+        const numRows = wasm.adosc_batch_into(
+            highPtr, lowPtr, closePtr, volumePtr,
+            outPtr, len,
+            2, 4, 1,  // short_period range
+            5, 6, 1   // long_period range
+        );
+        
+        assert.strictEqual(numRows, rows);
+        
+        // Read results
+        const memory2 = wasm.__wbindgen_memory ? wasm.__wbindgen_memory() : wasm.memory;
+        const results = new Float64Array(memory2.buffer, outPtr, totalSize);
+        
+        // Verify first row matches single calculation
+        const expected = wasm.adosc_js(high, low, close, volume, 2, 5);
+        for (let i = 0; i < len; i++) {
+            assertClose(results[i], expected[i], 1e-10, `Batch into mismatch at index ${i}`);
+        }
+    } finally {
+        wasm.adosc_free(highPtr, len);
+        wasm.adosc_free(lowPtr, len);
+        wasm.adosc_free(closePtr, len);
+        wasm.adosc_free(volumePtr, len);
+        wasm.adosc_free(outPtr, totalSize);
+    }
 });

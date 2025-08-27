@@ -203,14 +203,14 @@ impl VossBuilder {
 
 #[derive(Debug, Error)]
 pub enum VossError {
+	#[error("voss: Input data slice is empty.")]
+	EmptyInputData,
 	#[error("voss: All values are NaN.")]
 	AllValuesNaN,
 	#[error("voss: Invalid period: period = {period}, data length = {data_len}")]
 	InvalidPeriod { period: usize, data_len: usize },
 	#[error("voss: Not enough valid data: needed = {needed}, valid = {valid}")]
 	NotEnoughValidData { needed: usize, valid: usize },
-	#[error("voss: Empty data provided.")]
-	EmptyData,
 }
 
 #[inline]
@@ -229,7 +229,7 @@ fn voss_prepare<'a>(
 	};
 
 	if data.is_empty() {
-		return Err(VossError::EmptyData);
+		return Err(VossError::EmptyInputData);
 	}
 
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(VossError::AllValuesNaN)?;
@@ -271,25 +271,25 @@ fn voss_compute_into(
 	voss: &mut [f64],
 	filt: &mut [f64],
 ) {
-	unsafe {
-		#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-		{
-			if matches!(kernel, Kernel::Scalar | Kernel::ScalarBatch) {
+	#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+	{
+		if matches!(kernel, Kernel::Scalar | Kernel::ScalarBatch) {
+			unsafe {
 				voss_simd128(data, period, predict, bandwidth, first, min_index, voss, filt);
-				return;
 			}
+			return;
 		}
+	}
 
-		match kernel {
-			Kernel::Scalar | Kernel::ScalarBatch => {
-				voss_scalar(data, period, predict, bandwidth, first, voss, filt)
-			}
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => voss_avx2(data, period, predict, bandwidth, first, voss, filt),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => voss_avx512(data, period, predict, bandwidth, first, voss, filt),
-			_ => unreachable!(),
+	match kernel {
+		Kernel::Scalar | Kernel::ScalarBatch => {
+			voss_scalar(data, period, predict, bandwidth, first, voss, filt)
 		}
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx2 | Kernel::Avx2Batch => unsafe { voss_avx2(data, period, predict, bandwidth, first, voss, filt) },
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx512 | Kernel::Avx512Batch => unsafe { voss_avx512(data, period, predict, bandwidth, first, voss, filt) },
+		_ => unreachable!(),
 	}
 }
 
@@ -337,7 +337,7 @@ pub fn voss_into_slice(
 }
 
 #[inline]
-pub unsafe fn voss_scalar(
+pub fn voss_scalar(
 	data: &[f64],
 	period: usize,
 	predict: usize,
@@ -349,39 +349,43 @@ pub unsafe fn voss_scalar(
 	use std::f64::consts::PI;
 	let order = 3 * predict;
 	let min_index = period.max(5).max(order);
+	let start_idx = first + min_index;
 
 	let f1 = (2.0 * PI / period as f64).cos();
 	let g1 = (bandwidth * 2.0 * PI / period as f64).cos();
 	let s1 = 1.0 / g1 - (1.0 / (g1 * g1) - 1.0).sqrt();
 
 	// Initialize the first couple of filt values to avoid NaN propagation
-	let start_idx = first + min_index;
 	if start_idx >= 2 {
 		filt[start_idx - 2] = 0.0;
 		filt[start_idx - 1] = 0.0;
 	}
 
+	// IIR pass for filt
+	let c1 = 0.5 * (1.0 - s1);
+	let c2 = f1 * (1.0 + s1);
+	let c3 = -s1;
+
 	for i in start_idx..data.len() {
 		let current = data[i];
 		let prev_2 = data[i - 2];
-		let prev_filt_1 = filt[i - 1];
-		let prev_filt_2 = filt[i - 2];
-		filt[i] = 0.5 * (1.0 - s1) * (current - prev_2) + f1 * (1.0 + s1) * prev_filt_1 - s1 * prev_filt_2;
+		let prev_f1 = filt[i - 1];
+		let prev_f2 = filt[i - 2];
+		filt[i] = c1 * (current - prev_2) + c2 * prev_f1 + c3 * prev_f2;
 	}
 
-	for i in (first + min_index)..data.len() {
+	// Predictive VOSS pass
+	let scale = (3 + order) as f64 / 2.0;
+	for i in start_idx..data.len() {
 		let mut sumc = 0.0;
-		for count in 0..order {
-			let idx = i - (order - count);
-			// Use previous voss values, defaulting to 0 if they're NaN (like TradingView's nz() function)
-			let voss_val = if idx >= first && !voss[idx].is_nan() {
-				voss[idx]
-			} else {
-				0.0
-			};
-			sumc += ((count + 1) as f64 / order as f64) * voss_val;
+		let base = i - order;
+		// weight = (k+1) / order, k=0..order-1
+		for k in 0..order {
+			let idx = base + k;
+			let vv = if idx >= first && !voss[idx].is_nan() { voss[idx] } else { 0.0 };
+			sumc += ((k + 1) as f64 / order as f64) * vv;
 		}
-		voss[i] = ((3 + order) as f64 / 2.0) * filt[i] - sumc;
+		voss[i] = scale * filt[i] - sumc;
 	}
 }
 
@@ -534,70 +538,99 @@ pub struct VossStream {
 	period: usize,
 	predict: usize,
 	bandwidth: f64,
+	// coefficients
+	f1: f64,
+	s1: f64,
+	c1: f64, // 0.5*(1-s1)
+	c2: f64, // f1*(1+s1)
+	c3: f64, // -s1
 	order: usize,
-	min_index: usize,
-	filt: Vec<f64>,
-	voss: Vec<f64>,
-	head: usize,
-	filled: bool,
+	warm_left: usize,
+	// state
+	prev_f1: f64,
+	prev_f2: f64,
+	last_x1: f64,
+	last_x2: f64,
+	// voss history for weighted sum
+	ring: Vec<f64>, // length = order
+	rpos: usize,
+	filled: bool
 }
 
 impl VossStream {
 	pub fn try_new(params: VossParams) -> Result<Self, VossError> {
+		use std::f64::consts::PI;
 		let period = params.period.unwrap_or(20);
+		if period == 0 { 
+			return Err(VossError::InvalidPeriod { period, data_len: 0 }); 
+		}
 		let predict = params.predict.unwrap_or(3);
 		let bandwidth = params.bandwidth.unwrap_or(0.25);
 
-		if period == 0 {
-			return Err(VossError::InvalidPeriod { period, data_len: 0 });
-		}
 		let order = 3 * predict;
 		let min_index = period.max(5).max(order);
+		let g1 = (bandwidth * 2.0 * PI / period as f64).cos();
+		let f1 = (2.0 * PI / period as f64).cos();
+		let s1 = 1.0 / g1 - (1.0 / (g1 * g1) - 1.0).sqrt();
 
 		Ok(Self {
-			period,
-			predict,
-			bandwidth,
+			period, predict, bandwidth,
+			f1, s1,
+			c1: 0.5*(1.0 - s1),
+			c2: f1*(1.0 + s1),
+			c3: -s1,
 			order,
-			min_index,
-			filt: vec![0.0; min_index + 2],
-			voss: vec![0.0; min_index + 2 + order],
-			head: 0,
+			warm_left: min_index,
+			prev_f1: 0.0,
+			prev_f2: 0.0,
+			last_x1: f64::NAN,
+			last_x2: f64::NAN,
+			ring: vec![0.0; order.max(1)],
+			rpos: 0,
 			filled: false,
 		})
 	}
 
 	#[inline(always)]
-	pub fn update(&mut self, value: f64) -> Option<(f64, f64)> {
-		let len = self.filt.len();
-		if self.head < len {
-			self.filt[self.head] = 0.0;
-			self.voss[self.head] = 0.0;
-			self.head += 1;
+	pub fn update(&mut self, x: f64) -> Option<(f64, f64)> {
+		// maintain last two raw inputs for x[i-2]
+		let x_im2 = self.last_x2;
+		self.last_x2 = self.last_x1;
+		self.last_x1 = x;
+
+		// until we have x[i-2], output is not ready
+		let filt_val = if x_im2.is_nan() {
+			0.0
+		} else {
+			let f = self.c1 * (x - x_im2) + self.c2 * self.prev_f1 + self.c3 * self.prev_f2;
+			self.prev_f2 = self.prev_f1;
+			self.prev_f1 = f;
+			f
+		};
+
+		// predictive VOSS: weighted sum of past VOSS values in ring
+		let scale = (3 + self.order) as f64 / 2.0;
+		let mut sumc = 0.0;
+		for k in 0..self.order {
+			// weights 1..order
+			let w = (k + 1) as f64 / self.order as f64;
+			let idx = (self.rpos + self.order - (self.order - 1 - k)) % self.order;
+			sumc += w * self.ring[idx];
+		}
+		let voss_val = scale * filt_val - sumc;
+
+		// push current voss into ring
+		if self.order > 0 {
+			self.ring[self.rpos] = voss_val;
+			self.rpos = (self.rpos + 1) % self.order;
+		}
+
+		if self.warm_left > 0 {
+			self.warm_left -= 1;
 			return None;
 		}
-		let i = self.head;
-		let f1 = (2.0 * std::f64::consts::PI / self.period as f64).cos();
-		let g1 = (self.bandwidth * 2.0 * std::f64::consts::PI / self.period as f64).cos();
-		let s1 = 1.0 / g1 - (1.0 / (g1 * g1) - 1.0).sqrt();
-
-		let prev_2 = value; // Not fully accurate in streaming context (need full window or ring buffer)
-		let prev_filt_1 = self.filt[i - 1];
-		let prev_filt_2 = self.filt[i - 2];
-		let filt = 0.5 * (1.0 - s1) * (value - prev_2) + f1 * (1.0 + s1) * prev_filt_1 - s1 * prev_filt_2;
-		self.filt.push(filt);
-
-		let mut sumc = 0.0;
-		for count in 0..self.order {
-			let idx = i - (self.order - count);
-			sumc += ((count + 1) as f64 / self.order as f64) * self.voss[idx];
-		}
-		let voss_val = ((3 + self.order) as f64 / 2.0) * filt - sumc;
-		self.voss.push(voss_val);
-		self.head += 1;
 		self.filled = true;
-
-		Some((voss_val, filt))
+		Some((voss_val, filt_val))
 	}
 }
 
@@ -749,6 +782,80 @@ pub fn voss_batch_par_slice(data: &[f64], sweep: &VossBatchRange, kern: Kernel) 
 }
 
 #[inline(always)]
+pub fn voss_batch_inner_into(
+	data: &[f64],
+	sweep: &VossBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	voss_out: &mut [f64],
+	filt_out: &mut [f64],
+) -> Result<Vec<VossParams>, VossError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(VossError::InvalidPeriod { period: 0, data_len: 0 });
+	}
+
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(VossError::AllValuesNaN)?;
+	let rows = combos.len();
+	let cols = data.len();
+
+	// Validate output buffers
+	if voss_out.len() != rows * cols || filt_out.len() != rows * cols {
+		return Err(VossError::InvalidPeriod { period: voss_out.len(), data_len: rows * cols });
+	}
+
+	let do_row = |row: usize, vo: &mut [f64], fo: &mut [f64]| {
+		// Initialize warmup as NaN
+		let p = combos[row].period.unwrap_or(20);
+		let q = combos[row].predict.unwrap_or(3);
+		let order = 3 * q;
+		let min_index = p.max(5).max(order);
+		let warm = first + min_index;
+		for x in &mut vo[..warm.min(cols)] { *x = f64::NAN; }
+		for x in &mut fo[..warm.min(cols)] { *x = f64::NAN; }
+
+		match kern {
+			Kernel::Scalar | Kernel::ScalarBatch => {
+				voss_scalar(data, p, q, combos[row].bandwidth.unwrap_or(0.25), first, vo, fo)
+			}
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => unsafe { 
+				voss_avx2(data, p, q, combos[row].bandwidth.unwrap_or(0.25), first, vo, fo) 
+			},
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => unsafe { 
+				voss_avx512(data, p, q, combos[row].bandwidth.unwrap_or(0.25), first, vo, fo) 
+			},
+			Kernel::Auto => unreachable!(),
+			_ => unreachable!(),
+		}
+	};
+
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			use rayon::prelude::*;
+			voss_out.par_chunks_mut(cols)
+				.zip(filt_out.par_chunks_mut(cols))
+				.enumerate()
+				.for_each(|(row, (vo, fo))| do_row(row, vo, fo));
+		}
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, (vo, fo)) in voss_out.chunks_mut(cols).zip(filt_out.chunks_mut(cols)).enumerate() {
+				do_row(row, vo, fo);
+			}
+		}
+	} else {
+		for (row, (vo, fo)) in voss_out.chunks_mut(cols).zip(filt_out.chunks_mut(cols)).enumerate() {
+			do_row(row, vo, fo);
+		}
+	}
+
+	Ok(combos)
+}
+
+#[inline(always)]
 fn voss_batch_inner(
 	data: &[f64],
 	sweep: &VossBatchRange,
@@ -799,7 +906,7 @@ fn voss_batch_inner(
 		core::slice::from_raw_parts_mut(filt_guard.as_mut_ptr() as *mut f64, filt_guard.len())
 	};
 
-	let do_row = |row: usize, out_voss: &mut [f64], out_filt: &mut [f64]| unsafe {
+	let do_row = |row: usize, out_voss: &mut [f64], out_filt: &mut [f64]| {
 		let prm = &combos[row];
 		let period = prm.period.unwrap();
 		let predict = prm.predict.unwrap();
@@ -807,9 +914,9 @@ fn voss_batch_inner(
 		match kern {
 			Kernel::Scalar => voss_row_scalar(data, first, period, predict, bandwidth, out_voss, out_filt),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => voss_row_avx2(data, first, period, predict, bandwidth, out_voss, out_filt),
+			Kernel::Avx2 => unsafe { voss_row_avx2(data, first, period, predict, bandwidth, out_voss, out_filt) },
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => voss_row_avx512(data, first, period, predict, bandwidth, out_voss, out_filt),
+			Kernel::Avx512 => unsafe { voss_row_avx512(data, first, period, predict, bandwidth, out_voss, out_filt) },
 			_ => unreachable!(),
 		}
 	};
@@ -866,7 +973,7 @@ fn voss_batch_inner(
 }
 
 #[inline(always)]
-unsafe fn voss_row_scalar(
+fn voss_row_scalar(
 	data: &[f64],
 	first: usize,
 	period: usize,
@@ -1686,22 +1793,22 @@ mod tests {
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "voss")]
-#[pyo3(signature = (data, period=None, predict=None, bandwidth=None, kernel=None))]
+#[pyo3(signature = (data, period=20, predict=3, bandwidth=0.25, kernel=None))]
 pub fn voss_py<'py>(
 	py: Python<'py>,
 	data: PyReadonlyArray1<'py, f64>,
-	period: Option<usize>,
-	predict: Option<usize>,
-	bandwidth: Option<f64>,
+	period: usize,
+	predict: usize,
+	bandwidth: f64,
 	kernel: Option<&str>,
 ) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
 	let slice_in = data.as_slice()?;
 	let kern = validate_kernel(kernel, false)?;
 	
 	let params = VossParams {
-		period,
-		predict,
-		bandwidth,
+		period: Some(period),
+		predict: Some(predict),
+		bandwidth: Some(bandwidth),
 	};
 	let input = VossInput::from_slice(slice_in, params);
 	
@@ -1727,12 +1834,12 @@ pub struct VossStreamPy {
 #[pymethods]
 impl VossStreamPy {
 	#[new]
-	#[pyo3(signature = (period=None, predict=None, bandwidth=None))]
-	fn new(period: Option<usize>, predict: Option<usize>, bandwidth: Option<f64>) -> PyResult<Self> {
+	#[pyo3(signature = (period=20, predict=3, bandwidth=0.25))]
+	fn new(period: usize, predict: usize, bandwidth: f64) -> PyResult<Self> {
 		let params = VossParams {
-			period,
-			predict,
-			bandwidth,
+			period: Some(period),
+			predict: Some(predict),
+			bandwidth: Some(bandwidth),
 		};
 		let stream = VossStream::try_new(params)
 			.map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -1756,6 +1863,7 @@ pub fn voss_batch_py<'py>(
 	bandwidth_range: (f64, f64, f64),
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
+	use numpy::PyArray1;
 	let slice_in = data.as_slice()?;
 	
 	let sweep = VossBatchRange {
@@ -1768,63 +1876,52 @@ pub fn voss_batch_py<'py>(
 	let rows = combos.len();
 	let cols = slice_in.len();
 	
-	// Pre-allocate output arrays for batch operations
+	// Pre-allocate NumPy outputs
 	let voss_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
 	let filt_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-	let slice_voss = unsafe { voss_arr.as_slice_mut()? };
-	let slice_filt = unsafe { filt_arr.as_slice_mut()? };
+	let voss_slice = unsafe { voss_arr.as_slice_mut()? };
+	let filt_slice = unsafe { filt_arr.as_slice_mut()? };
 	
 	let kern = validate_kernel(kernel, true)?;
 	
-	// Compute without GIL
-	let combos_result = py.allow_threads(|| {
-		let kernel = match kern {
-			Kernel::Auto => detect_best_batch_kernel(),
-			k => k,
-		};
-		
-		// Get the corresponding SIMD kernel for batch operations
-		let simd = match kernel {
-			Kernel::Avx512Batch => Kernel::Avx512,
-			Kernel::Avx2Batch => Kernel::Avx2,
-			Kernel::ScalarBatch => Kernel::Scalar,
-			_ => kernel,
-		};
-		
-		// Compute batch operations
-		let output = voss_batch_par_slice(slice_in, &sweep, simd)?;
-		
-		// Copy results to pre-allocated arrays
-		slice_voss.copy_from_slice(&output.voss);
-		slice_filt.copy_from_slice(&output.filt);
-		
-		Ok::<Vec<VossParams>, VossError>(output.combos)
-	})
-	.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	// Compute without GIL, writing directly to NumPy arrays
+	let combos = py
+		.allow_threads(|| {
+			let k = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+			let simd = match k {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => k,
+			};
+			voss_batch_inner_into(slice_in, &sweep, simd, true, voss_slice, filt_slice)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 	
 	// Build result dictionary
 	let dict = PyDict::new(py);
 	dict.set_item("voss", voss_arr.reshape((rows, cols))?)?;
 	dict.set_item("filt", filt_arr.reshape((rows, cols))?)?;
-	
-	// Add parameter arrays using zero-copy transfer
 	dict.set_item(
 		"periods",
-		combos_result.iter()
+		combos.iter()
 			.map(|p| p.period.unwrap_or(20) as u64)
 			.collect::<Vec<_>>()
 			.into_pyarray(py)
 	)?;
 	dict.set_item(
 		"predicts",
-		combos_result.iter()
+		combos.iter()
 			.map(|p| p.predict.unwrap_or(3) as u64)
 			.collect::<Vec<_>>()
 			.into_pyarray(py)
 	)?;
 	dict.set_item(
 		"bandwidths",
-		combos_result.iter()
+		combos.iter()
 			.map(|p| p.bandwidth.unwrap_or(0.25))
 			.collect::<Vec<_>>()
 			.into_pyarray(py)
@@ -1837,29 +1934,23 @@ pub fn voss_batch_py<'py>(
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
-pub fn voss_js(
-	data: &[f64],
-	period: usize,
-	predict: usize,
-	bandwidth: f64,
-) -> Result<Vec<f64>, JsValue> {
+pub fn voss_js(data: &[f64], period: usize, predict: usize, bandwidth: f64) -> Result<JsValue, JsValue> {
 	let params = VossParams {
 		period: Some(period),
 		predict: Some(predict),
 		bandwidth: Some(bandwidth),
 	};
 	let input = VossInput::from_slice(data, params);
+	let out = voss_with_kernel(&input, detect_best_kernel()).map_err(|e| JsValue::from_str(&e.to_string()))?;
 	
-	// Single allocation for both outputs
-	let mut voss_out = vec![0.0; data.len()];
-	let mut filt_out = vec![0.0; data.len()];
+	#[derive(Serialize)]
+	struct Out { 
+		voss: Vec<f64>, 
+		filt: Vec<f64> 
+	}
 	
-	voss_into_slice(&mut voss_out, &mut filt_out, &input, Kernel::Auto)
-		.map_err(|e| JsValue::from_str(&e.to_string()))?;
-	
-	// Flatten: [voss..., filt...]
-	voss_out.extend(filt_out);
-	Ok(voss_out)
+	serde_wasm_bindgen::to_value(&Out { voss: out.voss, filt: out.filt })
+		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 #[cfg(feature = "wasm")]
@@ -1943,38 +2034,36 @@ pub struct VossBatchConfig {
 pub struct VossBatchJsOutput {
 	pub voss: Vec<f64>,
 	pub filt: Vec<f64>,
-	pub periods: Vec<usize>,
-	pub predicts: Vec<usize>,
-	pub bandwidths: Vec<f64>,
+	pub combos: Vec<VossParams>,
 	pub rows: usize,
 	pub cols: usize,
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = "voss_batch")]
-pub fn voss_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
-	let config: VossBatchConfig = serde_wasm_bindgen::from_value(config)?;
+pub fn voss_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let cfg: VossBatchConfig = serde_wasm_bindgen::from_value(config)
+		.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
 	
 	let sweep = VossBatchRange {
-		period: config.period_range,
-		predict: config.predict_range,
-		bandwidth: config.bandwidth_range,
+		period: cfg.period_range,
+		predict: cfg.predict_range,
+		bandwidth: cfg.bandwidth_range,
 	};
 	
-	let output = voss_batch_par_slice(data, &sweep, Kernel::Auto)
+	let out = voss_batch_inner(data, &sweep, detect_best_kernel(), false)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 	
-	let result = VossBatchJsOutput {
-		voss: output.voss,
-		filt: output.filt,
-		periods: output.combos.iter().map(|c| c.period.unwrap_or(20)).collect(),
-		predicts: output.combos.iter().map(|c| c.predict.unwrap_or(3)).collect(),
-		bandwidths: output.combos.iter().map(|c| c.bandwidth.unwrap_or(0.25)).collect(),
-		rows: output.rows,
-		cols: output.cols,
+	let js = VossBatchJsOutput {
+		voss: out.voss,
+		filt: out.filt,
+		combos: out.combos,
+		rows: out.rows,
+		cols: out.cols,
 	};
 	
-	serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&e.to_string()))
+	serde_wasm_bindgen::to_value(&js)
+		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 #[cfg(feature = "wasm")]

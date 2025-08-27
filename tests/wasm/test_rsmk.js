@@ -43,13 +43,15 @@ test('RSMK basic functionality', () => {
     // Test with default parameters
     const close = new Float64Array(testData.close);
     
-    // rsmk_js returns flattened [indicator..., signal...]
+    // rsmk_js returns object with values, rows, cols
     const result = wasm.rsmk_js(close, close, 90, 3, 20, null, null);
-    assert.strictEqual(result.length, close.length * 2); // Two outputs
+    assert.strictEqual(result.rows, 2); // Indicator and signal
+    assert.strictEqual(result.cols, close.length);
+    assert.strictEqual(result.values.length, close.length * 2); // Two outputs
     
     // Split results
-    const indicator = result.slice(0, close.length);
-    const signal = result.slice(close.length);
+    const indicator = result.values.slice(0, close.length);
+    const signal = result.values.slice(close.length);
     
     assert.strictEqual(indicator.length, close.length);
     assert.strictEqual(signal.length, close.length);
@@ -59,7 +61,9 @@ test('RSMK with custom MA types', () => {
     const close = new Float64Array(testData.close);
     
     const result = wasm.rsmk_js(close, close, 90, 3, 20, "sma", "ema");
-    assert.strictEqual(result.length, close.length * 2);
+    assert.strictEqual(result.rows, 2);
+    assert.strictEqual(result.cols, close.length);
+    assert.strictEqual(result.values.length, close.length * 2);
 });
 
 test('RSMK error handling - zero period', () => {
@@ -75,7 +79,7 @@ test('RSMK error handling - insufficient data', () => {
     
     assert.throws(() => {
         wasm.rsmk_js(inputData, inputData, 90, 3, 20, null, null);
-    }, /Not enough data/);
+    }, /Invalid period/);
 });
 
 test('RSMK error handling - all NaN', () => {
@@ -91,7 +95,7 @@ test('RSMK error handling - invalid MA type', () => {
     
     assert.throws(() => {
         wasm.rsmk_js(inputData, inputData, 2, 3, 3, "nonexistent_ma", "ema");
-    }, /Ma function error/);
+    }, /Error from MA function/);
 });
 
 test('RSMK fast API - in-place operation', () => {
@@ -108,17 +112,21 @@ test('RSMK fast API - in-place operation', () => {
         const comparePtr = signalPtr; // Another aliased pointer
         
         // Copy data to buffers
-        const indicatorBuf = new Float64Array(wasm.memory.buffer, indicatorPtr, len);
-        const signalBuf = new Float64Array(wasm.memory.buffer, signalPtr, len);
+        const indicatorBuf = new Float64Array(wasm.__wasm.memory.buffer, indicatorPtr, len);
+        const signalBuf = new Float64Array(wasm.__wasm.memory.buffer, signalPtr, len);
         indicatorBuf.set(close);
         signalBuf.set(close);
         
         // Call fast API with aliased pointers
         wasm.rsmk_into(closePtr, indicatorPtr, signalPtr, len, comparePtr, 90, 3, 20, null, null);
         
+        // Recreate views after operation in case memory was reallocated
+        const indicatorResult = new Float64Array(wasm.__wasm.memory.buffer, indicatorPtr, len);
+        const signalResult = new Float64Array(wasm.__wasm.memory.buffer, signalPtr, len);
+        
         // Results should be written correctly despite aliasing
-        assert.strictEqual(indicatorBuf.length, len);
-        assert.strictEqual(signalBuf.length, len);
+        assert.strictEqual(indicatorResult.length, len);
+        assert.strictEqual(signalResult.length, len);
     } finally {
         wasm.rsmk_free(indicatorPtr, len);
         wasm.rsmk_free(signalPtr, len);

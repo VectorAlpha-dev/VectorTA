@@ -86,7 +86,7 @@ test('VLMA zero or inverted periods', () => {
     // Test zero max_period
     assert.throws(() => {
         wasm.vlma_js(inputData, 5, 0, "sma", 0);
-    }, /Invalid period/);
+    }, /(Invalid period|greater than max_period)/);
 });
 
 test('VLMA not enough data', () => {
@@ -305,7 +305,7 @@ test('VLMA zero-copy error handling', () => {
         // Zero max period
         assert.throws(() => {
             wasm.vlma_into(ptr, ptr, 10, 5, 0, "sma", 0);
-        }, /Invalid period/);
+        }, /(Invalid period|greater than max_period)/);
     } finally {
         wasm.vlma_free(ptr, 10);
     }

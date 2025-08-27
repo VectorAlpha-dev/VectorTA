@@ -146,6 +146,8 @@ use crate::indicators::cvi::{cvi_batch_py, cvi_py, CviStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::di::{di_batch_py, di_py, DiStreamPy};
 #[cfg(feature = "python")]
+use crate::indicators::dm::{dm_batch_py, dm_py, DmStreamPy};
+#[cfg(feature = "python")]
 use crate::indicators::efi::{efi_batch_py, efi_py, EfiStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::fosc::{fosc_batch_py, fosc_py, FoscStreamPy};
@@ -875,6 +877,11 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(di_py, m)?)?;
 	m.add_function(wrap_pyfunction!(di_batch_py, m)?)?;
 	m.add_class::<DiStreamPy>()?;
+
+	// Register DM functions with their user-facing names
+	m.add_function(wrap_pyfunction!(dm_py, m)?)?;
+	m.add_function(wrap_pyfunction!(dm_batch_py, m)?)?;
+	m.add_class::<DmStreamPy>()?;
 
 	// Register EFI functions with their user-facing names
 	m.add_function(wrap_pyfunction!(efi_py, m)?)?;
