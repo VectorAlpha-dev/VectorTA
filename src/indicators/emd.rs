@@ -24,7 +24,6 @@ use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(feature = "python")]
@@ -247,131 +246,186 @@ pub fn emd(input: &EmdInput) -> Result<EmdOutput, EmdError> {
 	emd_with_kernel(input, Kernel::Auto)
 }
 
-fn emd_prepare<'a>(input: &'a EmdInput<'a>, kernel: Kernel) -> Result<(&'a [f64], &'a [f64], &'a [f64], &'a [f64], usize, f64, f64, usize, Kernel), EmdError> {
-	let (high, low, close, volume) = match &input.data {
-		EmdData::Candles { candles } => {
-			let high = source_type(candles, "high");
-			let low = source_type(candles, "low");
-			let close = source_type(candles, "close");
-			let volume = source_type(candles, "volume");
-			(high, low, close, volume)
-		}
-		EmdData::Slices { high, low, close, volume } => {
-			(*high, *low, *close, *volume)
-		}
+#[inline]
+pub fn emd_into_slices(
+	ub: &mut [f64],
+	mb: &mut [f64],
+	lb: &mut [f64],
+	input: &EmdInput,
+	kernel: Kernel,
+) -> Result<(), EmdError> {
+	let (high, low, period, delta, fraction, first, chosen) = emd_prepare(input, kernel)?;
+	if ub.len() != high.len() || mb.len() != high.len() || lb.len() != high.len() {
+		return Err(EmdError::InvalidInputLength { expected: high.len(), actual: ub.len().min(mb.len()).min(lb.len()) });
+	}
+
+	emd_compute_into(high, low, period, delta, fraction, first, chosen, ub, mb, lb);
+
+	let up_low_warm = first + 50 - 1;
+	let mid_warm    = first + 2 * period - 1;
+	let ub_len = ub.len();
+	let lb_len = lb.len();
+	let mb_len = mb.len();
+	for v in &mut ub[..up_low_warm.min(ub_len)] { *v = f64::NAN; }
+	for v in &mut lb[..up_low_warm.min(lb_len)] { *v = f64::NAN; }
+	for v in &mut mb[..mid_warm.min(mb_len)]    { *v = f64::NAN; }
+
+	Ok(())
+}
+
+#[inline]
+fn emd_prepare<'a>(
+	input: &'a EmdInput<'a>,
+	kernel: Kernel,
+) -> Result<(&'a [f64], &'a [f64], usize, f64, f64, usize, Kernel), EmdError> {
+	let (high, low) = match &input.data {
+		EmdData::Candles { candles } => (source_type(candles, "high"), source_type(candles, "low")),
+		EmdData::Slices { high, low, .. } => (*high, *low),
 	};
 
 	let len = high.len();
-	let period = input.get_period();
-	let delta = input.get_delta();
+	if len == 0 || low.len() != len {
+		return Err(EmdError::InvalidInputLength { expected: len, actual: low.len() });
+	}
+
+	let period   = input.get_period();
+	let delta    = input.get_delta();
 	let fraction = input.get_fraction();
 
-	let first = (0..len)
-		.find(|&i| !high[i].is_nan() && !low[i].is_nan())
-		.ok_or(EmdError::AllValuesNaN)?;
+	let first = (0..len).find(|&i| !high[i].is_nan() && !low[i].is_nan()).ok_or(EmdError::AllValuesNaN)?;
 
 	if period == 0 || period > len {
 		return Err(EmdError::InvalidPeriod { period, data_len: len });
 	}
 	let needed = (2 * period).max(50);
-	if (len - first) < needed {
-		return Err(EmdError::NotEnoughValidData {
-			needed,
-			valid: len - first,
-		});
+	if len - first < needed {
+		return Err(EmdError::NotEnoughValidData { needed, valid: len - first });
 	}
-	if delta.is_nan() || delta.is_infinite() {
-		return Err(EmdError::InvalidDelta { delta });
-	}
-	if fraction.is_nan() || fraction.is_infinite() {
-		return Err(EmdError::InvalidFraction { fraction });
-	}
+	if delta.is_nan() || delta.is_infinite() { return Err(EmdError::InvalidDelta { delta }); }
+	if fraction.is_nan() || fraction.is_infinite() { return Err(EmdError::InvalidFraction { fraction }); }
 
-	let chosen = match kernel {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
-
-	let warmup_period = first + 2 * period - 1;
-
-	Ok((high, low, close, volume, period, delta, fraction, warmup_period, chosen))
+	let chosen = match kernel { Kernel::Auto => detect_best_kernel(), k => k };
+	Ok((high, low, period, delta, fraction, first, chosen))
 }
 
-fn emd_calc(
-	high: &[f64],
-	low: &[f64],
-	period: usize,
-	delta: f64,
-	fraction: f64,
-	first: usize,
-	len: usize,
-	kernel: Kernel,
-) -> Result<EmdOutput, EmdError> {
+#[inline(always)]
+fn emd_compute_into(
+	high: &[f64], low: &[f64],
+	period: usize, delta: f64, fraction: f64,
+	first: usize, kernel: Kernel,
+	ub: &mut [f64], mb: &mut [f64], lb: &mut [f64],
+) {
 	unsafe {
 		match kernel {
-			Kernel::Scalar | Kernel::ScalarBatch => emd_scalar(high, low, period, delta, fraction, first, len),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => emd_avx2(high, low, period, delta, fraction, first, len),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => emd_avx512(high, low, period, delta, fraction, first, len),
+			Kernel::Scalar | Kernel::ScalarBatch =>
+				emd_scalar_into(high, low, period, delta, fraction, first, ub, mb, lb),
+			#[cfg(all(feature="nightly-avx", target_arch="x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch =>
+				emd_scalar_into(high, low, period, delta, fraction, first, ub, mb, lb),
+			#[cfg(all(feature="nightly-avx", target_arch="x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch =>
+				emd_scalar_into(high, low, period, delta, fraction, first, ub, mb, lb),
 			_ => unreachable!(),
 		}
 	}
 }
 
 pub fn emd_with_kernel(input: &EmdInput, kernel: Kernel) -> Result<EmdOutput, EmdError> {
-	let (high, low) = match &input.data {
-		EmdData::Candles { candles } => {
-			let high = source_type(candles, "high");
-			let low = source_type(candles, "low");
-			(high, low)
-		}
-		EmdData::Slices { high, low, .. } => (*high, *low),
-	};
-
+	let (high, low, period, delta, fraction, first, chosen) = emd_prepare(input, kernel)?;
 	let len = high.len();
-	let period = input.get_period();
-	let delta = input.get_delta();
-	let fraction = input.get_fraction();
+	let up_low_warm = first + 50 - 1;
+	let mid_warm    = first + 2 * period - 1;
 
-	let first = (0..len)
-		.find(|&i| !high[i].is_nan() && !low[i].is_nan())
-		.ok_or(EmdError::AllValuesNaN)?;
+	let mut upperband  = alloc_with_nan_prefix(len, up_low_warm);
+	let mut middleband = alloc_with_nan_prefix(len, mid_warm);
+	let mut lowerband  = alloc_with_nan_prefix(len, up_low_warm);
 
-	if period == 0 || period > len {
-		return Err(EmdError::InvalidPeriod { period, data_len: len });
-	}
-	let needed = (2 * period).max(50);
-	if (len - first) < needed {
-		return Err(EmdError::NotEnoughValidData {
-			needed,
-			valid: len - first,
-		});
-	}
-	if delta.is_nan() || delta.is_infinite() {
-		return Err(EmdError::InvalidDelta { delta });
-	}
-	if fraction.is_nan() || fraction.is_infinite() {
-		return Err(EmdError::InvalidFraction { fraction });
-	}
+	emd_compute_into(high, low, period, delta, fraction, first, chosen,
+	                 &mut upperband, &mut middleband, &mut lowerband);
 
-	let chosen = match kernel {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
+	Ok(EmdOutput { upperband, middleband, lowerband })
+}
 
-	unsafe {
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => emd_scalar(high, low, period, delta, fraction, first, len),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => emd_avx2(high, low, period, delta, fraction, first, len),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => emd_avx512(high, low, period, delta, fraction, first, len),
-			_ => unreachable!(),
+#[inline]
+pub unsafe fn emd_scalar_into(
+	high: &[f64], low: &[f64],
+	period: usize, delta: f64, fraction: f64,
+	first: usize,
+	ub: &mut [f64], mb: &mut [f64], lb: &mut [f64],
+) {
+	let len = high.len();
+	debug_assert_eq!(low.len(), len);
+	debug_assert_eq!(ub.len(), len);
+	debug_assert_eq!(mb.len(), len);
+	debug_assert_eq!(lb.len(), len);
+
+	let per_up_low = 50usize;
+	let per_mid    = 2 * period;
+	let beta  = (2.0 * std::f64::consts::PI / period as f64).cos();
+	let gamma = 1.0 / ((4.0 * std::f64::consts::PI * delta / period as f64).cos());
+	let alpha = gamma - (gamma * gamma - 1.0).sqrt();
+	let half_one_minus_alpha = 0.5 * (1.0 - alpha);
+
+	let mut sum_up = 0.0; let mut sum_mb = 0.0; let mut sum_low = 0.0;
+	let mut sp_ring = vec![0.0; per_up_low];
+	let mut sv_ring = vec![0.0; per_up_low];
+	let mut bp_ring = vec![0.0; per_mid];
+	let mut idx_up_low = 0usize; let mut idx_mid = 0usize;
+
+	let mut bp_prev1 = 0.0; let mut bp_prev2 = 0.0;
+	let mut peak_prev = 0.0; let mut valley_prev = 0.0;
+	let mut initialized = false;
+	let up_low_sub = per_up_low - 1;
+	let mid_sub    = per_mid - 1;
+
+	for i in 0..len {
+		if i < first { continue; }
+		let price = (high[i] + low[i]) * 0.5;
+		if !initialized {
+			bp_prev1 = price; bp_prev2 = price; peak_prev = price; valley_prev = price; initialized = true;
 		}
+		let bp_curr = if i >= first + 2 {
+			let price_i2 = (high[i - 2] + low[i - 2]) * 0.5;
+			half_one_minus_alpha * (price - price_i2) + beta * (1.0 + alpha) * bp_prev1 - alpha * bp_prev2
+		} else { price };
+
+		let mut peak_curr = peak_prev;
+		let mut valley_curr = valley_prev;
+		if i >= first + 2 {
+			if bp_prev1 > bp_curr && bp_prev1 > bp_prev2 { peak_curr = bp_prev1; }
+			if bp_prev1 < bp_curr && bp_prev1 < bp_prev2 { valley_curr = bp_prev1; }
+		}
+		let sp = peak_curr * fraction;
+		let sv = valley_curr * fraction;
+
+		sum_up += sp; sum_low += sv; sum_mb += bp_curr;
+		let old_sp = sp_ring[idx_up_low];
+		let old_sv = sv_ring[idx_up_low];
+		let old_bp = bp_ring[idx_mid];
+		sp_ring[idx_up_low] = sp;
+		sv_ring[idx_up_low] = sv;
+		bp_ring[idx_mid]    = bp_curr;
+
+		if i >= first + per_up_low { sum_up -= old_sp; sum_low -= old_sv; }
+		if i >= first + per_mid    { sum_mb -= old_bp; }
+
+		idx_up_low = (idx_up_low + 1) % per_up_low;
+		idx_mid    = (idx_mid + 1) % per_mid;
+
+		if i >= first + up_low_sub {
+			ub[i] = sum_up / per_up_low as f64;
+			lb[i] = sum_low / per_up_low as f64;
+		}
+		if i >= first + mid_sub {
+			mb[i] = sum_mb / per_mid as f64;
+		}
+
+		bp_prev2 = bp_prev1; bp_prev1 = bp_curr;
+		peak_prev = peak_curr; valley_prev = valley_curr;
 	}
 }
 
+// Keep the wrapper for backward compatibility
 #[inline]
 pub unsafe fn emd_scalar(
 	high: &[f64],
@@ -382,7 +436,6 @@ pub unsafe fn emd_scalar(
 	first: usize,
 	len: usize,
 ) -> Result<EmdOutput, EmdError> {
-	// Warmup periods for each band
 	let per_up_low = 50;
 	let per_mid = 2 * period;
 	let upperband_warmup = first + per_up_low - 1;
@@ -392,88 +445,7 @@ pub unsafe fn emd_scalar(
 	let mut middleband = alloc_with_nan_prefix(len, middleband_warmup);
 	let mut lowerband = alloc_with_nan_prefix(len, upperband_warmup);
 
-	let beta = (2.0 * std::f64::consts::PI / period as f64).cos();
-	let gamma = 1.0 / ((4.0 * std::f64::consts::PI * delta / period as f64).cos());
-	let alpha = gamma - (gamma * gamma - 1.0).sqrt();
-	let half_one_minus_alpha = 0.5 * (1.0 - alpha);
-
-	let mut sum_up = 0.0;
-	let mut sum_mb = 0.0;
-	let mut sum_low = 0.0;
-	let mut sp_ring = vec![0.0; per_up_low];
-	let mut sv_ring = vec![0.0; per_up_low];
-	let mut bp_ring = vec![0.0; per_mid];
-	let mut idx_up_low = 0_usize;
-	let mut idx_mid = 0_usize;
-
-	let mut bp_prev1 = 0.0;
-	let mut bp_prev2 = 0.0;
-	let mut peak_prev = 0.0;
-	let mut valley_prev = 0.0;
-	let mut initialized = false;
-	let up_low_sub = per_up_low - 1;
-	let mid_sub = per_mid - 1;
-
-	for i in 0..len {
-		if i < first {
-			continue;
-		}
-		let price = (high[i] + low[i]) * 0.5;
-		if !initialized {
-			bp_prev1 = price;
-			bp_prev2 = price;
-			peak_prev = price;
-			valley_prev = price;
-			initialized = true;
-		}
-		let bp_curr = if i >= first + 2 {
-			let price_i2 = (high[i - 2] + low[i - 2]) * 0.5;
-			half_one_minus_alpha * (price - price_i2) + beta * (1.0 + alpha) * bp_prev1 - alpha * bp_prev2
-		} else {
-			price
-		};
-		let mut peak_curr = peak_prev;
-		let mut valley_curr = valley_prev;
-		if i >= first + 2 {
-			if bp_prev1 > bp_curr && bp_prev1 > bp_prev2 {
-				peak_curr = bp_prev1;
-			}
-			if bp_prev1 < bp_curr && bp_prev1 < bp_prev2 {
-				valley_curr = bp_prev1;
-			}
-		}
-		let sp = peak_curr * fraction;
-		let sv = valley_curr * fraction;
-		sum_up += sp;
-		sum_low += sv;
-		sum_mb += bp_curr;
-		let old_sp = sp_ring[idx_up_low];
-		let old_sv = sv_ring[idx_up_low];
-		let old_bp = bp_ring[idx_mid];
-		sp_ring[idx_up_low] = sp;
-		sv_ring[idx_up_low] = sv;
-		bp_ring[idx_mid] = bp_curr;
-		if i >= first + per_up_low {
-			sum_up -= old_sp;
-			sum_low -= old_sv;
-		}
-		if i >= first + per_mid {
-			sum_mb -= old_bp;
-		}
-		idx_up_low = (idx_up_low + 1) % per_up_low;
-		idx_mid = (idx_mid + 1) % per_mid;
-		if i >= first + up_low_sub {
-			upperband[i] = sum_up / per_up_low as f64;
-			lowerband[i] = sum_low / per_up_low as f64;
-		}
-		if i >= first + mid_sub {
-			middleband[i] = sum_mb / per_mid as f64;
-		}
-		bp_prev2 = bp_prev1;
-		bp_prev1 = bp_curr;
-		peak_prev = peak_curr;
-		valley_prev = valley_curr;
-	}
+	emd_scalar_into(high, low, period, delta, fraction, first, &mut upperband, &mut middleband, &mut lowerband);
 
 	Ok(EmdOutput {
 		upperband,
@@ -630,6 +602,11 @@ pub struct EmdStream {
 	bp_prev2: f64,
 	peak_prev: f64,
 	valley_prev: f64,
+	price_prev1: f64,
+	price_prev2: f64,
+	alpha: f64,
+	beta: f64,
+	half_one_minus_alpha: f64,
 	initialized: bool,
 	count: usize,
 }
@@ -650,6 +627,12 @@ impl EmdStream {
 			return Err(EmdError::InvalidFraction { fraction });
 		}
 
+		// Precompute constants for performance
+		let beta = (2.0 * std::f64::consts::PI / period as f64).cos();
+		let gamma = 1.0 / ((4.0 * std::f64::consts::PI * delta / period as f64).cos());
+		let alpha = gamma - (gamma * gamma - 1.0).sqrt();
+		let half_one_minus_alpha = 0.5 * (1.0 - alpha);
+
 		Ok(Self {
 			period,
 			delta,
@@ -668,6 +651,11 @@ impl EmdStream {
 			bp_prev2: 0.0,
 			peak_prev: 0.0,
 			valley_prev: 0.0,
+			price_prev1: 0.0,
+			price_prev2: 0.0,
+			alpha,
+			beta,
+			half_one_minus_alpha,
 			initialized: false,
 			count: 0,
 		})
@@ -676,21 +664,18 @@ impl EmdStream {
 	#[inline(always)]
 	pub fn update(&mut self, high: f64, low: f64) -> (Option<f64>, Option<f64>, Option<f64>) {
 		let price = (high + low) * 0.5;
-		let beta = (2.0 * std::f64::consts::PI / self.period as f64).cos();
-		let gamma = 1.0 / ((4.0 * std::f64::consts::PI * self.delta / self.period as f64).cos());
-		let alpha = gamma - (gamma * gamma - 1.0).sqrt();
-		let half_one_minus_alpha = 0.5 * (1.0 - alpha);
 
 		if !self.initialized {
 			self.bp_prev1 = price;
 			self.bp_prev2 = price;
 			self.peak_prev = price;
 			self.valley_prev = price;
+			self.price_prev1 = price;
+			self.price_prev2 = price;
 			self.initialized = true;
 		}
 		let bp_curr = if self.count >= 2 {
-			let price_i2 = price;
-			half_one_minus_alpha * (price - price_i2) + beta * (1.0 + alpha) * self.bp_prev1 - alpha * self.bp_prev2
+			self.half_one_minus_alpha * (price - self.price_prev2) + self.beta * (1.0 + self.alpha) * self.bp_prev1 - self.alpha * self.bp_prev2
 		} else {
 			price
 		};
@@ -738,6 +723,8 @@ impl EmdStream {
 		self.bp_prev1 = bp_curr;
 		self.peak_prev = peak_curr;
 		self.valley_prev = valley_curr;
+		self.price_prev2 = self.price_prev1;
+		self.price_prev1 = price;
 		self.count += 1;
 		(ub, mb, lb)
 	}
@@ -931,122 +918,107 @@ fn emd_batch_inner(
 	parallel: bool,
 ) -> Result<EmdBatchOutput, EmdError> {
 	let combos = expand_grid(sweep);
-	if combos.is_empty() {
-		return Err(EmdError::InvalidPeriod { period: 0, data_len: 0 });
-	}
+	if combos.is_empty() { return Err(EmdError::InvalidPeriod { period: 0, data_len: 0 }); }
+
 	let len = high.len();
-	let first = (0..len)
-		.find(|&i| !high[i].is_nan() && !low[i].is_nan())
-		.ok_or(EmdError::AllValuesNaN)?;
+	if low.len() != len { return Err(EmdError::InvalidInputLength { expected: len, actual: low.len() }); }
+
+	let first = (0..len).find(|&i| !high[i].is_nan() && !low[i].is_nan()).ok_or(EmdError::AllValuesNaN)?;
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
 	let needed = (2 * max_p).max(50);
-	if len - first < needed {
-		return Err(EmdError::NotEnoughValidData {
-			needed,
-			valid: len - first,
-		});
-	}
+	if len - first < needed { return Err(EmdError::NotEnoughValidData { needed, valid: len - first }); }
 
 	let rows = combos.len();
 	let cols = len;
 
-	// Calculate warmup periods for each row
-	let warmup_periods_upper: Vec<usize> = combos.iter()
-		.map(|_| first + 49) // upperband/lowerband warmup is always first + 49
-		.collect();
-	let warmup_periods_middle: Vec<usize> = combos.iter()
-		.map(|c| first + 2 * c.period.unwrap() - 1)
-		.collect();
+	// allocate uninit matrices
+	let mut ub_mu = make_uninit_matrix(rows, cols);
+	let mut mb_mu = make_uninit_matrix(rows, cols);
+	let mut lb_mu = make_uninit_matrix(rows, cols);
 
-	// Use uninitialized matrix allocation with proper NaN prefixes
-	let mut upperband_mu = make_uninit_matrix(rows, cols);
-	init_matrix_prefixes(&mut upperband_mu, cols, &warmup_periods_upper);
-	let mut middleband_mu = make_uninit_matrix(rows, cols);
-	init_matrix_prefixes(&mut middleband_mu, cols, &warmup_periods_middle);
-	let mut lowerband_mu = make_uninit_matrix(rows, cols);
-	init_matrix_prefixes(&mut lowerband_mu, cols, &warmup_periods_upper);
+	// warmup prefixes
+	let warm_up_low: Vec<usize> = combos.iter().map(|_| first + 50 - 1).collect();
+	let warm_mid:    Vec<usize> = combos.iter().map(|c| first + 2 * c.period.unwrap() - 1).collect();
 
-	// Convert to mutable slices
-	let upperband_slice = unsafe {
-		std::slice::from_raw_parts_mut(upperband_mu.as_mut_ptr() as *mut f64, rows * cols)
-	};
-	let middleband_slice = unsafe {
-		std::slice::from_raw_parts_mut(middleband_mu.as_mut_ptr() as *mut f64, rows * cols)
-	};
-	let lowerband_slice = unsafe {
-		std::slice::from_raw_parts_mut(lowerband_mu.as_mut_ptr() as *mut f64, rows * cols)
+	init_matrix_prefixes(&mut ub_mu, cols, &warm_up_low);
+	init_matrix_prefixes(&mut mb_mu, cols, &warm_mid);
+	init_matrix_prefixes(&mut lb_mu, cols, &warm_up_low);
+
+	// Convert to raw parts for parallel access
+	let ub_ptr = ub_mu.as_mut_ptr() as *mut f64 as usize;
+	let mb_ptr = mb_mu.as_mut_ptr() as *mut f64 as usize;
+	let lb_ptr = lb_mu.as_mut_ptr() as *mut f64 as usize;
+
+	let simd = match kern {
+		Kernel::Auto => match detect_best_batch_kernel() {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch => Kernel::Avx2,
+			Kernel::ScalarBatch => Kernel::Scalar,
+			_ => Kernel::Scalar,
+		},
+		Kernel::Avx512 | Kernel::Avx512Batch => Kernel::Avx512,
+		Kernel::Avx2 | Kernel::Avx2Batch => Kernel::Avx2,
+		Kernel::Scalar | Kernel::ScalarBatch => Kernel::Scalar,
+		_ => Kernel::Scalar,
 	};
 
-	let do_row = |row: usize, ub: &mut [f64], mb: &mut [f64], lb: &mut [f64]| {
-		let prm = &combos[row];
-		let period = prm.period.unwrap();
-		let delta = prm.delta.unwrap();
-		let fraction = prm.fraction.unwrap();
-		let out = unsafe { emd_row_scalar(high, low, period, delta, fraction, first, cols) }
-			.expect("emd row computation failed");
-		ub.copy_from_slice(&out.upperband);
-		mb.copy_from_slice(&out.middleband);
-		lb.copy_from_slice(&out.lowerband);
-	};
 	if parallel {
-		#[cfg(not(target_arch = "wasm32"))]
+		#[cfg(not(target_arch="wasm32"))]
+		(0..rows).into_par_iter().for_each(|row| {
+			let prm = &combos[row];
+			let p   = prm.period.unwrap();
+			let d   = prm.delta.unwrap();
+			let f   = prm.fraction.unwrap();
+
+			let ub = unsafe { std::slice::from_raw_parts_mut((ub_ptr as *mut f64).add(row * cols), cols) };
+			let mb = unsafe { std::slice::from_raw_parts_mut((mb_ptr as *mut f64).add(row * cols), cols) };
+			let lb = unsafe { std::slice::from_raw_parts_mut((lb_ptr as *mut f64).add(row * cols), cols) };
+
+			emd_compute_into(high, low, p, d, f, first, simd, ub, mb, lb);
+		});
+		#[cfg(target_arch="wasm32")]
 		{
-			upperband_slice
-				.par_chunks_mut(cols)
-				.zip(middleband_slice.par_chunks_mut(cols))
-				.zip(lowerband_slice.par_chunks_mut(cols))
-				.enumerate()
-				.for_each(|(row, ((ub, mb), lb))| {
-					do_row(row, ub, mb, lb);
-				});
-		}
-		#[cfg(target_arch = "wasm32")]
-		{
+			let ub_rows = unsafe { std::slice::from_raw_parts_mut(ub_ptr as *mut f64, rows * cols) };
+			let mb_rows = unsafe { std::slice::from_raw_parts_mut(mb_ptr as *mut f64, rows * cols) };
+			let lb_rows = unsafe { std::slice::from_raw_parts_mut(lb_ptr as *mut f64, rows * cols) };
 			for row in 0..rows {
-				let ub = &mut upperband_slice[row * cols..(row + 1) * cols];
-				let mb = &mut middleband_slice[row * cols..(row + 1) * cols];
-				let lb = &mut lowerband_slice[row * cols..(row + 1) * cols];
-				do_row(row, ub, mb, lb);
+				let prm = &combos[row];
+				let p   = prm.period.unwrap();
+				let d   = prm.delta.unwrap();
+				let f   = prm.fraction.unwrap();
+
+				let ub = &mut ub_rows[row * cols .. (row + 1) * cols];
+				let mb = &mut mb_rows[row * cols .. (row + 1) * cols];
+				let lb = &mut lb_rows[row * cols .. (row + 1) * cols];
+
+				emd_compute_into(high, low, p, d, f, first, simd, ub, mb, lb);
 			}
 		}
 	} else {
+		let ub_rows = unsafe { std::slice::from_raw_parts_mut(ub_ptr as *mut f64, rows * cols) };
+		let mb_rows = unsafe { std::slice::from_raw_parts_mut(mb_ptr as *mut f64, rows * cols) };
+		let lb_rows = unsafe { std::slice::from_raw_parts_mut(lb_ptr as *mut f64, rows * cols) };
 		for row in 0..rows {
-			let ub = &mut upperband_slice[row * cols..(row + 1) * cols];
-			let mb = &mut middleband_slice[row * cols..(row + 1) * cols];
-			let lb = &mut lowerband_slice[row * cols..(row + 1) * cols];
-			do_row(row, ub, mb, lb);
+			let prm = &combos[row];
+			let p   = prm.period.unwrap();
+			let d   = prm.delta.unwrap();
+			let f   = prm.fraction.unwrap();
+
+			let ub = &mut ub_rows[row * cols .. (row + 1) * cols];
+			let mb = &mut mb_rows[row * cols .. (row + 1) * cols];
+			let lb = &mut lb_rows[row * cols .. (row + 1) * cols];
+
+			emd_compute_into(high, low, p, d, f, first, simd, ub, mb, lb);
 		}
 	}
 
-	// Convert back to owned Vecs
-	let upperband = unsafe {
-		Vec::from_raw_parts(upperband_mu.as_mut_ptr() as *mut f64, rows * cols, rows * cols)
-	};
-	let middleband = unsafe {
-		Vec::from_raw_parts(middleband_mu.as_mut_ptr() as *mut f64, rows * cols, rows * cols)
-	};
-	let lowerband = unsafe {
-		Vec::from_raw_parts(lowerband_mu.as_mut_ptr() as *mut f64, rows * cols, rows * cols)
-	};
-	
-	// Forget the original uninitialized vectors to prevent double-free
-	std::mem::forget(upperband_mu);
-	std::mem::forget(middleband_mu);
-	std::mem::forget(lowerband_mu);
+	let upperband  = unsafe { Vec::from_raw_parts(ub_mu.as_mut_ptr() as *mut f64, rows * cols, rows * cols) };
+	let middleband = unsafe { Vec::from_raw_parts(mb_mu.as_mut_ptr() as *mut f64, rows * cols, rows * cols) };
+	let lowerband  = unsafe { Vec::from_raw_parts(lb_mu.as_mut_ptr() as *mut f64, rows * cols, rows * cols) };
 
-	Ok(EmdBatchOutput {
-		upperband,
-		middleband,
-		lowerband,
-		combos,
-		rows,
-		cols,
-	})
-}
+	std::mem::forget(ub_mu); std::mem::forget(mb_mu); std::mem::forget(lb_mu);
 
-#[inline(always)]
-fn expand_grid_for_emdbatch(r: &EmdBatchRange) -> Vec<EmdParams> {
-	expand_grid(r)
+	Ok(EmdBatchOutput { upperband, middleband, lowerband, combos, rows, cols })
 }
 
 #[inline(always)]
@@ -1061,93 +1033,91 @@ fn emd_batch_inner_into(
 	lowerband_out: &mut [f64],
 ) -> Result<Vec<EmdParams>, EmdError> {
 	let combos = expand_grid(sweep);
-	if combos.is_empty() {
-		return Err(EmdError::InvalidPeriod { period: 0, data_len: 0 });
-	}
+	if combos.is_empty() { return Err(EmdError::InvalidPeriod { period: 0, data_len: 0 }); }
 	let len = high.len();
-	let first = (0..len)
-		.find(|&i| !high[i].is_nan() && !low[i].is_nan())
-		.ok_or(EmdError::AllValuesNaN)?;
+	if low.len() != len { return Err(EmdError::InvalidInputLength { expected: len, actual: low.len() }); }
+
+	let rows = combos.len(); let cols = len;
+	if upperband_out.len() != rows * cols || middleband_out.len() != rows * cols || lowerband_out.len() != rows * cols {
+		return Err(EmdError::InvalidInputLength { expected: rows * cols, actual: upperband_out.len().min(middleband_out.len()).min(lowerband_out.len()) });
+	}
+
+	let first = (0..len).find(|&i| !high[i].is_nan() && !low[i].is_nan()).ok_or(EmdError::AllValuesNaN)?;
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
 	let needed = (2 * max_p).max(50);
-	if len - first < needed {
-		return Err(EmdError::NotEnoughValidData {
-			needed,
-			valid: len - first,
-		});
+	if len - first < needed { return Err(EmdError::NotEnoughValidData { needed, valid: len - first }); }
+
+	// init NaN prefixes in-place
+	{
+		let mut ub_mu = unsafe { std::slice::from_raw_parts_mut(upperband_out.as_mut_ptr() as *mut MaybeUninit<f64>, rows * cols) };
+		let mut mb_mu = unsafe { std::slice::from_raw_parts_mut(middleband_out.as_mut_ptr() as *mut MaybeUninit<f64>, rows * cols) };
+		let mut lb_mu = unsafe { std::slice::from_raw_parts_mut(lowerband_out.as_mut_ptr() as *mut MaybeUninit<f64>, rows * cols) };
+
+		let warm_up_low: Vec<usize> = combos.iter().map(|_| first + 50 - 1).collect();
+		let warm_mid:    Vec<usize> = combos.iter().map(|c| first + 2 * c.period.unwrap() - 1).collect();
+
+		init_matrix_prefixes(&mut ub_mu, cols, &warm_up_low);
+		init_matrix_prefixes(&mut mb_mu, cols, &warm_mid);
+		init_matrix_prefixes(&mut lb_mu, cols, &warm_up_low);
 	}
 
-	let rows = combos.len();
-	let cols = len;
-	
-	// Ensure output slices are the correct size
-	if upperband_out.len() != rows * cols || middleband_out.len() != rows * cols || lowerband_out.len() != rows * cols {
-		return Err(EmdError::InvalidPeriod { period: rows * cols, data_len: upperband_out.len() });
-	}
+	// Get raw pointers as usize for parallel access
+	let ub_ptr = upperband_out.as_mut_ptr() as usize;
+	let mb_ptr = middleband_out.as_mut_ptr() as usize;
+	let lb_ptr = lowerband_out.as_mut_ptr() as usize;
 
-	// Convert to MaybeUninit slices for direct writing
-	let upperband_uninit = unsafe { 
-		std::slice::from_raw_parts_mut(upperband_out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>, rows * cols) 
-	};
-	let middleband_uninit = unsafe { 
-		std::slice::from_raw_parts_mut(middleband_out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>, rows * cols) 
-	};
-	let lowerband_uninit = unsafe { 
-		std::slice::from_raw_parts_mut(lowerband_out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>, rows * cols) 
-	};
-
-	// Calculate warmup periods for each row
-	let warmup_periods_upper: Vec<usize> = combos.iter()
-		.map(|_| first + 49) // upperband/lowerband warmup is always first + 49
-		.collect();
-	let warmup_periods_middle: Vec<usize> = combos.iter()
-		.map(|c| first + 2 * c.period.unwrap() - 1)
-		.collect();
-
-	// Initialize NaN prefixes
-	init_matrix_prefixes(upperband_uninit, cols, &warmup_periods_upper);
-	init_matrix_prefixes(middleband_uninit, cols, &warmup_periods_middle);
-	init_matrix_prefixes(lowerband_uninit, cols, &warmup_periods_upper);
-
-	let do_row = |row: usize, ub: &mut [f64], mb: &mut [f64], lb: &mut [f64]| {
-		let prm = &combos[row];
-		let period = prm.period.unwrap();
-		let delta = prm.delta.unwrap();
-		let fraction = prm.fraction.unwrap();
-		let out = unsafe { emd_row_scalar(high, low, period, delta, fraction, first, cols) }
-			.expect("emd row computation failed");
-		ub.copy_from_slice(&out.upperband);
-		mb.copy_from_slice(&out.middleband);
-		lb.copy_from_slice(&out.lowerband);
+	let simd = match kern {
+		Kernel::Auto => match detect_best_batch_kernel() {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch => Kernel::Avx2,
+			Kernel::ScalarBatch => Kernel::Scalar,
+			_ => Kernel::Scalar,
+		},
+		Kernel::Avx512 | Kernel::Avx512Batch => Kernel::Avx512,
+		Kernel::Avx2 | Kernel::Avx2Batch => Kernel::Avx2,
+		Kernel::Scalar | Kernel::ScalarBatch => Kernel::Scalar,
+		_ => Kernel::Scalar,
 	};
 
 	if parallel {
-		#[cfg(not(target_arch = "wasm32"))]
-		{
-			upperband_out
-				.par_chunks_mut(cols)
-				.zip(middleband_out.par_chunks_mut(cols))
-				.zip(lowerband_out.par_chunks_mut(cols))
-				.enumerate()
-				.for_each(|(row, ((ub, mb), lb))| {
-					do_row(row, ub, mb, lb);
-				});
-		}
-		#[cfg(target_arch = "wasm32")]
-		{
-			for row in 0..rows {
-				let ub = &mut upperband_out[row * cols..(row + 1) * cols];
-				let mb = &mut middleband_out[row * cols..(row + 1) * cols];
-				let lb = &mut lowerband_out[row * cols..(row + 1) * cols];
-				do_row(row, ub, mb, lb);
-			}
+		#[cfg(not(target_arch="wasm32"))]
+		(0..rows).into_par_iter().for_each(|row| {
+			let prm = &combos[row];
+			let p   = prm.period.unwrap();
+			let d   = prm.delta.unwrap();
+			let f   = prm.fraction.unwrap();
+
+			let ub = unsafe { std::slice::from_raw_parts_mut((ub_ptr as *mut f64).add(row * cols), cols) };
+			let mb = unsafe { std::slice::from_raw_parts_mut((mb_ptr as *mut f64).add(row * cols), cols) };
+			let lb = unsafe { std::slice::from_raw_parts_mut((lb_ptr as *mut f64).add(row * cols), cols) };
+
+			emd_compute_into(high, low, p, d, f, first, simd, ub, mb, lb);
+		});
+		#[cfg(target_arch="wasm32")]
+		for row in 0..rows {
+			let prm = &combos[row];
+			let p   = prm.period.unwrap();
+			let d   = prm.delta.unwrap();
+			let f   = prm.fraction.unwrap();
+
+			let ub = &mut upperband_out[row * cols .. (row + 1) * cols];
+			let mb = &mut middleband_out[row * cols .. (row + 1) * cols];
+			let lb = &mut lowerband_out[row * cols .. (row + 1) * cols];
+
+			emd_compute_into(high, low, p, d, f, first, simd, ub, mb, lb);
 		}
 	} else {
 		for row in 0..rows {
-			let ub = &mut upperband_out[row * cols..(row + 1) * cols];
-			let mb = &mut middleband_out[row * cols..(row + 1) * cols];
-			let lb = &mut lowerband_out[row * cols..(row + 1) * cols];
-			do_row(row, ub, mb, lb);
+			let prm = &combos[row];
+			let p   = prm.period.unwrap();
+			let d   = prm.delta.unwrap();
+			let f   = prm.fraction.unwrap();
+
+			let ub = &mut upperband_out[row * cols .. (row + 1) * cols];
+			let mb = &mut middleband_out[row * cols .. (row + 1) * cols];
+			let lb = &mut lowerband_out[row * cols .. (row + 1) * cols];
+
+			emd_compute_into(high, low, p, d, f, first, simd, ub, mb, lb);
 		}
 	}
 
@@ -2252,43 +2222,38 @@ mod tests {
 // Python bindings
 #[cfg(feature = "python")]
 #[pyfunction(name = "emd")]
-#[pyo3(signature = (high, low, close, volume, period, delta, fraction, kernel=None))]
+#[pyo3(signature = (high, low, period, delta, fraction, kernel=None))]
 pub fn emd_py<'py>(
 	py: Python<'py>,
 	high: PyReadonlyArray1<'py, f64>,
-	low: PyReadonlyArray1<'py, f64>,
-	close: PyReadonlyArray1<'py, f64>,
-	volume: PyReadonlyArray1<'py, f64>,
+	low:  PyReadonlyArray1<'py, f64>,
 	period: usize,
 	delta: f64,
 	fraction: f64,
 	kernel: Option<&str>,
 ) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
-	let high_slice = high.as_slice()?;
-	let low_slice = low.as_slice()?;
-	let close_slice = close.as_slice()?;
-	let volume_slice = volume.as_slice()?;
+	let hi = high.as_slice()?;
+	let lo = low.as_slice()?;
+	if hi.len() != lo.len() {
+		return Err(PyValueError::new_err("high and low must have same length"));
+	}
+
+	let params = EmdParams { period: Some(period), delta: Some(delta), fraction: Some(fraction) };
+	let inp = EmdInput::from_slices(hi, lo, &[], &[], params); // close/volume unused
 	let kern = validate_kernel(kernel, false)?;
 
-	let params = EmdParams {
-		period: Some(period),
-		delta: Some(delta),
-		fraction: Some(fraction),
-	};
-	let input = EmdInput::from_slices(high_slice, low_slice, close_slice, volume_slice, params);
+	let ub = unsafe { PyArray1::<f64>::new(py, [hi.len()], false) };
+	let mb = unsafe { PyArray1::<f64>::new(py, [hi.len()], false) };
+	let lb = unsafe { PyArray1::<f64>::new(py, [hi.len()], false) };
 
-	let (upperband_vec, middleband_vec, lowerband_vec) = py
-		.allow_threads(|| {
-			emd_with_kernel(&input, kern)
-				.map(|o| (o.upperband, o.middleband, o.lowerband))
-		})
+	let ubm = unsafe { ub.as_slice_mut()? };
+	let mbm = unsafe { mb.as_slice_mut()? };
+	let lbm = unsafe { lb.as_slice_mut()? };
+
+	py.allow_threads(|| emd_into_slices(ubm, mbm, lbm, &inp, kern))
 		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-	Ok((
-		upperband_vec.into_pyarray(py),
-		middleband_vec.into_pyarray(py),
-		lowerband_vec.into_pyarray(py),
-	))
+	Ok((ub, mb, lb))
 }
 
 #[cfg(feature = "python")]
@@ -2318,244 +2283,95 @@ impl EmdStreamPy {
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "emd_batch")]
-#[pyo3(signature = (high, low, close, volume, period_range, delta_range, fraction_range, kernel=None))]
+#[pyo3(signature = (high, low, period_range, delta_range, fraction_range, kernel=None))]
 pub fn emd_batch_py<'py>(
 	py: Python<'py>,
 	high: PyReadonlyArray1<'py, f64>,
-	low: PyReadonlyArray1<'py, f64>,
-	close: PyReadonlyArray1<'py, f64>,
-	volume: PyReadonlyArray1<'py, f64>,
+	low:  PyReadonlyArray1<'py, f64>,
 	period_range: (usize, usize, usize),
 	delta_range: (f64, f64, f64),
 	fraction_range: (f64, f64, f64),
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
-	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
-	use pyo3::types::PyDict;
+	use numpy::PyArrayMethods;
 
-	let high_slice = high.as_slice()?;
-	let low_slice = low.as_slice()?;
+	let hi = high.as_slice()?;
+	let lo = low.as_slice()?;
+	if hi.len() != lo.len() {
+		return Err(PyValueError::new_err("high and low must have same length"));
+	}
+
+	let sweep = EmdBatchRange { period: period_range, delta: delta_range, fraction: fraction_range };
+	let combos = expand_grid(&sweep);
+	let rows = combos.len(); let cols = hi.len();
+
+	let ub = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let mb = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let lb = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+
+	let ubm = unsafe { ub.as_slice_mut()? };
+	let mbm = unsafe { mb.as_slice_mut()? };
+	let lbm = unsafe { lb.as_slice_mut()? };
+
 	let kern = validate_kernel(kernel, true)?;
 
-	let sweep = EmdBatchRange {
-		period: period_range,
-		delta: delta_range,
-		fraction: fraction_range,
-	};
+	let combos = py.allow_threads(|| {
+		let k = match kern {
+			Kernel::Auto => detect_best_batch_kernel(),
+			k => k,
+		};
+		let simd = match k {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch   => Kernel::Avx2,
+			Kernel::ScalarBatch => Kernel::Scalar,
+			_ => unreachable!(),
+		};
+		emd_batch_inner_into(hi, lo, &sweep, simd, true, ubm, mbm, lbm)
+	}).map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-	// Calculate dimensions
-	let combos = expand_grid(&sweep);
-	let rows = combos.len();
-	let cols = high_slice.len();
-
-	// Pre-allocate NumPy arrays directly (zero-copy optimization)
-	let upperband_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-	let middleband_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-	let lowerband_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-	
-	let upperband_slice = unsafe { upperband_arr.as_slice_mut()? };
-	let middleband_slice = unsafe { middleband_arr.as_slice_mut()? };
-	let lowerband_slice = unsafe { lowerband_arr.as_slice_mut()? };
-
-	let combos = py
-		.allow_threads(|| {
-			let kernel = match kern {
-				Kernel::Auto => detect_best_batch_kernel(),
-				k => k,
-			};
-			let simd = match kernel {
-				Kernel::Avx512Batch => Kernel::Avx512,
-				Kernel::Avx2Batch => Kernel::Avx2,
-				Kernel::ScalarBatch => Kernel::Scalar,
-				_ => unreachable!(),
-			};
-			emd_batch_inner_into(
-				high_slice, 
-				low_slice, 
-				&sweep, 
-				simd, 
-				true,
-				upperband_slice,
-				middleband_slice,
-				lowerband_slice
-			)
-		})
-		.map_err(|e| PyValueError::new_err(e.to_string()))?;
-
-	let dict = PyDict::new(py);
-	
-	// Reshape the flattened arrays into 2D matrices
-	dict.set_item("upperband", upperband_arr.reshape((rows, cols))?)?;
-	dict.set_item("middleband", middleband_arr.reshape((rows, cols))?)?;
-	dict.set_item("lowerband", lowerband_arr.reshape((rows, cols))?)?;
-	
-	// Add parameter arrays
-	dict.set_item(
-		"periods",
-		combos
-			.iter()
-			.map(|p| p.period.unwrap() as u64)
-			.collect::<Vec<_>>()
-			.into_pyarray(py),
-	)?;
-	dict.set_item(
-		"deltas",
-		combos
-			.iter()
-			.map(|p| p.delta.unwrap())
-			.collect::<Vec<_>>()
-			.into_pyarray(py),
-	)?;
-	dict.set_item(
-		"fractions",
-		combos
-			.iter()
-			.map(|p| p.fraction.unwrap())
-			.collect::<Vec<_>>()
-			.into_pyarray(py),
-	)?;
-
-	Ok(dict)
+	let d = PyDict::new(py);
+	d.set_item("upper",  ub.reshape((rows, cols))?)?;
+	d.set_item("middle", mb.reshape((rows, cols))?)?;
+	d.set_item("lower",  lb.reshape((rows, cols))?)?;
+	d.set_item("periods",  combos.iter().map(|p| p.period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+	d.set_item("deltas",   combos.iter().map(|p| p.delta.unwrap()).collect::<Vec<_>>().into_pyarray(py))?;
+	d.set_item("fractions",combos.iter().map(|p| p.fraction.unwrap()).collect::<Vec<_>>().into_pyarray(py))?;
+	Ok(d)
 }
 
 // ############################################
 // WASM Bindings
 // ############################################
 
-/// Write EMD directly to output slices - no allocations
-pub fn emd_into_slice(
-	upperband_dst: &mut [f64],
-	middleband_dst: &mut [f64],
-	lowerband_dst: &mut [f64],
-	input: &EmdInput,
-	kern: Kernel,
-) -> Result<(), EmdError> {
-	let (high, low, close, volume, period, delta, fraction, warmup_period, chosen) = emd_prepare(input, kern)?;
-
-	let len = high.len();
-	if upperband_dst.len() != len || middleband_dst.len() != len || lowerband_dst.len() != len {
-		return Err(EmdError::InvalidInputLength {
-			expected: len,
-			actual: upperband_dst.len(),
-		});
-	}
-
-	// Compute EMD directly into the output slices
-	let result = emd_calc(&high, &low, period, delta, fraction, 0, len, chosen)?;
-
-	// Copy results to output slices
-	upperband_dst.copy_from_slice(&result.upperband);
-	middleband_dst.copy_from_slice(&result.middleband);
-	lowerband_dst.copy_from_slice(&result.lowerband);
-
-	// Fill warmup period with NaN for all outputs
-	for v in &mut upperband_dst[..warmup_period] {
-		*v = f64::NAN;
-	}
-	for v in &mut middleband_dst[..warmup_period] {
-		*v = f64::NAN;
-	}
-	for v in &mut lowerband_dst[..warmup_period] {
-		*v = f64::NAN;
-	}
-
-	Ok(())
-}
-
-#[cfg(feature = "wasm")]
-use wasm_bindgen::prelude::*;
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
 
 #[cfg(feature = "wasm")]
-#[wasm_bindgen]
-pub struct EmdResult {
-	values: Vec<f64>, // [upperband..., middleband..., lowerband...]
-	rows: usize,      // 3 for EMD
-	cols: usize,      // data length
+#[derive(Serialize, Deserialize)]
+pub struct EmdJsOutput {
+	pub values: Vec<f64>, // [upper..., middle..., lower...]
+	pub rows: usize,      // 3
+	pub cols: usize,      // len
 }
 
 #[cfg(feature = "wasm")]
-#[wasm_bindgen]
-impl EmdResult {
-	#[wasm_bindgen(getter)]
-	pub fn values(&self) -> Vec<f64> {
-		self.values.clone()
-	}
+#[wasm_bindgen(js_name = "emd_js")]
+pub fn emd_js(high: &[f64], low: &[f64], _close: &[f64], _volume: &[f64], period: usize, delta: f64, fraction: f64) -> Result<JsValue, JsValue> {
+	if high.len() != low.len() { return Err(JsValue::from_str("high and low must have same length")); }
+	let params = EmdParams { period: Some(period), delta: Some(delta), fraction: Some(fraction) };
+	let input  = EmdInput::from_slices(high, low, &[], &[], params);
 
-	#[wasm_bindgen(getter)]
-	pub fn rows(&self) -> usize {
-		self.rows
-	}
+	let mut values = vec![f64::NAN; 3 * high.len()];
+	let (ub, rest) = values.split_at_mut(high.len());
+	let (mb, lb)   = rest.split_at_mut(high.len());
 
-	#[wasm_bindgen(getter)]
-	pub fn cols(&self) -> usize {
-		self.cols
-	}
-}
-
-#[cfg(feature = "wasm")]
-#[wasm_bindgen]
-pub fn emd_js(
-	high: &[f64],
-	low: &[f64],
-	close: &[f64],
-	volume: &[f64],
-	period: usize,
-	delta: f64,
-	fraction: f64,
-) -> Result<EmdResult, JsValue> {
-	let params = EmdParams {
-		period: Some(period),
-		delta: Some(delta),
-		fraction: Some(fraction),
-	};
-
-	// Create candles from the input data
-	let len = high.len();
-	if low.len() != len || close.len() != len || volume.len() != len {
-		return Err(JsValue::from_str("All input arrays must have the same length"));
-	}
-
-	let mut hl2 = Vec::with_capacity(len);
-	let mut hlc3 = Vec::with_capacity(len);
-	let mut ohlc4 = Vec::with_capacity(len);
-	let mut hlcc4 = Vec::with_capacity(len);
-	
-	for i in 0..len {
-		let h = high[i];
-		let l = low[i];
-		let c = close[i];
-		hl2.push((h + l) / 2.0);
-		hlc3.push((h + l + c) / 3.0);
-		ohlc4.push((0.0 + h + l + c) / 4.0);  // open is 0
-		hlcc4.push((h + l + c + c) / 4.0);
-	}
-	
-	let candles = Candles {
-		timestamp: vec![0; len],
-		open: vec![0.0; len], // EMD doesn't use open prices
-		high: high.to_vec(),
-		low: low.to_vec(),
-		close: close.to_vec(),
-		volume: volume.to_vec(),
-		hl2,
-		hlc3,
-		ohlc4,
-		hlcc4,
-	};
-
-	let input = EmdInput::from_candles(&candles, params);
-
-	// Single allocation for all three outputs
-	let mut values = vec![0.0; len * 3];
-	let (upper_slice, rest) = values.split_at_mut(len);
-	let (middle_slice, lower_slice) = rest.split_at_mut(len);
-
-	emd_into_slice(upper_slice, middle_slice, lower_slice, &input, Kernel::Auto)
+	emd_into_slices(ub, mb, lb, &input, detect_best_kernel())
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-	Ok(EmdResult { values, rows: 3, cols: len })
+	let output = EmdJsOutput { values, rows: 3, cols: high.len() };
+	serde_wasm_bindgen::to_value(&output).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 #[cfg(feature = "wasm")]
@@ -2581,9 +2397,9 @@ pub fn emd_free(ptr: *mut f64, len: usize) {
 #[wasm_bindgen]
 pub fn emd_into(
 	high_ptr: *const f64,
-	low_ptr: *const f64,
-	close_ptr: *const f64,
-	volume_ptr: *const f64,
+	low_ptr:  *const f64,
+	_close_ptr: *const f64,  // unused but kept for API compatibility
+	_volume_ptr: *const f64, // unused but kept for API compatibility
 	upper_ptr: *mut f64,
 	middle_ptr: *mut f64,
 	lower_ptr: *mut f64,
@@ -2592,91 +2408,44 @@ pub fn emd_into(
 	delta: f64,
 	fraction: f64,
 ) -> Result<(), JsValue> {
-	if high_ptr.is_null()
-		|| low_ptr.is_null()
-		|| close_ptr.is_null()
-		|| volume_ptr.is_null()
-		|| upper_ptr.is_null()
-		|| middle_ptr.is_null()
-		|| lower_ptr.is_null()
-	{
-		return Err(JsValue::from_str("Null pointer provided"));
+	if high_ptr.is_null() || low_ptr.is_null() || upper_ptr.is_null() || middle_ptr.is_null() || lower_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer"));
 	}
-
 	unsafe {
-		let high = std::slice::from_raw_parts(high_ptr, len);
-		let low = std::slice::from_raw_parts(low_ptr, len);
-		let close = std::slice::from_raw_parts(close_ptr, len);
-		let volume = std::slice::from_raw_parts(volume_ptr, len);
-
-		let params = EmdParams {
-			period: Some(period),
-			delta: Some(delta),
-			fraction: Some(fraction),
-		};
-
-		let mut hl2 = Vec::with_capacity(len);
-		let mut hlc3 = Vec::with_capacity(len);
-		let mut ohlc4 = Vec::with_capacity(len);
-		let mut hlcc4 = Vec::with_capacity(len);
+		// Check for aliasing - if high_ptr == upper_ptr, we need to copy the data first
+		let hi_aliased = high_ptr as *const f64 == upper_ptr as *const f64;
+		let lo_aliased = low_ptr as *const f64 == upper_ptr as *const f64 
+		              || low_ptr as *const f64 == middle_ptr as *const f64 
+		              || low_ptr as *const f64 == lower_ptr as *const f64;
 		
-		for i in 0..len {
-			let h = high[i];
-			let l = low[i];
-			let c = close[i];
-			hl2.push((h + l) / 2.0);
-			hlc3.push((h + l + c) / 3.0);
-			ohlc4.push((0.0 + h + l + c) / 4.0);  // open is 0
-			hlcc4.push((h + l + c + c) / 4.0);
-		}
-		
-		let candles = Candles {
-			timestamp: vec![0; len],
-			open: vec![0.0; len],
-			high: high.to_vec(),
-			low: low.to_vec(),
-			close: close.to_vec(),
-			volume: volume.to_vec(),
-			hl2,
-			hlc3,
-			ohlc4,
-			hlcc4,
-		};
-
-		let input = EmdInput::from_candles(&candles, params);
-
-		// Check for aliasing - any input pointer matching any output pointer
-		let input_ptrs = [high_ptr as *const u8, low_ptr as *const u8, close_ptr as *const u8, volume_ptr as *const u8];
-		let output_ptrs = [upper_ptr as *const u8, middle_ptr as *const u8, lower_ptr as *const u8];
-
-		let has_aliasing = input_ptrs.iter().any(|&inp| output_ptrs.iter().any(|&out| inp == out));
-
-		if has_aliasing {
-			// Use temporary buffers for aliased operation
-			let mut temp_upper = vec![0.0; len];
-			let mut temp_middle = vec![0.0; len];
-			let mut temp_lower = vec![0.0; len];
-
-			emd_into_slice(&mut temp_upper, &mut temp_middle, &mut temp_lower, &input, Kernel::Auto)
+		if hi_aliased || lo_aliased {
+			// Handle aliasing by computing to temporary buffers first
+			let hi = std::slice::from_raw_parts(high_ptr, len);
+			let lo = std::slice::from_raw_parts(low_ptr, len);
+			
+			let params = EmdParams { period: Some(period), delta: Some(delta), fraction: Some(fraction) };
+			let input = EmdInput::from_slices(hi, lo, &[], &[], params);
+			let output = emd_with_kernel(&input, detect_best_kernel())
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
-
-			let upper_out = std::slice::from_raw_parts_mut(upper_ptr, len);
-			let middle_out = std::slice::from_raw_parts_mut(middle_ptr, len);
-			let lower_out = std::slice::from_raw_parts_mut(lower_ptr, len);
-
-			upper_out.copy_from_slice(&temp_upper);
-			middle_out.copy_from_slice(&temp_middle);
-			lower_out.copy_from_slice(&temp_lower);
+			
+			// Copy results to output pointers
+			let ub = std::slice::from_raw_parts_mut(upper_ptr, len);
+			let mb = std::slice::from_raw_parts_mut(middle_ptr, len);
+			let lb = std::slice::from_raw_parts_mut(lower_ptr, len);
+			ub.copy_from_slice(&output.upperband);
+			mb.copy_from_slice(&output.middleband);
+			lb.copy_from_slice(&output.lowerband);
 		} else {
-			// Direct computation into output buffers
-			let upper_out = std::slice::from_raw_parts_mut(upper_ptr, len);
-			let middle_out = std::slice::from_raw_parts_mut(middle_ptr, len);
-			let lower_out = std::slice::from_raw_parts_mut(lower_ptr, len);
-
-			emd_into_slice(upper_out, middle_out, lower_out, &input, Kernel::Auto)
-				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			// No aliasing, can write directly
+			let hi = std::slice::from_raw_parts(high_ptr, len);
+			let lo = std::slice::from_raw_parts(low_ptr, len);
+			let ub = std::slice::from_raw_parts_mut(upper_ptr, len);
+			let mb = std::slice::from_raw_parts_mut(middle_ptr, len);
+			let lb = std::slice::from_raw_parts_mut(lower_ptr, len);
+			let params = EmdParams { period: Some(period), delta: Some(delta), fraction: Some(fraction) };
+			let input  = EmdInput::from_slices(hi, lo, &[], &[], params);
+			emd_into_slices(ub, mb, lb, &input, detect_best_kernel()).map_err(|e| JsValue::from_str(&e.to_string()))?;
 		}
-
 		Ok(())
 	}
 }
@@ -2692,74 +2461,43 @@ pub struct EmdBatchConfig {
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct EmdBatchJsOutput {
-	pub upperband: Vec<f64>,
-	pub middleband: Vec<f64>,
-	pub lowerband: Vec<f64>,
-	pub combos: Vec<EmdParams>,
-	pub rows: usize,
-	pub cols: usize,
+	pub upperband: Vec<f64>,    // flattened rows * cols
+	pub middleband: Vec<f64>,   // flattened rows * cols
+	pub lowerband: Vec<f64>,    // flattened rows * cols
+	pub combos: Vec<EmdParams>, // same shape as Rust
+	pub rows: usize,            // combos.len()
+	pub cols: usize,            // len
 }
 
 #[cfg(feature = "wasm")]
-#[wasm_bindgen(js_name = emd_batch)]
-pub fn emd_batch_unified_js(
-	high: &[f64],
-	low: &[f64],
-	close: &[f64],
-	volume: &[f64],
-	config: JsValue,
-) -> Result<JsValue, JsValue> {
-	let config: EmdBatchConfig =
-		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+#[wasm_bindgen(js_name = "emd_batch")]
+pub fn emd_batch_unified_js(high: &[f64], low: &[f64], _close: &[f64], _volume: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	if high.len() != low.len() { return Err(JsValue::from_str("high and low must have same length")); }
 
-	let sweep = EmdBatchRange {
-		period: config.period_range,
-		delta: config.delta_range,
-		fraction: config.fraction_range,
-	};
+	let cfg: EmdBatchConfig = serde_wasm_bindgen::from_value(config)
+		.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	let sweep = EmdBatchRange { period: cfg.period_range, delta: cfg.delta_range, fraction: cfg.fraction_range };
+	let combos = expand_grid(&sweep);
+	let rows_p = combos.len();
+	let cols   = high.len();
 
-	let len = high.len();
-	let mut hl2 = Vec::with_capacity(len);
-	let mut hlc3 = Vec::with_capacity(len);
-	let mut ohlc4 = Vec::with_capacity(len);
-	let mut hlcc4 = Vec::with_capacity(len);
-	
-	for i in 0..len {
-		let h = high[i];
-		let l = low[i];
-		let c = close[i];
-		hl2.push((h + l) / 2.0);
-		hlc3.push((h + l + c) / 3.0);
-		ohlc4.push((0.0 + h + l + c) / 4.0);  // open is 0
-		hlcc4.push((h + l + c + c) / 4.0);
-	}
-	
-	let candles = Candles {
-		timestamp: vec![0; len],
-		open: vec![0.0; len],
-		high: high.to_vec(),
-		low: low.to_vec(),
-		close: close.to_vec(),
-		volume: volume.to_vec(),
-		hl2,
-		hlc3,
-		ohlc4,
-		hlcc4,
-	};
+	// allocate three planes
+	let mut ub = vec![f64::NAN; rows_p * cols];
+	let mut mb = vec![f64::NAN; rows_p * cols];
+	let mut lb = vec![f64::NAN; rows_p * cols];
 
-	let output = emd_batch_slice(high, low, &sweep, Kernel::Auto)
+	emd_batch_inner_into(high, low, &sweep, detect_best_kernel(), false, &mut ub, &mut mb, &mut lb)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-	let js_output = EmdBatchJsOutput {
-		upperband: output.upperband,
-		middleband: output.middleband,
-		lowerband: output.lowerband,
-		combos: output.combos,
-		rows: output.rows,
-		cols: output.cols,
+	let out = EmdBatchJsOutput { 
+		upperband: ub, 
+		middleband: mb, 
+		lowerband: lb, 
+		combos, 
+		rows: rows_p, 
+		cols 
 	};
-
-	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&e.to_string()))
+	serde_wasm_bindgen::to_value(&out).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 #[cfg(feature = "wasm")]
@@ -2797,8 +2535,6 @@ pub fn emd_batch_into(
 	unsafe {
 		let high = std::slice::from_raw_parts(high_ptr, len);
 		let low = std::slice::from_raw_parts(low_ptr, len);
-		let close = std::slice::from_raw_parts(close_ptr, len);
-		let volume = std::slice::from_raw_parts(volume_ptr, len);
 
 		let sweep = EmdBatchRange {
 			period: (period_start, period_end, period_step),
@@ -2806,36 +2542,8 @@ pub fn emd_batch_into(
 			fraction: (fraction_start, fraction_end, fraction_step),
 		};
 
-		let mut hl2 = Vec::with_capacity(len);
-		let mut hlc3 = Vec::with_capacity(len);
-		let mut ohlc4 = Vec::with_capacity(len);
-		let mut hlcc4 = Vec::with_capacity(len);
-		
-		for i in 0..len {
-			let h = high[i];
-			let l = low[i];
-			let c = close[i];
-			hl2.push((h + l) / 2.0);
-			hlc3.push((h + l + c) / 3.0);
-			ohlc4.push((0.0 + h + l + c) / 4.0);  // open is 0
-			hlcc4.push((h + l + c + c) / 4.0);
-		}
-		
-		let candles = Candles {
-			timestamp: vec![0; len],
-			open: vec![0.0; len],
-			high: high.to_vec(),
-			low: low.to_vec(),
-			close: close.to_vec(),
-			volume: volume.to_vec(),
-			hl2,
-			hlc3,
-			ohlc4,
-			hlcc4,
-		};
-
 		// Calculate dimensions
-		let combos = expand_grid_for_emdbatch(&sweep);
+		let combos = expand_grid(&sweep);
 		let rows = combos.len();
 		let cols = len;
 		let total_len = rows * cols;

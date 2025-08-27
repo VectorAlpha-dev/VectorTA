@@ -117,38 +117,85 @@ class TestCorrelHl:
         second_result = ta_indicators.correl_hl(first_result, low, period=2)
         assert len(second_result) == len(low)
     
+    def test_correl_hl_very_small_dataset(self):
+        """Test CORREL_HL with single data point - mirrors check_correl_hl_very_small_dataset"""
+        single_high = np.array([42.0])
+        single_low = np.array([21.0])
+        
+        result = ta_indicators.correl_hl(single_high, single_low, period=1)
+        assert len(result) == 1
+        # With period=1, correlation is undefined (returns 0.0 or NaN)
+        assert np.isnan(result[0]) or abs(result[0]) < np.finfo(float).eps
+    
+    def test_correl_hl_all_nan_input(self):
+        """Test CORREL_HL with all NaN values"""
+        all_nan_high = np.full(100, np.nan)
+        all_nan_low = np.full(100, np.nan)
+        
+        with pytest.raises(ValueError, match="All values are NaN"):
+            ta_indicators.correl_hl(all_nan_high, all_nan_low, period=9)
+    
     def test_correl_hl_nan_handling(self, test_data):
-        """Test CORREL_HL handles NaN values correctly"""
+        """Test CORREL_HL handles NaN values correctly - mirrors check_correl_hl_nan_handling"""
         high = test_data['high']
         low = test_data['low']
+        period = 9
         
-        result = ta_indicators.correl_hl(high, low, period=9)
+        result = ta_indicators.correl_hl(high, low, period=period)
         assert len(result) == len(high)
         
-        # First period values should be NaN
-        assert all(np.isnan(result[:8]))
+        # Find first valid index where both high and low are not NaN
+        first_valid_idx = 0
+        for i in range(len(high)):
+            if not np.isnan(high[i]) and not np.isnan(low[i]):
+                first_valid_idx = i
+                break
+        
+        # Calculate warmup period: first_valid_idx + period - 1
+        warmup_period = first_valid_idx + period - 1
+        
+        # First warmup_period values should be NaN
+        assert all(np.isnan(result[:warmup_period])), f"Expected NaN in first {warmup_period} values"
         
         # After warmup period, should have valid values
-        assert not all(np.isnan(result[8:]))
+        if len(result) > warmup_period:
+            assert not all(np.isnan(result[warmup_period:])), "Expected valid values after warmup period"
+            # Verify no NaN after warmup (unless there are NaN in input)
+            for i in range(warmup_period, len(result)):
+                if not np.isnan(high[i]) and not np.isnan(low[i]):
+                    assert not np.isnan(result[i]), f"Unexpected NaN at index {i} after warmup"
     
     def test_correl_hl_stream(self):
-        """Test CORREL_HL streaming functionality"""
-        stream = ta_indicators.CorrelHlStream(period=5)
+        """Test CORREL_HL streaming functionality - compare with batch calculation"""
+        period = 5
         
         # Test data
-        high_values = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
-        low_values = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0]
+        high_values = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
+        low_values = np.array([0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0])
         
-        results = []
+        # Batch calculation
+        batch_result = ta_indicators.correl_hl(high_values, low_values, period=period)
+        
+        # Streaming calculation
+        stream = ta_indicators.CorrelHlStream(period=period)
+        stream_results = []
         for h, l in zip(high_values, low_values):
             result = stream.update(h, l)
-            results.append(result)
+            stream_results.append(result if result is not None else np.nan)
         
-        # First 4 updates should return None (warmup period)
-        assert all(r is None for r in results[:4])
+        stream_results = np.array(stream_results)
+        
+        # First period-1 updates should return None/NaN (warmup period)
+        assert all(np.isnan(stream_results[:period-1])), f"Expected NaN during warmup (first {period-1} values)"
         
         # After warmup, should get valid values
-        assert all(r is not None for r in results[4:])
+        assert all(not np.isnan(v) for v in stream_results[period-1:]), "Expected valid values after warmup"
+        
+        # Compare batch vs streaming where both are valid
+        for i in range(len(batch_result)):
+            if not np.isnan(batch_result[i]) and not np.isnan(stream_results[i]):
+                assert_close(batch_result[i], stream_results[i], rtol=1e-10, 
+                           msg=f"Stream vs batch mismatch at index {i}")
     
     def test_correl_hl_batch_single_period(self, test_data):
         """Test CORREL_HL batch with single period"""

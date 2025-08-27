@@ -41,7 +41,7 @@ test('Bollinger Bands - partial params', () => {
     const result = wasm.bollinger_bands_js(close, 22, 2.0, 2.0, "sma", 0);
     
     // Result should have 3x the length (upper, middle, lower)
-    assert.strictEqual(result.length, close.length * 3);
+    assert.strictEqual(result.values.length, close.length * 3);
 });
 
 // TODO: This test may fail until ma.rs has WASM bindings
@@ -51,11 +51,11 @@ test('Bollinger Bands - accuracy test', () => {
     // Use default parameters
     const result = wasm.bollinger_bands_js(close, 20, 2.0, 2.0, "sma", 0);
     
-    // Extract bands (result is flattened as [upper..., middle..., lower...])
+    // Extract bands (result.values is flattened as [upper..., middle..., lower...])
     const len = close.length;
-    const upper = result.slice(0, len);
-    const middle = result.slice(len, 2 * len);
-    const lower = result.slice(2 * len, 3 * len);
+    const upper = result.values.slice(0, len);
+    const middle = result.values.slice(len, 2 * len);
+    const lower = result.values.slice(2 * len, 3 * len);
     
     // Expected values from Rust tests
     const expectedMiddle = [
@@ -157,12 +157,12 @@ test('Bollinger Bands - reinput test', () => {
     // First pass
     const result1 = wasm.bollinger_bands_js(close, 20, 2.0, 2.0, "sma", 0);
     const len = close.length;
-    const middle1 = result1.slice(len, 2 * len);
+    const middle1 = result1.values.slice(len, 2 * len);
     
     // Second pass - apply to middle band
     const result2 = wasm.bollinger_bands_js(middle1, 10, 2.0, 2.0, "sma", 0);
     
-    assert.strictEqual(result2.length, middle1.length * 3);
+    assert.strictEqual(result2.values.length, middle1.length * 3);
 });
 
 test('Bollinger Bands - NaN handling', () => {
@@ -170,9 +170,9 @@ test('Bollinger Bands - NaN handling', () => {
     
     const result = wasm.bollinger_bands_js(close, 20, 2.0, 2.0, "sma", 0);
     const len = close.length;
-    const upper = result.slice(0, len);
-    const middle = result.slice(len, 2 * len);
-    const lower = result.slice(2 * len, 3 * len);
+    const upper = result.values.slice(0, len);
+    const middle = result.values.slice(len, 2 * len);
+    const lower = result.values.slice(2 * len, 3 * len);
     
     // After warmup period (240), no NaN values should exist
     if (len > 240) {
@@ -213,7 +213,7 @@ test('Bollinger Bands - batch single params', () => {
     
     // Compare with single calculation
     const singleResult = wasm.bollinger_bands_js(close, 20, 2.0, 2.0, "sma", 0);
-    const singleMiddle = singleResult.slice(len, 2 * len);
+    const singleMiddle = singleResult.values.slice(len, 2 * len);
     
     // Should match
     assertArrayClose(middle, singleMiddle, 1e-10, "Batch vs single calculation mismatch");
@@ -291,13 +291,13 @@ test('Bollinger Bands - different MA types', () => {
     
     for (const maType of maTypes) {
         const result = wasm.bollinger_bands_js(close, 20, 2.0, 2.0, maType, 0);
-        assert.strictEqual(result.length, close.length * 3, `Failed for matype: ${maType}`);
+        assert.strictEqual(result.values.length, close.length * 3, `Failed for matype: ${maType}`);
         
         // Extract bands
         const len = close.length;
-        const upper = result.slice(0, len);
-        const middle = result.slice(len, 2 * len);
-        const lower = result.slice(2 * len, 3 * len);
+        const upper = result.values.slice(0, len);
+        const middle = result.values.slice(len, 2 * len);
+        const lower = result.values.slice(2 * len, 3 * len);
         
         // Verify structure - values should be numbers (including NaN during warmup)
         assert.ok(upper.every(v => typeof v === 'number'), 'Upper band has numeric values');
@@ -312,11 +312,11 @@ test('Bollinger Bands - different deviation types', () => {
     // Test with standard deviation (0)
     const result0 = wasm.bollinger_bands_js(close, 20, 2.0, 2.0, "sma", 0);
     const len = close.length;
-    const upper0 = result0.slice(0, len);
+    const upper0 = result0.values.slice(0, len);
     
     // Test with mean absolute deviation (1)
     const result1 = wasm.bollinger_bands_js(close, 20, 2.0, 2.0, "sma", 1);
-    const upper1 = result1.slice(0, len);
+    const upper1 = result1.values.slice(0, len);
     
     // Band widths should be different
     let foundDifference = false;
@@ -337,9 +337,9 @@ test('Bollinger Bands - asymmetric bands', () => {
     // Test with different devup and devdn
     const result = wasm.bollinger_bands_js(close, 20, 3.0, 1.0, "sma", 0);
     const len = close.length;
-    const upper = result.slice(0, len);
-    const middle = result.slice(len, 2 * len);
-    const lower = result.slice(2 * len, 3 * len);
+    const upper = result.values.slice(0, len);
+    const middle = result.values.slice(len, 2 * len);
+    const lower = result.values.slice(2 * len, 3 * len);
     
     // Check that bands are asymmetric after warmup
     for (let i = 20; i < len && i < 30; i++) {
@@ -358,19 +358,25 @@ test('Bollinger Bands - fast API basic operation', () => {
     const data = new Float64Array(testData.close);
     const len = data.length;
     
-    // Allocate memory for outputs
-    const upperPtr = wasm.bollinger_bands_alloc(len);
-    const middlePtr = wasm.bollinger_bands_alloc(len);
-    const lowerPtr = wasm.bollinger_bands_alloc(len);
+    // Allocate memory for input and outputs
+    const dataPtr = wasm.bb_alloc(len);
+    const upperPtr = wasm.bb_alloc(len);
+    const middlePtr = wasm.bb_alloc(len);
+    const lowerPtr = wasm.bb_alloc(len);
     
+    assert(dataPtr !== 0, 'Failed to allocate input memory');
     assert(upperPtr !== 0, 'Failed to allocate upper band memory');
     assert(middlePtr !== 0, 'Failed to allocate middle band memory');
     assert(lowerPtr !== 0, 'Failed to allocate lower band memory');
     
+    // Copy input data to WASM memory
+    const dataView = new Float64Array(wasm.__wasm.memory.buffer, dataPtr, len);
+    dataView.set(data);
+    
     try {
         // Compute using fast API
-        wasm.bollinger_bands_into(
-            data, 
+        wasm.bb_into(
+            dataPtr, 
             upperPtr, 
             middlePtr, 
             lowerPtr, 
@@ -383,15 +389,15 @@ test('Bollinger Bands - fast API basic operation', () => {
         );
         
         // Read results back
-        const upper = new Float64Array(wasm.memory.buffer, upperPtr, len);
-        const middle = new Float64Array(wasm.memory.buffer, middlePtr, len);
-        const lower = new Float64Array(wasm.memory.buffer, lowerPtr, len);
+        const upper = new Float64Array(wasm.__wasm.memory.buffer, upperPtr, len);
+        const middle = new Float64Array(wasm.__wasm.memory.buffer, middlePtr, len);
+        const lower = new Float64Array(wasm.__wasm.memory.buffer, lowerPtr, len);
         
         // Compare with safe API
         const safeResult = wasm.bollinger_bands_js(data, 20, 2.0, 2.0, "sma", 0);
-        const safeUpper = safeResult.slice(0, len);
-        const safeMiddle = safeResult.slice(len, 2 * len);
-        const safeLower = safeResult.slice(2 * len, 3 * len);
+        const safeUpper = safeResult.values.slice(0, len);
+        const safeMiddle = safeResult.values.slice(len, 2 * len);
+        const safeLower = safeResult.values.slice(2 * len, 3 * len);
         
         // Verify results match
         for (let i = 0; i < len; i++) {
@@ -405,9 +411,10 @@ test('Bollinger Bands - fast API basic operation', () => {
         }
     } finally {
         // Always free memory
-        wasm.bollinger_bands_free(upperPtr, len);
-        wasm.bollinger_bands_free(middlePtr, len);
-        wasm.bollinger_bands_free(lowerPtr, len);
+        wasm.bb_free(dataPtr, len);
+        wasm.bb_free(upperPtr, len);
+        wasm.bb_free(middlePtr, len);
+        wasm.bb_free(lowerPtr, len);
     }
 });
 
@@ -416,17 +423,17 @@ test('Bollinger Bands - fast API in-place operation (aliasing)', () => {
     const len = data.length;
     
     // Test case 1: input aliased with upper output
-    const ptr1 = wasm.bollinger_bands_alloc(len);
-    const ptr2 = wasm.bollinger_bands_alloc(len);
-    const ptr3 = wasm.bollinger_bands_alloc(len);
+    const ptr1 = wasm.bb_alloc(len);
+    const ptr2 = wasm.bb_alloc(len);
+    const ptr3 = wasm.bb_alloc(len);
     
     try {
         // Copy data to first pointer
-        const wasmData = new Float64Array(wasm.memory.buffer, ptr1, len);
+        const wasmData = new Float64Array(wasm.__wasm.memory.buffer, ptr1, len);
         wasmData.set(data);
         
         // Compute with input aliased to upper output
-        wasm.bollinger_bands_into(
+        wasm.bb_into(
             ptr1,  // input = upper output (aliasing)
             ptr1,  // upper output
             ptr2,  // middle output
@@ -441,9 +448,9 @@ test('Bollinger Bands - fast API in-place operation (aliasing)', () => {
         
         // Compare with safe API
         const safeResult = wasm.bollinger_bands_js(data, 20, 2.0, 2.0, "sma", 0);
-        const safeUpper = safeResult.slice(0, len);
+        const safeUpper = safeResult.values.slice(0, len);
         
-        const upper = new Float64Array(wasm.memory.buffer, ptr1, len);
+        const upper = new Float64Array(wasm.__wasm.memory.buffer, ptr1, len);
         
         // Verify upper band is correct despite aliasing
         for (let i = 0; i < len; i++) {
@@ -451,9 +458,9 @@ test('Bollinger Bands - fast API in-place operation (aliasing)', () => {
             assertClose(upper[i], safeUpper[i], 1e-10, `Aliased upper band mismatch at ${i}`);
         }
     } finally {
-        wasm.bollinger_bands_free(ptr1, len);
-        wasm.bollinger_bands_free(ptr2, len);
-        wasm.bollinger_bands_free(ptr3, len);
+        wasm.bb_free(ptr1, len);
+        wasm.bb_free(ptr2, len);
+        wasm.bb_free(ptr3, len);
     }
 });
 
@@ -463,34 +470,40 @@ test('Bollinger Bands - fast API error handling', () => {
     
     // Test with null pointers
     assert.throws(() => {
-        wasm.bollinger_bands_into(0, 0, 0, 0, len, 20, 2.0, 2.0, "sma", 0);
-    }, /Null pointer/);
+        wasm.bb_into(0, 0, 0, 0, len, 20, 2.0, 2.0, "sma", 0);
+    }, /null pointer/i);
+    
+    // Allocate memory for input data
+    const dataPtr = wasm.bb_alloc(len);
+    const dataView = new Float64Array(wasm.__wasm.memory.buffer, dataPtr, len);
+    dataView.set(data);
     
     // Test with invalid parameters
-    const upperPtr = wasm.bollinger_bands_alloc(len);
-    const middlePtr = wasm.bollinger_bands_alloc(len);
-    const lowerPtr = wasm.bollinger_bands_alloc(len);
+    const upperPtr = wasm.bb_alloc(len);
+    const middlePtr = wasm.bb_alloc(len);
+    const lowerPtr = wasm.bb_alloc(len);
     
     try {
         // Zero period
         assert.throws(() => {
-            wasm.bollinger_bands_into(
-                data, upperPtr, middlePtr, lowerPtr, 
+            wasm.bb_into(
+                dataPtr, upperPtr, middlePtr, lowerPtr, 
                 len, 0, 2.0, 2.0, "sma", 0
             );
         }, /Invalid period/);
         
         // Period exceeds length
         assert.throws(() => {
-            wasm.bollinger_bands_into(
-                data, upperPtr, middlePtr, lowerPtr,
+            wasm.bb_into(
+                dataPtr, upperPtr, middlePtr, lowerPtr,
                 len, 10, 2.0, 2.0, "sma", 0
             );
         }, /Invalid period|period exceeds/);
     } finally {
-        wasm.bollinger_bands_free(upperPtr, len);
-        wasm.bollinger_bands_free(middlePtr, len);
-        wasm.bollinger_bands_free(lowerPtr, len);
+        wasm.bb_free(dataPtr, len);
+        wasm.bb_free(upperPtr, len);
+        wasm.bb_free(middlePtr, len);
+        wasm.bb_free(lowerPtr, len);
     }
 });
 
@@ -498,18 +511,18 @@ test('Bollinger Bands - fast API memory management', () => {
     const sizes = [100, 1000, 10000];
     
     sizes.forEach(size => {
-        const upperPtr = wasm.bollinger_bands_alloc(size);
-        const middlePtr = wasm.bollinger_bands_alloc(size);
-        const lowerPtr = wasm.bollinger_bands_alloc(size);
+        const upperPtr = wasm.bb_alloc(size);
+        const middlePtr = wasm.bb_alloc(size);
+        const lowerPtr = wasm.bb_alloc(size);
         
         assert(upperPtr !== 0, `Failed to allocate upper ${size} elements`);
         assert(middlePtr !== 0, `Failed to allocate middle ${size} elements`);
         assert(lowerPtr !== 0, `Failed to allocate lower ${size} elements`);
         
         // Verify we can write to the memory
-        const upper = new Float64Array(wasm.memory.buffer, upperPtr, size);
-        const middle = new Float64Array(wasm.memory.buffer, middlePtr, size);
-        const lower = new Float64Array(wasm.memory.buffer, lowerPtr, size);
+        const upper = new Float64Array(wasm.__wasm.memory.buffer, upperPtr, size);
+        const middle = new Float64Array(wasm.__wasm.memory.buffer, middlePtr, size);
+        const lower = new Float64Array(wasm.__wasm.memory.buffer, lowerPtr, size);
         
         upper[0] = 42.0;
         upper[size - 1] = 99.0;
@@ -522,9 +535,9 @@ test('Bollinger Bands - fast API memory management', () => {
         assert.strictEqual(lower[0], 44.0);
         
         // Free the memory
-        wasm.bollinger_bands_free(upperPtr, size);
-        wasm.bollinger_bands_free(middlePtr, size);
-        wasm.bollinger_bands_free(lowerPtr, size);
+        wasm.bb_free(upperPtr, size);
+        wasm.bb_free(middlePtr, size);
+        wasm.bb_free(lowerPtr, size);
     });
 });
 
@@ -533,15 +546,15 @@ test('Bollinger Bands - fast API complex aliasing scenarios', () => {
     const len = data.length;
     
     // Test all outputs aliased to same pointer
-    const ptr = wasm.bollinger_bands_alloc(len);
+    const ptr = wasm.bb_alloc(len);
     
     try {
         // Copy data
-        const wasmData = new Float64Array(wasm.memory.buffer, ptr, len);
+        const wasmData = new Float64Array(wasm.__wasm.memory.buffer, ptr, len);
         wasmData.set(data);
         
         // All outputs point to same location (extreme aliasing)
-        wasm.bollinger_bands_into(
+        wasm.bb_into(
             ptr,  // input
             ptr,  // upper = input
             ptr,  // middle = input = upper
@@ -555,11 +568,11 @@ test('Bollinger Bands - fast API complex aliasing scenarios', () => {
         );
         
         // The result should be the lower band (last write wins)
-        const result = new Float64Array(wasm.memory.buffer, ptr, len);
+        const result = new Float64Array(wasm.__wasm.memory.buffer, ptr, len);
         
         // Compare with safe API to get expected lower band
         const safeResult = wasm.bollinger_bands_js(data, 3, 2.0, 2.0, "sma", 0);
-        const safeLower = safeResult.slice(2 * len, 3 * len);
+        const safeLower = safeResult.values.slice(2 * len, 3 * len);
         
         for (let i = 0; i < len; i++) {
             if (isNaN(safeLower[i]) && isNaN(result[i])) continue;
@@ -567,6 +580,6 @@ test('Bollinger Bands - fast API complex aliasing scenarios', () => {
                        `Extreme aliasing result mismatch at ${i}`);
         }
     } finally {
-        wasm.bollinger_bands_free(ptr, len);
+        wasm.bb_free(ptr, len);
     }
 });

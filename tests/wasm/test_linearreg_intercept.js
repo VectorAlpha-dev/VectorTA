@@ -44,7 +44,7 @@ test('Linear Regression Intercept partial params', () => {
     // Test with default parameters
     const close = new Float64Array(testData.close);
     
-    const result = wasm.linearreg_intercept_js(close, 12);
+    const result = wasm.linearreg_intercept_js(close, 14);
     assert.strictEqual(result.length, close.length);
 });
 
@@ -77,7 +77,7 @@ test('Linear Regression Intercept default candles', () => {
     // Test with default parameters
     const close = new Float64Array(testData.close);
     
-    const result = wasm.linearreg_intercept_js(close, 12);
+    const result = wasm.linearreg_intercept_js(close, 14);
     assert.strictEqual(result.length, close.length);
 });
 
@@ -104,7 +104,7 @@ test('Linear Regression Intercept very small dataset', () => {
     const singlePoint = new Float64Array([42.0]);
     
     assert.throws(() => {
-        wasm.linearreg_intercept_js(singlePoint, 12);
+        wasm.linearreg_intercept_js(singlePoint, 14);
     }, /Invalid period|Not enough valid data/);
 });
 
@@ -113,7 +113,7 @@ test('Linear Regression Intercept empty input', () => {
     const empty = new Float64Array([]);
     
     assert.throws(() => {
-        wasm.linearreg_intercept_js(empty, 12);
+        wasm.linearreg_intercept_js(empty, 14);
     }, /Input data slice is empty/);
 });
 
@@ -123,11 +123,11 @@ test('Linear Regression Intercept reinput', () => {
     const expected = EXPECTED_OUTPUTS.linearreg_intercept;
     
     // First pass
-    const firstResult = wasm.linearreg_intercept_js(close, 12);
+    const firstResult = wasm.linearreg_intercept_js(close, 14);
     assert.strictEqual(firstResult.length, close.length);
     
     // Second pass - apply to output
-    const secondResult = wasm.linearreg_intercept_js(firstResult, 12);
+    const secondResult = wasm.linearreg_intercept_js(firstResult, 14);
     assert.strictEqual(secondResult.length, firstResult.length);
     
     // Check last 5 values match expected (if provided)
@@ -146,18 +146,16 @@ test('Linear Regression Intercept NaN handling', () => {
     // Test handles NaN values correctly
     const close = new Float64Array(testData.close);
     
-    const result = wasm.linearreg_intercept_js(close, 12);
+    const result = wasm.linearreg_intercept_js(close, 14);
     assert.strictEqual(result.length, close.length);
     
-    // After warmup period (240), no NaN values should exist
-    if (result.length > 240) {
-        for (let i = 240; i < result.length; i++) {
-            assert(!isNaN(result[i]), `Found unexpected NaN at index ${i}`);
-        }
-    }
+    // First period-1 values should be NaN (warmup = first + period - 1)
+    assertAllNaN(result.slice(0, 13), "Expected NaN in warmup period");
     
-    // First period-1 values should be NaN
-    assertAllNaN(result.slice(0, 11), "Expected NaN in warmup period");
+    // After warmup period, no NaN values should exist
+    for (let i = 13; i < Math.min(100, result.length); i++) {
+        assert(!isNaN(result[i]), `Found unexpected NaN at index ${i}`);
+    }
 });
 
 test('Linear Regression Intercept all NaN input', () => {
@@ -166,8 +164,38 @@ test('Linear Regression Intercept all NaN input', () => {
     allNaN.fill(NaN);
     
     assert.throws(() => {
-        wasm.linearreg_intercept_js(allNaN, 12);
+        wasm.linearreg_intercept_js(allNaN, 14);
     }, /All values are NaN/);
+});
+
+test('Linear Regression Intercept period=1 edge case', () => {
+    // Test period=1 returns input values directly
+    const data = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    
+    const result = wasm.linearreg_intercept_js(data, 1);
+    
+    // Period=1 should return the input values
+    assertArrayClose(result, data, 1e-10, "Period=1 should return input values");
+});
+
+test('Linear Regression Intercept linear trend property', () => {
+    // Test with perfect linear data: y = 2x + 10
+    const data = new Float64Array(50);
+    for (let i = 0; i < 50; i++) {
+        data[i] = 2.0 * i + 10.0;
+    }
+    const period = 10;
+    
+    const result = wasm.linearreg_intercept_js(data, period);
+    
+    // For perfect linear data, the intercept equals the value at window start
+    const warmup = period - 1;
+    for (let i = warmup + 5; i < warmup + 10; i++) {
+        const windowStart = i - period + 1;
+        const expected = data[windowStart];
+        assertClose(result[i], expected, 1e-9, 
+                   `Linear trend mismatch at index ${i}`);
+    }
 });
 
 test('Linear Regression Intercept batch single parameter set', () => {
@@ -176,11 +204,11 @@ test('Linear Regression Intercept batch single parameter set', () => {
     
     // Using the new ergonomic batch API for single parameter
     const batchResult = wasm.linearreg_intercept_batch(close, {
-        period_range: [12, 12, 0]
+        period_range: [14, 14, 0]
     });
     
     // Should match single calculation
-    const singleResult = wasm.linearreg_intercept_js(close, 12);
+    const singleResult = wasm.linearreg_intercept_js(close, 14);
     
     assert.strictEqual(batchResult.values.length, singleResult.length);
     assertArrayClose(batchResult.values, singleResult, 1e-10, "Batch vs single mismatch");
@@ -295,7 +323,7 @@ test('Linear Regression Intercept batch edge cases', () => {
         wasm.linearreg_intercept_batch(new Float64Array([]), {
             period_range: [10, 10, 0]
         });
-    }, /All values are NaN/);
+    }, /Input data slice is empty/);
 });
 
 // Zero-copy API tests
@@ -432,11 +460,14 @@ test('Linear Regression Intercept batch into API', () => {
         const inView = new Float64Array(wasm.__wasm.memory.buffer, inPtr, data.length);
         inView.set(data);
         
-        // Run batch
-        wasm.linearreg_intercept_batch_into(
+        // Run batch - should return number of rows
+        const rows = wasm.linearreg_intercept_batch_into(
             inPtr, outPtr, data.length,
             2, 6, 2  // period range: 2, 4, 6
         );
+        
+        // Verify returned rows count
+        assert.strictEqual(rows, 3, "batch_into should return number of rows");
         
         // Check results
         const outView = new Float64Array(wasm.__wasm.memory.buffer, outPtr, totalSize);

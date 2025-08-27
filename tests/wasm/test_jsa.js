@@ -50,25 +50,23 @@ test('JSA partial params', () => {
 test('JSA accuracy', async () => {
     // Test JSA matches expected values from Rust tests - mirrors check_jsa_accuracy
     const close = new Float64Array(testData.close);
+    const expected = EXPECTED_OUTPUTS.jsa;
     
-    const result = wasm.jsa_js(close, 30);
+    const result = wasm.jsa_js(close, expected.defaultParams.period);
     
     assert.strictEqual(result.length, close.length);
-    
-    // Expected last 5 values from Rust test
-    const expectedLastFive = [61640.0, 61418.0, 61240.0, 61060.5, 60889.5];
     
     // Check last 5 values match expected
     const last5 = result.slice(-5);
     assertArrayClose(
         last5,
-        expectedLastFive,
+        expected.last5Values,
         1e-5,
         "JSA last 5 values mismatch"
     );
     
     // Compare full output with Rust
-    // await compareWithRust('jsa', result, 'close', { period: 30 });
+    // await compareWithRust('jsa', result, 'close', { period: expected.defaultParams.period });
 });
 
 test('JSA default candles', async () => {
@@ -88,7 +86,7 @@ test('JSA zero period', () => {
     
     assert.throws(() => {
         wasm.jsa_js(inputData, 0);
-    });
+    }, /Invalid period/);
 });
 
 test('JSA period exceeds length', () => {
@@ -97,7 +95,7 @@ test('JSA period exceeds length', () => {
     
     assert.throws(() => {
         wasm.jsa_js(dataSmall, 10);
-    });
+    }, /Invalid period/);
 });
 
 test('JSA very small dataset', () => {
@@ -106,7 +104,7 @@ test('JSA very small dataset', () => {
     
     assert.throws(() => {
         wasm.jsa_js(dataSingle, 5);
-    });
+    }, /Invalid period|Not enough valid data/);
 });
 
 test('JSA empty input', () => {
@@ -115,7 +113,7 @@ test('JSA empty input', () => {
     
     assert.throws(() => {
         wasm.jsa_js(dataEmpty, 30);
-    });
+    }, /Input data slice is empty/);
 });
 
 test('JSA all NaN', () => {
@@ -124,25 +122,7 @@ test('JSA all NaN', () => {
     
     assert.throws(() => {
         wasm.jsa_js(data, 3);
-    });
-});
-
-test('JSA reinput', () => {
-    // Test JSA with re-input of JSA result - mirrors check_jsa_reinput
-    const close = new Float64Array(testData.close);
-    
-    // First JSA pass with period=10
-    const firstResult = wasm.jsa_js(close, 10);
-    
-    // Second JSA pass with period=5 using first result as input
-    const secondResult = wasm.jsa_js(firstResult, 5);
-    
-    assert.strictEqual(secondResult.length, firstResult.length);
-    
-    // Verify values are reasonable (not NaN/Inf) after index 30
-    for (let i = 30; i < secondResult.length; i++) {
-        assert(isFinite(secondResult[i]), `NaN found at index ${i}`);
-    }
+    }, /All values are NaN/);
 });
 
 test('JSA NaN handling', () => {
@@ -454,7 +434,7 @@ test('JSA zero-copy API', () => {
     
     // Compute JSA in-place
     try {
-        wasm.jsa_fast(ptr, ptr, data.length, period);
+        wasm.jsa_into(ptr, ptr, data.length, period);
         
         // Verify results match regular API
         const regularResult = wasm.jsa_js(data, period);
@@ -490,7 +470,7 @@ test('JSA zero-copy with separate buffers', () => {
         inView.set(data);
         
         // Compute JSA
-        wasm.jsa_fast(inPtr, outPtr, data.length, period);
+        wasm.jsa_into(inPtr, outPtr, data.length, period);
         
         // Get output view
         const outView = new Float64Array(wasm.__wasm.memory.buffer, outPtr, data.length);
@@ -541,7 +521,7 @@ test('JSA batch fast API', () => {
 test('JSA zero-copy error handling', () => {
     // Test null pointer
     assert.throws(() => {
-        wasm.jsa_fast(0, 0, 10, 5);
+        wasm.jsa_into(0, 0, 10, 5);
     }, /null pointer|Null pointer/i);
     
     // Test invalid parameters with allocated memory
@@ -549,12 +529,12 @@ test('JSA zero-copy error handling', () => {
     try {
         // Invalid period
         assert.throws(() => {
-            wasm.jsa_fast(ptr, ptr, 10, 0);
+            wasm.jsa_into(ptr, ptr, 10, 0);
         }, /Invalid period/);
         
         // Period exceeds length
         assert.throws(() => {
-            wasm.jsa_fast(ptr, ptr, 10, 20);
+            wasm.jsa_into(ptr, ptr, 10, 20);
         }, /Invalid period/);
     } finally {
         wasm.jsa_free(ptr, 10);

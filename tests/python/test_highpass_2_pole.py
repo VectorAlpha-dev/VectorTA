@@ -92,7 +92,7 @@ class TestHighPass2Pole:
         data_single = np.array([42.0])
         
         # Period=2 should fail with single data point
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="Invalid period"):
             ta_indicators.highpass_2_pole(data_single, period=2, k=0.707)
     
     def test_highpass2_empty_input(self):
@@ -107,14 +107,26 @@ class TestHighPass2Pole:
         data = np.array([1.0, 2.0, 3.0])
         
         # Test k = -0.5 (negative)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="Invalid k"):
             ta_indicators.highpass_2_pole(data, period=2, k=-0.5)
+        
+        # Test k = 0.0 (zero)
+        with pytest.raises(ValueError, match="Invalid k"):
+            ta_indicators.highpass_2_pole(data, period=2, k=0.0)
+        
+        # Test k = NaN
+        with pytest.raises(ValueError, match="Invalid k"):
+            ta_indicators.highpass_2_pole(data, period=2, k=float('nan'))
+        
+        # Test k = Infinity
+        with pytest.raises(ValueError, match="Invalid k"):
+            ta_indicators.highpass_2_pole(data, period=2, k=float('inf'))
     
     def test_highpass2_all_nan(self):
         """Test HighPass2 with all NaN input"""
         data = np.array([np.nan, np.nan, np.nan, np.nan, np.nan])
         
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="All values are NaN"):
             ta_indicators.highpass_2_pole(data, period=3, k=0.707)
     
     def test_highpass2_reinput(self, test_data):
@@ -143,14 +155,14 @@ class TestHighPass2Pole:
         
         assert len(result) == len(close)
         
-        # After warmup period, there should be no NaN values
-        if len(result) > 240:
-            for i in range(240, len(result)):
-                assert not np.isnan(result[i]), f"Unexpected NaN at index {i}"
+        # highpass_2_pole only puts NaN for leading NaN inputs
+        # Since test data has no leading NaN, output should have no NaN values
+        for i in range(len(result)):
+            assert not np.isnan(result[i]), f"Unexpected NaN at index {i}"
     
     def test_highpass2_streaming(self, test_data):
         """Test HighPass2 streaming vs batch calculation"""
-        close = test_data['close'][:100]  # Use first 100 values for testing
+        close = test_data['close'][:200]  # Use first 200 values for testing
         period = 48
         k = 0.707
         
@@ -167,13 +179,32 @@ class TestHighPass2Pole:
         
         stream_results = np.array(stream_results)
         
-        # Note: The current HighPass2Stream implementation returns None for all values
-        # This is consistent with the Rust implementation which has a placeholder
-        # So we'll just verify the lengths match
+        # Compare batch vs streaming where values exist
+        # The stream returns None for warmup period (first period values)
+        # and actual values afterwards
         assert len(stream_results) == len(batch_result)
+        
+        # Find where streaming starts producing values
+        first_valid_idx = None
+        for i in range(len(stream_results)):
+            if not np.isnan(stream_results[i]):
+                first_valid_idx = i
+                break
+        
+        if first_valid_idx is not None:
+            # Compare values after warmup
+            for i in range(first_valid_idx, len(stream_results)):
+                if np.isnan(batch_result[i]) and np.isnan(stream_results[i]):
+                    continue
+                assert_close(
+                    stream_results[i], 
+                    batch_result[i],
+                    rtol=1e-9,
+                    msg=f"Streaming mismatch at index {i}"
+                )
     
     def test_highpass2_batch(self, test_data):
-        """Test HighPass2 batch computation."""
+        """Test HighPass2 batch computation with comprehensive checks."""
         close = test_data['close']
         
         # Test period range 40-60 step 10, k range 0.5-0.9 step 0.2
@@ -211,6 +242,75 @@ class TestHighPass2Pole:
                 )
                 row_idx += 1
     
+    def test_highpass2_batch_single_params(self, test_data):
+        """Test HighPass2 batch with single parameter combination."""
+        close = test_data['close']
+        
+        # Single parameter combination (default values)
+        period_range = (48, 48, 0)  # Only period=48
+        k_range = (0.707, 0.707, 0.0)  # Only k=0.707
+        
+        batch_result = ta_indicators.highpass_2_pole_batch(close, period_range, k_range)
+        
+        # Should match single calculation
+        single_result = ta_indicators.highpass_2_pole(close, 48, 0.707)
+        
+        assert batch_result['values'].shape == (1, len(close))
+        np.testing.assert_allclose(
+            batch_result['values'][0], 
+            single_result,
+            rtol=1e-10,
+            err_msg="Batch single params mismatch"
+        )
+    
+    def test_highpass2_batch_edge_cases(self, test_data):
+        """Test HighPass2 batch edge cases."""
+        close = test_data['close'][:50]  # Smaller dataset
+        
+        # Test step larger than range
+        batch_result = ta_indicators.highpass_2_pole_batch(
+            close,
+            period_range=(30, 35, 10),  # Step > range, should only use 30
+            k_range=(0.5, 0.5, 0.0)
+        )
+        
+        assert batch_result['values'].shape[0] == 1
+        assert batch_result['periods'][0] == 30
+        assert batch_result['k'][0] == 0.5
+        
+        # Test empty data
+        with pytest.raises(ValueError, match="All values are NaN|Empty input"):
+            ta_indicators.highpass_2_pole_batch(
+                np.array([]),
+                period_range=(48, 48, 0),
+                k_range=(0.707, 0.707, 0.0)
+            )
+    
+    def test_highpass2_first_value_handling(self, test_data):
+        """Test HighPass2 handles leading NaN values correctly."""
+        close = test_data['close'][:100]
+        
+        # Add leading NaN values
+        close_with_nan = np.concatenate([np.array([np.nan, np.nan, np.nan]), close])
+        
+        result = ta_indicators.highpass_2_pole(close_with_nan, period=48, k=0.707)
+        
+        assert len(result) == len(close_with_nan)
+        
+        # First 3 values should remain NaN
+        assert np.all(np.isnan(result[:3]))
+        
+        # Find first non-NaN value position
+        first_valid = None
+        for i in range(len(result)):
+            if not np.isnan(result[i]):
+                first_valid = i
+                break
+        
+        # highpass_2_pole preserves leading NaN, then starts calculating immediately
+        # So first valid should be at position 3 (right after the 3 NaN values)
+        assert first_valid == 3, f"First valid at {first_valid}, expected 3"
+    
     def test_highpass2_different_k_values(self, test_data):
         """Test HighPass2 with different k values."""
         close = test_data['close']
@@ -221,19 +321,9 @@ class TestHighPass2Pole:
             result = ta_indicators.highpass_2_pole(close, period, k)
             assert len(result) == len(close)
             
-            # The highpass_2_pole filter includes a warmup period of NaN values
-            # Find where valid data starts
-            first_valid = None
+            # highpass_2_pole only puts NaN for leading NaN inputs
+            # Since test data has no leading NaN, all output should be valid
             for i in range(len(result)):
-                if not np.isnan(result[i]):
-                    first_valid = i
-                    break
-            
-            # Verify that we have valid data after the warmup
-            assert first_valid is not None, f"No valid data found for k={k}"
-            
-            # Verify no NaN after first valid
-            for i in range(first_valid, len(result)):
                 assert not np.isnan(result[i]), f"Unexpected NaN at index {i} for k={k}"
     
     def test_highpass2_batch_performance(self, test_data):

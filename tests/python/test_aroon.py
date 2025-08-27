@@ -32,10 +32,9 @@ class TestAroon:
         
         # Test with default params (length=14)
         result = ta_indicators.aroon(high, low, 14)  # Using default
-        assert 'up' in result
-        assert 'down' in result
-        assert len(result['up']) == len(high)
-        assert len(result['down']) == len(low)
+        up, down = result
+        assert len(up) == len(high)
+        assert len(down) == len(low)
     
     def test_aroon_accuracy(self, test_data):
         """Test Aroon matches expected values from Rust tests - mirrors check_aroon_accuracy"""
@@ -47,19 +46,20 @@ class TestAroon:
             high, low,
             length=expected['default_params']['length']
         )
+        up, down = result
         
-        assert len(result['up']) == len(high)
-        assert len(result['down']) == len(low)
+        assert len(up) == len(high)
+        assert len(down) == len(low)
         
         # Check last 5 values match expected
         assert_close(
-            result['up'][-5:], 
+            up[-5:], 
             expected['last_5_up'],
             rtol=1e-2,  # Aroon uses 1e-2 tolerance in Rust tests
             msg="Aroon up last 5 values mismatch"
         )
         assert_close(
-            result['down'][-5:], 
+            down[-5:], 
             expected['last_5_down'],
             rtol=1e-2,  # Aroon uses 1e-2 tolerance in Rust tests
             msg="Aroon down last 5 values mismatch"
@@ -76,8 +76,9 @@ class TestAroon:
         
         # Default params: length=14
         result = ta_indicators.aroon(high, low, 14)
-        assert len(result['up']) == len(high)
-        assert len(result['down']) == len(low)
+        up, down = result
+        assert len(up) == len(high)
+        assert len(down) == len(low)
     
     def test_aroon_zero_length(self):
         """Test Aroon fails with zero length - mirrors check_aroon_zero_length"""
@@ -115,7 +116,7 @@ class TestAroon:
         high = np.array([10.0, 11.0, 12.0])
         low = np.array([9.0, 10.0])  # Different length
         
-        with pytest.raises(ValueError, match="High/low data length mismatch"):
+        with pytest.raises(ValueError, match="High/low length mismatch"):
             ta_indicators.aroon(high, low, length=2)
     
     def test_aroon_reinput(self, test_data):
@@ -125,13 +126,15 @@ class TestAroon:
         
         # First pass with length=14
         first_result = ta_indicators.aroon(high, low, length=14)
-        assert len(first_result['up']) == len(high)
-        assert len(first_result['down']) == len(low)
+        first_up, first_down = first_result
+        assert len(first_up) == len(high)
+        assert len(first_down) == len(low)
         
         # Second pass with length=5
         second_result = ta_indicators.aroon(high, low, length=5)
-        assert len(second_result['up']) == len(high)
-        assert len(second_result['down']) == len(low)
+        second_up, second_down = second_result
+        assert len(second_up) == len(high)
+        assert len(second_down) == len(low)
     
     def test_aroon_nan_handling(self, test_data):
         """Test Aroon handles NaN values correctly - mirrors check_aroon_nan_handling"""
@@ -139,18 +142,19 @@ class TestAroon:
         low = test_data['low']
         
         result = ta_indicators.aroon(high, low, length=14)
-        assert len(result['up']) == len(high)
-        assert len(result['down']) == len(low)
+        up, down = result
+        assert len(up) == len(high)
+        assert len(down) == len(low)
         
         # After warmup period (240), no NaN values should exist
-        if len(result['up']) > 240:
-            assert not np.any(np.isnan(result['up'][240:])), "Found unexpected NaN in up after warmup period"
-            assert not np.any(np.isnan(result['down'][240:])), "Found unexpected NaN in down after warmup period"
+        if len(up) > 240:
+            assert not np.any(np.isnan(up[240:])), "Found unexpected NaN in up after warmup period"
+            assert not np.any(np.isnan(down[240:])), "Found unexpected NaN in down after warmup period"
         
         # First `length` values should be NaN
         expected_warmup = 14  # for length=14
-        assert np.all(np.isnan(result['up'][:expected_warmup])), "Expected NaN in up warmup period"
-        assert np.all(np.isnan(result['down'][:expected_warmup])), "Expected NaN in down warmup period"
+        assert np.all(np.isnan(up[:expected_warmup])), "Expected NaN in up warmup period"
+        assert np.all(np.isnan(down[:expected_warmup])), "Expected NaN in down warmup period"
     
     def test_aroon_streaming(self, test_data):
         """Test Aroon streaming API - mirrors check_aroon_streaming"""
@@ -160,6 +164,7 @@ class TestAroon:
         
         # Batch calculation
         batch_result = ta_indicators.aroon(high, low, length=length)
+        batch_up, batch_down = batch_result
         
         # Streaming calculation
         stream = ta_indicators.AroonStream(length=length)
@@ -179,16 +184,16 @@ class TestAroon:
         stream_down = np.array(stream_down)
         
         # Compare batch vs streaming
-        assert len(batch_result['up']) == len(stream_up)
-        assert len(batch_result['down']) == len(stream_down)
+        assert len(batch_up) == len(stream_up)
+        assert len(batch_down) == len(stream_down)
         
         # Check they match (allowing for floating point differences)
-        mask_up = ~(np.isnan(batch_result['up']) | np.isnan(stream_up))
-        mask_down = ~(np.isnan(batch_result['down']) | np.isnan(stream_down))
+        mask_up = ~(np.isnan(batch_up) | np.isnan(stream_up))
+        mask_down = ~(np.isnan(batch_down) | np.isnan(stream_down))
         
         if np.any(mask_up):
             assert_close(
-                batch_result['up'][mask_up],
+                batch_up[mask_up],
                 stream_up[mask_up],
                 rtol=1e-8,
                 msg="Aroon up streaming mismatch"
@@ -196,7 +201,7 @@ class TestAroon:
         
         if np.any(mask_down):
             assert_close(
-                batch_result['down'][mask_down],
+                batch_down[mask_down],
                 stream_down[mask_down],
                 rtol=1e-8,
                 msg="Aroon down streaming mismatch"
@@ -217,14 +222,16 @@ class TestAroon:
         assert 'lengths' in result
         
         # Should have 1 combination (default params)
-        assert result['up'].shape[0] == 1
-        assert result['up'].shape[1] == len(high)
-        assert result['down'].shape[0] == 1
-        assert result['down'].shape[1] == len(low)
+        up = result['up']
+        down = result['down']
+        assert up.shape[0] == 1
+        assert up.shape[1] == len(high)
+        assert down.shape[0] == 1
+        assert down.shape[1] == len(low)
         
         # Extract the single row
-        default_up = result['up'][0]
-        default_down = result['down'][0]
+        default_up = up[0]
+        default_down = down[0]
         expected = EXPECTED_OUTPUTS['aroon']
         
         # Check last 5 values match (with Aroon tolerance)
@@ -245,16 +252,9 @@ class TestAroon:
         """Test Aroon with all NaN values"""
         all_nan = np.full(100, np.nan)
         
-        # Aroon should handle all NaN inputs by returning NaN for warmup period, then 0.0
-        result = ta_indicators.aroon(all_nan, all_nan, length=14)
-        
-        # First 14 values should be NaN (warmup period)
-        assert np.all(np.isnan(result['up'][:14]))
-        assert np.all(np.isnan(result['down'][:14]))
-        
-        # After warmup, should return 0.0 (no valid highs/lows found)
-        assert np.all(result['up'][14:] == 0.0)
-        assert np.all(result['down'][14:] == 0.0)
+        # Aroon should return an error for all NaN inputs
+        with pytest.raises(ValueError, match="All values are NaN"):
+            ta_indicators.aroon(all_nan, all_nan, length=14)
     
     def test_aroon_batch_multiple_lengths(self, test_data):
         """Test Aroon batch with multiple lengths"""
@@ -271,10 +271,12 @@ class TestAroon:
         assert 'lengths' in result
         
         # Should have 3 combinations
-        assert result['up'].shape[0] == 3
-        assert result['up'].shape[1] == 100
-        assert result['down'].shape[0] == 3
-        assert result['down'].shape[1] == 100
+        up = result['up']
+        down = result['down']
+        assert up.shape[0] == 3
+        assert up.shape[1] == 100
+        assert down.shape[0] == 3
+        assert down.shape[1] == 100
         
         # Check lengths array
         assert len(result['lengths']) == 3
@@ -282,8 +284,8 @@ class TestAroon:
         
         # Verify each row has proper warmup
         for i, length in enumerate([10, 15, 20]):
-            row_up = result['up'][i]
-            row_down = result['down'][i]
+            row_up = up[i]
+            row_down = down[i]
             expected_warmup = length
             # Check warmup NaNs
             assert np.all(np.isnan(row_up[:expected_warmup])), f"Expected NaN in up warmup for length {length}"
@@ -300,31 +302,33 @@ class TestAroon:
         
         # Test with scalar kernel
         result_scalar = ta_indicators.aroon(high, low, length=14, kernel="scalar")
-        assert len(result_scalar['up']) == 100
-        assert len(result_scalar['down']) == 100
+        scalar_up, scalar_down = result_scalar
+        assert len(scalar_up) == 100
+        assert len(scalar_down) == 100
         
         # Test with auto kernel (default)
         result_auto = ta_indicators.aroon(high, low, length=14)
-        assert len(result_auto['up']) == 100
-        assert len(result_auto['down']) == 100
+        auto_up, auto_down = result_auto
+        assert len(auto_up) == 100
+        assert len(auto_down) == 100
         
         # Results should be very close regardless of kernel
         # Skip NaN values in comparison
-        mask_up = ~(np.isnan(result_scalar['up']) | np.isnan(result_auto['up']))
-        mask_down = ~(np.isnan(result_scalar['down']) | np.isnan(result_auto['down']))
+        mask_up = ~(np.isnan(scalar_up) | np.isnan(auto_up))
+        mask_down = ~(np.isnan(scalar_down) | np.isnan(auto_down))
         
         if np.any(mask_up):
             assert_close(
-                result_scalar['up'][mask_up],
-                result_auto['up'][mask_up],
+                scalar_up[mask_up],
+                auto_up[mask_up],
                 rtol=1e-10,
                 msg="Kernel up results should match"
             )
         
         if np.any(mask_down):
             assert_close(
-                result_scalar['down'][mask_down],
-                result_auto['down'][mask_down],
+                scalar_down[mask_down],
+                auto_down[mask_down],
                 rtol=1e-10,
                 msg="Kernel down results should match"
             )

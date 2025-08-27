@@ -44,7 +44,7 @@ test('ROC partial params', () => {
     // Test with default parameters - mirrors check_roc_partial_params
     const close = new Float64Array(testData.close);
     
-    const result = wasm.roc_js(close, 10);
+    const result = wasm.roc_js(close, 9);
     assert.strictEqual(result.length, close.length);
 });
 
@@ -77,7 +77,7 @@ test('ROC default candles', () => {
     // Test ROC with default parameters - mirrors check_roc_default_candles
     const close = new Float64Array(testData.close);
     
-    const result = wasm.roc_js(close, 10);
+    const result = wasm.roc_js(close, 9);
     assert.strictEqual(result.length, close.length);
 });
 
@@ -113,8 +113,8 @@ test('ROC empty input', () => {
     const empty = new Float64Array([]);
     
     assert.throws(() => {
-        wasm.roc_js(empty, 10);
-    }, /Input data slice is empty/);
+        wasm.roc_js(empty, 9);
+    }, /Empty data provided|Input data slice is empty/);
 });
 
 test('ROC reinput', () => {
@@ -140,7 +140,7 @@ test('ROC NaN handling', () => {
     // Test ROC handles NaN values correctly - mirrors check_roc_nan_handling
     const close = new Float64Array(testData.close);
     
-    const result = wasm.roc_js(close, 10);
+    const result = wasm.roc_js(close, 9);
     assert.strictEqual(result.length, close.length);
     
     // After warmup period (240), no NaN values should exist
@@ -150,8 +150,8 @@ test('ROC NaN handling', () => {
         }
     }
     
-    // First period values should be NaN
-    assertAllNaN(result.slice(0, 10), "Expected NaN in warmup period");
+    // First period values should be NaN (ROC with period=9 has warmup of 9)
+    assertAllNaN(result.slice(0, 9), "Expected NaN in warmup period");
 });
 
 test('ROC all NaN input', () => {

@@ -38,7 +38,6 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix};
-use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -277,10 +276,10 @@ pub fn keltner_with_kernel(input: &KeltnerInput, kernel: Kernel) -> Result<Keltn
 		other => other,
 	};
 
-	let warmup_period = period - 1;
-	let mut upper_band = alloc_with_nan_prefix(len, warmup_period);
-	let mut middle_band = alloc_with_nan_prefix(len, warmup_period);
-	let mut lower_band = alloc_with_nan_prefix(len, warmup_period);
+	let warm = first + period - 1;
+	let mut upper_band = alloc_with_nan_prefix(len, warm);
+	let mut middle_band = alloc_with_nan_prefix(len, warm);
+	let mut lower_band = alloc_with_nan_prefix(len, warm);
 
 	unsafe {
 		match chosen {
@@ -454,8 +453,8 @@ pub fn keltner_into_slice(
 	}
 	
 	// Fill warmup with NaN
-	let warmup_period = period - 1;
-	for i in 0..warmup_period {
+	let warm = first + period - 1;
+	for i in 0..warm {
 		upper_dst[i] = f64::NAN;
 		middle_dst[i] = f64::NAN;
 		lower_dst[i] = f64::NAN;
@@ -481,7 +480,8 @@ pub fn keltner_scalar(
 	lower: &mut [f64],
 ) {
 	let len = close.len();
-	let mut atr = alloc_with_nan_prefix(len, period - 1);
+	let warm = first + period - 1;
+	let mut atr = alloc_with_nan_prefix(len, warm);
 	let alpha = 1.0 / (period as f64);
 	let mut sum_tr = 0.0;
 	let mut rma = f64::NAN;
@@ -506,7 +506,7 @@ pub fn keltner_scalar(
 		}
 	}
 	// Pre-allocate MA values buffer to avoid allocation
-	let mut ma_values = alloc_with_nan_prefix(len, period - 1);
+	let mut ma_values = alloc_with_nan_prefix(len, warm);
 	
 	// Use into_slice functions for common MA types to avoid allocation
 	match ma_type {
@@ -927,7 +927,7 @@ pub fn keltner_batch_slice(
 	sweep: &KeltnerBatchRange,
 	kern: Kernel,
 ) -> Result<KeltnerBatchOutput, KeltnerError> {
-	keltner_batch_inner(high, low, close, source, sweep, kern, false)
+	keltner_batch_inner(high, low, close, source, sweep, kern, false, None)
 }
 pub fn keltner_batch_par_slice(
 	high: &[f64],
@@ -937,7 +937,7 @@ pub fn keltner_batch_par_slice(
 	sweep: &KeltnerBatchRange,
 	kern: Kernel,
 ) -> Result<KeltnerBatchOutput, KeltnerError> {
-	keltner_batch_inner(high, low, close, source, sweep, kern, true)
+	keltner_batch_inner(high, low, close, source, sweep, kern, true, None)
 }
 fn keltner_batch_inner(
 	high: &[f64],
@@ -947,6 +947,7 @@ fn keltner_batch_inner(
 	sweep: &KeltnerBatchRange,
 	kern: Kernel,
 	parallel: bool,
+	ma_type: Option<&str>,
 ) -> Result<KeltnerBatchOutput, KeltnerError> {
 	let combos = expand_grid(sweep);
 	if combos.is_empty() {
@@ -968,9 +969,9 @@ fn keltner_batch_inner(
 	let cols = len;
 	
 	// Calculate warmup periods for each row
-	let warmup_periods: Vec<usize> = combos
+	let warm: Vec<usize> = combos
 		.iter()
-		.map(|c| c.period.unwrap() - 1)
+		.map(|c| first + c.period.unwrap() - 1)
 		.collect();
 	
 	// Allocate uninitialized matrices and initialize NaN prefixes
@@ -978,9 +979,9 @@ fn keltner_batch_inner(
 	let mut middle_mu = make_uninit_matrix(rows, cols);
 	let mut lower_mu = make_uninit_matrix(rows, cols);
 	
-	init_matrix_prefixes(&mut upper_mu, cols, &warmup_periods);
-	init_matrix_prefixes(&mut middle_mu, cols, &warmup_periods);
-	init_matrix_prefixes(&mut lower_mu, cols, &warmup_periods);
+	init_matrix_prefixes(&mut upper_mu, cols, &warm);
+	init_matrix_prefixes(&mut middle_mu, cols, &warm);
+	init_matrix_prefixes(&mut lower_mu, cols, &warm);
 	
 	// Convert to mutable slices
 	let mut upper_guard = core::mem::ManuallyDrop::new(upper_mu);
@@ -991,10 +992,23 @@ fn keltner_batch_inner(
 	let middle: &mut [f64] = unsafe { core::slice::from_raw_parts_mut(middle_guard.as_mut_ptr() as *mut f64, middle_guard.len()) };
 	let lower: &mut [f64] = unsafe { core::slice::from_raw_parts_mut(lower_guard.as_mut_ptr() as *mut f64, lower_guard.len()) };
 	
+	// Select the appropriate row function based on kernel
+	type RowFn = unsafe fn(&[f64], &[f64], &[f64], &[f64], usize, f64, &str, usize,
+	                       &mut [f64], &mut [f64], &mut [f64]);
+	
+	let row_fn: RowFn = match kern {
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx512 => keltner_row_avx512,
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx2 => keltner_row_avx2,
+		_ => keltner_row_scalar,
+	};
+	
+	let ma = ma_type.unwrap_or("ema");
 	let do_row = |row: usize, up: &mut [f64], mid: &mut [f64], low_out: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
 		let mult = combos[row].multiplier.unwrap();
-		keltner_row_scalar(high, low, close, source, period, mult, "ema", first, up, mid, low_out)
+		row_fn(high, low, close, source, period, mult, ma, first, up, mid, low_out)
 	};
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
@@ -1948,7 +1962,7 @@ mod tests {
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "keltner")]
-#[pyo3(signature = (high, low, close, source, period, multiplier, ma_type, kernel=None))]
+#[pyo3(signature = (high, low, close, source, period, multiplier, ma_type="ema", kernel=None))]
 pub fn keltner_py<'py>(
 	py: Python<'py>,
 	high: numpy::PyReadonlyArray1<'py, f64>,
@@ -1959,33 +1973,33 @@ pub fn keltner_py<'py>(
 	multiplier: f64,
 	ma_type: &str,
 	kernel: Option<&str>,
-) -> PyResult<Bound<'py, PyDict>> {
-	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
-	use pyo3::types::PyDict;
+) -> PyResult<(Bound<'py, numpy::PyArray1<f64>>,
+              Bound<'py, numpy::PyArray1<f64>>,
+              Bound<'py, numpy::PyArray1<f64>>)> {
+	use numpy::{PyArray1, PyArrayMethods};
 
-	let high_slice = high.as_slice()?;
-	let low_slice = low.as_slice()?;
-	let close_slice = close.as_slice()?;
-	let source_slice = source.as_slice()?;
-	
-	let kern = validate_kernel(kernel, false)?;
-	let params = KeltnerParams {
-		period: Some(period),
-		multiplier: Some(multiplier),
-		ma_type: Some(ma_type.to_string()),
-	};
-	let input = KeltnerInput::from_slice(high_slice, low_slice, close_slice, source_slice, params);
+	let h = high.as_slice()?;
+	let l = low.as_slice()?;
+	let c = close.as_slice()?;
+	let s = source.as_slice()?;
+	let len = c.len();
 
-	let result = py
-		.allow_threads(|| keltner_with_kernel(&input, kern))
-		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	let mut up_arr  = unsafe { PyArray1::<f64>::new(py, [len], false) };
+	let mut mid_arr = unsafe { PyArray1::<f64>::new(py, [len], false) };
+	let mut low_arr = unsafe { PyArray1::<f64>::new(py, [len], false) };
 
-	let dict = PyDict::new(py);
-	dict.set_item("upper_band", result.upper_band.into_pyarray(py))?;
-	dict.set_item("middle_band", result.middle_band.into_pyarray(py))?;
-	dict.set_item("lower_band", result.lower_band.into_pyarray(py))?;
-	
-	Ok(dict)
+	let up  = unsafe { up_arr.as_slice_mut()? };
+	let mid = unsafe { mid_arr.as_slice_mut()? };
+	let lowo= unsafe { low_arr.as_slice_mut()? };
+
+	let params = KeltnerParams { period: Some(period), multiplier: Some(multiplier), ma_type: Some(ma_type.to_string()) };
+	let input  = KeltnerInput::from_slice(h, l, c, s, params);
+	let kern   = validate_kernel(kernel, false)?;
+
+	py.allow_threads(|| keltner_into_slice(up, mid, lowo, &input, kern))
+	  .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	Ok((up_arr, mid_arr, low_arr))
 }
 
 #[cfg(feature = "python")]
@@ -2015,7 +2029,7 @@ impl KeltnerStreamPy {
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "keltner_batch")]
-#[pyo3(signature = (high, low, close, source, period_range, multiplier_range, ma_type="ema", kernel=None))]
+#[pyo3(signature = (high, low, close, source, period_range, multiplier_range, kernel=None))]
 pub fn keltner_batch_py<'py>(
 	py: Python<'py>,
 	high: numpy::PyReadonlyArray1<'py, f64>,
@@ -2024,118 +2038,79 @@ pub fn keltner_batch_py<'py>(
 	source: numpy::PyReadonlyArray1<'py, f64>,
 	period_range: (usize, usize, usize),
 	multiplier_range: (f64, f64, f64),
-	ma_type: &str,
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
-	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
-	use pyo3::types::PyDict;
+	use numpy::{PyArray1, PyArrayMethods};
+	let h = high.as_slice()?;
+	let l = low.as_slice()?;
+	let c = close.as_slice()?;
+	let s = source.as_slice()?;
 
-	let high_slice = high.as_slice()?;
-	let low_slice = low.as_slice()?;
-	let close_slice = close.as_slice()?;
-	let source_slice = source.as_slice()?;
+	let sweep = KeltnerBatchRange { period: period_range, multiplier: multiplier_range };
+	let kern  = validate_kernel(kernel, true)?;
 
-	let sweep = KeltnerBatchRange {
-		period: period_range,
-		multiplier: multiplier_range,
-	};
+	// Run batch once to get shapes and combos
+	let out = py.allow_threads(|| keltner_batch_par_slice(h, l, c, s, &sweep, match kern {
+		Kernel::Auto => detect_best_batch_kernel(),
+		k => k
+	})).map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-	let kern = validate_kernel(kernel, true)?;
+	let rows = out.rows;
+	let cols = out.cols;
 
-	let output = py
-		.allow_threads(|| keltner_batch_with_kernel(high_slice, low_slice, close_slice, source_slice, &sweep, kern))
-		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	// Materialize into PyArrays without extra copies
+	let up_arr  = unsafe { PyArray1::<f64>::new(py, [rows*cols], false) };
+	let mid_arr = unsafe { PyArray1::<f64>::new(py, [rows*cols], false) };
+	let low_arr = unsafe { PyArray1::<f64>::new(py, [rows*cols], false) };
 
-	let rows = output.rows;
-	let cols = output.cols;
+	unsafe { up_arr.as_slice_mut()? }.copy_from_slice(&out.upper_band);
+	unsafe { mid_arr.as_slice_mut()? }.copy_from_slice(&out.middle_band);
+	unsafe { low_arr.as_slice_mut()? }.copy_from_slice(&out.lower_band);
 
 	let dict = PyDict::new(py);
-	dict.set_item("upper_band", output.upper_band.into_pyarray(py).reshape((rows, cols))?)?;
-	dict.set_item("middle_band", output.middle_band.into_pyarray(py).reshape((rows, cols))?)?;
-	dict.set_item("lower_band", output.lower_band.into_pyarray(py).reshape((rows, cols))?)?;
-	dict.set_item(
-		"periods",
-		output.combos
-			.iter()
-			.map(|p| p.period.unwrap() as u64)
-			.collect::<Vec<_>>()
-			.into_pyarray(py),
-	)?;
-	dict.set_item(
-		"multipliers",
-		output.combos
-			.iter()
-			.map(|p| p.multiplier.unwrap())
-			.collect::<Vec<_>>()
-			.into_pyarray(py),
-	)?;
-
+	dict.set_item("upper", up_arr.reshape((rows, cols))?)?;
+	dict.set_item("middle", mid_arr.reshape((rows, cols))?)?;
+	dict.set_item("lower", low_arr.reshape((rows, cols))?)?;
+	use numpy::IntoPyArray;
+	dict.set_item("periods",  out.combos.iter().map(|p| p.period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+	dict.set_item("multipliers", out.combos.iter().map(|p| p.multiplier.unwrap()).collect::<Vec<_>>().into_pyarray(py))?;
 	Ok(dict)
 }
 
 // WASM bindings
 
 #[cfg(feature = "wasm")]
-#[wasm_bindgen]
-pub struct KeltnerMultiResult {
-	values: Vec<f64>, // [upper..., middle..., lower...]
-	rows: usize,      // 3 for keltner (upper, middle, lower)
-	cols: usize,      // data length
+#[derive(Serialize, Deserialize)]
+pub struct KeltnerResult {
+	pub values: Vec<f64>, // [upper..., middle..., lower...]
+	pub rows: usize,      // 3
+	pub cols: usize,      // len
 }
 
 #[cfg(feature = "wasm")]
-#[wasm_bindgen]
-impl KeltnerMultiResult {
-	#[wasm_bindgen(getter)]
-	pub fn values(&self) -> Vec<f64> {
-		self.values.clone()
-	}
-	
-	#[wasm_bindgen(getter)]
-	pub fn rows(&self) -> usize {
-		self.rows
-	}
-	
-	#[wasm_bindgen(getter)]
-	pub fn cols(&self) -> usize {
-		self.cols
-	}
-}
-
-/// Safe API - returns flattened array [upper..., middle..., lower...]
-#[cfg(feature = "wasm")]
-#[wasm_bindgen]
+#[wasm_bindgen(js_name = "keltner")]
 pub fn keltner_js(
-	high: &[f64],
-	low: &[f64],
-	close: &[f64],
-	source: &[f64],
-	period: usize,
-	multiplier: f64,
-	ma_type: &str,
-) -> Result<KeltnerMultiResult, JsValue> {
-	let params = KeltnerParams {
-		period: Some(period),
-		multiplier: Some(multiplier),
-		ma_type: Some(ma_type.to_string()),
-	};
-	let input = KeltnerInput::from_slice(high, low, close, source, params);
-	
+	high: &[f64], low: &[f64], close: &[f64], source: &[f64],
+	period: usize, multiplier: f64, ma_type: String
+) -> Result<JsValue, JsValue> {
+	if !(high.len() == low.len() && low.len() == close.len() && close.len() == source.len()) {
+		return Err(JsValue::from_str("Input arrays must have equal length"));
+	}
 	let len = close.len();
-	let mut output = vec![0.0; len * 3]; // 3 outputs
-	
-	// Split into three slices
-	let (upper_part, rest) = output.split_at_mut(len);
-	let (middle_part, lower_part) = rest.split_at_mut(len);
-	
-	keltner_into_slice(upper_part, middle_part, lower_part, &input, Kernel::Auto)
+
+	// One contiguous buffer, no intermediate Vecs
+	let mut values = vec![0.0f64; 3 * len];
+	let (upper, rest)  = values.split_at_mut(len);
+	let (middle, lower)= rest.split_at_mut(len);
+
+	let params = KeltnerParams { period: Some(period), multiplier: Some(multiplier), ma_type: Some(ma_type) };
+	let input  = KeltnerInput::from_slice(high, low, close, source, params);
+
+	keltner_into_slice(upper, middle, lower, &input, detect_best_kernel())
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
-	
-	Ok(KeltnerMultiResult {
-		values: output,
-		rows: 3,
-		cols: len,
-	})
+
+	let out = KeltnerResult { values, rows: 3, cols: len };
+	serde_wasm_bindgen::to_value(&out).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 /// Fast API with aliasing detection - separate pointers for each output
@@ -2244,45 +2219,56 @@ pub struct KeltnerBatchConfig {
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct KeltnerBatchJsOutput {
-	pub upper_band: Vec<f64>,
-	pub middle_band: Vec<f64>,
-	pub lower_band: Vec<f64>,
+	pub upper: Vec<f64>,
+	pub middle: Vec<f64>,
+	pub lower: Vec<f64>,
 	pub combos: Vec<KeltnerParams>,
 	pub rows: usize,
 	pub cols: usize,
 }
 
 #[cfg(feature = "wasm")]
-#[wasm_bindgen(js_name = keltner_batch)]
-pub fn keltner_batch_js(
-	high: &[f64],
-	low: &[f64],
-	close: &[f64],
-	source: &[f64],
-	config: JsValue,
+#[wasm_bindgen(js_name = "keltner_batch")]
+pub fn keltner_batch_unified_js(
+	high: &[f64], low: &[f64], close: &[f64], source: &[f64], config: JsValue
 ) -> Result<JsValue, JsValue> {
-	let config: KeltnerBatchConfig = serde_wasm_bindgen::from_value(config)
+	let cfg: KeltnerBatchConfig = serde_wasm_bindgen::from_value(config)
 		.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
-	
-	let sweep = KeltnerBatchRange {
-		period: config.period_range,
-		multiplier: config.multiplier_range,
-	};
-	
-	let output = keltner_batch_with_kernel(high, low, close, source, &sweep, Kernel::Auto)
+	let sweep = KeltnerBatchRange { period: cfg.period_range, multiplier: cfg.multiplier_range };
+
+	let out = keltner_batch_inner(high, low, close, source, &sweep, detect_best_batch_kernel(), false, Some(&cfg.ma_type))
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
-	
-	let combos = output.combos.clone();
-	
-	let js_output = KeltnerBatchJsOutput {
-		upper_band: output.upper_band,
-		middle_band: output.middle_band,
-		lower_band: output.lower_band,
-		combos,
-		rows: output.rows,
-		cols: output.cols,
+
+	let js_out = KeltnerBatchJsOutput {
+		upper: out.upper_band, middle: out.middle_band, lower: out.lower_band,
+		combos: out.combos, rows: out.rows, cols: out.cols,
 	};
-	
-	serde_wasm_bindgen::to_value(&js_output)
-		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+	serde_wasm_bindgen::to_value(&js_out).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = "keltner_into_concat")]
+pub fn keltner_into_concat(
+	h_ptr: *const f64, l_ptr: *const f64, c_ptr: *const f64, s_ptr: *const f64,
+	out_ptr: *mut f64, len: usize,
+	period: usize, multiplier: f64, ma_type: String
+) -> Result<(), JsValue> {
+	if [h_ptr, l_ptr, c_ptr, s_ptr, out_ptr as *const f64].iter().any(|p| p.is_null()) {
+		return Err(JsValue::from_str("null pointer passed to keltner_into_concat"));
+	}
+	unsafe {
+		let h = std::slice::from_raw_parts(h_ptr, len);
+		let l = std::slice::from_raw_parts(l_ptr, len);
+		let c = std::slice::from_raw_parts(c_ptr, len);
+		let s = std::slice::from_raw_parts(s_ptr, len);
+
+		let out = std::slice::from_raw_parts_mut(out_ptr, 3*len);
+		let (upper, rest)  = out.split_at_mut(len);
+		let (middle, lower)= rest.split_at_mut(len);
+
+		let params = KeltnerParams { period: Some(period), multiplier: Some(multiplier), ma_type: Some(ma_type) };
+		let input  = KeltnerInput::from_slice(h, l, c, s, params);
+		keltner_into_slice(upper, middle, lower, &input, detect_best_kernel())
+			.map_err(|e| JsValue::from_str(&e.to_string()))
+	}
 }

@@ -35,24 +35,16 @@ class TestLinearRegIntercept:
     def test_linearreg_intercept_accuracy(self, test_data):
         """Test Linear Regression Intercept matches expected values from Rust tests - mirrors check_linreg_accuracy"""
         close = test_data['close']
+        expected = EXPECTED_OUTPUTS['linearreg_intercept']
         
-        # Expected values from Rust tests
-        expected_last_five = [
-            60000.91428571429,
-            59947.142857142855,
-            59754.57142857143,
-            59318.4,
-            59321.91428571429,
-        ]
-        
-        result = ta_indicators.linearreg_intercept(close, period=14)
+        result = ta_indicators.linearreg_intercept(close, period=expected['default_params']['period'])
         
         assert len(result) == len(close)
         
         # Check last 5 values match expected
         assert_close(
             result[-5:], 
-            expected_last_five,
+            expected['last_5_values'],
             rtol=1e-6,
             msg="Linear Regression Intercept last 5 values mismatch"
         )
@@ -93,6 +85,39 @@ class TestLinearRegIntercept:
         with pytest.raises(ValueError, match="Input data slice is empty"):
             ta_indicators.linearreg_intercept(empty, period=14)
     
+    def test_linearreg_intercept_all_nan_input(self):
+        """Test Linear Regression Intercept fails with all NaN values - mirrors check for AllValuesNaN"""
+        all_nan = np.full(100, np.nan)
+        
+        with pytest.raises(ValueError, match="All values are NaN"):
+            ta_indicators.linearreg_intercept(all_nan, period=14)
+    
+    def test_linearreg_intercept_period_one(self):
+        """Test Linear Regression Intercept with period=1 returns input values - special case"""
+        data = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0])
+        
+        result = ta_indicators.linearreg_intercept(data, period=1)
+        
+        # Period=1 should return the input values directly
+        assert_close(result, data, rtol=1e-10, msg="Period=1 should return input values")
+    
+    def test_linearreg_intercept_linear_trend(self):
+        """Test Linear Regression Intercept with perfect linear data - property test"""
+        # Create perfect linear data: y = 2x + 10
+        data = np.array([2.0 * i + 10.0 for i in range(50)])
+        period = 10
+        
+        result = ta_indicators.linearreg_intercept(data, period=period)
+        
+        # For perfect linear data, the intercept should equal the value at the start of each window
+        # After warmup, check a few values
+        warmup = period - 1
+        for i in range(warmup + 5, warmup + 10):
+            window_start = i - period + 1
+            expected = data[window_start]  # For perfect linear regression
+            assert_close(result[i], expected, rtol=1e-9, 
+                        msg=f"Linear trend mismatch at index {i}")
+    
     def test_linearreg_intercept_nan_handling(self, test_data):
         """Test Linear Regression Intercept handles NaN values correctly - mirrors check_linreg_nan_handling"""
         close = test_data['close']
@@ -102,9 +127,9 @@ class TestLinearRegIntercept:
         assert len(result) == len(close)
         
         # Check that after warmup period, no unexpected NaN values exist
-        warmup = 14 - 1  # period - 1
+        # Warmup = first + period - 1
         non_nan_start = next((i for i, val in enumerate(close) if not np.isnan(val)), 0)
-        expected_valid_start = non_nan_start + warmup
+        expected_valid_start = non_nan_start + 14 - 1  # first + period - 1
         
         if expected_valid_start < len(result):
             for i in range(expected_valid_start, min(expected_valid_start + 40, len(result))):
@@ -166,6 +191,19 @@ class TestLinearRegInterceptStream:
         for i in range(4, len(results)):
             assert results[i] is not None
             assert not np.isnan(results[i])
+    
+    def test_stream_period_one(self):
+        """Test Linear Regression Intercept stream with period=1"""
+        stream = ta_indicators.LinearRegInterceptStream(period=1)
+        
+        # Test data
+        data = [1.0, 2.0, 3.0, 4.0, 5.0]
+        
+        # Period=1 should return values immediately
+        for val in data:
+            result = stream.update(val)
+            assert result is not None
+            assert_close(result, val, rtol=1e-10, msg=f"Period=1 stream should return input value {val}")
     
     def test_stream_nan_handling(self):
         """Test Linear Regression Intercept stream handles NaN correctly"""

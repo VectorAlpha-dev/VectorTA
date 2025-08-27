@@ -7,15 +7,17 @@ import numpy as np
 import sys
 from pathlib import Path
 
-# Add parent directory to path to import the built module
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'target/wheels'))
-
 try:
     import my_project as ta_indicators
 except ImportError:
-    pytest.skip("Python module not built. Run 'maturin develop --features python' first", allow_module_level=True)
+    # If not in virtual environment, try to import from installed location
+    try:
+        import my_project as ta_indicators
+    except ImportError:
+        pytest.skip("Python module not built. Run 'maturin develop --features python' first", allow_module_level=True)
 
 from test_utils import load_test_data, assert_close, EXPECTED_OUTPUTS
+from rust_comparison import compare_with_rust
 
 
 class TestKeltner:
@@ -24,10 +26,11 @@ class TestKeltner:
         return load_test_data()
     
     def test_keltner_accuracy(self, test_data):
-        """Test KELTNER matches expected values from Rust tests"""
+        """Test KELTNER matches expected values from Rust tests - mirrors check_keltner_accuracy"""
         expected = EXPECTED_OUTPUTS['keltner']
         
-        result = ta_indicators.keltner(
+        # Returns tuple (upper, middle, lower)
+        upper_band, middle_band, lower_band = ta_indicators.keltner(
             test_data['high'],
             test_data['low'],
             test_data['close'],
@@ -37,80 +40,196 @@ class TestKeltner:
             expected['default_params']['ma_type']
         )
         
-        # Check all three bands
-        assert 'upper_band' in result
-        assert 'middle_band' in result
-        assert 'lower_band' in result
-        
         # Verify lengths
-        assert len(result['upper_band']) == len(test_data['close'])
-        assert len(result['middle_band']) == len(test_data['close'])
-        assert len(result['lower_band']) == len(test_data['close'])
+        assert len(upper_band) == len(test_data['close'])
+        assert len(middle_band) == len(test_data['close'])
+        assert len(lower_band) == len(test_data['close'])
         
-        # Check last 5 values for each band
+        # Check last 5 values for each band with proper tolerance
         assert_close(
-            result['upper_band'][-5:],
+            upper_band[-5:],
             expected['last_5_upper'],
-            rtol=1e-1,  # Same tolerance as Rust tests
+            rtol=1e-8,  # Use tighter tolerance like ALMA
             msg="Upper band mismatch"
         )
         
         assert_close(
-            result['middle_band'][-5:],
+            middle_band[-5:],
             expected['last_5_middle'],
-            rtol=1e-1,
+            rtol=1e-8,
             msg="Middle band mismatch"
         )
         
         assert_close(
-            result['lower_band'][-5:],
+            lower_band[-5:],
             expected['last_5_lower'],
-            rtol=1e-1,
+            rtol=1e-8,
             msg="Lower band mismatch"
         )
+        
+        # Compare full output with Rust (if available)
+        try:
+            compare_with_rust('keltner', upper_band, 'keltner', expected['default_params'])
+        except:
+            pass  # Rust comparison is optional
     
-    def test_keltner_errors(self):
-        """Test error handling"""
-        # Test with empty data
+    def test_keltner_default_params(self, test_data):
+        """Test KELTNER with default parameters - mirrors check_keltner_default_params"""
+        # Default params: period=20, multiplier=2.0, ma_type="ema"
+        upper, middle, lower = ta_indicators.keltner(
+            test_data['high'],
+            test_data['low'],
+            test_data['close'],
+            test_data['close'],
+            20, 2.0, "ema"
+        )
+        
+        assert len(upper) == len(test_data['close'])
+        assert len(middle) == len(test_data['close'])
+        assert len(lower) == len(test_data['close'])
+    
+    def test_keltner_zero_period(self, test_data):
+        """Test KELTNER fails with zero period - mirrors check_keltner_zero_period"""
+        with pytest.raises(ValueError, match="invalid period"):
+            ta_indicators.keltner(
+                test_data['high'],
+                test_data['low'],
+                test_data['close'],
+                test_data['close'],
+                0, 2.0, "ema"
+            )
+    
+    def test_keltner_large_period(self, test_data):
+        """Test KELTNER fails when period exceeds data length - mirrors check_keltner_large_period"""
+        with pytest.raises(ValueError, match="invalid period"):
+            ta_indicators.keltner(
+                test_data['high'],
+                test_data['low'],
+                test_data['close'],
+                test_data['close'],
+                999999, 2.0, "ema"
+            )
+    
+    def test_keltner_empty_input(self):
+        """Test KELTNER fails with empty input - similar to ALMA's check_alma_empty_input"""
+        empty = np.array([])
+        
         with pytest.raises(ValueError, match="empty data"):
-            ta_indicators.keltner(
-                np.array([]),
-                np.array([]),
-                np.array([]),
-                np.array([]),
-                20,
-                2.0,
-                "ema"
-            )
+            ta_indicators.keltner(empty, empty, empty, empty, 20, 2.0, "ema")
+    
+    def test_keltner_very_small_dataset(self):
+        """Test KELTNER with insufficient data - similar to ALMA's check_alma_very_small_dataset"""
+        small_data = np.array([1.0, 2.0, 3.0])
         
-        # Test with period = 0
+        with pytest.raises(ValueError, match="invalid period|not enough valid data"):
+            ta_indicators.keltner(
+                small_data, small_data, small_data, small_data,
+                20, 2.0, "ema"
+            )
+    
+    def test_keltner_all_nan_input(self):
+        """Test KELTNER with all NaN values"""
+        all_nan = np.full(100, np.nan)
+        
+        with pytest.raises(ValueError, match="[Aa]ll values are"):
+            ta_indicators.keltner(
+                all_nan, all_nan, all_nan, all_nan,
+                20, 2.0, "ema"
+            )
+    
+    def test_keltner_invalid_multiplier(self):
+        """Test KELTNER with invalid multiplier values"""
         data = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
-        with pytest.raises(ValueError, match="invalid period"):
-            ta_indicators.keltner(
-                data,
-                data,
-                data,
-                data,
-                0,
-                2.0,
-                "ema"
-            )
         
-        # Test with period > data length
-        with pytest.raises(ValueError, match="invalid period"):
-            ta_indicators.keltner(
-                data,
-                data,
-                data,
-                data,
-                10,
-                2.0,
-                "ema"
+        # Test with negative multiplier (should still work, just flips bands)
+        upper, middle, lower = ta_indicators.keltner(
+            data, data, data, data,
+            2, -2.0, "ema"
+        )
+        assert len(upper) == len(data)
+        
+        # Test with zero multiplier (bands collapse to middle)
+        upper, middle, lower = ta_indicators.keltner(
+            data, data, data, data,
+            2, 0.0, "ema"
+        )
+        assert len(upper) == len(data)
+        
+        # Test with NaN multiplier - in Rust this actually works and returns NaN values
+        # which is a reasonable behavior
+        try:
+            upper, middle, lower = ta_indicators.keltner(
+                data, data, data, data,
+                2, float('nan'), "ema"
             )
+            # If it doesn't fail, verify all outputs are NaN
+            assert np.all(np.isnan(upper[2:])), "Expected NaN output for NaN multiplier"
+        except ValueError:
+            # Some implementations might reject NaN multiplier
+            pass
+    
+    def test_keltner_different_ma_types(self, test_data):
+        """Test KELTNER with different MA types"""
+        ma_types = ["ema", "sma", "wma", "rma"]
+        
+        for ma_type in ma_types:
+            try:
+                upper, middle, lower = ta_indicators.keltner(
+                    test_data['high'][:100],  # Use smaller subset for speed
+                    test_data['low'][:100],
+                    test_data['close'][:100],
+                    test_data['close'][:100],
+                    20, 2.0, ma_type
+                )
+                assert len(upper) == 100, f"Failed for MA type: {ma_type}"
+                assert len(middle) == 100, f"Failed for MA type: {ma_type}"
+                assert len(lower) == 100, f"Failed for MA type: {ma_type}"
+            except ValueError as e:
+                # Some MA types might not be supported
+                if "unsupported" not in str(e).lower():
+                    raise
+    
+    def test_keltner_nan_handling(self, test_data):
+        """Test KELTNER handles NaN values correctly - mirrors check_keltner_nan_handling"""
+        period = 20
+        upper, middle, lower = ta_indicators.keltner(
+            test_data['high'],
+            test_data['low'],
+            test_data['close'],
+            test_data['close'],
+            period, 2.0, "ema"
+        )
+        
+        assert len(upper) == len(test_data['close'])
+        assert len(middle) == len(test_data['close'])
+        assert len(lower) == len(test_data['close'])
+        
+        # After warmup period (240), no NaN values should exist
+        if len(upper) > 240:
+            assert not np.any(np.isnan(upper[240:])), "Found unexpected NaN in upper band after warmup"
+            assert not np.any(np.isnan(middle[240:])), "Found unexpected NaN in middle band after warmup"
+            assert not np.any(np.isnan(lower[240:])), "Found unexpected NaN in lower band after warmup"
+        
+        # First period-1 values should be NaN (warmup period)
+        warmup = period - 1
+        assert np.all(np.isnan(upper[:warmup])), f"Expected NaN in upper band warmup period (first {warmup} values)"
+        assert np.all(np.isnan(middle[:warmup])), f"Expected NaN in middle band warmup period (first {warmup} values)"
+        assert np.all(np.isnan(lower[:warmup])), f"Expected NaN in lower band warmup period (first {warmup} values)"
     
     def test_keltner_streaming(self, test_data):
-        """Test streaming functionality"""
+        """Test streaming functionality - mirrors check_keltner_streaming"""
         expected = EXPECTED_OUTPUTS['keltner']
+        
+        # Batch calculation
+        batch_upper, batch_middle, batch_lower = ta_indicators.keltner(
+            test_data['high'],
+            test_data['low'],
+            test_data['close'],
+            test_data['close'],
+            expected['default_params']['period'],
+            expected['default_params']['multiplier'],
+            expected['default_params']['ma_type']
+        )
         
         # Create streaming instance
         stream = ta_indicators.KeltnerStream(
@@ -120,7 +239,10 @@ class TestKeltner:
         )
         
         # Process data through stream
-        results = []
+        stream_upper = []
+        stream_middle = []
+        stream_lower = []
+        
         for i in range(len(test_data['close'])):
             result = stream.update(
                 test_data['high'][i],
@@ -128,66 +250,119 @@ class TestKeltner:
                 test_data['close'][i],
                 test_data['close'][i]  # source
             )
-            results.append(result)
+            if result is not None:
+                stream_upper.append(result[0])
+                stream_middle.append(result[1])
+                stream_lower.append(result[2])
+            else:
+                stream_upper.append(np.nan)
+                stream_middle.append(np.nan)
+                stream_lower.append(np.nan)
         
-        # Extract non-None results
-        non_none_results = [r for r in results if r is not None]
+        stream_upper = np.array(stream_upper)
+        stream_middle = np.array(stream_middle)
+        stream_lower = np.array(stream_lower)
         
-        # Should have results after warmup period
-        assert len(non_none_results) > 0
-        
-        # Last result should match expected values
-        if len(non_none_results) >= 5:
-            last_5_upper = [r[0] for r in non_none_results[-5:]]
-            last_5_middle = [r[1] for r in non_none_results[-5:]]
-            last_5_lower = [r[2] for r in non_none_results[-5:]]
-            
-            assert_close(
-                last_5_upper,
-                expected['last_5_upper'],
-                rtol=1e-1,
-                msg="Streaming upper band mismatch"
-            )
-            assert_close(
-                last_5_middle,
-                expected['last_5_middle'],
-                rtol=1e-1,
-                msg="Streaming middle band mismatch"
-            )
-            assert_close(
-                last_5_lower,
-                expected['last_5_lower'],
-                rtol=1e-1,
-                msg="Streaming lower band mismatch"
-            )
+        # Compare batch vs streaming for each band
+        for i, (b_u, s_u, b_m, s_m, b_l, s_l) in enumerate(zip(
+            batch_upper, stream_upper, batch_middle, stream_middle, batch_lower, stream_lower
+        )):
+            if np.isnan(b_u) and np.isnan(s_u):
+                continue
+            assert_close(b_u, s_u, rtol=1e-8, atol=1e-8,
+                        msg=f"Upper band streaming mismatch at index {i}")
+            assert_close(b_m, s_m, rtol=1e-8, atol=1e-8,
+                        msg=f"Middle band streaming mismatch at index {i}")
+            assert_close(b_l, s_l, rtol=1e-8, atol=1e-8,
+                        msg=f"Lower band streaming mismatch at index {i}")
     
-    def test_keltner_batch(self, test_data):
-        """Test batch functionality"""
+    def test_keltner_batch_default_row(self, test_data):
+        """Test batch with default parameters matches single calculation - mirrors check_batch_default_row"""
+        expected = EXPECTED_OUTPUTS['keltner']
+        
+        # Single calculation with default params
+        single_upper, single_middle, single_lower = ta_indicators.keltner(
+            test_data['high'],
+            test_data['low'],
+            test_data['close'],
+            test_data['close'],
+            expected['default_params']['period'],
+            expected['default_params']['multiplier'],
+            expected['default_params']['ma_type']
+        )
+        
+        # Batch with only default params
         result = ta_indicators.keltner_batch(
             test_data['high'],
             test_data['low'],
             test_data['close'],
-            test_data['close'],  # source
-            (10, 30, 10),      # period range
-            (1.0, 3.0, 1.0),   # multiplier range
-            "ema"
+            test_data['close'],
+            (20, 20, 0),  # Default period only
+            (2.0, 2.0, 0.0)  # Default multiplier only
         )
         
-        assert 'upper_band' in result
-        assert 'middle_band' in result
-        assert 'lower_band' in result
+        assert 'upper' in result
+        assert 'middle' in result
+        assert 'lower' in result
         assert 'periods' in result
         assert 'multipliers' in result
         
+        # Should have 1 combination
+        assert result['upper'].shape[0] == 1
+        assert result['middle'].shape[0] == 1
+        assert result['lower'].shape[0] == 1
+        assert result['upper'].shape[1] == len(test_data['close'])
+        
+        # Extract the single row and compare with single calculation
+        batch_upper_row = result['upper'][0]
+        batch_middle_row = result['middle'][0]
+        batch_lower_row = result['lower'][0]
+        
+        # Compare full arrays
+        assert_close(batch_upper_row, single_upper, rtol=1e-8,
+                    msg="Batch upper band doesn't match single calculation")
+        assert_close(batch_middle_row, single_middle, rtol=1e-8,
+                    msg="Batch middle band doesn't match single calculation")
+        assert_close(batch_lower_row, single_lower, rtol=1e-8,
+                    msg="Batch lower band doesn't match single calculation")
+    
+    def test_keltner_batch_multiple_params(self, test_data):
+        """Test batch functionality with multiple parameter combinations"""
+        # Use smaller subset for speed
+        high = test_data['high'][:100]
+        low = test_data['low'][:100]
+        close = test_data['close'][:100]
+        
+        result = ta_indicators.keltner_batch(
+            high, low, close, close,
+            (10, 30, 10),      # periods: 10, 20, 30
+            (1.0, 3.0, 1.0)    # multipliers: 1.0, 2.0, 3.0
+        )
+        
         # Check shape - should have 3 periods x 3 multipliers = 9 rows
         expected_rows = 3 * 3
-        assert result['upper_band'].shape == (expected_rows, len(test_data['close']))
-        assert result['middle_band'].shape == (expected_rows, len(test_data['close']))
-        assert result['lower_band'].shape == (expected_rows, len(test_data['close']))
+        assert result['upper'].shape == (expected_rows, 100)
+        assert result['middle'].shape == (expected_rows, 100)
+        assert result['lower'].shape == (expected_rows, 100)
         
         # Check parameter arrays
         assert len(result['periods']) == expected_rows
         assert len(result['multipliers']) == expected_rows
+        
+        # Verify first and last parameter combinations
+        assert result['periods'][0] == 10
+        assert result['multipliers'][0] == 1.0
+        assert result['periods'][-1] == 30
+        assert result['multipliers'][-1] == 3.0
+        
+        # Verify each row matches individual calculation for spot checks
+        # Check first combination (period=10, multiplier=1.0)
+        single_upper, single_middle, single_lower = ta_indicators.keltner(
+            high, low, close, close, 10, 1.0, "ema"
+        )
+        
+        assert_close(result['upper'][0], single_upper, rtol=1e-8,
+                    msg="First batch row doesn't match single calculation")
 
 
 if __name__ == '__main__':

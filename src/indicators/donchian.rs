@@ -28,6 +28,7 @@ use aligned_vec::{AVec, CACHELINE_ALIGN};
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
+use std::collections::VecDeque;
 use thiserror::Error;
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
@@ -152,6 +153,10 @@ pub enum DonchianError {
 	AllValuesNaN,
 	#[error("donchian: High/Low data slices have different lengths.")]
 	MismatchedLength,
+	#[error("donchian: Output slice length doesn't match input length.")]
+	MismatchedOutputLength,
+	#[error("donchian: Invalid kernel - batch kernel required.")]
+	InvalidKernel,
 }
 
 #[inline]
@@ -179,7 +184,7 @@ pub fn donchian_with_kernel(input: &DonchianInput, kernel: Kernel) -> Result<Don
 	let first_valid_high = high.iter().position(|&x| !x.is_nan());
 	let first_valid_low = low.iter().position(|&x| !x.is_nan());
 	let first_valid_idx = match (first_valid_high, first_valid_low) {
-		(Some(h), Some(l)) => h.min(l),
+		(Some(h), Some(l)) => h.max(l),
 		_ => return Err(DonchianError::AllValuesNaN),
 	};
 
@@ -197,7 +202,12 @@ pub fn donchian_with_kernel(input: &DonchianInput, kernel: Kernel) -> Result<Don
 	}
 
 	let chosen = match kernel {
-		Kernel::Auto => detect_best_kernel(),
+		Kernel::Auto => {
+			#[cfg(target_arch = "wasm32")]
+			{ detect_best_kernel() }
+			#[cfg(not(target_arch = "wasm32"))]
+			{ detect_best_kernel() }
+		}
 		k => k,
 	};
 
@@ -261,9 +271,14 @@ pub fn donchian_scalar(
 	for i in (first_valid + period - 1)..high.len() {
 		let start = i + 1 - period;
 		let (mut maxv, mut minv) = (f64::NEG_INFINITY, f64::INFINITY);
+		let mut has_nan = false;
 		for k in 0..period {
 			let h = high[start + k];
 			let l = low[start + k];
+			if h.is_nan() || l.is_nan() {
+				has_nan = true;
+				break;
+			}
 			if h > maxv {
 				maxv = h;
 			}
@@ -271,9 +286,15 @@ pub fn donchian_scalar(
 				minv = l;
 			}
 		}
-		upper[i] = maxv;
-		lower[i] = minv;
-		middle[i] = 0.5 * (maxv + minv);
+		if has_nan {
+			upper[i] = f64::NAN;
+			lower[i] = f64::NAN;
+			middle[i] = f64::NAN;
+		} else {
+			upper[i] = maxv;
+			lower[i] = minv;
+			middle[i] = 0.5 * (maxv + minv);
+		}
 	}
 }
 
@@ -329,16 +350,13 @@ pub fn donchian_into_slice(
 		return Err(DonchianError::MismatchedLength);
 	}
 	if upper_dst.len() != high.len() || middle_dst.len() != high.len() || lower_dst.len() != high.len() {
-		return Err(DonchianError::InvalidPeriod {
-			period: upper_dst.len(),
-			data_len: high.len(),
-		});
+		return Err(DonchianError::MismatchedOutputLength);
 	}
 
 	let first_valid_high = high.iter().position(|&x| !x.is_nan());
 	let first_valid_low = low.iter().position(|&x| !x.is_nan());
 	let first_valid_idx = match (first_valid_high, first_valid_low) {
-		(Some(h), Some(l)) => h.min(l),
+		(Some(h), Some(l)) => h.max(l),
 		_ => return Err(DonchianError::AllValuesNaN),
 	};
 
@@ -355,7 +373,7 @@ pub fn donchian_into_slice(
 
 	let chosen = match kern {
 		#[cfg(target_arch = "wasm32")]
-		Kernel::Auto => detect_wasm_kernel(),
+		Kernel::Auto => detect_best_kernel(),
 		#[cfg(not(target_arch = "wasm32"))]
 		Kernel::Auto => detect_best_kernel(),
 		k => k,
@@ -418,7 +436,7 @@ pub fn donchian_batch_with_kernel(
 	let kernel = match k {
 		Kernel::Auto => detect_best_batch_kernel(),
 		other if other.is_batch() => other,
-		_ => return Err(DonchianError::InvalidPeriod { period: 0, data_len: 0 }),
+		_ => return Err(DonchianError::InvalidKernel),
 	};
 	let simd = match kernel {
 		Kernel::Avx512Batch => Kernel::Avx512,
@@ -562,7 +580,7 @@ fn donchian_batch_inner(
 		.iter()
 		.position(|x| !x.is_nan())
 		.zip(low.iter().position(|x| !x.is_nan()))
-		.map(|(a, b)| a.min(b));
+		.map(|(a, b)| a.max(b));
 	let first = match first {
 		Some(idx) => idx,
 		None => return Err(DonchianError::AllValuesNaN),
@@ -692,9 +710,14 @@ unsafe fn donchian_row_scalar(
 	for i in (first + period - 1)..high.len() {
 		let start = i + 1 - period;
 		let (mut maxv, mut minv) = (f64::NEG_INFINITY, f64::INFINITY);
+		let mut has_nan = false;
 		for k in 0..period {
 			let h = high[start + k];
 			let l = low[start + k];
+			if h.is_nan() || l.is_nan() {
+				has_nan = true;
+				break;
+			}
 			if h > maxv {
 				maxv = h;
 			}
@@ -702,9 +725,15 @@ unsafe fn donchian_row_scalar(
 				minv = l;
 			}
 		}
-		upper[i] = maxv;
-		lower[i] = minv;
-		middle[i] = 0.5 * (maxv + minv);
+		if has_nan {
+			upper[i] = f64::NAN;
+			lower[i] = f64::NAN;
+			middle[i] = f64::NAN;
+		} else {
+			upper[i] = maxv;
+			lower[i] = minv;
+			middle[i] = 0.5 * (maxv + minv);
+		}
 	}
 }
 
@@ -775,6 +804,10 @@ pub struct DonchianStream {
 	low_buf: Vec<f64>,
 	head: usize,
 	filled: bool,
+	// Monotonic deques for O(1) max/min tracking
+	max_deque: VecDeque<(f64, usize)>,  // (value, logical_time)
+	min_deque: VecDeque<(f64, usize)>,
+	current_time: usize,
 }
 
 impl DonchianStream {
@@ -789,35 +822,80 @@ impl DonchianStream {
 			low_buf: vec![f64::NAN; period],
 			head: 0,
 			filled: false,
+			max_deque: VecDeque::with_capacity(period),
+			min_deque: VecDeque::with_capacity(period),
+			current_time: 0,
 		})
 	}
 
 	#[inline(always)]
 	pub fn update(&mut self, high: f64, low: f64) -> Option<(f64, f64, f64)> {
+		// Check for NaN inputs
+		if high.is_nan() || low.is_nan() {
+			self.high_buf[self.head] = high;
+			self.low_buf[self.head] = low;
+			self.head = (self.head + 1) % self.period;
+			self.current_time += 1;
+			
+			if !self.filled && self.head == 0 {
+				self.filled = true;
+			}
+			
+			// Clear deques if we have NaN
+			self.max_deque.clear();
+			self.min_deque.clear();
+			
+			if self.filled {
+				return Some((f64::NAN, f64::NAN, f64::NAN));
+			}
+			return None;
+		}
+		
+		// Store values
 		self.high_buf[self.head] = high;
 		self.low_buf[self.head] = low;
 		self.head = (self.head + 1) % self.period;
+		
+		// Remove elements outside the window
+		let window_start = self.current_time.saturating_sub(self.period - 1);
+		while !self.max_deque.is_empty() && self.max_deque.front().unwrap().1 < window_start {
+			self.max_deque.pop_front();
+		}
+		while !self.min_deque.is_empty() && self.min_deque.front().unwrap().1 < window_start {
+			self.min_deque.pop_front();
+		}
+		
+		// Maintain monotonic property for max deque
+		while !self.max_deque.is_empty() && self.max_deque.back().unwrap().0 <= high {
+			self.max_deque.pop_back();
+		}
+		self.max_deque.push_back((high, self.current_time));
+		
+		// Maintain monotonic property for min deque
+		while !self.min_deque.is_empty() && self.min_deque.back().unwrap().0 >= low {
+			self.min_deque.pop_back();
+		}
+		self.min_deque.push_back((low, self.current_time));
+		
+		self.current_time += 1;
+		
 		if !self.filled && self.head == 0 {
 			self.filled = true;
 		}
+		
 		if !self.filled {
 			return None;
 		}
-		let mut maxv = f64::NEG_INFINITY;
-		let mut minv = f64::INFINITY;
-		let mut idx = self.head;
-		for _ in 0..self.period {
-			let h = self.high_buf[idx];
-			let l = self.low_buf[idx];
-			if h > maxv {
-				maxv = h;
-			}
-			if l < minv {
-				minv = l;
-			}
-			idx = (idx + 1) % self.period;
+		
+		// Get max and min from deque fronts - O(1)
+		let maxv = self.max_deque.front().map(|(v, _)| *v).unwrap_or(f64::NAN);
+		let minv = self.min_deque.front().map(|(v, _)| *v).unwrap_or(f64::NAN);
+		
+		if maxv.is_nan() || minv.is_nan() {
+			Some((f64::NAN, f64::NAN, f64::NAN))
+		} else {
+			Some((maxv, 0.5 * (maxv + minv), minv))
 		}
-		Some((maxv, 0.5 * (maxv + minv), minv))
 	}
 }
 
@@ -1550,7 +1628,7 @@ fn donchian_batch_inner_into(
 		.iter()
 		.position(|x| !x.is_nan())
 		.zip(low.iter().position(|x| !x.is_nan()))
-		.map(|(a, b)| a.min(b));
+		.map(|(a, b)| a.max(b));
 	let first = match first {
 		Some(idx) => idx,
 		None => return Err(DonchianError::AllValuesNaN),

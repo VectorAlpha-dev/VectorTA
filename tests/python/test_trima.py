@@ -36,31 +36,25 @@ class TestTrima:
     def test_trima_accuracy(self, test_data):
         """Test TRIMA matches expected values from Rust tests - mirrors check_trima_accuracy"""
         close = test_data['close']
+        expected = EXPECTED_OUTPUTS['trima']
         
-        # Default params
-        result = ta_indicators.trima(close, period=30)
+        result = ta_indicators.trima(
+            close, 
+            period=expected['default_params']['period']
+        )
         
         assert len(result) == len(close)
         
-        # Check last 5 values match expected (from Rust tests)
-        expected_last_five = [
-            59957.916666666664,
-            59846.770833333336,
-            59750.620833333334,
-            59665.2125,
-            59581.612499999996,
-        ]
-        
+        # Check last 5 values match expected
         assert_close(
             result[-5:], 
-            expected_last_five,
+            expected['last_5_values'],
             rtol=1e-6,
             msg="TRIMA last 5 values mismatch"
         )
         
         # Compare full output with Rust
-        # TODO: Add TRIMA to generate_references.rs
-        # compare_with_rust('trima', result, 'close', {'period': 30})
+        compare_with_rust('trima', result, 'close', expected['default_params'])
     
     def test_trima_default_candles(self, test_data):
         """Test TRIMA with default parameters - mirrors check_trima_default_candles"""
@@ -124,6 +118,7 @@ class TestTrima:
     def test_trima_reinput(self, test_data):
         """Test TRIMA on its own output - mirrors check_trima_reinput"""
         close = test_data['close']
+        expected = EXPECTED_OUTPUTS['trima']
         
         # First pass with period=30
         first_result = ta_indicators.trima(close, period=30)
@@ -133,13 +128,13 @@ class TestTrima:
         second_result = ta_indicators.trima(first_result, period=10)
         assert len(second_result) == len(first_result)
         
-        # After warmup period, no NaN values should exist
-        # Warmup is first + m1 + m2 - 1
-        # For period=10: m1=5, m2=6, so warmup is approximately 10
-        warmup = 240  # Conservative warmup like other tests
-        if len(second_result) > warmup:
-            valid_values = second_result[warmup:]
-            assert not np.any(np.isnan(valid_values)), "Found unexpected NaN after warmup"
+        # Check last 5 values match expected
+        assert_close(
+            second_result[-5:],
+            expected['reinput_last_5'],
+            rtol=1e-6,
+            msg="TRIMA re-input last 5 values mismatch"
+        )
     
     def test_trima_nan_handling(self, test_data):
         """Test TRIMA NaN handling - mirrors check_trima_nan_handling"""
@@ -188,20 +183,33 @@ class TestTrima:
             assert abs(b - s) < 1e-9, f"TRIMA streaming mismatch at index {i}: batch={b}, stream={s}"
     
     def test_trima_batch(self, test_data):
-        """Test TRIMA batch computation for multiple periods"""
+        """Test TRIMA batch computation for multiple periods - mirrors check_batch_default_row"""
         close = test_data['close']
+        expected = EXPECTED_OUTPUTS['trima']
         
-        # Test single period
-        result = ta_indicators.trima_batch(close, period_range=(30, 30, 0))
+        # Test single period (default params)
+        result = ta_indicators.trima_batch(
+            close, 
+            period_range=(expected['default_params']['period'], expected['default_params']['period'], 0)
+        )
         
         assert 'values' in result
         assert 'periods' in result
         assert result['values'].shape == (1, len(close))
         assert len(result['periods']) == 1
-        assert result['periods'][0] == 30
+        assert result['periods'][0] == expected['default_params']['period']
+        
+        # Check last 5 values match expected
+        default_row = result['values'][0]
+        assert_close(
+            default_row[-5:],
+            expected['last_5_values'],
+            rtol=1e-6,
+            msg="TRIMA batch default row mismatch"
+        )
         
         # Check values match single computation
-        single_result = ta_indicators.trima(close, period=30)
+        single_result = ta_indicators.trima(close, period=expected['default_params']['period'])
         assert_close(
             result['values'][0], 
             single_result,
@@ -231,6 +239,66 @@ class TestTrima:
                 rtol=1e-8,
                 msg=f"TRIMA batch period {period} mismatch"
             )
+    
+    def test_trima_batch_edge_cases(self, test_data):
+        """Test TRIMA batch with edge cases - similar to ALMA tests"""
+        close = test_data['close'][:100]  # Use smaller dataset for speed
+        
+        # Single value sweep
+        single_batch = ta_indicators.trima_batch(
+            close,
+            period_range=(20, 20, 1)
+        )
+        assert single_batch['values'].shape == (1, len(close))
+        assert len(single_batch['periods']) == 1
+        
+        # Step larger than range
+        large_step = ta_indicators.trima_batch(
+            close,
+            period_range=(10, 15, 20)  # Step larger than range
+        )
+        # Should only have period=10
+        assert large_step['values'].shape == (1, len(close))
+        assert len(large_step['periods']) == 1
+        assert large_step['periods'][0] == 10
+        
+        # Empty data should throw
+        with pytest.raises(ValueError, match="All values are NaN|No data"):
+            ta_indicators.trima_batch(np.array([]), period_range=(10, 10, 0))
+    
+    def test_trima_batch_full_sweep(self, test_data):
+        """Test full parameter sweep matching expected structure"""
+        close = test_data['close'][:50]  # Use smaller dataset for speed
+        
+        result = ta_indicators.trima_batch(
+            close,
+            period_range=(10, 20, 5)  # 3 periods: 10, 15, 20
+        )
+        
+        # Should have 3 combinations
+        assert result['values'].shape == (3, 50)
+        assert len(result['periods']) == 3
+        assert list(result['periods']) == [10, 15, 20]
+        
+        # Verify structure - each row should have proper warmup
+        for i, period in enumerate(result['periods']):
+            row_data = result['values'][i]
+            # First period-1 values should be NaN
+            for j in range(int(period) - 1):
+                assert np.isnan(row_data[j]), f"Expected NaN at warmup index {j} for period {period}"
+            # After warmup should have values
+            for j in range(int(period) - 1, 50):
+                assert not np.isnan(row_data[j]), f"Unexpected NaN at index {j} for period {period}"
+    
+    def test_trima_with_inf_values(self):
+        """Test TRIMA handles infinite values properly"""
+        data = np.array([1.0, 2.0, np.inf, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0])
+        
+        # Should handle inf like NaN - continue after it
+        result = ta_indicators.trima(data, period=5)
+        assert len(result) == len(data)
+        # Warmup period should still apply
+        assert np.all(np.isnan(result[:4]))  # First period-1 values
     
     def test_trima_kernel_selection(self, test_data):
         """Test TRIMA with different kernel selections"""

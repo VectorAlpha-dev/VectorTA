@@ -169,6 +169,8 @@ pub enum SmaError {
 	NotEnoughValidData { needed: usize, valid: usize },
 	#[error("sma: All values are NaN.")]
 	AllValuesNaN,
+	#[error("sma: Output buffer size mismatch: expected = {expected}, got = {got}")]
+	OutputLenMismatch { expected: usize, got: usize },
 }
 
 #[inline]
@@ -177,47 +179,9 @@ pub fn sma(input: &SmaInput) -> Result<SmaOutput, SmaError> {
 }
 
 pub fn sma_with_kernel(input: &SmaInput, kernel: Kernel) -> Result<SmaOutput, SmaError> {
-	let data: &[f64] = input.as_ref();
-	if data.is_empty() {
-		return Err(SmaError::EmptyData);
-	}
-	let period = input.get_period();
-	let len = data.len();
-	if period == 0 || period > len {
-		return Err(SmaError::InvalidPeriod { period, data_len: len });
-	}
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(SmaError::AllValuesNaN)?;
-	if len - first < period {
-		return Err(SmaError::NotEnoughValidData {
-			needed: period,
-			valid: len - first,
-		});
-	}
-
-	let warm = first + period - 1;
-	let mut out = alloc_with_nan_prefix(len, warm);
-	let chosen = match kernel {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
-
-	unsafe {
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => {
-				sma_scalar(data, period, first, &mut out);
-			}
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => {
-				sma_avx2(data, period, first, &mut out);
-			}
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => {
-				sma_avx512(data, period, first, &mut out);
-			}
-			_ => unreachable!(),
-		}
-	}
-
+	let (data, period, first, chosen) = sma_prepare(input, kernel)?;
+	let mut out = alloc_with_nan_prefix(data.len(), first + period - 1);
+	sma_compute_into(data, period, first, chosen, &mut out);
 	Ok(SmaOutput { values: out })
 }
 
@@ -225,14 +189,13 @@ pub fn sma_with_kernel(input: &SmaInput, kernel: Kernel) -> Result<SmaOutput, Sm
 /// The output slice must be the same length as the input data.
 #[inline]
 pub fn sma_into_slice(dst: &mut [f64], input: &SmaInput, kern: Kernel) -> Result<(), SmaError> {
-	let data: &[f64] = input.as_ref();
-	let (period, first, chosen) = sma_prepare(input, kern)?;
+	let (data, period, first, chosen) = sma_prepare(input, kern)?;
 
 	// Verify output buffer size matches input
 	if dst.len() != data.len() {
-		return Err(SmaError::InvalidPeriod {
-			period: dst.len(),
-			data_len: data.len(),
+		return Err(SmaError::OutputLenMismatch {
+			expected: data.len(),
+			got: dst.len(),
 		});
 	}
 
@@ -248,32 +211,27 @@ pub fn sma_into_slice(dst: &mut [f64], input: &SmaInput, kern: Kernel) -> Result
 	Ok(())
 }
 
-/// Prepare SMA computation by validating inputs and returning intermediate values for zero-copy operations
-#[inline]
-fn sma_prepare<'a>(input: &'a SmaInput, kernel: Kernel) -> Result<(usize, usize, Kernel), SmaError> {
+#[inline(always)]
+fn sma_prepare<'a>(
+	input: &'a SmaInput,
+	kernel: Kernel,
+) -> Result<(&'a [f64], usize, usize, Kernel), SmaError> {
 	let data: &[f64] = input.as_ref();
-	if data.is_empty() {
-		return Err(SmaError::EmptyData);
-	}
+	if data.is_empty() { return Err(SmaError::EmptyData); }
+
 	let period = input.get_period();
 	let len = data.len();
 	if period == 0 || period > len {
 		return Err(SmaError::InvalidPeriod { period, data_len: len });
 	}
+
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(SmaError::AllValuesNaN)?;
 	if len - first < period {
-		return Err(SmaError::NotEnoughValidData {
-			needed: period,
-			valid: len - first,
-		});
+		return Err(SmaError::NotEnoughValidData { needed: period, valid: len - first });
 	}
 
-	let chosen = match kernel {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
-
-	Ok((period, first, chosen))
+	let chosen = match kernel { Kernel::Auto => detect_best_kernel(), k => k };
+	Ok((data, period, first, chosen))
 }
 
 /// Compute SMA into a pre-allocated output buffer for zero-copy operations
@@ -518,101 +476,107 @@ fn sma_batch_inner(
 	parallel: bool,
 ) -> Result<SmaBatchOutput, SmaError> {
 	let combos = expand_grid(sweep);
-	if combos.is_empty() {
-		return Err(SmaError::InvalidPeriod { period: 0, data_len: 0 });
-	}
+	if combos.is_empty() { return Err(SmaError::InvalidPeriod { period: 0, data_len: 0 }); }
+	if data.is_empty() { return Err(SmaError::EmptyData); }
+
+	let cols = data.len();
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(SmaError::AllValuesNaN)?;
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-	if data.len() - first < max_p {
-		return Err(SmaError::NotEnoughValidData {
-			needed: max_p,
-			valid: data.len() - first,
-		});
+	if cols - first < max_p {
+		return Err(SmaError::NotEnoughValidData { needed: max_p, valid: cols - first });
 	}
+
 	let rows = combos.len();
-	let cols = data.len();
 
-	let mut raw = make_uninit_matrix(rows, cols);
-	sma_batch_inner_into(data, sweep, kern, parallel, &mut raw)?;
+	// 1) allocate rows×cols uninit
+	let mut buf_mu = make_uninit_matrix(rows, cols);
 
-	// ---- finished: transmute into a Vec<f64> -----------------------------------
-	let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
-	Ok(SmaBatchOutput {
-		values,
-		combos,
-		rows,
-		cols,
-	})
+	// 2) warmup NaN prefixes per row
+	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
+	init_matrix_prefixes(&mut buf_mu, cols, &warm);
+
+	// 3) view as &mut [f64] without copy
+	let mut guard = core::mem::ManuallyDrop::new(buf_mu);
+	let out_slice: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len())
+	};
+
+	// 4) compute in-place
+	sma_batch_inner_into(data, sweep, kern, parallel, out_slice)?;
+
+	// 5) reconstruct Vec<f64> with zero copy
+	let values = unsafe {
+		Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, guard.len(), guard.capacity())
+	};
+
+	Ok(SmaBatchOutput { values, combos, rows, cols })
 }
 
-/// Zero-copy batch computation that writes directly into pre-allocated buffer
 #[inline(always)]
 fn sma_batch_inner_into(
 	data: &[f64],
 	sweep: &SmaBatchRange,
 	kern: Kernel,
 	parallel: bool,
-	raw: &mut [MaybeUninit<f64>],
+	out: &mut [f64],
 ) -> Result<Vec<SmaParams>, SmaError> {
 	let combos = expand_grid(sweep);
-	if combos.is_empty() {
-		return Err(SmaError::InvalidPeriod { period: 0, data_len: 0 });
-	}
-	if data.is_empty() {
-		return Err(SmaError::EmptyData);
-	}
+	if combos.is_empty() { return Err(SmaError::InvalidPeriod { period: 0, data_len: 0 }); }
+	if data.is_empty() { return Err(SmaError::EmptyData); }
+
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(SmaError::AllValuesNaN)?;
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
 	if data.len() - first < max_p {
-		return Err(SmaError::NotEnoughValidData {
-			needed: max_p,
-			valid: data.len() - first,
-		});
+		return Err(SmaError::NotEnoughValidData { needed: max_p, valid: data.len() - first });
 	}
+
+	let rows = combos.len();
 	let cols = data.len();
-	let warm: Vec<usize> = combos
-		.iter()
-		.map(|c| first + c.period.unwrap() - 1) // first valid SMA index for that row
+
+	// Map Auto and Batch to a concrete non-batch kernel (ALMA parity)
+	let actual_kern = match kern {
+		Kernel::Auto => detect_best_batch_kernel(),
+		k => k,
+	};
+	let actual_kern = match actual_kern {
+		Kernel::Avx512Batch => Kernel::Avx512,
+		Kernel::Avx2Batch   => Kernel::Avx2,
+		Kernel::ScalarBatch => Kernel::Scalar,
+		other               => other,
+	};
+
+	// Work over MaybeUninit rows to avoid re-writing warmup
+	let out_uninit: &mut [MaybeUninit<f64>] = unsafe {
+		core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
+	};
+
+	// Initialize warmup cells with NaN
+	let warm: Vec<usize> = combos.iter()
+		.map(|c| first + c.period.unwrap_or(9) - 1)
 		.collect();
+	init_matrix_prefixes(out_uninit, cols, &warm);
 
-	unsafe { init_matrix_prefixes(raw, cols, &warm) };
-
-	// ---- closure that writes one row ------------------------------------------
 	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
 		let period = combos[row].period.unwrap();
-
 		// cast this row to &mut [f64]
-		let out_row = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
-
-		match kern {
-			Kernel::Scalar | Kernel::ScalarBatch => sma_row_scalar(data, first, period, out_row),
+		let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
+		match actual_kern {
+			Kernel::Scalar | Kernel::ScalarBatch => sma_row_scalar(data, first, period, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => sma_row_avx2(data, first, period, out_row),
+			Kernel::Avx2 | Kernel::Avx2Batch => sma_row_avx2(data, first, period, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => sma_row_avx512(data, first, period, out_row),
+			Kernel::Avx512 | Kernel::Avx512Batch => sma_row_avx512(data, first, period, dst),
 			_ => unreachable!(),
 		}
 	};
 
-	// ---- run every row, filling `raw` in-place ---------------------------------
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
-		{
-			raw.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
-		}
-
+		out_uninit.par_chunks_mut(cols).enumerate().for_each(|(row, slice)| do_row(row, slice));
 		#[cfg(target_arch = "wasm32")]
-		{
-			for (row, slice) in raw.chunks_mut(cols).enumerate() {
-				do_row(row, slice);
-			}
-		}
+		for (row, slice) in out_uninit.chunks_mut(cols).enumerate() { do_row(row, slice); }
 	} else {
-		for (row, slice) in raw.chunks_mut(cols).enumerate() {
-			do_row(row, slice);
-		}
+		for (row, slice) in out_uninit.chunks_mut(cols).enumerate() { do_row(row, slice); }
 	}
 
 	Ok(combos)
@@ -757,28 +721,16 @@ pub fn sma_batch_py<'py>(
 
 	// Perform batch computation with zero-copy directly into NumPy array
 	let combos = py
-		.allow_threads(|| -> Result<Vec<SmaParams>, SmaError> {
-			// Resolve Kernel::Auto to a specific kernel
-			let kernel = match kern {
-				Kernel::Auto => detect_best_batch_kernel(),
-				k => k,
-			};
+		.allow_threads(|| {
+			let kernel = match kern { Kernel::Auto => detect_best_batch_kernel(), k => k };
 			let simd = match kernel {
 				Kernel::Avx512Batch => Kernel::Avx512,
-				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::Avx2Batch   => Kernel::Avx2,
 				Kernel::ScalarBatch => Kernel::Scalar,
 				_ => unreachable!(),
 			};
-
-			// Convert to MaybeUninit slice for batch computation
-			let out_uninit = unsafe {
-				std::slice::from_raw_parts_mut(slice_out.as_mut_ptr() as *mut MaybeUninit<f64>, slice_out.len())
-			};
-
-			sma_batch_inner_into(
-				data_slice, &range, simd, true, // parallel
-				out_uninit,
-			)
+			// pass &mut [f64]; inner converts to MaybeUninit
+			sma_batch_inner_into(data_slice, &range, simd, true, slice_out)
 		})
 		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
@@ -880,6 +832,7 @@ pub struct SmaBatchConfig {
 pub struct SmaBatchJsOutput {
 	pub values: Vec<f64>,
 	pub combos: Vec<SmaParams>,
+	pub periods: Vec<usize>,  // Added for API parity with ALMA
 	pub rows: usize,
 	pub cols: usize,
 }
@@ -898,6 +851,7 @@ pub fn sma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, Js
 
 	let js_output = SmaBatchJsOutput {
 		values: output.values,
+		periods: output.combos.iter().map(|c| c.period.unwrap_or(9)).collect(),
 		combos: output.combos,
 		rows: output.rows,
 		cols: output.cols,
@@ -1038,18 +992,16 @@ pub fn sma_batch_into(
 
 		let out = std::slice::from_raw_parts_mut(out_ptr, total_size);
 
-		// Convert output slice to MaybeUninit for the existing function
-		let out_uninit = std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len());
+		// Map to non-batch kernel (ALMA parity) and no parallel on WASM
+		let kernel = match detect_best_batch_kernel() {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch   => Kernel::Avx2,
+			Kernel::ScalarBatch => Kernel::Scalar,
+			other               => other,
+		};
 
-		// Use the existing batch inner computation function
-		sma_batch_inner_into(
-			data,
-			&sweep,
-			Kernel::Auto,
-			false, // No parallel on WASM
-			out_uninit,
-		)
-		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		sma_batch_inner_into(data, &sweep, kernel, false, out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 		Ok(rows)
 	}

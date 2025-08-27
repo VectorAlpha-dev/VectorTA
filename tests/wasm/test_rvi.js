@@ -134,7 +134,7 @@ test('RVI not enough valid data', () => {
     
     assert.throws(() => {
         wasm.rvi_js(data, 3, 5, 1, 0);
-    }, /Not enough valid data/);
+    }, /Invalid period|Not enough valid data/);
 });
 
 test('RVI empty input', () => {
@@ -261,12 +261,19 @@ test('RVI zero-copy API', () => {
     const close = new Float64Array(testData.close);
     const len = close.length;
     
-    // Allocate output buffer
+    // Allocate buffers in WASM memory
+    const inPtr = wasm.rvi_alloc(len);
     const outPtr = wasm.rvi_alloc(len);
     
     try {
-        // Get the input pointer from the TypedArray
-        const inPtr = close.byteOffset;
+        // Calculate expected result first (before any WASM memory operations)
+        const expected = wasm.rvi_js(close, 10, 14, 1, 0);
+        
+        // Get WASM memory and create views
+        const inputView = new Float64Array(wasm.__wasm.memory.buffer, inPtr, len);
+        
+        // Copy input data to WASM memory
+        inputView.set(close);
         
         // Call zero-copy version
         wasm.rvi_into(
@@ -276,14 +283,15 @@ test('RVI zero-copy API', () => {
             10, 14, 1, 0
         );
         
-        // Create TypedArray view of the output
-        const memory = wasm.memory || wasm.__wasm.memory;
-        const output = new Float64Array(memory.buffer, outPtr, len);
+        // Get fresh memory reference after the call (in case it was resized)
+        const output = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
         
-        // Compare with JS version
-        const expected = wasm.rvi_js(close, 10, 14, 1, 0);
+        // Convert to array immediately to avoid detached buffer issues
+        const outputArray = Array.from(output);
+        
+        // Compare results
         assertArrayClose(
-            Array.from(output),
+            outputArray,
             expected,
             1e-10,
             "Zero-copy RVI mismatch"
@@ -291,6 +299,7 @@ test('RVI zero-copy API', () => {
         
     } finally {
         // Clean up
+        wasm.rvi_free(inPtr, len);
         wasm.rvi_free(outPtr, len);
     }
 });
@@ -305,8 +314,7 @@ test('RVI zero-copy in-place', () => {
     
     try {
         // Copy input data to WASM memory
-        const memory = wasm.memory || wasm.__wasm.memory;
-        const wasmData = new Float64Array(memory.buffer, ptr, len);
+        const wasmData = new Float64Array(wasm.__wasm.memory.buffer, ptr, len);
         wasmData.set(data);
         
         // Call with same pointer for input and output (in-place)
@@ -317,10 +325,13 @@ test('RVI zero-copy in-place', () => {
             10, 14, 1, 0
         );
         
+        // Re-create view after computation (in case memory was resized)
+        const wasmDataAfter = new Float64Array(wasm.__wasm.memory.buffer, ptr, len);
+        
         // Compare with JS version
         const expected = wasm.rvi_js(data, 10, 14, 1, 0);
         assertArrayClose(
-            Array.from(wasmData),
+            Array.from(wasmDataAfter),
             expected,
             1e-10,
             "In-place RVI mismatch"

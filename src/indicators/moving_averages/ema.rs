@@ -16,7 +16,6 @@
 //! - **`Ok(EmaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
 //! - **`Err(EmaError)`** otherwise.
 
-use crate::utilities::aligned_vector::AlignedVec;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -174,59 +173,31 @@ pub fn ema(input: &EmaInput) -> Result<EmaOutput, EmaError> {
 fn ema_prepare<'a>(
 	input: &'a EmaInput,
 	kernel: Kernel,
-) -> Result<
-	(
-		// data
-		&'a [f64],
-		// period
-		usize,
-		// first
-		usize,
-		// alpha
-		f64,
-		// beta
-		f64,
-		// chosen
-		Kernel,
-	),
-	EmaError,
-> {
-	let data: &[f64] = match &input.data {
-		EmaData::Candles { candles, source } => source_type(candles, source),
-		EmaData::Slice(sl) => sl,
-	};
+) -> Result<(&'a [f64], usize, usize, f64, f64, Kernel), EmaError> {
+	let data: &[f64] = input.as_ref();
 
 	let len = data.len();
-	if len == 0 {
-		return Err(EmaError::EmptyInputData);
-	}
+	if len == 0 { return Err(EmaError::EmptyInputData); }
 
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(EmaError::AllValuesNaN)?;
 	let period = input.get_period();
-
 	if period == 0 || period > len {
 		return Err(EmaError::InvalidPeriod { period, data_len: len });
 	}
-	if (len - first) < period {
-		return Err(EmaError::NotEnoughValidData {
-			needed: period,
-			valid: len - first,
-		});
+	if len - first < period {
+		return Err(EmaError::NotEnoughValidData { needed: period, valid: len - first });
 	}
 
 	let alpha = 2.0 / (period as f64 + 1.0);
 	let beta = 1.0 - alpha;
-
-	let chosen = match kernel {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
-
+	let chosen = if matches!(kernel, Kernel::Auto) { detect_best_kernel() } else { kernel };
 	Ok((data, period, first, alpha, beta, chosen))
 }
 
 #[inline(always)]
-fn ema_compute_into(data: &[f64], period: usize, first: usize, alpha: f64, beta: f64, kernel: Kernel, out: &mut [f64]) {
+fn ema_compute_into(
+	data: &[f64], period: usize, first: usize, alpha: f64, beta: f64, kernel: Kernel, out: &mut [f64],
+) {
 	unsafe {
 		match kernel {
 			Kernel::Scalar | Kernel::ScalarBatch => ema_scalar_into(data, period, first, alpha, beta, out),
@@ -234,6 +205,11 @@ fn ema_compute_into(data: &[f64], period: usize, first: usize, alpha: f64, beta:
 			Kernel::Avx2 | Kernel::Avx2Batch => ema_avx2_into(data, period, first, alpha, beta, out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 | Kernel::Avx512Batch => ema_avx512_into(data, period, first, alpha, beta, out),
+
+			// Fallback to scalar when AVX* is requested but not built/available
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch =>
+				ema_scalar_into(data, period, first, alpha, beta, out),
 			_ => unreachable!(),
 		}
 	}
@@ -288,21 +264,42 @@ pub unsafe fn ema_scalar(
 }
 
 #[inline(always)]
-unsafe fn ema_scalar_into(data: &[f64], _period: usize, first_val: usize, alpha: f64, beta: f64, out: &mut [f64]) {
+unsafe fn ema_scalar_into(data: &[f64], period: usize, first_val: usize, alpha: f64, beta: f64, out: &mut [f64]) {
 	let len = data.len();
 	debug_assert_eq!(out.len(), len);
 
-	let mut prev = *data.get_unchecked(first_val);
-	*out.get_unchecked_mut(first_val) = prev;
+	// Use running mean for the first period samples, like the stream does
+	let mut mean = *data.get_unchecked(first_val);
+	*out.get_unchecked_mut(first_val) = mean;
+	let mut valid_count = 1usize;
+	
+	// Running mean phase (indices first_val+1 to first_val+period-1)
+	let warmup_end = (first_val + period).min(len);
+	for i in (first_val + 1)..warmup_end {
+		let x = *data.get_unchecked(i);
+		if x.is_finite() {
+			valid_count += 1;
+			mean = ((valid_count as f64 - 1.0) * mean + x) / valid_count as f64;
+			*out.get_unchecked_mut(i) = mean;
+		} else {
+			// Skip NaN values like stream does - carry forward previous value
+			*out.get_unchecked_mut(i) = mean;
+		}
+	}
 
-	let mut src = data.as_ptr().add(first_val + 1);
-	let mut dst = out.as_mut_ptr().add(first_val + 1);
-	for _ in (first_val + 1)..len {
-		let x = *src;
-		prev = beta.mul_add(prev, alpha * x);
-		*dst = prev;
-		src = src.add(1);
-		dst = dst.add(1);
+	// EMA phase (from first_val+period onwards)
+	if warmup_end < len {
+		let mut prev = mean;
+		for i in warmup_end..len {
+			let x = *data.get_unchecked(i);
+			if x.is_finite() {
+				prev = beta.mul_add(prev, alpha * x);
+				*out.get_unchecked_mut(i) = prev;
+			} else {
+				// Skip NaN values - carry forward previous value
+				*out.get_unchecked_mut(i) = prev;
+			}
+		}
 	}
 }
 
@@ -347,40 +344,30 @@ pub struct EmaStream {
 	beta: f64,
 	count: usize,
 	mean: f64,
+	filled: bool,
 }
 
 impl EmaStream {
 	pub fn try_new(params: EmaParams) -> Result<Self, EmaError> {
 		let period = params.period.unwrap_or(9);
-		if period == 0 {
-			return Err(EmaError::InvalidPeriod { period, data_len: 0 });
-		}
+		if period == 0 { return Err(EmaError::InvalidPeriod { period, data_len: 0 }); }
 		let alpha = 2.0 / (period as f64 + 1.0);
-		Ok(Self {
-			period,
-			alpha,
-			beta: 1.0 - alpha,
-			count: 0,
-			mean: f64::NAN,
-		})
+		Ok(Self { period, alpha, beta: 1.0 - alpha, count: 0, mean: f64::NAN, filled: false })
 	}
 
 	#[inline(always)]
 	pub fn update(&mut self, x: f64) -> Option<f64> {
-		if !x.is_finite() {
-			return None;
+		if !x.is_finite() { 
+			// Return current state for NaN input, but don't update
+			return if self.filled { Some(self.mean) } else { None };
 		}
-
 		self.count += 1;
-		if self.count == 1 {
-			self.mean = x;
-		} else if self.count > self.period {
-			self.mean = self.beta.mul_add(self.mean, self.alpha * x);
-		} else {
-			self.mean = ((self.count as f64 - 1.0) * self.mean + x) / self.count as f64;
-		}
+		if self.count == 1 { self.mean = x; }
+		else if self.count > self.period { self.mean = self.beta.mul_add(self.mean, self.alpha * x); }
+		else { self.mean = ((self.count as f64 - 1.0) * self.mean + x) / self.count as f64; }
 
-		Some(self.mean)
+		if !self.filled && self.count >= self.period { self.filled = true; }
+		if self.filled { Some(self.mean) } else { None }
 	}
 }
 
@@ -516,41 +503,28 @@ fn ema_batch_inner(
 	let rows = combos.len();
 	let cols = data.len();
 
-	// Step 1: Allocate uninitialized matrix
+	if cols == 0 { return Err(EmaError::EmptyInputData); }
+
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(EmaError::AllValuesNaN)?;
+
 	let mut buf_mu = make_uninit_matrix(rows, cols);
 
-	// Step 2: Calculate warmup periods for each row
-	let warm: Vec<usize> = combos
-		.iter()
-		.map(|_| data.iter().position(|x| !x.is_nan()).unwrap_or(0))
-		.collect();
-
-	// Step 3: Initialize NaN prefixes for each row
+	// warm prefix per row = first (EMA defines from first onward)
+	let warm: Vec<usize> = std::iter::repeat(first).take(rows).collect();
 	init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-	// Step 4: Convert to mutable slice for computation
-	let mut buf_guard = std::mem::ManuallyDrop::new(buf_mu);
-	let out: &mut [f64] =
-		unsafe { core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len()) };
-
-	// Step 5: Compute into the buffer
-	let returned_combos = ema_batch_inner_into(data, sweep, kern, parallel, out)?;
-
-	// Step 6: Reclaim as Vec<f64>
-	let values = unsafe {
-		Vec::from_raw_parts(
-			buf_guard.as_mut_ptr() as *mut f64,
-			buf_guard.len(),
-			buf_guard.capacity(),
-		)
+	let mut guard = core::mem::ManuallyDrop::new(buf_mu);
+	let out: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len())
 	};
 
-	Ok(EmaBatchOutput {
-		values,
-		combos: returned_combos,
-		rows,
-		cols,
-	})
+	let returned_combos = ema_batch_inner_into(data, sweep, kern, parallel, out)?;
+
+	let values = unsafe {
+		Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, guard.len(), guard.capacity())
+	};
+
+	Ok(EmaBatchOutput { values, combos: returned_combos, rows, cols })
 }
 
 #[inline(always)]
@@ -629,9 +603,40 @@ fn ema_batch_inner_into(
 #[inline(always)]
 unsafe fn ema_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
 	let alpha = 2.0 / (period as f64 + 1.0);
-	out[first] = data[first];
-	for i in (first + 1)..data.len() {
-		out[i] = alpha * data[i] + (1.0 - alpha) * out[i - 1];
+	let beta = 1.0 - alpha;
+	
+	// Use running mean for the first period samples, like the stream does
+	let mut mean = data[first];
+	out[first] = mean;
+	let mut valid_count = 1usize;
+	
+	// Running mean phase (indices first+1 to first+period-1)
+	let warmup_end = (first + period).min(data.len());
+	for i in (first + 1)..warmup_end {
+		let x = data[i];
+		if x.is_finite() {
+			valid_count += 1;
+			mean = ((valid_count as f64 - 1.0) * mean + x) / valid_count as f64;
+			out[i] = mean;
+		} else {
+			// Skip NaN values like stream does - carry forward previous value
+			out[i] = mean;
+		}
+	}
+	
+	// EMA phase (from first+period onwards)
+	if warmup_end < data.len() {
+		let mut prev = mean;
+		for i in warmup_end..data.len() {
+			let x = data[i];
+			if x.is_finite() {
+				prev = beta * prev + alpha * x;
+				out[i] = prev;
+			} else {
+				// Skip NaN values - carry forward previous value
+				out[i] = prev;
+			}
+		}
 	}
 }
 
@@ -815,12 +820,21 @@ mod tests {
 		let mut stream = EmaStream::try_new(EmaParams { period: Some(period) })?;
 		let mut stream_values = Vec::with_capacity(candles.close.len());
 
-		for &price in &candles.close {
-			stream_values.push(stream.update(price).unwrap_or(f64::NAN));
+		// Stream now returns None until warmup is filled, so we need to track this differently
+		for (i, &price) in candles.close.iter().enumerate() {
+			let stream_val = stream.update(price);
+			// Before warmup period, stream returns None, batch has actual values
+			if i < period - 1 {
+				assert!(stream_val.is_none(), "[{}] Stream should return None during warmup at idx {}", test_name, i);
+				stream_values.push(f64::NAN);
+			} else {
+				stream_values.push(stream_val.unwrap_or(f64::NAN));
+			}
 		}
 
 		assert_eq!(batch_output.len(), stream_values.len());
 
+		// Compare after warmup period when both have valid values
 		for (i, (&b, &s)) in batch_output.iter().zip(&stream_values).enumerate().skip(warm_up) {
 			if b.is_nan() && s.is_nan() {
 				continue;
@@ -1009,8 +1023,10 @@ mod tests {
 						);
 					}
 					
-					// Test 6: EMA recursive property (for i > first_valid)
-					if i > first_valid && y.is_finite() && out[i-1].is_finite() && data[i].is_finite() {
+					// Test 6: EMA recursive property (only after warmup period)
+					// During warmup (first_valid to first_valid+period-1), we use running mean
+					// After warmup (first_valid+period onwards), we use EMA formula
+					if i >= first_valid + period && y.is_finite() && out[i-1].is_finite() && data[i].is_finite() {
 						let expected_ema = alpha * data[i] + beta * out[i-1];
 						let diff = (y - expected_ema).abs();
 						
@@ -1240,6 +1256,78 @@ mod tests {
 	}
 	gen_batch_tests!(check_batch_default_row);
 	gen_batch_tests!(check_batch_no_poison);
+
+	// Test that batch and stream produce identical results
+	#[test]
+	fn test_batch_stream_consistency() -> Result<(), Box<dyn std::error::Error>> {
+		// Test data with NaN values mid-series
+		let test_data = vec![
+			1.0, 2.0, 3.0, 4.0, 5.0, 
+			f64::NAN,  // Test NaN handling
+			6.0, 7.0, 8.0, 9.0, 10.0,
+			f64::NAN,
+			11.0, 12.0, 13.0, 14.0, 15.0,
+		];
+		
+		let period = 5;
+		
+		// Get batch output
+		let params = EmaParams { period: Some(period) };
+		let input = EmaInput::from_slice(&test_data, params.clone());
+		let batch_output = ema(&input)?;
+		
+		// Get stream output
+		let mut stream = EmaStream::try_new(params)?;
+		let mut stream_output = Vec::new();
+		for &val in &test_data {
+			let result = stream.update(val);
+			// Stream returns None during warmup, batch has values
+			// But after warmup they should match
+			stream_output.push(result.unwrap_or(f64::NAN));
+		}
+		
+		// Check consistency after warmup period
+		for i in period..test_data.len() {
+			let batch_val = batch_output.values[i];
+			let stream_val = stream_output[i];
+			
+			// Both should handle NaN the same way
+			if batch_val.is_finite() && stream_val.is_finite() {
+				let diff = (batch_val - stream_val).abs();
+				assert!(
+					diff < 1e-10,
+					"Batch/Stream mismatch at index {}: batch={}, stream={}, diff={}",
+					i, batch_val, stream_val, diff
+				);
+			} else {
+				assert_eq!(
+					batch_val.is_nan(), 
+					stream_val.is_nan(),
+					"Batch/Stream NaN mismatch at index {}: batch={}, stream={}",
+					i, batch_val, stream_val
+				);
+			}
+		}
+		
+		// Also test early warmup consistency - both should use running mean
+		for i in 0..period.min(test_data.len()) {
+			if test_data[i].is_finite() {
+				// During warmup, stream returns NaN but internally tracks running mean
+				// Batch should also be computing running mean during this phase
+				// We can't directly compare since stream returns None, but we can check
+				// that batch values are reasonable (not just the first value repeated)
+				if i > 0 && batch_output.values[i].is_finite() {
+					// Should not just be the first value
+					assert!(
+						(batch_output.values[i] - test_data[0]).abs() > 1e-10 || i == 0,
+						"Batch should use running mean during warmup, not just first value"
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
 }
 
 // ====== PYTHON BINDINGS ======
@@ -1293,6 +1381,15 @@ pub fn ema_batch_py<'py>(
 
 	let kern = validate_kernel(kernel, true)?;
 
+	// Initialize NaN prefixes before computation
+	let first = slice_in.iter().position(|x| !x.is_nan()).unwrap_or(0);
+	for r in 0..rows {
+		let row_start = r * cols;
+		for i in 0..first {
+			slice_out[row_start + i] = f64::NAN;
+		}
+	}
+	
 	let combos = py
 		.allow_threads(|| {
 			let kernel = match kern {
@@ -1509,6 +1606,13 @@ pub fn ema_batch_into(
 		let cols = len;
 
 		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+
+		// Initialize NaN prefixes before computation
+		let first = data.iter().position(|x| !x.is_nan()).ok_or(JsValue::from_str("All NaN"))?;
+		for r in 0..rows {
+			let s = r * cols;
+			out[s..s + first].fill(f64::NAN);
+		}
 
 		// Use optimized batch processing
 		ema_batch_inner_into(data, &sweep, Kernel::Auto, false, out).map_err(|e| JsValue::from_str(&e.to_string()))?;

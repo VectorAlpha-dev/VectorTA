@@ -112,7 +112,7 @@ test('EMD error handling', () => {
     // Test with empty data
     assert.throws(() => {
         wasm.emd_js([], [], [], [], 20, 0.5, 0.1);
-    }, /All values are NaN/, 'Should throw on empty data');
+    }, /Invalid input length/, 'Should throw on empty data');
     
     // Test with mismatched lengths
     assert.throws(() => {
@@ -123,7 +123,7 @@ test('EMD error handling', () => {
             [1, 2, 3],
             20, 0.5, 0.1
         );
-    }, /must have the same length/, 'Should throw on mismatched array lengths');
+    }, /high and low must have same length/, 'Should throw on mismatched array lengths');
     
     // Test with invalid period
     assert.throws(() => {

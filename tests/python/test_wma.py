@@ -16,6 +16,7 @@ except ImportError:
     pytest.skip("Python module not built. Run 'maturin develop --features python' first", allow_module_level=True)
 
 from test_utils import load_test_data, assert_close, EXPECTED_OUTPUTS
+from rust_comparison import compare_with_rust
 
 
 class TestWma:
@@ -50,6 +51,24 @@ class TestWma:
             rtol=1e-6,  # Using 1e-6 as per Rust test
             msg="WMA last 5 values mismatch"
         )
+        
+        # Compare full output with Rust
+        compare_with_rust('wma', result, 'close', expected['default_params'])
+    
+    def test_wma_default_candles(self, test_data):
+        """Test WMA with default parameters - mirrors check_wma_default_candles"""
+        close = test_data['close']
+        
+        # Default params: period=30
+        result = ta_indicators.wma(close, 30)
+        assert len(result) == len(close)
+    
+    def test_wma_empty_input(self):
+        """Test WMA fails with empty input - mirrors check_wma_empty_input"""
+        empty = np.array([])
+        
+        with pytest.raises(ValueError, match="Input data slice is empty"):
+            ta_indicators.wma(empty, period=30)
     
     def test_wma_zero_period(self):
         """Test WMA fails with zero period - mirrors check_wma_zero_period"""
@@ -100,11 +119,11 @@ class TestWma:
         if len(result) > 50:
             assert not np.any(np.isnan(result[50:])), "Found unexpected NaN after warmup period"
         
-        # First period-1 values should be NaN (warmup is period-1 for WMA)
-        # For period=14, indices 0-12 should be NaN
-        assert np.all(np.isnan(result[:13])), "Expected NaN in warmup period"
-        # First valid value should be at index period-1 = 13
-        assert not np.isnan(result[13]), "Expected valid value at index 13"
+        # The warmup period for WMA is first + period - 1
+        # Since the test data has no leading NaNs (first = 0), warmup = 0 + 14 - 1 = 13
+        # So indices 0-12 should be NaN, index 13 should be the first valid value
+        assert np.all(np.isnan(result[:13])), "Expected NaN in warmup period (indices 0-12)"
+        assert not np.isnan(result[13]), "Expected first valid value at index 13"
     
     def test_wma_streaming(self, test_data):
         """Test WMA streaming matches batch calculation - mirrors check_wma_streaming"""
@@ -145,8 +164,12 @@ class TestWma:
         
         assert 'values' in result
         assert 'periods' in result
+        assert 'rows' in result  # Check for rows metadata
+        assert 'cols' in result  # Check for cols metadata
         
         # Should have 1 combination (default params)
+        assert result['rows'] == 1
+        assert result['cols'] == len(close)
         assert result['values'].shape[0] == 1
         assert result['values'].shape[1] == len(close)
         

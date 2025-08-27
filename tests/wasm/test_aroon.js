@@ -190,22 +190,10 @@ test('Aroon all NaN input', () => {
     const allNaN = new Float64Array(100);
     allNaN.fill(NaN);
     
-    // Aroon should handle all NaN inputs by returning NaN for warmup period, then 0.0
-    const result = wasm.aroon_js(allNaN, allNaN, 14);
-    const upArray = Array.from(result.up);
-    const downArray = Array.from(result.down);
-    
-    // First 14 values should be NaN (warmup period)
-    for (let i = 0; i < 14; i++) {
-        assert(isNaN(upArray[i]), `Expected NaN at index ${i} in up, got ${upArray[i]}`);
-        assert(isNaN(downArray[i]), `Expected NaN at index ${i} in down, got ${downArray[i]}`);
-    }
-    
-    // After warmup, should return 0.0 (no valid highs/lows found)
-    for (let i = 14; i < upArray.length; i++) {
-        assert.strictEqual(upArray[i], 0.0, `Expected 0.0 at index ${i} in up, got ${upArray[i]}`);
-        assert.strictEqual(downArray[i], 0.0, `Expected 0.0 at index ${i} in down, got ${downArray[i]}`);
-    }
+    // Aroon should return an error for all NaN inputs
+    assert.throws(() => {
+        wasm.aroon_js(allNaN, allNaN, 14);
+    }, /All values are NaN/, 'Expected AllValuesNaN error');
 });
 
 test('Aroon batch single parameter set', () => {

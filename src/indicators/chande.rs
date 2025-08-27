@@ -27,6 +27,7 @@ use aligned_vec::{AVec, CACHELINE_ALIGN};
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
+use std::collections::VecDeque;
 use std::convert::AsRef;
 use std::mem::ManuallyDrop;
 use thiserror::Error;
@@ -39,6 +40,8 @@ use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
@@ -48,6 +51,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone)]
 pub enum ChandeData<'a> {
 	Candles { candles: &'a Candles },
+	Slices { high: &'a [f64], low: &'a [f64], close: &'a [f64] },
 }
 
 #[derive(Debug, Clone)]
@@ -56,6 +60,7 @@ pub struct ChandeOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct ChandeParams {
 	pub period: Option<usize>,
 	pub mult: Option<f64>,
@@ -87,6 +92,13 @@ impl<'a> ChandeInput<'a> {
 		}
 	}
 	#[inline]
+	pub fn from_slices(high: &'a [f64], low: &'a [f64], close: &'a [f64], p: ChandeParams) -> Self {
+		Self {
+			data: ChandeData::Slices { high, low, close },
+			params: p,
+		}
+	}
+	#[inline]
 	pub fn with_default_candles(c: &'a Candles) -> Self {
 		Self::from_candles(c, ChandeParams::default())
 	}
@@ -101,6 +113,15 @@ impl<'a> ChandeInput<'a> {
 	#[inline]
 	pub fn get_direction(&self) -> &str {
 		self.params.direction.as_deref().unwrap_or("long")
+	}
+	#[inline]
+	pub fn borrow_slices(&self) -> (&[f64], &[f64], &[f64]) {
+		match &self.data {
+			ChandeData::Candles { candles } => {
+				(source_type(candles, "high"), source_type(candles, "low"), source_type(candles, "close"))
+			}
+			ChandeData::Slices { high, low, close } => (high, low, close),
+		}
 	}
 }
 
@@ -160,6 +181,17 @@ impl ChandeBuilder {
 	}
 
 	#[inline(always)]
+	pub fn apply_slices(self, high: &[f64], low: &[f64], close: &[f64]) -> Result<ChandeOutput, ChandeError> {
+		let p = ChandeParams {
+			period: self.period,
+			mult: self.mult,
+			direction: self.direction,
+		};
+		let i = ChandeInput::from_slices(high, low, close, p);
+		chande_with_kernel(&i, self.kernel)
+	}
+
+	#[inline(always)]
 	pub fn into_stream(self) -> Result<ChandeStream, ChandeError> {
 		let p = ChandeParams {
 			period: self.period,
@@ -172,14 +204,24 @@ impl ChandeBuilder {
 
 #[derive(Debug, Error)]
 pub enum ChandeError {
+	#[error("chande: Input series are empty.")]
+	EmptyInputData,
 	#[error("chande: All values are NaN.")]
 	AllValuesNaN,
 	#[error("chande: Invalid period: period = {period}, data_len = {data_len}")]
 	InvalidPeriod { period: usize, data_len: usize },
 	#[error("chande: Not enough valid data: needed = {needed}, valid = {valid}")]
 	NotEnoughValidData { needed: usize, valid: usize },
+	#[error("chande: High/Low/Close length mismatch: h={h}, l={l}, c={c}")]
+	DataLengthMismatch { h: usize, l: usize, c: usize },
 	#[error("chande: Invalid direction: {direction}")]
 	InvalidDirection { direction: String },
+}
+
+#[inline]
+fn first_valid3(h: &[f64], l: &[f64], c: &[f64]) -> Option<usize> {
+	let n = h.len().min(l.len()).min(c.len());
+	(0..n).find(|&i| !h[i].is_nan() && !l[i].is_nan() && !c[i].is_nan())
 }
 
 #[inline]
@@ -188,16 +230,20 @@ pub fn chande(input: &ChandeInput) -> Result<ChandeOutput, ChandeError> {
 }
 
 pub fn chande_with_kernel(input: &ChandeInput, kernel: Kernel) -> Result<ChandeOutput, ChandeError> {
-	let ChandeData::Candles { candles } = &input.data;
-	let high = source_type(candles, "high");
-	let low = source_type(candles, "low");
-	let close = source_type(candles, "close");
-	let len = high.len();
+	let (high, low, close) = input.borrow_slices();
+	if high.is_empty() || low.is_empty() || close.is_empty() {
+		return Err(ChandeError::EmptyInputData);
+	}
+	if !(high.len() == low.len() && low.len() == close.len()) {
+		return Err(ChandeError::DataLengthMismatch { 
+			h: high.len(), 
+			l: low.len(), 
+			c: close.len() 
+		});
+	}
 
-	let first = close
-		.iter()
-		.position(|&x| !x.is_nan())
-		.ok_or(ChandeError::AllValuesNaN)?;
+	let len = high.len();
+	let first = first_valid3(high, low, close).ok_or(ChandeError::AllValuesNaN)?;
 	let period = input.get_period();
 	let mult = input.get_mult();
 	let dir = input.get_direction().to_lowercase();
@@ -218,9 +264,16 @@ pub fn chande_with_kernel(input: &ChandeInput, kernel: Kernel) -> Result<ChandeO
 		Kernel::Auto => detect_best_kernel(),
 		other => other,
 	};
+	
+	// Safe fallback when AVX isn't available
+	let chosen = match (chosen, cfg!(all(feature = "nightly-avx", target_arch = "x86_64"))) {
+		(Kernel::Avx512 | Kernel::Avx512Batch, false) |
+		(Kernel::Avx2   | Kernel::Avx2Batch,   false) => Kernel::Scalar,
+		(k, _) => k,
+	};
 
-	let warmup_period = first + period - 1;
-	let mut out = alloc_with_nan_prefix(len, warmup_period);
+	let warmup = first + period - 1;
+	let mut out = alloc_with_nan_prefix(len, warmup);
 	unsafe {
 		match chosen {
 			Kernel::Scalar | Kernel::ScalarBatch => {
@@ -248,49 +301,60 @@ pub fn chande_compute_into(
 	kernel: Kernel,
 	out: &mut [f64],
 ) -> Result<(), ChandeError> {
-	// Validate inputs
+	if high.is_empty() || low.is_empty() || close.is_empty() { 
+		return Err(ChandeError::EmptyInputData); 
+	}
+	if !(high.len() == low.len() && low.len() == close.len()) {
+		return Err(ChandeError::DataLengthMismatch { 
+			h: high.len(), 
+			l: low.len(), 
+			c: close.len() 
+		});
+	}
+	if out.len() != high.len() {
+		// Match alma.rs convention for into-slice mismatch
+		return Err(ChandeError::InvalidPeriod { 
+			period: out.len(), 
+			data_len: high.len() 
+		});
+	}
 	let len = high.len();
-	if len != low.len() || len != close.len() {
-		return Err(ChandeError::AllValuesNaN);
-	}
-	
-	let first = close
-		.iter()
-		.position(|&x| !x.is_nan())
-		.ok_or(ChandeError::AllValuesNaN)?;
-	
-	let dir = direction.to_lowercase();
-	if dir != "long" && dir != "short" {
-		return Err(ChandeError::InvalidDirection { direction: dir });
-	}
-	
+	let first = first_valid3(high, low, close).ok_or(ChandeError::AllValuesNaN)?;
 	if period == 0 || period > len {
 		return Err(ChandeError::InvalidPeriod { period, data_len: len });
 	}
-	
 	if len - first < period {
 		return Err(ChandeError::NotEnoughValidData {
 			needed: period,
 			valid: len - first,
 		});
 	}
-	
-	let chosen = match kernel {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
+	let dir = direction.to_lowercase();
+	if dir != "long" && dir != "short" {
+		return Err(ChandeError::InvalidDirection { direction: dir });
+	}
+
+	let warmup = first + period - 1;
+	let warmup_end = warmup.min(out.len());
+	for v in &mut out[..warmup_end] { 
+		*v = f64::NAN; 
+	}
+
+	let chosen = match kernel { 
+		Kernel::Auto => detect_best_kernel(), 
+		k => k 
 	};
 	
-	// Fill warmup period with NaN
-	let warmup_period = first + period - 1;
-	for i in 0..warmup_period {
-		out[i] = f64::NAN;
-	}
+	// Safe fallback when AVX isn't available
+	let chosen = match (chosen, cfg!(all(feature = "nightly-avx", target_arch = "x86_64"))) {
+		(Kernel::Avx512 | Kernel::Avx512Batch, false) |
+		(Kernel::Avx2   | Kernel::Avx2Batch,   false) => Kernel::Scalar,
+		(k, _) => k,
+	};
 	
 	unsafe {
 		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => {
-				chande_scalar(high, low, close, period, mult, &dir, first, out)
-			}
+			Kernel::Scalar | Kernel::ScalarBatch => chande_scalar(high, low, close, period, mult, &dir, first, out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx2 | Kernel::Avx2Batch => chande_avx2(high, low, close, period, mult, &dir, first, out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -298,7 +362,6 @@ pub fn chande_compute_into(
 			_ => unreachable!(),
 		}
 	}
-	
 	Ok(())
 }
 
@@ -310,38 +373,11 @@ pub fn chande_into_slice(
 	input: &ChandeInput,
 	kern: Kernel,
 ) -> Result<(), ChandeError> {
-	let (high, low, close) = match &input.data {
-		ChandeData::Candles { candles } => (&candles.high, &candles.low, &candles.close),
-	};
-	
-	let params = &input.params;
-	let period = params.period.unwrap_or(22);
-	let mult = params.mult.unwrap_or(3.0);
-	let direction = params.direction.as_deref().unwrap_or("long");
-	
-	// Validate inputs
-	if high.is_empty() || low.is_empty() || close.is_empty() {
-		return Err(ChandeError::AllValuesNaN);
-	}
-	
-	if high.len() != low.len() || high.len() != close.len() {
-		return Err(ChandeError::NotEnoughValidData {
-			needed: high.len().max(low.len()).max(close.len()),
-			valid: high.len().min(low.len()).min(close.len()),
-		});
-	}
-	
-	if dst.len() != high.len() {
-		return Err(ChandeError::InvalidPeriod {
-			period,
-			data_len: high.len(),
-		});
-	}
-	
-	// Use the existing chande_compute_into function
-	chande_compute_into(high, low, close, period, mult, direction, kern, dst)?;
-	
-	Ok(())
+	let (high, low, close) = input.borrow_slices();
+	let p = input.get_period();
+	let m = input.get_mult();
+	let d = input.get_direction();
+	chande_compute_into(high, low, close, p, m, d, kern, dst)
 }
 
 #[inline]
@@ -475,6 +511,11 @@ pub struct ChandeStream {
 	buffer_filled: usize,
 	filled: bool,
 	buffer_idx: usize,  // Ring buffer index
+	// Monotonic deque for O(1) max/min tracking
+	// Stores (value, index) pairs
+	max_deque: VecDeque<(f64, usize)>,
+	min_deque: VecDeque<(f64, usize)>,
+	current_time: usize,  // Logical time for tracking window
 }
 
 impl ChandeStream {
@@ -502,6 +543,9 @@ impl ChandeStream {
 			buffer_filled: 0,
 			filled: false,
 			buffer_idx: 0,
+			max_deque: VecDeque::with_capacity(period),
+			min_deque: VecDeque::with_capacity(period),
+			current_time: 0,
 		})
 	}
 
@@ -526,6 +570,18 @@ impl ChandeStream {
 			self.high_buf[self.buffer_filled - 1] = high;
 			self.low_buf[self.buffer_filled - 1] = low;
 			
+			// Update deques during warmup
+			// Remove elements that can't be max/min
+			while !self.max_deque.is_empty() && self.max_deque.back().unwrap().0 <= high {
+				self.max_deque.pop_back();
+			}
+			self.max_deque.push_back((high, self.current_time));
+			
+			while !self.min_deque.is_empty() && self.min_deque.back().unwrap().0 >= low {
+				self.min_deque.pop_back();
+			}
+			self.min_deque.push_back((low, self.current_time));
+			
 			if self.buffer_filled == self.period {
 				self.atr /= self.period as f64;
 				self.filled = true;
@@ -536,26 +592,42 @@ impl ChandeStream {
 			self.atr += alpha * (tr - self.atr);
 			
 			// Store in ring buffer
+			let old_idx = self.buffer_idx;
 			self.high_buf[self.buffer_idx] = high;
 			self.low_buf[self.buffer_idx] = low;
 			self.buffer_idx = (self.buffer_idx + 1) % self.period;
+			
+			// Remove elements outside window from deques
+			let window_start = self.current_time.saturating_sub(self.period - 1);
+			while !self.max_deque.is_empty() && self.max_deque.front().unwrap().1 < window_start {
+				self.max_deque.pop_front();
+			}
+			while !self.min_deque.is_empty() && self.min_deque.front().unwrap().1 < window_start {
+				self.min_deque.pop_front();
+			}
+			
+			// Add new elements to deques (monotonic property)
+			while !self.max_deque.is_empty() && self.max_deque.back().unwrap().0 <= high {
+				self.max_deque.pop_back();
+			}
+			self.max_deque.push_back((high, self.current_time));
+			
+			while !self.min_deque.is_empty() && self.min_deque.back().unwrap().0 >= low {
+				self.min_deque.pop_back();
+			}
+			self.min_deque.push_back((low, self.current_time));
 		}
 		
 		self.close_prev = close;
+		self.current_time += 1;
 		
 		if self.filled {
-			// Find max/min over the buffer
+			// Get max/min from deque front in O(1)
 			if self.direction == "long" {
-				let m = self.high_buf[..self.buffer_filled.min(self.period)]
-					.iter()
-					.cloned()
-					.fold(f64::MIN, f64::max);
+				let m = self.max_deque.front().map(|(val, _)| *val).unwrap_or(high);
 				Some(m - self.atr * self.mult)
 			} else {
-				let m = self.low_buf[..self.buffer_filled.min(self.period)]
-					.iter()
-					.cloned()
-					.fold(f64::MAX, f64::min);
+				let m = self.min_deque.front().map(|(val, _)| *val).unwrap_or(low);
 				Some(m + self.atr * self.mult)
 			}
 		} else {
@@ -624,6 +696,10 @@ impl ChandeBatchBuilder {
 		let high = source_type(c, "high");
 		let low = source_type(c, "low");
 		let close = source_type(c, "close");
+		chande_batch_with_kernel(high, low, close, &self.range, &self.direction, self.kernel)
+	}
+
+	pub fn apply_slices(self, high: &[f64], low: &[f64], close: &[f64]) -> Result<ChandeBatchOutput, ChandeError> {
 		chande_batch_with_kernel(high, low, close, &self.range, &self.direction, self.kernel)
 	}
 }
@@ -746,10 +822,7 @@ fn chande_batch_inner(
 	if combos.is_empty() {
 		return Err(ChandeError::InvalidPeriod { period: 0, data_len: 0 });
 	}
-	let first = close
-		.iter()
-		.position(|&x| !x.is_nan())
-		.ok_or(ChandeError::AllValuesNaN)?;
+	let first = first_valid3(high, low, close).ok_or(ChandeError::AllValuesNaN)?;
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
 	if high.len() - first < max_p {
 		return Err(ChandeError::NotEnoughValidData {
@@ -840,10 +913,7 @@ fn chande_batch_inner_into(
 		return Err(ChandeError::InvalidPeriod { period: 0, data_len: 0 });
 	}
 	
-	let first = close
-		.iter()
-		.position(|&x| !x.is_nan())
-		.ok_or(ChandeError::AllValuesNaN)?;
+	let first = first_valid3(high, low, close).ok_or(ChandeError::AllValuesNaN)?;
 	
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
 	if high.len() - first < max_p {
@@ -1666,19 +1736,6 @@ mod tests {
 // ============================
 
 #[cfg(feature = "python")]
-#[inline]
-fn validate_kernel(kernel: Option<&str>, is_batch: bool) -> PyResult<Kernel> {
-	let kernel_str = kernel.unwrap_or("auto");
-	match kernel_str.to_lowercase().as_str() {
-		"auto" => Ok(Kernel::Auto),
-		"scalar" => Ok(if is_batch { Kernel::ScalarBatch } else { Kernel::Scalar }),
-		"avx2" => Ok(if is_batch { Kernel::Avx2Batch } else { Kernel::Avx2 }),
-		"avx512" => Ok(if is_batch { Kernel::Avx512Batch } else { Kernel::Avx512 }),
-		_ => Err(PyValueError::new_err(format!("Invalid kernel: {}", kernel_str))),
-	}
-}
-
-#[cfg(feature = "python")]
 #[pyfunction(name = "chande")]
 #[pyo3(signature = (high, low, close, period, mult, direction, kernel=None))]
 pub fn chande_py<'py>(
@@ -1691,43 +1748,21 @@ pub fn chande_py<'py>(
 	direction: &str,
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
-	let high_slice = high.as_slice()?;
-	let low_slice = low.as_slice()?;
-	let close_slice = close.as_slice()?;
-	
-	// Validate inputs have same length
-	if high_slice.len() != low_slice.len() || high_slice.len() != close_slice.len() {
-		return Err(PyValueError::new_err("Input arrays must have the same length"));
-	}
-	
+	let h = high.as_slice()?;
+	let l = low.as_slice()?;
+	let c = close.as_slice()?;
 	let kern = validate_kernel(kernel, false)?;
-	
-	// Build input and compute result
-	let candles = Candles {
-		high: high_slice.to_vec(),
-		low: low_slice.to_vec(),
-		close: close_slice.to_vec(),
-		timestamp: vec![],
-		open: vec![],
-		volume: vec![],
-		hl2: vec![],
-		hlc3: vec![],
-		ohlc4: vec![],
-		hlcc4: vec![],
-	};
-	
 	let params = ChandeParams {
 		period: Some(period),
 		mult: Some(mult),
 		direction: Some(direction.to_string()),
 	};
-	
-	let input = ChandeInput::from_candles(&candles, params);
-	
-	let result_vec: Vec<f64> = py
+	let input = ChandeInput::from_slices(h, l, c, params);
+
+	let result_vec = py
 		.allow_threads(|| chande_with_kernel(&input, kern).map(|o| o.values))
 		.map_err(|e| PyValueError::new_err(e.to_string()))?;
-	
+
 	Ok(result_vec.into_pyarray(py))
 }
 
@@ -1758,7 +1793,7 @@ impl ChandeStreamPy {
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "chande_batch")]
-#[pyo3(signature = (high, low, close, period_range, mult_range, direction="long", kernel=None))]
+#[pyo3(signature = (high, low, close, period_range, mult_range, direction, kernel=None))]
 pub fn chande_batch_py<'py>(
 	py: Python<'py>,
 	high: PyReadonlyArray1<'py, f64>,
@@ -1769,91 +1804,42 @@ pub fn chande_batch_py<'py>(
 	direction: &str,
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
-	let high_slice = high.as_slice()?;
-	let low_slice = low.as_slice()?;
-	let close_slice = close.as_slice()?;
-	
-	// Validate inputs have same length
-	if high_slice.len() != low_slice.len() || high_slice.len() != close_slice.len() {
-		return Err(PyValueError::new_err("Input arrays must have the same length"));
-	}
-	
-	let kern = validate_kernel(kernel, true)?;
-	
+	let h = high.as_slice()?;
+	let l = low.as_slice()?;
+	let c = close.as_slice()?;
+
 	let sweep = ChandeBatchRange {
 		period: period_range,
 		mult: mult_range,
 	};
-	
 	let combos = expand_grid(&sweep, direction);
 	let rows = combos.len();
-	let cols = high_slice.len();
-	
-	// Pre-allocate output array for batch operations
+	let cols = h.len();
+
 	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
 	let slice_out = unsafe { out_arr.as_slice_mut()? };
-	
-	// Find first valid index in close data
-	let first = close_slice
-		.iter()
-		.position(|&x| !x.is_nan())
-		.unwrap_or(0);
-	
-	// Calculate warmup periods for each row and initialize NaN prefixes
-	let warmup_periods: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
-	
-	// Initialize NaN prefixes for each row
-	for (row_idx, &warmup) in warmup_periods.iter().enumerate() {
-		let row_start = row_idx * cols;
-		for col_idx in 0..warmup.min(cols) {
-			slice_out[row_start + col_idx] = f64::NAN;
-		}
-	}
-	
-	let combos = py
-		.allow_threads(|| {
-			let kernel = match kern {
-				Kernel::Auto => detect_best_batch_kernel(),
-				k => k,
-			};
-			let simd = match kernel {
-				Kernel::Avx512Batch => Kernel::Avx512,
-				Kernel::Avx2Batch => Kernel::Avx2,
-				Kernel::ScalarBatch => Kernel::Scalar,
-				_ => unreachable!(),
-			};
-			
-			// Compute directly into pre-allocated buffer with NaN prefixes already initialized
-			chande_batch_inner_into(high_slice, low_slice, close_slice, &sweep, direction, simd, true, slice_out)
-		})
-		.map_err(|e| PyValueError::new_err(e.to_string()))?;
-	
+
+	let kern = validate_kernel(kernel, true)?;
+	py.allow_threads(|| {
+		let simd = match kern {
+			Kernel::Auto => detect_best_batch_kernel(),
+			k => k,
+		};
+		// map Batch to compute kernel like alma.rs
+		let simd = match simd {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch => Kernel::Avx2,
+			Kernel::ScalarBatch => Kernel::Scalar,
+			_ => simd,
+		};
+		chande_batch_inner_into(h, l, c, &sweep, direction, simd, true, slice_out)
+	}).map_err(|e| PyValueError::new_err(e.to_string()))?;
+
 	let dict = PyDict::new(py);
 	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
-	dict.set_item(
-		"periods",
-		combos
-			.iter()
-			.map(|p| p.period.unwrap() as u64)
-			.collect::<Vec<_>>()
-			.into_pyarray(py),
-	)?;
-	dict.set_item(
-		"mults",
-		combos
-			.iter()
-			.map(|p| p.mult.unwrap())
-			.collect::<Vec<_>>()
-			.into_pyarray(py),
-	)?;
-	dict.set_item(
-		"directions",
-		combos
-			.iter()
-			.map(|p| p.direction.as_ref().unwrap().as_str())
-			.collect::<Vec<_>>(),
-	)?;
-	
+	dict.set_item("periods", combos.iter().map(|p| p.period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+	dict.set_item("mults", combos.iter().map(|p| p.mult.unwrap()).collect::<Vec<_>>().into_pyarray(py))?;
+	dict.set_item("directions", combos.iter().map(|p| p.direction.as_deref().unwrap()).collect::<Vec<_>>())?;
 	Ok(dict)
 }
 
@@ -1861,234 +1847,164 @@ pub fn chande_batch_py<'py>(
 // WASM Bindings
 // ============================
 
-/// Serializable batch result for WASM
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn chande_js(high: &[f64], low: &[f64], close: &[f64], period: usize, mult: f64, direction: &str) -> Result<Vec<f64>, JsValue> {
+	let params = ChandeParams { period: Some(period), mult: Some(mult), direction: Some(direction.to_string()) };
+	let input = ChandeInput::from_slices(high, low, close, params);
+	let mut out = vec![0.0; high.len()];
+	chande_into_slice(&mut out, &input, detect_best_kernel()).map_err(|e| JsValue::from_str(&e.to_string()))?;
+	Ok(out)
+}
+
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
-pub struct ChandeBatchResult {
+pub struct ChandeBatchConfig {
+	pub period_range: (usize, usize, usize),
+	pub mult_range: (f64, f64, f64),
+	pub direction: String,
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct ChandeBatchJsOutput {
 	pub values: Vec<f64>,
-	pub periods: Vec<usize>,
-	pub mults: Vec<f64>,
-	pub directions: Vec<String>,
+	pub combos: Vec<ChandeParams>,
 	pub rows: usize,
 	pub cols: usize,
 }
 
-/// Safe API: Single calculation with automatic memory management
-#[cfg(feature = "wasm")]
-#[wasm_bindgen]
-pub fn chande_js(
-	high: &[f64],
-	low: &[f64],
-	close: &[f64],
-	period: usize,
-	mult: f64,
-	direction: &str,
-) -> Result<Vec<f64>, JsValue> {
-	let params = ChandeParams {
-		period: Some(period),
-		mult: Some(mult),
-		direction: Some(direction.to_string()),
-	};
-	
-	let candles = Candles {
-		high: high.to_vec(),
-		low: low.to_vec(),
-		close: close.to_vec(),
-		timestamp: vec![],
-		open: vec![],
-		volume: vec![],
-		hl2: vec![],
-		hlc3: vec![],
-		ohlc4: vec![],
-		hlcc4: vec![],
-	};
-	
-	let input = ChandeInput::from_candles(&candles, params);
-	let mut output = vec![0.0; high.len()];
-	
-	chande_into_slice(&mut output, &input, Kernel::Auto)
-		.map_err(|e| JsValue::from_str(&e.to_string()))?;
-	
-	Ok(output)
-}
-
-/// Safe API: Batch processing with JavaScript-friendly output
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn chande_batch_js(
-	high: &[f64],
-	low: &[f64],
-	close: &[f64],
-	period_start: usize,
-	period_end: usize,
-	period_step: usize,
-	mult_start: f64,
-	mult_end: f64,
-	mult_step: f64,
+	high: &[f64], low: &[f64], close: &[f64],
+	period_start: usize, period_end: usize, period_step: usize,
+	mult_start: f64, mult_end: f64, mult_step: f64,
 	direction: &str,
 ) -> Result<JsValue, JsValue> {
-	let period_range = (period_start, period_end, period_step);
-	let mult_range = (mult_start, mult_end, mult_step);
-	
-	let candles = Candles {
-		high: high.to_vec(),
-		low: low.to_vec(),
-		close: close.to_vec(),
-		timestamp: vec![],
-		open: vec![],
-		volume: vec![],
-		hl2: vec![],
-		hlc3: vec![],
-		ohlc4: vec![],
-		hlcc4: vec![],
-	};
+	use wasm_bindgen::prelude::*;
 	
 	let sweep = ChandeBatchRange {
-		period: period_range,
-		mult: mult_range,
+		period: (period_start, period_end, period_step),
+		mult: (mult_start, mult_end, mult_step),
 	};
 	
-	// Generate parameter combinations
-	let combos = expand_grid(&sweep, direction);
-	let rows = combos.len();
-	let cols = high.len();
-	
-	// Allocate output matrix with NaN values
-	let mut out_flat = vec![f64::NAN; rows * cols];
-	
-	// Compute batch
-	let _ = chande_batch_inner_into(high, low, close, &sweep, direction, Kernel::Auto, false, &mut out_flat)
+	let out = chande_batch_inner(high, low, close, &sweep, direction, detect_best_kernel(), false)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 	
-	let result = ChandeBatchResult {
-		values: out_flat,
-		periods: combos.iter().map(|p| p.period.unwrap()).collect(),
-		mults: combos.iter().map(|p| p.mult.unwrap()).collect(),
-		directions: combos.iter().map(|p| p.direction.as_ref().unwrap().clone()).collect(),
-		rows,
-		cols,
-	};
+	// Create JS object with values, periods, mults, directions arrays
+	let js_obj = js_sys::Object::new();
 	
-	serde_wasm_bindgen::to_value(&result)
-		.map_err(|e| JsValue::from_str(&e.to_string()))
-}
-
-/// Memory allocation for WASM
-#[cfg(feature = "wasm")]
-#[wasm_bindgen]
-pub fn chande_alloc(len: usize) -> *mut f64 {
-	let mut vec = Vec::<f64>::with_capacity(len);
-	let ptr = vec.as_mut_ptr();
-	std::mem::forget(vec);
-	ptr
-}
-
-/// Memory deallocation for WASM
-#[cfg(feature = "wasm")]
-#[wasm_bindgen]
-pub fn chande_free(ptr: *mut f64, len: usize) {
-	if !ptr.is_null() {
-		unsafe {
-			let _ = Vec::from_raw_parts(ptr, len, len);
-		}
+	// Convert values to JS array
+	let values_arr = js_sys::Float64Array::new_with_length(out.values.len() as u32);
+	values_arr.copy_from(&out.values);
+	js_sys::Reflect::set(&js_obj, &JsValue::from_str("values"), &values_arr.into())?;
+	
+	// Extract periods, mults, directions from combos
+	let periods: Vec<f64> = out.combos.iter().map(|c| c.period.unwrap() as f64).collect();
+	let mults: Vec<f64> = out.combos.iter().map(|c| c.mult.unwrap()).collect();
+	let directions: Vec<String> = out.combos.iter().map(|c| c.direction.as_ref().unwrap().clone()).collect();
+	
+	// Convert to JS arrays
+	let periods_arr = js_sys::Float64Array::new_with_length(periods.len() as u32);
+	periods_arr.copy_from(&periods);
+	js_sys::Reflect::set(&js_obj, &JsValue::from_str("periods"), &periods_arr.into())?;
+	
+	let mults_arr = js_sys::Float64Array::new_with_length(mults.len() as u32);
+	mults_arr.copy_from(&mults);
+	js_sys::Reflect::set(&js_obj, &JsValue::from_str("mults"), &mults_arr.into())?;
+	
+	// Convert directions to JS array
+	let dirs_arr = js_sys::Array::new();
+	for dir in &directions {
+		dirs_arr.push(&JsValue::from_str(dir));
 	}
+	js_sys::Reflect::set(&js_obj, &JsValue::from_str("directions"), &dirs_arr.into())?;
+	
+	// Add rows and cols
+	js_sys::Reflect::set(&js_obj, &JsValue::from_str("rows"), &JsValue::from_f64(out.rows as f64))?;
+	js_sys::Reflect::set(&js_obj, &JsValue::from_str("cols"), &JsValue::from_f64(out.cols as f64))?;
+	
+	Ok(js_obj.into())
 }
 
-/// Fast/Zero-copy API: Compute directly into pre-allocated buffer
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = chande_batch)]
+pub fn chande_batch_unified_js(high: &[f64], low: &[f64], close: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let cfg: ChandeBatchConfig = serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	let sweep = ChandeBatchRange { period: cfg.period_range, mult: cfg.mult_range };
+	let out = chande_batch_inner(high, low, close, &sweep, &cfg.direction, detect_best_kernel(), false)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	let js = ChandeBatchJsOutput { values: out.values, combos: out.combos, rows: out.rows, cols: out.cols };
+	serde_wasm_bindgen::to_value(&js).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen] pub fn chande_alloc(len: usize) -> *mut f64 {
+	let mut v: Vec<f64> = Vec::with_capacity(len);
+	let p = v.as_mut_ptr(); std::mem::forget(v); p
+}
+#[cfg(feature = "wasm")]
+#[wasm_bindgen] pub fn chande_free(ptr: *mut f64, len: usize) { unsafe { let _ = Vec::from_raw_parts(ptr, len, len); } }
+
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn chande_into(
-	high_ptr: *const f64,
-	low_ptr: *const f64,
-	close_ptr: *const f64,
-	out_ptr: *mut f64,
-	len: usize,
-	period: usize,
-	mult: f64,
-	direction: &str,
+	h_ptr: *const f64, l_ptr: *const f64, c_ptr: *const f64, out_ptr: *mut f64, len: usize,
+	period: usize, mult: f64, direction: &str,
 ) -> Result<(), JsValue> {
-	if high_ptr.is_null() || low_ptr.is_null() || close_ptr.is_null() || out_ptr.is_null() {
-		return Err(JsValue::from_str("Null pointer provided"));
+	if [h_ptr as usize, l_ptr as usize, c_ptr as usize, out_ptr as usize].iter().any(|&p| p == 0) {
+		return Err(JsValue::from_str("null pointer passed to chande_into"));
 	}
-	
 	unsafe {
-		let high = std::slice::from_raw_parts(high_ptr, len);
-		let low = std::slice::from_raw_parts(low_ptr, len);
-		let close = std::slice::from_raw_parts(close_ptr, len);
-		
-		// Check for aliasing with any of the input pointers
-		let needs_temp = high_ptr == out_ptr || low_ptr == out_ptr || close_ptr == out_ptr;
-		
-		if needs_temp {
-			// Use temporary buffer to avoid aliasing issues
-			let mut temp = vec![0.0; len];
-			chande_compute_into(high, low, close, period, mult, direction, Kernel::Auto, &mut temp)
-				.map_err(|e| JsValue::from_str(&e.to_string()))?;
-			let out = std::slice::from_raw_parts_mut(out_ptr, len);
-			out.copy_from_slice(&temp);
+		let h = std::slice::from_raw_parts(h_ptr, len);
+		let l = std::slice::from_raw_parts(l_ptr, len);
+		let c = std::slice::from_raw_parts(c_ptr, len);
+		let out = std::slice::from_raw_parts_mut(out_ptr, len);
+
+		// Handle aliasing safely
+		if out_ptr as *const f64 == h_ptr || out_ptr as *const f64 == l_ptr || out_ptr as *const f64 == c_ptr {
+			let mut tmp = vec![0.0; len];
+			let params = ChandeParams { period: Some(period), mult: Some(mult), direction: Some(direction.to_string()) };
+			let input = ChandeInput::from_slices(h, l, c, params);
+			chande_into_slice(&mut tmp, &input, detect_best_kernel()).map_err(|e| JsValue::from_str(&e.to_string()))?;
+			out.copy_from_slice(&tmp);
 		} else {
-			// Direct computation when no aliasing
-			let out = std::slice::from_raw_parts_mut(out_ptr, len);
-			chande_compute_into(high, low, close, period, mult, direction, Kernel::Auto, out)
-				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let params = ChandeParams { period: Some(period), mult: Some(mult), direction: Some(direction.to_string()) };
+			let input = ChandeInput::from_slices(h, l, c, params);
+			chande_into_slice(out, &input, detect_best_kernel()).map_err(|e| JsValue::from_str(&e.to_string()))?;
 		}
-		
 		Ok(())
 	}
 }
 
-/// Fast/Zero-copy API: Batch computation into pre-allocated buffer
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn chande_batch_into(
-	high_ptr: *const f64,
-	low_ptr: *const f64,
-	close_ptr: *const f64,
-	out_ptr: *mut f64,
-	len: usize,
-	period_start: usize,
-	period_end: usize,
-	period_step: usize,
-	mult_start: f64,
-	mult_end: f64,
-	mult_step: f64,
+	h_ptr: *const f64, l_ptr: *const f64, c_ptr: *const f64, out_ptr: *mut f64, len: usize,
+	p_start: usize, p_end: usize, p_step: usize,
+	m_start: f64, m_end: f64, m_step: f64,
 	direction: &str,
 ) -> Result<usize, JsValue> {
-	if high_ptr.is_null() || low_ptr.is_null() || close_ptr.is_null() || out_ptr.is_null() {
-		return Err(JsValue::from_str("Null pointer provided"));
+	if [h_ptr as usize, l_ptr as usize, c_ptr as usize, out_ptr as usize].iter().any(|&p| p == 0) {
+		return Err(JsValue::from_str("null pointer passed to chande_batch_into"));
 	}
-	
 	unsafe {
-		let high = std::slice::from_raw_parts(high_ptr, len);
-		let low = std::slice::from_raw_parts(low_ptr, len);
-		let close = std::slice::from_raw_parts(close_ptr, len);
-		
-		let sweep = ChandeBatchRange {
-			period: (period_start, period_end, period_step),
-			mult: (mult_start, mult_end, mult_step),
+		let h = std::slice::from_raw_parts(h_ptr, len);
+		let l = std::slice::from_raw_parts(l_ptr, len);
+		let c = std::slice::from_raw_parts(c_ptr, len);
+		let sweep = ChandeBatchRange { period: (p_start, p_end, p_step), mult: (m_start, m_end, m_step) };
+		let combos = expand_grid(&sweep, direction);
+		let rows = combos.len(); let cols = len;
+		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+		// Map Auto to concrete compute kernel
+		let simd = match detect_best_batch_kernel() {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch => Kernel::Avx2,
+			_ => Kernel::Scalar,
 		};
-		
-		let param_combinations = expand_grid(&sweep, direction);
-		let rows = param_combinations.len();
-		let cols = len;
-		
-		// Check for aliasing
-		let needs_temp = high_ptr == out_ptr || low_ptr == out_ptr || close_ptr == out_ptr;
-		
-		if needs_temp {
-			// Use temporary buffer initialized with NaN
-			let mut temp = vec![f64::NAN; rows * cols];
-			chande_batch_inner_into(high, low, close, &sweep, direction, Kernel::Auto, false, &mut temp)
-				.map_err(|e| JsValue::from_str(&e.to_string()))?;
-			let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
-			out.copy_from_slice(&temp);
-		} else {
-			// Direct computation
-			let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
-			chande_batch_inner_into(high, low, close, &sweep, direction, Kernel::Auto, false, out)
-				.map_err(|e| JsValue::from_str(&e.to_string()))?;
-		}
-		
+		chande_batch_inner_into(h, l, c, &sweep, direction, simd, false, out).map_err(|e| JsValue::from_str(&e.to_string()))?;
 		Ok(rows)
 	}
 }

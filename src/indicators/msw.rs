@@ -227,50 +227,30 @@ pub unsafe fn msw_scalar(data: &[f64], period: usize, first: usize, len: usize) 
 	let mut sine = alloc_with_nan_prefix(len, first + period - 1);
 	let mut lead = alloc_with_nan_prefix(len, first + period - 1);
 
-	let mut cos_table: AVec<f64, aligned_vec::ConstAlign<CACHELINE_ALIGN>> =
-		AVec::with_capacity(CACHELINE_ALIGN, period);
-	let mut sin_table: AVec<f64, aligned_vec::ConstAlign<CACHELINE_ALIGN>> =
-		AVec::with_capacity(CACHELINE_ALIGN, period);
-	cos_table.resize(period, 0.0);
-	sin_table.resize(period, 0.0);
-
+	let mut cos_table = Vec::with_capacity(period);
+	let mut sin_table = Vec::with_capacity(period);
 	for j in 0..period {
 		let angle = TULIP_TPI * j as f64 / period as f64;
-		cos_table[j] = angle.cos();
-		sin_table[j] = angle.sin();
+		cos_table.push(angle.cos());
+		sin_table.push(angle.sin());
 	}
-	
-	// Initialize NaN prefix for initial invalid data
-	for i in 0..first {
-		sine[i] = f64::NAN;
-		lead[i] = f64::NAN;
-	}
-	
+
 	for i in (first + period - 1)..len {
 		let mut rp = 0.0;
 		let mut ip = 0.0;
 		for j in 0..period {
-			let weight = data[i - j];
-			rp += cos_table[j] * weight;
-			ip += sin_table[j] * weight;
+			let w = *data.get_unchecked(i - j);
+			rp += cos_table[j] * w;
+			ip += sin_table[j] * w;
 		}
-		let mut phase = if rp.abs() > 0.001 {
-			atan(ip / rp)
-		} else {
-			TULIP_PI * if ip < 0.0 { -1.0 } else { 1.0 }
-		};
-		if rp < 0.0 {
-			phase += TULIP_PI;
-		}
+		let mut phase = if rp.abs() > 0.001 { atan(ip / rp) } else { TULIP_PI * if ip < 0.0 { -1.0 } else { 1.0 } };
+		if rp < 0.0 { phase += TULIP_PI; }
 		phase += TULIP_PI / 2.0;
-		if phase < 0.0 {
-			phase += TULIP_TPI;
-		}
-		if phase > TULIP_TPI {
-			phase -= TULIP_TPI;
-		}
-		sine[i] = phase.sin();
-		lead[i] = (phase + TULIP_PI / 4.0).sin();
+		if phase < 0.0 { phase += TULIP_TPI; }
+		if phase > TULIP_TPI { phase -= TULIP_TPI; }
+
+		*sine.get_unchecked_mut(i) = phase.sin();
+		*lead.get_unchecked_mut(i) = (phase + TULIP_PI / 4.0).sin();
 	}
 	Ok(MswOutput { sine, lead })
 }
@@ -605,110 +585,85 @@ fn msw_batch_inner_into(
 	sine_out: &mut [f64],
 	lead_out: &mut [f64],
 ) -> Result<Vec<MswParams>, MswError> {
+	use std::mem::MaybeUninit;
+
 	let combos = expand_grid(sweep);
 	if combos.is_empty() {
 		return Err(MswError::InvalidPeriod { period: 0, data_len: 0 });
 	}
-	
+
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(MswError::AllValuesNaN)?;
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+
 	if data.len() - first < max_p {
 		return Err(MswError::NotEnoughValidData {
 			needed: max_p,
 			valid: data.len() - first,
 		});
 	}
-	
+
 	let rows = combos.len();
 	let cols = data.len();
-	
 	if sine_out.len() != rows * cols || lead_out.len() != rows * cols {
 		return Err(MswError::InvalidPeriod { period: 0, data_len: 0 });
 	}
-	
-	// Initialize NaN prefixes for each row
-	for (row, combo) in combos.iter().enumerate() {
-		let period = combo.period.unwrap();
-		let warmup = first + period - 1;
-		let start = row * cols;
-		for i in 0..warmup.min(cols) {
-			sine_out[start + i] = f64::NAN;
-			lead_out[start + i] = f64::NAN;
+
+	// 1) Cast to MaybeUninit and initialize NaN warm prefixes with helper
+	let sine_mu = unsafe { std::slice::from_raw_parts_mut(sine_out.as_mut_ptr() as *mut MaybeUninit<f64>, sine_out.len()) };
+	let lead_mu = unsafe { std::slice::from_raw_parts_mut(lead_out.as_mut_ptr() as *mut MaybeUninit<f64>, lead_out.len()) };
+
+	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
+	init_matrix_prefixes(sine_mu, cols, &warm);
+	init_matrix_prefixes(lead_mu, cols, &warm);
+
+	// 2) Compute rows into the same backing memory
+	let do_row = |row: usize, sine_row_mu: &mut [MaybeUninit<f64>], lead_row_mu: &mut [MaybeUninit<f64>]| unsafe {
+		let period = combos[row].period.unwrap();
+		let sine_row = std::slice::from_raw_parts_mut(sine_row_mu.as_mut_ptr() as *mut f64, sine_row_mu.len());
+		let lead_row = std::slice::from_raw_parts_mut(lead_row_mu.as_mut_ptr() as *mut f64, lead_row_mu.len());
+
+		match kern {
+			Kernel::Scalar => msw_row_scalar(data, first, period, sine_row, lead_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => msw_row_avx2(data, first, period, sine_row, lead_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => msw_row_avx512(data, first, period, sine_row, lead_row),
+			_ => unreachable!(),
 		}
-	}
+	};
 	
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
 			use rayon::prelude::*;
-			sine_out
-				.par_chunks_mut(cols)
-				.zip(lead_out.par_chunks_mut(cols))
-				.enumerate()
-				.for_each(|(row, (sine_slice, lead_slice))| unsafe {
-					let period = combos[row].period.unwrap();
-					match kern {
-						Kernel::Scalar => msw_row_scalar(data, first, period, sine_slice, lead_slice),
-						#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-						Kernel::Avx2 => msw_row_avx2(data, first, period, sine_slice, lead_slice),
-						#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-						Kernel::Avx512 => msw_row_avx512(data, first, period, sine_slice, lead_slice),
-						_ => unreachable!(),
-					}
-				});
+			sine_mu.par_chunks_mut(cols)
+				   .zip(lead_mu.par_chunks_mut(cols))
+				   .enumerate()
+				   .for_each(|(row, (sine_row_mu, lead_row_mu))| do_row(row, sine_row_mu, lead_row_mu));
 		}
-		
 		#[cfg(target_arch = "wasm32")]
 		{
-			for row in 0..rows {
-				let period = combos[row].period.unwrap();
-				let start = row * cols;
-				let end = start + cols;
-				unsafe {
-					match kern {
-						Kernel::Scalar => msw_row_scalar(data, first, period, &mut sine_out[start..end], &mut lead_out[start..end]),
-						#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-						Kernel::Avx2 => msw_row_avx2(data, first, period, &mut sine_out[start..end], &mut lead_out[start..end]),
-						#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-						Kernel::Avx512 => msw_row_avx512(data, first, period, &mut sine_out[start..end], &mut lead_out[start..end]),
-						_ => unreachable!(),
-					}
-				}
+			for (row, (sine_row_mu, lead_row_mu)) in sine_mu.chunks_mut(cols).zip(lead_mu.chunks_mut(cols)).enumerate() {
+				do_row(row, sine_row_mu, lead_row_mu);
 			}
 		}
 	} else {
-		for row in 0..rows {
-			let period = combos[row].period.unwrap();
-			let start = row * cols;
-			let end = start + cols;
-			unsafe {
-				match kern {
-					Kernel::Scalar => msw_row_scalar(data, first, period, &mut sine_out[start..end], &mut lead_out[start..end]),
-					#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-					Kernel::Avx2 => msw_row_avx2(data, first, period, &mut sine_out[start..end], &mut lead_out[start..end]),
-					#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-					Kernel::Avx512 => msw_row_avx512(data, first, period, &mut sine_out[start..end], &mut lead_out[start..end]),
-					_ => unreachable!(),
-				}
-			}
+		for (row, (sine_row_mu, lead_row_mu)) in sine_mu.chunks_mut(cols).zip(lead_mu.chunks_mut(cols)).enumerate() {
+			do_row(row, sine_row_mu, lead_row_mu);
 		}
 	}
-	
+
 	Ok(combos)
 }
 
 #[inline(always)]
 unsafe fn msw_row_scalar(data: &[f64], first: usize, period: usize, sine: &mut [f64], lead: &mut [f64]) {
-	let mut cos_table: AVec<f64, aligned_vec::ConstAlign<CACHELINE_ALIGN>> =
-		AVec::with_capacity(CACHELINE_ALIGN, period);
-	let mut sin_table: AVec<f64, aligned_vec::ConstAlign<CACHELINE_ALIGN>> =
-		AVec::with_capacity(CACHELINE_ALIGN, period);
-	cos_table.resize(period, 0.0);
-	sin_table.resize(period, 0.0);
+	let mut cos_table = Vec::with_capacity(period);
+	let mut sin_table = Vec::with_capacity(period);
 	for j in 0..period {
 		let angle = TULIP_TPI * j as f64 / period as f64;
-		cos_table[j] = angle.cos();
-		sin_table[j] = angle.sin();
+		cos_table.push(angle.cos());
+		sin_table.push(angle.sin());
 	}
 	for i in (first + period - 1)..data.len() {
 		let mut rp = 0.0;
@@ -774,28 +729,19 @@ pub fn msw_py<'py>(
 	data: numpy::PyReadonlyArray1<'py, f64>,
 	period: usize,
 	kernel: Option<&str>,
-) -> PyResult<Bound<'py, PyDict>> {
-	use numpy::{IntoPyArray, PyArrayMethods};
-
+) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
+	use numpy::PyArrayMethods;
 	let slice_in = data.as_slice()?;
 	let kern = validate_kernel(kernel, false)?;
-	
-	let params = MswParams {
-		period: Some(period),
-	};
+
+	let params = MswParams { period: Some(period) };
 	let msw_in = MswInput::from_slice(slice_in, params);
-	
-	// Get MswOutput struct containing Vec<f64> from Rust function
-	let output = py
+
+	let out = py
 		.allow_threads(|| msw_with_kernel(&msw_in, kern))
 		.map_err(|e| PyValueError::new_err(e.to_string()))?;
-	
-	// Build output dictionary with zero-copy transfer
-	let dict = PyDict::new(py);
-	dict.set_item("sine", output.sine.into_pyarray(py))?;
-	dict.set_item("lead", output.lead.into_pyarray(py))?;
-	
-	Ok(dict)
+
+	Ok((out.sine.into_pyarray(py), out.lead.into_pyarray(py)))
 }
 
 #[cfg(feature = "python")]
@@ -973,52 +919,31 @@ unsafe fn msw_scalar_into(
 	sine: &mut [f64],
 	lead: &mut [f64],
 ) -> Result<(), MswError> {
-	let mut cos_table: AVec<f64, aligned_vec::ConstAlign<CACHELINE_ALIGN>> =
-		AVec::with_capacity(CACHELINE_ALIGN, period);
-	let mut sin_table: AVec<f64, aligned_vec::ConstAlign<CACHELINE_ALIGN>> =
-		AVec::with_capacity(CACHELINE_ALIGN, period);
-	cos_table.resize(period, 0.0);
-	sin_table.resize(period, 0.0);
-
+	let mut cos_table = Vec::with_capacity(period);
+	let mut sin_table = Vec::with_capacity(period);
 	for j in 0..period {
 		let angle = TULIP_TPI * j as f64 / period as f64;
-		cos_table[j] = angle.cos();
-		sin_table[j] = angle.sin();
+		cos_table.push(angle.cos());
+		sin_table.push(angle.sin());
 	}
-	
-	// Initialize NaN prefix for initial invalid data
-	for i in 0..first {
-		sine[i] = f64::NAN;
-		lead[i] = f64::NAN;
-	}
-	
+
 	for i in (first + period - 1)..len {
 		let mut rp = 0.0;
 		let mut ip = 0.0;
 		for j in 0..period {
-			let weight = data[i - j];
-			rp += cos_table[j] * weight;
-			ip += sin_table[j] * weight;
+			let w = *data.get_unchecked(i - j);
+			rp += cos_table[j] * w;
+			ip += sin_table[j] * w;
 		}
-		let mut phase = if rp.abs() > 0.001 {
-			atan(ip / rp)
-		} else {
-			TULIP_PI * if ip < 0.0 { -1.0 } else { 1.0 }
-		};
-		if rp < 0.0 {
-			phase += TULIP_PI;
-		}
+		let mut phase = if rp.abs() > 0.001 { atan(ip / rp) } else { TULIP_PI * if ip < 0.0 { -1.0 } else { 1.0 } };
+		if rp < 0.0 { phase += TULIP_PI; }
 		phase += TULIP_PI / 2.0;
-		if phase < 0.0 {
-			phase += TULIP_TPI;
-		}
-		if phase > TULIP_TPI {
-			phase -= TULIP_TPI;
-		}
-		sine[i] = phase.sin();
-		lead[i] = (phase + TULIP_PI / 4.0).sin();
+		if phase < 0.0 { phase += TULIP_TPI; }
+		if phase > TULIP_TPI { phase -= TULIP_TPI; }
+
+		*sine.get_unchecked_mut(i) = phase.sin();
+		*lead.get_unchecked_mut(i) = (phase + TULIP_PI / 4.0).sin();
 	}
-	
 	Ok(())
 }
 
@@ -1030,26 +955,27 @@ pub struct MswJsOutput {
 }
 
 #[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct MswResult {
+	pub values: Vec<f64>, // [sine rows first … then lead rows]
+	pub rows: usize,      // 2
+	pub cols: usize,      // data length
+}
+
+#[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn msw_js(data: &[f64], period: usize) -> Result<JsValue, JsValue> {
 	let params = MswParams { period: Some(period) };
 	let input = MswInput::from_slice(data, params);
-	
-	let mut sine_output = vec![0.0; data.len()];
-	let mut lead_output = vec![0.0; data.len()];
-	
-	msw_into_slice(&mut sine_output, &mut lead_output, &input, Kernel::Auto)
-		.map_err(|e| JsValue::from_str(&e.to_string()))?;
-	
-	// Create the structured output
-	let js_output = MswJsOutput {
-		sine: sine_output,
-		lead: lead_output,
-	};
-	
-	// Serialize the output struct into a JavaScript object
-	serde_wasm_bindgen::to_value(&js_output)
-		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+
+	let len = data.len();
+	let mut values = vec![f64::NAN; 2 * len];
+	let (sine, lead) = values.split_at_mut(len);
+
+	msw_into_slice(sine, lead, &input, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	let res = MswResult { values, rows: 2, cols: len };
+	serde_wasm_bindgen::to_value(&res).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 // Keep msw_wasm as deprecated alias for backward compatibility
@@ -1058,6 +984,21 @@ pub fn msw_js(data: &[f64], period: usize) -> Result<JsValue, JsValue> {
 #[deprecated(since = "1.0.0", note = "Use msw_js instead")]
 pub fn msw_wasm(data: &[f64], period: usize) -> Result<JsValue, JsValue> {
 	msw_js(data, period)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn msw_into_flat(in_ptr: *const f64, out_ptr: *mut f64, len: usize, period: usize) -> Result<(), JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() { return Err(JsValue::from_str("null pointer")); }
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		let (sine, lead) = (
+			std::slice::from_raw_parts_mut(out_ptr, len),
+			std::slice::from_raw_parts_mut(out_ptr.add(len), len),
+		);
+		let input = MswInput::from_slice(data, MswParams { period: Some(period) });
+		msw_into_slice(sine, lead, &input, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))
+	}
 }
 
 #[cfg(feature = "wasm")]
@@ -1148,28 +1089,35 @@ pub struct MswBatchJsOutput {
 }
 
 #[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct MswBatchFlatJsOutput {
+	pub values: Vec<f64>,
+	pub combos: Vec<MswParams>,
+	pub rows: usize, // 2 * combos.len()
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = msw_batch)]
 pub fn msw_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
-	let config: MswBatchConfig =
-		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
-	
-	let sweep = MswBatchRange {
-		period: config.period_range,
-	};
-	
-	let output = msw_batch_inner(data, &sweep, Kernel::Auto, false)
+	let config: MswBatchConfig = serde_wasm_bindgen::from_value(config)
+		.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	let sweep = MswBatchRange { period: config.period_range };
+
+	// Plan buffers: first half for sine rows, second half for lead rows
+	let combos = expand_grid(&sweep);
+	if combos.is_empty() { return Err(JsValue::from_str("No parameter combinations")); }
+	let rows = combos.len();
+	let cols = data.len();
+
+	let mut values = vec![f64::NAN; 2 * rows * cols];
+	let (sine_out, lead_out) = values.split_at_mut(rows * cols);
+
+	msw_batch_inner_into(data, &sweep, Kernel::Auto, false, sine_out, lead_out)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
-	
-	let js_output = MswBatchJsOutput {
-		sine: output.sine,
-		lead: output.lead,
-		combos: output.combos,
-		rows: output.rows,
-		cols: output.cols,
-	};
-	
-	serde_wasm_bindgen::to_value(&js_output)
-		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+
+	let out = MswBatchFlatJsOutput { values, combos, rows: 2 * rows, cols };
+	serde_wasm_bindgen::to_value(&out).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 #[cfg(feature = "wasm")]
@@ -1217,6 +1165,35 @@ pub fn msw_batch_metadata_js(
 	let metadata = combos.iter().map(|combo| combo.period.unwrap() as f64).collect();
 	
 	Ok(metadata)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn msw_batch_into_flat(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+) -> Result<usize, JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() { return Err(JsValue::from_str("null pointer")); }
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		let sweep = MswBatchRange { period: (period_start, period_end, period_step) };
+		let combos = expand_grid(&sweep);
+		if combos.is_empty() { return Err(JsValue::from_str("No parameter combinations")); }
+		let rows = combos.len();
+		let cols = len;
+
+		let sine_out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+		let lead_out = std::slice::from_raw_parts_mut(out_ptr.add(rows * cols), rows * cols);
+
+		msw_batch_inner_into(data, &sweep, Kernel::Auto, false, sine_out, lead_out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+		Ok(2 * rows) // number of rows written
+	}
 }
 
 #[cfg(feature = "wasm")]

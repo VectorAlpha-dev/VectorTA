@@ -31,6 +31,8 @@ use pyo3::types::{PyDict, PyList};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
+#[cfg(feature = "wasm")]
+use js_sys;
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -39,14 +41,12 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
-#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
-use std::mem::ManuallyDrop;
+use std::mem::{ManuallyDrop, MaybeUninit};
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
@@ -175,6 +175,13 @@ pub enum AroonError {
 	MismatchSliceLength { high_len: usize, low_len: usize },
 }
 
+#[inline(always)]
+fn first_valid_pair(high: &[f64], low: &[f64]) -> Option<usize> {
+	high.iter()
+		.zip(low.iter())
+		.position(|(h, l)| h.is_finite() && l.is_finite())
+}
+
 #[inline]
 pub fn aroon(input: &AroonInput) -> Result<AroonOutput, AroonError> {
 	aroon_with_kernel(input, Kernel::Auto)
@@ -212,8 +219,9 @@ pub fn aroon_with_kernel(input: &AroonInput, kernel: Kernel) -> Result<AroonOutp
 		other => other,
 	};
 
-	// Calculate warmup period: Aroon needs 'length' bars before producing valid values
-	let warmup_period = length;
+	// Calculate warmup period with proper handling of leading NaNs
+	let first = first_valid_pair(high, low).ok_or(AroonError::AllValuesNaN)?;
+	let warmup_period = first + length;
 	let mut up = alloc_with_nan_prefix(len, warmup_period);
 	let mut down = alloc_with_nan_prefix(len, warmup_period);
 
@@ -227,6 +235,16 @@ pub fn aroon_with_kernel(input: &AroonInput, kernel: Kernel) -> Result<AroonOutp
 			_ => unreachable!(),
 		}
 	}
+	
+	// Re-mask warmup period after kernel computation
+	let warm = warmup_period.min(len);
+	for v in &mut up[..warm] {
+		*v = f64::NAN;
+	}
+	for v in &mut down[..warm] {
+		*v = f64::NAN;
+	}
+	
 	Ok(AroonOutput {
 		aroon_up: up,
 		aroon_down: down,
@@ -254,6 +272,22 @@ pub fn aroon_scalar(high: &[f64], low: &[f64], length: usize, up: &mut [f64], do
 	// 2) For each bar i from `length` up to `len - 1`, scan a window of size `length + 1`.
 	for i in length..len {
 		let start = i - length;
+		
+		// Check if any value in the window is NaN
+		let mut has_nan = false;
+		for j in start..=i {
+			if !high[j].is_finite() || !low[j].is_finite() {
+				has_nan = true;
+				break;
+			}
+		}
+		
+		if has_nan {
+			up[i] = f64::NAN;
+			down[i] = f64::NAN;
+			continue;
+		}
+		
 		// Initialize with the first bar in [start..=i]
 		let mut max_val = high[start];
 		let mut min_val = low[start];
@@ -340,9 +374,10 @@ impl AroonStream {
 
 	/// Push a new (high, low).  Until we have seen at least `length+1` bars, this returns `None`.
 	/// Once `count >= length+1`, each call returns `Some((aroon_up, aroon_down))`.
+	/// Returns `None` if any value in the current window is NaN.
 	#[inline(always)]
 	pub fn update(&mut self, high: f64, low: f64) -> Option<(f64, f64)> {
-		// 1) Overwrite the “head” slot
+		// 1) Overwrite the "head" slot
 		self.buffer_high[self.head] = high;
 		self.buffer_low[self.head] = low;
 
@@ -354,17 +389,24 @@ impl AroonStream {
 			self.count += 1;
 		}
 
-		// 4) If we haven’t yet filled `length+1` bars, return None
+		// 4) If we haven't yet filled `length+1` bars, return None
 		if self.count < self.buf_size {
 			return None;
 		}
 
-		// 5) Compute “current index” = the slot we just wrote was (head + buf_size − 1) % buf_size
+		// 5) Compute "current index" = the slot we just wrote was (head + buf_size − 1) % buf_size
 		let cur_idx = (self.head + self.buf_size - 1) % self.buf_size;
 
-		// 6) Scan exactly the last (length+1) bars in chronological order:
-		//    - “oldest_idx” is (cur_idx - length) mod buf_size  ≡  (cur_idx + 1) % buf_size
+		// 6) Check for NaN in the window
 		let oldest_idx = (cur_idx + 1) % self.buf_size;
+		for k in 0..=self.length {
+			let idx = (oldest_idx + k) % self.buf_size;
+			if !self.buffer_high[idx].is_finite() || !self.buffer_low[idx].is_finite() {
+				return None; // Window contains NaN
+			}
+		}
+		
+		// 7) Scan exactly the last (length+1) bars in chronological order:
 		// Initialize to the oldest bar in the window:
 		let mut max_idx = oldest_idx;
 		let mut min_idx = oldest_idx;
@@ -387,11 +429,11 @@ impl AroonStream {
 			}
 		}
 
-		// 7) “Bars ago” for that max:  dist_hi = (cur_idx − max_idx) mod buf_size
+		// 8) "Bars ago" for that max:  dist_hi = (cur_idx − max_idx) mod buf_size
 		let dist_hi = ((cur_idx as isize - max_idx as isize).rem_euclid(self.buf_size as isize)) as usize;
 		let dist_lo = ((cur_idx as isize - min_idx as isize).rem_euclid(self.buf_size as isize)) as usize;
 
-		// 8) Aroon formula: up = (length − dist_hi)/length * 100
+		// 9) Aroon formula: up = (length − dist_hi)/length * 100
 		let inv_len = 1.0 / (self.length as f64);
 		let up = (self.length as f64 - dist_hi as f64) * inv_len * 100.0;
 		let down = (self.length as f64 - dist_lo as f64) * inv_len * 100.0;
@@ -499,7 +541,12 @@ pub fn aroon_batch_with_kernel(
 	let kernel = match k {
 		Kernel::Auto => detect_best_batch_kernel(),
 		other if other.is_batch() => other,
-		_ => return Err(AroonError::InvalidLength { length: 0, data_len: 0 }),
+		_ => {
+			return Err(AroonError::InvalidLength {
+				length: 0,
+				data_len: 0,
+			})
+		}
 	};
 	let simd = match kernel {
 		Kernel::Avx512Batch => Kernel::Avx512,
@@ -561,10 +608,13 @@ fn aroon_batch_inner(
 	let mut buf_up_mu = make_uninit_matrix(rows, cols);
 	let mut buf_down_mu = make_uninit_matrix(rows, cols);
 
-	// Step 2: Calculate warmup periods for each row
-	let warmup_periods: Vec<usize> = combos.iter().map(|c| c.length.unwrap()).collect();
+	// Step 2: Find first valid pair for leading NaN handling
+	let first = first_valid_pair(high, low).ok_or(AroonError::AllValuesNaN)?;
+	
+	// Step 3: Calculate warmup periods for each row (honoring leading NaNs)
+	let warmup_periods: Vec<usize> = combos.iter().map(|c| first + c.length.unwrap()).collect();
 
-	// Step 3: Initialize NaN prefixes for each row
+	// Step 4: Initialize NaN prefixes for each row
 	init_matrix_prefixes(&mut buf_up_mu, cols, &warmup_periods);
 	init_matrix_prefixes(&mut buf_down_mu, cols, &warmup_periods);
 
@@ -578,8 +628,18 @@ fn aroon_batch_inner(
 
 	// Step 5: Perform batch computation into the buffers
 	aroon_batch_inner_into(high, low, sweep, kern, parallel, up, down)?;
+	
+	// Step 6: Re-mask warmup periods after computation
+	for (row, &warmup) in warmup_periods.iter().enumerate() {
+		let row_start = row * cols;
+		let warm_end = (row_start + warmup).min(row_start + cols);
+		for i in row_start..warm_end {
+			up[i] = f64::NAN;
+			down[i] = f64::NAN;
+		}
+	}
 
-	// Step 6: Reclaim as Vec<f64>
+	// Step 7: Reclaim as Vec<f64>
 	let up_values = unsafe {
 		Vec::from_raw_parts(
 			buf_up_guard.as_mut_ptr() as *mut f64,
@@ -645,8 +705,11 @@ fn aroon_batch_inner_into(
 		});
 	}
 	
-	// Calculate warmup periods for each row
-	let warmup_periods: Vec<usize> = combos.iter().map(|c| c.length.unwrap()).collect();
+	// Find first valid pair for leading NaN handling
+	let first = first_valid_pair(high, low).ok_or(AroonError::AllValuesNaN)?;
+	
+	// Calculate warmup periods for each row (honoring leading NaNs)
+	let warmup_periods: Vec<usize> = combos.iter().map(|c| first + c.length.unwrap()).collect();
 	
 	// Initialize NaN prefixes for each row in the provided buffers
 	for (row, &warmup) in warmup_periods.iter().enumerate() {
@@ -686,6 +749,16 @@ fn aroon_batch_inner_into(
 	} else {
 		for (row, (u, d)) in out_up.chunks_mut(cols).zip(out_down.chunks_mut(cols)).enumerate() {
 			do_row(row, u, d);
+		}
+	}
+	
+	// Re-mask warmup periods after computation
+	for (row, &warmup) in warmup_periods.iter().enumerate() {
+		let row_start = row * cols;
+		let warm_end = (row_start + warmup).min(row_start + cols);
+		for i in row_start..warm_end {
+			out_up[i] = f64::NAN;
+			out_down[i] = f64::NAN;
 		}
 	}
 	
@@ -1382,11 +1455,164 @@ mod tests {
 		check_aroon_reinput,
 		check_aroon_nan_handling,
 		check_aroon_streaming,
-		check_aroon_no_poison
+		check_aroon_no_poison,
+		check_aroon_all_nan_error,
+		check_aroon_leading_nan_warmup,
+		check_aroon_nan_in_window,
+		check_aroon_streaming_nan_window
 	);
 	
 	#[cfg(feature = "proptest")]
 	generate_all_aroon_tests!(check_aroon_property);
+	
+	// Test that AllValuesNaN error is properly emitted
+	fn check_aroon_all_nan_error(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		let high = vec![f64::NAN; 20];
+		let low = vec![f64::NAN; 20];
+		let params = AroonParams { length: Some(5) };
+		let input = AroonInput::from_slices_hl(&high, &low, params);
+		
+		let result = aroon_with_kernel(&input, kernel);
+		assert!(
+			matches!(result, Err(AroonError::AllValuesNaN)),
+			"Expected AllValuesNaN error, got: {:?}",
+			result
+		);
+		
+		Ok(())
+	}
+	
+	// Test that leading NaNs are properly handled in warmup calculation
+	fn check_aroon_leading_nan_warmup(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		let mut high = vec![f64::NAN; 5];
+		let mut low = vec![f64::NAN; 5];
+		high.extend_from_slice(&[100.0, 110.0, 105.0, 115.0, 112.0, 120.0, 118.0, 125.0, 122.0, 130.0]);
+		low.extend_from_slice(&[90.0, 95.0, 92.0, 98.0, 96.0, 100.0, 99.0, 105.0, 103.0, 108.0]);
+		
+		let params = AroonParams { length: Some(3) };
+		let input = AroonInput::from_slices_hl(&high, &low, params);
+		let result = aroon_with_kernel(&input, kernel)?;
+		
+		// First 5 values are NaN (leading) + 3 for length = 8 warmup period
+		for i in 0..8 {
+			assert!(
+				result.aroon_up[i].is_nan(),
+				"Expected NaN at index {} for aroon_up during warmup, got {}",
+				i,
+				result.aroon_up[i]
+			);
+			assert!(
+				result.aroon_down[i].is_nan(),
+				"Expected NaN at index {} for aroon_down during warmup, got {}",
+				i,
+				result.aroon_down[i]
+			);
+		}
+		
+		// Values after warmup should be valid
+		for i in 8..high.len() {
+			assert!(
+				!result.aroon_up[i].is_nan(),
+				"Unexpected NaN at index {} for aroon_up after warmup",
+				i
+			);
+			assert!(
+				!result.aroon_down[i].is_nan(),
+				"Unexpected NaN at index {} for aroon_down after warmup",
+				i
+			);
+		}
+		
+		Ok(())
+	}
+	
+	// Test that NaN within window produces NaN output
+	fn check_aroon_nan_in_window(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		let mut high = vec![100.0, 110.0, 105.0, 115.0, 112.0, f64::NAN, 118.0, 125.0, 122.0, 130.0];
+		let low = vec![90.0, 95.0, 92.0, 98.0, 96.0, 100.0, 99.0, 105.0, 103.0, 108.0];
+		
+		let params = AroonParams { length: Some(3) };
+		let input = AroonInput::from_slices_hl(&high, &low, params);
+		let result = aroon_with_kernel(&input, kernel)?;
+		
+		// When NaN is at index 5, it affects outputs at indices 3, 4, 5, 6, 7, 8
+		// (window size is length+1=4, so NaN affects 4 positions: 5-3 through 5)
+		// Actually window affects positions 5 through 8 (where the NaN is in the window)
+		for i in 5..=8 {
+			if i < result.aroon_up.len() {
+				assert!(
+					result.aroon_up[i].is_nan(),
+					"Expected NaN at index {} for aroon_up when NaN is in window, got {}",
+					i,
+					result.aroon_up[i]
+				);
+				assert!(
+					result.aroon_down[i].is_nan(),
+					"Expected NaN at index {} for aroon_down when NaN is in window, got {}",
+					i,
+					result.aroon_down[i]
+				);
+			}
+		}
+		
+		// Position 9 should be valid (NaN no longer in window)
+		if result.aroon_up.len() > 9 {
+			assert!(
+				!result.aroon_up[9].is_nan(),
+				"Unexpected NaN at index 9 for aroon_up after NaN exits window"
+			);
+			assert!(
+				!result.aroon_down[9].is_nan(),
+				"Unexpected NaN at index 9 for aroon_down after NaN exits window"
+			);
+		}
+		
+		Ok(())
+	}
+	
+	// Test that streaming handles NaN in window correctly
+	fn check_aroon_streaming_nan_window(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		let mut stream = AroonStream::try_new(AroonParams { length: Some(3) })?;
+		
+		// Feed some valid data
+		assert_eq!(stream.update(100.0, 90.0), None); // Not enough data yet
+		assert_eq!(stream.update(110.0, 95.0), None); // Not enough data yet
+		assert_eq!(stream.update(105.0, 92.0), None); // Not enough data yet
+		
+		// Now we have length+1=4 values, should get a result
+		let result = stream.update(115.0, 98.0);
+		assert!(result.is_some(), "Expected Some result after 4 values");
+		
+		// Feed a NaN
+		let result_with_nan = stream.update(f64::NAN, 100.0);
+		assert_eq!(
+			result_with_nan,
+			None,
+			"Expected None when NaN is in window"
+		);
+		
+		// Continue feeding data, should still get None while NaN is in window
+		assert_eq!(stream.update(120.0, 105.0), None);
+		assert_eq!(stream.update(125.0, 108.0), None);
+		assert_eq!(stream.update(130.0, 110.0), None);
+		
+		// After length+1=4 values total, NaN should be out of window
+		let result_after_nan = stream.update(135.0, 112.0);
+		assert!(
+			result_after_nan.is_some(),
+			"Expected Some result after NaN exits window"
+		);
+		
+		Ok(())
+	}
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);
@@ -1585,6 +1811,65 @@ mod tests {
 	gen_batch_tests!(check_batch_no_poison);
 }
 
+/// Write directly to output slices - no allocations
+#[inline]
+pub fn aroon_into_slice(
+	dst_up: &mut [f64],
+	dst_down: &mut [f64],
+	input: &AroonInput,
+	kern: Kernel,
+) -> Result<(), AroonError> {
+	let (high, low): (&[f64], &[f64]) = match &input.data {
+		AroonData::Candles { candles } => (source_type(candles, "high"), source_type(candles, "low")),
+		AroonData::SlicesHL { high, low } => (*high, *low),
+	};
+	if high.is_empty() || low.is_empty() {
+		return Err(AroonError::EmptyInputData);
+	}
+	if high.len() != low.len() {
+		return Err(AroonError::MismatchSliceLength {
+			high_len: high.len(),
+			low_len: low.len(),
+		});
+	}
+	let len = high.len();
+	let length = input.get_length();
+	if length == 0 || length > len {
+		return Err(AroonError::InvalidLength { length, data_len: len });
+	}
+	if dst_up.len() != len || dst_down.len() != len {
+		return Err(AroonError::InvalidLength {
+			length: dst_up.len(),
+			data_len: len,
+		});
+	}
+
+	let first = first_valid_pair(high, low).ok_or(AroonError::AllValuesNaN)?;
+	let warm = first + length;
+
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		k => k,
+	};
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => aroon_scalar(high, low, length, dst_up, dst_down),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => aroon_avx2(high, low, length, dst_up, dst_down),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => aroon_avx512(high, low, length, dst_up, dst_down),
+			_ => unreachable!(),
+		}
+	}
+	for v in &mut dst_up[..warm.min(len)] {
+		*v = f64::NAN;
+	}
+	for v in &mut dst_down[..warm.min(len)] {
+		*v = f64::NAN;
+	}
+	Ok(())
+}
+
 #[cfg(feature = "python")]
 #[pyfunction(name = "aroon")]
 #[pyo3(signature = (high, low, length, kernel=None))]
@@ -1594,40 +1879,29 @@ pub fn aroon_py<'py>(
 	low: numpy::PyReadonlyArray1<'py, f64>,
 	length: usize,
 	kernel: Option<&str>,
-) -> PyResult<Bound<'py, PyDict>> {
-	use numpy::{IntoPyArray, PyArrayMethods};
-	use pyo3::types::PyDict;
+) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
 
-	let high_slice = high.as_slice()?;
-	let low_slice = low.as_slice()?;
-
-	// Validate input lengths
-	if high_slice.len() != low_slice.len() {
+	let h = high.as_slice()?;
+	let l = low.as_slice()?;
+	if h.len() != l.len() {
 		return Err(PyValueError::new_err(format!(
-			"High/low data length mismatch: high={}, low={}",
-			high_slice.len(),
-			low_slice.len()
+			"High/low length mismatch: {} vs {}",
+			h.len(),
+			l.len()
 		)));
 	}
 
-	// Validate kernel before allow_threads
 	let kern = validate_kernel(kernel, false)?;
-
-	// Build input struct
 	let params = AroonParams { length: Some(length) };
-	let aroon_in = AroonInput::from_slices_hl(high_slice, low_slice, params);
+	let input = AroonInput::from_slices_hl(h, l, params);
 
-	// GOOD: Get AroonOutput struct containing Vec<f64> from Rust function
-	let output = py
-		.allow_threads(|| aroon_with_kernel(&aroon_in, kern))
+	// compute in Rust, then move Vecs zero-copy into NumPy
+	let out = py
+		.allow_threads(|| aroon_with_kernel(&input, kern))
 		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-	// Build output dictionary with zero-copy transfer
-	let dict = PyDict::new(py);
-	dict.set_item("up", output.aroon_up.into_pyarray(py))?;
-	dict.set_item("down", output.aroon_down.into_pyarray(py))?;
-
-	Ok(dict)
+	Ok((out.aroon_up.into_pyarray(py), out.aroon_down.into_pyarray(py)))
 }
 
 #[cfg(feature = "python")]
@@ -1656,7 +1930,6 @@ impl AroonStreamPy {
 #[cfg(feature = "python")]
 #[pyfunction(name = "aroon_batch")]
 #[pyo3(signature = (high, low, length_range, kernel=None))]
-/// Batch Aroon calculation across multiple lengths.
 pub fn aroon_batch_py<'py>(
 	py: Python<'py>,
 	high: numpy::PyReadonlyArray1<'py, f64>,
@@ -1667,55 +1940,45 @@ pub fn aroon_batch_py<'py>(
 	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
 	use pyo3::types::PyDict;
 
-	let high_slice = high.as_slice()?;
-	let low_slice = low.as_slice()?;
-
-	// Validate input lengths
-	if high_slice.len() != low_slice.len() {
+	let h = high.as_slice()?;
+	let l = low.as_slice()?;
+	if h.len() != l.len() {
 		return Err(PyValueError::new_err(format!(
-			"High/low data length mismatch: high={}, low={}",
-			high_slice.len(),
-			low_slice.len()
+			"High/low length mismatch: {} vs {}",
+			h.len(),
+			l.len()
 		)));
 	}
 
 	let sweep = AroonBatchRange { length: length_range };
-	
-	// Pre-calculate dimensions
 	let combos = expand_grid(&sweep);
 	let rows = combos.len();
-	let cols = high_slice.len();
-	
-	// Pre-allocate numpy arrays for zero-copy operation
-	let out_up_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-	let out_down_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-	let slice_out_up = unsafe { out_up_arr.as_slice_mut()? };
-	let slice_out_down = unsafe { out_down_arr.as_slice_mut()? };
+	let cols = h.len();
 
-	// Validate kernel before allow_threads
+	let up_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let down_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let up_slice = unsafe { up_arr.as_slice_mut()? };
+	let down_slice = unsafe { down_arr.as_slice_mut()? };
+
 	let kern = validate_kernel(kernel, true)?;
+	py.allow_threads(|| {
+		let batch = match kern {
+			Kernel::Auto => detect_best_batch_kernel(),
+			k => k,
+		};
+		let simd = match batch {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch => Kernel::Avx2,
+			Kernel::ScalarBatch => Kernel::Scalar,
+			_ => unreachable!(),
+		};
+		aroon_batch_inner_into(h, l, &sweep, simd, true, up_slice, down_slice)
+	})
+	.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-	// Heavy work without the GIL - write directly into numpy arrays
-	let combos = py
-		.allow_threads(|| {
-			let kernel = match kern {
-				Kernel::Auto => detect_best_batch_kernel(),
-				k => k,
-			};
-			let simd = match kernel {
-				Kernel::Avx512Batch => Kernel::Avx512,
-				Kernel::Avx2Batch => Kernel::Avx2,
-				Kernel::ScalarBatch => Kernel::Scalar,
-				_ => unreachable!(),
-			};
-			aroon_batch_inner_into(high_slice, low_slice, &sweep, simd, true, slice_out_up, slice_out_down)
-		})
-		.map_err(|e| PyValueError::new_err(e.to_string()))?;
-
-	// Build dict with zero-copy transfers
 	let dict = PyDict::new(py);
-	dict.set_item("up", out_up_arr.reshape((rows, cols))?)?;
-	dict.set_item("down", out_down_arr.reshape((rows, cols))?)?;
+	dict.set_item("up", up_arr.reshape((rows, cols))?)?;
+	dict.set_item("down", down_arr.reshape((rows, cols))?)?;
 	dict.set_item(
 		"lengths",
 		combos
@@ -1724,212 +1987,156 @@ pub fn aroon_batch_py<'py>(
 			.collect::<Vec<_>>()
 			.into_pyarray(py),
 	)?;
-
+	dict.set_item("rows", rows)?;
+	dict.set_item("cols", cols)?;
 	Ok(dict)
 }
 
-/// Write directly to output slices - no allocations
-#[inline]
-pub fn aroon_into_slice(
-	up_dst: &mut [f64],
-	down_dst: &mut [f64],
-	input: &AroonInput,
-	kern: Kernel,
-) -> Result<(), AroonError> {
-	let (high, low): (&[f64], &[f64]) = match &input.data {
-		AroonData::Candles { candles } => (source_type(candles, "high"), source_type(candles, "low")),
-		AroonData::SlicesHL { high, low } => (*high, *low),
-	};
-	
-	if high.len() != low.len() {
-		return Err(AroonError::MismatchSliceLength {
-			high_len: high.len(),
-			low_len: low.len(),
-		});
-	}
-	
-	let len = high.len();
-	let length = input.get_length();
-	
-	if up_dst.len() != len || down_dst.len() != len {
-		return Err(AroonError::InvalidLength { 
-			length: up_dst.len(), 
-			data_len: len 
-		});
-	}
-	
-	if length == 0 || length > len {
-		return Err(AroonError::InvalidLength { length, data_len: len });
-	}
-	
-	let chosen = match kern {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
-	
-	// Calculate warmup period
-	let warmup_period = length;
-	
-	// Fill warmup with NaN
-	for v in &mut up_dst[..warmup_period] {
-		*v = f64::NAN;
-	}
-	for v in &mut down_dst[..warmup_period] {
-		*v = f64::NAN;
-	}
-	
-	// Compute directly into the output slices
-	unsafe {
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => aroon_scalar(high, low, length, up_dst, down_dst),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => aroon_avx2(high, low, length, up_dst, down_dst),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => aroon_avx512(high, low, length, up_dst, down_dst),
-			_ => unreachable!(),
-		}
-	}
-	
-	Ok(())
-}
 
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct AroonJsOutput {
-	pub up: Vec<f64>,
-	pub down: Vec<f64>,
+	pub values: Vec<f64>, // [up..., down...]
+	pub rows: usize,      // 2
+	pub cols: usize,      // len
 }
 
 #[cfg(feature = "wasm")]
-#[wasm_bindgen]
+#[wasm_bindgen(js_name = "aroon_js")]
 pub fn aroon_js(high: &[f64], low: &[f64], length: usize) -> Result<JsValue, JsValue> {
 	let params = AroonParams { length: Some(length) };
 	let input = AroonInput::from_slices_hl(high, low, params);
 
-	// Use the proper aroon function which uses alloc_with_nan_prefix internally
-	let output = aroon_with_kernel(&input, Kernel::Auto)
+	let mut up = vec![0.0; high.len()];
+	let mut down = vec![0.0; high.len()];
+	
+	aroon_into_slice(&mut up, &mut down, &input, detect_best_kernel())
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-	// Create the structured output
-	let js_output = AroonJsOutput {
-		up: output.aroon_up,
-		down: output.aroon_down,
-	};
-
-	// Serialize the output struct into a JavaScript object
-	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
-}
-
-#[cfg(feature = "wasm")]
-#[wasm_bindgen]
-pub fn aroon_batch_js(
-	high: &[f64],
-	low: &[f64],
-	length_start: usize,
-	length_end: usize,
-	length_step: usize,
-) -> Result<JsValue, JsValue> {
-	let sweep = AroonBatchRange {
-		length: (length_start, length_end, length_step),
-	};
-
-	// Use the existing batch function with parallel=false for WASM
-	// In WASM, we should always use Scalar kernel
-	let output =
-		aroon_batch_inner(high, low, &sweep, Kernel::Scalar, false).map_err(|e| JsValue::from_str(&e.to_string()))?;
-
-	// Create the structured output
-	let js_output = AroonBatchJsOutput {
-		up: output.up,
-		down: output.down,
-		combos: output.combos,
-		rows: output.rows,
-		cols: output.cols,
-	};
-
-	// Serialize the output struct into a JavaScript object
-	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
-}
-
-#[cfg(feature = "wasm")]
-#[wasm_bindgen]
-pub fn aroon_batch_metadata_js(
-	length_start: usize,
-	length_end: usize,
-	length_step: usize,
-) -> Result<Vec<f64>, JsValue> {
-	let sweep = AroonBatchRange {
-		length: (length_start, length_end, length_step),
-	};
-
-	let combos = expand_grid(&sweep);
-	let metadata = combos.iter().map(|combo| combo.length.unwrap() as f64).collect();
-
-	Ok(metadata)
-}
-
-// New ergonomic WASM API
-#[cfg(feature = "wasm")]
-#[derive(Serialize, Deserialize)]
-pub struct AroonBatchConfig {
-	pub length_range: (usize, usize, usize),
+	// Return as object with up and down arrays
+	let obj = js_sys::Object::new();
+	js_sys::Reflect::set(&obj, &JsValue::from_str("up"), &serde_wasm_bindgen::to_value(&up).unwrap())?;
+	js_sys::Reflect::set(&obj, &JsValue::from_str("down"), &serde_wasm_bindgen::to_value(&down).unwrap())?;
+	
+	Ok(obj.into())
 }
 
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct AroonBatchJsOutput {
-	pub up: Vec<f64>,
-	pub down: Vec<f64>,
+	pub values: Vec<f64>,      // [all up rows..., all down rows...]
+	pub rows: usize,           // 2*combos
+	pub cols: usize,           // len
 	pub combos: Vec<AroonParams>,
-	pub rows: usize,
-	pub cols: usize,
 }
 
 #[cfg(feature = "wasm")]
-#[wasm_bindgen(js_name = aroon_batch)]
-pub fn aroon_batch_unified_js(high: &[f64], low: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
-	// 1. Deserialize the configuration object from JavaScript
-	let config: AroonBatchConfig =
-		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+#[wasm_bindgen(js_name = "aroon_batch_js")]
+pub fn aroon_batch_unified_js(
+	high: &[f64], 
+	low: &[f64], 
+	length_start: usize,
+	length_end: usize,
+	length_step: usize
+) -> Result<JsValue, JsValue> {
+	let sweep = AroonBatchRange { 
+		length: (length_start, length_end, length_step) 
+	};
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = high.len();
 
+	// compute into two separate flat buffers
+	let mut up = vec![0.0; rows * cols];
+	let mut down = vec![0.0; rows * cols];
+
+	aroon_batch_inner_into(high, low, &sweep, detect_best_kernel(), false, &mut up, &mut down)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	// Return as separate up and down arrays
+	let obj = js_sys::Object::new();
+	js_sys::Reflect::set(&obj, &JsValue::from_str("up"), &serde_wasm_bindgen::to_value(&up).unwrap())?;
+	js_sys::Reflect::set(&obj, &JsValue::from_str("down"), &serde_wasm_bindgen::to_value(&down).unwrap())?;
+	js_sys::Reflect::set(&obj, &JsValue::from_str("rows"), &JsValue::from_f64(rows as f64))?;
+	js_sys::Reflect::set(&obj, &JsValue::from_str("cols"), &JsValue::from_f64(cols as f64))?;
+	js_sys::Reflect::set(&obj, &JsValue::from_str("combos"), &serde_wasm_bindgen::to_value(&combos).unwrap())?;
+	
+	Ok(obj.into())
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = "aroon_batch_metadata_js")]
+pub fn aroon_batch_metadata_js(
+	length_start: usize,
+	length_end: usize,
+	length_step: usize
+) -> Result<Vec<f64>, JsValue> {
 	let sweep = AroonBatchRange {
-		length: config.length_range,
+		length: (length_start, length_end, length_step),
 	};
+	
+	let combos = expand_grid(&sweep);
+	let metadata: Vec<f64> = combos.iter().map(|c| c.length.unwrap_or(14) as f64).collect();
+	
+	Ok(metadata)
+}
 
-	// 2. Run the existing core logic
-	// In WASM, we should always use Scalar kernel
-	let output =
-		aroon_batch_inner(high, low, &sweep, Kernel::Scalar, false).map_err(|e| JsValue::from_str(&e.to_string()))?;
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct AroonBatchConfig {
+	pub length_range: Vec<usize>,  // [start, end, step]
+}
 
-	// 3. Create the structured output
-	let js_output = AroonBatchJsOutput {
-		up: output.up,
-		down: output.down,
-		combos: output.combos,
-		rows: output.rows,
-		cols: output.cols,
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = "aroon_batch")]
+pub fn aroon_batch_config_js(high: &[f64], low: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: AroonBatchConfig = serde_wasm_bindgen::from_value(config)
+		.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	
+	if config.length_range.len() != 3 {
+		return Err(JsValue::from_str("Invalid config: length_range must have exactly 3 elements [start, end, step]"));
+	}
+	
+	let sweep = AroonBatchRange {
+		length: (config.length_range[0], config.length_range[1], config.length_range[2]),
 	};
-
-	// 4. Serialize the output struct into a JavaScript object
-	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+	
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = high.len();
+	
+	// compute into two separate flat buffers
+	let mut up = vec![0.0; rows * cols];
+	let mut down = vec![0.0; rows * cols];
+	
+	aroon_batch_inner_into(high, low, &sweep, detect_best_kernel(), false, &mut up, &mut down)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	// Return as separate up and down arrays with combos
+	let obj = js_sys::Object::new();
+	js_sys::Reflect::set(&obj, &JsValue::from_str("up"), &serde_wasm_bindgen::to_value(&up).unwrap())?;
+	js_sys::Reflect::set(&obj, &JsValue::from_str("down"), &serde_wasm_bindgen::to_value(&down).unwrap())?;
+	js_sys::Reflect::set(&obj, &JsValue::from_str("rows"), &JsValue::from_f64(rows as f64))?;
+	js_sys::Reflect::set(&obj, &JsValue::from_str("cols"), &JsValue::from_f64(cols as f64))?;
+	js_sys::Reflect::set(&obj, &JsValue::from_str("combos"), &serde_wasm_bindgen::to_value(&combos).unwrap())?;
+	
+	Ok(obj.into())
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn aroon_alloc(len: usize) -> *mut f64 {
-	let mut vec = Vec::<f64>::with_capacity(len);
-	let ptr = vec.as_mut_ptr();
-	std::mem::forget(vec);
-	ptr
+	let mut v = Vec::<f64>::with_capacity(2 * len);
+	let p = v.as_mut_ptr();
+	std::mem::forget(v);
+	p
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn aroon_free(ptr: *mut f64, len: usize) {
-	if !ptr.is_null() {
-		unsafe {
-			let _ = Vec::from_raw_parts(ptr, len, len);
-		}
+	unsafe {
+		let _ = Vec::from_raw_parts(ptr, 2 * len, 2 * len);
 	}
 }
 
@@ -1938,88 +2145,22 @@ pub fn aroon_free(ptr: *mut f64, len: usize) {
 pub fn aroon_into(
 	high_ptr: *const f64,
 	low_ptr: *const f64,
-	up_ptr: *mut f64,
-	down_ptr: *mut f64,
+	out_ptr: *mut f64, // expects length 2*len
 	len: usize,
 	length: usize,
 ) -> Result<(), JsValue> {
-	if high_ptr.is_null() || low_ptr.is_null() || up_ptr.is_null() || down_ptr.is_null() {
-		return Err(JsValue::from_str("Null pointer provided"));
+	if high_ptr.is_null() || low_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to aroon_into"));
 	}
-	
 	unsafe {
 		let high = std::slice::from_raw_parts(high_ptr, len);
 		let low = std::slice::from_raw_parts(low_ptr, len);
+		let out = std::slice::from_raw_parts_mut(out_ptr, 2 * len);
+
 		let params = AroonParams { length: Some(length) };
 		let input = AroonInput::from_slices_hl(high, low, params);
-		
-		// Check for aliasing - multiple scenarios since we have 2 inputs and 2 outputs
-		let needs_temp = high_ptr == up_ptr.cast()
-			|| high_ptr == down_ptr.cast()
-			|| low_ptr == up_ptr.cast()
-			|| low_ptr == down_ptr.cast()
-			|| up_ptr == down_ptr;
-		
-		if needs_temp {
-			// Allocate temporary buffers for outputs
-			let mut temp_up = vec![0.0; len];
-			let mut temp_down = vec![0.0; len];
-			aroon_into_slice(&mut temp_up, &mut temp_down, &input, Kernel::Auto)
-				.map_err(|e| JsValue::from_str(&e.to_string()))?;
-			
-			// Copy to output pointers
-			let up_out = std::slice::from_raw_parts_mut(up_ptr, len);
-			let down_out = std::slice::from_raw_parts_mut(down_ptr, len);
-			up_out.copy_from_slice(&temp_up);
-			down_out.copy_from_slice(&temp_down);
-		} else {
-			// Direct computation into output slices
-			let up_out = std::slice::from_raw_parts_mut(up_ptr, len);
-			let down_out = std::slice::from_raw_parts_mut(down_ptr, len);
-			aroon_into_slice(up_out, down_out, &input, Kernel::Auto)
-				.map_err(|e| JsValue::from_str(&e.to_string()))?;
-		}
-		
-		Ok(())
-	}
-}
 
-#[cfg(feature = "wasm")]
-#[wasm_bindgen]
-pub fn aroon_batch_into(
-	high_ptr: *const f64,
-	low_ptr: *const f64,
-	up_ptr: *mut f64,
-	down_ptr: *mut f64,
-	len: usize,
-	length_start: usize,
-	length_end: usize,
-	length_step: usize,
-) -> Result<usize, JsValue> {
-	if high_ptr.is_null() || low_ptr.is_null() || up_ptr.is_null() || down_ptr.is_null() {
-		return Err(JsValue::from_str("Null pointer provided"));
-	}
-	
-	unsafe {
-		let high = std::slice::from_raw_parts(high_ptr, len);
-		let low = std::slice::from_raw_parts(low_ptr, len);
-		
-		let sweep = AroonBatchRange {
-			length: (length_start, length_end, length_step),
-		};
-		
-		let combos = expand_grid(&sweep);
-		let rows = combos.len();
-		let total_size = rows * len;
-		
-		// Prepare output slices
-		let up_out = std::slice::from_raw_parts_mut(up_ptr, total_size);
-		let down_out = std::slice::from_raw_parts_mut(down_ptr, total_size);
-		
-		// Use the optimized batch_inner_into function for zero-copy operation
-		aroon_batch_inner_into(high, low, &sweep, detect_best_kernel(), false, up_out, down_out)
-			.map_err(|e| JsValue::from_str(&e.to_string()))?;
-		
-		Ok(rows)
+		let (up, down) = out.split_at_mut(len);
+		aroon_into_slice(up, down, &input, detect_best_kernel()).map_err(|e| JsValue::from_str(&e.to_string()))
 	}
 }

@@ -24,7 +24,6 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 use paste::paste;
@@ -94,7 +93,7 @@ impl<'a> TrimaInput<'a> {
 	}
 	#[inline]
 	pub fn get_period(&self) -> usize {
-		self.params.period.unwrap_or(14)
+		self.params.period.unwrap_or(30)
 	}
 }
 
@@ -647,20 +646,21 @@ pub fn trima_batch_with_kernel(
 	k: Kernel,
 ) -> Result<TrimaBatchOutput, TrimaError> {
 	let kernel = match k {
-		Kernel::Auto => detect_best_kernel(),
-		Kernel::Scalar => Kernel::Scalar,
-		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-		Kernel::Avx2 => Kernel::Avx2,
-		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-		Kernel::Avx512 => Kernel::Avx512,
-		Kernel::ScalarBatch => Kernel::Scalar,
-		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-		Kernel::Avx2Batch => Kernel::Avx2,
-		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-		Kernel::Avx512Batch => Kernel::Avx512,
-		_ => Kernel::Scalar, // Fallback to scalar
+		Kernel::Auto => detect_best_batch_kernel(),
+		other if other.is_batch() => other,
+		other => other, // allow explicit per-row kernels for tests
 	};
-	trima_batch_par_slice(data, sweep, kernel)
+
+	// Map batch selector to per-row compute kernel (ALMA pattern)
+	let simd = match kernel {
+		Kernel::Avx512Batch => Kernel::Avx512,
+		Kernel::Avx2Batch   => Kernel::Avx2,
+		Kernel::ScalarBatch => Kernel::Scalar,
+		Kernel::Avx512 | Kernel::Avx2 | Kernel::Scalar => kernel,
+		_ => Kernel::Scalar,
+	};
+
+	trima_batch_par_slice(data, sweep, simd)
 }
 
 #[derive(Clone, Debug)]
@@ -784,7 +784,14 @@ fn trima_batch_inner(
 	}
 
 	// ---------- 5. convert Vec<MaybeUninit<f64>> → Vec<f64> ----------
-	let values: Vec<f64> = unsafe { core::mem::transmute(raw) };
+	let mut buf_guard = core::mem::ManuallyDrop::new(raw);
+	let values = unsafe {
+		Vec::from_raw_parts(
+			buf_guard.as_mut_ptr() as *mut f64,
+			buf_guard.len(),
+			buf_guard.capacity(),
+		)
+	};
 
 	Ok(TrimaBatchOutput {
 		values,
@@ -818,48 +825,41 @@ pub fn trima_batch_inner_into(
 
 	let rows = combos.len();
 	let cols = data.len();
-	
-	// Initialize warmup periods
-	for (row, combo) in combos.iter().enumerate() {
-		let period = combo.period.unwrap();
-		let warmup = first + period - 1;
-		let row_start = row * cols;
-		for i in 0..warmup.min(cols) {
-			out[row_start + i] = f64::NAN;
-		}
-	}
 
-	// Closure that computes one row
-	let do_row = |row: usize, out_slice: &mut [f64]| {
+	// Stamp warm prefixes via helper on the destination buffer
+	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
+	let out_mu = unsafe {
+		core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
+	};
+	init_matrix_prefixes(out_mu, cols, &warm);
+
+	// Per-row writer (cast to f64 slice only for the row)
+	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
 		let period = combos[row].period.unwrap();
-		unsafe {
-			match kern {
-				Kernel::Scalar => trima_row_scalar(data, first, period, 0, core::ptr::null(), 1.0, out_slice),
-				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-				Kernel::Avx2 => trima_row_avx2(data, first, period, 0, core::ptr::null(), 1.0, out_slice),
-				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-				Kernel::Avx512 => trima_row_avx512(data, first, period, 0, core::ptr::null(), 1.0, out_slice),
-				_ => trima_row_scalar(data, first, period, 0, core::ptr::null(), 1.0, out_slice),
-			}
+		let out_row = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
+		match kern {
+			Kernel::Scalar => trima_row_scalar(data, first, period, 0, core::ptr::null(), 1.0, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2    => trima_row_avx2   (data, first, period, 0, core::ptr::null(), 1.0, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512  => trima_row_avx512 (data, first, period, 0, core::ptr::null(), 1.0, out_row),
+			_ => trima_row_scalar(data, first, period, 0, core::ptr::null(), 1.0, out_row),
 		}
 	};
 
-	// Run every row (parallel or serial)
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			out.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
+			out_mu.par_chunks_mut(cols).enumerate().for_each(|(row, slice)| do_row(row, slice));
 		}
 		#[cfg(target_arch = "wasm32")]
 		{
-			for (row, slice) in out.chunks_mut(cols).enumerate() {
+			for (row, slice) in out_mu.chunks_mut(cols).enumerate() {
 				do_row(row, slice);
 			}
 		}
 	} else {
-		for (row, slice) in out.chunks_mut(cols).enumerate() {
+		for (row, slice) in out_mu.chunks_mut(cols).enumerate() {
 			do_row(row, slice);
 		}
 	}
@@ -973,35 +973,40 @@ pub fn trima_batch_py<'py>(
 	use pyo3::types::PyDict;
 
 	let slice_in = data.as_slice()?;
-	let kern = validate_kernel(kernel, true)?;  // true for batch operations
-
 	let sweep = TrimaBatchRange { period: period_range };
 
-	// Heavy work without the GIL
-	let output = py
-		.allow_threads(|| -> Result<TrimaBatchOutput, TrimaError> { trima_batch_with_kernel(slice_in, &sweep, kern) })
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = slice_in.len();
+
+	// Pre-allocate NumPy output and write into it directly
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+	// Resolve kernel like ALMA
+	let kern = validate_kernel(kernel, true)?;
+	let kern = match kern {
+		Kernel::Auto => detect_best_batch_kernel(),
+		k => k,
+	};
+	let simd = match kern {
+		Kernel::Avx512Batch => Kernel::Avx512,
+		Kernel::Avx2Batch   => Kernel::Avx2,
+		Kernel::ScalarBatch => Kernel::Scalar,
+		Kernel::Avx512 | Kernel::Avx2 | Kernel::Scalar => kern,
+		_ => Kernel::Scalar,
+	};
+
+	let combos = py
+		.allow_threads(|| trima_batch_inner_into(slice_in, &sweep, simd, true, slice_out))
 		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-	// Build output dict
 	let dict = PyDict::new(py);
-
-	// Convert values to NumPy array and reshape
-	dict.set_item(
-		"values",
-		output.values.into_pyarray(py).reshape((output.rows, output.cols))?,
-	)?;
-
-	// Extract periods from combos
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
 	dict.set_item(
 		"periods",
-		output
-			.combos
-			.iter()
-			.map(|p| p.period.unwrap_or(30) as u64)
-			.collect::<Vec<_>>()
-			.into_pyarray(py),
+		combos.iter().map(|p| p.period.unwrap_or(30) as u64).collect::<Vec<_>>().into_pyarray(py),
 	)?;
-
 	Ok(dict)
 }
 
@@ -1054,12 +1059,11 @@ pub struct TrimaBatchJsOutput {
 pub fn trima_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
 	let config: TrimaBatchConfig =
 		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	let sweep = TrimaBatchRange { period: config.period_range };
 
-	let sweep = TrimaBatchRange {
-		period: config.period_range,
-	};
-
-	let output = trima_batch_inner(data, &sweep, Kernel::Auto, false).map_err(|e| JsValue::from_str(&e.to_string()))?;
+	// resolve per-row kernel for batch like ALMA
+	let output = trima_batch_inner(data, &sweep, detect_best_kernel(), false)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	let js_output = TrimaBatchJsOutput {
 		values: output.values,
@@ -1067,7 +1071,6 @@ pub fn trima_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, 
 		rows: output.rows,
 		cols: output.cols,
 	};
-
 	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
@@ -1149,30 +1152,26 @@ pub fn trima_into(
 	if in_ptr.is_null() || out_ptr.is_null() {
 		return Err(JsValue::from_str("null pointer passed to trima_into"));
 	}
-
 	unsafe {
 		let data = std::slice::from_raw_parts(in_ptr, len);
-
 		if period == 0 || period > len {
 			return Err(JsValue::from_str("Invalid period"));
 		}
-
-		let params = TrimaParams {
-			period: Some(period),
-		};
-
-		let out = std::slice::from_raw_parts_mut(out_ptr, len);
-		
+		let params = TrimaParams { period: Some(period) };
 		if in_ptr == out_ptr {
-			// For in-place computation, we need to copy data to a temp buffer
-			let temp_data = Vec::from(data);
-			let temp_input = TrimaInput::from_slice(&temp_data, params);
-			trima_into_slice(out, &temp_input, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))?;
+			// compute into a temp result buffer, then copy
+			let mut temp = vec![0.0; len];
+			let input = TrimaInput::from_slice(data, params);
+			trima_into_slice(&mut temp, &input, detect_best_kernel())
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
 		} else {
 			let input = TrimaInput::from_slice(data, params);
-			trima_into_slice(out, &input, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			trima_into_slice(out, &input, detect_best_kernel())
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 		}
-
 		Ok(())
 	}
 }

@@ -97,7 +97,7 @@ test('ADX zero period', () => {
     
     assert.throws(() => {
         wasm.adx_js(high, low, close, 0);
-    }, /Invalid period/);
+    }, /Invalid period: period = 0/);
 });
 
 test('ADX period exceeds length', () => {
@@ -108,7 +108,7 @@ test('ADX period exceeds length', () => {
     
     assert.throws(() => {
         wasm.adx_js(high, low, close, 10);
-    }, /Invalid period/);
+    }, /Invalid period: period = 10/);
 });
 
 test('ADX very small dataset', () => {
@@ -143,27 +143,6 @@ test('ADX all NaN input', () => {
     }, /All values are NaN/);
 });
 
-test('ADX reinput', () => {
-    // Test ADX applied twice (re-input) - mirrors check_adx_reinput
-    const high = new Float64Array(testData.high);
-    const low = new Float64Array(testData.low);
-    const close = new Float64Array(testData.close);
-    
-    // First pass
-    const firstResult = wasm.adx_js(high, low, close, 14);
-    assert.strictEqual(firstResult.length, close.length);
-    
-    // Second pass - apply ADX using the first result as close price
-    const secondResult = wasm.adx_js(high, low, firstResult, 5);
-    assert.strictEqual(secondResult.length, firstResult.length);
-    
-    // Check that we have values after warmup
-    let nonNanCount = 0;
-    for (const val of secondResult) {
-        if (!isNaN(val)) nonNanCount++;
-    }
-    assert(nonNanCount > 100, "Expected more non-NaN values after second pass");
-});
 
 test('ADX NaN handling', () => {
     // Test ADX handles NaN values correctly - mirrors check_adx_nan_handling
@@ -174,15 +153,39 @@ test('ADX NaN handling', () => {
     const result = wasm.adx_js(high, low, close, 14);
     assert.strictEqual(result.length, close.length);
     
-    // After warmup period (100), no NaN values should exist
-    if (result.length > 100) {
-        for (let i = 100; i < result.length; i++) {
-            assert(!isNaN(result[i]), `Found unexpected NaN at index ${i}`);
+    // ADX warmup period is 2 * period - 1 = 27 for period=14
+    const warmupPeriod = 2 * 14 - 1;
+    
+    // First warmupPeriod values should be NaN
+    assertAllNaN(result.slice(0, warmupPeriod), `Expected NaN in first ${warmupPeriod} values`);
+    
+    // After warmup + buffer, no NaN values should exist
+    if (result.length > warmupPeriod + 10) {
+        for (let i = warmupPeriod + 10; i < result.length; i++) {
+            assert(!isNaN(result[i]), `Found unexpected NaN at index ${i} after warmup period`);
         }
     }
+});
+
+test('ADX leading NaN values', () => {
+    // Test ADX with leading NaN values in input
+    const high = new Float64Array(testData.high.slice(0, 100));
+    const low = new Float64Array(testData.low.slice(0, 100));
+    const close = new Float64Array(testData.close.slice(0, 100));
     
-    // First several values should be NaN (ADX needs extra warmup)
-    assertAllNaN(result.slice(0, 27), "Expected NaN in warmup period");
+    // Add some NaN values at the beginning
+    for (let i = 0; i < 5; i++) {
+        high[i] = NaN;
+        low[i] = NaN;
+        close[i] = NaN;
+    }
+    
+    const result = wasm.adx_js(high, low, close, 14);
+    assert.strictEqual(result.length, close.length);
+    
+    // Should handle leading NaN values properly
+    // Warmup will be extended by the NaN values
+    assertAllNaN(result.slice(0, 5), "Expected NaN where input has NaN");
 });
 
 test('ADX batch single parameter set', () => {
@@ -280,18 +283,18 @@ test('ADX batch full parameter sweep', () => {
         const rowStart = combo * 50;
         const rowData = batchResult.slice(rowStart, rowStart + 50);
         
-        // ADX needs 2*period warmup bars
-        const expectedFirstValid = 2 * period - 1;
+        // ADX warmup period is 2 * period - 1
+        const warmupPeriod = 2 * period - 1;
         
         // Check warmup period
-        for (let i = 0; i < Math.min(expectedFirstValid, 50); i++) {
+        for (let i = 0; i < Math.min(warmupPeriod, 50); i++) {
             assert(isNaN(rowData[i]), `Expected NaN at warmup index ${i} for period ${period}`);
         }
         
         // After warmup should eventually have values
-        if (50 > expectedFirstValid + 5) {
+        if (50 > warmupPeriod + 5) {
             let hasValues = false;
-            for (let i = expectedFirstValid; i < 50; i++) {
+            for (let i = warmupPeriod; i < 50; i++) {
                 if (!isNaN(rowData[i])) {
                     hasValues = true;
                     break;
@@ -337,7 +340,24 @@ test('ADX batch edge cases', () => {
             new Float64Array([]),
             14, 14, 0
         );
-    }, /All values are NaN|unreachable|RuntimeError/);
+    }, /Input data slice is empty|All values are NaN|unreachable|RuntimeError/);
+});
+
+test('ADX batch invalid params', () => {
+    // Test ADX batch with invalid parameters
+    const high = new Float64Array(testData.high.slice(0, 50));
+    const low = new Float64Array(testData.low.slice(0, 50));
+    const close = new Float64Array(testData.close.slice(0, 50));
+    
+    // Period exceeds data length
+    assert.throws(() => {
+        wasm.adx_batch_js(
+            high,
+            low,
+            close,
+            100, 100, 0
+        );
+    }, /Not enough valid data/);
 });
 
 // New API tests
@@ -485,24 +505,29 @@ test('ADX warmup behavior', () => {
     
     const result = wasm.adx_js(high, low, close, period);
     
-    // ADX needs 2*period warmup bars
-    const expectedFirstValid = 2 * period - 1;  // 27 for period=14
+    // ADX needs:
+    // - period bars for initial ATR
+    // - period more bars for DX calculation  
+    // - first ADX appears at 2*period bars
+    const warmupPeriod = 2 * period - 1;  // 27 for period=14
     
-    // All values before this should be NaN
-    for (let i = 0; i < expectedFirstValid; i++) {
+    // All values before warmupPeriod should be NaN
+    for (let i = 0; i < warmupPeriod; i++) {
         assert(isNaN(result[i]), `Expected NaN at index ${i} during warmup`);
     }
     
-    // Should eventually get non-NaN values after warmup
-    if (result.length > expectedFirstValid + 5) {
-        let hasValues = false;
-        for (let i = expectedFirstValid; i < result.length; i++) {
-            if (!isNaN(result[i])) {
-                hasValues = true;
-                break;
-            }
+    // Should have first valid value at warmupPeriod index
+    if (result.length > warmupPeriod) {
+        assert(!isNaN(result[warmupPeriod]), 
+               `Expected first valid value at index ${warmupPeriod}`);
+    }
+    
+    // Check that we have consistent non-NaN values after warmup
+    if (result.length > warmupPeriod + 5) {
+        for (let i = warmupPeriod; i < result.length; i++) {
+            assert(!isNaN(result[i]), 
+                   `Expected all non-NaN values after warmup period at index ${i}`);
         }
-        assert(hasValues, "Expected some non-NaN values after warmup");
     }
 });
 

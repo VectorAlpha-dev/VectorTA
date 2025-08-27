@@ -25,7 +25,6 @@ use crate::utilities::helpers::{
 	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, 
 	init_matrix_prefixes, make_uninit_matrix,
 };
-use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -200,6 +199,8 @@ pub enum DecyclerError {
 	AllValuesNaN,
 	#[error("decycler: Invalid k: k = {k}")]
 	InvalidK { k: f64 },
+	#[error("decycler: Invalid kernel type for batch operation")]
+	InvalidKernel,
 }
 
 #[inline]
@@ -208,7 +209,6 @@ pub fn decycler(input: &DecyclerInput) -> Result<DecyclerOutput, DecyclerError> 
 }
 
 /// Write directly to output slice - no allocations
-#[cfg(any(feature = "python", feature = "wasm"))]
 #[inline]
 pub fn decycler_into_slice(
 	out: &mut [f64],
@@ -281,34 +281,35 @@ pub fn decycler_into_slice(
 unsafe fn decycler_scalar_into(data: &[f64], hp_period: usize, k: f64, first: usize, out: &mut [f64]) -> Result<(), DecyclerError> {
 	use std::f64::consts::PI;
 	
-	// Initialize NaN prefix
-	for i in 0..first {
-		out[i] = f64::NAN;
-	}
-	
-	// We only need to keep track of the last 2 hp values
+	// Remove any prefix writes here; prefix NaNs are handled by caller
 	let mut hp_prev2 = 0.0;
 	let mut hp_prev1 = 0.0;
 	
 	let angle = 2.0 * PI * k / (hp_period as f64);
 	let sin_val = angle.sin();
 	let cos_val = angle.cos();
-	let alpha = 1.0 + ((sin_val - 1.0) / cos_val);
+	// Add epsilon guard to avoid division by near-zero
+	const EPSILON: f64 = 1e-10;
+	let cos_safe = if cos_val.abs() < EPSILON {
+		EPSILON.copysign(cos_val)
+	} else {
+		cos_val
+	};
+	let alpha = 1.0 + ((sin_val - 1.0) / cos_safe);
 	let one_minus_alpha_half = 1.0 - alpha / 2.0;
 	let c = one_minus_alpha_half * one_minus_alpha_half;
 	let one_minus_alpha = 1.0 - alpha;
 	let one_minus_alpha_sq = one_minus_alpha * one_minus_alpha;
 
+	// Initialize internal state only; DO NOT write to output
 	if data.len() > first {
-		let hp_val = data[first];
-		hp_prev2 = hp_val;
-		out[first] = data[first] - hp_val;
+		hp_prev2 = data[first];
 	}
 	if data.len() > (first + 1) {
-		let hp_val = data[first + 1];
-		hp_prev1 = hp_val;
-		out[first + 1] = data[first + 1] - hp_val;
+		hp_prev1 = data[first + 1];
 	}
+	
+	// Start writing results only from first+2 onwards
 	for i in (first + 2)..data.len() {
 		let current = data[i];
 		let prev1 = data[i - 1];
@@ -389,22 +390,28 @@ pub fn decycler_scalar(data: &[f64], hp_period: usize, k: f64, first: usize) -> 
 	let angle = 2.0 * PI * k / (hp_period as f64);
 	let sin_val = angle.sin();
 	let cos_val = angle.cos();
-	let alpha = 1.0 + ((sin_val - 1.0) / cos_val);
+	// Add epsilon guard to avoid division by near-zero
+	const EPSILON: f64 = 1e-10;
+	let cos_safe = if cos_val.abs() < EPSILON {
+		EPSILON.copysign(cos_val)
+	} else {
+		cos_val
+	};
+	let alpha = 1.0 + ((sin_val - 1.0) / cos_safe);
 	let one_minus_alpha_half = 1.0 - alpha / 2.0;
 	let c = one_minus_alpha_half * one_minus_alpha_half;
 	let one_minus_alpha = 1.0 - alpha;
 	let one_minus_alpha_sq = one_minus_alpha * one_minus_alpha;
 
+	// Initialize internal state only; DO NOT write to out[first..first+2]
 	if data.len() > first {
-		let hp_val = data[first];
-		hp_prev2 = hp_val;
-		out[first] = data[first] - hp_val;
+		hp_prev2 = data[first];
 	}
 	if data.len() > (first + 1) {
-		let hp_val = data[first + 1];
-		hp_prev1 = hp_val;
-		out[first + 1] = data[first + 1] - hp_val;
+		hp_prev1 = data[first + 1];
 	}
+	
+	// Start writing results only from first+2 onwards
 	for i in (first + 2)..data.len() {
 		let current = data[i];
 		let prev1 = data[i - 1];
@@ -467,7 +474,7 @@ pub fn decycler_batch_with_kernel(
 	let kernel = match k {
 		Kernel::Auto => detect_best_batch_kernel(),
 		other if other.is_batch() => other,
-		_ => return Err(DecyclerError::InvalidPeriod { period: 0, data_len: 0 }),
+		_ => return Err(DecyclerError::InvalidKernel),
 	};
 	let simd = match kernel {
 		Kernel::Avx512Batch => Kernel::Avx512,
@@ -509,7 +516,14 @@ impl DecyclerStream {
 		let angle = 2.0 * PI * k / (hp_period as f64);
 		let sin_val = angle.sin();
 		let cos_val = angle.cos();
-		let alpha = 1.0 + ((sin_val - 1.0) / cos_val);
+		// Add epsilon guard to avoid division by near-zero
+		const EPSILON: f64 = 1e-10;
+		let cos_safe = if cos_val.abs() < EPSILON {
+			EPSILON.copysign(cos_val)
+		} else {
+			cos_val
+		};
+		let alpha = 1.0 + ((sin_val - 1.0) / cos_safe);
 		let one_minus_alpha_half = 1.0 - alpha / 2.0;
 		let c = one_minus_alpha_half * one_minus_alpha_half;
 		let one_minus_alpha = 1.0 - alpha;
@@ -529,8 +543,14 @@ impl DecyclerStream {
 	}
 	#[inline(always)]
 	pub fn update(&mut self, value: f64) -> Option<f64> {
+		// Skip leading NaNs
+		if value.is_nan() && self.idx == 0 {
+			return None;
+		}
+		
 		let idx0 = self.idx % self.hp_period;
 		self.buffer[idx0] = value;
+		
 		if self.idx == 0 {
 			self.hp[idx0] = value;
 		} else if self.idx == 1 {
@@ -544,16 +564,16 @@ impl DecyclerStream {
 				- self.one_minus_alpha_sq * hp_prev2;
 			self.hp[idx0] = val;
 		}
-		let out = if self.idx < 2 {
-			value - self.hp[idx0]
-		} else {
-			value - self.hp[idx0]
-		};
+		
+		let out_val = value - self.hp[idx0];
 		self.idx += 1;
-		if self.idx >= self.hp_period {
-			self.filled = true;
+		
+		// Return None for warmup period (first + 2), matching offline behavior
+		if self.idx > 2 {
+			Some(out_val)
+		} else {
+			None
 		}
-		Some(out)
 	}
 }
 
@@ -705,81 +725,32 @@ fn decycler_batch_inner(
 	parallel: bool,
 ) -> Result<DecyclerBatchOutput, DecyclerError> {
 	let combos = expand_grid(sweep);
-	if combos.is_empty() {
-		return Err(DecyclerError::InvalidPeriod { period: 0, data_len: 0 });
-	}
-	let first = data
-		.iter()
-		.position(|x| !x.is_nan())
-		.ok_or(DecyclerError::AllValuesNaN)?;
-	let max_p = combos.iter().map(|c| c.hp_period.unwrap()).max().unwrap();
-	if data.len() - first < max_p {
-		return Err(DecyclerError::NotEnoughValidData {
-			needed: max_p,
-			valid: data.len() - first,
-		});
+	let cols = data.len();
+	if cols == 0 { 
+		return Err(DecyclerError::EmptyData); 
 	}
 	let rows = combos.len();
-	let cols = data.len();
-	
-	// Use matrix helpers instead of direct allocation
-	let mut buffer = make_uninit_matrix(rows, cols);
-	
-	// Calculate warmup periods for each row
-	let warmup_periods: Vec<usize> = combos.iter()
-		.map(|_| first + 2)  // Each row needs warmup of first + 2
-		.collect();
-	
-	// Initialize NaN prefixes
-	init_matrix_prefixes(&mut buffer, cols, &warmup_periods);
-	
-	// Convert to initialized memory for processing
-	let mut values = unsafe {
-		use std::mem::ManuallyDrop;
-		let mut v = ManuallyDrop::new(buffer);
-		Vec::from_raw_parts(v.as_mut_ptr() as *mut f64, v.len(), v.capacity())
+
+	// Allocate once, set per-row warmups, then compute into place
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+
+	// Decycler warmup is first + 2 for all rows
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(DecyclerError::AllValuesNaN)?;
+	let warm: Vec<usize> = combos.iter().map(|_| first + 2).collect();
+	init_matrix_prefixes(&mut buf_mu, cols, &warm);
+
+	let mut guard = core::mem::ManuallyDrop::new(buf_mu);
+	let out_f64: &mut [f64] = unsafe {
+		std::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len())
 	};
 
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-		let hp_period = combos[row].hp_period.unwrap();
-		let k = combos[row].k.unwrap();
-		match kern {
-			Kernel::Scalar => decycler_row_scalar(data, first, hp_period, k, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => decycler_row_avx2(data, first, hp_period, k, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => decycler_row_avx512(data, first, hp_period, k, out_row),
-			_ => unreachable!(),
-		}
+	let combos = decycler_batch_inner_into(data, sweep, kern, parallel, out_f64)?;
+
+	let values = unsafe {
+		Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, guard.len(), guard.capacity())
 	};
 
-	if parallel {
-		#[cfg(not(target_arch = "wasm32"))]
-		{
-			values
-				.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
-		}
-
-		#[cfg(target_arch = "wasm32")]
-		{
-			for (row, slice) in values.chunks_mut(cols).enumerate() {
-				do_row(row, slice);
-			}
-		}
-	} else {
-		for (row, slice) in values.chunks_mut(cols).enumerate() {
-			do_row(row, slice);
-		}
-	}
-
-	Ok(DecyclerBatchOutput {
-		values,
-		combos,
-		rows,
-		cols,
-	})
+	Ok(DecyclerBatchOutput { values, combos, rows, cols })
 }
 
 #[inline(always)]
@@ -793,22 +764,28 @@ unsafe fn decycler_row_scalar(data: &[f64], first: usize, hp_period: usize, k: f
 	let angle = 2.0 * PI * k / (hp_period as f64);
 	let sin_val = angle.sin();
 	let cos_val = angle.cos();
-	let alpha = 1.0 + ((sin_val - 1.0) / cos_val);
+	// Add epsilon guard to avoid division by near-zero
+	const EPSILON: f64 = 1e-10;
+	let cos_safe = if cos_val.abs() < EPSILON {
+		EPSILON.copysign(cos_val)
+	} else {
+		cos_val
+	};
+	let alpha = 1.0 + ((sin_val - 1.0) / cos_safe);
 	let one_minus_alpha_half = 1.0 - alpha / 2.0;
 	let c = one_minus_alpha_half * one_minus_alpha_half;
 	let one_minus_alpha = 1.0 - alpha;
 	let one_minus_alpha_sq = one_minus_alpha * one_minus_alpha;
 
+	// Initialize internal state only; DO NOT write to output
 	if data.len() > first {
-		let hp_val = data[first];
-		hp_prev2 = hp_val;
-		out[first] = data[first] - hp_val;
+		hp_prev2 = data[first];
 	}
 	if data.len() > (first + 1) {
-		let hp_val = data[first + 1];
-		hp_prev1 = hp_val;
-		out[first + 1] = data[first + 1] - hp_val;
+		hp_prev1 = data[first + 1];
 	}
+	
+	// Start writing results only from first+2 onwards
 	for i in (first + 2)..data.len() {
 		let current = data[i];
 		let prev1 = data[i - 1];
@@ -1596,9 +1573,9 @@ pub fn decycler_batch_py<'py>(
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
 	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
 	use pyo3::types::PyDict;
+	use std::mem::MaybeUninit;
 
 	let slice_in = data.as_slice()?;
-
 	let sweep = DecyclerBatchRange {
 		hp_period: hp_period_range,
 		k: k_range,
@@ -1608,9 +1585,20 @@ pub fn decycler_batch_py<'py>(
 	let rows = combos.len();
 	let cols = slice_in.len();
 
+	// Preallocate 1D buffer, zero-copy reshape later
 	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
 	let slice_out = unsafe { out_arr.as_slice_mut()? };
-
+	
+	// Initialize NaN prefixes for each row
+	let first = slice_in.iter().position(|x| !x.is_nan()).unwrap_or(0);
+	let warmup = first + 2;
+	for row in 0..rows {
+		let row_start = row * cols;
+		for i in 0..warmup.min(cols) {
+			slice_out[row_start + i] = f64::NAN;
+		}
+	}
+	
 	let kern = validate_kernel(kernel, true)?;
 
 	let combos = py
@@ -1649,8 +1637,7 @@ pub fn decycler_batch_py<'py>(
 	)?;
 	dict.set_item("rows", rows)?;
 	dict.set_item("cols", cols)?;
-
-	Ok(dict.to_owned())
+	Ok(dict)
 }
 
 #[inline(always)]
@@ -1681,47 +1668,30 @@ fn decycler_batch_inner_into(
 	let rows = combos.len();
 	let cols = data.len();
 
-	// Initialize NaN prefixes for each row based on warmup period
-	for (row, _combo) in combos.iter().enumerate() {
-		let warmup = first + 2;  // Each row needs warmup of first + 2
-		let row_start = row * cols;
-		for i in 0..warmup.min(cols) {
-			out[row_start + i] = f64::NAN;
-		}
-	}
+	// Treat out as MaybeUninit to allow caller to set NaN prefixes via init_matrix_prefixes
+	let out_mu = unsafe {
+		std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
+	};
 
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
 		let hp_period = combos[row].hp_period.unwrap();
 		let k = combos[row].k.unwrap();
+		let dst = std::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
+
 		match kern {
-			Kernel::Scalar => decycler_row_scalar(data, first, hp_period, k, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => decycler_row_avx2(data, first, hp_period, k, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => decycler_row_avx512(data, first, hp_period, k, out_row),
-			_ => unreachable!(),
+			Kernel::Scalar | Kernel::ScalarBatch => decycler_row_scalar(data, first, hp_period, k, dst),
+			_ => decycler_row_scalar(data, first, hp_period, k, dst),
 		}
 	};
 
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
-		{
-			out
-				.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
-		}
+		out_mu.par_chunks_mut(cols).enumerate().for_each(|(r, s)| do_row(r, s));
 
 		#[cfg(target_arch = "wasm32")]
-		{
-			for (row, slice) in out.chunks_mut(cols).enumerate() {
-				do_row(row, slice);
-			}
-		}
+		for (r, s) in out_mu.chunks_mut(cols).enumerate() { do_row(r, s); }
 	} else {
-		for (row, slice) in out.chunks_mut(cols).enumerate() {
-			do_row(row, slice);
-		}
+		for (r, s) in out_mu.chunks_mut(cols).enumerate() { do_row(r, s); }
 	}
 
 	Ok(combos)
@@ -1739,11 +1709,9 @@ pub fn decycler_js(data: &[f64], hp_period: usize, k: f64) -> Result<Vec<f64>, J
 		k: Some(k),
 	};
 	let input = DecyclerInput::from_slice(data, params);
-	
-	let mut output = vec![0.0; data.len()]; // Single allocation
-	decycler_into_slice(&mut output, &input, Kernel::Auto)
+	let mut output = vec![0.0; data.len()];
+	decycler_into_slice(&mut output, &input, detect_best_kernel())
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
-	
 	Ok(output)
 }
 
@@ -1757,7 +1725,7 @@ pub fn decycler_into(
 	k: f64,
 ) -> Result<(), JsValue> {
 	if in_ptr.is_null() || out_ptr.is_null() {
-		return Err(JsValue::from_str("Null pointer provided"));
+		return Err(JsValue::from_str("null pointer"));
 	}
 	
 	unsafe {
@@ -1768,19 +1736,17 @@ pub fn decycler_into(
 		};
 		let input = DecyclerInput::from_slice(data, params);
 		
-		if in_ptr == out_ptr as *const f64 { // CRITICAL: Aliasing check
-			let mut temp = vec![0.0; len];
-			decycler_into_slice(&mut temp, &input, Kernel::Auto)
+		if in_ptr == out_ptr as *const f64 {
+			let mut tmp = vec![0.0; len];
+			decycler_into_slice(&mut tmp, &input, detect_best_kernel())
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
-			let out = std::slice::from_raw_parts_mut(out_ptr, len);
-			out.copy_from_slice(&temp);
+			std::slice::from_raw_parts_mut(out_ptr, len).copy_from_slice(&tmp);
 		} else {
-			let out = std::slice::from_raw_parts_mut(out_ptr, len);
-			decycler_into_slice(out, &input, Kernel::Auto)
+			decycler_into_slice(std::slice::from_raw_parts_mut(out_ptr, len), &input, detect_best_kernel())
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 		}
-		Ok(())
 	}
+	Ok(())
 }
 
 #[cfg(feature = "wasm")]
@@ -1820,28 +1786,26 @@ pub struct DecyclerBatchJsOutput {
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = decycler_batch)]
-pub fn decycler_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
-	let config: DecyclerBatchConfig = serde_wasm_bindgen::from_value(config)
+pub fn decycler_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let cfg: DecyclerBatchConfig = serde_wasm_bindgen::from_value(config)
 		.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
 	
 	let sweep = DecyclerBatchRange {
-		hp_period: config.hp_period_range,
-		k: config.k_range,
+		hp_period: cfg.hp_period_range,
+		k: cfg.k_range,
 	};
 	
-	match decycler_batch_with_kernel(data, &sweep, Kernel::Auto) {
-		Ok(result) => {
-			let output = DecyclerBatchJsOutput {
-				values: result.values,
-				combos: result.combos,
-				rows: result.rows,
-				cols: result.cols,
-			};
-			serde_wasm_bindgen::to_value(&output)
-				.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
-		}
-		Err(e) => Err(JsValue::from_str(&e.to_string())),
-	}
+	let out = decycler_batch_inner(data, &sweep, detect_best_kernel(), false)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	let js = DecyclerBatchJsOutput {
+		values: out.values,
+		combos: out.combos,
+		rows: out.rows,
+		cols: out.cols,
+	};
+	serde_wasm_bindgen::to_value(&js)
+		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 #[cfg(feature = "wasm")]
@@ -1850,46 +1814,29 @@ pub fn decycler_batch_into(
 	in_ptr: *const f64,
 	out_ptr: *mut f64,
 	len: usize,
-	hp_period_start: usize,
-	hp_period_end: usize,
-	hp_period_step: usize,
+	hp_start: usize,
+	hp_end: usize,
+	hp_step: usize,
 	k_start: f64,
 	k_end: f64,
 	k_step: f64,
 ) -> Result<usize, JsValue> {
 	if in_ptr.is_null() || out_ptr.is_null() {
-		return Err(JsValue::from_str("Null pointer provided"));
+		return Err(JsValue::from_str("null pointer"));
 	}
 	
 	unsafe {
 		let data = std::slice::from_raw_parts(in_ptr, len);
 		let sweep = DecyclerBatchRange {
-			hp_period: (hp_period_start, hp_period_end, hp_period_step),
+			hp_period: (hp_start, hp_end, hp_step),
 			k: (k_start, k_end, k_step),
 		};
-		
 		let combos = expand_grid(&sweep);
 		let rows = combos.len();
 		let cols = len;
-		let total_size = rows * cols;
-		
-		let out = std::slice::from_raw_parts_mut(out_ptr, total_size);
-		
-		// Check if we have aliasing
-		let data_ptr_range = in_ptr as usize..(in_ptr as usize + len * std::mem::size_of::<f64>());
-		let out_ptr_range = out_ptr as usize..(out_ptr as usize + total_size * std::mem::size_of::<f64>());
-		
-		if data_ptr_range.start < out_ptr_range.end && out_ptr_range.start < data_ptr_range.end {
-			// Ranges overlap - need to use temporary buffer
-			let result = decycler_batch_with_kernel(data, &sweep, Kernel::Auto)
-				.map_err(|e| JsValue::from_str(&e.to_string()))?;
-			out.copy_from_slice(&result.values);
-		} else {
-			// No overlap - can write directly
-			decycler_batch_inner_into(data, &sweep, detect_best_kernel(), true, out)
-				.map_err(|e| JsValue::from_str(&e.to_string()))?;
-		}
-		
+		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+		decycler_batch_inner_into(data, &sweep, detect_best_kernel(), false, out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
 		Ok(rows)
 	}
 }

@@ -106,6 +106,59 @@ const EXPECTED_OUTPUTS = {
             59165.14427332
         ]
     },
+    donchian: {
+        defaultParams: { period: 20 },
+        last5Upper: [61290.0, 61290.0, 61290.0, 61290.0, 61290.0],
+        last5Middle: [59583.0, 59583.0, 59583.0, 59583.0, 59583.0],
+        last5Lower: [57876.0, 57876.0, 57876.0, 57876.0, 57876.0],
+        // Re-input test: Apply Donchian to the middle band output
+        reinputLast5Upper: [61700.0, 61700.0, 61700.0, 61642.5, 61642.5],
+        reinputLast5Middle: [60641.5, 60641.5, 60641.5, 60612.75, 60612.75],
+        reinputLast5Lower: [59583.0, 59583.0, 59583.0, 59583.0, 59583.0],
+        warmupPeriod: 19  // period - 1
+    },
+    trima: {
+        defaultParams: { period: 30 },
+        last5Values: [
+            59957.916666666664,
+            59846.770833333336,
+            59750.620833333334,
+            59665.2125,
+            59581.612499999996
+        ],
+        // Re-input test expected values (period=10 on first pass result)
+        reinputLast5: [
+            60750.01069444444,
+            60552.44180555555,
+            60372.22486111111,
+            60210.39555555556,
+            60066.62458333334
+        ],
+        warmupPeriod: 29  // period - 1
+    },
+    msw: {
+        defaultParams: { period: 5 },
+        last5Sine: [
+            -0.49733966449848194,
+            -0.8909425976991894,
+            -0.709353328514554,
+            -0.40483478076837887,
+            -0.8817006719953886
+        ],
+        last5Lead: [
+            -0.9651269132969991,
+            -0.30888310410390457,
+            -0.003182174183612666,
+            0.36030983330963545,
+            -0.28983704937461496
+        ],
+        warmupPeriod: 4  // period - 1
+    },
+    jsa: {
+        defaultParams: { period: 30 },
+        last5Values: [61640.0, 61418.0, 61240.0, 61060.5, 60889.5],
+        warmupPeriod: 30  // first_valid + period where first_valid = 0 for this data
+    },
     cg: {
         defaultParams: { period: 10 },
         last5Values: [
@@ -116,6 +169,17 @@ const EXPECTED_OUTPUTS = {
             -5.004210799262688
         ]
     },
+    chande: {
+        defaultParams: { period: 22, mult: 3.0, direction: 'long' },
+        last5Values: [
+            59444.14115983658,
+            58576.49837984401,
+            58649.1120898511,
+            58724.56154031242,
+            58713.39965211639
+        ],
+        warmupPeriod: 21  // period - 1
+    },
     cfo: {
         defaultParams: { period: 14, scalar: 100.0 },
         last5Values: [
@@ -124,6 +188,16 @@ const EXPECTED_OUTPUTS = {
             0.20349744599816233,
             0.0919617952835795,
             -0.5676291145560617
+        ]
+    },
+    mfi: {
+        defaultParams: { period: 14 },
+        last5Values: [
+            38.13874339324763,
+            37.44139770113819,
+            31.02039511395131,
+            28.092605898618896,
+            25.905204729397813
         ]
     },
     cwma: {
@@ -190,6 +264,16 @@ const EXPECTED_OUTPUTS = {
             59332.492883847
         ]
     },
+    linearreg_intercept: {
+        defaultParams: { period: 14 },
+        last5Values: [
+            60000.91428571429,
+            59947.142857142855,
+            59754.57142857143,
+            59318.4,
+            59321.91428571429
+        ]
+    },
     ema: {
         defaultParams: { period: 9 },
         lastFive: [
@@ -248,7 +332,11 @@ const EXPECTED_OUTPUTS = {
             59179.40342783722,
             59171.22758152845,
             59127.859841077094
-        ]
+        ],
+        // Re-input test expected values (period=10 on first pass result)
+        // Note: The Rust test only verifies length, not specific values
+        reinputLast5: null,  // Not verified in Rust tests
+        warmupPeriod: 13  // first + period - 1 (with no leading NaNs, first=0)
     },
     trix: {
         defaultParams: { period: 18 },
@@ -599,13 +687,13 @@ const EXPECTED_OUTPUTS = {
         ]
     },
     roc: {
-        defaultParams: { period: 10 },
+        defaultParams: { period: 9 },
         last5Values: [
-            -0.22551709049294377,
-            -0.5561903481650754,
-            -0.32752013235864963,
-            -0.49454153980722504,
-            -1.5045927020536976
+            -0.38143567683828206,
+            -0.08778890145695328,
+            -0.689666773200559,
+            -0.664976238854087,
+            0.7454354957832976
         ],
         // Reinput test just verifies no NaN after index 28
         reinputLast5: [0, 0, 0, 0, 0]  // Placeholder - test will skip this check
@@ -658,6 +746,31 @@ const EXPECTED_OUTPUTS = {
             -0.6821291938174874,
             -0.5620008722078592,
             -0.4101724140910927
+        ]
+    },
+    correl_hl: {
+        defaultParams: { period: 5 },
+        last5Values: [
+            0.04589155420456278,
+            0.6491664099299647,
+            0.9691259236943873,
+            0.9915438003818791,
+            0.8460608423095615
+        ]
+    },
+    sma: {
+        defaultParams: { period: 9 },
+        last_5_values: [59180.8, 59175.0, 59129.4, 59085.4, 59133.7],
+        reinputLast5: null  // To be calculated if needed
+    },
+    mwdx: {
+        defaultParams: { factor: 0.2 },
+        last5Values: [
+            59302.181566190935,
+            59277.94525295275,
+            59230.1562023622,
+            59215.124961889764,
+            59103.099969511815
         ]
     }
 };

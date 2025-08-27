@@ -21,10 +21,8 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
-#[cfg(not(target_arch = "wasm32"))]
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
@@ -71,25 +69,25 @@ pub struct JsaInput<'a> {
 }
 
 impl<'a> JsaInput<'a> {
-	#[inline]
+	#[inline(always)]
 	pub fn from_candles(c: &'a Candles, s: &'a str, p: JsaParams) -> Self {
 		Self {
 			data: JsaData::Candles { candles: c, source: s },
 			params: p,
 		}
 	}
-	#[inline]
+	#[inline(always)]
 	pub fn from_slice(sl: &'a [f64], p: JsaParams) -> Self {
 		Self {
 			data: JsaData::Slice(sl),
 			params: p,
 		}
 	}
-	#[inline]
+	#[inline(always)]
 	pub fn with_default_candles(c: &'a Candles) -> Self {
 		Self::from_candles(c, "close", JsaParams::default())
 	}
-	#[inline]
+	#[inline(always)]
 	pub fn get_period(&self) -> usize {
 		self.params.period.unwrap_or(30)
 	}
@@ -158,13 +156,31 @@ pub enum JsaError {
 	#[error("jsa: Not enough valid data: needed = {needed}, valid = {valid}")]
 	NotEnoughValidData { needed: usize, valid: usize },
 
-	#[error("jsa: Invalid output buffer size: expected = {expected}, actual = {actual}")]
-	InvalidOutputBuffer { expected: usize, actual: usize },
+	#[error("jsa: output length mismatch: expected = {expected}, got = {got}")]
+	OutputLenMismatch { expected: usize, got: usize },
+
+	#[error("jsa: invalid kernel for batch op: {kernel:?}")]
+	InvalidKernel { kernel: Kernel },
+
 }
 
 #[inline]
 pub fn jsa(input: &JsaInput) -> Result<JsaOutput, JsaError> {
 	jsa_with_kernel(input, Kernel::Auto)
+}
+
+#[inline(always)]
+fn jsa_compute_into(data: &[f64], period: usize, first: usize, k: Kernel, out: &mut [f64]) {
+	unsafe {
+		match k {
+			Kernel::Scalar | Kernel::ScalarBatch => jsa_scalar(data, period, first, out),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => jsa_avx2(data, period, first, out),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => jsa_avx512(data, period, first, out),
+			_ => unreachable!(),
+		}
+	}
 }
 
 pub fn jsa_with_kernel(input: &JsaInput, kernel: Kernel) -> Result<JsaOutput, JsaError> {
@@ -196,25 +212,20 @@ pub fn jsa_with_kernel(input: &JsaInput, kernel: Kernel) -> Result<JsaOutput, Js
 	let mut out = alloc_with_nan_prefix(len, warm);
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
-		other => other,
+		k => k,
 	};
-
-	unsafe {
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => jsa_scalar(data, period, first, &mut out),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => jsa_avx2(data, period, first, &mut out),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => jsa_avx512(data, period, first, &mut out),
-			_ => unreachable!(),
-		}
-	}
+	jsa_compute_into(data, period, first, chosen, &mut out);
 	Ok(JsaOutput { values: out })
 }
 
 #[inline]
 pub fn jsa_into(input: &JsaInput, out: &mut [f64]) -> Result<(), JsaError> {
 	jsa_with_kernel_into(input, Kernel::Auto, out)
+}
+
+#[inline]
+pub fn jsa_into_slice(dst: &mut [f64], input: &JsaInput, kern: Kernel) -> Result<(), JsaError> {
+	jsa_with_kernel_into(input, kern, dst)
 }
 
 pub fn jsa_with_kernel_into(input: &JsaInput, kernel: Kernel, out: &mut [f64]) -> Result<(), JsaError> {
@@ -232,10 +243,7 @@ pub fn jsa_with_kernel_into(input: &JsaInput, kernel: Kernel, out: &mut [f64]) -
 
 	// Ensure output buffer is the correct size
 	if out.len() != len {
-		return Err(JsaError::InvalidOutputBuffer {
-			expected: len,
-			actual: out.len(),
-		});
+		return Err(JsaError::OutputLenMismatch { expected: len, got: out.len() });
 	}
 
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(JsaError::AllValuesNaN)?;
@@ -258,19 +266,9 @@ pub fn jsa_with_kernel_into(input: &JsaInput, kernel: Kernel, out: &mut [f64]) -
 
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
-		other => other,
+		k => k,
 	};
-
-	unsafe {
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => jsa_scalar(data, period, first, out),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => jsa_avx2(data, period, first, out),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => jsa_avx512(data, period, first, out),
-			_ => unreachable!(),
-		}
-	}
+	jsa_compute_into(data, period, first, chosen, out);
 	Ok(())
 }
 
@@ -402,7 +400,7 @@ pub fn jsa_batch_with_kernel(data: &[f64], sweep: &JsaBatchRange, k: Kernel) -> 
 	let kernel = match k {
 		Kernel::Auto => detect_best_batch_kernel(),
 		other if other.is_batch() => other,
-		_ => return Err(JsaError::InvalidPeriod { period: 0, data_len: 0 }),
+		other => return Err(JsaError::InvalidKernel { kernel: other }),
 	};
 
 	let simd = match kernel {
@@ -494,12 +492,12 @@ fn jsa_batch_inner(
 	// -----------------------------------
 	let mut raw = make_uninit_matrix(rows, cols);
 	// fill each row’s warm prefix with quiet-NaNs
-	unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
+	init_matrix_prefixes(&mut raw, cols, &warm);
 
 	// Resolve Auto kernel before use
-	let chosen_kernel = match kern {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
+	let actual_kern = match kern {
+		Kernel::Auto => detect_best_batch_kernel(),
+		k => k,
 	};
 
 	// -----------------------------------
@@ -511,12 +509,12 @@ fn jsa_batch_inner(
 		// cast this row to &mut [f64] for the SIMD/scalar kernels
 		let out_row = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
-		match chosen_kernel {
-			Kernel::Scalar | Kernel::ScalarBatch => jsa_row_scalar(data, first, period, out_row),
+		match actual_kern {
+			Kernel::ScalarBatch | Kernel::Scalar => jsa_row_scalar(data, first, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => jsa_row_avx2(data, first, period, out_row),
+			Kernel::Avx2Batch | Kernel::Avx2 => jsa_row_avx2(data, first, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => jsa_row_avx512(data, first, period, out_row),
+			Kernel::Avx512Batch | Kernel::Avx512 => jsa_row_avx512(data, first, period, out_row),
 			_ => unreachable!(),
 		}
 	};
@@ -547,7 +545,16 @@ fn jsa_batch_inner(
 	// -----------------------------------
 	// 5.  transmute to Vec<f64> (all cells written)
 	// -----------------------------------
-	let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
+	use core::mem::ManuallyDrop;
+
+	let mut buf_guard = ManuallyDrop::new(raw);
+	let values = unsafe {
+		Vec::from_raw_parts(
+			buf_guard.as_mut_ptr() as *mut f64,
+			buf_guard.len(),
+			buf_guard.capacity(),
+		)
+	};
 
 	Ok(JsaBatchOutput {
 		values,
@@ -587,34 +594,31 @@ fn jsa_batch_inner_into(
 
 	// Ensure output buffer is the correct size
 	if out.len() != rows * cols {
-		return Err(JsaError::InvalidOutputBuffer {
-			expected: rows * cols,
-			actual: out.len(),
-		});
+		return Err(JsaError::OutputLenMismatch { expected: rows * cols, got: out.len() });
 	}
 
 	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
 
 	// Cast output to MaybeUninit for initialization
 	let out_uninit = unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len()) };
-	unsafe { init_matrix_prefixes(out_uninit, cols, &warm) };
+	init_matrix_prefixes(out_uninit, cols, &warm);
 
 	// Resolve Auto kernel before use
-	let chosen_kernel = match kern {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
+	let actual_kern = match kern {
+		Kernel::Auto => detect_best_batch_kernel(),
+		k => k,
 	};
 
 	// ---------- closure that fills ONE row ---------------------------
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
 
-		match chosen_kernel {
-			Kernel::Scalar | Kernel::ScalarBatch => jsa_row_scalar(data, first, period, out_row),
+		match actual_kern {
+			Kernel::ScalarBatch | Kernel::Scalar => jsa_row_scalar(data, first, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => jsa_row_avx2(data, first, period, out_row),
+			Kernel::Avx2Batch | Kernel::Avx2 => jsa_row_avx2(data, first, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => jsa_row_avx512(data, first, period, out_row),
+			Kernel::Avx512Batch | Kernel::Avx512 => jsa_row_avx512(data, first, period, out_row),
 			_ => unreachable!(),
 		}
 	};
@@ -680,10 +684,6 @@ unsafe fn jsa_row_avx512_long(data: &[f64], first: usize, period: usize, out: &m
 	jsa_row_scalar(data, first, period, out)
 }
 
-#[inline(always)]
-pub fn expand_grid_jsa(r: &JsaBatchRange) -> Vec<JsaParams> {
-	expand_grid(r)
-}
 
 // Python bindings
 #[cfg(feature = "python")]
@@ -920,42 +920,41 @@ pub fn jsa_free(ptr: *mut f64, len: usize) {
 }
 
 #[cfg(feature = "wasm")]
-#[wasm_bindgen]
-pub fn jsa_fast(in_ptr: *const f64, out_ptr: *mut f64, len: usize, period: usize) -> Result<(), JsValue> {
-	// Check for null pointers
+#[wasm_bindgen(js_name = jsa_into)]
+pub fn jsa_into_wasm(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period: usize,
+) -> Result<(), JsValue> {
 	if in_ptr.is_null() || out_ptr.is_null() {
-		return Err(JsValue::from_str("Null pointer provided"));
+		return Err(JsValue::from_str("null pointer passed to jsa_into"));
 	}
-
 	unsafe {
-		// Create slice from pointer
 		let data = std::slice::from_raw_parts(in_ptr, len);
-
-		// Validate inputs
 		if period == 0 || period > len {
-			return Err(JsValue::from_str(&format!("Invalid period: {}", period)));
+			return Err(JsValue::from_str("Invalid period"));
 		}
-
-		let params = JsaParams { period: Some(period) };
-		let input = JsaInput::from_slice(data, params);
-
-		// Check for aliasing (input and output buffers are the same)
+		let input = JsaInput::from_slice(data, JsaParams { period: Some(period) });
 		if in_ptr == out_ptr {
-			// Use temporary buffer to avoid corruption during computation
 			let mut temp = vec![0.0; len];
-			jsa_with_kernel_into(&input, Kernel::Auto, &mut temp).map_err(|e| JsValue::from_str(&e.to_string()))?;
-
-			// Copy results back to output
-			let out = std::slice::from_raw_parts_mut(out_ptr, len);
-			out.copy_from_slice(&temp);
+			jsa_into_slice(&mut temp, &input, detect_best_kernel())
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			std::slice::from_raw_parts_mut(out_ptr, len).copy_from_slice(&temp);
 		} else {
-			// No aliasing, compute directly into output
-			let out = std::slice::from_raw_parts_mut(out_ptr, len);
-			jsa_with_kernel_into(&input, Kernel::Auto, out).map_err(|e| JsValue::from_str(&e.to_string()))?;
+			jsa_into_slice(std::slice::from_raw_parts_mut(out_ptr, len), &input, detect_best_kernel())
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 		}
-
 		Ok(())
 	}
+}
+
+// optional for compat
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+#[deprecated(note = "use jsa_into")]
+pub fn jsa_fast(in_ptr: *const f64, out_ptr: *mut f64, len: usize, period: usize) -> Result<(), JsValue> {
+	jsa_into_wasm(in_ptr, out_ptr, len, period)
 }
 
 // ================== Batch Processing Fast API ==================

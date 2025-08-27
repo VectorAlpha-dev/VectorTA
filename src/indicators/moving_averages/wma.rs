@@ -25,6 +25,8 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 #[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -64,6 +66,7 @@ pub struct WmaOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct WmaParams {
 	pub period: Option<usize>,
 }
@@ -159,6 +162,9 @@ impl WmaBuilder {
 
 #[derive(Debug, Error)]
 pub enum WmaError {
+	#[error("wma: Input data slice is empty.")]
+	EmptyInputData,
+
 	#[error("wma: All values are NaN.")]
 	AllValuesNaN,
 
@@ -167,6 +173,9 @@ pub enum WmaError {
 
 	#[error("wma: Not enough valid data: needed = {needed}, valid = {valid}")]
 	NotEnoughValidData { needed: usize, valid: usize },
+
+	#[error("wma: Invalid kernel - batch kernel required.")]
+	InvalidKernel,
 }
 
 #[inline]
@@ -177,7 +186,7 @@ pub fn wma(input: &WmaInput) -> Result<WmaOutput, WmaError> {
 pub fn wma_with_kernel(input: &WmaInput, kernel: Kernel) -> Result<WmaOutput, WmaError> {
 	let (data, period, first, chosen) = wma_prepare(input, kernel)?;
 	let len = data.len();
-	let warm = first + period;
+	let warm = first + period - 1;
 	let mut out = alloc_with_nan_prefix(len, warm);
 
 	wma_compute_into(data, period, first, chosen, &mut out);
@@ -222,20 +231,19 @@ fn wma_prepare<'a>(
 	),
 	WmaError,
 > {
-	let data: &[f64] = match &input.data {
-		WmaData::Candles { candles, source } => source_type(candles, source),
-		WmaData::Slice(sl) => sl,
-	};
+	let data: &[f64] = input.as_ref();
+	let len = data.len();
+	if len == 0 {
+		return Err(WmaError::EmptyInputData);
+	}
 
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(WmaError::AllValuesNaN)?;
-
-	let len = data.len();
 	let period = input.get_period();
 
 	if period < 2 || period > len {
 		return Err(WmaError::InvalidPeriod { period, data_len: len });
 	}
-	if (len - first) < period {
+	if len - first < period {
 		return Err(WmaError::NotEnoughValidData {
 			needed: period,
 			valid: len - first,
@@ -244,7 +252,7 @@ fn wma_prepare<'a>(
 
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
-		other => other,
+		k => k,
 	};
 
 	Ok((data, period, first, chosen))
@@ -259,7 +267,7 @@ fn wma_compute_into(data: &[f64], period: usize, first: usize, kernel: Kernel, o
 			Kernel::Avx2 | Kernel::Avx2Batch => wma_avx2(data, period, first, out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 | Kernel::Avx512Batch => wma_avx512(data, period, first, out),
-			Kernel::Auto | _ => wma_scalar(data, period, first, out),
+			_ => unreachable!(),
 		}
 	}
 }
@@ -329,7 +337,7 @@ pub fn wma_with_kernel_batch(data: &[f64], sweep: &WmaBatchRange, k: Kernel) -> 
 	let kernel = match k {
 		Kernel::Auto => detect_best_batch_kernel(),
 		other if other.is_batch() => other,
-		_ => return Err(WmaError::InvalidPeriod { period: 0, data_len: 0 }),
+		_ => return Err(WmaError::InvalidKernel),
 	};
 
 	let simd = match kernel {
@@ -509,12 +517,31 @@ fn wma_batch_inner(
 	let combos = expand_grid(sweep);
 	let rows = combos.len();
 	let cols = data.len();
+	if cols == 0 {
+		return Err(WmaError::EmptyInputData);
+	}
 
-	// Allocate output buffer
-	let mut values = vec![0.0; rows * cols];
+	// Allocate uninitialized rows×cols
+	let mut buf_mu = make_uninit_matrix(rows, cols);
 
-	// Use the _into variant for zero-copy
-	wma_batch_inner_into(data, sweep, kern, parallel, &mut values)?;
+	// Warmup prefixes per row
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(WmaError::AllValuesNaN)?;
+	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
+	init_matrix_prefixes(&mut buf_mu, cols, &warm);
+
+	// Reinterpret as &mut [f64] without extra writes
+	let mut guard = core::mem::ManuallyDrop::new(buf_mu);
+	let out: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len())
+	};
+
+	// Fill in-place
+	wma_batch_inner_into(data, sweep, kern, parallel, out)?;
+
+	// Materialize Vec<f64> without copying
+	let values = unsafe {
+		Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, guard.len(), guard.capacity())
+	};
 
 	Ok(WmaBatchOutput {
 		values,
@@ -550,7 +577,7 @@ fn wma_batch_inner_into(
 	let cols = data.len();
 
 	// ---------- 1.  How many leading NaNs each row needs ----------
-	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
+	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
 
 	// ---------- 2.  Reinterpret output slice as MaybeUninit for efficient initialization ----------
 	// SAFETY: We're reinterpreting the output slice as MaybeUninit to use the efficient
@@ -1148,6 +1175,38 @@ mod tests {
 	#[cfg(feature = "proptest")]
 	generate_all_wma_tests!(check_wma_property);
 
+	fn check_invalid_kernel_error(test: &str) -> Result<(), Box<dyn Error>> {
+		let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+		let sweep = WmaBatchRange { period: (2, 5, 1) };
+		
+		// Test with non-batch kernels - should return InvalidKernel error
+		let non_batch_kernels = vec![Kernel::Scalar, Kernel::Avx2, Kernel::Avx512];
+		for kernel in non_batch_kernels {
+			let result = wma_with_kernel_batch(&data, &sweep, kernel);
+			assert!(
+				matches!(result, Err(WmaError::InvalidKernel)),
+				"[{}] Expected InvalidKernel error for {:?}, got {:?}",
+				test, kernel, result
+			);
+		}
+		
+		// Test with batch kernels - should succeed
+		let batch_kernels = vec![Kernel::Auto, Kernel::ScalarBatch];
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		let batch_kernels = vec![Kernel::Auto, Kernel::ScalarBatch, Kernel::Avx2Batch, Kernel::Avx512Batch];
+		
+		for kernel in batch_kernels {
+			let result = wma_with_kernel_batch(&data, &sweep, kernel);
+			assert!(
+				result.is_ok(),
+				"[{}] Expected success for batch kernel {:?}, got error: {:?}",
+				test, kernel, result.err()
+			);
+		}
+		
+		Ok(())
+	}
+
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);
 		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
@@ -1276,6 +1335,11 @@ mod tests {
 	}
 	gen_batch_tests!(check_batch_default_row);
 	gen_batch_tests!(check_batch_no_poison);
+	
+	#[test]
+	fn test_invalid_kernel_error() {
+		let _ = check_invalid_kernel_error("test_invalid_kernel_error");
+	}
 }
 
 #[cfg(feature = "python")]
@@ -1430,8 +1494,40 @@ pub fn wma_batch_py<'py>(
 			.collect::<Vec<_>>()
 			.into_pyarray(py),
 	)?;
+	dict.set_item("rows", rows)?;
+	dict.set_item("cols", cols)?;
 
 	Ok(dict)
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct WmaBatchConfig {
+	pub period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct WmaBatchJsOutput {
+	pub values: Vec<f64>,
+	pub combos: Vec<WmaParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = wma_batch)]
+pub fn wma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let cfg: WmaBatchConfig =
+		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {e}")))?;
+	let sweep = WmaBatchRange { period: cfg.period_range };
+
+	// detect_best_kernel() is correct here (inner expects scalar/avx, not *Batch)
+	let out = wma_batch_inner(data, &sweep, detect_best_kernel(), false)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	let js = WmaBatchJsOutput { values: out.values, combos: out.combos, rows: out.rows, cols: out.cols };
+	serde_wasm_bindgen::to_value(&js).map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
 }
 
 #[cfg(feature = "wasm")]

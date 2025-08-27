@@ -4,7 +4,8 @@ These tests mirror the Rust unit tests to ensure Python bindings work correctly.
 """
 import pytest
 import numpy as np
-from test_utils import load_test_data, assert_close
+from test_utils import load_test_data, assert_close, EXPECTED_OUTPUTS
+from rust_comparison import compare_with_rust
 
 # Import SMA functions - they'll be available after building with maturin
 try:
@@ -32,19 +33,23 @@ def test_sma_accuracy():
     """Test SMA matches expected values from Rust tests - mirrors check_sma_accuracy"""
     data = load_test_data()
     close = np.array(data['close'], dtype=np.float64)
+    expected = EXPECTED_OUTPUTS['sma']
     
     # Test with period=9 (default)
-    result = sma(close, 9)
+    result = sma(close, expected['default_params']['period'])
     
     assert len(result) == len(close)
     
     # Expected values from Rust test
-    expected_last_five = [59180.8, 59175.0, 59129.4, 59085.4, 59133.7]
+    expected_last_five = expected['last_5_values']
     
     actual_last_five = result[-5:]
     
-    for i, (actual, expected) in enumerate(zip(actual_last_five, expected_last_five)):
-        assert_close(actual, expected, rtol=1e-4, msg=f"SMA mismatch at index {i}")
+    for i, (actual, exp) in enumerate(zip(actual_last_five, expected_last_five)):
+        assert_close(actual, exp, rtol=1e-4, msg=f"SMA mismatch at index {i}")
+    
+    # Compare with Rust implementation
+    compare_with_rust('sma', result, 'close', expected['default_params'])
 
 
 def test_sma_invalid_period():
@@ -52,7 +57,7 @@ def test_sma_invalid_period():
     input_data = np.array([10.0, 20.0, 30.0], dtype=np.float64)
     
     # Period = 0 should fail
-    with pytest.raises(ValueError, match="sma"):
+    with pytest.raises(ValueError, match="Invalid period|period must be greater than 0"):
         sma(input_data, 0)
 
 
@@ -60,7 +65,7 @@ def test_sma_period_exceeds_length():
     """Test SMA fails with period exceeding length"""
     data_small = np.array([10.0, 20.0, 30.0], dtype=np.float64)
     
-    with pytest.raises(ValueError, match="sma"):
+    with pytest.raises(ValueError, match="Invalid period|Period.*exceeds|Not enough.*data"):
         sma(data_small, 10)
 
 
@@ -68,7 +73,7 @@ def test_sma_very_small_dataset():
     """Test SMA fails with insufficient data"""
     single_point = np.array([42.0], dtype=np.float64)
     
-    with pytest.raises(ValueError, match="sma"):
+    with pytest.raises(ValueError, match="Invalid period|Not enough.*data|Insufficient data"):
         sma(single_point, 9)
 
 
@@ -107,14 +112,14 @@ def test_sma_nan_handling():
     warmup = first_valid + 9 - 1
     
     if len(result) > warmup:
-        assert np.all(np.isfinite(result[warmup:]))
+        assert np.all(np.isfinite(result[warmup:])), "Expected finite values after warmup"
 
 
 def test_sma_all_nan():
     """Test SMA with all NaN values"""
     all_nan = np.full(100, np.nan, dtype=np.float64)
     
-    with pytest.raises(ValueError, match="sma"):
+    with pytest.raises(ValueError, match="All values are NaN|No valid data"):
         sma(all_nan, 14)
 
 
@@ -122,7 +127,7 @@ def test_sma_empty_input():
     """Test SMA with empty input"""
     data_empty = np.array([], dtype=np.float64)
     
-    with pytest.raises(ValueError, match="sma"):
+    with pytest.raises(ValueError, match="Empty|empty|No data"):
         sma(data_empty, 14)
 
 
@@ -277,12 +282,12 @@ def test_sma_batch_error_handling():
     """Test SMA batch error handling"""
     # Test with all NaN data
     all_nan = np.full(100, np.nan, dtype=np.float64)
-    with pytest.raises(ValueError, match="sma"):
+    with pytest.raises(ValueError, match="All values are NaN|No valid data"):
         sma_batch(all_nan, (10, 20, 5))
     
     # Test with insufficient data
     small_data = np.array([1.0, 2.0, 3.0], dtype=np.float64)
-    with pytest.raises(ValueError, match="sma"):
+    with pytest.raises(ValueError, match="Invalid period|Period.*exceeds|Not enough.*data"):
         sma_batch(small_data, (10, 20, 5))
 
 
@@ -304,7 +309,7 @@ def test_sma_zero_copy_verification():
 def test_sma_stream_error_handling():
     """Test SMA stream error handling"""
     # Test with invalid period
-    with pytest.raises(ValueError, match="sma"):
+    with pytest.raises(ValueError, match="Invalid period|period must be greater than 0"):
         SmaStream(0)
     
     # Test that stream properly handles warmup

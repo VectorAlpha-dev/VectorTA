@@ -20,13 +20,11 @@
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix};
-use aligned_vec::{AVec, CACHELINE_ALIGN};
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
+use std::mem::MaybeUninit;
 use thiserror::Error;
 
 #[cfg(feature = "python")]
@@ -66,7 +64,7 @@ pub struct RocParams {
 
 impl Default for RocParams {
 	fn default() -> Self {
-		Self { period: Some(10) }
+		Self { period: Some(9) }
 	}
 }
 
@@ -107,7 +105,7 @@ impl<'a> RocInput<'a> {
 	}
 	#[inline]
 	pub fn get_period(&self) -> usize {
-		self.params.period.unwrap_or(10)
+		self.params.period.unwrap_or(9)
 	}
 }
 
@@ -164,7 +162,7 @@ impl RocBuilder {
 
 #[derive(Debug, Error)]
 pub enum RocError {
-	#[error("roc: Empty data provided.")]
+	#[error("roc: Input data slice is empty.")]
 	EmptyData,
 	#[error("roc: Invalid period: period = {period}, data length = {data_len}")]
 	InvalidPeriod { period: usize, data_len: usize },
@@ -179,47 +177,45 @@ pub fn roc(input: &RocInput) -> Result<RocOutput, RocError> {
 	roc_with_kernel(input, Kernel::Auto)
 }
 
-pub fn roc_with_kernel(input: &RocInput, kernel: Kernel) -> Result<RocOutput, RocError> {
-	let data: &[f64] = match &input.data {
-		RocData::Candles { candles, source } => source_type(candles, source),
-		RocData::Slice(slice) => slice,
-	};
-
-	if data.is_empty() {
+#[inline(always)]
+fn roc_prepare<'a>(input: &'a RocInput, kernel: Kernel)
+-> Result<(&'a [f64], usize, usize, Kernel), RocError> {
+	let data: &[f64] = input.as_ref();
+	let len = data.len();
+	if len == 0 {
 		return Err(RocError::EmptyData);
 	}
-
-	let period = input.get_period();
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(RocError::AllValuesNaN)?;
-	if period == 0 || period > data.len() {
-		return Err(RocError::InvalidPeriod {
-			period,
-			data_len: data.len(),
-		});
+	let period = input.get_period();
+	if period == 0 || period > len {
+		return Err(RocError::InvalidPeriod { period, data_len: len });
 	}
-	if (data.len() - first) < period {
-		return Err(RocError::NotEnoughValidData {
-			needed: period,
-			valid: data.len() - first,
-		});
+	if len - first < period {
+		return Err(RocError::NotEnoughValidData { needed: period, valid: len - first });
 	}
+	let chosen = match kernel { Kernel::Auto => detect_best_kernel(), k => k };
+	Ok((data, period, first, chosen))
+}
 
-	let mut out = alloc_with_nan_prefix(data.len(), first + period);
-	let chosen = match kernel {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
-
+#[inline(always)]
+fn roc_compute_into(data: &[f64], period: usize, first: usize, kernel: Kernel, out: &mut [f64]) {
 	unsafe {
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => roc_scalar(data, period, first, &mut out),
+		match kernel {
+			Kernel::Scalar | Kernel::ScalarBatch => roc_scalar(data, period, first, out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => roc_avx2(data, period, first, &mut out),
+			Kernel::Avx2 | Kernel::Avx2Batch => roc_row_avx2(data, first, period, 0, std::ptr::null(), 0.0, out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => roc_avx512(data, period, first, &mut out),
+			Kernel::Avx512 | Kernel::Avx512Batch => roc_row_avx512(data, first, period, 0, std::ptr::null(), 0.0, out),
 			_ => unreachable!(),
 		}
 	}
+}
+
+pub fn roc_with_kernel(input: &RocInput, kernel: Kernel) -> Result<RocOutput, RocError> {
+	let (data, period, first, chosen) = roc_prepare(input, kernel)?;
+	// ROC first valid index is first + period
+	let mut out = alloc_with_nan_prefix(data.len(), first + period);
+	roc_compute_into(data, period, first, chosen, &mut out);
 	Ok(RocOutput { values: out })
 }
 
@@ -635,51 +631,45 @@ fn roc_batch_inner_into(
 			valid: data.len() - first,
 		});
 	}
+
 	let rows = combos.len();
 	let cols = data.len();
-	
-	// Initialize warmup periods with NaN
-	for (row, combo) in combos.iter().enumerate() {
-		let period = combo.period.unwrap();
-		let warmup_end = first + period;
-		let row_start = row * cols;
-		for i in 0..warmup_end {
-			out[row_start + i] = f64::NAN;
-		}
-	}
 
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+	// 1) View output as uninitialized and write NaN warm prefixes via helper
+	let out_mu: &mut [MaybeUninit<f64>] = unsafe {
+		core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
+	};
+	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
+	init_matrix_prefixes(out_mu, cols, &warm);
+
+	// 2) Row worker: write valid region only
+	let do_row = |row: usize, row_mu: &mut [MaybeUninit<f64>]| unsafe {
 		let period = combos[row].period.unwrap();
+		let dst: &mut [f64] = core::slice::from_raw_parts_mut(row_mu.as_mut_ptr() as *mut f64, row_mu.len());
 		match kern {
-			Kernel::Scalar => roc_row_scalar(data, first, period, 0, std::ptr::null(), 0.0, out_row),
+			Kernel::Scalar => roc_row_scalar(data, first, period, 0, std::ptr::null(), 0.0, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => roc_row_avx2(data, first, period, 0, std::ptr::null(), 0.0, out_row),
+			Kernel::Avx2 => roc_row_avx2(data, first, period, 0, std::ptr::null(), 0.0, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => roc_row_avx512(data, first, period, 0, std::ptr::null(), 0.0, out_row),
+			Kernel::Avx512 => roc_row_avx512(data, first, period, 0, std::ptr::null(), 0.0, dst),
 			_ => unreachable!(),
 		}
 	};
 
+	// 3) Iterate rows
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			out.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
+			out_mu.par_chunks_mut(cols).enumerate().for_each(|(row, row_mu)| do_row(row, row_mu));
 		}
-
 		#[cfg(target_arch = "wasm32")]
 		{
-			for (row, slice) in out.chunks_mut(cols).enumerate() {
-				do_row(row, slice);
-			}
+			for (row, row_mu) in out_mu.chunks_mut(cols).enumerate() { do_row(row, row_mu); }
 		}
 	} else {
-		for (row, slice) in out.chunks_mut(cols).enumerate() {
-			do_row(row, slice);
-		}
+		for (row, row_mu) in out_mu.chunks_mut(cols).enumerate() { do_row(row, row_mu); }
 	}
-	
+
 	Ok(combos)
 }
 
@@ -790,58 +780,16 @@ impl RocStreamPy {
 /// Write ROC values directly to output slice - no allocations
 #[inline]
 pub fn roc_into_slice(dst: &mut [f64], input: &RocInput, kern: Kernel) -> Result<(), RocError> {
-	let data = input.as_ref();
-	let period = input.get_period();
-	
+	let (data, period, first, chosen) = roc_prepare(input, kern)?;
 	if dst.len() != data.len() {
 		return Err(RocError::InvalidPeriod {
 			period: dst.len(),
 			data_len: data.len(),
 		});
 	}
-	
-	// Find first non-NaN value
-	let first = data.iter().position(|&x| !x.is_nan()).ok_or(RocError::AllValuesNaN)?;
-	
-	// Validate period
-	if period == 0 || period > data.len() - first {
-		return Err(RocError::InvalidPeriod { period, data_len: data.len() });
-	}
-	
-	// Check if we have enough valid data
-	if data.len() - first < period {
-		return Err(RocError::NotEnoughValidData {
-			needed: period,
-			valid: data.len() - first,
-		});
-	}
-	
-	// Calculate ROC values
 	let warmup_end = first + period;
-	
-	// Fill warmup period with NaN
-	for v in &mut dst[..warmup_end] {
-		*v = f64::NAN;
-	}
-	
-	// Calculate ROC for valid range
-	let chosen = match kern {
-		Kernel::Auto => detect_best_kernel(),
-		k => k,
-	};
-	
-	// Use the appropriate kernel
-	unsafe {
-		match chosen {
-			Kernel::Scalar => roc_scalar(data, period, first, dst),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => roc_row_avx2(data, first, period, 0, std::ptr::null(), 0.0, dst),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => roc_row_avx512(data, first, period, 0, std::ptr::null(), 0.0, dst),
-			_ => unreachable!(),
-		}
-	}
-	
+	for v in &mut dst[..warmup_end] { *v = f64::NAN; }
+	roc_compute_into(data, period, first, chosen, dst);
 	Ok(())
 }
 
@@ -1156,7 +1104,7 @@ mod tests {
 		
 		// Define comprehensive parameter combinations
 		let test_params = vec![
-			RocParams::default(),                    // period: 10
+			RocParams::default(),                    // period: 9
 			RocParams { period: Some(2) },          // minimum viable
 			RocParams { period: Some(5) },          // small
 			RocParams { period: Some(7) },          // small
@@ -1185,7 +1133,7 @@ mod tests {
 					panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
 						 with params: period={} (param set {})",
-						test_name, val, bits, i, params.period.unwrap_or(10), param_idx
+						test_name, val, bits, i, params.period.unwrap_or(9), param_idx
 					);
 				}
 				
@@ -1193,7 +1141,7 @@ mod tests {
 					panic!(
 						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
 						 with params: period={} (param set {})",
-						test_name, val, bits, i, params.period.unwrap_or(10), param_idx
+						test_name, val, bits, i, params.period.unwrap_or(9), param_idx
 					);
 				}
 				
@@ -1201,7 +1149,7 @@ mod tests {
 					panic!(
 						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
 						 with params: period={} (param set {})",
-						test_name, val, bits, i, params.period.unwrap_or(10), param_idx
+						test_name, val, bits, i, params.period.unwrap_or(9), param_idx
 					);
 				}
 			}
@@ -1473,10 +1421,13 @@ mod tests {
 		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
 		let c = read_candles_from_csv(file)?;
 
-		let output = RocBatchBuilder::new().kernel(kernel).apply_candles(&c, "close")?;
+		let output = RocBatchBuilder::new()
+			.period_static(10)  // Use period=10 to match expected values
+			.kernel(kernel)
+			.apply_candles(&c, "close")?;
 
-		let def = RocParams::default();
-		let row = output.values_for(&def).expect("default row missing");
+		let test_params = RocParams { period: Some(10) };
+		let row = output.values_for(&test_params).expect("period=10 row missing");
 
 		assert_eq!(row.len(), c.close.len());
 
@@ -1491,7 +1442,7 @@ mod tests {
 		for (i, &v) in row[start..].iter().enumerate() {
 			assert!(
 				(v - expected[i]).abs() < 1e-7,
-				"[{test}] default-row mismatch at idx {i}: {v} vs {expected:?}"
+				"[{test}] period=10 row mismatch at idx {i}: {v} vs {expected:?}"
 			);
 		}
 		Ok(())
@@ -1536,7 +1487,7 @@ mod tests {
 					panic!(
 						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
 						 at row {} col {} (flat index {}) with params: period={}",
-						test, cfg_idx, val, bits, row, col, idx, combo.period.unwrap_or(10)
+						test, cfg_idx, val, bits, row, col, idx, combo.period.unwrap_or(9)
 					);
 				}
 				
@@ -1544,7 +1495,7 @@ mod tests {
 					panic!(
 						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
 						 at row {} col {} (flat index {}) with params: period={}",
-						test, cfg_idx, val, bits, row, col, idx, combo.period.unwrap_or(10)
+						test, cfg_idx, val, bits, row, col, idx, combo.period.unwrap_or(9)
 					);
 				}
 				
@@ -1552,7 +1503,7 @@ mod tests {
 					panic!(
 						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
 						 at row {} col {} (flat index {}) with params: period={}",
-						test, cfg_idx, val, bits, row, col, idx, combo.period.unwrap_or(10)
+						test, cfg_idx, val, bits, row, col, idx, combo.period.unwrap_or(9)
 					);
 				}
 			}

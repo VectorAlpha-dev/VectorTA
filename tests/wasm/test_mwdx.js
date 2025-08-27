@@ -51,47 +51,53 @@ test('MWDX partial params', () => {
 test('MWDX accuracy', async () => {
     // Test MWDX matches expected values from Rust tests - mirrors check_mwdx_accuracy
     const close = new Float64Array(testData.close);
+    const expected = EXPECTED_OUTPUTS.mwdx;
     
-    const result = wasm.mwdx_js(close, 0.2);
+    const result = wasm.mwdx_js(
+        close,
+        expected.defaultParams.factor
+    );
     
     assert.strictEqual(result.length, close.length);
     
-    // Expected values from Rust test
-    const expectedLastFive = [
-        59302.181566190935,
-        59277.94525295275,
-        59230.1562023622,
-        59215.124961889764,
-        59103.099969511815,
-    ];
+    // Check last 5 values match expected
+    const last5 = result.slice(-5);
+    assertArrayClose(
+        last5,
+        expected.last5Values,
+        1e-7,
+        "MWDX last 5 values mismatch"
+    );
     
-    const actualLastFive = result.slice(-5);
-    
-    for (let i = 0; i < 5; i++) {
-        assertClose(actualLastFive[i], expectedLastFive[i], 1e-5, 
-            `MWDX mismatch at index ${i}`);
-    }
-    
-    // Compare with Rust implementation
-    await compareWithRust('mwdx', result, { factor: 0.2 });
+    // Compare full output with Rust
+    await compareWithRust('mwdx', result, 'close', expected.defaultParams);
 });
 
 test('MWDX zero factor', () => {
-    // Test MWDX fails with zero factor
+    // Test MWDX fails with zero factor - mirrors check_mwdx_zero_factor
     const inputData = new Float64Array([10.0, 20.0, 30.0]);
     
     assert.throws(() => {
         wasm.mwdx_js(inputData, 0.0);
-    });
+    }, /Factor must be greater than 0/);
 });
 
 test('MWDX negative factor', () => {
-    // Test MWDX fails with negative factor
+    // Test MWDX fails with negative factor - mirrors check_mwdx_negative_factor
     const inputData = new Float64Array([10.0, 20.0, 30.0]);
     
     assert.throws(() => {
         wasm.mwdx_js(inputData, -0.5);
-    });
+    }, /Factor must be greater than 0/);
+});
+
+test('MWDX NaN factor', () => {
+    // Test MWDX fails with NaN factor
+    const inputData = new Float64Array([10.0, 20.0, 30.0]);
+    
+    assert.throws(() => {
+        wasm.mwdx_js(inputData, NaN);
+    }, /Factor must be greater than 0/);
 });
 
 test('MWDX very small dataset', () => {
@@ -109,7 +115,7 @@ test('MWDX empty input', () => {
     
     assert.throws(() => {
         wasm.mwdx_js(dataEmpty, 0.2);
-    });
+    }, /No input data was provided/);
 });
 
 test('MWDX reinput', () => {
@@ -364,17 +370,24 @@ test('MWDX NaN prefix', () => {
     const result = wasm.mwdx_js(data, 0.2);
     assert.strictEqual(result.length, data.length);
     
-    // MWDX formula: out[i] = fac * data[i] + (1.0 - fac) * out[i-1]
-    // Due to the recursive nature and NaN propagation:
+    // MWDX should preserve NaN prefix but compute valid values starting from first non-NaN
+    // This matches ALMA behavior and prevents NaN contamination of the entire series
     // result[0] = NaN (input)
-    // result[1] = 0.2 * NaN + 0.8 * NaN = NaN  
-    // result[2] = 0.2 * 10.0 + 0.8 * NaN = NaN (NaN propagates)
-    // All subsequent values will be NaN due to dependency on previous NaN
+    // result[1] = NaN (input)
+    // result[2] = 10.0 (first non-NaN value)
+    // result[3] = 0.2 * 20.0 + 0.8 * 10.0 = 4.0 + 8.0 = 12.0
+    // result[4] = 0.2 * 30.0 + 0.8 * 12.0 = 6.0 + 9.6 = 15.6
+    // result[5] = 0.2 * 40.0 + 0.8 * 15.6 = 8.0 + 12.48 = 20.48
     
-    // All values should be NaN when starting with NaN prefix
-    for (let i = 0; i < result.length; i++) {
-        assert(isNaN(result[i]), `Expected NaN at index ${i}`);
-    }
+    // First two values should be NaN (the prefix)
+    assert(isNaN(result[0]), 'Expected NaN at index 0');
+    assert(isNaN(result[1]), 'Expected NaN at index 1');
+    
+    // Starting from index 2, values should be computed correctly
+    assert.strictEqual(result[2], 10.0);
+    assert(Math.abs(result[3] - 12.0) < 1e-10, `Expected 12.0 at index 3, got ${result[3]}`);
+    assert(Math.abs(result[4] - 15.6) < 1e-10, `Expected 15.6 at index 4, got ${result[4]}`);
+    assert(Math.abs(result[5] - 20.48) < 1e-10, `Expected 20.48 at index 5, got ${result[5]}`);
     
     // Test with data that has no NaN prefix to verify normal operation
     const cleanData = new Float64Array([10.0, 20.0, 30.0, 40.0]);
@@ -401,6 +414,20 @@ test('MWDX formula verification', () => {
     }
     
     assertArrayClose(result, expected, 1e-12, 'Formula verification failed');
+});
+
+test('MWDX all NaN input', () => {
+    // Test MWDX with all NaN values
+    const allNaN = new Float64Array(100);
+    for (let i = 0; i < 100; i++) {
+        allNaN[i] = NaN;
+    }
+    
+    // MWDX doesn't raise error for all NaN - it returns all NaN
+    const result = wasm.mwdx_js(allNaN, 0.2);
+    for (let i = 0; i < result.length; i++) {
+        assert(isNaN(result[i]), `Expected NaN at index ${i}`);
+    }
 });
 
 test('MWDX oscillating data', () => {

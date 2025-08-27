@@ -161,12 +161,16 @@ impl LinearRegInterceptBuilder {
 
 #[derive(Debug, Error)]
 pub enum LinearRegInterceptError {
+	#[error("linearreg_intercept: Input data slice is empty.")]
+	InputDataSliceEmpty,
 	#[error("linearreg_intercept: All values are NaN.")]
 	AllValuesNaN,
 	#[error("linearreg_intercept: Invalid period: period = {period}, data length = {data_len}")]
 	InvalidPeriod { period: usize, data_len: usize },
 	#[error("linearreg_intercept: Not enough valid data: needed = {needed}, valid = {valid}")]
 	NotEnoughValidData { needed: usize, valid: usize },
+	#[error("linearreg_intercept: Output length {dst} != input length {src}")]
+	OutputLengthMismatch { dst: usize, src: usize },
 }
 
 // ---- Main entrypoints ----
@@ -183,6 +187,10 @@ pub fn linearreg_intercept_with_kernel(
 	kernel: Kernel,
 ) -> Result<LinearRegInterceptOutput, LinearRegInterceptError> {
 	let data: &[f64] = input.as_ref();
+
+	if data.is_empty() {
+		return Err(LinearRegInterceptError::InputDataSliceEmpty);
+	}
 
 	let first = data
 		.iter()
@@ -201,7 +209,7 @@ pub fn linearreg_intercept_with_kernel(
 		});
 	}
 
-	let mut out = alloc_with_nan_prefix(len, period - 1);
+	let mut out = alloc_with_nan_prefix(len, first + period - 1);
 
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
@@ -230,6 +238,11 @@ pub fn linearreg_intercept_into_slice(
 	kern: Kernel
 ) -> Result<(), LinearRegInterceptError> {
 	let data: &[f64] = input.as_ref();
+	
+	if data.is_empty() {
+		return Err(LinearRegInterceptError::InputDataSliceEmpty);
+	}
+	
 	let first = data
 		.iter()
 		.position(|x| !x.is_nan())
@@ -248,9 +261,9 @@ pub fn linearreg_intercept_into_slice(
 	}
 	
 	if dst.len() != data.len() {
-		return Err(LinearRegInterceptError::InvalidPeriod {
-			period: dst.len(),
-			data_len: data.len(),
+		return Err(LinearRegInterceptError::OutputLengthMismatch {
+			dst: dst.len(),
+			src: data.len(),
 		});
 	}
 
@@ -280,46 +293,45 @@ pub fn linearreg_intercept_into_slice(
 
 #[inline]
 pub fn linearreg_intercept_scalar(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) {
-	let n = period as f64;
-	let mut sum_x = 0.0;
-	let mut sum_x2 = 0.0;
-	for i in 0..period {
-		let xi = (i + 1) as f64;
-		sum_x += xi;
-		sum_x2 += xi * xi;
-	}
-	let denom = n * sum_x2 - sum_x * sum_x;
-	if denom.abs() < f64::EPSILON {
+	// Fast path: period == 1
+	if period == 1 {
+		for i in first_val..data.len() {
+			out[i] = data[i];
+		}
 		return;
 	}
+
+	let n = period as f64;
+
+	// Precompute constants
+	let mut sum_x = 0.0;
+	let mut sum_x2 = 0.0;
+	for k in 0..period {
+		let x = (k + 1) as f64;
+		sum_x += x;
+		sum_x2 += x * x;
+	}
+	let denom = n * sum_x2 - sum_x * sum_x;
 	let bd = 1.0 / denom;
 
-	let mut sum_y = 0.0;
-	let mut sum_xy = 0.0;
-	for i in 0..(period - 1) {
-		let val = data[first_val + i];
-		let xi = (i + 1) as f64;
-		sum_y += val;
-		sum_xy += val * xi;
-	}
-
-	let p_idx = period as f64;
-
+	// main loop - recalculate sums for each window
 	for i in (first_val + period - 1)..data.len() {
-		let val = data[i];
-		sum_y += val;
-		sum_xy += val * p_idx;
+		// Calculate sums for current window
+		let mut sum_y = 0.0;
+		let mut sum_xy = 0.0;
+		let window_start = i + 1 - period;
+		
+		for j in 0..period {
+			let y = data[window_start + j];
+			let x = (j + 1) as f64;
+			sum_y += y;
+			sum_xy += y * x;
+		}
 
+		// regression
 		let b = (n * sum_xy - sum_x * sum_y) * bd;
 		let a = (sum_y - b * sum_x) / n;
 		out[i] = a + b;
-
-		let remove_idx = i as isize - (period as isize) + 1;
-		if remove_idx >= 0 && (remove_idx as usize) < data.len() {
-			let old_val = data[remove_idx as usize];
-			sum_xy -= sum_y;
-			sum_y -= old_val;
-		}
 	}
 }
 
@@ -373,19 +385,23 @@ impl LinearRegInterceptStream {
 		if period == 0 {
 			return Err(LinearRegInterceptError::InvalidPeriod { period, data_len: 0 });
 		}
-		let mut sum_x = 0.0;
-		let mut sum_x2 = 0.0;
-		for i in 0..period {
-			let xi = (i + 1) as f64;
-			sum_x += xi;
-			sum_x2 += xi * xi;
-		}
-		let n = period as f64;
-		let denom = n * sum_x2 - sum_x * sum_x;
-		if denom.abs() < f64::EPSILON {
-			return Err(LinearRegInterceptError::InvalidPeriod { period, data_len: 0 });
-		}
-		let bd = 1.0 / denom;
+
+		// period==1 allowed
+		let (sum_x, sum_x2, n, bd) = if period == 1 {
+			(1.0, 1.0, 1.0, 0.0)
+		} else {
+			let mut sx = 0.0;
+			let mut sx2 = 0.0;
+			for i in 0..period {
+				let x = (i + 1) as f64;
+				sx += x;
+				sx2 += x * x;
+			}
+			let n = period as f64;
+			let denom = n * sx2 - sx * sx;
+			let bd = 1.0 / denom;
+			(sx, sx2, n, bd)
+		};
 
 		Ok(Self {
 			period,
@@ -403,19 +419,26 @@ impl LinearRegInterceptStream {
 
 	#[inline(always)]
 	pub fn update(&mut self, value: f64) -> Option<f64> {
-		let tail_idx = self.head;
-		let prev = self.buffer[tail_idx];
-		self.buffer[tail_idx] = value;
+		if self.period == 1 {
+			return Some(value);
+		}
+
+		let tail = self.head;
+		let prev = self.buffer[tail];
+		self.buffer[tail] = value;
 		self.head = (self.head + 1) % self.period;
 
 		if !self.filled && self.head == 0 {
 			self.filled = true;
-			// first fill: recalc everything
 			self.sum_y = self.buffer.iter().sum();
-			self.sum_xy = self.buffer.iter().enumerate().map(|(i, v)| v * ((i + 1) as f64)).sum();
+			self.sum_xy = self.buffer.iter().enumerate()
+				.map(|(i, v)| v * ((i + 1) as f64))
+				.sum();
 		} else if self.filled {
-			self.sum_y += value - prev;
-			self.sum_xy += value * (self.period as f64) - self.sum_y;
+			let sum_y_old = self.sum_y;
+			// slide window sums
+			self.sum_y = sum_y_old + value - prev;
+			self.sum_xy = self.sum_xy + self.n * value - sum_y_old;
 		} else {
 			self.sum_y += value;
 			self.sum_xy += value * (self.head as f64);
@@ -579,6 +602,10 @@ fn linearreg_intercept_batch_inner_into(
 	parallel: bool,
 	out: &mut [f64],
 ) -> Result<Vec<LinearRegInterceptParams>, LinearRegInterceptError> {
+	if data.is_empty() {
+		return Err(LinearRegInterceptError::InputDataSliceEmpty);
+	}
+	
 	let combos = expand_grid(sweep);
 	if combos.is_empty() {
 		return Err(LinearRegInterceptError::InvalidPeriod { period: 0, data_len: 0 });
@@ -597,15 +624,20 @@ fn linearreg_intercept_batch_inner_into(
 	}
 
 	let cols = data.len();
+	
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
 
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
-		match kern {
-			Kernel::Scalar => linearreg_intercept_row_scalar(data, first, period, out_row),
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => linearreg_intercept_row_scalar(data, first, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => linearreg_intercept_row_avx2(data, first, period, out_row),
+			Kernel::Avx2 | Kernel::Avx2Batch => linearreg_intercept_row_avx2(data, first, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => linearreg_intercept_row_avx512(data, first, period, out_row),
+			Kernel::Avx512 | Kernel::Avx512Batch => linearreg_intercept_row_avx512(data, first, period, out_row),
 			_ => unreachable!(),
 		}
 	};
@@ -641,6 +673,10 @@ fn linearreg_intercept_batch_inner(
 	kern: Kernel,
 	parallel: bool,
 ) -> Result<LinearRegInterceptBatchOutput, LinearRegInterceptError> {
+	if data.is_empty() {
+		return Err(LinearRegInterceptError::InputDataSliceEmpty);
+	}
+	
 	let combos = expand_grid(sweep);
 	if combos.is_empty() {
 		return Err(LinearRegInterceptError::InvalidPeriod { period: 0, data_len: 0 });
@@ -674,14 +710,20 @@ fn linearreg_intercept_batch_inner(
 		std::mem::forget(buf_mu);
 		Vec::from_raw_parts(ptr, rows * cols, rows * cols)
 	};
+	
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+	
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
-		match kern {
-			Kernel::Scalar => linearreg_intercept_row_scalar(data, first, period, out_row),
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => linearreg_intercept_row_scalar(data, first, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => linearreg_intercept_row_avx2(data, first, period, out_row),
+			Kernel::Avx2 | Kernel::Avx2Batch => linearreg_intercept_row_avx2(data, first, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => linearreg_intercept_row_avx512(data, first, period, out_row),
+			Kernel::Avx512 | Kernel::Avx512Batch => linearreg_intercept_row_avx512(data, first, period, out_row),
 			_ => unreachable!(),
 		}
 	};
@@ -1367,7 +1409,6 @@ pub fn linearreg_intercept_batch_py<'py>(
 	use pyo3::types::PyDict;
 
 	let slice_in = data.as_slice()?;
-
 	let sweep = LinearRegInterceptBatchRange { period: period_range };
 
 	let combos = expand_grid(&sweep);
@@ -1377,35 +1418,38 @@ pub fn linearreg_intercept_batch_py<'py>(
 	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
 	let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-	let kern = validate_kernel(kernel, true)?;
+	// Write warm NaNs per row only
+	if !combos.is_empty() && cols > 0 {
+		let first = slice_in.iter().position(|x| !x.is_nan()).unwrap_or(0);
+		for (r, prm) in combos.iter().enumerate() {
+			let warm = (first + prm.period.unwrap() - 1).min(cols);
+			for v in &mut slice_out[r*cols .. r*cols + warm] {
+				*v = f64::NAN;
+			}
+		}
+	}
 
-	let combos = py
-		.allow_threads(|| {
-			let kernel = match kern {
-				Kernel::Auto => detect_best_batch_kernel(),
-				k => k,
-			};
-			let simd = match kernel {
-				Kernel::Avx512Batch => Kernel::Avx512,
-				Kernel::Avx2Batch => Kernel::Avx2,
-				Kernel::ScalarBatch => Kernel::Scalar,
-				_ => unreachable!(),
-			};
-			linearreg_intercept_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
-		})
-		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	let kern = validate_kernel(kernel, true)?;
+	let combos = py.allow_threads(|| {
+		let kernel = match kern {
+			Kernel::Auto => detect_best_batch_kernel(),
+			k => k,
+		};
+		let simd = match kernel {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch => Kernel::Avx2,
+			Kernel::ScalarBatch => Kernel::Scalar,
+			_ => unreachable!(),
+		};
+		linearreg_intercept_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+	}).map_err(|e| PyValueError::new_err(e.to_string()))?;
 
 	let dict = PyDict::new(py);
 	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
 	dict.set_item(
 		"periods",
-		combos
-			.iter()
-			.map(|p| p.period.unwrap() as u64)
-			.collect::<Vec<_>>()
-			.into_pyarray(py),
+		combos.iter().map(|p| p.period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py),
 	)?;
-
 	Ok(dict)
 }
 
@@ -1521,33 +1565,47 @@ pub fn linearreg_intercept_batch_into(
 	period_start: usize,
 	period_end: usize,
 	period_step: usize,
-) -> Result<(), JsValue> {
+) -> Result<usize, JsValue> {
 	if in_ptr.is_null() || out_ptr.is_null() {
 		return Err(JsValue::from_str("Null pointer provided"));
 	}
-	
+
 	unsafe {
 		let data = std::slice::from_raw_parts(in_ptr, len);
-		let sweep = LinearRegInterceptBatchRange {
-			period: (period_start, period_end, period_step),
-		};
-		
+		let sweep = LinearRegInterceptBatchRange { period: (period_start, period_end, period_step) };
 		let combos = expand_grid(&sweep);
 		let rows = combos.len();
-		let total_size = rows * len;
-		
+		let cols = len;
+		let total = rows * cols;
+
+		// Warmup NaNs per row
+		let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+
 		if in_ptr == out_ptr {
-			let mut temp = vec![0.0; total_size];
+			let mut temp = vec![0.0; total];
+			
+			// Pre-fill warmup NaNs for each row
+			for (r, prm) in combos.iter().enumerate() {
+				let warm = (first + prm.period.unwrap() - 1).min(cols);
+				temp[r * cols .. r * cols + warm].fill(f64::NAN);
+			}
+			
 			linearreg_intercept_batch_inner_into(data, &sweep, Kernel::Auto, true, &mut temp)
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
-			let out = std::slice::from_raw_parts_mut(out_ptr, total_size);
+			let out = std::slice::from_raw_parts_mut(out_ptr, total);
 			out.copy_from_slice(&temp);
 		} else {
-			let out = std::slice::from_raw_parts_mut(out_ptr, total_size);
+			let out = std::slice::from_raw_parts_mut(out_ptr, total);
+			
+			// Pre-fill warmup NaNs for each row
+			for (r, prm) in combos.iter().enumerate() {
+				let warm = (first + prm.period.unwrap() - 1).min(cols);
+				out[r * cols .. r * cols + warm].fill(f64::NAN);
+			}
+			
 			linearreg_intercept_batch_inner_into(data, &sweep, Kernel::Auto, true, out)
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 		}
-		
-		Ok(())
+		Ok(rows)
 	}
 }

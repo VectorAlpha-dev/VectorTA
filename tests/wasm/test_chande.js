@@ -75,11 +75,13 @@ test('Chande accuracy', async () => {
         "Chande last 5 values mismatch"
     );
     
-    // First 21 values should be NaN (period - 1)
-    const warmupPeriod = expected.defaultParams.period - 1;
+    // Verify exact warmup period
+    const warmupPeriod = expected.warmupPeriod;
     for (let i = 0; i < warmupPeriod; i++) {
         assert(isNaN(result[i]), `Expected NaN at index ${i} during warmup period`);
     }
+    // First valid value should be at warmup period index
+    assert(!isNaN(result[warmupPeriod]), `Expected valid value at index ${warmupPeriod} (after warmup)`);
     
     // Compare full output with Rust
     await compareWithRust('chande', result, 'candles', expected.defaultParams);
@@ -124,7 +126,7 @@ test('Chande empty input', () => {
     
     assert.throws(() => {
         wasm.chande_js(empty, empty, empty, 22, 3.0, 'long');
-    }, /All values are NaN/);
+    }, /Input series are empty/);
 });
 
 test('Chande mismatched lengths', () => {
@@ -135,7 +137,7 @@ test('Chande mismatched lengths', () => {
     
     assert.throws(() => {
         wasm.chande_js(high, low, close, 2, 3.0, 'long');
-    }, /Not enough valid data/);
+    }, /length mismatch/);
 });
 
 test('Chande directions', () => {
@@ -149,12 +151,14 @@ test('Chande directions', () => {
     assert.strictEqual(resultLong.length, close.length);
     assert(isNaN(resultLong[0]));  // First period-1 values should be NaN
     assert(isNaN(resultLong[1]));
+    assert(!isNaN(resultLong[2])); // First valid value at index 2 (period-1)
     
     // Test short direction
     const resultShort = wasm.chande_js(high, low, close, 3, 2.0, 'short');
     assert.strictEqual(resultShort.length, close.length);
     assert(isNaN(resultShort[0]));  // First period-1 values should be NaN
     assert(isNaN(resultShort[1]));
+    assert(!isNaN(resultShort[2])); // First valid value at index 2 (period-1)
     
     // Results should be different for long vs short
     assert.notStrictEqual(resultLong[2], resultShort[2]);
@@ -347,6 +351,239 @@ test('Chande zero-copy API with aliasing', () => {
         wasm.chande_free(highPtr, len);
         wasm.chande_free(lowPtr, len);
         wasm.chande_free(closePtr, len);
+    }
+});
+
+// Note: Chande doesn't have ergonomic batch API yet, using standard batch API
+test('Chande batch metadata structure', () => {
+    // Test batch result metadata structure with standard API
+    const high = new Float64Array(testData.high.slice(0, 50));
+    const low = new Float64Array(testData.low.slice(0, 50));
+    const close = new Float64Array(testData.close.slice(0, 50));
+    const expected = EXPECTED_OUTPUTS.chande;
+    
+    // Single parameter combination
+    const result = wasm.chande_batch_js(
+        high, low, close,
+        expected.defaultParams.period, expected.defaultParams.period, 0,
+        expected.defaultParams.mult, expected.defaultParams.mult, 0,
+        expected.defaultParams.direction
+    );
+    
+    // Verify structure
+    assert(result.values, 'Should have values array');
+    assert(result.periods, 'Should have periods array');
+    assert(result.mults, 'Should have mults array');
+    assert(result.directions, 'Should have directions array');
+    assert(typeof result.rows === 'number', 'Should have rows count');
+    assert(typeof result.cols === 'number', 'Should have cols count');
+    
+    // Verify dimensions
+    assert.strictEqual(result.rows, 1);
+    assert.strictEqual(result.cols, 50);
+    assert.strictEqual(result.periods.length, 1);
+    assert.strictEqual(result.values.length, 50);
+});
+
+test('Chande batch multiple parameter combinations', () => {
+    // Test with multiple parameter combinations
+    const high = new Float64Array(testData.high.slice(0, 50));
+    const low = new Float64Array(testData.low.slice(0, 50));
+    const close = new Float64Array(testData.close.slice(0, 50));
+    
+    const result = wasm.chande_batch_js(
+        high, low, close,
+        10, 20, 10,      // 10, 20
+        2.0, 3.0, 0.5,   // 2.0, 2.5, 3.0
+        'short'
+    );
+    
+    // Should have 2 * 3 = 6 combinations
+    assert.strictEqual(result.rows, 6);
+    assert.strictEqual(result.cols, 50);
+    assert.strictEqual(result.periods.length, 6);
+    assert.strictEqual(result.mults.length, 6);
+    assert.strictEqual(result.directions.length, 6);
+    assert.strictEqual(result.values.length, 300);
+    
+    // Verify parameter combinations
+    const expectedPeriods = [10, 10, 10, 20, 20, 20];
+    const expectedMults = [2.0, 2.5, 3.0, 2.0, 2.5, 3.0];
+    
+    for (let i = 0; i < 6; i++) {
+        assert.strictEqual(result.periods[i], expectedPeriods[i], `Period mismatch at index ${i}`);
+        assertClose(result.mults[i], expectedMults[i], 1e-10, `Mult mismatch at index ${i}`);
+        assert.strictEqual(result.directions[i], 'short', `Direction mismatch at index ${i}`);
+    }
+    
+    // Verify first combination matches single calculation
+    const firstRow = result.values.slice(0, result.cols);
+    const singleResult = wasm.chande_js(high, low, close, 10, 2.0, 'short');
+    assertArrayClose(firstRow, singleResult, 1e-10, "First batch row vs single mismatch");
+});
+
+test('Chande batch edge cases', () => {
+    // Test edge cases for batch processing
+    const high = new Float64Array([10, 20, 30, 40, 50, 60, 70, 80, 90, 100]);
+    const low = new Float64Array([5, 15, 25, 35, 45, 55, 65, 75, 85, 95]);
+    const close = new Float64Array([8, 18, 28, 38, 48, 58, 68, 78, 88, 98]);
+    
+    // Single value sweep - step = 0
+    const singleBatch = wasm.chande_batch_js(
+        high, low, close,
+        5, 5, 0,       // Single period
+        2.0, 2.0, 0,   // Single mult
+        'long'
+    );
+    
+    assert.strictEqual(singleBatch.rows, 1);
+    assert.strictEqual(singleBatch.values.length, 10);
+    assert.strictEqual(singleBatch.periods.length, 1);
+    
+    // Step larger than range - should only get start value
+    const largeBatch = wasm.chande_batch_js(
+        high, low, close,
+        5, 7, 10,      // Step > range, should only get 5
+        2.0, 2.0, 0,   // Single mult
+        'long'
+    );
+    
+    // Should only have period=5
+    assert.strictEqual(largeBatch.rows, 1);
+    assert.strictEqual(largeBatch.values.length, 10);
+    assert.strictEqual(largeBatch.periods[0], 5);
+});
+
+test('Chande warmup period validation', () => {
+    // Test warmup period calculation for different periods
+    const high = new Float64Array(100).fill(100);
+    const low = new Float64Array(100).fill(90);
+    const close = new Float64Array(100).fill(95);
+    
+    const testPeriods = [5, 10, 22, 30];
+    
+    for (const period of testPeriods) {
+        const result = wasm.chande_js(high, low, close, period, 2.0, 'long');
+        const expectedWarmup = period - 1;
+        
+        // Check NaN values in warmup period
+        for (let i = 0; i < expectedWarmup; i++) {
+            assert(isNaN(result[i]), `Expected NaN at index ${i} for period ${period}`);
+        }
+        
+        // Check first valid value after warmup
+        assert(!isNaN(result[expectedWarmup]), `Expected valid value at index ${expectedWarmup} for period ${period}`);
+    }
+});
+
+test('Chande SIMD128 consistency', () => {
+    // This test verifies SIMD128 produces same results as scalar
+    // It runs automatically when SIMD128 is enabled
+    const testCases = [
+        { size: 10, period: 5 },
+        { size: 100, period: 22 },
+        { size: 1000, period: 50 },
+        { size: 10000, period: 100 }
+    ];
+    
+    for (const testCase of testCases) {
+        const high = new Float64Array(testCase.size);
+        const low = new Float64Array(testCase.size);
+        const close = new Float64Array(testCase.size);
+        
+        for (let i = 0; i < testCase.size; i++) {
+            const base = 100 + Math.sin(i * 0.1) * 10;
+            high[i] = base + 5;
+            low[i] = base - 5;
+            close[i] = base + Math.cos(i * 0.05) * 3;
+        }
+        
+        const result = wasm.chande_js(high, low, close, testCase.period, 3.0, 'long');
+        
+        // Basic sanity checks
+        assert.strictEqual(result.length, testCase.size);
+        
+        // Check warmup period
+        const expectedWarmup = testCase.period - 1;
+        for (let i = 0; i < expectedWarmup; i++) {
+            assert(isNaN(result[i]), `Expected NaN at warmup index ${i} for size=${testCase.size}`);
+        }
+        
+        // Check values exist after warmup
+        for (let i = expectedWarmup; i < Math.min(expectedWarmup + 10, result.length); i++) {
+            assert(!isNaN(result[i]), `Unexpected NaN at index ${i} for size=${testCase.size}`);
+        }
+    }
+});
+
+test('Chande zero-copy error handling', () => {
+    // Test null pointer
+    assert.throws(() => {
+        wasm.chande_into(0, 0, 0, 0, 10, 22, 3.0, 'long');
+    }, /null pointer|invalid memory/i);
+    
+    // Test invalid parameters with allocated memory
+    const highPtr = wasm.chande_alloc(10);
+    const lowPtr = wasm.chande_alloc(10);
+    const closePtr = wasm.chande_alloc(10);
+    const outPtr = wasm.chande_alloc(10);
+    
+    try {
+        // Invalid period
+        assert.throws(() => {
+            wasm.chande_into(highPtr, lowPtr, closePtr, outPtr, 10, 0, 3.0, 'long');
+        }, /Invalid period/);
+        
+        // Invalid direction
+        assert.throws(() => {
+            wasm.chande_into(highPtr, lowPtr, closePtr, outPtr, 10, 5, 3.0, 'invalid');
+        }, /Invalid direction/);
+    } finally {
+        wasm.chande_free(highPtr, 10);
+        wasm.chande_free(lowPtr, 10);
+        wasm.chande_free(closePtr, 10);
+        wasm.chande_free(outPtr, 10);
+    }
+});
+
+test('Chande memory management', () => {
+    // Allocate and free multiple times to ensure no leaks
+    const sizes = [100, 1000, 10000];
+    
+    for (const size of sizes) {
+        const highPtr = wasm.chande_alloc(size);
+        const lowPtr = wasm.chande_alloc(size);
+        const closePtr = wasm.chande_alloc(size);
+        const outPtr = wasm.chande_alloc(size);
+        
+        assert(highPtr !== 0, `Failed to allocate high buffer for ${size} elements`);
+        assert(lowPtr !== 0, `Failed to allocate low buffer for ${size} elements`);
+        assert(closePtr !== 0, `Failed to allocate close buffer for ${size} elements`);
+        assert(outPtr !== 0, `Failed to allocate output buffer for ${size} elements`);
+        
+        // Write pattern to verify memory
+        const highMem = new Float64Array(wasm.__wasm.memory.buffer, highPtr, size);
+        const lowMem = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, size);
+        const closeMem = new Float64Array(wasm.__wasm.memory.buffer, closePtr, size);
+        
+        for (let i = 0; i < Math.min(10, size); i++) {
+            highMem[i] = 100 + i;
+            lowMem[i] = 90 + i;
+            closeMem[i] = 95 + i;
+        }
+        
+        // Verify pattern
+        for (let i = 0; i < Math.min(10, size); i++) {
+            assert.strictEqual(highMem[i], 100 + i, `High memory corruption at index ${i}`);
+            assert.strictEqual(lowMem[i], 90 + i, `Low memory corruption at index ${i}`);
+            assert.strictEqual(closeMem[i], 95 + i, `Close memory corruption at index ${i}`);
+        }
+        
+        // Free memory
+        wasm.chande_free(highPtr, size);
+        wasm.chande_free(lowPtr, size);
+        wasm.chande_free(closePtr, size);
+        wasm.chande_free(outPtr, size);
     }
 });
 

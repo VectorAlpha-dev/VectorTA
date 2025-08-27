@@ -40,34 +40,32 @@ class TestChande:
         high = test_data['high']
         low = test_data['low']
         close = test_data['close']
+        expected = EXPECTED_OUTPUTS['chande']
         
-        # Expected values from Rust tests
-        expected_last_five = [
-            59444.14115983658,
-            58576.49837984401,
-            58649.1120898511,
-            58724.56154031242,
-            58713.39965211639,
-        ]
-        
-        result = ta_indicators.chande(high, low, close, 22, 3.0, 'long')
+        result = ta_indicators.chande(
+            high, low, close,
+            period=expected['default_params']['period'],
+            mult=expected['default_params']['mult'],
+            direction=expected['default_params']['direction']
+        )
         
         assert len(result) == len(close)
         
         # Check last 5 values match expected
         assert_close(
             result[-5:], 
-            expected_last_five,
+            expected['last_5_values'],
             rtol=1e-8,
             msg="Chande last 5 values mismatch"
         )
         
-        # First 21 values should be NaN (period - 1)
-        assert np.all(np.isnan(result[:21])), "Expected leading NaN in warmup period"
+        # Verify exact warmup period
+        warmup_period = expected['warmup_period']
+        assert np.all(np.isnan(result[:warmup_period])), f"Expected NaN in warmup period (first {warmup_period} values)"
+        assert not np.isnan(result[warmup_period]), f"Expected valid value at index {warmup_period} (after warmup)"
         
         # Compare full output with Rust
-        params = {'period': 22, 'mult': 3.0, 'direction': 'long'}
-        compare_with_rust('chande', result, 'candles', params)
+        compare_with_rust('chande', result, 'candles', expected['default_params'])
     
     def test_chande_zero_period(self):
         """Test Chande fails with zero period - mirrors check_chande_zero_period"""
@@ -100,7 +98,7 @@ class TestChande:
         """Test Chande fails with empty input"""
         empty = np.array([])
         
-        with pytest.raises(ValueError, match="All values are NaN"):
+        with pytest.raises(ValueError, match="Input series are empty"):
             ta_indicators.chande(empty, empty, empty, period=22, mult=3.0, direction='long')
     
     def test_chande_all_nan(self):
@@ -116,7 +114,7 @@ class TestChande:
         low = np.array([5.0, 15.0])
         close = np.array([8.0, 18.0, 28.0])
         
-        with pytest.raises(ValueError, match="Input arrays must have the same length"):
+        with pytest.raises(ValueError, match="length mismatch"):
             ta_indicators.chande(high, low, close, period=2, mult=3.0, direction='long')
     
     def test_chande_directions(self):
@@ -143,16 +141,23 @@ class TestChande:
         high = test_data['high']
         low = test_data['low']
         close = test_data['close']
+        expected = EXPECTED_OUTPUTS['chande']
         
-        result = ta_indicators.chande(high, low, close, period=22, mult=3.0, direction='long')
+        result = ta_indicators.chande(
+            high, low, close,
+            period=expected['default_params']['period'],
+            mult=expected['default_params']['mult'],
+            direction=expected['default_params']['direction']
+        )
         assert len(result) == len(close)
         
-        # First period-1 values should be NaN
-        assert np.all(np.isnan(result[:21])), "Expected NaN in warmup period"
+        # Verify exact warmup period
+        warmup_period = expected['warmup_period']
+        assert np.all(np.isnan(result[:warmup_period])), f"Expected NaN in warmup period (first {warmup_period} values)"
         
-        # After warmup period (240), no NaN values should exist
-        if len(result) > 240:
-            assert not np.any(np.isnan(result[240:])), "Found unexpected NaN after warmup"
+        # After warmup period, all values should be valid
+        if len(result) > warmup_period:
+            assert not np.any(np.isnan(result[warmup_period:])), f"Found unexpected NaN after warmup period (index {warmup_period}+)"
     
     def test_chande_streaming(self, test_data):
         """Test Chande streaming functionality - mirrors check_chande_streaming"""
@@ -256,6 +261,92 @@ class TestChande:
                 rtol=1e-10,
                 msg=f"Batch row {i} (period={period}, mult={mult}) mismatch"
             )
+    
+    def test_chande_batch_metadata(self, test_data):
+        """Test Chande batch result metadata structure"""
+        high = test_data['high'][:50]
+        low = test_data['low'][:50]
+        close = test_data['close'][:50]
+        
+        # Test batch with multiple parameters
+        result = ta_indicators.chande_batch(
+            high, low, close,
+            period_range=(10, 20, 5),      # 10, 15, 20
+            mult_range=(2.0, 3.0, 0.5),    # 2.0, 2.5, 3.0
+            direction='long'
+        )
+        
+        # Verify result structure
+        assert 'values' in result
+        assert 'periods' in result
+        assert 'mults' in result
+        assert 'directions' in result
+        
+        # Should have 3 * 3 = 9 combinations
+        expected_combos = 9
+        assert result['values'].shape[0] == expected_combos
+        assert len(result['periods']) == expected_combos
+        assert len(result['mults']) == expected_combos
+        assert len(result['directions']) == expected_combos
+        
+        # Verify parameter combinations are correct
+        expected_periods = [10, 10, 10, 15, 15, 15, 20, 20, 20]
+        expected_mults = [2.0, 2.5, 3.0] * 3
+        
+        assert_close(result['periods'], expected_periods, rtol=0, msg="Period combinations mismatch")
+        assert_close(result['mults'], expected_mults, rtol=1e-10, msg="Mult combinations mismatch")
+        assert all(d == 'long' for d in result['directions'])
+    
+    def test_chande_batch_edge_cases(self, test_data):
+        """Test Chande batch with edge cases"""
+        high = test_data['high'][:30]
+        low = test_data['low'][:30]
+        close = test_data['close'][:30]
+        
+        # Test with step larger than range - should only have one combination
+        result = ta_indicators.chande_batch(
+            high, low, close,
+            period_range=(10, 12, 5),      # Step > range, should only get 10
+            mult_range=(2.0, 2.0, 0.0),    # Single value
+            direction='short'
+        )
+        
+        assert result['values'].shape[0] == 1
+        assert result['periods'][0] == 10
+        assert result['mults'][0] == 2.0
+        assert result['directions'][0] == 'short'
+        
+        # Test with exact range match
+        result2 = ta_indicators.chande_batch(
+            high, low, close,
+            period_range=(10, 15, 5),      # Should get 10, 15
+            mult_range=(2.0, 2.5, 0.5),    # Should get 2.0, 2.5
+            direction='long'
+        )
+        
+        assert result2['values'].shape[0] == 4  # 2 * 2 combinations
+        assert len(result2['periods']) == 4
+        
+    def test_chande_warmup_validation(self, test_data):
+        """Test Chande warmup period is correctly calculated"""
+        high = test_data['high'][:100]
+        low = test_data['low'][:100]
+        close = test_data['close'][:100]
+        
+        test_periods = [5, 10, 22, 50]
+        
+        for period in test_periods:
+            result = ta_indicators.chande(high, low, close, period=period, mult=2.0, direction='long')
+            
+            expected_warmup = period - 1
+            
+            # Check NaN values in warmup period
+            for i in range(expected_warmup):
+                assert np.isnan(result[i]), f"Expected NaN at index {i} for period {period}"
+            
+            # Check first valid value after warmup
+            if expected_warmup < len(result):
+                assert not np.isnan(result[expected_warmup]), f"Expected valid value at index {expected_warmup} for period {period}"
     
     def test_chande_kernel_parameter(self, test_data):
         """Test Chande with different kernel parameters"""

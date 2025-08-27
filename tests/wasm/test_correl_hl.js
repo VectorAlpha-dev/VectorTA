@@ -58,7 +58,7 @@ test('CORREL_HL accuracy', async () => {
     const result = wasm.correl_hl_js(
         high,
         low,
-        expected.default_params.period
+        expected.defaultParams.period
     );
     
     assert.strictEqual(result.length, high.length);
@@ -67,13 +67,14 @@ test('CORREL_HL accuracy', async () => {
     const last5 = result.slice(-5);
     assertArrayClose(
         last5,
-        expected.last_5_values,
+        expected.last5Values,
         1e-7,  // CORREL_HL uses 1e-7 tolerance in Rust tests
         "CORREL_HL last 5 values mismatch"
     );
     
-    // Compare full output with Rust
-    await compareWithRust('correl_hl', result, ['high', 'low'], expected.default_params);
+    // Compare full output with Rust - use default period 9 for comparison since generate_references uses defaults
+    const resultDefault = wasm.correl_hl_js(high, low, 9);
+    await compareWithRust('correl_hl', resultDefault, 'high,low', { period: 9 });
 });
 
 test('CORREL_HL from candles', () => {
@@ -145,6 +146,30 @@ test('CORREL_HL reinput', () => {
     assert.strictEqual(secondResult.length, low.length);
 });
 
+test('CORREL_HL very small dataset', () => {
+    // Test CORREL_HL with single data point - mirrors check_correl_hl_very_small_dataset
+    const singleHigh = new Float64Array([42.0]);
+    const singleLow = new Float64Array([21.0]);
+    
+    const result = wasm.correl_hl_js(singleHigh, singleLow, 1);
+    assert.strictEqual(result.length, 1);
+    // With period=1, correlation is undefined (returns 0.0 or NaN)
+    assert(isNaN(result[0]) || Math.abs(result[0]) < Number.EPSILON,
+           `Expected NaN or 0 for period=1, got ${result[0]}`);
+});
+
+test('CORREL_HL all NaN input', () => {
+    // Test CORREL_HL with all NaN values
+    const allNanHigh = new Float64Array(100);
+    const allNanLow = new Float64Array(100);
+    allNanHigh.fill(NaN);
+    allNanLow.fill(NaN);
+    
+    assert.throws(() => {
+        wasm.correl_hl_js(allNanHigh, allNanLow, 9);
+    }, /All values are NaN/);
+});
+
 test('CORREL_HL NaN handling', () => {
     // Test CORREL_HL handles NaN values correctly
     const high = new Float64Array(testData.high);
@@ -161,36 +186,48 @@ test('CORREL_HL NaN handling', () => {
 });
 
 test('CORREL_HL fast API (in-place)', () => {
-    // Test fast API with in-place operation (aliasing)
+    // Test fast API with in-place operation
     const high = new Float64Array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]);
     const low = new Float64Array([0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0]);
     const period = 3;
+    const len = high.length;
     
     // Get expected results from safe API
     const expected = wasm.correl_hl_js(high, low, period);
     
-    // Allocate output buffer
-    const len = high.length;
+    // Allocate buffers
+    const highPtr = wasm.correl_hl_alloc(len);
+    const lowPtr = wasm.correl_hl_alloc(len);
     const outPtr = wasm.correl_hl_alloc(len);
     
     try {
-        // First, test normal operation (no aliasing)
-        wasm.correl_hl_into(high, low, outPtr, len, period);
+        // Copy data into WASM memory
+        const highMem = new Float64Array(wasm.__wasm.memory.buffer, highPtr, len);
+        const lowMem = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, len);
+        highMem.set(high);
+        lowMem.set(low);
+        
+        // Test normal operation (no aliasing)
+        wasm.correl_hl_into(highPtr, lowPtr, outPtr, len, period);
         
         // Read results from WASM memory
-        const memory = new Float64Array(wasm.memory.buffer, outPtr, len);
-        const result = new Float64Array(memory);
+        const outMem = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
+        const result = new Float64Array(outMem);
         
         // Should match safe API
         assertArrayClose(result, expected, 1e-10, "Fast API mismatch");
         
-        // Now test aliasing - use high pointer as output
-        const highCopy = new Float64Array(high);
-        wasm.correl_hl_into(highCopy, low, highCopy, len, period);
+        // Test aliasing - use high pointer as output
+        wasm.correl_hl_into(highPtr, lowPtr, highPtr, len, period);
+        
+        // Read results (recreate view in case memory grew)
+        const highMem2 = new Float64Array(wasm.__wasm.memory.buffer, highPtr, len);
         
         // Should still produce same results
-        assertArrayClose(highCopy, expected, 1e-10, "Fast API aliasing mismatch");
+        assertArrayClose(highMem2, expected, 1e-10, "Fast API aliasing mismatch");
     } finally {
+        wasm.correl_hl_free(highPtr, len);
+        wasm.correl_hl_free(lowPtr, len);
         wasm.correl_hl_free(outPtr, len);
     }
 });
@@ -268,20 +305,28 @@ test('CORREL_HL batch fast API', () => {
     const periodStep = 5;
     const expectedRows = 3; // periods: 5, 10, 15
     
-    // Allocate output buffer
+    // Allocate buffers
+    const highPtr = wasm.correl_hl_alloc(len);
+    const lowPtr = wasm.correl_hl_alloc(len);
     const outPtr = wasm.correl_hl_alloc(len * expectedRows);
     
     try {
+        // Copy data into WASM memory
+        const highMem = new Float64Array(wasm.__wasm.memory.buffer, highPtr, len);
+        const lowMem = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, len);
+        highMem.set(high);
+        lowMem.set(low);
+        
         const rows = wasm.correl_hl_batch_into(
-            high, low, outPtr, len,
+            highPtr, lowPtr, outPtr, len,
             periodStart, periodEnd, periodStep
         );
         
         assert.strictEqual(rows, expectedRows);
         
         // Read results from WASM memory
-        const memory = new Float64Array(wasm.memory.buffer, outPtr, len * rows);
-        const result = new Float64Array(memory);
+        const outMem = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len * rows);
+        const result = new Float64Array(outMem);
         
         // Compare with safe batch API
         const config = {
@@ -296,6 +341,8 @@ test('CORREL_HL batch fast API', () => {
             "Fast batch API mismatch"
         );
     } finally {
+        wasm.correl_hl_free(highPtr, len);
+        wasm.correl_hl_free(lowPtr, len);
         wasm.correl_hl_free(outPtr, len * expectedRows);
     }
 });

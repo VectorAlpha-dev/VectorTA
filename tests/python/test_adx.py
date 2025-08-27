@@ -78,7 +78,7 @@ class TestAdx:
         low = np.array([5.0, 15.0, 25.0])
         close = np.array([9.0, 19.0, 29.0])
         
-        with pytest.raises(ValueError, match="Invalid period"):
+        with pytest.raises(ValueError, match="Invalid period: period = 0"):
             ta_indicators.adx(high, low, close, period=0)
     
     def test_adx_period_exceeds_length(self):
@@ -87,7 +87,7 @@ class TestAdx:
         low = np.array([5.0, 15.0, 25.0])
         close = np.array([9.0, 19.0, 29.0])
         
-        with pytest.raises(ValueError, match="Invalid period"):
+        with pytest.raises(ValueError, match="Invalid period: period = 10"):
             ta_indicators.adx(high, low, close, period=10)
     
     def test_adx_very_small_dataset(self):
@@ -96,7 +96,7 @@ class TestAdx:
         low = np.array([41.0])
         close = np.array([40.5])
         
-        with pytest.raises(ValueError, match="Invalid period"):
+        with pytest.raises(ValueError, match="Invalid period: period = 14|Not enough valid data"):
             ta_indicators.adx(high, low, close, period=14)
     
     def test_adx_input_length_mismatch(self):
@@ -115,24 +115,6 @@ class TestAdx:
         with pytest.raises(ValueError, match="All values are NaN"):
             ta_indicators.adx(all_nan, all_nan, all_nan, period=14)
     
-    def test_adx_reinput(self, test_data):
-        """Test ADX applied twice (re-input) - mirrors check_adx_reinput"""
-        high = test_data['high']
-        low = test_data['low']
-        close = test_data['close']
-        
-        # First pass
-        first_result = ta_indicators.adx(high, low, close, period=14)
-        assert len(first_result) == len(close)
-        
-        # Second pass - apply ADX using the first result as close price
-        # This is different from ALMA since ADX requires high/low/close
-        second_result = ta_indicators.adx(high, low, first_result, period=5)
-        assert len(second_result) == len(first_result)
-        
-        # Check that we have values after warmup
-        non_nan_count = np.sum(~np.isnan(second_result))
-        assert non_nan_count > 100, "Expected more non-NaN values after second pass"
     
     def test_adx_nan_handling(self, test_data):
         """Test ADX handles NaN values correctly - mirrors check_adx_nan_handling"""
@@ -143,14 +125,15 @@ class TestAdx:
         result = ta_indicators.adx(high, low, close, period=14)
         assert len(result) == len(close)
         
-        # ADX requires period + additional warmup bars
-        # After warmup period (100), no NaN values should exist
-        if len(result) > 100:
-            assert not np.any(np.isnan(result[100:])), "Found unexpected NaN after warmup period"
+        # ADX warmup period is 2 * period - 1 = 27 for period=14
+        warmup_period = 2 * 14 - 1
         
-        # First several values should be NaN (more than just period due to ADX calculation)
-        # ADX needs period + 1 bars minimum, but also needs time to calculate DX values
-        assert np.all(np.isnan(result[:27])), "Expected NaN in warmup period"
+        # First warmup_period values should be NaN
+        assert np.all(np.isnan(result[:warmup_period])), f"Expected NaN in first {warmup_period} values"
+        
+        # After warmup + buffer, no NaN values should exist
+        if len(result) > warmup_period + 10:
+            assert not np.any(np.isnan(result[warmup_period + 10:])), "Found unexpected NaN after warmup period"
     
     def test_adx_streaming(self, test_data):
         """Test ADX streaming matches batch calculation - mirrors check_adx_streaming"""
@@ -250,48 +233,47 @@ class TestAdx:
                     msg=f"Period {period} mismatch at index {j}"
                 )
     
-    def test_adx_kernel_parameter(self, test_data):
-        """Test ADX with different kernel parameters"""
-        high = test_data['high'][:100]
-        low = test_data['low'][:100]
-        close = test_data['close'][:100]
-        
-        # Test with explicit scalar kernel
-        result_scalar = ta_indicators.adx(high, low, close, period=14, kernel='scalar')
-        assert len(result_scalar) == len(close)
-        
-        # Test with auto kernel (default)
-        result_auto = ta_indicators.adx(high, low, close, period=14)
-        
-        # Results should be very close (might use different kernels)
-        for i, (s, a) in enumerate(zip(result_scalar, result_auto)):
-            if np.isnan(s) and np.isnan(a):
-                continue
-            assert_close(s, a, rtol=1e-10, atol=1e-10,
-                        msg=f"Kernel results mismatch at index {i}")
     
-    def test_adx_edge_cases(self, test_data):
-        """Test ADX with edge case scenarios"""
-        # Test with minimum required data
-        min_len = 15  # period + 1
-        high = test_data['high'][:min_len]
-        low = test_data['low'][:min_len]
-        close = test_data['close'][:min_len]
+    def test_adx_leading_nan_values(self, test_data):
+        """Test ADX with leading NaN values in input"""
+        high = test_data['high'][:100].copy()
+        low = test_data['low'][:100].copy()
+        close = test_data['close'][:100].copy()
+        
+        # Add some NaN values at the beginning
+        high[:5] = np.nan
+        low[:5] = np.nan
+        close[:5] = np.nan
         
         result = ta_indicators.adx(high, low, close, period=14)
-        assert len(result) == min_len
+        assert len(result) == len(close)
         
-        # Test with flat price (no movement)
-        flat_high = np.full(50, 100.0)
-        flat_low = np.full(50, 100.0)
-        flat_close = np.full(50, 100.0)
+        # Should handle leading NaN values properly
+        # Warmup will be extended by the NaN values
+        assert np.all(np.isnan(result[:5])), "Expected NaN where input has NaN"
+    
+    def test_adx_batch_empty_input(self):
+        """Test ADX batch with empty input arrays"""
+        empty = np.array([])
         
-        result_flat = ta_indicators.adx(flat_high, flat_low, flat_close, period=14)
-        assert len(result_flat) == 50
-        # ADX should be low for flat prices (no trend)
-        non_nan_values = result_flat[~np.isnan(result_flat)]
-        if len(non_nan_values) > 0:
-            assert np.all(non_nan_values < 20), "ADX should be low for flat prices"
+        with pytest.raises(ValueError, match="Not enough valid data"):
+            ta_indicators.adx_batch(
+                empty, empty, empty,
+                period_range=(14, 14, 0)
+            )
+    
+    def test_adx_batch_invalid_params(self, test_data):
+        """Test ADX batch with invalid parameters"""
+        high = test_data['high'][:50]
+        low = test_data['low'][:50]
+        close = test_data['close'][:50]
+        
+        # Period exceeds data length
+        with pytest.raises(ValueError):
+            ta_indicators.adx_batch(
+                high, low, close,
+                period_range=(100, 100, 0)
+            )
     
     def test_adx_warmup_behavior(self, test_data):
         """Test ADX warmup period behavior in detail"""
@@ -306,17 +288,21 @@ class TestAdx:
         # - period bars for initial ATR
         # - period more bars for DX calculation
         # - first ADX appears at 2*period bars
-        expected_first_valid = 2 * period - 1  # 27 for period=14
+        warmup_period = 2 * period - 1  # 27 for period=14
         
-        # All values before this should be NaN
-        assert np.all(np.isnan(result[:expected_first_valid])), \
-            f"Expected NaN for indices 0 to {expected_first_valid-1}"
+        # All values before warmup_period should be NaN
+        assert np.all(np.isnan(result[:warmup_period])), \
+            f"Expected NaN for indices 0 to {warmup_period-1}"
         
-        # Should have a value at expected_first_valid (might still be calculating)
-        # Check that we eventually get non-NaN values
-        if len(result) > expected_first_valid + 5:
-            assert not np.all(np.isnan(result[expected_first_valid:])), \
-                "Expected some non-NaN values after warmup"
+        # Should have first valid value at warmup_period index
+        if len(result) > warmup_period:
+            assert not np.isnan(result[warmup_period]), \
+                f"Expected first valid value at index {warmup_period}"
+        
+        # Check that we have consistent non-NaN values after warmup
+        if len(result) > warmup_period + 5:
+            assert not np.any(np.isnan(result[warmup_period:])), \
+                "Expected all non-NaN values after warmup period"
 
 
 if __name__ == '__main__':

@@ -209,18 +209,21 @@ class TestPivot:
             mode_range=(0, 4, 1)  # All modes: 0, 1, 2, 3, 4
         )
         
-        assert 'values' in result
+        # Check that all 9 level arrays are present
+        levels = ['r4', 'r3', 'r2', 'r1', 'pp', 's1', 's2', 's3', 's4']
+        for level in levels:
+            assert level in result, f"Missing {level} in result"
+        
         assert 'modes' in result
-        assert 'rows' in result
+        assert 'rows_per_level' in result
         assert 'cols' in result
-        assert 'n_levels' in result
         
-        assert result['rows'] == 5  # 5 modes
+        assert result['rows_per_level'] == 5  # 5 modes
         assert result['cols'] == len(close)
-        assert result['n_levels'] == 9  # 9 output levels
         
-        # Values should be shaped (rows, cols * 9)
-        assert result['values'].shape == (5, len(close) * 9)
+        # Each level should be shaped (5, len(close))
+        for level in levels:
+            assert result[level].shape == (5, len(close)), f"{level} has wrong shape"
         
         # Test single mode batch
         single_result = ta_indicators.pivot_batch(
@@ -228,22 +231,21 @@ class TestPivot:
             mode_range=(3, 3, 1)  # Only Camarilla mode
         )
         
-        assert single_result['rows'] == 1
+        assert single_result['rows_per_level'] == 1
         
         # Extract and verify Camarilla values match single calculation
         r4_single, r3_single, r2_single, r1_single, pp_single, s1_single, s2_single, s3_single, s4_single = \
             ta_indicators.pivot(high, low, close, open_, mode=3)
         
-        # Extract first row from batch (interleaved values)
-        batch_values = single_result['values'][0]
-        # Values are interleaved: r4[0], r3[0], r2[0], r1[0], pp[0], s1[0], s2[0], s3[0], s4[0], r4[1], ...
+        # Extract first row from batch (each level is a separate array)
+        batch_r4 = single_result['r4'][0]
+        batch_pp = single_result['pp'][0]
         
         # Check a few values
         for i in range(min(10, len(close))):
-            idx = i * 9
-            assert_close(batch_values[idx], r4_single[i], rtol=1e-10, 
+            assert_close(batch_r4[i], r4_single[i], rtol=1e-10, 
                         msg=f"Batch r4[{i}] mismatch")
-            assert_close(batch_values[idx + 4], pp_single[i], rtol=1e-10, 
+            assert_close(batch_pp[i], pp_single[i], rtol=1e-10, 
                         msg=f"Batch pp[{i}] mismatch")
     
     def test_pivot_kernel_param(self, test_data):

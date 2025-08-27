@@ -50,7 +50,8 @@ test('Donchian - basic functionality', () => {
 test('Donchian - accuracy test', () => {
     const high = new Float64Array(testData.high);
     const low = new Float64Array(testData.low);
-    const period = 20;
+    const expected = EXPECTED_OUTPUTS.donchian;
+    const period = expected.defaultParams.period;
     
     const result = wasm.donchian_js(high, low, period);
     
@@ -60,28 +61,23 @@ test('Donchian - accuracy test', () => {
     const middle = result.values.slice(len, 2 * len);
     const lower = result.values.slice(2 * len, 3 * len);
     
-    // Expected values from Rust tests
-    const expectedUpper = [61290.0, 61290.0, 61290.0, 61290.0, 61290.0];
-    const expectedMiddle = [59583.0, 59583.0, 59583.0, 59583.0, 59583.0];
-    const expectedLower = [57876.0, 57876.0, 57876.0, 57876.0, 57876.0];
-    
     // Check last 5 values
     const startIdx = len - 5;
     assertArrayClose(
         upper.slice(startIdx),
-        expectedUpper,
+        expected.last5Upper,
         0.1,
         'Upper band last 5 values mismatch'
     );
     assertArrayClose(
         middle.slice(startIdx),
-        expectedMiddle,
+        expected.last5Middle,
         0.1,
         'Middle band last 5 values mismatch'
     );
     assertArrayClose(
         lower.slice(startIdx),
-        expectedLower,
+        expected.last5Lower,
         0.1,
         'Lower band last 5 values mismatch'
     );
@@ -243,7 +239,8 @@ test('Donchian - very small dataset', () => {
 test('Donchian - reinput test', () => {
     const high = new Float64Array(testData.high);
     const low = new Float64Array(testData.low);
-    const period = 20;
+    const expected = EXPECTED_OUTPUTS.donchian;
+    const period = expected.defaultParams.period;
     
     // First pass
     const firstResult = wasm.donchian_js(high, low, period);
@@ -252,7 +249,8 @@ test('Donchian - reinput test', () => {
     const firstMiddle = firstResult.values.slice(len, 2 * len);
     const firstLower = firstResult.values.slice(2 * len, 3 * len);
     
-    // Second pass - apply Donchian to its own output (using middle as both high/low)
+    // Second pass - apply Donchian to its own middle band output (using middle as both high/low)
+    // When high == low, all bands should converge to the same value
     const secondResult = wasm.donchian_js(firstMiddle, firstMiddle, period);
     const secondUpper = secondResult.values.slice(0, len);
     const secondMiddle = secondResult.values.slice(len, 2 * len);
@@ -262,13 +260,29 @@ test('Donchian - reinput test', () => {
     assert.strictEqual(secondResult.rows, 3);
     assert.strictEqual(secondResult.cols, len);
     
-    // Check some values exist after warmup
-    // Note: The first pass middle has NaN values for the first period-1 indices,
-    // so the second pass needs 2*period-1 indices before valid values
-    const secondWarmup = 2 * period - 1;
-    assert(!isNaN(secondUpper[secondWarmup]), 'Second pass upper should have values after warmup');
-    assert(!isNaN(secondMiddle[secondWarmup]), 'Second pass middle should have values after warmup');
-    assert(!isNaN(secondLower[secondWarmup]), 'Second pass lower should have values after warmup');
+    // Check last 5 values match expected reinput values
+    const startIdx = len - 5;
+    assertArrayClose(
+        secondUpper.slice(startIdx),
+        expected.reinputLast5Upper,
+        0.1,
+        'Reinput upper band last 5 values mismatch'
+    );
+    assertArrayClose(
+        secondMiddle.slice(startIdx),
+        expected.reinputLast5Middle,
+        0.1,
+        'Reinput middle band last 5 values mismatch'
+    );
+    assertArrayClose(
+        secondLower.slice(startIdx),
+        expected.reinputLast5Lower,
+        0.1,
+        'Reinput lower band last 5 values mismatch'
+    );
+    
+    // Note: When using the middle band as both high and low, the bands will NOT be equal
+    // because the middle band has varying values, so max and min over a window will differ
 });
 
 test('Donchian - invalid high/low relationship', () => {
@@ -312,10 +326,15 @@ test('Donchian - partial NaN handling', () => {
     assert(isNaN(upper[1]), 'Should be NaN at index 1');
     assert(isNaN(upper[2]), 'Should be NaN at index 2');
     
-    // Should have valid values after enough non-NaN data
-    assert(!isNaN(upper[5]), 'Should have valid value at index 5');
-    assert(!isNaN(middle[5]), 'Should have valid value at index 5');
-    assert(!isNaN(lower[5]), 'Should have valid value at index 5');
+    // With NaN propagation, index 5 will still be NaN because its window includes the NaN at index 3
+    assert(isNaN(upper[5]), 'Should be NaN at index 5 due to NaN in window');
+    assert(isNaN(middle[5]), 'Should be NaN at index 5 due to NaN in window');
+    assert(isNaN(lower[5]), 'Should be NaN at index 5 due to NaN in window');
+    
+    // First valid value should be at index 6 (window [4, 5, 6] has no NaNs)
+    assert(!isNaN(upper[6]), 'Should have valid value at index 6');
+    assert(!isNaN(middle[6]), 'Should have valid value at index 6');
+    assert(!isNaN(lower[6]), 'Should have valid value at index 6');
 });
 
 test('Donchian - zero-copy null pointer handling', () => {
@@ -619,6 +638,107 @@ test('Donchian - fast batch API', () => {
         wasm.donchian_free(middlePtr, totalSize);
         wasm.donchian_free(lowerPtr, totalSize);
     }
+});
+
+test('Donchian - batch metadata from result', () => {
+    // Test that batch result includes correct parameter combinations
+    const high = new Float64Array(testData.high.slice(0, 100));
+    const low = new Float64Array(testData.low.slice(0, 100));
+    
+    const config = {
+        period_range: [10, 20, 5]  // 10, 15, 20
+    };
+    
+    const result = wasm.donchian_batch(high, low, config);
+    
+    // Should have 3 combinations (10, 15, 20)
+    assert.strictEqual(result.periods.length, 3);
+    assert.strictEqual(result.rows, 3);
+    
+    // Check periods array
+    assert.strictEqual(result.periods[0], 10);
+    assert.strictEqual(result.periods[1], 15);
+    assert.strictEqual(result.periods[2], 20);
+    
+    // Verify sizes
+    assert.strictEqual(result.upper.length, 3 * 100);
+    assert.strictEqual(result.middle.length, 3 * 100);
+    assert.strictEqual(result.lower.length, 3 * 100);
+});
+
+test('Donchian - batch full parameter sweep', () => {
+    // Test comprehensive parameter sweep
+    const high = new Float64Array(testData.high.slice(0, 50));
+    const low = new Float64Array(testData.low.slice(0, 50));
+    
+    const config = {
+        period_range: [5, 25, 5]  // 5, 10, 15, 20, 25
+    };
+    
+    const result = wasm.donchian_batch(high, low, config);
+    
+    // Should have 5 combinations
+    assert.strictEqual(result.periods.length, 5);
+    assert.strictEqual(result.rows, 5);
+    assert.strictEqual(result.cols, 50);
+    
+    // Check all periods
+    assert.deepStrictEqual(Array.from(result.periods), [5, 10, 15, 20, 25]);
+    
+    // Verify warmup periods are different for each row
+    for (let row = 0; row < 5; row++) {
+        const period = result.periods[row];
+        const rowStart = row * 50;
+        
+        // Check warmup NaNs
+        for (let i = 0; i < period - 1; i++) {
+            assert(isNaN(result.upper[rowStart + i]), 
+                `Row ${row} should have NaN at index ${i} during warmup`);
+        }
+        // Check valid data after warmup
+        assert(!isNaN(result.upper[rowStart + period]), 
+            `Row ${row} should have valid data after warmup`);
+    }
+});
+
+test('Donchian - batch matches EXPECTED_OUTPUTS', () => {
+    // Test that batch with default params matches expected values
+    const high = new Float64Array(testData.high);
+    const low = new Float64Array(testData.low);
+    const expected = EXPECTED_OUTPUTS.donchian;
+    
+    const config = {
+        period_range: [expected.defaultParams.period, expected.defaultParams.period, 0]
+    };
+    
+    const result = wasm.donchian_batch(high, low, config);
+    
+    // Should have 1 row with default params
+    assert.strictEqual(result.rows, 1);
+    assert.strictEqual(result.periods[0], expected.defaultParams.period);
+    
+    // Check last 5 values match expected
+    const len = high.length;
+    const startIdx = len - 5;
+    
+    assertArrayClose(
+        result.upper.slice(startIdx, startIdx + 5),
+        expected.last5Upper,
+        0.1,
+        'Batch upper band last 5 values mismatch'
+    );
+    assertArrayClose(
+        result.middle.slice(startIdx, startIdx + 5),
+        expected.last5Middle,
+        0.1,
+        'Batch middle band last 5 values mismatch'
+    );
+    assertArrayClose(
+        result.lower.slice(startIdx, startIdx + 5),
+        expected.last5Lower,
+        0.1,
+        'Batch lower band last 5 values mismatch'
+    );
 });
 
 // Add test.after hook for cleanup

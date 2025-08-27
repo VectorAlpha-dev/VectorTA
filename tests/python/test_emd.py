@@ -25,12 +25,10 @@ class TestEmd:
     
     def test_emd_accuracy(self, test_data):
         """Test EMD matches expected values from Rust tests"""
-        # EMD requires high, low, close, and volume data
+        # EMD only uses high and low data
         upperband, middleband, lowerband = ta.emd(
             test_data['high'],
             test_data['low'],
-            test_data['close'],
-            test_data['volume'],
             period=20,
             delta=0.5,
             fraction=0.1
@@ -71,10 +69,8 @@ class TestEmd:
     def test_emd_errors(self):
         """Test error handling"""
         # Test with empty data
-        with pytest.raises(ValueError, match="All values are NaN"):
+        with pytest.raises(ValueError, match="Invalid input length"):
             ta.emd(
-                np.array([]),
-                np.array([]),
                 np.array([]),
                 np.array([]),
                 period=20,
@@ -88,8 +84,6 @@ class TestEmd:
             ta.emd(
                 nan_data,
                 nan_data,
-                nan_data,
-                nan_data,
                 period=20,
                 delta=0.5,
                 fraction=0.1
@@ -101,8 +95,6 @@ class TestEmd:
             ta.emd(
                 data,
                 data,
-                data,
-                data,
                 period=0,
                 delta=0.5,
                 fraction=0.1
@@ -112,8 +104,6 @@ class TestEmd:
         small_data = np.array([10.0] * 10)
         with pytest.raises(ValueError, match="Invalid period"):
             ta.emd(
-                small_data,
-                small_data,
                 small_data,
                 small_data,
                 period=20,  # Needs at least 2*period = 40 or 50 data points
@@ -143,17 +133,15 @@ class TestEmd:
         result = ta.emd_batch(
             test_data['high'],
             test_data['low'],
-            test_data['close'],
-            test_data['volume'],
             period_range=(20, 22, 2),    # 2 values: 20, 22
             delta_range=(0.5, 0.6, 0.1), # 2 values: 0.5, 0.6
             fraction_range=(0.1, 0.2, 0.1)  # 2 values: 0.1, 0.2
         )
         
         # Should have 2*2*2 = 8 combinations
-        assert result['upperband'].shape[0] == 8, "Expected 8 rows in batch output"
-        assert result['middleband'].shape[0] == 8, "Expected 8 rows in batch output"
-        assert result['lowerband'].shape[0] == 8, "Expected 8 rows in batch output"
+        assert result['upper'].shape[0] == 8, "Expected 8 rows in batch output"
+        assert result['middle'].shape[0] == 8, "Expected 8 rows in batch output"
+        assert result['lower'].shape[0] == 8, "Expected 8 rows in batch output"
         
         # Check parameter arrays
         assert len(result['periods']) == 8
@@ -164,17 +152,15 @@ class TestEmd:
         upperband, middleband, lowerband = ta.emd(
             test_data['high'],
             test_data['low'],
-            test_data['close'],
-            test_data['volume'],
             period=20,
             delta=0.5,
             fraction=0.1
         )
         
         # Compare with first row of batch result
-        np.testing.assert_array_almost_equal(result['upperband'][0], upperband, decimal=6)
-        np.testing.assert_array_almost_equal(result['middleband'][0], middleband, decimal=6)
-        np.testing.assert_array_almost_equal(result['lowerband'][0], lowerband, decimal=6)
+        np.testing.assert_array_almost_equal(result['upper'][0], upperband, decimal=6)
+        np.testing.assert_array_almost_equal(result['middle'][0], middleband, decimal=6)
+        np.testing.assert_array_almost_equal(result['lower'][0], lowerband, decimal=6)
 
 
 if __name__ == '__main__':

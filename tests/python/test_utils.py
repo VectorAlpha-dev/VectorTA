@@ -95,6 +95,78 @@ EXPECTED_OUTPUTS = {
             -5.004210799262688
         ]
     },
+    'trima': {
+        'default_params': {'period': 30},
+        'last_5_values': [
+            59957.916666666664,
+            59846.770833333336,
+            59750.620833333334,
+            59665.2125,
+            59581.612499999996
+        ],
+        # Re-input test expected values (period=10 on first pass result)
+        'reinput_last_5': [
+            60750.01069444444,
+            60552.44180555555,
+            60372.22486111111,
+            60210.39555555556,
+            60066.62458333334
+        ]
+    },
+    'chande': {
+        'default_params': {'period': 22, 'mult': 3.0, 'direction': 'long'},
+        'last_5_values': [
+            59444.14115983658,
+            58576.49837984401,
+            58649.1120898511,
+            58724.56154031242,
+            58713.39965211639
+        ],
+        'warmup_period': 21  # period - 1
+    },
+    'mfi': {
+        'default_params': {'period': 14},
+        'last_5_values': [
+            38.13874339324763,
+            37.44139770113819,
+            31.02039511395131,
+            28.092605898618896,
+            25.905204729397813
+        ]
+    },
+    'jsa': {
+        'default_params': {'period': 30},
+        'last_5_values': [61640.0, 61418.0, 61240.0, 61060.5, 60889.5],
+        'warmup_period': 30  # first_valid + period where first_valid = 0 for this data
+    },
+    'donchian': {
+        'default_params': {'period': 20},
+        'last_5_upper': [61290.0, 61290.0, 61290.0, 61290.0, 61290.0],
+        'last_5_middle': [59583.0, 59583.0, 59583.0, 59583.0, 59583.0],
+        'last_5_lower': [57876.0, 57876.0, 57876.0, 57876.0, 57876.0],
+        # Re-input test: Apply Donchian to the middle band output
+        'reinput_last_5_upper': [61700.0, 61700.0, 61700.0, 61642.5, 61642.5],
+        'reinput_last_5_middle': [60641.5, 60641.5, 60641.5, 60612.75, 60612.75],
+        'reinput_last_5_lower': [59583.0, 59583.0, 59583.0, 59583.0, 59583.0]
+    },
+    'msw': {
+        'default_params': {'period': 5},
+        'last_5_sine': [
+            -0.49733966449848194,
+            -0.8909425976991894,
+            -0.709353328514554,
+            -0.40483478076837887,
+            -0.8817006719953886,
+        ],
+        'last_5_lead': [
+            -0.9651269132969991,
+            -0.30888310410390457,
+            -0.003182174183612666,
+            0.36030983330963545,
+            -0.28983704937461496,
+        ],
+        'warmup_period': 4  # period - 1
+    },
     'correl_hl': {
         'default_params': {'period': 5},
         'last_5_values': [
@@ -175,6 +247,16 @@ EXPECTED_OUTPUTS = {
             59067.97928994083
         ]
     },
+    'linearreg_intercept': {
+        'default_params': {'period': 14},
+        'last_5_values': [
+            60000.91428571429,
+            59947.142857142855,
+            59754.57142857143,
+            59318.4,
+            59321.91428571429
+        ]
+    },
     'srwma': {
         'default_params': {'period': 14},
         'last_5_values': [
@@ -203,7 +285,11 @@ EXPECTED_OUTPUTS = {
             59179.40342783722,
             59171.22758152845,
             59127.859841077094
-        ]
+        ],
+        # Re-input test expected values (period=10 on first pass result)
+        # Note: The Rust test only verifies length, not specific values
+        'reinput_last_5': None,  # Not verified in Rust tests
+        'warmup_period': 13  # first + period - 1 (with no leading NaNs, first=0)
     },
     'wilders': {
         'default_params': {'period': 5},
@@ -676,6 +762,21 @@ EXPECTED_OUTPUTS = {
             57892.68743964749,
             57901.158827412924,
             57802.67752581411
+        ]
+    },
+    'sma': {
+        'default_params': {'period': 9},
+        'last_5_values': [59180.8, 59175.0, 59129.4, 59085.4, 59133.7],
+        'reinput_last_5': None  # To be calculated if needed
+    },
+    'mwdx': {
+        'default_params': {'factor': 0.2},
+        'last_5_values': [
+            59302.181566190935,
+            59277.94525295275,
+            59230.1562023622,
+            59215.124961889764,
+            59103.099969511815
         ]
     }
 }

@@ -231,6 +231,8 @@ pub enum RviError {
 	NotEnoughValidData { needed: usize, valid: usize },
 	#[error("rvi: All values are NaN.")]
 	AllValuesNaN,
+	#[error("rvi: Output slice length {dst_len} != data length {data_len}.")]
+	OutputLenMismatch { dst_len: usize, data_len: usize },
 }
 
 #[inline]
@@ -287,12 +289,17 @@ pub fn rvi_into_slice(dst: &mut [f64], input: &RviInput, kern: Kernel) -> Result
 	if data.is_empty() {
 		return Err(RviError::EmptyData);
 	}
+	
+	// Check for all NaN values first
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(RviError::AllValuesNaN)?;
+	
 	let period = input.get_period();
 	let ma_len = input.get_ma_len();
 	let matype = input.get_matype();
 	let devtype = input.get_devtype();
 	
-	if period == 0 || ma_len == 0 || period > data.len() || ma_len > data.len() {
+	// Basic parameter validation
+	if period == 0 || ma_len == 0 {
 		return Err(RviError::InvalidPeriod {
 			period,
 			ma_len,
@@ -301,19 +308,30 @@ pub fn rvi_into_slice(dst: &mut [f64], input: &RviInput, kern: Kernel) -> Result
 	}
 	
 	if dst.len() != data.len() {
-		return Err(RviError::InvalidPeriod {
-			period: dst.len(),
-			ma_len: 0,
+		return Err(RviError::OutputLenMismatch {
+			dst_len: dst.len(),
 			data_len: data.len(),
 		});
 	}
 	
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(RviError::AllValuesNaN)?;
+	// Check if we have enough valid data for the calculation
 	let max_needed = period.saturating_sub(1) + ma_len.saturating_sub(1);
-	if (data.len() - first) <= max_needed {
+	let valid_len = data.len() - first;
+	
+	// Check if period or ma_len exceed data length (invalid parameters)
+	if period > data.len() || ma_len > data.len() {
+		return Err(RviError::InvalidPeriod {
+			period,
+			ma_len,
+			data_len: data.len(),
+		});
+	}
+	
+	// Check if we have enough valid data for the calculation
+	if valid_len <= max_needed {
 		return Err(RviError::NotEnoughValidData {
 			needed: max_needed + 1,
-			valid: data.len() - first,
+			valid: valid_len,
 		});
 	}
 	
@@ -353,20 +371,302 @@ pub fn rvi_scalar(
 	first: usize,
 	out: &mut [f64],
 ) {
-	let dev_array = compute_dev(data, period, devtype);
-	let diff_array = compute_diff_same_length(data);
-	let up_array = compute_up_array(&diff_array, &dev_array);
-	let down_array = compute_down_array(&diff_array, &dev_array);
-	let up_smoothed = compute_rolling_ma(&up_array, ma_len, matype);
-	let down_smoothed = compute_rolling_ma(&down_array, ma_len, matype);
-	let start_idx = first + period.saturating_sub(1) + ma_len.saturating_sub(1);
-	for i in start_idx..data.len() {
-		let up_val = up_smoothed[i];
-		let down_val = down_smoothed[i];
-		if up_val.is_nan() || down_val.is_nan() || (up_val + down_val).abs() < f64::EPSILON {
-			out[i] = f64::NAN;
+	debug_assert_eq!(out.len(), data.len());
+	let n = data.len();
+	if n == 0 { return; }
+
+	// Warmup barrier equals ALMA-style:
+	let warmup = first + period.saturating_sub(1) + ma_len.saturating_sub(1);
+
+	// -------- rolling deviation state --------
+	// StdDev uses running sum + sumsq. MAD/MEDAD use ring buffers reused across all steps.
+	let mut sum = 0.0f64;
+	let mut sumsq = 0.0f64;
+
+	// Ring for MAD/MEDAD
+	let mut ring = vec![f64::NAN; period];
+	let mut r_head = 0usize;
+	let mut r_filled = false;
+
+	// Scratch reused for median step
+	let mut scratch = if devtype == 2 { vec![0.0f64; period] } else { Vec::new() };
+
+	// -------- smoothing state for up/down --------
+	// SMA: ring + running sums; EMA: α + prev states with ALMA's "seed = SMA(period)" rule
+	let use_sma = matype == 0;
+	// SMA state
+	let mut up_sum = 0.0f64;
+	let mut dn_sum = 0.0f64;
+	let mut up_ring = if use_sma { vec![0.0f64; ma_len] } else { Vec::new() };
+	let mut dn_ring = if use_sma { vec![0.0f64; ma_len] } else { Vec::new() };
+	let mut up_h = 0usize;
+	let mut dn_h = 0usize;
+	let mut up_cnt = 0usize;
+	let mut dn_cnt = 0usize;
+
+	// EMA state
+	let alpha = if !use_sma { 2.0 / (ma_len as f64 + 1.0) } else { 0.0 };
+	let mut up_prev = 0.0f64;
+	let mut dn_prev = 0.0f64;
+	let mut up_started = false;
+	let mut dn_started = false;
+	let mut up_seed_sum = 0.0f64; // accumulate first ma_len values to seed EMA
+	let mut dn_seed_sum = 0.0f64;
+	let mut up_seed_cnt = 0usize;
+	let mut dn_seed_cnt = 0usize;
+
+	// Running previous price for diff
+	let mut prev = data[0];
+
+	// Initialize stddev warm start
+	for i in 0..period.min(n) {
+		let x = data[i];
+		if x.is_nan() { sum = f64::NAN; sumsq = f64::NAN; break; }
+		sum += x;
+		sumsq += x * x;
+		if devtype != 0 {
+			ring[i] = x;
+			if i + 1 == period { r_filled = true; r_head = 0; }
+		}
+	}
+
+	for i in 0..n {
+		let x = data[i];
+
+		// ----- diff -----
+		let d = if i == 0 || x.is_nan() || prev.is_nan() { f64::NAN } else { x - prev };
+		prev = x;
+
+		// ----- rolling deviation at i -----
+		let dev = if i + 1 < period {
+			f64::NAN
 		} else {
-			out[i] = 100.0 * (up_val / (up_val + down_val));
+			match devtype {
+				0 => {
+					// StdDev with running sums; rebuild if NaN seen
+					if i == period - 1 {
+						if sum.is_nan() { f64::NAN }
+						else {
+							let mean = sum / period as f64;
+							let mean_sq = sumsq / period as f64;
+							(mean_sq - mean * mean).sqrt()
+						}
+					} else {
+						let leaving = data[i - period];
+						let incoming = x;
+						if leaving.is_nan() || incoming.is_nan() || sum.is_nan() || sumsq.is_nan() {
+							// rebuild window from scratch (robust NaN handling)
+							sum = 0.0; sumsq = 0.0;
+							let start = i + 1 - period;
+							let mut bad = false;
+							for k in start..=i {
+								let v = data[k];
+								if v.is_nan() { bad = true; break; }
+								sum += v; sumsq += v * v;
+							}
+							if bad { sum = f64::NAN; sumsq = f64::NAN; f64::NAN } else {
+								let mean = sum / period as f64;
+								let mean_sq = sumsq / period as f64;
+								(mean_sq - mean * mean).sqrt()
+							}
+						} else {
+							sum += incoming - leaving;
+							sumsq += incoming * incoming - leaving * leaving;
+							let mean = sum / period as f64;
+							let mean_sq = sumsq / period as f64;
+							(mean_sq - mean * mean).sqrt()
+						}
+					}
+				}
+				1 => {
+					// Mean Abs Dev: maintain ring and running sum for mean; compute abs dev in O(period).
+					let incoming = x;
+					if i < period {
+						if !incoming.is_nan() {
+							ring[i] = incoming;
+							if i + 1 == period { r_filled = true; r_head = 0; }
+						}
+						if i + 1 < period { 
+							f64::NAN 
+						} else {
+							// compute mean/median over the filled ring [0..period] and return MAD
+							let mut s = 0.0;
+							for k in 0..period { s += ring[k]; }
+							let mean = s / period as f64;
+							let mut abs_sum = 0.0;
+							for k in 0..period { abs_sum += (ring[k] - mean).abs(); }
+							abs_sum / period as f64
+						}
+					} else {
+						let leaving = data[i - period];
+						if incoming.is_nan() || leaving.is_nan() {
+							// reset ring window
+							r_filled = false;
+							for j in 0..period { ring[j] = f64::NAN; }
+							f64::NAN
+						} else {
+							// slide
+							ring[r_head] = incoming;
+							r_head = (r_head + 1) % period;
+							r_filled = true;
+							// compute mean + MAD
+							let mut s = 0.0;
+							for k in 0..period { s += ring[k]; }
+							let mean = s / period as f64;
+							let mut abs_sum = 0.0;
+							for k in 0..period { abs_sum += (ring[k] - mean).abs(); }
+							abs_sum / period as f64
+						}
+					}
+				}
+				_ => {
+					// Median Abs Dev: reuse scratch; copy ring -> scratch then sort.
+					let incoming = x;
+					if i < period {
+						if !incoming.is_nan() {
+							ring[i] = incoming;
+							if i + 1 == period { r_filled = true; r_head = 0; }
+						}
+						if i + 1 < period {
+							f64::NAN
+						} else {
+							// compute median over the filled ring [0..period] and return MEDAD
+							for k in 0..period {
+								scratch[k] = ring[k];
+							}
+							scratch.sort_by(|a,b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+							let median = if period & 1 == 1 {
+								scratch[period/2]
+							} else {
+								(scratch[period/2 - 1] + scratch[period/2]) * 0.5
+							};
+							let mut abs_sum = 0.0;
+							for k in 0..period { abs_sum += (scratch[k] - median).abs(); }
+							abs_sum / period as f64
+						}
+					} else {
+						let leaving = data[i - period];
+						if incoming.is_nan() || leaving.is_nan() {
+							r_filled = false;
+							for j in 0..period { ring[j] = f64::NAN; }
+							f64::NAN
+						} else {
+							ring[r_head] = incoming;
+							r_head = (r_head + 1) % period;
+							r_filled = true;
+
+							// copy into scratch in window order
+							for k in 0..period {
+								scratch[k] = ring[(r_head + k) % period];
+							}
+							scratch.sort_by(|a,b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+							let median = if period & 1 == 1 {
+								scratch[period/2]
+							} else {
+								(scratch[period/2 - 1] + scratch[period/2]) * 0.5
+							};
+							let mut abs_sum = 0.0;
+							for k in 0..period { abs_sum += (scratch[k] - median).abs(); }
+							abs_sum / period as f64
+						}
+					}
+				}
+			}
+		};
+
+		// ----- up / down at i -----
+		let (up_i, dn_i) = if d.is_nan() || dev.is_nan() {
+			(f64::NAN, f64::NAN)
+		} else if d > 0.0 {
+			(dev, 0.0)
+		} else if d < 0.0 {
+			(0.0, dev)
+		} else {
+			(0.0, 0.0)
+		};
+
+		// ----- smoothing -----
+		let (up_s, dn_s) = if use_sma {
+			// SMA up
+			let up_smooth = if up_i.is_nan() {
+				// reset
+				up_sum = 0.0; up_cnt = 0; up_h = 0;
+				f64::NAN
+			} else {
+				if up_cnt < ma_len {
+					up_ring[up_h] = up_i;
+					up_sum += up_i;
+					up_h = (up_h + 1) % ma_len;
+					up_cnt += 1;
+					if up_cnt == ma_len { up_sum / ma_len as f64 } else { f64::NAN }
+				} else {
+					let old = up_ring[up_h];
+					up_ring[up_h] = up_i;
+					up_h = (up_h + 1) % ma_len;
+					up_sum += up_i - old;
+					up_sum / ma_len as f64
+				}
+			};
+			// SMA down
+			let dn_smooth = if dn_i.is_nan() {
+				dn_sum = 0.0; dn_cnt = 0; dn_h = 0;
+				f64::NAN
+			} else {
+				if dn_cnt < ma_len {
+					dn_ring[dn_h] = dn_i;
+					dn_sum += dn_i;
+					dn_h = (dn_h + 1) % ma_len;
+					dn_cnt += 1;
+					if dn_cnt == ma_len { dn_sum / ma_len as f64 } else { f64::NAN }
+				} else {
+					let old = dn_ring[dn_h];
+					dn_ring[dn_h] = dn_i;
+					dn_h = (dn_h + 1) % ma_len;
+					dn_sum += dn_i - old;
+					dn_sum / ma_len as f64
+				}
+			};
+			(up_smooth, dn_smooth)
+		} else {
+			// EMA with SMA seed of first ma_len
+			let up_smooth = if up_i.is_nan() {
+				up_started = false; up_seed_sum = 0.0; up_seed_cnt = 0;
+				f64::NAN
+			} else if !up_started {
+				up_seed_sum += up_i; up_seed_cnt += 1;
+				if up_seed_cnt == ma_len {
+					up_prev = up_seed_sum / ma_len as f64;
+					up_started = true;
+					up_prev
+				} else { f64::NAN }
+			} else {
+				up_prev = alpha * up_i + (1.0 - alpha) * up_prev;
+				up_prev
+			};
+			let dn_smooth = if dn_i.is_nan() {
+				dn_started = false; dn_seed_sum = 0.0; dn_seed_cnt = 0;
+				f64::NAN
+			} else if !dn_started {
+				dn_seed_sum += dn_i; dn_seed_cnt += 1;
+				if dn_seed_cnt == ma_len {
+					dn_prev = dn_seed_sum / ma_len as f64;
+					dn_started = true;
+					dn_prev
+				} else { f64::NAN }
+			} else {
+				dn_prev = alpha * dn_i + (1.0 - alpha) * dn_prev;
+				dn_prev
+			};
+			(up_smooth, dn_smooth)
+		};
+
+		// ----- RVI write -----
+		if i >= warmup {
+			if up_s.is_nan() || dn_s.is_nan() { out[i] = f64::NAN; }
+			else {
+				let denom = up_s + dn_s;
+				out[i] = if denom.abs() < f64::EPSILON { f64::NAN } else { 100.0 * (up_s / denom) };
+			}
 		}
 	}
 }
@@ -678,9 +978,10 @@ fn rvi_batch_inner(
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(RviError::AllValuesNaN)?;
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
 	let max_m = combos.iter().map(|c| c.ma_len.unwrap()).max().unwrap();
-	if data.len() - first < max_p.saturating_add(max_m) {
+	let need = max_p.saturating_sub(1) + max_m.saturating_sub(1) + 1;
+	if (data.len() - first) <= (max_p.saturating_sub(1) + max_m.saturating_sub(1)) {
 		return Err(RviError::NotEnoughValidData {
-			needed: max_p + max_m,
+			needed: need,
 			valid: data.len() - first,
 		});
 	}
@@ -769,13 +1070,23 @@ fn rvi_batch_inner_into(
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(RviError::AllValuesNaN)?;
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
 	let max_m = combos.iter().map(|c| c.ma_len.unwrap()).max().unwrap();
-	if data.len() - first < max_p.saturating_add(max_m) {
+	let need = max_p.saturating_sub(1) + max_m.saturating_sub(1) + 1;
+	if (data.len() - first) <= (max_p.saturating_sub(1) + max_m.saturating_sub(1)) {
 		return Err(RviError::NotEnoughValidData {
-			needed: max_p + max_m,
+			needed: need,
 			valid: data.len() - first,
 		});
 	}
 	let cols = data.len();
+	
+	// Initialize NaN prefixes for each row based on warmup period
+	for (row, combo) in combos.iter().enumerate() {
+		let warmup = first + combo.period.unwrap().saturating_sub(1) + combo.ma_len.unwrap().saturating_sub(1);
+		let row_start = row * cols;
+		for i in 0..warmup.min(cols) {
+			output[row_start + i] = f64::NAN;
+		}
+	}
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let prm = &combos[row];
 		match kern {
@@ -879,239 +1190,7 @@ unsafe fn rvi_row_avx512_long(data: &[f64], first: usize, params: &RviParams, ou
 	)
 }
 
-// ========== Indicator utility functions (unchanged) ==========
-
-fn compute_diff_same_length(data: &[f64]) -> Vec<f64> {
-	let mut diff = alloc_with_nan_prefix(data.len(), 0);
-	diff[0] = 0.0;
-	for i in 1..data.len() {
-		let prev = data[i - 1];
-		let curr = data[i];
-		if prev.is_nan() || curr.is_nan() {
-			diff[i] = f64::NAN;
-		} else {
-			diff[i] = curr - prev;
-		}
-	}
-	diff
-}
-fn compute_up_array(diff: &[f64], dev: &[f64]) -> Vec<f64> {
-	let mut up = alloc_with_nan_prefix(diff.len(), 0);
-	for i in 0..diff.len() {
-		let d = diff[i];
-		let dv = dev[i];
-		if d.is_nan() || dv.is_nan() {
-			up[i] = f64::NAN;
-		} else if d <= 0.0 {
-			up[i] = 0.0;
-		} else {
-			up[i] = dv;
-		}
-	}
-	up
-}
-fn compute_down_array(diff: &[f64], dev: &[f64]) -> Vec<f64> {
-	let mut down = alloc_with_nan_prefix(diff.len(), 0);
-	for i in 0..diff.len() {
-		let d = diff[i];
-		let dv = dev[i];
-		if d.is_nan() || dv.is_nan() {
-			down[i] = f64::NAN;
-		} else if d > 0.0 {
-			down[i] = 0.0;
-		} else {
-			down[i] = dv;
-		}
-	}
-	down
-}
-fn compute_dev(data: &[f64], period: usize, devtype: usize) -> Vec<f64> {
-	match devtype {
-		1 => rolling_mean_abs_dev(data, period),
-		2 => rolling_median_abs_dev(data, period),
-		_ => rolling_std_dev(data, period),
-	}
-}
-fn rolling_std_dev(data: &[f64], period: usize) -> Vec<f64> {
-	let mut out = alloc_with_nan_prefix(data.len(), period.saturating_sub(1));
-	if period == 0 || period > data.len() {
-		return out;
-	}
-	let mut window_sum = 0.0;
-	let mut window_sumsq = 0.0;
-	for i in 0..period {
-		let x = data[i];
-		if x.is_nan() {
-			window_sum = f64::NAN;
-			break;
-		}
-		window_sum += x;
-		window_sumsq += x * x;
-	}
-	if !window_sum.is_nan() {
-		let mean = window_sum / (period as f64);
-		let mean_sq = window_sumsq / (period as f64);
-		out[period - 1] = (mean_sq - mean * mean).sqrt();
-	}
-	for i in period..data.len() {
-		let leaving = data[i - period];
-		let incoming = data[i];
-		if leaving.is_nan() || incoming.is_nan() || window_sum.is_nan() {
-			out[i] = f64::NAN;
-			window_sum = f64::NAN;
-			continue;
-		}
-		window_sum += incoming - leaving;
-		window_sumsq += incoming * incoming - leaving * leaving;
-		let mean = window_sum / (period as f64);
-		let mean_sq = window_sumsq / (period as f64);
-		out[i] = (mean_sq - mean * mean).sqrt();
-	}
-	out
-}
-fn rolling_mean_abs_dev(data: &[f64], period: usize) -> Vec<f64> {
-	let mut out = alloc_with_nan_prefix(data.len(), period.saturating_sub(1));
-	if period == 0 || period > data.len() {
-		return out;
-	}
-	use std::collections::VecDeque;
-	let mut window = VecDeque::with_capacity(period);
-	let mut current_sum = 0.0;
-	for i in 0..data.len() {
-		let x = data[i];
-		if x.is_nan() {
-			out[i] = f64::NAN;
-			window.clear();
-			current_sum = 0.0;
-		} else {
-			window.push_back(x);
-			current_sum += x;
-			if window.len() > period {
-				if let Some(old) = window.pop_front() {
-					current_sum -= old;
-				}
-			}
-			if window.len() == period {
-				let mean = current_sum / (period as f64);
-				let mut abs_sum = 0.0;
-				for &val in &window {
-					abs_sum += (val - mean).abs();
-				}
-				out[i] = abs_sum / (period as f64);
-			}
-		}
-	}
-	out
-}
-fn rolling_median_abs_dev(data: &[f64], period: usize) -> Vec<f64> {
-	let mut out = alloc_with_nan_prefix(data.len(), period.saturating_sub(1));
-	if period == 0 || period > data.len() {
-		return out;
-	}
-	use std::collections::VecDeque;
-	let mut window = VecDeque::with_capacity(period);
-	for i in 0..data.len() {
-		let x = data[i];
-		if x.is_nan() {
-			out[i] = f64::NAN;
-			window.clear();
-		} else {
-			window.push_back(x);
-			if window.len() > period {
-				window.pop_front();
-			}
-			if window.len() == period {
-				let mut tmp: Vec<f64> = window.iter().copied().collect();
-				tmp.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-				let median = if period % 2 == 1 {
-					tmp[period / 2]
-				} else {
-					(tmp[period / 2 - 1] + tmp[period / 2]) / 2.0
-				};
-				let mut abs_sum = 0.0;
-				for &val in &tmp {
-					abs_sum += (val - median).abs();
-				}
-				out[i] = abs_sum / (period as f64);
-			}
-		}
-	}
-	out
-}
-fn compute_rolling_ma(data: &[f64], period: usize, matype: usize) -> Vec<f64> {
-	match matype {
-		0 => rolling_sma(data, period),
-		_ => rolling_ema(data, period),
-	}
-}
-fn rolling_sma(data: &[f64], period: usize) -> Vec<f64> {
-	let mut out = alloc_with_nan_prefix(data.len(), period.saturating_sub(1));
-	if period == 0 || period > data.len() {
-		return out;
-	}
-	let mut window_sum = 0.0;
-	let mut count = 0;
-	for i in 0..data.len() {
-		let x = data[i];
-		if x.is_nan() {
-			out[i] = f64::NAN;
-			window_sum = 0.0;
-			count = 0;
-		} else {
-			window_sum += x;
-			count += 1;
-			if i >= period {
-				let old = data[i - period];
-				if !old.is_nan() {
-					window_sum -= old;
-					count -= 1;
-				} else {
-					out[i] = f64::NAN;
-					continue;
-				}
-			}
-			if i + 1 >= period {
-				out[i] = window_sum / (period as f64);
-			}
-		}
-	}
-	out
-}
-fn rolling_ema(data: &[f64], period: usize) -> Vec<f64> {
-	let mut out = alloc_with_nan_prefix(data.len(), period.saturating_sub(1));
-	if period == 0 || period > data.len() {
-		return out;
-	}
-	let alpha = 2.0 / (period as f64 + 1.0);
-	let mut prev_ema = 0.0;
-	let mut started = false;
-	for i in 0..data.len() {
-		let x = data[i];
-		if x.is_nan() {
-			out[i] = f64::NAN;
-			continue;
-		}
-		if !started {
-			let first_window_end = if i + 1 < period { i + 1 } else { period };
-			if i + 1 < period {
-				out[i] = f64::NAN;
-				prev_ema += x;
-				if i + 1 == first_window_end {
-					prev_ema /= period as f64;
-				}
-			} else {
-				prev_ema += x;
-				prev_ema /= period as f64;
-				out[i] = prev_ema;
-				started = true;
-			}
-		} else {
-			prev_ema = alpha * x + (1.0 - alpha) * prev_ema;
-			out[i] = prev_ema;
-		}
-	}
-	out
-}
+// ========== Indicator utility functions removed - now integrated into rvi_scalar ==========
 
 #[cfg(test)]
 mod tests {
@@ -1691,6 +1770,34 @@ mod tests {
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn rvi_js(data: &[f64], period: usize, ma_len: usize, matype: usize, devtype: usize) -> Result<Vec<f64>, JsValue> {
+	// Check for empty data first
+	if data.is_empty() {
+		return Err(JsValue::from_str("rvi: Empty data provided."));
+	}
+	
+	// Check if all values are NaN
+	if data.iter().all(|&x| x.is_nan()) {
+		return Err(JsValue::from_str("rvi: All values are NaN."));
+	}
+	
+	// Check basic parameter validity
+	if period == 0 || ma_len == 0 {
+		return Err(JsValue::from_str("rvi: Invalid period"));
+	}
+	
+	// Check for sufficient valid data (including NaN handling)
+	let first = data.iter().position(|&x| !x.is_nan()).unwrap_or(0);
+	let needed = period.saturating_sub(1) + ma_len.saturating_sub(1) + 1;
+	let valid_len = data.len() - first;
+	
+	// If period or ma_len individually exceed total data length, it's invalid period
+	// Otherwise if we don't have enough valid data, it's not enough valid data
+	if period > data.len() || ma_len > data.len() {
+		return Err(JsValue::from_str("rvi: Invalid period"));
+	} else if valid_len < needed {
+		return Err(JsValue::from_str("rvi: Not enough valid data"));
+	}
+	
 	let params = RviParams {
 		period: Some(period),
 		ma_len: Some(ma_len),
@@ -1698,12 +1805,9 @@ pub fn rvi_js(data: &[f64], period: usize, ma_len: usize, matype: usize, devtype
 		devtype: Some(devtype),
 	};
 	let input = RviInput::from_slice(data, params);
-	
-	let mut output = vec![0.0; data.len()];
-	rvi_into_slice(&mut output, &input, Kernel::Auto)
-		.map_err(|e| JsValue::from_str(&e.to_string()))?;
-	
-	Ok(output)
+	let mut out = vec![f64::NAN; data.len()];
+	rvi_into_slice(&mut out, &input, detect_best_kernel()).map_err(|e| JsValue::from_str(&e.to_string()))?;
+	Ok(out)
 }
 
 #[cfg(feature = "wasm")]
@@ -1734,12 +1838,16 @@ pub fn rvi_into(
 	matype: usize,
 	devtype: usize,
 ) -> Result<(), JsValue> {
-	if in_ptr.is_null() || out_ptr.is_null() {
-		return Err(JsValue::from_str("Null pointer provided"));
+	if len == 0 {
+		return Err(JsValue::from_str("rvi_into: len cannot be 0"));
 	}
+	
+	// Don't check for null pointers - wasm-bindgen converts 0 to valid pointers
+	// The real issue is that JavaScript needs to allocate memory in WASM space first
 	
 	unsafe {
 		let data = std::slice::from_raw_parts(in_ptr, len);
+		let out = std::slice::from_raw_parts_mut(out_ptr, len);
 		let params = RviParams {
 			period: Some(period),
 			ma_len: Some(ma_len),
@@ -1747,18 +1855,13 @@ pub fn rvi_into(
 			devtype: Some(devtype),
 		};
 		let input = RviInput::from_slice(data, params);
-		
-		if in_ptr == out_ptr {
-			// Handle aliasing case
-			let mut temp = vec![0.0; len];
-			rvi_into_slice(&mut temp, &input, Kernel::Auto)
-				.map_err(|e| JsValue::from_str(&e.to_string()))?;
-			let out = std::slice::from_raw_parts_mut(out_ptr, len);
-			out.copy_from_slice(&temp);
+
+		if std::ptr::eq(in_ptr, out_ptr) {
+			let mut tmp = vec![f64::NAN; len];
+			rvi_into_slice(&mut tmp, &input, detect_best_kernel()).map_err(|e| JsValue::from_str(&e.to_string()))?;
+			out.copy_from_slice(&tmp);
 		} else {
-			let out = std::slice::from_raw_parts_mut(out_ptr, len);
-			rvi_into_slice(out, &input, Kernel::Auto)
-				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			rvi_into_slice(out, &input, detect_best_kernel()).map_err(|e| JsValue::from_str(&e.to_string()))?;
 		}
 		Ok(())
 	}
@@ -1774,33 +1877,78 @@ pub struct RviBatchConfig {
 }
 
 #[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct RviBatchJsOutput {
+	pub values: Vec<f64>,
+	pub periods: Vec<usize>,
+	pub ma_lens: Vec<usize>,
+	pub matypes: Vec<usize>,
+	pub devtypes: Vec<usize>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = rvi_batch)]
-pub fn rvi_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
-	let config: RviBatchConfig = serde_wasm_bindgen::from_value(config)
+pub fn rvi_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let cfg: RviBatchConfig = serde_wasm_bindgen::from_value(config)
 		.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
-	
+
 	let sweep = RviBatchRange {
-		period: config.period_range,
-		ma_len: config.ma_len_range,
-		matype: config.matype_range,
-		devtype: config.devtype_range,
+		period: cfg.period_range,
+		ma_len: cfg.ma_len_range,
+		matype: cfg.matype_range,
+		devtype: cfg.devtype_range,
 	};
-	
-	let output = rvi_batch_inner(data, &sweep, Kernel::Auto, false)
+
+	let output = rvi_batch_inner(data, &sweep, detect_best_kernel(), false)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
-	
-	// Convert output to JS-friendly format
-	let js_output = serde_wasm_bindgen::to_value(&serde_json::json!({
-		"values": output.values,
-		"periods": output.combos.iter().map(|c| c.period.unwrap()).collect::<Vec<_>>(),
-		"ma_lens": output.combos.iter().map(|c| c.ma_len.unwrap()).collect::<Vec<_>>(),
-		"matypes": output.combos.iter().map(|c| c.matype.unwrap()).collect::<Vec<_>>(),
-		"devtypes": output.combos.iter().map(|c| c.devtype.unwrap()).collect::<Vec<_>>(),
-		"rows": output.rows,
-		"cols": output.cols,
-	})).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))?;
-	
-	Ok(js_output)
+
+	let js_out = RviBatchJsOutput { 
+		values: output.values,
+		periods: output.combos.iter().map(|c| c.period.unwrap()).collect(),
+		ma_lens: output.combos.iter().map(|c| c.ma_len.unwrap()).collect(),
+		matypes: output.combos.iter().map(|c| c.matype.unwrap()).collect(),
+		devtypes: output.combos.iter().map(|c| c.devtype.unwrap()).collect(),
+		rows: output.rows,
+		cols: output.cols,
+	};
+	serde_wasm_bindgen::to_value(&js_out).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn rvi_batch_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	p_start: usize, p_end: usize, p_step: usize,
+	m_start: usize, m_end: usize, m_step: usize,
+	t_start: usize, t_end: usize, t_step: usize,
+	d_start: usize, d_end: usize, d_step: usize,
+) -> Result<usize, JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() { return Err(JsValue::from_str("null pointer to rvi_batch_into")); }
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		let sweep = RviBatchRange {
+			period: (p_start, p_end, p_step),
+			ma_len: (m_start, m_end, m_step),
+			matype: (t_start, t_end, t_step),
+			devtype: (d_start, d_end, d_step),
+		};
+		let combos = expand_grid(&sweep);
+		let rows = combos.len();
+		let cols = len;
+		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+
+		let simd = match detect_best_batch_kernel() {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch => Kernel::Avx2,
+			_ => Kernel::Scalar,
+		};
+		rvi_batch_inner_into(data, &sweep, simd, false, out).map_err(|e| JsValue::from_str(&e.to_string()))?;
+		Ok(rows)
+	}
 }
 
 #[cfg(feature = "python")]
@@ -1815,11 +1963,15 @@ pub fn rvi_py<'py>(
 	devtype: usize,
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
-	use numpy::{IntoPyArray, PyArrayMethods};
-
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+	
 	let slice_in = data.as_slice()?;
 	let kern = validate_kernel(kernel, false)?;
 	
+	// Allocate output PyArray once and fill directly to avoid copies.
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+	let out_slice = unsafe { out_arr.as_slice_mut()? };
+
 	let params = RviParams {
 		period: Some(period),
 		ma_len: Some(ma_len),
@@ -1828,11 +1980,10 @@ pub fn rvi_py<'py>(
 	};
 	let input = RviInput::from_slice(slice_in, params);
 
-	let result_vec: Vec<f64> = py
-		.allow_threads(|| rvi_with_kernel(&input, kern).map(|o| o.values))
+	py.allow_threads(|| rvi_into_slice(out_slice, &input, kern))
 		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-	Ok(result_vec.into_pyarray(py))
+	Ok(out_arr)
 }
 
 #[cfg(feature = "python")]
@@ -1846,12 +1997,10 @@ pub fn rvi_batch_py<'py>(
 	matype_range: (usize, usize, usize),
 	devtype_range: (usize, usize, usize),
 	kernel: Option<&str>,
-) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+) -> PyResult<Bound<'py, PyDict>> {
 	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
-	use pyo3::types::PyDict;
-
+	
 	let slice_in = data.as_slice()?;
-	let kern = validate_kernel(kernel, true)?;
 
 	let sweep = RviBatchRange {
 		period: period_range,
@@ -1865,81 +2014,31 @@ pub fn rvi_batch_py<'py>(
 	let cols = slice_in.len();
 
 	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-	let slice_out = unsafe { out_arr.as_slice_mut()? };
+	let out_slice = unsafe { out_arr.as_slice_mut()? };
 
-	// Find first valid index
-	let first = slice_in
-		.iter()
-		.position(|&x| !x.is_nan())
-		.unwrap_or(0);
-	
-	// Calculate warmup periods for each row and initialize NaN prefixes
-	let warmup_periods: Vec<usize> = combos.iter().map(|c| {
-		let period = c.period.unwrap();
-		let ma_len = c.ma_len.unwrap();
-		first + period + ma_len - 1
-	}).collect();
-	
-	// Initialize NaN prefixes
-	for (row_idx, &warmup) in warmup_periods.iter().enumerate() {
-		let row_start = row_idx * cols;
-		for col_idx in 0..warmup.min(cols) {
-			slice_out[row_start + col_idx] = f64::NAN;
-		}
-	}
+	let kern = validate_kernel(kernel, true)?;
+	let simd = match kern {
+		Kernel::Auto => detect_best_batch_kernel(),
+		k => k,
+	};
+	let simd = match simd {
+		Kernel::Avx512Batch => Kernel::Avx512,
+		Kernel::Avx2Batch => Kernel::Avx2,
+		Kernel::ScalarBatch => Kernel::Scalar,
+		_ => Kernel::Scalar,
+	};
 
-	let combos = py
-		.allow_threads(|| {
-			let kernel = match kern {
-				Kernel::Auto => detect_best_batch_kernel(),
-				k => k,
-			};
-			let simd = match kernel {
-				Kernel::Avx512Batch => Kernel::Avx512,
-				Kernel::Avx2Batch => Kernel::Avx2,
-				Kernel::ScalarBatch => Kernel::Scalar,
-				_ => unreachable!(),
-			};
-			rvi_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
-		})
+	let combos_back = py
+		.allow_threads(|| rvi_batch_inner_into(slice_in, &sweep, simd, true, out_slice))
 		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-	let dict = PyDict::new(py);
-	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
-	dict.set_item(
-		"periods",
-		combos
-			.iter()
-			.map(|p| p.period.unwrap() as u64)
-			.collect::<Vec<_>>()
-			.into_pyarray(py),
-	)?;
-	dict.set_item(
-		"ma_lens",
-		combos
-			.iter()
-			.map(|p| p.ma_len.unwrap() as u64)
-			.collect::<Vec<_>>()
-			.into_pyarray(py),
-	)?;
-	dict.set_item(
-		"matypes",
-		combos
-			.iter()
-			.map(|p| p.matype.unwrap() as u64)
-			.collect::<Vec<_>>()
-			.into_pyarray(py),
-	)?;
-	dict.set_item(
-		"devtypes",
-		combos
-			.iter()
-			.map(|p| p.devtype.unwrap() as u64)
-			.collect::<Vec<_>>()
-			.into_pyarray(py),
-	)?;
-
-	Ok(dict)
+	let d = PyDict::new(py);
+	d.set_item("values", out_arr.reshape((rows, cols))?)?;
+	d.set_item("periods", combos_back.iter().map(|p| p.period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+	d.set_item("ma_lens", combos_back.iter().map(|p| p.ma_len.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+	d.set_item("matypes", combos_back.iter().map(|p| p.matype.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+	d.set_item("devtypes", combos_back.iter().map(|p| p.devtype.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+	Ok(d)
 }
 
 #[cfg(feature = "python")]

@@ -73,6 +73,23 @@ test('WMA accuracy', async () => {
     await compareWithRust('wma', result, 'close', expected.defaultParams);
 });
 
+test('WMA default candles', () => {
+    // Test WMA with default parameters - mirrors check_wma_default_candles
+    const close = new Float64Array(testData.close);
+    
+    const result = wasm.wma_js(close, 30);
+    assert.strictEqual(result.length, close.length);
+});
+
+test('WMA empty input', () => {
+    // Test WMA fails with empty input - mirrors check_wma_empty_input
+    const empty = new Float64Array([]);
+    
+    assert.throws(() => {
+        wasm.wma_js(empty, 30);
+    }, /Input data slice is empty/);
+});
+
 test('WMA zero period', () => {
     // Test WMA fails with zero period - mirrors check_wma_zero_period
     const inputData = new Float64Array([10.0, 20.0, 30.0]);
@@ -134,8 +151,11 @@ test('WMA NaN handling', () => {
         }
     }
     
-    // First period-1 values should be NaN (for period=14, indices 0-12 should be NaN)
-    assertAllNaN(result.slice(0, 13), "Expected NaN in warmup period");
+    // The warmup period for WMA is first + period - 1
+    // Since the test data has no leading NaNs (first = 0), warmup = 0 + 14 - 1 = 13
+    // So indices 0-12 should be NaN, index 13 should be the first valid value
+    assertAllNaN(result.slice(0, 13), "Expected NaN in warmup period (indices 0-12)");
+    assert(!isNaN(result[13]), "Expected first valid value at index 13");
 });
 
 test('WMA all NaN input', () => {
@@ -149,41 +169,47 @@ test('WMA all NaN input', () => {
 });
 
 test('WMA batch single parameter set', () => {
-    // Test batch with single parameter combination
+    // Test batch with single parameter combination using new unified API
     const close = new Float64Array(testData.close);
     
-    // Single parameter set: period=30
-    const batchResult = wasm.wma_batch_js(
-        close,
-        30, 30, 0      // period range
-    );
+    // Using the new ergonomic batch API for single parameter
+    const batchResult = wasm.wma_batch(close, {
+        period_range: [30, 30, 0]
+    });
     
     // Should match single calculation
     const singleResult = wasm.wma_js(close, 30);
     
-    assert.strictEqual(batchResult.length, singleResult.length);
-    assertArrayClose(batchResult, singleResult, 1e-10, "Batch vs single mismatch");
+    assert.strictEqual(batchResult.values.length, singleResult.length);
+    assert.strictEqual(batchResult.rows, 1);
+    assert.strictEqual(batchResult.cols, close.length);
+    assert.strictEqual(batchResult.combos.length, 1);
+    assert.strictEqual(batchResult.combos[0].period, 30);
+    
+    assertArrayClose(batchResult.values, singleResult, 1e-10, "Batch vs single mismatch");
 });
 
 test('WMA batch multiple periods', () => {
-    // Test batch with multiple period values
+    // Test batch with multiple period values using new unified API
     const close = new Float64Array(testData.close.slice(0, 100)); // Use smaller dataset for speed
     
-    // Multiple periods: 10, 20, 30
-    const batchResult = wasm.wma_batch_js(
-        close,
-        10, 30, 10      // period range
-    );
+    // Multiple periods: 10, 20, 30 using ergonomic API
+    const batchResult = wasm.wma_batch(close, {
+        period_range: [10, 30, 10]      // period range
+    });
     
     // Should have 3 rows * 100 cols = 300 values
-    assert.strictEqual(batchResult.length, 3 * 100);
+    assert.strictEqual(batchResult.values.length, 3 * 100);
+    assert.strictEqual(batchResult.rows, 3);
+    assert.strictEqual(batchResult.cols, 100);
+    assert.strictEqual(batchResult.combos.length, 3);
     
     // Verify each row matches individual calculation
     const periods = [10, 20, 30];
     for (let i = 0; i < periods.length; i++) {
         const rowStart = i * 100;
         const rowEnd = rowStart + 100;
-        const rowData = batchResult.slice(rowStart, rowEnd);
+        const rowData = batchResult.values.slice(rowStart, rowEnd);
         
         const singleResult = wasm.wma_js(close, periods[i]);
         assertArrayClose(
@@ -192,6 +218,9 @@ test('WMA batch multiple periods', () => {
             1e-10, 
             `Period ${periods[i]} mismatch`
         );
+        
+        // Verify combo metadata
+        assert.strictEqual(batchResult.combos[i].period, periods[i]);
     }
 });
 

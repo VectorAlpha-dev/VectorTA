@@ -19,6 +19,7 @@ use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
 	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel,
+	init_matrix_prefixes, make_uninit_matrix,
 };
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -43,6 +44,49 @@ use crate::utilities::kernel_validation::validate_kernel;
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
+
+// ========== CONSTANTS ==========
+
+const N_LEVELS: usize = 9; // r4, r3, r2, r1, pp, s1, s2, s3, s4 in this order
+
+// ========== HELPER FUNCTIONS ==========
+
+#[inline(always)]
+fn first_valid_ohlc(high: &[f64], low: &[f64], close: &[f64]) -> Option<usize> {
+	let len = high.len();
+	for i in 0..len {
+		if !(high[i].is_nan() || low[i].is_nan() || close[i].is_nan()) {
+			return Some(i);
+		}
+	}
+	None
+}
+
+// Unified kernel dispatch like ALMA
+#[inline(always)]
+fn pivot_compute_into(
+	high: &[f64], low: &[f64], close: &[f64], open: &[f64],
+	mode: usize, first: usize, k: Kernel,
+	r4: &mut [f64], r3: &mut [f64], r2: &mut [f64], r1: &mut [f64],
+	pp: &mut [f64], s1: &mut [f64], s2: &mut [f64], s3: &mut [f64], s4: &mut [f64],
+) {
+	unsafe {
+		match k {
+			Kernel::Scalar | Kernel::ScalarBatch => {
+				pivot_scalar(high, low, close, open, mode, first, r4, r3, r2, r1, pp, s1, s2, s3, s4)
+			}
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => {
+				pivot_avx2(high, low, close, open, mode, first, r4, r3, r2, r1, pp, s1, s2, s3, s4)
+			}
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => {
+				pivot_avx512(high, low, close, open, mode, first, r4, r3, r2, r1, pp, s1, s2, s3, s4)
+			}
+			_ => unreachable!(),
+		}
+	}
+}
 
 // ========== DATA/INPUT/OUTPUT STRUCTS ==========
 
@@ -243,64 +287,10 @@ pub fn pivot_with_kernel(input: &PivotInput, kernel: Kernel) -> Result<PivotOutp
 		Kernel::Auto => detect_best_kernel(),
 		other => other,
 	};
-	unsafe {
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => pivot_scalar(
-				high,
-				low,
-				close,
-				open,
-				mode,
-				first_valid_idx,
-				&mut r4,
-				&mut r3,
-				&mut r2,
-				&mut r1,
-				&mut pp,
-				&mut s1,
-				&mut s2,
-				&mut s3,
-				&mut s4,
-			),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => pivot_avx2(
-				high,
-				low,
-				close,
-				open,
-				mode,
-				first_valid_idx,
-				&mut r4,
-				&mut r3,
-				&mut r2,
-				&mut r1,
-				&mut pp,
-				&mut s1,
-				&mut s2,
-				&mut s3,
-				&mut s4,
-			),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => pivot_avx512(
-				high,
-				low,
-				close,
-				open,
-				mode,
-				first_valid_idx,
-				&mut r4,
-				&mut r3,
-				&mut r2,
-				&mut r1,
-				&mut pp,
-				&mut s1,
-				&mut s2,
-				&mut s3,
-				&mut s4,
-			),
-			_ => unreachable!(),
-		}
-	}
+	pivot_compute_into(
+		high, low, close, open, mode, first_valid_idx, chosen,
+		&mut r4, &mut r3, &mut r2, &mut r1, &mut pp, &mut s1, &mut s2, &mut s3, &mut s4,
+	);
 	Ok(PivotOutput {
 		r4,
 		r3,
@@ -371,7 +361,18 @@ pub fn pivot_into_slices(
 		return Err(PivotError::NotEnoughValidData);
 	}
 	
-	// Fill warmup with NaN
+	// Match ALMA pattern: compute first, then set warmup NaNs
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+	
+	pivot_compute_into(
+		high, low, close, open, mode, first_valid_idx, chosen,
+		r4, r3, r2, r1, pp, s1, s2, s3, s4,
+	);
+	
+	// Now set warmup NaNs after computation
 	for i in 0..first_valid_idx {
 		r4[i] = f64::NAN;
 		r3[i] = f64::NAN;
@@ -382,31 +383,6 @@ pub fn pivot_into_slices(
 		s2[i] = f64::NAN;
 		s3[i] = f64::NAN;
 		s4[i] = f64::NAN;
-	}
-	
-	let chosen = match kern {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
-	
-	unsafe {
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => pivot_scalar(
-				high, low, close, open, mode, first_valid_idx,
-				r4, r3, r2, r1, pp, s1, s2, s3, s4,
-			),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => pivot_avx2(
-				high, low, close, open, mode, first_valid_idx,
-				r4, r3, r2, r1, pp, s1, s2, s3, s4,
-			),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => pivot_avx512(
-				high, low, close, open, mode, first_valid_idx,
-				r4, r3, r2, r1, pp, s1, s2, s3, s4,
-			),
-			_ => unreachable!(),
-		}
 	}
 	
 	Ok(())
@@ -437,6 +413,16 @@ pub unsafe fn pivot_scalar(
 		let c = close[i];
 		let o = open[i];
 		if h.is_nan() || l.is_nan() || c.is_nan() {
+			// Set all outputs to NaN when input is invalid
+			r4[i] = f64::NAN;
+			r3[i] = f64::NAN;
+			r2[i] = f64::NAN;
+			r1[i] = f64::NAN;
+			pp[i] = f64::NAN;
+			s1[i] = f64::NAN;
+			s2[i] = f64::NAN;
+			s3[i] = f64::NAN;
+			s4[i] = f64::NAN;
 			continue;
 		}
 		let p = match mode {
@@ -459,6 +445,11 @@ pub unsafe fn pivot_scalar(
 				r2[i] = p + (h - l);
 				s1[i] = 2.0 * p - h;
 				s2[i] = p - (h - l);
+				// Standard mode doesn't use r3, r4, s3, s4
+				r3[i] = f64::NAN;
+				r4[i] = f64::NAN;
+				s3[i] = f64::NAN;
+				s4[i] = f64::NAN;
 			}
 			1 => {
 				r1[i] = p + 0.382 * (h - l);
@@ -467,6 +458,9 @@ pub unsafe fn pivot_scalar(
 				s1[i] = p - 0.382 * (h - l);
 				s2[i] = p - 0.618 * (h - l);
 				s3[i] = p - 1.0 * (h - l);
+				// Fibonacci mode doesn't use r4, s4
+				r4[i] = f64::NAN;
+				s4[i] = f64::NAN;
 			}
 			2 => {
 				s1[i] = if c < o {
@@ -483,6 +477,13 @@ pub unsafe fn pivot_scalar(
 				} else {
 					(h + l + 2.0 * c) / 2.0 - l
 				};
+				// Demark mode doesn't use r2, r3, r4, s2, s3, s4
+				r2[i] = f64::NAN;
+				r3[i] = f64::NAN;
+				r4[i] = f64::NAN;
+				s2[i] = f64::NAN;
+				s3[i] = f64::NAN;
+				s4[i] = f64::NAN;
 			}
 			3 => {
 				r4[i] = (0.55 * (h - l)) + c;
@@ -710,6 +711,180 @@ pub unsafe fn pivot_row_avx512_long(
 	pivot_avx512_long(high, low, close, open, mode, first, r4, r3, r2, r1, pp, s1, s2, s3, s4)
 }
 
+// ========== NEW BATCH HELPERS ==========
+
+// Compute one row-block (9 rows) for a given mode into pre-sliced outputs
+#[inline(always)]
+unsafe fn pivot_rows_scalar_into(
+	high: &[f64], low: &[f64], close: &[f64], open: &[f64],
+	mode: usize, first: usize,
+	r4: &mut [f64], r3: &mut [f64], r2: &mut [f64], r1: &mut [f64],
+	pp: &mut [f64], s1: &mut [f64], s2: &mut [f64], s3: &mut [f64], s4: &mut [f64],
+) {
+	pivot_scalar(high, low, close, open, mode, first, r4, r3, r2, r1, pp, s1, s2, s3, s4)
+}
+
+// New: flat batch "inner_into" mirroring alma_batch_inner_into
+#[inline(always)]
+fn pivot_batch_inner_into(
+	high: &[f64], low: &[f64], close: &[f64], open: &[f64],
+	sweep: &PivotBatchRange, kern: Kernel, parallel: bool, out: &mut [f64],
+) -> Result<Vec<PivotParams>, PivotError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() { 
+		return Err(PivotError::EmptyData); 
+	}
+	let cols = high.len();
+	if cols == 0 || low.len() != cols || close.len() != cols || open.len() != cols { 
+		return Err(PivotError::EmptyData); 
+	}
+
+	let first = first_valid_ohlc(high, low, close).ok_or(PivotError::AllValuesNaN)?;
+	if first >= cols { 
+		return Err(PivotError::NotEnoughValidData); 
+	}
+
+	let rows = combos.len() * N_LEVELS;
+	// out is expected length rows*cols
+	assert_eq!(out.len(), rows * cols, "pivot_batch_inner_into: out len mismatch");
+
+	// Warm prefixes for each of the 9 rows of each combo
+	let warm: Vec<usize> = vec![first; rows];
+	
+	// Poison + warm NaNs using your helper
+	let out_mu = unsafe {
+		let mu = std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>, out.len());
+		init_matrix_prefixes(mu, cols, &warm);
+		mu
+	};
+
+	// Resolve kernel (scalar path is fine; stubs keep parity)
+	let chosen = match kern { 
+		Kernel::Auto => detect_best_batch_kernel(), 
+		k => k 
+	};
+
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			use rayon::prelude::*;
+			use std::sync::atomic::{AtomicPtr, Ordering};
+			
+			// Wrap pointer in AtomicPtr for thread safety
+			let out_ptr = AtomicPtr::new(out.as_mut_ptr());
+			let out_len = out.len();
+			
+			// Drive indices; compute offsets and re-slice
+			(0..combos.len()).into_par_iter().for_each(|ci| {
+				let mode = combos[ci].mode.unwrap_or(3);
+				// Compute 9 rows window for this combo
+				let base = ci * N_LEVELS * cols;
+				unsafe {
+					let ptr = out_ptr.load(Ordering::Relaxed);
+					let mu = std::slice::from_raw_parts_mut(ptr as *mut std::mem::MaybeUninit<f64>, out_len);
+					let mut rows_mu = mu[base..base + N_LEVELS * cols].chunks_mut(cols);
+					let mut cast = |mu: &mut [std::mem::MaybeUninit<f64>]| {
+						std::slice::from_raw_parts_mut(mu.as_mut_ptr() as *mut f64, mu.len())
+					};
+					let r4_mu = rows_mu.next().unwrap();
+					let r3_mu = rows_mu.next().unwrap();
+					let r2_mu = rows_mu.next().unwrap();
+					let r1_mu = rows_mu.next().unwrap();
+					let pp_mu = rows_mu.next().unwrap();
+					let s1_mu = rows_mu.next().unwrap();
+					let s2_mu = rows_mu.next().unwrap();
+					let s3_mu = rows_mu.next().unwrap();
+					let s4_mu = rows_mu.next().unwrap();
+					
+					let r4 = cast(r4_mu);
+					let r3 = cast(r3_mu);
+					let r2 = cast(r2_mu);
+					let r1 = cast(r1_mu);
+					let pp = cast(pp_mu);
+					let s1 = cast(s1_mu);
+					let s2 = cast(s2_mu);
+					let s3 = cast(s3_mu);
+					let s4 = cast(s4_mu);
+					
+					match chosen {
+						Kernel::Scalar | Kernel::ScalarBatch => {
+							pivot_rows_scalar_into(high, low, close, open, mode, first, r4, r3, r2, r1, pp, s1, s2, s3, s4)
+						}
+						#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+						Kernel::Avx2 | Kernel::Avx2Batch => {
+							pivot_row_avx2(high, low, close, open, mode, first, r4, r3, r2, r1, pp, s1, s2, s3, s4)
+						}
+						#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+						Kernel::Avx512 | Kernel::Avx512Batch => {
+							pivot_row_avx512(high, low, close, open, mode, first, r4, r3, r2, r1, pp, s1, s2, s3, s4)
+						}
+						_ => unreachable!(),
+					}
+				}
+			});
+		}
+		#[cfg(target_arch = "wasm32")]
+		{
+			// Sequential execution for WASM
+			let mut row_chunks = out_mu.chunks_mut(cols);
+			for p in &combos {
+				let mode = p.mode.unwrap_or(3);
+				unsafe {
+					let r4_mu = row_chunks.next().unwrap();
+					let r3_mu = row_chunks.next().unwrap();
+					let r2_mu = row_chunks.next().unwrap();
+					let r1_mu = row_chunks.next().unwrap();
+					let pp_mu = row_chunks.next().unwrap();
+					let s1_mu = row_chunks.next().unwrap();
+					let s2_mu = row_chunks.next().unwrap();
+					let s3_mu = row_chunks.next().unwrap();
+					let s4_mu = row_chunks.next().unwrap();
+
+					// Cast MU -> f64 slices without extra alloc/copy
+					let mut cast = |mu: &mut [std::mem::MaybeUninit<f64>]| {
+						std::slice::from_raw_parts_mut(mu.as_mut_ptr() as *mut f64, mu.len())
+					};
+					let (r4, r3, r2, r1, pp, s1, s2, s3, s4) = (
+						cast(r4_mu), cast(r3_mu), cast(r2_mu), cast(r1_mu), cast(pp_mu),
+						cast(s1_mu), cast(s2_mu), cast(s3_mu), cast(s4_mu)
+					);
+
+					pivot_rows_scalar_into(high, low, close, open, mode, first, r4, r3, r2, r1, pp, s1, s2, s3, s4);
+				}
+			}
+		}
+	} else {
+		// Sequential execution
+		let mut row_chunks = out_mu.chunks_mut(cols);
+		for p in &combos {
+			let mode = p.mode.unwrap_or(3);
+			unsafe {
+				let r4_mu = row_chunks.next().unwrap();
+				let r3_mu = row_chunks.next().unwrap();
+				let r2_mu = row_chunks.next().unwrap();
+				let r1_mu = row_chunks.next().unwrap();
+				let pp_mu = row_chunks.next().unwrap();
+				let s1_mu = row_chunks.next().unwrap();
+				let s2_mu = row_chunks.next().unwrap();
+				let s3_mu = row_chunks.next().unwrap();
+				let s4_mu = row_chunks.next().unwrap();
+
+				// Cast MU -> f64 slices without extra alloc/copy
+				let mut cast = |mu: &mut [std::mem::MaybeUninit<f64>]| {
+					std::slice::from_raw_parts_mut(mu.as_mut_ptr() as *mut f64, mu.len())
+				};
+				let (r4, r3, r2, r1, pp, s1, s2, s3, s4) = (
+					cast(r4_mu), cast(r3_mu), cast(r2_mu), cast(r1_mu), cast(pp_mu),
+					cast(s1_mu), cast(s2_mu), cast(s3_mu), cast(s4_mu)
+				);
+
+				pivot_rows_scalar_into(high, low, close, open, mode, first, r4, r3, r2, r1, pp, s1, s2, s3, s4);
+			}
+		}
+	}
+	Ok(combos)
+}
+
 // ========== BATCH (RANGE) API ==========
 
 #[derive(Clone, Debug)]
@@ -788,6 +963,50 @@ pub struct PivotBatchOutput {
 	pub rows: usize,
 	pub cols: usize,
 }
+
+// New: flat batch container like ALMA
+#[derive(Clone, Debug)]
+pub struct PivotBatchFlatOutput {
+	pub values: Vec<f64>,         // row-major, rows = combos*9, cols = len
+	pub combos: Vec<PivotParams>, // one per combo
+	pub rows: usize,              // combos*9
+	pub cols: usize,              // len
+}
+
+pub fn pivot_batch_flat_with_kernel(
+	high: &[f64], low: &[f64], close: &[f64], open: &[f64],
+	sweep: &PivotBatchRange, k: Kernel
+) -> Result<PivotBatchFlatOutput, PivotError> {
+	let kernel = match k { 
+		Kernel::Auto => detect_best_batch_kernel(), 
+		other if other.is_batch() => other, 
+		_ => return Err(PivotError::EmptyData) 
+	};
+	let combos = expand_grid(sweep);
+	if combos.is_empty() { 
+		return Err(PivotError::EmptyData); 
+	}
+	let cols = high.len();
+	let rows = combos.len() * N_LEVELS;
+
+	// Single allocation, MU -> f64 without copies
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	let warm: Vec<usize> = vec![first_valid_ohlc(high, low, close).ok_or(PivotError::AllValuesNaN)?; rows];
+	init_matrix_prefixes(&mut buf_mu, cols, &warm);
+
+	let mut guard = core::mem::ManuallyDrop::new(buf_mu);
+	let out: &mut [f64] = unsafe { 
+		core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) 
+	};
+
+	pivot_batch_inner_into(high, low, close, open, sweep, kernel, true, out)?;
+
+	let values = unsafe { 
+		Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, guard.len(), guard.capacity()) 
+	};
+	Ok(PivotBatchFlatOutput { values, combos, rows, cols })
+}
+
 fn expand_grid(r: &PivotBatchRange) -> Vec<PivotParams> {
 	let (start, end, step) = r.mode;
 	let mut v = Vec::new();
@@ -1057,67 +1276,52 @@ pub fn pivot_batch_py<'py>(
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
 	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
-	use pyo3::types::PyDict;
 
-	let high_slice = high.as_slice()?;
-	let low_slice = low.as_slice()?;
-	let close_slice = close.as_slice()?;
-	let open_slice = open.as_slice()?;
-	
-	let kern = validate_kernel(kernel, true)?;
-	
+	let (h, l, c, o) = (high.as_slice()?, low.as_slice()?, close.as_slice()?, open.as_slice()?);
 	let sweep = PivotBatchRange { mode: mode_range };
+	let kern = validate_kernel(kernel, true)?;
 
-	let output = py.allow_threads(|| {
-		pivot_batch_with_kernel(high_slice, low_slice, close_slice, open_slice, &sweep, kern)
-	})
-	.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	// Compute flat once using zero-copy path
+	let flat = py.allow_threads(|| pivot_batch_flat_with_kernel(h, l, c, o, &sweep, kern))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
+	// Split flat values into 9 views of shape (combos, cols) flattened (row-major)
+	let combos = flat.combos.len();
+	let cols = flat.cols;
+	let vals = flat.values; // take ownership; move into NumPy without copy
+
+	// One NumPy buffer, then create 9 arrays as views without extra copies
+	let arr = unsafe { PyArray1::<f64>::new(py, [vals.len()], false) };
+	unsafe { 
+		arr.as_slice_mut()?.copy_from_slice(&vals); 
+	} // single copy from our owned Vec into NumPy storage
+
+	// Produce 9 arrays as separate 2D arrays
 	let dict = PyDict::new(py);
+	let names = ["r4", "r3", "r2", "r1", "pp", "s1", "s2", "s3", "s4"];
 	
-	// For pivot, we need to handle 9 output arrays per parameter combination
-	// We'll flatten them into a 2D array where each row contains all 9 levels
-	let total_values = output.rows * output.cols * 9;
-	let mut flat_values = Vec::with_capacity(total_values);
-	
-	for levels in &output.levels {
-		// For each parameter combo, interleave the 9 arrays
-		for i in 0..output.cols {
-			flat_values.push(levels[0][i]); // r4
-			flat_values.push(levels[1][i]); // r3
-			flat_values.push(levels[2][i]); // r2
-			flat_values.push(levels[3][i]); // r1
-			flat_values.push(levels[4][i]); // pp
-			flat_values.push(levels[5][i]); // s1
-			flat_values.push(levels[6][i]); // s2
-			flat_values.push(levels[7][i]); // s3
-			flat_values.push(levels[8][i]); // s4
+	for (li, name) in names.iter().enumerate() {
+		// Create a new array for this level
+		let level_arr = unsafe { PyArray1::<f64>::new(py, [combos * cols], false) };
+		let level_slice = unsafe { level_arr.as_slice_mut()? };
+		
+		// Copy data for this level from the flat array
+		// The data is organized as [combo0_r4...combo0_s4, combo1_r4...combo1_s4, ...]
+		// We need to extract every 9th element starting from li
+		for combo_idx in 0..combos {
+			let base_idx = combo_idx * N_LEVELS * cols;
+			let level_base = li * cols;
+			for col_idx in 0..cols {
+				level_slice[combo_idx * cols + col_idx] = vals[base_idx + level_base + col_idx];
+			}
 		}
+		
+		dict.set_item(*name, level_arr.reshape((combos, cols))?)?;
 	}
 	
-	// Create the values array and reshape it
-	let values_arr = unsafe { PyArray1::<f64>::new(py, [total_values], false) };
-	unsafe {
-		let slice = values_arr.as_slice_mut()?;
-		slice.copy_from_slice(&flat_values);
-	}
-	dict.set_item("values", values_arr.reshape((output.rows, output.cols * 9))?)?;
-	
-	// Add mode parameters
-	dict.set_item(
-		"modes",
-		output.combos
-			.iter()
-			.map(|p| p.mode.unwrap() as u64)
-			.collect::<Vec<_>>()
-			.into_pyarray(py),
-	)?;
-	
-	// Add metadata
-	dict.set_item("rows", output.rows)?;
-	dict.set_item("cols", output.cols)?;
-	dict.set_item("n_levels", 9)?;
-	
+	dict.set_item("modes", flat.combos.iter().map(|p| p.mode.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+	dict.set_item("rows_per_level", combos)?; // for each level
+	dict.set_item("cols", cols)?;
 	Ok(dict)
 }
 
@@ -1125,39 +1329,28 @@ pub fn pivot_batch_py<'py>(
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
-pub fn pivot_js(
-	high: &[f64],
-	low: &[f64],
-	close: &[f64],
-	open: &[f64],
-	mode: usize,
-) -> Result<Vec<f64>, JsValue> {
+pub fn pivot_js(high: &[f64], low: &[f64], close: &[f64], open: &[f64], mode: usize) -> Result<Vec<f64>, JsValue> {
+	// Check for mismatched lengths explicitly
+	let len = high.len();
+	if low.len() != len || close.len() != len || open.len() != len {
+		return Err(JsValue::from_str("pivot: Input arrays must have the same length"));
+	}
+	
 	let params = PivotParams { mode: Some(mode) };
 	let input = PivotInput::from_slices(high, low, close, open, params);
-	
-	let len = high.len();
-	
-	// Single allocation for all 9 levels
-	let mut output = vec![0.0; len * 9];
-	
-	// Create mutable slices for each level
-	let (r4, rest) = output.split_at_mut(len);
-	let (r3, rest) = rest.split_at_mut(len);
-	let (r2, rest) = rest.split_at_mut(len);
-	let (r1, rest) = rest.split_at_mut(len);
-	let (pp, rest) = rest.split_at_mut(len);
-	let (s1, rest) = rest.split_at_mut(len);
-	let (s2, rest) = rest.split_at_mut(len);
-	let (s3, s4) = rest.split_at_mut(len);
-	
-	// Compute into slices
-	pivot_into_slices(
-		r4, r3, r2, r1,
-		pp, s1, s2, s3, s4,
-		&input, Kernel::Auto
-	).map_err(|e| JsValue::from_str(&e.to_string()))?;
-	
-	Ok(output)
+	let out = pivot_with_kernel(&input, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))?;
+	let cols = high.len();
+	let mut values = Vec::with_capacity(N_LEVELS * cols);
+	values.extend_from_slice(&out.r4);
+	values.extend_from_slice(&out.r3);
+	values.extend_from_slice(&out.r2);
+	values.extend_from_slice(&out.r1);
+	values.extend_from_slice(&out.pp);
+	values.extend_from_slice(&out.s1);
+	values.extend_from_slice(&out.s2);
+	values.extend_from_slice(&out.s3);
+	values.extend_from_slice(&out.s4);
+	Ok(values)
 }
 
 #[cfg(feature = "wasm")]
@@ -1298,12 +1491,11 @@ pub struct PivotBatchConfig {
 
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
-pub struct PivotBatchJsOutput {
-	pub values: Vec<f64>,  // Flattened array of all levels
+pub struct PivotBatchFlatJsOutput {
+	pub values: Vec<f64>, // row-major, rows = combos*9, cols = len
 	pub modes: Vec<usize>,
-	pub rows: usize,       // Number of parameter combinations
-	pub cols: usize,       // Data length
-	pub n_levels: usize,   // Always 9 for pivot
+	pub rows: usize,
+	pub cols: usize,
 }
 
 #[cfg(feature = "wasm")]
@@ -1315,47 +1507,14 @@ pub fn pivot_batch_js(
 	open: &[f64],
 	config: JsValue,
 ) -> Result<JsValue, JsValue> {
-	let config: PivotBatchConfig = serde_wasm_bindgen::from_value(config)
+	let cfg: PivotBatchConfig = serde_wasm_bindgen::from_value(config)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
-	
-	let sweep = PivotBatchRange {
-		mode: config.mode_range,
-	};
-	
-	let output = pivot_batch_inner(high, low, close, open, &sweep, Kernel::Auto)
+	let sweep = PivotBatchRange { mode: cfg.mode_range };
+	let flat = pivot_batch_flat_with_kernel(high, low, close, open, &sweep, Kernel::Auto)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
-	
-	// Flatten all 9 arrays per combination
-	let mut flat_values = Vec::with_capacity(output.rows * output.cols * 9);
-	for levels in &output.levels {
-		// For each parameter combo, append all 9 levels
-		for i in 0..output.cols {
-			flat_values.push(levels[0][i]); // r4
-			flat_values.push(levels[1][i]); // r3
-			flat_values.push(levels[2][i]); // r2
-			flat_values.push(levels[3][i]); // r1
-			flat_values.push(levels[4][i]); // pp
-			flat_values.push(levels[5][i]); // s1
-			flat_values.push(levels[6][i]); // s2
-			flat_values.push(levels[7][i]); // s3
-			flat_values.push(levels[8][i]); // s4
-		}
-	}
-	
-	let modes: Vec<usize> = output.combos.iter()
-		.map(|p| p.mode.unwrap())
-		.collect();
-	
-	let result = PivotBatchJsOutput {
-		values: flat_values,
-		modes,
-		rows: output.rows,
-		cols: output.cols,
-		n_levels: 9,
-	};
-	
-	serde_wasm_bindgen::to_value(&result)
-		.map_err(|e| JsValue::from_str(&e.to_string()))
+	let modes = flat.combos.iter().map(|p| p.mode.unwrap()).collect();
+	let out = PivotBatchFlatJsOutput { values: flat.values, modes, rows: flat.rows, cols: flat.cols };
+	serde_wasm_bindgen::to_value(&out).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 #[cfg(test)]

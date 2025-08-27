@@ -21,12 +21,14 @@ use my_project::indicators::cg::{cg, CgInput, CgParams};
 use my_project::indicators::kurtosis::{kurtosis, KurtosisInput, KurtosisParams};
 use my_project::indicators::midpoint::{midpoint, MidpointInput, MidpointParams};
 use my_project::indicators::chande::{chande, ChandeData, ChandeInput, ChandeParams};
+use my_project::indicators::correl_hl::{correl_hl, CorrelHlData, CorrelHlInput, CorrelHlParams};
 use my_project::indicators::ppo::{ppo, PpoInput, PpoParams};
 use my_project::indicators::rsx::{rsx, RsxInput, RsxParams};
 use my_project::indicators::marketefi::{marketefi, MarketefiData, MarketefiInput, MarketefiParams};
+use my_project::indicators::mfi::{mfi, MfiData, MfiInput, MfiParams};
 use my_project::indicators::ui::{ui, UiInput, UiParams};
 use my_project::indicators::squeeze_momentum::{squeeze_momentum, SqueezeMomentumInput, SqueezeMomentumParams};
-use my_project::indicators::mass::{mass, MassData, MassInput, MassParams};
+use my_project::indicators::mass::{mass, MassInput, MassParams};
 /// Binary to generate reference outputs for indicator testing
 /// This is used by Python and WASM tests to verify their outputs match Rust
 use my_project::indicators::decycler::{decycler, DecyclerInput, DecyclerParams};
@@ -48,6 +50,7 @@ use my_project::indicators::moving_averages::jma::{jma, JmaInput, JmaParams};
 use my_project::indicators::moving_averages::jsa::{jsa, JsaInput, JsaParams};
 use my_project::indicators::moving_averages::kama::{kama, KamaInput, KamaParams};
 use my_project::indicators::moving_averages::linreg::{linreg, LinRegInput, LinRegParams};
+use my_project::indicators::linearreg_intercept::{linearreg_intercept, LinearRegInterceptInput, LinearRegInterceptParams};
 use my_project::indicators::moving_averages::maaq::{maaq, MaaqInput, MaaqParams};
 use my_project::indicators::moving_averages::mama::{mama, MamaInput, MamaParams};
 use my_project::indicators::moving_averages::mwdx::{mwdx, MwdxInput, MwdxParams};
@@ -69,17 +72,19 @@ use my_project::indicators::moving_averages::tilson::{tilson, TilsonInput, Tilso
 use my_project::indicators::moving_averages::trendflex::{trendflex, TrendFlexInput, TrendFlexParams};
 use my_project::indicators::moving_averages::trima::{trima, TrimaInput, TrimaParams};
 use my_project::indicators::tsf::{tsf, TsfInput, TsfParams};
+use my_project::indicators::roc::{roc, RocInput, RocParams};
 use my_project::indicators::rocp::{rocp, RocpInput, RocpParams};
 use my_project::indicators::rsi::{rsi, RsiInput, RsiParams};
+use my_project::indicators::rvi::{rvi, RviInput, RviParams};
 use my_project::indicators::moving_averages::vpwma::{vpwma, VpwmaInput, VpwmaParams};
 use my_project::indicators::moving_averages::vwap::{vwap, VwapInput, VwapParams};
 use my_project::indicators::moving_averages::vwma::{vwma, VwmaInput, VwmaParams};
 use my_project::indicators::moving_averages::wilders::{wilders, WildersInput, WildersParams};
 use my_project::indicators::moving_averages::wma::{wma, WmaInput, WmaParams};
 use my_project::indicators::moving_averages::zlema::{zlema, ZlemaInput, ZlemaParams};
-use my_project::indicators::vpci::{vpci, VpciData, VpciInput, VpciParams};
-use my_project::indicators::vpt::{vpt, VptInput, VptData};
-use my_project::indicators::stddev::{stddev, StdDevData, StdDevInput, StdDevParams};
+use my_project::indicators::vpci::{vpci, VpciInput, VpciParams};
+use my_project::indicators::vpt::{vpt, VptInput};
+use my_project::indicators::stddev::{stddev, StdDevInput, StdDevParams};
 use my_project::indicators::wclprice::{wclprice, WclpriceData, WclpriceInput, WclpriceParams};
 use my_project::utilities::data_loader::read_candles_from_csv;
 use serde_json::json;
@@ -89,7 +94,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	let args: Vec<String> = env::args().collect();
 	if args.len() < 2 {
 		eprintln!("Usage: {} <indicator_name> [source]", args[0]);
-		eprintln!("Available indicators: ad, acosc, adx, adosc, adxr, alligator, alma, ao, apo, aroon, aroonosc, atr, bandpass, bollinger_bands, bollinger_bands_width, bop, cci, cfo, cg, cwma, decycler, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass_2_pole, highpass, hma, hwma, jma, jsa, kama, kurtosis, linreg, maaq, mama, marketefi, mwdx, nma, ppo, rsx, pwma, reflex, rocp, rsi, sinwma, sma, smma, squeeze_momentum, sqwma, srwma, stddev, supersmoother_3_pole, supersmoother, swma, tema, tilson, trendflex, trima, vpci, tsf, ui, vwap, vwma, vpwma, wclprice, wilders, wma, zlema");
+		eprintln!("Available indicators: ad, acosc, adx, adosc, adxr, alligator, alma, ao, apo, aroon, aroonosc, atr, bandpass, bollinger_bands, bollinger_bands_width, bop, cci, cfo, cg, cwma, decycler, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass_2_pole, highpass, hma, hwma, jma, jsa, kama, kurtosis, linreg, maaq, mama, marketefi, mfi, mwdx, nma, ppo, rsx, pwma, reflex, roc, rocp, rsi, rvi, sinwma, sma, smma, squeeze_momentum, sqwma, srwma, stddev, supersmoother_3_pole, supersmoother, swma, tema, tilson, trendflex, trima, vpci, tsf, ui, vwap, vwma, vpwma, wclprice, wilders, wma, zlema");
 		eprintln!("Available sources: open, high, low, close, volume, hl2, hlc3, ohlc4, hlcc4");
 		std::process::exit(1);
 	}
@@ -427,6 +432,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 				"length": result.values.len()
 			})
 		}
+		"linearreg_intercept" => {
+			let params = LinearRegInterceptParams::default();
+			let period = params.period.unwrap_or(14);
+			let input = LinearRegInterceptInput::from_candles(&candles, source, params);
+			let result = linearreg_intercept(&input)?;
+			json!({
+				"indicator": "linearreg_intercept",
+				"source": source,
+				"params": {
+					"period": period
+				},
+				"values": result.values,
+				"length": result.values.len()
+			})
+		}
 		"maaq" => {
 			let params = MaaqParams::default();
 			let period = params.period.unwrap_or(11);
@@ -515,6 +535,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 			let result = mass(&input)?;
 			json!({
 				"indicator": "mass",
+				"source": source,
+				"params": {
+					"period": period
+				},
+				"values": result.values,
+				"length": result.values.len()
+			})
+		}
+		"mfi" => {
+			// MFI requires typical price and volume
+			if source != "hlc3_volume" {
+				eprintln!("MFI indicator requires 'hlc3_volume' source");
+				std::process::exit(1);
+			}
+			let params = MfiParams::default();
+			let period = params.period.unwrap_or(14);
+			
+			// Calculate typical price directly from candles fields
+			let typical_price: Vec<f64> = candles.high.iter()
+				.zip(candles.low.iter())
+				.zip(candles.close.iter())
+				.map(|((h, l), c)| (h + l + c) / 3.0)
+				.collect();
+			
+			let input = MfiInput {
+				data: MfiData::Slices {
+					typical_price: &typical_price,
+					volume: &candles.volume,
+				},
+				params,
+			};
+			let result = mfi(&input)?;
+			json!({
+				"indicator": "mfi",
 				"source": source,
 				"params": {
 					"period": period
@@ -816,6 +870,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 				"length": result.values.len()
 			})
 		}
+		"roc" => {
+			let params = RocParams::default();
+			let period = params.period.unwrap_or(9);
+			let input = RocInput::from_candles(&candles, source, params);
+			let result = roc(&input)?;
+			json!({
+				"indicator": "roc",
+				"source": source,
+				"params": {
+					"period": period
+				},
+				"values": result.values,
+				"length": result.values.len()
+			})
+		}
 		"rocp" => {
 			let params = RocpParams::default();
 			let period = params.period.unwrap_or(10);
@@ -841,6 +910,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 				"source": source,
 				"params": {
 					"period": period
+				},
+				"values": result.values,
+				"length": result.values.len()
+			})
+		}
+		"rvi" => {
+			let params = RviParams::default();
+			let period = params.period.unwrap_or(10);
+			let ma_len = params.ma_len.unwrap_or(14);
+			let matype = params.matype.unwrap_or(1);
+			let devtype = params.devtype.unwrap_or(0);
+			let input = RviInput::from_candles(&candles, source, params);
+			let result = rvi(&input)?;
+			json!({
+				"indicator": "rvi",
+				"source": source,
+				"params": {
+					"period": period,
+					"ma_len": ma_len,
+					"matype": matype,
+					"devtype": devtype
 				},
 				"values": result.values,
 				"length": result.values.len()
@@ -1417,6 +1507,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 					"period": period,
 					"mult": mult,
 					"direction": direction
+				},
+				"values": result.values,
+				"length": result.values.len()
+			})
+		}
+		"correl_hl" => {
+			// correl_hl takes high,low as source
+			if source != "high,low" {
+				eprintln!("CORREL_HL indicator requires 'high,low' source");
+				std::process::exit(1);
+			}
+			let params = CorrelHlParams::default();
+			let period = params.period.unwrap_or(9);
+			let input = CorrelHlInput {
+				data: CorrelHlData::Candles { candles: &candles },
+				params,
+			};
+			let result = correl_hl(&input)?;
+			json!({
+				"indicator": "correl_hl",
+				"source": source,
+				"params": {
+					"period": period
 				},
 				"values": result.values,
 				"length": result.values.len()

@@ -160,6 +160,9 @@ impl RsxBuilder {
 
 #[derive(Debug, Error)]
 pub enum RsxError {
+	#[error("rsx: Input data slice is empty.")]
+	EmptyInputData,
+	
 	#[error("rsx: All values are NaN.")]
 	AllValuesNaN,
 
@@ -168,28 +171,31 @@ pub enum RsxError {
 
 	#[error("rsx: Not enough valid data: needed = {needed}, valid = {valid}")]
 	NotEnoughValidData { needed: usize, valid: usize },
+	
+	#[error("rsx: Size mismatch: destination length = {dst}, source length = {src}")]
+	SizeMismatch { dst: usize, src: usize },
+	
+	#[error("rsx: Invalid kernel: expected batch kernel, got {kernel:?}")]
+	InvalidKernel { kernel: Kernel },
 }
 
-#[inline]
-pub fn rsx(input: &RsxInput) -> Result<RsxOutput, RsxError> {
-	rsx_with_kernel(input, Kernel::Auto)
-}
-
-pub fn rsx_with_kernel(input: &RsxInput, kernel: Kernel) -> Result<RsxOutput, RsxError> {
-	let data: &[f64] = match &input.data {
-		RsxData::Candles { candles, source } => source_type(candles, source),
-		RsxData::Slice(sl) => sl,
-	};
-
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(RsxError::AllValuesNaN)?;
-
+#[inline(always)]
+fn rsx_prepare<'a>(
+	input: &'a RsxInput,
+	kernel: Kernel,
+) -> Result<(&'a [f64], usize, usize, Kernel), RsxError> {
+	let data: &[f64] = input.as_ref();
 	let len = data.len();
+	if len == 0 {
+		return Err(RsxError::EmptyInputData);
+	}
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(RsxError::AllValuesNaN)?;
 	let period = input.get_period();
 
 	if period == 0 || period > len {
 		return Err(RsxError::InvalidPeriod { period, data_len: len });
 	}
-	if (len - first) < period {
+	if len - first < period {
 		return Err(RsxError::NotEnoughValidData {
 			needed: period,
 			valid: len - first,
@@ -198,78 +204,69 @@ pub fn rsx_with_kernel(input: &RsxInput, kernel: Kernel) -> Result<RsxOutput, Rs
 
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
-		other => other,
+		k => k,
 	};
+	Ok((data, period, first, chosen))
+}
 
-	let mut out = alloc_with_nan_prefix(len, first + period - 1);
+#[inline]
+pub fn rsx(input: &RsxInput) -> Result<RsxOutput, RsxError> {
+	rsx_with_kernel(input, Kernel::Auto)
+}
+
+pub fn rsx_with_kernel(input: &RsxInput, kernel: Kernel) -> Result<RsxOutput, RsxError> {
+	let (data, period, first, chosen) = rsx_prepare(input, kernel)?;
+	let mut out = alloc_with_nan_prefix(data.len(), first + period - 1);
+
 	unsafe {
 		match chosen {
+			#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+			Kernel::Scalar | Kernel::ScalarBatch => rsx_simd128(data, period, first, &mut out),
+			#[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
 			Kernel::Scalar | Kernel::ScalarBatch => rsx_scalar(data, period, first, &mut out),
+			
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx2 | Kernel::Avx2Batch => rsx_avx2(data, period, first, &mut out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 | Kernel::Avx512Batch => rsx_avx512(data, period, first, &mut out),
-			#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-			Kernel::Scalar | Kernel::ScalarBatch => rsx_simd128(data, period, first, &mut out),
-			_ => unreachable!(),
+			
+			_ => rsx_scalar(data, period, first, &mut out),
 		}
 	}
-
 	Ok(RsxOutput { values: out })
 }
 
 #[inline]
 pub fn rsx_into_slice(dst: &mut [f64], input: &RsxInput, kern: Kernel) -> Result<(), RsxError> {
-	let data: &[f64] = match &input.data {
-		RsxData::Candles { candles, source } => source_type(candles, source),
-		RsxData::Slice(sl) => sl,
-	};
-
+	let (data, period, first, chosen) = rsx_prepare(input, kern)?;
 	if dst.len() != data.len() {
-		return Err(RsxError::InvalidPeriod {
-			period: dst.len(),
-			data_len: data.len(),
+		return Err(RsxError::SizeMismatch {
+			dst: dst.len(),
+			src: data.len(),
 		});
 	}
-
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(RsxError::AllValuesNaN)?;
-	let len = data.len();
-	let period = input.get_period();
-
-	if period == 0 || period > len {
-		return Err(RsxError::InvalidPeriod { period, data_len: len });
-	}
-	if (len - first) < period {
-		return Err(RsxError::NotEnoughValidData {
-			needed: period,
-			valid: len - first,
-		});
-	}
-
-	let chosen = match kern {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
 
 	unsafe {
 		match chosen {
+			#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+			Kernel::Scalar | Kernel::ScalarBatch => rsx_simd128(data, period, first, dst),
+			#[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
 			Kernel::Scalar | Kernel::ScalarBatch => rsx_scalar(data, period, first, dst),
+			
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx2 | Kernel::Avx2Batch => rsx_avx2(data, period, first, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 | Kernel::Avx512Batch => rsx_avx512(data, period, first, dst),
-			#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-			Kernel::Scalar | Kernel::ScalarBatch => rsx_simd128(data, period, first, dst),
-			_ => unreachable!(),
+			
+			_ => rsx_scalar(data, period, first, dst),
 		}
 	}
 
-	// Fill warmup period with NaN
+	// prefix only
 	let warmup_end = first + period - 1;
 	for v in &mut dst[..warmup_end] {
 		*v = f64::NAN;
 	}
-
 	Ok(())
 }
 
@@ -552,17 +549,14 @@ pub fn rsx_batch_with_kernel(data: &[f64], sweep: &RsxBatchRange, k: Kernel) -> 
 	let kernel = match k {
 		Kernel::Auto => detect_best_batch_kernel(),
 		other if other.is_batch() => other,
-		_ => return Err(RsxError::InvalidPeriod { period: 0, data_len: 0 }),
+		other => return Err(RsxError::InvalidKernel { kernel: other }),
 	};
 
 	let simd = match kernel {
 		Kernel::Avx512Batch => Kernel::Avx512,
 		Kernel::Avx2Batch => Kernel::Avx2,
 		Kernel::ScalarBatch => Kernel::Scalar,
-		Kernel::Avx512 => Kernel::Avx512,
-		Kernel::Avx2 => Kernel::Avx2,
-		Kernel::Scalar => Kernel::Scalar,
-		Kernel::Auto => detect_best_kernel(),
+		_ => unreachable!(),
 	};
 	rsx_batch_par_slice(data, sweep, simd)
 }
@@ -1427,46 +1421,53 @@ fn rsx_batch_inner_into(
 		return Err(RsxError::InvalidPeriod { period: 0, data_len: 0 });
 	}
 
+	let len = data.len();
+	if len == 0 {
+		return Err(RsxError::EmptyInputData);
+	}
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(RsxError::AllValuesNaN)?;
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-	if data.len() - first < max_p {
+	if len - first < max_p {
 		return Err(RsxError::NotEnoughValidData {
 			needed: max_p,
-			valid: data.len() - first,
+			valid: len - first,
 		});
 	}
 
 	let rows = combos.len();
-	let cols = data.len();
+	let cols = len;
 
-	// Resolve kernel selection
-	let actual_kernel = match kern {
+	// prefix NaNs using helper on the *provided* buffer
+	unsafe {
+		let out_mu = std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len());
+		let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
+		init_matrix_prefixes(out_mu, cols, &warm);
+	}
+
+	// select scalar/placeholder SIMD kernel
+	let actual = match kern {
 		Kernel::Auto => detect_best_kernel(),
 		k => k,
 	};
 
-	// Initialize NaN prefixes for each row based on warmup period
-	for (row, combo) in combos.iter().enumerate() {
-		let warmup = first + combo.period.unwrap() - 1;
-		let row_start = row * cols;
-		for i in 0..warmup.min(cols) {
-			out[row_start + i] = f64::NAN;
-		}
-	}
-
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
-		match actual_kernel {
-			Kernel::Scalar | Kernel::ScalarBatch => rsx_row_scalar(data, first, period, out_row),
+		match actual {
+			#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+			Kernel::Scalar | Kernel::ScalarBatch => rsx_simd128(data, period, first, out_row),
+			#[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+			Kernel::Scalar | Kernel::ScalarBatch => rsx_scalar(data, period, first, out_row),
+			
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => rsx_row_avx2(data, first, period, out_row),
+			Kernel::Avx2 | Kernel::Avx2Batch => rsx_avx2(data, period, first, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => rsx_row_avx512(data, first, period, out_row),
+			Kernel::Avx512 | Kernel::Avx512Batch => rsx_avx512(data, period, first, out_row),
 			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
 			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
-				rsx_row_scalar(data, first, period, out_row)
+				rsx_scalar(data, period, first, out_row)
 			}
-			Kernel::Auto => unreachable!("Auto kernel should have been resolved"),
+			
+			_ => rsx_scalar(data, period, first, out_row),
 		}
 	};
 
@@ -1585,25 +1586,37 @@ pub struct RsxBatchJsOutput {
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = rsx_batch)]
-pub fn rsx_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+pub fn rsx_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
 	let config: RsxBatchConfig = 
 		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	let sweep = RsxBatchRange { period: config.period_range };
 
-	let sweep = RsxBatchRange {
-		period: config.period_range,
+	// mirror ALMA: build rows*cols buffer using helpers
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = data.len();
+
+	// allocate rows×cols uninit and prefix-init via helper
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	let first = data.iter().position(|x| !x.is_nan()).ok_or_else(|| JsValue::from_str("All NaN"))?;
+	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
+	init_matrix_prefixes(&mut buf_mu, cols, &warm);
+
+	// cast to f64 and compute into place
+	let mut guard = core::mem::ManuallyDrop::new(buf_mu);
+	let out_slice: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len())
 	};
 
-	let output = rsx_batch_inner(data, &sweep, Kernel::Auto, false)
+	rsx_batch_inner_into(data, &sweep, detect_best_kernel(), false, out_slice)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-	let js_output = RsxBatchJsOutput {
-		values: output.values,
-		combos: output.combos,
-		rows: output.rows,
-		cols: output.cols,
+	let values = unsafe {
+		Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, guard.len(), guard.capacity())
 	};
 
-	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+	let js = RsxBatchJsOutput { values, combos, rows, cols };
+	serde_wasm_bindgen::to_value(&js).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 #[cfg(feature = "wasm")]

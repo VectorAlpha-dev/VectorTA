@@ -38,7 +38,6 @@ use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -135,7 +134,11 @@ pub fn mfi(input: &MfiInput) -> Result<MfiOutput, MfiError> {
 	mfi_with_kernel(input, Kernel::Auto)
 }
 
-pub fn mfi_with_kernel(input: &MfiInput, kernel: Kernel) -> Result<MfiOutput, MfiError> {
+#[inline(always)]
+fn mfi_prepare<'a>(
+	input: &'a MfiInput<'a>,
+	kernel: Kernel,
+) -> Result<(&'a [f64], &'a [f64], usize, usize, Kernel), MfiError> {
 	let (typical_price, volume): (&[f64], &[f64]) = match &input.data {
 		MfiData::Candles { candles, source } => (
 			source_type(candles, source),
@@ -173,26 +176,45 @@ pub fn mfi_with_kernel(input: &MfiInput, kernel: Kernel) -> Result<MfiOutput, Mf
 		});
 	}
 
-	let warmup_period = first_valid_idx + period - 1;
-	let mut out = alloc_with_nan_prefix(length, warmup_period);
-
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
 		other => other,
 	};
 
+	Ok((typical_price, volume, period, first_valid_idx, chosen))
+}
+
+#[inline(always)]
+fn mfi_compute_into(
+	typical_price: &[f64],
+	volume: &[f64],
+	period: usize,
+	first: usize,
+	kernel: Kernel,
+	out: &mut [f64],
+) {
 	unsafe {
-		match chosen {
+		match kernel {
 			Kernel::Scalar | Kernel::ScalarBatch => {
-				mfi_scalar(typical_price, volume, period, first_valid_idx, &mut out)
+				mfi_scalar(typical_price, volume, period, first, out)
 			}
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => mfi_avx2(typical_price, volume, period, first_valid_idx, &mut out),
+			Kernel::Avx2 | Kernel::Avx2Batch => mfi_avx2(typical_price, volume, period, first, out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => mfi_avx512(typical_price, volume, period, first_valid_idx, &mut out),
+			Kernel::Avx512 | Kernel::Avx512Batch => mfi_avx512(typical_price, volume, period, first, out),
 			_ => unreachable!(),
 		}
 	}
+}
+
+pub fn mfi_with_kernel(input: &MfiInput, kernel: Kernel) -> Result<MfiOutput, MfiError> {
+	let (typical_price, volume, period, first_valid_idx, chosen) = mfi_prepare(input, kernel)?;
+
+	let warmup_period = first_valid_idx + period - 1;
+	let mut out = alloc_with_nan_prefix(typical_price.len(), warmup_period);
+
+	mfi_compute_into(typical_price, volume, period, first_valid_idx, chosen, &mut out);
+
 	Ok(MfiOutput { values: out })
 }
 
@@ -383,8 +405,6 @@ pub struct MfiStream {
 	period: usize,
 	pos_buf: Vec<f64>,
 	neg_buf: Vec<f64>,
-	typical_buf: Vec<f64>,
-	volume_buf: Vec<f64>,
 	head: usize,
 	filled: bool,
 	pos_sum: f64,
@@ -403,8 +423,6 @@ impl MfiStream {
 			period,
 			pos_buf: vec![0.0; period],
 			neg_buf: vec![0.0; period],
-			typical_buf: Vec::with_capacity(period),
-			volume_buf: Vec::with_capacity(period),
 			head: 0,
 			filled: false,
 			pos_sum: 0.0,
@@ -418,8 +436,6 @@ impl MfiStream {
 	pub fn update(&mut self, typical_price: f64, volume: f64) -> Option<f64> {
 		if self.index == 0 {
 			self.prev_typical = typical_price;
-			self.typical_buf.clear();
-			self.volume_buf.clear();
 			self.index += 1;
 			return None;
 		}
@@ -622,6 +638,10 @@ fn mfi_batch_inner(
 
 	let rows = combos.len();
 	let cols = length;
+
+	if volume.len() != cols {
+		return Err(MfiError::EmptyData);
+	}
 	
 	// Use uninitialized memory with NaN prefixes
 	let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -652,10 +672,9 @@ fn mfi_batch_inner(
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			out
-				.chunks_mut(cols)
+			use rayon::prelude::*;
+			out.par_chunks_mut(cols)
 				.enumerate()
-				.par_bridge()
 				.for_each(|(row, slice)| do_row(row, slice));
 		}
 
@@ -716,6 +735,10 @@ fn mfi_batch_inner_into(
 	}
 
 	let cols = length;
+
+	if volume.len() != cols {
+		return Err(MfiError::EmptyData);
+	}
 	
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
@@ -732,10 +755,9 @@ fn mfi_batch_inner_into(
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			out
-				.chunks_mut(cols)
+			use rayon::prelude::*;
+			out.par_chunks_mut(cols)
 				.enumerate()
-				.par_bridge()
 				.for_each(|(row, slice)| do_row(row, slice));
 		}
 
@@ -877,122 +899,74 @@ pub fn mfi_batch_py<'py>(
 	period_range: (usize, usize, usize),
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
-	let typical_slice = typical_price.as_slice()?;
-	let volume_slice = volume.as_slice()?;
-	let kern = validate_kernel(kernel, true)?; // true for batch operations
-	
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+	use pyo3::types::PyDict;
+
+	let tp = typical_price.as_slice()?;
+	let vol = volume.as_slice()?;
+	if tp.len() != vol.len() {
+		return Err(PyValueError::new_err("mfi_batch: typical_price and volume length mismatch"));
+	}
+
 	let sweep = MfiBatchRange { period: period_range };
-	
+	let kern = validate_kernel(kernel, true)?;
+
 	// Calculate dimensions
 	let combos = expand_grid(&sweep);
 	let rows = combos.len();
-	let cols = typical_slice.len();
-	
-	// Pre-allocate output array (OK for batch operations)
+	let cols = tp.len();
+
+	// Allocate NumPy array upfront for zero-copy
 	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-	let slice_out = unsafe { out_arr.as_slice_mut()? };
-	
-	// Compute without GIL
-	let combos = py.allow_threads(|| {
-		// Handle kernel selection for batch operations
-		let kernel = match kern {
-			Kernel::Auto => detect_best_batch_kernel(),
-			k => k,
-		};
-		
-		// Map batch kernels to regular kernels
-		let simd = match kernel {
-			Kernel::Avx512Batch => Kernel::Avx512,
-			Kernel::Avx2Batch => Kernel::Avx2,
-			Kernel::ScalarBatch => Kernel::Scalar,
-			_ => kernel,
-		};
-		
-		mfi_batch_inner_into(typical_slice, volume_slice, &sweep, simd, true, slice_out)
-	})
-	.map_err(|e| PyValueError::new_err(e.to_string()))?;
-	
-	// Build result dictionary
+	let out_slice = unsafe { out_arr.as_slice_mut()? };
+
+	// Compute directly into NumPy buffer
+	let combos = py
+		.allow_threads(|| {
+			let k = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+			// Map batch -> compute kernel as in ALMA
+			let simd = match k {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => k,
+			};
+			mfi_batch_inner_into(tp, vol, &sweep, simd, true, out_slice)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
 	let dict = PyDict::new(py);
+	// Zero-copy reshape NumPy array
 	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
 	dict.set_item(
 		"periods",
-		combos.iter()
+		combos
+			.iter()
 			.map(|p| p.period.unwrap() as u64)
 			.collect::<Vec<_>>()
-			.into_pyarray(py)
+			.into_pyarray(py),
 	)?;
-	
 	Ok(dict)
 }
 
 #[inline]
 pub fn mfi_into_slice(dst: &mut [f64], input: &MfiInput, kern: Kernel) -> Result<(), MfiError> {
-	let (typical_price, volume): (&[f64], &[f64]) = match &input.data {
-		MfiData::Candles { candles, source } => (
-			source_type(candles, source),
-			candles.volume.as_slice(),
-		),
-		MfiData::Slices {
-			typical_price,
-			volume,
-		} => (*typical_price, *volume),
-	};
+	let (typical_price, volume, period, first_valid_idx, chosen) = mfi_prepare(input, kern)?;
 
-	let length = typical_price.len();
-	if length == 0 || volume.len() != length {
-		return Err(MfiError::EmptyData);
-	}
-
-	if dst.len() != length {
+	if dst.len() != typical_price.len() {
 		return Err(MfiError::InvalidPeriod { 
 			period: dst.len(), 
-			data_len: length 
+			data_len: typical_price.len() 
 		});
 	}
 
-	let period = input.get_period();
-	let first_valid_idx =
-		(0..length).find(|&i| !typical_price[i].is_nan() && !volume[i].is_nan());
-	let first_valid_idx = match first_valid_idx {
-		Some(idx) => idx,
-		None => return Err(MfiError::AllValuesNaN),
-	};
-
-	if period == 0 || period > length {
-		return Err(MfiError::InvalidPeriod {
-			period,
-			data_len: length,
-		});
-	}
-	if (length - first_valid_idx) < period {
-		return Err(MfiError::NotEnoughValidData {
-			needed: period,
-			valid: length - first_valid_idx,
-		});
-	}
-
-	let warmup_period = first_valid_idx + period - 1;
-
-	let chosen = match kern {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
-
-	unsafe {
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => {
-				mfi_scalar(typical_price, volume, period, first_valid_idx, dst)
-			}
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => mfi_avx2(typical_price, volume, period, first_valid_idx, dst),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => mfi_avx512(typical_price, volume, period, first_valid_idx, dst),
-			_ => unreachable!(),
-		}
-	}
+	mfi_compute_into(typical_price, volume, period, first_valid_idx, chosen, dst);
 
 	// Fill warmup with NaN
+	let warmup_period = first_valid_idx + period - 1;
 	for v in &mut dst[..warmup_period] {
 		*v = f64::NAN;
 	}
@@ -1123,21 +1097,22 @@ pub fn mfi_batch_into(
 	if typical_price_ptr.is_null() || volume_ptr.is_null() || out_ptr.is_null() {
 		return Err(JsValue::from_str("null pointer passed to mfi_batch_into"));
 	}
-
 	unsafe {
-		let typical_price = std::slice::from_raw_parts(typical_price_ptr, len);
-		let volume = std::slice::from_raw_parts(volume_ptr, len);
-		let out = std::slice::from_raw_parts_mut(out_ptr, len);
+		let tp = std::slice::from_raw_parts(typical_price_ptr, len);
+		let vol = std::slice::from_raw_parts(volume_ptr, len);
 
-		let sweep = MfiBatchRange {
-			period: (period_start, period_end, period_step),
-		};
+		let sweep = MfiBatchRange { period: (period_start, period_end, period_step) };
+		let combos = expand_grid(&sweep);
+		let rows = combos.len();
+		let cols = len;
 
-		mfi_batch_inner_into(typical_price, volume, &sweep, detect_best_kernel(), false, out)
+		// Destination must be rows * cols
+		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+
+		mfi_batch_inner_into(tp, vol, &sweep, detect_best_kernel(), false, out)
 			.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-		let combos = expand_grid(&sweep);
-		Ok(combos.len())
+		Ok(rows)
 	}
 }
 

@@ -225,7 +225,7 @@ class TestBollingerBands:
             devup_range=(2.0, 2.0, 0.0),  # Default devup only
             devdn_range=(2.0, 2.0, 0.0),  # Default devdn only
             matype="sma",  # Default matype
-            devtype=0  # Default devtype
+            devtype_range=(0, 0, 0)  # Default devtype
         )
         
         assert 'upper' in result
@@ -338,7 +338,7 @@ class TestBollingerBands:
             devup_range=(1.0, 3.0, 1.0),  # 1.0, 2.0, 3.0
             devdn_range=(2.0, 2.0, 0.0),  # Just 2.0
             matype="sma",
-            devtype=0
+            devtype_range=(0, 0, 0)
         )
         
         # Should have 3 * 3 * 1 = 9 combinations

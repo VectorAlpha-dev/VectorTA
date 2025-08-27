@@ -125,6 +125,111 @@ test('Decycler NaN handling', () => {
     }
 });
 
+test('Decycler warmup period', () => {
+    // Test Decycler warmup period matches expected behavior
+    const close = new Float64Array(testData.close);
+    const hp_period = 125;
+    
+    const result = wasm.decycler_js(close, hp_period, 0.707);
+    
+    // Find first non-NaN index in result
+    const firstNonNaN = result.findIndex(v => !isNaN(v));
+    if (firstNonNaN !== -1) {
+        // According to Rust implementation, warmup is first + 2
+        // where first is the first non-NaN in input data
+        const firstInput = close.findIndex(v => !isNaN(v));
+        const expectedWarmup = firstInput + 2;
+        
+        assert.strictEqual(firstNonNaN, expectedWarmup, 
+            `Warmup period mismatch: expected ${expectedWarmup}, got ${firstNonNaN}`);
+        
+        // Verify all values before warmup are NaN
+        for (let i = 0; i < expectedWarmup; i++) {
+            assert(isNaN(result[i]), `Expected NaN at index ${i} during warmup`);
+        }
+    }
+});
+
+test('Decycler partial NaN input', () => {
+    // Test Decycler with data containing some NaN values
+    // Create simple test data
+    const data = new Float64Array(100);
+    for (let i = 0; i < 100; i++) {
+        data[i] = i + 1.0; // 1 to 100
+    }
+    
+    // Inject a few NaN values
+    data[10] = NaN;
+    data[11] = NaN;
+    
+    // Run decycler - it should handle the NaN values
+    const result = wasm.decycler_js(data, 5, 0.707);
+    assert.strictEqual(result.length, data.length);
+    
+    // The test verifies that the indicator can be called with data containing NaN
+    // The actual behavior with NaN in the middle might vary
+});
+
+test('Decycler edge case k values', () => {
+    // Test Decycler with edge case k values
+    const data = new Float64Array(100);
+    for (let i = 0; i < 100; i++) {
+        data[i] = i + 1.0; // 1 to 100
+    }
+    
+    // Test very small positive k (just above 0)
+    const resultSmall = wasm.decycler_js(data, 10, 0.001);
+    assert.strictEqual(resultSmall.length, data.length);
+    
+    // Test k = 0.707 (default critical damping)
+    const resultDefault = wasm.decycler_js(data, 10, 0.707);
+    assert.strictEqual(resultDefault.length, data.length);
+    
+    // Test large k value
+    const resultLarge = wasm.decycler_js(data, 10, 10.0);
+    assert.strictEqual(resultLarge.length, data.length);
+    
+    // Results should differ based on k value
+    // After warmup, check that different k values produce different results
+    const warmupEnd = 2; // first + 2 where first=0 for this data
+    const checkIdx = warmupEnd + 5;
+    if (data.length > checkIdx) {
+        assert(resultSmall[checkIdx] !== resultDefault[checkIdx], 
+            "Different k values should produce different results");
+        assert(resultDefault[checkIdx] !== resultLarge[checkIdx], 
+            "Different k values should produce different results");
+    }
+});
+
+test('Decycler reinput', () => {
+    // Test Decycler applied twice (re-input)
+    const close = new Float64Array(testData.close);
+    const hp_period = 30;
+    const k = 0.707;
+    
+    // First pass
+    const firstResult = wasm.decycler_js(close, hp_period, k);
+    assert.strictEqual(firstResult.length, close.length);
+    
+    // Second pass - apply Decycler to Decycler output
+    const secondResult = wasm.decycler_js(firstResult, hp_period, k);
+    assert.strictEqual(secondResult.length, firstResult.length);
+    
+    // Both should have same length and valid values after warmup
+    const warmupEnd = 4; // (first + 2) * 2 for double application
+    if (secondResult.length > warmupEnd + 10) {
+        // Check that second pass produces valid values
+        let hasValidValues = false;
+        for (let i = warmupEnd; i < warmupEnd + 10; i++) {
+            if (!isNaN(secondResult[i])) {
+                hasValidValues = true;
+                break;
+            }
+        }
+        assert(hasValidValues, "Expected valid values after double application");
+    }
+});
+
 test('Decycler all NaN input', () => {
     // Test Decycler with all NaN values
     const allNaN = new Float64Array(100);
@@ -206,9 +311,42 @@ test('Decycler batch multiple parameters', () => {
     ];
     
     for (let i = 0; i < expectedCombos.length; i++) {
-        assert.strictEqual(batchResult.combos[i].hp_period, expectedCombos[i].hp_period);
-        assertClose(batchResult.combos[i].k, expectedCombos[i].k, 0.01, "k value mismatch");
+        assert.strictEqual(batchResult.combos[i].hp_period, expectedCombos[i].hp_period,
+            `hp_period mismatch at index ${i}`);
+        assertClose(batchResult.combos[i].k, expectedCombos[i].k, 0.01, 
+            `k value mismatch at index ${i}`);
     }
+    
+    // Verify a specific row matches individual calculation
+    // Check row 3 (hp_period=20, k=0.5)
+    const rowIdx = 3;
+    const rowStart = rowIdx * 50;
+    const rowEnd = rowStart + 50;
+    const rowData = batchResult.values.slice(rowStart, rowEnd);
+    
+    const singleResult = wasm.decycler_js(close, 20, 0.5);
+    assertArrayClose(rowData, singleResult, 1e-10, 
+        `Batch row ${rowIdx} doesn't match single calculation`);
+});
+
+test('Decycler batch invalid parameters', () => {
+    // Test batch with invalid parameter ranges
+    const close = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    
+    // Invalid hp_period range (start > end)
+    assert.throws(() => {
+        wasm.decycler_batch(close, {
+            hp_period_range: [20, 10, 5],
+            k_range: [0.707, 0.707, 0]
+        });
+    }, /Invalid.*period|Empty.*grid|Invalid.*range/);
+    
+    // Invalid k range (negative k)
+    // The batch function might not validate individual k values until processing
+    // Try with a simple negative k that should fail
+    assert.throws(() => {
+        wasm.decycler_js(close, 5, -0.5);
+    }, /Invalid k/);
 });
 
 test('Decycler batch edge cases', () => {
@@ -240,7 +378,7 @@ test('Decycler batch edge cases', () => {
             hp_period_range: [125, 125, 0],
             k_range: [0.707, 0.707, 0]
         });
-    }, /All values are NaN/);
+    }, /Empty data/);
 });
 
 // Fast API tests (zero-copy)

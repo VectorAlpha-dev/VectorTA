@@ -12,7 +12,8 @@ import {
     assertClose,
     isNaN,
     assertAllNaN,
-    assertNoNaN 
+    assertNoNaN,
+    EXPECTED_OUTPUTS 
 } from './test_utils.js';
 import { compareWithRust } from './rust-comparison.js';
 
@@ -21,20 +22,6 @@ const __dirname = path.dirname(__filename);
 
 let wasm;
 let testData;
-
-// Expected outputs for TRIMA
-const EXPECTED_OUTPUTS = {
-    trima: {
-        default_params: { period: 30 },
-        last_5_values: [
-            59957.916666666664,
-            59846.770833333336,
-            59750.620833333334,
-            59665.2125,
-            59581.612499999996,
-        ]
-    }
-};
 
 test.before(async () => {
     // Load WASM module
@@ -65,18 +52,21 @@ test('trima_accuracy', () => {
     const close = testData.close;
     const expected = EXPECTED_OUTPUTS.trima;
     
-    const result = wasm.trima_js(close, expected.default_params.period);
+    const result = wasm.trima_js(close, expected.defaultParams.period);
     
     assert.equal(result.length, close.length);
     
     // Check last 5 values
     const last5 = result.slice(-5);
-    expected.last_5_values.forEach((expectedVal, i) => {
-        assertClose(last5[i], expectedVal, 1e-6, `TRIMA mismatch at index ${i}`);
-    });
+    assertArrayClose(
+        last5,
+        expected.last5Values,
+        1e-6,
+        "TRIMA last 5 values mismatch"
+    );
     
     // Compare with Rust
-    compareWithRust('trima', result, 'close', expected.default_params);
+    compareWithRust('trima', result, 'close', expected.defaultParams);
 });
 
 test('trima_default_candles', () => {
@@ -148,6 +138,7 @@ test('trima_all_nan_input', () => {
 
 test('trima_reinput', () => {
     const close = testData.close;
+    const expected = EXPECTED_OUTPUTS.trima;
     
     // First pass
     const firstResult = wasm.trima_js(close, 30);
@@ -157,12 +148,14 @@ test('trima_reinput', () => {
     const secondResult = wasm.trima_js(firstResult, 10);
     assert.equal(secondResult.length, firstResult.length);
     
-    // Check for NaN handling after warmup
-    if (secondResult.length > 240) {
-        for (let i = 240; i < secondResult.length; i++) {
-            assert.ok(!isNaN(secondResult[i]), `Unexpected NaN at index ${i}`);
-        }
-    }
+    // Check last 5 values match expected
+    const last5 = secondResult.slice(-5);
+    assertArrayClose(
+        last5,
+        expected.reinputLast5,
+        1e-6,
+        "TRIMA re-input last 5 values mismatch"
+    );
 });
 
 test('trima_nan_handling', () => {
@@ -186,23 +179,26 @@ test('trima_nan_handling', () => {
 
 test('trima_batch_old_api', () => {
     const close = testData.close;
+    const expected = EXPECTED_OUTPUTS.trima;
     
-    const result = wasm.trima_batch_js(close, 30, 30, 0);
-    const metadata = wasm.trima_batch_metadata_js(30, 30, 0);
+    const result = wasm.trima_batch_js(close, expected.defaultParams.period, expected.defaultParams.period, 0);
+    const metadata = wasm.trima_batch_metadata_js(expected.defaultParams.period, expected.defaultParams.period, 0);
     
     // Should have 1 period value
     assert.equal(metadata.length, 1);
-    assert.equal(metadata[0], 30);
+    assert.equal(metadata[0], expected.defaultParams.period);
     
     // Result should be flattened array (1 row × data length)
     assert.equal(result.length, close.length);
     
     // Check last 5 values
-    const expected = EXPECTED_OUTPUTS.trima.last_5_values;
     const last5 = result.slice(-5);
-    expected.forEach((expectedVal, i) => {
-        assertClose(last5[i], expectedVal, 1e-6, `TRIMA batch mismatch at index ${i}`);
-    });
+    assertArrayClose(
+        last5,
+        expected.last5Values,
+        1e-6,
+        "TRIMA batch mismatch"
+    );
 });
 
 test('trima_batch_multiple_periods', () => {
@@ -527,6 +523,115 @@ test('TRIMA SIMD128 consistency', () => {
         // Verify reasonable values
         const avgAfterWarmup = sumAfterWarmup / countAfterWarmup;
         assert(Math.abs(avgAfterWarmup) < 10, `Average value ${avgAfterWarmup} seems unreasonable`);
+    }
+});
+
+test('TRIMA batch edge cases', () => {
+    // Test edge cases for batch processing
+    const close = new Float64Array(testData.close.slice(0, 100));
+    
+    // Single value sweep
+    const singleBatch = wasm.trima_batch(close, {
+        period_range: [20, 20, 1]
+    });
+    
+    assert.strictEqual(singleBatch.values.length, 100);
+    assert.strictEqual(singleBatch.combos.length, 1);
+    
+    // Step larger than range
+    const largeBatch = wasm.trima_batch(close, {
+        period_range: [10, 15, 20]  // Step larger than range
+    });
+    
+    // Should only have period=10
+    assert.strictEqual(largeBatch.values.length, 100);
+    assert.strictEqual(largeBatch.combos.length, 1);
+    assert.strictEqual(largeBatch.combos[0].period, 10);
+    
+    // Empty data should throw
+    assert.throws(() => {
+        wasm.trima_batch(new Float64Array([]), {
+            period_range: [10, 10, 0]
+        });
+    }, /All values are NaN|No data/);
+});
+
+test('TRIMA batch full parameter sweep', () => {
+    // Test full parameter sweep matching expected structure
+    const close = new Float64Array(testData.close.slice(0, 50));
+    
+    const batchResult = wasm.trima_batch(close, {
+        period_range: [10, 20, 5]  // 3 periods: 10, 15, 20
+    });
+    
+    // Should have 3 combinations
+    assert.strictEqual(batchResult.combos.length, 3);
+    assert.strictEqual(batchResult.rows, 3);
+    assert.strictEqual(batchResult.cols, 50);
+    assert.strictEqual(batchResult.values.length, 150);
+    
+    // Verify structure
+    const expectedPeriods = [10, 15, 20];
+    for (let combo = 0; combo < batchResult.combos.length; combo++) {
+        const period = batchResult.combos[combo].period;
+        assert.strictEqual(period, expectedPeriods[combo]);
+        
+        const rowStart = combo * 50;
+        const rowData = batchResult.values.slice(rowStart, rowStart + 50);
+        
+        // First period-1 values should be NaN
+        for (let i = 0; i < period - 1; i++) {
+            assert(isNaN(rowData[i]), `Expected NaN at warmup index ${i} for period ${period}`);
+        }
+        
+        // After warmup should have values
+        for (let i = period - 1; i < 50; i++) {
+            assert(!isNaN(rowData[i]), `Unexpected NaN at index ${i} for period ${period}`);
+        }
+    }
+});
+
+test('TRIMA batch metadata verification', () => {
+    // Test that batch result includes correct parameter combinations
+    const close = new Float64Array(30); // Need enough data for period 20
+    close.fill(100);
+    
+    const result = wasm.trima_batch(close, {
+        period_range: [10, 20, 10]  // period: 10, 20
+    });
+    
+    // Should have 2 combinations
+    assert.strictEqual(result.combos.length, 2);
+    
+    // Check combinations
+    assert.strictEqual(result.combos[0].period, 10);
+    assert.strictEqual(result.combos[1].period, 20);
+});
+
+test('TRIMA batch vs single consistency', () => {
+    // Verify batch results match single calculations
+    const close = new Float64Array(testData.close.slice(0, 100));
+    
+    const periods = [10, 15, 20, 25, 30];
+    
+    // Batch calculation
+    const batch = wasm.trima_batch(close, {
+        period_range: [10, 30, 5]
+    });
+    
+    // Verify each row matches individual calculation
+    for (let i = 0; i < periods.length; i++) {
+        const rowStart = i * 100;
+        const rowEnd = rowStart + 100;
+        const rowData = batch.values.slice(rowStart, rowEnd);
+        
+        const singleResult = wasm.trima_js(close, periods[i]);
+        assertArrayClose(
+            Array.from(rowData),
+            singleResult,
+            1e-10,
+            `Period ${periods[i]} mismatch`
+        );
     }
 });
 

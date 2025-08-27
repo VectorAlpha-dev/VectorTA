@@ -33,19 +33,18 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
-use crate::utilities::data_loader::{source_type, Candles};
+use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
 	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
-use std::mem::ManuallyDrop;
+use std::mem::{ManuallyDrop, MaybeUninit};
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
@@ -100,6 +99,25 @@ impl<'a> CorrelHlInput<'a> {
 
 	#[inline]
 	pub fn get_period(&self) -> usize {
+		self.params.period.unwrap_or(9)
+	}
+	
+	#[inline(always)]
+	pub fn as_refs(&'a self) -> Result<(&'a [f64], &'a [f64]), CorrelHlError> {
+		match &self.data {
+			CorrelHlData::Candles { candles } => {
+				let hi = candles.select_candle_field("high")
+					.map_err(|_| CorrelHlError::CandleFieldError { field: "high" })?;
+				let lo = candles.select_candle_field("low")
+					.map_err(|_| CorrelHlError::CandleFieldError { field: "low" })?;
+				Ok((hi, lo))
+			}
+			CorrelHlData::Slices { high, low } => Ok((*high, *low)),
+		}
+	}
+
+	#[inline(always)]
+	pub fn period_or_default(&self) -> usize {
 		self.params.period.unwrap_or(9)
 	}
 }
@@ -168,6 +186,10 @@ pub enum CorrelHlError {
 	NotEnoughValidData { needed: usize, valid: usize },
 	#[error("correl_hl: All values are NaN in high or low.")]
 	AllValuesNaN,
+	#[error("correl_hl: Candle field error: {field}")]
+	CandleFieldError { field: &'static str },
+	#[error("correl_hl: Output length {dst} != input length {src}")]
+	OutputLengthMismatch { dst: usize, src: usize },
 }
 
 #[inline]
@@ -175,29 +197,20 @@ pub fn correl_hl(input: &CorrelHlInput) -> Result<CorrelHlOutput, CorrelHlError>
 	correl_hl_with_kernel(input, Kernel::Auto)
 }
 
-pub fn correl_hl_with_kernel(input: &CorrelHlInput, kernel: Kernel) -> Result<CorrelHlOutput, CorrelHlError> {
-	let (high, low) = match &input.data {
-		CorrelHlData::Candles { candles } => {
-			let high = candles
-				.select_candle_field("high")
-				.map_err(|_e| CorrelHlError::EmptyData)?;
-			let low = candles
-				.select_candle_field("low")
-				.map_err(|_e| CorrelHlError::EmptyData)?;
-			(high, low)
-		}
-		CorrelHlData::Slices { high, low } => (*high, *low),
-	};
-
+#[inline(always)]
+fn correl_hl_prepare<'a>(
+	input: &'a CorrelHlInput,
+	kernel: Kernel,
+) -> Result<(&'a [f64], &'a [f64], usize, usize, Kernel), CorrelHlError> {
+	let (high, low) = input.as_refs()?;
 	if high.is_empty() || low.is_empty() {
 		return Err(CorrelHlError::EmptyData);
 	}
-
 	if high.len() != low.len() {
 		return Err(CorrelHlError::DataLengthMismatch);
 	}
 
-	let period = input.get_period();
+	let period = input.period_or_default();
 	if period == 0 || period > high.len() {
 		return Err(CorrelHlError::InvalidPeriod {
 			period,
@@ -205,119 +218,70 @@ pub fn correl_hl_with_kernel(input: &CorrelHlInput, kernel: Kernel) -> Result<Co
 		});
 	}
 
-	let first_valid_idx = match high
+	let first = high
 		.iter()
 		.zip(low.iter())
 		.position(|(&h, &l)| !h.is_nan() && !l.is_nan())
-	{
-		Some(idx) => idx,
-		None => return Err(CorrelHlError::AllValuesNaN),
-	};
+		.ok_or(CorrelHlError::AllValuesNaN)?;
 
-	if (high.len() - first_valid_idx) < period {
+	if high.len() - first < period {
 		return Err(CorrelHlError::NotEnoughValidData {
 			needed: period,
-			valid: high.len() - first_valid_idx,
+			valid: high.len() - first,
 		});
 	}
 
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
-		other => other,
+		k => k,
 	};
+	Ok((high, low, period, first, chosen))
+}
 
-	let warmup_period = first_valid_idx + period - 1;
-	let mut out = alloc_with_nan_prefix(high.len(), warmup_period);
+#[inline(always)]
+fn correl_hl_compute_into(
+	high: &[f64],
+	low: &[f64],
+	period: usize,
+	first: usize,
+	kern: Kernel,
+	out: &mut [f64],
+) {
 	unsafe {
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => correl_hl_scalar(high, low, period, first_valid_idx, &mut out),
+		match kern {
+			Kernel::Scalar | Kernel::ScalarBatch => correl_hl_scalar(high, low, period, first, out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => correl_hl_avx2(high, low, period, first_valid_idx, &mut out),
+			Kernel::Avx2 | Kernel::Avx2Batch => correl_hl_avx2(high, low, period, first, out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => correl_hl_avx512(high, low, period, first_valid_idx, &mut out),
-			_ => unreachable!(),
+			Kernel::Avx512 | Kernel::Avx512Batch => correl_hl_avx512(high, low, period, first, out),
+			_ => correl_hl_scalar(high, low, period, first, out),
 		}
 	}
+}
+
+pub fn correl_hl_with_kernel(input: &CorrelHlInput, kernel: Kernel) -> Result<CorrelHlOutput, CorrelHlError> {
+	let (high, low, period, first, chosen) = correl_hl_prepare(input, kernel)?;
+	let warm = first + period - 1;
+	let mut out = alloc_with_nan_prefix(high.len(), warm);
+	correl_hl_compute_into(high, low, period, first, chosen, &mut out);
 	Ok(CorrelHlOutput { values: out })
 }
 
 /// Write correlation coefficient directly to output slice - no allocations
 #[inline]
-pub fn correl_hl_into_slice(dst: &mut [f64], input: &CorrelHlInput, kern: Kernel) -> Result<(), CorrelHlError> {
-	let (high, low) = match &input.data {
-		CorrelHlData::Candles { candles } => {
-			let high = candles
-				.select_candle_field("high")
-				.map_err(|_e| CorrelHlError::EmptyData)?;
-			let low = candles
-				.select_candle_field("low")
-				.map_err(|_e| CorrelHlError::EmptyData)?;
-			(high, low)
-		}
-		CorrelHlData::Slices { high, low } => (*high, *low),
-	};
-
-	if high.is_empty() || low.is_empty() {
-		return Err(CorrelHlError::EmptyData);
-	}
-
-	if high.len() != low.len() {
-		return Err(CorrelHlError::DataLengthMismatch);
-	}
-
+pub fn correl_hl_into_slice(dst: &mut [f64], input: &CorrelHlInput, kernel: Kernel) -> Result<(), CorrelHlError> {
+	let (high, low, period, first, chosen) = correl_hl_prepare(input, kernel)?;
 	if dst.len() != high.len() {
-		return Err(CorrelHlError::InvalidPeriod {
-			period: dst.len(),
-			data_len: high.len(),
+		return Err(CorrelHlError::OutputLengthMismatch {
+			dst: dst.len(),
+			src: high.len(),
 		});
 	}
-
-	let period = input.get_period();
-	if period == 0 || period > high.len() {
-		return Err(CorrelHlError::InvalidPeriod {
-			period,
-			data_len: high.len(),
-		});
-	}
-
-	let first_valid_idx = match high
-		.iter()
-		.zip(low.iter())
-		.position(|(&h, &l)| !h.is_nan() && !l.is_nan())
-	{
-		Some(idx) => idx,
-		None => return Err(CorrelHlError::AllValuesNaN),
-	};
-
-	if (high.len() - first_valid_idx) < period {
-		return Err(CorrelHlError::NotEnoughValidData {
-			needed: period,
-			valid: high.len() - first_valid_idx,
-		});
-	}
-
-	let chosen = match kern {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
-
-	// Fill warmup period with NaN
-	let warmup_period = first_valid_idx + period - 1;
-	for v in &mut dst[..warmup_period] {
+	correl_hl_compute_into(high, low, period, first, chosen, dst);
+	let warm = first + period - 1;
+	for v in &mut dst[..warm] {
 		*v = f64::NAN;
 	}
-
-	unsafe {
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => correl_hl_scalar(high, low, period, first_valid_idx, dst),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => correl_hl_avx2(high, low, period, first_valid_idx, dst),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => correl_hl_avx512(high, low, period, first_valid_idx, dst),
-			_ => unreachable!(),
-		}
-	}
-
 	Ok(())
 }
 
@@ -427,6 +391,13 @@ pub struct CorrelHlStream {
 	buffer_low: Vec<f64>,
 	head: usize,
 	filled: bool,
+	// Running sums for O(1) correlation calculation
+	sum_h: f64,
+	sum_h2: f64,
+	sum_l: f64,
+	sum_l2: f64,
+	sum_hl: f64,
+	count: usize,  // Count of valid values in buffer
 }
 
 impl CorrelHlStream {
@@ -454,48 +425,64 @@ impl CorrelHlStream {
 			buffer_low,
 			head: 0,
 			filled: false,
+			sum_h: 0.0,
+			sum_h2: 0.0,
+			sum_l: 0.0,
+			sum_l2: 0.0,
+			sum_hl: 0.0,
+			count: 0,
 		})
 	}
 
 	#[inline(always)]
 	pub fn update(&mut self, h: f64, l: f64) -> Option<f64> {
+		// Get the old values that will be replaced
+		let old_h = self.buffer_high[self.head];
+		let old_l = self.buffer_low[self.head];
+		
+		// Update running sums by removing old values (if valid)
+		if !old_h.is_nan() && !old_l.is_nan() {
+			self.sum_h -= old_h;
+			self.sum_h2 -= old_h * old_h;
+			self.sum_l -= old_l;
+			self.sum_l2 -= old_l * old_l;
+			self.sum_hl -= old_h * old_l;
+		} else if self.count < self.period {
+			// Still in warmup phase
+			self.count += 1;
+		}
+		
+		// Store new values
 		self.buffer_high[self.head] = h;
 		self.buffer_low[self.head] = l;
+		
+		// Add new values to running sums
+		self.sum_h += h;
+		self.sum_h2 += h * h;
+		self.sum_l += l;
+		self.sum_l2 += l * l;
+		self.sum_hl += h * l;
+		
 		self.head = (self.head + 1) % self.period;
 
 		if !self.filled && self.head == 0 {
 			self.filled = true;
 		}
-		if !self.filled {
+		
+		if !self.filled || self.count < self.period {
 			return None;
 		}
-		Some(self.dot_ring())
-	}
-
-	#[inline(always)]
-	fn dot_ring(&self) -> f64 {
-		let mut sum_h = 0.0;
-		let mut sum_h2 = 0.0;
-		let mut sum_l = 0.0;
-		let mut sum_l2 = 0.0;
-		let mut sum_hl = 0.0;
-		for i in 0..self.period {
-			let h = self.buffer_high[(self.head + i) % self.period];
-			let l = self.buffer_low[(self.head + i) % self.period];
-			sum_h += h;
-			sum_h2 += h * h;
-			sum_l += l;
-			sum_l2 += l * l;
-			sum_hl += h * l;
-		}
+		
+		// Calculate correlation using running sums - O(1)
 		let pf = self.period as f64;
-		let cov = sum_hl - (sum_h * sum_l / pf);
-		let var_h = sum_h2 - (sum_h * sum_h / pf);
-		let var_l = sum_l2 - (sum_l * sum_l / pf);
+		let cov = self.sum_hl - (self.sum_h * self.sum_l / pf);
+		let var_h = self.sum_h2 - (self.sum_h * self.sum_h / pf);
+		let var_l = self.sum_l2 - (self.sum_l * self.sum_l / pf);
+		
 		if var_h <= 0.0 || var_l <= 0.0 {
-			0.0
+			Some(0.0)
 		} else {
-			cov / (var_h.sqrt() * var_l.sqrt())
+			Some(cov / (var_h.sqrt() * var_l.sqrt()))
 		}
 	}
 }
@@ -767,44 +754,42 @@ fn correl_hl_batch_inner_into(
 	let rows = combos.len();
 	let cols = high.len();
 
-	// Initialize warmup periods
+	// Warm prefixes with helper, zero-copy, debug-poison friendly.
 	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
-	for (row, &warmup_period) in warm.iter().enumerate() {
-		let row_start = row * cols;
-		for i in 0..warmup_period {
-			out[row_start + i] = f64::NAN;
-		}
-	}
+	let out_mu: &mut [MaybeUninit<f64>] =
+		unsafe { core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len()) };
+	init_matrix_prefixes(out_mu, cols, &warm);
 
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+	// Row compute writes valid cells; no need to touch warm prefix again.
+	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| {
 		let period = combos[row].period.unwrap();
+		let dst: &mut [f64] = unsafe {
+			core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len())
+		};
 		match kern {
-			Kernel::Scalar => correl_hl_row_scalar(high, low, first, period, out_row),
+			Kernel::Scalar => unsafe { correl_hl_row_scalar(high, low, first, period, dst) },
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => correl_hl_row_avx2(high, low, first, period, out_row),
+			Kernel::Avx2 => unsafe { correl_hl_row_avx2(high, low, first, period, dst) },
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => correl_hl_row_avx512(high, low, first, period, out_row),
-			_ => unreachable!(),
+			Kernel::Avx512 => unsafe { correl_hl_row_avx512(high, low, first, period, dst) },
+			_ => unsafe { correl_hl_row_scalar(high, low, first, period, dst) },
 		}
 	};
 
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			out.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
+			out_mu.par_chunks_mut(cols).enumerate().for_each(|(r, s)| do_row(r, s));
 		}
-
 		#[cfg(target_arch = "wasm32")]
 		{
-			for (row, slice) in out.chunks_mut(cols).enumerate() {
-				do_row(row, slice);
+			for (r, s) in out_mu.chunks_mut(cols).enumerate() {
+				do_row(r, s);
 			}
 		}
 	} else {
-		for (row, slice) in out.chunks_mut(cols).enumerate() {
-			do_row(row, slice);
+		for (r, s) in out_mu.chunks_mut(cols).enumerate() {
+			do_row(r, s);
 		}
 	}
 

@@ -104,6 +104,25 @@ test('EMA very small dataset', () => {
     }, "Expected error for insufficient data");
 });
 
+test('EMA empty input', () => {
+    // Test EMA fails with empty input - mirrors check_ema_empty_input
+    const empty = new Float64Array([]);
+    
+    assert.throws(() => {
+        wasm.ema_js(empty, 9);
+    }, /Input data slice is empty|Empty input/);
+});
+
+test('EMA all NaN input', () => {
+    // Test EMA fails with all NaN values
+    const allNaN = new Float64Array(100);
+    allNaN.fill(NaN);
+    
+    assert.throws(() => {
+        wasm.ema_js(allNaN, 9);
+    }, /All values are NaN/);
+});
+
 test('EMA NaN handling', () => {
     // Test EMA handles NaN values correctly - mirrors check_ema_nan_handling
     const close = new Float64Array(testData.close);
@@ -116,6 +135,22 @@ test('EMA NaN handling', () => {
         for (let i = 30; i < result.length; i++) {
             assert.ok(!isNaN(result[i]), `Found unexpected NaN at index ${i}`);
         }
+    }
+});
+
+test('EMA warmup period', () => {
+    // Test EMA warmup period behavior
+    const simpleData = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    const period = 5;
+    
+    const result = wasm.ema_js(simpleData, period);
+    
+    // EMA starts from first value, so first value should NOT be NaN
+    assert.ok(!isNaN(result[0]), "EMA should start from first value");
+    
+    // All values should be finite for EMA (unlike SMA which has NaN warmup)
+    for (let i = 0; i < result.length; i++) {
+        assert.ok(isFinite(result[i]), `EMA value at index ${i} should be finite`);
     }
 });
 
@@ -299,6 +334,54 @@ test('EMA batch edge cases', () => {
     });
     assert.strictEqual(largeSweep.rows, 1); // Should only have start value
     assert.strictEqual(largeSweep.combos[0].period, 3);
+});
+
+test('EMA batch consistency', () => {
+    // Test that batch results match individual calculations
+    const close = new Float64Array(testData.close.slice(0, 100)); // Use smaller dataset
+    
+    const batchResult = wasm.ema_batch(close, {
+        period_range: [10, 30, 10]  // periods: 10, 20, 30
+    });
+    
+    const expectedPeriods = [10, 20, 30];
+    assert.strictEqual(batchResult.rows, expectedPeriods.length);
+    
+    // Verify each batch row matches individual calculation
+    for (let i = 0; i < expectedPeriods.length; i++) {
+        const period = expectedPeriods[i];
+        const singleResult = wasm.ema_js(close, period);
+        
+        // Extract row from batch
+        const rowStart = i * close.length;
+        const rowEnd = rowStart + close.length;
+        const batchRow = batchResult.values.slice(rowStart, rowEnd);
+        
+        // Compare values
+        assertArrayClose(batchRow, singleResult, 1e-10, 
+                        `Batch row for period ${period} doesn't match single calculation`);
+    }
+});
+
+test('EMA batch multiple periods', () => {
+    // Test comprehensive batch with multiple periods
+    const close = new Float64Array(testData.close.slice(0, 50));
+    
+    const batchResult = wasm.ema_batch(close, {
+        period_range: [5, 15, 2]  // periods: 5, 7, 9, 11, 13, 15
+    });
+    
+    const expectedPeriods = [5, 7, 9, 11, 13, 15];
+    assert.strictEqual(batchResult.rows, expectedPeriods.length);
+    assert.strictEqual(batchResult.cols, close.length);
+    
+    // Verify all expected periods are in combos
+    for (let i = 0; i < expectedPeriods.length; i++) {
+        assert.strictEqual(batchResult.combos[i].period, expectedPeriods[i]);
+    }
+    
+    // Verify dimensions
+    assert.strictEqual(batchResult.values.length, expectedPeriods.length * close.length);
 });
 
 test('EMA zero-copy error handling', () => {

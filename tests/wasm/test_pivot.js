@@ -75,10 +75,10 @@ test('Pivot - accuracy test (Camarilla)', () => {
     const r4 = result.slice(0, len);
     
     // Check against expected R4 values for Camarilla
-    const expected = EXPECTED_OUTPUTS.pivot;
     const last5_r4 = r4.slice(-5);
+    const expected_r4 = [59466.5, 59357.55, 59243.6, 59334.85, 59170.35];
     
-    assertArrayClose(last5_r4, expected.last_5_r4, 1e-1, "Camarilla R4 values");
+    assertArrayClose(last5_r4, expected_r4, 1e-1, "Camarilla R4 values");
 });
 
 test('Pivot - all calculation modes', () => {
@@ -149,10 +149,10 @@ test('Pivot - batch processing', () => {
     
     assert(result.values, 'Batch result should have values');
     assert(result.modes, 'Batch result should have modes');
-    assert.strictEqual(result.rows, 5, 'Should have 5 mode combinations');
+    assert.strictEqual(result.rows, 45, 'Should have 45 rows (5 modes * 9 levels)');
     assert.strictEqual(result.cols, close.length, 'Should match input length');
-    assert.strictEqual(result.n_levels, 9, 'Should always have 9 levels');
-    assert.strictEqual(result.values.length, result.rows * result.cols * 9, 'Values array size should match');
+    assert.strictEqual(result.modes.length, 5, 'Should have 5 modes');
+    assert.strictEqual(result.values.length, result.rows * result.cols, 'Values array size should match');
 });
 
 test('Pivot - memory allocation', () => {
@@ -175,7 +175,11 @@ test('Pivot - fast API (pivot_into)', () => {
     const open = new Float64Array([99, 100, 102, 103, 102]);
     const len = high.length;
     
-    // Allocate output arrays
+    // Allocate input and output arrays in WASM memory
+    const high_ptr = wasm.pivot_alloc(len);
+    const low_ptr = wasm.pivot_alloc(len);
+    const close_ptr = wasm.pivot_alloc(len);
+    const open_ptr = wasm.pivot_alloc(len);
     const r4_ptr = wasm.pivot_alloc(len);
     const r3_ptr = wasm.pivot_alloc(len);
     const r2_ptr = wasm.pivot_alloc(len);
@@ -187,18 +191,38 @@ test('Pivot - fast API (pivot_into)', () => {
     const s4_ptr = wasm.pivot_alloc(len);
     
     try {
-        // Call the fast API
+        // Copy input data into WASM memory
+        const memory = new Float64Array(wasm.__wasm.memory.buffer);
+        const highStart = high_ptr / 8;
+        const lowStart = low_ptr / 8;
+        const closeStart = close_ptr / 8;
+        const openStart = open_ptr / 8;
+        memory.set(high, highStart);
+        memory.set(low, lowStart);
+        memory.set(close, closeStart);
+        memory.set(open, openStart);
+        
+        // Call the fast API with pointers
         wasm.pivot_into(
-            high.buffer, low.buffer, close.buffer, open.buffer,
+            high_ptr, low_ptr, close_ptr, open_ptr,
             r4_ptr, r3_ptr, r2_ptr, r1_ptr, pp_ptr, s1_ptr, s2_ptr, s3_ptr, s4_ptr,
             len, 3  // Camarilla mode
         );
         
-        // Note: We can't easily verify the results without additional WASM functions
-        // to read memory, but at least verify it doesn't throw
+        // Read results (recreate view in case memory grew)
+        const memoryAfter = new Float64Array(wasm.__wasm.memory.buffer);
+        const ppStart = pp_ptr / 8;
+        const pp = memoryAfter.slice(ppStart, ppStart + len);
+        
+        // Verify pivot point has valid values
+        assert(!isNaN(pp[0]), 'PP should have valid values from start for Camarilla');
         
     } finally {
-        // Clean up
+        // Clean up all allocated memory
+        wasm.pivot_free(high_ptr, len);
+        wasm.pivot_free(low_ptr, len);
+        wasm.pivot_free(close_ptr, len);
+        wasm.pivot_free(open_ptr, len);
         wasm.pivot_free(r4_ptr, len);
         wasm.pivot_free(r3_ptr, len);
         wasm.pivot_free(r2_ptr, len);

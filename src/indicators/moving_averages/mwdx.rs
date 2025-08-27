@@ -211,7 +211,7 @@ fn mwdx_prepare<'a>(
 	}
 	let fac = 2.0 / (val2 + 1.0);
 
-	let warm = data.iter().position(|x| !x.is_nan()).map(|i| i + 1).unwrap_or(len);
+	let warm = data.iter().position(|x| !x.is_nan()).unwrap_or(len);
 
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
@@ -269,11 +269,18 @@ pub fn mwdx_into_slice(dst: &mut [f64], input: &MwdxInput, kern: Kernel) -> Resu
 #[inline]
 pub fn mwdx_scalar(data: &[f64], fac: f64, out: &mut [f64]) {
 	let n = data.len();
-	if n == 0 {
+	if n == 0 { return; }
+	let first = data.iter().position(|x| !x.is_nan()).unwrap_or(n);
+	if first == n { 
+		// all NaNs: ensure output is NaN-only
+		for j in 0..n { out[j] = f64::NAN; }
 		return;
 	}
-	out[0] = data[0];
-	for i in 1..n {
+	// prefix = NaN (only the warmup)
+	for j in 0..first { out[j] = f64::NAN; }
+	// start from the first real value
+	out[first] = data[first];
+	for i in (first + 1)..n {
 		out[i] = fac * data[i] + (1.0 - fac) * out[i - 1];
 	}
 }
@@ -492,8 +499,8 @@ fn mwdx_batch_inner(
 
 	let rows = combos.len();
 	let cols = data.len();
-	let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(cols);
-	let warm_prefixes = vec![first_valid + 1; rows]; // rows × constant
+	let first = data.iter().position(|x| !x.is_nan()).unwrap_or(cols);
+	let warm_prefixes = vec![first; rows]; // rows × constant
 
 	// 2.  Allocate the big rows × cols matrix *uninitialised* …
 	let mut raw = make_uninit_matrix(rows, cols);
@@ -521,11 +528,11 @@ fn mwdx_batch_inner(
 		let out_row = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
 		match kern {
-			Kernel::Scalar => mwdx_row_scalar(data, fac, out_row),
+			Kernel::Scalar => mwdx_row_scalar(data, fac, first, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => mwdx_row_avx2(data, fac, out_row),
+			Kernel::Avx2 => mwdx_row_avx2(data, fac, first, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => mwdx_row_avx512(data, fac, out_row),
+			Kernel::Avx512 => mwdx_row_avx512(data, fac, first, out_row),
 			_ => unreachable!(),
 		}
 	};
@@ -553,8 +560,11 @@ fn mwdx_batch_inner(
 	}
 
 	// ---------------------------------------------------------------------------
-	// 5.  Every element is now initialised – transmogrify to Vec<f64>
-	let values: Vec<f64> = unsafe { std::mem::transmute::<Vec<MaybeUninit<f64>>, Vec<f64>>(raw) };
+	// 5.  Every element is now initialised – convert to Vec<f64> using ManuallyDrop pattern
+	let mut guard = core::mem::ManuallyDrop::new(raw);
+	let values = unsafe {
+		Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, guard.len(), guard.capacity())
+	};
 
 	Ok(MwdxBatchOutput {
 		values,
@@ -594,8 +604,8 @@ fn mwdx_batch_inner_into(
 
 	let rows = combos.len();
 	let cols = data.len();
-	let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(cols);
-	let warm_prefixes = vec![first_valid + 1; rows];
+	let first = data.iter().position(|x| !x.is_nan()).unwrap_or(cols);
+	let warm_prefixes = vec![first; rows];
 
 	// SAFETY: We're reinterpreting the output slice as MaybeUninit
 	let out_uninit = unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len()) };
@@ -621,11 +631,11 @@ fn mwdx_batch_inner_into(
 		let out_row = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
 		match kern {
-			Kernel::Scalar => mwdx_row_scalar(data, fac, out_row),
+			Kernel::Scalar => mwdx_row_scalar(data, fac, first, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => mwdx_row_avx2(data, fac, out_row),
+			Kernel::Avx2 => mwdx_row_avx2(data, fac, first, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => mwdx_row_avx512(data, fac, out_row),
+			Kernel::Avx512 => mwdx_row_avx512(data, fac, first, out_row),
 			_ => unreachable!(),
 		}
 	};
@@ -655,13 +665,11 @@ fn mwdx_batch_inner_into(
 }
 
 #[inline(always)]
-unsafe fn mwdx_row_scalar(data: &[f64], fac: f64, out: &mut [f64]) {
+unsafe fn mwdx_row_scalar(data: &[f64], fac: f64, first: usize, out: &mut [f64]) {
 	let n = data.len();
-	if n == 0 {
-		return;
-	}
-	out[0] = data[0];
-	for i in 1..n {
+	if n == 0 { return; }
+	out[first] = data[first];
+	for i in (first + 1)..n {
 		out[i] = fac * data[i] + (1.0 - fac) * out[i - 1];
 	}
 }
@@ -669,19 +677,15 @@ unsafe fn mwdx_row_scalar(data: &[f64], fac: f64, out: &mut [f64]) {
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 #[target_feature(enable = "avx2,fma")]
-unsafe fn mwdx_row_avx2(data: &[f64], fac: f64, out: &mut [f64]) {
-	// For batch row processing, the dependency chain still exists
-	// so we fall back to scalar for now
-	mwdx_row_scalar(data, fac, out);
+unsafe fn mwdx_row_avx2(data: &[f64], fac: f64, first: usize, out: &mut [f64]) {
+	mwdx_row_scalar(data, fac, first, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 #[target_feature(enable = "avx512f")]
-pub unsafe fn mwdx_row_avx512(data: &[f64], fac: f64, out: &mut [f64]) {
-	// MWDX has sequential dependencies, so no SIMD benefit
-	// Fall back to scalar implementation
-	mwdx_row_scalar(data, fac, out);
+pub unsafe fn mwdx_row_avx512(data: &[f64], fac: f64, first: usize, out: &mut [f64]) {
+	mwdx_row_scalar(data, fac, first, out);
 }
 
 #[inline(always)]
@@ -1076,6 +1080,65 @@ mod tests {
 			.unwrap();
 
 		Ok(())
+	}
+
+	#[test]
+	fn test_leading_nans_single_series() {
+		// Test case with leading NaNs to verify they don't contaminate the series
+		let data_with_nans = vec![f64::NAN, f64::NAN, f64::NAN, 1.0, 2.0, 3.0, 4.0, 5.0];
+		let params = MwdxParams { factor: Some(0.5) };
+		let input = MwdxInput::from_slice(&data_with_nans, params);
+		
+		let result = mwdx(&input).expect("MWDX should succeed");
+		
+		// Check that first 3 values are NaN
+		for i in 0..3 {
+			assert!(result.values[i].is_nan(), "Index {} should be NaN but got {}", i, result.values[i]);
+		}
+		
+		// Check that values starting from index 3 are not NaN and are computed correctly
+		assert!(!result.values[3].is_nan(), "Index 3 should not be NaN");
+		assert_eq!(result.values[3], 1.0, "First non-NaN should be 1.0");
+		
+		// Verify the computation for subsequent values
+		// With factor=0.5, fac=0.5, so: out[i] = 0.5 * data[i] + 0.5 * out[i-1]
+		let expected_4 = 0.5 * 2.0 + 0.5 * 1.0; // = 1.5
+		let expected_5 = 0.5 * 3.0 + 0.5 * 1.5; // = 2.25
+		
+		assert!((result.values[4] - expected_4).abs() < 1e-10, "Index 4 mismatch");
+		assert!((result.values[5] - expected_5).abs() < 1e-10, "Index 5 mismatch");
+	}
+
+	#[test]
+	fn test_leading_nans_batch() {
+		// Test batch processing with leading NaNs
+		let data_with_nans = vec![f64::NAN, f64::NAN, 10.0, 20.0, 30.0, 40.0];
+		let sweep = MwdxBatchRange {
+			factor: (0.3, 0.5, 0.2),
+		};
+		
+		let result = mwdx_batch_slice(&data_with_nans, &sweep, Kernel::Scalar)
+			.expect("Batch should succeed");
+		
+		// Check each row in the batch
+		for row in 0..result.rows {
+			let row_start = row * result.cols;
+			let row_values = &result.values[row_start..row_start + result.cols];
+			
+			// First 2 values should be NaN
+			for i in 0..2 {
+				assert!(row_values[i].is_nan(), 
+					"Row {} index {} should be NaN", row, i);
+			}
+			
+			// Value at index 2 should be 10.0 (first non-NaN)
+			assert_eq!(row_values[2], 10.0, 
+				"Row {} index 2 should be 10.0", row);
+			
+			// Subsequent values should be computed
+			assert!(!row_values[3].is_nan(), 
+				"Row {} index 3 should not be NaN", row);
+		}
 	}
 
 	generate_all_mwdx_tests!(

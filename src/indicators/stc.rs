@@ -40,6 +40,7 @@ use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
+use core::mem::MaybeUninit;
 use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
@@ -267,18 +268,18 @@ pub fn stc(input: &StcInput) -> Result<StcOutput, StcError> {
 
 pub fn stc_with_kernel(input: &StcInput, kernel: Kernel) -> Result<StcOutput, StcError> {
 	let data: &[f64] = input.as_ref();
-
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(StcError::AllValuesNaN)?;
 	let len = data.len();
+	if len == 0 {
+		return Err(StcError::EmptyData);
+	}
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(StcError::AllValuesNaN)?;
 
 	let fast_period = input.get_fast_period();
 	let slow_period = input.get_slow_period();
 	let k_period = input.get_k_period();
 	let d_period = input.get_d_period();
 	let needed = fast_period.max(slow_period).max(k_period).max(d_period);
-	if len == 0 {
-		return Err(StcError::EmptyData);
-	}
+	
 	if (len - first) < needed {
 		return Err(StcError::NotEnoughValidData {
 			needed,
@@ -291,7 +292,8 @@ pub fn stc_with_kernel(input: &StcInput, kernel: Kernel) -> Result<StcOutput, St
 		other => other,
 	};
 
-	let mut output = alloc_with_nan_prefix(len, needed);
+	let warmup = first + needed - 1;
+	let mut output = alloc_with_nan_prefix(len, warmup);
 
 	unsafe {
 		match chosen {
@@ -340,26 +342,21 @@ pub fn stc_with_kernel(input: &StcInput, kernel: Kernel) -> Result<StcOutput, St
 #[inline]
 pub fn stc_into_slice(dst: &mut [f64], input: &StcInput, kern: Kernel) -> Result<(), StcError> {
 	let data: &[f64] = input.as_ref();
-
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(StcError::AllValuesNaN)?;
 	let len = data.len();
-
-	if dst.len() != len {
-		return Err(StcError::NotEnoughValidData {
-			needed: len,
-			valid: dst.len(),
-		});
-	}
-
-	let fast_period = input.get_fast_period();
-	let slow_period = input.get_slow_period();
-	let k_period = input.get_k_period();
-	let d_period = input.get_d_period();
-	let needed = fast_period.max(slow_period).max(k_period).max(d_period);
-
 	if len == 0 {
 		return Err(StcError::EmptyData);
 	}
+
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(StcError::AllValuesNaN)?;
+	if dst.len() != len {
+		return Err(StcError::Internal(format!("dst len {} != src len {}", dst.len(), len)));
+	}
+
+	let needed = input.get_fast_period()
+		.max(input.get_slow_period())
+		.max(input.get_k_period())
+		.max(input.get_d_period());
+
 	if (len - first) < needed {
 		return Err(StcError::NotEnoughValidData {
 			needed,
@@ -367,59 +364,57 @@ pub fn stc_into_slice(dst: &mut [f64], input: &StcInput, kern: Kernel) -> Result
 		});
 	}
 
+	// correct warmup
+	let warmup_end = first + needed - 1;
+	for v in &mut dst[..warmup_end.min(len)] {
+		*v = f64::NAN;
+	}
+
 	let chosen = match kern {
 		Kernel::Auto => detect_best_kernel(),
 		other => other,
 	};
 
-	// Fill warmup with NaN
-	for v in &mut dst[..needed] {
-		*v = f64::NAN;
-	}
-
-	// Get output from kernel functions and copy to dst
-	let result = unsafe {
+	unsafe {
 		match chosen {
 			Kernel::Scalar | Kernel::ScalarBatch => stc_scalar(
 				data,
-				fast_period,
-				slow_period,
-				k_period,
-				d_period,
+				input.get_fast_period(),
+				input.get_slow_period(),
+				input.get_k_period(),
+				input.get_d_period(),
 				input.get_fast_ma_type(),
 				input.get_slow_ma_type(),
 				first,
 				dst,
-			),
+			)?,
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx2 | Kernel::Avx2Batch => stc_avx2(
 				data,
-				fast_period,
-				slow_period,
-				k_period,
-				d_period,
+				input.get_fast_period(),
+				input.get_slow_period(),
+				input.get_k_period(),
+				input.get_d_period(),
 				input.get_fast_ma_type(),
 				input.get_slow_ma_type(),
 				first,
 				dst,
-			),
+			)?,
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 | Kernel::Avx512Batch => stc_avx512(
 				data,
-				fast_period,
-				slow_period,
-				k_period,
-				d_period,
+				input.get_fast_period(),
+				input.get_slow_period(),
+				input.get_k_period(),
+				input.get_d_period(),
 				input.get_fast_ma_type(),
 				input.get_slow_ma_type(),
 				first,
 				dst,
-			),
+			)?,
 			_ => unreachable!(),
 		}
-	}?;
-
-	// The kernel functions already wrote to dst, so we just need to return Ok
+	}
 	Ok(())
 }
 
@@ -784,6 +779,8 @@ fn stc_batch_inner(
 			Kernel::Avx2 => stc_row_avx2(data, first, prm, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 => stc_row_avx512(data, first, prm, out_row),
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx512 => stc_row_scalar(data, first, prm, out_row),
 			_ => unreachable!(),
 		}
 	};
@@ -825,11 +822,6 @@ fn stc_batch_inner(
 
 #[inline(always)]
 pub unsafe fn stc_row_scalar(data: &[f64], first: usize, prm: &StcParams, out: &mut [f64]) -> Result<(), StcError> {
-	let warmup = prm.fast_period.unwrap()
-		.max(prm.slow_period.unwrap())
-		.max(prm.k_period.unwrap())
-		.max(prm.d_period.unwrap());
-	let mut tmp = alloc_with_nan_prefix(data.len(), warmup);
 	stc_scalar(
 		data,
 		prm.fast_period.unwrap(),
@@ -839,10 +831,8 @@ pub unsafe fn stc_row_scalar(data: &[f64], first: usize, prm: &StcParams, out: &
 		prm.fast_ma_type.as_deref().unwrap_or("ema"),
 		prm.slow_ma_type.as_deref().unwrap_or("ema"),
 		first,
-		&mut tmp,
-	)?;
-	out.copy_from_slice(&tmp);
-	Ok(())
+		out,
+	)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -937,7 +927,10 @@ impl StcStream {
 		}
 		
 		// Need enough data for the largest period
-		let min_data = self.fast_period.max(self.slow_period).max(self.k_period);
+		let min_data = self.fast_period
+			.max(self.slow_period)
+			.max(self.k_period)
+			.max(self.d_period);
 		if self.count < min_data {
 			return None;
 		}
@@ -1051,9 +1044,6 @@ pub fn stc_batch_py<'py>(
 	d_period_range: (usize, usize, usize),
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
-	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
-	use pyo3::types::PyDict;
-
 	let slice_in = data.as_slice()?;
 
 	let sweep = StcBatchRange {
@@ -1070,37 +1060,15 @@ pub fn stc_batch_py<'py>(
 	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
 	let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-	// Find first valid index
-	let first = slice_in
-		.iter()
-		.position(|&x| !x.is_nan())
-		.unwrap_or(0);
-	
-	// Calculate warmup periods for each row and initialize NaN prefixes
-	let warmup_periods: Vec<usize> = combos.iter().map(|c| {
-		let slow = c.slow_period.unwrap();
-		let k = c.k_period.unwrap();
-		let d = c.d_period.unwrap();
-		first + slow + k + d - 2
-	}).collect();
-	
-	// Initialize NaN prefixes
-	for (row_idx, &warmup) in warmup_periods.iter().enumerate() {
-		let row_start = row_idx * cols;
-		for col_idx in 0..warmup.min(cols) {
-			slice_out[row_start + col_idx] = f64::NAN;
-		}
-	}
-
 	let kern = validate_kernel(kernel, true)?;
 
 	let combos = py
 		.allow_threads(|| {
-			let kernel = match kern {
+			let k = match kern {
 				Kernel::Auto => detect_best_batch_kernel(),
 				k => k,
 			};
-			let simd = match kernel {
+			let simd = match k {
 				Kernel::Avx512Batch => Kernel::Avx512,
 				Kernel::Avx2Batch => Kernel::Avx2,
 				Kernel::ScalarBatch => Kernel::Scalar,
@@ -1157,9 +1125,105 @@ fn stc_batch_inner_into(
 	parallel: bool,
 	out: &mut [f64],
 ) -> Result<Vec<StcParams>, StcError> {
-	let result = stc_batch_inner(data, sweep, kern, parallel)?;
-	out.copy_from_slice(&result.values);
-	Ok(result.combos)
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(StcError::NotEnoughValidData { needed: 1, valid: 0 });
+	}
+
+	let len = data.len();
+	if len == 0 {
+		return Err(StcError::EmptyData);
+	}
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(StcError::AllValuesNaN)?;
+
+	let max_needed = combos
+		.iter()
+		.map(|c| {
+			c.fast_period
+				.unwrap()
+				.max(c.slow_period.unwrap())
+				.max(c.k_period.unwrap())
+				.max(c.d_period.unwrap())
+		})
+		.max()
+		.unwrap();
+
+	if (len - first) < max_needed {
+		return Err(StcError::NotEnoughValidData {
+			needed: max_needed,
+			valid: len - first,
+		});
+	}
+
+	let rows = combos.len();
+	let cols = len;
+	if out.len() != rows * cols {
+		return Err(StcError::Internal(format!("out len {} != rows*cols {}", out.len(), rows*cols)));
+	}
+
+	// init NaN prefixes on the destination matrix
+	let mut out_mu = unsafe {
+		core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
+	};
+	let warm: Vec<usize> = combos.iter().map(|c| {
+		first + c.fast_period.unwrap()
+			.max(c.slow_period.unwrap())
+			.max(c.k_period.unwrap())
+			.max(c.d_period.unwrap()) - 1
+	}).collect();
+	init_matrix_prefixes(&mut out_mu, cols, &warm);
+
+	let chosen = match kern {
+		Kernel::Auto => detect_best_batch_kernel(),
+		k => k,
+	};
+	let simd = match chosen {
+		Kernel::Avx512Batch => Kernel::Avx512,
+		Kernel::Avx2Batch => Kernel::Avx2,
+		Kernel::ScalarBatch => Kernel::Scalar,
+		Kernel::Avx512 => Kernel::Avx512,
+		Kernel::Avx2 => Kernel::Avx2,
+		Kernel::Scalar => Kernel::Scalar,
+		_ => Kernel::Scalar,
+	};
+
+	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+		match simd {
+			Kernel::Scalar => stc_row_scalar(data, first, &combos[row], out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => stc_row_avx2(data, first, &combos[row], out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => stc_row_avx512(data, first, &combos[row], out_row),
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx512 => stc_row_scalar(data, first, &combos[row], out_row),
+			_ => unreachable!(),
+		}
+	};
+
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			out_mu.par_chunks_mut(cols).enumerate().for_each(|(r, mr)| {
+				// reinterpret row back to f64 for compute
+				let row_slice = unsafe {
+					core::slice::from_raw_parts_mut(mr.as_mut_ptr() as *mut f64, cols)
+				};
+				do_row(r, row_slice).unwrap();
+			});
+		}
+		#[cfg(target_arch = "wasm32")]
+		for (r, mr) in out_mu.chunks_mut(cols).enumerate() {
+			let row_slice = unsafe { core::slice::from_raw_parts_mut(mr.as_mut_ptr() as *mut f64, cols) };
+			do_row(r, row_slice).unwrap();
+		}
+	} else {
+		for (r, mr) in out_mu.chunks_mut(cols).enumerate() {
+			let row_slice = unsafe { core::slice::from_raw_parts_mut(mr.as_mut_ptr() as *mut f64, cols) };
+			do_row(r, row_slice).unwrap();
+		}
+	}
+
+	Ok(combos)
 }
 
 // ============================================

@@ -172,6 +172,10 @@ pub enum FoscError {
 	InvalidPeriod { period: usize, data_len: usize },
 	#[error("fosc: Not enough valid data: needed = {needed}, valid = {valid}")]
 	NotEnoughValidData { needed: usize, valid: usize },
+	#[error("fosc: Output slice wrong length: dst_len = {dst_len}, data_len = {data_len}")]
+	OutputSliceWrongLen { dst_len: usize, data_len: usize },
+	#[error("fosc: Invalid kernel for batch operation")]
+	InvalidKernelForBatch,
 }
 
 // --------- Main Dispatchers ---------
@@ -202,7 +206,8 @@ pub fn fosc_with_kernel(input: &FoscInput, kernel: Kernel) -> Result<FoscOutput,
 		Kernel::Auto => detect_best_kernel(),
 		other => other,
 	};
-	let mut out = alloc_with_nan_prefix(len, period - 1);
+	// FIX: warmup = first + period - 1
+	let mut out = alloc_with_nan_prefix(len, first + period - 1);
 	unsafe {
 		match chosen {
 			Kernel::Scalar | Kernel::ScalarBatch => fosc_scalar(data, period, first, &mut out),
@@ -228,8 +233,8 @@ pub fn fosc_into_slice(dst: &mut [f64], input: &FoscInput, kern: Kernel) -> Resu
 	}
 	
 	if dst.len() != len {
-		return Err(FoscError::InvalidPeriod { 
-			period: dst.len(), 
+		return Err(FoscError::OutputSliceWrongLen { 
+			dst_len: dst.len(), 
 			data_len: len 
 		});
 	}
@@ -352,13 +357,14 @@ pub unsafe fn fosc_avx512_long(data: &[f64], period: usize, first: usize, out: &
 pub struct FoscStream {
 	period: usize,
 	buffer: Vec<f64>,
-	idx: usize,
+	idx: usize,  // Circular buffer index
 	filled: bool,
-	x: f64,
-	x2: f64,
-	y: f64,
-	xy: f64,
+	x: f64,   // Sum of x values (constant for fixed window)
+	x2: f64,  // Sum of x^2 values (constant for fixed window)
+	y: f64,   // Running sum of y values
+	xy: f64,  // Running sum of x*y values
 	tsf: f64,
+	count: usize,  // Number of values added so far
 }
 
 impl FoscStream {
@@ -384,53 +390,75 @@ impl FoscStream {
 			y: 0.0,
 			xy: 0.0,
 			tsf: 0.0,
+			count: 0,
 		})
 	}
 	#[inline(always)]
 	pub fn update(&mut self, value: f64) -> Option<f64> {
-		if self.idx < self.period {
+		// During warmup phase
+		if self.count < self.period {
 			self.buffer[self.idx] = value;
-			self.idx += 1;
-			if self.idx == self.period {
+			
+			// Update running sums
+			self.y += value;
+			self.xy += value * ((self.count + 1) as f64);
+			
+			self.idx = (self.idx + 1) % self.period;
+			self.count += 1;
+			
+			if self.count == self.period {
 				self.filled = true;
 			}
 			return None;
 		}
-		// Simple O(period) recompute (can be optimized, but match scalar logic)
-		for i in 0..self.period {
-			self.buffer[i] = if i == self.period - 1 {
-				value
-			} else {
-				self.buffer[i + 1]
-			};
+		
+		// After warmup - use circular buffer
+		let old_value = self.buffer[self.idx];
+		self.buffer[self.idx] = value;
+		
+		// Update running sums incrementally
+		// For xy, we need to adjust for the circular nature
+		// When we remove old_value, it was at position 1 in the window
+		// When we add new value, it's at position period
+		if !old_value.is_nan() {
+			self.y -= old_value;
+			// Recalculate xy by removing old contribution
+			let mut xy_temp = 0.0;
+			for i in 0..self.period {
+				let buf_idx = (self.idx + i + 1) % self.period;
+				let xi = (i + 1) as f64;
+				xy_temp += self.buffer[buf_idx] * xi;
+			}
+			self.xy = xy_temp;
 		}
+		
+		if !value.is_nan() {
+			self.y += value;
+		}
+		
+		self.idx = (self.idx + 1) % self.period;
+		
 		if !self.filled {
 			return None;
 		}
-		let mut x = 0.0;
-		let mut x2 = 0.0;
-		let mut y = 0.0;
-		let mut xy = 0.0;
-		for i in 0..self.period {
-			let xi = (i + 1) as f64;
-			let v = self.buffer[i];
-			x += xi;
-			x2 += xi * xi;
-			y += v;
-			xy += v * xi;
-		}
+		
+		// Calculate linear regression parameters
 		let p = 1.0 / (self.period as f64);
-		let denom = (self.period as f64) * x2 - x * x;
+		let denom = (self.period as f64) * self.x2 - self.x * self.x;
 		let bd = if denom.abs() < f64::EPSILON { 0.0 } else { 1.0 / denom };
-		let b = (self.period as f64 * xy - x * y) * bd;
-		let a = (y - b * x) * p;
+		let b = (self.period as f64 * self.xy - self.x * self.y) * bd;
+		let a = (self.y - b * self.x) * p;
+		
+		// Time Series Forecast
 		let tsf = a + b * ((self.period + 1) as f64);
-		let v = self.buffer[self.period - 1];
-		let out = if !v.is_nan() && v != 0.0 {
-			100.0 * (v - tsf) / v
+		
+		// Current value is the one we just added
+		let out = if !value.is_nan() && value != 0.0 {
+			100.0 * (value - tsf) / value
 		} else {
 			f64::NAN
 		};
+		
 		Some(out)
 	}
 }
@@ -539,7 +567,7 @@ pub fn fosc_batch_with_kernel(data: &[f64], sweep: &FoscBatchRange, k: Kernel) -
 	let kernel = match k {
 		Kernel::Auto => detect_best_batch_kernel(),
 		other if other.is_batch() => other,
-		_ => return Err(FoscError::InvalidPeriod { period: 0, data_len: 0 }),
+		_ => return Err(FoscError::InvalidKernelForBatch),
 	};
 	let simd = match kernel {
 		Kernel::Avx512Batch => Kernel::Avx512,
@@ -574,17 +602,38 @@ fn fosc_batch_inner(
 	let mut buf_mu = make_uninit_matrix(rows, cols);
 	
 	// Calculate warmup periods for each parameter combination
-	let warmup_periods: Vec<usize> = combos.iter().map(|c| c.period.unwrap_or(5) - 1).collect();
+	// FIX: warmup = first + period - 1 per row
+	let warmup_periods: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap_or(5) - 1).collect();
 	init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
 	
-	// Convert to mutable slice for computation
-	let (prefix, aligned, suffix) = unsafe { buf_mu.as_mut_slice().align_to_mut::<f64>() };
-	assert!(prefix.is_empty() && suffix.is_empty());
-	let values = aligned;
+	// Use ManuallyDrop to prevent double-free (ALMA pattern)
+	let mut guard = core::mem::ManuallyDrop::new(buf_mu);
+	let out_f64: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len())
+	};
+
+	// Compute into the f64 buffer
+	let actual = match kern {
+		Kernel::Auto => detect_best_batch_kernel(),
+		k => k,
+	};
+	let simd = match actual {
+		Kernel::ScalarBatch => Kernel::Scalar,
+		Kernel::Scalar => Kernel::Scalar,
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx2Batch => Kernel::Avx2,
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx2 => Kernel::Avx2,
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx512Batch => Kernel::Avx512,
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx512 => Kernel::Avx512,
+		_ => unreachable!(),
+	};
 
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
-		match kern {
+		match simd {
 			Kernel::Scalar => fosc_row_scalar(data, first, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx2 => fosc_row_avx2(data, first, period, out_row),
@@ -597,7 +646,7 @@ fn fosc_batch_inner(
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			values
+			out_f64
 				.par_chunks_mut(cols)
 				.enumerate()
 				.for_each(|(row, slice)| do_row(row, slice));
@@ -605,29 +654,109 @@ fn fosc_batch_inner(
 
 		#[cfg(target_arch = "wasm32")]
 		{
-			for (row, slice) in values.chunks_mut(cols).enumerate() {
+			for (row, slice) in out_f64.chunks_mut(cols).enumerate() {
 				do_row(row, slice);
 			}
 		}
 	} else {
-		for (row, slice) in values.chunks_mut(cols).enumerate() {
+		for (row, slice) in out_f64.chunks_mut(cols).enumerate() {
 			do_row(row, slice);
 		}
 	}
 
-	// Convert MaybeUninit to Vec<f64>
-	let values_vec = unsafe {
-		let ptr = buf_mu.as_mut_ptr() as *mut f64;
-		Vec::from_raw_parts(ptr, rows * cols, rows * cols)
+	// Reconstitute Vec<f64> without extra copy
+	let values = unsafe {
+		Vec::from_raw_parts(
+			guard.as_mut_ptr() as *mut f64,
+			guard.len(),
+			guard.capacity(),
+		)
 	};
-	std::mem::forget(buf_mu);
 	
 	Ok(FoscBatchOutput {
-		values: values_vec,
+		values,
 		combos,
 		rows,
 		cols,
 	})
+}
+
+#[inline(always)]
+fn fosc_batch_inner_into(
+	data: &[f64],
+	sweep: &FoscBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	out: &mut [f64],
+) -> Result<Vec<FoscParams>, FoscError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(FoscError::InvalidPeriod { period: 0, data_len: 0 });
+	}
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(FoscError::AllValuesNaN)?;
+	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	if data.len() - first < max_p {
+		return Err(FoscError::NotEnoughValidData { needed: max_p, valid: data.len() - first });
+	}
+
+	let cols = data.len();
+
+	// Work with MaybeUninit until fully written, like ALMA
+	let out_uninit: &mut [MaybeUninit<f64>] = unsafe {
+		core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
+	};
+
+	// Use init_matrix_prefixes helper like ALMA
+	let warmup_periods: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
+	init_matrix_prefixes(out_uninit, cols, &warmup_periods);
+
+	let actual = match kern {
+		Kernel::Auto => detect_best_batch_kernel(),
+		k => k,
+	};
+	let simd = match actual {
+		Kernel::ScalarBatch => Kernel::Scalar,
+		Kernel::Scalar => Kernel::Scalar,
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx2Batch => Kernel::Avx2,
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx2 => Kernel::Avx2,
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx512Batch => Kernel::Avx512,
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx512 => Kernel::Avx512,
+		_ => unreachable!(),
+	};
+
+	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
+		let period = combos[row].period.unwrap();
+		// Convert this row's MU slice to f64 slice only for writing
+		let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
+		match simd {
+			Kernel::Scalar => fosc_row_scalar(data, first, period, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => fosc_row_avx2(data, first, period, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => fosc_row_avx512(data, first, period, dst),
+			_ => unreachable!(),
+		}
+		// Warmup NaNs were prewritten by init_matrix_prefixes
+	};
+
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			out_uninit.par_chunks_mut(cols).enumerate().for_each(|(r, sl)| do_row(r, sl));
+		}
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (r, sl) in out_uninit.chunks_mut(cols).enumerate() { do_row(r, sl); }
+		}
+	} else {
+		for (r, sl) in out_uninit.chunks_mut(cols).enumerate() { do_row(r, sl); }
+	}
+
+	Ok(combos)
 }
 
 #[inline(always)]
@@ -699,54 +828,53 @@ pub fn fosc_batch_py<'py>(
 	period_range: (usize, usize, usize),
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
-	let data_slice = data.as_slice()?;
-	let kernel_enum = validate_kernel(kernel, true).map(|k| match k {
-		Kernel::Scalar => Kernel::ScalarBatch,
-		Kernel::Avx2 => Kernel::Avx2Batch,
-		Kernel::Avx512 => Kernel::Avx512Batch,
-		Kernel::Auto => Kernel::Auto,
-		_ => k,
-	})?;
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+	use pyo3::types::PyDict;
 
-	let range = FoscBatchRange { period: period_range };
+	let slice_in = data.as_slice()?; // zero-copy borrow
+	let sweep = FoscBatchRange { period: period_range };
 
-	// Pre-calculate dimensions
-	let combos = expand_grid(&range);
+	// Precompute shape from sweep (no compute yet)
+	let combos = expand_grid(&sweep);
 	let rows = combos.len();
-	let cols = data_slice.len();
+	let cols = slice_in.len();
 
-	// Pre-allocate output array
-	let output_array = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-	let output_slice = unsafe { output_array.as_slice_mut()? };
+	// Preallocate output buffer exposed to Python
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let out_slice = unsafe { out_arr.as_slice_mut()? };
 
-	// Compute directly into the pre-allocated array
-	py.allow_threads(|| {
-		// Copy data_slice to avoid lifetime issues
-		let data_vec = data_slice.to_vec();
-		
-		// Call batch function with a temporary output, then copy
-		let batch_result = fosc_batch_with_kernel(&data_vec, &range, kernel_enum)
-			.map_err(|e| PyErr::new::<PyValueError, _>(e.to_string()))?;
-		
-		// Copy results to pre-allocated array
-		output_slice.copy_from_slice(&batch_result.values);
-		Ok::<FoscBatchOutput, PyErr>(batch_result)
-	})
-	.map(|result| {
-		let dict = PyDict::new(py);
-		dict.set_item("values", output_array)?;
-		
-		// Create combos as list of tuples
-		let combos_tuples: Vec<(usize,)> = result
-			.combos
-			.iter()
-			.map(|p| (p.period.unwrap_or(5),))
-			.collect();
-		dict.set_item("combos", combos_tuples)?;
-		dict.set_item("rows", result.rows)?;
-		dict.set_item("cols", result.cols)?;
-		Ok(dict)
-	})?
+	let kern = validate_kernel(kernel, true)?;
+
+	// Compute directly into the PyArray buffer without copies
+	let combos = py
+		.allow_threads(|| {
+			let batch = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+			let simd = match batch {
+				Kernel::ScalarBatch => Kernel::Scalar,
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+				Kernel::Avx2Batch => Kernel::Avx2,
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+				Kernel::Avx512Batch => Kernel::Avx512,
+				_ => unreachable!(),
+			};
+			fosc_batch_inner_into(slice_in, &sweep, simd, true, out_slice)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	let dict = PyDict::new(py);
+	// reshape to 2D view
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	// ALMA-style metadata arrays
+	dict.set_item(
+		"periods",
+		combos.iter().map(|p| p.period.unwrap_or(5) as u64).collect::<Vec<_>>().into_pyarray(py),
+	)?;
+	dict.set_item("rows", rows)?;
+	dict.set_item("cols", cols)?;
+	Ok(dict)
 }
 
 #[cfg(feature = "python")]
