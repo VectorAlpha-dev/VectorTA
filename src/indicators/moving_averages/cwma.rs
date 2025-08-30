@@ -284,15 +284,14 @@ fn cwma_prepare<'a>(
 		});
 	}
 
-	let mut weights = Vec::with_capacity(period);
+	let mut weights = Vec::with_capacity(period - 1);
 	let mut norm = 0.0;
-	for i in 0..period {
+	for i in 0..period - 1 {
 		let w = ((period - i) as f64).powi(3);
 		weights.push(w);
 		norm += w;
 	}
-	let mut inv_norm = 1.0 / norm;
-	inv_norm = inv_norm * (2.0 - norm * inv_norm);
+	let inv_norm = 1.0 / norm;
 
 	let warm = first + period - 1;
 
@@ -375,7 +374,7 @@ pub unsafe fn cwma_scalar(
 	out: &mut [f64],
 ) {
 	let wlen = weights.len();
-	for i in (first_val + wlen - 1)..data.len() {
+	for i in (first_val + wlen)..data.len() {
 		let mut acc = 0.0;
 		for (k, &w) in weights.iter().enumerate() {
 			acc = data[i - k].mul_add(w, acc);
@@ -395,7 +394,7 @@ pub unsafe fn cwma_scalar(
 	out: &mut [f64],
 ) {
 	let wlen = weights.len();
-	for i in (first_val + wlen - 1)..data.len() {
+	for i in (first_val + wlen)..data.len() {
 		let mut acc = 0.0;
 		for (k, &w) in weights.iter().enumerate() {
 			// Fallback for architectures without mul_add
@@ -420,7 +419,7 @@ pub unsafe fn cwma_avx2(
 	let wlen = weights.len();
 	let chunks = wlen / STEP;
 	let tail = wlen % STEP;
-	let first_out = first_valid + wlen - 1;
+	let first_out = first_valid + wlen;
 
 	for i in first_out..data.len() {
 		let mut acc = _mm256_setzero_pd();
@@ -494,13 +493,13 @@ pub unsafe fn cwma_avx512_short(
 	out: &mut [f64],
 ) {
 	debug_assert!(period <= 32);
-	debug_assert_eq!(weights.len(), period);
+	debug_assert_eq!(weights.len(), period - 1);
 
 	const STEP: usize = 8;
 	let wlen = weights.len();
 	let chunks = wlen / STEP;
 	let tail = wlen % STEP;
-	let first_out = first_valid + wlen - 1;
+	let first_out = first_valid + wlen;
 
 	let mut wv: [__m512d; 4] = [_mm512_setzero_pd(); 4];
 	if chunks >= 1 {
@@ -565,7 +564,7 @@ pub unsafe fn cwma_avx512_long(
 	let wlen = weights.len();
 	let chunks = wlen / STEP;
 	let tail = wlen % STEP;
-	let first_out = first_valid + wlen - 1;
+	let first_out = first_valid + wlen;
 
 	if wlen < 24 {
 		cwma_avx2(data, weights, _period, first_valid, inv_norm, out);
@@ -633,8 +632,8 @@ impl CwmaStream {
 			return Err(CwmaError::InvalidPeriod { period, data_len: 0 });
 		}
 
-		let mut weights = Vec::with_capacity(period);
-		for i in 0..period {
+		let mut weights = Vec::with_capacity(period - 1);
+		for i in 0..period - 1 {
 			weights.push(((period - i) as f64).powi(3));
 		}
 		let inv_norm = 1.0 / weights.iter().sum::<f64>();
@@ -669,7 +668,7 @@ impl CwmaStream {
 		}
 
 		let mut sum = 0.0;
-		for k in 0..self.period {
+		for k in 0..self.period - 1 {
 			let ring_idx = (self.head + self.period - 1 - k) % self.period;
 			sum += self.ring[ring_idx] * self.weights[k];
 		}
@@ -898,13 +897,12 @@ fn cwma_batch_inner_into(
 	for (row, prm) in combos.iter().enumerate() {
 		let period = prm.period.unwrap();
 		let mut norm = 0.0;
-		for i in 0..period {
+		for i in 0..period - 1 {
 			let w = ((period - i) as f64).powi(3);
 			flat_w[row * max_p + i] = w;
 			norm += w;
 		}
-		let mut inv_norm = 1.0 / norm;
-		inv_norm = inv_norm * (2.0 - norm * inv_norm); // Newton-Raphson refinement
+		let inv_norm = 1.0 / norm;
 		inv_norms[row] = inv_norm;
 	}
 
@@ -970,7 +968,8 @@ unsafe fn cwma_row_scalar(
 	out: &mut [f64],
 ) {
 	let wlen = period - 1;
-	for i in (first + wlen)..data.len() {
+	let start_idx = first + wlen;
+	for i in start_idx..data.len().min(out.len()) {
 		let mut sum = 0.0;
 		for k in 0..wlen {
 			let w = *w_ptr.add(k);
@@ -1037,7 +1036,8 @@ unsafe fn cwma_row_avx512_short(
 		None
 	};
 
-	for i in (first + wlen)..data.len() {
+	let start_idx = first + wlen;
+	for i in start_idx..data.len().min(out.len()) {
 		let mut acc = _mm512_setzero_pd();
 
 		if chunks >= 1 && i >= 7 {
@@ -1102,7 +1102,8 @@ unsafe fn cwma_row_avx512_long(
 	let wregs: &[__m512d] =
 		core::slice::from_raw_parts(wregs.as_ptr() as *const __m512d, n_chunks + (tail_len != 0) as usize);
 
-	for i in (first + wlen)..data.len() {
+	let start_idx = first + wlen;
+	for i in start_idx..data.len().min(out.len()) {
 		// ------ window base pointer ------------------------------------------
 		let base_ptr = data.as_ptr().add(i - wlen); // oldest value in window
 
@@ -1170,7 +1171,8 @@ unsafe fn cwma_row_avx2(
 		_ => unreachable!(),
 	};
 
-	for i in (first + wlen)..data.len() {
+	let start_idx = first + wlen;
+	for i in start_idx..data.len().min(out.len()) {
 		let mut acc = _mm256_setzero_pd();
 
 		for blk in 0..vec_blks {

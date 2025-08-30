@@ -546,7 +546,7 @@ fn vpt_batch_inner(price: &[f64], volume: &[f64], kern: Kernel, _parallel: bool)
 	// For VPT, warmup is always at least 1 (index 0 is always NaN)
 	// but might be more if there are NaN values in the data
 	let first_valid = vpt_first_valid(price, volume).ok_or(VptError::NotEnoughValidData)?;
-	let warm = vec![first_valid];
+	let warm = vec![first_valid + 1];
 	init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
 	// get &mut [f64] view over MaybeUninit<f64> buffer

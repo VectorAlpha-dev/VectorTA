@@ -211,9 +211,9 @@ pub fn trendflex_with_kernel(input: &TrendFlexInput, kernel: Kernel) -> Result<T
 		match chosen {
 			Kernel::Scalar | Kernel::ScalarBatch => trendflex_scalar_into(data, period, ss_period, first, &mut out)?,
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => trendflex_scalar_into(data, period, ss_period, first, &mut out)?,
+			Kernel::Avx2 | Kernel::Avx2Batch => trendflex_avx2_into(data, period, ss_period, first, &mut out)?,
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => trendflex_scalar_into(data, period, ss_period, first, &mut out)?,
+			Kernel::Avx512 | Kernel::Avx512Batch => trendflex_avx512_into(data, period, ss_period, first, &mut out)?,
 			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
 			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
 				trendflex_scalar_into(data, period, ss_period, first, &mut out)?
@@ -266,8 +266,9 @@ pub fn trendflex_into_slice(
 		match chosen {
 			Kernel::Scalar | Kernel::ScalarBatch => trendflex_scalar_into(data, period, ss_period, first, dst)?,
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch |
-			Kernel::Avx512 | Kernel::Avx512Batch => trendflex_scalar_into(data, period, ss_period, first, dst)?,
+			Kernel::Avx2 | Kernel::Avx2Batch => trendflex_avx2_into(data, period, ss_period, first, dst)?,
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => trendflex_avx512_into(data, period, ss_period, first, dst)?,
 			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
 			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
 				trendflex_scalar_into(data, period, ss_period, first, dst)?
@@ -387,9 +388,10 @@ unsafe fn trendflex_scalar_into(
 	Ok(())
 }
 
-// AVX2 stub
+// AVX2 implementation (micro-SIMD)
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
+#[target_feature(enable = "avx2,fma")]
 unsafe fn trendflex_avx2_into(
 	data: &[f64],
 	period: usize,
@@ -397,13 +399,105 @@ unsafe fn trendflex_avx2_into(
 	first_valid: usize,
 	out: &mut [f64],
 ) -> Result<(), TrendFlexError> {
-	// Calls scalar solution, maintains API
-	trendflex_scalar_into(data, period, ss_period, first_valid, out)
+    use std::f64::consts::PI;
+
+    let len = data.len();
+    let warm = first_valid + period;
+    for i in 0..warm.min(out.len()) {
+        *out.get_unchecked_mut(i) = f64::NAN;
+    }
+
+    if first_valid >= len { return Ok(()); }
+
+    // Super smoother coefficients
+    let a = (-1.414_f64 * PI / ss_period as f64).exp();
+    let a_sq = a * a;
+    let b = 2.0 * a * (1.414_f64 * PI / ss_period as f64).cos();
+    let c = (1.0 + a_sq - b) * 0.5;
+
+    // Helper to compute a single series in a streaming fashion with a ring buffer
+    #[inline(always)]
+    unsafe fn run_series_avx2(
+        x: &[f64], period: usize, a_sq: f64, b: f64, c: f64,
+        out: &mut [f64], out_off: usize
+    ) {
+        let n = x.len();
+        if n == 0 { return; }
+        let mut prev2 = x[0];
+        let mut prev1 = if n > 1 { x[1] } else { x[0] };
+        // initialize ring buffer and rolling sum
+        let mut ring = vec![0.0f64; period];
+        let mut sum = 0.0f64;
+        let mut head = 0usize;
+        // seed first entries
+        ring[head] = prev2; sum += prev2; head = (head + 1) % period;
+        if n > 1 { ring[head] = prev1; sum += prev1; head = (head + 1) % period; }
+
+        let tp_f = period as f64;
+        let inv_tp = 1.0 / tp_f;
+        let mut ms_prev = 0.0f64;
+
+        // fill until we have period samples
+        let mut i = 2usize;
+        while i < n && i < period {
+            let cur = c * (x[i] + x[i-1]) + b * prev1 - a_sq * prev2;
+            prev2 = prev1; prev1 = cur;
+            sum += cur;
+            ring[head] = cur; head = (head + 1) % period;
+            i += 1;
+        }
+        // main loop: produce outputs
+        while i < n {
+            _mm_prefetch(x.as_ptr().add(i + 16).cast(), _MM_HINT_T0);
+            let cur = c * (x[i] + x[i-1]) + b * prev1 - a_sq * prev2;
+            prev2 = prev1; prev1 = cur;
+
+            let my_sum = (tp_f * cur - sum) * inv_tp;
+            // ms_current = 0.04*my_sum*my_sum + 0.96*ms_prev
+            let v = _mm_set_sd(my_sum);
+            let sq = _mm_mul_sd(v, v);
+            let s04 = _mm_mul_sd(_mm_set_sd(0.04), sq);
+            let s96 = _mm_mul_sd(_mm_set_sd(0.96), _mm_set_sd(ms_prev));
+            let ms_cur = _mm_add_sd(s04, s96);
+            let ms_current = _mm_cvtsd_f64(ms_cur);
+            ms_prev = ms_current;
+
+            let out_val = if ms_current != 0.0 {
+                let denom = _mm_sqrt_sd(_mm_setzero_pd(), _mm_set_sd(ms_current));
+                let denom_s = _mm_cvtsd_f64(denom);
+                my_sum / denom_s
+            } else { 0.0 };
+            // non-temporal store
+            _mm_stream_sd(out.get_unchecked_mut(out_off + i) as *mut f64, _mm_set_sd(out_val));
+
+            // update rolling sum and ring
+            let old = ring[head];
+            sum += cur - old;
+            ring[head] = cur;
+            head = (head + 1) % period;
+
+            i += 1;
+        }
+    }
+
+    if first_valid == 0 {
+        run_series_avx2(data, period, a_sq, b, c, out, 0);
+        return Ok(());
+    }
+
+    // Tail-only case
+    let m = len - first_valid;
+    if m < period { return Ok(()); }
+    if m < ss_period { return Err(TrendFlexError::SmootherPeriodExceedsData { ss_period, data_len: m }); }
+    let tail = &data[first_valid..];
+    run_series_avx2(tail, period, a_sq, b, c, out, first_valid);
+    Ok(())
 }
 
 // AVX512 stub
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
+#[target_feature(enable = "avx512f,avx512dq,fma")]
 unsafe fn trendflex_avx512_into(
 	data: &[f64],
 	period: usize,
@@ -411,11 +505,89 @@ unsafe fn trendflex_avx512_into(
 	first_valid: usize,
 	out: &mut [f64],
 ) -> Result<(), TrendFlexError> {
-	if period <= 32 {
-		trendflex_avx512_short_into(data, period, ss_period, first_valid, out)
-	} else {
-		trendflex_avx512_long_into(data, period, ss_period, first_valid, out)
-	}
+    use std::f64::consts::PI;
+
+    let len = data.len();
+    let warm = first_valid + period;
+    for i in 0..warm.min(out.len()) {
+        *out.get_unchecked_mut(i) = f64::NAN;
+    }
+
+    if first_valid >= len { return Ok(()); }
+
+    let a = (-1.414_f64 * PI / ss_period as f64).exp();
+    let a_sq = a * a;
+    let b = 2.0 * a * (1.414_f64 * PI / ss_period as f64).cos();
+    let c = (1.0 + a_sq - b) * 0.5;
+
+    // Streaming series with ring buffer and non-temporal stores
+    #[inline(always)]
+    unsafe fn run_series_avx512(
+        x: &[f64], period: usize, a_sq: f64, b: f64, c: f64,
+        out: &mut [f64], out_off: usize
+    ) {
+        let n = x.len();
+        if n == 0 { return; }
+        let mut prev2 = x[0];
+        let mut prev1 = if n > 1 { x[1] } else { x[0] };
+        let mut ring = vec![0.0f64; period];
+        let mut sum = 0.0f64;
+        let mut head = 0usize;
+        ring[head] = prev2; sum += prev2; head = (head + 1) % period;
+        if n > 1 { ring[head] = prev1; sum += prev1; head = (head + 1) % period; }
+
+        let tp_f = period as f64;
+        let inv_tp = 1.0 / tp_f;
+        let mut ms_prev = 0.0f64;
+
+        let mut i = 2usize;
+        while i < n && i < period {
+            let cur = c * (x[i] + x[i-1]) + b * prev1 - a_sq * prev2;
+            prev2 = prev1; prev1 = cur;
+            sum += cur;
+            ring[head] = cur; head = (head + 1) % period;
+            i += 1;
+        }
+        while i < n {
+            _mm_prefetch(x.as_ptr().add(i + 32).cast(), _MM_HINT_T0);
+            let cur = c * (x[i] + x[i-1]) + b * prev1 - a_sq * prev2;
+            prev2 = prev1; prev1 = cur;
+
+            let my_sum = (tp_f * cur - sum) * inv_tp;
+            let v = _mm_set_sd(my_sum);
+            let sq = _mm_mul_sd(v, v);
+            let s04 = _mm_mul_sd(_mm_set_sd(0.04), sq);
+            let s96 = _mm_mul_sd(_mm_set_sd(0.96), _mm_set_sd(ms_prev));
+            let ms_cur = _mm_add_sd(s04, s96);
+            let ms_current = _mm_cvtsd_f64(ms_cur);
+            ms_prev = ms_current;
+
+            let out_val = if ms_current != 0.0 {
+                let denom = _mm_sqrt_sd(_mm_setzero_pd(), _mm_set_sd(ms_current));
+                my_sum / _mm_cvtsd_f64(denom)
+            } else { 0.0 };
+            _mm_stream_sd(out.get_unchecked_mut(out_off + i) as *mut f64, _mm_set_sd(out_val));
+
+            let old = ring[head];
+            sum += cur - old;
+            ring[head] = cur;
+            head = (head + 1) % period;
+
+            i += 1;
+        }
+    }
+
+    if first_valid == 0 {
+        run_series_avx512(data, period, a_sq, b, c, out, 0);
+        return Ok(());
+    }
+
+    let m = len - first_valid;
+    if m < period { return Ok(()); }
+    if m < ss_period { return Err(TrendFlexError::SmootherPeriodExceedsData { ss_period, data_len: m }); }
+    let tail = &data[first_valid..];
+    run_series_avx512(tail, period, a_sq, b, c, out, first_valid);
+    Ok(())
 }
 
 // AVX512 short stub
@@ -878,26 +1050,14 @@ unsafe fn trendflex_row_scalar(data: &[f64], first: usize, period: usize, out_ro
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn trendflex_row_avx2(data: &[f64], first: usize, period: usize, out_row: &mut [f64]) {
-	trendflex_row_scalar(data, first, period, out_row);
+	let ss_period = ((period as f64) / 2.0).round() as usize;
+	let _ = trendflex_avx2_into(data, period, ss_period, first, out_row);
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn trendflex_row_avx512(data: &[f64], first: usize, period: usize, out_row: &mut [f64]) {
-	if period <= 32 {
-		trendflex_row_avx512_short(data, first, period, out_row);
-	} else {
-		trendflex_row_avx512_long(data, first, period, out_row);
-	}
-}
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
-unsafe fn trendflex_row_avx512_short(data: &[f64], first: usize, period: usize, out_row: &mut [f64]) {
-	trendflex_row_scalar(data, first, period, out_row);
-}
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
-unsafe fn trendflex_row_avx512_long(data: &[f64], first: usize, period: usize, out_row: &mut [f64]) {
-	trendflex_row_scalar(data, first, period, out_row);
+	let ss_period = ((period as f64) / 2.0).round() as usize;
+	let _ = trendflex_avx512_into(data, period, ss_period, first, out_row);
 }
 
 // Test coverage -- use alma.rs style macros and patterns

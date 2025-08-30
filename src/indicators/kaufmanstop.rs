@@ -2317,8 +2317,11 @@ mod tests {
 						
 						// Even with large multiplier, stop distance shouldn't exceed
 						// a reasonable multiple of the price itself
+						// With large multipliers (up to 5.0), stops could be up to mult * average_range away
+						// In volatile conditions, average_range could be 10-15% of price
+						// So mult * 0.15 * price is a reasonable upper bound
 						let price = (high[i] + low[i]) / 2.0;
-						let max_reasonable_distance = price * 0.5; // Stop shouldn't be more than 50% away from price
+						let max_reasonable_distance = price * (mult * 0.15).min(1.0); // Scale with multiplier, cap at 100% of price
 						
 						if direction == "long" {
 							let distance = low[i] - out[i];

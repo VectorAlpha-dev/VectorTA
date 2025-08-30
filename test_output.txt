@@ -1,0 +1,9 @@
+   Compiling my_project v0.1.0 (C:\Rust Projects\my_project)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 12.14s
+     Running unittests src\lib.rs (target\debug\deps\my_project-c0c2560279479f76.exe)
+
+running 1 test
+test indicators::dec_osc::tests::check_dec_osc_property_avx2_f64 ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6273 filtered out; finished in 0.05s
+

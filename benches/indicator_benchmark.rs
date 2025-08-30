@@ -62,7 +62,6 @@ use my_project::indicators::{
 	aroon::{aroon as aroon_raw, AroonInput},
 	aroonosc::{aroon_osc as aroon_osc_raw, AroonOscInput},
 	atr::{atr as atr_raw, AtrInput},
-	avgprice::{avgprice as avgprice_raw, AvgPriceInput},
 	bandpass::{bandpass as bandpass_raw, BandPassInput},
 	bollinger_bands::{bollinger_bands as bollinger_bands_raw, BollingerBandsInput},
 	bollinger_bands_width::{bollinger_bands_width as bollinger_bands_width_raw, BollingerBandsWidthInput},
@@ -96,13 +95,6 @@ use my_project::indicators::{
 	fisher::{fisher as fisher_raw, FisherInput},
 	fosc::{fosc as fosc_raw, FoscInput},
 	gatorosc::{gatorosc as gatorosc_raw, GatorOscInput},
-	heikin_ashi_candles::{heikin_ashi_candles as heikin_ashi_candles_raw, HeikinAshiInput},
-	ht_dcperiod::{ht_dcperiod as ht_dcperiod_raw, HtDcPeriodInput},
-	ht_dcphase::{ht_dcphase as ht_dcphase_raw, HtDcPhaseInput},
-	ht_phasor::{ht_phasor as ht_phasor_raw, HtPhasorInput},
-	ht_sine::{ht_sine as ht_sine_raw, HtSineInput},
-	ht_trendline::{ht_trendline as ht_trendline_raw, HtTrendlineInput},
-	ht_trendmode::{ht_trendmode as ht_trendmode_raw, HtTrendModeInput},
 	ift_rsi::{ift_rsi as ift_rsi_raw, IftRsiInput},
 	kaufmanstop::{kaufmanstop as kaufmanstop_raw, KaufmanstopInput},
 	kdj::{kdj as kdj_raw, KdjInput},
@@ -201,7 +193,6 @@ pub type ApoInputS = ApoInput<'static>;
 pub type AroonInputS = AroonInput<'static>;
 pub type AroonOscInputS = AroonOscInput<'static>;
 pub type AtrInputS = AtrInput<'static>;
-pub type AvgPriceInputS = AvgPriceInput<'static>;
 pub type BandPassInputS = BandPassInput<'static>;
 pub type BollingerBandsInputS = BollingerBandsInput<'static>;
 pub type BollingerBandsWidthInputS = BollingerBandsWidthInput<'static>;
@@ -244,16 +235,9 @@ pub type FramaInputS = FramaInput<'static>;
 pub type FwmaInputS = FwmaInput<'static>;
 pub type GatorOscInputS = GatorOscInput<'static>;
 pub type GaussianInputS = GaussianInput<'static>;
-pub type HeikinAshiInputS = HeikinAshiInput<'static>;
 pub type HighPassInputS = HighPassInput<'static>;
 pub type HighPass2InputS = HighPass2Input<'static>;
 pub type HmaInputS = HmaInput<'static>;
-pub type HtDcPeriodInputS = HtDcPeriodInput<'static>;
-pub type HtDcPhaseInputS = HtDcPhaseInput<'static>;
-pub type HtPhasorInputS = HtPhasorInput<'static>;
-pub type HtSineInputS = HtSineInput<'static>;
-pub type HtTrendlineInputS = HtTrendlineInput<'static>;
-pub type HtTrendModeInputS = HtTrendModeInput<'static>;
 pub type HwmaInputS = HwmaInput<'static>;
 pub type IftRsiInputS = IftRsiInput<'static>;
 pub type JmaInputS = JmaInput<'static>;
@@ -541,7 +525,6 @@ impl_input_len!(
 	AroonInputS,
 	AroonOscInputS,
 	AtrInputS,
-	AvgPriceInputS,
 	BandPassInputS,
 	BollingerBandsInputS,
 	BollingerBandsWidthInputS,
@@ -584,16 +567,9 @@ impl_input_len!(
 	FwmaInputS,
 	GatorOscInputS,
 	GaussianInputS,
-	HeikinAshiInputS,
 	HighPassInputS,
 	HighPass2InputS,
 	HmaInputS,
-	HtDcPeriodInputS,
-	HtDcPhaseInputS,
-	HtPhasorInputS,
-	HtSineInputS,
-	HtTrendlineInputS,
-	HtTrendModeInputS,
 	HwmaInputS,
 	IftRsiInputS,
 	JmaInputS,
@@ -642,6 +618,7 @@ impl_input_len!(
 	RocpInputS,
 	RocrInputS,
 	RsiInputS,
+	RsxInputS,
 	RviInputS,
 	SafeZoneStopInputS,
 	SarInputS,
@@ -703,7 +680,6 @@ bench_wrappers! {
 	(aroon_bench, aroon_raw, AroonInputS),
 	(aroon_osc_bench, aroon_osc_raw, AroonOscInputS),
 	(atr_bench, atr_raw, AtrInputS),
-	(avgprice_bench, avgprice_raw, AvgPriceInputS),
 	(bandpass_bench, bandpass_raw, BandPassInputS),
 	(bollinger_bands_bench, bollinger_bands_raw, BollingerBandsInputS),
 	(bollinger_bands_width_bench, bollinger_bands_width_raw, BollingerBandsWidthInputS),
@@ -737,13 +713,6 @@ bench_wrappers! {
 	(fisher_bench, fisher_raw, FisherInputS),
 	(fosc_bench, fosc_raw, FoscInputS),
 	(gatorosc_bench, gatorosc_raw, GatorOscInputS),
-	(heikin_ashi_candles_bench, heikin_ashi_candles_raw, HeikinAshiInputS),
-	(ht_dcperiod_bench, ht_dcperiod_raw, HtDcPeriodInputS),
-	(ht_dcphase_bench, ht_dcphase_raw, HtDcPhaseInputS),
-	(ht_phasor_bench, ht_phasor_raw, HtPhasorInputS),
-	(ht_sine_bench, ht_sine_raw, HtSineInputS),
-	(ht_trendline_bench, ht_trendline_raw, HtTrendlineInputS),
-	(ht_trendmode_bench, ht_trendmode_raw, HtTrendModeInputS),
 	(ift_rsi_bench, ift_rsi_raw, IftRsiInputS),
 	(kaufmanstop_bench, kaufmanstop_raw, KaufmanstopInputS),
 	(kdj_bench, kdj_raw, KdjInputS),
@@ -828,7 +797,6 @@ bench_scalars!(
 	aroon_bench        => AroonInputS,
 	aroon_osc_bench    => AroonOscInputS,
 	atr_bench          => AtrInputS,
-	avgprice_bench     => AvgPriceInputS,
 	bandpass_bench     => BandPassInputS,
 
 	bollinger_bands_bench => BollingerBandsInputS,
@@ -863,13 +831,6 @@ bench_scalars!(
 	fisher_bench      => FisherInputS,
 	fosc_bench        => FoscInputS,
 	gatorosc_bench    => GatorOscInputS,
-	heikin_ashi_candles_bench => HeikinAshiInputS,
-	ht_dcperiod_bench => HtDcPeriodInputS,
-	ht_dcphase_bench => HtDcPhaseInputS,
-	ht_phasor_bench => HtPhasorInputS,
-	ht_sine_bench => HtSineInputS,
-	ht_trendline_bench => HtTrendlineInputS,
-	ht_trendmode_bench => HtTrendModeInputS,
 	ift_rsi_bench     => IftRsiInputS,
 	kaufmanstop_bench => KaufmanstopInputS,
 	kdj_bench         => KdjInputS,

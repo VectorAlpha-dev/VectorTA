@@ -1093,6 +1093,7 @@ enum MaImpl {
 	Ema {
 		alpha: f64,
 		value: f64,
+		warmup_count: usize,  // Track warmup phase for running mean
 	},
 	Sma {
 		buffer: Vec<f64>,
@@ -1120,6 +1121,7 @@ impl KeltnerStream {
 			_ => MaImpl::Ema {
 				alpha: 2.0 / (period as f64 + 1.0),
 				value: 0.0,
+				warmup_count: 0,
 			},
 		};
 		Ok(Self {
@@ -1146,12 +1148,17 @@ impl KeltnerStream {
 		self.count += 1;
 
 		if self.count < self.period {
+			// Update MA during warmup
 			match &mut self.ma_impl {
-				MaImpl::Ema { alpha, value } => {
-					if self.count == 1 {
+				MaImpl::Ema { value, warmup_count, .. } => {
+					// Use running mean during warmup, like batch EMA does
+					if *warmup_count == 0 {
 						*value = source;
+						*warmup_count = 1;
 					} else {
-						*value += (source - *value) * *alpha;
+						*warmup_count += 1;
+						// Running mean formula: new_mean = ((count-1) * old_mean + new_value) / count
+						*value = ((*warmup_count as f64 - 1.0) * *value + source) / *warmup_count as f64;
 					}
 				}
 				MaImpl::Sma {
@@ -1181,11 +1188,16 @@ impl KeltnerStream {
 			self.atr += (tr - self.atr) / self.period as f64;
 		}
 
+		// Update and get MA value
 		let ma_val = match &mut self.ma_impl {
-			MaImpl::Ema { alpha, value } => {
-				if self.count == 1 {
-					*value = source;
+			MaImpl::Ema { alpha, value, warmup_count } => {
+				if self.count == self.period {
+					// Transition from running mean to EMA
+					// This is the last warmup value, use running mean one more time
+					*warmup_count += 1;
+					*value = ((*warmup_count as f64 - 1.0) * *value + source) / *warmup_count as f64;
 				} else {
+					// Now use EMA formula
 					*value += (source - *value) * *alpha;
 				}
 				*value

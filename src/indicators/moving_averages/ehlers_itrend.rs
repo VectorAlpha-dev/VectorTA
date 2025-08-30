@@ -548,11 +548,10 @@ pub unsafe fn ehlers_itrend_unsafe_scalar(
 	let mut sp = 0;
 
 	for (idx, &x0) in src.iter().enumerate() {
-		let fir_val = (4.0 * x0
-			+ 3.0 * src.get_unchecked(idx.saturating_sub(1))
-			+ 2.0 * src.get_unchecked(idx.saturating_sub(2))
-			+ src.get_unchecked(idx.saturating_sub(3)))
-			* DIV10;
+		let x1 = if idx >= 1 { *src.get_unchecked(idx - 1) } else { 0.0 };
+		let x2 = if idx >= 2 { *src.get_unchecked(idx - 2) } else { 0.0 };
+		let x3 = if idx >= 3 { *src.get_unchecked(idx - 3) } else { 0.0 };
+		let fir_val = (4.0 * x0 + 3.0 * x1 + 2.0 * x2 + x3) * DIV10;
 		*fir.get_unchecked_mut(rp) = fir_val;
 
 		let hp = C0 * (r7(&fir, rp, 0) - r7(&fir, rp, 6)) + C1 * (r7(&fir, rp, 2) - r7(&fir, rp, 4));

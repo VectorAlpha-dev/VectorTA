@@ -1437,12 +1437,17 @@ mod tests {
 				// Property 5: Perfect efficiency for straight line moves
 				// Note: Using 0.90 threshold for practical tolerance with floating-point arithmetic
 				if data.len() >= period + 10 {
-					// Find a monotonic section if exists
-					for window_start in warmup..(data.len() - period) {
-						let window_end = (window_start + period).min(data.len() - 1);
-						let window = &data[window_start..=window_end];
+					// Check ER values for monotonic windows
+					// ER at index i uses data from [i+1-period..=i]
+					for i in (warmup + 1)..data.len() {
+						if i < period {
+							continue;
+						}
+						let window_start = i + 1 - period;
+						let window_end = i;
 						
-						// Check if this window is monotonic but not constant
+						// Check if the window used for this ER calculation is monotonic
+						let window = &data[window_start..=window_end];
 						let is_monotonic_up = window.windows(2).all(|w| w[1] >= w[0] - 1e-10);
 						let is_monotonic_down = window.windows(2).all(|w| w[1] <= w[0] + 1e-10);
 						let is_constant = window.windows(2).all(|w| (w[1] - w[0]).abs() < 1e-10);
@@ -1450,12 +1455,13 @@ mod tests {
 						// Skip constant windows as they're handled by Property 6
 						if !is_constant && (is_monotonic_up || is_monotonic_down) {
 							// For a perfect trend, ER should be close to 1.0
-							let er_val = out[window_end];
-							if !er_val.is_nan() && (window[window.len()-1] - window[0]).abs() > 1e-6 {
+							let er_val = out[i];
+							let net_change = (window[window.len()-1] - window[0]).abs();
+							if !er_val.is_nan() && net_change > 1e-6 {
 								prop_assert!(
 									er_val >= 0.90,
-									"Expected high ER (>0.90) for monotonic move at {}, got {}",
-									window_end,
+									"Expected high ER (>0.90) for monotonic move at index {}, got {}",
+									i,
 									er_val
 								);
 							}
@@ -1464,26 +1470,27 @@ mod tests {
 				}
 
 				// Property 6: Constant prices should yield 0.0
-				// When all prices in window are identical, delta=0 and sum=0, ER remains unset (NaN from warmup)
-				// But after warmup, the indicator leaves the value as 0.0 since sum is not > 0
-				for i in warmup..data.len().saturating_sub(period) {
-					let window_end = i + period - 1;
-					if window_end < data.len() {
-						let window = &data[i..=window_end];
-						let is_constant = window.windows(2).all(|w| (w[1] - w[0]).abs() < 1e-10);
-						
-						if is_constant {
-							let er_val = out[window_end];
-							// For constant prices, ER calculation has delta=0 and sum=0
-							// The guard `if sum > 0.0` prevents division, leaving the value unchanged
-							// Since we use alloc_with_nan_prefix, values after warmup stay as allocated (0.0)
-							prop_assert!(
-								er_val.is_nan() || er_val.abs() < 1e-10,
-								"Constant prices should yield NaN or 0, got {} at index {}",
-								er_val,
-								window_end
-							);
-						}
+				// When all prices in window are identical, delta=0 and sum=0
+				// The code sets ER to 0.0 in this case
+				for i in (warmup + 1)..data.len() {
+					if i < period {
+						continue;
+					}
+					let window_start = i + 1 - period;
+					let window_end = i;
+					let window = &data[window_start..=window_end];
+					let is_constant = window.windows(2).all(|w| (w[1] - w[0]).abs() < 1e-10);
+					
+					if is_constant {
+						let er_val = out[i];
+						// For constant prices, ER calculation has delta=0 and sum=0
+						// The code explicitly sets out[i] = 0.0 when sum == 0
+						prop_assert!(
+							er_val.is_nan() || er_val.abs() < 1e-10,
+							"Constant prices should yield NaN or 0, got {} at index {}",
+							er_val,
+							i
+						);
 					}
 				}
 
@@ -1504,28 +1511,30 @@ mod tests {
 				// Create a synthetic choppy pattern and verify low ER
 				if period >= 4 && data.len() >= period * 3 {
 					// Look for sections with high volatility relative to net movement
-					for i in warmup..(data.len() - period) {
-						let window_start = i;
-						let window_end = i + period - 1;
-						if window_end < data.len() {
-							let net_change = (data[window_end] - data[window_start]).abs();
-							let mut total_movement = 0.0;
-							for j in window_start..window_end {
-								total_movement += (data[j + 1] - data[j]).abs();
-							}
-							
-							// If total movement is much larger than net change, market is choppy
-							if total_movement > 0.0 && net_change / total_movement < 0.3 {
-								let er_val = out[window_end];
-								if !er_val.is_nan() {
-									// Choppy markets should have low ER
-									prop_assert!(
-										er_val <= 0.35,
-										"Expected low ER (<0.35) for choppy market at {}, got {}",
-										window_end,
-										er_val
-									);
-								}
+					for i in (warmup + 1)..data.len() {
+						if i < period {
+							continue;
+						}
+						let window_start = i + 1 - period;
+						let window_end = i;
+						
+						let net_change = (data[window_end] - data[window_start]).abs();
+						let mut total_movement = 0.0;
+						for j in window_start..window_end {
+							total_movement += (data[j + 1] - data[j]).abs();
+						}
+						
+						// If total movement is much larger than net change, market is choppy
+						if total_movement > 0.0 && net_change / total_movement < 0.3 {
+							let er_val = out[i];
+							if !er_val.is_nan() {
+								// Choppy markets should have low ER
+								prop_assert!(
+									er_val <= 0.35,
+									"Expected low ER (<0.35) for choppy market at index {}, got {}",
+									i,
+									er_val
+								);
 							}
 						}
 					}

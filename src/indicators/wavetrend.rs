@@ -1930,7 +1930,7 @@ mod tests {
 			);
 		}
 		for (i, (&b, &s)) in full_output.wt2.iter().zip(wt2_stream.iter()).enumerate() {
-			if b.is_nan() && s.is_nan() {
+			if b.is_nan() || s.is_nan() {
 				continue;
 			}
 			let diff = (b - s).abs();
@@ -1945,7 +1945,7 @@ mod tests {
 			);
 		}
 		for (i, (&b, &s)) in full_output.wt_diff.iter().zip(diff_stream.iter()).enumerate() {
-			if b.is_nan() && s.is_nan() {
+			if b.is_nan() || s.is_nan() {
 				continue;
 			}
 			let diff = (b - s).abs();

@@ -714,6 +714,8 @@ pub struct TilsonStream {
 	lookback_total: usize,
 	values_seen: usize,
 	initialized: bool,
+	warmup_buffer: Vec<f64>,
+	warmup_index: usize,
 }
 
 impl TilsonStream {
@@ -749,37 +751,125 @@ impl TilsonStream {
 			lookback_total,
 			values_seen: 0,
 			initialized: false,
+			warmup_buffer: Vec::with_capacity(lookback_total + 1),
+			warmup_index: 0,
 		})
 	}
 
 	#[inline(always)]
 	pub fn update(&mut self, value: f64) -> Option<f64> {
-		self.values_seen += 1;
-		
-		// Initialize EMAs on first value
-		if !self.initialized {
-			for i in 0..6 {
-				self.e[i] = value;
-			}
-			self.initialized = true;
-			if self.values_seen <= self.lookback_total {
-				return None;
-			}
+		// During warmup, collect values
+		if self.values_seen < self.lookback_total {
+			self.warmup_buffer.push(value);
+			self.values_seen += 1;
+			return None;
 		}
 		
-		// Update the EMA cascade
+		// Initialize after collecting exactly lookback_total values
+		if !self.initialized {
+			self.initialize_from_warmup();
+			self.initialized = true;
+			// Now process the current value (the lookback_total+1 th value)
+		}
+		
+		self.values_seen += 1;
+		
+		// Update the EMA cascade with the new value
 		self.e[0] = self.k * value + self.one_minus_k * self.e[0];
 		for i in 1..6 {
 			self.e[i] = self.k * self.e[i - 1] + self.one_minus_k * self.e[i];
 		}
 		
-		// Return None during warmup period
-		if self.values_seen <= self.lookback_total {
-			return None;
-		}
-		
 		// Calculate and return T3 value
 		Some(self.c1 * self.e[5] + self.c2 * self.e[4] + self.c3 * self.e[3] + self.c4 * self.e[2])
+	}
+	
+	fn initialize_from_warmup(&mut self) {
+		// Match the scalar kernel's warmup initialization
+		// The scalar implementation consumes exactly lookback_total values for warmup
+		let period = self.period;
+		let k = self.k;
+		let one_minus_k = self.one_minus_k;
+		
+		// We need exactly lookback_total values, which is 6 * (period - 1)
+		// This is distributed as: period + 5*(period-1) values
+		
+		// Initialize e1 as average of first period values
+		let mut temp_real = 0.0;
+		for i in 0..period {
+			temp_real += self.warmup_buffer[self.warmup_index + i];
+		}
+		self.e[0] = temp_real / (period as f64);
+		self.warmup_index += period;
+		
+		// Initialize e2
+		temp_real = self.e[0];
+		for j in 1..period {
+			if self.warmup_index < self.warmup_buffer.len() {
+				self.e[0] = k * self.warmup_buffer[self.warmup_index] + one_minus_k * self.e[0];
+				temp_real += self.e[0];
+				self.warmup_index += 1;
+			}
+		}
+		self.e[1] = temp_real / (period as f64);
+		
+		// Initialize e3
+		temp_real = self.e[1];
+		for j in 1..period {
+			if self.warmup_index < self.warmup_buffer.len() {
+				self.e[0] = k * self.warmup_buffer[self.warmup_index] + one_minus_k * self.e[0];
+				self.e[1] = k * self.e[0] + one_minus_k * self.e[1];
+				temp_real += self.e[1];
+				self.warmup_index += 1;
+			}
+		}
+		self.e[2] = temp_real / (period as f64);
+		
+		// Initialize e4
+		temp_real = self.e[2];
+		for j in 1..period {
+			if self.warmup_index < self.warmup_buffer.len() {
+				self.e[0] = k * self.warmup_buffer[self.warmup_index] + one_minus_k * self.e[0];
+				self.e[1] = k * self.e[0] + one_minus_k * self.e[1];
+				self.e[2] = k * self.e[1] + one_minus_k * self.e[2];
+				temp_real += self.e[2];
+				self.warmup_index += 1;
+			}
+		}
+		self.e[3] = temp_real / (period as f64);
+		
+		// Initialize e5
+		temp_real = self.e[3];
+		for j in 1..period {
+			if self.warmup_index < self.warmup_buffer.len() {
+				self.e[0] = k * self.warmup_buffer[self.warmup_index] + one_minus_k * self.e[0];
+				self.e[1] = k * self.e[0] + one_minus_k * self.e[1];
+				self.e[2] = k * self.e[1] + one_minus_k * self.e[2];
+				self.e[3] = k * self.e[2] + one_minus_k * self.e[3];
+				temp_real += self.e[3];
+				self.warmup_index += 1;
+			}
+		}
+		self.e[4] = temp_real / (period as f64);
+		
+		// Initialize e6 
+		// At this point we should have used period + 4*(period-1) values
+		// The last loop uses the remaining period-1 values to reach lookback_total
+		temp_real = self.e[4];
+		for j in 1..period {
+			if self.warmup_index < self.warmup_buffer.len() {
+				self.e[0] = k * self.warmup_buffer[self.warmup_index] + one_minus_k * self.e[0];
+				self.e[1] = k * self.e[0] + one_minus_k * self.e[1];
+				self.e[2] = k * self.e[1] + one_minus_k * self.e[2];
+				self.e[3] = k * self.e[2] + one_minus_k * self.e[3];
+				self.e[4] = k * self.e[3] + one_minus_k * self.e[4];
+				temp_real += self.e[4];
+				self.warmup_index += 1;
+			}
+		}
+		self.e[5] = temp_real / (period as f64);
+		
+		self.initialized = true;
 	}
 }
 

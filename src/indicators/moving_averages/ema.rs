@@ -282,7 +282,7 @@ unsafe fn ema_scalar_into(data: &[f64], period: usize, first_val: usize, alpha: 
 			mean = ((valid_count as f64 - 1.0) * mean + x) / valid_count as f64;
 			*out.get_unchecked_mut(i) = mean;
 		} else {
-			// Skip NaN values like stream does - carry forward previous value
+			// During warmup, skip NaN values and carry forward
 			*out.get_unchecked_mut(i) = mean;
 		}
 	}

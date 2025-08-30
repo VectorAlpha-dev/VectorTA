@@ -1087,6 +1087,12 @@ fn rvi_batch_inner_into(
 	}
 	let cols = data.len();
 	
+	// Map Kernel::Auto to best batch kernel
+	let chosen_kernel = match kern {
+		Kernel::Auto => detect_best_batch_kernel(),
+		other => other,
+	};
+	
 	// Initialize NaN prefixes for each row based on warmup period
 	for (row, combo) in combos.iter().enumerate() {
 		let warmup = first + combo.period.unwrap().saturating_sub(1) + combo.ma_len.unwrap().saturating_sub(1);

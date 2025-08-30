@@ -204,103 +204,113 @@ pub fn mean_ad_with_kernel(input: &MeanAdInput, kernel: Kernel) -> Result<MeanAd
 		other => other,
 	};
 
-	unsafe {
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => mean_ad_scalar(data, period, first),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => mean_ad_avx2(data, period, first),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => mean_ad_avx512(data, period, first),
-			_ => unreachable!(),
-		}
+	match chosen {
+		Kernel::Scalar | Kernel::ScalarBatch => mean_ad_scalar(data, period, first),
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx2 | Kernel::Avx2Batch => mean_ad_avx2(data, period, first),
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx512 | Kernel::Avx512Batch => mean_ad_avx512(data, period, first),
+		_ => unreachable!(),
 	}
 }
 
 #[inline]
-pub unsafe fn mean_ad_scalar(data: &[f64], period: usize, first: usize) -> Result<MeanAdOutput, MeanAdError> {
-	let warmup_period = first + 2 * period - 2;
-	let mut out = alloc_with_nan_prefix(data.len(), warmup_period);
-	if first + period > data.len() {
+pub fn mean_ad_scalar(data: &[f64], period: usize, first: usize) -> Result<MeanAdOutput, MeanAdError> {
+	// Guard against invalid parameters
+	if period == 0 {
+		return Err(MeanAdError::InvalidPeriod { period: 0, data_len: data.len() });
+	}
+	if first > data.len() {
+		return Err(MeanAdError::NotEnoughValidData { 
+			needed: first, 
+			valid: data.len() 
+		});
+	}
+	
+	let n = data.len();
+	let mut out = vec![f64::NAN; n];
+	
+	if first + period > n {
 		return Ok(MeanAdOutput { values: out });
 	}
 	
-	// Use circular buffers for intermediate values
-	let mut mean_buffer = vec![0.0; period];
-	let mut deviation_buffer = vec![0.0; period];
-	let mut mean_idx = 0;
-	let mut dev_idx = 0;
-	
-	// Calculate initial rolling mean
+	// Compute rolling SMA of prices
 	let mut sum = 0.0;
-	for &v in &data[first..(first + period)] {
-		sum += v;
+	for i in first..(first + period) {
+		sum += data[i];
 	}
-	let mut current_mean = sum / (period as f64);
+	let mut sma = sum / (period as f64);
 	
-	// Fill initial deviation buffer
-	for i in 0..period {
-		let deviation = (data[first + i] - current_mean).abs();
-		deviation_buffer[i] = deviation;
-	}
+	// Circular buffer for residuals (pointwise absolute deviations)
+	let mut residual_buffer = vec![0.0; period];
+	let mut buffer_index = 0;
+	let mut residual_sum = 0.0;
 	
-	// Calculate initial MAD
-	let mut mad_sum = 0.0;
-	for &dev in &deviation_buffer {
-		mad_sum += dev;
-	}
-	
-	if first + 2 * period - 2 < data.len() {
-		out[first + 2 * period - 2] = mad_sum / (period as f64);
-	}
-	
-	// Process remaining data
-	for i in (first + period)..data.len() {
-		// Update rolling mean
-		sum += data[i] - data[i - period];
-		current_mean = sum / (period as f64);
+	// Fill residual buffer for first period of SMAs
+	// Each residual is |x_t - SMA_t| where SMA_t is the SMA ending at time t
+	for t in (first + period - 1)..(first + 2 * period - 1).min(n) {
+		let residual = (data[t] - sma).abs();
+		residual_buffer[buffer_index] = residual;
+		buffer_index = (buffer_index + 1) % period;
+		residual_sum += residual;
 		
-		// Calculate deviation for current point
-		let current_deviation = (data[i] - current_mean).abs();
-		
-		// Update MAD if we have enough data
-		if i >= first + 2 * period - 1 {
-			// Remove oldest deviation and add new one
-			mad_sum += current_deviation - deviation_buffer[dev_idx];
-			deviation_buffer[dev_idx] = current_deviation;
-			dev_idx = (dev_idx + 1) % period;
-			
-			out[i] = mad_sum / (period as f64);
-		} else if i >= first + period - 1 {
-			// Still warming up the deviation buffer
-			deviation_buffer[dev_idx] = current_deviation;
-			dev_idx = (dev_idx + 1) % period;
+		// Advance SMA for next time point if there's more data
+		if t + 1 < n && t + 1 >= first + period {
+			sum += data[t + 1] - data[t + 1 - period];
+			sma = sum / (period as f64);
 		}
 	}
-
+	
+	// First output after warmup period
+	let first_output = first + 2 * period - 2;
+	if first_output < n {
+		out[first_output] = residual_sum / (period as f64);
+	}
+	
+	// Continue streaming for remaining data
+	for t in (first + 2 * period - 1)..n {
+		// Current residual against current SMA
+		let residual = (data[t] - sma).abs();
+		
+		// Update residual buffer and sum
+		residual_sum += residual - residual_buffer[buffer_index];
+		residual_buffer[buffer_index] = residual;
+		buffer_index = (buffer_index + 1) % period;
+		
+		// Output MA of residuals
+		out[t] = residual_sum / (period as f64);
+		
+		// Advance SMA for next step
+		if t + 1 < n {
+			sum += data[t + 1] - data[t + 1 - period];
+			sma = sum / (period as f64);
+		}
+	}
+	
 	Ok(MeanAdOutput { values: out })
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub unsafe fn mean_ad_avx2(data: &[f64], period: usize, first: usize) -> Result<MeanAdOutput, MeanAdError> {
+pub fn mean_ad_avx2(data: &[f64], period: usize, first: usize) -> Result<MeanAdOutput, MeanAdError> {
 	mean_ad_scalar(data, period, first)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub unsafe fn mean_ad_avx512(data: &[f64], period: usize, first: usize) -> Result<MeanAdOutput, MeanAdError> {
+pub fn mean_ad_avx512(data: &[f64], period: usize, first: usize) -> Result<MeanAdOutput, MeanAdError> {
 	mean_ad_scalar(data, period, first)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub unsafe fn mean_ad_avx512_short(data: &[f64], period: usize, first: usize) -> Result<MeanAdOutput, MeanAdError> {
+pub fn mean_ad_avx512_short(data: &[f64], period: usize, first: usize) -> Result<MeanAdOutput, MeanAdError> {
 	mean_ad_scalar(data, period, first)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub unsafe fn mean_ad_avx512_long(data: &[f64], period: usize, first: usize) -> Result<MeanAdOutput, MeanAdError> {
+pub fn mean_ad_avx512_long(data: &[f64], period: usize, first: usize) -> Result<MeanAdOutput, MeanAdError> {
 	mean_ad_scalar(data, period, first)
 }
 
@@ -450,7 +460,7 @@ fn mean_ad_batch_inner_into(
 	let rows = combos.len();
 	let cols = data.len();
 	
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+	let do_row = |row: usize, out_row: &mut [f64]| {
 		let period = combos[row].period.unwrap();
 		match kern {
 			Kernel::Scalar => mean_ad_row_scalar(data, first, period, out_row),
@@ -522,7 +532,7 @@ fn mean_ad_batch_inner(
 	let values_ptr = buf_guard.as_mut_ptr() as *mut f64;
 	let values_slice: &mut [f64] = unsafe { core::slice::from_raw_parts_mut(values_ptr, buf_guard.len()) };
 
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+	let do_row = |row: usize, out_row: &mut [f64]| {
 		let period = combos[row].period.unwrap();
 		match kern {
 			Kernel::Scalar => mean_ad_row_scalar(data, first, period, out_row),
@@ -572,72 +582,75 @@ fn mean_ad_batch_inner(
 }
 
 #[inline(always)]
-pub unsafe fn mean_ad_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
+pub fn mean_ad_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
 	if first + period > data.len() {
 		return;
 	}
 	
-	// Use circular buffers for intermediate values
-	let mut deviation_buffer = vec![0.0; period];
-	let mut dev_idx = 0;
+	let n = data.len();
 	
-	// Calculate initial rolling mean
+	// Compute rolling SMA of prices
 	let mut sum = 0.0;
-	for &v in &data[first..(first + period)] {
-		sum += v;
+	for i in first..(first + period) {
+		sum += data[i];
 	}
-	let mut current_mean = sum / (period as f64);
+	let mut sma = sum / (period as f64);
 	
-	// Fill initial deviation buffer
-	for i in 0..period {
-		let deviation = (data[first + i] - current_mean).abs();
-		deviation_buffer[i] = deviation;
-	}
+	// Circular buffer for residuals (pointwise absolute deviations)
+	let mut residual_buffer = vec![0.0; period];
+	let mut buffer_index = 0;
+	let mut residual_sum = 0.0;
 	
-	// Calculate initial MAD
-	let mut mad_sum = 0.0;
-	for &dev in &deviation_buffer {
-		mad_sum += dev;
-	}
-	
-	if first + 2 * period - 2 < data.len() {
-		out[first + 2 * period - 2] = mad_sum / (period as f64);
-	}
-	
-	// Process remaining data
-	for i in (first + period)..data.len() {
-		// Update rolling mean
-		sum += data[i] - data[i - period];
-		current_mean = sum / (period as f64);
+	// Fill residual buffer for first period of SMAs
+	for t in (first + period - 1)..(first + 2 * period - 1).min(n) {
+		let residual = (data[t] - sma).abs();
+		residual_buffer[buffer_index] = residual;
+		buffer_index = (buffer_index + 1) % period;
+		residual_sum += residual;
 		
-		// Calculate deviation for current point
-		let current_deviation = (data[i] - current_mean).abs();
+		// Advance SMA for next time point
+		if t + 1 < n && t + 1 >= first + period {
+			sum += data[t + 1] - data[t + 1 - period];
+			sma = sum / (period as f64);
+		}
+	}
+	
+	// First output after warmup period
+	let first_output = first + 2 * period - 2;
+	if first_output < n {
+		out[first_output] = residual_sum / (period as f64);
+	}
+	
+	// Continue streaming for remaining data
+	for t in (first + 2 * period - 1)..n {
+		// Current residual against current SMA
+		let residual = (data[t] - sma).abs();
 		
-		// Update MAD if we have enough data
-		if i >= first + 2 * period - 1 {
-			// Remove oldest deviation and add new one
-			mad_sum += current_deviation - deviation_buffer[dev_idx];
-			deviation_buffer[dev_idx] = current_deviation;
-			dev_idx = (dev_idx + 1) % period;
-			
-			out[i] = mad_sum / (period as f64);
-		} else if i >= first + period - 1 {
-			// Still warming up the deviation buffer
-			deviation_buffer[dev_idx] = current_deviation;
-			dev_idx = (dev_idx + 1) % period;
+		// Update residual buffer and sum
+		residual_sum += residual - residual_buffer[buffer_index];
+		residual_buffer[buffer_index] = residual;
+		buffer_index = (buffer_index + 1) % period;
+		
+		// Output MA of residuals
+		out[t] = residual_sum / (period as f64);
+		
+		// Advance SMA for next step
+		if t + 1 < n {
+			sum += data[t + 1] - data[t + 1 - period];
+			sma = sum / (period as f64);
 		}
 	}
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-pub unsafe fn mean_ad_row_avx2(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
+pub fn mean_ad_row_avx2(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
 	mean_ad_row_scalar(data, first, period, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-pub unsafe fn mean_ad_row_avx512(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
+pub fn mean_ad_row_avx512(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
 	if period <= 32 {
 		mean_ad_row_avx512_short(data, first, period, out);
 	} else {
@@ -647,13 +660,13 @@ pub unsafe fn mean_ad_row_avx512(data: &[f64], first: usize, period: usize, out:
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-pub unsafe fn mean_ad_row_avx512_short(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
+pub fn mean_ad_row_avx512_short(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
 	mean_ad_row_scalar(data, first, period, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-pub unsafe fn mean_ad_row_avx512_long(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
+pub fn mean_ad_row_avx512_long(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
 	mean_ad_row_scalar(data, first, period, out);
 }
 
@@ -690,6 +703,7 @@ impl MeanAdStream {
 	}
 	#[inline(always)]
 	pub fn update(&mut self, value: f64) -> Option<f64> {
+		// Add new value to buffer
 		self.buffer[self.head] = value;
 		self.head = (self.head + 1) % self.period;
 		if !self.filled && self.head == 0 {
@@ -698,16 +712,27 @@ impl MeanAdStream {
 		if !self.filled {
 			return None;
 		}
+		
+		// Calculate rolling mean of price window
 		self.mean = self.buffer.iter().copied().sum::<f64>() / (self.period as f64);
-		let deviation = (value - self.mean).abs();
-		self.mean_buffer[self.mean_head] = deviation;
+		
+		// Calculate deviation of current value from rolling mean
+		// We're maintaining a rolling window of deviations
+		let new_deviation = (value - self.mean).abs();
+		
+		// Add new deviation to deviation buffer
+		self.mean_buffer[self.mean_head] = new_deviation;
 		self.mean_head = (self.mean_head + 1) % self.period;
+		
+		// We need two full windows: one for mean, one for deviations
 		if !self.mean_filled && self.mean_head == 0 {
 			self.mean_filled = true;
 		}
 		if !self.mean_filled {
 			return None;
 		}
+		
+		// Calculate rolling mean of deviations
 		self.mad = self.mean_buffer.iter().copied().sum::<f64>() / (self.period as f64);
 		Some(self.mad)
 	}

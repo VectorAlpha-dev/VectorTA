@@ -715,18 +715,29 @@ impl AroonOscStream {
 		Some(self.calc_ring_fast())
 	}
 	#[inline(always)]
-	fn calc_ring(&self) -> f64 {
+	fn update_highest_idx(&mut self) {
 		let w = self.length + 1;
-		let mut hi = self.high_buffer[self.head];
-		let mut lo = self.low_buffer[self.head];
-		let mut hi_i = 0usize;
-		let mut lo_i = 0usize;
-		for i in 1..w {
-			let idx = (self.head + i) % w;
-			let h = self.high_buffer[idx];
-			if h > hi { hi = h; hi_i = i; }
-			let l = self.low_buffer[idx];
-			if l < lo { lo = l; lo_i = i; }
+		let mut highest = f64::NEG_INFINITY;
+		let mut highest_idx = 0;
+		for i in 0..w {
+			if self.high_buffer[i] >= highest {
+				highest = self.high_buffer[i];
+				highest_idx = i;
+			}
+		}
+		self.highest_idx = highest_idx;
+	}
+	
+	#[inline(always)]
+	fn update_lowest_idx(&mut self) {
+		let w = self.length + 1;
+		let mut lowest = f64::INFINITY;
+		let mut lowest_idx = 0;
+		for i in 0..w {
+			if self.low_buffer[i] <= lowest {
+				lowest = self.low_buffer[i];
+				lowest_idx = i;
+			}
 		}
 		self.lowest_idx = lowest_idx;
 	}
@@ -753,12 +764,6 @@ impl AroonOscStream {
 		let up = (self.length as f64 - offset_highest as f64) * inv_length * 100.0;
 		let down = (self.length as f64 - offset_lowest as f64) * inv_length * 100.0;
 		up - down
-	}
-	
-	// Keep original for compatibility if needed
-	#[inline(always)]
-	fn calc_ring(&self) -> f64 {
-		self.calc_ring_fast()
 	}
 }
 

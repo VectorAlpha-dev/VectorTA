@@ -356,7 +356,7 @@ fn maaq_prepare<'a>(
 	if period == 0 || fast_p == 0 || slow_p == 0 {
 		return Err(MaaqError::ZeroPeriods { period, fast_p, slow_p });
 	}
-	if period > len {
+	if period >= len {
 		return Err(MaaqError::InvalidPeriod { period, data_len: len });
 	}
 	if len - first < period {
@@ -383,8 +383,8 @@ pub fn maaq_with_kernel(input: &MaaqInput, kernel: Kernel) -> Result<MaaqOutput,
 
 	maaq_compute_into(data, period, fast_p, slow_p, first, chosen, &mut out)?;
 
-	// ALMA parity: restore NaN prefix (AVX implementations may have written raw prices)
-	let warmup_end = first + period - 1;
+	// ALMA parity: restore NaN prefix (implementations may have written raw prices)
+	let warmup_end = first + period;
 	for v in &mut out[..warmup_end] {
 		*v = f64::NAN;
 	}
@@ -405,7 +405,7 @@ pub fn maaq_scalar(
 	let fast_sc = 2.0 / (fast_p as f64 + 1.0);
 	let slow_sc = 2.0 / (slow_p as f64 + 1.0);
 
-	// ring buffer of |Δ| for the current window ending at i = first + period - 1
+	// ring buffer of |Δ| for the current window
 	let mut diffs = vec![0.0f64; period];
 	let mut vol_sum = 0.0;
 	// fill diffs[1..period-1] over data[first..first+period-1]
@@ -415,10 +415,23 @@ pub fn maaq_scalar(
 		vol_sum += d;
 	}
 
-	// first computable index
-	let i0 = first + period - 1;
-	let mut prev_val = data[i0 - 1];
+	// Copy raw prices to warmup area (to match AVX2)
+	for i in first..(first + period).min(len) {
+		out[i] = data[i];
+	}
 
+	// first computable index (at period, not period-1, to match AVX2)
+	let i0 = first + period;
+	if i0 >= len {
+		return Ok(());
+	}
+
+	// Add the final diff to complete the window
+	let new_diff = (data[i0] - data[i0 - 1]).abs();
+	diffs[0] = new_diff;
+	vol_sum += new_diff;
+
+	let mut prev_val = data[i0 - 1];
 	let er0 = if vol_sum > f64::EPSILON { (data[i0] - data[first]).abs() / vol_sum } else { 0.0 };
 	let mut sc = fast_sc.mul_add(er0, slow_sc);
 	sc *= sc;
@@ -580,24 +593,32 @@ impl MaaqStream {
 	}
 	#[inline(always)]
 	pub fn update(&mut self, value: f64) -> Option<f64> {
-		let prev = if self.count > 0 {
-			self.buffer[(self.head + self.period - 1) % self.period]
-		} else {
-			value
-		};
+		// During warmup, just return the raw value
+		if self.count < self.period {
+			let prev = if self.count > 0 {
+				self.buffer[(self.head + self.period - 1) % self.period]
+			} else {
+				value
+			};
+			let d = (value - prev).abs();
+			self.buffer[self.head] = value;
+			self.diff[self.head] = d;
+			self.head = (self.head + 1) % self.period;
+			self.count += 1;
+			self.last = value;
+			if self.count == self.period {
+				self.filled = true;
+			}
+			return Some(value); // Return raw values during warmup
+		}
+		
+		// After warmup, compute MAAQ
+		let prev = self.buffer[(self.head + self.period - 1) % self.period];
 		let old_value = self.buffer[self.head];
 		let d = (value - prev).abs();
 		self.buffer[self.head] = value;
 		self.diff[self.head] = d;
 		self.head = (self.head + 1) % self.period;
-		self.count += 1;
-		if !self.filled {
-			self.last = value;
-			if self.head == 0 {
-				self.filled = true;
-			}
-			return Some(value); // MAAQ returns raw values during warmup
-		}
 		let sum: f64 = self.diff.iter().sum();
 		let noise = sum;
 		let signal = (value - old_value).abs();

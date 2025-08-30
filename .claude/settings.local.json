@@ -374,7 +374,13 @@
       "Bash(.venvScriptspython.exe -m pytest tests/python/test_epma.py -v)",
       "Bash(.venvScriptspython.exe -m pytest tests/python/test_cwma.py -v)",
       "Bash(./test_cwma_impl.exe)",
-      "Bash(.venvScriptspython.exe -m pytest tests/python/test_cwma.py::TestCwma::test_cwma_accuracy -xvs)"
+      "Bash(.venvScriptspython.exe -m pytest tests/python/test_cwma.py::TestCwma::test_cwma_accuracy -xvs)",
+      "Bash(echo \"Exit code: $?\")",
+      "Bash(./test_cwma_period2.exe)",
+      "Bash(./test_cwma_batch_period2.exe)",
+      "Bash(RUST_BACKTRACE=1 cargo test --features nightly-avx --lib indicators::dec_osc::tests::check_dec_osc_property)",
+      "Bash(RUST_BACKTRACE=1 cargo test --features nightly-avx --lib indicators::moving_averages::mwdx::tests::check_mwdx_property_scalar_f64 -- --nocapture)",
+      "Bash(set RUST_BACKTRACE=1)"
     ],
     "deny": [],
     "defaultMode": "acceptEdits"
