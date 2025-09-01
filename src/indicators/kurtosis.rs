@@ -157,6 +157,8 @@ impl KurtosisBuilder {
 
 #[derive(Debug, Error)]
 pub enum KurtosisError {
+	#[error("kurtosis: Input data slice is empty.")]
+	EmptyInputData,
 	#[error("kurtosis: All values are NaN.")]
 	AllValuesNaN,
 	#[error("kurtosis: Invalid period: period = {period}, data length = {data_len}")]
@@ -174,6 +176,10 @@ pub fn kurtosis(input: &KurtosisInput) -> Result<KurtosisOutput, KurtosisError> 
 
 pub fn kurtosis_with_kernel(input: &KurtosisInput, kernel: Kernel) -> Result<KurtosisOutput, KurtosisError> {
 	let data: &[f64] = input.as_ref();
+
+	if data.is_empty() {
+		return Err(KurtosisError::EmptyInputData);
+	}
 
 	let first = data
 		.iter()
@@ -216,6 +222,10 @@ pub fn kurtosis_with_kernel(input: &KurtosisInput, kernel: Kernel) -> Result<Kur
 #[inline]
 pub fn kurtosis_into_slice(dst: &mut [f64], input: &KurtosisInput, kernel: Kernel) -> Result<(), KurtosisError> {
 	let data: &[f64] = input.as_ref();
+	
+	if data.is_empty() {
+		return Err(KurtosisError::EmptyInputData);
+	}
 	
 	let first = data
 		.iter()
@@ -1595,6 +1605,7 @@ pub struct KurtosisBatchConfig {
 pub struct KurtosisBatchJsOutput {
 	pub values: Vec<f64>,
 	pub combos: Vec<KurtosisParams>,
+	pub periods: Vec<usize>,
 	pub rows: usize,
 	pub cols: usize,
 }
@@ -1614,6 +1625,7 @@ pub fn kurtosis_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValu
 
 	let js_output = KurtosisBatchJsOutput {
 		values: output.values,
+		periods: output.combos.iter().map(|c| c.period.unwrap()).collect(),
 		combos: output.combos,
 		rows: output.rows,
 		cols: output.cols,

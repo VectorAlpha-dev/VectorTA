@@ -707,9 +707,22 @@ fn cci_batch_inner_into(
 		_ => unreachable!(),
 	};
 
-	// Note: NaN prefix initialization is now handled in cci_batch_inner
-	// We just need to convert the output slice to MaybeUninit for the row processing
+	// Initialize NaN prefixes for warmup periods
+	let warm: Vec<usize> = combos
+		.iter()
+		.map(|c| first + c.period.unwrap() - 1)
+		.collect();
+	
+	// Convert output slice to MaybeUninit for initialization
 	let out_uninit = unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len()) };
+	
+	// Initialize the NaN prefixes row-wise
+	for (row, &warmup) in warm.iter().enumerate() {
+		let row_start = row * cols;
+		for col in 0..warmup.min(cols) {
+			out_uninit[row_start + col].write(f64::NAN);
+		}
+	}
 
 	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
 		let period = combos[row].period.unwrap();

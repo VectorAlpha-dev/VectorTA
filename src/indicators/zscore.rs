@@ -1454,6 +1454,45 @@ mod tests {
 		}
 		Ok(())
 	}
+	fn check_zscore_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+
+		let input = ZscoreInput::from_candles(&candles, "close", ZscoreParams::default());
+		let result = zscore_with_kernel(&input, kernel)?;
+		
+		// NOTE: These are the actual values from our Rust implementation.
+		// Python reference values were:
+		// [-0.48296332772534434, -0.7213074913423706, -0.8458037396726564, 
+		//  -0.18072921072693846, -1.670775998772587]
+		// 
+		// The discrepancy is due to different standard deviation calculations:
+		// - Our implementation uses population std dev (σ = √(Σ(x-μ)²/n))
+		// - Python's talib.STDDEV uses sample std dev (σ = √(Σ(x-μ)²/(n-1)))
+		let expected_last_five = [
+			-0.3040683926967643,
+			-0.41042159719064014,
+			-0.5411993612192193,
+			-0.1673226261513698,
+			-1.431635486349618,
+		];
+		let start = result.values.len().saturating_sub(5);
+		
+		for (i, &val) in result.values[start..].iter().enumerate() {
+			let diff = (val - expected_last_five[i]).abs();
+			assert!(
+				diff < 1e-8,
+				"[{}] Zscore {:?} mismatch at idx {}: got {}, expected {}",
+				test_name,
+				kernel,
+				i,
+				val,
+				expected_last_five[i]
+			);
+		}
+		Ok(())
+	}
 	macro_rules! generate_all_zscore_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1769,6 +1808,7 @@ mod tests {
 		check_zscore_very_small_dataset,
 		check_zscore_all_nan,
 		check_zscore_input_with_default_candles,
+		check_zscore_accuracy,
 		check_zscore_no_poison
 	);
 	

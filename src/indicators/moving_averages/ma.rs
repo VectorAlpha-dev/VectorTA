@@ -1517,8 +1517,7 @@ pub fn ma_with_kernel<'a>(
 		}
 
 		_ => {
-			// Default to SMA for invalid MA types
-			ma_with_kernel("sma", data, period, kernel)
+			return Err(format!("Unknown moving average type: {}", ma_type).into());
 		}
 	}
 }
@@ -1541,11 +1540,23 @@ pub fn ma_py<'py>(
 	// Get Vec<f64> from Rust function
 	let result_vec: Vec<f64> = py
 		.allow_threads(|| -> Result<Vec<f64>, Box<dyn Error + Send + Sync>> {
-			ma_with_kernel(ma_type, MaData::Slice(slice_in), period, kern).map_err(
-				|e| -> Box<dyn Error + Send + Sync> {
-					Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
-				},
-			)
+			// Try the requested MA type first
+			match ma_with_kernel(ma_type, MaData::Slice(slice_in), period, kern) {
+				Ok(result) => Ok(result),
+				Err(e) => {
+					// If it's an unknown MA type error, default to SMA
+					if e.to_string().contains("Unknown moving average type") {
+						ma_with_kernel("sma", MaData::Slice(slice_in), period, kern).map_err(
+							|e| -> Box<dyn Error + Send + Sync> {
+								Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+							},
+						)
+					} else {
+						// For other errors, propagate them
+						Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())) as Box<dyn Error + Send + Sync>)
+					}
+				}
+			}
 		})
 		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
@@ -1556,7 +1567,19 @@ pub fn ma_py<'py>(
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = "ma")]
 pub fn ma_js(data: &[f64], ma_type: &str, period: usize) -> Result<Vec<f64>, JsValue> {
-	ma(ma_type, MaData::Slice(data), period).map_err(|e| JsValue::from_str(&e.to_string()))
+	// Try the requested MA type first
+	match ma(ma_type, MaData::Slice(data), period) {
+		Ok(result) => Ok(result),
+		Err(e) => {
+			// If it's an unknown MA type error, default to SMA
+			if e.to_string().contains("Unknown moving average type") {
+				ma("sma", MaData::Slice(data), period).map_err(|e| JsValue::from_str(&e.to_string()))
+			} else {
+				// For other errors, propagate them
+				Err(JsValue::from_str(&e.to_string()))
+			}
+		}
+	}
 }
 
 #[cfg(test)]

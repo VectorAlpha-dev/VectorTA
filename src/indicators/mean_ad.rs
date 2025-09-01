@@ -460,15 +460,21 @@ fn mean_ad_batch_inner_into(
 	let rows = combos.len();
 	let cols = data.len();
 	
+	// Detect best kernel if Auto is specified
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+	
 	let do_row = |row: usize, out_row: &mut [f64]| {
 		let period = combos[row].period.unwrap();
-		match kern {
+		match chosen {
 			Kernel::Scalar => mean_ad_row_scalar(data, first, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx2 => mean_ad_row_avx2(data, first, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 => mean_ad_row_avx512(data, first, period, out_row),
-			_ => unreachable!(),
+			_ => mean_ad_row_scalar(data, first, period, out_row),
 		}
 	};
 	
@@ -532,15 +538,21 @@ fn mean_ad_batch_inner(
 	let values_ptr = buf_guard.as_mut_ptr() as *mut f64;
 	let values_slice: &mut [f64] = unsafe { core::slice::from_raw_parts_mut(values_ptr, buf_guard.len()) };
 
+	// Detect best kernel if Auto is specified
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+
 	let do_row = |row: usize, out_row: &mut [f64]| {
 		let period = combos[row].period.unwrap();
-		match kern {
+		match chosen {
 			Kernel::Scalar => mean_ad_row_scalar(data, first, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx2 => mean_ad_row_avx2(data, first, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 => mean_ad_row_avx512(data, first, period, out_row),
-			_ => unreachable!(),
+			_ => mean_ad_row_scalar(data, first, period, out_row),
 		}
 	};
 	if parallel {

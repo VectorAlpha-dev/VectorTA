@@ -313,43 +313,179 @@ pub fn vpwma_scalar(
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn vpwma_avx512(data: &[f64], weights: &[f64], period: usize, first_valid: usize, inv_norm: f64, out: &mut [f64]) {
-	if period <= 32 {
-		unsafe { vpwma_avx512_short(data, weights, period, first_valid, inv_norm, out) }
-	} else {
-		unsafe { vpwma_avx512_long(data, weights, period, first_valid, inv_norm, out) }
-	}
+	unsafe { vpwma_avx512_core(data, weights, period, first_valid, inv_norm, out) }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn vpwma_avx2(data: &[f64], weights: &[f64], period: usize, first_valid: usize, inv_norm: f64, out: &mut [f64]) {
-	vpwma_scalar(data, weights, period, first_valid, inv_norm, out);
-}
+	let len = data.len();
+	let win_len = period - 1;
+	if len == 0 || win_len == 0 { return; }
 
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[target_feature(enable = "avx512f,fma")]
-unsafe fn vpwma_avx512_short(
-	data: &[f64],
-	weights: &[f64],
-	period: usize,
-	first_valid: usize,
-	inv_norm: f64,
-	out: &mut [f64],
-) {
-	vpwma_scalar(data, weights, period, first_valid, inv_norm, out);
+	// Build reversed weights so that we can dot-product with a forward window
+	let mut wrev: Vec<f64> = Vec::with_capacity(win_len);
+	unsafe { wrev.set_len(win_len); }
+	for j in 0..win_len {
+		unsafe { *wrev.get_unchecked_mut(j) = *weights.get_unchecked(win_len - 1 - j); }
+	}
+
+    const STEP: usize = 4;
+    let chunks = win_len / STEP;
+    let tail = win_len % STEP;
+    let tail_mask = match tail {
+        0 => _mm256_setzero_si256(),
+        1 => _mm256_setr_epi64x(-1, 0, 0, 0),
+        2 => _mm256_setr_epi64x(-1, -1, 0, 0),
+        3 => _mm256_setr_epi64x(-1, -1, -1, 0),
+        _ => unreachable!(),
+    };
+
+    // Preload weight registers
+    const MAX_CHUNKS: usize = 1024;
+    debug_assert!(chunks + (tail != 0) as usize <= MAX_CHUNKS);
+    let mut wregs: [core::mem::MaybeUninit<__m256d>; MAX_CHUNKS] = core::mem::MaybeUninit::uninit().assume_init();
+    for blk in 0..chunks {
+        wregs[blk].as_mut_ptr().write(_mm256_loadu_pd(wrev.as_ptr().add(blk * STEP)));
+    }
+    let w_tail = if tail != 0 {
+        _mm256_maskload_pd(wrev.as_ptr().add(chunks * STEP), tail_mask)
+    } else { _mm256_setzero_pd() };
+    let wregs: &[__m256d] = core::slice::from_raw_parts(wregs.as_ptr() as *const __m256d, chunks);
+
+    let paired = chunks & !3;
+    for i in (first_valid + win_len)..len {
+        let start = i + 1 - win_len;
+        _mm_prefetch(data.as_ptr().add(start + 64) as *const i8, _MM_HINT_T0);
+
+        // 4-way unrolled accumulators
+        let mut s0 = _mm256_setzero_pd();
+        let mut s1 = _mm256_setzero_pd();
+        let mut s2 = _mm256_setzero_pd();
+        let mut s3 = _mm256_setzero_pd();
+
+        let mut blk = 0;
+        while blk < paired {
+            let d0 = _mm256_loadu_pd(data.as_ptr().add(start + (blk + 0) * STEP));
+            let d1 = _mm256_loadu_pd(data.as_ptr().add(start + (blk + 1) * STEP));
+            let d2 = _mm256_loadu_pd(data.as_ptr().add(start + (blk + 2) * STEP));
+            let d3 = _mm256_loadu_pd(data.as_ptr().add(start + (blk + 3) * STEP));
+            s0 = _mm256_fmadd_pd(d0, *wregs.get_unchecked(blk + 0), s0);
+            s1 = _mm256_fmadd_pd(d1, *wregs.get_unchecked(blk + 1), s1);
+            s2 = _mm256_fmadd_pd(d2, *wregs.get_unchecked(blk + 2), s2);
+            s3 = _mm256_fmadd_pd(d3, *wregs.get_unchecked(blk + 3), s3);
+            blk += 4;
+        }
+        for r in blk..chunks {
+            let d = _mm256_loadu_pd(data.as_ptr().add(start + r * STEP));
+            s0 = _mm256_fmadd_pd(d, *wregs.get_unchecked(r), s0);
+        }
+        if tail != 0 {
+            let d_tail = _mm256_maskload_pd(data.as_ptr().add(start + chunks * STEP), tail_mask);
+            s0 = _mm256_fmadd_pd(d_tail, w_tail, s0);
+        }
+
+        // collapse accumulators and horizontal sum
+        let sum01 = _mm256_add_pd(s0, s1);
+        let sum23 = _mm256_add_pd(s2, s3);
+        let acc = _mm256_add_pd(sum01, sum23);
+        let hi = _mm256_extractf128_pd(acc, 1);
+        let lo = _mm256_castpd256_pd128(acc);
+        let sum2 = _mm_add_pd(hi, lo);
+        let sum1 = _mm_add_pd(sum2, _mm_unpackhi_pd(sum2, sum2));
+        let sum = _mm_cvtsd_f64(sum1);
+        *out.get_unchecked_mut(i) = sum * inv_norm;
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,avx512dq,fma")]
-unsafe fn vpwma_avx512_long(
-	data: &[f64],
-	weights: &[f64],
-	period: usize,
-	first_valid: usize,
-	inv_norm: f64,
-	out: &mut [f64],
+unsafe fn vpwma_avx512_core(
+    data: &[f64],
+    weights: &[f64],
+    period: usize,
+    first_valid: usize,
+    inv_norm: f64,
+    out: &mut [f64],
 ) {
-	vpwma_scalar(data, weights, period, first_valid, inv_norm, out);
+    #[inline]
+    unsafe fn hsum_pd_zmm(v: __m512d) -> f64 {
+        let hi256 = _mm512_extractf64x4_pd(v, 1);
+        let lo256 = _mm512_castpd512_pd256(v);
+        let sum256 = _mm256_add_pd(hi256, lo256);
+        let hi128 = _mm256_extractf128_pd(sum256, 1);
+        let lo128 = _mm256_castpd256_pd128(sum256);
+        let sum128 = _mm_add_pd(hi128, lo128);
+        let hi64 = _mm_unpackhi_pd(sum128, sum128);
+        let sum64 = _mm_add_sd(sum128, hi64);
+        _mm_cvtsd_f64(sum64)
+    }
+
+    let len = data.len();
+    let win_len = period - 1;
+    if len == 0 || win_len == 0 { return; }
+
+    // Build reversed weights
+    let mut wrev: Vec<f64> = Vec::with_capacity(win_len);
+    wrev.set_len(win_len);
+    for j in 0..win_len {
+        *wrev.get_unchecked_mut(j) = *weights.get_unchecked(win_len - 1 - j);
+    }
+
+    const STEP: usize = 8;
+    let chunks = win_len / STEP;
+    let tail = win_len % STEP;
+    let tmask: __mmask8 = (1u8 << tail).wrapping_sub(1);
+
+    // Preload weight registers
+    const MAX_CHUNKS: usize = 512;
+    debug_assert!(chunks + (tail != 0) as usize <= MAX_CHUNKS);
+    let mut wregs: [core::mem::MaybeUninit<__m512d>; MAX_CHUNKS] = core::mem::MaybeUninit::uninit().assume_init();
+    for blk in 0..chunks {
+        wregs[blk].as_mut_ptr().write(_mm512_loadu_pd(wrev.as_ptr().add(blk * STEP)));
+    }
+    if tail != 0 {
+        wregs[chunks]
+            .as_mut_ptr()
+            .write(_mm512_maskz_loadu_pd(tmask, wrev.as_ptr().add(chunks * STEP)));
+    }
+    let wregs: &[__m512d] = core::slice::from_raw_parts(
+        wregs.as_ptr() as *const __m512d,
+        chunks + (tail != 0) as usize,
+    );
+
+    let paired = chunks & !3;
+    for i in (first_valid + win_len)..len {
+        let start = i + 1 - win_len;
+        _mm_prefetch(data.as_ptr().add(start + 128) as *const i8, _MM_HINT_T0);
+
+        let mut s0 = _mm512_setzero_pd();
+        let mut s1 = _mm512_setzero_pd();
+        let mut s2 = _mm512_setzero_pd();
+        let mut s3 = _mm512_setzero_pd();
+        let mut blk = 0;
+        while blk < paired {
+            let d0 = _mm512_loadu_pd(data.as_ptr().add(start + (blk + 0) * STEP));
+            let d1 = _mm512_loadu_pd(data.as_ptr().add(start + (blk + 1) * STEP));
+            let d2 = _mm512_loadu_pd(data.as_ptr().add(start + (blk + 2) * STEP));
+            let d3 = _mm512_loadu_pd(data.as_ptr().add(start + (blk + 3) * STEP));
+            s0 = _mm512_fmadd_pd(d0, *wregs.get_unchecked(blk + 0), s0);
+            s1 = _mm512_fmadd_pd(d1, *wregs.get_unchecked(blk + 1), s1);
+            s2 = _mm512_fmadd_pd(d2, *wregs.get_unchecked(blk + 2), s2);
+            s3 = _mm512_fmadd_pd(d3, *wregs.get_unchecked(blk + 3), s3);
+            blk += 4;
+        }
+        for r in blk..chunks {
+            let d = _mm512_loadu_pd(data.as_ptr().add(start + r * STEP));
+            s0 = _mm512_fmadd_pd(d, *wregs.get_unchecked(r), s0);
+        }
+        if tail != 0 {
+            let d_tail = _mm512_maskz_loadu_pd(tmask, data.as_ptr().add(start + chunks * STEP));
+            s0 = _mm512_fmadd_pd(d_tail, *wregs.get_unchecked(chunks), s0);
+        }
+        let sum = hsum_pd_zmm(_mm512_add_pd(_mm512_add_pd(s0, s1), _mm512_add_pd(s2, s3)));
+        *out.get_unchecked_mut(i) = sum * inv_norm;
+    }
 }
 
 // ------- 3) VpwmaStream (streaming “online” version) -------
@@ -899,62 +1035,145 @@ unsafe fn vpwma_row_scalar(
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn vpwma_row_avx2(
-	data: &[f64],
-	first: usize,
-	period: usize,
-	stride: usize,
-	w_ptr: *const f64,
-	inv_n: f64,
-	out: &mut [f64],
+    data: &[f64],
+    first: usize,
+    period: usize,
+    stride: usize,
+    w_ptr: *const f64,
+    inv_n: f64,
+    out: &mut [f64],
 ) {
-	vpwma_row_scalar(data, first, period, stride, w_ptr, inv_n, out)
+    let len = data.len();
+    let win_len = period - 1;
+    if len == 0 || win_len == 0 { return; }
+
+    // Build reversed weights and preload weight registers
+    const STEP: usize = 4;
+    let chunks = win_len / STEP;
+    let tail = win_len % STEP;
+    let tail_mask = match tail {
+        0 => _mm256_setzero_si256(),
+        1 => _mm256_setr_epi64x(-1, 0, 0, 0),
+        2 => _mm256_setr_epi64x(-1, -1, 0, 0),
+        3 => _mm256_setr_epi64x(-1, -1, -1, 0),
+        _ => unreachable!(),
+    };
+
+    // Reverse weights into a temporary buffer
+    let mut wrev: Vec<f64> = Vec::with_capacity(win_len);
+    wrev.set_len(win_len);
+    for j in 0..win_len {
+        *wrev.get_unchecked_mut(j) = *w_ptr.add(win_len - 1 - j);
+    }
+
+    // Preload weight registers
+    const MAX_CHUNKS: usize = 1024;
+    debug_assert!(chunks <= MAX_CHUNKS);
+    let mut wregs: [core::mem::MaybeUninit<__m256d>; MAX_CHUNKS] = core::mem::MaybeUninit::uninit().assume_init();
+    for blk in 0..chunks {
+        wregs[blk].as_mut_ptr().write(_mm256_loadu_pd(wrev.as_ptr().add(blk * STEP)));
+    }
+    let w_tail = if tail != 0 {
+        _mm256_maskload_pd(wrev.as_ptr().add(chunks * STEP), tail_mask)
+    } else {
+        _mm256_setzero_pd()
+    };
+    let wregs: &[__m256d] = core::slice::from_raw_parts(wregs.as_ptr() as *const __m256d, chunks);
+
+    for i in (first + win_len)..len {
+        let start = i + 1 - win_len;
+        let mut acc = _mm256_setzero_pd();
+        for blk in 0..chunks {
+            let d = _mm256_loadu_pd(data.as_ptr().add(start + blk * STEP));
+            acc = _mm256_fmadd_pd(d, *wregs.get_unchecked(blk), acc);
+        }
+        if tail != 0 {
+            let d_tail = _mm256_maskload_pd(data.as_ptr().add(start + chunks * STEP), tail_mask);
+            acc = _mm256_fmadd_pd(d_tail, w_tail, acc);
+        }
+        let hi = _mm256_extractf128_pd(acc, 1);
+        let lo = _mm256_castpd256_pd128(acc);
+        let sum2 = _mm_add_pd(hi, lo);
+        let sum1 = _mm_add_pd(sum2, _mm_unpackhi_pd(sum2, sum2));
+        let sum = _mm_cvtsd_f64(sum1);
+        *out.get_unchecked_mut(i) = sum * inv_n;
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,fma,avx512dq")]
 pub unsafe fn vpwma_row_avx512(
-	data: &[f64],
-	first: usize,
-	period: usize,
-	stride: usize,
-	w_ptr: *const f64,
-	inv_n: f64,
-	out: &mut [f64],
+    data: &[f64],
+    first: usize,
+    period: usize,
+    stride: usize,
+    w_ptr: *const f64,
+    inv_n: f64,
+    out: &mut [f64],
 ) {
-	if period <= 32 {
-		vpwma_row_avx512_short(data, first, period, stride, w_ptr, inv_n, out);
-	} else {
-		vpwma_row_avx512_long(data, first, period, stride, w_ptr, inv_n, out);
-	}
-	_mm_sfence();
-}
+    let len = data.len();
+    let win_len = period - 1;
+    if len == 0 || win_len == 0 { return; }
 
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[target_feature(enable = "avx512f,fma")]
-unsafe fn vpwma_row_avx512_short(
-	data: &[f64],
-	first: usize,
-	period: usize,
-	_stride: usize,
-	w_ptr: *const f64,
-	inv_n: f64,
-	out: &mut [f64],
-) {
-	vpwma_row_scalar(data, first, period, _stride, w_ptr, inv_n, out)
-}
+    #[inline]
+    unsafe fn hsum_pd_zmm(v: __m512d) -> f64 {
+        let hi256 = _mm512_extractf64x4_pd(v, 1);
+        let lo256 = _mm512_castpd512_pd256(v);
+        let sum256 = _mm256_add_pd(hi256, lo256);
+        let hi128 = _mm256_extractf128_pd(sum256, 1);
+        let lo128 = _mm256_castpd256_pd128(sum256);
+        let sum128 = _mm_add_pd(hi128, lo128);
+        let hi64 = _mm_unpackhi_pd(sum128, sum128);
+        let sum64 = _mm_add_sd(sum128, hi64);
+        _mm_cvtsd_f64(sum64)
+    }
 
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[target_feature(enable = "avx512f,avx512dq,fma")]
-pub(crate) unsafe fn vpwma_row_avx512_long(
-	data: &[f64],
-	first: usize,
-	period: usize,
-	_stride: usize,
-	w_ptr: *const f64,
-	inv_n: f64,
-	out: &mut [f64],
-) {
-	vpwma_row_scalar(data, first, period, _stride, w_ptr, inv_n, out)
+    const STEP: usize = 8;
+    let chunks = win_len / STEP;
+    let tail = win_len % STEP;
+    let tmask: __mmask8 = (1u8 << tail).wrapping_sub(1);
+
+    // Build reversed weights into registers once
+    // Allocate on stack to avoid heap cost per row
+    const MAX_CHUNKS: usize = 512;
+    debug_assert!(chunks + (tail != 0) as usize <= MAX_CHUNKS);
+    let mut wregs: [core::mem::MaybeUninit<__m512d>; MAX_CHUNKS] = core::mem::MaybeUninit::uninit().assume_init();
+
+    // We must first materialize reversed weights into a temporary buffer
+    let mut wrev: Vec<f64> = Vec::with_capacity(win_len);
+    wrev.set_len(win_len);
+    for j in 0..win_len {
+        *wrev.get_unchecked_mut(j) = *w_ptr.add(win_len - 1 - j);
+    }
+
+    for blk in 0..chunks {
+        wregs[blk].as_mut_ptr().write(_mm512_loadu_pd(wrev.as_ptr().add(blk * STEP)));
+    }
+    if tail != 0 {
+        wregs[chunks]
+            .as_mut_ptr()
+            .write(_mm512_maskz_loadu_pd(tmask, wrev.as_ptr().add(chunks * STEP)));
+    }
+    let wregs: &[__m512d] = core::slice::from_raw_parts(
+        wregs.as_ptr() as *const __m512d,
+        chunks + (tail != 0) as usize,
+    );
+
+    for i in (first + win_len)..len {
+        let start = i + 1 - win_len;
+        let mut acc = _mm512_setzero_pd();
+        for blk in 0..chunks {
+            let d = _mm512_loadu_pd(data.as_ptr().add(start + blk * STEP));
+            acc = _mm512_fmadd_pd(d, *wregs.get_unchecked(blk), acc);
+        }
+        if tail != 0 {
+            let d_tail = _mm512_maskz_loadu_pd(tmask, data.as_ptr().add(start + chunks * STEP));
+            acc = _mm512_fmadd_pd(d_tail, *wregs.get_unchecked(chunks), acc);
+        }
+        let sum = hsum_pd_zmm(acc);
+        *out.get_unchecked_mut(i) = sum * inv_n;
+    }
+    _mm_sfence();
 }
 
 // ----- TESTS -----

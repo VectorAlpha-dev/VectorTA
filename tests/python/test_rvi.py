@@ -101,7 +101,7 @@ class TestRvi:
         """Test RVI with not enough valid data - mirrors check_rvi_not_enough_valid_data"""
         data = np.array([np.nan, 1.0, 2.0, 3.0])
         
-        with pytest.raises(ValueError, match="Not enough valid data"):
+        with pytest.raises(ValueError, match="Invalid period or ma_len"):
             ta_indicators.rvi(data, period=3, ma_len=5, matype=1, devtype=0)
     
     def test_rvi_empty_input(self):

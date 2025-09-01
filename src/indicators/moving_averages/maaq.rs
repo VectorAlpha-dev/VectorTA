@@ -384,7 +384,7 @@ pub fn maaq_with_kernel(input: &MaaqInput, kernel: Kernel) -> Result<MaaqOutput,
 	maaq_compute_into(data, period, fast_p, slow_p, first, chosen, &mut out)?;
 
 	// ALMA parity: restore NaN prefix (implementations may have written raw prices)
-	let warmup_end = first + period;
+	let warmup_end = first + period - 1;
 	for v in &mut out[..warmup_end] {
 		*v = f64::NAN;
 	}

@@ -297,15 +297,8 @@ pub fn linearreg_angle_avx512_long(data: &[f64], period: usize, first_valid: usi
 #[derive(Debug, Clone)]
 pub struct Linearreg_angleStream {
 	period: usize,
-	buffer: Vec<f64>,
-	head: usize,
-	filled: bool,
-	sum_x: f64,
-	sum_x_sqr: f64,
-	divisor: f64,
-	count: usize,  // Track total values seen for correct indexing
-	sum_y: f64,   // Running sum of y values
-	sum_kd: f64,  // Running sum of k*d values
+	buffer: Vec<f64>,  // Store all historical data for accurate calculation
+	params: Linearreg_angleParams,
 }
 
 impl Linearreg_angleStream {
@@ -315,63 +308,28 @@ impl Linearreg_angleStream {
 			return Err(Linearreg_angleError::InvalidPeriod { period, data_len: 0 });
 		}
 
-		let sum_x = (period * (period - 1)) as f64 * 0.5;
-		let sum_x_sqr = (period * (period - 1) * (2 * period - 1)) as f64 / 6.0;
-		let divisor = sum_x * sum_x - (period as f64) * sum_x_sqr;
-
 		Ok(Self {
 			period,
-			buffer: vec![f64::NAN; period],
-			head: 0,
-			filled: false,
-			sum_x,
-			sum_x_sqr,
-			divisor,
-			count: 0,
-			sum_y: 0.0,
-			sum_kd: 0.0,
+			buffer: Vec::new(),  // Start with empty buffer that will grow
+			params,
 		})
 	}
 	#[inline(always)]
 	pub fn update(&mut self, value: f64) -> Option<f64> {
-		let old_value = self.buffer[self.head];
-		self.buffer[self.head] = value;
-		self.head = (self.head + 1) % self.period;
-		self.count += 1;
-
-		if !self.filled && self.head == 0 {
-			self.filled = true;
-		}
+		// Append new value to buffer (grows unbounded for accuracy)
+		self.buffer.push(value);
 		
-		if self.filled {
-			// Update running sums incrementally
-			// Remove old value contribution
-			if !old_value.is_nan() {
-				self.sum_y -= old_value;
-			}
-			// Add new value contribution  
-			self.sum_y += value;
-			
-			// For sum_kd: when window slides, all indices effectively decrease by 1
-			// So we subtract sum_y (equivalent to decreasing all indices by 1)
-			// Then add the new value at index (period-1)
-			self.sum_kd -= self.sum_y;
-			self.sum_kd += value * (self.period as f64 - 1.0);
-		} else {
-			// Still filling the buffer - just accumulate
-			if !value.is_nan() {
-				self.sum_y += value;
-				// Position in buffer is (self.count - 1)
-				self.sum_kd += value * ((self.count - 1) as f64);
-			}
+		// Need enough data for the calculation
+		if self.buffer.len() < self.period {
 			return None;
 		}
 		
-		let current_idx = self.count - 1;
-		let start_idx = current_idx - self.period + 1;
-		let sum_xy = (current_idx as f64) * self.sum_y - self.sum_kd - (start_idx as f64) * self.sum_y;
-		let slope = ((self.period as f64) * sum_xy - self.sum_x * self.sum_y) / self.divisor;
-		Some(slope.atan() * (180.0 / PI))
+		// Recalculate linearreg_angle on full buffer (O(n) but accurate)
+		let input = Linearreg_angleInput::from_slice(&self.buffer, self.params.clone());
+		match linearreg_angle(&input) {
+			Ok(res) => res.values.last().cloned(),
+			Err(_) => None,
+		}
 	}
 }
 

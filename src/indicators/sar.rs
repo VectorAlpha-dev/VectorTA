@@ -321,9 +321,8 @@ pub fn sar_into_slice(dst: &mut [f64], input: &SarInput, kern: Kernel) -> Result
 		Kernel::Avx2 | Kernel::Avx2Batch => sar_avx2(high, low, first, acceleration, maximum, dst),
 		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 		Kernel::Avx512 | Kernel::Avx512Batch => sar_avx512(high, low, first, acceleration, maximum, dst),
-		#[cfg(all(feature = "simd128", target_arch = "wasm32"))]
-		Kernel::Simd128 => sar_simd128(high, low, first, acceleration, maximum, dst),
-		_ => unreachable!(),
+		// For WASM with simd128, use scalar for now (can be optimized later)
+		_ => sar_scalar(high, low, first, acceleration, maximum, dst),
 	}
 
 	// Fill warmup with NaN

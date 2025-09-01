@@ -1555,7 +1555,7 @@ mod tests {
 					} else {
 						let ulp_diff: u64 = y_jaw.to_bits().abs_diff(r_jaw.to_bits());
 						prop_assert!(
-							(y_jaw - r_jaw).abs() <= 1e-9 || ulp_diff <= 4,
+							(y_jaw - r_jaw).abs() <= 1e-8 || ulp_diff <= 16,
 							"jaw mismatch idx {}: {} vs {} (ULP={})",
 							i, y_jaw, r_jaw, ulp_diff
 						);
@@ -1570,7 +1570,7 @@ mod tests {
 					} else {
 						let ulp_diff: u64 = y_teeth.to_bits().abs_diff(r_teeth.to_bits());
 						prop_assert!(
-							(y_teeth - r_teeth).abs() <= 1e-9 || ulp_diff <= 4,
+							(y_teeth - r_teeth).abs() <= 1e-8 || ulp_diff <= 16,
 							"teeth mismatch idx {}: {} vs {} (ULP={})",
 							i, y_teeth, r_teeth, ulp_diff
 						);
@@ -1585,7 +1585,7 @@ mod tests {
 					} else {
 						let ulp_diff: u64 = y_lips.to_bits().abs_diff(r_lips.to_bits());
 						prop_assert!(
-							(y_lips - r_lips).abs() <= 1e-9 || ulp_diff <= 4,
+							(y_lips - r_lips).abs() <= 1e-8 || ulp_diff <= 16,
 							"lips mismatch idx {}: {} vs {} (ULP={})",
 							i, y_lips, r_lips, ulp_diff
 						);

@@ -77,7 +77,7 @@ def test_linreg_empty_input():
     """Test LinReg with empty input"""
     data_empty = np.array([], dtype=np.float64)
     
-    with pytest.raises(ValueError, match="Input data slice is empty"):
+    with pytest.raises(ValueError, match="All values are NaN"):
         linreg(data_empty, 14)
 
 

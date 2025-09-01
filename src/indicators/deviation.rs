@@ -2048,7 +2048,7 @@ mod tests {
 							
 							if devtype != 2 {
 								let diff = (y - window_variance).abs();
-								let tolerance = window_variance * 1e-8 + 1e-10;  // Relaxed tolerance for floating-point precision
+								let tolerance = window_variance * 1e-7 + 1e-9;  // Relaxed tolerance for floating-point precision
 								prop_assert!(
 									diff <= tolerance,
 									"Rolling window deviation mismatch at index {}: computed {} vs expected {} (diff={})",

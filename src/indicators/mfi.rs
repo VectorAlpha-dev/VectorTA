@@ -228,6 +228,12 @@ pub unsafe fn mfi_scalar(
 ) {
 	let len = typical_price.len();
 
+	// Initialize warmup period with NaN
+	let idx_mfi_start = first + period - 1;
+	for i in 0..idx_mfi_start.min(out.len()) {
+		out[i] = f64::NAN;
+	}
+
 	let mut pos_buf = vec![0.0; period];
 	let mut neg_buf = vec![0.0; period];
 	let mut pos_sum = 0.0;

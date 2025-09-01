@@ -284,7 +284,11 @@ fn tsi_compute_into_streaming(
 
 		// Always compute TSI when we have both EMAs, but respect warmup
 		if i >= warmup_end {
-			out[i] = if d2 == 0.0 { f64::NAN } else { 100.0 * (n2 / d2) };
+			out[i] = if d2 == 0.0 { 
+				f64::NAN 
+			} else { 
+				(100.0 * (n2 / d2)).clamp(-100.0, 100.0) 
+			};
 		}
 	}
 

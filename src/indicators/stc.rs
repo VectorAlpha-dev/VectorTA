@@ -881,13 +881,10 @@ pub struct StcStream {
 	pub k_period: usize,
 	pub d_period: usize,
 	buffer: Vec<f64>,
-	idx: usize,
-	filled: bool,
 	params: StcParams,
 	// Internal state for streaming calculations
-	// Note: Current implementation recalculates from buffer on each update
+	// Note: Current implementation recalculates from buffer on each update (O(n))
 	// Future optimization could maintain streaming state for each component
-	count: usize,
 }
 
 impl StcStream {
@@ -901,69 +898,36 @@ impl StcStream {
 			return Err(StcError::NotEnoughValidData { needed: 1, valid: 0 });
 		}
 		
-		let buffer_size = fast.max(slow).max(k).max(d);
-		
 		Ok(Self {
 			fast_period: fast,
 			slow_period: slow,
 			k_period: k,
 			d_period: d,
-			buffer: vec![f64::NAN; buffer_size],
-			idx: 0,
-			filled: false,
+			buffer: Vec::new(),  // Start with empty buffer that will grow
 			params,
-			count: 0,
 		})
 	}
 
 	#[inline(always)]
 	pub fn update(&mut self, value: f64) -> Option<f64> {
-		self.buffer[self.idx] = value;
-		self.idx = (self.idx + 1) % self.buffer.len();
-		self.count += 1;
+		// Append new value to buffer (grows unbounded for accuracy)
+		self.buffer.push(value);
 		
-		if !self.filled && self.idx == 0 {
-			self.filled = true;
-		}
-		
-		// Need enough data for the largest period
+		// Need enough data for the calculation
 		let min_data = self.fast_period
 			.max(self.slow_period)
 			.max(self.k_period)
 			.max(self.d_period);
-		if self.count < min_data {
+		
+		if self.buffer.len() < min_data {
 			return None;
 		}
 		
-		// Create a temporary working buffer on the stack for small buffer sizes
-		// For larger buffers, we reuse the pre-allocated buffers
-		if self.buffer.len() <= 256 {
-			// Stack allocation for small buffers
-			let mut temp_buffer = [0.0f64; 256];
-			let slice_len = self.buffer.len();
-			
-			// Copy data from circular buffer to linear buffer
-			let mut write_idx = 0;
-			let mut read_idx = self.idx;
-			for _ in 0..slice_len {
-				temp_buffer[write_idx] = self.buffer[read_idx];
-				write_idx += 1;
-				read_idx = (read_idx + 1) % slice_len;
-			}
-			
-			// Use the linear buffer
-			let linear_slice = &temp_buffer[..slice_len];
-			let input = StcInput::from_slice(linear_slice, self.params.clone());
-			match stc(&input) {
-				Ok(res) => res.values.last().cloned(),
-				Err(_) => None,
-			}
-		} else {
-			// For larger buffers, we need a different approach
-			// STC is complex enough that full streaming implementation would require
-			// maintaining state for multiple MAs and stochastic calculations
-			// For now, indicate that streaming is not supported for large windows
-			None
+		// Recalculate STC on full buffer (O(n) but accurate)
+		let input = StcInput::from_slice(&self.buffer, self.params.clone());
+		match stc(&input) {
+			Ok(res) => res.values.last().cloned(),
+			Err(_) => None,
 		}
 	}
 }

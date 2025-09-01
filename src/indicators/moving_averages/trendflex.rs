@@ -528,13 +528,14 @@ unsafe fn trendflex_avx512_into(
     ) {
         let n = x.len();
         if n == 0 { return; }
-        let mut prev2 = x[0];
-        let mut prev1 = if n > 1 { x[1] } else { x[0] };
+        let mut prev2 = *x.get_unchecked(0);
+        let mut prev1 = if n > 1 { *x.get_unchecked(1) } else { *x.get_unchecked(0) };
         let mut ring = vec![0.0f64; period];
         let mut sum = 0.0f64;
         let mut head = 0usize;
-        ring[head] = prev2; sum += prev2; head = (head + 1) % period;
-        if n > 1 { ring[head] = prev1; sum += prev1; head = (head + 1) % period; }
+        // seed first two entries
+        *ring.get_unchecked_mut(head) = prev2; sum += prev2; head += 1; if head == period { head = 0; }
+        if n > 1 { *ring.get_unchecked_mut(head) = prev1; sum += prev1; head += 1; if head == period { head = 0; } }
 
         let tp_f = period as f64;
         let inv_tp = 1.0 / tp_f;
@@ -542,36 +543,96 @@ unsafe fn trendflex_avx512_into(
 
         let mut i = 2usize;
         while i < n && i < period {
-            let cur = c * (x[i] + x[i-1]) + b * prev1 - a_sq * prev2;
+            let cur = c * (*x.get_unchecked(i) + *x.get_unchecked(i-1)) + b * prev1 - a_sq * prev2;
             prev2 = prev1; prev1 = cur;
             sum += cur;
-            ring[head] = cur; head = (head + 1) % period;
+            *ring.get_unchecked_mut(head) = cur; head += 1; if head == period { head = 0; }
             i += 1;
         }
+        // Heuristics
+        let use_stream = n >= 131072;
+        let use_unroll = n >= 262144;
+        // Unroll by 2 for better ILP (only on very large series)
+        if use_unroll {
+        while i + 1 < n {
+            _mm_prefetch(x.as_ptr().add(i + 32).cast(), _MM_HINT_T0);
+            // --- iteration i ---
+            let cur0 = c * (*x.get_unchecked(i) + *x.get_unchecked(i-1)) + b * prev1 - a_sq * prev2;
+            prev2 = prev1; prev1 = cur0;
+
+            let my_sum0 = (tp_f * cur0 - sum) * inv_tp;
+            // ms0 = 0.04*my_sum^2 + 0.96*ms_prev
+            let v0 = _mm_set_sd(my_sum0);
+            let sq0 = _mm_mul_sd(v0, v0);
+            let ms0 = _mm_fmadd_sd(_mm_set_sd(0.04), sq0, _mm_mul_sd(_mm_set_sd(0.96), _mm_set_sd(ms_prev)));
+            let ms0_s = _mm_cvtsd_f64(ms0);
+            ms_prev = ms0_s;
+            let out0 = if ms0_s != 0.0 {
+                let den0 = _mm_sqrt_sd(_mm_setzero_pd(), _mm_set_sd(ms0_s));
+                my_sum0 / _mm_cvtsd_f64(den0)
+            } else { 0.0 };
+            if use_stream {
+                _mm_stream_sd(out.get_unchecked_mut(out_off + i) as *mut f64, _mm_set_sd(out0));
+            } else {
+                *out.get_unchecked_mut(out_off + i) = out0;
+            }
+
+            let old0 = *ring.get_unchecked(head);
+            sum += cur0 - old0;
+            *ring.get_unchecked_mut(head) = cur0; head += 1; if head == period { head = 0; }
+
+            // --- iteration i+1 ---
+            let cur1 = c * (*x.get_unchecked(i+1) + *x.get_unchecked(i)) + b * prev1 - a_sq * prev2;
+            prev2 = prev1; prev1 = cur1;
+
+            let my_sum1 = (tp_f * cur1 - sum) * inv_tp;
+            let v1 = _mm_set_sd(my_sum1);
+            let sq1 = _mm_mul_sd(v1, v1);
+            let ms1 = _mm_fmadd_sd(_mm_set_sd(0.04), sq1, _mm_mul_sd(_mm_set_sd(0.96), _mm_set_sd(ms_prev)));
+            let ms1_s = _mm_cvtsd_f64(ms1);
+            ms_prev = ms1_s;
+            let out1 = if ms1_s != 0.0 {
+                let den1 = _mm_sqrt_sd(_mm_setzero_pd(), _mm_set_sd(ms1_s));
+                my_sum1 / _mm_cvtsd_f64(den1)
+            } else { 0.0 };
+            if use_stream {
+                _mm_stream_sd(out.get_unchecked_mut(out_off + i + 1) as *mut f64, _mm_set_sd(out1));
+            } else {
+                *out.get_unchecked_mut(out_off + i + 1) = out1;
+            }
+
+            let old1 = *ring.get_unchecked(head);
+            sum += cur1 - old1;
+            *ring.get_unchecked_mut(head) = cur1; head += 1; if head == period { head = 0; }
+
+            i += 2;
+        }
+        }
+        // leftover or non-unrolled path
         while i < n {
             _mm_prefetch(x.as_ptr().add(i + 32).cast(), _MM_HINT_T0);
-            let cur = c * (x[i] + x[i-1]) + b * prev1 - a_sq * prev2;
+            let cur = c * (*x.get_unchecked(i) + *x.get_unchecked(i-1)) + b * prev1 - a_sq * prev2;
             prev2 = prev1; prev1 = cur;
 
             let my_sum = (tp_f * cur - sum) * inv_tp;
             let v = _mm_set_sd(my_sum);
             let sq = _mm_mul_sd(v, v);
-            let s04 = _mm_mul_sd(_mm_set_sd(0.04), sq);
-            let s96 = _mm_mul_sd(_mm_set_sd(0.96), _mm_set_sd(ms_prev));
-            let ms_cur = _mm_add_sd(s04, s96);
-            let ms_current = _mm_cvtsd_f64(ms_cur);
-            ms_prev = ms_current;
-
-            let out_val = if ms_current != 0.0 {
-                let denom = _mm_sqrt_sd(_mm_setzero_pd(), _mm_set_sd(ms_current));
-                my_sum / _mm_cvtsd_f64(denom)
+            let ms = _mm_fmadd_sd(_mm_set_sd(0.04), sq, _mm_mul_sd(_mm_set_sd(0.96), _mm_set_sd(ms_prev)));
+            let ms_s = _mm_cvtsd_f64(ms);
+            ms_prev = ms_s;
+            let out_val = if ms_s != 0.0 {
+                let den = _mm_sqrt_sd(_mm_setzero_pd(), _mm_set_sd(ms_s));
+                my_sum / _mm_cvtsd_f64(den)
             } else { 0.0 };
-            _mm_stream_sd(out.get_unchecked_mut(out_off + i) as *mut f64, _mm_set_sd(out_val));
+            if use_stream {
+                _mm_stream_sd(out.get_unchecked_mut(out_off + i) as *mut f64, _mm_set_sd(out_val));
+            } else {
+                *out.get_unchecked_mut(out_off + i) = out_val;
+            }
 
-            let old = ring[head];
+            let old = *ring.get_unchecked(head);
             sum += cur - old;
-            ring[head] = cur;
-            head = (head + 1) % period;
+            *ring.get_unchecked_mut(head) = cur; head += 1; if head == period { head = 0; }
 
             i += 1;
         }

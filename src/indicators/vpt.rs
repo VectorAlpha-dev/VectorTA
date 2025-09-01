@@ -1,6 +1,12 @@
 //! # Volume Price Trend (VPT)
 //!
-//! Exact match for Jesse's implementation (shifted array approach).
+//! Implements the cumulative Volume Price Trend indicator, which accumulates
+//! volume-weighted price changes over time. This is the standard definition of VPT.
+//!
+//! Note: This implementation calculates cumulative VPT where each value is the
+//! running sum of all previous volume * (price_change / previous_price) values.
+//! Some implementations (like certain Python libraries) may use a non-cumulative
+//! version that only adds the current and previous period values.
 //!
 //! ## Parameters
 //! None (uses price/volume arrays).
@@ -924,6 +930,13 @@ mod tests {
 		let input = VptInput::from_candles(&candles, "close");
 		let output = vpt_with_kernel(&input, kernel)?;
 
+		// NOTE: The Rust implementation calculates cumulative VPT (standard definition)
+		// Python reference values were for a non-cumulative version:
+		// [-0.40358334248536065, -0.16292768139917702, -0.4792942916867958,
+		//  -0.1188231211518107, -3.3492674990910025]
+		// 
+		// Our implementation accumulates all historical VPT values, while the Python
+		// version only adds the current and previous period values.
 		let expected_last_five = [
 			-18292.323972247592,
 			-18292.510374716476,

@@ -416,7 +416,7 @@ class TestEri:
         close = test_data['close']
         
         # Test each MA type separately
-        ma_types = ["ema", "sma", "wma", "hma", "zlma"]
+        ma_types = ["ema", "sma", "wma", "hma", "zlema"]
         
         for ma_type in ma_types:
             result = ta_indicators.eri_batch(

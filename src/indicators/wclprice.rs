@@ -781,6 +781,39 @@ mod tests {
 		Ok(())
 	}
 	
+	fn check_wclprice_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		
+		let input = WclpriceInput::from_candles(&candles);
+		let result = wclprice_with_kernel(&input, kernel)?;
+		
+		// Reference values provided by user
+		let expected_last_five = [
+			59225.5,
+			59212.75,
+			59078.5,
+			59150.75,
+			58711.25,
+		];
+		
+		let start = result.values.len().saturating_sub(5);
+		for (i, &val) in result.values[start..].iter().enumerate() {
+			let diff = (val - expected_last_five[i]).abs();
+			assert!(
+				diff < 1e-8,
+				"[{}] WCLPRICE {:?} mismatch at idx {}: got {}, expected {}",
+				test_name,
+				kernel,
+				i,
+				val,
+				expected_last_five[i]
+			);
+		}
+		Ok(())
+	}
+	
 	#[cfg(debug_assertions)]
 	fn check_wclprice_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test_name);
@@ -1032,6 +1065,7 @@ mod tests {
 		check_wclprice_empty_data,
 		check_wclprice_all_nan,
 		check_wclprice_partial_nan,
+		check_wclprice_accuracy,
 		check_wclprice_no_poison
 	);
 	

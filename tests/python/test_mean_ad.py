@@ -131,10 +131,11 @@ class TestMean_Ad:
     
     def test_mean_ad_batch(self, test_data):
         """Test batch processing - mirrors check_batch_default_row"""
-        close = test_data['close']
+        # Use hl2 source to match expected values
+        hl2 = (test_data['high'] + test_data['low']) / 2
         
         result = ta_indicators.mean_ad_batch(
-            close,
+            hl2,
             period_range=(5, 5, 0)  # Default period only
         )
         
@@ -143,7 +144,7 @@ class TestMean_Ad:
         
         # Should have 1 combination (default params)
         assert result['values'].shape[0] == 1
-        assert result['values'].shape[1] == len(close)
+        assert result['values'].shape[1] == len(hl2)
         
         # Extract the single row
         default_row = result['values'][0]
