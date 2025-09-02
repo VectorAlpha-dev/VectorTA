@@ -468,6 +468,11 @@ fn mean_ad_batch_inner_into(
 	
 	let do_row = |row: usize, out_row: &mut [f64]| {
 		let period = combos[row].period.unwrap();
+		// Initialize warmup period with NaN
+		let warmup_end = first + 2 * period - 2;
+		for i in 0..warmup_end.min(out_row.len()) {
+			out_row[i] = f64::NAN;
+		}
 		match chosen {
 			Kernel::Scalar => mean_ad_row_scalar(data, first, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -546,6 +551,11 @@ fn mean_ad_batch_inner(
 
 	let do_row = |row: usize, out_row: &mut [f64]| {
 		let period = combos[row].period.unwrap();
+		// Initialize warmup period with NaN  
+		let warmup_end = first + 2 * period - 2;
+		for i in 0..warmup_end.min(out_row.len()) {
+			out_row[i] = f64::NAN;
+		}
 		match chosen {
 			Kernel::Scalar => mean_ad_row_scalar(data, first, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1524,78 +1534,80 @@ pub fn mean_ad_into_slice(
 		other => other,
 	};
 	
-	// Compute directly into dst - no intermediate allocation
-	unsafe {
-		let warmup_period = first + 2 * period - 2;
-		
-		// Helper functions already handle NaN initialization
-		
-		if first + period > data.len() {
-			return Ok(());
-		}
-		
-		// Use circular buffers for intermediate values
-		let mut mean_buffer = vec![0.0; period];
-		let mut deviation_buffer = vec![0.0; period];
-		let mut mean_idx = 0;
-		let mut dev_idx = 0;
-		
-		// Calculate initial rolling mean
-		let mut sum = 0.0;
-		for &v in &data[first..(first + period)] {
-			sum += v;
-		}
-		
-		// Process data using the appropriate kernel
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => {
-				// Inline the scalar implementation to write directly to dst
-				let inv_period = 1.0 / period as f64;
-				
-				// Sliding mean calculation
-				for i in first..data.len() {
-					if i >= first + period {
-						sum -= mean_buffer[mean_idx];
-						sum += data[i];
-					}
-					let mean = sum * inv_period;
-					mean_buffer[mean_idx] = data[i];
-					mean_idx = (mean_idx + 1) % period;
-					
-					// Calculate deviation once we have enough rolling means
-					if i >= first + period - 1 {
-						let mut dev_sum = 0.0;
-						
-						// Second pass: calculate mean absolute deviation
-						if i >= first + 2 * period - 2 {
-							for j in 0..period {
-								let dev_idx_j = (dev_idx + j) % period;
-								dev_sum += deviation_buffer[dev_idx_j];
-							}
-							dst[i] = dev_sum * inv_period;
-						}
-						
-						// Update deviation buffer
-						let idx = (i + 1).saturating_sub(period);
-						let deviation = (data[idx] - mean).abs();
-						deviation_buffer[dev_idx] = deviation;
-						dev_idx = (dev_idx + 1) % period;
-					}
-				}
-			}
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
-				// AVX kernels are stubs, use scalar
-				return mean_ad_into_slice(dst, input, Kernel::Scalar);
-			}
-			_ => unreachable!(),
-		}
+	// Fill entire output with NaN first
+	for v in dst.iter_mut() {
+		*v = f64::NAN;
 	}
 	
-	// Fill warmup with NaN
-	let warmup_period = first + 2 * period - 2;
-	for v in &mut dst[..warmup_period] {
-		*v = f64::NAN;
+	// Process data using the appropriate kernel
+	match chosen {
+		Kernel::Scalar | Kernel::ScalarBatch => {
+			// Use the same correct algorithm as mean_ad_scalar
+			let n = data.len();
+			
+			if first + period > n {
+				return Ok(());
+			}
+			
+			// Compute rolling SMA of prices
+			let mut sum = 0.0;
+			for i in first..(first + period) {
+				sum += data[i];
+			}
+			let mut sma = sum / (period as f64);
+			
+			// Circular buffer for residuals (pointwise absolute deviations)
+			let mut residual_buffer = vec![0.0; period];
+			let mut buffer_index = 0;
+			let mut residual_sum = 0.0;
+			
+			// Fill residual buffer for first period of SMAs
+			// Each residual is |x_t - SMA_t| where SMA_t is the SMA ending at time t
+			for t in (first + period - 1)..(first + 2 * period - 1).min(n) {
+				let residual = (data[t] - sma).abs();
+				residual_buffer[buffer_index] = residual;
+				buffer_index = (buffer_index + 1) % period;
+				residual_sum += residual;
+				
+				// Advance SMA for next time point if there's more data
+				if t + 1 < n && t + 1 >= first + period {
+					sum += data[t + 1] - data[t + 1 - period];
+					sma = sum / (period as f64);
+				}
+			}
+			
+			// First output after warmup period
+			let first_output = first + 2 * period - 2;
+			if first_output < n {
+				dst[first_output] = residual_sum / (period as f64);
+			}
+			
+			// Continue streaming for remaining data
+			for t in (first + 2 * period - 1)..n {
+				// Current residual against current SMA
+				let residual = (data[t] - sma).abs();
+				
+				// Update residual buffer and sum
+				residual_sum += residual - residual_buffer[buffer_index];
+				residual_buffer[buffer_index] = residual;
+				buffer_index = (buffer_index + 1) % period;
+				
+				// Output MA of residuals
+				dst[t] = residual_sum / (period as f64);
+				
+				// Advance SMA for next step
+				if t + 1 < n {
+					sum += data[t + 1] - data[t + 1 - period];
+					sma = sum / (period as f64);
+				}
+			}
+		}
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+			// AVX kernels are stubs, use scalar
+			return mean_ad_into_slice(dst, input, Kernel::Scalar);
+		}
+		_ => unreachable!(),
 	}
 	
 	Ok(())

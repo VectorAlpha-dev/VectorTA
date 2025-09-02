@@ -98,17 +98,24 @@ test('MEAN_AD fast API', () => {
         const memory = new Float64Array(wasm.__wasm.memory.buffer, inPtr, data.length);
         memory.set(data);
         
+        // Compare with safe API first (this might grow memory)
+        const expected = wasm.mean_ad_js(data, period);
+        
         // Test normal operation
         wasm.mean_ad_into(inPtr, outPtr, data.length, period);
+        
+        // Get fresh memory reference after WASM call (memory might have grown)
         const result = new Float64Array(wasm.__wasm.memory.buffer, outPtr, data.length);
         
-        // Compare with safe API
-        const expected = wasm.mean_ad_js(data, period);
         assertArrayClose(result, expected, 1e-10, 'Fast API mismatch');
         
         // Test in-place operation (aliasing)
-        memory.set(data); // Reset input data
+        // Get fresh memory reference and reset input data
+        const memoryForReset = new Float64Array(wasm.__wasm.memory.buffer, inPtr, data.length);
+        memoryForReset.set(data); // Reset input data
         wasm.mean_ad_into(inPtr, inPtr, data.length, period);
+        
+        // Get fresh memory reference after WASM call
         const inPlaceResult = new Float64Array(wasm.__wasm.memory.buffer, inPtr, data.length);
         assertArrayClose(inPlaceResult, expected, 1e-10, 'In-place operation mismatch');
     } finally {

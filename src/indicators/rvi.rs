@@ -543,7 +543,7 @@ pub fn rvi_scalar(
 								(scratch[period/2 - 1] + scratch[period/2]) * 0.5
 							};
 							let mut abs_sum = 0.0;
-							for k in 0..period { abs_sum += (scratch[k] - median).abs(); }
+							for k in 0..period { abs_sum += (ring[k] - median).abs(); }
 							abs_sum / period as f64
 						}
 					} else {
@@ -568,7 +568,8 @@ pub fn rvi_scalar(
 								(scratch[period/2 - 1] + scratch[period/2]) * 0.5
 							};
 							let mut abs_sum = 0.0;
-							for k in 0..period { abs_sum += (scratch[k] - median).abs(); }
+							// Calculate deviations from original ring values, not sorted scratch
+							for k in 0..period { abs_sum += (ring[(r_head + k) % period] - median).abs(); }
 							abs_sum / period as f64
 						}
 					}

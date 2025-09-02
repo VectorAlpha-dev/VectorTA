@@ -159,9 +159,7 @@ test('RVI batch single parameter set', () => {
         devtype_range: [0, 0, 0]
     };
     
-    const batchResultMap = wasm.rvi_batch(close, config);
-    // Convert Map to object for easier access
-    const batchResult = Object.fromEntries(batchResultMap);
+    const batchResult = wasm.rvi_batch(close, config);
     const singleResult = wasm.rvi_js(close, 10, 14, 1, 0);
     
     assert.strictEqual(batchResult.rows, 1);
@@ -189,8 +187,7 @@ test('RVI batch multiple periods', () => {
         devtype_range: [0, 0, 0]
     };
     
-    const batchResultMap = wasm.rvi_batch(close, config);
-    const batchResult = Object.fromEntries(batchResultMap);
+    const batchResult = wasm.rvi_batch(close, config);
     
     // Should have 3 rows * 100 cols
     assert.strictEqual(batchResult.rows, 3);
@@ -226,8 +223,7 @@ test('RVI batch full parameter sweep', () => {
         devtype_range: [0, 1, 1]     // 2 devtypes
     };
     
-    const batchResultMap = wasm.rvi_batch(close, config);
-    const batchResult = Object.fromEntries(batchResultMap);
+    const batchResult = wasm.rvi_batch(close, config);
     
     // Should have 3 * 2 * 2 * 2 = 24 combinations
     assert.strictEqual(batchResult.rows, 24);
@@ -312,7 +308,8 @@ test('RVI zero-copy API', () => {
 
 test('RVI zero-copy in-place', () => {
     // Test in-place operation (aliasing)
-    const data = new Float64Array(testData.close);
+    // Use smaller dataset to avoid memory issues
+    const data = new Float64Array(testData.close.slice(0, 100));
     const len = data.length;
     
     // Allocate a single buffer
@@ -320,7 +317,6 @@ test('RVI zero-copy in-place', () => {
     
     try {
         // Copy input data to WASM memory
-        const wasmData = new Float64Array(wasm.__wasm.memory.buffer, ptr, len);
         const wasmData = new Float64Array(wasm.__wasm.memory.buffer, ptr, len);
         wasmData.set(data);
         

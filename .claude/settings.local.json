@@ -19,7 +19,9 @@
       "Bash(wasm-pack:*)",
       "Bash(set RUSTFLAGS=-C target-feature=+simd128)",
       "Bash(grep:*)",
-      "Bash(cargo run:*)"
+      "Bash(cargo run:*)",
+      "Bash(cargo clean:*)",
+      "Bash(set PROPTEST_CASES=100)"
     ],
     "deny": [],
     "ask": [],
