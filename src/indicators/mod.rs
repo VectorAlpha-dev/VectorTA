@@ -75,6 +75,7 @@ pub mod minmax;
 pub use minmax::{minmax, MinmaxInput, MinmaxOutput, MinmaxParams};
 pub mod mom;
 pub mod moving_averages;
+pub mod other_indicators;
 pub mod msw;
 pub mod natr;
 pub mod nvi;
@@ -176,4 +177,11 @@ pub use moving_averages::{
 	alma, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass, highpass_2_pole, hma, hwma, jma,
 	jsa, kama, linreg, maaq, mama, mwdx, nma, pwma, reflex, sinwma, sma, smma, sqwma, srwma, supersmoother,
 	supersmoother_3_pole, swma, tema, tilson, trendflex, trima, vpwma, vwap, vwma, wilders, wma, zlema,
+};
+pub use other_indicators::{
+	buff_averages, buff_averages_with_kernel, buff_averages_into_slices,
+	buff_averages_batch_with_kernel, BuffAveragesInput, BuffAveragesOutput, 
+	BuffAveragesParams, BuffAveragesData, BuffAveragesBuilder, BuffAveragesStream, 
+	BuffAveragesError, BuffAveragesBatchRange, BuffAveragesBatchOutput, 
+	BuffAveragesBatchBuilder,
 };

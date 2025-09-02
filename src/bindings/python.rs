@@ -36,6 +36,8 @@ use crate::indicators::bollinger_bands_width::{
 #[cfg(feature = "python")]
 use crate::indicators::bop::{bop_batch_py, bop_py, BopStreamPy};
 #[cfg(feature = "python")]
+use crate::indicators::other_indicators::{buff_averages_py, buff_averages_batch_py, BuffAveragesStreamPy};
+#[cfg(feature = "python")]
 use crate::indicators::cci::{cci_batch_py, cci_py, CciStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::cfo::{cfo_batch_py, cfo_py, CfoStreamPy};
@@ -947,6 +949,11 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(bop_py, m)?)?;
 	m.add_function(wrap_pyfunction!(bop_batch_py, m)?)?;
 	m.add_class::<BopStreamPy>()?;
+
+	// Buff Averages
+	m.add_function(wrap_pyfunction!(buff_averages_py, m)?)?;
+	m.add_function(wrap_pyfunction!(buff_averages_batch_py, m)?)?;
+	m.add_class::<BuffAveragesStreamPy>()?;
 
 	// Register Linear Regression Intercept functions with their user-facing names
 	m.add_function(wrap_pyfunction!(linearreg_intercept_py, m)?)?;
