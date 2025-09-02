@@ -107,6 +107,23 @@ const EXPECTED_OUTPUTS = {
         ],
         warmupPeriod: 20  // 16 + period - 1 = 16 + 5 - 1 = 20
     },
+    aso: {
+        defaultParams: { period: 10, mode: 0 },
+        last5Bulls: [
+            48.48594883,
+            46.37206396,
+            47.20522805,
+            46.83750720,
+            43.28268188
+        ],
+        last5Bears: [
+            51.51405117,
+            53.62793604,
+            52.79477195,
+            53.16249280,
+            56.71731812
+        ]
+    },
     alma: {
         defaultParams: { period: 9, offset: 0.85, sigma: 6.0 },
         last5Values: [

@@ -4,6 +4,8 @@ use pyo3::prelude::*;
 // Add module initialization here
 
 #[cfg(feature = "python")]
+use crate::other_indicators::aso::{aso_py, aso_batch_py, AsoStreamPy};
+#[cfg(feature = "python")]
 use crate::indicators::acosc::{acosc_batch_py, acosc_py, AcoscStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::ad::{ad_batch_py, ad_py, AdStreamPy};
@@ -688,6 +690,11 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(aroon_py, m)?)?;
 	m.add_function(wrap_pyfunction!(aroon_batch_py, m)?)?;
 	m.add_class::<AroonStreamPy>()?;
+
+	// Register ASO functions with their user-facing names
+	m.add_function(wrap_pyfunction!(aso_py, m)?)?;
+	m.add_function(wrap_pyfunction!(aso_batch_py, m)?)?;
+	m.add_class::<AsoStreamPy>()?;
 
 	// Register Bollinger Bands Width functions with their user-facing names
 	m.add_function(wrap_pyfunction!(bollinger_bands_width_py, m)?)?;
