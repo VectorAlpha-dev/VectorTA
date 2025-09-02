@@ -85,6 +85,24 @@ EXPECTED_OUTPUTS = {
             59165.14427332
         ]
     },
+    'alphatrend': {
+        'default_params': {'coeff': 1.0, 'period': 14, 'no_volume': False},
+        'k1_last_5_values': [
+            60243.00,
+            60243.00,
+            60138.92857143,
+            60088.42857143,
+            59937.21428571,
+        ],
+        'k2_last_5_values': [
+            60542.42857143,
+            60454.14285714,
+            60243.00,
+            60243.00,
+            60138.92857143,
+        ],
+        'warmup_period': 13,  # period - 1
+    },
     'kama': {
         'default_params': {'period': 30},
         'last_5_values': [

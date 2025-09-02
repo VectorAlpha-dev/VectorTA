@@ -138,6 +138,24 @@ const EXPECTED_OUTPUTS = {
         hasWarmup: false,
         warmupLength: 0
     },
+    alphatrend: {
+        defaultParams: { coeff: 1.0, period: 14, noVolume: false },
+        k1Last5Values: [
+            60243.00,
+            60243.00,
+            60138.92857143,
+            60088.42857143,
+            59937.21428571
+        ],
+        k2Last5Values: [
+            60542.42857143,
+            60454.14285714,
+            60243.00,
+            60243.00,
+            60138.92857143
+        ],
+        warmupPeriod: 13  // period - 1
+    },
     kama: {
         defaultParams: { period: 30 },
         last5Values: [

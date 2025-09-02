@@ -21,7 +21,11 @@
       "Bash(grep:*)",
       "Bash(cargo run:*)",
       "Bash(cargo clean:*)",
-      "Bash(set PROPTEST_CASES=100)"
+      "Bash(set PROPTEST_CASES=100)",
+      "Bash(cargo check:*)",
+      "Bash(.venvScriptspython.exe tests/python/test_alphatrend.py -v)",
+      "Bash(.venv/Scripts/python.exe tests/python/test_alphatrend.py:*)",
+      "Bash(.venv/Scripts/python.exe -m pytest:*)"
     ],
     "deny": [],
     "ask": [],

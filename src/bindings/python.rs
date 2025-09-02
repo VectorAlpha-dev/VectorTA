@@ -328,6 +328,8 @@ use crate::indicators::zscore::{zscore_batch_py, zscore_py, ZscoreStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::pfe::{pfe_batch_py, pfe_py, PfeStreamPy};
 #[cfg(feature = "python")]
+use crate::indicators::other_indicators::alphatrend::{alphatrend_py, AlphaTrendStreamPy};
+#[cfg(feature = "python")]
 use crate::indicators::roc::{roc_batch_py, roc_py, RocStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::rvi::{rvi_batch_py, rvi_py, RviStreamPy};
@@ -1002,6 +1004,10 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(zscore_py, m)?)?;
 	m.add_function(wrap_pyfunction!(zscore_batch_py, m)?)?;
 	m.add_class::<ZscoreStreamPy>()?;
+
+	// Register AlphaTrend functions with their user-facing names
+	m.add_function(wrap_pyfunction!(alphatrend_py, m)?)?;
+	m.add_class::<AlphaTrendStreamPy>()?;
 
 	// Register GatorOsc functions with their user-facing names
 	m.add_function(wrap_pyfunction!(gatorosc_py, m)?)?;
