@@ -38,6 +38,8 @@ use crate::indicators::bop::{bop_batch_py, bop_py, BopStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::cci::{cci_batch_py, cci_py, CciStreamPy};
 #[cfg(feature = "python")]
+use crate::other_indicators::cci_cycle::{cci_cycle_batch_py, cci_cycle_py, CciCycleStreamPy};
+#[cfg(feature = "python")]
 use crate::indicators::cfo::{cfo_batch_py, cfo_py, CfoStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::cg::{cg_batch_py, cg_py, CgStreamPy};
@@ -937,6 +939,11 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(cci_py, m)?)?;
 	m.add_function(wrap_pyfunction!(cci_batch_py, m)?)?;
 	m.add_class::<CciStreamPy>()?;
+	
+	// Register CCI Cycle functions
+	m.add_function(wrap_pyfunction!(cci_cycle_py, m)?)?;
+	m.add_function(wrap_pyfunction!(cci_cycle_batch_py, m)?)?;
+	m.add_class::<CciCycleStreamPy>()?;
 
 	// Register CFO functions with their user-facing names
 	m.add_function(wrap_pyfunction!(cfo_py, m)?)?;

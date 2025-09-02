@@ -6,6 +6,7 @@
 #![allow(clippy::needless_range_loop)]
 
 pub mod indicators;
+pub mod other_indicators;
 pub mod utilities;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

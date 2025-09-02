@@ -21,7 +21,8 @@
       "Bash(grep:*)",
       "Bash(cargo run:*)",
       "Bash(cargo clean:*)",
-      "Bash(set PROPTEST_CASES=100)"
+      "Bash(set PROPTEST_CASES=100)",
+      "Bash(test_bindings.bat cci_cycle)"
     ],
     "deny": [],
     "ask": [],
