@@ -333,6 +333,8 @@ use crate::indicators::roc::{roc_batch_py, roc_py, RocStreamPy};
 use crate::indicators::rvi::{rvi_batch_py, rvi_py, RviStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::vlma::{vlma_batch_py, vlma_py, VlmaStreamPy};
+#[cfg(feature = "python")]
+use crate::other_indicators::avsl::{avsl_py, avsl_batch_py};
 
 #[pymodule]
 fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -932,6 +934,10 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(atr_py, m)?)?;
 	m.add_function(wrap_pyfunction!(atr_batch_py, m)?)?;
 	m.add_class::<AtrStreamPy>()?;
+
+	// Register AVSL functions with their user-facing names
+	m.add_function(wrap_pyfunction!(avsl_py, m)?)?;
+	m.add_function(wrap_pyfunction!(avsl_batch_py, m)?)?;
 
 	// Register CCI functions with their user-facing names
 	m.add_function(wrap_pyfunction!(cci_py, m)?)?;

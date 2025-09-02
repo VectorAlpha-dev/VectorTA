@@ -21,7 +21,11 @@
       "Bash(grep:*)",
       "Bash(cargo run:*)",
       "Bash(cargo clean:*)",
-      "Bash(set PROPTEST_CASES=100)"
+      "Bash(set PROPTEST_CASES=100)",
+      "Bash(test_bindings.bat avsl)",
+      "Bash(cargo check:*)",
+      "Bash(pip install:*)",
+      "Bash(./test_bindings.bat avsl)"
     ],
     "deny": [],
     "ask": [],
