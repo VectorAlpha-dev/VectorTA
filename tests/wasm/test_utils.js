@@ -1221,6 +1221,58 @@ const EXPECTED_OUTPUTS = {
             59215.124961889764,
             59103.099969511815
         ]
+    },
+    qqe: {
+        defaultParams: { rsiPeriod: 14, smoothingFactor: 5, fastFactor: 4.236 },
+        last5Fast: [
+            42.68548144,
+            42.68200826,
+            42.32797706,
+            42.50623375,
+            41.34014948
+        ],
+        last5Slow: [
+            36.49339135,
+            36.59103557,
+            36.59103557,
+            36.64790896,
+            36.64790896
+        ],
+        warmupPeriod: 17,  // Actual warmup period: first + rsi_period + smoothing_factor - 2 = 0 + 14 + 5 - 2 = 17
+        // For batch testing
+        batchDefaultRowFast: [
+            42.68548144,
+            42.68200826,
+            42.32797706,
+            42.50623375,
+            41.34014948
+        ],
+        batchDefaultRowSlow: [
+            36.49339135,
+            36.59103557,
+            36.59103557,
+            36.64790896,
+            36.64790896
+        ]
+    },
+    vama: {
+        defaultParams: { length: 13, viFactor: 0.67, strict: true, samplePeriod: 0 },
+        fastValues: [  // length=13
+            58881.58124494,
+            58866.67951208,
+            58873.34641238,
+            58870.41762890,
+            58696.37821343
+        ],
+        slowParams: { length: 55, viFactor: 0.67, strict: true, samplePeriod: 0 },
+        slowValues: [  // length=55
+            60338.30226444,
+            60327.06967012,
+            60318.07491767,
+            60324.78454609,
+            60305.94922998
+        ],
+        warmupPeriod: 12  // length - 1 for default params
     }
 };
 

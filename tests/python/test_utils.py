@@ -1209,6 +1209,58 @@ EXPECTED_OUTPUTS = {
             59215.124961889764,
             59103.099969511815
         ]
+    },
+    'qqe': {
+        'default_params': {'rsi_period': 14, 'smoothing_factor': 5, 'fast_factor': 4.236},
+        'last_5_fast': [
+            42.68548144,
+            42.68200826,
+            42.32797706,
+            42.50623375,
+            41.34014948
+        ],
+        'last_5_slow': [
+            36.49339135,
+            36.59103557,
+            36.59103557,
+            36.64790896,
+            36.64790896
+        ],
+        'warmup_period': 17,  # Actual warmup period: first + rsi_period + smoothing_factor - 2 = 0 + 14 + 5 - 2 = 17
+        # For batch testing
+        'batch_default_row_fast': [
+            42.68548144,
+            42.68200826,
+            42.32797706,
+            42.50623375,
+            41.34014948
+        ],
+        'batch_default_row_slow': [
+            36.49339135,
+            36.59103557,
+            36.59103557,
+            36.64790896,
+            36.64790896
+        ]
+    },
+    'vama': {
+        'default_params': {'length': 13, 'vi_factor': 0.67, 'strict': True, 'sample_period': 0},
+        'fast_values': [  # length=13
+            58881.58124494,
+            58866.67951208,
+            58873.34641238,
+            58870.41762890,
+            58696.37821343
+        ],
+        'slow_params': {'length': 55, 'vi_factor': 0.67, 'strict': True, 'sample_period': 0},
+        'slow_values': [  # length=55
+            60338.30226444,
+            60327.06967012,
+            60318.07491767,
+            60324.78454609,
+            60305.94922998
+        ],
+        'warmup_period': 12  # length - 1 for default params
     }
 }
 

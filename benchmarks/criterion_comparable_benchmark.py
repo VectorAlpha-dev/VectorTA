@@ -246,6 +246,7 @@ class CriterionComparableBenchmark:
             ('vwma', lambda: my_project.vwma(data['close'], data['volume'], 14)),
             ('vwmacd', lambda: my_project.vwmacd(data['close'], data['volume'], 12, 26, 9)),
             ('vi', lambda: my_project.vi(data['high'], data['low'], data['close'], 14)),
+            ('vama', lambda: my_project.vama(data['close'], data['volume'], 13, 0.67, True, 0)),
             ('vpt', lambda: my_project.vpt(data['close'], data['volume'])),
             ('vwmacd', lambda: my_project.vwmacd(data['close'], data['volume'], 12, 26, 9)),
             ('wilders', lambda: my_project.wilders(data['close'], 14)),

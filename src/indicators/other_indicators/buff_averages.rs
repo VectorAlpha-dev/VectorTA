@@ -892,7 +892,10 @@ fn buff_averages_batch_inner(
     k: Kernel,
     parallel: bool,
 ) -> Result<BuffAveragesBatchOutput, BuffAveragesError> {
-    if price.len() != volume.len() || price.is_empty() {
+    if price.is_empty() {
+        return Err(BuffAveragesError::EmptyInputData);
+    }
+    if price.len() != volume.len() {
         return Err(BuffAveragesError::MismatchedDataLength { 
             price_len: price.len(), 
             volume_len: volume.len() 
@@ -931,13 +934,19 @@ fn buff_averages_batch_inner(
     buff_averages_batch_inner_into_parallel(price, volume, sweep, k, fast_slice, slow_slice, parallel)?;
 
     // Return as Vec<f64> without copy
-    let mut f_guard = core::mem::ManuallyDrop::new(fast_mu);
-    let mut s_guard = core::mem::ManuallyDrop::new(slow_mu);
     let fast = unsafe {
-        Vec::from_raw_parts(f_guard.as_mut_ptr() as *mut f64, f_guard.len(), f_guard.capacity())
+        let ptr = fast_mu.as_mut_ptr() as *mut f64;
+        let len = fast_mu.len();
+        let cap = fast_mu.capacity();
+        core::mem::forget(fast_mu);
+        Vec::from_raw_parts(ptr, len, cap)
     };
     let slow = unsafe {
-        Vec::from_raw_parts(s_guard.as_mut_ptr() as *mut f64, s_guard.len(), s_guard.capacity())
+        let ptr = slow_mu.as_mut_ptr() as *mut f64;
+        let len = slow_mu.len();
+        let cap = slow_mu.capacity();
+        core::mem::forget(slow_mu);
+        Vec::from_raw_parts(ptr, len, cap)
     };
 
     Ok(BuffAveragesBatchOutput { fast, slow, combos, rows, cols })
@@ -1085,7 +1094,11 @@ pub fn buff_averages_unified_js(
         let (fast_out, slow_out) = flat.split_at_mut(len);
         buff_averages_into_slices(fast_out, slow_out, &input, detect_best_kernel())
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        Vec::from_raw_parts(mat.as_mut_ptr() as *mut f64, mat.len(), mat.capacity())
+        let ptr = mat.as_mut_ptr() as *mut f64;
+        let len = mat.len();
+        let cap = mat.capacity();
+        core::mem::forget(mat);
+        Vec::from_raw_parts(ptr, len, cap)
     };
 
     let js = BuffAveragesJsResult { values, rows: 2, cols: len };
@@ -1123,7 +1136,11 @@ pub fn buff_averages_js(
         let (fast_out, slow_out) = flat.split_at_mut(len);
         buff_averages_into_slices(fast_out, slow_out, &input, detect_best_kernel())
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        Vec::from_raw_parts(mat.as_mut_ptr() as *mut f64, mat.len(), mat.capacity())
+        let ptr = mat.as_mut_ptr() as *mut f64;
+        let len = mat.len();
+        let cap = mat.capacity();
+        core::mem::forget(mat);
+        Vec::from_raw_parts(ptr, len, cap)
     };
 
     Ok(values)
@@ -1162,8 +1179,8 @@ pub fn buff_averages_into(
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
-pub fn buff_averages_alloc(total_len: usize) -> *mut f64 {
-    let mut v = Vec::<f64>::with_capacity(total_len);
+pub fn buff_averages_alloc(len: usize) -> *mut f64 {
+    let mut v = Vec::<f64>::with_capacity(2 * len);
     let ptr = v.as_mut_ptr();
     core::mem::forget(v);
     ptr
@@ -1171,8 +1188,8 @@ pub fn buff_averages_alloc(total_len: usize) -> *mut f64 {
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
-pub fn buff_averages_free(ptr: *mut f64, total_len: usize) {
-    unsafe { let _ = Vec::from_raw_parts(ptr, total_len, total_len); }
+pub fn buff_averages_free(ptr: *mut f64, len: usize) {
+    unsafe { let _ = Vec::from_raw_parts(ptr, 2 * len, 2 * len); }
 }
 
 // ==================== WASM BATCH BINDINGS ====================
@@ -1351,6 +1368,23 @@ impl BuffAveragesContext {
     
     pub fn get_warmup_period(&self) -> usize {
         self.slow_period - 1
+    }
+    
+    #[wasm_bindgen]
+    pub fn compute(&self, price: &[f64], volume: &[f64]) -> Result<Vec<f64>, JsValue> {
+        let params = BuffAveragesParams {
+            fast_period: Some(self.fast_period),
+            slow_period: Some(self.slow_period),
+        };
+        let input = BuffAveragesInput::from_slices(price, volume, params);
+        let result = buff_averages_with_kernel(&input, self.kernel)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        
+        // Concatenate [fast..., slow...]
+        let mut output = Vec::with_capacity(price.len() * 2);
+        output.extend_from_slice(&result.fast_buff);
+        output.extend_from_slice(&result.slow_buff);
+        Ok(output)
     }
 }
 

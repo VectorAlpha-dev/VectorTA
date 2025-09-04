@@ -805,6 +805,13 @@ use wasm_bindgen::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct ViJsResult {
+	pub plus: Vec<f64>,
+	pub minus: Vec<f64>,
+}
+
+#[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn vi_js(
 	high: &[f64],
@@ -815,21 +822,40 @@ pub fn vi_js(
 	let mut plus = vec![0.0; high.len()];
 	let mut minus = vec![0.0; high.len()];
 	
-	vi_into_slice_wasm(&mut plus, &mut minus, high, low, close, period, Kernel::Auto)
+	vi_into_slice_wasm(&mut plus, &mut minus, high, low, close, period, detect_best_kernel())
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 	
-	// Create JS object with plus and minus arrays
-	let obj = js_sys::Object::new();
-	js_sys::Reflect::set(&obj, &JsValue::from_str("plus"), &serde_wasm_bindgen::to_value(&plus).unwrap())?;
-	js_sys::Reflect::set(&obj, &JsValue::from_str("minus"), &serde_wasm_bindgen::to_value(&minus).unwrap())?;
+	let result = ViJsResult { plus, minus };
 	
-	Ok(obj.into())
+	serde_wasm_bindgen::to_value(&result)
+		.map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vi_unified_js(
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	period: usize,
+) -> Result<Vec<f64>, JsValue> {
+	// Preallocate flattened result vector [plus..., minus...]
+	let mut result = vec![0.0; high.len() * 2];
+	
+	// Split into plus and minus slices
+	let (plus_slice, minus_slice) = result.split_at_mut(high.len());
+	
+	// Compute directly into slices
+	vi_into_slice_wasm(plus_slice, minus_slice, high, low, close, period, detect_best_kernel())
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(result)
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn vi_alloc(len: usize) -> *mut f64 {
-	let mut vec = Vec::<f64>::with_capacity(len);
+	let mut vec = Vec::<f64>::with_capacity(len * 2); // Allocate for both plus and minus
 	let ptr = vec.as_mut_ptr();
 	std::mem::forget(vec);
 	ptr
@@ -838,10 +864,8 @@ pub fn vi_alloc(len: usize) -> *mut f64 {
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn vi_free(ptr: *mut f64, len: usize) {
-	if !ptr.is_null() {
-		unsafe {
-			let _ = Vec::from_raw_parts(ptr, len, len);
-		}
+	unsafe {
+		let _ = Vec::from_raw_parts(ptr, len * 2, len * 2);
 	}
 }
 
@@ -865,34 +889,12 @@ pub fn vi_into(
 		let low = std::slice::from_raw_parts(low_ptr, len);
 		let close = std::slice::from_raw_parts(close_ptr, len);
 		
-		// Check for aliasing - VI reads 3 inputs and writes 2 outputs
-		// Need to check if any output aliases with any input
-		let aliasing = (high_ptr as *const f64 == plus_ptr as *const f64) ||
-					  (high_ptr as *const f64 == minus_ptr as *const f64) ||
-					  (low_ptr as *const f64 == plus_ptr as *const f64) ||
-					  (low_ptr as *const f64 == minus_ptr as *const f64) ||
-					  (close_ptr as *const f64 == plus_ptr as *const f64) ||
-					  (close_ptr as *const f64 == minus_ptr as *const f64);
+		// Direct computation into output slices
+		let plus_out = std::slice::from_raw_parts_mut(plus_ptr, len);
+		let minus_out = std::slice::from_raw_parts_mut(minus_ptr, len);
 		
-		if aliasing {
-			// Use temporary buffers for outputs
-			let mut temp_plus = vec![0.0; len];
-			let mut temp_minus = vec![0.0; len];
-			
-			vi_into_slice_wasm(&mut temp_plus, &mut temp_minus, high, low, close, period, Kernel::Auto)
-				.map_err(|e| JsValue::from_str(&e.to_string()))?;
-			
-			let plus_out = std::slice::from_raw_parts_mut(plus_ptr, len);
-			let minus_out = std::slice::from_raw_parts_mut(minus_ptr, len);
-			plus_out.copy_from_slice(&temp_plus);
-			minus_out.copy_from_slice(&temp_minus);
-		} else {
-			let plus_out = std::slice::from_raw_parts_mut(plus_ptr, len);
-			let minus_out = std::slice::from_raw_parts_mut(minus_ptr, len);
-			
-			vi_into_slice_wasm(plus_out, minus_out, high, low, close, period, Kernel::Auto)
-				.map_err(|e| JsValue::from_str(&e.to_string()))?;
-		}
+		vi_into_slice_wasm(plus_out, minus_out, high, low, close, period, detect_best_kernel())
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
 		
 		Ok(())
 	}

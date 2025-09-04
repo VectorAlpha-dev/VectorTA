@@ -36,7 +36,7 @@ use crate::indicators::bollinger_bands_width::{
 #[cfg(feature = "python")]
 use crate::indicators::bop::{bop_batch_py, bop_py, BopStreamPy};
 #[cfg(feature = "python")]
-use crate::indicators::other_indicators::{buff_averages_py, buff_averages_batch_py, BuffAveragesStreamPy};
+use crate::indicators::other_indicators::{buff_averages_py, buff_averages_batch_py, BuffAveragesStreamPy, qqe_py, qqe_batch_py, QqeStreamPy, vama_py, vama_batch_py, VamaStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::cci::{cci_batch_py, cci_py, CciStreamPy};
 #[cfg(feature = "python")]
@@ -954,6 +954,16 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(buff_averages_py, m)?)?;
 	m.add_function(wrap_pyfunction!(buff_averages_batch_py, m)?)?;
 	m.add_class::<BuffAveragesStreamPy>()?;
+
+	// QQE
+	m.add_function(wrap_pyfunction!(qqe_py, m)?)?;
+	m.add_function(wrap_pyfunction!(qqe_batch_py, m)?)?;
+	m.add_class::<QqeStreamPy>()?;
+
+	// VAMA
+	m.add_function(wrap_pyfunction!(vama_py, m)?)?;
+	m.add_function(wrap_pyfunction!(vama_batch_py, m)?)?;
+	m.add_class::<VamaStreamPy>()?;
 
 	// Register Linear Regression Intercept functions with their user-facing names
 	m.add_function(wrap_pyfunction!(linearreg_intercept_py, m)?)?;
