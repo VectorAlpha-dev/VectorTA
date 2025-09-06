@@ -1,5 +1,5 @@
 """
-Python binding tests for VAMA indicator.
+Python binding tests for VolumeAdjustedMa indicator.
 These tests mirror the Rust unit tests to ensure Python bindings work correctly.
 """
 import pytest
@@ -20,29 +20,29 @@ from test_utils import load_test_data, assert_close, EXPECTED_OUTPUTS
 from rust_comparison import compare_with_rust
 
 
-class TestVama:
+class TestVolumeAdjustedMa:
     @pytest.fixture(scope='class')
     def test_data(self):
         """Load test data from CSV file"""
         return load_test_data()
     
-    def test_vama_partial_params(self, test_data):
-        """Test VAMA with partial parameters (None values) - mirrors check_vama_partial_params"""
+    def test_volume_adjusted_ma_partial_params(self, test_data):
+        """Test VolumeAdjustedMa with partial parameters (None values) - mirrors check_volume_adjusted_ma_partial_params"""
         close = test_data['close']
         volume = test_data['volume']
         
         # Test with default parameters (should work with defaults)
-        result = ta_indicators.vama(close, volume, 13, 0.67, True, 0)
+        result = ta_indicators.VolumeAdjustedMa(close, volume, 13, 0.67, True, 0)
         assert len(result) == len(close)
     
-    def test_vama_accuracy(self, test_data):
-        """Test VAMA matches expected values from Rust tests - mirrors check_vama_accuracy"""
+    def test_volume_adjusted_ma_accuracy(self, test_data):
+        """Test VolumeAdjustedMa matches expected values from Rust tests - mirrors check_volume_adjusted_ma_accuracy"""
         close = test_data['close']
         volume = test_data['volume']
-        expected = EXPECTED_OUTPUTS['vama']
+        expected = EXPECTED_OUTPUTS['volume_adjusted_ma']
         
         # Test with fast parameters (length=13)
-        result = ta_indicators.vama(
+        result = ta_indicators.VolumeAdjustedMa(
             close,
             volume,
             length=expected['default_params']['length'],
@@ -58,20 +58,20 @@ class TestVama:
             result[-5:],
             expected['fast_values'],
             rtol=1e-6,
-            msg="VAMA last 5 values mismatch"
+            msg="VolumeAdjustedMa last 5 values mismatch"
         )
         
         # Compare full output with Rust
-        compare_with_rust('vama', result, 'close_volume', expected['default_params'])
+        compare_with_rust('volume_adjusted_ma', result, 'close_volume', expected['default_params'])
     
-    def test_vama_slow(self, test_data):
-        """Test VAMA with slow parameters (length=55) - mirrors check_vama_slow"""
+    def test_volume_adjusted_ma_slow(self, test_data):
+        """Test VolumeAdjustedMa with slow parameters (length=55) - mirrors check_volume_adjusted_ma_slow"""
         close = test_data['close']
         volume = test_data['volume']
-        expected = EXPECTED_OUTPUTS['vama']
+        expected = EXPECTED_OUTPUTS['volume_adjusted_ma']
         
         # Test with slow parameters (length=55)
-        result = ta_indicators.vama(
+        result = ta_indicators.VolumeAdjustedMa(
             close,
             volume,
             length=expected['slow_params']['length'],
@@ -87,79 +87,79 @@ class TestVama:
             result[-5:],
             expected['slow_values'],
             rtol=1e-6,
-            msg="VAMA slow last 5 values mismatch"
+            msg="VolumeAdjustedMa slow last 5 values mismatch"
         )
     
-    def test_vama_default_candles(self, test_data):
-        """Test VAMA with default parameters - mirrors check_vama_default_candles"""
+    def test_volume_adjusted_ma_default_candles(self, test_data):
+        """Test VolumeAdjustedMa with default parameters - mirrors check_volume_adjusted_ma_default_candles"""
         close = test_data['close']
         volume = test_data['volume']
         
         # Default params: length=13, vi_factor=0.67, strict=True, sample_period=0
-        result = ta_indicators.vama(close, volume, 13, 0.67, True, 0)
+        result = ta_indicators.VolumeAdjustedMa(close, volume, 13, 0.67, True, 0)
         
         assert len(result) == len(close)
     
-    def test_vama_empty_input(self):
-        """Test VAMA fails with empty input"""
+    def test_volume_adjusted_ma_empty_input(self):
+        """Test VolumeAdjustedMa fails with empty input"""
         empty_price = np.array([])
         empty_volume = np.array([])
         
         with pytest.raises(ValueError, match="Input data slice is empty"):
-            ta_indicators.vama(empty_price, empty_volume)
+            ta_indicators.VolumeAdjustedMa(empty_price, empty_volume)
     
-    def test_vama_all_nan(self):
-        """Test VAMA fails with all NaN values"""
+    def test_volume_adjusted_ma_all_nan(self):
+        """Test VolumeAdjustedMa fails with all NaN values"""
         all_nan = np.full(100, np.nan)
         volume = np.full(100, 100.0)
         
         with pytest.raises(ValueError, match="All values are NaN"):
-            ta_indicators.vama(all_nan, volume)
+            ta_indicators.VolumeAdjustedMa(all_nan, volume)
     
-    def test_vama_mismatched_lengths(self):
-        """Test VAMA fails when price and volume have different lengths"""
+    def test_volume_adjusted_ma_mismatched_lengths(self):
+        """Test VolumeAdjustedMa fails when price and volume have different lengths"""
         price = np.array([10.0, 20.0, 30.0])
         volume = np.array([100.0, 200.0])  # Different length
         
         with pytest.raises(ValueError, match="length mismatch"):
-            ta_indicators.vama(price, volume)
+            ta_indicators.VolumeAdjustedMa(price, volume)
     
-    def test_vama_invalid_period(self):
-        """Test VAMA fails with zero period"""
+    def test_volume_adjusted_ma_invalid_period(self):
+        """Test VolumeAdjustedMa fails with zero period"""
         price = np.array([10.0, 20.0, 30.0])
         volume = np.array([100.0, 200.0, 300.0])
         
         with pytest.raises(ValueError, match="Invalid period"):
-            ta_indicators.vama(price, volume, length=0)
+            ta_indicators.VolumeAdjustedMa(price, volume, length=0)
     
-    def test_vama_invalid_vi_factor(self):
-        """Test VAMA fails with invalid vi_factor"""
+    def test_volume_adjusted_ma_invalid_vi_factor(self):
+        """Test VolumeAdjustedMa fails with invalid vi_factor"""
         price = np.array([10.0, 20.0, 30.0, 40.0, 50.0])
         volume = np.array([100.0, 200.0, 300.0, 400.0, 500.0])
         
         # Zero vi_factor
         with pytest.raises(ValueError, match="Invalid vi_factor"):
-            ta_indicators.vama(price, volume, length=2, vi_factor=0.0)
+            ta_indicators.VolumeAdjustedMa(price, volume, length=2, vi_factor=0.0)
         
         # Negative vi_factor
         with pytest.raises(ValueError, match="Invalid vi_factor"):
-            ta_indicators.vama(price, volume, length=2, vi_factor=-1.0)
+            ta_indicators.VolumeAdjustedMa(price, volume, length=2, vi_factor=-1.0)
     
-    def test_vama_period_exceeds_length(self):
-        """Test VAMA fails when period exceeds data length"""
+    def test_volume_adjusted_ma_period_exceeds_length(self):
+        """Test VolumeAdjustedMa fails when period exceeds data length"""
         small_price = np.array([10.0, 20.0, 30.0])
         small_volume = np.array([100.0, 200.0, 300.0])
         
         with pytest.raises(ValueError, match="Invalid period|Not enough"):
-            ta_indicators.vama(small_price, small_volume, length=10)
+            ta_indicators.VolumeAdjustedMa(small_price, small_volume, length=10)
     
-    def test_vama_nan_handling(self, test_data):
-        """Test VAMA handles NaN values correctly"""
+    def test_volume_adjusted_ma_nan_handling(self, test_data):
+        """Test VolumeAdjustedMa handles NaN values correctly"""
         close = test_data['close']
         volume = test_data['volume']
-        expected = EXPECTED_OUTPUTS['vama']
+        expected = EXPECTED_OUTPUTS['volume_adjusted_ma']
         
-        result = ta_indicators.vama(close, volume, length=13, vi_factor=0.67, strict=True, sample_period=0)
+        result = ta_indicators.VolumeAdjustedMa(close, volume, length=13, vi_factor=0.67, strict=True, sample_period=0)
         
         assert len(result) == len(close)
         
@@ -173,16 +173,16 @@ class TestVama:
         # First warmup values should be NaN
         assert np.all(np.isnan(result[:warmup])), f"Expected NaN in warmup period (first {warmup} values)"
     
-    def test_vama_strict_vs_non_strict(self, test_data):
-        """Test VAMA with strict=True vs strict=False"""
+    def test_volume_adjusted_ma_strict_vs_non_strict(self, test_data):
+        """Test VolumeAdjustedMa with strict=True vs strict=False"""
         close = test_data['close'][:100]  # Use smaller dataset
         volume = test_data['volume'][:100]
         
         # Test with strict=True
-        result_strict = ta_indicators.vama(close, volume, length=13, vi_factor=0.67, strict=True, sample_period=0)
+        result_strict = ta_indicators.VolumeAdjustedMa(close, volume, length=13, vi_factor=0.67, strict=True, sample_period=0)
         
         # Test with strict=False
-        result_non_strict = ta_indicators.vama(close, volume, length=13, vi_factor=0.67, strict=False, sample_period=0)
+        result_non_strict = ta_indicators.VolumeAdjustedMa(close, volume, length=13, vi_factor=0.67, strict=False, sample_period=0)
         
         assert len(result_strict) == len(close)
         assert len(result_non_strict) == len(close)
@@ -191,16 +191,16 @@ class TestVama:
         assert not np.all(np.isnan(result_strict[13:]))
         assert not np.all(np.isnan(result_non_strict[13:]))
     
-    def test_vama_sample_period(self, test_data):
-        """Test VAMA with different sample periods"""
+    def test_volume_adjusted_ma_sample_period(self, test_data):
+        """Test VolumeAdjustedMa with different sample periods"""
         close = test_data['close'][:100]  # Use smaller dataset
         volume = test_data['volume'][:100]
         
         # Test with sample_period=0 (all bars)
-        result_all = ta_indicators.vama(close, volume, length=13, vi_factor=0.67, strict=True, sample_period=0)
+        result_all = ta_indicators.VolumeAdjustedMa(close, volume, length=13, vi_factor=0.67, strict=True, sample_period=0)
         
         # Test with fixed sample_period
-        result_fixed = ta_indicators.vama(close, volume, length=13, vi_factor=0.67, strict=True, sample_period=20)
+        result_fixed = ta_indicators.VolumeAdjustedMa(close, volume, length=13, vi_factor=0.67, strict=True, sample_period=20)
         
         assert len(result_all) == len(close)
         assert len(result_fixed) == len(close)
@@ -209,15 +209,15 @@ class TestVama:
         assert not np.all(np.isnan(result_all[13:]))
         assert not np.all(np.isnan(result_fixed[13:]))
     
-    def test_vama_different_vi_factors(self, test_data):
-        """Test VAMA with different vi_factor values"""
+    def test_volume_adjusted_ma_different_vi_factors(self, test_data):
+        """Test VolumeAdjustedMa with different vi_factor values"""
         close = test_data['close'][:100]  # Use smaller dataset
         volume = test_data['volume'][:100]
         
         # Test with different vi_factors
-        result1 = ta_indicators.vama(close, volume, length=13, vi_factor=0.5, strict=True, sample_period=0)
-        result2 = ta_indicators.vama(close, volume, length=13, vi_factor=0.67, strict=True, sample_period=0)
-        result3 = ta_indicators.vama(close, volume, length=13, vi_factor=1.0, strict=True, sample_period=0)
+        result1 = ta_indicators.VolumeAdjustedMa(close, volume, length=13, vi_factor=0.5, strict=True, sample_period=0)
+        result2 = ta_indicators.VolumeAdjustedMa(close, volume, length=13, vi_factor=0.67, strict=True, sample_period=0)
+        result3 = ta_indicators.VolumeAdjustedMa(close, volume, length=13, vi_factor=1.0, strict=True, sample_period=0)
         
         assert len(result1) == len(close)
         assert len(result2) == len(close)
@@ -227,32 +227,32 @@ class TestVama:
         assert not np.array_equal(result1[-10:], result2[-10:])
         assert not np.array_equal(result2[-10:], result3[-10:])
     
-    def test_vama_very_small_dataset(self):
-        """Test VAMA fails with insufficient data - mirrors check_vama_very_small_dataset"""
+    def test_volume_adjusted_ma_very_small_dataset(self):
+        """Test VolumeAdjustedMa fails with insufficient data - mirrors check_volume_adjusted_ma_very_small_dataset"""
         single_price = np.array([42.0])
         single_volume = np.array([100.0])
         
         with pytest.raises(ValueError, match="Invalid period|Not enough valid data"):
-            ta_indicators.vama(single_price, single_volume, length=13, vi_factor=0.67, strict=True, sample_period=0)
+            ta_indicators.VolumeAdjustedMa(single_price, single_volume, length=13, vi_factor=0.67, strict=True, sample_period=0)
     
-    def test_vama_zero_length(self):
-        """Test VAMA fails with zero length - mirrors check_vama_zero_length"""
+    def test_volume_adjusted_ma_zero_length(self):
+        """Test VolumeAdjustedMa fails with zero length - mirrors check_volume_adjusted_ma_zero_length"""
         price = np.array([10.0, 20.0, 30.0, 40.0, 50.0])
         volume = np.array([100.0, 200.0, 300.0, 400.0, 500.0])
         
         with pytest.raises(ValueError, match="Invalid period"):
-            ta_indicators.vama(price, volume, length=0, vi_factor=0.67, strict=True, sample_period=0)
+            ta_indicators.VolumeAdjustedMa(price, volume, length=0, vi_factor=0.67, strict=True, sample_period=0)
     
-    def test_vama_length_exceeds_data(self):
-        """Test VAMA fails when length exceeds data - mirrors check_vama_length_exceeds_data"""
+    def test_volume_adjusted_ma_length_exceeds_data(self):
+        """Test VolumeAdjustedMa fails when length exceeds data - mirrors check_volume_adjusted_ma_length_exceeds_data"""
         price = np.array([10.0, 20.0, 30.0])
         volume = np.array([100.0, 200.0, 300.0])
         
         with pytest.raises(ValueError, match="Invalid period"):
-            ta_indicators.vama(price, volume, length=10, vi_factor=0.67, strict=True, sample_period=0)
+            ta_indicators.VolumeAdjustedMa(price, volume, length=10, vi_factor=0.67, strict=True, sample_period=0)
     
-    def test_vama_streaming(self, test_data):
-        """Test VAMA streaming matches batch calculation - mirrors check_vama_streaming"""
+    def test_volume_adjusted_ma_streaming(self, test_data):
+        """Test VolumeAdjustedMa streaming matches batch calculation - mirrors check_volume_adjusted_ma_streaming"""
         close = test_data['close']
         volume = test_data['volume']
         length = 13
@@ -261,11 +261,11 @@ class TestVama:
         sample_period = 0
         
         # Batch calculation
-        batch_result = ta_indicators.vama(close, volume, length=length, vi_factor=vi_factor, 
+        batch_result = ta_indicators.VolumeAdjustedMa(close, volume, length=length, vi_factor=vi_factor, 
                                          strict=strict, sample_period=sample_period)
         
         # Streaming calculation
-        stream = ta_indicators.VamaStream(length=length, vi_factor=vi_factor, 
+        stream = ta_indicators.VolumeAdjustedMaStream(length=length, vi_factor=vi_factor, 
                                          strict=strict, sample_period=sample_period)
         stream_values = []
         
@@ -283,14 +283,14 @@ class TestVama:
             if np.isnan(b) and np.isnan(s):
                 continue
             assert_close(b, s, rtol=1e-9, atol=1e-9, 
-                        msg=f"VAMA streaming mismatch at index {i}")
+                        msg=f"VolumeAdjustedMa streaming mismatch at index {i}")
     
-    def test_vama_batch(self, test_data):
-        """Test VAMA batch processing - mirrors check_batch_default_row"""
+    def test_volume_adjusted_ma_batch(self, test_data):
+        """Test VolumeAdjustedMa batch processing - mirrors check_batch_default_row"""
         close = test_data['close']
         volume = test_data['volume']
         
-        result = ta_indicators.vama_batch(
+        result = ta_indicators.VolumeAdjustedMa_batch(
             close,
             volume,
             length_range=(13, 13, 0),  # Default length only
@@ -310,27 +310,27 @@ class TestVama:
         
         # Extract the single row
         default_row = result['values'][0]
-        expected = EXPECTED_OUTPUTS['vama']['fast_values']
+        expected = EXPECTED_OUTPUTS['volume_adjusted_ma']['fast_values']
         
         # Check last 5 values match
         assert_close(
             default_row[-5:],
             expected,
             rtol=1e-6,
-            msg="VAMA batch default row mismatch"
+            msg="VolumeAdjustedMa batch default row mismatch"
         )
     
-    def test_vama_constant_volume(self):
-        """Test VAMA with constant volume"""
+    def test_volume_adjusted_ma_constant_volume(self):
+        """Test VolumeAdjustedMa with constant volume"""
         # Create price series with some variation
         price = np.array([50.0, 51.0, 49.0, 52.0, 48.0, 53.0, 47.0, 54.0, 46.0, 55.0] * 5)
         # Constant volume
         volume = np.array([1000.0] * 50)
         
-        result = ta_indicators.vama(price, volume, length=5, vi_factor=0.67, strict=True, sample_period=0)
+        result = ta_indicators.VolumeAdjustedMa(price, volume, length=5, vi_factor=0.67, strict=True, sample_period=0)
         
         assert len(result) == len(price)
-        # With constant volume, VAMA should still produce valid results
+        # With constant volume, VolumeAdjustedMa should still produce valid results
         assert not np.all(np.isnan(result[5:]))
 
 

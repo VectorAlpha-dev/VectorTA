@@ -39,7 +39,13 @@
       "Read(/C:\\Rust Projects\\my_project-bindings-1/**)",
       "Read(/C:\\Rust Projects\\my_project-bindings-1\\src\\indicators\\moving_averages/**)",
       "Read(/C:\\Rust Projects\\my_project-bindings-1\\src\\indicators\\moving_averages/**)",
-      "Read(/C:\\Rust Projects\\my_project-bindings-1\\src\\indicators\\other_indicators/**)"
+      "Read(/C:\\Rust Projects\\my_project-bindings-1\\src\\indicators\\other_indicators/**)",
+      "Read(/C:\\Rust Projects\\my_project-bindings-1\\src\\indicators\\other_indicators/**)",
+      "Read(/C:\\Rust Projects\\my_project-bindings-1\\src\\indicators\\moving_averages/**)",
+      "Read(/C:\\Rust Projects\\my_project-bindings-1\\src\\indicators\\moving_averages/**)",
+      "Read(/C:\\Rust Projects\\my_project-bindings-1\\src\\indicators\\moving_averages/**)",
+      "Read(/C:\\Rust Projects\\my_project-bindings-1\\src\\indicators\\moving_averages/**)",
+      "Bash(test_bindings.bat nadaraya_watson_envelope)"
     ],
     "deny": [],
     "ask": [],

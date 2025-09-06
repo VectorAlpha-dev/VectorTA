@@ -36,7 +36,7 @@ use crate::indicators::bollinger_bands_width::{
 #[cfg(feature = "python")]
 use crate::indicators::bop::{bop_batch_py, bop_py, BopStreamPy};
 #[cfg(feature = "python")]
-use crate::indicators::other_indicators::{buff_averages_py, buff_averages_batch_py, BuffAveragesStreamPy, qqe_py, qqe_batch_py, QqeStreamPy, vama_py, vama_batch_py, VamaStreamPy};
+use crate::indicators::other_indicators::{buff_averages_py, buff_averages_batch_py, BuffAveragesStreamPy, qqe_py, qqe_batch_py, QqeStreamPy, volume_adjusted_ma_py, volume_adjusted_ma_batch_py, VolumeAdjustedMaStreamPy, nadaraya_watson_envelope_py, nadaraya_watson_envelope_batch_py, NweStreamPy, beardy_squeeze_pro_py};
 #[cfg(feature = "python")]
 use crate::indicators::cci::{cci_batch_py, cci_py, CciStreamPy};
 #[cfg(feature = "python")]
@@ -960,10 +960,18 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(qqe_batch_py, m)?)?;
 	m.add_class::<QqeStreamPy>()?;
 
-	// VAMA
-	m.add_function(wrap_pyfunction!(vama_py, m)?)?;
-	m.add_function(wrap_pyfunction!(vama_batch_py, m)?)?;
-	m.add_class::<VamaStreamPy>()?;
+	// Volume Adjusted MA
+	m.add_function(wrap_pyfunction!(volume_adjusted_ma_py, m)?)?;
+	m.add_function(wrap_pyfunction!(volume_adjusted_ma_batch_py, m)?)?;
+	m.add_class::<VolumeAdjustedMaStreamPy>()?;
+
+	// Nadaraya-Watson Envelope
+	m.add_function(wrap_pyfunction!(nadaraya_watson_envelope_py, m)?)?;
+	m.add_function(wrap_pyfunction!(nadaraya_watson_envelope_batch_py, m)?)?;
+	m.add_class::<NweStreamPy>()?;
+	
+	// Beardy Squeeze Pro
+	m.add_function(wrap_pyfunction!(beardy_squeeze_pro_py, m)?)?;
 
 	// Register Linear Regression Intercept functions with their user-facing names
 	m.add_function(wrap_pyfunction!(linearreg_intercept_py, m)?)?;

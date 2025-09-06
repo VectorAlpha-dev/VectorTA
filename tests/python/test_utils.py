@@ -1261,6 +1261,25 @@ EXPECTED_OUTPUTS = {
             60305.94922998
         ],
         'warmup_period': 12  # length - 1 for default params
+    },
+    'volume_adjusted_ma': {  # Updated after Pine logic fixes
+        'default_params': {'length': 13, 'vi_factor': 0.67, 'strict': True, 'sample_period': 0},
+        'fast_values': [  # length=13 (Updated after Pine logic fixes)
+            60249.34558277224,
+            60283.78930990677,
+            60173.39052862816,
+            60260.19903965848,
+            60226.10253226444
+        ],
+        'slow_params': {'length': 55, 'vi_factor': 0.67, 'strict': True, 'sample_period': 0},
+        'slow_values': [  # length=55 (Updated after Pine logic fixes)
+            60943.90131552854,
+            60929.79497887764,
+            60912.66617792769,
+            60900.71462347596,
+            60844.41271673433
+        ],
+        'warmup_period': 12  # length - 1 for default params
     }
 }
 

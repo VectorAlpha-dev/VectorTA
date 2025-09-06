@@ -1273,6 +1273,25 @@ const EXPECTED_OUTPUTS = {
             60305.94922998
         ],
         warmupPeriod: 12  // length - 1 for default params
+    },
+    volume_adjusted_ma: {  // Same as vama but with new name
+        defaultParams: { length: 13, viFactor: 0.67, strict: true, samplePeriod: 0 },
+        fastValues: [  // length=13 (Updated after Pine logic fixes)
+            60249.34558277224,
+            60283.78930990677,
+            60173.39052862816,
+            60260.19903965848,
+            60226.10253226444
+        ],
+        slowParams: { length: 55, viFactor: 0.67, strict: true, samplePeriod: 0 },
+        slowValues: [  // length=55 (Updated after Pine logic fixes)
+            60943.90131552854,
+            60929.79497887764,
+            60912.66617792769,
+            60900.71462347596,
+            60844.41271673433
+        ],
+        warmupPeriod: 12  // length - 1 for default params
     }
 };
 
