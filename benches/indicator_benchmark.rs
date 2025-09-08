@@ -50,6 +50,11 @@ use my_project::indicators::moving_averages::{
 	zlema::{zlema_with_kernel, ZlemaBatchBuilder, ZlemaInput},
 };
 
+// Import other indicators
+use my_project::other_indicators::{
+	macz::{macz_with_kernel, MaczBatchBuilder, MaczInput},
+};
+
 use my_project::indicators::{
 	acosc::{acosc as acosc_raw, AcoscInput},
 	ad::{ad as ad_raw, AdInput},
@@ -188,6 +193,7 @@ pub type AdxInputS = AdxInput<'static>;
 pub type AdxrInputS = AdxrInput<'static>;
 pub type AlligatorInputS = AlligatorInput<'static>;
 pub type AlmaInputS = AlmaInput<'static>;
+pub type MaczInputS = MaczInput<'static>;
 pub type AoInputS = AoInput<'static>;
 pub type ApoInputS = ApoInput<'static>;
 pub type AroonInputS = AroonInput<'static>;
@@ -489,6 +495,17 @@ macro_rules! make_batch_wrappers {
 }
 
 // Special implementation for RsmkInputS which requires two candle sets
+impl InputLen for MaczInputS {
+	fn with_len(len: usize) -> Self {
+		match len {
+			10_000 => MaczInput::with_default_candles(&*CANDLES_10K, &CANDLES_10K.volume),
+			100_000 => MaczInput::with_default_candles(&*CANDLES_100K, &CANDLES_100K.volume),
+			1_000_000 => MaczInput::with_default_candles(&*CANDLES_1M, &CANDLES_1M.volume),
+			_ => panic!("unsupported len {len}"),
+		}
+	}
+}
+
 impl InputLen for RsmkInputS {
 	fn with_len(len: usize) -> Self {
 		match len {
@@ -905,6 +922,7 @@ bench_scalars!(
 );
 
 make_kernel_wrappers!(alma, alma_with_kernel, AlmaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(macz, macz_with_kernel, MaczInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(cwma, cwma_with_kernel, CwmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(dema, dema_with_kernel, DemaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(edcf, edcf_with_kernel, EdcfInputS; Scalar,Avx2,Avx512);
@@ -950,6 +968,11 @@ make_kernel_wrappers!(zlema, zlema_with_kernel, ZlemaInputS; Scalar,Avx2,Avx512)
 
 make_batch_wrappers!(
 	alma_batch, AlmaBatchBuilder, AlmaInputS;
+	ScalarBatch, Avx2Batch, Avx512Batch
+);
+
+make_batch_wrappers!(
+	macz_batch, MaczBatchBuilder, MaczInputS;
 	ScalarBatch, Avx2Batch, Avx512Batch
 );
 
@@ -1036,6 +1059,13 @@ bench_variants!(
 	alma_batch_scalarbatch,
 	alma_batch_avx2batch,
 	alma_batch_avx512batch
+);
+
+bench_variants!(
+	macz_batch => MaczInputS; Some(232);
+	macz_batch_scalarbatch,
+	macz_batch_avx2batch,
+	macz_batch_avx512batch
 );
 
 bench_variants!(
@@ -1330,6 +1360,13 @@ bench_variants!(
 	alma_scalar,
 	alma_avx2,
 	alma_avx512,
+);
+
+bench_variants!(
+	macz => MaczInputS; None;
+	macz_scalar,
+	macz_avx2,
+	macz_avx512,
 );
 
 bench_variants!(
@@ -1630,6 +1667,8 @@ criterion_main!(
 	benches_scalar,
 	benches_alma,
 	benches_alma_batch,
+	benches_macz,
+	benches_macz_batch,
 	benches_cwma,
 	benches_cwma_batch,
 	benches_dema,

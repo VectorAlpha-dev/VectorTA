@@ -438,8 +438,8 @@ pub fn aso_scalar(
         let intrabarbulls = (((close[i] - low[i]) + (high[i] - open[i])) * 50.0) / k1;
         let intrabarbears = (((high[i] - close[i]) + (open[i] - low[i])) * 50.0) / k1;
 
-        // group over last `period` bars; only defined if i >= period-1
-        if i >= period - 1 {
+        // group over last `period` bars; only defined if we have enough valid data
+        if i >= warm {
             let start = i + 1 - period;
 
             let mut gl = f64::MAX;
@@ -470,7 +470,7 @@ pub fn aso_scalar(
                 _ => 0.5 * (intrabarbears + groupbears),
             };
 
-            // rolling window of defined values begins at `warm`
+            // rolling window of defined values
             let old_b = if filled == period { ring_b[head] } else { 0.0 };
             let old_e = if filled == period { ring_e[head] } else { 0.0 };
             sum_b += b - old_b;
@@ -480,13 +480,11 @@ pub fn aso_scalar(
             head = (head + 1) % period;
             if filled < period { filled += 1; }
 
-            // emit only from warm onward, divide by actual count to mirror alma.rs ramp
-            if i >= warm {
-                let n = filled; // grows 1..=period, then stays at period
-                unsafe {
-                    *out_bulls.get_unchecked_mut(i) = sum_b / n as f64;
-                    *out_bears.get_unchecked_mut(i) = sum_e / n as f64;
-                }
+            // emit output, divide by actual count to mirror alma.rs ramp
+            let n = filled; // grows 1..=period, then stays at period
+            unsafe {
+                *out_bulls.get_unchecked_mut(i) = sum_b / n as f64;
+                *out_bears.get_unchecked_mut(i) = sum_e / n as f64;
             }
         }
     }
@@ -1373,7 +1371,7 @@ pub fn aso_batch_unified_js(
     let out = AsoBatchJsOutput { 
         values, 
         combos: combos.clone(),  // We need to return the actual combos
-        rows,
+        rows: rows * 2,  // 2 outputs per combo (bulls and bears)
         cols 
     };
     serde_wasm_bindgen::to_value(&out).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))

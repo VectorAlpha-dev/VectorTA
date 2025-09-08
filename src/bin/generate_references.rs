@@ -102,6 +102,7 @@ use my_project::indicators::vpt::{vpt, VptInput};
 use my_project::indicators::stddev::{stddev, StdDevInput, StdDevParams};
 use my_project::indicators::var::{var, VarInput, VarParams};
 use my_project::indicators::wclprice::{wclprice, WclpriceInput};
+use my_project::other_indicators::macz::{macz, MaczInput, MaczParams};
 use my_project::utilities::data_loader::read_candles_from_csv;
 use serde_json::json;
 use std::env;
@@ -110,7 +111,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	let args: Vec<String> = env::args().collect();
 	if args.len() < 2 {
 		eprintln!("Usage: {} <indicator_name> [source]", args[0]);
-		eprintln!("Available indicators: ad, acosc, adx, adosc, adxr, alligator, alma, ao, apo, aroon, aroonosc, atr, bandpass, bollinger_bands, bollinger_bands_width, bop, cci, cfo, cg, chop, cwma, decycler, dema, devstop, di, edcf, ehlers_itrend, ema, epma, eri, fisher, frama, fwma, gaussian, highpass_2_pole, highpass, hma, hwma, jma, jsa, kama, kst, kurtosis, linreg, maaq, mama, marketefi, midpoint, midprice, mfi, mwdx, nma, pma, ppo, rsx, pwma, reflex, roc, rocp, rsi, rvi, rvi, sinwma, sma, smma, squeeze_momentum, sqwma, srwma, stddev, supersmoother_3_pole, supersmoother, swma, tema, tilson, trendflex, trima, var, vpci, tsf, ui, vwap, vwma, vpwma, wclprice, wilders, wma, zlema");
+		eprintln!("Available indicators: ad, acosc, adx, adosc, adxr, alligator, alma, ao, apo, aroon, aroonosc, atr, bandpass, bollinger_bands, bollinger_bands_width, bop, cci, cfo, cg, chop, cwma, decycler, dema, devstop, di, edcf, ehlers_itrend, ema, epma, eri, fisher, frama, fwma, gaussian, highpass_2_pole, highpass, hma, hwma, jma, jsa, kama, kst, kurtosis, linreg, maaq, macz, mama, marketefi, midpoint, midprice, mfi, mwdx, nma, pma, ppo, rsx, pwma, reflex, roc, rocp, rsi, rvi, rvi, sinwma, sma, smma, squeeze_momentum, sqwma, srwma, stddev, supersmoother_3_pole, supersmoother, swma, tema, tilson, trendflex, trima, var, vpci, tsf, ui, vwap, vwma, vpwma, wclprice, wilders, wma, zlema");
 		eprintln!("Available sources: open, high, low, close, volume, hl2, hlc3, ohlc4, hlcc4");
 		std::process::exit(1);
 	}
@@ -721,6 +722,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 					"period": period,
 					"fast_period": fast_period,
 					"slow_period": slow_period
+				},
+				"values": result.values,
+				"length": result.values.len()
+			})
+		}
+		"macz" => {
+			let params = MaczParams::default();
+			let fast_length = params.fast_length.unwrap_or(12);
+			let slow_length = params.slow_length.unwrap_or(25);
+			let signal_length = params.signal_length.unwrap_or(9);
+			let lengthz = params.lengthz.unwrap_or(20);
+			let length_stdev = params.length_stdev.unwrap_or(25);
+			let a = params.a.unwrap_or(1.0);
+			let b = params.b.unwrap_or(1.0);
+			let use_lag = params.use_lag.unwrap_or(false);
+			let gamma = params.gamma.unwrap_or(0.02);
+			let input = MaczInput::from_candles(&candles, source, params);
+			let result = macz(&input)?;
+			json!({
+				"indicator": "macz",
+				"source": source,
+				"params": {
+					"fast_length": fast_length,
+					"slow_length": slow_length,
+					"signal_length": signal_length,
+					"lengthz": lengthz,
+					"length_stdev": length_stdev,
+					"a": a,
+					"b": b,
+					"use_lag": use_lag,
+					"gamma": gamma
 				},
 				"values": result.values,
 				"length": result.values.len()
