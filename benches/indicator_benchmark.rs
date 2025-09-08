@@ -50,6 +50,13 @@ use my_project::indicators::moving_averages::{
 	zlema::{zlema_with_kernel, ZlemaBatchBuilder, ZlemaInput},
 };
 
+// Import other indicators
+use my_project::other_indicators::{
+	avsl::{avsl_with_kernel, AvslBatchBuilder, AvslInput},
+	dma::{dma_with_kernel, DmaBatchBuilder, DmaInput},
+	range_filter::{range_filter_with_kernel, RangeFilterBatchBuilder, RangeFilterInput},
+};
+
 use my_project::indicators::{
 	acosc::{acosc as acosc_raw, AcoscInput},
 	ad::{ad as ad_raw, AdInput},
@@ -335,6 +342,11 @@ pub type WildersInputS = WildersInput<'static>;
 pub type WillrInputS = WillrInput<'static>;
 pub type WmaInputS = WmaInput<'static>;
 pub type ZlemaInputS = ZlemaInput<'static>;
+
+// Other indicators InputS types
+pub type AvslInputS = AvslInput<'static>;
+pub type DmaInputS = DmaInput<'static>;
+pub type RangeFilterInputS = RangeFilterInput<'static>;
 pub type ZscoreInputS = ZscoreInput<'static>;
 
 macro_rules! impl_input_len {
@@ -665,7 +677,11 @@ impl_input_len!(
 	WillrInputS,
 	WmaInputS,
 	ZlemaInputS,
-	ZscoreInputS
+	ZscoreInputS,
+	// Other indicators
+	AvslInputS,
+	DmaInputS,
+	RangeFilterInputS
 );
 
 bench_wrappers! {
@@ -948,6 +964,11 @@ make_kernel_wrappers!(wilders, wilders_with_kernel, WildersInputS; Scalar,Avx2,A
 make_kernel_wrappers!(wma, wma_with_kernel, WmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(zlema, zlema_with_kernel, ZlemaInputS; Scalar,Avx2,Avx512);
 
+// Other indicators kernel wrappers
+make_kernel_wrappers!(avsl, avsl_with_kernel, AvslInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(dma, dma_with_kernel, DmaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(range_filter, range_filter_with_kernel, RangeFilterInputS; Scalar,Avx2,Avx512);
+
 make_batch_wrappers!(
 	alma_batch, AlmaBatchBuilder, AlmaInputS;
 	ScalarBatch, Avx2Batch, Avx512Batch
@@ -1030,6 +1051,11 @@ make_batch_wrappers!(vpwma_batch, VpwmaBatchBuilder, VpwmaInputS; ScalarBatch, A
 make_batch_wrappers!(wilders_batch, WildersBatchBuilder, WildersInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(wma_batch, WmaBatchBuilder, WmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(zlema_batch, ZlemaBatchBuilder, ZlemaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+
+// Other indicators batch wrappers
+make_batch_wrappers!(avsl_batch, AvslBatchBuilder, AvslInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(dma_batch, DmaBatchBuilder, DmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(range_filter_batch, RangeFilterBatchBuilder, RangeFilterInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 
 bench_variants!(
 	alma_batch => AlmaInputS; Some(232);
@@ -1323,6 +1349,28 @@ bench_variants!(
 	zlema_batch_scalarbatch,
 	zlema_batch_avx2batch,
 	zlema_batch_avx512batch,
+);
+
+// Other indicators batch variants
+bench_variants!(
+	avsl_batch => AvslInputS; Some(200);
+	avsl_batch_scalarbatch,
+	avsl_batch_avx2batch,
+	avsl_batch_avx512batch,
+);
+
+bench_variants!(
+	dma_batch => DmaInputS; Some(200);
+	dma_batch_scalarbatch,
+	dma_batch_avx2batch,
+	dma_batch_avx512batch,
+);
+
+bench_variants!(
+	range_filter_batch => RangeFilterInputS; Some(200);
+	range_filter_batch_scalarbatch,
+	range_filter_batch_avx2batch,
+	range_filter_batch_avx512batch,
 );
 
 bench_variants!(
@@ -1626,6 +1674,28 @@ bench_variants!(
 	zlema_avx512,
 );
 
+// Other indicators single variants
+bench_variants!(
+	avsl => AvslInputS; None;
+	avsl_scalar,
+	avsl_avx2,
+	avsl_avx512,
+);
+
+bench_variants!(
+	dma => DmaInputS; None;
+	dma_scalar,
+	dma_avx2,
+	dma_avx512,
+);
+
+bench_variants!(
+	range_filter => RangeFilterInputS; None;
+	range_filter_scalar,
+	range_filter_avx2,
+	range_filter_avx512,
+);
+
 criterion_main!(
 	benches_scalar,
 	benches_alma,
@@ -1712,5 +1782,12 @@ criterion_main!(
 	benches_wma,
 	benches_wma_batch,
 	benches_zlema,
-	benches_zlema_batch
+	benches_zlema_batch,
+	// Other indicators
+	benches_avsl,
+	benches_avsl_batch,
+	benches_dma,
+	benches_dma_batch,
+	benches_range_filter,
+	benches_range_filter_batch
 );

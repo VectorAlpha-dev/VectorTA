@@ -85,6 +85,31 @@ EXPECTED_OUTPUTS = {
             59165.14427332
         ]
     },
+    'sama': {
+        'default_params': {'length': 200, 'maj_length': 14, 'min_length': 6},
+        'test_params': {'length': 50, 'maj_length': 14, 'min_length': 6},
+        'last_5_values': [
+            4438.510011892495,
+            4432.756593411552,
+            4427.661588344437,
+            4422.183920434451,
+            4416.96929689133
+        ],
+        'test_last_5': [
+            4349.36514574484,
+            4342.003804508042,
+            4338.192552401373,
+            4331.60839768486,
+            4326.283758247442
+        ],
+        'reinput_last_5': [
+            4427.001774348806,
+            4420.063164565887,
+            4413.379849287151,
+            4406.704628748189,
+            4400.13965972772
+        ]
+    },
     'kama': {
         'default_params': {'period': 30},
         'last_5_values': [
@@ -117,6 +142,34 @@ EXPECTED_OUTPUTS = {
             59179.88888888889,
             59080.99999999999
         ]
+    },
+    'wto': {
+        'default_params': {'channel_length': 10, 'average_length': 21},
+        'last_5_values': {
+            'wavetrend1': [
+                -31.700919052041584,
+                -31.429599055287365,
+                -33.42650456951316,
+                -32.48187262451018,
+                -39.88701736507456,
+            ],
+            'wavetrend2': [
+                -35.68024735,
+                -33.31827192,
+                -32.62715068,
+                -32.25972409,
+                -34.30624855,
+            ],
+            'histogram': [
+                3.9793283,
+                1.8886729,
+                -0.7993544,
+                -0.2221492,
+                -5.5807683,
+            ]
+        },
+        'warmup_period': 20,  # Based on average_length - 1
+        'has_three_outputs': True
     },
     'nma': {
         'default_params': {'period': 40},
@@ -1209,6 +1262,60 @@ EXPECTED_OUTPUTS = {
             59215.124961889764,
             59103.099969511815
         ]
+    },
+    'dma': {
+        'default_params': {
+            'hull_length': 7,
+            'ema_length': 20,
+            'ema_gain_limit': 50,
+            'hull_ma_type': 'WMA'
+        },
+        'last_5_values': [
+            59404.62489256,
+            59326.48766951,
+            59195.35128538,
+            59153.22811529,
+            58933.88503421
+        ],
+        # Warmup period calculation: max(hull_period-1, ema_period-1) = max(6, 19) = 19
+        'warmup_period': 19,
+        # Values for constant input test (all values = 100.0) - DMA should stabilize to the constant
+        'constant_value': 100.0,
+        # Batch test parameters - testing different hull lengths
+        'batch_hull_lengths': [5, 7, 9, 11],
+        'batch_hull_range': (5, 11, 2),  # hull_length_range
+        'batch_ema_range': (20, 20, 0),  # ema_length_range (fixed)
+        'batch_gain_range': (50, 50, 0),  # ema_gain_limit_range (fixed)
+        # Alternative hull MA types to test
+        'hull_ma_types': ['WMA', 'EMA'],
+        # For batch test - default params row should match single calculation
+        'batch_default_row': [
+            59404.62489256,
+            59326.48766951,
+            59195.35128538,
+            59153.22811529,
+            58933.88503421
+        ]
+    },
+    'ehma': {
+        'default_params': {'period': 14},
+        'test_data': [
+            59500.0, 59450.0, 59420.0, 59380.0, 59350.0, 
+            59320.0, 59310.0, 59300.0, 59280.0, 59260.0,
+            59250.0, 59240.0, 59230.0, 59220.0, 59210.0,
+            59200.0, 59190.0, 59180.0
+        ],
+        'expected_value_at_13': 59309.748,  # Value at index 13 for period=14
+        'warmup_period': 13,  # period - 1 = 14 - 1 = 13
+        # For period=10 on different data
+        'period_10_warmup': 9,  # period - 1 = 10 - 1 = 9
+        # For batch processing with different periods
+        'batch_periods': [10, 14, 20, 28],
+        'batch_range': (10, 30, 10),  # Start, stop+step, step
+        # Streaming test - values should match batch calculation
+        'streaming_matches_batch': True,
+        # Values for consistency test - running EHMA multiple times should produce same results
+        'consistency_test': True
     }
 }
 

@@ -334,7 +334,17 @@ use crate::indicators::rvi::{rvi_batch_py, rvi_py, RviStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::vlma::{vlma_batch_py, vlma_py, VlmaStreamPy};
 #[cfg(feature = "python")]
-use crate::other_indicators::avsl::{avsl_py, avsl_batch_py};
+use crate::other_indicators::avsl::{avsl_py, avsl_batch_py, AvslStreamPy};
+#[cfg(feature = "python")]
+use crate::other_indicators::dma::{dma_py, dma_batch_py, DmaStreamPy};
+#[cfg(feature = "python")]
+use crate::other_indicators::range_filter::{range_filter_py, range_filter_batch_py, RangeFilterStreamPy};
+#[cfg(feature = "python")]
+use crate::other_indicators::sama::{sama_py, sama_batch_py, SamaStreamPy};
+#[cfg(feature = "python")]
+use crate::other_indicators::wto::{wto_py, wto_batch_py, WtoStreamPy};
+#[cfg(feature = "python")]
+use crate::other_indicators::ehma::{ehma_py, ehma_batch_py, EhmaStreamPy};
 
 #[pymodule]
 fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -938,6 +948,32 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	// Register AVSL functions with their user-facing names
 	m.add_function(wrap_pyfunction!(avsl_py, m)?)?;
 	m.add_function(wrap_pyfunction!(avsl_batch_py, m)?)?;
+	m.add_class::<AvslStreamPy>()?;
+
+	// Register DMA functions with their user-facing names
+	m.add_function(wrap_pyfunction!(dma_py, m)?)?;
+	m.add_function(wrap_pyfunction!(dma_batch_py, m)?)?;
+	m.add_class::<DmaStreamPy>()?;
+
+	// Register Range Filter functions with their user-facing names
+	m.add_function(wrap_pyfunction!(range_filter_py, m)?)?;
+	m.add_function(wrap_pyfunction!(range_filter_batch_py, m)?)?;
+	m.add_class::<RangeFilterStreamPy>()?;
+
+	// Register SAMA functions with their user-facing names
+	m.add_function(wrap_pyfunction!(sama_py, m)?)?;
+	m.add_function(wrap_pyfunction!(sama_batch_py, m)?)?;
+	m.add_class::<SamaStreamPy>()?;
+
+	// Register WTO functions with their user-facing names
+	m.add_function(wrap_pyfunction!(wto_py, m)?)?;
+	m.add_function(wrap_pyfunction!(wto_batch_py, m)?)?;
+	m.add_class::<WtoStreamPy>()?;
+
+	// Register EHMA functions with their user-facing names
+	m.add_function(wrap_pyfunction!(ehma_py, m)?)?;
+	m.add_function(wrap_pyfunction!(ehma_batch_py, m)?)?;
+	m.add_class::<EhmaStreamPy>()?;
 
 	// Register CCI functions with their user-facing names
 	m.add_function(wrap_pyfunction!(cci_py, m)?)?;

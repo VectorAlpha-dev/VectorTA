@@ -522,8 +522,13 @@ pub fn avsl_scalar(
         .map_err(|e| AvslError::ComputationError(format!("AVSL SMA error: {}", e)))?;
 
     // warmup NaNs
-    let warmup_end = start;
-    for v in &mut out[..warmup_end] { *v = f64::NAN; }
+    // The SMA needs slow_period valid values to produce its first output
+    // Since pre has valid values starting at index 'start', the first valid SMA output
+    // will be at index start + slow_period - 1
+    let warmup_end = start + slow_period - 1;
+    if warmup_end <= len {
+        for v in &mut out[..warmup_end] { *v = f64::NAN; }
+    }
     Ok(())
 }
 
@@ -1209,7 +1214,7 @@ pub fn avsl_batch_unified_js(close: &[f64], low: &[f64], volume: &[f64], config:
         multiplier: cfg.mult_range,
     };
 
-    let out = avsl_batch_with_kernel(close, low, volume, &sweep, detect_best_kernel())
+    let out = avsl_batch_with_kernel(close, low, volume, &sweep, detect_best_batch_kernel())
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     let js = AvslBatchJsOutput {
@@ -1328,7 +1333,7 @@ pub fn avsl_batch_into(
         let out = core::slice::from_raw_parts_mut(out_ptr, rows * cols);
 
         // Fill flattened out
-        avsl_batch_inner_into(close, low, vol, &combos, detect_best_kernel(), out)
+        avsl_batch_inner_into(close, low, vol, &combos, detect_best_batch_kernel(), out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         Ok(rows)
     }

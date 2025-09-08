@@ -101,7 +101,7 @@ class CriterionComparableBenchmark:
         
         # Map of indicator names to their benchmark paths
         indicators_to_find = [
-            'alma', 'alligator', 'aroonosc', 'bollinger_bands', 'ao', 'vpwma', 'vwma', 'vwmacd', 'wilders', 'willr', 'wma', 'zlema', 'ad', 'adx', 'acosc', 'adosc', 'apo',
+            'alma', 'alligator', 'aroonosc', 'avsl', 'bollinger_bands', 'ao', 'dma', 'range_filter', 'sama', 'vpwma', 'vwma', 'vwmacd', 'wilders', 'willr', 'wma', 'zlema', 'ad', 'adx', 'acosc', 'adosc', 'apo',
             'bandpass', 'vwap', 'cwma', 'dema', 'deviation', 'dpo', 'er', 'edcf', 'ehlers_itrend', 'ema', 'epma', 'eri',
             'frama', 'fwma', 'gaussian', 'highpass_2_pole', 'highpass', 'hma',
             'hwma', 'ift_rsi', 'jma', 'jsa', 'kama', 'kdj', 'linearreg_intercept', 'kvo', 'kurtosis', 'kst', 'linreg', 'mab', 'lrsi', 'mean_ad', 'mom', 'pivot', 'rocp', 'linearreg_slope', 'maaq', 'mama', 'mass', 'midprice', 'medprice', 'msw', 'medium_ad', 'mwdx', 'obv',
@@ -115,7 +115,7 @@ class CriterionComparableBenchmark:
         target_size = size_map.get(self.data_size, '1m')
         
         # Also add batch indicators to find
-        batch_indicators = ['alma_batch', 'aroonosc_batch', 'bollinger_bands_batch', 'ao_batch', 'vpwma_batch', 'vwmacd_batch', 'willr_batch', 'voss_batch', 'wma_batch', 'zlema_batch', 
+        batch_indicators = ['alma_batch', 'aroonosc_batch', 'avsl_batch', 'bollinger_bands_batch', 'ao_batch', 'dma_batch', 'range_filter_batch', 'sama_batch', 'vpwma_batch', 'vwmacd_batch', 'willr_batch', 'voss_batch', 'wma_batch', 'zlema_batch', 
                            'sma_batch', 'stddev_batch', 'ema_batch', 'dema_batch', 'dpo_batch', 'er_batch', 'deviation_batch', 'dti_batch', 'edcf_batch', 'ehlers_itrend_batch', 'eri_batch', 'tema_batch', 
                            'hma_batch', 'ift_rsi_batch', 'kvo_batch', 'kst_batch', 'lrsi_batch', 'mean_ad_batch', 'mom_batch', 'pivot_batch', 'rocp_batch', 'stochf_batch', 'cwma_batch', 'adxr_batch', 'adx_batch', 'adosc_batch', 'aroon_batch', 'linearreg_intercept_batch',
                            'bollinger_bands_width_batch', 'apo_batch', 'bandpass_batch', 'atr_batch', 'cci_batch', 'bop_batch', 
@@ -236,6 +236,10 @@ class CriterionComparableBenchmark:
         # Define indicators with their functions
         indicators = [
             ('alma', lambda: my_project.alma(data['close'], 9, 0.85, 6.0)),
+            ('avsl', lambda: my_project.avsl(data['close'], 14, 10.0)),
+            ('dma', lambda: my_project.dma(data['close'], 9, 9)),
+            ('range_filter', lambda: my_project.range_filter(data['close'], 2.618, 14, True, 27, "close")),
+            ('sama', lambda: my_project.sama(data['close'], 200, 14, 6)),
             ('alligator', lambda: my_project.alligator((data['high'] + data['low']) / 2)),
             ('aroon', lambda: my_project.aroon(data['high'], data['low'], 14)),
             ('bollinger_bands', lambda: my_project.bollinger_bands(data['close'], 20, 2.0, 2.0, "sma", 0)),
@@ -413,6 +417,10 @@ class CriterionComparableBenchmark:
         print("\n  Batch operations (232 combos - matching Rust defaults):")
         batch_indicators = [
             ('alma_batch', lambda: my_project.alma_batch(data['close'], (9, 240, 1), (0.85, 0.85, 0.0), (6.0, 6.0, 0.0))),
+            ('avsl_batch', lambda: my_project.avsl_batch(data['close'], (14, 50, 1), (10.0, 10.0, 0.0))),
+            ('dma_batch', lambda: my_project.dma_batch(data['close'], (9, 50, 1), (9, 50, 1))),
+            ('range_filter_batch', lambda: my_project.range_filter_batch(data['close'], 2.618, 2.618, 0.1, 14, 14, 1, True, 27, "close")),
+            ('sama_batch', lambda: my_project.sama_batch(data['close'], (190, 210, 1), (12, 16, 1), (4, 8, 1))),
             ('aroonosc_batch', lambda: my_project.aroonosc_batch(data['high'], data['low'], (14, 14, 1))),
             ('bollinger_bands_batch', lambda: my_project.bollinger_bands_batch(data['close'], (20, 20, 0), (2.0, 2.0, 0.0), (2.0, 2.0, 0.0), "sma", 0)),
             ('ao_batch', lambda: my_project.ao_batch(data['high'], data['low'], (5, 5, 1), (34, 34, 1))),
@@ -601,7 +609,7 @@ class CriterionComparableBenchmark:
         print("-" * 80)
         
         batch_comparisons = []
-        for base_name in ['alma', 'aroonosc', 'ao', 'vpwma', 'wma', 'zlema', 'sma', 'ema', 'dema', 'dpo', 'er', 'tema', 'hma', 'ift_rsi', 'kvo', 'kst', 'lrsi', 'mean_ad', 'pivot', 'rocp', 'cwma', 'keltner', 'adxr', 'adx', 'adosc', 'aroon', 'bollinger_bands_width', 'apo', 'bandpass', 'atr', 'cg', 'cci', 'cfo', 'linearreg_intercept', 'mass', 'midprice', 'obv', 'qstick', 'stc', 'tsi', 'midpoint', 'cmo', 'dec_osc', 'donchian', 'mfi', 'natr', 'ppo', 'rsi', 'var', 'vpci', 'gatorosc', 'kurtosis', 'mab', 'msw', 'supertrend', 'cvi', 'di', 'wad', 'correlation_cycle', 'pfe', 'roc', 'rvi', 'minmax']:
+        for base_name in ['alma', 'aroonosc', 'ao', 'avsl', 'dma', 'range_filter', 'vpwma', 'wma', 'zlema', 'sma', 'ema', 'dema', 'dpo', 'er', 'tema', 'hma', 'ift_rsi', 'kvo', 'kst', 'lrsi', 'mean_ad', 'pivot', 'rocp', 'cwma', 'keltner', 'adxr', 'adx', 'adosc', 'aroon', 'bollinger_bands_width', 'apo', 'bandpass', 'atr', 'cg', 'cci', 'cfo', 'linearreg_intercept', 'mass', 'midprice', 'obv', 'qstick', 'stc', 'tsi', 'midpoint', 'cmo', 'dec_osc', 'donchian', 'mfi', 'natr', 'ppo', 'rsi', 'var', 'vpci', 'gatorosc', 'kurtosis', 'mab', 'msw', 'supertrend', 'cvi', 'di', 'wad', 'correlation_cycle', 'pfe', 'roc', 'rvi', 'minmax']:
             if base_name in self.python_results and f"{base_name}_batch" in self.python_results:
                 single_time = self.python_results[base_name]
                 batch_time = self.python_results[f"{base_name}_batch"]

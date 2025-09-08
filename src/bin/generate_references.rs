@@ -38,10 +38,10 @@ use my_project::indicators::squeeze_momentum::{squeeze_momentum, SqueezeMomentum
 use my_project::indicators::mass::{mass, MassInput, MassParams};
 /// Binary to generate reference outputs for indicator testing
 /// This is used by Python and WASM tests to verify their outputs match Rust
-use my_project::indicators::damiani_volatmeter::{damiani_volatmeter, DamianiVolatmeterInput, DamianiVolatmeterParams, DamianiVolatmeterData};
+use my_project::indicators::damiani_volatmeter::{damiani_volatmeter, DamianiVolatmeterInput, DamianiVolatmeterParams};
 use my_project::indicators::decycler::{decycler, DecyclerInput, DecyclerParams};
 use my_project::indicators::deviation::{deviation, DeviationInput, DeviationParams};
-use my_project::indicators::emv::{emv, EmvInput, EmvParams};
+use my_project::indicators::emv::{emv, EmvInput};
 use my_project::indicators::devstop::{devstop, DevStopInput, DevStopParams, DevStopData};
 use my_project::indicators::er::{er, ErInput, ErParams};
 use my_project::indicators::di::{di, DiData, DiInput, DiParams};
@@ -102,6 +102,7 @@ use my_project::indicators::vpt::{vpt, VptInput};
 use my_project::indicators::stddev::{stddev, StdDevInput, StdDevParams};
 use my_project::indicators::var::{var, VarInput, VarParams};
 use my_project::indicators::wclprice::{wclprice, WclpriceInput};
+use my_project::other_indicators::sama::{sama, SamaInput, SamaParams};
 use my_project::utilities::data_loader::read_candles_from_csv;
 use serde_json::json;
 use std::env;
@@ -110,7 +111,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	let args: Vec<String> = env::args().collect();
 	if args.len() < 2 {
 		eprintln!("Usage: {} <indicator_name> [source]", args[0]);
-		eprintln!("Available indicators: ad, acosc, adx, adosc, adxr, alligator, alma, ao, apo, aroon, aroonosc, atr, bandpass, bollinger_bands, bollinger_bands_width, bop, cci, cfo, cg, chop, cwma, decycler, dema, devstop, di, edcf, ehlers_itrend, ema, epma, eri, fisher, frama, fwma, gaussian, highpass_2_pole, highpass, hma, hwma, jma, jsa, kama, kst, kurtosis, linreg, maaq, mama, marketefi, midpoint, midprice, mfi, mwdx, nma, pma, ppo, rsx, pwma, reflex, roc, rocp, rsi, rvi, rvi, sinwma, sma, smma, squeeze_momentum, sqwma, srwma, stddev, supersmoother_3_pole, supersmoother, swma, tema, tilson, trendflex, trima, var, vpci, tsf, ui, vwap, vwma, vpwma, wclprice, wilders, wma, zlema");
+		eprintln!("Available indicators: ad, acosc, adx, adosc, adxr, alligator, alma, ao, apo, aroon, aroonosc, atr, bandpass, bollinger_bands, bollinger_bands_width, bop, cci, cfo, cg, chop, cwma, decycler, dema, devstop, di, edcf, ehlers_itrend, ema, epma, eri, fisher, frama, fwma, gaussian, highpass_2_pole, highpass, hma, hwma, jma, jsa, kama, kst, kurtosis, linreg, maaq, mama, marketefi, midpoint, midprice, mfi, mwdx, nma, pma, ppo, rsx, pwma, reflex, roc, rocp, rsi, rvi, rvi, sama, sinwma, sma, smma, squeeze_momentum, sqwma, srwma, stddev, supersmoother_3_pole, supersmoother, swma, tema, tilson, trendflex, trima, var, vpci, tsf, ui, vwap, vwma, vpwma, wclprice, wilders, wma, zlema");
 		eprintln!("Available sources: open, high, low, close, volume, hl2, hlc3, ohlc4, hlcc4");
 		std::process::exit(1);
 	}
@@ -1900,6 +1901,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 				"source": source,
 				"params": {
 					"period": period
+				},
+				"values": result.values,
+				"length": result.values.len()
+			})
+		}
+		"sama" => {
+			let params = SamaParams::default();
+			let length = params.length.unwrap_or(200);
+			let maj_length = params.maj_length.unwrap_or(14);
+			let min_length = params.min_length.unwrap_or(6);
+			let input = SamaInput::from_candles(&candles, source, params);
+			let result = sama(&input)?;
+			json!({
+				"indicator": "sama",
+				"source": source,
+				"params": {
+					"length": length,
+					"maj_length": maj_length,
+					"min_length": min_length
 				},
 				"values": result.values,
 				"length": result.values.len()

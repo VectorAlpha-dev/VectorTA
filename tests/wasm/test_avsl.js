@@ -406,12 +406,17 @@ test('AVSL zero-copy in-place operation', () => {
         const resultView = new Float64Array(memory2.buffer, closePtr, size);
         
         // Check warmup period has NaN
-        for (let i = 0; i < 25 && i < size; i++) {
+        // With first_val=0 and slow_period=26:
+        // - pre array has valid values starting at index 25 (first_val + slow_period - 1)
+        // - SMA needs 26 values to produce output, so first valid output is at 25 + 26 - 1 = 50
+        // So indices 0-49 should be NaN, and 50+ should have values
+        const warmupEnd = 50; // (0 + 26 - 1) + 26 - 1
+        for (let i = 0; i < warmupEnd && i < size; i++) {
             assert.ok(isNaN(resultView[i]), `Expected NaN at warmup index ${i}`);
         }
         
-        // Check after warmup has values
-        for (let i = 26; i < Math.min(50, size); i++) {
+        // Check after warmup has values (starting from index 50)
+        for (let i = warmupEnd; i < Math.min(warmupEnd + 10, size); i++) {
             assert.ok(!isNaN(resultView[i]), `Unexpected NaN at index ${i}`);
         }
     } finally {
