@@ -1221,6 +1221,14 @@ const EXPECTED_OUTPUTS = {
             59215.124961889764,
             59103.099969511815
         ]
+    },
+    halftrend: {
+        defaultParams: { amplitude: 2, channelDeviation: 2.0, atrPeriod: 100 },
+        testIndices: [15570, 15571, 15574, 15575, 15576],
+        expectedHalftrend: [59763.0, 59763.0, 59763.0, 59310.0, 59310.0],
+        expectedTrend: [0.0, 0.0, 1.0, 1.0, 1.0],
+        warmupPeriod: 99,  // max(amplitude, atrPeriod) - 1 with firstValidIndex=0
+        hasWarmup: true
     }
 };
 

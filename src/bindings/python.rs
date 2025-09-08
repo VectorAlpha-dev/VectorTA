@@ -40,6 +40,16 @@ use crate::indicators::cci::{cci_batch_py, cci_py, CciStreamPy};
 #[cfg(feature = "python")]
 use crate::other_indicators::cci_cycle::{cci_cycle_batch_py, cci_cycle_py, CciCycleStreamPy};
 #[cfg(feature = "python")]
+use crate::other_indicators::halftrend::{halftrend_batch_py, halftrend_py, halftrend_tuple_py, HalfTrendStreamPy};
+#[cfg(feature = "python")]
+use crate::other_indicators::volatility_adjusted_ma::{vama_batch_py, vama_py, VamaStreamPy};
+#[cfg(feature = "python")]
+use crate::other_indicators::fvg_trailing_stop::{fvg_trailing_stop_py, fvg_trailing_stop_batch_py, FvgTrailingStopStreamPy};
+#[cfg(feature = "python")]
+use crate::other_indicators::net_myrsi::{net_myrsi_py, net_myrsi_batch_py, NetMyrsiStreamPy};
+#[cfg(feature = "python")]
+use crate::other_indicators::reverse_rsi::{reverse_rsi_py, reverse_rsi_batch_py, ReverseRsiStreamPy};
+#[cfg(feature = "python")]
 use crate::indicators::cfo::{cfo_batch_py, cfo_py, CfoStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::cg::{cg_batch_py, cg_py, CgStreamPy};
@@ -944,6 +954,32 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(cci_cycle_py, m)?)?;
 	m.add_function(wrap_pyfunction!(cci_cycle_batch_py, m)?)?;
 	m.add_class::<CciCycleStreamPy>()?;
+	
+	// Register HalfTrend functions
+	m.add_function(wrap_pyfunction!(halftrend_py, m)?)?;
+	m.add_function(wrap_pyfunction!(halftrend_tuple_py, m)?)?;  // Compatibility function for tuple return
+	m.add_function(wrap_pyfunction!(halftrend_batch_py, m)?)?;
+	m.add_class::<HalfTrendStreamPy>()?;
+	
+	// Register VAMA functions
+	m.add_function(wrap_pyfunction!(vama_py, m)?)?;
+	m.add_function(wrap_pyfunction!(vama_batch_py, m)?)?;
+	m.add_class::<VamaStreamPy>()?;
+	
+	// Register FVG Trailing Stop functions
+	m.add_function(wrap_pyfunction!(fvg_trailing_stop_py, m)?)?;
+	m.add_function(wrap_pyfunction!(fvg_trailing_stop_batch_py, m)?)?;
+	m.add_class::<FvgTrailingStopStreamPy>()?;
+	
+	// Register NET MyRSI functions
+	m.add_function(wrap_pyfunction!(net_myrsi_py, m)?)?;
+	m.add_function(wrap_pyfunction!(net_myrsi_batch_py, m)?)?;
+	m.add_class::<NetMyrsiStreamPy>()?;
+	
+	// Register Reverse RSI functions
+	m.add_function(wrap_pyfunction!(reverse_rsi_py, m)?)?;
+	m.add_function(wrap_pyfunction!(reverse_rsi_batch_py, m)?)?;
+	m.add_class::<ReverseRsiStreamPy>()?;
 
 	// Register CFO functions with their user-facing names
 	m.add_function(wrap_pyfunction!(cfo_py, m)?)?;

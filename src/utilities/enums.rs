@@ -20,4 +20,14 @@ impl Kernel {
 	pub const fn is_batch(self) -> bool {
 		matches!(self, Kernel::ScalarBatch | Kernel::Avx2Batch | Kernel::Avx512Batch)
 	}
+	
+	#[inline(always)]
+	pub const fn to_non_batch(self) -> Kernel {
+		match self {
+			Kernel::ScalarBatch => Kernel::Scalar,
+			Kernel::Avx2Batch => Kernel::Avx2,
+			Kernel::Avx512Batch => Kernel::Avx512,
+			other => other,
+		}
+	}
 }

@@ -50,6 +50,12 @@ use my_project::indicators::moving_averages::{
 	zlema::{zlema_with_kernel, ZlemaBatchBuilder, ZlemaInput},
 };
 
+use my_project::other_indicators::{
+	halftrend::{halftrend as halftrend_raw, HalfTrendInput},
+	net_myrsi::{net_myrsi_with_kernel, NetMyrsiBatchBuilder, NetMyrsiInput},
+	volatility_adjusted_ma::{vama as vama_raw, VamaInput},
+};
+
 use my_project::indicators::{
 	acosc::{acosc as acosc_raw, AcoscInput},
 	ad::{ad as ad_raw, AdInput},
@@ -335,6 +341,9 @@ pub type WildersInputS = WildersInput<'static>;
 pub type WillrInputS = WillrInput<'static>;
 pub type WmaInputS = WmaInput<'static>;
 pub type ZlemaInputS = ZlemaInput<'static>;
+pub type VamaInputS = VamaInput<'static>;
+pub type HalfTrendInputS = HalfTrendInput<'static>;
+pub type NetMyrsiInputS = NetMyrsiInput<'static>;
 pub type ZscoreInputS = ZscoreInput<'static>;
 
 macro_rules! impl_input_len {
@@ -947,6 +956,7 @@ make_kernel_wrappers!(vwma, vwma_with_kernel, VwmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(wilders, wilders_with_kernel, WildersInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(wma, wma_with_kernel, WmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(zlema, zlema_with_kernel, ZlemaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(net_myrsi, net_myrsi_with_kernel, NetMyrsiInputS; Scalar,Avx2,Avx512);
 
 make_batch_wrappers!(
 	alma_batch, AlmaBatchBuilder, AlmaInputS;
@@ -1030,6 +1040,7 @@ make_batch_wrappers!(vpwma_batch, VpwmaBatchBuilder, VpwmaInputS; ScalarBatch, A
 make_batch_wrappers!(wilders_batch, WildersBatchBuilder, WildersInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(wma_batch, WmaBatchBuilder, WmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(zlema_batch, ZlemaBatchBuilder, ZlemaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(net_myrsi_batch, NetMyrsiBatchBuilder, NetMyrsiInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 
 bench_variants!(
 	alma_batch => AlmaInputS; Some(232);
@@ -1626,6 +1637,20 @@ bench_variants!(
 	zlema_avx512,
 );
 
+bench_variants!(
+	net_myrsi => NetMyrsiInputS; None;
+	net_myrsi_scalar,
+	net_myrsi_avx2,
+	net_myrsi_avx512,
+);
+
+bench_variants!(
+	net_myrsi_batch => NetMyrsiInputS; Some(37);
+	net_myrsi_batch_scalarbatch,
+	net_myrsi_batch_avx2batch,
+	net_myrsi_batch_avx512batch
+);
+
 criterion_main!(
 	benches_scalar,
 	benches_alma,
@@ -1712,5 +1737,7 @@ criterion_main!(
 	benches_wma,
 	benches_wma_batch,
 	benches_zlema,
-	benches_zlema_batch
+	benches_zlema_batch,
+	benches_net_myrsi,
+	benches_net_myrsi_batch
 );

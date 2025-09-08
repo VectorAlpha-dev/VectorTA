@@ -1209,6 +1209,23 @@ EXPECTED_OUTPUTS = {
             59215.124961889764,
             59103.099969511815
         ]
+    },
+    'halftrend': {
+        'default_params': {'amplitude': 2, 'channel_deviation': 2.0, 'atr_period': 100},
+        'test_indices': [15570, 15571, 15574, 15575, 15576],
+        'expected_halftrend': [59763.0, 59763.0, 59763.0, 59310.0, 59310.0],
+        'expected_trend': [0.0, 0.0, 1.0, 1.0, 1.0],
+        'warmup_period': 99,  # max(amplitude, atr_period) - 1 with first_valid_index=0
+        'has_warmup': True
+    },
+    'reverse_rsi': {
+        'default_params': {'rsi_length': 14, 'rsi_level': 50.0},
+        'last_5_values': [
+            60124.655535277416, 60064.68013990046, 60001.56012990757, 59932.80583491417, 59877.248275277445
+        ],
+        'warmup_period': 27,  # (2 * rsi_length) - 1
+        'has_warmup': True,
+        'note': 'These are values at positions -6 to -2 in the full dataset'
     }
 }
 
