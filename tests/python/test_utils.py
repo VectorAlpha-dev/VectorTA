@@ -27,7 +27,8 @@ def load_test_data():
                 continue
             if len(row) < 6:
                 continue
-            # CSV format matches Rust: timestamp[0], open[1], close[2], high[3], low[4], volume[5]
+            # CSV format: timestamp[0], open[1], close[2], high[3], low[4], volume[5]
+            # The columns are NOT in standard OHLC order!
             candles['timestamp'].append(int(row[0]))
             candles['open'].append(float(row[1]))
             candles['close'].append(float(row[2]))
@@ -85,6 +86,34 @@ EXPECTED_OUTPUTS = {
             59165.14427332
         ]
     },
+    'percentile_nearest_rank': {
+        'default_params': {'length': 15, 'percentage': 50.0},
+        # Actual last 5 values from CSV data with default params
+        'last_5_values': [
+            59419.0,
+            59419.0,
+            59300.0,
+            59285.0,
+            59273.0
+        ],
+        # Test values from Rust tests
+        'basic_test': {
+            'data': [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
+            'length': 5,
+            'percentage': 50.0,
+            'expected_at_4': 3.0,  # 50th percentile of [1,2,3,4,5]
+            'expected_at_5': 4.0,  # 50th percentile of [2,3,4,5,6]
+        },
+        'percentile_tests': {
+            'data': [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
+            'length': 5,
+            'p25_at_4': 1.0,  # 25th percentile of [1,2,3,4,5]
+            'p75_at_4': 4.0,  # 75th percentile of [1,2,3,4,5]
+            'p100_at_4': 5.0,  # 100th percentile of [1,2,3,4,5]
+        },
+        # Expected warmup period behavior
+        'warmup_period': 14,  # For default length=15, first 14 values are NaN
+    },
     'alphatrend': {
         'default_params': {'coeff': 1.0, 'period': 14, 'no_volume': False},
         'k1_last_5_values': [
@@ -102,6 +131,17 @@ EXPECTED_OUTPUTS = {
             60138.92857143,
         ],
         'warmup_period': 13,  # period - 1
+    },
+    'chandelier_exit': {
+        'default_params': {'period': 22, 'mult': 3.0, 'use_close': True},
+        'short_stop_last_5': [
+            68719.23648167,
+            68705.54391432,
+            68244.42828185,
+            67599.49972358,
+            66883.02246342
+        ],
+        'warmup_period': 21,  # period - 1
     },
     'kama': {
         'default_params': {'period': 30},
@@ -196,6 +236,23 @@ EXPECTED_OUTPUTS = {
             0.9950545846019277,
             0.984954072979463
         ]
+    },
+    'uma': {
+        'default_params': {
+            'accelerator': 1.0,
+            'min_length': 5,
+            'max_length': 50,
+            'smooth_length': 4
+        },
+        'last_5_values': [
+            59665.81830666,
+            59477.69234542,
+            59314.50778603,
+            59218.23033661,
+            59143.61473211
+        ],
+        'warmup_period': 53,  # max_length + smooth_length - 1
+        'test_data': None  # Uses CSV data from load_test_data()
     },
     'devstop': {
         'default_params': {
@@ -1227,6 +1284,28 @@ EXPECTED_OUTPUTS = {
             59215.124961889764,
             59103.099969511815
         ]
+    },
+    'cora_wave': {
+        'default_params': {'period': 20, 'r_multi': 2.0, 'smooth': True},
+        'last_5_values': [
+            59248.63632114,
+            59251.74238978,
+            59203.36944998,
+            59171.14999178,
+            59053.74201623
+        ],
+        'warmup_period': 22,  # first + period - 1 + smooth_period.saturating_sub(1) - actual is 22 for smooth=true
+        # Values for parameter variation tests
+        'no_smoothing_differs': True,  # Raw vs smoothed should differ
+        'different_r_multi_differs': True,  # Different r_multi values should produce different results
+        # Batch test parameters
+        'batch_periods': [15, 20, 25],
+        'batch_r_multis': [1.5, 2.0, 2.5],
+        'batch_range': {
+            'period_range': (15, 25, 5),
+            'r_multi_range': (1.5, 2.5, 0.5),
+            'smooth': False  # Test without smoothing for batch
+        }
     }
 }
 

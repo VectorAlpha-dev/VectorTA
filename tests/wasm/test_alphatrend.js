@@ -269,12 +269,12 @@ test('AlphaTrend different parameters', () => {
 
 test('AlphaTrend memory allocation', () => {
     const size = 1000;
-    const ptr = wasm.alphatrend_alloc(size);
+    const ptr = wasm.alphatrend_alloc_flat(size);
     
     assert.ok(ptr !== 0, 'Should allocate memory successfully');
     
     // Free the allocated memory
-    wasm.alphatrend_free(ptr, size);
+    wasm.alphatrend_free_flat(ptr, size);
 });
 
 test('AlphaTrend warmup period', () => {

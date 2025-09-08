@@ -4,6 +4,16 @@ use pyo3::prelude::*;
 // Add module initialization here
 
 #[cfg(feature = "python")]
+use crate::other_indicators::cora_wave::{cora_wave_batch_py, cora_wave_py, CoraWaveStreamPy};
+#[cfg(feature = "python")]
+use crate::other_indicators::ehlers_pma::{ehlers_pma_py, ehlers_pma_flat_py, ehlers_pma_batch_py, EhlersPmaStreamPy};
+#[cfg(feature = "python")]
+use crate::other_indicators::chandelier_exit::{chandelier_exit_py, chandelier_exit_batch_py, ChandelierExitStreamPy};
+#[cfg(feature = "python")]
+use crate::other_indicators::percentile_nearest_rank::{percentile_nearest_rank_py, percentile_nearest_rank_batch_py, PercentileNearestRankStreamPy};
+#[cfg(feature = "python")]
+use crate::other_indicators::uma::{uma_py, uma_batch_py, UmaStreamPy};
+#[cfg(feature = "python")]
 use crate::indicators::acosc::{acosc_batch_py, acosc_py, AcoscStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::ad::{ad_batch_py, ad_py, AdStreamPy};
@@ -328,7 +338,7 @@ use crate::indicators::zscore::{zscore_batch_py, zscore_py, ZscoreStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::pfe::{pfe_batch_py, pfe_py, PfeStreamPy};
 #[cfg(feature = "python")]
-use crate::indicators::other_indicators::alphatrend::{alphatrend_py, AlphaTrendStreamPy};
+use crate::other_indicators::alphatrend::{alphatrend_py, AlphaTrendStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::roc::{roc_batch_py, roc_py, RocStreamPy};
 #[cfg(feature = "python")]
@@ -685,6 +695,32 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
 	// Register MA dispatcher function
 	m.add_function(wrap_pyfunction!(ma_py, m)?)?;
+
+	// Register CoRa Wave functions with their user-facing names
+	m.add_function(wrap_pyfunction!(cora_wave_py, m)?)?;
+	m.add_function(wrap_pyfunction!(cora_wave_batch_py, m)?)?;
+	m.add_class::<CoraWaveStreamPy>()?;
+
+	// Register Ehlers PMA functions with their user-facing names
+	m.add_function(wrap_pyfunction!(ehlers_pma_py, m)?)?;
+	m.add_function(wrap_pyfunction!(ehlers_pma_flat_py, m)?)?;
+	m.add_function(wrap_pyfunction!(ehlers_pma_batch_py, m)?)?;
+	m.add_class::<EhlersPmaStreamPy>()?;
+
+	// Register Chandelier Exit functions with their user-facing names
+	m.add_function(wrap_pyfunction!(chandelier_exit_py, m)?)?;
+	m.add_function(wrap_pyfunction!(chandelier_exit_batch_py, m)?)?;
+	m.add_class::<ChandelierExitStreamPy>()?;
+
+	// Register Percentile Nearest Rank functions with their user-facing names
+	m.add_function(wrap_pyfunction!(percentile_nearest_rank_py, m)?)?;
+	m.add_function(wrap_pyfunction!(percentile_nearest_rank_batch_py, m)?)?;
+	m.add_class::<PercentileNearestRankStreamPy>()?;
+
+	// Register UMA functions with their user-facing names
+	m.add_function(wrap_pyfunction!(uma_py, m)?)?;
+	m.add_function(wrap_pyfunction!(uma_batch_py, m)?)?;
+	m.add_class::<UmaStreamPy>()?;
 
 	// Register Aroon functions with their user-facing names
 	m.add_function(wrap_pyfunction!(aroon_py, m)?)?;

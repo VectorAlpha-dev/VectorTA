@@ -177,6 +177,3 @@ pub use moving_averages::{
 	jsa, kama, linreg, maaq, mama, mwdx, nma, pwma, reflex, sinwma, sma, smma, sqwma, srwma, supersmoother,
 	supersmoother_3_pole, swma, tema, tilson, trendflex, trima, vpwma, vwap, vwma, wilders, wma, zlema,
 };
-
-pub mod other_indicators;
-pub use other_indicators::{alphatrend, AlphaTrendInput, AlphaTrendOutput, AlphaTrendParams};
