@@ -38,10 +38,10 @@ use my_project::indicators::squeeze_momentum::{squeeze_momentum, SqueezeMomentum
 use my_project::indicators::mass::{mass, MassInput, MassParams};
 /// Binary to generate reference outputs for indicator testing
 /// This is used by Python and WASM tests to verify their outputs match Rust
-use my_project::indicators::damiani_volatmeter::{damiani_volatmeter, DamianiVolatmeterInput, DamianiVolatmeterParams, DamianiVolatmeterData};
+use my_project::indicators::damiani_volatmeter::{damiani_volatmeter, DamianiVolatmeterInput, DamianiVolatmeterParams};
 use my_project::indicators::decycler::{decycler, DecyclerInput, DecyclerParams};
 use my_project::indicators::deviation::{deviation, DeviationInput, DeviationParams};
-use my_project::indicators::emv::{emv, EmvInput, EmvParams};
+use my_project::indicators::emv::{emv, EmvInput};
 use my_project::indicators::devstop::{devstop, DevStopInput, DevStopParams, DevStopData};
 use my_project::indicators::er::{er, ErInput, ErParams};
 use my_project::indicators::di::{di, DiData, DiInput, DiParams};

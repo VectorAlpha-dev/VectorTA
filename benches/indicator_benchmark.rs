@@ -12,6 +12,7 @@ use my_project::indicators::moving_averages::{
 	dema::{dema_with_kernel, DemaBatchBuilder, DemaInput},
 	edcf::{edcf_with_kernel, EdcfBatchBuilder, EdcfInput},
 	ehlers_itrend::{ehlers_itrend_with_kernel, EhlersITrendBatchBuilder, EhlersITrendInput},
+	ehlers_pma::{ehlers_pma_with_kernel, EhlersPmaBuilder, EhlersPmaInput},
 	ema::{ema_with_kernel, EmaBatchBuilder, EmaInput},
 	epma::{epma_with_kernel, EpmaBatchBuilder, EpmaInput},
 	frama::{frama_with_kernel, FramaBatchBuilder, FramaInput},
@@ -43,6 +44,7 @@ use my_project::indicators::moving_averages::{
 	tilson::{tilson_with_kernel, TilsonBatchBuilder, TilsonInput},
 	trendflex::{trendflex_with_kernel, TrendFlexBatchBuilder, TrendFlexInput},
 	trima::{trima_with_kernel, TrimaBatchBuilder, TrimaInput},
+	uma::{uma_with_kernel, UmaBatchBuilder, UmaInput},
 	vpwma::{vpwma_with_kernel, VpwmaBatchBuilder, VpwmaInput},
 	vwma::{vwma_with_kernel, VwmaInput, VwmaParams},
 	wilders::{wilders_with_kernel, WildersBatchBuilder, WildersInput},
@@ -57,6 +59,7 @@ use my_project::indicators::{
 	adx::{adx as adx_raw, AdxInput},
 	adxr::{adxr as adxr_raw, AdxrInput},
 	alligator::{alligator as alligator_raw, AlligatorInput},
+	alphatrend::{alphatrend as alphatrend_raw, AlphaTrendInput},
 	ao::{ao as ao_raw, AoInput},
 	apo::{apo as apo_raw, ApoInput},
 	aroon::{aroon as aroon_raw, AroonInput},
@@ -70,10 +73,12 @@ use my_project::indicators::{
 	cfo::{cfo as cfo_raw, CfoInput},
 	cg::{cg as cg_raw, CgInput},
 	chande::{chande as chande_raw, ChandeInput},
+	chandelier_exit::{chandelier_exit_with_kernel, ChandelierExitInput, CeBatchBuilder},
 	chop::{chop as chop_raw, ChopInput},
 	cksp::{cksp as cksp_raw, CkspInput},
 	cmo::{cmo as cmo_raw, CmoInput},
 	coppock::{coppock as coppock_raw, CoppockInput},
+	cora_wave::{cora_wave as cora_wave_raw, CoraWaveInput},
 	correl_hl::{correl_hl as correl_hl_raw, CorrelHlInput},
 	correlation_cycle::{correlation_cycle as correlation_cycle_raw, CorrelationCycleInput},
 	cvi::{cvi as cvi_raw, CviInput},
@@ -123,6 +128,7 @@ use my_project::indicators::{
 	nvi::{nvi as nvi_raw, NviInput},
 	obv::{obv as obv_raw, ObvInput},
 	pfe::{pfe as pfe_raw, PfeInput},
+	percentile_nearest_rank::{percentile_nearest_rank_with_kernel, PercentileNearestRankInput, PercentileNearestRankBatchBuilder},
 	pivot::{pivot as pivot_raw, PivotInput},
 	pma::{pma as pma_raw, PmaInput},
 	ppo::{ppo as ppo_raw, PpoInput},
@@ -187,6 +193,7 @@ pub type AdoscInputS = AdoscInput<'static>;
 pub type AdxInputS = AdxInput<'static>;
 pub type AdxrInputS = AdxrInput<'static>;
 pub type AlligatorInputS = AlligatorInput<'static>;
+pub type AlphaTrendInputS = AlphaTrendInput<'static>;
 pub type AlmaInputS = AlmaInput<'static>;
 pub type AoInputS = AoInput<'static>;
 pub type ApoInputS = ApoInput<'static>;
@@ -201,10 +208,12 @@ pub type CciInputS = CciInput<'static>;
 pub type CfoInputS = CfoInput<'static>;
 pub type CgInputS = CgInput<'static>;
 pub type ChandeInputS = ChandeInput<'static>;
+pub type ChandelierExitInputS = ChandelierExitInput<'static>;
 pub type ChopInputS = ChopInput<'static>;
 pub type CkspInputS = CkspInput<'static>;
 pub type CmoInputS = CmoInput<'static>;
 pub type CoppockInputS = CoppockInput<'static>;
+pub type CoraWaveInputS = CoraWaveInput<'static>;
 pub type CorrelHlInputS = CorrelHlInput<'static>;
 pub type CorrelationCycleInputS = CorrelationCycleInput<'static>;
 pub type CviInputS = CviInput<'static>;
@@ -223,6 +232,7 @@ pub type DxInputS = DxInput<'static>;
 pub type EdcfInputS = EdcfInput<'static>;
 pub type EfiInputS = EfiInput<'static>;
 pub type EhlersITrendInputS = EhlersITrendInput<'static>;
+pub type EhlersPmaInputS = EhlersPmaInput<'static>;
 pub type EmaInputS = EmaInput<'static>;
 pub type EmdInputS = EmdInput<'static>;
 pub type EmvInputS = EmvInput<'static>;
@@ -275,6 +285,7 @@ pub type NmaInputS = NmaInput<'static>;
 pub type NviInputS = NviInput<'static>;
 pub type ObvInputS = ObvInput<'static>;
 pub type PfeInputS = PfeInput<'static>;
+pub type PercentileNearestRankInputS = PercentileNearestRankInput<'static>;
 pub type PivotInputS = PivotInput<'static>;
 pub type PmaInputS = PmaInput<'static>;
 pub type PpoInputS = PpoInput<'static>;
@@ -310,6 +321,7 @@ pub type TemaInputS = TemaInput<'static>;
 pub type TilsonInputS = TilsonInput<'static>;
 pub type TrendFlexInputS = TrendFlexInput<'static>;
 pub type TrimaInputS = TrimaInput<'static>;
+pub type UmaInputS = UmaInput<'static>;
 pub type TrixInputS = TrixInput<'static>;
 pub type TsfInputS = TsfInput<'static>;
 pub type TsiInputS = TsiInput<'static>;
@@ -520,6 +532,7 @@ impl_input_len!(
 	AdxrInputS,
 	AlligatorInputS,
 	AlmaInputS,
+	AlphaTrendInputS,
 	AoInputS,
 	ApoInputS,
 	AroonInputS,
@@ -533,10 +546,12 @@ impl_input_len!(
 	CfoInputS,
 	CgInputS,
 	ChandeInputS,
+	ChandelierExitInputS,
 	ChopInputS,
 	CkspInputS,
 	CmoInputS,
 	CoppockInputS,
+	CoraWaveInputS,
 	CorrelHlInputS,
 	CorrelationCycleInputS,
 	CviInputS,
@@ -555,6 +570,7 @@ impl_input_len!(
 	EdcfInputS,
 	EfiInputS,
 	EhlersITrendInputS,
+	EhlersPmaInputS,
 	EmaInputS,
 	EmdInputS,
 	EmvInputS,
@@ -606,6 +622,7 @@ impl_input_len!(
 	NmaInputS,
 	NviInputS,
 	ObvInputS,
+	PercentileNearestRankInputS,
 	PfeInputS,
 	PivotInputS,
 	PmaInputS,
@@ -647,6 +664,7 @@ impl_input_len!(
 	TtmTrendInputS,
 	UiInputS,
 	UltOscInputS,
+	UmaInputS,
 	VarInputS,
 	ViInputS,
 	VidyaInputS,
@@ -675,6 +693,7 @@ bench_wrappers! {
 	(adx_bench, adx_raw, AdxInputS),
 	(adxr_bench, adxr_raw, AdxrInputS),
 	(alligator_bench, alligator_raw, AlligatorInputS),
+	(alphatrend_bench, alphatrend_raw, AlphaTrendInputS),
 	(ao_bench, ao_raw, AoInputS),
 	(apo_bench, apo_raw, ApoInputS),
 	(aroon_bench, aroon_raw, AroonInputS),
@@ -692,6 +711,7 @@ bench_wrappers! {
 	(cksp_bench, cksp_raw, CkspInputS),
 	(cmo_bench, cmo_raw, CmoInputS),
 	(coppock_bench, coppock_raw, CoppockInputS),
+	(cora_wave_bench, cora_wave_raw, CoraWaveInputS),
 	(correl_hl_bench, correl_hl_raw, CorrelHlInputS),
 	(correlation_cycle_bench, correlation_cycle_raw, CorrelationCycleInputS),
 	(cvi_bench, cvi_raw, CviInputS),
@@ -790,6 +810,7 @@ bench_scalars!(
 	adx_bench   => AdxInputS,
 	adxr_bench  => AdxrInputS,
 	alligator_bench => AlligatorInputS,
+	alphatrend_bench => AlphaTrendInputS,
 
 	ao_bench   => AoInputS,
 	apo_bench  => ApoInputS,
@@ -810,6 +831,7 @@ bench_scalars!(
 	cksp_bench        => CkspInputS,
 	cmo_bench         => CmoInputS,
 	coppock_bench     => CoppockInputS,
+	cora_wave_bench   => CoraWaveInputS,
 	correl_hl_bench   => CorrelHlInputS,
 	correlation_cycle_bench => CorrelationCycleInputS,
 	cvi_bench         => CviInputS,
@@ -909,6 +931,7 @@ make_kernel_wrappers!(cwma, cwma_with_kernel, CwmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(dema, dema_with_kernel, DemaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(edcf, edcf_with_kernel, EdcfInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(ehlers_itrend, ehlers_itrend_with_kernel, EhlersITrendInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(ehlers_pma, ehlers_pma_with_kernel, EhlersPmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(ema, ema_with_kernel, EmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(epma, epma_with_kernel, EpmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(frama, frama_with_kernel, FramaInputS; Scalar,Avx2,Avx512);
@@ -940,6 +963,9 @@ make_kernel_wrappers!(tema, tema_with_kernel, TemaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(tilson, tilson_with_kernel, TilsonInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(trendflex, trendflex_with_kernel, TrendFlexInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(trima, trima_with_kernel, TrimaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(uma, uma_with_kernel, UmaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(chandelier_exit, chandelier_exit_with_kernel, ChandelierExitInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(percentile_nearest_rank, percentile_nearest_rank_with_kernel, PercentileNearestRankInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(vidya, vidya_with_kernel, VidyaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(vlma, vlma_with_kernel, VlmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(vpwma, vpwma_with_kernel, VpwmaInputS; Scalar,Avx2,Avx512);
@@ -970,6 +996,11 @@ make_batch_wrappers!(
 
 make_batch_wrappers!(
 	ehlers_itrend_batch, EhlersITrendBatchBuilder, EhlersITrendInputS;
+	ScalarBatch, Avx2Batch, Avx512Batch
+);
+
+make_batch_wrappers!(
+	ehlers_pma_batch, EhlersPmaBuilder, EhlersPmaInputS;
 	ScalarBatch, Avx2Batch, Avx512Batch
 );
 
@@ -1024,12 +1055,80 @@ make_batch_wrappers!(tema_batch, TemaBatchBuilder, TemaInputS; ScalarBatch, Avx2
 make_batch_wrappers!(tilson_batch, TilsonBatchBuilder, TilsonInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(trendflex_batch, TrendFlexBatchBuilder, TrendFlexInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(trima_batch, TrimaBatchBuilder, TrimaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+// UMA needs special handling for volume parameter
+fn uma_batch_scalarbatch(input: &UmaInputS) -> anyhow::Result<()> {
+    let slice: &[f64] = input.as_ref();
+    UmaBatchBuilder::new()
+        .kernel(Kernel::ScalarBatch)
+        .apply_slice(slice, None)?;
+    Ok(())
+}
+fn uma_batch_avx2batch(input: &UmaInputS) -> anyhow::Result<()> {
+    let slice: &[f64] = input.as_ref();
+    UmaBatchBuilder::new()
+        .kernel(Kernel::Avx2Batch)
+        .apply_slice(slice, None)?;
+    Ok(())
+}
+fn uma_batch_avx512batch(input: &UmaInputS) -> anyhow::Result<()> {
+    let slice: &[f64] = input.as_ref();
+    UmaBatchBuilder::new()
+        .kernel(Kernel::Avx512Batch)
+        .apply_slice(slice, None)?;
+    Ok(())
+}
 make_batch_wrappers!(vidya_batch, VidyaBatchBuilder, VidyaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(vlma_batch, VlmaBatchBuilder, VlmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(vpwma_batch, VpwmaBatchBuilder, VpwmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(wilders_batch, WildersBatchBuilder, WildersInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(wma_batch, WmaBatchBuilder, WmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(zlema_batch, ZlemaBatchBuilder, ZlemaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+// ChandelierExit needs special handling for apply_slices
+fn chandelier_exit_batch_scalarbatch(input: &ChandelierExitInputS) -> anyhow::Result<()> {
+    // ChandelierExit requires high, low, and close data
+    // For benchmarking, we'll use the same data for all three
+    let slice: &[f64] = input.as_ref();
+    CeBatchBuilder::new()
+        .kernel(Kernel::ScalarBatch)
+        .apply_slices(slice, slice, slice)?;
+    Ok(())
+}
+fn chandelier_exit_batch_avx2batch(input: &ChandelierExitInputS) -> anyhow::Result<()> {
+    let slice: &[f64] = input.as_ref();
+    CeBatchBuilder::new()
+        .kernel(Kernel::Avx2Batch)
+        .apply_slices(slice, slice, slice)?;
+    Ok(())
+}
+fn chandelier_exit_batch_avx512batch(input: &ChandelierExitInputS) -> anyhow::Result<()> {
+    let slice: &[f64] = input.as_ref();
+    CeBatchBuilder::new()
+        .kernel(Kernel::Avx512Batch)
+        .apply_slices(slice, slice, slice)?;
+    Ok(())
+}
+// PercentileNearestRank needs special handling for apply method
+fn percentile_nearest_rank_batch_scalarbatch(input: &PercentileNearestRankInputS) -> anyhow::Result<()> {
+    let slice: &[f64] = input.as_ref();
+    PercentileNearestRankBatchBuilder::new()
+        .kernel(Kernel::ScalarBatch)
+        .apply(slice)?;
+    Ok(())
+}
+fn percentile_nearest_rank_batch_avx2batch(input: &PercentileNearestRankInputS) -> anyhow::Result<()> {
+    let slice: &[f64] = input.as_ref();
+    PercentileNearestRankBatchBuilder::new()
+        .kernel(Kernel::Avx2Batch)
+        .apply(slice)?;
+    Ok(())
+}
+fn percentile_nearest_rank_batch_avx512batch(input: &PercentileNearestRankInputS) -> anyhow::Result<()> {
+    let slice: &[f64] = input.as_ref();
+    PercentileNearestRankBatchBuilder::new()
+        .kernel(Kernel::Avx512Batch)
+        .apply(slice)?;
+    Ok(())
+}
 
 bench_variants!(
 	alma_batch => AlmaInputS; Some(232);
@@ -1064,6 +1163,13 @@ bench_variants!(
 	ehlers_itrend_batch_scalarbatch,
 	ehlers_itrend_batch_avx2batch,
 	ehlers_itrend_batch_avx512batch,
+);
+
+bench_variants!(
+	ehlers_pma_batch => EhlersPmaInputS; Some(227);
+	ehlers_pma_batch_scalarbatch,
+	ehlers_pma_batch_avx2batch,
+	ehlers_pma_batch_avx512batch,
 );
 
 bench_variants!(
@@ -1284,6 +1390,13 @@ bench_variants!(
 );
 
 bench_variants!(
+	uma_batch => UmaInputS; Some(227);
+	uma_batch_scalarbatch,
+	uma_batch_avx2batch,
+	uma_batch_avx512batch,
+);
+
+bench_variants!(
 	vidya_batch => VidyaInputS; Some(227);
 	vidya_batch_scalarbatch,
 	vidya_batch_avx2batch,
@@ -1326,6 +1439,20 @@ bench_variants!(
 );
 
 bench_variants!(
+	chandelier_exit_batch => ChandelierExitInputS; Some(227);
+	chandelier_exit_batch_scalarbatch,
+	chandelier_exit_batch_avx2batch,
+	chandelier_exit_batch_avx512batch,
+);
+
+bench_variants!(
+	percentile_nearest_rank_batch => PercentileNearestRankInputS; Some(227);
+	percentile_nearest_rank_batch_scalarbatch,
+	percentile_nearest_rank_batch_avx2batch,
+	percentile_nearest_rank_batch_avx512batch,
+);
+
+bench_variants!(
 	alma => AlmaInputS; None;
 	alma_scalar,
 	alma_avx2,
@@ -1358,6 +1485,13 @@ bench_variants!(
 	ehlers_itrend_scalar,
 	ehlers_itrend_avx2,
 	ehlers_itrend_avx512,
+);
+
+bench_variants!(
+	ehlers_pma => EhlersPmaInputS; None;
+	ehlers_pma_scalar,
+	ehlers_pma_avx2,
+	ehlers_pma_avx512,
 );
 
 bench_variants!(
@@ -1578,6 +1712,27 @@ bench_variants!(
 );
 
 bench_variants!(
+	uma => UmaInputS; None;
+	uma_scalar,
+	uma_avx2,
+	uma_avx512,
+);
+
+bench_variants!(
+	chandelier_exit => ChandelierExitInputS; None;
+	chandelier_exit_scalar,
+	chandelier_exit_avx2,
+	chandelier_exit_avx512,
+);
+
+bench_variants!(
+	percentile_nearest_rank => PercentileNearestRankInputS; None;
+	percentile_nearest_rank_scalar,
+	percentile_nearest_rank_avx2,
+	percentile_nearest_rank_avx512,
+);
+
+bench_variants!(
 	vidya => VidyaInputS; None;
 	vidya_scalar,
 	vidya_avx2,
@@ -1638,6 +1793,8 @@ criterion_main!(
 	benches_edcf_batch,
 	benches_ehlers_itrend,
 	benches_ehlers_itrend_batch,
+	benches_ehlers_pma,
+	benches_ehlers_pma_batch,
 	benches_ema,
 	benches_ema_batch,
 	benches_epma,
@@ -1700,6 +1857,10 @@ criterion_main!(
 	benches_trendflex_batch,
 	benches_trima,
 	benches_trima_batch,
+	benches_uma,
+	benches_uma_batch,
+	benches_chandelier_exit,
+	benches_percentile_nearest_rank,
 	benches_vidya,
 	benches_vidya_batch,
 	benches_vlma,
@@ -1712,5 +1873,9 @@ criterion_main!(
 	benches_wma,
 	benches_wma_batch,
 	benches_zlema,
-	benches_zlema_batch
+	benches_zlema_batch,
+	benches_chandelier_exit,
+	benches_chandelier_exit_batch,
+	benches_percentile_nearest_rank,
+	benches_percentile_nearest_rank_batch
 );

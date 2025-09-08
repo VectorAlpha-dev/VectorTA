@@ -4,6 +4,8 @@ pub mod adosc;
 pub mod adx;
 pub mod adxr;
 pub mod alligator;
+pub mod alphatrend;
+pub use alphatrend::{alphatrend, AlphaTrendInput, AlphaTrendOutput, AlphaTrendParams};
 pub mod ao;
 pub mod apo;
 pub mod aroon;
@@ -17,10 +19,20 @@ pub mod cci;
 pub mod cfo;
 pub mod cg;
 pub mod chande;
+pub mod chandelier_exit;
+pub use chandelier_exit::{
+    chandelier_exit, chandelier_exit_with_kernel, chandelier_exit_into_slices, chandelier_exit_into_flat,
+    ChandelierExitInput, ChandelierExitOutput, ChandelierExitParams, ChandelierExitData,
+    ChandelierExitBuilder, ChandelierExitError,
+    CeBatchRange, CeBatchBuilder, CeBatchOutput, 
+    ce_batch_with_kernel, ce_batch_slice, ce_batch_par_slice
+};
 pub mod chop;
 pub mod cksp;
 pub mod cmo;
 pub mod coppock;
+pub mod cora_wave;
+pub use cora_wave::{cora_wave, CoraWaveInput, CoraWaveOutput, CoraWaveParams};
 pub mod correl_hl;
 pub mod correlation_cycle;
 pub use correlation_cycle::{
@@ -80,6 +92,15 @@ pub mod natr;
 pub mod nvi;
 pub mod obv;
 pub mod pfe;
+pub mod percentile_nearest_rank;
+pub use percentile_nearest_rank::{
+    percentile_nearest_rank, percentile_nearest_rank_with_kernel, percentile_nearest_rank_into_slice,
+    PercentileNearestRankInput, PercentileNearestRankOutput, 
+    PercentileNearestRankParams, PercentileNearestRankData, PercentileNearestRankError,
+    PercentileNearestRankBuilder, PercentileNearestRankStream,
+    PercentileNearestRankBatchRange, PercentileNearestRankBatchBuilder, PercentileNearestRankBatchOutput,
+    pnr_batch_with_kernel, pnr_batch_slice, pnr_batch_par_slice
+};
 pub mod pivot;
 pub mod pma;
 pub mod ppo;
@@ -173,7 +194,7 @@ pub use mean_ad::{mean_ad, MeanAdInput, MeanAdOutput, MeanAdParams};
 pub use mom::{mom, MomInput, MomOutput, MomParams};
 pub use ui::{ui, UiInput, UiOutput, UiParams};
 pub use moving_averages::{
-	alma, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass, highpass_2_pole, hma, hwma, jma,
+	alma, cwma, dema, edcf, ehlers_itrend, ehlers_pma, ema, epma, frama, fwma, gaussian, highpass, highpass_2_pole, hma, hwma, jma,
 	jsa, kama, linreg, maaq, mama, mwdx, nma, pwma, reflex, sinwma, sma, smma, sqwma, srwma, supersmoother,
-	supersmoother_3_pole, swma, tema, tilson, trendflex, trima, vpwma, vwap, vwma, wilders, wma, zlema,
+	supersmoother_3_pole, swma, tema, tilson, trendflex, trima, uma, vpwma, vwap, vwma, wilders, wma, zlema,
 };

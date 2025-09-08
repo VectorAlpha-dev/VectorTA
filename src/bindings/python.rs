@@ -4,15 +4,15 @@ use pyo3::prelude::*;
 // Add module initialization here
 
 #[cfg(feature = "python")]
-use crate::other_indicators::cora_wave::{cora_wave_batch_py, cora_wave_py, CoraWaveStreamPy};
+use crate::indicators::cora_wave::{cora_wave_batch_py, cora_wave_py, CoraWaveStreamPy};
 #[cfg(feature = "python")]
-use crate::other_indicators::ehlers_pma::{ehlers_pma_py, ehlers_pma_flat_py, ehlers_pma_batch_py, EhlersPmaStreamPy};
+use crate::indicators::moving_averages::ehlers_pma::{ehlers_pma_py, ehlers_pma_flat_py, ehlers_pma_batch_py, EhlersPmaStreamPy};
 #[cfg(feature = "python")]
-use crate::other_indicators::chandelier_exit::{chandelier_exit_py, chandelier_exit_batch_py, ChandelierExitStreamPy};
+use crate::indicators::chandelier_exit::{chandelier_exit_py, chandelier_exit_batch_py, ChandelierExitStreamPy};
 #[cfg(feature = "python")]
-use crate::other_indicators::percentile_nearest_rank::{percentile_nearest_rank_py, percentile_nearest_rank_batch_py, PercentileNearestRankStreamPy};
+use crate::indicators::percentile_nearest_rank::{percentile_nearest_rank_py, percentile_nearest_rank_batch_py, PercentileNearestRankStreamPy};
 #[cfg(feature = "python")]
-use crate::other_indicators::uma::{uma_py, uma_batch_py, UmaStreamPy};
+use crate::indicators::moving_averages::uma::{uma_py, uma_batch_py, UmaStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::acosc::{acosc_batch_py, acosc_py, AcoscStreamPy};
 #[cfg(feature = "python")]
@@ -338,7 +338,7 @@ use crate::indicators::zscore::{zscore_batch_py, zscore_py, ZscoreStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::pfe::{pfe_batch_py, pfe_py, PfeStreamPy};
 #[cfg(feature = "python")]
-use crate::other_indicators::alphatrend::{alphatrend_py, AlphaTrendStreamPy};
+use crate::indicators::alphatrend::{alphatrend_py, AlphaTrendStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::roc::{roc_batch_py, roc_py, RocStreamPy};
 #[cfg(feature = "python")]
