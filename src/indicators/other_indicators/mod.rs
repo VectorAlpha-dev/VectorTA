@@ -72,15 +72,40 @@ pub use nadaraya_watson_envelope::{
     nadaraya_watson_envelope_alloc, nadaraya_watson_envelope_free, NweJsResult, NweBatchJsOutput,
 };
 
-pub mod beardy_squeeze_pro;
-pub use beardy_squeeze_pro::{
-    beardy_squeeze_pro, beardy_squeeze_pro_with_kernel,
-    BeardySqueezeProInput, BeardySqueezeProOutput, BeardySqueezeProParams, BeardySqueezeProData,
-    BeardySqueezeProError,
+pub mod ttm_squeeze;
+pub use ttm_squeeze::{
+    ttm_squeeze, ttm_squeeze_with_kernel, ttm_squeeze_into_slices,
+    ttm_squeeze_batch_with_kernel,
+    TtmSqueezeInput, TtmSqueezeOutput, TtmSqueezeParams, TtmSqueezeData,
+    TtmSqueezeBuilder, TtmSqueezeStream, TtmSqueezeError,
+    TtmSqueezeBatchRange, TtmSqueezeBatchOutput, TtmSqueezeBatchBuilder,
 };
 
 #[cfg(feature = "python")]
-pub use beardy_squeeze_pro::beardy_squeeze_pro_py;
+pub use ttm_squeeze::{ttm_squeeze_py, ttm_squeeze_batch_py, TtmSqueezeStreamPy};
 
 #[cfg(feature = "wasm")]
-pub use beardy_squeeze_pro::{beardy_squeeze_pro_js, BeardySqueezeProJsResult};
+pub use ttm_squeeze::{
+    ttm_squeeze_js, ttm_squeeze_into_js, ttm_squeeze_into_js_ptrs,
+    ttm_squeeze_alloc, ttm_squeeze_free, ttm_squeeze_batch_unified_js,
+    TtmSqueezeJsResult, TtmSqueezeBatchConfig, TtmSqueezeBatchJsOutput,
+};
+
+pub mod mod_god_mode;
+pub use mod_god_mode::{
+    mod_god_mode, mod_god_mode_with_kernel, mod_god_mode_auto, mod_god_mode_into_slices,
+    mod_god_mode_batch_with_kernel,
+    ModGodModeInput, ModGodModeOutput, ModGodModeParams, ModGodModeData,
+    ModGodModeMode, ModGodModeError,
+    ModGodModeBuilder, ModGodModeStream, ModGodModeBatchBuilder,
+    ModGodModeBatchRange, ModGodModeBatchOutput,
+};
+
+#[cfg(feature = "python")]
+pub use mod_god_mode::{mod_god_mode_py, mod_god_mode_batch_py, ModGodModeStreamPy};
+
+#[cfg(feature = "wasm")]
+pub use mod_god_mode::{
+    mod_god_mode_wasm, mod_god_mode_alloc, mod_god_mode_free, mod_god_mode_into,
+    mod_god_mode_js_flat, ModGodModeJsFlat
+};

@@ -36,7 +36,7 @@ use crate::indicators::bollinger_bands_width::{
 #[cfg(feature = "python")]
 use crate::indicators::bop::{bop_batch_py, bop_py, BopStreamPy};
 #[cfg(feature = "python")]
-use crate::indicators::other_indicators::{buff_averages_py, buff_averages_batch_py, BuffAveragesStreamPy, qqe_py, qqe_batch_py, QqeStreamPy, volume_adjusted_ma_py, volume_adjusted_ma_batch_py, VolumeAdjustedMaStreamPy, nadaraya_watson_envelope_py, nadaraya_watson_envelope_batch_py, NweStreamPy, beardy_squeeze_pro_py};
+use crate::indicators::other_indicators::{buff_averages_py, buff_averages_batch_py, BuffAveragesStreamPy, qqe_py, qqe_batch_py, QqeStreamPy, volume_adjusted_ma_py, volume_adjusted_ma_batch_py, VolumeAdjustedMaStreamPy, nadaraya_watson_envelope_py, nadaraya_watson_envelope_batch_py, NweStreamPy, ttm_squeeze_py, ttm_squeeze_batch_py, TtmSqueezeStreamPy, mod_god_mode_py, mod_god_mode_batch_py, ModGodModeStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::cci::{cci_batch_py, cci_py, CciStreamPy};
 #[cfg(feature = "python")]
@@ -970,8 +970,15 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(nadaraya_watson_envelope_batch_py, m)?)?;
 	m.add_class::<NweStreamPy>()?;
 	
-	// Beardy Squeeze Pro
-	m.add_function(wrap_pyfunction!(beardy_squeeze_pro_py, m)?)?;
+	// TTM Squeeze
+	m.add_function(wrap_pyfunction!(ttm_squeeze_py, m)?)?;
+	m.add_function(wrap_pyfunction!(ttm_squeeze_batch_py, m)?)?;
+	m.add_class::<TtmSqueezeStreamPy>()?;
+	
+	// Modified God Mode
+	m.add_function(wrap_pyfunction!(mod_god_mode_py, m)?)?;
+	m.add_function(wrap_pyfunction!(mod_god_mode_batch_py, m)?)?;
+	m.add_class::<ModGodModeStreamPy>()?;
 
 	// Register Linear Regression Intercept functions with their user-facing names
 	m.add_function(wrap_pyfunction!(linearreg_intercept_py, m)?)?;

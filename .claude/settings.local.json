@@ -45,7 +45,14 @@
       "Read(/C:\\Rust Projects\\my_project-bindings-1\\src\\indicators\\moving_averages/**)",
       "Read(/C:\\Rust Projects\\my_project-bindings-1\\src\\indicators\\moving_averages/**)",
       "Read(/C:\\Rust Projects\\my_project-bindings-1\\src\\indicators\\moving_averages/**)",
-      "Bash(test_bindings.bat nadaraya_watson_envelope)"
+      "Bash(test_bindings.bat nadaraya_watson_envelope)",
+      "Bash(move:*)",
+      "Bash(ren:*)",
+      "Bash(test_bindings.bat ttm_squeeze)",
+      "Bash(del debug_ttm.py)",
+      "Bash(del srcindicatorsother_indicatorsmod_god_mode_full.rs)",
+      "Bash(test_bindings.bat mod_god_mode)",
+      "Bash(del test_mod_god_mode_api.py)"
     ],
     "deny": [],
     "ask": [],
