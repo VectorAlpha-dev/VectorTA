@@ -1,4 +1,5 @@
 pub mod alma;
+pub mod buff_averages;
 pub mod cwma;
 pub mod dema;
 pub mod edcf;
@@ -35,6 +36,7 @@ pub mod tema;
 pub mod tilson;
 pub mod trendflex;
 pub mod trima;
+pub mod volume_adjusted_ma;
 pub mod vpwma;
 pub mod vwap;
 pub mod vwma;

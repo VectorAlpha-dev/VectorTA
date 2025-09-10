@@ -73,10 +73,13 @@ pub mod midpoint;
 pub mod midprice;
 pub mod minmax;
 pub use minmax::{minmax, MinmaxInput, MinmaxOutput, MinmaxParams};
+pub mod mod_god_mode;
 pub mod mom;
 pub mod moving_averages;
 pub mod other_indicators;
+pub use other_indicators::ehlers_kama::{ehlers_kama, EhlersKamaInput, EhlersKamaOutput, EhlersKamaParams};
 pub mod msw;
+pub mod nadaraya_watson_envelope;
 pub mod natr;
 pub mod nvi;
 pub mod obv;
@@ -86,6 +89,7 @@ pub mod pma;
 pub mod ppo;
 pub use ppo::{ppo, PpoInput, PpoOutput, PpoParams};
 pub mod pvi;
+pub mod qqe;
 pub mod qstick;
 pub mod roc;
 pub use roc::{roc, RocInput, RocOutput, RocParams, RocError, RocBuilder, RocStream, RocBatchBuilder, RocBatchOutput, RocBatchRange};
@@ -109,6 +113,7 @@ pub mod supertrend;
 pub mod trix;
 pub mod tsf;
 pub mod tsi;
+pub mod ttm_squeeze;
 pub mod ttm_trend;
 pub mod ui;
 pub mod ultosc;
@@ -174,14 +179,7 @@ pub use mean_ad::{mean_ad, MeanAdInput, MeanAdOutput, MeanAdParams};
 pub use mom::{mom, MomInput, MomOutput, MomParams};
 pub use ui::{ui, UiInput, UiOutput, UiParams};
 pub use moving_averages::{
-	alma, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass, highpass_2_pole, hma, hwma, jma,
+	alma, buff_averages, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass, highpass_2_pole, hma, hwma, jma,
 	jsa, kama, linreg, maaq, mama, mwdx, nma, pwma, reflex, sinwma, sma, smma, sqwma, srwma, supersmoother,
-	supersmoother_3_pole, swma, tema, tilson, trendflex, trima, vpwma, vwap, vwma, wilders, wma, zlema,
-};
-pub use other_indicators::{
-	buff_averages, buff_averages_with_kernel, buff_averages_into_slices,
-	buff_averages_batch_with_kernel, BuffAveragesInput, BuffAveragesOutput, 
-	BuffAveragesParams, BuffAveragesData, BuffAveragesBuilder, BuffAveragesStream, 
-	BuffAveragesError, BuffAveragesBatchRange, BuffAveragesBatchOutput, 
-	BuffAveragesBatchBuilder,
+	supersmoother_3_pole, swma, tema, tilson, trendflex, trima, volume_adjusted_ma, vpwma, vwap, vwma, wilders, wma, zlema,
 };

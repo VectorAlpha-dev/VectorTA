@@ -52,7 +52,9 @@
       "Bash(del debug_ttm.py)",
       "Bash(del srcindicatorsother_indicatorsmod_god_mode_full.rs)",
       "Bash(test_bindings.bat mod_god_mode)",
-      "Bash(del test_mod_god_mode_api.py)"
+      "Bash(del test_mod_god_mode_api.py)",
+      "Bash(test:*)",
+      "Bash(.test_bindings.bat ehlers_kama)"
     ],
     "deny": [],
     "ask": [],

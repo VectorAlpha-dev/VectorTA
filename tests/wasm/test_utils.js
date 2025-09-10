@@ -1292,6 +1292,16 @@ const EXPECTED_OUTPUTS = {
             60844.41271673433
         ],
         warmupPeriod: 12  // length - 1 for default params
+    },
+    ehlersKama: {
+        defaultParams: { period: 20 },
+        last5Values: [
+            59721.60663208,
+            59717.43599957,
+            59708.31467709,
+            59704.78675836,
+            59701.81308504
+        ]
     }
 };
 
