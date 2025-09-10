@@ -4,6 +4,20 @@ use pyo3::prelude::*;
 // Add module initialization here
 
 #[cfg(feature = "python")]
+use crate::indicators::moving_averages::tradjema::{tradjema_py, tradjema_batch_py, TradjemaStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::aso::{aso_py, aso_batch_py, AsoStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::macz::{macz_py, macz_batch_py, MaczStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::ott::{ott_py, ott_batch_py, OttStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::dvdiqqe::{dvdiqqe_py, dvdiqqe_batch_py};
+#[cfg(feature = "python")]
+use crate::indicators::prb::{prb_py, prb_batch_py, PrbStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::lpc::{lpc_py, lpc_batch_py, LpcStreamPy};
+#[cfg(feature = "python")]
 use crate::indicators::acosc::{acosc_batch_py, acosc_py, AcoscStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::ad::{ad_batch_py, ad_py, AdStreamPy};
@@ -721,6 +735,40 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(aroon_py, m)?)?;
 	m.add_function(wrap_pyfunction!(aroon_batch_py, m)?)?;
 	m.add_class::<AroonStreamPy>()?;
+
+	// Register TRADJEMA functions with their user-facing names
+	m.add_function(wrap_pyfunction!(tradjema_py, m)?)?;
+	m.add_function(wrap_pyfunction!(tradjema_batch_py, m)?)?;
+	m.add_class::<TradjemaStreamPy>()?;
+
+	// Register ASO functions with their user-facing names
+	m.add_function(wrap_pyfunction!(aso_py, m)?)?;
+	m.add_function(wrap_pyfunction!(aso_batch_py, m)?)?;
+	m.add_class::<AsoStreamPy>()?;
+
+	// Register MAC-Z functions with their user-facing names
+	m.add_function(wrap_pyfunction!(macz_py, m)?)?;
+	m.add_function(wrap_pyfunction!(macz_batch_py, m)?)?;
+	m.add_class::<MaczStreamPy>()?;
+	
+	// Register OTT functions with their user-facing names
+	m.add_function(wrap_pyfunction!(ott_py, m)?)?;
+	m.add_function(wrap_pyfunction!(ott_batch_py, m)?)?;
+	m.add_class::<OttStreamPy>()?;
+
+	// Register DVDIQQE function
+	m.add_function(wrap_pyfunction!(dvdiqqe_py, m)?)?;
+	m.add_function(wrap_pyfunction!(dvdiqqe_batch_py, m)?)?;
+
+	// Register PRB functions
+	m.add_function(wrap_pyfunction!(prb_py, m)?)?;
+	m.add_function(wrap_pyfunction!(prb_batch_py, m)?)?;
+	m.add_class::<PrbStreamPy>()?;
+
+	// Register LPC functions
+	m.add_function(wrap_pyfunction!(lpc_py, m)?)?;
+	m.add_function(wrap_pyfunction!(lpc_batch_py, m)?)?;
+	m.add_class::<LpcStreamPy>()?;
 
 	// Register Bollinger Bands Width functions with their user-facing names
 	m.add_function(wrap_pyfunction!(bollinger_bands_width_py, m)?)?;

@@ -8,6 +8,8 @@ pub mod ao;
 pub mod apo;
 pub mod aroon;
 pub mod aroonosc;
+pub mod aso;
+pub use aso::{aso, AsoInput, AsoOutput, AsoParams};
 pub mod atr;
 pub mod bandpass;
 pub mod bollinger_bands;
@@ -43,6 +45,14 @@ pub mod dm;
 pub mod donchian;
 pub mod dpo;
 pub mod dti;
+pub mod dvdiqqe;
+pub use dvdiqqe::{
+    dvdiqqe, dvdiqqe_with_kernel, dvdiqqe_into_slices, 
+    dvdiqqe_batch_with_kernel, dvdiqqe_batch_slice, dvdiqqe_batch_par_slice,
+    DvdiqqeInput, DvdiqqeOutput, DvdiqqeParams, DvdiqqeBuilder,
+    DvdiqqeBatchRange, DvdiqqeBatchOutput, DvdiqqeBatchBuilder,
+    DvdiqqeStream
+};
 pub mod dx;
 pub mod efi;
 pub mod emd;
@@ -66,9 +76,13 @@ pub mod kvo;
 pub mod linearreg_angle;
 pub mod linearreg_intercept;
 pub mod linearreg_slope;
+pub mod lpc;
+pub use lpc::{lpc, LpcInput, LpcOutput, LpcParams};
 pub mod lrsi;
 pub mod mab;
 pub mod macd;
+pub mod macz;
+pub use macz::{macz, MaczInput, MaczOutput, MaczParams};
 pub mod marketefi;
 pub mod mass;
 pub mod mean_ad;
@@ -91,11 +105,19 @@ pub mod net_myrsi;
 pub use net_myrsi::{net_myrsi, NetMyrsiInput, NetMyrsiOutput, NetMyrsiParams};
 pub mod nvi;
 pub mod obv;
+pub mod ott;
+pub use ott::{ott, ott_batch_slice, ott_batch_par_slice, ott_batch_with_kernel, OttInput, OttOutput, OttParams};
 pub mod pfe;
 pub mod pivot;
 pub mod pma;
 pub mod ppo;
 pub use ppo::{ppo, PpoInput, PpoOutput, PpoParams};
+pub mod prb;
+pub use prb::{
+    prb, prb_with_kernel, prb_batch_with_kernel, prb_batch_slice, prb_batch_par_slice,
+    PrbInput, PrbOutput, PrbParams, PrbBuilder, PrbStream,
+    PrbBatchRange, PrbBatchOutput, PrbBatchBuilder
+};
 pub mod pvi;
 pub mod qqe;
 pub mod qstick;
@@ -191,5 +213,5 @@ pub use ui::{ui, UiInput, UiOutput, UiParams};
 pub use moving_averages::{
 	alma, buff_averages, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass, highpass_2_pole, hma, hwma, jma,
 	jsa, kama, linreg, maaq, mama, mwdx, nma, pwma, reflex, sinwma, sma, smma, sqwma, srwma, supersmoother,
-	supersmoother_3_pole, swma, tema, tilson, trendflex, trima, volume_adjusted_ma, volatility_adjusted_ma, vpwma, vwap, vwma, wilders, wma, zlema,
+	supersmoother_3_pole, swma, tema, tilson, tradjema, trendflex, trima, volume_adjusted_ma, volatility_adjusted_ma, vpwma, vwap, vwma, wilders, wma, zlema,
 };

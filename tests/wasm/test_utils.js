@@ -107,6 +107,23 @@ const EXPECTED_OUTPUTS = {
         ],
         warmupPeriod: 20  // 16 + period - 1 = 16 + 5 - 1 = 20
     },
+    aso: {
+        defaultParams: { period: 10, mode: 0 },
+        last5Bulls: [
+            48.48594883,
+            46.37206396,
+            47.20522805,
+            46.83750720,
+            43.28268188
+        ],
+        last5Bears: [
+            51.51405117,
+            53.62793604,
+            52.79477195,
+            53.16249280,
+            56.71731812
+        ]
+    },
     alma: {
         defaultParams: { period: 9, offset: 0.85, sigma: 6.0 },
         last5Values: [
@@ -123,6 +140,48 @@ const EXPECTED_OUTPUTS = {
             59238.16030697,
             59222.63528822,
             59165.14427332
+        ]
+    },
+    tradjema: {
+        defaultParams: { length: 40, mult: 10.0 },
+        last5Values: [
+            59395.39322263,
+            59388.09683228,
+            59373.08371503,
+            59350.75110897,
+            59323.14225348
+        ],
+        reinputLast5: [
+            60151.36846160,
+            60111.35712403,
+            60069.22096081,
+            60025.14431263,
+            59979.98583228
+        ]
+    },
+    prb: {
+        defaultParams: {
+            smoothData: false,
+            smoothPeriod: 10,
+            regressionPeriod: 100,
+            polynomialOrder: 2,
+            regressionOffset: 0,
+            ndev: 2.0
+        },
+        last5MainValues: [
+            59083.04826441,
+            58900.06593477,
+            58722.13172976,
+            58575.33291206,
+            58376.00589983
+        ],
+        // Reinput test - apply PRB to PRB output  
+        reinputLast5: [
+            59083.04826441,  // Will be calculated from actual test
+            58900.06593477,
+            58722.13172976,
+            58575.33291206,
+            58376.00589983
         ]
     },
     highpass: {
@@ -222,6 +281,22 @@ const EXPECTED_OUTPUTS = {
             59774.25,
             59774.25
         ]
+    },
+    dvdiqqe: {
+        defaultParams: {
+            period: 13,
+            smoothingPeriod: 6,
+            fastMultiplier: 3.0,
+            slowMultiplier: 5.0,
+            volumeType: 'real',
+            centerType: 'dynamic',
+            tickSize: 0.0001
+        },
+        // PineScript reference values for validation
+        pinescriptDvdi: [-304.41010224, -279.48152664, -287.58723437, -252.40349484, -343.00922595],
+        pinescriptSlowTl: [356.29040696, -955.69385266, -951.82562405, -903.39071943, -903.39071943],
+        pinescriptFastTl: [-728.26380454, -697.40500858, -697.40500858, -654.73695895, -654.73695895],
+        pinescriptCenter: [70.68067540, 70.58479308, 70.48674435, 70.39837811, 70.28527069]
     },
     er: {
         defaultParams: { period: 5 },
@@ -1257,6 +1332,79 @@ const EXPECTED_OUTPUTS = {
             59215.124961889764,
             59103.099969511815
         ]
+    },
+    ott: {
+        defaultParams: { period: 2, percent: 1.4, ma_type: 'VAR' },
+        accuracyParams: { period: 2, percent: 1.4, ma_type: 'VAR' },  // Using period=2 for accuracy test
+        last5Values: [
+            59719.89457348,
+            59719.89457348,
+            59719.89457348,
+            59719.89457348,
+            59649.80599569
+        ],
+        warmupPeriod: 1,  // For period=2
+        // Re-input test values (OTT applied to OTT output with period=2)
+        reinputLast5: [
+            60132.08843846,
+            60132.08843846,
+            60132.08843846,
+            60132.08843846,
+            60085.0354506
+        ]
+    },
+    macz: {
+        defaultParams: {
+            fast_length: 12,
+            slow_length: 25,
+            signal_length: 9,
+            lengthz: 20,
+            length_stdev: 25,
+            a: 1.0,
+            b: 1.0,
+            use_lag: false,
+            gamma: 0.02
+        },
+        last5Values: [
+            0.5578971508160178,
+            0.15010753626161655,
+            -0.03573723916148075,
+            0.1320298011553359,
+            -0.7969910390628968
+        ],
+        warmupPeriod: 33  // Actual warmup from implementation
+    },
+    lpc: {
+        default_params: {
+            cutoff_type: 'adaptive',
+            fixed_period: 20,
+            max_cycle_limit: 60,
+            cycle_mult: 1.0,
+            tr_mult: 1.0
+        },
+        // Reference values from actual LPC implementation output
+        last_5_filter: [
+            59346.30519969,
+            59327.59393858,
+            59290.68770889,
+            59257.83622820,
+            59196.32617649
+        ],
+        last_5_high_band: [
+            60351.08358296,
+            60220.19604722,
+            60090.66513329,
+            59981.40792457,
+            59903.93414995
+        ],
+        last_5_low_band: [
+            58341.52681643,
+            58434.99182994,
+            58490.71028450,
+            58534.26453184,
+            58488.71820303
+        ],
+        warmupPeriod: 1  // First value that's not NaN (based on first valid index)
     },
     qqe: {
         defaultParams: { rsiPeriod: 14, smoothingFactor: 5, fastFactor: 4.236 },

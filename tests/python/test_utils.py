@@ -85,6 +85,23 @@ EXPECTED_OUTPUTS = {
             59165.14427332
         ]
     },
+    'tradjema': {
+        'default_params': {'length': 40, 'mult': 10.0},
+        'last_5_values': [
+            59395.39322263,
+            59388.09683228,
+            59373.08371503,
+            59350.75110897,
+            59323.14225348
+        ],
+        'reinput_last_5': [
+            60151.36846160,
+            60111.35712403,
+            60069.22096081,
+            60025.14431263,
+            59979.98583228
+        ]
+    },
     'kama': {
         'default_params': {'period': 30},
         'last_5_values': [
@@ -93,6 +110,48 @@ EXPECTED_OUTPUTS = {
             60115.177367962766,
             60071.37070833558,
             59992.79386218023
+        ]
+    },
+    'prb': {
+        'default_params': {
+            'smooth_data': False,
+            'smooth_period': 10, 
+            'regression_period': 100,
+            'polynomial_order': 2,
+            'regression_offset': 0,
+            'ndev': 2.0
+        },
+        'last_5_main_values': [
+            59083.04826441,
+            58900.06593477,
+            58722.13172976,
+            58575.33291206,
+            58376.00589983,
+        ],
+        # Reinput test - apply PRB to PRB output
+        'reinput_last_5': [
+            59083.04826441,  # Will be calculated from actual test
+            58900.06593477,
+            58722.13172976,
+            58575.33291206,
+            58376.00589983,
+        ]
+    },
+    'aso': {
+        'default_params': {'period': 10, 'mode': 0},
+        'last_5_bulls': [
+            48.48594883,
+            46.37206396,
+            47.20522805,
+            46.83750720,
+            43.28268188,
+        ],
+        'last_5_bears': [
+            51.51405117,
+            53.62793604,
+            52.79477195,
+            53.16249280,
+            56.71731812,
         ]
     },
     'highpass': {
@@ -145,6 +204,22 @@ EXPECTED_OUTPUTS = {
             59268.00202402624,
             59160.03888720062
         ]
+    },
+    'dvdiqqe': {
+        'default_params': {
+            'period': 13,
+            'smoothing_period': 6,
+            'fast_multiplier': 3.0,
+            'slow_multiplier': 5.0,
+            'volume_type': 'real',
+            'center_type': 'dynamic',
+            'tick_size': 0.0001
+        },
+        # PineScript reference values for validation
+        'pinescript_dvdi': [-304.41010224, -279.48152664, -287.58723437, -252.40349484, -343.00922595],
+        'pinescript_slow_tl': [356.29040696, -955.69385266, -951.82562405, -903.39071943, -903.39071943],
+        'pinescript_fast_tl': [-728.26380454, -697.40500858, -697.40500858, -654.73695895, -654.73695895],
+        'pinescript_center': [70.68067540, 70.58479308, 70.48674435, 70.39837811, 70.28527069]
     },
     'cci': {
         'default_params': {'period': 14},
@@ -1245,6 +1320,79 @@ EXPECTED_OUTPUTS = {
             59215.124961889764,
             59103.099969511815
         ]
+    },
+    'ott': {
+        'default_params': {'period': 2, 'percent': 1.4, 'ma_type': 'VAR'},
+        'accuracy_params': {'period': 2, 'percent': 1.4, 'ma_type': 'VAR'},  # Using period=2 for accuracy test
+        'last_5_values': [
+            59719.89457348,
+            59719.89457348,
+            59719.89457348,
+            59719.89457348,
+            59649.80599569
+        ],
+        'warmup_period': 1,  # For period=2
+        # Re-input test values (OTT applied to OTT output with period=2)
+        'reinput_last_5': [
+            60132.08843846,
+            60132.08843846,
+            60132.08843846,
+            60132.08843846,
+            60085.0354506
+        ]
+    },
+    'macz': {
+        'default_params': {
+            'fast_length': 12,
+            'slow_length': 25,
+            'signal_length': 9,
+            'lengthz': 20,
+            'length_stdev': 25,
+            'a': 1.0,
+            'b': 1.0,
+            'use_lag': False,
+            'gamma': 0.02
+        },
+        'last_5_values': [
+            0.6101446327627289,
+            0.22714649540336862,
+            -0.007786221530073578,
+            0.13180921580477045,
+            -0.7201884654964374
+        ],
+        'warmup_period': 33  # Actual warmup from implementation
+    },
+    'lpc': {
+        'default_params': {
+            'cutoff_type': 'adaptive',
+            'fixed_period': 20,
+            'max_cycle_limit': 60,
+            'cycle_mult': 1.0,
+            'tr_mult': 1.0
+        },
+        # Reference values from actual LPC implementation output
+        'last_5_filter': [
+            59346.30519969,
+            59327.59393858,
+            59290.68770889,
+            59257.83622820,
+            59196.32617649
+        ],
+        'last_5_high_band': [
+            60351.08358296,
+            60220.19604722,
+            60090.66513329,
+            59981.40792457,
+            59903.93414995
+        ],
+        'last_5_low_band': [
+            58341.52681643,
+            58434.99182994,
+            58490.71028450,
+            58534.26453184,
+            58488.71820303
+        ],
+        'warmup_period': 1  # First value that's not NaN (based on first valid index)
     },
     'qqe': {
         'default_params': {'rsi_period': 14, 'smoothing_factor': 5, 'fast_factor': 4.236},

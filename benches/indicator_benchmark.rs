@@ -44,6 +44,7 @@ use my_project::indicators::moving_averages::{
 	swma::{swma_with_kernel, SwmaBatchBuilder, SwmaInput},
 	tema::{tema_with_kernel, TemaBatchBuilder, TemaInput},
 	tilson::{tilson_with_kernel, TilsonBatchBuilder, TilsonInput},
+	tradjema::{tradjema_with_kernel, TradjemaBatchBuilder, TradjemaInput},
 	trendflex::{trendflex_with_kernel, TrendFlexBatchBuilder, TrendFlexInput},
 	trima::{trima_with_kernel, TrimaBatchBuilder, TrimaInput},
 	volume_adjusted_ma::{VolumeAdjustedMa_with_kernel, VolumeAdjustedMaBatchBuilder, VolumeAdjustedMaInput},
@@ -66,8 +67,16 @@ use my_project::indicators::moving_averages::{
 	volatility_adjusted_ma::{vama_with_kernel, VamaBatchBuilder, VamaInput},
 };
 
+// Removed - other_indicators no longer exists
+
 use my_project::indicators::{
 	acosc::{acosc as acosc_raw, AcoscInput},
+	aso::{aso as aso_raw, AsoInput},
+	dvdiqqe::{dvdiqqe_with_kernel, DvdiqqeBatchBuilder, DvdiqqeInput},
+	lpc::{lpc as lpc_raw, LpcInput},
+	macz::{macz_with_kernel, MaczBatchBuilder, MaczInput},
+	ott::{ott_batch_with_kernel, OttBatchBuilder, OttInput},
+	prb::{prb_with_kernel, PrbBatchBuilder, PrbInput},
 	ad::{ad as ad_raw, AdInput},
 	adosc::{adosc as adosc_raw, AdoscInput},
 	adx::{adx as adx_raw, AdxInput},
@@ -208,6 +217,7 @@ pub type AdxInputS = AdxInput<'static>;
 pub type AdxrInputS = AdxrInput<'static>;
 pub type AlligatorInputS = AlligatorInput<'static>;
 pub type AlmaInputS = AlmaInput<'static>;
+pub type MaczInputS = MaczInput<'static>;
 pub type AoInputS = AoInput<'static>;
 pub type ApoInputS = ApoInput<'static>;
 pub type AroonInputS = AroonInput<'static>;
@@ -276,6 +286,7 @@ pub type LinearregAngleInputS = Linearreg_angleInput<'static>;
 pub type LinearRegInterceptInputS = LinearRegInterceptInput<'static>;
 pub type LinearRegSlopeInputS = LinearRegSlopeInput<'static>;
 pub type LinRegInputS = LinRegInput<'static>;
+pub type LpcInputS = LpcInput<'static>;
 pub type LrsiInputS = LrsiInput<'static>;
 pub type MaaqInputS = MaaqInput<'static>;
 pub type MabInputS = MabInput<'static>;
@@ -299,10 +310,12 @@ pub type NweInputS = NweInput<'static>;
 pub type NmaInputS = NmaInput<'static>;
 pub type NviInputS = NviInput<'static>;
 pub type ObvInputS = ObvInput<'static>;
+pub type OttInputS = OttInput<'static>;
 pub type PfeInputS = PfeInput<'static>;
 pub type PivotInputS = PivotInput<'static>;
 pub type PmaInputS = PmaInput<'static>;
 pub type PpoInputS = PpoInput<'static>;
+pub type PrbInputS = PrbInput<'static>;
 pub type PviInputS = PviInput<'static>;
 pub type PwmaInputS = PwmaInput<'static>;
 pub type QqeInputS = QqeInput<'static>;
@@ -334,6 +347,7 @@ pub type SuperSmoother3PoleInputS = SuperSmoother3PoleInput<'static>;
 pub type SwmaInputS = SwmaInput<'static>;
 pub type TemaInputS = TemaInput<'static>;
 pub type TilsonInputS = TilsonInput<'static>;
+pub type TradjemaInputS = TradjemaInput<'static>;
 pub type TrendFlexInputS = TrendFlexInput<'static>;
 pub type TrimaInputS = TrimaInput<'static>;
 pub type TrixInputS = TrixInput<'static>;
@@ -523,6 +537,17 @@ macro_rules! make_batch_wrappers {
 }
 
 // Special implementation for RsmkInputS which requires two candle sets
+impl InputLen for MaczInputS {
+	fn with_len(len: usize) -> Self {
+		match len {
+			10_000 => MaczInput::with_default_candles(&*CANDLES_10K, &CANDLES_10K.volume),
+			100_000 => MaczInput::with_default_candles(&*CANDLES_100K, &CANDLES_100K.volume),
+			1_000_000 => MaczInput::with_default_candles(&*CANDLES_1M, &CANDLES_1M.volume),
+			_ => panic!("unsupported len {len}"),
+		}
+	}
+}
+
 impl InputLen for RsmkInputS {
 	fn with_len(len: usize) -> Self {
 		match len {
@@ -675,6 +700,7 @@ impl_input_len!(
 	SwmaInputS,
 	TemaInputS,
 	TilsonInputS,
+	TradjemaInputS,
 	TrendFlexInputS,
 	TrimaInputS,
 	TrixInputS,
@@ -952,6 +978,7 @@ bench_scalars!(
 
 make_kernel_wrappers!(alma, alma_with_kernel, AlmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(buff_averages, buff_averages_with_kernel, BuffAveragesInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(macz, macz_with_kernel, MaczInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(cwma, cwma_with_kernel, CwmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(dema, dema_with_kernel, DemaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(edcf, edcf_with_kernel, EdcfInputS; Scalar,Avx2,Avx512);
@@ -987,6 +1014,7 @@ make_kernel_wrappers!(supersmoother_3_pole, supersmoother_3_pole_with_kernel, Su
 make_kernel_wrappers!(swma, swma_with_kernel, SwmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(tema, tema_with_kernel, TemaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(tilson, tilson_with_kernel, TilsonInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(tradjema, tradjema_with_kernel, TradjemaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(trendflex, trendflex_with_kernel, TrendFlexInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(trima, trima_with_kernel, TrimaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(vidya, vidya_with_kernel, VidyaInputS; Scalar,Avx2,Avx512);
@@ -1011,6 +1039,11 @@ make_batch_wrappers!(
 
 make_batch_wrappers!(
 	buff_averages_batch, BuffAveragesBatchBuilder, BuffAveragesInputS;
+	ScalarBatch, Avx2Batch, Avx512Batch
+);
+
+make_batch_wrappers!(
+	macz_batch, MaczBatchBuilder, MaczInputS;
 	ScalarBatch, Avx2Batch, Avx512Batch
 );
 
@@ -1093,6 +1126,67 @@ make_batch_wrappers!(supersmoother_3_pole_batch, SuperSmoother3PoleBatchBuilder,
 make_batch_wrappers!(swma_batch, SwmaBatchBuilder, SwmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(tema_batch, TemaBatchBuilder, TemaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(tilson_batch, TilsonBatchBuilder, TilsonInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+// Custom batch wrappers for TRADJEMA (requires OHLC data)
+#[inline(always)]
+fn tradjema_batch_scalarbatch(input: &TradjemaInputS) -> anyhow::Result<()> {
+    use my_project::indicators::moving_averages::tradjema::{TradjemaBatchBuilder, TradjemaData};
+    use my_project::utilities::enums::Kernel;
+    
+    let (high, low, close) = match &input.data {
+        TradjemaData::Candles { candles } => {
+            (&candles.high[..], &candles.low[..], &candles.close[..])
+        },
+        TradjemaData::Slices { high, low, close } => {
+            (*high, *low, *close)
+        }
+    };
+    
+    TradjemaBatchBuilder::new()
+        .kernel(Kernel::ScalarBatch)
+        .apply_slices(&high, &low, &close)?;
+    Ok(())
+}
+
+#[inline(always)]
+fn tradjema_batch_avx2batch(input: &TradjemaInputS) -> anyhow::Result<()> {
+    use my_project::indicators::moving_averages::tradjema::{TradjemaBatchBuilder, TradjemaData};
+    use my_project::utilities::enums::Kernel;
+    
+    let (high, low, close) = match &input.data {
+        TradjemaData::Candles { candles } => {
+            (&candles.high[..], &candles.low[..], &candles.close[..])
+        },
+        TradjemaData::Slices { high, low, close } => {
+            (*high, *low, *close)
+        }
+    };
+    
+    TradjemaBatchBuilder::new()
+        .kernel(Kernel::Avx2Batch)
+        .apply_slices(&high, &low, &close)?;
+    Ok(())
+}
+
+#[inline(always)]
+fn tradjema_batch_avx512batch(input: &TradjemaInputS) -> anyhow::Result<()> {
+    use my_project::indicators::moving_averages::tradjema::{TradjemaBatchBuilder, TradjemaData};
+    use my_project::utilities::enums::Kernel;
+    
+    let (high, low, close) = match &input.data {
+        TradjemaData::Candles { candles } => {
+            (&candles.high[..], &candles.low[..], &candles.close[..])
+        },
+        TradjemaData::Slices { high, low, close } => {
+            (*high, *low, *close)
+        }
+    };
+    
+    TradjemaBatchBuilder::new()
+        .kernel(Kernel::Avx512Batch)
+        .apply_slices(&high, &low, &close)?;
+    Ok(())
+}
+
 make_batch_wrappers!(trendflex_batch, TrendFlexBatchBuilder, TrendFlexInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(trima_batch, TrimaBatchBuilder, TrimaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(vidya_batch, VidyaBatchBuilder, VidyaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
@@ -1123,6 +1217,13 @@ bench_variants!(
 	buff_averages_batch_scalarbatch,
 	buff_averages_batch_avx2batch,
 	buff_averages_batch_avx512batch
+);
+
+bench_variants!(
+	macz_batch => MaczInputS; Some(232);
+	macz_batch_scalarbatch,
+	macz_batch_avx2batch,
+	macz_batch_avx512batch
 );
 
 bench_variants!(
@@ -1378,6 +1479,13 @@ bench_variants!(
 );
 
 bench_variants!(
+	tradjema_batch => TradjemaInputS; Some(227);
+	tradjema_batch_scalarbatch,
+	tradjema_batch_avx2batch,
+	tradjema_batch_avx512batch,
+);
+
+bench_variants!(
 	trendflex_batch => TrendFlexInputS; Some(227);
 	trendflex_batch_scalarbatch,
 	trendflex_batch_avx2batch,
@@ -1452,6 +1560,13 @@ bench_variants!(
 	buff_averages_scalar,
 	buff_averages_avx2,
 	buff_averages_avx512,
+);
+
+bench_variants!(
+	macz => MaczInputS; None;
+	macz_scalar,
+	macz_avx2,
+	macz_avx512,
 );
 
 bench_variants!(
@@ -1693,6 +1808,13 @@ bench_variants!(
 );
 
 bench_variants!(
+	tradjema => TradjemaInputS; None;
+	tradjema_scalar,
+	tradjema_avx2,
+	tradjema_avx512,
+);
+
+bench_variants!(
 	trendflex => TrendFlexInputS; None;
 	trendflex_scalar,
 	trendflex_avx2,
@@ -1854,6 +1976,8 @@ criterion_main!(
 	benches_alma_batch,
 	benches_buff_averages,
 	benches_buff_averages_batch,
+	benches_macz,
+	benches_macz_batch,
 	benches_cwma,
 	benches_cwma_batch,
 	benches_dema,
