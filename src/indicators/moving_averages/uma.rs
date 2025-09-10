@@ -1717,7 +1717,7 @@ mod tests {
         pyo3::Python::with_gil(|py| {
             use numpy::PyArray1;
             let data = PyArray1::from_vec(py, (0..256).map(|i| i as f64).collect());
-            let d = crate::other_indicators::uma::uma_batch_py(
+            let d = crate::indicators::moving_averages::uma::uma_batch_py(
                 py, data.readonly(), (1.0,1.0,0.0), (5,5,0), (50,50,0), (4,4,0), None, Some("scalar_batch")
             ).unwrap();
             let v = d.get_item("values").unwrap();

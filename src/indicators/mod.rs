@@ -115,7 +115,6 @@ pub use minmax::{minmax, MinmaxInput, MinmaxOutput, MinmaxParams};
 pub mod mod_god_mode;
 pub mod mom;
 pub mod moving_averages;
-pub mod other_indicators;
 pub use moving_averages::ehlers_kama::{ehlers_kama, EhlersKamaInput, EhlersKamaOutput, EhlersKamaParams};
 pub mod msw;
 pub mod nadaraya_watson_envelope;
@@ -124,10 +123,8 @@ pub mod net_myrsi;
 pub use net_myrsi::{net_myrsi, NetMyrsiInput, NetMyrsiOutput, NetMyrsiParams};
 pub mod nvi;
 pub mod obv;
-<<<<<<< HEAD
 pub mod ott;
 pub use ott::{ott, ott_batch_slice, ott_batch_par_slice, ott_batch_with_kernel, OttInput, OttOutput, OttParams};
-=======
 pub mod otto;
 pub use otto::{
     otto, OttoInput, OttoOutput, OttoParams, OttoError, OttoData, OttoBuilder, OttoStream,
@@ -136,8 +133,7 @@ pub use otto::{
 #[cfg(feature = "python")]
 pub use otto::{otto_py, otto_batch_py, OttoStreamPy};
 #[cfg(feature = "wasm")]
-pub use otto::{otto_js, otto_batch, otto_alloc, otto_free, otto_into};
->>>>>>> simd-4
+pub use otto::{otto_js, otto_batch_unified_js, otto_alloc, otto_free, otto_into};
 pub mod pfe;
 pub mod percentile_nearest_rank;
 pub use percentile_nearest_rank::{
@@ -280,13 +276,7 @@ pub use mean_ad::{mean_ad, MeanAdInput, MeanAdOutput, MeanAdParams};
 pub use mom::{mom, MomInput, MomOutput, MomParams};
 pub use ui::{ui, UiInput, UiOutput, UiParams};
 pub use moving_averages::{
-<<<<<<< HEAD
-	alma, buff_averages, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass, highpass_2_pole, hma, hwma, jma,
+	alma, buff_averages, cwma, dema, edcf, ehlers_itrend, ehlers_pma, ema, epma, frama, fwma, gaussian, highpass, highpass_2_pole, hma, hwma, jma,
 	jsa, kama, linreg, maaq, mama, mwdx, nma, pwma, reflex, sinwma, sma, smma, sqwma, srwma, supersmoother,
-	supersmoother_3_pole, swma, tema, tilson, tradjema, trendflex, trima, volume_adjusted_ma, volatility_adjusted_ma, vpwma, vwap, vwma, wilders, wma, zlema,
-=======
-	alma, cwma, dema, edcf, ehlers_itrend, ehlers_pma, ema, epma, frama, fwma, gaussian, highpass, highpass_2_pole, hma, hwma, jma,
-	jsa, kama, linreg, maaq, mama, mwdx, nma, pwma, reflex, sinwma, sma, smma, sqwma, srwma, supersmoother,
-	supersmoother_3_pole, swma, tema, tilson, trendflex, trima, uma, vpwma, vwap, vwma, wilders, wma, zlema,
->>>>>>> simd-4
+	supersmoother_3_pole, swma, tema, tilson, tradjema, trendflex, trima, uma, volume_adjusted_ma, volatility_adjusted_ma, vpwma, vwap, vwma, wilders, wma, zlema,
 };

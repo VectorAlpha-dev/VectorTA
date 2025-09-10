@@ -6,6 +6,9 @@ pub mod dma;
 pub mod edcf;
 pub mod ehlers_ecema;
 pub mod ehlers_itrend;
+pub mod ehlers_kama;
+pub mod ehlers_pma;
+pub mod ehma;
 pub mod ema;
 pub mod epma;
 pub mod frama;
@@ -41,6 +44,9 @@ pub mod tilson;
 pub mod tradjema;
 pub mod trendflex;
 pub mod trima;
+pub mod uma;
+pub mod volatility_adjusted_ma;
+pub mod volume_adjusted_ma;
 pub mod vpwma;
 pub mod vwap;
 pub mod vwma;
@@ -55,6 +61,12 @@ pub use dma::{
     // Batch API exports
     DmaBatchRange, DmaBatchBuilder, DmaBatchOutput, dma_batch_with_kernel,
 };
+
+pub use ehlers_kama::{ehlers_kama, EhlersKamaInput, EhlersKamaOutput, EhlersKamaParams};
+pub use ehlers_pma::{ehlers_pma, EhlersPmaInput, EhlersPmaOutput, EhlersPmaParams};
+pub use uma::{uma, UmaInput, UmaOutput, UmaParams};
+pub use volume_adjusted_ma::{VolumeAdjustedMa as volume_adjusted_ma, VolumeAdjustedMaInput, VolumeAdjustedMaOutput, VolumeAdjustedMaParams};
+pub use volatility_adjusted_ma::{vama as volatility_adjusted_ma, VamaInput as VolatilityAdjustedMaInput, VamaOutput as VolatilityAdjustedMaOutput, VamaParams as VolatilityAdjustedMaParams};
 
 pub use ehma::{
     ehma, ehma_with_kernel, ehma_into_slice, EhmaInput, EhmaOutput,

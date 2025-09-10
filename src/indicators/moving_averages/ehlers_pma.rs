@@ -26,7 +26,7 @@
 //!
 //! ## Example
 //! ```rust
-//! use my_project::other_indicators::ehlers_pma::*;
+//! use my_project::indicators::moving_averages::ehlers_pma::*;
 //! 
 //! let data = vec![100.0; 20]; // Sample data
 //! let input = EhlersPmaInput::from_slice(&data, EhlersPmaParams::default());
