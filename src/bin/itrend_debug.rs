@@ -47,7 +47,7 @@ fn main() {
 
         let mut y_val = f64::NAN;
         let mut it_curr = 0.0;
-        let mut it1 = 0.0; let mut it2 = 0.0; let mut it3 = 0.0;
+        let _it1 = 0.0; let _it2 = 0.0; let _it3 = 0.0;
 
         for i in 0..=idx {
             let x0 = data[i];
@@ -91,8 +91,8 @@ fn main() {
             let q1_6 = get_ring(&q1_buf, ring_ptr, 6);
             let j_q_val = (0.0962 * q1_0 + 0.5769 * q1_2 - 0.5769 * q1_4 - 0.0962 * q1_6) * period_mult;
 
-            let mut i2_cur = 0.2 * (i1_val - j_q_val) + 0.8 * prev_i2;
-            let mut q2_cur = 0.2 * (q1_val + j_i_val) + 0.8 * prev_q2;
+            let i2_cur = 0.2 * (i1_val - j_q_val) + 0.8 * prev_i2;
+            let q2_cur = 0.2 * (q1_val + j_i_val) + 0.8 * prev_q2;
 
             let re_val = i2_cur * prev_i2 + q2_cur * prev_q2;
             let im_val = i2_cur * prev_q2 - q2_cur * prev_i2;
@@ -140,9 +140,9 @@ fn main() {
             ring_ptr = (ring_ptr + 1) % 7;
         }
 
-        let last_dcp = {
-            let mut new_mesa = 0.0; // not used here; compute dcp same as last iter
-            (0) // placeholder
+        let _last_dcp = {
+            let _new_mesa = 0.0; // not used here; compute dcp same as last iter
+            0 // placeholder
         };
         (y_val, it_curr, prev_it1, prev_it2, prev_it3, 0)
     }

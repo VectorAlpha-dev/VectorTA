@@ -4,6 +4,8 @@ pub mod adosc;
 pub mod adx;
 pub mod adxr;
 pub mod alligator;
+pub mod alphatrend;
+pub use alphatrend::{alphatrend, AlphaTrendInput, AlphaTrendOutput, AlphaTrendParams};
 pub mod ao;
 pub mod apo;
 pub mod aroon;
@@ -28,10 +30,20 @@ pub use cci_cycle::{cci_cycle, CciCycleInput, CciCycleOutput, CciCycleParams};
 pub mod cfo;
 pub mod cg;
 pub mod chande;
+pub mod chandelier_exit;
+pub use chandelier_exit::{
+    chandelier_exit, chandelier_exit_with_kernel, chandelier_exit_into_slices, chandelier_exit_into_flat,
+    ChandelierExitInput, ChandelierExitOutput, ChandelierExitParams, ChandelierExitData,
+    ChandelierExitBuilder, ChandelierExitError,
+    CeBatchRange, CeBatchBuilder, CeBatchOutput, 
+    ce_batch_with_kernel, ce_batch_slice, ce_batch_par_slice
+};
 pub mod chop;
 pub mod cksp;
 pub mod cmo;
 pub mod coppock;
+pub mod cora_wave;
+pub use cora_wave::{cora_wave, CoraWaveInput, CoraWaveOutput, CoraWaveParams};
 pub mod correl_hl;
 pub mod correlation_cycle;
 pub use correlation_cycle::{
@@ -112,9 +124,30 @@ pub mod net_myrsi;
 pub use net_myrsi::{net_myrsi, NetMyrsiInput, NetMyrsiOutput, NetMyrsiParams};
 pub mod nvi;
 pub mod obv;
+<<<<<<< HEAD
 pub mod ott;
 pub use ott::{ott, ott_batch_slice, ott_batch_par_slice, ott_batch_with_kernel, OttInput, OttOutput, OttParams};
+=======
+pub mod otto;
+pub use otto::{
+    otto, OttoInput, OttoOutput, OttoParams, OttoError, OttoData, OttoBuilder, OttoStream,
+    OttoBatchOutput, OttoBatchBuilder, OttoBatchRange
+};
+#[cfg(feature = "python")]
+pub use otto::{otto_py, otto_batch_py, OttoStreamPy};
+#[cfg(feature = "wasm")]
+pub use otto::{otto_js, otto_batch, otto_alloc, otto_free, otto_into};
+>>>>>>> simd-4
 pub mod pfe;
+pub mod percentile_nearest_rank;
+pub use percentile_nearest_rank::{
+    percentile_nearest_rank, percentile_nearest_rank_with_kernel, percentile_nearest_rank_into_slice,
+    PercentileNearestRankInput, PercentileNearestRankOutput, 
+    PercentileNearestRankParams, PercentileNearestRankData, PercentileNearestRankError,
+    PercentileNearestRankBuilder, PercentileNearestRankStream,
+    PercentileNearestRankBatchRange, PercentileNearestRankBatchBuilder, PercentileNearestRankBatchOutput,
+    pnr_batch_with_kernel, pnr_batch_slice, pnr_batch_par_slice
+};
 pub mod pivot;
 pub mod pma;
 pub mod ppo;
@@ -247,7 +280,13 @@ pub use mean_ad::{mean_ad, MeanAdInput, MeanAdOutput, MeanAdParams};
 pub use mom::{mom, MomInput, MomOutput, MomParams};
 pub use ui::{ui, UiInput, UiOutput, UiParams};
 pub use moving_averages::{
+<<<<<<< HEAD
 	alma, buff_averages, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass, highpass_2_pole, hma, hwma, jma,
 	jsa, kama, linreg, maaq, mama, mwdx, nma, pwma, reflex, sinwma, sma, smma, sqwma, srwma, supersmoother,
 	supersmoother_3_pole, swma, tema, tilson, tradjema, trendflex, trima, volume_adjusted_ma, volatility_adjusted_ma, vpwma, vwap, vwma, wilders, wma, zlema,
+=======
+	alma, cwma, dema, edcf, ehlers_itrend, ehlers_pma, ema, epma, frama, fwma, gaussian, highpass, highpass_2_pole, hma, hwma, jma,
+	jsa, kama, linreg, maaq, mama, mwdx, nma, pwma, reflex, sinwma, sma, smma, sqwma, srwma, supersmoother,
+	supersmoother_3_pole, swma, tema, tilson, trendflex, trima, uma, vpwma, vwap, vwma, wilders, wma, zlema,
+>>>>>>> simd-4
 };

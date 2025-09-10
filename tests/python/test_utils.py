@@ -27,7 +27,8 @@ def load_test_data():
                 continue
             if len(row) < 6:
                 continue
-            # CSV format matches Rust: timestamp[0], open[1], close[2], high[3], low[4], volume[5]
+            # CSV format: timestamp[0], open[1], close[2], high[3], low[4], volume[5]
+            # The columns are NOT in standard OHLC order!
             candles['timestamp'].append(int(row[0]))
             candles['open'].append(float(row[1]))
             candles['close'].append(float(row[2]))
@@ -65,6 +66,22 @@ def assert_no_nan(arr, msg=""):
     if np.any(np.isnan(arr)):
         raise AssertionError(f"{msg}: Found NaN values in array")
 
+def generate_otto_test_data():
+    """Generate the standard OTTO test data pattern"""
+    otto_config = EXPECTED_OUTPUTS['otto']['test_data_pattern']
+    size = otto_config['size']
+    data = np.zeros(size, dtype=np.float64)
+    
+    # Generate base pattern
+    for i in range(size):
+        data[i] = otto_config['formula'](i)
+    
+    # Override last 30 values
+    last_30 = otto_config['last_30_override']
+    data[-30:] = last_30
+    
+    return data
+
 # Expected outputs from Rust tests - these must match EXACTLY
 EXPECTED_OUTPUTS = {
     'alma': {
@@ -84,6 +101,103 @@ EXPECTED_OUTPUTS = {
             59222.63528822,
             59165.14427332
         ]
+    },
+    'otto': {
+        'default_params': {
+            'ott_period': 2,
+            'ott_percent': 0.6,
+            'fast_vidya_length': 10,
+            'slow_vidya_length': 25,
+            'correcting_constant': 100000,
+            'ma_type': 'VAR'
+        },
+        # Expected values from PineScript (last 5 values)
+        'last_5_hott': [
+            0.61437486,
+            0.61421295,
+            0.61409778,
+            0.61404352,
+            0.61388393
+        ],
+        'last_5_lott': [
+            0.61221457,
+            0.61219084,
+            0.61197922,
+            0.61179661,
+            0.61142377
+        ],
+        # Test data generation pattern
+        'test_data_pattern': {
+            'size': 260,
+            'formula': lambda i: 0.612 - (i * 0.00001),
+            'last_30_override': [
+                0.61233, 0.61235, 0.61210, 0.61195, 0.61180,
+                0.61165, 0.61150, 0.61135, 0.61120, 0.61105,
+                0.61090, 0.61075, 0.61060, 0.61045, 0.61030,
+                0.61015, 0.61000, 0.60985, 0.60970, 0.60955,
+                0.60940, 0.60925, 0.60910, 0.60895, 0.60880,
+                0.60865, 0.60850, 0.60835, 0.60820, 0.60805,
+            ]
+        },
+        # Warmup period for default params
+        'warmup_period': 250  # Conservative estimate
+    },
+    'percentile_nearest_rank': {
+        'default_params': {'length': 15, 'percentage': 50.0},
+        # Actual last 5 values from CSV data with default params
+        'last_5_values': [
+            59419.0,
+            59419.0,
+            59300.0,
+            59285.0,
+            59273.0
+        ],
+        # Test values from Rust tests
+        'basic_test': {
+            'data': [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
+            'length': 5,
+            'percentage': 50.0,
+            'expected_at_4': 3.0,  # 50th percentile of [1,2,3,4,5]
+            'expected_at_5': 4.0,  # 50th percentile of [2,3,4,5,6]
+        },
+        'percentile_tests': {
+            'data': [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
+            'length': 5,
+            'p25_at_4': 1.0,  # 25th percentile of [1,2,3,4,5]
+            'p75_at_4': 4.0,  # 75th percentile of [1,2,3,4,5]
+            'p100_at_4': 5.0,  # 100th percentile of [1,2,3,4,5]
+        },
+        # Expected warmup period behavior
+        'warmup_period': 14,  # For default length=15, first 14 values are NaN
+    },
+    'alphatrend': {
+        'default_params': {'coeff': 1.0, 'period': 14, 'no_volume': False},
+        'k1_last_5_values': [
+            60243.00,
+            60243.00,
+            60138.92857143,
+            60088.42857143,
+            59937.21428571,
+        ],
+        'k2_last_5_values': [
+            60542.42857143,
+            60454.14285714,
+            60243.00,
+            60243.00,
+            60138.92857143,
+        ],
+        'warmup_period': 13,  # period - 1
+    },
+    'chandelier_exit': {
+        'default_params': {'period': 22, 'mult': 3.0, 'use_close': True},
+        'short_stop_last_5': [
+            68719.23648167,
+            68705.54391432,
+            68244.42828185,
+            67599.49972358,
+            66883.02246342
+        ],
+        'warmup_period': 21,  # period - 1
     },
     'sama': {
         'default_params': {'length': 200, 'maj_length': 14, 'min_length': 6},
@@ -306,6 +420,23 @@ EXPECTED_OUTPUTS = {
             0.9950545846019277,
             0.984954072979463
         ]
+    },
+    'uma': {
+        'default_params': {
+            'accelerator': 1.0,
+            'min_length': 5,
+            'max_length': 50,
+            'smooth_length': 4
+        },
+        'last_5_values': [
+            59665.81830666,
+            59477.69234542,
+            59314.50778603,
+            59218.23033661,
+            59143.61473211
+        ],
+        'warmup_period': 53,  # max_length + smooth_length - 1
+        'test_data': None  # Uses CSV data from load_test_data()
     },
     'devstop': {
         'default_params': {
@@ -1373,6 +1504,28 @@ EXPECTED_OUTPUTS = {
             59215.124961889764,
             59103.099969511815
         ]
+    },
+    'cora_wave': {
+        'default_params': {'period': 20, 'r_multi': 2.0, 'smooth': True},
+        'last_5_values': [
+            59248.63632114,
+            59251.74238978,
+            59203.36944998,
+            59171.14999178,
+            59053.74201623
+        ],
+        'warmup_period': 22,  # first + period - 1 + smooth_period.saturating_sub(1) - actual is 22 for smooth=true
+        # Values for parameter variation tests
+        'no_smoothing_differs': True,  # Raw vs smoothed should differ
+        'different_r_multi_differs': True,  # Different r_multi values should produce different results
+        # Batch test parameters
+        'batch_periods': [15, 20, 25],
+        'batch_r_multis': [1.5, 2.0, 2.5],
+        'batch_range': {
+            'period_range': (15, 25, 5),
+            'r_multi_range': (1.5, 2.5, 0.5),
+            'smooth': False  # Test without smoothing for batch
+        }
     },
     'dma': {
         'default_params': {

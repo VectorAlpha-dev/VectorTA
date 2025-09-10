@@ -250,6 +250,52 @@ const EXPECTED_OUTPUTS = {
         hasWarmup: false,
         warmupLength: 0
     },
+    percentileNearestRank: {
+        defaultParams: { length: 15, percentage: 50.0 },
+        // Actual last 5 values from CSV data with default params
+        last5Values: [
+            59419.0,
+            59419.0,
+            59300.0,
+            59285.0,
+            59273.0
+        ],
+        // Test values from Rust tests
+        basicTest: {
+            data: [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
+            length: 5,
+            percentage: 50.0,
+            expectedAt4: 3.0,  // 50th percentile of [1,2,3,4,5]
+            expectedAt5: 4.0,  // 50th percentile of [2,3,4,5,6]
+        },
+        percentileTests: {
+            data: [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
+            length: 5,
+            p25At4: 1.0,  // 25th percentile of [1,2,3,4,5]
+            p75At4: 4.0,  // 75th percentile of [1,2,3,4,5]
+            p100At4: 5.0,  // 100th percentile of [1,2,3,4,5]
+        },
+        // Expected warmup period behavior
+        warmupPeriod: 14,  // For default length=15, first 14 values are NaN
+    },
+    alphatrend: {
+        defaultParams: { coeff: 1.0, period: 14, noVolume: false },
+        k1Last5Values: [
+            60243.00,
+            60243.00,
+            60138.92857143,
+            60088.42857143,
+            59937.21428571
+        ],
+        k2Last5Values: [
+            60542.42857143,
+            60454.14285714,
+            60243.00,
+            60243.00,
+            60138.92857143
+        ],
+        warmupPeriod: 13  // period - 1
+    },
     kama: {
         defaultParams: { period: 30 },
         last5Values: [
@@ -1385,6 +1431,28 @@ const EXPECTED_OUTPUTS = {
             59215.124961889764,
             59103.099969511815
         ]
+    },
+    coraWave: {
+        defaultParams: { period: 20, r_multi: 2.0, smooth: true },
+        last5Values: [
+            59248.63632114,
+            59251.74238978,
+            59203.36944998,
+            59171.14999178,
+            59053.74201623
+        ],
+        warmupPeriod: 22,  // first + period - 1 + smooth_period.saturating_sub(1) - actual is 22 for smooth=true
+        // Values for parameter variation tests
+        noSmoothingDiffers: true,  // Raw vs smoothed should differ
+        differentRMultiDiffers: true,  // Different r_multi values should produce different results
+        // Batch test parameters
+        batchPeriods: [15, 20, 25],
+        batchRMultis: [1.5, 2.0, 2.5],
+        batchRange: {
+            periodRange: [15, 25, 5],
+            rMultiRange: [1.5, 2.5, 0.5],
+            smooth: false  // Test without smoothing for batch
+        }
     },
     dma: {
         defaultParams: {

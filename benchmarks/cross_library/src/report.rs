@@ -16,6 +16,13 @@ pub struct BenchmarkResult {
     pub throughput_mb_per_sec: f64,
 }
 
+fn display_option(o: &Option<f64>) -> String {
+    match o {
+        Some(v) => format!("{:.2}", v),
+        None => "N/A".to_string(),
+    }
+}
+
 #[derive(Debug, Clone, Tabled)]
 pub struct ComparisonRow {
     #[tabled(rename = "Indicator")]
@@ -28,7 +35,7 @@ pub struct ComparisonRow {
     pub rust_ffi_time: f64,
     #[tabled(rename = "Tulip (ms)")]
     pub tulip_time: f64,
-    #[tabled(rename = "TA-Lib (ms)")]
+    #[tabled(rename = "TA-Lib (ms)", display_with = "display_option")]
     pub talib_time: Option<f64>,
     #[tabled(rename = "Rust/Tulip")]
     pub rust_vs_tulip: f64,

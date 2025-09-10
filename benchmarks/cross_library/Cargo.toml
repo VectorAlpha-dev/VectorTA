@@ -3,6 +3,10 @@ name = "cross-library-benchmark"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+talib = []
+
 [dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 anyhow = "1.0"

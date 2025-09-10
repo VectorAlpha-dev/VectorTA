@@ -285,7 +285,7 @@ unsafe fn rsi_compute_into_scalar(data: &[f64], period: usize, first: usize, out
 	let mut avg_loss = 0.0;
 	let mut has_nan = false;
 
-	for i in (first + 1)..=(first + period) {
+	for i in (first + 1)..=((first + period).min(len - 1)) {
 		let delta = data[i] - data[i - 1];
 		if !delta.is_finite() { 
 			has_nan = true;
@@ -311,7 +311,9 @@ unsafe fn rsi_compute_into_scalar(data: &[f64], period: usize, first: usize, out
 			100.0 * avg_gain / (avg_gain + avg_loss)
 		}
 	};
-	out[first + period] = initial_rsi;
+	if first + period < len {
+		out[first + period] = initial_rsi;
+	}
 
 	for i in (first + period + 1)..len {
 		let delta = data[i] - data[i - 1];
@@ -615,7 +617,7 @@ unsafe fn rsi_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f
 	let mut avg_loss = 0.0;
 	let mut has_nan = false;
 
-	for i in (first + 1)..=(first + period) {
+	for i in (first + 1)..=((first + period).min(len - 1)) {
 		let delta = data[i] - data[i - 1];
 		if !delta.is_finite() { 
 			has_nan = true;
@@ -641,7 +643,9 @@ unsafe fn rsi_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f
 			100.0 * avg_gain / (avg_gain + avg_loss)
 		}
 	};
-	out[first + period] = initial_rsi;
+	if first + period < len {
+		out[first + period] = initial_rsi;
+	}
 
 	for i in (first + period + 1)..len {
 		let delta = data[i] - data[i - 1];
