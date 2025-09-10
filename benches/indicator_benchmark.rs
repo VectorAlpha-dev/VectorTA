@@ -8,11 +8,13 @@ use std::time::Duration;
 // Import moving averages separately
 use my_project::indicators::moving_averages::{
 	alma::{alma_with_kernel, AlmaBatchBuilder, AlmaInput},
+	buff_averages::{buff_averages_with_kernel, BuffAveragesBatchBuilder, BuffAveragesInput},
 	cwma::{cwma_with_kernel, CwmaBatchBuilder, CwmaInput},
 	dema::{dema_with_kernel, DemaBatchBuilder, DemaInput},
 	edcf::{edcf_with_kernel, EdcfBatchBuilder, EdcfInput},
 	ehlers_ecema::{ehlers_ecema_with_kernel, EhlersEcemaBatchBuilder, EhlersEcemaInput},
 	ehlers_itrend::{ehlers_itrend_with_kernel, EhlersITrendBatchBuilder, EhlersITrendInput},
+	ehlers_kama::{ehlers_kama_with_kernel, EhlersKamaBatchBuilder, EhlersKamaInput},
 	ema::{ema_with_kernel, EmaBatchBuilder, EmaInput},
 	epma::{epma_with_kernel, EpmaBatchBuilder, EpmaInput},
 	frama::{frama_with_kernel, FramaBatchBuilder, FramaInput},
@@ -44,6 +46,7 @@ use my_project::indicators::moving_averages::{
 	tilson::{tilson_with_kernel, TilsonBatchBuilder, TilsonInput},
 	trendflex::{trendflex_with_kernel, TrendFlexBatchBuilder, TrendFlexInput},
 	trima::{trima_with_kernel, TrimaBatchBuilder, TrimaInput},
+	volume_adjusted_ma::{VolumeAdjustedMa_with_kernel, VolumeAdjustedMaBatchBuilder, VolumeAdjustedMaInput},
 	vpwma::{vpwma_with_kernel, VpwmaBatchBuilder, VpwmaInput},
 	vwma::{vwma_with_kernel, VwmaInput, VwmaParams},
 	wilders::{wilders_with_kernel, WildersBatchBuilder, WildersInput},
@@ -130,8 +133,10 @@ use my_project::indicators::{
 	midpoint::{midpoint as midpoint_raw, MidpointInput},
 	midprice::{midprice as midprice_raw, MidpriceInput},
 	minmax::{minmax as minmax_raw, MinmaxInput},
+	mod_god_mode::{mod_god_mode as mod_god_mode_raw, ModGodModeInput},
 	mom::{mom as mom_raw, MomInput},
 	msw::{msw as msw_raw, MswInput},
+	nadaraya_watson_envelope::{nadaraya_watson_envelope as nadaraya_watson_envelope_raw, NweInput},
 	natr::{natr as natr_raw, NatrInput},
 	nvi::{nvi as nvi_raw, NviInput},
 	obv::{obv as obv_raw, ObvInput},
@@ -140,6 +145,7 @@ use my_project::indicators::{
 	pma::{pma as pma_raw, PmaInput},
 	ppo::{ppo as ppo_raw, PpoInput},
 	pvi::{pvi as pvi_raw, PviInput},
+	qqe::{qqe as qqe_raw, QqeInput},
 	qstick::{qstick as qstick_raw, QstickInput},
 	roc::{roc as roc_raw, RocInput},
 	rocp::{rocp as rocp_raw, RocpInput},
@@ -160,6 +166,7 @@ use my_project::indicators::{
 	trix::{trix as trix_raw, TrixInput},
 	tsf::{tsf as tsf_raw, TsfInput},
 	tsi::{tsi as tsi_raw, TsiInput},
+	ttm_squeeze::{ttm_squeeze as ttm_squeeze_raw, TtmSqueezeInput},
 	ttm_trend::{ttm_trend as ttm_trend_raw, TtmTrendInput},
 	ui::{ui as ui_raw, UiInput},
 	ultosc::{ultosc as ultosc_raw, UltOscInput},
@@ -210,6 +217,7 @@ pub type BandPassInputS = BandPassInput<'static>;
 pub type BollingerBandsInputS = BollingerBandsInput<'static>;
 pub type BollingerBandsWidthInputS = BollingerBandsWidthInput<'static>;
 pub type BopInputS = BopInput<'static>;
+pub type BuffAveragesInputS = BuffAveragesInput<'static>;
 pub type CciInputS = CciInput<'static>;
 pub type CfoInputS = CfoInput<'static>;
 pub type CgInputS = CgInput<'static>;
@@ -237,6 +245,7 @@ pub type EdcfInputS = EdcfInput<'static>;
 pub type EfiInputS = EfiInput<'static>;
 pub type EhlersEcemaInputS = EhlersEcemaInput<'static>;
 pub type EhlersITrendInputS = EhlersITrendInput<'static>;
+pub type EhlersKamaInputS = EhlersKamaInput<'static>;
 pub type EmaInputS = EmaInput<'static>;
 pub type EmdInputS = EmdInput<'static>;
 pub type EmvInputS = EmvInput<'static>;
@@ -281,10 +290,12 @@ pub type MfiInputS = MfiInput<'static>;
 pub type MidpointInputS = MidpointInput<'static>;
 pub type MidpriceInputS = MidpriceInput<'static>;
 pub type MinmaxInputS = MinmaxInput<'static>;
+pub type ModGodModeInputS = ModGodModeInput<'static>;
 pub type MomInputS = MomInput<'static>;
 pub type MswInputS = MswInput<'static>;
 pub type MwdxInputS = MwdxInput<'static>;
 pub type NatrInputS = NatrInput<'static>;
+pub type NweInputS = NweInput<'static>;
 pub type NmaInputS = NmaInput<'static>;
 pub type NviInputS = NviInput<'static>;
 pub type ObvInputS = ObvInput<'static>;
@@ -294,6 +305,7 @@ pub type PmaInputS = PmaInput<'static>;
 pub type PpoInputS = PpoInput<'static>;
 pub type PviInputS = PviInput<'static>;
 pub type PwmaInputS = PwmaInput<'static>;
+pub type QqeInputS = QqeInput<'static>;
 pub type QstickInputS = QstickInput<'static>;
 pub type ReflexInputS = ReflexInput<'static>;
 pub type RocInputS = RocInput<'static>;
@@ -327,6 +339,7 @@ pub type TrimaInputS = TrimaInput<'static>;
 pub type TrixInputS = TrixInput<'static>;
 pub type TsfInputS = TsfInput<'static>;
 pub type TsiInputS = TsiInput<'static>;
+pub type TtmSqueezeInputS = TtmSqueezeInput<'static>;
 pub type TtmTrendInputS = TtmTrendInput<'static>;
 pub type UiInputS = UiInput<'static>;
 pub type UltOscInputS = UltOscInput<'static>;
@@ -334,6 +347,7 @@ pub type VarInputS = VarInput<'static>;
 pub type ViInputS = ViInput<'static>;
 pub type VidyaInputS = VidyaInput<'static>;
 pub type VlmaInputS = VlmaInput<'static>;
+pub type VolumeAdjustedMaInputS = VolumeAdjustedMaInput<'static>;
 pub type VoscInputS = VoscInput<'static>;
 pub type VossInputS = VossInput<'static>;
 pub type VpciInputS = VpciInput<'static>;
@@ -576,6 +590,7 @@ impl_input_len!(
 	EfiInputS,
 	EhlersEcemaInputS,
 	EhlersITrendInputS,
+	EhlersKamaInputS,
 	EmaInputS,
 	EmdInputS,
 	EmvInputS,
@@ -882,8 +897,10 @@ bench_scalars!(
 	midpoint_bench  => MidpointInputS,
 	midprice_bench  => MidpriceInputS,
 	minmax_bench    => MinmaxInputS,
+	mod_god_mode_bench => ModGodModeInputS,
 	mom_bench       => MomInputS,
 	msw_bench       => MswInputS,
+	nadaraya_watson_envelope_bench => NweInputS,
 
 	natr_bench   => NatrInputS,
 	nvi_bench    => NviInputS,
@@ -893,6 +910,7 @@ bench_scalars!(
 	pma_bench    => PmaInputS,
 	ppo_bench    => PpoInputS,
 	pvi_bench    => PviInputS,
+	qqe_bench    => QqeInputS,
 	qstick_bench => QstickInputS,
 	roc_bench    => RocInputS,
 	rocp_bench   => RocpInputS,
@@ -913,6 +931,7 @@ bench_scalars!(
 	trix_bench   => TrixInputS,
 	tsf_bench    => TsfInputS,
 	tsi_bench    => TsiInputS,
+	ttm_squeeze_bench => TtmSqueezeInputS,
 	ttm_trend_bench => TtmTrendInputS,
 	ui_bench     => UiInputS,
 	ultosc_bench => UltOscInputS,
@@ -932,11 +951,13 @@ bench_scalars!(
 );
 
 make_kernel_wrappers!(alma, alma_with_kernel, AlmaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(buff_averages, buff_averages_with_kernel, BuffAveragesInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(cwma, cwma_with_kernel, CwmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(dema, dema_with_kernel, DemaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(edcf, edcf_with_kernel, EdcfInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(ehlers_ecema, ehlers_ecema_with_kernel, EhlersEcemaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(ehlers_itrend, ehlers_itrend_with_kernel, EhlersITrendInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(ehlers_kama, ehlers_kama_with_kernel, EhlersKamaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(ema, ema_with_kernel, EmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(epma, epma_with_kernel, EpmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(frama, frama_with_kernel, FramaInputS; Scalar,Avx2,Avx512);
@@ -969,6 +990,7 @@ make_kernel_wrappers!(tilson, tilson_with_kernel, TilsonInputS; Scalar,Avx2,Avx5
 make_kernel_wrappers!(trendflex, trendflex_with_kernel, TrendFlexInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(trima, trima_with_kernel, TrimaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(vidya, vidya_with_kernel, VidyaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(volume_adjusted_ma, VolumeAdjustedMa_with_kernel, VolumeAdjustedMaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(vlma, vlma_with_kernel, VlmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(vpwma, vpwma_with_kernel, VpwmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(vwma, vwma_with_kernel, VwmaInputS; Scalar,Avx2,Avx512);
@@ -984,6 +1006,11 @@ make_kernel_wrappers!(vama, vama_with_kernel, VamaInputS; Scalar,Avx2,Avx512);
 
 make_batch_wrappers!(
 	alma_batch, AlmaBatchBuilder, AlmaInputS;
+	ScalarBatch, Avx2Batch, Avx512Batch
+);
+
+make_batch_wrappers!(
+	buff_averages_batch, BuffAveragesBatchBuilder, BuffAveragesInputS;
 	ScalarBatch, Avx2Batch, Avx512Batch
 );
 
@@ -1009,6 +1036,11 @@ make_batch_wrappers!(
 
 make_batch_wrappers!(
 	ehlers_itrend_batch, EhlersITrendBatchBuilder, EhlersITrendInputS;
+	ScalarBatch, Avx2Batch, Avx512Batch
+);
+
+make_batch_wrappers!(
+	ehlers_kama_batch, EhlersKamaBatchBuilder, EhlersKamaInputS;
 	ScalarBatch, Avx2Batch, Avx512Batch
 );
 
@@ -1065,6 +1097,7 @@ make_batch_wrappers!(trendflex_batch, TrendFlexBatchBuilder, TrendFlexInputS; Sc
 make_batch_wrappers!(trima_batch, TrimaBatchBuilder, TrimaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(vidya_batch, VidyaBatchBuilder, VidyaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(vlma_batch, VlmaBatchBuilder, VlmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(volume_adjusted_ma_batch, VolumeAdjustedMaBatchBuilder, VolumeAdjustedMaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(vpwma_batch, VpwmaBatchBuilder, VpwmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(wilders_batch, WildersBatchBuilder, WildersInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(wma_batch, WmaBatchBuilder, WmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
@@ -1083,6 +1116,13 @@ bench_variants!(
 	alma_batch_scalarbatch,
 	alma_batch_avx2batch,
 	alma_batch_avx512batch
+);
+
+bench_variants!(
+	buff_averages_batch => BuffAveragesInputS; None;
+	buff_averages_batch_scalarbatch,
+	buff_averages_batch_avx2batch,
+	buff_averages_batch_avx512batch
 );
 
 bench_variants!(
@@ -1125,6 +1165,13 @@ bench_variants!(
 	ehlers_itrend_batch_scalarbatch,
 	ehlers_itrend_batch_avx2batch,
 	ehlers_itrend_batch_avx512batch,
+);
+
+bench_variants!(
+	ehlers_kama_batch => EhlersKamaInputS; Some(20);
+	ehlers_kama_batch_scalarbatch,
+	ehlers_kama_batch_avx2batch,
+	ehlers_kama_batch_avx512batch,
 );
 
 bench_variants!(
@@ -1359,6 +1406,13 @@ bench_variants!(
 );
 
 bench_variants!(
+	volume_adjusted_ma_batch => VolumeAdjustedMaInputS; None;
+	volume_adjusted_ma_batch_scalarbatch,
+	volume_adjusted_ma_batch_avx2batch,
+	volume_adjusted_ma_batch_avx512batch,
+);
+
+bench_variants!(
 	vpwma_batch => VpwmaInputS; Some(227);
 	vpwma_batch_scalarbatch,
 	vpwma_batch_avx2batch,
@@ -1394,6 +1448,13 @@ bench_variants!(
 );
 
 bench_variants!(
+	buff_averages => BuffAveragesInputS; None;
+	buff_averages_scalar,
+	buff_averages_avx2,
+	buff_averages_avx512,
+);
+
+bench_variants!(
    cwma => CwmaInputS; None;
    cwma_scalar,
    cwma_avx2,
@@ -1419,6 +1480,13 @@ bench_variants!(
 	ehlers_itrend_scalar,
 	ehlers_itrend_avx2,
 	ehlers_itrend_avx512,
+);
+
+bench_variants!(
+	ehlers_kama => EhlersKamaInputS; None;
+	ehlers_kama_scalar,
+	ehlers_kama_avx2,
+	ehlers_kama_avx512,
 );
 
 bench_variants!(
@@ -1653,6 +1721,13 @@ bench_variants!(
 );
 
 bench_variants!(
+	volume_adjusted_ma => VolumeAdjustedMaInputS; None;
+	volume_adjusted_ma_scalar,
+	volume_adjusted_ma_avx2,
+	volume_adjusted_ma_avx512,
+);
+
+bench_variants!(
 	vpwma => VpwmaInputS; None;
 	vpwma_scalar,
 	vpwma_avx2,
@@ -1777,6 +1852,8 @@ criterion_main!(
 	benches_scalar,
 	benches_alma,
 	benches_alma_batch,
+	benches_buff_averages,
+	benches_buff_averages_batch,
 	benches_cwma,
 	benches_cwma_batch,
 	benches_dema,
@@ -1787,6 +1864,8 @@ criterion_main!(
 	benches_ehlers_ecema_batch,
 	benches_ehlers_itrend,
 	benches_ehlers_itrend_batch,
+	benches_ehlers_kama,
+	benches_ehlers_kama_batch,
 	benches_ema,
 	benches_ema_batch,
 	benches_epma,
@@ -1853,6 +1932,8 @@ criterion_main!(
 	benches_vidya_batch,
 	benches_vlma,
 	benches_vlma_batch,
+	benches_volume_adjusted_ma,
+	benches_volume_adjusted_ma_batch,
 	benches_vpwma,
 	benches_vpwma_batch,
 	benches_vwma,

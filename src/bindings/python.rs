@@ -36,6 +36,18 @@ use crate::indicators::bollinger_bands_width::{
 #[cfg(feature = "python")]
 use crate::indicators::bop::{bop_batch_py, bop_py, BopStreamPy};
 #[cfg(feature = "python")]
+use crate::indicators::moving_averages::buff_averages::{buff_averages_py, buff_averages_batch_py, BuffAveragesStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::moving_averages::volume_adjusted_ma::{volume_adjusted_ma_py, volume_adjusted_ma_batch_py, VolumeAdjustedMaStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::qqe::{qqe_py, qqe_batch_py, QqeStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::nadaraya_watson_envelope::{nadaraya_watson_envelope_py, nadaraya_watson_envelope_batch_py, NweStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::ttm_squeeze::{ttm_squeeze_py, ttm_squeeze_batch_py, TtmSqueezeStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::mod_god_mode::{mod_god_mode_py, mod_god_mode_batch_py, ModGodModeStreamPy};
+#[cfg(feature = "python")]
 use crate::indicators::cci::{cci_batch_py, cci_py, CciStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::cci_cycle::{cci_cycle_batch_py, cci_cycle_py, CciCycleStreamPy};
@@ -235,6 +247,8 @@ use crate::indicators::moving_averages::jma::{jma_batch_py, jma_py, JmaStreamPy}
 use crate::indicators::moving_averages::jsa::{jsa_batch_py, jsa_py, JsaStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::kama::{kama_batch_py, kama_py, KamaStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::moving_averages::ehlers_kama::{ehlers_kama_py, ehlers_kama_batch_py, EhlersKamaStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::linreg::{linreg_batch_py, linreg_py, LinRegStreamPy};
 #[cfg(feature = "python")]
@@ -484,6 +498,11 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(kama_py, m)?)?;
 	m.add_function(wrap_pyfunction!(kama_batch_py, m)?)?;
 	m.add_class::<KamaStreamPy>()?;
+
+	// Register Ehlers KAMA functions with their user-facing names
+	m.add_function(wrap_pyfunction!(ehlers_kama_py, m)?)?;
+	m.add_function(wrap_pyfunction!(ehlers_kama_batch_py, m)?)?;
+	m.add_class::<EhlersKamaStreamPy>()?;
 
 	// Register LinReg functions with their user-facing names
 	m.add_function(wrap_pyfunction!(linreg_py, m)?)?;
@@ -997,6 +1016,36 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(bop_py, m)?)?;
 	m.add_function(wrap_pyfunction!(bop_batch_py, m)?)?;
 	m.add_class::<BopStreamPy>()?;
+
+	// Buff Averages
+	m.add_function(wrap_pyfunction!(buff_averages_py, m)?)?;
+	m.add_function(wrap_pyfunction!(buff_averages_batch_py, m)?)?;
+	m.add_class::<BuffAveragesStreamPy>()?;
+
+	// QQE
+	m.add_function(wrap_pyfunction!(qqe_py, m)?)?;
+	m.add_function(wrap_pyfunction!(qqe_batch_py, m)?)?;
+	m.add_class::<QqeStreamPy>()?;
+
+	// Volume Adjusted MA
+	m.add_function(wrap_pyfunction!(volume_adjusted_ma_py, m)?)?;
+	m.add_function(wrap_pyfunction!(volume_adjusted_ma_batch_py, m)?)?;
+	m.add_class::<VolumeAdjustedMaStreamPy>()?;
+
+	// Nadaraya-Watson Envelope
+	m.add_function(wrap_pyfunction!(nadaraya_watson_envelope_py, m)?)?;
+	m.add_function(wrap_pyfunction!(nadaraya_watson_envelope_batch_py, m)?)?;
+	m.add_class::<NweStreamPy>()?;
+	
+	// TTM Squeeze
+	m.add_function(wrap_pyfunction!(ttm_squeeze_py, m)?)?;
+	m.add_function(wrap_pyfunction!(ttm_squeeze_batch_py, m)?)?;
+	m.add_class::<TtmSqueezeStreamPy>()?;
+	
+	// Modified God Mode
+	m.add_function(wrap_pyfunction!(mod_god_mode_py, m)?)?;
+	m.add_function(wrap_pyfunction!(mod_god_mode_batch_py, m)?)?;
+	m.add_class::<ModGodModeStreamPy>()?;
 
 	// Register Linear Regression Intercept functions with their user-facing names
 	m.add_function(wrap_pyfunction!(linearreg_intercept_py, m)?)?;

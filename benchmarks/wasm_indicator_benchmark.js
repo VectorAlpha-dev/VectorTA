@@ -2016,6 +2016,37 @@ const INDICATORS = {
             }
         }
     },
+    willr: {
+        name: 'Williams %R',
+        // Safe API
+        safe: {
+            fn: 'willr_js',
+            params: { period: 14 },
+            needsMultipleInputs: true  // Uses high, low, close
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'willr_alloc',
+            freeFn: 'willr_free',
+            computeFn: 'willr_into',
+            params: { period: 14 },
+            needsMultipleInputs: true
+        },
+        // Batch API
+        batch: {
+            fn: 'willr_batch',
+            fastFn: 'willr_batch_into',
+            config: {
+                small: {
+                    period_range: [10, 20, 5]       // 3 values: 10, 15, 20
+                },
+                medium: {
+                    period_range: [10, 30, 5]       // 5 values: 10, 15, 20, 25, 30
+                }
+            },
+            needsMultipleInputs: true
+        }
+    },
     wma: {
         name: 'WMA (Weighted Moving Average)',
         // Safe API

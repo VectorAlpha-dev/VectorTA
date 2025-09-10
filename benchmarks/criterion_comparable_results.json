@@ -4,19 +4,12 @@
   "samples": 10,
   "gc_disabled": true,
   "omp_threads": 1,
-  "data_size": "10k",
+  "data_size": "1M",
   "python_results": {
-    "keltner": 18.599385,
-    "keltner_batch": 18.339515
+    "willr": 7.2397,
+    "willr_batch": 11.247175
   },
   "rust_results": {},
   "comparisons": [],
-  "batch_comparisons": [
-    {
-      "indicator": "keltner",
-      "single_ms": 18.599385,
-      "batch_ms": 18.339515,
-      "overhead_pct": -1.3971967352684134
-    }
-  ]
+  "batch_comparisons": []
 }
