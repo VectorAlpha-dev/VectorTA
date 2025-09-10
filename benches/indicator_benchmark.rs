@@ -50,13 +50,16 @@ use my_project::indicators::moving_averages::{
 	zlema::{zlema_with_kernel, ZlemaBatchBuilder, ZlemaInput},
 };
 
-// Import other indicators
-use my_project::other_indicators::{
-	macz::{macz_with_kernel, MaczBatchBuilder, MaczInput},
-};
+// Removed - other_indicators no longer exists
 
 use my_project::indicators::{
 	acosc::{acosc as acosc_raw, AcoscInput},
+	aso::{aso as aso_raw, AsoInput},
+	dvdiqqe::{dvdiqqe_with_kernel, DvdiqqeBatchBuilder, DvdiqqeInput},
+	lpc::{lpc as lpc_raw, LpcInput},
+	macz::{macz_with_kernel, MaczBatchBuilder, MaczInput},
+	ott::{ott_batch_with_kernel, OttBatchBuilder, OttInput},
+	prb::{prb_with_kernel, PrbBatchBuilder, PrbInput},
 	ad::{ad as ad_raw, AdInput},
 	adosc::{adosc as adosc_raw, AdoscInput},
 	adx::{adx as adx_raw, AdxInput},
@@ -259,6 +262,7 @@ pub type LinearregAngleInputS = Linearreg_angleInput<'static>;
 pub type LinearRegInterceptInputS = LinearRegInterceptInput<'static>;
 pub type LinearRegSlopeInputS = LinearRegSlopeInput<'static>;
 pub type LinRegInputS = LinRegInput<'static>;
+pub type LpcInputS = LpcInput<'static>;
 pub type LrsiInputS = LrsiInput<'static>;
 pub type MaaqInputS = MaaqInput<'static>;
 pub type MabInputS = MabInput<'static>;
@@ -280,10 +284,12 @@ pub type NatrInputS = NatrInput<'static>;
 pub type NmaInputS = NmaInput<'static>;
 pub type NviInputS = NviInput<'static>;
 pub type ObvInputS = ObvInput<'static>;
+pub type OttInputS = OttInput<'static>;
 pub type PfeInputS = PfeInput<'static>;
 pub type PivotInputS = PivotInput<'static>;
 pub type PmaInputS = PmaInput<'static>;
 pub type PpoInputS = PpoInput<'static>;
+pub type PrbInputS = PrbInput<'static>;
 pub type PviInputS = PviInput<'static>;
 pub type PwmaInputS = PwmaInput<'static>;
 pub type QstickInputS = QstickInput<'static>;

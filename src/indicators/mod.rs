@@ -8,6 +8,8 @@ pub mod ao;
 pub mod apo;
 pub mod aroon;
 pub mod aroonosc;
+pub mod aso;
+pub use aso::{aso, AsoInput, AsoOutput, AsoParams};
 pub mod atr;
 pub mod bandpass;
 pub mod bollinger_bands;
@@ -41,6 +43,14 @@ pub mod dm;
 pub mod donchian;
 pub mod dpo;
 pub mod dti;
+pub mod dvdiqqe;
+pub use dvdiqqe::{
+    dvdiqqe, dvdiqqe_with_kernel, dvdiqqe_into_slices, 
+    dvdiqqe_batch_with_kernel, dvdiqqe_batch_slice, dvdiqqe_batch_par_slice,
+    DvdiqqeInput, DvdiqqeOutput, DvdiqqeParams, DvdiqqeBuilder,
+    DvdiqqeBatchRange, DvdiqqeBatchOutput, DvdiqqeBatchBuilder,
+    DvdiqqeStream
+};
 pub mod dx;
 pub mod efi;
 pub mod emd;
@@ -60,9 +70,13 @@ pub mod kvo;
 pub mod linearreg_angle;
 pub mod linearreg_intercept;
 pub mod linearreg_slope;
+pub mod lpc;
+pub use lpc::{lpc, LpcInput, LpcOutput, LpcParams};
 pub mod lrsi;
 pub mod mab;
 pub mod macd;
+pub mod macz;
+pub use macz::{macz, MaczInput, MaczOutput, MaczParams};
 pub mod marketefi;
 pub mod mass;
 pub mod mean_ad;
@@ -79,11 +93,19 @@ pub mod msw;
 pub mod natr;
 pub mod nvi;
 pub mod obv;
+pub mod ott;
+pub use ott::{ott, ott_batch_slice, ott_batch_par_slice, ott_batch_with_kernel, OttInput, OttOutput, OttParams};
 pub mod pfe;
 pub mod pivot;
 pub mod pma;
 pub mod ppo;
 pub use ppo::{ppo, PpoInput, PpoOutput, PpoParams};
+pub mod prb;
+pub use prb::{
+    prb, prb_with_kernel, prb_batch_with_kernel, prb_batch_slice, prb_batch_par_slice,
+    PrbInput, PrbOutput, PrbParams, PrbBuilder, PrbStream,
+    PrbBatchRange, PrbBatchOutput, PrbBatchBuilder
+};
 pub mod pvi;
 pub mod qstick;
 pub mod roc;

@@ -4,17 +4,19 @@ use pyo3::prelude::*;
 // Add module initialization here
 
 #[cfg(feature = "python")]
-use crate::other_indicators::aso::{aso_py, aso_batch_py, AsoStreamPy};
+use crate::other_indicators::tradjema::{tradjema_py, tradjema_batch_py, TradjemaStreamPy};
 #[cfg(feature = "python")]
-use crate::other_indicators::macz::{macz_py, macz_batch_py, MaczStreamPy};
+use crate::indicators::aso::{aso_py, aso_batch_py, AsoStreamPy};
 #[cfg(feature = "python")]
-use crate::other_indicators::ott::{ott_py, ott_batch_py, OttStreamPy};
+use crate::indicators::macz::{macz_py, macz_batch_py, MaczStreamPy};
 #[cfg(feature = "python")]
-use crate::other_indicators::dvdiqqe::{dvdiqqe_py, dvdiqqe_batch_py};
+use crate::indicators::ott::{ott_py, ott_batch_py, OttStreamPy};
 #[cfg(feature = "python")]
-use crate::other_indicators::prb::{prb_py, prb_batch_py, PrbStreamPy};
+use crate::indicators::dvdiqqe::{dvdiqqe_py, dvdiqqe_batch_py};
 #[cfg(feature = "python")]
-use crate::other_indicators::lpc::{lpc_py, lpc_batch_py, LpcStreamPy};
+use crate::indicators::prb::{prb_py, prb_batch_py, PrbStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::lpc::{lpc_py, lpc_batch_py, LpcStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::acosc::{acosc_batch_py, acosc_py, AcoscStreamPy};
 #[cfg(feature = "python")]
@@ -700,6 +702,11 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(aroon_py, m)?)?;
 	m.add_function(wrap_pyfunction!(aroon_batch_py, m)?)?;
 	m.add_class::<AroonStreamPy>()?;
+
+	// Register TRADJEMA functions with their user-facing names
+	m.add_function(wrap_pyfunction!(tradjema_py, m)?)?;
+	m.add_function(wrap_pyfunction!(tradjema_batch_py, m)?)?;
+	m.add_class::<TradjemaStreamPy>()?;
 
 	// Register ASO functions with their user-facing names
 	m.add_function(wrap_pyfunction!(aso_py, m)?)?;

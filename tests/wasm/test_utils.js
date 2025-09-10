@@ -142,6 +142,23 @@ const EXPECTED_OUTPUTS = {
             59165.14427332
         ]
     },
+    tradjema: {
+        defaultParams: { length: 40, mult: 10.0 },
+        last5Values: [
+            59395.39322263,
+            59388.09683228,
+            59373.08371503,
+            59350.75110897,
+            59323.14225348
+        ],
+        reinputLast5: [
+            60151.36846160,
+            60111.35712403,
+            60069.22096081,
+            60025.14431263,
+            59979.98583228
+        ]
+    },
     prb: {
         defaultParams: {
             smoothData: false,
