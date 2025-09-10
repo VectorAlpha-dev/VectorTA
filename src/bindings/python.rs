@@ -4,7 +4,7 @@ use pyo3::prelude::*;
 // Add module initialization here
 
 #[cfg(feature = "python")]
-use crate::other_indicators::tradjema::{tradjema_py, tradjema_batch_py, TradjemaStreamPy};
+use crate::indicators::moving_averages::tradjema::{tradjema_py, tradjema_batch_py, TradjemaStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::aso::{aso_py, aso_batch_py, AsoStreamPy};
 #[cfg(feature = "python")]

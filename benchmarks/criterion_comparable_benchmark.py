@@ -106,7 +106,7 @@ class CriterionComparableBenchmark:
             'frama', 'fwma', 'gaussian', 'highpass_2_pole', 'highpass', 'hma',
             'hwma', 'ift_rsi', 'jma', 'jsa', 'kama', 'kdj', 'linearreg_intercept', 'kvo', 'kurtosis', 'kst', 'linreg', 'mab', 'lrsi', 'mean_ad', 'mom', 'pivot', 'rocp', 'linearreg_slope', 'maaq', 'mama', 'mass', 'midprice', 'medprice', 'msw', 'medium_ad', 'mwdx', 'obv',
             'nma', 'nvi', 'pvi', 'pma', 'pwma', 'reflex', 'sar', 'roc', 'sinwma', 'sma', 'smma', 'sqwma', 'srwma', 'stc', 'tsi', 'minmax',
-            'supersmoother_3_pole', 'supersmoother', 'supertrend', 'swma', 'tema', 'tilson',
+            'supersmoother_3_pole', 'supersmoother', 'supertrend', 'swma', 'tema', 'tilson', 'tradjema',
             'trendflex', 'ttm_trend', 'trima', 'vidya', 'vlma', 'vqwma', 'vwmacd', 'adxr', 'aroon', 'bollinger_bands_width', 'atr', 'cci', 'bop',
             'cg', 'cfo', 'coppock', 'marketefi', 'midpoint', 'vi', 'vpt', 'cmo', 'dec_osc', 'macd', 'mfi', 'natr', 'ppo', 'var', 'vpci', 'wclprice', 'damiani_volatmeter', 'emd', 'gatorosc', 'wavetrend', 'chop', 'cvi', 'di', 'efi', 'fosc', 'ui', 'vosc', 'dti', 'dx', 'keltner', 'rvi'  # Added missing indicators
         ]
@@ -351,6 +351,7 @@ class CriterionComparableBenchmark:
             ('swma', lambda: my_project.swma(data['close'], 14)),
             ('tema', lambda: my_project.tema(data['close'], 14)),
             ('tilson', lambda: my_project.tilson(data['close'], 14, 0.7)),
+            ('tradjema', lambda: my_project.tradjema(data['high'], data['low'], data['close'], 40, 10.0)),
             ('trendflex', lambda: my_project.trendflex(data['close'], 20)),
             ('ttm_trend', lambda: my_project.ttm_trend((data['high'] + data['low']) / 2.0, data['close'], 5)),
             ('vlma', lambda: my_project.vlma(data['close'], 5, 50, "sma", 0)),

@@ -33,6 +33,7 @@ pub mod supersmoother_3_pole;
 pub mod swma;
 pub mod tema;
 pub mod tilson;
+pub mod tradjema;
 pub mod trendflex;
 pub mod trima;
 pub mod vpwma;

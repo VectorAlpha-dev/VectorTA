@@ -41,6 +41,7 @@ use my_project::indicators::moving_averages::{
 	swma::{swma_with_kernel, SwmaBatchBuilder, SwmaInput},
 	tema::{tema_with_kernel, TemaBatchBuilder, TemaInput},
 	tilson::{tilson_with_kernel, TilsonBatchBuilder, TilsonInput},
+	tradjema::{tradjema_with_kernel, TradjemaBatchBuilder, TradjemaInput},
 	trendflex::{trendflex_with_kernel, TrendFlexBatchBuilder, TrendFlexInput},
 	trima::{trima_with_kernel, TrimaBatchBuilder, TrimaInput},
 	vpwma::{vpwma_with_kernel, VpwmaBatchBuilder, VpwmaInput},
@@ -320,6 +321,7 @@ pub type SuperSmoother3PoleInputS = SuperSmoother3PoleInput<'static>;
 pub type SwmaInputS = SwmaInput<'static>;
 pub type TemaInputS = TemaInput<'static>;
 pub type TilsonInputS = TilsonInput<'static>;
+pub type TradjemaInputS = TradjemaInput<'static>;
 pub type TrendFlexInputS = TrendFlexInput<'static>;
 pub type TrimaInputS = TrimaInput<'static>;
 pub type TrixInputS = TrixInput<'static>;
@@ -662,6 +664,7 @@ impl_input_len!(
 	SwmaInputS,
 	TemaInputS,
 	TilsonInputS,
+	TradjemaInputS,
 	TrendFlexInputS,
 	TrimaInputS,
 	TrixInputS,
@@ -962,6 +965,7 @@ make_kernel_wrappers!(supersmoother_3_pole, supersmoother_3_pole_with_kernel, Su
 make_kernel_wrappers!(swma, swma_with_kernel, SwmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(tema, tema_with_kernel, TemaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(tilson, tilson_with_kernel, TilsonInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(tradjema, tradjema_with_kernel, TradjemaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(trendflex, trendflex_with_kernel, TrendFlexInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(trima, trima_with_kernel, TrimaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(vidya, vidya_with_kernel, VidyaInputS; Scalar,Avx2,Avx512);
@@ -1051,6 +1055,67 @@ make_batch_wrappers!(supersmoother_3_pole_batch, SuperSmoother3PoleBatchBuilder,
 make_batch_wrappers!(swma_batch, SwmaBatchBuilder, SwmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(tema_batch, TemaBatchBuilder, TemaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(tilson_batch, TilsonBatchBuilder, TilsonInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+// Custom batch wrappers for TRADJEMA (requires OHLC data)
+#[inline(always)]
+fn tradjema_batch_scalarbatch(input: &TradjemaInputS) -> anyhow::Result<()> {
+    use my_project::indicators::moving_averages::tradjema::{TradjemaBatchBuilder, TradjemaData};
+    use my_project::utilities::enums::Kernel;
+    
+    let (high, low, close) = match &input.data {
+        TradjemaData::Candles { candles } => {
+            (&candles.high[..], &candles.low[..], &candles.close[..])
+        },
+        TradjemaData::Slices { high, low, close } => {
+            (*high, *low, *close)
+        }
+    };
+    
+    TradjemaBatchBuilder::new()
+        .kernel(Kernel::ScalarBatch)
+        .apply_slices(&high, &low, &close)?;
+    Ok(())
+}
+
+#[inline(always)]
+fn tradjema_batch_avx2batch(input: &TradjemaInputS) -> anyhow::Result<()> {
+    use my_project::indicators::moving_averages::tradjema::{TradjemaBatchBuilder, TradjemaData};
+    use my_project::utilities::enums::Kernel;
+    
+    let (high, low, close) = match &input.data {
+        TradjemaData::Candles { candles } => {
+            (&candles.high[..], &candles.low[..], &candles.close[..])
+        },
+        TradjemaData::Slices { high, low, close } => {
+            (*high, *low, *close)
+        }
+    };
+    
+    TradjemaBatchBuilder::new()
+        .kernel(Kernel::Avx2Batch)
+        .apply_slices(&high, &low, &close)?;
+    Ok(())
+}
+
+#[inline(always)]
+fn tradjema_batch_avx512batch(input: &TradjemaInputS) -> anyhow::Result<()> {
+    use my_project::indicators::moving_averages::tradjema::{TradjemaBatchBuilder, TradjemaData};
+    use my_project::utilities::enums::Kernel;
+    
+    let (high, low, close) = match &input.data {
+        TradjemaData::Candles { candles } => {
+            (&candles.high[..], &candles.low[..], &candles.close[..])
+        },
+        TradjemaData::Slices { high, low, close } => {
+            (*high, *low, *close)
+        }
+    };
+    
+    TradjemaBatchBuilder::new()
+        .kernel(Kernel::Avx512Batch)
+        .apply_slices(&high, &low, &close)?;
+    Ok(())
+}
+
 make_batch_wrappers!(trendflex_batch, TrendFlexBatchBuilder, TrendFlexInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(trima_batch, TrimaBatchBuilder, TrimaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(vidya_batch, VidyaBatchBuilder, VidyaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
@@ -1303,6 +1368,13 @@ bench_variants!(
 	tilson_batch_scalarbatch,
 	tilson_batch_avx2batch,
 	tilson_batch_avx512batch,
+);
+
+bench_variants!(
+	tradjema_batch => TradjemaInputS; Some(227);
+	tradjema_batch_scalarbatch,
+	tradjema_batch_avx2batch,
+	tradjema_batch_avx512batch,
 );
 
 bench_variants!(
@@ -1604,6 +1676,13 @@ bench_variants!(
 	tilson_scalar,
 	tilson_avx2,
 	tilson_avx512,
+);
+
+bench_variants!(
+	tradjema => TradjemaInputS; None;
+	tradjema_scalar,
+	tradjema_avx2,
+	tradjema_avx512,
 );
 
 bench_variants!(

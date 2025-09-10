@@ -1,4 +1,4 @@
-use my_project::other_indicators::tradjema::{tradjema, TradjemaInput, TradjemaParams};
+use my_project::indicators::moving_averages::tradjema::{tradjema, TradjemaInput, TradjemaParams};
 
 fn main() {
     // Sample OHLC data

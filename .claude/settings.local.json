@@ -44,7 +44,9 @@
       "Bash(test_bindings.bat tradjema --python)",
       "Bash(del test_tradjema_fix.py)",
       "Bash(test_bindings.bat tradjema)",
-      "Bash(./test_bindings.bat tradjema)"
+      "Bash(./test_bindings.bat tradjema)",
+      "Bash(del:*)",
+      "Bash(md5sum:*)"
     ],
     "deny": [],
     "ask": [],
