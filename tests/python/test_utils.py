@@ -66,6 +66,22 @@ def assert_no_nan(arr, msg=""):
     if np.any(np.isnan(arr)):
         raise AssertionError(f"{msg}: Found NaN values in array")
 
+def generate_otto_test_data():
+    """Generate the standard OTTO test data pattern"""
+    otto_config = EXPECTED_OUTPUTS['otto']['test_data_pattern']
+    size = otto_config['size']
+    data = np.zeros(size, dtype=np.float64)
+    
+    # Generate base pattern
+    for i in range(size):
+        data[i] = otto_config['formula'](i)
+    
+    # Override last 30 values
+    last_30 = otto_config['last_30_override']
+    data[-30:] = last_30
+    
+    return data
+
 # Expected outputs from Rust tests - these must match EXACTLY
 EXPECTED_OUTPUTS = {
     'alma': {
@@ -85,6 +101,46 @@ EXPECTED_OUTPUTS = {
             59222.63528822,
             59165.14427332
         ]
+    },
+    'otto': {
+        'default_params': {
+            'ott_period': 2,
+            'ott_percent': 0.6,
+            'fast_vidya_length': 10,
+            'slow_vidya_length': 25,
+            'correcting_constant': 100000,
+            'ma_type': 'VAR'
+        },
+        # Expected values from PineScript (last 5 values)
+        'last_5_hott': [
+            0.61437486,
+            0.61421295,
+            0.61409778,
+            0.61404352,
+            0.61388393
+        ],
+        'last_5_lott': [
+            0.61221457,
+            0.61219084,
+            0.61197922,
+            0.61179661,
+            0.61142377
+        ],
+        # Test data generation pattern
+        'test_data_pattern': {
+            'size': 260,
+            'formula': lambda i: 0.612 - (i * 0.00001),
+            'last_30_override': [
+                0.61233, 0.61235, 0.61210, 0.61195, 0.61180,
+                0.61165, 0.61150, 0.61135, 0.61120, 0.61105,
+                0.61090, 0.61075, 0.61060, 0.61045, 0.61030,
+                0.61015, 0.61000, 0.60985, 0.60970, 0.60955,
+                0.60940, 0.60925, 0.60910, 0.60895, 0.60880,
+                0.60865, 0.60850, 0.60835, 0.60820, 0.60805,
+            ]
+        },
+        # Warmup period for default params
+        'warmup_period': 250  # Conservative estimate
     },
     'percentile_nearest_rank': {
         'default_params': {'length': 15, 'percentage': 50.0},

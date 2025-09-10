@@ -14,8 +14,12 @@ pub mod report;
 // Include generated bindings
 include!(concat!(env!("OUT_DIR"), "/tulip_bindings.rs"));
 
-#[cfg(not(no_talib))]
+// TA-Lib bindings are optional - only include if available
+#[cfg(feature = "talib")]
 include!(concat!(env!("OUT_DIR"), "/talib_bindings.rs"));
+
+// Define constants that might be missing
+pub const TI_OKAY: i32 = 0;
 
 // Re-export useful types
 pub type TulipReal = c_double;
@@ -69,8 +73,9 @@ pub mod tulip {
             .map(|slice| slice.as_mut_ptr() as *mut TulipReal)
             .collect();
 
-        // Call the indicator
-        let result = (info.indicator)(
+        // Call the indicator function if it exists
+        let indicator_fn = info.indicator.expect("Indicator function not found");
+        let result = indicator_fn(
             size as c_int,
             input_ptrs.as_ptr(),
             options.as_ptr() as *const TulipReal,
@@ -94,14 +99,15 @@ pub mod tulip {
         }
 
         let info = &*indicator;
-        let start = (info.start)(options.as_ptr() as *const TulipReal);
+        let start_fn = info.start.expect("Start function not found");
+        let start = start_fn(options.as_ptr() as *const TulipReal);
         
         Ok(start as usize)
     }
 }
 
 // Module for TA-Lib wrappers (if available)
-#[cfg(not(no_talib))]
+#[cfg(feature = "talib")]
 pub mod talib {
     use super::*;
     

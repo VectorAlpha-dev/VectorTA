@@ -14,6 +14,8 @@ use crate::indicators::percentile_nearest_rank::{percentile_nearest_rank_py, per
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::uma::{uma_py, uma_batch_py, UmaStreamPy};
 #[cfg(feature = "python")]
+use crate::other_indicators::otto::{otto_py, otto_batch_py, OttoStreamPy};
+#[cfg(feature = "python")]
 use crate::indicators::acosc::{acosc_batch_py, acosc_py, AcoscStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::ad::{ad_batch_py, ad_py, AdStreamPy};
@@ -721,6 +723,11 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(uma_py, m)?)?;
 	m.add_function(wrap_pyfunction!(uma_batch_py, m)?)?;
 	m.add_class::<UmaStreamPy>()?;
+
+	// Register OTTO functions with their user-facing names
+	m.add_function(wrap_pyfunction!(otto_py, m)?)?;
+	m.add_function(wrap_pyfunction!(otto_batch_py, m)?)?;
+	m.add_class::<OttoStreamPy>()?;
 
 	// Register Aroon functions with their user-facing names
 	m.add_function(wrap_pyfunction!(aroon_py, m)?)?;

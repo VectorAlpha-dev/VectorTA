@@ -57,7 +57,12 @@
       "Bash(del test_uma_values.rs)",
       "Bash(.debug_uma.exe)",
       "Bash(./debug_uma)",
-      "Bash(.venv\\Scripts\\python.exe test_extended_uma.py:*)"
+      "Bash(.venv\\Scripts\\python.exe test_extended_uma.py:*)",
+      "Bash(git submodule:*)",
+      "Bash(test:*)",
+      "Bash(cmd.exe:*)",
+      "Bash(.venv\\Scripts\\python.exe tests\\python\\test_otto.py:*)",
+      "Bash(.test_bindings.bat otto --python)"
     ],
     "deny": [],
     "ask": [],

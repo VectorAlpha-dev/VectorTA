@@ -1,6 +1,14 @@
 use std::os::raw::{c_double, c_int};
 use std::slice;
-use my_project::indicators;
+use my_project::indicators::moving_averages::{
+    sma, ema, dema, tema, wma, kama, trima, hma, vwma, wilders, zlema
+};
+use my_project::indicators::{
+    rsi, atr, bollinger_bands, macd, adx, cci, stoch, aroon,
+    apo, cmo, dpo, mom, ppo, roc, willr, ad, adosc, obv, mfi,
+    ao, bop, natr, stddev, var, ultosc
+};
+use my_project::utilities::data_loader::Candles;
 
 /// FFI wrapper for Rust SMA indicator
 #[no_mangle]
@@ -17,13 +25,13 @@ pub unsafe extern "C" fn rust_sma(
     let input_slice = slice::from_raw_parts(input, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
     
-    let params = indicators::sma::SmaParams {
+    let params = sma::SmaParams {
         period: Some(period as usize),
     };
     
-    let sma_input = indicators::sma::SmaInput::from_slice(input_slice, params);
+    let sma_input = sma::SmaInput::from_slice(input_slice, params);
     
-    match indicators::sma::sma(&sma_input) {
+    match sma::sma(&sma_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
             0
@@ -47,13 +55,13 @@ pub unsafe extern "C" fn rust_ema(
     let input_slice = slice::from_raw_parts(input, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
     
-    let params = indicators::ema::EmaParams {
+    let params = ema::EmaParams {
         period: Some(period as usize),
     };
     
-    let ema_input = indicators::ema::EmaInput::from_slice(input_slice, params);
+    let ema_input = ema::EmaInput::from_slice(input_slice, params);
     
-    match indicators::ema::ema(&ema_input) {
+    match ema::ema(&ema_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
             0
@@ -77,13 +85,13 @@ pub unsafe extern "C" fn rust_rsi(
     let input_slice = slice::from_raw_parts(input, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
     
-    let params = indicators::rsi::RsiParams {
+    let params = rsi::RsiParams {
         period: Some(period as usize),
     };
     
-    let rsi_input = indicators::rsi::RsiInput::from_slice(input_slice, params);
+    let rsi_input = rsi::RsiInput::from_slice(input_slice, params);
     
-    match indicators::rsi::rsi(&rsi_input) {
+    match rsi::rsi(&rsi_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
             0
@@ -111,18 +119,39 @@ pub unsafe extern "C" fn rust_atr(
     let close_slice = slice::from_raw_parts(close, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
     
-    let params = indicators::atr::AtrParams {
-        period: Some(period as usize),
+    let params = atr::AtrParams {
+        length: Some(period as usize),
     };
     
-    let atr_input = indicators::atr::AtrInput::from_slices(
-        high_slice,
-        low_slice,
-        close_slice,
-        params
-    );
+    // ATR needs a Candles structure, we'll create a minimal one
+    let mut hl2 = vec![0.0; size as usize];
+    let mut hlc3 = vec![0.0; size as usize];
+    let mut ohlc4 = vec![0.0; size as usize];
+    let mut hlcc4 = vec![0.0; size as usize];
     
-    match indicators::atr::atr(&atr_input) {
+    for i in 0..size as usize {
+        hl2[i] = (high_slice[i] + low_slice[i]) / 2.0;
+        hlc3[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 3.0;
+        ohlc4[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 4.0; // Using close as open substitute
+        hlcc4[i] = (high_slice[i] + low_slice[i] + close_slice[i] + close_slice[i]) / 4.0;
+    }
+    
+    let candles = Candles {
+        high: high_slice.to_vec(),
+        low: low_slice.to_vec(),
+        close: close_slice.to_vec(),
+        open: vec![0.0; size as usize], // ATR doesn't use open
+        volume: vec![0.0; size as usize], // ATR doesn't use volume
+        timestamp: vec![0; size as usize],
+        hl2,
+        hlc3,
+        ohlc4,
+        hlcc4,
+    };
+    
+    let atr_input = atr::AtrInput::from_candles(&candles, params);
+    
+    match atr::atr(&atr_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
             0
@@ -152,21 +181,21 @@ pub unsafe extern "C" fn rust_bbands(
     let middle_slice = slice::from_raw_parts_mut(output_middle, size as usize);
     let upper_slice = slice::from_raw_parts_mut(output_upper, size as usize);
     
-    let params = indicators::bollinger_bands::BollingerBandsParams {
+    let params = bollinger_bands::BollingerBandsParams {
         period: Some(period as usize),
-        multiplier_upper: Some(stddev),
-        multiplier_lower: Some(stddev),
-        ma_type: Some("sma".to_string()),
-        ddof: Some(0),
+        devup: Some(stddev),
+        devdn: Some(stddev),
+        matype: Some("sma".to_string()),
+        devtype: Some(0),
     };
     
-    let bb_input = indicators::bollinger_bands::BollingerBandsInput::from_slice(input_slice, params);
+    let bb_input = bollinger_bands::BollingerBandsInput::from_slice(input_slice, params);
     
-    match indicators::bollinger_bands::bollinger_bands(&bb_input) {
+    match bollinger_bands::bollinger_bands(&bb_input) {
         Ok(result) => {
-            lower_slice.copy_from_slice(&result.lower);
-            middle_slice.copy_from_slice(&result.middle);
-            upper_slice.copy_from_slice(&result.upper);
+            lower_slice.copy_from_slice(&result.lower_band);
+            middle_slice.copy_from_slice(&result.middle_band);
+            upper_slice.copy_from_slice(&result.upper_band);
             0
         }
         Err(_) => -1,
@@ -195,19 +224,20 @@ pub unsafe extern "C" fn rust_macd(
     let signal_slice = slice::from_raw_parts_mut(output_signal, size as usize);
     let histogram_slice = slice::from_raw_parts_mut(output_histogram, size as usize);
     
-    let params = indicators::macd::MacdParams {
-        short_period: Some(short_period as usize),
-        long_period: Some(long_period as usize),
+    let params = macd::MacdParams {
+        fast_period: Some(short_period as usize),
+        slow_period: Some(long_period as usize),
         signal_period: Some(signal_period as usize),
+        ma_type: Some("ema".to_string()),
     };
     
-    let macd_input = indicators::macd::MacdInput::from_slice(input_slice, params);
+    let macd_input = macd::MacdInput::from_slice(input_slice, params);
     
-    match indicators::macd::macd(&macd_input) {
+    match macd::macd(&macd_input) {
         Ok(result) => {
             macd_slice.copy_from_slice(&result.macd);
             signal_slice.copy_from_slice(&result.signal);
-            histogram_slice.copy_from_slice(&result.histogram);
+            histogram_slice.copy_from_slice(&result.hist);
             0
         }
         Err(_) => -1,
@@ -234,18 +264,39 @@ pub unsafe extern "C" fn rust_adx(
     let close_slice = slice::from_raw_parts(close, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
     
-    let params = indicators::adx::AdxParams {
+    let params = adx::AdxParams {
         period: Some(period as usize),
     };
     
-    let adx_input = indicators::adx::AdxInput::from_slices(
-        high_slice,
-        low_slice,
-        close_slice,
-        params
-    );
+    // ADX needs a Candles structure
+    let mut hl2 = vec![0.0; size as usize];
+    let mut hlc3 = vec![0.0; size as usize];
+    let mut ohlc4 = vec![0.0; size as usize];
+    let mut hlcc4 = vec![0.0; size as usize];
     
-    match indicators::adx::adx(&adx_input) {
+    for i in 0..size as usize {
+        hl2[i] = (high_slice[i] + low_slice[i]) / 2.0;
+        hlc3[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 3.0;
+        ohlc4[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 4.0;
+        hlcc4[i] = (high_slice[i] + low_slice[i] + close_slice[i] + close_slice[i]) / 4.0;
+    }
+    
+    let candles = Candles {
+        high: high_slice.to_vec(),
+        low: low_slice.to_vec(),
+        close: close_slice.to_vec(),
+        open: vec![0.0; size as usize],
+        volume: vec![0.0; size as usize],
+        timestamp: vec![0; size as usize],
+        hl2,
+        hlc3,
+        ohlc4,
+        hlcc4,
+    };
+    
+    let adx_input = adx::AdxInput::from_candles(&candles, params);
+    
+    match adx::adx(&adx_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
             0
@@ -274,21 +325,353 @@ pub unsafe extern "C" fn rust_cci(
     let close_slice = slice::from_raw_parts(close, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
     
-    // Calculate typical price
-    let mut typical_price = vec![0.0; size as usize];
-    for i in 0..size as usize {
-        typical_price[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 3.0;
-    }
-    
-    let params = indicators::cci::CciParams {
+    let params = cci::CciParams {
         period: Some(period as usize),
     };
     
-    let cci_input = indicators::cci::CciInput::from_slice(&typical_price, params);
+    // CCI needs a Candles structure for typical price calculation
+    let mut hl2 = vec![0.0; size as usize];
+    let mut hlc3 = vec![0.0; size as usize];
+    let mut ohlc4 = vec![0.0; size as usize];
+    let mut hlcc4 = vec![0.0; size as usize];
     
-    match indicators::cci::cci(&cci_input) {
+    for i in 0..size as usize {
+        hl2[i] = (high_slice[i] + low_slice[i]) / 2.0;
+        hlc3[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 3.0;
+        ohlc4[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 4.0;
+        hlcc4[i] = (high_slice[i] + low_slice[i] + close_slice[i] + close_slice[i]) / 4.0;
+    }
+    
+    let candles = Candles {
+        high: high_slice.to_vec(),
+        low: low_slice.to_vec(),
+        close: close_slice.to_vec(),
+        open: vec![0.0; size as usize],
+        volume: vec![0.0; size as usize],
+        timestamp: vec![0; size as usize],
+        hl2,
+        hlc3,
+        ohlc4,
+        hlcc4,
+    };
+    
+    let cci_input = cci::CciInput::from_candles(&candles, "hlc3", params);
+    
+    match cci::cci(&cci_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
+            0
+        }
+        Err(_) => -1,
+    }
+}
+
+/// FFI wrapper for Rust DEMA indicator
+#[no_mangle]
+pub unsafe extern "C" fn rust_dema(
+    size: c_int,
+    input: *const c_double,
+    period: c_int,
+    output: *mut c_double,
+) -> c_int {
+    if input.is_null() || output.is_null() || size <= 0 || period <= 0 {
+        return -1;
+    }
+
+    let input_slice = slice::from_raw_parts(input, size as usize);
+    let output_slice = slice::from_raw_parts_mut(output, size as usize);
+    
+    let params = dema::DemaParams {
+        period: Some(period as usize),
+    };
+    
+    let dema_input = dema::DemaInput::from_slice(input_slice, params);
+    
+    match dema::dema(&dema_input) {
+        Ok(result) => {
+            output_slice.copy_from_slice(&result.values);
+            0
+        }
+        Err(_) => -1,
+    }
+}
+
+/// FFI wrapper for Rust TEMA indicator
+#[no_mangle]
+pub unsafe extern "C" fn rust_tema(
+    size: c_int,
+    input: *const c_double,
+    period: c_int,
+    output: *mut c_double,
+) -> c_int {
+    if input.is_null() || output.is_null() || size <= 0 || period <= 0 {
+        return -1;
+    }
+
+    let input_slice = slice::from_raw_parts(input, size as usize);
+    let output_slice = slice::from_raw_parts_mut(output, size as usize);
+    
+    let params = tema::TemaParams {
+        period: Some(period as usize),
+    };
+    
+    let tema_input = tema::TemaInput::from_slice(input_slice, params);
+    
+    match tema::tema(&tema_input) {
+        Ok(result) => {
+            output_slice.copy_from_slice(&result.values);
+            0
+        }
+        Err(_) => -1,
+    }
+}
+
+/// FFI wrapper for Rust WMA indicator
+#[no_mangle]
+pub unsafe extern "C" fn rust_wma(
+    size: c_int,
+    input: *const c_double,
+    period: c_int,
+    output: *mut c_double,
+) -> c_int {
+    if input.is_null() || output.is_null() || size <= 0 || period <= 0 {
+        return -1;
+    }
+
+    let input_slice = slice::from_raw_parts(input, size as usize);
+    let output_slice = slice::from_raw_parts_mut(output, size as usize);
+    
+    let params = wma::WmaParams {
+        period: Some(period as usize),
+    };
+    
+    let wma_input = wma::WmaInput::from_slice(input_slice, params);
+    
+    match wma::wma(&wma_input) {
+        Ok(result) => {
+            output_slice.copy_from_slice(&result.values);
+            0
+        }
+        Err(_) => -1,
+    }
+}
+
+/// FFI wrapper for Rust KAMA indicator
+#[no_mangle]
+pub unsafe extern "C" fn rust_kama(
+    size: c_int,
+    input: *const c_double,
+    period: c_int,
+    output: *mut c_double,
+) -> c_int {
+    if input.is_null() || output.is_null() || size <= 0 || period <= 0 {
+        return -1;
+    }
+
+    let input_slice = slice::from_raw_parts(input, size as usize);
+    let output_slice = slice::from_raw_parts_mut(output, size as usize);
+    
+    let params = kama::KamaParams {
+        period: Some(period as usize),
+    };
+    
+    let kama_input = kama::KamaInput::from_slice(input_slice, params);
+    
+    match kama::kama(&kama_input) {
+        Ok(result) => {
+            output_slice.copy_from_slice(&result.values);
+            0
+        }
+        Err(_) => -1,
+    }
+}
+
+/// FFI wrapper for Rust TRIMA indicator
+#[no_mangle]
+pub unsafe extern "C" fn rust_trima(
+    size: c_int,
+    input: *const c_double,
+    period: c_int,
+    output: *mut c_double,
+) -> c_int {
+    if input.is_null() || output.is_null() || size <= 0 || period <= 0 {
+        return -1;
+    }
+
+    let input_slice = slice::from_raw_parts(input, size as usize);
+    let output_slice = slice::from_raw_parts_mut(output, size as usize);
+    
+    let params = trima::TrimaParams {
+        period: Some(period as usize),
+    };
+    
+    let trima_input = trima::TrimaInput::from_slice(input_slice, params);
+    
+    match trima::trima(&trima_input) {
+        Ok(result) => {
+            output_slice.copy_from_slice(&result.values);
+            0
+        }
+        Err(_) => -1,
+    }
+}
+
+/// FFI wrapper for Rust HMA indicator
+#[no_mangle]
+pub unsafe extern "C" fn rust_hma(
+    size: c_int,
+    input: *const c_double,
+    period: c_int,
+    output: *mut c_double,
+) -> c_int {
+    if input.is_null() || output.is_null() || size <= 0 || period <= 0 {
+        return -1;
+    }
+
+    let input_slice = slice::from_raw_parts(input, size as usize);
+    let output_slice = slice::from_raw_parts_mut(output, size as usize);
+    
+    let params = hma::HmaParams {
+        period: Some(period as usize),
+    };
+    
+    let hma_input = hma::HmaInput::from_slice(input_slice, params);
+    
+    match hma::hma(&hma_input) {
+        Ok(result) => {
+            output_slice.copy_from_slice(&result.values);
+            0
+        }
+        Err(_) => -1,
+    }
+}
+
+/// FFI wrapper for Rust Stochastic indicator
+#[no_mangle]
+pub unsafe extern "C" fn rust_stoch(
+    size: c_int,
+    high: *const c_double,
+    low: *const c_double,
+    close: *const c_double,
+    k_period: c_int,
+    k_smooth: c_int,
+    d_smooth: c_int,
+    output_k: *mut c_double,
+    output_d: *mut c_double,
+) -> c_int {
+    if high.is_null() || low.is_null() || close.is_null() || 
+       output_k.is_null() || output_d.is_null() || size <= 0 {
+        return -1;
+    }
+
+    let high_slice = slice::from_raw_parts(high, size as usize);
+    let low_slice = slice::from_raw_parts(low, size as usize);
+    let close_slice = slice::from_raw_parts(close, size as usize);
+    let k_slice = slice::from_raw_parts_mut(output_k, size as usize);
+    let d_slice = slice::from_raw_parts_mut(output_d, size as usize);
+    
+    let params = stoch::StochParams {
+        fastk_period: Some(k_period as usize),
+        slowk_period: Some(k_smooth as usize),
+        slowk_ma_type: Some("sma".to_string()),
+        slowd_period: Some(d_smooth as usize),
+        slowd_ma_type: Some("sma".to_string()),
+    };
+    
+    // Create Candles structure
+    let mut hl2 = vec![0.0; size as usize];
+    let mut hlc3 = vec![0.0; size as usize];
+    let mut ohlc4 = vec![0.0; size as usize];
+    let mut hlcc4 = vec![0.0; size as usize];
+    
+    for i in 0..size as usize {
+        hl2[i] = (high_slice[i] + low_slice[i]) / 2.0;
+        hlc3[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 3.0;
+        ohlc4[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 4.0;
+        hlcc4[i] = (high_slice[i] + low_slice[i] + close_slice[i] + close_slice[i]) / 4.0;
+    }
+    
+    let candles = Candles {
+        high: high_slice.to_vec(),
+        low: low_slice.to_vec(),
+        close: close_slice.to_vec(),
+        open: vec![0.0; size as usize],
+        volume: vec![0.0; size as usize],
+        timestamp: vec![0; size as usize],
+        hl2,
+        hlc3,
+        ohlc4,
+        hlcc4,
+    };
+    
+    let stoch_input = stoch::StochInput::from_candles(&candles, params);
+    
+    match stoch::stoch(&stoch_input) {
+        Ok(result) => {
+            k_slice.copy_from_slice(&result.k);
+            d_slice.copy_from_slice(&result.d);
+            0
+        }
+        Err(_) => -1,
+    }
+}
+
+/// FFI wrapper for Rust Aroon indicator
+#[no_mangle]
+pub unsafe extern "C" fn rust_aroon(
+    size: c_int,
+    high: *const c_double,
+    low: *const c_double,
+    period: c_int,
+    output_down: *mut c_double,
+    output_up: *mut c_double,
+) -> c_int {
+    if high.is_null() || low.is_null() || output_down.is_null() || 
+       output_up.is_null() || size <= 0 || period <= 0 {
+        return -1;
+    }
+
+    let high_slice = slice::from_raw_parts(high, size as usize);
+    let low_slice = slice::from_raw_parts(low, size as usize);
+    let down_slice = slice::from_raw_parts_mut(output_down, size as usize);
+    let up_slice = slice::from_raw_parts_mut(output_up, size as usize);
+    
+    let params = aroon::AroonParams {
+        length: Some(period as usize),
+    };
+    
+    // Create minimal Candles structure  
+    let mut hl2 = vec![0.0; size as usize];
+    let mut hlc3 = vec![0.0; size as usize];
+    let mut ohlc4 = vec![0.0; size as usize];
+    let mut hlcc4 = vec![0.0; size as usize];
+    
+    for i in 0..size as usize {
+        hl2[i] = (high_slice[i] + low_slice[i]) / 2.0;
+        hlc3[i] = (high_slice[i] + low_slice[i]) / 3.0;
+        ohlc4[i] = (high_slice[i] + low_slice[i]) / 4.0;
+        hlcc4[i] = (high_slice[i] + low_slice[i]) / 4.0;
+    }
+    
+    let candles = Candles {
+        high: high_slice.to_vec(),
+        low: low_slice.to_vec(),
+        close: vec![0.0; size as usize],
+        open: vec![0.0; size as usize],
+        volume: vec![0.0; size as usize],
+        timestamp: vec![0; size as usize],
+        hl2,
+        hlc3,
+        ohlc4,
+        hlcc4,
+    };
+    
+    let aroon_input = aroon::AroonInput::from_candles(&candles, params);
+    
+    match aroon::aroon(&aroon_input) {
+        Ok(result) => {
+            down_slice.copy_from_slice(&result.aroon_down);
+            up_slice.copy_from_slice(&result.aroon_up);
             0
         }
         Err(_) => -1,

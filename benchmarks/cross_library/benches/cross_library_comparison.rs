@@ -1,8 +1,9 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use cross_library_benchmark::{tulip, rust_ffi};
 use cross_library_benchmark::utils::CandleData;
-use my_project::indicators;
-use std::collections::HashMap;
+use my_project::indicators::moving_averages::{sma, ema};
+use my_project::indicators::{rsi, atr, bollinger_bands, macd, adx, cci, stoch, aroon};
+use my_project::utilities::data_loader::Candles;
 use std::path::Path;
 use std::time::Duration;
 
@@ -25,7 +26,7 @@ struct IndicatorMapping {
 
 fn get_indicator_mappings() -> Vec<IndicatorMapping> {
     vec![
-        // Simple Moving Average
+        // === Core Indicators (10) - Already implemented ===
         IndicatorMapping {
             rust_name: "sma",
             tulip_name: "sma",
@@ -33,7 +34,6 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["close"],
             options: vec![14.0],
         },
-        // Exponential Moving Average
         IndicatorMapping {
             rust_name: "ema",
             tulip_name: "ema",
@@ -41,7 +41,6 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["close"],
             options: vec![14.0],
         },
-        // Relative Strength Index
         IndicatorMapping {
             rust_name: "rsi",
             tulip_name: "rsi",
@@ -49,7 +48,6 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["close"],
             options: vec![14.0],
         },
-        // Bollinger Bands
         IndicatorMapping {
             rust_name: "bollinger_bands",
             tulip_name: "bbands",
@@ -57,7 +55,6 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["close"],
             options: vec![20.0, 2.0],
         },
-        // MACD
         IndicatorMapping {
             rust_name: "macd",
             tulip_name: "macd",
@@ -65,7 +62,6 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["close"],
             options: vec![12.0, 26.0, 9.0],
         },
-        // Average True Range
         IndicatorMapping {
             rust_name: "atr",
             tulip_name: "atr",
@@ -73,7 +69,6 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["high", "low", "close"],
             options: vec![14.0],
         },
-        // Stochastic
         IndicatorMapping {
             rust_name: "stoch",
             tulip_name: "stoch",
@@ -81,7 +76,6 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["high", "low", "close"],
             options: vec![14.0, 3.0, 3.0],
         },
-        // Aroon
         IndicatorMapping {
             rust_name: "aroon",
             tulip_name: "aroon",
@@ -89,7 +83,6 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["high", "low"],
             options: vec![14.0],
         },
-        // ADX
         IndicatorMapping {
             rust_name: "adx",
             tulip_name: "adx",
@@ -97,13 +90,188 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["high", "low"],
             options: vec![14.0],
         },
-        // CCI
         IndicatorMapping {
             rust_name: "cci",
             tulip_name: "cci",
             talib_name: Some("CCI"),
             inputs: vec!["high", "low", "close"],
             options: vec![14.0],
+        },
+        
+        // === Additional Moving Averages ===
+        IndicatorMapping {
+            rust_name: "dema",
+            tulip_name: "dema",
+            talib_name: Some("DEMA"),
+            inputs: vec!["close"],
+            options: vec![14.0],
+        },
+        IndicatorMapping {
+            rust_name: "tema",
+            tulip_name: "tema",
+            talib_name: Some("TEMA"),
+            inputs: vec!["close"],
+            options: vec![14.0],
+        },
+        IndicatorMapping {
+            rust_name: "wma",
+            tulip_name: "wma",
+            talib_name: Some("WMA"),
+            inputs: vec!["close"],
+            options: vec![14.0],
+        },
+        IndicatorMapping {
+            rust_name: "kama",
+            tulip_name: "kama",
+            talib_name: Some("KAMA"),
+            inputs: vec!["close"],
+            options: vec![14.0],
+        },
+        IndicatorMapping {
+            rust_name: "trima",
+            tulip_name: "trima",
+            talib_name: Some("TRIMA"),
+            inputs: vec!["close"],
+            options: vec![14.0],
+        },
+        IndicatorMapping {
+            rust_name: "hma",
+            tulip_name: "hma",
+            talib_name: Some("HMA"),
+            inputs: vec!["close"],
+            options: vec![14.0],
+        },
+        
+        // === Momentum Indicators ===
+        IndicatorMapping {
+            rust_name: "apo",
+            tulip_name: "apo",
+            talib_name: Some("APO"),
+            inputs: vec!["close"],
+            options: vec![12.0, 26.0],
+        },
+        IndicatorMapping {
+            rust_name: "cmo",
+            tulip_name: "cmo",
+            talib_name: Some("CMO"),
+            inputs: vec!["close"],
+            options: vec![14.0],
+        },
+        IndicatorMapping {
+            rust_name: "dpo",
+            tulip_name: "dpo",
+            talib_name: Some("DPO"),
+            inputs: vec!["close"],
+            options: vec![14.0],
+        },
+        IndicatorMapping {
+            rust_name: "mom",
+            tulip_name: "mom",
+            talib_name: Some("MOM"),
+            inputs: vec!["close"],
+            options: vec![14.0],
+        },
+        IndicatorMapping {
+            rust_name: "ppo",
+            tulip_name: "ppo",
+            talib_name: Some("PPO"),
+            inputs: vec!["close"],
+            options: vec![12.0, 26.0, 9.0],
+        },
+        IndicatorMapping {
+            rust_name: "roc",
+            tulip_name: "roc",
+            talib_name: Some("ROC"),
+            inputs: vec!["close"],
+            options: vec![14.0],
+        },
+        IndicatorMapping {
+            rust_name: "rocr",
+            tulip_name: "rocr",
+            talib_name: Some("ROCR"),
+            inputs: vec!["close"],
+            options: vec![14.0],
+        },
+        IndicatorMapping {
+            rust_name: "willr",
+            tulip_name: "willr",
+            talib_name: Some("WILLR"),
+            inputs: vec!["high", "low", "close"],
+            options: vec![14.0],
+        },
+        
+        // === Volume Indicators ===
+        IndicatorMapping {
+            rust_name: "ad",
+            tulip_name: "ad",
+            talib_name: Some("AD"),
+            inputs: vec!["high", "low", "close", "volume"],
+            options: vec![],
+        },
+        IndicatorMapping {
+            rust_name: "adosc",
+            tulip_name: "adosc",
+            talib_name: Some("ADOSC"),
+            inputs: vec!["high", "low", "close", "volume"],
+            options: vec![3.0, 10.0],
+        },
+        IndicatorMapping {
+            rust_name: "obv",
+            tulip_name: "obv",
+            talib_name: Some("OBV"),
+            inputs: vec!["close", "volume"],
+            options: vec![],
+        },
+        IndicatorMapping {
+            rust_name: "mfi",
+            tulip_name: "mfi",
+            talib_name: Some("MFI"),
+            inputs: vec!["high", "low", "close", "volume"],
+            options: vec![14.0],
+        },
+        
+        // === Other Common Indicators ===
+        IndicatorMapping {
+            rust_name: "ao",
+            tulip_name: "ao",
+            talib_name: Some("AO"),
+            inputs: vec!["high", "low"],
+            options: vec![],
+        },
+        IndicatorMapping {
+            rust_name: "bop",
+            tulip_name: "bop",
+            talib_name: Some("BOP"),
+            inputs: vec!["open", "high", "low", "close"],
+            options: vec![],
+        },
+        IndicatorMapping {
+            rust_name: "natr",
+            tulip_name: "natr",
+            talib_name: Some("NATR"),
+            inputs: vec!["high", "low", "close"],
+            options: vec![14.0],
+        },
+        IndicatorMapping {
+            rust_name: "stddev",
+            tulip_name: "stddev",
+            talib_name: Some("STDDEV"),
+            inputs: vec!["close"],
+            options: vec![14.0],
+        },
+        IndicatorMapping {
+            rust_name: "var",
+            tulip_name: "var",
+            talib_name: Some("VAR"),
+            inputs: vec!["close"],
+            options: vec![14.0],
+        },
+        IndicatorMapping {
+            rust_name: "ultosc",
+            tulip_name: "ultosc",
+            talib_name: Some("ULTOSC"),
+            inputs: vec!["high", "low", "close"],
+            options: vec![7.0, 14.0, 28.0],
         },
     ]
 }
@@ -126,56 +294,76 @@ fn benchmark_rust_indicator(
     // Benchmark Rust implementation (direct call)
     match indicator.rust_name {
         "sma" => {
-            let input = indicators::sma::SmaInput::from_slice(&data.close, indicators::sma::SmaParams { period: Some(14) });
+            let input = sma::SmaInput::from_slice(&data.close, sma::SmaParams { period: Some(14) });
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(indicators::sma::sma(input));
+                    let _ = black_box(sma::sma(input));
                 });
             });
         }
         "ema" => {
-            let input = indicators::ema::EmaInput::from_slice(&data.close, indicators::ema::EmaParams { period: Some(14) });
+            let input = ema::EmaInput::from_slice(&data.close, ema::EmaParams { period: Some(14) });
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(indicators::ema::ema(input));
+                    let _ = black_box(ema::ema(input));
                 });
             });
         }
         "rsi" => {
-            let input = indicators::rsi::RsiInput::from_slice(&data.close, indicators::rsi::RsiParams { period: Some(14) });
+            let input = rsi::RsiInput::from_slice(&data.close, rsi::RsiParams { period: Some(14) });
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(indicators::rsi::rsi(input));
+                    let _ = black_box(rsi::rsi(input));
                 });
             });
         }
         "bollinger_bands" => {
-            let input = indicators::bollinger_bands::BollingerBandsInput::from_slice(
+            let input = bollinger_bands::BollingerBandsInput::from_slice(
                 &data.close, 
-                indicators::bollinger_bands::BollingerBandsParams { 
+                bollinger_bands::BollingerBandsParams { 
                     period: Some(20),
-                    multiplier_upper: Some(2.0),
-                    multiplier_lower: Some(2.0),
-                    ma_type: Some("sma".to_string()),
-                    ddof: Some(0),
+                    devup: Some(2.0),
+                    devdn: Some(2.0),
+                    matype: Some("sma".to_string()),
+                    devtype: Some(0),
                 }
             );
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(indicators::bollinger_bands::bollinger_bands(input));
+                    let _ = black_box(bollinger_bands::bollinger_bands(input));
                 });
             });
         }
         "atr" => {
-            let input = indicators::atr::AtrInput::from_slices(
-                &data.high,
-                &data.low, 
-                &data.close,
-                indicators::atr::AtrParams { period: Some(14) }
-            );
+            // Convert CandleData to Candles
+            let mut hl2 = vec![0.0; data.len()];
+            let mut hlc3 = vec![0.0; data.len()];
+            let mut ohlc4 = vec![0.0; data.len()];
+            let mut hlcc4 = vec![0.0; data.len()];
+            
+            for i in 0..data.len() {
+                hl2[i] = (data.high[i] + data.low[i]) / 2.0;
+                hlc3[i] = (data.high[i] + data.low[i] + data.close[i]) / 3.0;
+                ohlc4[i] = (data.open[i] + data.high[i] + data.low[i] + data.close[i]) / 4.0;
+                hlcc4[i] = (data.high[i] + data.low[i] + data.close[i] + data.close[i]) / 4.0;
+            }
+            
+            let candles = Candles {
+                high: data.high.clone(),
+                low: data.low.clone(),
+                close: data.close.clone(),
+                open: data.open.clone(),
+                volume: data.volume.clone(),
+                timestamp: data.timestamps.clone(),
+                hl2,
+                hlc3,
+                ohlc4,
+                hlcc4,
+            };
+            let input = atr::AtrInput::from_candles(&candles, atr::AtrParams { length: Some(14) });
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(indicators::atr::atr(input));
+                    let _ = black_box(atr::atr(input));
                 });
             });
         }
