@@ -11,6 +11,13 @@ pub mod aroonosc;
 pub mod aso;
 pub use aso::{aso, AsoInput, AsoOutput, AsoParams};
 pub mod atr;
+pub mod avsl;
+pub use avsl::{
+    avsl, avsl_with_kernel, AvslInput, AvslOutput, AvslParams, AvslError, 
+    AvslData, AvslBuilder, avsl_into_slice,
+    // Batch API exports
+    AvslBatchRange, AvslBatchBuilder, AvslBatchOutput, avsl_batch_with_kernel,
+};
 pub mod bandpass;
 pub mod bollinger_bands;
 pub mod bollinger_bands_width;
@@ -121,6 +128,16 @@ pub use prb::{
 pub mod pvi;
 pub mod qqe;
 pub mod qstick;
+pub mod range_filter;
+pub use range_filter::{
+    range_filter, range_filter_with_kernel, range_filter_into_slice, RangeFilterInput, RangeFilterOutput, 
+    RangeFilterParams, RangeFilterError, RangeFilterData, RangeFilterBuilder,
+    // Batch API exports
+    RangeFilterBatchRange, RangeFilterBatchBuilder, RangeFilterBatchOutput,
+    range_filter_batch_slice, range_filter_batch_par_slice,
+    // Streaming API exports
+    RangeFilterStream,
+};
 pub mod roc;
 pub use roc::{roc, RocInput, RocOutput, RocParams, RocError, RocBuilder, RocStream, RocBatchBuilder, RocBatchOutput, RocBatchRange};
 pub mod rocp;
@@ -164,10 +181,29 @@ pub mod wad;
 pub mod wavetrend;
 pub mod wclprice;
 pub mod willr;
+pub mod wto;
+pub use wto::{
+    wto, wto_with_kernel, wto_into_slices, WtoInput, WtoOutput, 
+    WtoParams, WtoError, WtoData, WtoBuilder,
+    // Batch API exports
+    WtoBatchRange, WtoBatchBuilder, WtoBatchOutput, wto_batch_slice, wto_batch_candles,
+    // Streaming API exports
+    WtoStream,
+};
 pub mod zscore;
 pub use vpci::{vpci, VpciInput, VpciOutput, VpciParams, VpciError, VpciData, VpciStream, VpciBatchOutput, VpciBatchBuilder, VpciBatchRange};
 #[cfg(feature = "python")]
 pub use vpci::{vpci_py, vpci_batch_py, VpciStreamPy};
+
+// Python exports for migrated indicators
+#[cfg(feature = "python")]
+pub use avsl::{avsl_py, avsl_batch_py, AvslStreamPy};
+
+#[cfg(feature = "python")]
+pub use range_filter::{range_filter_py, range_filter_batch_py, RangeFilterStreamPy};
+
+#[cfg(feature = "python")]
+pub use wto::{wto_py, wto_batch_py, WtoStreamPy};
 #[cfg(feature = "wasm")]
 pub use vpci::{vpci_js, vpci_into, vpci_alloc, vpci_free, vpci_batch_unified_js, vpci_batch_into, VpciContext};
 pub use vidya::{vidya, VidyaInput, VidyaOutput, VidyaParams, VidyaError, VidyaData, VidyaStream, VidyaBatchOutput, VidyaBatchBuilder, VidyaBatchRange, VidyaBuilder};

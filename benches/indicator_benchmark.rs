@@ -11,7 +11,9 @@ use my_project::indicators::moving_averages::{
 	buff_averages::{buff_averages_with_kernel, BuffAveragesBatchBuilder, BuffAveragesInput},
 	cwma::{cwma_with_kernel, CwmaBatchBuilder, CwmaInput},
 	dema::{dema_with_kernel, DemaBatchBuilder, DemaInput},
+	dma::{dma_with_kernel, DmaBatchBuilder, DmaInput},
 	edcf::{edcf_with_kernel, EdcfBatchBuilder, EdcfInput},
+	ehma::{ehma_with_kernel, EhmaBatchBuilder, EhmaInput},
 	ehlers_ecema::{ehlers_ecema_with_kernel, EhlersEcemaBatchBuilder, EhlersEcemaInput},
 	ehlers_itrend::{ehlers_itrend_with_kernel, EhlersITrendBatchBuilder, EhlersITrendInput},
 	ehlers_kama::{ehlers_kama_with_kernel, EhlersKamaBatchBuilder, EhlersKamaInput},
@@ -31,9 +33,11 @@ use my_project::indicators::moving_averages::{
 	maaq::{maaq_with_kernel, MaaqBatchBuilder, MaaqInput},
 	mama::{mama_with_kernel, MamaBatchBuilder, MamaInput},
 	mwdx::{mwdx_with_kernel, MwdxBatchBuilder, MwdxInput},
+	nama::{nama_with_kernel, NamaBatchBuilder, NamaInput},
 	nma::{nma_with_kernel, NmaBatchBuilder, NmaInput},
 	pwma::{pwma_with_kernel, PwmaBatchBuilder, PwmaInput},
 	reflex::{reflex_with_kernel, ReflexBatchBuilder, ReflexInput},
+	sama::{sama_with_kernel, SamaBatchBuilder, SamaInput},
 	sinwma::{sinwma_with_kernel, SinWmaBatchBuilder, SinWmaInput},
 	sma::{sma_with_kernel, SmaBatchBuilder, SmaInput},
 	smma::{smma_with_kernel, SmmaBatchBuilder, SmmaInput},
@@ -54,6 +58,7 @@ use my_project::indicators::moving_averages::{
 	wma::{wma_with_kernel, WmaBatchBuilder, WmaInput},
 	zlema::{zlema_with_kernel, ZlemaBatchBuilder, ZlemaInput},
 };
+
 
 use my_project::indicators::{
 	cci_cycle::{cci_cycle_with_kernel, CciCycleBatchBuilder, CciCycleInput},
@@ -87,6 +92,7 @@ use my_project::indicators::{
 	aroon::{aroon as aroon_raw, AroonInput},
 	aroonosc::{aroon_osc as aroon_osc_raw, AroonOscInput},
 	atr::{atr as atr_raw, AtrInput},
+	avsl::{avsl_with_kernel, AvslBatchBuilder, AvslInput},
 	bandpass::{bandpass as bandpass_raw, BandPassInput},
 	bollinger_bands::{bollinger_bands as bollinger_bands_raw, BollingerBandsInput},
 	bollinger_bands_width::{bollinger_bands_width as bollinger_bands_width_raw, BollingerBandsWidthInput},
@@ -156,6 +162,7 @@ use my_project::indicators::{
 	pvi::{pvi as pvi_raw, PviInput},
 	qqe::{qqe as qqe_raw, QqeInput},
 	qstick::{qstick as qstick_raw, QstickInput},
+	range_filter::{range_filter_with_kernel, RangeFilterBatchBuilder, RangeFilterInput},
 	roc::{roc as roc_raw, RocInput},
 	rocp::{rocp as rocp_raw, RocpInput},
 	rocr::{rocr as rocr_raw, RocrInput},
@@ -193,10 +200,13 @@ use my_project::indicators::{
 	wavetrend::{wavetrend as wavetrend_raw, WavetrendInput},
 	wclprice::{wclprice as wclprice_raw, WclpriceInput},
 	willr::{willr as willr_raw, WillrInput},
+	wto::{wto_with_kernel, WtoBatchBuilder, WtoInput},
 	zscore::{zscore as zscore_raw, ZscoreInput},
 };
 
 use my_project::utilities::data_loader::{read_candles_from_csv, Candles};
+
+// (other_indicators section removed - NAMA moved to moving_averages)
 
 static CANDLES_10K: Lazy<Candles> =
 	Lazy::new(|| read_candles_from_csv("src/data/10kCandles.csv").expect("10 k candles csv"));
@@ -377,6 +387,15 @@ pub type WildersInputS = WildersInput<'static>;
 pub type WillrInputS = WillrInput<'static>;
 pub type WmaInputS = WmaInput<'static>;
 pub type ZlemaInputS = ZlemaInput<'static>;
+
+// Other indicators InputS types
+pub type AvslInputS = AvslInput<'static>;
+pub type DmaInputS = DmaInput<'static>;
+pub type EhmaInputS = EhmaInput<'static>;
+pub type RangeFilterInputS = RangeFilterInput<'static>;
+pub type SamaInputS = SamaInput<'static>;
+pub type WtoInputS = WtoInput<'static>;
+pub type NamaInputS = NamaInput<'static>;
 pub type VamaInputS = VamaInput<'static>;
 pub type HalfTrendInputS = HalfTrendInput<'static>;
 pub type NetMyrsiInputS = NetMyrsiInput<'static>;
@@ -728,12 +747,14 @@ impl_input_len!(
 	WmaInputS,
 	ZlemaInputS,
 	ZscoreInputS,
-	CciCycleInputS,
-	FvgTrailingStopInputS,
-	HalfTrendInputS,
-	NetMyrsiInputS,
-	ReverseRsiInputS,
-	VamaInputS
+	// Other indicators
+	AvslInputS,
+	DmaInputS,
+	EhmaInputS,
+	RangeFilterInputS,
+	SamaInputS,
+	WtoInputS,
+	NamaInputS
 );
 
 bench_wrappers! {
@@ -1025,6 +1046,15 @@ make_kernel_wrappers!(vwma, vwma_with_kernel, VwmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(wilders, wilders_with_kernel, WildersInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(wma, wma_with_kernel, WmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(zlema, zlema_with_kernel, ZlemaInputS; Scalar,Avx2,Avx512);
+
+// Other indicators kernel wrappers
+make_kernel_wrappers!(avsl, avsl_with_kernel, AvslInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(dma, dma_with_kernel, DmaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(ehma, ehma_with_kernel, EhmaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(range_filter, range_filter_with_kernel, RangeFilterInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(sama, sama_with_kernel, SamaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(wto, wto_with_kernel, WtoInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(nama, nama_with_kernel, NamaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(net_myrsi, net_myrsi_with_kernel, NetMyrsiInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(cci_cycle, cci_cycle_with_kernel, CciCycleInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(fvg_trailing_stop, fvg_trailing_stop_with_kernel, FvgTrailingStopInputS; Scalar,Avx2,Avx512);
@@ -1196,6 +1226,15 @@ make_batch_wrappers!(vpwma_batch, VpwmaBatchBuilder, VpwmaInputS; ScalarBatch, A
 make_batch_wrappers!(wilders_batch, WildersBatchBuilder, WildersInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(wma_batch, WmaBatchBuilder, WmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(zlema_batch, ZlemaBatchBuilder, ZlemaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+
+// Other indicators batch wrappers
+make_batch_wrappers!(avsl_batch, AvslBatchBuilder, AvslInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(dma_batch, DmaBatchBuilder, DmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(ehma_batch, EhmaBatchBuilder, EhmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(range_filter_batch, RangeFilterBatchBuilder, RangeFilterInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(sama_batch, SamaBatchBuilder, SamaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(wto_batch, WtoBatchBuilder, WtoInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(nama_batch, NamaBatchBuilder, NamaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(net_myrsi_batch, NetMyrsiBatchBuilder, NetMyrsiInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(cci_cycle_batch, CciCycleBatchBuilder, CciCycleInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 // TODO: FvgTrailingStopInput uses apply_slices() not apply_slice() - needs custom batch wrapper
@@ -1548,6 +1587,56 @@ bench_variants!(
 	zlema_batch_avx512batch,
 );
 
+// Other indicators batch variants
+bench_variants!(
+	avsl_batch => AvslInputS; Some(200);
+	avsl_batch_scalarbatch,
+	avsl_batch_avx2batch,
+	avsl_batch_avx512batch,
+);
+
+bench_variants!(
+	dma_batch => DmaInputS; Some(200);
+	dma_batch_scalarbatch,
+	dma_batch_avx2batch,
+	dma_batch_avx512batch,
+);
+
+bench_variants!(
+	range_filter_batch => RangeFilterInputS; Some(200);
+	range_filter_batch_scalarbatch,
+	range_filter_batch_avx2batch,
+	range_filter_batch_avx512batch,
+);
+
+bench_variants!(
+	ehma_batch => EhmaInputS; Some(200);
+	ehma_batch_scalarbatch,
+	ehma_batch_avx2batch,
+	ehma_batch_avx512batch,
+);
+
+bench_variants!(
+	sama_batch => SamaInputS; Some(200);
+	sama_batch_scalarbatch,
+	sama_batch_avx2batch,
+	sama_batch_avx512batch,
+);
+
+bench_variants!(
+	wto_batch => WtoInputS; Some(200);
+	wto_batch_scalarbatch,
+	wto_batch_avx2batch,
+	wto_batch_avx512batch,
+);
+
+bench_variants!(
+	nama_batch => NamaInputS; Some(30);
+	nama_batch_scalarbatch,
+	nama_batch_avx2batch,
+	nama_batch_avx512batch,
+);
+
 bench_variants!(
 	alma => AlmaInputS; None;
 	alma_scalar,
@@ -1884,6 +1973,56 @@ bench_variants!(
 	zlema_avx512,
 );
 
+// Other indicators single variants
+bench_variants!(
+	avsl => AvslInputS; None;
+	avsl_scalar,
+	avsl_avx2,
+	avsl_avx512,
+);
+
+bench_variants!(
+	dma => DmaInputS; None;
+	dma_scalar,
+	dma_avx2,
+	dma_avx512,
+);
+
+bench_variants!(
+	range_filter => RangeFilterInputS; None;
+	range_filter_scalar,
+	range_filter_avx2,
+	range_filter_avx512,
+);
+
+bench_variants!(
+	ehma => EhmaInputS; None;
+	ehma_scalar,
+	ehma_avx2,
+	ehma_avx512,
+);
+
+bench_variants!(
+	sama => SamaInputS; None;
+	sama_scalar,
+	sama_avx2,
+	sama_avx512,
+);
+
+bench_variants!(
+	wto => WtoInputS; None;
+	wto_scalar,
+	wto_avx2,
+	wto_avx512,
+);
+
+bench_variants!(
+	nama => NamaInputS; None;
+	nama_scalar,
+	nama_avx2,
+	nama_avx512,
+);
+
 bench_variants!(
 	net_myrsi => NetMyrsiInputS; None;
 	net_myrsi_scalar,
@@ -2067,16 +2206,13 @@ criterion_main!(
 	benches_wma_batch,
 	benches_zlema,
 	benches_zlema_batch,
-	benches_net_myrsi,
-	benches_net_myrsi_batch,
-	benches_cci_cycle,
-	benches_cci_cycle_batch,
-	benches_fvg_trailing_stop,
-	// benches_fvg_trailing_stop_batch, // TODO: needs custom batch wrapper
-	benches_halftrend,
-	// benches_halftrend_batch, // TODO: needs custom batch wrapper
-	benches_reverse_rsi,
-	benches_reverse_rsi_batch,
-	benches_vama,
-	benches_vama_batch
+	// Other indicators
+	benches_avsl,
+	benches_avsl_batch,
+	benches_dma,
+	benches_dma_batch,
+	benches_range_filter,
+	benches_range_filter_batch,
+	benches_nama,
+	benches_nama_batch
 );

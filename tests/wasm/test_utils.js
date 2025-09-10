@@ -96,6 +96,34 @@ function assertNoNaN(array, msg = "") {
 
 // Expected outputs from Rust tests - these must match EXACTLY
 const EXPECTED_OUTPUTS = {
+    wto: {
+        defaultParams: { channelLength: 10, averageLength: 21 },
+        last5Values: {
+            wavetrend1: [
+                -31.700919052041584,
+                -31.429599055287365,
+                -33.42650456951316,
+                -32.48187262451018,
+                -39.88701736507456,
+            ],
+            wavetrend2: [
+                -35.68024735,
+                -33.31827192,
+                -32.62715068,
+                -32.25972409,
+                -34.30624855,
+            ],
+            histogram: [
+                3.9793283,
+                1.8886729,
+                -0.7993544,
+                -0.2221492,
+                -5.5807683,
+            ]
+        },
+        warmupPeriod: 20,  // Based on average_length - 1
+        hasThreeOutputs: true
+    },
     mass: {
         defaultParams: { period: 5 },
         last5Values: [
@@ -140,6 +168,31 @@ const EXPECTED_OUTPUTS = {
             59238.16030697,
             59222.63528822,
             59165.14427332
+        ]
+    },
+    sama: {
+        defaultParams: { length: 200, majLength: 14, minLength: 6 },
+        testParams: { length: 50, majLength: 14, minLength: 6 },
+        last5Values: [
+            4438.510011892495,
+            4432.756593411552,
+            4427.661588344437,
+            4422.183920434451,
+            4416.96929689133
+        ],
+        testLast5: [
+            4349.36514574484,
+            4342.003804508042,
+            4338.192552401373,
+            4331.60839768486,
+            4326.283758247442
+        ],
+        reinputLast5: [
+            4427.001774348806,
+            4420.063164565887,
+            4413.379849287151,
+            4406.704628748189,
+            4400.13965972772
         ]
     },
     tradjema: {
@@ -1332,6 +1385,60 @@ const EXPECTED_OUTPUTS = {
             59215.124961889764,
             59103.099969511815
         ]
+    },
+    dma: {
+        defaultParams: {
+            hull_length: 7,
+            ema_length: 20,
+            ema_gain_limit: 50,
+            hull_ma_type: 'WMA'
+        },
+        last5Values: [
+            59404.62489256,
+            59326.48766951,
+            59195.35128538,
+            59153.22811529,
+            58933.88503421
+        ],
+        // Warmup period calculation: max(hull_period-1, ema_period-1) = max(6, 19) = 19
+        warmupPeriod: 19,
+        // Values for constant input test (all values = 100.0)
+        constantValue: 100.0,
+        // Batch test parameters - testing different hull lengths  
+        batchHullLengths: [5, 7, 9, 11],
+        batchHullRange: [5, 11, 2],  // hull_length_range
+        batchEmaRange: [20, 20, 0],  // ema_length_range (fixed)
+        batchGainRange: [50, 50, 0], // ema_gain_limit_range (fixed)
+        // Alternative hull MA types to test
+        hullMaTypes: ['WMA', 'EMA'],
+        // For batch test - default params row should match single calculation
+        batchDefaultRow: [
+            59404.62489256,
+            59326.48766951,
+            59195.35128538,
+            59153.22811529,
+            58933.88503421
+        ]
+    },
+    ehma: {
+        defaultParams: { period: 14 },
+        testData: [
+            59500.0, 59450.0, 59420.0, 59380.0, 59350.0, 
+            59320.0, 59310.0, 59300.0, 59280.0, 59260.0,
+            59250.0, 59240.0, 59230.0, 59220.0, 59210.0,
+            59200.0, 59190.0, 59180.0
+        ],
+        expectedValueAt13: 59309.748,  // Value at index 13 for period=14
+        warmupPeriod: 13,  // period - 1 = 14 - 1 = 13
+        // For period=10 on different data
+        period10Warmup: 9,  // period - 1 = 10 - 1 = 9
+        // For batch processing with different periods
+        batchPeriods: [10, 14, 20, 28],
+        batchRange: [10, 30, 10],  // Start, stop+step, step
+        // Streaming test - values should match batch calculation
+        streamingMatchesBatch: true,
+        // Values for consistency test - running EHMA multiple times should produce same results
+        consistencyTest: true
     },
     ott: {
         defaultParams: { period: 2, percent: 1.4, ma_type: 'VAR' },
