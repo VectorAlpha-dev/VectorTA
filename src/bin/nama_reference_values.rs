@@ -1,4 +1,4 @@
-use my_project::other_indicators::nama::{nama, NamaInput, NamaParams};
+use my_project::indicators::moving_averages::nama::{nama, NamaInput, NamaParams};
 
 fn main() {
     // Test data matching Python/WASM tests

@@ -40,7 +40,8 @@
       "Bash(cmd.exe:*)",
       "Bash(del \"src\\other_indicators\\mod.rs\")",
       "Bash(test_bindings.bat nama)",
-      "Bash(cargo bench:*)"
+      "Bash(cargo bench:*)",
+      "Bash(.test_bindings.bat nama)"
     ],
     "deny": [],
     "ask": [],

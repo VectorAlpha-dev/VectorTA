@@ -22,6 +22,7 @@ pub mod ma;
 pub mod maaq;
 pub mod mama;
 pub mod mwdx;
+pub mod nama;
 pub mod nma;
 pub mod pwma;
 pub mod reflex;
@@ -64,6 +65,13 @@ pub use ehma::{
     EhmaStream,
 };
 
+pub use nama::{
+    nama, nama_with_kernel, nama_into_slice, NamaInput, NamaOutput,
+    NamaParams, NamaError, NamaData, NamaBuilder, NamaStream,
+    // Batch API exports
+    NamaBatchRange, NamaBatchOutput, NamaBatchBuilder, nama_batch_with_kernel,
+};
+
 pub use sama::{
     sama, sama_with_kernel, sama_into_slice, SamaInput, SamaOutput, 
     SamaParams, SamaError, SamaData, SamaBuilder,
@@ -82,4 +90,11 @@ pub use dma::{dma_py, dma_batch_py, DmaStreamPy};
 pub use ehma::{ehma_py, ehma_batch_py, EhmaStreamPy};
 
 #[cfg(feature = "python")]
+pub use nama::{nama_py, nama_batch_py, NamaStreamPy};
+
+#[cfg(feature = "python")]
 pub use sama::{sama_py, sama_batch_py, SamaStreamPy};
+
+// WASM exports
+#[cfg(feature = "wasm")]
+pub use nama::{nama_js, nama_batch_unified_js, nama_alloc, nama_free, nama_into};

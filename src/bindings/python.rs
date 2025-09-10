@@ -346,7 +346,7 @@ use crate::indicators::wto::{wto_py, wto_batch_py, WtoStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::ehma::{ehma_py, ehma_batch_py, EhmaStreamPy};
 #[cfg(feature = "python")]
-use crate::other_indicators::nama::{nama_py, nama_batch_py, NamaStreamPy};
+use crate::indicators::moving_averages::nama::{nama_py, nama_batch_py, NamaStreamPy};
 
 #[pymodule]
 fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {

@@ -30,6 +30,7 @@ use my_project::indicators::moving_averages::{
 	maaq::{maaq_with_kernel, MaaqBatchBuilder, MaaqInput},
 	mama::{mama_with_kernel, MamaBatchBuilder, MamaInput},
 	mwdx::{mwdx_with_kernel, MwdxBatchBuilder, MwdxInput},
+	nama::{nama_with_kernel, NamaBatchBuilder, NamaInput},
 	nma::{nma_with_kernel, NmaBatchBuilder, NmaInput},
 	pwma::{pwma_with_kernel, PwmaBatchBuilder, PwmaInput},
 	reflex::{reflex_with_kernel, ReflexBatchBuilder, ReflexInput},
@@ -176,8 +177,7 @@ use my_project::indicators::{
 
 use my_project::utilities::data_loader::{read_candles_from_csv, Candles};
 
-// Import from other_indicators
-use my_project::other_indicators::nama::{nama_with_kernel, NamaBatchBuilder, NamaInput};
+// (other_indicators section removed - NAMA moved to moving_averages)
 
 static CANDLES_10K: Lazy<Candles> =
 	Lazy::new(|| read_candles_from_csv("src/data/10kCandles.csv").expect("10 k candles csv"));

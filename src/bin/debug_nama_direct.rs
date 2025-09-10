@@ -1,4 +1,4 @@
-use my_project::other_indicators::nama::{nama, nama_into_slice, NamaInput, NamaParams};
+use my_project::indicators::moving_averages::nama::{nama, nama_into_slice, NamaInput, NamaParams};
 use my_project::utilities::data_loader::read_candles_from_csv;
 use my_project::utilities::enums::Kernel;
 
