@@ -77,7 +77,7 @@ pub mod mod_god_mode;
 pub mod mom;
 pub mod moving_averages;
 pub mod other_indicators;
-pub use other_indicators::ehlers_kama::{ehlers_kama, EhlersKamaInput, EhlersKamaOutput, EhlersKamaParams};
+pub use moving_averages::ehlers_kama::{ehlers_kama, EhlersKamaInput, EhlersKamaOutput, EhlersKamaParams};
 pub mod msw;
 pub mod nadaraya_watson_envelope;
 pub mod natr;

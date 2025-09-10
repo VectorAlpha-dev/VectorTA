@@ -13,6 +13,7 @@ use my_project::indicators::moving_averages::{
 	dema::{dema_with_kernel, DemaBatchBuilder, DemaInput},
 	edcf::{edcf_with_kernel, EdcfBatchBuilder, EdcfInput},
 	ehlers_itrend::{ehlers_itrend_with_kernel, EhlersITrendBatchBuilder, EhlersITrendInput},
+	ehlers_kama::{ehlers_kama_with_kernel, EhlersKamaBatchBuilder, EhlersKamaInput},
 	ema::{ema_with_kernel, EmaBatchBuilder, EmaInput},
 	epma::{epma_with_kernel, EpmaBatchBuilder, EpmaInput},
 	frama::{frama_with_kernel, FramaBatchBuilder, FramaInput},
@@ -230,6 +231,7 @@ pub type DxInputS = DxInput<'static>;
 pub type EdcfInputS = EdcfInput<'static>;
 pub type EfiInputS = EfiInput<'static>;
 pub type EhlersITrendInputS = EhlersITrendInput<'static>;
+pub type EhlersKamaInputS = EhlersKamaInput<'static>;
 pub type EmaInputS = EmaInput<'static>;
 pub type EmdInputS = EmdInput<'static>;
 pub type EmvInputS = EmvInput<'static>;
@@ -567,6 +569,7 @@ impl_input_len!(
 	EdcfInputS,
 	EfiInputS,
 	EhlersITrendInputS,
+	EhlersKamaInputS,
 	EmaInputS,
 	EmdInputS,
 	EmvInputS,
@@ -926,6 +929,7 @@ make_kernel_wrappers!(cwma, cwma_with_kernel, CwmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(dema, dema_with_kernel, DemaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(edcf, edcf_with_kernel, EdcfInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(ehlers_itrend, ehlers_itrend_with_kernel, EhlersITrendInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(ehlers_kama, ehlers_kama_with_kernel, EhlersKamaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(ema, ema_with_kernel, EmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(epma, epma_with_kernel, EpmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(frama, frama_with_kernel, FramaInputS; Scalar,Avx2,Avx512);
@@ -993,6 +997,11 @@ make_batch_wrappers!(
 
 make_batch_wrappers!(
 	ehlers_itrend_batch, EhlersITrendBatchBuilder, EhlersITrendInputS;
+	ScalarBatch, Avx2Batch, Avx512Batch
+);
+
+make_batch_wrappers!(
+	ehlers_kama_batch, EhlersKamaBatchBuilder, EhlersKamaInputS;
 	ScalarBatch, Avx2Batch, Avx512Batch
 );
 
@@ -1095,6 +1104,13 @@ bench_variants!(
 	ehlers_itrend_batch_scalarbatch,
 	ehlers_itrend_batch_avx2batch,
 	ehlers_itrend_batch_avx512batch,
+);
+
+bench_variants!(
+	ehlers_kama_batch => EhlersKamaInputS; Some(20);
+	ehlers_kama_batch_scalarbatch,
+	ehlers_kama_batch_avx2batch,
+	ehlers_kama_batch_avx512batch,
 );
 
 bench_variants!(
@@ -1406,6 +1422,13 @@ bench_variants!(
 );
 
 bench_variants!(
+	ehlers_kama => EhlersKamaInputS; None;
+	ehlers_kama_scalar,
+	ehlers_kama_avx2,
+	ehlers_kama_avx512,
+);
+
+bench_variants!(
 	ema => EmaInputS; None;
 	ema_scalar,
 	ema_avx2,
@@ -1692,6 +1715,8 @@ criterion_main!(
 	benches_edcf_batch,
 	benches_ehlers_itrend,
 	benches_ehlers_itrend_batch,
+	benches_ehlers_kama,
+	benches_ehlers_kama_batch,
 	benches_ema,
 	benches_ema_batch,
 	benches_epma,

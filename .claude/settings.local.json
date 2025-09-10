@@ -54,7 +54,9 @@
       "Bash(test_bindings.bat mod_god_mode)",
       "Bash(del test_mod_god_mode_api.py)",
       "Bash(test:*)",
-      "Bash(.test_bindings.bat ehlers_kama)"
+      "Bash(.test_bindings.bat ehlers_kama)",
+      "Bash(call test_bindings.bat willr --wasm)",
+      "Bash(run_wasm_benchmark.bat willr)"
     ],
     "deny": [],
     "ask": [],

@@ -234,7 +234,7 @@ use crate::indicators::moving_averages::jsa::{jsa_batch_py, jsa_py, JsaStreamPy}
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::kama::{kama_batch_py, kama_py, KamaStreamPy};
 #[cfg(feature = "python")]
-use crate::indicators::other_indicators::ehlers_kama::{ehlers_kama_py, ehlers_kama_batch_py, EhlersKamaStreamPy};
+use crate::indicators::moving_averages::ehlers_kama::{ehlers_kama_py, ehlers_kama_batch_py, EhlersKamaStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::linreg::{linreg_batch_py, linreg_py, LinRegStreamPy};
 #[cfg(feature = "python")]

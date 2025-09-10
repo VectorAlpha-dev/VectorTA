@@ -4,6 +4,7 @@ pub mod cwma;
 pub mod dema;
 pub mod edcf;
 pub mod ehlers_itrend;
+pub mod ehlers_kama;
 pub mod ema;
 pub mod epma;
 pub mod frama;
