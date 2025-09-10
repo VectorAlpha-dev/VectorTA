@@ -435,6 +435,11 @@ fn benchmark_rust_indicator(
     }
 
     // Benchmark Tulip implementation
+    #[cfg(not(feature = "talib"))]
+    let has_talib = false;
+    #[cfg(feature = "talib")]
+    let has_talib = std::env::var("TALIB_PATH").is_ok();
+    
     let mut output_buffers: Vec<Vec<f64>> = match indicator.tulip_name {
         "bbands" => vec![vec![0.0; data.len()]; 3], // 3 outputs
         "macd" => vec![vec![0.0; data.len()]; 3],   // 3 outputs  
@@ -473,6 +478,26 @@ fn benchmark_rust_indicator(
         });
     });
 
+    // Benchmark TA-LIB implementation if available
+    #[cfg(feature = "talib")]
+    {
+        if has_talib && indicator.talib_name.is_some() {
+            group.bench_function("talib", |b| {
+                b.iter(|| {
+                    // TA-LIB benchmark would go here when bindings are available
+                    // For now, this is a placeholder
+                    // Example:
+                    // unsafe {
+                    //     let result = TA_SMA(...);
+                    // }
+                    
+                    // Placeholder computation to prevent optimization
+                    let _ = black_box(&data.close[0]);
+                });
+            });
+        }
+    }
+    
     group.finish();
 }
 

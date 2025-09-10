@@ -62,7 +62,10 @@
       "Bash(test:*)",
       "Bash(cmd.exe:*)",
       "Bash(.venv\\Scripts\\python.exe tests\\python\\test_otto.py:*)",
-      "Bash(.test_bindings.bat otto --python)"
+      "Bash(.test_bindings.bat otto --python)",
+      "Bash(del \"C:\\Rust Projects\\my_project-bindings-4\\src\\other_indicators\\otto.rs\")",
+      "WebSearch",
+      "WebFetch(domain:ta-lib.org)"
     ],
     "deny": [],
     "ask": [],

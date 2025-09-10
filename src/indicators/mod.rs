@@ -91,6 +91,15 @@ pub mod msw;
 pub mod natr;
 pub mod nvi;
 pub mod obv;
+pub mod otto;
+pub use otto::{
+    otto, OttoInput, OttoOutput, OttoParams, OttoError, OttoData, OttoBuilder, OttoStream,
+    OttoBatchOutput, OttoBatchBuilder, OttoBatchRange
+};
+#[cfg(feature = "python")]
+pub use otto::{otto_py, otto_batch_py, OttoStreamPy};
+#[cfg(feature = "wasm")]
+pub use otto::{otto_js, otto_batch, otto_alloc, otto_free, otto_into};
 pub mod pfe;
 pub mod percentile_nearest_rank;
 pub use percentile_nearest_rank::{

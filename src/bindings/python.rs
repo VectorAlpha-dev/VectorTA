@@ -14,7 +14,7 @@ use crate::indicators::percentile_nearest_rank::{percentile_nearest_rank_py, per
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::uma::{uma_py, uma_batch_py, UmaStreamPy};
 #[cfg(feature = "python")]
-use crate::other_indicators::otto::{otto_py, otto_batch_py, OttoStreamPy};
+use crate::indicators::otto::{otto_py, otto_batch_py, OttoStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::acosc::{acosc_batch_py, acosc_py, AcoscStreamPy};
 #[cfg(feature = "python")]

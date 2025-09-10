@@ -32,10 +32,12 @@ benchmarks/cross_library/
 On Windows:
 - Visual Studio 2019+ or Build Tools for Visual Studio
 - Rust toolchain (stable)
+- (Optional) TA-LIB - See [TALIB_SETUP.md](TALIB_SETUP.md) for installation guide
 
 On Linux/macOS:
 - GCC or Clang
 - Make
+- (Optional) TA-LIB development libraries
 
 ### Build Steps
 
@@ -44,19 +46,29 @@ On Linux/macOS:
 git submodule update --init --recursive
 ```
 
-2. Build the benchmark:
+2. Build the benchmark (without TA-LIB):
 ```bash
 cd benchmarks/cross_library
 cargo build --release
 ```
 
-Note: TA-Lib requires manual setup on Windows. Download pre-built binaries from ta-lib.org.
+3. Build with TA-LIB support (optional):
+```bash
+# First, install TA-LIB and set TALIB_PATH environment variable
+# See TALIB_SETUP.md for detailed instructions
+cargo build --release --features talib
+```
 
 ## Running Benchmarks
 
-Run all benchmarks:
+Run benchmarks without TA-LIB:
 ```bash
 cargo bench
+```
+
+Run benchmarks with TA-LIB (if installed):
+```bash
+cargo bench --features talib
 ```
 
 Run specific indicator:
@@ -67,6 +79,11 @@ cargo bench -- sma
 Generate HTML report:
 ```bash
 cargo bench -- --save-baseline comparison
+```
+
+Test TA-LIB installation:
+```bash
+cargo run --example test_talib --features talib
 ```
 
 ## Indicators Benchmarked
@@ -89,7 +106,7 @@ The benchmarks measure:
 1. **Direct Rust Performance**: Native Rust function calls
 2. **Rust FFI Performance**: Rust called through C FFI
 3. **Tulip Performance**: C library performance
-4. **TA-Lib Performance**: C library performance (when available)
+4. **TA-Lib Performance**: C library performance (when available with `--features talib`)
 
 Key metrics:
 - Median execution time (ms)
@@ -130,7 +147,12 @@ pub unsafe extern "C" fn rust_indicator(...) -> c_int {
 
 ### Windows Build Issues
 - Ensure Visual Studio or Build Tools are installed
-- For TA-Lib, download pre-built binaries and set LIB/INCLUDE paths
+- For TA-Lib, see [TALIB_SETUP.md](TALIB_SETUP.md) for detailed Windows installation
+
+### TA-LIB Integration Issues
+- Run `cargo run --example test_talib --features talib` to verify installation
+- Check that `TALIB_PATH` environment variable is set correctly
+- Ensure you have the 64-bit version of TA-LIB for 64-bit Rust
 
 ### Missing Indicators
 - Check that the indicator exists in both libraries
@@ -140,3 +162,12 @@ pub unsafe extern "C" fn rust_indicator(...) -> c_int {
 - Ensure release builds with optimizations
 - Check for debug assertions in release mode
 - Verify data alignment for SIMD operations
+
+## TA-LIB Support
+
+TA-LIB integration is optional. The benchmarks work with just Tulip Indicators, but adding TA-LIB provides:
+- Industry-standard comparison baseline
+- Additional indicator implementations
+- Cross-validation of results
+
+See [TALIB_SETUP.md](TALIB_SETUP.md) for installation instructions.

@@ -127,6 +127,7 @@ use my_project::indicators::{
 	natr::{natr as natr_raw, NatrInput},
 	nvi::{nvi as nvi_raw, NviInput},
 	obv::{obv as obv_raw, ObvInput},
+	otto::{otto as otto_raw, OttoInput, OttoBatchBuilder},
 	pfe::{pfe as pfe_raw, PfeInput},
 	percentile_nearest_rank::{percentile_nearest_rank_with_kernel, PercentileNearestRankInput, PercentileNearestRankBatchBuilder},
 	pivot::{pivot as pivot_raw, PivotInput},
@@ -284,6 +285,7 @@ pub type NatrInputS = NatrInput<'static>;
 pub type NmaInputS = NmaInput<'static>;
 pub type NviInputS = NviInput<'static>;
 pub type ObvInputS = ObvInput<'static>;
+pub type OttoInputS = OttoInput<'static>;
 pub type PfeInputS = PfeInput<'static>;
 pub type PercentileNearestRankInputS = PercentileNearestRankInput<'static>;
 pub type PivotInputS = PivotInput<'static>;
@@ -622,6 +624,7 @@ impl_input_len!(
 	NmaInputS,
 	NviInputS,
 	ObvInputS,
+	OttoInputS,
 	PercentileNearestRankInputS,
 	PfeInputS,
 	PivotInputS,
@@ -760,6 +763,7 @@ bench_wrappers! {
 	(natr_bench, natr_raw, NatrInputS),
 	(nvi_bench, nvi_raw, NviInputS),
 	(obv_bench, obv_raw, ObvInputS),
+	(otto_bench, otto_raw, OttoInputS),
 	(pfe_bench, pfe_raw, PfeInputS),
 	(pivot_bench, pivot_raw, PivotInputS),
 	(pma_bench, pma_raw, PmaInputS),
@@ -883,6 +887,7 @@ bench_scalars!(
 	natr_bench   => NatrInputS,
 	nvi_bench    => NviInputS,
 	obv_bench    => ObvInputS,
+	otto_bench   => OttoInputS,
 	pfe_bench    => PfeInputS,
 	pivot_bench  => PivotInputS,
 	pma_bench    => PmaInputS,
@@ -1129,6 +1134,8 @@ fn percentile_nearest_rank_batch_avx512batch(input: &PercentileNearestRankInputS
         .apply(slice)?;
     Ok(())
 }
+
+make_batch_wrappers!(otto_batch, OttoBatchBuilder, OttoInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 
 bench_variants!(
 	alma_batch => AlmaInputS; Some(232);
@@ -1443,6 +1450,13 @@ bench_variants!(
 	chandelier_exit_batch_scalarbatch,
 	chandelier_exit_batch_avx2batch,
 	chandelier_exit_batch_avx512batch,
+);
+
+bench_variants!(
+	otto_batch => OttoInputS; Some(227);
+	otto_batch_scalarbatch,
+	otto_batch_avx2batch,
+	otto_batch_avx512batch,
 );
 
 bench_variants!(
@@ -1876,6 +1890,7 @@ criterion_main!(
 	benches_zlema_batch,
 	benches_chandelier_exit,
 	benches_chandelier_exit_batch,
+	benches_otto_batch,
 	benches_percentile_nearest_rank,
 	benches_percentile_nearest_rank_batch
 );
