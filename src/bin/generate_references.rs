@@ -102,7 +102,7 @@ use my_project::indicators::vpt::{vpt, VptInput};
 use my_project::indicators::stddev::{stddev, StdDevInput, StdDevParams};
 use my_project::indicators::var::{var, VarInput, VarParams};
 use my_project::indicators::wclprice::{wclprice, WclpriceInput};
-use my_project::other_indicators::sama::{sama, SamaInput, SamaParams};
+use my_project::indicators::moving_averages::sama::{sama, SamaInput, SamaParams};
 use my_project::utilities::data_loader::read_candles_from_csv;
 use serde_json::json;
 use std::env;

@@ -334,17 +334,19 @@ use crate::indicators::rvi::{rvi_batch_py, rvi_py, RviStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::vlma::{vlma_batch_py, vlma_py, VlmaStreamPy};
 #[cfg(feature = "python")]
-use crate::other_indicators::avsl::{avsl_py, avsl_batch_py, AvslStreamPy};
+use crate::indicators::avsl::{avsl_py, avsl_batch_py, AvslStreamPy};
 #[cfg(feature = "python")]
-use crate::other_indicators::dma::{dma_py, dma_batch_py, DmaStreamPy};
+use crate::indicators::moving_averages::dma::{dma_py, dma_batch_py, DmaStreamPy};
 #[cfg(feature = "python")]
-use crate::other_indicators::range_filter::{range_filter_py, range_filter_batch_py, RangeFilterStreamPy};
+use crate::indicators::range_filter::{range_filter_py, range_filter_batch_py, RangeFilterStreamPy};
 #[cfg(feature = "python")]
-use crate::other_indicators::sama::{sama_py, sama_batch_py, SamaStreamPy};
+use crate::indicators::moving_averages::sama::{sama_py, sama_batch_py, SamaStreamPy};
 #[cfg(feature = "python")]
-use crate::other_indicators::wto::{wto_py, wto_batch_py, WtoStreamPy};
+use crate::indicators::wto::{wto_py, wto_batch_py, WtoStreamPy};
 #[cfg(feature = "python")]
-use crate::other_indicators::ehma::{ehma_py, ehma_batch_py, EhmaStreamPy};
+use crate::indicators::moving_averages::ehma::{ehma_py, ehma_batch_py, EhmaStreamPy};
+#[cfg(feature = "python")]
+use crate::other_indicators::nama::{nama_py, nama_batch_py, NamaStreamPy};
 
 #[pymodule]
 fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -974,6 +976,11 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(ehma_py, m)?)?;
 	m.add_function(wrap_pyfunction!(ehma_batch_py, m)?)?;
 	m.add_class::<EhmaStreamPy>()?;
+
+	// Register NAMA functions with their user-facing names
+	m.add_function(wrap_pyfunction!(nama_py, m)?)?;
+	m.add_function(wrap_pyfunction!(nama_batch_py, m)?)?;
+	m.add_class::<NamaStreamPy>()?;
 
 	// Register CCI functions with their user-facing names
 	m.add_function(wrap_pyfunction!(cci_py, m)?)?;

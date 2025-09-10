@@ -37,7 +37,10 @@
       "Bash(test_bindings.bat uma)",
       "Bash(del srcother_indicatorsuma.rs)",
       "Bash(test_bindings.bat ehma)",
-      "Bash(cmd.exe:*)"
+      "Bash(cmd.exe:*)",
+      "Bash(del \"src\\other_indicators\\mod.rs\")",
+      "Bash(test_bindings.bat nama)",
+      "Bash(cargo bench:*)"
     ],
     "deny": [],
     "ask": [],

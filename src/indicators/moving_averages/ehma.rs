@@ -548,44 +548,7 @@ unsafe fn ehma_avx512_impl(
 }
 
 // ==================== WASM SIMD128 IMPLEMENTATION ====================
-#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-#[inline]
-pub unsafe fn ehma_simd128(
-    data: &[f64],
-    weights: &[f64],
-    period: usize,
-    first_val: usize,
-    inv_coef: f64,
-    out: &mut [f64],
-) {
-    use core::arch::wasm32::*;
-    
-    let p2 = period & !1;
-    
-    for i in (first_val + period - 1)..data.len() {
-        let start = i + 1 - period;
-        let window = &data[start..start + period];
-        
-        let mut sum_vec = f64x2_splat(0.0);
-        
-        // Process 2 elements at a time
-        for j in (0..p2).step_by(2) {
-            let d_vec = v128_load(&window[j] as *const f64 as *const v128);
-            let w_vec = v128_load(&weights[j] as *const f64 as *const v128);
-            sum_vec = f64x2_add(sum_vec, f64x2_mul(d_vec, w_vec));
-        }
-        
-        // Extract and sum components
-        let mut sum = f64x2_extract_lane::<0>(sum_vec) + f64x2_extract_lane::<1>(sum_vec);
-        
-        // Handle remaining element if period is odd
-        if p2 < period {
-            sum += window[p2] * weights[p2];
-        }
-        
-        out[i] = sum * inv_coef;
-    }
-}
+// Note: This function is already defined above. Duplicate removed.
 
 // ==================== STREAMING API ====================
 #[derive(Debug, Clone)]
