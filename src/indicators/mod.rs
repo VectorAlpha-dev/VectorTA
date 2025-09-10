@@ -14,6 +14,8 @@ pub mod bollinger_bands;
 pub mod bollinger_bands_width;
 pub mod bop;
 pub mod cci;
+pub mod cci_cycle;
+pub use cci_cycle::{cci_cycle, CciCycleInput, CciCycleOutput, CciCycleParams};
 pub mod cfo;
 pub mod cg;
 pub mod chande;
@@ -49,7 +51,11 @@ pub mod er;
 pub mod eri;
 pub mod fisher;
 pub mod fosc;
+pub mod fvg_trailing_stop;
+pub use fvg_trailing_stop::{fvg_trailing_stop, FvgTrailingStopInput, FvgTrailingStopOutput, FvgTrailingStopParams};
 pub mod gatorosc;
+pub mod halftrend;
+pub use halftrend::{halftrend, HalfTrendInput, HalfTrendOutput, HalfTrendParams};
 pub mod ift_rsi;
 pub mod kaufmanstop;
 pub mod kdj;
@@ -77,6 +83,8 @@ pub mod mom;
 pub mod moving_averages;
 pub mod msw;
 pub mod natr;
+pub mod net_myrsi;
+pub use net_myrsi::{net_myrsi, NetMyrsiInput, NetMyrsiOutput, NetMyrsiParams};
 pub mod nvi;
 pub mod obv;
 pub mod pfe;
@@ -90,6 +98,8 @@ pub mod roc;
 pub use roc::{roc, RocInput, RocOutput, RocParams, RocError, RocBuilder, RocStream, RocBatchBuilder, RocBatchOutput, RocBatchRange};
 pub mod rocp;
 pub mod rocr;
+pub mod reverse_rsi;
+pub use reverse_rsi::{reverse_rsi, ReverseRsiInput, ReverseRsiOutput, ReverseRsiParams};
 pub mod rsi;
 pub mod rsmk;
 pub mod rsx;
@@ -175,5 +185,5 @@ pub use ui::{ui, UiInput, UiOutput, UiParams};
 pub use moving_averages::{
 	alma, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass, highpass_2_pole, hma, hwma, jma,
 	jsa, kama, linreg, maaq, mama, mwdx, nma, pwma, reflex, sinwma, sma, smma, sqwma, srwma, supersmoother,
-	supersmoother_3_pole, swma, tema, tilson, trendflex, trima, vpwma, vwap, vwma, wilders, wma, zlema,
+	supersmoother_3_pole, swma, tema, tilson, trendflex, trima, volatility_adjusted_ma, vpwma, vwap, vwma, wilders, wma, zlema,
 };

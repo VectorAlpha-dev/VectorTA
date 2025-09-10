@@ -108,7 +108,8 @@ class CriterionComparableBenchmark:
             'nma', 'nvi', 'pvi', 'pma', 'pwma', 'reflex', 'sar', 'roc', 'sinwma', 'sma', 'smma', 'sqwma', 'srwma', 'stc', 'tsi', 'minmax',
             'supersmoother_3_pole', 'supersmoother', 'supertrend', 'swma', 'tema', 'tilson',
             'trendflex', 'ttm_trend', 'trima', 'vidya', 'vlma', 'vqwma', 'vwmacd', 'adxr', 'aroon', 'bollinger_bands_width', 'atr', 'cci', 'bop',
-            'cg', 'cfo', 'coppock', 'marketefi', 'midpoint', 'vi', 'vpt', 'cmo', 'dec_osc', 'macd', 'mfi', 'natr', 'ppo', 'var', 'vpci', 'wclprice', 'damiani_volatmeter', 'emd', 'gatorosc', 'wavetrend', 'chop', 'cvi', 'di', 'efi', 'fosc', 'ui', 'vosc', 'dti', 'dx', 'keltner', 'rvi'  # Added missing indicators
+            'cg', 'cfo', 'coppock', 'marketefi', 'midpoint', 'vi', 'vpt', 'cmo', 'dec_osc', 'macd', 'mfi', 'natr', 'ppo', 'var', 'vpci', 'wclprice', 'damiani_volatmeter', 'emd', 'gatorosc', 'wavetrend', 'chop', 'cvi', 'di', 'efi', 'fosc', 'ui', 'vosc', 'dti', 'dx', 'keltner', 'rvi',
+            'cci_cycle', 'fvg_trailing_stop', 'halftrend', 'net_myrsi', 'reverse_rsi', 'vama'  # Added missing indicators
         ]
         
         size_map = {'10k': '10k', '100k': '100k', '1M': '1m'}
@@ -119,7 +120,8 @@ class CriterionComparableBenchmark:
                            'sma_batch', 'stddev_batch', 'ema_batch', 'dema_batch', 'dpo_batch', 'er_batch', 'deviation_batch', 'dti_batch', 'edcf_batch', 'ehlers_itrend_batch', 'eri_batch', 'tema_batch', 
                            'hma_batch', 'ift_rsi_batch', 'kvo_batch', 'kst_batch', 'lrsi_batch', 'mean_ad_batch', 'mom_batch', 'pivot_batch', 'rocp_batch', 'stochf_batch', 'cwma_batch', 'adxr_batch', 'adx_batch', 'adosc_batch', 'aroon_batch', 'linearreg_intercept_batch',
                            'bollinger_bands_width_batch', 'apo_batch', 'bandpass_batch', 'atr_batch', 'cci_batch', 'bop_batch', 
-                           'trendflex_batch', 'mass_batch', 'midprice_batch', 'obv_batch', 'qstick_batch', 'stc_batch', 'tsi_batch', 'vidya_batch']
+                           'trendflex_batch', 'mass_batch', 'midprice_batch', 'obv_batch', 'qstick_batch', 'stc_batch', 'tsi_batch', 'vidya_batch',
+                           'cci_cycle_batch', 'fvg_trailing_stop_batch', 'halftrend_batch', 'net_myrsi_batch', 'reverse_rsi_batch', 'vama_batch']
         all_indicators = indicators_to_find + batch_indicators
         
         for indicator in all_indicators:
@@ -393,6 +395,12 @@ class CriterionComparableBenchmark:
             ('dx', lambda: my_project.dx(data['high'], data['low'], data['close'], 14)),
             ('fisher', lambda: my_project.fisher(data['high'], data['low'], 9)),
             ('rvi', lambda: my_project.rvi(data['close'], 10, 14, 1, 0)),
+            ('cci_cycle', lambda: my_project.cci_cycle((data['high'] + data['low'] + data['close']) / 3, 14)),
+            ('fvg_trailing_stop', lambda: my_project.fvg_trailing_stop(data['high'], data['low'], data['close'], 3, 1.0)),
+            ('halftrend', lambda: my_project.halftrend(data['high'], data['low'], data['close'], 2, 2, 0)),
+            ('net_myrsi', lambda: my_project.net_myrsi(data['close'], 14)),
+            ('reverse_rsi', lambda: my_project.reverse_rsi(data['close'], 14, 50.0)),
+            ('vama', lambda: my_project.vama(data['close'], 9, 2.0)),
         ]
         
         # Filter if requested

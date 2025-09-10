@@ -112,7 +112,11 @@
       "Bash(.venv/Scripts/python:*)",
       "Bash(test_bindings.bat net_myrsi --python)",
       "Bash(test_bindings.bat reverse_rsi --python)",
-      "Bash(.venvScriptspython tests/python/test_reverse_rsi.py)"
+      "Bash(.venvScriptspython tests/python/test_reverse_rsi.py)",
+      "Bash(test_bindings.bat ehlers_ecema --python)",
+      "Bash(.venvScriptspython get_ecema_values.py)",
+      "Bash(del get_ecema_values.py)",
+      "Bash(del test_wasm_gain.js)"
     ],
     "deny": [],
     "ask": [],

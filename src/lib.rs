@@ -6,8 +6,8 @@
 #![allow(clippy::needless_range_loop)]
 
 pub mod indicators;
-pub mod other_indicators;
 pub mod utilities;
+pub mod other_indicators;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod _rayon_one_big_stack {

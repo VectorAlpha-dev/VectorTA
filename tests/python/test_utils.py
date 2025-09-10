@@ -418,6 +418,42 @@ EXPECTED_OUTPUTS = {
             0.0
         ]
     },
+    'ehlers_ecema': {
+        'default_params': {'length': 20, 'gain_limit': 50},
+        # Values from real CSV data (2018-09-01-2024-Bitfinex_Spot-4h.csv)
+        'last_5_values': [
+            59368.42792078,
+            59311.07435861,
+            59212.84931613,
+            59221.59111692,
+            58978.72640292
+        ],
+        # Note: Pine mode currently produces same values as regular mode
+        'pine_mode_last_5': [
+            59368.42792078,
+            59311.07435861,
+            59212.84931613,
+            59221.59111692,
+            58978.72640292
+        ],
+        # Re-input test (length=10, gain_limit=30)
+        'reinput_params': {'length': 10, 'gain_limit': 30},
+        'reinput_last_5': [
+            59324.20351585,
+            59282.79818999,
+            59207.38519971,
+            59194.22630265,
+            59025.67038012
+        ],
+        'warmup_period': 19,  # length - 1 = 20 - 1 = 19
+        'pine_warmup_period': 0,  # Pine mode starts from first value
+        # Batch test parameters
+        'batch_params': {
+            'length_range': (15, 25, 5),  # 15, 20, 25
+            'gain_limit_range': (40, 60, 10)  # 40, 50, 60
+        },
+        'batch_combinations': 9  # 3 lengths * 3 gain_limits
+    },
     'trima': {
         'default_params': {'period': 30},
         'last_5_values': [

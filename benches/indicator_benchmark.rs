@@ -50,9 +50,15 @@ use my_project::indicators::moving_averages::{
 	zlema::{zlema_with_kernel, ZlemaBatchBuilder, ZlemaInput},
 };
 
-use my_project::other_indicators::{
+use my_project::indicators::{
+	cci_cycle::{cci_cycle, CciCycleInput},
+	fvg_trailing_stop::{fvg_trailing_stop, FvgTrailingStopInput},
 	halftrend::{halftrend as halftrend_raw, HalfTrendInput},
 	net_myrsi::{net_myrsi_with_kernel, NetMyrsiBatchBuilder, NetMyrsiInput},
+	reverse_rsi::{reverse_rsi, ReverseRsiInput},
+};
+
+use my_project::indicators::moving_averages::{
 	volatility_adjusted_ma::{vama as vama_raw, VamaInput},
 };
 
@@ -344,6 +350,9 @@ pub type ZlemaInputS = ZlemaInput<'static>;
 pub type VamaInputS = VamaInput<'static>;
 pub type HalfTrendInputS = HalfTrendInput<'static>;
 pub type NetMyrsiInputS = NetMyrsiInput<'static>;
+pub type CciCycleInputS = CciCycleInput<'static>;
+pub type FvgTrailingStopInputS = FvgTrailingStopInput<'static>;
+pub type ReverseRsiInputS = ReverseRsiInput<'static>;
 pub type ZscoreInputS = ZscoreInput<'static>;
 
 macro_rules! impl_input_len {
@@ -674,7 +683,13 @@ impl_input_len!(
 	WillrInputS,
 	WmaInputS,
 	ZlemaInputS,
-	ZscoreInputS
+	ZscoreInputS,
+	CciCycleInputS,
+	FvgTrailingStopInputS,
+	HalfTrendInputS,
+	NetMyrsiInputS,
+	ReverseRsiInputS,
+	VamaInputS
 );
 
 bench_wrappers! {
@@ -910,7 +925,12 @@ bench_scalars!(
 	wavetrend_bench => WavetrendInputS,
 	wclprice_bench => WclpriceInputS,
 	willr_bench     => WillrInputS,
-	zscore_bench    => ZscoreInputS
+	zscore_bench    => ZscoreInputS,
+	cci_cycle_bench => CciCycleInputS,
+	fvg_trailing_stop_bench => FvgTrailingStopInputS,
+	halftrend_bench => HalfTrendInputS,
+	reverse_rsi_bench => ReverseRsiInputS,
+	vama_bench => VamaInputS
 );
 
 make_kernel_wrappers!(alma, alma_with_kernel, AlmaInputS; Scalar,Avx2,Avx512);
@@ -957,6 +977,11 @@ make_kernel_wrappers!(wilders, wilders_with_kernel, WildersInputS; Scalar,Avx2,A
 make_kernel_wrappers!(wma, wma_with_kernel, WmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(zlema, zlema_with_kernel, ZlemaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(net_myrsi, net_myrsi_with_kernel, NetMyrsiInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(cci_cycle, cci_cycle_with_kernel, CciCycleInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(fvg_trailing_stop, fvg_trailing_stop_with_kernel, FvgTrailingStopInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(halftrend, halftrend_with_kernel, HalfTrendInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(reverse_rsi, reverse_rsi_with_kernel, ReverseRsiInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(vama, vama_with_kernel, VamaInputS; Scalar,Avx2,Avx512);
 
 make_batch_wrappers!(
 	alma_batch, AlmaBatchBuilder, AlmaInputS;
@@ -1041,6 +1066,11 @@ make_batch_wrappers!(wilders_batch, WildersBatchBuilder, WildersInputS; ScalarBa
 make_batch_wrappers!(wma_batch, WmaBatchBuilder, WmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(zlema_batch, ZlemaBatchBuilder, ZlemaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(net_myrsi_batch, NetMyrsiBatchBuilder, NetMyrsiInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(cci_cycle_batch, CciCycleBatchBuilder, CciCycleInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(fvg_trailing_stop_batch, FvgTsBatchBuilder, FvgTrailingStopInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(halftrend_batch, HalfTrendBatchBuilder, HalfTrendInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(reverse_rsi_batch, ReverseRsiBatchBuilder, ReverseRsiInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(vama_batch, VamaBatchBuilder, VamaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 
 bench_variants!(
 	alma_batch => AlmaInputS; Some(232);
@@ -1651,6 +1681,76 @@ bench_variants!(
 	net_myrsi_batch_avx512batch
 );
 
+bench_variants!(
+	cci_cycle => CciCycleInputS; None;
+	cci_cycle_scalar,
+	cci_cycle_avx2,
+	cci_cycle_avx512,
+);
+
+bench_variants!(
+	cci_cycle_batch => CciCycleInputS; Some(227);
+	cci_cycle_batch_scalarbatch,
+	cci_cycle_batch_avx2batch,
+	cci_cycle_batch_avx512batch
+);
+
+bench_variants!(
+	fvg_trailing_stop => FvgTrailingStopInputS; None;
+	fvg_trailing_stop_scalar,
+	fvg_trailing_stop_avx2,
+	fvg_trailing_stop_avx512,
+);
+
+bench_variants!(
+	fvg_trailing_stop_batch => FvgTrailingStopInputS; Some(100);
+	fvg_trailing_stop_batch_scalarbatch,
+	fvg_trailing_stop_batch_avx2batch,
+	fvg_trailing_stop_batch_avx512batch
+);
+
+bench_variants!(
+	halftrend => HalfTrendInputS; None;
+	halftrend_scalar,
+	halftrend_avx2,
+	halftrend_avx512,
+);
+
+bench_variants!(
+	halftrend_batch => HalfTrendInputS; Some(100);
+	halftrend_batch_scalarbatch,
+	halftrend_batch_avx2batch,
+	halftrend_batch_avx512batch
+);
+
+bench_variants!(
+	reverse_rsi => ReverseRsiInputS; None;
+	reverse_rsi_scalar,
+	reverse_rsi_avx2,
+	reverse_rsi_avx512,
+);
+
+bench_variants!(
+	reverse_rsi_batch => ReverseRsiInputS; Some(27);
+	reverse_rsi_batch_scalarbatch,
+	reverse_rsi_batch_avx2batch,
+	reverse_rsi_batch_avx512batch
+);
+
+bench_variants!(
+	vama => VamaInputS; None;
+	vama_scalar,
+	vama_avx2,
+	vama_avx512,
+);
+
+bench_variants!(
+	vama_batch => VamaInputS; Some(232);
+	vama_batch_scalarbatch,
+	vama_batch_avx2batch,
+	vama_batch_avx512batch
+);
+
 criterion_main!(
 	benches_scalar,
 	benches_alma,
@@ -1739,5 +1839,15 @@ criterion_main!(
 	benches_zlema,
 	benches_zlema_batch,
 	benches_net_myrsi,
-	benches_net_myrsi_batch
+	benches_net_myrsi_batch,
+	benches_cci_cycle,
+	benches_cci_cycle_batch,
+	benches_fvg_trailing_stop,
+	benches_fvg_trailing_stop_batch,
+	benches_halftrend,
+	benches_halftrend_batch,
+	benches_reverse_rsi,
+	benches_reverse_rsi_batch,
+	benches_vama,
+	benches_vama_batch
 );

@@ -102,6 +102,7 @@ use my_project::indicators::vpt::{vpt, VptInput};
 use my_project::indicators::stddev::{stddev, StdDevInput, StdDevParams};
 use my_project::indicators::var::{var, VarInput, VarParams};
 use my_project::indicators::wclprice::{wclprice, WclpriceInput};
+use my_project::other_indicators::ehlers_ecema::{ehlers_ecema, EhlersEcemaInput, EhlersEcemaParams};
 use my_project::utilities::data_loader::read_candles_from_csv;
 use serde_json::json;
 use std::env;
@@ -355,6 +356,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 				"params": {
 					"warmup_bars": warmup_bars,
 					"max_dc_period": max_dc_period
+				},
+				"values": result.values,
+				"length": result.values.len()
+			})
+		}
+		"ehlers_ecema" => {
+			let params = EhlersEcemaParams::default();
+			let length = params.length.unwrap_or(20);
+			let gain_limit = params.gain_limit.unwrap_or(50);
+			let pine_compatible = params.pine_compatible.unwrap_or(false);
+			let confirmed_only = params.confirmed_only.unwrap_or(false);
+			let input = EhlersEcemaInput::from_candles(&candles, source, params);
+			let result = ehlers_ecema(&input)?;
+			json!({
+				"indicator": "ehlers_ecema",
+				"source": source,
+				"params": {
+					"length": length,
+					"gain_limit": gain_limit,
+					"pine_compatible": pine_compatible,
+					"confirmed_only": confirmed_only
 				},
 				"values": result.values,
 				"length": result.values.len()

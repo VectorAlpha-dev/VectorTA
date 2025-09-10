@@ -35,6 +35,7 @@ pub mod tema;
 pub mod tilson;
 pub mod trendflex;
 pub mod trima;
+pub mod volatility_adjusted_ma;
 pub mod vpwma;
 pub mod vwap;
 pub mod vwma;

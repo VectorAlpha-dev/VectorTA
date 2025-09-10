@@ -295,6 +295,42 @@ const EXPECTED_OUTPUTS = {
             { rsiPeriod: 50, wmaPeriod: 50 }
         ]
     },
+    ehlersEcema: {
+        defaultParams: { length: 20, gainLimit: 50 },
+        // Values from real CSV data (2018-09-01-2024-Bitfinex_Spot-4h.csv)
+        last5Values: [
+            59368.42792078,
+            59311.07435861,
+            59212.84931613,
+            59221.59111692,
+            58978.72640292
+        ],
+        // Note: Pine mode currently produces same values as regular mode
+        pineModeLast5: [
+            59368.42792078,
+            59311.07435861,
+            59212.84931613,
+            59221.59111692,
+            58978.72640292
+        ],
+        // Re-input test (length=10, gainLimit=30)
+        reinputParams: { length: 10, gainLimit: 30 },
+        reinputLast5: [
+            59324.20351585,
+            59282.79818999,
+            59207.38519971,
+            59194.22630265,
+            59025.67038012
+        ],
+        warmupPeriod: 19,  // length - 1 = 20 - 1 = 19
+        pineWarmupPeriod: 0,  // Pine mode starts from first value
+        // Batch test parameters
+        batchParams: {
+            lengthRange: [15, 25, 5],  // 15, 20, 25
+            gainLimitRange: [40, 60, 10]  // 40, 50, 60
+        },
+        batchCombinations: 9  // 3 lengths * 3 gainLimits
+    },
     tilson: {
         defaultParams: { period: 5, volume_factor: 0.0 },
         last5Values: [

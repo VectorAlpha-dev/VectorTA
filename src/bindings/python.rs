@@ -38,17 +38,19 @@ use crate::indicators::bop::{bop_batch_py, bop_py, BopStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::cci::{cci_batch_py, cci_py, CciStreamPy};
 #[cfg(feature = "python")]
-use crate::other_indicators::cci_cycle::{cci_cycle_batch_py, cci_cycle_py, CciCycleStreamPy};
+use crate::indicators::cci_cycle::{cci_cycle_batch_py, cci_cycle_py, CciCycleStreamPy};
 #[cfg(feature = "python")]
-use crate::other_indicators::halftrend::{halftrend_batch_py, halftrend_py, halftrend_tuple_py, HalfTrendStreamPy};
+use crate::indicators::halftrend::{halftrend_batch_py, halftrend_py, halftrend_tuple_py, HalfTrendStreamPy};
 #[cfg(feature = "python")]
-use crate::other_indicators::volatility_adjusted_ma::{vama_batch_py, vama_py, VamaStreamPy};
+use crate::indicators::moving_averages::volatility_adjusted_ma::{vama_batch_py, vama_py, VamaStreamPy};
 #[cfg(feature = "python")]
-use crate::other_indicators::fvg_trailing_stop::{fvg_trailing_stop_py, fvg_trailing_stop_batch_py, FvgTrailingStopStreamPy};
+use crate::indicators::fvg_trailing_stop::{fvg_trailing_stop_py, fvg_trailing_stop_batch_py, FvgTrailingStopStreamPy};
 #[cfg(feature = "python")]
-use crate::other_indicators::net_myrsi::{net_myrsi_py, net_myrsi_batch_py, NetMyrsiStreamPy};
+use crate::indicators::net_myrsi::{net_myrsi_py, net_myrsi_batch_py, NetMyrsiStreamPy};
 #[cfg(feature = "python")]
-use crate::other_indicators::reverse_rsi::{reverse_rsi_py, reverse_rsi_batch_py, ReverseRsiStreamPy};
+use crate::indicators::reverse_rsi::{reverse_rsi_py, reverse_rsi_batch_py, ReverseRsiStreamPy};
+#[cfg(feature = "python")]
+use crate::other_indicators::ehlers_ecema::{ehlers_ecema_py, ehlers_ecema_batch_py, EhlersEcemaStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::cfo::{cfo_batch_py, cfo_py, CfoStreamPy};
 #[cfg(feature = "python")]
@@ -980,6 +982,11 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(reverse_rsi_py, m)?)?;
 	m.add_function(wrap_pyfunction!(reverse_rsi_batch_py, m)?)?;
 	m.add_class::<ReverseRsiStreamPy>()?;
+	
+	// Register Ehlers Error Correcting EMA functions
+	m.add_function(wrap_pyfunction!(ehlers_ecema_py, m)?)?;
+	m.add_function(wrap_pyfunction!(ehlers_ecema_batch_py, m)?)?;
+	m.add_class::<EhlersEcemaStreamPy>()?;
 
 	// Register CFO functions with their user-facing names
 	m.add_function(wrap_pyfunction!(cfo_py, m)?)?;
