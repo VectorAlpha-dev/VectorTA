@@ -2,6 +2,7 @@ pub mod alma;
 pub mod cwma;
 pub mod dema;
 pub mod edcf;
+pub mod ehlers_ecema;
 pub mod ehlers_itrend;
 pub mod ema;
 pub mod epma;

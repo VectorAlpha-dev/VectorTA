@@ -1,2 +1,1 @@
-pub mod ehlers_ecema;
-pub use ehlers_ecema::{ehlers_ecema, EhlersEcemaInput, EhlersEcemaOutput, EhlersEcemaParams};
+// This module is now empty as all indicators have been moved to the main indicators folder

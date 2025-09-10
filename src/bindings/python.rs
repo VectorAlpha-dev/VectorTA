@@ -50,7 +50,7 @@ use crate::indicators::net_myrsi::{net_myrsi_py, net_myrsi_batch_py, NetMyrsiStr
 #[cfg(feature = "python")]
 use crate::indicators::reverse_rsi::{reverse_rsi_py, reverse_rsi_batch_py, ReverseRsiStreamPy};
 #[cfg(feature = "python")]
-use crate::other_indicators::ehlers_ecema::{ehlers_ecema_py, ehlers_ecema_batch_py, EhlersEcemaStreamPy};
+use crate::indicators::moving_averages::ehlers_ecema::{ehlers_ecema_py, ehlers_ecema_batch_py, EhlersEcemaStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::cfo::{cfo_batch_py, cfo_py, CfoStreamPy};
 #[cfg(feature = "python")]

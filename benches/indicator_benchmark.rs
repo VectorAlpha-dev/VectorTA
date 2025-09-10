@@ -11,6 +11,7 @@ use my_project::indicators::moving_averages::{
 	cwma::{cwma_with_kernel, CwmaBatchBuilder, CwmaInput},
 	dema::{dema_with_kernel, DemaBatchBuilder, DemaInput},
 	edcf::{edcf_with_kernel, EdcfBatchBuilder, EdcfInput},
+	ehlers_ecema::{ehlers_ecema_with_kernel, EhlersEcemaBatchBuilder, EhlersEcemaInput},
 	ehlers_itrend::{ehlers_itrend_with_kernel, EhlersITrendBatchBuilder, EhlersITrendInput},
 	ema::{ema_with_kernel, EmaBatchBuilder, EmaInput},
 	epma::{epma_with_kernel, EpmaBatchBuilder, EpmaInput},
@@ -51,15 +52,15 @@ use my_project::indicators::moving_averages::{
 };
 
 use my_project::indicators::{
-	cci_cycle::{cci_cycle, CciCycleInput},
-	fvg_trailing_stop::{fvg_trailing_stop, FvgTrailingStopInput},
-	halftrend::{halftrend as halftrend_raw, HalfTrendInput},
+	cci_cycle::{cci_cycle_with_kernel, CciCycleBatchBuilder, CciCycleInput},
+	fvg_trailing_stop::{fvg_trailing_stop_with_kernel, FvgTsBatchBuilder, FvgTrailingStopInput},
+	halftrend::{halftrend_with_kernel, HalfTrendBatchBuilder, HalfTrendInput},
 	net_myrsi::{net_myrsi_with_kernel, NetMyrsiBatchBuilder, NetMyrsiInput},
-	reverse_rsi::{reverse_rsi, ReverseRsiInput},
+	reverse_rsi::{reverse_rsi_with_kernel, ReverseRsiBatchBuilder, ReverseRsiInput},
 };
 
 use my_project::indicators::moving_averages::{
-	volatility_adjusted_ma::{vama as vama_raw, VamaInput},
+	volatility_adjusted_ma::{vama_with_kernel, VamaBatchBuilder, VamaInput},
 };
 
 use my_project::indicators::{
@@ -234,6 +235,7 @@ pub type DtiInputS = DtiInput<'static>;
 pub type DxInputS = DxInput<'static>;
 pub type EdcfInputS = EdcfInput<'static>;
 pub type EfiInputS = EfiInput<'static>;
+pub type EhlersEcemaInputS = EhlersEcemaInput<'static>;
 pub type EhlersITrendInputS = EhlersITrendInput<'static>;
 pub type EmaInputS = EmaInput<'static>;
 pub type EmdInputS = EmdInput<'static>;
@@ -572,6 +574,7 @@ impl_input_len!(
 	DxInputS,
 	EdcfInputS,
 	EfiInputS,
+	EhlersEcemaInputS,
 	EhlersITrendInputS,
 	EmaInputS,
 	EmdInputS,
@@ -925,18 +928,14 @@ bench_scalars!(
 	wavetrend_bench => WavetrendInputS,
 	wclprice_bench => WclpriceInputS,
 	willr_bench     => WillrInputS,
-	zscore_bench    => ZscoreInputS,
-	cci_cycle_bench => CciCycleInputS,
-	fvg_trailing_stop_bench => FvgTrailingStopInputS,
-	halftrend_bench => HalfTrendInputS,
-	reverse_rsi_bench => ReverseRsiInputS,
-	vama_bench => VamaInputS
+	zscore_bench    => ZscoreInputS
 );
 
 make_kernel_wrappers!(alma, alma_with_kernel, AlmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(cwma, cwma_with_kernel, CwmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(dema, dema_with_kernel, DemaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(edcf, edcf_with_kernel, EdcfInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(ehlers_ecema, ehlers_ecema_with_kernel, EhlersEcemaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(ehlers_itrend, ehlers_itrend_with_kernel, EhlersITrendInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(ema, ema_with_kernel, EmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(epma, epma_with_kernel, EpmaInputS; Scalar,Avx2,Avx512);
@@ -1004,6 +1003,11 @@ make_batch_wrappers!(
 );
 
 make_batch_wrappers!(
+	ehlers_ecema_batch, EhlersEcemaBatchBuilder, EhlersEcemaInputS;
+	ScalarBatch, Avx2Batch, Avx512Batch
+);
+
+make_batch_wrappers!(
 	ehlers_itrend_batch, EhlersITrendBatchBuilder, EhlersITrendInputS;
 	ScalarBatch, Avx2Batch, Avx512Batch
 );
@@ -1067,8 +1071,10 @@ make_batch_wrappers!(wma_batch, WmaBatchBuilder, WmaInputS; ScalarBatch, Avx2Bat
 make_batch_wrappers!(zlema_batch, ZlemaBatchBuilder, ZlemaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(net_myrsi_batch, NetMyrsiBatchBuilder, NetMyrsiInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(cci_cycle_batch, CciCycleBatchBuilder, CciCycleInputS; ScalarBatch, Avx2Batch, Avx512Batch);
-make_batch_wrappers!(fvg_trailing_stop_batch, FvgTsBatchBuilder, FvgTrailingStopInputS; ScalarBatch, Avx2Batch, Avx512Batch);
-make_batch_wrappers!(halftrend_batch, HalfTrendBatchBuilder, HalfTrendInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+// TODO: FvgTrailingStopInput uses apply_slices() not apply_slice() - needs custom batch wrapper
+// make_batch_wrappers!(fvg_trailing_stop_batch, FvgTsBatchBuilder, FvgTrailingStopInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+// TODO: HalfTrendInput doesn't implement AsRef - needs custom batch wrapper  
+// make_batch_wrappers!(halftrend_batch, HalfTrendBatchBuilder, HalfTrendInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(reverse_rsi_batch, ReverseRsiBatchBuilder, ReverseRsiInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(vama_batch, VamaBatchBuilder, VamaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 
@@ -1098,6 +1104,20 @@ bench_variants!(
    edcf_batch_scalarbatch,
    edcf_batch_avx2batch,
    edcf_batch_avx512batch,
+);
+
+bench_variants!(
+	ehlers_ecema => EhlersEcemaInputS; None;
+	ehlers_ecema_scalar,
+	ehlers_ecema_avx2,
+	ehlers_ecema_avx512,
+);
+
+bench_variants!(
+	ehlers_ecema_batch => EhlersEcemaInputS; Some(227);
+	ehlers_ecema_batch_scalarbatch,
+	ehlers_ecema_batch_avx2batch,
+	ehlers_ecema_batch_avx512batch,
 );
 
 bench_variants!(
@@ -1702,12 +1722,13 @@ bench_variants!(
 	fvg_trailing_stop_avx512,
 );
 
-bench_variants!(
-	fvg_trailing_stop_batch => FvgTrailingStopInputS; Some(100);
-	fvg_trailing_stop_batch_scalarbatch,
-	fvg_trailing_stop_batch_avx2batch,
-	fvg_trailing_stop_batch_avx512batch
-);
+// TODO: FvgTrailingStop needs custom batch wrapper
+// bench_variants!(
+// 	fvg_trailing_stop_batch => FvgTrailingStopInputS; Some(100);
+// 	fvg_trailing_stop_batch_scalarbatch,
+// 	fvg_trailing_stop_batch_avx2batch,
+// 	fvg_trailing_stop_batch_avx512batch
+// );
 
 bench_variants!(
 	halftrend => HalfTrendInputS; None;
@@ -1716,12 +1737,13 @@ bench_variants!(
 	halftrend_avx512,
 );
 
-bench_variants!(
-	halftrend_batch => HalfTrendInputS; Some(100);
-	halftrend_batch_scalarbatch,
-	halftrend_batch_avx2batch,
-	halftrend_batch_avx512batch
-);
+// TODO: HalfTrend needs custom batch wrapper
+// bench_variants!(
+// 	halftrend_batch => HalfTrendInputS; Some(100);
+// 	halftrend_batch_scalarbatch,
+// 	halftrend_batch_avx2batch,
+// 	halftrend_batch_avx512batch
+// );
 
 bench_variants!(
 	reverse_rsi => ReverseRsiInputS; None;
@@ -1761,6 +1783,8 @@ criterion_main!(
 	benches_dema_batch,
 	benches_edcf,
 	benches_edcf_batch,
+	benches_ehlers_ecema,
+	benches_ehlers_ecema_batch,
 	benches_ehlers_itrend,
 	benches_ehlers_itrend_batch,
 	benches_ema,
@@ -1843,9 +1867,9 @@ criterion_main!(
 	benches_cci_cycle,
 	benches_cci_cycle_batch,
 	benches_fvg_trailing_stop,
-	benches_fvg_trailing_stop_batch,
+	// benches_fvg_trailing_stop_batch, // TODO: needs custom batch wrapper
 	benches_halftrend,
-	benches_halftrend_batch,
+	// benches_halftrend_batch, // TODO: needs custom batch wrapper
 	benches_reverse_rsi,
 	benches_reverse_rsi_batch,
 	benches_vama,
