@@ -1,0 +1,675 @@
+   Compiling cross-library-benchmark v0.1.0 (C:\Rust Projects\my_project-bindings-4\benchmarks\cross_library)
+warning: unused import: `Table`
+ --> src\report.rs:6:14
+  |
+6 | use tabled::{Table, Tabled};
+  |              ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `LibraryType`
+ --> src\json_export.rs:6:52
+  |
+6 | use crate::unified_benchmark::{UnifiedMeasurement, LibraryType};
+  |                                                    ^^^^^^^^^^^
+
+warning: unused import: `crate::benchmark_methodology::ComparisonMode`
+ --> src\json_export.rs:7:5
+  |
+7 | use crate::benchmark_methodology::ComparisonMode;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::slice`
+  --> src\lib.rs:46:9
+   |
+46 |     use std::slice;
+   |         ^^^^^^^^^^
+
+warning: `cross-library-benchmark` (lib) generated 4 warnings (run `cargo fix --lib -p cross-library-benchmark` to apply 4 suggestions)
+warning: unused import: `std::collections::HashSet`
+ --> examples\generate_measure_collect.rs:4:5
+  |
+4 | use std::collections::HashSet;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: `cross-library-benchmark` (example "generate_measure_collect") generated 1 warning (run `cargo fix --example "generate_measure_collect"` to apply 1 suggestion)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 10.56s
+     Running `target\debug\examples\generate_measure_collect.exe`
+// Generated measure_and_collect function
+fn measure_and_collect(indicator: &IndicatorMapping, data: &CandleData, _size_name: &str) {
+    let iterations = 10;
+    let candles = create_candles(data);
+    
+    // Measure Rust Native
+    match indicator.rust_name {
+        "sma" => {
+            let input = SmaInput::from_slice(&data.close, SmaParams { period: Some(14) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(sma::sma(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "ema" => {
+            let input = EmaInput::from_slice(&data.close, EmaParams { period: Some(14) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(ema::ema(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "rsi" => {
+            let input = RsiInput::from_slice(&data.close, RsiParams { period: Some(14) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(rsi::rsi(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "bollinger_bands" => {
+            let input = BollingerBandsInput::from_slice(&data.close, BollingerBandsParams { period: Some(20), devup: Some(2.0), devdn: Some(2.0), matype: Some("sma".to_string()), devtype: Some(0) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(bollinger_bands::bollinger_bands(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "macd" => {
+            let input = MacdInput::from_slice(&data.close, MacdParams { fast_period: Some(12), slow_period: Some(26), signal_period: Some(9), ma_type: None });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(macd::macd(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "atr" => {
+            let input = AtrInput::from_candles(&candles, AtrParams { length: Some(14) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(atr::atr(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "stoch" => {
+            let input = StochInput::from_candles(&candles, StochParams { fastk_period: Some(14), slowk_period: Some(3), slowk_matype: None, slowd_period: Some(3), slowd_matype: None });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(stoch::stoch(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "aroon" => {
+            let input = AroonInput::from_candles(&candles, AroonParams { length: Some(14) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(aroon::aroon(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "adx" => {
+            let input = AdxInput::from_candles(&candles, AdxParams { period: Some(14) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(adx::adx(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "cci" => {
+            let input = CciInput::from_candles(&candles, "hlc3", CciParams { period: Some(20) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(cci::cci(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "dema" => {
+            let input = DemaInput::from_slice(&data.close, DemaParams { period: Some(14) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(dema::dema(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "tema" => {
+            let input = TemaInput::from_slice(&data.close, TemaParams { period: Some(14) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(tema::tema(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "wma" => {
+            let input = WmaInput::from_slice(&data.close, WmaParams { period: Some(14) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(wma::wma(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "kama" => {
+            let input = KamaInput::from_slice(&data.close, KamaParams { period: Some(14) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(kama::kama(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "trima" => {
+            let input = TrimaInput::from_slice(&data.close, TrimaParams { period: Some(14) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(trima::trima(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "hma" => {
+            let input = HmaInput::from_slice(&data.close, HmaParams { period: Some(14) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(hma::hma(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "zlema" => {
+            let input = ZlemaInput::from_slice(&data.close, ZlemaParams { period: Some(14) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(zlema::zlema(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "vwma" => {
+            let input = VwmaInput::from_candles(&candles, "close", VwmaParams { period: Some(14) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(vwma::vwma(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "wilders" => {
+            let input = WildersInput::from_slice(&data.close, WildersParams { period: Some(14) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(wilders::wilders(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "apo" => {
+            let input = ApoInput::from_slice(&data.close, ApoParams { fast: Some(12), slow: Some(26), matype: None });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(apo::apo(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "cmo" => {
+            let input = CmoInput::from_slice(&data.close, CmoParams { period: Some(14) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(cmo::cmo(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "dpo" => {
+            let input = DpoInput::from_slice(&data.close, DpoParams { period: Some(14) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(dpo::dpo(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "mom" => {
+            let input = MomInput::from_slice(&data.close, MomParams { period: Some(10) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(mom::mom(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "ppo" => {
+            let input = PpoInput::from_slice(&data.close, PpoParams { fast_period: Some(12), slow_period: Some(26), ma_type: None });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(ppo::ppo(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "roc" => {
+            let input = RocInput::from_slice(&data.close, RocParams { period: Some(10) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(roc::roc(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "rocr" => {
+            let input = RocrInput::from_slice(&data.close, RocrParams { period: Some(10) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(rocr::rocr(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "rocp" => {
+            let input = RocpInput::from_slice(&data.close, RocpParams { period: Some(10) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(rocp::rocp(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "willr" => {
+            let input = WillrInput::from_candles(&candles, WillrParams { period: Some(14) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(willr::willr(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "ad" => {
+            let input = AdInput::from_candles(&candles, AdParams {});
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(ad::ad(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "adosc" => {
+            let input = AdoscInput::from_candles(&candles, AdoscParams { fast_period: Some(3), slow_period: Some(10) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(adosc::adosc(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "obv" => {
+            let input = ObvInput::from_candles(&candles, ObvParams {});
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(obv::obv(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "mfi" => {
+            let input = MfiInput::from_candles(&candles, "hlc3", MfiParams { period: Some(14) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(mfi::mfi(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "ao" => {
+            let input = AoInput::from_candles(&candles, "hl2", AoParams { short_period: Some(5), long_period: Some(34) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(ao::ao(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "bop" => {
+            let input = BopInput::from_candles(&candles, BopParams {});
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(bop::bop(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "natr" => {
+            let input = NatrInput::from_candles(&candles, NatrParams { period: Some(14) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(natr::natr(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "stddev" => {
+            let input = StddevInput::from_slice(&data.close, StddevParams { period: Some(5) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(stddev::stddev(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "var" => {
+            let input = VarInput::from_slice(&data.close, VarParams { period: Some(5) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(var::var(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "ultosc" => {
+            let input = UltoscInput::from_candles(&candles, UltoscParams { short_period: Some(7), medium_period: Some(14), long_period: Some(28) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(ultosc::ultosc(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "adxr" => {
+            let input = AdxrInput::from_candles(&candles, AdxrParams { period: Some(14) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(adxr::adxr(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "aroonosc" => {
+            let input = AroonoscInput::from_candles(&candles, AroonoscParams { period: Some(14) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(aroonosc::aroonosc(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "di" => {
+            let input = DiInput::from_candles(&candles, DiParams { period: Some(14) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(di::di(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "dm" => {
+            let input = DmInput::from_candles(&candles, DmParams { period: Some(14) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(dm::dm(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "dx" => {
+            let input = DxInput::from_candles(&candles, DxParams { period: Some(14) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(dx::dx(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "fisher" => {
+            let input = FisherInput::from_candles(&candles, "hl2", FisherParams { period: Some(14) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(fisher::fisher(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "fosc" => {
+            let input = FoscInput::from_slice(&data.close, FoscParams { period: Some(14) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(fosc::fosc(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "kvo" => {
+            let input = KvoInput::from_candles(&candles, KvoParams { short_period: Some(34), long_period: Some(55), signal_period: Some(13) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(kvo::kvo(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "linearreg_slope" => {
+            let input = LinearregSlopeInput::from_slice(&data.close, LinearregSlopeParams { period: Some(14) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(linearreg_slope::linearreg_slope(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "linearreg_intercept" => {
+            let input = LinearregInterceptInput::from_slice(&data.close, LinearregInterceptParams { period: Some(14) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(linearreg_intercept::linearreg_intercept(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "mass" => {
+            let input = MassInput::from_candles(&candles, "hl2", MassParams { high_period: Some(9), low_period: Some(25) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(mass::mass(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "medprice" => {
+            let input = MedpriceInput::from_candles(&candles, MedpriceParams {});
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(medprice::medprice(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "midpoint" => {
+            let input = MidpointInput::from_slice(&data.close, MidpointParams { period: Some(14) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(midpoint::midpoint(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "midprice" => {
+            let input = MidpriceInput::from_candles(&candles, MidpriceParams { period: Some(14) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(midprice::midprice(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "nvi" => {
+            let input = NviInput::from_candles(&candles, NviParams {});
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(nvi::nvi(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "pvi" => {
+            let input = PviInput::from_candles(&candles, PviParams {});
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(pvi::pvi(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "qstick" => {
+            let input = QstickInput::from_candles(&candles, QstickParams { period: Some(14) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(qstick::qstick(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "sar" => {
+            let input = SarInput::from_candles(&candles, SarParams { acceleration: Some(0.02), maximum: Some(0.2) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(sar::sar(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "srsi" => {
+            let input = SrsiInput::from_slice(&data.close, SrsiParams { rsi_period: Some(14), stoch_period: Some(14), k_period: Some(3), d_period: Some(3) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(srsi::srsi(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "stochf" => {
+            let input = StochfInput::from_candles(&candles, StochfParams { fastk_period: Some(5), fastd_period: Some(3), fastd_matype: None });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(stochf::stochf(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "trix" => {
+            let input = TrixInput::from_slice(&data.close, TrixParams { period: Some(14) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(trix::trix(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "tsf" => {
+            let input = TsfInput::from_slice(&data.close, TsfParams { period: Some(14) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(tsf::tsf(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "vidya" => {
+            let input = VidyaInput::from_slice(&data.close, VidyaParams { short_period: Some(2), long_period: Some(5), alpha: Some(0.2) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(vidya::vidya(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "vosc" => {
+            let input = VoscInput::from_candles(&candles, VoscParams { short_period: Some(5), long_period: Some(10) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(vosc::vosc(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "wad" => {
+            let input = WadInput::from_candles(&candles, WadParams {});
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(wad::wad(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "wclprice" => {
+            let input = WclpriceInput::from_candles(&candles, WclpriceParams {});
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(wclprice::wclprice(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "cvi" => {
+            let input = CviInput::from_candles(&candles, CviParams { period: Some(14) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(cvi::cvi(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "emv" => {
+            let input = EmvInput::from_candles(&candles, EmvParams {});
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(emv::emv(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "marketefi" => {
+            let input = MarketefiInput::from_candles(&candles, MarketefiParams {});
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(marketefi::marketefi(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "minmax" => {
+            let input = MinmaxInput::from_slice(&data.close, MinmaxParams { period: Some(14) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(minmax::minmax(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        "msw" => {
+            let input = MswInput::from_slice(&data.close, MswParams { period: Some(14) });
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = black_box(msw::msw(&input));
+            }
+            let duration = start.elapsed() / iterations as u32;
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());
+        }
+        _ => {}  // Skip unmapped indicators
+    }
+    
+    // Measure Tulip (existing code remains the same)
+    unsafe {
+        // ... (keep existing Tulip measurement code)
+    }
+}

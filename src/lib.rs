@@ -8,6 +8,9 @@
 pub mod indicators;
 pub mod utilities;
 
+#[cfg(feature = "cuda")]
+pub mod cuda;
+
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod _rayon_one_big_stack {
 	use ctor::ctor;

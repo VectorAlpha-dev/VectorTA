@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
+#[cfg(feature = "html-reports")]
 use plotters::prelude::*;
 use tabled::{Table, Tabled};
 use serde::{Deserialize, Serialize};
@@ -130,9 +131,12 @@ impl ReportGenerator {
         // Add charts
         html.push_str("<h2>Performance Charts</h2>\n");
         
-        // Generate and embed charts
-        self.generate_comparison_chart("comparison_chart.png")?;
-        html.push_str("<img src='comparison_chart.png' alt='Performance Comparison Chart'>\n");
+        // Generate and embed charts (only when html-reports feature is enabled)
+        #[cfg(feature = "html-reports")]
+        {
+            self.generate_comparison_chart("comparison_chart.png")?;
+            html.push_str("<img src='comparison_chart.png' alt='Performance Comparison Chart'>\n");
+        }
 
         // Add summary statistics
         html.push_str("<h2>Summary</h2>\n<ul>\n");
@@ -177,6 +181,7 @@ impl ReportGenerator {
         Ok(())
     }
 
+    #[cfg(feature = "html-reports")]
     fn generate_comparison_chart(&self, filename: &str) -> Result<(), Box<dyn std::error::Error>> {
         let root = BitMapBackend::new(filename, (1024, 768)).into_drawing_area();
         root.fill(&WHITE)?;
@@ -199,6 +204,12 @@ impl ReportGenerator {
         // TODO: Add actual data plotting
 
         root.present()?;
+        Ok(())
+    }
+
+    // Stub when html-reports feature is disabled
+    #[cfg(not(feature = "html-reports"))]
+    fn generate_comparison_chart(&self, _filename: &str) -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     }
 

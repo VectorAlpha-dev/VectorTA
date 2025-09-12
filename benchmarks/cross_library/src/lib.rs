@@ -11,6 +11,21 @@ pub mod rust_ffi;
 // Report generation module
 pub mod report;
 
+// FFI overhead measurement module
+pub mod ffi_overhead;
+
+// Benchmark methodology module
+pub mod benchmark_methodology;
+
+// Unified benchmark system
+pub mod unified_benchmark;
+
+// JSON export functionality
+pub mod json_export;
+
+// Benchmark collector for aggregating results
+pub mod benchmark_collector;
+
 // Include generated bindings
 include!(concat!(env!("OUT_DIR"), "/tulip_bindings.rs"));
 
@@ -108,19 +123,7 @@ pub mod tulip {
 
 // Module for TA-Lib wrappers (if available)
 #[cfg(feature = "talib")]
-pub mod talib {
-    use super::*;
-    
-    // TA-Lib wrapper implementations will go here
-    pub unsafe fn call_sma(
-        _input: &[f64],
-        _period: i32,
-        _output: &mut [f64],
-    ) -> Result<(), String> {
-        // Placeholder - actual implementation depends on TA-Lib bindings
-        Err("TA-Lib not implemented yet".to_string())
-    }
-}
+pub mod talib_wrapper;
 
 // Common benchmark utilities
 pub mod utils {
