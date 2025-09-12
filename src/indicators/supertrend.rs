@@ -337,6 +337,30 @@ fn supertrend_compute_into(
 }
 
 pub fn supertrend_with_kernel(input: &SuperTrendInput, kernel: Kernel) -> Result<SuperTrendOutput, SuperTrendError> {
+	// Use classic kernel for default parameters
+	let (high, low, close) = input.as_hlc();
+	let period = input.get_period();
+	let factor = input.get_factor();
+	
+	let chosen = match kernel {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+	
+	// Use classic kernel for default parameters with scalar kernel
+	if chosen == Kernel::Scalar && period == 10 && (factor - 3.0).abs() < f64::EPSILON {
+		let len = high.len();
+		let mut trend = alloc_with_nan_prefix(len, 0);
+		let mut changed = alloc_with_nan_prefix(len, 0);
+		
+		unsafe {
+			supertrend_scalar_classic(high, low, close, period, factor, &mut trend, &mut changed)?;
+		}
+		
+		return Ok(SuperTrendOutput { trend, changed });
+	}
+	
+	// Regular implementation
 	let (high, low, close, period, factor, first_valid_idx, atr_values, chosen) = 
 		supertrend_prepare(input, kernel)?;
 
@@ -566,6 +590,157 @@ pub unsafe fn supertrend_avx512_long(
 		trend,
 		changed,
 	);
+}
+
+/// Classic kernel optimization for SuperTrend with inline ATR calculation
+/// Eliminates function call overhead for ATR operation
+#[inline]
+pub unsafe fn supertrend_scalar_classic(
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	period: usize,
+	factor: f64,
+	trend_out: &mut [f64],
+	changed_out: &mut [f64],
+) -> Result<(), SuperTrendError> {
+	let n = high.len();
+	
+	// Find first valid index
+	let mut first_valid = None;
+	for i in 0..n {
+		if high[i].is_finite() && low[i].is_finite() && close[i].is_finite() {
+			first_valid = Some(i);
+			break;
+		}
+	}
+	
+	let first_valid = first_valid.ok_or(SuperTrendError::AllValuesNaN)?;
+	
+	if n - first_valid < period {
+		return Err(SuperTrendError::NotEnoughValidData {
+			needed: period,
+			valid: n - first_valid,
+		});
+	}
+	
+	// Initialize NaN prefix
+	let warmup = first_valid + period - 1;
+	for i in 0..warmup.min(n) {
+		trend_out[i] = f64::NAN;
+		changed_out[i] = f64::NAN;
+	}
+	
+	// Step 1: Calculate ATR inline (Wilder's method)
+	let mut tr_values = vec![0.0; n];
+	
+	// Calculate True Range values
+	if first_valid < n {
+		tr_values[first_valid] = high[first_valid] - low[first_valid];
+	}
+	
+	for i in (first_valid + 1)..n {
+		let high_low = high[i] - low[i];
+		let high_close = (high[i] - close[i - 1]).abs();
+		let low_close = (low[i] - close[i - 1]).abs();
+		tr_values[i] = high_low.max(high_close).max(low_close);
+	}
+	
+	// Calculate ATR using Wilder's smoothing
+	let mut atr_values = vec![f64::NAN; n];
+	
+	// Initial ATR is simple average of first 'period' TR values
+	let mut atr_sum = 0.0;
+	for i in first_valid..(first_valid + period).min(n) {
+		atr_sum += tr_values[i];
+	}
+	
+	if first_valid + period <= n {
+		atr_values[first_valid + period - 1] = atr_sum / period as f64;
+		
+		// Continue with Wilder's smoothing
+		let alpha = 1.0 / period as f64;
+		let alpha_1minus = 1.0 - alpha;
+		
+		for i in (first_valid + period)..n {
+			atr_values[i] = alpha * tr_values[i] + alpha_1minus * atr_values[i - 1];
+		}
+	}
+	
+	// Step 2: Calculate SuperTrend bands
+	if warmup >= n {
+		return Ok(());
+	}
+	
+	// Initialize first valid point
+	let half_range = (high[warmup] + low[warmup]) / 2.0;
+	let mut prev_upper_band = half_range + factor * atr_values[warmup];
+	let mut prev_lower_band = half_range - factor * atr_values[warmup];
+	
+	// Set initial trend based on close position
+	if close[warmup] <= prev_upper_band {
+		trend_out[warmup] = prev_upper_band;
+	} else {
+		trend_out[warmup] = prev_lower_band;
+	}
+	changed_out[warmup] = 0.0;
+	
+	// Process remaining points
+	for i in (warmup + 1)..n {
+		let half_range = (high[i] + low[i]) / 2.0;
+		let upper_basic = half_range + factor * atr_values[i];
+		let lower_basic = half_range - factor * atr_values[i];
+		
+		// Update bands based on previous close
+		let prev_close = close[i - 1];
+		let mut curr_upper_band = upper_basic;
+		let mut curr_lower_band = lower_basic;
+		
+		if prev_close <= prev_upper_band {
+			curr_upper_band = upper_basic.min(prev_upper_band);
+		}
+		if prev_close >= prev_lower_band {
+			curr_lower_band = lower_basic.max(prev_lower_band);
+		}
+		
+		// Determine current trend and change flag
+		let prev_trend = trend_out[i - 1];
+		let curr_close = close[i];
+		
+		if (prev_trend - prev_upper_band).abs() < f64::EPSILON {
+			// Previous trend was upper band
+			if curr_close <= curr_upper_band {
+				trend_out[i] = curr_upper_band;
+				changed_out[i] = 0.0;
+			} else {
+				trend_out[i] = curr_lower_band;
+				changed_out[i] = 1.0;
+			}
+		} else if (prev_trend - prev_lower_band).abs() < f64::EPSILON {
+			// Previous trend was lower band
+			if curr_close >= curr_lower_band {
+				trend_out[i] = curr_lower_band;
+				changed_out[i] = 0.0;
+			} else {
+				trend_out[i] = curr_upper_band;
+				changed_out[i] = 1.0;
+			}
+		} else {
+			// Fallback (shouldn't happen in normal operation)
+			if curr_close <= curr_upper_band {
+				trend_out[i] = curr_upper_band;
+			} else {
+				trend_out[i] = curr_lower_band;
+			}
+			changed_out[i] = 0.0;
+		}
+		
+		// Update previous bands for next iteration
+		prev_upper_band = curr_upper_band;
+		prev_lower_band = curr_lower_band;
+	}
+	
+	Ok(())
 }
 
 // Streaming (stateful) implementation for parity

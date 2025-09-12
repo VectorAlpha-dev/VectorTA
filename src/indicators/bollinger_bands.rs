@@ -326,6 +326,14 @@ pub fn bollinger_bands_compute_into(
 	out_m: &mut [f64],
 	out_l: &mut [f64],
 ) -> Result<(), BollingerBandsError> {
+	// Use classic kernel for SMA
+	if matype == "sma" || matype == "SMA" {
+		unsafe {
+			bb_row_scalar_classic_sma(data, period, devtype, devup, devdn, first, out_u, out_m, out_l);
+		}
+		return Ok(());
+	}
+	
 	// Precompute middle and deviation once to avoid any per-row panics.
 	let middle = ma(matype, MaData::Slice(data), period)
 		.map_err(|e| BollingerBandsError::UnderlyingFunctionFailed(e.to_string()))?;
@@ -491,6 +499,85 @@ pub unsafe fn bollinger_bands_avx2(
 	bollinger_bands_scalar(data, matype, ma_data, period, devtype, dev_input, devup, devdn)
 }
 
+/// Classic kernel - optimized loop-jammed implementation for SMA
+unsafe fn bb_row_scalar_classic_sma(
+	data: &[f64],
+	period: usize,
+	devtype: usize,
+	devup: f64,
+	devdn: f64,
+	first: usize,
+	out_u: &mut [f64],
+	out_m: &mut [f64],
+	out_l: &mut [f64],
+) {
+	// Direct inline SMA calculation
+	let n = data.len();
+	let warmup_end = first + period - 1;
+	
+	if warmup_end >= n {
+		return;
+	}
+	
+	// Initialize SMA
+	let mut sum = 0.0;
+	for j in 0..period {
+		sum += data[first + j];
+	}
+	let mut sma_val = sum / period as f64;
+	
+	// Initialize standard deviation calculation
+	let mut sum_sq = 0.0;
+	for j in 0..period {
+		let val = data[first + j];
+		sum_sq += val * val;
+	}
+	
+	// Compute first valid point
+	let mean = sma_val;
+	let variance = if devtype == 0 {
+		// Population variance
+		sum_sq / period as f64 - mean * mean
+	} else {
+		// Sample variance
+		(sum_sq - period as f64 * mean * mean) / (period - 1) as f64
+	};
+	let stddev = variance.max(0.0).sqrt();
+	
+	out_m[warmup_end] = mean;
+	out_u[warmup_end] = mean + devup * stddev;
+	out_l[warmup_end] = mean - devdn * stddev;
+	
+	// Rolling window for remaining values
+	for i in (warmup_end + 1)..n {
+		let old_val = data[i - period];
+		let new_val = data[i];
+		
+		// Update SMA
+		sum += new_val - old_val;
+		sma_val = sum / period as f64;
+		
+		// Update sum of squares
+		sum_sq += new_val * new_val - old_val * old_val;
+		
+		// Compute standard deviation
+		let mean = sma_val;
+		let variance = if devtype == 0 {
+			// Population variance
+			sum_sq / period as f64 - mean * mean
+		} else {
+			// Sample variance  
+			(sum_sq - period as f64 * mean * mean) / (period - 1) as f64
+		};
+		let stddev = variance.max(0.0).sqrt();
+		
+		out_m[i] = mean;
+		out_u[i] = mean + devup * stddev;
+		out_l[i] = mean - devdn * stddev;
+	}
+}
+
+/// Regular kernel - uses function calls for flexibility with any MA type
 unsafe fn bb_row_scalar(
 	data: &[f64],
 	matype: &str,
@@ -503,6 +590,12 @@ unsafe fn bb_row_scalar(
 	out_m: &mut [f64],
 	out_l: &mut [f64],
 ) {
+	// Use classic kernel for SMA
+	if matype == "sma" || matype == "SMA" {
+		bb_row_scalar_classic_sma(data, period, devtype, devup, devdn, first, out_u, out_m, out_l);
+		return;
+	}
+	
 	// SAFETY: This function must write to all elements from (first + period - 1) onwards
 	// Since this is called from bollinger_bands_compute_into which already handles errors,
 	// we can use expect here knowing the computation should succeed

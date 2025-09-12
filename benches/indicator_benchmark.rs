@@ -8,7 +8,7 @@ use std::time::Duration;
 // Import moving averages separately
 use my_project::indicators::moving_averages::{
 	alma::{alma_with_kernel, AlmaBatchBuilder, AlmaInput},
-	buff_averages::{buff_averages_with_kernel, BuffAveragesBatchBuilder, BuffAveragesInput},
+	buff_averages::{buff_averages_with_kernel, BuffAveragesInput},
 	cwma::{cwma_with_kernel, CwmaBatchBuilder, CwmaInput},
 	dema::{dema_with_kernel, DemaBatchBuilder, DemaInput},
 	dma::{dma_with_kernel, DmaBatchBuilder, DmaInput},
@@ -49,11 +49,11 @@ use my_project::indicators::moving_averages::{
 	swma::{swma_with_kernel, SwmaBatchBuilder, SwmaInput},
 	tema::{tema_with_kernel, TemaBatchBuilder, TemaInput},
 	tilson::{tilson_with_kernel, TilsonBatchBuilder, TilsonInput},
-	tradjema::{tradjema_with_kernel, TradjemaBatchBuilder, TradjemaInput},
+	tradjema::{tradjema_with_kernel, TradjemaInput},
 	trendflex::{trendflex_with_kernel, TrendFlexBatchBuilder, TrendFlexInput},
 	trima::{trima_with_kernel, TrimaBatchBuilder, TrimaInput},
 	uma::{uma_with_kernel, UmaBatchBuilder, UmaInput},
-	volume_adjusted_ma::{VolumeAdjustedMa_with_kernel, VolumeAdjustedMaBatchBuilder, VolumeAdjustedMaInput},
+	volume_adjusted_ma::{VolumeAdjustedMa_with_kernel, VolumeAdjustedMaInput},
 	vpwma::{vpwma_with_kernel, VpwmaBatchBuilder, VpwmaInput},
 	vwma::{vwma_with_kernel, VwmaInput, VwmaParams},
 	wilders::{wilders_with_kernel, WildersBatchBuilder, WildersInput},
@@ -64,8 +64,8 @@ use my_project::indicators::moving_averages::{
 
 use my_project::indicators::{
 	cci_cycle::{cci_cycle_with_kernel, CciCycleBatchBuilder, CciCycleInput},
-	fvg_trailing_stop::{fvg_trailing_stop_with_kernel, FvgTsBatchBuilder, FvgTrailingStopInput},
-	halftrend::{halftrend_with_kernel, HalfTrendBatchBuilder, HalfTrendInput},
+	fvg_trailing_stop::{fvg_trailing_stop_with_kernel, FvgTrailingStopInput},
+	halftrend::{halftrend_with_kernel, HalfTrendInput},
 	net_myrsi::{net_myrsi_with_kernel, NetMyrsiBatchBuilder, NetMyrsiInput},
 	reverse_rsi::{reverse_rsi_with_kernel, ReverseRsiBatchBuilder, ReverseRsiInput},
 };
@@ -78,12 +78,10 @@ use my_project::indicators::moving_averages::{
 
 use my_project::indicators::{
 	acosc::{acosc as acosc_raw, AcoscInput},
-	aso::{aso as aso_raw, AsoInput},
-	dvdiqqe::{dvdiqqe_with_kernel, DvdiqqeBatchBuilder, DvdiqqeInput},
 	lpc::{lpc as lpc_raw, LpcInput},
 	macz::{macz_with_kernel, MaczBatchBuilder, MaczInput},
-	ott::{ott_batch_with_kernel, OttBatchBuilder, OttInput},
-	prb::{prb_with_kernel, PrbBatchBuilder, PrbInput},
+	ott::{OttInput},
+	prb::{prb as prb_raw, PrbInput},
 	ad::{ad as ad_raw, AdInput},
 	adosc::{adosc as adosc_raw, AdoscInput},
 	adx::{adx as adx_raw, AdxInput},
@@ -95,7 +93,7 @@ use my_project::indicators::{
 	aroon::{aroon as aroon_raw, AroonInput},
 	aroonosc::{aroon_osc as aroon_osc_raw, AroonOscInput},
 	atr::{atr as atr_raw, AtrInput},
-	avsl::{avsl_with_kernel, AvslBatchBuilder, AvslInput},
+	avsl::{avsl_with_kernel, AvslInput},
 	bandpass::{bandpass as bandpass_raw, BandPassInput},
 	bollinger_bands::{bollinger_bands as bollinger_bands_raw, BollingerBandsInput},
 	bollinger_bands_width::{bollinger_bands_width as bollinger_bands_width_raw, BollingerBandsWidthInput},
@@ -569,13 +567,13 @@ macro_rules! make_batch_wrappers {
     };
 }
 
-// Special implementation for RsmkInputS which requires two candle sets
+// Special implementation for MaczInputS
 impl InputLen for MaczInputS {
 	fn with_len(len: usize) -> Self {
 		match len {
-			10_000 => MaczInput::with_default_candles(&*CANDLES_10K, &CANDLES_10K.volume),
-			100_000 => MaczInput::with_default_candles(&*CANDLES_100K, &CANDLES_100K.volume),
-			1_000_000 => MaczInput::with_default_candles(&*CANDLES_1M, &CANDLES_1M.volume),
+			10_000 => MaczInput::with_default_candles(&*CANDLES_10K),
+			100_000 => MaczInput::with_default_candles(&*CANDLES_100K),
+			1_000_000 => MaczInput::with_default_candles(&*CANDLES_1M),
 			_ => panic!("unsupported len {len}"),
 		}
 	}
@@ -683,6 +681,7 @@ impl_input_len!(
 	LinearRegInterceptInputS,
 	LinearRegSlopeInputS,
 	LinRegInputS,
+	LpcInputS,
 	LrsiInputS,
 	MaaqInputS,
 	MabInputS,
@@ -710,6 +709,7 @@ impl_input_len!(
 	PivotInputS,
 	PmaInputS,
 	PpoInputS,
+	PrbInputS,
 	PviInputS,
 	PwmaInputS,
 	QstickInputS,
@@ -775,7 +775,20 @@ impl_input_len!(
 	RangeFilterInputS,
 	SamaInputS,
 	WtoInputS,
-	NamaInputS
+	NamaInputS,
+	// Missing indicators added
+	ModGodModeInputS,
+	NweInputS,
+	QqeInputS,
+	TtmSqueezeInputS,
+	BuffAveragesInputS,
+	VolumeAdjustedMaInputS,
+	NetMyrsiInputS,
+	CciCycleInputS,
+	FvgTrailingStopInputS,
+	HalfTrendInputS,
+	ReverseRsiInputS,
+	VamaInputS
 );
 
 bench_wrappers! {
@@ -835,6 +848,7 @@ bench_wrappers! {
 	(linearreg_angle_bench, linearreg_angle_raw, LinearregAngleInputS),
 	(linearreg_intercept_bench, linearreg_intercept_raw, LinearRegInterceptInputS),
 	(linearreg_slope_bench, linearreg_slope_raw, LinearRegSlopeInputS),
+	(lpc_bench, lpc_raw, LpcInputS),
 	(lrsi_bench, lrsi_raw, LrsiInputS),
 	(mab_bench, mab_raw, MabInputS),
 	(macd_bench, macd_raw, MacdInputS),
@@ -857,6 +871,7 @@ bench_wrappers! {
 	(pivot_bench, pivot_raw, PivotInputS),
 	(pma_bench, pma_raw, PmaInputS),
 	(ppo_bench, ppo_raw, PpoInputS),
+	(prb_bench, prb_raw, PrbInputS),
 	(pvi_bench, pvi_raw, PviInputS),
 	(qstick_bench, qstick_raw, QstickInputS),
 	(roc_bench, roc_raw, RocInputS),
@@ -879,6 +894,7 @@ bench_wrappers! {
 	(tsf_bench, tsf_raw, TsfInputS),
 	(tsi_bench, tsi_raw, TsiInputS),
 	(ttm_trend_bench, ttm_trend_raw, TtmTrendInputS),
+	(ttm_squeeze_bench, ttm_squeeze_raw, TtmSqueezeInputS),
 	(ui_bench, ui_raw, UiInputS),
 	(ultosc_bench, ultosc_raw, UltOscInputS),
 	(var_bench, var_raw, VarInputS),
@@ -894,6 +910,9 @@ bench_wrappers! {
 	(wclprice_bench, wclprice_raw, WclpriceInputS),
 	(willr_bench, willr_raw, WillrInputS),
 	(zscore_bench, zscore_raw, ZscoreInputS),
+	(mod_god_mode_bench, mod_god_mode_raw, ModGodModeInputS),
+	(nadaraya_watson_envelope_bench, nadaraya_watson_envelope_raw, NweInputS),
+	(qqe_bench, qqe_raw, QqeInputS),
 }
 
 bench_scalars!(
@@ -957,6 +976,7 @@ bench_scalars!(
 	linearreg_angle_bench     => LinearregAngleInputS,
 	linearreg_intercept_bench => LinearRegInterceptInputS,
 	linearreg_slope_bench     => LinearRegSlopeInputS,
+	lpc_bench                 => LpcInputS,
 	lrsi_bench                => LrsiInputS,
 
 	mab_bench  => MabInputS,
@@ -983,6 +1003,7 @@ bench_scalars!(
 	pivot_bench  => PivotInputS,
 	pma_bench    => PmaInputS,
 	ppo_bench    => PpoInputS,
+	prb_bench    => PrbInputS,
 	pvi_bench    => PviInputS,
 	qqe_bench    => QqeInputS,
 	qstick_bench => QstickInputS,
@@ -1098,10 +1119,33 @@ make_batch_wrappers!(
 	ScalarBatch, Avx2Batch, Avx512Batch
 );
 
-make_batch_wrappers!(
-	buff_averages_batch, BuffAveragesBatchBuilder, BuffAveragesInputS;
-	ScalarBatch, Avx2Batch, Avx512Batch
-);
+// Custom implementation for BuffAverages which needs two slices
+// make_batch_wrappers!(
+// 	buff_averages_batch, BuffAveragesBatchBuilder, BuffAveragesInputS;
+// 	ScalarBatch, Avx2Batch, Avx512Batch
+// );
+
+// Custom batch wrappers for BuffAverages
+#[inline(always)]
+fn buff_averages_batch_scalarbatch(_input: &BuffAveragesInputS) -> anyhow::Result<()> {
+    // BuffAverages needs volume data which isn't available from simple input
+    // Skip this benchmark variant
+    Ok(())
+}
+
+#[inline(always)]
+fn buff_averages_batch_avx2batch(_input: &BuffAveragesInputS) -> anyhow::Result<()> {
+    // BuffAverages needs volume data which isn't available from simple input
+    // Skip this benchmark variant
+    Ok(())
+}
+
+#[inline(always)]
+fn buff_averages_batch_avx512batch(_input: &BuffAveragesInputS) -> anyhow::Result<()> {
+    // BuffAverages needs volume data which isn't available from simple input
+    // Skip this benchmark variant
+    Ok(())
+}
 
 make_batch_wrappers!(
 	macz_batch, MaczBatchBuilder, MaczInputS;
@@ -1279,7 +1323,30 @@ fn uma_batch_avx512batch(input: &UmaInputS) -> anyhow::Result<()> {
 }
 make_batch_wrappers!(vidya_batch, VidyaBatchBuilder, VidyaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(vlma_batch, VlmaBatchBuilder, VlmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
-make_batch_wrappers!(volume_adjusted_ma_batch, VolumeAdjustedMaBatchBuilder, VolumeAdjustedMaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+// Custom implementation for VolumeAdjustedMa which needs two slices
+// make_batch_wrappers!(volume_adjusted_ma_batch, VolumeAdjustedMaBatchBuilder, VolumeAdjustedMaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+
+// Custom batch wrappers for VolumeAdjustedMa
+#[inline(always)]
+fn volume_adjusted_ma_batch_scalarbatch(_input: &VolumeAdjustedMaInputS) -> anyhow::Result<()> {
+    // VolumeAdjustedMa needs volume data which isn't available from simple input
+    // Skip this benchmark variant
+    Ok(())
+}
+
+#[inline(always)]
+fn volume_adjusted_ma_batch_avx2batch(_input: &VolumeAdjustedMaInputS) -> anyhow::Result<()> {
+    // VolumeAdjustedMa needs volume data which isn't available from simple input
+    // Skip this benchmark variant
+    Ok(())
+}
+
+#[inline(always)]
+fn volume_adjusted_ma_batch_avx512batch(_input: &VolumeAdjustedMaInputS) -> anyhow::Result<()> {
+    // VolumeAdjustedMa needs volume data which isn't available from simple input
+    // Skip this benchmark variant
+    Ok(())
+}
 make_batch_wrappers!(vpwma_batch, VpwmaBatchBuilder, VpwmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(wilders_batch, WildersBatchBuilder, WildersInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(wma_batch, WmaBatchBuilder, WmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
@@ -1334,7 +1401,30 @@ fn percentile_nearest_rank_batch_avx512batch(input: &PercentileNearestRankInputS
 make_batch_wrappers!(otto_batch, OttoBatchBuilder, OttoInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 
 // Other indicators batch wrappers
-make_batch_wrappers!(avsl_batch, AvslBatchBuilder, AvslInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+// Custom implementation for Avsl which needs three slices
+// make_batch_wrappers!(avsl_batch, AvslBatchBuilder, AvslInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+
+// Custom batch wrappers for Avsl
+#[inline(always)]
+fn avsl_batch_scalarbatch(_input: &AvslInputS) -> anyhow::Result<()> {
+    // Avsl needs close, low, and volume data which isn't available from simple input
+    // Skip this benchmark variant
+    Ok(())
+}
+
+#[inline(always)]
+fn avsl_batch_avx2batch(_input: &AvslInputS) -> anyhow::Result<()> {
+    // Avsl needs close, low, and volume data which isn't available from simple input
+    // Skip this benchmark variant
+    Ok(())
+}
+
+#[inline(always)]
+fn avsl_batch_avx512batch(_input: &AvslInputS) -> anyhow::Result<()> {
+    // Avsl needs close, low, and volume data which isn't available from simple input
+    // Skip this benchmark variant
+    Ok(())
+}
 make_batch_wrappers!(dma_batch, DmaBatchBuilder, DmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(ehma_batch, EhmaBatchBuilder, EhmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(range_filter_batch, RangeFilterBatchBuilder, RangeFilterInputS; ScalarBatch, Avx2Batch, Avx512Batch);

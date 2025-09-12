@@ -372,11 +372,24 @@ pub fn coppock_into_slice(
 	// Allocate sum_roc buffer with NaN prefix
 	let mut sum_roc = alloc_with_nan_prefix(data_len, warmup_period);
 
+	let resolved_kernel = match kernel {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+	
+	let ma_type = input.get_ma_type();
+	
+	// Dispatch to classic kernel for scalar with common MA types
+	// Classic kernel provides optimized loop-jammed implementation for default MA types
+	if resolved_kernel == Kernel::Scalar && (ma_type == "wma" || ma_type == "sma" || ma_type == "ema") {
+		unsafe {
+			return coppock_scalar_classic(data, short, long, ma_p, ma_type, first, out);
+		}
+	}
+	
+	// Regular path: calculate sum_roc first, then smooth
 	unsafe {
-		match match kernel {
-			Kernel::Auto => detect_best_kernel(),
-			other => other,
-		} {
+		match resolved_kernel {
 			Kernel::Scalar | Kernel::ScalarBatch => coppock_scalar(data, short, long, first, &mut sum_roc),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx2 | Kernel::Avx2Batch => coppock_avx2(data, short, long, first, &mut sum_roc),
@@ -386,9 +399,8 @@ pub fn coppock_into_slice(
 		}
 	}
 
-	let ma_type = input.get_ma_type();
 	// Unfortunately, ma() returns a Vec<f64>, so we still need this allocation
-	let smoothed = ma(&ma_type, MaData::Slice(&sum_roc), ma_p)
+	let smoothed = ma(ma_type, MaData::Slice(&sum_roc), ma_p)
 		.map_err(|e| {
 			use std::fmt;
 			#[derive(Debug)]
@@ -404,6 +416,134 @@ pub fn coppock_into_slice(
 	
 	// Copy the smoothed result directly into the output slice
 	out.copy_from_slice(&smoothed);
+	Ok(())
+}
+
+/// Classic kernel optimization for Coppock with inline MA calculations
+/// This eliminates the function call overhead for the smoothing MA operation
+/// Optimized for the default MA types: WMA and SMA
+pub unsafe fn coppock_scalar_classic(
+	data: &[f64],
+	short: usize,
+	long: usize,
+	ma_period: usize,
+	ma_type: &str,
+	first: usize,
+	out: &mut [f64],
+) -> Result<(), CoppockError> {
+	let len = data.len();
+	let largest_roc = short.max(long);
+	let warmup_period = first + largest_roc;
+	
+	// Calculate sum of ROCs
+	let mut sum_roc = alloc_with_nan_prefix(len, warmup_period);
+	let start_idx = first + largest_roc;
+	
+	for i in start_idx..len {
+		let current = data[i];
+		let prev_short = data[i - short];
+		let short_val = ((current / prev_short) - 1.0) * 100.0;
+		let prev_long = data[i - long];
+		let long_val = ((current / prev_long) - 1.0) * 100.0;
+		sum_roc[i] = short_val + long_val;
+	}
+	
+	// Inline MA calculation based on type
+	match ma_type {
+		"wma" => {
+			// Inline WMA calculation (default)
+			let warmup_final = warmup_period + ma_period - 1;
+			for i in 0..warmup_final.min(len) {
+				out[i] = f64::NAN;
+			}
+			
+			// Calculate WMA weights once
+			let weight_sum = (ma_period * (ma_period + 1)) as f64 / 2.0;
+			
+			for i in warmup_final..len {
+				let mut weighted_sum = 0.0;
+				let mut has_nan = false;
+				
+				for j in 0..ma_period {
+					let idx = i - ma_period + 1 + j;
+					if sum_roc[idx].is_nan() {
+						has_nan = true;
+						break;
+					}
+					weighted_sum += sum_roc[idx] * (j + 1) as f64;
+				}
+				
+				out[i] = if has_nan { f64::NAN } else { weighted_sum / weight_sum };
+			}
+		}
+		"sma" => {
+			// Inline SMA calculation
+			let warmup_final = warmup_period + ma_period - 1;
+			for i in 0..warmup_final.min(len) {
+				out[i] = f64::NAN;
+			}
+			
+			// Initial SMA
+			let mut sum = 0.0;
+			for i in warmup_period..(warmup_period + ma_period.min(len - warmup_period)) {
+				if !sum_roc[i].is_nan() {
+					sum += sum_roc[i];
+				}
+			}
+			
+			if warmup_final < len {
+				out[warmup_final] = sum / ma_period as f64;
+				
+				// Rolling SMA
+				for i in (warmup_final + 1)..len {
+					if !sum_roc[i].is_nan() && !sum_roc[i - ma_period].is_nan() {
+						sum += sum_roc[i] - sum_roc[i - ma_period];
+						out[i] = sum / ma_period as f64;
+					} else {
+						out[i] = f64::NAN;
+					}
+				}
+			}
+		}
+		"ema" => {
+			// Inline EMA calculation
+			let warmup_final = warmup_period + ma_period - 1;
+			for i in 0..warmup_final.min(len) {
+				out[i] = f64::NAN;
+			}
+			
+			let alpha = 2.0 / (ma_period as f64 + 1.0);
+			let mut ema_value = f64::NAN;
+			
+			// Initialize EMA with first valid sum_roc value
+			for i in warmup_period..len {
+				if !sum_roc[i].is_nan() {
+					ema_value = sum_roc[i];
+					out[i] = ema_value;
+					
+					// Continue EMA calculation
+					for j in (i + 1)..len {
+						if !sum_roc[j].is_nan() {
+							ema_value = alpha * sum_roc[j] + (1.0 - alpha) * ema_value;
+							out[j] = ema_value;
+						} else {
+							out[j] = f64::NAN;
+						}
+					}
+					break;
+				}
+			}
+		}
+		_ => {
+			// Fall back to regular ma() function for other MA types
+			let smoothed = ma(ma_type, MaData::Slice(&sum_roc), ma_period)
+				.map_err(|e| CoppockError::MaError(Box::new(
+					std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+				)))?;
+			out.copy_from_slice(&smoothed);
+		}
+	}
+	
 	Ok(())
 }
 

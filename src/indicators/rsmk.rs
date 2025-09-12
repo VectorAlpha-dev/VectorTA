@@ -320,13 +320,22 @@ pub fn rsmk_with_kernel(input: &RsmkInput, kernel: Kernel) -> Result<RsmkOutput,
 		mom[i] = if a.is_nan() || b.is_nan() { f64::NAN } else { a - b };
 	}
 
-	// indicator MA -> reuse Vec directly, avoid extra alloc/copy
+	// Use classic kernel for common MA type combinations
 	let matype = input.get_ma_type();
+	let sigtype = input.get_signal_ma_type();
+	let mom_first_valid = first_valid + lookback; // momentum starts after lookback
+	
+	if (matype == "sma" || matype == "SMA") && (sigtype == "sma" || sigtype == "SMA") {
+		return rsmk_classic_sma(&mom, period, signal_period, mom_first_valid);
+	} else if (matype == "ema" || matype == "EMA") && (sigtype == "ema" || sigtype == "EMA") {
+		return rsmk_classic_ema(&mom, period, signal_period, mom_first_valid);
+	}
+	
+	// Fall back to generic MA for other types
 	let mut indicator = ma(matype, MaData::Slice(&mom), period).map_err(|e| RsmkError::MaError(e.to_string()))?;
 	for v in &mut indicator { *v *= 100.0; }
 
 	// signal MA -> reuse Vec directly
-	let sigtype = input.get_signal_ma_type();
 	let signal = ma(sigtype, MaData::Slice(&indicator), signal_period).map_err(|e| RsmkError::MaError(e.to_string()))?;
 
 	Ok(RsmkOutput { indicator, signal })
@@ -2132,4 +2141,184 @@ mod tests {
 	}
 	gen_batch_tests!(check_batch_default_row);
 	gen_batch_tests!(check_batch_no_poison);
+}
+
+// === Classic Kernel Implementations ===
+
+/// Classic kernel with inline SMA calculations for both indicator and signal
+#[inline]
+fn rsmk_classic_sma(
+	mom: &[f64],
+	period: usize,
+	signal_period: usize,
+	first_valid: usize,
+) -> Result<RsmkOutput, RsmkError> {
+	let len = mom.len();
+	let ind_warmup = first_valid + period - 1;
+	let sig_warmup = ind_warmup + signal_period - 1;
+	
+	// Check if we have enough data
+	let needed = period.max(signal_period);
+	if len < first_valid || len - first_valid < needed {
+		return Err(RsmkError::NotEnoughValidData { 
+			needed, 
+			valid: if len >= first_valid { len - first_valid } else { 0 }
+		});
+	}
+	
+	let mut indicator = alloc_with_nan_prefix(len, ind_warmup);
+	let mut signal = alloc_with_nan_prefix(len, sig_warmup);
+	
+	// Calculate indicator (SMA of momentum * 100)
+	let mut sum_ind = 0.0;
+	let mut count_ind = 0;
+	
+	// Initialize first SMA for indicator
+	for i in first_valid..(first_valid + period).min(len) {
+		if !mom[i].is_nan() {
+			sum_ind += mom[i];
+			count_ind += 1;
+		}
+	}
+	
+	if count_ind > 0 && ind_warmup < len {
+		indicator[ind_warmup] = (sum_ind / count_ind as f64) * 100.0;
+		
+		// Rolling SMA for indicator
+		for i in (ind_warmup + 1)..len {
+			let old_val = mom[i - period];
+			let new_val = mom[i];
+			if !old_val.is_nan() {
+				sum_ind -= old_val;
+				count_ind -= 1;
+			}
+			if !new_val.is_nan() {
+				sum_ind += new_val;
+				count_ind += 1;
+			}
+			indicator[i] = if count_ind > 0 { 
+				(sum_ind / count_ind as f64) * 100.0 
+			} else { 
+				f64::NAN 
+			};
+		}
+	}
+	
+	// Calculate signal (SMA of indicator)
+	let mut sum_sig = 0.0;
+	let mut count_sig = 0;
+	
+	// Initialize first SMA for signal
+	for i in ind_warmup..(ind_warmup + signal_period).min(len) {
+		if !indicator[i].is_nan() {
+			sum_sig += indicator[i];
+			count_sig += 1;
+		}
+	}
+	
+	if count_sig > 0 && sig_warmup < len {
+		signal[sig_warmup] = sum_sig / count_sig as f64;
+		
+		// Rolling SMA for signal
+		for i in (sig_warmup + 1)..len {
+			let old_val = indicator[i - signal_period];
+			let new_val = indicator[i];
+			if !old_val.is_nan() {
+				sum_sig -= old_val;
+				count_sig -= 1;
+			}
+			if !new_val.is_nan() {
+				sum_sig += new_val;
+				count_sig += 1;
+			}
+			signal[i] = if count_sig > 0 { 
+				sum_sig / count_sig as f64 
+			} else { 
+				f64::NAN 
+			};
+		}
+	}
+	
+	Ok(RsmkOutput { indicator, signal })
+}
+
+/// Classic kernel with inline EMA calculations for both indicator and signal
+#[inline]
+fn rsmk_classic_ema(
+	mom: &[f64],
+	period: usize,
+	signal_period: usize,
+	first_valid: usize,
+) -> Result<RsmkOutput, RsmkError> {
+	let len = mom.len();
+	let ind_warmup = first_valid + period - 1;
+	let sig_warmup = ind_warmup + signal_period - 1;
+	
+	// Check if we have enough data
+	let needed = period.max(signal_period);
+	if len < first_valid || len - first_valid < needed {
+		return Err(RsmkError::NotEnoughValidData { 
+			needed, 
+			valid: if len >= first_valid { len - first_valid } else { 0 }
+		});
+	}
+	
+	let mut indicator = alloc_with_nan_prefix(len, ind_warmup);
+	let mut signal = alloc_with_nan_prefix(len, sig_warmup);
+	
+	// Calculate indicator (EMA of momentum * 100)
+	let alpha_ind = 2.0 / (period as f64 + 1.0);
+	let one_minus_alpha_ind = 1.0 - alpha_ind;
+	
+	// Initialize EMA for indicator with SMA
+	let mut sum_ind = 0.0;
+	let mut count_ind = 0;
+	for i in first_valid..(first_valid + period).min(len) {
+		if !mom[i].is_nan() {
+			sum_ind += mom[i];
+			count_ind += 1;
+		}
+	}
+	
+	if count_ind > 0 && ind_warmup < len {
+		let mut ema_ind = (sum_ind / count_ind as f64) * 100.0;
+		indicator[ind_warmup] = ema_ind;
+		
+		// Continue EMA for indicator
+		for i in (ind_warmup + 1)..len {
+			if !mom[i].is_nan() {
+				ema_ind = (alpha_ind * mom[i] * 100.0) + (one_minus_alpha_ind * ema_ind);
+			}
+			indicator[i] = ema_ind;
+		}
+	}
+	
+	// Calculate signal (EMA of indicator)
+	let alpha_sig = 2.0 / (signal_period as f64 + 1.0);
+	let one_minus_alpha_sig = 1.0 - alpha_sig;
+	
+	// Initialize EMA for signal with SMA
+	let mut sum_sig = 0.0;
+	let mut count_sig = 0;
+	for i in ind_warmup..(ind_warmup + signal_period).min(len) {
+		if !indicator[i].is_nan() {
+			sum_sig += indicator[i];
+			count_sig += 1;
+		}
+	}
+	
+	if count_sig > 0 && sig_warmup < len {
+		let mut ema_sig = sum_sig / count_sig as f64;
+		signal[sig_warmup] = ema_sig;
+		
+		// Continue EMA for signal
+		for i in (sig_warmup + 1)..len {
+			if !indicator[i].is_nan() {
+				ema_sig = (alpha_sig * indicator[i]) + (one_minus_alpha_sig * ema_sig);
+			}
+			signal[i] = ema_sig;
+		}
+	}
+	
+	Ok(RsmkOutput { indicator, signal })
 }

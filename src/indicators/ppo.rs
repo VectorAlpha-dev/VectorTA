@@ -296,6 +296,14 @@ pub fn ppo_into_slice(dst: &mut [f64], input: &PpoInput, kern: Kernel) -> Result
 pub unsafe fn ppo_scalar(
 	data: &[f64], fast: usize, slow: usize, ma_type: &str, first: usize, out: &mut [f64]
 ) {
+	// Check for classic kernel optimization
+	if ma_type == "ema" {
+		return ppo_scalar_classic_ema(data, fast, slow, first, out);
+	} else if ma_type == "sma" {
+		return ppo_scalar_classic_sma(data, fast, slow, first, out);
+	}
+	
+	// Fall back to regular implementation for other MA types
 	// MA failures should be impossible after validation; if they occur, write NaN and return.
 	let fast_ma = match ma(ma_type, MaData::Slice(data), fast) { Ok(v) => v, Err(_) => {
 		for i in (first + slow - 1)..data.len() { out[i] = f64::NAN; } return;
@@ -308,6 +316,119 @@ pub unsafe fn ppo_scalar(
 		let sf = slow_ma[i];
 		let ff = fast_ma[i];
 		out[i] = if sf.is_nan() || ff.is_nan() || sf == 0.0 { f64::NAN } else { 100.0 * (ff - sf) / sf };
+	}
+}
+
+// Classic kernel with inline EMA calculations
+#[inline]
+pub unsafe fn ppo_scalar_classic_ema(
+	data: &[f64], fast: usize, slow: usize, first: usize, out: &mut [f64]
+) {
+	// EMA alpha factors
+	let fast_alpha = 2.0 / (fast as f64 + 1.0);
+	let slow_alpha = 2.0 / (slow as f64 + 1.0);
+	
+	// Initialize EMAs with SMA
+	let mut fast_sum = 0.0;
+	let mut slow_sum = 0.0;
+	
+	// Calculate initial SMAs for EMA initialization
+	for i in first..first + fast.min(data.len() - first) {
+		fast_sum += data[i];
+		if i < first + slow {
+			slow_sum += data[i];
+		}
+	}
+	
+	for i in first + fast..first + slow.min(data.len() - first) {
+		slow_sum += data[i];
+	}
+	
+	let mut fast_ema = fast_sum / fast as f64;
+	let mut slow_ema = slow_sum / slow as f64;
+	
+	// Process data with inline EMA calculations
+	for i in first..data.len() {
+		if i >= first + fast - 1 {
+			if i == first + fast - 1 {
+				// First EMA value is the SMA
+				fast_ema = fast_sum / fast as f64;
+			} else {
+				// Update EMA
+				fast_ema = fast_alpha * data[i] + (1.0 - fast_alpha) * fast_ema;
+			}
+		}
+		
+		if i >= first + slow - 1 {
+			if i == first + slow - 1 {
+				// First EMA value is the SMA
+				slow_ema = slow_sum / slow as f64;
+			} else {
+				// Update EMA
+				slow_ema = slow_alpha * data[i] + (1.0 - slow_alpha) * slow_ema;
+			}
+			
+			// Calculate PPO
+			out[i] = if slow_ema == 0.0 || slow_ema.is_nan() || fast_ema.is_nan() {
+				f64::NAN
+			} else {
+				100.0 * (fast_ema - slow_ema) / slow_ema
+			};
+		}
+	}
+}
+
+// Classic kernel with inline SMA calculations
+#[inline]
+pub unsafe fn ppo_scalar_classic_sma(
+	data: &[f64], fast: usize, slow: usize, first: usize, out: &mut [f64]
+) {
+	// SMA calculation logic matching the exact behavior of sma_scalar
+	
+	// Calculate slow SMA sum starting from 'first'
+	let mut slow_sum = 0.0;
+	for i in 0..slow {
+		slow_sum += data[first + i];
+	}
+	
+	// For fast SMA at index (first + slow - 1), we need the window 
+	// from (first + slow - fast) to (first + slow - 1)
+	let mut fast_sum = 0.0;
+	let fast_start = first + slow - fast;
+	for i in 0..fast {
+		fast_sum += data[fast_start + i];
+	}
+	
+	// First valid index for both SMAs is at (first + slow - 1)
+	let start_idx = first + slow - 1;
+	
+	// Calculate first PPO value
+	let fast_ma = fast_sum / fast as f64;
+	let slow_ma = slow_sum / slow as f64;
+	out[start_idx] = if slow_ma == 0.0 || slow_ma.is_nan() || fast_ma.is_nan() {
+		f64::NAN
+	} else {
+		100.0 * (fast_ma - slow_ma) / slow_ma
+	};
+	
+	// Process remaining data with rolling window
+	for i in start_idx + 1..data.len() {
+		// Update fast SMA rolling sum
+		fast_sum += data[i] - data[i - fast];
+		
+		// Update slow SMA rolling sum
+		slow_sum += data[i] - data[i - slow];
+		
+		// Calculate new SMAs
+		let fast_ma = fast_sum / fast as f64;
+		let slow_ma = slow_sum / slow as f64;
+		
+		// Calculate PPO
+		out[i] = if slow_ma == 0.0 || slow_ma.is_nan() || fast_ma.is_nan() {
+			f64::NAN
+		} else {
+			100.0 * (fast_ma - slow_ma) / slow_ma
+		};
 	}
 }
 
@@ -657,7 +778,26 @@ fn ppo_batch_inner(
 
 #[inline(always)]
 pub unsafe fn ppo_row_scalar(data: &[f64], first: usize, fast: usize, slow: usize, ma_type: &str, out: &mut [f64]) {
-	ppo_scalar(data, fast, slow, ma_type, first, out)
+	// Check for classic kernel optimization
+	if ma_type == "ema" {
+		ppo_row_scalar_classic_ema(data, first, fast, slow, out);
+	} else if ma_type == "sma" {
+		ppo_row_scalar_classic_sma(data, first, fast, slow, out);
+	} else {
+		ppo_scalar(data, fast, slow, ma_type, first, out);
+	}
+}
+
+// Classic row kernel with inline EMA for batch processing
+#[inline(always)]
+pub unsafe fn ppo_row_scalar_classic_ema(data: &[f64], first: usize, fast: usize, slow: usize, out: &mut [f64]) {
+	ppo_scalar_classic_ema(data, fast, slow, first, out);
+}
+
+// Classic row kernel with inline SMA for batch processing
+#[inline(always)]
+pub unsafe fn ppo_row_scalar_classic_sma(data: &[f64], first: usize, fast: usize, slow: usize, out: &mut [f64]) {
+	ppo_scalar_classic_sma(data, fast, slow, first, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]

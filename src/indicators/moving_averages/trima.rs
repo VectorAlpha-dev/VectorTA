@@ -262,8 +262,8 @@ fn trima_compute_into(
 
 #[inline(always)]
 unsafe fn trima_scalar_optimized(data: &[f64], period: usize, m1: usize, m2: usize, first: usize, out: &mut [f64]) {
-	// Call the original implementation for correctness
-	trima_scalar(data, period, first, out);
+	// Use the classic kernel for optimized performance
+	trima_scalar_classic(data, period, first, out);
 }
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
@@ -361,6 +361,69 @@ pub fn trima_into_slice(output: &mut [f64], input: &TrimaInput, kernel: Kernel) 
 }
 
 #[inline]
+/// Classic kernel - optimized loop-jammed implementation without function calls
+pub fn trima_scalar_classic(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
+	// ─── OPTIMIZED TWO-PASS SMA APPROACH (LOOP-JAMMED) ───
+	//
+	// Let m1 = (period+1)/2,  m2 = period − m1 + 1.
+	// First pass: compute the m1-period SMA of `data` inline.
+	// Second pass: compute the m2-period SMA of that first-pass result inline.
+	// This avoids function calls and allocations.
+
+	let n = data.len();
+	let m1 = (period + 1) / 2;
+	let m2 = period - m1 + 1;
+	
+	// Allocate intermediate buffer for first pass
+	let mut sma1 = vec![f64::NAN; n];
+	
+	// FIRST PASS: Inline SMA of length m1
+	if first + m1 <= n {
+		// Initial sum for first valid SMA value
+		let mut sum1 = 0.0;
+		for j in 0..m1 {
+			sum1 += data[first + j];
+		}
+		sma1[first + m1 - 1] = sum1 / m1 as f64;
+		
+		// Rolling sum for remaining values
+		for i in (first + m1)..n {
+			sum1 += data[i] - data[i - m1];
+			sma1[i] = sum1 / m1 as f64;
+		}
+	}
+	
+	// SECOND PASS: Inline SMA of length m2 on sma1 results
+	let warmup_end = first + period - 1;
+	if warmup_end < n {
+		// Find first valid index in sma1
+		let first_valid_sma1 = first + m1 - 1;
+		let first_valid_sma2 = first_valid_sma1 + m2 - 1;
+		
+		if first_valid_sma2 < n {
+			// Initial sum for first valid TRIMA value
+			let mut sum2 = 0.0;
+			for j in 0..m2 {
+				sum2 += sma1[first_valid_sma1 + j];
+			}
+			
+			if warmup_end < n {
+				out[warmup_end] = sum2 / m2 as f64;
+			}
+			
+			// Rolling sum for remaining values
+			for i in (warmup_end + 1)..n {
+				let old_idx = i - m2;
+				if old_idx >= first_valid_sma1 {
+					sum2 += sma1[i] - sma1[old_idx];
+					out[i] = sum2 / m2 as f64;
+				}
+			}
+		}
+	}
+}
+
+/// Regular kernel - uses function calls for flexibility
 pub fn trima_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
 	// ─── TWO-PASS SMA APPROACH ───
 	//
@@ -431,7 +494,8 @@ pub fn trima_row_scalar(
 	_inv_n: f64,
 	out: &mut [f64],
 ) {
-	trima_scalar(data, period, first, out);
+	// Use classic kernel for row operations
+	trima_scalar_classic(data, period, first, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]

@@ -298,6 +298,39 @@ pub fn kaufmanstop_with_kernel(
 		});
 	}
 
+	// Use alloc_with_nan_prefix instead of vec![f64::NAN; ...]
+	let mut out = alloc_with_nan_prefix(high.len(), first_valid_idx + period - 1);
+
+	// Dispatch to classic kernels for common MA types
+	if ma_type == "sma" || ma_type == "SMA" {
+		unsafe {
+			kaufmanstop_scalar_classic_sma(
+				high,
+				low,
+				period,
+				first_valid_idx,
+				mult,
+				direction,
+				&mut out,
+			)?;
+		}
+		return Ok(KaufmanstopOutput { values: out });
+	} else if ma_type == "ema" || ma_type == "EMA" {
+		unsafe {
+			kaufmanstop_scalar_classic_ema(
+				high,
+				low,
+				period,
+				first_valid_idx,
+				mult,
+				direction,
+				&mut out,
+			)?;
+		}
+		return Ok(KaufmanstopOutput { values: out });
+	}
+
+	// Original implementation (fallback for other MA types)
 	// Use helper function to allocate with NaN prefix
 	let mut hl_diff = alloc_with_nan_prefix(high.len(), first_valid_idx);
 	for i in first_valid_idx..high.len() {
@@ -310,9 +343,6 @@ pub fn kaufmanstop_with_kernel(
 
 	let ma_input = MaData::Slice(&hl_diff[first_valid_idx..]);
 	let hl_diff_ma = ma(ma_type, ma_input, period).map_err(|_| KaufmanstopError::AllValuesNaN)?;
-
-	// Use alloc_with_nan_prefix instead of vec![f64::NAN; ...]
-	let mut out = alloc_with_nan_prefix(high.len(), first_valid_idx + period - 1);
 
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
@@ -1514,6 +1544,141 @@ pub fn kaufmanstop_batch_into(
 		};
 		serde_wasm_bindgen::to_value(&meta).map_err(Into::into)
 	}
+}
+
+/// Optimized KaufmanStop calculation with inline SMA
+#[inline]
+pub unsafe fn kaufmanstop_scalar_classic_sma(
+	high: &[f64],
+	low: &[f64],
+	period: usize,
+	first_valid_idx: usize,
+	mult: f64,
+	direction: &str,
+	out: &mut [f64],
+) -> Result<(), KaufmanstopError> {
+	let start_idx = first_valid_idx + period - 1;
+	let is_long = direction.eq_ignore_ascii_case("long");
+	
+	// Calculate initial SMA of high-low range
+	let mut sum = 0.0;
+	let mut valid_count = 0;
+	for i in 0..period {
+		let idx = first_valid_idx + i;
+		if !high[idx].is_nan() && !low[idx].is_nan() {
+			sum += high[idx] - low[idx];
+			valid_count += 1;
+		}
+	}
+	
+	if valid_count == 0 {
+		return Err(KaufmanstopError::AllValuesNaN);
+	}
+	
+	let mut sma = sum / valid_count as f64;
+	
+	// Calculate first KaufmanStop value
+	if is_long {
+		out[start_idx] = low[start_idx] - sma * mult;
+	} else {
+		out[start_idx] = high[start_idx] + sma * mult;
+	}
+	
+	// Rolling window calculations
+	for i in (start_idx + 1)..high.len() {
+		// Update SMA with rolling window
+		let old_idx = i - period;
+		let new_idx = i;
+		
+		// Remove old value
+		if !high[old_idx].is_nan() && !low[old_idx].is_nan() {
+			let old_range = high[old_idx] - low[old_idx];
+			sum -= old_range;
+			valid_count -= 1;
+		}
+		
+		// Add new value
+		if !high[new_idx].is_nan() && !low[new_idx].is_nan() {
+			let new_range = high[new_idx] - low[new_idx];
+			sum += new_range;
+			valid_count += 1;
+		}
+		
+		if valid_count > 0 {
+			sma = sum / valid_count as f64;
+		} else {
+			sma = f64::NAN;
+		}
+		
+		// Calculate KaufmanStop value
+		if is_long {
+			out[i] = low[i] - sma * mult;
+		} else {
+			out[i] = high[i] + sma * mult;
+		}
+	}
+	
+	Ok(())
+}
+
+/// Optimized KaufmanStop calculation with inline EMA
+#[inline]
+pub unsafe fn kaufmanstop_scalar_classic_ema(
+	high: &[f64],
+	low: &[f64],
+	period: usize,
+	first_valid_idx: usize,
+	mult: f64,
+	direction: &str,
+	out: &mut [f64],
+) -> Result<(), KaufmanstopError> {
+	let start_idx = first_valid_idx + period - 1;
+	let is_long = direction.eq_ignore_ascii_case("long");
+	let alpha = 2.0 / (period as f64 + 1.0);
+	let beta = 1.0 - alpha;
+	
+	// Calculate initial SMA for EMA startup
+	let mut sum = 0.0;
+	let mut valid_count = 0;
+	for i in 0..period {
+		let idx = first_valid_idx + i;
+		if !high[idx].is_nan() && !low[idx].is_nan() {
+			sum += high[idx] - low[idx];
+			valid_count += 1;
+		}
+	}
+	
+	if valid_count == 0 {
+		return Err(KaufmanstopError::AllValuesNaN);
+	}
+	
+	let mut ema = sum / valid_count as f64;
+	
+	// Calculate first KaufmanStop value
+	if is_long {
+		out[start_idx] = low[start_idx] - ema * mult;
+	} else {
+		out[start_idx] = high[start_idx] + ema * mult;
+	}
+	
+	// EMA and KaufmanStop calculations
+	for i in (start_idx + 1)..high.len() {
+		// Update EMA with new range value
+		if !high[i].is_nan() && !low[i].is_nan() {
+			let range = high[i] - low[i];
+			ema = alpha * range + beta * ema;
+		}
+		// If current values are NaN, EMA continues with previous value
+		
+		// Calculate KaufmanStop value
+		if is_long {
+			out[i] = low[i] - ema * mult;
+		} else {
+			out[i] = high[i] + ema * mult;
+		}
+	}
+	
+	Ok(())
 }
 
 #[cfg(test)]

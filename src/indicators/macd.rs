@@ -328,6 +328,92 @@ fn macd_prepare<'a>(
 }
 
 #[inline(always)]
+/// Classic kernel - optimized loop-jammed implementation for EMA
+fn macd_compute_into_classic_ema(
+	data: &[f64],
+	fast: usize,
+	slow: usize,
+	signal: usize,
+	first: usize,
+	macd_out: &mut [f64],
+	signal_out: &mut [f64],
+	hist_out: &mut [f64],
+) -> Result<(), MacdError> {
+	let len = data.len();
+	
+	// Calculate alphas for EMA
+	let fast_alpha = 2.0 / (fast as f64 + 1.0);
+	let slow_alpha = 2.0 / (slow as f64 + 1.0);
+	let signal_alpha = 2.0 / (signal as f64 + 1.0);
+	
+	// Initialize fast EMA with SMA
+	let mut fast_sum = 0.0;
+	for i in 0..fast.min(len - first) {
+		fast_sum += data[first + i];
+	}
+	let mut fast_ema = fast_sum / fast as f64;
+	
+	// Initialize slow EMA with SMA
+	let mut slow_sum = 0.0;
+	for i in 0..slow.min(len - first) {
+		slow_sum += data[first + i];
+	}
+	let mut slow_ema = slow_sum / slow as f64;
+	
+	// Warmup periods
+	let macd_warmup = first + slow - 1;
+	let signal_warmup = first + slow + signal - 2;
+	
+	// Calculate first valid MACD value
+	if macd_warmup < len {
+		macd_out[macd_warmup] = fast_ema - slow_ema;
+	}
+	
+	// Calculate fast and slow EMAs and MACD line
+	for i in (macd_warmup + 1)..len {
+		fast_ema = fast_alpha * data[i] + (1.0 - fast_alpha) * fast_ema;
+		slow_ema = slow_alpha * data[i] + (1.0 - slow_alpha) * slow_ema;
+		macd_out[i] = fast_ema - slow_ema;
+	}
+	
+	// Initialize signal EMA with first MACD values
+	if signal_warmup < len && macd_warmup < len {
+		// Initialize signal with SMA of first signal-period MACD values
+		let signal_start = macd_warmup;
+		let signal_init_end = (signal_start + signal).min(len);
+		let mut signal_sum = 0.0;
+		let mut count = 0;
+		
+		for i in signal_start..signal_init_end {
+			if !macd_out[i].is_nan() {
+				signal_sum += macd_out[i];
+				count += 1;
+			}
+		}
+		
+		if count > 0 {
+			let mut signal_ema = signal_sum / count as f64;
+			
+			// Set first valid signal and histogram
+			if signal_warmup < len {
+				signal_out[signal_warmup] = signal_ema;
+				hist_out[signal_warmup] = macd_out[signal_warmup] - signal_ema;
+			}
+			
+			// Continue with signal EMA
+			for i in (signal_warmup + 1)..len {
+				if !macd_out[i].is_nan() {
+					signal_ema = signal_alpha * macd_out[i] + (1.0 - signal_alpha) * signal_ema;
+					signal_out[i] = signal_ema;
+					hist_out[i] = macd_out[i] - signal_ema;
+				}
+			}
+		}
+	}
+	
+	Ok(())
+}
+
 fn macd_compute_into(
 	data: &[f64],
 	fast: usize,
@@ -339,6 +425,11 @@ fn macd_compute_into(
 	signal_out: &mut [f64],
 	hist_out: &mut [f64],
 ) -> Result<(), MacdError> {
+	// Use classic kernel for EMA
+	if ma_type.eq_ignore_ascii_case("ema") {
+		return macd_compute_into_classic_ema(data, fast, slow, signal, first, macd_out, signal_out, hist_out);
+	}
+	
 	use crate::indicators::moving_averages::ma::{ma, MaData};
 
 	debug_assert_eq!(macd_out.len(), data.len());
@@ -447,6 +538,31 @@ pub fn macd_with_kernel(input: &MacdInput, kernel: Kernel) -> Result<MacdOutput,
 }
 
 #[inline(always)]
+/// Classic kernel - optimized scalar implementation for EMA
+pub unsafe fn macd_scalar_classic_ema(
+	data: &[f64],
+	fast: usize,
+	slow: usize,
+	signal: usize,
+	first: usize,
+) -> Result<MacdOutput, MacdError> {
+	let len = data.len();
+	let macd_warmup = first + slow - 1;
+	let signal_warmup = first + slow + signal - 2;
+	
+	let mut macd = alloc_with_nan_prefix(len, macd_warmup);
+	let mut signal_vec = alloc_with_nan_prefix(len, signal_warmup);
+	let mut hist = alloc_with_nan_prefix(len, signal_warmup);
+	
+	macd_compute_into_classic_ema(data, fast, slow, signal, first, &mut macd, &mut signal_vec, &mut hist)?;
+	
+	Ok(MacdOutput {
+		macd,
+		signal: signal_vec,
+		hist,
+	})
+}
+
 pub unsafe fn macd_scalar(
 	data: &[f64],
 	fast: usize,
@@ -455,6 +571,11 @@ pub unsafe fn macd_scalar(
 	ma_type: &str,
 	first: usize,
 ) -> Result<MacdOutput, MacdError> {
+	// Use classic kernel for EMA
+	if ma_type.eq_ignore_ascii_case("ema") {
+		return macd_scalar_classic_ema(data, fast, slow, signal, first);
+	}
+	
 	use crate::indicators::moving_averages::ma::{ma, MaData};
 	let len = data.len();
 	let fast_ma = ma(ma_type, MaData::Slice(data), fast).map_err(|_| MacdError::AllValuesNaN)?;

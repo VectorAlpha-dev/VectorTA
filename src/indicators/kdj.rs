@@ -436,7 +436,16 @@ fn kdj_compute_into_scalar(
 		};
 	}
 
-	// Unavoidable Vecs from dynamic MA selection.
+	// Use classic kernel for common MA types
+	if (slow_k_ma == "sma" || slow_k_ma == "SMA") && 
+	   (slow_d_ma == "sma" || slow_d_ma == "SMA") {
+		return kdj_classic_sma(&stoch, slow_k, slow_d, stoch_warm, k_out, d_out, j_out);
+	} else if (slow_k_ma == "ema" || slow_k_ma == "EMA") && 
+	          (slow_d_ma == "ema" || slow_d_ma == "EMA") {
+		return kdj_classic_ema(&stoch, slow_k, slow_d, stoch_warm, k_out, d_out, j_out);
+	}
+
+	// Fall back to generic MA for other types
 	let k_vec = ma(slow_k_ma, MaData::Slice(&stoch), slow_k)
 		.map_err(|e| KdjError::MaError(e.to_string().into()))?;
 	let d_vec = ma(slow_d_ma, MaData::Slice(&k_vec), slow_d)
@@ -2786,3 +2795,205 @@ pub fn kdj_batch_unified_js(high: &[f64], low: &[f64], close: &[f64], config: Js
 }
 
 // kdj_batch_into removed - use kdj_batch instead
+
+// === Classic Kernel Implementations ===
+
+/// Classic kernel with inline SMA calculations for both K and D smoothing
+#[inline]
+fn kdj_classic_sma(
+	stoch: &[f64],
+	slow_k: usize,
+	slow_d: usize,
+	stoch_warm: usize,
+	k_out: &mut [f64],
+	d_out: &mut [f64],
+	j_out: &mut [f64],
+) -> Result<(), KdjError> {
+	let len = stoch.len();
+	
+	// Initialize K output with NaN prefix
+	let k_warm = stoch_warm + slow_k - 1;
+	for i in 0..k_warm.min(len) {
+		k_out[i] = f64::NAN;
+	}
+	
+	// Calculate %K (SMA of stochastic)
+	let mut sum_k = 0.0;
+	let mut count_k = 0;
+	
+	// Initialize first SMA for K
+	for i in stoch_warm..(stoch_warm + slow_k).min(len) {
+		if !stoch[i].is_nan() {
+			sum_k += stoch[i];
+			count_k += 1;
+		}
+	}
+	
+	if count_k > 0 && k_warm < len {
+		k_out[k_warm] = sum_k / count_k as f64;
+		
+		// Rolling SMA for K
+		for i in (k_warm + 1)..len {
+			let old_val = stoch[i - slow_k];
+			let new_val = stoch[i];
+			if !old_val.is_nan() {
+				sum_k -= old_val;
+				count_k -= 1;
+			}
+			if !new_val.is_nan() {
+				sum_k += new_val;
+				count_k += 1;
+			}
+			k_out[i] = if count_k > 0 { sum_k / count_k as f64 } else { f64::NAN };
+		}
+	}
+	
+	// Initialize D output with NaN prefix
+	let d_warm = k_warm + slow_d - 1;
+	for i in 0..d_warm.min(len) {
+		d_out[i] = f64::NAN;
+	}
+	
+	// Calculate %D (SMA of %K)
+	let mut sum_d = 0.0;
+	let mut count_d = 0;
+	
+	// Initialize first SMA for D
+	for i in k_warm..(k_warm + slow_d).min(len) {
+		if !k_out[i].is_nan() {
+			sum_d += k_out[i];
+			count_d += 1;
+		}
+	}
+	
+	if count_d > 0 && d_warm < len {
+		d_out[d_warm] = sum_d / count_d as f64;
+		
+		// Rolling SMA for D
+		for i in (d_warm + 1)..len {
+			let old_val = k_out[i - slow_d];
+			let new_val = k_out[i];
+			if !old_val.is_nan() {
+				sum_d -= old_val;
+				count_d -= 1;
+			}
+			if !new_val.is_nan() {
+				sum_d += new_val;
+				count_d += 1;
+			}
+			d_out[i] = if count_d > 0 { sum_d / count_d as f64 } else { f64::NAN };
+		}
+	}
+	
+	// Calculate J = 3K - 2D
+	for i in 0..d_warm.min(len) {
+		j_out[i] = f64::NAN;
+	}
+	for i in d_warm..len {
+		j_out[i] = if k_out[i].is_nan() || d_out[i].is_nan() { 
+			f64::NAN 
+		} else { 
+			3.0 * k_out[i] - 2.0 * d_out[i] 
+		};
+	}
+	
+	Ok(())
+}
+
+/// Classic kernel with inline EMA calculations for both K and D smoothing
+#[inline]
+fn kdj_classic_ema(
+	stoch: &[f64],
+	slow_k: usize,
+	slow_d: usize,
+	stoch_warm: usize,
+	k_out: &mut [f64],
+	d_out: &mut [f64],
+	j_out: &mut [f64],
+) -> Result<(), KdjError> {
+	let len = stoch.len();
+	
+	// Initialize K output with NaN prefix
+	let k_warm = stoch_warm + slow_k - 1;
+	for i in 0..k_warm.min(len) {
+		k_out[i] = f64::NAN;
+	}
+	
+	// Calculate %K (EMA of stochastic)
+	let alpha_k = 2.0 / (slow_k as f64 + 1.0);
+	let one_minus_alpha_k = 1.0 - alpha_k;
+	
+	// Initialize EMA for K with SMA
+	let mut sum_k = 0.0;
+	let mut count_k = 0;
+	for i in stoch_warm..(stoch_warm + slow_k).min(len) {
+		if !stoch[i].is_nan() {
+			sum_k += stoch[i];
+			count_k += 1;
+		}
+	}
+	
+	if count_k > 0 && k_warm < len {
+		let mut ema_k = sum_k / count_k as f64;
+		k_out[k_warm] = ema_k;
+		
+		// Continue EMA for K
+		for i in (k_warm + 1)..len {
+			if !stoch[i].is_nan() {
+				ema_k = alpha_k * stoch[i] + one_minus_alpha_k * ema_k;
+				k_out[i] = ema_k;
+			} else {
+				k_out[i] = ema_k; // Carry forward last valid value
+			}
+		}
+	}
+	
+	// Initialize D output with NaN prefix
+	let d_warm = k_warm + slow_d - 1;
+	for i in 0..d_warm.min(len) {
+		d_out[i] = f64::NAN;
+	}
+	
+	// Calculate %D (EMA of %K)
+	let alpha_d = 2.0 / (slow_d as f64 + 1.0);
+	let one_minus_alpha_d = 1.0 - alpha_d;
+	
+	// Initialize EMA for D with SMA
+	let mut sum_d = 0.0;
+	let mut count_d = 0;
+	for i in k_warm..(k_warm + slow_d).min(len) {
+		if !k_out[i].is_nan() {
+			sum_d += k_out[i];
+			count_d += 1;
+		}
+	}
+	
+	if count_d > 0 && d_warm < len {
+		let mut ema_d = sum_d / count_d as f64;
+		d_out[d_warm] = ema_d;
+		
+		// Continue EMA for D
+		for i in (d_warm + 1)..len {
+			if !k_out[i].is_nan() {
+				ema_d = alpha_d * k_out[i] + one_minus_alpha_d * ema_d;
+				d_out[i] = ema_d;
+			} else {
+				d_out[i] = ema_d; // Carry forward last valid value
+			}
+		}
+	}
+	
+	// Calculate J = 3K - 2D
+	for i in 0..d_warm.min(len) {
+		j_out[i] = f64::NAN;
+	}
+	for i in d_warm..len {
+		j_out[i] = if k_out[i].is_nan() || d_out[i].is_nan() { 
+			f64::NAN 
+		} else { 
+			3.0 * k_out[i] - 2.0 * d_out[i] 
+		};
+	}
+	
+	Ok(())
+}

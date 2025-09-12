@@ -254,12 +254,26 @@ pub fn eri_with_kernel(input: &EriInput, kernel: Kernel) -> Result<EriOutput, Er
 	}
 
 	let ma_type = input.get_ma_type();
-	let full_ma =
-		ma(&ma_type, MaData::Slice(&source_data), period).map_err(|e| EriError::MaCalculationError(e.to_string()))?;
-
 	let warmup_period = first_valid_idx + period - 1;
 	let mut bull = alloc_with_nan_prefix(source_data.len(), warmup_period);
 	let mut bear = alloc_with_nan_prefix(source_data.len(), warmup_period);
+
+	// Dispatch to classic kernels for common cases
+	if ma_type == "sma" || ma_type == "SMA" {
+		unsafe {
+			eri_scalar_classic_sma(high, low, &source_data, period, first_valid_idx, &mut bull, &mut bear)?;
+		}
+		return Ok(EriOutput { bull, bear });
+	} else if ma_type == "ema" || ma_type == "EMA" {
+		unsafe {
+			eri_scalar_classic_ema(high, low, &source_data, period, first_valid_idx, &mut bull, &mut bear)?;
+		}
+		return Ok(EriOutput { bull, bear });
+	}
+
+	// Fall back to general implementation
+	let full_ma =
+		ma(&ma_type, MaData::Slice(&source_data), period).map_err(|e| EriError::MaCalculationError(e.to_string()))?;
 
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
@@ -1277,6 +1291,85 @@ pub fn eri_batch_js(
 	let js_output = EriBatchJsOutput { values, rows, cols, periods };
 	serde_wasm_bindgen::to_value(&js_output)
 		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+/// Optimized ERI calculation with inline SMA
+#[inline]
+pub unsafe fn eri_scalar_classic_sma(
+	high: &[f64],
+	low: &[f64],
+	source: &[f64],
+	period: usize,
+	first_valid_idx: usize,
+	bull: &mut [f64],
+	bear: &mut [f64],
+) -> Result<(), EriError> {
+	let start_idx = first_valid_idx + period - 1;
+	
+	// Calculate initial SMA
+	let mut sum = 0.0;
+	for i in 0..period {
+		sum += source[first_valid_idx + i];
+	}
+	let mut sma = sum / period as f64;
+	
+	// Calculate first ERI values
+	bull[start_idx] = high[start_idx] - sma;
+	bear[start_idx] = low[start_idx] - sma;
+	
+	// Rolling window calculations
+	for i in (start_idx + 1)..source.len() {
+		// Update SMA with rolling window
+		let old_val = source[i - period];
+		let new_val = source[i];
+		sum = sum - old_val + new_val;
+		sma = sum / period as f64;
+		
+		// Calculate ERI values
+		bull[i] = high[i] - sma;
+		bear[i] = low[i] - sma;
+	}
+	
+	Ok(())
+}
+
+/// Optimized ERI calculation with inline EMA
+#[inline]
+pub unsafe fn eri_scalar_classic_ema(
+	high: &[f64],
+	low: &[f64],
+	source: &[f64],
+	period: usize,
+	first_valid_idx: usize,
+	bull: &mut [f64],
+	bear: &mut [f64],
+) -> Result<(), EriError> {
+	let start_idx = first_valid_idx + period - 1;
+	let alpha = 2.0 / (period as f64 + 1.0);
+	let beta = 1.0 - alpha;
+	
+	// Calculate initial SMA for EMA startup
+	let mut sum = 0.0;
+	for i in 0..period {
+		sum += source[first_valid_idx + i];
+	}
+	let mut ema = sum / period as f64;
+	
+	// Calculate first ERI values
+	bull[start_idx] = high[start_idx] - ema;
+	bear[start_idx] = low[start_idx] - ema;
+	
+	// EMA and ERI calculations
+	for i in (start_idx + 1)..source.len() {
+		// Update EMA
+		ema = alpha * source[i] + beta * ema;
+		
+		// Calculate ERI values
+		bull[i] = high[i] - ema;
+		bear[i] = low[i] - ema;
+	}
+	
+	Ok(())
 }
 
 #[cfg(test)]

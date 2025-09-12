@@ -326,6 +326,15 @@ pub fn devstop_into_slice(dst: &mut [f64], input: &DevStopInput, _kernel: Kernel
 	let is_long = input.get_direction().eq_ignore_ascii_case("long");
 	let ma_type = input.get_ma_type();
 
+	// Dispatch to classic kernels for common cases
+	if devtype == 0 {  // Population standard deviation
+		if ma_type == "sma" || ma_type == "SMA" {
+			return unsafe { devstop_scalar_classic_sma(high, low, period, mult, is_long, first, dst) };
+		} else if ma_type == "ema" || ma_type == "EMA" {
+			return unsafe { devstop_scalar_classic_ema(high, low, period, mult, is_long, first, dst) };
+		}
+	}
+
 	// Build range with warm prefix only, no full NaN fill
 	let mut range = alloc_with_nan_prefix(len, first + 1);
 	// rolling(2) max/min without allocating temp vectors
@@ -1387,6 +1396,343 @@ pub fn devstop_batch_unified_js(high:&[f64], low:&[f64], config: JsValue) -> Res
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 	let js = DevStopBatchJsOutput { values: out.values, combos: out.combos, rows: out.rows, cols: out.cols };
 	serde_wasm_bindgen::to_value(&js).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+/// Optimized DevStop calculation with inline SMA and standard deviation
+#[inline]
+pub unsafe fn devstop_scalar_classic_sma(
+	high: &[f64],
+	low: &[f64],
+	period: usize,
+	mult: f64,
+	is_long: bool,
+	first: usize,
+	dst: &mut [f64],
+) -> Result<(), DevStopError> {
+	let len = high.len();
+	use std::collections::VecDeque;
+	
+	// Build range with rolling(2) max/min
+	let mut range = vec![f64::NAN; len];
+	if first + 1 < len {
+		let mut prev_h = high[first];
+		let mut prev_l = low[first];
+		for i in (first + 1)..len {
+			let h = high[i];
+			let l = low[i];
+			if !h.is_nan() && !prev_h.is_nan() && !l.is_nan() && !prev_l.is_nan() {
+				let hi2 = if h > prev_h { h } else { prev_h };
+				let lo2 = if l < prev_l { l } else { prev_l };
+				range[i] = hi2 - lo2;
+			}
+			prev_h = h;
+			prev_l = l;
+		}
+	}
+	
+	// Calculate initial SMA and standard deviation for the range
+	let start_idx = first + period;
+	if start_idx >= len {
+		return Err(DevStopError::NotEnoughValidData { needed: period, valid: len - first });
+	}
+	
+	// Initial SMA of range
+	let mut sum = 0.0;
+	let mut valid_count = 0;
+	for i in 0..period {
+		let val = range[first + 1 + i];  // range starts at first+1
+		if !val.is_nan() {
+			sum += val;
+			valid_count += 1;
+		}
+	}
+	if valid_count == 0 {
+		return Err(DevStopError::AllValuesNaN);
+	}
+	let mut sma = sum / valid_count as f64;
+	
+	// Initial standard deviation (population)
+	let mut sq_sum = 0.0;
+	for i in 0..period {
+		let val = range[first + 1 + i];
+		if !val.is_nan() {
+			let diff = val - sma;
+			sq_sum += diff * diff;
+		}
+	}
+	let mut stddev = (sq_sum / valid_count as f64).sqrt();
+	
+	// Setup for rolling max/min
+	let mut dq: VecDeque<usize> = VecDeque::with_capacity(period + 1);
+	let mut ring: Vec<f64> = vec![f64::NAN; period];
+	let start_base = first + period;
+	let start_final = start_base + period - 1;
+	let warm = first + 2 * period - 1;
+	
+	// Fill warmup with NaN
+	for v in &mut dst[..warm.min(len)] {
+		*v = f64::NAN;
+	}
+	
+	// Main loop with rolling calculations
+	for i in start_base..len {
+		// Update rolling SMA and stddev for range
+		if i > start_base {
+			let old_idx = i - period;
+			let new_idx = i;
+			if old_idx >= first + 1 && new_idx < len {
+				let old_val = range[old_idx];
+				let new_val = range[new_idx];
+				
+				// Update sum for SMA
+				if !old_val.is_nan() && !new_val.is_nan() {
+					sum = sum - old_val + new_val;
+				} else if !old_val.is_nan() {
+					sum -= old_val;
+					valid_count -= 1;
+				} else if !new_val.is_nan() {
+					sum += new_val;
+					valid_count += 1;
+				}
+				
+				if valid_count > 0 {
+					sma = sum / valid_count as f64;
+					
+					// Recalculate standard deviation
+					sq_sum = 0.0;
+					for j in 0..period {
+						let idx = i - period + 1 + j;
+						if idx < len {
+							let val = range[idx];
+							if !val.is_nan() {
+								let diff = val - sma;
+								sq_sum += diff * diff;
+							}
+						}
+					}
+					stddev = (sq_sum / valid_count as f64).sqrt();
+				}
+			}
+		}
+		
+		// Calculate base value
+		let base = if is_long {
+			if high[i].is_nan() || sma.is_nan() || stddev.is_nan() {
+				f64::NAN
+			} else {
+				high[i] - sma - mult * stddev
+			}
+		} else {
+			if low[i].is_nan() || sma.is_nan() || stddev.is_nan() {
+				f64::NAN
+			} else {
+				low[i] + sma + mult * stddev
+			}
+		};
+		
+		// Store in ring buffer
+		ring[i % period] = base;
+		
+		// Update deque for rolling max/min
+		if is_long {
+			while let Some(&j) = dq.back() {
+				let bj = ring[j % period];
+				if bj.is_nan() || bj <= base {
+					dq.pop_back();
+				} else {
+					break;
+				}
+			}
+		} else {
+			while let Some(&j) = dq.back() {
+				let bj = ring[j % period];
+				if bj.is_nan() || bj >= base {
+					dq.pop_back();
+				} else {
+					break;
+				}
+			}
+		}
+		dq.push_back(i);
+		
+		// Drop out-of-window elements
+		let cut = if i >= period { i + 1 - period } else { 0 };
+		while let Some(&j) = dq.front() {
+			if j < cut {
+				dq.pop_front();
+			} else {
+				break;
+			}
+		}
+		
+		// Output final value
+		if i >= start_final {
+			if let Some(&j) = dq.front() {
+				dst[i] = ring[j % period];
+			} else {
+				dst[i] = f64::NAN;
+			}
+		}
+	}
+	
+	Ok(())
+}
+
+/// Optimized DevStop calculation with inline EMA and standard deviation
+#[inline]
+pub unsafe fn devstop_scalar_classic_ema(
+	high: &[f64],
+	low: &[f64],
+	period: usize,
+	mult: f64,
+	is_long: bool,
+	first: usize,
+	dst: &mut [f64],
+) -> Result<(), DevStopError> {
+	let len = high.len();
+	use std::collections::VecDeque;
+	
+	// Build range with rolling(2) max/min
+	let mut range = vec![f64::NAN; len];
+	if first + 1 < len {
+		let mut prev_h = high[first];
+		let mut prev_l = low[first];
+		for i in (first + 1)..len {
+			let h = high[i];
+			let l = low[i];
+			if !h.is_nan() && !prev_h.is_nan() && !l.is_nan() && !prev_l.is_nan() {
+				let hi2 = if h > prev_h { h } else { prev_h };
+				let lo2 = if l < prev_l { l } else { prev_l };
+				range[i] = hi2 - lo2;
+			}
+			prev_h = h;
+			prev_l = l;
+		}
+	}
+	
+	// Calculate initial SMA for EMA startup
+	let start_idx = first + period;
+	if start_idx >= len {
+		return Err(DevStopError::NotEnoughValidData { needed: period, valid: len - first });
+	}
+	
+	// Initial SMA of range for EMA
+	let mut sum = 0.0;
+	let mut valid_count = 0;
+	for i in 0..period {
+		let val = range[first + 1 + i];
+		if !val.is_nan() {
+			sum += val;
+			valid_count += 1;
+		}
+	}
+	if valid_count == 0 {
+		return Err(DevStopError::AllValuesNaN);
+	}
+	let mut ema = sum / valid_count as f64;
+	let alpha = 2.0 / (period as f64 + 1.0);
+	let beta = 1.0 - alpha;
+	
+	// Setup for rolling max/min
+	let mut dq: VecDeque<usize> = VecDeque::with_capacity(period + 1);
+	let mut ring: Vec<f64> = vec![f64::NAN; period];
+	let start_base = first + period;
+	let start_final = start_base + period - 1;
+	let warm = first + 2 * period - 1;
+	
+	// Fill warmup with NaN
+	for v in &mut dst[..warm.min(len)] {
+		*v = f64::NAN;
+	}
+	
+	// Main loop with EMA and rolling calculations
+	for i in start_base..len {
+		// Update EMA
+		if i < len && !range[i].is_nan() {
+			ema = alpha * range[i] + beta * ema;
+		}
+		
+		// Calculate standard deviation with current EMA
+		let mut sq_sum = 0.0;
+		let mut count = 0;
+		for j in 0..period {
+			let idx = i - period + 1 + j;
+			if idx >= first + 1 && idx < len {
+				let val = range[idx];
+				if !val.is_nan() {
+					let diff = val - ema;
+					sq_sum += diff * diff;
+					count += 1;
+				}
+			}
+		}
+		let stddev = if count > 0 {
+			(sq_sum / count as f64).sqrt()
+		} else {
+			f64::NAN
+		};
+		
+		// Calculate base value
+		let base = if is_long {
+			if high[i].is_nan() || ema.is_nan() || stddev.is_nan() {
+				f64::NAN
+			} else {
+				high[i] - ema - mult * stddev
+			}
+		} else {
+			if low[i].is_nan() || ema.is_nan() || stddev.is_nan() {
+				f64::NAN
+			} else {
+				low[i] + ema + mult * stddev
+			}
+		};
+		
+		// Store in ring buffer
+		ring[i % period] = base;
+		
+		// Update deque for rolling max/min
+		if is_long {
+			while let Some(&j) = dq.back() {
+				let bj = ring[j % period];
+				if bj.is_nan() || bj <= base {
+					dq.pop_back();
+				} else {
+					break;
+				}
+			}
+		} else {
+			while let Some(&j) = dq.back() {
+				let bj = ring[j % period];
+				if bj.is_nan() || bj >= base {
+					dq.pop_back();
+				} else {
+					break;
+				}
+			}
+		}
+		dq.push_back(i);
+		
+		// Drop out-of-window elements
+		let cut = if i >= period { i + 1 - period } else { 0 };
+		while let Some(&j) = dq.front() {
+			if j < cut {
+				dq.pop_front();
+			} else {
+				break;
+			}
+		}
+		
+		// Output final value
+		if i >= start_final {
+			if let Some(&j) = dq.front() {
+				dst[i] = ring[j % period];
+			} else {
+				dst[i] = f64::NAN;
+			}
+		}
+	}
+	
+	Ok(())
 }
 
 #[cfg(test)]

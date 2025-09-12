@@ -431,6 +431,18 @@ pub unsafe fn bollinger_bands_width_scalar_into(
 	let devdn = input.get_devdn();
 	let matype = input.get_matype();
 	let devtype = input.get_devtype();
+
+	// Dispatch to classic kernels for common cases
+	if devtype == 0 {
+		// Population standard deviation
+		if matype == "sma" || matype == "SMA" {
+			return bollinger_bands_width_scalar_classic_sma(data, period, devup, devdn, first_valid_idx, out);
+		} else if matype == "ema" || matype == "EMA" {
+			return bollinger_bands_width_scalar_classic_ema(data, period, devup, devdn, first_valid_idx, out);
+		}
+	}
+
+	// Fall back to general implementation
 	let ma_data = match &input.data {
 		BollingerBandsWidthData::Candles { candles, source } => {
 			crate::indicators::moving_averages::ma::MaData::Candles { candles, source }
@@ -457,6 +469,119 @@ pub unsafe fn bollinger_bands_width_scalar_into(
 		let l = m - devdn * dev_values[i];
 		out[i] = (u - l) / m;
 	}
+	Ok(())
+}
+
+/// Optimized Bollinger Bands Width calculation with inline SMA and standard deviation
+#[inline]
+pub unsafe fn bollinger_bands_width_scalar_classic_sma(
+	data: &[f64],
+	period: usize,
+	devup: f64,
+	devdn: f64,
+	first_valid_idx: usize,
+	out: &mut [f64],
+) -> Result<(), BollingerBandsWidthError> {
+	let start_idx = first_valid_idx + period - 1;
+
+	// Calculate initial SMA
+	let mut sum = 0.0;
+	for i in 0..period {
+		sum += data[first_valid_idx + i];
+	}
+	let mut sma = sum / period as f64;
+
+	// Calculate initial standard deviation (population)
+	let mut sq_sum = 0.0;
+	for i in 0..period {
+		let diff = data[first_valid_idx + i] - sma;
+		sq_sum += diff * diff;
+	}
+	let mut stddev = (sq_sum / period as f64).sqrt();
+
+	// Calculate first width value
+	let upper = sma + devup * stddev;
+	let lower = sma - devdn * stddev;
+	out[start_idx] = (upper - lower) / sma;
+
+	// Rolling window calculations
+	for i in (start_idx + 1)..data.len() {
+		// Update SMA with rolling window
+		let old_val = data[i - period];
+		let new_val = data[i];
+		sum = sum - old_val + new_val;
+		sma = sum / period as f64;
+
+		// Update standard deviation
+		sq_sum = 0.0;
+		for j in 0..period {
+			let diff = data[i - period + 1 + j] - sma;
+			sq_sum += diff * diff;
+		}
+		stddev = (sq_sum / period as f64).sqrt();
+
+		// Calculate width
+		let upper = sma + devup * stddev;
+		let lower = sma - devdn * stddev;
+		out[i] = (upper - lower) / sma;
+	}
+
+	Ok(())
+}
+
+/// Optimized Bollinger Bands Width calculation with inline EMA and standard deviation
+#[inline]
+pub unsafe fn bollinger_bands_width_scalar_classic_ema(
+	data: &[f64],
+	period: usize,
+	devup: f64,
+	devdn: f64,
+	first_valid_idx: usize,
+	out: &mut [f64],
+) -> Result<(), BollingerBandsWidthError> {
+	let start_idx = first_valid_idx + period - 1;
+	let alpha = 2.0 / (period as f64 + 1.0);
+	let beta = 1.0 - alpha;
+
+	// Calculate initial SMA for EMA
+	let mut sum = 0.0;
+	for i in 0..period {
+		sum += data[first_valid_idx + i];
+	}
+	let mut ema = sum / period as f64;
+
+	// Calculate initial standard deviation (population)
+	let mut sq_sum = 0.0;
+	for i in 0..period {
+		let diff = data[first_valid_idx + i] - ema;
+		sq_sum += diff * diff;
+	}
+	let mut stddev = (sq_sum / period as f64).sqrt();
+
+	// Calculate first width value
+	let upper = ema + devup * stddev;
+	let lower = ema - devdn * stddev;
+	out[start_idx] = (upper - lower) / ema;
+
+	// EMA and rolling standard deviation
+	for i in (start_idx + 1)..data.len() {
+		// Update EMA
+		ema = alpha * data[i] + beta * ema;
+
+		// Calculate standard deviation with current EMA
+		sq_sum = 0.0;
+		for j in 0..period {
+			let diff = data[i - period + 1 + j] - ema;
+			sq_sum += diff * diff;
+		}
+		stddev = (sq_sum / period as f64).sqrt();
+
+		// Calculate width
+		let upper = ema + devup * stddev;
+		let lower = ema - devdn * stddev;
+		out[i] = (upper - lower) / ema;
+	}
+
 	Ok(())
 }
 

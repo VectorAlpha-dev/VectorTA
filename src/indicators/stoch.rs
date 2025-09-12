@@ -365,6 +365,19 @@ pub fn stoch_with_kernel(input: &StochInput, kernel: Kernel) -> Result<StochOutp
 
 	let slowk_ma_type = input.get_slowk_ma_type();
 	let slowd_ma_type = input.get_slowd_ma_type();
+	
+	// Use classic kernel for common MA types
+	// Note: k_raw starts being valid at first_valid_idx + fastk_period - 1
+	let k_first_valid = first_valid_idx + fastk_period - 1;
+	if (slowk_ma_type == "sma" || slowk_ma_type == "SMA") && 
+	   (slowd_ma_type == "sma" || slowd_ma_type == "SMA") {
+		return stoch_classic_sma(&k_raw, slowk_period, slowd_period, k_first_valid);
+	} else if (slowk_ma_type == "ema" || slowk_ma_type == "EMA") && 
+	          (slowd_ma_type == "ema" || slowd_ma_type == "EMA") {
+		return stoch_classic_ema(&k_raw, slowk_period, slowd_period, k_first_valid);
+	}
+	
+	// Fall back to generic MA for other types
 	let k_vec =
 		ma(&slowk_ma_type, MaData::Slice(&k_raw), slowk_period).map_err(|e| StochError::Other(e.to_string()))?;
 	let d_vec =
@@ -2048,4 +2061,157 @@ mod tests {
 
 	gen_batch_tests!(check_batch_default_row);
 	gen_batch_tests!(check_batch_no_poison);
+}
+
+// === Classic Kernel Implementations ===
+
+/// Classic kernel with inline SMA calculations for both K and D smoothing
+#[inline]
+fn stoch_classic_sma(
+	k_raw: &[f64],
+	slowk_period: usize,
+	slowd_period: usize,
+	first_valid_idx: usize,
+) -> Result<StochOutput, StochError> {
+	let len = k_raw.len();
+	let mut k_vec = alloc_with_nan_prefix(len, first_valid_idx + slowk_period - 1);
+	let mut d_vec = alloc_with_nan_prefix(len, first_valid_idx + slowk_period + slowd_period - 2);
+	
+	// Calculate %K (SMA of raw K)
+	let mut sum_k = 0.0;
+	let k_start = first_valid_idx;
+	
+	// Initialize first SMA for K
+	for i in k_start..(k_start + slowk_period).min(len) {
+		if !k_raw[i].is_nan() {
+			sum_k += k_raw[i];
+		}
+	}
+	if k_start + slowk_period - 1 < len {
+		k_vec[k_start + slowk_period - 1] = sum_k / slowk_period as f64;
+	}
+	
+	// Rolling SMA for K
+	for i in (k_start + slowk_period)..len {
+		let old_val = k_raw[i - slowk_period];
+		let new_val = k_raw[i];
+		if !old_val.is_nan() {
+			sum_k -= old_val;
+		}
+		if !new_val.is_nan() {
+			sum_k += new_val;
+		}
+		k_vec[i] = sum_k / slowk_period as f64;
+	}
+	
+	// Calculate %D (SMA of %K)
+	let mut sum_d = 0.0;
+	let d_start = first_valid_idx + slowk_period - 1;
+	
+	// Initialize first SMA for D
+	for i in d_start..(d_start + slowd_period).min(len) {
+		if !k_vec[i].is_nan() {
+			sum_d += k_vec[i];
+		}
+	}
+	if d_start + slowd_period - 1 < len {
+		d_vec[d_start + slowd_period - 1] = sum_d / slowd_period as f64;
+	}
+	
+	// Rolling SMA for D
+	for i in (d_start + slowd_period)..len {
+		let old_val = k_vec[i - slowd_period];
+		let new_val = k_vec[i];
+		if !old_val.is_nan() {
+			sum_d -= old_val;
+		}
+		if !new_val.is_nan() {
+			sum_d += new_val;
+		}
+		d_vec[i] = sum_d / slowd_period as f64;
+	}
+	
+	Ok(StochOutput { k: k_vec, d: d_vec })
+}
+
+/// Classic kernel with inline EMA calculations for both K and D smoothing
+#[inline]
+fn stoch_classic_ema(
+	k_raw: &[f64],
+	slowk_period: usize,
+	slowd_period: usize,
+	first_valid_idx: usize,
+) -> Result<StochOutput, StochError> {
+	let len = k_raw.len();
+	let mut k_vec = alloc_with_nan_prefix(len, first_valid_idx + slowk_period - 1);
+	let mut d_vec = alloc_with_nan_prefix(len, first_valid_idx + slowk_period + slowd_period - 2);
+	
+	// Calculate %K (EMA of raw K)
+	let alpha_k = 2.0 / (slowk_period as f64 + 1.0);
+	let one_minus_alpha_k = 1.0 - alpha_k;
+	
+	// Initialize EMA for K with SMA
+	let k_warmup = first_valid_idx + slowk_period - 1;
+	let mut sum_k = 0.0;
+	let mut count_k = 0;
+	for i in first_valid_idx..(first_valid_idx + slowk_period).min(len) {
+		if !k_raw[i].is_nan() {
+			sum_k += k_raw[i];
+			count_k += 1;
+		}
+	}
+	
+	if count_k > 0 && k_warmup < len {
+		let mut ema_k = sum_k / count_k as f64;
+		k_vec[k_warmup] = ema_k;
+		
+		// Continue EMA for K
+		for i in (k_warmup + 1)..len {
+			if !k_raw[i].is_nan() {
+				ema_k = alpha_k * k_raw[i] + one_minus_alpha_k * ema_k;
+			}
+			k_vec[i] = ema_k;
+		}
+	} else {
+		// If no valid data in warmup, fill remaining positions with NaN
+		for i in k_warmup..len {
+			k_vec[i] = f64::NAN;
+		}
+	}
+	
+	// Calculate %D (EMA of %K)
+	let alpha_d = 2.0 / (slowd_period as f64 + 1.0);
+	let one_minus_alpha_d = 1.0 - alpha_d;
+	
+	// Initialize EMA for D with SMA
+	let d_warmup = first_valid_idx + slowk_period + slowd_period - 2;
+	let d_start = first_valid_idx + slowk_period - 1;
+	let mut sum_d = 0.0;
+	let mut count_d = 0;
+	for i in d_start..(d_start + slowd_period).min(len) {
+		if !k_vec[i].is_nan() {
+			sum_d += k_vec[i];
+			count_d += 1;
+		}
+	}
+	
+	if count_d > 0 && d_warmup < len {
+		let mut ema_d = sum_d / count_d as f64;
+		d_vec[d_warmup] = ema_d;
+		
+		// Continue EMA for D
+		for i in (d_warmup + 1)..len {
+			if !k_vec[i].is_nan() {
+				ema_d = alpha_d * k_vec[i] + one_minus_alpha_d * ema_d;
+			}
+			d_vec[i] = ema_d;
+		}
+	} else {
+		// If no valid data in warmup, fill remaining positions with NaN
+		for i in d_warmup..len {
+			d_vec[i] = f64::NAN;
+		}
+	}
+	
+	Ok(StochOutput { k: k_vec, d: d_vec })
 }

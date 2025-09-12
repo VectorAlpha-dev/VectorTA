@@ -298,6 +298,17 @@ pub fn ott(input: &OttInput) -> Result<OttOutput, OttError> {
 pub fn ott_with_kernel(input: &OttInput, kernel: Kernel) -> Result<OttOutput, OttError> {
     let (data, period, percent, ma_type, first, chosen) = ott_prepare(input, kernel)?;
     
+    // Check for classic kernel conditions (default parameters with VAR MA type)
+    // DISABLED: Still has minor accuracy differences
+    if false && chosen == Kernel::Scalar && period == 2 && percent == 1.4 && ma_type.to_uppercase() == "VAR" {
+        // Use optimized classic kernel for default parameters
+        let mut out = vec![f64::NAN; data.len()];
+        unsafe {
+            ott_scalar_classic(data, period, percent, first, &mut out)?;
+        }
+        return Ok(OttOutput { values: out });
+    }
+    
     // Calculate the moving average based on the selected type
     let ma_values = calculate_moving_average(data, period, ma_type, chosen)?;
     
@@ -606,6 +617,138 @@ fn ott_compute_into(
             _ => unreachable!(),
         }
     }
+}
+
+// ==================== CLASSIC KERNEL ====================
+/// Optimized classic kernel for OTT with default parameters (period=2, percent=1.4, ma_type="VAR")
+/// Inlines VAR moving average calculation (VIDYA) and OTT computation for maximum performance
+#[inline(always)]
+pub unsafe fn ott_scalar_classic(
+    data: &[f64],
+    period: usize,
+    percent: f64,
+    first: usize,
+    out: &mut [f64],
+) -> Result<(), OttError> {
+    let len = data.len();
+    
+    // Step 1: Inline VAR (Variable Moving Average) calculation - matching calculate_var_ma exactly
+    let valpha = 2.0 / (period as f64 + 1.0);
+    
+    // rolling sums for last 9 diffs
+    let mut ring_u = [0.0f64; 9];
+    let mut ring_d = [0.0f64; 9];
+    let mut u_sum = 0.0;
+    let mut d_sum = 0.0;
+    let mut idx = 0usize;
+    
+    // Pine-compatible seed: nz(VAR[1]) = 0.0 at start
+    let mut var = 0.0;
+    let mut var_ma = vec![f64::NAN; len];
+    var_ma[first] = var;
+    
+    // prefill window for indices first+1 ..= first+8
+    let start = first + 1;
+    let pre_end = (first + 8).min(len.saturating_sub(1));
+    for i in start..=pre_end {
+        let a = data[i - 1];
+        let b = data[i];
+        if !a.is_nan() && !b.is_nan() {
+            let up = (b - a).max(0.0);
+            let down = (a - b).max(0.0);
+            ring_u[idx] = up;
+            u_sum += up;
+            ring_d[idx] = down;
+            d_sum += down;
+            idx = (idx + 1) % 9;
+        }
+        var_ma[i] = var; // output current var (0.0) until window fills
+    }
+    
+    // main loop from first+9
+    for i in (first + 9)..len {
+        let a = data[i - 1];
+        let b = data[i];
+        if !a.is_nan() && !b.is_nan() {
+            // pop oldest, push newest
+            let old_u = ring_u[idx];
+            let old_d = ring_d[idx];
+            let up = (b - a).max(0.0);
+            let down = (a - b).max(0.0);
+            
+            u_sum += up - old_u;
+            d_sum += down - old_d;
+            
+            ring_u[idx] = up;
+            ring_d[idx] = down;
+            idx = (idx + 1) % 9;
+            
+            let denom = u_sum + d_sum;
+            let vcmo = if denom != 0.0 { (u_sum - d_sum) / denom } else { 0.0 };
+            
+            var = valpha * vcmo.abs() * b + (1.0 - valpha * vcmo.abs()) * var;
+            var_ma[i] = var;
+        } else if i > first {
+            var_ma[i] = var_ma[i - 1]; // carry forward on NaN
+        }
+    }
+    
+    // Step 2: Apply OTT calculation with the VAR moving average
+    let fark = percent * 0.01;
+    let ma_first = first;  // VAR starts from first valid value
+    
+    // Fill warmup with NaN
+    for i in 0..ma_first {
+        out[i] = f64::NAN;
+    }
+    
+    // Initialize direction
+    let mut dir = 1i32;
+    let mut long_stop = f64::NAN;
+    let mut short_stop = f64::NAN;
+    
+    for i in ma_first..len {
+        let mavg = var_ma[i];
+        
+        if mavg.is_nan() {
+            continue;
+        }
+        
+        let offset = mavg * fark;
+        
+        // Calculate long stop
+        let long_stop_prev = if long_stop.is_nan() { mavg - offset } else { long_stop };
+        long_stop = if mavg > long_stop_prev {
+            (mavg - offset).max(long_stop_prev)
+        } else {
+            mavg - offset
+        };
+        
+        // Calculate short stop
+        let short_stop_prev = if short_stop.is_nan() { mavg + offset } else { short_stop };
+        short_stop = if mavg < short_stop_prev {
+            (mavg + offset).min(short_stop_prev)
+        } else {
+            mavg + offset
+        };
+        
+        // Update direction
+        let prev_dir = dir;
+        if mavg > short_stop_prev {
+            dir = 1;
+        } else if mavg <= long_stop_prev {
+            dir = -1;
+        }
+        
+        // Calculate OTT value
+        out[i] = if dir == -1 {
+            short_stop
+        } else {
+            long_stop
+        };
+    }
+    
+    Ok(())
 }
 
 // ==================== SCALAR IMPLEMENTATION ====================

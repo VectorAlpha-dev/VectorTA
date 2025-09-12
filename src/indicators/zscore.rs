@@ -284,6 +284,16 @@ pub unsafe fn zscore_scalar(
 	nbdev: f64,
 	devtype: usize,
 ) -> Result<ZscoreOutput, ZscoreError> {
+	// Check for classic kernel optimization
+	if devtype == 0 { // Standard deviation only
+		if ma_type == "sma" {
+			return zscore_scalar_classic_sma(data, period, first, nbdev);
+		} else if ma_type == "ema" {
+			return zscore_scalar_classic_ema(data, period, first, nbdev);
+		}
+	}
+	
+	// Fall back to regular implementation for other MA types or deviation types
 	let means = ma(ma_type, MaData::Slice(data), period)
 		.map_err(|e| ZscoreError::MaError(e.to_string()))?;
 	let dev_input = DevInput {
@@ -310,6 +320,147 @@ pub unsafe fn zscore_scalar(
 			(value - mean) / sigma
 		};
 	}
+	Ok(ZscoreOutput { values: out })
+}
+
+// Classic kernel with inline SMA and standard deviation
+#[inline]
+pub unsafe fn zscore_scalar_classic_sma(
+	data: &[f64],
+	period: usize,
+	first: usize,
+	nbdev: f64,
+) -> Result<ZscoreOutput, ZscoreError> {
+	let warmup_end = first + period - 1;
+	let mut out = alloc_with_nan_prefix(data.len(), warmup_end);
+	
+	// Calculate initial SMA and sum of squares
+	let mut sum = 0.0;
+	let mut sum_sqr = 0.0;
+	for j in first..warmup_end + 1 {
+		let val = data[j];
+		sum += val;
+		sum_sqr += val * val;
+	}
+	let mut mean = sum / period as f64;
+	
+	// Calculate initial standard deviation using the efficient formula
+	let variance = (sum_sqr / period as f64) - (mean * mean);
+	let mut stddev = if variance <= 0.0 {
+		0.0
+	} else {
+		variance.sqrt() * nbdev
+	};
+	
+	// First valid value
+	out[warmup_end] = if stddev == 0.0 || stddev.is_nan() {
+		f64::NAN
+	} else {
+		(data[warmup_end] - mean) / stddev
+	};
+	
+	// Rolling calculation with efficient updates
+	for i in warmup_end + 1..data.len() {
+		// Update rolling SMA and sum of squares
+		let old_val = data[i - period];
+		let new_val = data[i];
+		sum = sum - old_val + new_val;
+		sum_sqr = sum_sqr - old_val * old_val + new_val * new_val;
+		mean = sum / period as f64;
+		
+		// Calculate standard deviation using the efficient formula
+		let variance = (sum_sqr / period as f64) - (mean * mean);
+		stddev = if variance <= 0.0 {
+			0.0
+		} else {
+			variance.sqrt() * nbdev
+		};
+		
+		// Calculate z-score
+		out[i] = if stddev == 0.0 || stddev.is_nan() {
+			f64::NAN
+		} else {
+			(new_val - mean) / stddev
+		};
+	}
+	
+	Ok(ZscoreOutput { values: out })
+}
+
+// Classic kernel with inline EMA and standard deviation
+#[inline]
+pub unsafe fn zscore_scalar_classic_ema(
+	data: &[f64],
+	period: usize,
+	first: usize,
+	nbdev: f64,
+) -> Result<ZscoreOutput, ZscoreError> {
+	let warmup_end = first + period - 1;
+	let mut out = alloc_with_nan_prefix(data.len(), warmup_end);
+	
+	// EMA alpha factor
+	let alpha = 2.0 / (period as f64 + 1.0);
+	let one_minus_alpha = 1.0 - alpha;
+	
+	// Initialize EMA with SMA
+	let mut sum = 0.0;
+	let mut sum_sqr = 0.0;
+	for j in first..warmup_end + 1 {
+		let val = data[j];
+		sum += val;
+		sum_sqr += val * val;
+	}
+	let mut ema = sum / period as f64;
+	
+	// Initialize exponentially weighted variance (start with sample variance)
+	let initial_variance = (sum_sqr / period as f64) - (ema * ema);
+	let mut ema_variance = initial_variance.max(0.0);
+	let mut stddev = ema_variance.sqrt() * nbdev;
+	
+	// First valid value
+	out[warmup_end] = if stddev == 0.0 || stddev.is_nan() {
+		f64::NAN
+	} else {
+		(data[warmup_end] - ema) / stddev
+	};
+	
+	// Rolling EMA and standard deviation calculation
+	// Use a circular buffer for efficient window management
+	use std::collections::VecDeque;
+	let mut window = VecDeque::with_capacity(period);
+	for j in first..=warmup_end {
+		window.push_back(data[j]);
+	}
+	
+	for i in warmup_end + 1..data.len() {
+		let new_val = data[i];
+		
+		// Update EMA
+		ema = alpha * new_val + one_minus_alpha * ema;
+		
+		// Update rolling window (O(1) operations)
+		if window.len() == period {
+			window.pop_front();
+		}
+		window.push_back(new_val);
+		
+		// Calculate standard deviation over the current window
+		// Note: We must recalculate because the EMA has changed
+		let mut sum_sq_diff = 0.0;
+		for &val in &window {
+			let diff = val - ema;
+			sum_sq_diff += diff * diff;
+		}
+		stddev = (sum_sq_diff / window.len() as f64).sqrt() * nbdev;
+		
+		// Calculate z-score
+		out[i] = if stddev == 0.0 || stddev.is_nan() {
+			f64::NAN
+		} else {
+			(new_val - ema) / stddev
+		};
+	}
+	
 	Ok(ZscoreOutput { values: out })
 }
 
@@ -753,6 +904,18 @@ unsafe fn zscore_row_scalar(
 	devtype: usize,
 	out: &mut [f64],
 ) {
+	// Check for classic kernel optimization
+	if devtype == 0 { // Standard deviation only
+		if ma_type == "sma" {
+			zscore_row_scalar_classic_sma(data, first, period, nbdev, out);
+			return;
+		} else if ma_type == "ema" {
+			zscore_row_scalar_classic_ema(data, first, period, nbdev, out);
+			return;
+		}
+	}
+	
+	// Fall back to regular implementation for other MA types or deviation types
 	let means = match ma(ma_type, MaData::Slice(data), period) {
 		Ok(m) => m,
 		Err(_) => {
@@ -788,6 +951,125 @@ unsafe fn zscore_row_scalar(
 			f64::NAN
 		} else {
 			(value - mean) / sigma
+		};
+	}
+}
+
+// Classic row kernel with inline SMA and standard deviation for batch processing
+#[inline(always)]
+unsafe fn zscore_row_scalar_classic_sma(
+	data: &[f64],
+	first: usize,
+	period: usize,
+	nbdev: f64,
+	out: &mut [f64],
+) {
+	let warmup_end = first + period - 1;
+	
+	// Calculate initial SMA
+	let mut sum = 0.0;
+	for j in first..warmup_end + 1 {
+		sum += data[j];
+	}
+	let mut mean = sum / period as f64;
+	
+	// Calculate initial standard deviation
+	let mut sum_sq_diff = 0.0;
+	for j in first..warmup_end + 1 {
+		let diff = data[j] - mean;
+		sum_sq_diff += diff * diff;
+	}
+	let mut stddev = (sum_sq_diff / period as f64).sqrt() * nbdev;
+	
+	// First valid value
+	out[warmup_end] = if stddev == 0.0 || stddev.is_nan() {
+		f64::NAN
+	} else {
+		(data[warmup_end] - mean) / stddev
+	};
+	
+	// Rolling calculation
+	for i in warmup_end + 1..data.len() {
+		// Update rolling SMA
+		let old_val = data[i - period];
+		let new_val = data[i];
+		sum = sum - old_val + new_val;
+		mean = sum / period as f64;
+		
+		// Update rolling standard deviation
+		sum_sq_diff = 0.0;
+		for j in (i - period + 1)..=i {
+			let diff = data[j] - mean;
+			sum_sq_diff += diff * diff;
+		}
+		stddev = (sum_sq_diff / period as f64).sqrt() * nbdev;
+		
+		// Calculate z-score
+		out[i] = if stddev == 0.0 || stddev.is_nan() {
+			f64::NAN
+		} else {
+			(new_val - mean) / stddev
+		};
+	}
+}
+
+// Classic row kernel with inline EMA and standard deviation for batch processing
+#[inline(always)]
+unsafe fn zscore_row_scalar_classic_ema(
+	data: &[f64],
+	first: usize,
+	period: usize,
+	nbdev: f64,
+	out: &mut [f64],
+) {
+	let warmup_end = first + period - 1;
+	
+	// EMA alpha factor
+	let alpha = 2.0 / (period as f64 + 1.0);
+	let one_minus_alpha = 1.0 - alpha;
+	
+	// Initialize EMA with SMA
+	let mut sum = 0.0;
+	for j in first..warmup_end + 1 {
+		sum += data[j];
+	}
+	let mut ema = sum / period as f64;
+	
+	// Calculate initial standard deviation
+	let mut sum_sq_diff = 0.0;
+	for j in first..warmup_end + 1 {
+		let diff = data[j] - ema;
+		sum_sq_diff += diff * diff;
+	}
+	let mut stddev = (sum_sq_diff / period as f64).sqrt() * nbdev;
+	
+	// First valid value
+	out[warmup_end] = if stddev == 0.0 || stddev.is_nan() {
+		f64::NAN
+	} else {
+		(data[warmup_end] - ema) / stddev
+	};
+	
+	// Rolling EMA and standard deviation calculation
+	for i in warmup_end + 1..data.len() {
+		// Update EMA
+		ema = alpha * data[i] + one_minus_alpha * ema;
+		
+		// Calculate standard deviation over the window
+		sum_sq_diff = 0.0;
+		let start_idx = if i >= period { i - period + 1 } else { first };
+		for j in start_idx..=i {
+			let diff = data[j] - ema;
+			sum_sq_diff += diff * diff;
+		}
+		let window_size = i - start_idx + 1;
+		stddev = (sum_sq_diff / window_size as f64).sqrt() * nbdev;
+		
+		// Calculate z-score
+		out[i] = if stddev == 0.0 || stddev.is_nan() {
+			f64::NAN
+		} else {
+			(data[i] - ema) / stddev
 		};
 	}
 }
