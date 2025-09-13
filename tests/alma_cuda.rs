@@ -73,6 +73,8 @@ fn alma_cuda_one_series_many_params_matches_cpu() -> Result<(), Box<dyn std::err
     Ok(())
 }
 
+// multi-stream variant removed
+
 #[cfg(feature = "cuda")]
 #[test]
 fn alma_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {

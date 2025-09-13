@@ -12,7 +12,7 @@ name = "indicator_benchmark"
 harness = false
 
 [[bench]]
-name = "cuda_alma"
+name = "cuda_bench"
 harness = false
 
 [dependencies]
@@ -71,7 +71,7 @@ path = "src/bin/generate_references.rs"
 
 [profile.release]
 opt-level       = 3
-codegen-units   = 1  # Single codegen unit for maximum optimization
+codegen-units   = 255  # Single codegen unit for maximum optimization
 incremental = false
 # panic = "abort"  # Commented out to allow benchmarks to compile
 overflow-checks = false
@@ -91,7 +91,7 @@ strip = "symbols"
 # Don't inherit from any profile to avoid panic strategy conflicts
 opt-level = 3
 lto = "fat"  # Enable for maximum performance
-codegen-units = 1  # Single codegen unit for maximum optimization
+codegen-units = 255  # Single codegen unit for maximum optimization
 incremental = false
 overflow-checks = false
 debug = false  # Disabled for faster compilation

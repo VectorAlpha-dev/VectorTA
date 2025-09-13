@@ -169,3 +169,4 @@ void alma_batch_tiled_f32(const float*  __restrict__ prices,      // Input price
     }
     out[out_idx] = sum * inv_norm;
 }
+

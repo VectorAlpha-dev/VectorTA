@@ -17,6 +17,8 @@ use cust::stream::{Stream, StreamFlags};
 use std::ffi::c_void;
 
 use std::fmt;
+use std::env;
+use cust::sys as cu;
 
 #[derive(Debug)]
 pub enum CudaAlmaError {
@@ -61,6 +63,35 @@ impl CudaAlma {
             .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
 
         Ok(Self { module, stream, _context: context })
+    }
+
+    #[inline]
+    fn mem_check_enabled() -> bool {
+        match env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && v.to_lowercase() != "false",
+            Err(_) => true,
+        }
+    }
+
+    #[inline]
+    fn device_mem_info() -> Option<(usize, usize)> {
+        unsafe {
+            let mut free: usize = 0;
+            let mut total: usize = 0;
+            let res = cu::cuMemGetInfo_v2(&mut free as *mut usize, &mut total as *mut usize);
+            if res == cu::CUresult::CUDA_SUCCESS { Some((free, total)) } else { None }
+        }
+    }
+
+    #[inline]
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+        if !Self::mem_check_enabled() { return true; }
+        if let Some((free, _total)) = Self::device_mem_info() {
+            required_bytes.saturating_add(headroom_bytes) <= free
+        } else {
+            // If we cannot query memory info, proceed (no-op check)
+            true
+        }
     }
 
     /// Compute ALMA for one series across many parameter combinations on GPU.
@@ -127,6 +158,21 @@ impl CudaAlma {
             inv_norms[idx] = inv;
             let base = idx * max_period;
             weights_flat[base..base + period].copy_from_slice(&w);
+        }
+
+        // Estimate device memory and enforce a light guardrail before allocating
+        let prices_bytes = series_len * std::mem::size_of::<f32>();
+        let weights_bytes = n_combos * max_period * std::mem::size_of::<f32>();
+        let periods_bytes = n_combos * std::mem::size_of::<i32>();
+        let inv_bytes = n_combos * std::mem::size_of::<f32>();
+        let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
+        let required = prices_bytes + weights_bytes + periods_bytes + inv_bytes + out_bytes;
+        let headroom = 64 * 1024 * 1024; // 64MB safety headroom
+        if !Self::will_fit(required, headroom) {
+            return Err(CudaAlmaError::InvalidInput(format!(
+                "estimated device memory {:.2} MB exceeds free VRAM",
+                (required as f64) / (1024.0 * 1024.0)
+            )));
         }
 
         // Allocate device buffers and copy (convert host data to f32)
@@ -218,6 +264,10 @@ impl CudaAlma {
         })
     }
 
+    /// Same as `alma_batch`, but partitions the parameter grid across `num_streams`
+    /// independent CUDA streams to improve overlap and scalability for very large
+    /// parameter counts. Returns the same row-major layout as `alma_batch`.
+        // removed: alma_batch_multi_stream
     /// Compute ALMA for multiple series (time-major layout) with a single parameter combination.
     /// Returns a time-major Vec<f64> of length `num_series * series_len`.
     pub fn alma_multi_series_one_param_time_major(
@@ -278,6 +328,20 @@ impl CudaAlma {
         // Compute weights on CPU
         let (weights, inv_norm) = compute_weights_cpu_f32(period, offset, sigma);
 
+        // Estimate VRAM for this op and guard
+        let prices_bytes = num_series * series_len * std::mem::size_of::<f32>();
+        let weights_bytes = period * std::mem::size_of::<f32>();
+        let first_valids_bytes = num_series * std::mem::size_of::<i32>();
+        let out_bytes = num_series * series_len * std::mem::size_of::<f32>();
+        let required = prices_bytes + weights_bytes + first_valids_bytes + out_bytes;
+        let headroom = 64 * 1024 * 1024; // 64MB
+        if !Self::will_fit(required, headroom) {
+            return Err(CudaAlmaError::InvalidInput(format!(
+                "estimated device memory {:.2} MB exceeds free VRAM",
+                (required as f64) / (1024.0 * 1024.0)
+            )));
+        }
+
         // Device buffers
         let host_tm_f32: Vec<f32> = data_tm.iter().map(|&x| x as f32).collect();
         let d_prices = DeviceBuffer::from_slice(&host_tm_f32)
@@ -335,6 +399,51 @@ impl CudaAlma {
             .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
         let host_out: Vec<f64> = host_out_f32.iter().map(|&x| x as f64).collect();
         Ok(host_out)
+    }
+
+    /// FP32-only variant: many-series × one-param, time-major input, write into provided host slice (f32).
+    pub fn alma_multi_series_one_param_time_major_into_host_f32(
+        &self,
+        data_tm_f32: &[f32],
+        num_series: usize,
+        series_len: usize,
+        params: &crate::indicators::moving_averages::alma::AlmaParams,
+        out_tm: &mut [f32],
+    ) -> Result<(), CudaAlmaError> {
+        if num_series == 0 || series_len == 0 { return Err(CudaAlmaError::InvalidInput("num_series or series_len is zero".into())); }
+        if data_tm_f32.len() != num_series * series_len { return Err(CudaAlmaError::InvalidInput("data length mismatch".into())); }
+        if out_tm.len() != num_series * series_len { return Err(CudaAlmaError::InvalidInput("out length mismatch".into())); }
+        let period = params.period.unwrap_or(0);
+        let offset = params.offset.unwrap_or(0.85);
+        let sigma = params.sigma.unwrap_or(6.0);
+        if period == 0 || sigma <= 0.0 || !(0.0..=1.0).contains(&offset) {
+            return Err(CudaAlmaError::InvalidInput("invalid params".into()));
+        }
+        let mut first_valids = vec![0i32; num_series];
+        for j in 0..num_series {
+            let mut fv = None;
+            for t in 0..series_len {
+                let v = data_tm_f32[t * num_series + j];
+                if !v.is_nan() { fv = Some(t); break; }
+            }
+            let fv = fv.ok_or_else(|| CudaAlmaError::InvalidInput(format!("series {} all NaN", j)))?;
+            first_valids[j] = fv as i32;
+        }
+        for (j, &fv) in first_valids.iter().enumerate() {
+            if series_len - (fv as usize) < period {
+                return Err(CudaAlmaError::InvalidInput(format!("series {} not enough valid data", j)));
+            }
+        }
+        let (weights, inv_norm) = compute_weights_cpu_f32(period, offset, sigma);
+        let d_prices = DeviceBuffer::from_slice(data_tm_f32).map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+        let d_weights = DeviceBuffer::from_slice(&weights).map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids).map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(num_series * series_len) }.map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+
+        self.alma_multi_series_one_param_device(
+            &d_prices, &d_weights, period as i32, inv_norm, num_series as i32, series_len as i32, &d_first_valids, &mut d_out,
+        )?;
+        d_out.copy_to(out_tm).map_err(|e| CudaAlmaError::Cuda(e.to_string()))
     }
 }
 
@@ -447,6 +556,8 @@ impl CudaAlma {
             .synchronize()
             .map_err(|e| CudaAlmaError::Cuda(e.to_string()))
     }
+
+    // removed: alma_batch_device_multi_stream
 }
 
 // Helper: compute Gaussian weights and 1/sum(weights) on CPU
@@ -463,6 +574,113 @@ fn compute_weights_cpu_f32(period: usize, offset: f64, sigma: f64) -> (Vec<f32>,
         norm += wi;
     }
     (w, 1.0f32 / norm)
+}
+
+impl CudaAlma {
+    /// FP32-only variant: compute ALMA for one series across many parameter combinations
+    /// and write results directly into the provided host slice `out` (row-major: combos x series_len).
+    pub fn alma_batch_into_host_f32(
+        &self,
+        data_f32: &[f32],
+        sweep: &crate::indicators::moving_averages::alma::AlmaBatchRange,
+        out: &mut [f32],
+    ) -> Result<(usize, usize, Vec<crate::indicators::moving_averages::alma::AlmaParams>), CudaAlmaError> {
+        use crate::indicators::moving_averages::alma::AlmaParams;
+        if data_f32.is_empty() {
+            return Err(CudaAlmaError::InvalidInput("empty data".into()));
+        }
+        let first_valid = data_f32
+            .iter()
+            .position(|x| !x.is_nan())
+            .ok_or_else(|| CudaAlmaError::InvalidInput("all values are NaN".into()))?;
+
+        let combos = expand_grid(sweep);
+        if combos.is_empty() {
+            return Err(CudaAlmaError::InvalidInput("no parameter combinations".into()));
+        }
+        let series_len = data_f32.len();
+        let max_period = combos.iter().map(|c| c.period.unwrap_or(0)).max().unwrap_or(0);
+        if max_period == 0 || series_len - first_valid < max_period {
+            return Err(CudaAlmaError::InvalidInput(format!(
+                "not enough valid data (needed >= {}, valid = {})",
+                max_period,
+                series_len - first_valid
+            )));
+        }
+        let n_combos = combos.len();
+        if out.len() != n_combos * series_len {
+            return Err(CudaAlmaError::InvalidInput(format!(
+                "out slice wrong length: got {}, expected {}",
+                out.len(), n_combos * series_len
+            )));
+        }
+
+        let mut weights_flat = vec![0f32; n_combos * max_period];
+        let mut inv_norms = vec![0f32; n_combos];
+        let mut periods_i32 = vec![0i32; n_combos];
+        for (idx, prm) in combos.iter().enumerate() {
+            let period = prm.period.unwrap_or(0);
+            let offset = prm.offset.unwrap_or(0.85);
+            let sigma = prm.sigma.unwrap_or(6.0);
+            if period == 0 || sigma <= 0.0 || !(0.0..=1.0).contains(&offset) {
+                return Err(CudaAlmaError::InvalidInput(format!(
+                    "invalid params: period={}, offset={}, sigma={}",
+                    period, offset, sigma
+                )));
+            }
+            let (w, inv) = compute_weights_cpu_f32(period, offset, sigma);
+            periods_i32[idx] = period as i32;
+            inv_norms[idx] = inv;
+            let base = idx * max_period;
+            weights_flat[base..base + period].copy_from_slice(&w);
+        }
+
+        // Estimate device memory and guard
+        let prices_bytes = series_len * std::mem::size_of::<f32>();
+        let weights_bytes = n_combos * max_period * std::mem::size_of::<f32>();
+        let periods_bytes = n_combos * std::mem::size_of::<i32>();
+        let inv_bytes = n_combos * std::mem::size_of::<f32>();
+        let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
+        let required = prices_bytes + weights_bytes + periods_bytes + inv_bytes + out_bytes;
+        let headroom = 64 * 1024 * 1024;
+        if !Self::will_fit(required, headroom) {
+            return Err(CudaAlmaError::InvalidInput(format!(
+                "estimated device memory {:.2} MB exceeds free VRAM",
+                (required as f64) / (1024.0 * 1024.0)
+            )));
+        }
+
+        // Device buffers
+        let d_prices = DeviceBuffer::from_slice(data_f32)
+            .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+        let d_weights = DeviceBuffer::from_slice(&weights_flat)
+            .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+        let d_periods = DeviceBuffer::from_slice(&periods_i32)
+            .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+        let d_inv_norms = DeviceBuffer::from_slice(&inv_norms)
+            .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
+            .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+
+        // Launch
+        self.alma_batch_device(
+            &d_prices,
+            &d_weights,
+            &d_periods,
+            &d_inv_norms,
+            max_period as i32,
+            series_len as i32,
+            n_combos as i32,
+            first_valid as i32,
+            &mut d_out,
+        )?;
+
+        // Copy into provided out
+        d_out.copy_to(out).map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+        Ok((n_combos, series_len, combos))
+    }
+
+    // removed: alma_batch_multi_stream_into_host_f32
 }
 
 // Local expansion of AlmaBatchRange into individual param combos (copied pattern)

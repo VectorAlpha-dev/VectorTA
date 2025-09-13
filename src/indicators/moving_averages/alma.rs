@@ -2122,29 +2122,38 @@ mod tests {
 #[pyo3(signature = (data, period, offset, sigma, kernel=None))]
 
 pub fn alma_py<'py>(
-	py: Python<'py>,
-	data: numpy::PyReadonlyArray1<'py, f64>,
-	period: usize,
-	offset: f64,
-	sigma: f64,
-	kernel: Option<&str>,
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period: usize,
+    offset: f64,
+    sigma: f64,
+    kernel: Option<&str>,
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
-	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
 
-	let slice_in = data.as_slice()?;
-	let kern = validate_kernel(kernel, false)?;
-	let params = AlmaParams {
-		period: Some(period),
-		offset: Some(offset),
-		sigma: Some(sigma),
-	};
-	let alma_in = AlmaInput::from_slice(slice_in, params);
+    let kern = validate_kernel(kernel, false)?;
+    let params = AlmaParams {
+        period: Some(period),
+        offset: Some(offset),
+        sigma: Some(sigma),
+    };
+    // Prefer zero-copy for contiguous input; fallback to a minimal copy for non-contiguous views.
+    let result_vec: Vec<f64> = if let Ok(slice_in) = data.as_slice() {
+        let alma_in = AlmaInput::from_slice(slice_in, params);
+        py.allow_threads(|| alma_with_kernel(&alma_in, kern).map(|o| o.values))
+            .map_err(|e| PyValueError::new_err(e.to_string()))?
+    } else {
+        // Non-contiguous (e.g., a column view) — copy just once.
+        let owned = data.as_array().to_owned();
+        let slice_in = owned.as_slice().expect("owned array should be contiguous");
+        let alma_in = AlmaInput::from_slice(slice_in, params);
+        let out = py
+            .allow_threads(|| alma_with_kernel(&alma_in, kern).map(|o| o.values))
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        out
+    };
 
-	let result_vec: Vec<f64> = py
-		.allow_threads(|| alma_with_kernel(&alma_in, kern).map(|o| o.values))
-		.map_err(|e| PyValueError::new_err(e.to_string()))?;
-
-	Ok(result_vec.into_pyarray(py))
+    Ok(result_vec.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
@@ -2248,6 +2257,230 @@ pub fn alma_batch_py<'py>(
 	)?;
 
 	Ok(dict)
+}
+
+// ==================== PYTHON: CUDA BINDINGS (zero-copy) ====================
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "alma_cuda_batch")]
+#[pyo3(signature = (data, period_range, offset_range, sigma_range, device_id=0))]
+pub fn alma_cuda_batch_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period_range: (usize, usize, usize),
+    offset_range: (f64, f64, f64),
+    sigma_range: (f64, f64, f64),
+    device_id: usize,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::{IntoPyArray, PyArrayMethods, PyUntypedArrayMethods};
+    use pyo3::types::PyDict;
+    use crate::cuda::cuda_available;
+    use crate::cuda::moving_averages::CudaAlma;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let slice_in: &[f64] = data.as_slice()?;
+    let sweep = AlmaBatchRange { period: period_range, offset: offset_range, sigma: sigma_range };
+
+    // Run CUDA without holding the GIL.
+    let out = py.allow_threads(|| {
+        let cuda = CudaAlma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.alma_batch(slice_in, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    let rows = out.rows;
+    let cols = out.cols;
+
+    // Zero-copy Vec<f64> -> NumPy (no extra host copy). Then reshape (view-only).
+    let values = out.values.into_pyarray(py).reshape((rows, cols))?;
+
+    let periods = out
+        .combos
+        .iter()
+        .map(|p| p.period.unwrap() as u64)
+        .collect::<Vec<_>>()
+        .into_pyarray(py);
+    let offsets = out
+        .combos
+        .iter()
+        .map(|p| p.offset.unwrap())
+        .collect::<Vec<_>>()
+        .into_pyarray(py);
+    let sigmas = out
+        .combos
+        .iter()
+        .map(|p| p.sigma.unwrap())
+        .collect::<Vec<_>>()
+        .into_pyarray(py);
+
+    let dict = PyDict::new(py);
+    dict.set_item("values", values)?;
+    dict.set_item("periods", periods)?;
+    dict.set_item("offsets", offsets)?;
+    dict.set_item("sigmas", sigmas)?;
+    Ok(dict)
+}
+
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "alma_cuda_many_series_one_param")]
+#[pyo3(signature = (data_tm, period, offset, sigma, device_id=0))]
+pub fn alma_cuda_many_series_one_param_py<'py>(
+    py: Python<'py>,
+    data_tm: numpy::PyReadonlyArray2<'py, f64>, // time-major [T, N], C-contiguous
+    period: usize,
+    offset: f64,
+    sigma: f64,
+    device_id: usize,
+) -> PyResult<Bound<'py, numpy::PyArray2<f64>>> {
+    use numpy::{IntoPyArray, PyArrayMethods, PyUntypedArrayMethods};
+    use crate::cuda::cuda_available;
+    use crate::cuda::moving_averages::CudaAlma;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    // Borrow as a flat slice without copying. Requires C-contiguous input.
+    let flat_in: &[f64] = data_tm.as_slice()?;
+    let rows = data_tm.shape()[0];
+    let cols = data_tm.shape()[1];
+
+    let params = AlmaParams { period: Some(period), offset: Some(offset), sigma: Some(sigma) };
+    let out_flat: Vec<f64> = py.allow_threads(|| {
+        let cuda = CudaAlma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.alma_multi_series_one_param_time_major(flat_in, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    // Zero-copy Vec -> NumPy view, then reshape to [T, N] without copying.
+    let arr = out_flat.into_pyarray(py).reshape((rows, cols))?;
+    Ok(arr)
+}
+
+// FP32-only, user-supplied output (zero extra copies)
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "alma_cuda_batch_into")]
+#[pyo3(signature = (data_f32, period_range, offset_range, sigma_range, out, device_id=0))]
+pub fn alma_cuda_batch_into_py<'py>(
+    py: Python<'py>,
+    data_f32: numpy::PyReadonlyArray1<'py, f32>,
+    period_range: (usize, usize, usize),
+    offset_range: (f64, f64, f64),
+    sigma_range: (f64, f64, f64),
+    out: Bound<'py, numpy::PyArray2<f32>>,
+    device_id: usize,
+) -> PyResult<()> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::moving_averages::CudaAlma;
+    use numpy::{PyUntypedArrayMethods, PyArrayMethods};
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let data_slice: &[f32] = data_f32.as_slice()?;
+    let sweep = AlmaBatchRange { period: period_range, offset: offset_range, sigma: sigma_range };
+    // Check output shape
+    let combos = expand_grid(&sweep);
+    let expected_rows = combos.len();
+    let expected_cols = data_slice.len();
+    let shape = out.shape();
+    if shape != [expected_rows, expected_cols] {
+        return Err(PyValueError::new_err(format!("out shape mismatch: got {:?}, expected [{}, {}]", shape, expected_rows, expected_cols)));
+    }
+    // Borrow out as contiguous mutable slice
+    let out_slice: &mut [f32] = unsafe { out.as_slice_mut()? };
+    py.allow_threads(|| {
+        let cuda = CudaAlma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.alma_batch_into_host_f32(data_slice, &sweep, out_slice)
+            .map(|_| ())
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "alma_cuda_batch_into_f64")]
+#[pyo3(signature = (data_f64, period_range, offset_range, sigma_range, out, device_id=0))]
+pub fn alma_cuda_batch_into_f64_py<'py>(
+    py: Python<'py>,
+    data_f64: numpy::PyReadonlyArray1<'py, f64>,
+    period_range: (usize, usize, usize),
+    offset_range: (f64, f64, f64),
+    sigma_range: (f64, f64, f64),
+    out: Bound<'py, numpy::PyArray2<f32>>,
+    device_id: usize,
+) -> PyResult<()> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::moving_averages::CudaAlma;
+    use numpy::{PyUntypedArrayMethods, PyArrayMethods};
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let data_slice64: &[f64] = data_f64.as_slice()?;
+    let mut data32: Vec<f32> = data_slice64.iter().map(|&x| x as f32).collect();
+    let sweep = AlmaBatchRange { period: period_range, offset: offset_range, sigma: sigma_range };
+    let combos = expand_grid(&sweep);
+    let expected_rows = combos.len();
+    let expected_cols = data_slice64.len();
+    let shape = out.shape();
+    if shape != [expected_rows, expected_cols] {
+        return Err(PyValueError::new_err(format!("out shape mismatch: got {:?}, expected [{}, {}]", shape, expected_rows, expected_cols)));
+    }
+    let out_slice: &mut [f32] = unsafe { out.as_slice_mut()? };
+    py.allow_threads(|| {
+        let cuda = CudaAlma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.alma_batch_into_host_f32(&data32, &sweep, out_slice)
+            .map(|_| ())
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })
+}
+
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "alma_cuda_many_series_one_param_into")]
+#[pyo3(signature = (data_tm_f32, period, offset, sigma, out, device_id=0))]
+pub fn alma_cuda_many_series_one_param_into_py<'py>(
+    py: Python<'py>,
+    data_tm_f32: numpy::PyReadonlyArray2<'py, f32>, // time-major
+    period: usize,
+    offset: f64,
+    sigma: f64,
+    out: Bound<'py, numpy::PyArray2<f32>>,          // time-major
+    device_id: usize,
+) -> PyResult<()> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::moving_averages::CudaAlma;
+    use numpy::{PyUntypedArrayMethods, PyArrayMethods};
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let flat_in: &[f32] = data_tm_f32.as_slice()?;
+    let rows = data_tm_f32.shape()[0];
+    let cols = data_tm_f32.shape()[1];
+    let shape = out.shape();
+    if shape != [rows, cols] {
+        return Err(PyValueError::new_err(format!("out shape mismatch: got {:?}, expected [{}, {}]", shape, rows, cols)));
+    }
+    let out_slice: &mut [f32] = unsafe { out.as_slice_mut()? };
+    let params = AlmaParams { period: Some(period), offset: Some(offset), sigma: Some(sigma) };
+    py.allow_threads(|| {
+        let cuda = CudaAlma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.alma_multi_series_one_param_time_major_into_host_f32(flat_in, cols, rows, &params, out_slice)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })
+}
+
+#[cfg(feature = "python")]
+pub fn register_alma_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
+    // CPU
+    m.add_function(wrap_pyfunction!(alma_py, m)?)?;
+    m.add_function(wrap_pyfunction!(alma_batch_py, m)?)?;
+    m.add_class::<AlmaStreamPy>()?;
+
+    // CUDA (feature-gated at compile time)
+    #[cfg(feature = "cuda")]
+    {
+        m.add_function(wrap_pyfunction!(alma_cuda_batch_py, m)?)?;
+        m.add_function(wrap_pyfunction!(alma_cuda_many_series_one_param_py, m)?)?;
+        m.add_function(wrap_pyfunction!(alma_cuda_batch_into_py, m)?)?;
+        m.add_function(wrap_pyfunction!(alma_cuda_batch_into_f64_py, m)?)?;
+        m.add_function(wrap_pyfunction!(alma_cuda_many_series_one_param_into_py, m)?)?;
+    }
+    Ok(())
 }
 
 #[cfg(feature = "wasm")]
