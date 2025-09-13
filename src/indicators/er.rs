@@ -1,20 +1,19 @@
 //! # Kaufman Efficiency Ratio (ER)
 //!
-//! The Kaufman Efficiency Ratio (ER) compares the absolute price change over a specified
-//! period to the sum of the incremental absolute changes within that same window.
-//! Returns a value between 0.0 and 1.0 (high = efficient move, low = choppy).
+//! Compares absolute price change over a period to the sum of incremental absolute changes.
+//! Returns values between 0.0 and 1.0 (high = efficient trend, low = choppy/noisy).
 //!
 //! ## Parameters
-//! - **period**: Window size (number of data points).
-//!
-//! ## Errors
-//! - **AllValuesNaN**: er: All input data values are `NaN`.
-//! - **InvalidPeriod**: er: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: er: Not enough valid data points for the requested `period`.
+//! - **period**: Window size (default: 5)
 //!
 //! ## Returns
-//! - **`Ok(ErOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-//! - **`Err(ErError)`** otherwise.
+//! - **`Ok(ErOutput)`** on success (`values: Vec<f64>` of length matching input)
+//! - **`Err(ErError)`** on failure
+//!
+//! ## Developer Status
+//! - **SIMD Kernels**: AVX2 (stub), AVX512 (stubs - short/long variants)
+//! - **Streaming**: O(n) performance (iterates through full period buffer)
+//! - **Memory**: Good zero-copy usage (alloc_with_nan_prefix, make_uninit_matrix)
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};

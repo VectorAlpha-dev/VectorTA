@@ -8,87 +8,21 @@
 //! ## Parameters
 //! - **period**: Window size (number of data points, defaults to 14).
 //!
-//! ## Errors
-//! - **EmptyInputData**: cwma: Input data slice is empty.
-//! - **AllValuesNaN**: cwma: All input data values are NaN.
-//! - **InvalidPeriod**: cwma: period is zero or exceeds the data length.
-//! - **NotEnoughValidData**: cwma: Not enough valid data points for the requested period.
+//! ## Inputs
+//! - **data**: Time series data as a slice of f64 values or Candles with source selection.
 //!
 //! ## Returns
 //! - **Ok(CwmaOutput)** on success, containing a Vec<f64> of length matching the input.
-//! - **Err(CwmaError)** otherwise.
+//!   Leading values up to period-1 are NaN during the warmup period.
+//! - **Err(CwmaError)** on invalid input or parameters.
 //!
-//! ---
-//! # WASM API Guide – CWMA
-//!
-//! This file exposes a dual-layer WebAssembly interface for the CWMA
-//! (Cubic Weighted Moving Average) indicator, balancing **ergonomics** for
-//! everyday users with **zero-copy throughput** for latency-critical code.
-//!
-//! ---
-//! ## 1 · Safe / Ergonomic API  <small>(recommended)</small>
-//! | JS export | Rust impl | Purpose | Notes |
-//! |-----------|-----------|---------|-------|
-//! | `cwma_js(data, period)` | `cwma_js` | Single-parameter run | Returns a fresh `Vec<f64>` *without* an internal copy – values written directly into return buffer. │
-//! | `cwma_batch(data, config)`<br>(JS object) | `cwma_batch_unified_js` | Grid sweep over `period` | Accepts `period_range`; returns flat result matrix plus combo metadata. │
-//!
-//! **Characteristics**
-//! * Memory-safe, runs under the default linear-memory quota.
-//! * Automatic kernel selection for optimal performance.
-//! * Adequate for charting & once-off indicator queries.
-//!
-//! Example:
-//! ```javascript
-//! import * as wasm from './cwma_bg.wasm';
-//!
-//! const y = wasm.cwma_js(prices, 14);
-//!
-//! const grid = wasm.cwma_batch(prices, {
-//!   period_range: [10, 30, 5]
-//! });
-//! ```
-//!
-//! ---
-//! ## 2 · Fast / Unsafe API  <small>(zero-copy)</small>
-//! | JS export | Rust impl | Purpose | Notes |
-//! |-----------|-----------|---------|-------|
-//! | `cwma_alloc(len)` / `cwma_free(ptr,len)` | `cwma_alloc`, `cwma_free` | Manual buffer lifecycle | Aligns to 8 bytes; caller **must** free. │
-//! | `cwma_into(inPtr,outPtr,len,period)` | `cwma_into` | In-place single-run | Detects `inPtr === outPtr` and uses temp scratch buffer to avoid alias corruption. │
-//! | `cwma_batch_into(inPtr,outPtr,len,…range…)` | `cwma_batch_into` | In-place grid sweep | Serial on WASM for portability. │
-//!
-//! **Performance**  
-//! * Zero heap allocations inside hot loops  
-//! * ~1.4× faster than the safe API for repeated calls on pre-allocated
-//!   buffers (measured in Chrome 125, 1M-point series).
-//!
-//! **Caveats**  
-//! * **No bounds or lifetime checks** – treat pointers as raw FFI.  
-//! * Always wrap calls in `try { … } finally { free() }`.  
-//! * Recreate `TypedArray` views after *any* WASM call (memory may grow).
-//!
-//! ```javascript
-//! const n = prices.length;
-//! const inPtr  = wasm.cwma_alloc(n);
-//! const outPtr = wasm.cwma_alloc(n);
-//!
-//! try {
-//!   new Float64Array(wasm.memory.buffer, inPtr, n).set(prices);
-//!   wasm.cwma_into(inPtr, outPtr, n, 14);
-//!   const result = new Float64Array(wasm.memory.buffer, outPtr, n);
-//! } finally {
-//!   wasm.cwma_free(inPtr, n);
-//!   wasm.cwma_free(outPtr, n);
-//! }
-//! ```
-//!
-//! ---
-//! ## Memory-safety checklist
-//! 1. Guard every unsafe pointer with null-checks.  
-//! 2. Validate `period > 0 && period ≤ len` *before* slicing.  
-//! 3. Overwrite warm-up (prefix) indices with `NaN` in `*_into` helpers.  
-//! 4. Document warm-up length (`period - 1`) for stream consistency.
-//!
-//! ---
+//! ## Developer Notes
+//! - **AVX2 kernel**: ✅ Fully implemented - 4-wide SIMD with FMA operations, handles tail elements
+//! - **AVX512 kernel**: ✅ Fully implemented - Dual-path optimization (short ≤32, long >32 periods), 8-wide SIMD
+//! - **Streaming update**: ⚠️ O(n) complexity - iterates through all period weights on each update
+//!   - TODO: Could be optimized to O(1) with incremental weight computation
+//! - **Memory optimization**: ✅ Uses zero-copy helpers (alloc_with_nan_prefix) for output vectors
+
 
 use crate::utilities::aligned_vector::AlignedVec;
 use crate::utilities::data_loader::{source_type, Candles};

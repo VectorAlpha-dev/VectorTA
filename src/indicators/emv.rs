@@ -1,16 +1,18 @@
 //! # Ease of Movement (EMV)
 //!
-//! Measures how easily price moves given volume. Returns a vector of EMV values (length
-//! = input length). Leading NaNs are returned before the first valid calculation.
+//! Measures how easily price moves given volume. Calculates the ratio of price movement to volume.
 //!
-//! ## Errors
-//! - **AllValuesNaN**: All input values are `NaN`.
-//! - **EmptyData**: Input data is empty.
-//! - **NotEnoughData**: Fewer than 2 valid data points.
+//! ## Parameters
+//! - None (requires high, low, close, and volume data)
 //!
 //! ## Returns
-//! - **`Ok(EmvOutput)`** on success (`values: Vec<f64>`)
-//! - **`Err(EmvError)`** otherwise
+//! - **`Ok(EmvOutput)`** on success (`values: Vec<f64>` of length matching input)
+//! - **`Err(EmvError)`** on failure
+//!
+//! ## Developer Status
+//! - **SIMD Kernels**: AVX2 (stub), AVX512 (stubs - short/long variants)
+//! - **Streaming**: O(1) performance
+//! - **Memory**: Good zero-copy usage (alloc_with_nan_prefix, make_uninit_matrix)
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix};

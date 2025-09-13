@@ -14,15 +14,20 @@
 //! This indicator has no configurable parameters. The weights and periods are fixed
 //! as per Ehlers' original specification.
 //!
-//! ## Errors
-//! - **EmptyInputData**: Input data slice is empty
-//! - **AllValuesNaN**: All input data values are `NaN`
-//! - **NotEnoughValidData**: Insufficient valid data points (minimum 13 required)
+//! ## Inputs
+//! - **data**: Time series data as a slice of f64 values or Candles with source selection.
 //!
 //! ## Returns
 //! - **`Ok(EhlersPmaOutput)`** containing:
-//!   - `predict`: Leading indicator line
-//!   - `trigger`: Smoothed signal line for crossover detection
+//!   - `predict`: Leading indicator line with NaN values during warmup (first 12 values)
+//!   - `trigger`: Smoothed signal line for crossover detection with NaN values during warmup (first 15 values)
+//!
+//! ## Developer Notes
+//! - **AVX2 kernel**: ❌ Stub only - falls back to scalar implementation
+//! - **AVX512 kernel**: ❌ Stub only - falls back to scalar implementation
+//! - **Streaming update**: ✅ O(1) complexity - efficient incremental computation
+//! - **Memory optimization**: ✅ Uses zero-copy helpers (alloc_with_nan_prefix) for output vectors
+//! - **TODO**: Implement SIMD kernels for the weighted moving average calculations
 //!
 //! ## Example
 //! ```rust

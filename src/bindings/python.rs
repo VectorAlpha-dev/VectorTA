@@ -112,6 +112,8 @@ use crate::indicators::correl_hl::{correl_hl_batch_py, correl_hl_py, CorrelHlStr
 #[cfg(feature = "python")]
 use crate::indicators::deviation::{deviation_batch_py, deviation_py, DeviationStreamPy};
 #[cfg(feature = "python")]
+use crate::indicators::devstop::{devstop_py, devstop_batch_py, DevStopStreamPy};
+#[cfg(feature = "python")]
 use crate::indicators::dti::{dti_batch_py, dti_py, DtiStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::eri::{eri_batch_py, eri_py, EriStreamPy};
@@ -873,6 +875,11 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(deviation_py, m)?)?;
 	m.add_function(wrap_pyfunction!(deviation_batch_py, m)?)?;
 	m.add_class::<DeviationStreamPy>()?;
+
+	// Register DevStop functions with their user-facing names
+	m.add_function(wrap_pyfunction!(devstop_py, m)?)?;
+	m.add_function(wrap_pyfunction!(devstop_batch_py, m)?)?;
+	m.add_class::<DevStopStreamPy>()?;
 
 	// Register DTI functions with their user-facing names
 	m.add_function(wrap_pyfunction!(dti_py, m)?)?;

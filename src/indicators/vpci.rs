@@ -8,15 +8,14 @@
 //! - **short_range**: Window size for short-term averages (default: 5).
 //! - **long_range**: Window size for long-term averages (default: 25).
 //!
-//! ## Errors
-//! - **VpciError::AllValuesNaN**: All close or volume values are NaN.
-//! - **VpciError::InvalidRange**: A range (period) is zero or exceeds data length.
-//! - **VpciError::NotEnoughValidData**: Not enough valid data for a range.
-//! - **VpciError::SmaError**: Underlying SMA error.
-//!
 //! ## Returns
 //! - **Ok(VpciOutput)** on success (`vpci`, `vpcis` of same length as input).
 //! - **Err(VpciError)** otherwise.
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 Kernels**: Functions exist with proper structure but all delegate to scalar implementation through vpci_compute_into. Prefix sum approach ready for SIMD vectorization.
+//! - **Streaming Performance**: O(n) implementation where n is period. Recalculates VWMAs and SMAs by iterating through buffers. Note: VPCIS returns VPCI value (not properly smoothed) in streaming mode.
+//! - **Memory Optimization**: Uses `alloc_with_nan_prefix` and batch helpers. Uses AVec for cache alignment but SIMD not yet leveraged. Prefix sum approach is memory efficient.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

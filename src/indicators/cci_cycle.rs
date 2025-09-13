@@ -7,15 +7,14 @@
 //! - **length**: Period for CCI calculation (default: 10)
 //! - **factor**: Smoothing factor for cycle calculation (default: 0.5)
 //!
-//! ## Errors
-//! - **EmptyInputData**: cci_cycle: Input data slice is empty.
-//! - **AllValuesNaN**: cci_cycle: All input values are `NaN`.
-//! - **InvalidPeriod**: cci_cycle: Period is zero or exceeds data length.
-//! - **NotEnoughValidData**: cci_cycle: Not enough valid data points for calculation.
-//!
 //! ## Returns
 //! - **`Ok(CciCycleOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-//! - **`Err(CciCycleError)`** otherwise.
+//! - **`Err(CciCycleError)`** on various error conditions.
+//!
+//! ## Developer Status
+//! - **SIMD Kernels**: AVX2 and AVX512 are STUBS - fall back to scalar implementation
+//! - **Streaming Performance**: O(n) - requires full recalculation due to dependencies on CCI, EMA, and SMMA calculations
+//! - **Memory Optimization**: GOOD - properly uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings

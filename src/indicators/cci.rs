@@ -1,22 +1,20 @@
 //! # Commodity Channel Index (CCI)
 //!
-//! Commodity Channel Index is typically calculated as:
+//! CCI measures the variation of a security's price from its statistical mean.
+//! It is calculated as the difference between typical price and its moving average, 
+//! divided by the mean absolute deviation multiplied by a constant (0.015).
 //!
-//! ```text
-//! CCI_t = (price_t - SMA(price, period)) / (0.015 * MeanAbsoluteDeviation(price, period))
-//! ```
-//!
-//! - **period**: Window size (number of data points). Defaults to 14.
-//!
-//! ## Errors
-//! - **EmptyInputData**: cci: Input data slice is empty.
-//! - **AllValuesNaN**: cci: All input data values are `NaN`.
-//! - **InvalidPeriod**: cci: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: cci: Not enough valid data points for the requested `period`.
+//! ## Parameters
+//! - **period**: Window size for calculations (default: 14)
 //!
 //! ## Returns
 //! - **`Ok(CciOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-//! - **`Err(CciError)`** otherwise.
+//! - **`Err(CciError)`** on various error conditions.
+//!
+//! ## Developer Status
+//! - **SIMD Kernels**: AVX2 is STUB (falls back to scalar), AVX512 has short/long variants but both are STUBS
+//! - **Streaming Performance**: O(n) - requires full window scan for Mean Absolute Deviation calculation
+//! - **Memory Optimization**: GOOD - properly uses alloc_with_nan_prefix helper for zero-copy allocation
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};

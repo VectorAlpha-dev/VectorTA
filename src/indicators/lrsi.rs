@@ -1,28 +1,19 @@
 //! # Laguerre RSI (LRSI)
 //!
-//! A momentum oscillator using a Laguerre filter, similar to RSI, but with different
-//! responsiveness and smoothness characteristics. This implementation matches the
-//! structure and feature parity of alma.rs, including AVX stubs, batch/grid support,
-//! builder and streaming API, and full input validation.
+//! Momentum oscillator using Laguerre filter, similar to RSI but with different
+//! responsiveness and smoothness characteristics.
 //!
 //! ## Parameters
-//! - **alpha**: Smoothing factor (0 < alpha < 1). Default: 0.2
-//!
-//! ## Warmup Period
-//! LRSI requires 4 valid data points to produce its first output value. The warmup period
-//! is calculated as `first_valid_index + 3`, where `first_valid_index` is the index of the
-//! first non-NaN price value. All values before this warmup period will be NaN.
-//!
-//! ## Errors
-//! - **AllValuesNaN**: lrsi: All input data values are `NaN`.
-//! - **InvalidAlpha**: lrsi: `alpha` not in (0, 1).
-//! - **EmptyData**: lrsi: Empty input.
-//! - **NotEnoughValidData**: lrsi: Not enough valid data.
-//! - **OutputLengthMismatch**: lrsi: Output buffer length doesn't match input length.
+//! - **alpha**: Smoothing factor between 0 and 1 (default: 0.2)
 //!
 //! ## Returns
-//! - **Ok(LrsiOutput)** with `Vec<f64>` matching input length, with NaN values during warmup
-//! - **Err(LrsiError)** otherwise
+//! - **`Ok(LrsiOutput)`** on success (`values: Vec<f64>` of length matching input)
+//! - **`Err(LrsiError)`** on failure
+//!
+//! ## Developer Status
+//! - **SIMD Kernels**: AVX2 (stub), AVX512 (stubs - short/long variants)
+//! - **Streaming**: O(1) performance
+//! - **Memory**: Good zero-copy usage (alloc_with_nan_prefix, make_uninit_matrix)
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};

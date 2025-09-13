@@ -1,27 +1,23 @@
 //! # Low Pass Channel (LPC)
 //!
-//! The Low Pass Channel attenuates higher frequency oscillations in price and volatility 
-//! with minimal lag using a single pole low pass filter and channel bands.
+//! Attenuates higher frequency oscillations in price and volatility with minimal lag.
+//! Uses single pole low pass filter with channel bands based on filtered true range.
 //!
 //! ## Parameters
-//! - **src**: Price source data (typically close prices)
-//! - **cutoff_type**: "adaptive" or "fixed" cutoff period selection (default: "adaptive")
-//! - **fixed_period**: Fixed cutoff period when using fixed mode (default: 20)
+//! - **cutoff_type**: "adaptive" or "fixed" cutoff period (default: "adaptive")
+//! - **fixed_period**: Fixed cutoff period for fixed mode (default: 20)
 //! - **max_cycle_limit**: Maximum cycle limit for adaptive mode (default: 60)
 //! - **cycle_mult**: Adaptive cutoff period multiplier (default: 1.0)
 //! - **tr_mult**: True range multiplier for channel width (default: 1.0)
 //!
-//! ## Errors
-//! - **EmptyInputData**: lpc: Input data slice is empty.
-//! - **AllValuesNaN**: lpc: All input values are `NaN`.
-//! - **InvalidPeriod**: lpc: Period is zero or exceeds data length.
-//! - **NotEnoughValidData**: lpc: Not enough valid data points for calculation.
-//! - **MissingData**: lpc: Required OHLC data is missing or mismatched lengths.
-//! - **InvalidCutoffType**: lpc: Cutoff type must be "adaptive" or "fixed".
-//!
 //! ## Returns
-//! - **`Ok(LpcOutput)`** on success, containing filter, high_band, and low_band Vec<f64> of length matching the input.
-//! - **`Err(LpcError)`** otherwise.
+//! - **`Ok(LpcOutput)`** on success (`filter`, `high_band`, `low_band` vectors)
+//! - **`Err(LpcError)`** on failure
+//!
+//! ## Developer Status
+//! - **SIMD Kernels**: AVX2 (stub), AVX512 (stub)
+//! - **Streaming**: Not implemented
+//! - **Memory**: Good zero-copy usage (alloc_with_nan_prefix, make_uninit_matrix)
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings

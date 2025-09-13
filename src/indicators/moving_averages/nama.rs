@@ -1,20 +1,23 @@
 //! # New Adaptive Moving Average (NAMA)
 //!
 //! A dynamic moving average that adapts based on market conditions using range and effort.
-//! Developed by Franklin Moormann (cheatcountry).
+//! Developed by Franklin Moormann (cheatcountry). The indicator calculates a ratio between
+//! price movement effort and range to determine adaptive smoothing.
 //!
 //! ## Parameters
 //! - **period**: Lookback period for calculations (defaults to 30)
 //!
-//! ## Errors
-//! - **EmptyInputData**: Input data slice is empty
-//! - **AllValuesNaN**: All input values are NaN
-//! - **InvalidPeriod**: Period is 0 or exceeds data length
-//! - **NotEnoughValidData**: Insufficient valid data for calculation
-//!
 //! ## Returns
 //! - **`Ok(NamaOutput)`** on success, containing a `Vec<f64>` matching input length
 //! - **`Err(NamaError)`** otherwise
+//!
+//! ## Developer Notes
+//! - **AVX2 kernel**: ❌ Stub only - falls back to scalar implementation
+//! - **AVX512 kernel**: ❌ Stub only - falls back to scalar implementation
+//! - **Streaming update**: ⚠️ O(n) complexity - iterates through entire buffer to calculate range/effort
+//!   - TODO: Could potentially optimize with running min/max structures for O(log n) updates
+//! - **Memory optimization**: ✅ Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix) for output vectors
+//! - **TODO**: Implement SIMD kernels for vectorized range and effort calculations
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods};

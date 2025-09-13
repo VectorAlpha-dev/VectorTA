@@ -1,18 +1,22 @@
 //! # 3-Pole SuperSmoother Filter
 //!
-//! Three-pole smoothing filter (John Ehlers). Strong noise suppression, responsive to trend, configurable by period.
+//! Three-pole smoothing filter developed by John Ehlers. Provides strong noise suppression
+//! while remaining responsive to trend changes. The filter uses recursive calculations
+//! with coefficients derived from the period parameter.
 //!
 //! ## Parameters
-//! - **period**: Smoothing period, >= 1.
-//!
-//! ## Errors
-//! - **AllValuesNaN**: supersmoother_3_pole: All input values are NaN.
-//! - **InvalidPeriod**: supersmoother_3_pole: `period` is zero or < 1 or exceeds data length.
-//! - **NotEnoughValidData**: supersmoother_3_pole: Not enough valid data for the requested period.
+//! - **period**: Smoothing period (>= 1, defaults to 14)
 //!
 //! ## Returns
-//! - **Ok(SuperSmoother3PoleOutput)** on success, values Vec<f64> matching input length.
+//! - **Ok(SuperSmoother3PoleOutput)** on success, containing a Vec<f64> matching input length.
 //! - **Err(SuperSmoother3PoleError)** otherwise.
+//!
+//! ## Developer Notes
+//! - **AVX2 kernel**: ❌ Stub only - falls back to scalar implementation
+//! - **AVX512 kernel**: ❌ Stub only - falls back to scalar implementation
+//! - **Streaming update**: ✅ O(1) complexity - efficient recursive calculation using only last 3 output values
+//! - **Memory optimization**: ✅ Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix) for output vectors
+//! - **TODO**: Implement SIMD kernels for recursive filter calculations (challenging due to sequential dependencies)
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

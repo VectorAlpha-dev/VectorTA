@@ -5,19 +5,21 @@
 //! control window size, phase shift, and smoothing aggressiveness.
 //!
 //! ## Parameters
-//! - **period**: Window size (number of data points).
-//! - **phase**: Shift in [-100.0, 100.0], curve displacement (default: 50.0).
-//! - **power**: Exponent for smoothing ratio (default: 2).
-//!
-//! ## Errors
-//! - **AllValuesNaN**: jma: All input data values are `NaN`.
-//! - **InvalidPeriod**: jma: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: jma: Not enough valid data points for the requested `period`.
-//! - **InvalidPhase**: jma: `phase` is `NaN` or infinite.
+//! - **period**: Window size (number of data points) - default: 7
+//! - **phase**: Shift in [-100.0, 100.0], curve displacement - default: 50.0
+//! - **power**: Exponent for smoothing ratio - default: 2
 //!
 //! ## Returns
-//! - **`Ok(JmaOutput)`** on success, containing a `Vec<f64>`.
+//! - **`Ok(JmaOutput)`** on success, containing a `Vec<f64>` of smoothed values.
 //! - **`Err(JmaError)`** otherwise.
+//!
+//! ## Developer Notes
+//! - **AVX2 kernel**: ✅ Fully implemented - vectorized computations with FMA operations
+//! - **AVX512 kernel**: ✅ Fully implemented - 4-way unrolled loop with 8-wide SIMD vectors for ILP
+//! - **Streaming update**: ✅ O(1) complexity - efficient incremental computation with state variables (e0, e1, e2)
+//! - **Memory optimization**: ✅ Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix) for output vectors
+//! - **Note**: Sequential nature of JMA calculations limits SIMD benefits, but implementations leverage
+//!   instruction-level parallelism through loop unrolling
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

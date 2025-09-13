@@ -8,14 +8,17 @@
 //! ## Parameters
 //! - **period**: The look-back window size used for weighting (defaults to 14).
 //!
-//! ## Errors
-//! - **AllValuesNaN**: srwma: All input data values are `NaN`.
-//! - **InvalidPeriod**: srwma: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: srwma: Not enough valid data points for the requested `period`.
-//!
 //! ## Returns
 //! - **`Ok(SrwmaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
 //! - **`Err(SrwmaError)`** otherwise.
+//!
+//! ## Developer Notes
+//! - **AVX2 kernel**: ❌ Stub only - falls back to scalar implementation
+//! - **AVX512 kernel**: ⚠️ Partially stubbed - has short/long path structure but both call scalar
+//! - **Streaming update**: ⚠️ O(n) complexity - iterates through all period weights for each update
+//!   - TODO: Could optimize to O(1) with incremental weight updates using square root properties
+//! - **Memory optimization**: ✅ Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix) for output vectors
+//! - **TODO**: Implement AVX2 kernel and complete AVX512 short/long path implementations for vectorized weighted averaging
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

@@ -7,15 +7,20 @@
 //! ## Parameters
 //! - **period**: Lookback period for the moving average (default: 14)
 //!
-//! ## Errors
-//! - **EmptyInputData**: ehma: Input data slice is empty.
-//! - **AllValuesNaN**: ehma: All input values are `NaN`.
-//! - **InvalidPeriod**: ehma: Period is zero or exceeds data length.
-//! - **NotEnoughValidData**: ehma: Not enough valid data points for calculation.
+//! ## Inputs
+//! - **data**: Time series data as a slice of f64 values or Candles with source selection.
 //!
 //! ## Returns
 //! - **`Ok(EhmaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-//! - **`Err(EhmaError)`** otherwise.
+//!   Leading values up to period-1 are NaN during the warmup period.
+//! - **`Err(EhmaError)`** on invalid input or parameters.
+//!
+//! ## Developer Notes
+//! - **AVX2 kernel**: ✅ Fully implemented - 4-wide SIMD with FMA operations, handles reverse weight application
+//! - **AVX512 kernel**: ✅ Fully implemented - 8-wide SIMD with efficient horizontal sum
+//! - **Streaming update**: ⚠️ O(n) complexity - iterates through all period weights on each update
+//!   - TODO: Could potentially optimize with incremental updates for fixed Hann weights
+//! - **Memory optimization**: ✅ Uses zero-copy helpers (alloc_with_nan_prefix) for output vectors
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings

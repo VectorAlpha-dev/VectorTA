@@ -1,21 +1,20 @@
 //! # Elder Ray Index (ERI)
 //!
-//! The Elder Ray Index (ERI) measures bullish and bearish pressure using an MA as a baseline.
-//! Parameters include `period` (MA window size) and `ma_type` (e.g., "ema", "sma").
-//! Batch/grid computation and SIMD stubs provided for API parity with alma.rs.
+//! Measures bullish and bearish pressure using a moving average as baseline.
+//! Calculates bull power (high - MA) and bear power (low - MA).
 //!
 //! ## Parameters
-//! - **period**: Window size for MA (default 13)
-//! - **ma_type**: MA type (default "ema")
-//!
-//! ## Errors
-//! - **AllValuesNaN**: eri: All input values are `NaN`.
-//! - **InvalidPeriod**: eri: `period` is zero or exceeds data length.
-//! - **NotEnoughValidData**: eri: Not enough valid data points for `period`.
+//! - **period**: MA window size (default: 13)
+//! - **ma_type**: Moving average type (default: "ema")
 //!
 //! ## Returns
-//! - **`Ok(EriOutput)`** on success, containing `bull` and `bear` vectors of length equal to the input.
-//! - **`Err(EriError)`** otherwise.
+//! - **`Ok(EriOutput)`** on success (`bull` and `bear` vectors of length matching input)
+//! - **`Err(EriError)`** on failure
+//!
+//! ## Developer Status
+//! - **SIMD Kernels**: AVX2 (stub), AVX512 (stubs - short/long variants)
+//! - **Streaming**: Not implemented
+//! - **Memory**: Good zero-copy usage (alloc_with_nan_prefix, make_uninit_matrix)
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};

@@ -7,15 +7,15 @@
 //! - **short_period**: The shorter EMA period (default: 3)
 //! - **long_period**: The longer EMA period (default: 10)
 //!
-//! ## Errors
-//! - **AllValuesNaN**: All values are NaN.
-//! - **InvalidPeriod**: short or long period is zero, or longer period exceeds input length.
-//! - **ShortPeriodGreaterThanLong**: short >= long.
-//! - **EmptySlices**: At least one slice is empty or slices have mismatched lengths.
-//!
 //! ## Returns
 //! - `Ok(AdoscOutput)` on success, containing Vec<f64> with one value per bar
 //! - `Err(AdoscError)` otherwise.
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 kernels**: Stubs (all call scalar implementation)
+//! - **Streaming update**: O(1) - uses EMA updates with constant computation
+//! - **Memory optimization**: Uses zero-copy helpers (alloc_with_nan_prefix)
+//! - **Optimization needed**: Implement actual SIMD kernels for batch processing
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};

@@ -1,26 +1,19 @@
 //! # Rate of Change Percentage (ROCP)
 //!
-//! The Rate of Change Percentage (ROCP) calculates the relative change in value
-//! between the current price and the price `period` bars ago, without the
-//! extra `* 100` factor used by ROC:
-//!
-//! \[ ROCP[i] = (price[i] - price[i - period]) / price[i - period] \]
-//!
-//! This indicator is centered around 0 and can be positive or negative.
+//! Calculates relative price change as (current - past) / past without the 100x factor.
 //!
 //! ## Parameters
-//! - **period**: The lookback window (number of data points). Defaults to 10.
-//!
-//! ## Errors
-//! - **AllValuesNaN**: rocp: All input data values are `NaN`.
-//! - **InvalidPeriod**: rocp: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: rocp: Fewer than `period` valid (non-`NaN`) data points remain
-//!   after the first valid index.
+//! - **data**: Input price data
+//! - **period**: Lookback window (default: 10)
 //!
 //! ## Returns
-//! - **`Ok(RocpOutput)`** on success, containing a `Vec<f64>` matching the input length,
-//!   with leading `NaN`s until the moving window is filled.
-//! - **`Err(RocpError)`** otherwise.
+//! - `Vec<f64>` - ROCP values centered at 0, matching input length
+//!
+//! ## Developer Status
+//! **AVX2**: Stub (calls scalar)
+//! **AVX512**: Has short/long variants but all stubs
+//! **Streaming**: O(1) - Simple ring buffer lookup
+//! **Memory**: Good - Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};

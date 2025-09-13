@@ -7,14 +7,14 @@
 //! ## Parameters
 //! - **period**: Window size (number of data points, default 5).
 //!
-//! ## Errors
-//! - **AllValuesNaN**: ttm_trend: All input data values are `NaN`.
-//! - **InvalidPeriod**: ttm_trend: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: ttm_trend: Not enough valid data points for the requested `period`.
-//!
 //! ## Returns
 //! - **`Ok(TtmTrendOutput)`** on success, containing a `Vec<bool>` of length matching the input.
 //! - **`Err(TtmTrendError)`** otherwise.
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 Kernels**: Stub implementations that delegate to scalar. SIMD functions exist but just call scalar version. Could vectorize the rolling average and comparison operations.
+//! - **Streaming Performance**: O(1) implementation using running sum with add/subtract pattern. Efficiently maintains sum as window slides.
+//! - **Memory Optimization**: Uses `alloc_with_nan_prefix` and `make_uninit_matrix` for batch operations. Properly uses zero-copy helpers throughout.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

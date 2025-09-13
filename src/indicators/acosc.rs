@@ -1,17 +1,18 @@
 //! # Accelerator Oscillator (ACOSC)
 //!
-//! Bill Williams’ AC Oscillator: measures median price acceleration via SMA5, SMA34, and further SMA5 smoothing.
+//! Bill Williams' AC Oscillator: measures median price acceleration via SMA5, SMA34, and further SMA5 smoothing.
 //!
 //! ## Parameters
 //! - None (fixed: periods are 5 and 34)
 //!
-//! ## Errors
-//! - **CandleFieldError**: Failed to get high/low from candles
-//! - **LengthMismatch**: Slices have different lengths
-//! - **NotEnoughData**: Less than 39 data points
-//!
 //! ## Returns
 //! - `Ok(AcoscOutput)` with vectors of `osc` and `change`
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 kernels**: Stubs (all call scalar implementation)
+//! - **Streaming update**: O(1) - uses ring buffers with fixed-size arrays
+//! - **Memory optimization**: Uses zero-copy helpers (alloc_with_nan_prefix)
+//! - **Optimization needed**: Implement actual SIMD kernels for batch processing
 
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;

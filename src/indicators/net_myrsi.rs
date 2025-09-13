@@ -1,21 +1,19 @@
 //! # NET MyRSI
 //!
-//! NET MyRSI combines John F. Ehlers' MyRSI calculation with his Noise Elimination Technique (NET).
-//! MyRSI is a custom RSI variant that compares consecutive price changes.
-//! NET reduces noise by analyzing sign relationships across the data.
+//! Combines Ehlers' MyRSI with Noise Elimination Technique for smoother RSI calculation.
 //!
 //! ## Parameters
-//! - **period**: Period for MyRSI calculation (default: 14)
-//!
-//! ## Errors
-//! - **EmptyInputData**: net_myrsi: Input data slice is empty.
-//! - **AllValuesNaN**: net_myrsi: All input values are `NaN`.
-//! - **InvalidPeriod**: net_myrsi: Period is zero or exceeds data length.
-//! - **NotEnoughValidData**: net_myrsi: Not enough valid data points for calculation.
+//! - **data**: Input price data
+//! - **period**: MyRSI calculation period (default: 14)
 //!
 //! ## Returns
-//! - **`Ok(NetMyrsiOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-//! - **`Err(NetMyrsiError)`** otherwise.
+//! - `Vec<f64>` - NET MyRSI values matching input length
+//!
+//! ## Developer Status
+//! **AVX2**: Not implemented (no SIMD functions found)
+//! **AVX512**: Not implemented (no SIMD functions found)
+//! **Streaming**: O(n) - Requires full window for NET calculation
+//! **Memory**: Good - Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings

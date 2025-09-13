@@ -1,7 +1,8 @@
 //! # Super Smoother Filter
 //!
-//! A double-pole smoothing filter that reduces high-frequency noise and preserves significant trend information.
-//! Parameters allow flexible window sizing. SIMD acceleration is stubbed to scalar for API parity.
+//! A double-pole smoothing filter developed by John Ehlers that reduces high-frequency noise 
+//! while preserving significant trend information. Uses recursive calculations with coefficients
+//! derived from the period parameter.
 //!
 //! ## Implementation Notes
 //! Row kernel functions (`supersmoother_row_*`) perform pure computation only - they do not write
@@ -11,15 +12,17 @@
 //! ## Parameters
 //! - **period**: Main lookback length (defaults to 14). Must be ≥ 1 and ≤ the data length.
 //!
-//! ## Errors
-//! - **AllValuesNaN**: supersmoother: All input data values are NaN.
-//! - **InvalidPeriod**: supersmoother: period is 0 or > data length.
-//! - **NotEnoughValidData**: supersmoother: Not enough valid data points for the requested period.
-//! - **EmptyData**: supersmoother: No input data.
-//!
 //! ## Returns
 //! - `Ok(SuperSmootherOutput)` on success (`values: Vec<f64>` matching input).
 //! - `Err(SuperSmootherError)` on validation or computation errors.
+//!
+//! ## Developer Notes
+//! - **AVX2 kernel**: ❌ Stub only - falls back to scalar implementation
+//! - **AVX512 kernel**: ❌ Stub only - has short/long path structure but both fall back to scalar
+//! - **Streaming update**: ✅ O(1) complexity - efficient recursive calculation using 2-element circular buffer
+//! - **Memory optimization**: ✅ Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix) for output vectors
+//! - **TODO**: Implement SIMD kernels for recursive filter calculations (challenging due to sequential dependencies)
+//! - **Note**: SIMD acceleration currently stubbed to scalar for API parity
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

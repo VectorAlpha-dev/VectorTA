@@ -5,19 +5,18 @@
 //! by comparing upward and downward price movements over a specified period.
 //!
 //! ## Parameters
-//! - **period**: The smoothing window size. Defaults to 14.
-//!
-//! ## Errors
-//! - **EmptyData**: di: Input data slice is empty.
-//! - **InvalidPeriod**: di: `period` is zero or exceeds data length.
-//! - **NotEnoughValidData**: di: Fewer than `period` valid (non-`NaN`) data points remain
-//!   after the first valid index.
-//! - **AllValuesNaN**: di: All high/low/close values are `NaN`.
+//! - **period**: The smoothing window size (default: 14)
 //!
 //! ## Returns
-//! - **`Ok(DiOutput)`** on success, containing two `Vec<f64>` matching the input length,
-//!   with leading `NaN`s until the calculation window is filled.
-//! - **`Err(DiError)`** otherwise.
+//! - **`Ok(DiOutput)`** on success, containing two `Vec<f64>` arrays:
+//!   - plus: Plus directional indicator values
+//!   - minus: Minus directional indicator values
+//! - **`Err(DiError)`** on various error conditions.
+//!
+//! ## Developer Status
+//! - **SIMD Kernels**: AVX2 and AVX512 are STUBS - fall back to scalar implementation
+//! - **Streaming Performance**: O(n) - requires full window recalculation for all directional movements
+//! - **Memory Optimization**: GOOD - uses alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes for batch operations
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};

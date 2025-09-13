@@ -1,25 +1,23 @@
 //! # KDJ (Stochastic Oscillator with MA smoothing)
 //!
-//! KDJ is derived from the Stochastic Oscillator (K, D) with an additional line J,
-//! where `J = 3 * K - 2 * D`. This indicator highlights momentum and potential
-//! overbought/oversold conditions.
+//! Stochastic Oscillator with K and D lines plus additional J line.
+//! J = 3 * K - 2 * D, used to highlight momentum and overbought/oversold conditions.
 //!
 //! ## Parameters
-//! - **fast_k_period**: The window for the fast stochastic calculation (default: 9).
-//! - **slow_k_period**: The smoothing period for K (default: 3).
-//! - **slow_k_ma_type**: MA type for smoothing K ("sma", "ema", etc., default: "sma").
-//! - **slow_d_period**: The smoothing period for D (default: 3).
-//! - **slow_d_ma_type**: MA type for smoothing D ("sma", "ema", etc., default: "sma").
-//!
-//! ## Errors
-//! - **AllValuesNaN**: kdj: All input values are NaN.
-//! - **InvalidPeriod**: kdj: period is zero or exceeds data length.
-//! - **NotEnoughValidData**: kdj: Not enough valid data points for the requested period.
-//! - **EmptyData**: kdj: Input data slice is empty.
+//! - **fast_k_period**: Window for fast stochastic (default: 9)
+//! - **slow_k_period**: K smoothing period (default: 3)
+//! - **slow_k_ma_type**: K smoothing MA type (default: "sma")
+//! - **slow_d_period**: D smoothing period (default: 3)
+//! - **slow_d_ma_type**: D smoothing MA type (default: "sma")
 //!
 //! ## Returns
-//! - **`Ok(KdjOutput)`** on success, with vectors for k, d, and j values.
-//! - **`Err(KdjError)`** otherwise.
+//! - **`Ok(KdjOutput)`** on success (`k`, `d`, `j` vectors of length matching input)
+//! - **`Err(KdjError)`** on failure
+//!
+//! ## Developer Status
+//! - **SIMD Kernels**: AVX2 (stub), AVX512 (stubs - short/long variants)
+//! - **Streaming**: Not implemented
+//! - **Memory**: Good zero-copy usage (alloc_with_nan_prefix, make_uninit_matrix)
 
 use crate::indicators::moving_averages::ma::{ma, MaData};
 use crate::indicators::utility_functions::{max_rolling, min_rolling, RollingError};

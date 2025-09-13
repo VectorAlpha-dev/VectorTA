@@ -5,14 +5,15 @@
 //! ## Parameters
 //! - No adjustable parameters beyond input data.
 //!
-//! ## Errors
-//! - **CandleFieldError**: ad: Failure retrieving required candle fields.
-//! - **DataLengthMismatch**: ad: Provided slices are not the same length.
-//! - **NotEnoughData**: ad: Data length is zero.
-//!
 //! ## Returns
 //! - **Ok(AdOutput)** on success, with AD values.
 //! - **Err(AdError)** otherwise.
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 kernels**: Stubs (all call scalar implementation)
+//! - **Streaming update**: O(1) - simple cumulative sum calculation
+//! - **Memory optimization**: Uses zero-copy helpers (alloc_with_nan_prefix)
+//! - **Optimization needed**: Implement actual SIMD kernels for batch processing
 
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;

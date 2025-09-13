@@ -1,23 +1,21 @@
 //! # Keltner Channels
 //!
-//! A volatility-based envelope indicator. The middle band is a moving average (MA) of a user-specified source,
-//! and the upper and lower bands are derived by adding or subtracting a multiple of an internally computed Average True Range (ATR).
+//! Volatility-based envelope indicator using MA and ATR.
+//! Middle band is MA of source, upper/lower bands are MA ± (multiplier × ATR).
 //!
 //! ## Parameters
-//! - **period**: Lookback length for both the moving average and ATR (default: 20).
-//! - **multiplier**: ATR multiplier for upper/lower bands (default: 2.0).
-//! - **ma_type**: MA type ("ema", "sma", etc.; default: "ema").
-//!
-//! ## Errors
-//! - **KeltnerEmptyData**: keltner: Input data is empty.
-//! - **KeltnerInvalidPeriod**: keltner: `period` is zero or exceeds data length.
-//! - **KeltnerNotEnoughValidData**: keltner: Not enough valid data after first valid index.
-//! - **KeltnerAllValuesNaN**: keltner: All values are NaN.
-//! - **KeltnerMaError**: keltner: MA error.
+//! - **period**: Window for both MA and ATR (default: 20)
+//! - **multiplier**: ATR multiplier for bands (default: 2.0)
+//! - **ma_type**: Moving average type (default: "ema")
 //!
 //! ## Returns
-//! - **Ok(KeltnerOutput)**: Contains upper_band, middle_band, lower_band.
-//! - **Err(KeltnerError)**
+//! - **`Ok(KeltnerOutput)`** on success (`upper_band`, `middle_band`, `lower_band` vectors)
+//! - **`Err(KeltnerError)`** on failure
+//!
+//! ## Developer Status
+//! - **SIMD Kernels**: AVX2 (stub), AVX512 (stubs - short/long variants)
+//! - **Streaming**: Not implemented
+//! - **Memory**: Good zero-copy usage (alloc_with_nan_prefix, make_uninit_matrix)
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};

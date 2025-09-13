@@ -8,16 +8,14 @@
 //! - **period**: Window size (number of data points), default 14.
 //! - **scalar**: Multiplier applied to drawdown, default 100.0.
 //!
-//! ## Errors
-//! - **AllValuesNaN**: All input values are NaN or infinite.
-//! - **InvalidPeriod**: `period` is zero or exceeds data length.
-//! - **NotEnoughValidData**: Not enough valid data points for period.
-//! - **InvalidScalar**: `scalar` is NaN or infinite.
-//! - **InvalidLength**: Output buffer length doesn't match input length.
-//!
 //! ## Returns
 //! - **Ok(UiOutput)** on success, containing a Vec<f64> matching the input length.
 //! - **Err(UiError)** otherwise.
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 Kernels**: Stub implementations that delegate to scalar. SIMD optimization opportunity for rolling max calculations and squared drawdown computations.
+//! - **Streaming Performance**: O(n) implementation - recalculates rolling max by iterating through entire buffer on each update. Could be optimized with a deque-based max tracker for O(1) amortized.
+//! - **Memory Optimization**: Uses `alloc_with_nan_prefix` and batch helpers properly. Uses AVec for cache-aligned buffers but SIMD kernels not yet implemented to take advantage.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};

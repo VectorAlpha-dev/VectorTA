@@ -1,19 +1,19 @@
 //! # Midpoint Indicator
 //!
-//! Calculates the midpoint of the highest and lowest value over a given window (`period`).
-//! Returns a vector matching the input size, with leading NaNs for incomplete windows.
+//! Calculates the midpoint of the highest and lowest values over a rolling window.
 //!
 //! ## Parameters
-//! - **period**: Window size (number of data points, default: 14).
-//!
-//! ## Errors
-//! - **AllValuesNaN**: midpoint: All input data values are `NaN`.
-//! - **InvalidPeriod**: midpoint: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: midpoint: Not enough valid data points for the requested `period`.
+//! - **data**: Input price data
+//! - **period**: Window size (default: 14)
 //!
 //! ## Returns
-//! - **`Ok(MidpointOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-//! - **`Err(MidpointError)`** otherwise.
+//! - `Vec<f64>` - Midpoint values `(high + low) / 2` matching input length
+//!
+//! ## Developer Status
+//! **AVX2**: Stub (calls scalar)
+//! **AVX512**: Stub with short/long variants (all call scalar)
+//! **Streaming**: O(n) - Requires full window scan each update
+//! **Memory**: Good - Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
