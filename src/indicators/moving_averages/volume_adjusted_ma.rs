@@ -1102,8 +1102,8 @@ pub struct VolumeAdjustedMaJsResult {
 }
 
 #[cfg(feature = "wasm")]
-#[wasm_bindgen(js_name = volume_adjusted_ma_js)]
-pub fn VolumeAdjustedMa_js(
+#[wasm_bindgen]
+pub fn volume_adjusted_ma_js(
     data: &[f64],
     volume: &[f64],
     length: usize,
@@ -1125,8 +1125,8 @@ pub fn VolumeAdjustedMa_js(
 }
 
 #[cfg(feature="wasm")]
-#[wasm_bindgen(js_name = volume_adjusted_ma_unified_js)]
-pub fn VolumeAdjustedMa_unified_js(
+#[wasm_bindgen]
+pub fn volume_adjusted_ma_unified_js(
     data: &[f64],
     volume: &[f64],
     length: Option<usize>,
@@ -1150,8 +1150,8 @@ pub fn VolumeAdjustedMa_unified_js(
 }
 
 #[cfg(feature="wasm")]
-#[wasm_bindgen(js_name = volume_adjusted_ma_alloc)]
-pub fn VolumeAdjustedMa_alloc(len: usize) -> *mut f64 {
+#[wasm_bindgen]
+pub fn volume_adjusted_ma_alloc(len: usize) -> *mut f64 {
     let mut v = Vec::<f64>::with_capacity(len);
     let p = v.as_mut_ptr();
     std::mem::forget(v);
@@ -1159,16 +1159,16 @@ pub fn VolumeAdjustedMa_alloc(len: usize) -> *mut f64 {
 }
 
 #[cfg(feature="wasm")]
-#[wasm_bindgen(js_name = volume_adjusted_ma_free)]
-pub fn VolumeAdjustedMa_free(ptr:*mut f64, len:usize) { 
+#[wasm_bindgen]
+pub fn volume_adjusted_ma_free(ptr:*mut f64, len:usize) { 
     unsafe { 
         let _ = Vec::from_raw_parts(ptr, len, len); 
     } 
 }
 
 #[cfg(feature="wasm")]
-#[wasm_bindgen(js_name = volume_adjusted_ma_into)]
-pub fn VolumeAdjustedMa_into(
+#[wasm_bindgen]
+pub fn volume_adjusted_ma_into(
     price_ptr:*const f64, vol_ptr:*const f64, out_ptr:*mut f64, len:usize,
     length:usize, vi_factor:f64, strict:bool, sample_period:usize
 ) -> Result<(), JsValue> {
@@ -1220,8 +1220,8 @@ pub struct VolumeAdjustedMaBatchJsOutput {
 }
 
 #[cfg(feature="wasm")]
-#[wasm_bindgen(js_name = volume_adjusted_ma_batch)]
-pub fn VolumeAdjustedMa_batch_unified_js(data:&[f64], volume:&[f64], cfg: JsValue) -> Result<JsValue, JsValue> {
+#[wasm_bindgen]
+pub fn volume_adjusted_ma_batch(data:&[f64], volume:&[f64], cfg: JsValue) -> Result<JsValue, JsValue> {
     let cfg: VolumeAdjustedMaBatchConfig = serde_wasm_bindgen::from_value(cfg)
         .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
     let sweep = VolumeAdjustedMaBatchRange{ 
@@ -1241,8 +1241,8 @@ pub fn VolumeAdjustedMa_batch_unified_js(data:&[f64], volume:&[f64], cfg: JsValu
 }
 
 #[cfg(feature="wasm")]
-#[wasm_bindgen(js_name = volume_adjusted_ma_batch_into)]
-pub fn VolumeAdjustedMa_batch_into(
+#[wasm_bindgen]
+pub fn volume_adjusted_ma_batch_into(
     price_ptr:*const f64, vol_ptr:*const f64, out_ptr:*mut f64, len:usize,
     length_start:usize, length_end:usize, length_step:usize,
     vf_start:f64, vf_end:f64, vf_step:f64,

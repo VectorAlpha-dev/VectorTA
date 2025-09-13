@@ -16,8 +16,15 @@
 //! ## Returns
 //! - **`Ok(DemaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
 //! - **`Err(DemaError)`** otherwise.
-
-//! Scalar Only
+//!
+//! ## Developer Notes
+//! - **AVX2 kernel**: Stub implementation - just calls scalar version
+//! - **AVX512 kernel**: Stub implementation - just calls scalar version  
+//! - **Streaming update**: O(1) complexity - performs simple EMA calculations
+//! - **Memory optimization**: Uses alloc_with_nan_prefix helper function
+//! - **Optimization opportunities**: 
+//!   - Implement actual SIMD kernels for AVX2/AVX512
+//!   - Consider vectorizing the dual EMA calculations
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

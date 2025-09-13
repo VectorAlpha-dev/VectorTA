@@ -14,6 +14,16 @@
 //! ## Returns
 //! - **Ok(VwmaOutput)** on success, containing the VWMA as a Vec<f64>.
 //! - **Err(VwmaError)** on error.
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 kernels**: Currently stubs calling scalar implementation
+//! - **Streaming update**: O(1) - maintains sliding window with running sums of price*volume and volume
+//! - **Memory optimization**: Uses `alloc_with_nan_prefix` for zero-copy allocation
+//! - **Current status**: Scalar implementation complete with sliding window approach
+//! - **Optimization opportunities**:
+//!   - Implement vectorized AVX2/AVX512 kernels for parallel window calculations
+//!   - Consider SIMD for price*volume multiplication and summation
+//!   - Optimize sliding window updates with vector operations
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};

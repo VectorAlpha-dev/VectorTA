@@ -6,17 +6,16 @@
 //! ## Parameters
 //! - **period**: The window size (number of data points). Defaults to 14.
 //!
-//! ## Errors
-//! - **EmptyData**: midprice: Input data slice is empty.
-//! - **InvalidPeriod**: midprice: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: midprice: Fewer than `period` valid (non-`NaN`) data points remain
-//!   after the first valid index.
-//! - **AllValuesNaN**: midprice: All input data values are `NaN`.
-//!
 //! ## Returns
 //! - **`Ok(MidpriceOutput)`** on success, containing a `Vec<f64>` matching the input length,
 //!   with leading `NaN`s until the window is filled.
-//! - **`Err(MidpriceError)`** otherwise.
+//! - **`Err(MidpriceError)`** on failure
+//!
+//! ## Developer Notes
+//! - **AVX2**: Stub implementation - calls scalar function
+//! - **AVX512**: Multiple stub functions (midprice_avx512_short, midprice_avx512_long) - all call scalar
+//! - **Streaming**: O(n) for each update - scans entire buffer to find min/max (needs optimization)
+//! - **Memory**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};

@@ -1,21 +1,26 @@
 //! # SuperTrend Indicator
 //!
-//! Trend-following indicator using ATR-based dynamic bands. Computes support/resistance bands
-//! and outputs the trend value and a change flag. SIMD/AVX stubs provided for API parity.
+//! Trend-following indicator using ATR-based dynamic bands to identify support and resistance levels.
+//! Generates buy/sell signals when price crosses the dynamic bands.
 //!
 //! ## Parameters
-//! - **period**: ATR lookback window (default: 10)
-//! - **factor**: ATR multiplier (default: 3.0)
+//! - **period**: ATR lookback window for volatility calculation (default: 10)
+//! - **factor**: ATR multiplier for band distance from HL/2 (default: 3.0)
 //!
-//! ## Errors
-//! - **EmptyData**: All slices empty
-//! - **InvalidPeriod**: period = 0 or period > data length
-//! - **NotEnoughValidData**: Not enough valid (non-NaN) rows
-//! - **AllValuesNaN**: No non-NaN row exists
+//! ## Inputs
+//! - High, low, and close price series (or candles)
+//! - All series must have the same length
 //!
 //! ## Returns
-//! - **Ok(SuperTrendOutput)**: { trend, changed } both Vec<f64> of input len
-//! - **Err(SuperTrendError)**
+//! - **trend**: SuperTrend line as `Vec<f64>` (length matches input, acts as dynamic support/resistance)
+//! - **changed**: Trend change signal as `Vec<f64>` (1.0 for change, 0.0 otherwise)
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 kernels**: Currently stubs that call scalar implementation
+//! - **Streaming update**: O(1) performance with embedded ATR stream and efficient state tracking
+//! - **Memory optimization**: Properly uses zero-copy helper functions (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
+//! - **TODO**: Implement actual SIMD kernels for AVX2/AVX512
+//! - **Note**: Streaming implementation is well-optimized with ATR stream integration
 
 use crate::indicators::atr::{atr, AtrData, AtrError, AtrInput, AtrOutput, AtrParams};
 use crate::utilities::data_loader::{source_type, Candles};

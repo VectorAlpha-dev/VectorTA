@@ -14,6 +14,18 @@
 //! ## Returns
 //! - **`Ok(LinRegOutput)`** on success, containing a `Vec<f64>` of length matching the input.
 //! - **`Err(LinRegError)`** otherwise.
+//!
+//! ## Developer Notes
+//! - **AVX2 kernel**: ❌ Stub - calls scalar implementation
+//! - **AVX512 kernel**: ❌ Stub - calls scalar implementation
+//! - **Streaming update**: ⚠️ O(n) - `dot_ring()` recalculates regression over full buffer
+//! - **Memory optimization**: ✅ Uses `alloc_with_nan_prefix` for zero-copy output allocation
+//! - **Current status**: Functional with efficient scalar implementation but missing SIMD optimizations
+//! - **Optimization opportunities**:
+//!   - Implement AVX2 kernel for vectorized sum calculations
+//!   - Implement AVX512 kernel for wider vector processing
+//!   - Streaming update could potentially maintain incremental sums for O(1) updates
+//!   - Linear regression calculations are well-suited for SIMD parallelization
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

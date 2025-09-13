@@ -1,28 +1,39 @@
 //! # Know Sure Thing (KST)
 //!
 //! KST is a momentum oscillator based on the smoothed rate-of-change (ROC) values of four different time frames.
-//! This implementation mirrors alma.rs in performance and structure, providing AVX2/AVX512 stubs, batch/grid interfaces,
-//! streaming, builders, and thorough input validation. All kernel variants and AVX stubs are present for API parity.
+//! It combines multiple ROC calculations with different periods and applies weighted smoothing to generate
+//! momentum signals.
 //!
 //! ## Parameters
-//! - **sma_period1**: Smoothing period for the first ROC. Defaults to 10.
-//! - **sma_period2**: Smoothing period for the second ROC. Defaults to 10.
-//! - **sma_period3**: Smoothing period for the third ROC. Defaults to 10.
-//! - **sma_period4**: Smoothing period for the fourth ROC. Defaults to 15.
-//! - **roc_period1**: Period for the first ROC calculation. Defaults to 10.
-//! - **roc_period2**: Period for the second ROC calculation. Defaults to 15.
-//! - **roc_period3**: Period for the third ROC calculation. Defaults to 20.
-//! - **roc_period4**: Period for the fourth ROC calculation. Defaults to 30.
-//! - **signal_period**: Smoothing period for the signal line. Defaults to 9.
-//!
-//! ## Errors
-//! - **AllValuesNaN**: All input data values are `NaN`.
-//! - **InvalidPeriod**: A period is zero or exceeds the data length.
-//! - **NotEnoughValidData**: Not enough valid data points for the requested period.
+//! - **sma_period1**: Smoothing period for the first ROC (default: 10)
+//! - **sma_period2**: Smoothing period for the second ROC (default: 10)
+//! - **sma_period3**: Smoothing period for the third ROC (default: 10)
+//! - **sma_period4**: Smoothing period for the fourth ROC (default: 15)
+//! - **roc_period1**: Period for the first ROC calculation (default: 10)
+//! - **roc_period2**: Period for the second ROC calculation (default: 15)
+//! - **roc_period3**: Period for the third ROC calculation (default: 20)
+//! - **roc_period4**: Period for the fourth ROC calculation (default: 30)
+//! - **signal_period**: Smoothing period for the signal line (default: 9)
 //!
 //! ## Returns
-//! - `Ok(KstOutput)` on success, containing two `Vec<f64>`: KST line and signal line.
-//! - `Err(KstError)` otherwise.
+//! - **`Ok(KstOutput)`** containing:
+//!   - `line`: The KST oscillator values
+//!   - `signal`: The smoothed signal line
+//!
+//! ## Developer Notes
+//! ### Implementation Status
+//! - **AVX2 Kernel**: Stub (unreachable - calls scalar through underlying indicators)
+//! - **AVX512 Kernel**: Stub with short/long variants (unreachable - calls scalar)
+//! - **Streaming Update**: O(1) - efficient with circular buffers for ROC and SMA calculations
+//! - **Memory Optimization**: Fully optimized with `alloc_with_nan_prefix` for output vectors
+//! - **Batch Operations**: Fully implemented with `make_uninit_matrix` and `init_matrix_prefixes`
+//!
+//! ### TODO - Performance Improvements
+//! - [ ] Implement actual AVX2 SIMD kernel (currently stub)
+//! - [ ] Implement actual AVX512 SIMD kernel (currently stub)
+//! - [ ] Optimize multiple ROC calculations with SIMD
+//! - [ ] Vectorize weighted sum calculations
+//! - [ ] Consider caching intermediate ROC/SMA values for batch operations
 
 use crate::indicators::moving_averages::sma::{sma, SmaData, SmaError, SmaInput, SmaOutput, SmaParams};
 use crate::indicators::roc::{roc, RocData, RocError, RocInput, RocOutput, RocParams};

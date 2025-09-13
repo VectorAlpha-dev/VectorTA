@@ -13,16 +13,24 @@
 //! - **volume_type**: "default" uses real volume with tick volume fallback, "tick" forces tick volume (default: "default")
 //! - **center_type**: "dynamic" for cumulative average, "static" for zero center line (default: "dynamic")
 //!
-//! ## Errors
-//! - **EmptyInputData**: dvdiqqe: Input data slice is empty.
-//! - **AllValuesNaN**: dvdiqqe: All input values are `NaN`.
-//! - **InvalidPeriod**: dvdiqqe: Period is zero or exceeds data length.
-//! - **NotEnoughValidData**: dvdiqqe: Not enough valid data points for calculation.
-//! - **MissingData**: dvdiqqe: Required OHLC data is missing or mismatched lengths.
-//!
 //! ## Returns
-//! - **`Ok(DvdiqqeOutput)`** on success, containing dvdi, fast_tl, slow_tl, and center_line Vec<f64> of length matching the input.
-//! - **`Err(DvdiqqeError)`** otherwise.
+//! - **`Ok(DvdiqqeOutput)`** containing dvdi, fast_tl, slow_tl, and center_line Vec<f64> arrays
+//!
+//! ## Developer Notes
+//! ### Implementation Status
+//! - **AVX2 Kernel**: Stub (calls scalar implementation)
+//! - **AVX512 Kernel**: Stub (calls scalar implementation)
+//! - **Streaming Update**: O(n) - recalculates entire history on each update
+//! - **Memory Optimization**: Fully optimized with `alloc_with_nan_prefix` for all output vectors
+//! - **Batch Operations**: Fully implemented with `make_uninit_matrix` and `init_matrix_prefixes`
+//!
+//! ### TODO - Performance Improvements
+//! - [ ] Implement actual AVX2 SIMD kernel (currently stub)
+//! - [ ] Implement actual AVX512 SIMD kernel (currently stub)
+//! - [ ] **Critical**: Optimize streaming to O(1) - currently O(n) recalculation
+//! - [ ] Vectorize PVI/NVI divergence calculations
+//! - [ ] Optimize trailing level computations with SIMD
+//! - [ ] Consider caching intermediate EMA values to avoid recalculation
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings

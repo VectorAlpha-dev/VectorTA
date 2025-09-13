@@ -2,18 +2,28 @@
 //!
 //! Kurtosis is a measure of the "tailedness" of a distribution, computed over a sliding window.  
 //! This indicator returns the excess kurtosis, using the uncorrected moment-based formula.
+//! Higher kurtosis indicates heavier tails and more outliers.
 //!
 //! ## Parameters
-//! - **period**: Window size (number of data points, default: 5)
-//!
-//! ## Errors
-//! - **AllValuesNaN**: kurtosis: All input data values are `NaN`.
-//! - **InvalidPeriod**: kurtosis: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: kurtosis: Not enough valid data points for the requested `period`.
+//! - **period**: Window size for kurtosis calculation (default: 5)
 //!
 //! ## Returns
-//! - **`Ok(KurtosisOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-//! - **`Err(KurtosisError)`** otherwise.
+//! - **`Ok(KurtosisOutput)`** containing a `Vec<f64>` of kurtosis values
+//!
+//! ## Developer Notes
+//! ### Implementation Status
+//! - **AVX2 Kernel**: Stub (calls scalar implementation)
+//! - **AVX512 Kernel**: Stub with short/long variants (both call scalar)
+//! - **Streaming Update**: O(1) - efficient with circular buffer for moment calculations
+//! - **Memory Optimization**: Fully optimized with `alloc_with_nan_prefix` for output vectors
+//! - **Batch Operations**: Fully implemented with `make_uninit_matrix` and `init_matrix_prefixes`
+//!
+//! ### TODO - Performance Improvements
+//! - [ ] Implement actual AVX2 SIMD kernel (currently stub)
+//! - [ ] Implement actual AVX512 SIMD kernel (currently stub)
+//! - [ ] Vectorize moment calculations (m2, m3, m4)
+//! - [ ] Optimize mean calculation with SIMD horizontal adds
+//! - [ ] Consider incremental moment updates instead of full recalculation
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};

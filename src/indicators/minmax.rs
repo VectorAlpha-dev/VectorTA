@@ -6,15 +6,15 @@
 //! ## Parameters
 //! - **order**: Neighborhood range (defaults to 3)
 //!
-//! ## Errors
-//! - **EmptyData**: minmax: Input data slice is empty.
-//! - **InvalidOrder**: minmax: `order` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: minmax: Not enough valid data points for the requested `order`.
-//! - **AllValuesNaN**: minmax: All input data values are `NaN`.
-//!
 //! ## Returns
 //! - **`Ok(MinmaxOutput)`** on success, containing local extrema and forward-filled values.
-//! - **`Err(MinmaxError)`** otherwise.
+//! - **`Err(MinmaxError)`** on failure
+//!
+//! ## Developer Notes
+//! - **AVX2**: Stub implementation - calls scalar function
+//! - **AVX512**: Multiple stub functions (minmax_avx512_short, minmax_avx512_long) - all call scalar
+//! - **Streaming**: O(n) for each update - scans entire window for min/max comparison (needs optimization)
+//! - **Memory**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

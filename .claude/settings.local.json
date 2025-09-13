@@ -65,7 +65,17 @@
       "Bash(.test_bindings.bat otto --python)",
       "Bash(del \"C:\\Rust Projects\\my_project-bindings-4\\src\\other_indicators\\otto.rs\")",
       "WebSearch",
-      "WebFetch(domain:ta-lib.org)"
+      "WebFetch(domain:ta-lib.org)",
+      "Bash(run_wasm_benchmark.bat pfe)",
+      "Bash(call run_wasm_benchmark.bat:*)",
+      "Bash(./run_wasm_benchmark.bat pfe)",
+      "Bash(./run_python_benchmark.bat pfe)",
+      "Bash(.venvScriptsactivate)",
+      "Bash(pip install:*)",
+      "Bash(./run_python_benchmark.bat ott)",
+      "Bash(./run_wasm_benchmark.bat ott)",
+      "Bash(./run_python_benchmark.bat net_myrsi)",
+      "Bash(./run_wasm_benchmark.bat net_myrsi)"
     ],
     "deny": [],
     "ask": [],

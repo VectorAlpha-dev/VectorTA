@@ -1,23 +1,28 @@
 //! # Stochastic Fast (StochF)
 //!
-//! A momentum indicator comparing a security’s closing price to its price range (high-low) over
-//! a specified lookback (`fastk_period`). Then applies a moving average (`fastd_period`) on
-//! the %K values to obtain %D. "Fast" variant uses shorter averaging and is more sensitive.
+//! A fast variant of the stochastic oscillator with minimal smoothing for more responsive signals.
+//! Compares closing price to high-low range over a shorter period than standard stochastic.
 //!
 //! ## Parameters
-//! - **fastk_period**: Lookback period for highest high/lowest low. Defaults to 5.
-//! - **fastd_period**: Period for moving average of %K. Defaults to 3.
-//! - **fastd_matype**: MA type (only SMA=0 supported). Defaults to 0.
+//! - **fastk_period**: Lookback period for highest high/lowest low (default: 5)
+//! - **fastd_period**: Period for moving average of %K to get %D (default: 3)
+//! - **fastd_matype**: MA type - currently only SMA (0) supported (default: 0)
 //!
-//! ## Errors
-//! - **EmptyData**: stochf: Input slice(s) are empty.
-//! - **InvalidPeriod**: stochf: Zero or out-of-bounds period.
-//! - **AllValuesNaN**: stochf: All values are NaN.
-//! - **NotEnoughValidData**: stochf: Not enough valid data after first valid index.
+//! ## Inputs
+//! - High, low, and close price series (or candles)
+//! - All series must have the same length
 //!
 //! ## Returns
-//! - **`Ok(StochfOutput)`** with `.k` and `.d` series matching input length.
-//! - **`Err(StochfError)`** otherwise.
+//! - **k**: Fast %K line as `Vec<f64>` (length matches input, range 0-100)
+//! - **d**: Fast %D line as `Vec<f64>` (length matches input, range 0-100)
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 kernels**: Currently stubs that call scalar implementation
+//! - **Streaming update**: O(n) performance due to recalculating min/max over full buffers
+//! - **Memory optimization**: Properly uses zero-copy helper functions (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
+//! - **TODO**: Implement actual SIMD kernels for AVX2/AVX512
+//! - **TODO**: Optimize streaming to maintain rolling min/max for O(1) updates
+//! - **Note**: Currently limited to SMA for %D calculation, could extend to other MA types
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};

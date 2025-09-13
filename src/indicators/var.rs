@@ -1,20 +1,24 @@
 //! # Rolling Variance (VAR)
 //!
-//! Computes the rolling variance over a specified window (`period`), with optional standard deviation factor (`nbdev`).
-//! API mirrors alma.rs, including builder, streaming, batch/grid sweep, and AVX stubs for full parity.
+//! Computes the rolling variance over a specified window with an optional standard deviation factor
+//! for scaling the output.
 //!
 //! ## Parameters
-//! - **period**: Window size (defaults to 14).
-//! - **nbdev**: Stddev factor (`VAR = var * nbdev^2`, defaults to 1.0).
+//! - **period**: Window size for variance calculation (default: 14)
+//! - **nbdev**: Standard deviation factor for scaling output, VAR = variance * nbdev^2 (default: 1.0)
 //!
-//! ## Errors
-//! - **AllValuesNaN**: All input data values are `NaN`.
-//! - **InvalidPeriod**: `period` is zero or exceeds data length.
-//! - **NotEnoughValidData**: Not enough valid data points for `period`.
+//! ## Inputs
+//! - Data series as slice or candles with source
 //!
 //! ## Returns
-//! - `Ok(VarOutput)` on success, with a `Vec<f64>` matching the input.
-//! - `Err(VarError)` otherwise.
+//! - **values**: Variance values as `Vec<f64>` (length matches input)
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 kernels**: Currently stubs that call scalar implementation
+//! - **Streaming update**: O(1) performance with Welford's online algorithm for incremental variance
+//! - **Memory optimization**: Properly uses zero-copy helper functions (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
+//! - **TODO**: Implement actual SIMD kernels for AVX2/AVX512
+//! - **Note**: Streaming implementation is highly optimized using running sums and sum of squares
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};

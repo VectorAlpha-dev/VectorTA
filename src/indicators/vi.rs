@@ -1,20 +1,25 @@
 //! # Vortex Indicator (VI)
 //!
-//! Computes the positive (VI+) and negative (VI-) vortex indicators based on a specified period.
-//! Supports batch computation, builder pattern, parameter sweeps, AVX2/AVX512 feature stubs, and streaming API.
+//! Measures directional movement by calculating positive and negative vortex lines that identify
+//! the relationship between closing prices and true range over a rolling period.
 //!
 //! ## Parameters
-//! - **period**: Lookback window size (default: 14).
+//! - **period**: Lookback window size for vortex calculation (default: 14)
 //!
-//! ## Errors
-//! - **EmptyData**: vi: Input slices are empty.
-//! - **InvalidPeriod**: vi: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: vi: Not enough valid data points for the requested `period`.
-//! - **AllValuesNaN**: vi: All input data values are `NaN`.
+//! ## Inputs
+//! - High, low, and close price series (or candles)
+//! - All series must have the same length
 //!
 //! ## Returns
-//! - **`Ok(ViOutput)`** on success, with `.plus` and `.minus` of length matching the input.
-//! - **`Err(ViError)`** otherwise.
+//! - **plus**: VI+ (positive vortex) line as `Vec<f64>` (length matches input)
+//! - **minus**: VI- (negative vortex) line as `Vec<f64>` (length matches input)
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 kernels**: Currently stubs that call scalar implementation
+//! - **Streaming update**: O(1) performance with circular buffers for TR, VP, and VM components
+//! - **Memory optimization**: Properly uses zero-copy helper functions (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
+//! - **TODO**: Implement actual SIMD kernels for AVX2/AVX512
+//! - **Note**: Streaming requires previous values (prev_high, prev_low, prev_close) for TR calculation
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

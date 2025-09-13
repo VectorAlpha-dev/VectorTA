@@ -1,26 +1,29 @@
 //! # Relative Strength Mark (RSMK)
 //!
-//! A comparative momentum-based indicator: calculates the log-ratio of two sources, applies a momentum
+//! A comparative momentum-based indicator that calculates the log-ratio of two sources, applies a momentum
 //! transform, smooths the result with a moving average, and provides both the main and signal lines.
-//! Supports kernel selection, batch sweeping, and streaming APIs, with AVX2/AVX512 function stubs for parity.
 //!
 //! ## Parameters
-//! - **lookback**: Lookback for momentum. Default: 90
-//! - **period**: MA period. Default: 3
-//! - **signal_period**: Signal MA period. Default: 20
-//! - **matype**: MA type. Default: "ema"
-//! - **signal_matype**: Signal MA type. Default: "ema"
+//! - **lookback**: Lookback period for momentum calculation (default: 90)
+//! - **period**: Moving average period for smoothing momentum (default: 3)
+//! - **signal_period**: Signal moving average period (default: 20)
+//! - **matype**: Moving average type for main line (default: "ema")
+//! - **signal_matype**: Moving average type for signal line (default: "ema")
 //!
-//! ## Errors
-//! - **EmptyData**: All input slices empty.
-//! - **InvalidPeriod**: One or more periods are zero/invalid.
-//! - **NotEnoughValidData**: Not enough valid points after first valid.
-//! - **AllValuesNaN**: All input or comparison values NaN.
-//! - **MaError**: Underlying MA error.
+//! ## Inputs
+//! - Main data series and comparison data series (or candles with source)
+//! - Both series must have the same length
 //!
 //! ## Returns
-//! - **`Ok(RsmkOutput)`** on success: contains indicator/signal, both `Vec<f64>` of input length.
-//! - **`Err(RsmkError)`** otherwise.
+//! - **indicator**: Main RSMK line as `Vec<f64>` (length matches input)
+//! - **signal**: Signal line as `Vec<f64>` (length matches input)
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 kernels**: Currently stubs that call scalar implementation
+//! - **Streaming update**: O(n) performance due to ma() calls on full arrays each update
+//! - **Memory optimization**: Properly uses zero-copy helper functions (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
+//! - **TODO**: Implement actual SIMD kernels for AVX2/AVX512
+//! - **TODO**: Optimize streaming update to O(1) by maintaining incremental MA state
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]

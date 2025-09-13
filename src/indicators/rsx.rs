@@ -3,16 +3,20 @@
 //! A smoothed oscillator similar to RSI that attempts to reduce lag and noise. The calculation uses an IIR filter approach for smoothing while retaining responsiveness.
 //!
 //! ## Parameters
-//! - **period**: The lookback window for RSX calculations. Defaults to 14.
+//! - **period**: Lookback window for RSX calculations (default: 14)
 //!
-//! ## Errors
-//! - **AllValuesNaN**: rsx: All input data values are `NaN`.
-//! - **InvalidPeriod**: rsx: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: rsx: Not enough valid data points for the requested `period`.
+//! ## Inputs
+//! - Data series as slice or candles with source
 //!
 //! ## Returns
-//! - **`Ok(RsxOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-//! - **`Err(RsxError)`** otherwise.
+//! - **values**: RSX oscillator values as `Vec<f64>` (length matches input, range 0-100)
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 kernels**: Currently stubs that call scalar implementation
+//! - **Streaming update**: O(1) performance with efficient ring buffer and state-based calculation
+//! - **Memory optimization**: Properly uses zero-copy helper functions (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
+//! - **TODO**: Implement actual SIMD kernels for AVX2/AVX512
+//! - **Note**: Streaming implementation is highly optimized with constant-time updates
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

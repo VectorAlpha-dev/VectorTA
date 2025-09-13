@@ -13,6 +13,17 @@
 //! ## Returns
 //! - **`Ok(JsaOutput)`** with `values: Vec<f64>`.
 //! - **`Err(JsaError)`** otherwise.
+//!
+//! ## Developer Notes
+//! - **AVX2 kernel**: ❌ Stub - calls scalar implementation
+//! - **AVX512 kernel**: ❌ Stub - both short and long variants call scalar
+//! - **Streaming update**: ✅ O(1) - simple average of current value with value at period offset
+//! - **Memory optimization**: ✅ Uses `alloc_with_nan_prefix` for zero-copy output allocation
+//! - **Current status**: Basic implementation with stub SIMD kernels
+//! - **Optimization opportunities**:
+//!   - Implement AVX2 kernel with vectorized (data[i] + data[i-period]) * 0.5
+//!   - Implement AVX512 kernel for wider vector processing
+//!   - Very simple calculation makes this ideal for SIMD optimization
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

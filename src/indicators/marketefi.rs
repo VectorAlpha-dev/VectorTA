@@ -5,17 +5,16 @@
 //! ## Parameters
 //! - No adjustable parameters; calculation is direct.
 //!
-//! ## Errors
-//! - **EmptyData**: marketefi: Input data slice is empty.
-//! - **MismatchedDataLength**: marketefi: `high`, `low`, and `volume` slices do not have the same length.
-//! - **AllValuesNaN**: marketefi: All input data values are `NaN`.
-//! - **NotEnoughValidData**: marketefi: No calculable values remain after the first valid index.
-//! - **ZeroOrNaNVolume**: marketefi: Volume is zero or NaN at a valid index.
-//!
 //! ## Returns
 //! - **`Ok(MarketefiOutput)`** on success, containing a `Vec<f64>` matching the input length,
 //!   with leading `NaN`s until the first valid index.
-//! - **`Err(MarketefiError)`** otherwise.
+//! - **`Err(MarketefiError)`** on failure
+//!
+//! ## Developer Notes
+//! - **AVX2**: Stub implementation - calls scalar function
+//! - **AVX512**: Multiple stub functions (marketefi_avx512, marketefi_avx512_short, marketefi_avx512_long) - all call scalar
+//! - **Streaming**: O(1) with direct calculation (high - low) / volume
+//! - **Memory**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

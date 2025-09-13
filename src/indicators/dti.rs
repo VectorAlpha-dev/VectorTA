@@ -5,22 +5,27 @@
 //! absolute value), producing a value typically scaled between `-100` and `100`.
 //!
 //! ## Parameters
-//! - **r**: The period of the first EMA smoothing. Defaults to 14.
-//! - **s**: The period of the second EMA smoothing. Defaults to 10.
-//! - **u**: The period of the third EMA smoothing. Defaults to 5.
-//!
-//! ## Errors
-//! - **EmptyData**: dti: Input data slice is empty.
-//! - **CandleFieldError**: dti: Error reading candle data fields.
-//! - **InvalidPeriod**: dti: One or more of the EMA periods is zero or exceeds the data length.
-//! - **NotEnoughValidData**: dti: Fewer valid (non-`NaN`) data points remain after the first
-//!   valid index than are needed to compute at least one of the EMAs.
-//! - **AllValuesNaN**: dti: All input high/low values are `NaN`.
+//! - **r**: The period of the first EMA smoothing (default: 14)
+//! - **s**: The period of the second EMA smoothing (default: 10)
+//! - **u**: The period of the third EMA smoothing (default: 5)
 //!
 //! ## Returns
-//! - **`Ok(DtiOutput)`** on success, containing a `Vec<f64>` matching the input length,
-//!   with leading `NaN`s until the indicator can be fully calculated.
-//! - **`Err(DtiError)`** otherwise.
+//! - **`Ok(DtiOutput)`** containing a `Vec<f64>` of DTI values ranging from -100 to 100
+//!
+//! ## Developer Notes
+//! ### Implementation Status
+//! - **AVX2 Kernel**: Stub (calls scalar implementation)
+//! - **AVX512 Kernel**: Partially implemented with short/long variants, but mostly stubs
+//! - **Streaming Update**: O(1) - efficient with maintained EMA states
+//! - **Memory Optimization**: Fully optimized with `alloc_with_nan_prefix` for output vectors
+//! - **Batch Operations**: Fully implemented with `make_uninit_matrix` and `init_matrix_prefixes`
+//!
+//! ### TODO - Performance Improvements
+//! - [ ] Implement actual AVX2 SIMD kernel (currently stub)
+//! - [ ] Complete AVX512 implementation (short/long variants are stubs)
+//! - [ ] Optimize triple EMA calculations with SIMD
+//! - [ ] Consider vectorizing the upward/downward movement calculations
+//! - [ ] Add parallel processing for batch parameter sweeps
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};

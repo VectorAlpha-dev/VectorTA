@@ -1,20 +1,37 @@
 //! # Choppiness Index (CHOP)
 //!
-//! The Choppiness Index is a volatility indicator designed to quantify whether
-//! the market is choppy (range-bound) or trending. A higher CHOP value implies
-//! more choppiness (sideways movement), while a lower value implies trending behavior.
-//!
-//! This indicator includes scalar, AVX2, and AVX512 implementations, streaming and batch APIs,
-//! and parameter sweep functionality for grid search, closely mirroring the alma.rs indicator.
+//! A volatility indicator that measures whether a market is trending or consolidating (choppy).
+//! The index ranges from 0 to 100, where higher values indicate more choppiness (sideways movement)
+//! and lower values indicate stronger trending behavior. CHOP uses the ratio of the sum of true ranges
+//! to the price range over a period, then applies a logarithmic transformation to normalize the output.
 //!
 //! ## Parameters
-//! - **period**: Rolling window length. Defaults to 14.
-//! - **scalar**: Multiplicative scaling factor. Defaults to 100.0.
-//! - **drift**: ATR period for calculating rolling ATR. Defaults to 1.
+//! - **period**: Rolling window length for calculations (default: 14)
+//! - **scalar**: Multiplicative scaling factor for output normalization (default: 100.0)
+//! - **drift**: ATR period for true range calculation (default: 1)
+//!
+//! ## Inputs
+//! - Requires high, low, and close price arrays
+//! - Supports both raw slices and Candles data structure
 //!
 //! ## Returns
-//! - **`Ok(ChopOutput)`** on success, containing a `Vec<f64>` with NaN leading until the rolling window is ready.
-//! - **`Err(ChopError)`** otherwise.
+//! - **`Ok(ChopOutput)`** containing a `Vec<f64>` matching input length
+//! - Values range from 0-100, with NaN during warmup period
+//! - High values (>61.8): Choppy/ranging market
+//! - Low values (<38.2): Trending market
+//!
+//! ## Developer Notes (Implementation Status)
+//! - **SIMD Kernels**:
+//!   - AVX2: STUB (calls scalar implementation)
+//!   - AVX512: STUB (calls scalar implementation)
+//!   - Both short and long variants are stubs
+//! - **Streaming Performance**: O(1) - efficient with rolling window buffers
+//! - **Memory Optimization**: YES - uses alloc_with_nan_prefix and make_uninit_matrix helpers
+//! - **Batch Operations**: Fully supported with parallel processing
+//! - **TODO**:
+//!   - Implement actual SIMD kernels for true range and logarithm calculations
+//!   - Vectorize the rolling sum and max/min operations
+//!   - Consider SIMD-optimized log10 from SLEEF library
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};

@@ -8,16 +8,15 @@
 //! - **smoothing_factor**: EMA smoothing factor for RSI (default: 5)
 //! - **fast_factor**: Multiplier for ATR bands (default: 4.236)
 //!
-//! ## Errors
-//! - **EmptyInputData**: qqe: Input data slice is empty.
-//! - **AllValuesNaN**: qqe: All input values are `NaN`.
-//! - **InvalidPeriod**: qqe: Period is zero or exceeds data length.
-//! - **NotEnoughValidData**: qqe: Not enough valid data points for calculation.
-//! - **DependentIndicatorError**: qqe: Error in dependent indicator calculation.
-//!
 //! ## Returns
 //! - **`Ok(QqeOutput)`** on success, containing `fast` and `slow` vectors.
-//! - **`Err(QqeError)`** otherwise.
+//! - **`Err(QqeError)`** on failure
+//!
+//! ## Developer Notes
+//! - **AVX2**: Stub implementation - calls scalar function
+//! - **AVX512**: Stub implementation - calls scalar function
+//! - **Streaming**: O(1) with efficient ring buffer and incremental RSI updates
+//! - **Memory**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings

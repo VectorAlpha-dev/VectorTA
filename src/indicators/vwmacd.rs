@@ -1,25 +1,31 @@
 //! # Volume Weighted MACD (VWMACD)
 //!
-//! A variant of MACD using volume-weighted moving averages (VWMA) in place of traditional moving averages.
-//! This implementation follows the same multi-kernel, batch, and stream support as alma.rs for performance and API consistency.
+//! A variant of MACD that uses volume-weighted moving averages instead of traditional moving averages,
+//! giving more weight to periods with higher trading volume.
 //!
 //! ## Parameters
-//! - **fast_period**: VWMA fast window (default: 12)
-//! - **slow_period**: VWMA slow window (default: 26)
-//! - **signal_period**: MA window for the signal line (default: 9)
-//! - **fast_ma_type**: MA type for fast VWMA calculation (default: "sma")
-//! - **slow_ma_type**: MA type for slow VWMA calculation (default: "sma")
+//! - **fast_period**: Fast VWMA period (default: 12)
+//! - **slow_period**: Slow VWMA period (default: 26)
+//! - **signal_period**: Signal line MA period (default: 9)
+//! - **fast_ma_type**: MA type for fast VWMA (default: "sma")
+//! - **slow_ma_type**: MA type for slow VWMA (default: "sma")
 //! - **signal_ma_type**: MA type for signal line (default: "ema")
 //!
-//! ## Errors
-//! - **AllValuesNaN**: No valid values in close or volume
-//! - **InvalidPeriod**: Any period is zero or exceeds the data length
-//! - **NotEnoughValidData**: Not enough valid values for requested period
-//! - **MaError**: Error from underlying MA calculation
+//! ## Inputs
+//! - Close price series and volume series (or candles with sources)
+//! - Both series must have the same length
 //!
 //! ## Returns
-//! - **Ok(VwmacdOutput)** with `.macd`, `.signal`, `.hist` (all Vec<f64>)
-//! - **Err(VwmacdError)** otherwise
+//! - **macd**: VWMACD line as `Vec<f64>` (fast VWMA - slow VWMA)
+//! - **signal**: Signal line as `Vec<f64>` (MA of MACD line)
+//! - **hist**: Histogram as `Vec<f64>` (MACD - signal)
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 kernels**: Currently stubs that call scalar implementation
+//! - **Streaming update**: O(n) performance due to recalculating full MAs each update
+//! - **Memory optimization**: Properly uses zero-copy helper functions (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
+//! - **TODO**: Implement actual SIMD kernels for AVX2/AVX512
+//! - **TODO**: Optimize streaming to maintain incremental MA state for O(1) updates
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};

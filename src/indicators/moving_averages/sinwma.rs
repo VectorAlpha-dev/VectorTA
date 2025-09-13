@@ -18,6 +18,18 @@
 //! ## Returns
 //! - **`Ok(SinWmaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
 //! - **`Err(SinWmaError)`** otherwise.
+//!
+//! ## Developer Notes
+//! - **AVX2 kernel**: ❌ Stub - calls scalar implementation
+//! - **AVX512 kernel**: ❌ Stub - both short and long variants call scalar
+//! - **Streaming update**: ⚠️ O(n) - `dot_ring()` iterates through all period weights
+//! - **Memory optimization**: ✅ Uses `alloc_with_nan_prefix` for zero-copy output allocation
+//! - **Current status**: Functional with pre-computed weights but missing SIMD optimizations
+//! - **Optimization opportunities**:
+//!   - Implement AVX2 kernel for vectorized weighted sum operations
+//!   - Implement AVX512 short/long kernels for wider vector processing
+//!   - Streaming update could potentially maintain incremental weighted sum for O(1)
+//!   - Weighted sum calculations are ideal for SIMD parallelization
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

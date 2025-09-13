@@ -6,15 +6,15 @@
 //! ## Parameters
 //! - **initial_value**: Starting PVI value. Default is 1000.0.
 //!
-//! ## Errors
-//! - **AllValuesNaN**: All input values are NaN.
-//! - **MismatchedLength**: Close and volume arrays have different lengths.
-//! - **EmptyData**: Provided slices are empty.
-//! - **NotEnoughValidData**: Less than 2 valid points after the first valid index.
-//!
 //! ## Returns
 //! - **`Ok(PviOutput)`** on success, with a Vec<f64> of PVI values matching the input length.
-//! - **`Err(PviError)`** otherwise.
+//! - **`Err(PviError)`** on failure
+//!
+//! ## Developer Notes
+//! - **AVX2**: Stub implementation - calls scalar function
+//! - **AVX512**: Multiple stub functions (pvi_avx512_short, pvi_avx512_long) - all call scalar
+//! - **Streaming**: O(1) with simple cumulative calculation
+//! - **Memory**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};

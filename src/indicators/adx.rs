@@ -1,7 +1,7 @@
 //! # Average Directional Index (ADX)
 //!
 //! The Average Directional Index (ADX) is a technical indicator that measures the strength
-//! of a prevailing trend by comparing consecutive bars’ highs and lows. The ADX uses
+//! of a prevailing trend by comparing consecutive bars' highs and lows. The ADX uses
 //! smoothed values of the directional movement (positive and negative) to arrive at a single
 //! value that signals the intensity of price movement.
 //!
@@ -16,6 +16,16 @@
 //! ## Returns
 //! - **`Ok(AdxOutput)`** on success, containing a `Vec<f64>` of length matching the input.
 //! - **`Err(AdxError)`** otherwise.
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 kernels**: Currently stubs calling scalar implementation
+//! - **Streaming update**: O(1) - maintains running smoothed values (ATR, +DM, -DM, ADX)
+//! - **Memory optimization**: Uses `alloc_with_nan_prefix` for zero-copy allocation
+//! - **Current status**: Scalar implementation complete with Wilder's smoothing
+//! - **Optimization opportunities**:
+//!   - Implement vectorized AVX2/AVX512 kernels for directional movement calculations
+//!   - Consider SIMD for parallel ATR and DM smoothing operations
+//!   - Optimize DX calculation with vector operations
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};

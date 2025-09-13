@@ -20,6 +20,16 @@
 //! ## Returns
 //! - **`Ok(VpwmaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
 //! - **`Err(VpwmaError)`** otherwise.
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 kernels**: AVX2 fully implemented with vectorized operations, AVX512 has core implementation
+//! - **Streaming update**: O(n) - `dot_ring()` iterates through period-1 weights for each update
+//! - **Memory optimization**: Uses `alloc_with_nan_prefix` for zero-copy allocation
+//! - **Current status**: SIMD implementations present for AVX2/AVX512 with 4-way unrolled accumulators
+//! - **Optimization opportunities**:
+//!   - Consider caching weight calculations for common period/power combinations
+//!   - Optimize dot_ring() in streaming kernel for better cache locality
+//!   - Potential for further AVX512 optimizations with wider vectors
 
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;

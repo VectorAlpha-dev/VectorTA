@@ -345,6 +345,38 @@ const INDICATORS = {
             needsMultipleInputs: true
         }
     },
+    ott: {
+        name: 'OTT',
+        // Safe API
+        safe: {
+            fn: 'ott_js',
+            params: { period: 2, percent: 1.4, ma_type: 'VAR' }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'ott_alloc',
+            freeFn: 'ott_free',
+            computeFn: 'ott_into',
+            params: { period: 2, percent: 1.4, ma_type: 'VAR' }
+        },
+        // Batch API
+        batch: {
+            fn: 'ott_batch',
+            fastFn: 'ott_batch_into',
+            config: {
+                small: {
+                    period_range: [2, 4, 1],        // 3 values: 2, 3, 4
+                    percent_range: [1.0, 2.0, 0.5], // 3 values: 1.0, 1.5, 2.0
+                    ma_types: ['VAR', 'SMA', 'EMA'] // 3 MA types = 27 combinations total
+                },
+                medium: {
+                    period_range: [2, 6, 1],        // 5 values: 2, 3, 4, 5, 6
+                    percent_range: [0.5, 2.5, 0.5], // 5 values: 0.5, 1.0, 1.5, 2.0, 2.5
+                    ma_types: ['VAR', 'SMA', 'EMA', 'WMA', 'ZLEMA'] // 5 MA types = 125 combinations total
+                }
+            }
+        }
+    },
     qstick: {
         name: 'QSTICK',
         // Safe API
@@ -473,6 +505,69 @@ const INDICATORS = {
             }
         }
     },
+    macz: {
+        name: 'MACZ',
+        // Safe API
+        safe: {
+            fn: 'macz_js',
+            params: { 
+                fast_length: 12, 
+                slow_length: 25, 
+                signal_length: 9,
+                lengthz: 20,
+                length_stdev: 25,
+                a: 1.0,
+                b: 1.0,
+                use_lag: false,
+                gamma: 0.02
+            }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'macz_alloc',
+            freeFn: 'macz_free',
+            computeFn: 'macz_into',
+            params: { 
+                fast_length: 12, 
+                slow_length: 25, 
+                signal_length: 9,
+                lengthz: 20,
+                length_stdev: 25,
+                a: 1.0,
+                b: 1.0,
+                use_lag: false,
+                gamma: 0.02
+            }
+        },
+        // Batch API
+        batch: {
+            fn: 'macz_batch',
+            config: {
+                small: {
+                    fast_length_range: [10, 14, 2],
+                    slow_length_range: [20, 30, 5],
+                    signal_length_range: [7, 11, 2],
+                    lengthz_range: [18, 22, 2],
+                    length_stdev_range: [20, 30, 5],
+                    a_range: [0.8, 1.2, 0.2],
+                    b_range: [0.8, 1.2, 0.2],
+                    use_lag_range: [false, false, false],
+                    gamma_range: [0.01, 0.03, 0.01]
+                },
+                medium: {
+                    fast_length_range: [8, 16, 2],
+                    slow_length_range: [20, 35, 5],
+                    signal_length_range: [5, 13, 2],
+                    lengthz_range: [15, 25, 5],
+                    length_stdev_range: [20, 35, 5],
+                    a_range: [0.5, 1.5, 0.25],
+                    b_range: [0.5, 1.5, 0.25],
+                    use_lag_range: [false, false, false],
+                    gamma_range: [0.01, 0.05, 0.01]
+                }
+            }
+        }
+    },
     bollinger_bands: {
         name: 'Bollinger Bands',
         // Safe API
@@ -512,6 +607,28 @@ const INDICATORS = {
                     // Total: 125 combinations
                 }
             }
+        }
+    },
+    bop: {
+        name: 'BOP',
+        needsMultipleInputs: true,  // Requires open, high, low, close
+        // Safe API
+        safe: {
+            fn: 'bop_js',
+            needsMultipleInputs: true
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'bop_alloc',
+            freeFn: 'bop_free',
+            computeFn: 'bop_into',
+            needsMultipleInputs: true
+        },
+        // Batch API
+        batch: {
+            fn: 'bop_batch_js',
+            fastFn: 'bop_batch_into',
+            needsMultipleInputs: true
         }
     },
     vlma: {
@@ -749,6 +866,41 @@ const INDICATORS = {
                     direction: 'short'              // 35 combinations total
                 }
             }
+        }
+    },
+    chandelier_exit: {
+        name: 'Chandelier Exit',
+        needsMultipleInputs: true,  // Uses high, low, close
+        // Safe API
+        safe: {
+            fn: 'ce_js',
+            params: { period: 22, mult: 3.0, use_close: true }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'ce_alloc',
+            freeFn: 'ce_free',
+            computeFn: 'ce_into',
+            params: { period: 22, mult: 3.0, use_close: true },
+            needsMultipleInputs: true,
+            dualOutput: true  // Has two outputs (long and short)
+        },
+        // Batch API
+        batch: {
+            fn: 'ce_batch',
+            fastFn: 'ce_batch_into',
+            config: {
+                small: {
+                    period_range: [20, 24, 2],      // 3 values: 20, 22, 24
+                    mult_range: [2.5, 3.5, 0.5]     // 3 values: 2.5, 3.0, 3.5 = 9 combinations
+                },
+                medium: {
+                    period_range: [15, 30, 5],      // 4 values: 15, 20, 25, 30
+                    mult_range: [2.0, 4.0, 0.5]     // 5 values: 2.0, 2.5, 3.0, 3.5, 4.0 = 20 combinations
+                }
+            },
+            needsMultipleInputs: true,
+            dualOutput: true
         }
     },
     acosc: {
@@ -1111,6 +1263,39 @@ const INDICATORS = {
             }
         }
     },
+    ehlers_ecema: {
+        name: 'Ehlers ECEMA',
+        // Safe API
+        safe: {
+            fn: 'ehlers_ecema_js',
+            params: { length: 20, gain_limit: 50 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'ehlers_ecema_alloc',
+            freeFn: 'ehlers_ecema_free',
+            computeFn: 'ehlers_ecema_into',
+            params: { length: 20, gain_limit: 50 }
+        },
+        // Batch API
+        batch: {
+            fn: 'ehlers_ecema_batch',
+            config: {
+                small: {
+                    length_range: [10, 30, 10],        // 3 values
+                    gain_limit_range: [30, 60, 15]     // 3 values
+                    // Total: 9 combinations
+                },
+                medium: {
+                    length_range: [10, 30, 5],         // 5 values
+                    gain_limit_range: [30, 60, 10]     // 4 values
+                    // Total: 20 combinations
+                }
+            },
+            // Fast batch API
+            fastFn: 'ehlers_ecema_batch_into'
+        }
+    },
     ehlers_itrend: {
         name: 'Ehlers Instantaneous Trendline',
         // Safe API
@@ -1142,6 +1327,23 @@ const INDICATORS = {
                 }
             }
         }
+    },
+    ehlers_pma: {
+        name: 'Ehlers PMA',
+        // Safe API
+        safe: {
+            fn: 'ehlers_pma',
+            params: {} // No parameters for this indicator
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'ehlers_pma_alloc',
+            freeFn: 'ehlers_pma_free',
+            computeFn: 'ehlers_pma_into',
+            params: {}, // No parameters
+            dualOutput: true  // Has two outputs (predict and trigger)
+        }
+        // No batch API as it has fixed parameters
     },
     fwma: {
         name: 'FWMA',
@@ -1506,6 +1708,53 @@ const INDICATORS = {
             hasMultipleOutputs: 4,
             // Fast batch API
             fastFn: 'minmax_batch_into'
+        }
+    },
+    range_filter: {
+        name: 'Range Filter',
+        // Safe API
+        safe: {
+            fn: 'range_filter_js',
+            params: { 
+                range_size: 2.618, 
+                range_period: 14, 
+                smooth: true, 
+                filter_period: 27, 
+                filter_type: 'close' 
+            }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'range_filter_alloc',
+            freeFn: 'range_filter_free',
+            computeFn: 'range_filter_into',
+            params: { 
+                range_size: 2.618, 
+                range_period: 14, 
+                smooth: true, 
+                filter_period: 27, 
+                filter_type: 'close' 
+            }
+        },
+        // Batch API
+        batch: {
+            fn: 'range_filter_batch',
+            config: {
+                small: {
+                    range_size_range: [2.0, 3.0, 0.5],      // 3 values
+                    range_period_range: [10, 20, 5],        // 3 values
+                    smooth: true,
+                    filter_period: 27,
+                    filter_type: 'close'                    // 9 combinations
+                },
+                medium: {
+                    range_size_range: [2.0, 3.5, 0.3],      // 6 values
+                    range_period_range: [10, 30, 5],        // 5 values
+                    smooth: true,
+                    filter_period: 27,
+                    filter_type: 'close'                    // 30 combinations
+                }
+            }
         }
     },
     reflex: {
@@ -2568,6 +2817,45 @@ const INDICATORS = {
             }
         }
     },
+    volume_adjusted_ma: {
+        name: 'Volume Adjusted MA',
+        // Safe API
+        safe: {
+            fn: 'volume_adjusted_ma_js',
+            params: { length: 13, vi_factor: 0.67, strict: true, sample_period: 0 },
+            inputs: ['prices', 'volumes']  // Special: requires both price and volume
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'volume_adjusted_ma_alloc',
+            freeFn: 'volume_adjusted_ma_free',
+            computeFn: 'volume_adjusted_ma_into',
+            params: { length: 13, vi_factor: 0.67, strict: true, sample_period: 0 },
+            inputs: ['prices', 'volumes']  // Special: requires both price and volume
+        },
+        // Batch API
+        batch: {
+            fn: 'volume_adjusted_ma_batch',
+            fastFn: 'volume_adjusted_ma_batch_into',
+            config: {
+                small: {
+                    length_range: [10, 20, 5],           // 3 values: 10, 15, 20
+                    vi_factor_range: [0.5, 1.0, 0.25],   // 3 values: 0.5, 0.75, 1.0
+                    sample_period_range: [0, 0, 0],      // 1 value: 0
+                    strict: true                         // Fixed value
+                    // Total: 9 combinations
+                },
+                medium: {
+                    length_range: [5, 25, 5],            // 5 values: 5, 10, 15, 20, 25
+                    vi_factor_range: [0.3, 1.0, 0.1],    // 8 values: 0.3, 0.4, 0.5, ..., 1.0
+                    sample_period_range: [0, 10, 5],     // 3 values: 0, 5, 10
+                    strict: true                         // Fixed value
+                    // Total: 120 combinations
+                }
+            },
+            inputs: ['prices', 'volumes']  // Special: requires both price and volume
+        }
+    },
     vwma: {
         name: 'VWMA (Volume Weighted Moving Average)',
         // Safe API
@@ -2922,6 +3210,43 @@ const INDICATORS = {
                     short_period_range: [10, 20, 5]    // 3 values: 10, 15, 20 = 12 combinations
                 }
             }
+        }
+    },
+    aso: {
+        name: 'ASO',
+        needsMultipleInputs: true,  // Requires open, high, low, close
+        // Safe API
+        safe: {
+            fn: 'aso_js',
+            params: { period: 10, mode: 0 },
+            needsMultipleInputs: true,
+            multiOutput: 2  // Returns bulls and bears arrays
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'aso_alloc',
+            freeFn: 'aso_free',
+            computeFn: 'aso_into',
+            params: { period: 10, mode: 0 },
+            needsMultipleInputs: true,
+            multiOutput: 2  // Returns bulls and bears arrays
+        },
+        // Batch API
+        batch: {
+            fn: 'aso_batch_unified_js',
+            fastFn: 'aso_batch_into',
+            config: {
+                small: {
+                    period_range: [8, 12, 2],    // 3 values: 8, 10, 12
+                    mode_range: [0, 2, 1]        // 3 values: 0, 1, 2 = 9 combinations
+                },
+                medium: {
+                    period_range: [6, 14, 2],    // 5 values: 6, 8, 10, 12, 14
+                    mode_range: [0, 2, 1]        // 3 values: 0, 1, 2 = 15 combinations
+                }
+            },
+            needsMultipleInputs: true,
+            multiOutput: 2
         }
     },
     atr: {
@@ -3678,6 +4003,34 @@ const INDICATORS = {
             needsMultipleInputs: true
         }
     },
+    net_myrsi: {
+        name: 'NET_MYRSI',
+        // Safe API
+        safe: {
+            fn: 'net_myrsi_js',
+            params: { period: 14 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'net_myrsi_alloc',
+            freeFn: 'net_myrsi_free',
+            computeFn: 'net_myrsi_into',
+            params: { period: 14 }
+        },
+        // Batch API
+        batch: {
+            fn: 'net_myrsi_batch',
+            fastFn: 'net_myrsi_batch_into',
+            config: {
+                small: {
+                    period_range: [10, 20, 2]       // 6 values: 10, 12, 14, 16, 18, 20
+                },
+                medium: {
+                    period_range: [5, 30, 5]        // 6 values: 5, 10, 15, 20, 25, 30
+                }
+            }
+        }
+    },
     ppo: {
         name: 'PPO (Percentage Price Oscillator)',
         // Safe API
@@ -3706,6 +4059,83 @@ const INDICATORS = {
                     fast_period_range: [10, 20, 2],  // 6 values: 10, 12, 14, 16, 18, 20
                     slow_period_range: [22, 32, 2],  // 6 values: 22, 24, 26, 28, 30, 32
                     ma_type: 'ema'                   // Total: 36 combinations
+                }
+            }
+        }
+    },
+    pfe: {
+        name: 'PFE',
+        // Safe API
+        safe: {
+            fn: 'pfe_js',
+            params: { period: 10, smoothing: 5 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'pfe_alloc',
+            freeFn: 'pfe_free',
+            computeFn: 'pfe_into',
+            params: { period: 10, smoothing: 5 }
+        },
+        // Batch API
+        batch: {
+            fn: 'pfe_batch',
+            fastFn: 'pfe_batch_into',
+            config: {
+                small: {
+                    period_range: [8, 12, 2],       // 3 values: 8, 10, 12
+                    smoothing_range: [3, 7, 2]      // 3 values: 3, 5, 7 = 9 combinations
+                },
+                medium: {
+                    period_range: [5, 20, 5],       // 4 values: 5, 10, 15, 20
+                    smoothing_range: [2, 10, 2]     // 5 values: 2, 4, 6, 8, 10 = 20 combinations
+                }
+            }
+        }
+    },
+    prb: {
+        name: 'PRB',
+        // Safe API
+        safe: {
+            fn: 'prb_js',
+            params: { 
+                use_trend: true,
+                poly_count: 10,
+                poly_window: 100,
+                stdev_count: 2,
+                stdev_offset: 0
+            }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'prb_alloc',
+            freeFn: 'prb_free',
+            computeFn: 'prb_into',
+            params: { 
+                use_trend: true,
+                poly_count: 10,
+                poly_window: 100,
+                stdev_count: 2,
+                stdev_offset: 0
+            }
+        },
+        // Batch API
+        batch: {
+            fn: 'prb_batch',
+            config: {
+                small: {
+                    use_trend: true,
+                    poly_count_range: [5, 15, 5],        // 3 values
+                    poly_window_range: [50, 150, 50],    // 3 values
+                    stdev_count_range: [1, 3, 1],        // 3 values
+                    stdev_offset_range: [0, 2, 1]        // 3 values = 81 combinations
+                },
+                medium: {
+                    use_trend: true,
+                    poly_count_range: [5, 20, 3],        // 6 values
+                    poly_window_range: [50, 200, 30],    // 6 values
+                    stdev_count_range: [1, 3, 1],        // 3 values
+                    stdev_offset_range: [0, 2, 1]        // 3 values = 324 combinations
                 }
             }
         }
@@ -4430,6 +4860,39 @@ const INDICATORS = {
             dualOutput: true
         }
     },
+    dm: {
+        name: 'DM',
+        needsMultipleInputs: true,  // Uses high, low
+        // Safe API
+        safe: {
+            fn: 'dm_js',
+            params: { period: 14 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'dm_alloc',
+            freeFn: 'dm_free',
+            computeFn: 'dm_into',
+            params: { period: 14 },
+            needsMultipleInputs: true,
+            dualOutput: true  // Has two outputs (plus and minus)
+        },
+        // Batch API
+        batch: {
+            fn: 'dm_batch',
+            fastFn: 'dm_batch_into',
+            config: {
+                small: {
+                    period_range: [10, 20, 5]      // 3 values: 10, 15, 20
+                },
+                medium: {
+                    period_range: [10, 30, 5]      // 5 values: 10, 15, 20, 25, 30
+                }
+            },
+            needsMultipleInputs: true,
+            dualOutput: true
+        }
+    },
     efi: {
         name: 'EFI',
         needsMultipleInputs: true,  // Uses close (price) and volume
@@ -4752,41 +5215,6 @@ const INDICATORS = {
             }
         }
     },
-    dti: {
-        name: 'DTI',
-        needsMultipleInputs: true,  // Uses high, low
-        // Safe API
-        safe: {
-            fn: 'dti_js',
-            params: { r: 14, s: 10, u: 5 }
-        },
-        // Fast/Unsafe API
-        fast: {
-            allocFn: 'dti_alloc',
-            freeFn: 'dti_free',
-            computeFn: 'dti_into',
-            params: { r: 14, s: 10, u: 5 },
-            needsMultipleInputs: true
-        },
-        // Batch API
-        batch: {
-            fn: 'dti_batch',
-            fastFn: 'dti_batch_into',
-            config: {
-                small: {
-                    r_range: [10, 20, 5],      // 3 values
-                    s_range: [8, 12, 2],       // 3 values
-                    u_range: [4, 6, 1]         // 3 values = 27 combinations
-                },
-                medium: {
-                    r_range: [10, 30, 5],      // 5 values
-                    s_range: [5, 15, 2],       // 6 values
-                    u_range: [3, 7, 1]         // 5 values = 150 combinations
-                }
-            },
-            needsMultipleInputs: true
-        }
-    },
     dx: {
         name: 'DX',
         needsMultipleInputs: true,  // Uses high, low, close
@@ -4967,6 +5395,53 @@ const INDICATORS = {
                 }
             },
             inputs: ['close', 'volume']  // Batch also requires both inputs
+        }
+    },
+    halftrend: {
+        name: 'HalfTrend',
+        needsMultipleInputs: true,  // Uses high, low, close
+        // Safe API
+        safe: {
+            fn: 'halftrend_js',
+            params: { 
+                amplitude: 2, 
+                channel_deviation: 2, 
+                atr_period: 100 
+            }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'halftrend_alloc',
+            freeFn: 'halftrend_free',
+            computeFn: 'halftrend_into',
+            params: { 
+                amplitude: 2, 
+                channel_deviation: 2, 
+                atr_period: 100 
+            },
+            needsMultipleInputs: true,
+            multipleOutputs: 6  // Has 6 outputs (halftrend, trend, atr_high, atr_low, buy_signal, sell_signal)
+        },
+        // Batch API
+        batch: {
+            fn: 'halftrend_batch',
+            fastFn: 'halftrend_batch_into',
+            config: {
+                small: {
+                    amplitude_range: [2, 4, 1],           // 3 values: 2, 3, 4
+                    channel_deviation_range: [1.5, 2.5, 0.5], // 3 values: 1.5, 2.0, 2.5
+                    atr_period_range: [50, 100, 50]       // 2 values: 50, 100
+                    // Total: 18 combinations
+                },
+                medium: {
+                    amplitude_range: [2, 6, 1],           // 5 values: 2, 3, 4, 5, 6
+                    channel_deviation_range: [1.0, 3.0, 0.5], // 5 values: 1.0, 1.5, 2.0, 2.5, 3.0
+                    atr_period_range: [50, 150, 25]       // 5 values: 50, 75, 100, 125, 150
+                    // Total: 125 combinations
+                }
+            },
+            needsMultipleInputs: true,
+            multipleOutputs: 6
         }
     }
 };

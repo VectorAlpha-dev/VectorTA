@@ -9,19 +9,27 @@
 //! - **smoothing_length**: Period for SMA smoothing of levels (default: 9)
 //! - **reset_on_cross**: Whether to reset trailing stop on cross (default: false)
 //!
-//! ## Errors
-//! - **EmptyInputData**: fvg_trailing_stop: Input data slice is empty.
-//! - **AllValuesNaN**: fvg_trailing_stop: All input values are `NaN`.
-//! - **InvalidPeriod**: fvg_trailing_stop: Period is zero or exceeds data length.
-//! - **NotEnoughValidData**: fvg_trailing_stop: Not enough valid data points for calculation.
-//!
 //! ## Returns
-//! - **`Ok(FvgTrailingStopOutput)`** on success, containing:
+//! - **`Ok(FvgTrailingStopOutput)`** containing:
 //!   - `upper`: Upper channel boundary (NaN when lower is active)
 //!   - `lower`: Lower channel boundary (NaN when upper is active)
 //!   - `upper_ts`: Upper trailing stop (NaN when lower is active)
 //!   - `lower_ts`: Lower trailing stop (NaN when upper is active)
-//! - **`Err(FvgTrailingStopError)`** otherwise.
+//!
+//! ## Developer Notes
+//! ### Implementation Status
+//! - **AVX2 Kernel**: Not implemented (no SIMD kernels for this indicator)
+//! - **AVX512 Kernel**: Not implemented (no SIMD kernels for this indicator)
+//! - **Streaming Update**: O(1) - efficient with VecDeque for FVG tracking
+//! - **Memory Optimization**: Fully optimized with `alloc_with_nan_prefix` for all output vectors
+//! - **Batch Operations**: Not implemented (complex state management makes batching difficult)
+//!
+//! ### TODO - Performance Improvements
+//! - [ ] Consider adding SIMD kernels for SMA calculations
+//! - [ ] Optimize FVG detection logic
+//! - [ ] Implement batch operations if use case emerges
+//! - [ ] Consider caching smoothed values to avoid recalculation
+//! - [ ] Optimize the trailing stop update logic
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings

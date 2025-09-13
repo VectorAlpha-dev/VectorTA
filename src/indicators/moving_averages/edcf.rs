@@ -26,6 +26,16 @@
 //! ## Returns
 //! - **`Ok(EdcfOutput)`** on success, containing a `Vec<f64>` of length matching the input.
 //! - **`Err(EdcfError)`** otherwise.
+//!
+//! ## Developer Notes
+//! - **AVX2 kernel**: Fully implemented - vectorized distance calculations with 4-wide SIMD
+//! - **AVX512 kernel**: Fully implemented - optimized with 8-wide SIMD operations
+//! - **Streaming update**: O(n) complexity - recalculates all distances for each update
+//! - **Memory optimization**: Uses alloc_with_nan_prefix but requires full-size distance buffer (memory intensive)
+//! - **Optimization opportunities**:
+//!   - Streaming kernel could cache distances and update incrementally
+//!   - Consider ring buffer approach to avoid full distance recalculation
+//!   - Distance buffer allocation is a major bottleneck in WASM
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

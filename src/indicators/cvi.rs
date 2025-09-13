@@ -1,25 +1,36 @@
 //! # Chaikin's Volatility (CVI)
 //!
-//! Chaikin's Volatility (CVI) measures the volatility of a financial instrument by calculating
-//! the percentage difference between two exponentially smoothed averages of the trading range
-//! (high-low) over a given period. A commonly used default period is 10. Higher values for the
-//! period will smooth out short-term fluctuations, while lower values will track rapid changes
-//! more closely.
+//! A volatility indicator that measures the rate of change between the high-low spread over time.
+//! CVI calculates the percentage difference between two exponentially smoothed averages of the 
+//! trading range (high-low), helping identify periods of increasing or decreasing volatility.
+//! Expanding volatility often precedes trend changes, while contracting volatility suggests consolidation.
 //!
 //! ## Parameters
-//! - **period**: The window size (number of data points). Defaults to 10.
+//! - **period**: Window size for EMA calculations (default: 10)
 //!
-//! ## Errors
-//! - **EmptyData**: cvi: Input data (high/low) is empty.
-//! - **InvalidPeriod**: cvi: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: cvi: Fewer than `2*period - 1` valid (non-`NaN`) data points remain
-//!   after the first valid index.
-//! - **AllValuesNaN**: cvi: All input high/low values are `NaN`.
+//! ## Inputs
+//! - Requires high and low price arrays
+//! - Supports both raw slices and Candles data structure
 //!
 //! ## Returns
-//! - **`Ok(CviOutput)`** on success, containing a `Vec<f64>` matching the input length,
-//!   with leading `NaN`s for the first `2*period - 1` values from the first valid data point.
-//! - **`Err(CviError)`** otherwise.
+//! - **`Ok(CviOutput)`** containing a `Vec<f64>` matching input length
+//! - Values represent percentage change in volatility
+//! - Leading NaNs for first `2*period - 1` values during warmup
+//! - Positive values indicate expanding volatility
+//! - Negative values indicate contracting volatility
+//!
+//! ## Developer Notes (Implementation Status)
+//! - **SIMD Kernels**:
+//!   - AVX2: STUB (calls scalar implementation)
+//!   - AVX512: STUB (calls scalar implementation)
+//!   - Both short and long variants are stubs
+//! - **Streaming Performance**: O(1) - efficient with EMA state and circular buffer
+//! - **Memory Optimization**: YES - uses alloc_with_nan_prefix and make_uninit_matrix helpers
+//! - **Batch Operations**: Fully supported with parallel processing
+//! - **TODO**:
+//!   - Implement actual SIMD kernels for EMA calculations
+//!   - Vectorize the percentage difference calculations
+//!   - Consider SIMD for high-low range computation
 
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;

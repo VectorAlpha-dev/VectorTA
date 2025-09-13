@@ -1,20 +1,31 @@
 //! # Fisher Transform
 //!
 //! The Fisher Transform identifies potential price reversals by normalizing price extremes
-//! using a Fisher Transform function. Takes `period` as parameter.
+//! using a Fisher Transform function. It converts prices to a Gaussian normal distribution
+//! to identify turning points more clearly.
 //!
 //! ## Parameters
-//! - **period**: Window size (number of data points).
-//!
-//! ## Errors
-//! - **EmptyData**: fisher: Input data is empty.
-//! - **InvalidPeriod**: fisher: `period` is zero or exceeds data length.
-//! - **NotEnoughValidData**: fisher: Not enough valid (non-NaN) data points after the first valid index.
-//! - **AllValuesNaN**: fisher: All input data values are `NaN`.
+//! - **period**: Window size for finding price extremes (default: 9)
 //!
 //! ## Returns
-//! - **`Ok(FisherOutput)`** on success, containing `fisher` and `signal` vectors matching input length.
-//! - **`Err(FisherError)`** otherwise.
+//! - **`Ok(FisherOutput)`** containing:
+//!   - `fisher`: The Fisher Transform values
+//!   - `signal`: The lagged Fisher values (previous Fisher value)
+//!
+//! ## Developer Notes
+//! ### Implementation Status
+//! - **AVX2 Kernel**: Stub (calls scalar implementation)
+//! - **AVX512 Kernel**: Stub (calls scalar implementation)
+//! - **Streaming Update**: O(1) - efficient with circular buffer for min/max tracking
+//! - **Memory Optimization**: Fully optimized with `alloc_with_nan_prefix` for output vectors
+//! - **Batch Operations**: Fully implemented with `make_uninit_matrix` and `init_matrix_prefixes`
+//!
+//! ### TODO - Performance Improvements
+//! - [ ] Implement actual AVX2 SIMD kernel (currently stub)
+//! - [ ] Implement actual AVX512 SIMD kernel (currently stub)
+//! - [ ] Vectorize min/max finding in rolling window
+//! - [ ] Optimize Fisher transform calculation with SIMD
+//! - [ ] Consider using SIMD for the constrain and transform operations
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};

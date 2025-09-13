@@ -20,6 +20,16 @@
 //! ## Returns
 //! - **`Ok(DmaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
 //! - **`Err(DmaError)`** otherwise.
+//!
+//! ## Developer Notes
+//! - **AVX2 kernel**: Stub implementation - just calls scalar version
+//! - **AVX512 kernel**: Stub implementation - just calls scalar version
+//! - **Streaming update**: O(n) complexity - maintains ring buffer with SMA/WMA calculations
+//! - **Memory optimization**: Uses alloc_with_nan_prefix helper function
+//! - **Optimization opportunities**:
+//!   - Implement SIMD kernels for vectorized Hull MA and EMA calculations
+//!   - Consider incremental updates for O(1) streaming performance
+//!   - Optimize gain search algorithm with SIMD
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};

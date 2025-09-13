@@ -20,6 +20,16 @@
 //! ## Returns
 //! - **Ok(EpmaOutput)** with a Vec<f64> of the same length as input
 //! - **Err(EpmaError)** otherwise
+//!
+//! ## Developer Notes
+//! - **AVX2 kernel**: ✅ Fully implemented with FMA operations and efficient weight calculation
+//! - **AVX512 kernel**: ✅ Fully implemented with separate short/long period optimizations
+//! - **Streaming update**: ⚠️ O(n) - `dot_ring()` iterates through period-1 weights on each update
+//! - **Memory optimization**: ✅ Uses `alloc_with_nan_prefix` for zero-copy output allocation
+//! - **Current status**: Production-ready with comprehensive SIMD optimizations
+//! - **Optimization opportunities**:
+//!   - Streaming update could potentially be optimized to O(1) by maintaining running sum
+//!   - Consider caching weight calculations for common period values
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

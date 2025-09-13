@@ -18,6 +18,17 @@
 //! ## Returns
 //! - **`Ok(KamaOutput)`** on success, containing a `Vec<f64>` with length matching the input.
 //! - **`Err(KamaError)`** otherwise.
+//!
+//! ## Developer Notes
+//! - **AVX2 kernel**: ✅ Fully implemented with vectorized sum operations and FMA instructions
+//! - **AVX512 kernel**: ✅ Fully implemented with wider vectors and AVX512 specific optimizations
+//! - **Streaming update**: ✅ O(1) - maintains running sums incrementally for efficiency
+//! - **Memory optimization**: ✅ Uses `alloc_with_nan_prefix` for zero-copy output allocation
+//! - **Current status**: Production-ready with comprehensive SIMD optimizations
+//! - **Optimization opportunities**:
+//!   - Already well-optimized with efficient streaming and SIMD implementations
+//!   - Consider caching frequently used constants for common period values
+//!   - Potential for further optimization in the scalar kernel's loop structure
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

@@ -21,6 +21,16 @@
 //! ## Returns
 //! - **Ok(AlligatorOutput)** on success, with jaw/teeth/lips vectors (shifted)
 //! - **Err(AlligatorError)** otherwise
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 kernels**: Currently stubs calling scalar (AVX512 has conditional dispatch for short/long)
+//! - **Streaming update**: O(1) - maintains three SMMA states with simple update calculations
+//! - **Memory optimization**: Uses `alloc_with_nan_prefix` for zero-copy allocation
+//! - **Current status**: Scalar implementation complete with three SMMA lines and forward shifting
+//! - **Optimization opportunities**:
+//!   - Implement vectorized AVX2/AVX512 kernels for parallel SMMA calculations
+//!   - Consider SIMD for simultaneous processing of all three lines
+//!   - Optimize forward shifting operations with memory-efficient techniques
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]

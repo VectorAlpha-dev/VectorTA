@@ -1,24 +1,26 @@
 //! # Relative Volatility Index (RVI)
 //!
-//! Measures direction of volatility, splitting a deviation measure (standard/mean/median deviation)
-//! into "up" and "down" buckets and applying a moving average for smoothing. Batch and streaming
-//! support, error handling, and AVX2/AVX512 function stubs included for API compatibility.
+//! Measures direction of volatility by splitting a deviation measure (standard/mean/median deviation)
+//! into "up" and "down" buckets and applying a moving average for smoothing.
 //!
 //! ## Parameters
-//! - **period**: Window size for volatility (default 10).
-//! - **ma_len**: Smoothing window for up/down (default 14).
-//! - **matype**: Smoothing type (0=SMA, 1=EMA; default 1).
-//! - **devtype**: Volatility measure (0=StdDev, 1=MeanAbsDev, 2=MedianAbsDev; default 0).
+//! - **period**: Window size for volatility calculation (default: 10)
+//! - **ma_len**: Smoothing window for up/down components (default: 14)
+//! - **matype**: Smoothing type - 0=SMA, 1=EMA (default: 1)
+//! - **devtype**: Volatility measure - 0=StdDev, 1=MeanAbsDev, 2=MedianAbsDev (default: 0)
 //!
-//! ## Errors
-//! - **EmptyData**: rvi: Input data is empty.
-//! - **InvalidPeriod**: rvi: period or ma_len invalid.
-//! - **NotEnoughValidData**: rvi: Not enough data after first valid.
-//! - **AllValuesNaN**: rvi: All input is NaN.
+//! ## Inputs
+//! - Data series as slice or candles with source
 //!
 //! ## Returns
-//! - **Ok(RviOutput)** with `Vec<f64>` of same length as input.
-//! - **Err(RviError)** otherwise.
+//! - **values**: RVI oscillator values as `Vec<f64>` (length matches input, range 0-100)
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 kernels**: Currently stubs that call scalar implementation
+//! - **Streaming update**: Not implemented - always returns None (needs complex state tracking)
+//! - **Memory optimization**: Properly uses zero-copy helper functions (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
+//! - **TODO**: Implement actual SIMD kernels for AVX2/AVX512
+//! - **TODO**: Implement proper streaming with state tracking for deviation arrays and differences
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};

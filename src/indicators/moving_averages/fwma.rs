@@ -90,6 +90,17 @@
 //! 4. Document warm-up length (`period – 1`) for stream consistency.
 //!
 //! ---
+//!
+//! ## Developer Notes
+//! - **AVX2 kernel**: ✅ Fully implemented with vectorized Fibonacci weight operations
+//! - **AVX512 kernel**: ✅ Fully implemented with short/long period optimizations
+//! - **Streaming update**: ⚠️ O(n) - `dot_ring()` iterates through all Fibonacci weights
+//! - **Memory optimization**: ✅ Uses `alloc_with_nan_prefix` for zero-copy output allocation
+//! - **Current status**: Production-ready with comprehensive SIMD optimizations
+//! - **Optimization opportunities**:
+//!   - Streaming update could be optimized to O(1) using incremental sum updates
+//!   - Consider pre-computing normalized Fibonacci weights for common periods
+//!   - WASM performance is excellent with SIMD128 support
 
 use crate::utilities::aligned_vector::AlignedVec;
 use crate::utilities::data_loader::{source_type, Candles};

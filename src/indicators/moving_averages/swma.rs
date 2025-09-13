@@ -13,6 +13,16 @@
 //! ## Returns
 //! - **`Ok(SwmaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
 //! - **`Err(SwmaError)`** otherwise.
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 kernels**: Currently stubs calling scalar implementation
+//! - **Streaming update**: O(n) - `dot_ring()` iterates through weights for each update
+//! - **Memory optimization**: Uses `alloc_with_nan_prefix` for zero-copy allocation
+//! - **Current status**: Main scalar implementation complete, SIMD kernels need implementation
+//! - **Optimization opportunities**:
+//!   - Implement vectorized AVX2/AVX512 kernels for weight application
+//!   - Consider caching weight calculations for common periods
+//!   - Optimize dot_ring() in streaming kernel for better cache locality
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

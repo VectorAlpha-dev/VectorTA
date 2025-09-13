@@ -1,23 +1,28 @@
 //! # WaveTrend Indicator
 //!
-//! A technical oscillator indicator (WT1, WT2, WT_DIFF = WT2 - WT1) using a combination
-//! of EMA, absolute deviations, and SMA. Parameters are: `channel_length`, `average_length`,
-//! `ma_length`, and `factor`. Full AVX2/AVX512 stub-parity with alma.rs for performance extension
-//! and batch/grid API. Scalar logic untouched for accuracy.
+//! A momentum oscillator that identifies overbought and oversold conditions using a combination
+//! of EMAs, absolute deviations, and SMAs to produce smooth wave-like signals.
 //!
 //! ## Parameters
-//! - **channel_length**: EMA period (default: 9)
-//! - **average_length**: EMA for transformed CI (default: 12)
-//! - **ma_length**: SMA period on WT1 (default: 3)
-//! - **factor**: Multiplier for transformation (default: 0.015)
+//! - **channel_length**: EMA period for initial smoothing (default: 9)
+//! - **average_length**: EMA period for transformed channel index (default: 12)
+//! - **ma_length**: SMA period for final smoothing of WT1 (default: 3)
+//! - **factor**: Scaling factor for normalization (default: 0.015)
 //!
-//! ## Errors
-//! - **EmptyData**, **AllValuesNaN**
-//! - **InvalidChannelLen**, **InvalidAverageLen**, **InvalidMaLen**
-//! - **NotEnoughValidData**
+//! ## Inputs
+//! - Data series as slice or candles with source
 //!
-//! ## Output
-//! - `WavetrendOutput` (fields: wt1, wt2, wt_diff)
+//! ## Returns
+//! - **wt1**: Primary WaveTrend line as `Vec<f64>` (length matches input)
+//! - **wt2**: Secondary WaveTrend line (SMA of WT1) as `Vec<f64>`
+//! - **wt_diff**: Difference (WT2 - WT1) as `Vec<f64>`
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 kernels**: Currently stubs that call scalar implementation
+//! - **Streaming update**: O(1) performance with efficient state management for all EMA/SMA stages
+//! - **Memory optimization**: Properly uses zero-copy helper functions (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
+//! - **TODO**: Implement actual SIMD kernels for AVX2/AVX512
+//! - **Note**: Streaming implementation maintains separate state for each calculation stage
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]

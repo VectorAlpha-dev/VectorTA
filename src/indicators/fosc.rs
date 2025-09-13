@@ -2,20 +2,28 @@
 //!
 //! The Forecast Oscillator (FOSC) measures the percentage difference between the current price
 //! and a one-step-ahead linear regression forecast. Positive values suggest the price is above
-//! its trend, while negative values indicate it's below. Parameters and errors match ALMA's API
-//! conventions for batch processing, builder usage, SIMD kernel dispatch, and streaming updates.
+//! its trend, while negative values indicate it's below.
 //!
 //! ## Parameters
-//! - **period**: Regression window (default: 5).
-//!
-//! ## Errors
-//! - **AllValuesNaN**: fosc: All input data values are `NaN`.
-//! - **InvalidPeriod**: fosc: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: fosc: Not enough valid data points for the requested `period`.
+//! - **period**: Regression window for linear forecast (default: 5)
 //!
 //! ## Returns
-//! - **`Ok(FoscOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-//! - **`Err(FoscError)`** otherwise.
+//! - **`Ok(FoscOutput)`** containing a `Vec<f64>` of oscillator values as percentages
+//!
+//! ## Developer Notes
+//! ### Implementation Status
+//! - **AVX2 Kernel**: Stub (calls scalar implementation)
+//! - **AVX512 Kernel**: Stub with short/long variants (both call scalar)
+//! - **Streaming Update**: O(1) - efficient with incremental regression updates
+//! - **Memory Optimization**: Fully optimized with `alloc_with_nan_prefix` for output vectors
+//! - **Batch Operations**: Fully implemented with `make_uninit_matrix` and `init_matrix_prefixes`
+//!
+//! ### TODO - Performance Improvements
+//! - [ ] Implement actual AVX2 SIMD kernel (currently stub)
+//! - [ ] Implement actual AVX512 SIMD kernel (currently stub)
+//! - [ ] Vectorize linear regression calculations
+//! - [ ] Optimize sum calculations with SIMD horizontal adds
+//! - [ ] Consider caching regression coefficients for batch operations
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

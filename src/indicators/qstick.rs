@@ -7,14 +7,15 @@
 //! ## Parameters
 //! - **period**: The window size (number of data points). Defaults to 5.
 //!
-//! ## Errors
-//! - **AllValuesNaN**: qstick: All input data values are `NaN`.
-//! - **InvalidPeriod**: qstick: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: qstick: Not enough valid data points for the requested `period`.
-//!
 //! ## Returns
 //! - **`Ok(QstickOutput)`** on success, containing a `Vec<f64>` matching the input length.
-//! - **`Err(QstickError)`** otherwise.
+//! - **`Err(QstickError)`** on failure
+//!
+//! ## Developer Notes
+//! - **AVX2**: Stub implementation - calls scalar function
+//! - **AVX512**: Multiple stub functions (qstick_avx512, qstick_avx512_short, qstick_avx512_long) - all call scalar
+//! - **Streaming**: O(1) with efficient circular buffer and running sum
+//! - **Memory**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

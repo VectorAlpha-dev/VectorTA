@@ -1,21 +1,39 @@
 //! # Band-Pass Filter
 //!
-//! A frequency-based filter (Ehlers-inspired) that isolates a band of interest by removing both high- and low-frequency components from a time series. Parameters `period` and `bandwidth` control the central window and width. Batch, stream, and SIMD kernels are supported.
+//! A frequency-domain filter inspired by John Ehlers' work that isolates specific frequency bands
+//! in price data by removing both high-frequency noise and low-frequency trends. The filter uses
+//! a two-stage approach: first applying a high-pass filter, then a band-pass transformation to
+//! isolate the desired frequency range. Useful for cycle analysis and detrending.
 //!
 //! ## Parameters
-//! - **period**: Central lookback period (>=2).
-//! - **bandwidth**: Passband width in [0,1] (default: 0.3).
+//! - **period**: Central lookback period for the passband (must be >= 2)
+//! - **bandwidth**: Passband width as fraction [0,1] (default: 0.3)
 //!
-//! ## Errors
-//! - **NotEnoughData**: Data length < period.
-//! - **InvalidPeriod**: period < 2.
-//! - **HpPeriodTooSmall**: hp_period after rounding < 2.
-//! - **TriggerPeriodTooSmall**: trigger_period after rounding < 2.
-//! - **HighPassError**: errors from underlying highpass filter.
+//! ## Inputs
+//! - Single price array (typically close prices)
+//! - Supports both raw slices and Candles with source selection
 //!
 //! ## Returns
-//! - **`Ok(BandPassOutput)`** on success.  
-//! - **`Err(BandPassError)`** otherwise.
+//! - **`Ok(BandPassOutput)`** containing four arrays:
+//!   - bp: Raw band-pass filtered values
+//!   - bp_normalized: Normalized band-pass values
+//!   - signal: Smoothed signal line
+//!   - trigger: Trigger line for crossover signals
+//!
+//! ## Developer Notes (Implementation Status)
+//! - **SIMD Kernels**:
+//!   - AVX2: STUB (calls scalar implementation)
+//!   - AVX512: STUB (calls scalar implementation)
+//!   - Recursive nature of filter makes SIMD optimization challenging
+//! - **Streaming Performance**: O(1) - efficient buffered state updates
+//! - **Memory Optimization**: PARTIAL
+//!   - Batch operations: YES - uses make_uninit_matrix and init_matrix_prefixes
+//!   - Single operations: NO - could benefit from alloc_with_nan_prefix
+//! - **Batch Operations**: Fully supported with parallel processing
+//! - **TODO**:
+//!   - Implement actual SIMD kernels (may require algorithm restructuring)
+//!   - Add alloc_with_nan_prefix for single indicator calculations
+//!   - Consider SIMD for normalization and smoothing stages
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};

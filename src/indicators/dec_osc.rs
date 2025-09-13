@@ -1,22 +1,37 @@
 //! # Decycler Oscillator (DEC_OSC)
 //!
-//! An oscillator that applies two sequential high-pass filters (2-pole) to remove
-//! cyclical components from the data. The residual is then scaled by `k` and expressed
-//! as a percentage of the original input series.
+//! A trend-following oscillator that uses cascaded high-pass filters to remove cyclical
+//! components from price data, leaving only the long-term trend. The indicator applies
+//! two sequential 2-pole high-pass filters to eliminate shorter-term cycles, then scales
+//! the result to show the percentage deviation from the original price series. Useful for
+//! identifying the underlying trend strength without short-term noise.
 //!
 //! ## Parameters
-//! - **hp_period**: The period used for the primary high-pass filter. Defaults to 125.
-//! - **k**: Multiplier for the final oscillator values. Defaults to 1.0.
+//! - **hp_period**: Period for the high-pass filters (default: 125)
+//! - **k**: Multiplier for scaling the oscillator output (default: 1.0)
 //!
-//! ## Errors
-//! - **AllValuesNaN**: dec_osc: All input data values are `NaN`.
-//! - **InvalidPeriod**: dec_osc: `hp_period` < 2 or exceeds the data length.
-//! - **NotEnoughValidData**: dec_osc: Fewer than 2 valid (non-`NaN`) data points remain.
-//! - **InvalidK**: dec_osc: `k` is `NaN` or non-positive.
+//! ## Inputs
+//! - Single price array (typically close prices)
+//! - Supports both raw slices and Candles with source selection
 //!
 //! ## Returns
-//! - **`Ok(DecOscOutput)`** on success, containing a `Vec<f64>` matching the input length.
-//! - **`Err(DecOscError)`** otherwise.
+//! - **`Ok(DecOscOutput)`** containing a `Vec<f64>` matching input length
+//! - Values represent trend strength as percentage of price
+//! - Leading NaNs for first 2 values during filter initialization
+//! - Positive values indicate uptrend, negative indicate downtrend
+//!
+//! ## Developer Notes (Implementation Status)
+//! - **SIMD Kernels**:
+//!   - AVX2: STUB (calls scalar implementation)
+//!   - AVX512: STUB (calls scalar implementation)
+//!   - Both short and long variants are stubs
+//! - **Streaming Performance**: O(1) - efficient with maintained filter state
+//! - **Memory Optimization**: YES - uses alloc_with_nan_prefix and make_uninit_matrix helpers
+//! - **Batch Operations**: Fully supported with parallel processing
+//! - **TODO**:
+//!   - Implement actual SIMD kernels for high-pass filter calculations
+//!   - Vectorize the recursive filter operations
+//!   - Consider SIMD for trigonometric coefficient calculations
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};

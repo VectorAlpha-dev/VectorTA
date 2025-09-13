@@ -1,23 +1,36 @@
 //! # Chandelier Exit (CE)
 //!
-//! A trailing stop-loss indicator that creates dynamic support/resistance bands using ATR.
-//! Developed by Chuck LeBeau, it helps identify potential exit points and trend reversals.
+//! A volatility-based trailing stop-loss indicator that creates dynamic support and resistance bands
+//! using ATR (Average True Range) combined with rolling highest high or lowest low values. Developed
+//! by Chuck LeBeau, it provides adaptive stop levels that follow price movements while accounting for
+//! market volatility. The stops tighten in trending markets and widen during volatile periods.
 //!
 //! ## Parameters
 //! - **period**: ATR period for volatility calculation (default: 22)
-//! - **mult**: ATR multiplier for band distance (default: 3.0)
+//! - **mult**: ATR multiplier for stop distance (default: 3.0)
 //! - **use_close**: Use close price for extremums instead of high/low (default: true)
 //!
-//! ## Errors
-//! - **EmptyInputData**: chandelier_exit: Input data slice is empty.
-//! - **AllValuesNaN**: chandelier_exit: All input values are `NaN`.
-//! - **InvalidPeriod**: chandelier_exit: Period is zero or exceeds data length.
-//! - **NotEnoughValidData**: chandelier_exit: Not enough valid data points for calculation.
-//! - **InconsistentDataLengths**: chandelier_exit: OHLC data arrays have different lengths.
+//! ## Inputs
+//! - Requires high, low, and close price arrays
+//! - Supports both raw slices and Candles data structure
 //!
 //! ## Returns
-//! - **`Ok(ChandelierExitOutput)`** on success, containing `long_stop` and `short_stop` vectors of length matching the input.
-//! - **`Err(ChandelierExitError)`** otherwise.
+//! - **`Ok(ChandelierExitOutput)`** containing:
+//!   - `long_stop`: Long position stop levels (highest[period] - ATR * mult)
+//!   - `short_stop`: Short position stop levels (lowest[period] + ATR * mult)
+//!   - Both arrays match input length with NaN during warmup
+//!
+//! ## Developer Notes (Implementation Status)
+//! - **SIMD Kernels**: N/A - uses ATR indicator internally which has stub SIMD implementations
+//!   - No dedicated SIMD kernels for this indicator
+//!   - Performance depends on underlying ATR implementation
+//! - **Streaming Performance**: O(1) - efficient rolling windows for ATR and extremums
+//! - **Memory Optimization**: YES - uses alloc_with_nan_prefix and make_uninit_matrix helpers
+//! - **Batch Operations**: Fully supported with parallel processing
+//! - **TODO**:
+//!   - Performance improvements would come from optimizing the underlying ATR indicator
+//!   - Consider adding dedicated SIMD kernels for rolling max/min operations
+//!   - Could benefit from vectorized extremum calculations
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};

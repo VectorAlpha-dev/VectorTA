@@ -8,17 +8,15 @@
 //! - **percent**: The percentage offset for stop levels (default: 1.4)
 //! - **ma_type**: Type of moving average to use (default: "VAR")
 //!
-//! ## Errors
-//! - **EmptyInputData**: ott: Input data slice is empty.
-//! - **AllValuesNaN**: ott: All input values are `NaN`.
-//! - **InvalidPeriod**: ott: Period is zero or exceeds data length.
-//! - **NotEnoughValidData**: ott: Not enough valid data points for calculation.
-//! - **InvalidPercent**: ott: Percent must be positive.
-//! - **InvalidMaType**: ott: Unsupported moving average type.
-//!
 //! ## Returns
 //! - **`Ok(OttOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-//! - **`Err(OttError)`** otherwise.
+//! - **`Err(OttError)`** on failure
+//!
+//! ## Developer Notes
+//! - **AVX2**: Stub implementation - calls scalar function
+//! - **AVX512**: Stub implementation - calls scalar function
+//! - **Streaming**: O(1) for most MA types, O(n) for VAR type due to buffer recalculation
+//! - **Memory**: Partially uses zero-copy helpers (alloc_with_nan_prefix) but missing make_uninit_matrix usage in batch operations
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings

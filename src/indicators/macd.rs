@@ -9,14 +9,15 @@
 //! - **signal_period**: Signal line moving average period (default: 9)
 //! - **ma_type**: Moving average type for all components (default: "ema")
 //!
-//! ## Errors
-//! - **AllValuesNaN**: All input values are NaN.
-//! - **InvalidPeriod**: One or more periods are zero or exceed data length.
-//! - **NotEnoughValidData**: Insufficient valid data points for requested period(s).
-//!
 //! ## Returns
 //! - `Ok(MacdOutput)` on success, containing MACD, signal, and histogram vectors
-//! - `Err(MacdError)` otherwise
+//! - `Err(MacdError)` on failure
+//!
+//! ## Developer Notes
+//! - **AVX2**: Stub implementation - calls scalar function
+//! - **AVX512**: Multiple stub functions (macd_avx512, macd_avx512_short, macd_avx512_long) - all call scalar
+//! - **Streaming**: O(1) for EMA type, O(n) fallback for other MA types - needs optimization for non-EMA
+//! - **Memory**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};

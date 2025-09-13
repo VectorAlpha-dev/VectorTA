@@ -1,19 +1,29 @@
 //! # Detrended Price Oscillator (DPO)
 //!
 //! The Detrended Price Oscillator (DPO) removes trend to highlight cycles by subtracting a
-//! centered moving average from a shifted price. Controlled by a single period parameter.
+//! centered moving average from a shifted price. It helps identify cycles in price movements
+//! by eliminating the underlying trend.
 //!
 //! ## Parameters
-//! - **period**: Window size (number of data points).
-//!
-//! ## Errors
-//! - **AllValuesNaN**: dpo: All input data values are `NaN`.
-//! - **InvalidPeriod**: dpo: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: dpo: Not enough valid data points for the requested `period`.
+//! - **period**: Window size for the moving average calculation (default: 5)
 //!
 //! ## Returns
-//! - **`Ok(DpoOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-//! - **`Err(DpoError)`** otherwise.
+//! - **`Ok(DpoOutput)`** containing a `Vec<f64>` of detrended price values
+//!
+//! ## Developer Notes
+//! ### Implementation Status
+//! - **AVX2 Kernel**: Stub (calls scalar implementation)
+//! - **AVX512 Kernel**: Stub (calls scalar implementation)
+//! - **WASM SIMD128**: Implemented with optimized vector operations
+//! - **Streaming Update**: O(1) - efficient circular buffer implementation
+//! - **Memory Optimization**: Fully optimized with `alloc_with_nan_prefix` for output vectors
+//! - **Batch Operations**: Fully implemented with `make_uninit_matrix` and `init_matrix_prefixes`
+//!
+//! ### TODO - Performance Improvements
+//! - [ ] Implement actual AVX2 SIMD kernel (currently stub)
+//! - [ ] Implement actual AVX512 SIMD kernel (currently stub)
+//! - [ ] Optimize batch operations with SIMD processing
+//! - [ ] Consider unrolling main calculation loop for better ILP
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{

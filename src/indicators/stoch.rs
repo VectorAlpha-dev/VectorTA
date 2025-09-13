@@ -1,25 +1,29 @@
 //! # Stochastic Oscillator (Stoch)
 //!
 //! A momentum indicator comparing a particular closing price to a range of prices over a certain period.
-//! Supports scalar, avx2, and avx512 stubs, batch/grid sweeping, and streaming API.
+//! Calculates %K (fast stochastic) and %D (slow stochastic) lines using high/low range normalization.
 //!
 //! ## Parameters
-//! - **fastk_period**: Highest high/lowest low window size. Default: 14
-//! - **slowk_period**: MA period for %K smoothing. Default: 3
-//! - **slowk_ma_type**: MA type for %K smoothing. Default: "sma"
-//! - **slowd_period**: MA period for %D. Default: 3
-//! - **slowd_ma_type**: MA type for %D. Default: "sma"
+//! - **fastk_period**: Window for highest high/lowest low calculation (default: 14)
+//! - **slowk_period**: MA period for %K smoothing (default: 3)
+//! - **slowk_ma_type**: MA type for %K smoothing (default: "sma")
+//! - **slowd_period**: MA period for %D calculation (default: 3)
+//! - **slowd_ma_type**: MA type for %D calculation (default: "sma")
 //!
-//! ## Errors
-//! - **EmptyData**: stoch: Input slices are empty.
-//! - **MismatchedLength**: stoch: Input slices have different lengths.
-//! - **InvalidPeriod**: stoch: Period is zero or exceeds data length.
-//! - **NotEnoughValidData**: stoch: Not enough valid (non-NaN) data points.
-//! - **AllValuesNaN**: stoch: All input values are NaN.
+//! ## Inputs
+//! - High, low, and close price series (or candles)
+//! - All series must have the same length
 //!
 //! ## Returns
-//! - **Ok(StochOutput)** on success. `k` and `d` fields have same length as input.
-//! - **Err(StochError)** otherwise.
+//! - **k**: %K line as `Vec<f64>` (length matches input, range 0-100)
+//! - **d**: %D line as `Vec<f64>` (length matches input, range 0-100)
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 kernels**: Currently stubs that call scalar implementation
+//! - **Streaming update**: O(n) performance due to recalculating min/max over full buffers
+//! - **Memory optimization**: Properly uses zero-copy helper functions (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
+//! - **TODO**: Implement actual SIMD kernels for AVX2/AVX512
+//! - **TODO**: Optimize streaming to maintain rolling min/max for O(1) updates
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};

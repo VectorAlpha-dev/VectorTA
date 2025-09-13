@@ -1,19 +1,29 @@
 //! # Average True Range (ATR)
 //!
-//! Measures volatility using the average of true ranges over a period. API closely mirrors alma.rs for consistency.
+//! A volatility indicator that measures market volatility by calculating the average of true ranges
+//! over a specified period. True range is the greatest of: current high-low, abs(high-close[prev]),
+//! or abs(low-close[prev]). ATR uses an RMA (Running Moving Average) for smoothing.
 //!
 //! ## Parameters
-//! - **length**: Window size for smoothing (defaults to 14).
+//! - **length**: Window size for RMA smoothing (defaults to 14)
 //!
-//! ## Errors
-//! - **InvalidLength**: ATR: Length is zero.
-//! - **InconsistentSliceLengths**: ATR: Provided slices have differing lengths.
-//! - **NoCandlesAvailable**: ATR: No data.
-//! - **NotEnoughData**: ATR: Data length too short for requested window.
+//! ## Inputs
+//! - Requires high, low, and close price arrays
+//! - Supports both raw slices and Candles data structure
 //!
 //! ## Returns
-//! - **`Ok(AtrOutput)`** on success, containing a `Vec<f64>` matching input length.
-//! - **`Err(AtrError)`** otherwise.
+//! - **`Ok(AtrOutput)`** containing a `Vec<f64>` matching input length
+//! - Leading values are NaN during the warmup period (length-1 values)
+//!
+//! ## Developer Notes (Implementation Status)
+//! - **SIMD Kernels**: 
+//!   - AVX2: STUB (calls scalar implementation)
+//!   - AVX512: STUB (calls scalar implementation)
+//!   - Optimization needed for parallel true range calculations
+//! - **Streaming Performance**: O(1) - efficient rolling RMA calculation
+//! - **Memory Optimization**: YES - uses alloc_with_nan_prefix and make_uninit_matrix helpers
+//! - **Batch Operations**: Fully supported with parallel processing
+//! - **TODO**: Implement actual SIMD kernels for AVX2/AVX512 to vectorize TR calculations
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyUntypedArrayMethods};

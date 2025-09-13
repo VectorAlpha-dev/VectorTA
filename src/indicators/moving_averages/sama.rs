@@ -18,6 +18,18 @@
 //! ## Returns
 //! - **`Ok(SamaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
 //! - **`Err(SamaError)`** otherwise.
+//!
+//! ## Developer Notes
+//! - **AVX2 kernel**: ❌ Stub - calls scalar implementation
+//! - **AVX512 kernel**: ❌ Stub - calls scalar implementation
+//! - **Streaming update**: ⚠️ O(n) - scans entire buffer for highest/lowest values each update
+//! - **Memory optimization**: ⚠️ Does NOT use zero-copy helpers - allocates with `vec![f64::NAN; data.len()]`
+//! - **Current status**: Functional but missing SIMD optimizations and memory optimization
+//! - **Optimization opportunities**:
+//!   - Implement AVX2/AVX512 kernels for vectorized min/max operations
+//!   - Switch to `alloc_with_nan_prefix` for zero-copy output allocation
+//!   - Consider sliding window min/max algorithm for O(log n) or O(1) streaming updates
+//!   - The highest/lowest calculation is well-suited for SIMD parallelization
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};

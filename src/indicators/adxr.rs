@@ -19,6 +19,16 @@
 //!
 //! ## Returns
 //! - **`Ok(AdxrOutput)`** on success, else **`Err(AdxrError)`**.
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 kernels**: Currently stubs calling scalar implementation
+//! - **Streaming update**: O(1) - maintains ADX history buffer and running smoothed values
+//! - **Memory optimization**: Uses `alloc_with_nan_prefix` for zero-copy allocation
+//! - **Current status**: Scalar implementation complete, builds on ADX calculation
+//! - **Optimization opportunities**:
+//!   - Implement vectorized AVX2/AVX512 kernels for ADX and averaging operations
+//!   - Consider SIMD for parallel processing of ADX buffer
+//!   - Optimize history buffer management with circular buffer techniques
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};

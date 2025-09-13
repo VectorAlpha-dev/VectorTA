@@ -18,6 +18,17 @@
 //! ## Returns
 //! - **`Ok(ReflexOutput)`** on success, containing a `Vec<f64>` of length matching the input.
 //! - **`Err(ReflexError)`** otherwise.
+//!
+//! ## Developer Notes
+//! - **AVX2 kernel**: ✅ Fully implemented with vectorized sum operations
+//! - **AVX512 kernel**: ✅ Fully implemented with 8-wide vector processing
+//! - **Streaming update**: ⚠️ O(n) - recalculates slope and variance over ring buffer each update
+//! - **Memory optimization**: ✅ Uses `alloc_with_nan_prefix` for zero-copy output allocation
+//! - **Current status**: Production-ready with comprehensive SIMD optimizations
+//! - **Optimization opportunities**:
+//!   - Streaming update complexity is inherent to the algorithm's variance calculation
+//!   - Consider incremental variance updates for potential O(1) streaming
+//!   - AVX implementations are well-optimized with horizontal sum operations
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

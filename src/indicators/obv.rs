@@ -5,14 +5,15 @@
 //! ## Parameters
 //! - *(none)*
 //!
-//! ## Errors
-//! - **EmptyData**: obv: Input data slice is empty.
-//! - **DataLengthMismatch**: obv: Mismatch in data lengths (close vs. volume).
-//! - **AllValuesNaN**: obv: All input data values are `NaN`.
-//!
 //! ## Returns
 //! - **`Ok(ObvOutput)`** on success, containing a `Vec<f64>` of length matching input.
-//! - **`Err(ObvError)`** otherwise.
+//! - **`Err(ObvError)`** on failure
+//!
+//! ## Developer Notes
+//! - **AVX2**: Stub implementation - calls scalar function
+//! - **AVX512**: Multiple stub functions (obv_avx512, obv_avx512_short, obv_avx512_long) - all call scalar
+//! - **Streaming**: O(1) with simple cumulative calculation
+//! - **Memory**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

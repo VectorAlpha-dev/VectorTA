@@ -1,24 +1,36 @@
 //! # Anti-Volume Stop Loss (AVSL)
 //!
-//! AVSL is a dynamic stop-loss indicator that uses volume-price confirmation/contradiction
-//! to calculate adaptive stop-loss levels. It combines volume-weighted moving averages 
-//! with simple moving averages to determine stop-loss positions based on market dynamics.
+//! A dynamic stop-loss indicator that uses volume-price confirmation/contradiction to calculate
+//! adaptive stop-loss levels. AVSL analyzes the relationship between volume-weighted moving averages
+//! (VWMA) and simple moving averages (SMA) to detect volume-price divergences, then calculates
+//! dynamic stop levels based on these divergences and market volatility.
 //!
 //! ## Parameters
 //! - **fast_period**: Period for fast average (default: 12)
 //! - **slow_period**: Period for slow average (default: 26)
-//! - **multiplier**: Standard deviation multiplier (default: 2.0)
+//! - **multiplier**: Volatility multiplier for stop distance (default: 2.0)
 //!
-//! ## Errors
-//! - **EmptyInputData**: avsl: Input data slice is empty.
-//! - **AllValuesNaN**: avsl: All input values are `NaN`.
-//! - **InvalidPeriod**: avsl: Period is zero or exceeds data length.
-//! - **NotEnoughValidData**: avsl: Not enough valid data points for calculation.
-//! - **DataLengthMismatch**: avsl: Price and volume data lengths don't match.
+//! ## Inputs
+//! - Requires close prices, low prices, and volume data
+//! - Supports both raw slices and Candles data structure
+//! - All three input arrays must have the same length
 //!
 //! ## Returns
-//! - **`Ok(AvslOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-//! - **`Err(AvslError)`** otherwise.
+//! - **`Ok(AvslOutput)`** containing a `Vec<f64>` matching input length
+//! - Leading values are NaN during warmup (slow_period-1 values)
+//!
+//! ## Developer Notes (Implementation Status)
+//! - **SIMD Kernels**:
+//!   - AVX2: STUB (calls scalar implementation)
+//!   - AVX512: STUB (calls scalar implementation)
+//!   - Complex indicator with multiple intermediate calculations makes SIMD challenging
+//! - **Streaming Performance**: O(n) - recalculates entire indicator on each update
+//!   - TODO: Optimize to O(1) by maintaining internal state buffers
+//! - **Memory Optimization**: YES - uses make_uninit_matrix and init_matrix_prefixes helpers
+//! - **Batch Operations**: Fully supported with parallel processing
+//! - **TODO**: 
+//!   - Implement actual SIMD kernels for component calculations (VWMA, SMA)
+//!   - Optimize streaming to O(1) by maintaining rolling state
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings

@@ -7,18 +7,26 @@
 //! to VF and calculates the difference.
 //!
 //! ## Parameters
-//! - **short_period**: The short EMA period. Defaults to 2.
-//! - **long_period**: The long EMA period. Defaults to 5.
-//!
-//! ## Errors
-//! - **AllValuesNaN**: kvo: All input data values are `NaN`.
-//! - **InvalidPeriod**: kvo: `short_period` < 1 or `long_period` < `short_period`.
-//! - **NotEnoughValidData**: kvo: Not enough valid data points for calculation.
-//! - **EmptyData**: kvo: Input data slice is empty or not found.
+//! - **short_period**: The short EMA period (default: 2)
+//! - **long_period**: The long EMA period (default: 5)
 //!
 //! ## Returns
-//! - **`Ok(KvoOutput)`** on success, containing a `Vec<f64>` matching input length.
-//! - **`Err(KvoError)`** otherwise.
+//! - **`Ok(KvoOutput)`** containing a `Vec<f64>` of oscillator values
+//!
+//! ## Developer Notes
+//! ### Implementation Status
+//! - **AVX2 Kernel**: Stub (calls scalar implementation)
+//! - **AVX512 Kernel**: Stub with short/long variants (both call scalar)
+//! - **Streaming Update**: O(1) - efficient with maintained EMA states and trend tracking
+//! - **Memory Optimization**: Fully optimized with `alloc_with_nan_prefix` for output vectors
+//! - **Batch Operations**: Fully implemented with `make_uninit_matrix` and `init_matrix_prefixes`
+//!
+//! ### TODO - Performance Improvements
+//! - [ ] Implement actual AVX2 SIMD kernel (currently stub)
+//! - [ ] Implement actual AVX512 SIMD kernel (currently stub)
+//! - [ ] Vectorize volume force calculations
+//! - [ ] Optimize EMA updates with SIMD
+//! - [ ] Consider caching trend and cumulative values for batch operations
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

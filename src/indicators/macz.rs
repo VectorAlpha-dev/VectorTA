@@ -14,16 +14,15 @@
 //! - **use_lag**: Apply Laguerre smoothing (default: false)
 //! - **gamma**: Laguerre gamma parameter (default: 0.02)
 //!
-//! ## Errors
-//! - **EmptyInputData**: macz: Input data slice is empty.
-//! - **AllValuesNaN**: macz: All input values are `NaN`.
-//! - **InvalidPeriod**: macz: Period is zero or exceeds data length.
-//! - **NotEnoughValidData**: macz: Not enough valid data points for calculation.
-//! - **InvalidParameter**: macz: Invalid parameter value.
-//!
 //! ## Returns
 //! - **`Ok(MaczOutput)`** on success, containing histogram values.
-//! - **`Err(MaczError)`** otherwise.
+//! - **`Err(MaczError)`** on failure
+//!
+//! ## Developer Notes
+//! - **AVX2**: Stub implementation - calls scalar function (notes that SMA has AVX2 internally)
+//! - **AVX512**: Stub implementation - calls scalar function (notes that SMA has AVX512 internally)
+//! - **Streaming**: O(1) with efficient circular buffer management and incremental computations
+//! - **Memory**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings

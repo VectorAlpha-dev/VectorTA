@@ -11,15 +11,15 @@
 //! - **correcting_constant**: Correcting constant for calculation (default: 100000)
 //! - **ma_type**: Moving average type (default: "VAR" for VIDYA)
 //!
-//! ## Errors
-//! - **EmptyInputData**: Input data slice is empty
-//! - **InvalidPeriod**: Period is zero or exceeds data length
-//! - **AllValuesNaN**: All input data values are NaN
-//! - **NotEnoughValidData**: Not enough valid data points for calculation
-//!
 //! ## Returns
 //! - **`Ok(OttoOutput)`** on success, containing HOTT and LOTT vectors
-//! - **`Err(OttoError)`** otherwise
+//! - **`Err(OttoError)`** on failure
+//!
+//! ## Developer Notes
+//! - **AVX2**: No dedicated SIMD implementation - uses component indicators' SIMD kernels
+//! - **AVX512**: No dedicated SIMD implementation - uses component indicators' SIMD kernels
+//! - **Streaming**: O(n) - recalculates entire buffer on each update (critical performance issue)
+//! - **Memory**: Does NOT use zero-copy helpers - uses regular Vec allocations throughout (needs optimization)
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};

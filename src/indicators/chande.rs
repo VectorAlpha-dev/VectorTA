@@ -1,21 +1,35 @@
 //! # Chande Exits (Chandelier Exits)
 //!
-//! Volatility-based trailing exit using ATR and rolling max/min, with builder, batch, and AVX/parallel support.
-//! API/feature/test coverage parity with alma.rs.
+//! A volatility-based trailing stop indicator that combines Average True Range (ATR) with rolling
+//! highest high or lowest low values to create adaptive stop-loss levels. Designed to protect
+//! profits by trailing price movements while allowing room for normal volatility. The indicator
+//! follows price movements more closely in trending markets and provides wider stops in volatile conditions.
 //!
 //! ## Parameters
-//! - **period**: Window size for both ATR and rolling max/min (default: 22).
-//! - **mult**: ATR multiplier (default: 3.0).
-//! - **direction**: "long" or "short" (default: "long").
+//! - **period**: Window size for both ATR calculation and rolling max/min (default: 22)
+//! - **mult**: ATR multiplier for stop distance (default: 3.0)
+//! - **direction**: Trading direction - "long" or "short" (default: "long")
 //!
-//! ## Errors
-//! - **AllValuesNaN**: chande: All input values are NaN.
-//! - **InvalidPeriod**: chande: period is zero or exceeds length.
-//! - **NotEnoughValidData**: chande: Not enough valid data for period.
-//! - **InvalidDirection**: chande: direction must be "long" or "short".
+//! ## Inputs
+//! - Requires high, low, and close price arrays
+//! - Supports both raw slices and Candles data structure
 //!
 //! ## Returns
-//! - `Ok(ChandeOutput)` on success, `Err(ChandeError)` on error.
+//! - **`Ok(ChandeOutput)`** containing a `Vec<f64>` of stop levels matching input length
+//! - For long: Highest High[period] - ATR[period] * multiplier
+//! - For short: Lowest Low[period] + ATR[period] * multiplier
+//!
+//! ## Developer Notes (Implementation Status)
+//! - **SIMD Kernels**:
+//!   - AVX2: STUB (calls scalar implementation)
+//!   - AVX512: STUB (calls scalar implementation)
+//!   - Both short and long variants are stubs
+//! - **Streaming Performance**: O(1) - efficient with rolling windows for ATR and max/min
+//! - **Memory Optimization**: YES - uses alloc_with_nan_prefix and make_uninit_matrix helpers
+//! - **Batch Operations**: Fully supported with parallel processing
+//! - **TODO**:
+//!   - Implement actual SIMD kernels for ATR and rolling max/min operations
+//!   - Consider SIMD for the final stop calculation combining components
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

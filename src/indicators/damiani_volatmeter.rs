@@ -1,21 +1,40 @@
 //! # Damiani Volatmeter
 //!
-//! A volatility indicator using ATR and standard deviation bands to measure trend activity and a threshold for "anti-trend." Supports batch evaluation, parameter sweeps, and SIMD kernels. This indicator follows the API conventions and modular layout of alma.rs, supporting AVX2/AVX512 (with stubs), and is fully unit tested.
+//! A dual-volatility indicator that combines ATR (Average True Range) and standard deviation calculations
+//! to identify trending vs ranging market conditions. It uses two timeframes - a shorter "viscosity" period
+//! for current volatility and a longer "sedation" period for baseline volatility. The indicator produces
+//! two outputs: a volatility signal and an anti-trend threshold that helps filter out choppy conditions.
 //!
 //! ## Parameters
-//! - **vis_atr**: ATR period for volatility (default 13)
-//! - **vis_std**: Std window for volatility (default 20)
-//! - **sed_atr**: ATR period for "sedation" (default 40)
-//! - **sed_std**: Std window for "sedation" (default 100)
-//! - **threshold**: Offset constant (default 1.4)
+//! - **vis_atr**: ATR period for short-term volatility (default: 13)
+//! - **vis_std**: Standard deviation window for short-term (default: 20)
+//! - **sed_atr**: ATR period for long-term baseline (default: 40)
+//! - **sed_std**: Standard deviation window for long-term (default: 100)
+//! - **threshold**: Offset constant for anti-trend calculation (default: 1.4)
 //!
-//! ## Errors
-//! - **AllValuesNaN**: all input data values are NaN
-//! - **InvalidPeriod**: one or more periods are zero or exceed the data length
-//! - **NotEnoughValidData**: not enough valid data points for requested lookback
+//! ## Inputs
+//! - Can use either raw price slice or Candles with source selection
+//! - When using single price array, high/low/close all use the same values
+//! - When using Candles, properly uses separate high/low/close for TR calculation
 //!
 //! ## Returns
-//! - **`Ok(DamianiVolatmeterOutput)`** with `vol`, `anti` arrays, else `Err(DamianiVolatmeterError)`
+//! - **`Ok(DamianiVolatmeterOutput)`** containing:
+//!   - `vol`: Volatility signal array (higher values = stronger trend)
+//!   - `anti`: Anti-trend threshold array (signal below this = choppy/ranging)
+//!   - Both arrays match input length with NaN during warmup
+//!
+//! ## Developer Notes (Implementation Status)
+//! - **SIMD Kernels**:
+//!   - AVX2: STUB (calls scalar implementation)
+//!   - AVX512: STUB (calls scalar implementation)
+//! - **Streaming Performance**: O(n) - processes entire data on each update
+//!   - TODO: Optimize to O(1) by maintaining incremental state
+//! - **Memory Optimization**: YES - uses alloc_with_nan_prefix and make_uninit_matrix helpers
+//! - **Batch Operations**: Fully supported with parallel processing
+//! - **TODO**:
+//!   - Implement actual SIMD kernels for ATR and std deviation calculations
+//!   - Optimize streaming to O(1) with proper state management
+//!   - Consider vectorizing the lag calculations and final formula
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

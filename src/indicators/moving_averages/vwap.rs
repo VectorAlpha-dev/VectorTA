@@ -19,6 +19,16 @@
 //! ## Returns
 //! - **`Ok(VwapOutput)`** on success, containing a `Vec<f64>` matching the input length.
 //! - **`Err(VwapError)`** otherwise.
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 kernels**: Currently stubs calling scalar implementation
+//! - **Streaming update**: O(1) - maintains running sums for current anchor period
+//! - **Memory optimization**: Uses `alloc_with_nan_prefix` for zero-copy allocation
+//! - **Current status**: Scalar implementation complete with anchor-based grouping
+//! - **Optimization opportunities**:
+//!   - Implement vectorized AVX2/AVX512 kernels for price*volume calculations
+//!   - Consider SIMD for batch processing multiple anchors simultaneously
+//!   - Optimize timestamp grouping calculations with vector operations
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};

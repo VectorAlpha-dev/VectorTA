@@ -18,6 +18,17 @@
 //! ## Returns
 //! - **`Ok(TilsonOutput)`** on success, containing a `Vec<f64>` matching the input.
 //! - **`Err(TilsonError)`** otherwise.
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 kernels**: Currently stubs calling scalar implementation
+//! - **Streaming update**: O(1) - maintains 6 EMA cascade states with simple update calculations
+//! - **Memory optimization**: Uses `alloc_with_nan_prefix` for zero-copy allocation
+//! - **Current status**: Main scalar implementation complete with 6-level EMA cascade
+//! - **Optimization opportunities**:
+//!   - Implement vectorized AVX2/AVX512 kernels for 6-level EMA cascade
+//!   - Consider SIMD for parallel processing of multiple EMA levels
+//!   - Optimize coefficient calculations (c1, c2, c3, c4) with vector operations
+//!   - Potential for FMA instructions in the weighted sum calculation
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

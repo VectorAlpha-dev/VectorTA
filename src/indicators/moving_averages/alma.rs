@@ -1,3 +1,24 @@
+/// # ALMA - Arnaud Legoux Moving Average
+///
+/// A Gaussian-weighted moving average designed to reduce lag while maintaining smoothness.
+/// Uses a shifted Gaussian distribution to weight historical data points.
+///
+/// ## Parameters
+/// - `period`: Window size for the moving average (default: 9)
+/// - `offset`: Controls the position of the Gaussian peak, 0.0-1.0 (default: 0.85)
+/// - `sigma`: Controls the width of the Gaussian distribution (default: 6.0)
+///
+/// ## Returns
+/// Vector of ALMA values with NaN prefix for warmup period (period - 1 values)
+///
+/// ## Developer Notes
+/// - **AVX2 kernel**: Fully implemented - processes 4 values per iteration
+/// - **AVX512 kernel**: Fully implemented with optimized short (<= 32) and long (> 32) period variants
+/// - **Streaming update**: O(n) complexity - performs full dot product with ring buffer on each update
+/// - **Optimization opportunities**: 
+///   - Streaming kernel could potentially use incremental updates to achieve O(1) complexity
+///   - Consider caching partial sums for the ring buffer implementation
+
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]

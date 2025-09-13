@@ -16,6 +16,16 @@
 //! - **tradition**: avg(tci, mf, rsi)
 //! - **godmode_mg**: avg(tci, csi_mg, mf, willy, cbci, lrsi)
 //! - **tradition_mg**: avg(tci, mf, rsi, cbci, lrsi)
+//!
+//! ## Returns
+//! - **`Ok(ModGodModeOutput)`** on success, containing wavetrend, signal, and histogram vectors
+//! - **`Err(ModGodModeError)`** on failure
+//!
+//! ## Developer Notes
+//! - **AVX2**: No dedicated SIMD implementation - uses component indicators' SIMD kernels
+//! - **AVX512**: No dedicated SIMD implementation - uses component indicators' SIMD kernels
+//! - **Streaming**: O(n) - recalculates on entire buffer each update (needs optimization)
+//! - **Memory**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1, PyArrayMethods};

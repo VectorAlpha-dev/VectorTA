@@ -1,22 +1,26 @@
 //! # Ultimate Oscillator (ULTOSC)
 //!
-//! The Ultimate Oscillator (ULTOSC) combines short, medium, and long time periods into a single oscillator value
-//! (0-100), blending market momentum over multiple horizons. Three periods are summed with weights 4:2:1.
+//! Combines short, medium, and long time periods into a single oscillator value,
+//! blending market momentum over multiple horizons with weighted averages (4:2:1 ratio).
 //!
 //! ## Parameters
-//! - **timeperiod1**: Short window (default = 7)
-//! - **timeperiod2**: Medium window (default = 14)
-//! - **timeperiod3**: Long window (default = 28)
+//! - **timeperiod1**: Short window for fast momentum (default: 7)
+//! - **timeperiod2**: Medium window for intermediate momentum (default: 14)
+//! - **timeperiod3**: Long window for slow momentum (default: 28)
 //!
-//! ## Errors
-//! - **EmptyData**: All input slices are empty.
-//! - **InvalidPeriods**: Any period is zero or exceeds data length.
-//! - **NotEnoughValidData**: Not enough valid data for the largest period.
-//! - **AllValuesNaN**: All input values are `NaN`.
+//! ## Inputs
+//! - High, low, and close price series (or candles)
+//! - All series must have the same length
 //!
 //! ## Returns
-//! - **`Ok(UltOscOutput)`**: Contains a `Vec<f64>` matching the input length.
-//! - **`Err(UltOscError)`** otherwise.
+//! - **values**: Ultimate Oscillator values as `Vec<f64>` (length matches input, range 0-100)
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 kernels**: Currently stubs that call scalar implementation
+//! - **Streaming update**: O(1) performance with efficient circular buffer and running sums
+//! - **Memory optimization**: Properly uses zero-copy helper functions (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
+//! - **TODO**: Implement actual SIMD kernels for AVX2/AVX512
+//! - **Note**: Streaming implementation is well-optimized with incremental sum updates
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};

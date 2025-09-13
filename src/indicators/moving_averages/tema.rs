@@ -14,6 +14,16 @@
 //! ## Returns
 //! - **`Ok(TemaOutput)`** on success, containing a `Vec<f64>` matching the input length.
 //! - **`Err(TemaError)`** otherwise.
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 kernels**: Currently stubs calling scalar implementation
+//! - **Streaming update**: O(1) - maintains three EMA states with simple update calculations
+//! - **Memory optimization**: Uses `alloc_with_nan_prefix` for zero-copy allocation
+//! - **Current status**: Main scalar implementation complete, SIMD kernels need implementation
+//! - **Optimization opportunities**:
+//!   - Implement vectorized AVX2/AVX512 kernels for parallel EMA calculations
+//!   - Consider SIMD for batch processing multiple TEMA values simultaneously
+//!   - Optimize EMA coefficient calculations with FMA instructions
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

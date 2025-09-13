@@ -1,21 +1,24 @@
 //! # Williams Accumulation/Distribution (WAD)
 //!
-//! Williams Accumulation/Distribution (WAD) is a cumulative measure of buying and selling pressure
-//! based on the relationship between the current close, previous close, and high and low price ranges.
-//! This implementation is API and feature-parity with alma.rs, including AVX stub functions,
-//! kernel selection, batch parameter sweep support, input validation, builder and stream APIs,
-//! and extensive test coverage.
+//! A cumulative measure of buying and selling pressure based on the relationship between
+//! current close, previous close, and the high-low price range.
 //!
 //! ## Parameters
-//! - None (WAD does not use a period).
+//! - None (WAD is a cumulative indicator without period)
 //!
-//! ## Errors
-//! - **EmptyData**: wad: Input data slice is empty.
-//! - **AllValuesNaN**: wad: All input data values for high, low, or close are `NaN`.
+//! ## Inputs
+//! - High, low, and close price series (or candles)
+//! - All series must have the same length
 //!
 //! ## Returns
-//! - **`Ok(WadOutput)`** on success, containing a `Vec<f64>` matching the input length.
-//! - **`Err(WadError)`** otherwise.
+//! - **values**: Cumulative WAD values as `Vec<f64>` (length matches input)
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 kernels**: Currently stubs that call scalar implementation
+//! - **Streaming update**: O(1) performance with simple accumulation
+//! - **Memory optimization**: Properly uses zero-copy helper functions (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
+//! - **TODO**: Implement actual SIMD kernels for AVX2/AVX512
+//! - **Note**: Streaming implementation is highly optimized with minimal state
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};

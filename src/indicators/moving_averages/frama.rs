@@ -20,6 +20,17 @@
 //! ## Returns
 //! - **`Ok(FramaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
 //! - **`Err(FramaError)`** otherwise.
+//!
+//! ## Developer Notes
+//! - **AVX2 kernel**: ✅ Fully implemented with specialized small window optimizations
+//! - **AVX512 kernel**: ✅ Fully implemented with small/large window branching
+//! - **Streaming update**: ⚠️ O(n) - recalculates fractal dimension over full buffer each update
+//! - **Memory optimization**: ✅ Uses `alloc_with_nan_prefix` for zero-copy output allocation
+//! - **Current status**: Production-ready with advanced SIMD optimizations for various window sizes
+//! - **Optimization opportunities**:
+//!   - Streaming update requires O(n) by nature of fractal dimension calculation
+//!   - Consider sliding window optimization to avoid full recalculation
+//!   - Potential for incremental fractal dimension updates
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

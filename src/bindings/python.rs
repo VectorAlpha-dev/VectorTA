@@ -1043,11 +1043,6 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(fosc_batch_py, m)?)?;
 	m.add_class::<FoscStreamPy>()?;
 
-	// Register DTI functions with their user-facing names
-	m.add_function(wrap_pyfunction!(dti_py, m)?)?;
-	m.add_function(wrap_pyfunction!(dti_batch_py, m)?)?;
-	m.add_class::<DtiStreamPy>()?;
-
 	// Register DX functions with their user-facing names
 	m.add_function(wrap_pyfunction!(dx_py, m)?)?;
 	m.add_function(wrap_pyfunction!(dx_batch_py, m)?)?;
