@@ -16,17 +16,17 @@
 //! - **ma_type**: Type of MA (e.g., `"wma"`, `"ema"`, `"sma"`). Defaults to `"wma"`.
 //! - **source**: Candle field (e.g. `"close"`, `"hlc3"`). Defaults to `"close"`.
 //!
-//! ## Errors
-//! - **EmptyData**: Input data slice is empty.
-//! - **AllValuesNaN**: All data values are `NaN`.
-//! - **NotEnoughValidData**: Not enough valid data to compute at least one output.
-//! - **InvalidPeriod**: Zero or out-of-bounds short/long/MA periods.
-//! - **MaError**: Underlying error from the `ma(...)` function.
-//!
 //! ## Returns
 //! - `Ok(CoppockOutput)` on success, containing a vector matching the input length,
 //!   with leading `NaN`s until the earliest valid index.
 //! - `Err(CoppockError)` otherwise.
+//!
+//! ## Developer Notes
+//! - **AVX2 kernel**: STUB - calls scalar implementation
+//! - **AVX512 kernel**: STUB - calls scalar implementation (both short and long variants)
+//! - **Streaming**: ✅ Implemented with CoppockStream (update function is O(1))
+//! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy) for intermediate sum_roc buffer
+//! - **Batch operations**: ✅ Implemented with parallel processing support
 
 use crate::indicators::moving_averages::ma::{ma, MaData};
 use crate::utilities::data_loader::{source_type, Candles};

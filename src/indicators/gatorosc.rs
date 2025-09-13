@@ -1,6 +1,6 @@
 //! # Gator Oscillator (GATOR)
 //!
-//! The Gator Oscillator is based on Bill Williams' Alligator indicator. It calculates three exponentially smoothed averages (Jaws, Teeth, and Lips) of a given source, then produces two lines: `upper = abs(Jaws - Teeth)` and `lower = -abs(Teeth - Lips)`. Their 1-period momentum changes are also reported. All parameters are adjustable.
+//! The Gator Oscillator is based on Bill Williams' Alligator indicator. It calculates three exponentially smoothed averages (Jaws, Teeth, and Lips) of a given source, then produces two lines: `upper = abs(Jaws - Teeth)` and `lower = -abs(Teeth - Lips)`. Their 1-period momentum changes are also reported.
 //!
 //! ## Parameters
 //! - **jaws_length**: EMA length for Jaws (default: 13)
@@ -10,15 +10,23 @@
 //! - **lips_length**: EMA length for Lips (default: 5)
 //! - **lips_shift**: Shift Lips forward (default: 3)
 //!
-//! ## Errors
-//! - **EmptyInputData**: gatorosc: Input data slice is empty.
-//! - **AllValuesNaN**: gatorosc: All input data values are `NaN`.
-//! - **InvalidSettings**: gatorosc: Any length or shift is zero or invalid.
-//! - **NotEnoughValidData**: gatorosc: Not enough valid data for computation.
+//! ## Inputs
+//! - Single data slice (typically close prices)
 //!
 //! ## Returns
-//! - `Ok(GatorOscOutput)` on success, with `upper`, `lower`, `upper_change`, and `lower_change` fields.
-//! - `Err(GatorOscError)` otherwise.
+//! - `Ok(GatorOscOutput)` containing:
+//!   - `upper`: Upper oscillator values (Vec<f64>)
+//!   - `lower`: Lower oscillator values (Vec<f64>)
+//!   - `upper_change`: Upper momentum changes (Vec<f64>)
+//!   - `lower_change`: Lower momentum changes (Vec<f64>)
+//! - Output lengths match input data length with NaN padding for warmup period
+//!
+//! ## Developer Notes
+//! - **AVX2 kernel**: STUB - calls scalar implementation (lines 449-477)
+//! - **AVX512 kernel**: STUB - calls scalar implementation (lines 530-558, 562-590)
+//! - **Streaming**: Not implemented
+//! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy) for all four outputs (lines 280-283)
+//! - **Batch operations**: ✅ Implemented with parallel processing support
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

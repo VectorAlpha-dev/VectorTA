@@ -9,15 +9,18 @@
 //! - **smooth_range**: Whether to smooth the range (default: true)
 //! - **smooth_period**: Period for smoothing the range (default: 27)
 //!
-//! ## Errors
-//! - **EmptyInputData**: range_filter: Input data slice is empty
-//! - **AllValuesNaN**: range_filter: All input values are NaN
-//! - **InvalidPeriod**: range_filter: Period is zero or exceeds data length
-//! - **NotEnoughValidData**: range_filter: Not enough valid data for calculation
+//! ## Inputs
+//! - **data**: Price data or any numeric series
 //!
 //! ## Returns
-//! - **`Ok(RangeFilterOutput)`** on success, containing filter values, high band, and low band
-//! - **`Err(RangeFilterError)`** otherwise
+//! - **filter**: Vector of filtered price values with NaN prefix during warmup
+//! - **high_band**: Vector of upper band values
+//! - **low_band**: Vector of lower band values
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 Kernels**: Stubs that call scalar implementation
+//! - **Streaming**: Implemented with O(1) update performance (maintains running EMAs)
+//! - **Zero-copy Memory**: Uses alloc_with_nan_prefix and make_uninit_matrix for batch operations
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

@@ -1696,3 +1696,10 @@ mod tests {
 	gen_batch_tests!(check_batch_default_row);
 	gen_batch_tests!(check_batch_no_poison);
 }
+
+#[cfg(feature = "python")]
+pub fn register_midprice_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(midprice_py, m)?)?;
+    m.add_function(wrap_pyfunction!(midprice_batch_py, m)?)?;
+    Ok(())
+}

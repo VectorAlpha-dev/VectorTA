@@ -8,16 +8,16 @@
 //! - **rsi_length**: Period for RSI calculation (default: 14)
 //! - **rsi_level**: Target RSI level to reverse-engineer (default: 50.0, range: 0-100)
 //!
-//! ## Errors
-//! - **EmptyInputData**: reverse_rsi: Input data slice is empty.
-//! - **AllValuesNaN**: reverse_rsi: All input values are `NaN`.
-//! - **InvalidPeriod**: reverse_rsi: Period is zero or exceeds data length.
-//! - **InvalidRsiLevel**: reverse_rsi: RSI level must be between 0 and 100.
-//! - **NotEnoughValidData**: reverse_rsi: Not enough valid data points for calculation.
+//! ## Inputs
+//! - **data**: Price data or any numeric series
 //!
 //! ## Returns
-//! - **`Ok(ReverseRsiOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-//! - **`Err(ReverseRsiError)`** otherwise.
+//! - **values**: Vector of reverse RSI values with NaN prefix during warmup period
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 Kernels**: Not implemented (no kernel dispatch in compute function)
+//! - **Streaming**: Implemented with O(1) update performance (maintains EMAs)
+//! - **Zero-copy Memory**: Uses alloc_with_nan_prefix and make_uninit_matrix for batch operations
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings

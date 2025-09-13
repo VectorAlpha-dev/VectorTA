@@ -7,14 +7,16 @@
 //! - **period**: Lookback window (default: 10)
 //! - **smoothing**: EMA smoothing window (default: 5)
 //!
-//! ## Errors
-//! - **AllValuesNaN**: pfe: All input data values are `NaN`.
-//! - **InvalidPeriod**: pfe: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: pfe: Not enough valid data points for the requested `period`.
+//! ## Inputs
+//! - **data**: Price data or any numeric series
 //!
 //! ## Returns
-//! - **`Ok(PfeOutput)`**: `Vec<f64>` matching input length (leading NaN for non-computable values)
-//! - **`Err(PfeError)`** otherwise
+//! - **values**: Vector of PFE values with NaN prefix during warmup period
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 Kernels**: Stubs that call scalar implementation
+//! - **Streaming**: Implemented with O(1) update performance (maintains running sum)
+//! - **Zero-copy Memory**: Uses alloc_with_nan_prefix and make_uninit_matrix for batch operations
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]

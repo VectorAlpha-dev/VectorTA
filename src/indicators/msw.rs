@@ -7,18 +7,17 @@
 //! ## Parameters
 //! - **period**: The window size (number of data points). Defaults to 5.
 //!
-//! ## Errors
-//! - **EmptyData**: msw: Input data slice is empty.
-//! - **InvalidPeriod**: msw: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: msw: Fewer than `period` valid (non-`NaN`) data points remain
-//!   after the first valid index.
-//! - **AllValuesNaN**: msw: All input data values are `NaN`.
+//! ## Inputs
+//! - **data**: Price data or any numeric series
 //!
 //! ## Returns
-//! - **`Ok(MswOutput)`** on success, containing two `Vec<f64>` of equal length:
-//!   `sine` and `lead`, both matching the input length, with leading `NaN`s until
-//!   the Mesa Sine Wave window is filled.
-//! - **`Err(MswError)`** otherwise.
+//! - **sine**: Vector of sine wave values with NaN prefix during warmup period
+//! - **lead**: Vector of leading sine wave values with NaN prefix during warmup period
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 Kernels**: Stubs that call scalar implementation
+//! - **Streaming**: Implemented with O(n) update performance (computes dot product over period)
+//! - **Zero-copy Memory**: Uses alloc_with_nan_prefix and make_uninit_matrix for batch operations
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};

@@ -9,21 +9,27 @@
 //! - **channel_deviation**: Multiplier for ATR-based channel width (default: 2)
 //! - **atr_period**: Period for ATR calculation (default: 100)
 //!
-//! ## Errors
-//! - **EmptyInputData**: halftrend: Input data slice is empty.
-//! - **AllValuesNaN**: halftrend: All input values are `NaN`.
-//! - **InvalidPeriod**: halftrend: Period is zero or exceeds data length.
-//! - **NotEnoughValidData**: halftrend: Not enough valid data points for calculation.
+//! ## Inputs
+//! - **high**: High prices
+//! - **low**: Low prices
+//! - **close**: Close prices
 //!
 //! ## Returns
-//! - **`Ok(HalfTrendOutput)`** on success, containing:
-//!   - `halftrend`: Main HalfTrend line values
-//!   - `trend`: Trend direction (0 for uptrend, 1 for downtrend)
-//!   - `atr_high`: Upper channel boundary
-//!   - `atr_low`: Lower channel boundary
-//!   - `buy_signal`: Buy signal triggers
-//!   - `sell_signal`: Sell signal triggers
-//! - **`Err(HalfTrendError)`** otherwise.
+//! - **`Ok(HalfTrendOutput)`** containing:
+//!   - `halftrend`: Main HalfTrend line values (Vec<f64>)
+//!   - `trend`: Trend direction - 0 for uptrend, 1 for downtrend (Vec<f64>)
+//!   - `atr_high`: Upper channel boundary (Vec<f64>)
+//!   - `atr_low`: Lower channel boundary (Vec<f64>)
+//!   - `buy_signal`: Buy signal triggers (Vec<f64>)
+//!   - `sell_signal`: Sell signal triggers (Vec<f64>)
+//! - Output lengths match input data length with NaN padding for warmup period
+//!
+//! ## Developer Notes
+//! - **AVX2 kernel**: STUB - calls scalar implementation (lines 568-591)
+//! - **AVX512 kernel**: STUB - calls scalar implementation (lines 596-620)
+//! - **Streaming**: Not implemented
+//! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy) for all six outputs (lines 365-370)
+//! - **Batch operations**: ✅ Implemented with parallel processing support
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings

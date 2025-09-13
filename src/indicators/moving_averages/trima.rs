@@ -7,15 +7,17 @@
 //! ## Parameters
 //! - **period**: Window size (must be > 3).
 //!
-//! ## Errors
-//! - **AllValuesNaN**: trima: All input data values are `NaN`.
-//! - **InvalidPeriod**: trima: `period` is zero, ≤ 3, or exceeds the data length.
-//! - **NotEnoughValidData**: trima: Not enough valid data points for the requested `period`.
-//! - **NoData**: trima: No data provided.
-//!
 //! ## Returns
 //! - **`Ok(TrimaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
 //! - **`Err(TrimaError)`** otherwise.
+//!
+//! ## Developer Status
+//! - **AVX2 kernel**: STUB - Falls back to scalar implementation
+//! - **AVX512 kernel**: STUB - Falls back to scalar implementation
+//! - **Streaming update**: O(1) - Efficient rolling sum approach
+//! - **Memory optimization**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix) ✓
+//! - **Optimization needed**: Implement SIMD kernels for better performance
+//! - **Note**: Streaming implementation is already well-optimized
 use crate::indicators::sma::{sma, SmaData, SmaInput, SmaParams};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

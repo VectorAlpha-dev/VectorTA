@@ -7,15 +7,16 @@
 //! - **period**: Window size (number of data points, default: 14).
 //! - **source**: Candle field (e.g., `"close"`, default: `"close"`).
 //!
-//! ## Errors
-//! - **EmptyData**: cmo: Input data slice is empty.
-//! - **InvalidPeriod**: cmo: Period is zero or exceeds data length.
-//! - **AllValuesNaN**: cmo: All input data values are `NaN`.
-//! - **NotEnoughValidData**: cmo: Not enough valid data points for the requested period.
-//!
 //! ## Returns
 //! - **`Ok(CmoOutput)`** on success, containing a `Vec<f64>` of length matching the input.
 //! - **`Err(CmoError)`** otherwise.
+//!
+//! ## Developer Notes
+//! - **AVX2 kernel**: STUB - calls scalar implementation
+//! - **AVX512 kernel**: STUB - calls scalar implementation (both short and long variants)
+//! - **Streaming**: Not implemented
+//! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy)
+//! - **Batch operations**: ✅ Implemented with parallel processing support
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

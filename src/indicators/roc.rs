@@ -7,15 +7,16 @@
 //! ## Parameters
 //! - **period**: Lookback window (defaults to 9)
 //!
-//! ## Errors
-//! - **EmptyData**: roc: Input data slice is empty.
-//! - **InvalidPeriod**: roc: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: roc: Fewer than `period` valid (non-`NaN`) data points remain after the first valid index.
-//! - **AllValuesNaN**: roc: All input data values are `NaN`.
+//! ## Inputs
+//! - **data**: Price data or any numeric series
 //!
 //! ## Returns
-//! - **`Ok(RocOutput)`** on success, containing a `Vec<f64>` matching the input length
-//! - **`Err(RocError)`** otherwise
+//! - **values**: Vector of ROC percentage values with NaN prefix during warmup period
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 Kernels**: Stubs that call scalar implementation
+//! - **Streaming**: Implemented with O(1) update performance (circular buffer)
+//! - **Zero-copy Memory**: Uses alloc_with_nan_prefix and make_uninit_matrix for batch operations
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

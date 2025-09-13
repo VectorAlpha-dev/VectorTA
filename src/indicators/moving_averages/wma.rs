@@ -5,14 +5,17 @@
 //! ## Parameters
 //! - **period**: Window size (must be >= 2).
 //!
-//! ## Errors
-//! - **AllValuesNaN**: wma: All input data values are `NaN`.
-//! - **InvalidPeriod**: wma: `period` is less than 2 or exceeds data length.
-//! - **NotEnoughValidData**: wma: Not enough valid data points for the requested `period`.
-//!
 //! ## Returns
 //! - **`Ok(WmaOutput)`** on success, containing a `Vec<f64>` matching the input length.
 //! - **`Err(WmaError)`** otherwise.
+//!
+//! ## Developer Status
+//! - **AVX2 kernel**: STUB - Falls back to scalar implementation
+//! - **AVX512 kernel**: STUB - Falls back to scalar implementation
+//! - **Streaming update**: O(1) - Efficient weight accumulation approach
+//! - **Memory optimization**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix) ✓
+//! - **Optimization needed**: Implement SIMD kernels for vectorized weight calculations
+//! - **Note**: Streaming uses rolling window with precomputed weights
 
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;

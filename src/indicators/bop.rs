@@ -26,6 +26,13 @@
 //! let out = bop(&input).unwrap();
 //! assert!((out.values[0] - 0.5).abs() < 1e-12);
 //! ```
+//!
+//! ## Developer Notes
+//! - **AVX2 kernel**: STUB - calls scalar implementation
+//! - **AVX512 kernel**: STUB - calls scalar implementation  
+//! - **Streaming**: Not implemented
+//! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy)
+//! - **Batch operations**: ✅ Implemented with parallel processing support
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};

@@ -6,16 +6,17 @@
 //! ## Parameters
 //! - **period**: Primary lookback period (defaults to 20).
 //!
-//! ## Errors
-//! - **NoDataProvided**: No input data provided.
-//! - **AllValuesNaN**: All input data are NaN.
-//! - **ZeroTrendFlexPeriod**: period is zero.
-//! - **TrendFlexPeriodExceedsData**: period > data length.
-//! - **SmootherPeriodExceedsData**: supersmoother period > data length.
-//!
 //! ## Returns
 //! - **Ok(TrendFlexOutput)**: Vec<f64> matching input length.
 //! - **Err(TrendFlexError)**: otherwise.
+//!
+//! ## Developer Status
+//! - **AVX2 kernel**: Partially implemented with micro-SIMD optimizations
+//! - **AVX512 kernel**: STUB - Falls back to scalar implementation
+//! - **Streaming update**: O(n) - Recalculates super smoother filter each update
+//! - **Memory optimization**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix) ✓
+//! - **Optimization needed**: Complete AVX512 implementation
+//! - **Streaming improvement**: Optimize to O(1) with incremental updates
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

@@ -5,16 +5,19 @@
 //!
 //! ## Parameters
 //! - **period**: Window size (must be ≥ 2).
-//! - **k**: Cutoff frequency (commonly in [0.0, 1.0]) controlling the filter’s
+//! - **k**: Cutoff frequency (commonly in [0.0, 1.0]) controlling the filter's
 //!          attenuation of low-frequency components (defaults to 0.707).
-//!
-//! ## Errors
-//! - **InvalidPeriod**: highpass_2_pole: `period` < 2 or data is empty.
-//! - **InvalidK**: highpass_2_pole: `k` ≤ 0.0 or `k` is `NaN`.
 //!
 //! ## Returns
 //! - **`Ok(HighPass2Output)`** on success, containing a `Vec<f64>` of length matching the input.
 //! - **`Err(HighPass2Error)`** otherwise.
+//!
+//! ## Developer Status
+//! - **AVX2 kernel**: IMPLEMENTED - Uses FMA optimizations for efficient computation
+//! - **AVX512 kernel**: STUB - Falls back to AVX2 implementation
+//! - **Streaming update**: O(1) - Efficient incremental calculation with state rotation
+//! - **Memory optimization**: GOOD - Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix)
+//! - **Optimization needed**: Implement AVX512 kernel with wider vectors for better performance
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

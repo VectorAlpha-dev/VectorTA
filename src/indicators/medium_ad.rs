@@ -6,15 +6,16 @@
 //! ## Parameters
 //! - **period**: The window size (number of data points). Defaults to 5.
 //!
-//! ## Errors
-//! - **AllValuesNaN**: medium_ad: All input data values are `NaN`.
-//! - **EmptyData**: medium_ad: Input data slice is empty.
-//! - **InvalidPeriod**: medium_ad: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: medium_ad: Not enough valid data points for the requested `period`.
+//! ## Inputs
+//! - **data**: Price data or any numeric series
 //!
 //! ## Returns
-//! - **`Ok(MediumAdOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-//! - **`Err(MediumAdError)`** otherwise.
+//! - **values**: Vector of median absolute deviation values with NaN prefix during warmup period
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 Kernels**: Stubs that call scalar implementation
+//! - **Streaming**: Implemented with O(n log n) update performance (sorts period-sized buffer)
+//! - **Zero-copy Memory**: Uses alloc_with_nan_prefix and make_uninit_matrix for batch operations
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

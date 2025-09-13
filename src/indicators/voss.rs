@@ -1046,6 +1046,15 @@ pub fn expand_grid_voss(r: &VossBatchRange) -> Vec<VossParams> {
 	expand_grid(r)
 }
 
+// ================== PYTHON MODULE REGISTRATION ==================
+#[cfg(feature = "python")]
+pub fn register_voss_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(voss_py, m)?)?;
+    m.add_function(wrap_pyfunction!(voss_batch_py, m)?)?;
+    m.add_class::<VossStreamPy>()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;

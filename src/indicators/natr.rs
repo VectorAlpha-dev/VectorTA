@@ -1764,3 +1764,10 @@ pub fn natr_batch_into(
 		Ok(rows)
 	}
 }
+
+#[cfg(feature = "python")]
+pub fn register_natr_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(natr_py, m)?)?;
+    m.add_function(wrap_pyfunction!(natr_batch_py, m)?)?;
+    Ok(())
+}

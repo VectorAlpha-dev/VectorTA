@@ -8,15 +8,16 @@
 //! - **x**: ATR multiplier (default: 1.0)
 //! - **q**: Rolling window (default: 9)
 //!
-//! ## Errors
-//! - **NoData**: cksp: Data is empty or all values NaN
-//! - **NotEnoughData**: cksp: Not enough data for the provided parameters
-//! - **InconsistentLengths**: cksp: Input slices have different lengths
-//! - **InvalidParam**: cksp: Parameter(s) invalid (e.g., zero/NaN/negative)
-//!
 //! ## Returns
-//! - **`Ok(CkspOutput)`** on success, containing two `Vec<f64>` of length matching the input
+//! - **`Ok(CkspOutput)`** on success, containing two `Vec<f64>` (long_values and short_values) of length matching the input
 //! - **`Err(CkspError)`** otherwise
+//!
+//! ## Developer Notes
+//! - **AVX2 kernel**: STUB - calls scalar implementation
+//! - **AVX512 kernel**: STUB - calls scalar implementation
+//! - **Streaming**: Not implemented
+//! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy) for both output arrays
+//! - **Batch operations**: ✅ Implemented with parallel processing support
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{

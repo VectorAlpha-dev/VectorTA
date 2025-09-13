@@ -8,15 +8,17 @@
 //! - **short_period**: EMA window size for the short period (defaults to 10).
 //! - **long_period**: EMA window size for the long period (defaults to 20).
 //!
-//! ## Errors
-//! - **AllValuesNaN**: apo: All input data values are `NaN`.
-//! - **InvalidPeriod**: apo: Periods are zero, or invalid.
-//! - **ShortPeriodNotLessThanLong**: apo: `short_period` is not less than `long_period`.
-//! - **NotEnoughValidData**: apo: Not enough valid data for the requested `long_period`.
-//!
 //! ## Returns
 //! - **`Ok(ApoOutput)`** on success, containing a `Vec<f64>` matching input length.
 //! - **`Err(ApoError)`** otherwise.
+//!
+//! ## Developer Status
+//! - **AVX2 kernel**: Partially implemented with basic EMA vectorization
+//! - **AVX512 kernel**: STUB with short/long variants - Falls back to AVX2 or scalar
+//! - **Streaming update**: O(1) - Efficient dual EMA updates
+//! - **Memory optimization**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix) ✓
+//! - **Optimization needed**: Complete AVX2 implementation, implement AVX512 kernels
+//! - **Note**: Needs SIMD optimization for EMA difference calculation
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};

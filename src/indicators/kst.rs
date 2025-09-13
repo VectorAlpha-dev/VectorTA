@@ -2153,6 +2153,13 @@ pub fn kst_batch_py<'py>(
     Ok(d)
 }
 
+#[cfg(feature = "python")]
+pub fn register_kst_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(kst_py, m)?)?;
+    m.add_function(wrap_pyfunction!(kst_batch_py, m)?)?;
+    Ok(())
+}
+
 // =========================== WASM Bindings ===========================
 
 // WASM kst_into_slice has been removed - kst_into_slice is now in the main module

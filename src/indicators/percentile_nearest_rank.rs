@@ -7,16 +7,16 @@
 //! - **length**: Window size for the rolling calculation (default: 15)
 //! - **percentage**: Percentile to calculate (0-100, default: 50)
 //!
-//! ## Errors
-//! - **EmptyInputData**: percentile_nearest_rank: Input data slice is empty.
-//! - **AllValuesNaN**: percentile_nearest_rank: All input values are `NaN`.
-//! - **InvalidPeriod**: percentile_nearest_rank: Period is zero or exceeds data length.
-//! - **InvalidPercentage**: percentile_nearest_rank: Percentage must be between 0 and 100.
-//! - **NotEnoughValidData**: percentile_nearest_rank: Not enough valid data points for calculation.
+//! ## Inputs
+//! - **data**: Price data or any numeric series
 //!
 //! ## Returns
-//! - **`Ok(PercentileNearestRankOutput)`** on success, containing a vector of percentile values.
-//! - **`Err(PercentileNearestRankError)`** otherwise.
+//! - **values**: Vector of percentile values with NaN prefix during warmup period
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 Kernels**: Not implemented (kernel parameter reserved but unused)
+//! - **Streaming**: Implemented with O(n log n) update performance (sorts window on each update)
+//! - **Zero-copy Memory**: Uses alloc_with_nan_prefix and make_uninit_matrix for batch operations
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
@@ -1393,4 +1393,11 @@ mod tests {
         // 50th percentile of [1.5,2.5,3.5,4.5,5.5] = 3.5
         assert_eq!(result.values[4], 3.5);
     }
+}
+
+#[cfg(feature = "python")]
+pub fn register_percentile_nearest_rank_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(percentile_nearest_rank_py, m)?)?;
+    m.add_function(wrap_pyfunction!(percentile_nearest_rank_batch_py, m)?)?;
+    Ok(())
 }

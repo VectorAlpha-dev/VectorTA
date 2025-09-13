@@ -6,17 +6,17 @@
   "omp_threads": 1,
   "data_size": "1M",
   "python_results": {
-    "ott": 8.054355,
-    "ott_batch": 57.939015
+    "cwma": 2.0605,
+    "cwma_batch": 1.78538
   },
   "rust_results": {},
   "comparisons": [],
   "batch_comparisons": [
     {
-      "indicator": "ott",
-      "single_ms": 8.054355,
-      "batch_ms": 57.939015,
-      "overhead_pct": 619.3501528055319
+      "indicator": "cwma",
+      "single_ms": 2.0605,
+      "batch_ms": 1.78538,
+      "overhead_pct": -13.352099005095862
     }
   ]
 }

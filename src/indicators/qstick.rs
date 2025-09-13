@@ -1233,6 +1233,14 @@ pub fn qstick_batch_py<'py>(
 	Ok(dict)
 }
 
+#[cfg(feature = "python")]
+pub fn register_qstick_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
+	m.add_function(wrap_pyfunction!(qstick_py, m)?)?;
+	m.add_function(wrap_pyfunction!(qstick_batch_py, m)?)?;
+	m.add_class::<QstickStreamPy>()?;
+	Ok(())
+}
+
 /// Write qstick directly to output slice - no allocations
 pub fn qstick_into_slice(
 	dst: &mut [f64],

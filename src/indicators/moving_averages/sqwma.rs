@@ -9,14 +9,16 @@
 //! ## Parameters
 //! - **period**: Defines the weight range; uses `period - 1` data points (must be ≥ 2).
 //!
-//! ## Errors
-//! - **AllValuesNaN**: sqwma: All input data values are `NaN`.
-//! - **InvalidPeriod**: sqwma: `period` is less than 2 or exceeds the data length.
-//! - **NotEnoughValidData**: sqwma: Not enough valid data points for the requested `period`.
-//!
 //! ## Returns
 //! - **`Ok(SqwmaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
 //! - **`Err(SqwmaError)`** otherwise.
+//!
+//! ## Developer Status
+//! - **AVX2 kernel**: STUB - Falls back to scalar implementation
+//! - **AVX512 kernel**: STUB - Both short and long variants fall back to scalar
+//! - **Streaming update**: O(n) - Iterates through weights array each update (lines 351-353)
+//! - **Memory optimization**: GOOD - Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix)
+//! - **Optimization needed**: Implement SIMD kernels, optimize streaming to avoid O(n) weight iteration
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};

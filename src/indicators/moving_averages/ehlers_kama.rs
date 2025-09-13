@@ -1,21 +1,21 @@
 //! # Ehlers Kaufman Adaptive Moving Average (EKAMA)
 //!
-//! A variation of Kaufman's Adaptive Moving Average developed by John Ehlers.
-//! This indicator dynamically adjusts its smoothing factor based on price efficiency
-//! with modified constants for improved responsiveness.
+//! Variation of Kaufman's Adaptive Moving Average with Ehlers' modifications for 
+//! improved responsiveness. Dynamically adjusts smoothing factor based on price 
+//! efficiency ratio to adapt between trending and ranging markets.
 //!
 //! ## Parameters
-//! - **period**: Lookback period for efficiency calculation (defaults to 20).
-//!
-//! ## Errors
-//! - **EmptyInputData**: ehlers_kama: Input data slice is empty.
-//! - **AllValuesNaN**: ehlers_kama: All input data is `NaN`.
-//! - **InvalidPeriod**: ehlers_kama: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: ehlers_kama: Not enough valid data to calculate EKAMA for the requested `period`.
+//! - **period**: Lookback period for efficiency calculation (default: 20)
 //!
 //! ## Returns
-//! - **`Ok(EhlersKamaOutput)`** on success, containing a `Vec<f64>` with length matching the input.
-//! - **`Err(EhlersKamaError)`** otherwise.
+//! - **values**: Adaptive moving average that adjusts to market conditions
+//!
+//! ## Developer Status
+//! - **AVX2 kernel**: STUB - Falls back to scalar implementation
+//! - **AVX512 kernel**: STUB - Falls back to scalar implementation
+//! - **Streaming update**: O(n) - Stores entire buffer, recalculates each update
+//! - **Memory optimization**: GOOD - Uses zero-copy helpers (alloc_with_nan_prefix)
+//! - **Optimization needed**: Implement SIMD kernels, optimize streaming to O(1) with rolling window
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
@@ -851,6 +851,15 @@ pub fn ehlers_kama_batch_into(
 
         Ok(rows)
     }
+}
+
+// ==================== PYTHON MODULE REGISTRATION ====================
+#[cfg(feature = "python")]
+pub fn register_ehlers_kama_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(ehlers_kama_py, m)?)?;
+    m.add_function(wrap_pyfunction!(ehlers_kama_batch_py, m)?)?;
+    m.add_class::<EhlersKamaStreamPy>()?;
+    Ok(())
 }
 
 #[cfg(test)]

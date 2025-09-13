@@ -8,16 +8,16 @@
 //! - **hp_period**: Window size used for the embedded high-pass filter (minimum of 2). Defaults to 125.
 //! - **k**: Frequency coefficient for the high-pass filter. Defaults to 0.707.
 //!
-//! ## Errors
-//! - **EmptyData**: decycler: Input data slice is empty.
-//! - **InvalidPeriod**: decycler: `hp_period` is zero, less than 2, or exceeds the data length.
-//! - **NotEnoughValidData**: decycler: Fewer than `hp_period` valid (non-`NaN`) data points remain after the first valid index.
-//! - **AllValuesNaN**: decycler: All input data values are `NaN`.
-//! - **InvalidK**: decycler: `k` is non-positive or NaN.
-//!
 //! ## Returns
 //! - **`Ok(DecyclerOutput)`** on success, containing a `Vec<f64>` matching the input length.
 //! - **`Err(DecyclerError)`** otherwise.
+//!
+//! ## Developer Notes
+//! - **AVX2 kernel**: STUB - calls scalar implementation
+//! - **AVX512 kernel**: STUB - calls scalar implementation (both short and long variants)
+//! - **Streaming**: Not implemented
+//! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy)
+//! - **Batch operations**: ✅ Implemented with parallel processing support
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

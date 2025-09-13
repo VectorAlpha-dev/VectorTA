@@ -8,14 +8,17 @@
 //! ## Parameters
 //! - **period**: Window size (number of data points).
 //!
-//! ## Errors
-//! - **AllValuesNaN**: wilders: All input data values are `NaN`.
-//! - **InvalidPeriod**: wilders: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: wilders: Not enough valid data points for the requested `period`.
-//!
 //! ## Returns
 //! - **`Ok(WildersOutput)`** on success, containing a `Vec<f64>` of length matching the input.
 //! - **`Err(WildersError)`** otherwise.
+//!
+//! ## Developer Status
+//! - **AVX2 kernel**: STUB - Falls back to scalar implementation
+//! - **AVX512 kernel**: STUB - Falls back to scalar implementation
+//! - **Streaming update**: O(1) - Efficient rolling window approach
+//! - **Memory optimization**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix) ✓
+//! - **Optimization needed**: Implement SIMD kernels for vectorized processing
+//! - **Note**: Streaming implementation is already well-optimized
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};

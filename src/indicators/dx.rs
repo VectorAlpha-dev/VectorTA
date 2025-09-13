@@ -1,18 +1,25 @@
 //! # DX (Directional Movement Index)
 //!
-//! Measures trend strength by comparing smoothed +DI and -DI, using Welles Wilder’s logic.
-//! - `period`: window size (typically 14).
+//! Measures trend strength by comparing smoothed +DI and -DI, using Welles Wilder's logic.
+//! 
+//! ## Parameters
+//! - `period`: window size (typically 14)
 //!
-//! ## Errors
-//! - **EmptyData**: All input slices empty.
-//! - **SelectCandleFieldError**: Failed to select field from `Candles`.
-//! - **InvalidPeriod**: `period` is zero or exceeds data length.
-//! - **NotEnoughValidData**: Not enough valid data after first valid index.
-//! - **AllValuesNaN**: All high, low, and close values are NaN.
+//! ## Inputs
+//! - `high`: High prices
+//! - `low`: Low prices
+//! - `close`: Close prices
 //!
 //! ## Returns
-//! - **Ok(DxOutput)** on success, with output length matching input.
-//! - **Err(DxError)** otherwise.
+//! - **Ok(DxOutput)** containing values (Vec<f64>) with trend strength between 0-100
+//! - Output length matches input data length with NaN padding for warmup period
+//!
+//! ## Developer Notes
+//! - **AVX2 kernel**: STUB - calls scalar implementation (line 331-334)
+//! - **AVX512 kernel**: STUB - calls scalar implementation (lines 336-345)
+//! - **Streaming**: ✅ Implemented with DxStream (update function is O(1))
+//! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy) at line 224
+//! - **Batch operations**: ✅ Implemented with parallel processing support
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

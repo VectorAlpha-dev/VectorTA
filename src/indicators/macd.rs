@@ -1062,6 +1062,13 @@ pub fn macd_batch_py<'py>(
 	Ok(dict)
 }
 
+#[cfg(feature = "python")]
+pub fn register_macd_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
+	m.add_function(wrap_pyfunction!(macd_py, m)?)?;
+	m.add_function(wrap_pyfunction!(macd_batch_py, m)?)?;
+	Ok(())
+}
+
 // =============================================================================
 // WASM BINDINGS
 // =============================================================================

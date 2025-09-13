@@ -1,26 +1,24 @@
 //! # SafeZoneStop
 //!
-//! The SafeZoneStop indicator attempts to place stop-loss levels based on
-//! directional movement and volatility, using MINUS_DM or PLUS_DM logic under the hood.
-//! Parity with alma.rs in terms of performance, features, and API structure. SIMD variants
-//! are stubbed to the scalar implementation as per requirements.
+//! The SafeZoneStop indicator places dynamic stop-loss levels based on directional movement
+//! and volatility, utilizing Wilder's smoothed directional movement calculations.
 //!
 //! ## Parameters
-//! - **period**: The time period for calculating DM (Wilder's smoothing). Defaults to 22.
+//! - **period**: Time period for calculating DM (Wilder's smoothing). Defaults to 22.
 //! - **mult**: Multiplier for the DM measure. Defaults to 2.5.
 //! - **max_lookback**: Window for final max/min. Defaults to 3.
-//! - **direction**: "long" or "short".
-//!
-//! ## Errors
-//! - **AllValuesNaN**: safezonestop: All input data values are `NaN`.
-//! - **InvalidPeriod**: safezonestop: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: safezonestop: Not enough valid data points for the requested `period`.
-//! - **MismatchedLengths**: safezonestop: Input slices have different lengths.
-//! - **InvalidDirection**: safezonestop: Direction must be "long" or "short".
+//! - **direction**: Trading direction - "long" or "short".
 //!
 //! ## Returns
-//! - **`Ok(SafeZoneStopOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-//! - **`Err(SafeZoneStopError)`** otherwise.
+//! - **`Ok(SafeZoneStopOutput)`** containing a `Vec<f64>` of stop levels matching input length.
+//! - **`Err(SafeZoneStopError)`** on invalid parameters or insufficient data.
+//!
+//! ## Developer Notes
+//! - **SIMD Status**: AVX2 and AVX512 kernels are stubs (call scalar implementation)
+//! - **Streaming Performance**: O(1) - efficient monotonic deque for rolling extremum
+//! - **Memory Optimization**: ✓ Uses alloc_with_nan_prefix and zero-copy batch operations
+//! - **Batch Support**: ✓ Full parallel batch parameter sweep implementation
+//! - **TODO**: Implement actual AVX2/AVX512 SIMD kernels for DM calculations and rolling operations
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]

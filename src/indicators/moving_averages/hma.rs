@@ -1459,6 +1459,15 @@ pub fn hma_batch_into(
 	}
 }
 
+// ==================== PYTHON MODULE REGISTRATION ====================
+#[cfg(feature = "python")]
+pub fn register_hma_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
+	m.add_function(wrap_pyfunction!(hma_py, m)?)?;
+	m.add_function(wrap_pyfunction!(hma_batch_py, m)?)?;
+	m.add_class::<HmaStreamPy>()?;
+	Ok(())
+}
+
 // --- tests ---
 
 #[cfg(test)]

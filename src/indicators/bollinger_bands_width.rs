@@ -14,6 +14,13 @@
 //! ## Returns
 //! - **`Ok(BollingerBandsWidthOutput)`**: Vec<f64> of same length as input
 //! - **`Err(BollingerBandsWidthError)`** otherwise
+//!
+//! ## Developer Notes
+//! - **AVX2 kernel**: STUB - calls scalar implementation
+//! - **AVX512 kernel**: STUB - calls scalar implementation
+//! - **Streaming**: Not implemented
+//! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy)
+//! - **Batch operations**: ✅ Implemented with parallel processing support
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};

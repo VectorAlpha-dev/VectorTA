@@ -1560,6 +1560,14 @@ pub fn ppo_batch_py<'py>(
 	Ok(dict)
 }
 
+#[cfg(feature = "python")]
+pub fn register_ppo_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
+	m.add_function(wrap_pyfunction!(ppo_py, m)?)?;
+	m.add_function(wrap_pyfunction!(ppo_batch_py, m)?)?;
+	m.add_class::<PpoStreamPy>()?;
+	Ok(())
+}
+
 // ────────────────────────────────────────────────────────────────────────────────
 // WASM Bindings
 // ────────────────────────────────────────────────────────────────────────────────

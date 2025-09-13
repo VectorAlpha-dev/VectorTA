@@ -9,17 +9,16 @@
 //! - **period**: Window size (number of data points).
 //! - **poles**: The number of poles (1..4) to use for the filter.
 //!
-//! ## Errors
-//! - **NoData**: gaussian: No data provided.
-//! - **InvalidPoles**: gaussian: `poles` is out of range (expected 1..4).
-//! - **InvalidPeriod**: gaussian: `period` is zero or exceeds the data length.
-//! - **PeriodLongerThanData**: gaussian: The `period` is longer than the data length.
-//! - **AllValuesNaN**: gaussian: All input data values are `NaN`.
-//! - **NotEnoughValidData**: gaussian: Not enough valid data for the requested `period`.
-//!
 //! ## Returns
 //! - **`Ok(GaussianOutput)`** on success, containing a `Vec<f64>` of length matching the input.
 //! - **`Err(GaussianError)`** otherwise.
+//!
+//! ## Developer Status
+//! - **AVX2 kernel**: STUB - Falls back to scalar implementation
+//! - **AVX512 kernel**: STUB - Falls back to scalar implementation
+//! - **Streaming update**: O(1) - Efficient incremental calculation for each pole
+//! - **Memory optimization**: GOOD - Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix)
+//! - **Optimization needed**: Implement SIMD kernels for parallel pole processing
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

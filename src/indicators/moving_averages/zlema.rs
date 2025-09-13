@@ -6,13 +6,17 @@
 //! ## Parameters
 //! - **period**: Lookback window (>= 1, defaults to 14).
 //!
-//! ## Errors
-//! - **AllValuesNaN**: All input values are `NaN`.
-//! - **InvalidPeriod**: `period` is 0 or exceeds data length.
-//!
 //! ## Returns
 //! - **`Ok(ZlemaOutput)`** on success, containing a `Vec<f64>`.
 //! - **`Err(ZlemaError)`** otherwise.
+//!
+//! ## Developer Status
+//! - **AVX2 kernel**: STUB - Falls back to scalar implementation
+//! - **AVX512 kernel**: STUB - Falls back to scalar implementation
+//! - **Streaming update**: O(1) - Efficient EMA approach with lag compensation
+//! - **Memory optimization**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix) ✓
+//! - **Optimization needed**: Implement SIMD kernels for vectorized EMA computation
+//! - **Note**: De-lagging uses lookback offset calculation
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

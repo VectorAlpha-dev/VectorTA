@@ -688,6 +688,15 @@ unsafe fn ttm_trend_row_avx512_long(source: &[f64], close: &[f64], first: usize,
 	ttm_trend_row_scalar(source, close, first, period, out)
 }
 
+// ================== PYTHON MODULE REGISTRATION ==================
+#[cfg(feature = "python")]
+pub fn register_ttm_trend_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(ttm_trend_py, m)?)?;
+    m.add_function(wrap_pyfunction!(ttm_trend_batch_py, m)?)?;
+    m.add_class::<TtmTrendStreamPy>()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;

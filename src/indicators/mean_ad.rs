@@ -7,15 +7,16 @@
 //! ## Parameters
 //! - **period**: The window size (number of data points, default: 5).
 //!
-//! ## Errors
-//! - **EmptyData**: mean_ad: Input data slice is empty.
-//! - **InvalidPeriod**: mean_ad: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: mean_ad: Fewer than `period` valid (non-`NaN`) data points remain after the first valid index.
-//! - **AllValuesNaN**: mean_ad: All input data values are `NaN`.
+//! ## Inputs
+//! - **data**: Price data or any numeric series
 //!
 //! ## Returns
-//! - **`Ok(MeanAdOutput)`** on success, containing a `Vec<f64>` matching the input length.
-//! - **`Err(MeanAdError)`** otherwise.
+//! - **values**: Vector of mean absolute deviation values with NaN prefix during warmup period
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 Kernels**: Stubs that call scalar implementation
+//! - **Streaming**: Implemented with O(n) update performance (recalculates mean over period)
+//! - **Zero-copy Memory**: NOT using alloc_with_nan_prefix (uses vec![f64::NAN]), but uses make_uninit_matrix for batch operations
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

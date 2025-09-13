@@ -132,6 +132,35 @@ const INDICATORS = {
             }
         }
     },
+    percentile_nearest_rank: {
+        name: 'Percentile Nearest Rank',
+        // Safe API
+        safe: {
+            fn: 'percentile_nearest_rank_js',
+            params: { length: 15, percentage: 50 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'percentile_nearest_rank_alloc',
+            freeFn: 'percentile_nearest_rank_free',
+            computeFn: 'percentile_nearest_rank_into',
+            params: { length: 15, percentage: 50 }
+        },
+        // Batch API
+        batch: {
+            fn: 'percentile_nearest_rank_batch',
+            config: {
+                small: {
+                    length_range: [10, 20, 5],       // 3 values
+                    percentage_range: [25, 75, 25]   // 3 values = 9 combinations
+                },
+                medium: {
+                    length_range: [10, 30, 5],       // 5 values
+                    percentage_range: [10, 90, 20]   // 5 values = 25 combinations
+                }
+            }
+        }
+    },
     cg: {
         name: 'CG',
         // Safe API
@@ -1328,6 +1357,34 @@ const INDICATORS = {
             }
         }
     },
+    ehlers_kama: {
+        name: 'Ehlers KAMA',
+        // Safe API
+        safe: {
+            fn: 'ehlers_kama_js',
+            params: { period: 14 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'ehlers_kama_alloc',
+            freeFn: 'ehlers_kama_free',
+            computeFn: 'ehlers_kama_into',
+            params: { period: 14 }
+        },
+        // Batch API
+        batch: {
+            fn: 'ehlers_kama_batch',
+            fastFn: 'ehlers_kama_batch_into',
+            config: {
+                small: {
+                    period_range: [5, 20, 3]       // 6 values
+                },
+                medium: {
+                    period_range: [5, 50, 5]       // 10 values
+                }
+            }
+        }
+    },
     ehlers_pma: {
         name: 'Ehlers PMA',
         // Safe API
@@ -1584,6 +1641,55 @@ const INDICATORS = {
             // Fast batch API
             fastFn: 'mama_batch_into',
             dualOutput: true
+        }
+    },
+    lpc: {
+        name: 'Linear Prediction Central',
+        needsMultipleInputs: true,  // Uses high, low, close
+        // Safe API
+        safe: {
+            fn: 'lpc_js',
+            params: { 
+                cutoff_type: 'adaptive',
+                fixed_period: 30,
+                cycle_mult: 1.5,
+                tr_mult: 1.0,
+                max_cycle_limit: 60
+            }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'lpc_alloc',
+            freeFn: 'lpc_free',
+            computeFn: 'lpc_into',
+            params: { 
+                cutoff_type: 'adaptive',
+                fixed_period: 30,
+                cycle_mult: 1.5,
+                tr_mult: 1.0,
+                max_cycle_limit: 60
+            },
+            needsMultipleInputs: true,
+            tripleOutput: true  // LPC has 3 outputs: filter, highband, lowband
+        },
+        // Batch API
+        batch: {
+            fn: 'lpc_batch',
+            fastFn: 'lpc_batch_into',
+            config: {
+                small: {
+                    fixed_period_range: [20, 40, 10],    // 3 values
+                    cycle_mult_range: [1.0, 2.0, 0.5],   // 3 values
+                    tr_mult_range: [1.0, 2.0, 0.5]       // 3 values
+                    // Total: 27 combinations
+                },
+                medium: {
+                    fixed_period_range: [20, 60, 5],     // 9 values
+                    cycle_mult_range: [1.0, 2.5, 0.25],  // 7 values
+                    tr_mult_range: [0.5, 2.0, 0.25]      // 7 values
+                    // Total: 441 combinations
+                }
+            }
         }
     },
     mass: {
@@ -3346,6 +3452,72 @@ const INDICATORS = {
             }
         }
     },
+    cora_wave: {
+        name: 'CoRa Wave',
+        // Safe API
+        safe: {
+            fn: 'cora_wave_js',
+            params: { 
+                period: 48,
+                r_multi: 4,
+                v_coef: 0.75,
+                v_exp: 0.991,
+                v_min: 3.996,
+                lma_period: 10,
+                std_period: 48,
+                std_multi: 0.1,
+                max: 4.0
+            }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'cora_wave_alloc',
+            freeFn: 'cora_wave_free',
+            computeFn: 'cora_wave_into',
+            params: { 
+                period: 48,
+                r_multi: 4,
+                v_coef: 0.75,
+                v_exp: 0.991,
+                v_min: 3.996,
+                lma_period: 10,
+                std_period: 48,
+                std_multi: 0.1,
+                max: 4.0
+            }
+        },
+        // Batch API
+        batch: {
+            fn: 'cora_wave_batch',
+            config: {
+                small: {
+                    period_range: [20, 30, 10],        // 2 values
+                    r_multi_range: [2, 4, 2],          // 2 values
+                    v_coef_range: [0.75, 0.75, 0],     // 1 value (static)
+                    v_exp_range: [0.991, 0.991, 0],    // 1 value (static)
+                    v_min_range: [3.996, 3.996, 0],    // 1 value (static)
+                    lma_period_range: [10, 10, 0],     // 1 value (static)
+                    std_period_range: [48, 48, 0],     // 1 value (static)
+                    std_multi_range: [0.1, 0.1, 0],    // 1 value (static)
+                    max_range: [4.0, 4.0, 0]           // 1 value (static)
+                    // Total: 4 combinations
+                },
+                medium: {
+                    period_range: [20, 60, 10],        // 5 values
+                    r_multi_range: [2, 6, 1],          // 5 values
+                    v_coef_range: [0.75, 0.75, 0],     // 1 value (static)
+                    v_exp_range: [0.991, 0.991, 0],    // 1 value (static)
+                    v_min_range: [3.996, 3.996, 0],    // 1 value (static)
+                    lma_period_range: [10, 10, 0],     // 1 value (static)
+                    std_period_range: [48, 48, 0],     // 1 value (static)
+                    std_multi_range: [0.1, 0.1, 0],    // 1 value (static)
+                    max_range: [4.0, 4.0, 0]           // 1 value (static)
+                    // Total: 25 combinations
+                }
+            },
+            fastFn: 'cora_wave_batch_into'
+        }
+    },
     dpo: {
         name: 'DPO',
         // Safe API
@@ -3724,6 +3896,42 @@ const INDICATORS = {
                 },
                 medium: {
                     length_range: [10, 30, 5]      // 5 values: 10, 15, 20, 25, 30
+                }
+            }
+        }
+    },
+    avsl: {
+        name: 'AVSL',
+        // Safe API - requires close, low, volume
+        safe: {
+            fn: 'avsl_js',
+            params: { fast_period: 12, slow_period: 26, multiplier: 2.0 }
+        },
+        needsMultipleInputs: true, // AVSL needs close, low, volume arrays
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'avsl_alloc',
+            freeFn: 'avsl_free',
+            computeFn: 'avsl_into',
+            params: { fast_period: 12, slow_period: 26, multiplier: 2.0 },
+            needsMultipleInputs: true
+        },
+        // Batch API
+        batch: {
+            fn: 'avsl_batch_js',
+            fastFn: 'avsl_batch_into',
+            config: {
+                small: {
+                    fast_period_range: [10, 20, 5],     // 3 values: 10, 15, 20
+                    slow_period_range: [20, 30, 5],     // 3 values: 20, 25, 30
+                    multiplier_range: [1.5, 2.5, 0.5]   // 3 values: 1.5, 2.0, 2.5
+                    // Total: 27 combinations
+                },
+                medium: {
+                    fast_period_range: [8, 16, 2],      // 5 values: 8, 10, 12, 14, 16
+                    slow_period_range: [20, 40, 5],     // 5 values: 20, 25, 30, 35, 40
+                    multiplier_range: [1.0, 3.0, 0.5]   // 5 values: 1.0, 1.5, 2.0, 2.5, 3.0
+                    // Total: 125 combinations
                 }
             }
         }
@@ -4296,6 +4504,37 @@ const INDICATORS = {
                 medium: {}
             },
             needsMultipleInputs: true
+        }
+    },
+    wto: {
+        name: 'WTO',
+        // Safe API
+        safe: {
+            fn: 'wto_js',
+            params: { channel_length: 10, average_length: 21 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'wto_alloc',
+            freeFn: 'wto_free',
+            computeFn: 'wto_into',
+            params: { channel_length: 10, average_length: 21 },
+            outputCount: 3  // Three outputs: wavetrend1, wavetrend2, histogram
+        },
+        // Batch API
+        batch: {
+            fn: 'wto_batch',
+            fastFn: 'wto_batch_into',
+            config: {
+                small: {
+                    channel_range: [8, 12, 2],       // 3 values
+                    average_range: [15, 25, 5]       // 3 values = 9 combinations
+                },
+                medium: {
+                    channel_range: [5, 20, 3],       // 6 values
+                    average_range: [10, 30, 5]       // 5 values = 30 combinations
+                }
+            }
         }
     },
     cksp: {
@@ -5395,6 +5634,58 @@ const INDICATORS = {
                 }
             },
             inputs: ['close', 'volume']  // Batch also requires both inputs
+        }
+    },
+    vama: {
+        name: 'VAMA (Volatility Adjusted MA)',
+        // Safe API
+        safe: {
+            fn: 'vama_js',
+            params: { base_period: 14, vol_period: 14, smoothing: true, smooth_type: 2, smooth_period: 3 },
+            run: (wasm, data, params) => wasm.vama_js(
+                data.close, 
+                params.base_period, 
+                params.vol_period,
+                params.smoothing,
+                params.smooth_type,
+                params.smooth_period
+            )
+        },
+        // Fast API with zero-copy
+        fast: {
+            alloc: 'vama_alloc',
+            free: 'vama_free',
+            fn: 'vama_into',
+            params: { base_period: 14, vol_period: 14, smoothing: true, smooth_type: 2, smooth_period: 3 },
+            run: (wasm, data, inPtr, outPtr, len, params) => wasm.vama_into(
+                inPtr, 
+                outPtr, 
+                len, 
+                params.base_period, 
+                params.vol_period,
+                params.smoothing,
+                params.smooth_type,
+                params.smooth_period
+            )
+        },
+        // Batch API
+        batch: {
+            fn: 'vama_batch_js',
+            params: {
+                base_period_range: [10, 20, 2],
+                vol_period_range: [10, 20, 2],
+                smoothing: true,
+                smooth_type: 2,
+                smooth_period: 3
+            },
+            run: (wasm, data, params) => wasm.vama_batch_js(
+                data.close,
+                params.base_period_range,
+                params.vol_period_range,
+                params.smoothing,
+                params.smooth_type,
+                params.smooth_period
+            )
         }
     },
     halftrend: {
@@ -6560,6 +6851,12 @@ class WasmIndicatorBenchmark {
             // Special case for EMV: high_ptr, low_ptr, close_ptr, volume_ptr, out_ptr, len (no parameters)
             if (indicatorConfig.name === 'EMV') {
                 const result = [highPtr, lowPtr, closePtr, volumePtr, outPtr, len];
+                return result;
+            }
+            
+            // Special case for VI: high_ptr, low_ptr, close_ptr, plus_ptr, minus_ptr, len, period
+            if (indicatorConfig.name === 'VI (Vortex Indicator)') {
+                const result = [highPtr, lowPtr, closePtr, outPtr, outPtr2, len, params.period];
                 return result;
             }
             

@@ -779,6 +779,14 @@ pub fn rocp_batch_py<'py>(
 	Ok(dict)
 }
 
+#[cfg(feature = "python")]
+pub fn register_rocp_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
+	m.add_function(wrap_pyfunction!(rocp_py, m)?)?;
+	m.add_function(wrap_pyfunction!(rocp_batch_py, m)?)?;
+	m.add_class::<RocpStreamPy>()?;
+	Ok(())
+}
+
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn rocp_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {

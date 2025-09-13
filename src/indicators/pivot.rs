@@ -6,14 +6,21 @@
 //! ## Parameters
 //! - **mode**: Calculation method. 0=Standard, 1=Fibonacci, 2=Demark, 3=Camarilla (default), 4=Woodie
 //!
-//! ## Errors
-//! - **EmptyData**: Required field missing
-//! - **AllValuesNaN**: All values are NaN
-//! - **NotEnoughValidData**: Not enough valid data for calculation
+//! ## Inputs
+//! - **high**: High price data
+//! - **low**: Low price data
+//! - **close**: Close price data
+//! - **open**: Open price data
 //!
 //! ## Returns
-//! - **Ok(PivotOutput)** with 9 Vec<f64> levels, each input length
-//! - **Err(PivotError)** on error
+//! - **r4, r3, r2, r1**: Resistance levels (4 vectors)
+//! - **pp**: Pivot point (1 vector)
+//! - **s1, s2, s3, s4**: Support levels (4 vectors)
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 Kernels**: Stubs that call scalar implementation
+//! - **Streaming**: Implemented with O(1) update performance (pure calculations)
+//! - **Zero-copy Memory**: Uses alloc_with_nan_prefix and make_uninit_matrix for batch operations
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

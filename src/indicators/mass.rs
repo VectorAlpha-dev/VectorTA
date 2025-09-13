@@ -7,18 +7,17 @@
 //! ## Parameters
 //! - **period**: The summation window size. Defaults to 5.
 //!
-//! ## Errors
-//! - **EmptyData**: mass: Input data slices are empty.
-//! - **DifferentLengthHL**: mass: `high` and `low` slices have different lengths.
-//! - **InvalidPeriod**: mass: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: mass: Fewer than `16 + period - 1` valid (non-`NaN`) data points remain
-//!   after the first valid index.
-//! - **AllValuesNaN**: mass: All input data values are `NaN`.
+//! ## Inputs
+//! - **high**: High price data
+//! - **low**: Low price data
 //!
 //! ## Returns
-//! - **`Ok(MassOutput)`** on success, containing a `Vec<f64>` matching the input length,
-//!   with leading `NaN`s until enough data is accumulated for the Mass Index calculation.
-//! - **`Err(MassError)`** otherwise.
+//! - **values**: Vector of Mass Index values with NaN prefix during warmup period
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 Kernels**: Stubs that call scalar implementation
+//! - **Streaming**: Implemented with O(1) update performance
+//! - **Zero-copy Memory**: Uses alloc_with_nan_prefix and make_uninit_matrix for batch operations
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
@@ -1456,6 +1455,13 @@ pub fn mass_batch_py<'py>(
 	)?;
 
 	Ok(dict)
+}
+
+#[cfg(feature = "python")]
+pub fn register_mass_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
+	m.add_function(wrap_pyfunction!(mass_py, m)?)?;
+	m.add_function(wrap_pyfunction!(mass_batch_py, m)?)?;
+	Ok(())
 }
 
 #[cfg(any(feature = "python", feature = "wasm"))]
