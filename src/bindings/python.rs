@@ -405,6 +405,11 @@ use crate::indicators::wto::{wto_py, wto_batch_py, WtoStreamPy};
 use crate::indicators::moving_averages::ehma::{ehma_py, ehma_batch_py, EhmaStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::nama::{nama_py, nama_batch_py, NamaStreamPy};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::{
+    alma_cuda_batch_py,
+    alma_cuda_many_series_one_param_py,
+};
 
 #[pymodule]
 fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -452,6 +457,11 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(alma_py, m)?)?;
 	m.add_function(wrap_pyfunction!(alma_batch_py, m)?)?;
 	m.add_class::<AlmaStreamPy>()?;
+    #[cfg(feature = "cuda")]
+    {
+        m.add_function(wrap_pyfunction!(alma_cuda_batch_py, m)?)?;
+        m.add_function(wrap_pyfunction!(alma_cuda_many_series_one_param_py, m)?)?;
+    }
 
 	// Register AroonOsc functions with their user-facing names
 	m.add_function(wrap_pyfunction!(aroon_osc_py, m)?)?;

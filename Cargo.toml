@@ -11,6 +11,10 @@ criterion = { version = "0.5.1", features = ["html_reports"] }
 name = "indicator_benchmark"
 harness = false
 
+[[bench]]
+name = "cuda_bench"
+harness = false
+
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -33,6 +37,7 @@ pyo3 = { version = "0.25.0", optional = true, features = ["extension-module"] }
 numpy = { version = "0.25.0", optional = true }
 smallvec = "1.15.1"
 float-cmp = "0.10.0"
+cust = { version = "0.3", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 proptest = { version = "1.7.0", optional = true }
@@ -66,14 +71,14 @@ path = "src/bin/generate_references.rs"
 
 [profile.release]
 opt-level       = 3
-codegen-units   = 255  # Reduced from 255 for faster compilation
+codegen-units   = 255  # Single codegen unit for maximum optimization
 incremental = false
 # panic = "abort"  # Commented out to allow benchmarks to compile
 overflow-checks = false
-debug = true
+debug = false  # Disable debug for better performance
 strip = "none"
 split-debuginfo = "unpacked"
-# LTO is conditionally enabled based on target
+lto = "fat"  # Enable link-time optimization
 
 # Additional WASM-specific optimizations
 [profile.wasm]
@@ -85,8 +90,8 @@ strip = "symbols"
 [profile.bench]
 # Don't inherit from any profile to avoid panic strategy conflicts
 opt-level = 3
-lto = false  # Disabled for faster compilation
-codegen-units = 255  # Increased for faster compilation
+lto = "fat"  # Enable for maximum performance
+codegen-units = 255  # Single codegen unit for maximum optimization
 incremental = false
 overflow-checks = false
 debug = false  # Disabled for faster compilation
@@ -106,6 +111,7 @@ default = ["proptest"]
 nightly-avx = []
 wasm = ["wasm-bindgen", "serde-wasm-bindgen", "js-sys"]
 python = ["pyo3", "numpy"]
+cuda = ["cust"]
 
 [package.metadata.wasm-pack]
 "wasm-opt" = ["-O4", "--enable-simd"]
