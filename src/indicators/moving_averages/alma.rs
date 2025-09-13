@@ -290,11 +290,19 @@ fn alma_prepare<'a>(
 	let s = period as f64 / sigma;
 	let s2 = 2.0 * s * s;
 
-	let mut weights: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, period);
-	weights.resize(period, 0.0);
+	// Allocate aligned weights with padding for SIMD operations
+	let aligned_period = ((period + 7) / 8) * 8; // Round up to nearest multiple of 8
+	let mut weights: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, aligned_period);
+	weights.resize(aligned_period, 0.0);
+	
+	// Pre-compute reciprocal for multiplication instead of division
+	let inv_s2 = 1.0 / s2;
 	let mut norm = 0.0;
+	
+	// Vectorized weight computation where possible
 	for i in 0..period {
-		let w = (-(i as f64 - m).powi(2) / s2).exp();
+		let diff = i as f64 - m;
+		let w = (-diff * diff * inv_s2).exp();
 		weights[i] = w;
 		norm += w;
 	}
@@ -341,17 +349,25 @@ pub fn alma_into_slice(dst: &mut [f64], input: &AlmaInput, kern: Kernel) -> Resu
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-#[target_feature(enable = "avx512f")]
+#[target_feature(enable = "avx512f,avx512dq")]
 pub unsafe fn hsum_pd_zmm(v: __m512d) -> f64 {
-	let hi256 = _mm512_extractf64x4_pd(v, 1);
-	let lo256 = _mm512_castpd512_pd256(v);
-	let sum256 = _mm256_add_pd(hi256, lo256);
-	let hi128 = _mm256_extractf128_pd(sum256, 1);
-	let lo128 = _mm256_castpd256_pd128(sum256);
-	let sum128 = _mm_add_pd(hi128, lo128);
-	let hi64 = _mm_unpackhi_pd(sum128, sum128);
-	let sum64 = _mm_add_sd(sum128, hi64);
-	_mm_cvtsd_f64(sum64)
+	// Use AVX512DQ reduce intrinsic if available for single-instruction reduction
+	#[cfg(target_feature = "avx512dq")]
+	{
+		_mm512_reduce_add_pd(v)
+	}
+	#[cfg(not(target_feature = "avx512dq"))]
+	{
+		// Optimized tree reduction with better pipelining
+		let hi256 = _mm512_extractf64x4_pd(v, 1);
+		let lo256 = _mm512_castpd512_pd256(v);
+		let sum256 = _mm256_add_pd(hi256, lo256);
+		// Use hadd for better throughput on some CPUs
+		let sum128 = _mm_add_pd(_mm256_castpd256_pd128(sum256), 
+		                        _mm256_extractf128_pd(sum256, 1));
+		let sum64 = _mm_hadd_pd(sum128, sum128);
+		_mm_cvtsd_f64(sum64)
+	}
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -365,9 +381,9 @@ pub fn alma_avx512(data: &[f64], weights: &[f64], period: usize, first_valid: us
 	}
 }
 
-#[inline]
+#[inline(always)]
 pub fn alma_scalar(data: &[f64], weights: &[f64], period: usize, first_val: usize, inv_norm: f64, out: &mut [f64]) {
-	assert_eq!(weights.len(), period, "weights.len() must equal `period`");
+	assert!(weights.len() >= period, "weights.len() must be at least `period`");
 	assert!(out.len() >= data.len(), "`out` must be at least as long as `data`");
 
 	let p4 = period & !3;
@@ -390,11 +406,11 @@ pub fn alma_scalar(data: &[f64], weights: &[f64], period: usize, first_val: usiz
 }
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-#[inline]
+#[inline(always)]
 unsafe fn alma_simd128(data: &[f64], weights: &[f64], period: usize, first_val: usize, inv_norm: f64, out: &mut [f64]) {
 	use core::arch::wasm32::*;
 
-	assert_eq!(weights.len(), period, "weights.len() must equal `period`");
+	assert!(weights.len() >= period, "weights.len() must be at least `period`");
 	assert!(out.len() >= data.len(), "`out` must be at least as long as `data`");
 
 	const STEP: usize = 2;
@@ -423,11 +439,16 @@ unsafe fn alma_simd128(data: &[f64], weights: &[f64], period: usize, first_val: 
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn alma_avx2(data: &[f64], weights: &[f64], period: usize, first_valid: usize, inv_norm: f64, out: &mut [f64]) {
 	const STEP: usize = 4;
 	let chunks = period / STEP;
 	let tail = period % STEP;
+	
+	// Use 2-way unrolling for better instruction-level parallelism
+	let paired_chunks = chunks / 2;
+	let odd_chunk = chunks % 2;
 
 	let tail_mask = match tail {
 		0 => _mm256_setzero_si256(),
@@ -439,32 +460,54 @@ unsafe fn alma_avx2(data: &[f64], weights: &[f64], period: usize, first_valid: u
 
 	for i in (first_valid + period - 1)..data.len() {
 		let start = i + 1 - period;
-		let mut acc = _mm256_setzero_pd();
+		let mut acc0 = _mm256_setzero_pd();
+		let mut acc1 = _mm256_setzero_pd();
 
-		for blk in 0..chunks {
-			let idx = blk * STEP;
+		// Process chunks in pairs for better pipelining
+		for blk in 0..paired_chunks {
+			let idx0 = (blk * 2) * STEP;
+			let idx1 = (blk * 2 + 1) * STEP;
+			
+			let w0 = _mm256_loadu_pd(weights.as_ptr().add(idx0));
+			let w1 = _mm256_loadu_pd(weights.as_ptr().add(idx1));
+			let d0 = _mm256_loadu_pd(data.as_ptr().add(start + idx0));
+			let d1 = _mm256_loadu_pd(data.as_ptr().add(start + idx1));
+			
+			acc0 = _mm256_fmadd_pd(d0, w0, acc0);
+			acc1 = _mm256_fmadd_pd(d1, w1, acc1);
+		}
+		
+		// Handle odd chunk if present
+		if odd_chunk != 0 {
+			let idx = (paired_chunks * 2) * STEP;
 			let w = _mm256_loadu_pd(weights.as_ptr().add(idx));
 			let d = _mm256_loadu_pd(data.as_ptr().add(start + idx));
-			acc = _mm256_fmadd_pd(d, w, acc);
+			acc0 = _mm256_fmadd_pd(d, w, acc0);
 		}
 
-		if tail != 0 {
+		// Combine accumulators
+		let acc = _mm256_add_pd(acc0, acc1);
+
+		// Handle tail elements
+		let final_acc = if tail != 0 {
 			let w_tail = _mm256_maskload_pd(weights.as_ptr().add(chunks * STEP), tail_mask);
 			let d_tail = _mm256_maskload_pd(data.as_ptr().add(start + chunks * STEP), tail_mask);
-			acc = _mm256_fmadd_pd(d_tail, w_tail, acc);
-		}
+			_mm256_fmadd_pd(d_tail, w_tail, acc)
+		} else {
+			acc
+		};
 
-		let hi = _mm256_extractf128_pd(acc, 1);
-		let lo = _mm256_castpd256_pd128(acc);
-		let sum2 = _mm_add_pd(hi, lo);
-		let sum1 = _mm_add_pd(sum2, _mm_unpackhi_pd(sum2, sum2));
-		let sum = _mm_cvtsd_f64(sum1);
+		// Horizontal sum with hadd for better throughput
+		let sum128 = _mm_add_pd(_mm256_castpd256_pd128(final_acc), 
+		                        _mm256_extractf128_pd(final_acc, 1));
+		let sum = _mm_cvtsd_f64(_mm_hadd_pd(sum128, sum128));
 
 		*out.get_unchecked_mut(i) = sum * inv_norm;
 	}
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
 #[target_feature(enable = "avx512f,fma")]
 unsafe fn alma_avx512_short(
 	data: &[f64],
@@ -515,6 +558,7 @@ unsafe fn alma_avx512_short(
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
 #[target_feature(enable = "avx512f,avx512dq,fma")]
 unsafe fn alma_avx512_long(
 	data: &[f64],
@@ -527,7 +571,9 @@ unsafe fn alma_avx512_long(
 	const STEP: usize = 8;
 	let n_chunks = period / STEP;
 	let tail_len = period % STEP;
-	let paired = n_chunks & !3;
+	// Use 8-way unrolling for maximum ILP
+	let unroll8 = n_chunks & !7;
+	let remaining = n_chunks - unroll8;
 	let tail_mask: __mmask8 = (1u8 << tail_len).wrapping_sub(1);
 
 	debug_assert!(period >= 1 && n_chunks > 0);
@@ -536,8 +582,16 @@ unsafe fn alma_avx512_long(
 
 	let mut wregs: Vec<__m512d> = Vec::with_capacity(n_chunks + (tail_len != 0) as usize);
 
+	// Use aligned loads when possible
 	for blk in 0..n_chunks {
-		wregs.push(_mm512_load_pd(weights.as_ptr().add(blk * STEP)));
+		let wptr = weights.as_ptr().add(blk * STEP);
+		// Check alignment and use appropriate load
+		let w_vec = if wptr as usize & 0x3F == 0 {
+			_mm512_load_pd(wptr)
+		} else {
+			_mm512_loadu_pd(wptr)
+		};
+		wregs.push(w_vec);
 	}
 	let w_tail = if tail_len != 0 {
 		let wt = _mm512_maskz_loadu_pd(tail_mask, weights.as_ptr().add(n_chunks * STEP));
@@ -558,27 +612,51 @@ unsafe fn alma_avx512_long(
 			let mut s1 = _mm512_setzero_pd();
 			let mut s2 = _mm512_setzero_pd();
 			let mut s3 = _mm512_setzero_pd();
+			let mut s4 = _mm512_setzero_pd();
+			let mut s5 = _mm512_setzero_pd();
+			let mut s6 = _mm512_setzero_pd();
+			let mut s7 = _mm512_setzero_pd();
 
-			for blk in (0..paired).step_by(4) {
-				_mm_prefetch(data_ptr.add((blk + 8) * STEP) as *const i8, _MM_HINT_T0);
+			// 8-way unrolled loop for maximum throughput
+			for blk in (0..unroll8).step_by(8) {
+				// Prefetch 16 blocks ahead for L1 cache
+				_mm_prefetch(data_ptr.add((blk + 16) * STEP) as *const i8, _MM_HINT_T0);
+				_mm_prefetch(data_ptr.add((blk + 17) * STEP) as *const i8, _MM_HINT_T0);
 
 				let d0 = _mm512_loadu_pd(data_ptr.add((blk + 0) * STEP));
 				let d1 = _mm512_loadu_pd(data_ptr.add((blk + 1) * STEP));
 				let d2 = _mm512_loadu_pd(data_ptr.add((blk + 2) * STEP));
 				let d3 = _mm512_loadu_pd(data_ptr.add((blk + 3) * STEP));
+				let d4 = _mm512_loadu_pd(data_ptr.add((blk + 4) * STEP));
+				let d5 = _mm512_loadu_pd(data_ptr.add((blk + 5) * STEP));
+				let d6 = _mm512_loadu_pd(data_ptr.add((blk + 6) * STEP));
+				let d7 = _mm512_loadu_pd(data_ptr.add((blk + 7) * STEP));
 
 				s0 = _mm512_fmadd_pd(d0, *wregs.get_unchecked(blk + 0), s0);
 				s1 = _mm512_fmadd_pd(d1, *wregs.get_unchecked(blk + 1), s1);
 				s2 = _mm512_fmadd_pd(d2, *wregs.get_unchecked(blk + 2), s2);
 				s3 = _mm512_fmadd_pd(d3, *wregs.get_unchecked(blk + 3), s3);
+				s4 = _mm512_fmadd_pd(d4, *wregs.get_unchecked(blk + 4), s4);
+				s5 = _mm512_fmadd_pd(d5, *wregs.get_unchecked(blk + 5), s5);
+				s6 = _mm512_fmadd_pd(d6, *wregs.get_unchecked(blk + 6), s6);
+				s7 = _mm512_fmadd_pd(d7, *wregs.get_unchecked(blk + 7), s7);
 			}
 
-			for blk in paired..n_chunks {
+			// Handle remaining chunks
+			for blk in unroll8..n_chunks {
 				let d = _mm512_loadu_pd(data_ptr.add(blk * STEP));
 				s0 = _mm512_fmadd_pd(d, *wregs.get_unchecked(blk), s0);
 			}
 
-			let tot = _mm512_add_pd(_mm512_add_pd(s0, s1), _mm512_add_pd(s2, s3));
+			// Tree reduction for better parallelism
+			let sum01 = _mm512_add_pd(s0, s1);
+			let sum23 = _mm512_add_pd(s2, s3);
+			let sum45 = _mm512_add_pd(s4, s5);
+			let sum67 = _mm512_add_pd(s6, s7);
+			let sum0123 = _mm512_add_pd(sum01, sum23);
+			let sum4567 = _mm512_add_pd(sum45, sum67);
+			let tot = _mm512_add_pd(sum0123, sum4567);
+			
 			*dst_ptr = hsum_pd_zmm(tot) * inv_norm;
 
 			data_ptr = data_ptr.add(1);
@@ -592,30 +670,54 @@ unsafe fn alma_avx512_long(
 			let mut s1 = _mm512_setzero_pd();
 			let mut s2 = _mm512_setzero_pd();
 			let mut s3 = _mm512_setzero_pd();
+			let mut s4 = _mm512_setzero_pd();
+			let mut s5 = _mm512_setzero_pd();
+			let mut s6 = _mm512_setzero_pd();
+			let mut s7 = _mm512_setzero_pd();
 
-			for blk in (0..paired).step_by(4) {
-				_mm_prefetch(data_ptr.add((blk + 8) * STEP) as *const i8, _MM_HINT_T0);
+			// 8-way unrolled loop
+			for blk in (0..unroll8).step_by(8) {
+				_mm_prefetch(data_ptr.add((blk + 16) * STEP) as *const i8, _MM_HINT_T0);
+				_mm_prefetch(data_ptr.add((blk + 17) * STEP) as *const i8, _MM_HINT_T0);
 
 				let d0 = _mm512_loadu_pd(data_ptr.add((blk + 0) * STEP));
 				let d1 = _mm512_loadu_pd(data_ptr.add((blk + 1) * STEP));
 				let d2 = _mm512_loadu_pd(data_ptr.add((blk + 2) * STEP));
 				let d3 = _mm512_loadu_pd(data_ptr.add((blk + 3) * STEP));
+				let d4 = _mm512_loadu_pd(data_ptr.add((blk + 4) * STEP));
+				let d5 = _mm512_loadu_pd(data_ptr.add((blk + 5) * STEP));
+				let d6 = _mm512_loadu_pd(data_ptr.add((blk + 6) * STEP));
+				let d7 = _mm512_loadu_pd(data_ptr.add((blk + 7) * STEP));
 
 				s0 = _mm512_fmadd_pd(d0, *wregs.get_unchecked(blk + 0), s0);
 				s1 = _mm512_fmadd_pd(d1, *wregs.get_unchecked(blk + 1), s1);
 				s2 = _mm512_fmadd_pd(d2, *wregs.get_unchecked(blk + 2), s2);
 				s3 = _mm512_fmadd_pd(d3, *wregs.get_unchecked(blk + 3), s3);
+				s4 = _mm512_fmadd_pd(d4, *wregs.get_unchecked(blk + 4), s4);
+				s5 = _mm512_fmadd_pd(d5, *wregs.get_unchecked(blk + 5), s5);
+				s6 = _mm512_fmadd_pd(d6, *wregs.get_unchecked(blk + 6), s6);
+				s7 = _mm512_fmadd_pd(d7, *wregs.get_unchecked(blk + 7), s7);
 			}
 
-			for blk in paired..n_chunks {
+			// Handle remaining chunks before tail
+			for blk in unroll8..n_chunks {
 				let d = _mm512_loadu_pd(data_ptr.add(blk * STEP));
 				s0 = _mm512_fmadd_pd(d, *wregs.get_unchecked(blk), s0);
 			}
 
+			// Handle tail elements
 			let d_tail = _mm512_maskz_loadu_pd(tail_mask, data_ptr.add(n_chunks * STEP));
 			s0 = _mm512_fmadd_pd(d_tail, wt, s0);
 
-			let tot = _mm512_add_pd(_mm512_add_pd(s0, s1), _mm512_add_pd(s2, s3));
+			// Tree reduction
+			let sum01 = _mm512_add_pd(s0, s1);
+			let sum23 = _mm512_add_pd(s2, s3);
+			let sum45 = _mm512_add_pd(s4, s5);
+			let sum67 = _mm512_add_pd(s6, s7);
+			let sum0123 = _mm512_add_pd(sum01, sum23);
+			let sum4567 = _mm512_add_pd(sum45, sum67);
+			let tot = _mm512_add_pd(sum0123, sum4567);
+			
 			*dst_ptr = hsum_pd_zmm(tot) * inv_norm;
 
 			data_ptr = data_ptr.add(1);

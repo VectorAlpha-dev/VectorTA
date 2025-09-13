@@ -1,19 +1,19 @@
 //! # Relative Strength Index (RSI)
 //!
-//! A momentum oscillator measuring recent price changes’ speed and magnitude.
-//! RSI oscillates between 0 and 100. Typical period: 14 bars.
+//! Momentum oscillator measuring price change speed/magnitude, ranging 0-100.
 //!
 //! ## Parameters
-//! - **period**: Window size (number of bars, default: 14).
-//!
-//! ## Errors
-//! - **AllValuesNaN**: rsi: All input values are `NaN`.
-//! - **InvalidPeriod**: rsi: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: rsi: Not enough valid data points for the requested `period`.
+//! - **data**: Input price data
+//! - **period**: Window size (default: 14)
 //!
 //! ## Returns
-//! - **`Ok(RsiOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-//! - **`Err(RsiError)`** otherwise.
+//! - `Vec<f64>` - RSI values (0-100 scale) matching input length
+//!
+//! ## Developer Status
+//! **AVX2**: Stub (row functions call scalar)
+//! **AVX512**: Has short/long row variants but all stubs
+//! **Streaming**: O(1) - Exponential smoothing with state
+//! **Memory**: Good - Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

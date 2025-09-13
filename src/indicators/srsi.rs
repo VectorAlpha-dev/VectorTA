@@ -16,6 +16,11 @@
 //! ## Returns
 //! - **`Ok(SrsiOutput)`** on success, containing vectors `k` and `d`.
 //! - **`Err(SrsiError)`** otherwise.
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 Kernels**: Currently delegate to scalar implementation for API parity. Future optimization opportunity for SIMD acceleration of RSI and Stochastic components.
+//! - **Streaming Performance**: Basic implementation using recalculation approach (O(n)). Proper streaming would require maintaining separate RSI and Stochastic state machines.
+//! - **Memory Optimization**: Batch mode uses RSI result caching to avoid redundant calculations across parameter combinations. Uses zero-copy helper functions for output allocation.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};

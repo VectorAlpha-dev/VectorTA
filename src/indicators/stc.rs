@@ -14,8 +14,10 @@
 //! ## Returns
 //! - **`Ok(StcOutput)`** or **`Err(StcError)`**
 //!
-//! ## SIMD
-//! - All AVX2/AVX512 implementations are stubs for strict API parity.
+//! ## Developer Notes
+//! - **AVX2/AVX512 Kernels**: All SIMD implementations are stubs that delegate to scalar for strict API parity. Future optimization could vectorize the MACD and stochastic calculations.
+//! - **Streaming Performance**: Uses O(n) recalculation approach by maintaining a growing buffer. Efficient streaming would require maintaining separate state for each component (MACD, Stoch, EMA).  
+//! - **Memory Optimization**: Uses `alloc_with_nan_prefix` for proper warmup handling. Intermediate calculations use appropriately-sized working buffers rather than full data-length allocations.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

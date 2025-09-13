@@ -10,15 +10,15 @@
 //! - **smooth_type**: Type of smoothing - 1=SMA, 2=EMA, 3=WMA (default: 3)
 //! - **smooth_period**: Smoothing period (default: 5)
 //!
-//! ## Errors
-//! - **EmptyInputData**: vama: Input data slice is empty.
-//! - **AllValuesNaN**: vama: All input values are `NaN`.
-//! - **InvalidPeriod**: vama: Period is zero or exceeds data length.
-//! - **NotEnoughValidData**: vama: Not enough valid data points for calculation.
-//!
 //! ## Returns
 //! - **`Ok(VamaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
 //! - **`Err(VamaError)`** otherwise.
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 kernels**: Not implemented (no explicit SIMD kernel functions)
+//! - **Streaming update**: O(n) - iterates through vol_period for deviation calculation
+//! - **Memory optimization**: Uses zero-copy helpers (alloc_with_nan_prefix)
+//! - **Optimization needed**: Implement SIMD kernels and optimize streaming to O(1)
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings

@@ -7,15 +7,14 @@
 //! - **predict**: Predictive lookahead factor (default: 3)
 //! - **bandwidth**: Filter bandwidth (default: 0.25)
 //!
-//! ## Errors
-//! - **AllValuesNaN**: voss: All input data values are `NaN`.
-//! - **InvalidPeriod**: voss: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: voss: Not enough valid data points for the requested window.
-//! - **EmptyData**: voss: Input data slice is empty.
-//!
 //! ## Returns
 //! - **`Ok(VossOutput)`** on success, containing filtered output vectors matching input length.
 //! - **`Err(VossError)`** otherwise.
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 Kernels**: Stub implementations that delegate to scalar. Functions exist but just call scalar version. IIR filter nature makes SIMD challenging but could vectorize across multiple parameter sets.
+//! - **Streaming Performance**: O(n) implementation where n is order (predict*3). Iterates through ring buffer for weighted sum calculation on each update. Could cache partial sums for minor optimization.
+//! - **Memory Optimization**: Uses `alloc_with_nan_prefix` and batch helpers properly. Ring buffer approach is memory efficient for streaming.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};

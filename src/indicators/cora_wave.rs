@@ -9,15 +9,14 @@
 //! - **r_multi**: Compound ratio multiplier (default: 2.0)
 //! - **smooth**: Enable auto-smoothing with WMA (default: true)
 //!
-//! ## Errors
-//! - **EmptyInputData**: cora_wave: Input data slice is empty.
-//! - **AllValuesNaN**: cora_wave: All input values are `NaN`.
-//! - **InvalidPeriod**: cora_wave: Period is zero or exceeds data length.
-//! - **NotEnoughValidData**: cora_wave: Not enough valid data points for calculation.
-//!
 //! ## Returns
 //! - **`Ok(CoraWaveOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-//! - **`Err(CoraWaveError)`** otherwise.
+//! - **`Err(CoraWaveError)`** on various error conditions.
+//!
+//! ## Developer Status
+//! - **SIMD Kernels**: AVX2 and AVX512 are STUBS - fall back to scalar implementation
+//! - **Streaming Performance**: O(1) - efficient incremental calculation with pre-computed weights
+//! - **Memory Optimization**: EXCELLENT - uses alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes throughout
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};

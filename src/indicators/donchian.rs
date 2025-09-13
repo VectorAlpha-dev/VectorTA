@@ -6,17 +6,19 @@
 //! average of these two values.
 //!
 //! ## Parameters
-//! - **period**: Window size for computing the highest high and lowest low (default 20).
-//!
-//! ## Errors
-//! - **AllValuesNaN**: donchian: All input data values are `NaN`.
-//! - **InvalidPeriod**: donchian: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: donchian: Not enough valid data points for the requested `period`.
-//! - **MismatchedLength**: donchian: High and Low slices have different lengths.
+//! - **period**: Window size for computing the highest high and lowest low (default: 20)
 //!
 //! ## Returns
-//! - **`Ok(DonchianOutput)`** on success, containing `upperband`, `middleband`, and `lowerband` vectors matching the input.
-//! - **`Err(DonchianError)`** otherwise.
+//! - **`Ok(DonchianOutput)`** on success, containing three `Vec<f64>` arrays:
+//!   - upperband: Highest high over the period
+//!   - middleband: Average of upper and lower bands
+//!   - lowerband: Lowest low over the period
+//! - **`Err(DonchianError)`** on various error conditions.
+//!
+//! ## Developer Status
+//! - **SIMD Kernels**: AVX2 and AVX512 are STUBS - fall back to scalar implementation
+//! - **Streaming Performance**: O(n) - requires full window scan for min/max calculations
+//! - **Memory Optimization**: GOOD - uses alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes for efficient memory usage
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

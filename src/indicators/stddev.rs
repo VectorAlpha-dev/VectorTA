@@ -21,6 +21,11 @@
 //! ## Returns
 //! - **Ok(StdDevOutput)** on success (output vector of length == input).
 //! - **Err(StdDevError)** otherwise.
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 Kernels**: SIMD implementations delegate to scalar for API parity. Rolling sum and sum-of-squares could be vectorized for periods > 8.
+//! - **Streaming Performance**: Efficient O(1) implementation using ring buffer with running sum and sum-of-squares. Optimal for real-time applications.
+//! - **Memory Optimization**: Uses zero-copy helper functions (`alloc_with_nan_prefix`, `make_uninit_matrix`). No cache-aligned buffers needed as computation is memory-bound rather than compute-bound.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};

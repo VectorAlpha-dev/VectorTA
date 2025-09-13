@@ -1,21 +1,20 @@
 //! # Money Flow Index (MFI)
 //!
-//! MFI is a momentum indicator that measures the inflow and outflow of money into an asset
-//! over a specified period. It uses price and volume to identify overbought or oversold
-//! conditions by comparing the "typical price" movement and volume flow.
+//! Momentum indicator measuring money inflow/outflow using price and volume.
 //!
 //! ## Parameters
-//! - **period**: The window size. Defaults to 14.
-//!
-//! ## Errors
-//! - **EmptyData**: mfi: Input data slices or candle fields are empty.
-//! - **InvalidPeriod**: mfi: `period` is zero, or exceeds the data length.
-//! - **NotEnoughValidData**: mfi: Fewer than `period` valid (non-`NaN`) data points remain after the first valid index.
-//! - **AllValuesNaN**: mfi: All computed typical prices or volumes are `NaN`.
+//! - **typical_price**: Typical price data (usually HLC/3)
+//! - **volume**: Volume data
+//! - **period**: Window size (default: 14)
 //!
 //! ## Returns
-//! - **`Ok(MfiOutput)`** on success, containing a `Vec<f64>` matching the input length, with leading `NaN`s until the MFI window is filled.
-//! - **`Err(MfiError)`** otherwise.
+//! - `Vec<f64>` - MFI values (0-100 scale) matching input length
+//!
+//! ## Developer Status
+//! **AVX2**: Stub (calls scalar)
+//! **AVX512**: Has short/long variants but all stubs
+//! **Streaming**: O(1) - Uses ring buffers for running sums
+//! **Memory**: Good - Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};

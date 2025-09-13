@@ -621,6 +621,45 @@ const INDICATORS = {
             hasMultipleOutputs: 2
         }
     },
+    fvg_trailing_stop: {
+        name: 'FVG Trailing Stop',
+        needsMultipleInputs: true,  // Uses high, low, close
+        hasMultipleOutputs: 4,      // Returns upper, lower, upper_ts, lower_ts
+        // Safe API
+        safe: {
+            fn: 'fvgTrailingStop',
+            params: { unmitigated_fvg_lookback: 5, smoothing_length: 9, reset_on_cross: false }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'fvgTrailingStopAlloc',
+            freeFn: 'fvgTrailingStopFree',
+            computeFn: 'fvgTrailingStopZeroCopy',
+            params: { unmitigated_fvg_lookback: 5, smoothing_length: 9, reset_on_cross: false },
+            needsMultipleInputs: true,
+            hasMultipleOutputs: 4
+        },
+        // Batch API
+        batch: {
+            fn: 'fvgTrailingStopBatch',
+            config: {
+                small: {
+                    lookback_range: [3, 5, 1],       // 3 values: 3, 4, 5
+                    smoothing_range: [1, 3, 1],      // 3 values: 1, 2, 3
+                    reset_include_false: true,
+                    reset_include_true: true         // 2 values: false, true = 18 combinations
+                },
+                medium: {
+                    lookback_range: [3, 7, 1],       // 5 values: 3, 4, 5, 6, 7
+                    smoothing_range: [1, 5, 1],      // 5 values: 1, 2, 3, 4, 5
+                    reset_include_false: true,
+                    reset_include_true: false        // 1 value: false = 25 combinations
+                }
+            },
+            needsMultipleInputs: true,
+            hasMultipleOutputs: 4
+        }
+    },
     ao: {
         name: 'AO',
         needsMultipleInputs: true,  // Uses high, low
@@ -749,6 +788,40 @@ const INDICATORS = {
                     direction: 'short'              // 35 combinations total
                 }
             }
+        }
+    },
+    devstop: {
+        name: 'DevStop',
+        needsMultipleInputs: true,  // Uses high, low
+        // Safe API
+        safe: {
+            fn: 'devstop_js',
+            params: { period: 20, mult: 2.0, devtype: 0, direction: 'long', ma_type: 'sma' }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'devstop_alloc',
+            freeFn: 'devstop_free',
+            computeFn: 'devstop_into',
+            params: { period: 20, mult: 2.0, devtype: 0, direction: 'long', ma_type: 'sma' },
+            needsMultipleInputs: true
+        },
+        // Batch API
+        batch: {
+            fn: 'devstop_batch_unified_js',
+            config: {
+                small: {
+                    period_range: [15, 25, 5],      // 3 values: 15, 20, 25
+                    mult_range: [1.5, 2.5, 0.5],    // 3 values: 1.5, 2.0, 2.5
+                    devtype_range: [0, 2, 1]        // 3 values: 0, 1, 2 = 27 combinations
+                },
+                medium: {
+                    period_range: [10, 30, 5],      // 5 values: 10, 15, 20, 25, 30
+                    mult_range: [1.0, 3.0, 0.5],    // 5 values: 1.0, 1.5, 2.0, 2.5, 3.0
+                    devtype_range: [0, 2, 1]        // 3 values: 0, 1, 2 = 75 combinations
+                }
+            },
+            needsMultipleInputs: true
         }
     },
     acosc: {
@@ -904,6 +977,37 @@ const INDICATORS = {
             params: { period: 15 }
         }
         // No batch API available
+    },
+    ehma: {
+        name: 'EHMA',
+        // Safe API
+        safe: {
+            fn: 'ehma_js',
+            params: { period: 14 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'ehma_alloc',
+            freeFn: 'ehma_free',
+            computeFn: 'ehma_into',
+            params: { period: 14 }
+        },
+        // Batch API
+        batch: {
+            fn: 'ehma_batch_unified_js',
+            config: {
+                small: {
+                    periods: [14, 14, 0]
+                },
+                medium: {
+                    periods: [10, 30, 2]
+                },
+                large: {
+                    periods: [5, 50, 5]
+                }
+            },
+            fastFn: 'ehma_batch_into'
+        }
     },
     eri: {
         name: 'ERI',
@@ -1508,6 +1612,56 @@ const INDICATORS = {
             fastFn: 'minmax_batch_into'
         }
     },
+    mod_god_mode: {
+        name: 'Modified God Mode',
+        // Safe API
+        safe: {
+            fn: 'mod_god_mode',
+            params: { 
+                n1: 17, 
+                n2: 6, 
+                n3: 4, 
+                mode: 'tradition_mg', 
+                use_volume: true 
+            },
+            inputs: ['high', 'low', 'close', 'volume']  // Requires OHLC and volume data
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'mod_god_mode_alloc',
+            freeFn: 'mod_god_mode_free',
+            computeFn: 'mod_god_mode_into',
+            params: { 
+                n1: 17, 
+                n2: 6, 
+                n3: 4, 
+                mode: 'tradition_mg', 
+                has_volume: true 
+            },
+            inputs: ['high', 'low', 'close', 'volume'],
+            tripleOutput: true  // Returns wavetrend, signal, and histogram
+        },
+        // Batch API
+        batch: {
+            fn: 'mod_god_mode_batch',
+            config: {
+                small: {
+                    n1_range: [10, 20, 5],      // 3 values
+                    n2_range: [4, 8, 2],        // 3 values
+                    n3_range: [2, 6, 2],        // 3 values = 27 combinations
+                    mode: 'tradition_mg',
+                    use_volume: true
+                },
+                medium: {
+                    n1_range: [10, 25, 3],      // 6 values
+                    n2_range: [3, 9, 2],        // 4 values
+                    n3_range: [2, 8, 2],        // 4 values = 96 combinations
+                    mode: 'tradition_mg',
+                    use_volume: true
+                }
+            }
+        }
+    },
     reflex: {
         name: 'Reflex',
         // Safe API
@@ -1816,6 +1970,35 @@ const INDICATORS = {
             },
             // Fast batch API
             fastFn: 'highpass_2_pole_batch_into'
+        }
+    },
+    nama: {
+        name: 'NAMA (Nonlinear Adaptive Moving Average)',
+        // Safe API
+        safe: {
+            fn: 'nama_js',
+            params: { period: 30 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'nama_alloc',
+            freeFn: 'nama_free',
+            computeFn: 'nama_into',
+            params: { period: 30 }
+        },
+        // Batch API
+        batch: {
+            fn: 'nama_batch',
+            config: {
+                small: {
+                    period_range: [20, 40, 10]     // 3 values: 20, 30, 40
+                },
+                medium: {
+                    period_range: [10, 50, 5]      // 9 values: 10, 15, 20, ..., 50
+                }
+            },
+            // Fast batch API
+            fastFn: 'nama_batch_into'
         }
     },
     nma: {
@@ -3193,6 +3376,38 @@ const INDICATORS = {
         }
         // No batch API - NVI has no parameters to sweep
     },
+    nadaraya_watson_envelope: {
+        name: 'Nadaraya-Watson Envelope',
+        // Safe API
+        safe: {
+            fn: 'nadaraya_watson_envelope_js',
+            params: { bandwidth: 8.0, multiplier: 50.0, lookback: 500 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'nadaraya_watson_envelope_alloc',
+            freeFn: 'nadaraya_watson_envelope_free',
+            computeFn: 'nadaraya_watson_envelope_into',
+            params: { bandwidth: 8.0, multiplier: 50.0, lookback: 500 },
+            dualOutput: true  // Returns upper and lower bands
+        },
+        // Batch API
+        batch: {
+            fn: 'nadaraya_watson_envelope_batch',
+            config: {
+                small: {
+                    bandwidth_range: [5.0, 10.0, 2.5],       // 3 values
+                    multiplier_range: [30.0, 70.0, 20.0],    // 3 values
+                    lookback_range: [300, 700, 200]          // 3 values = 27 combinations
+                },
+                medium: {
+                    bandwidth_range: [4.0, 12.0, 2.0],       // 5 values
+                    multiplier_range: [20.0, 80.0, 15.0],    // 5 values
+                    lookback_range: [200, 800, 150]          // 5 values = 125 combinations
+                }
+            }
+        }
+    },
     pvi: {
         name: 'PVI (Positive Volume Index)',
         // Safe API
@@ -3943,6 +4158,39 @@ const INDICATORS = {
             needsMultipleInputs: true
         }
     },
+    ttm_squeeze: {
+        name: 'TTM Squeeze',
+        needsMultipleInputs: true,  // Uses high, low, close
+        multipleOutputs: 2,         // Returns squeeze and momentum
+        // Safe API
+        safe: {
+            fn: 'ttm_squeeze_js',
+            params: { 
+                bb_period: 20, 
+                bb_stddev: 2.0,
+                kc_period_ema: 1.0,
+                kc_mult_low: 1.5,
+                kc_mult_high: 2.0
+            },
+            needsMultipleInputs: true
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'ttm_squeeze_alloc',
+            freeFn: 'ttm_squeeze_free',
+            computeFn: 'ttm_squeeze_into',
+            params: { 
+                bb_period: 20, 
+                bb_stddev: 2.0,
+                kc_period_ema: 1.0,
+                kc_mult_low: 1.5,
+                kc_mult_high: 2.0
+            },
+            needsMultipleInputs: true,
+            outputCount: 2  // 2 outputs: squeeze, momentum
+        },
+        // Note: No batch API for ttm_squeeze as it doesn't appear to have batch functions
+    },
     gatorosc: {
         name: 'GatorOsc',
         // Safe API
@@ -4430,6 +4678,48 @@ const INDICATORS = {
             dualOutput: true
         }
     },
+    dma: {
+        name: 'DMA',
+        // Safe API
+        safe: {
+            fn: 'dma_js',
+            params: { 
+                hull_length: 9,
+                ema_length: 9,
+                ema_gain_limit: 9,
+                hull_ma_type: 'sma',
+                ema_ma_type: 'ema'
+            }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'dma_alloc',
+            freeFn: 'dma_free',
+            computeFn: 'dma_into',
+            params: { 
+                hull_length: 9,
+                ema_length: 9,
+                ema_gain_limit: 9,
+                hull_ma_type: 'sma',
+                ema_ma_type: 'ema'
+            }
+        },
+        // Batch API
+        batch: {
+            fn: 'dma_batch_unified_js',
+            config: {
+                small: {
+                    hull_length_range: [9, 50, 1],
+                    ema_length_range: [9, 50, 1]
+                },
+                medium: {
+                    hull_length_range: [5, 30, 5],
+                    ema_length_range: [5, 30, 5]
+                }
+            },
+            fastFn: 'dma_batch_into'
+        }
+    },
     efi: {
         name: 'EFI',
         needsMultipleInputs: true,  // Uses close (price) and volume
@@ -4592,6 +4882,42 @@ const INDICATORS = {
             needsMultipleInputs: true
         }
     },
+    qqe: {
+        name: 'QQE (Quantitative Qualitative Estimation)',
+        // Safe API
+        safe: {
+            fn: 'qqe_js',
+            params: { rsi_period: 14, smoothing_period: 5, wilders_period: 4.236 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'qqe_alloc',
+            freeFn: 'qqe_free',
+            computeFn: 'qqe_into',
+            params: { rsi_period: 14, smoothing_period: 5, wilders_period: 4.236 },
+            outputCount: 2  // QQE has two outputs: qqe line and trigger line
+        },
+        // Batch API
+        batch: {
+            fn: 'qqe_batch',
+            config: {
+                small: {
+                    rsi_period_range: [10, 20, 5],       // 3 values: 10, 15, 20
+                    smoothing_period_range: [3, 7, 2],   // 3 values: 3, 5, 7
+                    wilders_period_range: [3.0, 5.0, 1.0] // 3 values: 3.0, 4.0, 5.0
+                    // Total: 27 combinations
+                },
+                medium: {
+                    rsi_period_range: [10, 30, 5],       // 5 values: 10, 15, 20, 25, 30
+                    smoothing_period_range: [3, 9, 2],   // 4 values: 3, 5, 7, 9
+                    wilders_period_range: [2.0, 5.0, 1.0] // 4 values: 2.0, 3.0, 4.0, 5.0
+                    // Total: 80 combinations
+                }
+            },
+            // Fast batch API
+            fastFn: 'qqe_batch_into'
+        }
+    },
     safezonestop: {
         name: 'SafeZoneStop',
         needsMultipleInputs: true,  // Uses high, low
@@ -4752,6 +5078,46 @@ const INDICATORS = {
             }
         }
     },
+    buff_averages: {
+        name: 'Buff Averages',
+        needsMultipleInputs: true,  // Uses price and volume
+        // Safe API
+        safe: {
+            fn: 'buff_averages_js',
+            params: { 
+                fast_period: 10,
+                slow_period: 5
+            }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'buff_averages_alloc',
+            freeFn: 'buff_averages_free',
+            computeFn: 'buff_averages_into',
+            params: { 
+                fast_period: 10,
+                slow_period: 5
+            },
+            needsMultipleInputs: true,
+            dualOutput: true  // Returns both fast and slow averages
+        },
+        // Batch API
+        batch: {
+            fn: 'buff_averages_batch_unified_js',
+            config: {
+                small: {
+                    fast_period_range: [10, 20, 1],
+                    slow_period_range: [5, 10, 1]
+                },
+                medium: {
+                    fast_period_range: [10, 30, 5],
+                    slow_period_range: [5, 15, 5]
+                }
+            },
+            fastFn: 'buff_averages_batch_into',
+            needsMultipleInputs: true
+        }
+    },
     dti: {
         name: 'DTI',
         needsMultipleInputs: true,  // Uses high, low
@@ -4785,6 +5151,64 @@ const INDICATORS = {
                 }
             },
             needsMultipleInputs: true
+        }
+    },
+    dvdiqqe: {
+        name: 'DVDIQQE',
+        needsMultipleInputs: true,  // Uses high, low, close, volume
+        hasMultipleOutputs: 4,      // Returns dvdi, fast_tl, slow_tl, center_line
+        // Safe API
+        safe: {
+            fn: 'dvdiqqe',
+            params: { 
+                period: 13, 
+                smoothing_period: 6, 
+                fast_multiplier: 2.618, 
+                slow_multiplier: 4.236, 
+                volume_type: 'default', 
+                center_type: 'dynamic' 
+            }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'dvdiqqe_alloc',
+            freeFn: 'dvdiqqe_free',
+            computeFn: 'dvdiqqe_into',
+            params: { 
+                period: 13, 
+                smoothing_period: 6, 
+                fast_multiplier: 2.618, 
+                slow_multiplier: 4.236, 
+                volume_type: 'default', 
+                center_type: 'dynamic' 
+            },
+            needsMultipleInputs: true,
+            hasMultipleOutputs: 4
+        },
+        // Batch API
+        batch: {
+            fn: 'dvdiqqe_batch_unified',
+            fastFn: 'dvdiqqe_batch_into',
+            config: {
+                small: {
+                    period_range: [10, 20, 5],           // 3 values: 10, 15, 20
+                    smoothing_period_range: [4, 8, 2],   // 3 values: 4, 6, 8
+                    fast_multiplier_range: [2.0, 3.0, 0.5], // 3 values: 2.0, 2.5, 3.0
+                    slow_multiplier_range: [4.0, 5.0, 0.5], // 3 values: 4.0, 4.5, 5.0
+                    volume_type: 'default',
+                    center_type: 'dynamic'                // Total: 81 combinations
+                },
+                medium: {
+                    period_range: [10, 30, 5],           // 5 values: 10, 15, 20, 25, 30
+                    smoothing_period_range: [4, 10, 2],  // 4 values: 4, 6, 8, 10
+                    fast_multiplier_range: [2.0, 3.5, 0.5], // 4 values
+                    slow_multiplier_range: [3.5, 5.0, 0.5], // 4 values
+                    volume_type: 'default',
+                    center_type: 'dynamic'                // Total: 320 combinations
+                }
+            },
+            needsMultipleInputs: true,
+            hasMultipleOutputs: 4
         }
     },
     dx: {
@@ -4912,61 +5336,76 @@ const INDICATORS = {
             }
         }
     },
-    vwmacd: {
-        name: 'VWMACD (Volume Weighted MACD)',
+    cci_cycle: {
+        name: 'CCI_CYCLE',
         // Safe API
         safe: {
-            fn: 'vwmacd_js',
-            params: { 
-                fast_period: 12, 
-                slow_period: 26, 
-                signal_period: 9,
-                fast_ma_type: "sma",
-                slow_ma_type: "sma",
-                signal_ma_type: "ema"
-            },
-            inputs: ['close', 'volume']  // Requires both close and volume
+            fn: 'cci_cycle_js',
+            params: { period: 14 }
         },
         // Fast/Unsafe API
         fast: {
-            allocFn: 'vwmacd_alloc',
-            freeFn: 'vwmacd_free',
-            computeFn: 'vwmacd_into',
-            params: { 
-                fast_period: 12, 
-                slow_period: 26, 
-                signal_period: 9,
-                fast_ma_type: "sma",
-                slow_ma_type: "sma",
-                signal_ma_type: "ema"
-            },
-            inputs: ['close', 'volume'],  // Requires both close and volume
-            outputCount: 3  // 3 outputs: macd, signal, histogram
+            allocFn: 'cci_cycle_alloc',
+            freeFn: 'cci_cycle_free',
+            computeFn: 'cci_cycle_into',
+            params: { period: 14 }
         },
         // Batch API
         batch: {
-            fn: 'vwmacd_batch',
+            fn: 'cci_cycle_batch',
+            fastFn: 'cci_cycle_batch_into',
             config: {
                 small: {
-                    fast_range: [10, 14, 2],    // 3 values: 10, 12, 14
-                    slow_range: [24, 28, 2],    // 3 values: 24, 26, 28
-                    signal_range: [8, 10, 1],   // 3 values: 8, 9, 10
-                    fast_ma_type: "sma",
-                    slow_ma_type: "sma",
-                    signal_ma_type: "ema"
-                    // Total: 3 * 3 * 3 = 27 combinations
+                    period_range: [10, 20, 5]  // 3 values: 10, 15, 20
                 },
                 medium: {
-                    fast_range: [8, 16, 2],     // 5 values: 8, 10, 12, 14, 16
-                    slow_range: [20, 30, 2],    // 6 values: 20, 22, 24, 26, 28, 30
-                    signal_range: [6, 12, 2],   // 4 values: 6, 8, 10, 12
-                    fast_ma_type: "sma",
-                    slow_ma_type: "sma", 
-                    signal_ma_type: "ema"
-                    // Total: 5 * 6 * 4 = 120 combinations
+                    period_range: [10, 30, 5]  // 5 values: 10, 15, 20, 25, 30
                 }
-            },
-            inputs: ['close', 'volume']  // Batch also requires both inputs
+            }
+        }
+    },
+    uma: {
+        name: 'UMA',
+        // Safe API
+        safe: {
+            fn: 'uma_js',
+            params: { 
+                accelerator: 1.0, 
+                min_length: 5, 
+                max_length: 50, 
+                smooth_length: 4,
+                volume: null 
+            }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'uma_alloc',
+            freeFn: 'uma_free',
+            computeFn: 'uma_into',
+            params: { 
+                accelerator: 1.0, 
+                min_length: 5, 
+                max_length: 50, 
+                smooth_length: 4 
+            }
+        },
+        // Batch API
+        batch: {
+            fn: 'uma_batch',
+            config: {
+                small: {
+                    accelerator_range: [1.0, 1.0, 0.0],     // 1 value
+                    min_length_range: [5, 5, 0],            // 1 value
+                    max_length_range: [50, 50, 0],          // 1 value
+                    smooth_length_range: [4, 4, 0]          // 1 value = 1 combination (matching Python)
+                },
+                medium: {
+                    accelerator_range: [0.5, 2.0, 0.5],     // 4 values
+                    min_length_range: [5, 15, 5],           // 3 values
+                    max_length_range: [30, 60, 10],         // 4 values
+                    smooth_length_range: [2, 6, 2]          // 3 values = 144 combinations
+                }
+            }
         }
     }
 };

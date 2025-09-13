@@ -10,16 +10,14 @@
 //! - **nbdev**: Multiplier for deviation. Defaults to 1.0.
 //! - **devtype**: 0 = stddev, 1 = mean abs dev, 2 = median abs dev. Defaults to 0.
 //!
-//! ## Errors
-//! - **AllValuesNaN**: zscore: All input data values are `NaN`.
-//! - **InvalidPeriod**: zscore: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: zscore: Not enough valid data points for the requested `period`.
-//! - **DevError**: zscore: Underlying error from the deviation function.
-//! - **MaError**: zscore: Underlying error from the moving average function.
-//!
 //! ## Returns
 //! - **`Ok(ZscoreOutput)`** on success, containing a `Vec<f64>` matching the input.
 //! - **`Err(ZscoreError)`** otherwise.
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 Kernels**: Stub implementations that delegate to scalar. Functions exist but just call scalar version. Could vectorize mean and deviation calculations.
+//! - **Streaming Performance**: O(n) implementation - copies entire buffer to ordered array, then calls MA and deviation functions which iterate again. Very inefficient - allocates new vectors on each update. Should maintain running statistics.
+//! - **Memory Optimization**: Uses `alloc_with_nan_prefix` and batch helpers properly. However, streaming allocates temporary vectors on each update which is wasteful.
 
 use crate::indicators::deviation::{deviation, DevError, DevInput, DevParams, DeviationData, DeviationOutput};
 use crate::indicators::moving_averages::ma::{ma, MaData};

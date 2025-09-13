@@ -1,17 +1,19 @@
 //! # Negative Volume Index (NVI)
 //!
-//! The NVI (Negative Volume Index) focuses on days when the volume decreases from the previous day.
-//! This implementation follows Tulip Indicators and does not take any parameters.
+//! Tracks price changes on days when volume decreases from the previous day.
 //!
-//! ## Errors
-//! - **EmptyData**: nvi: Input data slice(s) is empty.
-//! - **AllCloseValuesNaN**: nvi: All close input values are `NaN`.
-//! - **AllVolumeValuesNaN**: nvi: All volume input values are `NaN`.
-//! - **NotEnoughValidData**: nvi: Fewer than 2 valid (non-`NaN`) data points after the first valid index.
+//! ## Parameters
+//! - **close**: Close price data
+//! - **volume**: Volume data
 //!
 //! ## Returns
-//! - **`Ok(NviOutput)`** on success, containing a `Vec<f64>` matching input length.
-//! - **`Err(NviError)`** otherwise.
+//! - `Vec<f64>` - NVI values starting at 1000, matching input length
+//!
+//! ## Developer Status
+//! **AVX2**: Stub (calls scalar)
+//! **AVX512**: Has short/long variants but all stubs
+//! **Streaming**: O(1) - Simple state tracking
+//! **Memory**: Good - Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};

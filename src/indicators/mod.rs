@@ -59,6 +59,11 @@ pub mod decycler;
 pub mod deviation;
 pub use deviation::{deviation, DeviationInput, DeviationOutput, DeviationParams};
 pub mod devstop;
+pub use devstop::{devstop, DevStopInput, DevStopOutput, DevStopParams, DevStopData, DevStopError};
+#[cfg(feature = "python")]
+pub use devstop::{devstop_py, devstop_batch_py, DevStopStreamPy};
+#[cfg(feature = "wasm")]
+pub use devstop::{devstop_js, devstop_batch_unified_js, devstop_alloc, devstop_free, devstop_into_js};
 pub mod di;
 pub mod dm;
 pub mod donchian;

@@ -9,18 +9,15 @@
 //! - **strict**: If true, enforces exact length requirement; if false, uses up to length bars (default: true)
 //! - **sample_period**: Number of bars to use for volume averaging (0 = all bars) (default: 0)
 //!
-//! ## Errors
-//! - **EmptyInputData**: volume_adjusted_ma: Input data slice is empty.
-//! - **EmptyVolumeData**: volume_adjusted_ma: Volume data slice is empty.
-//! - **AllValuesNaN**: volume_adjusted_ma: All input values are `NaN`.
-//! - **InvalidPeriod**: volume_adjusted_ma: Period is zero or exceeds data length.
-//! - **NotEnoughValidData**: volume_adjusted_ma: Not enough valid data points for calculation.
-//! - **InvalidViFactor**: volume_adjusted_ma: Volume increment factor must be positive.
-//! - **DataLengthMismatch**: volume_adjusted_ma: Price and volume data have different lengths.
-//!
 //! ## Returns
 //! - **`Ok(VolumeAdjustedMaOutput)`** on success, containing values vector.
 //! - **`Err(VolumeAdjustedMaError)`** otherwise.
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 kernels**: Stubs (both functions call scalar implementation)
+//! - **Streaming update**: O(n) - iterates through up to cap bars per update
+//! - **Memory optimization**: Uses zero-copy helpers (alloc_with_nan_prefix)
+//! - **Optimization needed**: Implement actual SIMD kernels and optimize streaming to O(1)
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings

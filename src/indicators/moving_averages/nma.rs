@@ -8,14 +8,17 @@
 //! ## Parameters
 //! - **period**: Window size (number of data points, default: 40)
 //!
-//! ## Errors
-//! - **AllValuesNaN**: nma: All input data values are `NaN`.
-//! - **InvalidPeriod**: nma: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: nma: Not enough valid data points for the requested `period`.
-//!
 //! ## Returns
 //! - **`Ok(NmaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
 //! - **`Err(NmaError)`** otherwise.
+//!
+//! ## Developer Notes
+//! - **AVX2 kernel**: ✅ Fully implemented - 4-wide SIMD with vectorized log transforms and weighted averaging
+//! - **AVX512 kernel**: ✅ Fully implemented - 8-wide SIMD with v2 variant for additional optimizations
+//! - **Streaming update**: ⚠️ O(n) complexity - dot_ring() iterates through all period weights
+//!   - TODO: Could optimize to O(1) with incremental computation of weighted sums
+//! - **Memory optimization**: ✅ Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix) for output vectors
+//! - **Note**: Log-space transformations benefit significantly from SIMD parallel processing
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

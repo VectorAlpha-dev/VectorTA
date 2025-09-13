@@ -1,20 +1,19 @@
 //! # Rate of Change Ratio (ROCR)
 //!
-//! The Rate of Change Ratio (ROCR) measures the ratio between the current price
-//! and the price `period` bars ago. Centered around 1.0; >1 means increase, <1 decrease.
+//! Measures the ratio current/past, centered at 1.0 (>1 increase, <1 decrease).
 //!
 //! ## Parameters
-//! - **period**: Lookback window (number of data points), default 10.
-//!
-//! ## Errors
-//! - **EmptyData**: rocr: Input data slice is empty.
-//! - **InvalidPeriod**: rocr: `period` is zero or exceeds data length.
-//! - **NotEnoughValidData**: rocr: Fewer than `period` valid (non-NaN) data points after first valid index.
-//! - **AllValuesNaN**: rocr: All input data values are `NaN`.
+//! - **data**: Input price data
+//! - **period**: Lookback window (default: 10)
 //!
 //! ## Returns
-//! - **`Ok(RocrOutput)`** on success, containing a `Vec<f64>` matching input length.
-//! - **`Err(RocrError)`** otherwise.
+//! - `Vec<f64>` - ROCR values centered at 1.0, matching input length
+//!
+//! ## Developer Status
+//! **AVX2**: Stub (calls scalar)
+//! **AVX512**: Has short/long variants but all stubs
+//! **Streaming**: O(1) - Simple ring buffer lookup
+//! **Memory**: Good - Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

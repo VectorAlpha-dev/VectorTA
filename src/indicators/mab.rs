@@ -1,24 +1,24 @@
 //! # Moving Average Bands (MAB)
 //!
-//! Calculates upper, middle, and lower bands based on fast and slow moving averages and the rolling standard deviation of their difference over the fast window.
+//! Calculates bands based on fast and slow moving averages with standard deviation
+//! of their difference over the fast window for dynamic band width.
 //!
 //! ## Parameters
 //! - **fast_period**: Fast MA window (default: 10)
 //! - **slow_period**: Slow MA window (default: 50)
 //! - **devup**: Upper band multiplier (default: 1.0)
 //! - **devdn**: Lower band multiplier (default: 1.0)
-//! - **fast_ma_type**: Fast MA type ("sma" or "ema", default: "sma")
-//! - **slow_ma_type**: Slow MA type ("sma" or "ema", default: "sma")
-//!
-//! ## Errors
-//! - **AllValuesNaN**: All input values are NaN.
-//! - **InvalidPeriod**: Fast/slow period is zero or exceeds data length.
-//! - **NotEnoughValidData**: Not enough valid data for the required periods.
-//! - **EmptyData**: Input slice is empty.
+//! - **fast_ma_type**: Fast MA type (default: "sma")
+//! - **slow_ma_type**: Slow MA type (default: "sma")
 //!
 //! ## Returns
-//! - `Ok(MabOutput)` with `.upperband`, `.middleband`, `.lowerband` (all Vec<f64>)
-//! - `Err(MabError)` otherwise.
+//! - **`Ok(MabOutput)`** on success (`upperband`, `middleband`, `lowerband` vectors)
+//! - **`Err(MabError)`** on failure
+//!
+//! ## Developer Status
+//! - **SIMD Kernels**: AVX2 (stub), AVX512 (stub)
+//! - **Streaming**: O(1) performance
+//! - **Memory**: Good zero-copy usage (alloc_with_nan_prefix, make_uninit_matrix)
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};

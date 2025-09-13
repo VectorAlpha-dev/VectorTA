@@ -10,15 +10,15 @@
 //! - **length**: The number of recent bars to look back when identifying the highest
 //!   high and lowest low (defaults to 14).
 //!
-//! ## Errors
-//! - **InvalidLength**: aroon_osc: The specified `length` is zero.
-//! - **EmptyData**: aroonosc: Empty input data.
-//! - **MismatchedArrayLengths**: aroonosc: High/low arrays have different lengths.
-//! - **NotEnoughData**: aroon_osc: Not enough data points to compute the Aroon Oscillator.
-//!
 //! ## Returns
 //! - **`Ok(AroonOscOutput)`** on success, containing a `Vec<f64>` of the oscillator values.
 //! - **`Err(AroonOscError)`** otherwise.
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 kernels**: Stubs (all call scalar implementation)
+//! - **Streaming update**: O(n) worst case - rescans window when max/min changes
+//! - **Memory optimization**: Uses zero-copy helpers (alloc_with_nan_prefix)
+//! - **Optimization needed**: Implement SIMD kernels and achieve consistent O(1) streaming
 
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;

@@ -1,22 +1,19 @@
 //! # Median Price (MEDPRICE)
 //!
-//! The median price is calculated as `(high + low) / 2.0` for each data point.
-//! This indicator uses the provided high and low price sources and returns a
-//! vector of median prices. Leading `NaN` values will be produced until the
-//! first valid (non-`NaN`) values of both `high` and `low` are encountered.
+//! Calculates the median price as `(high + low) / 2.0` for each period.
 //!
 //! ## Parameters
-//! *None*
-//!
-//! ## Errors
-//! - **EmptyData**: medprice: Input data slices are empty.
-//! - **DifferentLength**: medprice: `high` and `low` data slices have different lengths.
-//! - **AllValuesNaN**: medprice: All input data values (high or low) are `NaN`.
+//! - **high**: High price data
+//! - **low**: Low price data
 //!
 //! ## Returns
-//! - **`Ok(MedpriceOutput)`** on success, containing a `Vec<f64>` matching the input length,
-//!   with leading `NaN` until the first valid high/low pair is encountered.
-//! - **`Err(MedpriceError)`** otherwise.
+//! - `Vec<f64>` - Median price values matching input length
+//!
+//! ## Developer Status
+//! **AVX2**: Stub (calls scalar)
+//! **AVX512**: Stub (calls scalar)
+//! **Streaming**: O(1) - Simple calculation
+//! **Memory**: Good - Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};

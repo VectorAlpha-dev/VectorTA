@@ -5,16 +5,23 @@
 //! The EMA reacts faster to recent price changes than the simple moving average (SMA).
 //!
 //! ## Parameters
-//! - **period**: Window size (number of data points).
+//! - **period**: Window size (number of data points, default: 9).
 //!
-//! ## Errors
-//! - **AllValuesNaN**: ema: All input data values are `NaN`.
-//! - **InvalidPeriod**: ema: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: ema: Not enough valid data points for the requested `period`.
+//! ## Inputs
+//! - **data**: Time series data as a slice of f64 values or Candles with source selection.
 //!
 //! ## Returns
 //! - **`Ok(EmaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-//! - **`Err(EmaError)`** otherwise.
+//!   Leading values up to period-1 are NaN during the warmup period.
+//! - **`Err(EmaError)`** on invalid input or parameters.
+//!
+//! ## Developer Notes
+//! - **AVX2 kernel**: ❌ Stub only - falls back to scalar implementation
+//! - **AVX512 kernel**: ❌ Stub only - falls back to scalar implementation
+//! - **Streaming update**: ✅ O(1) complexity - efficient exponential smoothing with alpha/beta coefficients
+//! - **Memory optimization**: ✅ Uses zero-copy helpers (alloc_with_nan_prefix) for output vectors
+//! - **Note**: EMA is inherently sequential (each value depends on the previous), making SIMD parallelization
+//!   less beneficial than for window-based indicators. The scalar implementation is already optimal.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

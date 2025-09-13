@@ -1,27 +1,25 @@
 //! # Polynomial Regression Bands (PRB)
 //!
-//! The Polynomial Regression Bands indicator calculates polynomial regression for any order 
-//! polynomial using LU decomposition to solve for regression coefficients. It includes an 
-//! optional 2-pole Super Smoother Filter for data smoothing before regression calculation.
+//! Calculates polynomial regression with optional smoothing and standard deviation bands.
 //!
 //! ## Parameters
-//! - **smooth_data**: Whether to apply smoothing before regression (default: true)
-//! - **smooth_period**: Period for the Super Smoother Filter (default: 10)
-//! - **regression_period**: Lookback period for regression calculation (default: 100)
-//! - **polynomial_order**: Order of the polynomial (1=linear, 2=quadratic, etc.) (default: 2)
-//! - **regression_offset**: Offset for shifting the regression curve (default: 0)
-//!
-//! ## Errors
-//! - **EmptyInputData**: prb: Input data slice is empty.
-//! - **AllValuesNaN**: prb: All input values are `NaN`.
-//! - **InvalidPeriod**: prb: Period is zero or exceeds data length.
-//! - **NotEnoughValidData**: prb: Not enough valid data points for calculation.
-//! - **InvalidOrder**: prb: Polynomial order must be >= 1.
-//! - **InvalidSmoothPeriod**: prb: Smooth period must be >= 2.
+//! - **data**: Input price data
+//! - **smooth_data**: Apply Super Smoother Filter (default: true)
+//! - **smooth_period**: SSF period (default: 10)
+//! - **regression_period**: Lookback period (default: 100)
+//! - **polynomial_order**: Order of polynomial (default: 2)
+//! - **ndev**: Standard deviation multiplier for bands (default: 2.0)
 //!
 //! ## Returns
-//! - **`Ok(PrbOutput)`** on success, containing polynomial regression values Vec<f64> of length matching the input.
-//! - **`Err(PrbError)`** otherwise.
+//! - `values`: Vec<f64> - Main regression line
+//! - `upper_band`: Vec<f64> - Upper band values
+//! - `lower_band`: Vec<f64> - Lower band values
+//!
+//! ## Developer Status
+//! **AVX2**: Stub (calls scalar)
+//! **AVX512**: Stub (calls scalar)
+//! **Streaming**: O(n²) - Full regression recalc on each update
+//! **Memory**: Good - Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings

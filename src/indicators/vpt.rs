@@ -11,14 +11,14 @@
 //! ## Parameters
 //! None (uses price/volume arrays).
 //!
-//! ## Errors
-//! - **EmptyData**: vpt: Input price or volume data is empty or mismatched.
-//! - **AllValuesNaN**: vpt: All input price or volume values are NaN.
-//! - **NotEnoughValidData**: vpt: Fewer than 2 valid price/volume points.
-//!
 //! ## Returns
 //! - **Ok(VptOutput)** with output array.
 //! - **Err(VptError)** otherwise.
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 Kernels**: Stub implementations that delegate to scalar. Comments indicate "API parity only". Cumulative nature makes SIMD challenging but could vectorize price change calculations.
+//! - **Streaming Performance**: O(1) implementation with simple cumulative sum tracking. Very efficient - only stores last price and VPT value.
+//! - **Memory Optimization**: Uses `alloc_with_nan_prefix` and batch helpers properly. Streaming is optimal with minimal state.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

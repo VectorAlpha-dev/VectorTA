@@ -1,25 +1,19 @@
 //! # Predictive Moving Average (PMA)
 //!
-//! Ehlers’ Predictive Moving Average calculates a smoothed value (`predict`)
-//! and a signal line (`trigger`) by applying a series of weighted moving averages
-//! and transformations to the input data. This indicator aims to predict future
-//! price movements more responsively than standard moving averages.
+//! Ehlers' Predictive Moving Average using weighted MAs for responsive prediction.
 //!
 //! ## Parameters
-//! - **source**: The data field to be used from the candles (e.g., "close", "hl2", etc.).
-//!   Defaults to "close" when using `with_default_candles`.
-//!
-//! ## Errors
-//! - **EmptyData**: pma: Input data slice is empty.
-//! - **NotEnoughValidData**: pma: Fewer than 7 valid (non-`NaN`) data points remain
-//!   after the first valid index.
-//! - **AllValuesNaN**: pma: All input data values are `NaN`.
+//! - **data**: Input price data
 //!
 //! ## Returns
-//! - **`Ok(PmaOutput)`** on success, containing two `Vec<f64>` (`predict` and `trigger`),
-//!   each matching the input length and filled with leading `NaN`s until enough data
-//!   points have accumulated.
-//! - **`Err(PmaError)`** otherwise.
+//! - `predict`: Vec<f64> - Predictive values matching input length
+//! - `trigger`: Vec<f64> - Signal line values matching input length
+//!
+//! ## Developer Status
+//! **AVX2**: Stub (calls scalar)
+//! **AVX512**: Has short/long variants but all stubs
+//! **Streaming**: O(1) - Uses fixed-size ring buffers
+//! **Memory**: Good - Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

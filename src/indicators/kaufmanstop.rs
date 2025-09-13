@@ -1,23 +1,22 @@
 //! # Kaufmanstop Indicator
 //!
 //! Adaptive price stop based on the average true range of price (high-low).
-//! Supports batch parameter sweeping and optional AVX acceleration.
+//! Calculates stops above or below price using MA of range multiplied by a factor.
 //!
 //! ## Parameters
 //! - **period**: Window size for range average (default: 22)
 //! - **mult**: Multiplier for averaged range (default: 2.0)
-//! - **direction**: "long" (stop below price) or "short" (above) (default: "long")
-//! - **ma_type**: Type of moving average for range ("sma", "ema", etc.; default: "sma")
-//!
-//! ## Errors
-//! - **EmptyData**: All relevant slices empty
-//! - **InvalidPeriod**: Zero/too large period
-//! - **NotEnoughValidData**: Not enough non-NaN data
-//! - **AllValuesNaN**: All inputs NaN
+//! - **direction**: "long" (stop below) or "short" (stop above) (default: "long")
+//! - **ma_type**: Moving average type for range (default: "sma")
 //!
 //! ## Returns
-//! - **Ok(KaufmanstopOutput)**: Output vector length matches input, leading NaNs where window not filled
-//! - **Err(KaufmanstopError)**: Error on failure
+//! - **`Ok(KaufmanstopOutput)`** on success (`values: Vec<f64>` of length matching input)
+//! - **`Err(KaufmanstopError)`** on failure
+//!
+//! ## Developer Status
+//! - **SIMD Kernels**: AVX2 (stub), AVX512 (stubs - short/long variants)
+//! - **Streaming**: O(n) performance (recalculates MA on full buffer each update)
+//! - **Memory**: Good zero-copy usage (alloc_with_nan_prefix, make_uninit_matrix)
 use crate::indicators::moving_averages::ma::{ma, MaData};
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;

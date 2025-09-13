@@ -1,3 +1,24 @@
+//! # Ultimate Moving Average (UMA)
+//!
+//! An adaptive moving average that dynamically adjusts its length based on multiple indicators
+//! including RSI, MFI, and standard deviation to respond to market conditions.
+//!
+//! ## Parameters
+//! - **accelerator**: Acceleration factor for dynamic length adjustment (default: 8.0)
+//! - **min_length**: Minimum lookback period (default: 5)
+//! - **max_length**: Maximum lookback period (default: 50)
+//! - **smooth_length**: Smoothing period for final output (default: 4)
+//!
+//! ## Returns
+//! - **`Ok(UmaOutput)`** containing values vector of length matching input data
+//! - **`Err(UmaError)`** on calculation errors
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 kernels**: Not implemented (no explicit SIMD kernel functions)
+//! - **Streaming update**: O(n) - calls full uma function on each update
+//! - **Memory optimization**: Uses zero-copy helpers (alloc_with_nan_prefix)
+//! - **Optimization needed**: Implement SIMD kernels and optimize streaming to O(1)
+
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 #[cfg(feature = "python")]

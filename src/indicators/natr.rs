@@ -1,23 +1,21 @@
 //! # Normalized Average True Range (NATR)
 //!
-//! A volatility indicator that normalizes the Average True Range (ATR) by the
-//! closing price, expressed as a percentage. NATR is useful for comparing volatility
-//! across different assets or time periods where price scales differ.
+//! Normalizes ATR by closing price as a percentage for cross-asset volatility comparison.
 //!
 //! ## Parameters
-//! - **period**: The number of data points to consider for the ATR calculation (Wilder's method). Defaults to 14.
-//!
-//! ## Errors
-//! - **EmptyData**: natr: Input data slice is empty.
-//! - **InvalidPeriod**: natr: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: natr: Fewer than `period` valid (non-`NaN`) data points remain
-//!   after the first valid index.
-//! - **AllValuesNaN**: natr: All input data values are `NaN`.
+//! - **high**: High price data
+//! - **low**: Low price data
+//! - **close**: Close price data
+//! - **period**: ATR calculation period (default: 14)
 //!
 //! ## Returns
-//! - **`Ok(NatrOutput)`** on success, containing a `Vec<f64>` matching the input length,
-//!   with leading `NaN`s until the ATR window is filled.
-//! - **`Err(NatrError)`** otherwise.
+//! - `Vec<f64>` - NATR values (percentage) matching input length
+//!
+//! ## Developer Status
+//! **AVX2**: Stub (calls scalar)
+//! **AVX512**: Has short/long variants but all stubs
+//! **Streaming**: O(1) - Uses exponential smoothing
+//! **Memory**: Good - Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

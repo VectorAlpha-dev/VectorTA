@@ -1,18 +1,23 @@
 //! # Pascal Weighted Moving Average (PWMA)
 //!
-//! A weighted moving average using Pascal’s triangle coefficients for weights.
+//! A weighted moving average using Pascal's triangle coefficients for weights.
+//! The weights follow binomial coefficients, giving more emphasis to middle values
+//! in the window, creating a bell-curve-like weighting pattern.
 //!
 //! ## Parameters
 //! - **period**: Window size (number of data points). Defaults to 5.
 //!
-//! ## Errors
-//! - **AllValuesNaN**: pwma: All input data values are `NaN`.
-//! - **InvalidPeriod**: pwma: `period` is zero or exceeds data length.
-//! - **PascalWeightsSumZero**: pwma: The computed Pascal weights sum to zero (unexpected).
-//!
 //! ## Returns
 //! - **`Ok(PwmaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
 //! - **`Err(PwmaError)`** otherwise.
+//!
+//! ## Developer Notes
+//! - **AVX2 kernel**: ✅ Fully implemented - 4-wide SIMD with FMA operations for weighted averaging
+//! - **AVX512 kernel**: ✅ Fully implemented - Dual-path optimization (short ≤32, long >32 periods), 8-wide SIMD
+//! - **Streaming update**: ⚠️ O(n) complexity - dot_ring() iterates through all Pascal weights
+//!   - TODO: Could optimize to O(1) with incremental updates using Pascal's triangle properties
+//! - **Memory optimization**: ✅ Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix) for output vectors
+//! - **Note**: Pascal weights are precomputed and normalized, suitable for SIMD vectorization
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

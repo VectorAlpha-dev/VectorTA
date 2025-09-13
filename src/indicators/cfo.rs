@@ -1,29 +1,20 @@
 //! # Chande Forecast Oscillator (CFO)
 //!
-//! Calculates `scalar * ((source - LinReg(source, period)) / source)` over a moving window.
+//! CFO measures the percentage difference between the current price and a linear regression forecast.
+//! It helps identify overbought/oversold conditions and potential trend changes.
 //!
 //! ## Parameters
-//! - **period**: Window size for internal linear regression (default 14)
-//! - **scalar**: Multiplier for output (default 100.0)
-//!
-//! ## Errors
-//! - **AllValuesNaN**: All input data values are NaN
-//! - **InvalidPeriod**: Period is zero or exceeds data length
-//! - **NoData**: Input data is empty
+//! - **period**: Window size for linear regression calculation (default: 14)
+//! - **scalar**: Multiplier for percentage output (default: 100.0)
 //!
 //! ## Returns
-//! - `Ok(CfoOutput)` on success (with output vector)
-//! - `Err(CfoError)` on failure
+//! - **`Ok(CfoOutput)`** on success, containing a `Vec<f64>` of length matching the input.
+//! - **`Err(CfoError)`** on various error conditions.
 //!
-//! ## Example
-//! ```
-//! use ta_indicators::{cfo, CfoInput, CfoParams};
-//! let prices = vec![1.0; 20];
-//! let params = CfoParams { period: Some(14), scalar: Some(100.0) };
-//! let input = CfoInput::from_slice(&prices, params);
-//! let output = cfo(&input).expect("Failed to calculate CFO");
-//! assert_eq!(output.values.len(), prices.len());
-//! ```
+//! ## Developer Status
+//! - **SIMD Kernels**: AVX2 and AVX512 (both short/long variants) are STUBS - fall back to scalar implementation
+//! - **Streaming Performance**: O(n) - requires full window for linear regression calculation
+//! - **Memory Optimization**: GOOD - properly uses alloc_with_nan_prefix and make_uninit_matrix helpers for zero-copy allocation
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyUntypedArrayMethods};
 #[cfg(feature = "python")]

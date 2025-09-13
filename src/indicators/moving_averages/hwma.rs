@@ -2,20 +2,22 @@
 //!
 //! Triple-smoothed adaptive moving average with three parameters (`na`, `nb`, `nc`).
 //! Each parameter adjusts a component of smoothing: level (`na`), trend (`nb`), and acceleration (`nc`).
-//! API and implementation structure matches alma.rs, including AVX stubs, kernel support, batch/grid/stream, and unit tests.
+//! This indicator uses exponential smoothing to track level, trend, and acceleration components of price movement.
 //!
 //! ## Parameters
-//! - **na**: Smoothing for level (0,1)
-//! - **nb**: Smoothing for trend (0,1)
-//! - **nc**: Smoothing for acceleration (0,1)
-//!
-//! ## Errors
-//! - **EmptyData**: hwma: The provided data array is empty.
-//! - **AllValuesNaN**: hwma: All input data values are `NaN`.
-//! - **InvalidParams**: hwma: One or more of `(na, nb, nc)` are out of (0,1).
+//! - **na**: Smoothing for level (0,1) - controls responsiveness to price changes
+//! - **nb**: Smoothing for trend (0,1) - controls trend following behavior
+//! - **nc**: Smoothing for acceleration (0,1) - controls rate of change tracking
 //!
 //! ## Returns
 //! - **`Ok(HwmaOutput)`** with results, or **`Err(HwmaError)`** on failure.
+//!
+//! ## Developer Notes
+//! - **AVX2 kernel**: ❌ Stub only - falls back to scalar implementation
+//! - **AVX512 kernel**: ❌ Stub only - falls back to scalar implementation
+//! - **Streaming update**: ✅ O(1) complexity - efficient incremental computation with three state variables
+//! - **Memory optimization**: ✅ Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix) for output vectors
+//! - **TODO**: Implement SIMD kernels for vectorized triple exponential smoothing calculations
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

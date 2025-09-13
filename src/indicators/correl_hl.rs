@@ -6,18 +6,15 @@
 //! ## Parameters
 //! - **period**: The window size (number of data points). Defaults to 9.
 //!
-//! ## Errors
-//! - **EmptyData**: correl_hl: The `high` or `low` arrays are empty.
-//! - **InvalidPeriod**: correl_hl: `period` is zero or exceeds the data length.
-//! - **DataLengthMismatch**: correl_hl: `high` and `low` arrays must have the same length.
-//! - **NotEnoughValidData**: correl_hl: Fewer than `period` valid (non-`NaN`) data points remain
-//!   after the first valid index.
-//! - **AllValuesNaN**: correl_hl: All `high` or `low` values are `NaN`.
-//!
 //! ## Returns
 //! - **`Ok(CorrelHlOutput)`** on success, containing a `Vec<f64>` matching the input length,
 //!   with leading `NaN`s until the rolling window is filled.
-//! - **`Err(CorrelHlError)`** otherwise.
+//! - **`Err(CorrelHlError)`** on various error conditions.
+//!
+//! ## Developer Status
+//! - **SIMD Kernels**: AVX2 is STUB, AVX512 has short/long variants but both are STUBS - fall back to scalar
+//! - **Streaming Performance**: O(1) - uses running sums for efficient incremental correlation calculation
+//! - **Memory Optimization**: GOOD - uses alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes for batch operations
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};

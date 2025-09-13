@@ -7,17 +7,15 @@
 //! - **period**: The lookback period for calculations (default: 10)
 //! - **mode**: Calculation mode - 0: average of both, 1: intrabar only, 2: group only (default: 0)
 //!
-//! ## Errors
-//! - **EmptyInputData**: aso: Input data slice is empty.
-//! - **AllValuesNaN**: aso: All input values are `NaN`.
-//! - **InvalidPeriod**: aso: Period is zero or exceeds data length.
-//! - **NotEnoughValidData**: aso: Not enough valid data points for calculation.
-//! - **MissingData**: aso: Required OHLC data is missing or mismatched lengths.
-//! - **InvalidMode**: aso: Mode must be 0, 1, or 2.
-//!
 //! ## Returns
 //! - **`Ok(AsoOutput)`** on success, containing bulls and bears Vec<f64> of length matching the input.
 //! - **`Err(AsoError)`** otherwise.
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 kernels**: Stubs (both fallback to scalar implementation)
+//! - **Streaming update**: O(n) - iterates through period to find group high/low
+//! - **Memory optimization**: Uses zero-copy helpers (alloc_with_nan_prefix)
+//! - **Optimization needed**: Implement SIMD kernels and optimize streaming to O(1)
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings

@@ -1,23 +1,21 @@
 //! # Percentage Price Oscillator (PPO)
 //!
-//! Expresses the difference between two moving averages as a percentage of the slower moving average.
-//! Parity with alma.rs API and features. SIMD/AVX2/AVX512 stubs provided for benchmarking, batch/grid/stream API available.
-//! Input validation, error handling, and unit tests matching alma.rs expectations.
+//! Expresses the difference between two moving averages as a percentage of the slower MA.
 //!
 //! ## Parameters
+//! - **data**: Input price data
 //! - **fast_period**: Short-term MA period (default: 12)
 //! - **slow_period**: Long-term MA period (default: 26)
-//! - **ma_type**: MA type, e.g., "sma", "ema" (default: "sma")
-//!
-//! ## Errors
-//! - **AllValuesNaN**: All input data values are NaN
-//! - **InvalidPeriod**: fast or slow period is zero or exceeds data length
-//! - **NotEnoughValidData**: Not enough valid data for slow period
-//! - **MaError**: Internal MA computation error
+//! - **ma_type**: Moving average type (default: "sma")
 //!
 //! ## Returns
-//! - **Ok(PpoOutput)** on success, containing Vec<f64> with same length as input
-//! - **Err(PpoError)** otherwise
+//! - `Vec<f64>` - PPO values as percentage, matching input length
+//!
+//! ## Developer Status
+//! **AVX2**: Stub (calls scalar)
+//! **AVX512**: Has short/long variants but all stubs
+//! **Streaming**: O(n) - Recalculates full MA on each update
+//! **Memory**: Good - Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};

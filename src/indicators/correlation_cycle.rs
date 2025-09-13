@@ -1,7 +1,24 @@
 //! # Correlation Cycle (John Ehlers)
 //!
 //! Computes real, imag, angle, and market state outputs based on correlation phasor analysis.
-//! Parity with alma.rs structure, SIMD feature gating, and batch/stream/builder APIs included.
+//! Uses phase correlation to identify market cycles and determine market state (trending vs cycling).
+//!
+//! ## Parameters
+//! - **period**: Window size for correlation calculation (default: 20)
+//! - **threshold**: Threshold for market state determination (default: 9.0)
+//!
+//! ## Returns
+//! - **`Ok(CorrelationCycleOutput)`** on success, containing four `Vec<f64>` arrays:
+//!   - real: Real component of the phasor
+//!   - imag: Imaginary component of the phasor
+//!   - angle: Phase angle in degrees
+//!   - state: Market state (1.0 for trending, 0.0 for cycling)
+//! - **`Err(CorrelationCycleError)`** on various error conditions.
+//!
+//! ## Developer Status
+//! - **SIMD Kernels**: AVX2 and AVX512 (both short/long variants) are STUBS - fall back to scalar implementation
+//! - **Streaming Performance**: O(n) - requires full window recalculation for correlation analysis
+//! - **Memory Optimization**: GOOD - uses alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes for efficient memory usage
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};

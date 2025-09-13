@@ -10,15 +10,14 @@
 //! - **kc_mult_mid**: Keltner Channel multiplier #2 (default: 1.5)
 //! - **kc_mult_low**: Keltner Channel multiplier #3 (default: 2.0)
 //!
-//! ## Errors
-//! - **EmptyData**: Input data is empty
-//! - **InvalidLength**: Period is zero or exceeds data length
-//! - **NotEnoughData**: Insufficient data for calculation
-//! - **AllValuesNaN**: All input values are NaN
-//!
 //! ## Returns
 //! - **momentum**: Momentum oscillator values
 //! - **squeeze**: Squeeze state (0=NoSqz, 1=LowSqz, 2=MidSqz, 3=HighSqz)
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 Kernels**: Not implemented - no SIMD-specific functions found. Indicator only delegates to SMA which may have SIMD optimizations. Direct SIMD optimization opportunity for BB/KC band calculations and linear regression.
+//! - **Streaming Performance**: O(n) implementation - recalculates SMA, standard deviation, and TR on each update by iterating through entire ring buffer. Could be optimized to O(1) with running sums.
+//! - **Memory Optimization**: Uses `alloc_with_nan_prefix` for TR calculation. Main calculation doesn't use batch helpers. Streaming uses fixed-size ring buffers which is memory efficient.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyUntypedArrayMethods};

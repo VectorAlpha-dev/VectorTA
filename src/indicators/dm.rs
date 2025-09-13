@@ -3,21 +3,21 @@
 //! Measures the strength of upward and downward price movements based on changes
 //! between consecutive high and low values. +DM is computed when the positive
 //! range (current high minus previous high) exceeds the negative range (previous
-//! low minus current low), while -DM is computed in the opposite case. Both
-//! values can be optionally smoothed over the specified `period`.
+//! low minus current low), while -DM is computed in the opposite case.
 //!
 //! ## Parameters
-//! - **period**: The smoothing window size (number of data points). Defaults to 14.
-//!
-//! ## Errors
-//! - **AllValuesNaN**: dm: All input data values are `NaN`.
-//! - **EmptyData**: dm: Input high/low slices are empty or mismatched in length.
-//! - **InvalidPeriod**: dm: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: dm: Not enough valid data points for the requested `period`.
+//! - **period**: The smoothing window size (default: 14)
 //!
 //! ## Returns
-//! - **`Ok(DmOutput)`** on success, containing two `Vec<f64>` matching the input length.
-//! - **`Err(DmError)`** otherwise.
+//! - **`Ok(DmOutput)`** on success, containing two `Vec<f64>` arrays:
+//!   - plus: Plus directional movement values
+//!   - minus: Minus directional movement values
+//! - **`Err(DmError)`** on various error conditions.
+//!
+//! ## Developer Status
+//! - **SIMD Kernels**: AVX2 and AVX512 (including short/long variants) are STUBS - fall back to scalar implementation
+//! - **Streaming Performance**: O(1) - uses exponential smoothing for efficient incremental updates
+//! - **Memory Optimization**: GOOD - uses alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes throughout
 
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;

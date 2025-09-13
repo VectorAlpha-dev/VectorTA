@@ -8,15 +8,15 @@
 //! ## Parameters
 //! - **length**: Lookback window (default: 14)
 //!
-//! ## Errors
-//! - **AllValuesNaN**: aroon: All input data values are `NaN`.
-//! - **InvalidLength**: aroon: `length` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: aroon: Not enough valid data points for the requested `length`.
-//! - **MismatchSliceLength**: aroon: `high` and `low` slices differ in length.
-//!
 //! ## Returns
 //! - **`Ok(AroonOutput)`** on success, containing vectors for aroon_up and aroon_down.
 //! - **`Err(AroonError)`** otherwise.
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 kernels**: Stubs (all call scalar implementation)
+//! - **Streaming update**: O(n) - iterates through window (length) to find min/max indices
+//! - **Memory optimization**: Uses zero-copy helpers (alloc_with_nan_prefix)
+//! - **Optimization needed**: Implement SIMD kernels and optimize streaming to O(1)
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};

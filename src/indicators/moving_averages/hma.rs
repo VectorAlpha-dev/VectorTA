@@ -10,16 +10,16 @@
 //! ## Parameters
 //! - **period**: Window size (number of data points). (defaults to 5)
 //!
-//! ## Errors
-//! - **NoData**: hma: No data provided.
-//! - **AllValuesNaN**: hma: All input data values are `NaN`.
-//! - **InvalidPeriod**: hma: `period` is zero or exceeds the data length.
-//! - **ZeroHalf**: hma: Cannot calculate half of period.
-//! - **ZeroSqrtPeriod**: hma: Cannot calculate sqrt of period.
-//!
 //! ## Returns
 //! - **`Ok(HmaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
 //! - **`Err(HmaError)`** otherwise.
+//!
+//! ## Developer Notes
+//! - **AVX2 kernel**: ✅ Fully implemented - 4-wide SIMD with FMA operations for weighted moving averages
+//! - **AVX512 kernel**: ✅ Fully implemented - 8-wide SIMD with optimized weighted average calculations
+//! - **Streaming update**: ⚠️ O(n) complexity - LinWma's `dot_ring()` iterates through all period weights
+//!   - TODO: Could potentially optimize to O(1) with incremental weight updates
+//! - **Memory optimization**: ✅ Uses zero-copy helpers (alloc_with_nan_prefix) for output vectors
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
