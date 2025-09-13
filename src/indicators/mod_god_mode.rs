@@ -533,6 +533,26 @@ pub fn mod_god_mode_with_kernel(input: &ModGodModeInput, kernel: Kernel) -> Resu
     // Resolve kernel
     let kern = match kernel { Kernel::Auto => detect_best_kernel(), k => k };
     
+    // Check for classic kernel optimization with default parameters
+    // DISABLED: Still has accuracy issues even with proper warmup
+    if false && kern == Kernel::Scalar && 
+       input.get_n1() == 17 && 
+       input.get_n2() == 6 && 
+       input.get_n3() == 4 && 
+       input.get_mode() == ModGodModeMode::TraditionMg {
+        // Use optimized classic kernel for default parameters
+        unsafe {
+            mod_god_mode_scalar_classic_tradition_mg(
+                high, low, close, volume,
+                17, 6, 4,
+                first, warm,
+                input.get_use_volume(),
+                &mut wt, &mut sig, &mut hist
+            )?;
+        }
+        return Ok(ModGodModeOutput { wavetrend: wt, signal: sig, histogram: hist });
+    }
+    
     // Delegate all calculation to the zero-copy into_slices function
     mod_god_mode_into_slices(&mut wt, &mut sig, &mut hist, input, kern)?;
     
@@ -804,6 +824,28 @@ pub fn mod_god_mode_into_slices(
     let warm = first + need - 1;
     let actual = match kern { Kernel::Auto => detect_best_kernel(), k => k };
     
+    // Check for classic kernel optimization with default parameters
+    // DISABLED: Still has accuracy issues even with proper warmup
+    if false && actual == Kernel::Scalar && 
+       n1 == 17 && n2 == 6 && n3 == 4 && 
+       input.get_mode() == ModGodModeMode::TraditionMg {
+        // Use optimized classic kernel for default parameters
+        unsafe {
+            mod_god_mode_scalar_classic_tradition_mg(
+                high, low, close, volume,
+                17, 6, 4,
+                first, warm,
+                input.get_use_volume(),
+                dst_wavetrend, dst_signal, dst_hist
+            )?;
+        }
+        // Finalize warmup prefix with NaNs
+        for v in &mut dst_wavetrend[..warm] { *v = f64::NAN; }
+        for v in &mut dst_signal[..warm] { *v = f64::NAN; }
+        for v in &mut dst_hist[..warm] { *v = f64::NAN; }
+        return Ok(());
+    }
+    
     // Calculate components
     let tci = calculate_tci(close, n1, n2, actual)?;
     let mf = calculate_mf(high, low, close, volume, n3, actual)?;
@@ -921,6 +963,362 @@ pub fn mod_god_mode_into_slices(
     for v in &mut dst_wavetrend[..warm] { *v = f64::NAN; }
     for v in &mut dst_signal[..warm] { *v = f64::NAN; }
     for v in &mut dst_hist[..warm] { *v = f64::NAN; }
+    
+    Ok(())
+}
+
+// ============================================================================
+// CLASSIC KERNEL - Optimized for default TraditionMg mode
+// ============================================================================
+
+/// Classic kernel for TraditionMg mode with inline calculations
+/// Eliminates ~8 function calls by inlining TCI, MF, RSI, CBCI, LRSI, and SMA calculations
+#[inline]
+pub unsafe fn mod_god_mode_scalar_classic_tradition_mg(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: Option<&[f64]>,
+    n1: usize,  // 17
+    n2: usize,  // 6
+    n3: usize,  // 4
+    first: usize,
+    _simple_warmup: usize,  // Ignored - we calculate proper compound warmup
+    use_volume: bool,
+    wavetrend: &mut [f64],
+    signal: &mut [f64],
+    histogram: &mut [f64],
+) -> Result<(), ModGodModeError> {
+    let len = close.len();
+    if len == 0 { return Err(ModGodModeError::EmptyInputData); }
+    
+    // Calculate proper compound warmup periods for each component
+    // TCI needs: EMA1(n1) -> EMA2(n1) -> EMA3(n2) = n1 + n1 + n2 - 2
+    let tci_warmup = first + n1 + n1 + n2 - 2;
+    // MF/RSI needs: n3 periods
+    let mf_warmup = first + n3;
+    // CBCI needs: RSI(n3) + momentum(n2) or RSI(n3) + EMA(n3)
+    let cbci_warmup = first + n3 + n2.max(n3);
+    // LRSI is same as RSI
+    let lrsi_warmup = first + n3;
+    
+    // The actual warmup where we can start producing valid wavetrend values
+    let actual_warmup = tci_warmup.max(mf_warmup).max(cbci_warmup).max(lrsi_warmup);
+    
+    // === TCI Calculation (inline 3 EMA passes) ===
+    // EMA1 of close
+    let mut ema1 = vec![f64::NAN; len];
+    let alpha1 = 2.0 / (n1 as f64 + 1.0);
+    let beta1 = 1.0 - alpha1;
+    if first < len {
+        ema1[first] = close[first];
+        for i in (first + 1)..len {
+            if close[i].is_finite() {
+                ema1[i] = alpha1 * close[i] + beta1 * ema1[i - 1];
+            } else {
+                ema1[i] = ema1[i - 1];
+            }
+        }
+    }
+    
+    // Calculate absolute deviations from EMA1
+    let mut abs_dev = vec![f64::NAN; len];
+    for i in first..len {
+        if ema1[i].is_finite() {
+            abs_dev[i] = (close[i] - ema1[i]).abs();
+        }
+    }
+    
+    // EMA2 of absolute deviations (starts from first + n1 - 1)
+    let mut ema2 = vec![f64::NAN; len];
+    let ema2_start = (first + n1 - 1).min(len - 1);
+    if ema2_start < len && abs_dev[ema2_start].is_finite() {
+        ema2[ema2_start] = abs_dev[ema2_start];
+        for i in (ema2_start + 1)..len {
+            if abs_dev[i].is_finite() {
+                ema2[i] = alpha1 * abs_dev[i] + beta1 * ema2[i - 1];
+            } else {
+                ema2[i] = ema2[i - 1];
+            }
+        }
+    }
+    
+    // Normalize to get CI (starts from first + n1 + n1 - 2)
+    let mut ci = vec![f64::NAN; len];
+    let ci_start = (first + n1 + n1 - 2).min(len - 1);
+    for i in ci_start..len {
+        if ema2[i].is_finite() && ema2[i] != 0.0 {
+            ci[i] = (close[i] - ema1[i]) / (0.025 * ema2[i]);  // Note: using 0.025 as in original
+        }
+    }
+    
+    // EMA3 of CI to get TCI (starts from tci_warmup)
+    let mut tci = vec![f64::NAN; len];
+    let alpha2 = 2.0 / (n2 as f64 + 1.0);
+    let beta2 = 1.0 - alpha2;
+    if tci_warmup < len && ci[tci_warmup].is_finite() {
+        tci[tci_warmup] = ci[tci_warmup] + 50.0;  // Add 50 offset for TCI
+        for i in (tci_warmup + 1)..len {
+            if ci[i].is_finite() {
+                tci[i] = alpha2 * ci[i] + beta2 * (tci[i - 1] - 50.0) + 50.0;  // Maintain offset
+            } else {
+                tci[i] = tci[i - 1];
+            }
+        }
+    }
+    
+    // === MF Calculation (inline MFI with volume or RSI without) ===
+    let mut mf = vec![f64::NAN; len];
+    if use_volume && volume.is_some() {
+        // MFI calculation with volume
+        let vol = volume.unwrap();
+        if first + n3 <= len {
+            // Calculate typical price
+            let mut typical_price = vec![0.0; len];
+            for i in first..len {
+                typical_price[i] = (high[i] + low[i] + close[i]) / 3.0;
+            }
+            
+            let mut pos_flow = 0.0;
+            let mut neg_flow = 0.0;
+            
+            // Initialize first n3 periods
+            for i in (first + 1)..=(first + n3).min(len - 1) {
+                let mf_raw = typical_price[i] * vol[i];
+                if typical_price[i] > typical_price[i - 1] {
+                    pos_flow += mf_raw;
+                } else if typical_price[i] < typical_price[i - 1] {
+                    neg_flow += mf_raw;
+                }
+            }
+            
+            // Calculate MFI for remaining periods
+            for i in (first + n3)..len {
+                if i > first + n3 {
+                    // Update sliding window
+                    let old_idx = i - n3;
+                    let old_mf = typical_price[old_idx] * vol[old_idx];
+                    if old_idx > first && typical_price[old_idx] > typical_price[old_idx - 1] {
+                        pos_flow -= old_mf;
+                    } else if old_idx > first && typical_price[old_idx] < typical_price[old_idx - 1] {
+                        neg_flow -= old_mf;
+                    }
+                    
+                    let new_mf = typical_price[i] * vol[i];
+                    if typical_price[i] > typical_price[i - 1] {
+                        pos_flow += new_mf;
+                    } else if typical_price[i] < typical_price[i - 1] {
+                        neg_flow += new_mf;
+                    }
+                }
+                
+                mf[i] = if neg_flow == 0.0 {
+                    100.0
+                } else {
+                    100.0 - (100.0 / (1.0 + pos_flow / neg_flow))
+                };
+            }
+        }
+    } else {
+        // RSI calculation without volume
+        if first + n3 <= len {
+            let mut avg_gain = 0.0;
+            let mut avg_loss = 0.0;
+            
+            // Calculate initial averages
+            for i in (first + 1)..=(first + n3) {
+                let change = close[i] - close[i - 1];
+                if change > 0.0 {
+                    avg_gain += change;
+                } else {
+                    avg_loss -= change;
+                }
+            }
+            avg_gain /= n3 as f64;
+            avg_loss /= n3 as f64;
+            
+            // Calculate RSI using Wilder's smoothing
+            for i in (first + n3)..len {
+                let change = close[i] - close[i - 1];
+                let (gain, loss) = if change > 0.0 {
+                    (change, 0.0)
+                } else {
+                    (0.0, -change)
+                };
+                
+                avg_gain = (avg_gain * (n3 - 1) as f64 + gain) / n3 as f64;
+                avg_loss = (avg_loss * (n3 - 1) as f64 + loss) / n3 as f64;
+                
+                mf[i] = if avg_loss == 0.0 {
+                    100.0
+                } else {
+                    100.0 - (100.0 / (1.0 + avg_gain / avg_loss))
+                };
+            }
+        }
+    }
+    
+    // === RSI Calculation (same as MF for tradition_mg when no volume) ===
+    let rsi = if use_volume && volume.is_some() {
+        // When using volume, RSI needs to be calculated separately
+        let mut rsi_vals = vec![f64::NAN; len];
+        if mf_warmup < len {
+            let mut avg_gain = 0.0;
+            let mut avg_loss = 0.0;
+            
+            // Calculate initial averages
+            for i in (first + 1)..(first + n3 + 1).min(len) {
+                let change = close[i] - close[i - 1];
+                if change > 0.0 {
+                    avg_gain += change;
+                } else {
+                    avg_loss -= change;
+                }
+            }
+            avg_gain /= n3 as f64;
+            avg_loss /= n3 as f64;
+            
+            // Calculate RSI using Wilder's smoothing
+            for i in mf_warmup..len {
+                if i > mf_warmup {
+                    let change = close[i] - close[i - 1];
+                    let (gain, loss) = if change > 0.0 {
+                        (change, 0.0)
+                    } else {
+                        (0.0, -change)
+                    };
+                    
+                    avg_gain = (avg_gain * (n3 - 1) as f64 + gain) / n3 as f64;
+                    avg_loss = (avg_loss * (n3 - 1) as f64 + loss) / n3 as f64;
+                }
+                
+                rsi_vals[i] = if avg_loss == 0.0 {
+                    100.0
+                } else {
+                    100.0 - (100.0 / (1.0 + avg_gain / avg_loss))
+                };
+            }
+        }
+        rsi_vals
+    } else {
+        mf.clone()
+    };
+    
+    // === CBCI Calculation (RSI momentum + EMA of RSI) ===
+    let mut cbci = vec![f64::NAN; len];
+    
+    // RSI momentum (difference over n2 periods)
+    let rsi_mom_start = mf_warmup + n2;
+    let mut rsi_mom = vec![f64::NAN; len];
+    if rsi_mom_start < len {
+        for i in rsi_mom_start..len {
+            if rsi[i].is_finite() && rsi[i - n2].is_finite() {
+                rsi_mom[i] = rsi[i] - rsi[i - n2];
+            }
+        }
+    }
+    
+    // EMA of RSI
+    let alpha3 = 2.0 / (n3 as f64 + 1.0);
+    let beta3 = 1.0 - alpha3;
+    let mut rsi_ema = vec![f64::NAN; len];
+    let rsi_ema_start = mf_warmup;
+    if rsi_ema_start < len && rsi[rsi_ema_start].is_finite() {
+        rsi_ema[rsi_ema_start] = rsi[rsi_ema_start];
+        for i in (rsi_ema_start + 1)..len {
+            if rsi[i].is_finite() {
+                rsi_ema[i] = alpha3 * rsi[i] + beta3 * rsi_ema[i - 1];
+            } else {
+                rsi_ema[i] = rsi_ema[i - 1];
+            }
+        }
+    }
+    
+    // CBCI = momentum + EMA (starts from cbci_warmup)
+    for i in cbci_warmup..len {
+        if rsi_mom[i].is_finite() && rsi_ema[i].is_finite() {
+            cbci[i] = rsi_mom[i] + rsi_ema[i];
+        }
+    }
+    
+    // === LRSI Calculation (RSI with LSMA smoothing) ===
+    // For simplicity, using RSI values directly as LRSI approximation
+    let lrsi = rsi.clone();
+    
+    // === Combine components into wavetrend ===
+    for i in actual_warmup..len {
+        let mut sum = 0.0;
+        let mut count = 0;
+        
+        if tci[i].is_finite() {
+            sum += tci[i];
+            count += 1;
+        }
+        if mf[i].is_finite() {
+            sum += mf[i];
+            count += 1;
+        }
+        if rsi[i].is_finite() {
+            sum += rsi[i];
+            count += 1;
+        }
+        if cbci[i].is_finite() {
+            sum += cbci[i];
+            count += 1;
+        }
+        if lrsi[i].is_finite() {
+            sum += lrsi[i];
+            count += 1;
+        }
+        
+        if count > 0 {
+            wavetrend[i] = sum / count as f64;
+        }
+    }
+    
+    // === Signal Calculation (inline SMA of wavetrend) ===
+    let signal_start = actual_warmup + 5;  // Need 6 values for SMA
+    if signal_start < len {
+        // Initialize first SMA value
+        let mut sum = 0.0;
+        for i in actual_warmup..(actual_warmup + 6).min(len) {
+            if wavetrend[i].is_finite() {
+                sum += wavetrend[i];
+            }
+        }
+        signal[signal_start] = sum / 6.0;
+        
+        // Sliding window for remaining values
+        for i in (signal_start + 1)..len {
+            if wavetrend[i].is_finite() && wavetrend[i - 6].is_finite() {
+                sum += wavetrend[i] - wavetrend[i - 6];
+                signal[i] = sum / 6.0;
+            } else {
+                signal[i] = signal[i - 1];
+            }
+        }
+    }
+    
+    // === Histogram Calculation (inline EMA of (wt - sig)*2 + 50) ===
+    let hist_start = signal_start;
+    if hist_start < len && signal[hist_start].is_finite() {
+        let alpha3 = 2.0 / (n3 as f64 + 1.0);
+        let beta3 = 1.0 - alpha3;
+        
+        // Calculate initial value
+        let diff = (wavetrend[hist_start] - signal[hist_start]) * 2.0 + 50.0;
+        histogram[hist_start] = diff;
+        
+        // EMA smoothing
+        for i in (hist_start + 1)..len {
+            if signal[i].is_finite() && wavetrend[i].is_finite() {
+                let diff = (wavetrend[i] - signal[i]) * 2.0 + 50.0;
+                histogram[i] = alpha3 * diff + beta3 * histogram[i - 1];
+            } else if i > 0 {
+                histogram[i] = histogram[i - 1];
+            }
+        }
+    }
     
     Ok(())
 }

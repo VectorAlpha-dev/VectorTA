@@ -49,7 +49,7 @@ use my_project::indicators::moving_averages::{
 	swma::{swma_with_kernel, SwmaBatchBuilder, SwmaInput},
 	tema::{tema_with_kernel, TemaBatchBuilder, TemaInput},
 	tilson::{tilson_with_kernel, TilsonBatchBuilder, TilsonInput},
-	tradjema::{tradjema_with_kernel, TradjemaBatchBuilder, TradjemaInput},
+	tradjema::{tradjema_with_kernel, TradjemaInput},
 	trendflex::{trendflex_with_kernel, TrendFlexBatchBuilder, TrendFlexInput},
 	trima::{trima_with_kernel, TrimaBatchBuilder, TrimaInput},
 	uma::{uma_with_kernel, UmaBatchBuilder, UmaInput},
@@ -78,12 +78,10 @@ use my_project::indicators::moving_averages::{
 
 use my_project::indicators::{
 	acosc::{acosc as acosc_raw, AcoscInput},
-	aso::{aso as aso_raw, AsoInput},
-	dvdiqqe::{dvdiqqe_with_kernel, DvdiqqeBatchBuilder, DvdiqqeInput},
 	lpc::{lpc as lpc_raw, LpcInput},
 	macz::{macz_with_kernel, MaczBatchBuilder, MaczInput},
-	ott::{ott_batch_with_kernel, OttBatchBuilder, OttInput},
-	prb::{prb_with_kernel, PrbBatchBuilder, PrbInput},
+	ott::{OttInput},
+	prb::{prb as prb_raw, PrbInput},
 	ad::{ad as ad_raw, AdInput},
 	adosc::{adosc as adosc_raw, AdoscInput},
 	adx::{adx as adx_raw, AdxInput},
@@ -95,7 +93,7 @@ use my_project::indicators::{
 	aroon::{aroon as aroon_raw, AroonInput},
 	aroonosc::{aroon_osc as aroon_osc_raw, AroonOscInput},
 	atr::{atr as atr_raw, AtrInput},
-	avsl::{avsl_with_kernel, AvslBatchBuilder, AvslInput},
+	avsl::{avsl_with_kernel, AvslInput},
 	bandpass::{bandpass as bandpass_raw, BandPassInput},
 	bollinger_bands::{bollinger_bands as bollinger_bands_raw, BollingerBandsInput},
 	bollinger_bands_width::{bollinger_bands_width as bollinger_bands_width_raw, BollingerBandsWidthInput},
@@ -569,7 +567,7 @@ macro_rules! make_batch_wrappers {
     };
 }
 
-// Special implementation for RsmkInputS which requires two candle sets
+// Special implementation for MaczInputS
 impl InputLen for MaczInputS {
 	fn with_len(len: usize) -> Self {
 		match len {
@@ -683,6 +681,7 @@ impl_input_len!(
 	LinearRegInterceptInputS,
 	LinearRegSlopeInputS,
 	LinRegInputS,
+	LpcInputS,
 	LrsiInputS,
 	MaaqInputS,
 	MabInputS,
@@ -710,6 +709,7 @@ impl_input_len!(
 	PivotInputS,
 	PmaInputS,
 	PpoInputS,
+	PrbInputS,
 	PviInputS,
 	PwmaInputS,
 	QstickInputS,
@@ -848,6 +848,7 @@ bench_wrappers! {
 	(linearreg_angle_bench, linearreg_angle_raw, LinearregAngleInputS),
 	(linearreg_intercept_bench, linearreg_intercept_raw, LinearRegInterceptInputS),
 	(linearreg_slope_bench, linearreg_slope_raw, LinearRegSlopeInputS),
+	(lpc_bench, lpc_raw, LpcInputS),
 	(lrsi_bench, lrsi_raw, LrsiInputS),
 	(mab_bench, mab_raw, MabInputS),
 	(macd_bench, macd_raw, MacdInputS),
@@ -870,6 +871,7 @@ bench_wrappers! {
 	(pivot_bench, pivot_raw, PivotInputS),
 	(pma_bench, pma_raw, PmaInputS),
 	(ppo_bench, ppo_raw, PpoInputS),
+	(prb_bench, prb_raw, PrbInputS),
 	(pvi_bench, pvi_raw, PviInputS),
 	(qstick_bench, qstick_raw, QstickInputS),
 	(roc_bench, roc_raw, RocInputS),
@@ -892,6 +894,7 @@ bench_wrappers! {
 	(tsf_bench, tsf_raw, TsfInputS),
 	(tsi_bench, tsi_raw, TsiInputS),
 	(ttm_trend_bench, ttm_trend_raw, TtmTrendInputS),
+	(ttm_squeeze_bench, ttm_squeeze_raw, TtmSqueezeInputS),
 	(ui_bench, ui_raw, UiInputS),
 	(ultosc_bench, ultosc_raw, UltOscInputS),
 	(var_bench, var_raw, VarInputS),
@@ -983,6 +986,7 @@ bench_scalars!(
 	linearreg_angle_bench     => LinearregAngleInputS,
 	linearreg_intercept_bench => LinearRegInterceptInputS,
 	linearreg_slope_bench     => LinearRegSlopeInputS,
+	lpc_bench                 => LpcInputS,
 	lrsi_bench                => LrsiInputS,
 
 	mab_bench  => MabInputS,
@@ -1009,6 +1013,7 @@ bench_scalars!(
 	pivot_bench  => PivotInputS,
 	pma_bench    => PmaInputS,
 	ppo_bench    => PpoInputS,
+	prb_bench    => PrbInputS,
 	pvi_bench    => PviInputS,
 	qqe_bench    => QqeInputS,
 	qstick_bench => QstickInputS,

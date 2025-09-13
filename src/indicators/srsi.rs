@@ -293,6 +293,12 @@ pub unsafe fn srsi_scalar(
 	k: usize,
 	d: usize,
 ) -> Result<SrsiOutput, SrsiError> {
+	// Use classic kernel for default parameters
+	if rsi_period == 14 && stoch_period == 14 && k == 3 && d == 3 {
+		return srsi_scalar_classic(data, rsi_period, stoch_period, k, d);
+	}
+	
+	// Regular implementation
 	let rsi_input = RsiInput::from_slice(
 		data,
 		RsiParams {
@@ -371,6 +377,163 @@ pub unsafe fn srsi_avx512_long(
 	d: usize,
 ) -> Result<SrsiOutput, SrsiError> {
 	srsi_scalar(data, rsi_period, stoch_period, k, d)
+}
+
+/// Classic kernel optimization for SRSI with inline RSI and Stochastic calculations
+/// Eliminates function call overhead for RSI and Stochastic operations
+#[inline]
+pub unsafe fn srsi_scalar_classic(
+	data: &[f64],
+	rsi_period: usize,
+	stoch_period: usize,
+	k_period: usize,
+	d_period: usize,
+) -> Result<SrsiOutput, SrsiError> {
+	let n = data.len();
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(SrsiError::AllValuesNaN)?;
+	
+	// Calculate warmup periods
+	let rsi_warmup = first + rsi_period;
+	let stoch_warmup = rsi_warmup + stoch_period - 1;
+	let k_warmup = stoch_warmup + k_period - 1;
+	let d_warmup = k_warmup + d_period - 1;
+	
+	if n <= d_warmup {
+		return Err(SrsiError::NotEnoughValidData);
+	}
+	
+	// Step 1: Calculate RSI inline (Wilder's smoothing method)
+	let mut rsi_values = alloc_with_nan_prefix(n, rsi_warmup);
+	
+	// Initialize gain/loss averages with first period
+	let mut avg_gain = 0.0;
+	let mut avg_loss = 0.0;
+	let mut prev = data[first];
+	
+	for i in (first + 1)..(first + rsi_period + 1).min(n) {
+		if data[i].is_finite() && prev.is_finite() {
+			let change = data[i] - prev;
+			if change > 0.0 {
+				avg_gain += change;
+			} else {
+				avg_loss += -change;
+			}
+			prev = data[i];
+		}
+	}
+	
+	avg_gain /= rsi_period as f64;
+	avg_loss /= rsi_period as f64;
+	
+	// Calculate RSI values using Wilder's smoothing
+	let alpha = 1.0 / rsi_period as f64;
+	let alpha_1minus = 1.0 - alpha;
+	
+	if first + rsi_period < n {
+		rsi_values[first + rsi_period] = if avg_loss == 0.0 {
+			100.0
+		} else {
+			100.0 - (100.0 / (1.0 + avg_gain / avg_loss))
+		};
+		
+		prev = data[first + rsi_period];
+	}
+	
+	for i in (first + rsi_period + 1)..n {
+		if data[i].is_finite() && prev.is_finite() {
+			let change = data[i] - prev;
+			let (gain, loss) = if change > 0.0 {
+				(change, 0.0)
+			} else {
+				(0.0, -change)
+			};
+			
+			avg_gain = alpha * gain + alpha_1minus * avg_gain;
+			avg_loss = alpha * loss + alpha_1minus * avg_loss;
+			
+			rsi_values[i] = if avg_loss == 0.0 {
+				100.0
+			} else {
+				100.0 - (100.0 / (1.0 + avg_gain / avg_loss))
+			};
+			
+			prev = data[i];
+		}
+	}
+	
+	// Step 2: Calculate Stochastic on RSI values inline
+	let mut fast_k = alloc_with_nan_prefix(n, stoch_warmup);
+	
+	// Calculate Fast %K (raw stochastic of RSI)
+	for i in stoch_warmup..n {
+		let start = i + 1 - stoch_period;
+		let mut min_rsi = f64::MAX;
+		let mut max_rsi = f64::MIN;
+		
+		for j in start..=i {
+			if rsi_values[j].is_finite() {
+				min_rsi = min_rsi.min(rsi_values[j]);
+				max_rsi = max_rsi.max(rsi_values[j]);
+			}
+		}
+		
+		if max_rsi > min_rsi {
+			fast_k[i] = 100.0 * (rsi_values[i] - min_rsi) / (max_rsi - min_rsi);
+		} else {
+			fast_k[i] = 50.0; // When range is 0, use middle value
+		}
+	}
+	
+	// Step 3: Calculate Slow %K (SMA of Fast %K)
+	let mut slow_k = alloc_with_nan_prefix(n, k_warmup);
+	
+	// Calculate initial SMA for Slow %K
+	let mut k_sum = 0.0;
+	for i in stoch_warmup..(stoch_warmup + k_period).min(n) {
+		if fast_k[i].is_finite() {
+			k_sum += fast_k[i];
+		}
+	}
+	
+	if stoch_warmup + k_period <= n {
+		slow_k[stoch_warmup + k_period - 1] = k_sum / k_period as f64;
+		
+		// Continue with rolling SMA
+		for i in (stoch_warmup + k_period)..n {
+			if fast_k[i].is_finite() && fast_k[i - k_period].is_finite() {
+				k_sum += fast_k[i] - fast_k[i - k_period];
+				slow_k[i] = k_sum / k_period as f64;
+			}
+		}
+	}
+	
+	// Step 4: Calculate Slow %D (SMA of Slow %K)
+	let mut slow_d = alloc_with_nan_prefix(n, d_warmup);
+	
+	// Calculate initial SMA for Slow %D
+	let mut d_sum = 0.0;
+	for i in k_warmup..(k_warmup + d_period).min(n) {
+		if slow_k[i].is_finite() {
+			d_sum += slow_k[i];
+		}
+	}
+	
+	if k_warmup + d_period <= n {
+		slow_d[k_warmup + d_period - 1] = d_sum / d_period as f64;
+		
+		// Continue with rolling SMA
+		for i in (k_warmup + d_period)..n {
+			if slow_k[i].is_finite() && slow_k[i - d_period].is_finite() {
+				d_sum += slow_k[i] - slow_k[i - d_period];
+				slow_d[i] = d_sum / d_period as f64;
+			}
+		}
+	}
+	
+	Ok(SrsiOutput {
+		k: slow_k,
+		d: slow_d,
+	})
 }
 
 #[inline(always)]

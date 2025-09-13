@@ -66,6 +66,13 @@ use crate::indicators::vwma::{vwma, VwmaData, VwmaInput, VwmaParams};
 use crate::indicators::wilders::{wilders, WildersData, WildersInput, WildersParams};
 use crate::indicators::wma::{wma, WmaData, WmaInput, WmaParams};
 use crate::indicators::zlema::{zlema, ZlemaData, ZlemaInput, ZlemaParams};
+use crate::indicators::moving_averages::dma::{dma, DmaData, DmaInput, DmaParams};
+use crate::indicators::moving_averages::ehlers_ecema::{ehlers_ecema, EhlersEcemaData, EhlersEcemaInput, EhlersEcemaParams};
+use crate::indicators::moving_averages::ehlers_kama::{ehlers_kama, EhlersKamaData, EhlersKamaInput, EhlersKamaParams};
+use crate::indicators::moving_averages::ehma::{ehma, EhmaData, EhmaInput, EhmaParams};
+use crate::indicators::moving_averages::nama::{nama, NamaData, NamaInput, NamaParams};
+use crate::indicators::moving_averages::sama::{sama, SamaData, SamaInput, SamaParams};
+use crate::indicators::moving_averages::volatility_adjusted_ma::{vama, VamaData, VamaInput, VamaParams};
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
 use std::error::Error;
@@ -112,6 +119,13 @@ use crate::indicators::vwma::vwma_with_kernel;
 use crate::indicators::wilders::wilders_with_kernel;
 use crate::indicators::wma::wma_with_kernel;
 use crate::indicators::zlema::zlema_with_kernel;
+use crate::indicators::moving_averages::dma::dma_with_kernel;
+use crate::indicators::moving_averages::ehlers_ecema::ehlers_ecema_with_kernel;
+use crate::indicators::moving_averages::ehlers_kama::ehlers_kama_with_kernel;
+use crate::indicators::moving_averages::ehma::ehma_with_kernel;
+use crate::indicators::moving_averages::nama::nama_with_kernel;
+use crate::indicators::moving_averages::sama::sama_with_kernel;
+use crate::indicators::moving_averages::volatility_adjusted_ma::vama_with_kernel;
 
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -832,6 +846,183 @@ pub fn ma<'a>(ma_type: &str, data: MaData<'a>, period: usize) -> Result<Vec<f64>
 			Ok(output.values)
 		}
 
+		"buff_averages" => {
+			// BuffAverages requires volume data and returns dual outputs, not suitable for simple MA selector
+			return Err("buff_averages requires volume data, use the indicator directly".into());
+		}
+
+		"dma" => {
+			let input = match data {
+				MaData::Candles { candles, source } => DmaInput {
+					data: DmaData::Candles { candles, source },
+					params: DmaParams {
+						ema_length: Some(period),
+						..Default::default()
+					},
+				},
+				MaData::Slice(s) => DmaInput {
+					data: DmaData::Slice(s),
+					params: DmaParams {
+						ema_length: Some(period),
+						..Default::default()
+					},
+				},
+			};
+			let output = dma(&input)?;
+			Ok(output.values)
+		}
+
+		"ehlers_ecema" => {
+			let input = match data {
+				MaData::Candles { candles, source } => EhlersEcemaInput {
+					data: EhlersEcemaData::Candles { candles, source },
+					params: EhlersEcemaParams {
+						length: Some(period),
+						..Default::default()
+					},
+				},
+				MaData::Slice(s) => EhlersEcemaInput {
+					data: EhlersEcemaData::Slice(s),
+					params: EhlersEcemaParams {
+						length: Some(period),
+						..Default::default()
+					},
+				},
+			};
+			let output = ehlers_ecema(&input)?;
+			Ok(output.values)
+		}
+
+		"ehlers_kama" => {
+			let input = match data {
+				MaData::Candles { candles, source } => EhlersKamaInput {
+					data: EhlersKamaData::Candles { candles, source },
+					params: EhlersKamaParams {
+						period: Some(period),
+						..Default::default()
+					},
+				},
+				MaData::Slice(s) => EhlersKamaInput {
+					data: EhlersKamaData::Slice(s),
+					params: EhlersKamaParams {
+						period: Some(period),
+						..Default::default()
+					},
+				},
+			};
+			let output = ehlers_kama(&input)?;
+			Ok(output.values)
+		}
+
+		"ehlers_pma" => {
+			// EhlersPma returns dual outputs (predict/trigger), not suitable for simple MA selector
+			return Err("ehlers_pma returns dual outputs, use the indicator directly".into());
+		}
+
+		"ehma" => {
+			let input = match data {
+				MaData::Candles { candles, source } => EhmaInput {
+					data: EhmaData::Candles { candles, source },
+					params: EhmaParams {
+						period: Some(period),
+						..Default::default()
+					},
+				},
+				MaData::Slice(s) => EhmaInput {
+					data: EhmaData::Slice(s),
+					params: EhmaParams {
+						period: Some(period),
+						..Default::default()
+					},
+				},
+			};
+			let output = ehma(&input)?;
+			Ok(output.values)
+		}
+
+		"frama" => {
+			// Frama requires high/low data, not suitable for simple MA selector  
+			return Err("frama requires high/low data, use the indicator directly".into());
+		}
+
+		"nama" => {
+			let input = match data {
+				MaData::Candles { candles, source } => NamaInput {
+					data: NamaData::Candles { candles, source },
+					params: NamaParams {
+						period: Some(period),
+						..Default::default()
+					},
+				},
+				MaData::Slice(s) => NamaInput {
+					data: NamaData::Slice(s),
+					params: NamaParams {
+						period: Some(period),
+						..Default::default()
+					},
+				},
+			};
+			let output = nama(&input)?;
+			Ok(output.values)
+		}
+
+		"sama" => {
+			let input = match data {
+				MaData::Candles { candles, source } => SamaInput {
+					data: SamaData::Candles { candles, source },
+					params: SamaParams {
+						length: Some(period),
+						..Default::default()
+					},
+				},
+				MaData::Slice(s) => SamaInput {
+					data: SamaData::Slice(s),
+					params: SamaParams {
+						length: Some(period),
+						..Default::default()
+					},
+				},
+			};
+			let output = sama(&input)?;
+			Ok(output.values)
+		}
+
+		"tradjema" => {
+			// TradjemaData requires high/low/close data, not suitable for simple MA selector
+			return Err("tradjema requires high/low/close data, use the indicator directly".into());
+		}
+
+		"uma" => {
+			// UMA requires volume data, not suitable for simple MA selector
+			return Err("uma requires volume data, use the indicator directly".into());
+		}
+
+		"volatility_adjusted_ma" => {
+			let input = match data {
+				MaData::Candles { candles, source } => VamaInput {
+					data: VamaData::Candles { candles, source },
+					params: VamaParams {
+						base_period: Some(period),
+						..Default::default()
+					},
+				},
+				MaData::Slice(s) => VamaInput {
+					data: VamaData::Slice(s),
+					params: VamaParams {
+						base_period: Some(period),
+						..Default::default()
+					},
+				},
+			};
+			let output = vama(&input)?;
+			Ok(output.values)
+		}
+
+		"volume_adjusted_ma" => {
+			// VolumeAdjustedMa requires volume data, not suitable for simple MA selector
+			return Err("volume_adjusted_ma requires volume data, use the indicator directly".into());
+		}
+
 		_ => {
 			return Err(format!("Unknown moving average type: {}", ma_type).into());
 		}
@@ -1514,6 +1705,183 @@ pub fn ma_with_kernel<'a>(
 			};
 			let output = zlema_with_kernel(&input, kernel)?;
 			Ok(output.values)
+		}
+
+		"buff_averages" => {
+			// BuffAverages requires volume data and returns dual outputs, not suitable for simple MA selector
+			return Err("buff_averages requires volume data, use the indicator directly".into());
+		}
+
+		"dma" => {
+			let input = match data {
+				MaData::Candles { candles, source } => DmaInput {
+					data: DmaData::Candles { candles, source },
+					params: DmaParams {
+						ema_length: Some(period),
+						..Default::default()
+					},
+				},
+				MaData::Slice(slice) => DmaInput {
+					data: DmaData::Slice(slice),
+					params: DmaParams {
+						ema_length: Some(period),
+						..Default::default()
+					},
+				},
+			};
+			let output = dma_with_kernel(&input, kernel)?;
+			Ok(output.values)
+		}
+
+		"ehlers_ecema" => {
+			let input = match data {
+				MaData::Candles { candles, source } => EhlersEcemaInput {
+					data: EhlersEcemaData::Candles { candles, source },
+					params: EhlersEcemaParams {
+						length: Some(period),
+						..Default::default()
+					},
+				},
+				MaData::Slice(slice) => EhlersEcemaInput {
+					data: EhlersEcemaData::Slice(slice),
+					params: EhlersEcemaParams {
+						length: Some(period),
+						..Default::default()
+					},
+				},
+			};
+			let output = ehlers_ecema_with_kernel(&input, kernel)?;
+			Ok(output.values)
+		}
+
+		"ehlers_kama" => {
+			let input = match data {
+				MaData::Candles { candles, source } => EhlersKamaInput {
+					data: EhlersKamaData::Candles { candles, source },
+					params: EhlersKamaParams {
+						period: Some(period),
+						..Default::default()
+					},
+				},
+				MaData::Slice(slice) => EhlersKamaInput {
+					data: EhlersKamaData::Slice(slice),
+					params: EhlersKamaParams {
+						period: Some(period),
+						..Default::default()
+					},
+				},
+			};
+			let output = ehlers_kama_with_kernel(&input, kernel)?;
+			Ok(output.values)
+		}
+
+		"ehlers_pma" => {
+			// EhlersPma returns dual outputs (predict/trigger), not suitable for simple MA selector
+			return Err("ehlers_pma returns dual outputs, use the indicator directly".into());
+		}
+
+		"ehma" => {
+			let input = match data {
+				MaData::Candles { candles, source } => EhmaInput {
+					data: EhmaData::Candles { candles, source },
+					params: EhmaParams {
+						period: Some(period),
+						..Default::default()
+					},
+				},
+				MaData::Slice(slice) => EhmaInput {
+					data: EhmaData::Slice(slice),
+					params: EhmaParams {
+						period: Some(period),
+						..Default::default()
+					},
+				},
+			};
+			let output = ehma_with_kernel(&input, kernel)?;
+			Ok(output.values)
+		}
+
+		"frama" => {
+			// Frama requires high/low data, not suitable for simple MA selector  
+			return Err("frama requires high/low data, use the indicator directly".into());
+		}
+
+		"nama" => {
+			let input = match data {
+				MaData::Candles { candles, source } => NamaInput {
+					data: NamaData::Candles { candles, source },
+					params: NamaParams {
+						period: Some(period),
+						..Default::default()
+					},
+				},
+				MaData::Slice(slice) => NamaInput {
+					data: NamaData::Slice(slice),
+					params: NamaParams {
+						period: Some(period),
+						..Default::default()
+					},
+				},
+			};
+			let output = nama_with_kernel(&input, kernel)?;
+			Ok(output.values)
+		}
+
+		"sama" => {
+			let input = match data {
+				MaData::Candles { candles, source } => SamaInput {
+					data: SamaData::Candles { candles, source },
+					params: SamaParams {
+						length: Some(period),
+						..Default::default()
+					},
+				},
+				MaData::Slice(slice) => SamaInput {
+					data: SamaData::Slice(slice),
+					params: SamaParams {
+						length: Some(period),
+						..Default::default()
+					},
+				},
+			};
+			let output = sama_with_kernel(&input, kernel)?;
+			Ok(output.values)
+		}
+
+		"tradjema" => {
+			// TradjemaData requires high/low/close data, not suitable for simple MA selector
+			return Err("tradjema requires high/low/close data, use the indicator directly".into());
+		}
+
+		"uma" => {
+			// UMA requires volume data, not suitable for simple MA selector
+			return Err("uma requires volume data, use the indicator directly".into());
+		}
+
+		"volatility_adjusted_ma" => {
+			let input = match data {
+				MaData::Candles { candles, source } => VamaInput {
+					data: VamaData::Candles { candles, source },
+					params: VamaParams {
+						base_period: Some(period),
+						..Default::default()
+					},
+				},
+				MaData::Slice(slice) => VamaInput {
+					data: VamaData::Slice(slice),
+					params: VamaParams {
+						base_period: Some(period),
+						..Default::default()
+					},
+				},
+			};
+			let output = vama_with_kernel(&input, kernel)?;
+			Ok(output.values)
+		}
+
+		"volume_adjusted_ma" => {
+			// VolumeAdjustedMa requires volume data, not suitable for simple MA selector
+			return Err("volume_adjusted_ma requires volume data, use the indicator directly".into());
 		}
 
 		_ => {

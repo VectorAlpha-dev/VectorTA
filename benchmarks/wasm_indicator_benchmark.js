@@ -374,6 +374,37 @@ const INDICATORS = {
             needsMultipleInputs: true
         }
     },
+    otto: {
+        name: 'OTT',
+        // Safe API
+        safe: {
+            fn: 'ott_js',
+            params: { period: 2, percent: 1.4, ma_type: 'VAR' }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'ott_alloc',
+            freeFn: 'ott_free',
+            computeFn: 'ott_into',
+            params: { period: 2, percent: 1.4, ma_type: 'VAR' }
+        },
+        // Batch API
+        batch: {
+            fn: 'ott_batch',
+            config: {
+                small: {
+                    period_range: [2, 10, 2],        // 5 values: 2, 4, 6, 8, 10
+                    percent_range: [1.0, 2.0, 0.5],  // 3 values: 1.0, 1.5, 2.0
+                    ma_type: 'VAR'                   // Single type = 15 combinations
+                },
+                medium: {
+                    period_range: [2, 20, 2],        // 10 values
+                    percent_range: [0.5, 3.0, 0.5],  // 6 values
+                    ma_type: 'VAR'                   // Single type = 60 combinations
+                }
+            }
+        }
+    },
     ott: {
         name: 'OTT',
         // Safe API
@@ -5690,6 +5721,21 @@ const INDICATORS = {
             },
             // Fast batch API (optional)
             fastFn: 'stochf_batch_into'
+        }
+    },
+    reverse_rsi: {
+        name: 'Reverse RSI',
+        // Safe API
+        safe: {
+            fn: 'reverse_rsi_js',
+            params: { period: 14, target_rsi: 50.0 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'reverse_rsi_alloc',
+            freeFn: 'reverse_rsi_free',
+            computeFn: 'reverse_rsi_into',
+            params: { period: 14, target_rsi: 50.0 }
         }
     },
     ui: {

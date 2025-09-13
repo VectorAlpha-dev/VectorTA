@@ -742,6 +742,7 @@ fn sama_batch_inner_into(
 
 // ========== Streaming Support ==========
 
+#[derive(Debug, Clone)]
 pub struct SamaStream {
     length: usize,
     maj_length: usize,

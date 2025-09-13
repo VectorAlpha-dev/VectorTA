@@ -264,8 +264,19 @@ pub fn qqe(input: &QqeInput) -> Result<QqeOutput, QqeError> {
 
 /// Entry point with explicit kernel selection - now uses zero-copy routine
 pub fn qqe_with_kernel(input: &QqeInput, kernel: Kernel) -> Result<QqeOutput, QqeError> {
-    let (data, rsi_p, ema_p, _fast_k, first, chosen) = qqe_prepare(input, kernel)?;
+    let (data, rsi_p, ema_p, fast_k, first, chosen) = qqe_prepare(input, kernel)?;
     let warm = first + rsi_p + ema_p - 2;
+
+    // Check for classic kernel conditions (default parameters)
+    if chosen == Kernel::Scalar && rsi_p == 14 && ema_p == 5 && fast_k == 4.236 {
+        // Use optimized classic kernel for default parameters
+        let mut fast = alloc_with_nan_prefix(data.len(), warm);
+        let mut slow = alloc_with_nan_prefix(data.len(), warm);
+        unsafe {
+            qqe_scalar_classic(data, rsi_p, ema_p, fast_k, first, &mut fast, &mut slow)?;
+        }
+        return Ok(QqeOutput { fast, slow });
+    }
 
     // match alma.rs: allocate with NaN prefix, no full-vector fill
     let mut fast = alloc_with_nan_prefix(data.len(), warm);
@@ -280,11 +291,19 @@ pub fn qqe_with_kernel(input: &QqeInput, kernel: Kernel) -> Result<QqeOutput, Qq
 fn qqe_scalar(data: &[f64], rsi_p: usize, ema_p: usize, fast_k: f64, first: usize, fast_warm: usize) -> Result<QqeOutput, QqeError> {
     let mut fast = alloc_with_nan_prefix(data.len(), fast_warm);
     let mut slow = alloc_with_nan_prefix(data.len(), fast_warm);
-    qqe_into_slices(&mut fast, &mut slow, &QqeInput::from_slice(data, QqeParams {
-        rsi_period: Some(rsi_p),
-        smoothing_factor: Some(ema_p),
-        fast_factor: Some(fast_k),
-    }), Kernel::Scalar)?;
+    
+    // Use classic kernel for default parameters
+    if rsi_p == 14 && ema_p == 5 && fast_k == 4.236 {
+        unsafe {
+            qqe_scalar_classic(data, rsi_p, ema_p, fast_k, first, &mut fast, &mut slow)?;
+        }
+    } else {
+        qqe_into_slices(&mut fast, &mut slow, &QqeInput::from_slice(data, QqeParams {
+            rsi_period: Some(rsi_p),
+            smoothing_factor: Some(ema_p),
+            fast_factor: Some(fast_k),
+        }), Kernel::Scalar)?;
+    }
     Ok(QqeOutput { fast, slow })
 }
 
@@ -460,6 +479,149 @@ fn qqe_compute_slow_from(
             qqes[i] = prev;
         }
     }
+}
+
+// ==================== CLASSIC KERNEL ====================
+/// Optimized classic kernel for QQE with default parameters
+/// Inlines RSI (with Wilder's smoothing) and EMA calculations for maximum performance
+#[inline(always)]
+pub unsafe fn qqe_scalar_classic(
+    data: &[f64],
+    rsi_period: usize,
+    smoothing_factor: usize,
+    fast_factor: f64,
+    first: usize,
+    dst_fast: &mut [f64],
+    dst_slow: &mut [f64],
+) -> Result<(), QqeError> {
+    let len = data.len();
+    let warm = first + rsi_period + smoothing_factor - 2;
+    
+    // Ensure output arrays are properly sized
+    if dst_fast.len() != len || dst_slow.len() != len {
+        return Err(QqeError::InvalidPeriod { period: dst_fast.len(), data_len: len });
+    }
+    
+    // Fill entire arrays with NaN initially
+    for i in 0..len {
+        dst_fast[i] = f64::NAN;
+        dst_slow[i] = f64::NAN;
+    }
+    
+    // Step 1: Inline RSI calculation with Wilder's smoothing
+    // Initialize first average gain and loss (matching rsi_compute_into_scalar exactly)
+    let inv_period = 1.0 / rsi_period as f64;
+    let beta = 1.0 - inv_period;
+    
+    let mut avg_gain = 0.0;
+    let mut avg_loss = 0.0;
+    let mut has_nan = false;
+    
+    for i in (first + 1)..=((first + rsi_period).min(len - 1)) {
+        let delta = data[i] - data[i - 1];
+        if !delta.is_finite() {
+            has_nan = true;
+            break;  // Any NaN in warmup invalidates the calculation
+        }
+        if delta > 0.0 {
+            avg_gain += delta;
+        } else if delta < 0.0 {
+            avg_loss += -delta;
+        }
+    }
+    
+    // Calculate RSI values with Wilder's smoothing
+    let mut rsi_values = vec![f64::NAN; len];
+    
+    // First RSI value at index first + rsi_period (matching rsi_compute_into_scalar)
+    let initial_rsi = if has_nan {
+        avg_gain = f64::NAN;  // Poison the averages so NaN propagates
+        avg_loss = f64::NAN;
+        f64::NAN  // If any NaN in warmup, initial RSI is NaN
+    } else {
+        avg_gain *= inv_period;
+        avg_loss *= inv_period;
+        if avg_gain + avg_loss == 0.0 {
+            50.0
+        } else {
+            100.0 * avg_gain / (avg_gain + avg_loss)
+        }
+    };
+    if first + rsi_period < len {
+        rsi_values[first + rsi_period] = initial_rsi;
+    }
+    
+    // Continue RSI calculation with Wilder's smoothing
+    for i in (first + rsi_period + 1)..len {
+        let delta = data[i] - data[i - 1];
+        let gain = if delta > 0.0 { delta } else { 0.0 };
+        let loss = if delta < 0.0 { -delta } else { 0.0 };
+        
+        avg_gain = inv_period * gain + beta * avg_gain;
+        avg_loss = inv_period * loss + beta * avg_loss;
+        
+        let rsi = if avg_gain + avg_loss == 0.0 {
+            50.0
+        } else {
+            100.0 * avg_gain / (avg_gain + avg_loss)
+        };
+        rsi_values[i] = rsi;
+    }
+    
+    // Step 2: Apply EMA smoothing to RSI values to get fast line (matching ema_scalar_into)
+    let ema_alpha = 2.0 / (smoothing_factor as f64 + 1.0);
+    let ema_beta = 1.0 - ema_alpha;
+    
+    // Find first valid RSI value for EMA initialization
+    let rsi_start = first + rsi_period;
+    
+    // Use running mean for warmup period (matching ema_scalar_into exactly)
+    if rsi_start < len && rsi_values[rsi_start].is_finite() {
+        let mut mean = rsi_values[rsi_start];
+        dst_fast[rsi_start] = mean;
+        let mut valid_count = 1usize;
+        
+        // Running mean phase (indices rsi_start+1 to rsi_start+smoothing_factor-1)
+        let ema_warmup_end = (rsi_start + smoothing_factor).min(len);
+        for i in (rsi_start + 1)..ema_warmup_end {
+            let x = rsi_values[i];
+            if x.is_finite() {
+                valid_count += 1;
+                mean = ((valid_count as f64 - 1.0) * mean + x) / valid_count as f64;
+                dst_fast[i] = mean;
+            } else {
+                // During warmup, skip NaN values and carry forward
+                dst_fast[i] = mean;
+            }
+        }
+        
+        // EMA phase (from rsi_start+smoothing_factor onwards)
+        if ema_warmup_end < len {
+            let mut prev = mean;
+            for i in ema_warmup_end..len {
+                let x = rsi_values[i];
+                if x.is_finite() {
+                    prev = ema_beta.mul_add(prev, ema_alpha * x);
+                    dst_fast[i] = prev;
+                } else {
+                    // Skip NaN values - carry forward previous value
+                    dst_fast[i] = prev;
+                }
+            }
+        }
+    }
+    
+    // Step 3: Enforce warmup NaN prefix (to match regular implementation)
+    // The regular implementation calculates RSI and EMA, THEN enforces NaN prefix
+    for i in 0..warm {
+        dst_fast[i] = f64::NAN;
+        dst_slow[i] = f64::NAN;
+    }
+    
+    // Step 4: Calculate slow line from fast line
+    qqe_compute_slow_from(dst_fast, fast_factor, warm, dst_slow);
+    
+    Ok(())
 }
 
 // ==================== STREAMING SUPPORT ====================

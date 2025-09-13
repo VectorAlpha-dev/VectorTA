@@ -672,6 +672,16 @@ fn macz_compute_into_tail_only(
     let len = data.len();
     let first = data.iter().position(|x| !x.is_nan()).ok_or(MaczError::AllValuesNaN)?;
     
+    // Dispatch to classic kernel for scalar
+    // Classic kernel provides optimized loop-jammed implementation
+    if kernel == Kernel::Scalar {
+        unsafe {
+            return macz_scalar_classic(
+                data, vol, fast, slow, sig, lz, lsd, a, b, use_lag, gamma, first, warm_hist, out
+            );
+        }
+    }
+    
     // Separate warmup periods:
     // warm_m: first valid MACZ sample (after MACD/Z-score components are ready)
     // warm_hist: first valid histogram (after signal MA is ready)
@@ -792,6 +802,174 @@ pub fn macz_scalar(
 ) -> Result<(), MaczError> {
     let input = MaczInput::from_slice(data, params.clone());
     macz_into_slice(out, &input, Kernel::Scalar)
+}
+
+/// Classic kernel optimization for MACZ with inline SMA calculations
+/// This eliminates function call overhead for all SMA operations
+pub unsafe fn macz_scalar_classic(
+    data: &[f64],
+    vol: Option<&[f64]>,
+    fast: usize,
+    slow: usize,
+    sig: usize,
+    lz: usize,
+    lsd: usize,
+    a: f64,
+    b: f64,
+    use_lag: bool,
+    gamma: f64,
+    first_valid_idx: usize,
+    warm_hist: usize,  // Passed in to match caller's expectation
+    out: &mut [f64],
+) -> Result<(), MaczError> {
+    let len = data.len();
+    
+    // Calculate warmup periods
+    let warm_m = first_valid_idx + slow.max(lz).max(lsd) - 1;
+    // warm_hist is passed in and should match warm_m + sig - 1
+    
+    // Note: The output buffer already has NaN prefixes set by the caller up to warm_hist
+    
+    // VWAP calculation (inline SMA when no volume)
+    let mut vwap = alloc_with_nan_prefix(len, first_valid_idx + lz - 1);
+    if vol.is_some() {
+        // Use existing VWAP calculation with volume
+        calculate_vwap_into(data, vol, lz, first_valid_idx, Kernel::Scalar, &mut vwap)?;
+    } else {
+        // Inline SMA for VWAP (no volume case)
+        let mut sum = 0.0;
+        for i in first_valid_idx..(first_valid_idx + lz) {
+            sum += data[i];
+        }
+        vwap[first_valid_idx + lz - 1] = sum / lz as f64;
+        
+        for i in (first_valid_idx + lz)..len {
+            sum += data[i] - data[i - lz];
+            vwap[i] = sum / lz as f64;
+        }
+    }
+    
+    // ZVWAP calculation
+    let mut zvwap = alloc_with_nan_prefix(len, first_valid_idx + lz - 1);
+    calculate_zvwap_into(data, &vwap, lz, first_valid_idx, &mut zvwap)?;
+    
+    // Fast MA - inline SMA calculation
+    let mut fast_ma = alloc_with_nan_prefix(len, first_valid_idx + fast - 1);
+    let mut fast_sum = 0.0;
+    for i in first_valid_idx..(first_valid_idx + fast) {
+        fast_sum += data[i];
+    }
+    fast_ma[first_valid_idx + fast - 1] = fast_sum / fast as f64;
+    
+    for i in (first_valid_idx + fast)..len {
+        fast_sum += data[i] - data[i - fast];
+        fast_ma[i] = fast_sum / fast as f64;
+    }
+    
+    // Slow MA - inline SMA calculation
+    let mut slow_ma = alloc_with_nan_prefix(len, first_valid_idx + slow - 1);
+    let mut slow_sum = 0.0;
+    for i in first_valid_idx..(first_valid_idx + slow) {
+        slow_sum += data[i];
+    }
+    slow_ma[first_valid_idx + slow - 1] = slow_sum / slow as f64;
+    
+    for i in (first_valid_idx + slow)..len {
+        slow_sum += data[i] - data[i - slow];
+        slow_ma[i] = slow_sum / slow as f64;
+    }
+    
+    // MACD calculation
+    let mut macd = alloc_with_nan_prefix(len, first_valid_idx + slow - 1);
+    for i in (first_valid_idx + slow - 1)..len {
+        let f = fast_ma[i];
+        let s = slow_ma[i];
+        macd[i] = if f.is_nan() || s.is_nan() { f64::NAN } else { f - s };
+    }
+    
+    // StdDev on source - inline mean calculation
+    let mut stdev = alloc_with_nan_prefix(len, first_valid_idx + lsd - 1);
+    
+    // Calculate initial mean and variance
+    let mut mean_sum = 0.0;
+    for i in first_valid_idx..(first_valid_idx + lsd) {
+        mean_sum += data[i];
+    }
+    let mean = mean_sum / lsd as f64;
+    
+    let mut var_sum = 0.0;
+    for i in first_valid_idx..(first_valid_idx + lsd) {
+        let diff = data[i] - mean;
+        var_sum += diff * diff;
+    }
+    stdev[first_valid_idx + lsd - 1] = (var_sum / lsd as f64).sqrt();
+    
+    // Rolling stddev calculation
+    for i in (first_valid_idx + lsd)..len {
+        mean_sum += data[i] - data[i - lsd];
+        let mean = mean_sum / lsd as f64;
+        
+        var_sum = 0.0;
+        for j in (i - lsd + 1)..=i {
+            let diff = data[j] - mean;
+            var_sum += diff * diff;
+        }
+        stdev[i] = (var_sum / lsd as f64).sqrt();
+    }
+    
+    // MAC-Z raw calculation
+    let mut macz_t = alloc_with_nan_prefix(len, warm_m);
+    for i in warm_m..len {
+        let z = zvwap[i];
+        let m = macd[i];
+        let sd = stdev[i];
+        macz_t[i] = if z.is_nan() || m.is_nan() || sd.is_nan() || sd <= 0.0 {
+            f64::NAN
+        } else {
+            z * a + (m / sd) * b
+        };
+    }
+    
+    // Smoothing (Laguerre or direct copy)
+    let mut macz = alloc_with_nan_prefix(len, warm_m);
+    if use_lag {
+        apply_laguerre(&macz_t, gamma, &mut macz);
+    } else {
+        macz[warm_m..].copy_from_slice(&macz_t[warm_m..]);
+    }
+    
+    // Signal MA - inline SMA calculation
+    let mut signal = alloc_with_nan_prefix(len, warm_hist);
+    let mut sig_sum = 0.0;
+    let sig_start = warm_m;
+    
+    // Initial signal sum
+    for i in sig_start..(sig_start + sig) {
+        if i < len && !macz[i].is_nan() {
+            sig_sum += macz[i];
+        }
+    }
+    
+    if sig_start + sig - 1 < len {
+        signal[sig_start + sig - 1] = sig_sum / sig as f64;
+    }
+    
+    // Rolling signal
+    for i in (sig_start + sig)..len {
+        if !macz[i].is_nan() && !macz[i - sig].is_nan() {
+            sig_sum += macz[i] - macz[i - sig];
+            signal[i] = sig_sum / sig as f64;
+        }
+    }
+    
+    // Histogram calculation (output)
+    for i in warm_hist..len {
+        let s = signal[i];
+        let m = macz[i];
+        out[i] = if s.is_nan() || m.is_nan() { f64::NAN } else { m - s };
+    }
+    
+    Ok(())
 }
 
 /// AVX2 implementation (currently delegates to scalar)

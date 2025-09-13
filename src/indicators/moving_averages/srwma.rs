@@ -706,6 +706,7 @@ unsafe fn srwma_row_avx512_long(
 	srwma_row_scalar(data, first, period, _stride, w_ptr, inv_n, out);
 }
 
+#[derive(Debug, Clone)]
 pub struct SrwmaStream {
 	period: usize,
 	weights: Vec<f64>,

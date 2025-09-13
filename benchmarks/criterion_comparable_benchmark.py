@@ -104,12 +104,12 @@ class CriterionComparableBenchmark:
             'alma', 'alligator', 'alphatrend', 'aroonosc', 'avsl', 'bollinger_bands', 'ao', 'dma', 'range_filter', 'sama', 'buff_averages', 'vpwma', 'volume_adjusted_ma', 'vwma', 'vwmacd', 'wilders', 'willr', 'wma', 'zlema', 'ad', 'adx', 'acosc', 'adosc', 'apo',
             'bandpass', 'vwap', 'cwma', 'dema', 'deviation', 'dpo', 'er', 'edcf', 'ehlers_ecema', 'ehlers_itrend', 'ehlers_kama', 'ema', 'epma', 'eri',
             'frama', 'fwma', 'gaussian', 'highpass_2_pole', 'highpass', 'hma',
-            'hwma', 'ift_rsi', 'jma', 'jsa', 'kama', 'kdj', 'linearreg_intercept', 'kvo', 'kurtosis', 'kst', 'linreg', 'mab', 'lrsi', 'mean_ad', 'mod_god_mode', 'mom', 'nadaraya_watson_envelope', 'pivot', 'qqe', 'rocp', 'linearreg_slope', 'maaq', 'mama', 'mass', 'midprice', 'medprice', 'msw', 'medium_ad', 'mwdx', 'obv',
+            'hwma', 'ift_rsi', 'jma', 'jsa', 'kama', 'kdj', 'linearreg_intercept', 'kvo', 'kurtosis', 'kst', 'linreg', 'mab', 'lrsi', 'mean_ad', 'mod_god_mode', 'mom', 'nadaraya_watson_envelope', 'pivot', 'qqe', 'rocp', 'stochf', 'linearreg_slope', 'maaq', 'mama', 'mass', 'midprice', 'medprice', 'msw', 'medium_ad', 'mwdx', 'obv',
             'nama', 'nma', 'nvi', 'pvi', 'pma', 'pwma', 'reflex', 'sar', 'roc', 'sinwma', 'sma', 'smma', 'sqwma', 'srwma', 'stc', 'tsi', 'ttm_squeeze', 'minmax',
-            'supersmoother_3_pole', 'supersmoother', 'supertrend', 'swma', 'tema', 'tilson', 'tradjema',
+            'supersmoother_3_pole', 'supersmoother', 'supertrend', 'ultosc', 'swma', 'tema', 'tilson', 'tradjema',
             'trendflex', 'ttm_trend', 'trima', 'uma', 'vidya', 'vlma', 'vqwma', 'vwmacd', 'adxr', 'aroon', 'bollinger_bands_width', 'atr', 'cci', 'bop',
-            'cg', 'cfo', 'chandelier_exit', 'coppock', 'correl_hl', 'marketefi', 'midpoint', 'vi', 'vpt', 'cmo', 'dec_osc', 'macd', 'mfi', 'natr', 'ppo', 'var', 'vpci', 'wclprice', 'damiani_volatmeter', 'emd', 'gatorosc', 'wavetrend', 'chop', 'cvi', 'di', 'dm', 'efi', 'fosc', 'ui', 'vosc', 'dti', 'dx', 'keltner', 'rvi',
-            'cci_cycle', 'fvg_trailing_stop', 'halftrend', 'net_myrsi', 'reverse_rsi', 'vama'  # Added missing indicators
+            'cg', 'cfo', 'chandelier_exit', 'coppock', 'correl_hl', 'marketefi', 'midpoint', 'vi', 'vpt', 'cmo', 'dec_osc', 'macd', 'mfi', 'natr', 'ppo', 'rsi', 'var', 'vpci', 'wclprice', 'damiani_volatmeter', 'emd', 'gatorosc', 'wavetrend', 'chop', 'cvi', 'di', 'dm', 'efi', 'fosc', 'ui', 'vosc', 'dti', 'dx', 'keltner', 'rvi',
+            'cci_cycle', 'fvg_trailing_stop', 'halftrend', 'net_myrsi', 'reverse_rsi', 'vama', 'squeeze_momentum'  # Added missing indicators
         ]
         
         size_map = {'10k': '10k', '100k': '100k', '1M': '1m'}
@@ -501,6 +501,7 @@ class CriterionComparableBenchmark:
             ('pivot_batch', lambda: my_project.pivot_batch(data['high'], data['low'], data['close'], data['open'], (0, 4, 1))),
             ('qqe_batch', lambda: my_project.qqe_batch(data['close'], (14, 14, 0), (5, 5, 0), (4.236, 4.236, 0.0))),
             ('rocp_batch', lambda: my_project.rocp_batch(data['close'], (9, 240, 1))),
+            ('stochf_batch', lambda: my_project.stochf_batch(data['high'], data['low'], data['close'], (5, 14, 1), (3, 5, 1))),
             ('safezonestop_batch', lambda: my_project.safezonestop_batch(data['high'], data['low'], (14, 30, 8), (2.0, 3.0, 0.5), (2, 4, 1), "long")),
             ('cwma_batch', lambda: my_project.cwma_batch(data['close'], (14, 14, 1))),
             ('keltner_batch', lambda: my_project.keltner_batch(data['high'], data['low'], data['close'], data['close'], (20, 20, 0), (2.0, 2.0, 0.0), 'ema')),
@@ -595,6 +596,8 @@ class CriterionComparableBenchmark:
             ('cci_cycle_batch', lambda: my_project.cci_cycle_batch((data['high'] + data['low'] + data['close']) / 3, (14, 14, 0))),
             ('dvdiqqe_batch', lambda: my_project.dvdiqqe_batch(data['high'], data['low'], data['close'], data['volume'], (10, 20, 2), (4, 8, 2), (2.0, 3.0, 0.5), (4.0, 5.0, 0.5), "default", "dynamic")),
             ('vama_batch', lambda: my_project.vama_batch(data['close'], (10, 20, 2), (10, 20, 2))),
+            ('reverse_rsi_batch', lambda: my_project.reverse_rsi_batch(data['close'], (14, 14, 0), (50.0, 50.0, 0.0))),
+            ('pvi_batch', lambda: my_project.pvi_batch(data['close'], data['volume'], (1000.0, 1000.0, 0.0))),
         ]
         
         # Filter batch tests if indicator filter is active
@@ -667,7 +670,7 @@ class CriterionComparableBenchmark:
         print("-" * 80)
         
         batch_comparisons = []
-        for base_name in ['alma', 'aroonosc', 'ao', 'avsl', 'dma', 'range_filter', 'vpwma', 'wma', 'zlema', 'sma', 'ema', 'dema', 'dpo', 'er', 'tema', 'hma', 'ift_rsi', 'kvo', 'kst', 'lrsi', 'macz', 'mean_ad', 'pivot', 'rocp', 'cwma', 'keltner', 'adxr', 'adx', 'adosc', 'aroon', 'bollinger_bands_width', 'apo', 'bandpass', 'atr', 'cg', 'cci', 'cfo', 'linearreg_intercept', 'mass', 'midprice', 'natr', 'net_myrsi', 'obv', 'ott', 'qstick', 'stc', 'tsi', 'midpoint', 'cmo', 'dec_osc', 'donchian', 'mfi', 'ppo', 'rsi', 'var', 'vpci', 'gatorosc', 'kurtosis', 'mab', 'msw', 'supertrend', 'cvi', 'di', 'wad', 'correlation_cycle', 'pfe', 'roc', 'rvi', 'minmax']:
+        for base_name in ['alma', 'aroonosc', 'ao', 'avsl', 'dma', 'range_filter', 'vpwma', 'wma', 'zlema', 'sma', 'ema', 'dema', 'dpo', 'er', 'tema', 'hma', 'ift_rsi', 'kvo', 'kst', 'lrsi', 'macz', 'mean_ad', 'pivot', 'rocp', 'stochf', 'cwma', 'keltner', 'adxr', 'adx', 'adosc', 'aroon', 'bollinger_bands_width', 'apo', 'bandpass', 'atr', 'cg', 'cci', 'cfo', 'linearreg_intercept', 'mass', 'midprice', 'natr', 'net_myrsi', 'obv', 'ott', 'qstick', 'stc', 'tsi', 'midpoint', 'cmo', 'dec_osc', 'donchian', 'mfi', 'ppo', 'rsi', 'var', 'vpci', 'gatorosc', 'kurtosis', 'mab', 'msw', 'supertrend', 'cvi', 'di', 'wad', 'correlation_cycle', 'pfe', 'roc', 'rvi', 'minmax', 'squeeze_momentum']:
             if base_name in self.python_results and f"{base_name}_batch" in self.python_results:
                 single_time = self.python_results[base_name]
                 batch_time = self.python_results[f"{base_name}_batch"]

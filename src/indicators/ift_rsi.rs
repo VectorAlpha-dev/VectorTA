@@ -259,21 +259,9 @@ pub fn ift_rsi_with_kernel(input: &IftRsiInput, kernel: Kernel) -> Result<IftRsi
 	let warmup_period = first + rsi_period + wma_period - 1;
 	let mut out = alloc_with_nan_prefix(len, warmup_period);
 
+	// Use classic kernel for optimized loop-jammed implementation
 	unsafe {
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => {
-				ift_rsi_scalar(data, rsi_period, wma_period, first, &mut out)?;
-			}
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => {
-				ift_rsi_avx2(data, rsi_period, wma_period, first, &mut out)?;
-			}
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => {
-				ift_rsi_avx512(data, rsi_period, wma_period, first, &mut out)?;
-			}
-			_ => unreachable!(),
-		}
+	    ift_rsi_scalar_classic(data, rsi_period, wma_period, first, &mut out)?;
 	}
 
 	Ok(IftRsiOutput { values: out })
@@ -371,22 +359,9 @@ pub fn ift_rsi_into_slice(
 		*v = f64::NAN;
 	}
 
-	// Compute into dst
-	match kern {
-		Kernel::Scalar | Kernel::ScalarBatch => {
-			ift_rsi_compute_into(data, rsi_period, wma_period, first, dst)?;
-		}
-		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-		Kernel::Avx2 | Kernel::Avx2Batch => {
-			// AVX2 is a stub, use scalar
-			ift_rsi_compute_into(data, rsi_period, wma_period, first, dst)?;
-		}
-		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-		Kernel::Avx512 | Kernel::Avx512Batch => {
-			// AVX512 is a stub, use scalar
-			ift_rsi_compute_into(data, rsi_period, wma_period, first, dst)?;
-		}
-		_ => unreachable!(),
+	// Use classic kernel for optimized loop-jammed implementation
+	unsafe {
+	    return ift_rsi_scalar_classic(data, rsi_period, wma_period, first, dst);
 	}
 	
 	Ok(())
@@ -948,6 +923,100 @@ impl IftRsiStream {
 			Some(wma_val.tanh())
 		}
 	}
+}
+
+/// Optimized IFT RSI calculation with inline RSI and WMA
+#[inline]
+pub unsafe fn ift_rsi_scalar_classic(
+	data: &[f64],
+	rsi_period: usize,
+	wma_period: usize,
+	first_valid: usize,
+	out: &mut [f64],
+) -> Result<(), IftRsiError> {
+	let len = data.len();
+	let sliced = &data[first_valid..];
+	let sliced_len = sliced.len();
+	
+	// Inline RSI calculation
+	// RSI uses the Wilder's smoothing method (exponential weighted)
+	let mut avg_gain = 0.0;
+	let mut avg_loss = 0.0;
+	
+	// Calculate initial average gain and loss
+	for i in 1..=rsi_period {
+		if i < sliced_len {
+			let change = sliced[i] - sliced[i - 1];
+			if change > 0.0 {
+				avg_gain += change;
+			} else {
+				avg_loss -= change; // loss is positive
+			}
+		}
+	}
+	avg_gain /= rsi_period as f64;
+	avg_loss /= rsi_period as f64;
+	
+	// Calculate RSI values with transformation
+	let mut rsi_transformed = vec![f64::NAN; sliced_len];
+	
+	// First RSI value
+	if rsi_period < sliced_len {
+		let rs = if avg_loss != 0.0 { avg_gain / avg_loss } else { 100.0 };
+		let rsi = 100.0 - (100.0 / (1.0 + rs));
+		rsi_transformed[rsi_period] = 0.1 * (rsi - 50.0);
+	}
+	
+	// Subsequent RSI values using Wilder's smoothing
+	let alpha = 1.0 / rsi_period as f64;
+	let beta = 1.0 - alpha;
+	
+	for i in (rsi_period + 1)..sliced_len {
+		let change = sliced[i] - sliced[i - 1];
+		let gain = if change > 0.0 { change } else { 0.0 };
+		let loss = if change < 0.0 { -change } else { 0.0 };
+		
+		avg_gain = beta * avg_gain + alpha * gain;
+		avg_loss = beta * avg_loss + alpha * loss;
+		
+		let rs = if avg_loss != 0.0 { avg_gain / avg_loss } else { 100.0 };
+		let rsi = 100.0 - (100.0 / (1.0 + rs));
+		rsi_transformed[i] = 0.1 * (rsi - 50.0);
+	}
+	
+	// Inline WMA calculation on transformed RSI values
+	let wma_start = rsi_period + wma_period - 1;
+	if wma_start >= sliced_len {
+		return Ok(());
+	}
+	
+	// Calculate WMA weights (triangular)
+	let mut weights = Vec::with_capacity(wma_period);
+	let weight_sum = (wma_period * (wma_period + 1)) / 2;
+	for i in 1..=wma_period {
+		weights.push(i as f64);
+	}
+	
+	// Calculate WMA and apply tanh
+	for i in wma_start..sliced_len {
+		let mut weighted_sum = 0.0;
+		let mut valid_weight_sum = 0.0;
+		
+		for j in 0..wma_period {
+			let idx = i - wma_period + 1 + j;
+			if idx < sliced_len && !rsi_transformed[idx].is_nan() {
+				weighted_sum += rsi_transformed[idx] * weights[j];
+				valid_weight_sum += weights[j];
+			}
+		}
+		
+		if valid_weight_sum > 0.0 {
+			let wma_val = weighted_sum / valid_weight_sum;
+			out[first_valid + i] = wma_val.tanh();
+		}
+	}
+	
+	Ok(())
 }
 
 #[cfg(test)]

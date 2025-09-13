@@ -432,6 +432,14 @@ pub fn stc_scalar(
 	first: usize,
 	out: &mut [f64],
 ) -> Result<(), StcError> {
+	// Check for classic kernel optimization
+	if fast_type == "ema" && slow_type == "ema" {
+		return unsafe { stc_scalar_classic_ema(data, fast, slow, k, d, first, out) };
+	} else if fast_type == "sma" && slow_type == "sma" {
+		return unsafe { stc_scalar_classic_sma(data, fast, slow, k, d, first, out) };
+	}
+	
+	// Fall back to regular implementation for other MA types
 	use crate::indicators::ema::{ema, EmaInput, EmaParams};
 	use crate::indicators::moving_averages::ma::{ma, MaData};
 	use crate::indicators::utility_functions::{max_rolling, min_rolling};
@@ -497,6 +505,302 @@ pub fn stc_scalar(
 	// Write results directly to output buffer
 	for (i, &val) in final_stc.iter().enumerate() {
 		out[first + i] = val;
+	}
+	
+	Ok(())
+}
+
+// Classic kernel with inline EMA calculations
+#[inline]
+pub unsafe fn stc_scalar_classic_ema(
+	data: &[f64],
+	fast: usize,
+	slow: usize,
+	k: usize,
+	d: usize,
+	first: usize,
+	out: &mut [f64],
+) -> Result<(), StcError> {
+	use crate::indicators::utility_functions::{max_rolling, min_rolling};
+	use crate::utilities::helpers::alloc_with_nan_prefix;
+	
+	let slice = &data[first..];
+	let working_len = slice.len();
+	
+	// EMA alpha factors
+	let fast_alpha = 2.0 / (fast as f64 + 1.0);
+	let slow_alpha = 2.0 / (slow as f64 + 1.0);
+	let d_alpha = 2.0 / (d as f64 + 1.0);
+	
+	// Initialize EMAs with SMA
+	let mut fast_sum = 0.0;
+	let mut slow_sum = 0.0;
+	
+	// Calculate initial SMAs for EMA initialization
+	for i in 0..fast.min(working_len) {
+		fast_sum += slice[i];
+		if i < slow {
+			slow_sum += slice[i];
+		}
+	}
+	
+	for i in fast..slow.min(working_len) {
+		slow_sum += slice[i];
+	}
+	
+	let mut fast_ema = if fast <= working_len { fast_sum / fast as f64 } else { f64::NAN };
+	let mut slow_ema = if slow <= working_len { slow_sum / slow as f64 } else { f64::NAN };
+	
+	// Calculate EMAs and MACD
+	let mut macd = alloc_with_nan_prefix(working_len, 0);
+	
+	for i in 0..working_len {
+		if i >= fast - 1 {
+			if i == fast - 1 {
+				// First EMA value is the SMA
+				fast_ema = fast_sum / fast as f64;
+			} else {
+				// Update EMA
+				fast_ema = fast_alpha * slice[i] + (1.0 - fast_alpha) * fast_ema;
+			}
+		}
+		
+		if i >= slow - 1 {
+			if i == slow - 1 {
+				// First EMA value is the SMA
+				slow_ema = slow_sum / slow as f64;
+			} else {
+				// Update EMA
+				slow_ema = slow_alpha * slice[i] + (1.0 - slow_alpha) * slow_ema;
+			}
+		}
+		
+		// Calculate MACD
+		if i >= slow - 1 {
+			macd[i] = fast_ema - slow_ema;
+		} else {
+			macd[i] = f64::NAN;
+		}
+	}
+	
+	// First stochastic calculation
+	let macd_min = min_rolling(&macd, k).map_err(|e| StcError::Internal(format!("{:?}", e)))?;
+	let macd_max = max_rolling(&macd, k).map_err(|e| StcError::Internal(format!("{:?}", e)))?;
+	
+	let mut stok = alloc_with_nan_prefix(working_len, 0);
+	for i in 0..working_len {
+		let range = macd_max[i] - macd_min[i];
+		if range.abs() > f64::EPSILON && !range.is_nan() {
+			stok[i] = (macd[i] - macd_min[i]) / range * 100.0;
+		} else if !macd[i].is_nan() {
+			stok[i] = 50.0;
+		}
+	}
+	
+	// First EMA smoothing (inline)
+	let mut d_vals = alloc_with_nan_prefix(working_len, 0);
+	let mut d_ema = f64::NAN;
+	let mut d_sum = 0.0;
+	let mut d_count = 0;
+	
+	for i in 0..working_len {
+		if !stok[i].is_nan() {
+			if d_count < d {
+				d_sum += stok[i];
+				d_count += 1;
+				if d_count == d {
+					d_ema = d_sum / d as f64;
+					d_vals[i] = d_ema;
+				} else {
+					d_vals[i] = f64::NAN;
+				}
+			} else {
+				d_ema = d_alpha * stok[i] + (1.0 - d_alpha) * d_ema;
+				d_vals[i] = d_ema;
+			}
+		} else {
+			d_vals[i] = f64::NAN;
+		}
+	}
+	
+	// Second stochastic calculation
+	let d_min = min_rolling(&d_vals, k).map_err(|e| StcError::Internal(format!("{:?}", e)))?;
+	let d_max = max_rolling(&d_vals, k).map_err(|e| StcError::Internal(format!("{:?}", e)))?;
+	
+	let mut kd = alloc_with_nan_prefix(working_len, 0);
+	for i in 0..working_len {
+		let range = d_max[i] - d_min[i];
+		if range.abs() > f64::EPSILON && !range.is_nan() {
+			kd[i] = (d_vals[i] - d_min[i]) / range * 100.0;
+		} else if !d_vals[i].is_nan() {
+			kd[i] = 50.0;
+		}
+	}
+	
+	// Final EMA smoothing (inline)
+	let mut final_ema = f64::NAN;
+	let mut final_sum = 0.0;
+	let mut final_count = 0;
+	
+	for i in 0..working_len {
+		if !kd[i].is_nan() {
+			if final_count < d {
+				final_sum += kd[i];
+				final_count += 1;
+				if final_count == d {
+					final_ema = final_sum / d as f64;
+					out[first + i] = final_ema;
+				} else {
+					out[first + i] = f64::NAN;
+				}
+			} else {
+				final_ema = d_alpha * kd[i] + (1.0 - d_alpha) * final_ema;
+				out[first + i] = final_ema;
+			}
+		} else {
+			out[first + i] = f64::NAN;
+		}
+	}
+	
+	Ok(())
+}
+
+// Classic kernel with inline SMA calculations
+#[inline]
+pub unsafe fn stc_scalar_classic_sma(
+	data: &[f64],
+	fast: usize,
+	slow: usize,
+	k: usize,
+	d: usize,
+	first: usize,
+	out: &mut [f64],
+) -> Result<(), StcError> {
+	use crate::indicators::utility_functions::{max_rolling, min_rolling};
+	use crate::utilities::helpers::alloc_with_nan_prefix;
+	
+	let slice = &data[first..];
+	let working_len = slice.len();
+	
+	// Calculate SMAs and MACD
+	let mut macd = alloc_with_nan_prefix(working_len, 0);
+	
+	// Initialize rolling sums
+	let mut fast_sum = 0.0;
+	let mut slow_sum = 0.0;
+	
+	// Initial sums
+	for i in 0..fast.min(working_len) {
+		fast_sum += slice[i];
+	}
+	for i in 0..slow.min(working_len) {
+		slow_sum += slice[i];
+	}
+	
+	// Calculate rolling SMAs and MACD
+	for i in 0..working_len {
+		if i >= fast {
+			fast_sum = fast_sum - slice[i - fast] + slice[i];
+		}
+		if i >= slow {
+			slow_sum = slow_sum - slice[i - slow] + slice[i];
+		}
+		
+		if i >= slow - 1 {
+			let fast_ma = if i >= fast - 1 { fast_sum / fast as f64 } else {
+				// Calculate partial SMA for fast
+				let mut sum = 0.0;
+				let start = if i >= fast - 1 { i - fast + 1 } else { 0 };
+				for j in start..=i {
+					sum += slice[j];
+				}
+				sum / ((i - start + 1) as f64)
+			};
+			let slow_ma = slow_sum / slow as f64;
+			macd[i] = fast_ma - slow_ma;
+		} else {
+			macd[i] = f64::NAN;
+		}
+	}
+	
+	// First stochastic calculation
+	let macd_min = min_rolling(&macd, k).map_err(|e| StcError::Internal(format!("{:?}", e)))?;
+	let macd_max = max_rolling(&macd, k).map_err(|e| StcError::Internal(format!("{:?}", e)))?;
+	
+	let mut stok = alloc_with_nan_prefix(working_len, 0);
+	for i in 0..working_len {
+		let range = macd_max[i] - macd_min[i];
+		if range.abs() > f64::EPSILON && !range.is_nan() {
+			stok[i] = (macd[i] - macd_min[i]) / range * 100.0;
+		} else if !macd[i].is_nan() {
+			stok[i] = 50.0;
+		}
+	}
+	
+	// First EMA smoothing (inline)
+	let d_alpha = 2.0 / (d as f64 + 1.0);
+	let mut d_vals = alloc_with_nan_prefix(working_len, 0);
+	let mut d_ema = f64::NAN;
+	let mut d_sum = 0.0;
+	let mut d_count = 0;
+	
+	for i in 0..working_len {
+		if !stok[i].is_nan() {
+			if d_count < d {
+				d_sum += stok[i];
+				d_count += 1;
+				if d_count == d {
+					d_ema = d_sum / d as f64;
+					d_vals[i] = d_ema;
+				} else {
+					d_vals[i] = f64::NAN;
+				}
+			} else {
+				d_ema = d_alpha * stok[i] + (1.0 - d_alpha) * d_ema;
+				d_vals[i] = d_ema;
+			}
+		} else {
+			d_vals[i] = f64::NAN;
+		}
+	}
+	
+	// Second stochastic calculation
+	let d_min = min_rolling(&d_vals, k).map_err(|e| StcError::Internal(format!("{:?}", e)))?;
+	let d_max = max_rolling(&d_vals, k).map_err(|e| StcError::Internal(format!("{:?}", e)))?;
+	
+	let mut kd = alloc_with_nan_prefix(working_len, 0);
+	for i in 0..working_len {
+		let range = d_max[i] - d_min[i];
+		if range.abs() > f64::EPSILON && !range.is_nan() {
+			kd[i] = (d_vals[i] - d_min[i]) / range * 100.0;
+		} else if !d_vals[i].is_nan() {
+			kd[i] = 50.0;
+		}
+	}
+	
+	// Final EMA smoothing (inline)
+	let mut final_ema = f64::NAN;
+	let mut final_sum = 0.0;
+	let mut final_count = 0;
+	
+	for i in 0..working_len {
+		if !kd[i].is_nan() {
+			if final_count < d {
+				final_sum += kd[i];
+				final_count += 1;
+				if final_count == d {
+					final_ema = final_sum / d as f64;
+					out[first + i] = final_ema;
+				} else {
+					out[first + i] = f64::NAN;
+				}
+			} else {
+				final_ema = d_alpha * kd[i] + (1.0 - d_alpha) * final_ema;
+				out[first + i] = final_ema;
+			}
+		} else {
+			out[first + i] = f64::NAN;
+		}
 	}
 	
 	Ok(())
@@ -824,14 +1128,53 @@ fn stc_batch_inner(
 
 #[inline(always)]
 pub unsafe fn stc_row_scalar(data: &[f64], first: usize, prm: &StcParams, out: &mut [f64]) -> Result<(), StcError> {
+	let fast_type = prm.fast_ma_type.as_deref().unwrap_or("ema");
+	let slow_type = prm.slow_ma_type.as_deref().unwrap_or("ema");
+	
+	// Check for classic kernel optimization
+	if fast_type == "ema" && slow_type == "ema" {
+		return stc_row_scalar_classic_ema(data, first, prm, out);
+	} else if fast_type == "sma" && slow_type == "sma" {
+		return stc_row_scalar_classic_sma(data, first, prm, out);
+	}
+	
+	// Fall back to regular implementation
 	stc_scalar(
 		data,
 		prm.fast_period.unwrap(),
 		prm.slow_period.unwrap(),
 		prm.k_period.unwrap(),
 		prm.d_period.unwrap(),
-		prm.fast_ma_type.as_deref().unwrap_or("ema"),
-		prm.slow_ma_type.as_deref().unwrap_or("ema"),
+		fast_type,
+		slow_type,
+		first,
+		out,
+	)
+}
+
+// Classic row kernel with inline EMA for batch processing
+#[inline(always)]
+pub unsafe fn stc_row_scalar_classic_ema(data: &[f64], first: usize, prm: &StcParams, out: &mut [f64]) -> Result<(), StcError> {
+	stc_scalar_classic_ema(
+		data,
+		prm.fast_period.unwrap(),
+		prm.slow_period.unwrap(),
+		prm.k_period.unwrap(),
+		prm.d_period.unwrap(),
+		first,
+		out,
+	)
+}
+
+// Classic row kernel with inline SMA for batch processing
+#[inline(always)]
+pub unsafe fn stc_row_scalar_classic_sma(data: &[f64], first: usize, prm: &StcParams, out: &mut [f64]) -> Result<(), StcError> {
+	stc_scalar_classic_sma(
+		data,
+		prm.fast_period.unwrap(),
+		prm.slow_period.unwrap(),
+		prm.k_period.unwrap(),
+		prm.d_period.unwrap(),
 		first,
 		out,
 	)

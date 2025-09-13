@@ -377,6 +377,29 @@ pub fn ttm_squeeze_with_kernel(
     
     let warmup = first + length - 1;
     
+    // Check for classic kernel conditions (default parameters)
+    let chosen = match kernel {
+        Kernel::Auto => detect_best_kernel(),
+        k => k,
+    };
+    
+    if chosen == Kernel::Scalar && length == 20 && bb_mult == 2.0 
+        && kc_mult_high == 1.0 && kc_mult_mid == 1.5 && kc_mult_low == 2.0 {
+        // Use optimized classic kernel for default parameters
+        let mut momentum = alloc_with_nan_prefix(len, warmup);
+        let mut squeeze = alloc_with_nan_prefix(len, warmup);
+        
+        unsafe {
+            ttm_squeeze_scalar_classic(
+                high, low, close, length, bb_mult,
+                kc_mult_high, kc_mult_mid, kc_mult_low,
+                first, warmup, &mut momentum, &mut squeeze,
+            )?;
+        }
+        
+        return Ok(TtmSqueezeOutput { momentum, squeeze });
+    }
+    
     // Calculate SMA for BB and KC basis (same value)
     let sma_params = SmaParams { period: Some(length) };
     let sma_input = SmaInput::from_slice(close, sma_params);
@@ -892,6 +915,171 @@ impl TtmSqueezeStream {
         self.head = 0;
         self.filled = false;
     }
+}
+
+// ==================== CLASSIC KERNEL ====================
+/// Optimized classic kernel for TTM Squeeze with default parameters
+/// Inlines SMA calculations and standard deviation computation for maximum performance
+#[inline(always)]
+pub unsafe fn ttm_squeeze_scalar_classic(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    length: usize,
+    bb_mult: f64,
+    kc_mult_high: f64,
+    kc_mult_mid: f64,
+    kc_mult_low: f64,
+    first: usize,
+    warmup: usize,
+    momentum: &mut [f64],
+    squeeze: &mut [f64],
+) -> Result<(), TtmSqueezeError> {
+    let len = close.len();
+    
+    // Step 1: Calculate SMA of close prices inline
+    let mut sma_values = vec![f64::NAN; len];
+    
+    // Initialize first SMA value
+    if first + length - 1 < len {
+        let mut sum = 0.0;
+        for i in first..(first + length) {
+            sum += close[i];
+        }
+        sma_values[first + length - 1] = sum / length as f64;
+        
+        // Continue with sliding window
+        for i in (first + length)..len {
+            sum = sum - close[i - length] + close[i];
+            sma_values[i] = sum / length as f64;
+        }
+    }
+    
+    // Step 2: Calculate True Range inline
+    let mut tr = vec![f64::NAN; len];
+    for i in first..len {
+        tr[i] = if i == first {
+            high[i] - low[i]
+        } else {
+            let pc = close[i - 1];
+            let hl = high[i] - low[i];
+            let hc = (high[i] - pc).abs();
+            let lc = (low[i] - pc).abs();
+            hl.max(hc).max(lc)
+        };
+    }
+    
+    // Step 3: Calculate SMA of True Range for Keltner Channel deviation
+    let mut dev_kc = vec![f64::NAN; len];
+    
+    // Initialize first TR SMA value
+    if first + length - 1 < len {
+        let mut sum = 0.0;
+        for i in first..(first + length) {
+            sum += tr[i];
+        }
+        dev_kc[first + length - 1] = sum / length as f64;
+        
+        // Continue with sliding window
+        for i in (first + length)..len {
+            sum = sum - tr[i - length] + tr[i];
+            dev_kc[i] = sum / length as f64;
+        }
+    }
+    
+    // Step 4: Main loop - compute BB/KC bands and momentum
+    for i in warmup..len {
+        let m = sma_values[i];
+        let dkc = dev_kc[i];
+        if m.is_nan() || dkc.is_nan() {
+            continue;
+        }
+        
+        // Calculate standard deviation for Bollinger Bands inline
+        let start = i + 1 - length;
+        let mut sum = 0.0;
+        let mut cnt = 0usize;
+        for j in start..=i {
+            let v = close[j];
+            if v.is_nan() { continue; }
+            let d = v - m;
+            sum += d * d;
+            cnt += 1;
+        }
+        
+        if cnt > 1 {
+            let std = (sum / cnt as f64).sqrt();
+            let bb_upper = m + bb_mult * std;
+            let bb_lower = m - bb_mult * std;
+            
+            // Calculate Keltner Channels
+            let kc_upper_low = m + dkc * kc_mult_low;
+            let kc_lower_low = m - dkc * kc_mult_low;
+            let kc_upper_mid = m + dkc * kc_mult_mid;
+            let kc_lower_mid = m - dkc * kc_mult_mid;
+            let kc_upper_high = m + dkc * kc_mult_high;
+            let kc_lower_high = m - dkc * kc_mult_high;
+            
+            // Determine squeeze state
+            let no_sqz = bb_lower < kc_lower_low || bb_upper > kc_upper_low;
+            squeeze[i] = if no_sqz { 
+                0.0  // NoSqz
+            } else if bb_lower >= kc_lower_high || bb_upper <= kc_upper_high { 
+                3.0  // HighSqz
+            } else if bb_lower >= kc_lower_mid || bb_upper <= kc_upper_mid { 
+                2.0  // MidSqz
+            } else { 
+                1.0  // LowSqz
+            };
+        }
+        
+        // Calculate momentum: linreg(close - avg(avg(highest, lowest), sma(close)))
+        // Find highest high and lowest low over the period
+        let mut highest = f64::NEG_INFINITY;
+        let mut lowest = f64::INFINITY;
+        let mut has_valid = false;
+        
+        for j in start..=i {
+            if high[j].is_finite() && low[j].is_finite() {
+                highest = highest.max(high[j]);
+                lowest = lowest.min(low[j]);
+                has_valid = true;
+            }
+        }
+        
+        if has_valid {
+            // midpoint = average of highest and lowest
+            let midpoint = (highest + lowest) * 0.5;
+            // Average of midpoint and close SMA
+            let avg = (midpoint + m) * 0.5;
+            
+            // Linear regression on close - avg
+            let mut sx = 0.0;
+            let mut sy = 0.0;
+            let mut sxy = 0.0;
+            let mut sx2 = 0.0;
+            let mut n = 0.0;
+            
+            for (k, j) in (start..=i).enumerate() {
+                let y = close[j] - avg;
+                if y.is_nan() { continue; }
+                let x = k as f64;
+                sx += x;
+                sy += y;
+                sxy += x * y;
+                sx2 += x * x;
+                n += 1.0;
+            }
+            
+            if n >= 2.0 {
+                let slope = (n * sxy - sx * sy) / (n * sx2 - sx * sx);
+                let intercept = (sy - slope * sx) / n;
+                momentum[i] = intercept + slope * ((length - 1) as f64);
+            }
+        }
+    }
+    
+    Ok(())
 }
 
 // ==================== PYTHON BINDINGS ====================

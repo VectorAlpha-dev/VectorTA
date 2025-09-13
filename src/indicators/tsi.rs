@@ -303,23 +303,51 @@ pub fn tsi(input: &TsiInput) -> Result<TsiOutput, TsiError> {
 	tsi_with_kernel(input, Kernel::Auto)
 }
 
-pub fn tsi_with_kernel(input: &TsiInput, _kernel: Kernel) -> Result<TsiOutput, TsiError> {
+pub fn tsi_with_kernel(input: &TsiInput, kernel: Kernel) -> Result<TsiOutput, TsiError> {
 	let (data, long, short, first) = tsi_prepare(input)?;
 	let warmup_end = first + long + short;
 	let mut out = alloc_with_nan_prefix(data.len(), warmup_end);
-	// no SIMD specialization here; streams are scalar
-	tsi_compute_into_streaming(data, long, short, first, &mut out)?;
+	
+	// Use classic kernel for default parameters with scalar kernel
+	let resolved_kernel = match kernel {
+		Kernel::Auto => detect_best_kernel(),
+		k => k,
+	};
+	
+	if resolved_kernel == Kernel::Scalar && long == 25 && short == 13 {
+		// Use optimized classic kernel for default parameters
+		unsafe {
+			tsi_scalar_classic(data, long, short, first, &mut out)?;
+		}
+	} else {
+		// no SIMD specialization here; streams are scalar
+		tsi_compute_into_streaming(data, long, short, first, &mut out)?;
+	}
 	Ok(TsiOutput { values: out })
 }
 
 #[inline]
-pub fn tsi_into_slice(dst: &mut [f64], input: &TsiInput, _kern: Kernel) -> Result<(), TsiError> {
+pub fn tsi_into_slice(dst: &mut [f64], input: &TsiInput, kern: Kernel) -> Result<(), TsiError> {
 	let (data, long, short, first) = tsi_prepare(input)?;
 	let warmup_end = first + long + short;
 	// Caller's buffer may not have NaNs set, so set them
 	let end = warmup_end.min(dst.len());
 	for v in &mut dst[..end] { *v = f64::NAN; }
-	tsi_compute_into_streaming(data, long, short, first, dst)?;
+	
+	// Use classic kernel for default parameters with scalar kernel
+	let resolved_kernel = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		k => k,
+	};
+	
+	if resolved_kernel == Kernel::Scalar && long == 25 && short == 13 {
+		// Use optimized classic kernel for default parameters
+		unsafe {
+			tsi_scalar_classic(data, long, short, first, dst)?;
+		}
+	} else {
+		tsi_compute_into_streaming(data, long, short, first, dst)?;
+	}
 	Ok(())
 }
 
@@ -328,8 +356,92 @@ pub fn tsi_into_slice(dst: &mut [f64], input: &TsiInput, _kern: Kernel) -> Resul
 pub unsafe fn tsi_scalar(data: &[f64], long: usize, short: usize, first: usize) -> Result<TsiOutput, TsiError> {
 	let warmup_end = first + long + short;
 	let mut out = alloc_with_nan_prefix(data.len(), warmup_end);
-	tsi_compute_into_streaming(data, long, short, first, &mut out)?;
+	// Use classic kernel for default parameters
+	if long == 25 && short == 13 {
+		tsi_scalar_classic(data, long, short, first, &mut out)?;
+	} else {
+		tsi_compute_into_streaming(data, long, short, first, &mut out)?;
+	}
 	Ok(TsiOutput { values: out })
+}
+
+/// Classic kernel optimization for TSI with inline double EMA calculations
+/// Eliminates function call overhead for all 4 EMA operations
+#[inline]
+pub unsafe fn tsi_scalar_classic(
+	data: &[f64],
+	long: usize,
+	short: usize,
+	first: usize,
+	out: &mut [f64],
+) -> Result<(), TsiError> {
+	let n = data.len();
+	let warmup_end = first + long + short;
+	
+	// Initialize output with NaN for warmup periods (already done by alloc_with_nan_prefix)
+	// out[..warmup_end.min(n)].fill(f64::NAN); // Already done by caller
+	
+	if first + 1 >= n {
+		return Ok(());
+	}
+	
+	// EMA alpha factors
+	let long_alpha = 2.0 / (long as f64 + 1.0);
+	let short_alpha = 2.0 / (short as f64 + 1.0);
+	let long_1minus = 1.0 - long_alpha;
+	let short_1minus = 1.0 - short_alpha;
+	
+	// Initialize EMAs with first momentum value
+	let mut prev = data[first];
+	
+	// Skip to first+1 to calculate first momentum
+	if first + 1 >= n || !data[first + 1].is_finite() {
+		return Ok(());
+	}
+	
+	let first_momentum = data[first + 1] - prev;
+	prev = data[first + 1];
+	
+	// Initialize all 4 EMAs with first momentum
+	let mut ema_long_num = first_momentum;
+	let mut ema_short_num = first_momentum;
+	let mut ema_long_den = first_momentum.abs();
+	let mut ema_short_den = first_momentum.abs();
+	
+	// Process remaining data with inline EMA calculations
+	for i in (first + 2)..n {
+		let cur = data[i];
+		if !cur.is_finite() {
+			out[i] = f64::NAN;
+			continue;
+		}
+		
+		let momentum = cur - prev;
+		prev = cur;
+		
+		// Update long EMA for numerator (momentum)
+		ema_long_num = long_alpha * momentum + long_1minus * ema_long_num;
+		
+		// Update short EMA for numerator (smoothed momentum)
+		ema_short_num = short_alpha * ema_long_num + short_1minus * ema_short_num;
+		
+		// Update long EMA for denominator (abs momentum)
+		ema_long_den = long_alpha * momentum.abs() + long_1minus * ema_long_den;
+		
+		// Update short EMA for denominator (smoothed abs momentum)
+		ema_short_den = short_alpha * ema_long_den + short_1minus * ema_short_den;
+		
+		// Calculate TSI after warmup period
+		if i >= warmup_end {
+			out[i] = if ema_short_den == 0.0 {
+				f64::NAN
+			} else {
+				(100.0 * (ema_short_num / ema_short_den)).clamp(-100.0, 100.0)
+			};
+		}
+	}
+	
+	Ok(())
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]

@@ -306,6 +306,19 @@ pub fn squeeze_momentum_into_slices(
 		});
 	}
 
+	// Use classic kernel for default parameters (all SMA-based calculations)
+	// The default parameters use SMA for all moving averages
+	// Classic kernel provides optimized loop-jammed implementation
+	if lbb == 20 && lkc == 20 && mbb == 2.0 && mkc == 1.5 {
+		// Use the optimized classic kernel for default parameters
+		unsafe {
+			return squeeze_momentum_scalar_classic(
+				high, low, close, lbb, mbb, lkc, mkc, first_valid,
+				squeeze_dst, momentum_dst, signal_dst
+			);
+		}
+	}
+
 	// Mark kernel as used (kernels are stubs per requirements)
 	let _ = kern;
 
@@ -788,6 +801,168 @@ pub fn squeeze_momentum_batch_inner_into(
 	Ok(combos)
 }
 
+
+// --- Classic Kernel Optimization ---
+
+/// Classic kernel for Squeeze Momentum with inline SMA calculations
+/// Eliminates function call overhead for all three SMA operations
+pub unsafe fn squeeze_momentum_scalar_classic(
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	lbb: usize,
+	mbb: f64,
+	lkc: usize,
+	mkc: f64,
+	first_valid: usize,
+	squeeze_dst: &mut [f64],
+	momentum_dst: &mut [f64],
+	signal_dst: &mut [f64],
+) -> Result<(), SqueezeMomentumError> {
+	let n = close.len();
+	
+	// Calculate warmup periods
+	let warm_sq = lbb.max(lkc).saturating_sub(1);
+	let warm_m = lkc.saturating_sub(1);
+	let warm_sig = warm_m + 1;
+	
+	// Initialize output slices with NaN for warmup periods
+	squeeze_dst[..warm_sq.min(n)].fill(f64::NAN);
+	momentum_dst[..warm_m.min(n)].fill(f64::NAN);
+	signal_dst[..warm_sig.min(n)].fill(f64::NAN);
+	
+	// BB SMA - inline calculation
+	let mut bb_sma = alloc_with_nan_prefix(n, lbb.saturating_sub(1));
+	let mut bb_sum = 0.0;
+	for i in first_valid..(first_valid + lbb.min(n - first_valid)) {
+		bb_sum += close[i];
+	}
+	if first_valid + lbb <= n {
+		bb_sma[first_valid + lbb - 1] = bb_sum / lbb as f64;
+		for i in (first_valid + lbb)..n {
+			bb_sum += close[i] - close[i - lbb];
+			bb_sma[i] = bb_sum / lbb as f64;
+		}
+	}
+	
+	// StdDev for BB - inline calculation
+	let mut dev = alloc_with_nan_prefix(n, lbb.saturating_sub(1));
+	for i in (first_valid + lbb - 1)..n {
+		let mean = bb_sma[i];
+		if !mean.is_nan() {
+			let mut var_sum = 0.0;
+			for j in (i + 1 - lbb)..=i {
+				let diff = close[j] - mean;
+				var_sum += diff * diff;
+			}
+			dev[i] = (var_sum / lbb as f64).sqrt();
+		}
+	}
+	
+	// KC SMA - inline calculation
+	let mut kc_sma = alloc_with_nan_prefix(n, lkc.saturating_sub(1));
+	let mut kc_sum = 0.0;
+	for i in first_valid..(first_valid + lkc.min(n - first_valid)) {
+		kc_sum += close[i];
+	}
+	if first_valid + lkc <= n {
+		kc_sma[first_valid + lkc - 1] = kc_sum / lkc as f64;
+		for i in (first_valid + lkc)..n {
+			kc_sum += close[i] - close[i - lkc];
+			kc_sma[i] = kc_sum / lkc as f64;
+		}
+	}
+	
+	// True Range calculation
+	let tr = true_range_slice(high, low, close);
+	
+	// TR MA - inline SMA calculation
+	let mut tr_ma = alloc_with_nan_prefix(n, lkc.saturating_sub(1));
+	let mut tr_sum = 0.0;
+	for i in 0..lkc.min(n) {
+		if !tr[i].is_nan() {
+			tr_sum += tr[i];
+		}
+	}
+	if lkc <= n {
+		tr_ma[lkc - 1] = tr_sum / lkc as f64;
+		for i in lkc..n {
+			if !tr[i].is_nan() && !tr[i - lkc].is_nan() {
+				tr_sum += tr[i] - tr[i - lkc];
+				tr_ma[i] = tr_sum / lkc as f64;
+			}
+		}
+	}
+	
+	// KC bands
+	let mut upper_kc = alloc_with_nan_prefix(n, lkc.saturating_sub(1));
+	let mut lower_kc = alloc_with_nan_prefix(n, lkc.saturating_sub(1));
+	for i in first_valid..n {
+		if i + 1 >= lkc && kc_sma[i].is_finite() && tr_ma[i].is_finite() {
+			let w = tr_ma[i] * mkc;
+			upper_kc[i] = kc_sma[i] + w;
+			lower_kc[i] = kc_sma[i] - w;
+		}
+	}
+	
+	// BB bands
+	let mut upper_bb = alloc_with_nan_prefix(n, lbb.saturating_sub(1));
+	let mut lower_bb = alloc_with_nan_prefix(n, lbb.saturating_sub(1));
+	for i in first_valid..n {
+		if i + 1 >= lbb && bb_sma[i].is_finite() && dev[i].is_finite() {
+			let d = dev[i] * mbb;
+			upper_bb[i] = bb_sma[i] + d;
+			lower_bb[i] = bb_sma[i] - d;
+		}
+	}
+	
+	// Squeeze calculation - fixed logic to match regular implementation
+	for i in first_valid..n {
+		if i >= warm_sq
+			&& upper_bb[i].is_finite()
+			&& lower_bb[i].is_finite()
+			&& upper_kc[i].is_finite()
+			&& lower_kc[i].is_finite()
+		{
+			let on = lower_bb[i] > lower_kc[i] && upper_bb[i] < upper_kc[i];
+			let off = lower_bb[i] < lower_kc[i] && upper_bb[i] > upper_kc[i];
+			squeeze_dst[i] = if on { -1.0 } else if off { 1.0 } else { 0.0 };
+		}
+	}
+	
+	// Momentum calculation - matching regular implementation
+	let highest = rolling_high_slice(high, lkc);
+	let lowest = rolling_low_slice(low, lkc);
+	
+	let mut raw = alloc_with_nan_prefix(n, lkc.saturating_sub(1));
+	for i in first_valid..n {
+		if i + 1 >= lkc && close[i].is_finite() && highest[i].is_finite() && lowest[i].is_finite() && kc_sma[i].is_finite() {
+			let mid = 0.5 * (highest[i] + lowest[i]);
+			raw[i] = close[i] - 0.5 * (mid + kc_sma[i]);
+		}
+	}
+	
+	// Apply linear regression to raw momentum  
+	let momentum_vals = linearreg_slice(&raw, lkc);
+	momentum_dst.copy_from_slice(&momentum_vals);
+	
+	// Signal calculation (lagged signed acceleration) - fixed values
+	for i in first_valid..n.saturating_sub(1) {
+		let curr = momentum_dst[i];
+		let next = momentum_dst[i + 1];
+		if curr.is_finite() && next.is_finite() {
+			signal_dst[i + 1] = if next > 0.0 {
+				if next > curr { 1.0 } else { 2.0 }
+			} else {
+				if next < curr { -1.0 } else { -2.0 }
+			};
+		} else if i + 1 >= warm_sig {
+			signal_dst[i + 1] = f64::NAN;
+		}
+	}
+	
+	Ok(())
+}
 
 // --- Utilities (Unchanged from scalar, as in original) ---
 

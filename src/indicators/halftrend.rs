@@ -367,6 +367,34 @@ pub fn halftrend_with_kernel(
     }
     let warm = first + warmup_span - 1;
     
+    // Check for classic kernel conditions (default parameters)
+    if chosen == Kernel::Scalar && amplitude == 2 && channel_deviation == 2.0 && atr_period == 100 {
+        // Use optimized classic kernel for default parameters
+        let mut halftrend = alloc_with_nan_prefix(len, warm);
+        let mut trend = alloc_with_nan_prefix(len, warm);
+        let mut atr_high = alloc_with_nan_prefix(len, warm);
+        let mut atr_low = alloc_with_nan_prefix(len, warm);
+        let mut buy_signal = alloc_with_nan_prefix(len, warm);
+        let mut sell_signal = alloc_with_nan_prefix(len, warm);
+        
+        unsafe {
+            halftrend_scalar_classic(
+                high, low, close, amplitude, channel_deviation, atr_period, first, warm,
+                &mut halftrend, &mut trend, &mut atr_high, &mut atr_low,
+                &mut buy_signal, &mut sell_signal,
+            )?;
+        }
+        
+        return Ok(HalfTrendOutput {
+            halftrend,
+            trend,
+            atr_high,
+            atr_low,
+            buy_signal,
+            sell_signal,
+        });
+    }
+    
     // Allocate output buffers with correct NaN prefix
     let mut halftrend = alloc_with_nan_prefix(len, warm);
     let mut trend = alloc_with_nan_prefix(len, warm);
@@ -463,6 +491,179 @@ fn halftrend_compute_into(
 
 /// Scalar implementation of HalfTrend computation
 #[inline]
+// ==================== CLASSIC KERNEL ====================
+/// Optimized classic kernel for HalfTrend with default parameters
+/// Inlines ATR (with Wilder's smoothing) and SMA calculations for maximum performance
+#[inline(always)]
+pub unsafe fn halftrend_scalar_classic(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    amplitude: usize,
+    channel_deviation: f64,
+    atr_period: usize,
+    first: usize,
+    warm: usize,
+    halftrend: &mut [f64],
+    trend: &mut [f64],
+    atr_high: &mut [f64],
+    atr_low: &mut [f64],
+    buy_signal: &mut [f64],
+    sell_signal: &mut [f64],
+) -> Result<(), HalfTrendError> {
+    let len = high.len();
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    
+    // Step 1: Inline ATR calculation matching atr_compute_into_scalar exactly
+    let mut atr_values = vec![f64::NAN; len];
+    let alpha = 1.0 / atr_period as f64;
+    
+    // Seed RMA at warm position for ATR (matching atr_compute_into_scalar)
+    let atr_warm = first + atr_period - 1;
+    let mut sum_tr = 0.0;
+    for i in first..=atr_warm.min(len - 1) {
+        let tr = if i == first {
+            high[i] - low[i]
+        } else {
+            let hl = high[i] - low[i];
+            let hc = (high[i] - close[i - 1]).abs();
+            let lc = (low[i] - close[i - 1]).abs();
+            hl.max(hc).max(lc)
+        };
+        sum_tr += tr;
+    }
+    
+    if atr_warm < len {
+        let mut rma = sum_tr / atr_period as f64;
+        atr_values[atr_warm] = rma;
+        
+        // Rolling RMA (Wilder's smoothing)
+        for i in (atr_warm + 1)..len {
+            let hl = high[i] - low[i];
+            let hc = (high[i] - close[i - 1]).abs();
+            let lc = (low[i] - close[i - 1]).abs();
+            let tr = hl.max(hc).max(lc);
+            rma += alpha * (tr - rma);
+            atr_values[i] = rma;
+        }
+    }
+    
+    // Step 2: Inline SMA calculations for highma and lowma
+    let mut highma = vec![f64::NAN; len];
+    let mut lowma = vec![f64::NAN; len];
+    
+    // SMA of high
+    let sma_warm = first + amplitude - 1;
+    if sma_warm < len {
+        let mut sum = 0.0;
+        for i in first..=sma_warm {
+            sum += high[i];
+        }
+        highma[sma_warm] = sum / amplitude as f64;
+        
+        for i in (sma_warm + 1)..len {
+            sum = sum - high[i - amplitude] + high[i];
+            highma[i] = sum / amplitude as f64;
+        }
+    }
+    
+    // SMA of low
+    if sma_warm < len {
+        let mut sum = 0.0;
+        for i in first..=sma_warm {
+            sum += low[i];
+        }
+        lowma[sma_warm] = sum / amplitude as f64;
+        
+        for i in (sma_warm + 1)..len {
+            sum = sum - low[i - amplitude] + low[i];
+            lowma[i] = sum / amplitude as f64;
+        }
+    }
+    
+    // Step 3: Core HalfTrend calculation (matching halftrend_scalar logic)
+    // Initialize state variables
+    let mut current_trend = 0i32;
+    let mut next_trend = 0i32;
+    let mut max_low_price = if warm > 0 { low[warm - 1] } else { low[0] };
+    let mut min_high_price = if warm > 0 { high[warm - 1] } else { high[0] };
+    let mut up = 0.0;
+    let mut down = 0.0;
+    
+    for i in warm..len {
+        // Default signals to NaN for this index
+        buy_signal[i] = qnan;
+        sell_signal[i] = qnan;
+        
+        // Calculate atr2 and dev
+        let atr2 = atr_values[i] / 2.0;
+        let dev = channel_deviation * atr2;
+        
+        // Find highest and lowest prices within amplitude window (sliding window)
+        let start = if i >= amplitude { i - amplitude + 1 } else { 0 };
+        let mut high_price = high[start];
+        let mut low_price = low[start];
+        for j in (start + 1)..=i {
+            if high[j] > high_price { high_price = high[j]; }
+            if low[j] < low_price { low_price = low[j]; }
+        }
+        
+        // Pine-style nz(low[1], low) and nz(high[1], high) to avoid underflow
+        let prev_low = if i > 0 { low[i - 1] } else { low[i] };
+        let prev_high = if i > 0 { high[i - 1] } else { high[i] };
+        
+        // Main HalfTrend logic (matching standard scalar implementation)
+        if next_trend == 1 {
+            max_low_price = max_low_price.max(low_price);
+            
+            if highma[i] < max_low_price && close[i] < prev_low {
+                current_trend = 1;
+                next_trend = 0;
+                min_high_price = high_price;
+            }
+        } else {
+            min_high_price = min_high_price.min(high_price);
+            
+            if lowma[i] > min_high_price && close[i] > prev_high {
+                current_trend = 0;
+                next_trend = 1;
+                max_low_price = low_price;
+            }
+        }
+        
+        // Calculate HalfTrend line and channels
+        if current_trend == 0 {
+            // Uptrend
+            if i > warm && trend[i - 1] != 0.0 {
+                // Trend changed from down to up - signal event
+                up = if down == 0.0 { down } else { down };
+                buy_signal[i] = up - atr2;
+            } else {
+                up = if i == warm || up == 0.0 { max_low_price } else { max_low_price.max(up) };
+            }
+            halftrend[i] = up;
+            atr_high[i] = up + dev;
+            atr_low[i] = up - dev;
+            trend[i] = 0.0;
+        } else {
+            // Downtrend
+            if i > warm && trend[i - 1] != 1.0 {
+                // Trend changed from up to down - signal event
+                down = if up == 0.0 { up } else { up };
+                sell_signal[i] = down + atr2;
+            } else {
+                down = if i == warm || down == 0.0 { min_high_price } else { min_high_price.min(down) };
+            }
+            halftrend[i] = down;
+            atr_high[i] = down + dev;
+            atr_low[i] = down - dev;
+            trend[i] = 1.0;
+        }
+    }
+    
+    Ok(())
+}
+
 pub fn halftrend_scalar(
     high: &[f64],
     low: &[f64],

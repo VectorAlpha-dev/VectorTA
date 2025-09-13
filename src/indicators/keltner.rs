@@ -464,6 +464,174 @@ pub fn keltner_into_slice(
 // Scalar calculation (core logic)
 
 #[inline]
+/// Classic kernel - optimized loop-jammed implementation for SMA
+pub fn keltner_scalar_classic_sma(
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	source: &[f64],
+	period: usize,
+	multiplier: f64,
+	first: usize,
+	upper: &mut [f64],
+	middle: &mut [f64],
+	lower: &mut [f64],
+) {
+	let len = close.len();
+	let warm = first + period - 1;
+	
+	if warm >= len {
+		return;
+	}
+	
+	// --- ATR Calculation (inline) ---
+	let alpha = 1.0 / (period as f64);
+	let mut sum_tr = 0.0;
+	let mut rma = f64::NAN;
+	let mut atr_values = vec![f64::NAN; len];
+	
+	for i in 0..len {
+		let tr = if i == 0 {
+			high[0] - low[0]
+		} else {
+			let hl = high[i] - low[i];
+			let hc = (high[i] - close[i - 1]).abs();
+			let lc = (low[i] - close[i - 1]).abs();
+			hl.max(hc).max(lc)
+		};
+		
+		if i < period {
+			sum_tr += tr;
+			if i == period - 1 {
+				rma = sum_tr / (period as f64);
+				atr_values[i] = rma;
+			}
+		} else {
+			rma += alpha * (tr - rma);
+			atr_values[i] = rma;
+		}
+	}
+	
+	// --- SMA Calculation (inline) ---
+	let mut sum = 0.0;
+	
+	// Initialize SMA
+	for j in 0..period {
+		sum += source[first + j];
+	}
+	let mut sma_val = sum / period as f64;
+	
+	// First valid Keltner point
+	if warm < len {
+		middle[warm] = sma_val;
+		let atr_v = atr_values[warm];
+		if !atr_v.is_nan() {
+			upper[warm] = sma_val + multiplier * atr_v;
+			lower[warm] = sma_val - multiplier * atr_v;
+		}
+	}
+	
+	// Rolling window for remaining values
+	for i in (warm + 1)..len {
+		// Update SMA
+		sum += source[i] - source[i - period];
+		sma_val = sum / period as f64;
+		
+		// Calculate Keltner bands
+		middle[i] = sma_val;
+		let atr_v = atr_values[i];
+		if !atr_v.is_nan() {
+			upper[i] = sma_val + multiplier * atr_v;
+			lower[i] = sma_val - multiplier * atr_v;
+		}
+	}
+}
+
+/// Classic kernel - optimized loop-jammed implementation for EMA
+pub fn keltner_scalar_classic_ema(
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	source: &[f64],
+	period: usize,
+	multiplier: f64,
+	first: usize,
+	upper: &mut [f64],
+	middle: &mut [f64],
+	lower: &mut [f64],
+) {
+	let len = close.len();
+	let warm = first + period - 1;
+	
+	if warm >= len {
+		return;
+	}
+	
+	// --- ATR Calculation (inline) ---
+	let alpha = 1.0 / (period as f64);
+	let mut sum_tr = 0.0;
+	let mut rma = f64::NAN;
+	let mut atr_values = vec![f64::NAN; len];
+	
+	for i in 0..len {
+		let tr = if i == 0 {
+			high[0] - low[0]
+		} else {
+			let hl = high[i] - low[i];
+			let hc = (high[i] - close[i - 1]).abs();
+			let lc = (low[i] - close[i - 1]).abs();
+			hl.max(hc).max(lc)
+		};
+		
+		if i < period {
+			sum_tr += tr;
+			if i == period - 1 {
+				rma = sum_tr / (period as f64);
+				atr_values[i] = rma;
+			}
+		} else {
+			rma += alpha * (tr - rma);
+			atr_values[i] = rma;
+		}
+	}
+	
+	// --- EMA Calculation (inline) ---
+	let ema_alpha = 2.0 / (period as f64 + 1.0);
+	let ema_alpha_1 = 1.0 - ema_alpha;
+	
+	// Initialize EMA with SMA
+	let mut sum = 0.0;
+	for j in 0..period {
+		sum += source[first + j];
+	}
+	let mut ema_val = sum / period as f64;
+	
+	// First valid Keltner point
+	if warm < len {
+		middle[warm] = ema_val;
+		let atr_v = atr_values[warm];
+		if !atr_v.is_nan() {
+			upper[warm] = ema_val + multiplier * atr_v;
+			lower[warm] = ema_val - multiplier * atr_v;
+		}
+	}
+	
+	// EMA updates for remaining values
+	for i in (warm + 1)..len {
+		// Update EMA
+		ema_val = ema_alpha * source[i] + ema_alpha_1 * ema_val;
+		
+		// Calculate Keltner bands
+		middle[i] = ema_val;
+		let atr_v = atr_values[i];
+		if !atr_v.is_nan() {
+			upper[i] = ema_val + multiplier * atr_v;
+			lower[i] = ema_val - multiplier * atr_v;
+		}
+	}
+}
+
+/// Regular kernel - uses function calls for flexibility
 pub fn keltner_scalar(
 	high: &[f64],
 	low: &[f64],
@@ -477,6 +645,20 @@ pub fn keltner_scalar(
 	middle: &mut [f64],
 	lower: &mut [f64],
 ) {
+	// Use classic kernels for SMA and EMA
+	match ma_type {
+		"sma" | "SMA" => {
+			keltner_scalar_classic_sma(high, low, close, source, period, multiplier, first, upper, middle, lower);
+			return;
+		},
+		"ema" | "EMA" => {
+			keltner_scalar_classic_ema(high, low, close, source, period, multiplier, first, upper, middle, lower);
+			return;
+		},
+		_ => {}
+	}
+	
+	// Original implementation for other MA types
 	let len = close.len();
 	let warm = first + period - 1;
 	let mut atr = alloc_with_nan_prefix(len, warm);
@@ -659,9 +841,18 @@ pub fn keltner_row_scalar(
 	middle: &mut [f64],
 	lower: &mut [f64],
 ) {
-	keltner_scalar(
-		high, low, close, source, period, multiplier, ma_type, first, upper, middle, lower,
-	)
+	// Dispatch to classic kernels for common MA types
+	match ma_type {
+		"sma" | "SMA" => {
+			keltner_scalar_classic_sma(high, low, close, source, period, multiplier, first, upper, middle, lower);
+		},
+		"ema" | "EMA" => {
+			keltner_scalar_classic_ema(high, low, close, source, period, multiplier, first, upper, middle, lower);
+		},
+		_ => {
+			keltner_scalar(high, low, close, source, period, multiplier, ma_type, first, upper, middle, lower);
+		}
+	}
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]

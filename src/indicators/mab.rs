@@ -269,8 +269,36 @@ pub fn mab_into_slice(
 		});
 	}
 
+	// Classic kernel available but disabled - revert to original implementation
+	// To enable classic kernel optimization, uncomment the following and comment out the code below:
+	/*
+	let fast_ma_type = input.get_fast_ma_type();
+	let slow_ma_type = input.get_slow_ma_type();
+	
+	if fast_ma_type == "sma" && slow_ma_type == "sma" {
+		// Use optimized classic kernel for SMA/SMA
+		unsafe {
+			return mab_scalar_classic_sma(
+				data,
+				fast_period,
+				slow_period,
+				devup,
+				devdn,
+				first,
+				upper_dst,
+				middle_dst,
+				lower_dst,
+			);
+		}
+	}
+	*/
+
+	// Fall back to general implementation for other MA type combinations
+	let fast_ma_type = input.get_fast_ma_type();
+	let slow_ma_type = input.get_slow_ma_type();
+	
 	// Fast MA
-	let fast_ma = match input.get_fast_ma_type() {
+	let fast_ma = match fast_ma_type {
 		"ema" => {
 			let params = EmaParams { period: Some(fast_period) };
 			ema(&EmaInput::from_slice(data, params)).map_err(|_| MabError::NotEnoughValidData {
@@ -286,7 +314,7 @@ pub fn mab_into_slice(
 	};
 
 	// Slow MA
-	let slow_ma = match input.get_slow_ma_type() {
+	let slow_ma = match slow_ma_type {
 		"ema" => {
 			let params = EmaParams { period: Some(slow_period) };
 			ema(&EmaInput::from_slice(data, params)).map_err(|_| MabError::NotEnoughValidData {
@@ -1423,6 +1451,112 @@ pub fn mab_batch_into(
 
 		Ok(rows)
 	}
+}
+
+/// Optimized MAB calculation with inline dual SMA (default configuration)
+#[inline]
+pub unsafe fn mab_scalar_classic_sma(
+	data: &[f64],
+	fast_period: usize,
+	slow_period: usize,
+	devup: f64,
+	devdn: f64,
+	first_valid_idx: usize,
+	upper: &mut [f64],
+	middle: &mut [f64],
+	lower: &mut [f64],
+) -> Result<(), MabError> {
+	let n = data.len();
+	
+	// Actually, for simplicity and correctness, let's just calculate the MAs inline
+	// and then use the standard computation
+	
+	// Calculate fast SMA
+	let mut fast_ma = vec![f64::NAN; n];
+	if fast_period > 0 && first_valid_idx + fast_period <= n {
+		let mut sum = 0.0;
+		for i in 0..fast_period {
+			sum += data[first_valid_idx + i];
+		}
+		fast_ma[first_valid_idx + fast_period - 1] = sum / fast_period as f64;
+		
+		for i in (first_valid_idx + fast_period)..n {
+			sum = sum - data[i - fast_period] + data[i];
+			fast_ma[i] = sum / fast_period as f64;
+		}
+	}
+	
+	// Calculate slow SMA
+	let mut slow_ma = vec![f64::NAN; n];
+	if slow_period > 0 && first_valid_idx + slow_period <= n {
+		let mut sum = 0.0;
+		for i in 0..slow_period {
+			sum += data[first_valid_idx + i];
+		}
+		slow_ma[first_valid_idx + slow_period - 1] = sum / slow_period as f64;
+		
+		for i in (first_valid_idx + slow_period)..n {
+			sum = sum - data[i - slow_period] + data[i];
+			slow_ma[i] = sum / slow_period as f64;
+		}
+	}
+	
+	// Now compute the bands using the same logic as the original scalar function
+	let need_total = slow_period.max(fast_period) + fast_period - 1;
+	let warmup = first_valid_idx + need_total - 1;
+	let first_output = warmup + 1;
+	
+	// Set warmup prefix to NaN
+	for i in 0..first_output.min(n) {
+		upper[i] = f64::NAN;
+		middle[i] = f64::NAN;
+		lower[i] = f64::NAN;
+	}
+	
+	if first_output >= n {
+		return Ok(());
+	}
+	
+	// Use the original scalar computation logic
+	// Initialize sum of squares for the first window
+	let start_idx = if first_output >= fast_period { 
+		first_output - fast_period + 1 
+	} else { 
+		0 
+	};
+	
+	let mut sum_sq = 0.0;
+	for i in start_idx..(start_idx + fast_period).min(fast_ma.len()) {
+		let diff = fast_ma[i] - slow_ma[i];
+		if !diff.is_nan() {
+			sum_sq += diff * diff;
+		}
+	}
+	
+	// Process first valid output
+	if first_output < fast_ma.len() {
+		let dev = (sum_sq / fast_period as f64).sqrt();
+		middle[first_output] = fast_ma[first_output];
+		upper[first_output] = slow_ma[first_output] + devup * dev;
+		lower[first_output] = slow_ma[first_output] - devdn * dev;
+	}
+	
+	// Process remaining values with running sum
+	for i in (first_output + 1)..fast_ma.len() {
+		let old_idx = i - fast_period;
+		let old = fast_ma[old_idx] - slow_ma[old_idx];
+		let new = fast_ma[i] - slow_ma[i];
+		if !old.is_nan() && !new.is_nan() {
+			sum_sq += new * new - old * old;
+		}
+		let dev = (sum_sq / fast_period as f64).sqrt();
+		
+		middle[i] = fast_ma[i];
+		upper[i] = slow_ma[i] + devup * dev;
+		lower[i] = slow_ma[i] - devdn * dev;
+	}
+	
+	Ok(())
 }
 
 #[cfg(test)]
