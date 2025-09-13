@@ -64,8 +64,8 @@ use my_project::indicators::moving_averages::{
 
 use my_project::indicators::{
 	cci_cycle::{cci_cycle, cci_cycle_with_kernel, CciCycleBatchBuilder, CciCycleInput},
-	fvg_trailing_stop::{fvg_trailing_stop, fvg_trailing_stop_with_kernel, FvgTsBatchBuilder, FvgTrailingStopInput},
-	halftrend::{halftrend, halftrend_with_kernel, HalfTrendBatchBuilder, HalfTrendInput},
+	fvg_trailing_stop::{fvg_trailing_stop, fvg_trailing_stop_with_kernel, FvgTrailingStopInput},
+	halftrend::{halftrend, halftrend_with_kernel, HalfTrendInput},
 	net_myrsi::{net_myrsi, net_myrsi_with_kernel, NetMyrsiBatchBuilder, NetMyrsiInput},
 	reverse_rsi::{reverse_rsi, reverse_rsi_with_kernel, ReverseRsiBatchBuilder, ReverseRsiInput},
 };
@@ -93,7 +93,7 @@ use my_project::indicators::{
 	aroon::{aroon as aroon_raw, AroonInput},
 	aroonosc::{aroon_osc as aroon_osc_raw, AroonOscInput},
 	atr::{atr as atr_raw, AtrInput},
-	avsl::{avsl_with_kernel, AvslInput},
+	avsl::{avsl_with_kernel, AvslBatchBuilder, AvslInput},
 	bandpass::{bandpass as bandpass_raw, BandPassInput},
 	bollinger_bands::{bollinger_bands as bollinger_bands_raw, BollingerBandsInput},
 	bollinger_bands_width::{bollinger_bands_width as bollinger_bands_width_raw, BollingerBandsWidthInput},
@@ -914,7 +914,6 @@ bench_wrappers! {
 	(mod_god_mode_bench, mod_god_mode_raw, ModGodModeInputS),
 	(nadaraya_watson_envelope_bench, nadaraya_watson_envelope_raw, NweInputS),
 	(qqe_bench, qqe_raw, QqeInputS),
-	(ttm_squeeze_bench, ttm_squeeze_raw, TtmSqueezeInputS),
 	(buff_averages_bench, buff_averages, BuffAveragesInputS),
 	(volume_adjusted_ma_bench, VolumeAdjustedMa, VolumeAdjustedMaInputS),
 	(net_myrsi_bench, net_myrsi, NetMyrsiInputS),

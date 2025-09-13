@@ -1990,7 +1990,7 @@ mod tests {
         Ok(())
     }
     
-    fn check_prb_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+    fn check_batch_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
@@ -2146,7 +2146,7 @@ mod tests {
         check_prb_reinput,
         check_prb_nan_handling,
         check_prb_streaming,
-        check_prb_no_poison
+        check_batch_no_poison
     );
     
     // Batch test generation macro
