@@ -67,6 +67,13 @@ use crate::indicators::wilders::{WildersParams, WildersStream};
 use crate::indicators::wma::{WmaParams, WmaStream};
 use crate::indicators::zlema::{ZlemaParams, ZlemaStream};
 use crate::indicators::frama::{FramaParams, FramaStream};
+use crate::indicators::moving_averages::dma::{DmaParams, DmaStream};
+use crate::indicators::moving_averages::ehlers_ecema::{EhlersEcemaParams, EhlersEcemaStream};
+use crate::indicators::moving_averages::ehlers_kama::{EhlersKamaParams, EhlersKamaStream};
+use crate::indicators::moving_averages::ehma::{EhmaParams, EhmaStream};
+use crate::indicators::moving_averages::nama::{NamaParams, NamaStream};
+use crate::indicators::moving_averages::sama::{SamaParams, SamaStream};
+use crate::indicators::moving_averages::volatility_adjusted_ma::{VamaParams, VamaStream};
 
 use std::error::Error;
 
@@ -115,6 +122,13 @@ pub enum MaStream {
     EhlersITrend(EhlersITrendStream),
     Frama(FramaStream),
     Epma(EpmaStream),
+    Dma(DmaStream),
+    EhlersEcema(EhlersEcemaStream),
+    EhlersKama(EhlersKamaStream),
+    Ehma(EhmaStream),
+    Nama(NamaStream),
+    Sama(SamaStream),
+    Vama(VamaStream),
 }
 
 impl MaStream {
@@ -133,8 +147,8 @@ impl MaStream {
             MaStream::Cwma(s) => s.update(value),
             MaStream::Edcf(s) => s.update(value),
             MaStream::Fwma(s) => s.update(value),
-            MaStream::Gaussian(s) => s.update(value),
-            MaStream::HighPass(s) => s.update(value),
+            MaStream::Gaussian(s) => Some(s.update(value)),
+            MaStream::HighPass(s) => Some(s.update(value)),
             MaStream::HighPass2(s) => s.update(value),
             MaStream::Hma(s) => s.update(value),
             MaStream::Hwma(s) => s.update(value),
@@ -143,16 +157,16 @@ impl MaStream {
             MaStream::Kama(s) => s.update(value),
             MaStream::LinReg(s) => s.update(value),
             MaStream::Maaq(s) => s.update(value),
-            MaStream::Mama(s) => s.update(value),
-            MaStream::Mwdx(s) => s.update(value),
+            MaStream::Mama(s) => s.update(value).map(|(mama, _fama)| mama),
+            MaStream::Mwdx(s) => Some(s.update(value)),
             MaStream::Nma(s) => s.update(value),
             MaStream::Pwma(s) => s.update(value),
             MaStream::Reflex(s) => s.update(value),
             MaStream::SinWma(s) => s.update(value),
             MaStream::SqWma(s) => s.update(value),
             MaStream::SrWma(s) => s.update(value),
-            MaStream::SuperSmoother(s) => s.update(value),
-            MaStream::SuperSmoother3Pole(s) => s.update(value),
+            MaStream::SuperSmoother(s) => s.update(value, None),
+            MaStream::SuperSmoother3Pole(s) => Some(s.update(value)),
             MaStream::Swma(s) => s.update(value),
             MaStream::Tilson(s) => s.update(value),
             MaStream::TrendFlex(s) => s.update(value),
@@ -160,11 +174,18 @@ impl MaStream {
             MaStream::Wilders(s) => s.update(value),
             MaStream::Wma(s) => s.update(value),
             MaStream::VpWma(s) => s.update(value),
-            MaStream::Vwap(s) => s.update(value),
-            MaStream::Vwma(s) => s.update(value),
+            MaStream::Vwap(s) => None, // Requires high/low/close - use update_with_volume instead
+            MaStream::Vwma(s) => None, // Requires volume - use update_with_volume instead
             MaStream::EhlersITrend(s) => s.update(value),
-            MaStream::Frama(s) => s.update(value),
+            MaStream::Frama(s) => None, // Requires high/low - cannot use with single value
             MaStream::Epma(s) => s.update(value),
+            MaStream::Dma(s) => s.update(value),
+            MaStream::EhlersEcema(s) => Some(s.next(value)),
+            MaStream::EhlersKama(s) => s.update(value),
+            MaStream::Ehma(s) => s.update(value),
+            MaStream::Nama(s) => s.update_source(value),
+            MaStream::Sama(s) => s.update(value),
+            MaStream::Vama(s) => s.update(value),
         }
     }
 
@@ -174,9 +195,9 @@ impl MaStream {
     #[inline]
     pub fn update_with_volume(&mut self, value: f64, volume: f64) -> Option<f64> {
         match self {
-            MaStream::VpWma(s) => s.update_with_volume(value, volume),
-            MaStream::Vwap(s) => s.update_with_volume(value, volume),
-            MaStream::Vwma(s) => s.update_with_volume(value, volume),
+            MaStream::VpWma(s) => s.update(value * volume),
+            MaStream::Vwap(_s) => None, // VWAP requires timestamp - not supported in simple update
+            MaStream::Vwma(s) => s.update(value, volume),
             _ => self.update(value),
         }
     }
@@ -434,7 +455,11 @@ pub fn ma_stream(ma_type: &str, period: usize) -> Result<MaStream, Box<dyn Error
         }
 
         "frama" => {
-            let stream = FramaStream::try_new(FramaParams { period: Some(period) })?;
+            let stream = FramaStream::try_new(FramaParams { 
+                window: Some(period), 
+                sc: None,
+                fc: None,
+            })?;
             Ok(MaStream::Frama(stream))
         }
 
@@ -444,6 +469,60 @@ pub fn ma_stream(ma_type: &str, period: usize) -> Result<MaStream, Box<dyn Error
                 offset: None, // Default used by indicator
             })?;
             Ok(MaStream::Epma(stream))
+        }
+
+        "dma" => {
+            let stream = DmaStream::try_new(DmaParams {
+                ema_length: Some(period),
+                ..Default::default()
+            })?;
+            Ok(MaStream::Dma(stream))
+        }
+
+        "ehlers_ecema" => {
+            let stream = EhlersEcemaStream::try_new(EhlersEcemaParams {
+                length: Some(period),
+                ..Default::default()
+            })?;
+            Ok(MaStream::EhlersEcema(stream))
+        }
+
+        "ehlers_kama" => {
+            let stream = EhlersKamaStream::try_new(EhlersKamaParams {
+                period: Some(period),
+            })?;
+            Ok(MaStream::EhlersKama(stream))
+        }
+
+        "ehma" => {
+            let stream = EhmaStream::try_new(EhmaParams {
+                period: Some(period),
+            })?;
+            Ok(MaStream::Ehma(stream))
+        }
+
+        "nama" => {
+            let stream = NamaStream::try_new(NamaParams {
+                period: Some(period),
+                ..Default::default()
+            })?;
+            Ok(MaStream::Nama(stream))
+        }
+
+        "sama" => {
+            let stream = SamaStream::try_new(SamaParams {
+                length: Some(period),
+                ..Default::default()
+            })?;
+            Ok(MaStream::Sama(stream))
+        }
+
+        "volatility_adjusted_ma" | "vama" => {
+            let stream = VamaStream::try_new(VamaParams {
+                base_period: Some(period),
+                ..Default::default()
+            })?;
+            Ok(MaStream::Vama(stream))
         }
 
         _ => {

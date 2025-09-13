@@ -631,21 +631,21 @@ impl CoppockStream {
 	#[inline(always)]
 	pub fn update(&mut self, value: f64) -> Option<f64> {
 		let n = self.buffer.len();
-		// 1) Write new price into “write_idx”
+		// 1) Write new price into "write_idx"
 		let write_idx = self.head;
 		self.buffer[write_idx] = value;
 		// 2) Advance head to next slot
 		self.head = (write_idx + 1) % n;
-		// 3) Once this ring buffer has wrapped once, “filled” = true
+		// 3) Once this ring buffer has wrapped once, "filled" = true
 		if !self.filled && self.head == 0 {
 			self.filled = true;
 		}
 		if !self.filled {
-			// We haven’t yet seen “long.max(short)+1” prices => cannot compute ROC
+			// We haven't yet seen "long.max(short)+1" prices => cannot compute ROC
 			return None;
 		}
 
-		// 4) “idx” is the location we just wrote into
+		// 4) "idx" is the location we just wrote into
 		let idx = write_idx;
 		let cur = self.buffer[idx];
 		let prev_short = self.buffer[(idx + n - self.short) % n];
@@ -970,11 +970,11 @@ fn coppock_batch_inner(
 			sum_roc[i] = short_val + long_val;
 		}
 
-		// Now smooth “sum_roc” with MA
+		// Now smooth "sum_roc" with MA
 		// (We unwrap because these parameters should always be valid here.)
 		let smoothed = ma(&ma_type, MaData::Slice(&sum_roc), ma_p).expect("MA error inside batch");
 
-		// Copy the smoothed vector into this row’s slice
+		// Copy the smoothed vector into this row's slice
 		out_row.copy_from_slice(&smoothed);
 	};
 

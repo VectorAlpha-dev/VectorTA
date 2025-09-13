@@ -4,7 +4,15 @@
       "Bash(do if ! grep -q \"avx2\\|avx512\" \"$file\")",
       "Bash(do if ! grep -q \"batch\\|Batch\" \"$file\")",
       "Bash(cargo check:*)",
-      "Bash(cargo bench:*)"
+      "Bash(cargo bench:*)",
+      "Bash(dir:*)",
+      "Bash(findstr:*)",
+      "Bash(grep:*)",
+      "Bash(cargo test:*)",
+      "Bash(rustc:*)",
+      "Bash(cargo build:*)",
+      "Bash(test_bindings.bat coppock)",
+      "Bash(cmd /c:*)"
     ],
     "deny": [],
     "ask": [],
