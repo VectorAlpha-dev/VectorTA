@@ -6,16 +6,17 @@
 //! - **short_period**: Window for short SMA (default: 5)
 //! - **long_period**: Window for long SMA (default: 34)
 //!
-//! ## Errors
-//! - **AllValuesNaN**: ao: All input values are NaN
-//! - **InvalidPeriods**: ao: short=0 or long=0
-//! - **ShortPeriodNotLess**: ao: short >= long
-//! - **NoData**: ao: Input slice is empty
-//! - **NotEnoughValidData**: ao: Not enough valid data for requested long_period
-//!
 //! ## Returns
 //! - **`Ok(AoOutput)`** with Vec<f64> of same length as input, leading values are NaN
 //! - **`Err(AoError)`** otherwise
+//!
+//! ## Developer Status
+//! - **AVX2 kernel**: STUB - Falls back to scalar implementation
+//! - **AVX512 kernel**: STUB - Falls back to scalar implementation
+//! - **Streaming update**: O(1) - Efficient rolling sums for both SMAs
+//! - **Memory optimization**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix) ✓
+//! - **Optimization needed**: Implement SIMD kernels for dual SMA calculations
+//! - **Note**: Streaming implementation is already well-optimized with rolling windows
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]

@@ -7,14 +7,16 @@
 //! - **fast_limit**: Upper bound for the adaptive smoothing factor (defaults to 0.5)
 //! - **slow_limit**: Lower bound for the adaptive smoothing factor (defaults to 0.05)
 //!
-//! ## Errors
-//! - **NotEnoughData**: mama: Fewer than 10 data points provided.
-//! - **InvalidFastLimit**: mama: Invalid fast limit (≤ 0.0, `NaN`, or infinite).
-//! - **InvalidSlowLimit**: mama: Invalid slow limit (≤ 0.0, `NaN`, or infinite).
-//!
 //! ## Returns
 //! - **`Ok(MamaOutput)`** on success, containing two `Vec<f64>`: `mama_values` and `fama_values`.
 //! - **`Err(MamaError)`** otherwise.
+//!
+//! ## Developer Status
+//! - **AVX2 kernel**: IMPLEMENTED - Uses SIMD for Hilbert transform computation
+//! - **AVX512 kernel**: STUB - No separate implementation, uses AVX2
+//! - **Streaming update**: O(n) - Rebuilds slice from ring buffer each update (lines 1122-1129)
+//! - **Memory optimization**: GOOD - Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix)
+//! - **Optimization needed**: Implement AVX512 kernel, optimize streaming to avoid slice rebuild
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

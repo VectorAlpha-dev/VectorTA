@@ -1,22 +1,22 @@
 //! # Ehlers Instantaneous Trend (EIT)
 //!
-//! John Ehlers' digital signal processing trendline using adaptive MESA-based spectral analysis. Smooths price with minimal lag and adapts dynamically to dominant cycle period.
+//! Digital signal processing trendline using adaptive MESA-based spectral analysis. 
+//! Smooths price with minimal lag and adapts dynamically to dominant cycle period 
+//! using John Ehlers' sophisticated DSP techniques.
 //!
 //! ## Parameters
-//! - **warmup_bars**: Initial bars for filter state (default: 12)
-//! - **max_dc_period**: Maximum cycle period (default: 50)
-//!
-//! ## Errors
-//! - **EmptyInputData**: Input data is empty
-//! - **AllValuesNaN**: All input values are NaN
-//! - **NotEnoughDataForWarmup**: Not enough data for warmup bars
+//! - **warmup_bars**: Initial bars for filter state initialization (default: 12)
+//! - **max_dc_period**: Maximum dominant cycle period to consider (default: 50)
 //!
 //! ## Returns
-//! - **Ok(EhlersITrendOutput)**: Vec<f64> matching input length
-//! - **Err(EhlersITrendError)**: On error
+//! - **values**: Instantaneous trendline with adaptive smoothing
 //!
-//! ## SIMD note
-//! **SIMD acceleration is not implemented for this indicator. SIMD (AVX2/AVX512) is ineffective for memory-bound or highly sequential filters like Ehlers ITrend. Scalar path is always used.**
+//! ## Developer Status
+//! - **AVX2 kernel**: NOT APPLICABLE - Inherently sequential algorithm
+//! - **AVX512 kernel**: NOT APPLICABLE - Inherently sequential algorithm
+//! - **Streaming update**: O(1) - Efficient incremental calculation
+//! - **Memory optimization**: GOOD - Uses zero-copy helpers (alloc_with_nan_prefix)
+//! - **Overall status**: WELL-OPTIMIZED - Algorithm inherently sequential, streaming is efficient
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{

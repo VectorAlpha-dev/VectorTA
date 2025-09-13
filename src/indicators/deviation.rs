@@ -28,12 +28,6 @@
 //! - **period**: Window size (number of data points). Must be >= 2 for standard deviation.
 //! - **devtype**: Type of deviation: 0 = Standard Deviation, 1 = Mean Absolute, 2 = Median Absolute.
 //!
-//! ## Errors
-//! - **AllValuesNaN**: All input data values are `NaN`.
-//! - **InvalidPeriod**: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: Not enough valid data points for the requested `period`.
-//! - **InvalidDevType**: Invalid devtype (must be 0, 1, or 2).
-//!
 //! ## Returns
 //! - **`Ok(DeviationOutput)`** on success, containing a `Vec<f64>` of length matching the input.
 //! - **`Err(DeviationError)`** otherwise.
@@ -50,6 +44,13 @@
 //! let input = DeviationInput::from_slice(&data, params);
 //! let output = deviation(&input).unwrap();
 //! ```
+//!
+//! ## Developer Notes
+//! - **AVX2 kernel**: STUB - empty function (uses deviation_compute_into instead)
+//! - **AVX512 kernel**: STUB - routes to scalar via deviation_compute_into
+//! - **Streaming**: Not implemented
+//! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy)
+//! - **Batch operations**: ✅ Implemented with parallel processing support
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};

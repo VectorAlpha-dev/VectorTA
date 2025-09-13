@@ -1,17 +1,21 @@
 //! # Weighted Close Price (WCLPRICE)
 //!
-//! Computes `(high + low + 2*close) / 4` for each index. NaN if any input field is NaN at index.
+//! WCLPRICE calculates a weighted average price that gives double weight to the closing price,
+//! useful for identifying price levels with heavier emphasis on closing values.
 //!
 //! ## Parameters
-//! - None (uses all of high, low, close)
-//!
-//! ## Errors
-//! - **EmptyData**: Input is empty
-//! - **AllValuesNaN**: All values are NaN in any required field
+//! - None (uses high, low, and close price data)
 //!
 //! ## Returns
-//! - **Ok(WclpriceOutput)** on success, contains a `Vec<f64>`
-//! - **Err(WclpriceError)** otherwise
+//! - **`Ok(WclpriceOutput)`** containing a `Vec<f64>` of weighted close values matching input length.
+//! - **`Err(WclpriceError)`** on invalid data or mismatched input lengths.
+//!
+//! ## Developer Notes
+//! - **SIMD Status**: AVX2 and AVX512 kernels are stubs (call scalar implementation)
+//! - **Streaming Performance**: O(1) - simple stateless calculation
+//! - **Memory Optimization**: ✓ Uses alloc_with_nan_prefix, make_uninit_matrix for batching
+//! - **Batch Support**: ✓ Full parallel batch implementation (though no parameters to sweep)
+//! - **TODO**: Implement actual AVX2/AVX512 SIMD kernels for vectorized arithmetic
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};

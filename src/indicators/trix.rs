@@ -1,22 +1,21 @@
 //! # TRIX (Triple Exponential Average Oscillator)
 //!
-//! TRIX is a momentum oscillator derived from a triple-smoothed Exponential Moving Average (EMA),
-//! then taking the 1-day Rate-Of-Change (ROC) of that triple EMA (multiplied by 10000).
+//! TRIX is a momentum oscillator that applies triple exponential smoothing to log prices
+//! and measures the rate of change, useful for filtering out market noise.
 //!
 //! ## Parameters
-//! - **period**: The EMA window size. Defaults to 18.
-//!
-//! ## Errors
-//! - **EmptyData**: trix: Input data slice is empty.
-//! - **InvalidPeriod**: trix: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: trix: Fewer than `3*(period - 1) + 1` valid data points remain
-//!   after the first valid index for triple-EMA + 1-bar ROC.
-//! - **AllValuesNaN**: trix: All input data values are `NaN`.
+//! - **period**: EMA smoothing period. Defaults to 18.
 //!
 //! ## Returns
-//! - **`Ok(TrixOutput)`** on success, matching the input length,
-//!   with `NaN` until triple-EMA is fully initialized plus 1 bar for the ROC.
-//! - **`Err(TrixError)`** otherwise.
+//! - **`Ok(TrixOutput)`** containing a `Vec<f64>` of TRIX values (ROC * 10000) matching input length.
+//! - **`Err(TrixError)`** on invalid parameters or insufficient data.
+//!
+//! ## Developer Notes
+//! - **SIMD Status**: AVX2 and AVX512 kernels are stubs (call scalar implementation)
+//! - **Streaming Performance**: O(1) - maintains minimal ring buffers for EMA stages
+//! - **Memory Optimization**: ✓ Uses alloc_with_nan_prefix for output allocation
+//! - **Batch Support**: ✓ Full parallel batch parameter sweep implementation
+//! - **TODO**: Implement actual AVX2/AVX512 SIMD kernels for triple EMA calculations
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -975,6 +974,15 @@ pub fn trix_batch_into(
 		
 		Ok(num_combos)
 	}
+}
+
+// ================== PYTHON MODULE REGISTRATION ==================
+#[cfg(feature = "python")]
+pub fn register_trix_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(trix_py, m)?)?;
+    m.add_function(wrap_pyfunction!(trix_batch_py, m)?)?;
+    m.add_class::<TrixStreamPy>()?;
+    Ok(())
 }
 
 #[cfg(test)]

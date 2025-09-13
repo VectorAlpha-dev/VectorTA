@@ -8,14 +8,16 @@
 //! ## Parameters
 //! - **period**: Window size (number of data points).
 //!
-//! ## Errors
-//! - **AllValuesNaN**: smma: All input data values are `NaN`.
-//! - **InvalidPeriod**: smma: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: smma: Not enough valid data points for the requested `period`.
-//!
 //! ## Returns
 //! - **`Ok(SmmaOutput)`** on success, containing a `Vec<f64>` matching the input.
 //! - **`Err(SmmaError)`** otherwise.
+//!
+//! ## Developer Status
+//! - **AVX2 kernel**: STUB - Falls back to scalar implementation
+//! - **AVX512 kernel**: STUB - Both short and long variants fall back to scalar
+//! - **Streaming update**: O(1) - Efficient exponential smoothing with previous value
+//! - **Memory optimization**: GOOD - Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix)
+//! - **Optimization needed**: Implement AVX2/AVX512 kernels (note: sequential dependencies limit SIMD benefit)
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};

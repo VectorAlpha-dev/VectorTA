@@ -1,17 +1,26 @@
 //! # Variable Length Moving Average (VLMA)
 //!
-//! Adaptive moving average whose period varies between `min_period` and `max_period` depending on deviation from a long-term average.
-//! Supports batch/grid parameter sweeps, kernel selection, streaming updates, and AVX2/AVX512 stubs for future SIMD support.
+//! VLMA is an adaptive moving average that adjusts its period dynamically based on price deviation
+//! from a reference moving average, becoming faster in trends and slower in consolidations.
 //!
 //! ## Parameters
-//! - **min_period**: Minimum period (default: 5)
-//! - **max_period**: Maximum period (default: 50)
-//! - **matype**: Moving average type (default: "sma")
-//! - **devtype**: Deviation type (0=std, 1=mad, 2=median, default: 0)
+//! - **min_period**: Minimum adaptive period. Defaults to 5.
+//! - **max_period**: Maximum adaptive period. Defaults to 50.
+//! - **matype**: Moving average type for reference. Defaults to "sma".
+//! - **devtype**: Deviation type (0=std, 1=mad, 2=median). Defaults to 0.
 //!
 //! ## Returns
-//! - **Ok(VlmaOutput)** on success, containing a Vec<f64> of indicator values
-//! - **Err(VlmaError)** on failure
+//! - **`Ok(VlmaOutput)`** containing a `Vec<f64>` of adaptive moving average values matching input length.
+//! - **`Err(VlmaError)`** on invalid parameters or insufficient data.
+//!
+//! ## Developer Notes
+//! - **SIMD Status**: AVX2 and AVX512 kernels are stubs (call scalar implementation)
+//! - **Streaming Performance**: O(n) - recalculates MA and deviation on each update (inefficient)
+//! - **Memory Optimization**: ✓ Uses alloc_with_nan_prefix for output allocation
+//! - **Batch Support**: ✓ Full parallel batch parameter sweep implementation
+//! - **TODO**: 
+//!   - Implement actual AVX2/AVX512 SIMD kernels
+//!   - Optimize streaming to O(1) with incremental MA/deviation updates
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]

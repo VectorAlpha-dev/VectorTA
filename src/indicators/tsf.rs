@@ -1,18 +1,21 @@
 //! # Time Series Forecast (TSF)
 //!
-//! TSF computes a linear regression forecast over a rolling window, returning the value projected for the next step. Parameters and features match alma.rs, with streaming, batch, and AVX function stubs, builder patterns, and validation. AVX/AVX512 are stubs mapped to scalar, but present for API parity.
+//! TSF calculates linear regression over a rolling window and projects the next value,
+//! providing a smoothed forecast of price direction based on recent trend.
 //!
 //! ## Parameters
-//! - **period**: Regression window size (default: 14).
-//!
-//! ## Errors
-//! - **AllValuesNaN**: tsf: All input data values are `NaN`.
-//! - **InvalidPeriod**: tsf: `period` is zero or exceeds data length.
-//! - **NotEnoughValidData**: tsf: Not enough valid data points for the requested period.
+//! - **period**: Linear regression window size. Defaults to 14.
 //!
 //! ## Returns
-//! - **`Ok(TsfOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-//! - **`Err(TsfError)`** otherwise.
+//! - **`Ok(TsfOutput)`** containing a `Vec<f64>` of forecasted values matching input length.
+//! - **`Err(TsfError)`** on invalid parameters or insufficient data.
+//!
+//! ## Developer Notes
+//! - **SIMD Status**: AVX2 and AVX512 kernels are stubs (call scalar implementation)
+//! - **Streaming Performance**: O(1) - maintains ring buffer with precomputed sums
+//! - **Memory Optimization**: ✓ Uses alloc_with_nan_prefix for output allocation
+//! - **Batch Support**: ✓ Full parallel batch parameter sweep implementation
+//! - **TODO**: Implement actual AVX2/AVX512 SIMD kernels for regression calculations
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};

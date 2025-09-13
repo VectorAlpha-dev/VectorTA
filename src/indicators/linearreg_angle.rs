@@ -1,22 +1,26 @@
 //! # Linear Regression Angle (LRA)
 //!
 //! Computes the angle (in degrees) of the linear regression line for a given period.
-//! Follows ALMA-style API for compatibility, SIMD-stubbed, with streaming and batch mode.
+//! The angle represents the slope of the best-fit line converted to degrees, useful for
+//! identifying trend strength and direction.
 //!
 //! ## Parameters
-//! - **period**: Window size (number of data points), defaults to 14.
+//! - **period**: Window size (number of data points), defaults to 14
 //!
-//! ## Errors
-//! - **AllValuesNaN**: All input data values are `NaN`.
-//! - **InvalidPeriod**: `period` is less than 2 or exceeds data length.
-//! - **NotEnoughValidData**: Not enough valid data for `period`.
-//! - **EmptyData**: Input data slice is empty.
-//! - **OutputLengthMismatch**: Output buffer length doesn't match input length.
-//! - **InvalidKernelType**: Kernel type mismatch for batch operations.
+//! ## Inputs
+//! - Single data slice (typically close prices)
 //!
 //! ## Returns
-//! - **`Ok(Linearreg_angleOutput)`** on success with `.values` field.
-//! - **`Err(Linearreg_angleError)`** otherwise.
+//! - **`Ok(Linearreg_angleOutput)`** containing values (Vec<f64>) representing regression angle in degrees
+//! - Output length matches input data length with NaN padding for warmup period
+//!
+//! ## Developer Notes
+//! - **AVX2 kernel**: STUB - calls scalar implementation (lines 281-283)
+//! - **AVX512 kernel**: STUB - calls scalar implementation (lines 287-289, 293-295)
+//! - **Streaming**: ⚠️ Implemented but O(n) performance - recalculates full buffer on each update (line 327)
+//! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy) at line 223
+//! - **Batch operations**: ✅ Implemented with parallel processing support
+//! - **NEEDS IMPROVEMENT**: Streaming implementation grows unbounded buffer and recalculates entire dataset on each update
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
@@ -1432,6 +1436,13 @@ pub fn linearreg_angle_batch_py<'py>(
 		combos.iter().map(|p| p.period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py),
 	)?;
 	Ok(dict)
+}
+
+#[cfg(feature = "python")]
+pub fn register_linearreg_angle_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
+	m.add_function(wrap_pyfunction!(linearreg_angle_py, m)?)?;
+	m.add_function(wrap_pyfunction!(linearreg_angle_batch_py, m)?)?;
+	Ok(())
 }
 
 #[inline(always)]

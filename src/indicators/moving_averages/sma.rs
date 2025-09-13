@@ -6,15 +6,16 @@
 //! ## Parameters
 //! - **period**: Window size (number of data points).
 //!
-//! ## Errors
-//! - **EmptyData**: sma: Input data slice is empty.
-//! - **InvalidPeriod**: sma: `period` is zero or exceeds data length.
-//! - **NotEnoughValidData**: sma: Fewer than `period` valid (non-`NaN`) values after the first valid index.
-//! - **AllValuesNaN**: sma: All input data are `NaN`.
-//!
 //! ## Returns
 //! - **`Ok(SmaOutput)`** on success, containing a `Vec<f64>` matching the input length.
 //! - **`Err(SmaError)`** otherwise.
+//!
+//! ## Developer Status
+//! - **AVX2 kernel**: IMPLEMENTED - Optimized SIMD operations for efficient computation
+//! - **AVX512 kernel**: STUB - Both short and long variants fall back to scalar
+//! - **Streaming update**: O(1) - Efficient with rolling sum tracking
+//! - **Memory optimization**: GOOD - Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix)
+//! - **Optimization needed**: Implement AVX512 kernels for both short and long periods
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

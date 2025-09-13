@@ -7,14 +7,19 @@
 //! ## Parameters
 //! - **period**: Window size (number of data points), default 14
 //!
-//! ## Errors
-//! - **AllValuesNaN**: linearreg_intercept: All input data values are `NaN`.
-//! - **InvalidPeriod**: linearreg_intercept: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: linearreg_intercept: Not enough valid data points for the requested `period`.
+//! ## Inputs
+//! - Single data slice (typically close prices)
 //!
 //! ## Returns
-//! - **`Ok(LinearRegInterceptOutput)`** on success, containing a `Vec<f64>` matching the input.
-//! - **`Err(LinearRegInterceptError)`** otherwise.
+//! - **`Ok(LinearRegInterceptOutput)`** containing values (Vec<f64>) representing y-intercept values
+//! - Output length matches input data length with NaN padding for warmup period
+//!
+//! ## Developer Notes
+//! - **AVX2 kernel**: STUB - calls scalar implementation (lines 350-352)
+//! - **AVX512 kernel**: STUB - calls scalar implementation (lines 356-358, 362-364)
+//! - **Streaming**: Not implemented
+//! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy) at line 212
+//! - **Batch operations**: ✅ Implemented with parallel processing support
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

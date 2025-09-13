@@ -9,15 +9,16 @@
 //! - **direction**: "long" or "short" (default: "long").
 //! - **ma_type**: Moving average type (default: "sma").
 //!
-//! ## Errors
-//! - **AllValuesNaN**: devstop: All values for high or low are NaN.
-//! - **InvalidPeriod**: devstop: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: devstop: Not enough valid data points for requested `period`.
-//! - **DevStopCalculation**: devstop: Underlying calculation error, including invalid `devtype`.
-//!
 //! ## Returns
 //! - **`Ok(DevStopOutput)`** on success, containing `Vec<f64>` matching input length.
 //! - **`Err(DevStopError)`** otherwise.
+//!
+//! ## Developer Notes
+//! - **AVX2 kernel**: Routes to devstop_into_slice (not a real SIMD implementation)
+//! - **AVX512 kernel**: Routes to devstop_into_slice (not a real SIMD implementation)
+//! - **Streaming**: Not implemented
+//! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy)
+//! - **Batch operations**: ✅ Implemented with parallel processing support
 
 use crate::indicators::deviation::{deviation, DevInput, DevParams};
 use crate::indicators::moving_averages::ma::{ma, MaData};

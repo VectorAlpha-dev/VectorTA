@@ -1,23 +1,24 @@
 //! # Ehlers Error Correcting Exponential Moving Average (ECEMA)
 //!
-//! The Ehlers Error Correcting EMA is an adaptive exponential moving average that
-//! automatically adjusts its gain to minimize the error between the indicator and price.
-//! It tests multiple gain values and selects the one that produces the least error.
+//! Adaptive exponential moving average that automatically adjusts its gain to minimize 
+//! error between the indicator and price. Tests multiple gain values and selects the 
+//! one producing the least error for optimal smoothing and responsiveness.
 //!
 //! ## Parameters
-//! - **length**: Period for the EMA calculation (default: 20)
-//! - **gain_limit**: Maximum gain value to test (divided by 10) (default: 50)
-//!
-//! ## Errors
-//! - **EmptyInputData**: ehlers_ecema: Input data slice is empty.
-//! - **AllValuesNaN**: ehlers_ecema: All input values are `NaN`.
-//! - **InvalidPeriod**: ehlers_ecema: Period is zero or exceeds data length.
-//! - **NotEnoughValidData**: ehlers_ecema: Not enough valid data points for calculation.
-//! - **InvalidGainLimit**: ehlers_ecema: Gain limit must be positive.
+//! - **length**: Period for EMA calculation (default: 20)
+//! - **gain_limit**: Maximum gain value to test, divided by 10 (default: 50)
+//! - **pine_compatible**: Use Pine Script compatible calculation mode
+//! - **confirmed_only**: Use confirmed (previous) values only
 //!
 //! ## Returns
-//! - **`Ok(EhlersEcemaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-//! - **`Err(EhlersEcemaError)`** otherwise.
+//! - **values**: Adaptive EMA values with optimized gain selection
+//!
+//! ## Developer Status
+//! - **AVX2 kernel**: STUB - Falls back to scalar implementation
+//! - **AVX512 kernel**: STUB - Falls back to scalar implementation
+//! - **Streaming update**: O(n) - Recalculates EMA from scratch each update
+//! - **Memory optimization**: GOOD - Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix)
+//! - **Optimization needed**: Implement SIMD kernels, optimize streaming to O(1) with incremental updates
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings

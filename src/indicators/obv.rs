@@ -1161,3 +1161,10 @@ pub fn obv_batch_js(close: &[f64], volume: &[f64]) -> Result<JsValue, JsValue> {
 	serde_wasm_bindgen::to_value(&js_output)
 		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
+
+#[cfg(feature = "python")]
+pub fn register_obv_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(obv_py, m)?)?;
+    m.add_function(wrap_pyfunction!(obv_batch_py, m)?)?;
+    Ok(())
+}

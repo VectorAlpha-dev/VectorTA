@@ -1,22 +1,25 @@
 //! # Buff Averages
 //!
-//! A volume-weighted moving average indicator that calculates fast and slow buffers
-//! based on volume-weighted price averages over different periods.
+//! Volume-weighted moving average indicator that computes dual-period volume-weighted 
+//! averages for trend analysis. Calculates separate fast and slow volume-weighted 
+//! moving averages to identify momentum shifts and trend changes.
 //!
 //! ## Parameters
-//! - **fast_period**: Fast period for calculation (default: 5)
-//! - **slow_period**: Slow period for calculation (default: 20)
-//!
-//! ## Errors
-//! - **EmptyInputData**: buff_averages: Input data slice is empty.
-//! - **AllValuesNaN**: buff_averages: All input values are `NaN`.
-//! - **InvalidPeriod**: buff_averages: Period is zero or exceeds data length.
-//! - **NotEnoughValidData**: buff_averages: Not enough valid data points for calculation.
-//! - **MismatchedDataLength**: buff_averages: Price and volume arrays have different lengths.
+//! - **fast_period**: Number of periods for fast average (default: 5)
+//! - **slow_period**: Number of periods for slow average (default: 20)
+//! - **price data**: Price series (close, open, high, low, or custom)
+//! - **volume data**: Volume series for weighting calculations
 //!
 //! ## Returns
-//! - **`Ok(BuffAveragesOutput)`** on success, containing `fast_buff` and `slow_buff` vectors.
-//! - **`Err(BuffAveragesError)`** otherwise.
+//! - **fast_buff**: Volume-weighted average over fast period
+//! - **slow_buff**: Volume-weighted average over slow period
+//!
+//! ## Developer Status
+//! - **AVX2 kernel**: STUB - Falls back to scalar implementation
+//! - **AVX512 kernel**: STUB - Falls back to scalar implementation  
+//! - **Streaming update**: O(n) - Iterates through both buffers for each update
+//! - **Optimization needed**: Implement SIMD kernels for better performance
+//! - **Streaming improvement**: Could be optimized to O(1) with running sums
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings

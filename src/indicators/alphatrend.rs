@@ -8,16 +8,17 @@
 //! - **period**: Common period for ATR, RSI/MFI calculations (default: 14)
 //! - **no_volume**: Use RSI instead of MFI when true (default: false)
 //!
-//! ## Errors
-//! - **EmptyInputData**: alphatrend: Input data slice is empty.
-//! - **AllValuesNaN**: alphatrend: All input values are `NaN`.
-//! - **InvalidPeriod**: alphatrend: Period is zero or exceeds data length.
-//! - **NotEnoughValidData**: alphatrend: Not enough valid data points for calculation.
-//! - **InconsistentDataLengths**: alphatrend: OHLCV data arrays have different lengths.
-//!
 //! ## Returns
 //! - **`Ok(AlphaTrendOutput)`** on success, containing `k1` and `k2` vectors of length matching the input.
 //! - **`Err(AlphaTrendError)`** otherwise.
+//!
+//! ## Developer Status
+//! - **AVX2 kernel**: STUB - Falls back to scalar implementation
+//! - **AVX512 kernel**: STUB - Falls back to scalar implementation
+//! - **Streaming update**: O(n) - Recalculates full buffers for ATR and RSI/MFI
+//! - **Memory optimization**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix) ✓
+//! - **Optimization needed**: Implement SIMD kernels for ATR/RSI/MFI computations
+//! - **Streaming improvement**: Could optimize to O(1) with incremental ATR and RSI/MFI updates
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};

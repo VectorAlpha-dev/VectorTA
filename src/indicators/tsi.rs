@@ -1,20 +1,22 @@
 //! # True Strength Index (TSI)
 //!
-//! A momentum oscillator with double EMA smoothing on momentum and its absolute value.
-//! Oscillates between positive/negative, indicating trend strength/direction.
+//! TSI is a momentum oscillator that applies double exponential smoothing to price momentum
+//! and its absolute value, providing a normalized measure of trend strength and direction.
 //!
 //! ## Parameters
-//! - **long_period**: Default = 25
-//! - **short_period**: Default = 13
-//!
-//! ## Errors
-//! - **AllValuesNaN**: tsi: All input data values are `NaN`.
-//! - **InvalidPeriod**: tsi: One or both periods are zero or exceed data length.
-//! - **NotEnoughValidData**: tsi: Not enough valid data after first valid index.
+//! - **long_period**: Long EMA smoothing period. Defaults to 25.
+//! - **short_period**: Short EMA smoothing period. Defaults to 13.
 //!
 //! ## Returns
-//! - **`Ok(TsiOutput)`** on success with `Vec<f64>` matching input.
-//! - **`Err(TsiError)`** otherwise.
+//! - **`Ok(TsiOutput)`** containing a `Vec<f64>` of TSI values (-100 to +100) matching input length.
+//! - **`Err(TsiError)`** on invalid parameters or insufficient data.
+//!
+//! ## Developer Notes
+//! - **SIMD Status**: AVX2 and AVX512 kernels are stubs (call scalar/streaming implementation)
+//! - **Streaming Performance**: O(1) - uses nested EMA streams with minimal state
+//! - **Memory Optimization**: ✓ Uses alloc_with_nan_prefix for output allocation
+//! - **Batch Support**: ✓ Full parallel batch parameter sweep implementation
+//! - **TODO**: Implement actual AVX2/AVX512 SIMD kernels for double EMA calculations
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]

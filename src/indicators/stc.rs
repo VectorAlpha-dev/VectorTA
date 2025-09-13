@@ -1080,6 +1080,14 @@ pub fn stc_batch_py<'py>(
 	Ok(dict)
 }
 
+#[cfg(feature = "python")]
+pub fn register_stc_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
+	m.add_function(wrap_pyfunction!(stc_py, m)?)?;
+	m.add_function(wrap_pyfunction!(stc_batch_py, m)?)?;
+	m.add_class::<StcStreamPy>()?;
+	Ok(())
+}
+
 // Helper function for batch processing
 #[inline(always)]
 fn stc_batch_inner_into(

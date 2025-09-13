@@ -5,17 +5,22 @@
 //! and then applying an EMA to that result.
 //!
 //! ## Parameters
-//! - **period**: Window size for the EMA (defaults to 13).
+//! - **period**: Window size for the EMA (defaults to 13)
 //!
-//! ## Errors
-//! - **AllValuesNaN**: efi: All input data values are `NaN`.
-//! - **InvalidPeriod**: efi: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: efi: Not enough valid data points for the requested `period`.
-//! - **EmptyData**: efi: Input data slice is empty or mismatched.
+//! ## Inputs
+//! - **price**: Price data (typically close prices)
+//! - **volume**: Volume data
 //!
 //! ## Returns
-//! - **`Ok(EfiOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-//! - **`Err(EfiError)`** otherwise.
+//! - **`Ok(EfiOutput)`** containing values (Vec<f64>) representing force index
+//! - Output length matches input data length with NaN padding for warmup period
+//!
+//! ## Developer Notes
+//! - **AVX2 kernel**: STUB - calls scalar implementation (lines 315-317)
+//! - **AVX512 kernel**: STUB - calls scalar implementation (lines 331-333, 337-339)
+//! - **Streaming**: ✅ Implemented with EfiStream (update function is O(1))
+//! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy) at line 222
+//! - **Batch operations**: ✅ Implemented with parallel processing support
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};

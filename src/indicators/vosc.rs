@@ -1,27 +1,22 @@
 //! # Volume Oscillator (VOSC)
 //!
-//! Measures changes in volume trends using two moving averages (short and long).
-//!
-//! ## Formula
-//! ```ignore
-//! vosc = 100 * ((short_avg - long_avg) / long_avg)
-//! ```
+//! VOSC measures the difference between short-term and long-term volume moving averages
+//! as a percentage, helping identify volume trends and divergences.
 //!
 //! ## Parameters
-//! - **short_period**: The short window size. Defaults to 2.
-//! - **long_period**: The long window size. Defaults to 5.
-//!
-//! ## Errors
-//! - **EmptyData**: vosc: Input data slice is empty.
-//! - **InvalidShortPeriod**: vosc: `short_period` is zero or exceeds the data length.
-//! - **InvalidLongPeriod**: vosc: `long_period` is zero or exceeds the data length.
-//! - **ShortPeriodGreaterThanLongPeriod**: vosc: `short_period` is greater than `long_period`.
-//! - **NotEnoughValidData**: vosc: Fewer than `long_period` valid data points after the first valid index.
-//! - **AllValuesNaN**: vosc: All input data values are `NaN`.
+//! - **short_period**: Short moving average period. Defaults to 2.
+//! - **long_period**: Long moving average period. Defaults to 5.
 //!
 //! ## Returns
-//! - **`Ok(VoscOutput)`** on success, containing a `Vec<f64>` matching input length.
-//! - **`Err(VoscError)`** otherwise.
+//! - **`Ok(VoscOutput)`** containing a `Vec<f64>` of oscillator values (percentage) matching input length.
+//! - **`Err(VoscError)`** on invalid parameters or insufficient data.
+//!
+//! ## Developer Notes
+//! - **SIMD Status**: AVX2 and AVX512 kernels are stubs (call scalar implementation)
+//! - **Streaming Performance**: O(1) - maintains separate ring buffers for short/long periods
+//! - **Memory Optimization**: ✓ Uses alloc_with_nan_prefix for output allocation
+//! - **Batch Support**: ✓ Full parallel batch parameter sweep implementation
+//! - **TODO**: Implement actual AVX2/AVX512 SIMD kernels for rolling sum calculations
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

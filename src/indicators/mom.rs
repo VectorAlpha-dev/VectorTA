@@ -1,20 +1,22 @@
 //! # Momentum (MOM)
 //!
-//! MOM measures the amount that a security’s price has changed over a given time span.
+//! MOM measures the amount that a security's price has changed over a given time span.
 //! It is calculated by subtracting the previous price (from the chosen period) from the
 //! current price, i.e., `momentum[i] = data[i] - data[i - period]`.
 //!
 //! ## Parameters
 //! - **period**: The lookback window size (number of data points). Defaults to 10.
 //!
-//! ## Errors
-//! - **AllValuesNaN**: mom: All input data values are `NaN`.
-//! - **InvalidPeriod**: mom: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: mom: Not enough valid data points for the requested `period`.
+//! ## Inputs
+//! - **data**: Price data or any numeric series
 //!
 //! ## Returns
-//! - **`Ok(MomOutput)`** on success, containing a `Vec<f64>` matching the input length.
-//! - **`Err(MomError)`** otherwise.
+//! - **values**: Vector of momentum values with NaN prefix during warmup period
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 Kernels**: Stubs that call scalar implementation
+//! - **Streaming**: Implemented with O(1) update performance
+//! - **Zero-copy Memory**: Uses alloc_with_nan_prefix and make_uninit_matrix for batch operations
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -1407,4 +1409,11 @@ impl MomStreamPy {
 	pub fn update(&mut self, value: f64) -> Option<f64> {
 		self.inner.update(value)
 	}
+}
+
+#[cfg(feature = "python")]
+pub fn register_mom_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(mom_py, m)?)?;
+    m.add_function(wrap_pyfunction!(mom_batch_py, m)?)?;
+    Ok(())
 }

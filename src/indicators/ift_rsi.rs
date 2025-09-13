@@ -1,7 +1,26 @@
 //! # Inverse Fisher Transform RSI (IFT RSI)
 //!
 //! Applies Inverse Fisher Transform to a WMA-smoothed RSI series.
-//! API closely matches alma.rs for interface, kernels, builders, batch/grid support, and error handling.
+//! The indicator first calculates RSI, smooths it with WMA, then applies the Inverse Fisher Transform
+//! to normalize values between -1 and 1.
+//!
+//! ## Parameters
+//! - **rsi_period**: Period for RSI calculation (default: 5)
+//! - **wma_period**: Period for WMA smoothing (default: 9)
+//!
+//! ## Inputs
+//! - Single data slice (typically close prices)
+//!
+//! ## Returns
+//! - **Ok(IftRsiOutput)** containing values (Vec<f64>) representing transformed RSI between -1 and 1
+//! - Output length matches input data length with NaN padding for warmup period
+//!
+//! ## Developer Notes
+//! - **AVX2 kernel**: STUB - calls scalar implementation (lines 390-398)
+//! - **AVX512 kernel**: STUB - calls scalar implementation (lines 378-386)
+//! - **Streaming**: Not implemented
+//! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy) at line 241
+//! - **Batch operations**: ✅ Implemented with parallel processing support
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};

@@ -7,14 +7,16 @@
 //! ## Parameters
 //! - **period**: The size of the window (number of data points). Defaults to 48.
 //!
-//! ## Errors
-//! - **AllValuesNaN**: highpass: All input data values are `NaN`.
-//! - **InvalidPeriod**: highpass: `period` is zero, exceeds data length, or data length is insufficient.
-//! - **InvalidAlpha**: highpass: `cos_val` is too close to zero, preventing valid alpha computation.
-//!
 //! ## Returns
 //! - **`Ok(HighPassOutput)`** on success, containing a `Vec<f64>` matching the input length.
 //! - **`Err(HighPassError)`** otherwise.
+//!
+//! ## Developer Status
+//! - **AVX2 kernel**: STUB - Falls back to scalar implementation
+//! - **AVX512 kernel**: STUB - Falls back to AVX2 (which falls back to scalar)
+//! - **Streaming update**: O(1) - Efficient incremental calculation with previous state
+//! - **Memory optimization**: NEEDS IMPROVEMENT - Uses regular vec![] instead of zero-copy helpers
+//! - **Optimization needed**: Implement SIMD kernels, adopt zero-copy helpers (alloc_with_nan_prefix)
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

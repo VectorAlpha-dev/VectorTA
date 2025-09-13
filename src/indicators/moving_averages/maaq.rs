@@ -8,14 +8,16 @@
 //! - **fast_period**: Smoothing coefficient (fast).
 //! - **slow_period**: Smoothing coefficient (slow).
 //!
-//! ## Errors
-//! - **AllValuesNaN**: All input values are `NaN`.
-//! - **InvalidPeriod**: Any window is zero or period exceeds data length.
-//! - **NotEnoughValidData**: Not enough data for the requested period.
-//!
 //! ## Returns
 //! - **Ok(MaaqOutput)** on success, with output values.
 //! - **Err(MaaqError)** otherwise.
+//!
+//! ## Developer Status
+//! - **AVX2 kernel**: IMPLEMENTED - Optimized rolling window with efficient diff tracking
+//! - **AVX512 kernel**: STUB - Falls back to AVX2 implementation
+//! - **Streaming update**: O(n) - Iterates through diff buffer to compute sum each update
+//! - **Memory optimization**: GOOD - Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix)
+//! - **Optimization needed**: Implement AVX512 kernel, optimize streaming to O(1) with rolling sum tracking
 
 /// # WASM API Guide – MAAQ
 ///

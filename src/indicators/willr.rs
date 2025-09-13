@@ -1,24 +1,21 @@
 //! # Williams' %R (WILLR)
 //!
-//! Williams' %R is a momentum oscillator that measures overbought/oversold levels.
-//! This implementation supports both scalar and AVX2/AVX512 batch processing with API/features/tests
-//! matching the `alma.rs` template, including parameter builders, batch processing, error handling,
-//! and AVX stubs.
-//!
-//! ## Formula
-//! \[ \text{%R} = \frac{\text{Highest\_High} - \text{Close}}{\text{Highest\_High} - \text{Lowest\_Low}} \times (-100) \]
+//! Williams' %R is a momentum oscillator that shows the relationship between the current close
+//! and the high-low range over a period, indicating overbought/oversold conditions (-20 to -80).
 //!
 //! ## Parameters
-//! - **period**: Window size (number of bars, default: 14).
-//!
-//! ## Errors
-//! - **AllValuesNaN**: willr: All input values are NaN.
-//! - **InvalidPeriod**: willr: period is zero or exceeds data length.
-//! - **NotEnoughValidData**: willr: Not enough valid data points for the requested period.
+//! - **period**: Lookback period for range calculation. Defaults to 14.
 //!
 //! ## Returns
-//! - **`Ok(WillrOutput)`**: Vec<f64> output, NaN padded.
-//! - **`Err(WillrError)`** otherwise.
+//! - **`Ok(WillrOutput)`** containing a `Vec<f64>` of %R values (-100 to 0) matching input length.
+//! - **`Err(WillrError)`** on invalid parameters or insufficient data.
+//!
+//! ## Developer Notes
+//! - **SIMD Status**: AVX2 and AVX512 kernels are stubs (call scalar implementation)
+//! - **Streaming Performance**: O(1) - maintains rolling high/low buffers
+//! - **Memory Optimization**: ✓ Uses alloc_with_nan_prefix, make_uninit_matrix for batching
+//! - **Batch Support**: ✓ Full parallel batch parameter sweep implementation
+//! - **TODO**: Implement actual AVX2/AVX512 SIMD kernels for min/max operations
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

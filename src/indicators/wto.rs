@@ -1,22 +1,26 @@
 //! # WaveTrend Oscillator (WTO)
 //!
-//! The WaveTrend Oscillator is a momentum indicator that identifies overbought and oversold
-//! conditions. It uses EMAs and channel calculations to generate two oscillating lines
-//! (wavetrend1 and wavetrend2) and their difference (histogram).
+//! WTO is a momentum oscillator that smooths price data through multiple EMA layers to identify
+//! overbought/oversold conditions with reduced noise, producing two waves and their histogram.
 //!
 //! ## Parameters
-//! - **channel_length**: Period for channel calculation (default: 10)
-//! - **average_length**: Period for final EMA smoothing (default: 21)
-//!
-//! ## Errors
-//! - **EmptyInputData**: wto: Input data slice is empty.
-//! - **AllValuesNaN**: wto: All input values are `NaN`.
-//! - **InvalidPeriod**: wto: Period is zero or exceeds data length.
-//! - **NotEnoughValidData**: wto: Not enough valid data points for calculation.
+//! - **channel_length**: EMA period for channel calculation. Defaults to 10.
+//! - **average_length**: EMA period for final smoothing. Defaults to 21.
 //!
 //! ## Returns
-//! - **`Ok(WtoOutput)`** on success, containing three `Vec<f64>` arrays for wavetrend1, wavetrend2, and histogram.
-//! - **`Err(WtoError)`** otherwise.
+//! - **`Ok(WtoOutput)`** containing three `Vec<f64>`:
+//!   - `wavetrend1`: Primary oscillator line
+//!   - `wavetrend2`: Signal line (SMA of wavetrend1)
+//!   - `histogram`: Difference between wavetrend1 and wavetrend2
+//! - **`Err(WtoError)`** on invalid parameters or insufficient data.
+//!
+//! ## Developer Notes
+//! - **SIMD Status**: AVX2 and AVX512 kernels are stubs (call scalar implementation)
+//! - **Streaming Performance**: O(1) - maintains EMA states and small buffers
+//! - **Memory Optimization**: ✓ Uses make_uninit_matrix, init_matrix_prefixes for zero-copy
+//! - **Batch Support**: ✓ Full parallel batch parameter sweep implementation
+//! - **WebAssembly**: Has SIMD128 implementation for WASM targets
+//! - **TODO**: Implement actual AVX2/AVX512 SIMD kernels for EMA calculations
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
@@ -1410,6 +1414,15 @@ pub fn wto_batch_py<'py>(
             .into_pyarray(py),
     )?;
     Ok(dict)
+}
+
+// ==================== PYTHON MODULE REGISTRATION ====================
+#[cfg(feature = "python")]
+pub fn register_wto_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(wto_py, m)?)?;
+    m.add_function(wrap_pyfunction!(wto_batch_py, m)?)?;
+    m.add_class::<WtoStreamPy>()?;
+    Ok(())
 }
 
 // ==================== TESTS ====================

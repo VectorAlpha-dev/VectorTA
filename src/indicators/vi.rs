@@ -1007,6 +1007,14 @@ pub fn vi_into_slice_wasm(
 	vi_into_slice(dst_plus, dst_minus, &input, kern)
 }
 
+// ================== PYTHON MODULE REGISTRATION ==================
+#[cfg(feature = "python")]
+pub fn register_vi_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(vi_py, m)?)?;
+    m.add_function(wrap_pyfunction!(vi_batch_py, m)?)?;
+    m.add_class::<ViStreamPy>()?;
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {

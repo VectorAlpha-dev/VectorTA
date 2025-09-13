@@ -6,14 +6,16 @@
 //! ## Parameters
 //! - **factor**: Controls balance between new and historical data (must be > 0).
 //!
-//! ## Errors
-//! - **EmptyData**: No input data provided.
-//! - **InvalidFactor**: `factor` is ≤ 0.0, NaN, or infinite.
-//! - **InvalidDenominator**: Factor leads to zero/negative denominator.
-//!
 //! ## Returns
 //! - **Ok(MwdxOutput)**: Contains Vec<f64> with result, matching input length.
 //! - **Err(MwdxError)**: On error.
+//!
+//! ## Developer Status
+//! - **AVX2 kernel**: STUB - Falls back to scalar (sequential dependencies prevent SIMD)
+//! - **AVX512 kernel**: STUB - Falls back to scalar (sequential dependencies prevent SIMD)
+//! - **Streaming update**: O(1) - Efficient incremental calculation
+//! - **Memory optimization**: GOOD - Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix)
+//! - **Overall status**: WELL-OPTIMIZED - Algorithm is inherently sequential, SIMD not applicable
 
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;

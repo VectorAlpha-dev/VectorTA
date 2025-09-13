@@ -8,16 +8,25 @@
 //! - **delta**: Band-pass phase parameter (default: 0.5)
 //! - **fraction**: Peak/valley scaling factor (default: 0.1)
 //!
-//! ## Errors
-//! - **AllValuesNaN**: emd: All input data values are `NaN`.
-//! - **InvalidPeriod**: emd: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: emd: Not enough valid data points for requested `period`.
-//! - **InvalidDelta**: emd: `delta` is `NaN` or infinite.
-//! - **InvalidFraction**: emd: `fraction` is `NaN` or infinite.
+//! ## Inputs
+//! - **high**: High prices
+//! - **low**: Low prices
+//! - **close**: Close prices (primary input for filtering)
+//! - **volume**: Volume data (used in some calculations)
 //!
 //! ## Returns
-//! - **`Ok(EmdOutput)`** on success, containing upperband/middleband/lowerband as `Vec<f64>`.
-//! - **`Err(EmdError)`** otherwise.
+//! - **`Ok(EmdOutput)`** containing:
+//!   - `upperband`: Upper band values (Vec<f64>)
+//!   - `middleband`: Middle band values (Vec<f64>)
+//!   - `lowerband`: Lower band values (Vec<f64>)
+//! - Output lengths match input data length with NaN padding for warmup period
+//!
+//! ## Developer Notes
+//! - **AVX2 kernel**: STUB - calls scalar implementation (lines 459-469)
+//! - **AVX512 kernel**: STUB - calls scalar implementation (lines 491-501, 505-514)
+//! - **Streaming**: Not implemented
+//! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy) for all three outputs (lines 339-341, 444-446)
+//! - **Batch operations**: ✅ Implemented with parallel processing support
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

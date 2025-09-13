@@ -55,6 +55,7 @@ pub mod wma;
 pub mod zlema;
 
 // Exports for migrated moving averages
+pub use cwma::{cwma, CwmaInput, CwmaOutput, CwmaParams};
 pub use dma::{
     dma, dma_with_kernel, DmaInput, DmaOutput, DmaParams, DmaError,
     DmaData, DmaBuilder, dma_into_slice, DmaStream,
@@ -62,6 +63,7 @@ pub use dma::{
     DmaBatchRange, DmaBatchBuilder, DmaBatchOutput, dma_batch_with_kernel,
 };
 
+pub use edcf::{edcf, EdcfInput, EdcfOutput, EdcfParams};
 pub use ehlers_kama::{ehlers_kama, EhlersKamaInput, EhlersKamaOutput, EhlersKamaParams};
 pub use ehlers_pma::{ehlers_pma, EhlersPmaInput, EhlersPmaOutput, EhlersPmaParams};
 pub use uma::{uma, UmaInput, UmaOutput, UmaParams};

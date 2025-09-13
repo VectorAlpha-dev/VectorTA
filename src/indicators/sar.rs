@@ -1,23 +1,22 @@
 //! # Parabolic SAR (SAR)
 //!
-//! The Parabolic SAR is a trend-following indicator that uses a system of
-//! progressively rising (in an uptrend) or falling (in a downtrend) dots.
+//! The Parabolic SAR is a trend-following indicator that provides stop and reverse points
+//! using a system of progressively accelerating dots that follow price trends.
 //!
 //! ## Parameters
-//! - **acceleration**: Acceleration factor. Defaults to 0.02.
-//! - **maximum**: Maximum acceleration. Defaults to 0.2.
-//!
-//! ## Errors
-//! - **EmptyData**: sar: Input data slice is empty.
-//! - **AllValuesNaN**: sar: All high/low values are `NaN`.
-//! - **NotEnoughValidData**: Fewer than 2 valid (non-`NaN`) data points after the first valid index.
-//! - **InvalidAcceleration**: sar: acceleration ≤ 0.0 or NaN.
-//! - **InvalidMaximum**: sar: maximum ≤ 0.0 or NaN.
+//! - **acceleration**: Initial acceleration factor. Defaults to 0.02.
+//! - **maximum**: Maximum acceleration limit. Defaults to 0.2.
 //!
 //! ## Returns
-//! - **`Ok(SarOutput)`** on success, containing a `Vec<f64>` matching the input length,
-//!   with leading `NaN`s until the calculation starts.
-//! - **`Err(SarError)`** otherwise.
+//! - **`Ok(SarOutput)`** containing a `Vec<f64>` of SAR values matching input length.
+//! - **`Err(SarError)`** on invalid parameters or insufficient data.
+//!
+//! ## Developer Notes
+//! - **SIMD Status**: AVX2 and AVX512 kernels are stubs (call scalar implementation)
+//! - **Streaming Performance**: O(1) - maintains minimal state for incremental updates
+//! - **Memory Optimization**: ✓ Uses alloc_with_nan_prefix for output allocation
+//! - **Batch Support**: ✓ Full parallel batch parameter sweep implementation
+//! - **TODO**: Implement actual AVX2/AVX512 SIMD kernels for trend detection and SAR calculations
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};

@@ -972,3 +972,10 @@ pub fn medprice_batch_js(high: &[f64], low: &[f64], config: JsValue) -> Result<J
 
 	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
+
+#[cfg(feature = "python")]
+pub fn register_medprice_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(medprice_py, m)?)?;
+    m.add_function(wrap_pyfunction!(medprice_batch_py, m)?)?;
+    Ok(())
+}

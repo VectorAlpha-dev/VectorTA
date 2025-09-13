@@ -1,26 +1,24 @@
 //! # Variable Index Dynamic Average (VIDYA)
 //!
-//! VIDYA is a moving average calculation that dynamically adjusts its smoothing factor
-//! based on the ratio of short-term to long-term standard deviations. This allows the
-//! average to become more responsive to volatility changes while still providing a
-//! smoothed signal.
+//! VIDYA is an adaptive moving average that adjusts its smoothing factor based on the ratio
+//! of short-term to long-term standard deviations, becoming more responsive during volatile periods.
 //!
 //! ## Parameters
-//! - **short_period**: The short look-back period for standard deviation. Must be >= 2. Defaults to 2.
-//! - **long_period**: The long look-back period for standard deviation. Must be >= short_period. Defaults to 5.
-//! - **alpha**: A smoothing factor between 0.0 and 1.0. Defaults to 0.2.
-//!
-//! ## Errors
-//! - **EmptyData**: vidya: Input data slice is empty.
-//! - **AllValuesNaN**: vidya: All input data values are `NaN`.
-//! - **NotEnoughValidData**: vidya: Fewer than `long_period` valid data points remain
-//!   after the first valid index.
-//! - **InvalidParameters**: vidya: Invalid `short_period`, `long_period`, or `alpha`.
+//! - **short_period**: Short lookback for standard deviation. Defaults to 2.
+//! - **long_period**: Long lookback for standard deviation. Defaults to 5.
+//! - **alpha**: Base smoothing factor (0.0-1.0). Defaults to 0.2.
 //!
 //! ## Returns
-//! - **`Ok(VidyaOutput)`** on success, containing a `Vec<f64>` matching the input length,
-//!   with leading `NaN`s until the computation can start.
-//! - **`Err(VidyaError)`** otherwise.
+//! - **`Ok(VidyaOutput)`** containing a `Vec<f64>` of adaptive moving average values matching input length.
+//! - **`Err(VidyaError)`** on invalid parameters or insufficient data.
+//!
+//! ## Developer Notes
+//! - **SIMD Status**: AVX2 and AVX512 kernels are stubs (call scalar implementation)
+//! - **Streaming Performance**: O(1) - maintains rolling sums for standard deviation calculations
+//! - **Memory Optimization**: ✓ Uses alloc_with_nan_prefix for output allocation
+//! - **Batch Support**: ✓ Full parallel batch parameter sweep implementation
+//! - **WebAssembly**: Has SIMD128 implementation for WASM targets
+//! - **TODO**: Implement actual AVX2/AVX512 SIMD kernels for variance calculations
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};

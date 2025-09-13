@@ -993,6 +993,15 @@ pub fn jsa_batch_into(
 	}
 }
 
+// ==================== PYTHON MODULE REGISTRATION ====================
+#[cfg(feature = "python")]
+pub fn register_jsa_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
+	m.add_function(wrap_pyfunction!(jsa_py, m)?)?;
+	m.add_function(wrap_pyfunction!(jsa_batch_py, m)?)?;
+	m.add_class::<JsaStreamPy>()?;
+	Ok(())
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;

@@ -963,6 +963,16 @@ unsafe fn edcf_row_avx2(data: &[f64], first: usize, period: usize, out: &mut [f6
 unsafe fn edcf_row_avx512(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
 	edcf_avx512(data, period, first, out);
 }
+
+// ==================== PYTHON MODULE REGISTRATION ====================
+#[cfg(feature = "python")]
+pub fn register_edcf_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
+	m.add_function(wrap_pyfunction!(edcf_py, m)?)?;
+	m.add_function(wrap_pyfunction!(edcf_batch_py, m)?)?;
+	m.add_class::<EdcfStreamPy>()?;
+	Ok(())
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;

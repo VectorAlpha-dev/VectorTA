@@ -12,6 +12,13 @@
 //! ## Returns
 //! - **BollingerBandsOutput** with upper, middle, and lower bands.
 //! - Proper error types for invalid input, params, or kernel mismatch.
+//!
+//! ## Developer Notes
+//! - **AVX2 kernel**: STUB - calls scalar implementation
+//! - **AVX512 kernel**: STUB - calls scalar implementation
+//! - **Streaming**: Not implemented
+//! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy) for all three bands
+//! - **Batch operations**: ✅ Implemented with parallel processing support
 use crate::indicators::deviation::{deviation, DevInput, DevParams};
 use crate::indicators::moving_averages::ma::{ma, MaData};
 use crate::utilities::data_loader::{source_type, Candles};
@@ -2316,7 +2323,7 @@ pub fn bollinger_bands_batch_unified_js(data: &[f64], config: JsValue) -> Result
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
-pub fn bb_alloc(len: usize) -> *mut f64 {
+pub fn bollinger_bands_alloc(len: usize) -> *mut f64 {
 	let mut v = Vec::<f64>::with_capacity(len);
 	let p = v.as_mut_ptr();
 	std::mem::forget(v);
@@ -2325,13 +2332,13 @@ pub fn bb_alloc(len: usize) -> *mut f64 {
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
-pub fn bb_free(ptr: *mut f64, len: usize) {
+pub fn bollinger_bands_free(ptr: *mut f64, len: usize) {
 	unsafe { let _ = Vec::from_raw_parts(ptr, len, len); }
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
-pub fn bb_into(
+pub fn bollinger_bands_into(
 	in_ptr: *const f64,
 	out_u: *mut f64,
 	out_m: *mut f64,

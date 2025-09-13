@@ -2082,3 +2082,11 @@ impl RviStreamPy {
 		self.stream.update(value)
 	}
 }
+
+#[cfg(feature = "python")]
+pub fn register_rvi_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
+	m.add_function(wrap_pyfunction!(rvi_py, m)?)?;
+	m.add_function(wrap_pyfunction!(rvi_batch_py, m)?)?;
+	m.add_class::<RviStreamPy>()?;
+	Ok(())
+}

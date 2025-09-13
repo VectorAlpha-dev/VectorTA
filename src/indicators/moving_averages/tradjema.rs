@@ -7,17 +7,17 @@
 //! - **length**: The lookback period for calculations (default: 40)
 //! - **mult**: Multiplier for the adjustment factor (default: 10.0)
 //!
-//! ## Errors
-//! - **EmptyInputData**: tradjema: Input data slice is empty.
-//! - **AllValuesNaN**: tradjema: All input values are `NaN`.
-//! - **InvalidLength**: tradjema: Length is zero or exceeds data length.
-//! - **NotEnoughValidData**: tradjema: Not enough valid data points for calculation.
-//! - **MissingData**: tradjema: Required OHLC data is missing or mismatched lengths.
-//! - **InvalidMult**: tradjema: Multiplier must be positive.
-//!
 //! ## Returns
 //! - **`Ok(TradjemaOutput)`** on success, containing a Vec<f64> of length matching the input.
 //! - **`Err(TradjemaError)`** otherwise.
+//!
+//! ## Developer Status
+//! - **AVX2 kernel**: STUB - Falls back to scalar implementation
+//! - **AVX512 kernel**: STUB - Falls back to scalar implementation
+//! - **Streaming update**: O(n) - Recalculates min/max over TR buffer each update
+//! - **Memory optimization**: Uses zero-copy helpers (alloc_with_nan_prefix) ✓
+//! - **Optimization needed**: Implement SIMD kernels for vectorized processing
+//! - **Streaming improvement**: Could optimize min/max tracking to reduce O(n) updates
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings

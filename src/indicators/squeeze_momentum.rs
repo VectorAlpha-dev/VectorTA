@@ -1,22 +1,30 @@
 //! # Squeeze Momentum Indicator (SMI)
 //!
-//! Detects market volatility "squeeze" and provides a smoothed momentum signal. Mirrors alma.rs in structure, features, and performance.
+//! Detects market volatility "squeeze" conditions by comparing Bollinger Bands to Keltner Channels,
+//! while providing momentum oscillator values with directional signal indicators.
 //!
 //! ## Parameters
-//! - **length_bb**: Lookback window for Bollinger Bands (default: 20)
-//! - **mult_bb**: BB stddev multiplier (default: 2.0)
-//! - **length_kc**: Lookback window for Keltner Channels (default: 20)
-//! - **mult_kc**: KC multiplier (default: 1.5)
-//!
-//! ## Errors
-//! - **AllValuesNaN**: All input values are NaN
-//! - **InvalidLength**: A lookback parameter is zero or exceeds data length
-//! - **InconsistentDataLength**: High/low/close have different lengths
-//! - **NotEnoughValidData**: Not enough valid data for requested lookback
+//! - **length_bb**: Bollinger Bands lookback period. Defaults to 20.
+//! - **mult_bb**: BB standard deviation multiplier. Defaults to 2.0.
+//! - **length_kc**: Keltner Channels lookback period. Defaults to 20.
+//! - **mult_kc**: KC ATR multiplier. Defaults to 1.5.
 //!
 //! ## Returns
-//! - **`Ok(SqueezeMomentumOutput)`** on success
-//! - **`Err(SqueezeMomentumError)`** otherwise
+//! - **`Ok(SqueezeMomentumOutput)`** containing three `Vec<f64>`:
+//!   - `squeeze`: Squeeze state (-1=on, 0=neutral, 1=off)
+//!   - `momentum`: Linear regression of price momentum
+//!   - `momentum_signal`: Directional acceleration signal (±1=accelerating, ±2=decelerating)
+//! - **`Err(SqueezeMomentumError)`** on invalid parameters or insufficient data.
+//!
+//! ## Developer Notes
+//! - **SIMD Status**: No SIMD kernels implemented (all kernels stub to scalar)
+//! - **Streaming Performance**: O(n) - recalculates full indicator on each update (inefficient)
+//! - **Memory Optimization**: ✓ Uses alloc_with_nan_prefix, make_uninit_matrix, zero-copy batching
+//! - **Batch Support**: ✓ Full parallel batch parameter sweep with zero-copy output
+//! - **TODO**: 
+//!   - Implement AVX2/AVX512 SIMD kernels for BB/KC band calculations
+//!   - Optimize streaming to O(1) with incremental state updates
+//!   - SIMD vectorize the linear regression momentum calculation
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};

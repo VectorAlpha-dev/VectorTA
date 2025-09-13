@@ -1497,6 +1497,15 @@ pub fn cwma_batch_into(
 	}
 }
 
+// ==================== PYTHON MODULE REGISTRATION ====================
+#[cfg(feature = "python")]
+pub fn register_cwma_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
+	m.add_function(wrap_pyfunction!(cwma_py, m)?)?;
+	m.add_function(wrap_pyfunction!(cwma_batch_py, m)?)?;
+	m.add_class::<CwmaStreamPy>()?;
+	Ok(())
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;

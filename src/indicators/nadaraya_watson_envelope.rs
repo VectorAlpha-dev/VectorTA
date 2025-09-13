@@ -8,17 +8,17 @@
 //! - **multiplier**: Band width multiplier for MAE (default: 3.0)
 //! - **lookback**: Maximum lookback period for regression (default: 500)
 //!
-//! ## Errors
-//! - **EmptyInputData**: Input data slice is empty
-//! - **AllValuesNaN**: All input values are `NaN`
-//! - **InvalidBandwidth**: Bandwidth must be positive
-//! - **InvalidMultiplier**: Multiplier must be non-negative
-//! - **InvalidLookback**: Lookback period must be positive
-//! - **NotEnoughValidData**: Not enough valid data points for calculation
+//! ## Inputs
+//! - **data**: Price data or any numeric series
 //!
 //! ## Returns
-//! - **`Ok(NweOutput)`** on success, containing `upper` and `lower` envelope vectors
-//! - **`Err(NweError)`** otherwise
+//! - **upper**: Vector of upper envelope values with NaN prefix during warmup period
+//! - **lower**: Vector of lower envelope values with NaN prefix during warmup period
+//!
+//! ## Developer Notes
+//! - **AVX2/AVX512 Kernels**: Not applicable - uses Gaussian kernel, not SIMD kernels
+//! - **Streaming**: Implemented with O(n) update performance where n=lookback (typically 500)
+//! - **Zero-copy Memory**: Uses alloc_with_nan_prefix and make_uninit_matrix for batch operations
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
