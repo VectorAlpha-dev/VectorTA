@@ -7,8 +7,9 @@ type Backend = 'cpu' | 'gpu'
 interface OptimizeResponse {
   ok: boolean
   data?: {
-    meta: { fast_periods: number[]; slow_periods: number[]; rows: number; cols: number; metrics: string[] }
+    meta: { fast_periods: number[]; slow_periods: number[]; rows: number; cols: number; metrics: string[]; axes: { name: string; values: number[] }[] }
     values: number[]
+    layers: number
   }
   error?: string
 }
@@ -22,7 +23,10 @@ export const App: React.FC = () => {
   const [sigma, setSigma] = useState(6.0)
   const [fastType, setFastType] = useState('alma')
   const [slowType, setSlowType] = useState('alma')
+  const [metric, setMetric] = useState<'totalReturn'|'trades'|'maxDrawdown'|'meanRet'|'stdRet'>('totalReturn')
   const [commission, setCommission] = useState(0.0)
+  const [axes, setAxes] = useState<{ name: string; values: number[] }[]>([])
+  const [slicers, setSlicers] = useState<number[]>([])
   const [status, setStatus] = useState('')
   const [results, setResults] = useState<BacktestResult[]>([])
   const [selected, setSelected] = useState<{ fast: number; slow: number } | null>(null)
@@ -55,14 +59,33 @@ export const App: React.FC = () => {
     const json: OptimizeResponse = await resp.json()
     if (!json.ok || !json.data) { setStatus('Error: ' + (json.error || 'unknown')); return }
     const { meta, values } = json.data
+    const ax = meta.axes || []
+    setAxes(ax)
+    setSlicers(new Array(ax.length).fill(0))
     const rows = meta.rows, cols = meta.cols, M = 5
     const out: BacktestResult[] = []
+    // Determine extras (beyond fast/slow period)
+    const extraAxes = (meta.axes || []).filter(a => a.name !== 'fast_period' && a.name !== 'slow_period')
+    const extraLens = extraAxes.map(a => a.values.length)
+    // Compute current layer index from slicers for extras
+    const layerIndex = extraLens.length === 0 ? 0 : (() => {
+      const idxs = (meta.axes || []).map((a, i) => ({ name: a.name, idx: slicers[i] || 0 }))
+      const extras = idxs.filter(x => x.name !== 'fast_period' && x.name !== 'slow_period').map(x => x.idx)
+      // row-major over extras in listed order
+      let mul = 1, idx = 0
+      for (let k = extraLens.length - 1; k >= 0; k--) { idx += (extras[k] || 0) * mul; mul *= extraLens[k] }
+      return idx
+    })()
     for (let i = 0; i < rows; i++) {
       for (let j = 0; j < cols; j++) {
-        const base = (i * cols + j) * M
+        const base = (((layerIndex * rows + i) * cols + j) * M)
+        const fastVal = meta.fast_periods[i]
+        const slowVal = meta.slow_periods[j]
         out.push({
-          fastPeriod: meta.fast_periods[i],
-          slowPeriod: meta.slow_periods[j],
+          fastPeriod: fastVal,
+          slowPeriod: slowVal,
+          displayX: slowVal,
+          displayY: fastVal,
           totalReturn: values[base + 0],
           trades: values[base + 1],
           maxDrawdown: values[base + 2],
@@ -92,9 +115,13 @@ export const App: React.FC = () => {
               <option value="ema">EMA</option>
               <option value="sma">SMA</option>
               <option value="wma">WMA</option>
+              <option value="buff_averages">Buff Averages</option>
+              <option value="cwma">CWMA</option>
+              <option value="edcf">EDCF</option>
               <option value="zlema">ZLEMA</option>
               <option value="dema">DEMA</option>
               <option value="trima">TRIMA</option>
+              <option value="ehma">EHMA</option>
               <option value="hma">HMA</option>
               <option value="smma">SMMA</option>
               <option value="dma">DMA</option>
@@ -109,7 +136,35 @@ export const App: React.FC = () => {
               <option value="wilders">Wilders</option>
               <option value="fwma">FWMA</option>
               <option value="linreg">LinReg</option>
+              <option value="ma">MA (dispatcher)</option>
+              <option value="ma_stream">MA Stream (dispatcher)</option>
               <option value="tema">TEMA</option>
+              <option value="jma">JMA</option>
+              <option value="kama">KAMA</option>
+              <option value="ehlers_kama">Ehlers KAMA</option>
+              <option value="epma">EPMA</option>
+              <option value="gaussian">Gaussian</option>
+              <option value="highpass">HighPass</option>
+              <option value="highpass_2_pole">HighPass 2-Pole</option>
+              <option value="hwma">HWMA</option>
+              <option value="jsa">JSA</option>
+              <option value="nama">NAMA</option>
+              <option value="nma">NMA</option>
+              <option value="mwdx">MWDX</option>
+              <option value="reflex">Reflex</option>
+              <option value="sama">SAMA</option>
+              <option value="tilson">Tilson (T3)</option>
+              <option value="tradjema">TrAdjEMA</option>
+              <option value="trendflex">TrendFlex</option>
+              <option value="uma">UMA</option>
+              <option value="vama">VAMA</option>
+              <option value="volume_adjusted_ma">Volume Adjusted MA</option>
+              <option value="vpwma">VPWMA</option>
+              <option value="ehlers_ecema">Ehlers ECEMA</option>
+              <option value="ehlers_itrend">Ehlers ITrend</option>
+              <option value="ehlers_pma">Ehlers PMA</option>
+              <option value="frama">FRAMA</option>
+              <option value="vwap">VWAP</option>
             </select>
           </label>
           <label>Slow MA Type
@@ -118,9 +173,13 @@ export const App: React.FC = () => {
               <option value="ema">EMA</option>
               <option value="sma">SMA</option>
               <option value="wma">WMA</option>
+              <option value="buff_averages">Buff Averages</option>
+              <option value="cwma">CWMA</option>
+              <option value="edcf">EDCF</option>
               <option value="zlema">ZLEMA</option>
               <option value="dema">DEMA</option>
               <option value="trima">TRIMA</option>
+              <option value="ehma">EHMA</option>
               <option value="hma">HMA</option>
               <option value="smma">SMMA</option>
               <option value="dma">DMA</option>
@@ -135,7 +194,35 @@ export const App: React.FC = () => {
               <option value="wilders">Wilders</option>
               <option value="fwma">FWMA</option>
               <option value="linreg">LinReg</option>
+              <option value="ma">MA (dispatcher)</option>
+              <option value="ma_stream">MA Stream (dispatcher)</option>
               <option value="tema">TEMA</option>
+              <option value="jma">JMA</option>
+              <option value="kama">KAMA</option>
+              <option value="ehlers_kama">Ehlers KAMA</option>
+              <option value="epma">EPMA</option>
+              <option value="gaussian">Gaussian</option>
+              <option value="highpass">HighPass</option>
+              <option value="highpass_2_pole">HighPass 2-Pole</option>
+              <option value="hwma">HWMA</option>
+              <option value="jsa">JSA</option>
+              <option value="nama">NAMA</option>
+              <option value="nma">NMA</option>
+              <option value="mwdx">MWDX</option>
+              <option value="reflex">Reflex</option>
+              <option value="sama">SAMA</option>
+              <option value="tilson">Tilson (T3)</option>
+              <option value="tradjema">TrAdjEMA</option>
+              <option value="trendflex">TrendFlex</option>
+              <option value="uma">UMA</option>
+              <option value="vama">VAMA</option>
+              <option value="volume_adjusted_ma">Volume Adjusted MA</option>
+              <option value="vpwma">VPWMA</option>
+              <option value="ehlers_ecema">Ehlers ECEMA</option>
+              <option value="ehlers_itrend">Ehlers ITrend</option>
+              <option value="ehlers_pma">Ehlers PMA</option>
+              <option value="frama">FRAMA</option>
+              <option value="vwap">VWAP</option>
             </select>
           </label>
           <label>Series length <input type="number" value={len} onChange={e => setLen(parseInt(e.target.value))} /></label>
@@ -148,12 +235,35 @@ export const App: React.FC = () => {
             </>
           )}
           <label>Commission <input type="number" step={0.0001} value={commission} onChange={e => setCommission(parseFloat(e.target.value))} /></label>
+          <label>Metric
+            <select value={metric} onChange={e => setMetric(e.target.value as any)}>
+              <option value="totalReturn">Total Return</option>
+              <option value="trades">Trades</option>
+              <option value="maxDrawdown">Max Drawdown</option>
+              <option value="meanRet">Mean Return</option>
+              <option value="stdRet">Std. Return</option>
+            </select>
+          </label>
           <button onClick={run}>Run</button>
           <div style={{ color: '#666' }}>{status}</div>
         </div>
 
         <div style={{ flex: 1 }}>
-          <HeatmapChart results={results} onCellClick={(f, s) => setSelected({ fast: f, slow: s })} selectedParams={selected} />
+          {/* Slicers for extra axes */}
+          {(axes.length > 2) && (
+            <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 8, flexWrap: 'wrap' }}>
+              {axes.map((a, idx) => (a.name === 'fast_period' || a.name === 'slow_period') ? null : (
+                <label key={idx}>{a.name}
+                  <select value={slicers[idx] || 0} onChange={e => {
+                    const next = slicers.slice(); next[idx] = parseInt(e.target.value); setSlicers(next)
+                  }}>
+                    {a.values.map((v, vi) => <option key={vi} value={vi}>{v}</option>)}
+                  </select>
+                </label>
+              ))}
+            </div>
+          )}
+          <HeatmapChart results={results} metric={metric} xLabel={'slow_period'} yLabel={'fast_period'} onCellClick={(f, s) => setSelected({ fast: f, slow: s })} selectedParams={selected} />
         </div>
 
         <div style={{ flex: 1 }}>
@@ -167,6 +277,39 @@ export const App: React.FC = () => {
             fastType={fastType}
             slowType={slowType}
           />
+          {/* Top-10 by selected metric */}
+          {results.length > 0 && (
+            <div style={{ marginTop: 12 }}>
+              <div style={{ fontWeight: 600, marginBottom: 6 }}>Top 10 by {metric}</div>
+              <div style={{ maxHeight: 240, overflow: 'auto', border: '1px solid #eee' }}>
+                <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
+                  <thead>
+                    <tr>
+                      <th style={{ textAlign: 'left', padding: 4 }}>Fast</th>
+                      <th style={{ textAlign: 'left', padding: 4 }}>Slow</th>
+                      <th style={{ textAlign: 'left', padding: 4 }}>{metric}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {([...results]
+                      .sort((a, b) => {
+                        const ka = a[metric] as number; const kb = b[metric] as number
+                        const asc = metric === 'maxDrawdown'
+                        return asc ? (ka - kb) : (kb - ka)
+                      })
+                      .slice(0, 10))
+                      .map((r, idx) => (
+                        <tr key={idx}>
+                          <td style={{ padding: 4 }}>{r.fastPeriod}</td>
+                          <td style={{ padding: 4 }}>{r.slowPeriod}</td>
+                          <td style={{ padding: 4 }}>{(r[metric] as number).toFixed(6)}</td>
+                        </tr>
+                      ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>

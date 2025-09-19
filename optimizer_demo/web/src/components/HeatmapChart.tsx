@@ -8,6 +8,9 @@ export interface BacktestResult {
   maxDrawdown: number
   meanRet?: number
   stdRet?: number
+  // Optional display axes values when using generic axes
+  displayX?: number
+  displayY?: number
 }
 
 interface HeatmapChartProps {
@@ -15,18 +18,20 @@ interface HeatmapChartProps {
   metric?: keyof BacktestResult
   onCellClick?: (fastPeriod: number, slowPeriod: number) => void
   selectedParams?: { fast: number; slow: number } | null
+  xLabel?: string
+  yLabel?: string
 }
 
-export function HeatmapChart({ results, metric = 'totalReturn', onCellClick, selectedParams }: HeatmapChartProps) {
+export function HeatmapChart({ results, metric = 'totalReturn', onCellClick, selectedParams, xLabel = 'Fast MA Period', yLabel = 'Slow MA Period' }: HeatmapChartProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [hoveredCell, setHoveredCell] = useState<{ x: number; y: number; value: number } | null>(null)
 
   const fastPeriods = useMemo(
-    () => Array.from(new Set(results.map(r => r.fastPeriod))).sort((a, b) => a - b),
+    () => Array.from(new Set(results.map(r => r.displayX ?? r.fastPeriod))).sort((a, b) => a - b),
     [results]
   )
   const slowPeriods = useMemo(
-    () => Array.from(new Set(results.map(r => r.slowPeriod))).sort((a, b) => a - b),
+    () => Array.from(new Set(results.map(r => r.displayY ?? r.slowPeriod))).sort((a, b) => a - b),
     [results]
   )
 
@@ -36,7 +41,7 @@ export function HeatmapChart({ results, metric = 'totalReturn', onCellClick, sel
     const matrix: number[][] = Array.from({ length: rows }, () => Array(cols).fill(NaN))
     for (let i = 0; i < rows; i++) {
       for (let j = 0; j < cols; j++) {
-        const r = results.find(x => x.fastPeriod === fastPeriods[j] && x.slowPeriod === slowPeriods[i])
+        const r = results.find(x => (x.displayX ?? x.fastPeriod) === fastPeriods[j] && (x.displayY ?? x.slowPeriod) === slowPeriods[i])
         matrix[i][j] = r ? (r[metric] as number) : NaN
       }
     }
@@ -104,8 +109,8 @@ export function HeatmapChart({ results, metric = 'totalReturn', onCellClick, sel
       if (i % Math.ceil(rows / 10) === 0) ctx.fillText(String(slowPeriods[i]), margin.left - 10, margin.top + i * cellH + cellH / 2)
     }
     ctx.fillStyle = '#aaa'; ctx.font = '14px sans-serif'; ctx.textAlign = 'center'
-    ctx.fillText('Fast MA Period', canvas.width / 2, canvas.height - 10)
-    ctx.save(); ctx.translate(15, canvas.height / 2); ctx.rotate(-Math.PI / 2); ctx.fillText('Slow MA Period', 0, 0); ctx.restore()
+    ctx.fillText(xLabel, canvas.width / 2, canvas.height - 10)
+    ctx.save(); ctx.translate(15, canvas.height / 2); ctx.rotate(-Math.PI / 2); ctx.fillText(yLabel, 0, 0); ctx.restore()
   }, [createMatrix, fastPeriods, slowPeriods, metric, selectedParams])
 
   useEffect(() => {
@@ -125,7 +130,7 @@ export function HeatmapChart({ results, metric = 'totalReturn', onCellClick, sel
     const cellW = chartW / cols, cellH = chartH / rows
     if (x >= margin.left && x <= canvas.width - margin.right && y >= margin.top && y <= canvas.height - margin.bottom) {
       const col = Math.floor((x - margin.left) / cellW); const row = Math.floor((y - margin.top) / cellH)
-      const r = results.find(v => v.fastPeriod === fastPeriods[col] && v.slowPeriod === slowPeriods[row])
+      const r = results.find(v => (v.displayX ?? v.fastPeriod) === fastPeriods[col] && (v.displayY ?? v.slowPeriod) === slowPeriods[row])
       if (r) setHoveredCell({ x: fastPeriods[col], y: slowPeriods[row], value: (r[metric] as number) })
       else setHoveredCell(null)
     } else { setHoveredCell(null) }
@@ -142,7 +147,9 @@ export function HeatmapChart({ results, metric = 'totalReturn', onCellClick, sel
     const cellW = chartW / cols, cellH = chartH / rows
     if (x >= margin.left && x <= canvas.width - margin.right && y >= margin.top && y <= canvas.height - margin.bottom) {
       const col = Math.floor((x - margin.left) / cellW); const row = Math.floor((y - margin.top) / cellH)
-      onCellClick(fastPeriods[col], slowPeriods[row])
+      // On click, use actual fast/slow for downstream overlay
+      const r = results.find(v => (v.displayX ?? v.fastPeriod) === fastPeriods[col] && (v.displayY ?? v.slowPeriod) === slowPeriods[row])
+      if (r) onCellClick(r.fastPeriod, r.slowPeriod)
     }
   }
 
@@ -157,4 +164,3 @@ export function HeatmapChart({ results, metric = 'totalReturn', onCellClick, sel
     </div>
   )
 }
-

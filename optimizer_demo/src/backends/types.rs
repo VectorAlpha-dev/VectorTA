@@ -37,6 +37,7 @@ pub struct OptimizeResponseMeta {
     pub metrics: Vec<&'static str>,
     pub rows: usize,
     pub cols: usize,
+    pub axes: Vec<AxisMeta>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -44,6 +45,14 @@ pub struct OptimizeResponse {
     pub meta: OptimizeResponseMeta,
     // Flattened row-major [rows * cols * M] fp32 for compactness
     pub values: Vec<f32>,
+    // Number of layers for extra dimensions (>= 1)
+    pub layers: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AxisMeta {
+    pub name: String,   // e.g., "fast_period", "slow_period", "fast.phase", "slow.power"
+    pub values: Vec<f64>,
 }
 
 pub fn expand_range((s, e, step): (usize, usize, usize)) -> Vec<usize> {

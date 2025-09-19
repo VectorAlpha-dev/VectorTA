@@ -5,6 +5,7 @@ mod backends {
 }
 
 use axum::{routing::post, Json, Router};
+use tokio::net::TcpListener;
 use tower_http::services::ServeDir;
 use backends::types::{Backend, OptimizeRequest, OptimizeResponse};
 use serde_json::json;
@@ -19,7 +20,8 @@ async fn main() {
         .fallback_service(static_service);
     let addr: SocketAddr = "127.0.0.1:8088".parse().unwrap();
     println!("Optimizer demo backend listening on http://{}", addr);
-    axum::Server::bind(&addr).serve(app.into_make_service()).await.unwrap();
+    let listener = TcpListener::bind(addr).await.unwrap();
+    axum::serve(listener, app).await.unwrap();
 }
 
 async fn optimize(Json(req): Json<OptimizeRequest>) -> Json<serde_json::Value> {

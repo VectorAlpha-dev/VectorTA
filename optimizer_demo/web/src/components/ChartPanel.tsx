@@ -102,8 +102,24 @@ export const ChartPanel: React.FC<ChartPanelProps> = ({ series, fast, slow, offs
       try {
         if (wasm) {
           if (t === 'alma' && typeof wasm.alma_js === 'function') return Array.from(wasm.alma_js(series, period, offset, sigma) as Float64Array)
+          // Special: buff_averages returns [fast..., slow...] and requires volume + both periods
+          if (t === 'buff_averages' && typeof wasm.buff_averages_js === 'function' && fast != null && slow != null) {
+            const vol = new Array(series.length).fill(1.0)
+            const flat = wasm.buff_averages_js(series, vol, fast, slow) as Float64Array
+            // Caller will decide which half to use. Return both concatenated for now.
+            return Array.from(flat)
+          }
+          // Special: Ehlers PMA returns object with 2 rows; no period
+          if (t === 'ehlers_pma' && typeof wasm.ehlers_pma === 'function') {
+            const obj = wasm.ehlers_pma(series)
+            // Expect { values: number[], rows:2, cols:len }
+            const values = obj && obj.values ? obj.values as number[] : []
+            return values.slice() // caller will split
+          }
           const fnName = t + '_js'
-          if (typeof wasm[fnName] === 'function') {
+          const altName = t
+          if (typeof (wasm as any)[fnName] === 'function' || typeof (wasm as any)[altName] === 'function') {
+            const fn = (wasm as any)[fnName] || (wasm as any)[altName]
             // Special case: FRAMA needs high/low/close; derive synthetic high/low if we only have close
             if (t === 'frama') {
               const close = series
@@ -116,9 +132,10 @@ export const ChartPanel: React.FC<ChartPanelProps> = ({ series, fast, slow, offs
                 } else { high.push(NaN); low.push(NaN) }
               }
               const sc = 300, fc = 1
-              return Array.from(wasm.frama_js(high, low, close, period, sc, fc) as Float64Array)
+              const frfn = (wasm as any).frama_js || (wasm as any).frama
+              return Array.from(frfn(high, low, close, period, sc, fc) as Float64Array)
             }
-            return Array.from(wasm[fnName](series, period) as Float64Array)
+            return Array.from(fn(series, period) as Float64Array)
           }
         }
       } catch (e) { console.warn('WASM call failed for', typ, e) }
@@ -126,8 +143,41 @@ export const ChartPanel: React.FC<ChartPanelProps> = ({ series, fast, slow, offs
       if (t === 'alma') return computeALMA(series, period, offset, sigma)
       return new Array(series.length).fill(NaN)
     }
-    const f = callMA(fastType, fast)
-    const s = callMA(slowType, slow)
+    // Pre-handle special paired indicators
+    let pairedPredict: number[] | null = null
+    let pairedTrigger: number[] | null = null
+    if (wasm && (fastType.toLowerCase() === 'ehlers_pma' || slowType.toLowerCase() === 'ehlers_pma')) {
+      try {
+        const obj = (wasm as any).ehlers_pma && (wasm as any).ehlers_pma(series)
+        if (obj && obj.values && obj.rows === 2) {
+          const vals = obj.values as number[]
+          const len = Math.floor(vals.length / 2)
+          pairedPredict = vals.slice(0, len)
+          pairedTrigger = vals.slice(len)
+        }
+      } catch (e) { console.warn('WASM ehlers_pma failed', e) }
+    }
+
+    let f = callMA(fastType, fast)
+    let s = callMA(slowType, slow)
+    // If buff_averages used, split the concatenated result
+    if (fastType.toLowerCase() === 'buff_averages' || slowType.toLowerCase() === 'buff_averages') {
+      try {
+        if (typeof (wasm as any)?.buff_averages_js === 'function' && fast != null && slow != null) {
+          const vol = new Array(series.length).fill(1.0)
+          const flat = (wasm as any).buff_averages_js(series, vol, fast, slow) as Float64Array
+          const len = Math.floor(flat.length / 2)
+          const fa = Array.from(flat.slice(0, len))
+          const sa = Array.from(flat.slice(len))
+          if (fastType.toLowerCase() === 'buff_averages') f = fa
+          if (slowType.toLowerCase() === 'buff_averages') s = sa
+        }
+      } catch (e) { console.warn('WASM buff_averages failed', e) }
+    }
+    if (pairedPredict && pairedTrigger) {
+      if (fastType.toLowerCase() === 'ehlers_pma') f = pairedPredict
+      if (slowType.toLowerCase() === 'ehlers_pma') s = pairedTrigger
+    }
     const now = Math.floor(Date.now() / 1000)
     const fData: { time: number, value: number }[] = []
     const sData: { time: number, value: number }[] = []
