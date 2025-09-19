@@ -13,24 +13,24 @@ pub mod cuda;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod _rayon_one_big_stack {
-	use ctor::ctor;
-	use rayon::ThreadPoolBuilder;
+    use ctor::ctor;
+    use rayon::ThreadPoolBuilder;
 
-	#[ctor]
-	fn init_rayon_pool() {
-		let _ = ThreadPoolBuilder::new()
-			.num_threads(1)
-			.stack_size(8 * 1024 * 1024)
-			.build_global();
-	}
+    #[ctor]
+    fn init_rayon_pool() {
+        let _ = ThreadPoolBuilder::new()
+            .num_threads(1)
+            .stack_size(8 * 1024 * 1024)
+            .build_global();
+    }
 }
 
 pub mod bindings {
-	#[cfg(feature = "python")]
-	pub mod python;
+    #[cfg(feature = "python")]
+    pub mod python;
 
-	#[cfg(feature = "wasm")]
-	pub mod wasm;
+    #[cfg(feature = "wasm")]
+    pub mod wasm;
 }
 
 // Global WASM memory management functions
@@ -56,9 +56,7 @@ pub fn deallocate_f64_array(ptr: *mut f64) {
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn read_f64_array(ptr: *const f64, len: usize) -> Vec<f64> {
-    unsafe {
-        std::slice::from_raw_parts(ptr, len).to_vec()
-    }
+    unsafe { std::slice::from_raw_parts(ptr, len).to_vec() }
 }
 
 #[cfg(feature = "wasm")]

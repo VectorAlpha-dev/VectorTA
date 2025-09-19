@@ -39,8 +39,8 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel,
-    init_matrix_prefixes, make_uninit_matrix,
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -61,15 +61,19 @@ use std::mem::MaybeUninit;
 use thiserror::Error;
 
 // Import indicators we'll use
-use crate::indicators::moving_averages::ema::{ema_with_kernel, ema_into_slice, EmaInput, EmaParams};
-use crate::indicators::moving_averages::sma::{sma_with_kernel, sma_into_slice, SmaInput, SmaParams};
+use crate::indicators::moving_averages::ema::{
+    ema_into_slice, ema_with_kernel, EmaInput, EmaParams,
+};
+use crate::indicators::moving_averages::sma::{
+    sma_into_slice, sma_with_kernel, SmaInput, SmaParams,
+};
 
 // ==================== DATA STRUCTURES ====================
 /// Input data enum supporting both raw slices and candle data
 #[derive(Debug, Clone)]
 pub enum WtoData<'a> {
-    Candles { 
-        candles: &'a Candles, 
+    Candles {
+        candles: &'a Candles,
         source: &'a str,
     },
     Slice(&'a [f64]),
@@ -115,7 +119,7 @@ impl<'a> WtoInput<'a> {
             params: p,
         }
     }
-    
+
     #[inline]
     pub fn from_slice(sl: &'a [f64], p: WtoParams) -> Self {
         Self {
@@ -123,17 +127,17 @@ impl<'a> WtoInput<'a> {
             params: p,
         }
     }
-    
+
     #[inline]
     pub fn with_default_candles(c: &'a Candles) -> Self {
         Self::from_candles(c, "close", WtoParams::default())
     }
-    
+
     #[inline]
     pub fn get_channel_length(&self) -> usize {
         self.params.channel_length.unwrap_or(10)
     }
-    
+
     #[inline]
     pub fn get_average_length(&self) -> usize {
         self.params.average_length.unwrap_or(21)
@@ -173,25 +177,25 @@ impl WtoBuilder {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     #[inline(always)]
     pub fn channel_length(mut self, n: usize) -> Self {
         self.channel_length = Some(n);
         self
     }
-    
+
     #[inline(always)]
     pub fn average_length(mut self, n: usize) -> Self {
         self.average_length = Some(n);
         self
     }
-    
+
     #[inline(always)]
     pub fn kernel(mut self, k: Kernel) -> Self {
         self.kernel = k;
         self
     }
-    
+
     #[inline(always)]
     pub fn apply(self, c: &Candles) -> Result<WtoOutput, WtoError> {
         let p = WtoParams {
@@ -201,7 +205,7 @@ impl WtoBuilder {
         let i = WtoInput::from_candles(c, "close", p);
         wto_with_kernel(&i, self.kernel)
     }
-    
+
     #[inline(always)]
     pub fn apply_slice(self, d: &[f64]) -> Result<WtoOutput, WtoError> {
         let p = WtoParams {
@@ -211,7 +215,7 @@ impl WtoBuilder {
         let i = WtoInput::from_slice(d, p);
         wto_with_kernel(&i, self.kernel)
     }
-    
+
     #[inline(always)]
     pub fn into_stream(self) -> Result<WtoStream, WtoError> {
         let p = WtoParams {
@@ -227,16 +231,16 @@ impl WtoBuilder {
 pub enum WtoError {
     #[error("wto: Input data slice is empty.")]
     EmptyInputData,
-    
+
     #[error("wto: All values are NaN.")]
     AllValuesNaN,
-    
+
     #[error("wto: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
-    
+
     #[error("wto: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
-    
+
     #[error("wto: Computation error: {0}")]
     ComputationError(String),
 }
@@ -251,17 +255,29 @@ pub fn wto(input: &WtoInput) -> Result<WtoOutput, WtoError> {
 pub fn wto_with_kernel(input: &WtoInput, kernel: Kernel) -> Result<WtoOutput, WtoError> {
     let (data, channel_length, average_length, first, chosen) = wto_prepare(input, kernel)?;
     let len = data.len();
-    
+
     // Allocate output vectors with NaN prefix
     let warmup = first + average_length + 3; // n2 + 3 for final SMA
     let mut wavetrend1 = alloc_with_nan_prefix(len, warmup);
     let mut wavetrend2 = alloc_with_nan_prefix(len, warmup);
     let mut histogram = alloc_with_nan_prefix(len, warmup);
-    
-    wto_compute_into(data, channel_length, average_length, first, chosen, 
-                     &mut wavetrend1, &mut wavetrend2, &mut histogram)?;
-    
-    Ok(WtoOutput { wavetrend1, wavetrend2, histogram })
+
+    wto_compute_into(
+        data,
+        channel_length,
+        average_length,
+        first,
+        chosen,
+        &mut wavetrend1,
+        &mut wavetrend2,
+        &mut histogram,
+    )?;
+
+    Ok(WtoOutput {
+        wavetrend1,
+        wavetrend2,
+        histogram,
+    })
 }
 
 /// Zero-allocation version
@@ -274,23 +290,32 @@ pub fn wto_into_slices(
     kernel: Kernel,
 ) -> Result<(), WtoError> {
     let (data, channel_length, average_length, first, chosen) = wto_prepare(input, kernel)?;
-    
+
     if wt1.len() != data.len() || wt2.len() != data.len() || hist.len() != data.len() {
         return Err(WtoError::InvalidPeriod {
             period: wt1.len(),
             data_len: data.len(),
         });
     }
-    
+
     // First, initialize ALL output arrays with NaN
     for i in 0..wt1.len() {
         wt1[i] = f64::NAN;
         wt2[i] = f64::NAN;
         hist[i] = f64::NAN;
     }
-    
-    wto_compute_into(data, channel_length, average_length, first, chosen, wt1, wt2, hist)?;
-    
+
+    wto_compute_into(
+        data,
+        channel_length,
+        average_length,
+        first,
+        chosen,
+        wt1,
+        wt2,
+        hist,
+    )?;
+
     Ok(())
 }
 
@@ -302,35 +327,44 @@ fn wto_prepare<'a>(
 ) -> Result<(&'a [f64], usize, usize, usize, Kernel), WtoError> {
     let data: &[f64] = input.as_ref();
     let len = data.len();
-    
+
     if len == 0 {
         return Err(WtoError::EmptyInputData);
     }
-    
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(WtoError::AllValuesNaN)?;
+
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(WtoError::AllValuesNaN)?;
     let channel_length = input.get_channel_length();
     let average_length = input.get_average_length();
-    
+
     if channel_length == 0 || channel_length > len {
-        return Err(WtoError::InvalidPeriod { period: channel_length, data_len: len });
-    }
-    if average_length == 0 || average_length > len {
-        return Err(WtoError::InvalidPeriod { period: average_length, data_len: len });
-    }
-    
-    let needed = average_length + 3; // Need extra for final SMA
-    if len - first < needed {
-        return Err(WtoError::NotEnoughValidData { 
-            needed, 
-            valid: len - first 
+        return Err(WtoError::InvalidPeriod {
+            period: channel_length,
+            data_len: len,
         });
     }
-    
+    if average_length == 0 || average_length > len {
+        return Err(WtoError::InvalidPeriod {
+            period: average_length,
+            data_len: len,
+        });
+    }
+
+    let needed = average_length + 3; // Need extra for final SMA
+    if len - first < needed {
+        return Err(WtoError::NotEnoughValidData {
+            needed,
+            valid: len - first,
+        });
+    }
+
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
         k => k,
     };
-    
+
     Ok((data, channel_length, average_length, first, chosen))
 }
 
@@ -354,11 +388,18 @@ fn wto_compute_into(
                 return wto_simd128(data, channel_length, average_length, first, wt1, wt2, hist);
             }
         }
-        
+
         match kernel {
-            Kernel::Scalar | Kernel::ScalarBatch => {
-                wto_scalar(data, channel_length, average_length, first, kernel, wt1, wt2, hist)
-            }
+            Kernel::Scalar | Kernel::ScalarBatch => wto_scalar(
+                data,
+                channel_length,
+                average_length,
+                first,
+                kernel,
+                wt1,
+                wt2,
+                hist,
+            ),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => {
                 wto_avx2(data, channel_length, average_length, first, wt1, wt2, hist)
@@ -368,9 +409,16 @@ fn wto_compute_into(
                 wto_avx512(data, channel_length, average_length, first, wt1, wt2, hist)
             }
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
-                wto_scalar(data, channel_length, average_length, first, kernel, wt1, wt2, hist)
-            }
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => wto_scalar(
+                data,
+                channel_length,
+                average_length,
+                first,
+                kernel,
+                wt1,
+                wt2,
+                hist,
+            ),
             _ => unreachable!(),
         }
     }
@@ -388,14 +436,14 @@ fn ema_pinescript_into(data: &[f64], period: usize, first_val: usize, out: &mut 
     if first_val >= len {
         return;
     }
-    
+
     let alpha = 2.0 / (period as f64 + 1.0);
     let beta = 1.0 - alpha;
-    
+
     // PineScript initializes with the first non-NaN value
     let mut ema = data[first_val];
     out[first_val] = ema;
-    
+
     // Continue with EMA calculation from the next point
     for i in (first_val + 1)..len {
         if data[i].is_finite() {
@@ -422,45 +470,44 @@ pub fn wto_scalar(
     hist: &mut [f64],
 ) -> Result<(), WtoError> {
     let len = data.len();
-    
-    // Allocate intermediate arrays  
+
+    // Allocate intermediate arrays
     // rows: 0 esa | 1 d | 2 ci (TCI will be computed directly into wt1)
     let rows = 3usize;
     let cols = len;
-    
+
     // Allocate uninitialized matrix
     let mut mu = make_uninit_matrix(rows, cols);
-    
+
     // Warmup prefixes per row
     let warm = [
-        first_val + channel_length - 1,  // esa
-        first_val + channel_length - 1,  // d
-        first_val + channel_length - 1,  // ci
+        first_val + channel_length - 1, // esa
+        first_val + channel_length - 1, // d
+        first_val + channel_length - 1, // ci
     ];
     init_matrix_prefixes(&mut mu, cols, &warm);
-    
+
     // Materialize &mut [f64] views for each row
     let mut guard = core::mem::ManuallyDrop::new(mu);
-    let flat: &mut [f64] = unsafe { 
-        core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) 
-    };
-    
+    let flat: &mut [f64] =
+        unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
+
     // Split the flat array into row slices
     let (esa, rest) = flat.split_at_mut(cols);
     let (d, ci) = rest.split_at_mut(cols);
-    
+
     // Step 1: Calculate ESA = EMA(close, channel_length) using PineScript-style initialization
     // PineScript uses SMA for initial value instead of running mean
     ema_pinescript_into(data, channel_length, first_val, esa);
-    
+
     // Step 2: Use CI row as scratch to avoid allocation - compute abs(close-esa) into CI
     for i in 0..len {
         ci[i] = (data[i] - esa[i]).abs();
     }
-    
+
     // Calculate D = EMA(abs_diff, channel_length) using PineScript-style initialization
     ema_pinescript_into(ci, channel_length, first_val + channel_length - 1, d);
-    
+
     // Step 3: Overwrite CI with true CI = (close - esa) / (0.015 * d)
     let start_ci = first_val + channel_length - 1;
     for i in start_ci..len {
@@ -471,16 +518,16 @@ pub fn wto_scalar(
             ci[i] = 0.0;
         }
     }
-    
+
     // Step 4: Calculate TCI = EMA(CI, average_length) directly into wt1 using PineScript-style initialization
     let ci_first = first_val + channel_length - 1;
     ema_pinescript_into(ci, average_length, ci_first, wt1);
-    
+
     // Step 6: WaveTrend2 = SMA(WaveTrend1, 4)
     let sma_input = SmaInput::from_slice(wt1, SmaParams { period: Some(4) });
     sma_into_slice(wt2, &sma_input, kernel)
         .map_err(|e| WtoError::ComputationError(format!("WT2 SMA error: {}", e)))?;
-    
+
     // Step 7: Histogram = WaveTrend1 - WaveTrend2
     // Calculate histogram for all valid points where both wt1 and wt2 are valid
     for i in 0..len {
@@ -488,7 +535,7 @@ pub fn wto_scalar(
             hist[i] = wt1[i] - wt2[i];
         }
     }
-    
+
     Ok(())
 }
 
@@ -505,7 +552,16 @@ unsafe fn wto_simd128(
     hist: &mut [f64],
 ) -> Result<(), WtoError> {
     // For now, fallback to scalar implementation
-    wto_scalar(data, channel_length, average_length, first_val, Kernel::Scalar, wt1, wt2, hist)
+    wto_scalar(
+        data,
+        channel_length,
+        average_length,
+        first_val,
+        Kernel::Scalar,
+        wt1,
+        wt2,
+        hist,
+    )
 }
 
 // ==================== AVX2 IMPLEMENTATION ====================
@@ -522,7 +578,16 @@ unsafe fn wto_avx2(
 ) -> Result<(), WtoError> {
     // For now, use scalar implementation
     // AVX2 optimization can be added later for the histogram calculation
-    wto_scalar(data, channel_length, average_length, first_val, Kernel::Avx2, wt1, wt2, hist)
+    wto_scalar(
+        data,
+        channel_length,
+        average_length,
+        first_val,
+        Kernel::Avx2,
+        wt1,
+        wt2,
+        hist,
+    )
 }
 
 // ==================== AVX512 IMPLEMENTATION ====================
@@ -539,7 +604,16 @@ unsafe fn wto_avx512(
 ) -> Result<(), WtoError> {
     // For now, use scalar implementation
     // AVX512 optimization can be added later for the histogram calculation
-    wto_scalar(data, channel_length, average_length, first_val, Kernel::Avx512, wt1, wt2, hist)
+    wto_scalar(
+        data,
+        channel_length,
+        average_length,
+        first_val,
+        Kernel::Avx512,
+        wt1,
+        wt2,
+        hist,
+    )
 }
 
 // ==================== PYTHON BINDINGS ====================
@@ -558,7 +632,7 @@ pub fn wto_py<'py>(
     Bound<'py, numpy::PyArray1<f64>>,
 )> {
     use numpy::{IntoPyArray, PyArrayMethods};
-    
+
     let slice = close.as_slice()?;
     let kern = validate_kernel(kernel, false)?;
     let p = WtoParams {
@@ -590,24 +664,23 @@ pub fn wto_js(
         average_length: Some(average_length),
     };
     let input = WtoInput::from_slice(close, params);
-    
-    let output = wto(&input)
-        .map_err(|e| JsValue::from_str(&e.to_string()))?;
-    
+
+    let output = wto(&input).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
     let result = js_sys::Object::new();
-    
+
     let wt1_array = js_sys::Float64Array::new_with_length(output.wavetrend1.len() as u32);
     wt1_array.copy_from(&output.wavetrend1);
     js_sys::Reflect::set(&result, &JsValue::from_str("wavetrend1"), &wt1_array)?;
-    
+
     let wt2_array = js_sys::Float64Array::new_with_length(output.wavetrend2.len() as u32);
     wt2_array.copy_from(&output.wavetrend2);
     js_sys::Reflect::set(&result, &JsValue::from_str("wavetrend2"), &wt2_array)?;
-    
+
     let hist_array = js_sys::Float64Array::new_with_length(output.histogram.len() as u32);
     hist_array.copy_from(&output.histogram);
     js_sys::Reflect::set(&result, &JsValue::from_str("histogram"), &hist_array)?;
-    
+
     Ok(result)
 }
 
@@ -648,13 +721,13 @@ pub fn wto_into(
         let wt1 = core::slice::from_raw_parts_mut(wt1_ptr, len);
         let wt2 = core::slice::from_raw_parts_mut(wt2_ptr, len);
         let hist = core::slice::from_raw_parts_mut(hist_ptr, len);
-        
+
         let p = WtoParams {
             channel_length: Some(channel_length),
             average_length: Some(average_length),
         };
         let inp = WtoInput::from_slice(data, p);
-        
+
         wto_into_slices(wt1, wt2, hist, &inp, Kernel::Auto)
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
@@ -681,13 +754,13 @@ pub fn wto_unified_js(
     };
     let input = WtoInput::from_slice(close, params);
     let out = wto(&input).map_err(|e| JsValue::from_str(&e.to_string()))?;
-    
+
     let cols = close.len();
     let mut values = Vec::with_capacity(3 * cols);
     values.extend_from_slice(&out.wavetrend1);
     values.extend_from_slice(&out.wavetrend2);
     values.extend_from_slice(&out.histogram);
-    
+
     let res = WtoResult {
         values,
         rows: 3,
@@ -742,7 +815,7 @@ pub fn wto_batch_into(
         let rows = combos.len();
         let cols = len;
         let out = core::slice::from_raw_parts_mut(out_ptr, rows * cols);
-        
+
         // Fill with WT1 values
         let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
         for (row, combo) in combos.iter().enumerate() {
@@ -752,7 +825,7 @@ pub fn wto_batch_into(
             wto_fill_wt1_row(data, combo.clone(), first, detect_best_kernel(), dst)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
         }
-        
+
         Ok(rows)
     }
 }
@@ -809,11 +882,11 @@ impl WtoBatchOutput {
         self.row_for_params(params)
             .map(|row| &self.values[row * self.cols..(row + 1) * self.cols])
     }
-    
+
     pub fn row_for_params(&self, params: &WtoParams) -> Option<usize> {
         self.combos.iter().position(|p| {
-            p.channel_length.unwrap_or(10) == params.channel_length.unwrap_or(10) &&
-            p.average_length.unwrap_or(21) == params.average_length.unwrap_or(21)
+            p.channel_length.unwrap_or(10) == params.channel_length.unwrap_or(10)
+                && p.average_length.unwrap_or(21) == params.average_length.unwrap_or(21)
         })
     }
 }
@@ -839,26 +912,36 @@ impl WtoBatchBuilder {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     pub fn channel_range(mut self, start: usize, end: usize, step: usize) -> Self {
         self.channel_range = (start, end, step);
         self
     }
-    
+
     pub fn average_range(mut self, start: usize, end: usize, step: usize) -> Self {
         self.average_range = (start, end, step);
         self
     }
-    
+
     pub fn kernel(mut self, k: Kernel) -> Self {
         self.kernel = k;
         self
     }
-    
-    pub fn apply_candles(self, candles: &Candles, source: &str) -> Result<WtoBatchOutput, WtoError> {
-        wto_batch_candles(candles, source, self.channel_range, self.average_range, self.kernel)
+
+    pub fn apply_candles(
+        self,
+        candles: &Candles,
+        source: &str,
+    ) -> Result<WtoBatchOutput, WtoError> {
+        wto_batch_candles(
+            candles,
+            source,
+            self.channel_range,
+            self.average_range,
+            self.kernel,
+        )
     }
-    
+
     pub fn apply_slice(self, data: &[f64]) -> Result<WtoBatchOutput, WtoError> {
         let sweep = WtoBatchRange {
             channel: self.channel_range,
@@ -866,23 +949,25 @@ impl WtoBatchBuilder {
         };
         wto_batch_with_kernel(data, &sweep, self.kernel)
     }
-    
+
     pub fn channel_static(mut self, p: usize) -> Self {
         self.channel_range = (p, p, 0);
         self
     }
-    
+
     pub fn average_static(mut self, p: usize) -> Self {
         self.average_range = (p, p, 0);
         self
     }
-    
+
     pub fn with_default_slice(data: &[f64], k: Kernel) -> Result<WtoBatchOutput, WtoError> {
         WtoBatchBuilder::new().kernel(k).apply_slice(data)
     }
-    
+
     pub fn with_default_candles(c: &Candles) -> Result<WtoBatchOutput, WtoError> {
-        WtoBatchBuilder::new().kernel(Kernel::Auto).apply_candles(c, "close")
+        WtoBatchBuilder::new()
+            .kernel(Kernel::Auto)
+            .apply_candles(c, "close")
     }
 }
 
@@ -897,7 +982,7 @@ fn wto_fill_wt1_row(
     let cols = data.len();
     let channel_length = p.channel_length.unwrap_or(10);
     let average_length = p.average_length.unwrap_or(21);
-    
+
     // Scratch: 2 rows (d, ci) uninit, prefix NaNs where needed
     let mut mu = make_uninit_matrix(2, cols);
     let warms = [
@@ -905,25 +990,24 @@ fn wto_fill_wt1_row(
         first + channel_length - 1, // ci
     ];
     init_matrix_prefixes(&mut mu, cols, &warms);
-    
+
     let mut guard = core::mem::ManuallyDrop::new(mu);
-    let flat: &mut [f64] = unsafe {
-        core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len())
-    };
+    let flat: &mut [f64] =
+        unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
     let (d, ci) = flat.split_at_mut(cols);
-    
+
     // ESA directly into dst as temporary for step 1 using PineScript EMA
     ema_pinescript_into(data, channel_length, first, dst);
-    
+
     // abs diff into ci
     for i in 0..cols {
         ci[i] = (data[i] - dst[i]).abs();
     }
-    
+
     // D = EMA(abs_diff, channel_length) using PineScript EMA
     let d_first = first + channel_length - 1;
     ema_pinescript_into(ci, channel_length, d_first, d);
-    
+
     // CI into ci[start..]
     let start = first + channel_length - 1;
     for i in start..cols {
@@ -934,11 +1018,11 @@ fn wto_fill_wt1_row(
             0.0
         };
     }
-    
+
     // TCI directly into dst (final WT1) using PineScript EMA
-    let ci_first = start;  // CI starts being valid after D is calculated
+    let ci_first = start; // CI starts being valid after D is calculated
     ema_pinescript_into(ci, average_length, ci_first, dst);
-    
+
     Ok(())
 }
 
@@ -972,7 +1056,12 @@ pub fn wto_batch_with_kernel(
     let kern = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         x if x.is_batch() => x,
-        _ => return Err(WtoError::InvalidPeriod { period: 0, data_len: 0 }),
+        _ => {
+            return Err(WtoError::InvalidPeriod {
+                period: 0,
+                data_len: 0,
+            })
+        }
     };
     let simd = match kern {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -995,17 +1084,23 @@ fn wto_batch_inner(
     }
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(WtoError::InvalidPeriod { period: 0, data_len: 0 });
+        return Err(WtoError::InvalidPeriod {
+            period: 0,
+            data_len: 0,
+        });
     }
-    
+
     let cols = data.len();
     let rows = combos.len();
-    
+
     // Make rows x cols with NaN warmups per row
     let mut mu = make_uninit_matrix(rows, cols);
     {
         // Warmup per row: first valid + average_length + 3
-        let first = data.iter().position(|x| !x.is_nan()).ok_or(WtoError::AllValuesNaN)?;
+        let first = data
+            .iter()
+            .position(|x| !x.is_nan())
+            .ok_or(WtoError::AllValuesNaN)?;
         let warms: Vec<usize> = combos
             .iter()
             .map(|p| first + p.average_length.unwrap_or(21) + 3)
@@ -1013,17 +1108,16 @@ fn wto_batch_inner(
         init_matrix_prefixes(&mut mu, cols, &warms);
     }
     let mut guard = core::mem::ManuallyDrop::new(mu);
-    let out: &mut [f64] = unsafe {
-        core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len())
-    };
-    
+    let out: &mut [f64] =
+        unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
+
     // Fill each row with WT1
     let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
     let do_row = |row: usize, dst: &mut [f64]| {
         let p = combos[row].clone();
         wto_fill_wt1_row(data, p, first, kern, dst).unwrap();
     };
-    
+
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         out.chunks_mut(cols)
@@ -1039,9 +1133,13 @@ fn wto_batch_inner(
             do_row(r, s);
         }
     }
-    
+
     let values = unsafe {
-        Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, guard.len(), guard.capacity())
+        Vec::from_raw_parts(
+            guard.as_mut_ptr() as *mut f64,
+            guard.len(),
+            guard.capacity(),
+        )
     };
     core::mem::forget(guard);
     Ok(WtoBatchOutput {
@@ -1079,9 +1177,9 @@ pub fn wto_batch_candles(
 // Full 3-output batch structure (MACD-style)
 #[derive(Debug, Clone)]
 pub struct WtoBatchAllOutput {
-    pub wt1: Vec<f64>,    // flattened rows x cols
-    pub wt2: Vec<f64>,    // flattened rows x cols
-    pub hist: Vec<f64>,   // flattened rows x cols
+    pub wt1: Vec<f64>,  // flattened rows x cols
+    pub wt2: Vec<f64>,  // flattened rows x cols
+    pub hist: Vec<f64>, // flattened rows x cols
     pub combos: Vec<WtoParams>,
     pub rows: usize,
     pub cols: usize,
@@ -1096,36 +1194,42 @@ pub fn wto_batch_all_outputs_with_kernel(
     if data.is_empty() {
         return Err(WtoError::EmptyInputData);
     }
-    
+
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(WtoError::InvalidPeriod { period: 0, data_len: 0 });
+        return Err(WtoError::InvalidPeriod {
+            period: 0,
+            data_len: 0,
+        });
     }
-    
+
     let cols = data.len();
     let rows = combos.len();
-    
+
     // Allocate 3 matrices uninitialized
     let mut wt1_mu = make_uninit_matrix(rows, cols);
     let mut wt2_mu = make_uninit_matrix(rows, cols);
     let mut hist_mu = make_uninit_matrix(rows, cols);
-    
+
     // Warmups per row
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(WtoError::AllValuesNaN)?;
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(WtoError::AllValuesNaN)?;
     let warms: Vec<usize> = combos
         .iter()
         .map(|p| first + p.average_length.unwrap_or(21) + 3)
         .collect();
-    
+
     init_matrix_prefixes(&mut wt1_mu, cols, &warms);
     init_matrix_prefixes(&mut wt2_mu, cols, &warms);
     init_matrix_prefixes(&mut hist_mu, cols, &warms);
-    
+
     // Materialize as slices
     let mut wt1_guard = core::mem::ManuallyDrop::new(wt1_mu);
     let mut wt2_guard = core::mem::ManuallyDrop::new(wt2_mu);
     let mut hist_guard = core::mem::ManuallyDrop::new(hist_mu);
-    
+
     let wt1_out: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(wt1_guard.as_mut_ptr() as *mut f64, wt1_guard.len())
     };
@@ -1135,22 +1239,22 @@ pub fn wto_batch_all_outputs_with_kernel(
     let hist_out: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(hist_guard.as_mut_ptr() as *mut f64, hist_guard.len())
     };
-    
+
     // Get kernel
     let kern = match k {
         Kernel::Auto => detect_best_kernel(),
         x => x,
     };
-    
+
     // Process each row
     for (row, combo) in combos.iter().enumerate() {
         let row_start = row * cols;
         let row_end = row_start + cols;
-        
+
         let wt1_row = &mut wt1_out[row_start..row_end];
         let wt2_row = &mut wt2_out[row_start..row_end];
         let hist_row = &mut hist_out[row_start..row_end];
-        
+
         let inp = WtoInput::from_slice(data, combo.clone());
         wto_compute_into(
             data,
@@ -1163,7 +1267,7 @@ pub fn wto_batch_all_outputs_with_kernel(
             hist_row,
         )?;
     }
-    
+
     // Turn matrices into Vecs
     let wt1 = unsafe {
         Vec::from_raw_parts(
@@ -1186,11 +1290,11 @@ pub fn wto_batch_all_outputs_with_kernel(
             hist_guard.capacity(),
         )
     };
-    
+
     core::mem::forget(wt1_guard);
     core::mem::forget(wt2_guard);
     core::mem::forget(hist_guard);
-    
+
     Ok(WtoBatchAllOutput {
         wt1,
         wt2,
@@ -1220,14 +1324,20 @@ impl WtoStream {
     pub fn try_new(params: WtoParams) -> Result<Self, WtoError> {
         let channel_length = params.channel_length.unwrap_or(10);
         let average_length = params.average_length.unwrap_or(21);
-        
+
         if channel_length == 0 {
-            return Err(WtoError::InvalidPeriod { period: channel_length, data_len: 0 });
+            return Err(WtoError::InvalidPeriod {
+                period: channel_length,
+                data_len: 0,
+            });
         }
         if average_length == 0 {
-            return Err(WtoError::InvalidPeriod { period: average_length, data_len: 0 });
+            return Err(WtoError::InvalidPeriod {
+                period: average_length,
+                data_len: 0,
+            });
         }
-        
+
         Ok(Self {
             channel_length,
             average_length,
@@ -1241,17 +1351,17 @@ impl WtoStream {
             initialized: false,
         })
     }
-    
+
     pub fn update(&mut self, value: f64) -> Option<(f64, f64, f64)> {
         if value.is_nan() {
             return None;
         }
-        
+
         self.data_buffer.push(value);
         if self.data_buffer.len() > self.channel_length {
             self.data_buffer.remove(0);
         }
-        
+
         if !self.initialized {
             if self.data_buffer.len() == self.channel_length {
                 self.esa = self.data_buffer.iter().sum::<f64>() / self.channel_length as f64;
@@ -1261,14 +1371,14 @@ impl WtoStream {
                 return None;
             }
         }
-        
+
         // Update ESA
         self.esa = self.esa_alpha * value + (1.0 - self.esa_alpha) * self.esa;
-        
+
         // Update D
         let abs_diff = (value - self.esa).abs();
         self.d = self.esa_alpha * abs_diff + (1.0 - self.esa_alpha) * self.d;
-        
+
         // Calculate CI
         let divisor = 0.015 * self.d;
         let ci = if divisor != 0.0 && divisor.is_finite() {
@@ -1276,33 +1386,33 @@ impl WtoStream {
         } else {
             0.0
         };
-        
+
         // Update TCI (WaveTrend1)
         self.tci = self.tci_alpha * ci + (1.0 - self.tci_alpha) * self.tci;
         let wt1 = self.tci;
-        
+
         // Update WaveTrend2 (SMA of last 4 WaveTrend1 values)
         self.wt2_buffer.push(wt1);
         if self.wt2_buffer.len() > 4 {
             self.wt2_buffer.remove(0);
         }
-        
+
         let wt2 = if self.wt2_buffer.len() == 4 {
             self.wt2_buffer.iter().sum::<f64>() / 4.0
         } else {
-            wt1  // Until we have 4 values, just use wt1
+            wt1 // Until we have 4 values, just use wt1
         };
-        
+
         let histogram = wt1 - wt2;
-        
+
         Some((wt1, wt2, histogram))
     }
-    
+
     pub fn last(&self) -> Option<(f64, f64, f64)> {
         if !self.initialized {
             return None;
         }
-        
+
         let wt1 = self.tci;
         let wt2 = if self.wt2_buffer.len() == 4 {
             self.wt2_buffer.iter().sum::<f64>() / 4.0
@@ -1310,10 +1420,10 @@ impl WtoStream {
             wt1
         };
         let histogram = wt1 - wt2;
-        
+
         Some((wt1, wt2, histogram))
     }
-    
+
     pub fn reset(&mut self) {
         self.data_buffer.clear();
         self.wt2_buffer.clear();
@@ -1344,15 +1454,15 @@ impl WtoStreamPy {
             inner: WtoStream::try_new(p).map_err(|e| PyValueError::new_err(e.to_string()))?,
         })
     }
-    
+
     pub fn update(&mut self, value: f64) -> Option<(f64, f64, f64)> {
         self.inner.update(value)
     }
-    
+
     pub fn last(&self) -> Option<(f64, f64, f64)> {
         self.inner.last()
     }
-    
+
     pub fn reset(&mut self) {
         self.inner.reset()
     }
@@ -1372,7 +1482,7 @@ pub fn wto_batch_py<'py>(
     use numpy::{IntoPyArray, PyArrayMethods};
     let slice = close.as_slice()?;
     let kern = validate_kernel(kernel, false)?;
-    
+
     // Compute full 3-output batch
     let sweep = WtoBatchRange {
         channel: channel_range,
@@ -1381,22 +1491,22 @@ pub fn wto_batch_py<'py>(
     let out = py
         .allow_threads(|| wto_batch_all_outputs_with_kernel(slice, &sweep, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    
+
     let dict = pyo3::types::PyDict::new(py);
-    
+
     // Create and reshape arrays for all three outputs
     let wt1_arr = unsafe { numpy::PyArray1::<f64>::new(py, [out.rows * out.cols], false) };
     unsafe { wt1_arr.as_slice_mut()? }.copy_from_slice(&out.wt1);
     dict.set_item("wt1", wt1_arr.reshape((out.rows, out.cols))?)?;
-    
+
     let wt2_arr = unsafe { numpy::PyArray1::<f64>::new(py, [out.rows * out.cols], false) };
     unsafe { wt2_arr.as_slice_mut()? }.copy_from_slice(&out.wt2);
     dict.set_item("wt2", wt2_arr.reshape((out.rows, out.cols))?)?;
-    
+
     let hist_arr = unsafe { numpy::PyArray1::<f64>::new(py, [out.rows * out.cols], false) };
     unsafe { hist_arr.as_slice_mut()? }.copy_from_slice(&out.hist);
     dict.set_item("hist", hist_arr.reshape((out.rows, out.cols))?)?;
-    
+
     dict.set_item(
         "channel_lengths",
         out.combos
@@ -1430,26 +1540,29 @@ pub fn register_wto_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()>
 mod tests {
     use super::*;
     use crate::utilities::data_loader::read_candles_from_csv;
-    
+
     // Helper macro to skip unsupported kernels
     macro_rules! skip_if_unsupported {
         ($kernel:expr, $test_name:expr) => {
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-            if matches!($kernel, Kernel::Avx2 | Kernel::Avx512 | Kernel::Avx2Batch | Kernel::Avx512Batch) {
+            if matches!(
+                $kernel,
+                Kernel::Avx2 | Kernel::Avx512 | Kernel::Avx2Batch | Kernel::Avx512Batch
+            ) {
                 eprintln!("[{}] Skipping due to missing AVX support", $test_name);
                 return Ok(());
             }
         };
     }
-    
+
     fn check_wto_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let input = WtoInput::from_candles(&candles, "close", WtoParams::default());
         let result = wto_with_kernel(&input, kernel)?;
-        
+
         // Reference values from PineScript
         let expected_wt1 = [
             -34.81423091,
@@ -1458,7 +1571,7 @@ mod tests {
             -34.93917015,
             -41.42578524,
         ];
-        
+
         let expected_wt2 = [
             -37.72141493,
             -35.54009606,
@@ -1466,7 +1579,7 @@ mod tests {
             -34.74334400,
             -36.39623258,
         ];
-        
+
         let expected_hist = [
             2.90718403,
             1.61137328,
@@ -1474,10 +1587,10 @@ mod tests {
             -0.19582615,
             -5.02955265,
         ];
-        
+
         let start = result.wavetrend1.len().saturating_sub(5);
-        
-        // Check WaveTrend1 
+
+        // Check WaveTrend1
         // Note: WTO uses EMA which may have slight implementation differences from PineScript
         // Using a slightly relaxed tolerance of 1e-6 for cross-platform compatibility
         for (i, &val) in result.wavetrend1[start..].iter().enumerate() {
@@ -1488,10 +1601,13 @@ mod tests {
             assert!(
                 diff < rel_tolerance.max(abs_tolerance),
                 "WaveTrend1 mismatch at idx {}: got {}, expected {}, diff {}",
-                i, val, expected_wt1[i], diff
+                i,
+                val,
+                expected_wt1[i],
+                diff
             );
         }
-        
+
         // Check WaveTrend2 with same tolerance approach
         for (i, &val) in result.wavetrend2[start..].iter().enumerate() {
             let diff = (val - expected_wt2[i]).abs();
@@ -1500,10 +1616,13 @@ mod tests {
             assert!(
                 diff < rel_tolerance.max(abs_tolerance),
                 "WaveTrend2 mismatch at idx {}: got {}, expected {}, diff {}",
-                i, val, expected_wt2[i], diff
+                i,
+                val,
+                expected_wt2[i],
+                diff
             );
         }
-        
+
         // Check Histogram with same tolerance approach
         for (i, &val) in result.histogram[start..].iter().enumerate() {
             let diff = (val - expected_hist[i]).abs();
@@ -1512,36 +1631,39 @@ mod tests {
             assert!(
                 diff < abs_tolerance,
                 "Histogram mismatch at idx {}: got {}, expected {}, diff {}",
-                i, val, expected_hist[i], diff
+                i,
+                val,
+                expected_hist[i],
+                diff
             );
         }
-        
+
         Ok(())
     }
-    
+
     fn check_wto_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        
+
         let data = vec![1.0; 100];
         let params = WtoParams {
             channel_length: Some(12),
-            average_length: None,  // Use default
+            average_length: None, // Use default
         };
         let input = WtoInput::from_slice(&data, params);
         let result = wto_with_kernel(&input, kernel)?;
-        
+
         assert_eq!(result.wavetrend1.len(), data.len());
         assert_eq!(result.wavetrend2.len(), data.len());
         assert_eq!(result.histogram.len(), data.len());
         Ok(())
     }
-    
+
     fn check_wto_default_candles(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        
+
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let input = WtoInput::with_default_candles(&candles);
         match input.data {
             WtoData::Candles { source, .. } => assert_eq!(source, "close"),
@@ -1549,13 +1671,13 @@ mod tests {
         }
         let output = wto_with_kernel(&input, kernel)?;
         assert_eq!(output.wavetrend1.len(), candles.close.len());
-        
+
         Ok(())
     }
-    
+
     fn check_wto_zero_period(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        
+
         let data = [10.0, 20.0, 30.0];
         let params = WtoParams {
             channel_length: Some(0),
@@ -1563,13 +1685,20 @@ mod tests {
         };
         let input = WtoInput::from_slice(&data, params);
         let res = wto_with_kernel(&input, kernel);
-        assert!(res.is_err(), "[{}] WTO should fail with zero period", test_name);
+        assert!(
+            res.is_err(),
+            "[{}] WTO should fail with zero period",
+            test_name
+        );
         Ok(())
     }
-    
-    fn check_wto_period_exceeds_length(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+
+    fn check_wto_period_exceeds_length(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        
+
         let data = [10.0, 20.0, 30.0];
         let params = WtoParams {
             channel_length: Some(10),
@@ -1584,18 +1713,22 @@ mod tests {
         );
         Ok(())
     }
-    
+
     fn check_wto_very_small_dataset(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        
+
         let single_point = [42.0];
         let params = WtoParams::default();
         let input = WtoInput::from_slice(&single_point, params);
         let res = wto_with_kernel(&input, kernel);
-        assert!(res.is_err(), "[{}] WTO should fail with insufficient data", test_name);
+        assert!(
+            res.is_err(),
+            "[{}] WTO should fail with insufficient data",
+            test_name
+        );
         Ok(())
     }
-    
+
     fn check_wto_empty_input(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let empty: [f64; 0] = [];
@@ -1608,7 +1741,7 @@ mod tests {
         );
         Ok(())
     }
-    
+
     fn check_wto_all_nan(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let data = vec![f64::NAN; 50];
@@ -1622,34 +1755,37 @@ mod tests {
         );
         Ok(())
     }
-    
+
     fn check_wto_reinput(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        
+
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let first_params = WtoParams::default();
         let first_input = WtoInput::from_candles(&candles, "close", first_params);
         let first_result = wto_with_kernel(&first_input, kernel)?;
-        
+
         let second_params = WtoParams::default();
         let second_input = WtoInput::from_slice(&first_result.wavetrend1, second_params);
         let second_result = wto_with_kernel(&second_input, kernel)?;
-        
-        assert_eq!(second_result.wavetrend1.len(), first_result.wavetrend1.len());
+
+        assert_eq!(
+            second_result.wavetrend1.len(),
+            first_result.wavetrend1.len()
+        );
         Ok(())
     }
-    
+
     fn check_wto_nan_handling(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        
+
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let input = WtoInput::from_candles(&candles, "close", WtoParams::default());
         let res = wto_with_kernel(&input, kernel)?;
-        
+
         assert_eq!(res.wavetrend1.len(), candles.close.len());
         if res.wavetrend1.len() > 50 {
             for (i, &val) in res.wavetrend1[50..].iter().enumerate() {
@@ -1663,26 +1799,26 @@ mod tests {
         }
         Ok(())
     }
-    
+
     fn check_wto_streaming(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        
+
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         // Calculate batch WTO for comparison
         let params = WtoParams::default();
         let input = WtoInput::from_candles(&candles, "close", params.clone());
         let batch_result = wto_with_kernel(&input, kernel)?;
-        
+
         // Create streaming calculator
         let mut stream = WtoStream::try_new(params)?;
-        
+
         // Feed data to stream and collect results
         let mut stream_wt1 = Vec::new();
         let mut stream_wt2 = Vec::new();
         let mut stream_hist = Vec::new();
-        
+
         for i in 0..candles.close.len() {
             if let Some((wt1, wt2, hist)) = stream.update(candles.close[i]) {
                 stream_wt1.push(wt1);
@@ -1690,36 +1826,48 @@ mod tests {
                 stream_hist.push(hist);
             }
         }
-        
+
         // Streaming will have fewer values due to warmup
         assert!(!stream_wt1.is_empty());
         Ok(())
     }
-    
+
     #[cfg(debug_assertions)]
     fn check_wto_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        
+
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let test_params = vec![
-            WtoParams { channel_length: Some(5), average_length: Some(10) },
-            WtoParams { channel_length: Some(20), average_length: Some(40) },
-            WtoParams { channel_length: Some(3), average_length: Some(7) },
+            WtoParams {
+                channel_length: Some(5),
+                average_length: Some(10),
+            },
+            WtoParams {
+                channel_length: Some(20),
+                average_length: Some(40),
+            },
+            WtoParams {
+                channel_length: Some(3),
+                average_length: Some(7),
+            },
         ];
-        
+
         for params in test_params {
             let input = WtoInput::from_candles(&candles, "close", params.clone());
             let output = wto_with_kernel(&input, kernel)?;
-            
+
             for (i, &val) in output.wavetrend1.iter().enumerate() {
                 if val.is_nan() {
                     continue;
                 }
-                
+
                 let bits = val.to_bits();
-                if bits == 0x11111111_11111111 || bits == 0x22222222_22222222 || bits == 0x33333333_33333333 {
+                if bits == 0x11111111_11111111
+                    || bits == 0x22222222_22222222
+                    || bits == 0x33333333_33333333
+                {
                     panic!(
                         "[{}] Found poison value {} (0x{:016X}) at index {} with params: {:?}",
                         test_name, val, bits, i, params
@@ -1727,61 +1875,71 @@ mod tests {
                 }
             }
         }
-        
+
         Ok(())
     }
-    
+
     #[cfg(not(debug_assertions))]
     fn check_wto_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
-    
+
     // Enhanced poison check for all three outputs
     #[cfg(debug_assertions)]
     fn check_wto_no_poison_all(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        
+
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
         let input = WtoInput::with_default_candles(&c);
         let out = wto_with_kernel(&input, kernel)?;
-        
+
         for series in [&out.wavetrend1, &out.wavetrend2, &out.histogram] {
             for &v in series {
-                if v.is_nan() { continue; }
+                if v.is_nan() {
+                    continue;
+                }
                 let b = v.to_bits();
                 assert!(
-                    b != 0x11111111_11111111 && b != 0x22222222_22222222 && b != 0x33333333_33333333,
-                    "[{}] poison value 0x{:016X}", test_name, b
+                    b != 0x11111111_11111111
+                        && b != 0x22222222_22222222
+                        && b != 0x33333333_33333333,
+                    "[{}] poison value 0x{:016X}",
+                    test_name,
+                    b
                 );
             }
         }
         Ok(())
     }
-    
+
     // Batch poison check
     fn check_batch_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        
+
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file)?;
-        
+
         // Test with WT1-only batch
         let output = WtoBatchBuilder::new()
             .channel_range(5, 15, 5)
             .average_range(10, 30, 10)
             .kernel(kernel)
             .apply_candles(&candles, "close")?;
-        
+
         for &v in &output.values {
-            if v.is_nan() { continue; }
+            if v.is_nan() {
+                continue;
+            }
             let b = v.to_bits();
             assert!(
                 b != 0x11111111_11111111 && b != 0x22222222_22222222 && b != 0x33333333_33333333,
-                "[{}] batch poison value 0x{:016X}", test_name, b
+                "[{}] batch poison value 0x{:016X}",
+                test_name,
+                b
             );
         }
-        
+
         // Test with full 3-output batch
         let sweep = WtoBatchRange {
             channel: (5, 15, 5),
@@ -1789,21 +1947,27 @@ mod tests {
         };
         let data = source_type(&candles, "close");
         let full_out = wto_batch_all_outputs_with_kernel(data, &sweep, kernel)?;
-        
+
         for series in [&full_out.wt1, &full_out.wt2, &full_out.hist] {
             for &v in series {
-                if v.is_nan() { continue; }
+                if v.is_nan() {
+                    continue;
+                }
                 let b = v.to_bits();
                 assert!(
-                    b != 0x11111111_11111111 && b != 0x22222222_22222222 && b != 0x33333333_33333333,
-                    "[{}] full batch poison value 0x{:016X}", test_name, b
+                    b != 0x11111111_11111111
+                        && b != 0x22222222_22222222
+                        && b != 0x33333333_33333333,
+                    "[{}] full batch poison value 0x{:016X}",
+                    test_name,
+                    b
                 );
             }
         }
-        
+
         Ok(())
     }
-    
+
     // Macro to generate test variants for all kernels
     macro_rules! generate_all_wto_tests {
         ($($test_fn:ident),*) => {
@@ -1835,7 +1999,7 @@ mod tests {
             }
         }
     }
-    
+
     // Generate all single kernel tests
     generate_all_wto_tests!(
         check_wto_accuracy,
@@ -1852,70 +2016,70 @@ mod tests {
         check_wto_no_poison,
         check_batch_poison
     );
-    
+
     // Additional poison check tests for debug mode
     #[cfg(debug_assertions)]
     #[test]
     fn test_wto_no_poison_all_scalar() {
         check_wto_no_poison_all("test_wto_no_poison_all_scalar", Kernel::Scalar).unwrap();
     }
-    
+
     #[cfg(all(debug_assertions, feature = "nightly-avx", target_arch = "x86_64"))]
     #[test]
     fn test_wto_no_poison_all_avx2() {
         check_wto_no_poison_all("test_wto_no_poison_all_avx2", Kernel::Avx2).unwrap();
     }
-    
+
     #[cfg(all(debug_assertions, feature = "nightly-avx", target_arch = "x86_64"))]
     #[test]
     fn test_wto_no_poison_all_avx512() {
         check_wto_no_poison_all("test_wto_no_poison_all_avx512", Kernel::Avx512).unwrap();
     }
-    
+
     #[cfg(all(debug_assertions, target_arch = "wasm32", target_feature = "simd128"))]
     #[test]
     fn test_wto_no_poison_all_simd128() {
         check_wto_no_poison_all("test_wto_no_poison_all_simd128", Kernel::Simd128).unwrap();
     }
-    
+
     // Batch testing functions
     fn check_batch_default_row(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        
+
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let output = WtoBatchBuilder::new()
             .kernel(kernel)
             .apply_candles(&candles, "close")?;
-        
+
         let def = WtoParams::default();
         let row = output.values_for(&def).expect("default row missing");
-        
+
         assert_eq!(row.len(), candles.close.len());
         Ok(())
     }
-    
+
     fn check_batch_sweep(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        
+
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let output = WtoBatchBuilder::new()
             .kernel(kernel)
             .channel_range(5, 15, 5)
             .average_range(10, 30, 10)
             .apply_candles(&candles, "close")?;
-        
-        let expected_combos = 3 * 3;  // (5,10,15) * (10,20,30)
+
+        let expected_combos = 3 * 3; // (5,10,15) * (10,20,30)
         assert_eq!(output.combos.len(), expected_combos);
         assert_eq!(output.rows, expected_combos);
         assert_eq!(output.cols, candles.close.len());
-        
+
         Ok(())
     }
-    
+
     // Macro for batch tests
     macro_rules! gen_batch_tests {
         ($fn_name:ident) => {
@@ -1941,7 +2105,7 @@ mod tests {
             }
         };
     }
-    
+
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_sweep);
 }

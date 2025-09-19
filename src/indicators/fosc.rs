@@ -28,8 +28,8 @@
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel,
-    init_matrix_prefixes, make_uninit_matrix,
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    make_uninit_matrix,
 };
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -41,11 +41,16 @@ use std::mem::MaybeUninit;
 use thiserror::Error;
 
 #[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
+#[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
-use pyo3::{exceptions::PyValueError, pyclass, pyfunction, pymethods, types::{PyDict, PyDictMethods}, Bound, PyErr, PyResult, Python};
-#[cfg(feature = "python")]
-use crate::utilities::kernel_validation::validate_kernel;
+use pyo3::{
+    exceptions::PyValueError,
+    pyclass, pyfunction, pymethods,
+    types::{PyDict, PyDictMethods},
+    Bound, PyErr, PyResult, Python,
+};
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
@@ -54,277 +59,305 @@ use wasm_bindgen::prelude::*;
 // --------- Input Data & Param Structs ---------
 
 impl<'a> AsRef<[f64]> for FoscInput<'a> {
-	#[inline(always)]
-	fn as_ref(&self) -> &[f64] {
-		match &self.data {
-			FoscData::Slice(slice) => slice,
-			FoscData::Candles { candles, source } => source_type(candles, source),
-		}
-	}
+    #[inline(always)]
+    fn as_ref(&self) -> &[f64] {
+        match &self.data {
+            FoscData::Slice(slice) => slice,
+            FoscData::Candles { candles, source } => source_type(candles, source),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub enum FoscData<'a> {
-	Candles { candles: &'a Candles, source: &'a str },
-	Slice(&'a [f64]),
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    Slice(&'a [f64]),
 }
 
 #[derive(Debug, Clone)]
 pub struct FoscOutput {
-	pub values: Vec<f64>,
+    pub values: Vec<f64>,
 }
 
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct FoscParams {
-	pub period: Option<usize>,
+    pub period: Option<usize>,
 }
 
 impl Default for FoscParams {
-	fn default() -> Self {
-		Self { period: Some(5) }
-	}
+    fn default() -> Self {
+        Self { period: Some(5) }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct FoscInput<'a> {
-	pub data: FoscData<'a>,
-	pub params: FoscParams,
+    pub data: FoscData<'a>,
+    pub params: FoscParams,
 }
 
 impl<'a> FoscInput<'a> {
-	#[inline]
-	pub fn from_candles(c: &'a Candles, s: &'a str, p: FoscParams) -> Self {
-		Self {
-			data: FoscData::Candles { candles: c, source: s },
-			params: p,
-		}
-	}
-	#[inline]
-	pub fn from_slice(sl: &'a [f64], p: FoscParams) -> Self {
-		Self {
-			data: FoscData::Slice(sl),
-			params: p,
-		}
-	}
-	#[inline]
-	pub fn with_default_candles(c: &'a Candles) -> Self {
-		Self::from_candles(c, "close", FoscParams::default())
-	}
-	#[inline]
-	pub fn get_period(&self) -> usize {
-		self.params.period.unwrap_or(5)
-	}
+    #[inline]
+    pub fn from_candles(c: &'a Candles, s: &'a str, p: FoscParams) -> Self {
+        Self {
+            data: FoscData::Candles {
+                candles: c,
+                source: s,
+            },
+            params: p,
+        }
+    }
+    #[inline]
+    pub fn from_slice(sl: &'a [f64], p: FoscParams) -> Self {
+        Self {
+            data: FoscData::Slice(sl),
+            params: p,
+        }
+    }
+    #[inline]
+    pub fn with_default_candles(c: &'a Candles) -> Self {
+        Self::from_candles(c, "close", FoscParams::default())
+    }
+    #[inline]
+    pub fn get_period(&self) -> usize {
+        self.params.period.unwrap_or(5)
+    }
 }
 
 // --------- Builder Struct ---------
 
 #[derive(Copy, Clone, Debug)]
 pub struct FoscBuilder {
-	period: Option<usize>,
-	kernel: Kernel,
+    period: Option<usize>,
+    kernel: Kernel,
 }
 
 impl Default for FoscBuilder {
-	fn default() -> Self {
-		Self {
-			period: None,
-			kernel: Kernel::Auto,
-		}
-	}
+    fn default() -> Self {
+        Self {
+            period: None,
+            kernel: Kernel::Auto,
+        }
+    }
 }
 
 impl FoscBuilder {
-	#[inline(always)]
-	pub fn new() -> Self {
-		Self::default()
-	}
-	#[inline(always)]
-	pub fn period(mut self, n: usize) -> Self {
-		self.period = Some(n);
-		self
-	}
-	#[inline(always)]
-	pub fn kernel(mut self, k: Kernel) -> Self {
-		self.kernel = k;
-		self
-	}
-	#[inline(always)]
-	pub fn apply(self, c: &Candles) -> Result<FoscOutput, FoscError> {
-		let p = FoscParams { period: self.period };
-		let i = FoscInput::from_candles(c, "close", p);
-		fosc_with_kernel(&i, self.kernel)
-	}
-	#[inline(always)]
-	pub fn apply_slice(self, d: &[f64]) -> Result<FoscOutput, FoscError> {
-		let p = FoscParams { period: self.period };
-		let i = FoscInput::from_slice(d, p);
-		fosc_with_kernel(&i, self.kernel)
-	}
-	#[inline(always)]
-	pub fn into_stream(self) -> Result<FoscStream, FoscError> {
-		let p = FoscParams { period: self.period };
-		FoscStream::try_new(p)
-	}
+    #[inline(always)]
+    pub fn new() -> Self {
+        Self::default()
+    }
+    #[inline(always)]
+    pub fn period(mut self, n: usize) -> Self {
+        self.period = Some(n);
+        self
+    }
+    #[inline(always)]
+    pub fn kernel(mut self, k: Kernel) -> Self {
+        self.kernel = k;
+        self
+    }
+    #[inline(always)]
+    pub fn apply(self, c: &Candles) -> Result<FoscOutput, FoscError> {
+        let p = FoscParams {
+            period: self.period,
+        };
+        let i = FoscInput::from_candles(c, "close", p);
+        fosc_with_kernel(&i, self.kernel)
+    }
+    #[inline(always)]
+    pub fn apply_slice(self, d: &[f64]) -> Result<FoscOutput, FoscError> {
+        let p = FoscParams {
+            period: self.period,
+        };
+        let i = FoscInput::from_slice(d, p);
+        fosc_with_kernel(&i, self.kernel)
+    }
+    #[inline(always)]
+    pub fn into_stream(self) -> Result<FoscStream, FoscError> {
+        let p = FoscParams {
+            period: self.period,
+        };
+        FoscStream::try_new(p)
+    }
 }
 
 // --------- Error ---------
 
 #[derive(Debug, Error)]
 pub enum FoscError {
-	#[error("fosc: Empty input data provided")]
-	EmptyInputData,
-	#[error("fosc: All values are NaN.")]
-	AllValuesNaN,
-	#[error("fosc: Invalid period: period = {period}, data length = {data_len}")]
-	InvalidPeriod { period: usize, data_len: usize },
-	#[error("fosc: Not enough valid data: needed = {needed}, valid = {valid}")]
-	NotEnoughValidData { needed: usize, valid: usize },
-	#[error("fosc: Output slice wrong length: dst_len = {dst_len}, data_len = {data_len}")]
-	OutputSliceWrongLen { dst_len: usize, data_len: usize },
-	#[error("fosc: Invalid kernel for batch operation")]
-	InvalidKernelForBatch,
+    #[error("fosc: Empty input data provided")]
+    EmptyInputData,
+    #[error("fosc: All values are NaN.")]
+    AllValuesNaN,
+    #[error("fosc: Invalid period: period = {period}, data length = {data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
+    #[error("fosc: Not enough valid data: needed = {needed}, valid = {valid}")]
+    NotEnoughValidData { needed: usize, valid: usize },
+    #[error("fosc: Output slice wrong length: dst_len = {dst_len}, data_len = {data_len}")]
+    OutputSliceWrongLen { dst_len: usize, data_len: usize },
+    #[error("fosc: Invalid kernel for batch operation")]
+    InvalidKernelForBatch,
 }
 
 // --------- Main Dispatchers ---------
 
 #[inline]
 pub fn fosc(input: &FoscInput) -> Result<FoscOutput, FoscError> {
-	fosc_with_kernel(input, Kernel::Auto)
+    fosc_with_kernel(input, Kernel::Auto)
 }
 
 pub fn fosc_with_kernel(input: &FoscInput, kernel: Kernel) -> Result<FoscOutput, FoscError> {
-	let data: &[f64] = input.as_ref();
-	let len = data.len();
-	if len == 0 {
-		return Err(FoscError::EmptyInputData);
-	}
-	let period = input.get_period();
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(FoscError::AllValuesNaN)?;
-	if period == 0 || period > len {
-		return Err(FoscError::InvalidPeriod { period, data_len: len });
-	}
-	if (len - first) < period {
-		return Err(FoscError::NotEnoughValidData {
-			needed: period,
-			valid: len - first,
-		});
-	}
-	let chosen = match kernel {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
-	// FIX: warmup = first + period - 1
-	let mut out = alloc_with_nan_prefix(len, first + period - 1);
-	unsafe {
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => fosc_scalar(data, period, first, &mut out),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => fosc_avx2(data, period, first, &mut out),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => fosc_avx512(data, period, first, &mut out),
-			_ => unreachable!(),
-		}
-	}
-	Ok(FoscOutput { values: out })
+    let data: &[f64] = input.as_ref();
+    let len = data.len();
+    if len == 0 {
+        return Err(FoscError::EmptyInputData);
+    }
+    let period = input.get_period();
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(FoscError::AllValuesNaN)?;
+    if period == 0 || period > len {
+        return Err(FoscError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
+    }
+    if (len - first) < period {
+        return Err(FoscError::NotEnoughValidData {
+            needed: period,
+            valid: len - first,
+        });
+    }
+    let chosen = match kernel {
+        Kernel::Auto => detect_best_kernel(),
+        other => other,
+    };
+    // FIX: warmup = first + period - 1
+    let mut out = alloc_with_nan_prefix(len, first + period - 1);
+    unsafe {
+        match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch => fosc_scalar(data, period, first, &mut out),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => fosc_avx2(data, period, first, &mut out),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => fosc_avx512(data, period, first, &mut out),
+            _ => unreachable!(),
+        }
+    }
+    Ok(FoscOutput { values: out })
 }
 
 /// Write directly to output slice - no allocations
 #[inline]
 pub fn fosc_into_slice(dst: &mut [f64], input: &FoscInput, kern: Kernel) -> Result<(), FoscError> {
-	let data: &[f64] = input.as_ref();
-	let len = data.len();
-	let period = input.get_period();
-	
-	if len == 0 {
-		return Err(FoscError::EmptyInputData);
-	}
-	
-	if dst.len() != len {
-		return Err(FoscError::OutputSliceWrongLen { 
-			dst_len: dst.len(), 
-			data_len: len 
-		});
-	}
-	
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(FoscError::AllValuesNaN)?;
-	if period == 0 || period > len {
-		return Err(FoscError::InvalidPeriod { period, data_len: len });
-	}
-	if (len - first) < period {
-		return Err(FoscError::NotEnoughValidData {
-			needed: period,
-			valid: len - first,
-		});
-	}
-	
-	let chosen = match kern {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
-	
-	unsafe {
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => fosc_scalar(data, period, first, dst),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => fosc_avx2(data, period, first, dst),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => fosc_avx512(data, period, first, dst),
-			_ => unreachable!(),
-		}
-	}
-	
-	// Fill warmup with NaN
-	let warmup_end = first + period - 1;
-	for v in &mut dst[..warmup_end] {
-		*v = f64::NAN;
-	}
-	
-	Ok(())
+    let data: &[f64] = input.as_ref();
+    let len = data.len();
+    let period = input.get_period();
+
+    if len == 0 {
+        return Err(FoscError::EmptyInputData);
+    }
+
+    if dst.len() != len {
+        return Err(FoscError::OutputSliceWrongLen {
+            dst_len: dst.len(),
+            data_len: len,
+        });
+    }
+
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(FoscError::AllValuesNaN)?;
+    if period == 0 || period > len {
+        return Err(FoscError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
+    }
+    if (len - first) < period {
+        return Err(FoscError::NotEnoughValidData {
+            needed: period,
+            valid: len - first,
+        });
+    }
+
+    let chosen = match kern {
+        Kernel::Auto => detect_best_kernel(),
+        other => other,
+    };
+
+    unsafe {
+        match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch => fosc_scalar(data, period, first, dst),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => fosc_avx2(data, period, first, dst),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => fosc_avx512(data, period, first, dst),
+            _ => unreachable!(),
+        }
+    }
+
+    // Fill warmup with NaN
+    let warmup_end = first + period - 1;
+    for v in &mut dst[..warmup_end] {
+        *v = f64::NAN;
+    }
+
+    Ok(())
 }
 
 // --------- Scalar Core ---------
 
 #[inline]
 pub fn fosc_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-	let n = data.len();
-	if n < period {
-		return;
-	}
-	let mut x = 0.0;
-	let mut x2 = 0.0;
-	let mut y = 0.0;
-	let mut xy = 0.0;
-	let p = 1.0 / (period as f64);
-	let mut tsf = 0.0;
+    let n = data.len();
+    if n < period {
+        return;
+    }
+    let mut x = 0.0;
+    let mut x2 = 0.0;
+    let mut y = 0.0;
+    let mut xy = 0.0;
+    let p = 1.0 / (period as f64);
+    let mut tsf = 0.0;
 
-	for i in 0..(period - 1) {
-		x += (i + 1) as f64;
-		x2 += ((i + 1) as f64) * ((i + 1) as f64);
-		xy += data[i] * ((i + 1) as f64);
-		y += data[i];
-	}
-	x += period as f64;
-	x2 += (period as f64) * (period as f64);
+    for i in 0..(period - 1) {
+        x += (i + 1) as f64;
+        x2 += ((i + 1) as f64) * ((i + 1) as f64);
+        xy += data[i] * ((i + 1) as f64);
+        y += data[i];
+    }
+    x += period as f64;
+    x2 += (period as f64) * (period as f64);
 
-	let denom = (period as f64) * x2 - x * x;
-	let bd = if denom.abs() < f64::EPSILON { 0.0 } else { 1.0 / denom };
+    let denom = (period as f64) * x2 - x * x;
+    let bd = if denom.abs() < f64::EPSILON {
+        0.0
+    } else {
+        1.0 / denom
+    };
 
-	for i in (first + period - 1)..n {
-		xy += data[i] * (period as f64);
-		y += data[i];
-		let b = (period as f64 * xy - x * y) * bd;
-		let a = (y - b * x) * p;
-		if !data[i].is_nan() && data[i] != 0.0 {
-			out[i] = 100.0 * (data[i] - tsf) / data[i];
-		} else {
-			out[i] = f64::NAN;
-		}
-		tsf = a + b * ((period + 1) as f64);
-		xy -= y;
-		let old_idx = i as isize - (period as isize) + 1;
-		y -= data[old_idx as usize];
-	}
+    for i in (first + period - 1)..n {
+        xy += data[i] * (period as f64);
+        y += data[i];
+        let b = (period as f64 * xy - x * y) * bd;
+        let a = (y - b * x) * p;
+        if !data[i].is_nan() && data[i] != 0.0 {
+            out[i] = 100.0 * (data[i] - tsf) / data[i];
+        } else {
+            out[i] = f64::NAN;
+        }
+        tsf = a + b * ((period + 1) as f64);
+        xy -= y;
+        let old_idx = i as isize - (period as isize) + 1;
+        y -= data[old_idx as usize];
+    }
 }
 
 // --------- AVX2/AVX512 Routing (Stubs) ---------
@@ -332,474 +365,521 @@ pub fn fosc_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn fosc_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-	// AVX2 not implemented, fallback to scalar
-	fosc_scalar(data, period, first, out)
+    // AVX2 not implemented, fallback to scalar
+    fosc_scalar(data, period, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn fosc_avx512(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-	// AVX512 not implemented, fallback to scalar
-	if period <= 32 {
-		fosc_avx512_short(data, period, first, out)
-	} else {
-		fosc_avx512_long(data, period, first, out)
-	}
+    // AVX512 not implemented, fallback to scalar
+    if period <= 32 {
+        fosc_avx512_short(data, period, first, out)
+    } else {
+        fosc_avx512_long(data, period, first, out)
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn fosc_avx512_short(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-	fosc_scalar(data, period, first, out)
+    fosc_scalar(data, period, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn fosc_avx512_long(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-	fosc_scalar(data, period, first, out)
+    fosc_scalar(data, period, first, out)
 }
 
 // --------- Streaming (Stateful) ---------
 
 #[derive(Debug, Clone)]
 pub struct FoscStream {
-	period: usize,
-	buffer: Vec<f64>,
-	idx: usize,  // Circular buffer index
-	filled: bool,
-	x: f64,   // Sum of x values (constant for fixed window)
-	x2: f64,  // Sum of x^2 values (constant for fixed window)
-	y: f64,   // Running sum of y values
-	xy: f64,  // Running sum of x*y values
-	tsf: f64,
-	count: usize,  // Number of values added so far
+    period: usize,
+    buffer: Vec<f64>,
+    idx: usize, // Circular buffer index
+    filled: bool,
+    x: f64,  // Sum of x values (constant for fixed window)
+    x2: f64, // Sum of x^2 values (constant for fixed window)
+    y: f64,  // Running sum of y values
+    xy: f64, // Running sum of x*y values
+    tsf: f64,
+    count: usize, // Number of values added so far
 }
 
 impl FoscStream {
-	pub fn try_new(params: FoscParams) -> Result<Self, FoscError> {
-		let period = params.period.unwrap_or(5);
-		if period == 0 {
-			return Err(FoscError::InvalidPeriod { period, data_len: 0 });
-		}
-		let mut x = 0.0;
-		let mut x2 = 0.0;
-		for i in 0..period {
-			let xi = (i + 1) as f64;
-			x += xi;
-			x2 += xi * xi;
-		}
-		Ok(Self {
-			period,
-			buffer: vec![f64::NAN; period],
-			idx: 0,
-			filled: false,
-			x,
-			x2,
-			y: 0.0,
-			xy: 0.0,
-			tsf: 0.0,
-			count: 0,
-		})
-	}
-	#[inline(always)]
-	pub fn update(&mut self, value: f64) -> Option<f64> {
-		// During warmup phase
-		if self.count < self.period {
-			self.buffer[self.idx] = value;
-			
-			// Update running sums
-			self.y += value;
-			self.xy += value * ((self.count + 1) as f64);
-			
-			self.idx = (self.idx + 1) % self.period;
-			self.count += 1;
-			
-			if self.count == self.period {
-				self.filled = true;
-			}
-			return None;
-		}
-		
-		// After warmup - use circular buffer
-		let old_value = self.buffer[self.idx];
-		self.buffer[self.idx] = value;
-		
-		// Update running sums incrementally
-		// For xy, we need to adjust for the circular nature
-		// When we remove old_value, it was at position 1 in the window
-		// When we add new value, it's at position period
-		if !old_value.is_nan() {
-			self.y -= old_value;
-			// Recalculate xy by removing old contribution
-			let mut xy_temp = 0.0;
-			for i in 0..self.period {
-				let buf_idx = (self.idx + i + 1) % self.period;
-				let xi = (i + 1) as f64;
-				xy_temp += self.buffer[buf_idx] * xi;
-			}
-			self.xy = xy_temp;
-		}
-		
-		if !value.is_nan() {
-			self.y += value;
-		}
-		
-		self.idx = (self.idx + 1) % self.period;
-		
-		if !self.filled {
-			return None;
-		}
-		
-		// Calculate linear regression parameters
-		let p = 1.0 / (self.period as f64);
-		let denom = (self.period as f64) * self.x2 - self.x * self.x;
-		let bd = if denom.abs() < f64::EPSILON { 0.0 } else { 1.0 / denom };
-		let b = (self.period as f64 * self.xy - self.x * self.y) * bd;
-		let a = (self.y - b * self.x) * p;
-		
-		// Time Series Forecast
-		let tsf = a + b * ((self.period + 1) as f64);
-		
-		// Current value is the one we just added
-		let out = if !value.is_nan() && value != 0.0 {
-			100.0 * (value - tsf) / value
-		} else {
-			f64::NAN
-		};
-		
-		Some(out)
-	}
+    pub fn try_new(params: FoscParams) -> Result<Self, FoscError> {
+        let period = params.period.unwrap_or(5);
+        if period == 0 {
+            return Err(FoscError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
+        }
+        let mut x = 0.0;
+        let mut x2 = 0.0;
+        for i in 0..period {
+            let xi = (i + 1) as f64;
+            x += xi;
+            x2 += xi * xi;
+        }
+        Ok(Self {
+            period,
+            buffer: vec![f64::NAN; period],
+            idx: 0,
+            filled: false,
+            x,
+            x2,
+            y: 0.0,
+            xy: 0.0,
+            tsf: 0.0,
+            count: 0,
+        })
+    }
+    #[inline(always)]
+    pub fn update(&mut self, value: f64) -> Option<f64> {
+        // During warmup phase
+        if self.count < self.period {
+            self.buffer[self.idx] = value;
+
+            // Update running sums
+            self.y += value;
+            self.xy += value * ((self.count + 1) as f64);
+
+            self.idx = (self.idx + 1) % self.period;
+            self.count += 1;
+
+            if self.count == self.period {
+                self.filled = true;
+            }
+            return None;
+        }
+
+        // After warmup - use circular buffer
+        let old_value = self.buffer[self.idx];
+        self.buffer[self.idx] = value;
+
+        // Update running sums incrementally
+        // For xy, we need to adjust for the circular nature
+        // When we remove old_value, it was at position 1 in the window
+        // When we add new value, it's at position period
+        if !old_value.is_nan() {
+            self.y -= old_value;
+            // Recalculate xy by removing old contribution
+            let mut xy_temp = 0.0;
+            for i in 0..self.period {
+                let buf_idx = (self.idx + i + 1) % self.period;
+                let xi = (i + 1) as f64;
+                xy_temp += self.buffer[buf_idx] * xi;
+            }
+            self.xy = xy_temp;
+        }
+
+        if !value.is_nan() {
+            self.y += value;
+        }
+
+        self.idx = (self.idx + 1) % self.period;
+
+        if !self.filled {
+            return None;
+        }
+
+        // Calculate linear regression parameters
+        let p = 1.0 / (self.period as f64);
+        let denom = (self.period as f64) * self.x2 - self.x * self.x;
+        let bd = if denom.abs() < f64::EPSILON {
+            0.0
+        } else {
+            1.0 / denom
+        };
+        let b = (self.period as f64 * self.xy - self.x * self.y) * bd;
+        let a = (self.y - b * self.x) * p;
+
+        // Time Series Forecast
+        let tsf = a + b * ((self.period + 1) as f64);
+
+        // Current value is the one we just added
+        let out = if !value.is_nan() && value != 0.0 {
+            100.0 * (value - tsf) / value
+        } else {
+            f64::NAN
+        };
+
+        Some(out)
+    }
 }
 
 // --------- Batch/Parameter Grid ---------
 
 #[derive(Clone, Debug)]
 pub struct FoscBatchRange {
-	pub period: (usize, usize, usize),
+    pub period: (usize, usize, usize),
 }
 
 impl Default for FoscBatchRange {
-	fn default() -> Self {
-		Self { period: (5, 50, 1) }
-	}
+    fn default() -> Self {
+        Self { period: (5, 50, 1) }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct FoscBatchBuilder {
-	range: FoscBatchRange,
-	kernel: Kernel,
+    range: FoscBatchRange,
+    kernel: Kernel,
 }
 
 impl FoscBatchBuilder {
-	pub fn new() -> Self {
-		Self::default()
-	}
-	pub fn kernel(mut self, k: Kernel) -> Self {
-		self.kernel = k;
-		self
-	}
-	#[inline]
-	pub fn period_range(mut self, start: usize, end: usize, step: usize) -> Self {
-		self.range.period = (start, end, step);
-		self
-	}
-	#[inline]
-	pub fn period_static(mut self, p: usize) -> Self {
-		self.range.period = (p, p, 0);
-		self
-	}
-	pub fn apply_slice(self, data: &[f64]) -> Result<FoscBatchOutput, FoscError> {
-		fosc_batch_with_kernel(data, &self.range, self.kernel)
-	}
-	pub fn with_default_slice(data: &[f64], k: Kernel) -> Result<FoscBatchOutput, FoscError> {
-		FoscBatchBuilder::new().kernel(k).apply_slice(data)
-	}
-	pub fn apply_candles(self, c: &Candles, src: &str) -> Result<FoscBatchOutput, FoscError> {
-		let slice = source_type(c, src);
-		self.apply_slice(slice)
-	}
-	pub fn with_default_candles(c: &Candles) -> Result<FoscBatchOutput, FoscError> {
-		FoscBatchBuilder::new().kernel(Kernel::Auto).apply_candles(c, "close")
-	}
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn kernel(mut self, k: Kernel) -> Self {
+        self.kernel = k;
+        self
+    }
+    #[inline]
+    pub fn period_range(mut self, start: usize, end: usize, step: usize) -> Self {
+        self.range.period = (start, end, step);
+        self
+    }
+    #[inline]
+    pub fn period_static(mut self, p: usize) -> Self {
+        self.range.period = (p, p, 0);
+        self
+    }
+    pub fn apply_slice(self, data: &[f64]) -> Result<FoscBatchOutput, FoscError> {
+        fosc_batch_with_kernel(data, &self.range, self.kernel)
+    }
+    pub fn with_default_slice(data: &[f64], k: Kernel) -> Result<FoscBatchOutput, FoscError> {
+        FoscBatchBuilder::new().kernel(k).apply_slice(data)
+    }
+    pub fn apply_candles(self, c: &Candles, src: &str) -> Result<FoscBatchOutput, FoscError> {
+        let slice = source_type(c, src);
+        self.apply_slice(slice)
+    }
+    pub fn with_default_candles(c: &Candles) -> Result<FoscBatchOutput, FoscError> {
+        FoscBatchBuilder::new()
+            .kernel(Kernel::Auto)
+            .apply_candles(c, "close")
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct FoscBatchOutput {
-	pub values: Vec<f64>,
-	pub combos: Vec<FoscParams>,
-	pub rows: usize,
-	pub cols: usize,
+    pub values: Vec<f64>,
+    pub combos: Vec<FoscParams>,
+    pub rows: usize,
+    pub cols: usize,
 }
 
 impl FoscBatchOutput {
-	pub fn row_for_params(&self, p: &FoscParams) -> Option<usize> {
-		self.combos
-			.iter()
-			.position(|c| c.period.unwrap_or(5) == p.period.unwrap_or(5))
-	}
-	pub fn values_for(&self, p: &FoscParams) -> Option<&[f64]> {
-		self.row_for_params(p).map(|row| {
-			let start = row * self.cols;
-			&self.values[start..start + self.cols]
-		})
-	}
+    pub fn row_for_params(&self, p: &FoscParams) -> Option<usize> {
+        self.combos
+            .iter()
+            .position(|c| c.period.unwrap_or(5) == p.period.unwrap_or(5))
+    }
+    pub fn values_for(&self, p: &FoscParams) -> Option<&[f64]> {
+        self.row_for_params(p).map(|row| {
+            let start = row * self.cols;
+            &self.values[start..start + self.cols]
+        })
+    }
 }
 
 #[inline(always)]
 fn expand_grid(r: &FoscBatchRange) -> Vec<FoscParams> {
-	fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-		if step == 0 || start == end {
-			return vec![start];
-		}
-		(start..=end).step_by(step).collect()
-	}
-	let periods = axis_usize(r.period);
-	let mut out = Vec::with_capacity(periods.len());
-	for &p in &periods {
-		out.push(FoscParams { period: Some(p) });
-	}
-	out
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+        if step == 0 || start == end {
+            return vec![start];
+        }
+        (start..=end).step_by(step).collect()
+    }
+    let periods = axis_usize(r.period);
+    let mut out = Vec::with_capacity(periods.len());
+    for &p in &periods {
+        out.push(FoscParams { period: Some(p) });
+    }
+    out
 }
 
 #[inline(always)]
-pub fn fosc_batch_slice(data: &[f64], sweep: &FoscBatchRange, kern: Kernel) -> Result<FoscBatchOutput, FoscError> {
-	fosc_batch_inner(data, sweep, kern, false)
+pub fn fosc_batch_slice(
+    data: &[f64],
+    sweep: &FoscBatchRange,
+    kern: Kernel,
+) -> Result<FoscBatchOutput, FoscError> {
+    fosc_batch_inner(data, sweep, kern, false)
 }
 
 #[inline(always)]
-pub fn fosc_batch_par_slice(data: &[f64], sweep: &FoscBatchRange, kern: Kernel) -> Result<FoscBatchOutput, FoscError> {
-	fosc_batch_inner(data, sweep, kern, true)
+pub fn fosc_batch_par_slice(
+    data: &[f64],
+    sweep: &FoscBatchRange,
+    kern: Kernel,
+) -> Result<FoscBatchOutput, FoscError> {
+    fosc_batch_inner(data, sweep, kern, true)
 }
 
-pub fn fosc_batch_with_kernel(data: &[f64], sweep: &FoscBatchRange, k: Kernel) -> Result<FoscBatchOutput, FoscError> {
-	let kernel = match k {
-		Kernel::Auto => detect_best_batch_kernel(),
-		other if other.is_batch() => other,
-		_ => return Err(FoscError::InvalidKernelForBatch),
-	};
-	let simd = match kernel {
-		Kernel::Avx512Batch => Kernel::Avx512,
-		Kernel::Avx2Batch => Kernel::Avx2,
-		Kernel::ScalarBatch => Kernel::Scalar,
-		_ => unreachable!(),
-	};
-	fosc_batch_par_slice(data, sweep, simd)
+pub fn fosc_batch_with_kernel(
+    data: &[f64],
+    sweep: &FoscBatchRange,
+    k: Kernel,
+) -> Result<FoscBatchOutput, FoscError> {
+    let kernel = match k {
+        Kernel::Auto => detect_best_batch_kernel(),
+        other if other.is_batch() => other,
+        _ => return Err(FoscError::InvalidKernelForBatch),
+    };
+    let simd = match kernel {
+        Kernel::Avx512Batch => Kernel::Avx512,
+        Kernel::Avx2Batch => Kernel::Avx2,
+        Kernel::ScalarBatch => Kernel::Scalar,
+        _ => unreachable!(),
+    };
+    fosc_batch_par_slice(data, sweep, simd)
 }
 
 #[inline(always)]
 fn fosc_batch_inner(
-	data: &[f64],
-	sweep: &FoscBatchRange,
-	kern: Kernel,
-	parallel: bool,
+    data: &[f64],
+    sweep: &FoscBatchRange,
+    kern: Kernel,
+    parallel: bool,
 ) -> Result<FoscBatchOutput, FoscError> {
-	let combos = expand_grid(sweep);
-	if combos.is_empty() {
-		return Err(FoscError::InvalidPeriod { period: 0, data_len: 0 });
-	}
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(FoscError::AllValuesNaN)?;
-	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-	if data.len() - first < max_p {
-		return Err(FoscError::NotEnoughValidData {
-			needed: max_p,
-			valid: data.len() - first,
-		});
-	}
-	let rows = combos.len();
-	let cols = data.len();
-	let mut buf_mu = make_uninit_matrix(rows, cols);
-	
-	// Calculate warmup periods for each parameter combination
-	// FIX: warmup = first + period - 1 per row
-	let warmup_periods: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap_or(5) - 1).collect();
-	init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
-	
-	// Use ManuallyDrop to prevent double-free (ALMA pattern)
-	let mut guard = core::mem::ManuallyDrop::new(buf_mu);
-	let out_f64: &mut [f64] = unsafe {
-		core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len())
-	};
+    let combos = expand_grid(sweep);
+    if combos.is_empty() {
+        return Err(FoscError::InvalidPeriod {
+            period: 0,
+            data_len: 0,
+        });
+    }
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(FoscError::AllValuesNaN)?;
+    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    if data.len() - first < max_p {
+        return Err(FoscError::NotEnoughValidData {
+            needed: max_p,
+            valid: data.len() - first,
+        });
+    }
+    let rows = combos.len();
+    let cols = data.len();
+    let mut buf_mu = make_uninit_matrix(rows, cols);
 
-	// Compute into the f64 buffer
-	let actual = match kern {
-		Kernel::Auto => detect_best_batch_kernel(),
-		k => k,
-	};
-	let simd = match actual {
-		Kernel::ScalarBatch => Kernel::Scalar,
-		Kernel::Scalar => Kernel::Scalar,
-		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-		Kernel::Avx2Batch => Kernel::Avx2,
-		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-		Kernel::Avx2 => Kernel::Avx2,
-		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-		Kernel::Avx512Batch => Kernel::Avx512,
-		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-		Kernel::Avx512 => Kernel::Avx512,
-		_ => unreachable!(),
-	};
+    // Calculate warmup periods for each parameter combination
+    // FIX: warmup = first + period - 1 per row
+    let warmup_periods: Vec<usize> = combos
+        .iter()
+        .map(|c| first + c.period.unwrap_or(5) - 1)
+        .collect();
+    init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
 
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-		let period = combos[row].period.unwrap();
-		match simd {
-			Kernel::Scalar => fosc_row_scalar(data, first, period, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => fosc_row_avx2(data, first, period, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => fosc_row_avx512(data, first, period, out_row),
-			_ => unreachable!(),
-		}
-	};
+    // Use ManuallyDrop to prevent double-free (ALMA pattern)
+    let mut guard = core::mem::ManuallyDrop::new(buf_mu);
+    let out_f64: &mut [f64] =
+        unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
-	if parallel {
-		#[cfg(not(target_arch = "wasm32"))]
-		{
-			out_f64
-				.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
-		}
+    // Compute into the f64 buffer
+    let actual = match kern {
+        Kernel::Auto => detect_best_batch_kernel(),
+        k => k,
+    };
+    let simd = match actual {
+        Kernel::ScalarBatch => Kernel::Scalar,
+        Kernel::Scalar => Kernel::Scalar,
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Avx2Batch => Kernel::Avx2,
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Avx2 => Kernel::Avx2,
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Avx512Batch => Kernel::Avx512,
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Avx512 => Kernel::Avx512,
+        _ => unreachable!(),
+    };
 
-		#[cfg(target_arch = "wasm32")]
-		{
-			for (row, slice) in out_f64.chunks_mut(cols).enumerate() {
-				do_row(row, slice);
-			}
-		}
-	} else {
-		for (row, slice) in out_f64.chunks_mut(cols).enumerate() {
-			do_row(row, slice);
-		}
-	}
+    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+        let period = combos[row].period.unwrap();
+        match simd {
+            Kernel::Scalar => fosc_row_scalar(data, first, period, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 => fosc_row_avx2(data, first, period, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 => fosc_row_avx512(data, first, period, out_row),
+            _ => unreachable!(),
+        }
+    };
 
-	// Reconstitute Vec<f64> without extra copy
-	let values = unsafe {
-		Vec::from_raw_parts(
-			guard.as_mut_ptr() as *mut f64,
-			guard.len(),
-			guard.capacity(),
-		)
-	};
-	
-	Ok(FoscBatchOutput {
-		values,
-		combos,
-		rows,
-		cols,
-	})
+    if parallel {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            out_f64
+                .par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(row, slice)| do_row(row, slice));
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, slice) in out_f64.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
+        }
+    } else {
+        for (row, slice) in out_f64.chunks_mut(cols).enumerate() {
+            do_row(row, slice);
+        }
+    }
+
+    // Reconstitute Vec<f64> without extra copy
+    let values = unsafe {
+        Vec::from_raw_parts(
+            guard.as_mut_ptr() as *mut f64,
+            guard.len(),
+            guard.capacity(),
+        )
+    };
+
+    Ok(FoscBatchOutput {
+        values,
+        combos,
+        rows,
+        cols,
+    })
 }
 
 #[inline(always)]
 fn fosc_batch_inner_into(
-	data: &[f64],
-	sweep: &FoscBatchRange,
-	kern: Kernel,
-	parallel: bool,
-	out: &mut [f64],
+    data: &[f64],
+    sweep: &FoscBatchRange,
+    kern: Kernel,
+    parallel: bool,
+    out: &mut [f64],
 ) -> Result<Vec<FoscParams>, FoscError> {
-	let combos = expand_grid(sweep);
-	if combos.is_empty() {
-		return Err(FoscError::InvalidPeriod { period: 0, data_len: 0 });
-	}
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(FoscError::AllValuesNaN)?;
-	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-	if data.len() - first < max_p {
-		return Err(FoscError::NotEnoughValidData { needed: max_p, valid: data.len() - first });
-	}
+    let combos = expand_grid(sweep);
+    if combos.is_empty() {
+        return Err(FoscError::InvalidPeriod {
+            period: 0,
+            data_len: 0,
+        });
+    }
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(FoscError::AllValuesNaN)?;
+    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    if data.len() - first < max_p {
+        return Err(FoscError::NotEnoughValidData {
+            needed: max_p,
+            valid: data.len() - first,
+        });
+    }
 
-	let cols = data.len();
+    let cols = data.len();
 
-	// Work with MaybeUninit until fully written, like ALMA
-	let out_uninit: &mut [MaybeUninit<f64>] = unsafe {
-		core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
-	};
+    // Work with MaybeUninit until fully written, like ALMA
+    let out_uninit: &mut [MaybeUninit<f64>] = unsafe {
+        core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
+    };
 
-	// Use init_matrix_prefixes helper like ALMA
-	let warmup_periods: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
-	init_matrix_prefixes(out_uninit, cols, &warmup_periods);
+    // Use init_matrix_prefixes helper like ALMA
+    let warmup_periods: Vec<usize> = combos
+        .iter()
+        .map(|c| first + c.period.unwrap() - 1)
+        .collect();
+    init_matrix_prefixes(out_uninit, cols, &warmup_periods);
 
-	let actual = match kern {
-		Kernel::Auto => detect_best_batch_kernel(),
-		k => k,
-	};
-	let simd = match actual {
-		Kernel::ScalarBatch => Kernel::Scalar,
-		Kernel::Scalar => Kernel::Scalar,
-		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-		Kernel::Avx2Batch => Kernel::Avx2,
-		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-		Kernel::Avx2 => Kernel::Avx2,
-		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-		Kernel::Avx512Batch => Kernel::Avx512,
-		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-		Kernel::Avx512 => Kernel::Avx512,
-		_ => unreachable!(),
-	};
+    let actual = match kern {
+        Kernel::Auto => detect_best_batch_kernel(),
+        k => k,
+    };
+    let simd = match actual {
+        Kernel::ScalarBatch => Kernel::Scalar,
+        Kernel::Scalar => Kernel::Scalar,
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Avx2Batch => Kernel::Avx2,
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Avx2 => Kernel::Avx2,
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Avx512Batch => Kernel::Avx512,
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Avx512 => Kernel::Avx512,
+        _ => unreachable!(),
+    };
 
-	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
-		let period = combos[row].period.unwrap();
-		// Convert this row's MU slice to f64 slice only for writing
-		let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
-		match simd {
-			Kernel::Scalar => fosc_row_scalar(data, first, period, dst),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => fosc_row_avx2(data, first, period, dst),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => fosc_row_avx512(data, first, period, dst),
-			_ => unreachable!(),
-		}
-		// Warmup NaNs were prewritten by init_matrix_prefixes
-	};
+    let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
+        let period = combos[row].period.unwrap();
+        // Convert this row's MU slice to f64 slice only for writing
+        let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
+        match simd {
+            Kernel::Scalar => fosc_row_scalar(data, first, period, dst),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 => fosc_row_avx2(data, first, period, dst),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 => fosc_row_avx512(data, first, period, dst),
+            _ => unreachable!(),
+        }
+        // Warmup NaNs were prewritten by init_matrix_prefixes
+    };
 
-	if parallel {
-		#[cfg(not(target_arch = "wasm32"))]
-		{
-			out_uninit.par_chunks_mut(cols).enumerate().for_each(|(r, sl)| do_row(r, sl));
-		}
-		#[cfg(target_arch = "wasm32")]
-		{
-			for (r, sl) in out_uninit.chunks_mut(cols).enumerate() { do_row(r, sl); }
-		}
-	} else {
-		for (r, sl) in out_uninit.chunks_mut(cols).enumerate() { do_row(r, sl); }
-	}
+    if parallel {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            out_uninit
+                .par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(r, sl)| do_row(r, sl));
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (r, sl) in out_uninit.chunks_mut(cols).enumerate() {
+                do_row(r, sl);
+            }
+        }
+    } else {
+        for (r, sl) in out_uninit.chunks_mut(cols).enumerate() {
+            do_row(r, sl);
+        }
+    }
 
-	Ok(combos)
+    Ok(combos)
 }
 
 #[inline(always)]
 unsafe fn fosc_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-	fosc_scalar(data, period, first, out);
+    fosc_scalar(data, period, first, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn fosc_row_avx2(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-	fosc_avx2(data, period, first, out);
+    fosc_avx2(data, period, first, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn fosc_row_avx512(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-	if period <= 32 {
-		fosc_row_avx512_short(data, first, period, out)
-	} else {
-		fosc_row_avx512_long(data, first, period, out)
-	}
+    if period <= 32 {
+        fosc_row_avx512_short(data, first, period, out)
+    } else {
+        fosc_row_avx512_long(data, first, period, out)
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn fosc_row_avx512_short(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-	fosc_avx512_short(data, period, first, out)
+    fosc_avx512_short(data, period, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn fosc_row_avx512_long(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-	fosc_avx512_long(data, period, first, out)
+    fosc_avx512_long(data, period, first, out)
 }
-
 
 // --------- Python Bindings ---------
 
@@ -807,106 +887,115 @@ unsafe fn fosc_row_avx512_long(data: &[f64], first: usize, period: usize, out: &
 #[pyfunction(name = "fosc")]
 #[pyo3(signature = (data, period=5, kernel=None))]
 pub fn fosc_py<'py>(
-	py: Python<'py>,
-	data: PyReadonlyArray1<'py, f64>,
-	period: usize,
-	kernel: Option<&str>,
+    py: Python<'py>,
+    data: PyReadonlyArray1<'py, f64>,
+    period: usize,
+    kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
-	let data_slice = data.as_slice()?;
-	let kernel_enum = validate_kernel(kernel, false)?;
+    let data_slice = data.as_slice()?;
+    let kernel_enum = validate_kernel(kernel, false)?;
 
-	let params = FoscParams { period: Some(period) };
-	let input = FoscInput::from_slice(data_slice, params);
+    let params = FoscParams {
+        period: Some(period),
+    };
+    let input = FoscInput::from_slice(data_slice, params);
 
-	py.allow_threads(|| {
-		let output = fosc_with_kernel(&input, kernel_enum).map_err(|e| {
-			PyErr::new::<PyValueError, _>(format!("Rust computation error: {}", e))
-		})?;
-		Ok(output)
-	})
-	.map(|result| result.values.into_pyarray(py))
+    py.allow_threads(|| {
+        let output = fosc_with_kernel(&input, kernel_enum)
+            .map_err(|e| PyErr::new::<PyValueError, _>(format!("Rust computation error: {}", e)))?;
+        Ok(output)
+    })
+    .map(|result| result.values.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "fosc_batch")]
 #[pyo3(signature = (data, period_range, kernel=None))]
 pub fn fosc_batch_py<'py>(
-	py: Python<'py>,
-	data: PyReadonlyArray1<'py, f64>,
-	period_range: (usize, usize, usize),
-	kernel: Option<&str>,
+    py: Python<'py>,
+    data: PyReadonlyArray1<'py, f64>,
+    period_range: (usize, usize, usize),
+    kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
-	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
-	use pyo3::types::PyDict;
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+    use pyo3::types::PyDict;
 
-	let slice_in = data.as_slice()?; // zero-copy borrow
-	let sweep = FoscBatchRange { period: period_range };
+    let slice_in = data.as_slice()?; // zero-copy borrow
+    let sweep = FoscBatchRange {
+        period: period_range,
+    };
 
-	// Precompute shape from sweep (no compute yet)
-	let combos = expand_grid(&sweep);
-	let rows = combos.len();
-	let cols = slice_in.len();
+    // Precompute shape from sweep (no compute yet)
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = slice_in.len();
 
-	// Preallocate output buffer exposed to Python
-	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-	let out_slice = unsafe { out_arr.as_slice_mut()? };
+    // Preallocate output buffer exposed to Python
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_slice = unsafe { out_arr.as_slice_mut()? };
 
-	let kern = validate_kernel(kernel, true)?;
+    let kern = validate_kernel(kernel, true)?;
 
-	// Compute directly into the PyArray buffer without copies
-	let combos = py
-		.allow_threads(|| {
-			let batch = match kern {
-				Kernel::Auto => detect_best_batch_kernel(),
-				k => k,
-			};
-			let simd = match batch {
-				Kernel::ScalarBatch => Kernel::Scalar,
-				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-				Kernel::Avx2Batch => Kernel::Avx2,
-				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-				Kernel::Avx512Batch => Kernel::Avx512,
-				_ => unreachable!(),
-			};
-			fosc_batch_inner_into(slice_in, &sweep, simd, true, out_slice)
-		})
-		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+    // Compute directly into the PyArray buffer without copies
+    let combos = py
+        .allow_threads(|| {
+            let batch = match kern {
+                Kernel::Auto => detect_best_batch_kernel(),
+                k => k,
+            };
+            let simd = match batch {
+                Kernel::ScalarBatch => Kernel::Scalar,
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2Batch => Kernel::Avx2,
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512Batch => Kernel::Avx512,
+                _ => unreachable!(),
+            };
+            fosc_batch_inner_into(slice_in, &sweep, simd, true, out_slice)
+        })
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-	let dict = PyDict::new(py);
-	// reshape to 2D view
-	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
-	// ALMA-style metadata arrays
-	dict.set_item(
-		"periods",
-		combos.iter().map(|p| p.period.unwrap_or(5) as u64).collect::<Vec<_>>().into_pyarray(py),
-	)?;
-	dict.set_item("rows", rows)?;
-	dict.set_item("cols", cols)?;
-	Ok(dict)
+    let dict = PyDict::new(py);
+    // reshape to 2D view
+    dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+    // ALMA-style metadata arrays
+    dict.set_item(
+        "periods",
+        combos
+            .iter()
+            .map(|p| p.period.unwrap_or(5) as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item("rows", rows)?;
+    dict.set_item("cols", cols)?;
+    Ok(dict)
 }
 
 #[cfg(feature = "python")]
 #[pyclass(name = "FoscStream")]
 pub struct FoscStreamPy {
-	inner: FoscStream,
+    inner: FoscStream,
 }
 
 #[cfg(feature = "python")]
 #[pymethods]
 impl FoscStreamPy {
-	#[new]
-	#[pyo3(signature = (period=5))]
-	pub fn new(period: usize) -> PyResult<Self> {
-		let params = FoscParams { period: Some(period) };
-		let inner = FoscStream::try_new(params).map_err(|e| {
-			PyErr::new::<PyValueError, _>(format!("Failed to create stream: {}", e))
-		})?;
-		Ok(Self { inner })
-	}
+    #[new]
+    #[pyo3(signature = (period=5))]
+    pub fn new(period: usize) -> PyResult<Self> {
+        let params = FoscParams {
+            period: Some(period),
+        };
+        let inner = FoscStream::try_new(params).map_err(|e| {
+            PyErr::new::<PyValueError, _>(format!("Failed to create stream: {}", e))
+        })?;
+        Ok(Self { inner })
+    }
 
-	pub fn update(&mut self, value: f64) -> Option<f64> {
-		self.inner.update(value)
-	}
+    pub fn update(&mut self, value: f64) -> Option<f64> {
+        self.inner.update(value)
+    }
 }
 
 // --------- WASM Bindings ---------
@@ -914,263 +1003,312 @@ impl FoscStreamPy {
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn fosc_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
-	let params = FoscParams { period: Some(period) };
-	let input = FoscInput::from_slice(data, params);
-	
-	let mut output = vec![0.0; data.len()];  // Single allocation
-	fosc_into_slice(&mut output, &input, Kernel::Auto)
-		.map_err(|e| JsValue::from_str(&e.to_string()))?;
-	
-	Ok(output)
+    let params = FoscParams {
+        period: Some(period),
+    };
+    let input = FoscInput::from_slice(data, params);
+
+    let mut output = vec![0.0; data.len()]; // Single allocation
+    fosc_into_slice(&mut output, &input, Kernel::Auto)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    Ok(output)
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn fosc_alloc(len: usize) -> *mut f64 {
-	let mut vec = Vec::<f64>::with_capacity(len);
-	let ptr = vec.as_mut_ptr();
-	std::mem::forget(vec);
-	ptr
+    let mut vec = Vec::<f64>::with_capacity(len);
+    let ptr = vec.as_mut_ptr();
+    std::mem::forget(vec);
+    ptr
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn fosc_free(ptr: *mut f64, len: usize) {
-	if !ptr.is_null() {
-		unsafe { let _ = Vec::from_raw_parts(ptr, len, len); }
-	}
+    if !ptr.is_null() {
+        unsafe {
+            let _ = Vec::from_raw_parts(ptr, len, len);
+        }
+    }
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn fosc_into(
-	in_ptr: *const f64,
-	out_ptr: *mut f64,
-	len: usize,
-	period: usize,
+    in_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    period: usize,
 ) -> Result<(), JsValue> {
-	if in_ptr.is_null() || out_ptr.is_null() {
-		return Err(JsValue::from_str("null pointer passed to fosc_into"));
-	}
-	
-	unsafe {
-		let data = std::slice::from_raw_parts(in_ptr, len);
-		
-		if period == 0 || period > len {
-			return Err(JsValue::from_str("Invalid period"));
-		}
-		
-		let params = FoscParams { period: Some(period) };
-		let input = FoscInput::from_slice(data, params);
-		
-		if in_ptr == out_ptr {  // CRITICAL: Aliasing check
-			let mut temp = vec![0.0; len];
-			fosc_into_slice(&mut temp, &input, Kernel::Auto)
-				.map_err(|e| JsValue::from_str(&e.to_string()))?;
-			let out = std::slice::from_raw_parts_mut(out_ptr, len);
-			out.copy_from_slice(&temp);
-		} else {
-			let out = std::slice::from_raw_parts_mut(out_ptr, len);
-			fosc_into_slice(out, &input, Kernel::Auto)
-				.map_err(|e| JsValue::from_str(&e.to_string()))?;
-		}
-		Ok(())
-	}
+    if in_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("null pointer passed to fosc_into"));
+    }
+
+    unsafe {
+        let data = std::slice::from_raw_parts(in_ptr, len);
+
+        if period == 0 || period > len {
+            return Err(JsValue::from_str("Invalid period"));
+        }
+
+        let params = FoscParams {
+            period: Some(period),
+        };
+        let input = FoscInput::from_slice(data, params);
+
+        if in_ptr == out_ptr {
+            // CRITICAL: Aliasing check
+            let mut temp = vec![0.0; len];
+            fosc_into_slice(&mut temp, &input, Kernel::Auto)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            out.copy_from_slice(&temp);
+        } else {
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            fosc_into_slice(out, &input, Kernel::Auto)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        }
+        Ok(())
+    }
 }
 
 // Batch API structures
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct FoscBatchConfig {
-	pub period_range: (usize, usize, usize),
+    pub period_range: (usize, usize, usize),
 }
 
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct FoscBatchJsOutput {
-	pub values: Vec<f64>,
-	pub combos: Vec<FoscParams>,
-	pub rows: usize,
-	pub cols: usize,
+    pub values: Vec<f64>,
+    pub combos: Vec<FoscParams>,
+    pub rows: usize,
+    pub cols: usize,
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = fosc_batch)]
 pub fn fosc_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
-	let config: FoscBatchConfig = 
-		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
-	
-	let range = FoscBatchRange {
-		period: config.period_range,
-	};
-	
-	let output = fosc_batch_inner(data, &range, Kernel::Auto, false)
-		.map_err(|e| JsValue::from_str(&e.to_string()))?;
-	
-	let js_output = FoscBatchJsOutput {
-		values: output.values,
-		combos: output.combos,
-		rows: output.rows,
-		cols: output.cols,
-	};
-	
-	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+    let config: FoscBatchConfig = serde_wasm_bindgen::from_value(config)
+        .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+    let range = FoscBatchRange {
+        period: config.period_range,
+    };
+
+    let output = fosc_batch_inner(data, &range, Kernel::Auto, false)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    let js_output = FoscBatchJsOutput {
+        values: output.values,
+        combos: output.combos,
+        rows: output.rows,
+        cols: output.cols,
+    };
+
+    serde_wasm_bindgen::to_value(&js_output)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn fosc_batch_into(
-	in_ptr: *const f64,
-	out_ptr: *mut f64,
-	len: usize,
-	period_start: usize,
-	period_end: usize,
-	period_step: usize,
+    in_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
 ) -> Result<usize, JsValue> {
-	if in_ptr.is_null() || out_ptr.is_null() {
-		return Err(JsValue::from_str("null pointer passed to fosc_batch_into"));
-	}
-	
-	unsafe {
-		let data = std::slice::from_raw_parts(in_ptr, len);
-		
-		let range = FoscBatchRange {
-			period: (period_start, period_end, period_step),
-		};
-		
-		// Call fosc_batch_inner and copy results
-		let output = fosc_batch_inner(data, &range, Kernel::Auto, false)
-			.map_err(|e| JsValue::from_str(&e.to_string()))?;
-		
-		// Copy results to output pointer
-		let out = std::slice::from_raw_parts_mut(out_ptr, output.values.len());
-		out.copy_from_slice(&output.values);
-		
-		Ok(output.rows)
-	}
+    if in_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("null pointer passed to fosc_batch_into"));
+    }
+
+    unsafe {
+        let data = std::slice::from_raw_parts(in_ptr, len);
+
+        let range = FoscBatchRange {
+            period: (period_start, period_end, period_step),
+        };
+
+        // Call fosc_batch_inner and copy results
+        let output = fosc_batch_inner(data, &range, Kernel::Auto, false)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        // Copy results to output pointer
+        let out = std::slice::from_raw_parts_mut(out_ptr, output.values.len());
+        out.copy_from_slice(&output.values);
+
+        Ok(output.rows)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-	use super::*;
-	use crate::skip_if_unsupported;
-	use crate::utilities::data_loader::read_candles_from_csv;
+    use super::*;
+    use crate::skip_if_unsupported;
+    use crate::utilities::data_loader::read_candles_from_csv;
 
-	fn check_fosc_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-		skip_if_unsupported!(kernel, test_name);
-		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-		let candles = read_candles_from_csv(file_path)?;
-		let default_params = FoscParams { period: None };
-		let input = FoscInput::from_candles(&candles, "close", default_params);
-		let output = fosc_with_kernel(&input, kernel)?;
-		assert_eq!(output.values.len(), candles.close.len());
-		Ok(())
-	}
+    fn check_fosc_partial_params(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let default_params = FoscParams { period: None };
+        let input = FoscInput::from_candles(&candles, "close", default_params);
+        let output = fosc_with_kernel(&input, kernel)?;
+        assert_eq!(output.values.len(), candles.close.len());
+        Ok(())
+    }
 
-	fn check_fosc_basic_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-		skip_if_unsupported!(kernel, test_name);
-		let test_data = [
-			81.59, 81.06, 82.87, 83.00, 83.61, 83.15, 82.84, 82.84, 83.99, 84.55, 84.36, 85.53,
-		];
-		let period = 5;
-		let input = FoscInput::from_slice(&test_data, FoscParams { period: Some(period) });
-		let result = fosc_with_kernel(&input, kernel)?;
-		assert_eq!(result.values.len(), test_data.len());
-		for i in 0..(period - 1) {
-			assert!(result.values[i].is_nan());
-		}
-		Ok(())
-	}
+    fn check_fosc_basic_accuracy(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let test_data = [
+            81.59, 81.06, 82.87, 83.00, 83.61, 83.15, 82.84, 82.84, 83.99, 84.55, 84.36, 85.53,
+        ];
+        let period = 5;
+        let input = FoscInput::from_slice(
+            &test_data,
+            FoscParams {
+                period: Some(period),
+            },
+        );
+        let result = fosc_with_kernel(&input, kernel)?;
+        assert_eq!(result.values.len(), test_data.len());
+        for i in 0..(period - 1) {
+            assert!(result.values[i].is_nan());
+        }
+        Ok(())
+    }
 
-	fn check_fosc_with_nan_data(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-		skip_if_unsupported!(kernel, test_name);
-		let input_data = [f64::NAN, f64::NAN, 1.0, 2.0, 3.0, 4.0, 5.0];
-		let params = FoscParams { period: Some(3) };
-		let input = FoscInput::from_slice(&input_data, params);
-		let result = fosc_with_kernel(&input, kernel)?;
-		assert_eq!(result.values.len(), input_data.len());
-		Ok(())
-	}
+    fn check_fosc_with_nan_data(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let input_data = [f64::NAN, f64::NAN, 1.0, 2.0, 3.0, 4.0, 5.0];
+        let params = FoscParams { period: Some(3) };
+        let input = FoscInput::from_slice(&input_data, params);
+        let result = fosc_with_kernel(&input, kernel)?;
+        assert_eq!(result.values.len(), input_data.len());
+        Ok(())
+    }
 
-	fn check_fosc_zero_period(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-		skip_if_unsupported!(kernel, test_name);
-		let input_data = [10.0, 20.0, 30.0];
-		let params = FoscParams { period: Some(0) };
-		let input = FoscInput::from_slice(&input_data, params);
-		let res = fosc_with_kernel(&input, kernel);
-		assert!(res.is_err(), "[{}] FOSC should fail with zero period", test_name);
-		Ok(())
-	}
+    fn check_fosc_zero_period(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let input_data = [10.0, 20.0, 30.0];
+        let params = FoscParams { period: Some(0) };
+        let input = FoscInput::from_slice(&input_data, params);
+        let res = fosc_with_kernel(&input, kernel);
+        assert!(
+            res.is_err(),
+            "[{}] FOSC should fail with zero period",
+            test_name
+        );
+        Ok(())
+    }
 
-	fn check_fosc_period_exceeds_length(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-		skip_if_unsupported!(kernel, test_name);
-		let data_small = [10.0, 20.0, 30.0];
-		let params = FoscParams { period: Some(10) };
-		let input = FoscInput::from_slice(&data_small, params);
-		let res = fosc_with_kernel(&input, kernel);
-		assert!(
-			res.is_err(),
-			"[{}] FOSC should fail with period exceeding length",
-			test_name
-		);
-		Ok(())
-	}
+    fn check_fosc_period_exceeds_length(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let data_small = [10.0, 20.0, 30.0];
+        let params = FoscParams { period: Some(10) };
+        let input = FoscInput::from_slice(&data_small, params);
+        let res = fosc_with_kernel(&input, kernel);
+        assert!(
+            res.is_err(),
+            "[{}] FOSC should fail with period exceeding length",
+            test_name
+        );
+        Ok(())
+    }
 
-	fn check_fosc_very_small_dataset(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-		skip_if_unsupported!(kernel, test_name);
-		let single_point = [42.0];
-		let params = FoscParams { period: Some(5) };
-		let input = FoscInput::from_slice(&single_point, params);
-		let res = fosc_with_kernel(&input, kernel);
-		assert!(res.is_err(), "[{}] FOSC should fail with insufficient data", test_name);
-		Ok(())
-	}
+    fn check_fosc_very_small_dataset(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let single_point = [42.0];
+        let params = FoscParams { period: Some(5) };
+        let input = FoscInput::from_slice(&single_point, params);
+        let res = fosc_with_kernel(&input, kernel);
+        assert!(
+            res.is_err(),
+            "[{}] FOSC should fail with insufficient data",
+            test_name
+        );
+        Ok(())
+    }
 
-	fn check_fosc_all_values_nan(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-		skip_if_unsupported!(kernel, test_name);
-		let input_data = [f64::NAN, f64::NAN, f64::NAN];
-		let params = FoscParams { period: Some(2) };
-		let input = FoscInput::from_slice(&input_data, params);
-		let res = fosc_with_kernel(&input, kernel);
-		assert!(res.is_err(), "[{}] FOSC should fail with all NaN", test_name);
-		Ok(())
-	}
+    fn check_fosc_all_values_nan(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let input_data = [f64::NAN, f64::NAN, f64::NAN];
+        let params = FoscParams { period: Some(2) };
+        let input = FoscInput::from_slice(&input_data, params);
+        let res = fosc_with_kernel(&input, kernel);
+        assert!(
+            res.is_err(),
+            "[{}] FOSC should fail with all NaN",
+            test_name
+        );
+        Ok(())
+    }
 
-	fn check_fosc_expected_values_reference(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-		skip_if_unsupported!(kernel, test_name);
-		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-		let candles = read_candles_from_csv(file_path)?;
-		let expected_last_five = [
-			-0.8904444627923475,
-			-0.4763353099245297,
-			-0.2379782851444668,
-			0.292790128025632,
-			-0.6597902988090389,
-		];
-		let params = FoscParams { period: Some(5) };
-		let input = FoscInput::from_candles(&candles, "close", params);
-		let result = fosc_with_kernel(&input, kernel)?;
-		let valid_len = result.values.len();
-		assert!(valid_len >= 5);
-		let output_slice = &result.values[valid_len - 5..valid_len];
-		for (i, &val) in output_slice.iter().enumerate() {
-			let exp: f64 = expected_last_five[i];
-			if exp.is_nan() {
-				assert!(val.is_nan());
-			} else {
-				assert!(
-					(val - exp).abs() < 1e-7,
-					"Mismatch at index {}: expected {}, got {}",
-					i,
-					exp,
-					val
-				);
-			}
-		}
-		Ok(())
-	}
+    fn check_fosc_expected_values_reference(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let expected_last_five = [
+            -0.8904444627923475,
+            -0.4763353099245297,
+            -0.2379782851444668,
+            0.292790128025632,
+            -0.6597902988090389,
+        ];
+        let params = FoscParams { period: Some(5) };
+        let input = FoscInput::from_candles(&candles, "close", params);
+        let result = fosc_with_kernel(&input, kernel)?;
+        let valid_len = result.values.len();
+        assert!(valid_len >= 5);
+        let output_slice = &result.values[valid_len - 5..valid_len];
+        for (i, &val) in output_slice.iter().enumerate() {
+            let exp: f64 = expected_last_five[i];
+            if exp.is_nan() {
+                assert!(val.is_nan());
+            } else {
+                assert!(
+                    (val - exp).abs() < 1e-7,
+                    "Mismatch at index {}: expected {}, got {}",
+                    i,
+                    exp,
+                    val
+                );
+            }
+        }
+        Ok(())
+    }
 
-	macro_rules! generate_all_fosc_tests {
+    macro_rules! generate_all_fosc_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
                 $(
@@ -1194,562 +1332,632 @@ mod tests {
         }
     }
 
-	#[cfg(debug_assertions)]
-	fn check_fosc_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-		skip_if_unsupported!(kernel, test_name);
+    #[cfg(debug_assertions)]
+    fn check_fosc_no_poison(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
 
-		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-		let candles = read_candles_from_csv(file_path)?;
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
 
-		// Define comprehensive parameter combinations
-		let test_params = vec![
-			// Default parameters
-			FoscParams::default(),
-			// Minimum period
-			FoscParams { period: Some(2) },
-			// Small periods
-			FoscParams { period: Some(3) },
-			FoscParams { period: Some(5) },  // Default value
-			FoscParams { period: Some(7) },
-			// Medium periods
-			FoscParams { period: Some(10) },
-			FoscParams { period: Some(14) },
-			FoscParams { period: Some(20) },
-			// Large periods
-			FoscParams { period: Some(30) },
-			FoscParams { period: Some(50) },
-			// Very large periods
-			FoscParams { period: Some(100) },
-			FoscParams { period: Some(200) },
-		];
+        // Define comprehensive parameter combinations
+        let test_params = vec![
+            // Default parameters
+            FoscParams::default(),
+            // Minimum period
+            FoscParams { period: Some(2) },
+            // Small periods
+            FoscParams { period: Some(3) },
+            FoscParams { period: Some(5) }, // Default value
+            FoscParams { period: Some(7) },
+            // Medium periods
+            FoscParams { period: Some(10) },
+            FoscParams { period: Some(14) },
+            FoscParams { period: Some(20) },
+            // Large periods
+            FoscParams { period: Some(30) },
+            FoscParams { period: Some(50) },
+            // Very large periods
+            FoscParams { period: Some(100) },
+            FoscParams { period: Some(200) },
+        ];
 
-		for (param_idx, params) in test_params.iter().enumerate() {
-			let input = FoscInput::from_candles(&candles, "close", params.clone());
-			let output = fosc_with_kernel(&input, kernel)?;
+        for (param_idx, params) in test_params.iter().enumerate() {
+            let input = FoscInput::from_candles(&candles, "close", params.clone());
+            let output = fosc_with_kernel(&input, kernel)?;
 
-			for (i, &val) in output.values.iter().enumerate() {
-				if val.is_nan() {
-					continue; // NaN values are expected during warmup
-				}
+            for (i, &val) in output.values.iter().enumerate() {
+                if val.is_nan() {
+                    continue; // NaN values are expected during warmup
+                }
 
-				let bits = val.to_bits();
+                let bits = val.to_bits();
 
-				// Check all three poison patterns
-				if bits == 0x11111111_11111111 {
-					panic!(
-						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+                // Check all three poison patterns
+                if bits == 0x11111111_11111111 {
+                    panic!(
+                        "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
 						 with params: period={} (param set {})",
-						test_name,
-						val,
-						bits,
-						i,
-						params.period.unwrap_or(5),
-						param_idx
-					);
-				}
+                        test_name,
+                        val,
+                        bits,
+                        i,
+                        params.period.unwrap_or(5),
+                        param_idx
+                    );
+                }
 
-				if bits == 0x22222222_22222222 {
-					panic!(
-						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+                if bits == 0x22222222_22222222 {
+                    panic!(
+                        "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
 						 with params: period={} (param set {})",
-						test_name,
-						val,
-						bits,
-						i,
-						params.period.unwrap_or(5),
-						param_idx
-					);
-				}
+                        test_name,
+                        val,
+                        bits,
+                        i,
+                        params.period.unwrap_or(5),
+                        param_idx
+                    );
+                }
 
-				if bits == 0x33333333_33333333 {
-					panic!(
-						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+                if bits == 0x33333333_33333333 {
+                    panic!(
+                        "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
 						 with params: period={} (param set {})",
-						test_name,
-						val,
-						bits,
-						i,
-						params.period.unwrap_or(5),
-						param_idx
-					);
-				}
-			}
-		}
+                        test_name,
+                        val,
+                        bits,
+                        i,
+                        params.period.unwrap_or(5),
+                        param_idx
+                    );
+                }
+            }
+        }
 
-		Ok(())
-	}
+        Ok(())
+    }
 
-	#[cfg(not(debug_assertions))]
-	fn check_fosc_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-		Ok(()) // No-op in release builds
-	}
+    #[cfg(not(debug_assertions))]
+    fn check_fosc_no_poison(
+        _test_name: &str,
+        _kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        Ok(()) // No-op in release builds
+    }
 
-	#[cfg(feature = "proptest")]
-	#[allow(clippy::float_cmp)]
-	fn check_fosc_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-		use proptest::prelude::*;
-		skip_if_unsupported!(kernel, test_name);
+    #[cfg(feature = "proptest")]
+    #[allow(clippy::float_cmp)]
+    fn check_fosc_property(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use proptest::prelude::*;
+        skip_if_unsupported!(kernel, test_name);
 
-		// Strategy 1: Variable period with random price data
-		let strat1 = (2usize..=50)
-			.prop_flat_map(|period| {
-				(
-					prop::collection::vec(
-						(1e-6f64..1e6f64).prop_filter("finite and non-zero", |x| x.is_finite() && x.abs() > 1e-10),
-						period..400,
-					),
-					Just(period),
-				)
-			});
+        // Strategy 1: Variable period with random price data
+        let strat1 = (2usize..=50).prop_flat_map(|period| {
+            (
+                prop::collection::vec(
+                    (1e-6f64..1e6f64)
+                        .prop_filter("finite and non-zero", |x| x.is_finite() && x.abs() > 1e-10),
+                    period..400,
+                ),
+                Just(period),
+            )
+        });
 
-		proptest::test_runner::TestRunner::default()
-			.run(&strat1, |(data, period)| {
-				let params = FoscParams { period: Some(period) };
-				let input = FoscInput::from_slice(&data, params);
+        proptest::test_runner::TestRunner::default().run(&strat1, |(data, period)| {
+            let params = FoscParams {
+                period: Some(period),
+            };
+            let input = FoscInput::from_slice(&data, params);
 
-				let FoscOutput { values: out } = fosc_with_kernel(&input, kernel).unwrap();
-				let FoscOutput { values: ref_out } = fosc_with_kernel(&input, Kernel::Scalar).unwrap();
+            let FoscOutput { values: out } = fosc_with_kernel(&input, kernel).unwrap();
+            let FoscOutput { values: ref_out } = fosc_with_kernel(&input, Kernel::Scalar).unwrap();
 
-				// Property 1: Output length must match input length
-				prop_assert_eq!(out.len(), data.len());
-				prop_assert_eq!(ref_out.len(), data.len());
+            // Property 1: Output length must match input length
+            prop_assert_eq!(out.len(), data.len());
+            prop_assert_eq!(ref_out.len(), data.len());
 
-				// Property 2: Warmup period correctness - first (period-1) values should be NaN
-				for i in 0..(period - 1) {
-					prop_assert!(out[i].is_nan(), "Expected NaN at index {} during warmup", i);
-					prop_assert!(ref_out[i].is_nan(), "Expected NaN at index {} during warmup (scalar)", i);
-				}
+            // Property 2: Warmup period correctness - first (period-1) values should be NaN
+            for i in 0..(period - 1) {
+                prop_assert!(out[i].is_nan(), "Expected NaN at index {} during warmup", i);
+                prop_assert!(
+                    ref_out[i].is_nan(),
+                    "Expected NaN at index {} during warmup (scalar)",
+                    i
+                );
+            }
 
-				// Property 3: Kernel consistency - all kernels should produce identical results
-				for i in (period - 1)..data.len() {
-					let y = out[i];
-					let r = ref_out[i];
+            // Property 3: Kernel consistency - all kernels should produce identical results
+            for i in (period - 1)..data.len() {
+                let y = out[i];
+                let r = ref_out[i];
 
-					// Both should be NaN or both should be finite
-					if r.is_nan() {
-						prop_assert!(y.is_nan(), "Kernel mismatch at {}: scalar is NaN but kernel is {}", i, y);
-					} else if y.is_nan() {
-						prop_assert!(r.is_nan(), "Kernel mismatch at {}: kernel is NaN but scalar is {}", i, r);
-					} else {
-						// Allow small tolerance for floating-point differences
-						let diff = (y - r).abs();
-						let tolerance = 1e-9 * r.abs().max(1.0);
-						prop_assert!(
-							diff <= tolerance,
-							"Kernel mismatch at {}: {} vs {} (diff: {})",
-							i, y, r, diff
-						);
-					}
+                // Both should be NaN or both should be finite
+                if r.is_nan() {
+                    prop_assert!(
+                        y.is_nan(),
+                        "Kernel mismatch at {}: scalar is NaN but kernel is {}",
+                        i,
+                        y
+                    );
+                } else if y.is_nan() {
+                    prop_assert!(
+                        r.is_nan(),
+                        "Kernel mismatch at {}: kernel is NaN but scalar is {}",
+                        i,
+                        r
+                    );
+                } else {
+                    // Allow small tolerance for floating-point differences
+                    let diff = (y - r).abs();
+                    let tolerance = 1e-9 * r.abs().max(1.0);
+                    prop_assert!(
+                        diff <= tolerance,
+                        "Kernel mismatch at {}: {} vs {} (diff: {})",
+                        i,
+                        y,
+                        r,
+                        diff
+                    );
+                }
 
-					// Property 4: Poison value detection
-					let y_bits = y.to_bits();
-					prop_assert_ne!(y_bits, 0x11111111_11111111, "Found alloc_with_nan_prefix poison at {}", i);
-					prop_assert_ne!(y_bits, 0x22222222_22222222, "Found init_matrix_prefixes poison at {}", i);
-					prop_assert_ne!(y_bits, 0x33333333_33333333, "Found make_uninit_matrix poison at {}", i);
-				}
+                // Property 4: Poison value detection
+                let y_bits = y.to_bits();
+                prop_assert_ne!(
+                    y_bits,
+                    0x11111111_11111111,
+                    "Found alloc_with_nan_prefix poison at {}",
+                    i
+                );
+                prop_assert_ne!(
+                    y_bits,
+                    0x22222222_22222222,
+                    "Found init_matrix_prefixes poison at {}",
+                    i
+                );
+                prop_assert_ne!(
+                    y_bits,
+                    0x33333333_33333333,
+                    "Found make_uninit_matrix poison at {}",
+                    i
+                );
+            }
 
-				Ok(())
-			})?;
+            Ok(())
+        })?;
 
-		// Strategy 2: Fixed period with varying data lengths
-		let strat2 = prop::collection::vec(
-			(1e-6f64..1e6f64).prop_filter("finite and non-zero", |x| x.is_finite() && x.abs() > 1e-10),
-			10..1000,
-		);
+        // Strategy 2: Fixed period with varying data lengths
+        let strat2 = prop::collection::vec(
+            (1e-6f64..1e6f64)
+                .prop_filter("finite and non-zero", |x| x.is_finite() && x.abs() > 1e-10),
+            10..1000,
+        );
 
-		proptest::test_runner::TestRunner::default()
-			.run(&strat2, |data| {
-				let period = 5; // Use default period
-				let params = FoscParams { period: Some(period) };
-				let input = FoscInput::from_slice(&data, params);
+        proptest::test_runner::TestRunner::default().run(&strat2, |data| {
+            let period = 5; // Use default period
+            let params = FoscParams {
+                period: Some(period),
+            };
+            let input = FoscInput::from_slice(&data, params);
 
-				let FoscOutput { values: out } = fosc_with_kernel(&input, kernel).unwrap();
+            let FoscOutput { values: out } = fosc_with_kernel(&input, kernel).unwrap();
 
-				// Check bounds - FOSC is percentage, typically -100 to +100 but can exceed
-				// We'll use a reasonable bound of -200% to +200%
-				for i in (period - 1)..data.len() {
-					if !out[i].is_nan() {
-						prop_assert!(
-							out[i] >= -200.0 && out[i] <= 200.0,
-							"FOSC value {} at index {} is out of reasonable bounds",
-							out[i], i
-						);
-					}
-				}
+            // Check bounds - FOSC is percentage, typically -100 to +100 but can exceed
+            // We'll use a reasonable bound of -200% to +200%
+            for i in (period - 1)..data.len() {
+                if !out[i].is_nan() {
+                    prop_assert!(
+                        out[i] >= -200.0 && out[i] <= 200.0,
+                        "FOSC value {} at index {} is out of reasonable bounds",
+                        out[i],
+                        i
+                    );
+                }
+            }
 
-				Ok(())
-			})?;
+            Ok(())
+        })?;
 
-		// Strategy 3: Trending (monotonic) data
-		let strat3 = (2usize..=20, 1e-6f64..10f64, 10usize..100)
-			.prop_map(|(period, start, len)| {
-				let data: Vec<f64> = (0..len).map(|i| start + (i as f64) * 0.1).collect();
-				(data, period)
-			});
+        // Strategy 3: Trending (monotonic) data
+        let strat3 =
+            (2usize..=20, 1e-6f64..10f64, 10usize..100).prop_map(|(period, start, len)| {
+                let data: Vec<f64> = (0..len).map(|i| start + (i as f64) * 0.1).collect();
+                (data, period)
+            });
 
-		proptest::test_runner::TestRunner::default()
-			.run(&strat3, |(data, period)| {
-				let params = FoscParams { period: Some(period) };
-				let input = FoscInput::from_slice(&data, params);
+        proptest::test_runner::TestRunner::default().run(&strat3, |(data, period)| {
+            let params = FoscParams {
+                period: Some(period),
+            };
+            let input = FoscInput::from_slice(&data, params);
 
-				let FoscOutput { values: out } = fosc_with_kernel(&input, kernel).unwrap();
+            let FoscOutput { values: out } = fosc_with_kernel(&input, kernel).unwrap();
 
-				// For perfectly linear data, FOSC should be small and consistent
-				// Due to the one-step-ahead nature, it won't be exactly zero
-				// Note: First valid value (at period-1) may be incorrect due to tsf initialization
-				let start_idx = if period > 0 { period } else { period - 1 };  // Skip first value
-				let valid_fosc: Vec<f64> = out.iter()
-					.skip(start_idx)
-					.filter(|v| !v.is_nan())
-					.copied()
-					.collect();
-				
-				if valid_fosc.len() > 5 {
-					// For linear trend, FOSC should be small (within 5%) and relatively consistent
-					for &val in &valid_fosc {
-						prop_assert!(
-							val.abs() < 5.0,
-							"FOSC {} too large for linear trend",
-							val
-						);
-					}
-					
-					// Check consistency - standard deviation should be small
-					let mean: f64 = valid_fosc.iter().sum::<f64>() / valid_fosc.len() as f64;
-					let variance: f64 = valid_fosc.iter()
-						.map(|v| (v - mean).powi(2))
-						.sum::<f64>() / valid_fosc.len() as f64;
-					let std_dev = variance.sqrt();
-					
-					prop_assert!(
-						std_dev < 1.0,
-						"FOSC standard deviation {} too high for linear trend",
-						std_dev
-					);
-				}
+            // For perfectly linear data, FOSC should be small and consistent
+            // Due to the one-step-ahead nature, it won't be exactly zero
+            // Note: First valid value (at period-1) may be incorrect due to tsf initialization
+            let start_idx = if period > 0 { period } else { period - 1 }; // Skip first value
+            let valid_fosc: Vec<f64> = out
+                .iter()
+                .skip(start_idx)
+                .filter(|v| !v.is_nan())
+                .copied()
+                .collect();
 
-				Ok(())
-			})?;
+            if valid_fosc.len() > 5 {
+                // For linear trend, FOSC should be small (within 5%) and relatively consistent
+                for &val in &valid_fosc {
+                    prop_assert!(val.abs() < 5.0, "FOSC {} too large for linear trend", val);
+                }
 
-		// Strategy 4: Oscillating (sine-wave) patterns
-		let strat4 = (2usize..=20, 10usize..100)
-			.prop_map(|(period, len)| {
-				let data: Vec<f64> = (0..len)
-					.map(|i| 100.0 + 10.0 * (i as f64 * 0.5).sin())
-					.collect();
-				(data, period)
-			});
+                // Check consistency - standard deviation should be small
+                let mean: f64 = valid_fosc.iter().sum::<f64>() / valid_fosc.len() as f64;
+                let variance: f64 = valid_fosc.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
+                    / valid_fosc.len() as f64;
+                let std_dev = variance.sqrt();
 
-		proptest::test_runner::TestRunner::default()
-			.run(&strat4, |(data, period)| {
-				let params = FoscParams { period: Some(period) };
-				let input = FoscInput::from_slice(&data, params);
+                prop_assert!(
+                    std_dev < 1.0,
+                    "FOSC standard deviation {} too high for linear trend",
+                    std_dev
+                );
+            }
 
-				let FoscOutput { values: out } = fosc_with_kernel(&input, kernel).unwrap();
+            Ok(())
+        })?;
 
-				// For oscillating data, FOSC should oscillate around zero
-				let valid_values: Vec<f64> = out.iter()
-					.skip(period - 1)
-					.filter(|v| !v.is_nan())
-					.copied()
-					.collect();
+        // Strategy 4: Oscillating (sine-wave) patterns
+        let strat4 = (2usize..=20, 10usize..100).prop_map(|(period, len)| {
+            let data: Vec<f64> = (0..len)
+                .map(|i| 100.0 + 10.0 * (i as f64 * 0.5).sin())
+                .collect();
+            (data, period)
+        });
 
-				if valid_values.len() > 10 {
-					let mean: f64 = valid_values.iter().sum::<f64>() / valid_values.len() as f64;
-					// Mean should be close to zero for symmetric oscillations
-					prop_assert!(
-						mean.abs() < 10.0,
-						"Mean FOSC {} is too far from zero for oscillating data",
-						mean
-					);
-				}
+        proptest::test_runner::TestRunner::default().run(&strat4, |(data, period)| {
+            let params = FoscParams {
+                period: Some(period),
+            };
+            let input = FoscInput::from_slice(&data, params);
 
-				Ok(())
-			})?;
+            let FoscOutput { values: out } = fosc_with_kernel(&input, kernel).unwrap();
 
-		// Strategy 5: Real-world-like OHLC data with small variations
-		let strat5 = (2usize..=20, 50f64..200f64, 20usize..100)
-			.prop_flat_map(|(period, base_price, len)| {
-				(
-					prop::collection::vec(
-						(-0.5f64..0.5f64, 0f64..0.5f64, 0f64..0.5f64)
-							.prop_map(move |(change, high_diff, low_diff)| {
-								base_price * (1.0 + change * 0.01) + high_diff
-							}),
-						len,
-					),
-					Just(period),
-				)
-			});
+            // For oscillating data, FOSC should oscillate around zero
+            let valid_values: Vec<f64> = out
+                .iter()
+                .skip(period - 1)
+                .filter(|v| !v.is_nan())
+                .copied()
+                .collect();
 
-		proptest::test_runner::TestRunner::default()
-			.run(&strat5, |(data, period)| {
-				let params = FoscParams { period: Some(period) };
-				let input = FoscInput::from_slice(&data, params);
+            if valid_values.len() > 10 {
+                let mean: f64 = valid_values.iter().sum::<f64>() / valid_values.len() as f64;
+                // Mean should be close to zero for symmetric oscillations
+                prop_assert!(
+                    mean.abs() < 10.0,
+                    "Mean FOSC {} is too far from zero for oscillating data",
+                    mean
+                );
+            }
 
-				let result = fosc_with_kernel(&input, kernel);
-				prop_assert!(result.is_ok(), "FOSC failed for OHLC-like data");
+            Ok(())
+        })?;
 
-				let FoscOutput { values: out } = result.unwrap();
+        // Strategy 5: Real-world-like OHLC data with small variations
+        let strat5 = (2usize..=20, 50f64..200f64, 20usize..100).prop_flat_map(
+            |(period, base_price, len)| {
+                (
+                    prop::collection::vec(
+                        (-0.5f64..0.5f64, 0f64..0.5f64, 0f64..0.5f64).prop_map(
+                            move |(change, high_diff, low_diff)| {
+                                base_price * (1.0 + change * 0.01) + high_diff
+                            },
+                        ),
+                        len,
+                    ),
+                    Just(period),
+                )
+            },
+        );
 
-				// Edge case: Test with period = 2 (minimum valid period)
-				if period == 2 {
-					for i in 1..data.len() {
-						if !out[i].is_nan() {
-							// With period=2, we're doing linear regression on just 2 points
-							// The forecast should be reasonable
-							prop_assert!(
-								out[i].abs() < 100.0,
-								"FOSC {} at index {} unreasonable for period=2",
-								out[i], i
-							);
-						}
-					}
-				}
+        proptest::test_runner::TestRunner::default().run(&strat5, |(data, period)| {
+            let params = FoscParams {
+                period: Some(period),
+            };
+            let input = FoscInput::from_slice(&data, params);
 
-				// Property: Constant data should produce near-zero FOSC
-				if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) && data.len() > period {
-					for i in (period - 1)..data.len() {
-						if !out[i].is_nan() {
-							prop_assert!(
-								out[i].abs() < 1e-6,
-								"FOSC {} at index {} should be ~0 for constant data",
-								out[i], i
-							);
-						}
-					}
-				}
+            let result = fosc_with_kernel(&input, kernel);
+            prop_assert!(result.is_ok(), "FOSC failed for OHLC-like data");
 
-				Ok(())
-			})?;
+            let FoscOutput { values: out } = result.unwrap();
 
-		// Strategy 6: Near-zero value testing
-		let strat6 = (2usize..=10, 10usize..50)
-			.prop_flat_map(|(period, len)| {
-				(
-					prop::collection::vec(
-						prop::strategy::Union::new(vec![
-							// Mix of normal values, very small values, and occasional zeros
-							(0.9f64..1.0).prop_map(|p| if p < 0.95 { 100.0 + p } else if p < 0.98 { 1e-12 } else { 0.0 }).boxed(),
-							(50f64..150f64).boxed(),
-							(-1e-12f64..1e-12f64).prop_filter("not exactly zero", |x| x.abs() > 1e-15).boxed(),
-						]),
-						len,
-					),
-					Just(period),
-				)
-			});
+            // Edge case: Test with period = 2 (minimum valid period)
+            if period == 2 {
+                for i in 1..data.len() {
+                    if !out[i].is_nan() {
+                        // With period=2, we're doing linear regression on just 2 points
+                        // The forecast should be reasonable
+                        prop_assert!(
+                            out[i].abs() < 100.0,
+                            "FOSC {} at index {} unreasonable for period=2",
+                            out[i],
+                            i
+                        );
+                    }
+                }
+            }
 
-		proptest::test_runner::TestRunner::default()
-			.run(&strat6, |(data, period)| {
-				let params = FoscParams { period: Some(period) };
-				let input = FoscInput::from_slice(&data, params);
+            // Property: Constant data should produce near-zero FOSC
+            if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) && data.len() > period {
+                for i in (period - 1)..data.len() {
+                    if !out[i].is_nan() {
+                        prop_assert!(
+                            out[i].abs() < 1e-6,
+                            "FOSC {} at index {} should be ~0 for constant data",
+                            out[i],
+                            i
+                        );
+                    }
+                }
+            }
 
-				let result = fosc_with_kernel(&input, kernel);
-				prop_assert!(result.is_ok(), "FOSC failed for near-zero data");
+            Ok(())
+        })?;
 
-				let FoscOutput { values: out } = result.unwrap();
+        // Strategy 6: Near-zero value testing
+        let strat6 = (2usize..=10, 10usize..50).prop_flat_map(|(period, len)| {
+            (
+                prop::collection::vec(
+                    prop::strategy::Union::new(vec![
+                        // Mix of normal values, very small values, and occasional zeros
+                        (0.9f64..1.0)
+                            .prop_map(|p| {
+                                if p < 0.95 {
+                                    100.0 + p
+                                } else if p < 0.98 {
+                                    1e-12
+                                } else {
+                                    0.0
+                                }
+                            })
+                            .boxed(),
+                        (50f64..150f64).boxed(),
+                        (-1e-12f64..1e-12f64)
+                            .prop_filter("not exactly zero", |x| x.abs() > 1e-15)
+                            .boxed(),
+                    ]),
+                    len,
+                ),
+                Just(period),
+            )
+        });
 
-				// When price is exactly 0.0, FOSC should be NaN
-				for i in (period - 1)..data.len() {
-					if data[i] == 0.0 {
-						prop_assert!(
-							out[i].is_nan(),
-							"FOSC should be NaN when price is 0.0 at index {}",
-							i
-						);
-					} else if data[i].abs() < 1e-10 {
-						// For very small values, FOSC might be large or NaN
-						// Just ensure it doesn't crash
-						if !out[i].is_nan() {
-							// Even with tiny prices, bounds should be reasonable
-							prop_assert!(
-								out[i].abs() < 10000.0,
-								"FOSC {} unreasonably large for tiny price {} at index {}",
-								out[i], data[i], i
-							);
-						}
-					}
-				}
+        proptest::test_runner::TestRunner::default().run(&strat6, |(data, period)| {
+            let params = FoscParams {
+                period: Some(period),
+            };
+            let input = FoscInput::from_slice(&data, params);
 
-				Ok(())
-			})?;
+            let result = fosc_with_kernel(&input, kernel);
+            prop_assert!(result.is_ok(), "FOSC failed for near-zero data");
 
-		Ok(())
-	}
+            let FoscOutput { values: out } = result.unwrap();
 
-	generate_all_fosc_tests!(
-		check_fosc_partial_params,
-		check_fosc_basic_accuracy,
-		check_fosc_with_nan_data,
-		check_fosc_zero_period,
-		check_fosc_period_exceeds_length,
-		check_fosc_very_small_dataset,
-		check_fosc_all_values_nan,
-		check_fosc_expected_values_reference,
-		check_fosc_no_poison
-	);
+            // When price is exactly 0.0, FOSC should be NaN
+            for i in (period - 1)..data.len() {
+                if data[i] == 0.0 {
+                    prop_assert!(
+                        out[i].is_nan(),
+                        "FOSC should be NaN when price is 0.0 at index {}",
+                        i
+                    );
+                } else if data[i].abs() < 1e-10 {
+                    // For very small values, FOSC might be large or NaN
+                    // Just ensure it doesn't crash
+                    if !out[i].is_nan() {
+                        // Even with tiny prices, bounds should be reasonable
+                        prop_assert!(
+                            out[i].abs() < 10000.0,
+                            "FOSC {} unreasonably large for tiny price {} at index {}",
+                            out[i],
+                            data[i],
+                            i
+                        );
+                    }
+                }
+            }
 
-	#[cfg(feature = "proptest")]
-	generate_all_fosc_tests!(check_fosc_property);
+            Ok(())
+        })?;
 
-	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-		skip_if_unsupported!(kernel, test);
-		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-		let c = read_candles_from_csv(file)?;
-		let output = FoscBatchBuilder::new().kernel(kernel).apply_candles(&c, "close")?;
-		let def = FoscParams::default();
-		let row = output.values_for(&def).expect("default row missing");
-		assert_eq!(row.len(), c.close.len());
-		let expected = [
-			-0.8904444627923475,
-			-0.4763353099245297,
-			-0.2379782851444668,
-			0.292790128025632,
-			-0.6597902988090389,
-		];
-		let start = row.len() - 5;
-		for (i, &v) in row[start..].iter().enumerate() {
-			assert!(
-				(v - expected[i]).abs() < 1e-7,
-				"[{test}] default-row mismatch at idx {i}: {v} vs {expected:?}"
-			);
-		}
-		Ok(())
-	}
+        Ok(())
+    }
 
-	macro_rules! gen_batch_tests {
-		($fn_name:ident) => {
-			paste::paste! {
-				#[test] fn [<$fn_name _scalar>]()      {
-					let _ = $fn_name(stringify!([<$fn_name _scalar>]), Kernel::ScalarBatch);
-				}
-				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-				#[test] fn [<$fn_name _avx2>]()        {
-					let _ = $fn_name(stringify!([<$fn_name _avx2>]), Kernel::Avx2Batch);
-				}
-				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-				#[test] fn [<$fn_name _avx512>]()      {
-					let _ = $fn_name(stringify!([<$fn_name _avx512>]), Kernel::Avx512Batch);
-				}
-				#[test] fn [<$fn_name _auto_detect>]() {
-					let _ = $fn_name(stringify!([<$fn_name _auto_detect>]),
-									 Kernel::Auto);
-				}
-			}
-		};
-	}
-	fn check_batch_sweep(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-		skip_if_unsupported!(kernel, test);
+    generate_all_fosc_tests!(
+        check_fosc_partial_params,
+        check_fosc_basic_accuracy,
+        check_fosc_with_nan_data,
+        check_fosc_zero_period,
+        check_fosc_period_exceeds_length,
+        check_fosc_very_small_dataset,
+        check_fosc_all_values_nan,
+        check_fosc_expected_values_reference,
+        check_fosc_no_poison
+    );
 
-		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-		let c = read_candles_from_csv(file)?;
+    #[cfg(feature = "proptest")]
+    generate_all_fosc_tests!(check_fosc_property);
 
-		let output = FoscBatchBuilder::new()
-			.kernel(kernel)
-			.period_range(5, 25, 5)
-			.apply_candles(&c, "close")?;
+    fn check_batch_default_row(
+        test: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test);
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let c = read_candles_from_csv(file)?;
+        let output = FoscBatchBuilder::new()
+            .kernel(kernel)
+            .apply_candles(&c, "close")?;
+        let def = FoscParams::default();
+        let row = output.values_for(&def).expect("default row missing");
+        assert_eq!(row.len(), c.close.len());
+        let expected = [
+            -0.8904444627923475,
+            -0.4763353099245297,
+            -0.2379782851444668,
+            0.292790128025632,
+            -0.6597902988090389,
+        ];
+        let start = row.len() - 5;
+        for (i, &v) in row[start..].iter().enumerate() {
+            assert!(
+                (v - expected[i]).abs() < 1e-7,
+                "[{test}] default-row mismatch at idx {i}: {v} vs {expected:?}"
+            );
+        }
+        Ok(())
+    }
 
-		let expected_combos = 5; // periods: 5, 10, 15, 20, 25
-		assert_eq!(output.combos.len(), expected_combos);
-		assert_eq!(output.rows, expected_combos);
-		assert_eq!(output.cols, c.close.len());
+    macro_rules! gen_batch_tests {
+        ($fn_name:ident) => {
+            paste::paste! {
+                #[test] fn [<$fn_name _scalar>]()      {
+                    let _ = $fn_name(stringify!([<$fn_name _scalar>]), Kernel::ScalarBatch);
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                #[test] fn [<$fn_name _avx2>]()        {
+                    let _ = $fn_name(stringify!([<$fn_name _avx2>]), Kernel::Avx2Batch);
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                #[test] fn [<$fn_name _avx512>]()      {
+                    let _ = $fn_name(stringify!([<$fn_name _avx512>]), Kernel::Avx512Batch);
+                }
+                #[test] fn [<$fn_name _auto_detect>]() {
+                    let _ = $fn_name(stringify!([<$fn_name _auto_detect>]),
+                                     Kernel::Auto);
+                }
+            }
+        };
+    }
+    fn check_batch_sweep(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test);
 
-		Ok(())
-	}
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let c = read_candles_from_csv(file)?;
 
-	#[cfg(debug_assertions)]
-	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-		skip_if_unsupported!(kernel, test);
+        let output = FoscBatchBuilder::new()
+            .kernel(kernel)
+            .period_range(5, 25, 5)
+            .apply_candles(&c, "close")?;
 
-		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-		let c = read_candles_from_csv(file)?;
+        let expected_combos = 5; // periods: 5, 10, 15, 20, 25
+        assert_eq!(output.combos.len(), expected_combos);
+        assert_eq!(output.rows, expected_combos);
+        assert_eq!(output.cols, c.close.len());
 
-		// Test various parameter sweep configurations
-		let test_configs = vec![
-			// (period_start, period_end, period_step)
-			(2, 10, 2),      // Small periods
-			(5, 25, 5),      // Medium periods  
-			(30, 60, 15),    // Large periods
-			(2, 5, 1),       // Dense small range
-			(10, 20, 2),     // Medium range with small steps
-			(5, 5, 0),       // Single period (default)
-			(5, 50, 15),     // Wide range
-			(100, 200, 50),  // Very large periods
-		];
+        Ok(())
+    }
 
-		for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
-			let output = FoscBatchBuilder::new()
-				.kernel(kernel)
-				.period_range(p_start, p_end, p_step)
-				.apply_candles(&c, "close")?;
+    #[cfg(debug_assertions)]
+    fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test);
 
-			for (idx, &val) in output.values.iter().enumerate() {
-				if val.is_nan() {
-					continue;
-				}
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let c = read_candles_from_csv(file)?;
 
-				let bits = val.to_bits();
-				let row = idx / output.cols;
-				let col = idx % output.cols;
-				let combo = &output.combos[row];
+        // Test various parameter sweep configurations
+        let test_configs = vec![
+            // (period_start, period_end, period_step)
+            (2, 10, 2),     // Small periods
+            (5, 25, 5),     // Medium periods
+            (30, 60, 15),   // Large periods
+            (2, 5, 1),      // Dense small range
+            (10, 20, 2),    // Medium range with small steps
+            (5, 5, 0),      // Single period (default)
+            (5, 50, 15),    // Wide range
+            (100, 200, 50), // Very large periods
+        ];
 
-				if bits == 0x11111111_11111111 {
-					panic!(
-						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+        for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
+            let output = FoscBatchBuilder::new()
+                .kernel(kernel)
+                .period_range(p_start, p_end, p_step)
+                .apply_candles(&c, "close")?;
+
+            for (idx, &val) in output.values.iter().enumerate() {
+                if val.is_nan() {
+                    continue;
+                }
+
+                let bits = val.to_bits();
+                let row = idx / output.cols;
+                let col = idx % output.cols;
+                let combo = &output.combos[row];
+
+                if bits == 0x11111111_11111111 {
+                    panic!(
+                        "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
 						 at row {} col {} (flat index {}) with params: period={}",
-						test,
-						cfg_idx,
-						val,
-						bits,
-						row,
-						col,
-						idx,
-						combo.period.unwrap_or(5)
-					);
-				}
+                        test,
+                        cfg_idx,
+                        val,
+                        bits,
+                        row,
+                        col,
+                        idx,
+                        combo.period.unwrap_or(5)
+                    );
+                }
 
-				if bits == 0x22222222_22222222 {
-					panic!(
-						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+                if bits == 0x22222222_22222222 {
+                    panic!(
+                        "[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
 						 at row {} col {} (flat index {}) with params: period={}",
-						test,
-						cfg_idx,
-						val,
-						bits,
-						row,
-						col,
-						idx,
-						combo.period.unwrap_or(5)
-					);
-				}
+                        test,
+                        cfg_idx,
+                        val,
+                        bits,
+                        row,
+                        col,
+                        idx,
+                        combo.period.unwrap_or(5)
+                    );
+                }
 
-				if bits == 0x33333333_33333333 {
-					panic!(
-						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+                if bits == 0x33333333_33333333 {
+                    panic!(
+                        "[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
 						 at row {} col {} (flat index {}) with params: period={}",
-						test,
-						cfg_idx,
-						val,
-						bits,
-						row,
-						col,
-						idx,
-						combo.period.unwrap_or(5)
-					);
-				}
-			}
-		}
+                        test,
+                        cfg_idx,
+                        val,
+                        bits,
+                        row,
+                        col,
+                        idx,
+                        combo.period.unwrap_or(5)
+                    );
+                }
+            }
+        }
 
-		Ok(())
-	}
+        Ok(())
+    }
 
-	#[cfg(not(debug_assertions))]
-	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-		Ok(())
-	}
+    #[cfg(not(debug_assertions))]
+    fn check_batch_no_poison(
+        _test: &str,
+        _kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        Ok(())
+    }
 
-	gen_batch_tests!(check_batch_default_row);
-	gen_batch_tests!(check_batch_sweep);
-	gen_batch_tests!(check_batch_no_poison);
+    gen_batch_tests!(check_batch_default_row);
+    gen_batch_tests!(check_batch_sweep);
+    gen_batch_tests!(check_batch_no_poison);
 }

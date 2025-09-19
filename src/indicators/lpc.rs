@@ -40,8 +40,8 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, 
-    init_matrix_prefixes, make_uninit_matrix,
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -65,12 +65,15 @@ use thiserror::Error;
 /// Input data enum supporting both candle data and raw slices
 #[derive(Debug, Clone)]
 pub enum LpcData<'a> {
-    Candles { candles: &'a Candles, source: &'a str },
-    Slices { 
-        high: &'a [f64], 
-        low: &'a [f64], 
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    Slices {
+        high: &'a [f64],
+        low: &'a [f64],
         close: &'a [f64],
-        src: &'a [f64]
+        src: &'a [f64],
     },
 }
 
@@ -125,50 +128,61 @@ impl<'a> LpcInput<'a> {
     #[inline]
     pub fn from_candles(c: &'a Candles, s: &'a str, p: LpcParams) -> Self {
         Self {
-            data: LpcData::Candles { candles: c, source: s },
+            data: LpcData::Candles {
+                candles: c,
+                source: s,
+            },
             params: p,
         }
     }
-    
+
     #[inline]
     pub fn from_slices(
-        high: &'a [f64], 
-        low: &'a [f64], 
+        high: &'a [f64],
+        low: &'a [f64],
         close: &'a [f64],
         src: &'a [f64],
-        p: LpcParams
+        p: LpcParams,
     ) -> Self {
         Self {
-            data: LpcData::Slices { high, low, close, src },
+            data: LpcData::Slices {
+                high,
+                low,
+                close,
+                src,
+            },
             params: p,
         }
     }
-    
+
     #[inline]
     pub fn with_default_candles(c: &'a Candles) -> Self {
         Self::from_candles(c, "close", LpcParams::default())
     }
-    
+
     #[inline]
     pub fn get_cutoff_type(&self) -> String {
-        self.params.cutoff_type.clone().unwrap_or_else(|| "adaptive".to_string())
+        self.params
+            .cutoff_type
+            .clone()
+            .unwrap_or_else(|| "adaptive".to_string())
     }
-    
+
     #[inline]
     pub fn get_fixed_period(&self) -> usize {
         self.params.fixed_period.unwrap_or(20)
     }
-    
+
     #[inline]
     pub fn get_max_cycle_limit(&self) -> usize {
         self.params.max_cycle_limit.unwrap_or(60)
     }
-    
+
     #[inline]
     pub fn get_cycle_mult(&self) -> f64 {
         self.params.cycle_mult.unwrap_or(1.0)
     }
-    
+
     #[inline]
     pub fn get_tr_mult(&self) -> f64 {
         self.params.tr_mult.unwrap_or(1.0)
@@ -205,48 +219,48 @@ impl LpcBuilder {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     #[inline(always)]
     pub fn cutoff_type(mut self, val: String) -> Self {
         self.cutoff_type = Some(val);
         self
     }
-    
+
     #[inline(always)]
     pub fn fixed_period(mut self, val: usize) -> Self {
         self.fixed_period = Some(val);
         self
     }
-    
+
     #[inline(always)]
     pub fn max_cycle_limit(mut self, val: usize) -> Self {
         self.max_cycle_limit = Some(val);
         self
     }
-    
+
     #[inline(always)]
     pub fn cycle_mult(mut self, val: f64) -> Self {
         self.cycle_mult = Some(val);
         self
     }
-    
+
     #[inline(always)]
     pub fn tr_mult(mut self, val: f64) -> Self {
         self.tr_mult = Some(val);
         self
     }
-    
+
     #[inline(always)]
     pub fn kernel(mut self, k: Kernel) -> Self {
         self.kernel = k;
         self
     }
-    
+
     #[inline(always)]
     pub fn apply(self, c: &Candles) -> Result<LpcOutput, LpcError> {
         self.apply_candles(c, "close")
     }
-    
+
     #[inline(always)]
     pub fn apply_candles(self, c: &Candles, s: &str) -> Result<LpcOutput, LpcError> {
         let p = LpcParams {
@@ -259,14 +273,14 @@ impl LpcBuilder {
         let i = LpcInput::from_candles(c, s, p);
         lpc_with_kernel(&i, self.kernel)
     }
-    
+
     #[inline(always)]
     pub fn apply_slices(
-        self, 
-        high: &[f64], 
-        low: &[f64], 
+        self,
+        high: &[f64],
+        low: &[f64],
         close: &[f64],
-        src: &[f64]
+        src: &[f64],
     ) -> Result<LpcOutput, LpcError> {
         let p = LpcParams {
             cutoff_type: self.cutoff_type,
@@ -278,7 +292,7 @@ impl LpcBuilder {
         let i = LpcInput::from_slices(high, low, close, src, p);
         lpc_with_kernel(&i, self.kernel)
     }
-    
+
     #[inline(always)]
     pub fn apply_slice(
         self,
@@ -289,7 +303,7 @@ impl LpcBuilder {
     ) -> Result<LpcOutput, LpcError> {
         self.apply_slices(high, low, close, src)
     }
-    
+
     #[inline(always)]
     pub fn into_stream(self) -> Result<LpcStream, LpcError> {
         let p = LpcParams {
@@ -309,8 +323,8 @@ pub struct LpcBatchRange {
     pub fixed_period: (usize, usize, usize),
     pub cycle_mult: (f64, f64, f64),
     pub tr_mult: (f64, f64, f64),
-    pub cutoff_type: String,      // "fixed" or "adaptive" (single choice for sweep)
-    pub max_cycle_limit: usize,    // only used if adaptive
+    pub cutoff_type: String, // "fixed" or "adaptive" (single choice for sweep)
+    pub max_cycle_limit: usize, // only used if adaptive
 }
 
 impl Default for LpcBatchRange {
@@ -332,51 +346,56 @@ pub struct LpcBatchBuilder {
 }
 
 impl LpcBatchBuilder {
-    pub fn new() -> Self { Self::default() }
-    pub fn kernel(mut self, k: Kernel) -> Self { self.kernel = k; self }
-
-    pub fn fixed_period_range(mut self, s: usize, e: usize, st: usize) -> Self { 
-        self.range.fixed_period = (s, e, st); 
-        self 
+    pub fn new() -> Self {
+        Self::default()
     }
-    pub fn fixed_period_static(mut self, p: usize) -> Self { 
-        self.range.fixed_period = (p, p, 0); 
-        self 
+    pub fn kernel(mut self, k: Kernel) -> Self {
+        self.kernel = k;
+        self
     }
 
-    pub fn cycle_mult_range(mut self, s: f64, e: f64, st: f64) -> Self { 
-        self.range.cycle_mult = (s, e, st); 
-        self 
+    pub fn fixed_period_range(mut self, s: usize, e: usize, st: usize) -> Self {
+        self.range.fixed_period = (s, e, st);
+        self
     }
-    pub fn cycle_mult_static(mut self, x: f64) -> Self { 
-        self.range.cycle_mult = (x, x, 0.0); 
-        self 
-    }
-
-    pub fn tr_mult_range(mut self, s: f64, e: f64, st: f64) -> Self { 
-        self.range.tr_mult = (s, e, st); 
-        self 
-    }
-    pub fn tr_mult_static(mut self, x: f64) -> Self { 
-        self.range.tr_mult = (x, x, 0.0); 
-        self 
+    pub fn fixed_period_static(mut self, p: usize) -> Self {
+        self.range.fixed_period = (p, p, 0);
+        self
     }
 
-    pub fn cutoff_type(mut self, ct: &str) -> Self { 
-        self.range.cutoff_type = ct.to_string(); 
-        self 
+    pub fn cycle_mult_range(mut self, s: f64, e: f64, st: f64) -> Self {
+        self.range.cycle_mult = (s, e, st);
+        self
     }
-    pub fn max_cycle_limit(mut self, m: usize) -> Self { 
-        self.range.max_cycle_limit = m; 
-        self 
+    pub fn cycle_mult_static(mut self, x: f64) -> Self {
+        self.range.cycle_mult = (x, x, 0.0);
+        self
+    }
+
+    pub fn tr_mult_range(mut self, s: f64, e: f64, st: f64) -> Self {
+        self.range.tr_mult = (s, e, st);
+        self
+    }
+    pub fn tr_mult_static(mut self, x: f64) -> Self {
+        self.range.tr_mult = (x, x, 0.0);
+        self
+    }
+
+    pub fn cutoff_type(mut self, ct: &str) -> Self {
+        self.range.cutoff_type = ct.to_string();
+        self
+    }
+    pub fn max_cycle_limit(mut self, m: usize) -> Self {
+        self.range.max_cycle_limit = m;
+        self
     }
 
     pub fn apply_slices(
-        self, 
-        h: &[f64], 
-        l: &[f64], 
-        c: &[f64], 
-        s: &[f64]
+        self,
+        h: &[f64],
+        l: &[f64],
+        c: &[f64],
+        s: &[f64],
     ) -> Result<LpcBatchOutput, LpcError> {
         lpc_batch_with_kernel(h, l, c, s, &self.range, self.kernel)
     }
@@ -384,9 +403,9 @@ impl LpcBatchBuilder {
 
 #[derive(Clone, Debug)]
 pub struct LpcBatchOutput {
-    pub values: Vec<f64>,      // rows x cols, rows = combos * 3
+    pub values: Vec<f64>, // rows x cols, rows = combos * 3
     pub combos: Vec<LpcParams>,
-    pub rows: usize,           // combos * 3
+    pub rows: usize, // combos * 3
     pub cols: usize,
 }
 
@@ -395,19 +414,19 @@ pub struct LpcBatchOutput {
 pub enum LpcError {
     #[error("lpc: Input data slice is empty.")]
     EmptyInputData,
-    
+
     #[error("lpc: All values are NaN.")]
     AllValuesNaN,
-    
+
     #[error("lpc: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
-    
+
     #[error("lpc: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
-    
+
     #[error("lpc: Invalid cutoff type: {cutoff_type}, must be 'adaptive' or 'fixed'")]
     InvalidCutoffType { cutoff_type: String },
-    
+
     #[error("lpc: Required OHLC data is missing or has mismatched lengths")]
     MissingData,
 }
@@ -417,49 +436,63 @@ pub enum LpcError {
 fn dom_cycle(src: &[f64], max_cycle_limit: usize) -> Vec<f64> {
     let len = src.len();
     let mut dom_cycles = vec![f64::NAN; len];
-    
+
     if len < 8 {
         return dom_cycles;
     }
-    
+
     let mut in_phase = vec![0.0; len];
     let mut quadrature = vec![0.0; len];
     let mut real_part = vec![0.0; len];
     let mut imag_part = vec![0.0; len];
     let mut delta_phase = vec![0.0; len];
     let mut inst_per = vec![0.0; len];
-    
+
     for i in 7..len {
         let val1 = src[i] - src[i - 7];
-        
+
         // Calculate In Phase component
         if i >= 4 {
-            let val1_4 = if i >= 4 { src[i - 4] - src[i.saturating_sub(11)] } else { 0.0 };
-            let val1_2 = if i >= 2 { src[i - 2] - src[i.saturating_sub(9)] } else { 0.0 };
-            in_phase[i] = 1.25 * (val1_4 - 0.635 * val1_2) + 
-                         if i >= 3 { 0.635 * in_phase[i - 3] } else { 0.0 };
+            let val1_4 = if i >= 4 {
+                src[i - 4] - src[i.saturating_sub(11)]
+            } else {
+                0.0
+            };
+            let val1_2 = if i >= 2 {
+                src[i - 2] - src[i.saturating_sub(9)]
+            } else {
+                0.0
+            };
+            in_phase[i] = 1.25 * (val1_4 - 0.635 * val1_2)
+                + if i >= 3 { 0.635 * in_phase[i - 3] } else { 0.0 };
         }
-        
+
         // Calculate Quadrature component
         if i >= 2 {
             let val1_2 = src[i - 2] - src[i.saturating_sub(9)];
-            quadrature[i] = val1_2 - 0.338 * val1 + 
-                           if i >= 2 { 0.338 * quadrature[i - 2] } else { 0.0 };
+            quadrature[i] = val1_2 - 0.338 * val1
+                + if i >= 2 {
+                    0.338 * quadrature[i - 2]
+                } else {
+                    0.0
+                };
         }
-        
+
         // Calculate Real and Imaginary parts
         if i >= 1 {
-            real_part[i] = 0.2 * (in_phase[i] * in_phase[i - 1] + quadrature[i] * quadrature[i - 1]) +
-                          0.8 * real_part[i - 1];
-            imag_part[i] = 0.2 * (in_phase[i] * quadrature[i - 1] - in_phase[i - 1] * quadrature[i]) +
-                          0.8 * imag_part[i - 1];
+            real_part[i] = 0.2
+                * (in_phase[i] * in_phase[i - 1] + quadrature[i] * quadrature[i - 1])
+                + 0.8 * real_part[i - 1];
+            imag_part[i] = 0.2
+                * (in_phase[i] * quadrature[i - 1] - in_phase[i - 1] * quadrature[i])
+                + 0.8 * imag_part[i - 1];
         }
-        
+
         // Calculate Delta Phase
         if real_part[i] != 0.0 {
             delta_phase[i] = (imag_part[i] / real_part[i]).atan();
         }
-        
+
         // Calculate Instantaneous Period
         let mut val2 = 0.0;
         let mut found_period = false;
@@ -473,11 +506,11 @@ fn dom_cycle(src: &[f64], max_cycle_limit: usize) -> Vec<f64> {
                 }
             }
         }
-        
+
         if !found_period {
             inst_per[i] = if i > 0 { inst_per[i - 1] } else { 20.0 };
         }
-        
+
         // Smooth the dominant cycle
         if i > 0 && !dom_cycles[i - 1].is_nan() {
             dom_cycles[i] = 0.25 * inst_per[i] + 0.75 * dom_cycles[i - 1];
@@ -485,7 +518,7 @@ fn dom_cycle(src: &[f64], max_cycle_limit: usize) -> Vec<f64> {
             dom_cycles[i] = inst_per[i];
         }
     }
-    
+
     dom_cycles
 }
 
@@ -493,19 +526,19 @@ fn dom_cycle(src: &[f64], max_cycle_limit: usize) -> Vec<f64> {
 fn lp_filter(src: &[f64], period: usize) -> Vec<f64> {
     let len = src.len();
     let mut output = vec![f64::NAN; len];
-    
+
     if period == 0 || len == 0 {
         return output;
     }
-    
+
     let omega = 2.0 * PI / (period as f64);
     let alpha = (1.0 - omega.sin()) / omega.cos();
-    
+
     // Initialize first value
     if !src[0].is_nan() {
         output[0] = src[0];
     }
-    
+
     // Apply filter
     for i in 1..len {
         if !src[i].is_nan() && !src[i - 1].is_nan() && !output[i - 1].is_nan() {
@@ -514,7 +547,7 @@ fn lp_filter(src: &[f64], period: usize) -> Vec<f64> {
             output[i] = src[i];
         }
     }
-    
+
     output
 }
 
@@ -522,14 +555,14 @@ fn lp_filter(src: &[f64], period: usize) -> Vec<f64> {
 fn calculate_true_range(high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
     let len = high.len();
     let mut tr = vec![0.0; len];
-    
+
     if len == 0 {
         return tr;
     }
-    
+
     // First value is just high - low
     tr[0] = high[0] - low[0];
-    
+
     // Subsequent values use Pine's formula with previous high/low
     for i in 1..len {
         let hl = high[i] - low[i];
@@ -537,7 +570,7 @@ fn calculate_true_range(high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
         let c_high1 = (close[i] - high[i - 1]).abs();
         tr[i] = hl.max(c_low1).max(c_high1);
     }
-    
+
     tr
 }
 
@@ -574,7 +607,9 @@ pub fn lpc_scalar(
         None
     };
 
-    if first >= len { return; }
+    if first >= len {
+        return;
+    }
 
     // Seed
     out_filter[first] = src[first];
@@ -589,7 +624,11 @@ pub fn lpc_scalar(
         // Per-bar period without allocating a Vec
         let p = if let Some(ref dc) = dc {
             let base = dc[i];
-            let per = if base.is_nan() { fixed_period } else { (base * cycle_mult).round().max(3.0) as usize };
+            let per = if base.is_nan() {
+                fixed_period
+            } else {
+                (base * cycle_mult).round().max(3.0) as usize
+            };
             per
         } else {
             fixed_period
@@ -633,8 +672,21 @@ pub fn lpc_avx2(
     out_low: &mut [f64],
 ) {
     // Currently falls back to scalar implementation
-    lpc_scalar(high, low, close, src, cutoff_type, fixed_period, max_cycle_limit,
-               cycle_mult, tr_mult, first, out_filter, out_high, out_low)
+    lpc_scalar(
+        high,
+        low,
+        close,
+        src,
+        cutoff_type,
+        fixed_period,
+        max_cycle_limit,
+        cycle_mult,
+        tr_mult,
+        first,
+        out_filter,
+        out_high,
+        out_low,
+    )
 }
 
 /// AVX512 kernel implementation for LPC computation (stub - uses scalar for now)
@@ -655,8 +707,21 @@ pub fn lpc_avx512(
     out_low: &mut [f64],
 ) {
     // Currently falls back to scalar implementation
-    lpc_scalar(high, low, close, src, cutoff_type, fixed_period, max_cycle_limit,
-               cycle_mult, tr_mult, first, out_filter, out_high, out_low)
+    lpc_scalar(
+        high,
+        low,
+        close,
+        src,
+        cutoff_type,
+        fixed_period,
+        max_cycle_limit,
+        cycle_mult,
+        tr_mult,
+        first,
+        out_filter,
+        out_high,
+        out_low,
+    )
 }
 
 /// Dispatch function that selects the appropriate kernel
@@ -681,27 +746,71 @@ fn lpc_compute_into(
         Kernel::Auto => detect_best_kernel(),
         k => k,
     };
-    
+
     match actual_kernel {
-        Kernel::Scalar | Kernel::ScalarBatch | Kernel::Auto => {
-            lpc_scalar(high, low, close, src, cutoff_type, fixed_period, max_cycle_limit,
-                      cycle_mult, tr_mult, first, out_filter, out_high, out_low)
-        }
+        Kernel::Scalar | Kernel::ScalarBatch | Kernel::Auto => lpc_scalar(
+            high,
+            low,
+            close,
+            src,
+            cutoff_type,
+            fixed_period,
+            max_cycle_limit,
+            cycle_mult,
+            tr_mult,
+            first,
+            out_filter,
+            out_high,
+            out_low,
+        ),
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-        Kernel::Avx2 | Kernel::Avx2Batch => {
-            lpc_avx2(high, low, close, src, cutoff_type, fixed_period, max_cycle_limit,
-                    cycle_mult, tr_mult, first, out_filter, out_high, out_low)
-        }
+        Kernel::Avx2 | Kernel::Avx2Batch => lpc_avx2(
+            high,
+            low,
+            close,
+            src,
+            cutoff_type,
+            fixed_period,
+            max_cycle_limit,
+            cycle_mult,
+            tr_mult,
+            first,
+            out_filter,
+            out_high,
+            out_low,
+        ),
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-        Kernel::Avx512 | Kernel::Avx512Batch => {
-            lpc_avx512(high, low, close, src, cutoff_type, fixed_period, max_cycle_limit,
-                      cycle_mult, tr_mult, first, out_filter, out_high, out_low)
-        }
+        Kernel::Avx512 | Kernel::Avx512Batch => lpc_avx512(
+            high,
+            low,
+            close,
+            src,
+            cutoff_type,
+            fixed_period,
+            max_cycle_limit,
+            cycle_mult,
+            tr_mult,
+            first,
+            out_filter,
+            out_high,
+            out_low,
+        ),
         #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-        _ => {
-            lpc_scalar(high, low, close, src, cutoff_type, fixed_period, max_cycle_limit,
-                      cycle_mult, tr_mult, first, out_filter, out_high, out_low)
-        }
+        _ => lpc_scalar(
+            high,
+            low,
+            close,
+            src,
+            cutoff_type,
+            fixed_period,
+            max_cycle_limit,
+            cycle_mult,
+            tr_mult,
+            first,
+            out_filter,
+            out_high,
+            out_low,
+        ),
     }
 }
 
@@ -723,7 +832,9 @@ fn lpc_compute_into_prefilled(
     out_low: &mut [f64],
 ) {
     let len = src.len();
-    if first >= len { return; }
+    if first >= len {
+        return;
+    }
 
     // seed (assumes [..first] already NaN)
     out_filter[first] = src[first];
@@ -734,13 +845,21 @@ fn lpc_compute_into_prefilled(
 
     let dc = if cutoff_type.eq_ignore_ascii_case("adaptive") {
         Some(dom_cycle(src, max_cycle_limit))
-    } else { None };
+    } else {
+        None
+    };
 
     for i in (first + 1)..len {
         let p = if let Some(ref dc) = dc {
             let base = dc[i];
-            if base.is_nan() { fixed_period } else { (base * cycle_mult).round().max(3.0) as usize }
-        } else { fixed_period };
+            if base.is_nan() {
+                fixed_period
+            } else {
+                (base * cycle_mult).round().max(3.0) as usize
+            }
+        } else {
+            fixed_period
+        };
 
         let omega = 2.0 * std::f64::consts::PI / (p as f64);
         let alpha = (1.0 - omega.sin()) / omega.cos();
@@ -776,57 +895,102 @@ pub fn lpc_with_kernel(input: &LpcInput, kernel: Kernel) -> Result<LpcOutput, Lp
     let mut high_band = alloc_with_nan_prefix(len, first);
     let mut low_band = alloc_with_nan_prefix(len, first);
 
-    lpc_compute_into(h, l, c, s, &cutoff, fp, mcl, cm, tm, first, kernel, &mut filter, &mut high_band, &mut low_band);
+    lpc_compute_into(
+        h,
+        l,
+        c,
+        s,
+        &cutoff,
+        fp,
+        mcl,
+        cm,
+        tm,
+        first,
+        kernel,
+        &mut filter,
+        &mut high_band,
+        &mut low_band,
+    );
 
-    Ok(LpcOutput { filter, high_band, low_band })
+    Ok(LpcOutput {
+        filter,
+        high_band,
+        low_band,
+    })
 }
 
 /// Prepare function to extract and validate inputs
 fn lpc_prepare<'a>(
     input: &'a LpcInput<'a>,
     kernel: Kernel,
-) -> Result<(&'a [f64], &'a [f64], &'a [f64], &'a [f64], String, usize, usize, f64, f64, usize, Kernel), LpcError> {
+) -> Result<
+    (
+        &'a [f64],
+        &'a [f64],
+        &'a [f64],
+        &'a [f64],
+        String,
+        usize,
+        usize,
+        f64,
+        f64,
+        usize,
+        Kernel,
+    ),
+    LpcError,
+> {
     let (high, low, close, src) = match &input.data {
         LpcData::Candles { candles, source } => {
             let src_data = source_type(candles, source);
-            (&candles.high[..], &candles.low[..], &candles.close[..], src_data)
+            (
+                &candles.high[..],
+                &candles.low[..],
+                &candles.close[..],
+                src_data,
+            )
         }
-        LpcData::Slices { high, low, close, src } => (*high, *low, *close, *src),
+        LpcData::Slices {
+            high,
+            low,
+            close,
+            src,
+        } => (*high, *low, *close, *src),
     };
-    
+
     if src.is_empty() {
         return Err(LpcError::EmptyInputData);
     }
-    
+
     if high.len() != src.len() || low.len() != src.len() || close.len() != src.len() {
         return Err(LpcError::MissingData);
     }
-    
+
     // Check for all NaN values
-    if src.iter().all(|v| v.is_nan()) || 
-       high.iter().all(|v| v.is_nan()) ||
-       low.iter().all(|v| v.is_nan()) || 
-       close.iter().all(|v| v.is_nan()) {
+    if src.iter().all(|v| v.is_nan())
+        || high.iter().all(|v| v.is_nan())
+        || low.iter().all(|v| v.is_nan())
+        || close.iter().all(|v| v.is_nan())
+    {
         return Err(LpcError::AllValuesNaN);
     }
-    
+
     let cutoff_type = input.get_cutoff_type();
     if !cutoff_type.eq_ignore_ascii_case("adaptive") && !cutoff_type.eq_ignore_ascii_case("fixed") {
         return Err(LpcError::InvalidCutoffType { cutoff_type });
     }
-    
+
     let fixed_period = input.get_fixed_period();
     let max_cycle_limit = input.get_max_cycle_limit();
     let cycle_mult = input.get_cycle_mult();
     let tr_mult = input.get_tr_mult();
-    
+
     if fixed_period == 0 || fixed_period > src.len() {
         return Err(LpcError::InvalidPeriod {
             period: fixed_period,
             data_len: src.len(),
         });
     }
-    
+
     // Find first valid index
     let mut first = 0;
     for i in 0..src.len() {
@@ -835,20 +999,32 @@ fn lpc_prepare<'a>(
             break;
         }
     }
-    
+
     // Require at least 2 valid bars after `first` because the filter uses i and i-1
     let valid = src.len().saturating_sub(first);
     if valid < 2 {
         return Err(LpcError::NotEnoughValidData { needed: 2, valid });
     }
-    
+
     let chosen = if kernel == Kernel::Auto {
         detect_best_kernel()
     } else {
         kernel
     };
-    
-    Ok((high, low, close, src, cutoff_type, fixed_period, max_cycle_limit, cycle_mult, tr_mult, first, chosen))
+
+    Ok((
+        high,
+        low,
+        close,
+        src,
+        cutoff_type,
+        fixed_period,
+        max_cycle_limit,
+        cycle_mult,
+        tr_mult,
+        first,
+        chosen,
+    ))
 }
 
 // ==================== STREAMING IMPLEMENTATION ====================
@@ -882,7 +1058,7 @@ impl LpcStream {
         if cutoff_type.to_lowercase() != "adaptive" && cutoff_type.to_lowercase() != "fixed" {
             return Err(LpcError::InvalidCutoffType { cutoff_type });
         }
-        
+
         Ok(Self {
             cutoff_type,
             fixed_period: params.fixed_period.unwrap_or(20),
@@ -904,13 +1080,13 @@ impl LpcStream {
             },
         })
     }
-    
+
     pub fn update(&mut self, high: f64, low: f64, close: f64, src: f64) -> Option<(f64, f64, f64)> {
         self.history_high.push(high);
         self.history_low.push(low);
         self.history_close.push(close);
         self.history_src.push(src);
-        
+
         // Keep history limited
         if self.history_src.len() > 100 {
             self.history_src.remove(0);
@@ -918,12 +1094,12 @@ impl LpcStream {
             self.history_low.remove(0);
             self.history_close.remove(0);
         }
-        
+
         let len = self.history_src.len();
         if len < 8 {
             return None;
         }
-        
+
         // Calculate period (adaptive or fixed)
         let period = if self.cutoff_type.to_lowercase() == "adaptive" {
             // Note: Full streaming IFM not yet implemented, using fixed period for now
@@ -932,18 +1108,22 @@ impl LpcStream {
         } else {
             self.fixed_period
         };
-        
+
         // Calculate filter
         let omega = 2.0 * PI / (period as f64);
         let alpha = (1.0 - omega.sin()) / omega.cos();
-        
+
         let filter = if self.prev_filter.is_nan() {
             src
         } else {
-            let prev_src = if len > 1 { self.history_src[len - 2] } else { src };
+            let prev_src = if len > 1 {
+                self.history_src[len - 2]
+            } else {
+                src
+            };
             0.5 * (1.0 - alpha) * (src + prev_src) + alpha * self.prev_filter
         };
-        
+
         // Calculate true range
         let tr = if len > 1 {
             let hl = high - low;
@@ -953,7 +1133,7 @@ impl LpcStream {
         } else {
             high - low
         };
-        
+
         // Calculate filtered true range
         let ftr = if self.prev_ftr.is_nan() {
             tr
@@ -974,13 +1154,13 @@ impl LpcStream {
             };
             0.5 * (1.0 - alpha) * (tr + prev_tr) + alpha * self.prev_ftr
         };
-        
+
         self.prev_filter = filter;
         self.prev_ftr = ftr;
-        
+
         let high_band = filter + ftr * self.tr_mult;
         let low_band = filter - ftr * self.tr_mult;
-        
+
         Some((filter, high_band, low_band))
     }
 }
@@ -1001,16 +1181,22 @@ pub fn lpc_py<'py>(
     cycle_mult: Option<f64>,
     tr_mult: Option<f64>,
     kernel: Option<&str>,
-) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
+) -> PyResult<(
+    Bound<'py, PyArray1<f64>>,
+    Bound<'py, PyArray1<f64>>,
+    Bound<'py, PyArray1<f64>>,
+)> {
     let h = high.as_slice()?;
     let l = low.as_slice()?;
     let c = close.as_slice()?;
     let s = src.as_slice()?;
-    
+
     if h.len() != s.len() || l.len() != s.len() || c.len() != s.len() {
-        return Err(PyValueError::new_err("All arrays must have the same length"));
+        return Err(PyValueError::new_err(
+            "All arrays must have the same length",
+        ));
     }
-    
+
     let params = LpcParams {
         cutoff_type,
         fixed_period,
@@ -1018,10 +1204,10 @@ pub fn lpc_py<'py>(
         cycle_mult,
         tr_mult,
     };
-    
+
     let input = LpcInput::from_slices(h, l, c, s, params);
     let kern = validate_kernel(kernel, false)?;
-    
+
     match lpc_with_kernel(&input, kern) {
         Ok(output) => Ok((
             output.filter.into_pyarray(py),
@@ -1057,13 +1243,13 @@ impl LpcStreamPy {
             cycle_mult,
             tr_mult,
         };
-        
+
         match LpcStream::try_new(params) {
             Ok(stream) => Ok(Self { inner: stream }),
             Err(e) => Err(PyValueError::new_err(e.to_string())),
         }
     }
-    
+
     pub fn update(&mut self, high: f64, low: f64, close: f64, src: f64) -> Option<(f64, f64, f64)> {
         self.inner.update(high, low, close, src)
     }
@@ -1095,7 +1281,9 @@ pub fn lpc_batch_py<'py>(
     let c = close.as_slice()?;
     let s = src.as_slice()?;
     if h.len() != s.len() || l.len() != s.len() || c.len() != s.len() {
-        return Err(PyValueError::new_err("All arrays must have the same length"));
+        return Err(PyValueError::new_err(
+            "All arrays must have the same length",
+        ));
     }
 
     let sweep = LpcBatchRange {
@@ -1124,7 +1312,7 @@ pub fn lpc_batch_py<'py>(
             slice_out[row * cols + col] = f64::NAN;
         }
     }
-    
+
     py.allow_threads(|| {
         lpc_batch_inner_into(h, l, c, s, &sweep, kern, first, slice_out)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -1132,12 +1320,30 @@ pub fn lpc_batch_py<'py>(
 
     let dict = pyo3::types::PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
-    dict.set_item("fixed_periods",
-        combos.iter().map(|p| p.fixed_period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
-    dict.set_item("cycle_mults",
-        combos.iter().map(|p| p.cycle_mult.unwrap()).collect::<Vec<_>>().into_pyarray(py))?;
-    dict.set_item("tr_mults",
-        combos.iter().map(|p| p.tr_mult.unwrap()).collect::<Vec<_>>().into_pyarray(py))?;
+    dict.set_item(
+        "fixed_periods",
+        combos
+            .iter()
+            .map(|p| p.fixed_period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "cycle_mults",
+        combos
+            .iter()
+            .map(|p| p.cycle_mult.unwrap())
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "tr_mults",
+        combos
+            .iter()
+            .map(|p| p.tr_mult.unwrap())
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
     // Row order mapping for multi-output
     let order_list = PyList::new(py, vec!["filter", "high", "low"])?;
     dict.set_item("order", order_list)?;
@@ -1174,7 +1380,9 @@ pub fn lpc_alloc(len: usize) -> *mut f64 {
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn lpc_free(ptr: *mut f64, len: usize) {
-    unsafe { let _ = Vec::from_raw_parts(ptr, len, len); }
+    unsafe {
+        let _ = Vec::from_raw_parts(ptr, len, len);
+    }
 }
 
 #[cfg(feature = "wasm")]
@@ -1194,12 +1402,17 @@ pub fn lpc_into(
     cycle_mult: f64,
     tr_mult: f64,
 ) -> Result<(), JsValue> {
-    if high_ptr.is_null() || low_ptr.is_null() || close_ptr.is_null() || src_ptr.is_null()
-        || filter_out_ptr.is_null() || high_out_ptr.is_null() || low_out_ptr.is_null()
+    if high_ptr.is_null()
+        || low_ptr.is_null()
+        || close_ptr.is_null()
+        || src_ptr.is_null()
+        || filter_out_ptr.is_null()
+        || high_out_ptr.is_null()
+        || low_out_ptr.is_null()
     {
         return Err(JsValue::from_str("null pointer passed to lpc_into"));
     }
-    
+
     unsafe {
         let h = std::slice::from_raw_parts(high_ptr, len);
         let l = std::slice::from_raw_parts(low_ptr, len);
@@ -1217,31 +1430,31 @@ pub fn lpc_into(
 
         // Detect aliasing with inputs. If any alias -> use temps, else write in place.
         let alias = filter_out_ptr as *const f64 == high_ptr
-                 || filter_out_ptr as *const f64 == low_ptr
-                 || filter_out_ptr as *const f64 == close_ptr
-                 || filter_out_ptr as *const f64 == src_ptr
-                 || high_out_ptr   as *const f64 == high_ptr
-                 || high_out_ptr   as *const f64 == low_ptr
-                 || high_out_ptr   as *const f64 == close_ptr
-                 || high_out_ptr   as *const f64 == src_ptr
-                 || low_out_ptr    as *const f64 == high_ptr
-                 || low_out_ptr    as *const f64 == low_ptr
-                 || low_out_ptr    as *const f64 == close_ptr
-                 || low_out_ptr    as *const f64 == src_ptr;
+            || filter_out_ptr as *const f64 == low_ptr
+            || filter_out_ptr as *const f64 == close_ptr
+            || filter_out_ptr as *const f64 == src_ptr
+            || high_out_ptr as *const f64 == high_ptr
+            || high_out_ptr as *const f64 == low_ptr
+            || high_out_ptr as *const f64 == close_ptr
+            || high_out_ptr as *const f64 == src_ptr
+            || low_out_ptr as *const f64 == high_ptr
+            || low_out_ptr as *const f64 == low_ptr
+            || low_out_ptr as *const f64 == close_ptr
+            || low_out_ptr as *const f64 == src_ptr;
 
         if alias {
-            let mut f  = vec![0.0; len];
+            let mut f = vec![0.0; len];
             let mut hb = vec![0.0; len];
             let mut lb = vec![0.0; len];
             lpc_into_slices(&mut f, &mut hb, &mut lb, &input, detect_best_kernel())
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             std::slice::from_raw_parts_mut(filter_out_ptr, len).copy_from_slice(&f);
-            std::slice::from_raw_parts_mut(high_out_ptr,   len).copy_from_slice(&hb);
-            std::slice::from_raw_parts_mut(low_out_ptr,    len).copy_from_slice(&lb);
+            std::slice::from_raw_parts_mut(high_out_ptr, len).copy_from_slice(&hb);
+            std::slice::from_raw_parts_mut(low_out_ptr, len).copy_from_slice(&lb);
         } else {
-            let f  = std::slice::from_raw_parts_mut(filter_out_ptr, len);
-            let hb = std::slice::from_raw_parts_mut(high_out_ptr,   len);
-            let lb = std::slice::from_raw_parts_mut(low_out_ptr,    len);
+            let f = std::slice::from_raw_parts_mut(filter_out_ptr, len);
+            let hb = std::slice::from_raw_parts_mut(high_out_ptr, len);
+            let lb = std::slice::from_raw_parts_mut(low_out_ptr, len);
             lpc_into_slices(f, hb, lb, &input, detect_best_kernel())
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
         }
@@ -1269,9 +1482,9 @@ pub fn lpc_wasm(
         cycle_mult: Some(cycle_mult),
         tr_mult: Some(tr_mult),
     };
-    
+
     let input = LpcInput::from_slices(high, low, close, src, params);
-    
+
     match lpc(&input) {
         Ok(output) => {
             let result = LpcResult {
@@ -1296,15 +1509,15 @@ pub struct LpcJsOutput {
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = lpc)]
 pub fn lpc_js(
-    high: &[f64], 
-    low: &[f64], 
-    close: &[f64], 
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
     src: &[f64],
-    cutoff_type: &str, 
-    fixed_period: usize, 
-    max_cycle_limit: usize, 
-    cycle_mult: f64, 
-    tr_mult: f64
+    cutoff_type: &str,
+    fixed_period: usize,
+    max_cycle_limit: usize,
+    cycle_mult: f64,
+    tr_mult: f64,
 ) -> Result<Vec<f64>, JsValue> {
     let params = LpcParams {
         cutoff_type: Some(cutoff_type.to_string()),
@@ -1336,23 +1549,23 @@ pub struct LpcBatchConfig {
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct LpcBatchJsOutput {
-    pub values: Vec<Vec<f64>>,  // 2D array: rows × cols
+    pub values: Vec<Vec<f64>>, // 2D array: rows × cols
     pub fixed_periods: Vec<usize>,
     pub cycle_mults: Vec<f64>,
     pub tr_mults: Vec<f64>,
     pub rows: usize,
     pub cols: usize,
-    pub order: Vec<String>,  // ["filter", "high", "low"]
+    pub order: Vec<String>, // ["filter", "high", "low"]
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = lpc_batch)]
 pub fn lpc_batch_unified_js(
-    high: &[f64], 
-    low: &[f64], 
-    close: &[f64], 
-    src: &[f64], 
-    config: JsValue
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    src: &[f64],
+    config: JsValue,
 ) -> Result<JsValue, JsValue> {
     let cfg: LpcBatchConfig = serde_wasm_bindgen::from_value(config)
         .map_err(|e| JsValue::from_str(&format!("Invalid config: {e}")))?;
@@ -1365,7 +1578,7 @@ pub fn lpc_batch_unified_js(
     };
     let out = lpc_batch_with_kernel(high, low, close, src, &sweep, detect_best_kernel())
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
-    
+
     // Convert flat values to 2D array for JavaScript
     let mut values_2d = Vec::with_capacity(out.rows);
     for i in 0..out.rows {
@@ -1373,20 +1586,20 @@ pub fn lpc_batch_unified_js(
         let end = start + out.cols;
         values_2d.push(out.values[start..end].to_vec());
     }
-    
+
     // Extract parameter arrays from combos
     // Since each combo generates 3 rows (filter, high, low), we need to repeat each param 3 times
     let num_combos = out.combos.len();
     let mut fixed_periods = Vec::with_capacity(num_combos);
     let mut cycle_mults = Vec::with_capacity(num_combos);
     let mut tr_mults = Vec::with_capacity(num_combos);
-    
+
     for combo in &out.combos {
         fixed_periods.push(combo.fixed_period.unwrap());
         cycle_mults.push(combo.cycle_mult.unwrap());
         tr_mults.push(combo.tr_mult.unwrap());
     }
-    
+
     let js = LpcBatchJsOutput {
         values: values_2d,
         fixed_periods,
@@ -1396,7 +1609,8 @@ pub fn lpc_batch_unified_js(
         cols: out.cols,
         order: vec!["filter".to_string(), "high".to_string(), "low".to_string()],
     };
-    serde_wasm_bindgen::to_value(&js).map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
+    serde_wasm_bindgen::to_value(&js)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
 }
 
 #[cfg(feature = "wasm")]
@@ -1420,7 +1634,10 @@ pub fn lpc_batch_into(
     cutoff_type: &str,
     max_cycle_limit: usize,
 ) -> Result<usize, JsValue> {
-    if [high_ptr, low_ptr, close_ptr, src_ptr, out_ptr].iter().any(|&p| p.is_null()) {
+    if [high_ptr, low_ptr, close_ptr, src_ptr, out_ptr]
+        .iter()
+        .any(|&p| p.is_null())
+    {
         return Err(JsValue::from_str("null pointer passed to lpc_batch_into"));
     }
     unsafe {
@@ -1452,8 +1669,17 @@ pub fn lpc_batch_into(
             }
         }
 
-        lpc_batch_inner_into(h, l, c, s, &sweep, crate::utilities::enums::Kernel::Auto, first, out)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        lpc_batch_inner_into(
+            h,
+            l,
+            c,
+            s,
+            &sweep,
+            crate::utilities::enums::Kernel::Auto,
+            first,
+            out,
+        )
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
         Ok(rows)
     }
 }
@@ -1471,28 +1697,50 @@ pub fn lpc_into_slices(
     let (h, l, c, s, cutoff, fp, mcl, cm, tm, first, _chosen) = lpc_prepare(input, kern)?;
     let n = s.len();
     if filter_dst.len() != n || high_band_dst.len() != n || low_band_dst.len() != n {
-        return Err(LpcError::InvalidPeriod { period: filter_dst.len(), data_len: n });
+        return Err(LpcError::InvalidPeriod {
+            period: filter_dst.len(),
+            data_len: n,
+        });
     }
-    lpc_compute_into(h, l, c, s, &cutoff, fp, mcl, cm, tm, first, kern, filter_dst, high_band_dst, low_band_dst);
+    lpc_compute_into(
+        h,
+        l,
+        c,
+        s,
+        &cutoff,
+        fp,
+        mcl,
+        cm,
+        tm,
+        first,
+        kern,
+        filter_dst,
+        high_band_dst,
+        low_band_dst,
+    );
     Ok(())
 }
 
 // Helper functions for batch processing
 #[inline]
 fn axis_usize((s, e, st): (usize, usize, usize)) -> Vec<usize> {
-    if st == 0 || s == e { return vec![s]; }
+    if st == 0 || s == e {
+        return vec![s];
+    }
     (s..=e).step_by(st).collect()
 }
 
 #[inline]
 fn axis_f64((s, e, st): (f64, f64, f64)) -> Vec<f64> {
-    if st.abs() < 1e-12 || (s - e).abs() < 1e-12 { return vec![s]; }
-    let mut v = Vec::new(); 
-    let mut x = s; 
-    while x <= e + 1e-12 { 
-        v.push(x); 
-        x += st; 
-    } 
+    if st.abs() < 1e-12 || (s - e).abs() < 1e-12 {
+        return vec![s];
+    }
+    let mut v = Vec::new();
+    let mut x = s;
+    while x <= e + 1e-12 {
+        v.push(x);
+        x += st;
+    }
     v
 }
 
@@ -1519,26 +1767,37 @@ fn expand_grid_lpc(r: &LpcBatchRange) -> Vec<LpcParams> {
 }
 
 pub fn lpc_batch_with_kernel(
-    high: &[f64], 
-    low: &[f64], 
-    close: &[f64], 
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
     src: &[f64],
-    sweep: &LpcBatchRange, 
-    k: Kernel
+    sweep: &LpcBatchRange,
+    k: Kernel,
 ) -> Result<LpcBatchOutput, LpcError> {
-    if src.is_empty() { return Err(LpcError::EmptyInputData); }
-    if high.len() != src.len() || low.len() != src.len() || close.len() != src.len() { 
-        return Err(LpcError::MissingData); 
+    if src.is_empty() {
+        return Err(LpcError::EmptyInputData);
+    }
+    if high.len() != src.len() || low.len() != src.len() || close.len() != src.len() {
+        return Err(LpcError::MissingData);
     }
 
-    let first = (0..src.len()).find(|&i| !src[i].is_nan() && !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
+    let first = (0..src.len())
+        .find(|&i| !src[i].is_nan() && !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
         .ok_or(LpcError::AllValuesNaN)?;
-    if src.len().saturating_sub(first) < 2 { 
-        return Err(LpcError::NotEnoughValidData { needed: 2, valid: src.len().saturating_sub(first) }); 
+    if src.len().saturating_sub(first) < 2 {
+        return Err(LpcError::NotEnoughValidData {
+            needed: 2,
+            valid: src.len().saturating_sub(first),
+        });
     }
 
     let combos = expand_grid_lpc(sweep);
-    if combos.is_empty() { return Err(LpcError::InvalidPeriod { period: 0, data_len: 0 }); }
+    if combos.is_empty() {
+        return Err(LpcError::InvalidPeriod {
+            period: 0,
+            data_len: 0,
+        });
+    }
 
     let cols = src.len();
     let rows = combos.len() * 3;
@@ -1549,25 +1808,35 @@ pub fn lpc_batch_with_kernel(
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
-    let out: &mut [f64] = unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
+    let out: &mut [f64] =
+        unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
     // fill
     lpc_batch_inner_into(high, low, close, src, sweep, k, first, out)?;
 
     let values = unsafe {
-        Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, guard.len(), guard.capacity())
+        Vec::from_raw_parts(
+            guard.as_mut_ptr() as *mut f64,
+            guard.len(),
+            guard.capacity(),
+        )
     };
 
-    Ok(LpcBatchOutput { values, combos, rows, cols })
+    Ok(LpcBatchOutput {
+        values,
+        combos,
+        rows,
+        cols,
+    })
 }
 
 fn lpc_batch_inner_into(
-    high: &[f64], 
-    low: &[f64], 
-    close: &[f64], 
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
     src: &[f64],
-    sweep: &LpcBatchRange, 
-    k: Kernel, 
+    sweep: &LpcBatchRange,
+    k: Kernel,
     first: usize,
     out: &mut [f64],
 ) -> Result<(), LpcError> {
@@ -1579,36 +1848,48 @@ fn lpc_batch_inner_into(
         other => other,
     };
 
-    let out_mu = unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len()) };
+    let out_mu = unsafe {
+        std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
+    };
 
     let do_row = |combo_idx: usize, dst3: &mut [MaybeUninit<f64>]| {
         let params = &combos[combo_idx];
         let mut rowslice = |k: usize| -> &mut [f64] {
             let start = k * cols;
-            unsafe { core::slice::from_raw_parts_mut(dst3.as_mut_ptr().add(start) as *mut f64, cols) }
+            unsafe {
+                core::slice::from_raw_parts_mut(dst3.as_mut_ptr().add(start) as *mut f64, cols)
+            }
         };
         let (f_dst, h_dst, l_dst) = (rowslice(0), rowslice(1), rowslice(2));
 
         lpc_compute_into_prefilled(
-            high, low, close, src,
+            high,
+            low,
+            close,
+            src,
             params.cutoff_type.as_ref().unwrap(),
             params.fixed_period.unwrap(),
             params.max_cycle_limit.unwrap(),
             params.cycle_mult.unwrap(),
             params.tr_mult.unwrap(),
             first,
-            f_dst, h_dst, l_dst,
+            f_dst,
+            h_dst,
+            l_dst,
         );
     };
 
     #[cfg(not(target_arch = "wasm32"))]
     {
-        out_mu.par_chunks_mut(3 * cols).enumerate().for_each(|(combo_idx, chunk)| do_row(combo_idx, chunk));
+        out_mu
+            .par_chunks_mut(3 * cols)
+            .enumerate()
+            .for_each(|(combo_idx, chunk)| do_row(combo_idx, chunk));
     }
     #[cfg(target_arch = "wasm32")]
     {
-        for (combo_idx, chunk) in out_mu.chunks_mut(3 * cols).enumerate() { 
-            do_row(combo_idx, chunk); 
+        for (combo_idx, chunk) in out_mu.chunks_mut(3 * cols).enumerate() {
+            do_row(combo_idx, chunk);
         }
     }
 
@@ -1660,59 +1941,86 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
     #[cfg(feature = "proptest")]
     use proptest::prelude::*;
-    
+
     fn check_lpc_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let params = LpcParams::default();
         let input = LpcInput::from_candles(&candles, "close", params);
         let result = lpc_with_kernel(&input, kernel)?;
-        
+
         // Reference values from actual implementation output
         let expected_filter = vec![
-            59346.30519969, 59327.59393858, 59290.68770889, 
-            59257.83622820, 59196.32617649
+            59346.30519969,
+            59327.59393858,
+            59290.68770889,
+            59257.83622820,
+            59196.32617649,
         ];
-        
+
         let expected_high_band = vec![
-            60351.08358296, 60220.19604722, 60090.66513329,
-            59981.40792457, 59903.93414995
+            60351.08358296,
+            60220.19604722,
+            60090.66513329,
+            59981.40792457,
+            59903.93414995,
         ];
-        
+
         let expected_low_band = vec![
-            58341.52681643, 58434.99182994, 58490.71028450,
-            58534.26453184, 58488.71820303
+            58341.52681643,
+            58434.99182994,
+            58490.71028450,
+            58534.26453184,
+            58488.71820303,
         ];
-        
+
         let start_idx = result.filter.len() - 5;
         for i in 0..5 {
             let filter_diff = (result.filter[start_idx + i] - expected_filter[i]).abs();
             let high_diff = (result.high_band[start_idx + i] - expected_high_band[i]).abs();
             let low_diff = (result.low_band[start_idx + i] - expected_low_band[i]).abs();
-            
-            assert!(filter_diff < 0.01, 
-                "[{}] LPC Filter {:?} mismatch at idx {}: got {}, expected {}", 
-                test_name, kernel, i, result.filter[start_idx + i], expected_filter[i]);
-                
-            assert!(high_diff < 0.01,
+
+            assert!(
+                filter_diff < 0.01,
+                "[{}] LPC Filter {:?} mismatch at idx {}: got {}, expected {}",
+                test_name,
+                kernel,
+                i,
+                result.filter[start_idx + i],
+                expected_filter[i]
+            );
+
+            assert!(
+                high_diff < 0.01,
                 "[{}] LPC High Band {:?} mismatch at idx {}: got {}, expected {}",
-                test_name, kernel, i, result.high_band[start_idx + i], expected_high_band[i]);
-                
-            assert!(low_diff < 0.01,
+                test_name,
+                kernel,
+                i,
+                result.high_band[start_idx + i],
+                expected_high_band[i]
+            );
+
+            assert!(
+                low_diff < 0.01,
                 "[{}] LPC Low Band {:?} mismatch at idx {}: got {}, expected {}",
-                test_name, kernel, i, result.low_band[start_idx + i], expected_low_band[i]);
+                test_name,
+                kernel,
+                i,
+                result.low_band[start_idx + i],
+                expected_low_band[i]
+            );
         }
-        
+
         Ok(())
     }
-    
+
     fn check_lpc_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let params = LpcParams {
             cutoff_type: None,
             fixed_period: None,
@@ -1723,15 +2031,15 @@ mod tests {
         let input = LpcInput::from_candles(&candles, "close", params);
         let output = lpc_with_kernel(&input, kernel)?;
         assert_eq!(output.filter.len(), candles.close.len());
-        
+
         Ok(())
     }
-    
+
     fn check_lpc_default_candles(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let input = LpcInput::with_default_candles(&candles);
         match input.data {
             LpcData::Candles { source, .. } => assert_eq!(source, "close"),
@@ -1739,10 +2047,10 @@ mod tests {
         }
         let output = lpc_with_kernel(&input, kernel)?;
         assert_eq!(output.filter.len(), candles.close.len());
-        
+
         Ok(())
     }
-    
+
     fn check_lpc_zero_period(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let data = vec![10.0, 20.0, 30.0];
@@ -1755,11 +2063,18 @@ mod tests {
         };
         let input = LpcInput::from_slices(&data, &data, &data, &data, params);
         let res = lpc_with_kernel(&input, kernel);
-        assert!(res.is_err(), "[{}] LPC should fail with zero period", test_name);
+        assert!(
+            res.is_err(),
+            "[{}] LPC should fail with zero period",
+            test_name
+        );
         Ok(())
     }
-    
-    fn check_lpc_period_exceeds_length(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+
+    fn check_lpc_period_exceeds_length(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let data = vec![10.0, 20.0, 30.0];
         let params = LpcParams {
@@ -1778,7 +2093,7 @@ mod tests {
         );
         Ok(())
     }
-    
+
     fn check_lpc_very_small_dataset(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let single_point = vec![42.0];
@@ -1789,18 +2104,28 @@ mod tests {
             cycle_mult: None,
             tr_mult: None,
         };
-        let input = LpcInput::from_slices(&single_point, &single_point, &single_point, &single_point, params);
+        let input = LpcInput::from_slices(
+            &single_point,
+            &single_point,
+            &single_point,
+            &single_point,
+            params,
+        );
         let res = lpc_with_kernel(&input, kernel);
-        assert!(res.is_err(), "[{}] LPC should fail with insufficient data", test_name);
+        assert!(
+            res.is_err(),
+            "[{}] LPC should fail with insufficient data",
+            test_name
+        );
         Ok(())
     }
-    
+
     fn check_lpc_empty_input(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let empty: Vec<f64> = vec![];
         let params = LpcParams::default();
         let input = LpcInput::from_slices(&empty, &empty, &empty, &empty, params);
-        
+
         let res = lpc_with_kernel(&input, kernel);
         assert!(
             matches!(res, Err(LpcError::EmptyInputData)),
@@ -1809,8 +2134,11 @@ mod tests {
         );
         Ok(())
     }
-    
-    fn check_lpc_invalid_cutoff_type(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+
+    fn check_lpc_invalid_cutoff_type(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let params = LpcParams {
@@ -1829,13 +2157,13 @@ mod tests {
         );
         Ok(())
     }
-    
+
     fn check_lpc_all_nan(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let nan_data = vec![f64::NAN, f64::NAN, f64::NAN];
         let params = LpcParams::default();
         let input = LpcInput::from_slices(&nan_data, &nan_data, &nan_data, &nan_data, params);
-        
+
         let res = lpc_with_kernel(&input, kernel);
         // Should return AllValuesNaN error
         assert!(
@@ -1845,12 +2173,12 @@ mod tests {
         );
         Ok(())
     }
-    
+
     fn check_lpc_reinput(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let first_params = LpcParams {
             cutoff_type: Some("fixed".to_string()),
             fixed_period: Some(20),
@@ -1860,7 +2188,7 @@ mod tests {
         };
         let first_input = LpcInput::from_candles(&candles, "close", first_params);
         let first_result = lpc_with_kernel(&first_input, kernel)?;
-        
+
         // Use filter output as new source
         let second_params = LpcParams {
             cutoff_type: Some("fixed".to_string()),
@@ -1874,19 +2202,19 @@ mod tests {
             &candles.low,
             &candles.close,
             &first_result.filter,
-            second_params
+            second_params,
         );
         let second_result = lpc_with_kernel(&second_input, kernel)?;
-        
+
         assert_eq!(second_result.filter.len(), first_result.filter.len());
         Ok(())
     }
-    
+
     fn check_lpc_nan_handling(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let input = LpcInput::from_candles(
             &candles,
             "close",
@@ -1912,19 +2240,19 @@ mod tests {
         }
         Ok(())
     }
-    
+
     fn check_lpc_streaming(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        
+
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let cutoff_type = "fixed".to_string();
         let fixed_period = 20;
         let max_cycle_limit = 60;
         let cycle_mult = 1.0;
         let tr_mult = 1.0;
-        
+
         let input = LpcInput::from_candles(
             &candles,
             "close",
@@ -1937,7 +2265,7 @@ mod tests {
             },
         );
         let batch_output = lpc_with_kernel(&input, kernel)?;
-        
+
         let mut stream = LpcStream::try_new(LpcParams {
             cutoff_type: Some(cutoff_type),
             fixed_period: Some(fixed_period),
@@ -1945,13 +2273,18 @@ mod tests {
             cycle_mult: Some(cycle_mult),
             tr_mult: Some(tr_mult),
         })?;
-        
+
         let mut stream_filter = Vec::with_capacity(candles.close.len());
         let mut stream_high = Vec::with_capacity(candles.close.len());
         let mut stream_low = Vec::with_capacity(candles.close.len());
-        
+
         for i in 0..candles.close.len() {
-            match stream.update(candles.high[i], candles.low[i], candles.close[i], candles.close[i]) {
+            match stream.update(
+                candles.high[i],
+                candles.low[i],
+                candles.close[i],
+                candles.close[i],
+            ) {
                 Some((f, h, l)) => {
                     stream_filter.push(f);
                     stream_high.push(h);
@@ -1964,29 +2297,30 @@ mod tests {
                 }
             }
         }
-        
+
         assert_eq!(batch_output.filter.len(), stream_filter.len());
-        
+
         // Streaming may differ slightly from batch, just verify reasonable values
         for i in 20..100.min(stream_filter.len()) {
             if !stream_filter[i].is_nan() {
                 assert!(
                     stream_low[i] <= stream_filter[i] && stream_filter[i] <= stream_high[i],
                     "[{}] Stream filter not between bands at idx {}",
-                    test_name, i
+                    test_name,
+                    i
                 );
             }
         }
         Ok(())
     }
-    
+
     #[cfg(debug_assertions)]
     fn check_lpc_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        
+
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let test_params = vec![
             LpcParams::default(),
             LpcParams {
@@ -2011,60 +2345,64 @@ mod tests {
                 tr_mult: Some(2.0),
             },
         ];
-        
+
         for (param_idx, params) in test_params.iter().enumerate() {
             let input = LpcInput::from_candles(&candles, "close", params.clone());
             let output = lpc_with_kernel(&input, kernel)?;
-            
+
             // Check all three outputs for poison values
             for i in 0..output.filter.len() {
                 let f = output.filter[i];
                 let hi = output.high_band[i];
                 let lo = output.low_band[i];
-                
+
                 for &val in &[f, hi, lo] {
-                    if val.is_nan() { continue; }
+                    if val.is_nan() {
+                        continue;
+                    }
                     let bits = val.to_bits();
-                    if bits == 0x11111111_11111111 { 
-                        panic!("[{}] alloc_with_nan_prefix poison at {}", test_name, i); 
+                    if bits == 0x11111111_11111111 {
+                        panic!("[{}] alloc_with_nan_prefix poison at {}", test_name, i);
                     }
-                    if bits == 0x22222222_22222222 { 
-                        panic!("[{}] init_matrix_prefixes poison at {}", test_name, i); 
+                    if bits == 0x22222222_22222222 {
+                        panic!("[{}] init_matrix_prefixes poison at {}", test_name, i);
                     }
-                    if bits == 0x33333333_33333333 { 
-                        panic!("[{}] make_uninit_matrix poison at {}", test_name, i); 
+                    if bits == 0x33333333_33333333 {
+                        panic!("[{}] make_uninit_matrix poison at {}", test_name, i);
                     }
                 }
             }
         }
-        
+
         Ok(())
     }
-    
+
     #[cfg(not(debug_assertions))]
     fn check_lpc_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
-    
+
     #[cfg(feature = "proptest")]
     #[allow(clippy::float_cmp)]
-    fn check_lpc_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_lpc_property(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
-        
-        let strat = (3usize..=50)
-            .prop_flat_map(|period| {
-                (
-                    prop::collection::vec(
-                        (100.0f64..200.0f64).prop_filter("finite", |x| x.is_finite()),
-                        period..400,
-                    ),
-                    Just(period),
-                    0.5f64..2.0f64,
-                    0.5f64..2.0f64,
-                )
-            });
-        
+
+        let strat = (3usize..=50).prop_flat_map(|period| {
+            (
+                prop::collection::vec(
+                    (100.0f64..200.0f64).prop_filter("finite", |x| x.is_finite()),
+                    period..400,
+                ),
+                Just(period),
+                0.5f64..2.0f64,
+                0.5f64..2.0f64,
+            )
+        });
+
         proptest::test_runner::TestRunner::default()
             .run(&strat, |(data, period, cycle_mult, tr_mult)| {
                 let params = LpcParams {
@@ -2075,15 +2413,15 @@ mod tests {
                     tr_mult: Some(tr_mult),
                 };
                 let input = LpcInput::from_slices(&data, &data, &data, &data, params);
-                
+
                 let result = lpc_with_kernel(&input, kernel).unwrap();
                 let ref_result = lpc_with_kernel(&input, Kernel::Scalar).unwrap();
-                
+
                 // Basic sanity checks
                 prop_assert_eq!(result.filter.len(), data.len());
                 prop_assert_eq!(result.high_band.len(), data.len());
                 prop_assert_eq!(result.low_band.len(), data.len());
-                
+
                 // Check filter is between bands
                 // Skip first few bars after warmup to avoid edge effects
                 let check_start = (period * 2).min(data.len());
@@ -2091,7 +2429,7 @@ mod tests {
                     let f = result.filter[i];
                     let h = result.high_band[i];
                     let l = result.low_band[i];
-                    
+
                     if !f.is_nan() && !h.is_nan() && !l.is_nan() {
                         // Note: Due to the lagging nature of the true range filter,
                         // bands can temporarily invert during extreme price jumps.
@@ -2101,29 +2439,31 @@ mod tests {
                         prop_assert!(h.is_finite(), "high_band at {i} not finite");
                         prop_assert!(l.is_finite(), "low_band at {i} not finite");
                     }
-                    
+
                     // Compare with scalar reference
                     if !f.is_nan() && !ref_result.filter[i].is_nan() {
                         let diff = (f - ref_result.filter[i]).abs();
                         prop_assert!(
                             diff <= 1e-9,
                             "mismatch idx {i}: {} vs {} (diff={})",
-                            f, ref_result.filter[i], diff
+                            f,
+                            ref_result.filter[i],
+                            diff
                         );
                     }
                 }
                 Ok(())
             })
             .unwrap();
-        
+
         Ok(())
     }
-    
+
     fn check_lpc_fixed_mode(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let params = LpcParams {
             cutoff_type: Some("fixed".to_string()),
             fixed_period: Some(20),
@@ -2131,17 +2471,17 @@ mod tests {
             cycle_mult: Some(1.0),
             tr_mult: Some(1.0),
         };
-        
+
         let input = LpcInput::from_candles(&candles, "close", params);
         let result = lpc_with_kernel(&input, kernel)?;
-        
+
         assert_eq!(result.filter.len(), candles.close.len());
         assert_eq!(result.high_band.len(), candles.close.len());
         assert_eq!(result.low_band.len(), candles.close.len());
-        
+
         Ok(())
     }
-    
+
     // Test generation macros
     macro_rules! generate_all_lpc_tests {
         ($($test_fn:ident),*) => {
@@ -2173,7 +2513,7 @@ mod tests {
             }
         }
     }
-    
+
     generate_all_lpc_tests!(
         check_lpc_accuracy,
         check_lpc_partial_params,
@@ -2190,10 +2530,10 @@ mod tests {
         check_lpc_fixed_mode,
         check_lpc_no_poison
     );
-    
+
     #[cfg(feature = "proptest")]
     generate_all_lpc_tests!(check_lpc_property);
-    
+
     #[test]
     fn test_lpc_streaming_basic() {
         // Basic test for streaming functionality
@@ -2204,9 +2544,9 @@ mod tests {
             cycle_mult: Some(1.0),
             tr_mult: Some(1.0),
         };
-        
+
         let mut stream = LpcStream::try_new(params).unwrap();
-        
+
         // Feed some data
         let test_data = vec![
             (100.0, 95.0, 98.0, 98.0),
@@ -2220,7 +2560,7 @@ mod tests {
             (109.0, 105.0, 108.0, 108.0),
             (110.0, 106.0, 109.0, 109.0),
         ];
-        
+
         for (high, low, close, src) in test_data {
             let result = stream.update(high, low, close, src);
             if let Some((filter, high_band, low_band)) = result {
@@ -2230,7 +2570,7 @@ mod tests {
             }
         }
     }
-    
+
     fn check_batch_shapes(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
@@ -2259,10 +2599,15 @@ mod tests {
         let sweep = LpcBatchRange::default();
         let out = lpc_batch_with_kernel(&c.high, &c.low, &c.close, &c.close, &sweep, kernel)?;
         for &v in &out.values {
-            if v.is_nan() { continue; }
+            if v.is_nan() {
+                continue;
+            }
             let b = v.to_bits();
-            assert!(b != 0x11111111_11111111 && b != 0x22222222_22222222 && b != 0x33333333_33333333,
-                    "[{}] found poison value", test);
+            assert!(
+                b != 0x11111111_11111111 && b != 0x22222222_22222222 && b != 0x33333333_33333333,
+                "[{}] found poison value",
+                test
+            );
         }
         Ok(())
     }

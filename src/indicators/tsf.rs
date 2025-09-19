@@ -20,9 +20,9 @@
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
-use pyo3::prelude::*;
-#[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
@@ -33,7 +33,10 @@ use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix};
+use crate::utilities::helpers::{
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    make_uninit_matrix,
+};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -46,734 +49,842 @@ use std::mem::MaybeUninit;
 use thiserror::Error;
 
 impl<'a> AsRef<[f64]> for TsfInput<'a> {
-	#[inline(always)]
-	fn as_ref(&self) -> &[f64] {
-		match &self.data {
-			TsfData::Slice(slice) => slice,
-			TsfData::Candles { candles, source } => source_type(candles, source),
-		}
-	}
+    #[inline(always)]
+    fn as_ref(&self) -> &[f64] {
+        match &self.data {
+            TsfData::Slice(slice) => slice,
+            TsfData::Candles { candles, source } => source_type(candles, source),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub enum TsfData<'a> {
-	Candles { candles: &'a Candles, source: &'a str },
-	Slice(&'a [f64]),
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    Slice(&'a [f64]),
 }
 
 #[derive(Debug, Clone)]
 pub struct TsfOutput {
-	pub values: Vec<f64>,
+    pub values: Vec<f64>,
 }
 
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct TsfParams {
-	pub period: Option<usize>,
+    pub period: Option<usize>,
 }
 
 impl Default for TsfParams {
-	fn default() -> Self {
-		Self { period: Some(14) }
-	}
+    fn default() -> Self {
+        Self { period: Some(14) }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct TsfInput<'a> {
-	pub data: TsfData<'a>,
-	pub params: TsfParams,
+    pub data: TsfData<'a>,
+    pub params: TsfParams,
 }
 
 impl<'a> TsfInput<'a> {
-	#[inline]
-	pub fn from_candles(c: &'a Candles, s: &'a str, p: TsfParams) -> Self {
-		Self {
-			data: TsfData::Candles { candles: c, source: s },
-			params: p,
-		}
-	}
-	#[inline]
-	pub fn from_slice(sl: &'a [f64], p: TsfParams) -> Self {
-		Self {
-			data: TsfData::Slice(sl),
-			params: p,
-		}
-	}
-	#[inline]
-	pub fn with_default_candles(c: &'a Candles) -> Self {
-		Self::from_candles(c, "close", TsfParams::default())
-	}
-	#[inline]
-	pub fn get_period(&self) -> usize {
-		self.params.period.unwrap_or(14)
-	}
+    #[inline]
+    pub fn from_candles(c: &'a Candles, s: &'a str, p: TsfParams) -> Self {
+        Self {
+            data: TsfData::Candles {
+                candles: c,
+                source: s,
+            },
+            params: p,
+        }
+    }
+    #[inline]
+    pub fn from_slice(sl: &'a [f64], p: TsfParams) -> Self {
+        Self {
+            data: TsfData::Slice(sl),
+            params: p,
+        }
+    }
+    #[inline]
+    pub fn with_default_candles(c: &'a Candles) -> Self {
+        Self::from_candles(c, "close", TsfParams::default())
+    }
+    #[inline]
+    pub fn get_period(&self) -> usize {
+        self.params.period.unwrap_or(14)
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
 pub struct TsfBuilder {
-	period: Option<usize>,
-	kernel: Kernel,
+    period: Option<usize>,
+    kernel: Kernel,
 }
 
 impl Default for TsfBuilder {
-	fn default() -> Self {
-		Self {
-			period: None,
-			kernel: Kernel::Auto,
-		}
-	}
+    fn default() -> Self {
+        Self {
+            period: None,
+            kernel: Kernel::Auto,
+        }
+    }
 }
 
 impl TsfBuilder {
-	#[inline(always)]
-	pub fn new() -> Self {
-		Self::default()
-	}
-	#[inline(always)]
-	pub fn period(mut self, n: usize) -> Self {
-		self.period = Some(n);
-		self
-	}
-	#[inline(always)]
-	pub fn kernel(mut self, k: Kernel) -> Self {
-		self.kernel = k;
-		self
-	}
-	#[inline(always)]
-	pub fn apply(self, c: &Candles) -> Result<TsfOutput, TsfError> {
-		let p = TsfParams { period: self.period };
-		let i = TsfInput::from_candles(c, "close", p);
-		tsf_with_kernel(&i, self.kernel)
-	}
-	#[inline(always)]
-	pub fn apply_slice(self, d: &[f64]) -> Result<TsfOutput, TsfError> {
-		let p = TsfParams { period: self.period };
-		let i = TsfInput::from_slice(d, p);
-		tsf_with_kernel(&i, self.kernel)
-	}
-	#[inline(always)]
-	pub fn into_stream(self) -> Result<TsfStream, TsfError> {
-		let p = TsfParams { period: self.period };
-		TsfStream::try_new(p)
-	}
+    #[inline(always)]
+    pub fn new() -> Self {
+        Self::default()
+    }
+    #[inline(always)]
+    pub fn period(mut self, n: usize) -> Self {
+        self.period = Some(n);
+        self
+    }
+    #[inline(always)]
+    pub fn kernel(mut self, k: Kernel) -> Self {
+        self.kernel = k;
+        self
+    }
+    #[inline(always)]
+    pub fn apply(self, c: &Candles) -> Result<TsfOutput, TsfError> {
+        let p = TsfParams {
+            period: self.period,
+        };
+        let i = TsfInput::from_candles(c, "close", p);
+        tsf_with_kernel(&i, self.kernel)
+    }
+    #[inline(always)]
+    pub fn apply_slice(self, d: &[f64]) -> Result<TsfOutput, TsfError> {
+        let p = TsfParams {
+            period: self.period,
+        };
+        let i = TsfInput::from_slice(d, p);
+        tsf_with_kernel(&i, self.kernel)
+    }
+    #[inline(always)]
+    pub fn into_stream(self) -> Result<TsfStream, TsfError> {
+        let p = TsfParams {
+            period: self.period,
+        };
+        TsfStream::try_new(p)
+    }
 }
 
 #[derive(Debug, Error)]
 pub enum TsfError {
-	#[error("tsf: Input data slice is empty.")]
-	EmptyInputData,
-	#[error("tsf: All values are NaN.")]
-	AllValuesNaN,
-	#[error("tsf: Invalid period: period = {period}, data length = {data_len}")]
-	InvalidPeriod { period: usize, data_len: usize },
-	#[error("tsf: Not enough valid data: needed = {needed}, valid = {valid}")]
-	NotEnoughValidData { needed: usize, valid: usize },
-	#[error("tsf: Mismatched output length: expected = {expected}, actual = {actual}")]
-	MismatchedOutputLen { expected: usize, actual: usize },
-	#[error("tsf: Period must be at least 2 for linear regression, got {period}")]
-	PeriodTooSmall { period: usize },
+    #[error("tsf: Input data slice is empty.")]
+    EmptyInputData,
+    #[error("tsf: All values are NaN.")]
+    AllValuesNaN,
+    #[error("tsf: Invalid period: period = {period}, data length = {data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
+    #[error("tsf: Not enough valid data: needed = {needed}, valid = {valid}")]
+    NotEnoughValidData { needed: usize, valid: usize },
+    #[error("tsf: Mismatched output length: expected = {expected}, actual = {actual}")]
+    MismatchedOutputLen { expected: usize, actual: usize },
+    #[error("tsf: Period must be at least 2 for linear regression, got {period}")]
+    PeriodTooSmall { period: usize },
 }
 
 #[inline]
 pub fn tsf(input: &TsfInput) -> Result<TsfOutput, TsfError> {
-	tsf_with_kernel(input, Kernel::Auto)
+    tsf_with_kernel(input, Kernel::Auto)
 }
 
 pub fn tsf_with_kernel(input: &TsfInput, kernel: Kernel) -> Result<TsfOutput, TsfError> {
-	let data: &[f64] = match &input.data {
-		TsfData::Candles { candles, source } => source_type(candles, source),
-		TsfData::Slice(sl) => sl,
-	};
+    let data: &[f64] = match &input.data {
+        TsfData::Candles { candles, source } => source_type(candles, source),
+        TsfData::Slice(sl) => sl,
+    };
 
-	let len = data.len();
-	if len == 0 {
-		return Err(TsfError::EmptyInputData);
-	}
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(TsfError::AllValuesNaN)?;
-	let period = input.get_period();
+    let len = data.len();
+    if len == 0 {
+        return Err(TsfError::EmptyInputData);
+    }
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(TsfError::AllValuesNaN)?;
+    let period = input.get_period();
 
-	if period < 2 {
-		return Err(TsfError::PeriodTooSmall { period });
-	}
-	if period > len {
-		return Err(TsfError::InvalidPeriod { period, data_len: len });
-	}
-	if (len - first) < period {
-		return Err(TsfError::NotEnoughValidData {
-			needed: period,
-			valid: len - first,
-		});
-	}
+    if period < 2 {
+        return Err(TsfError::PeriodTooSmall { period });
+    }
+    if period > len {
+        return Err(TsfError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
+    }
+    if (len - first) < period {
+        return Err(TsfError::NotEnoughValidData {
+            needed: period,
+            valid: len - first,
+        });
+    }
 
-	let chosen = match kernel {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
-	let mut out = alloc_with_nan_prefix(len, first + period - 1);
+    let chosen = match kernel {
+        Kernel::Auto => detect_best_kernel(),
+        other => other,
+    };
+    let mut out = alloc_with_nan_prefix(len, first + period - 1);
 
-	unsafe {
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => tsf_scalar(data, period, first, &mut out),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => tsf_avx2(data, period, first, &mut out),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => tsf_avx512(data, period, first, &mut out),
-			_ => unreachable!(),
-		}
-	}
+    unsafe {
+        match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch => tsf_scalar(data, period, first, &mut out),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => tsf_avx2(data, period, first, &mut out),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => tsf_avx512(data, period, first, &mut out),
+            _ => unreachable!(),
+        }
+    }
 
-	Ok(TsfOutput { values: out })
+    Ok(TsfOutput { values: out })
 }
 
 #[inline]
 pub fn tsf_into_slice(dst: &mut [f64], input: &TsfInput, kern: Kernel) -> Result<(), TsfError> {
-	let data: &[f64] = match &input.data {
-		TsfData::Candles { candles, source } => source_type(candles, source),
-		TsfData::Slice(sl) => sl,
-	};
+    let data: &[f64] = match &input.data {
+        TsfData::Candles { candles, source } => source_type(candles, source),
+        TsfData::Slice(sl) => sl,
+    };
 
-	let len = data.len();
-	if len == 0 {
-		return Err(TsfError::EmptyInputData);
-	}
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(TsfError::AllValuesNaN)?;
-	let period = input.get_period();
+    let len = data.len();
+    if len == 0 {
+        return Err(TsfError::EmptyInputData);
+    }
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(TsfError::AllValuesNaN)?;
+    let period = input.get_period();
 
-	if period < 2 {
-		return Err(TsfError::PeriodTooSmall { period });
-	}
-	if period > len {
-		return Err(TsfError::InvalidPeriod { period, data_len: len });
-	}
-	if (len - first) < period {
-		return Err(TsfError::NotEnoughValidData {
-			needed: period,
-			valid: len - first,
-		});
-	}
-	if dst.len() != data.len() {
-		return Err(TsfError::MismatchedOutputLen {
-			expected: data.len(),
-			actual: dst.len(),
-		});
-	}
+    if period < 2 {
+        return Err(TsfError::PeriodTooSmall { period });
+    }
+    if period > len {
+        return Err(TsfError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
+    }
+    if (len - first) < period {
+        return Err(TsfError::NotEnoughValidData {
+            needed: period,
+            valid: len - first,
+        });
+    }
+    if dst.len() != data.len() {
+        return Err(TsfError::MismatchedOutputLen {
+            expected: data.len(),
+            actual: dst.len(),
+        });
+    }
 
-	let chosen = match kern {
-		Kernel::Auto => detect_best_kernel(),
-		k => k,
-	};
+    let chosen = match kern {
+        Kernel::Auto => detect_best_kernel(),
+        k => k,
+    };
 
-	match chosen {
-		Kernel::Scalar | Kernel::ScalarBatch => tsf_scalar(data, period, first, dst),
-		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-		Kernel::Avx2 | Kernel::Avx2Batch => unsafe { tsf_avx2(data, period, first, dst) },
-		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-		Kernel::Avx512 | Kernel::Avx512Batch => unsafe { tsf_avx512(data, period, first, dst) },
-		#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-		Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => tsf_scalar(data, period, first, dst),
-		_ => unreachable!(),
-	}
+    match chosen {
+        Kernel::Scalar | Kernel::ScalarBatch => tsf_scalar(data, period, first, dst),
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Avx2 | Kernel::Avx2Batch => unsafe { tsf_avx2(data, period, first, dst) },
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Avx512 | Kernel::Avx512Batch => unsafe { tsf_avx512(data, period, first, dst) },
+        #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+        Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+            tsf_scalar(data, period, first, dst)
+        }
+        _ => unreachable!(),
+    }
 
-	// Fill warmup with NaN
-	let warmup_end = first + period - 1;
-	for v in &mut dst[..warmup_end] {
-		*v = f64::NAN;
-	}
+    // Fill warmup with NaN
+    let warmup_end = first + period - 1;
+    for v in &mut dst[..warmup_end] {
+        *v = f64::NAN;
+    }
 
-	Ok(())
+    Ok(())
 }
 
 #[inline(always)]
 pub fn tsf_scalar(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) {
-	// Precompute ∑ x and ∑ x² for x = 0..period-1
-	let sum_x = (0..period).map(|x| x as f64).sum::<f64>();
-	let sum_x_sqr = (0..period).map(|x| (x as f64) * (x as f64)).sum::<f64>();
-	let divisor = (period as f64 * sum_x_sqr) - (sum_x * sum_x);
+    // Precompute ∑ x and ∑ x² for x = 0..period-1
+    let sum_x = (0..period).map(|x| x as f64).sum::<f64>();
+    let sum_x_sqr = (0..period).map(|x| (x as f64) * (x as f64)).sum::<f64>();
+    let divisor = (period as f64 * sum_x_sqr) - (sum_x * sum_x);
 
-	// We only start writing output once we have 'period' non‐NaN points
-	// at indices [first_val .. first_val + period - 2], so the first valid index is:
-	// i = first_val + period - 1
-	for i in (first_val + period - 1)..data.len() {
-		let mut sum_xy = 0.0;
-		let mut sum_y = 0.0;
+    // We only start writing output once we have 'period' non‐NaN points
+    // at indices [first_val .. first_val + period - 2], so the first valid index is:
+    // i = first_val + period - 1
+    for i in (first_val + period - 1)..data.len() {
+        let mut sum_xy = 0.0;
+        let mut sum_y = 0.0;
 
-		// --- CORRECTION HERE ---
-		// j = 0 should correspond to the oldest point in the window,
-		// i.e. data[i - (period - 1)].  When j = period - 1, that is data[i].
-		for j in 0..period {
-			let idx = i - (period - 1) + j;
-			let val = data[idx];
-			sum_y += val;
-			sum_xy += (j as f64) * val;
-		}
+        // --- CORRECTION HERE ---
+        // j = 0 should correspond to the oldest point in the window,
+        // i.e. data[i - (period - 1)].  When j = period - 1, that is data[i].
+        for j in 0..period {
+            let idx = i - (period - 1) + j;
+            let val = data[idx];
+            sum_y += val;
+            sum_xy += (j as f64) * val;
+        }
 
-		let m = ((period as f64) * sum_xy - sum_x * sum_y) / divisor;
-		let b = (sum_y - m * sum_x) / (period as f64);
-		out[i] = b + m * (period as f64);
-	}
+        let m = ((period as f64) * sum_xy - sum_x * sum_y) / divisor;
+        let b = (sum_y - m * sum_x) / (period as f64);
+        out[i] = b + m * (period as f64);
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn tsf_avx512(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-	unsafe {
-		if period <= 32 {
-			tsf_avx512_short(data, period, first_valid, out);
-		} else {
-			tsf_avx512_long(data, period, first_valid, out);
-		}
-	}
+    unsafe {
+        if period <= 32 {
+            tsf_avx512_short(data, period, first_valid, out);
+        } else {
+            tsf_avx512_long(data, period, first_valid, out);
+        }
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn tsf_avx2(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-	unsafe { tsf_scalar(data, period, first_valid, out) }
+    unsafe { tsf_scalar(data, period, first_valid, out) }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn tsf_avx512_short(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-	tsf_scalar(data, period, first_valid, out)
+    tsf_scalar(data, period, first_valid, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn tsf_avx512_long(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-	tsf_scalar(data, period, first_valid, out)
+    tsf_scalar(data, period, first_valid, out)
 }
 
 #[derive(Debug, Clone)]
 pub struct TsfStream {
-	period: usize,
-	buffer: Vec<f64>,
-	head: usize,
-	filled: bool,
-	sum_x: f64,
-	sum_x_sqr: f64,
-	divisor: f64,
+    period: usize,
+    buffer: Vec<f64>,
+    head: usize,
+    filled: bool,
+    sum_x: f64,
+    sum_x_sqr: f64,
+    divisor: f64,
 }
 
 impl TsfStream {
-	pub fn try_new(params: TsfParams) -> Result<Self, TsfError> {
-		let period = params.period.unwrap_or(14);
-		if period < 2 {
-			return Err(TsfError::PeriodTooSmall { period });
-		}
+    pub fn try_new(params: TsfParams) -> Result<Self, TsfError> {
+        let period = params.period.unwrap_or(14);
+        if period < 2 {
+            return Err(TsfError::PeriodTooSmall { period });
+        }
 
-		// Precompute ∑ x and ∑ x² for x = 0..period-1
-		let sum_x = (0..period).map(|x| x as f64).sum::<f64>();
-		let sum_x_sqr = (0..period).map(|x| (x as f64) * (x as f64)).sum::<f64>();
-		let divisor = (period as f64 * sum_x_sqr) - (sum_x * sum_x);
+        // Precompute ∑ x and ∑ x² for x = 0..period-1
+        let sum_x = (0..period).map(|x| x as f64).sum::<f64>();
+        let sum_x_sqr = (0..period).map(|x| (x as f64) * (x as f64)).sum::<f64>();
+        let divisor = (period as f64 * sum_x_sqr) - (sum_x * sum_x);
 
-		Ok(Self {
-			period,
-			buffer: vec![f64::NAN; period],
-			head: 0,
-			filled: false,
-			sum_x,
-			sum_x_sqr,
-			divisor,
-		})
-	}
+        Ok(Self {
+            period,
+            buffer: vec![f64::NAN; period],
+            head: 0,
+            filled: false,
+            sum_x,
+            sum_x_sqr,
+            divisor,
+        })
+    }
 
-	#[inline(always)]
-	pub fn update(&mut self, value: f64) -> Option<f64> {
-		// Write the newest value at buffer[head], then advance head.
-		self.buffer[self.head] = value;
-		self.head = (self.head + 1) % self.period;
+    #[inline(always)]
+    pub fn update(&mut self, value: f64) -> Option<f64> {
+        // Write the newest value at buffer[head], then advance head.
+        self.buffer[self.head] = value;
+        self.head = (self.head + 1) % self.period;
 
-		// Once head wraps to 0, we know the ring has filled at least once.
-		if !self.filled && self.head == 0 {
-			self.filled = true;
-		}
+        // Once head wraps to 0, we know the ring has filled at least once.
+        if !self.filled && self.head == 0 {
+            self.filled = true;
+        }
 
-		// Until we've filled 'period' values, we return None.
-		if !self.filled {
-			return None;
-		}
+        // Until we've filled 'period' values, we return None.
+        if !self.filled {
+            return None;
+        }
 
-		// Once filled, compute the regression forecast via dot_ring()
-		Some(self.dot_ring())
-	}
+        // Once filled, compute the regression forecast via dot_ring()
+        Some(self.dot_ring())
+    }
 
-	#[inline(always)]
-	fn dot_ring(&self) -> f64 {
-		// This loop already uses the correct chronological order:
-		//   j = 0 → oldest (at index = head)
-		//   j = period-1 → newest (at index = head + period - 1 mod period)
-		let mut sum_xy = 0.0;
-		let mut sum_y = 0.0;
-		let mut idx = self.head; // head always points at the oldest element
+    #[inline(always)]
+    fn dot_ring(&self) -> f64 {
+        // This loop already uses the correct chronological order:
+        //   j = 0 → oldest (at index = head)
+        //   j = period-1 → newest (at index = head + period - 1 mod period)
+        let mut sum_xy = 0.0;
+        let mut sum_y = 0.0;
+        let mut idx = self.head; // head always points at the oldest element
 
-		for j in 0..self.period {
-			let val = self.buffer[idx];
-			sum_y += val;
-			sum_xy += (j as f64) * val;
-			idx = (idx + 1) % self.period;
-		}
+        for j in 0..self.period {
+            let val = self.buffer[idx];
+            sum_y += val;
+            sum_xy += (j as f64) * val;
+            idx = (idx + 1) % self.period;
+        }
 
-		let m = ((self.period as f64) * sum_xy - self.sum_x * sum_y) / self.divisor;
-		let b = (sum_y - m * self.sum_x) / (self.period as f64);
-		b + m * (self.period as f64)
-	}
+        let m = ((self.period as f64) * sum_xy - self.sum_x * sum_y) / self.divisor;
+        let b = (sum_y - m * self.sum_x) / (self.period as f64);
+        b + m * (self.period as f64)
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct TsfBatchRange {
-	pub period: (usize, usize, usize),
+    pub period: (usize, usize, usize),
 }
 
 impl Default for TsfBatchRange {
-	fn default() -> Self {
-		Self { period: (14, 240, 1) }
-	}
+    fn default() -> Self {
+        Self {
+            period: (14, 240, 1),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct TsfBatchBuilder {
-	range: TsfBatchRange,
-	kernel: Kernel,
+    range: TsfBatchRange,
+    kernel: Kernel,
 }
 
 impl TsfBatchBuilder {
-	pub fn new() -> Self {
-		Self::default()
-	}
-	pub fn kernel(mut self, k: Kernel) -> Self {
-		self.kernel = k;
-		self
-	}
-	#[inline]
-	pub fn period_range(mut self, start: usize, end: usize, step: usize) -> Self {
-		self.range.period = (start, end, step);
-		self
-	}
-	#[inline]
-	pub fn period_static(mut self, p: usize) -> Self {
-		self.range.period = (p, p, 0);
-		self
-	}
-	pub fn apply_slice(self, data: &[f64]) -> Result<TsfBatchOutput, TsfError> {
-		tsf_batch_with_kernel(data, &self.range, self.kernel)
-	}
-	pub fn with_default_slice(data: &[f64], k: Kernel) -> Result<TsfBatchOutput, TsfError> {
-		TsfBatchBuilder::new().kernel(k).apply_slice(data)
-	}
-	pub fn apply_candles(self, c: &Candles, src: &str) -> Result<TsfBatchOutput, TsfError> {
-		let slice = source_type(c, src);
-		self.apply_slice(slice)
-	}
-	pub fn with_default_candles(c: &Candles) -> Result<TsfBatchOutput, TsfError> {
-		TsfBatchBuilder::new().kernel(Kernel::Auto).apply_candles(c, "close")
-	}
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn kernel(mut self, k: Kernel) -> Self {
+        self.kernel = k;
+        self
+    }
+    #[inline]
+    pub fn period_range(mut self, start: usize, end: usize, step: usize) -> Self {
+        self.range.period = (start, end, step);
+        self
+    }
+    #[inline]
+    pub fn period_static(mut self, p: usize) -> Self {
+        self.range.period = (p, p, 0);
+        self
+    }
+    pub fn apply_slice(self, data: &[f64]) -> Result<TsfBatchOutput, TsfError> {
+        tsf_batch_with_kernel(data, &self.range, self.kernel)
+    }
+    pub fn with_default_slice(data: &[f64], k: Kernel) -> Result<TsfBatchOutput, TsfError> {
+        TsfBatchBuilder::new().kernel(k).apply_slice(data)
+    }
+    pub fn apply_candles(self, c: &Candles, src: &str) -> Result<TsfBatchOutput, TsfError> {
+        let slice = source_type(c, src);
+        self.apply_slice(slice)
+    }
+    pub fn with_default_candles(c: &Candles) -> Result<TsfBatchOutput, TsfError> {
+        TsfBatchBuilder::new()
+            .kernel(Kernel::Auto)
+            .apply_candles(c, "close")
+    }
 }
 
-pub fn tsf_batch_with_kernel(data: &[f64], sweep: &TsfBatchRange, k: Kernel) -> Result<TsfBatchOutput, TsfError> {
-	let kernel = match k {
-		Kernel::Auto => detect_best_batch_kernel(),
-		other if other.is_batch() => other,
-		_ => return Err(TsfError::InvalidPeriod { period: 0, data_len: 0 }),
-	};
+pub fn tsf_batch_with_kernel(
+    data: &[f64],
+    sweep: &TsfBatchRange,
+    k: Kernel,
+) -> Result<TsfBatchOutput, TsfError> {
+    let kernel = match k {
+        Kernel::Auto => detect_best_batch_kernel(),
+        other if other.is_batch() => other,
+        _ => {
+            return Err(TsfError::InvalidPeriod {
+                period: 0,
+                data_len: 0,
+            })
+        }
+    };
 
-	let simd = match kernel {
-		Kernel::Avx512Batch => Kernel::Avx512,
-		Kernel::Avx2Batch => Kernel::Avx2,
-		Kernel::ScalarBatch => Kernel::Scalar,
-		_ => unreachable!(),
-	};
-	tsf_batch_par_slice(data, sweep, simd)
+    let simd = match kernel {
+        Kernel::Avx512Batch => Kernel::Avx512,
+        Kernel::Avx2Batch => Kernel::Avx2,
+        Kernel::ScalarBatch => Kernel::Scalar,
+        _ => unreachable!(),
+    };
+    tsf_batch_par_slice(data, sweep, simd)
 }
 
 #[derive(Clone, Debug)]
 pub struct TsfBatchOutput {
-	pub values: Vec<f64>,
-	pub combos: Vec<TsfParams>,
-	pub rows: usize,
-	pub cols: usize,
+    pub values: Vec<f64>,
+    pub combos: Vec<TsfParams>,
+    pub rows: usize,
+    pub cols: usize,
 }
 impl TsfBatchOutput {
-	pub fn row_for_params(&self, p: &TsfParams) -> Option<usize> {
-		self.combos
-			.iter()
-			.position(|c| c.period.unwrap_or(14) == p.period.unwrap_or(14))
-	}
+    pub fn row_for_params(&self, p: &TsfParams) -> Option<usize> {
+        self.combos
+            .iter()
+            .position(|c| c.period.unwrap_or(14) == p.period.unwrap_or(14))
+    }
 
-	pub fn values_for(&self, p: &TsfParams) -> Option<&[f64]> {
-		self.row_for_params(p).map(|row| {
-			let start = row * self.cols;
-			&self.values[start..start + self.cols]
-		})
-	}
+    pub fn values_for(&self, p: &TsfParams) -> Option<&[f64]> {
+        self.row_for_params(p).map(|row| {
+            let start = row * self.cols;
+            &self.values[start..start + self.cols]
+        })
+    }
 }
 
 #[inline(always)]
 fn expand_grid(r: &TsfBatchRange) -> Vec<TsfParams> {
-	fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-		if step == 0 || start == end {
-			return vec![start];
-		}
-		(start..=end).step_by(step).collect()
-	}
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+        if step == 0 || start == end {
+            return vec![start];
+        }
+        (start..=end).step_by(step).collect()
+    }
 
-	let periods = axis_usize(r.period);
+    let periods = axis_usize(r.period);
 
-	let mut out = Vec::with_capacity(periods.len());
-	for &p in &periods {
-		out.push(TsfParams { period: Some(p) });
-	}
-	out
+    let mut out = Vec::with_capacity(periods.len());
+    for &p in &periods {
+        out.push(TsfParams { period: Some(p) });
+    }
+    out
 }
 
 #[inline(always)]
-pub fn tsf_batch_slice(data: &[f64], sweep: &TsfBatchRange, kern: Kernel) -> Result<TsfBatchOutput, TsfError> {
-	tsf_batch_inner(data, sweep, kern, false)
+pub fn tsf_batch_slice(
+    data: &[f64],
+    sweep: &TsfBatchRange,
+    kern: Kernel,
+) -> Result<TsfBatchOutput, TsfError> {
+    tsf_batch_inner(data, sweep, kern, false)
 }
 
 #[inline(always)]
-pub fn tsf_batch_par_slice(data: &[f64], sweep: &TsfBatchRange, kern: Kernel) -> Result<TsfBatchOutput, TsfError> {
-	tsf_batch_inner(data, sweep, kern, true)
+pub fn tsf_batch_par_slice(
+    data: &[f64],
+    sweep: &TsfBatchRange,
+    kern: Kernel,
+) -> Result<TsfBatchOutput, TsfError> {
+    tsf_batch_inner(data, sweep, kern, true)
 }
 
 #[inline(always)]
 fn tsf_batch_inner(
-	data: &[f64],
-	sweep: &TsfBatchRange,
-	kern: Kernel,
-	parallel: bool,
+    data: &[f64],
+    sweep: &TsfBatchRange,
+    kern: Kernel,
+    parallel: bool,
 ) -> Result<TsfBatchOutput, TsfError> {
-	// Build the list of TsfParams to run over
-	let combos = expand_grid(sweep);
-	if combos.is_empty() {
-		return Err(TsfError::InvalidPeriod { period: 0, data_len: 0 });
-	}
+    // Build the list of TsfParams to run over
+    let combos = expand_grid(sweep);
+    if combos.is_empty() {
+        return Err(TsfError::InvalidPeriod {
+            period: 0,
+            data_len: 0,
+        });
+    }
 
-	// Find first non‐NaN index
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(TsfError::AllValuesNaN)?;
-	// Compute the maximum period required by any combo
-	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-	if data.len() - first < max_p {
-		return Err(TsfError::NotEnoughValidData {
-			needed: max_p,
-			valid: data.len() - first,
-		});
-	}
+    // Find first non‐NaN index
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(TsfError::AllValuesNaN)?;
+    // Compute the maximum period required by any combo
+    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    if data.len() - first < max_p {
+        return Err(TsfError::NotEnoughValidData {
+            needed: max_p,
+            valid: data.len() - first,
+        });
+    }
 
-	let rows = combos.len();
-	let cols = data.len();
-	let mut sum_xs = vec![0.0; rows];
-	let mut divisors = vec![0.0; rows];
+    let rows = combos.len();
+    let cols = data.len();
+    let mut sum_xs = vec![0.0; rows];
+    let mut divisors = vec![0.0; rows];
 
-	// Precompute ∑x and divisor for each "period = combos[row].period"
-	for (row, prm) in combos.iter().enumerate() {
-		let period = prm.period.unwrap();
-		let sum_x = (0..period).map(|x| x as f64).sum::<f64>();
-		let sum_x2 = (0..period).map(|x| (x as f64) * (x as f64)).sum::<f64>();
-		let divisor = (period as f64 * sum_x2) - (sum_x * sum_x);
-		sum_xs[row] = sum_x;
-		divisors[row] = divisor;
-	}
+    // Precompute ∑x and divisor for each "period = combos[row].period"
+    for (row, prm) in combos.iter().enumerate() {
+        let period = prm.period.unwrap();
+        let sum_x = (0..period).map(|x| x as f64).sum::<f64>();
+        let sum_x2 = (0..period).map(|x| (x as f64) * (x as f64)).sum::<f64>();
+        let divisor = (period as f64 * sum_x2) - (sum_x * sum_x);
+        sum_xs[row] = sum_x;
+        divisors[row] = divisor;
+    }
 
-	// Use uninitialized memory like ALMA
-	let mut buf_mu = make_uninit_matrix(rows, cols);
-	
-	// Compute warmup periods for each row
-	let warm: Vec<usize> = combos
-		.iter()
-		.map(|c| first + c.period.unwrap() - 1)
-		.collect();
-	init_matrix_prefixes(&mut buf_mu, cols, &warm);
+    // Use uninitialized memory like ALMA
+    let mut buf_mu = make_uninit_matrix(rows, cols);
 
-	// Use ManuallyDrop pattern for safe conversion
-	let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
-	let out: &mut [f64] =
-		unsafe { core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len()) };
+    // Compute warmup periods for each row
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| first + c.period.unwrap() - 1)
+        .collect();
+    init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-	// Closure that computes one row into out_row
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-		let period = combos[row].period.unwrap();
-		let sum_x = sum_xs[row];
-		let divisor = divisors[row];
+    // Use ManuallyDrop pattern for safe conversion
+    let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
+    let out: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
+    };
 
-		match kern {
-			Kernel::Scalar => tsf_row_scalar(data, first, period, sum_x, divisor, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => tsf_row_avx2(data, first, period, sum_x, divisor, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => tsf_row_avx512(data, first, period, sum_x, divisor, out_row),
-			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-			Kernel::Avx2 | Kernel::Avx512 => tsf_row_scalar(data, first, period, sum_x, divisor, out_row),
-			_ => unreachable!(),
-		}
-	};
+    // Closure that computes one row into out_row
+    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+        let period = combos[row].period.unwrap();
+        let sum_x = sum_xs[row];
+        let divisor = divisors[row];
 
-	if parallel {
-		#[cfg(not(target_arch = "wasm32"))]
-		{
-			out
-				.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
-		}
+        match kern {
+            Kernel::Scalar => tsf_row_scalar(data, first, period, sum_x, divisor, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 => tsf_row_avx2(data, first, period, sum_x, divisor, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 => tsf_row_avx512(data, first, period, sum_x, divisor, out_row),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx512 => {
+                tsf_row_scalar(data, first, period, sum_x, divisor, out_row)
+            }
+            _ => unreachable!(),
+        }
+    };
 
-		#[cfg(target_arch = "wasm32")]
-		{
-			for (row, slice) in out.chunks_mut(cols).enumerate() {
-				do_row(row, slice);
-			}
-		}
-	} else {
-		for (row, slice) in out.chunks_mut(cols).enumerate() {
-			do_row(row, slice);
-		}
-	}
+    if parallel {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            out.par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(row, slice)| do_row(row, slice));
+        }
 
-	// Convert back to Vec using ManuallyDrop pattern
-	let values = unsafe {
-		Vec::from_raw_parts(
-			buf_guard.as_mut_ptr() as *mut f64,
-			buf_guard.len(),
-			buf_guard.capacity(),
-		)
-	};
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, slice) in out.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
+        }
+    } else {
+        for (row, slice) in out.chunks_mut(cols).enumerate() {
+            do_row(row, slice);
+        }
+    }
 
-	Ok(TsfBatchOutput {
-		values,
-		combos,
-		rows,
-		cols,
-	})
+    // Convert back to Vec using ManuallyDrop pattern
+    let values = unsafe {
+        Vec::from_raw_parts(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+            buf_guard.capacity(),
+        )
+    };
+
+    Ok(TsfBatchOutput {
+        values,
+        combos,
+        rows,
+        cols,
+    })
 }
 
 // Helper function for Python batch bindings - writes directly to the provided buffer
 #[inline(always)]
 fn tsf_batch_inner_into(
-	data: &[f64],
-	sweep: &TsfBatchRange,
-	kern: Kernel,
-	parallel: bool,
-	output: &mut [f64],
+    data: &[f64],
+    sweep: &TsfBatchRange,
+    kern: Kernel,
+    parallel: bool,
+    output: &mut [f64],
 ) -> Result<Vec<TsfParams>, TsfError> {
-	// Build combos
-	let combos = expand_grid(sweep);
-	if combos.is_empty() {
-		return Err(TsfError::InvalidPeriod { period: 0, data_len: 0 });
-	}
+    // Build combos
+    let combos = expand_grid(sweep);
+    if combos.is_empty() {
+        return Err(TsfError::InvalidPeriod {
+            period: 0,
+            data_len: 0,
+        });
+    }
 
-	// First valid index and max window
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(TsfError::AllValuesNaN)?;
-	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-	if data.len() - first < max_p {
-		return Err(TsfError::NotEnoughValidData { needed: max_p, valid: data.len() - first });
-	}
+    // First valid index and max window
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(TsfError::AllValuesNaN)?;
+    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    if data.len() - first < max_p {
+        return Err(TsfError::NotEnoughValidData {
+            needed: max_p,
+            valid: data.len() - first,
+        });
+    }
 
-	let rows = combos.len();
-	let cols = data.len();
+    let rows = combos.len();
+    let cols = data.len();
 
-	// Precompute ∑x and divisor per row
-	let mut sum_xs = vec![0.0; rows];
-	let mut divisors = vec![0.0; rows];
-	for (row, prm) in combos.iter().enumerate() {
-		let p = prm.period.unwrap();
-		let sum_x = (0..p).map(|x| x as f64).sum::<f64>();
-		let sum_x2 = (0..p).map(|x| (x as f64) * (x as f64)).sum::<f64>();
-		sum_xs[row] = sum_x;
-		divisors[row] = (p as f64 * sum_x2) - (sum_x * sum_x);
-	}
+    // Precompute ∑x and divisor per row
+    let mut sum_xs = vec![0.0; rows];
+    let mut divisors = vec![0.0; rows];
+    for (row, prm) in combos.iter().enumerate() {
+        let p = prm.period.unwrap();
+        let sum_x = (0..p).map(|x| x as f64).sum::<f64>();
+        let sum_x2 = (0..p).map(|x| (x as f64) * (x as f64)).sum::<f64>();
+        sum_xs[row] = sum_x;
+        divisors[row] = (p as f64 * sum_x2) - (sum_x * sum_x);
+    }
 
-	// Initialize only warmup prefixes to NaN using helper, zero extra writes
-	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
-	let out_mu: &mut [MaybeUninit<f64>] = unsafe {
-		core::slice::from_raw_parts_mut(output.as_mut_ptr() as *mut MaybeUninit<f64>, output.len())
-	};
-	init_matrix_prefixes(out_mu, cols, &warm);
+    // Initialize only warmup prefixes to NaN using helper, zero extra writes
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| first + c.period.unwrap() - 1)
+        .collect();
+    let out_mu: &mut [MaybeUninit<f64>] = unsafe {
+        core::slice::from_raw_parts_mut(output.as_mut_ptr() as *mut MaybeUninit<f64>, output.len())
+    };
+    init_matrix_prefixes(out_mu, cols, &warm);
 
-	// Row kernel
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-		let p = combos[row].period.unwrap();
-		let sum_x = sum_xs[row];
-		let div = divisors[row];
-		match kern {
-			Kernel::Scalar => tsf_row_scalar(data, first, p, sum_x, div, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => tsf_row_avx2(data, first, p, sum_x, div, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => tsf_row_avx512(data, first, p, sum_x, div, out_row),
-			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-			Kernel::Avx2 | Kernel::Avx512 => tsf_row_scalar(data, first, p, sum_x, div, out_row),
-			_ => unreachable!(),
-		}
-	};
+    // Row kernel
+    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+        let p = combos[row].period.unwrap();
+        let sum_x = sum_xs[row];
+        let div = divisors[row];
+        match kern {
+            Kernel::Scalar => tsf_row_scalar(data, first, p, sum_x, div, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 => tsf_row_avx2(data, first, p, sum_x, div, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 => tsf_row_avx512(data, first, p, sum_x, div, out_row),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx512 => tsf_row_scalar(data, first, p, sum_x, div, out_row),
+            _ => unreachable!(),
+        }
+    };
 
-	// Compute rows into output
-	if parallel {
-		#[cfg(not(target_arch = "wasm32"))]
-		{
-			output.par_chunks_mut(cols).enumerate().for_each(|(r, sl)| do_row(r, sl));
-		}
-		#[cfg(target_arch = "wasm32")]
-		{
-			for (r, sl) in output.chunks_mut(cols).enumerate() { do_row(r, sl); }
-		}
-	} else {
-		for (r, sl) in output.chunks_mut(cols).enumerate() { do_row(r, sl); }
-	}
+    // Compute rows into output
+    if parallel {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            output
+                .par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(r, sl)| do_row(r, sl));
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (r, sl) in output.chunks_mut(cols).enumerate() {
+                do_row(r, sl);
+            }
+        }
+    } else {
+        for (r, sl) in output.chunks_mut(cols).enumerate() {
+            do_row(r, sl);
+        }
+    }
 
-	Ok(combos)
+    Ok(combos)
 }
 
 // 2) tsf_row_scalar (fixed indexing so j=0→oldest, j=period−1→newest)
 #[inline(always)]
-unsafe fn tsf_row_scalar(data: &[f64], first: usize, period: usize, sum_x: f64, divisor: f64, out: &mut [f64]) {
-	// Loop i from (first + period − 1) .. end.  At i we compute a regression over
-	//   indices [i−(period−1) .. i], with x = 0 at data[i−(period−1)], x = period−1 at data[i].
-	for i in (first + period - 1)..data.len() {
-		let mut sum_xy = 0.0;
-		let mut sum_y = 0.0;
+unsafe fn tsf_row_scalar(
+    data: &[f64],
+    first: usize,
+    period: usize,
+    sum_x: f64,
+    divisor: f64,
+    out: &mut [f64],
+) {
+    // Loop i from (first + period − 1) .. end.  At i we compute a regression over
+    //   indices [i−(period−1) .. i], with x = 0 at data[i−(period−1)], x = period−1 at data[i].
+    for i in (first + period - 1)..data.len() {
+        let mut sum_xy = 0.0;
+        let mut sum_y = 0.0;
 
-		// Correct order: “j = 0” hits data[i − (period − 1)] (oldest),
-		// “j = period − 1” hits data[i] (most recent).
-		for j in 0..period {
-			let idx = i - (period - 1) + j;
-			let val = data[idx];
-			sum_y += val;
-			sum_xy += (j as f64) * val;
-		}
+        // Correct order: “j = 0” hits data[i − (period − 1)] (oldest),
+        // “j = period − 1” hits data[i] (most recent).
+        for j in 0..period {
+            let idx = i - (period - 1) + j;
+            let val = data[idx];
+            sum_y += val;
+            sum_xy += (j as f64) * val;
+        }
 
-		let m = ((period as f64) * sum_xy - sum_x * sum_y) / divisor;
-		let b = (sum_y - m * sum_x) / (period as f64);
-		out[i] = b + m * (period as f64);
-	}
+        let m = ((period as f64) * sum_xy - sum_x * sum_y) / divisor;
+        let b = (sum_y - m * sum_x) / (period as f64);
+        out[i] = b + m * (period as f64);
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-unsafe fn tsf_row_avx2(data: &[f64], first: usize, period: usize, sum_x: f64, divisor: f64, out: &mut [f64]) {
-	tsf_row_scalar(data, first, period, sum_x, divisor, out)
+unsafe fn tsf_row_avx2(
+    data: &[f64],
+    first: usize,
+    period: usize,
+    sum_x: f64,
+    divisor: f64,
+    out: &mut [f64],
+) {
+    tsf_row_scalar(data, first, period, sum_x, divisor, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-unsafe fn tsf_row_avx512(data: &[f64], first: usize, period: usize, sum_x: f64, divisor: f64, out: &mut [f64]) {
-	if period <= 32 {
-		tsf_row_avx512_short(data, first, period, sum_x, divisor, out);
-	} else {
-		tsf_row_avx512_long(data, first, period, sum_x, divisor, out);
-	}
+unsafe fn tsf_row_avx512(
+    data: &[f64],
+    first: usize,
+    period: usize,
+    sum_x: f64,
+    divisor: f64,
+    out: &mut [f64],
+) {
+    if period <= 32 {
+        tsf_row_avx512_short(data, first, period, sum_x, divisor, out);
+    } else {
+        tsf_row_avx512_long(data, first, period, sum_x, divisor, out);
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-unsafe fn tsf_row_avx512_short(data: &[f64], first: usize, period: usize, sum_x: f64, divisor: f64, out: &mut [f64]) {
-	tsf_row_scalar(data, first, period, sum_x, divisor, out)
+unsafe fn tsf_row_avx512_short(
+    data: &[f64],
+    first: usize,
+    period: usize,
+    sum_x: f64,
+    divisor: f64,
+    out: &mut [f64],
+) {
+    tsf_row_scalar(data, first, period, sum_x, divisor, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-unsafe fn tsf_row_avx512_long(data: &[f64], first: usize, period: usize, sum_x: f64, divisor: f64, out: &mut [f64]) {
-	tsf_row_scalar(data, first, period, sum_x, divisor, out)
+unsafe fn tsf_row_avx512_long(
+    data: &[f64],
+    first: usize,
+    period: usize,
+    sum_x: f64,
+    divisor: f64,
+    out: &mut [f64],
+) {
+    tsf_row_scalar(data, first, period, sum_x, divisor, out)
 }
-
 
 // ================================
 // Python Bindings
@@ -783,102 +894,107 @@ unsafe fn tsf_row_avx512_long(data: &[f64], first: usize, period: usize, sum_x: 
 #[pyfunction(name = "tsf")]
 #[pyo3(signature = (data, period, kernel=None))]
 pub fn tsf_py<'py>(
-	py: Python<'py>,
-	data: PyReadonlyArray1<'py, f64>,
-	period: usize,
-	kernel: Option<&str>,
+    py: Python<'py>,
+    data: PyReadonlyArray1<'py, f64>,
+    period: usize,
+    kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
-	use numpy::{IntoPyArray, PyArrayMethods};
+    use numpy::{IntoPyArray, PyArrayMethods};
 
-	let slice_in = data.as_slice()?;
-	let kern = validate_kernel(kernel, false)?;
-	
-	let params = TsfParams {
-		period: Some(period),
-	};
-	let tsf_in = TsfInput::from_slice(slice_in, params);
+    let slice_in = data.as_slice()?;
+    let kern = validate_kernel(kernel, false)?;
 
-	let result_vec: Vec<f64> = py
-		.allow_threads(|| tsf_with_kernel(&tsf_in, kern).map(|o| o.values))
-		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let params = TsfParams {
+        period: Some(period),
+    };
+    let tsf_in = TsfInput::from_slice(slice_in, params);
 
-	Ok(result_vec.into_pyarray(py))
+    let result_vec: Vec<f64> = py
+        .allow_threads(|| tsf_with_kernel(&tsf_in, kern).map(|o| o.values))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    Ok(result_vec.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
 #[pyclass(name = "TsfStream")]
 pub struct TsfStreamPy {
-	stream: TsfStream,
+    stream: TsfStream,
 }
 
 #[cfg(feature = "python")]
 #[pymethods]
 impl TsfStreamPy {
-	#[new]
-	fn new(period: usize) -> PyResult<Self> {
-		let params = TsfParams {
-			period: Some(period),
-		};
-		let stream = TsfStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
-		Ok(TsfStreamPy { stream })
-	}
+    #[new]
+    fn new(period: usize) -> PyResult<Self> {
+        let params = TsfParams {
+            period: Some(period),
+        };
+        let stream =
+            TsfStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(TsfStreamPy { stream })
+    }
 
-	fn update(&mut self, value: f64) -> Option<f64> {
-		self.stream.update(value)
-	}
+    fn update(&mut self, value: f64) -> Option<f64> {
+        self.stream.update(value)
+    }
 }
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "tsf_batch")]
 #[pyo3(signature = (data, period_range, kernel=None))]
 pub fn tsf_batch_py<'py>(
-	py: Python<'py>,
-	data: PyReadonlyArray1<'py, f64>,
-	period_range: (usize, usize, usize),
-	kernel: Option<&str>,
+    py: Python<'py>,
+    data: PyReadonlyArray1<'py, f64>,
+    period_range: (usize, usize, usize),
+    kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
-	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
-	use pyo3::types::PyDict;
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+    use pyo3::types::PyDict;
 
-	let slice_in = data.as_slice()?;
+    let slice_in = data.as_slice()?;
 
-	let sweep = TsfBatchRange {
-		period: period_range,
-	};
+    let sweep = TsfBatchRange {
+        period: period_range,
+    };
 
-	let combos = expand_grid(&sweep);
-	let rows = combos.len();
-	let cols = slice_in.len();
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = slice_in.len();
 
-	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-	let slice_out = unsafe { out_arr.as_slice_mut()? };
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-	let kern = validate_kernel(kernel, true)?;
+    let kern = validate_kernel(kernel, true)?;
 
-	let combos = py
-		.allow_threads(|| {
-			let kernel = match kern {
-				Kernel::Auto => detect_best_batch_kernel(),
-				k => k,
-			};
-			let simd = match kernel {
-				Kernel::Avx512Batch => Kernel::Avx512,
-				Kernel::Avx2Batch => Kernel::Avx2,
-				Kernel::ScalarBatch => Kernel::Scalar,
-				_ => unreachable!(),
-			};
-			tsf_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
-		})
-		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let combos = py
+        .allow_threads(|| {
+            let kernel = match kern {
+                Kernel::Auto => detect_best_batch_kernel(),
+                k => k,
+            };
+            let simd = match kernel {
+                Kernel::Avx512Batch => Kernel::Avx512,
+                Kernel::Avx2Batch => Kernel::Avx2,
+                Kernel::ScalarBatch => Kernel::Scalar,
+                _ => unreachable!(),
+            };
+            tsf_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+        })
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-	let dict = PyDict::new(py);
-	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
-	dict.set_item(
-		"periods",
-		combos.iter().map(|p| p.period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py)
-	)?;
+    let dict = PyDict::new(py);
+    dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+    dict.set_item(
+        "periods",
+        combos
+            .iter()
+            .map(|p| p.period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
 
-	Ok(dict)
+    Ok(dict)
 }
 
 // ================================
@@ -888,651 +1004,694 @@ pub fn tsf_batch_py<'py>(
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn tsf_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
-	let params = TsfParams {
-		period: Some(period),
-	};
-	let input = TsfInput::from_slice(data, params);
+    let params = TsfParams {
+        period: Some(period),
+    };
+    let input = TsfInput::from_slice(data, params);
 
-	let mut output = vec![0.0; data.len()];
+    let mut output = vec![0.0; data.len()];
 
-	tsf_into_slice(&mut output, &input, detect_best_kernel())
-		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+    tsf_into_slice(&mut output, &input, detect_best_kernel())
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-	Ok(output)
+    Ok(output)
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn tsf_alloc(len: usize) -> *mut f64 {
-	let mut vec = Vec::<f64>::with_capacity(len);
-	let ptr = vec.as_mut_ptr();
-	std::mem::forget(vec);
-	ptr
+    let mut vec = Vec::<f64>::with_capacity(len);
+    let ptr = vec.as_mut_ptr();
+    std::mem::forget(vec);
+    ptr
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn tsf_free(ptr: *mut f64, len: usize) {
-	if !ptr.is_null() {
-		unsafe {
-			let _ = Vec::from_raw_parts(ptr, len, len);
-		}
-	}
+    if !ptr.is_null() {
+        unsafe {
+            let _ = Vec::from_raw_parts(ptr, len, len);
+        }
+    }
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn tsf_into(
-	in_ptr: *const f64,
-	out_ptr: *mut f64,
-	len: usize,
-	period: usize,
+    in_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    period: usize,
 ) -> Result<(), JsValue> {
-	if in_ptr.is_null() || out_ptr.is_null() {
-		return Err(JsValue::from_str("Null pointer provided"));
-	}
+    if in_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("Null pointer provided"));
+    }
 
-	unsafe {
-		let data = std::slice::from_raw_parts(in_ptr, len);
-		let params = TsfParams {
-			period: Some(period),
-		};
-		let input = TsfInput::from_slice(data, params);
+    unsafe {
+        let data = std::slice::from_raw_parts(in_ptr, len);
+        let params = TsfParams {
+            period: Some(period),
+        };
+        let input = TsfInput::from_slice(data, params);
 
-		let kernel = detect_best_kernel();
-		if in_ptr == out_ptr {
-			// Handle aliasing case
-			let mut temp = vec![0.0; len];
-			tsf_into_slice(&mut temp, &input, kernel)
-				.map_err(|e| JsValue::from_str(&e.to_string()))?;
-			let out = std::slice::from_raw_parts_mut(out_ptr, len);
-			out.copy_from_slice(&temp);
-		} else {
-			let out = std::slice::from_raw_parts_mut(out_ptr, len);
-			tsf_into_slice(out, &input, kernel)
-				.map_err(|e| JsValue::from_str(&e.to_string()))?;
-		}
-		Ok(())
-	}
+        let kernel = detect_best_kernel();
+        if in_ptr == out_ptr {
+            // Handle aliasing case
+            let mut temp = vec![0.0; len];
+            tsf_into_slice(&mut temp, &input, kernel)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            out.copy_from_slice(&temp);
+        } else {
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            tsf_into_slice(out, &input, kernel).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct TsfBatchConfig {
-	pub period_range: (usize, usize, usize),
+    pub period_range: (usize, usize, usize),
 }
 
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct TsfBatchJsOutput {
-	pub values: Vec<f64>,
-	pub combos: Vec<TsfParams>,
-	pub rows: usize,
-	pub cols: usize,
+    pub values: Vec<f64>,
+    pub combos: Vec<TsfParams>,
+    pub rows: usize,
+    pub cols: usize,
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = tsf_batch)]
 pub fn tsf_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
-	let config: TsfBatchConfig =
-		serde_wasm_bindgen::from_value(config)
-			.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+    let config: TsfBatchConfig = serde_wasm_bindgen::from_value(config)
+        .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
 
-	let sweep = TsfBatchRange {
-		period: config.period_range,
-	};
+    let sweep = TsfBatchRange {
+        period: config.period_range,
+    };
 
-	let kernel = detect_best_batch_kernel();
-	let simd = match kernel {
-		Kernel::Avx512Batch => Kernel::Avx512,
-		Kernel::Avx2Batch => Kernel::Avx2,
-		Kernel::ScalarBatch => Kernel::Scalar,
-		_ => Kernel::Scalar, // Fallback for WASM
-	};
-	let output = tsf_batch_inner(data, &sweep, simd, false)
-		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let kernel = detect_best_batch_kernel();
+    let simd = match kernel {
+        Kernel::Avx512Batch => Kernel::Avx512,
+        Kernel::Avx2Batch => Kernel::Avx2,
+        Kernel::ScalarBatch => Kernel::Scalar,
+        _ => Kernel::Scalar, // Fallback for WASM
+    };
+    let output = tsf_batch_inner(data, &sweep, simd, false)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-	let js_output = TsfBatchJsOutput {
-		values: output.values,
-		combos: output.combos,
-		rows: output.rows,
-		cols: output.cols,
-	};
+    let js_output = TsfBatchJsOutput {
+        values: output.values,
+        combos: output.combos,
+        rows: output.rows,
+        cols: output.cols,
+    };
 
-	serde_wasm_bindgen::to_value(&js_output)
-		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+    serde_wasm_bindgen::to_value(&js_output)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn tsf_batch_into(
-	in_ptr: *const f64,
-	out_ptr: *mut f64,
-	len: usize,
-	period_start: usize,
-	period_end: usize,
-	period_step: usize,
+    in_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
 ) -> Result<usize, JsValue> {
-	if in_ptr.is_null() || out_ptr.is_null() {
-		return Err(JsValue::from_str("null pointer passed to tsf_batch_into"));
-	}
+    if in_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("null pointer passed to tsf_batch_into"));
+    }
 
-	unsafe {
-		let data = std::slice::from_raw_parts(in_ptr, len);
+    unsafe {
+        let data = std::slice::from_raw_parts(in_ptr, len);
 
-		let sweep = TsfBatchRange {
-			period: (period_start, period_end, period_step),
-		};
+        let sweep = TsfBatchRange {
+            period: (period_start, period_end, period_step),
+        };
 
-		let combos = expand_grid(&sweep);
-		let rows = combos.len();
-		let cols = len;
+        let combos = expand_grid(&sweep);
+        let rows = combos.len();
+        let cols = len;
 
-		if rows == 0 {
-			return Err(JsValue::from_str("No valid parameter combinations"));
-		}
+        if rows == 0 {
+            return Err(JsValue::from_str("No valid parameter combinations"));
+        }
 
-		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
 
-		let kernel = detect_best_batch_kernel();
-		let simd = match kernel {
-			Kernel::Avx512Batch => Kernel::Avx512,
-			Kernel::Avx2Batch => Kernel::Avx2,
-			Kernel::ScalarBatch => Kernel::Scalar,
-			_ => unreachable!(),
-		};
+        let kernel = detect_best_batch_kernel();
+        let simd = match kernel {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => unreachable!(),
+        };
 
-		tsf_batch_inner_into(data, &sweep, simd, true, out)
-			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+        tsf_batch_inner_into(data, &sweep, simd, true, out)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-		Ok(rows)
-	}
+        Ok(rows)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-	use super::*;
-	use crate::skip_if_unsupported;
-	use crate::utilities::data_loader::read_candles_from_csv;
+    use super::*;
+    use crate::skip_if_unsupported;
+    use crate::utilities::data_loader::read_candles_from_csv;
 
-	fn check_tsf_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-		skip_if_unsupported!(kernel, test_name);
-		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-		let candles = read_candles_from_csv(file_path)?;
-		let default_params = TsfParams { period: None };
-		let input = TsfInput::from_candles(&candles, "close", default_params);
-		let output = tsf_with_kernel(&input, kernel)?;
-		assert_eq!(output.values.len(), candles.close.len());
-		Ok(())
-	}
+    fn check_tsf_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let default_params = TsfParams { period: None };
+        let input = TsfInput::from_candles(&candles, "close", default_params);
+        let output = tsf_with_kernel(&input, kernel)?;
+        assert_eq!(output.values.len(), candles.close.len());
+        Ok(())
+    }
 
-	fn check_tsf_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-		skip_if_unsupported!(kernel, test_name);
-		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-		let candles = read_candles_from_csv(file_path)?;
-		let input = TsfInput::from_candles(&candles, "close", TsfParams::default());
-		let result = tsf_with_kernel(&input, kernel)?;
-		let expected_last_five = [
-			58846.945054945056,
-			58818.83516483516,
-			58854.57142857143,
-			59083.846153846156,
-			58962.25274725275,
-		];
-		let start = result.values.len().saturating_sub(5);
-		for (i, &val) in result.values[start..].iter().enumerate() {
-			let diff = (val - expected_last_five[i]).abs();
-			assert!(
-				diff < 1e-1,
-				"[{}] TSF {:?} mismatch at idx {}: got {}, expected {}",
-				test_name,
-				kernel,
-				i,
-				val,
-				expected_last_five[i]
-			);
-		}
-		Ok(())
-	}
+    fn check_tsf_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let input = TsfInput::from_candles(&candles, "close", TsfParams::default());
+        let result = tsf_with_kernel(&input, kernel)?;
+        let expected_last_five = [
+            58846.945054945056,
+            58818.83516483516,
+            58854.57142857143,
+            59083.846153846156,
+            58962.25274725275,
+        ];
+        let start = result.values.len().saturating_sub(5);
+        for (i, &val) in result.values[start..].iter().enumerate() {
+            let diff = (val - expected_last_five[i]).abs();
+            assert!(
+                diff < 1e-1,
+                "[{}] TSF {:?} mismatch at idx {}: got {}, expected {}",
+                test_name,
+                kernel,
+                i,
+                val,
+                expected_last_five[i]
+            );
+        }
+        Ok(())
+    }
 
-	fn check_tsf_default_candles(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-		skip_if_unsupported!(kernel, test_name);
-		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-		let candles = read_candles_from_csv(file_path)?;
-		let input = TsfInput::with_default_candles(&candles);
-		match input.data {
-			TsfData::Candles { source, .. } => assert_eq!(source, "close"),
-			_ => panic!("Expected TsfData::Candles"),
-		}
-		let output = tsf_with_kernel(&input, kernel)?;
-		assert_eq!(output.values.len(), candles.close.len());
-		Ok(())
-	}
+    fn check_tsf_default_candles(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let input = TsfInput::with_default_candles(&candles);
+        match input.data {
+            TsfData::Candles { source, .. } => assert_eq!(source, "close"),
+            _ => panic!("Expected TsfData::Candles"),
+        }
+        let output = tsf_with_kernel(&input, kernel)?;
+        assert_eq!(output.values.len(), candles.close.len());
+        Ok(())
+    }
 
-	fn check_tsf_zero_period(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-		skip_if_unsupported!(kernel, test_name);
-		let input_data = [10.0, 20.0, 30.0];
-		let params = TsfParams { period: Some(0) };
-		let input = TsfInput::from_slice(&input_data, params);
-		let res = tsf_with_kernel(&input, kernel);
-		assert!(res.is_err(), "[{}] TSF should fail with zero period", test_name);
-		if let Err(e) = res {
-			assert!(matches!(e, TsfError::PeriodTooSmall { period: 0 }));
-		}
-		Ok(())
-	}
+    fn check_tsf_zero_period(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let input_data = [10.0, 20.0, 30.0];
+        let params = TsfParams { period: Some(0) };
+        let input = TsfInput::from_slice(&input_data, params);
+        let res = tsf_with_kernel(&input, kernel);
+        assert!(
+            res.is_err(),
+            "[{}] TSF should fail with zero period",
+            test_name
+        );
+        if let Err(e) = res {
+            assert!(matches!(e, TsfError::PeriodTooSmall { period: 0 }));
+        }
+        Ok(())
+    }
 
-	fn check_tsf_period_one(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-		skip_if_unsupported!(kernel, test_name);
-		let input_data = [10.0, 20.0, 30.0, 40.0, 50.0];
-		let params = TsfParams { period: Some(1) };
-		let input = TsfInput::from_slice(&input_data, params);
-		let res = tsf_with_kernel(&input, kernel);
-		assert!(res.is_err(), "[{}] TSF should fail with period=1", test_name);
-		if let Err(e) = res {
-			assert!(matches!(e, TsfError::PeriodTooSmall { period: 1 }));
-		}
-		Ok(())
-	}
+    fn check_tsf_period_one(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let input_data = [10.0, 20.0, 30.0, 40.0, 50.0];
+        let params = TsfParams { period: Some(1) };
+        let input = TsfInput::from_slice(&input_data, params);
+        let res = tsf_with_kernel(&input, kernel);
+        assert!(
+            res.is_err(),
+            "[{}] TSF should fail with period=1",
+            test_name
+        );
+        if let Err(e) = res {
+            assert!(matches!(e, TsfError::PeriodTooSmall { period: 1 }));
+        }
+        Ok(())
+    }
 
-	fn check_tsf_mismatched_output_len(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-		skip_if_unsupported!(kernel, test_name);
-		let input_data = [10.0, 20.0, 30.0, 40.0, 50.0];
-		let params = TsfParams { period: Some(3) };
-		let input = TsfInput::from_slice(&input_data, params);
-		
-		// Destination slice has wrong length
-		let mut dst = vec![0.0; 10]; // Wrong size (should be 5)
-		let res = tsf_into_slice(&mut dst, &input, kernel);
-		
-		assert!(res.is_err(), "[{}] TSF should fail with mismatched output length", test_name);
-		if let Err(e) = res {
-			assert!(matches!(e, TsfError::MismatchedOutputLen { expected: 5, actual: 10 }));
-		}
-		Ok(())
-	}
+    fn check_tsf_mismatched_output_len(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let input_data = [10.0, 20.0, 30.0, 40.0, 50.0];
+        let params = TsfParams { period: Some(3) };
+        let input = TsfInput::from_slice(&input_data, params);
 
-	fn check_tsf_period_exceeds_length(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-		skip_if_unsupported!(kernel, test_name);
-		let data_small = [10.0, 20.0, 30.0];
-		let params = TsfParams { period: Some(10) };
-		let input = TsfInput::from_slice(&data_small, params);
-		let res = tsf_with_kernel(&input, kernel);
-		assert!(
-			res.is_err(),
-			"[{}] TSF should fail with period exceeding length",
-			test_name
-		);
-		Ok(())
-	}
+        // Destination slice has wrong length
+        let mut dst = vec![0.0; 10]; // Wrong size (should be 5)
+        let res = tsf_into_slice(&mut dst, &input, kernel);
 
-	fn check_tsf_very_small_dataset(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-		skip_if_unsupported!(kernel, test_name);
-		let single_point = [42.0];
-		let params = TsfParams { period: Some(9) };
-		let input = TsfInput::from_slice(&single_point, params);
-		let res = tsf_with_kernel(&input, kernel);
-		assert!(res.is_err(), "[{}] TSF should fail with insufficient data", test_name);
-		Ok(())
-	}
+        assert!(
+            res.is_err(),
+            "[{}] TSF should fail with mismatched output length",
+            test_name
+        );
+        if let Err(e) = res {
+            assert!(matches!(
+                e,
+                TsfError::MismatchedOutputLen {
+                    expected: 5,
+                    actual: 10
+                }
+            ));
+        }
+        Ok(())
+    }
 
-	fn check_tsf_reinput(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-		skip_if_unsupported!(kernel, test_name);
-		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-		let candles = read_candles_from_csv(file_path)?;
-		let first_params = TsfParams { period: Some(14) };
-		let first_input = TsfInput::from_candles(&candles, "close", first_params);
-		let first_result = tsf_with_kernel(&first_input, kernel)?;
-		let second_params = TsfParams { period: Some(14) };
-		let second_input = TsfInput::from_slice(&first_result.values, second_params);
-		let second_result = tsf_with_kernel(&second_input, kernel)?;
-		assert_eq!(second_result.values.len(), first_result.values.len());
-		Ok(())
-	}
+    fn check_tsf_period_exceeds_length(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let data_small = [10.0, 20.0, 30.0];
+        let params = TsfParams { period: Some(10) };
+        let input = TsfInput::from_slice(&data_small, params);
+        let res = tsf_with_kernel(&input, kernel);
+        assert!(
+            res.is_err(),
+            "[{}] TSF should fail with period exceeding length",
+            test_name
+        );
+        Ok(())
+    }
 
-	fn check_tsf_nan_handling(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-		skip_if_unsupported!(kernel, test_name);
-		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-		let candles = read_candles_from_csv(file_path)?;
-		let input = TsfInput::from_candles(&candles, "close", TsfParams { period: Some(14) });
-		let res = tsf_with_kernel(&input, kernel)?;
-		assert_eq!(res.values.len(), candles.close.len());
-		if res.values.len() > 240 {
-			for (i, &val) in res.values[240..].iter().enumerate() {
-				assert!(
-					!val.is_nan(),
-					"[{}] Found unexpected NaN at out-index {}",
-					test_name,
-					240 + i
-				);
-			}
-		}
-		Ok(())
-	}
+    fn check_tsf_very_small_dataset(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let single_point = [42.0];
+        let params = TsfParams { period: Some(9) };
+        let input = TsfInput::from_slice(&single_point, params);
+        let res = tsf_with_kernel(&input, kernel);
+        assert!(
+            res.is_err(),
+            "[{}] TSF should fail with insufficient data",
+            test_name
+        );
+        Ok(())
+    }
 
-	fn check_tsf_streaming(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-		skip_if_unsupported!(kernel, test_name);
+    fn check_tsf_reinput(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let first_params = TsfParams { period: Some(14) };
+        let first_input = TsfInput::from_candles(&candles, "close", first_params);
+        let first_result = tsf_with_kernel(&first_input, kernel)?;
+        let second_params = TsfParams { period: Some(14) };
+        let second_input = TsfInput::from_slice(&first_result.values, second_params);
+        let second_result = tsf_with_kernel(&second_input, kernel)?;
+        assert_eq!(second_result.values.len(), first_result.values.len());
+        Ok(())
+    }
 
-		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-		let candles = read_candles_from_csv(file_path)?;
+    fn check_tsf_nan_handling(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let input = TsfInput::from_candles(&candles, "close", TsfParams { period: Some(14) });
+        let res = tsf_with_kernel(&input, kernel)?;
+        assert_eq!(res.values.len(), candles.close.len());
+        if res.values.len() > 240 {
+            for (i, &val) in res.values[240..].iter().enumerate() {
+                assert!(
+                    !val.is_nan(),
+                    "[{}] Found unexpected NaN at out-index {}",
+                    test_name,
+                    240 + i
+                );
+            }
+        }
+        Ok(())
+    }
 
-		let period = 14;
-		let input = TsfInput::from_candles(&candles, "close", TsfParams { period: Some(period) });
-		let batch_output = tsf_with_kernel(&input, kernel)?.values;
+    fn check_tsf_streaming(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
 
-		let mut stream = TsfStream::try_new(TsfParams { period: Some(period) })?;
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
 
-		let mut stream_values = Vec::with_capacity(candles.close.len());
-		for &price in &candles.close {
-			match stream.update(price) {
-				Some(tsf_val) => stream_values.push(tsf_val),
-				None => stream_values.push(f64::NAN),
-			}
-		}
+        let period = 14;
+        let input = TsfInput::from_candles(
+            &candles,
+            "close",
+            TsfParams {
+                period: Some(period),
+            },
+        );
+        let batch_output = tsf_with_kernel(&input, kernel)?.values;
 
-		assert_eq!(batch_output.len(), stream_values.len());
-		for (i, (&b, &s)) in batch_output.iter().zip(stream_values.iter()).enumerate() {
-			if b.is_nan() && s.is_nan() {
-				continue;
-			}
-			let diff = (b - s).abs();
-			assert!(
-				diff < 1e-9,
-				"[{}] TSF streaming f64 mismatch at idx {}: batch={}, stream={}, diff={}",
-				test_name,
-				i,
-				b,
-				s,
-				diff
-			);
-		}
-		Ok(())
-	}
+        let mut stream = TsfStream::try_new(TsfParams {
+            period: Some(period),
+        })?;
 
-	#[cfg(debug_assertions)]
-	fn check_tsf_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-		skip_if_unsupported!(kernel, test_name);
+        let mut stream_values = Vec::with_capacity(candles.close.len());
+        for &price in &candles.close {
+            match stream.update(price) {
+                Some(tsf_val) => stream_values.push(tsf_val),
+                None => stream_values.push(f64::NAN),
+            }
+        }
 
-		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-		let candles = read_candles_from_csv(file_path)?;
+        assert_eq!(batch_output.len(), stream_values.len());
+        for (i, (&b, &s)) in batch_output.iter().zip(stream_values.iter()).enumerate() {
+            if b.is_nan() && s.is_nan() {
+                continue;
+            }
+            let diff = (b - s).abs();
+            assert!(
+                diff < 1e-9,
+                "[{}] TSF streaming f64 mismatch at idx {}: batch={}, stream={}, diff={}",
+                test_name,
+                i,
+                b,
+                s,
+                diff
+            );
+        }
+        Ok(())
+    }
 
-		// Define comprehensive parameter combinations
-		let test_params = vec![
-			TsfParams::default(), // period: 14
-			TsfParams { period: Some(1) },
-			TsfParams { period: Some(2) },
-			TsfParams { period: Some(5) },
-			TsfParams { period: Some(7) },
-			TsfParams { period: Some(10) },
-			TsfParams { period: Some(20) },
-			TsfParams { period: Some(30) },
-			TsfParams { period: Some(50) },
-			TsfParams { period: Some(100) },
-			TsfParams { period: Some(200) },
-		];
+    #[cfg(debug_assertions)]
+    fn check_tsf_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
 
-		for (param_idx, params) in test_params.iter().enumerate() {
-			let input = TsfInput::from_candles(&candles, "close", params.clone());
-			let output = tsf_with_kernel(&input, kernel)?;
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
 
-			for (i, &val) in output.values.iter().enumerate() {
-				if val.is_nan() {
-					continue; // NaN values are expected during warmup
-				}
+        // Define comprehensive parameter combinations
+        let test_params = vec![
+            TsfParams::default(), // period: 14
+            TsfParams { period: Some(1) },
+            TsfParams { period: Some(2) },
+            TsfParams { period: Some(5) },
+            TsfParams { period: Some(7) },
+            TsfParams { period: Some(10) },
+            TsfParams { period: Some(20) },
+            TsfParams { period: Some(30) },
+            TsfParams { period: Some(50) },
+            TsfParams { period: Some(100) },
+            TsfParams { period: Some(200) },
+        ];
 
-				let bits = val.to_bits();
+        for (param_idx, params) in test_params.iter().enumerate() {
+            let input = TsfInput::from_candles(&candles, "close", params.clone());
+            let output = tsf_with_kernel(&input, kernel)?;
 
-				// Check all three poison patterns
-				if bits == 0x11111111_11111111 {
-					panic!(
-						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+            for (i, &val) in output.values.iter().enumerate() {
+                if val.is_nan() {
+                    continue; // NaN values are expected during warmup
+                }
+
+                let bits = val.to_bits();
+
+                // Check all three poison patterns
+                if bits == 0x11111111_11111111 {
+                    panic!(
+                        "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
 						 with params: period={} (param set {})",
-						test_name,
-						val,
-						bits,
-						i,
-						params.period.unwrap_or(14),
-						param_idx
-					);
-				}
+                        test_name,
+                        val,
+                        bits,
+                        i,
+                        params.period.unwrap_or(14),
+                        param_idx
+                    );
+                }
 
-				if bits == 0x22222222_22222222 {
-					panic!(
-						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+                if bits == 0x22222222_22222222 {
+                    panic!(
+                        "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
 						 with params: period={} (param set {})",
-						test_name,
-						val,
-						bits,
-						i,
-						params.period.unwrap_or(14),
-						param_idx
-					);
-				}
+                        test_name,
+                        val,
+                        bits,
+                        i,
+                        params.period.unwrap_or(14),
+                        param_idx
+                    );
+                }
 
-				if bits == 0x33333333_33333333 {
-					panic!(
-						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+                if bits == 0x33333333_33333333 {
+                    panic!(
+                        "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
 						 with params: period={} (param set {})",
-						test_name,
-						val,
-						bits,
-						i,
-						params.period.unwrap_or(14),
-						param_idx
-					);
-				}
-			}
-		}
+                        test_name,
+                        val,
+                        bits,
+                        i,
+                        params.period.unwrap_or(14),
+                        param_idx
+                    );
+                }
+            }
+        }
 
-		Ok(())
-	}
+        Ok(())
+    }
 
-	#[cfg(not(debug_assertions))]
-	fn check_tsf_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-		Ok(()) // No-op in release builds
-	}
+    #[cfg(not(debug_assertions))]
+    fn check_tsf_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        Ok(()) // No-op in release builds
+    }
 
-	#[cfg(feature = "proptest")]
-	#[allow(clippy::float_cmp)]
-	fn check_tsf_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-		use proptest::prelude::*;
-		skip_if_unsupported!(kernel, test_name);
+    #[cfg(feature = "proptest")]
+    #[allow(clippy::float_cmp)]
+    fn check_tsf_property(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use proptest::prelude::*;
+        skip_if_unsupported!(kernel, test_name);
 
-		// Generate random parameter combinations and corresponding data vectors
-		// Period must be at least 2 for meaningful regression (period=1 would have no regression)
-		let strat = (2usize..=30)
-			.prop_flat_map(|period| {
-				(
-					prop::collection::vec(
-						(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
-						period..400,
-					),
-					Just(period),
-				)
-			});
+        // Generate random parameter combinations and corresponding data vectors
+        // Period must be at least 2 for meaningful regression (period=1 would have no regression)
+        let strat = (2usize..=30).prop_flat_map(|period| {
+            (
+                prop::collection::vec(
+                    (-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+                    period..400,
+                ),
+                Just(period),
+            )
+        });
 
-		proptest::test_runner::TestRunner::default()
-			.run(&strat, |(data, period)| {
-				let params = TsfParams {
-					period: Some(period),
-				};
-				let input = TsfInput::from_slice(&data, params);
+        proptest::test_runner::TestRunner::default()
+            .run(&strat, |(data, period)| {
+                let params = TsfParams {
+                    period: Some(period),
+                };
+                let input = TsfInput::from_slice(&data, params);
 
-				// Get outputs from the kernel under test and scalar reference
-				let TsfOutput { values: out } = tsf_with_kernel(&input, kernel).unwrap();
-				let TsfOutput { values: ref_out } = tsf_with_kernel(&input, Kernel::Scalar).unwrap();
+                // Get outputs from the kernel under test and scalar reference
+                let TsfOutput { values: out } = tsf_with_kernel(&input, kernel).unwrap();
+                let TsfOutput { values: ref_out } =
+                    tsf_with_kernel(&input, Kernel::Scalar).unwrap();
 
-				// Find first non-NaN index (warmup period)
-				let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
-				let warmup_end = first + period - 1;
+                // Find first non-NaN index (warmup period)
+                let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+                let warmup_end = first + period - 1;
 
-				// Property 1: Warmup period validation - first period-1 values should be NaN
-				for i in 0..warmup_end {
-					prop_assert!(
-						out[i].is_nan(),
-						"[{}] Expected NaN during warmup at index {}, got {}",
-						test_name,
-						i,
-						out[i]
-					);
-				}
+                // Property 1: Warmup period validation - first period-1 values should be NaN
+                for i in 0..warmup_end {
+                    prop_assert!(
+                        out[i].is_nan(),
+                        "[{}] Expected NaN during warmup at index {}, got {}",
+                        test_name,
+                        i,
+                        out[i]
+                    );
+                }
 
-				// Property 2: Kernel consistency - compare with scalar reference
-				for i in warmup_end..data.len() {
-					let y = out[i];
-					let r = ref_out[i];
+                // Property 2: Kernel consistency - compare with scalar reference
+                for i in warmup_end..data.len() {
+                    let y = out[i];
+                    let r = ref_out[i];
 
-					// Handle NaN/infinite values
-					if !y.is_finite() || !r.is_finite() {
-						prop_assert!(
-							y.to_bits() == r.to_bits(),
-							"[{}] finite/NaN mismatch at idx {}: {} vs {}",
-							test_name,
-							i,
-							y,
-							r
-						);
-						continue;
-					}
+                    // Handle NaN/infinite values
+                    if !y.is_finite() || !r.is_finite() {
+                        prop_assert!(
+                            y.to_bits() == r.to_bits(),
+                            "[{}] finite/NaN mismatch at idx {}: {} vs {}",
+                            test_name,
+                            i,
+                            y,
+                            r
+                        );
+                        continue;
+                    }
 
-					// ULP comparison for finite values
-					let y_bits = y.to_bits();
-					let r_bits = r.to_bits();
-					let ulp_diff: u64 = y_bits.abs_diff(r_bits);
+                    // ULP comparison for finite values
+                    let y_bits = y.to_bits();
+                    let r_bits = r.to_bits();
+                    let ulp_diff: u64 = y_bits.abs_diff(r_bits);
 
-					prop_assert!(
-						(y - r).abs() <= 1e-9 || ulp_diff <= 4,
-						"[{}] Kernel mismatch at idx {}: {} vs {} (ULP={})",
-						test_name,
-						i,
-						y,
-						r,
-						ulp_diff
-					);
-				}
+                    prop_assert!(
+                        (y - r).abs() <= 1e-9 || ulp_diff <= 4,
+                        "[{}] Kernel mismatch at idx {}: {} vs {} (ULP={})",
+                        test_name,
+                        i,
+                        y,
+                        r,
+                        ulp_diff
+                    );
+                }
 
-				// Property 3: Constant data property - TSF should predict the same constant
-				if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) && !data.is_empty() {
-					for i in warmup_end..data.len() {
-						if out[i].is_finite() {
-							prop_assert!(
-								(out[i] - data[0]).abs() <= 1e-6,
-								"[{}] Constant data: TSF at {} = {}, expected {}",
-								test_name,
-								i,
-								out[i],
-								data[0]
-							);
-						}
-					}
-				}
+                // Property 3: Constant data property - TSF should predict the same constant
+                if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) && !data.is_empty() {
+                    for i in warmup_end..data.len() {
+                        if out[i].is_finite() {
+                            prop_assert!(
+                                (out[i] - data[0]).abs() <= 1e-6,
+                                "[{}] Constant data: TSF at {} = {}, expected {}",
+                                test_name,
+                                i,
+                                out[i],
+                                data[0]
+                            );
+                        }
+                    }
+                }
 
-				// Property 4: Bounded output range
-				// TSF predictions should be within reasonable bounds of the input data
-				// Since TSF extrapolates, we allow for some extension beyond the data range
-				let data_min = data[first..].iter().fold(f64::INFINITY, |a, &b| a.min(b));
-				let data_max = data[first..].iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-				let data_range = data_max - data_min;
-				
-				// Allow TSF to extrapolate up to 2x the data range beyond min/max
-				let bound_factor = 2.0;
-				let lower_bound = data_min - bound_factor * data_range;
-				let upper_bound = data_max + bound_factor * data_range;
-				
-				for i in warmup_end..data.len() {
-					if out[i].is_finite() && data_range > 1e-10 {
-						prop_assert!(
-							out[i] >= lower_bound && out[i] <= upper_bound,
-							"[{}] TSF at {} = {} is outside bounds [{}, {}]",
-							test_name,
-							i,
-							out[i],
-							lower_bound,
-							upper_bound
-						);
-					}
-				}
+                // Property 4: Bounded output range
+                // TSF predictions should be within reasonable bounds of the input data
+                // Since TSF extrapolates, we allow for some extension beyond the data range
+                let data_min = data[first..].iter().fold(f64::INFINITY, |a, &b| a.min(b));
+                let data_max = data[first..]
+                    .iter()
+                    .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+                let data_range = data_max - data_min;
 
-				// Property 5: Monotonic trend validation (improved)
-				let is_monotonic_inc = data.windows(2).all(|w| w[1] >= w[0] - 1e-10);
-				let is_monotonic_dec = data.windows(2).all(|w| w[1] <= w[0] + 1e-10);
-				
-				if is_monotonic_inc || is_monotonic_dec {
-					// For monotonic data, check trend direction at a few points
-					let test_points = vec![warmup_end, (warmup_end + data.len()) / 2, data.len() - 1];
-					
-					for &i in test_points.iter() {
-						if i < data.len() && out[i].is_finite() {
-							let window_end = i;
-							let window_start = i.saturating_sub(period - 1);
-							
-							if is_monotonic_inc {
-								// For increasing data, TSF should predict >= last value
-								prop_assert!(
-									out[i] >= data[window_end] - 1e-6,
-									"[{}] Monotonic increasing: TSF at {} = {} < last value {}",
-									test_name,
-									i,
-									out[i],
-									data[window_end]
-								);
-							} else if is_monotonic_dec {
-								// For decreasing data, TSF should predict <= last value
-								prop_assert!(
-									out[i] <= data[window_end] + 1e-6,
-									"[{}] Monotonic decreasing: TSF at {} = {} > last value {}",
-									test_name,
-									i,
-									out[i],
-									data[window_end]
-								);
-							}
-						}
-					}
-				}
+                // Allow TSF to extrapolate up to 2x the data range beyond min/max
+                let bound_factor = 2.0;
+                let lower_bound = data_min - bound_factor * data_range;
+                let upper_bound = data_max + bound_factor * data_range;
 
-				// Property 6: Edge case - period = 2 (minimum valid period)
-				// Only test once at the first valid output position
-				if period == 2 && warmup_end < data.len() {
-					let i = warmup_end;
-					if out[i].is_finite() {
-						// With period=2, TSF fits a line through the last 2 points and extrapolates
-						let x0 = data[i - 1]; // older point at x=0
-						let x1 = data[i];     // newer point at x=1
-						// Linear extrapolation to x=2: 2*x1 - x0
-						let expected = 2.0 * x1 - x0;
-						prop_assert!(
-							(out[i] - expected).abs() <= 1e-6,
-							"[{}] Period=2: TSF at {} = {}, expected {}",
-							test_name,
-							i,
-							out[i],
-							expected
-						);
-					}
-				}
+                for i in warmup_end..data.len() {
+                    if out[i].is_finite() && data_range > 1e-10 {
+                        prop_assert!(
+                            out[i] >= lower_bound && out[i] <= upper_bound,
+                            "[{}] TSF at {} = {} is outside bounds [{}, {}]",
+                            test_name,
+                            i,
+                            out[i],
+                            lower_bound,
+                            upper_bound
+                        );
+                    }
+                }
 
-				// Property 7: Clean input produces clean output (no NaN injection)
-				// After warmup, all outputs should be finite for finite inputs
-				for i in warmup_end..data.len() {
-					if data[i.saturating_sub(period - 1)..=i].iter().all(|x| x.is_finite()) {
-						prop_assert!(
-							out[i].is_finite(),
-							"[{}] TSF produced NaN/Inf at {} despite finite input window",
-							test_name,
-							i
-						);
-					}
-				}
+                // Property 5: Monotonic trend validation (improved)
+                let is_monotonic_inc = data.windows(2).all(|w| w[1] >= w[0] - 1e-10);
+                let is_monotonic_dec = data.windows(2).all(|w| w[1] <= w[0] + 1e-10);
 
-				Ok(())
-			})
-			.unwrap();
+                if is_monotonic_inc || is_monotonic_dec {
+                    // For monotonic data, check trend direction at a few points
+                    let test_points =
+                        vec![warmup_end, (warmup_end + data.len()) / 2, data.len() - 1];
 
-		Ok(())
-	}
+                    for &i in test_points.iter() {
+                        if i < data.len() && out[i].is_finite() {
+                            let window_end = i;
+                            let window_start = i.saturating_sub(period - 1);
 
-	macro_rules! generate_all_tsf_tests {
+                            if is_monotonic_inc {
+                                // For increasing data, TSF should predict >= last value
+                                prop_assert!(
+                                    out[i] >= data[window_end] - 1e-6,
+                                    "[{}] Monotonic increasing: TSF at {} = {} < last value {}",
+                                    test_name,
+                                    i,
+                                    out[i],
+                                    data[window_end]
+                                );
+                            } else if is_monotonic_dec {
+                                // For decreasing data, TSF should predict <= last value
+                                prop_assert!(
+                                    out[i] <= data[window_end] + 1e-6,
+                                    "[{}] Monotonic decreasing: TSF at {} = {} > last value {}",
+                                    test_name,
+                                    i,
+                                    out[i],
+                                    data[window_end]
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // Property 6: Edge case - period = 2 (minimum valid period)
+                // Only test once at the first valid output position
+                if period == 2 && warmup_end < data.len() {
+                    let i = warmup_end;
+                    if out[i].is_finite() {
+                        // With period=2, TSF fits a line through the last 2 points and extrapolates
+                        let x0 = data[i - 1]; // older point at x=0
+                        let x1 = data[i]; // newer point at x=1
+                                          // Linear extrapolation to x=2: 2*x1 - x0
+                        let expected = 2.0 * x1 - x0;
+                        prop_assert!(
+                            (out[i] - expected).abs() <= 1e-6,
+                            "[{}] Period=2: TSF at {} = {}, expected {}",
+                            test_name,
+                            i,
+                            out[i],
+                            expected
+                        );
+                    }
+                }
+
+                // Property 7: Clean input produces clean output (no NaN injection)
+                // After warmup, all outputs should be finite for finite inputs
+                for i in warmup_end..data.len() {
+                    if data[i.saturating_sub(period - 1)..=i]
+                        .iter()
+                        .all(|x| x.is_finite())
+                    {
+                        prop_assert!(
+                            out[i].is_finite(),
+                            "[{}] TSF produced NaN/Inf at {} despite finite input window",
+                            test_name,
+                            i
+                        );
+                    }
+                }
+
+                Ok(())
+            })
+            .unwrap();
+
+        Ok(())
+    }
+
+    macro_rules! generate_all_tsf_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
                 $(
@@ -1556,166 +1715,168 @@ mod tests {
         }
     }
 
-	generate_all_tsf_tests!(
-		check_tsf_partial_params,
-		check_tsf_accuracy,
-		check_tsf_default_candles,
-		check_tsf_zero_period,
-		check_tsf_period_one,
-		check_tsf_mismatched_output_len,
-		check_tsf_period_exceeds_length,
-		check_tsf_very_small_dataset,
-		check_tsf_reinput,
-		check_tsf_nan_handling,
-		check_tsf_streaming,
-		check_tsf_no_poison
-	);
+    generate_all_tsf_tests!(
+        check_tsf_partial_params,
+        check_tsf_accuracy,
+        check_tsf_default_candles,
+        check_tsf_zero_period,
+        check_tsf_period_one,
+        check_tsf_mismatched_output_len,
+        check_tsf_period_exceeds_length,
+        check_tsf_very_small_dataset,
+        check_tsf_reinput,
+        check_tsf_nan_handling,
+        check_tsf_streaming,
+        check_tsf_no_poison
+    );
 
-	#[cfg(feature = "proptest")]
-	generate_all_tsf_tests!(check_tsf_property);
+    #[cfg(feature = "proptest")]
+    generate_all_tsf_tests!(check_tsf_property);
 
-	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-		skip_if_unsupported!(kernel, test);
+    fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test);
 
-		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-		let c = read_candles_from_csv(file)?;
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let c = read_candles_from_csv(file)?;
 
-		let output = TsfBatchBuilder::new().kernel(kernel).apply_candles(&c, "close")?;
+        let output = TsfBatchBuilder::new()
+            .kernel(kernel)
+            .apply_candles(&c, "close")?;
 
-		let def = TsfParams::default();
-		let row = output.values_for(&def).expect("default row missing");
+        let def = TsfParams::default();
+        let row = output.values_for(&def).expect("default row missing");
 
-		assert_eq!(row.len(), c.close.len());
+        assert_eq!(row.len(), c.close.len());
 
-		let expected = [
-			58846.945054945056,
-			58818.83516483516,
-			58854.57142857143,
-			59083.846153846156,
-			58962.25274725275,
-		];
-		let start = row.len() - 5;
-		for (i, &v) in row[start..].iter().enumerate() {
-			assert!(
-				(v - expected[i]).abs() < 1e-1,
-				"[{test}] default-row mismatch at idx {i}: {v} vs {expected:?}"
-			);
-		}
-		Ok(())
-	}
+        let expected = [
+            58846.945054945056,
+            58818.83516483516,
+            58854.57142857143,
+            59083.846153846156,
+            58962.25274725275,
+        ];
+        let start = row.len() - 5;
+        for (i, &v) in row[start..].iter().enumerate() {
+            assert!(
+                (v - expected[i]).abs() < 1e-1,
+                "[{test}] default-row mismatch at idx {i}: {v} vs {expected:?}"
+            );
+        }
+        Ok(())
+    }
 
-	#[cfg(debug_assertions)]
-	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-		skip_if_unsupported!(kernel, test);
+    #[cfg(debug_assertions)]
+    fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test);
 
-		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-		let c = read_candles_from_csv(file)?;
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let c = read_candles_from_csv(file)?;
 
-		// Test various parameter sweep configurations
-		let test_configs = vec![
-			// (period_start, period_end, period_step)
-			(2, 10, 2),       // Small periods
-			(5, 25, 5),       // Medium periods
-			(20, 50, 10),     // Large periods
-			(2, 5, 1),        // Dense small range
-			(14, 14, 0),      // Single value (default period)
-			(30, 60, 15),     // Mixed range
-			(50, 100, 25),    // Very large periods
-			(100, 200, 50),   // Extra large periods
-		];
+        // Test various parameter sweep configurations
+        let test_configs = vec![
+            // (period_start, period_end, period_step)
+            (2, 10, 2),     // Small periods
+            (5, 25, 5),     // Medium periods
+            (20, 50, 10),   // Large periods
+            (2, 5, 1),      // Dense small range
+            (14, 14, 0),    // Single value (default period)
+            (30, 60, 15),   // Mixed range
+            (50, 100, 25),  // Very large periods
+            (100, 200, 50), // Extra large periods
+        ];
 
-		for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
-			let output = TsfBatchBuilder::new()
-				.kernel(kernel)
-				.period_range(p_start, p_end, p_step)
-				.apply_candles(&c, "close")?;
+        for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
+            let output = TsfBatchBuilder::new()
+                .kernel(kernel)
+                .period_range(p_start, p_end, p_step)
+                .apply_candles(&c, "close")?;
 
-			for (idx, &val) in output.values.iter().enumerate() {
-				if val.is_nan() {
-					continue;
-				}
+            for (idx, &val) in output.values.iter().enumerate() {
+                if val.is_nan() {
+                    continue;
+                }
 
-				let bits = val.to_bits();
-				let row = idx / output.cols;
-				let col = idx % output.cols;
-				let combo = &output.combos[row];
+                let bits = val.to_bits();
+                let row = idx / output.cols;
+                let col = idx % output.cols;
+                let combo = &output.combos[row];
 
-				// Check all three poison patterns with detailed context
-				if bits == 0x11111111_11111111 {
-					panic!(
-						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+                // Check all three poison patterns with detailed context
+                if bits == 0x11111111_11111111 {
+                    panic!(
+                        "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
 						 at row {} col {} (flat index {}) with params: period={}",
-						test,
-						cfg_idx,
-						val,
-						bits,
-						row,
-						col,
-						idx,
-						combo.period.unwrap_or(14)
-					);
-				}
+                        test,
+                        cfg_idx,
+                        val,
+                        bits,
+                        row,
+                        col,
+                        idx,
+                        combo.period.unwrap_or(14)
+                    );
+                }
 
-				if bits == 0x22222222_22222222 {
-					panic!(
-						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+                if bits == 0x22222222_22222222 {
+                    panic!(
+                        "[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
 						 at row {} col {} (flat index {}) with params: period={}",
-						test,
-						cfg_idx,
-						val,
-						bits,
-						row,
-						col,
-						idx,
-						combo.period.unwrap_or(14)
-					);
-				}
+                        test,
+                        cfg_idx,
+                        val,
+                        bits,
+                        row,
+                        col,
+                        idx,
+                        combo.period.unwrap_or(14)
+                    );
+                }
 
-				if bits == 0x33333333_33333333 {
-					panic!(
-						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+                if bits == 0x33333333_33333333 {
+                    panic!(
+                        "[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
 						 at row {} col {} (flat index {}) with params: period={}",
-						test,
-						cfg_idx,
-						val,
-						bits,
-						row,
-						col,
-						idx,
-						combo.period.unwrap_or(14)
-					);
-				}
-			}
-		}
+                        test,
+                        cfg_idx,
+                        val,
+                        bits,
+                        row,
+                        col,
+                        idx,
+                        combo.period.unwrap_or(14)
+                    );
+                }
+            }
+        }
 
-		Ok(())
-	}
+        Ok(())
+    }
 
-	#[cfg(not(debug_assertions))]
-	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-		Ok(()) // No-op in release builds
-	}
+    #[cfg(not(debug_assertions))]
+    fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        Ok(()) // No-op in release builds
+    }
 
-	macro_rules! gen_batch_tests {
-		($fn_name:ident) => {
-			paste::paste! {
-				#[test] fn [<$fn_name _scalar>]()      {
-					let _ = $fn_name(stringify!([<$fn_name _scalar>]), Kernel::ScalarBatch);
-				}
-				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-				#[test] fn [<$fn_name _avx2>]()        {
-					let _ = $fn_name(stringify!([<$fn_name _avx2>]), Kernel::Avx2Batch);
-				}
-				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-				#[test] fn [<$fn_name _avx512>]()      {
-					let _ = $fn_name(stringify!([<$fn_name _avx512>]), Kernel::Avx512Batch);
-				}
-				#[test] fn [<$fn_name _auto_detect>]() {
-					let _ = $fn_name(stringify!([<$fn_name _auto_detect>]), Kernel::Auto);
-				}
-			}
-		};
-	}
-	gen_batch_tests!(check_batch_default_row);
-	gen_batch_tests!(check_batch_no_poison);
+    macro_rules! gen_batch_tests {
+        ($fn_name:ident) => {
+            paste::paste! {
+                #[test] fn [<$fn_name _scalar>]()      {
+                    let _ = $fn_name(stringify!([<$fn_name _scalar>]), Kernel::ScalarBatch);
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                #[test] fn [<$fn_name _avx2>]()        {
+                    let _ = $fn_name(stringify!([<$fn_name _avx2>]), Kernel::Avx2Batch);
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                #[test] fn [<$fn_name _avx512>]()      {
+                    let _ = $fn_name(stringify!([<$fn_name _avx512>]), Kernel::Avx512Batch);
+                }
+                #[test] fn [<$fn_name _auto_detect>]() {
+                    let _ = $fn_name(stringify!([<$fn_name _auto_detect>]), Kernel::Auto);
+                }
+            }
+        };
+    }
+    gen_batch_tests!(check_batch_default_row);
+    gen_batch_tests!(check_batch_no_poison);
 }

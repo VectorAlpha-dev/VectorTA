@@ -58,60 +58,111 @@ pub mod zlema;
 // Exports for migrated moving averages
 pub use cwma::{cwma, CwmaInput, CwmaOutput, CwmaParams};
 pub use dma::{
-    dma, dma_with_kernel, DmaInput, DmaOutput, DmaParams, DmaError,
-    DmaData, DmaBuilder, dma_into_slice, DmaStream,
+    dma,
+    dma_batch_with_kernel,
+    dma_into_slice,
+    dma_with_kernel,
+    DmaBatchBuilder,
+    DmaBatchOutput,
     // Batch API exports
-    DmaBatchRange, DmaBatchBuilder, DmaBatchOutput, dma_batch_with_kernel,
+    DmaBatchRange,
+    DmaBuilder,
+    DmaData,
+    DmaError,
+    DmaInput,
+    DmaOutput,
+    DmaParams,
+    DmaStream,
 };
 
 pub use edcf::{edcf, EdcfInput, EdcfOutput, EdcfParams};
 pub use ehlers_kama::{ehlers_kama, EhlersKamaInput, EhlersKamaOutput, EhlersKamaParams};
 pub use ehlers_pma::{ehlers_pma, EhlersPmaInput, EhlersPmaOutput, EhlersPmaParams};
 pub use uma::{uma, UmaInput, UmaOutput, UmaParams};
-pub use volume_adjusted_ma::{VolumeAdjustedMa as volume_adjusted_ma, VolumeAdjustedMaInput, VolumeAdjustedMaOutput, VolumeAdjustedMaParams};
-pub use volatility_adjusted_ma::{vama as volatility_adjusted_ma, VamaInput as VolatilityAdjustedMaInput, VamaOutput as VolatilityAdjustedMaOutput, VamaParams as VolatilityAdjustedMaParams};
+pub use volatility_adjusted_ma::{
+    vama as volatility_adjusted_ma, VamaInput as VolatilityAdjustedMaInput,
+    VamaOutput as VolatilityAdjustedMaOutput, VamaParams as VolatilityAdjustedMaParams,
+};
+pub use volume_adjusted_ma::{
+    VolumeAdjustedMa as volume_adjusted_ma, VolumeAdjustedMaInput, VolumeAdjustedMaOutput,
+    VolumeAdjustedMaParams,
+};
 
 pub use ehma::{
-    ehma, ehma_with_kernel, ehma_into_slice, EhmaInput, EhmaOutput,
-    EhmaParams, EhmaError, EhmaData, EhmaBuilder,
+    ehma,
+    ehma_batch_inner_into,
+    ehma_batch_par_slice,
+    ehma_batch_slice,
+    ehma_batch_with_kernel,
+    ehma_batch_with_kernel_slice,
+    ehma_into_slice,
+    ehma_with_kernel,
+    EhmaBatchBuilder,
+    EhmaBatchOutput,
     // Batch API exports
-    EhmaBatchRange, EhmaBatchBuilder, EhmaBatchOutput, 
-    ehma_batch_with_kernel, ehma_batch_with_kernel_slice,
-    ehma_batch_slice, ehma_batch_par_slice, ehma_batch_inner_into,
+    EhmaBatchRange,
+    EhmaBuilder,
+    EhmaData,
+    EhmaError,
+    EhmaInput,
+    EhmaOutput,
+    EhmaParams,
     // Streaming API exports
     EhmaStream,
 };
 
 pub use nama::{
-    nama, nama_with_kernel, nama_into_slice, NamaInput, NamaOutput,
-    NamaParams, NamaError, NamaData, NamaBuilder, NamaStream,
+    nama,
+    nama_batch_with_kernel,
+    nama_into_slice,
+    nama_with_kernel,
+    NamaBatchBuilder,
+    NamaBatchOutput,
     // Batch API exports
-    NamaBatchRange, NamaBatchOutput, NamaBatchBuilder, nama_batch_with_kernel,
+    NamaBatchRange,
+    NamaBuilder,
+    NamaData,
+    NamaError,
+    NamaInput,
+    NamaOutput,
+    NamaParams,
+    NamaStream,
 };
 
 pub use sama::{
-    sama, sama_with_kernel, sama_into_slice, SamaInput, SamaOutput, 
-    SamaParams, SamaError, SamaData, SamaBuilder,
+    sama,
+    sama_batch_par_slice,
+    sama_batch_slice,
+    sama_batch_with_kernel,
+    sama_into_slice,
+    sama_with_kernel,
+    SamaBatchBuilder,
+    SamaBatchOutput,
     // Batch API exports
-    SamaBatchRange, SamaBatchBuilder, SamaBatchOutput, sama_batch_with_kernel,
-    sama_batch_slice, sama_batch_par_slice,
+    SamaBatchRange,
+    SamaBuilder,
+    SamaData,
+    SamaError,
+    SamaInput,
+    SamaOutput,
+    SamaParams,
     // Streaming API exports
     SamaStream,
 };
 
 // Python exports for migrated moving averages
 #[cfg(feature = "python")]
-pub use dma::{dma_py, dma_batch_py, DmaStreamPy};
+pub use dma::{dma_batch_py, dma_py, DmaStreamPy};
 
 #[cfg(feature = "python")]
-pub use ehma::{ehma_py, ehma_batch_py, EhmaStreamPy};
+pub use ehma::{ehma_batch_py, ehma_py, EhmaStreamPy};
 
 #[cfg(feature = "python")]
-pub use nama::{nama_py, nama_batch_py, NamaStreamPy};
+pub use nama::{nama_batch_py, nama_py, NamaStreamPy};
 
 #[cfg(feature = "python")]
-pub use sama::{sama_py, sama_batch_py, SamaStreamPy};
+pub use sama::{sama_batch_py, sama_py, SamaStreamPy};
 
 // WASM exports
 #[cfg(feature = "wasm")]
-pub use nama::{nama_js, nama_batch_unified_js, nama_alloc, nama_free, nama_into};
+pub use nama::{nama_alloc, nama_batch_unified_js, nama_free, nama_into, nama_js};

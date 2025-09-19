@@ -35,11 +35,16 @@
 //! - [ ] Vectorize weighted sum calculations
 //! - [ ] Consider caching intermediate ROC/SMA values for batch operations
 
-use crate::indicators::moving_averages::sma::{sma, SmaData, SmaError, SmaInput, SmaOutput, SmaParams};
+use crate::indicators::moving_averages::sma::{
+    sma, SmaData, SmaError, SmaInput, SmaOutput, SmaParams,
+};
 use crate::indicators::roc::{roc, RocData, RocError, RocInput, RocOutput, RocParams};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes};
+use crate::utilities::helpers::{
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    make_uninit_matrix,
+};
 // aligned_vec imports removed - not used in KST
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -50,338 +55,377 @@ use std::error::Error;
 use thiserror::Error;
 
 #[cfg(feature = "wasm")]
+use js_sys;
+#[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
-#[cfg(feature = "wasm")]
-use js_sys;
 
 #[derive(Debug, Clone)]
 pub enum KstData<'a> {
-	Candles { candles: &'a Candles, source: &'a str },
-	Slice(&'a [f64]),
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    Slice(&'a [f64]),
 }
 
 #[derive(Debug, Clone)]
 pub struct KstOutput {
-	pub line: Vec<f64>,
-	pub signal: Vec<f64>,
+    pub line: Vec<f64>,
+    pub signal: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "wasm", derive(serde::Serialize, serde::Deserialize))]
 pub struct KstParams {
-	pub sma_period1: Option<usize>,
-	pub sma_period2: Option<usize>,
-	pub sma_period3: Option<usize>,
-	pub sma_period4: Option<usize>,
-	pub roc_period1: Option<usize>,
-	pub roc_period2: Option<usize>,
-	pub roc_period3: Option<usize>,
-	pub roc_period4: Option<usize>,
-	pub signal_period: Option<usize>,
+    pub sma_period1: Option<usize>,
+    pub sma_period2: Option<usize>,
+    pub sma_period3: Option<usize>,
+    pub sma_period4: Option<usize>,
+    pub roc_period1: Option<usize>,
+    pub roc_period2: Option<usize>,
+    pub roc_period3: Option<usize>,
+    pub roc_period4: Option<usize>,
+    pub signal_period: Option<usize>,
 }
 
 impl Default for KstParams {
-	fn default() -> Self {
-		Self {
-			sma_period1: Some(10),
-			sma_period2: Some(10),
-			sma_period3: Some(10),
-			sma_period4: Some(15),
-			roc_period1: Some(10),
-			roc_period2: Some(15),
-			roc_period3: Some(20),
-			roc_period4: Some(30),
-			signal_period: Some(9),
-		}
-	}
+    fn default() -> Self {
+        Self {
+            sma_period1: Some(10),
+            sma_period2: Some(10),
+            sma_period3: Some(10),
+            sma_period4: Some(15),
+            roc_period1: Some(10),
+            roc_period2: Some(15),
+            roc_period3: Some(20),
+            roc_period4: Some(30),
+            signal_period: Some(9),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct KstInput<'a> {
-	pub data: KstData<'a>,
-	pub params: KstParams,
+    pub data: KstData<'a>,
+    pub params: KstParams,
 }
 
 impl<'a> AsRef<[f64]> for KstInput<'a> {
-	#[inline(always)]
-	fn as_ref(&self) -> &[f64] {
-		match &self.data {
-			KstData::Slice(slice) => slice,
-			KstData::Candles { candles, source } => source_type(candles, source),
-		}
-	}
+    #[inline(always)]
+    fn as_ref(&self) -> &[f64] {
+        match &self.data {
+            KstData::Slice(slice) => slice,
+            KstData::Candles { candles, source } => source_type(candles, source),
+        }
+    }
 }
 
 impl<'a> KstInput<'a> {
-	#[inline]
-	pub fn from_candles(c: &'a Candles, s: &'a str, p: KstParams) -> Self {
-		Self {
-			data: KstData::Candles { candles: c, source: s },
-			params: p,
-		}
-	}
-	#[inline]
-	pub fn from_slice(sl: &'a [f64], p: KstParams) -> Self {
-		Self {
-			data: KstData::Slice(sl),
-			params: p,
-		}
-	}
-	#[inline]
-	pub fn with_default_candles(c: &'a Candles) -> Self {
-		Self::from_candles(c, "close", KstParams::default())
-	}
-	#[inline]
-	pub fn get_sma_period1(&self) -> usize {
-		self.params.sma_period1.unwrap_or(10)
-	}
-	#[inline]
-	pub fn get_sma_period2(&self) -> usize {
-		self.params.sma_period2.unwrap_or(10)
-	}
-	#[inline]
-	pub fn get_sma_period3(&self) -> usize {
-		self.params.sma_period3.unwrap_or(10)
-	}
-	#[inline]
-	pub fn get_sma_period4(&self) -> usize {
-		self.params.sma_period4.unwrap_or(15)
-	}
-	#[inline]
-	pub fn get_roc_period1(&self) -> usize {
-		self.params.roc_period1.unwrap_or(10)
-	}
-	#[inline]
-	pub fn get_roc_period2(&self) -> usize {
-		self.params.roc_period2.unwrap_or(15)
-	}
-	#[inline]
-	pub fn get_roc_period3(&self) -> usize {
-		self.params.roc_period3.unwrap_or(20)
-	}
-	#[inline]
-	pub fn get_roc_period4(&self) -> usize {
-		self.params.roc_period4.unwrap_or(30)
-	}
-	#[inline]
-	pub fn get_signal_period(&self) -> usize {
-		self.params.signal_period.unwrap_or(9)
-	}
+    #[inline]
+    pub fn from_candles(c: &'a Candles, s: &'a str, p: KstParams) -> Self {
+        Self {
+            data: KstData::Candles {
+                candles: c,
+                source: s,
+            },
+            params: p,
+        }
+    }
+    #[inline]
+    pub fn from_slice(sl: &'a [f64], p: KstParams) -> Self {
+        Self {
+            data: KstData::Slice(sl),
+            params: p,
+        }
+    }
+    #[inline]
+    pub fn with_default_candles(c: &'a Candles) -> Self {
+        Self::from_candles(c, "close", KstParams::default())
+    }
+    #[inline]
+    pub fn get_sma_period1(&self) -> usize {
+        self.params.sma_period1.unwrap_or(10)
+    }
+    #[inline]
+    pub fn get_sma_period2(&self) -> usize {
+        self.params.sma_period2.unwrap_or(10)
+    }
+    #[inline]
+    pub fn get_sma_period3(&self) -> usize {
+        self.params.sma_period3.unwrap_or(10)
+    }
+    #[inline]
+    pub fn get_sma_period4(&self) -> usize {
+        self.params.sma_period4.unwrap_or(15)
+    }
+    #[inline]
+    pub fn get_roc_period1(&self) -> usize {
+        self.params.roc_period1.unwrap_or(10)
+    }
+    #[inline]
+    pub fn get_roc_period2(&self) -> usize {
+        self.params.roc_period2.unwrap_or(15)
+    }
+    #[inline]
+    pub fn get_roc_period3(&self) -> usize {
+        self.params.roc_period3.unwrap_or(20)
+    }
+    #[inline]
+    pub fn get_roc_period4(&self) -> usize {
+        self.params.roc_period4.unwrap_or(30)
+    }
+    #[inline]
+    pub fn get_signal_period(&self) -> usize {
+        self.params.signal_period.unwrap_or(9)
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
 pub struct KstBuilder {
-	sma_period1: Option<usize>,
-	sma_period2: Option<usize>,
-	sma_period3: Option<usize>,
-	sma_period4: Option<usize>,
-	roc_period1: Option<usize>,
-	roc_period2: Option<usize>,
-	roc_period3: Option<usize>,
-	roc_period4: Option<usize>,
-	signal_period: Option<usize>,
-	kernel: Kernel,
+    sma_period1: Option<usize>,
+    sma_period2: Option<usize>,
+    sma_period3: Option<usize>,
+    sma_period4: Option<usize>,
+    roc_period1: Option<usize>,
+    roc_period2: Option<usize>,
+    roc_period3: Option<usize>,
+    roc_period4: Option<usize>,
+    signal_period: Option<usize>,
+    kernel: Kernel,
 }
 
 impl Default for KstBuilder {
-	fn default() -> Self {
-		Self {
-			sma_period1: None,
-			sma_period2: None,
-			sma_period3: None,
-			sma_period4: None,
-			roc_period1: None,
-			roc_period2: None,
-			roc_period3: None,
-			roc_period4: None,
-			signal_period: None,
-			kernel: Kernel::Auto,
-		}
-	}
+    fn default() -> Self {
+        Self {
+            sma_period1: None,
+            sma_period2: None,
+            sma_period3: None,
+            sma_period4: None,
+            roc_period1: None,
+            roc_period2: None,
+            roc_period3: None,
+            roc_period4: None,
+            signal_period: None,
+            kernel: Kernel::Auto,
+        }
+    }
 }
 
 impl KstBuilder {
-	#[inline(always)]
-	pub fn new() -> Self {
-		Self::default()
-	}
-	#[inline(always)]
-	pub fn sma_period1(mut self, n: usize) -> Self {
-		self.sma_period1 = Some(n);
-		self
-	}
-	#[inline(always)]
-	pub fn sma_period2(mut self, n: usize) -> Self {
-		self.sma_period2 = Some(n);
-		self
-	}
-	#[inline(always)]
-	pub fn sma_period3(mut self, n: usize) -> Self {
-		self.sma_period3 = Some(n);
-		self
-	}
-	#[inline(always)]
-	pub fn sma_period4(mut self, n: usize) -> Self {
-		self.sma_period4 = Some(n);
-		self
-	}
-	#[inline(always)]
-	pub fn roc_period1(mut self, n: usize) -> Self {
-		self.roc_period1 = Some(n);
-		self
-	}
-	#[inline(always)]
-	pub fn roc_period2(mut self, n: usize) -> Self {
-		self.roc_period2 = Some(n);
-		self
-	}
-	#[inline(always)]
-	pub fn roc_period3(mut self, n: usize) -> Self {
-		self.roc_period3 = Some(n);
-		self
-	}
-	#[inline(always)]
-	pub fn roc_period4(mut self, n: usize) -> Self {
-		self.roc_period4 = Some(n);
-		self
-	}
-	#[inline(always)]
-	pub fn signal_period(mut self, n: usize) -> Self {
-		self.signal_period = Some(n);
-		self
-	}
-	#[inline(always)]
-	pub fn kernel(mut self, k: Kernel) -> Self {
-		self.kernel = k;
-		self
-	}
-	#[inline(always)]
-	pub fn apply(self, c: &Candles) -> Result<KstOutput, KstError> {
-		let p = KstParams {
-			sma_period1: self.sma_period1,
-			sma_period2: self.sma_period2,
-			sma_period3: self.sma_period3,
-			sma_period4: self.sma_period4,
-			roc_period1: self.roc_period1,
-			roc_period2: self.roc_period2,
-			roc_period3: self.roc_period3,
-			roc_period4: self.roc_period4,
-			signal_period: self.signal_period,
-		};
-		let i = KstInput::from_candles(c, "close", p);
-		kst_with_kernel(&i, self.kernel)
-	}
-	#[inline(always)]
-	pub fn apply_slice(self, d: &[f64]) -> Result<KstOutput, KstError> {
-		let p = KstParams {
-			sma_period1: self.sma_period1,
-			sma_period2: self.sma_period2,
-			sma_period3: self.sma_period3,
-			sma_period4: self.sma_period4,
-			roc_period1: self.roc_period1,
-			roc_period2: self.roc_period2,
-			roc_period3: self.roc_period3,
-			roc_period4: self.roc_period4,
-			signal_period: self.signal_period,
-		};
-		let i = KstInput::from_slice(d, p);
-		kst_with_kernel(&i, self.kernel)
-	}
-	#[inline(always)]
-	pub fn into_stream(self) -> Result<KstStream, KstError> {
-		let p = KstParams {
-			sma_period1: self.sma_period1,
-			sma_period2: self.sma_period2,
-			sma_period3: self.sma_period3,
-			sma_period4: self.sma_period4,
-			roc_period1: self.roc_period1,
-			roc_period2: self.roc_period2,
-			roc_period3: self.roc_period3,
-			roc_period4: self.roc_period4,
-			signal_period: self.signal_period,
-		};
-		KstStream::try_new(p)
-	}
+    #[inline(always)]
+    pub fn new() -> Self {
+        Self::default()
+    }
+    #[inline(always)]
+    pub fn sma_period1(mut self, n: usize) -> Self {
+        self.sma_period1 = Some(n);
+        self
+    }
+    #[inline(always)]
+    pub fn sma_period2(mut self, n: usize) -> Self {
+        self.sma_period2 = Some(n);
+        self
+    }
+    #[inline(always)]
+    pub fn sma_period3(mut self, n: usize) -> Self {
+        self.sma_period3 = Some(n);
+        self
+    }
+    #[inline(always)]
+    pub fn sma_period4(mut self, n: usize) -> Self {
+        self.sma_period4 = Some(n);
+        self
+    }
+    #[inline(always)]
+    pub fn roc_period1(mut self, n: usize) -> Self {
+        self.roc_period1 = Some(n);
+        self
+    }
+    #[inline(always)]
+    pub fn roc_period2(mut self, n: usize) -> Self {
+        self.roc_period2 = Some(n);
+        self
+    }
+    #[inline(always)]
+    pub fn roc_period3(mut self, n: usize) -> Self {
+        self.roc_period3 = Some(n);
+        self
+    }
+    #[inline(always)]
+    pub fn roc_period4(mut self, n: usize) -> Self {
+        self.roc_period4 = Some(n);
+        self
+    }
+    #[inline(always)]
+    pub fn signal_period(mut self, n: usize) -> Self {
+        self.signal_period = Some(n);
+        self
+    }
+    #[inline(always)]
+    pub fn kernel(mut self, k: Kernel) -> Self {
+        self.kernel = k;
+        self
+    }
+    #[inline(always)]
+    pub fn apply(self, c: &Candles) -> Result<KstOutput, KstError> {
+        let p = KstParams {
+            sma_period1: self.sma_period1,
+            sma_period2: self.sma_period2,
+            sma_period3: self.sma_period3,
+            sma_period4: self.sma_period4,
+            roc_period1: self.roc_period1,
+            roc_period2: self.roc_period2,
+            roc_period3: self.roc_period3,
+            roc_period4: self.roc_period4,
+            signal_period: self.signal_period,
+        };
+        let i = KstInput::from_candles(c, "close", p);
+        kst_with_kernel(&i, self.kernel)
+    }
+    #[inline(always)]
+    pub fn apply_slice(self, d: &[f64]) -> Result<KstOutput, KstError> {
+        let p = KstParams {
+            sma_period1: self.sma_period1,
+            sma_period2: self.sma_period2,
+            sma_period3: self.sma_period3,
+            sma_period4: self.sma_period4,
+            roc_period1: self.roc_period1,
+            roc_period2: self.roc_period2,
+            roc_period3: self.roc_period3,
+            roc_period4: self.roc_period4,
+            signal_period: self.signal_period,
+        };
+        let i = KstInput::from_slice(d, p);
+        kst_with_kernel(&i, self.kernel)
+    }
+    #[inline(always)]
+    pub fn into_stream(self) -> Result<KstStream, KstError> {
+        let p = KstParams {
+            sma_period1: self.sma_period1,
+            sma_period2: self.sma_period2,
+            sma_period3: self.sma_period3,
+            sma_period4: self.sma_period4,
+            roc_period1: self.roc_period1,
+            roc_period2: self.roc_period2,
+            roc_period3: self.roc_period3,
+            roc_period4: self.roc_period4,
+            signal_period: self.signal_period,
+        };
+        KstStream::try_new(p)
+    }
 }
 
 #[derive(Debug, Error)]
 pub enum KstError {
-	#[error("kst: {0}")]
-	Roc(#[from] RocError),
-	#[error("kst: {0}")]
-	Sma(#[from] SmaError),
-	#[error("kst: Input data slice is empty.")]
-	EmptyInputData,
-	#[error("kst: All values are NaN.")]
-	AllValuesNaN,
-	#[error("kst: Invalid period: period = {period}, data length = {data_len}")]
-	InvalidPeriod { period: usize, data_len: usize },
-	#[error("kst: Not enough valid data: needed = {needed}, valid = {valid}")]
-	NotEnoughValidData { needed: usize, valid: usize },
+    #[error("kst: {0}")]
+    Roc(#[from] RocError),
+    #[error("kst: {0}")]
+    Sma(#[from] SmaError),
+    #[error("kst: Input data slice is empty.")]
+    EmptyInputData,
+    #[error("kst: All values are NaN.")]
+    AllValuesNaN,
+    #[error("kst: Invalid period: period = {period}, data length = {data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
+    #[error("kst: Not enough valid data: needed = {needed}, valid = {valid}")]
+    NotEnoughValidData { needed: usize, valid: usize },
 }
 
 #[inline]
 pub fn kst(input: &KstInput) -> Result<KstOutput, KstError> {
-	kst_with_kernel(input, Kernel::Auto)
+    kst_with_kernel(input, Kernel::Auto)
 }
 
 #[inline(always)]
 fn kst_prepare<'a>(
-	input: &'a KstInput,
-	kernel: Kernel,
-) -> Result<(
-	&'a [f64],
-	// periods
-	(usize,usize,usize,usize), // s1..s4
-	(usize,usize,usize,usize), // r1..r4
-	usize,                     // sig
-	usize,                     // first
-	usize,                     // warm_line = max(ri+si-1)
-	usize,                     // warm_sig  = warm_line + sig - 1
-	Kernel                     // chosen
-), KstError> {
-	let data = input.as_ref();
-	let len = data.len();
-	if len == 0 { return Err(KstError::EmptyInputData); }
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(KstError::AllValuesNaN)?;
+    input: &'a KstInput,
+    kernel: Kernel,
+) -> Result<
+    (
+        &'a [f64],
+        // periods
+        (usize, usize, usize, usize), // s1..s4
+        (usize, usize, usize, usize), // r1..r4
+        usize,                        // sig
+        usize,                        // first
+        usize,                        // warm_line = max(ri+si-1)
+        usize,                        // warm_sig  = warm_line + sig - 1
+        Kernel,                       // chosen
+    ),
+    KstError,
+> {
+    let data = input.as_ref();
+    let len = data.len();
+    if len == 0 {
+        return Err(KstError::EmptyInputData);
+    }
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(KstError::AllValuesNaN)?;
 
-	let s1 = input.get_sma_period1();
-	let s2 = input.get_sma_period2();
-	let s3 = input.get_sma_period3();
-	let s4 = input.get_sma_period4();
-	let r1 = input.get_roc_period1();
-	let r2 = input.get_roc_period2();
-	let r3 = input.get_roc_period3();
-	let r4 = input.get_roc_period4();
-	let sig = input.get_signal_period();
+    let s1 = input.get_sma_period1();
+    let s2 = input.get_sma_period2();
+    let s3 = input.get_sma_period3();
+    let s4 = input.get_sma_period4();
+    let r1 = input.get_roc_period1();
+    let r2 = input.get_roc_period2();
+    let r3 = input.get_roc_period3();
+    let r4 = input.get_roc_period4();
+    let sig = input.get_signal_period();
 
-	// explicit period checks
-	for &p in [s1,s2,s3,s4,r1,r2,r3,r4,sig].iter() {
-		if p == 0 || p > len { return Err(KstError::InvalidPeriod { period: p, data_len: len }); }
-	}
+    // explicit period checks
+    for &p in [s1, s2, s3, s4, r1, r2, r3, r4, sig].iter() {
+        if p == 0 || p > len {
+            return Err(KstError::InvalidPeriod {
+                period: p,
+                data_len: len,
+            });
+        }
+    }
 
-	let warm1 = r1 + s1 - 1;
-	let warm2 = r2 + s2 - 1;
-	let warm3 = r3 + s3 - 1;
-	let warm4 = r4 + s4 - 1;
-	let warm_line = warm1.max(warm2).max(warm3).max(warm4);
-	if len - first < warm_line {
-		return Err(KstError::NotEnoughValidData { needed: warm_line, valid: len - first });
-	}
-	let warm_sig = warm_line + sig - 1;
-	if warm_sig > len { return Err(KstError::NotEnoughValidData { needed: warm_sig, valid: len }); }
+    let warm1 = r1 + s1 - 1;
+    let warm2 = r2 + s2 - 1;
+    let warm3 = r3 + s3 - 1;
+    let warm4 = r4 + s4 - 1;
+    let warm_line = warm1.max(warm2).max(warm3).max(warm4);
+    if len - first < warm_line {
+        return Err(KstError::NotEnoughValidData {
+            needed: warm_line,
+            valid: len - first,
+        });
+    }
+    let warm_sig = warm_line + sig - 1;
+    if warm_sig > len {
+        return Err(KstError::NotEnoughValidData {
+            needed: warm_sig,
+            valid: len,
+        });
+    }
 
-	let chosen = match kernel { Kernel::Auto => detect_best_kernel(), k => k };
-	Ok((data, (s1,s2,s3,s4), (r1,r2,r3,r4), sig, first, warm_line, warm_sig, chosen))
+    let chosen = match kernel {
+        Kernel::Auto => detect_best_kernel(),
+        k => k,
+    };
+    Ok((
+        data,
+        (s1, s2, s3, s4),
+        (r1, r2, r3, r4),
+        sig,
+        first,
+        warm_line,
+        warm_sig,
+        chosen,
+    ))
 }
 
 #[inline(always)]
 fn kst_compute_into(
     data: &[f64],
-    s: (usize,usize,usize,usize),
-    r: (usize,usize,usize,usize),
+    s: (usize, usize, usize, usize),
+    r: (usize, usize, usize, usize),
     sig: usize,
     first: usize,
     warm_line: usize,
@@ -390,98 +434,205 @@ fn kst_compute_into(
     out_sig: &mut [f64],
 ) {
     let len = data.len();
-    let (s1,s2,s3,s4) = s; let (r1,r2,r3,r4) = r;
+    let (s1, s2, s3, s4) = s;
+    let (r1, r2, r3, r4) = r;
 
     // use stack buffers to avoid wasm memory.grow detaching JS views
     const STACK: usize = 256;
-    let mut sb1 = [0.0f64; STACK]; let mut sb2 = [0.0f64; STACK];
-    let mut sb3 = [0.0f64; STACK]; let mut sb4 = [0.0f64; STACK];
-    let mut vb1; let mut vb2; let mut vb3; let mut vb4;
+    let mut sb1 = [0.0f64; STACK];
+    let mut sb2 = [0.0f64; STACK];
+    let mut sb3 = [0.0f64; STACK];
+    let mut sb4 = [0.0f64; STACK];
+    let mut vb1;
+    let mut vb2;
+    let mut vb3;
+    let mut vb4;
 
     let (b1, b2, b3, b4): (&mut [f64], &mut [f64], &mut [f64], &mut [f64]) = {
-        vb1 = if s1 > STACK { vec![0.0; s1] } else { Vec::new() };
-        vb2 = if s2 > STACK { vec![0.0; s2] } else { Vec::new() };
-        vb3 = if s3 > STACK { vec![0.0; s3] } else { Vec::new() };
-        vb4 = if s4 > STACK { vec![0.0; s4] } else { Vec::new() };
-        let b1 = if s1 <= STACK { &mut sb1[..s1] } else { vb1.as_mut_slice() };
-        let b2 = if s2 <= STACK { &mut sb2[..s2] } else { vb2.as_mut_slice() };
-        let b3 = if s3 <= STACK { &mut sb3[..s3] } else { vb3.as_mut_slice() };
-        let b4 = if s4 <= STACK { &mut sb4[..s4] } else { vb4.as_mut_slice() };
-        (b1,b2,b3,b4)
+        vb1 = if s1 > STACK {
+            vec![0.0; s1]
+        } else {
+            Vec::new()
+        };
+        vb2 = if s2 > STACK {
+            vec![0.0; s2]
+        } else {
+            Vec::new()
+        };
+        vb3 = if s3 > STACK {
+            vec![0.0; s3]
+        } else {
+            Vec::new()
+        };
+        vb4 = if s4 > STACK {
+            vec![0.0; s4]
+        } else {
+            Vec::new()
+        };
+        let b1 = if s1 <= STACK {
+            &mut sb1[..s1]
+        } else {
+            vb1.as_mut_slice()
+        };
+        let b2 = if s2 <= STACK {
+            &mut sb2[..s2]
+        } else {
+            vb2.as_mut_slice()
+        };
+        let b3 = if s3 <= STACK {
+            &mut sb3[..s3]
+        } else {
+            vb3.as_mut_slice()
+        };
+        let b4 = if s4 <= STACK {
+            &mut sb4[..s4]
+        } else {
+            vb4.as_mut_slice()
+        };
+        (b1, b2, b3, b4)
     };
 
-    let mut i1=0usize; let mut i2=0usize; let mut i3=0usize; let mut i4=0usize;
-    let mut sum1=0.0; let mut sum2=0.0; let mut sum3=0.0; let mut sum4=0.0;
-    let inv1 = 1.0/(s1 as f64); let inv2 = 1.0/(s2 as f64);
-    let inv3 = 1.0/(s3 as f64); let inv4 = 1.0/(s4 as f64);
+    let mut i1 = 0usize;
+    let mut i2 = 0usize;
+    let mut i3 = 0usize;
+    let mut i4 = 0usize;
+    let mut sum1 = 0.0;
+    let mut sum2 = 0.0;
+    let mut sum3 = 0.0;
+    let mut sum4 = 0.0;
+    let inv1 = 1.0 / (s1 as f64);
+    let inv2 = 1.0 / (s2 as f64);
+    let inv3 = 1.0 / (s3 as f64);
+    let inv4 = 1.0 / (s4 as f64);
 
     let start_line = first + warm_line;
 
     for i in first..len {
-        let mut v1=0.0; if i>=first+r1 && data[i-r1].is_finite() && data[i].is_finite() {
-            let p=data[i-r1]; if p!=0.0 { v1=((data[i]/p)-1.0)*100.0; }
+        let mut v1 = 0.0;
+        if i >= first + r1 && data[i - r1].is_finite() && data[i].is_finite() {
+            let p = data[i - r1];
+            if p != 0.0 {
+                v1 = ((data[i] / p) - 1.0) * 100.0;
+            }
         }
-        let mut v2=0.0; if i>=first+r2 && data[i-r2].is_finite() && data[i].is_finite() {
-            let p=data[i-r2]; if p!=0.0 { v2=((data[i]/p)-1.0)*100.0; }
+        let mut v2 = 0.0;
+        if i >= first + r2 && data[i - r2].is_finite() && data[i].is_finite() {
+            let p = data[i - r2];
+            if p != 0.0 {
+                v2 = ((data[i] / p) - 1.0) * 100.0;
+            }
         }
-        let mut v3=0.0; if i>=first+r3 && data[i-r3].is_finite() && data[i].is_finite() {
-            let p=data[i-r3]; if p!=0.0 { v3=((data[i]/p)-1.0)*100.0; }
+        let mut v3 = 0.0;
+        if i >= first + r3 && data[i - r3].is_finite() && data[i].is_finite() {
+            let p = data[i - r3];
+            if p != 0.0 {
+                v3 = ((data[i] / p) - 1.0) * 100.0;
+            }
         }
-        let mut v4=0.0; if i>=first+r4 && data[i-r4].is_finite() && data[i].is_finite() {
-            let p=data[i-r4]; if p!=0.0 { v4=((data[i]/p)-1.0)*100.0; }
+        let mut v4 = 0.0;
+        if i >= first + r4 && data[i - r4].is_finite() && data[i].is_finite() {
+            let p = data[i - r4];
+            if p != 0.0 {
+                v4 = ((data[i] / p) - 1.0) * 100.0;
+            }
         }
 
-        if i>=first+r1 { sum1 -= b1[i1]; b1[i1]=v1; sum1 += v1; i1 = (i1+1)%s1; }
-        if i>=first+r2 { sum2 -= b2[i2]; b2[i2]=v2; sum2 += v2; i2 = (i2+1)%s2; }
-        if i>=first+r3 { sum3 -= b3[i3]; b3[i3]=v3; sum3 += v3; i3 = (i3+1)%s3; }
-        if i>=first+r4 { sum4 -= b4[i4]; b4[i4]=v4; sum4 += v4; i4 = (i4+1)%s4; }
+        if i >= first + r1 {
+            sum1 -= b1[i1];
+            b1[i1] = v1;
+            sum1 += v1;
+            i1 = (i1 + 1) % s1;
+        }
+        if i >= first + r2 {
+            sum2 -= b2[i2];
+            b2[i2] = v2;
+            sum2 += v2;
+            i2 = (i2 + 1) % s2;
+        }
+        if i >= first + r3 {
+            sum3 -= b3[i3];
+            b3[i3] = v3;
+            sum3 += v3;
+            i3 = (i3 + 1) % s3;
+        }
+        if i >= first + r4 {
+            sum4 -= b4[i4];
+            b4[i4] = v4;
+            sum4 += v4;
+            i4 = (i4 + 1) % s4;
+        }
 
-        if i < start_line { continue; } // hard gate: no writes before all components are ready
+        if i < start_line {
+            continue;
+        } // hard gate: no writes before all components are ready
 
-        let k = (sum1*inv1) + 2.0*(sum2*inv2) + 3.0*(sum3*inv3) + 4.0*(sum4*inv4);
+        let k = (sum1 * inv1) + 2.0 * (sum2 * inv2) + 3.0 * (sum3 * inv3) + 4.0 * (sum4 * inv4);
         out_line[i] = k;
     }
 
     // signal
     let sig_start = start_line;
-    let sig_warm  = first + warm_sig;
+    let sig_warm = first + warm_sig;
     let mut ssum = 0.0;
-    for i in sig_start..(sig_start+sig).min(len) {
+    for i in sig_start..(sig_start + sig).min(len) {
         let v = out_line[i];
-        if v.is_finite() { ssum += v; }
+        if v.is_finite() {
+            ssum += v;
+        }
     }
-    if sig_warm < len { out_sig[sig_warm] = ssum/(sig as f64); }
-    for i in (sig_start+sig)..len {
-        ssum += out_line[i] - out_line[i-sig];
-        out_sig[i] = ssum/(sig as f64);
+    if sig_warm < len {
+        out_sig[sig_warm] = ssum / (sig as f64);
+    }
+    for i in (sig_start + sig)..len {
+        ssum += out_line[i] - out_line[i - sig];
+        out_sig[i] = ssum / (sig as f64);
     }
 }
 
 pub fn kst_with_kernel(input: &KstInput, kernel: Kernel) -> Result<KstOutput, KstError> {
-	let (data, s, r, sig, first, warm_line, warm_sig, chosen) = kst_prepare(input, kernel)?;
-	let len = data.len();
+    let (data, s, r, sig, first, warm_line, warm_sig, chosen) = kst_prepare(input, kernel)?;
+    let len = data.len();
 
-	// Adjust warmup to account for NaN prefix
-	let actual_warm_line = first + warm_line;
-	let actual_warm_sig = first + warm_sig;
-	let mut line   = alloc_with_nan_prefix(len, actual_warm_line);
-	let mut signal = alloc_with_nan_prefix(len, actual_warm_sig);
+    // Adjust warmup to account for NaN prefix
+    let actual_warm_line = first + warm_line;
+    let actual_warm_sig = first + warm_sig;
+    let mut line = alloc_with_nan_prefix(len, actual_warm_line);
+    let mut signal = alloc_with_nan_prefix(len, actual_warm_sig);
 
-	unsafe {
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => {
-				kst_compute_into(data, s, r, sig, first, warm_line, warm_sig, &mut line, &mut signal);
-			}
-			#[cfg(all(feature="nightly-avx", target_arch="x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch |
-			Kernel::Avx512 | Kernel::Avx512Batch => {
-				// keep stubs, call scalar body
-				kst_compute_into(data, s, r, sig, first, warm_line, warm_sig, &mut line, &mut signal);
-			}
-			_ => unreachable!(),
-		}
-	}
-	Ok(KstOutput { line, signal })
+    unsafe {
+        match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                kst_compute_into(
+                    data,
+                    s,
+                    r,
+                    sig,
+                    first,
+                    warm_line,
+                    warm_sig,
+                    &mut line,
+                    &mut signal,
+                );
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                // keep stubs, call scalar body
+                kst_compute_into(
+                    data,
+                    s,
+                    r,
+                    sig,
+                    first,
+                    warm_line,
+                    warm_sig,
+                    &mut line,
+                    &mut signal,
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+    Ok(KstOutput { line, signal })
 }
 
 #[inline]
@@ -492,16 +643,25 @@ pub fn kst_into_slice(
     kernel: Kernel,
 ) -> Result<(), KstError> {
     let (data, s, r, sig, first, warm_line, warm_sig, _chosen) = kst_prepare(input, kernel)?;
-    if out_line.len()!=data.len() || out_signal.len()!=data.len() {
-        return Err(KstError::InvalidPeriod { period: out_line.len(), data_len: data.len() });
+    if out_line.len() != data.len() || out_signal.len() != data.len() {
+        return Err(KstError::InvalidPeriod {
+            period: out_line.len(),
+            data_len: data.len(),
+        });
     }
 
-    kst_compute_into(data, s, r, sig, first, warm_line, warm_sig, out_line, out_signal);
+    kst_compute_into(
+        data, s, r, sig, first, warm_line, warm_sig, out_line, out_signal,
+    );
 
-    let prefix_line  = (first + warm_line).min(out_line.len());
-    let prefix_sig   = (first + warm_sig ).min(out_signal.len());
-    for v in &mut out_line[..prefix_line]  { *v = f64::NAN; }
-    for v in &mut out_signal[..prefix_sig] { *v = f64::NAN; }
+    let prefix_line = (first + warm_line).min(out_line.len());
+    let prefix_sig = (first + warm_sig).min(out_signal.len());
+    for v in &mut out_line[..prefix_line] {
+        *v = f64::NAN;
+    }
+    for v in &mut out_signal[..prefix_sig] {
+        *v = f64::NAN;
+    }
     Ok(())
 }
 
@@ -513,592 +673,802 @@ pub fn kst_into_slice(
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub(crate) unsafe fn kst_avx2(_input: &KstInput, _first: usize, _len: usize) -> Result<KstOutput, KstError> {
-	// Stub: would implement AVX2 optimization
-	unreachable!("AVX2 stub should not be called directly")
+pub(crate) unsafe fn kst_avx2(
+    _input: &KstInput,
+    _first: usize,
+    _len: usize,
+) -> Result<KstOutput, KstError> {
+    // Stub: would implement AVX2 optimization
+    unreachable!("AVX2 stub should not be called directly")
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub(crate) unsafe fn kst_avx512(_input: &KstInput, _first: usize, len: usize) -> Result<KstOutput, KstError> {
-	// Dispatch to long/short stub
-	if len <= 32 {
-		kst_avx512_short(_input, _first, len)
-	} else {
-		kst_avx512_long(_input, _first, len)
-	}
+pub(crate) unsafe fn kst_avx512(
+    _input: &KstInput,
+    _first: usize,
+    len: usize,
+) -> Result<KstOutput, KstError> {
+    // Dispatch to long/short stub
+    if len <= 32 {
+        kst_avx512_short(_input, _first, len)
+    } else {
+        kst_avx512_long(_input, _first, len)
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub(crate) unsafe fn kst_avx512_short(_input: &KstInput, _first: usize, _len: usize) -> Result<KstOutput, KstError> {
-	// Stub: would implement AVX512 short optimization
-	unreachable!("AVX512 short stub should not be called directly")
+pub(crate) unsafe fn kst_avx512_short(
+    _input: &KstInput,
+    _first: usize,
+    _len: usize,
+) -> Result<KstOutput, KstError> {
+    // Stub: would implement AVX512 short optimization
+    unreachable!("AVX512 short stub should not be called directly")
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub(crate) unsafe fn kst_avx512_long(_input: &KstInput, _first: usize, _len: usize) -> Result<KstOutput, KstError> {
-	// Stub: would implement AVX512 long optimization
-	unreachable!("AVX512 long stub should not be called directly")
+pub(crate) unsafe fn kst_avx512_long(
+    _input: &KstInput,
+    _first: usize,
+    _len: usize,
+) -> Result<KstOutput, KstError> {
+    // Stub: would implement AVX512 long optimization
+    unreachable!("AVX512 long stub should not be called directly")
 }
 
 #[inline]
-pub fn kst_batch_with_kernel(data: &[f64], sweep: &KstBatchRange, k: Kernel) -> Result<KstBatchOutput, KstError> {
-	let kernel = match k {
-		Kernel::Auto => detect_best_batch_kernel(),
-		other if other.is_batch() => other,
-		_ => return Err(KstError::InvalidPeriod { period: 0, data_len: 0 }),
-	};
-	let simd = match kernel {
-		Kernel::Avx512Batch => Kernel::Avx512,
-		Kernel::Avx2Batch => Kernel::Avx2,
-		Kernel::ScalarBatch => Kernel::Scalar,
-		_ => unreachable!(),
-	};
-	kst_batch_par_slice(data, sweep, simd)
+pub fn kst_batch_with_kernel(
+    data: &[f64],
+    sweep: &KstBatchRange,
+    k: Kernel,
+) -> Result<KstBatchOutput, KstError> {
+    let kernel = match k {
+        Kernel::Auto => detect_best_batch_kernel(),
+        other if other.is_batch() => other,
+        _ => {
+            return Err(KstError::InvalidPeriod {
+                period: 0,
+                data_len: 0,
+            })
+        }
+    };
+    let simd = match kernel {
+        Kernel::Avx512Batch => Kernel::Avx512,
+        Kernel::Avx2Batch => Kernel::Avx2,
+        Kernel::ScalarBatch => Kernel::Scalar,
+        _ => unreachable!(),
+    };
+    kst_batch_par_slice(data, sweep, simd)
 }
 
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "wasm", derive(serde::Serialize, serde::Deserialize))]
 pub struct KstBatchRange {
-	pub sma_period1: (usize, usize, usize),
-	pub sma_period2: (usize, usize, usize),
-	pub sma_period3: (usize, usize, usize),
-	pub sma_period4: (usize, usize, usize),
-	pub roc_period1: (usize, usize, usize),
-	pub roc_period2: (usize, usize, usize),
-	pub roc_period3: (usize, usize, usize),
-	pub roc_period4: (usize, usize, usize),
-	pub signal_period: (usize, usize, usize),
+    pub sma_period1: (usize, usize, usize),
+    pub sma_period2: (usize, usize, usize),
+    pub sma_period3: (usize, usize, usize),
+    pub sma_period4: (usize, usize, usize),
+    pub roc_period1: (usize, usize, usize),
+    pub roc_period2: (usize, usize, usize),
+    pub roc_period3: (usize, usize, usize),
+    pub roc_period4: (usize, usize, usize),
+    pub signal_period: (usize, usize, usize),
 }
 
 impl Default for KstBatchRange {
-	fn default() -> Self {
-		Self {
-			sma_period1: (10, 10, 0),
-			sma_period2: (10, 10, 0),
-			sma_period3: (10, 10, 0),
-			sma_period4: (15, 15, 0),
-			roc_period1: (10, 10, 0),
-			roc_period2: (15, 15, 0),
-			roc_period3: (20, 20, 0),
-			roc_period4: (30, 30, 0),
-			signal_period: (9, 9, 0),
-		}
-	}
+    fn default() -> Self {
+        Self {
+            sma_period1: (10, 10, 0),
+            sma_period2: (10, 10, 0),
+            sma_period3: (10, 10, 0),
+            sma_period4: (15, 15, 0),
+            roc_period1: (10, 10, 0),
+            roc_period2: (15, 15, 0),
+            roc_period3: (20, 20, 0),
+            roc_period4: (30, 30, 0),
+            signal_period: (9, 9, 0),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct KstBatchBuilder {
-	range: KstBatchRange,
-	kernel: Kernel,
+    range: KstBatchRange,
+    kernel: Kernel,
 }
 
 impl KstBatchBuilder {
-	pub fn new() -> Self {
-		Self::default()
-	}
-	pub fn kernel(mut self, k: Kernel) -> Self {
-		self.kernel = k;
-		self
-	}
-	pub fn sma_period1_range(mut self, start: usize, end: usize, step: usize) -> Self {
-		self.range.sma_period1 = (start, end, step);
-		self
-	}
-	pub fn sma_period2_range(mut self, start: usize, end: usize, step: usize) -> Self {
-		self.range.sma_period2 = (start, end, step);
-		self
-	}
-	pub fn sma_period3_range(mut self, start: usize, end: usize, step: usize) -> Self {
-		self.range.sma_period3 = (start, end, step);
-		self
-	}
-	pub fn sma_period4_range(mut self, start: usize, end: usize, step: usize) -> Self {
-		self.range.sma_period4 = (start, end, step);
-		self
-	}
-	pub fn roc_period1_range(mut self, start: usize, end: usize, step: usize) -> Self {
-		self.range.roc_period1 = (start, end, step);
-		self
-	}
-	pub fn roc_period2_range(mut self, start: usize, end: usize, step: usize) -> Self {
-		self.range.roc_period2 = (start, end, step);
-		self
-	}
-	pub fn roc_period3_range(mut self, start: usize, end: usize, step: usize) -> Self {
-		self.range.roc_period3 = (start, end, step);
-		self
-	}
-	pub fn roc_period4_range(mut self, start: usize, end: usize, step: usize) -> Self {
-		self.range.roc_period4 = (start, end, step);
-		self
-	}
-	pub fn signal_period_range(mut self, start: usize, end: usize, step: usize) -> Self {
-		self.range.signal_period = (start, end, step);
-		self
-	}
-	pub fn apply_slice(self, data: &[f64]) -> Result<KstBatchOutput, KstError> {
-		kst_batch_with_kernel(data, &self.range, self.kernel)
-	}
-	pub fn with_default_slice(data: &[f64], k: Kernel) -> Result<KstBatchOutput, KstError> {
-		KstBatchBuilder::new().kernel(k).apply_slice(data)
-	}
-	pub fn apply_candles(self, c: &Candles, src: &str) -> Result<KstBatchOutput, KstError> {
-		self.apply_slice(source_type(c, src))
-	}
-	pub fn with_default_candles(c: &Candles) -> Result<KstBatchOutput, KstError> {
-		KstBatchBuilder::new().kernel(Kernel::Auto).apply_candles(c, "close")
-	}
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn kernel(mut self, k: Kernel) -> Self {
+        self.kernel = k;
+        self
+    }
+    pub fn sma_period1_range(mut self, start: usize, end: usize, step: usize) -> Self {
+        self.range.sma_period1 = (start, end, step);
+        self
+    }
+    pub fn sma_period2_range(mut self, start: usize, end: usize, step: usize) -> Self {
+        self.range.sma_period2 = (start, end, step);
+        self
+    }
+    pub fn sma_period3_range(mut self, start: usize, end: usize, step: usize) -> Self {
+        self.range.sma_period3 = (start, end, step);
+        self
+    }
+    pub fn sma_period4_range(mut self, start: usize, end: usize, step: usize) -> Self {
+        self.range.sma_period4 = (start, end, step);
+        self
+    }
+    pub fn roc_period1_range(mut self, start: usize, end: usize, step: usize) -> Self {
+        self.range.roc_period1 = (start, end, step);
+        self
+    }
+    pub fn roc_period2_range(mut self, start: usize, end: usize, step: usize) -> Self {
+        self.range.roc_period2 = (start, end, step);
+        self
+    }
+    pub fn roc_period3_range(mut self, start: usize, end: usize, step: usize) -> Self {
+        self.range.roc_period3 = (start, end, step);
+        self
+    }
+    pub fn roc_period4_range(mut self, start: usize, end: usize, step: usize) -> Self {
+        self.range.roc_period4 = (start, end, step);
+        self
+    }
+    pub fn signal_period_range(mut self, start: usize, end: usize, step: usize) -> Self {
+        self.range.signal_period = (start, end, step);
+        self
+    }
+    pub fn apply_slice(self, data: &[f64]) -> Result<KstBatchOutput, KstError> {
+        kst_batch_with_kernel(data, &self.range, self.kernel)
+    }
+    pub fn with_default_slice(data: &[f64], k: Kernel) -> Result<KstBatchOutput, KstError> {
+        KstBatchBuilder::new().kernel(k).apply_slice(data)
+    }
+    pub fn apply_candles(self, c: &Candles, src: &str) -> Result<KstBatchOutput, KstError> {
+        self.apply_slice(source_type(c, src))
+    }
+    pub fn with_default_candles(c: &Candles) -> Result<KstBatchOutput, KstError> {
+        KstBatchBuilder::new()
+            .kernel(Kernel::Auto)
+            .apply_candles(c, "close")
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct KstBatchOutput {
-	pub lines: Vec<f64>,
-	pub signals: Vec<f64>,
-	pub combos: Vec<KstParams>,
-	pub rows: usize,
-	pub cols: usize,
+    pub lines: Vec<f64>,
+    pub signals: Vec<f64>,
+    pub combos: Vec<KstParams>,
+    pub rows: usize,
+    pub cols: usize,
 }
 impl KstBatchOutput {
-	pub fn row_for_params(&self, p: &KstParams) -> Option<usize> {
-		self.combos.iter().position(|c| {
-			c.sma_period1.unwrap_or(10) == p.sma_period1.unwrap_or(10)
-				&& c.sma_period2.unwrap_or(10) == p.sma_period2.unwrap_or(10)
-				&& c.sma_period3.unwrap_or(10) == p.sma_period3.unwrap_or(10)
-				&& c.sma_period4.unwrap_or(15) == p.sma_period4.unwrap_or(15)
-				&& c.roc_period1.unwrap_or(10) == p.roc_period1.unwrap_or(10)
-				&& c.roc_period2.unwrap_or(15) == p.roc_period2.unwrap_or(15)
-				&& c.roc_period3.unwrap_or(20) == p.roc_period3.unwrap_or(20)
-				&& c.roc_period4.unwrap_or(30) == p.roc_period4.unwrap_or(30)
-				&& c.signal_period.unwrap_or(9) == p.signal_period.unwrap_or(9)
-		})
-	}
-	pub fn lines_for(&self, p: &KstParams) -> Option<&[f64]> {
-		self.row_for_params(p).map(|row| {
-			let start = row * self.cols;
-			&self.lines[start..start + self.cols]
-		})
-	}
-	pub fn signals_for(&self, p: &KstParams) -> Option<&[f64]> {
-		self.row_for_params(p).map(|row| {
-			let start = row * self.cols;
-			&self.signals[start..start + self.cols]
-		})
-	}
+    pub fn row_for_params(&self, p: &KstParams) -> Option<usize> {
+        self.combos.iter().position(|c| {
+            c.sma_period1.unwrap_or(10) == p.sma_period1.unwrap_or(10)
+                && c.sma_period2.unwrap_or(10) == p.sma_period2.unwrap_or(10)
+                && c.sma_period3.unwrap_or(10) == p.sma_period3.unwrap_or(10)
+                && c.sma_period4.unwrap_or(15) == p.sma_period4.unwrap_or(15)
+                && c.roc_period1.unwrap_or(10) == p.roc_period1.unwrap_or(10)
+                && c.roc_period2.unwrap_or(15) == p.roc_period2.unwrap_or(15)
+                && c.roc_period3.unwrap_or(20) == p.roc_period3.unwrap_or(20)
+                && c.roc_period4.unwrap_or(30) == p.roc_period4.unwrap_or(30)
+                && c.signal_period.unwrap_or(9) == p.signal_period.unwrap_or(9)
+        })
+    }
+    pub fn lines_for(&self, p: &KstParams) -> Option<&[f64]> {
+        self.row_for_params(p).map(|row| {
+            let start = row * self.cols;
+            &self.lines[start..start + self.cols]
+        })
+    }
+    pub fn signals_for(&self, p: &KstParams) -> Option<&[f64]> {
+        self.row_for_params(p).map(|row| {
+            let start = row * self.cols;
+            &self.signals[start..start + self.cols]
+        })
+    }
 }
 
 #[inline(always)]
 fn expand_grid(r: &KstBatchRange) -> Vec<KstParams> {
-	fn axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-		if step == 0 || start == end {
-			return vec![start];
-		}
-		(start..=end).step_by(step).collect()
-	}
-	let s1 = axis(r.sma_period1);
-	let s2 = axis(r.sma_period2);
-	let s3 = axis(r.sma_period3);
-	let s4 = axis(r.sma_period4);
-	let r1 = axis(r.roc_period1);
-	let r2 = axis(r.roc_period2);
-	let r3 = axis(r.roc_period3);
-	let r4 = axis(r.roc_period4);
-	let sig = axis(r.signal_period);
+    fn axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+        if step == 0 || start == end {
+            return vec![start];
+        }
+        (start..=end).step_by(step).collect()
+    }
+    let s1 = axis(r.sma_period1);
+    let s2 = axis(r.sma_period2);
+    let s3 = axis(r.sma_period3);
+    let s4 = axis(r.sma_period4);
+    let r1 = axis(r.roc_period1);
+    let r2 = axis(r.roc_period2);
+    let r3 = axis(r.roc_period3);
+    let r4 = axis(r.roc_period4);
+    let sig = axis(r.signal_period);
 
-	let mut out = Vec::with_capacity(
-		s1.len() * s2.len() * s3.len() * s4.len() * r1.len() * r2.len() * r3.len() * r4.len() * sig.len(),
-	);
-	for &s1v in &s1 {
-		for &s2v in &s2 {
-			for &s3v in &s3 {
-				for &s4v in &s4 {
-					for &r1v in &r1 {
-						for &r2v in &r2 {
-							for &r3v in &r3 {
-								for &r4v in &r4 {
-									for &sigv in &sig {
-										out.push(KstParams {
-											sma_period1: Some(s1v),
-											sma_period2: Some(s2v),
-											sma_period3: Some(s3v),
-											sma_period4: Some(s4v),
-											roc_period1: Some(r1v),
-											roc_period2: Some(r2v),
-											roc_period3: Some(r3v),
-											roc_period4: Some(r4v),
-											signal_period: Some(sigv),
-										});
-									}
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-	out
+    let mut out = Vec::with_capacity(
+        s1.len()
+            * s2.len()
+            * s3.len()
+            * s4.len()
+            * r1.len()
+            * r2.len()
+            * r3.len()
+            * r4.len()
+            * sig.len(),
+    );
+    for &s1v in &s1 {
+        for &s2v in &s2 {
+            for &s3v in &s3 {
+                for &s4v in &s4 {
+                    for &r1v in &r1 {
+                        for &r2v in &r2 {
+                            for &r3v in &r3 {
+                                for &r4v in &r4 {
+                                    for &sigv in &sig {
+                                        out.push(KstParams {
+                                            sma_period1: Some(s1v),
+                                            sma_period2: Some(s2v),
+                                            sma_period3: Some(s3v),
+                                            sma_period4: Some(s4v),
+                                            roc_period1: Some(r1v),
+                                            roc_period2: Some(r2v),
+                                            roc_period3: Some(r3v),
+                                            roc_period4: Some(r4v),
+                                            signal_period: Some(sigv),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 #[inline(always)]
-pub fn kst_batch_slice(data: &[f64], sweep: &KstBatchRange, kern: Kernel) -> Result<KstBatchOutput, KstError> {
-	kst_batch_inner(data, sweep, kern, false)
+pub fn kst_batch_slice(
+    data: &[f64],
+    sweep: &KstBatchRange,
+    kern: Kernel,
+) -> Result<KstBatchOutput, KstError> {
+    kst_batch_inner(data, sweep, kern, false)
 }
 #[inline(always)]
-pub fn kst_batch_par_slice(data: &[f64], sweep: &KstBatchRange, kern: Kernel) -> Result<KstBatchOutput, KstError> {
-	kst_batch_inner(data, sweep, kern, true)
+pub fn kst_batch_par_slice(
+    data: &[f64],
+    sweep: &KstBatchRange,
+    kern: Kernel,
+) -> Result<KstBatchOutput, KstError> {
+    kst_batch_inner(data, sweep, kern, true)
 }
 
 #[inline(always)]
 fn kst_batch_inner(
-	data: &[f64],
-	sweep: &KstBatchRange,
-	kern: Kernel,
-	parallel: bool,
+    data: &[f64],
+    sweep: &KstBatchRange,
+    kern: Kernel,
+    parallel: bool,
 ) -> Result<KstBatchOutput, KstError> {
-	let combos = expand_grid(sweep);
-	if combos.is_empty() { return Err(KstError::InvalidPeriod { period: 0, data_len: 0 }); }
-	let cols = data.len();
-	if cols==0 { return Err(KstError::EmptyInputData); }
-	
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(KstError::AllValuesNaN)?;
+    let combos = expand_grid(sweep);
+    if combos.is_empty() {
+        return Err(KstError::InvalidPeriod {
+            period: 0,
+            data_len: 0,
+        });
+    }
+    let cols = data.len();
+    if cols == 0 {
+        return Err(KstError::EmptyInputData);
+    }
 
-	// per-row warms
-	let mut warm_line = Vec::with_capacity(combos.len());
-	let mut warm_sig  = Vec::with_capacity(combos.len());
-	for c in &combos {
-		let s1=c.sma_period1.unwrap(); let s2=c.sma_period2.unwrap();
-		let s3=c.sma_period3.unwrap(); let s4=c.sma_period4.unwrap();
-		let r1=c.roc_period1.unwrap(); let r2=c.roc_period2.unwrap();
-		let r3=c.roc_period3.unwrap(); let r4=c.roc_period4.unwrap();
-		let sig=c.signal_period.unwrap();
-		let wl = (r1+s1-1).max(r2+s2-1).max(r3+s3-1).max(r4+s4-1);
-		warm_line.push(wl);
-		warm_sig.push(wl + sig - 1);
-	}
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(KstError::AllValuesNaN)?;
 
-	// allocate two uninit matrices then prefix NaNs
-	let rows = combos.len();
-	let mut line_mu   = make_uninit_matrix(rows, cols);
-	let mut signal_mu = make_uninit_matrix(rows, cols);
-	let warm_line_abs: Vec<usize> = warm_line.iter().map(|&wl| first + wl).collect();
-	let warm_sig_abs:  Vec<usize> = warm_sig.iter().map(|&ws| first + ws).collect();
-	init_matrix_prefixes(&mut line_mu,   cols, &warm_line_abs);
-	init_matrix_prefixes(&mut signal_mu, cols, &warm_sig_abs);
+    // per-row warms
+    let mut warm_line = Vec::with_capacity(combos.len());
+    let mut warm_sig = Vec::with_capacity(combos.len());
+    for c in &combos {
+        let s1 = c.sma_period1.unwrap();
+        let s2 = c.sma_period2.unwrap();
+        let s3 = c.sma_period3.unwrap();
+        let s4 = c.sma_period4.unwrap();
+        let r1 = c.roc_period1.unwrap();
+        let r2 = c.roc_period2.unwrap();
+        let r3 = c.roc_period3.unwrap();
+        let r4 = c.roc_period4.unwrap();
+        let sig = c.signal_period.unwrap();
+        let wl = (r1 + s1 - 1)
+            .max(r2 + s2 - 1)
+            .max(r3 + s3 - 1)
+            .max(r4 + s4 - 1);
+        warm_line.push(wl);
+        warm_sig.push(wl + sig - 1);
+    }
 
-	// cast to &mut [f64] safely via ManuallyDrop
-	let mut line_guard   = core::mem::ManuallyDrop::new(line_mu);
-	let mut signal_guard = core::mem::ManuallyDrop::new(signal_mu);
-	let line_out:   &mut [f64] = unsafe { core::slice::from_raw_parts_mut(line_guard.as_mut_ptr()   as *mut f64, line_guard.len()) };
-	let signal_out: &mut [f64] = unsafe { core::slice::from_raw_parts_mut(signal_guard.as_mut_ptr() as *mut f64, signal_guard.len()) };
+    // allocate two uninit matrices then prefix NaNs
+    let rows = combos.len();
+    let mut line_mu = make_uninit_matrix(rows, cols);
+    let mut signal_mu = make_uninit_matrix(rows, cols);
+    let warm_line_abs: Vec<usize> = warm_line.iter().map(|&wl| first + wl).collect();
+    let warm_sig_abs: Vec<usize> = warm_sig.iter().map(|&ws| first + ws).collect();
+    init_matrix_prefixes(&mut line_mu, cols, &warm_line_abs);
+    init_matrix_prefixes(&mut signal_mu, cols, &warm_sig_abs);
 
-	// resolve scalar for parity (stubs OK)
-	let actual = match kern {
-		Kernel::Auto => detect_best_batch_kernel(),
-		k => k,
-	};
-	let simd = match actual {
-		Kernel::ScalarBatch => Kernel::Scalar,
-		Kernel::Avx2Batch   => Kernel::Scalar,  // Use scalar if AVX2 not available
-		Kernel::Avx512Batch => Kernel::Scalar,  // Use scalar if AVX512 not available
-		_ => Kernel::Scalar,
-	};
+    // cast to &mut [f64] safely via ManuallyDrop
+    let mut line_guard = core::mem::ManuallyDrop::new(line_mu);
+    let mut signal_guard = core::mem::ManuallyDrop::new(signal_mu);
+    let line_out: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(line_guard.as_mut_ptr() as *mut f64, line_guard.len())
+    };
+    let signal_out: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(signal_guard.as_mut_ptr() as *mut f64, signal_guard.len())
+    };
 
-	// Closure to process each row. The unwrap() is safe because:
-	// 1. expand_grid() ensures all parameters in combos are Some(valid_value)
-	// 2. We've already validated data is not empty above
-	// So kst_prepare() cannot fail with InvalidPeriod or EmptyInputData
-	let do_row = |row: usize, ldst: &mut [f64], sdst: &mut [f64]| {
-		let prm = &combos[row];
-		let input = KstInput::from_slice(data, *prm);
-		let (_d, s, r, sig, first, wl, ws, _chosen) = kst_prepare(&input, simd).unwrap();
-		kst_compute_into(data, s, r, sig, first, wl, ws, ldst, sdst);
-	};
+    // resolve scalar for parity (stubs OK)
+    let actual = match kern {
+        Kernel::Auto => detect_best_batch_kernel(),
+        k => k,
+    };
+    let simd = match actual {
+        Kernel::ScalarBatch => Kernel::Scalar,
+        Kernel::Avx2Batch => Kernel::Scalar, // Use scalar if AVX2 not available
+        Kernel::Avx512Batch => Kernel::Scalar, // Use scalar if AVX512 not available
+        _ => Kernel::Scalar,
+    };
 
-	if parallel {
-		#[cfg(not(target_arch="wasm32"))]
-		line_out.par_chunks_mut(cols)
-			.zip(signal_out.par_chunks_mut(cols))
-			.enumerate()
-			.for_each(|(row,(l,s))| do_row(row,l,s));
-		#[cfg(target_arch="wasm32")]
-		for (row,(l,s)) in line_out.chunks_mut(cols).zip(signal_out.chunks_mut(cols)).enumerate() { do_row(row,l,s); }
-	} else {
-		for (row,(l,s)) in line_out.chunks_mut(cols).zip(signal_out.chunks_mut(cols)).enumerate() { do_row(row,l,s); }
-	}
+    // Closure to process each row. The unwrap() is safe because:
+    // 1. expand_grid() ensures all parameters in combos are Some(valid_value)
+    // 2. We've already validated data is not empty above
+    // So kst_prepare() cannot fail with InvalidPeriod or EmptyInputData
+    let do_row = |row: usize, ldst: &mut [f64], sdst: &mut [f64]| {
+        let prm = &combos[row];
+        let input = KstInput::from_slice(data, *prm);
+        let (_d, s, r, sig, first, wl, ws, _chosen) = kst_prepare(&input, simd).unwrap();
+        kst_compute_into(data, s, r, sig, first, wl, ws, ldst, sdst);
+    };
 
-	// reconstitute Vecs without copy
-	let lines = unsafe { Vec::from_raw_parts(line_guard.as_mut_ptr() as *mut f64, line_guard.len(), line_guard.capacity()) };
-	let signals = unsafe { Vec::from_raw_parts(signal_guard.as_mut_ptr() as *mut f64, signal_guard.len(), signal_guard.capacity()) };
+    if parallel {
+        #[cfg(not(target_arch = "wasm32"))]
+        line_out
+            .par_chunks_mut(cols)
+            .zip(signal_out.par_chunks_mut(cols))
+            .enumerate()
+            .for_each(|(row, (l, s))| do_row(row, l, s));
+        #[cfg(target_arch = "wasm32")]
+        for (row, (l, s)) in line_out
+            .chunks_mut(cols)
+            .zip(signal_out.chunks_mut(cols))
+            .enumerate()
+        {
+            do_row(row, l, s);
+        }
+    } else {
+        for (row, (l, s)) in line_out
+            .chunks_mut(cols)
+            .zip(signal_out.chunks_mut(cols))
+            .enumerate()
+        {
+            do_row(row, l, s);
+        }
+    }
 
-	Ok(KstBatchOutput { lines, signals, combos, rows, cols })
+    // reconstitute Vecs without copy
+    let lines = unsafe {
+        Vec::from_raw_parts(
+            line_guard.as_mut_ptr() as *mut f64,
+            line_guard.len(),
+            line_guard.capacity(),
+        )
+    };
+    let signals = unsafe {
+        Vec::from_raw_parts(
+            signal_guard.as_mut_ptr() as *mut f64,
+            signal_guard.len(),
+            signal_guard.capacity(),
+        )
+    };
+
+    Ok(KstBatchOutput {
+        lines,
+        signals,
+        combos,
+        rows,
+        cols,
+    })
 }
 
 #[inline(always)]
 fn kst_batch_inner_into(
-	data: &[f64],
-	sweep: &KstBatchRange,
-	kern: Kernel,
-	parallel: bool,
-	lines_out: &mut [f64],
-	signals_out: &mut [f64],
+    data: &[f64],
+    sweep: &KstBatchRange,
+    kern: Kernel,
+    parallel: bool,
+    lines_out: &mut [f64],
+    signals_out: &mut [f64],
 ) -> Result<Vec<KstParams>, KstError> {
-	let combos = expand_grid(sweep);
-	if combos.is_empty() { return Err(KstError::InvalidPeriod { period: 0, data_len: 0 }); }
-	let cols = data.len(); let rows = combos.len();
-	if lines_out.len()!=rows*cols || signals_out.len()!=rows*cols {
-		return Err(KstError::InvalidPeriod { period: lines_out.len(), data_len: rows*cols });
-	}
-	
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(KstError::AllValuesNaN)?;
+    let combos = expand_grid(sweep);
+    if combos.is_empty() {
+        return Err(KstError::InvalidPeriod {
+            period: 0,
+            data_len: 0,
+        });
+    }
+    let cols = data.len();
+    let rows = combos.len();
+    if lines_out.len() != rows * cols || signals_out.len() != rows * cols {
+        return Err(KstError::InvalidPeriod {
+            period: lines_out.len(),
+            data_len: rows * cols,
+        });
+    }
 
-	// warmups per row
-	let mut warm_line = vec![0usize; rows];
-	let mut warm_sig  = vec![0usize; rows];
-	for (row,c) in combos.iter().enumerate() {
-		let wl = (c.roc_period1.unwrap()+c.sma_period1.unwrap()-1)
-		       .max(c.roc_period2.unwrap()+c.sma_period2.unwrap()-1)
-		       .max(c.roc_period3.unwrap()+c.sma_period3.unwrap()-1)
-		       .max(c.roc_period4.unwrap()+c.sma_period4.unwrap()-1);
-		warm_line[row]=wl;
-		warm_sig[row]=wl + c.signal_period.unwrap() - 1;
-		// prefix NaNs directly with first offset
-		let abs_wl = first + warm_line[row];
-		let abs_ws = first + warm_sig[row];
-		for v in &mut lines_out[row*cols .. row*cols + abs_wl.min(cols)] { *v = f64::NAN; }
-		for v in &mut signals_out[row*cols .. row*cols + abs_ws.min(cols)] { *v = f64::NAN; }
-	}
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(KstError::AllValuesNaN)?;
 
-	let actual = match kern { Kernel::Auto => detect_best_batch_kernel(), k => k };
-	let simd = match actual {
-		Kernel::ScalarBatch => Kernel::Scalar,
-		Kernel::Avx2Batch => Kernel::Scalar,  // Use scalar if AVX2 not available
-		Kernel::Avx512Batch => Kernel::Scalar,  // Use scalar if AVX512 not available
-		_ => Kernel::Scalar,
-	};
+    // warmups per row
+    let mut warm_line = vec![0usize; rows];
+    let mut warm_sig = vec![0usize; rows];
+    for (row, c) in combos.iter().enumerate() {
+        let wl = (c.roc_period1.unwrap() + c.sma_period1.unwrap() - 1)
+            .max(c.roc_period2.unwrap() + c.sma_period2.unwrap() - 1)
+            .max(c.roc_period3.unwrap() + c.sma_period3.unwrap() - 1)
+            .max(c.roc_period4.unwrap() + c.sma_period4.unwrap() - 1);
+        warm_line[row] = wl;
+        warm_sig[row] = wl + c.signal_period.unwrap() - 1;
+        // prefix NaNs directly with first offset
+        let abs_wl = first + warm_line[row];
+        let abs_ws = first + warm_sig[row];
+        for v in &mut lines_out[row * cols..row * cols + abs_wl.min(cols)] {
+            *v = f64::NAN;
+        }
+        for v in &mut signals_out[row * cols..row * cols + abs_ws.min(cols)] {
+            *v = f64::NAN;
+        }
+    }
 
-	// Closure to process each row. The unwrap() is safe because:
-	// 1. expand_grid() ensures all parameters in combos are Some(valid_value)
-	// 2. We've already validated data is not empty above
-	// So kst_prepare() cannot fail with InvalidPeriod or EmptyInputData
-	let do_row = |row: usize, ldst: &mut [f64], sdst: &mut [f64]| {
-		let prm = &combos[row];
-		let input = KstInput::from_slice(data, *prm);
-		let (_d, s, r, sig, first, wl, ws, _chosen) = kst_prepare(&input, simd).unwrap();
-		kst_compute_into(data, s, r, sig, first, wl, ws, ldst, sdst);
-	};
+    let actual = match kern {
+        Kernel::Auto => detect_best_batch_kernel(),
+        k => k,
+    };
+    let simd = match actual {
+        Kernel::ScalarBatch => Kernel::Scalar,
+        Kernel::Avx2Batch => Kernel::Scalar, // Use scalar if AVX2 not available
+        Kernel::Avx512Batch => Kernel::Scalar, // Use scalar if AVX512 not available
+        _ => Kernel::Scalar,
+    };
 
-	if parallel {
-		#[cfg(not(target_arch="wasm32"))]
-		lines_out.par_chunks_mut(cols).zip(signals_out.par_chunks_mut(cols)).enumerate().for_each(|(r,(l,s))| do_row(r,l,s));
-		#[cfg(target_arch="wasm32")]
-		for (r,(l,s)) in lines_out.chunks_mut(cols).zip(signals_out.chunks_mut(cols)).enumerate() { do_row(r,l,s); }
-	} else {
-		for (r,(l,s)) in lines_out.chunks_mut(cols).zip(signals_out.chunks_mut(cols)).enumerate() { do_row(r,l,s); }
-	}
+    // Closure to process each row. The unwrap() is safe because:
+    // 1. expand_grid() ensures all parameters in combos are Some(valid_value)
+    // 2. We've already validated data is not empty above
+    // So kst_prepare() cannot fail with InvalidPeriod or EmptyInputData
+    let do_row = |row: usize, ldst: &mut [f64], sdst: &mut [f64]| {
+        let prm = &combos[row];
+        let input = KstInput::from_slice(data, *prm);
+        let (_d, s, r, sig, first, wl, ws, _chosen) = kst_prepare(&input, simd).unwrap();
+        kst_compute_into(data, s, r, sig, first, wl, ws, ldst, sdst);
+    };
 
-	Ok(combos)
+    if parallel {
+        #[cfg(not(target_arch = "wasm32"))]
+        lines_out
+            .par_chunks_mut(cols)
+            .zip(signals_out.par_chunks_mut(cols))
+            .enumerate()
+            .for_each(|(r, (l, s))| do_row(r, l, s));
+        #[cfg(target_arch = "wasm32")]
+        for (r, (l, s)) in lines_out
+            .chunks_mut(cols)
+            .zip(signals_out.chunks_mut(cols))
+            .enumerate()
+        {
+            do_row(r, l, s);
+        }
+    } else {
+        for (r, (l, s)) in lines_out
+            .chunks_mut(cols)
+            .zip(signals_out.chunks_mut(cols))
+            .enumerate()
+        {
+            do_row(r, l, s);
+        }
+    }
+
+    Ok(combos)
 }
 
 // Row helper functions removed - no longer needed with direct compute_into approach
 
 #[derive(Debug, Clone)]
 pub struct KstStream {
-	s:(usize,usize,usize,usize),
-	r:(usize,usize,usize,usize),
-	sig:usize,
-	// ring buffers for ROC SMAs
-	b1:Vec<f64>, b2:Vec<f64>, b3:Vec<f64>, b4:Vec<f64>,
-	i1:usize, i2:usize, i3:usize, i4:usize,
-	sum1:f64, sum2:f64, sum3:f64, sum4:f64,
-	inv1:f64, inv2:f64, inv3:f64, inv4:f64,
-	// signal ring
-	sig_buf:Vec<f64>, sig_idx:usize, sig_sum:f64,
-	// price history for ROC calculations
-	price_history:Vec<f64>,
-	price_idx:usize,
-	// warm tracking
-	t:usize,    // ticks seen
-	warm_line:usize,
-	warm_sig:usize,
-	last_line:f64,
+    s: (usize, usize, usize, usize),
+    r: (usize, usize, usize, usize),
+    sig: usize,
+    // ring buffers for ROC SMAs
+    b1: Vec<f64>,
+    b2: Vec<f64>,
+    b3: Vec<f64>,
+    b4: Vec<f64>,
+    i1: usize,
+    i2: usize,
+    i3: usize,
+    i4: usize,
+    sum1: f64,
+    sum2: f64,
+    sum3: f64,
+    sum4: f64,
+    inv1: f64,
+    inv2: f64,
+    inv3: f64,
+    inv4: f64,
+    // signal ring
+    sig_buf: Vec<f64>,
+    sig_idx: usize,
+    sig_sum: f64,
+    // price history for ROC calculations
+    price_history: Vec<f64>,
+    price_idx: usize,
+    // warm tracking
+    t: usize, // ticks seen
+    warm_line: usize,
+    warm_sig: usize,
+    last_line: f64,
 }
 impl KstStream {
-	pub fn try_new(params: KstParams) -> Result<Self, KstError> {
-		let s1=params.sma_period1.unwrap_or(10);
-		let s2=params.sma_period2.unwrap_or(10);
-		let s3=params.sma_period3.unwrap_or(10);
-		let s4=params.sma_period4.unwrap_or(15);
-		let r1=params.roc_period1.unwrap_or(10);
-		let r2=params.roc_period2.unwrap_or(15);
-		let r3=params.roc_period3.unwrap_or(20);
-		let r4=params.roc_period4.unwrap_or(30);
-		let sig=params.signal_period.unwrap_or(9);
-		for &p in [s1,s2,s3,s4,r1,r2,r3,r4,sig].iter() {
-			if p==0 { return Err(KstError::InvalidPeriod { period: p, data_len: 0 }); }
-		}
-		let warm_line = (r1+s1-1).max(r2+s2-1).max(r3+s3-1).max(r4+s4-1);
-		let warm_sig  = warm_line + sig - 1;
-		let max_roc = r1.max(r2).max(r3).max(r4);
-		Ok(Self{
-			s:(s1,s2,s3,s4), r:(r1,r2,r3,r4), sig,
-			b1:vec![0.0;s1], b2:vec![0.0;s2], b3:vec![0.0;s3], b4:vec![0.0;s4],
-			i1:0,i2:0,i3:0,i4:0, sum1:0.0,sum2:0.0,sum3:0.0,sum4:0.0,
-			inv1:1.0/(s1 as f64), inv2:1.0/(s2 as f64), inv3:1.0/(s3 as f64), inv4:1.0/(s4 as f64),
-			sig_buf:vec![f64::NAN; sig], sig_idx:0, sig_sum:0.0,
-			price_history:vec![f64::NAN; max_roc + 1],
-			price_idx:0,
-			t:0, warm_line, warm_sig, last_line:f64::NAN
-		})
-	}
-	pub fn update(&mut self, price: f64) -> Option<(f64, f64)> {
-		let (s1,s2,s3,s4)=self.s; let (r1,r2,r3,r4)=self.r;
-		
-		// Store price in circular buffer
-		self.price_history[self.price_idx] = price;
-		self.price_idx = (self.price_idx + 1) % self.price_history.len();
-		
-		// compute inline ROCs only when lookback available
-		let mut v1=0.0; 
-		if self.t>=r1 { 
-			let idx = (self.price_idx + self.price_history.len() - r1 - 1) % self.price_history.len();
-			let p=self.price_history[idx]; 
-			if p!=0.0 && p.is_finite(){ v1=((price/p)-1.0)*100.0; } 
-		}
-		let mut v2=0.0; 
-		if self.t>=r2 { 
-			let idx = (self.price_idx + self.price_history.len() - r2 - 1) % self.price_history.len();
-			let p=self.price_history[idx]; 
-			if p!=0.0 && p.is_finite(){ v2=((price/p)-1.0)*100.0; } 
-		}
-		let mut v3=0.0; 
-		if self.t>=r3 { 
-			let idx = (self.price_idx + self.price_history.len() - r3 - 1) % self.price_history.len();
-			let p=self.price_history[idx]; 
-			if p!=0.0 && p.is_finite(){ v3=((price/p)-1.0)*100.0; } 
-		}
-		let mut v4=0.0; 
-		if self.t>=r4 { 
-			let idx = (self.price_idx + self.price_history.len() - r4 - 1) % self.price_history.len();
-			let p=self.price_history[idx]; 
-			if p!=0.0 && p.is_finite(){ v4=((price/p)-1.0)*100.0; } 
-		}
-		
-		if self.t>=r1 { self.sum1 -= self.b1[self.i1]; self.b1[self.i1]=v1; self.sum1 += v1; self.i1 = (self.i1+1)%s1; }
-		if self.t>=r2 { self.sum2 -= self.b2[self.i2]; self.b2[self.i2]=v2; self.sum2 += v2; self.i2 = (self.i2+1)%s2; }
-		if self.t>=r3 { self.sum3 -= self.b3[self.i3]; self.b3[self.i3]=v3; self.sum3 += v3; self.i3 = (self.i3+1)%s3; }
-		if self.t>=r4 { self.sum4 -= self.b4[self.i4]; self.b4[self.i4]=v4; self.sum4 += v4; self.i4 = (self.i4+1)%s4; }
-		
-		self.t+=1;
-		
-		if self.t<=self.warm_line { return None; }
-		
-		let line = (self.sum1*self.inv1) + 2.0*(self.sum2*self.inv2) + 3.0*(self.sum3*self.inv3) + 4.0*(self.sum4*self.inv4);
-		self.last_line = line;
-		
-		// Update signal SMA
-		if self.t == self.warm_line + 1 {
-			// First signal calculation
-			self.sig_buf[0] = line;
-			self.sig_sum = line;
-			self.sig_idx = 1;
-			return Some((line, f64::NAN));
-		} else if self.t <= self.warm_sig {
-			// Building up signal buffer
-			self.sig_buf[self.sig_idx] = line;
-			self.sig_sum += line;
-			self.sig_idx = (self.sig_idx + 1) % self.sig;
-			if self.t == self.warm_sig {
-				let signal = self.sig_sum / (self.sig as f64);
-				return Some((line, signal));
-			}
-			return Some((line, f64::NAN));
-		} else {
-			// Normal operation
-			self.sig_sum -= self.sig_buf[self.sig_idx];
-			self.sig_buf[self.sig_idx] = line;
-			self.sig_sum += line;
-			self.sig_idx = (self.sig_idx + 1) % self.sig;
-			let signal = self.sig_sum / (self.sig as f64);
-			return Some((line, signal));
-		}
-	}
+    pub fn try_new(params: KstParams) -> Result<Self, KstError> {
+        let s1 = params.sma_period1.unwrap_or(10);
+        let s2 = params.sma_period2.unwrap_or(10);
+        let s3 = params.sma_period3.unwrap_or(10);
+        let s4 = params.sma_period4.unwrap_or(15);
+        let r1 = params.roc_period1.unwrap_or(10);
+        let r2 = params.roc_period2.unwrap_or(15);
+        let r3 = params.roc_period3.unwrap_or(20);
+        let r4 = params.roc_period4.unwrap_or(30);
+        let sig = params.signal_period.unwrap_or(9);
+        for &p in [s1, s2, s3, s4, r1, r2, r3, r4, sig].iter() {
+            if p == 0 {
+                return Err(KstError::InvalidPeriod {
+                    period: p,
+                    data_len: 0,
+                });
+            }
+        }
+        let warm_line = (r1 + s1 - 1)
+            .max(r2 + s2 - 1)
+            .max(r3 + s3 - 1)
+            .max(r4 + s4 - 1);
+        let warm_sig = warm_line + sig - 1;
+        let max_roc = r1.max(r2).max(r3).max(r4);
+        Ok(Self {
+            s: (s1, s2, s3, s4),
+            r: (r1, r2, r3, r4),
+            sig,
+            b1: vec![0.0; s1],
+            b2: vec![0.0; s2],
+            b3: vec![0.0; s3],
+            b4: vec![0.0; s4],
+            i1: 0,
+            i2: 0,
+            i3: 0,
+            i4: 0,
+            sum1: 0.0,
+            sum2: 0.0,
+            sum3: 0.0,
+            sum4: 0.0,
+            inv1: 1.0 / (s1 as f64),
+            inv2: 1.0 / (s2 as f64),
+            inv3: 1.0 / (s3 as f64),
+            inv4: 1.0 / (s4 as f64),
+            sig_buf: vec![f64::NAN; sig],
+            sig_idx: 0,
+            sig_sum: 0.0,
+            price_history: vec![f64::NAN; max_roc + 1],
+            price_idx: 0,
+            t: 0,
+            warm_line,
+            warm_sig,
+            last_line: f64::NAN,
+        })
+    }
+    pub fn update(&mut self, price: f64) -> Option<(f64, f64)> {
+        let (s1, s2, s3, s4) = self.s;
+        let (r1, r2, r3, r4) = self.r;
+
+        // Store price in circular buffer
+        self.price_history[self.price_idx] = price;
+        self.price_idx = (self.price_idx + 1) % self.price_history.len();
+
+        // compute inline ROCs only when lookback available
+        let mut v1 = 0.0;
+        if self.t >= r1 {
+            let idx =
+                (self.price_idx + self.price_history.len() - r1 - 1) % self.price_history.len();
+            let p = self.price_history[idx];
+            if p != 0.0 && p.is_finite() {
+                v1 = ((price / p) - 1.0) * 100.0;
+            }
+        }
+        let mut v2 = 0.0;
+        if self.t >= r2 {
+            let idx =
+                (self.price_idx + self.price_history.len() - r2 - 1) % self.price_history.len();
+            let p = self.price_history[idx];
+            if p != 0.0 && p.is_finite() {
+                v2 = ((price / p) - 1.0) * 100.0;
+            }
+        }
+        let mut v3 = 0.0;
+        if self.t >= r3 {
+            let idx =
+                (self.price_idx + self.price_history.len() - r3 - 1) % self.price_history.len();
+            let p = self.price_history[idx];
+            if p != 0.0 && p.is_finite() {
+                v3 = ((price / p) - 1.0) * 100.0;
+            }
+        }
+        let mut v4 = 0.0;
+        if self.t >= r4 {
+            let idx =
+                (self.price_idx + self.price_history.len() - r4 - 1) % self.price_history.len();
+            let p = self.price_history[idx];
+            if p != 0.0 && p.is_finite() {
+                v4 = ((price / p) - 1.0) * 100.0;
+            }
+        }
+
+        if self.t >= r1 {
+            self.sum1 -= self.b1[self.i1];
+            self.b1[self.i1] = v1;
+            self.sum1 += v1;
+            self.i1 = (self.i1 + 1) % s1;
+        }
+        if self.t >= r2 {
+            self.sum2 -= self.b2[self.i2];
+            self.b2[self.i2] = v2;
+            self.sum2 += v2;
+            self.i2 = (self.i2 + 1) % s2;
+        }
+        if self.t >= r3 {
+            self.sum3 -= self.b3[self.i3];
+            self.b3[self.i3] = v3;
+            self.sum3 += v3;
+            self.i3 = (self.i3 + 1) % s3;
+        }
+        if self.t >= r4 {
+            self.sum4 -= self.b4[self.i4];
+            self.b4[self.i4] = v4;
+            self.sum4 += v4;
+            self.i4 = (self.i4 + 1) % s4;
+        }
+
+        self.t += 1;
+
+        if self.t <= self.warm_line {
+            return None;
+        }
+
+        let line = (self.sum1 * self.inv1)
+            + 2.0 * (self.sum2 * self.inv2)
+            + 3.0 * (self.sum3 * self.inv3)
+            + 4.0 * (self.sum4 * self.inv4);
+        self.last_line = line;
+
+        // Update signal SMA
+        if self.t == self.warm_line + 1 {
+            // First signal calculation
+            self.sig_buf[0] = line;
+            self.sig_sum = line;
+            self.sig_idx = 1;
+            return Some((line, f64::NAN));
+        } else if self.t <= self.warm_sig {
+            // Building up signal buffer
+            self.sig_buf[self.sig_idx] = line;
+            self.sig_sum += line;
+            self.sig_idx = (self.sig_idx + 1) % self.sig;
+            if self.t == self.warm_sig {
+                let signal = self.sig_sum / (self.sig as f64);
+                return Some((line, signal));
+            }
+            return Some((line, f64::NAN));
+        } else {
+            // Normal operation
+            self.sig_sum -= self.sig_buf[self.sig_idx];
+            self.sig_buf[self.sig_idx] = line;
+            self.sig_sum += line;
+            self.sig_idx = (self.sig_idx + 1) % self.sig;
+            let signal = self.sig_sum / (self.sig as f64);
+            return Some((line, signal));
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-	use super::*;
-	use crate::skip_if_unsupported;
-	use crate::utilities::data_loader::read_candles_from_csv;
-	#[cfg(feature = "proptest")]
-	use proptest::prelude::*;
+    use super::*;
+    use crate::skip_if_unsupported;
+    use crate::utilities::data_loader::read_candles_from_csv;
+    #[cfg(feature = "proptest")]
+    use proptest::prelude::*;
 
-	fn check_kst_default_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-		skip_if_unsupported!(kernel, test_name);
-		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-		let candles = read_candles_from_csv(file_path)?;
-		let input = KstInput::with_default_candles(&candles);
-		let result = kst_with_kernel(&input, kernel)?;
-		assert_eq!(result.line.len(), candles.close.len());
-		assert_eq!(result.signal.len(), candles.close.len());
-		Ok(())
-	}
+    fn check_kst_default_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let input = KstInput::with_default_candles(&candles);
+        let result = kst_with_kernel(&input, kernel)?;
+        assert_eq!(result.line.len(), candles.close.len());
+        assert_eq!(result.signal.len(), candles.close.len());
+        Ok(())
+    }
 
-	fn check_kst_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-		skip_if_unsupported!(kernel, test_name);
-		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-		let candles = read_candles_from_csv(file_path)?;
-		let input = KstInput::with_default_candles(&candles);
-		let result = kst_with_kernel(&input, kernel)?;
-		let expected_last_five_line = [
-			-47.38570195278667,
-			-44.42926180347176,
-			-42.185693049429034,
-			-40.10697793942024,
-			-40.17466795905724,
-		];
-		let expected_last_five_signal = [
-			-52.66743277411538,
-			-51.559775662725556,
-			-50.113844191238954,
-			-48.58923772989874,
-			-47.01112630514571,
-		];
-		let l = result.line.len();
-		let s = result.signal.len();
-		for (i, &v) in result.line[l - 5..].iter().enumerate() {
-			assert!(
-				(v - expected_last_five_line[i]).abs() < 1e-1,
-				"KST line mismatch {}: {} vs {}",
-				i,
-				v,
-				expected_last_five_line[i]
-			);
-		}
-		for (i, &v) in result.signal[s - 5..].iter().enumerate() {
-			assert!(
-				(v - expected_last_five_signal[i]).abs() < 1e-1,
-				"KST signal mismatch {}: {} vs {}",
-				i,
-				v,
-				expected_last_five_signal[i]
-			);
-		}
-		Ok(())
-	}
+    fn check_kst_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let input = KstInput::with_default_candles(&candles);
+        let result = kst_with_kernel(&input, kernel)?;
+        let expected_last_five_line = [
+            -47.38570195278667,
+            -44.42926180347176,
+            -42.185693049429034,
+            -40.10697793942024,
+            -40.17466795905724,
+        ];
+        let expected_last_five_signal = [
+            -52.66743277411538,
+            -51.559775662725556,
+            -50.113844191238954,
+            -48.58923772989874,
+            -47.01112630514571,
+        ];
+        let l = result.line.len();
+        let s = result.signal.len();
+        for (i, &v) in result.line[l - 5..].iter().enumerate() {
+            assert!(
+                (v - expected_last_five_line[i]).abs() < 1e-1,
+                "KST line mismatch {}: {} vs {}",
+                i,
+                v,
+                expected_last_five_line[i]
+            );
+        }
+        for (i, &v) in result.signal[s - 5..].iter().enumerate() {
+            assert!(
+                (v - expected_last_five_signal[i]).abs() < 1e-1,
+                "KST signal mismatch {}: {} vs {}",
+                i,
+                v,
+                expected_last_five_signal[i]
+            );
+        }
+        Ok(())
+    }
 
-	fn check_kst_nan_handling(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-		skip_if_unsupported!(kernel, test_name);
-		let nan_data = [f64::NAN, f64::NAN, f64::NAN];
-		let input = KstInput::from_slice(&nan_data, KstParams::default());
-		let result = kst_with_kernel(&input, kernel);
-		assert!(result.is_err(), "[{}] Should error with all NaN", test_name);
-		Ok(())
-	}
+    fn check_kst_nan_handling(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let nan_data = [f64::NAN, f64::NAN, f64::NAN];
+        let input = KstInput::from_slice(&nan_data, KstParams::default());
+        let result = kst_with_kernel(&input, kernel);
+        assert!(result.is_err(), "[{}] Should error with all NaN", test_name);
+        Ok(())
+    }
 
-	macro_rules! generate_all_kst_tests {
+    macro_rules! generate_all_kst_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
                 $(
@@ -1116,403 +1486,426 @@ mod tests {
         }
     }
 
-	#[cfg(debug_assertions)]
-	fn check_kst_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-		skip_if_unsupported!(kernel, test_name);
+    #[cfg(debug_assertions)]
+    fn check_kst_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
 
-		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-		let candles = read_candles_from_csv(file_path)?;
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
 
-		// Define comprehensive parameter combinations
-		let test_params = vec![
-			KstParams::default(),
-			// Minimum viable periods
-			KstParams {
-				sma_period1: Some(2),
-				sma_period2: Some(2),
-				sma_period3: Some(2),
-				sma_period4: Some(2),
-				roc_period1: Some(2),
-				roc_period2: Some(2),
-				roc_period3: Some(2),
-				roc_period4: Some(2),
-				signal_period: Some(2),
-			},
-			// Small periods
-			KstParams {
-				sma_period1: Some(5),
-				sma_period2: Some(5),
-				sma_period3: Some(5),
-				sma_period4: Some(7),
-				roc_period1: Some(5),
-				roc_period2: Some(7),
-				roc_period3: Some(10),
-				roc_period4: Some(15),
-				signal_period: Some(5),
-			},
-			// Mixed small/medium periods
-			KstParams {
-				sma_period1: Some(7),
-				sma_period2: Some(10),
-				sma_period3: Some(12),
-				sma_period4: Some(15),
-				roc_period1: Some(8),
-				roc_period2: Some(12),
-				roc_period3: Some(16),
-				roc_period4: Some(20),
-				signal_period: Some(7),
-			},
-			// Default periods (10, 10, 10, 15, 10, 15, 20, 30, 9)
-			KstParams {
-				sma_period1: Some(10),
-				sma_period2: Some(10),
-				sma_period3: Some(10),
-				sma_period4: Some(15),
-				roc_period1: Some(10),
-				roc_period2: Some(15),
-				roc_period3: Some(20),
-				roc_period4: Some(30),
-				signal_period: Some(9),
-			},
-			// Large periods
-			KstParams {
-				sma_period1: Some(20),
-				sma_period2: Some(25),
-				sma_period3: Some(30),
-				sma_period4: Some(35),
-				roc_period1: Some(25),
-				roc_period2: Some(35),
-				roc_period3: Some(45),
-				roc_period4: Some(60),
-				signal_period: Some(15),
-			},
-			// Very large periods
-			KstParams {
-				sma_period1: Some(30),
-				sma_period2: Some(40),
-				sma_period3: Some(50),
-				sma_period4: Some(60),
-				roc_period1: Some(40),
-				roc_period2: Some(60),
-				roc_period3: Some(80),
-				roc_period4: Some(100),
-				signal_period: Some(21),
-			},
-			// Asymmetric periods
-			KstParams {
-				sma_period1: Some(5),
-				sma_period2: Some(10),
-				sma_period3: Some(20),
-				sma_period4: Some(50),
-				roc_period1: Some(7),
-				roc_period2: Some(14),
-				roc_period3: Some(28),
-				roc_period4: Some(56),
-				signal_period: Some(12),
-			},
-			// Edge case: very small signal period
-			KstParams {
-				sma_period1: Some(10),
-				sma_period2: Some(10),
-				sma_period3: Some(10),
-				sma_period4: Some(15),
-				roc_period1: Some(10),
-				roc_period2: Some(15),
-				roc_period3: Some(20),
-				roc_period4: Some(30),
-				signal_period: Some(2),
-			},
-			// Absolute minimum (all periods = 1)
-			KstParams {
-				sma_period1: Some(1),
-				sma_period2: Some(1),
-				sma_period3: Some(1),
-				sma_period4: Some(1),
-				roc_period1: Some(1),
-				roc_period2: Some(1),
-				roc_period3: Some(1),
-				roc_period4: Some(1),
-				signal_period: Some(1),
-			},
-			// Maximum reasonable periods
-			KstParams {
-				sma_period1: Some(100),
-				sma_period2: Some(120),
-				sma_period3: Some(140),
-				sma_period4: Some(160),
-				roc_period1: Some(100),
-				roc_period2: Some(150),
-				roc_period3: Some(200),
-				roc_period4: Some(250),
-				signal_period: Some(50),
-			},
-			// Common real-world configuration
-			KstParams {
-				sma_period1: Some(10),
-				sma_period2: Some(15),
-				sma_period3: Some(20),
-				sma_period4: Some(30),
-				roc_period1: Some(10),
-				roc_period2: Some(15),
-				roc_period3: Some(20),
-				roc_period4: Some(30),
-				signal_period: Some(10),
-			},
-			// Another asymmetric case
-			KstParams {
-				sma_period1: Some(3),
-				sma_period2: Some(6),
-				sma_period3: Some(12),
-				sma_period4: Some(24),
-				roc_period1: Some(5),
-				roc_period2: Some(10),
-				roc_period3: Some(20),
-				roc_period4: Some(40),
-				signal_period: Some(8),
-			},
-		];
+        // Define comprehensive parameter combinations
+        let test_params = vec![
+            KstParams::default(),
+            // Minimum viable periods
+            KstParams {
+                sma_period1: Some(2),
+                sma_period2: Some(2),
+                sma_period3: Some(2),
+                sma_period4: Some(2),
+                roc_period1: Some(2),
+                roc_period2: Some(2),
+                roc_period3: Some(2),
+                roc_period4: Some(2),
+                signal_period: Some(2),
+            },
+            // Small periods
+            KstParams {
+                sma_period1: Some(5),
+                sma_period2: Some(5),
+                sma_period3: Some(5),
+                sma_period4: Some(7),
+                roc_period1: Some(5),
+                roc_period2: Some(7),
+                roc_period3: Some(10),
+                roc_period4: Some(15),
+                signal_period: Some(5),
+            },
+            // Mixed small/medium periods
+            KstParams {
+                sma_period1: Some(7),
+                sma_period2: Some(10),
+                sma_period3: Some(12),
+                sma_period4: Some(15),
+                roc_period1: Some(8),
+                roc_period2: Some(12),
+                roc_period3: Some(16),
+                roc_period4: Some(20),
+                signal_period: Some(7),
+            },
+            // Default periods (10, 10, 10, 15, 10, 15, 20, 30, 9)
+            KstParams {
+                sma_period1: Some(10),
+                sma_period2: Some(10),
+                sma_period3: Some(10),
+                sma_period4: Some(15),
+                roc_period1: Some(10),
+                roc_period2: Some(15),
+                roc_period3: Some(20),
+                roc_period4: Some(30),
+                signal_period: Some(9),
+            },
+            // Large periods
+            KstParams {
+                sma_period1: Some(20),
+                sma_period2: Some(25),
+                sma_period3: Some(30),
+                sma_period4: Some(35),
+                roc_period1: Some(25),
+                roc_period2: Some(35),
+                roc_period3: Some(45),
+                roc_period4: Some(60),
+                signal_period: Some(15),
+            },
+            // Very large periods
+            KstParams {
+                sma_period1: Some(30),
+                sma_period2: Some(40),
+                sma_period3: Some(50),
+                sma_period4: Some(60),
+                roc_period1: Some(40),
+                roc_period2: Some(60),
+                roc_period3: Some(80),
+                roc_period4: Some(100),
+                signal_period: Some(21),
+            },
+            // Asymmetric periods
+            KstParams {
+                sma_period1: Some(5),
+                sma_period2: Some(10),
+                sma_period3: Some(20),
+                sma_period4: Some(50),
+                roc_period1: Some(7),
+                roc_period2: Some(14),
+                roc_period3: Some(28),
+                roc_period4: Some(56),
+                signal_period: Some(12),
+            },
+            // Edge case: very small signal period
+            KstParams {
+                sma_period1: Some(10),
+                sma_period2: Some(10),
+                sma_period3: Some(10),
+                sma_period4: Some(15),
+                roc_period1: Some(10),
+                roc_period2: Some(15),
+                roc_period3: Some(20),
+                roc_period4: Some(30),
+                signal_period: Some(2),
+            },
+            // Absolute minimum (all periods = 1)
+            KstParams {
+                sma_period1: Some(1),
+                sma_period2: Some(1),
+                sma_period3: Some(1),
+                sma_period4: Some(1),
+                roc_period1: Some(1),
+                roc_period2: Some(1),
+                roc_period3: Some(1),
+                roc_period4: Some(1),
+                signal_period: Some(1),
+            },
+            // Maximum reasonable periods
+            KstParams {
+                sma_period1: Some(100),
+                sma_period2: Some(120),
+                sma_period3: Some(140),
+                sma_period4: Some(160),
+                roc_period1: Some(100),
+                roc_period2: Some(150),
+                roc_period3: Some(200),
+                roc_period4: Some(250),
+                signal_period: Some(50),
+            },
+            // Common real-world configuration
+            KstParams {
+                sma_period1: Some(10),
+                sma_period2: Some(15),
+                sma_period3: Some(20),
+                sma_period4: Some(30),
+                roc_period1: Some(10),
+                roc_period2: Some(15),
+                roc_period3: Some(20),
+                roc_period4: Some(30),
+                signal_period: Some(10),
+            },
+            // Another asymmetric case
+            KstParams {
+                sma_period1: Some(3),
+                sma_period2: Some(6),
+                sma_period3: Some(12),
+                sma_period4: Some(24),
+                roc_period1: Some(5),
+                roc_period2: Some(10),
+                roc_period3: Some(20),
+                roc_period4: Some(40),
+                signal_period: Some(8),
+            },
+        ];
 
-		for (param_idx, params) in test_params.iter().enumerate() {
-			let input = KstInput::from_candles(&candles, "close", params.clone());
-			let output = kst_with_kernel(&input, kernel)?;
+        for (param_idx, params) in test_params.iter().enumerate() {
+            let input = KstInput::from_candles(&candles, "close", params.clone());
+            let output = kst_with_kernel(&input, kernel)?;
 
-			// Check line values
-			for (i, &val) in output.line.iter().enumerate() {
-				if val.is_nan() {
-					continue; // NaN values are expected during warmup
-				}
+            // Check line values
+            for (i, &val) in output.line.iter().enumerate() {
+                if val.is_nan() {
+                    continue; // NaN values are expected during warmup
+                }
 
-				let bits = val.to_bits();
+                let bits = val.to_bits();
 
-				// Check all three poison patterns
-				if bits == 0x11111111_11111111 {
-					panic!(
-						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+                // Check all three poison patterns
+                if bits == 0x11111111_11111111 {
+                    panic!(
+                        "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
 						 in KST line with params: sma_periods=({},{},{},{}), roc_periods=({},{},{},{}), \
 						 signal_period={} (param set {})",
-						test_name, val, bits, i,
-						params.sma_period1.unwrap_or(10),
-						params.sma_period2.unwrap_or(10),
-						params.sma_period3.unwrap_or(10),
-						params.sma_period4.unwrap_or(15),
-						params.roc_period1.unwrap_or(10),
-						params.roc_period2.unwrap_or(15),
-						params.roc_period3.unwrap_or(20),
-						params.roc_period4.unwrap_or(30),
-						params.signal_period.unwrap_or(9),
-						param_idx
-					);
-				}
+                        test_name,
+                        val,
+                        bits,
+                        i,
+                        params.sma_period1.unwrap_or(10),
+                        params.sma_period2.unwrap_or(10),
+                        params.sma_period3.unwrap_or(10),
+                        params.sma_period4.unwrap_or(15),
+                        params.roc_period1.unwrap_or(10),
+                        params.roc_period2.unwrap_or(15),
+                        params.roc_period3.unwrap_or(20),
+                        params.roc_period4.unwrap_or(30),
+                        params.signal_period.unwrap_or(9),
+                        param_idx
+                    );
+                }
 
-				if bits == 0x22222222_22222222 {
-					panic!(
-						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+                if bits == 0x22222222_22222222 {
+                    panic!(
+                        "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
 						 in KST line with params: sma_periods=({},{},{},{}), roc_periods=({},{},{},{}), \
 						 signal_period={} (param set {})",
-						test_name, val, bits, i,
-						params.sma_period1.unwrap_or(10),
-						params.sma_period2.unwrap_or(10),
-						params.sma_period3.unwrap_or(10),
-						params.sma_period4.unwrap_or(15),
-						params.roc_period1.unwrap_or(10),
-						params.roc_period2.unwrap_or(15),
-						params.roc_period3.unwrap_or(20),
-						params.roc_period4.unwrap_or(30),
-						params.signal_period.unwrap_or(9),
-						param_idx
-					);
-				}
+                        test_name,
+                        val,
+                        bits,
+                        i,
+                        params.sma_period1.unwrap_or(10),
+                        params.sma_period2.unwrap_or(10),
+                        params.sma_period3.unwrap_or(10),
+                        params.sma_period4.unwrap_or(15),
+                        params.roc_period1.unwrap_or(10),
+                        params.roc_period2.unwrap_or(15),
+                        params.roc_period3.unwrap_or(20),
+                        params.roc_period4.unwrap_or(30),
+                        params.signal_period.unwrap_or(9),
+                        param_idx
+                    );
+                }
 
-				if bits == 0x33333333_33333333 {
-					panic!(
-						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+                if bits == 0x33333333_33333333 {
+                    panic!(
+                        "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
 						 in KST line with params: sma_periods=({},{},{},{}), roc_periods=({},{},{},{}), \
 						 signal_period={} (param set {})",
-						test_name, val, bits, i,
-						params.sma_period1.unwrap_or(10),
-						params.sma_period2.unwrap_or(10),
-						params.sma_period3.unwrap_or(10),
-						params.sma_period4.unwrap_or(15),
-						params.roc_period1.unwrap_or(10),
-						params.roc_period2.unwrap_or(15),
-						params.roc_period3.unwrap_or(20),
-						params.roc_period4.unwrap_or(30),
-						params.signal_period.unwrap_or(9),
-						param_idx
-					);
-				}
-			}
+                        test_name,
+                        val,
+                        bits,
+                        i,
+                        params.sma_period1.unwrap_or(10),
+                        params.sma_period2.unwrap_or(10),
+                        params.sma_period3.unwrap_or(10),
+                        params.sma_period4.unwrap_or(15),
+                        params.roc_period1.unwrap_or(10),
+                        params.roc_period2.unwrap_or(15),
+                        params.roc_period3.unwrap_or(20),
+                        params.roc_period4.unwrap_or(30),
+                        params.signal_period.unwrap_or(9),
+                        param_idx
+                    );
+                }
+            }
 
-			// Check signal values
-			for (i, &val) in output.signal.iter().enumerate() {
-				if val.is_nan() {
-					continue;
-				}
+            // Check signal values
+            for (i, &val) in output.signal.iter().enumerate() {
+                if val.is_nan() {
+                    continue;
+                }
 
-				let bits = val.to_bits();
+                let bits = val.to_bits();
 
-				if bits == 0x11111111_11111111 {
-					panic!(
-						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+                if bits == 0x11111111_11111111 {
+                    panic!(
+                        "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
 						 in KST signal with params: sma_periods=({},{},{},{}), roc_periods=({},{},{},{}), \
 						 signal_period={} (param set {})",
-						test_name, val, bits, i,
-						params.sma_period1.unwrap_or(10),
-						params.sma_period2.unwrap_or(10),
-						params.sma_period3.unwrap_or(10),
-						params.sma_period4.unwrap_or(15),
-						params.roc_period1.unwrap_or(10),
-						params.roc_period2.unwrap_or(15),
-						params.roc_period3.unwrap_or(20),
-						params.roc_period4.unwrap_or(30),
-						params.signal_period.unwrap_or(9),
-						param_idx
-					);
-				}
+                        test_name,
+                        val,
+                        bits,
+                        i,
+                        params.sma_period1.unwrap_or(10),
+                        params.sma_period2.unwrap_or(10),
+                        params.sma_period3.unwrap_or(10),
+                        params.sma_period4.unwrap_or(15),
+                        params.roc_period1.unwrap_or(10),
+                        params.roc_period2.unwrap_or(15),
+                        params.roc_period3.unwrap_or(20),
+                        params.roc_period4.unwrap_or(30),
+                        params.signal_period.unwrap_or(9),
+                        param_idx
+                    );
+                }
 
-				if bits == 0x22222222_22222222 {
-					panic!(
-						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+                if bits == 0x22222222_22222222 {
+                    panic!(
+                        "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
 						 in KST signal with params: sma_periods=({},{},{},{}), roc_periods=({},{},{},{}), \
 						 signal_period={} (param set {})",
-						test_name, val, bits, i,
-						params.sma_period1.unwrap_or(10),
-						params.sma_period2.unwrap_or(10),
-						params.sma_period3.unwrap_or(10),
-						params.sma_period4.unwrap_or(15),
-						params.roc_period1.unwrap_or(10),
-						params.roc_period2.unwrap_or(15),
-						params.roc_period3.unwrap_or(20),
-						params.roc_period4.unwrap_or(30),
-						params.signal_period.unwrap_or(9),
-						param_idx
-					);
-				}
+                        test_name,
+                        val,
+                        bits,
+                        i,
+                        params.sma_period1.unwrap_or(10),
+                        params.sma_period2.unwrap_or(10),
+                        params.sma_period3.unwrap_or(10),
+                        params.sma_period4.unwrap_or(15),
+                        params.roc_period1.unwrap_or(10),
+                        params.roc_period2.unwrap_or(15),
+                        params.roc_period3.unwrap_or(20),
+                        params.roc_period4.unwrap_or(30),
+                        params.signal_period.unwrap_or(9),
+                        param_idx
+                    );
+                }
 
-				if bits == 0x33333333_33333333 {
-					panic!(
-						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+                if bits == 0x33333333_33333333 {
+                    panic!(
+                        "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
 						 in KST signal with params: sma_periods=({},{},{},{}), roc_periods=({},{},{},{}), \
 						 signal_period={} (param set {})",
-						test_name, val, bits, i,
-						params.sma_period1.unwrap_or(10),
-						params.sma_period2.unwrap_or(10),
-						params.sma_period3.unwrap_or(10),
-						params.sma_period4.unwrap_or(15),
-						params.roc_period1.unwrap_or(10),
-						params.roc_period2.unwrap_or(15),
-						params.roc_period3.unwrap_or(20),
-						params.roc_period4.unwrap_or(30),
-						params.signal_period.unwrap_or(9),
-						param_idx
-					);
-				}
-			}
-		}
+                        test_name,
+                        val,
+                        bits,
+                        i,
+                        params.sma_period1.unwrap_or(10),
+                        params.sma_period2.unwrap_or(10),
+                        params.sma_period3.unwrap_or(10),
+                        params.sma_period4.unwrap_or(15),
+                        params.roc_period1.unwrap_or(10),
+                        params.roc_period2.unwrap_or(15),
+                        params.roc_period3.unwrap_or(20),
+                        params.roc_period4.unwrap_or(30),
+                        params.signal_period.unwrap_or(9),
+                        param_idx
+                    );
+                }
+            }
+        }
 
-		Ok(())
-	}
+        Ok(())
+    }
 
-	#[cfg(not(debug_assertions))]
-	fn check_kst_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-		Ok(()) // No-op in release builds
-	}
+    #[cfg(not(debug_assertions))]
+    fn check_kst_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        Ok(()) // No-op in release builds
+    }
 
-	#[cfg(feature = "proptest")]
-	#[allow(clippy::float_cmp)]
-	fn check_kst_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-		use proptest::prelude::*;
-		skip_if_unsupported!(kernel, test_name);
+    #[cfg(feature = "proptest")]
+    #[allow(clippy::float_cmp)]
+    fn check_kst_property(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use proptest::prelude::*;
+        skip_if_unsupported!(kernel, test_name);
 
-		// Generate realistic parameter combinations for KST
-		let strat = (
-			// SMA periods (reasonable ranges)
-			(3usize..=20),  // sma_period1
-			(3usize..=20),  // sma_period2
-			(3usize..=20),  // sma_period3
-			(5usize..=25),  // sma_period4
-			// ROC periods (reasonable ranges)
-			(5usize..=15),  // roc_period1
-			(10usize..=20), // roc_period2
-			(15usize..=25), // roc_period3
-			(20usize..=35), // roc_period4
-			// Signal period
-			(3usize..=15),  // signal_period
-			// Data scenario selector
-			(0usize..=3),   // scenario type
-		).prop_flat_map(|(s1, s2, s3, s4, r1, r2, r3, r4, sig, scenario)| {
-			// Calculate minimum data length needed
-			let warmup1 = r1 + s1 - 1;
-			let warmup2 = r2 + s2 - 1;
-			let warmup3 = r3 + s3 - 1;
-			let warmup4 = r4 + s4 - 1;
-			let warmup = warmup1.max(warmup2).max(warmup3).max(warmup4);
-			let min_data_len = warmup + sig + 20; // Extra buffer for testing
-			
-			// Different data generation strategies based on scenario
-			let data_strategy = match scenario {
-				0 => {
-					// Normal price range (most common)
-					prop::collection::vec(
-						(10.0f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
-						min_data_len..400,
-					).boxed()
-				},
-				1 => {
-					// Small values (penny stocks)
-					prop::collection::vec(
-						(0.01f64..5.0f64).prop_filter("finite", |x| x.is_finite()),
-						min_data_len..400,
-					).boxed()
-				},
-				2 => {
-					// Data with plateaus (same value for extended periods)
-					prop::collection::vec(
-						(10.0f64..1000.0f64),
-						min_data_len..400,
-					).prop_map(|mut v| {
-						// Create plateaus by repeating some values
-						for i in 0..v.len()/4 {
-							let plateau_start = i * 4;
-							let plateau_end = (plateau_start + 3).min(v.len() - 1);
-							let plateau_value = v[plateau_start];
-							for j in plateau_start..=plateau_end {
-								v[j] = plateau_value;
-							}
-						}
-						v
-					}).boxed()
-				},
-				_ => {
-					// Data with large jumps
-					prop::collection::vec(
-						(10.0f64..1000.0f64),
-						min_data_len..400,
-					).prop_map(|mut v| {
-						// Introduce some large jumps
-						for i in (5..v.len()).step_by(20) {
-							v[i] = v[i-1] * (1.5 + (i % 3) as f64 * 0.5); // 1.5x to 2.5x jump
-						}
-						v
-					}).boxed()
-				}
-			};
-			
-			(
-				data_strategy,
-				Just(s1),
-				Just(s2),
-				Just(s3),
-				Just(s4),
-				Just(r1),
-				Just(r2),
-				Just(r3),
-				Just(r4),
-				Just(sig),
-			)
-		});
+        // Generate realistic parameter combinations for KST
+        let strat = (
+            // SMA periods (reasonable ranges)
+            (3usize..=20), // sma_period1
+            (3usize..=20), // sma_period2
+            (3usize..=20), // sma_period3
+            (5usize..=25), // sma_period4
+            // ROC periods (reasonable ranges)
+            (5usize..=15),  // roc_period1
+            (10usize..=20), // roc_period2
+            (15usize..=25), // roc_period3
+            (20usize..=35), // roc_period4
+            // Signal period
+            (3usize..=15), // signal_period
+            // Data scenario selector
+            (0usize..=3), // scenario type
+        )
+            .prop_flat_map(|(s1, s2, s3, s4, r1, r2, r3, r4, sig, scenario)| {
+                // Calculate minimum data length needed
+                let warmup1 = r1 + s1 - 1;
+                let warmup2 = r2 + s2 - 1;
+                let warmup3 = r3 + s3 - 1;
+                let warmup4 = r4 + s4 - 1;
+                let warmup = warmup1.max(warmup2).max(warmup3).max(warmup4);
+                let min_data_len = warmup + sig + 20; // Extra buffer for testing
 
-		proptest::test_runner::TestRunner::default()
+                // Different data generation strategies based on scenario
+                let data_strategy = match scenario {
+                    0 => {
+                        // Normal price range (most common)
+                        prop::collection::vec(
+                            (10.0f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
+                            min_data_len..400,
+                        )
+                        .boxed()
+                    }
+                    1 => {
+                        // Small values (penny stocks)
+                        prop::collection::vec(
+                            (0.01f64..5.0f64).prop_filter("finite", |x| x.is_finite()),
+                            min_data_len..400,
+                        )
+                        .boxed()
+                    }
+                    2 => {
+                        // Data with plateaus (same value for extended periods)
+                        prop::collection::vec((10.0f64..1000.0f64), min_data_len..400)
+                            .prop_map(|mut v| {
+                                // Create plateaus by repeating some values
+                                for i in 0..v.len() / 4 {
+                                    let plateau_start = i * 4;
+                                    let plateau_end = (plateau_start + 3).min(v.len() - 1);
+                                    let plateau_value = v[plateau_start];
+                                    for j in plateau_start..=plateau_end {
+                                        v[j] = plateau_value;
+                                    }
+                                }
+                                v
+                            })
+                            .boxed()
+                    }
+                    _ => {
+                        // Data with large jumps
+                        prop::collection::vec((10.0f64..1000.0f64), min_data_len..400)
+                            .prop_map(|mut v| {
+                                // Introduce some large jumps
+                                for i in (5..v.len()).step_by(20) {
+                                    v[i] = v[i - 1] * (1.5 + (i % 3) as f64 * 0.5);
+                                    // 1.5x to 2.5x jump
+                                }
+                                v
+                            })
+                            .boxed()
+                    }
+                };
+
+                (
+                    data_strategy,
+                    Just(s1),
+                    Just(s2),
+                    Just(s3),
+                    Just(s4),
+                    Just(r1),
+                    Just(r2),
+                    Just(r3),
+                    Just(r4),
+                    Just(sig),
+                )
+            });
+
+        proptest::test_runner::TestRunner::default()
 			.run(&strat, |(data, s1, s2, s3, s4, r1, r2, r3, r4, sig)| {
 				let params = KstParams {
 					sma_period1: Some(s1),
@@ -1746,26 +2139,33 @@ mod tests {
 			})
 			.unwrap();
 
-		Ok(())
-	}
+        Ok(())
+    }
 
-	#[cfg(feature = "proptest")]
-	generate_all_kst_tests!(check_kst_property);
+    #[cfg(feature = "proptest")]
+    generate_all_kst_tests!(check_kst_property);
 
-	generate_all_kst_tests!(check_kst_default_params, check_kst_accuracy, check_kst_nan_handling, check_kst_no_poison);
+    generate_all_kst_tests!(
+        check_kst_default_params,
+        check_kst_accuracy,
+        check_kst_nan_handling,
+        check_kst_no_poison
+    );
 
-	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-		skip_if_unsupported!(kernel, test);
-		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-		let c = read_candles_from_csv(file)?;
-		let output = KstBatchBuilder::new().kernel(kernel).apply_candles(&c, "close")?;
-		let def = KstParams::default();
-		let row = output.lines_for(&def).expect("default row missing");
-		assert_eq!(row.len(), c.close.len());
-		Ok(())
-	}
+    fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test);
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let c = read_candles_from_csv(file)?;
+        let output = KstBatchBuilder::new()
+            .kernel(kernel)
+            .apply_candles(&c, "close")?;
+        let def = KstParams::default();
+        let row = output.lines_for(&def).expect("default row missing");
+        assert_eq!(row.len(), c.close.len());
+        Ok(())
+    }
 
-	macro_rules! gen_batch_tests {
+    macro_rules! gen_batch_tests {
         ($fn_name:ident) => {
             paste::paste! {
                 #[test] fn [<$fn_name _scalar>]()      { let _ = $fn_name(stringify!([<$fn_name _scalar>]), Kernel::ScalarBatch); }
@@ -1777,218 +2177,293 @@ mod tests {
             }
         };
     }
-	#[cfg(debug_assertions)]
-	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-		skip_if_unsupported!(kernel, test);
+    #[cfg(debug_assertions)]
+    fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test);
 
-		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-		let c = read_candles_from_csv(file)?;
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let c = read_candles_from_csv(file)?;
 
-		// Test various parameter sweep configurations (kept minimal to avoid OOM)
-		let test_configs = vec![
-			// Small periods - single combination
-			(3, 3, 0, 3, 3, 0, 3, 3, 0, 3, 3, 0, 3, 3, 0, 4, 4, 0, 5, 5, 0, 6, 6, 0, 3, 3, 0),
-			// Medium periods - 2x2x2x2 combinations
-			(5, 10, 5, 5, 10, 5, 5, 10, 5, 8, 13, 5, 5, 10, 5, 8, 13, 5, 10, 15, 5, 15, 20, 5, 5, 7, 2),
-			// Default values
-			(10, 10, 0, 10, 10, 0, 10, 10, 0, 15, 15, 0, 10, 10, 0, 15, 15, 0, 20, 20, 0, 30, 30, 0, 9, 9, 0),
-			// Dense small range - limited
-			(2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 3, 4, 1, 4, 5, 1, 5, 6, 1, 2, 3, 1),
-		];
+        // Test various parameter sweep configurations (kept minimal to avoid OOM)
+        let test_configs = vec![
+            // Small periods - single combination
+            (
+                3, 3, 0, 3, 3, 0, 3, 3, 0, 3, 3, 0, 3, 3, 0, 4, 4, 0, 5, 5, 0, 6, 6, 0, 3, 3, 0,
+            ),
+            // Medium periods - 2x2x2x2 combinations
+            (
+                5, 10, 5, 5, 10, 5, 5, 10, 5, 8, 13, 5, 5, 10, 5, 8, 13, 5, 10, 15, 5, 15, 20, 5,
+                5, 7, 2,
+            ),
+            // Default values
+            (
+                10, 10, 0, 10, 10, 0, 10, 10, 0, 15, 15, 0, 10, 10, 0, 15, 15, 0, 20, 20, 0, 30,
+                30, 0, 9, 9, 0,
+            ),
+            // Dense small range - limited
+            (
+                2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 3, 4, 1, 4, 5, 1, 5, 6, 1, 2, 3, 1,
+            ),
+        ];
 
-		for (cfg_idx, &(s1_start, s1_end, s1_step, s2_start, s2_end, s2_step, 
-						s3_start, s3_end, s3_step, s4_start, s4_end, s4_step,
-						r1_start, r1_end, r1_step, r2_start, r2_end, r2_step,
-						r3_start, r3_end, r3_step, r4_start, r4_end, r4_step,
-						sig_start, sig_end, sig_step)) in test_configs.iter().enumerate() {
-			
-			let output = KstBatchBuilder::new()
-				.kernel(kernel)
-				.sma_period1_range(s1_start, s1_end, s1_step)
-				.sma_period2_range(s2_start, s2_end, s2_step)
-				.sma_period3_range(s3_start, s3_end, s3_step)
-				.sma_period4_range(s4_start, s4_end, s4_step)
-				.roc_period1_range(r1_start, r1_end, r1_step)
-				.roc_period2_range(r2_start, r2_end, r2_step)
-				.roc_period3_range(r3_start, r3_end, r3_step)
-				.roc_period4_range(r4_start, r4_end, r4_step)
-				.signal_period_range(sig_start, sig_end, sig_step)
-				.apply_candles(&c, "close")?;
+        for (
+            cfg_idx,
+            &(
+                s1_start,
+                s1_end,
+                s1_step,
+                s2_start,
+                s2_end,
+                s2_step,
+                s3_start,
+                s3_end,
+                s3_step,
+                s4_start,
+                s4_end,
+                s4_step,
+                r1_start,
+                r1_end,
+                r1_step,
+                r2_start,
+                r2_end,
+                r2_step,
+                r3_start,
+                r3_end,
+                r3_step,
+                r4_start,
+                r4_end,
+                r4_step,
+                sig_start,
+                sig_end,
+                sig_step,
+            ),
+        ) in test_configs.iter().enumerate()
+        {
+            let output = KstBatchBuilder::new()
+                .kernel(kernel)
+                .sma_period1_range(s1_start, s1_end, s1_step)
+                .sma_period2_range(s2_start, s2_end, s2_step)
+                .sma_period3_range(s3_start, s3_end, s3_step)
+                .sma_period4_range(s4_start, s4_end, s4_step)
+                .roc_period1_range(r1_start, r1_end, r1_step)
+                .roc_period2_range(r2_start, r2_end, r2_step)
+                .roc_period3_range(r3_start, r3_end, r3_step)
+                .roc_period4_range(r4_start, r4_end, r4_step)
+                .signal_period_range(sig_start, sig_end, sig_step)
+                .apply_candles(&c, "close")?;
 
-			// Check line values
-			for (idx, &val) in output.lines.iter().enumerate() {
-				if val.is_nan() {
-					continue;
-				}
+            // Check line values
+            for (idx, &val) in output.lines.iter().enumerate() {
+                if val.is_nan() {
+                    continue;
+                }
 
-				let bits = val.to_bits();
-				let row = idx / output.cols;
-				let col = idx % output.cols;
-				let combo = &output.combos[row];
+                let bits = val.to_bits();
+                let row = idx / output.cols;
+                let col = idx % output.cols;
+                let combo = &output.combos[row];
 
-				// Check all three poison patterns with detailed context
-				if bits == 0x11111111_11111111 {
-					panic!(
-						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+                // Check all three poison patterns with detailed context
+                if bits == 0x11111111_11111111 {
+                    panic!(
+                        "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
 						 at row {} col {} (flat index {}) in KST lines with params: \
 						 sma_periods=({},{},{},{}), roc_periods=({},{},{},{}), signal_period={}",
-						test, cfg_idx, val, bits, row, col, idx,
-						combo.sma_period1.unwrap_or(10),
-						combo.sma_period2.unwrap_or(10),
-						combo.sma_period3.unwrap_or(10),
-						combo.sma_period4.unwrap_or(15),
-						combo.roc_period1.unwrap_or(10),
-						combo.roc_period2.unwrap_or(15),
-						combo.roc_period3.unwrap_or(20),
-						combo.roc_period4.unwrap_or(30),
-						combo.signal_period.unwrap_or(9)
-					);
-				}
+                        test,
+                        cfg_idx,
+                        val,
+                        bits,
+                        row,
+                        col,
+                        idx,
+                        combo.sma_period1.unwrap_or(10),
+                        combo.sma_period2.unwrap_or(10),
+                        combo.sma_period3.unwrap_or(10),
+                        combo.sma_period4.unwrap_or(15),
+                        combo.roc_period1.unwrap_or(10),
+                        combo.roc_period2.unwrap_or(15),
+                        combo.roc_period3.unwrap_or(20),
+                        combo.roc_period4.unwrap_or(30),
+                        combo.signal_period.unwrap_or(9)
+                    );
+                }
 
-				if bits == 0x22222222_22222222 {
-					panic!(
-						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+                if bits == 0x22222222_22222222 {
+                    panic!(
+                        "[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
 						 at row {} col {} (flat index {}) in KST lines with params: \
 						 sma_periods=({},{},{},{}), roc_periods=({},{},{},{}), signal_period={}",
-						test, cfg_idx, val, bits, row, col, idx,
-						combo.sma_period1.unwrap_or(10),
-						combo.sma_period2.unwrap_or(10),
-						combo.sma_period3.unwrap_or(10),
-						combo.sma_period4.unwrap_or(15),
-						combo.roc_period1.unwrap_or(10),
-						combo.roc_period2.unwrap_or(15),
-						combo.roc_period3.unwrap_or(20),
-						combo.roc_period4.unwrap_or(30),
-						combo.signal_period.unwrap_or(9)
-					);
-				}
+                        test,
+                        cfg_idx,
+                        val,
+                        bits,
+                        row,
+                        col,
+                        idx,
+                        combo.sma_period1.unwrap_or(10),
+                        combo.sma_period2.unwrap_or(10),
+                        combo.sma_period3.unwrap_or(10),
+                        combo.sma_period4.unwrap_or(15),
+                        combo.roc_period1.unwrap_or(10),
+                        combo.roc_period2.unwrap_or(15),
+                        combo.roc_period3.unwrap_or(20),
+                        combo.roc_period4.unwrap_or(30),
+                        combo.signal_period.unwrap_or(9)
+                    );
+                }
 
-				if bits == 0x33333333_33333333 {
-					panic!(
-						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+                if bits == 0x33333333_33333333 {
+                    panic!(
+                        "[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
 						 at row {} col {} (flat index {}) in KST lines with params: \
 						 sma_periods=({},{},{},{}), roc_periods=({},{},{},{}), signal_period={}",
-						test, cfg_idx, val, bits, row, col, idx,
-						combo.sma_period1.unwrap_or(10),
-						combo.sma_period2.unwrap_or(10),
-						combo.sma_period3.unwrap_or(10),
-						combo.sma_period4.unwrap_or(15),
-						combo.roc_period1.unwrap_or(10),
-						combo.roc_period2.unwrap_or(15),
-						combo.roc_period3.unwrap_or(20),
-						combo.roc_period4.unwrap_or(30),
-						combo.signal_period.unwrap_or(9)
-					);
-				}
-			}
+                        test,
+                        cfg_idx,
+                        val,
+                        bits,
+                        row,
+                        col,
+                        idx,
+                        combo.sma_period1.unwrap_or(10),
+                        combo.sma_period2.unwrap_or(10),
+                        combo.sma_period3.unwrap_or(10),
+                        combo.sma_period4.unwrap_or(15),
+                        combo.roc_period1.unwrap_or(10),
+                        combo.roc_period2.unwrap_or(15),
+                        combo.roc_period3.unwrap_or(20),
+                        combo.roc_period4.unwrap_or(30),
+                        combo.signal_period.unwrap_or(9)
+                    );
+                }
+            }
 
-			// Check signal values
-			for (idx, &val) in output.signals.iter().enumerate() {
-				if val.is_nan() {
-					continue;
-				}
+            // Check signal values
+            for (idx, &val) in output.signals.iter().enumerate() {
+                if val.is_nan() {
+                    continue;
+                }
 
-				let bits = val.to_bits();
-				let row = idx / output.cols;
-				let col = idx % output.cols;
-				let combo = &output.combos[row];
+                let bits = val.to_bits();
+                let row = idx / output.cols;
+                let col = idx % output.cols;
+                let combo = &output.combos[row];
 
-				if bits == 0x11111111_11111111 {
-					panic!(
-						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+                if bits == 0x11111111_11111111 {
+                    panic!(
+                        "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
 						 at row {} col {} (flat index {}) in KST signals with params: \
 						 sma_periods=({},{},{},{}), roc_periods=({},{},{},{}), signal_period={}",
-						test, cfg_idx, val, bits, row, col, idx,
-						combo.sma_period1.unwrap_or(10),
-						combo.sma_period2.unwrap_or(10),
-						combo.sma_period3.unwrap_or(10),
-						combo.sma_period4.unwrap_or(15),
-						combo.roc_period1.unwrap_or(10),
-						combo.roc_period2.unwrap_or(15),
-						combo.roc_period3.unwrap_or(20),
-						combo.roc_period4.unwrap_or(30),
-						combo.signal_period.unwrap_or(9)
-					);
-				}
+                        test,
+                        cfg_idx,
+                        val,
+                        bits,
+                        row,
+                        col,
+                        idx,
+                        combo.sma_period1.unwrap_or(10),
+                        combo.sma_period2.unwrap_or(10),
+                        combo.sma_period3.unwrap_or(10),
+                        combo.sma_period4.unwrap_or(15),
+                        combo.roc_period1.unwrap_or(10),
+                        combo.roc_period2.unwrap_or(15),
+                        combo.roc_period3.unwrap_or(20),
+                        combo.roc_period4.unwrap_or(30),
+                        combo.signal_period.unwrap_or(9)
+                    );
+                }
 
-				if bits == 0x22222222_22222222 {
-					panic!(
-						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+                if bits == 0x22222222_22222222 {
+                    panic!(
+                        "[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
 						 at row {} col {} (flat index {}) in KST signals with params: \
 						 sma_periods=({},{},{},{}), roc_periods=({},{},{},{}), signal_period={}",
-						test, cfg_idx, val, bits, row, col, idx,
-						combo.sma_period1.unwrap_or(10),
-						combo.sma_period2.unwrap_or(10),
-						combo.sma_period3.unwrap_or(10),
-						combo.sma_period4.unwrap_or(15),
-						combo.roc_period1.unwrap_or(10),
-						combo.roc_period2.unwrap_or(15),
-						combo.roc_period3.unwrap_or(20),
-						combo.roc_period4.unwrap_or(30),
-						combo.signal_period.unwrap_or(9)
-					);
-				}
+                        test,
+                        cfg_idx,
+                        val,
+                        bits,
+                        row,
+                        col,
+                        idx,
+                        combo.sma_period1.unwrap_or(10),
+                        combo.sma_period2.unwrap_or(10),
+                        combo.sma_period3.unwrap_or(10),
+                        combo.sma_period4.unwrap_or(15),
+                        combo.roc_period1.unwrap_or(10),
+                        combo.roc_period2.unwrap_or(15),
+                        combo.roc_period3.unwrap_or(20),
+                        combo.roc_period4.unwrap_or(30),
+                        combo.signal_period.unwrap_or(9)
+                    );
+                }
 
-				if bits == 0x33333333_33333333 {
-					panic!(
-						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+                if bits == 0x33333333_33333333 {
+                    panic!(
+                        "[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
 						 at row {} col {} (flat index {}) in KST signals with params: \
 						 sma_periods=({},{},{},{}), roc_periods=({},{},{},{}), signal_period={}",
-						test, cfg_idx, val, bits, row, col, idx,
-						combo.sma_period1.unwrap_or(10),
-						combo.sma_period2.unwrap_or(10),
-						combo.sma_period3.unwrap_or(10),
-						combo.sma_period4.unwrap_or(15),
-						combo.roc_period1.unwrap_or(10),
-						combo.roc_period2.unwrap_or(15),
-						combo.roc_period3.unwrap_or(20),
-						combo.roc_period4.unwrap_or(30),
-						combo.signal_period.unwrap_or(9)
-					);
-				}
-			}
-		}
+                        test,
+                        cfg_idx,
+                        val,
+                        bits,
+                        row,
+                        col,
+                        idx,
+                        combo.sma_period1.unwrap_or(10),
+                        combo.sma_period2.unwrap_or(10),
+                        combo.sma_period3.unwrap_or(10),
+                        combo.sma_period4.unwrap_or(15),
+                        combo.roc_period1.unwrap_or(10),
+                        combo.roc_period2.unwrap_or(15),
+                        combo.roc_period3.unwrap_or(20),
+                        combo.roc_period4.unwrap_or(30),
+                        combo.signal_period.unwrap_or(9)
+                    );
+                }
+            }
+        }
 
-		Ok(())
-	}
+        Ok(())
+    }
 
-	#[cfg(not(debug_assertions))]
-	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-		Ok(())
-	}
+    #[cfg(not(debug_assertions))]
+    fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        Ok(())
+    }
 
-	gen_batch_tests!(check_batch_default_row);
-	gen_batch_tests!(check_batch_no_poison);
+    gen_batch_tests!(check_batch_default_row);
+    gen_batch_tests!(check_batch_no_poison);
 
-	#[test]
-	fn check_empty_input_error() {
-		// Test that empty input returns EmptyInputData, not AllValuesNaN
-		let empty_data: Vec<f64> = vec![];
-		let params = KstParams::default();
-		let input = KstInput::from_slice(&empty_data, params);
-		
-		match kst(&input) {
-			Err(KstError::EmptyInputData) => {},  // Expected
-			Err(e) => panic!("Expected EmptyInputData, got: {:?}", e),
-			Ok(_) => panic!("Empty input should have failed"),
-		}
-		
-		// Test that all NaN still returns AllValuesNaN
-		let nan_data = vec![f64::NAN; 10];
-		let input2 = KstInput::from_slice(&nan_data, params);
-		
-		match kst(&input2) {
-			Err(KstError::AllValuesNaN) => {},  // Expected
-			Err(e) => panic!("Expected AllValuesNaN, got: {:?}", e),
-			Ok(_) => panic!("All NaN should have failed"),
-		}
-	}
+    #[test]
+    fn check_empty_input_error() {
+        // Test that empty input returns EmptyInputData, not AllValuesNaN
+        let empty_data: Vec<f64> = vec![];
+        let params = KstParams::default();
+        let input = KstInput::from_slice(&empty_data, params);
+
+        match kst(&input) {
+            Err(KstError::EmptyInputData) => {} // Expected
+            Err(e) => panic!("Expected EmptyInputData, got: {:?}", e),
+            Ok(_) => panic!("Empty input should have failed"),
+        }
+
+        // Test that all NaN still returns AllValuesNaN
+        let nan_data = vec![f64::NAN; 10];
+        let input2 = KstInput::from_slice(&nan_data, params);
+
+        match kst(&input2) {
+            Err(KstError::AllValuesNaN) => {} // Expected
+            Err(e) => panic!("Expected AllValuesNaN, got: {:?}", e),
+            Ok(_) => panic!("All NaN should have failed"),
+        }
+    }
 }
 
 // =============================================================================
 // PYTHON BINDINGS
 // =============================================================================
 
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
 #[cfg(feature = "python")]
@@ -1997,11 +2472,9 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
-#[cfg(feature = "python")]
-use crate::utilities::kernel_validation::validate_kernel;
 
 #[cfg(feature = "python")]
-#[pyfunction(name="kst")]
+#[pyfunction(name = "kst")]
 #[pyo3(signature=(data,
     sma_period1=None, sma_period2=None, sma_period3=None, sma_period4=None,
     roc_period1=None, roc_period2=None, roc_period3=None, roc_period4=None,
@@ -2009,13 +2482,13 @@ use crate::utilities::kernel_validation::validate_kernel;
 pub fn kst_py<'py>(
     py: Python<'py>,
     data: numpy::PyReadonlyArray1<'py, f64>,
-    sma_period1: Option<usize>, 
-    sma_period2: Option<usize>, 
-    sma_period3: Option<usize>, 
+    sma_period1: Option<usize>,
+    sma_period2: Option<usize>,
+    sma_period3: Option<usize>,
     sma_period4: Option<usize>,
-    roc_period1: Option<usize>, 
-    roc_period2: Option<usize>, 
-    roc_period3: Option<usize>, 
+    roc_period1: Option<usize>,
+    roc_period2: Option<usize>,
+    roc_period3: Option<usize>,
     roc_period4: Option<usize>,
     signal_period: Option<usize>,
     kernel: Option<&str>,
@@ -2034,9 +2507,9 @@ pub fn kst_py<'py>(
     };
     let input = KstInput::from_slice(slice, prm);
     let kern = validate_kernel(kernel, false)?;
-    let (line, signal) = py.allow_threads(|| {
-        kst_with_kernel(&input, kern).map(|o| (o.line, o.signal))
-    }).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let (line, signal) = py
+        .allow_threads(|| kst_with_kernel(&input, kern).map(|o| (o.line, o.signal)))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((line.into_pyarray(py), signal.into_pyarray(py)))
 }
 
@@ -2072,8 +2545,8 @@ impl KstStreamPy {
             roc_period4,
             signal_period,
         };
-        let stream = KstStream::try_new(params)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let stream =
+            KstStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok(KstStreamPy { stream })
     }
 
@@ -2082,8 +2555,8 @@ impl KstStreamPy {
     }
 }
 
-#[cfg(feature="python")]
-#[pyfunction(name="kst_batch")]
+#[cfg(feature = "python")]
+#[pyfunction(name = "kst_batch")]
 #[pyo3(signature=(data,
     sma1_range, sma2_range, sma3_range, sma4_range,
     roc1_range, roc2_range, roc3_range, roc4_range,
@@ -2091,34 +2564,39 @@ impl KstStreamPy {
 pub fn kst_batch_py<'py>(
     py: Python<'py>,
     data: numpy::PyReadonlyArray1<'py, f64>,
-    sma1_range: (usize,usize,usize),
-    sma2_range: (usize,usize,usize),
-    sma3_range: (usize,usize,usize),
-    sma4_range: (usize,usize,usize),
-    roc1_range: (usize,usize,usize),
-    roc2_range: (usize,usize,usize),
-    roc3_range: (usize,usize,usize),
-    roc4_range: (usize,usize,usize),
-    sig_range:  (usize,usize,usize),
+    sma1_range: (usize, usize, usize),
+    sma2_range: (usize, usize, usize),
+    sma3_range: (usize, usize, usize),
+    sma4_range: (usize, usize, usize),
+    roc1_range: (usize, usize, usize),
+    roc2_range: (usize, usize, usize),
+    roc3_range: (usize, usize, usize),
+    roc4_range: (usize, usize, usize),
+    sig_range: (usize, usize, usize),
     kernel: Option<&str>,
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
     let slice = data.as_slice()?;
     let sweep = KstBatchRange {
-        sma_period1: sma1_range, sma_period2: sma2_range,
-        sma_period3: sma3_range, sma_period4: sma4_range,
-        roc_period1: roc1_range, roc_period2: roc2_range,
-        roc_period3: roc3_range, roc_period4: roc4_range,
+        sma_period1: sma1_range,
+        sma_period2: sma2_range,
+        sma_period3: sma3_range,
+        sma_period4: sma4_range,
+        roc_period1: roc1_range,
+        roc_period2: roc2_range,
+        roc_period3: roc3_range,
+        roc_period4: roc4_range,
         signal_period: sig_range,
     };
     let kern = validate_kernel(kernel, true)?;
     let combos;
-    let rows; let cols = slice.len();
+    let rows;
+    let cols = slice.len();
     let (line_arr, sig_arr) = {
         let tmp_combos = expand_grid(&sweep);
         rows = tmp_combos.len();
         combos = tmp_combos; // keep for metadata
-        let out_line = unsafe { PyArray1::<f64>::new(py, [rows*cols], false) };
-        let out_sig  = unsafe { PyArray1::<f64>::new(py, [rows*cols], false) };
+        let out_line = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+        let out_sig = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
         let lo = unsafe { out_line.as_slice_mut()? };
         let so = unsafe { out_sig.as_slice_mut()? };
         py.allow_threads(|| {
@@ -2128,28 +2606,92 @@ pub fn kst_batch_py<'py>(
             };
             let simd = match k {
                 Kernel::ScalarBatch => Kernel::Scalar,
-                Kernel::Avx2Batch => Kernel::Scalar,  // Use scalar if AVX2 not available
-                Kernel::Avx512Batch => Kernel::Scalar,  // Use scalar if AVX512 not available
+                Kernel::Avx2Batch => Kernel::Scalar, // Use scalar if AVX2 not available
+                Kernel::Avx512Batch => Kernel::Scalar, // Use scalar if AVX512 not available
                 _ => Kernel::Scalar,
             };
             kst_batch_inner_into(slice, &sweep, simd, true, lo, so)
-        }).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        })
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
         (out_line, out_sig)
     };
 
     let d = pyo3::types::PyDict::new(py);
-    d.set_item("line",   line_arr.reshape((rows, cols))?)?;
+    d.set_item("line", line_arr.reshape((rows, cols))?)?;
     d.set_item("signal", sig_arr.reshape((rows, cols))?)?;
     // metadata vectors per combo
-    d.set_item("sma1", combos.iter().map(|c| c.sma_period1.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
-    d.set_item("sma2", combos.iter().map(|c| c.sma_period2.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
-    d.set_item("sma3", combos.iter().map(|c| c.sma_period3.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
-    d.set_item("sma4", combos.iter().map(|c| c.sma_period4.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
-    d.set_item("roc1", combos.iter().map(|c| c.roc_period1.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
-    d.set_item("roc2", combos.iter().map(|c| c.roc_period2.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
-    d.set_item("roc3", combos.iter().map(|c| c.roc_period3.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
-    d.set_item("roc4", combos.iter().map(|c| c.roc_period4.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
-    d.set_item("sig",  combos.iter().map(|c| c.signal_period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+    d.set_item(
+        "sma1",
+        combos
+            .iter()
+            .map(|c| c.sma_period1.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    d.set_item(
+        "sma2",
+        combos
+            .iter()
+            .map(|c| c.sma_period2.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    d.set_item(
+        "sma3",
+        combos
+            .iter()
+            .map(|c| c.sma_period3.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    d.set_item(
+        "sma4",
+        combos
+            .iter()
+            .map(|c| c.sma_period4.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    d.set_item(
+        "roc1",
+        combos
+            .iter()
+            .map(|c| c.roc_period1.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    d.set_item(
+        "roc2",
+        combos
+            .iter()
+            .map(|c| c.roc_period2.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    d.set_item(
+        "roc3",
+        combos
+            .iter()
+            .map(|c| c.roc_period3.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    d.set_item(
+        "roc4",
+        combos
+            .iter()
+            .map(|c| c.roc_period4.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    d.set_item(
+        "sig",
+        combos
+            .iter()
+            .map(|c| c.signal_period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
     Ok(d)
 }
 
@@ -2164,7 +2706,7 @@ pub fn register_kst_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()>
 
 // WASM kst_into_slice has been removed - kst_into_slice is now in the main module
 
-#[cfg(feature="wasm")]
+#[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct KstJsResult {
     pub values: Vec<f64>, // [line..., signal...]
@@ -2172,68 +2714,100 @@ pub struct KstJsResult {
     pub cols: usize,      // len
 }
 
-#[cfg(feature="wasm")]
+#[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = "kst")]
-pub fn kst_js(data: &[f64],
-    sma1: usize, sma2: usize, sma3: usize, sma4: usize,
-    roc1: usize, roc2: usize, roc3: usize, roc4: usize,
-    sig: usize
+pub fn kst_js(
+    data: &[f64],
+    sma1: usize,
+    sma2: usize,
+    sma3: usize,
+    sma4: usize,
+    roc1: usize,
+    roc2: usize,
+    roc3: usize,
+    roc4: usize,
+    sig: usize,
 ) -> Result<JsValue, JsValue> {
     let prm = KstParams {
-        sma_period1: Some(sma1), sma_period2: Some(sma2),
-        sma_period3: Some(sma3), sma_period4: Some(sma4),
-        roc_period1: Some(roc1), roc_period2: Some(roc2),
-        roc_period3: Some(roc3), roc_period4: Some(roc4),
+        sma_period1: Some(sma1),
+        sma_period2: Some(sma2),
+        sma_period3: Some(sma3),
+        sma_period4: Some(sma4),
+        roc_period1: Some(roc1),
+        roc_period2: Some(roc2),
+        roc_period3: Some(roc3),
+        roc_period4: Some(roc4),
         signal_period: Some(sig),
     };
     let input = KstInput::from_slice(data, prm);
 
-    let mut line   = vec![0.0; data.len()];
+    let mut line = vec![0.0; data.len()];
     let mut signal = vec![0.0; data.len()];
-    kst_into_slice(&mut line, &mut signal, &input, detect_best_kernel()).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    kst_into_slice(&mut line, &mut signal, &input, detect_best_kernel())
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    let mut values = line; values.extend_from_slice(&signal);
-    let result = KstJsResult { values, rows: 2, cols: data.len() };
-    serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
+    let mut values = line;
+    values.extend_from_slice(&signal);
+    let result = KstJsResult {
+        values,
+        rows: 2,
+        cols: data.len(),
+    };
+    serde_wasm_bindgen::to_value(&result)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
 }
 
 // optional fast pointers API
-#[cfg(feature="wasm")]
+#[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn kst_into(
     in_ptr: *const f64,
     out_line_ptr: *mut f64,
     out_signal_ptr: *mut f64,
     len: usize,
-    sma1: usize, sma2: usize, sma3: usize, sma4: usize,
-    roc1: usize, roc2: usize, roc3: usize, roc4: usize,
-    sig: usize
+    sma1: usize,
+    sma2: usize,
+    sma3: usize,
+    sma4: usize,
+    roc1: usize,
+    roc2: usize,
+    roc3: usize,
+    roc4: usize,
+    sig: usize,
 ) -> Result<(), JsValue> {
     if in_ptr.is_null() || out_line_ptr.is_null() || out_signal_ptr.is_null() {
         return Err(JsValue::from_str("null pointer"));
     }
     unsafe {
         // detect aliasing (same or overlapping regions)
-        let in_beg = in_ptr as usize;          let in_end = in_beg + len*8;
-        let lo_beg = out_line_ptr as usize;    let lo_end = lo_beg + len*8;
-        let so_beg = out_signal_ptr as usize;  let so_end = so_beg + len*8;
-        let overlap = |a0:usize,a1:usize,b0:usize,b1:usize| a0 < b1 && b0 < a1;
+        let in_beg = in_ptr as usize;
+        let in_end = in_beg + len * 8;
+        let lo_beg = out_line_ptr as usize;
+        let lo_end = lo_beg + len * 8;
+        let so_beg = out_signal_ptr as usize;
+        let so_end = so_beg + len * 8;
+        let overlap = |a0: usize, a1: usize, b0: usize, b1: usize| a0 < b1 && b0 < a1;
 
         let data_slice = std::slice::from_raw_parts(in_ptr, len);
         let shadow; // optional owned copy if aliasing
-        let data = if overlap(in_beg,in_end,lo_beg,lo_end) || overlap(in_beg,in_end,so_beg,so_end) {
-            // alias-safe fallback
-            shadow = data_slice.to_vec();
-            &shadow[..]
-        } else {
-            data_slice
-        };
+        let data =
+            if overlap(in_beg, in_end, lo_beg, lo_end) || overlap(in_beg, in_end, so_beg, so_end) {
+                // alias-safe fallback
+                shadow = data_slice.to_vec();
+                &shadow[..]
+            } else {
+                data_slice
+            };
 
         let prm = KstParams {
-            sma_period1: Some(sma1), sma_period2: Some(sma2),
-            sma_period3: Some(sma3), sma_period4: Some(sma4),
-            roc_period1: Some(roc1), roc_period2: Some(roc2),
-            roc_period3: Some(roc3), roc_period4: Some(roc4),
+            sma_period1: Some(sma1),
+            sma_period2: Some(sma2),
+            sma_period3: Some(sma3),
+            sma_period4: Some(sma4),
+            roc_period1: Some(roc1),
+            roc_period2: Some(roc2),
+            roc_period3: Some(roc3),
+            roc_period4: Some(roc4),
             signal_period: Some(sig),
         };
         let input = KstInput::from_slice(data, prm);
@@ -2281,36 +2855,51 @@ pub struct KstBatchConfig {
     pub signal_period_range: (usize, usize, usize),
 }
 
-#[cfg(feature="wasm")]
+#[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct KstBatchJsOutput {
-    pub values: Vec<f64>,     // rows = combos*2
+    pub values: Vec<f64>, // rows = combos*2
     pub combos: Vec<KstParams>,
-    pub rows: usize,          // combos*2
+    pub rows: usize, // combos*2
     pub cols: usize,
 }
 
-#[cfg(feature="wasm")]
-#[wasm_bindgen(js_name="kst_batch")]
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = "kst_batch")]
 pub fn kst_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let sweep: KstBatchRange = serde_wasm_bindgen::from_value(config)
         .map_err(|e| JsValue::from_str(&format!("Invalid config: {e}")))?;
     let combos = expand_grid(&sweep);
-    let rows = combos.len(); let cols = data.len();
+    let rows = combos.len();
+    let cols = data.len();
 
     // allocate flat buffers rows*cols for each output and fill
-    let mut lines  = vec![0.0; rows*cols];
-    let mut sigs   = vec![0.0; rows*cols];
-    kst_batch_inner_into(data, &sweep, detect_best_kernel(), false, &mut lines, &mut sigs)
-        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let mut lines = vec![0.0; rows * cols];
+    let mut sigs = vec![0.0; rows * cols];
+    kst_batch_inner_into(
+        data,
+        &sweep,
+        detect_best_kernel(),
+        false,
+        &mut lines,
+        &mut sigs,
+    )
+    .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     // interleave by outputs -> concatenate [line rows..., signal rows...]
-    let mut values = lines; values.extend_from_slice(&sigs);
+    let mut values = lines;
+    values.extend_from_slice(&sigs);
 
     // Note: rows = combos*2 since KST has two outputs (line and signal)
     // This differs from ALMA which reports rows = combos with single output
-    let out = KstBatchJsOutput { values, combos, rows: rows*2, cols };
-    serde_wasm_bindgen::to_value(&out).map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
+    let out = KstBatchJsOutput {
+        values,
+        combos,
+        rows: rows * 2,
+        cols,
+    };
+    serde_wasm_bindgen::to_value(&out)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
 }
 
 /// Fast batch calculation into pre-allocated memory
@@ -2352,10 +2941,10 @@ pub fn kst_batch_into(
     if in_ptr.is_null() || line_out_ptr.is_null() || signal_out_ptr.is_null() {
         return Err(JsValue::from_str("null pointer passed to kst_batch_into"));
     }
-    
+
     unsafe {
         let data = std::slice::from_raw_parts(in_ptr, len);
-        
+
         let sweep = KstBatchRange {
             sma_period1: (sma_period1_start, sma_period1_end, sma_period1_step),
             sma_period2: (sma_period2_start, sma_period2_end, sma_period2_step),
@@ -2367,7 +2956,7 @@ pub fn kst_batch_into(
             roc_period4: (roc_period4_start, roc_period4_end, roc_period4_step),
             signal_period: (signal_period_start, signal_period_end, signal_period_step),
         };
-        
+
         // Calculate number of parameter combinations
         let count_range = |r: &(usize, usize, usize)| {
             if r.2 == 0 {
@@ -2376,23 +2965,24 @@ pub fn kst_batch_into(
                 ((r.1.saturating_sub(r.0)) / r.2) + 1
             }
         };
-        
-        let rows = count_range(&sweep.sma_period1).max(1) *
-                   count_range(&sweep.sma_period2).max(1) *
-                   count_range(&sweep.sma_period3).max(1) *
-                   count_range(&sweep.sma_period4).max(1) *
-                   count_range(&sweep.roc_period1).max(1) *
-                   count_range(&sweep.roc_period2).max(1) *
-                   count_range(&sweep.roc_period3).max(1) *
-                   count_range(&sweep.roc_period4).max(1) *
-                   count_range(&sweep.signal_period).max(1);
+
+        let rows = count_range(&sweep.sma_period1).max(1)
+            * count_range(&sweep.sma_period2).max(1)
+            * count_range(&sweep.sma_period3).max(1)
+            * count_range(&sweep.sma_period4).max(1)
+            * count_range(&sweep.roc_period1).max(1)
+            * count_range(&sweep.roc_period2).max(1)
+            * count_range(&sweep.roc_period3).max(1)
+            * count_range(&sweep.roc_period4).max(1)
+            * count_range(&sweep.signal_period).max(1);
         let cols = len;
-        
+
         let line_out = std::slice::from_raw_parts_mut(line_out_ptr, rows * cols);
         let signal_out = std::slice::from_raw_parts_mut(signal_out_ptr, rows * cols);
-        
-        kst_batch_inner_into(data, &sweep, Kernel::Auto, false, line_out, signal_out).map_err(|e| JsValue::from_str(&e.to_string()))?;
-        
+
+        kst_batch_inner_into(data, &sweep, Kernel::Auto, false, line_out, signal_out)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
         Ok(rows)
     }
 }

@@ -36,7 +36,8 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -58,7 +59,10 @@ impl<'a> AsRef<[f64]> for NamaInput<'a> {
 
 #[derive(Debug, Clone)]
 pub enum NamaData<'a> {
-    Candles { candles: &'a Candles, source: &'a str },
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
     Slice(&'a [f64]),
 }
 
@@ -89,7 +93,10 @@ impl<'a> NamaInput<'a> {
     #[inline]
     pub fn from_candles(c: &'a Candles, s: &'a str, p: NamaParams) -> Self {
         Self {
-            data: NamaData::Candles { candles: c, source: s },
+            data: NamaData::Candles {
+                candles: c,
+                source: s,
+            },
             params: p,
         }
     }
@@ -143,19 +150,25 @@ impl NamaBuilder {
 
     #[inline(always)]
     pub fn apply(self, c: &Candles) -> Result<NamaOutput, NamaError> {
-        let p = NamaParams { period: self.period };
+        let p = NamaParams {
+            period: self.period,
+        };
         let i = NamaInput::from_candles(c, "close", p);
         nama_with_kernel(&i, self.kernel)
     }
     #[inline(always)]
     pub fn apply_slice(self, d: &[f64]) -> Result<NamaOutput, NamaError> {
-        let p = NamaParams { period: self.period };
+        let p = NamaParams {
+            period: self.period,
+        };
         let i = NamaInput::from_slice(d, p);
         nama_with_kernel(&i, self.kernel)
     }
     #[inline(always)]
     pub fn into_stream(self) -> Result<NamaStream, NamaError> {
-        let p = NamaParams { period: self.period };
+        let p = NamaParams {
+            period: self.period,
+        };
         NamaStream::try_new(p)
     }
 }
@@ -164,13 +177,13 @@ impl NamaBuilder {
 pub enum NamaError {
     #[error("nama: Input data slice is empty.")]
     EmptyInputData,
-    
+
     #[error("nama: All values are NaN.")]
     AllValuesNaN,
-    
+
     #[error("nama: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
-    
+
     #[error("nama: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
 }
@@ -184,16 +197,31 @@ pub fn nama(input: &NamaInput) -> Result<NamaOutput, NamaError> {
 fn nama_prepare<'a>(
     input: &'a NamaInput,
     kernel: Kernel,
-) -> Result<(&'a [f64], usize, usize, Kernel, Option<(&'a [f64], &'a [f64], &'a [f64])>), NamaError> {
+) -> Result<
+    (
+        &'a [f64],
+        usize,
+        usize,
+        Kernel,
+        Option<(&'a [f64], &'a [f64], &'a [f64])>,
+    ),
+    NamaError,
+> {
     let data: &[f64] = input.as_ref();
     let len = data.len();
     if len == 0 {
         return Err(NamaError::EmptyInputData);
     }
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(NamaError::AllValuesNaN)?;
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(NamaError::AllValuesNaN)?;
     let period = input.get_period();
     if period == 0 || period > len {
-        return Err(NamaError::InvalidPeriod { period, data_len: len });
+        return Err(NamaError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
     }
     if len - first < period {
         return Err(NamaError::NotEnoughValidData {
@@ -207,7 +235,9 @@ fn nama_prepare<'a>(
     };
     // Extra OHLC for TR if input is Candles
     let ohlc = match &input.data {
-        NamaData::Candles { candles, .. } => Some((&candles.high[..], &candles.low[..], &candles.close[..])),
+        NamaData::Candles { candles, .. } => {
+            Some((&candles.high[..], &candles.low[..], &candles.close[..]))
+        }
         _ => None,
     };
     Ok((data, period, first, chosen, ohlc))
@@ -261,7 +291,9 @@ fn nama_compute_into(
 ) {
     let n = src.len();
     let i0 = first + period - 1;
-    if i0 >= n { return; } // NaN prefix already set by allocator
+    if i0 >= n {
+        return;
+    } // NaN prefix already set by allocator
 
     #[inline(always)]
     fn tr_at(k: usize, first: usize, ohlc: Option<(&[f64], &[f64], &[f64])>, src: &[f64]) -> f64 {
@@ -277,7 +309,11 @@ fn nama_compute_into(
                 }
             }
             None => {
-                if k == first { 0.0 } else { (src[k] - src[k - 1]).abs() }
+                if k == first {
+                    0.0
+                } else {
+                    (src[k] - src[k - 1]).abs()
+                }
             }
         }
     }
@@ -288,21 +324,33 @@ fn nama_compute_into(
     #[inline(always)]
     fn push_max(dq: &mut VecDeque<usize>, a: &[f64], j: usize) {
         while let Some(&k) = dq.back() {
-            if a[k] <= a[j] { dq.pop_back(); } else { break; }
+            if a[k] <= a[j] {
+                dq.pop_back();
+            } else {
+                break;
+            }
         }
         dq.push_back(j);
     }
     #[inline(always)]
     fn push_min(dq: &mut VecDeque<usize>, a: &[f64], j: usize) {
         while let Some(&k) = dq.back() {
-            if a[k] >= a[j] { dq.pop_back(); } else { break; }
+            if a[k] >= a[j] {
+                dq.pop_back();
+            } else {
+                break;
+            }
         }
         dq.push_back(j);
     }
     #[inline(always)]
     fn pop_old(dq: &mut VecDeque<usize>, win_start: usize) {
         while let Some(&k) = dq.front() {
-            if k < win_start { dq.pop_front(); } else { break; }
+            if k < win_start {
+                dq.pop_front();
+            } else {
+                break;
+            }
         }
     }
 
@@ -323,7 +371,11 @@ fn nama_compute_into(
         let hi = src[*dq_max.front().unwrap()];
         let lo = src[*dq_min.front().unwrap()];
         let result = hi - lo;
-        let alpha = if eff_sum != 0.0 { result / eff_sum } else { 0.0 };
+        let alpha = if eff_sum != 0.0 {
+            result / eff_sum
+        } else {
+            0.0
+        };
         out[i0] = alpha * src[i0];
     }
 
@@ -345,7 +397,11 @@ fn nama_compute_into(
         let hi = src[*dq_max.front().unwrap()];
         let lo = src[*dq_min.front().unwrap()];
         let result = hi - lo;
-        let alpha = if eff_sum != 0.0 { result / eff_sum } else { 0.0 };
+        let alpha = if eff_sum != 0.0 {
+            result / eff_sum
+        } else {
+            0.0
+        };
 
         out[i] = alpha * src[j] + (1.0 - alpha) * out[i - 1];
         i += 1;
@@ -356,7 +412,7 @@ pub fn nama_with_kernel(input: &NamaInput, kernel: Kernel) -> Result<NamaOutput,
     let (src, period, first, chosen, ohlc) = nama_prepare(input, kernel)?;
     // ALMA-compatible NaN prefix:
     let mut out = alloc_with_nan_prefix(src.len(), first + period - 1);
-    
+
     // Select kernel implementation
     match chosen {
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -365,7 +421,7 @@ pub fn nama_with_kernel(input: &NamaInput, kernel: Kernel) -> Result<NamaOutput,
         Kernel::Avx2 => nama_avx2(src, period, first, ohlc, &mut out),
         _ => nama_scalar(src, period, first, ohlc, &mut out),
     }
-    
+
     Ok(NamaOutput { values: out })
 }
 
@@ -373,11 +429,16 @@ pub fn nama_with_kernel(input: &NamaInput, kernel: Kernel) -> Result<NamaOutput,
 pub fn nama_into_slice(dst: &mut [f64], input: &NamaInput, k: Kernel) -> Result<(), NamaError> {
     let (src, period, first, chosen, ohlc) = nama_prepare(input, k)?;
     if dst.len() != src.len() {
-        return Err(NamaError::InvalidPeriod { period: dst.len(), data_len: src.len() });
+        return Err(NamaError::InvalidPeriod {
+            period: dst.len(),
+            data_len: src.len(),
+        });
     }
     let warmup_end = (first + period - 1).min(dst.len());
-    for v in &mut dst[..warmup_end] { *v = f64::NAN; }
-    
+    for v in &mut dst[..warmup_end] {
+        *v = f64::NAN;
+    }
+
     // Select kernel implementation
     match chosen {
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -386,7 +447,7 @@ pub fn nama_into_slice(dst: &mut [f64], input: &NamaInput, k: Kernel) -> Result<
         Kernel::Avx2 => nama_avx2(src, period, first, ohlc, dst),
         _ => nama_scalar(src, period, first, ohlc, dst),
     }
-    
+
     Ok(())
 }
 
@@ -409,7 +470,10 @@ impl NamaStream {
     pub fn try_new(params: NamaParams) -> Result<Self, NamaError> {
         let p = params.period.unwrap_or(30);
         if p == 0 {
-            return Err(NamaError::InvalidPeriod { period: 0, data_len: 0 });
+            return Err(NamaError::InvalidPeriod {
+                period: 0,
+                data_len: 0,
+            });
         }
         Ok(Self {
             period: p,
@@ -481,7 +545,13 @@ impl NamaStream {
     }
 
     // Full OHLC streaming TR
-    pub fn update_ohlc(&mut self, src: f64, high: f64, low: f64, close_prev: Option<f64>) -> Option<f64> {
+    pub fn update_ohlc(
+        &mut self,
+        src: f64,
+        high: f64,
+        low: f64,
+        close_prev: Option<f64>,
+    ) -> Option<f64> {
         let tr = match self.has_last_close || close_prev.is_some() {
             false => high - low,
             true => {
@@ -545,7 +615,9 @@ pub struct NamaBatchRange {
 
 impl Default for NamaBatchRange {
     fn default() -> Self {
-        Self { period: (30, 240, 1) }
+        Self {
+            period: (30, 240, 1),
+        }
     }
 }
 
@@ -581,7 +653,9 @@ impl NamaBatchBuilder {
         NamaBatchBuilder::new().kernel(k).apply_slice(data)
     }
     pub fn with_default_candles(c: &Candles) -> Result<NamaBatchOutput, NamaError> {
-        NamaBatchBuilder::new().kernel(Kernel::Auto).apply_candles(c, "close")
+        NamaBatchBuilder::new()
+            .kernel(Kernel::Auto)
+            .apply_candles(c, "close")
     }
 }
 
@@ -595,10 +669,13 @@ pub struct NamaBatchOutput {
 
 impl NamaBatchOutput {
     pub fn row_for_params(&self, p: &NamaParams) -> Option<usize> {
-        self.combos.iter().position(|c| c.period.unwrap_or(30) == p.period.unwrap_or(30))
+        self.combos
+            .iter()
+            .position(|c| c.period.unwrap_or(30) == p.period.unwrap_or(30))
     }
     pub fn values_for(&self, p: &NamaParams) -> Option<&[f64]> {
-        self.row_for_params(p).map(|row| &self.values[row * self.cols..(row + 1) * self.cols])
+        self.row_for_params(p)
+            .map(|row| &self.values[row * self.cols..(row + 1) * self.cols])
     }
 }
 
@@ -610,10 +687,16 @@ fn expand_grid(r: &NamaBatchRange) -> Vec<NamaParams> {
     } else {
         (s..=e).step_by(t).collect()
     };
-    v.into_iter().map(|p| NamaParams { period: Some(p) }).collect()
+    v.into_iter()
+        .map(|p| NamaParams { period: Some(p) })
+        .collect()
 }
 
-pub fn nama_batch_with_kernel(data: &[f64], sweep: &NamaBatchRange, k: Kernel) -> Result<NamaBatchOutput, NamaError> {
+pub fn nama_batch_with_kernel(
+    data: &[f64],
+    sweep: &NamaBatchRange,
+    k: Kernel,
+) -> Result<NamaBatchOutput, NamaError> {
     let resolved = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other => other,
@@ -635,30 +718,44 @@ fn nama_batch_inner(
 ) -> Result<NamaBatchOutput, NamaError> {
     let combos = expand_grid(sweep);
     let cols = data.len();
-    if cols == 0 { return Err(NamaError::EmptyInputData); }
+    if cols == 0 {
+        return Err(NamaError::EmptyInputData);
+    }
     let rows = combos.len();
 
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(NamaError::AllValuesNaN)?;
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(NamaError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
     if cols - first < max_p {
-        return Err(NamaError::NotEnoughValidData { needed: max_p, valid: cols - first });
+        return Err(NamaError::NotEnoughValidData {
+            needed: max_p,
+            valid: cols - first,
+        });
     }
 
     let mut buf_mu = make_uninit_matrix(rows, cols);
-    let warms: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
+    let warms: Vec<usize> = combos
+        .iter()
+        .map(|c| first + c.period.unwrap() - 1)
+        .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warms);
 
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
-    let out: &mut [f64] = unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
+    let out: &mut [f64] =
+        unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
     // fill rows; parallelize when not wasm
     #[cfg(not(target_arch = "wasm32"))]
     {
         use rayon::prelude::*;
-        out.par_chunks_mut(cols).zip(combos.par_iter()).try_for_each(|(row_slice, prm)| {
-            let inp = NamaInput::from_slice(data, *prm);
-            nama_into_slice(row_slice, &inp, kern)
-        })?;
+        out.par_chunks_mut(cols)
+            .zip(combos.par_iter())
+            .try_for_each(|(row_slice, prm)| {
+                let inp = NamaInput::from_slice(data, *prm);
+                nama_into_slice(row_slice, &inp, kern)
+            })?;
     }
     #[cfg(target_arch = "wasm32")]
     {
@@ -668,8 +765,19 @@ fn nama_batch_inner(
         }
     }
 
-    let values = unsafe { Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, guard.len(), guard.capacity()) };
-    Ok(NamaBatchOutput { values, combos, rows, cols })
+    let values = unsafe {
+        Vec::from_raw_parts(
+            guard.as_mut_ptr() as *mut f64,
+            guard.len(),
+            guard.capacity(),
+        )
+    };
+    Ok(NamaBatchOutput {
+        values,
+        combos,
+        rows,
+        cols,
+    })
 }
 
 // ==================== PYTHON BINDINGS ====================
@@ -685,7 +793,9 @@ pub fn nama_py<'py>(
     use numpy::PyArray1;
     let slice_in = data.as_slice()?;
     let kern = validate_kernel(kernel, false)?;
-    let params = NamaParams { period: Some(period) };
+    let params = NamaParams {
+        period: Some(period),
+    };
     let input = NamaInput::from_slice(slice_in, params);
 
     let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
@@ -707,8 +817,10 @@ pub struct NamaStreamPy {
 impl NamaStreamPy {
     #[new]
     fn new(period: usize) -> PyResult<Self> {
-        let s = NamaStream::try_new(NamaParams { period: Some(period) })
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let s = NamaStream::try_new(NamaParams {
+            period: Some(period),
+        })
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok(NamaStreamPy { stream: s })
     }
     /// Single-series update
@@ -716,7 +828,13 @@ impl NamaStreamPy {
         self.stream.update_source(value)
     }
     /// OHLC update
-    fn update_ohlc(&mut self, src: f64, high: f64, low: f64, prev_close: Option<f64>) -> Option<f64> {
+    fn update_ohlc(
+        &mut self,
+        src: f64,
+        high: f64,
+        low: f64,
+        prev_close: Option<f64>,
+    ) -> Option<f64> {
         self.stream.update_ohlc(src, high, low, prev_close)
     }
 }
@@ -732,7 +850,9 @@ pub fn nama_batch_py<'py>(
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
     use numpy::PyArray1;
     let slice_in = data.as_slice()?;
-    let sweep = NamaBatchRange { period: period_range };
+    let sweep = NamaBatchRange {
+        period: period_range,
+    };
     let combos = expand_grid(&sweep);
     let rows = combos.len();
     let cols = slice_in.len();
@@ -748,11 +868,19 @@ pub fn nama_batch_py<'py>(
             nama_into_slice(&mut out_flat[start..start + cols], &input, kern)?;
         }
         Ok(())
-    }).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
-    dict.set_item("periods", combos.iter().map(|p| p.period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+    dict.set_item(
+        "periods",
+        combos
+            .iter()
+            .map(|p| p.period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
     Ok(dict)
 }
 
@@ -767,10 +895,13 @@ pub fn nama_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     if period == 0 || period > data.len() {
         return Err(JsValue::from_str("Invalid period"));
     }
-    let params = NamaParams { period: Some(period) };
+    let params = NamaParams {
+        period: Some(period),
+    };
     let input = NamaInput::from_slice(data, params);
     let mut output = vec![0.0; data.len()];
-    nama_into_slice(&mut output, &input, detect_best_kernel()).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    nama_into_slice(&mut output, &input, detect_best_kernel())
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
     Ok(output)
 }
 
@@ -794,7 +925,9 @@ pub struct NamaBatchJsOutput {
 pub fn nama_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let cfg: NamaBatchConfig = serde_wasm_bindgen::from_value(config)
         .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
-    let sweep = NamaBatchRange { period: cfg.period_range };
+    let sweep = NamaBatchRange {
+        period: cfg.period_range,
+    };
     let output = nama_batch_with_kernel(data, &sweep, detect_best_kernel())
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
     let js = NamaBatchJsOutput {
@@ -803,7 +936,8 @@ pub fn nama_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, J
         rows: output.rows,
         cols: output.cols,
     };
-    serde_wasm_bindgen::to_value(&js).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+    serde_wasm_bindgen::to_value(&js)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 #[cfg(feature = "wasm")]
@@ -825,7 +959,12 @@ pub fn nama_free(ptr: *mut f64, len: usize) {
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
-pub fn nama_into(in_ptr: *const f64, out_ptr: *mut f64, len: usize, period: usize) -> Result<(), JsValue> {
+pub fn nama_into(
+    in_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    period: usize,
+) -> Result<(), JsValue> {
     if in_ptr.is_null() || out_ptr.is_null() {
         return Err(JsValue::from_str("null pointer passed to nama_into"));
     }
@@ -834,15 +973,19 @@ pub fn nama_into(in_ptr: *const f64, out_ptr: *mut f64, len: usize, period: usiz
     }
     unsafe {
         let data = std::slice::from_raw_parts(in_ptr, len);
-        let params = NamaParams { period: Some(period) };
+        let params = NamaParams {
+            period: Some(period),
+        };
         let input = NamaInput::from_slice(data, params);
         if in_ptr == out_ptr {
             let mut tmp = vec![0.0; len];
-            nama_into_slice(&mut tmp, &input, detect_best_kernel()).map_err(|e| JsValue::from_str(&e.to_string()))?;
+            nama_into_slice(&mut tmp, &input, detect_best_kernel())
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
             std::slice::from_raw_parts_mut(out_ptr, len).copy_from_slice(&tmp);
         } else {
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
-            nama_into_slice(out, &input, detect_best_kernel()).map_err(|e| JsValue::from_str(&e.to_string()))?;
+            nama_into_slice(out, &input, detect_best_kernel())
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
         }
         Ok(())
     }
@@ -863,7 +1006,9 @@ pub fn nama_batch_into(
     }
     unsafe {
         let data = std::slice::from_raw_parts(in_ptr, len);
-        let sweep = NamaBatchRange { period: (period_start, period_end, period_step) };
+        let sweep = NamaBatchRange {
+            period: (period_start, period_end, period_step),
+        };
         let combos = expand_grid(&sweep);
         let rows = combos.len();
         let cols = len;
@@ -945,23 +1090,23 @@ mod tests {
         // Use CSV data like ALMA tests
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let params = NamaParams { period: Some(30) };
         let input = NamaInput::from_candles(&candles, "close", params);
         let result = nama_with_kernel(&input, kernel)?;
-        
+
         // User's reference values (note: shifted by 1 position from our calculation)
         // These are the values you provided:
         // 59,309.14340744, 59,304.88975909, 59,283.51109653, 59,243.52850894, 59,228.86200178
         // Our calculation gives:
         let expected_last_five = [
-            59304.88975909,  // matches your 2nd value
-            59283.51109653,  // matches your 3rd value
-            59243.52850894,  // matches your 4th value
-            59228.86200178,  // matches your 5th value
-            59137.33546742,  // our additional value
+            59304.88975909, // matches your 2nd value
+            59283.51109653, // matches your 3rd value
+            59243.52850894, // matches your 4th value
+            59228.86200178, // matches your 5th value
+            59137.33546742, // our additional value
         ];
-        
+
         let start = result.values.len().saturating_sub(5);
         for (i, &val) in result.values[start..].iter().enumerate() {
             let diff = (val - expected_last_five[i]).abs();
@@ -977,12 +1122,12 @@ mod tests {
         }
         Ok(())
     }
-    
+
     fn check_nama_default_candles(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let input = NamaInput::with_default_candles(&candles);
         match input.data {
             NamaData::Candles { source, .. } => assert_eq!(source, "close"),
@@ -990,7 +1135,7 @@ mod tests {
         }
         let output = nama_with_kernel(&input, kernel)?;
         assert_eq!(output.values.len(), candles.close.len());
-        
+
         // Verify last 5 values match expected
         let expected_last_five = [
             59304.88975909,
@@ -999,7 +1144,7 @@ mod tests {
             59228.86200178,
             59137.33546742,
         ];
-        
+
         let start = output.values.len().saturating_sub(5);
         for (i, &val) in output.values[start..].iter().enumerate() {
             let diff = (val - expected_last_five[i]).abs();
@@ -1012,31 +1157,45 @@ mod tests {
                 expected_last_five[i]
             );
         }
-        
+
         Ok(())
     }
-    
+
     fn check_nama_zero_period(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let input_data = [10.0, 20.0, 30.0];
         let params = NamaParams { period: Some(0) };
         let input = NamaInput::from_slice(&input_data, params);
         let res = nama_with_kernel(&input, kernel);
-        assert!(res.is_err(), "[{}] NAMA should fail with zero period", test_name);
+        assert!(
+            res.is_err(),
+            "[{}] NAMA should fail with zero period",
+            test_name
+        );
         Ok(())
     }
-    
-    fn check_nama_period_exceeds_length(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+
+    fn check_nama_period_exceeds_length(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let data_small = [10.0, 20.0, 30.0];
         let params = NamaParams { period: Some(10) };
         let input = NamaInput::from_slice(&data_small, params);
         let res = nama_with_kernel(&input, kernel);
-        assert!(res.is_err(), "[{}] NAMA should fail when period exceeds data length", test_name);
+        assert!(
+            res.is_err(),
+            "[{}] NAMA should fail when period exceeds data length",
+            test_name
+        );
         Ok(())
     }
-    
-    fn check_nama_very_small_dataset(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+
+    fn check_nama_very_small_dataset(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let data = [42.0];
         let params = NamaParams { period: Some(1) };
@@ -1045,7 +1204,7 @@ mod tests {
         assert_eq!(result.values.len(), 1);
         Ok(())
     }
-    
+
     fn check_nama_nan_handling(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let data_nan = vec![f64::NAN, f64::NAN, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0];
@@ -1057,7 +1216,7 @@ mod tests {
         assert!(result.values[1].is_nan());
         Ok(())
     }
-    
+
     fn check_nama_empty_input(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let data: [f64; 0] = [];
@@ -1067,7 +1226,7 @@ mod tests {
         assert!(result.is_err());
         Ok(())
     }
-    
+
     fn check_nama_invalid_period(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
@@ -1077,7 +1236,7 @@ mod tests {
         assert!(result.is_err());
         Ok(())
     }
-    
+
     fn check_nama_reinput(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let data = vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0];
@@ -1089,7 +1248,7 @@ mod tests {
         assert_eq!(result2.values.len(), data.len());
         Ok(())
     }
-    
+
     fn check_nama_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let data = vec![1.0; 50];
@@ -1099,7 +1258,7 @@ mod tests {
         assert_eq!(result.values.len(), 50);
         Ok(())
     }
-    
+
     fn check_nama_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let mut data = vec![100.0; 50];
@@ -1115,19 +1274,19 @@ mod tests {
     fn check_nama_streaming(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let data = vec![
-            100.0, 102.0, 101.0, 103.0, 105.0, 104.0, 106.0, 108.0,
-            107.0, 109.0, 111.0, 110.0, 112.0, 114.0, 113.0, 115.0,
+            100.0, 102.0, 101.0, 103.0, 105.0, 104.0, 106.0, 108.0, 107.0, 109.0, 111.0, 110.0,
+            112.0, 114.0, 113.0, 115.0,
         ];
-        
+
         // Batch calculation
         let params = NamaParams { period: Some(5) };
         let input = NamaInput::from_slice(&data, params);
         let batch_result = nama_with_kernel(&input, kernel)?;
-        
+
         // Streaming calculation
         let mut stream = NamaStream::try_new(params)?;
         let mut stream_values = Vec::new();
-        
+
         for &value in &data {
             if let Some(result) = stream.update_source(value) {
                 stream_values.push(result);
@@ -1135,7 +1294,7 @@ mod tests {
                 stream_values.push(f64::NAN);
             }
         }
-        
+
         // Compare results (streaming should match batch after warmup)
         let warmup = 4; // first + period - 1 = 0 + 5 - 1 = 4
         for i in warmup..data.len() {
@@ -1145,7 +1304,10 @@ mod tests {
                 assert!(
                     (batch_val - stream_val).abs() < 1e-10,
                     "[{}] Mismatch at {}: batch={}, stream={}",
-                    test_name, i, batch_val, stream_val
+                    test_name,
+                    i,
+                    batch_val,
+                    stream_val
                 );
             }
         }
@@ -1156,7 +1318,7 @@ mod tests {
     fn check_nama_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         use proptest::prelude::*;
-        
+
         proptest!(|(data: Vec<f64>, period in 1..20usize)| {
             if data.len() > period {
                 let params = NamaParams { period: Some(period) };
@@ -1188,25 +1350,31 @@ mod tests {
         skip_if_unsupported!(kernel, test_name);
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
-        
+
         let output = NamaBatchBuilder::new()
             .kernel(kernel)
             .period_range(10, 30, 5)
             .apply_candles(&c, "close")?;
-        
+
         assert_eq!(output.rows, 5); // (30-10)/5 + 1 = 5
         assert_eq!(output.cols, c.close.len());
-        
+
         // Verify each row has proper warmup
         for (i, combo) in output.combos.iter().enumerate() {
             let period = combo.period.unwrap();
             let row_start = i * output.cols;
             let row = &output.values[row_start..row_start + output.cols];
-            
+
             // Check warmup period
             let warmup = period - 1; // first=0, so warmup = 0 + period - 1
             for j in 0..warmup {
-                assert!(row[j].is_nan(), "[{}] Row {} should have NaN at index {}", test_name, i, j);
+                assert!(
+                    row[j].is_nan(),
+                    "[{}] Row {} should have NaN at index {}",
+                    test_name,
+                    i,
+                    j
+                );
             }
         }
         Ok(())
@@ -1221,13 +1389,27 @@ mod tests {
                 .kernel(kernel)
                 .period_range(10, 20, 5)
                 .apply_slice(&data)?;
-            
+
             for (i, &v) in output.values.iter().enumerate() {
-                if v.is_nan() { continue; }
+                if v.is_nan() {
+                    continue;
+                }
                 let bits = v.to_bits();
-                assert_ne!(bits, 0x11111111_11111111, "[{}] alloc poison at {}", test_name, i);
-                assert_ne!(bits, 0x22222222_22222222, "[{}] matrix poison at {}", test_name, i);
-                assert_ne!(bits, 0x33333333_33333333, "[{}] uninit poison at {}", test_name, i);
+                assert_ne!(
+                    bits, 0x11111111_11111111,
+                    "[{}] alloc poison at {}",
+                    test_name, i
+                );
+                assert_ne!(
+                    bits, 0x22222222_22222222,
+                    "[{}] matrix poison at {}",
+                    test_name, i
+                );
+                assert_ne!(
+                    bits, 0x33333333_33333333,
+                    "[{}] uninit poison at {}",
+                    test_name, i
+                );
             }
         }
         Ok(())
@@ -1286,16 +1468,22 @@ mod tests {
         // single
         let out = nama_with_kernel(&NamaInput::with_default_candles(&c), Kernel::Scalar)?.values;
         for (i, &v) in out.iter().enumerate() {
-            if v.is_nan() { continue; }
+            if v.is_nan() {
+                continue;
+            }
             let b = v.to_bits();
             assert_ne!(b, 0x11111111_11111111, "alloc poison at {i}");
             assert_ne!(b, 0x22222222_22222222, "matrix poison at {i}");
             assert_ne!(b, 0x33333333_33333333, "uninit poison at {i}");
         }
         // batch
-        let b = NamaBatchBuilder::new().period_range(5, 10, 1).apply_candles(&c, "close")?;
+        let b = NamaBatchBuilder::new()
+            .period_range(5, 10, 1)
+            .apply_candles(&c, "close")?;
         for (i, &v) in b.values.iter().enumerate() {
-            if v.is_nan() { continue; }
+            if v.is_nan() {
+                continue;
+            }
             let bts = v.to_bits();
             assert_ne!(bts, 0x11111111_11111111, "alloc poison at flat {i}");
             assert_ne!(bts, 0x22222222_22222222, "matrix poison at flat {i}");

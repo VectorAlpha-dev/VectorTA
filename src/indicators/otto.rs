@@ -76,7 +76,10 @@ impl<'a> AsRef<[f64]> for OttoInput<'a> {
 
 #[derive(Debug, Clone)]
 pub enum OttoData<'a> {
-    Candles { candles: &'a Candles, source: &'a str },
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
     Slice(&'a [f64]),
 }
 
@@ -120,11 +123,14 @@ impl<'a> OttoInput<'a> {
     #[inline]
     pub fn from_candles(c: &'a Candles, s: &'a str, p: OttoParams) -> Self {
         Self {
-            data: OttoData::Candles { candles: c, source: s },
+            data: OttoData::Candles {
+                candles: c,
+                source: s,
+            },
             params: p,
         }
     }
-    
+
     #[inline]
     pub fn from_slice(sl: &'a [f64], p: OttoParams) -> Self {
         Self {
@@ -132,37 +138,37 @@ impl<'a> OttoInput<'a> {
             params: p,
         }
     }
-    
+
     #[inline]
     pub fn with_default_candles(c: &'a Candles) -> Self {
         Self::from_candles(c, "close", OttoParams::default())
     }
-    
+
     #[inline]
     pub fn get_ott_period(&self) -> usize {
         self.params.ott_period.unwrap_or(2)
     }
-    
+
     #[inline]
     pub fn get_ott_percent(&self) -> f64 {
         self.params.ott_percent.unwrap_or(0.6)
     }
-    
+
     #[inline]
     pub fn get_fast_vidya_length(&self) -> usize {
         self.params.fast_vidya_length.unwrap_or(10)
     }
-    
+
     #[inline]
     pub fn get_slow_vidya_length(&self) -> usize {
         self.params.slow_vidya_length.unwrap_or(25)
     }
-    
+
     #[inline]
     pub fn get_correcting_constant(&self) -> f64 {
         self.params.correcting_constant.unwrap_or(100000.0)
     }
-    
+
     #[inline]
     pub fn get_ma_type(&self) -> &str {
         self.params.ma_type.as_deref().unwrap_or("VAR")
@@ -219,49 +225,49 @@ impl OttoBuilder {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     #[inline]
     pub fn ott_period(mut self, p: usize) -> Self {
         self.ott_period = Some(p);
         self
     }
-    
+
     #[inline]
     pub fn ott_percent(mut self, p: f64) -> Self {
         self.ott_percent = Some(p);
         self
     }
-    
+
     #[inline]
     pub fn fast_vidya_length(mut self, l: usize) -> Self {
         self.fast_vidya_length = Some(l);
         self
     }
-    
+
     #[inline]
     pub fn slow_vidya_length(mut self, l: usize) -> Self {
         self.slow_vidya_length = Some(l);
         self
     }
-    
+
     #[inline]
     pub fn correcting_constant(mut self, c: f64) -> Self {
         self.correcting_constant = Some(c);
         self
     }
-    
+
     #[inline]
     pub fn ma_type(mut self, m: &'static str) -> Self {
         self.ma_type = Some(m);
         self
     }
-    
+
     #[inline]
     pub fn kernel(mut self, k: Kernel) -> Self {
         self.kernel = k;
         self
     }
-    
+
     #[inline]
     pub fn apply(self, c: &Candles) -> Result<OttoOutput, OttoError> {
         let params = OttoParams {
@@ -275,7 +281,7 @@ impl OttoBuilder {
         let input = OttoInput::from_candles(c, "close", params);
         otto_with_kernel(&input, self.kernel)
     }
-    
+
     #[inline]
     pub fn apply_slice(self, data: &[f64]) -> Result<OttoOutput, OttoError> {
         let params = OttoParams {
@@ -289,7 +295,7 @@ impl OttoBuilder {
         let input = OttoInput::from_slice(data, params);
         otto_with_kernel(&input, self.kernel)
     }
-    
+
     #[inline]
     pub fn into_stream(self) -> Result<OttoStream, OttoError> {
         let params = OttoParams {
@@ -323,16 +329,16 @@ impl OttoStream {
         let ott_period = params.ott_period.unwrap_or(2);
         let slow_vidya_length = params.slow_vidya_length.unwrap_or(25);
         let fast_vidya_length = params.fast_vidya_length.unwrap_or(10);
-        
+
         if ott_period == 0 {
             return Err(OttoError::InvalidPeriod {
                 period: ott_period,
                 data_len: 0,
             });
         }
-        
+
         let required_capacity = slow_vidya_length * fast_vidya_length + 10;
-        
+
         Ok(Self {
             ott_period,
             ott_percent: params.ott_percent.unwrap_or(0.6),
@@ -344,22 +350,22 @@ impl OttoStream {
             filled: false,
         })
     }
-    
+
     pub fn update(&mut self, value: f64) -> Option<(f64, f64)> {
         self.buffer.push(value);
-        
+
         let required_len = self.slow_vidya_length * self.fast_vidya_length + 10;
-        
+
         if !self.filled && self.buffer.len() >= required_len {
             self.filled = true;
         }
-        
+
         if self.filled {
             // Keep buffer at required size
             if self.buffer.len() > required_len {
                 self.buffer.remove(0);
             }
-            
+
             let params = OttoParams {
                 ott_period: Some(self.ott_period),
                 ott_percent: Some(self.ott_percent),
@@ -368,9 +374,9 @@ impl OttoStream {
                 correcting_constant: Some(self.correcting_constant),
                 ma_type: Some(self.ma_type.clone()),
             };
-            
+
             let input = OttoInput::from_slice(&self.buffer, params);
-            
+
             match otto(&input) {
                 Ok(output) => {
                     let last_idx = output.hott.len() - 1;
@@ -382,7 +388,7 @@ impl OttoStream {
             None
         }
     }
-    
+
     pub fn reset(&mut self) {
         self.buffer.clear();
         self.filled = false;
@@ -392,15 +398,15 @@ impl OttoStream {
 // Custom CMO calculation using sum (matching Pine's math.sum)
 fn cmo_sum_based(data: &[f64], period: usize) -> Vec<f64> {
     let mut output = vec![f64::NAN; data.len()];
-    
+
     if data.len() < period + 1 {
         return output;
     }
-    
+
     for i in period..data.len() {
         let mut sum_up = 0.0;
         let mut sum_down = 0.0;
-        
+
         // Calculate sum of up and down moves over the period
         for j in 1..=period {
             let idx = i - period + j;
@@ -413,7 +419,7 @@ fn cmo_sum_based(data: &[f64], period: usize) -> Vec<f64> {
                 }
             }
         }
-        
+
         let sum_total = sum_up + sum_down;
         if sum_total != 0.0 {
             output[i] = (sum_up - sum_down) / sum_total;
@@ -421,7 +427,7 @@ fn cmo_sum_based(data: &[f64], period: usize) -> Vec<f64> {
             output[i] = 0.0;
         }
     }
-    
+
     output
 }
 
@@ -430,28 +436,32 @@ fn vidya(data: &[f64], period: usize) -> Result<Vec<f64>, OttoError> {
     if data.is_empty() {
         return Err(OttoError::EmptyInputData);
     }
-    
+
     if period == 0 || period > data.len() {
         return Err(OttoError::InvalidPeriod {
             period,
             data_len: data.len(),
         });
     }
-    
+
     let alpha = 2.0 / (period as f64 + 1.0);
     let mut output = vec![f64::NAN; data.len()]; // Pine starts from beginning
-    
+
     // Calculate CMO using sum-based approach (matching Pine)
     let cmo_values = cmo_sum_based(data, 9);
-    
+
     // Pine-style initialization: start with 0.0 and run from index 1
     let mut var_prev = 0.0;
-    
+
     // Process all data points from the beginning (Pine's nz() treats NaN as 0)
     for i in 0..data.len() {
         let current_value = if data[i].is_nan() { 0.0 } else { data[i] };
-        let current_cmo = if cmo_values[i].is_nan() { 0.0 } else { cmo_values[i] };
-        
+        let current_cmo = if cmo_values[i].is_nan() {
+            0.0
+        } else {
+            cmo_values[i]
+        };
+
         if i == 0 {
             // First value: Pine would use nz(VAR[1]) = 0 from initialization
             let abs_cmo = current_cmo.abs();
@@ -465,7 +475,7 @@ fn vidya(data: &[f64], period: usize) -> Result<Vec<f64>, OttoError> {
             output[i] = var_prev;
         }
     }
-    
+
     Ok(output)
 }
 
@@ -477,21 +487,25 @@ fn tma_custom(data: &[f64], period: usize) -> Result<Vec<f64>, OttoError> {
             data_len: data.len(),
         });
     }
-    
+
     // Pine's TMA: sma(sma(src, ceil(L/2)), floor(L/2)+1)
-    let first_period = (period + 1) / 2;  // ceil(L/2)
-    let second_period = period / 2 + 1;   // floor(L/2) + 1
-    
+    let first_period = (period + 1) / 2; // ceil(L/2)
+    let second_period = period / 2 + 1; // floor(L/2) + 1
+
     // First SMA
-    let params1 = SmaParams { period: Some(first_period) };
+    let params1 = SmaParams {
+        period: Some(first_period),
+    };
     let input1 = SmaInput::from_slice(data, params1);
     let sma1 = sma(&input1).map_err(|e| OttoError::MaError(e.to_string()))?;
-    
+
     // Second SMA on the first SMA result
-    let params2 = SmaParams { period: Some(second_period) };
+    let params2 = SmaParams {
+        period: Some(second_period),
+    };
     let input2 = SmaInput::from_slice(&sma1.values, params2);
     let sma2 = sma(&input2).map_err(|e| OttoError::MaError(e.to_string()))?;
-    
+
     Ok(sma2.values)
 }
 
@@ -500,20 +514,20 @@ fn wwma(data: &[f64], period: usize) -> Result<Vec<f64>, OttoError> {
     if data.is_empty() {
         return Err(OttoError::EmptyInputData);
     }
-    
+
     if period == 0 || period > data.len() {
         return Err(OttoError::InvalidPeriod {
             period,
             data_len: data.len(),
         });
     }
-    
+
     let alpha = 1.0 / period as f64;
     let mut output = vec![f64::NAN; data.len()];
-    
+
     // Find first non-NaN value
     let first_valid = data.iter().position(|&x| !x.is_nan()).unwrap_or(0);
-    
+
     // Initialize with first valid value or simple average of first period values
     let mut sum = 0.0;
     let mut count = 0;
@@ -523,11 +537,11 @@ fn wwma(data: &[f64], period: usize) -> Result<Vec<f64>, OttoError> {
             count += 1;
         }
     }
-    
+
     if count > 0 {
         let mut wwma_prev = sum / count as f64;
         output[first_valid + period - 1] = wwma_prev;
-        
+
         // Calculate WWMA using recursive formula
         for i in first_valid + period..data.len() {
             if !data[i].is_nan() {
@@ -538,7 +552,7 @@ fn wwma(data: &[f64], period: usize) -> Result<Vec<f64>, OttoError> {
             }
         }
     }
-    
+
     Ok(output)
 }
 
@@ -546,28 +560,44 @@ fn wwma(data: &[f64], period: usize) -> Result<Vec<f64>, OttoError> {
 fn calculate_ma(data: &[f64], period: usize, ma_type: &str) -> Result<Vec<f64>, OttoError> {
     match ma_type {
         "SMA" => {
-            let params = SmaParams { period: Some(period) };
+            let params = SmaParams {
+                period: Some(period),
+            };
             let input = SmaInput::from_slice(data, params);
-            sma(&input).map(|o| o.values).map_err(|e| OttoError::MaError(e.to_string()))
+            sma(&input)
+                .map(|o| o.values)
+                .map_err(|e| OttoError::MaError(e.to_string()))
         }
         "EMA" => {
-            let params = EmaParams { period: Some(period) };
+            let params = EmaParams {
+                period: Some(period),
+            };
             let input = EmaInput::from_slice(data, params);
-            ema(&input).map(|o| o.values).map_err(|e| OttoError::MaError(e.to_string()))
+            ema(&input)
+                .map(|o| o.values)
+                .map_err(|e| OttoError::MaError(e.to_string()))
         }
         "WMA" => {
-            let params = WmaParams { period: Some(period) };
+            let params = WmaParams {
+                period: Some(period),
+            };
             let input = WmaInput::from_slice(data, params);
-            wma(&input).map(|o| o.values).map_err(|e| OttoError::MaError(e.to_string()))
+            wma(&input)
+                .map(|o| o.values)
+                .map_err(|e| OttoError::MaError(e.to_string()))
         }
         "WWMA" => {
             // Wilder's Weighted Moving Average
             wwma(data, period)
         }
         "DEMA" => {
-            let params = DemaParams { period: Some(period) };
+            let params = DemaParams {
+                period: Some(period),
+            };
             let input = DemaInput::from_slice(data, params);
-            dema(&input).map(|o| o.values).map_err(|e| OttoError::MaError(e.to_string()))
+            dema(&input)
+                .map(|o| o.values)
+                .map_err(|e| OttoError::MaError(e.to_string()))
         }
         "TMA" => {
             // Use custom TMA implementation for Pine compatibility
@@ -575,22 +605,36 @@ fn calculate_ma(data: &[f64], period: usize, ma_type: &str) -> Result<Vec<f64>, 
         }
         "VAR" => vidya(data, period),
         "ZLEMA" => {
-            let params = ZlemaParams { period: Some(period) };
+            let params = ZlemaParams {
+                period: Some(period),
+            };
             let input = ZlemaInput::from_slice(data, params);
-            zlema(&input).map(|o| o.values).map_err(|e| OttoError::MaError(e.to_string()))
+            zlema(&input)
+                .map(|o| o.values)
+                .map_err(|e| OttoError::MaError(e.to_string()))
         }
         "TSF" => {
             // TSF is already correct - it does the forecast
-            let params = TsfParams { period: Some(period) };
+            let params = TsfParams {
+                period: Some(period),
+            };
             let input = TsfInput::from_slice(data, params);
-            tsf(&input).map(|o| o.values).map_err(|e| OttoError::MaError(e.to_string()))
+            tsf(&input)
+                .map(|o| o.values)
+                .map_err(|e| OttoError::MaError(e.to_string()))
         }
         "HULL" => {
-            let params = HmaParams { period: Some(period) };
+            let params = HmaParams {
+                period: Some(period),
+            };
             let input = HmaInput::from_slice(data, params);
-            hma(&input).map(|o| o.values).map_err(|e| OttoError::MaError(e.to_string()))
+            hma(&input)
+                .map(|o| o.values)
+                .map_err(|e| OttoError::MaError(e.to_string()))
         }
-        _ => Err(OttoError::InvalidMaType { ma_type: ma_type.to_string() }),
+        _ => Err(OttoError::InvalidMaType {
+            ma_type: ma_type.to_string(),
+        }),
     }
 }
 
@@ -609,26 +653,38 @@ fn resolve_batch_kernel(k: Kernel) -> Result<Kernel, OttoError> {
     Ok(match k {
         Kernel::Auto => detect_best_batch_kernel(),
         b if b.is_batch() => b,
-        _ => return Err(OttoError::InvalidPeriod { period: 0, data_len: 0 }), // same error class ALMA uses
+        _ => {
+            return Err(OttoError::InvalidPeriod {
+                period: 0,
+                data_len: 0,
+            })
+        } // same error class ALMA uses
     })
 }
 
 #[inline]
 fn first_valid_idx(d: &[f64]) -> Result<usize, OttoError> {
-    d.iter().position(|x| !x.is_nan()).ok_or(OttoError::AllValuesNaN)
+    d.iter()
+        .position(|x| !x.is_nan())
+        .ok_or(OttoError::AllValuesNaN)
 }
 
 #[inline]
-fn otto_prepare<'a>(input: &'a OttoInput) -> Result<(&'a [f64], usize, usize, usize, f64, String), OttoError> {
+fn otto_prepare<'a>(
+    input: &'a OttoInput,
+) -> Result<(&'a [f64], usize, usize, usize, f64, String), OttoError> {
     let data = input.as_ref();
-    if data.is_empty() { 
-        return Err(OttoError::EmptyInputData); 
+    if data.is_empty() {
+        return Err(OttoError::EmptyInputData);
     }
 
     let first = first_valid_idx(data)?;
     let ott_period = input.get_ott_period();
     if ott_period == 0 || ott_period > data.len() {
-        return Err(OttoError::InvalidPeriod { period: ott_period, data_len: data.len() });
+        return Err(OttoError::InvalidPeriod {
+            period: ott_period,
+            data_len: data.len(),
+        });
     }
 
     let ott_percent = input.get_ott_percent();
@@ -652,11 +708,14 @@ pub fn otto_into_slices(
     hott_dst: &mut [f64],
     lott_dst: &mut [f64],
     input: &OttoInput,
-    _kern: Kernel
+    _kern: Kernel,
 ) -> Result<(), OttoError> {
     let (data, first, ott_p, needed, ott_percent, ma_type) = otto_prepare(input)?;
     if hott_dst.len() != data.len() || lott_dst.len() != data.len() {
-        return Err(OttoError::InvalidPeriod { period: hott_dst.len(), data_len: data.len() });
+        return Err(OttoError::InvalidPeriod {
+            period: hott_dst.len(),
+            data_len: data.len(),
+        });
     }
 
     // compute subseries
@@ -664,8 +723,8 @@ pub fn otto_into_slices(
     let fast_vidya = input.get_fast_vidya_length();
     let coco = input.get_correcting_constant();
 
-    let mov1 = vidya(data, slow_vidya / 2)?;          // Vec
-    let mov2 = vidya(data, slow_vidya)?;              // Vec
+    let mov1 = vidya(data, slow_vidya / 2)?; // Vec
+    let mov2 = vidya(data, slow_vidya)?; // Vec
     let mov3 = vidya(data, slow_vidya * fast_vidya)?; // Vec
 
     // LOTT - calculate for all data since vidya produces values from the start
@@ -695,24 +754,44 @@ pub fn otto_into_slices(
     for i in start..data.len() {
         let ma = mavg[i];
         if ma.is_nan() {
-            if i > 0 { hott_dst[i] = hott_dst[i - 1]; }
+            if i > 0 {
+                hott_dst[i] = hott_dst[i - 1];
+            }
             continue;
         }
         if i == start {
             let mt = long_stop_prev;
-            hott_dst[i] = if ma > mt { mt * (200.0 + ott_percent) / 200.0 }
-                          else        { mt * (200.0 - ott_percent) / 200.0 };
+            hott_dst[i] = if ma > mt {
+                mt * (200.0 + ott_percent) / 200.0
+            } else {
+                mt * (200.0 - ott_percent) / 200.0
+            };
         } else {
             let ls = ma * (1.0 - fark);
             let ss = ma * (1.0 + fark);
-            let long_stop  = if ma > long_stop_prev  { ls.max(long_stop_prev)  } else { ls };
-            let short_stop = if ma < short_stop_prev { ss.min(short_stop_prev) } else { ss };
-            let dir = if dir_prev == -1 && ma > short_stop_prev { 1 }
-                      else if dir_prev == 1 && ma < long_stop_prev { -1 }
-                      else { dir_prev };
+            let long_stop = if ma > long_stop_prev {
+                ls.max(long_stop_prev)
+            } else {
+                ls
+            };
+            let short_stop = if ma < short_stop_prev {
+                ss.min(short_stop_prev)
+            } else {
+                ss
+            };
+            let dir = if dir_prev == -1 && ma > short_stop_prev {
+                1
+            } else if dir_prev == 1 && ma < long_stop_prev {
+                -1
+            } else {
+                dir_prev
+            };
             let mt = if dir == 1 { long_stop } else { short_stop };
-            hott_dst[i] = if ma > mt { mt * (200.0 + ott_percent) / 200.0 }
-                          else        { mt * (200.0 - ott_percent) / 200.0 };
+            hott_dst[i] = if ma > mt {
+                mt * (200.0 + ott_percent) / 200.0
+            } else {
+                mt * (200.0 - ott_percent) / 200.0
+            };
             long_stop_prev = long_stop;
             short_stop_prev = short_stop;
             dir_prev = dir;
@@ -725,8 +804,8 @@ pub fn otto_into_slices(
 pub fn otto_with_kernel(input: &OttoInput, kern: Kernel) -> Result<OttoOutput, OttoError> {
     let chosen = resolve_single_kernel(kern);
     let data = input.as_ref();
-    if data.is_empty() { 
-        return Err(OttoError::EmptyInputData); 
+    if data.is_empty() {
+        return Err(OttoError::EmptyInputData);
     }
 
     // Initialize with all NaN, let otto_into_slices determine where values start
@@ -774,35 +853,46 @@ pub struct OttoBatchBuilder {
 }
 
 impl OttoBatchBuilder {
-    pub fn new() -> Self { Self::default() }
-    pub fn kernel(mut self, k: Kernel) -> Self { self.kernel = k; self }
-    pub fn ott_period_range(mut self, s: usize, e: usize, step: usize) -> Self { 
-        self.range.ott_period = (s,e,step); self 
+    pub fn new() -> Self {
+        Self::default()
     }
-    pub fn ott_percent_range(mut self, s: f64, e: f64, step: f64) -> Self { 
-        self.range.ott_percent = (s,e,step); self 
+    pub fn kernel(mut self, k: Kernel) -> Self {
+        self.kernel = k;
+        self
     }
-    pub fn fast_vidya_range(mut self, s: usize, e: usize, step: usize) -> Self { 
-        self.range.fast_vidya = (s,e,step); self 
+    pub fn ott_period_range(mut self, s: usize, e: usize, step: usize) -> Self {
+        self.range.ott_period = (s, e, step);
+        self
     }
-    pub fn slow_vidya_range(mut self, s: usize, e: usize, step: usize) -> Self { 
-        self.range.slow_vidya = (s,e,step); self 
+    pub fn ott_percent_range(mut self, s: f64, e: f64, step: f64) -> Self {
+        self.range.ott_percent = (s, e, step);
+        self
     }
-    pub fn correcting_constant_range(mut self, s: f64, e: f64, step: f64) -> Self { 
-        self.range.correcting_constant = (s,e,step); self 
+    pub fn fast_vidya_range(mut self, s: usize, e: usize, step: usize) -> Self {
+        self.range.fast_vidya = (s, e, step);
+        self
     }
-    pub fn ma_types(mut self, v: Vec<String>) -> Self { 
-        self.range.ma_types = v; self 
+    pub fn slow_vidya_range(mut self, s: usize, e: usize, step: usize) -> Self {
+        self.range.slow_vidya = (s, e, step);
+        self
+    }
+    pub fn correcting_constant_range(mut self, s: f64, e: f64, step: f64) -> Self {
+        self.range.correcting_constant = (s, e, step);
+        self
+    }
+    pub fn ma_types(mut self, v: Vec<String>) -> Self {
+        self.range.ma_types = v;
+        self
     }
 
     pub fn apply_slice(self, data: &[f64]) -> Result<OttoBatchOutput, OttoError> {
         otto_batch_with_kernel(data, &self.range, self.kernel)
     }
-    
+
     pub fn apply_candles(self, c: &Candles, src: &str) -> Result<OttoBatchOutput, OttoError> {
         self.apply_slice(source_type(c, src))
     }
-    
+
     pub fn with_default_slice(data: &[f64], k: Kernel) -> Result<OttoBatchOutput, OttoError> {
         OttoBatchBuilder::new().kernel(k).apply_slice(data)
     }
@@ -822,43 +912,50 @@ pub struct OttoBatchOutput {
 
 #[inline]
 fn axis_usize(a: (usize, usize, usize)) -> Vec<usize> {
-    let (s,e,st) = a; 
-    if st==0 || s==e { return vec![s]; }
+    let (s, e, st) = a;
+    if st == 0 || s == e {
+        return vec![s];
+    }
     (s..=e).step_by(st).collect()
 }
 
 #[inline]
 fn axis_f64(a: (f64, f64, f64)) -> Vec<f64> {
-    let (s,e,st)=a; 
-    if st.abs()<1e-12 || (s-e).abs()<1e-12 { return vec![s]; }
-    let mut v=Vec::new(); 
-    let mut x=s; 
-    while x<=e+1e-12 { v.push(x); x+=st; } 
+    let (s, e, st) = a;
+    if st.abs() < 1e-12 || (s - e).abs() < 1e-12 {
+        return vec![s];
+    }
+    let mut v = Vec::new();
+    let mut x = s;
+    while x <= e + 1e-12 {
+        v.push(x);
+        x += st;
+    }
     v
 }
 
 fn expand_grid_otto(r: &OttoBatchRange) -> Vec<OttoParams> {
-    let p  = axis_usize(r.ott_period);
+    let p = axis_usize(r.ott_period);
     let op = axis_f64(r.ott_percent);
     let fv = axis_usize(r.fast_vidya);
     let sv = axis_usize(r.slow_vidya);
     let cc = axis_f64(r.correcting_constant);
     let mt = &r.ma_types;
 
-    let mut v=Vec::with_capacity(p.len()*op.len()*fv.len()*sv.len()*cc.len()*mt.len());
-    for &pp in &p { 
-        for &oo in &op { 
-            for &ff in &fv { 
-                for &ss in &sv { 
+    let mut v = Vec::with_capacity(p.len() * op.len() * fv.len() * sv.len() * cc.len() * mt.len());
+    for &pp in &p {
+        for &oo in &op {
+            for &ff in &fv {
+                for &ss in &sv {
                     for &ccv in &cc {
                         for m in mt {
-                            v.push(OttoParams{
-                                ott_period:Some(pp), 
-                                ott_percent:Some(oo),
-                                fast_vidya_length:Some(ff), 
-                                slow_vidya_length:Some(ss),
-                                correcting_constant:Some(ccv), 
-                                ma_type:Some(m.clone())
+                            v.push(OttoParams {
+                                ott_period: Some(pp),
+                                ott_percent: Some(oo),
+                                fast_vidya_length: Some(ff),
+                                slow_vidya_length: Some(ss),
+                                correcting_constant: Some(ccv),
+                                ma_type: Some(m.clone()),
                             });
                         }
                     }
@@ -869,10 +966,13 @@ fn expand_grid_otto(r: &OttoBatchRange) -> Vec<OttoParams> {
     v
 }
 
-pub fn otto_batch_with_kernel(data: &[f64], sweep: &OttoBatchRange, k: Kernel)
--> Result<OttoBatchOutput, OttoError> {
-    if data.is_empty() { 
-        return Err(OttoError::EmptyInputData); 
+pub fn otto_batch_with_kernel(
+    data: &[f64],
+    sweep: &OttoBatchRange,
+    k: Kernel,
+) -> Result<OttoBatchOutput, OttoError> {
+    if data.is_empty() {
+        return Err(OttoError::EmptyInputData);
     }
     let kernel = resolve_batch_kernel(k)?;
 
@@ -880,9 +980,9 @@ pub fn otto_batch_with_kernel(data: &[f64], sweep: &OttoBatchRange, k: Kernel)
     if combos.is_empty() {
         // If combos is empty, it means expand_grid_otto returned no combinations
         // This typically happens when ma_types is empty or parameters are invalid
-        return Err(OttoError::InvalidPeriod { 
-            period: 0, 
-            data_len: data.len() 
+        return Err(OttoError::InvalidPeriod {
+            period: 0,
+            data_len: data.len(),
         });
     }
 
@@ -896,12 +996,25 @@ pub fn otto_batch_with_kernel(data: &[f64], sweep: &OttoBatchRange, k: Kernel)
     // row loop; kernel currently selects scalar path but is threaded for parity
     for (row, prm) in combos.iter().enumerate() {
         let input = OttoInput::from_slice(data, prm.clone());
-        let row_h = &mut hott[row*cols .. (row+1)*cols];
-        let row_l = &mut lott[row*cols .. (row+1)*cols];
-        otto_into_slices(row_h, row_l, &input, match kernel { _ => Kernel::Scalar })?; // keep scalar, API-parity ready
+        let row_h = &mut hott[row * cols..(row + 1) * cols];
+        let row_l = &mut lott[row * cols..(row + 1) * cols];
+        otto_into_slices(
+            row_h,
+            row_l,
+            &input,
+            match kernel {
+                _ => Kernel::Scalar,
+            },
+        )?; // keep scalar, API-parity ready
     }
 
-    Ok(OttoBatchOutput { hott, lott, combos, rows, cols })
+    Ok(OttoBatchOutput {
+        hott,
+        lott,
+        combos,
+        rows,
+        cols,
+    })
 }
 
 // ============= PYTHON BINDINGS =============
@@ -919,7 +1032,10 @@ pub fn otto_py<'py>(
     correcting_constant: f64,
     ma_type: &str,
     kernel: Option<&str>,
-) -> PyResult<(Bound<'py, numpy::PyArray1<f64>>, Bound<'py, numpy::PyArray1<f64>>)> {
+) -> PyResult<(
+    Bound<'py, numpy::PyArray1<f64>>,
+    Bound<'py, numpy::PyArray1<f64>>,
+)> {
     use numpy::{IntoPyArray, PyArray1};
 
     let slice_in = data.as_slice()?;
@@ -940,10 +1056,7 @@ pub fn otto_py<'py>(
         .allow_threads(|| otto_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    Ok((
-        out.hott.into_pyarray(py),
-        out.lott.into_pyarray(py),
-    ))
+    Ok((out.hott.into_pyarray(py), out.lott.into_pyarray(py)))
 }
 
 #[cfg(feature = "python")]
@@ -978,11 +1091,40 @@ pub fn otto_batch_py<'py>(
     let dict = PyDict::new(py);
     let hott = out.hott.into_pyarray(py).reshape([out.rows, out.cols])?;
     let lott = out.lott.into_pyarray(py).reshape([out.rows, out.cols])?;
-    dict.set_item("hott", hott)?; dict.set_item("lott", lott)?;
-    dict.set_item("ott_periods", out.combos.iter().map(|p| p.ott_period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
-    dict.set_item("ott_percents", out.combos.iter().map(|p| p.ott_percent.unwrap()).collect::<Vec<_>>().into_pyarray(py))?;
-    dict.set_item("fast_vidya", out.combos.iter().map(|p| p.fast_vidya_length.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
-    dict.set_item("slow_vidya", out.combos.iter().map(|p| p.slow_vidya_length.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+    dict.set_item("hott", hott)?;
+    dict.set_item("lott", lott)?;
+    dict.set_item(
+        "ott_periods",
+        out.combos
+            .iter()
+            .map(|p| p.ott_period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "ott_percents",
+        out.combos
+            .iter()
+            .map(|p| p.ott_percent.unwrap())
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "fast_vidya",
+        out.combos
+            .iter()
+            .map(|p| p.fast_vidya_length.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "slow_vidya",
+        out.combos
+            .iter()
+            .map(|p| p.slow_vidya_length.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
     let py_list = PyList::new(py, out.combos.iter().map(|p| p.ma_type.clone().unwrap()))?;
     dict.set_item("ma_types", py_list)?;
     Ok(dict)
@@ -1023,16 +1165,16 @@ impl OttoStreamPy {
             buffer: Vec::new(),
         }
     }
-    
+
     pub fn update(&mut self, value: f64) -> PyResult<(Option<f64>, Option<f64>)> {
         self.buffer.push(value);
-        
+
         // Need extra values for CMO calculation inside VIDYA
         let required_len = self.slow_vidya_length * self.fast_vidya_length + 10;
         if self.buffer.len() < required_len {
             return Ok((None, None));
         }
-        
+
         let params = OttoParams {
             ott_period: Some(self.ott_period),
             ott_percent: Some(self.ott_percent),
@@ -1041,9 +1183,9 @@ impl OttoStreamPy {
             correcting_constant: Some(self.correcting_constant),
             ma_type: Some(self.ma_type.clone()),
         };
-        
+
         let input = OttoInput::from_slice(&self.buffer, params);
-        
+
         match otto(&input) {
             Ok(output) => {
                 let last_idx = output.hott.len() - 1;
@@ -1052,7 +1194,7 @@ impl OttoStreamPy {
             Err(e) => Err(PyValueError::new_err(e.to_string())),
         }
     }
-    
+
     pub fn reset(&mut self) {
         self.buffer.clear();
     }
@@ -1096,8 +1238,13 @@ pub fn otto_js(
     values.extend_from_slice(&out.hott);
     values.extend_from_slice(&out.lott);
 
-    let js = OttoResult { values, rows: 2, cols: data.len() };
-    serde_wasm_bindgen::to_value(&js).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+    let js = OttoResult {
+        values,
+        rows: 2,
+        cols: data.len(),
+    };
+    serde_wasm_bindgen::to_value(&js)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 #[cfg(feature = "wasm")]
@@ -1114,11 +1261,11 @@ pub struct OttoBatchConfig {
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct OttoBatchJsOutput {
-    pub values: Vec<f64>,     // row-major: for each combo: HOTT row, then LOTT row
+    pub values: Vec<f64>, // row-major: for each combo: HOTT row, then LOTT row
     pub combos: Vec<OttoParams>,
-    pub rows: usize,          // combos.len() * 2
-    pub cols: usize,          // data length
-    pub rows_per_combo: usize // = 2
+    pub rows: usize,           // combos.len() * 2
+    pub cols: usize,           // data length
+    pub rows_per_combo: usize, // = 2
 }
 
 #[cfg(feature = "wasm")]
@@ -1153,7 +1300,8 @@ pub fn otto_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, J
         cols: out.cols,
         rows_per_combo: 2,
     };
-    serde_wasm_bindgen::to_value(&js).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+    serde_wasm_bindgen::to_value(&js)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 #[cfg(feature = "wasm")]
@@ -1168,7 +1316,9 @@ pub fn otto_alloc(len: usize) -> *mut f64 {
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn otto_free(ptr: *mut f64, len: usize) {
-    unsafe { let _ = Vec::from_raw_parts(ptr, len, len); }
+    unsafe {
+        let _ = Vec::from_raw_parts(ptr, len, len);
+    }
 }
 
 #[cfg(feature = "wasm")]
@@ -1202,8 +1352,10 @@ pub fn otto_into(
             lott_tmp = vec![f64::NAN; len];
             (&mut hott_tmp, &mut lott_tmp)
         } else {
-            (std::slice::from_raw_parts_mut(hott_ptr, len),
-             std::slice::from_raw_parts_mut(lott_ptr, len))
+            (
+                std::slice::from_raw_parts_mut(hott_ptr, len),
+                std::slice::from_raw_parts_mut(lott_ptr, len),
+            )
         };
 
         let params = OttoParams {
@@ -1234,7 +1386,7 @@ mod tests {
     use super::*;
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
-    
+
     /// Generate synthetic test data pattern used in PineScript tests
     /// Pattern: 0.612 - (i * 0.00001) for i from 0 to n-1
     /// Note: The PineScript reference values were calculated with this pattern:
@@ -1249,47 +1401,59 @@ mod tests {
         }
         data
     }
-    
+
     fn check_otto_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        
+
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let params = OttoParams {
             ott_period: None, // Use default
             ott_percent: Some(0.8),
             fast_vidya_length: None, // Use default
             slow_vidya_length: Some(20),
             correcting_constant: None, // Use default
-            ma_type: None, // Use default
+            ma_type: None,             // Use default
         };
-        
+
         let input = OttoInput::from_candles(&candles, "close", params);
         let output = otto_with_kernel(&input, kernel)?;
-        
+
         assert_eq!(output.hott.len(), candles.close.len());
         assert_eq!(output.lott.len(), candles.close.len());
-        
+
         Ok(())
     }
-    
+
     fn check_otto_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        
+
         // Use CSV data like ALMA does
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let params = OttoParams::default();
         let input = OttoInput::from_candles(&candles, "close", params);
         let result = otto_with_kernel(&input, kernel)?;
-        
+
         // Reference values for last 5 bars with CSV data and default params
         // These were obtained from running the scalar kernel implementation
-        let expected_hott = [0.6137310801679211, 0.6136758137211143, 0.6135129389965592, 0.6133345015018311, 0.6130191362868016];
-        let expected_lott = [0.6118478692473065, 0.6118237221582352, 0.6116076875101266, 0.6114220222840161, 0.6110393343841534];
-        
+        let expected_hott = [
+            0.6137310801679211,
+            0.6136758137211143,
+            0.6135129389965592,
+            0.6133345015018311,
+            0.6130191362868016,
+        ];
+        let expected_lott = [
+            0.6118478692473065,
+            0.6118237221582352,
+            0.6116076875101266,
+            0.6114220222840161,
+            0.6110393343841534,
+        ];
+
         // Check the last 5 values match expected
         let start = result.hott.len().saturating_sub(5);
         for (i, &expected) in expected_hott.iter().enumerate() {
@@ -1305,7 +1469,7 @@ mod tests {
                 expected
             );
         }
-        
+
         for (i, &expected) in expected_lott.iter().enumerate() {
             let actual = result.lott[start + i];
             let diff = (actual - expected).abs();
@@ -1319,75 +1483,89 @@ mod tests {
                 expected
             );
         }
-        
+
         Ok(())
     }
-    
+
     fn check_otto_default_candles(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        
+
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let input = OttoInput::with_default_candles(&candles);
         let output = otto_with_kernel(&input, kernel)?;
-        
+
         assert_eq!(output.hott.len(), candles.close.len());
         assert_eq!(output.lott.len(), candles.close.len());
-        
+
         Ok(())
     }
-    
+
     fn check_otto_zero_period(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        
+
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let params = OttoParams {
             ott_period: Some(0),
             ..Default::default()
         };
-        
+
         let input = OttoInput::from_candles(&candles, "close", params);
         let result = otto_with_kernel(&input, kernel);
-        
-        assert!(result.is_err(), "[{}] Expected error for zero period", test_name);
-        
+
+        assert!(
+            result.is_err(),
+            "[{}] Expected error for zero period",
+            test_name
+        );
+
         Ok(())
     }
-    
-    fn check_otto_period_exceeds_length(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+
+    fn check_otto_period_exceeds_length(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        
+
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         // Use a small slice of the data
         let small_data = &candles.close[0..3];
-        
+
         let params = OttoParams {
             ott_period: Some(10),
             ..Default::default()
         };
-        
+
         let input = OttoInput::from_slice(small_data, params);
         let result = otto_with_kernel(&input, kernel);
-        
-        assert!(result.is_err(), "[{}] Expected error when period exceeds length", test_name);
-        
+
+        assert!(
+            result.is_err(),
+            "[{}] Expected error when period exceeds length",
+            test_name
+        );
+
         Ok(())
     }
-    
-    fn check_otto_very_small_dataset(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+
+    fn check_otto_very_small_dataset(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        
+
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         // Need at least 15 values for CMO inside VIDYA
         let small_data = &candles.close[0..15];
-        
+
         let params = OttoParams {
             ott_period: Some(1),
             ott_percent: Some(0.5),
@@ -1396,146 +1574,180 @@ mod tests {
             correcting_constant: Some(1.0),
             ma_type: Some("SMA".to_string()),
         };
-        
+
         let input = OttoInput::from_slice(small_data, params);
         let result = otto_with_kernel(&input, kernel);
-        
+
         // Should succeed with minimal valid parameters
-        assert!(result.is_ok(), "[{}] Should handle very small dataset: {:?}", test_name, result);
-        
+        assert!(
+            result.is_ok(),
+            "[{}] Should handle very small dataset: {:?}",
+            test_name,
+            result
+        );
+
         Ok(())
     }
-    
+
     fn check_otto_empty_input(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        
+
         let data: Vec<f64> = vec![];
         let params = OttoParams::default();
-        
+
         let input = OttoInput::from_slice(&data, params);
         let result = otto_with_kernel(&input, kernel);
-        
-        assert!(result.is_err(), "[{}] Expected error for empty input", test_name);
-        
+
+        assert!(
+            result.is_err(),
+            "[{}] Expected error for empty input",
+            test_name
+        );
+
         Ok(())
     }
-    
+
     fn check_otto_invalid_ma_type(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        
+
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let params = OttoParams {
             ma_type: Some("INVALID_MA".to_string()),
             ..Default::default()
         };
-        
+
         let input = OttoInput::from_candles(&candles, "close", params);
         let result = otto_with_kernel(&input, kernel);
-        
-        assert!(result.is_err(), "[{}] Expected error for invalid MA type", test_name);
-        
+
+        assert!(
+            result.is_err(),
+            "[{}] Expected error for invalid MA type",
+            test_name
+        );
+
         Ok(())
     }
-    
+
     fn check_otto_all_ma_types(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        
+
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
-        let ma_types = ["SMA", "EMA", "WMA", "DEMA", "TMA", "VAR", "ZLEMA", "TSF", "HULL"];
-        
+
+        let ma_types = [
+            "SMA", "EMA", "WMA", "DEMA", "TMA", "VAR", "ZLEMA", "TSF", "HULL",
+        ];
+
         for ma_type in &ma_types {
             let params = OttoParams {
                 ma_type: Some(ma_type.to_string()),
                 ..Default::default()
             };
-            
+
             let input = OttoInput::from_candles(&candles, "close", params);
             let result = otto_with_kernel(&input, kernel)?;
-            
-            assert_eq!(result.hott.len(), candles.close.len(), 
-                "[{}] MA type {} output length mismatch", test_name, ma_type);
+
+            assert_eq!(
+                result.hott.len(),
+                candles.close.len(),
+                "[{}] MA type {} output length mismatch",
+                test_name,
+                ma_type
+            );
         }
-        
+
         Ok(())
     }
-    
+
     fn check_otto_reinput(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        
+
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let params = OttoParams::default();
         let input = OttoInput::from_candles(&candles, "close", params);
-        
+
         let result1 = otto_with_kernel(&input, kernel)?;
         let result2 = otto_with_kernel(&input, kernel)?;
-        
+
         // Results should be identical
         for i in 0..result1.hott.len() {
             if result1.hott[i].is_finite() && result2.hott[i].is_finite() {
-                assert!((result1.hott[i] - result2.hott[i]).abs() < 1e-10,
-                    "[{}] Reinput produced different HOTT at index {}", test_name, i);
+                assert!(
+                    (result1.hott[i] - result2.hott[i]).abs() < 1e-10,
+                    "[{}] Reinput produced different HOTT at index {}",
+                    test_name,
+                    i
+                );
             }
             if result1.lott[i].is_finite() && result2.lott[i].is_finite() {
-                assert!((result1.lott[i] - result2.lott[i]).abs() < 1e-10,
-                    "[{}] Reinput produced different LOTT at index {}", test_name, i);
+                assert!(
+                    (result1.lott[i] - result2.lott[i]).abs() < 1e-10,
+                    "[{}] Reinput produced different LOTT at index {}",
+                    test_name,
+                    i
+                );
             }
         }
-        
+
         Ok(())
     }
-    
+
     fn check_otto_nan_handling(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        
+
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let mut data = candles.close.clone();
         // Insert some NaN values
         data[100] = f64::NAN;
         data[150] = f64::NAN;
         data[200] = f64::NAN;
-        
+
         let params = OttoParams::default();
         let input = OttoInput::from_slice(&data, params);
         let result = otto_with_kernel(&input, kernel)?;
-        
+
         assert_eq!(result.hott.len(), data.len());
         assert_eq!(result.lott.len(), data.len());
-        
+
         // Should still produce some valid values
-        let valid_count = result.hott.iter()
+        let valid_count = result
+            .hott
+            .iter()
             .skip(250)
             .filter(|&&x| x.is_finite())
             .count();
-        assert!(valid_count > 0, "[{}] Should produce some valid values despite NaNs", test_name);
-        
+        assert!(
+            valid_count > 0,
+            "[{}] Should produce some valid values despite NaNs",
+            test_name
+        );
+
         Ok(())
     }
-    
+
     fn check_otto_streaming(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        
+
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let params = OttoParams::default();
-        
+
         // Batch calculation
         let input = OttoInput::from_candles(&candles, "close", params.clone());
         let batch_output = otto_with_kernel(&input, kernel)?;
-        
+
         // Streaming calculation
         let mut stream = OttoStream::try_new(params)?;
         let mut stream_hott = Vec::new();
         let mut stream_lott = Vec::new();
-        
+
         for &value in &candles.close {
             match stream.update(value) {
                 Some((h, l)) => {
@@ -1548,7 +1760,7 @@ mod tests {
                 }
             }
         }
-        
+
         // Compare last few values (streaming starts producing after warmup)
         // Note: Due to Pine-style initialization in batch vs rolling window in streaming,
         // differences are expected, especially with real market data
@@ -1557,21 +1769,27 @@ mod tests {
             if stream_hott[i].is_finite() && batch_output.hott[i].is_finite() {
                 let diff = (stream_hott[i] - batch_output.hott[i]).abs();
                 // Higher tolerance needed for real market data due to initialization differences
-                assert!(diff < 0.2,
-                    "[{}] Stream HOTT mismatch at {}: {} vs {} (diff: {})", 
-                    test_name, i, stream_hott[i], batch_output.hott[i], diff);
+                assert!(
+                    diff < 0.2,
+                    "[{}] Stream HOTT mismatch at {}: {} vs {} (diff: {})",
+                    test_name,
+                    i,
+                    stream_hott[i],
+                    batch_output.hott[i],
+                    diff
+                );
             }
         }
-        
+
         Ok(())
     }
-    
+
     fn check_otto_builder(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        
+
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let output = OttoBuilder::new()
             .ott_period(3)
             .ott_percent(0.8)
@@ -1581,13 +1799,13 @@ mod tests {
             .ma_type("EMA")
             .kernel(kernel)
             .apply(&candles)?;
-        
+
         assert_eq!(output.hott.len(), candles.close.len());
         assert_eq!(output.lott.len(), candles.close.len());
-        
+
         Ok(())
     }
-    
+
     // Macro to generate all test variants
     macro_rules! generate_all_otto_tests {
         ($($test_fn:ident),*) => {
@@ -1619,7 +1837,7 @@ mod tests {
             }
         }
     }
-    
+
     generate_all_otto_tests!(
         check_otto_partial_params,
         check_otto_accuracy,
@@ -1635,50 +1853,62 @@ mod tests {
         check_otto_streaming,
         check_otto_builder
     );
-    
+
     // Batch tests
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
-        
+
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let output = OttoBatchBuilder::new()
             .kernel(kernel)
             .apply_candles(&candles, "close")?;
-        
+
         // Find the default params in the output
         let def = OttoParams::default();
-        let default_idx = output.combos.iter().position(|c| {
-            c.ott_period == def.ott_period &&
-            c.ott_percent == def.ott_percent &&
-            c.fast_vidya_length == def.fast_vidya_length &&
-            c.slow_vidya_length == def.slow_vidya_length &&
-            c.correcting_constant == def.correcting_constant &&
-            c.ma_type == def.ma_type
-        }).expect("default params not found in batch output");
-        
-        let hott_row = &output.hott[default_idx * output.cols .. (default_idx + 1) * output.cols];
-        let lott_row = &output.lott[default_idx * output.cols .. (default_idx + 1) * output.cols];
-        
+        let default_idx = output
+            .combos
+            .iter()
+            .position(|c| {
+                c.ott_period == def.ott_period
+                    && c.ott_percent == def.ott_percent
+                    && c.fast_vidya_length == def.fast_vidya_length
+                    && c.slow_vidya_length == def.slow_vidya_length
+                    && c.correcting_constant == def.correcting_constant
+                    && c.ma_type == def.ma_type
+            })
+            .expect("default params not found in batch output");
+
+        let hott_row = &output.hott[default_idx * output.cols..(default_idx + 1) * output.cols];
+        let lott_row = &output.lott[default_idx * output.cols..(default_idx + 1) * output.cols];
+
         assert_eq!(hott_row.len(), candles.close.len());
         assert_eq!(lott_row.len(), candles.close.len());
-        
+
         // Verify some values are not NaN after warmup
         let non_nan_hott = hott_row.iter().filter(|&&x| !x.is_nan()).count();
         let non_nan_lott = lott_row.iter().filter(|&&x| !x.is_nan()).count();
-        assert!(non_nan_hott > 0, "[{}] Expected some non-NaN HOTT values", test);
-        assert!(non_nan_lott > 0, "[{}] Expected some non-NaN LOTT values", test);
-        
+        assert!(
+            non_nan_hott > 0,
+            "[{}] Expected some non-NaN HOTT values",
+            test
+        );
+        assert!(
+            non_nan_lott > 0,
+            "[{}] Expected some non-NaN LOTT values",
+            test
+        );
+
         Ok(())
     }
-    
+
     fn check_batch_sweep(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
-        
+
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let output = OttoBatchBuilder::new()
             .kernel(kernel)
             .ott_period_range(2, 4, 1)
@@ -1688,12 +1918,18 @@ mod tests {
             .correcting_constant_range(100000.0, 100000.0, 0.0)
             .ma_types(vec!["VAR".into(), "EMA".into()])
             .apply_candles(&candles, "close")?;
-        
-        let expected_combos = 3 * 3 * 3 * 3 * 1 * 2;  // 3 periods * 3 percents * 3 fast * 3 slow * 1 constant * 2 MA types
-        assert_eq!(output.combos.len(), expected_combos, "[{}] Expected {} combos", test, expected_combos);
+
+        let expected_combos = 3 * 3 * 3 * 3 * 1 * 2; // 3 periods * 3 percents * 3 fast * 3 slow * 1 constant * 2 MA types
+        assert_eq!(
+            output.combos.len(),
+            expected_combos,
+            "[{}] Expected {} combos",
+            test,
+            expected_combos
+        );
         assert_eq!(output.rows, expected_combos);
         assert_eq!(output.cols, candles.close.len());
-        
+
         Ok(())
     }
 
@@ -1705,11 +1941,22 @@ mod tests {
         let c = read_candles_from_csv(file)?;
         let out = OttoBuilder::new().kernel(kernel).apply(&c)?;
         for &v in out.hott.iter().chain(out.lott.iter()) {
-            if v.is_nan() { continue; }
+            if v.is_nan() {
+                continue;
+            }
             let b = v.to_bits();
-            assert_ne!(b, 0x1111_1111_1111_1111, "[{test}] alloc_with_nan_prefix poison seen");
-            assert_ne!(b, 0x2222_2222_2222_2222, "[{test}] init_matrix_prefixes poison seen");
-            assert_ne!(b, 0x3333_3333_3333_3333, "[{test}] make_uninit_matrix poison seen");
+            assert_ne!(
+                b, 0x1111_1111_1111_1111,
+                "[{test}] alloc_with_nan_prefix poison seen"
+            );
+            assert_ne!(
+                b, 0x2222_2222_2222_2222,
+                "[{test}] init_matrix_prefixes poison seen"
+            );
+            assert_ne!(
+                b, 0x3333_3333_3333_3333,
+                "[{test}] make_uninit_matrix poison seen"
+            );
         }
         Ok(())
     }
@@ -1717,14 +1964,30 @@ mod tests {
     #[cfg(debug_assertions)]
     fn check_no_poison_batch(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
-        let data = (0..300).map(|i| (i as f64).cos()*2.0 + 10.0).collect::<Vec<_>>();
+        let data = (0..300)
+            .map(|i| (i as f64).cos() * 2.0 + 10.0)
+            .collect::<Vec<_>>();
         let out = OttoBatchBuilder::new().kernel(kernel).apply_slice(&data)?;
         for &v in out.hott.iter().chain(out.lott.iter()) {
-            if v.is_nan() { continue; }
+            if v.is_nan() {
+                continue;
+            }
             let b = v.to_bits();
-            assert_ne!(b, 0x1111_1111_1111_1111, "[{}] alloc_with_nan_prefix poison seen", test);
-            assert_ne!(b, 0x2222_2222_2222_2222, "[{}] init_matrix_prefixes poison seen", test);
-            assert_ne!(b, 0x3333_3333_3333_3333, "[{}] make_uninit_matrix poison seen", test);
+            assert_ne!(
+                b, 0x1111_1111_1111_1111,
+                "[{}] alloc_with_nan_prefix poison seen",
+                test
+            );
+            assert_ne!(
+                b, 0x2222_2222_2222_2222,
+                "[{}] init_matrix_prefixes poison seen",
+                test
+            );
+            assert_ne!(
+                b, 0x3333_3333_3333_3333,
+                "[{}] make_uninit_matrix poison seen",
+                test
+            );
         }
         Ok(())
     }
@@ -1732,19 +1995,19 @@ mod tests {
     macro_rules! gen_batch_tests {
         ($fn_name:ident) => {
             paste::paste! {
-                #[test] fn [<$fn_name _scalar>]()      { 
-                    let _ = $fn_name(stringify!([<$fn_name _scalar>]), Kernel::ScalarBatch); 
+                #[test] fn [<$fn_name _scalar>]()      {
+                    let _ = $fn_name(stringify!([<$fn_name _scalar>]), Kernel::ScalarBatch);
                 }
                 #[cfg(all(feature="nightly-avx", target_arch="x86_64"))]
-                #[test] fn [<$fn_name _avx2>]()        { 
-                    let _ = $fn_name(stringify!([<$fn_name _avx2>]), Kernel::Avx2Batch); 
+                #[test] fn [<$fn_name _avx2>]()        {
+                    let _ = $fn_name(stringify!([<$fn_name _avx2>]), Kernel::Avx2Batch);
                 }
                 #[cfg(all(feature="nightly-avx", target_arch="x86_64"))]
-                #[test] fn [<$fn_name _avx512>]()      { 
-                    let _ = $fn_name(stringify!([<$fn_name _avx512>]), Kernel::Avx512Batch); 
+                #[test] fn [<$fn_name _avx512>]()      {
+                    let _ = $fn_name(stringify!([<$fn_name _avx512>]), Kernel::Avx512Batch);
                 }
-                #[test] fn [<$fn_name _auto_detect>]() { 
-                    let _ = $fn_name(stringify!([<$fn_name _auto_detect>]), Kernel::Auto); 
+                #[test] fn [<$fn_name _auto_detect>]() {
+                    let _ = $fn_name(stringify!([<$fn_name _auto_detect>]), Kernel::Auto);
                 }
             }
         };
@@ -1754,7 +2017,7 @@ mod tests {
     gen_batch_tests!(check_batch_sweep);
     #[cfg(debug_assertions)]
     gen_batch_tests!(check_no_poison_batch);
-    
+
     // Add poison check for single operations
     #[cfg(debug_assertions)]
     generate_all_otto_tests!(check_no_poison_single);

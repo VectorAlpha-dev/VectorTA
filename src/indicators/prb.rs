@@ -42,8 +42,8 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel,
-    init_matrix_prefixes, make_uninit_matrix,
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -67,16 +67,19 @@ use thiserror::Error;
 /// Input data enum supporting both candle data and raw slices
 #[derive(Debug, Clone)]
 pub enum PrbData<'a> {
-    Candles { candles: &'a Candles, source: &'a str },
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
     Slice(&'a [f64]),
 }
 
 /// Output structure containing polynomial regression values and bands
 #[derive(Debug, Clone)]
 pub struct PrbOutput {
-    pub values: Vec<f64>,      // Main polynomial regression line
-    pub upper_band: Vec<f64>,   // Upper band (regression + ndev * stdev)
-    pub lower_band: Vec<f64>,   // Lower band (regression - ndev * stdev)
+    pub values: Vec<f64>,     // Main polynomial regression line
+    pub upper_band: Vec<f64>, // Upper band (regression + ndev * stdev)
+    pub lower_band: Vec<f64>, // Lower band (regression - ndev * stdev)
 }
 
 /// Parameters structure with optional fields for defaults
@@ -88,8 +91,8 @@ pub struct PrbParams {
     pub regression_period: Option<usize>,
     pub polynomial_order: Option<usize>,
     pub regression_offset: Option<i32>,
-    pub ndev: Option<f64>,  // Standard deviation multiplier for bands
-    pub equ_from: Option<usize>,  // "Forecast From _ Bars Ago" parameter for Pine Script parity
+    pub ndev: Option<f64>,       // Standard deviation multiplier for bands
+    pub equ_from: Option<usize>, // "Forecast From _ Bars Ago" parameter for Pine Script parity
 }
 
 impl Default for PrbParams {
@@ -101,7 +104,7 @@ impl Default for PrbParams {
             polynomial_order: Some(2),
             regression_offset: Some(0),
             ndev: Some(2.0),
-            equ_from: Some(0),  // Default to 0 for standard behavior
+            equ_from: Some(0), // Default to 0 for standard behavior
         }
     }
 }
@@ -126,7 +129,10 @@ impl<'a> PrbInput<'a> {
     #[inline]
     pub fn from_candles(c: &'a Candles, s: &'a str, p: PrbParams) -> Self {
         Self {
-            data: PrbData::Candles { candles: c, source: s },
+            data: PrbData::Candles {
+                candles: c,
+                source: s,
+            },
             params: p,
         }
     }
@@ -168,11 +174,11 @@ impl<'a> PrbInput<'a> {
     pub fn get_regression_offset(&self) -> i32 {
         self.params.regression_offset.unwrap_or(0)
     }
-    
+
     pub fn get_ndev(&self) -> f64 {
         self.params.ndev.unwrap_or(2.0)
     }
-    
+
     #[inline]
     pub fn get_equ_from(&self) -> usize {
         self.params.equ_from.unwrap_or(0)
@@ -212,55 +218,55 @@ impl PrbBuilder {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     #[inline(always)]
     pub fn smooth_data(mut self, s: bool) -> Self {
         self.smooth_data = Some(s);
         self
     }
-    
+
     #[inline(always)]
     pub fn smooth_period(mut self, p: usize) -> Self {
         self.smooth_period = Some(p);
         self
     }
-    
+
     #[inline(always)]
     pub fn regression_period(mut self, p: usize) -> Self {
         self.regression_period = Some(p);
         self
     }
-    
+
     #[inline(always)]
     pub fn polynomial_order(mut self, o: usize) -> Self {
         self.polynomial_order = Some(o);
         self
     }
-    
+
     #[inline(always)]
     pub fn regression_offset(mut self, o: i32) -> Self {
         self.regression_offset = Some(o);
         self
     }
-    
+
     #[inline(always)]
     pub fn ndev(mut self, n: f64) -> Self {
         self.ndev = Some(n);
         self
     }
-    
+
     #[inline(always)]
     pub fn equ_from(mut self, e: usize) -> Self {
         self.equ_from = Some(e);
         self
     }
-    
+
     #[inline(always)]
     pub fn kernel(mut self, k: Kernel) -> Self {
         self.kernel = k;
         self
     }
-    
+
     #[inline(always)]
     pub fn apply(self, c: &Candles) -> Result<PrbOutput, PrbError> {
         let p = PrbParams {
@@ -275,7 +281,7 @@ impl PrbBuilder {
         let i = PrbInput::from_candles(c, "close", p);
         prb_with_kernel(&i, self.kernel)
     }
-    
+
     #[inline(always)]
     pub fn apply_slice(self, d: &[f64]) -> Result<PrbOutput, PrbError> {
         let p = PrbParams {
@@ -290,7 +296,7 @@ impl PrbBuilder {
         let i = PrbInput::from_slice(d, p);
         prb_with_kernel(&i, self.kernel)
     }
-    
+
     #[inline(always)]
     pub fn into_stream(self) -> Result<PrbStream, PrbError> {
         let p = PrbParams {
@@ -311,22 +317,22 @@ impl PrbBuilder {
 pub enum PrbError {
     #[error("prb: Input data slice is empty.")]
     EmptyInputData,
-    
+
     #[error("prb: All values are NaN.")]
     AllValuesNaN,
-    
+
     #[error("prb: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
-    
+
     #[error("prb: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
-    
+
     #[error("prb: Invalid polynomial order: {order} (must be >= 1)")]
     InvalidOrder { order: usize },
-    
+
     #[error("prb: Invalid smooth period: {period} (must be >= 2)")]
     InvalidSmoothPeriod { period: usize },
-    
+
     #[error("prb: Matrix is singular and cannot be decomposed")]
     SingularMatrix,
 }
@@ -357,19 +363,26 @@ impl PrbStream {
         let polynomial_order = params.polynomial_order.unwrap_or(2);
         let regression_offset = params.regression_offset.unwrap_or(0);
         let ndev = params.ndev.unwrap_or(2.0);
-        
+
         if polynomial_order < 1 {
-            return Err(PrbError::InvalidOrder { order: polynomial_order });
+            return Err(PrbError::InvalidOrder {
+                order: polynomial_order,
+            });
         }
-        
+
         if smooth_data && smooth_period < 2 {
-            return Err(PrbError::InvalidSmoothPeriod { period: smooth_period });
+            return Err(PrbError::InvalidSmoothPeriod {
+                period: smooth_period,
+            });
         }
-        
+
         if regression_period == 0 {
-            return Err(PrbError::InvalidPeriod { period: regression_period, data_len: 0 });
+            return Err(PrbError::InvalidPeriod {
+                period: regression_period,
+                data_len: 0,
+            });
         }
-        
+
         // Calculate SSF coefficients
         let pi = std::f64::consts::PI;
         let omega = 2.0 * pi / (smooth_period as f64);
@@ -378,7 +391,7 @@ impl PrbStream {
         let c3 = -a * a;
         let c2 = b;
         let c1 = 1.0 - c2 - c3;
-        
+
         Ok(Self {
             smooth_data,
             smooth_period,
@@ -396,7 +409,7 @@ impl PrbStream {
             filled: false,
         })
     }
-    
+
     pub fn update(&mut self, value: f64) -> Option<(f64, f64, f64)> {
         // Apply SSF if enabled
         let smoothed = if self.smooth_data {
@@ -407,7 +420,7 @@ impl PrbStream {
         } else {
             value
         };
-        
+
         // Add to buffer
         if self.buffer.len() < self.regression_period {
             self.buffer.push(value);
@@ -422,37 +435,38 @@ impl PrbStream {
             self.smooth_buffer.rotate_left(1);
             self.smooth_buffer[self.regression_period - 1] = smoothed;
         }
-        
+
         if !self.filled {
             return None;
         }
-        
+
         // Calculate regression
         let mut x_vals = vec![0.0; self.regression_period];
         for i in 0..self.regression_period {
             x_vals[i] = (i + 1) as f64;
         }
-        
-        let coefficients = calculate_regression_coefficients(
-            &x_vals,
-            &self.smooth_buffer,
-            self.polynomial_order
-        ).ok()?;
-        
+
+        let coefficients =
+            calculate_regression_coefficients(&x_vals, &self.smooth_buffer, self.polynomial_order)
+                .ok()?;
+
         let x_position = (self.regression_period as f64) - (self.regression_offset as f64);
         let regression_value = evaluate_polynomial(&coefficients, x_position);
-        
+
         // Calculate standard deviation of the window
         let mean = self.smooth_buffer.iter().sum::<f64>() / self.regression_period as f64;
-        let variance = self.smooth_buffer.iter()
+        let variance = self
+            .smooth_buffer
+            .iter()
             .map(|&v| (v - mean) * (v - mean))
-            .sum::<f64>() / self.regression_period as f64;
+            .sum::<f64>()
+            / self.regression_period as f64;
         let stdev = variance.sqrt();
-        
+
         // Calculate bands
         let upper = regression_value + self.ndev * stdev;
         let lower = regression_value - self.ndev * stdev;
-        
+
         Some((regression_value, upper, lower))
     }
 }
@@ -464,7 +478,9 @@ impl PrbStream {
 #[inline]
 fn ssf_filter(data: &[f64], period: usize, first: usize) -> Vec<f64> {
     let len = data.len();
-    if len == 0 { return Vec::new(); }
+    if len == 0 {
+        return Vec::new();
+    }
 
     let mut out = alloc_with_nan_prefix(len, first);
 
@@ -496,27 +512,27 @@ fn ssf_filter(data: &[f64], period: usize, first: usize) -> Vec<f64> {
 fn lu_decomposition(matrix: &[f64], size: usize) -> Result<(Vec<f64>, Vec<f64>), PrbError> {
     let mut l = vec![0.0; size * size];
     let mut u = vec![0.0; size * size];
-    
+
     // Copy first row to U
     for j in 0..size {
         u[j] = matrix[j];
     }
-    
+
     // Check for zero pivot
     if u[0].abs() < 1e-10 {
         return Err(PrbError::SingularMatrix);
     }
-    
+
     // Compute first column of L
     for i in 1..size {
         l[i * size] = matrix[i * size] / u[0];
     }
-    
+
     // Set diagonal of L to 1
     for i in 0..size {
         l[i * size + i] = 1.0;
     }
-    
+
     // Compute remaining elements
     for i in 1..size {
         for j in i..size {
@@ -526,7 +542,7 @@ fn lu_decomposition(matrix: &[f64], size: usize) -> Result<(Vec<f64>, Vec<f64>),
                 sum += l[i * size + k] * u[k * size + j];
             }
             u[i * size + j] = matrix[i * size + j] - sum;
-            
+
             // Compute L[j][i] for j > i
             if j > i {
                 let mut sum = 0.0;
@@ -540,14 +556,14 @@ fn lu_decomposition(matrix: &[f64], size: usize) -> Result<(Vec<f64>, Vec<f64>),
             }
         }
     }
-    
+
     Ok((l, u))
 }
 
 /// Forward substitution for lower triangular system Ly = b
 fn forward_substitution(l: &[f64], b: &[f64], size: usize) -> Vec<f64> {
     let mut y = vec![0.0; size];
-    
+
     for i in 0..size {
         let mut sum = b[i];
         for j in 0..i {
@@ -555,14 +571,14 @@ fn forward_substitution(l: &[f64], b: &[f64], size: usize) -> Vec<f64> {
         }
         y[i] = sum / l[i * size + i];
     }
-    
+
     y
 }
 
 /// Backward substitution for upper triangular system Ux = y
 fn backward_substitution(u: &[f64], y: &[f64], size: usize) -> Vec<f64> {
     let mut x = vec![0.0; size];
-    
+
     for i in (0..size).rev() {
         let mut sum = y[i];
         for j in (i + 1)..size {
@@ -570,7 +586,7 @@ fn backward_substitution(u: &[f64], y: &[f64], size: usize) -> Vec<f64> {
         }
         x[i] = sum / u[i * size + i];
     }
-    
+
     x
 }
 
@@ -591,16 +607,32 @@ impl PrbWorkspace {
     fn ensure(&mut self, order: usize, reg_p: usize) {
         let ms = order + 1;
         let sq = ms * ms;
-        if self.x_power_sums.len() < 2 * order + 1 { self.x_power_sums.resize(2 * order + 1, 0.0); }
-        if self.xy_sums.len() < ms { self.xy_sums.resize(ms, 0.0); }
-        if self.matrix.len() < sq { self.matrix.resize(sq, 0.0); }
-        if self.l.len() < sq { self.l.resize(sq, 0.0); }
-        if self.u.len() < sq { self.u.resize(sq, 0.0); }
-        if self.y.len() < ms { self.y.resize(ms, 0.0); }
-        if self.coeffs.len() < ms { self.coeffs.resize(ms, 0.0); }
+        if self.x_power_sums.len() < 2 * order + 1 {
+            self.x_power_sums.resize(2 * order + 1, 0.0);
+        }
+        if self.xy_sums.len() < ms {
+            self.xy_sums.resize(ms, 0.0);
+        }
+        if self.matrix.len() < sq {
+            self.matrix.resize(sq, 0.0);
+        }
+        if self.l.len() < sq {
+            self.l.resize(sq, 0.0);
+        }
+        if self.u.len() < sq {
+            self.u.resize(sq, 0.0);
+        }
+        if self.y.len() < ms {
+            self.y.resize(ms, 0.0);
+        }
+        if self.coeffs.len() < ms {
+            self.coeffs.resize(ms, 0.0);
+        }
         if self.x_vals.len() < reg_p {
             self.x_vals.resize(reg_p, 0.0);
-            for i in 0..reg_p { self.x_vals[i] = (i + 1) as f64; }
+            for i in 0..reg_p {
+                self.x_vals[i] = (i + 1) as f64;
+            }
         }
     }
 }
@@ -608,13 +640,14 @@ impl PrbWorkspace {
 /// In-place solver that uses slices, not new Vecs
 #[inline]
 fn poly_coeffs_into(
-    x_vals: &[f64],           // len = n
-    y_window: &[f64],         // len = n
+    x_vals: &[f64],   // len = n
+    y_window: &[f64], // len = n
     order: usize,
     x_power_sums: &mut [f64], // len >= 2*order+1
     xy_sums: &mut [f64],      // len >= order+1
     matrix: &mut [f64],       // len >= (order+1)^2
-    l: &mut [f64], u: &mut [f64],
+    l: &mut [f64],
+    u: &mut [f64],
     y: &mut [f64],
     coeffs: &mut [f64],
 ) -> Result<(), PrbError> {
@@ -624,28 +657,34 @@ fn poly_coeffs_into(
     // power sums
     for p in 0..=(2 * order) {
         let mut s = 0.0;
-        for i in 0..n { s += x_vals[i].powi(p as i32); }
+        for i in 0..n {
+            s += x_vals[i].powi(p as i32);
+        }
         x_power_sums[p] = s;
     }
     // xy sums
     for p in 0..=order {
         let mut s = 0.0;
-        for i in 0..n { s += x_vals[i].powi(p as i32) * y_window[i]; }
+        for i in 0..n {
+            s += x_vals[i].powi(p as i32) * y_window[i];
+        }
         xy_sums[p] = s;
     }
     // build matrix
     for i in 0..m {
         for j in 0..m {
-            matrix[i*m + j] = x_power_sums[i + j];
+            matrix[i * m + j] = x_power_sums[i + j];
         }
     }
     // LU
     let (l2, u2) = lu_decomposition(matrix, m)?;
-    l[..m*m].copy_from_slice(&l2);
-    u[..m*m].copy_from_slice(&u2);
+    l[..m * m].copy_from_slice(&l2);
+    u[..m * m].copy_from_slice(&u2);
 
     // forward/backward
-    for i in 0..m { y[i] = xy_sums[i]; }
+    for i in 0..m {
+        y[i] = xy_sums[i];
+    }
     let yy = forward_substitution(l, y, m);
     let xx = backward_substitution(u, &yy, m);
     coeffs[..m].copy_from_slice(&xx);
@@ -660,7 +699,7 @@ fn calculate_regression_coefficients(
 ) -> Result<Vec<f64>, PrbError> {
     let n = x_vals.len();
     let matrix_size = order + 1;
-    
+
     // Calculate x power sums for matrix
     let mut x_power_sums = vec![0.0; 2 * order + 1];
     for p in 0..=(2 * order) {
@@ -670,7 +709,7 @@ fn calculate_regression_coefficients(
         }
         x_power_sums[p] = sum;
     }
-    
+
     // Calculate x^p * y sums for result vector
     let mut xy_sums = vec![0.0; order + 1];
     for p in 0..=order {
@@ -680,7 +719,7 @@ fn calculate_regression_coefficients(
         }
         xy_sums[p] = sum;
     }
-    
+
     // Build coefficient matrix
     let mut matrix = vec![0.0; matrix_size * matrix_size];
     for i in 0..matrix_size {
@@ -688,12 +727,12 @@ fn calculate_regression_coefficients(
             matrix[i * matrix_size + j] = x_power_sums[i + j];
         }
     }
-    
+
     // Solve using LU decomposition
     let (l, u) = lu_decomposition(&matrix, matrix_size)?;
     let y = forward_substitution(&l, &xy_sums, matrix_size);
     let coefficients = backward_substitution(&u, &y, matrix_size);
-    
+
     Ok(coefficients)
 }
 
@@ -729,37 +768,89 @@ fn prb_compute_into(
     {
         if matches!(kernel, Kernel::Scalar | Kernel::ScalarBatch) {
             unsafe {
-                prb_simd128(data, smooth_data, smooth_period, regression_period, 
-                           polynomial_order, regression_offset, ndev, equ_from, first, out, out_upper, out_lower)?;
+                prb_simd128(
+                    data,
+                    smooth_data,
+                    smooth_period,
+                    regression_period,
+                    polynomial_order,
+                    regression_offset,
+                    ndev,
+                    equ_from,
+                    first,
+                    out,
+                    out_upper,
+                    out_lower,
+                )?;
             }
             return Ok(());
         }
     }
-    
+
     match kernel {
-        Kernel::Scalar | Kernel::ScalarBatch => {
-            prb_scalar(data, smooth_data, smooth_period, regression_period,
-                      polynomial_order, regression_offset, ndev, equ_from, first, out, out_upper, out_lower)?
-        }
+        Kernel::Scalar | Kernel::ScalarBatch => prb_scalar(
+            data,
+            smooth_data,
+            smooth_period,
+            regression_period,
+            polynomial_order,
+            regression_offset,
+            ndev,
+            equ_from,
+            first,
+            out,
+            out_upper,
+            out_lower,
+        )?,
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-        Kernel::Avx2 | Kernel::Avx2Batch => {
-            unsafe {
-                prb_avx2(data, smooth_data, smooth_period, regression_period,
-                        polynomial_order, regression_offset, ndev, equ_from, first, out, out_upper, out_lower)?
-            }
-        }
+        Kernel::Avx2 | Kernel::Avx2Batch => unsafe {
+            prb_avx2(
+                data,
+                smooth_data,
+                smooth_period,
+                regression_period,
+                polynomial_order,
+                regression_offset,
+                ndev,
+                equ_from,
+                first,
+                out,
+                out_upper,
+                out_lower,
+            )?
+        },
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-        Kernel::Avx512 | Kernel::Avx512Batch => {
-            unsafe {
-                prb_avx512(data, smooth_data, smooth_period, regression_period,
-                          polynomial_order, regression_offset, ndev, equ_from, first, out, out_upper, out_lower)?
-            }
-        }
+        Kernel::Avx512 | Kernel::Avx512Batch => unsafe {
+            prb_avx512(
+                data,
+                smooth_data,
+                smooth_period,
+                regression_period,
+                polynomial_order,
+                regression_offset,
+                ndev,
+                equ_from,
+                first,
+                out,
+                out_upper,
+                out_lower,
+            )?
+        },
         #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-        Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
-            prb_scalar(data, smooth_data, smooth_period, regression_period,
-                      polynomial_order, regression_offset, ndev, equ_from, first, out, out_upper, out_lower)?
-        }
+        Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => prb_scalar(
+            data,
+            smooth_data,
+            smooth_period,
+            regression_period,
+            polynomial_order,
+            regression_offset,
+            ndev,
+            equ_from,
+            first,
+            out,
+            out_upper,
+            out_lower,
+        )?,
         _ => unreachable!(),
     }
     Ok(())
@@ -792,8 +883,13 @@ fn prb_scalar(
     };
 
     let mut ws = PrbWorkspace {
-        x_power_sums: Vec::new(), xy_sums: Vec::new(), matrix: Vec::new(),
-        l: Vec::new(), u: Vec::new(), y: Vec::new(), coeffs: Vec::new(),
+        x_power_sums: Vec::new(),
+        xy_sums: Vec::new(),
+        matrix: Vec::new(),
+        l: Vec::new(),
+        u: Vec::new(),
+        y: Vec::new(),
+        coeffs: Vec::new(),
         x_vals: Vec::new(),
     };
     ws.ensure(polynomial_order, regression_period);
@@ -811,9 +907,13 @@ fn prb_scalar(
             &ws.x_vals[..regression_period],
             y_win,
             polynomial_order,
-            &mut ws.x_power_sums, &mut ws.xy_sums,
-            &mut ws.matrix, &mut ws.l, &mut ws.u,
-            &mut ws.y, &mut ws.coeffs,
+            &mut ws.x_power_sums,
+            &mut ws.xy_sums,
+            &mut ws.matrix,
+            &mut ws.l,
+            &mut ws.u,
+            &mut ws.y,
+            &mut ws.coeffs,
         )?;
 
         let reg = evaluate_polynomial(&ws.coeffs[..=polynomial_order], x_pos);
@@ -821,7 +921,10 @@ fn prb_scalar(
         // one-pass variance not required; two-pass is fine and allocation-free
         let mean = y_win.iter().sum::<f64>() / (regression_period as f64);
         let mut s = 0.0;
-        for &v in y_win { let d = v - mean; s += d * d; }
+        for &v in y_win {
+            let d = v - mean;
+            s += d * d;
+        }
         let stdev = (s / regression_period as f64).sqrt();
 
         out[i] = reg;
@@ -850,8 +953,20 @@ unsafe fn prb_avx2(
 ) -> Result<(), PrbError> {
     // For now, fall back to scalar implementation
     // Full SIMD implementation would require vectorizing the matrix operations
-    prb_scalar(data, smooth_data, smooth_period, regression_period,
-              polynomial_order, regression_offset, ndev, equ_from, first, out, out_upper, out_lower)
+    prb_scalar(
+        data,
+        smooth_data,
+        smooth_period,
+        regression_period,
+        polynomial_order,
+        regression_offset,
+        ndev,
+        equ_from,
+        first,
+        out,
+        out_upper,
+        out_lower,
+    )
 }
 
 // AVX512 implementation
@@ -873,8 +988,20 @@ unsafe fn prb_avx512(
 ) -> Result<(), PrbError> {
     // For now, fall back to scalar implementation
     // Full SIMD implementation would require vectorizing the matrix operations
-    prb_scalar(data, smooth_data, smooth_period, regression_period,
-              polynomial_order, regression_offset, ndev, equ_from, first, out, out_upper, out_lower)
+    prb_scalar(
+        data,
+        smooth_data,
+        smooth_period,
+        regression_period,
+        polynomial_order,
+        regression_offset,
+        ndev,
+        equ_from,
+        first,
+        out,
+        out_upper,
+        out_lower,
+    )
 }
 
 // WASM SIMD128 implementation
@@ -895,8 +1022,20 @@ unsafe fn prb_simd128(
 ) -> Result<(), PrbError> {
     // For now, fall back to scalar implementation
     // Full SIMD implementation would require vectorizing the matrix operations
-    prb_scalar(data, smooth_data, smooth_period, regression_period,
-              polynomial_order, regression_offset, ndev, equ_from, first, out, out_upper, out_lower)
+    prb_scalar(
+        data,
+        smooth_data,
+        smooth_period,
+        regression_period,
+        polynomial_order,
+        regression_offset,
+        ndev,
+        equ_from,
+        first,
+        out,
+        out_upper,
+        out_lower,
+    )
 }
 
 // ==================== PUBLIC API ====================
@@ -915,9 +1054,12 @@ pub fn prb_with_kernel(input: &PrbInput, kernel: Kernel) -> Result<PrbOutput, Pr
     if len == 0 {
         return Err(PrbError::EmptyInputData);
     }
-    
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(PrbError::AllValuesNaN)?;
-    
+
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(PrbError::AllValuesNaN)?;
+
     // Get parameters
     let smooth_data = input.get_smooth_data();
     let smooth_period = input.get_smooth_period();
@@ -926,23 +1068,27 @@ pub fn prb_with_kernel(input: &PrbInput, kernel: Kernel) -> Result<PrbOutput, Pr
     let regression_offset = input.get_regression_offset();
     let ndev = input.get_ndev();
     let equ_from = input.get_equ_from();
-    
+
     // Validate parameters
     if polynomial_order < 1 {
-        return Err(PrbError::InvalidOrder { order: polynomial_order });
+        return Err(PrbError::InvalidOrder {
+            order: polynomial_order,
+        });
     }
-    
+
     if smooth_data && smooth_period < 2 {
-        return Err(PrbError::InvalidSmoothPeriod { period: smooth_period });
+        return Err(PrbError::InvalidSmoothPeriod {
+            period: smooth_period,
+        });
     }
-    
+
     if regression_period == 0 || regression_period > len {
         return Err(PrbError::InvalidPeriod {
             period: regression_period,
             data_len: len,
         });
     }
-    
+
     let warmup = first + regression_period - 1 + equ_from;
     if warmup >= len {
         return Err(PrbError::NotEnoughValidData {
@@ -950,18 +1096,18 @@ pub fn prb_with_kernel(input: &PrbInput, kernel: Kernel) -> Result<PrbOutput, Pr
             valid: len - first,
         });
     }
-    
+
     // Select kernel
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
         k => k,
     };
-    
+
     // Allocate output buffers with NaN prefix
     let mut values = alloc_with_nan_prefix(len, warmup);
     let mut upper_band = alloc_with_nan_prefix(len, warmup);
     let mut lower_band = alloc_with_nan_prefix(len, warmup);
-    
+
     // Compute PRB with bands
     prb_compute_into(
         data,
@@ -978,8 +1124,12 @@ pub fn prb_with_kernel(input: &PrbInput, kernel: Kernel) -> Result<PrbOutput, Pr
         &mut upper_band,
         &mut lower_band,
     )?;
-    
-    Ok(PrbOutput { values, upper_band, lower_band })
+
+    Ok(PrbOutput {
+        values,
+        upper_band,
+        lower_band,
+    })
 }
 
 /// Write PRB output directly into pre-allocated slices for zero-copy operation
@@ -993,14 +1143,20 @@ pub fn prb_into_slice(
 ) -> Result<(), PrbError> {
     let data: &[f64] = input.as_ref();
     let len = data.len();
-    if len == 0 { 
-        return Err(PrbError::EmptyInputData); 
+    if len == 0 {
+        return Err(PrbError::EmptyInputData);
     }
     if dst_main.len() != len || dst_upper.len() != len || dst_lower.len() != len {
-        return Err(PrbError::InvalidPeriod { period: dst_main.len(), data_len: len });
+        return Err(PrbError::InvalidPeriod {
+            period: dst_main.len(),
+            data_len: len,
+        });
     }
 
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(PrbError::AllValuesNaN)?;
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(PrbError::AllValuesNaN)?;
     let smooth_data = input.get_smooth_data();
     let smooth_period = input.get_smooth_period();
     let regression_period = input.get_regression_period();
@@ -1009,29 +1165,53 @@ pub fn prb_into_slice(
     let ndev = input.get_ndev();
     let equ_from = input.get_equ_from();
 
-    if polynomial_order < 1 { 
-        return Err(PrbError::InvalidOrder { order: polynomial_order }); 
+    if polynomial_order < 1 {
+        return Err(PrbError::InvalidOrder {
+            order: polynomial_order,
+        });
     }
-    if smooth_data && smooth_period < 2 { 
-        return Err(PrbError::InvalidSmoothPeriod { period: smooth_period }); 
+    if smooth_data && smooth_period < 2 {
+        return Err(PrbError::InvalidSmoothPeriod {
+            period: smooth_period,
+        });
     }
     if regression_period == 0 || regression_period > len {
-        return Err(PrbError::InvalidPeriod { period: regression_period, data_len: len });
+        return Err(PrbError::InvalidPeriod {
+            period: regression_period,
+            data_len: len,
+        });
     }
 
     let warmup = first + regression_period - 1 + equ_from;
-    for v in &mut dst_main[..warmup] { *v = f64::NAN; }
-    for v in &mut dst_upper[..warmup] { *v = f64::NAN; }
-    for v in &mut dst_lower[..warmup] { *v = f64::NAN; }
+    for v in &mut dst_main[..warmup] {
+        *v = f64::NAN;
+    }
+    for v in &mut dst_upper[..warmup] {
+        *v = f64::NAN;
+    }
+    for v in &mut dst_lower[..warmup] {
+        *v = f64::NAN;
+    }
 
-    let chosen = match kern { 
-        Kernel::Auto => detect_best_kernel(), 
-        k => k 
+    let chosen = match kern {
+        Kernel::Auto => detect_best_kernel(),
+        k => k,
     };
-    
+
     prb_compute_into(
-        data, smooth_data, smooth_period, regression_period, polynomial_order,
-        regression_offset, ndev, equ_from, first, chosen, dst_main, dst_upper, dst_lower
+        data,
+        smooth_data,
+        smooth_period,
+        regression_period,
+        polynomial_order,
+        regression_offset,
+        ndev,
+        equ_from,
+        first,
+        chosen,
+        dst_main,
+        dst_upper,
+        dst_lower,
     )
 }
 
@@ -1148,7 +1328,12 @@ pub fn prb_batch_with_kernel(
     let kernel = match kernel {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => return Err(PrbError::InvalidPeriod { period: 0, data_len: 0 }),
+        _ => {
+            return Err(PrbError::InvalidPeriod {
+                period: 0,
+                data_len: 0,
+            })
+        }
     };
 
     let simd = match kernel {
@@ -1193,27 +1378,38 @@ fn prb_batch_inner(
     let combos = expand_grid(sweep, smooth_data);
     let cols = data.len();
     let rows = combos.len();
-    if cols == 0 { return Err(PrbError::AllValuesNaN); }
+    if cols == 0 {
+        return Err(PrbError::AllValuesNaN);
+    }
 
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(PrbError::AllValuesNaN)?;
-    let warm: Vec<usize> = combos.iter().map(|c| first + c.regression_period.unwrap() - 1).collect();
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(PrbError::AllValuesNaN)?;
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| first + c.regression_period.unwrap() - 1)
+        .collect();
 
     // Three output matrices
     let mut mu_main = make_uninit_matrix(rows, cols);
-    let mut mu_up   = make_uninit_matrix(rows, cols);
-    let mut mu_lo   = make_uninit_matrix(rows, cols);
+    let mut mu_up = make_uninit_matrix(rows, cols);
+    let mut mu_lo = make_uninit_matrix(rows, cols);
 
     init_matrix_prefixes(&mut mu_main, cols, &warm);
-    init_matrix_prefixes(&mut mu_up,   cols, &warm);
-    init_matrix_prefixes(&mut mu_lo,   cols, &warm);
+    init_matrix_prefixes(&mut mu_up, cols, &warm);
+    init_matrix_prefixes(&mut mu_lo, cols, &warm);
 
     let mut g_main = ManuallyDrop::new(mu_main);
-    let mut g_up   = ManuallyDrop::new(mu_up);
-    let mut g_lo   = ManuallyDrop::new(mu_lo);
+    let mut g_up = ManuallyDrop::new(mu_up);
+    let mut g_lo = ManuallyDrop::new(mu_lo);
 
-    let out_main: &mut [f64] = unsafe { core::slice::from_raw_parts_mut(g_main.as_mut_ptr() as *mut f64, g_main.len()) };
-    let out_up:   &mut [f64] = unsafe { core::slice::from_raw_parts_mut(g_up.as_mut_ptr()   as *mut f64, g_up.len()) };
-    let out_lo:   &mut [f64] = unsafe { core::slice::from_raw_parts_mut(g_lo.as_mut_ptr()   as *mut f64, g_lo.len()) };
+    let out_main: &mut [f64] =
+        unsafe { core::slice::from_raw_parts_mut(g_main.as_mut_ptr() as *mut f64, g_main.len()) };
+    let out_up: &mut [f64] =
+        unsafe { core::slice::from_raw_parts_mut(g_up.as_mut_ptr() as *mut f64, g_up.len()) };
+    let out_lo: &mut [f64] =
+        unsafe { core::slice::from_raw_parts_mut(g_lo.as_mut_ptr() as *mut f64, g_lo.len()) };
 
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
@@ -1222,46 +1418,50 @@ fn prb_batch_inner(
             let main_ptr = out_main.as_mut_ptr() as usize;
             let up_ptr = out_up.as_mut_ptr() as usize;
             let lo_ptr = out_lo.as_mut_ptr() as usize;
-            
-            (0..rows).into_par_iter().try_for_each(|row| -> Result<(), PrbError> {
-                let c = &combos[row];
-                unsafe {
-                    let r_main = std::slice::from_raw_parts_mut(
-                        (main_ptr as *mut f64).add(row * cols),
-                        cols
-                    );
-                    let r_up = std::slice::from_raw_parts_mut(
-                        (up_ptr as *mut f64).add(row * cols),
-                        cols
-                    );
-                    let r_lo = std::slice::from_raw_parts_mut(
-                        (lo_ptr as *mut f64).add(row * cols),
-                        cols
-                    );
-                    
-                    prb_compute_into(
-                        data,
-                        smooth_data,
-                        c.smooth_period.unwrap_or(10),
-                        c.regression_period.unwrap_or(100),
-                        c.polynomial_order.unwrap_or(2),
-                        c.regression_offset.unwrap_or(0),
-                        c.ndev.unwrap_or(2.0),
-                        c.equ_from.unwrap_or(0),
-                        first,
-                        kern,
-                        r_main, r_up, r_lo
-                    )
-                }
-            })?;
+
+            (0..rows)
+                .into_par_iter()
+                .try_for_each(|row| -> Result<(), PrbError> {
+                    let c = &combos[row];
+                    unsafe {
+                        let r_main = std::slice::from_raw_parts_mut(
+                            (main_ptr as *mut f64).add(row * cols),
+                            cols,
+                        );
+                        let r_up = std::slice::from_raw_parts_mut(
+                            (up_ptr as *mut f64).add(row * cols),
+                            cols,
+                        );
+                        let r_lo = std::slice::from_raw_parts_mut(
+                            (lo_ptr as *mut f64).add(row * cols),
+                            cols,
+                        );
+
+                        prb_compute_into(
+                            data,
+                            smooth_data,
+                            c.smooth_period.unwrap_or(10),
+                            c.regression_period.unwrap_or(100),
+                            c.polynomial_order.unwrap_or(2),
+                            c.regression_offset.unwrap_or(0),
+                            c.ndev.unwrap_or(2.0),
+                            c.equ_from.unwrap_or(0),
+                            first,
+                            kern,
+                            r_main,
+                            r_up,
+                            r_lo,
+                        )
+                    }
+                })?;
         }
         #[cfg(target_arch = "wasm32")]
         {
             for row in 0..rows {
                 let c = &combos[row];
-                let r_main = &mut out_main[row * cols .. (row + 1) * cols];
-                let r_up   = &mut out_up  [row * cols .. (row + 1) * cols];
-                let r_lo   = &mut out_lo  [row * cols .. (row + 1) * cols];
+                let r_main = &mut out_main[row * cols..(row + 1) * cols];
+                let r_up = &mut out_up[row * cols..(row + 1) * cols];
+                let r_lo = &mut out_lo[row * cols..(row + 1) * cols];
 
                 prb_compute_into(
                     data,
@@ -1274,16 +1474,18 @@ fn prb_batch_inner(
                     c.equ_from.unwrap_or(0),
                     first,
                     kern,
-                    r_main, r_up, r_lo
+                    r_main,
+                    r_up,
+                    r_lo,
                 )?;
             }
         }
     } else {
         for row in 0..rows {
             let c = &combos[row];
-            let r_main = &mut out_main[row * cols .. (row + 1) * cols];
-            let r_up   = &mut out_up  [row * cols .. (row + 1) * cols];
-            let r_lo   = &mut out_lo  [row * cols .. (row + 1) * cols];
+            let r_main = &mut out_main[row * cols..(row + 1) * cols];
+            let r_up = &mut out_up[row * cols..(row + 1) * cols];
+            let r_lo = &mut out_lo[row * cols..(row + 1) * cols];
 
             prb_compute_into(
                 data,
@@ -1296,28 +1498,53 @@ fn prb_batch_inner(
                 c.equ_from.unwrap_or(0),
                 first,
                 kern,
-                r_main, r_up, r_lo
+                r_main,
+                r_up,
+                r_lo,
             )?;
         }
     }
 
-    let values = unsafe { Vec::from_raw_parts(g_main.as_mut_ptr() as *mut f64, g_main.len(), g_main.capacity()) };
-    let upper_band = unsafe { Vec::from_raw_parts(g_up.as_mut_ptr()   as *mut f64, g_up.len(),   g_up.capacity()) };
-    let lower_band = unsafe { Vec::from_raw_parts(g_lo.as_mut_ptr()   as *mut f64, g_lo.len(),   g_lo.capacity()) };
+    let values = unsafe {
+        Vec::from_raw_parts(
+            g_main.as_mut_ptr() as *mut f64,
+            g_main.len(),
+            g_main.capacity(),
+        )
+    };
+    let upper_band =
+        unsafe { Vec::from_raw_parts(g_up.as_mut_ptr() as *mut f64, g_up.len(), g_up.capacity()) };
+    let lower_band =
+        unsafe { Vec::from_raw_parts(g_lo.as_mut_ptr() as *mut f64, g_lo.len(), g_lo.capacity()) };
 
-    Ok(PrbBatchOutput { values, upper_band, lower_band, combos, rows, cols })
+    Ok(PrbBatchOutput {
+        values,
+        upper_band,
+        lower_band,
+        combos,
+        rows,
+        cols,
+    })
 }
 
 #[inline(always)]
 fn expand_grid(r: &PrbBatchRange, smooth_flag: bool) -> Vec<PrbParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        if step == 0 || start == end { return vec![start]; }
+        if step == 0 || start == end {
+            return vec![start];
+        }
         (start..=end).step_by(step).collect()
     }
     fn axis_i32((start, end, step): (i32, i32, i32)) -> Vec<i32> {
-        if step == 0 || start == end { return vec![start]; }
-        let mut v = Vec::new(); let mut x = start;
-        while x <= end { v.push(x); x += step; }
+        if step == 0 || start == end {
+            return vec![start];
+        }
+        let mut v = Vec::new();
+        let mut x = start;
+        while x <= end {
+            v.push(x);
+            x += step;
+        }
         v
     }
 
@@ -1326,7 +1553,7 @@ fn expand_grid(r: &PrbBatchRange, smooth_flag: bool) -> Vec<PrbParams> {
     let pos = axis_usize(r.polynomial_order);
     let ros = axis_i32(r.regression_offset);
 
-    let mut out = Vec::with_capacity(sps.len()*rps.len()*pos.len()*ros.len());
+    let mut out = Vec::with_capacity(sps.len() * rps.len() * pos.len() * ros.len());
     for &sp in &sps {
         for &rp in &rps {
             for &po in &pos {
@@ -1337,8 +1564,8 @@ fn expand_grid(r: &PrbBatchRange, smooth_flag: bool) -> Vec<PrbParams> {
                         regression_period: Some(rp),
                         polynomial_order: Some(po),
                         regression_offset: Some(ro),
-                        ndev: Some(2.0),  // Default ndev for batch processing
-                        equ_from: Some(0),  // Default equ_from for batch processing
+                        ndev: Some(2.0),   // Default ndev for batch processing
+                        equ_from: Some(0), // Default equ_from for batch processing
                     });
                 }
             }
@@ -1361,7 +1588,11 @@ pub fn prb_py<'py>(
     regression_offset: i32,
     ndev: f64,
     kernel: Option<&str>,
-) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
+) -> PyResult<(
+    Bound<'py, PyArray1<f64>>,
+    Bound<'py, PyArray1<f64>>,
+    Bound<'py, PyArray1<f64>>,
+)> {
     let slice_in = data.as_slice()?;
     let params = PrbParams {
         smooth_data: Some(smooth_data),
@@ -1370,13 +1601,15 @@ pub fn prb_py<'py>(
         polynomial_order: Some(polynomial_order),
         regression_offset: Some(regression_offset),
         ndev: Some(ndev),
-        equ_from: Some(0),  // Default value for Python bindings
+        equ_from: Some(0), // Default value for Python bindings
     };
     let input = PrbInput::from_slice(slice_in, params);
     let kern = validate_kernel(kernel, false)?;
-    let (m,u,l) = py.allow_threads(|| {
-        prb_with_kernel(&input, kern).map(|o| (o.values, o.upper_band, o.lower_band))
-    }).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let (m, u, l) = py
+        .allow_threads(|| {
+            prb_with_kernel(&input, kern).map(|o| (o.values, o.upper_band, o.lower_band))
+        })
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((m.into_pyarray(py), u.into_pyarray(py), l.into_pyarray(py)))
 }
 
@@ -1403,14 +1636,26 @@ pub fn prb_batch_py<'py>(
 ) -> PyResult<Bound<'py, PyDict>> {
     let slice_in = data.as_slice()?;
     let kern = validate_kernel(kernel, true)?;
-    
+
     let sweep = PrbBatchRange {
         smooth_period: (smooth_period_start, smooth_period_end, smooth_period_step),
-        regression_period: (regression_period_start, regression_period_end, regression_period_step),
-        polynomial_order: (polynomial_order_start, polynomial_order_end, polynomial_order_step),
-        regression_offset: (regression_offset_start, regression_offset_end, regression_offset_step),
+        regression_period: (
+            regression_period_start,
+            regression_period_end,
+            regression_period_step,
+        ),
+        polynomial_order: (
+            polynomial_order_start,
+            polynomial_order_end,
+            polynomial_order_step,
+        ),
+        regression_offset: (
+            regression_offset_start,
+            regression_offset_end,
+            regression_offset_step,
+        ),
     };
-    
+
     let out = prb_batch_with_kernel(slice_in, &sweep, kern, smooth_data)
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
@@ -1418,7 +1663,7 @@ pub fn prb_batch_py<'py>(
     let cols = out.cols;
 
     let dict = PyDict::new(py);
-    
+
     // Convert to PyArray and reshape
     use ndarray::Array2;
     let values_arr = Array2::from_shape_vec((rows, cols), out.values)
@@ -1427,20 +1672,44 @@ pub fn prb_batch_py<'py>(
         .map_err(|e| PyValueError::new_err(format!("Failed to reshape upper: {}", e)))?;
     let lower_arr = Array2::from_shape_vec((rows, cols), out.lower_band)
         .map_err(|e| PyValueError::new_err(format!("Failed to reshape lower: {}", e)))?;
-    
-    dict.set_item("values", values_arr.into_pyarray(py))?;   // shape (rows, cols)
-    dict.set_item("upper",  upper_arr.into_pyarray(py))?;    // shape (rows, cols)
-    dict.set_item("lower",  lower_arr.into_pyarray(py))?;    // shape (rows, cols)
+
+    dict.set_item("values", values_arr.into_pyarray(py))?; // shape (rows, cols)
+    dict.set_item("upper", upper_arr.into_pyarray(py))?; // shape (rows, cols)
+    dict.set_item("lower", lower_arr.into_pyarray(py))?; // shape (rows, cols)
 
     // axes + metadata, same names you already use
-    dict.set_item("smooth_periods",
-        out.combos.iter().map(|p| p.smooth_period.unwrap_or(10) as u64).collect::<Vec<_>>().into_pyarray(py))?;
-    dict.set_item("regression_periods",
-        out.combos.iter().map(|p| p.regression_period.unwrap_or(100) as u64).collect::<Vec<_>>().into_pyarray(py))?;
-    dict.set_item("polynomial_orders",
-        out.combos.iter().map(|p| p.polynomial_order.unwrap_or(2) as u64).collect::<Vec<_>>().into_pyarray(py))?;
-    dict.set_item("regression_offsets",
-        out.combos.iter().map(|p| p.regression_offset.unwrap_or(0)).collect::<Vec<_>>().into_pyarray(py))?;
+    dict.set_item(
+        "smooth_periods",
+        out.combos
+            .iter()
+            .map(|p| p.smooth_period.unwrap_or(10) as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "regression_periods",
+        out.combos
+            .iter()
+            .map(|p| p.regression_period.unwrap_or(100) as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "polynomial_orders",
+        out.combos
+            .iter()
+            .map(|p| p.polynomial_order.unwrap_or(2) as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "regression_offsets",
+        out.combos
+            .iter()
+            .map(|p| p.regression_offset.unwrap_or(0))
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
 
     dict.set_item("rows", rows)?;
     dict.set_item("cols", cols)?;
@@ -1472,13 +1741,13 @@ impl PrbStreamPy {
             polynomial_order,
             regression_offset,
             ndev,
-            equ_from: Some(0),  // Default value for Python streaming API
+            equ_from: Some(0), // Default value for Python streaming API
         };
-        let stream = PrbStream::try_new(params)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let stream =
+            PrbStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok(PrbStreamPy { stream })
     }
-    
+
     fn update(&mut self, value: f64) -> Option<(f64, f64, f64)> {
         self.stream.update(value)
     }
@@ -1502,12 +1771,12 @@ impl PrbJsResult {
     pub fn values(&self) -> Vec<f64> {
         self.values.clone()
     }
-    
+
     #[wasm_bindgen(getter)]
     pub fn rows(&self) -> usize {
         self.rows
     }
-    
+
     #[wasm_bindgen(getter)]
     pub fn cols(&self) -> usize {
         self.cols
@@ -1532,17 +1801,17 @@ pub fn prb_js(
         polynomial_order: Some(polynomial_order),
         regression_offset: Some(regression_offset),
         ndev: Some(ndev),
-        equ_from: Some(0),  // Default value for Python bindings
+        equ_from: Some(0), // Default value for Python bindings
     };
     let input = PrbInput::from_slice(data, params);
-    
+
     let output = prb(&input).map_err(|e| JsValue::from_str(&e.to_string()))?;
-    
+
     // Flatten the three arrays into one
     let mut values = output.values;
     values.extend(output.upper_band);
     values.extend(output.lower_band);
-    
+
     Ok(PrbJsResult {
         values,
         rows: 3,
@@ -1570,16 +1839,29 @@ pub fn prb_batch_js(
 ) -> Result<JsValue, JsValue> {
     let sweep = PrbBatchRange {
         smooth_period: (smooth_period_start, smooth_period_end, smooth_period_step),
-        regression_period: (regression_period_start, regression_period_end, regression_period_step),
-        polynomial_order: (polynomial_order_start, polynomial_order_end, polynomial_order_step),
-        regression_offset: (regression_offset_start, regression_offset_end, regression_offset_step),
+        regression_period: (
+            regression_period_start,
+            regression_period_end,
+            regression_period_step,
+        ),
+        polynomial_order: (
+            polynomial_order_start,
+            polynomial_order_end,
+            polynomial_order_step,
+        ),
+        regression_offset: (
+            regression_offset_start,
+            regression_offset_end,
+            regression_offset_step,
+        ),
     };
 
     let out = prb_batch_slice(data, &sweep, detect_best_kernel(), smooth_data)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     // concatenate [values rows..., upper rows..., lower rows...] in row-major
-    let mut values = Vec::with_capacity(out.values.len() + out.upper_band.len() + out.lower_band.len());
+    let mut values =
+        Vec::with_capacity(out.values.len() + out.upper_band.len() + out.lower_band.len());
     values.extend_from_slice(&out.values);
     values.extend_from_slice(&out.upper_band);
     values.extend_from_slice(&out.lower_band);
@@ -1590,7 +1872,8 @@ pub fn prb_batch_js(
         cols: out.cols,
         combos: out.combos,
     };
-    serde_wasm_bindgen::to_value(&flat).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+    serde_wasm_bindgen::to_value(&flat)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 // WASM pointer helpers for zero-copy operations
@@ -1606,7 +1889,9 @@ pub fn prb_alloc(len: usize) -> *mut f64 {
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn prb_free(ptr: *mut f64, len: usize) {
-    unsafe { let _ = Vec::from_raw_parts(ptr, len, len); }
+    unsafe {
+        let _ = Vec::from_raw_parts(ptr, len, len);
+    }
 }
 
 #[cfg(feature = "wasm")]
@@ -1669,7 +1954,11 @@ pub struct PrbBatchFlatJs {
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = "prb_batch_unified")]
-pub fn prb_batch_unified_js(data: &[f64], config: JsValue, smooth_data: bool) -> Result<JsValue, JsValue> {
+pub fn prb_batch_unified_js(
+    data: &[f64],
+    config: JsValue,
+    smooth_data: bool,
+) -> Result<JsValue, JsValue> {
     #[derive(Serialize, Deserialize)]
     struct Cfg {
         smooth_period: (usize, usize, usize),
@@ -1695,7 +1984,8 @@ pub fn prb_batch_unified_js(data: &[f64], config: JsValue, smooth_data: bool) ->
         rows: out.rows,
         cols: out.cols,
     };
-    serde_wasm_bindgen::to_value(&js).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+    serde_wasm_bindgen::to_value(&js)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 // ==================== TESTS ====================
@@ -1705,12 +1995,12 @@ mod tests {
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
     use std::error::Error;
-    
+
     fn check_prb_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let params = PrbParams {
             smooth_data: Some(false),
             smooth_period: None,
@@ -1722,7 +2012,7 @@ mod tests {
         };
         let input = PrbInput::from_candles(&candles, "close", params);
         let result = prb_with_kernel(&input, kernel)?;
-        
+
         // Reference values from actual CSV data (last 5 non-NaN values)
         let expected_last_five = [
             59083.04826441,
@@ -1731,22 +2021,28 @@ mod tests {
             58575.33291206,
             58376.00589983,
         ];
-        
+
         // Get last 5 non-NaN values
-        let non_nan_values: Vec<f64> = result.values.iter()
+        let non_nan_values: Vec<f64> = result
+            .values
+            .iter()
             .filter(|v| !v.is_nan())
             .copied()
             .collect();
-        
-        assert!(non_nan_values.len() >= 5, "[{}] Should have at least 5 non-NaN values", test_name);
-        
+
+        assert!(
+            non_nan_values.len() >= 5,
+            "[{}] Should have at least 5 non-NaN values",
+            test_name
+        );
+
         let start = non_nan_values.len() - 5;
         for i in 0..5 {
             let actual = non_nan_values[start + i];
             let expected_val = expected_last_five[i];
             let diff = (actual - expected_val).abs();
             let tolerance = expected_val.abs() * 0.01; // 1% tolerance
-            
+
             assert!(
                 diff < tolerance,
                 "[{}] PRB {:?} mismatch at idx {}: got {}, expected {}",
@@ -1759,12 +2055,12 @@ mod tests {
         }
         Ok(())
     }
-    
+
     fn check_prb_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let params = PrbParams {
             smooth_data: None,
             smooth_period: None,
@@ -1777,10 +2073,10 @@ mod tests {
         let input = PrbInput::from_candles(&candles, "close", params);
         let output = prb_with_kernel(&input, kernel)?;
         assert_eq!(output.values.len(), candles.close.len());
-        
+
         Ok(())
     }
-    
+
     fn check_prb_zero_period(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let input_data = [10.0, 20.0, 30.0];
@@ -1795,11 +2091,18 @@ mod tests {
         };
         let input = PrbInput::from_slice(&input_data, params);
         let res = prb_with_kernel(&input, kernel);
-        assert!(res.is_err(), "[{}] PRB should fail with zero period", test_name);
+        assert!(
+            res.is_err(),
+            "[{}] PRB should fail with zero period",
+            test_name
+        );
         Ok(())
     }
-    
-    fn check_prb_period_exceeds_length(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+
+    fn check_prb_period_exceeds_length(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let data_small = [10.0, 20.0, 30.0];
         let params = PrbParams {
@@ -1820,7 +2123,7 @@ mod tests {
         );
         Ok(())
     }
-    
+
     fn check_prb_very_small_dataset(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let single_point = [42.0];
@@ -1835,10 +2138,14 @@ mod tests {
         };
         let input = PrbInput::from_slice(&single_point, params);
         let res = prb_with_kernel(&input, kernel);
-        assert!(res.is_err(), "[{}] PRB should fail with insufficient data", test_name);
+        assert!(
+            res.is_err(),
+            "[{}] PRB should fail with insufficient data",
+            test_name
+        );
         Ok(())
     }
-    
+
     fn check_prb_empty_input(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let empty: [f64; 0] = [];
@@ -1851,8 +2158,11 @@ mod tests {
         );
         Ok(())
     }
-    
-    fn check_prb_invalid_smooth_period(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+
+    fn check_prb_invalid_smooth_period(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let data = [1.0, 2.0, 3.0, 4.0, 5.0];
         let params = PrbParams {
@@ -1873,7 +2183,7 @@ mod tests {
         );
         Ok(())
     }
-    
+
     fn check_prb_invalid_order(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let data = [1.0, 2.0, 3.0, 4.0, 5.0];
@@ -1895,12 +2205,12 @@ mod tests {
         );
         Ok(())
     }
-    
+
     fn check_prb_reinput(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let first_params = PrbParams {
             smooth_data: Some(false),
             smooth_period: None,
@@ -1912,7 +2222,7 @@ mod tests {
         };
         let first_input = PrbInput::from_candles(&candles, "close", first_params);
         let first_result = prb_with_kernel(&first_input, kernel)?;
-        
+
         let second_params = PrbParams {
             smooth_data: Some(false),
             smooth_period: None,
@@ -1924,17 +2234,17 @@ mod tests {
         };
         let second_input = PrbInput::from_slice(&first_result.values, second_params);
         let second_result = prb_with_kernel(&second_input, kernel)?;
-        
+
         assert_eq!(second_result.values.len(), first_result.values.len());
-        
+
         Ok(())
     }
-    
+
     fn check_prb_nan_handling(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let input = PrbInput::from_candles(
             &candles,
             "close",
@@ -1962,7 +2272,7 @@ mod tests {
         }
         Ok(())
     }
-    
+
     fn check_prb_streaming(test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         let params = PrbParams {
             smooth_data: Some(false),
@@ -1973,29 +2283,37 @@ mod tests {
             ndev: None,
             equ_from: None,
         };
-        
+
         let mut stream = PrbStream::try_new(params)?;
-        
+
         // Feed data points
         for i in 1..=15 {
             let val = i as f64 * 10.0;
             let result = stream.update(val);
             if i >= 10 {
-                assert!(result.is_some(), "[{}] Stream should produce output after warmup", test_name);
+                assert!(
+                    result.is_some(),
+                    "[{}] Stream should produce output after warmup",
+                    test_name
+                );
             } else {
-                assert!(result.is_none(), "[{}] Stream should not produce output during warmup", test_name);
+                assert!(
+                    result.is_none(),
+                    "[{}] Stream should not produce output during warmup",
+                    test_name
+                );
             }
         }
-        
+
         Ok(())
     }
-    
-    fn check_batch_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+
+    fn check_prb_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        
+
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let params = PrbParams {
             smooth_data: Some(false),
             smooth_period: None,
@@ -2007,32 +2325,36 @@ mod tests {
         };
         let input = PrbInput::from_candles(&candles, "close", params);
         let output = prb_with_kernel(&input, kernel)?;
-        
+
         #[cfg(debug_assertions)]
         {
             // Check all three output arrays for poison values
-            for arr in [&output.values[..], &output.upper_band[..], &output.lower_band[..]] {
+            for arr in [
+                &output.values[..],
+                &output.upper_band[..],
+                &output.lower_band[..],
+            ] {
                 for (idx, &val) in arr.iter().enumerate() {
                     if val.is_nan() {
                         continue;
                     }
-                    
+
                     let bits = val.to_bits();
-                    
+
                     if bits == 0x11111111_11111111 {
                         panic!(
                             "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {}",
                             test_name, val, bits, idx
                         );
                     }
-                    
+
                     if bits == 0x22222222_22222222 {
                         panic!(
                             "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {}",
                             test_name, val, bits, idx
                         );
                     }
-                    
+
                     if bits == 0x33333333_33333333 {
                         panic!(
                             "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {}",
@@ -2042,10 +2364,10 @@ mod tests {
                 }
             }
         }
-        
+
         Ok(())
     }
-    
+
     // Batch tests for API parity
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2056,7 +2378,10 @@ mod tests {
             .smooth_data(false)
             .apply_candles(&c, "close")?;
         // default row should exist and match length
-        let def = PrbParams { smooth_data: Some(false), ..PrbParams::default() };
+        let def = PrbParams {
+            smooth_data: Some(false),
+            ..PrbParams::default()
+        };
         let row = out.values_for(&def).expect("default row missing");
         assert_eq!(row.len(), c.close.len());
         Ok(())
@@ -2093,15 +2418,23 @@ mod tests {
             .apply_candles(&c, "close")?;
         for arr in [&out.values[..], &out.upper_band[..], &out.lower_band[..]] {
             for (idx, &v) in arr.iter().enumerate() {
-                if v.is_nan() { continue; }
+                if v.is_nan() {
+                    continue;
+                }
                 let b = v.to_bits();
-                assert!(b != 0x11111111_11111111 && b != 0x22222222_22222222 && b != 0x33333333_33333333,
-                    "[{}] poison at flat index {}", test, idx);
+                assert!(
+                    b != 0x11111111_11111111
+                        && b != 0x22222222_22222222
+                        && b != 0x33333333_33333333,
+                    "[{}] poison at flat index {}",
+                    test,
+                    idx
+                );
             }
         }
         Ok(())
     }
-    
+
     // Macro to generate tests for all kernel variants
     macro_rules! generate_all_prb_tests {
         ($($test_fn:ident),*) => {
@@ -2133,7 +2466,7 @@ mod tests {
             }
         }
     }
-    
+
     generate_all_prb_tests!(
         check_prb_accuracy,
         check_prb_partial_params,
@@ -2146,9 +2479,9 @@ mod tests {
         check_prb_reinput,
         check_prb_nan_handling,
         check_prb_streaming,
-        check_batch_no_poison
+        check_prb_no_poison
     );
-    
+
     // Batch test generation macro
     macro_rules! gen_batch_tests {
         ($fn_name:ident) => {

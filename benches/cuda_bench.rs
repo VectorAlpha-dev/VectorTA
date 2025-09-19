@@ -13,9 +13,14 @@ use my_project::indicators::moving_averages::alma::{AlmaBatchRange, AlmaParams};
 
 macro_rules! cuda_bench {
     ( $group_name:literal, $prep_fn:ident, $launch_fn:ident ) => {
-        fn $prep_fn() -> impl Sized { $prep_fn() }
+        fn $prep_fn() -> impl Sized {
+            $prep_fn()
+        }
         fn bench_impl(c: &mut Criterion) {
-            if !cuda_available() { eprintln!("[bench] skipping CUDA (no device)"); return; }
+            if !cuda_available() {
+                eprintln!("[bench] skipping CUDA (no device)");
+                return;
+            }
             let mut group = c.benchmark_group($group_name);
             let mut state = $prep_fn();
             group.bench_with_input(BenchmarkId::from_parameter("default"), &0, |b, _| {
@@ -72,7 +77,11 @@ fn device_free_bytes() -> Option<usize> {
         let mut total: usize = 0;
         let _ = cust::init(cust::prelude::CudaFlags::empty());
         let res = cust::sys::cuMemGetInfo_v2(&mut free as *mut usize, &mut total as *mut usize);
-        if res == cust::sys::CUresult::CUDA_SUCCESS { Some(free) } else { None }
+        if res == cust::sys::CUresult::CUDA_SUCCESS {
+            Some(free)
+        } else {
+            None
+        }
     }
 }
 
@@ -96,11 +105,19 @@ fn prep_alma_one_series_many_params() -> AlmaOneSeriesState {
     let cuda = CudaAlma::new(0).expect("cuda alma");
     let series_len = 50_000usize;
     let data = gen_series(series_len);
-    let sweep = AlmaBatchRange { period: (9, 240, 12), offset: (0.05, 0.95, 0.10), sigma: (1.5, 11.0, 0.5) };
+    let sweep = AlmaBatchRange {
+        period: (9, 240, 12),
+        offset: (0.05, 0.95, 0.10),
+        sigma: (1.5, 11.0, 0.5),
+    };
     let mut combos: Vec<(usize, f64, f64)> = Vec::new();
     for p in (sweep.period.0..=sweep.period.1).step_by(sweep.period.2) {
-        for oi in 0..10 { let o = sweep.offset.0 + oi as f64 * sweep.offset.2;
-            for si in 0..20 { let s = sweep.sigma.0 + si as f64 * sweep.sigma.2; combos.push((p, o, s)); }
+        for oi in 0..10 {
+            let o = sweep.offset.0 + oi as f64 * sweep.offset.2;
+            for si in 0..20 {
+                let s = sweep.sigma.0 + si as f64 * sweep.sigma.2;
+                combos.push((p, o, s));
+            }
         }
     }
     let max_period = combos.iter().map(|(p, _, _)| *p).max().unwrap();
@@ -116,12 +133,16 @@ fn prep_alma_one_series_many_params() -> AlmaOneSeriesState {
         let base = i * max_period;
         weights_flat[base..base + *p].copy_from_slice(&w);
     }
-    let first_valid = host_prices_f32.iter().position(|v| !v.is_nan()).unwrap_or(0) as i32;
+    let first_valid = host_prices_f32
+        .iter()
+        .position(|v| !v.is_nan())
+        .unwrap_or(0) as i32;
     let d_prices = DeviceBuffer::from_slice(&host_prices_f32).unwrap();
     let d_weights = DeviceBuffer::from_slice(&weights_flat).unwrap();
     let d_periods = DeviceBuffer::from_slice(&periods_i32).unwrap();
     let d_inv_norms = DeviceBuffer::from_slice(&inv_norms).unwrap();
-    let d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }.unwrap();
+    let d_out: DeviceBuffer<f32> =
+        unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }.unwrap();
     AlmaOneSeriesState {
         cuda,
         d_prices,
@@ -137,17 +158,20 @@ fn prep_alma_one_series_many_params() -> AlmaOneSeriesState {
 }
 
 fn launch_alma_one_series_many_params(state: &mut AlmaOneSeriesState) {
-    state.cuda.alma_batch_device(
-        &state.d_prices,
-        &state.d_weights,
-        &state.d_periods,
-        &state.d_inv_norms,
-        state.max_period,
-        state.series_len,
-        state.n_combos,
-        state.first_valid,
-        &mut state.d_out,
-    ).unwrap();
+    state
+        .cuda
+        .alma_batch_device(
+            &state.d_prices,
+            &state.d_weights,
+            &state.d_periods,
+            &state.d_inv_norms,
+            state.max_period,
+            state.series_len,
+            state.n_combos,
+            state.first_valid,
+            &mut state.d_out,
+        )
+        .unwrap();
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -170,8 +194,16 @@ fn prep_alma_many_series_one_param() -> AlmaManySeriesState {
     let num_series = 4000usize;
     let series_len = 50_000usize;
     let host_tm_f32 = gen_time_major_f32(num_series, series_len);
-    let params = AlmaParams { period: Some(14), offset: Some(0.85), sigma: Some(6.0) };
-    let (w, inv) = compute_weights_cpu_f32(params.period.unwrap(), params.offset.unwrap(), params.sigma.unwrap());
+    let params = AlmaParams {
+        period: Some(14),
+        offset: Some(0.85),
+        sigma: Some(6.0),
+    };
+    let (w, inv) = compute_weights_cpu_f32(
+        params.period.unwrap(),
+        params.offset.unwrap(),
+        params.sigma.unwrap(),
+    );
     let mut first_valids = vec![0i32; num_series];
     for j in 0..num_series {
         first_valids[j] = (0..series_len)
@@ -181,7 +213,8 @@ fn prep_alma_many_series_one_param() -> AlmaManySeriesState {
     let d_prices_tm = DeviceBuffer::from_slice(&host_tm_f32).unwrap();
     let d_weights = DeviceBuffer::from_slice(&w).unwrap();
     let d_first_valids = DeviceBuffer::from_slice(&first_valids).unwrap();
-    let d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(num_series * series_len) }.unwrap();
+    let d_out_tm: DeviceBuffer<f32> =
+        unsafe { DeviceBuffer::uninitialized(num_series * series_len) }.unwrap();
     AlmaManySeriesState {
         cuda,
         d_prices_tm,
@@ -196,26 +229,35 @@ fn prep_alma_many_series_one_param() -> AlmaManySeriesState {
 }
 
 fn launch_alma_many_series_one_param(state: &mut AlmaManySeriesState) {
-    state.cuda.alma_multi_series_one_param_device(
-        &state.d_prices_tm,
-        &state.d_weights,
-        state.period,
-        state.inv,
-        state.num_series,
-        state.series_len,
-        &state.d_first_valids,
-        &mut state.d_out_tm,
-    ).unwrap();
+    state
+        .cuda
+        .alma_multi_series_one_param_device(
+            &state.d_prices_tm,
+            &state.d_weights,
+            state.period,
+            state.inv,
+            state.num_series,
+            state.series_len,
+            &state.d_first_valids,
+            &mut state.d_out_tm,
+        )
+        .unwrap();
 }
 
 // Instantiate benches using the small macro wrapper
 fn alma_one_series_bench(c: &mut Criterion) {
-    if !cuda_available() { eprintln!("[bench] skipping CUDA (no device)"); return; }
+    if !cuda_available() {
+        eprintln!("[bench] skipping CUDA (no device)");
+        return;
+    }
     let mut group = c.benchmark_group("alma_cuda_one_series_many_params");
     group.sample_size(10);
     let mut state = prep_alma_one_series_many_params();
     group.bench_with_input(BenchmarkId::from_parameter("50k_x_4kparams"), &0, |b, _| {
-        b.iter(|| { launch_alma_one_series_many_params(&mut state); black_box(()) })
+        b.iter(|| {
+            launch_alma_one_series_many_params(&mut state);
+            black_box(())
+        })
     });
     group.finish();
 }
@@ -239,12 +281,16 @@ fn prep_alma_one_series_1m_x_240() -> AlmaOneSeriesState {
         let base = i * max_period;
         weights_flat[base..base + p].copy_from_slice(&w);
     }
-    let first_valid = host_prices_f32.iter().position(|v| !v.is_nan()).unwrap_or(0) as i32;
+    let first_valid = host_prices_f32
+        .iter()
+        .position(|v| !v.is_nan())
+        .unwrap_or(0) as i32;
     let d_prices = DeviceBuffer::from_slice(&host_prices_f32).unwrap();
     let d_weights = DeviceBuffer::from_slice(&weights_flat).unwrap();
     let d_periods = DeviceBuffer::from_slice(&periods_i32).unwrap();
     let d_inv_norms = DeviceBuffer::from_slice(&inv_norms).unwrap();
-    let d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }.unwrap();
+    let d_out: DeviceBuffer<f32> =
+        unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }.unwrap();
     AlmaOneSeriesState {
         cuda,
         d_prices,
@@ -260,7 +306,10 @@ fn prep_alma_one_series_1m_x_240() -> AlmaOneSeriesState {
 }
 
 fn alma_one_series_bench_1m_240(c: &mut Criterion) {
-    if !cuda_available() { eprintln!("[bench] skipping CUDA (no device)"); return; }
+    if !cuda_available() {
+        eprintln!("[bench] skipping CUDA (no device)");
+        return;
+    }
     // VRAM guard
     let series_len = 1_000_000usize;
     let n_combos = 240usize;
@@ -271,7 +320,11 @@ fn alma_one_series_bench_1m_240(c: &mut Criterion) {
     let approx = out_bytes + weights_bytes + input_bytes + 64 * 1024 * 1024;
     if let Some(free) = device_free_bytes() {
         if approx > free {
-            eprintln!("[bench] skip 1M x 240 (need ~{} MB, free ~{} MB)", approx / (1024*1024), free / (1024*1024));
+            eprintln!(
+                "[bench] skip 1M x 240 (need ~{} MB, free ~{} MB)",
+                approx / (1024 * 1024),
+                free / (1024 * 1024)
+            );
             return;
         }
     }
@@ -279,7 +332,10 @@ fn alma_one_series_bench_1m_240(c: &mut Criterion) {
     group.sample_size(10);
     let mut state = prep_alma_one_series_1m_x_240();
     group.bench_with_input(BenchmarkId::from_parameter("1m_x_240params"), &0, |b, _| {
-        b.iter(|| { launch_alma_one_series_many_params(&mut state); black_box(()) })
+        b.iter(|| {
+            launch_alma_one_series_many_params(&mut state);
+            black_box(())
+        })
     });
     group.finish();
 }
@@ -292,8 +348,15 @@ fn prep_alma_one_series_250k_x_4k() -> AlmaOneSeriesState {
     let periods: Vec<usize> = (1..=240).collect(); // 240
     let offsets: [f64; 4] = [0.25, 0.5, 0.75, 0.85]; // 4
     let sigmas: [f64; 4] = [3.0, 6.0, 9.0, 12.0]; // 4
-    let mut combos: Vec<(usize, f64, f64)> = Vec::with_capacity(periods.len() * offsets.len() * sigmas.len());
-    for &p in &periods { for &o in &offsets { for &s in &sigmas { combos.push((p, o, s)); } } }
+    let mut combos: Vec<(usize, f64, f64)> =
+        Vec::with_capacity(periods.len() * offsets.len() * sigmas.len());
+    for &p in &periods {
+        for &o in &offsets {
+            for &s in &sigmas {
+                combos.push((p, o, s));
+            }
+        }
+    }
     let max_period = periods.iter().copied().max().unwrap();
     let n_combos = combos.len(); // ~3840
 
@@ -308,12 +371,16 @@ fn prep_alma_one_series_250k_x_4k() -> AlmaOneSeriesState {
         let base = i * max_period;
         weights_flat[base..base + *p].copy_from_slice(&w);
     }
-    let first_valid = host_prices_f32.iter().position(|v| !v.is_nan()).unwrap_or(0) as i32;
+    let first_valid = host_prices_f32
+        .iter()
+        .position(|v| !v.is_nan())
+        .unwrap_or(0) as i32;
     let d_prices = DeviceBuffer::from_slice(&host_prices_f32).unwrap();
     let d_weights = DeviceBuffer::from_slice(&weights_flat).unwrap();
     let d_periods = DeviceBuffer::from_slice(&periods_i32).unwrap();
     let d_inv_norms = DeviceBuffer::from_slice(&inv_norms).unwrap();
-    let d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }.unwrap();
+    let d_out: DeviceBuffer<f32> =
+        unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }.unwrap();
     AlmaOneSeriesState {
         cuda,
         d_prices,
@@ -329,7 +396,10 @@ fn prep_alma_one_series_250k_x_4k() -> AlmaOneSeriesState {
 }
 
 fn alma_one_series_bench_250k_4k(c: &mut Criterion) {
-    if !cuda_available() { eprintln!("[bench] skipping CUDA (no device)"); return; }
+    if !cuda_available() {
+        eprintln!("[bench] skipping CUDA (no device)");
+        return;
+    }
     // VRAM guard
     let series_len = 250_000usize;
     let n_combos = 240usize * 4usize * 4usize; // ~3840
@@ -340,26 +410,47 @@ fn alma_one_series_bench_250k_4k(c: &mut Criterion) {
     let approx = out_bytes + weights_bytes + input_bytes + 128 * 1024 * 1024;
     if let Some(free) = device_free_bytes() {
         if approx > free {
-            eprintln!("[bench] skip 250k x ~4k (need ~{} MB, free ~{} MB)", approx / (1024*1024), free / (1024*1024));
+            eprintln!(
+                "[bench] skip 250k x ~4k (need ~{} MB, free ~{} MB)",
+                approx / (1024 * 1024),
+                free / (1024 * 1024)
+            );
             return;
         }
     }
     let mut group = c.benchmark_group("alma_cuda_one_series_many_params");
     group.sample_size(10);
     let mut state = prep_alma_one_series_250k_x_4k();
-    group.bench_with_input(BenchmarkId::from_parameter("250k_x_~4kparams"), &0, |b, _| {
-        b.iter(|| { launch_alma_one_series_many_params(&mut state); black_box(()) })
-    });
+    group.bench_with_input(
+        BenchmarkId::from_parameter("250k_x_~4kparams"),
+        &0,
+        |b, _| {
+            b.iter(|| {
+                launch_alma_one_series_many_params(&mut state);
+                black_box(())
+            })
+        },
+    );
     group.finish();
 }
 fn alma_many_series_bench(c: &mut Criterion) {
-    if !cuda_available() { eprintln!("[bench] skipping CUDA (no device)"); return; }
+    if !cuda_available() {
+        eprintln!("[bench] skipping CUDA (no device)");
+        return;
+    }
     let mut group = c.benchmark_group("alma_cuda_many_series_one_param");
     group.sample_size(10);
     let mut state = prep_alma_many_series_one_param();
-    group.bench_with_input(BenchmarkId::from_parameter("4000series_x_50k"), &0, |b, _| {
-        b.iter(|| { launch_alma_many_series_one_param(&mut state); black_box(()) })
-    });
+    group.bench_with_input(
+        BenchmarkId::from_parameter("4000series_x_50k"),
+        &0,
+        |b, _| {
+            b.iter(|| {
+                launch_alma_many_series_one_param(&mut state);
+                black_box(())
+            })
+        },
+    );
     group.finish();
 }
 
@@ -369,8 +460,8 @@ fn alma_many_series_bench(c: &mut Criterion) {
 // ALMA: one series × many params (multi-stream, very large inputs)
 // ──────────────────────────────────────────────────────────────
 
-
-criterion_group!(benches,
+criterion_group!(
+    benches,
     alma_one_series_bench,
     alma_one_series_bench_1m_240,
     alma_one_series_bench_250k_4k,

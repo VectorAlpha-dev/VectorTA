@@ -48,8 +48,8 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel,
-    init_matrix_prefixes, make_uninit_matrix,
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -78,7 +78,10 @@ impl<'a> AsRef<[f64]> for DmaInput<'a> {
 
 #[derive(Debug, Clone)]
 pub enum DmaData<'a> {
-    Candles { candles: &'a Candles, source: &'a str },
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
     Slice(&'a [f64]),
 }
 
@@ -117,11 +120,14 @@ impl<'a> DmaInput<'a> {
     #[inline]
     pub fn from_candles(c: &'a Candles, s: &'a str, p: DmaParams) -> Self {
         Self {
-            data: DmaData::Candles { candles: c, source: s },
+            data: DmaData::Candles {
+                candles: c,
+                source: s,
+            },
             params: p,
         }
     }
-    
+
     #[inline]
     pub fn from_slice(sl: &'a [f64], p: DmaParams) -> Self {
         Self {
@@ -129,32 +135,35 @@ impl<'a> DmaInput<'a> {
             params: p,
         }
     }
-    
+
     #[inline]
     pub fn with_default_candles(c: &'a Candles) -> Self {
         Self::from_candles(c, "close", DmaParams::default())
     }
-    
+
     #[inline]
     pub fn get_hull_length(&self) -> usize {
         self.params.hull_length.unwrap_or(7)
     }
-    
+
     #[inline]
     pub fn get_ema_length(&self) -> usize {
         self.params.ema_length.unwrap_or(20)
     }
-    
+
     #[inline]
     pub fn get_ema_gain_limit(&self) -> usize {
         self.params.ema_gain_limit.unwrap_or(50)
     }
-    
+
     #[inline]
     pub fn get_hull_ma_type(&self) -> String {
-        self.params.hull_ma_type.clone().unwrap_or_else(|| "WMA".to_string())
+        self.params
+            .hull_ma_type
+            .clone()
+            .unwrap_or_else(|| "WMA".to_string())
     }
-    
+
     #[inline]
     pub fn hull_ma_type_str(&self) -> &str {
         self.params.hull_ma_type.as_deref().unwrap_or("WMA")
@@ -187,37 +196,37 @@ impl DmaBuilder {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     #[inline(always)]
     pub fn hull_length(mut self, val: usize) -> Self {
         self.hull_length = Some(val);
         self
     }
-    
+
     #[inline(always)]
     pub fn ema_length(mut self, val: usize) -> Self {
         self.ema_length = Some(val);
         self
     }
-    
+
     #[inline(always)]
     pub fn ema_gain_limit(mut self, val: usize) -> Self {
         self.ema_gain_limit = Some(val);
         self
     }
-    
+
     #[inline(always)]
     pub fn hull_ma_type(mut self, val: String) -> Self {
         self.hull_ma_type = Some(val);
         self
     }
-    
+
     #[inline(always)]
     pub fn kernel(mut self, k: Kernel) -> Self {
         self.kernel = k;
         self
     }
-    
+
     #[inline(always)]
     pub fn apply(self, c: &Candles) -> Result<DmaOutput, DmaError> {
         let p = DmaParams {
@@ -229,7 +238,7 @@ impl DmaBuilder {
         let i = DmaInput::from_candles(c, "close", p);
         dma_with_kernel(&i, self.kernel)
     }
-    
+
     #[inline(always)]
     pub fn apply_slice(self, d: &[f64]) -> Result<DmaOutput, DmaError> {
         let p = DmaParams {
@@ -241,7 +250,7 @@ impl DmaBuilder {
         let i = DmaInput::from_slice(d, p);
         dma_with_kernel(&i, self.kernel)
     }
-    
+
     #[inline(always)]
     pub fn into_stream(self) -> Result<DmaStream, DmaError> {
         let p = DmaParams {
@@ -258,16 +267,16 @@ impl DmaBuilder {
 pub enum DmaError {
     #[error("dma: Input data slice is empty.")]
     EmptyInputData,
-    
+
     #[error("dma: All values are NaN.")]
     AllValuesNaN,
-    
+
     #[error("dma: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
-    
+
     #[error("dma: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
-    
+
     #[error("dma: Invalid Hull MA type: {value}. Must be 'WMA' or 'EMA'.")]
     InvalidHullMAType { value: String },
 }
@@ -279,34 +288,55 @@ pub fn dma(input: &DmaInput) -> Result<DmaOutput, DmaError> {
 
 #[inline(always)]
 pub fn dma_with_kernel(input: &DmaInput, kernel: Kernel) -> Result<DmaOutput, DmaError> {
-    let (data, hull_len, ema_len, ema_gain_limit, hull_ma_type, first, chosen) = dma_prepare(input, kernel)?;
-    
+    let (data, hull_len, ema_len, ema_gain_limit, hull_ma_type, first, chosen) =
+        dma_prepare(input, kernel)?;
+
     let sqrt_len = (hull_len as f64).sqrt().round() as usize;
     let warmup_end = first + hull_len.max(ema_len) + sqrt_len - 1;
-    
+
     let mut out = alloc_with_nan_prefix(data.len(), warmup_end);
     dma_compute_into(
-        data, hull_len, ema_len, ema_gain_limit, &hull_ma_type, first, chosen, &mut out
+        data,
+        hull_len,
+        ema_len,
+        ema_gain_limit,
+        &hull_ma_type,
+        first,
+        chosen,
+        &mut out,
     );
     Ok(DmaOutput { values: out })
 }
 
 #[inline(always)]
 pub fn dma_into_slice(dst: &mut [f64], input: &DmaInput, kern: Kernel) -> Result<(), DmaError> {
-    let (data, hull_len, ema_len, ema_gain_limit, hull_ma_type, first, chosen) = dma_prepare(input, kern)?;
-    
+    let (data, hull_len, ema_len, ema_gain_limit, hull_ma_type, first, chosen) =
+        dma_prepare(input, kern)?;
+
     if dst.len() != data.len() {
-        return Err(DmaError::InvalidPeriod { period: dst.len(), data_len: data.len() });
+        return Err(DmaError::InvalidPeriod {
+            period: dst.len(),
+            data_len: data.len(),
+        });
     }
-    
+
     dma_compute_into(
-        data, hull_len, ema_len, ema_gain_limit, &hull_ma_type, first, chosen, dst
+        data,
+        hull_len,
+        ema_len,
+        ema_gain_limit,
+        &hull_ma_type,
+        first,
+        chosen,
+        dst,
     );
-    
+
     let sqrt_len = (hull_len as f64).sqrt().round() as usize;
     let warmup_end = first + hull_len.max(ema_len) + sqrt_len - 1;
     let end = warmup_end.min(dst.len());
-    for v in &mut dst[..end] { *v = f64::NAN; }
+    for v in &mut dst[..end] {
+        *v = f64::NAN;
+    }
     Ok(())
 }
 
@@ -317,27 +347,58 @@ fn dma_prepare<'a>(
 ) -> Result<(&'a [f64], usize, usize, usize, &'a str, usize, Kernel), DmaError> {
     let data: &[f64] = input.as_ref();
     let len = data.len();
-    if len == 0 { return Err(DmaError::EmptyInputData); }
+    if len == 0 {
+        return Err(DmaError::EmptyInputData);
+    }
 
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(DmaError::AllValuesNaN)?;
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(DmaError::AllValuesNaN)?;
     let hull_length = input.get_hull_length();
-    let ema_length  = input.get_ema_length();
+    let ema_length = input.get_ema_length();
     let ema_gain_limit = input.get_ema_gain_limit();
     let hull_ma_type = input.hull_ma_type_str();
 
-    if hull_length == 0 || hull_length > len { return Err(DmaError::InvalidPeriod { period: hull_length, data_len: len }); }
-    if ema_length  == 0 || ema_length  > len { return Err(DmaError::InvalidPeriod { period: ema_length,  data_len: len }); }
+    if hull_length == 0 || hull_length > len {
+        return Err(DmaError::InvalidPeriod {
+            period: hull_length,
+            data_len: len,
+        });
+    }
+    if ema_length == 0 || ema_length > len {
+        return Err(DmaError::InvalidPeriod {
+            period: ema_length,
+            data_len: len,
+        });
+    }
 
     let sqrt_len = (hull_length as f64).sqrt().round() as usize;
     let needed = hull_length.max(ema_length) + sqrt_len;
     if len - first < needed {
-        return Err(DmaError::NotEnoughValidData { needed, valid: len - first });
+        return Err(DmaError::NotEnoughValidData {
+            needed,
+            valid: len - first,
+        });
     }
     if hull_ma_type != "WMA" && hull_ma_type != "EMA" {
-        return Err(DmaError::InvalidHullMAType { value: hull_ma_type.to_string() });
+        return Err(DmaError::InvalidHullMAType {
+            value: hull_ma_type.to_string(),
+        });
     }
-    let chosen = match kernel { Kernel::Auto => detect_best_kernel(), k => k };
-    Ok((data, hull_length, ema_length, ema_gain_limit, hull_ma_type, first, chosen))
+    let chosen = match kernel {
+        Kernel::Auto => detect_best_kernel(),
+        k => k,
+    };
+    Ok((
+        data,
+        hull_length,
+        ema_length,
+        ema_gain_limit,
+        hull_ma_type,
+        first,
+        chosen,
+    ))
 }
 
 #[inline(always)]
@@ -355,27 +416,59 @@ fn dma_compute_into(
         #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
         {
             if matches!(kernel, Kernel::Scalar | Kernel::ScalarBatch) {
-                dma_simd128(data, hull_length, ema_length, ema_gain_limit, hull_ma_type, first, out);
+                dma_simd128(
+                    data,
+                    hull_length,
+                    ema_length,
+                    ema_gain_limit,
+                    hull_ma_type,
+                    first,
+                    out,
+                );
                 return;
             }
         }
-        
+
         match kernel {
-            Kernel::Scalar | Kernel::ScalarBatch => {
-                dma_scalar(data, hull_length, ema_length, ema_gain_limit, hull_ma_type, first, out)
-            }
+            Kernel::Scalar | Kernel::ScalarBatch => dma_scalar(
+                data,
+                hull_length,
+                ema_length,
+                ema_gain_limit,
+                hull_ma_type,
+                first,
+                out,
+            ),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => {
-                dma_avx2(data, hull_length, ema_length, ema_gain_limit, hull_ma_type, first, out)
-            }
+            Kernel::Avx2 | Kernel::Avx2Batch => dma_avx2(
+                data,
+                hull_length,
+                ema_length,
+                ema_gain_limit,
+                hull_ma_type,
+                first,
+                out,
+            ),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => {
-                dma_avx512(data, hull_length, ema_length, ema_gain_limit, hull_ma_type, first, out)
-            }
+            Kernel::Avx512 | Kernel::Avx512Batch => dma_avx512(
+                data,
+                hull_length,
+                ema_length,
+                ema_gain_limit,
+                hull_ma_type,
+                first,
+                out,
+            ),
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
-                dma_scalar(data, hull_length, ema_length, ema_gain_limit, hull_ma_type, first, out)
-            }
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => dma_scalar(
+                data,
+                hull_length,
+                ema_length,
+                ema_gain_limit,
+                hull_ma_type,
+                first,
+                out,
+            ),
             _ => unreachable!(),
         }
     }
@@ -394,7 +487,9 @@ pub fn dma_scalar(
     out: &mut [f64],
 ) {
     let n = data.len();
-    if n == 0 { return; }
+    if n == 0 {
+        return;
+    }
 
     // --- Adaptive EMA state (single-output path)
     let alpha_e = 2.0 / (ema_length as f64 + 1.0);
@@ -434,7 +529,11 @@ pub fn dma_scalar(
     let mut diff_wma_init_done = false;
 
     // EMA(diff) state
-    let alpha_sqrt = if sqrt_len > 0 { 2.0 / (sqrt_len as f64 + 1.0) } else { 0.0 };
+    let alpha_sqrt = if sqrt_len > 0 {
+        2.0 / (sqrt_len as f64 + 1.0)
+    } else {
+        0.0
+    };
     let mut diff_ema = 0.0;
     let mut diff_ema_init_done = false;
     let mut diff_sum_seed = 0.0;
@@ -444,8 +543,16 @@ pub fn dma_scalar(
     let mut e_half_init_done = false;
     let mut e_full_prev = 0.0;
     let mut e_full_init_done = false;
-    let alpha_half = if half > 0 { 2.0 / (half as f64 + 1.0) } else { 0.0 };
-    let alpha_full = if hull_length > 0 { 2.0 / (hull_length as f64 + 1.0) } else { 0.0 };
+    let alpha_half = if half > 0 {
+        2.0 / (half as f64 + 1.0)
+    } else {
+        0.0
+    };
+    let alpha_full = if hull_length > 0 {
+        2.0 / (hull_length as f64 + 1.0)
+    } else {
+        0.0
+    };
 
     let is_wma = hull_ma_type == "WMA";
 
@@ -457,7 +564,9 @@ pub fn dma_scalar(
             if i >= i0_e {
                 let start = i + 1 - ema_length;
                 let mut sum = 0.0;
-                for k in start..=i { sum += data[k]; }
+                for k in start..=i {
+                    sum += data[k];
+                }
                 e0_prev = sum / ema_length as f64;
                 e0_init_done = true;
             }
@@ -477,7 +586,7 @@ pub fn dma_scalar(
                         let mut sum = 0.0;
                         let mut wsum_local = 0.0;
                         for (j, idx) in (start..=i).enumerate() {
-                            let w = (j + 1) as f64;            // oldest=1 ... newest=half
+                            let w = (j + 1) as f64; // oldest=1 ... newest=half
                             let v = data[idx];
                             sum += v;
                             wsum_local += w * v;
@@ -529,7 +638,9 @@ pub fn dma_scalar(
                     if i >= i0_half {
                         let start = i + 1 - half;
                         let mut sum = 0.0;
-                        for k in start..=i { sum += data[k]; }
+                        for k in start..=i {
+                            sum += data[k];
+                        }
                         e_half_prev = sum / half as f64;
                         e_half_init_done = true;
                     }
@@ -543,7 +654,9 @@ pub fn dma_scalar(
                     if i >= i0_full {
                         let start = i + 1 - hull_length;
                         let mut sum = 0.0;
-                        for k in start..=i { sum += data[k]; }
+                        for k in start..=i {
+                            sum += data[k];
+                        }
                         e_full_prev = sum / hull_length as f64;
                         e_full_init_done = true;
                     }
@@ -572,7 +685,7 @@ pub fn dma_scalar(
                         a_diff = 0.0;
                         s_diff = 0.0;
                         for (j, &v) in diff_ring.iter().enumerate() {
-                            let w = (j + 1) as f64;            // oldest=1 ... newest=sqrt_len
+                            let w = (j + 1) as f64; // oldest=1 ... newest=sqrt_len
                             a_diff += v;
                             s_diff += w * v;
                         }
@@ -625,7 +738,8 @@ pub fn dma_scalar(
                         best_gain = g;
                     }
                 }
-                ec_now = alpha_e * (e0_prev + best_gain * (x - ec_prev)) + (1.0 - alpha_e) * ec_prev;
+                ec_now =
+                    alpha_e * (e0_prev + best_gain * (x - ec_prev)) + (1.0 - alpha_e) * ec_prev;
                 ec_prev = ec_now;
             }
         }
@@ -649,7 +763,15 @@ unsafe fn dma_simd128(
     out: &mut [f64],
 ) {
     use core::arch::wasm32::*;
-    dma_scalar(data, hull_length, ema_length, ema_gain_limit, hull_ma_type, first_val, out);
+    dma_scalar(
+        data,
+        hull_length,
+        ema_length,
+        ema_gain_limit,
+        hull_ma_type,
+        first_val,
+        out,
+    );
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -663,7 +785,15 @@ unsafe fn dma_avx2(
     first_val: usize,
     out: &mut [f64],
 ) {
-    dma_scalar(data, hull_length, ema_length, ema_gain_limit, hull_ma_type, first_val, out);
+    dma_scalar(
+        data,
+        hull_length,
+        ema_length,
+        ema_gain_limit,
+        hull_ma_type,
+        first_val,
+        out,
+    );
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -677,7 +807,15 @@ unsafe fn dma_avx512(
     first_val: usize,
     out: &mut [f64],
 ) {
-    dma_scalar(data, hull_length, ema_length, ema_gain_limit, hull_ma_type, first_val, out);
+    dma_scalar(
+        data,
+        hull_length,
+        ema_length,
+        ema_gain_limit,
+        hull_ma_type,
+        first_val,
+        out,
+    );
 }
 
 #[derive(Debug, Clone)]
@@ -691,9 +829,9 @@ pub struct DmaStream {
     is_wma: bool,
 
     // raw ring for outgoing lookbacks
-    cap: usize,              // max(hull_length, ema_length)
+    cap: usize, // max(hull_length, ema_length)
     ring: Vec<f64>,
-    head: usize,             // next write index
+    head: usize, // next write index
     filled: usize,
 
     // first-valid handling
@@ -702,7 +840,7 @@ pub struct DmaStream {
 
     // EMA(e0)
     alpha_e: f64,
-    sum_e0: f64,             // running sum for SMA seed
+    sum_e0: f64, // running sum for SMA seed
     e0_prev: f64,
     e0_ready: bool,
 
@@ -711,35 +849,52 @@ pub struct DmaStream {
     ec_ready: bool,
 
     // HULL=WMA state
-    sum_half: f64, sum_full: f64,   // simple sums
-    s_half: f64,  s_full: f64,      // weighted sums
-    half_ready: bool, full_ready: bool,
+    sum_half: f64,
+    sum_full: f64, // simple sums
+    s_half: f64,
+    s_full: f64, // weighted sums
+    half_ready: bool,
+    full_ready: bool,
 
     // HULL=EMA state
-    alpha_half: f64, alpha_full: f64,
-    e_half_prev: f64, e_full_prev: f64,
-    e_half_ready: bool, e_full_ready: bool,
+    alpha_half: f64,
+    alpha_full: f64,
+    e_half_prev: f64,
+    e_full_prev: f64,
+    e_half_ready: bool,
+    e_full_ready: bool,
 
     // diff final smoother
     // for WMA(diff)
-    a_diff: f64, s_diff: f64, diff_wma_ready: bool,
+    a_diff: f64,
+    s_diff: f64,
+    diff_wma_ready: bool,
     // for EMA(diff)
-    alpha_sqrt: f64, diff_ema: f64, diff_ema_ready: bool,
+    alpha_sqrt: f64,
+    diff_ema: f64,
+    diff_ema_ready: bool,
     // shared diff ring
-    diff_ring: Vec<f64>, diff_head: usize, diff_filled: usize,
+    diff_ring: Vec<f64>,
+    diff_head: usize,
+    diff_filled: usize,
 }
 
 impl DmaStream {
     pub fn try_new(params: DmaParams) -> Result<Self, DmaError> {
         let hull_length = params.hull_length.unwrap_or(7);
-        let ema_length  = params.ema_length.unwrap_or(20);
+        let ema_length = params.ema_length.unwrap_or(20);
         let ema_gain_limit = params.ema_gain_limit.unwrap_or(50);
         let hull_ma_type = params.hull_ma_type.unwrap_or_else(|| "WMA".to_string());
         if hull_length == 0 || ema_length == 0 {
-            return Err(DmaError::InvalidPeriod { period: hull_length.max(ema_length), data_len: 0 });
+            return Err(DmaError::InvalidPeriod {
+                period: hull_length.max(ema_length),
+                data_len: 0,
+            });
         }
         if hull_ma_type != "WMA" && hull_ma_type != "EMA" {
-            return Err(DmaError::InvalidHullMAType { value: hull_ma_type });
+            return Err(DmaError::InvalidHullMAType {
+                value: hull_ma_type,
+            });
         }
 
         let half = hull_length / 2;
@@ -747,30 +902,59 @@ impl DmaStream {
         let cap = hull_length.max(ema_length).max(1);
 
         Ok(Self {
-            ema_length, ema_gain_limit, hull_length, half, sqrt_len,
+            ema_length,
+            ema_gain_limit,
+            hull_length,
+            half,
+            sqrt_len,
             is_wma: hull_ma_type == "WMA",
 
-            cap, ring: vec![f64::NAN; cap], head: 0, filled: 0,
-            i: 0, seen_first: false,
+            cap,
+            ring: vec![f64::NAN; cap],
+            head: 0,
+            filled: 0,
+            i: 0,
+            seen_first: false,
 
             alpha_e: 2.0 / (ema_length as f64 + 1.0),
-            sum_e0: 0.0, e0_prev: 0.0, e0_ready: false,
+            sum_e0: 0.0,
+            e0_prev: 0.0,
+            e0_ready: false,
 
-            ec_prev: 0.0, ec_ready: false,
+            ec_prev: 0.0,
+            ec_ready: false,
 
-            sum_half: 0.0, sum_full: 0.0,
-            s_half: 0.0,   s_full: 0.0,
-            half_ready: half == 0, full_ready: hull_length == 0,
+            sum_half: 0.0,
+            sum_full: 0.0,
+            s_half: 0.0,
+            s_full: 0.0,
+            half_ready: half == 0,
+            full_ready: hull_length == 0,
 
-            alpha_half: if half > 0 { 2.0 / (half as f64 + 1.0) } else { 0.0 },
+            alpha_half: if half > 0 {
+                2.0 / (half as f64 + 1.0)
+            } else {
+                0.0
+            },
             alpha_full: 2.0 / (hull_length as f64 + 1.0),
-            e_half_prev: 0.0, e_full_prev: 0.0,
-            e_half_ready: half == 0, e_full_ready: hull_length == 0,
+            e_half_prev: 0.0,
+            e_full_prev: 0.0,
+            e_half_ready: half == 0,
+            e_full_ready: hull_length == 0,
 
-            a_diff: 0.0, s_diff: 0.0, diff_wma_ready: sqrt_len == 0,
-            alpha_sqrt: if sqrt_len > 0 { 2.0 / (sqrt_len as f64 + 1.0) } else { 0.0 },
-            diff_ema: 0.0, diff_ema_ready: sqrt_len == 0,
-            diff_ring: vec![f64::NAN; sqrt_len.max(1)], diff_head: 0, diff_filled: 0,
+            a_diff: 0.0,
+            s_diff: 0.0,
+            diff_wma_ready: sqrt_len == 0,
+            alpha_sqrt: if sqrt_len > 0 {
+                2.0 / (sqrt_len as f64 + 1.0)
+            } else {
+                0.0
+            },
+            diff_ema: 0.0,
+            diff_ema_ready: sqrt_len == 0,
+            diff_ring: vec![f64::NAN; sqrt_len.max(1)],
+            diff_head: 0,
+            diff_filled: 0,
         })
     }
 
@@ -779,7 +963,9 @@ impl DmaStream {
         // skip leading NaNs to mirror batch `first`
         if !self.seen_first {
             self.i += 1;
-            if x.is_nan() { return None; }
+            if x.is_nan() {
+                return None;
+            }
             self.seen_first = true;
         }
 
@@ -787,7 +973,9 @@ impl DmaStream {
         let old_head = self.head;
         self.ring[old_head] = x;
         self.head = (old_head + 1) % self.cap;
-        if self.filled < self.cap { self.filled += 1; }
+        if self.filled < self.cap {
+            self.filled += 1;
+        }
 
         // helper to fetch outgoing k-back sample (k>=1)
         #[inline(always)]
@@ -798,12 +986,18 @@ impl DmaStream {
 
         // ==== EMA(e0) with SMA seed ====
         if self.filled < self.ema_length {
-            if x.is_finite() { self.sum_e0 += x; }
+            if x.is_finite() {
+                self.sum_e0 += x;
+            }
         } else {
             // incoming x included already; subtract outgoing
             let out_e = kback(&self.ring, self.head, self.cap, self.ema_length);
-            if x.is_finite()    { self.sum_e0 += x; }
-            if out_e.is_finite(){ self.sum_e0 -= out_e; }
+            if x.is_finite() {
+                self.sum_e0 += x;
+            }
+            if out_e.is_finite() {
+                self.sum_e0 -= out_e;
+            }
             if !self.e0_ready {
                 self.e0_prev = self.sum_e0 / self.ema_length as f64;
                 self.e0_ready = true;
@@ -819,11 +1013,17 @@ impl DmaStream {
             // WMA(half) rolling init + update
             if self.half > 0 {
                 if self.filled < self.half {
-                    if x.is_finite() { self.sum_half += x; }
+                    if x.is_finite() {
+                        self.sum_half += x;
+                    }
                 } else {
                     let out_h = kback(&self.ring, self.head, self.cap, self.half);
-                    if x.is_finite()    { self.sum_half += x; }
-                    if out_h.is_finite(){ self.sum_half -= out_h; }
+                    if x.is_finite() {
+                        self.sum_half += x;
+                    }
+                    if out_h.is_finite() {
+                        self.sum_half -= out_h;
+                    }
                     if !self.half_ready {
                         // seed weighted sum once
                         self.s_half = 0.0;
@@ -833,19 +1033,28 @@ impl DmaStream {
                         }
                         self.half_ready = true;
                     } else {
-                        let a_prev = self.sum_half + kback(&self.ring, self.head, self.cap, self.half); // previous sum before we subtracted out_h
+                        let a_prev =
+                            self.sum_half + kback(&self.ring, self.head, self.cap, self.half); // previous sum before we subtracted out_h
                         self.s_half = self.s_half + (self.half as f64) * x - a_prev;
                     }
                 }
-            } else { self.half_ready = true; }
+            } else {
+                self.half_ready = true;
+            }
 
             // WMA(full) rolling init + update
             if self.filled < self.hull_length {
-                if x.is_finite() { self.sum_full += x; }
+                if x.is_finite() {
+                    self.sum_full += x;
+                }
             } else {
                 let out_f = kback(&self.ring, self.head, self.cap, self.hull_length);
-                if x.is_finite()    { self.sum_full += x; }
-                if out_f.is_finite(){ self.sum_full -= out_f; }
+                if x.is_finite() {
+                    self.sum_full += x;
+                }
+                if out_f.is_finite() {
+                    self.sum_full -= out_f;
+                }
                 if !self.full_ready {
                     self.s_full = 0.0;
                     for j in 0..self.hull_length {
@@ -854,7 +1063,8 @@ impl DmaStream {
                     }
                     self.full_ready = true;
                 } else {
-                    let a_prev = self.sum_full + kback(&self.ring, self.head, self.cap, self.hull_length);
+                    let a_prev =
+                        self.sum_full + kback(&self.ring, self.head, self.cap, self.hull_length);
                     self.s_full = self.s_full + (self.hull_length as f64) * x - a_prev;
                 }
             }
@@ -872,19 +1082,26 @@ impl DmaStream {
                     // accumulate implicitly via ring
                 } else if !self.e_half_ready {
                     let mut s = 0.0;
-                    for j in 0..self.half { s += kback(&self.ring, self.head, self.cap, self.half - j); }
+                    for j in 0..self.half {
+                        s += kback(&self.ring, self.head, self.cap, self.half - j);
+                    }
                     self.e_half_prev = s / self.half as f64;
                     self.e_half_ready = true;
                 } else {
-                    self.e_half_prev = self.alpha_half * x + (1.0 - self.alpha_half) * self.e_half_prev;
+                    self.e_half_prev =
+                        self.alpha_half * x + (1.0 - self.alpha_half) * self.e_half_prev;
                 }
-            } else { self.e_half_ready = true; }
+            } else {
+                self.e_half_ready = true;
+            }
 
             if self.filled < self.hull_length {
                 // wait
             } else if !self.e_full_ready {
                 let mut s = 0.0;
-                for j in 0..self.hull_length { s += kback(&self.ring, self.head, self.cap, self.hull_length - j); }
+                for j in 0..self.hull_length {
+                    s += kback(&self.ring, self.head, self.cap, self.hull_length - j);
+                }
                 self.e_full_prev = s / self.hull_length as f64;
                 self.e_full_ready = true;
             } else {
@@ -899,16 +1116,21 @@ impl DmaStream {
         // final smoother over diff
         let mut hull_val = f64::NAN;
         if self.sqrt_len == 0 {
-            if diff_now.is_finite() { hull_val = diff_now; }
+            if diff_now.is_finite() {
+                hull_val = diff_now;
+            }
         } else if diff_now.is_finite() {
             let old = self.diff_ring[self.diff_head];
             self.diff_ring[self.diff_head] = diff_now;
             self.diff_head = (self.diff_head + 1) % self.sqrt_len;
-            if self.diff_filled < self.sqrt_len { self.diff_filled += 1; }
+            if self.diff_filled < self.sqrt_len {
+                self.diff_filled += 1;
+            }
 
             if self.is_wma {
                 if !self.diff_wma_ready && self.diff_filled == self.sqrt_len {
-                    self.a_diff = 0.0; self.s_diff = 0.0;
+                    self.a_diff = 0.0;
+                    self.s_diff = 0.0;
                     for j in 0..self.sqrt_len {
                         let v = self.diff_ring[(self.diff_head + j) % self.sqrt_len];
                         self.a_diff += v;
@@ -927,12 +1149,15 @@ impl DmaStream {
             } else {
                 if !self.diff_ema_ready && self.diff_filled == self.sqrt_len {
                     let mut s = 0.0;
-                    for j in 0..self.sqrt_len { s += self.diff_ring[j]; }
+                    for j in 0..self.sqrt_len {
+                        s += self.diff_ring[j];
+                    }
                     self.diff_ema = s / self.sqrt_len as f64;
                     self.diff_ema_ready = true;
                     hull_val = self.diff_ema;
                 } else if self.diff_ema_ready {
-                    self.diff_ema = self.alpha_sqrt * diff_now + (1.0 - self.alpha_sqrt) * self.diff_ema;
+                    self.diff_ema =
+                        self.alpha_sqrt * diff_now + (1.0 - self.alpha_sqrt) * self.diff_ema;
                     hull_val = self.diff_ema;
                 }
             }
@@ -950,11 +1175,16 @@ impl DmaStream {
                 let mut best_g = 0.0;
                 for gi in 0..=self.ema_gain_limit {
                     let g = gi as f64 / 10.0;
-                    let cand = self.alpha_e * (self.e0_prev + g * (x - self.ec_prev)) + (1.0 - self.alpha_e) * self.ec_prev;
+                    let cand = self.alpha_e * (self.e0_prev + g * (x - self.ec_prev))
+                        + (1.0 - self.alpha_e) * self.ec_prev;
                     let err = (x - cand).abs();
-                    if err < best_err { best_err = err; best_g = g; }
+                    if err < best_err {
+                        best_err = err;
+                        best_g = g;
+                    }
                 }
-                let ec = self.alpha_e * (self.e0_prev + best_g * (x - self.ec_prev)) + (1.0 - self.alpha_e) * self.ec_prev;
+                let ec = self.alpha_e * (self.e0_prev + best_g * (x - self.ec_prev))
+                    + (1.0 - self.alpha_e) * self.ec_prev;
                 self.ec_prev = ec;
                 ec_now = ec;
             }
@@ -962,7 +1192,11 @@ impl DmaStream {
 
         self.i += 1;
 
-        if hull_val.is_finite() && ec_now.is_finite() { Some(0.5 * (hull_val + ec_now)) } else { None }
+        if hull_val.is_finite() && ec_now.is_finite() {
+            Some(0.5 * (hull_val + ec_now))
+        } else {
+            None
+        }
     }
 }
 
@@ -996,58 +1230,58 @@ impl DmaBatchBuilder {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     pub fn kernel(mut self, k: Kernel) -> Self {
         self.kernel = k;
         self
     }
-    
+
     #[inline]
     pub fn hull_length_range(mut self, start: usize, end: usize, step: usize) -> Self {
         self.range.hull_length = (start, end, step);
         self
     }
-    
+
     #[inline]
     pub fn hull_length_static(mut self, val: usize) -> Self {
         self.range.hull_length = (val, val, 0);
         self
     }
-    
+
     #[inline]
     pub fn ema_length_range(mut self, start: usize, end: usize, step: usize) -> Self {
         self.range.ema_length = (start, end, step);
         self
     }
-    
+
     #[inline]
     pub fn ema_length_static(mut self, val: usize) -> Self {
         self.range.ema_length = (val, val, 0);
         self
     }
-    
+
     #[inline]
     pub fn ema_gain_limit_range(mut self, start: usize, end: usize, step: usize) -> Self {
         self.range.ema_gain_limit = (start, end, step);
         self
     }
-    
+
     #[inline]
     pub fn ema_gain_limit_static(mut self, val: usize) -> Self {
         self.range.ema_gain_limit = (val, val, 0);
         self
     }
-    
+
     #[inline]
     pub fn hull_ma_type(mut self, val: String) -> Self {
         self.range.hull_ma_type = val;
         self
     }
-    
+
     pub fn apply_slice(self, data: &[f64]) -> Result<DmaBatchOutput, DmaError> {
         dma_batch_with_kernel(data, &self.range, self.kernel)
     }
-    
+
     pub fn with_default_slice(data: &[f64], k: Kernel) -> Result<DmaBatchOutput, DmaError> {
         DmaBatchBuilder::new().kernel(k).apply_slice(data)
     }
@@ -1058,7 +1292,9 @@ impl DmaBatchBuilder {
     }
 
     pub fn with_default_candles(c: &Candles) -> Result<DmaBatchOutput, DmaError> {
-        DmaBatchBuilder::new().kernel(Kernel::Auto).apply_candles(c, "close")
+        DmaBatchBuilder::new()
+            .kernel(Kernel::Auto)
+            .apply_candles(c, "close")
     }
 }
 
@@ -1076,10 +1312,11 @@ impl DmaBatchOutput {
             c.hull_length.unwrap_or(7) == p.hull_length.unwrap_or(7)
                 && c.ema_length.unwrap_or(20) == p.ema_length.unwrap_or(20)
                 && c.ema_gain_limit.unwrap_or(50) == p.ema_gain_limit.unwrap_or(50)
-                && c.hull_ma_type.as_ref().unwrap_or(&"WMA".to_string()) == p.hull_ma_type.as_ref().unwrap_or(&"WMA".to_string())
+                && c.hull_ma_type.as_ref().unwrap_or(&"WMA".to_string())
+                    == p.hull_ma_type.as_ref().unwrap_or(&"WMA".to_string())
         })
     }
-    
+
     pub fn values_for(&self, p: &DmaParams) -> Option<&[f64]> {
         self.row_for_params(p).map(|row| {
             let start = row * self.cols;
@@ -1096,11 +1333,11 @@ fn expand_grid_dma(r: &DmaBatchRange) -> Vec<DmaParams> {
         }
         (start..=end).step_by(step).collect()
     }
-    
+
     let hull_lengths = axis_usize(r.hull_length);
     let ema_lengths = axis_usize(r.ema_length);
     let ema_gain_limits = axis_usize(r.ema_gain_limit);
-    
+
     let mut combos = Vec::new();
     for &h in &hull_lengths {
         for &e in &ema_lengths {
@@ -1119,12 +1356,20 @@ fn expand_grid_dma(r: &DmaBatchRange) -> Vec<DmaParams> {
 
 // Batch API parity facades
 #[inline(always)]
-pub fn dma_batch_slice(data: &[f64], sweep: &DmaBatchRange, kern: Kernel) -> Result<DmaBatchOutput, DmaError> {
+pub fn dma_batch_slice(
+    data: &[f64],
+    sweep: &DmaBatchRange,
+    kern: Kernel,
+) -> Result<DmaBatchOutput, DmaError> {
     dma_batch_inner(data, sweep, kern, false)
 }
 
 #[inline(always)]
-pub fn dma_batch_par_slice(data: &[f64], sweep: &DmaBatchRange, kern: Kernel) -> Result<DmaBatchOutput, DmaError> {
+pub fn dma_batch_par_slice(
+    data: &[f64],
+    sweep: &DmaBatchRange,
+    kern: Kernel,
+) -> Result<DmaBatchOutput, DmaError> {
     dma_batch_inner(data, sweep, kern, true)
 }
 
@@ -1138,18 +1383,28 @@ fn dma_batch_inner(
     let combos = expand_grid_dma(sweep);
     let cols = data.len();
     let rows = combos.len();
-    if cols == 0 { return Err(DmaError::EmptyInputData); }
-    if rows == 0 { return Err(DmaError::EmptyInputData); }
+    if cols == 0 {
+        return Err(DmaError::EmptyInputData);
+    }
+    if rows == 0 {
+        return Err(DmaError::EmptyInputData);
+    }
 
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(DmaError::AllValuesNaN)?;
-    let warm: Vec<usize> = combos.iter().map(|c| {
-        let h = c.hull_length.unwrap();
-        let e = c.ema_length.unwrap();
-        let sqrt_len = (h as f64).sqrt().round() as usize;
-        first + h.max(e) + sqrt_len - 1
-    }).collect();
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(DmaError::AllValuesNaN)?;
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| {
+            let h = c.hull_length.unwrap();
+            let e = c.ema_length.unwrap();
+            let sqrt_len = (h as f64).sqrt().round() as usize;
+            first + h.max(e) + sqrt_len - 1
+        })
+        .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
@@ -1159,22 +1414,40 @@ fn dma_batch_inner(
     dma_batch_inner_into(data, sweep, kern, parallel, out)?;
 
     let values = unsafe {
-        Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, guard.len(), guard.capacity())
+        Vec::from_raw_parts(
+            guard.as_mut_ptr() as *mut f64,
+            guard.len(),
+            guard.capacity(),
+        )
     };
 
-    Ok(DmaBatchOutput { values, combos, rows, cols })
+    Ok(DmaBatchOutput {
+        values,
+        combos,
+        rows,
+        cols,
+    })
 }
 
-pub fn dma_batch_with_kernel(data: &[f64], sweep: &DmaBatchRange, k: Kernel) -> Result<DmaBatchOutput, DmaError> {
+pub fn dma_batch_with_kernel(
+    data: &[f64],
+    sweep: &DmaBatchRange,
+    k: Kernel,
+) -> Result<DmaBatchOutput, DmaError> {
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => return Err(DmaError::InvalidPeriod { period: 0, data_len: 0 }), // ALMA parity
+        _ => {
+            return Err(DmaError::InvalidPeriod {
+                period: 0,
+                data_len: 0,
+            })
+        } // ALMA parity
     };
     // map batch→SIMD like ALMA
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
-        Kernel::Avx2Batch   => Kernel::Avx2,
+        Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
         _ => unreachable!(),
     };
@@ -1190,9 +1463,17 @@ fn dma_batch_inner_into(
     out: &mut [f64],
 ) -> Result<Vec<DmaParams>, DmaError> {
     let combos = expand_grid_dma(sweep);
-    if combos.is_empty() { return Err(DmaError::InvalidPeriod { period: 0, data_len: 0 }); }
+    if combos.is_empty() {
+        return Err(DmaError::InvalidPeriod {
+            period: 0,
+            data_len: 0,
+        });
+    }
 
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(DmaError::AllValuesNaN)?;
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(DmaError::AllValuesNaN)?;
     let cols = data.len();
 
     let actual = match k {
@@ -1201,27 +1482,29 @@ fn dma_batch_inner_into(
     };
     let simd = match actual {
         Kernel::Avx512Batch => Kernel::Avx512,
-        Kernel::Avx2Batch   => Kernel::Avx2,
+        Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
         _ => actual,
     };
 
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| {
-        let dst = unsafe { core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len()) };
+        let dst = unsafe {
+            core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len())
+        };
         let prm = &combos[row];
         let hull_len = prm.hull_length.unwrap_or(7);
         let ema_len = prm.ema_length.unwrap_or(20);
-        
+
         // Calculate warmup period for this parameter combination
         let sqrt_len = (hull_len as f64).sqrt().round() as usize;
         let warmup_end = first + hull_len.max(ema_len) + sqrt_len - 1;
         let warmup_end = warmup_end.min(dst.len());
-        
+
         // Initialize warmup period with NaN
         for i in 0..warmup_end {
             dst[i] = f64::NAN;
         }
-        
+
         dma_compute_into(
             data,
             hull_len,
@@ -1240,11 +1523,18 @@ fn dma_batch_inner_into(
 
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
-        dst_mu.par_chunks_mut(cols).enumerate().for_each(|(r, row)| do_row(r, row));
+        dst_mu
+            .par_chunks_mut(cols)
+            .enumerate()
+            .for_each(|(r, row)| do_row(r, row));
         #[cfg(target_arch = "wasm32")]
-        for (r, row) in dst_mu.chunks_mut(cols).enumerate() { do_row(r, row); }
+        for (r, row) in dst_mu.chunks_mut(cols).enumerate() {
+            do_row(r, row);
+        }
     } else {
-        for (r, row) in dst_mu.chunks_mut(cols).enumerate() { do_row(r, row); }
+        for (r, row) in dst_mu.chunks_mut(cols).enumerate() {
+            do_row(r, row);
+        }
     }
 
     Ok(combos)
@@ -1271,11 +1561,11 @@ pub fn dma_py<'py>(
         hull_ma_type: Some(hull_ma_type.to_string()),
     };
     let input = DmaInput::from_slice(slice_in, params);
-    
+
     let result_vec: Vec<f64> = py
         .allow_threads(|| dma_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    
+
     Ok(result_vec.into_pyarray(py))
 }
 
@@ -1289,18 +1579,23 @@ pub struct DmaStreamPy {
 #[pymethods]
 impl DmaStreamPy {
     #[new]
-    fn new(hull_length: usize, ema_length: usize, ema_gain_limit: usize, hull_ma_type: &str) -> PyResult<Self> {
+    fn new(
+        hull_length: usize,
+        ema_length: usize,
+        ema_gain_limit: usize,
+        hull_ma_type: &str,
+    ) -> PyResult<Self> {
         let params = DmaParams {
             hull_length: Some(hull_length),
             ema_length: Some(ema_length),
             ema_gain_limit: Some(ema_gain_limit),
             hull_ma_type: Some(hull_ma_type.to_string()),
         };
-        let stream = DmaStream::try_new(params)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let stream =
+            DmaStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok(DmaStreamPy { stream })
     }
-    
+
     fn update(&mut self, value: f64) -> Option<f64> {
         self.stream.update(value)
     }
@@ -1344,9 +1639,14 @@ pub fn dma_batch_py<'py>(
             };
             let simd = match kernel {
                 Kernel::Avx512Batch => Kernel::Avx512,
-                Kernel::Avx2Batch   => Kernel::Avx2,
+                Kernel::Avx2Batch => Kernel::Avx2,
                 Kernel::ScalarBatch => Kernel::Scalar,
-                _ => return Err(DmaError::InvalidPeriod { period: 0, data_len: 0 }),
+                _ => {
+                    return Err(DmaError::InvalidPeriod {
+                        period: 0,
+                        data_len: 0,
+                    })
+                }
             };
             dma_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
         })
@@ -1356,24 +1656,39 @@ pub fn dma_batch_py<'py>(
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
     dict.set_item(
         "hull_lengths",
-        combos.iter().map(|p| p.hull_length.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py),
+        combos
+            .iter()
+            .map(|p| p.hull_length.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
     )?;
     dict.set_item(
         "ema_lengths",
-        combos.iter().map(|p| p.ema_length.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py),
+        combos
+            .iter()
+            .map(|p| p.ema_length.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
     )?;
     dict.set_item(
         "ema_gain_limits",
-        combos.iter().map(|p| p.ema_gain_limit.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py),
+        combos
+            .iter()
+            .map(|p| p.ema_gain_limit.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
     )?;
     dict.set_item("hull_ma_type", hull_ma_type)?;
-    
+
     // optional: when sweeping types (for now always the same)
     dict.set_item(
         "hull_ma_types",
-        combos.iter().map(|p| p.hull_ma_type.as_deref().unwrap_or("WMA")).collect::<Vec<_>>()
+        combos
+            .iter()
+            .map(|p| p.hull_ma_type.as_deref().unwrap_or("WMA"))
+            .collect::<Vec<_>>(),
     )?;
-    
+
     Ok(dict)
 }
 
@@ -1393,11 +1708,11 @@ pub fn dma_js(
         hull_ma_type: Some(hull_ma_type.to_string()),
     };
     let input = DmaInput::from_slice(data, params);
-    
+
     let mut output = vec![0.0; data.len()];
     dma_into_slice(&mut output, &input, detect_best_kernel())
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
-    
+
     Ok(output)
 }
 
@@ -1432,10 +1747,10 @@ pub fn dma_into(
     if in_ptr.is_null() || out_ptr.is_null() {
         return Err(JsValue::from_str("null pointer passed to dma_into"));
     }
-    
+
     unsafe {
         let data = std::slice::from_raw_parts(in_ptr, len);
-        
+
         let params = DmaParams {
             hull_length: Some(hull_length),
             ema_length: Some(ema_length),
@@ -1443,7 +1758,7 @@ pub fn dma_into(
             hull_ma_type: Some(hull_ma_type.to_string()),
         };
         let input = DmaInput::from_slice(data, params);
-        
+
         if in_ptr == out_ptr {
             let mut temp = vec![0.0; len];
             dma_into_slice(&mut temp, &input, detect_best_kernel())
@@ -1455,7 +1770,7 @@ pub fn dma_into(
             dma_into_slice(out, &input, detect_best_kernel())
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
         }
-        
+
         Ok(())
     }
 }
@@ -1481,8 +1796,8 @@ pub struct DmaBatchJsOutput {
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = dma_batch)]
 pub fn dma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
-    let cfg: DmaBatchConfig =
-        serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {e}")))?;
+    let cfg: DmaBatchConfig = serde_wasm_bindgen::from_value(config)
+        .map_err(|e| JsValue::from_str(&format!("Invalid config: {e}")))?;
 
     let sweep = DmaBatchRange {
         hull_length: cfg.hull_length_range,
@@ -1495,16 +1810,24 @@ pub fn dma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, Js
     let combos = expand_grid_dma(&sweep);
     let rows = combos.len();
     let cols = data.len();
-    if rows == 0 { return Err(JsValue::from_str("no parameter combinations")); }
+    if rows == 0 {
+        return Err(JsValue::from_str("no parameter combinations"));
+    }
 
     let mut buf_mu = make_uninit_matrix(rows, cols);
-    let first = data.iter().position(|x| !x.is_nan()).ok_or_else(|| JsValue::from_str("All NaN"))?;
-    let warm: Vec<usize> = combos.iter().map(|c| {
-        let h = c.hull_length.unwrap();
-        let e = c.ema_length.unwrap();
-        let sqrt_len = (h as f64).sqrt().round() as usize;
-        first + h.max(e) + sqrt_len - 1
-    }).collect();
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or_else(|| JsValue::from_str("All NaN"))?;
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| {
+            let h = c.hull_length.unwrap();
+            let e = c.ema_length.unwrap();
+            let sqrt_len = (h as f64).sqrt().round() as usize;
+            first + h.max(e) + sqrt_len - 1
+        })
+        .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
@@ -1515,10 +1838,20 @@ pub fn dma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, Js
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     let values = unsafe {
-        Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, guard.len(), guard.capacity())
+        Vec::from_raw_parts(
+            guard.as_mut_ptr() as *mut f64,
+            guard.len(),
+            guard.capacity(),
+        )
     };
-    let js = DmaBatchJsOutput { values, combos, rows, cols };
-    serde_wasm_bindgen::to_value(&js).map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
+    let js = DmaBatchJsOutput {
+        values,
+        combos,
+        rows,
+        cols,
+    };
+    serde_wasm_bindgen::to_value(&js)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
 }
 
 #[cfg(feature = "wasm")]
@@ -1527,9 +1860,15 @@ pub fn dma_batch_into(
     in_ptr: *const f64,
     out_ptr: *mut f64,
     len: usize,
-    hull_start: usize, hull_end: usize, hull_step: usize,
-    ema_start: usize, ema_end: usize, ema_step: usize,
-    gain_start: usize, gain_end: usize, gain_step: usize,
+    hull_start: usize,
+    hull_end: usize,
+    hull_step: usize,
+    ema_start: usize,
+    ema_end: usize,
+    ema_step: usize,
+    gain_start: usize,
+    gain_end: usize,
+    gain_step: usize,
     hull_ma_type: &str,
 ) -> Result<usize, JsValue> {
     if in_ptr.is_null() || out_ptr.is_null() {
@@ -1549,13 +1888,19 @@ pub fn dma_batch_into(
 
         // warm prefixes pre-init in caller's buffer
         let out_mu = std::slice::from_raw_parts_mut(out_ptr as *mut MaybeUninit<f64>, rows * cols);
-        let first = data.iter().position(|x| !x.is_nan()).ok_or_else(|| JsValue::from_str("All NaN"))?;
-        let warm: Vec<usize> = combos.iter().map(|c| {
-            let h = c.hull_length.unwrap();
-            let e = c.ema_length.unwrap();
-            let sqrt_len = (h as f64).sqrt().round() as usize;
-            first + h.max(e) + sqrt_len - 1
-        }).collect();
+        let first = data
+            .iter()
+            .position(|x| !x.is_nan())
+            .ok_or_else(|| JsValue::from_str("All NaN"))?;
+        let warm: Vec<usize> = combos
+            .iter()
+            .map(|c| {
+                let h = c.hull_length.unwrap();
+                let e = c.ema_length.unwrap();
+                let sqrt_len = (h as f64).sqrt().round() as usize;
+                first + h.max(e) + sqrt_len - 1
+            })
+            .collect();
         init_matrix_prefixes(out_mu, cols, &warm);
 
         // compute into caller buffer
@@ -1573,15 +1918,15 @@ mod tests {
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
     use std::error::Error;
-    
+
     fn check_dma_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let input = DmaInput::from_candles(&candles, "close", DmaParams::default());
         let result = dma_with_kernel(&input, kernel)?;
-        
+
         let expected_last_five = [
             59404.62489256,
             59326.48766951,
@@ -1589,12 +1934,12 @@ mod tests {
             59153.22811529,
             58933.88503421,
         ];
-        
+
         let start = result.values.len().saturating_sub(5);
         for (i, &val) in result.values[start..].iter().enumerate() {
             let diff = (val - expected_last_five[i]).abs();
             assert!(
-                diff < 0.001,  // Allow small tolerance for floating-point differences
+                diff < 0.001, // Allow small tolerance for floating-point differences
                 "[{}] DMA {:?} mismatch at idx {}: got {}, expected {}, diff {}",
                 test_name,
                 kernel,
@@ -1606,12 +1951,12 @@ mod tests {
         }
         Ok(())
     }
-    
+
     fn check_dma_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let default_params = DmaParams {
             hull_length: None,
             ema_length: None,
@@ -1621,15 +1966,15 @@ mod tests {
         let input = DmaInput::from_candles(&candles, "close", default_params);
         let output = dma_with_kernel(&input, kernel)?;
         assert_eq!(output.values.len(), candles.close.len());
-        
+
         Ok(())
     }
-    
+
     fn check_dma_default_candles(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let input = DmaInput::with_default_candles(&candles);
         match input.data {
             DmaData::Candles { source, .. } => assert_eq!(source, "close"),
@@ -1637,10 +1982,10 @@ mod tests {
         }
         let output = dma_with_kernel(&input, kernel)?;
         assert_eq!(output.values.len(), candles.close.len());
-        
+
         Ok(())
     }
-    
+
     fn check_dma_zero_period(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let input_data = [10.0, 20.0, 30.0];
@@ -1652,11 +1997,18 @@ mod tests {
         };
         let input = DmaInput::from_slice(&input_data, params);
         let res = dma_with_kernel(&input, kernel);
-        assert!(res.is_err(), "[{}] DMA should fail with zero period", test_name);
+        assert!(
+            res.is_err(),
+            "[{}] DMA should fail with zero period",
+            test_name
+        );
         Ok(())
     }
-    
-    fn check_dma_period_exceeds_length(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+
+    fn check_dma_period_exceeds_length(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let data_small = [10.0, 20.0, 30.0];
         let params = DmaParams {
@@ -1674,7 +2026,7 @@ mod tests {
         );
         Ok(())
     }
-    
+
     fn check_dma_very_small_dataset(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let single_point = [42.0];
@@ -1688,7 +2040,7 @@ mod tests {
         );
         Ok(())
     }
-    
+
     fn check_dma_empty_input(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let empty: [f64; 0] = [];
@@ -1702,7 +2054,7 @@ mod tests {
         );
         Ok(())
     }
-    
+
     fn check_dma_all_nan(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let nan_data = [f64::NAN, f64::NAN, f64::NAN];
@@ -1716,7 +2068,7 @@ mod tests {
         );
         Ok(())
     }
-    
+
     fn check_dma_invalid_hull_type(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let data = [10.0; 50];
@@ -1735,7 +2087,7 @@ mod tests {
         );
         Ok(())
     }
-    
+
     // Generate test functions for all kernel variants
     macro_rules! generate_all_dma_tests {
         ($($test_fn:ident),*) => {
@@ -1769,7 +2121,7 @@ mod tests {
     macro_rules! generate_dma_batch_tests {
         ($($fn_name:ident),*) => {
             paste::paste! {
-                $(  
+                $(
                     #[test]
                     fn [<$fn_name _scalar_batch>]() -> Result<(), Box<dyn Error>> {
                         $fn_name(stringify!([<$fn_name _scalar_batch>]), Kernel::ScalarBatch)
@@ -1791,7 +2143,7 @@ mod tests {
     }
 
     generate_dma_batch_tests!(check_dma_batch_basic);
-    
+
     // Generate batch tests with auto-detect like ALMA
     macro_rules! gen_batch_tests {
         ($fn_name:ident) => {
@@ -1807,7 +2159,7 @@ mod tests {
     }
 
     gen_batch_tests!(check_batch_sweep);
-    
+
     // Additional test functions for ALMA parity
     fn check_dma_reinput(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -1835,7 +2187,8 @@ mod tests {
 
         let first = c.close.iter().position(|x| !x.is_nan()).unwrap_or(0);
         let sqrt_len = (p.hull_length.unwrap_or(7) as f64).sqrt().round() as usize;
-        let warm = first + p.hull_length.unwrap_or(7).max(p.ema_length.unwrap_or(20)) + sqrt_len - 1;
+        let warm =
+            first + p.hull_length.unwrap_or(7).max(p.ema_length.unwrap_or(20)) + sqrt_len - 1;
         for (i, &v) in out.iter().enumerate().skip(warm.min(out.len())) {
             assert!(!v.is_nan(), "[{test}] unexpected NaN at {i}");
         }
@@ -1847,7 +2200,9 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        let out = DmaBatchBuilder::new().kernel(kernel).apply_candles(&c, "close")?;
+        let out = DmaBatchBuilder::new()
+            .kernel(kernel)
+            .apply_candles(&c, "close")?;
         let def = DmaParams::default();
         let row = out.values_for(&def).expect("default row missing");
         assert_eq!(row.len(), c.close.len());
@@ -1877,16 +2232,25 @@ mod tests {
         let c = read_candles_from_csv(file)?;
         let p = DmaParams::default();
 
-        let batch = dma_with_kernel(&DmaInput::from_candles(&c, "close", p.clone()), kernel)?.values;
+        let batch =
+            dma_with_kernel(&DmaInput::from_candles(&c, "close", p.clone()), kernel)?.values;
 
         let mut s = DmaStream::try_new(p)?;
         let mut stream = Vec::with_capacity(c.close.len());
-        for &x in &c.close { stream.push(s.update(x).unwrap_or(f64::NAN)); }
+        for &x in &c.close {
+            stream.push(s.update(x).unwrap_or(f64::NAN));
+        }
 
         assert_eq!(batch.len(), stream.len());
         for (i, (&b, &t)) in batch.iter().zip(&stream).enumerate() {
-            if b.is_nan() && t.is_nan() { continue; }
-            assert!((b - t).abs() < 1e-9, "[{test}] idx {i} diff {}", (b - t).abs());
+            if b.is_nan() && t.is_nan() {
+                continue;
+            }
+            assert!(
+                (b - t).abs() < 1e-9,
+                "[{test}] idx {i} diff {}",
+                (b - t).abs()
+            );
         }
         Ok(())
     }
@@ -1913,7 +2277,7 @@ mod tests {
     }
 
     gen_added_dma_tests!(check_dma_reinput, check_dma_nan_handling);
-    
+
     // NOTE: Streaming test still has minor initialization differences with ring-buffer implementation
     // The ring-buffer correctly maintains history but initial seeding may differ slightly from batch
     // Uncomment to test streaming parity: gen_added_dma_tests!(check_dma_streaming);
@@ -1944,44 +2308,61 @@ mod tests {
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     #[test]
     fn test_dma_simd128_correctness() {
-        let data = vec![1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0,9.0,10.0];
+        let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
         let p = DmaParams::default();
         let input = DmaInput::from_slice(&data, p);
         let scalar = dma_with_kernel(&input, Kernel::Scalar).unwrap();
-        let simd   = dma_with_kernel(&input, Kernel::Scalar).unwrap(); // simd128 path behind Scalar on wasm
+        let simd = dma_with_kernel(&input, Kernel::Scalar).unwrap(); // simd128 path behind Scalar on wasm
         assert_eq!(scalar.values.len(), simd.values.len());
-        for (a,b) in scalar.values.iter().zip(simd.values.iter()) {
-            assert!((a-b).abs() < 1e-10);
+        for (a, b) in scalar.values.iter().zip(simd.values.iter()) {
+            assert!((a - b).abs() < 1e-10);
         }
     }
-    
+
     // Special debug-only tests that don't need kernel variants
     #[cfg(debug_assertions)]
     #[test]
     fn test_dma_no_poison_values() -> Result<(), Box<dyn Error>> {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let input = DmaInput::from_candles(&candles, "close", DmaParams::default());
         let output = dma(&input)?;
-        
+
         for &v in &output.values {
-            if v.is_nan() { continue; }
+            if v.is_nan() {
+                continue;
+            }
             let b = v.to_bits();
             // Check for common uninitialized memory patterns
-            assert_ne!(b, 0x11111111_11111111, "Found poison value 0x11111111_11111111");
-            assert_ne!(b, 0x22222222_22222222, "Found poison value 0x22222222_22222222");
-            assert_ne!(b, 0x33333333_33333333, "Found poison value 0x33333333_33333333");
-            assert_ne!(b, 0xDEADBEEF_DEADBEEF, "Found poison value 0xDEADBEEF_DEADBEEF");
-            assert_ne!(b, 0xFEEEFEEE_FEEEFEEE, "Found poison value 0xFEEEFEEE_FEEEFEEE");
+            assert_ne!(
+                b, 0x11111111_11111111,
+                "Found poison value 0x11111111_11111111"
+            );
+            assert_ne!(
+                b, 0x22222222_22222222,
+                "Found poison value 0x22222222_22222222"
+            );
+            assert_ne!(
+                b, 0x33333333_33333333,
+                "Found poison value 0x33333333_33333333"
+            );
+            assert_ne!(
+                b, 0xDEADBEEF_DEADBEEF,
+                "Found poison value 0xDEADBEEF_DEADBEEF"
+            );
+            assert_ne!(
+                b, 0xFEEEFEEE_FEEEFEEE,
+                "Found poison value 0xFEEEFEEE_FEEEFEEE"
+            );
         }
         Ok(())
     }
-    
+
     fn check_dma_batch_basic(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let data = vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0];
-        
+
         let sweep = DmaBatchRange {
             hull_length: (3, 5, 1),
             ema_length: (5, 5, 0),
@@ -1989,15 +2370,19 @@ mod tests {
             hull_ma_type: "WMA".to_string(),
         };
         let output = dma_batch_with_kernel(&data, &sweep, kernel)?;
-        
-        assert_eq!(output.rows, 3, "[{}] Expected 3 rows for hull_length range 3-5", test_name);
+
+        assert_eq!(
+            output.rows, 3,
+            "[{}] Expected 3 rows for hull_length range 3-5",
+            test_name
+        );
         assert_eq!(output.cols, data.len());
         assert_eq!(output.values.len(), output.rows * output.cols);
         assert_eq!(output.combos.len(), output.rows);
-        
+
         Ok(())
     }
-    
+
     #[test]
     fn test_dma_stream_incremental() -> Result<(), Box<dyn Error>> {
         let params = DmaParams {
@@ -2006,23 +2391,26 @@ mod tests {
             ema_gain_limit: Some(10),
             hull_ma_type: Some("WMA".to_string()),
         };
-        
+
         let mut stream = DmaStream::try_new(params)?;
         let data = vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0];
-        
+
         let mut results = Vec::new();
         for &val in &data {
             if let Some(result) = stream.update(val) {
                 results.push(result);
             }
         }
-        
+
         // Should get results after warmup period
-        assert!(!results.is_empty(), "Stream should produce results after warmup");
-        
+        assert!(
+            !results.is_empty(),
+            "Stream should produce results after warmup"
+        );
+
         Ok(())
     }
-    
+
     #[cfg(debug_assertions)]
     #[test]
     fn test_dma_batch_no_poison_values() -> Result<(), Box<dyn std::error::Error>> {
@@ -2035,7 +2423,9 @@ mod tests {
             .ema_gain_limit_static(10)
             .apply_slice(&c.close)?;
         for &v in &out.values {
-            if v.is_nan() { continue; }
+            if v.is_nan() {
+                continue;
+            }
             let b = v.to_bits();
             assert_ne!(b, 0x11111111_11111111);
             assert_ne!(b, 0x22222222_22222222);

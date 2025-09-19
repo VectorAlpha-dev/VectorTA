@@ -28,6 +28,35 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct DeviceArrayF32Py {
+    pub(crate) inner: crate::cuda::moving_averages::DeviceArrayF32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl DeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack__<'py>(&self, _py: Python<'py>) -> PyResult<PyObject> {
+        Err(pyo3::exceptions::PyNotImplementedError::new_err(
+            "__dlpack__ not implemented yet",
+        ))
+    }
+}
+
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
@@ -370,25 +399,10 @@ pub fn alma_into_slice(dst: &mut [f64], input: &AlmaInput, kern: Kernel) -> Resu
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-#[target_feature(enable = "avx512f,avx512dq")]
+#[target_feature(enable = "avx512f")]
 pub unsafe fn hsum_pd_zmm(v: __m512d) -> f64 {
-	// Use AVX512DQ reduce intrinsic if available for single-instruction reduction
-	#[cfg(target_feature = "avx512dq")]
-	{
-		_mm512_reduce_add_pd(v)
-	}
-	#[cfg(not(target_feature = "avx512dq"))]
-	{
-		// Optimized tree reduction with better pipelining
-		let hi256 = _mm512_extractf64x4_pd(v, 1);
-		let lo256 = _mm512_castpd512_pd256(v);
-		let sum256 = _mm256_add_pd(hi256, lo256);
-		// Use hadd for better throughput on some CPUs
-		let sum128 = _mm_add_pd(_mm256_castpd256_pd128(sum256), 
-		                        _mm256_extractf128_pd(sum256, 1));
-		let sum64 = _mm_hadd_pd(sum128, sum128);
-		_mm_cvtsd_f64(sum64)
-	}
+	#[allow(unused_unsafe)]
+	{ _mm512_reduce_add_pd(v) }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -563,7 +577,7 @@ unsafe fn alma_avx512_short(
 		let mut acc = _mm512_setzero_pd();
 
 		for blk in 0..chunks {
-			let w = _mm512_loadu_pd(weights.as_ptr().add(blk * STEP));
+			let w = _mm512_load_pd(weights.as_ptr().add(blk * STEP));
 			let d = _mm512_loadu_pd(data.as_ptr().add(start + blk * STEP));
 			acc = _mm512_fmadd_pd(d, w, acc);
 		}
@@ -580,7 +594,7 @@ unsafe fn alma_avx512_short(
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-#[target_feature(enable = "avx512f,avx512dq,fma")]
+#[target_feature(enable = "avx512f,fma")]
 unsafe fn alma_avx512_long(
 	data: &[f64],
 	weights: &[f64],
@@ -594,30 +608,34 @@ unsafe fn alma_avx512_long(
 	let tail_len = period % STEP;
 	// Use 8-way unrolling for maximum ILP
 	let unroll8 = n_chunks & !7;
-	let remaining = n_chunks - unroll8;
 	let tail_mask: __mmask8 = (1u8 << tail_len).wrapping_sub(1);
 
 	debug_assert!(period >= 1 && n_chunks > 0);
 	debug_assert_eq!(data.len(), out.len());
 	debug_assert!(weights.len() >= period);
 
-	let mut wregs: Vec<__m512d> = Vec::with_capacity(n_chunks + (tail_len != 0) as usize);
+	const MAX_STACK_CHUNKS: usize = 256;
+	let mut stack_storage = MaybeUninit::<[__m512d; MAX_STACK_CHUNKS]>::uninit();
+	let mut heap_storage: Option<Vec<__m512d>> = None;
 
-	// Use aligned loads when possible
-	for blk in 0..n_chunks {
-		let wptr = weights.as_ptr().add(blk * STEP);
-		// Check alignment and use appropriate load
-		let w_vec = if wptr as usize & 0x3F == 0 {
-			_mm512_load_pd(wptr)
-		} else {
-			_mm512_loadu_pd(wptr)
-		};
-		wregs.push(w_vec);
-	}
+	let wregs: &[__m512d] = if n_chunks <= MAX_STACK_CHUNKS {
+		let base = stack_storage.as_mut_ptr().cast::<__m512d>();
+		for blk in 0..n_chunks {
+			unsafe {
+				base.add(blk).write(_mm512_load_pd(weights.as_ptr().add(blk * STEP)));
+			}
+		}
+		unsafe { core::slice::from_raw_parts(base, n_chunks) }
+	} else {
+		let mut regs = Vec::with_capacity(n_chunks);
+		for blk in 0..n_chunks {
+			regs.push(_mm512_load_pd(weights.as_ptr().add(blk * STEP)));
+		}
+		heap_storage = Some(regs);
+		heap_storage.as_ref().unwrap().as_slice()
+	};
 	let w_tail = if tail_len != 0 {
-		let wt = _mm512_maskz_loadu_pd(tail_mask, weights.as_ptr().add(n_chunks * STEP));
-		wregs.push(wt);
-		Some(wt)
+		Some(_mm512_maskz_loadu_pd(tail_mask, weights.as_ptr().add(n_chunks * STEP)))
 	} else {
 		None
 	};
@@ -640,10 +658,6 @@ unsafe fn alma_avx512_long(
 
 			// 8-way unrolled loop for maximum throughput
 			for blk in (0..unroll8).step_by(8) {
-				// Prefetch 16 blocks ahead for L1 cache
-				_mm_prefetch(data_ptr.add((blk + 16) * STEP) as *const i8, _MM_HINT_T0);
-				_mm_prefetch(data_ptr.add((blk + 17) * STEP) as *const i8, _MM_HINT_T0);
-
 				let d0 = _mm512_loadu_pd(data_ptr.add((blk + 0) * STEP));
 				let d1 = _mm512_loadu_pd(data_ptr.add((blk + 1) * STEP));
 				let d2 = _mm512_loadu_pd(data_ptr.add((blk + 2) * STEP));
@@ -698,9 +712,6 @@ unsafe fn alma_avx512_long(
 
 			// 8-way unrolled loop
 			for blk in (0..unroll8).step_by(8) {
-				_mm_prefetch(data_ptr.add((blk + 16) * STEP) as *const i8, _MM_HINT_T0);
-				_mm_prefetch(data_ptr.add((blk + 17) * STEP) as *const i8, _MM_HINT_T0);
-
 				let d0 = _mm512_loadu_pd(data_ptr.add((blk + 0) * STEP));
 				let d1 = _mm512_loadu_pd(data_ptr.add((blk + 1) * STEP));
 				let d2 = _mm512_loadu_pd(data_ptr.add((blk + 2) * STEP));
@@ -1075,19 +1086,9 @@ fn alma_batch_inner_into(
 	let cols = data.len();
 	let mut inv_norms = vec![0.0; rows];
 
-	// Initialize NaN prefixes for each row based on warmup period
-	for (row, combo) in combos.iter().enumerate() {
-		let warmup = first + combo.period.unwrap() - 1;
-		let row_start = row * cols;
-		for i in 0..warmup.min(cols) {
-			out[row_start + i] = f64::NAN;
-		}
-	}
-
 	let cap = rows * max_p;
 	let mut flat_w = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cap);
 	flat_w.resize(cap, 0.0);
-	let flat_slice = flat_w.as_mut_slice();
 
 	for (row, prm) in combos.iter().enumerate() {
 		let period = prm.period.unwrap();
@@ -1129,14 +1130,14 @@ fn alma_batch_inner_into(
 		let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
 		match actual_kern {
-			Kernel::Scalar | Kernel::ScalarBatch => alma_row_scalar(data, first, period, max_p, w_ptr, inv_n, dst),
+			Kernel::Scalar | Kernel::ScalarBatch => alma_row_scalar(data, first, period, w_ptr, inv_n, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => alma_row_avx2(data, first, period, max_p, w_ptr, inv_n, dst),
+			Kernel::Avx2 | Kernel::Avx2Batch => alma_row_avx2(data, first, period, w_ptr, inv_n, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => alma_row_avx512(data, first, period, max_p, w_ptr, inv_n, dst),
+			Kernel::Avx512 | Kernel::Avx512Batch => alma_row_avx512(data, first, period, w_ptr, inv_n, dst),
 			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
 			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
-				alma_row_scalar(data, first, period, max_p, w_ptr, inv_n, dst)
+				alma_row_scalar(data, first, period, w_ptr, inv_n, dst)
 			}
 			Kernel::Auto => unreachable!("Auto kernel should have been resolved"),
 		}
@@ -1171,7 +1172,6 @@ unsafe fn alma_row_scalar(
 	data: &[f64],
 	first: usize,
 	period: usize,
-	stride: usize,
 	w_ptr: *const f64,
 	inv_n: f64,
 	out: &mut [f64],
@@ -1198,7 +1198,6 @@ unsafe fn alma_row_avx2(
 	data: &[f64],
 	first: usize,
 	period: usize,
-	stride: usize,
 	w_ptr: *const f64,
 	inv_n: f64,
 	out: &mut [f64],
@@ -1239,23 +1238,20 @@ unsafe fn alma_row_avx2(
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[target_feature(enable = "avx512f,fma,avx512dq")]
+#[target_feature(enable = "avx512f,fma")]
 pub unsafe fn alma_row_avx512(
 	data: &[f64],
 	first: usize,
 	period: usize,
-	stride: usize,
 	w_ptr: *const f64,
 	inv_n: f64,
 	out: &mut [f64],
 ) {
 	if period <= 32 {
-		alma_row_avx512_short(data, first, period, stride, w_ptr, inv_n, out);
+		alma_row_avx512_short(data, first, period, w_ptr, inv_n, out);
 	} else {
-		alma_row_avx512_long(data, first, period, stride, w_ptr, inv_n, out);
+		alma_row_avx512_long(data, first, period, w_ptr, inv_n, out);
 	}
-
-	_mm_sfence();
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1264,7 +1260,6 @@ unsafe fn alma_row_avx512_short(
 	data: &[f64],
 	first: usize,
 	period: usize,
-	_stride: usize,
 	w_ptr: *const f64,
 	inv_n: f64,
 	out: &mut [f64],
@@ -1282,7 +1277,7 @@ unsafe fn alma_row_avx512_short(
 			let start = i + 1 - period;
 			let d_tail = _mm512_maskz_loadu_pd(tail_mask, data.as_ptr().add(start));
 			let res = hsum_pd_zmm(_mm512_mul_pd(d_tail, w_tail)) * inv_n;
-			_mm_stream_sd(out.get_unchecked_mut(i) as *mut f64, _mm_set_sd(res));
+			*out.get_unchecked_mut(i) = res;
 		}
 		return;
 	}
@@ -1292,7 +1287,7 @@ unsafe fn alma_row_avx512_short(
 		let mut acc = _mm512_setzero_pd();
 
 		for blk in 0..chunks {
-			let w = _mm512_loadu_pd(w_ptr.add(blk * STEP));
+			let w = _mm512_load_pd(w_ptr.add(blk * STEP));
 			let d = _mm512_loadu_pd(data.as_ptr().add(start + blk * STEP));
 			acc = _mm512_fmadd_pd(d, w, acc);
 		}
@@ -1304,17 +1299,16 @@ unsafe fn alma_row_avx512_short(
 		}
 
 		let res = hsum_pd_zmm(acc) * inv_n;
-		_mm_stream_sd(out.get_unchecked_mut(i) as *mut f64, _mm_set_sd(res));
+		*out.get_unchecked_mut(i) = res;
 	}
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[target_feature(enable = "avx512f,avx512dq,fma")]
+#[target_feature(enable = "avx512f,fma")]
 unsafe fn alma_row_avx512_long(
 	data: &[f64],
 	first: usize,
 	period: usize,
-	_stride: usize,
 	w_ptr: *const f64,
 	inv_n: f64,
 	out: &mut [f64],
@@ -1330,7 +1324,7 @@ unsafe fn alma_row_avx512_long(
 	let mut wregs: [core::mem::MaybeUninit<__m512d>; MAX_CHUNKS] = core::mem::MaybeUninit::uninit().assume_init();
 
 	for blk in 0..n_chunks {
-		wregs[blk].as_mut_ptr().write(_mm512_loadu_pd(w_ptr.add(blk * STEP)));
+		wregs[blk].as_mut_ptr().write(_mm512_load_pd(w_ptr.add(blk * STEP)));
 	}
 	if tail_len != 0 {
 		wregs[n_chunks]
@@ -1349,7 +1343,7 @@ unsafe fn alma_row_avx512_long(
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[target_feature(enable = "avx512f,avx512dq,fma")]
+#[target_feature(enable = "avx512f,fma")]
 unsafe fn long_kernel_no_tail(
 	data: &[f64],
 	first: usize,
@@ -1373,8 +1367,6 @@ unsafe fn long_kernel_no_tail(
 
 		let mut blk = 0;
 		while blk < paired {
-			_mm_prefetch(data_ptr.add((blk + 16) * STEP) as *const i8, _MM_HINT_T0);
-
 			let d0 = _mm512_loadu_pd(data_ptr.add((blk + 0) * STEP));
 			let d1 = _mm512_loadu_pd(data_ptr.add((blk + 1) * STEP));
 			let d2 = _mm512_loadu_pd(data_ptr.add((blk + 2) * STEP));
@@ -1396,7 +1388,7 @@ unsafe fn long_kernel_no_tail(
 		let sum = _mm512_add_pd(_mm512_add_pd(s0, s1), _mm512_add_pd(s2, s3));
 		let res = hsum_pd_zmm(sum) * inv_n;
 
-		_mm_stream_sd(dst_ptr as *mut f64, _mm_set_sd(res));
+		*dst_ptr = res;
 
 		data_ptr = data_ptr.add(1);
 		dst_ptr = dst_ptr.add(1);
@@ -1407,7 +1399,7 @@ unsafe fn long_kernel_no_tail(
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[target_feature(enable = "avx512f,avx512dq,fma")]
+#[target_feature(enable = "avx512f,fma")]
 unsafe fn long_kernel_with_tail(
 	data: &[f64],
 	first: usize,
@@ -1435,8 +1427,6 @@ unsafe fn long_kernel_with_tail(
 
 		let mut blk = 0;
 		while blk < paired {
-			_mm_prefetch(data_ptr.add((blk + 16) * STEP) as *const i8, _MM_HINT_T0);
-
 			let d0 = _mm512_loadu_pd(data_ptr.add((blk + 0) * STEP));
 			let d1 = _mm512_loadu_pd(data_ptr.add((blk + 1) * STEP));
 			let d2 = _mm512_loadu_pd(data_ptr.add((blk + 2) * STEP));
@@ -1461,7 +1451,7 @@ unsafe fn long_kernel_with_tail(
 		let sum = _mm512_add_pd(_mm512_add_pd(s0, s1), _mm512_add_pd(s2, s3));
 		let res = hsum_pd_zmm(sum) * inv_n;
 
-		_mm_stream_sd(dst_ptr as *mut f64, _mm_set_sd(res));
+		*dst_ptr = res;
 
 		data_ptr = data_ptr.add(1);
 		dst_ptr = dst_ptr.add(1);
@@ -2384,54 +2374,51 @@ pub fn alma_batch_py<'py>(
 
 // ==================== PYTHON: CUDA BINDINGS (zero-copy) ====================
 #[cfg(all(feature = "python", feature = "cuda"))]
+/// Deprecated: prefer `alma_cuda_batch_dev` for zero-copy VRAM access.
 #[pyfunction(name = "alma_cuda_batch")]
-#[pyo3(signature = (data, period_range, offset_range, sigma_range, device_id=0))]
+#[pyo3(signature = (data_f32, period_range, offset_range, sigma_range, device_id=0))]
 pub fn alma_cuda_batch_py<'py>(
     py: Python<'py>,
-    data: numpy::PyReadonlyArray1<'py, f64>,
+    data_f32: numpy::PyReadonlyArray1<'py, f32>,
     period_range: (usize, usize, usize),
     offset_range: (f64, f64, f64),
     sigma_range: (f64, f64, f64),
     device_id: usize,
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
-    use numpy::{IntoPyArray, PyArrayMethods, PyUntypedArrayMethods};
-    use pyo3::types::PyDict;
     use crate::cuda::cuda_available;
     use crate::cuda::moving_averages::CudaAlma;
+    use numpy::{IntoPyArray, PyArrayMethods};
+    use pyo3::types::PyDict;
 
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
 
-    let slice_in: &[f64] = data.as_slice()?;
+    let slice_in: &[f32] = data_f32.as_slice()?;
     let sweep = AlmaBatchRange { period: period_range, offset: offset_range, sigma: sigma_range };
 
-    // Run CUDA without holding the GIL.
-    let out = py.allow_threads(|| {
+    let (rows, cols, combos, values) = py.allow_threads(|| -> PyResult<(usize, usize, Vec<AlmaParams>, Vec<f32>)> {
         let cuda = CudaAlma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.alma_batch(slice_in, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+        let preview = expand_grid(&sweep);
+        let mut buf = vec![0f32; preview.len() * slice_in.len()];
+        let (rows, cols, combos) = cuda
+            .alma_batch_into_host_f32(slice_in, &sweep, &mut buf)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok((rows, cols, combos, buf))
     })?;
 
-    let rows = out.rows;
-    let cols = out.cols;
-
-    // Zero-copy Vec<f64> -> NumPy (no extra host copy). Then reshape (view-only).
-    let values = out.values.into_pyarray(py).reshape((rows, cols))?;
-
-    let periods = out
-        .combos
+    let values = values.into_pyarray(py).reshape((rows, cols))?;
+    let periods = combos
         .iter()
         .map(|p| p.period.unwrap() as u64)
         .collect::<Vec<_>>()
         .into_pyarray(py);
-    let offsets = out
-        .combos
+    let offsets = combos
         .iter()
         .map(|p| p.offset.unwrap())
         .collect::<Vec<_>>()
         .into_pyarray(py);
-    let sigmas = out
-        .combos
+    let sigmas = combos
         .iter()
         .map(|p| p.sigma.unwrap())
         .collect::<Vec<_>>()
@@ -2447,17 +2434,54 @@ pub fn alma_cuda_batch_py<'py>(
 
 
 #[cfg(all(feature = "python", feature = "cuda"))]
+/// Deprecated: prefer `alma_cuda_many_series_one_param_dev` for VRAM handles.
 #[pyfunction(name = "alma_cuda_many_series_one_param")]
-#[pyo3(signature = (data_tm, period, offset, sigma, device_id=0))]
+#[pyo3(signature = (data_tm_f32, period, offset, sigma, device_id=0))]
 pub fn alma_cuda_many_series_one_param_py<'py>(
     py: Python<'py>,
-    data_tm: numpy::PyReadonlyArray2<'py, f64>, // time-major [T, N], C-contiguous
+    data_tm_f32: numpy::PyReadonlyArray2<'py, f32>, // time-major [T, N], C-contiguous
     period: usize,
     offset: f64,
     sigma: f64,
     device_id: usize,
-) -> PyResult<Bound<'py, numpy::PyArray2<f64>>> {
-    use numpy::{IntoPyArray, PyArrayMethods, PyUntypedArrayMethods};
+) -> PyResult<Bound<'py, numpy::PyArray2<f32>>> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::moving_averages::CudaAlma;
+    use numpy::{IntoPyArray, PyArrayMethods};
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let flat_in: &[f32] = data_tm_f32.as_slice()?;
+    let rows = data_tm_f32.shape()[0];
+    let cols = data_tm_f32.shape()[1];
+
+    let params = AlmaParams { period: Some(period), offset: Some(offset), sigma: Some(sigma) };
+    let values = py.allow_threads(|| -> PyResult<Vec<f32>> {
+        let cuda = CudaAlma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let mut buf = vec![0f32; rows * cols];
+        cuda
+            .alma_multi_series_one_param_time_major_into_host_f32(flat_in, cols, rows, &params, &mut buf)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(buf)
+    })?;
+
+    let arr = values.into_pyarray(py).reshape((rows, cols))?;
+    Ok(arr)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "alma_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, period_range, offset_range, sigma_range, device_id=0))]
+pub fn alma_cuda_batch_dev_py(
+    py: Python<'_>,
+    data_f32: numpy::PyReadonlyArray1<'_, f32>,
+    period_range: (usize, usize, usize),
+    offset_range: (f64, f64, f64),
+    sigma_range: (f64, f64, f64),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     use crate::cuda::moving_averages::CudaAlma;
 
@@ -2465,25 +2489,55 @@ pub fn alma_cuda_many_series_one_param_py<'py>(
         return Err(PyValueError::new_err("CUDA not available"));
     }
 
-    // Borrow as a flat slice without copying. Requires C-contiguous input.
-    let flat_in: &[f64] = data_tm.as_slice()?;
-    let rows = data_tm.shape()[0];
-    let cols = data_tm.shape()[1];
+    let slice_in: &[f32] = data_f32.as_slice()?;
+    let sweep = AlmaBatchRange { period: period_range, offset: offset_range, sigma: sigma_range };
 
-    let params = AlmaParams { period: Some(period), offset: Some(offset), sigma: Some(sigma) };
-    let out_flat: Vec<f64> = py.allow_threads(|| {
+    let inner = py.allow_threads(|| {
         let cuda = CudaAlma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.alma_multi_series_one_param_time_major(flat_in, cols, rows, &params)
+        cuda
+            .alma_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    // Zero-copy Vec -> NumPy view, then reshape to [T, N] without copying.
-    let arr = out_flat.into_pyarray(py).reshape((rows, cols))?;
-    Ok(arr)
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "alma_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, period, offset, sigma, device_id=0))]
+pub fn alma_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    period: usize,
+    offset: f64,
+    sigma: f64,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::moving_averages::CudaAlma;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let flat_in: &[f32] = data_tm_f32.as_slice()?;
+    let rows = data_tm_f32.shape()[0];
+    let cols = data_tm_f32.shape()[1];
+    let params = AlmaParams { period: Some(period), offset: Some(offset), sigma: Some(sigma) };
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaAlma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda
+            .alma_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
 }
 
 // FP32-only, user-supplied output (zero extra copies)
 #[cfg(all(feature = "python", feature = "cuda"))]
+/// Deprecated: use `alma_cuda_batch_dev` plus an explicit device→host copy when needed.
 #[pyfunction(name = "alma_cuda_batch_into")]
 #[pyo3(signature = (data_f32, period_range, offset_range, sigma_range, out, device_id=0))]
 pub fn alma_cuda_batch_into_py<'py>(
@@ -2520,42 +2574,7 @@ pub fn alma_cuda_batch_into_py<'py>(
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyfunction(name = "alma_cuda_batch_into_f64")]
-#[pyo3(signature = (data_f64, period_range, offset_range, sigma_range, out, device_id=0))]
-pub fn alma_cuda_batch_into_f64_py<'py>(
-    py: Python<'py>,
-    data_f64: numpy::PyReadonlyArray1<'py, f64>,
-    period_range: (usize, usize, usize),
-    offset_range: (f64, f64, f64),
-    sigma_range: (f64, f64, f64),
-    out: Bound<'py, numpy::PyArray2<f32>>,
-    device_id: usize,
-) -> PyResult<()> {
-    use crate::cuda::cuda_available;
-    use crate::cuda::moving_averages::CudaAlma;
-    use numpy::{PyUntypedArrayMethods, PyArrayMethods};
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
-    let data_slice64: &[f64] = data_f64.as_slice()?;
-    let mut data32: Vec<f32> = data_slice64.iter().map(|&x| x as f32).collect();
-    let sweep = AlmaBatchRange { period: period_range, offset: offset_range, sigma: sigma_range };
-    let combos = expand_grid(&sweep);
-    let expected_rows = combos.len();
-    let expected_cols = data_slice64.len();
-    let shape = out.shape();
-    if shape != [expected_rows, expected_cols] {
-        return Err(PyValueError::new_err(format!("out shape mismatch: got {:?}, expected [{}, {}]", shape, expected_rows, expected_cols)));
-    }
-    let out_slice: &mut [f32] = unsafe { out.as_slice_mut()? };
-    py.allow_threads(|| {
-        let cuda = CudaAlma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.alma_batch_into_host_f32(&data32, &sweep, out_slice)
-            .map(|_| ())
-            .map_err(|e| PyValueError::new_err(e.to_string()))
-    })
-}
-
-
-#[cfg(all(feature = "python", feature = "cuda"))]
+/// Deprecated: use `alma_cuda_many_series_one_param_dev` and copy explicitly if required.
 #[pyfunction(name = "alma_cuda_many_series_one_param_into")]
 #[pyo3(signature = (data_tm_f32, period, offset, sigma, out, device_id=0))]
 pub fn alma_cuda_many_series_one_param_into_py<'py>(
@@ -2597,10 +2616,12 @@ pub fn register_alma_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()
     // CUDA (feature-gated at compile time)
     #[cfg(feature = "cuda")]
     {
+        m.add_class::<DeviceArrayF32Py>()?;
+        m.add_function(wrap_pyfunction!(alma_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(alma_cuda_many_series_one_param_dev_py, m)?)?;
         m.add_function(wrap_pyfunction!(alma_cuda_batch_py, m)?)?;
         m.add_function(wrap_pyfunction!(alma_cuda_many_series_one_param_py, m)?)?;
         m.add_function(wrap_pyfunction!(alma_cuda_batch_into_py, m)?)?;
-        m.add_function(wrap_pyfunction!(alma_cuda_batch_into_f64_py, m)?)?;
         m.add_function(wrap_pyfunction!(alma_cuda_many_series_one_param_into_py, m)?)?;
     }
     Ok(())

@@ -41,8 +41,8 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel,
-    init_matrix_prefixes, make_uninit_matrix,
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -77,7 +77,10 @@ impl<'a> AsRef<[f64]> for VamaInput<'a> {
 /// Input data enum supporting both raw slices and candle data
 #[derive(Debug, Clone)]
 pub enum VamaData<'a> {
-    Candles { candles: &'a Candles, source: &'a str },
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
     Slice(&'a [f64]),
 }
 
@@ -121,11 +124,14 @@ impl<'a> VamaInput<'a> {
     #[inline]
     pub fn from_candles(c: &'a Candles, s: &'a str, p: VamaParams) -> Self {
         Self {
-            data: VamaData::Candles { candles: c, source: s },
+            data: VamaData::Candles {
+                candles: c,
+                source: s,
+            },
             params: p,
         }
     }
-    
+
     #[inline]
     pub fn from_slice(sl: &'a [f64], p: VamaParams) -> Self {
         Self {
@@ -133,32 +139,32 @@ impl<'a> VamaInput<'a> {
             params: p,
         }
     }
-    
+
     #[inline]
     pub fn with_default_candles(c: &'a Candles) -> Self {
         Self::from_candles(c, "close", VamaParams::default())
     }
-    
+
     #[inline]
     pub fn get_base_period(&self) -> usize {
         self.params.base_period.unwrap_or(113)
     }
-    
+
     #[inline]
     pub fn get_vol_period(&self) -> usize {
         self.params.vol_period.unwrap_or(51)
     }
-    
+
     #[inline]
     pub fn get_smoothing(&self) -> bool {
         self.params.smoothing.unwrap_or(true)
     }
-    
+
     #[inline]
     pub fn get_smooth_type(&self) -> usize {
         self.params.smooth_type.unwrap_or(3)
     }
-    
+
     #[inline]
     pub fn get_smooth_period(&self) -> usize {
         self.params.smooth_period.unwrap_or(5)
@@ -195,43 +201,43 @@ impl VamaBuilder {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     #[inline(always)]
     pub fn base_period(mut self, val: usize) -> Self {
         self.base_period = Some(val);
         self
     }
-    
+
     #[inline(always)]
     pub fn vol_period(mut self, val: usize) -> Self {
         self.vol_period = Some(val);
         self
     }
-    
+
     #[inline(always)]
     pub fn smoothing(mut self, val: bool) -> Self {
         self.smoothing = Some(val);
         self
     }
-    
+
     #[inline(always)]
     pub fn smooth_type(mut self, val: usize) -> Self {
         self.smooth_type = Some(val);
         self
     }
-    
+
     #[inline(always)]
     pub fn smooth_period(mut self, val: usize) -> Self {
         self.smooth_period = Some(val);
         self
     }
-    
+
     #[inline(always)]
     pub fn kernel(mut self, k: Kernel) -> Self {
         self.kernel = k;
         self
     }
-    
+
     #[inline(always)]
     pub fn apply(self, c: &Candles) -> Result<VamaOutput, VamaError> {
         let p = VamaParams {
@@ -244,7 +250,7 @@ impl VamaBuilder {
         let i = VamaInput::from_candles(c, "close", p);
         vama_with_kernel(&i, self.kernel)
     }
-    
+
     #[inline(always)]
     pub fn apply_slice(self, d: &[f64]) -> Result<VamaOutput, VamaError> {
         let p = VamaParams {
@@ -257,7 +263,7 @@ impl VamaBuilder {
         let i = VamaInput::from_slice(d, p);
         vama_with_kernel(&i, self.kernel)
     }
-    
+
     #[inline(always)]
     pub fn into_stream(self) -> Result<VamaStream, VamaError> {
         let p = VamaParams {
@@ -276,25 +282,25 @@ impl VamaBuilder {
 pub enum VamaError {
     #[error("vama: Input data slice is empty.")]
     EmptyInputData,
-    
+
     #[error("vama: All values are NaN.")]
     AllValuesNaN,
-    
+
     #[error("vama: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
-    
+
     #[error("vama: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
-    
+
     #[error("vama: Invalid smooth type: {smooth_type}. Must be 1 (SMA), 2 (EMA), or 3 (WMA)")]
     InvalidSmoothType { smooth_type: usize },
-    
+
     #[error("vama: EMA calculation failed: {0}")]
     EmaError(String),
-    
+
     #[error("vama: SMA calculation failed: {0}")]
     SmaError(String),
-    
+
     #[error("vama: WMA calculation failed: {0}")]
     WmaError(String),
 }
@@ -311,15 +317,20 @@ fn vama_core_into(
     out: &mut [f64],
 ) -> Result<(), VamaError> {
     let len = data.len();
-    
+
     // Base EMA into temp buffer with NaN prefix
     let mut ema_values = alloc_with_nan_prefix(len, first + base_period - 1);
-    let ema_input = EmaInput::from_slice(data, EmaParams { period: Some(base_period) });
+    let ema_input = EmaInput::from_slice(
+        data,
+        EmaParams {
+            period: Some(base_period),
+        },
+    );
     ema_into_slice(&mut ema_values, &ema_input, kernel)
         .map_err(|e| VamaError::EmaError(e.to_string()))?;
-    
+
     let warmup = first + base_period.max(vol_period) - 1;
-    
+
     // Main VAMA calculation directly into output
     for i in warmup..len {
         let mid = ema_values[i];
@@ -327,19 +338,25 @@ fn vama_core_into(
             out[i] = f64::NAN;
             continue;
         }
-        
+
         let start = i + 1 - vol_period.min(i + 1 - first);
         let mut vol_up = f64::NEG_INFINITY;
         let mut vol_down = f64::INFINITY;
-        
+
         for j in start..=i {
             let e = ema_values[j];
-            if e.is_nan() { continue; }
+            if e.is_nan() {
+                continue;
+            }
             let dev = data[j] - e;
-            if dev > vol_up { vol_up = dev; }
-            if dev < vol_down { vol_down = dev; }
+            if dev > vol_up {
+                vol_up = dev;
+            }
+            if dev < vol_down {
+                vol_down = dev;
+            }
         }
-        
+
         out[i] = if vol_up.is_infinite() || vol_down.is_infinite() {
             mid
         } else {
@@ -357,36 +374,54 @@ pub fn vama(input: &VamaInput) -> Result<VamaOutput, VamaError> {
 
 /// Entry point with explicit kernel selection - zero-copy orchestration
 pub fn vama_with_kernel(input: &VamaInput, kernel: Kernel) -> Result<VamaOutput, VamaError> {
-    let (data, base_p, vol_p, smoothing, smooth_ty, smooth_p, first, chosen) = 
+    let (data, base_p, vol_p, smoothing, smooth_ty, smooth_p, first, chosen) =
         vama_prepare(input, kernel)?;
     let warmup = first + base_p.max(vol_p) - 1;
-    
+
     if !smoothing {
         // Single allocation with NaN prefix pre-filled
         let mut out = alloc_with_nan_prefix(data.len(), warmup);
         vama_core_into(data, base_p, vol_p, first, chosen, &mut out)?;
         return Ok(VamaOutput { values: out });
     }
-    
+
     // Two allocations for smoothing, no copies:
     // 1) Work buffer for core pass
     let mut work = alloc_with_nan_prefix(data.len(), warmup);
     vama_core_into(data, base_p, vol_p, first, chosen, &mut work)?;
-    
+
     // 2) Final output buffer for smoothing result
     let mut out = alloc_with_nan_prefix(data.len(), warmup);
     match smooth_ty {
         1 => {
-            let si = SmaInput::from_slice(&work, SmaParams { period: Some(smooth_p) });
-            sma_into_slice(&mut out, &si, chosen).map_err(|e| VamaError::SmaError(e.to_string()))?;
+            let si = SmaInput::from_slice(
+                &work,
+                SmaParams {
+                    period: Some(smooth_p),
+                },
+            );
+            sma_into_slice(&mut out, &si, chosen)
+                .map_err(|e| VamaError::SmaError(e.to_string()))?;
         }
         2 => {
-            let ei = EmaInput::from_slice(&work, EmaParams { period: Some(smooth_p) });
-            ema_into_slice(&mut out, &ei, chosen).map_err(|e| VamaError::EmaError(e.to_string()))?;
+            let ei = EmaInput::from_slice(
+                &work,
+                EmaParams {
+                    period: Some(smooth_p),
+                },
+            );
+            ema_into_slice(&mut out, &ei, chosen)
+                .map_err(|e| VamaError::EmaError(e.to_string()))?;
         }
         3 => {
-            let wi = WmaInput::from_slice(&work, WmaParams { period: Some(smooth_p) });
-            wma_into_slice(&mut out, &wi, chosen).map_err(|e| VamaError::WmaError(e.to_string()))?;
+            let wi = WmaInput::from_slice(
+                &work,
+                WmaParams {
+                    period: Some(smooth_p),
+                },
+            );
+            wma_into_slice(&mut out, &wi, chosen)
+                .map_err(|e| VamaError::WmaError(e.to_string()))?;
         }
         _ => unreachable!(),
     }
@@ -396,33 +431,67 @@ pub fn vama_with_kernel(input: &VamaInput, kernel: Kernel) -> Result<VamaOutput,
 /// Zero-copy into-slice with warmup NaNs written, no final copying
 #[inline]
 pub fn vama_into_slice(dst: &mut [f64], input: &VamaInput, kern: Kernel) -> Result<(), VamaError> {
-    let (data, base_p, vol_p, smoothing, smooth_ty, smooth_p, first, chosen) = 
+    let (data, base_p, vol_p, smoothing, smooth_ty, smooth_p, first, chosen) =
         vama_prepare(input, kern)?;
     if dst.len() != data.len() {
-        return Err(VamaError::InvalidPeriod { period: dst.len(), data_len: data.len() });
+        return Err(VamaError::InvalidPeriod {
+            period: dst.len(),
+            data_len: data.len(),
+        });
     }
-    
+
     let warmup = first + base_p.max(vol_p) - 1;
-    
+
     if !smoothing {
         // Write warmup NaNs and compute directly into dst
-        for v in &mut dst[..warmup] { *v = f64::NAN; }
+        for v in &mut dst[..warmup] {
+            *v = f64::NAN;
+        }
         vama_core_into(data, base_p, vol_p, first, chosen, dst)?;
         return Ok(());
     }
-    
+
     // Smoothing: one transient work buffer, final in dst
     let mut work = alloc_with_nan_prefix(data.len(), warmup);
     vama_core_into(data, base_p, vol_p, first, chosen, &mut work)?;
-    
-    for v in &mut dst[..warmup] { *v = f64::NAN; }
+
+    for v in &mut dst[..warmup] {
+        *v = f64::NAN;
+    }
     match smooth_ty {
-        1 => sma_into_slice(dst, &SmaInput::from_slice(&work, SmaParams { period: Some(smooth_p) }), chosen)
-                .map_err(|e| VamaError::SmaError(e.to_string()))?,
-        2 => ema_into_slice(dst, &EmaInput::from_slice(&work, EmaParams { period: Some(smooth_p) }), chosen)
-                .map_err(|e| VamaError::EmaError(e.to_string()))?,
-        3 => wma_into_slice(dst, &WmaInput::from_slice(&work, WmaParams { period: Some(smooth_p) }), chosen)
-                .map_err(|e| VamaError::WmaError(e.to_string()))?,
+        1 => sma_into_slice(
+            dst,
+            &SmaInput::from_slice(
+                &work,
+                SmaParams {
+                    period: Some(smooth_p),
+                },
+            ),
+            chosen,
+        )
+        .map_err(|e| VamaError::SmaError(e.to_string()))?,
+        2 => ema_into_slice(
+            dst,
+            &EmaInput::from_slice(
+                &work,
+                EmaParams {
+                    period: Some(smooth_p),
+                },
+            ),
+            chosen,
+        )
+        .map_err(|e| VamaError::EmaError(e.to_string()))?,
+        3 => wma_into_slice(
+            dst,
+            &WmaInput::from_slice(
+                &work,
+                WmaParams {
+                    period: Some(smooth_p),
+                },
+            ),
+            chosen,
+        )
+        .map_err(|e| VamaError::WmaError(e.to_string()))?,
         _ => unreachable!(),
     }
     Ok(())
@@ -436,33 +505,41 @@ fn vama_prepare<'a>(
 ) -> Result<(&'a [f64], usize, usize, bool, usize, usize, usize, Kernel), VamaError> {
     let data: &[f64] = input.as_ref();
     let len = data.len();
-    
+
     if len == 0 {
         return Err(VamaError::EmptyInputData);
     }
-    
-    let first = data.iter().position(|x| !x.is_nan())
+
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
         .ok_or(VamaError::AllValuesNaN)?;
-    
+
     let base_period = input.get_base_period();
     let vol_period = input.get_vol_period();
     let smoothing = input.get_smoothing();
     let smooth_type = input.get_smooth_type();
     let smooth_period = input.get_smooth_period();
-    
+
     // Validation
     if base_period == 0 || base_period > len {
-        return Err(VamaError::InvalidPeriod { period: base_period, data_len: len });
+        return Err(VamaError::InvalidPeriod {
+            period: base_period,
+            data_len: len,
+        });
     }
     if vol_period == 0 || vol_period > len {
-        return Err(VamaError::InvalidPeriod { period: vol_period, data_len: len });
+        return Err(VamaError::InvalidPeriod {
+            period: vol_period,
+            data_len: len,
+        });
     }
     if smoothing {
         if smooth_type < 1 || smooth_type > 3 {
             return Err(VamaError::InvalidSmoothType { smooth_type });
         }
     }
-    
+
     let needed = base_period.max(vol_period);
     if len - first < needed {
         return Err(VamaError::NotEnoughValidData {
@@ -470,15 +547,23 @@ fn vama_prepare<'a>(
             valid: len - first,
         });
     }
-    
+
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
         k => k,
     };
-    
-    Ok((data, base_period, vol_period, smoothing, smooth_type, smooth_period, first, chosen))
-}
 
+    Ok((
+        data,
+        base_period,
+        vol_period,
+        smoothing,
+        smooth_type,
+        smooth_period,
+        first,
+        chosen,
+    ))
+}
 
 // ==================== STREAMING SUPPORT ====================
 /// Streaming calculator for real-time updates
@@ -502,27 +587,27 @@ impl VamaStream {
         let smoothing = params.smoothing.unwrap_or(true);
         let smooth_type = params.smooth_type.unwrap_or(3);
         let smooth_period = params.smooth_period.unwrap_or(5);
-        
+
         if base_period == 0 {
-            return Err(VamaError::InvalidPeriod { 
-                period: base_period, 
-                data_len: 0 
+            return Err(VamaError::InvalidPeriod {
+                period: base_period,
+                data_len: 0,
             });
         }
-        
+
         if vol_period == 0 {
-            return Err(VamaError::InvalidPeriod { 
-                period: vol_period, 
-                data_len: 0 
+            return Err(VamaError::InvalidPeriod {
+                period: vol_period,
+                data_len: 0,
             });
         }
-        
+
         if smoothing && (smooth_type < 1 || smooth_type > 3) {
             return Err(VamaError::InvalidSmoothType { smooth_type });
         }
-        
+
         let buffer_size = base_period.max(vol_period) * 2;
-        
+
         Ok(Self {
             buffer: vec![0.0; buffer_size],
             ema_buffer: vec![0.0; buffer_size],
@@ -535,7 +620,7 @@ impl VamaStream {
             ready: false,
         })
     }
-    
+
     pub fn update(&mut self, value: f64) -> Option<f64> {
         // simple EMA update + O(vol_period) deviation window scan
         let alpha = 2.0 / (self.base_period as f64 + 1.0);
@@ -553,8 +638,12 @@ impl VamaStream {
         }
 
         self.index = self.index.wrapping_add(1);
-        if self.index >= self.base_period.max(self.vol_period) as u64 { self.ready = true; }
-        if !self.ready { return None; }
+        if self.index >= self.base_period.max(self.vol_period) as u64 {
+            self.ready = true;
+        }
+        if !self.ready {
+            return None;
+        }
 
         let ema_now = self.ema_buffer[(self.index.wrapping_sub(1)) as usize % n];
         let mut hi = f64::NEG_INFINITY;
@@ -565,12 +654,22 @@ impl VamaStream {
             let x = self.buffer[j as usize % n];
             let e = self.ema_buffer[j as usize % n];
             let d = x - e;
-            if d > hi { hi = d; }
-            if d < lo { lo = d; }
+            if d > hi {
+                hi = d;
+            }
+            if d < lo {
+                lo = d;
+            }
         }
-        let core = if hi.is_infinite() || lo.is_infinite() { ema_now } else { ema_now + (hi + lo)/2.0 };
+        let core = if hi.is_infinite() || lo.is_infinite() {
+            ema_now
+        } else {
+            ema_now + (hi + lo) / 2.0
+        };
 
-        if !self.smoothing { return Some(core); }
+        if !self.smoothing {
+            return Some(core);
+        }
         // optional smoothing step (small fixed SMA/EMA/WMA over last smooth_period on core)
         // keep it trivial to avoid extra storage; approximate with SMA of recent cores
         let m = self.smooth_period.min(self.index as usize);
@@ -588,10 +687,18 @@ impl VamaStream {
                 let xj = self.buffer[jj % n];
                 let ej = self.ema_buffer[jj % n];
                 let dj = xj - ej;
-                if dj > hi2 { hi2 = dj; }
-                if dj < lo2 { lo2 = dj; }
+                if dj > hi2 {
+                    hi2 = dj;
+                }
+                if dj < lo2 {
+                    lo2 = dj;
+                }
             }
-            let core_j = if hi2.is_infinite() || lo2.is_infinite() { e } else { e + (hi2 + lo2)/2.0 };
+            let core_j = if hi2.is_infinite() || lo2.is_infinite() {
+                e
+            } else {
+                e + (hi2 + lo2) / 2.0
+            };
             sum += core_j;
             cnt += 1;
         }
@@ -604,7 +711,7 @@ impl VamaStream {
 #[derive(Clone, Debug)]
 pub struct VamaBatchRange {
     pub base_period: (usize, usize, usize),
-    pub vol_period:  (usize, usize, usize),
+    pub vol_period: (usize, usize, usize),
 }
 
 impl Default for VamaBatchRange {
@@ -619,8 +726,10 @@ impl Default for VamaBatchRange {
 /// Expand parameter ranges to all combinations
 #[inline(always)]
 fn expand_grid_vama(r: &VamaBatchRange) -> Vec<VamaParams> {
-    fn axis((s,e,t):(usize,usize,usize)) -> Vec<usize> {
-        if t == 0 || s == e { return vec![s]; }
+    fn axis((s, e, t): (usize, usize, usize)) -> Vec<usize> {
+        if t == 0 || s == e {
+            return vec![s];
+        }
         (s..=e).step_by(t).collect()
     }
     let bs = axis(r.base_period);
@@ -631,7 +740,7 @@ fn expand_grid_vama(r: &VamaBatchRange) -> Vec<VamaParams> {
             out.push(VamaParams {
                 base_period: Some(b),
                 vol_period: Some(v),
-                smoothing: Some(false),   // batch path unsmoothed, mirrors alma.rs approach
+                smoothing: Some(false), // batch path unsmoothed, mirrors alma.rs approach
                 smooth_type: Some(3),
                 smooth_period: Some(5),
             });
@@ -651,10 +760,10 @@ pub struct VamaBatchOutput {
 
 impl VamaBatchOutput {
     pub fn row_for_params(&self, p: &VamaParams) -> Option<usize> {
-        self.combos.iter().position(|c|
-            c.base_period.unwrap() == p.base_period.unwrap() &&
-            c.vol_period.unwrap()  == p.vol_period.unwrap()
-        )
+        self.combos.iter().position(|c| {
+            c.base_period.unwrap() == p.base_period.unwrap()
+                && c.vol_period.unwrap() == p.vol_period.unwrap()
+        })
     }
     pub fn values_for(&self, p: &VamaParams) -> Option<&[f64]> {
         self.row_for_params(p).map(|row| {
@@ -672,12 +781,33 @@ pub struct VamaBatchBuilder {
 }
 
 impl VamaBatchBuilder {
-    pub fn new() -> Self { Self::default() }
-    pub fn kernel(mut self, k: Kernel) -> Self { self.kernel = k; self }
-    #[inline] pub fn base_period_range(mut self, s: usize, e: usize, t: usize) -> Self { self.range.base_period = (s,e,t); self }
-    #[inline] pub fn base_period_static(mut self, p: usize) -> Self { self.range.base_period = (p,p,0); self }
-    #[inline] pub fn vol_period_range(mut self, s: usize, e: usize, t: usize) -> Self { self.range.vol_period = (s,e,t); self }
-    #[inline] pub fn vol_period_static(mut self, p: usize) -> Self { self.range.vol_period = (p,p,0); self }
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn kernel(mut self, k: Kernel) -> Self {
+        self.kernel = k;
+        self
+    }
+    #[inline]
+    pub fn base_period_range(mut self, s: usize, e: usize, t: usize) -> Self {
+        self.range.base_period = (s, e, t);
+        self
+    }
+    #[inline]
+    pub fn base_period_static(mut self, p: usize) -> Self {
+        self.range.base_period = (p, p, 0);
+        self
+    }
+    #[inline]
+    pub fn vol_period_range(mut self, s: usize, e: usize, t: usize) -> Self {
+        self.range.vol_period = (s, e, t);
+        self
+    }
+    #[inline]
+    pub fn vol_period_static(mut self, p: usize) -> Self {
+        self.range.vol_period = (p, p, 0);
+        self
+    }
     pub fn apply_slice(self, data: &[f64]) -> Result<VamaBatchOutput, VamaError> {
         vama_batch_with_kernel(data, &self.range, self.kernel)
     }
@@ -688,7 +818,9 @@ impl VamaBatchBuilder {
         VamaBatchBuilder::new().kernel(k).apply_slice(data)
     }
     pub fn with_default_candles(c: &Candles) -> Result<VamaBatchOutput, VamaError> {
-        VamaBatchBuilder::new().kernel(Kernel::Auto).apply_candles(c, "close")
+        VamaBatchBuilder::new()
+            .kernel(Kernel::Auto)
+            .apply_candles(c, "close")
     }
 }
 
@@ -703,26 +835,43 @@ fn vama_batch_inner(
     let combos = expand_grid_vama(ranges);
     let cols = data.len();
     let rows = combos.len();
-    if cols == 0 { return Err(VamaError::EmptyInputData); }
-    if rows == 0 { return Err(VamaError::InvalidPeriod { period: 0, data_len: cols }); }
-    
+    if cols == 0 {
+        return Err(VamaError::EmptyInputData);
+    }
+    if rows == 0 {
+        return Err(VamaError::InvalidPeriod {
+            period: 0,
+            data_len: cols,
+        });
+    }
+
     // Validate that all period combinations fit within data length
     for combo in &combos {
         let base_p = combo.base_period.unwrap_or(0);
         let vol_p = combo.vol_period.unwrap_or(0);
         if base_p > cols {
-            return Err(VamaError::InvalidPeriod { period: base_p, data_len: cols });
+            return Err(VamaError::InvalidPeriod {
+                period: base_p,
+                data_len: cols,
+            });
         }
         if vol_p > cols {
-            return Err(VamaError::InvalidPeriod { period: vol_p, data_len: cols });
+            return Err(VamaError::InvalidPeriod {
+                period: vol_p,
+                data_len: cols,
+            });
         }
     }
 
     // allocate without zeroing; write NaN prefixes only
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(VamaError::AllValuesNaN)?;
-    let warm: Vec<usize> = combos.iter()
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(VamaError::AllValuesNaN)?;
+    let warm: Vec<usize> = combos
+        .iter()
         .map(|p| first + p.base_period.unwrap().max(p.vol_period.unwrap()) - 1)
         .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
@@ -735,9 +884,18 @@ fn vama_batch_inner(
     vama_batch_inner_into_with_simd(data, &combos, first, simd, out, cols, parallel)?;
 
     let values = unsafe {
-        Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, guard.len(), guard.capacity())
+        Vec::from_raw_parts(
+            guard.as_mut_ptr() as *mut f64,
+            guard.len(),
+            guard.capacity(),
+        )
     };
-    Ok(VamaBatchOutput { values, combos, rows, cols })
+    Ok(VamaBatchOutput {
+        values,
+        combos,
+        rows,
+        cols,
+    })
 }
 
 /// Into-existing buffer (NumPy/WASM) with warmup NaNs and SIMD mapping
@@ -755,7 +913,9 @@ fn vama_batch_inner_into_with_simd(
     for (row, prm) in combos.iter().enumerate() {
         let warm = first + prm.base_period.unwrap().max(prm.vol_period.unwrap()) - 1;
         let rs = row * cols;
-        for i in 0..warm.min(cols) { out[rs + i] = f64::NAN; }
+        for i in 0..warm.min(cols) {
+            out[rs + i] = f64::NAN;
+        }
     }
 
     let do_row = |row: usize, dst: &mut [f64]| -> Result<(), VamaError> {
@@ -780,12 +940,16 @@ fn vama_batch_inner_into_with_simd(
                 .into_par_iter()
                 .try_for_each(|(r, dst)| do_row(r, dst))?;
         } else {
-            for (r, dst) in out.chunks_mut(cols).enumerate() { do_row(r, dst)?; }
+            for (r, dst) in out.chunks_mut(cols).enumerate() {
+                do_row(r, dst)?;
+            }
         }
     }
     #[cfg(target_arch = "wasm32")]
     {
-        for (r, dst) in out.chunks_mut(cols).enumerate() { do_row(r, dst)?; }
+        for (r, dst) in out.chunks_mut(cols).enumerate() {
+            do_row(r, dst)?;
+        }
     }
     Ok(())
 }
@@ -800,36 +964,68 @@ fn vama_batch_inner_into(
     parallel: bool,
 ) -> Result<(), VamaError> {
     let combos = expand_grid_vama(ranges);
-    if combos.is_empty() { return Err(VamaError::InvalidPeriod { period: 0, data_len: 0 }); }
-    
+    if combos.is_empty() {
+        return Err(VamaError::InvalidPeriod {
+            period: 0,
+            data_len: 0,
+        });
+    }
+
     let cols = data.len();
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(VamaError::AllValuesNaN)?;
-    
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(VamaError::AllValuesNaN)?;
+
     let simd = match k {
         Kernel::Auto => match detect_best_batch_kernel() {
             Kernel::Avx512Batch => Kernel::Avx512,
-            Kernel::Avx2Batch   => Kernel::Avx2,
-            _                   => Kernel::Scalar,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            _ => Kernel::Scalar,
         },
         Kernel::Avx512Batch => Kernel::Avx512,
-        Kernel::Avx2Batch   => Kernel::Avx2,
+        Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
         _ => k.to_non_batch(),
     };
-    
+
     vama_batch_inner_into_with_simd(data, &combos, first, simd, out, cols, parallel)
 }
 
 /// Convenience batch wrapper - single-threaded
 #[inline(always)]
-pub fn vama_batch_slice(data: &[f64], r: &VamaBatchRange, k: Kernel) -> Result<VamaBatchOutput, VamaError> {
-    vama_batch_inner(data, r, match k { Kernel::Auto => detect_best_kernel(), x => x }, false)
+pub fn vama_batch_slice(
+    data: &[f64],
+    r: &VamaBatchRange,
+    k: Kernel,
+) -> Result<VamaBatchOutput, VamaError> {
+    vama_batch_inner(
+        data,
+        r,
+        match k {
+            Kernel::Auto => detect_best_kernel(),
+            x => x,
+        },
+        false,
+    )
 }
 
 /// Convenience batch wrapper - parallel
 #[inline(always)]
-pub fn vama_batch_par_slice(data: &[f64], r: &VamaBatchRange, k: Kernel) -> Result<VamaBatchOutput, VamaError> {
-    vama_batch_inner(data, r, match k { Kernel::Auto => detect_best_kernel(), x => x }, true)
+pub fn vama_batch_par_slice(
+    data: &[f64],
+    r: &VamaBatchRange,
+    k: Kernel,
+) -> Result<VamaBatchOutput, VamaError> {
+    vama_batch_inner(
+        data,
+        r,
+        match k {
+            Kernel::Auto => detect_best_kernel(),
+            x => x,
+        },
+        true,
+    )
 }
 
 /// Batch processing with parameter sweep using flat matrix
@@ -840,14 +1036,19 @@ pub fn vama_batch_with_kernel(
 ) -> Result<VamaBatchOutput, VamaError> {
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
-        Kernel::ScalarBatch => Kernel::ScalarBatch,  // Explicitly handle ScalarBatch
+        Kernel::ScalarBatch => Kernel::ScalarBatch, // Explicitly handle ScalarBatch
         other if other.is_batch() => other,
-        _ => return Err(VamaError::InvalidPeriod { period: 0, data_len: 0 }),
+        _ => {
+            return Err(VamaError::InvalidPeriod {
+                period: 0,
+                data_len: 0,
+            })
+        }
     };
     // Map batch → non-batch SIMD for the inner
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
-        Kernel::Avx2Batch   => Kernel::Avx2,
+        Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
         // Fallback for any other batch kernels (shouldn't happen, but safer than unreachable!)
         _ => Kernel::Scalar,
@@ -876,7 +1077,7 @@ pub fn vama_py<'py>(
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
     let k = validate_kernel(kernel, false)?;
     let data_slice = data.as_slice()?;
-    
+
     let params = VamaParams {
         base_period: Some(base_period),
         vol_period: Some(vol_period),
@@ -885,11 +1086,11 @@ pub fn vama_py<'py>(
         smooth_period: Some(smooth_period),
     };
     let input = VamaInput::from_slice(data_slice, params);
-    
+
     let result_vec: Vec<f64> = py
         .allow_threads(|| vama_with_kernel(&input, k).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    
+
     Ok(result_vec.into_pyarray(py))
 }
 
@@ -899,45 +1100,67 @@ pub fn vama_py<'py>(
 pub fn vama_batch_py<'py>(
     py: Python<'py>,
     data: PyReadonlyArray1<'py, f64>,
-    base_period_range: (usize,usize,usize),
-    vol_period_range:  (usize,usize,usize),
+    base_period_range: (usize, usize, usize),
+    vol_period_range: (usize, usize, usize),
     kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
     use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
     let slice_in = data.as_slice()?;
-    let ranges = VamaBatchRange { base_period: base_period_range, vol_period: vol_period_range };
+    let ranges = VamaBatchRange {
+        base_period: base_period_range,
+        vol_period: vol_period_range,
+    };
     let kern = validate_kernel(kernel, true)?;
-    
+
     // Pre-calculate combos and dimensions
     let combos = expand_grid_vama(&ranges);
     let rows = combos.len();
     let cols = slice_in.len();
-    
+
     // Pre-allocate NumPy array and write directly into it
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let out_slice = unsafe { out_arr.as_slice_mut()? };
-    
+
     let simd = match kern {
         Kernel::Auto => match detect_best_batch_kernel() {
             Kernel::Avx512Batch => Kernel::Avx512,
-            Kernel::Avx2Batch   => Kernel::Avx2,
-            _                   => Kernel::Scalar,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            _ => Kernel::Scalar,
         },
         Kernel::Avx512Batch => Kernel::Avx512,
-        Kernel::Avx2Batch   => Kernel::Avx2,
+        Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
         _ => return Err(PyValueError::new_err("invalid batch kernel")),
     };
-    
-    let first = slice_in.iter().position(|x| !x.is_nan()).ok_or_else(|| PyValueError::new_err("vama: All values are NaN"))?;
-    py.allow_threads(|| vama_batch_inner_into_with_simd(slice_in, &combos, first, simd, out_slice, cols, true))
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    
+
+    let first = slice_in
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or_else(|| PyValueError::new_err("vama: All values are NaN"))?;
+    py.allow_threads(|| {
+        vama_batch_inner_into_with_simd(slice_in, &combos, first, simd, out_slice, cols, true)
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
     // dict keys mirror Alma style per-param
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
-    dict.set_item("base_periods", combos.iter().map(|p| p.base_period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
-    dict.set_item("vol_periods",  combos.iter().map(|p| p.vol_period.unwrap()  as u64).collect::<Vec<_>>().into_pyarray(py))?;
+    dict.set_item(
+        "base_periods",
+        combos
+            .iter()
+            .map(|p| p.base_period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "vol_periods",
+        combos
+            .iter()
+            .map(|p| p.vol_period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
     Ok(dict.into())
 }
 
@@ -966,13 +1189,13 @@ impl VamaStreamPy {
             smooth_type: Some(smooth_type),
             smooth_period: Some(smooth_period),
         };
-        
+
         let stream = VamaStream::try_new(params)
             .map_err(|e| PyErr::new::<PyValueError, _>(e.to_string()))?;
-        
+
         Ok(Self { stream })
     }
-    
+
     pub fn update(&mut self, value: f64) -> Option<f64> {
         self.stream.update(value)
     }
@@ -1045,7 +1268,7 @@ pub fn vama_into(
             smooth_period: Some(smooth_period),
         };
         let input = VamaInput::from_slice(data, params);
-        
+
         if core::ptr::eq(in_ptr, out_ptr) {
             // In-place: use temp buffer
             let mut tmp = vec![0.0; len];
@@ -1075,8 +1298,8 @@ pub struct VamaBatchJsOutput {
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct VamaBatchConfig {
-    pub base_period_range: (usize,usize,usize),
-    pub vol_period_range:  (usize,usize,usize),
+    pub base_period_range: (usize, usize, usize),
+    pub vol_period_range: (usize, usize, usize),
 }
 
 #[cfg(feature = "wasm")]
@@ -1084,23 +1307,32 @@ pub struct VamaBatchConfig {
 pub fn vama_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let cfg: VamaBatchConfig = serde_wasm_bindgen::from_value(config)
         .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
-    let ranges = VamaBatchRange { base_period: cfg.base_period_range, vol_period: cfg.vol_period_range };
-    
+    let ranges = VamaBatchRange {
+        base_period: cfg.base_period_range,
+        vol_period: cfg.vol_period_range,
+    };
+
     // Follow ALMA's pattern: use detect_best_kernel() and pass false for parallel
     let out = vama_batch_inner(data, &ranges, detect_best_kernel(), false)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let js = VamaBatchJsOutput { values: out.values, combos: out.combos, rows: out.rows, cols: out.cols };
-    serde_wasm_bindgen::to_value(&js).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+    let js = VamaBatchJsOutput {
+        values: out.values,
+        combos: out.combos,
+        rows: out.rows,
+        cols: out.cols,
+    };
+    serde_wasm_bindgen::to_value(&js)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 // ==================== UNIT TESTS ====================
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utilities::data_loader::read_candles_from_csv;
     use crate::skip_if_unsupported;
+    use crate::utilities::data_loader::read_candles_from_csv;
     use std::error::Error;
-    
+
     // ==================== TEST MACROS ====================
     /// Macro to generate tests for all supported kernels
     macro_rules! test_with_kernels {
@@ -1110,13 +1342,13 @@ mod tests {
                 fn [<$test_fn _scalar>]() {
                     let _ = $test_fn(stringify!([<$test_fn _scalar>]), Kernel::Scalar);
                 }
-                
+
                 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
                 #[test]
                 fn [<$test_fn _avx2>]() {
                     let _ = $test_fn(stringify!([<$test_fn _avx2>]), Kernel::Avx2);
                 }
-                
+
                 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
                 #[test]
                 fn [<$test_fn _avx512>]() {
@@ -1125,7 +1357,7 @@ mod tests {
             }
         };
     }
-    
+
     /// Macro to generate batch kernel tests
     macro_rules! test_batch_kernels {
         ($test_fn:ident) => {
@@ -1134,13 +1366,13 @@ mod tests {
                 fn [<$test_fn _scalar_batch>]() {
                     let _ = $test_fn(stringify!([<$test_fn _scalar_batch>]), Kernel::ScalarBatch);
                 }
-                
+
                 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
                 #[test]
                 fn [<$test_fn _avx2_batch>]() {
                     let _ = $test_fn(stringify!([<$test_fn _avx2_batch>]), Kernel::Avx2Batch);
                 }
-                
+
                 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
                 #[test]
                 fn [<$test_fn _avx512_batch>]() {
@@ -1149,7 +1381,7 @@ mod tests {
             }
         };
     }
-    
+
     // Helper to check warmup NaNs are correctly set
     fn check_vama_warmup_nan(test_name: &str, k: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(k, test_name);
@@ -1162,7 +1394,7 @@ mod tests {
         assert!(out.values[..warm].iter().all(|v| v.is_nan()));
         Ok(())
     }
-    
+
     // Helper to check no poison values in output
     #[cfg(debug_assertions)]
     fn check_vama_no_poison(test_name: &str, k: Kernel) -> Result<(), Box<dyn Error>> {
@@ -1172,7 +1404,9 @@ mod tests {
         let input = VamaInput::with_default_candles(&candles);
         let out = vama_with_kernel(&input, k)?;
         for &v in &out.values {
-            if v.is_nan() { continue; }
+            if v.is_nan() {
+                continue;
+            }
             let b = v.to_bits();
             assert_ne!(b, 0x11111111_11111111);
             assert_ne!(b, 0x22222222_22222222);
@@ -1180,15 +1414,15 @@ mod tests {
         }
         Ok(())
     }
-    
+
     // Test all kernels produce identical results
     fn check_kernel_consistency(test_name: &str) -> Result<(), Box<dyn Error>> {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file)?;
         let input = VamaInput::with_default_candles(&candles);
-        
+
         let scalar = vama_with_kernel(&input, Kernel::Scalar)?;
-        
+
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         {
             if is_x86_feature_detected!("avx2") {
@@ -1202,7 +1436,7 @@ mod tests {
                     }
                 }
             }
-            
+
             if is_x86_feature_detected!("avx512f") {
                 let avx512 = vama_with_kernel(&input, Kernel::Avx512)?;
                 for (i, (s, a)) in scalar.values.iter().zip(avx512.values.iter()).enumerate() {
@@ -1217,17 +1451,17 @@ mod tests {
         }
         Ok(())
     }
-    
+
     // Generate tests for all kernels
     test_with_kernels!(check_vama_warmup_nan);
-    
+
     #[cfg(debug_assertions)]
     test_with_kernels!(check_vama_no_poison);
-    
+
     test_with_kernels!(check_vama_edge_cases);
     test_with_kernels!(check_vama_smoothing);
     test_batch_kernels!(check_vama_batch_consistency);
-    
+
     // New batch tests matching alma.rs style
     macro_rules! gen_batch_tests {
         ($fn_name:ident) => {
@@ -1241,18 +1475,28 @@ mod tests {
             }
         };
     }
-    
+
     fn check_batch_default_row(test: &str, k: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(k, test);
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
-        let out = VamaBatchBuilder::new().kernel(k).base_period_static(113).vol_period_static(51).apply_candles(&c, "close")?;
-        let def = VamaParams { base_period: Some(113), vol_period: Some(51), smoothing: Some(false), smooth_type: Some(3), smooth_period: Some(5) };
+        let out = VamaBatchBuilder::new()
+            .kernel(k)
+            .base_period_static(113)
+            .vol_period_static(51)
+            .apply_candles(&c, "close")?;
+        let def = VamaParams {
+            base_period: Some(113),
+            vol_period: Some(51),
+            smoothing: Some(false),
+            smooth_type: Some(3),
+            smooth_period: Some(5),
+        };
         let row = out.values_for(&def).expect("default row missing");
         assert_eq!(row.len(), c.close.len());
         Ok(())
     }
-    
+
     fn check_batch_sweep(test: &str, k: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(k, test);
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
@@ -1266,7 +1510,7 @@ mod tests {
         assert_eq!(out.cols, c.close.len());
         Ok(())
     }
-    
+
     #[cfg(debug_assertions)]
     fn check_vama_batch_no_poison(test: &str, k: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(k, test);
@@ -1278,7 +1522,9 @@ mod tests {
             .vol_period_range(2, 6, 2)
             .apply_candles(&c, "close")?;
         for &v in &out.values {
-            if v.is_nan() { continue; }
+            if v.is_nan() {
+                continue;
+            }
             let b = v.to_bits();
             assert_ne!(b, 0x11111111_11111111);
             assert_ne!(b, 0x22222222_22222222);
@@ -1286,24 +1532,24 @@ mod tests {
         }
         Ok(())
     }
-    
+
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_sweep);
     #[cfg(debug_assertions)]
     gen_batch_tests!(check_vama_batch_no_poison);
-    
+
     // Test kernel consistency
     #[test]
     fn vama_kernel_consistency() {
         let _ = check_kernel_consistency("vama_kernel_consistency");
     }
-    
+
     // ==================== KERNEL-SPECIFIC TEST FUNCTIONS ====================
-    
+
     // Test edge cases for different kernels
     fn check_vama_edge_cases(test_name: &str, k: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(k, test_name);
-        
+
         // Test with minimal data
         let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let base_p = 2;
@@ -1317,22 +1563,36 @@ mod tests {
         };
         let input = VamaInput::from_slice(&data, params);
         let result = vama_with_kernel(&input, k)?;
-        assert_eq!(result.values.len(), data.len(), "[{}] Output length should match input", test_name);
-        
+        assert_eq!(
+            result.values.len(),
+            data.len(),
+            "[{}] Output length should match input",
+            test_name
+        );
+
         // Check warmup period - VAMA calculates warmup based on max(base, vol)
         let warmup = base_p.max(vol_p);
-        
+
         // Count actual NaN values
         let nan_count = result.values.iter().take_while(|v| v.is_nan()).count();
-        
-        // Verify warmup period 
-        assert!(nan_count >= warmup - 1, "[{}] Should have at least {} warmup NaN values, got {}", 
-                test_name, warmup - 1, nan_count);
-        
+
+        // Verify warmup period
+        assert!(
+            nan_count >= warmup - 1,
+            "[{}] Should have at least {} warmup NaN values, got {}",
+            test_name,
+            warmup - 1,
+            nan_count
+        );
+
         // Check that we eventually get non-NaN values
         let non_nan_count = result.values.iter().filter(|v| !v.is_nan()).count();
-        assert!(non_nan_count > 0, "[{}] Should have some non-NaN values", test_name);
-        
+        assert!(
+            non_nan_count > 0,
+            "[{}] Should have some non-NaN values",
+            test_name
+        );
+
         // Test with single value
         let single = vec![42.0];
         let params_single = VamaParams {
@@ -1344,20 +1604,29 @@ mod tests {
         };
         let input_single = VamaInput::from_slice(&single, params_single);
         let result_single = vama_with_kernel(&input_single, k)?;
-        assert_eq!(result_single.values.len(), 1, "[{}] Single value output should have length 1", test_name);
-        assert!(!result_single.values[0].is_nan(), "[{}] Single value should produce a result", test_name);
-        
+        assert_eq!(
+            result_single.values.len(),
+            1,
+            "[{}] Single value output should have length 1",
+            test_name
+        );
+        assert!(
+            !result_single.values[0].is_nan(),
+            "[{}] Single value should produce a result",
+            test_name
+        );
+
         Ok(())
     }
-    
+
     // Test smoothing variations
     fn check_vama_smoothing(test_name: &str, k: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(k, test_name);
-        
+
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let data: Vec<f64> = candles.close[..100].to_vec();
-        
+
         // Test all smoothing types
         for smooth_type in 1..=3 {
             let params = VamaParams {
@@ -1370,19 +1639,23 @@ mod tests {
             let input = VamaInput::from_slice(&data, params);
             let result = vama_with_kernel(&input, k)?;
             assert_eq!(result.values.len(), data.len());
-            
+
             // Verify some values are not NaN after warmup
             let non_nan = result.values.iter().filter(|v| !v.is_nan()).count();
-            assert!(non_nan > 0, "Smoothing type {} produced all NaNs", smooth_type);
+            assert!(
+                non_nan > 0,
+                "Smoothing type {} produced all NaNs",
+                smooth_type
+            );
         }
-        
+
         Ok(())
     }
-    
+
     // Test batch consistency
     fn check_vama_batch_consistency(test_name: &str, k: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(k, test_name);
-        
+
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let data: Vec<f64> = candles.close[..50].to_vec();
@@ -1390,14 +1663,17 @@ mod tests {
             base_period: (10, 12, 2),
             vol_period: (5, 7, 2),
         };
-        
+
         let batch_result = vama_batch_with_kernel(&data, &ranges, k)?;
-        
+
         // Verify batch dimensions
         assert_eq!(batch_result.combos.len(), 4); // 2x2 grid
-        assert_eq!(batch_result.values.len(), batch_result.rows * batch_result.cols);
+        assert_eq!(
+            batch_result.values.len(),
+            batch_result.rows * batch_result.cols
+        );
         assert_eq!(batch_result.cols, data.len());
-        
+
         // Compare with individual calculations
         for (idx, combo) in batch_result.combos.iter().enumerate() {
             let bp = combo.base_period.unwrap();
@@ -1410,34 +1686,47 @@ mod tests {
                 smooth_period: None,
             };
             let input = VamaInput::from_slice(&data, params);
-            let single_result = vama_with_kernel(&input, match k {
-                Kernel::ScalarBatch => Kernel::Scalar,
-                Kernel::Avx2Batch => Kernel::Avx2,
-                Kernel::Avx512Batch => Kernel::Avx512,
-                _ => k,
-            })?;
-            
+            let single_result = vama_with_kernel(
+                &input,
+                match k {
+                    Kernel::ScalarBatch => Kernel::Scalar,
+                    Kernel::Avx2Batch => Kernel::Avx2,
+                    Kernel::Avx512Batch => Kernel::Avx512,
+                    _ => k,
+                },
+            )?;
+
             let row_start = idx * data.len();
             let row_end = row_start + data.len();
             let batch_row = &batch_result.values[row_start..row_end];
-            
-            for (i, (&batch_val, &single_val)) in batch_row.iter().zip(single_result.values.iter()).enumerate() {
+
+            for (i, (&batch_val, &single_val)) in batch_row
+                .iter()
+                .zip(single_result.values.iter())
+                .enumerate()
+            {
                 if !batch_val.is_nan() && !single_val.is_nan() {
                     let diff = (batch_val - single_val).abs();
-                    assert!(diff < 1e-10, "Batch vs single mismatch at row {} col {}: {} vs {}", idx, i, batch_val, single_val);
+                    assert!(
+                        diff < 1e-10,
+                        "Batch vs single mismatch at row {} col {}: {} vs {}",
+                        idx,
+                        i,
+                        batch_val,
+                        single_val
+                    );
                 }
             }
         }
-        
+
         Ok(())
     }
-    
-    
+
     // Basic functionality tests
     #[test]
     fn test_vama_accuracy() -> Result<(), Box<dyn Error>> {
         use crate::utilities::data_loader::read_candles_from_csv;
-        
+
         // Reference values from PineScript with default settings
         let expected = vec![
             61437.31013970,
@@ -1446,11 +1735,11 @@ mod tests {
             61352.71733871,
             61321.57890702,
         ];
-        
+
         // Load actual market data from CSV
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let params = VamaParams {
             base_period: Some(113),
             vol_period: Some(51),
@@ -1458,10 +1747,10 @@ mod tests {
             smooth_type: Some(3), // WMA
             smooth_period: Some(5),
         };
-        
+
         let input = VamaInput::from_candles(&candles, "close", params);
         let output = vama(&input)?;
-        
+
         // Check last 5 values match expected
         let start = output.values.len() - 5;
         for i in 0..5 {
@@ -1473,14 +1762,17 @@ mod tests {
                 assert!(
                     diff < tolerance,
                     "Value mismatch at index {}: expected {:.8}, got {:.8}, diff {:.10}",
-                    i, expected_val, actual, diff
+                    i,
+                    expected_val,
+                    actual,
+                    diff
                 );
             }
         }
-        
+
         Ok(())
     }
-    
+
     #[test]
     fn test_vama_empty_input() {
         let data: Vec<f64> = vec![];
@@ -1489,7 +1781,7 @@ mod tests {
         let result = vama(&input);
         assert!(matches!(result, Err(VamaError::EmptyInputData)));
     }
-    
+
     #[test]
     fn test_vama_all_nan() {
         let data = vec![f64::NAN; 100];
@@ -1498,7 +1790,7 @@ mod tests {
         let result = vama(&input);
         assert!(matches!(result, Err(VamaError::AllValuesNaN)));
     }
-    
+
     #[test]
     fn test_vama_invalid_period() {
         let data = vec![1.0; 50];
@@ -1513,7 +1805,7 @@ mod tests {
         let result = vama(&input);
         assert!(matches!(result, Err(VamaError::InvalidPeriod { .. })));
     }
-    
+
     #[test]
     fn test_vama_batch() -> Result<(), Box<dyn Error>> {
         let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
@@ -1521,22 +1813,22 @@ mod tests {
             base_period: (2, 3, 1),
             vol_period: (2, 3, 1),
         };
-        
+
         // Use ScalarBatch instead of Scalar for batch processing
         let result = vama_batch_with_kernel(&data, &ranges, Kernel::ScalarBatch)?;
-        
+
         assert_eq!(result.combos.len(), 4); // 2x2 parameter grid
         assert_eq!(result.values.len(), result.rows * result.cols);
-        
+
         Ok(())
     }
-    
+
     #[test]
     fn test_vama_builder() -> Result<(), Box<dyn Error>> {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let data: Vec<f64> = candles.close.clone();
-        
+
         // Test builder with all parameters
         let result = VamaBuilder::new()
             .base_period(20)
@@ -1546,89 +1838,96 @@ mod tests {
             .smooth_period(5)
             .kernel(Kernel::Auto)
             .apply_slice(&data)?;
-        
+
         assert_eq!(result.values.len(), data.len());
-        
+
         // Test builder with defaults (need enough data for default period 113)
-        let result_default = VamaBuilder::default()
-            .apply_slice(&data)?;
-        
+        let result_default = VamaBuilder::default().apply_slice(&data)?;
+
         assert_eq!(result_default.values.len(), data.len());
-        
+
         Ok(())
     }
-    
+
     #[test]
     fn test_vama_stream() -> Result<(), Box<dyn Error>> {
         let params = VamaParams::default();
         let mut stream = VamaStream::try_new(params)?;
-        
+
         // Feed some values
         for i in 0..200 {
             let val = 100.0 + (i as f64) * 0.1;
             let _ = stream.update(val);
         }
-        
+
         assert!(stream.ready);
         Ok(())
     }
-    
-    #[test] 
+
+    #[test]
     fn test_vama_input_variants() -> Result<(), Box<dyn Error>> {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file)?;
-        
+
         // Test with candles
         let result_candles = VamaInput::with_default_candles(&candles);
         let out_candles = vama(&result_candles)?;
         assert_eq!(out_candles.values.len(), candles.close.len());
-        
+
         // Test with custom source
         let result_high = VamaInput::from_candles(&candles, "high", VamaParams::default());
         let out_high = vama(&result_high)?;
         assert_eq!(out_high.values.len(), candles.high.len());
-        
+
         // Test with slice
         let slice_data: Vec<f64> = candles.close.clone();
         let result_slice = VamaInput::from_slice(&slice_data, VamaParams::default());
         let out_slice = vama(&result_slice)?;
         assert_eq!(out_slice.values.len(), slice_data.len());
-        
+
         Ok(())
     }
-    
+
     #[test]
     fn test_vama_into_slice() -> Result<(), Box<dyn Error>> {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let data: Vec<f64> = candles.close.clone();
         let mut output = vec![0.0; data.len()];
-        
+
         let params = VamaParams::default();
         let input = VamaInput::from_slice(&data, params);
-        
+
         vama_into_slice(&mut output, &input, Kernel::Auto)?;
-        
+
         // Verify warmup NaNs were written
         let first_valid = output.iter().position(|v| !v.is_nan());
         assert!(first_valid.is_some());
-        
+
         // Compare with regular vama
         let regular_output = vama(&input)?;
-        for (i, (&into_val, &regular_val)) in output.iter().zip(regular_output.values.iter()).enumerate() {
+        for (i, (&into_val, &regular_val)) in
+            output.iter().zip(regular_output.values.iter()).enumerate()
+        {
             if !into_val.is_nan() && !regular_val.is_nan() {
                 let diff = (into_val - regular_val).abs();
-                assert!(diff < 1e-10, "into_slice mismatch at {}: {} vs {}", i, into_val, regular_val);
+                assert!(
+                    diff < 1e-10,
+                    "into_slice mismatch at {}: {} vs {}",
+                    i,
+                    into_val,
+                    regular_val
+                );
             }
         }
-        
+
         Ok(())
     }
-    
+
     #[test]
     fn test_vama_param_validation() {
         let data = vec![1.0; 10];
-        
+
         // Test zero period
         let params = VamaParams {
             base_period: Some(0),
@@ -1640,7 +1939,7 @@ mod tests {
         let input = VamaInput::from_slice(&data, params);
         let result = vama(&input);
         assert!(matches!(result, Err(VamaError::InvalidPeriod { .. })));
-        
+
         // Test invalid smooth type
         let params = VamaParams {
             base_period: Some(5),
@@ -1653,42 +1952,46 @@ mod tests {
         let result = vama(&input);
         assert!(matches!(result, Err(VamaError::InvalidSmoothType { .. })));
     }
-    
+
     // New tests to match Alma parity
     fn check_vama_partial_params(test: &str, k: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(k, test);
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
-        let input = VamaInput::from_candles(&c, "close", VamaParams { 
-            base_period: None, 
-            vol_period: None, 
-            smoothing: None, 
-            smooth_type: None, 
-            smooth_period: None 
-        });
+        let input = VamaInput::from_candles(
+            &c,
+            "close",
+            VamaParams {
+                base_period: None,
+                vol_period: None,
+                smoothing: None,
+                smooth_type: None,
+                smooth_period: None,
+            },
+        );
         let out = vama_with_kernel(&input, k)?;
         assert_eq!(out.values.len(), c.close.len());
         Ok(())
     }
-    
+
     fn check_vama_default_candles(test: &str, k: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(k, test);
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
         let input = VamaInput::with_default_candles(&c);
-        match input.data { 
-            VamaData::Candles { source, .. } => assert_eq!(source, "close"), 
-            _ => panic!() 
+        match input.data {
+            VamaData::Candles { source, .. } => assert_eq!(source, "close"),
+            _ => panic!(),
         }
         let out = vama_with_kernel(&input, k)?;
         assert_eq!(out.values.len(), c.close.len());
         Ok(())
     }
-    
+
     fn check_vama_period_errors(test: &str, k: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(k, test);
         let data = vec![1.0; 10];
-        
+
         // Test zero base period
         let params = VamaParams {
             base_period: Some(0),
@@ -1700,7 +2003,7 @@ mod tests {
         let input = VamaInput::from_slice(&data, params);
         let result = vama_with_kernel(&input, k);
         assert!(matches!(result, Err(VamaError::InvalidPeriod { .. })));
-        
+
         // Test too long period
         let params = VamaParams {
             base_period: Some(100),
@@ -1712,10 +2015,10 @@ mod tests {
         let input = VamaInput::from_slice(&data, params);
         let result = vama_with_kernel(&input, k);
         assert!(matches!(result, Err(VamaError::InvalidPeriod { .. })));
-        
+
         Ok(())
     }
-    
+
     fn check_vama_small_dataset(test: &str, k: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(k, test);
         let data = vec![1.0, 2.0, 3.0];
@@ -1732,7 +2035,7 @@ mod tests {
         assert!(matches!(result, Err(VamaError::InvalidPeriod { .. })));
         Ok(())
     }
-    
+
     fn check_vama_reinput(test: &str, k: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(k, test);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
@@ -1745,23 +2048,28 @@ mod tests {
             smooth_type: None,
             smooth_period: None,
         };
-        
+
         // First pass
         let input1 = VamaInput::from_slice(&data, params.clone());
         let output1 = vama_with_kernel(&input1, k)?;
-        
+
         // Second pass - use output as input
         let input2 = VamaInput::from_slice(&output1.values, params);
         let output2 = vama_with_kernel(&input2, k)?;
-        
+
         // Should have same length
-        assert_eq!(output2.values.len(), output1.values.len(), "[{}] Output lengths should match", test);
-        
+        assert_eq!(
+            output2.values.len(),
+            output1.values.len(),
+            "[{}] Output lengths should match",
+            test
+        );
+
         // Values should be different but reasonable after warmup
         let warmup = 30;
         let mut found_diff = false;
         let mut max_diff = 0.0;
-        
+
         for i in warmup..output1.values.len() {
             if !output1.values[i].is_nan() && !output2.values[i].is_nan() {
                 let diff = (output1.values[i] - output2.values[i]).abs();
@@ -1770,29 +2078,40 @@ mod tests {
                     found_diff = true;
                 }
                 // Values should be in reasonable range (use larger tolerance for real data)
-                assert!(diff < 100000.0, "[{}] Reinput difference too large at {}: {} vs {}, diff: {}", 
-                       test, i, output1.values[i], output2.values[i], diff);
+                assert!(
+                    diff < 100000.0,
+                    "[{}] Reinput difference too large at {}: {} vs {}, diff: {}",
+                    test,
+                    i,
+                    output1.values[i],
+                    output2.values[i],
+                    diff
+                );
             }
         }
-        
-        assert!(found_diff, "[{}] Reinput should produce different values", test);
-        
+
+        assert!(
+            found_diff,
+            "[{}] Reinput should produce different values",
+            test
+        );
+
         Ok(())
     }
-    
+
     // Wire up the new tests
     test_with_kernels!(check_vama_partial_params);
     test_with_kernels!(check_vama_default_candles);
     test_with_kernels!(check_vama_period_errors);
     test_with_kernels!(check_vama_small_dataset);
     test_with_kernels!(check_vama_reinput);
-    
+
     // Property-based testing
     #[cfg(feature = "proptest")]
     mod proptest_tests {
         use super::*;
         use proptest::prelude::*;
-        
+
         proptest! {
             #[test]
             fn test_vama_proptest_length_preservation(
@@ -1808,12 +2127,12 @@ mod tests {
                     smooth_period: None,
                 };
                 let input = VamaInput::from_slice(&data, params);
-                
+
                 if let Ok(output) = vama(&input) {
                     prop_assert_eq!(output.values.len(), data.len());
                 }
             }
-            
+
             #[test]
             fn test_vama_proptest_nan_handling(
                 mut data in prop::collection::vec(0.0f64..1000.0, 50..200),
@@ -1825,7 +2144,7 @@ mod tests {
                         data[pos] = f64::NAN;
                     }
                 }
-                
+
                 // Use smaller periods that will work with generated data sizes
                 let params = VamaParams {
                     base_period: Some(20.min(data.len())),
@@ -1835,7 +2154,7 @@ mod tests {
                     smooth_period: None,
                 };
                 let input = VamaInput::from_slice(&data, params);
-                
+
                 // Should handle NaNs gracefully - either succeed or fail with AllValuesNaN
                 let result = vama(&input);
                 prop_assert!(
@@ -1843,7 +2162,7 @@ mod tests {
                     "Expected Ok or AllValuesNaN, got {:?}", result
                 );
             }
-            
+
             #[test]
             fn test_vama_proptest_batch_consistency(
                 data in prop::collection::vec(0.0f64..1000.0, 100..200),
@@ -1856,11 +2175,11 @@ mod tests {
                     base_period: (base_start, base_end.max(base_start), 5),
                     vol_period: (vol_start, vol_end.max(vol_start), 5),
                 };
-                
+
                 if let Ok(batch_result) = vama_batch_with_kernel(&data, &ranges, Kernel::Auto) {
                     prop_assert_eq!(batch_result.values.len(), batch_result.rows * batch_result.cols);
                     prop_assert_eq!(batch_result.cols, data.len());
-                    
+
                     // Each row should correspond to a parameter combination
                     for (idx, params) in batch_result.combos.iter().enumerate() {
                         let single_input = VamaInput::from_slice(&data, params.clone());
@@ -1868,14 +2187,14 @@ mod tests {
                             let row_start = idx * data.len();
                             let row_end = row_start + data.len();
                             let batch_row = &batch_result.values[row_start..row_end];
-                            
+
                             // Compare after warmup
                             let warmup = params.base_period.unwrap().max(params.vol_period.unwrap());
                             for i in warmup..data.len() {
                                 if !batch_row[i].is_nan() && !single_result.values[i].is_nan() {
                                     let diff = (batch_row[i] - single_result.values[i]).abs();
-                                    prop_assert!(diff < 1e-10, 
-                                        "Batch vs single mismatch at row {} col {}: {} vs {}", 
+                                    prop_assert!(diff < 1e-10,
+                                        "Batch vs single mismatch at row {} col {}: {} vs {}",
                                         idx, i, batch_row[i], single_result.values[i]);
                                 }
                             }
@@ -1883,7 +2202,7 @@ mod tests {
                     }
                 }
             }
-            
+
             #[test]
             fn test_vama_proptest_determinism(
                 data in prop::collection::vec(0.0f64..1000.0, 50..200),
@@ -1898,12 +2217,12 @@ mod tests {
                     smooth_period: Some(3),
                 };
                 let input = VamaInput::from_slice(&data, params);
-                
+
                 // Same input should produce same output
                 if let (Ok(result1), Ok(result2)) = (vama(&input), vama(&input)) {
                     for (i, (&v1, &v2)) in result1.values.iter().zip(result2.values.iter()).enumerate() {
                         if !v1.is_nan() && !v2.is_nan() {
-                            prop_assert!((v1 - v2).abs() < 1e-15, 
+                            prop_assert!((v1 - v2).abs() < 1e-15,
                                 "Non-deterministic result at {}: {} vs {}", i, v1, v2);
                         }
                     }

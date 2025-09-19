@@ -119,11 +119,11 @@ cuda = ["cust"]
 [profile.release.build-override]
 # Applies only to build-scripts & proc-macros, *not* to your library/bin code.
 # Note: Cannot specify lto in build-override profiles (Cargo restriction)
-codegen-units = 1      # optional tidy-up; keeps small helper crates optimised
+codegen-units = 255      # optional tidy-up; keeps small helper crates optimised
 
 [profile.bench.build-override]
 # Note: Cannot specify lto in build-override profiles (Cargo restriction)
-codegen-units = 1
+codegen-units = 255
 
 
 # ────────────────────────────────────────────────────────────────

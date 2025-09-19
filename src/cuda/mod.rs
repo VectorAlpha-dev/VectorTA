@@ -49,4 +49,3 @@ pub fn cuda_device_count() -> usize {
         0
     }
 }
-

@@ -1,12 +1,12 @@
 // Integration tests for CUDA ALMA kernels
 
 use my_project::indicators::moving_averages::alma::{
-    alma_batch_with_kernel, AlmaBatchRange, AlmaBuilder, AlmaParams, AlmaBatchOutput, AlmaError,
+    alma_batch_with_kernel, AlmaBatchOutput, AlmaBatchRange, AlmaBuilder, AlmaError, AlmaParams,
 };
 use my_project::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
-use my_project::cuda::{cuda_available};
+use my_project::cuda::cuda_available;
 #[cfg(feature = "cuda")]
 use my_project::cuda::moving_averages::CudaAlma;
 
@@ -67,7 +67,13 @@ fn alma_cuda_one_series_many_params_matches_cpu() -> Result<(), Box<dyn std::err
     for i in 0..(cpu.rows * cpu.cols) {
         let a = cpu.values[i];
         let b = gpu.values[i];
-        assert!(approx_eq(a, b, tol), "mismatch at {}: cpu={} gpu={}", i, a, b);
+        assert!(
+            approx_eq(a, b, tol),
+            "mismatch at {}: cpu={} gpu={}",
+            i,
+            a,
+            b
+        );
     }
 
     Ok(())
@@ -95,7 +101,11 @@ fn alma_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
         }
     }
 
-    let params = AlmaParams { period: Some(14), offset: Some(0.85), sigma: Some(6.0) };
+    let params = AlmaParams {
+        period: Some(14),
+        offset: Some(0.85),
+        sigma: Some(6.0),
+    };
 
     // CPU baseline per series (row-major to time-major)
     let mut cpu_tm = vec![f64::NAN; num_series * series_len];
@@ -108,10 +118,11 @@ fn alma_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
             .period(params.period.unwrap())
             .offset(params.offset.unwrap())
             .sigma(params.sigma.unwrap())
-            .apply_slice(&series) {
-                Ok(v) => v,
-                Err(e) => return Err(Box::new(e)),
-            };
+            .apply_slice(&series)
+        {
+            Ok(v) => v,
+            Err(e) => return Err(Box::new(e)),
+        };
         for t in 0..series_len {
             cpu_tm[t * num_series + j] = out.values[t];
         }
@@ -127,7 +138,13 @@ fn alma_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
     for i in 0..(num_series * series_len) {
         let a = cpu_tm[i];
         let b = gpu_tm[i];
-        assert!(approx_eq(a, b, tol), "mismatch at {}: cpu={} gpu={}", i, a, b);
+        assert!(
+            approx_eq(a, b, tol),
+            "mismatch at {}: cpu={} gpu={}",
+            i,
+            a,
+            b
+        );
     }
     Ok(())
 }

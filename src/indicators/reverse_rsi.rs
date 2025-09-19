@@ -41,8 +41,8 @@ use crate::indicators::moving_averages::ema::{ema, ema_into_slice, EmaInput, Ema
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, 
-    init_matrix_prefixes, make_uninit_matrix,
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -76,7 +76,10 @@ impl<'a> AsRef<[f64]> for ReverseRsiInput<'a> {
 /// Input data enum supporting both raw slices and candle data
 #[derive(Debug, Clone)]
 pub enum ReverseRsiData<'a> {
-    Candles { candles: &'a Candles, source: &'a str },
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
     Slice(&'a [f64]),
 }
 
@@ -114,11 +117,14 @@ impl<'a> ReverseRsiInput<'a> {
     #[inline]
     pub fn from_candles(c: &'a Candles, s: &'a str, p: ReverseRsiParams) -> Self {
         Self {
-            data: ReverseRsiData::Candles { candles: c, source: s },
+            data: ReverseRsiData::Candles {
+                candles: c,
+                source: s,
+            },
             params: p,
         }
     }
-    
+
     #[inline]
     pub fn from_slice(sl: &'a [f64], p: ReverseRsiParams) -> Self {
         Self {
@@ -126,17 +132,17 @@ impl<'a> ReverseRsiInput<'a> {
             params: p,
         }
     }
-    
+
     #[inline]
     pub fn with_default_candles(c: &'a Candles) -> Self {
         Self::from_candles(c, "close", ReverseRsiParams::default())
     }
-    
+
     #[inline]
     pub fn get_rsi_length(&self) -> usize {
         self.params.rsi_length.unwrap_or(14)
     }
-    
+
     #[inline]
     pub fn get_rsi_level(&self) -> f64 {
         self.params.rsi_level.unwrap_or(50.0)
@@ -167,25 +173,25 @@ impl ReverseRsiBuilder {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     #[inline(always)]
     pub fn rsi_length(mut self, val: usize) -> Self {
         self.rsi_length = Some(val);
         self
     }
-    
+
     #[inline(always)]
     pub fn rsi_level(mut self, val: f64) -> Self {
         self.rsi_level = Some(val);
         self
     }
-    
+
     #[inline(always)]
     pub fn kernel(mut self, k: Kernel) -> Self {
         self.kernel = k;
         self
     }
-    
+
     #[inline(always)]
     pub fn apply(self, c: &Candles) -> Result<ReverseRsiOutput, ReverseRsiError> {
         let p = ReverseRsiParams {
@@ -195,7 +201,7 @@ impl ReverseRsiBuilder {
         let i = ReverseRsiInput::from_candles(c, "close", p);
         reverse_rsi_with_kernel(&i, self.kernel)
     }
-    
+
     #[inline(always)]
     pub fn apply_slice(self, d: &[f64]) -> Result<ReverseRsiOutput, ReverseRsiError> {
         let p = ReverseRsiParams {
@@ -205,7 +211,7 @@ impl ReverseRsiBuilder {
         let i = ReverseRsiInput::from_slice(d, p);
         reverse_rsi_with_kernel(&i, self.kernel)
     }
-    
+
     #[inline(always)]
     pub fn into_stream(self) -> Result<ReverseRsiStream, ReverseRsiError> {
         let p = ReverseRsiParams {
@@ -220,7 +226,7 @@ impl ReverseRsiBuilder {
 #[derive(Debug, Clone)]
 pub struct ReverseRsiBatchRange {
     pub rsi_length_range: (usize, usize, usize), // (start, end, step)
-    pub rsi_level_range: (f64, f64, f64),       // (start, end, step)
+    pub rsi_level_range: (f64, f64, f64),        // (start, end, step)
 }
 
 impl Default for ReverseRsiBatchRange {
@@ -277,27 +283,31 @@ impl ReverseRsiBatchBuilder {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     #[inline(always)]
     pub fn rsi_length_range(mut self, start: usize, end: usize, step: usize) -> Self {
         self.rsi_length_range = (start, end, step);
         self
     }
-    
+
     #[inline(always)]
     pub fn rsi_level_range(mut self, start: f64, end: f64, step: f64) -> Self {
         self.rsi_level_range = (start, end, step);
         self
     }
-    
+
     #[inline(always)]
     pub fn kernel(mut self, k: Kernel) -> Self {
         self.kernel = k;
         self
     }
-    
+
     #[inline(always)]
-    pub fn apply_candles(self, c: &Candles, source: &str) -> Result<ReverseRsiBatchOutput, ReverseRsiError> {
+    pub fn apply_candles(
+        self,
+        c: &Candles,
+        source: &str,
+    ) -> Result<ReverseRsiBatchOutput, ReverseRsiError> {
         let sweep = ReverseRsiBatchRange {
             rsi_length_range: self.rsi_length_range,
             rsi_level_range: self.rsi_level_range,
@@ -305,7 +315,7 @@ impl ReverseRsiBatchBuilder {
         let data = source_type(c, source);
         reverse_rsi_batch_slice(data, &sweep, self.kernel)
     }
-    
+
     #[inline(always)]
     pub fn apply_slice(self, data: &[f64]) -> Result<ReverseRsiBatchOutput, ReverseRsiError> {
         let sweep = ReverseRsiBatchRange {
@@ -314,13 +324,18 @@ impl ReverseRsiBatchBuilder {
         };
         reverse_rsi_batch_slice(data, &sweep, self.kernel)
     }
-    
-    pub fn with_default_slice(data: &[f64], k: Kernel) -> Result<ReverseRsiBatchOutput, ReverseRsiError> {
+
+    pub fn with_default_slice(
+        data: &[f64],
+        k: Kernel,
+    ) -> Result<ReverseRsiBatchOutput, ReverseRsiError> {
         ReverseRsiBatchBuilder::new().kernel(k).apply_slice(data)
     }
-    
+
     pub fn with_default_candles(c: &Candles) -> Result<ReverseRsiBatchOutput, ReverseRsiError> {
-        ReverseRsiBatchBuilder::new().kernel(Kernel::Auto).apply_candles(c, "close")
+        ReverseRsiBatchBuilder::new()
+            .kernel(Kernel::Auto)
+            .apply_candles(c, "close")
     }
 }
 
@@ -329,16 +344,16 @@ impl ReverseRsiBatchBuilder {
 pub enum ReverseRsiError {
     #[error("reverse_rsi: Input data slice is empty.")]
     EmptyInputData,
-    
+
     #[error("reverse_rsi: All values are NaN.")]
     AllValuesNaN,
-    
+
     #[error("reverse_rsi: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
-    
+
     #[error("reverse_rsi: Invalid RSI level: {level} (must be between 0 and 100)")]
     InvalidRsiLevel { level: f64 },
-    
+
     #[error("reverse_rsi: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
 }
@@ -351,19 +366,30 @@ fn reverse_rsi_prepare<'a>(
 ) -> Result<(&'a [f64], usize, usize, f64, usize), ReverseRsiError> {
     let data: &[f64] = input.as_ref();
     let len = data.len();
-    if len == 0 { return Err(ReverseRsiError::EmptyInputData); }
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(ReverseRsiError::AllValuesNaN)?;
+    if len == 0 {
+        return Err(ReverseRsiError::EmptyInputData);
+    }
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(ReverseRsiError::AllValuesNaN)?;
     let rsi_len = input.get_rsi_length();
     let rsi_lvl = input.get_rsi_level();
     if rsi_len == 0 || rsi_len > len {
-        return Err(ReverseRsiError::InvalidPeriod { period: rsi_len, data_len: len });
+        return Err(ReverseRsiError::InvalidPeriod {
+            period: rsi_len,
+            data_len: len,
+        });
     }
     if !(0.0 < rsi_lvl && rsi_lvl < 100.0) || rsi_lvl.is_nan() || rsi_lvl.is_infinite() {
         return Err(ReverseRsiError::InvalidRsiLevel { level: rsi_lvl });
     }
     let ema_len = (2 * rsi_len) - 1; // warmup bars count
     if len - first < ema_len {
-        return Err(ReverseRsiError::NotEnoughValidData { needed: ema_len, valid: len - first });
+        return Err(ReverseRsiError::NotEnoughValidData {
+            needed: ema_len,
+            valid: len - first,
+        });
     }
     Ok((data, first, rsi_len, rsi_lvl, ema_len))
 }
@@ -374,18 +400,18 @@ fn reverse_rsi_compute_into(
     first: usize,
     rsi_length: usize,
     rsi_level: f64,
-    ema_kern: Kernel,  // <— honor kernel
+    ema_kern: Kernel, // <— honor kernel
     out: &mut [f64],
 ) -> Result<(), ReverseRsiError> {
     use core::mem::MaybeUninit;
-    
+
     let len = data.len();
     let ema_len = (2 * rsi_length) - 1;
-    
+
     // 2 × len uninit scratch without UB or leaks
     let mut scratch = make_uninit_matrix(2, len);
     let (up_mu, dn_mu) = scratch.split_at_mut(len);
-    
+
     // Initialize all cells via MaybeUninit::write
     for i in 0..first {
         up_mu[i].write(0.0);
@@ -398,7 +424,11 @@ fn reverse_rsi_compute_into(
                 0.0
             } else {
                 let p = data[i - 1];
-                if p.is_finite() { p } else { 0.0 }
+                if p.is_finite() {
+                    p
+                } else {
+                    0.0
+                }
             };
             let d = cur - prev;
             up_mu[i].write(d.max(0.0));
@@ -408,19 +438,25 @@ fn reverse_rsi_compute_into(
             dn_mu[i].write(0.0);
         }
     }
-    
+
     // Safe views after full init (read-only is fine)
     let up_buf: &[f64] = unsafe { core::slice::from_raw_parts(up_mu.as_ptr() as *const f64, len) };
     let dn_buf: &[f64] = unsafe { core::slice::from_raw_parts(dn_mu.as_ptr() as *const f64, len) };
-    
+
     // Pre-NAN outputs; avoid post pass
     let mut up_ema = alloc_with_nan_prefix(len, first + ema_len - 1);
     let mut dn_ema = alloc_with_nan_prefix(len, first + ema_len - 1);
-    
-    let p = EmaParams { period: Some(ema_len) };
-    ema_into_slice_or_wrap(&mut up_ema, &EmaInput::from_slice(up_buf, p.clone()), ema_kern)?;
+
+    let p = EmaParams {
+        period: Some(ema_len),
+    };
+    ema_into_slice_or_wrap(
+        &mut up_ema,
+        &EmaInput::from_slice(up_buf, p.clone()),
+        ema_kern,
+    )?;
     ema_into_slice_or_wrap(&mut dn_ema, &EmaInput::from_slice(dn_buf, p), ema_kern)?;
-    
+
     for i in (first + ema_len - 1)..len {
         let u = up_ema[i];
         let d = dn_ema[i];
@@ -429,7 +465,11 @@ fn reverse_rsi_compute_into(
             data[i] + x
         } else {
             let v = data[i] + x * ((100.0 - rsi_level) / rsi_level);
-            if v.is_finite() { v } else { 0.0 }
+            if v.is_finite() {
+                v
+            } else {
+                0.0
+            }
         };
     }
     Ok(())
@@ -438,17 +478,21 @@ fn reverse_rsi_compute_into(
 #[inline(always)]
 fn to_non_batch(k: Kernel) -> Kernel {
     match k {
-        Kernel::Auto        => detect_best_kernel(),
+        Kernel::Auto => detect_best_kernel(),
         Kernel::ScalarBatch => Kernel::Scalar,
-        Kernel::Avx2Batch   => Kernel::Avx2,
+        Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::Avx512Batch => Kernel::Avx512,
-        other               => other,
+        other => other,
     }
 }
 
 // prefer zero-copy EMA; honor kernel, map batch→non-batch
 #[inline]
-fn ema_into_slice_or_wrap(dst: &mut [f64], inp: &EmaInput, kern: Kernel) -> Result<(), ReverseRsiError> {
+fn ema_into_slice_or_wrap(
+    dst: &mut [f64],
+    inp: &EmaInput,
+    kern: Kernel,
+) -> Result<(), ReverseRsiError> {
     let k = to_non_batch(kern);
     ema_into_slice(dst, inp, k).map_err(|_| ReverseRsiError::NotEnoughValidData {
         needed: inp.params.period.unwrap_or(1),
@@ -461,7 +505,10 @@ pub fn reverse_rsi(input: &ReverseRsiInput) -> Result<ReverseRsiOutput, ReverseR
     reverse_rsi_with_kernel(input, Kernel::Auto)
 }
 
-pub fn reverse_rsi_with_kernel(input: &ReverseRsiInput, kernel: Kernel) -> Result<ReverseRsiOutput, ReverseRsiError> {
+pub fn reverse_rsi_with_kernel(
+    input: &ReverseRsiInput,
+    kernel: Kernel,
+) -> Result<ReverseRsiOutput, ReverseRsiError> {
     let (data, first, rsi_len, rsi_lvl, ema_len) = reverse_rsi_prepare(input, kernel)?;
     let mut out = alloc_with_nan_prefix(data.len(), first + ema_len - 1);
     reverse_rsi_compute_into(data, first, rsi_len, rsi_lvl, kernel, &mut out)?; // pass kernel
@@ -469,13 +516,22 @@ pub fn reverse_rsi_with_kernel(input: &ReverseRsiInput, kernel: Kernel) -> Resul
 }
 
 #[inline]
-pub fn reverse_rsi_into_slice(dst: &mut [f64], input: &ReverseRsiInput, kernel: Kernel) -> Result<(), ReverseRsiError> {
+pub fn reverse_rsi_into_slice(
+    dst: &mut [f64],
+    input: &ReverseRsiInput,
+    kernel: Kernel,
+) -> Result<(), ReverseRsiError> {
     let (data, first, rsi_len, rsi_lvl, ema_len) = reverse_rsi_prepare(input, kernel)?;
     if dst.len() != data.len() {
-        return Err(ReverseRsiError::InvalidPeriod { period: dst.len(), data_len: data.len() });
+        return Err(ReverseRsiError::InvalidPeriod {
+            period: dst.len(),
+            data_len: data.len(),
+        });
     }
     reverse_rsi_compute_into(data, first, rsi_len, rsi_lvl, kernel, dst)?; // pass kernel
-    for v in &mut dst[..first + ema_len - 1] { *v = f64::NAN; }
+    for v in &mut dst[..first + ema_len - 1] {
+        *v = f64::NAN;
+    }
     Ok(())
 }
 
@@ -498,7 +554,10 @@ impl ReverseRsiStream {
     pub fn try_new(params: ReverseRsiParams) -> Result<Self, ReverseRsiError> {
         let rsi_length = params.rsi_length.unwrap_or(14);
         if rsi_length == 0 {
-            return Err(ReverseRsiError::InvalidPeriod { period: 0, data_len: 0 });
+            return Err(ReverseRsiError::InvalidPeriod {
+                period: 0,
+                data_len: 0,
+            });
         }
         let rsi_level = params.rsi_level.unwrap_or(50.0);
         if !(0.0 < rsi_level && rsi_level < 100.0) || !rsi_level.is_finite() {
@@ -520,7 +579,7 @@ impl ReverseRsiStream {
             count: 0,
         })
     }
-    
+
     #[inline]
     pub fn update(&mut self, value: f64) -> Option<f64> {
         let prev = if !self.filled && self.head == 0 {
@@ -529,13 +588,13 @@ impl ReverseRsiStream {
             let idx = (self.head + self.buf.len() - 1) % self.buf.len();
             self.buf[idx]
         };
-        
+
         self.buf[self.head] = value;
         self.head = (self.head + 1) % self.buf.len();
         if !self.filled && self.head == 0 {
             self.filled = true;
         }
-        
+
         let d = if value.is_finite() && prev.is_finite() {
             value - prev
         } else {
@@ -543,9 +602,9 @@ impl ReverseRsiStream {
         };
         let up = d.max(0.0);
         let dn = (-d).max(0.0);
-        
+
         self.count += 1;
-        
+
         // Warmup with SMA over ema_length samples
         if self.count <= self.ema_length {
             self.up_ema = ((self.count as f64 - 1.0) * self.up_ema + up) / (self.count as f64);
@@ -555,18 +614,22 @@ impl ReverseRsiStream {
             self.up_ema = self.beta * self.up_ema + self.alpha * up;
             self.down_ema = self.beta * self.down_ema + self.alpha * dn;
         }
-        
+
         let x = (self.rsi_length - 1) as f64
             * (self.down_ema * self.rsi_level / (100.0 - self.rsi_level) - self.up_ema);
         let out = if x >= 0.0 {
             value + x
         } else {
             let v = value + x * ((100.0 - self.rsi_level) / self.rsi_level);
-            if v.is_finite() { v } else { 0.0 }
+            if v.is_finite() {
+                v
+            } else {
+                0.0
+            }
         };
         Some(out)
     }
-    
+
     pub fn next(&mut self, value: f64) -> f64 {
         self.update(value).unwrap_or(f64::NAN)
     }
@@ -581,7 +644,12 @@ pub fn reverse_rsi_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => return Err(ReverseRsiError::InvalidPeriod { period: 0, data_len: 0 }),
+        _ => {
+            return Err(ReverseRsiError::InvalidPeriod {
+                period: 0,
+                data_len: 0,
+            })
+        }
     };
     // compute using scalar/AVX phase inside reverse_rsi_with_kernel per-row (same as now)
     reverse_rsi_batch_inner(data, sweep, kernel, true)
@@ -589,16 +657,16 @@ pub fn reverse_rsi_batch_with_kernel(
 
 pub(crate) fn expand_grid(sweep: &ReverseRsiBatchRange) -> Vec<ReverseRsiParams> {
     let mut combos = Vec::new();
-    
+
     let (len_start, len_end, len_step) = sweep.rsi_length_range;
     let (lvl_start, lvl_end, lvl_step) = sweep.rsi_level_range;
-    
+
     let lengths = if len_step == 0 {
         vec![len_start]
     } else {
         (len_start..=len_end).step_by(len_step).collect::<Vec<_>>()
     };
-    
+
     let levels = if lvl_step == 0.0 {
         vec![lvl_start]
     } else {
@@ -610,7 +678,7 @@ pub(crate) fn expand_grid(sweep: &ReverseRsiBatchRange) -> Vec<ReverseRsiParams>
         }
         lvls
     };
-    
+
     for &length in &lengths {
         for &level in &levels {
             combos.push(ReverseRsiParams {
@@ -619,7 +687,7 @@ pub(crate) fn expand_grid(sweep: &ReverseRsiBatchRange) -> Vec<ReverseRsiParams>
             });
         }
     }
-    
+
     combos
 }
 
@@ -651,13 +719,13 @@ fn reverse_rsi_batch_inner(
     let combos = expand_grid(sweep);
     let cols = data.len();
     let rows = combos.len();
-    
+
     if cols == 0 {
         return Err(ReverseRsiError::EmptyInputData);
     }
-    
+
     let mut buf_mu = make_uninit_matrix(rows, cols);
-    
+
     // Calculate warmup periods for each combination
     let warm: Vec<usize> = combos
         .iter()
@@ -667,16 +735,16 @@ fn reverse_rsi_batch_inner(
             first + ema_length
         })
         .collect();
-    
+
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
-    
+
     let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
-    
+
     reverse_rsi_batch_inner_into(data, &combos, kern, parallel, out)?;
-    
+
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -684,7 +752,7 @@ fn reverse_rsi_batch_inner(
             buf_guard.capacity(),
         )
     };
-    
+
     Ok(ReverseRsiBatchOutput {
         values,
         combos,
@@ -702,8 +770,11 @@ fn reverse_rsi_batch_inner_into(
     out: &mut [f64],
 ) -> Result<(), ReverseRsiError> {
     let cols = data.len();
-    let row_kern = to_non_batch(match kern { Kernel::Auto => detect_best_batch_kernel(), k => k });
-    
+    let row_kern = to_non_batch(match kern {
+        Kernel::Auto => detect_best_batch_kernel(),
+        k => k,
+    });
+
     let do_row = |row: usize, dst: &mut [f64]| {
         let input = ReverseRsiInput::from_slice(data, combos[row].clone());
         if reverse_rsi_into_slice(dst, &input, row_kern).is_err() {
@@ -712,14 +783,20 @@ fn reverse_rsi_batch_inner_into(
             }
         }
     };
-    
+
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
-        out.par_chunks_mut(cols).enumerate().for_each(|(r, s)| do_row(r, s));
+        out.par_chunks_mut(cols)
+            .enumerate()
+            .for_each(|(r, s)| do_row(r, s));
         #[cfg(target_arch = "wasm32")]
-        for (r, s) in out.chunks_mut(cols).enumerate() { do_row(r, s); }
+        for (r, s) in out.chunks_mut(cols).enumerate() {
+            do_row(r, s);
+        }
     } else {
-        for (r, s) in out.chunks_mut(cols).enumerate() { do_row(r, s); }
+        for (r, s) in out.chunks_mut(cols).enumerate() {
+            do_row(r, s);
+        }
     }
     Ok(())
 }
@@ -737,7 +814,7 @@ pub fn reverse_rsi_batch(
             data_len: rows * cols,
         });
     }
-    
+
     let params_len = params.len();
     if params_len != cols && params_len != 1 {
         return Err(ReverseRsiError::InvalidPeriod {
@@ -745,22 +822,21 @@ pub fn reverse_rsi_batch(
             data_len: cols,
         });
     }
-    
+
     let kernel = detect_best_batch_kernel();
     let mut results = Vec::with_capacity(cols);
-    
+
     #[cfg(not(target_arch = "wasm32"))]
     {
         results = (0..cols)
             .into_par_iter()
             .map(|col| {
-                let col_data: Vec<f64> = (0..rows)
-                    .map(|row| data_matrix[row * cols + col])
-                    .collect();
-                    
+                let col_data: Vec<f64> =
+                    (0..rows).map(|row| data_matrix[row * cols + col]).collect();
+
                 let param_idx = if params_len == 1 { 0 } else { col };
                 let input = ReverseRsiInput::from_slice(&col_data, params[param_idx].clone());
-                
+
                 match reverse_rsi_with_kernel(&input, kernel) {
                     Ok(output) => output.values,
                     Err(_) => vec![f64::NAN; rows],
@@ -768,26 +844,24 @@ pub fn reverse_rsi_batch(
             })
             .collect();
     }
-    
+
     #[cfg(target_arch = "wasm32")]
     {
         for col in 0..cols {
-            let col_data: Vec<f64> = (0..rows)
-                .map(|row| data_matrix[row * cols + col])
-                .collect();
-                
+            let col_data: Vec<f64> = (0..rows).map(|row| data_matrix[row * cols + col]).collect();
+
             let param_idx = if params_len == 1 { 0 } else { col };
             let input = ReverseRsiInput::from_slice(&col_data, params[param_idx].clone());
-            
+
             let output = match reverse_rsi_with_kernel(&input, kernel) {
                 Ok(output) => output.values,
                 Err(_) => vec![f64::NAN; rows],
             };
-            
+
             results.push(output);
         }
     }
-    
+
     Ok(results)
 }
 
@@ -804,7 +878,10 @@ pub fn reverse_rsi_py<'py>(
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
     let slice_in = data.as_slice()?;
     let kern = validate_kernel(kernel, false)?;
-    let params = ReverseRsiParams { rsi_length: Some(rsi_length), rsi_level: Some(rsi_level) };
+    let params = ReverseRsiParams {
+        rsi_length: Some(rsi_length),
+        rsi_level: Some(rsi_level),
+    };
     let inp = ReverseRsiInput::from_slice(slice_in, params);
     let out: Vec<f64> = py
         .allow_threads(|| reverse_rsi_with_kernel(&inp, kern).map(|o| o.values))
@@ -824,7 +901,10 @@ pub fn reverse_rsi_batch_py<'py>(
 ) -> PyResult<Bound<'py, PyDict>> {
     use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
     let slice_in = data.as_slice()?;
-    let sweep = ReverseRsiBatchRange { rsi_length_range, rsi_level_range };
+    let sweep = ReverseRsiBatchRange {
+        rsi_length_range,
+        rsi_level_range,
+    };
     let kern = validate_kernel(kernel, true)?;
     let combos = expand_grid(&sweep);
     let rows = combos.len();
@@ -833,39 +913,68 @@ pub fn reverse_rsi_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     py.allow_threads(|| {
-        reverse_rsi_batch_inner_into(slice_in, &combos, {
-            match kern {
-                Kernel::Auto => detect_best_batch_kernel(),
-                k => k,
-            }
-        }, true, slice_out)
-    }).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        reverse_rsi_batch_inner_into(
+            slice_in,
+            &combos,
+            {
+                match kern {
+                    Kernel::Auto => detect_best_batch_kernel(),
+                    k => k,
+                }
+            },
+            true,
+            slice_out,
+        )
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
-    dict.set_item("rsi_lengths",
-        combos.iter().map(|p| p.rsi_length.unwrap_or(14) as u64).collect::<Vec<_>>().into_pyarray(py))?;
-    dict.set_item("rsi_levels",
-        combos.iter().map(|p| p.rsi_level.unwrap_or(50.0)).collect::<Vec<_>>().into_pyarray(py))?;
+    dict.set_item(
+        "rsi_lengths",
+        combos
+            .iter()
+            .map(|p| p.rsi_length.unwrap_or(14) as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "rsi_levels",
+        combos
+            .iter()
+            .map(|p| p.rsi_level.unwrap_or(50.0))
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
     Ok(dict.into())
 }
 
 #[cfg(feature = "python")]
 #[pyclass(name = "ReverseRsiStream")]
-pub struct ReverseRsiStreamPy { inner: ReverseRsiStream }
+pub struct ReverseRsiStreamPy {
+    inner: ReverseRsiStream,
+}
 
 #[cfg(feature = "python")]
 #[pymethods]
 impl ReverseRsiStreamPy {
     #[new]
     fn new(rsi_length: usize, rsi_level: f64) -> PyResult<Self> {
-        let params = ReverseRsiParams { rsi_length: Some(rsi_length), rsi_level: Some(rsi_level) };
-        let stream = ReverseRsiStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let params = ReverseRsiParams {
+            rsi_length: Some(rsi_length),
+            rsi_level: Some(rsi_level),
+        };
+        let stream =
+            ReverseRsiStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok(Self { inner: stream })
     }
-    fn update(&mut self, value: f64) -> Option<f64> { self.inner.update(value) }
+    fn update(&mut self, value: f64) -> Option<f64> {
+        self.inner.update(value)
+    }
     #[deprecated(note = "use update()")]
-    fn next(&mut self, value: f64) -> f64 { self.inner.next(value) }
+    fn next(&mut self, value: f64) -> f64 {
+        self.inner.next(value)
+    }
 }
 
 // ==================== WASM BINDINGS ====================
@@ -888,16 +997,22 @@ pub struct ReverseRsiBatchJsOutput {
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = reverse_rsi_batch)]
 pub fn reverse_rsi_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
-    let cfg: ReverseRsiBatchConfig =
-        serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {e}")))?;
+    let cfg: ReverseRsiBatchConfig = serde_wasm_bindgen::from_value(config)
+        .map_err(|e| JsValue::from_str(&format!("Invalid config: {e}")))?;
     let sweep = ReverseRsiBatchRange {
         rsi_length_range: cfg.rsi_length_range,
         rsi_level_range: cfg.rsi_level_range,
     };
     let out = reverse_rsi_batch_inner(data, &sweep, detect_best_kernel(), false)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let js = ReverseRsiBatchJsOutput { values: out.values, combos: out.combos, rows: out.rows, cols: out.cols };
-    serde_wasm_bindgen::to_value(&js).map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
+    let js = ReverseRsiBatchJsOutput {
+        values: out.values,
+        combos: out.combos,
+        rows: out.rows,
+        cols: out.cols,
+    };
+    serde_wasm_bindgen::to_value(&js)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
 }
 
 #[cfg(feature = "wasm")]
@@ -911,11 +1026,10 @@ pub fn reverse_rsi_js(
         rsi_length: Some(rsi_length),
         rsi_level: Some(rsi_level),
     };
-    
+
     let input = ReverseRsiInput::from_slice(data, params);
-    let output = reverse_rsi(&input)
-        .map_err(|e| JsValue::from_str(&e.to_string()))?;
-    
+    let output = reverse_rsi(&input).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
     Ok(output.values)
 }
 
@@ -950,7 +1064,10 @@ pub fn reverse_rsi_into(
     }
     unsafe {
         let data = std::slice::from_raw_parts(in_ptr, len);
-        let params = ReverseRsiParams { rsi_length: Some(rsi_length), rsi_level: Some(rsi_level) };
+        let params = ReverseRsiParams {
+            rsi_length: Some(rsi_length),
+            rsi_level: Some(rsi_level),
+        };
         let input = ReverseRsiInput::from_slice(data, params);
         if in_ptr == out_ptr {
             let mut temp = vec![0.0; len];
@@ -980,12 +1097,12 @@ pub fn reverse_rsi_batch_columnar_into(
     let total_len = rows * cols;
     let data = unsafe { std::slice::from_raw_parts(in_ptr, total_len) };
     let out = unsafe { std::slice::from_raw_parts_mut(out_ptr, total_len) };
-    
+
     let params = vec![ReverseRsiParams {
         rsi_length: Some(rsi_length),
         rsi_level: Some(rsi_level),
     }];
-    
+
     match reverse_rsi_batch(data, rows, cols, &params) {
         Ok(results) => {
             for (col, result) in results.iter().enumerate() {
@@ -1013,7 +1130,9 @@ pub fn reverse_rsi_batch_into(
     rsi_lvl_step: f64,
 ) -> Result<usize, JsValue> {
     if in_ptr.is_null() || out_ptr.is_null() {
-        return Err(JsValue::from_str("null pointer passed to reverse_rsi_batch_into"));
+        return Err(JsValue::from_str(
+            "null pointer passed to reverse_rsi_batch_into",
+        ));
     }
     unsafe {
         let data = std::slice::from_raw_parts(in_ptr, len);
@@ -1037,14 +1156,17 @@ pub fn reverse_rsi_batch_into(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utilities::data_loader::read_candles_from_csv;
     use crate::skip_if_unsupported;
-    
-    fn check_reverse_rsi_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+    use crate::utilities::data_loader::read_candles_from_csv;
+
+    fn check_reverse_rsi_partial_params(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let default_params = ReverseRsiParams {
             rsi_length: None,
             rsi_level: None,
@@ -1052,53 +1174,63 @@ mod tests {
         let input = ReverseRsiInput::from_candles(&candles, "close", default_params);
         let output = reverse_rsi_with_kernel(&input, kernel)?;
         assert_eq!(output.values.len(), candles.close.len());
-        
+
         Ok(())
     }
-    
+
     fn check_reverse_rsi_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let params = ReverseRsiParams {
             rsi_length: Some(14),
             rsi_level: Some(50.0),
         };
-        
+
         let input = ReverseRsiInput::from_candles(&candles, "close", params);
         let result = reverse_rsi_with_kernel(&input, kernel)?;
-        
+
         // Verify the calculation produces valid results
         assert_eq!(result.values.len(), candles.close.len());
-        
+
         // Check last 5 values match expected reference values
         // These values should match what you provided: 60,124.65553528, 60,064.68013990, 60,001.56012991, 59,932.80583491, 59,877.24827528
         // Note: The actual values are at positions -6 to -2 (we take the 5 values before the last one)
         let expected_last_5 = vec![
-            60124.655535277416, 60064.68013990046, 60001.56012990757, 59932.80583491417, 59877.248275277445
+            60124.655535277416,
+            60064.68013990046,
+            60001.56012990757,
+            59932.80583491417,
+            59877.248275277445,
         ];
-        
-        let start = result.values.len().saturating_sub(6);  // Get last 6 values
-        let end = result.values.len().saturating_sub(1);    // Skip the very last value
-        
+
+        let start = result.values.len().saturating_sub(6); // Get last 6 values
+        let end = result.values.len().saturating_sub(1); // Skip the very last value
+
         for (i, &actual) in result.values[start..end].iter().enumerate() {
             let expected = expected_last_5[i];
             assert!(
                 (actual - expected).abs() < 0.00001,
                 "[{}] Last 5 values mismatch at index {}: expected {}, got {}",
-                test_name, i, expected, actual
+                test_name,
+                i,
+                expected,
+                actual
             );
         }
-        
+
         Ok(())
     }
-    
-    fn check_reverse_rsi_default_candles(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+
+    fn check_reverse_rsi_default_candles(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let input = ReverseRsiInput::with_default_candles(&candles);
         match input.data {
             ReverseRsiData::Candles { source, .. } => assert_eq!(source, "close"),
@@ -1106,11 +1238,14 @@ mod tests {
         }
         let output = reverse_rsi_with_kernel(&input, kernel)?;
         assert_eq!(output.values.len(), candles.close.len());
-        
+
         Ok(())
     }
-    
-    fn check_reverse_rsi_zero_period(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+
+    fn check_reverse_rsi_zero_period(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let input_data = [10.0, 20.0, 30.0];
         let params = ReverseRsiParams {
@@ -1119,11 +1254,18 @@ mod tests {
         };
         let input = ReverseRsiInput::from_slice(&input_data, params);
         let res = reverse_rsi_with_kernel(&input, kernel);
-        assert!(res.is_err(), "[{}] Reverse RSI should fail with zero period", test_name);
+        assert!(
+            res.is_err(),
+            "[{}] Reverse RSI should fail with zero period",
+            test_name
+        );
         Ok(())
     }
-    
-    fn check_reverse_rsi_period_exceeds_length(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+
+    fn check_reverse_rsi_period_exceeds_length(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let data_small = [10.0, 20.0, 30.0];
         let params = ReverseRsiParams {
@@ -1139,8 +1281,11 @@ mod tests {
         );
         Ok(())
     }
-    
-    fn check_reverse_rsi_very_small_dataset(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+
+    fn check_reverse_rsi_very_small_dataset(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let single_point = [42.0];
         let params = ReverseRsiParams {
@@ -1149,11 +1294,18 @@ mod tests {
         };
         let input = ReverseRsiInput::from_slice(&single_point, params);
         let res = reverse_rsi_with_kernel(&input, kernel);
-        assert!(res.is_err(), "[{}] Reverse RSI should fail with insufficient data", test_name);
+        assert!(
+            res.is_err(),
+            "[{}] Reverse RSI should fail with insufficient data",
+            test_name
+        );
         Ok(())
     }
-    
-    fn check_reverse_rsi_empty_input(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+
+    fn check_reverse_rsi_empty_input(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let empty: [f64; 0] = [];
         let input = ReverseRsiInput::from_slice(&empty, ReverseRsiParams::default());
@@ -1165,11 +1317,14 @@ mod tests {
         );
         Ok(())
     }
-    
-    fn check_reverse_rsi_invalid_level(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+
+    fn check_reverse_rsi_invalid_level(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let data = vec![1.0; 30];
-        
+
         // Test level > 100
         let params = ReverseRsiParams {
             rsi_length: Some(14),
@@ -1182,7 +1337,7 @@ mod tests {
             "[{}] Reverse RSI should fail with invalid level > 100",
             test_name
         );
-        
+
         // Test negative level
         let params = ReverseRsiParams {
             rsi_length: Some(14),
@@ -1195,7 +1350,7 @@ mod tests {
             "[{}] Reverse RSI should fail with negative level",
             test_name
         );
-        
+
         // Test level = 0 (now invalid due to division by zero)
         let params = ReverseRsiParams {
             rsi_length: Some(14),
@@ -1208,7 +1363,7 @@ mod tests {
             "[{}] Reverse RSI should fail with level = 0",
             test_name
         );
-        
+
         // Test level = 100 (now invalid due to division by zero)
         let params = ReverseRsiParams {
             rsi_length: Some(14),
@@ -1221,10 +1376,10 @@ mod tests {
             "[{}] Reverse RSI should fail with level = 100",
             test_name
         );
-        
+
         Ok(())
     }
-    
+
     fn check_reverse_rsi_all_nan(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let data = vec![f64::NAN; 20];
@@ -1238,36 +1393,39 @@ mod tests {
         );
         Ok(())
     }
-    
+
     fn check_reverse_rsi_reinput(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let first_params = ReverseRsiParams {
             rsi_length: Some(14),
             rsi_level: Some(50.0),
         };
         let first_input = ReverseRsiInput::from_candles(&candles, "close", first_params);
         let first_result = reverse_rsi_with_kernel(&first_input, kernel)?;
-        
+
         let second_params = ReverseRsiParams {
             rsi_length: Some(14),
             rsi_level: Some(50.0),
         };
         let second_input = ReverseRsiInput::from_slice(&first_result.values, second_params);
         let second_result = reverse_rsi_with_kernel(&second_input, kernel)?;
-        
+
         assert_eq!(second_result.values.len(), first_result.values.len());
-        
+
         Ok(())
     }
-    
-    fn check_reverse_rsi_nan_handling(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+
+    fn check_reverse_rsi_nan_handling(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let input = ReverseRsiInput::from_candles(
             &candles,
             "close",
@@ -1278,19 +1436,19 @@ mod tests {
         );
         let res = reverse_rsi_with_kernel(&input, kernel)?;
         assert_eq!(res.values.len(), candles.close.len());
-        
+
         Ok(())
     }
-    
+
     fn check_reverse_rsi_streaming(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        
+
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let rsi_length = 14;
         let rsi_level = 50.0;
-        
+
         let input = ReverseRsiInput::from_candles(
             &candles,
             "close",
@@ -1300,12 +1458,12 @@ mod tests {
             },
         );
         let batch_output = reverse_rsi_with_kernel(&input, kernel)?.values;
-        
+
         let mut stream = ReverseRsiStream::try_new(ReverseRsiParams {
             rsi_length: Some(rsi_length),
             rsi_level: Some(rsi_level),
         })?;
-        
+
         let mut stream_values = Vec::with_capacity(candles.close.len());
         for &price in &candles.close {
             match stream.update(price) {
@@ -1313,9 +1471,9 @@ mod tests {
                 None => stream_values.push(f64::NAN),
             }
         }
-        
+
         assert_eq!(batch_output.len(), stream_values.len());
-        
+
         // Compare non-NaN values
         for (i, (&b, &s)) in batch_output.iter().zip(stream_values.iter()).enumerate() {
             if b.is_nan() && s.is_nan() {
@@ -1336,23 +1494,26 @@ mod tests {
         }
         Ok(())
     }
-    
-    fn check_reverse_rsi_warmup_nans(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+
+    fn check_reverse_rsi_warmup_nans(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let params = ReverseRsiParams {
             rsi_length: Some(14),
             rsi_level: Some(50.0),
         };
-        
+
         let input = ReverseRsiInput::from_candles(&candles, "close", params);
         let result = reverse_rsi_with_kernel(&input, kernel)?;
-        
+
         // Find first non-NaN value in input
         let first_valid = candles.close.iter().position(|x| !x.is_nan()).unwrap_or(0);
-        
+
         // All values before first_valid should be NaN
         for i in 0..first_valid {
             assert!(
@@ -1362,16 +1523,16 @@ mod tests {
                 i
             );
         }
-        
+
         Ok(())
     }
-    
+
     #[cfg(debug_assertions)]
     fn check_reverse_rsi_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let test_params = vec![
             ReverseRsiParams::default(),
             ReverseRsiParams {
@@ -1387,18 +1548,18 @@ mod tests {
                 rsi_level: Some(70.0),
             },
         ];
-        
+
         for (param_idx, params) in test_params.iter().enumerate() {
             let input = ReverseRsiInput::from_candles(&candles, "close", params.clone());
             let output = reverse_rsi_with_kernel(&input, kernel)?;
-            
+
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
                     continue;
                 }
-                
+
                 let bits = val.to_bits();
-                
+
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1411,7 +1572,7 @@ mod tests {
                         params.rsi_level.unwrap_or(50.0)
                     );
                 }
-                
+
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
@@ -1424,7 +1585,7 @@ mod tests {
                         params.rsi_level.unwrap_or(50.0)
                     );
                 }
-                
+
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
@@ -1439,15 +1600,18 @@ mod tests {
                 }
             }
         }
-        
+
         Ok(())
     }
-    
+
     #[cfg(not(debug_assertions))]
-    fn check_reverse_rsi_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+    fn check_reverse_rsi_no_poison(
+        _test_name: &str,
+        _kernel: Kernel,
+    ) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
-    
+
     // Test generation macro
     macro_rules! generate_all_reverse_rsi_tests {
         ($($test_fn:ident),*) => {
@@ -1479,7 +1643,7 @@ mod tests {
             }
         }
     }
-    
+
     generate_all_reverse_rsi_tests!(
         check_reverse_rsi_partial_params,
         check_reverse_rsi_accuracy,
@@ -1496,61 +1660,67 @@ mod tests {
         check_reverse_rsi_warmup_nans,
         check_reverse_rsi_no_poison
     );
-    
+
     // Batch processing tests
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
-        
+
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
-        
-        let output = ReverseRsiBatchBuilder::new().kernel(kernel).apply_candles(&c, "close")?;
-        
+
+        let output = ReverseRsiBatchBuilder::new()
+            .kernel(kernel)
+            .apply_candles(&c, "close")?;
+
         let def = ReverseRsiParams::default();
         let row = output.values_for(&def).expect("default row missing");
-        
+
         assert_eq!(row.len(), c.close.len());
-        
+
         // Verify we have some valid values
         let valid_count = row.iter().filter(|v| v.is_finite()).count();
-        assert!(valid_count > 0, "[{}] Should have valid values in default row", test);
-        
+        assert!(
+            valid_count > 0,
+            "[{}] Should have valid values in default row",
+            test
+        );
+
         Ok(())
     }
-    
+
     fn check_batch_sweep(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
-        
+
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
-        
+
         let output = ReverseRsiBatchBuilder::new()
             .kernel(kernel)
             .rsi_length_range(10, 20, 2)
             .rsi_level_range(30.0, 70.0, 10.0)
             .apply_candles(&c, "close")?;
-        
+
         let expected_combos = 6 * 5; // 6 lengths * 5 levels
         assert_eq!(output.combos.len(), expected_combos);
         assert_eq!(output.rows, expected_combos);
         assert_eq!(output.cols, c.close.len());
-        
+
         Ok(())
     }
-    
+
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
-        
+
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
-        
+
         let test_configs = vec![
             (7, 21, 7, 20.0, 80.0, 20.0),
             (14, 14, 0, 50.0, 50.0, 0.0),
             (10, 20, 5, 30.0, 70.0, 20.0),
         ];
-        
+
         for (cfg_idx, &(len_start, len_end, len_step, lvl_start, lvl_end, lvl_step)) in
             test_configs.iter().enumerate()
         {
@@ -1559,17 +1729,17 @@ mod tests {
                 .rsi_length_range(len_start, len_end, len_step)
                 .rsi_level_range(lvl_start, lvl_end, lvl_step)
                 .apply_candles(&c, "close")?;
-            
+
             for (idx, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
                     continue;
                 }
-                
+
                 let bits = val.to_bits();
                 let row = idx / output.cols;
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
-                
+
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -1585,7 +1755,7 @@ mod tests {
                         combo.rsi_level.unwrap_or(50.0)
                     );
                 }
-                
+
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
@@ -1601,7 +1771,7 @@ mod tests {
                         combo.rsi_level.unwrap_or(50.0)
                     );
                 }
-                
+
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
@@ -1619,15 +1789,15 @@ mod tests {
                 }
             }
         }
-        
+
         Ok(())
     }
-    
+
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
-    
+
     macro_rules! gen_batch_tests {
         ($fn_name:ident) => {
             paste::paste! {
@@ -1648,32 +1818,35 @@ mod tests {
             }
         };
     }
-    
+
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_sweep);
     gen_batch_tests!(check_batch_no_poison);
-    
+
     fn check_kernel_passthrough(_name: &str, _k: Kernel) -> Result<(), Box<dyn Error>> {
         // smoke: ensure both explicit Scalar and Auto execute without error
         let data = vec![1.0; 64];
         for k in [Kernel::Scalar, Kernel::Auto] {
-            let p = ReverseRsiParams { rsi_length: Some(14), rsi_level: Some(50.0) };
+            let p = ReverseRsiParams {
+                rsi_length: Some(14),
+                rsi_level: Some(50.0),
+            };
             let inp = ReverseRsiInput::from_slice(&data, p);
             let _ = reverse_rsi_with_kernel(&inp, k)?;
         }
         Ok(())
     }
-    
+
     fn check_batch_into_signature_parity(_n: &str, _k: Kernel) -> Result<(), Box<dyn Error>> {
         // allocate input and output and call the wasm-style function behind a cfg if desired
         Ok(())
     }
-    
+
     #[test]
     fn test_kernel_passthrough() {
         let _ = check_kernel_passthrough("kernel_passthrough", Kernel::Auto);
     }
-    
+
     #[test]
     fn test_batch_into_signature_parity() {
         let _ = check_batch_into_signature_parity("batch_into_signature", Kernel::Auto);
