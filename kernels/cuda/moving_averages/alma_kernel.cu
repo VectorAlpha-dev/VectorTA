@@ -7,6 +7,10 @@
 // A many-series × one-parameter kernel is also supplied, all following the
 // VRAM-first design used by the Rust wrapper.
 
+#ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
+#define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
+#endif
+
 #include <cuda_runtime.h>
 #include <math.h>
 
@@ -79,6 +83,51 @@ void alma_batch_f32_onthefly(const float* __restrict__ prices,
             #pragma unroll 4
             for (int k = 0; k < period; ++k) {
                 sum += prices[start + k] * weights[k];
+            }
+            out[base_out + t] = sum * inv_norm;
+        }
+        t += stride;
+    }
+}
+
+// Precomputed-weight variant (legacy path). Uses pre-uploaded weights and inv_norms.
+extern "C" __global__
+void alma_batch_f32(const float* __restrict__ prices,
+                    const float* __restrict__ weights_flat,
+                    const int* __restrict__ periods,
+                    const float* __restrict__ inv_norms,
+                    int max_period,
+                    int series_len,
+                    int n_combos,
+                    int first_valid,
+                    float* __restrict__ out) {
+    extern __shared__ float shared_weights[];
+
+    const int combo_idx = blockIdx.y;
+    if (combo_idx >= n_combos) return;
+
+    const int period = periods[combo_idx];
+    const float inv_norm = inv_norms[combo_idx];
+
+    for (int i = threadIdx.x; i < period; i += blockDim.x) {
+        shared_weights[i] = weights_flat[combo_idx * max_period + i];
+    }
+    __syncthreads();
+
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    const int stride = gridDim.x * blockDim.x;
+    const int warm = first_valid + period - 1;
+    const int base_out = combo_idx * series_len;
+
+    while (t < series_len) {
+        if (t < warm) {
+            out[base_out + t] = NAN;
+        } else {
+            const int start_idx = t - period + 1;
+            float sum = 0.0f;
+            #pragma unroll 4
+            for (int k = 0; k < period; ++k) {
+                sum += prices[start_idx + k] * shared_weights[k];
             }
             out[base_out + t] = sum * inv_norm;
         }
@@ -178,7 +227,81 @@ void alma_batch_tiled_async_f32(const float* __restrict__ prices,
     out[out_idx] = sum * inv_norm;
 }
 
-// Many-series × one-parameter kernel, time-major input layout.
+// Precomputed-weight tiled variant.
+// Precomputed-weight tiled variant (templated tile size).
+template<int TILE>
+struct AlmaBatchTiledPrecomputed {
+    static __device__ void run(const float* __restrict__ prices,
+                               const float* __restrict__ weights_flat,
+                               const int* __restrict__ periods,
+                               const float* __restrict__ inv_norms,
+                               int max_period,
+                               int series_len,
+                               int n_combos,
+                               int first_valid,
+                               float* __restrict__ out) {
+        static_assert(TILE > 0, "Tile size must be positive");
+        const int combo_idx = blockIdx.y;
+        if (combo_idx >= n_combos) return;
+        const int period = periods[combo_idx];
+        const float inv_norm = inv_norms[combo_idx];
+        if (blockDim.x != TILE) return;
+        const int tile_len = TILE;
+        const int t0 = blockIdx.x * tile_len;
+        if (t0 >= series_len) return;
+        const int warm = first_valid + period - 1;
+        extern __shared__ float sh[];
+        float* w = sh;
+        float* p = sh + period;
+        for (int i = threadIdx.x; i < period; i += TILE) {
+            w[i] = weights_flat[combo_idx * max_period + i];
+        }
+        __syncthreads();
+        const int p_base = t0 - (period - 1);
+        const int total = tile_len + period - 1;
+        for (int i = threadIdx.x; i < total; i += TILE) {
+            int idx = p_base + i;
+            float v = 0.0f;
+            if (idx >= 0 && idx < series_len) {
+                v = prices[idx];
+            }
+            p[i] = v;
+        }
+        __syncthreads();
+        const int t = t0 + threadIdx.x;
+        if (t >= series_len) return;
+        const int out_idx = combo_idx * series_len + t;
+        if (t < warm) {
+            out[out_idx] = NAN;
+            return;
+        }
+        int start = threadIdx.x;
+        float sum = 0.0f;
+        #pragma unroll 4
+        for (int k = 0; k < period; ++k) {
+            sum += p[start + k] * w[k];
+        }
+        out[out_idx] = sum * inv_norm;
+    }
+};
+
+#define DEFINE_ALMA_BATCH_TILED_PRECOMP(NAME, TILE)                                                     \
+extern "C" __global__ void NAME(const float* __restrict__ prices,                                      \
+                                 const float* __restrict__ weights_flat,                                \
+                                 const int* __restrict__ periods,                                       \
+                                 const float* __restrict__ inv_norms,                                   \
+                                 int max_period,                                                        \
+                                 int series_len,                                                        \
+                                 int n_combos,                                                          \
+                                 int first_valid,                                                       \
+                                 float* __restrict__ out) {                                             \
+    AlmaBatchTiledPrecomputed<TILE>::run(                                                               \
+        prices, weights_flat, periods, inv_norms, max_period, series_len, n_combos, first_valid, out);  \
+}
+
+DEFINE_ALMA_BATCH_TILED_PRECOMP(alma_batch_tiled_f32_tile128, 128)
+DEFINE_ALMA_BATCH_TILED_PRECOMP(alma_batch_tiled_f32_tile256, 256)
+
 extern "C" __global__
 void alma_multi_series_one_param_onthefly_f32(const float* __restrict__ prices_tm,
                                               const int* __restrict__ first_valids,
@@ -227,6 +350,48 @@ void alma_multi_series_one_param_onthefly_f32(const float* __restrict__ prices_t
             for (int k = 0; k < period; ++k) {
                 const int in_idx = (start + k) * num_series + series_idx;
                 sum += prices_tm[in_idx] * weights[k];
+            }
+            out_tm[out_idx] = sum * inv_norm;
+        }
+        t += stride;
+    }
+}
+
+// Precomputed-weight variant for many-series path.
+extern "C" __global__
+void alma_multi_series_one_param_f32(const float* __restrict__ prices_tm,
+                                     const float* __restrict__ weights,
+                                     int period,
+                                     float inv_norm,
+                                     int num_series,
+                                     int series_len,
+                                     const int* __restrict__ first_valids,
+                                     float* __restrict__ out_tm) {
+    extern __shared__ float shared_weights[];
+
+    for (int i = threadIdx.x; i < period; i += blockDim.x) {
+        shared_weights[i] = weights[i];
+    }
+    __syncthreads();
+
+    const int series_idx = blockIdx.y;
+    if (series_idx >= num_series) return;
+
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    const int stride = gridDim.x * blockDim.x;
+    const int warm = first_valids[series_idx] + period - 1;
+
+    while (t < series_len) {
+        const int out_idx = t * num_series + series_idx;
+        if (t < warm) {
+            out_tm[out_idx] = NAN;
+        } else {
+            const int start = t - period + 1;
+            float sum = 0.0f;
+            #pragma unroll 4
+            for (int k = 0; k < period; ++k) {
+                const int in_idx = (start + k) * num_series + series_idx;
+                sum += prices_tm[in_idx] * shared_weights[k];
             }
             out_tm[out_idx] = sum * inv_norm;
         }

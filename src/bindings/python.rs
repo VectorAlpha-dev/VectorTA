@@ -187,7 +187,7 @@ use crate::indicators::mom::{mom_batch_py, mom_py, MomStreamPy};
 use crate::indicators::moving_averages::alma::{alma_batch_py, alma_py, AlmaStreamPy};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::alma::{
-    alma_cuda_batch_py, alma_cuda_many_series_one_param_py,
+    alma_cuda_batch_dev_py, alma_cuda_many_series_one_param_dev_py,
 };
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::buff_averages::{
@@ -498,8 +498,8 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<AlmaStreamPy>()?;
     #[cfg(feature = "cuda")]
     {
-        m.add_function(wrap_pyfunction!(alma_cuda_batch_py, m)?)?;
-        m.add_function(wrap_pyfunction!(alma_cuda_many_series_one_param_py, m)?)?;
+        m.add_function(wrap_pyfunction!(alma_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(alma_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
     // Register AroonOsc functions with their user-facing names

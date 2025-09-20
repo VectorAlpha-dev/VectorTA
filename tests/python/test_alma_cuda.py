@@ -7,6 +7,11 @@ import pytest
 import numpy as np
 
 try:
+    import cupy as cp
+except ImportError:  # pragma: no cover - optional dependency for CUDA path
+    cp = None
+
+try:
     import my_project as ti
 except ImportError:
     pytest.skip("Python module not built. Run 'maturin develop --features python,cuda' first", allow_module_level=True)
@@ -15,12 +20,19 @@ from test_utils import load_test_data, assert_close
 
 
 def _cuda_available() -> bool:
-    # Try a minimal call to detect CUDA availability and bindings presence
-    if not hasattr(ti, 'alma_cuda_batch'):
+    if cp is None:
+        return False
+    if not hasattr(ti, 'alma_cuda_batch_dev'):
         return False
     try:
         x = np.array([np.nan, 1.0, 2.0, 3.0], dtype=np.float64)
-        _ = ti.alma_cuda_batch(x, (3, 3, 0), (0.85, 0.85, 0.0), (6.0, 6.0, 0.0))
+        handle = ti.alma_cuda_batch_dev(
+            x.astype(np.float32),
+            period_range=(3, 3, 0),
+            offset_range=(0.85, 0.85, 0.0),
+            sigma_range=(6.0, 6.0, 0.0),
+        )
+        _ = cp.asarray(handle)  # ensure CuPy can wrap the handle
         return True
     except Exception as e:
         msg = str(e).lower()
@@ -44,18 +56,18 @@ class TestAlmaCuda:
         cpu = ti.alma(close, period, offset, sigma)
 
         # CUDA single-combo batch
-        res = ti.alma_cuda_batch(
-            close,
+        handle = ti.alma_cuda_batch_dev(
+            close.astype(np.float32),
             period_range=(period, period, 0),
             offset_range=(offset, offset, 0.0),
             sigma_range=(sigma, sigma, 0.0),
         )
 
-        assert 'values' in res
-        gpu = res['values'][0]
+        gpu = cp.asarray(handle)
+        gpu_first = cp.asnumpy(gpu)[0]
 
         # Compare entire row with modest tolerance (fp32 vs fp64)
-        assert_close(gpu, cpu, rtol=1e-5, atol=1e-6, msg="CUDA batch vs CPU mismatch")
+        assert_close(gpu_first, cpu, rtol=1e-5, atol=1e-6, msg="CUDA batch vs CPU mismatch")
 
     # multi-stream variant removed
 
@@ -78,7 +90,10 @@ class TestAlmaCuda:
             cpu_tm[:, j] = ti.alma(data_tm[:, j], period, offset, sigma)
 
         # CUDA
-        gpu_tm = ti.alma_cuda_many_series_one_param(data_tm, period, offset, sigma)
+        handle = ti.alma_cuda_many_series_one_param_dev(
+            data_tm.astype(np.float32), period, offset, sigma
+        )
+        gpu_tm = cp.asnumpy(cp.asarray(handle))
 
         assert gpu_tm.shape == data_tm.shape
         assert_close(gpu_tm, cpu_tm, rtol=1e-5, atol=1e-6, msg="CUDA many-series vs CPU mismatch")

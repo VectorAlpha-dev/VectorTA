@@ -267,10 +267,10 @@ fn prep_alma_one_series_1m_x_240() -> AlmaOneSeriesState {
     let cuda = CudaAlma::new(0).expect("cuda alma");
     let series_len = 1_000_000usize;
     let data = gen_series(series_len);
+    let host_prices_f32: Vec<f32> = data.iter().map(|&x| x as f32).collect();
     let periods: Vec<usize> = (1..=240).collect();
     let n_combos = periods.len();
     let max_period = *periods.iter().max().unwrap();
-    let host_prices_f32: Vec<f32> = data.iter().map(|&x| x as f32).collect();
     let mut weights_flat = vec![0f32; n_combos * max_period];
     let mut inv_norms = vec![0f32; n_combos];
     let mut periods_i32 = vec![0i32; n_combos];
@@ -345,9 +345,10 @@ fn prep_alma_one_series_250k_x_4k() -> AlmaOneSeriesState {
     let cuda = CudaAlma::new(0).expect("cuda alma");
     let series_len = 250_000usize;
     let data = gen_series(series_len);
-    let periods: Vec<usize> = (1..=240).collect(); // 240
-    let offsets: [f64; 4] = [0.25, 0.5, 0.75, 0.85]; // 4
-    let sigmas: [f64; 4] = [3.0, 6.0, 9.0, 12.0]; // 4
+    let host_prices_f32: Vec<f32> = data.iter().map(|&x| x as f32).collect();
+    let periods: Vec<usize> = (1..=240).collect();
+    let offsets: [f64; 4] = [0.25, 0.5, 0.75, 0.85];
+    let sigmas: [f64; 4] = [3.0, 6.0, 9.0, 12.0];
     let mut combos: Vec<(usize, f64, f64)> =
         Vec::with_capacity(periods.len() * offsets.len() * sigmas.len());
     for &p in &periods {
@@ -358,9 +359,7 @@ fn prep_alma_one_series_250k_x_4k() -> AlmaOneSeriesState {
         }
     }
     let max_period = periods.iter().copied().max().unwrap();
-    let n_combos = combos.len(); // ~3840
-
-    let host_prices_f32: Vec<f32> = data.iter().map(|&x| x as f32).collect();
+    let n_combos = combos.len();
     let mut weights_flat = vec![0f32; n_combos * max_period];
     let mut inv_norms = vec![0f32; n_combos];
     let mut periods_i32 = vec![0i32; n_combos];

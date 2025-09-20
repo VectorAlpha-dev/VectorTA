@@ -1,5 +1,5 @@
 [build]
-rustc-wrapper = "sccache"
+# rustc-wrapper = "sccache"
 
 # Limit test parallelism to prevent crashes from memory exhaustion
 [test]

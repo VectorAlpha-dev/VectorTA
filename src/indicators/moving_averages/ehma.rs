@@ -1434,14 +1434,16 @@ impl EhmaContext {
                 )
             },
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => ehma_avx512(
-                data,
-                &self.weights,
-                self.period,
-                self.first,
-                self.inv_coef,
-                out,
-            ),
+            Kernel::Avx512 | Kernel::Avx512Batch => unsafe {
+                ehma_avx512(
+                    data,
+                    &self.weights,
+                    self.period,
+                    self.first,
+                    self.inv_coef,
+                    out,
+                )
+            },
             _ => ehma_scalar(
                 data,
                 &self.weights,

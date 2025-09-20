@@ -9,6 +9,8 @@
 #![allow(non_snake_case)]
 
 mod indicators;
+#[cfg(feature = "cuda")]
+mod cuda;
 mod utilities;
 use csv::ReaderBuilder;
 use serde::Deserialize;

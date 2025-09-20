@@ -1,7 +1,7 @@
 // Integration tests for CUDA ALMA kernels
 
 use my_project::indicators::moving_averages::alma::{
-    alma_batch_with_kernel, AlmaBatchOutput, AlmaBatchRange, AlmaBuilder, AlmaError, AlmaParams,
+    alma_batch_with_kernel, AlmaBatchRange, AlmaBuilder, AlmaParams,
 };
 use my_project::utilities::enums::Kernel;
 
@@ -9,6 +9,8 @@ use my_project::utilities::enums::Kernel;
 use my_project::cuda::cuda_available;
 #[cfg(feature = "cuda")]
 use my_project::cuda::moving_averages::CudaAlma;
+#[cfg(feature = "cuda")]
+use cust::memory::CopyDestination;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -54,19 +56,27 @@ fn alma_cuda_one_series_many_params_matches_cpu() -> Result<(), Box<dyn std::err
         Err(e) => return Err(Box::new(e)),
     };
 
-    // GPU
+    // GPU (device handle, copy back for comparison)
     let cuda = CudaAlma::new(0).expect("CudaAlma::new");
-    let gpu = cuda.alma_batch(&data, &sweep).expect("cuda alma_batch");
+    let data_f32: Vec<f32> = data.iter().map(|&v| v as f32).collect();
+    let gpu_handle = cuda
+        .alma_batch_dev(&data_f32, &sweep)
+        .expect("cuda alma_batch_dev");
 
-    assert_eq!(cpu.rows, gpu.rows);
-    assert_eq!(cpu.cols, gpu.cols);
-    assert_eq!(cpu.combos.len(), gpu.combos.len());
+    assert_eq!(cpu.rows, gpu_handle.rows);
+    assert_eq!(cpu.cols, gpu_handle.cols);
+
+    let mut gpu_host = vec![0f32; gpu_handle.len()];
+    gpu_handle
+        .buf
+        .copy_to(&mut gpu_host)
+        .expect("copy cuda alma batch result to host");
 
     // fp32 kernel vs fp64 CPU: allow a modest tolerance
     let tol = 1e-5;
     for i in 0..(cpu.rows * cpu.cols) {
         let a = cpu.values[i];
-        let b = gpu.values[i];
+        let b = gpu_host[i] as f64;
         assert!(
             approx_eq(a, b, tol),
             "mismatch at {}: cpu={} gpu={}",
@@ -130,14 +140,29 @@ fn alma_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
 
     // GPU
     let cuda = CudaAlma::new(0).expect("CudaAlma::new");
-    let gpu_tm = cuda
-        .alma_multi_series_one_param_time_major(&data_tm, num_series, series_len, &params)
-        .expect("cuda alma_multi_series_one_param_time_major");
+    let data_tm_f32: Vec<f32> = data_tm.iter().map(|&v| v as f32).collect();
+    let gpu_handle = cuda
+        .alma_multi_series_one_param_time_major_dev(
+            &data_tm_f32,
+            num_series,
+            series_len,
+            &params,
+        )
+        .expect("cuda alma_multi_series_one_param_time_major_dev");
+
+    assert_eq!(gpu_handle.rows, series_len);
+    assert_eq!(gpu_handle.cols, num_series);
+
+    let mut gpu_tm = vec![0f32; gpu_handle.len()];
+    gpu_handle
+        .buf
+        .copy_to(&mut gpu_tm)
+        .expect("copy many-series result to host");
 
     let tol = 1e-5;
     for i in 0..(num_series * series_len) {
         let a = cpu_tm[i];
-        let b = gpu_tm[i];
+        let b = gpu_tm[i] as f64;
         assert!(
             approx_eq(a, b, tol),
             "mismatch at {}: cpu={} gpu={}",

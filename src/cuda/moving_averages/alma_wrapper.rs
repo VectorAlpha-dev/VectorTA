@@ -68,16 +68,20 @@ impl CudaAlma {
     pub fn new(device_id: usize) -> Result<Self, CudaAlmaError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
 
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+        let device =
+            Device::get_device(device_id as u32).map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/alma_kernel.ptx"));
         let module = Module::from_ptx(ptx, &[]).map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
-        let stream =
-            Stream::new(StreamFlags::NON_BLOCKING, None).map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
+            .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
 
-        Ok(Self { module, stream, _context: context })
+        Ok(Self {
+            module,
+            stream,
+            _context: context,
+        })
     }
 
     #[inline]
@@ -128,7 +132,9 @@ impl CudaAlma {
 
         let combos = expand_grid(sweep);
         if combos.is_empty() {
-            return Err(CudaAlmaError::InvalidInput("no parameter combinations".into()));
+            return Err(CudaAlmaError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
         }
 
         let series_len = data_f32.len();
@@ -170,25 +176,27 @@ impl CudaAlma {
         max_period: usize,
     ) -> Result<DeviceArrayF32, CudaAlmaError> {
         let n_combos = combos.len();
-        let periods_i32: Vec<i32> = combos
-            .iter()
-            .map(|p| p.period.unwrap() as i32)
-            .collect();
-        let offsets_f32: Vec<f32> = combos
-            .iter()
-            .map(|p| p.offset.unwrap() as f32)
-            .collect();
-        let sigmas_f32: Vec<f32> = combos
-            .iter()
-            .map(|p| p.sigma.unwrap() as f32)
-            .collect();
+        let mut periods_i32 = vec![0i32; n_combos];
+        let mut weights_flat = vec![0f32; n_combos * max_period];
+        let mut inv_norms = vec![0f32; n_combos];
+
+        for (idx, prm) in combos.iter().enumerate() {
+            let period = prm.period.unwrap() as usize;
+            let offset = prm.offset.unwrap();
+            let sigma = prm.sigma.unwrap();
+            let (weights, inv_norm) = compute_weights_cpu_f32(period, offset, sigma);
+            periods_i32[idx] = period as i32;
+            inv_norms[idx] = inv_norm;
+            let base = idx * max_period;
+            weights_flat[base..base + period].copy_from_slice(&weights);
+        }
 
         let prices_bytes = series_len * std::mem::size_of::<f32>();
         let periods_bytes = n_combos * std::mem::size_of::<i32>();
-        let offsets_bytes = n_combos * std::mem::size_of::<f32>();
-        let sigmas_bytes = n_combos * std::mem::size_of::<f32>();
+        let weights_bytes = n_combos * max_period * std::mem::size_of::<f32>();
+        let inv_norm_bytes = n_combos * std::mem::size_of::<f32>();
         let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
-        let required = prices_bytes + periods_bytes + offsets_bytes + sigmas_bytes + out_bytes;
+        let required = prices_bytes + periods_bytes + weights_bytes + inv_norm_bytes + out_bytes;
         let headroom = 64 * 1024 * 1024; // 64MB safety margin
         if !Self::will_fit(required, headroom) {
             return Err(CudaAlmaError::InvalidInput(format!(
@@ -197,24 +205,23 @@ impl CudaAlma {
             )));
         }
 
-        let d_prices = DeviceBuffer::from_slice(data_f32)
+        let d_prices =
+            DeviceBuffer::from_slice(data_f32).map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+        let d_weights = DeviceBuffer::from_slice(&weights_flat)
             .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
         let d_periods = DeviceBuffer::from_slice(&periods_i32)
             .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
-        let d_offsets = DeviceBuffer::from_slice(&offsets_f32)
-            .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
-        let d_sigmas = DeviceBuffer::from_slice(&sigmas_f32)
-            .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(n_combos * series_len)
-        }
-        .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+        let d_inv_norms =
+            DeviceBuffer::from_slice(&inv_norms).map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
+                .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
 
         self.launch_batch_kernel(
             &d_prices,
+            &d_weights,
             &d_periods,
-            &d_offsets,
-            &d_sigmas,
+            &d_inv_norms,
             series_len,
             n_combos,
             first_valid,
@@ -226,59 +233,71 @@ impl CudaAlma {
             .synchronize()
             .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows: n_combos, cols: series_len })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: n_combos,
+            cols: series_len,
+        })
     }
 
     fn launch_batch_kernel(
         &self,
         d_prices: &DeviceBuffer<f32>,
+        d_weights: &DeviceBuffer<f32>,
         d_periods: &DeviceBuffer<i32>,
-        d_offsets: &DeviceBuffer<f32>,
-        d_sigmas: &DeviceBuffer<f32>,
+        d_inv_norms: &DeviceBuffer<f32>,
         series_len: usize,
         n_combos: usize,
         first_valid: usize,
         max_period: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaAlmaError> {
-        const BLOCK_X: u32 = 256;
-        let grid_x = ((series_len as u32) + BLOCK_X - 1) / BLOCK_X;
-        let grid: GridSize = (grid_x, n_combos as u32, 1).into();
-        let block: BlockSize = (BLOCK_X, 1, 1).into();
-
         let use_tiled = series_len > 8192;
+        let mut block_x: u32 = 256;
         let (func, shared_bytes) = if use_tiled {
-            let tile = BLOCK_X as usize;
+            block_x = Self::pick_tiled_block(max_period, series_len, n_combos);
+            let tile = block_x as usize;
             let elems = max_period + (tile + max_period - 1);
+            let func_name = match block_x {
+                128 => "alma_batch_tiled_f32_tile128",
+                _ => "alma_batch_tiled_f32_tile256",
+            };
             (
                 self.module
-                    .get_function("alma_batch_tiled_async_f32")
+                    .get_function(func_name)
                     .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?,
                 (elems * std::mem::size_of::<f32>()) as u32,
             )
         } else {
+            block_x = 256;
             (
                 self.module
-                    .get_function("alma_batch_f32_onthefly")
+                    .get_function("alma_batch_f32")
                     .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?,
                 (max_period * std::mem::size_of::<f32>()) as u32,
             )
         };
 
+        let grid_x = ((series_len as u32) + block_x - 1) / block_x;
+        let grid: GridSize = (grid_x, n_combos as u32, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+            let mut weights_ptr = d_weights.as_device_ptr().as_raw();
             let mut periods_ptr = d_periods.as_device_ptr().as_raw();
-            let mut offsets_ptr = d_offsets.as_device_ptr().as_raw();
-            let mut sigmas_ptr = d_sigmas.as_device_ptr().as_raw();
+            let mut inv_ptr = d_inv_norms.as_device_ptr().as_raw();
+            let mut max_period_i = max_period as i32;
             let mut series_len_i = series_len as i32;
             let mut n_combos_i = n_combos as i32;
             let mut first_valid_i = first_valid as i32;
             let mut out_ptr = d_out.as_device_ptr().as_raw();
             let args: &mut [*mut c_void] = &mut [
                 &mut prices_ptr as *mut _ as *mut c_void,
+                &mut weights_ptr as *mut _ as *mut c_void,
                 &mut periods_ptr as *mut _ as *mut c_void,
-                &mut offsets_ptr as *mut _ as *mut c_void,
-                &mut sigmas_ptr as *mut _ as *mut c_void,
+                &mut inv_ptr as *mut _ as *mut c_void,
+                &mut max_period_i as *mut _ as *mut c_void,
                 &mut series_len_i as *mut _ as *mut c_void,
                 &mut n_combos_i as *mut _ as *mut c_void,
                 &mut first_valid_i as *mut _ as *mut c_void,
@@ -289,6 +308,46 @@ impl CudaAlma {
                 .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?
         }
         Ok(())
+    }
+
+    #[inline]
+    fn pick_tiled_block(max_period: usize, series_len: usize, n_combos: usize) -> u32 {
+        if max_period <= 128 && series_len >= 32_768 && n_combos >= 256 {
+            128
+        } else {
+            256
+        }
+    }
+
+    /// Launch using precomputed device buffers (legacy performance path).
+    pub fn alma_batch_device(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        d_weights: &DeviceBuffer<f32>,
+        d_periods: &DeviceBuffer<i32>,
+        d_inv_norms: &DeviceBuffer<f32>,
+        max_period: i32,
+        series_len: i32,
+        n_combos: i32,
+        first_valid: i32,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaAlmaError> {
+        if series_len <= 0 || n_combos <= 0 || max_period <= 0 {
+            return Err(CudaAlmaError::InvalidInput(
+                "series_len, n_combos, and max_period must be positive".into(),
+            ));
+        }
+        self.launch_batch_kernel(
+            d_prices,
+            d_weights,
+            d_periods,
+            d_inv_norms,
+            series_len as usize,
+            n_combos as usize,
+            first_valid.max(0) as usize,
+            max_period as usize,
+            d_out,
+        )
     }
 
     /// Launch one-series × many-params and return a VRAM-resident handle.
@@ -320,8 +379,7 @@ impl CudaAlma {
             )));
         }
 
-        let arr =
-            self.run_batch_kernel(data_f32, &combos, first_valid, series_len, max_period)?;
+        let arr = self.run_batch_kernel(data_f32, &combos, first_valid, series_len, max_period)?;
         arr.buf
             .copy_to(out)
             .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
@@ -367,7 +425,8 @@ impl CudaAlma {
                     break;
                 }
             }
-            let fv = fv.ok_or_else(|| CudaAlmaError::InvalidInput(format!("series {} all NaN", series)))?;
+            let fv = fv
+                .ok_or_else(|| CudaAlmaError::InvalidInput(format!("series {} all NaN", series)))?;
             if rows - fv < period {
                 return Err(CudaAlmaError::InvalidInput(format!(
                     "series {} not enough valid data (needed >= {}, valid = {})",
@@ -394,8 +453,9 @@ impl CudaAlma {
     ) -> Result<DeviceArrayF32, CudaAlmaError> {
         let prices_bytes = cols * rows * std::mem::size_of::<f32>();
         let first_valid_bytes = cols * std::mem::size_of::<i32>();
+        let weights_bytes = period * std::mem::size_of::<f32>();
         let out_bytes = cols * rows * std::mem::size_of::<f32>();
-        let required = prices_bytes + first_valid_bytes + out_bytes;
+        let required = prices_bytes + first_valid_bytes + weights_bytes + out_bytes;
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
             return Err(CudaAlmaError::InvalidInput(format!(
@@ -408,19 +468,20 @@ impl CudaAlma {
             .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
         let d_first_valids = DeviceBuffer::from_slice(first_valids)
             .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(cols * rows)
-        }
-        .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+        let (weights_host, inv_norm) = compute_weights_cpu_f32(period, offset as f64, sigma as f64);
+        let d_weights = DeviceBuffer::from_slice(&weights_host)
+            .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
+            .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
 
         self.launch_many_series_kernel(
             &d_prices,
-            &d_first_valids,
+            &d_weights,
             period,
-            offset,
-            sigma,
+            inv_norm,
             cols,
             rows,
+            &d_first_valids,
             &mut d_out,
         )?;
 
@@ -428,18 +489,22 @@ impl CudaAlma {
             .synchronize()
             .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 
     fn launch_many_series_kernel(
         &self,
         d_prices: &DeviceBuffer<f32>,
-        d_first_valids: &DeviceBuffer<i32>,
+        d_weights: &DeviceBuffer<f32>,
         period: usize,
-        offset: f32,
-        sigma: f32,
+        inv_norm: f32,
         cols: usize,
         rows: usize,
+        d_first_valids: &DeviceBuffer<i32>,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaAlmaError> {
         const BLOCK_X: u32 = 128;
@@ -450,26 +515,26 @@ impl CudaAlma {
 
         let func = self
             .module
-            .get_function("alma_multi_series_one_param_onthefly_f32")
+            .get_function("alma_multi_series_one_param_f32")
             .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
 
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+            let mut weights_ptr = d_weights.as_device_ptr().as_raw();
             let mut first_valids_ptr = d_first_valids.as_device_ptr().as_raw();
             let mut period_i = period as i32;
-            let mut offset_f = offset;
-            let mut sigma_f = sigma;
+            let mut inv = inv_norm;
             let mut num_series_i = cols as i32;
             let mut series_len_i = rows as i32;
             let mut out_ptr = d_out.as_device_ptr().as_raw();
             let args: &mut [*mut c_void] = &mut [
                 &mut prices_ptr as *mut _ as *mut c_void,
-                &mut first_valids_ptr as *mut _ as *mut c_void,
+                &mut weights_ptr as *mut _ as *mut c_void,
                 &mut period_i as *mut _ as *mut c_void,
-                &mut offset_f as *mut _ as *mut c_void,
-                &mut sigma_f as *mut _ as *mut c_void,
+                &mut inv as *mut _ as *mut c_void,
                 &mut num_series_i as *mut _ as *mut c_void,
                 &mut series_len_i as *mut _ as *mut c_void,
+                &mut first_valids_ptr as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
             self.stream
@@ -477,6 +542,35 @@ impl CudaAlma {
                 .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?
         }
         Ok(())
+    }
+
+    /// Precomputed-weight path for many-series × one param.
+    pub fn alma_multi_series_one_param_device(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        d_weights: &DeviceBuffer<f32>,
+        period: i32,
+        inv_norm: f32,
+        num_series: i32,
+        series_len: i32,
+        d_first_valids: &DeviceBuffer<i32>,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaAlmaError> {
+        if period <= 0 || num_series <= 0 || series_len <= 0 {
+            return Err(CudaAlmaError::InvalidInput(
+                "period, num_series, and series_len must be positive".into(),
+            ));
+        }
+        self.launch_many_series_kernel(
+            d_prices,
+            d_weights,
+            period as usize,
+            inv_norm,
+            num_series as usize,
+            series_len as usize,
+            d_first_valids,
+            d_out,
+        )
     }
 
     /// Many-series × one-parameter (time-major). Returns a VRAM handle.
@@ -489,7 +583,15 @@ impl CudaAlma {
     ) -> Result<DeviceArrayF32, CudaAlmaError> {
         let (first_valids, period, offset, sigma) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
-        self.run_many_series_kernel(data_tm_f32, cols, rows, &first_valids, period, offset, sigma)
+        self.run_many_series_kernel(
+            data_tm_f32,
+            cols,
+            rows,
+            &first_valids,
+            period,
+            offset,
+            sigma,
+        )
     }
 
     /// Host-copy helper for many-series × one-param (FP32 output).
@@ -510,8 +612,15 @@ impl CudaAlma {
         }
         let (first_valids, period, offset, sigma) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
-        let arr =
-            self.run_many_series_kernel(data_tm_f32, cols, rows, &first_valids, period, offset, sigma)?;
+        let arr = self.run_many_series_kernel(
+            data_tm_f32,
+            cols,
+            rows,
+            &first_valids,
+            period,
+            offset,
+            sigma,
+        )?;
         arr.buf
             .copy_to(out_tm)
             .map_err(|e| CudaAlmaError::Cuda(e.to_string()))
@@ -546,9 +655,36 @@ fn expand_grid(r: &AlmaBatchRange) -> Vec<AlmaParams> {
     for &p in &periods {
         for &o in &offsets {
             for &s in &sigmas {
-                out.push(AlmaParams { period: Some(p), offset: Some(o), sigma: Some(s) });
+                out.push(AlmaParams {
+                    period: Some(p),
+                    offset: Some(o),
+                    sigma: Some(s),
+                });
             }
         }
     }
     out
+}
+
+fn compute_weights_cpu_f32(period: usize, offset: f64, sigma: f64) -> (Vec<f32>, f32) {
+    let mut weights = vec![0f32; period];
+    if period == 0 {
+        return (weights, 0.0);
+    }
+    let m = offset * (period.saturating_sub(1)) as f64;
+    let s = (period as f64) / sigma;
+    let s2 = 2.0 * s * s;
+    let mut norm = 0.0f64;
+    for i in 0..period {
+        let diff = i as f64 - m;
+        let w = (-((diff * diff) / s2)).exp() as f32;
+        weights[i] = w;
+        norm += w as f64;
+    }
+    let inv = if norm == 0.0 {
+        0.0
+    } else {
+        (1.0 / norm) as f32
+    };
+    (weights, inv)
 }
