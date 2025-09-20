@@ -608,6 +608,18 @@ unsafe fn buff_averages_simd128(
 
 // ==================== AVX2 IMPLEMENTATION ====================
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn hsum256_pd(v: __m256d) -> f64 {
+    // Sum 4 lanes -> scalar
+    let hi: __m128d = _mm256_extractf128_pd::<1>(v);
+    let lo: __m128d = _mm256_castpd256_pd128(v);
+    let sum2: __m128d = _mm_add_pd(lo, hi);               // [a0+a2, a1+a3]
+    let hi64: __m128d = _mm_unpackhi_pd(sum2, sum2);      // [a1+a3, a1+a3]
+    let sum: __m128d = _mm_add_sd(sum2, hi64);            // [total, _]
+    _mm_cvtsd_f64(sum)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn buff_averages_avx2(
     price: &[f64],
@@ -618,16 +630,131 @@ unsafe fn buff_averages_avx2(
     fast_out: &mut [f64],
     slow_out: &mut [f64],
 ) {
-    // Stub - fallback to scalar for now
-    buff_averages_scalar(
-        price,
-        volume,
-        fast_period,
-        slow_period,
-        first,
-        fast_out,
-        slow_out,
-    );
+    let len = price.len();
+    if len == 0 {
+        return;
+    }
+    let warm = first + slow_period - 1;
+    if warm >= len {
+        return;
+    }
+
+    // ---- initial slow window [warm+1-slow .. warm] ----
+    let slow_start = warm + 1 - slow_period;
+    let mut i = slow_start;
+    let end = warm + 1; // exclusive
+    let mut slow_num_v = _mm256_setzero_pd();
+    let mut slow_den_v = _mm256_setzero_pd();
+
+    while i + 4 <= end {
+        let p = _mm256_loadu_pd(price.as_ptr().add(i));
+        let v = _mm256_loadu_pd(volume.as_ptr().add(i));
+        // mask lanes where both p and v are not-NaN
+        let mp = _mm256_cmp_pd(p, p, _CMP_ORD_Q);
+        let mv = _mm256_cmp_pd(v, v, _CMP_ORD_Q);
+        let m = _mm256_and_pd(mp, mv);
+        // accumulate masked p*v and v
+        let pv = _mm256_mul_pd(p, v);
+        slow_num_v = _mm256_add_pd(slow_num_v, _mm256_and_pd(pv, m));
+        slow_den_v = _mm256_add_pd(slow_den_v, _mm256_and_pd(v, m));
+        i += 4;
+    }
+
+    let mut slow_numerator = hsum256_pd(slow_num_v);
+    let mut slow_denominator = hsum256_pd(slow_den_v);
+
+    while i < end {
+        let p = *price.get_unchecked(i);
+        let v = *volume.get_unchecked(i);
+        if !p.is_nan() && !v.is_nan() {
+            slow_numerator += p * v;
+            slow_denominator += v;
+        }
+        i += 1;
+    }
+
+    // ---- initial fast window [warm+1-fast .. warm] ----
+    let fast_start = warm + 1 - fast_period;
+    let mut j = fast_start;
+    let mut fast_num_v = _mm256_setzero_pd();
+    let mut fast_den_v = _mm256_setzero_pd();
+
+    while j + 4 <= end {
+        let p = _mm256_loadu_pd(price.as_ptr().add(j));
+        let v = _mm256_loadu_pd(volume.as_ptr().add(j));
+        let mp = _mm256_cmp_pd(p, p, _CMP_ORD_Q);
+        let mv = _mm256_cmp_pd(v, v, _CMP_ORD_Q);
+        let m = _mm256_and_pd(mp, mv);
+        let pv = _mm256_mul_pd(p, v);
+        fast_num_v = _mm256_add_pd(fast_num_v, _mm256_and_pd(pv, m));
+        fast_den_v = _mm256_add_pd(fast_den_v, _mm256_and_pd(v, m));
+        j += 4;
+    }
+
+    let mut fast_numerator = hsum256_pd(fast_num_v);
+    let mut fast_denominator = hsum256_pd(fast_den_v);
+
+    while j < end {
+        let p = *price.get_unchecked(j);
+        let v = *volume.get_unchecked(j);
+        if !p.is_nan() && !v.is_nan() {
+            fast_numerator += p * v;
+            fast_denominator += v;
+        }
+        j += 1;
+    }
+
+    // write first valid outputs
+    slow_out[warm] = if slow_denominator != 0.0 {
+        slow_numerator / slow_denominator
+    } else {
+        0.0
+    };
+    fast_out[warm] = if fast_denominator != 0.0 {
+        fast_numerator / fast_denominator
+    } else {
+        0.0
+    };
+
+    // ---- rolling updates, scalar (single element enters/exits each step) ----
+    for k in (warm + 1)..len {
+        let old_slow = k - slow_period;
+        let new_p = *price.get_unchecked(k);
+        let new_v = *volume.get_unchecked(k);
+        let old_p = *price.get_unchecked(old_slow);
+        let old_v = *volume.get_unchecked(old_slow);
+
+        if !old_p.is_nan() && !old_v.is_nan() {
+            slow_numerator -= old_p * old_v;
+            slow_denominator -= old_v;
+        }
+        if !new_p.is_nan() && !new_v.is_nan() {
+            slow_numerator += new_p * new_v;
+            slow_denominator += new_v;
+        }
+        slow_out[k] = if slow_denominator != 0.0 {
+            slow_numerator / slow_denominator
+        } else {
+            0.0
+        };
+
+        let old_fast = k - fast_period;
+        let old_pf = *price.get_unchecked(old_fast);
+        let old_vf = *volume.get_unchecked(old_fast);
+        if !old_pf.is_nan() && !old_vf.is_nan() {
+            fast_numerator -= old_pf * old_vf;
+            fast_denominator -= old_vf;
+        }
+        if !new_p.is_nan() && !new_v.is_nan() {
+            fast_numerator += new_p * new_v;
+            fast_denominator += new_v;
+        }
+        fast_out[k] = if fast_denominator != 0.0 {
+            fast_numerator / fast_denominator
+        } else {
+            0.0
+        };
+    }
 }
 
 // ==================== AVX512 IMPLEMENTATION ====================
@@ -642,16 +769,135 @@ unsafe fn buff_averages_avx512(
     fast_out: &mut [f64],
     slow_out: &mut [f64],
 ) {
-    // Stub - fallback to scalar for now
-    buff_averages_scalar(
-        price,
-        volume,
-        fast_period,
-        slow_period,
-        first,
-        fast_out,
-        slow_out,
-    );
+    let len = price.len();
+    if len == 0 {
+        return;
+    }
+    let warm = first + slow_period - 1;
+    if warm >= len {
+        return;
+    }
+
+    // ---- initial slow window [warm+1-slow .. warm] ----
+    let slow_start = warm + 1 - slow_period;
+    let mut i = slow_start;
+    let end = warm + 1; // exclusive
+    let mut slow_num_v = _mm512_setzero_pd();
+    let mut slow_den_v = _mm512_setzero_pd();
+
+    while i + 8 <= end {
+        let p = _mm512_loadu_pd(price.as_ptr().add(i));
+        let v = _mm512_loadu_pd(volume.as_ptr().add(i));
+        // mask lanes where both p and v are not-NaN
+        let mp: __mmask8 = _mm512_cmp_pd_mask(p, p, _CMP_ORD_Q);
+        let mv: __mmask8 = _mm512_cmp_pd_mask(v, v, _CMP_ORD_Q);
+        let m: __mmask8 = mp & mv;
+
+        // masked accumulate p*v and v
+        let pv = _mm512_mul_pd(p, v);
+        slow_num_v = _mm512_mask_add_pd(slow_num_v, m, slow_num_v, pv);
+        slow_den_v = _mm512_mask_add_pd(slow_den_v, m, slow_den_v, v);
+
+        i += 8;
+    }
+
+    let mut slow_numerator = _mm512_reduce_add_pd(slow_num_v);
+    let mut slow_denominator = _mm512_reduce_add_pd(slow_den_v);
+
+    while i < end {
+        let p = *price.get_unchecked(i);
+        let v = *volume.get_unchecked(i);
+        if !p.is_nan() && !v.is_nan() {
+            slow_numerator += p * v;
+            slow_denominator += v;
+        }
+        i += 1;
+    }
+
+    // ---- initial fast window [warm+1-fast .. warm] ----
+    let fast_start = warm + 1 - fast_period;
+    let mut j = fast_start;
+    let mut fast_num_v = _mm512_setzero_pd();
+    let mut fast_den_v = _mm512_setzero_pd();
+
+    while j + 8 <= end {
+        let p = _mm512_loadu_pd(price.as_ptr().add(j));
+        let v = _mm512_loadu_pd(volume.as_ptr().add(j));
+        let mp: __mmask8 = _mm512_cmp_pd_mask(p, p, _CMP_ORD_Q);
+        let mv: __mmask8 = _mm512_cmp_pd_mask(v, v, _CMP_ORD_Q);
+        let m: __mmask8 = mp & mv;
+
+        let pv = _mm512_mul_pd(p, v);
+        fast_num_v = _mm512_mask_add_pd(fast_num_v, m, fast_num_v, pv);
+        fast_den_v = _mm512_mask_add_pd(fast_den_v, m, fast_den_v, v);
+
+        j += 8;
+    }
+
+    let mut fast_numerator = _mm512_reduce_add_pd(fast_num_v);
+    let mut fast_denominator = _mm512_reduce_add_pd(fast_den_v);
+
+    while j < end {
+        let p = *price.get_unchecked(j);
+        let v = *volume.get_unchecked(j);
+        if !p.is_nan() && !v.is_nan() {
+            fast_numerator += p * v;
+            fast_denominator += v;
+        }
+        j += 1;
+    }
+
+    // write first valid outputs
+    slow_out[warm] = if slow_denominator != 0.0 {
+        slow_numerator / slow_denominator
+    } else {
+        0.0
+    };
+    fast_out[warm] = if fast_denominator != 0.0 {
+        fast_numerator / fast_denominator
+    } else {
+        0.0
+    };
+
+    // ---- rolling updates, scalar ----
+    for k in (warm + 1)..len {
+        let old_slow = k - slow_period;
+        let new_p = *price.get_unchecked(k);
+        let new_v = *volume.get_unchecked(k);
+        let old_p = *price.get_unchecked(old_slow);
+        let old_v = *volume.get_unchecked(old_slow);
+
+        if !old_p.is_nan() && !old_v.is_nan() {
+            slow_numerator -= old_p * old_v;
+            slow_denominator -= old_v;
+        }
+        if !new_p.is_nan() && !new_v.is_nan() {
+            slow_numerator += new_p * new_v;
+            slow_denominator += new_v;
+        }
+        slow_out[k] = if slow_denominator != 0.0 {
+            slow_numerator / slow_denominator
+        } else {
+            0.0
+        };
+
+        let old_fast = k - fast_period;
+        let old_pf = *price.get_unchecked(old_fast);
+        let old_vf = *volume.get_unchecked(old_fast);
+        if !old_pf.is_nan() && !old_vf.is_nan() {
+            fast_numerator -= old_pf * old_vf;
+            fast_denominator -= old_vf;
+        }
+        if !new_p.is_nan() && !new_v.is_nan() {
+            fast_numerator += new_p * new_v;
+            fast_denominator += new_v;
+        }
+        fast_out[k] = if fast_denominator != 0.0 {
+            fast_numerator / fast_denominator
+        } else {
+            0.0
+        };
+    }
 }
 
 // ==================== STREAMING SUPPORT ====================
