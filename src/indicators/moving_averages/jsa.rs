@@ -765,13 +765,18 @@ unsafe fn jsa_row_avx512_long(data: &[f64], first: usize, period: usize, out: &m
 
 // Python bindings
 #[cfg(feature = "python")]
-use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::{cuda_available, moving_averages::CudaJsa};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 #[cfg(feature = "python")]
 #[pyfunction]
@@ -870,6 +875,69 @@ pub fn jsa_batch_py<'py>(
     )?;
 
     Ok(dict)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "jsa_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, period_range=(30, 30, 0), device_id=0))]
+pub fn jsa_cuda_batch_dev_py(
+    py: Python<'_>,
+    data_f32: PyReadonlyArray1<'_, f32>,
+    period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let slice_in = data_f32.as_slice()?;
+    let sweep = JsaBatchRange {
+        period: period_range,
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaJsa::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.jsa_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "jsa_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, period, device_id=0))]
+pub fn jsa_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm_f32: PyReadonlyArray2<'_, f32>,
+    period: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    if period == 0 {
+        return Err(PyValueError::new_err("period must be positive"));
+    }
+
+    let flat = data_tm_f32.as_slice()?;
+    let shape = data_tm_f32.shape();
+    if shape.len() != 2 {
+        return Err(PyValueError::new_err("expected a 2D array"));
+    }
+    let series_len = shape[0];
+    let num_series = shape[1];
+    let params = JsaParams {
+        period: Some(period),
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaJsa::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.jsa_many_series_one_param_time_major_dev(flat, num_series, series_len, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
 }
 
 // Note: jsa_batch_with_metadata_py is no longer needed since jsa_batch_py now returns metadata in the dictionary
@@ -1105,6 +1173,11 @@ pub fn register_jsa_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()>
     m.add_function(wrap_pyfunction!(jsa_py, m)?)?;
     m.add_function(wrap_pyfunction!(jsa_batch_py, m)?)?;
     m.add_class::<JsaStreamPy>()?;
+    #[cfg(feature = "cuda")]
+    {
+        m.add_function(wrap_pyfunction!(jsa_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(jsa_cuda_many_series_one_param_dev_py, m)?)?;
+    }
     Ok(())
 }
 

@@ -221,7 +221,7 @@ use my_project::indicators::{
     wad::{wad as wad_raw, WadInput},
     wavetrend::{wavetrend as wavetrend_raw, WavetrendInput},
     wclprice::{wclprice as wclprice_raw, WclpriceInput},
-    willr::{willr as willr_raw, WillrInput},
+    willr::{willr as willr_raw, WillrBatchBuilder, WillrData, WillrInput},
     wto::{wto_with_kernel, WtoBatchBuilder, WtoInput},
     zscore::{zscore as zscore_raw, ZscoreInput},
 };
@@ -1358,6 +1358,42 @@ fn uma_batch_avx512batch(input: &UmaInputS) -> anyhow::Result<()> {
         .apply_slice(slice, None)?;
     Ok(())
 }
+
+fn willr_batch_scalarbatch(input: &WillrInputS) -> anyhow::Result<()> {
+    let (high, low, close) = match &input.data {
+        WillrData::Candles { candles } => (&candles.high[..], &candles.low[..], &candles.close[..]),
+        WillrData::Slices { high, low, close } => (*high, *low, *close),
+    };
+
+    WillrBatchBuilder::new()
+        .kernel(Kernel::ScalarBatch)
+        .apply_slices(high, low, close)?;
+    Ok(())
+}
+
+fn willr_batch_avx2batch(input: &WillrInputS) -> anyhow::Result<()> {
+    let (high, low, close) = match &input.data {
+        WillrData::Candles { candles } => (&candles.high[..], &candles.low[..], &candles.close[..]),
+        WillrData::Slices { high, low, close } => (*high, *low, *close),
+    };
+
+    WillrBatchBuilder::new()
+        .kernel(Kernel::Avx2Batch)
+        .apply_slices(high, low, close)?;
+    Ok(())
+}
+
+fn willr_batch_avx512batch(input: &WillrInputS) -> anyhow::Result<()> {
+    let (high, low, close) = match &input.data {
+        WillrData::Candles { candles } => (&candles.high[..], &candles.low[..], &candles.close[..]),
+        WillrData::Slices { high, low, close } => (*high, *low, *close),
+    };
+
+    WillrBatchBuilder::new()
+        .kernel(Kernel::Avx512Batch)
+        .apply_slices(high, low, close)?;
+    Ok(())
+}
 make_batch_wrappers!(vidya_batch, VidyaBatchBuilder, VidyaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(vlma_batch, VlmaBatchBuilder, VlmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 
@@ -1838,6 +1874,13 @@ bench_variants!(
     vpwma_batch_scalarbatch,
     vpwma_batch_avx2batch,
     vpwma_batch_avx512batch,
+);
+
+bench_variants!(
+    willr_batch => WillrInputS; Some(227);
+    willr_batch_scalarbatch,
+    willr_batch_avx2batch,
+    willr_batch_avx512batch,
 );
 
 bench_variants!(
@@ -2528,6 +2571,7 @@ criterion_main!(
     benches_volume_adjusted_ma_batch,
     benches_vpwma,
     benches_vpwma_batch,
+    benches_willr_batch,
     benches_vwma,
     benches_wilders,
     benches_wilders_batch,

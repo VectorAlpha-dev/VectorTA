@@ -30,6 +30,12 @@
 //!   - Optimize coefficient calculations (c1, c2, c3, c4) with vector operations
 //!   - Potential for FMA instructions in the weighted sum calculation
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::{CudaTilson, CudaTilsonError};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -2026,6 +2032,68 @@ pub fn tilson_batch_py<'py>(
             .into_pyarray(py),
     )?;
     Ok(dict)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "tilson_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, period_range, volume_factor_range=None, device_id=0))]
+pub fn tilson_cuda_batch_dev_py(
+    py: Python<'_>,
+    data_f32: numpy::PyReadonlyArray1<'_, f32>,
+    period_range: (usize, usize, usize),
+    volume_factor_range: Option<(f64, f64, f64)>,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let slice_in = data_f32.as_slice()?;
+    let sweep = TilsonBatchRange {
+        period: period_range,
+        volume_factor: volume_factor_range.unwrap_or((0.0, 0.0, 0.0)),
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaTilson::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.tilson_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "tilson_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, period, volume_factor, device_id=0))]
+pub fn tilson_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    period: usize,
+    volume_factor: f64,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    use numpy::PyUntypedArrayMethods;
+
+    let flat = data_tm_f32.as_slice()?;
+    let rows = data_tm_f32.shape()[0];
+    let cols = data_tm_f32.shape()[1];
+    let params = TilsonParams {
+        period: Some(period),
+        volume_factor: Some(volume_factor),
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaTilson::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.tilson_many_series_one_param_time_major_dev(flat, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "python")]

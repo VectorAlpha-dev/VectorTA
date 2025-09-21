@@ -17,6 +17,10 @@
 //! - **Batch Support**: ✓ Full parallel batch parameter sweep implementation
 //! - **TODO**: Implement actual AVX2/AVX512 SIMD kernels for min/max operations
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::oscillators::CudaWillr;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -538,6 +542,253 @@ fn expand_grid(r: &WillrBatchRange) -> Vec<WillrParams> {
         .collect()
 }
 
+#[derive(Debug)]
+struct SharedWillrCtx {
+    log2: Vec<usize>,
+    st_max: Vec<Vec<f64>>,
+    st_min: Vec<Vec<f64>>,
+    nan_psum: Vec<u32>,
+}
+
+impl SharedWillrCtx {
+    #[inline]
+    fn build_log2(n: usize) -> Vec<usize> {
+        let mut lg = vec![0usize; n + 1];
+        for i in 2..=n {
+            lg[i] = lg[i >> 1] + 1;
+        }
+        lg
+    }
+
+    #[inline]
+    fn build_sparse(data: &[f64], is_max: bool, log2: &[usize]) -> Vec<Vec<f64>> {
+        let n = data.len();
+        if n == 0 {
+            return vec![Vec::new()];
+        }
+        let max_k = log2[n];
+        let mut st: Vec<Vec<f64>> = Vec::with_capacity(max_k + 1);
+        st.push(data.to_vec());
+        let mut k = 1usize;
+        while k <= max_k {
+            let window = 1usize << k;
+            let len = n + 1 - window;
+            let prev = &st[k - 1];
+            let offset = 1usize << (k - 1);
+            let mut row = Vec::with_capacity(len);
+            for i in 0..len {
+                let a = prev[i];
+                let b = prev[i + offset];
+                row.push(if is_max { a.max(b) } else { a.min(b) });
+            }
+            st.push(row);
+            k += 1;
+        }
+        st
+    }
+
+    #[inline]
+    fn new(high: &[f64], low: &[f64]) -> Self {
+        debug_assert_eq!(high.len(), low.len());
+        let n = high.len();
+        let log2 = Self::build_log2(n);
+
+        let mut high_clean = Vec::with_capacity(n);
+        let mut low_clean = Vec::with_capacity(n);
+        let mut nan_psum = vec![0u32; n + 1];
+
+        for i in 0..n {
+            let h = high[i];
+            let l = low[i];
+            let has_nan = h.is_nan() || l.is_nan();
+            nan_psum[i + 1] = nan_psum[i] + (has_nan as u32);
+
+            high_clean.push(if h.is_nan() { f64::NEG_INFINITY } else { h });
+            low_clean.push(if l.is_nan() { f64::INFINITY } else { l });
+        }
+
+        let st_max = Self::build_sparse(&high_clean, true, &log2);
+        let st_min = Self::build_sparse(&low_clean, false, &log2);
+
+        Self {
+            log2,
+            st_max,
+            st_min,
+            nan_psum,
+        }
+    }
+
+    #[inline]
+    fn qmax(&self, l: usize, r: usize) -> f64 {
+        let len = r - l + 1;
+        let k = self.log2[len];
+        let offset = 1usize << k;
+        let a = self.st_max[k][l];
+        let b = self.st_max[k][r + 1 - offset];
+        a.max(b)
+    }
+
+    #[inline]
+    fn qmin(&self, l: usize, r: usize) -> f64 {
+        let len = r - l + 1;
+        let k = self.log2[len];
+        let offset = 1usize << k;
+        let a = self.st_min[k][l];
+        let b = self.st_min[k][r + 1 - offset];
+        a.min(b)
+    }
+
+    #[inline]
+    fn window_has_nan(&self, l: usize, r: usize) -> bool {
+        (self.nan_psum[r + 1] - self.nan_psum[l]) != 0
+    }
+
+    #[cfg(feature = "cuda")]
+    #[inline]
+    fn flatten(&self) -> (Vec<f64>, Vec<f64>, Vec<usize>) {
+        let levels = self.st_max.len();
+        let mut offsets = Vec::with_capacity(levels + 1);
+        let mut total = 0usize;
+        for level in &self.st_max {
+            offsets.push(total);
+            total += level.len();
+        }
+        offsets.push(total);
+
+        let mut flat_max = Vec::with_capacity(total);
+        for level in &self.st_max {
+            flat_max.extend_from_slice(level);
+        }
+
+        let mut flat_min = Vec::with_capacity(total);
+        for level in &self.st_min {
+            flat_min.extend_from_slice(level);
+        }
+
+        (flat_max, flat_min, offsets)
+    }
+}
+
+#[cfg(feature = "cuda")]
+#[derive(Debug, Clone)]
+pub struct WillrGpuTables {
+    pub log2: Vec<i32>,
+    pub level_offsets: Vec<i32>,
+    pub st_max: Vec<f32>,
+    pub st_min: Vec<f32>,
+    pub nan_psum: Vec<i32>,
+}
+
+#[cfg(feature = "cuda")]
+impl WillrGpuTables {
+    #[inline]
+    fn from_shared_ctx(ctx: &SharedWillrCtx) -> Self {
+        let (flat_max_f64, flat_min_f64, offsets_usize) = ctx.flatten();
+        let log2 = ctx.log2.iter().map(|&v| v as i32).collect();
+        let level_offsets = offsets_usize.iter().map(|&v| v as i32).collect();
+        let st_max = flat_max_f64.iter().map(|&v| v as f32).collect();
+        let st_min = flat_min_f64.iter().map(|&v| v as f32).collect();
+        let nan_psum = ctx.nan_psum.iter().map(|&v| v as i32).collect();
+
+        Self {
+            log2,
+            level_offsets,
+            st_max,
+            st_min,
+            nan_psum,
+        }
+    }
+}
+
+#[cfg(feature = "cuda")]
+#[inline]
+pub fn build_willr_gpu_tables(high: &[f32], low: &[f32]) -> WillrGpuTables {
+    debug_assert_eq!(high.len(), low.len());
+    let high_f64: Vec<f64> = high.iter().map(|&v| v as f64).collect();
+    let low_f64: Vec<f64> = low.iter().map(|&v| v as f64).collect();
+    let ctx = SharedWillrCtx::new(&high_f64, &low_f64);
+    WillrGpuTables::from_shared_ctx(&ctx)
+}
+
+#[inline(always)]
+fn willr_row_shared_core(
+    close: &[f64],
+    first_valid: usize,
+    period: usize,
+    out: &mut [f64],
+    ctx: &SharedWillrCtx,
+) {
+    let n = close.len();
+    let start_i = first_valid + period - 1;
+    if start_i >= n {
+        return;
+    }
+
+    for i in start_i..n {
+        let c = close[i];
+        if c.is_nan() {
+            out[i] = f64::NAN;
+            continue;
+        }
+
+        let l_idx = i + 1 - period;
+        if ctx.window_has_nan(l_idx, i) {
+            out[i] = f64::NAN;
+            continue;
+        }
+
+        let h = ctx.qmax(l_idx, i);
+        let l = ctx.qmin(l_idx, i);
+
+        if !h.is_finite() || !l.is_finite() {
+            out[i] = f64::NAN;
+            continue;
+        }
+
+        let denom = h - l;
+        out[i] = if denom == 0.0 {
+            0.0
+        } else {
+            (h - c) / denom * -100.0
+        };
+    }
+}
+
+#[inline(always)]
+fn willr_row_scalar_with_ctx(
+    close: &[f64],
+    first_valid: usize,
+    period: usize,
+    out: &mut [f64],
+    ctx: &SharedWillrCtx,
+) {
+    willr_row_shared_core(close, first_valid, period, out, ctx);
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn willr_row_avx2_with_ctx(
+    close: &[f64],
+    first_valid: usize,
+    period: usize,
+    out: &mut [f64],
+    ctx: &SharedWillrCtx,
+) {
+    willr_row_shared_core(close, first_valid, period, out, ctx);
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn willr_row_avx512_with_ctx(
+    close: &[f64],
+    first_valid: usize,
+    period: usize,
+    out: &mut [f64],
+    ctx: &SharedWillrCtx,
+) {
+    willr_row_shared_core(close, first_valid, period, out, ctx);
+}
+
 #[inline(always)]
 pub fn willr_batch_slice(
     high: &[f64],
@@ -618,17 +869,19 @@ fn willr_batch_inner(
         )
     };
 
+    let ctx = SharedWillrCtx::new(high, low);
+
     let do_row = |row: usize, out_row: &mut [f64]| {
         let period = combos[row].period.unwrap();
         match kern {
-            Kernel::Scalar => willr_row_scalar(high, low, close, first_valid, period, out_row),
+            Kernel::Scalar => willr_row_scalar_with_ctx(close, first_valid, period, out_row, &ctx),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 => unsafe {
-                willr_row_avx2(high, low, close, first_valid, period, out_row)
+                willr_row_avx2_with_ctx(close, first_valid, period, out_row, &ctx)
             },
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 => unsafe {
-                willr_row_avx512(high, low, close, first_valid, period, out_row)
+                willr_row_avx512_with_ctx(close, first_valid, period, out_row, &ctx)
             },
             _ => unreachable!(),
         }
@@ -863,6 +1116,8 @@ fn willr_batch_inner_into(
         });
     }
 
+    let ctx = SharedWillrCtx::new(high, low);
+
     let do_row = |row: usize, out_row: &mut [f64]| {
         let period = combos[row].period.unwrap();
         // Initialize warmup period with NaN
@@ -871,14 +1126,14 @@ fn willr_batch_inner_into(
             *v = f64::NAN;
         }
         match kern {
-            Kernel::Scalar => willr_row_scalar(high, low, close, first_valid, period, out_row),
+            Kernel::Scalar => willr_row_scalar_with_ctx(close, first_valid, period, out_row, &ctx),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 => unsafe {
-                willr_row_avx2(high, low, close, first_valid, period, out_row)
+                willr_row_avx2_with_ctx(close, first_valid, period, out_row, &ctx)
             },
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 => unsafe {
-                willr_row_avx512(high, low, close, first_valid, period, out_row)
+                willr_row_avx512_with_ctx(close, first_valid, period, out_row, &ctx)
             },
             _ => unreachable!(),
         }
@@ -1625,6 +1880,44 @@ pub fn willr_batch_py<'py>(
     dict.set_item("cols", cols)?;
 
     Ok(dict)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "willr_cuda_batch_dev")]
+#[pyo3(signature = (high, low, close, period_range, device_id=0))]
+pub fn willr_cuda_batch_dev_py(
+    py: Python<'_>,
+    high: PyReadonlyArray1<'_, f32>,
+    low: PyReadonlyArray1<'_, f32>,
+    close: PyReadonlyArray1<'_, f32>,
+    period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let high_slice = high.as_slice()?;
+    let low_slice = low.as_slice()?;
+    let close_slice = close.as_slice()?;
+
+    if high_slice.len() != low_slice.len() || high_slice.len() != close_slice.len() {
+        return Err(PyValueError::new_err("mismatched input lengths"));
+    }
+
+    let sweep = WillrBatchRange {
+        period: period_range,
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaWillr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.willr_batch_dev(high_slice, low_slice, close_slice, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
 }
 
 // --- WASM bindings ---

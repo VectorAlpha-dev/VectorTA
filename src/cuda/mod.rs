@@ -5,6 +5,8 @@
 
 #[cfg(feature = "cuda")]
 pub mod moving_averages;
+#[cfg(feature = "cuda")]
+pub mod oscillators;
 
 /// Returns true if a CUDA device is available and the driver API can be initialized.
 #[inline]

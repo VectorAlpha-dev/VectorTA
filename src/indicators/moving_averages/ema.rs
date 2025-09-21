@@ -44,6 +44,12 @@ use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::CudaEma;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 impl<'a> AsRef<[f64]> for EmaInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
@@ -1709,6 +1715,66 @@ pub fn ema_batch_py<'py>(
     )?;
 
     Ok(dict.into())
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "ema_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, period_range=(9, 9, 0), device_id=0))]
+pub fn ema_cuda_batch_dev_py(
+    py: Python<'_>,
+    data_f32: numpy::PyReadonlyArray1<'_, f32>,
+    period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let slice_in = data_f32.as_slice()?;
+    let sweep = EmaBatchRange {
+        period: period_range,
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaEma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.ema_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "ema_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, period, device_id=0))]
+pub fn ema_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    period: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    if period == 0 {
+        return Err(PyValueError::new_err("period must be positive"));
+    }
+
+    let flat = data_tm_f32.as_slice()?;
+    let shape = data_tm_f32.shape();
+    let series_len = shape[0];
+    let num_series = shape[1];
+    let params = EmaParams {
+        period: Some(period),
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaEma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.ema_many_series_one_param_time_major_dev(flat, num_series, series_len, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "python")]

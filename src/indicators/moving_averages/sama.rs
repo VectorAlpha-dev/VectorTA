@@ -32,7 +32,7 @@
 //!   - The highest/lowest calculation is well-suited for SIMD parallelization
 
 #[cfg(feature = "python")]
-use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
@@ -45,6 +45,10 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::{cuda_available, moving_averages::CudaSama};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -1036,6 +1040,76 @@ pub fn sama_batch_py<'py>(
             .into_pyarray(py),
     )?;
     Ok(dict.into())
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "sama_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, length_range=(200, 200, 0), maj_length_range=(14, 14, 0), min_length_range=(6, 6, 0), device_id=0))]
+pub fn sama_cuda_batch_dev_py(
+    py: Python<'_>,
+    data_f32: PyReadonlyArray1<'_, f32>,
+    length_range: (usize, usize, usize),
+    maj_length_range: (usize, usize, usize),
+    min_length_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let slice_in = data_f32.as_slice()?;
+    let sweep = SamaBatchRange {
+        length: length_range,
+        maj_length: maj_length_range,
+        min_length: min_length_range,
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaSama::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.sama_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "sama_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, length, maj_length, min_length, device_id=0))]
+pub fn sama_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm_f32: PyReadonlyArray2<'_, f32>,
+    length: usize,
+    maj_length: usize,
+    min_length: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    if length == 0 || maj_length == 0 || min_length == 0 {
+        return Err(PyValueError::new_err(
+            "length, maj_length, and min_length must be positive",
+        ));
+    }
+
+    let flat = data_tm_f32.as_slice()?;
+    let shape = data_tm_f32.shape();
+    let series_len = shape[0];
+    let num_series = shape[1];
+    let params = SamaParams {
+        length: Some(length),
+        maj_length: Some(maj_length),
+        min_length: Some(min_length),
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaSama::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.sama_many_series_one_param_time_major_dev(flat, num_series, series_len, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "python")]

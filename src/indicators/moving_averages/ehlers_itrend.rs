@@ -43,6 +43,13 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::CudaEhlersITrend;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
@@ -1309,6 +1316,80 @@ pub fn ehlers_itrend_batch_py<'py>(
             .into_pyarray(py),
     )?;
     Ok(dict)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "ehlers_itrend_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, warmup_range=(12, 12, 0), max_dc_range=(50, 50, 0), device_id=0))]
+pub fn ehlers_itrend_cuda_batch_dev_py(
+    py: Python<'_>,
+    data_f32: numpy::PyReadonlyArray1<'_, f32>,
+    warmup_range: (usize, usize, usize),
+    max_dc_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let slice_in = data_f32.as_slice()?;
+    let sweep = EhlersITrendBatchRange {
+        warmup_bars: warmup_range,
+        max_dc_period: max_dc_range,
+    };
+
+    let inner = py.allow_threads(|| -> PyResult<_> {
+        let cuda =
+            CudaEhlersITrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.ehlers_itrend_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "ehlers_itrend_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, warmup_bars=12, max_dc_period=50, device_id=0))]
+pub fn ehlers_itrend_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    warmup_bars: usize,
+    max_dc_period: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    if warmup_bars == 0 {
+        return Err(PyValueError::new_err("warmup_bars must be positive"));
+    }
+    if max_dc_period == 0 {
+        return Err(PyValueError::new_err("max_dc_period must be positive"));
+    }
+
+    let flat = data_tm_f32.as_slice()?;
+    let shape = data_tm_f32.shape();
+    if shape.len() != 2 {
+        return Err(PyValueError::new_err("time-major matrix must be 2D"));
+    }
+    let series_len = shape[0];
+    let num_series = shape[1];
+    let params = EhlersITrendParams {
+        warmup_bars: Some(warmup_bars),
+        max_dc_period: Some(max_dc_period),
+    };
+
+    let inner = py.allow_threads(|| -> PyResult<_> {
+        let cuda =
+            CudaEhlersITrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.ehlers_itrend_many_series_one_param_time_major_dev(
+            flat, num_series, series_len, &params,
+        )
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
 }
 
 // ────────────────────────────────────────────────────────────────────

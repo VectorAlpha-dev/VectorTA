@@ -22,8 +22,10 @@
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "python")]
-use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
@@ -1162,6 +1164,83 @@ pub fn vama_batch_py<'py>(
             .into_pyarray(py),
     )?;
     Ok(dict.into())
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "vama_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, base_period_range=(100,130,10), vol_period_range=(40,60,10), device_id=0))]
+pub fn vama_cuda_batch_dev_py(
+    py: Python<'_>,
+    data_f32: PyReadonlyArray1<'_, f32>,
+    base_period_range: (usize, usize, usize),
+    vol_period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::moving_averages::CudaVama;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let slice_in = data_f32.as_slice()?;
+    let ranges = VamaBatchRange {
+        base_period: base_period_range,
+        vol_period: vol_period_range,
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaVama::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.vama_batch_dev(slice_in, &ranges)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "vama_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, base_period, vol_period, device_id=0))]
+pub fn vama_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm_f32: PyReadonlyArray2<'_, f32>,
+    base_period: usize,
+    vol_period: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::moving_averages::CudaVama;
+    use numpy::PyUntypedArrayMethods;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    if base_period == 0 || vol_period == 0 {
+        return Err(PyValueError::new_err(
+            "base_period and vol_period must be positive",
+        ));
+    }
+
+    let flat: &[f32] = data_tm_f32.as_slice()?;
+    let shape = data_tm_f32.shape();
+    let rows = shape[0];
+    let cols = shape[1];
+    let params = VamaParams {
+        base_period: Some(base_period),
+        vol_period: Some(vol_period),
+        smoothing: Some(false),
+        smooth_type: Some(3),
+        smooth_period: Some(5),
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaVama::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.vama_many_series_one_param_time_major_dev(flat, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "python")]

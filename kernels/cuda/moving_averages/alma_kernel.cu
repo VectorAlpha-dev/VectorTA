@@ -23,13 +23,8 @@
 
 #define ALMA_CUDA_VERSION (__CUDACC_VER_MAJOR__ * 1000 + __CUDACC_VER_MINOR__ * 10)
 
-#if ALMA_CUDA_VERSION >= 12040
-#define ALMA_HAS_PIPELINE 1
-#include <cuda/barrier>
-#include <cuda/pipeline>
-#else
+// Disable cuda::pipeline usage for compatibility with older toolchains.
 #define ALMA_HAS_PIPELINE 0
-#endif
 
 // Grid: blockIdx.y = parameter combo, blockIdx.x/threadIdx.x = time indices
 extern "C" __global__
@@ -203,10 +198,7 @@ void alma_batch_tiled_async_f32(const float* __restrict__ prices,
         price_tile[i] = v;
 #endif
     }
-#if ALMA_HAS_PIPELINE
-    cuda::pipeline_commit();
-    cuda::pipeline_wait_prior(0);
-#endif
+
     __syncthreads();
 
     const int t = t0 + threadIdx.x;

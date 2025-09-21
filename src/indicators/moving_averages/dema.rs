@@ -26,6 +26,10 @@
 //!   - Implement actual SIMD kernels for AVX2/AVX512
 //!   - Consider vectorizing the dual EMA calculations
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::CudaDema;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -362,17 +366,233 @@ pub unsafe fn dema_scalar(data: &[f64], period: usize, first: usize, out: &mut [
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// DEMA AVX2 / AVX512 kernels (drop‑in)
+// ─────────────────────────────────────────────────────────────────────────────
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn last_lane_256(v: __m256d) -> f64 {
+    let hi: __m128d = _mm256_extractf128_pd(v, 1); // lanes [2,3]
+    let dup_hi: __m128d = _mm_unpackhi_pd(hi, hi); // [lane3, lane3]
+    _mm_cvtsd_f64(dup_hi)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn last_lane_512(v: __m512d) -> f64 {
+    let hi2: __m128d = _mm512_extractf64x2_pd(v, 3); // lanes [6,7]
+    let dup_hi: __m128d = _mm_unpackhi_pd(hi2, hi2); // [lane7, lane7]
+    _mm_cvtsd_f64(dup_hi)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn shl1_256(x: __m256d) -> __m256d {
+    // [0, x0, x1, x2]
+    let lo: __m128d = _mm256_castpd256_pd128(x); // [x0,x1]
+    let hi: __m128d = _mm256_extractf128_pd(x, 1); // [x2,x3]
+    let lo_res = _mm_unpacklo_pd(_mm_setzero_pd(), lo); // [0,x0]
+    let hi_res = _mm_shuffle_pd(
+        _mm_unpackhi_pd(lo, lo), // [x1,x1]
+        _mm_unpacklo_pd(hi, hi),
+        0x0,
+    ); // [x1,x2]
+    _mm256_insertf128_pd(_mm256_castpd128_pd256(lo_res), hi_res, 1)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn shl2_256(x: __m256d) -> __m256d {
+    // [0, 0, x0, x1]
+    let lo: __m128d = _mm256_castpd256_pd128(x);
+    _mm256_insertf128_pd(_mm256_castpd128_pd256(_mm_setzero_pd()), lo, 1)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn scan4(v: __m256d, a1: __m256d, a2: __m256d) -> __m256d {
+    // t = v; t += a1*shl1(t); t += a2*shl2(t);
+    let t1 = _mm256_fmadd_pd(a1, shl1_256(v), v);
+    let t2 = _mm256_fmadd_pd(a2, shl2_256(t1), t1);
+    t2
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn shl1_512(x: __m512d) -> __m512d {
+    // [0, x0, x1, x2, x3, x4, x5, x6]
+    let idx: __m512i = _mm512_set_epi64(6, 5, 4, 3, 2, 1, 0, 0);
+    let mask: __mmask8 = 0b1111_1110;
+    _mm512_maskz_permutexvar_pd(mask, idx, x)
+}
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn shl2_512(x: __m512d) -> __m512d {
+    // [0, 0, x0, x1, x2, x3, x4, x5]
+    let idx: __m512i = _mm512_set_epi64(5, 4, 3, 2, 1, 0, 0, 0);
+    let mask: __mmask8 = 0b1111_1100;
+    _mm512_maskz_permutexvar_pd(mask, idx, x)
+}
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn shl4_512(x: __m512d) -> __m512d {
+    // [0, 0, 0, 0, x0, x1, x2, x3]
+    let idx: __m512i = _mm512_set_epi64(3, 2, 1, 0, 0, 0, 0, 0);
+    let mask: __mmask8 = 0b1111_0000;
+    _mm512_maskz_permutexvar_pd(mask, idx, x)
+}
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn scan8(v: __m512d, a1: __m512d, a2: __m512d, a4: __m512d) -> __m512d {
+    // t = v; t += a1*shl1(t); t += a2*shl2(t); t += a4*shl4(t);
+    let t1 = _mm512_fmadd_pd(a1, shl1_512(v), v);
+    let t2 = _mm512_fmadd_pd(a2, shl2_512(t1), t1);
+    let t3 = _mm512_fmadd_pd(a4, shl4_512(t2), t2);
+    t3
+}
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 #[inline]
 pub unsafe fn dema_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    dema_scalar(data, period, first, out);
+    debug_assert!(data.len() == out.len());
+    if first >= data.len() {
+        return;
+    }
+
+    let n = data.len();
+    let alpha = 2.0 / (period as f64 + 1.0);
+    let a = 1.0 - alpha;
+
+    // initial state at first finite sample
+    let mut i = first;
+    let mut ema1 = *data.get_unchecked(i);
+    let mut ema2 = ema1;
+    *out.get_unchecked_mut(i) = ema1;
+    i += 1;
+    if i >= n {
+        return;
+    }
+
+    // precompute constants
+    let alpha_v = _mm256_set1_pd(alpha);
+    let a1_s = a;
+    let a2_s = a1_s * a1_s;
+    let a3_s = a2_s * a1_s;
+    let a4_s = a2_s * a2_s;
+    let pow_vec = _mm256_set_pd(a4_s, a3_s, a2_s, a1_s);
+    let a1_v = _mm256_set1_pd(a1_s);
+    let a2_v = _mm256_set1_pd(a2_s);
+
+    // main blocks of 4
+    while i + 4 <= n {
+        // load inputs
+        let x = _mm256_loadu_pd(data.as_ptr().add(i));
+        // EMA1 block
+        let v1 = _mm256_mul_pd(alpha_v, x);
+        let t1 = scan4(v1, a1_v, a2_v);
+        let prev1 = _mm256_set1_pd(ema1);
+        let ema1_vec = _mm256_fmadd_pd(pow_vec, prev1, t1);
+
+        // EMA2 block
+        let v2 = _mm256_mul_pd(alpha_v, ema1_vec);
+        let t2 = scan4(v2, a1_v, a2_v);
+        let prev2 = _mm256_set1_pd(ema2);
+        let ema2_vec = _mm256_fmadd_pd(pow_vec, prev2, t2);
+
+        // DEMA = 2*EMA1 - EMA2
+        let two_ema1 = _mm256_add_pd(ema1_vec, ema1_vec);
+        let dema_v = _mm256_sub_pd(two_ema1, ema2_vec);
+        _mm256_storeu_pd(out.as_mut_ptr().add(i), dema_v);
+
+        // carry state to next block (last lane)
+        ema1 = last_lane_256(ema1_vec);
+        ema2 = last_lane_256(ema2_vec);
+        i += 4;
+    }
+
+    // scalar tail
+    while i < n {
+        let price = *data.get_unchecked(i);
+        ema1 = ema1.mul_add(a, price * alpha);
+        ema2 = ema2.mul_add(a, ema1 * alpha);
+        *out.get_unchecked_mut(i) = (2.0 * ema1) - ema2;
+        i += 1;
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,avx512dq,fma")]
+#[inline]
 pub unsafe fn dema_avx512(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    dema_scalar(data, period, first, out);
+    debug_assert!(data.len() == out.len());
+    if first >= data.len() {
+        return;
+    }
+
+    let n = data.len();
+    let alpha = 2.0 / (period as f64 + 1.0);
+    let a = 1.0 - alpha;
+
+    // initial state
+    let mut i = first;
+    let mut ema1 = *data.get_unchecked(i);
+    let mut ema2 = ema1;
+    *out.get_unchecked_mut(i) = ema1;
+    i += 1;
+    if i >= n {
+        return;
+    }
+
+    // constants
+    let alpha_v = _mm512_set1_pd(alpha);
+    let a1_s = a;
+    let a2_s = a1_s * a1_s;
+    let a3_s = a2_s * a1_s;
+    let a4_s = a2_s * a2_s;
+    let a5_s = a4_s * a1_s;
+    let a6_s = a3_s * a3_s; // a^6
+    let a7_s = a6_s * a1_s; // a^7
+    let a8_s = a4_s * a4_s; // a^8
+    let pow_vec = _mm512_set_pd(a8_s, a7_s, a6_s, a5_s, a4_s, a3_s, a2_s, a1_s);
+    let a1_v = _mm512_set1_pd(a1_s);
+    let a2_v = _mm512_set1_pd(a2_s);
+    let a4_v = _mm512_set1_pd(a4_s);
+
+    while i + 8 <= n {
+        let x = _mm512_loadu_pd(data.as_ptr().add(i));
+
+        // EMA1 block
+        let v1 = _mm512_mul_pd(alpha_v, x);
+        let t1 = scan8(v1, a1_v, a2_v, a4_v);
+        let prev1 = _mm512_set1_pd(ema1);
+        let ema1_vec = _mm512_fmadd_pd(pow_vec, prev1, t1);
+
+        // EMA2 block
+        let v2 = _mm512_mul_pd(alpha_v, ema1_vec);
+        let t2 = scan8(v2, a1_v, a2_v, a4_v);
+        let prev2 = _mm512_set1_pd(ema2);
+        let ema2_vec = _mm512_fmadd_pd(pow_vec, prev2, t2);
+
+        // DEMA
+        let two_ema1 = _mm512_add_pd(ema1_vec, ema1_vec);
+        let dema_v = _mm512_sub_pd(two_ema1, ema2_vec);
+        _mm512_storeu_pd(out.as_mut_ptr().add(i), dema_v);
+
+        // carry
+        ema1 = last_lane_512(ema1_vec);
+        ema2 = last_lane_512(ema2_vec);
+        i += 8;
+    }
+
+    // scalar tail
+    while i < n {
+        let price = *data.get_unchecked(i);
+        ema1 = ema1.mul_add(a, price * alpha);
+        ema2 = ema2.mul_add(a, ema1 * alpha);
+        *out.get_unchecked_mut(i) = (2.0 * ema1) - ema2;
+        i += 1;
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1649,6 +1869,35 @@ pub fn dema_batch_py<'py>(
             .into_pyarray(py),
     )?;
     Ok(dict)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "dema_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, period_range, device_id=0))]
+pub fn dema_cuda_batch_dev_py(
+    py: Python<'_>,
+    data_f32: numpy::PyReadonlyArray1<'_, f32>,
+    period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let slice_in = data_f32.as_slice()?;
+    let sweep = DemaBatchRange {
+        period: period_range,
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaDema::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.dema_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
 }
 
 // ================== WASM API ====================
