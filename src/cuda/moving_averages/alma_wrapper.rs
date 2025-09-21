@@ -8,7 +8,6 @@
 //! - "alma_batch_f32_ondev"                          // one-series × many-params, weights computed on device
 //! - "alma_batch_f32"                                // one-series × many-params, precomputed weights
 //! - "alma_batch_tiled_f32_tile128" / "..._tile256"  // tiled variant for long series, precomputed weights
-//! - "alma_multi_series_one_param_f32_ondev"         // many-series × one-param, weights on device
 //! - "alma_multi_series_one_param_f32"               // many-series × one-param, precomputed weights
 //!
 //! Notes:
@@ -141,12 +140,24 @@ impl CudaAlma {
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/alma_kernel.ptx"));
         // High optimization, target from current context
+        // Use a slightly lower JIT opt level for improved stability across drivers
+        // while keeping high performance in practice.
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O4),
+            ModuleJitOption::OptLevel(OptLevel::O2),
         ];
-        let module = Module::from_ptx(ptx, jit_opts)
-            .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+        let module = match Module::from_ptx(ptx, jit_opts) {
+            Ok(m) => m,
+            Err(_) => {
+                // Retry with progressively simpler JIT options to avoid brittle drivers.
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                    m
+                } else {
+                    Module::from_ptx(ptx, &[])
+                        .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?
+                }
+            }
+        };
 
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
@@ -700,37 +711,20 @@ impl CudaAlma {
             unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
                 .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
 
-        if self
-            .module
-            .get_function("alma_multi_series_one_param_f32_ondev")
-            .is_ok()
-        {
-            self.launch_many_series_kernel_ondev(
-                &d_prices,
-                period,
-                offset,
-                sigma,
-                cols,
-                rows,
-                &d_first_valids,
-                &mut d_out,
-            )?;
-        } else {
-            // Legacy: precompute weights on host
-            let (weights_host, inv_norm) = compute_weights_cpu_f32(period, offset as f64, sigma as f64);
-            let d_weights = DeviceBuffer::from_slice(&weights_host)
-                .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
-            self.launch_many_series_kernel_precomputed(
-                &d_prices,
-                &d_weights,
-                period,
-                inv_norm,
-                cols,
-                rows,
-                &d_first_valids,
-                &mut d_out,
-            )?;
-        }
+        // Prefer host-precomputed weights/normalization for accuracy
+        let (weights_host, inv_norm) = compute_weights_cpu_f32(period, offset as f64, sigma as f64);
+        let d_weights = DeviceBuffer::from_slice(&weights_host)
+            .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+        self.launch_many_series_kernel_precomputed(
+            &d_prices,
+            &d_weights,
+            period,
+            inv_norm,
+            cols,
+            rows,
+            &d_first_valids,
+            &mut d_out,
+        )?;
 
         self.stream
             .synchronize()
@@ -1006,50 +1000,7 @@ impl CudaAlma {
         Ok(())
     }
 
-    fn launch_many_series_kernel_ondev(
-        &self,
-        d_prices: &DeviceBuffer<f32>,
-        period: usize,
-        offset: f32,
-        sigma: f32,
-        cols: usize,
-        rows: usize,
-        d_first_valids: &DeviceBuffer<i32>,
-        d_out: &mut DeviceBuffer<f32>,
-    ) -> Result<(), CudaAlmaError> {
-        let func = self
-            .module
-            .get_function("alma_multi_series_one_param_f32_ondev")
-            .or_else(|_| self.module.get_function("alma_multi_series_one_param_onthefly_f32"))
-            .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
-
-        // Shared memory for per-block weights
-        let shared_bytes = (period * std::mem::size_of::<f32>()) as u32;
-
-        // Fixed mapping: block.x over time, grid.y over series
-        const BLOCK_X: u32 = 128;
-        let grid_x = ((rows as u32) + BLOCK_X - 1) / BLOCK_X;
-        let grid: GridSize = (grid_x, cols as u32, 1).into();
-        let block: BlockSize = (BLOCK_X, 1, 1).into();
-
-        let stream = &self.stream;
-        unsafe {
-            launch!(
-                func<<<grid, block, shared_bytes, stream>>>(
-                    d_prices.as_device_ptr(),
-                    (period as i32),
-                    offset,
-                    sigma,
-                    (cols as i32),
-                    (rows as i32),
-                    d_first_valids.as_device_ptr(),
-                    d_out.as_device_ptr()
-                )
-            )
-            .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
-        }
-        Ok(())
-    }
+    // (removed) launch_many_series_kernel_ondev: many-series on-the-fly weights path was unused
 
     fn launch_many_series_kernel_precomputed(
         &self,
@@ -1127,7 +1078,11 @@ impl CudaAlma {
             }
             ManySeriesKernelPolicy::OneD { .. } => { /* fall through to 1D below */ }
             ManySeriesKernelPolicy::Auto => {
-                if let Some(ref v) = force_ms {
+                // For very small column counts, 1D tends to be numerically
+                // cleaner and plenty fast. Prefer 1D when cols are tiny.
+                if cols < 16 {
+                    // fall through to 1D mapping below
+                } else if let Some(ref v) = force_ms {
                     if v.eq_ignore_ascii_case("2d_ty4") { if try_2d(128, 4).is_some() { return Ok(()); } }
                     else if v.eq_ignore_ascii_case("2d_ty2") { if try_2d(128, 2).is_some() { return Ok(()); } }
                 } else {
@@ -1344,12 +1299,12 @@ pub mod benches {
     }
 
     fn prep_alma_one_series_many_params() -> Box<dyn CudaBenchState> {
-        let cuda = CudaAlma::new(0).expect("cuda alma");
-        // Bench pin (fast path) — keep commented for quick toggling:
-        // cuda.set_policy(CudaAlmaPolicy {
-        //     batch: BatchKernelPolicy::Tiled { tile: 256, per_thread: BatchThreadsPerOutput::Two },
-        //     many_series: ManySeriesKernelPolicy::Auto,
-        // });
+        let mut cuda = CudaAlma::new(0).expect("cuda alma");
+        // Bench pin (fast path)
+        cuda.set_policy(CudaAlmaPolicy {
+            batch: BatchKernelPolicy::Tiled { tile: 256, per_thread: BatchThreadsPerOutput::Two },
+            many_series: ManySeriesKernelPolicy::Auto,
+        });
         let price = gen_series(ONE_SERIES_LEN);
         let start_period = 10usize;
         let end_period = start_period + PARAM_SWEEP - 1;
@@ -1416,12 +1371,12 @@ pub mod benches {
 
     // Generic prep for batch with (LEN, SWEEP)
     fn prep_batch_len_sweep<const LEN: usize, const SWEEP: usize>() -> Box<dyn CudaBenchState> {
-        let cuda = CudaAlma::new(0).expect("cuda alma");
-        // Bench pin (fast path) — keep commented for quick toggling:
-        // cuda.set_policy(CudaAlmaPolicy {
-        //     batch: BatchKernelPolicy::Tiled { tile: 256, per_thread: BatchThreadsPerOutput::Two },
-        //     many_series: ManySeriesKernelPolicy::Auto,
-        // });
+        let mut cuda = CudaAlma::new(0).expect("cuda alma");
+        // Bench pin (fast path)
+        cuda.set_policy(CudaAlmaPolicy {
+            batch: BatchKernelPolicy::Tiled { tile: 256, per_thread: BatchThreadsPerOutput::Two },
+            many_series: ManySeriesKernelPolicy::Auto,
+        });
         let price = gen_series(LEN);
         let start_period = 10usize;
         let end_period = start_period + SWEEP - 1;
@@ -1484,12 +1439,12 @@ pub mod benches {
 
     // Generic prep for many-series (COLS, ROWS)
     fn prep_many_series_generic<const COLS: usize, const ROWS: usize>() -> Box<dyn CudaBenchState> {
-        let cuda = CudaAlma::new(0).expect("cuda alma");
-        // Bench pin (fast path) — keep commented for quick toggling:
-        // cuda.set_policy(CudaAlmaPolicy {
-        //     batch: BatchKernelPolicy::Auto,
-        //     many_series: ManySeriesKernelPolicy::Tiled2D { tx: 128, ty: 4 },
-        // });
+        let mut cuda = CudaAlma::new(0).expect("cuda alma");
+        // Bench pin (fast path)
+        cuda.set_policy(CudaAlmaPolicy {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Tiled2D { tx: 128, ty: 4 },
+        });
         let prices_tm = gen_time_major_prices(COLS, ROWS);
         let period = 64usize;
         let (weights, inv_norm) = super::compute_weights_cpu_f32(period, 0.85, 6.0);
@@ -1508,12 +1463,12 @@ pub mod benches {
     }
 
     fn prep_alma_many_series_one_param() -> Box<dyn CudaBenchState> {
-        let cuda = CudaAlma::new(0).expect("cuda alma");
-        // Bench pin (fast path) — keep commented for quick toggling:
-        // cuda.set_policy(CudaAlmaPolicy {
-        //     batch: BatchKernelPolicy::Auto,
-        //     many_series: ManySeriesKernelPolicy::Tiled2D { tx: 128, ty: 4 },
-        // });
+        let mut cuda = CudaAlma::new(0).expect("cuda alma");
+        // Bench pin (fast path)
+        cuda.set_policy(CudaAlmaPolicy {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Tiled2D { tx: 128, ty: 4 },
+        });
         let cols = MANY_SERIES_COLS;
         let rows = MANY_SERIES_LEN;
         let prices_tm = gen_time_major_prices(cols, rows);

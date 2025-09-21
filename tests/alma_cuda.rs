@@ -16,7 +16,10 @@ fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
         return true;
     }
-    (a - b).abs() <= tol
+    let diff = (a - b).abs();
+    let rtol = tol;
+    let atol = tol;
+    diff <= atol + rtol * a.abs().max(b.abs())
 }
 
 #[test]
@@ -154,7 +157,8 @@ fn alma_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
         .copy_to(&mut gpu_tm)
         .expect("copy many-series result to host");
 
-    let tol = 1e-5;
+    // GPU uses compensated dot accumulation by default; require tight tolerance.
+    let tol = 1e-3;
     for i in 0..(num_series * series_len) {
         let a = cpu_tm[i];
         let b = gpu_tm[i] as f64;

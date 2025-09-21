@@ -30,16 +30,9 @@
 #include <math.h>
 #include <stdint.h>
 
-#include <cooperative_groups.h>
-#include <cooperative_groups/memcpy_async.h>
-#include <cuda/pipeline>
-#include <cuda/barrier>
-
 #ifdef ALMA_USE_CUB_REDUCE
   #include <cub/cub.cuh>
 #endif
-
-namespace cg = cooperative_groups;
 
 // ------------------------- Tunables & feature flags -------------------------
 
@@ -47,19 +40,11 @@ namespace cg = cooperative_groups;
   #define ALMA_UNROLL 4
 #endif
 
-// Set to 1 to enable Kahan-Neumaier compensated accumulation in dot-products.
+// Enable Kahan-Neumaier compensated accumulation in dot-products by default
 #ifndef ALMA_COMPENSATED_DOT
-  #define ALMA_COMPENSATED_DOT 0
+  #define ALMA_COMPENSATED_DOT 1
 #endif
 
-// Enable double-buffered pipeline in tiled async kernel when SM80+ available.
-#ifndef ALMA_PIPELINE_ENABLED
-  #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
-    #define ALMA_PIPELINE_ENABLED 1
-  #else
-    #define ALMA_PIPELINE_ENABLED 0
-  #endif
-#endif
 
 // ------------------------------- Utilities ---------------------------------
 
@@ -151,11 +136,37 @@ float alma_dot_comp(const float* __restrict__ x,
 
 __device__ __forceinline__
 float alma_dot(const float* __restrict__ x,
-               const float* __restrict__ w, int n) {
+              const float* __restrict__ w, int n) {
 #if ALMA_COMPENSATED_DOT
   return alma_dot_comp(x, w, n);
 #else
   return alma_dot_uncomp(x, w, n);
+#endif
+}
+
+// Strided dot-product x[0], x[stride], x[2*stride], ...
+__device__ __forceinline__
+float alma_dot_stride(const float* __restrict__ x,
+                      int stride,
+                      const float* __restrict__ w, int n) {
+#if ALMA_COMPENSATED_DOT
+  float s = 0.f, c = 0.f;
+  #pragma unroll 4
+  for (int i = 0; i < n; ++i) {
+    float term = __fmaf_rn(x[i * stride], w[i], 0.f);
+    float y = term - c;
+    float t = s + y;
+    c = (t - s) - y;
+    s = t;
+  }
+  return s;
+#else
+  float s = 0.f;
+  #pragma unroll 4
+  for (int i = 0; i < n; ++i) {
+    s = __fmaf_rn(x[i * stride], w[i], s);
+  }
+  return s;
 #endif
 }
 
@@ -276,139 +287,8 @@ void alma_batch_f32(const float* __restrict__ prices,
 // -------- 3) Async-tiled on-the-fly kernel with two-stage pipeline ---------
 // Dynamic shared layout (16B aligned):
 //   [weights: period*4] [pad->16] [stage0: (TILE+period-1)*4] [pad->16] [stage1: ...]
-extern "C" __global__
-void alma_batch_tiled_async_f32(const float* __restrict__ prices,
-                                const int*   __restrict__ periods,
-                                const float* __restrict__ offsets,
-                                const float* __restrict__ sigmas,
-                                int series_len,
-                                int n_combos,
-                                int first_valid,
-                                float* __restrict__ out) {
-  const int combo = blockIdx.y;
-  if (combo >= n_combos) return;
+// [removed] alma_batch_tiled_async_f32 (unused)
 
-  // Broadcast params
-  __shared__ int   period_s;
-  __shared__ float offset_s, sigma_s;
-  if (threadIdx.x == 0) {
-    period_s = periods[combo];
-    offset_s = offsets[combo];
-    sigma_s  = sigmas[combo];
-  }
-  __syncthreads();
-
-  const int   period = period_s;
-  const float m      = offset_s * float(period - 1);
-  const float s      = float(period) / fmaxf(sigma_s, 1e-6f);
-  const float s2     = 2.0f * s * s;
-  const int   warm   = first_valid + period - 1;
-
-  const int TILE  = blockDim.x;
-  const int total = TILE + period - 1;
-  const size_t weights_bytes = size_t(period) * sizeof(float);
-  const size_t tile_bytes    = size_t(total)  * sizeof(float);
-
-  // 16B-aligned dynamic shared memory partition
-  extern __shared__ __align__(16) unsigned char shmem_raw[];
-  size_t off = 0;
-  float* weights = reinterpret_cast<float*>(shmem_raw + off);
-  off = alma_align_up(off + weights_bytes, 16);
-  float* stage0  = reinterpret_cast<float*>(shmem_raw + off);
-  off = alma_align_up(off + tile_bytes, 16);
-  float* stage1  = reinterpret_cast<float*>(shmem_raw + off);
-
-  __shared__ float inv_norm_s;
-  alma_compute_weights_and_invnorm(period, m, s2, weights, &inv_norm_s);
-  const float inv_norm = inv_norm_s;
-
-  const int combo_base = combo * series_len;
-
-#if ALMA_PIPELINE_ENABLED
-  auto block = cg::this_thread_block();
-  constexpr int stages = 2;
-  __shared__ cuda::pipeline_shared_state<cuda::thread_scope_block, stages> pipe_state;
-  auto pipe = cuda::make_pipeline(block, &pipe_state);
-
-  // Stride tiles across grid.x
-  int t_base = blockIdx.x * TILE;
-  if (t_base >= series_len) return;
-
-  // Kickstart stage0
-  int p_base = t_base - (period - 1);
-  pipe.producer_acquire();
-  if (p_base >= 0 && (p_base + total) <= series_len) {
-    cuda::memcpy_async(block, stage0, prices + p_base, tile_bytes, pipe);  // cooperative copy
-  } else {
-    for (int i = threadIdx.x; i < total; i += TILE) {
-      int idx = p_base + i;
-      stage0[i] = (0 <= idx && idx < series_len) ? prices[idx] : 0.f;
-    }
-  }
-  pipe.producer_commit();
-
-  while (true) {
-    // Prefetch next tile into stage1
-    int t_next = t_base + gridDim.x * TILE;
-    int p_next = t_next - (period - 1);
-    if (t_next < series_len) {
-      pipe.producer_acquire();
-      if (p_next >= 0 && (p_next + total) <= series_len) {
-        cuda::memcpy_async(block, stage1, prices + p_next, tile_bytes, pipe);
-      } else {
-        for (int i = threadIdx.x; i < total; i += TILE) {
-          int idx = p_next + i;
-          stage1[i] = (0 <= idx && idx < series_len) ? prices[idx] : 0.f;
-        }
-      }
-      pipe.producer_commit();
-    }
-
-    // Wait for current stage to be ready and compute it
-    pipe.consumer_wait();
-    {
-      int t = t_base + threadIdx.x;
-      if (t < series_len) {
-        float outv = NAN;
-        if (t >= warm) {
-          int start = threadIdx.x;
-          outv = alma_dot(&stage0[start], weights, period) * inv_norm;
-        }
-        out[combo_base + t] = outv;
-      }
-    }
-    pipe.consumer_release();
-
-    if (t_next >= series_len) break;
-
-    // Advance and swap buffers
-    t_base = t_next;
-    float* tmp = stage0; stage0 = stage1; stage1 = tmp;
-  }
-#else
-  // Fallback: synchronous cooperative load and compute
-  int t0    = blockIdx.x * TILE;
-  if (t0 >= series_len) return;
-  int pbase = t0 - (period - 1);
-
-  // load tile into shared
-  for (int i = threadIdx.x; i < total; i += TILE) {
-    int idx = pbase + i;
-    stage0[i] = (0 <= idx && idx < series_len) ? prices[idx] : 0.f;
-  }
-  __syncthreads();
-
-  int t = t0 + threadIdx.x;
-  if (t < series_len) {
-    float outv = NAN;
-    if (t >= warm) {
-      int start = threadIdx.x;
-      outv = alma_dot(&stage0[start], weights, period) * inv_norm;
-    }
-    out[combo_base + t] = outv;
-  }
-#endif
-}
 
 // ------------- 4) Precomputed-weight tiled (template TILE) ------------------
 
@@ -610,37 +490,21 @@ struct AlmaBatchTiledPrecomputed2X {
     const int warm = first_valid + period - 1;
     const int combo_base = combo * series_len;
 
-    // Each thread computes two consecutive outputs using a sliding update.
+    // Each thread computes two consecutive outputs via two dot-products.
     int b = 2 * threadIdx.x; // start offset within tile
     int t = t0 + b;
-    // First output
     float out0 = NAN, out1 = NAN;
     if (t < series_len) {
       if (t >= warm) {
         float s0 = alma_dot(&buf[b], w, period);
         out0 = s0 * inv_norm;
-        // Second output via sliding update using two FMAs
-        if ((t + 1) < series_len) {
-          if ((t + 1) >= warm) {
-            float s1 = __fmaf_rn(w[period - 1], buf[b + period], s0);
-            s1 = __fmaf_rn(-w[0], buf[b], s1);
-            out1 = s1 * inv_norm;
-          } else {
-            out1 = NAN;
-          }
-        }
-      } else {
-        out0 = NAN;
-        if ((t + 1) < series_len) {
-          if ((t + 1) >= warm) {
-            float s1 = alma_dot(&buf[b + 1], w, period);
-            out1 = s1 * inv_norm;
-          } else {
-            out1 = NAN;
-          }
+      }
+      if ((t + 1) < series_len) {
+        if ((t + 1) >= warm) {
+          float s1 = alma_dot(&buf[b + 1], w, period);
+          out1 = s1 * inv_norm;
         }
       }
-      // Write results
       out[combo_base + t] = out0;
       if ((t + 1) < series_len) out[combo_base + t + 1] = out1;
     }
@@ -667,50 +531,8 @@ DEFINE_ALMA_BATCH_TILED_PRECOMP_2X(alma_batch_tiled_f32_2x_tile512, 512)
 
 // ------------- 5) Many-series, one-parameter (time-major) -------------------
 
-extern "C" __global__
-void alma_multi_series_one_param_onthefly_f32(const float* __restrict__ prices_tm,
-                                              const int*   __restrict__ first_valids, // [num_series]
-                                              int period,
-                                              float offset,
-                                              float sigma,
-                                              int num_series,
-                                              int series_len,
-                                              float* __restrict__ out_tm) {
-  const int TX = blockDim.x;
-  const int SY = blockDim.y;
+// [removed] alma_multi_series_one_param_onthefly_f32 (unused)
 
-  int t = blockIdx.x * TX + threadIdx.x;  // time
-  int s = blockIdx.y * SY + threadIdx.y;  // series
-  if (s >= num_series || t >= series_len) return;
-
-  extern __shared__ float sh[];
-  float* weights = sh;
-
-  const float m  = offset * float(period - 1);
-  const float s1 = float(period) / fmaxf(sigma, 1e-6f);
-  const float s2 = 2.0f * s1 * s1;
-
-  __shared__ float inv_norm_s;
-  alma_compute_weights_and_invnorm(period, m, s2, weights, &inv_norm_s);
-  const float inv_norm = inv_norm_s;
-
-  const int warm = first_valids[s] + period - 1;
-  const int out_idx = t * num_series + s;
-
-  if (t < warm) {
-    out_tm[out_idx] = NAN;
-    return;
-  }
-
-  int start = t - period + 1;
-  float acc = 0.f;
-  #pragma unroll 4
-  for (int k = 0; k < period; ++k) {
-    int in_idx = (start + k) * num_series + s;
-    acc = __fmaf_rn(prices_tm[in_idx], weights[k], acc);
-  }
-  out_tm[out_idx] = acc * inv_norm;
-}
 
 extern "C" __global__
 void alma_multi_series_one_param_f32(const float* __restrict__ prices_tm,
@@ -744,12 +566,8 @@ void alma_multi_series_one_param_f32(const float* __restrict__ prices_tm,
   }
 
   int start = t - period + 1;
-  float acc = 0.f;
-  #pragma unroll 4
-  for (int k = 0; k < period; ++k) {
-    int in_idx = (start + k) * num_series + s;
-    acc = __fmaf_rn(prices_tm[in_idx], w[k], acc);
-  }
+  const float* xptr = &prices_tm[start * num_series + s];
+  float acc = alma_dot_stride(xptr, num_series, w, period);
   out_tm[out_idx] = acc * inv_norm;
 }
 
@@ -832,8 +650,9 @@ void alma_ms1p_tiled_core(const float* __restrict__ prices_tm,
   // Cooperative load of tile across series and time
   const bool vec_ok = (TY_ == 4) && ((num_series & 3) == 0) && ((s0 & 3) == 0);
 
+  const int p0 = t0 - (period - 1); // tile starts before current block time
   for (int dt = threadIdx.x; dt < total; dt += blockDim.x) {
-    int t = t0 + dt;
+    int t = p0 + dt;
     if (t >= 0 && t < series_len) {
       if (vec_ok && threadIdx.y == 0) {
         // Vectorized load across 4 contiguous series columns
@@ -870,12 +689,8 @@ void alma_ms1p_tiled_core(const float* __restrict__ prices_tm,
   }
 
   int start = threadIdx.x; // within tile
-  float acc = 0.f;
-  #pragma unroll 4
-  for (int k = 0; k < period; ++k) {
-    float x = tile[(start + k) * TY_ + threadIdx.y];
-    acc = __fmaf_rn(x, w[k], acc);
-  }
+  const float* xptr = &tile[start * TY_ + threadIdx.y];
+  float acc = alma_dot_stride(xptr, TY_, w, period);
   out_tm[out_idx] = acc * inv_norm;
 }
 
