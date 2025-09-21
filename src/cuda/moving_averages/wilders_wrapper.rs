@@ -270,6 +270,24 @@ impl CudaWilders {
     }
 }
 
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::define_ma_period_benches_batch_only;
+
+    define_ma_period_benches_batch_only!(
+        wilders_benches,
+        CudaWilders,
+        crate::indicators::moving_averages::wilders::WildersBatchRange,
+        wilders_batch_dev,
+        crate::indicators::moving_averages::wilders::WildersBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        "wilders",
+        "wilders"
+    );
+    pub use wilders_benches::bench_profiles;
+}
+
 fn expand_periods(range: &WildersBatchRange) -> Vec<WildersParams> {
     let (start, end, step) = range.period;
     if step == 0 || start == end {

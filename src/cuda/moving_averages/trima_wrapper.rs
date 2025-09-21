@@ -467,3 +467,24 @@ impl CudaTrima {
         Ok(())
     }
 }
+
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::define_ma_period_benches;
+
+    define_ma_period_benches!(
+        trima_benches,
+        CudaTrima,
+        crate::indicators::moving_averages::trima::TrimaBatchRange,
+        crate::indicators::moving_averages::trima::TrimaParams,
+        trima_batch_dev,
+        trima_multi_series_one_param_time_major_dev,
+        crate::indicators::moving_averages::trima::TrimaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::trima::TrimaParams { period: Some(64) },
+        "trima",
+        "trima"
+    );
+    pub use trima_benches::bench_profiles;
+}

@@ -754,3 +754,24 @@ impl CudaNama {
         Ok(())
     }
 }
+
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::define_ma_period_benches;
+
+    define_ma_period_benches!(
+        nama_benches,
+        CudaNama,
+        crate::indicators::moving_averages::nama::NamaBatchRange,
+        crate::indicators::moving_averages::nama::NamaParams,
+        nama_batch_dev,
+        nama_many_series_one_param_time_major_dev,
+        crate::indicators::moving_averages::nama::NamaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::nama::NamaParams { period: Some(64) },
+        "nama",
+        "nama"
+    );
+    pub use nama_benches::bench_profiles;
+}

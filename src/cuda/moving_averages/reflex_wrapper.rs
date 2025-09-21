@@ -523,6 +523,24 @@ impl CudaReflex {
     }
 }
 
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::define_ma_period_benches_batch_only;
+
+    define_ma_period_benches_batch_only!(
+        reflex_benches,
+        CudaReflex,
+        crate::indicators::moving_averages::reflex::ReflexBatchRange,
+        reflex_batch_dev,
+        crate::indicators::moving_averages::reflex::ReflexBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        "reflex",
+        "reflex"
+    );
+    pub use reflex_benches::bench_profiles;
+}
+
 fn expand_grid_reflex(range: &ReflexBatchRange) -> Vec<ReflexParams> {
     let (start, end, step) = range.period;
     if step == 0 || start == end {

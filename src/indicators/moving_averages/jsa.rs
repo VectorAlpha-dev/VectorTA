@@ -765,6 +765,8 @@ unsafe fn jsa_row_avx512_long(data: &[f64], first: usize, period: usize, out: &m
 
 // Python bindings
 #[cfg(feature = "python")]
+use numpy::PyUntypedArrayMethods;
+#[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;

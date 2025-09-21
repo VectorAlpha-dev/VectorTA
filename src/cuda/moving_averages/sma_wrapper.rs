@@ -380,3 +380,24 @@ impl CudaSma {
             .map_err(|e| CudaSmaError::Cuda(e.to_string()))
     }
 }
+
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::define_ma_period_benches;
+
+    define_ma_period_benches!(
+        sma_benches,
+        CudaSma,
+        crate::indicators::moving_averages::sma::SmaBatchRange,
+        crate::indicators::moving_averages::sma::SmaParams,
+        sma_batch_dev,
+        sma_multi_series_one_param_time_major_dev,
+        crate::indicators::moving_averages::sma::SmaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::sma::SmaParams { period: Some(64) },
+        "sma",
+        "sma"
+    );
+    pub use sma_benches::bench_profiles;
+}

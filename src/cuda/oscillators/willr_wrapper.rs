@@ -291,6 +291,85 @@ impl CudaWillr {
     }
 }
 
+// ---------- Bench profiles (batch only) ----------
+
+pub mod benches {
+    use super::*;
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::cuda::bench::helpers::gen_series;
+
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+
+    fn bytes_one_series_many_params() -> usize {
+        // close + precomputed tables (derived from synthetic H/L); count worst-case generous
+        let in_bytes = 3 * ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    fn synth_hlc_from_close(close: &[f32]) -> (Vec<f32>, Vec<f32>) {
+        let mut high = close.to_vec();
+        let mut low = close.to_vec();
+        for i in 0..close.len() {
+            let v = close[i];
+            if v.is_nan() {
+                continue;
+            }
+            let x = i as f32 * 0.0023;
+            let off = (0.0029 * x.sin()).abs() + 0.1;
+            high[i] = v + off;
+            low[i] = v - off;
+        }
+        (high, low)
+    }
+
+    struct WillrBatchState {
+        cuda: CudaWillr,
+        high: Vec<f32>,
+        low: Vec<f32>,
+        close: Vec<f32>,
+        sweep: WillrBatchRange,
+    }
+    impl CudaBenchState for WillrBatchState {
+        fn launch(&mut self) {
+            let _ = self
+                .cuda
+                .willr_batch_dev(&self.high, &self.low, &self.close, &self.sweep)
+                .expect("willr batch");
+        }
+    }
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaWillr::new(0).expect("cuda willr");
+        let close = gen_series(ONE_SERIES_LEN);
+        let (high, low) = synth_hlc_from_close(&close);
+        let sweep = WillrBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1),
+        };
+        Box::new(WillrBatchState {
+            cuda,
+            high,
+            low,
+            close,
+            sweep,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new(
+                "willr",
+                "one_series_many_params",
+                "willr_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+        ]
+    }
+}
+
 fn expand_periods(range: &WillrBatchRange) -> Vec<WillrParams> {
     let (start, end, step) = range.period;
     if step == 0 || start == end {

@@ -1978,6 +1978,8 @@ use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::PyReadonlyArray2;
 #[cfg(feature = "python")]
+use numpy::PyUntypedArrayMethods;
+#[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
 #[cfg(feature = "python")]
 use pyo3::{exceptions::PyValueError, prelude::*, types::PyDict};

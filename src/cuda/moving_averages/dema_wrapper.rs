@@ -232,3 +232,22 @@ fn expand_periods(range: &DemaBatchRange) -> Vec<DemaParams> {
     }
     out
 }
+
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::define_ma_period_benches_batch_only;
+
+    // DEMA currently exposes only the batch path; register batch-only benches.
+    define_ma_period_benches_batch_only!(
+        dema_benches,
+        CudaDema,
+        crate::indicators::moving_averages::dema::DemaBatchRange,
+        dema_batch_dev,
+        crate::indicators::moving_averages::dema::DemaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        "dema",
+        "dema"
+    );
+    pub use dema_benches::bench_profiles;
+}

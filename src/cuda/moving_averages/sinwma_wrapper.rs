@@ -521,3 +521,24 @@ impl CudaSinwma {
         )
     }
 }
+
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::define_ma_period_benches;
+
+    define_ma_period_benches!(
+        sinwma_benches,
+        CudaSinwma,
+        crate::indicators::moving_averages::sinwma::SinWmaBatchRange,
+        crate::indicators::moving_averages::sinwma::SinWmaParams,
+        sinwma_batch_dev,
+        sinwma_many_series_one_param_time_major_dev,
+        crate::indicators::moving_averages::sinwma::SinWmaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::sinwma::SinWmaParams { period: Some(64) },
+        "sinwma",
+        "sinwma"
+    );
+    pub use sinwma_benches::bench_profiles;
+}

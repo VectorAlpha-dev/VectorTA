@@ -622,6 +622,27 @@ impl CudaTilson {
     }
 }
 
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::define_ma_period_benches;
+
+    define_ma_period_benches!(
+        tilson_benches,
+        CudaTilson,
+        crate::indicators::moving_averages::tilson::TilsonBatchRange,
+        crate::indicators::moving_averages::tilson::TilsonParams,
+        tilson_batch_dev,
+        tilson_many_series_one_param_time_major_dev,
+        crate::indicators::moving_averages::tilson::TilsonBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1), volume_factor: (0.0, 0.0, 0.0) },
+        crate::indicators::moving_averages::tilson::TilsonParams { period: Some(64), volume_factor: Some(0.0) },
+        "tilson",
+        "tilson"
+    );
+    pub use tilson_benches::bench_profiles;
+}
+
 fn expand_combos(range: &TilsonBatchRange) -> Vec<TilsonParams> {
     fn axis_usize(axis: (usize, usize, usize)) -> Vec<usize> {
         let (start, end, step) = axis;

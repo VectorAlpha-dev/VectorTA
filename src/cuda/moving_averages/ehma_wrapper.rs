@@ -548,3 +548,24 @@ impl CudaEhma {
         Ok(())
     }
 }
+
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::define_ma_period_benches;
+
+    define_ma_period_benches!(
+        ehma_benches,
+        CudaEhma,
+        crate::indicators::moving_averages::ehma::EhmaBatchRange,
+        crate::indicators::moving_averages::ehma::EhmaParams,
+        ehma_batch_dev,
+        ehma_multi_series_one_param_time_major_dev,
+        crate::indicators::moving_averages::ehma::EhmaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::ehma::EhmaParams { period: Some(64) },
+        "ehma",
+        "ehma"
+    );
+    pub use ehma_benches::bench_profiles;
+}

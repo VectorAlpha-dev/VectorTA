@@ -580,6 +580,27 @@ impl CudaHighPass2 {
     }
 }
 
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::define_ma_period_benches;
+
+    define_ma_period_benches!(
+        highpass2_benches,
+        CudaHighPass2,
+        crate::indicators::moving_averages::highpass_2_pole::HighPass2BatchRange,
+        crate::indicators::moving_averages::highpass_2_pole::HighPass2Params,
+        highpass2_batch_dev,
+        highpass2_many_series_one_param_time_major_dev,
+        crate::indicators::moving_averages::highpass_2_pole::HighPass2BatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1), k: (0.5, 0.5, 0.0) },
+        crate::indicators::moving_averages::highpass_2_pole::HighPass2Params { period: Some(64), k: Some(0.5) },
+        "highpass2",
+        "highpass2"
+    );
+    pub use highpass2_benches::bench_profiles;
+}
+
 struct Coefficients {
     c: f32,
     cm2: f32,

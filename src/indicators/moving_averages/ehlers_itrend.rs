@@ -35,6 +35,8 @@ use std::mem::MaybeUninit;
 use thiserror::Error;
 
 #[cfg(feature = "python")]
+use numpy::PyUntypedArrayMethods;
+#[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;

@@ -4,12 +4,16 @@
 //! runtime detection helpers and submodules for GPU-accelerated indicators.
 
 #[cfg(feature = "cuda")]
+pub mod bench;
+#[cfg(feature = "cuda")]
 pub mod moving_averages;
 #[cfg(feature = "cuda")]
 pub mod wavetrend;
 #[cfg(feature = "cuda")]
 pub mod wclprice;
 
+#[cfg(feature = "cuda")]
+pub use bench::{CudaBenchScenario, CudaBenchState};
 #[cfg(feature = "cuda")]
 pub use moving_averages::{
     CudaAlma, CudaDma, CudaEhlersPma, CudaGaussian, CudaJma, CudaMama, CudaReflex, CudaSqwma,
@@ -22,8 +26,6 @@ pub mod oscillators;
 #[cfg(feature = "cuda")]
 pub mod wto_wrapper;
 
-#[cfg(feature = "cuda")]
-pub use moving_averages::alma_wrapper::{CudaAlma, DeviceArrayF32};
 #[cfg(feature = "cuda")]
 pub use moving_averages::cwma_wrapper::CudaCwma;
 #[cfg(feature = "cuda")]
@@ -43,8 +45,6 @@ pub use moving_averages::supersmoother_3_pole_wrapper::CudaSupersmoother3Pole;
 #[cfg(feature = "cuda")]
 pub use moving_averages::tradjema_wrapper::CudaTradjema;
 #[cfg(feature = "cuda")]
-pub use moving_averages::volume_adjusted_ma_wrapper::CudaVama;
-#[cfg(feature = "cuda")]
 pub use moving_averages::wma_wrapper::CudaWma;
 #[cfg(feature = "cuda")]
 pub use wto_wrapper::{CudaWto, CudaWtoBatchResult, DeviceArrayF32Triplet};
@@ -55,10 +55,10 @@ pub mod zscore_wrapper;
 
 #[cfg(feature = "cuda")]
 pub use moving_averages::{
-    CudaAlma, CudaBuffAverages, CudaBuffAveragesError, CudaFrama, CudaFramaError, CudaHma,
-    CudaHmaError, CudaLinreg, CudaLinregError, CudaNma, CudaNmaError, CudaSma, CudaSmaError,
-    CudaSuperSmoother, CudaSuperSmootherError, CudaTrendflex, CudaTrendflexError, CudaVpwma,
-    CudaVpwmaError, CudaZlema, CudaZlemaError, DeviceArrayF32,
+    CudaBuffAverages, CudaBuffAveragesError, CudaFrama, CudaFramaError, CudaHma, CudaHmaError,
+    CudaLinreg, CudaLinregError, CudaNma, CudaNmaError, CudaSma, CudaSmaError, CudaSuperSmoother,
+    CudaSuperSmootherError, CudaTrendflex, CudaTrendflexError, CudaVolumeAdjustedMa,
+    CudaVolumeAdjustedMaError, CudaVpwma, CudaVpwmaError, CudaZlema, CudaZlemaError,
 };
 #[cfg(feature = "cuda")]
 pub use wad_wrapper::{CudaWad, CudaWadError};

@@ -383,3 +383,24 @@ impl CudaSuperSmoother {
             .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))
     }
 }
+
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::define_ma_period_benches;
+
+    define_ma_period_benches!(
+        supersmoother_benches,
+        CudaSuperSmoother,
+        crate::indicators::moving_averages::supersmoother::SuperSmootherBatchRange,
+        crate::indicators::moving_averages::supersmoother::SuperSmootherParams,
+        supersmoother_batch_dev,
+        supersmoother_multi_series_one_param_time_major_dev,
+        crate::indicators::moving_averages::supersmoother::SuperSmootherBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::supersmoother::SuperSmootherParams { period: Some(64) },
+        "supersmoother",
+        "supersmoother"
+    );
+    pub use supersmoother_benches::bench_profiles;
+}

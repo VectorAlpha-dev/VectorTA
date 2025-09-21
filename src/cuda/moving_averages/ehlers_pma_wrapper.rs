@@ -530,3 +530,102 @@ impl CudaEhlersPma {
         )
     }
 }
+
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+    const MANY_SERIES_COLS: usize = 250;
+    const MANY_SERIES_LEN: usize = 1_000_000;
+
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let out_bytes = 2 * ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 32 * 1024 * 1024
+    }
+    fn bytes_many_series_one_param() -> usize {
+        let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
+        let in_bytes = elems * std::mem::size_of::<f32>();
+        let out_bytes = 2 * elems * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 32 * 1024 * 1024
+    }
+
+    struct PmaBatchState {
+        cuda: CudaEhlersPma,
+        price: Vec<f32>,
+        sweep: EhlersPmaBatchRange,
+    }
+    impl CudaBenchState for PmaBatchState {
+        fn launch(&mut self) {
+            let _pair = self
+                .cuda
+                .ehlers_pma_batch_dev(&self.price, &self.sweep)
+                .expect("pma batch launch");
+        }
+    }
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaEhlersPma::new(0).expect("cuda pma");
+        let price = gen_series(ONE_SERIES_LEN);
+        let sweep = EhlersPmaBatchRange { combos: PARAM_SWEEP };
+        Box::new(PmaBatchState { cuda, price, sweep })
+    }
+
+    struct PmaManyState {
+        cuda: CudaEhlersPma,
+        data_tm: Vec<f32>,
+        cols: usize,
+        rows: usize,
+    }
+    impl CudaBenchState for PmaManyState {
+        fn launch(&mut self) {
+            let _pair = self
+                .cuda
+                .ehlers_pma_many_series_one_param_time_major_dev(
+                    &self.data_tm,
+                    self.cols,
+                    self.rows,
+                )
+                .expect("pma many-series launch");
+        }
+    }
+    fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
+        let cuda = CudaEhlersPma::new(0).expect("cuda pma");
+        let cols = MANY_SERIES_COLS;
+        let rows = MANY_SERIES_LEN;
+        let data_tm = gen_time_major_prices(cols, rows);
+        Box::new(PmaManyState {
+            cuda,
+            data_tm,
+            cols,
+            rows,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new(
+                "ehlers_pma",
+                "one_series_many_params",
+                "ehlers_pma_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new(
+                "ehlers_pma",
+                "many_series_one_param",
+                "ehlers_pma_cuda_many_series_one_param",
+                "250x1m",
+                prep_many_series_one_param,
+            )
+            .with_sample_size(5)
+            .with_mem_required(bytes_many_series_one_param()),
+        ]
+    }
+}

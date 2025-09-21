@@ -595,6 +595,116 @@ impl CudaWto {
     }
 }
 
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+    const MANY_SERIES_COLS: usize = 250;
+    const MANY_SERIES_LEN: usize = 1_000_000;
+
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        // 3 outputs
+        let out_bytes = 3 * ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+    fn bytes_many_series_one_param() -> usize {
+        let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
+        let in_bytes = elems * std::mem::size_of::<f32>();
+        let out_bytes = 3 * elems * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    struct WtoBatchState {
+        cuda: CudaWto,
+        price: Vec<f32>,
+        sweep: WtoBatchRange,
+    }
+    impl CudaBenchState for WtoBatchState {
+        fn launch(&mut self) {
+            let _ = self
+                .cuda
+                .wto_batch_dev(&self.price, &self.sweep)
+                .expect("wto batch");
+        }
+    }
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaWto::new(0).expect("cuda wto");
+        let price = gen_series(ONE_SERIES_LEN);
+        let sweep = WtoBatchRange {
+            channel: (10, 10 + PARAM_SWEEP - 1, 1),
+            average: (21, 21, 0),
+        };
+        Box::new(WtoBatchState { cuda, price, sweep })
+    }
+
+    struct WtoManyState {
+        cuda: CudaWto,
+        data_tm: Vec<f32>,
+        cols: usize,
+        rows: usize,
+        params: WtoParams,
+    }
+    impl CudaBenchState for WtoManyState {
+        fn launch(&mut self) {
+            let _ = self
+                .cuda
+                .wto_many_series_one_param_time_major_dev(
+                    &self.data_tm,
+                    self.cols,
+                    self.rows,
+                    &self.params,
+                )
+                .expect("wto many-series");
+        }
+    }
+    fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
+        let cuda = CudaWto::new(0).expect("cuda wto");
+        let cols = MANY_SERIES_COLS;
+        let rows = MANY_SERIES_LEN;
+        let data_tm = gen_time_major_prices(cols, rows);
+        let params = WtoParams {
+            channel_length: Some(10),
+            average_length: Some(21),
+        };
+        Box::new(WtoManyState {
+            cuda,
+            data_tm,
+            cols,
+            rows,
+            params,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new(
+                "wto",
+                "one_series_many_params",
+                "wto_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new(
+                "wto",
+                "many_series_one_param",
+                "wto_cuda_many_series_one_param",
+                "250x1m",
+                prep_many_series_one_param,
+            )
+            .with_sample_size(5)
+            .with_mem_required(bytes_many_series_one_param()),
+        ]
+    }
+}
+
 fn expand_grid(r: &WtoBatchRange) -> Vec<WtoParams> {
     fn axis_u(range: (usize, usize, usize)) -> Vec<usize> {
         let (start, end, step) = range;

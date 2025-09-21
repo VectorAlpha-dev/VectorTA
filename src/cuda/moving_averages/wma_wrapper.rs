@@ -524,3 +524,24 @@ impl CudaWma {
         )
     }
 }
+
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::define_ma_period_benches;
+
+    define_ma_period_benches!(
+        wma_benches,
+        CudaWma,
+        crate::indicators::moving_averages::wma::WmaBatchRange,
+        crate::indicators::moving_averages::wma::WmaParams,
+        wma_batch_dev,
+        wma_multi_series_one_param_time_major_dev,
+        crate::indicators::moving_averages::wma::WmaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::wma::WmaParams { period: Some(64) },
+        "wma",
+        "wma"
+    );
+    pub use wma_benches::bench_profiles;
+}

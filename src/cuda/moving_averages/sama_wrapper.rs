@@ -533,6 +533,27 @@ impl CudaSama {
     }
 }
 
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::define_ma_period_benches;
+
+    define_ma_period_benches!(
+        sama_benches,
+        CudaSama,
+        crate::indicators::moving_averages::sama::SamaBatchRange,
+        crate::indicators::moving_averages::sama::SamaParams,
+        sama_batch_dev,
+        sama_many_series_one_param_time_major_dev,
+        crate::indicators::moving_averages::sama::SamaBatchRange { length: (64, 64 + PARAM_SWEEP - 1, 1), maj_length: (14, 14, 0), min_length: (6, 6, 0) },
+        crate::indicators::moving_averages::sama::SamaParams { length: Some(64), maj_length: Some(14), min_length: Some(6) },
+        "sama",
+        "sama"
+    );
+    pub use sama_benches::bench_profiles;
+}
+
 fn expand_grid(range: &SamaBatchRange) -> Vec<SamaParams> {
     fn axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
         if step == 0 || start == end {

@@ -175,3 +175,72 @@ impl CudaWad {
         Ok(len)
     }
 }
+
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::cuda::bench::helpers::gen_series;
+
+    const ONE_SERIES_LEN: usize = 1_000_000;
+
+    fn bytes_one_series() -> usize {
+        // 3 inputs (H/L/C) + 1 output
+        let in_bytes = 3 * ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let out_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 32 * 1024 * 1024
+    }
+
+    fn synth_hlc_from_close(close: &[f32]) -> (Vec<f32>, Vec<f32>) {
+        let mut high = close.to_vec();
+        let mut low = close.to_vec();
+        for i in 0..close.len() {
+            let v = close[i];
+            if v.is_nan() {
+                continue;
+            }
+            let x = i as f32 * 0.0027;
+            let off = (0.0031 * x.cos()).abs() + 0.12;
+            high[i] = v + off;
+            low[i] = v - off;
+        }
+        (high, low)
+    }
+
+    struct WadState {
+        cuda: CudaWad,
+        high: Vec<f32>,
+        low: Vec<f32>,
+        close: Vec<f32>,
+    }
+    impl CudaBenchState for WadState {
+        fn launch(&mut self) {
+            let _ = self
+                .cuda
+                .wad_series_dev(&self.high, &self.low, &self.close)
+                .expect("wad kernel");
+        }
+    }
+
+    fn prep_one_series() -> Box<dyn CudaBenchState> {
+        let cuda = CudaWad::new(0).expect("cuda wad");
+        let close = gen_series(ONE_SERIES_LEN);
+        let (high, low) = synth_hlc_from_close(&close);
+        Box::new(WadState { cuda, high, low, close })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new(
+                "wad",
+                "one_series",
+                "wad_cuda_series",
+                "1m",
+                prep_one_series,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series()),
+        ]
+    }
+}

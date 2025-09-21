@@ -418,3 +418,24 @@ impl CudaTrendflex {
             .map_err(|e| CudaTrendflexError::Cuda(e.to_string()))
     }
 }
+
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::define_ma_period_benches;
+
+    define_ma_period_benches!(
+        trendflex_benches,
+        CudaTrendflex,
+        crate::indicators::moving_averages::trendflex::TrendFlexBatchRange,
+        crate::indicators::moving_averages::trendflex::TrendFlexParams,
+        trendflex_batch_dev,
+        trendflex_multi_series_one_param_time_major_dev,
+        crate::indicators::moving_averages::trendflex::TrendFlexBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::trendflex::TrendFlexParams { period: Some(64) },
+        "trendflex",
+        "trendflex"
+    );
+    pub use trendflex_benches::bench_profiles;
+}

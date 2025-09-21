@@ -555,6 +555,27 @@ impl CudaSrwma {
     }
 }
 
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::define_ma_period_benches;
+
+    define_ma_period_benches!(
+        srwma_benches,
+        CudaSrwma,
+        crate::indicators::moving_averages::srwma::SrwmaBatchRange,
+        crate::indicators::moving_averages::srwma::SrwmaParams,
+        srwma_batch_dev,
+        srwma_many_series_one_param_time_major_dev,
+        crate::indicators::moving_averages::srwma::SrwmaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::srwma::SrwmaParams { period: Some(64) },
+        "srwma",
+        "srwma"
+    );
+    pub use srwma_benches::bench_profiles;
+}
+
 fn expand_grid(range: &SrwmaBatchRange) -> Vec<SrwmaParams> {
     fn axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
         if step == 0 || start == end {

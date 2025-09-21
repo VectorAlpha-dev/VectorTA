@@ -360,3 +360,62 @@ impl CudaZscore {
         Ok((combos.len(), len, meta))
     }
 }
+
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::cuda::bench::helpers::gen_series;
+    use crate::indicators::zscore::ZscoreBatchRange;
+
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    struct ZscoreBatchState {
+        cuda: CudaZscore,
+        price: Vec<f32>,
+        sweep: ZscoreBatchRange,
+    }
+    impl CudaBenchState for ZscoreBatchState {
+        fn launch(&mut self) {
+            let _ = self
+                .cuda
+                .zscore_batch_dev(&self.price, &self.sweep)
+                .expect("zscore batch");
+        }
+    }
+
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaZscore::new(0).expect("cuda zscore");
+        let price = gen_series(ONE_SERIES_LEN);
+        // vary period; nbdev=2.0; ma_type="sma"; devtype=0 (supported)
+        let sweep = ZscoreBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1),
+            ma_type: ("sma".to_string(), "sma".to_string(), "".to_string()),
+            nbdev: (2.0, 2.0, 0.0),
+            devtype: (0, 0, 0),
+        };
+        Box::new(ZscoreBatchState { cuda, price, sweep })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new(
+                "zscore",
+                "one_series_many_params",
+                "zscore_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+        ]
+    }
+}

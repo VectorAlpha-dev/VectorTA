@@ -32,6 +32,8 @@
 //!   - The highest/lowest calculation is well-suited for SIMD parallelization
 
 #[cfg(feature = "python")]
+use numpy::PyUntypedArrayMethods;
+#[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;

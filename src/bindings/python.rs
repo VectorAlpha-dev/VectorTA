@@ -242,9 +242,10 @@ use crate::indicators::moving_averages::ehlers_pma::{
     ehlers_pma_cuda_batch_dev_py, ehlers_pma_cuda_many_series_one_param_dev_py,
 };
 #[cfg(feature = "python")]
+use crate::indicators::moving_averages::ehma::{ehma_batch_py, ehma_py, EhmaStreamPy};
+#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::ehma::{
-    ehma_batch_py, ehma_cuda_batch_dev_py, ehma_cuda_many_series_one_param_dev_py, ehma_py,
-    EhmaStreamPy,
+    ehma_cuda_batch_dev_py, ehma_cuda_many_series_one_param_dev_py,
 };
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::ema::{ema_batch_py, ema_py, EmaStreamPy};
@@ -487,11 +488,11 @@ use crate::indicators::moving_averages::volume_adjusted_ma::{
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::vpwma::{vpwma_batch_py, vpwma_py, VpwmaStreamPy};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::vwap::vwap_cuda_batch_dev_py;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::vpwma::{
     vpwma_cuda_batch_dev_py, vpwma_cuda_many_series_one_param_dev_py,
 };
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::vwap::vwap_cuda_batch_dev_py;
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::vwap::{vwap_batch_py, vwap_py, VwapStreamPy};
 #[cfg(feature = "python")]

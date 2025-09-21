@@ -241,3 +241,21 @@ impl CudaZlema {
         Ok((combos.len(), len, combos))
     }
 }
+
+// ---------- Bench profiles (batch-only) ----------
+
+pub mod benches {
+    use super::*;
+    use crate::define_ma_period_benches_batch_only;
+
+    define_ma_period_benches_batch_only!(
+        zlema_benches,
+        CudaZlema,
+        crate::indicators::moving_averages::zlema::ZlemaBatchRange,
+        zlema_batch_dev,
+        crate::indicators::moving_averages::zlema::ZlemaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        "zlema",
+        "zlema"
+    );
+    pub use zlema_benches::bench_profiles;
+}

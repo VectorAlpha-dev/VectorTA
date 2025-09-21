@@ -462,3 +462,24 @@ impl CudaSmma {
         Ok(())
     }
 }
+
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::define_ma_period_benches;
+
+    define_ma_period_benches!(
+        smma_benches,
+        CudaSmma,
+        crate::indicators::moving_averages::smma::SmmaBatchRange,
+        crate::indicators::moving_averages::smma::SmmaParams,
+        smma_batch_dev,
+        smma_multi_series_one_param_time_major_dev,
+        crate::indicators::moving_averages::smma::SmmaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::smma::SmmaParams { period: Some(64) },
+        "smma",
+        "smma"
+    );
+    pub use smma_benches::bench_profiles;
+}

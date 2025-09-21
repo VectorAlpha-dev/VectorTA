@@ -725,3 +725,34 @@ struct BatchInputs {
     series_len: usize,
     max_sqrt_len: usize,
 }
+
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::define_ma_period_benches;
+
+    define_ma_period_benches!(
+        dma_benches,
+        CudaDma,
+        crate::indicators::moving_averages::dma::DmaBatchRange,
+        crate::indicators::moving_averages::dma::DmaParams,
+        dma_batch_dev,
+        dma_many_series_one_param_time_major_dev,
+        crate::indicators::moving_averages::dma::DmaBatchRange {
+            hull_length: (7, 7 + PARAM_SWEEP - 1, 1),
+            ema_length: (20, 20, 0),
+            ema_gain_limit: (50, 50, 0),
+            hull_ma_type: "WMA".to_string(),
+        },
+        crate::indicators::moving_averages::dma::DmaParams {
+            hull_length: Some(64),
+            ema_length: Some(20),
+            ema_gain_limit: Some(50),
+            hull_ma_type: Some("WMA".to_string()),
+        },
+        "dma",
+        "dma"
+    );
+    pub use dma_benches::bench_profiles;
+}

@@ -34,6 +34,65 @@ impl fmt::Display for CudaBuffAveragesError {
     }
 }
 
+pub mod benches {
+    use super::*;
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![CudaBenchScenario::new(
+            "buff_averages",
+            "batch_dev",
+            "buff_averages_cuda_batch_dev",
+            "60k_x_49combos",
+            prep_buff_averages_batch_box,
+        )]
+    }
+
+    struct BuffAveragesBatchState {
+        cuda: CudaBuffAverages,
+        price: Vec<f32>,
+        volume: Vec<f32>,
+        sweep: BuffAveragesBatchRange,
+    }
+
+    impl CudaBenchState for BuffAveragesBatchState {
+        fn launch(&mut self) {
+            let (fast_dev, slow_dev) = self
+                .cuda
+                .buff_averages_batch_dev(&self.price, &self.volume, &self.sweep)
+                .expect("launch buff averages batch kernel");
+            drop(fast_dev);
+            drop(slow_dev);
+        }
+    }
+
+    fn prep_buff_averages_batch() -> BuffAveragesBatchState {
+        let cuda = CudaBuffAverages::new(0).expect("cuda buff averages");
+        let len = 60_000usize;
+        let mut price = vec![f32::NAN; len];
+        let mut volume = vec![f32::NAN; len];
+        for i in 3..len {
+            let x = i as f32;
+            price[i] = (x * 0.001).sin() + 0.0001 * x;
+            volume[i] = (x * 0.0007).cos().abs() + 0.6;
+        }
+        let sweep = BuffAveragesBatchRange {
+            fast_period: (4, 28, 4),
+            slow_period: (32, 128, 16),
+        };
+        BuffAveragesBatchState {
+            cuda,
+            price,
+            volume,
+            sweep,
+        }
+    }
+
+    fn prep_buff_averages_batch_box() -> Box<dyn CudaBenchState> {
+        Box::new(prep_buff_averages_batch())
+    }
+}
+
 impl std::error::Error for CudaBuffAveragesError {}
 
 pub struct CudaBuffAverages {

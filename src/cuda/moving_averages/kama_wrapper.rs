@@ -486,3 +486,24 @@ impl CudaKama {
         )
     }
 }
+
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::define_ma_period_benches;
+
+    define_ma_period_benches!(
+        kama_benches,
+        CudaKama,
+        crate::indicators::moving_averages::kama::KamaBatchRange,
+        crate::indicators::moving_averages::kama::KamaParams,
+        kama_batch_dev,
+        kama_many_series_one_param_time_major_dev,
+        crate::indicators::moving_averages::kama::KamaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::kama::KamaParams { period: Some(64) },
+        "kama",
+        "kama"
+    );
+    pub use kama_benches::bench_profiles;
+}

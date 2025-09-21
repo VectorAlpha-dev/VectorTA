@@ -601,3 +601,24 @@ impl CudaCwma {
             .map_err(|e| CudaCwmaError::Cuda(e.to_string()))
     }
 }
+
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::define_ma_period_benches;
+
+    define_ma_period_benches!(
+        cwma_benches,
+        CudaCwma,
+        crate::indicators::moving_averages::cwma::CwmaBatchRange,
+        crate::indicators::moving_averages::cwma::CwmaParams,
+        cwma_batch_dev,
+        cwma_multi_series_one_param_time_major_dev,
+        crate::indicators::moving_averages::cwma::CwmaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::cwma::CwmaParams { period: Some(64) },
+        "cwma",
+        "cwma"
+    );
+    pub use cwma_benches::bench_profiles;
+}

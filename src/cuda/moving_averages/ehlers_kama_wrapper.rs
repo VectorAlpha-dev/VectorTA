@@ -511,3 +511,24 @@ impl CudaEhlersKama {
             .map_err(|e| CudaEhlersKamaError::Cuda(e.to_string()))
     }
 }
+
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::define_ma_period_benches;
+
+    define_ma_period_benches!(
+        ehlers_kama_benches,
+        CudaEhlersKama,
+        crate::indicators::moving_averages::ehlers_kama::EhlersKamaBatchRange,
+        crate::indicators::moving_averages::ehlers_kama::EhlersKamaParams,
+        ehlers_kama_batch_dev,
+        ehlers_kama_multi_series_one_param_time_major_dev,
+        crate::indicators::moving_averages::ehlers_kama::EhlersKamaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::ehlers_kama::EhlersKamaParams { period: Some(64) },
+        "ehlers_kama",
+        "ehlers_kama"
+    );
+    pub use ehlers_kama_benches::bench_profiles;
+}

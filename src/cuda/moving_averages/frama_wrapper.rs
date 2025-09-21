@@ -572,3 +572,165 @@ impl CudaFrama {
             .map_err(|e| CudaFramaError::Cuda(e.to_string()))
     }
 }
+
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+    const MANY_SERIES_COLS: usize = 250;
+    const MANY_SERIES_LEN: usize = 1_000_000;
+
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = ONE_SERIES_LEN * 3 * std::mem::size_of::<f32>(); // high/low/close
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+    fn bytes_many_series_one_param() -> usize {
+        let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
+        let in_bytes = elems * 3 * std::mem::size_of::<f32>();
+        let out_bytes = elems * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    fn make_hlc_from_close(close: &[f32]) -> (Vec<f32>, Vec<f32>) {
+        let mut high = close.to_vec();
+        let mut low = close.to_vec();
+        for i in 0..close.len() {
+            let v = close[i];
+            if v.is_nan() {
+                continue;
+            }
+            let x = i as f32 * 0.0021;
+            let off = (0.003 * x.sin()).abs() + 0.2;
+            high[i] = v + off;
+            low[i] = v - off;
+        }
+        (high, low)
+    }
+
+    fn make_hlc_tm_from_close(close_tm: &[f32], cols: usize, rows: usize) -> (Vec<f32>, Vec<f32>) {
+        let mut high = close_tm.to_vec();
+        let mut low = close_tm.to_vec();
+        for row in 0..rows {
+            for col in 0..cols {
+                let idx = row * cols + col;
+                let v = close_tm[idx];
+                if v.is_nan() {
+                    continue;
+                }
+                let x = (row as f32) * 0.0017 + (col as f32) * 0.01;
+                let off = (0.0033 * x.cos()).abs() + 0.18;
+                high[idx] = v + off;
+                low[idx] = v - off;
+            }
+        }
+        (high, low)
+    }
+
+    struct FramaBatchState {
+        cuda: CudaFrama,
+        high: Vec<f32>,
+        low: Vec<f32>,
+        close: Vec<f32>,
+        sweep: FramaBatchRange,
+    }
+    impl CudaBenchState for FramaBatchState {
+        fn launch(&mut self) {
+            let _ = self
+                .cuda
+                .frama_batch_dev(&self.high, &self.low, &self.close, &self.sweep)
+                .expect("frama batch launch");
+        }
+    }
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaFrama::new(0).expect("cuda frama");
+        let close = gen_series(ONE_SERIES_LEN);
+        let (high, low) = make_hlc_from_close(&close);
+        let sweep = FramaBatchRange {
+            window: (10, 10 + PARAM_SWEEP - 1, 1),
+            sc: (300, 300, 0),
+            fc: (1, 1, 0),
+        };
+        Box::new(FramaBatchState {
+            cuda,
+            high,
+            low,
+            close,
+            sweep,
+        })
+    }
+
+    struct FramaManyState {
+        cuda: CudaFrama,
+        high_tm: Vec<f32>,
+        low_tm: Vec<f32>,
+        close_tm: Vec<f32>,
+        cols: usize,
+        rows: usize,
+        params: FramaParams,
+    }
+    impl CudaBenchState for FramaManyState {
+        fn launch(&mut self) {
+            let _ = self
+                .cuda
+                .frama_many_series_one_param_time_major_dev(
+                    &self.high_tm,
+                    &self.low_tm,
+                    &self.close_tm,
+                    self.cols,
+                    self.rows,
+                    &self.params,
+                )
+                .expect("frama many-series launch");
+        }
+    }
+    fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
+        let cuda = CudaFrama::new(0).expect("cuda frama");
+        let cols = MANY_SERIES_COLS;
+        let rows = MANY_SERIES_LEN;
+        let close_tm = gen_time_major_prices(cols, rows);
+        let (high_tm, low_tm) = make_hlc_tm_from_close(&close_tm, cols, rows);
+        let params = FramaParams {
+            window: Some(64),
+            sc: Some(300),
+            fc: Some(1),
+        };
+        Box::new(FramaManyState {
+            cuda,
+            high_tm,
+            low_tm,
+            close_tm,
+            cols,
+            rows,
+            params,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new(
+                "frama",
+                "one_series_many_params",
+                "frama_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new(
+                "frama",
+                "many_series_one_param",
+                "frama_cuda_many_series_one_param",
+                "250x1m",
+                prep_many_series_one_param,
+            )
+            .with_sample_size(5)
+            .with_mem_required(bytes_many_series_one_param()),
+        ]
+    }
+}

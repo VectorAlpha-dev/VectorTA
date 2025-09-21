@@ -533,6 +533,27 @@ impl CudaEhlersITrend {
     }
 }
 
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::define_ma_period_benches;
+
+    define_ma_period_benches!(
+        ehlers_itrend_benches,
+        CudaEhlersITrend,
+        crate::indicators::moving_averages::ehlers_itrend::EhlersITrendBatchRange,
+        crate::indicators::moving_averages::ehlers_itrend::EhlersITrendParams,
+        ehlers_itrend_batch_dev,
+        ehlers_itrend_many_series_one_param_time_major_dev,
+        crate::indicators::moving_averages::ehlers_itrend::EhlersITrendBatchRange { warmup_bars: (12, 12 + PARAM_SWEEP - 1, 1), max_dc_period: (50, 50, 0) },
+        crate::indicators::moving_averages::ehlers_itrend::EhlersITrendParams { warmup_bars: Some(32), max_dc_period: Some(50) },
+        "ehlers_itrend",
+        "ehlers_itrend"
+    );
+    pub use ehlers_itrend_benches::bench_profiles;
+}
+
 fn expand_grid_cuda(
     range: &EhlersITrendBatchRange,
 ) -> Result<Vec<EhlersITrendParams>, CudaEhlersITrendError> {

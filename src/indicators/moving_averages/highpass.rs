@@ -42,6 +42,8 @@ use numpy::ndarray::{Array1, Array2};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::PyReadonlyArray2;
 #[cfg(feature = "python")]
+use numpy::PyUntypedArrayMethods;
+#[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;

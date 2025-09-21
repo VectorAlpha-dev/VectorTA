@@ -24,7 +24,7 @@
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::moving_averages::CudaVama;
+use crate::cuda::moving_averages::CudaVolumeAdjustedMa;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "python")]
@@ -1363,7 +1363,8 @@ pub fn volume_adjusted_ma_cuda_batch_dev_py(
     };
 
     let inner = py.allow_threads(|| {
-        let cuda = CudaVama::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda = CudaVolumeAdjustedMa::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.vama_batch_dev(prices, volumes, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
@@ -1373,7 +1374,7 @@ pub fn volume_adjusted_ma_cuda_batch_dev_py(
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "volume_adjusted_ma_cuda_many_series_one_param_dev")]
-#[pyo3(signature = (price_tm_f32, volume_tm_f32, length, vi_factor, strict=True, sample_period=0, device_id=0))]
+#[pyo3(signature = (price_tm_f32, volume_tm_f32, length, vi_factor, strict=true, sample_period=0, device_id=0))]
 pub fn volume_adjusted_ma_cuda_many_series_one_param_dev_py(
     py: Python<'_>,
     price_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
@@ -1413,7 +1414,8 @@ pub fn volume_adjusted_ma_cuda_many_series_one_param_dev_py(
     };
 
     let inner = py.allow_threads(|| {
-        let cuda = CudaVama::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda = CudaVolumeAdjustedMa::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.vama_multi_series_one_param_time_major_dev(
             price_slice,
             volume_slice,

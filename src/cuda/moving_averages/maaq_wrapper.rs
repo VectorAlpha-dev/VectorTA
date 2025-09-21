@@ -511,3 +511,24 @@ impl CudaMaaq {
         Ok(())
     }
 }
+
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::define_ma_period_benches;
+
+    define_ma_period_benches!(
+        maaq_benches,
+        CudaMaaq,
+        crate::indicators::moving_averages::maaq::MaaqBatchRange,
+        crate::indicators::moving_averages::maaq::MaaqParams,
+        maaq_batch_dev,
+        maaq_multi_series_one_param_time_major_dev,
+        crate::indicators::moving_averages::maaq::MaaqBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1), fast_period: (2, 2, 0), slow_period: (30, 30, 0) },
+        crate::indicators::moving_averages::maaq::MaaqParams { period: Some(64), fast_period: Some(2), slow_period: Some(30) },
+        "maaq",
+        "maaq"
+    );
+    pub use maaq_benches::bench_profiles;
+}

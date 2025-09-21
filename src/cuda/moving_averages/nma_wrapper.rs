@@ -468,3 +468,24 @@ impl CudaNma {
             .map_err(|e| CudaNmaError::Cuda(e.to_string()))
     }
 }
+
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::define_ma_period_benches;
+
+    define_ma_period_benches!(
+        nma_benches,
+        CudaNma,
+        crate::indicators::moving_averages::nma::NmaBatchRange,
+        crate::indicators::moving_averages::nma::NmaParams,
+        nma_batch_dev,
+        nma_multi_series_one_param_time_major_dev,
+        crate::indicators::moving_averages::nma::NmaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::nma::NmaParams { period: Some(64) },
+        "nma",
+        "nma"
+    );
+    pub use nma_benches::bench_profiles;
+}

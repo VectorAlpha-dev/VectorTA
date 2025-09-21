@@ -498,6 +498,27 @@ impl CudaJsa {
     }
 }
 
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::define_ma_period_benches;
+
+    define_ma_period_benches!(
+        jsa_benches,
+        CudaJsa,
+        crate::indicators::moving_averages::jsa::JsaBatchRange,
+        crate::indicators::moving_averages::jsa::JsaParams,
+        jsa_batch_dev,
+        jsa_many_series_one_param_time_major_dev,
+        crate::indicators::moving_averages::jsa::JsaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::jsa::JsaParams { period: Some(64) },
+        "jsa",
+        "jsa"
+    );
+    pub use jsa_benches::bench_profiles;
+}
+
 fn expand_periods(range: &JsaBatchRange) -> Vec<JsaParams> {
     let (start, end, step) = range.period;
     if start > end {

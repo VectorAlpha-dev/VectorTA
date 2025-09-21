@@ -580,6 +580,27 @@ impl CudaVama {
     }
 }
 
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::define_ma_period_benches;
+
+    define_ma_period_benches!(
+        vama_benches,
+        CudaVama,
+        crate::indicators::moving_averages::volatility_adjusted_ma::VamaBatchRange,
+        crate::indicators::moving_averages::volatility_adjusted_ma::VamaParams,
+        vama_batch_dev,
+        vama_many_series_one_param_time_major_dev,
+        crate::indicators::moving_averages::volatility_adjusted_ma::VamaBatchRange { base_period: (16, 16 + PARAM_SWEEP - 1, 1), vol_period: (51, 51, 0) },
+        crate::indicators::moving_averages::volatility_adjusted_ma::VamaParams { base_period: Some(64), vol_period: Some(51), smoothing: Some(false), smooth_type: Some(3), smooth_period: Some(5) },
+        "vama",
+        "vama"
+    );
+    pub use vama_benches::bench_profiles;
+}
+
 fn expand_vama_grid(range: &VamaBatchRange) -> Vec<VamaParams> {
     fn axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
         if step == 0 || start == end {

@@ -575,6 +575,114 @@ impl CudaMama {
     }
 }
 
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+    const MANY_SERIES_COLS: usize = 250;
+    const MANY_SERIES_LEN: usize = 1_000_000;
+
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let out_bytes = 2 * ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+    fn bytes_many_series_one_param() -> usize {
+        let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
+        let in_bytes = elems * std::mem::size_of::<f32>();
+        let out_bytes = 2 * elems * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    struct MamaBatchState {
+        cuda: CudaMama,
+        price: Vec<f32>,
+        sweep: MamaBatchRange,
+    }
+    impl CudaBenchState for MamaBatchState {
+        fn launch(&mut self) {
+            let _pair = self
+                .cuda
+                .mama_batch_dev(&self.price, &self.sweep)
+                .expect("mama batch launch");
+        }
+    }
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaMama::new(0).expect("cuda mama");
+        let price = gen_series(ONE_SERIES_LEN);
+        let sweep = MamaBatchRange {
+            fast_limit: (0.5, 0.5 + (PARAM_SWEEP as f64 - 1.0) * 0.001, 0.001),
+            slow_limit: (0.05, 0.05, 0.0),
+        };
+        Box::new(MamaBatchState { cuda, price, sweep })
+    }
+
+    struct MamaManyState {
+        cuda: CudaMama,
+        data_tm: Vec<f32>,
+        cols: usize,
+        rows: usize,
+        fast_limit: f32,
+        slow_limit: f32,
+    }
+    impl CudaBenchState for MamaManyState {
+        fn launch(&mut self) {
+            let _pair = self
+                .cuda
+                .mama_many_series_one_param_time_major_dev(
+                    &self.data_tm,
+                    self.cols,
+                    self.rows,
+                    self.fast_limit,
+                    self.slow_limit,
+                )
+                .expect("mama many-series launch");
+        }
+    }
+    fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
+        let cuda = CudaMama::new(0).expect("cuda mama");
+        let cols = MANY_SERIES_COLS;
+        let rows = MANY_SERIES_LEN;
+        let data_tm = gen_time_major_prices(cols, rows);
+        Box::new(MamaManyState {
+            cuda,
+            data_tm,
+            cols,
+            rows,
+            fast_limit: 0.5,
+            slow_limit: 0.05,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new(
+                "mama",
+                "one_series_many_params",
+                "mama_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new(
+                "mama",
+                "many_series_one_param",
+                "mama_cuda_many_series_one_param",
+                "250x1m",
+                prep_many_series_one_param,
+            )
+            .with_sample_size(5)
+            .with_mem_required(bytes_many_series_one_param()),
+        ]
+    }
+}
+
 struct BatchInputs {
     combos: Vec<MamaParams>,
     fast_limits: Vec<f32>,

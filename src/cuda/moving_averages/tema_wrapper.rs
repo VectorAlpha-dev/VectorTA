@@ -515,6 +515,24 @@ impl CudaTema {
     }
 }
 
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::define_ma_period_benches_batch_only;
+
+    define_ma_period_benches_batch_only!(
+        tema_benches,
+        CudaTema,
+        crate::indicators::moving_averages::tema::TemaBatchRange,
+        tema_batch_dev,
+        crate::indicators::moving_averages::tema::TemaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        "tema",
+        "tema"
+    );
+    pub use tema_benches::bench_profiles;
+}
+
 struct BatchInputs {
     combos: Vec<TemaParams>,
     periods: Vec<i32>,

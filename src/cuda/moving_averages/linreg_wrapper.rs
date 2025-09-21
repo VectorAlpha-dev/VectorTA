@@ -507,3 +507,24 @@ impl CudaLinreg {
             .map_err(|e| CudaLinregError::Cuda(e.to_string()))
     }
 }
+
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::define_ma_period_benches;
+
+    define_ma_period_benches!(
+        linreg_benches,
+        CudaLinreg,
+        crate::indicators::moving_averages::linreg::LinRegBatchRange,
+        crate::indicators::moving_averages::linreg::LinRegParams,
+        linreg_batch_dev,
+        linreg_multi_series_one_param_time_major_dev,
+        crate::indicators::moving_averages::linreg::LinRegBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::linreg::LinRegParams { period: Some(64) },
+        "linreg",
+        "linreg"
+    );
+    pub use linreg_benches::bench_profiles;
+}

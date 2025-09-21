@@ -580,6 +580,27 @@ impl CudaGaussian {
     }
 }
 
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::define_ma_period_benches;
+
+    define_ma_period_benches!(
+        gaussian_benches,
+        CudaGaussian,
+        crate::indicators::moving_averages::gaussian::GaussianBatchRange,
+        crate::indicators::moving_averages::gaussian::GaussianParams,
+        gaussian_batch_dev,
+        gaussian_many_series_one_param_time_major_dev,
+        crate::indicators::moving_averages::gaussian::GaussianBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1), poles: (4, 4, 0) },
+        crate::indicators::moving_averages::gaussian::GaussianParams { period: Some(64), poles: Some(4) },
+        "gaussian",
+        "gaussian"
+    );
+    pub use gaussian_benches::bench_profiles;
+}
+
 struct BatchInputs {
     combos: Vec<GaussianParams>,
     periods: Vec<i32>,

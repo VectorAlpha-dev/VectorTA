@@ -464,3 +464,24 @@ impl CudaSwma {
         Ok(())
     }
 }
+
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::define_ma_period_benches;
+
+    define_ma_period_benches!(
+        swma_benches,
+        CudaSwma,
+        crate::indicators::moving_averages::swma::SwmaBatchRange,
+        crate::indicators::moving_averages::swma::SwmaParams,
+        swma_batch_dev,
+        swma_multi_series_one_param_time_major_dev,
+        crate::indicators::moving_averages::swma::SwmaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::swma::SwmaParams { period: Some(64) },
+        "swma",
+        "swma"
+    );
+    pub use swma_benches::bench_profiles;
+}

@@ -40,6 +40,8 @@ use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
 use numpy;
 #[cfg(feature = "python")]
+use numpy::PyUntypedArrayMethods;
+#[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use pyo3::prelude::*;

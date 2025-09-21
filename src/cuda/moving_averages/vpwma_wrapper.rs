@@ -516,3 +516,24 @@ impl CudaVpwma {
             .map_err(|e| CudaVpwmaError::Cuda(e.to_string()))
     }
 }
+
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::define_ma_period_benches;
+
+    define_ma_period_benches!(
+        vpwma_benches,
+        CudaVpwma,
+        crate::indicators::moving_averages::vpwma::VpwmaBatchRange,
+        crate::indicators::moving_averages::vpwma::VpwmaParams,
+        vpwma_batch_dev,
+        vpwma_multi_series_one_param_time_major_dev,
+        crate::indicators::moving_averages::vpwma::VpwmaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1), power: (2.0, 2.0, 0.0) },
+        crate::indicators::moving_averages::vpwma::VpwmaParams { period: Some(64), power: Some(2.0) },
+        "vpwma",
+        "vpwma"
+    );
+    pub use vpwma_benches::bench_profiles;
+}

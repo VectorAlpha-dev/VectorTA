@@ -154,3 +154,72 @@ impl CudaWclprice {
         Ok(())
     }
 }
+
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::cuda::bench::helpers::gen_series;
+
+    const ONE_SERIES_LEN: usize = 1_000_000;
+
+    fn bytes_one_series() -> usize {
+        // 3 inputs (H/L/C) + 1 output
+        let in_bytes = 3 * ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let out_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 32 * 1024 * 1024
+    }
+
+    fn synth_hlc_from_close(close: &[f32]) -> (Vec<f32>, Vec<f32>) {
+        let mut high = close.to_vec();
+        let mut low = close.to_vec();
+        for i in 0..close.len() {
+            let v = close[i];
+            if v.is_nan() {
+                continue;
+            }
+            let x = i as f32 * 0.0025;
+            let off = (0.002 * x.sin()).abs() + 0.15;
+            high[i] = v + off;
+            low[i] = v - off;
+        }
+        (high, low)
+    }
+
+    struct WclState {
+        cuda: CudaWclprice,
+        high: Vec<f32>,
+        low: Vec<f32>,
+        close: Vec<f32>,
+    }
+    impl CudaBenchState for WclState {
+        fn launch(&mut self) {
+            let _ = self
+                .cuda
+                .wclprice_dev(&self.high, &self.low, &self.close)
+                .expect("wclprice kernel");
+        }
+    }
+
+    fn prep_one_series() -> Box<dyn CudaBenchState> {
+        let cuda = CudaWclprice::new(0).expect("cuda wclprice");
+        let close = gen_series(ONE_SERIES_LEN);
+        let (high, low) = synth_hlc_from_close(&close);
+        Box::new(WclState { cuda, high, low, close })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new(
+                "wclprice",
+                "one_series",
+                "wclprice_cuda_series",
+                "1m",
+                prep_one_series,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series()),
+        ]
+    }
+}

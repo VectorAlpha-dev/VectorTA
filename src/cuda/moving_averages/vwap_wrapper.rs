@@ -488,3 +488,86 @@ impl CudaVwap {
             .map_err(|e| CudaVwapError::Cuda(e.to_string()))
     }
 }
+
+// ---------- Bench profiles (batch only) ----------
+
+pub mod benches {
+    use super::*;
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+
+    fn bytes_one_series_many_params() -> usize {
+        // timestamps (i64), prices (f64), volumes (f64), outputs PARAM_SWEEP × f32
+        let in_bytes = ONE_SERIES_LEN * (std::mem::size_of::<i64>() + 2 * std::mem::size_of::<f64>());
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    fn synth_vwap_inputs(len: usize) -> (Vec<i64>, Vec<f64>, Vec<f64>) {
+        // Monotonic timestamps in ms (1 minute step)
+        let mut ts = vec![0i64; len];
+        for i in 0..len {
+            ts[i] = (i as i64) * 60_000;
+        }
+        // Price series (f64)
+        let mut prices = vec![f64::NAN; len];
+        for i in 3..len {
+            let x = i as f64;
+            prices[i] = (x * 0.001).sin() + 0.0001 * x;
+        }
+        // Volumes positive (f64)
+        let mut vols = vec![f64::NAN; len];
+        for i in 5..len {
+            let x = i as f64 * 0.007;
+            vols[i] = (x.cos().abs() + 1.2) * 950.0;
+        }
+        (ts, vols, prices)
+    }
+
+    struct VwapBatchState {
+        cuda: CudaVwap,
+        ts: Vec<i64>,
+        vol: Vec<f64>,
+        price: Vec<f64>,
+        sweep: VwapBatchRange,
+    }
+    impl CudaBenchState for VwapBatchState {
+        fn launch(&mut self) {
+            let _ = self
+                .cuda
+                .vwap_batch_dev(&self.ts, &self.vol, &self.price, &self.sweep)
+                .expect("vwap batch launch");
+        }
+    }
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaVwap::new(0).expect("cuda vwap");
+        let (ts, vol, price) = synth_vwap_inputs(ONE_SERIES_LEN);
+        // Anchor sweep: 1d..=250d step 1
+        let sweep = VwapBatchRange {
+            anchor: ("1d".to_string(), "250d".to_string(), 1),
+        };
+        Box::new(VwapBatchState {
+            cuda,
+            ts,
+            vol,
+            price,
+            sweep,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new(
+                "vwap",
+                "one_series_many_params",
+                "vwap_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+        ]
+    }
+}

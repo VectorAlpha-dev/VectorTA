@@ -11,7 +11,7 @@ use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
 use my_project::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::moving_averages::CudaVama;
+use my_project::cuda::moving_averages::CudaVolumeAdjustedMa;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -54,7 +54,7 @@ fn volume_adjusted_ma_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error:
 
     let cpu = VolumeAdjustedMa_batch_with_kernel(&prices, &volumes, &sweep, Kernel::ScalarBatch)?;
 
-    let cuda = CudaVama::new(0).map_err(|e| Box::<dyn std::error::Error>::from(e))?;
+    let cuda = CudaVolumeAdjustedMa::new(0).map_err(|e| Box::<dyn std::error::Error>::from(e))?;
     let prices_f32: Vec<f32> = prices.iter().map(|&v| v as f32).collect();
     let volumes_f32: Vec<f32> = volumes.iter().map(|&v| v as f32).collect();
     let gpu_handle = cuda
@@ -115,7 +115,7 @@ fn volume_adjusted_ma_cuda_batch_strict_only_matches_cpu() -> Result<(), Box<dyn
 
     let cpu = VolumeAdjustedMa_batch_with_kernel(&prices, &volumes, &sweep, Kernel::ScalarBatch)?;
 
-    let cuda = CudaVama::new(0).map_err(|e| Box::<dyn std::error::Error>::from(e))?;
+    let cuda = CudaVolumeAdjustedMa::new(0).map_err(|e| Box::<dyn std::error::Error>::from(e))?;
     let prices_f32: Vec<f32> = prices.iter().map(|&v| v as f32).collect();
     let volumes_f32: Vec<f32> = volumes.iter().map(|&v| v as f32).collect();
     let gpu_handle = cuda
@@ -197,7 +197,7 @@ fn volume_adjusted_ma_cuda_many_series_one_param_matches_cpu(
         }
     }
 
-    let cuda = CudaVama::new(0).map_err(|e| Box::<dyn std::error::Error>::from(e))?;
+    let cuda = CudaVolumeAdjustedMa::new(0).map_err(|e| Box::<dyn std::error::Error>::from(e))?;
     let price_tm_f32: Vec<f32> = prices_tm.iter().map(|&v| v as f32).collect();
     let volume_tm_f32: Vec<f32> = volume_tm.iter().map(|&v| v as f32).collect();
     let params = VolumeAdjustedMaParams {

@@ -474,3 +474,24 @@ impl CudaMwdx {
         })
     }
 }
+
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::define_ma_period_benches;
+
+    define_ma_period_benches!(
+        mwdx_benches,
+        CudaMwdx,
+        crate::indicators::moving_averages::mwdx::MwdxBatchRange,
+        crate::indicators::moving_averages::mwdx::MwdxParams,
+        mwdx_batch_dev,
+        mwdx_many_series_one_param_time_major_dev,
+        crate::indicators::moving_averages::mwdx::MwdxBatchRange { factor: (0.05, 0.05 + (PARAM_SWEEP as f64 - 1.0) * 0.001, 0.001) },
+        crate::indicators::moving_averages::mwdx::MwdxParams { factor: Some(0.2) },
+        "mwdx",
+        "mwdx"
+    );
+    pub use mwdx_benches::bench_profiles;
+}

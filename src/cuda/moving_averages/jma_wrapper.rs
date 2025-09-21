@@ -613,6 +613,27 @@ impl CudaJma {
     }
 }
 
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::define_ma_period_benches;
+
+    define_ma_period_benches!(
+        jma_benches,
+        CudaJma,
+        crate::indicators::moving_averages::jma::JmaBatchRange,
+        crate::indicators::moving_averages::jma::JmaParams,
+        jma_batch_dev,
+        jma_many_series_one_param_time_major_dev,
+        crate::indicators::moving_averages::jma::JmaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1), phase: (50.0, 50.0, 0.0), power: (2, 2, 0) },
+        crate::indicators::moving_averages::jma::JmaParams { period: Some(64), phase: Some(50.0), power: Some(2) },
+        "jma",
+        "jma"
+    );
+    pub use jma_benches::bench_profiles;
+}
+
 struct BatchInputs {
     combos: Vec<JmaParams>,
     alphas: Vec<f32>,

@@ -464,7 +464,7 @@ impl CudaFwma {
             rows,
             cols,
         })
-    }
+}
 
     pub fn fwma_multi_series_one_param_time_major_into_host_f32(
         &self,
@@ -512,4 +512,25 @@ impl CudaFwma {
 
         Ok(())
     }
+}
+
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::define_ma_period_benches;
+
+    define_ma_period_benches!(
+        fwma_benches,
+        CudaFwma,
+        crate::indicators::moving_averages::fwma::FwmaBatchRange,
+        crate::indicators::moving_averages::fwma::FwmaParams,
+        fwma_batch_dev,
+        fwma_multi_series_one_param_time_major_dev,
+        crate::indicators::moving_averages::fwma::FwmaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::fwma::FwmaParams { period: Some(64) },
+        "fwma",
+        "fwma"
+    );
+    pub use fwma_benches::bench_profiles;
 }

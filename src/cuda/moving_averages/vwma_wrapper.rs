@@ -601,6 +601,124 @@ impl CudaVwma {
     }
 }
 
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices, gen_time_major_volumes};
+
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+    const MANY_SERIES_COLS: usize = 250;
+    const MANY_SERIES_LEN: usize = 1_000_000;
+
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = 2 * ONE_SERIES_LEN * std::mem::size_of::<f32>(); // price + volume
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+    fn bytes_many_series_one_param() -> usize {
+        let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
+        let in_bytes = 2 * elems * std::mem::size_of::<f32>();
+        let out_bytes = elems * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    struct VwmaBatchState {
+        cuda: CudaVwma,
+        price: Vec<f32>,
+        volume: Vec<f32>,
+        sweep: VwmaBatchRange,
+    }
+    impl CudaBenchState for VwmaBatchState {
+        fn launch(&mut self) {
+            let _ = self
+                .cuda
+                .vwma_batch_dev(&self.price, &self.volume, &self.sweep)
+                .expect("vwma batch launch");
+        }
+    }
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaVwma::new(0).expect("cuda vwma");
+        let price = gen_series(ONE_SERIES_LEN);
+        let volume = gen_series(ONE_SERIES_LEN)
+            .into_iter()
+            .map(|v| if v.is_nan() { v } else { (v.abs() + 1.0) * 500.0 })
+            .collect::<Vec<f32>>();
+        let sweep = VwmaBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1),
+        };
+        Box::new(VwmaBatchState {
+            cuda,
+            price,
+            volume,
+            sweep,
+        })
+    }
+
+    struct VwmaManyState {
+        cuda: CudaVwma,
+        price_tm: Vec<f32>,
+        vol_tm: Vec<f32>,
+        cols: usize,
+        rows: usize,
+        period: usize,
+    }
+    impl CudaBenchState for VwmaManyState {
+        fn launch(&mut self) {
+            let _ = self
+                .cuda
+                .vwma_many_series_one_param_time_major_dev(
+                    &self.price_tm,
+                    &self.vol_tm,
+                    self.cols,
+                    self.rows,
+                    self.period,
+                )
+                .expect("vwma many-series launch");
+        }
+    }
+    fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
+        let cuda = CudaVwma::new(0).expect("cuda vwma");
+        let cols = MANY_SERIES_COLS;
+        let rows = MANY_SERIES_LEN;
+        let price_tm = gen_time_major_prices(cols, rows);
+        let vol_tm = gen_time_major_volumes(cols, rows);
+        Box::new(VwmaManyState {
+            cuda,
+            price_tm,
+            vol_tm,
+            cols,
+            rows,
+            period: 64,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new(
+                "vwma",
+                "one_series_many_params",
+                "vwma_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new(
+                "vwma",
+                "many_series_one_param",
+                "vwma_cuda_many_series_one_param",
+                "250x1m",
+                prep_many_series_one_param,
+            )
+            .with_sample_size(5)
+            .with_mem_required(bytes_many_series_one_param()),
+        ]
+    }
+}
+
 struct BatchInputs {
     combos: Vec<VwmaParams>,
     periods: Vec<i32>,

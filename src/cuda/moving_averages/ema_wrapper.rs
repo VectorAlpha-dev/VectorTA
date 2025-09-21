@@ -493,6 +493,27 @@ impl CudaEma {
     }
 }
 
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::define_ma_period_benches;
+
+    define_ma_period_benches!(
+        ema_benches,
+        CudaEma,
+        crate::indicators::moving_averages::ema::EmaBatchRange,
+        crate::indicators::moving_averages::ema::EmaParams,
+        ema_batch_dev,
+        ema_many_series_one_param_time_major_dev,
+        crate::indicators::moving_averages::ema::EmaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::ema::EmaParams { period: Some(64) },
+        "ema",
+        "ema"
+    );
+    pub use ema_benches::bench_profiles;
+}
+
 fn expand_grid(range: &EmaBatchRange) -> Vec<EmaParams> {
     fn axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
         if step == 0 || start == end {

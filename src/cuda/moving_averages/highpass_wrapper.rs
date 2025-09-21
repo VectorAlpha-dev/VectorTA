@@ -472,3 +472,24 @@ impl CudaHighpass {
         )
     }
 }
+
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::define_ma_period_benches;
+
+    define_ma_period_benches!(
+        highpass_benches,
+        CudaHighpass,
+        crate::indicators::moving_averages::highpass::HighPassBatchRange,
+        crate::indicators::moving_averages::highpass::HighPassParams,
+        highpass_batch_dev,
+        highpass_many_series_one_param_time_major_dev,
+        crate::indicators::moving_averages::highpass::HighPassBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::highpass::HighPassParams { period: Some(64) },
+        "highpass",
+        "highpass"
+    );
+    pub use highpass_benches::bench_profiles;
+}

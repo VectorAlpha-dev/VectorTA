@@ -597,3 +597,24 @@ impl CudaEpma {
         )
     }
 }
+
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::define_ma_period_benches;
+
+    define_ma_period_benches!(
+        epma_benches,
+        CudaEpma,
+        crate::indicators::moving_averages::epma::EpmaBatchRange,
+        crate::indicators::moving_averages::epma::EpmaParams,
+        epma_batch_dev,
+        epma_many_series_one_param_time_major_dev,
+        crate::indicators::moving_averages::epma::EpmaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1), offset: (4, 4, 0) },
+        crate::indicators::moving_averages::epma::EpmaParams { period: Some(64), offset: Some(4) },
+        "epma",
+        "epma"
+    );
+    pub use epma_benches::bench_profiles;
+}

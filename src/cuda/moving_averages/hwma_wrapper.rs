@@ -422,3 +422,24 @@ impl CudaHwma {
         })
     }
 }
+
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::define_ma_period_benches;
+
+    define_ma_period_benches!(
+        hwma_benches,
+        CudaHwma,
+        crate::indicators::moving_averages::hwma::HwmaBatchRange,
+        crate::indicators::moving_averages::hwma::HwmaParams,
+        hwma_batch_dev,
+        hwma_multi_series_one_param_time_major_dev,
+        crate::indicators::moving_averages::hwma::HwmaBatchRange { na: (0.05, 0.05 + (PARAM_SWEEP as f64 - 1.0) * 0.001, 0.001), nb: (0.1, 0.1, 0.0), nc: (0.1, 0.1, 0.0) },
+        crate::indicators::moving_averages::hwma::HwmaParams { na: Some(0.2), nb: Some(0.1), nc: Some(0.1) },
+        "hwma",
+        "hwma"
+    );
+    pub use hwma_benches::bench_profiles;
+}

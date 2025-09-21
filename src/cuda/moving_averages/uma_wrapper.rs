@@ -763,6 +763,121 @@ impl CudaUma {
     }
 }
 
+// ---------- Bench profiles (custom; UMA needs volume option) ----------
+
+pub mod benches {
+    use super::*;
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+    const MANY_SERIES_COLS: usize = 250;
+    const MANY_SERIES_LEN: usize = 1_000_000;
+
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+    fn bytes_many_series_one_param() -> usize {
+        let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
+        let in_bytes = elems * std::mem::size_of::<f32>();
+        let out_bytes = elems * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    struct UmaBatchState {
+        cuda: CudaUma,
+        price: Vec<f32>,
+        sweep: UmaBatchRange,
+    }
+    impl CudaBenchState for UmaBatchState {
+        fn launch(&mut self) {
+            let _ = self
+                .cuda
+                .uma_batch_dev(&self.price, None, &self.sweep)
+                .expect("launch uma batch");
+        }
+    }
+    fn prep_uma_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaUma::new(0).expect("cuda uma");
+        let price = gen_series(ONE_SERIES_LEN);
+        // Build 250-combo sweep by varying max_length, holding others constant.
+        let sweep = UmaBatchRange {
+            accelerator: (1.0, 1.0, 0.0),
+            min_length: (5, 5, 0),
+            max_length: (16, 16 + PARAM_SWEEP - 1, 1),
+            smooth_length: (4, 4, 0),
+        };
+        Box::new(UmaBatchState { cuda, price, sweep })
+    }
+
+    struct UmaManyState {
+        cuda: CudaUma,
+        data_tm: Vec<f32>,
+        cols: usize,
+        rows: usize,
+        params: UmaParams,
+    }
+    impl CudaBenchState for UmaManyState {
+        fn launch(&mut self) {
+            let _ = self
+                .cuda
+                .uma_many_series_one_param_time_major_dev(
+                    &self.data_tm,
+                    None,
+                    self.cols,
+                    self.rows,
+                    &self.params,
+                )
+                .expect("launch uma many-series");
+        }
+    }
+    fn prep_uma_many_series_one_param() -> Box<dyn CudaBenchState> {
+        let cuda = CudaUma::new(0).expect("cuda uma");
+        let cols = MANY_SERIES_COLS;
+        let rows = MANY_SERIES_LEN;
+        let data_tm = gen_time_major_prices(cols, rows);
+        let params = UmaParams {
+            accelerator: Some(1.0),
+            min_length: Some(5),
+            max_length: Some(64),
+            smooth_length: Some(4),
+        };
+        Box::new(UmaManyState {
+            cuda,
+            data_tm,
+            cols,
+            rows,
+            params,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new(
+                "uma",
+                "one_series_many_params",
+                "uma_cuda_batch_dev",
+                "1m_x_250",
+                prep_uma_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new(
+                "uma",
+                "many_series_one_param",
+                "uma_cuda_many_series_one_param",
+                "250x1m",
+                prep_uma_many_series_one_param,
+            )
+            .with_sample_size(5)
+            .with_mem_required(bytes_many_series_one_param()),
+        ]
+    }
+}
+
 struct BatchInputs {
     combos: Vec<UmaParams>,
     accelerators: Vec<f32>,

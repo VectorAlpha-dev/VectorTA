@@ -462,3 +462,60 @@ impl CudaWavetrend {
         combos
     }
 }
+
+// ---------- Bench profiles (batch only) ----------
+
+pub mod benches {
+    use super::*;
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::cuda::bench::helpers::gen_series;
+
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        // 3 outputs
+        let out_bytes = 3 * ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    struct WtBatchState {
+        cuda: CudaWavetrend,
+        price: Vec<f32>,
+        sweep: WavetrendBatchRange,
+    }
+    impl CudaBenchState for WtBatchState {
+        fn launch(&mut self) {
+            let _ = self
+                .cuda
+                .wavetrend_batch_dev(&self.price, &self.sweep)
+                .expect("wavetrend batch");
+        }
+    }
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaWavetrend::new(0).expect("cuda wavetrend");
+        let price = gen_series(ONE_SERIES_LEN);
+        let sweep = WavetrendBatchRange {
+            channel_length: (10, 10 + PARAM_SWEEP - 1, 1),
+            average_length: (21, 21, 0),
+            ma_length: (4, 4, 0),
+            factor: (0.015, 0.015, 0.0),
+        };
+        Box::new(WtBatchState { cuda, price, sweep })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new(
+                "wavetrend",
+                "one_series_many_params",
+                "wavetrend_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+        ]
+    }
+}
