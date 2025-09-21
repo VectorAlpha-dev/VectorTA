@@ -40,10 +40,16 @@
 //! assert_eq!(output.trigger.len(), data.len());
 //! ```
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::{cuda_available, moving_averages::CudaEhlersPma};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use numpy::{PyReadonlyArray2, PyUntypedArrayMethods};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
@@ -90,6 +96,31 @@ impl Default for EhlersPmaParams {
     fn default() -> Self {
         Self
     }
+}
+
+/// Dummy sweep descriptor used for CUDA/API parity with other moving averages.
+///
+/// `EhlersPma` has fixed coefficients, so `combos` controls how many identical
+/// rows are produced when exercising the batch CUDA kernel (mirroring ALMA's
+/// "one series × many params" surface).
+#[derive(Debug, Clone)]
+pub struct EhlersPmaBatchRange {
+    pub combos: usize,
+}
+
+impl Default for EhlersPmaBatchRange {
+    #[inline]
+    fn default() -> Self {
+        Self { combos: 1 }
+    }
+}
+
+#[inline]
+pub fn expand_grid(range: &EhlersPmaBatchRange) -> Vec<EhlersPmaParams> {
+    let count = range.combos.max(1);
+    core::iter::repeat(EhlersPmaParams::default())
+        .take(count)
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -855,6 +886,84 @@ pub fn ehlers_pma_batch_py<'py>(
     kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
     ehlers_pma_flat_py(py, data, kernel)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "ehlers_pma_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, period_range=(0,0,0), offset_range=(0.0,0.0,0.0), sigma_range=(0.0,0.0,0.0), device_id=0))]
+pub fn ehlers_pma_cuda_batch_dev_py(
+    py: Python<'_>,
+    data_f32: PyReadonlyArray1<'_, f32>,
+    period_range: (usize, usize, usize),
+    offset_range: (f64, f64, f64),
+    sigma_range: (f64, f64, f64),
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
+    let _ = offset_range;
+    let _ = sigma_range;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let slice_in = data_f32.as_slice()?;
+    let combos = if period_range.2 == 0 || period_range.0 == period_range.1 {
+        1
+    } else if period_range.1 < period_range.0 {
+        0
+    } else {
+        ((period_range.1 - period_range.0) / period_range.2).saturating_add(1)
+    };
+    if combos == 0 {
+        return Err(PyValueError::new_err("invalid period sweep for ehlers_pma"));
+    }
+
+    let sweep = EhlersPmaBatchRange { combos };
+    let pair = py.allow_threads(|| {
+        let cuda =
+            CudaEhlersPma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.ehlers_pma_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    let crate::cuda::moving_averages::DeviceEhlersPmaPair { predict, trigger } = pair;
+    Ok((
+        DeviceArrayF32Py { inner: predict },
+        DeviceArrayF32Py { inner: trigger },
+    ))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "ehlers_pma_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, device_id=0))]
+pub fn ehlers_pma_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm_f32: PyReadonlyArray2<'_, f32>,
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let shape = data_tm_f32.shape();
+    if shape.len() != 2 {
+        return Err(PyValueError::new_err("expected time-major 2D array"));
+    }
+    let rows = shape[0];
+    let cols = shape[1];
+    let flat = data_tm_f32.as_slice()?;
+
+    let pair = py.allow_threads(|| {
+        let cuda =
+            CudaEhlersPma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.ehlers_pma_many_series_one_param_time_major_dev(flat, cols, rows)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    let crate::cuda::moving_averages::DeviceEhlersPmaPair { predict, trigger } = pair;
+    Ok((
+        DeviceArrayF32Py { inner: predict },
+        DeviceArrayF32Py { inner: trigger },
+    ))
 }
 
 #[cfg(feature = "python")]

@@ -19,8 +19,14 @@
 //! - **Memory optimization**: Uses zero-copy helpers (alloc_with_nan_prefix)
 //! - **Optimization needed**: Implement SIMD kernels and optimize streaming to O(1)
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::CudaUma;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "python")]
-use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
+use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1, PyReadonlyArray2};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
@@ -1165,6 +1171,93 @@ pub fn uma_batch_py<'py>(
     dict.set_item("combos", combo_list)?;
 
     Ok(dict.into())
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "uma_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, accelerator_range, min_length_range, max_length_range, smooth_length_range, volume_f32=None, device_id=0))]
+pub fn uma_cuda_batch_dev_py(
+    py: Python<'_>,
+    data_f32: numpy::PyReadonlyArray1<'_, f32>,
+    accelerator_range: (f64, f64, f64),
+    min_length_range: (usize, usize, usize),
+    max_length_range: (usize, usize, usize),
+    smooth_length_range: (usize, usize, usize),
+    volume_f32: Option<numpy::PyReadonlyArray1<'_, f32>>,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let slice_in = data_f32.as_slice()?;
+    let volume_slice = volume_f32.as_ref().map(|v| v.as_slice()).transpose()?;
+    let sweep = UmaBatchRange {
+        accelerator: accelerator_range,
+        min_length: min_length_range,
+        max_length: max_length_range,
+        smooth_length: smooth_length_range,
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaUma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.uma_batch_dev(slice_in, volume_slice, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "uma_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (prices_tm_f32, accelerator, min_length, max_length, smooth_length, volume_tm_f32=None, device_id=0))]
+pub fn uma_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    prices_tm_f32: PyReadonlyArray2<'_, f32>,
+    accelerator: f64,
+    min_length: usize,
+    max_length: usize,
+    smooth_length: usize,
+    volume_tm_f32: Option<PyReadonlyArray2<'_, f32>>,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    use numpy::PyUntypedArrayMethods;
+
+    let rows = prices_tm_f32.shape()[0];
+    let cols = prices_tm_f32.shape()[1];
+    if let Some(vol) = &volume_tm_f32 {
+        let vshape = vol.shape();
+        if vshape != prices_tm_f32.shape() {
+            return Err(PyValueError::new_err(
+                "price and volume matrices must share shape",
+            ));
+        }
+    }
+
+    let prices_flat = prices_tm_f32.as_slice()?;
+    let volume_flat = volume_tm_f32
+        .as_ref()
+        .map(|arr| arr.as_slice())
+        .transpose()?;
+
+    let params = UmaParams {
+        accelerator: Some(accelerator),
+        min_length: Some(min_length),
+        max_length: Some(max_length),
+        smooth_length: Some(smooth_length),
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaUma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.uma_many_series_one_param_time_major_dev(prices_flat, volume_flat, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
 }
 
 // ==================== WASM BINDINGS ====================

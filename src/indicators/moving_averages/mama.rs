@@ -2419,7 +2419,15 @@ mod tests {
 #[cfg(feature = "python")]
 mod python_bindings {
     use super::*;
+    #[cfg(feature = "cuda")]
+    use crate::cuda::cuda_available;
+    #[cfg(feature = "cuda")]
+    use crate::cuda::moving_averages::{CudaMama, DeviceMamaPair};
+    #[cfg(feature = "cuda")]
+    use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
     use crate::utilities::kernel_validation::validate_kernel;
+    #[cfg(feature = "cuda")]
+    use numpy::PyReadonlyArray2;
     use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1};
     use pyo3::exceptions::PyValueError;
     use pyo3::prelude::*;
@@ -2528,6 +2536,81 @@ mod python_bindings {
         Ok(dict)
     }
 
+    #[cfg(feature = "cuda")]
+    #[pyfunction(name = "mama_cuda_batch_dev")]
+    #[pyo3(signature = (data_f32, fast_limit_range, slow_limit_range, device_id=0))]
+    pub fn mama_cuda_batch_dev_py(
+        py: Python<'_>,
+        data_f32: PyReadonlyArray1<'_, f32>,
+        fast_limit_range: (f64, f64, f64),
+        slow_limit_range: (f64, f64, f64),
+        device_id: usize,
+    ) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
+        if !cuda_available() {
+            return Err(PyValueError::new_err("CUDA not available"));
+        }
+
+        let slice_in = data_f32.as_slice()?;
+        let sweep = MamaBatchRange {
+            fast_limit: fast_limit_range,
+            slow_limit: slow_limit_range,
+        };
+
+        let pair = py.allow_threads(|| {
+            let cuda =
+                CudaMama::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+            cuda.mama_batch_dev(slice_in, &sweep)
+                .map_err(|e| PyValueError::new_err(e.to_string()))
+        })?;
+
+        let DeviceMamaPair { mama, fama } = pair;
+        Ok((
+            DeviceArrayF32Py { inner: mama },
+            DeviceArrayF32Py { inner: fama },
+        ))
+    }
+
+    #[cfg(feature = "cuda")]
+    #[pyfunction(name = "mama_cuda_many_series_one_param_dev")]
+    #[pyo3(signature = (data_tm_f32, fast_limit, slow_limit, device_id=0))]
+    pub fn mama_cuda_many_series_one_param_dev_py(
+        py: Python<'_>,
+        data_tm_f32: PyReadonlyArray2<'_, f32>,
+        fast_limit: f64,
+        slow_limit: f64,
+        device_id: usize,
+    ) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
+        use numpy::PyUntypedArrayMethods;
+
+        if !cuda_available() {
+            return Err(PyValueError::new_err("CUDA not available"));
+        }
+
+        let shape = data_tm_f32.shape();
+        if shape.len() != 2 {
+            return Err(PyValueError::new_err("expected 2D array"));
+        }
+        let rows = shape[0];
+        let cols = shape[1];
+        let flat = data_tm_f32.as_slice()?;
+
+        let fast = fast_limit as f32;
+        let slow = slow_limit as f32;
+
+        let pair = py.allow_threads(|| {
+            let cuda =
+                CudaMama::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+            cuda.mama_many_series_one_param_time_major_dev(flat, cols, rows, fast, slow)
+                .map_err(|e| PyValueError::new_err(e.to_string()))
+        })?;
+
+        let DeviceMamaPair { mama, fama } = pair;
+        Ok((
+            DeviceArrayF32Py { inner: mama },
+            DeviceArrayF32Py { inner: fama },
+        ))
+    }
+
     #[pyclass]
     #[pyo3(name = "MamaStream")]
     pub struct MamaStreamPy {
@@ -2556,6 +2639,8 @@ mod python_bindings {
 // Re-export Python bindings at module level
 #[cfg(feature = "python")]
 pub use python_bindings::{mama_batch_py, mama_py, MamaStreamPy};
+#[cfg(all(feature = "python", feature = "cuda"))]
+pub use python_bindings::{mama_cuda_batch_dev_py, mama_cuda_many_series_one_param_dev_py};
 
 // WASM bindings
 #[cfg(feature = "wasm")]

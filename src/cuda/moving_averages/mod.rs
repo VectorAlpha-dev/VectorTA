@@ -1,5 +1,15 @@
 #[cfg(feature = "cuda")]
 pub mod alma_wrapper;
+pub mod dma_wrapper;
+pub mod ehlers_pma_wrapper;
+pub mod gaussian_wrapper;
+pub mod jma_wrapper;
+pub mod mama_wrapper;
+pub mod reflex_wrapper;
+pub mod sqwma_wrapper;
+pub mod tema_wrapper;
+pub mod uma_wrapper;
+pub mod vwma_wrapper;
 #[cfg(feature = "cuda")]
 pub mod dema_wrapper;
 #[cfg(feature = "cuda")]
@@ -57,6 +67,16 @@ pub mod vpwma_wrapper;
 pub mod zlema_wrapper;
 
 pub use alma_wrapper::{CudaAlma, DeviceArrayF32};
+pub use dma_wrapper::CudaDma;
+pub use ehlers_pma_wrapper::{CudaEhlersPma, DeviceEhlersPmaPair};
+pub use gaussian_wrapper::CudaGaussian;
+pub use jma_wrapper::CudaJma;
+pub use mama_wrapper::{CudaMama, DeviceMamaPair};
+pub use reflex_wrapper::CudaReflex;
+pub use sqwma_wrapper::CudaSqwma;
+pub use tema_wrapper::CudaTema;
+pub use uma_wrapper::CudaUma;
+pub use vwma_wrapper::CudaVwma;
 #[cfg(feature = "cuda")]
 pub use dema_wrapper::{CudaDema, CudaDemaError};
 #[cfg(feature = "cuda")]

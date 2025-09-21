@@ -25,6 +25,12 @@
 //!   - Consider SIMD for price*volume multiplication and summation
 //!   - Optimize sliding window updates with vector operations
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::CudaVwma;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
@@ -1555,6 +1561,80 @@ pub fn vwma_batch_py<'py>(
             .into_pyarray(py),
     )?;
     Ok(dict.into())
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "vwma_cuda_batch_dev")]
+#[pyo3(signature = (prices_f32, volumes_f32, period_range, device_id=0))]
+pub fn vwma_cuda_batch_dev_py(
+    py: Python<'_>,
+    prices_f32: numpy::PyReadonlyArray1<'_, f32>,
+    volumes_f32: numpy::PyReadonlyArray1<'_, f32>,
+    period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let price_slice = prices_f32.as_slice()?;
+    let volume_slice = volumes_f32.as_slice()?;
+    let sweep = VwmaBatchRange {
+        period: period_range,
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaVwma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.vwma_batch_dev(price_slice, volume_slice, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "vwma_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (prices_tm_f32, volumes_tm_f32, period, device_id=0))]
+pub fn vwma_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    prices_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    volumes_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    period: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use numpy::PyUntypedArrayMethods;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let price_shape = prices_tm_f32.shape();
+    let volume_shape = volumes_tm_f32.shape();
+    if price_shape != volume_shape {
+        return Err(PyValueError::new_err(
+            "price and volume matrices must share shape",
+        ));
+    }
+
+    let rows = price_shape[0];
+    let cols = price_shape[1];
+
+    let prices_flat = prices_tm_f32.as_slice()?;
+    let volumes_flat = volumes_tm_f32.as_slice()?;
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaVwma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.vwma_many_series_one_param_time_major_dev(
+            prices_flat,
+            volumes_flat,
+            cols,
+            rows,
+            period,
+        )
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "wasm")]

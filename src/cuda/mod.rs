@@ -6,6 +6,16 @@
 #[cfg(feature = "cuda")]
 pub mod moving_averages;
 #[cfg(feature = "cuda")]
+pub mod wclprice;
+
+#[cfg(feature = "cuda")]
+pub use moving_averages::{
+    CudaAlma, CudaDma, CudaEhlersPma, CudaGaussian, CudaJma, CudaMama, CudaReflex, CudaSqwma,
+    CudaTema, CudaVwma, DeviceArrayF32, DeviceEhlersPmaPair, DeviceMamaPair,
+};
+#[cfg(feature = "cuda")]
+pub use wclprice::CudaWclprice;
+#[cfg(feature = "cuda")]
 pub mod oscillators;
 #[cfg(feature = "cuda")]
 pub mod wto_wrapper;
