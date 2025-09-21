@@ -28,6 +28,9 @@ pub struct CudaBenchScenario {
     /// Approximate VRAM required (in bytes) to run the scenario, including any
     /// safety headroom.
     pub mem_required: Option<usize>,
+    /// Optional inner iteration count to repeat the kernel multiple times per
+    /// Criterion iteration (useful for very small workloads to reduce noise).
+    pub inner_iters: Option<usize>,
     /// Preparation function returning the state needed for repeated kernel
     /// launches. The state owns its device buffers for the benchmark lifetime.
     pub prep: fn() -> Box<dyn CudaBenchState>,
@@ -50,6 +53,7 @@ impl CudaBenchScenario {
             skip_label: None,
             sample_size: None,
             mem_required: None,
+            inner_iters: None,
             prep,
         }
     }
@@ -69,6 +73,12 @@ impl CudaBenchScenario {
     /// Attach a VRAM requirement estimate (bytes).
     pub const fn with_mem_required(mut self, bytes: usize) -> Self {
         self.mem_required = Some(bytes);
+        self
+    }
+
+    /// Attach an inner iteration count (repeats kernel in one bench iter).
+    pub const fn with_inner_iters(mut self, iters: usize) -> Self {
+        self.inner_iters = Some(iters);
         self
     }
 }

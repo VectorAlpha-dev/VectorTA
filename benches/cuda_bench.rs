@@ -1,6 +1,7 @@
 #![cfg(feature = "cuda")]
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use std::time::{Duration, Instant};
 use cust::memory::mem_get_info;
 use my_project::cuda::{self, CudaBenchScenario};
 
@@ -98,9 +99,28 @@ fn run_registered_benches(c: &mut Criterion) {
         }
         let prep = scen.prep;
         let mut state = prep();
-        group.bench_with_input(BenchmarkId::new(scen.bench_id, scen.indicator), &(), |b, _| {
-            b.iter(|| state.launch())
-        });
+        // Pre-warm once to avoid measuring JIT/first-launch overhead
+        state.launch();
+        let inner = scen.inner_iters.unwrap_or(1);
+        if inner > 1 {
+            // Normalize to per-launch timing using iter_custom (divide elapsed by `inner`).
+            group.bench_function(BenchmarkId::new(scen.bench_id, scen.indicator), |b| {
+                b.iter_custom(|iters| {
+                    let total = iters.saturating_mul(inner as u64);
+                    let start = Instant::now();
+                    for _ in 0..total { state.launch(); }
+                    let elapsed = start.elapsed();
+                    // Return average per-iteration time, which we scale down by `inner`
+                    // so Criterion reports time per single kernel launch.
+                    let nanos = elapsed.as_nanos() / (inner as u128).max(1);
+                    Duration::from_nanos(nanos as u64)
+                })
+            });
+        } else {
+            group.bench_function(BenchmarkId::new(scen.bench_id, scen.indicator), |b| {
+                b.iter(|| state.launch())
+            });
+        }
         group.finish();
     }
 }

@@ -34,6 +34,54 @@ use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+// -------- Kernel selection policy (explicit for tests; Auto for production) --------
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchThreadsPerOutput { One, Two }
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelPolicy {
+    Auto,
+    Plain { block_x: u32 },
+    Tiled { tile: u32, per_thread: BatchThreadsPerOutput },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelPolicy {
+    Auto,
+    OneD { block_x: u32 },
+    Tiled2D { tx: u32, ty: u32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CudaAlmaPolicy {
+    pub batch: BatchKernelPolicy,
+    pub many_series: ManySeriesKernelPolicy,
+}
+
+impl Default for CudaAlmaPolicy {
+    fn default() -> Self {
+        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+    }
+}
+
+// -------- Introspection (selected kernel) --------
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+    Tiled1x { tile: u32 },
+    Tiled2x { tile: u32 },
+    OnDevice { block_x: u32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+    Tiled2D { tx: u32, ty: u32 },
+}
 
 #[derive(Debug)]
 pub enum CudaAlmaError {
@@ -75,6 +123,12 @@ pub struct CudaAlma {
     stream: Stream,
     _context: Context, // keep context alive
     device_id: u32,
+    policy: CudaAlmaPolicy,
+    last_batch: Option<BatchKernelSelected>,
+    last_many: Option<ManySeriesKernelSelected>,
+    // Debug: ensure we only print selection once per instance when BENCH_DEBUG=1
+    debug_batch_logged: bool,
+    debug_many_logged: bool,
 }
 
 impl CudaAlma {
@@ -102,6 +156,11 @@ impl CudaAlma {
             stream,
             _context: context,
             device_id: device_id as u32,
+            policy: CudaAlmaPolicy::default(),
+            last_batch: None,
+            last_many: None,
+            debug_batch_logged: false,
+            debug_many_logged: false,
         })
     }
 
@@ -111,6 +170,51 @@ impl CudaAlma {
         self.stream
             .synchronize()
             .map_err(|e| CudaAlmaError::Cuda(e.to_string()))
+    }
+
+    /// Create using an explicit policy.
+    pub fn new_with_policy(device_id: usize, policy: CudaAlmaPolicy) -> Result<Self, CudaAlmaError> {
+        let mut s = Self::new(device_id)?;
+        s.policy = policy;
+        Ok(s)
+    }
+    pub fn set_policy(&mut self, policy: CudaAlmaPolicy) { self.policy = policy; }
+    pub fn policy(&self) -> &CudaAlmaPolicy { &self.policy }
+    /// Last selected batch kernel (if any) for debugging/inspection.
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
+    /// Last selected many-series kernel (if any) for debugging/inspection.
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+
+    #[inline]
+    fn maybe_log_batch_debug(&self) {
+        // Throttle: once per process unless BENCH_DEBUG_SCOPE=scenario
+        static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
+        if self.debug_batch_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_batch {
+                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] ALMA batch selected kernel: {:?}", sel);
+                }
+                unsafe { (*(self as *const _ as *mut CudaAlma)).debug_batch_logged = true; }
+            }
+        }
+    }
+
+    #[inline]
+    fn maybe_log_many_debug(&self) {
+        // Throttle: once per process unless BENCH_DEBUG_SCOPE=scenario
+        static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
+        if self.debug_many_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_many {
+                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] ALMA many-series selected kernel: {:?}", sel);
+                }
+                unsafe { (*(self as *const _ as *mut CudaAlma)).debug_many_logged = true; }
+            }
+        }
     }
 
     // ---------- Utilities ----------
@@ -158,46 +262,22 @@ impl CudaAlma {
                 }
             }
         }
-
-        // Heuristic: choose tile to maintain enough CTAs relative to SM count
-        let sm_count = Device::get_device(self.device_id)
-            .ok()
-            .and_then(|d| d.get_attribute(cust::device::DeviceAttribute::MultiprocessorCount).ok())
-            .unwrap_or(64) as u32;
-
-        let candidates: [u32; 3] = [256, 128, 512];
-        let mut best = 256u32;
-        for &tile in &candidates {
-            // Only consider tiles that have a compiled kernel symbol
-            let fname = match tile {
-                128 => "alma_batch_tiled_f32_tile128",
-                256 => "alma_batch_tiled_f32_tile256",
-                512 => "alma_batch_tiled_f32_tile512",
-                _ => continue,
-            };
-            if self.module.get_function(fname).is_err() {
-                continue;
+        // Default preference: 256 is best for typical long series and moderate combo counts.
+        // Fall back to 128 only for very short series where blocks would be mostly idle.
+        let prefer_256 = self.module.get_function("alma_batch_tiled_f32_tile256").is_ok();
+        if prefer_256 {
+            // If series is extremely short, 128 can reduce tail waste.
+            if series_len < 8192 {
+                if self.module.get_function("alma_batch_tiled_f32_tile128").is_ok() { return 128; }
             }
-
-            let grid_x = ((series_len as u32) + tile - 1) / tile;
-            let grid_y = n_combos as u32;
-            let ctas = grid_x.saturating_mul(grid_y.min(65_535));
-
-            // If CTAs < 2*SMs, prefer smaller tile to increase grid density
-            let enough_density = ctas >= 2 * sm_count;
-            if !enough_density && tile > 128 {
-                best = 128;
-                continue;
-            }
-
-            // Favor larger tile when period small to reduce per-CTA overhead
-            if max_period <= 64 && tile >= best {
-                best = tile;
-            } else if best == 0 {
-                best = tile;
-            }
+            return 256;
         }
-        if best == 0 { 256 } else { best }
+        // Next best: 128
+        if self.module.get_function("alma_batch_tiled_f32_tile128").is_ok() { return 128; }
+        // Otherwise 512 if available
+        if self.module.get_function("alma_batch_tiled_f32_tile512").is_ok() { return 512; }
+        // Fallback
+        256
     }
 
     #[inline]
@@ -730,6 +810,13 @@ impl CudaAlma {
             .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
         let block_x = if suggested_block > 0 { suggested_block } else { 256 };
 
+        // Introspection
+        unsafe {
+            let this = self as *const _ as *mut CudaAlma;
+            (*this).last_batch = Some(BatchKernelSelected::OnDevice { block_x });
+        }
+        self.maybe_log_batch_debug();
+
         // Chunk over grid.y if needed
         for (start, len) in Self::grid_y_chunks(n_combos) {
             let grid_x = ((series_len as u32) + block_x - 1) / block_x;
@@ -772,12 +859,23 @@ impl CudaAlma {
         max_period: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaAlmaError> {
-        // Decide between plain and tiled kernels
-        let use_tiled = series_len > 8192;
+        // Decide between plain and tiled kernels (policy first)
+        let mut use_tiled = series_len > 8192;
         let mut block_x: u32 = 256;
+        let mut force_tile: Option<u32> = None;
+        let mut force_two_per_thread: Option<bool> = None;
+        match self.policy.batch {
+            BatchKernelPolicy::Auto => {}
+            BatchKernelPolicy::Plain { block_x: bx } => { use_tiled = false; block_x = bx; }
+            BatchKernelPolicy::Tiled { tile, per_thread } => {
+                use_tiled = true;
+                force_tile = Some(tile);
+                force_two_per_thread = Some(matches!(per_thread, BatchThreadsPerOutput::Two));
+            }
+        }
 
         if use_tiled {
-            block_x = self.pick_tiled_block(max_period, series_len, n_combos);
+            block_x = force_tile.unwrap_or_else(|| self.pick_tiled_block(max_period, series_len, n_combos));
             let tile = block_x as usize; // outputs per block
             // Automatic 2x-per-thread selection for larger periods if kernel exists
             let two_x_name = match block_x {
@@ -787,8 +885,12 @@ impl CudaAlma {
                 _ => "",
             };
             let two_x_available = !two_x_name.is_empty() && self.module.get_function(two_x_name).is_ok();
-            // Heuristic: enable 2x when period is moderately large; adjust as needed.
-            let use_two_per_thread = two_x_available && max_period >= 96;
+            // Decide 1x vs 2x per-thread: prefer 2x whenever available unless explicitly forced off.
+            let use_two_per_thread = if let Some(v) = force_two_per_thread { v } else {
+                let force_2x = matches!(std::env::var("ALMA_FORCE_2X"), Ok(v) if v == "1" || v.eq_ignore_ascii_case("true"));
+                let force_1x = matches!(std::env::var("ALMA_FORCE_1X"), Ok(v) if v == "1" || v.eq_ignore_ascii_case("true"));
+                if force_2x && two_x_available { true } else if force_1x { false } else { two_x_available }
+            };
             let threads_x = if use_two_per_thread { (block_x / 2).max(1) } else { block_x };
             // Dynamic shared: weights + tile_overlap buffer sized by outputs per block
             let elems = max_period + (tile + max_period - 1);
@@ -815,6 +917,17 @@ impl CudaAlma {
                 .module
                 .get_function(func_name)
                 .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+
+            // Introspection
+            unsafe {
+                let this = self as *const _ as *mut CudaAlma;
+                (*this).last_batch = Some(if use_two_per_thread {
+                    BatchKernelSelected::Tiled2x { tile: block_x }
+                } else {
+                    BatchKernelSelected::Tiled1x { tile: block_x }
+                });
+            }
+            self.maybe_log_batch_debug();
 
             for (start, len) in Self::grid_y_chunks(n_combos) {
                 let grid_x = ((series_len as u32) + (block_x - 1)) / block_x; // divide by outputs per block
@@ -848,11 +961,21 @@ impl CudaAlma {
                 .get_function("alma_batch_f32")
                 .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
 
-            // Fixed block size is usually better for bandwidth-bound 1D loops; allow override.
-            block_x = match std::env::var("ALMA_BLOCK_X").ok().and_then(|s| s.parse::<u32>().ok()) {
-                Some(v) if v == 128 || v == 256 || v == 512 => v,
-                _ => 256,
+            // Fixed block size; allow override when Auto only.
+            block_x = match self.policy.batch {
+                BatchKernelPolicy::Plain { block_x } => block_x,
+                _ => match std::env::var("ALMA_BLOCK_X").ok().and_then(|s| s.parse::<u32>().ok()) {
+                    Some(v) if v == 128 || v == 256 || v == 512 => v,
+                    _ => 256,
+                },
             };
+
+            // Introspection
+            unsafe {
+                let this = self as *const _ as *mut CudaAlma;
+                (*this).last_batch = Some(BatchKernelSelected::Plain { block_x });
+            }
+            self.maybe_log_batch_debug();
 
             for (start, len) in Self::grid_y_chunks(n_combos) {
                 let grid_x = ((series_len as u32) + block_x - 1) / block_x;
@@ -939,19 +1062,101 @@ impl CudaAlma {
         d_first_valids: &DeviceBuffer<i32>,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaAlmaError> {
+        // Try 2D tiled variants first (TX=128, TY=4 then TY=2), fall back if not suitable.
+        // We prefer 2D whenever the symbol exists and shared memory fits.
+        let dev = Device::get_device(self.device_id).ok();
+        let max_smem: usize = dev
+            .and_then(|d| d.get_attribute(cust::device::DeviceAttribute::MaxSharedMemoryPerBlock).ok())
+            .unwrap_or(48 * 1024) as usize;
+
+        // Optional test/bench override: ALMA_MS_FORCE=1d|2d_ty4|2d_ty2 (only used when policy=Auto)
+        let force_ms = match self.policy.many_series {
+            ManySeriesKernelPolicy::Auto => std::env::var("ALMA_MS_FORCE").ok(),
+            _ => None,
+        };
+
+        let try_2d = |tx: u32, ty: u32| -> Option<()> {
+            let total = tx as usize + period - 1;
+            // Shared = weights + tile
+            let shared_bytes = ((period + total * ty as usize) * std::mem::size_of::<f32>()) as u32;
+            if (shared_bytes as usize) > max_smem { return None; }
+            // Make sure symbol exists
+            let fname = match (tx, ty) {
+                (128, 4) => "alma_ms1p_tiled_f32_tx128_ty4",
+                (128, 2) => "alma_ms1p_tiled_f32_tx128_ty2",
+                _ => return None,
+            };
+            let func = match self.module.get_function(fname) {
+                Ok(f) => f,
+                Err(_) => return None,
+            };
+            let grid_x = ((rows as u32) + tx - 1) / tx;
+            let grid_y = ((cols as u32) + ty - 1) / ty;
+            let grid: GridSize = (grid_x, grid_y, 1).into();
+            let block: BlockSize = (tx, ty, 1).into();
+            let stream = &self.stream;
+            unsafe {
+                launch!(
+                    func<<<grid, block, shared_bytes, stream>>>(
+                        d_prices.as_device_ptr(),
+                        d_weights.as_device_ptr(),
+                        (period as i32),
+                        inv_norm,
+                        (cols as i32),
+                        (rows as i32),
+                        d_first_valids.as_device_ptr(),
+                        d_out.as_device_ptr()
+                    )
+                )
+                .map_err(|e| CudaAlmaError::Cuda(e.to_string()))
+                .ok()?;
+            }
+            // Introspection
+            unsafe {
+                let this = self as *const _ as *mut CudaAlma;
+                (*this).last_many = Some(ManySeriesKernelSelected::Tiled2D { tx, ty });
+            }
+            self.maybe_log_many_debug();
+            Some(())
+        };
+
+        // Respect explicit policy first
+        match self.policy.many_series {
+            ManySeriesKernelPolicy::Tiled2D { tx, ty } => {
+                if try_2d(tx as u32, ty as u32).is_some() { return Ok(()); }
+            }
+            ManySeriesKernelPolicy::OneD { .. } => { /* fall through to 1D below */ }
+            ManySeriesKernelPolicy::Auto => {
+                if let Some(ref v) = force_ms {
+                    if v.eq_ignore_ascii_case("2d_ty4") { if try_2d(128, 4).is_some() { return Ok(()); } }
+                    else if v.eq_ignore_ascii_case("2d_ty2") { if try_2d(128, 2).is_some() { return Ok(()); } }
+                } else {
+                    // Prefer TY=4 when columns are reasonably wide; else TY=2.
+                    if cols >= 128 {
+                        if try_2d(128, 4).is_some() { return Ok(()); }
+                        if try_2d(128, 2).is_some() { return Ok(()); }
+                    } else {
+                        if try_2d(128, 2).is_some() { return Ok(()); }
+                        if try_2d(128, 4).is_some() { return Ok(()); }
+                    }
+                }
+            }
+        }
+
+        // Fallback: 1D mapping (current kernel)
         let func = self
             .module
             .get_function("alma_multi_series_one_param_f32")
             .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
 
-        // Shared memory for weights
         let shared_bytes = (period * std::mem::size_of::<f32>()) as u32;
-
-        const BLOCK_X: u32 = 128;
-        let grid_x = ((rows as u32) + BLOCK_X - 1) / BLOCK_X;
+        let block_x: u32 = match self.policy.many_series {
+            ManySeriesKernelPolicy::OneD { block_x } => block_x,
+            _ => 128,
+        };
+        let grid_x = ((rows as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x, cols as u32, 1).into();
-        let block: BlockSize = (BLOCK_X, 1, 1).into();
-
+        let block: BlockSize = (block_x, 1, 1).into();
         let stream = &self.stream;
         unsafe {
             launch!(
@@ -968,6 +1173,12 @@ impl CudaAlma {
             )
             .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
         }
+        // Introspection
+        unsafe {
+            let this = self as *const _ as *mut CudaAlma;
+            (*this).last_many = Some(ManySeriesKernelSelected::OneD { block_x });
+        }
+        self.maybe_log_many_debug();
         Ok(())
     }
 
@@ -1072,6 +1283,16 @@ pub mod benches {
     const PARAM_SWEEP: usize = 250;
     const MANY_SERIES_COLS: usize = 250;
     const MANY_SERIES_LEN: usize = 1_000_000;
+    // Additional sizes for coverage
+    const ONE_SERIES_LEN_SMALL: usize = 250_000;
+    const PARAM_SWEEP_SMALL: usize = 128;
+    const ONE_SERIES_LEN_LARGE: usize = 2_000_000;
+    const PARAM_SWEEP_LARGE: usize = 250;
+    const ONE_SERIES_LEN_XL: usize = 4_000_000;
+    const MANY_SERIES_COLS_SMALL: usize = 128;
+    const MANY_SERIES_LEN_SMALL: usize = 500_000;
+    const MANY_SERIES_COLS_LARGE: usize = 512;
+    const MANY_SERIES_LEN_LARGE: usize = 2_000_000;
 
     fn bytes_one_series_many_params() -> usize {
         let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
@@ -1099,6 +1320,7 @@ pub mod benches {
         n_combos: usize,
         max_period: usize,
         first_valid: usize,
+        warmed: bool,
     }
 
     impl CudaBenchState for AlmaBatchDeviceState {
@@ -1116,12 +1338,18 @@ pub mod benches {
                     &mut self.d_out,
                 )
                 .expect("launch alma_batch_device");
-            self.cuda.synchronize().expect("sync");
+        self.cuda.synchronize().expect("sync");
+            if !self.warmed { self.warmed = true; }
         }
     }
 
     fn prep_alma_one_series_many_params() -> Box<dyn CudaBenchState> {
         let cuda = CudaAlma::new(0).expect("cuda alma");
+        // Bench pin (fast path) — keep commented for quick toggling:
+        // cuda.set_policy(CudaAlmaPolicy {
+        //     batch: BatchKernelPolicy::Tiled { tile: 256, per_thread: BatchThreadsPerOutput::Two },
+        //     many_series: ManySeriesKernelPolicy::Auto,
+        // });
         let price = gen_series(ONE_SERIES_LEN);
         let start_period = 10usize;
         let end_period = start_period + PARAM_SWEEP - 1;
@@ -1182,7 +1410,44 @@ pub mod benches {
             n_combos,
             max_period,
             first_valid,
+            warmed: false,
         })
+    }
+
+    // Generic prep for batch with (LEN, SWEEP)
+    fn prep_batch_len_sweep<const LEN: usize, const SWEEP: usize>() -> Box<dyn CudaBenchState> {
+        let cuda = CudaAlma::new(0).expect("cuda alma");
+        // Bench pin (fast path) — keep commented for quick toggling:
+        // cuda.set_policy(CudaAlmaPolicy {
+        //     batch: BatchKernelPolicy::Tiled { tile: 256, per_thread: BatchThreadsPerOutput::Two },
+        //     many_series: ManySeriesKernelPolicy::Auto,
+        // });
+        let price = gen_series(LEN);
+        let start_period = 10usize;
+        let end_period = start_period + SWEEP - 1;
+        let sweep = AlmaBatchRange { period: (start_period, end_period, 1), offset: (0.85, 0.85, 0.0), sigma: (6.0, 6.0, 0.0) };
+        let first_valid = price.iter().position(|x| !x.is_nan()).unwrap_or(0);
+        let combos = super::expand_grid(&sweep);
+        let n_combos = combos.len();
+        let max_period = combos.iter().map(|c| c.period.unwrap_or(0)).max().unwrap_or(0);
+        let mut periods_i32 = vec![0i32; n_combos];
+        let mut inv_norms = vec![0f32; n_combos];
+        let mut weights_flat = vec![0f32; n_combos * max_period];
+        for (idx, prm) in combos.iter().enumerate() {
+            let period = prm.period.unwrap() as usize;
+            let (weights, inv_norm) = super::compute_weights_cpu_f32(period, prm.offset.unwrap(), prm.sigma.unwrap());
+            periods_i32[idx] = period as i32;
+            inv_norms[idx] = inv_norm;
+            let base = idx * max_period;
+            weights_flat[base..base + period].copy_from_slice(&weights);
+        }
+        let d_prices = unsafe { DeviceBuffer::from_slice_async(&price, &cuda.stream) }.expect("d_prices");
+        let d_weights = DeviceBuffer::from_slice(&weights_flat).expect("d_weights");
+        let d_periods = DeviceBuffer::from_slice(&periods_i32).expect("d_periods");
+        let d_inv_norms = DeviceBuffer::from_slice(&inv_norms).expect("d_inv_norms");
+        let d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(n_combos * LEN, &cuda.stream) }.expect("d_out");
+        cuda.synchronize().expect("sync after prep");
+        Box::new(AlmaBatchDeviceState { cuda, d_prices, d_weights, d_periods, d_inv_norms, d_out, series_len: LEN, n_combos, max_period, first_valid, warmed: false })
     }
 
     struct AlmaManySeriesDeviceState {
@@ -1195,6 +1460,7 @@ pub mod benches {
         rows: usize,
         period: usize,
         inv_norm: f32,
+        warmed: bool,
     }
 
     impl CudaBenchState for AlmaManySeriesDeviceState {
@@ -1211,12 +1477,43 @@ pub mod benches {
                     &mut self.d_out_tm,
                 )
                 .expect("alma many-series precomputed");
-            self.cuda.synchronize().expect("sync");
+        self.cuda.synchronize().expect("sync");
+            if !self.warmed { self.warmed = true; }
         }
+    }
+
+    // Generic prep for many-series (COLS, ROWS)
+    fn prep_many_series_generic<const COLS: usize, const ROWS: usize>() -> Box<dyn CudaBenchState> {
+        let cuda = CudaAlma::new(0).expect("cuda alma");
+        // Bench pin (fast path) — keep commented for quick toggling:
+        // cuda.set_policy(CudaAlmaPolicy {
+        //     batch: BatchKernelPolicy::Auto,
+        //     many_series: ManySeriesKernelPolicy::Tiled2D { tx: 128, ty: 4 },
+        // });
+        let prices_tm = gen_time_major_prices(COLS, ROWS);
+        let period = 64usize;
+        let (weights, inv_norm) = super::compute_weights_cpu_f32(period, 0.85, 6.0);
+        let mut first_valids = vec![0i32; COLS];
+        for s in 0..COLS {
+            let mut fv = 0usize;
+            for t in 0..ROWS { if !prices_tm[t * COLS + s].is_nan() { fv = t; break; } }
+            first_valids[s] = fv as i32;
+        }
+        let d_prices_tm = unsafe { DeviceBuffer::from_slice_async(&prices_tm, &cuda.stream) }.expect("d_prices_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
+        let d_weights = DeviceBuffer::from_slice(&weights).expect("d_weights");
+        let d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(COLS * ROWS, &cuda.stream) }.expect("d_out_tm");
+        cuda.synchronize().expect("sync after prep");
+        Box::new(AlmaManySeriesDeviceState { cuda, d_prices_tm, d_first_valids, d_weights, d_out_tm, cols: COLS, rows: ROWS, period, inv_norm, warmed: false })
     }
 
     fn prep_alma_many_series_one_param() -> Box<dyn CudaBenchState> {
         let cuda = CudaAlma::new(0).expect("cuda alma");
+        // Bench pin (fast path) — keep commented for quick toggling:
+        // cuda.set_policy(CudaAlmaPolicy {
+        //     batch: BatchKernelPolicy::Auto,
+        //     many_series: ManySeriesKernelPolicy::Tiled2D { tx: 128, ty: 4 },
+        // });
         let cols = MANY_SERIES_COLS;
         let rows = MANY_SERIES_LEN;
         let prices_tm = gen_time_major_prices(cols, rows);
@@ -1257,29 +1554,32 @@ pub mod benches {
             rows,
             period,
             inv_norm,
+            warmed: false,
         })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         vec![
-            CudaBenchScenario::new(
-                "alma",
-                "one_series_many_params",
-                "alma_cuda_batch_dev",
-                "1m_x_250",
-                prep_alma_one_series_many_params,
-            )
-            .with_sample_size(10)
-            .with_mem_required(bytes_one_series_many_params()),
-            CudaBenchScenario::new(
-                "alma",
-                "many_series_one_param",
-                "alma_cuda_many_series_one_param",
-                "250x1m",
-                prep_alma_many_series_one_param,
-            )
-            .with_sample_size(10)
-            .with_mem_required(bytes_many_series_one_param()),
+            // Batch sizes: 250k x 250, 1m x 250, 4m x 250
+            CudaBenchScenario::new("alma", "one_series_many_params", "alma_cuda_batch_dev", "250k_x_250", prep_batch_len_sweep::<{ONE_SERIES_LEN_SMALL}, {PARAM_SWEEP}>)
+                .with_sample_size(12)
+                .with_mem_required(ONE_SERIES_LEN_SMALL * 4 + ONE_SERIES_LEN_SMALL * PARAM_SWEEP * 4 + 64 * 1024 * 1024),
+            CudaBenchScenario::new("alma", "one_series_many_params", "alma_cuda_batch_dev", "1m_x_250", prep_alma_one_series_many_params)
+                .with_sample_size(10)
+                .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new("alma", "one_series_many_params", "alma_cuda_batch_dev", "4m_x_250", prep_batch_len_sweep::<{ONE_SERIES_LEN_XL}, {PARAM_SWEEP}>)
+                .with_sample_size(6)
+                .with_mem_required(ONE_SERIES_LEN_XL * 4 + ONE_SERIES_LEN_XL * PARAM_SWEEP * 4 + 64 * 1024 * 1024),
+            // Many-series sizes: small, medium, large
+            CudaBenchScenario::new("alma", "many_series_one_param", "alma_cuda_many_series_one_param", "128x500k", prep_many_series_generic::<{MANY_SERIES_COLS_SMALL}, {MANY_SERIES_LEN_SMALL}>)
+                .with_sample_size(12)
+                .with_mem_required(MANY_SERIES_COLS_SMALL * MANY_SERIES_LEN_SMALL * 4 * 2 + 64 * 1024 * 1024),
+            CudaBenchScenario::new("alma", "many_series_one_param", "alma_cuda_many_series_one_param", "250x1m", prep_alma_many_series_one_param)
+                .with_sample_size(10)
+                .with_mem_required(bytes_many_series_one_param()),
+            CudaBenchScenario::new("alma", "many_series_one_param", "alma_cuda_many_series_one_param", "512x2m", prep_many_series_generic::<{MANY_SERIES_COLS_LARGE}, {MANY_SERIES_LEN_LARGE}>)
+                .with_sample_size(8)
+                .with_mem_required(MANY_SERIES_COLS_LARGE * MANY_SERIES_LEN_LARGE * 4 * 2 + 64 * 1024 * 1024),
         ]
     }
 }

@@ -783,3 +783,111 @@ void alma_precompute_weights_f32(const int*   __restrict__ periods,
   }
   if (threadIdx.x == 0) inv_norms[combo] = inv_norm;
 }
+
+// ------------- 7) Many-series tiled (2D block), precomputed weights ---------
+
+template<int TX, int TY>
+__device__ __forceinline__
+void alma_ms1p_tiled_core(const float* __restrict__ prices_tm,
+                          const float* __restrict__ weights,
+                          int period,
+                          float inv_norm,
+                          int num_series,
+                          int series_len,
+                          const int* __restrict__ first_valids,
+                          float* __restrict__ out_tm) {
+  const int TX_ = TX;
+  const int TY_ = TY;
+  const int t0 = blockIdx.x * TX_;
+  const int s0 = blockIdx.y * TY_;
+
+  if (t0 >= series_len || s0 >= num_series) return;
+
+  // Shared: weights + tile [ (TX+period-1) x TY ]
+  const int total = TX_ + period - 1;
+  extern __shared__ __align__(16) unsigned char shraw[];
+  size_t off = 0;
+  float* w = reinterpret_cast<float*>(shraw + off);
+  off = alma_align_up(off + size_t(period) * sizeof(float), 16);
+  float* tile = reinterpret_cast<float*>(shraw + off);
+
+  // Load weights into shared (vectorized if aligned)
+  uintptr_t waddr = reinterpret_cast<uintptr_t>(weights);
+  if ((waddr & 0xF) == 0) {
+    int ve = period >> 2; // period/4
+    for (int vi = threadIdx.y * blockDim.x + threadIdx.x; vi < ve; vi += blockDim.x * blockDim.y) {
+      reinterpret_cast<float4*>(w)[vi] = reinterpret_cast<const float4*>(weights)[vi];
+    }
+    if ((threadIdx.x == 0) && (threadIdx.y == 0) && ((period & 3) != 0)) {
+      int base = ve << 2;
+      for (int r = 0; r < (period & 3); ++r) w[base + r] = weights[base + r];
+    }
+  } else {
+    for (int i = threadIdx.y * blockDim.x + threadIdx.x; i < period; i += blockDim.x * blockDim.y) {
+      w[i] = weights[i];
+    }
+  }
+  __syncthreads();
+
+  // Cooperative load of tile across series and time
+  const bool vec_ok = (TY_ == 4) && ((num_series & 3) == 0) && ((s0 & 3) == 0);
+
+  for (int dt = threadIdx.x; dt < total; dt += blockDim.x) {
+    int t = t0 + dt;
+    if (t >= 0 && t < series_len) {
+      if (vec_ok && threadIdx.y == 0) {
+        // Vectorized load across 4 contiguous series columns
+        const float4* src4 = reinterpret_cast<const float4*>(&prices_tm[t * num_series + s0]);
+        float4 v = src4[0];
+        tile[dt * TY_ + 0] = v.x;
+        tile[dt * TY_ + 1] = v.y;
+        tile[dt * TY_ + 2] = v.z;
+        tile[dt * TY_ + 3] = v.w;
+      } else {
+        int s = s0 + threadIdx.y;
+        float val = 0.f;
+        if (s < num_series) val = prices_tm[t * num_series + s];
+        tile[dt * TY_ + threadIdx.y] = val;
+      }
+    } else {
+      int idx = dt * TY_ + threadIdx.y;
+      if (idx < total * TY_) tile[idx] = 0.f;
+    }
+  }
+  __syncthreads();
+
+  // Compute outputs for this CTA
+  int s = s0 + threadIdx.y;
+  int t = t0 + threadIdx.x;
+  if (s >= num_series || t >= series_len) return;
+
+  int warm = first_valids[s] + period - 1;
+  int out_idx = t * num_series + s;
+
+  if (t < warm) {
+    out_tm[out_idx] = NAN;
+    return;
+  }
+
+  int start = threadIdx.x; // within tile
+  float acc = 0.f;
+  #pragma unroll 4
+  for (int k = 0; k < period; ++k) {
+    float x = tile[(start + k) * TY_ + threadIdx.y];
+    acc = __fmaf_rn(x, w[k], acc);
+  }
+  out_tm[out_idx] = acc * inv_norm;
+}
+
+#define DEFINE_ALMA_MS1P_TILED(NAME, TX, TY)                                     \
+extern "C" __global__ void NAME(                                                 \
+  const float* __restrict__ prices_tm,                                           \
+  const float* __restrict__ weights,                                             \
+  int period, float inv_norm, int num_series, int series_len,                    \
+  const int* __restrict__ first_valids, float* __restrict__ out_tm) {            \
+  alma_ms1p_tiled_core<TX, TY>(prices_tm, weights, period, inv_norm,             \
+                               num_series, series_len, first_valids, out_tm);    \
+}
+
+DEFINE_ALMA_MS1P_TILED(alma_ms1p_tiled_f32_tx128_ty2, 128, 2)
+DEFINE_ALMA_MS1P_TILED(alma_ms1p_tiled_f32_tx128_ty4, 128, 4)
