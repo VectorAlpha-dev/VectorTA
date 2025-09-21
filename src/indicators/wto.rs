@@ -24,6 +24,10 @@
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::{cuda_available, CudaWto, CudaWtoBatchResult, DeviceArrayF32Triplet};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
@@ -55,6 +59,7 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 
 // Standard library imports
+use std::collections::BTreeMap;
 use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
@@ -971,6 +976,398 @@ impl WtoBatchBuilder {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct WtoBatchMember {
+    row: usize,
+    average_length: usize,
+}
+
+#[derive(Clone, Copy)]
+struct ThreadSafePtr(*mut f64);
+
+unsafe impl Send for ThreadSafePtr {}
+unsafe impl Sync for ThreadSafePtr {}
+
+#[inline]
+fn group_rows_by_channel(
+    combos: &[WtoParams],
+    cols: usize,
+) -> Result<Vec<(usize, Vec<WtoBatchMember>)>, WtoError> {
+    let mut groups: BTreeMap<usize, Vec<WtoBatchMember>> = BTreeMap::new();
+
+    for (row, params) in combos.iter().enumerate() {
+        let channel_length = params.channel_length.unwrap_or(10);
+        let average_length = params.average_length.unwrap_or(21);
+
+        if channel_length == 0 || channel_length > cols {
+            return Err(WtoError::InvalidPeriod {
+                period: channel_length,
+                data_len: cols,
+            });
+        }
+        if average_length == 0 || average_length > cols {
+            return Err(WtoError::InvalidPeriod {
+                period: average_length,
+                data_len: cols,
+            });
+        }
+
+        groups
+            .entry(channel_length)
+            .or_default()
+            .push(WtoBatchMember {
+                row,
+                average_length,
+            });
+    }
+
+    Ok(groups.into_iter().collect())
+}
+
+#[inline]
+fn apply_ci_to_members(
+    ci: &[f64],
+    members: &[WtoBatchMember],
+    start_ci: usize,
+    cols: usize,
+    out_ptr: ThreadSafePtr,
+    parallel: bool,
+) -> Result<(), WtoError> {
+    let _ = parallel; // parallel hint currently unused after grouping reuse
+    for member in members {
+        let dst =
+            unsafe { core::slice::from_raw_parts_mut(out_ptr.0.add(member.row * cols), cols) };
+        ema_pinescript_into(ci, member.average_length, start_ci, dst);
+    }
+    Ok(())
+}
+
+fn wto_fill_wt1_grouped(
+    data: &[f64],
+    combos: &[WtoParams],
+    first: usize,
+    kernel: Kernel,
+    parallel: bool,
+    out: &mut [f64],
+) -> Result<(), WtoError> {
+    let cols = data.len();
+    let groups = group_rows_by_channel(combos, cols)?;
+    if groups.is_empty() {
+        return Ok(());
+    }
+
+    let kernel = match kernel {
+        Kernel::Auto => detect_best_kernel(),
+        other => other.to_non_batch(),
+    };
+
+    match kernel {
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Avx512 => unsafe {
+            wto_batch_fill_wt1_grouped_avx512(data, &groups, first, out, parallel)
+        },
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Avx2 => unsafe {
+            wto_batch_fill_wt1_grouped_avx2(data, &groups, first, out, parallel)
+        },
+        Kernel::Scalar => wto_batch_fill_wt1_grouped_scalar(data, &groups, first, out, parallel),
+        #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+        Kernel::Avx2 | Kernel::Avx512 => {
+            wto_batch_fill_wt1_grouped_scalar(data, &groups, first, out, parallel)
+        }
+        #[allow(unreachable_patterns)]
+        _ => wto_batch_fill_wt1_grouped_scalar(data, &groups, first, out, parallel),
+    }
+}
+
+fn wto_batch_fill_wt1_grouped_scalar(
+    data: &[f64],
+    groups: &[(usize, Vec<WtoBatchMember>)],
+    first: usize,
+    out: &mut [f64],
+    parallel: bool,
+) -> Result<(), WtoError> {
+    let cols = data.len();
+    let out_ptr = ThreadSafePtr(out.as_mut_ptr());
+
+    for (channel_length, members) in groups.iter() {
+        let channel_length = *channel_length;
+        let start_ci = first + channel_length - 1;
+        if start_ci >= cols {
+            return Err(WtoError::NotEnoughValidData {
+                needed: start_ci + 1,
+                valid: cols.saturating_sub(first),
+            });
+        }
+
+        let mut scratch = make_uninit_matrix(3, cols);
+        let warms = [start_ci, start_ci, start_ci];
+        init_matrix_prefixes(&mut scratch, cols, &warms);
+
+        let mut guard = core::mem::ManuallyDrop::new(scratch);
+        let flat: &mut [f64] =
+            unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
+        let (esa, rest) = flat.split_at_mut(cols);
+        let (d, ci) = rest.split_at_mut(cols);
+
+        ema_pinescript_into(data, channel_length, first, esa);
+
+        for i in 0..cols {
+            ci[i] = (data[i] - esa[i]).abs();
+        }
+
+        ema_pinescript_into(ci, channel_length, start_ci, d);
+
+        for i in start_ci..cols {
+            let denom = 0.015 * d[i];
+            ci[i] = if denom != 0.0 && denom.is_finite() {
+                (data[i] - esa[i]) / denom
+            } else {
+                0.0
+            };
+        }
+
+        let ci_slice: &[f64] = ci;
+        apply_ci_to_members(
+            ci_slice,
+            members.as_slice(),
+            start_ci,
+            cols,
+            out_ptr,
+            parallel,
+        )?;
+
+        unsafe {
+            Vec::from_raw_parts(
+                guard.as_mut_ptr() as *mut f64,
+                guard.len(),
+                guard.capacity(),
+            );
+        }
+        core::mem::forget(guard);
+    }
+
+    Ok(())
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn wto_batch_fill_wt1_grouped_avx2(
+    data: &[f64],
+    groups: &[(usize, Vec<WtoBatchMember>)],
+    first: usize,
+    out: &mut [f64],
+    parallel: bool,
+) -> Result<(), WtoError> {
+    use core::arch::x86_64::*;
+
+    let cols = data.len();
+    let out_ptr = ThreadSafePtr(out.as_mut_ptr());
+
+    for (channel_length, members) in groups.iter() {
+        let channel_length = *channel_length;
+        let start_ci = first + channel_length - 1;
+        if start_ci >= cols {
+            return Err(WtoError::NotEnoughValidData {
+                needed: start_ci + 1,
+                valid: cols.saturating_sub(first),
+            });
+        }
+
+        let mut scratch = make_uninit_matrix(3, cols);
+        let warms = [start_ci, start_ci, start_ci];
+        init_matrix_prefixes(&mut scratch, cols, &warms);
+
+        let mut guard = core::mem::ManuallyDrop::new(scratch);
+        let flat: &mut [f64] =
+            core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len());
+        let (esa, rest) = flat.split_at_mut(cols);
+        let (d, ci) = rest.split_at_mut(cols);
+
+        ema_pinescript_into(data, channel_length, first, esa);
+
+        let signmask = _mm256_set1_pd(-0.0_f64);
+        let mut i = 0usize;
+        while i + 4 <= cols {
+            let x = _mm256_loadu_pd(data.as_ptr().add(i));
+            let e = _mm256_loadu_pd(esa.as_ptr().add(i));
+            let diff = _mm256_sub_pd(x, e);
+            let absd = _mm256_andnot_pd(signmask, diff);
+            _mm256_storeu_pd(ci.as_mut_ptr().add(i), absd);
+            i += 4;
+        }
+        while i < cols {
+            ci[i] = (data[i] - esa[i]).abs();
+            i += 1;
+        }
+
+        ema_pinescript_into(ci, channel_length, start_ci, d);
+
+        let k015 = _mm256_set1_pd(0.015_f64);
+        let zero = _mm256_set1_pd(0.0_f64);
+        let infv = _mm256_set1_pd(f64::INFINITY);
+        let mut j = start_ci;
+        while j + 4 <= cols {
+            let x = _mm256_loadu_pd(data.as_ptr().add(j));
+            let e = _mm256_loadu_pd(esa.as_ptr().add(j));
+            let num = _mm256_sub_pd(x, e);
+
+            let dv = _mm256_loadu_pd(d.as_ptr().add(j));
+            let den = _mm256_mul_pd(k015, dv);
+
+            let neq0 = _mm256_cmp_pd(den, zero, _CMP_NEQ_OQ);
+            let abs_den = _mm256_andnot_pd(signmask, den);
+            let not_inf = _mm256_cmp_pd(abs_den, infv, _CMP_NEQ_OQ);
+            let ord = _mm256_cmp_pd(den, den, _CMP_ORD_Q);
+            let valid = _mm256_and_pd(_mm256_and_pd(neq0, not_inf), ord);
+
+            let q = _mm256_div_pd(num, den);
+            let outv = _mm256_blendv_pd(zero, q, valid);
+            _mm256_storeu_pd(ci.as_mut_ptr().add(j), outv);
+            j += 4;
+        }
+        while j < cols {
+            let denom = 0.015 * d[j];
+            ci[j] = if denom != 0.0 && denom.is_finite() {
+                (data[j] - esa[j]) / denom
+            } else {
+                0.0
+            };
+            j += 1;
+        }
+
+        let ci_slice: &[f64] = ci;
+        apply_ci_to_members(
+            ci_slice,
+            members.as_slice(),
+            start_ci,
+            cols,
+            out_ptr,
+            parallel,
+        )?;
+
+        unsafe {
+            Vec::from_raw_parts(
+                guard.as_mut_ptr() as *mut f64,
+                guard.len(),
+                guard.capacity(),
+            );
+        }
+        core::mem::forget(guard);
+    }
+
+    Ok(())
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+unsafe fn wto_batch_fill_wt1_grouped_avx512(
+    data: &[f64],
+    groups: &[(usize, Vec<WtoBatchMember>)],
+    first: usize,
+    out: &mut [f64],
+    parallel: bool,
+) -> Result<(), WtoError> {
+    use core::arch::x86_64::*;
+
+    let cols = data.len();
+    let out_ptr = ThreadSafePtr(out.as_mut_ptr());
+
+    for (channel_length, members) in groups.iter() {
+        let channel_length = *channel_length;
+        let start_ci = first + channel_length - 1;
+        if start_ci >= cols {
+            return Err(WtoError::NotEnoughValidData {
+                needed: start_ci + 1,
+                valid: cols.saturating_sub(first),
+            });
+        }
+
+        let mut scratch = make_uninit_matrix(3, cols);
+        let warms = [start_ci, start_ci, start_ci];
+        init_matrix_prefixes(&mut scratch, cols, &warms);
+
+        let mut guard = core::mem::ManuallyDrop::new(scratch);
+        let flat: &mut [f64] =
+            core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len());
+        let (esa, rest) = flat.split_at_mut(cols);
+        let (d, ci) = rest.split_at_mut(cols);
+
+        ema_pinescript_into(data, channel_length, first, esa);
+
+        let signmask = _mm512_set1_pd(-0.0_f64);
+        let mut i = 0usize;
+        while i + 8 <= cols {
+            let x = _mm512_loadu_pd(data.as_ptr().add(i));
+            let e = _mm512_loadu_pd(esa.as_ptr().add(i));
+            let diff = _mm512_sub_pd(x, e);
+            let absd = _mm512_andnot_pd(signmask, diff);
+            _mm512_storeu_pd(ci.as_mut_ptr().add(i), absd);
+            i += 8;
+        }
+        while i < cols {
+            ci[i] = (data[i] - esa[i]).abs();
+            i += 1;
+        }
+
+        ema_pinescript_into(ci, channel_length, start_ci, d);
+
+        let k015 = _mm512_set1_pd(0.015_f64);
+        let zero = _mm512_set1_pd(0.0_f64);
+        let infv = _mm512_set1_pd(f64::INFINITY);
+        let mut j = start_ci;
+        while j + 8 <= cols {
+            let x = _mm512_loadu_pd(data.as_ptr().add(j));
+            let e = _mm512_loadu_pd(esa.as_ptr().add(j));
+            let num = _mm512_sub_pd(x, e);
+
+            let dv = _mm512_loadu_pd(d.as_ptr().add(j));
+            let den = _mm512_mul_pd(k015, dv);
+
+            let neq0 = _mm512_cmp_pd_mask(den, zero, _CMP_NEQ_OQ);
+            let abs_den = _mm512_andnot_pd(signmask, den);
+            let not_inf = _mm512_cmp_pd_mask(abs_den, infv, _CMP_NEQ_OQ);
+            let ord = _mm512_cmp_pd_mask(den, den, _CMP_ORD_Q);
+            let valid = neq0 & not_inf & ord;
+
+            let q = _mm512_div_pd(num, den);
+            let outv = _mm512_mask_blend_pd(valid, zero, q);
+            _mm512_storeu_pd(ci.as_mut_ptr().add(j), outv);
+            j += 8;
+        }
+        while j < cols {
+            let denom = 0.015 * d[j];
+            ci[j] = if denom != 0.0 && denom.is_finite() {
+                (data[j] - esa[j]) / denom
+            } else {
+                0.0
+            };
+            j += 1;
+        }
+
+        let ci_slice: &[f64] = ci;
+        apply_ci_to_members(
+            ci_slice,
+            members.as_slice(),
+            start_ci,
+            cols,
+            out_ptr,
+            parallel,
+        )?;
+
+        unsafe {
+            Vec::from_raw_parts(
+                guard.as_mut_ptr() as *mut f64,
+                guard.len(),
+                guard.capacity(),
+            );
+        }
+        core::mem::forget(guard);
+    }
+
+    Ok(())
+}
+
 // Zero-allocation function to fill WT1 row
 fn wto_fill_wt1_row(
     data: &[f64],
@@ -1093,14 +1490,15 @@ fn wto_batch_inner(
     let cols = data.len();
     let rows = combos.len();
 
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(WtoError::AllValuesNaN)?;
+
     // Make rows x cols with NaN warmups per row
     let mut mu = make_uninit_matrix(rows, cols);
     {
         // Warmup per row: first valid + average_length + 3
-        let first = data
-            .iter()
-            .position(|x| !x.is_nan())
-            .ok_or(WtoError::AllValuesNaN)?;
         let warms: Vec<usize> = combos
             .iter()
             .map(|p| first + p.average_length.unwrap_or(21) + 3)
@@ -1111,28 +1509,7 @@ fn wto_batch_inner(
     let out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
-    // Fill each row with WT1
-    let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
-    let do_row = |row: usize, dst: &mut [f64]| {
-        let p = combos[row].clone();
-        wto_fill_wt1_row(data, p, first, kern, dst).unwrap();
-    };
-
-    if parallel {
-        #[cfg(not(target_arch = "wasm32"))]
-        out.chunks_mut(cols)
-            .enumerate()
-            .par_bridge()
-            .for_each(|(r, s)| do_row(r, s));
-        #[cfg(target_arch = "wasm32")]
-        for (r, s) in out.chunks_mut(cols).enumerate() {
-            do_row(r, s);
-        }
-    } else {
-        for (r, s) in out.chunks_mut(cols).enumerate() {
-            do_row(r, s);
-        }
-    }
+    wto_fill_wt1_grouped(data, &combos, first, kern, parallel, out)?;
 
     let values = unsafe {
         Vec::from_raw_parts(
@@ -1246,26 +1623,25 @@ pub fn wto_batch_all_outputs_with_kernel(
         x => x,
     };
 
-    // Process each row
-    for (row, combo) in combos.iter().enumerate() {
+    wto_fill_wt1_grouped(data, &combos, first, kern, true, wt1_out)?;
+
+    for row in 0..rows {
         let row_start = row * cols;
         let row_end = row_start + cols;
 
-        let wt1_row = &mut wt1_out[row_start..row_end];
+        let wt1_row = &wt1_out[row_start..row_end];
         let wt2_row = &mut wt2_out[row_start..row_end];
         let hist_row = &mut hist_out[row_start..row_end];
 
-        let inp = WtoInput::from_slice(data, combo.clone());
-        wto_compute_into(
-            data,
-            inp.get_channel_length(),
-            inp.get_average_length(),
-            first,
-            kern,
-            wt1_row,
-            wt2_row,
-            hist_row,
-        )?;
+        let sma_input = SmaInput::from_slice(wt1_row, SmaParams { period: Some(4) });
+        sma_into_slice(wt2_row, &sma_input, kern)
+            .map_err(|e| WtoError::ComputationError(format!("WT2 SMA error: {}", e)))?;
+
+        for i in 0..cols {
+            if !wt1_row[i].is_nan() && !wt2_row[i].is_nan() {
+                hist_row[i] = wt1_row[i] - wt2_row[i];
+            }
+        }
     }
 
     // Turn matrices into Vecs
@@ -1526,12 +1902,109 @@ pub fn wto_batch_py<'py>(
     Ok(dict)
 }
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "wto_cuda_batch_dev")]
+#[pyo3(signature = (close_f32, channel_range, average_range, device_id=0))]
+pub fn wto_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    close_f32: numpy::PyReadonlyArray1<'py, f32>,
+    channel_range: (usize, usize, usize),
+    average_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::IntoPyArray;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let slice = close_f32.as_slice()?;
+    let sweep = WtoBatchRange {
+        channel: channel_range,
+        average: average_range,
+    };
+
+    let CudaWtoBatchResult { outputs, combos } = py.allow_threads(|| {
+        let cuda = CudaWto::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.wto_batch_dev(slice, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    let DeviceArrayF32Triplet { wt1, wt2, hist } = outputs;
+
+    let dict = pyo3::types::PyDict::new(py);
+    dict.set_item("wt1", Py::new(py, DeviceArrayF32Py { inner: wt1 })?)?;
+    dict.set_item("wt2", Py::new(py, DeviceArrayF32Py { inner: wt2 })?)?;
+    dict.set_item("hist", Py::new(py, DeviceArrayF32Py { inner: hist })?)?;
+
+    let channel_vec: Vec<usize> = combos.iter().map(|p| p.channel_length.unwrap()).collect();
+    let average_vec: Vec<usize> = combos.iter().map(|p| p.average_length.unwrap()).collect();
+
+    dict.set_item("channel_lengths", channel_vec.into_pyarray(py))?;
+    dict.set_item("average_lengths", average_vec.into_pyarray(py))?;
+    dict.set_item("rows", combos.len())?;
+    dict.set_item("cols", slice.len())?;
+
+    Ok(dict)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "wto_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, channel_length, average_length, device_id=0))]
+pub fn wto_cuda_many_series_one_param_dev_py<'py>(
+    py: Python<'py>,
+    data_tm_f32: numpy::PyReadonlyArray2<'py, f32>,
+    channel_length: usize,
+    average_length: usize,
+    device_id: usize,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::PyUntypedArrayMethods;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let shape = data_tm_f32.shape();
+    if shape.len() != 2 {
+        return Err(PyValueError::new_err("expected 2D array"));
+    }
+    let rows = shape[0];
+    let cols = shape[1];
+    let flat = data_tm_f32.as_slice()?;
+
+    let params = WtoParams {
+        channel_length: Some(channel_length),
+        average_length: Some(average_length),
+    };
+
+    let DeviceArrayF32Triplet { wt1, wt2, hist } = py.allow_threads(|| {
+        let cuda = CudaWto::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.wto_many_series_one_param_time_major_dev(flat, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    let dict = pyo3::types::PyDict::new(py);
+    dict.set_item("wt1", Py::new(py, DeviceArrayF32Py { inner: wt1 })?)?;
+    dict.set_item("wt2", Py::new(py, DeviceArrayF32Py { inner: wt2 })?)?;
+    dict.set_item("hist", Py::new(py, DeviceArrayF32Py { inner: hist })?)?;
+    dict.set_item("rows", rows)?;
+    dict.set_item("cols", cols)?;
+    dict.set_item("channel_length", channel_length)?;
+    dict.set_item("average_length", average_length)?;
+
+    Ok(dict)
+}
+
 // ==================== PYTHON MODULE REGISTRATION ====================
 #[cfg(feature = "python")]
 pub fn register_wto_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(wto_py, m)?)?;
     m.add_function(wrap_pyfunction!(wto_batch_py, m)?)?;
     m.add_class::<WtoStreamPy>()?;
+    #[cfg(feature = "cuda")]
+    {
+        m.add_function(wrap_pyfunction!(wto_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(wto_cuda_many_series_one_param_dev_py, m)?)?;
+    }
     Ok(())
 }
 

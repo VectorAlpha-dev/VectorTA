@@ -31,6 +31,12 @@
 //!   - Streaming update could potentially be optimized to O(1) by maintaining running sum
 //!   - Consider caching weight calculations for common period values
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::CudaEpma;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -1969,6 +1975,8 @@ mod tests {
 // Python bindings
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use numpy::PyReadonlyArray2;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
 #[cfg(feature = "python")]
@@ -2065,6 +2073,67 @@ pub fn epma_batch_py<'py>(
             .into_pyarray(py),
     )?;
     Ok(dict)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "epma_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, period_range, offset_range, device_id=0))]
+pub fn epma_cuda_batch_dev_py(
+    py: Python<'_>,
+    data_f32: numpy::PyReadonlyArray1<'_, f32>,
+    period_range: (usize, usize, usize),
+    offset_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let sweep = EpmaBatchRange {
+        period: period_range,
+        offset: offset_range,
+    };
+    let slice_in = data_f32.as_slice()?;
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaEpma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.epma_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "epma_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, period, offset, device_id=0))]
+pub fn epma_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm_f32: PyReadonlyArray2<'_, f32>,
+    period: usize,
+    offset: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let flat_in = data_tm_f32.as_slice()?;
+    let shape = data_tm_f32.shape();
+    let rows = shape[0];
+    let cols = shape[1];
+    let params = EpmaParams {
+        period: Some(period),
+        offset: Some(offset),
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaEpma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.epma_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "python")]

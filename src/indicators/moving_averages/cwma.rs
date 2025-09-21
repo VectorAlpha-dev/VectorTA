@@ -23,6 +23,12 @@
 //!   - TODO: Could be optimized to O(1) with incremental weight computation
 //! - **Memory optimization**: ✅ Uses zero-copy helpers (alloc_with_nan_prefix) for output vectors
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::CudaCwma;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 use crate::utilities::aligned_vector::AlignedVec;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -1346,6 +1352,61 @@ pub fn cwma_batch_py<'py>(
     Ok(dict)
 }
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "cwma_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, period_range, device_id=0))]
+pub fn cwma_cuda_batch_dev_py(
+    py: Python<'_>,
+    data_f32: numpy::PyReadonlyArray1<'_, f32>,
+    period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let slice_in = data_f32.as_slice()?;
+    let sweep = CwmaBatchRange {
+        period: period_range,
+    };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaCwma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.cwma_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "cwma_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, period, device_id=0))]
+pub fn cwma_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    period: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use numpy::PyUntypedArrayMethods;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let flat_in: &[f32] = data_tm_f32.as_slice()?;
+    let rows = data_tm_f32.shape()[0];
+    let cols = data_tm_f32.shape()[1];
+    let params = CwmaParams {
+        period: Some(period),
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaCwma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.cwma_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
+}
+
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn cwma_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
@@ -1557,6 +1618,11 @@ pub fn register_cwma_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()
     m.add_function(wrap_pyfunction!(cwma_py, m)?)?;
     m.add_function(wrap_pyfunction!(cwma_batch_py, m)?)?;
     m.add_class::<CwmaStreamPy>()?;
+    #[cfg(feature = "cuda")]
+    {
+        m.add_function(wrap_pyfunction!(cwma_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(cwma_cuda_many_series_one_param_dev_py, m)?)?;
+    }
     Ok(())
 }
 

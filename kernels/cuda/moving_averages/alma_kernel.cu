@@ -23,7 +23,7 @@
 
 #define ALMA_CUDA_VERSION (__CUDACC_VER_MAJOR__ * 1000 + __CUDACC_VER_MINOR__ * 10)
 
-#if ALMA_CUDA_VERSION >= 12040
+#if ALMA_CUDA_VERSION >= 12040 && ALMA_CUDA_VERSION < 13000
 #define ALMA_HAS_PIPELINE 1
 #include <cuda/barrier>
 #include <cuda/pipeline>

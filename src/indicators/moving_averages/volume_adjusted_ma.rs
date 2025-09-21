@@ -21,6 +21,12 @@
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::CudaVama;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -1326,6 +1332,101 @@ pub fn volume_adjusted_ma_batch_py<'py>(
     Ok(dict)
 }
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "volume_adjusted_ma_cuda_batch_dev")]
+#[pyo3(signature = (price_f32, volume_f32, length_range, vi_factor_range, sample_period_range, strict=None, device_id=0))]
+pub fn volume_adjusted_ma_cuda_batch_dev_py(
+    py: Python<'_>,
+    price_f32: numpy::PyReadonlyArray1<'_, f32>,
+    volume_f32: numpy::PyReadonlyArray1<'_, f32>,
+    length_range: (usize, usize, usize),
+    vi_factor_range: (f64, f64, f64),
+    sample_period_range: (usize, usize, usize),
+    strict: Option<bool>,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let prices = price_f32.as_slice()?;
+    let volumes = volume_f32.as_slice()?;
+    if prices.len() != volumes.len() {
+        return Err(PyValueError::new_err("price and volume length mismatch"));
+    }
+
+    let sweep = VolumeAdjustedMaBatchRange {
+        length: length_range,
+        vi_factor: vi_factor_range,
+        sample_period: sample_period_range,
+        strict,
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaVama::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.vama_batch_dev(prices, volumes, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "volume_adjusted_ma_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (price_tm_f32, volume_tm_f32, length, vi_factor, strict=True, sample_period=0, device_id=0))]
+pub fn volume_adjusted_ma_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    price_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    volume_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    length: usize,
+    vi_factor: f64,
+    strict: bool,
+    sample_period: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use numpy::PyUntypedArrayMethods;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let price_slice = price_tm_f32.as_slice()?;
+    let volume_slice = volume_tm_f32.as_slice()?;
+
+    let shape = price_tm_f32.shape();
+    if shape != volume_tm_f32.shape() {
+        return Err(PyValueError::new_err(
+            "price and volume tensors must share the same shape",
+        ));
+    }
+    if shape.len() != 2 {
+        return Err(PyValueError::new_err("expected 2D arrays (time, series)"));
+    }
+    let rows = shape[0];
+    let cols = shape[1];
+
+    let params = VolumeAdjustedMaParams {
+        length: Some(length),
+        vi_factor: Some(vi_factor),
+        strict: Some(strict),
+        sample_period: Some(sample_period),
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaVama::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.vama_multi_series_one_param_time_major_dev(
+            price_slice,
+            volume_slice,
+            cols,
+            rows,
+            &params,
+        )
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
+}
+
 #[cfg(feature = "python")]
 #[pyclass(name = "VolumeAdjustedMaStream")]
 pub struct VolumeAdjustedMaStreamPy {
@@ -1356,6 +1457,14 @@ pub fn register_VolumeAdjustedMa_module(m: &Bound<'_, pyo3::types::PyModule>) ->
     m.add_function(wrap_pyfunction!(volume_adjusted_ma_py, m)?)?;
     m.add_function(wrap_pyfunction!(volume_adjusted_ma_batch_py, m)?)?;
     m.add_class::<VolumeAdjustedMaStreamPy>()?;
+    #[cfg(feature = "cuda")]
+    {
+        m.add_function(wrap_pyfunction!(volume_adjusted_ma_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(
+            volume_adjusted_ma_cuda_many_series_one_param_dev_py,
+            m
+        )?)?;
+    }
     Ok(())
 }
 
