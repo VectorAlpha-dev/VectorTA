@@ -337,7 +337,7 @@ pub fn halftrend(input: &HalfTrendInput) -> Result<HalfTrendOutput, HalfTrendErr
     halftrend_with_kernel(input, Kernel::Auto)
 }
 
-/// Variant with explicit kernel selection  
+/// Variant with explicit kernel selection
 pub fn halftrend_with_kernel(
     input: &HalfTrendInput,
     kernel: Kernel,

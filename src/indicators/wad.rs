@@ -20,6 +20,12 @@
 //! - **TODO**: Implement actual SIMD kernels for AVX2/AVX512
 //! - **Note**: Streaming implementation is highly optimized with minimal state
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::CudaWad;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -1097,6 +1103,33 @@ pub fn wad_into_slice(dst: &mut [f64], input: &WadInput, kern: Kernel) -> Result
     }
 
     Ok(())
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "wad_cuda_dev")]
+#[pyo3(signature = (high_f32, low_f32, close_f32, device_id=0))]
+pub fn wad_cuda_dev_py(
+    py: Python<'_>,
+    high_f32: PyReadonlyArray1<'_, f32>,
+    low_f32: PyReadonlyArray1<'_, f32>,
+    close_f32: PyReadonlyArray1<'_, f32>,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let high = high_f32.as_slice()?;
+    let low = low_f32.as_slice()?;
+    let close = close_f32.as_slice()?;
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaWad::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.wad_series_dev(high, low, close)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "python")]

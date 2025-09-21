@@ -1883,7 +1883,7 @@ mod tests {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
 						 in wt1 output with params: channel_length={}, average_length={}, ma_length={}, factor={} (param set {})",
-						test_name, val, bits, i, 
+						test_name, val, bits, i,
 						params.channel_length.unwrap_or(9),
 						params.average_length.unwrap_or(12),
 						params.ma_length.unwrap_or(3),

@@ -1535,13 +1535,13 @@ mod tests {
 				let mut low_data = Vec::with_capacity(size);
 				let mut close_data = Vec::with_capacity(size);
 				let mut open_data = Vec::with_capacity(size);
-				
+
 				let mut current_price = base_price;
-				
+
 				for i in 0..size {
 					let (r1, r2, r3, r4) = random_factors[i];
 					let range = current_price * volatility;
-					
+
 					// Generate OHLC based on market type - consistently use all 4 random factors
 					let (open, high, low, close) = match market_type {
 						0 => {
@@ -1607,16 +1607,16 @@ mod tests {
 							}
 						}
 					};
-					
+
 					// Ensure OHLC constraints are strictly maintained
 					let high_final = high.max(open).max(close);
 					let low_final = low.min(open).min(close);
-					
+
 					// Additional validation
 					debug_assert!(high_final >= low_final, "High must be >= Low");
 					debug_assert!(high_final >= open && high_final >= close, "High must be >= Open and Close");
 					debug_assert!(low_final <= open && low_final <= close, "Low must be <= Open and Close");
-					
+
 					open_data.push(open);
 					high_data.push(high_final);
 					low_data.push(low_final);
@@ -1630,32 +1630,32 @@ mod tests {
 					drift: Some(drift),
 				};
 				let input = ChopInput::from_slices(&high_data, &low_data, &close_data, params.clone());
-				
+
 				// Calculate CHOP with specified kernel and scalar reference
 				let result = chop_with_kernel(&input, kernel)?;
 				let reference = chop_with_kernel(&input, Kernel::Scalar)?;
-				
+
 				// Calculate warmup period
 				let first_valid_idx = (0..size).find(|&i| {
 					!(high_data[i].is_nan() || low_data[i].is_nan() || close_data[i].is_nan())
 				}).unwrap_or(0);
 				let warmup_period = first_valid_idx + period - 1;
-				
+
 				// Track CHOP statistics for market condition validation
 				let mut valid_chop_values = Vec::new();
-				
+
 				// Property validations
 				for i in 0..size {
 					let y = result.values[i];
 					let r = reference.values[i];
-					
+
 					// Property 1: All values should be finite or NaN (no infinity or undefined)
 					prop_assert!(
 						y.is_nan() || y.is_finite(),
 						"[{}] CHOP at index {} is not finite or NaN: {}",
 						test_name, i, y
 					);
-					
+
 					// Property 2: Values before warmup should be NaN
 					if i < warmup_period {
 						prop_assert!(
@@ -1664,7 +1664,7 @@ mod tests {
 							test_name, i, y
 						);
 					}
-					
+
 					// Property 3: Values after warmup should generally be finite (unless edge case)
 					if i >= warmup_period && !high_data[i].is_nan() && !low_data[i].is_nan() && !close_data[i].is_nan() {
 						// Check if we have enough valid data in the window
@@ -1672,13 +1672,13 @@ mod tests {
 						let window_valid = (window_start..=i).all(|j| {
 							!high_data[j].is_nan() && !low_data[j].is_nan() && !close_data[j].is_nan()
 						});
-						
+
 						if window_valid {
 							// CHOP can be NaN if range is 0 or ATR sum is 0
 							let window_high_max = (window_start..=i).map(|j| high_data[j]).fold(f64::NEG_INFINITY, f64::max);
 							let window_low_min = (window_start..=i).map(|j| low_data[j]).fold(f64::INFINITY, f64::min);
 							let range = window_high_max - window_low_min;
-							
+
 							if range > 1e-10 {
 								// If range is non-zero, CHOP should typically be finite
 								if !y.is_nan() {
@@ -1691,7 +1691,7 @@ mod tests {
 										"[{}] CHOP at index {} out of reasonable bounds: {} (scalar={}, bounds=±{})",
 										test_name, i, y, scalar, normalized_bound
 									);
-									
+
 									// Collect valid CHOP values for statistics
 									valid_chop_values.push(y);
 								}
@@ -1713,7 +1713,7 @@ mod tests {
 							}
 						}
 					}
-					
+
 					// Property 5: Kernel consistency - all kernels should produce identical results
 					if y.is_finite() && r.is_finite() {
 						let ulp_diff = y.to_bits().abs_diff(r.to_bits());
@@ -1729,7 +1729,7 @@ mod tests {
 							test_name, i, y.is_nan(), r.is_nan()
 						);
 					}
-					
+
 					// Property 6: Special case - when high == low (flat candle), CHOP should handle gracefully
 					if (high_data[i] - low_data[i]).abs() < 1e-10 && i >= warmup_period {
 						// When current candle is flat but window has range, CHOP can still be calculated
@@ -1740,9 +1740,9 @@ mod tests {
 							test_name, i, y
 						);
 					}
-					
+
 				}
-				
+
 				// Property 7: Market condition validation with meaningful checks
 				if valid_chop_values.len() > 20 {
 					let avg_chop = valid_chop_values.iter().sum::<f64>() / valid_chop_values.len() as f64;
@@ -1750,7 +1750,7 @@ mod tests {
 					let mut sorted_values = valid_chop_values.clone();
 					sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 					let median_chop = sorted_values[median_idx];
-					
+
 					// Market-specific validation with thresholds
 					match market_type {
 						0 | 1 => {
@@ -1807,14 +1807,14 @@ mod tests {
 						_ => {}
 					}
 				}
-				
+
 				// Property 10: Monotonicity check for extreme cases
 				if size >= period * 3 {
 					// Check that identical consecutive segments produce similar CHOP
 					let seg1_end = period * 2;
 					let seg2_start = period;
 					let seg2_end = period * 3;
-					
+
 					if seg1_end < size && seg2_end < size {
 						let seg1_values: Vec<f64> = result.values[period..seg1_end]
 							.iter()
@@ -1826,11 +1826,11 @@ mod tests {
 							.filter(|v| v.is_finite())
 							.cloned()
 							.collect();
-						
+
 						if !seg1_values.is_empty() && !seg2_values.is_empty() {
 							let seg1_avg = seg1_values.iter().sum::<f64>() / seg1_values.len() as f64;
 							let seg2_avg = seg2_values.iter().sum::<f64>() / seg2_values.len() as f64;
-							
+
 							// For flat markets, consecutive segments should have similar CHOP
 							// But only if both segments have meaningful values
 							if market_type == 4 && seg1_avg.abs() > 1e-6 && seg2_avg.abs() > 1e-6 {
@@ -1844,7 +1844,7 @@ mod tests {
 						}
 					}
 				}
-				
+
 				Ok(())
 			})
 			.unwrap();

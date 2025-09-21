@@ -1152,7 +1152,7 @@ mod tests {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in plus array \
 						 with params: period={} (param set {})",
-						test_name, val, bits, i, 
+						test_name, val, bits, i,
 						params.period.unwrap_or(14), param_idx
 					);
                 }
@@ -1161,7 +1161,7 @@ mod tests {
                     panic!(
 						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in plus array \
 						 with params: period={} (param set {})",
-						test_name, val, bits, i, 
+						test_name, val, bits, i,
 						params.period.unwrap_or(14), param_idx
 					);
                 }
@@ -1170,7 +1170,7 @@ mod tests {
                     panic!(
 						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in plus array \
 						 with params: period={} (param set {})",
-						test_name, val, bits, i, 
+						test_name, val, bits, i,
 						params.period.unwrap_or(14), param_idx
 					);
                 }
@@ -1189,7 +1189,7 @@ mod tests {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in minus array \
 						 with params: period={} (param set {})",
-						test_name, val, bits, i, 
+						test_name, val, bits, i,
 						params.period.unwrap_or(14), param_idx
 					);
                 }
@@ -1198,7 +1198,7 @@ mod tests {
                     panic!(
 						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in minus array \
 						 with params: period={} (param set {})",
-						test_name, val, bits, i, 
+						test_name, val, bits, i,
 						params.period.unwrap_or(14), param_idx
 					);
                 }
@@ -1207,7 +1207,7 @@ mod tests {
                     panic!(
 						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in minus array \
 						 with params: period={} (param set {})",
-						test_name, val, bits, i, 
+						test_name, val, bits, i,
 						params.period.unwrap_or(14), param_idx
 					);
                 }

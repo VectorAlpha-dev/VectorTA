@@ -1165,7 +1165,7 @@ pub fn nadaraya_watson_envelope_py<'py>(
 #[cfg(feature = "python")]
 #[pyfunction(name = "nadaraya_watson_envelope_batch")]
 #[pyo3(signature = (
-    data, 
+    data,
     bandwidth_range=(8.0, 8.0, 0.0),
     multiplier_range=(3.0, 3.0, 0.0),
     lookback_range=(500, 500, 0),

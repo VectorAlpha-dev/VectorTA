@@ -1005,8 +1005,8 @@ mod tests {
                     for i in check_start..constant_result.len() {
                         let abs_val = constant_result[i].abs();
                         // More lenient tolerance for edge cases
-                        prop_assert!(abs_val < 1e-3, 
-							"[{}] Highpass should remove DC component at index {}, got {} (should be near 0)", 
+                        prop_assert!(abs_val < 1e-3,
+							"[{}] Highpass should remove DC component at index {}, got {} (should be near 0)",
 							test_name, i, constant_result[i]);
                     }
                 }

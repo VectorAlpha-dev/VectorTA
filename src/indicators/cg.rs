@@ -1,7 +1,7 @@
 //! # Center of Gravity (CG)
 //!
 //! The Center of Gravity (CG) indicator attempts to measure the "center" of prices
-//! over a given window, sometimes used for smoothing or cycle analysis.  
+//! over a given window, sometimes used for smoothing or cycle analysis.
 //!
 //! ## Parameters
 //! - **period**: The window size. Defaults to 10.

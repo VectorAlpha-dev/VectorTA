@@ -1811,7 +1811,7 @@ mod tests {
 
 				// Test with specified kernel
 				let VlmaOutput { values: out } = vlma_with_kernel(&input, kernel).unwrap();
-				
+
 				// Also compute with scalar kernel for comparison
 				let VlmaOutput { values: ref_out } = vlma_with_kernel(&input, Kernel::Scalar).unwrap();
 
@@ -1819,7 +1819,7 @@ mod tests {
 				// VLMA sets an initial value at first_valid, then NaN until max_period - 1
 				let first_valid = data.iter().position(|&x| !x.is_nan()).unwrap_or(0);
 				let expected_warmup = first_valid + max_period - 1;
-				
+
 				// Check that first_valid has a value (if it exists)
 				if first_valid < out.len() {
 					prop_assert!(
@@ -1827,7 +1827,7 @@ mod tests {
 						"Expected initial value at first_valid index {}, got NaN",
 						first_valid
 					);
-					
+
 					// Property 1b: Initial value should equal first data point
 					prop_assert!(
 						(out[first_valid] - data[first_valid]).abs() < 1e-9,
@@ -1837,7 +1837,7 @@ mod tests {
 						first_valid
 					);
 				}
-				
+
 				// Check NaN values between first_valid+1 and expected_warmup
 				for i in (first_valid + 1)..expected_warmup.min(out.len()) {
 					prop_assert!(
@@ -1860,7 +1860,7 @@ mod tests {
 				// Property 3: Output bounds - VLMA should be within exact data range
 				let data_min = data.iter().cloned().fold(f64::INFINITY, f64::min);
 				let data_max = data.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-				
+
 				for (i, &val) in out.iter().enumerate() {
 					if !val.is_nan() && i != first_valid { // Skip first_valid as it equals the data point
 						prop_assert!(
@@ -1894,28 +1894,28 @@ mod tests {
 				if data.len() >= max_period * 2 {
 					let stable_start = expected_warmup + max_period;
 					let stable_end = data.len();
-					
+
 					if stable_start < stable_end {
 						let input_segment = &data[stable_start..stable_end];
 						let output_segment = &out[stable_start..stable_end];
-						
+
 						// Calculate variance for both
 						let input_mean: f64 = input_segment.iter().sum::<f64>() / input_segment.len() as f64;
 						let input_var: f64 = input_segment.iter()
 							.map(|x| (x - input_mean).powi(2))
 							.sum::<f64>() / input_segment.len() as f64;
-						
+
 						let valid_outputs: Vec<f64> = output_segment.iter()
 							.filter(|x| !x.is_nan())
 							.cloned()
 							.collect();
-						
+
 						if valid_outputs.len() > 1 {
 							let output_mean: f64 = valid_outputs.iter().sum::<f64>() / valid_outputs.len() as f64;
 							let output_var: f64 = valid_outputs.iter()
 								.map(|x| (x - output_mean).powi(2))
 								.sum::<f64>() / valid_outputs.len() as f64;
-							
+
 							// VLMA should smooth the data, so variance should be less than or equal to input
 							prop_assert!(
 								output_var <= input_var * 1.01 || output_var < 1e-10,
@@ -1926,20 +1926,20 @@ mod tests {
 						}
 					}
 				}
-				
+
 				// Property 5b: Adaptive period behavior test
 				// For volatile data, VLMA should show adaptive behavior
 				if data.len() >= max_period * 3 {
 					// Calculate volatility in two different regions
 					let mid_point = data.len() / 2;
 					let region1_start = expected_warmup + max_period;
-					
+
 					// Ensure mid_point is after region1_start to avoid underflow
 					if mid_point > region1_start && data.len() > mid_point + max_period {
 						let region1_end = region1_start + max_period.min((mid_point - region1_start) / 2);
 						let region2_start = mid_point + max_period;
 						let region2_end = region2_start + max_period.min((data.len() - region2_start) / 2);
-					
+
 						if region1_end > region1_start && region2_end > region2_start {
 							// Calculate standard deviation for each region
 							let calc_std = |segment: &[f64]| -> f64 {
@@ -1949,14 +1949,14 @@ mod tests {
 									.sum::<f64>() / segment.len() as f64;
 								variance.sqrt()
 							};
-							
+
 							let region1_data = &data[region1_start..region1_end.min(data.len())];
 							let region2_data = &data[region2_start..region2_end.min(data.len())];
-							
+
 							if region1_data.len() > 2 && region2_data.len() > 2 {
 								let std1 = calc_std(region1_data);
 								let std2 = calc_std(region2_data);
-								
+
 								// If one region is significantly more volatile than the other
 								if (std1 > std2 * 2.0 || std2 > std1 * 2.0) && std1 > 1e-6 && std2 > 1e-6 {
 									// VLMA outputs should show some difference between regions
@@ -1970,11 +1970,11 @@ mod tests {
 										.filter(|x| !x.is_nan())
 										.cloned()
 										.collect();
-									
+
 									if out1.len() > 2 && out2.len() > 2 {
 										let out_std1 = calc_std(&out1);
 										let out_std2 = calc_std(&out2);
-										
+
 										// The region with higher volatility should have different characteristics
 										prop_assert!(
 											(out_std1 - out_std2).abs() > 1e-10 || (std1 - std2).abs() < 1e-6,
@@ -2041,14 +2041,14 @@ mod tests {
 				// If data is strictly increasing/decreasing, VLMA should follow the trend
 				let is_increasing = data.windows(2).all(|w| w[1] >= w[0]);
 				let is_decreasing = data.windows(2).all(|w| w[1] <= w[0]);
-				
+
 				if is_increasing || is_decreasing {
 					let valid_outputs: Vec<(usize, f64)> = out.iter()
 						.enumerate()
 						.filter(|(_, x)| !x.is_nan())
 						.map(|(i, &x)| (i, x))
 						.collect();
-					
+
 					if valid_outputs.len() >= 10 {
 						// Check last 5 values follow the trend
 						let last_5 = &valid_outputs[valid_outputs.len() - 5..];
@@ -2081,7 +2081,7 @@ mod tests {
 				// Property 9: Determinism - same input produces same output
 				let input2 = VlmaInput::from_slice(&data, params);
 				let VlmaOutput { values: out2 } = vlma_with_kernel(&input2, kernel).unwrap();
-				
+
 				for i in 0..out.len().min(out2.len()) {
 					if out[i].is_finite() && out2[i].is_finite() {
 						prop_assert!(

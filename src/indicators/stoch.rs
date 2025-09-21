@@ -2006,7 +2006,7 @@ mod tests {
                                 let expected_min = if slowk_period == 1 { 99.0 } else { 85.0 };
                                 prop_assert!(
 									k_val >= expected_min,
-									"K[{}] = {} should be >= {} when close equals highest high (slowk_period={})", 
+									"K[{}] = {} should be >= {} when close equals highest high (slowk_period={})",
 									i, k_val, expected_min, slowk_period
 								);
                             }
@@ -2018,7 +2018,7 @@ mod tests {
                                 let expected_max = if slowk_period == 1 { 1.0 } else { 15.0 };
                                 prop_assert!(
 									k_val <= expected_max,
-									"K[{}] = {} should be <= {} when close equals lowest low (slowk_period={})", 
+									"K[{}] = {} should be <= {} when close equals lowest low (slowk_period={})",
 									i, k_val, expected_max, slowk_period
 								);
                             }

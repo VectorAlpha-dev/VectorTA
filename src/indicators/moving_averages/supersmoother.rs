@@ -32,6 +32,10 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::{
+    cuda::moving_averages::CudaSuperSmoother, indicators::moving_averages::alma::DeviceArrayF32Py,
+};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -576,7 +580,7 @@ impl SuperSmootherBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &SuperSmootherBatchRange) -> Vec<SuperSmootherParams> {
+pub fn expand_grid_supersmoother(r: &SuperSmootherBatchRange) -> Vec<SuperSmootherParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
         if step == 0 || start == end {
             return vec![start];
@@ -616,7 +620,7 @@ fn supersmoother_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<SuperSmootherBatchOutput, SuperSmootherError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid_supersmoother(sweep);
     if combos.is_empty() {
         return Err(SuperSmootherError::InvalidPeriod {
             period: 0,
@@ -676,7 +680,7 @@ pub fn supersmoother_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<SuperSmootherParams>, SuperSmootherError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid_supersmoother(sweep);
     if combos.is_empty() {
         return Err(SuperSmootherError::InvalidPeriod {
             period: 0,
@@ -1607,7 +1611,7 @@ pub fn supersmoother_batch_py<'py>(
         period: (period_start, period_end, period_step),
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid_supersmoother(&sweep);
     let rows = combos.len();
     let cols = slice_in.len();
 
@@ -1653,6 +1657,75 @@ pub fn supersmoother_batch_py<'py>(
     )?;
 
     Ok(dict)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "supersmoother_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, period_range, device_id=0))]
+pub fn supersmoother_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    data_f32: numpy::PyReadonlyArray1<'py, f32>,
+    period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, Bound<'py, pyo3::types::PyDict>)> {
+    use crate::cuda::cuda_available;
+    use numpy::IntoPyArray;
+    use pyo3::types::PyDict;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let slice_in = data_f32.as_slice()?;
+    let sweep = SuperSmootherBatchRange {
+        period: period_range,
+    };
+
+    let (inner, combos) = py.allow_threads(|| {
+        let cuda =
+            CudaSuperSmoother::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.supersmoother_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    let dict = PyDict::new(py);
+    let periods: Vec<u64> = combos.iter().map(|c| c.period.unwrap() as u64).collect();
+    dict.set_item("periods", periods.into_pyarray(py))?;
+
+    Ok((DeviceArrayF32Py { inner }, dict))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "supersmoother_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, period, device_id=0))]
+pub fn supersmoother_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    period: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use numpy::PyUntypedArrayMethods;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let flat_in = data_tm_f32.as_slice()?;
+    let rows = data_tm_f32.shape()[0];
+    let cols = data_tm_f32.shape()[1];
+    let params = SuperSmootherParams {
+        period: Some(period),
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda =
+            CudaSuperSmoother::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.supersmoother_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "wasm")]
@@ -1743,7 +1816,7 @@ pub fn supersmoother_batch_metadata_js(
         period: (period_start, period_end, period_step),
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid_supersmoother(&sweep);
     let metadata: Vec<f64> = combos
         .iter()
         .map(|combo| combo.period.unwrap() as f64)
@@ -1840,7 +1913,7 @@ pub fn supersmoother_batch_into(
         let sweep = SuperSmootherBatchRange {
             period: (period_start, period_end, period_step),
         };
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid_supersmoother(&sweep);
         let rows = combos.len();
         let out_slice = std::slice::from_raw_parts_mut(out_ptr, rows * len);
 

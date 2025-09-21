@@ -5,6 +5,22 @@
 
 #[cfg(feature = "cuda")]
 pub mod moving_averages;
+#[cfg(feature = "cuda")]
+pub mod wad_wrapper;
+#[cfg(feature = "cuda")]
+pub mod zscore_wrapper;
+
+#[cfg(feature = "cuda")]
+pub use moving_averages::{
+    CudaAlma, CudaBuffAverages, CudaBuffAveragesError, CudaFrama, CudaFramaError, CudaHma,
+    CudaHmaError, CudaLinreg, CudaLinregError, CudaNma, CudaNmaError, CudaSma, CudaSmaError,
+    CudaSuperSmoother, CudaSuperSmootherError, CudaTrendflex, CudaTrendflexError, CudaVpwma,
+    CudaVpwmaError, CudaZlema, CudaZlemaError, DeviceArrayF32,
+};
+#[cfg(feature = "cuda")]
+pub use wad_wrapper::{CudaWad, CudaWadError};
+#[cfg(feature = "cuda")]
+pub use zscore_wrapper::{CudaZscore, CudaZscoreError};
 
 /// Returns true if a CUDA device is available and the driver API can be initialized.
 #[inline]

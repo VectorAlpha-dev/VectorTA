@@ -1100,7 +1100,7 @@ mod tests {
 					// Calculate bounds - VWMA should be within price range
 					let price_min = window_prices.iter().cloned().fold(f64::INFINITY, f64::min);
 					let price_max = window_prices.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-					
+
 					// Check if all volumes in window are zero (would cause division by zero)
 					let volume_sum: f64 = window_volumes.iter().sum();
 					let has_valid_volume = volume_sum > 0.0 && volume_sum.is_finite();
@@ -1118,13 +1118,13 @@ mod tests {
 						// When volume sum is 0, we expect NaN (from division by zero)
 						// However, due to sliding window mechanics, we may still have a valid result
 						// if the numerator (sum of price*volume products) is also 0
-						
+
 						// Calculate the actual numerator to understand what should happen
 						let numerator: f64 = window_prices.iter()
 							.zip(window_volumes.iter())
 							.map(|(p, v)| p * v)
 							.sum();
-						
+
 						if numerator == 0.0 || !numerator.is_finite() {
 							// 0/0 case - implementation may return NaN, 0, or -0
 							prop_assert!(

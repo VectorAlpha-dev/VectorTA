@@ -1206,7 +1206,7 @@ mod tests {
 
 				// Test with the specified kernel
 				let EpmaOutput { values: out } = epma_with_kernel(&input, kernel).unwrap();
-				
+
 				// Also compute reference with scalar kernel for consistency check
 				let EpmaOutput { values: ref_out } = epma_with_kernel(&input, Kernel::Scalar).unwrap();
 
@@ -1237,7 +1237,7 @@ mod tests {
 						let w = (period as i32 - i as i32 - offset as i32) as f64;
 						weight_sum += w;
 					}
-					
+
 					// Only check for valid output if weight_sum is non-zero
 					if weight_sum.abs() > 1e-10 {
 						prop_assert!(
@@ -1257,7 +1257,7 @@ mod tests {
 					let w = (period as i32 - i as i32 - offset as i32) as f64;
 					weight_sum += w;
 				}
-				
+
 				if weight_sum.abs() > 1e-10 {
 					// Normal case: weight_sum is non-zero, outputs should be finite
 					for i in warmup..data.len() {
@@ -1292,7 +1292,7 @@ mod tests {
 					}
 				}
 
-				// Property 4: Special case - period=2, offset=0 
+				// Property 4: Special case - period=2, offset=0
 				// EPMA uses period-1 values, so for period=2 it uses 1 value
 				// Weight = (2 - 0 - 0) = 2, but since p1=1, it just copies the value
 				if period == 2 && offset == 0 && warmup < data.len() {
@@ -1323,7 +1323,7 @@ mod tests {
 						let w = (period as i32 - i as i32 - offset as i32) as f64;
 						weight_sum += w;
 					}
-					
+
 					if weight_sum.abs() > 1e-10 {
 						for i in warmup..data.len() {
 							prop_assert!(
@@ -1363,7 +1363,7 @@ mod tests {
 					} else {
 						(y - r).abs()
 					};
-					
+
 					// Allow small relative error (0.01%) or small absolute error or small ULP difference
 					prop_assert!(
 						rel_error <= 1e-4 || (y - r).abs() <= 1e-9 || ulp_diff <= 100,
@@ -1401,7 +1401,7 @@ mod tests {
 									expected_sum += data[start + i] * weights[p1 - 1 - i];
 								}
 								let expected = expected_sum / weight_sum;
-								
+
 								// Both should be finite for comparison
 								if out[idx].is_finite() && expected.is_finite() {
 									// Use relative tolerance for large values, absolute for small
@@ -1422,7 +1422,7 @@ mod tests {
 								} else {
 									// Both should have the same NaN/Inf status
 									prop_assert!(
-										out[idx].is_nan() == expected.is_nan() && 
+										out[idx].is_nan() == expected.is_nan() &&
 										out[idx].is_infinite() == expected.is_infinite(),
 										"[{}] EPMA formula NaN/Inf mismatch at {}: got {}, expected {}",
 										test_name,

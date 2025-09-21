@@ -34,8 +34,10 @@ use std::convert::AsRef;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::{cuda::moving_averages::CudaSma, indicators::moving_averages::alma::DeviceArrayF32Py};
 #[cfg(feature = "python")]
-use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
@@ -496,7 +498,7 @@ impl SmaBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &SmaBatchRange) -> Vec<SmaParams> {
+pub fn expand_grid_sma(r: &SmaBatchRange) -> Vec<SmaParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
         if step == 0 || start == end {
             return vec![start];
@@ -536,7 +538,7 @@ fn sma_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<SmaBatchOutput, SmaError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid_sma(sweep);
     if combos.is_empty() {
         return Err(SmaError::InvalidPeriod {
             period: 0,
@@ -605,7 +607,7 @@ fn sma_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<SmaParams>, SmaError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid_sma(sweep);
     if combos.is_empty() {
         return Err(SmaError::InvalidPeriod {
             period: 0,
@@ -814,7 +816,7 @@ pub fn sma_batch_py<'py>(
     };
 
     // Validate and prepare
-    let combos = expand_grid(&range);
+    let combos = expand_grid_sma(&range);
     if combos.is_empty() {
         return Err(PyValueError::new_err("Invalid period range"));
     }
@@ -862,6 +864,73 @@ pub fn sma_batch_py<'py>(
     )?;
 
     Ok(dict.into())
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "sma_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, period_range, device_id=0))]
+pub fn sma_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    data_f32: numpy::PyReadonlyArray1<'py, f32>,
+    period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, Bound<'py, PyDict>)> {
+    use crate::cuda::cuda_available;
+    use numpy::IntoPyArray;
+    use pyo3::types::PyDict;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let slice_in = data_f32.as_slice()?;
+    let sweep = SmaBatchRange {
+        period: period_range,
+    };
+
+    let (inner, combos) = py.allow_threads(|| {
+        let cuda = CudaSma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.sma_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    let dict = PyDict::new(py);
+    let periods: Vec<u64> = combos.iter().map(|c| c.period.unwrap() as u64).collect();
+    dict.set_item("periods", periods.into_pyarray(py))?;
+
+    Ok((DeviceArrayF32Py { inner }, dict))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "sma_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, period, device_id=0))]
+pub fn sma_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    period: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use numpy::PyUntypedArrayMethods;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let flat_in = data_tm_f32.as_slice()?;
+    let rows = data_tm_f32.shape()[0];
+    let cols = data_tm_f32.shape()[1];
+    let params = SmaParams {
+        period: Some(period),
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaSma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.sma_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "python")]
@@ -1013,7 +1082,7 @@ pub fn sma_batch_metadata_js(
     let range = SmaBatchRange {
         period: (period_start, period_end, period_step),
     };
-    let combos = expand_grid(&range);
+    let combos = expand_grid_sma(&range);
     combos.iter().map(|c| c.period.unwrap_or(9)).collect()
 }
 
@@ -1029,7 +1098,7 @@ pub fn sma_batch_rows_cols_js(
     let range = SmaBatchRange {
         period: (period_start, period_end, period_step),
     };
-    let combos = expand_grid(&range);
+    let combos = expand_grid_sma(&range);
     vec![combos.len(), data_len]
 }
 
@@ -1122,7 +1191,7 @@ pub fn sma_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid_sma(&sweep);
         let rows = combos.len();
         let total_size = rows * len;
 

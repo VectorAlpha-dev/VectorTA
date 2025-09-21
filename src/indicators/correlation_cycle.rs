@@ -603,7 +603,7 @@ pub struct CorrelationCycleStream {
     head: usize,
     filled: bool,
     /// Holds the (real, imag, angle, state) computed for the "previous" window,
-    /// so that we emit it one tick later.  
+    /// so that we emit it one tick later.
     last: Option<(f64, f64, f64, f64)>,
     // Pre-allocated working buffers to avoid allocations in update()
     work_data: Vec<f64>,

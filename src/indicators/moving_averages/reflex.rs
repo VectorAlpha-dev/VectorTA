@@ -1034,7 +1034,7 @@ pub fn reflex_py<'py>(
     kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
     r#"Compute Reflex indicator.
-    
+
     Parameters
     ----------
     data : numpy.ndarray
@@ -1047,7 +1047,7 @@ pub fn reflex_py<'py>(
         - 'scalar': Use scalar implementation
         - 'avx2': Use AVX2 implementation (if available)
         - 'avx512': Use AVX512 implementation (if available)
-    
+
     Returns
     -------
     numpy.ndarray
@@ -1083,7 +1083,7 @@ pub fn reflex_batch_py<'py>(
     kernel: Option<&str>,
 ) -> PyResult<Py<PyDict>> {
     r#"Compute Reflex indicator for multiple periods.
-    
+
     Parameters
     ----------
     data : numpy.ndarray
@@ -1092,7 +1092,7 @@ pub fn reflex_batch_py<'py>(
         (start, end, step) for period range
     kernel : str, optional
         Kernel to use (see reflex() for options)
-    
+
     Returns
     -------
     dict

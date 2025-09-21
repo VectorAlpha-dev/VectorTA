@@ -1304,7 +1304,7 @@ mod tests {
 					if val.is_nan() && ref_val.is_nan() {
 						continue;
 					}
-					
+
 					let diff = (val - ref_val).abs();
 					prop_assert!(
 						diff < 1e-9,
@@ -1317,7 +1317,7 @@ mod tests {
 				let all_same_high = high.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
 				let all_same_low = low.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
 				let all_same_close = close.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
-				
+
 				if all_same_high && all_same_low && all_same_close {
 					// With no directional movement, DX should be near 0
 					if out.len() > warmup + 10 {
@@ -1341,20 +1341,20 @@ mod tests {
 					let first_half_avg_price = close[..mid].iter().sum::<f64>() / mid as f64;
 					let second_half_avg_price = close[mid..].iter().sum::<f64>() / (out.len() - mid) as f64;
 					let price_change = ((second_half_avg_price - first_half_avg_price) / first_half_avg_price).abs();
-					
+
 					// For significant price changes, DX should reflect trend strength
 					if price_change > 0.05 {
 						// Compare average DX in second half vs first half
 						let first_half_dx = &out[warmup..mid];
 						let second_half_dx = &out[mid..];
-						
+
 						let first_avg = first_half_dx.iter()
 							.filter(|v| !v.is_nan())
 							.sum::<f64>() / first_half_dx.len() as f64;
 						let second_avg = second_half_dx.iter()
 							.filter(|v| !v.is_nan())
 							.sum::<f64>() / second_half_dx.len() as f64;
-						
+
 						// In trending markets, average DX should be meaningful (> 20)
 						prop_assert!(
 							second_avg > 20.0 || first_avg > 20.0,
@@ -1378,21 +1378,21 @@ mod tests {
 							(h, l, c)
 						})
 						.collect::<Vec<_>>();
-					
+
 					let perfect_high: Vec<f64> = perfect_trend.iter().map(|&(h, _, _)| h).collect();
 					let perfect_low: Vec<f64> = perfect_trend.iter().map(|&(_, l, _)| l).collect();
 					let perfect_close: Vec<f64> = perfect_trend.iter().map(|&(_, _, c)| c).collect();
-					
+
 					let perfect_input = DxInput::from_hlc_slices(&perfect_high, &perfect_low, &perfect_close, params.clone());
 					let DxOutput { values: perfect_out } = dx_with_kernel(&perfect_input, kernel).unwrap();
-					
+
 					// In a perfect trend, DX should be high after stabilization
 					if perfect_out.len() > warmup + 10 {
 						let stable_dx = &perfect_out[warmup + 10..];
 						let avg_dx = stable_dx.iter()
 							.filter(|v| !v.is_nan())
 							.sum::<f64>() / stable_dx.len() as f64;
-						
+
 						prop_assert!(
 							avg_dx > 50.0,  // Strong trend should show DX > 50
 							"[{}] Expected high DX (>50) in perfect trend, got avg {}",
@@ -1420,21 +1420,21 @@ mod tests {
 							(h, l, c)
 						})
 						.collect::<Vec<_>>();
-					
+
 					let ranging_high: Vec<f64> = ranging_data.iter().map(|&(h, _, _)| h).collect();
 					let ranging_low: Vec<f64> = ranging_data.iter().map(|&(_, l, _)| l).collect();
 					let ranging_close: Vec<f64> = ranging_data.iter().map(|&(_, _, c)| c).collect();
-					
+
 					let ranging_input = DxInput::from_hlc_slices(&ranging_high, &ranging_low, &ranging_close, params.clone());
 					let DxOutput { values: ranging_out } = dx_with_kernel(&ranging_input, kernel).unwrap();
-					
+
 					// In a ranging market, DX should be low after stabilization
 					if ranging_out.len() > warmup + 10 {
 						let stable_dx = &ranging_out[warmup + 10..];
 						let avg_dx = stable_dx.iter()
 							.filter(|v| !v.is_nan())
 							.sum::<f64>() / stable_dx.len() as f64;
-						
+
 						// Note: Even small oscillations can produce moderate DX values
 						// since DX measures absolute directional movement
 						prop_assert!(

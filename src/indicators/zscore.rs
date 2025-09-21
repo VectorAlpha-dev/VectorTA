@@ -19,9 +19,13 @@
 //! - **Streaming Performance**: O(n) implementation - copies entire buffer to ordered array, then calls MA and deviation functions which iterate again. Very inefficient - allocates new vectors on each update. Should maintain running statistics.
 //! - **Memory Optimization**: Uses `alloc_with_nan_prefix` and batch helpers properly. However, streaming allocates temporary vectors on each update which is wasteful.
 
+#[cfg(feature = "cuda")]
+use crate::cuda::{CudaZscore, CudaZscoreError};
 use crate::indicators::deviation::{
     deviation, DevError, DevInput, DevParams, DeviationData, DeviationOutput,
 };
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 use crate::indicators::moving_averages::ma::{ma, MaData};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -46,6 +50,7 @@ use pyo3::types::{PyDict, PyList};
 use rayon::prelude::*;
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::error::Error;
 use thiserror::Error;
 #[cfg(feature = "wasm")]
@@ -881,46 +886,147 @@ fn zscore_batch_inner(
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
-    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-        let prm = &combos[row];
+    let mut groups: HashMap<usize, Vec<(usize, f64)>> = HashMap::new();
+    let mut fallback_rows: Vec<usize> = Vec::new();
+    for (row_idx, prm) in combos.iter().enumerate() {
         let period = prm.period.unwrap();
         let ma_type = prm.ma_type.as_ref().unwrap();
-        let nbdev = prm.nbdev.unwrap();
         let devtype = prm.devtype.unwrap();
-        match kern {
-            Kernel::Scalar => {
-                zscore_row_scalar(data, first, period, ma_type, nbdev, devtype, out_row)
-            }
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => zscore_row_avx2(data, first, period, ma_type, nbdev, devtype, out_row),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => {
-                zscore_row_avx512(data, first, period, ma_type, nbdev, devtype, out_row)
-            }
-            _ => unreachable!(),
-        }
-    };
-    if parallel {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            out.par_chunks_mut(cols)
-                .enumerate()
-                .for_each(|(row, slice)| do_row(row, slice));
-        }
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            for (row, slice) in out.chunks_mut(cols).enumerate() {
-                do_row(row, slice);
-            }
-        }
-    } else {
-        for (row, slice) in out.chunks_mut(cols).enumerate() {
-            do_row(row, slice);
+        if devtype == 0 && ma_type == "sma" {
+            groups
+                .entry(period)
+                .or_default()
+                .push((row_idx, prm.nbdev.unwrap()));
+        } else {
+            fallback_rows.push(row_idx);
         }
     }
 
-    // Convert the uninitialized buffer to a proper Vec
+    let prefixes = if groups.is_empty() {
+        None
+    } else {
+        Some(build_sma_std_prefixes(data))
+    };
+
+    let writer = RowWriter {
+        ptr: out.as_mut_ptr(),
+        cols,
+    };
+
+    for (period, rows_for_period) in groups.into_iter() {
+        let warmup_end = first + period - 1;
+        let mut base = vec![f64::NAN; cols];
+
+        match kern {
+            Kernel::Scalar => {
+                let pre = prefixes.as_ref().expect("prefixes missing for scalar path");
+                zscore_sma_std_from_prefix_scalar(data, period, warmup_end, pre, &mut base);
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 => unsafe {
+                let pre = prefixes.as_ref().expect("prefixes missing for AVX2 path");
+                zscore_sma_std_from_prefix_avx2(data, period, warmup_end, pre, &mut base);
+            },
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 => unsafe {
+                let pre = prefixes.as_ref().expect("prefixes missing for AVX512 path");
+                zscore_sma_std_from_prefix_avx512(data, period, warmup_end, pre, &mut base);
+            },
+            _ => unreachable!(),
+        }
+
+        let base_ref = &base;
+
+        let write_scalar = |row_idx: usize, nbdev: f64| unsafe {
+            writer.with_row(row_idx, |dst| {
+                scale_copy_row_scalar(base_ref, warmup_end, nbdev, dst);
+            });
+        };
+
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        let write_avx2 = |row_idx: usize, nbdev: f64| unsafe {
+            writer.with_row(row_idx, |dst| {
+                scale_copy_row_avx2(base_ref, warmup_end, nbdev, dst);
+            });
+        };
+
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        let write_avx512 = |row_idx: usize, nbdev: f64| unsafe {
+            writer.with_row(row_idx, |dst| {
+                scale_copy_row_avx512(base_ref, warmup_end, nbdev, dst);
+            });
+        };
+
+        let dispatch_write = |row_idx: usize, nbdev: f64| match kern {
+            Kernel::Scalar => write_scalar(row_idx, nbdev),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 => write_avx2(row_idx, nbdev),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 => write_avx512(row_idx, nbdev),
+            _ => unreachable!(),
+        };
+
+        if parallel {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                use rayon::prelude::*;
+                rows_for_period
+                    .par_iter()
+                    .for_each(|(row_idx, nb)| dispatch_write(*row_idx, *nb));
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                for (row_idx, nb) in rows_for_period.iter() {
+                    dispatch_write(*row_idx, *nb);
+                }
+            }
+        } else {
+            for (row_idx, nb) in rows_for_period.iter() {
+                dispatch_write(*row_idx, *nb);
+            }
+        }
+    }
+
+    if !fallback_rows.is_empty() {
+        let do_row = |row: usize| unsafe {
+            let prm = &combos[row];
+            let period = prm.period.unwrap();
+            let ma_type = prm.ma_type.as_ref().unwrap();
+            let nbdev = prm.nbdev.unwrap();
+            let devtype = prm.devtype.unwrap();
+            writer.with_row(row, |dst| match kern {
+                Kernel::Scalar => {
+                    zscore_row_scalar(data, first, period, ma_type, nbdev, devtype, dst)
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 => zscore_row_avx2(data, first, period, ma_type, nbdev, devtype, dst),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 => {
+                    zscore_row_avx512(data, first, period, ma_type, nbdev, devtype, dst)
+                }
+                _ => unreachable!(),
+            });
+        };
+
+        if parallel {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                use rayon::prelude::*;
+                fallback_rows.par_iter().for_each(|&row| do_row(row));
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                for &row in &fallback_rows {
+                    do_row(row);
+                }
+            }
+        } else {
+            for &row in &fallback_rows {
+                do_row(row);
+            }
+        }
+    }
+
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -1010,50 +1116,402 @@ unsafe fn zscore_row_scalar_classic_sma(
 ) {
     let warmup_end = first + period - 1;
 
-    // Calculate initial SMA
+    // Initial rolling sums
     let mut sum = 0.0;
-    for j in first..warmup_end + 1 {
-        sum += data[j];
+    let mut sum_sqr = 0.0;
+    for j in first..=warmup_end {
+        let val = data[j];
+        sum += val;
+        sum_sqr += val * val;
     }
+
     let mut mean = sum / period as f64;
+    let mut variance = (sum_sqr / period as f64) - (mean * mean);
+    let mut stddev = if variance <= 0.0 {
+        0.0
+    } else {
+        variance.sqrt() * nbdev
+    };
 
-    // Calculate initial standard deviation
-    let mut sum_sq_diff = 0.0;
-    for j in first..warmup_end + 1 {
-        let diff = data[j] - mean;
-        sum_sq_diff += diff * diff;
-    }
-    let mut stddev = (sum_sq_diff / period as f64).sqrt() * nbdev;
-
-    // First valid value
     out[warmup_end] = if stddev == 0.0 || stddev.is_nan() {
         f64::NAN
     } else {
         (data[warmup_end] - mean) / stddev
     };
 
-    // Rolling calculation
     for i in warmup_end + 1..data.len() {
-        // Update rolling SMA
         let old_val = data[i - period];
         let new_val = data[i];
-        sum = sum - old_val + new_val;
+
+        sum += new_val - old_val;
+        sum_sqr += new_val * new_val - old_val * old_val;
+
         mean = sum / period as f64;
+        variance = (sum_sqr / period as f64) - (mean * mean);
+        stddev = if variance <= 0.0 {
+            0.0
+        } else {
+            variance.sqrt() * nbdev
+        };
 
-        // Update rolling standard deviation
-        sum_sq_diff = 0.0;
-        for j in (i - period + 1)..=i {
-            let diff = data[j] - mean;
-            sum_sq_diff += diff * diff;
-        }
-        stddev = (sum_sq_diff / period as f64).sqrt() * nbdev;
-
-        // Calculate z-score
         out[i] = if stddev == 0.0 || stddev.is_nan() {
             f64::NAN
         } else {
             (new_val - mean) / stddev
         };
+    }
+}
+
+#[derive(Clone, Debug)]
+struct SmaStdPrefixes {
+    ps: Vec<f64>,
+    ps2: Vec<f64>,
+    pnan: Vec<i32>,
+}
+
+#[inline]
+fn build_sma_std_prefixes(data: &[f64]) -> SmaStdPrefixes {
+    let n = data.len();
+    let mut ps = vec![0.0f64; n + 1];
+    let mut ps2 = vec![0.0f64; n + 1];
+    let mut pnan = vec![0i32; n + 1];
+
+    for i in 0..n {
+        let v = data[i];
+        if v.is_nan() {
+            ps[i + 1] = ps[i];
+            ps2[i + 1] = ps2[i];
+            pnan[i + 1] = pnan[i] + 1;
+        } else {
+            ps[i + 1] = ps[i] + v;
+            ps2[i + 1] = ps2[i] + v * v;
+            pnan[i + 1] = pnan[i];
+        }
+    }
+
+    SmaStdPrefixes { ps, ps2, pnan }
+}
+
+#[inline]
+fn zscore_sma_std_from_prefix_scalar(
+    data: &[f64],
+    period: usize,
+    warmup_end: usize,
+    pre: &SmaStdPrefixes,
+    base_out: &mut [f64],
+) {
+    let n = data.len();
+    debug_assert_eq!(base_out.len(), n);
+
+    for v in &mut base_out[..warmup_end] {
+        *v = f64::NAN;
+    }
+    if n <= warmup_end {
+        return;
+    }
+
+    let denom = period as f64;
+    for i in warmup_end..n {
+        let nan_count = pre.pnan[i + 1] - pre.pnan[i + 1 - period];
+        if nan_count > 0 {
+            base_out[i] = f64::NAN;
+            continue;
+        }
+
+        let sum = pre.ps[i + 1] - pre.ps[i + 1 - period];
+        let sum2 = pre.ps2[i + 1] - pre.ps2[i + 1 - period];
+        let mean = sum / denom;
+        let variance = sum2 / denom - mean * mean;
+        let stdv = if variance <= 0.0 {
+            0.0
+        } else {
+            variance.sqrt()
+        };
+        base_out[i] = if stdv == 0.0 || stdv.is_nan() {
+            f64::NAN
+        } else {
+            (data[i] - mean) / stdv
+        };
+    }
+}
+
+#[inline]
+fn scale_copy_row_scalar(src_base: &[f64], warmup_end: usize, nbdev: f64, dst: &mut [f64]) {
+    debug_assert_eq!(src_base.len(), dst.len());
+
+    if warmup_end > 0 {
+        dst[..warmup_end].copy_from_slice(&src_base[..warmup_end]);
+    }
+
+    if dst.len() <= warmup_end {
+        return;
+    }
+
+    if nbdev == 0.0 {
+        for v in &mut dst[warmup_end..] {
+            *v = f64::NAN;
+        }
+        return;
+    }
+
+    for (d, s) in dst[warmup_end..].iter_mut().zip(&src_base[warmup_end..]) {
+        *d = *s / nbdev;
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn zscore_sma_std_from_prefix_avx2(
+    data: &[f64],
+    period: usize,
+    warmup_end: usize,
+    pre: &SmaStdPrefixes,
+    base_out: &mut [f64],
+) {
+    let n = data.len();
+    debug_assert_eq!(base_out.len(), n);
+
+    for v in &mut base_out[..warmup_end] {
+        *v = f64::NAN;
+    }
+    if n <= warmup_end {
+        return;
+    }
+
+    let den = _mm256_set1_pd(period as f64);
+    let zero = _mm256_set1_pd(0.0);
+    let nanv = _mm256_set1_pd(f64::NAN);
+
+    let mut i = warmup_end;
+    while i + 4 <= n {
+        let s_hi = _mm256_loadu_pd(pre.ps.as_ptr().add(i + 1));
+        let s_lo = _mm256_loadu_pd(pre.ps.as_ptr().add(i + 1 - period));
+        let sum = _mm256_sub_pd(s_hi, s_lo);
+
+        let q_hi = _mm256_loadu_pd(pre.ps2.as_ptr().add(i + 1));
+        let q_lo = _mm256_loadu_pd(pre.ps2.as_ptr().add(i + 1 - period));
+        let sum2 = _mm256_sub_pd(q_hi, q_lo);
+
+        let mean = _mm256_div_pd(sum, den);
+        let var = _mm256_sub_pd(_mm256_div_pd(sum2, den), _mm256_mul_pd(mean, mean));
+        let var_nz = _mm256_max_pd(var, zero);
+        let stdv = _mm256_sqrt_pd(var_nz);
+
+        let x = _mm256_loadu_pd(data.as_ptr().add(i));
+        let z = _mm256_div_pd(_mm256_sub_pd(x, mean), stdv);
+
+        let m_std0 = _mm256_cmp_pd(stdv, zero, _CMP_EQ_OQ);
+        let m_stdnan = _mm256_cmp_pd(stdv, stdv, _CMP_UNORD_Q);
+
+        let cur = _mm_loadu_si128(pre.pnan.as_ptr().add(i + 1) as *const _);
+        let prev = _mm_loadu_si128(pre.pnan.as_ptr().add(i + 1 - period) as *const _);
+        let diff = _mm_sub_epi32(cur, prev);
+        let diff_pd = _mm256_cvtepi32_pd(diff);
+        let m_hasnan = _mm256_cmp_pd(diff_pd, zero, _CMP_GT_OQ);
+
+        let mask = _mm256_or_pd(_mm256_or_pd(m_std0, m_stdnan), m_hasnan);
+        let res = _mm256_blendv_pd(z, nanv, mask);
+        _mm256_storeu_pd(base_out.as_mut_ptr().add(i), res);
+
+        i += 4;
+    }
+
+    let den_s = period as f64;
+    while i < n {
+        let count = pre.pnan[i + 1] - pre.pnan[i + 1 - period];
+        if count > 0 {
+            base_out[i] = f64::NAN;
+        } else {
+            let sum = pre.ps[i + 1] - pre.ps[i + 1 - period];
+            let sum2 = pre.ps2[i + 1] - pre.ps2[i + 1 - period];
+            let mean = sum / den_s;
+            let variance = sum2 / den_s - mean * mean;
+            let sd = if variance <= 0.0 {
+                0.0
+            } else {
+                variance.sqrt()
+            };
+            base_out[i] = if sd == 0.0 || sd.is_nan() {
+                f64::NAN
+            } else {
+                (data[i] - mean) / sd
+            };
+        }
+        i += 1;
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+#[inline]
+unsafe fn zscore_sma_std_from_prefix_avx512(
+    data: &[f64],
+    period: usize,
+    warmup_end: usize,
+    pre: &SmaStdPrefixes,
+    base_out: &mut [f64],
+) {
+    let n = data.len();
+    debug_assert_eq!(base_out.len(), n);
+
+    for v in &mut base_out[..warmup_end] {
+        *v = f64::NAN;
+    }
+    if n <= warmup_end {
+        return;
+    }
+
+    let den = _mm512_set1_pd(period as f64);
+    let zero = _mm512_set1_pd(0.0);
+    let nanv = _mm512_set1_pd(f64::NAN);
+
+    let mut i = warmup_end;
+    while i + 8 <= n {
+        let s_hi = _mm512_loadu_pd(pre.ps.as_ptr().add(i + 1));
+        let s_lo = _mm512_loadu_pd(pre.ps.as_ptr().add(i + 1 - period));
+        let sum = _mm512_sub_pd(s_hi, s_lo);
+
+        let q_hi = _mm512_loadu_pd(pre.ps2.as_ptr().add(i + 1));
+        let q_lo = _mm512_loadu_pd(pre.ps2.as_ptr().add(i + 1 - period));
+        let sum2 = _mm512_sub_pd(q_hi, q_lo);
+
+        let mean = _mm512_div_pd(sum, den);
+        let var = _mm512_sub_pd(_mm512_div_pd(sum2, den), _mm512_mul_pd(mean, mean));
+        let var_nz = _mm512_max_pd(var, zero);
+        let stdv = _mm512_sqrt_pd(var_nz);
+
+        let x = _mm512_loadu_pd(data.as_ptr().add(i));
+        let z = _mm512_div_pd(_mm512_sub_pd(x, mean), stdv);
+
+        let k_std0 = _mm512_cmp_pd_mask(stdv, zero, _CMP_EQ_OQ);
+        let k_stdnan = _mm512_cmp_pd_mask(stdv, stdv, _CMP_UNORD_Q);
+
+        let cur_i = _mm256_loadu_si256(pre.pnan.as_ptr().add(i + 1) as *const _);
+        let prev_i = _mm256_loadu_si256(pre.pnan.as_ptr().add(i + 1 - period) as *const _);
+        let diff_i = _mm256_sub_epi32(cur_i, prev_i);
+        let diff_pd = _mm512_cvtepi32_pd(diff_i);
+        let k_hasnan = _mm512_cmp_pd_mask(diff_pd, zero, _CMP_GT_OQ);
+
+        let k_bad = k_std0 | k_stdnan | k_hasnan;
+        let res = _mm512_mask_mov_pd(z, k_bad, nanv);
+        _mm512_storeu_pd(base_out.as_mut_ptr().add(i), res);
+
+        i += 8;
+    }
+
+    let den_s = period as f64;
+    while i < n {
+        let count = pre.pnan[i + 1] - pre.pnan[i + 1 - period];
+        if count > 0 {
+            base_out[i] = f64::NAN;
+        } else {
+            let sum = pre.ps[i + 1] - pre.ps[i + 1 - period];
+            let sum2 = pre.ps2[i + 1] - pre.ps2[i + 1 - period];
+            let mean = sum / den_s;
+            let variance = sum2 / den_s - mean * mean;
+            let sd = if variance <= 0.0 {
+                0.0
+            } else {
+                variance.sqrt()
+            };
+            base_out[i] = if sd == 0.0 || sd.is_nan() {
+                f64::NAN
+            } else {
+                (data[i] - mean) / sd
+            };
+        }
+        i += 1;
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn scale_copy_row_avx2(src_base: &[f64], warmup_end: usize, nbdev: f64, dst: &mut [f64]) {
+    debug_assert_eq!(src_base.len(), dst.len());
+
+    if warmup_end > 0 {
+        dst[..warmup_end].copy_from_slice(&src_base[..warmup_end]);
+    }
+
+    if dst.len() <= warmup_end {
+        return;
+    }
+
+    if nbdev == 0.0 {
+        for v in &mut dst[warmup_end..] {
+            *v = f64::NAN;
+        }
+        return;
+    }
+
+    let inv = _mm256_set1_pd(1.0 / nbdev);
+    let mut i = warmup_end;
+    while i + 4 <= dst.len() {
+        let v = _mm256_loadu_pd(src_base.as_ptr().add(i));
+        let y = _mm256_mul_pd(v, inv);
+        _mm256_storeu_pd(dst.as_mut_ptr().add(i), y);
+        i += 4;
+    }
+    while i < dst.len() {
+        dst[i] = src_base[i] / nbdev;
+        i += 1;
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+#[inline]
+unsafe fn scale_copy_row_avx512(src_base: &[f64], warmup_end: usize, nbdev: f64, dst: &mut [f64]) {
+    debug_assert_eq!(src_base.len(), dst.len());
+
+    if warmup_end > 0 {
+        dst[..warmup_end].copy_from_slice(&src_base[..warmup_end]);
+    }
+
+    if dst.len() <= warmup_end {
+        return;
+    }
+
+    if nbdev == 0.0 {
+        for v in &mut dst[warmup_end..] {
+            *v = f64::NAN;
+        }
+        return;
+    }
+
+    let inv = _mm512_set1_pd(1.0 / nbdev);
+    let mut i = warmup_end;
+    while i + 8 <= dst.len() {
+        let v = _mm512_loadu_pd(src_base.as_ptr().add(i));
+        let y = _mm512_mul_pd(v, inv);
+        _mm512_storeu_pd(dst.as_mut_ptr().add(i), y);
+        i += 8;
+    }
+    while i < dst.len() {
+        dst[i] = src_base[i] / nbdev;
+        i += 1;
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RowWriter {
+    ptr: *mut f64,
+    cols: usize,
+}
+
+unsafe impl Send for RowWriter {}
+unsafe impl Sync for RowWriter {}
+
+impl RowWriter {
+    #[inline(always)]
+    unsafe fn with_row<F>(&self, row: usize, mut f: F)
+    where
+        F: FnOnce(&mut [f64]),
+    {
+        let slice = std::slice::from_raw_parts_mut(self.ptr.add(row * self.cols), self.cols);
+        f(slice);
     }
 }
 
@@ -1218,44 +1676,147 @@ pub fn zscore_batch_inner_into(
         }
     }
 
-    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-        let prm = &combos[row];
+    let mut groups: HashMap<usize, Vec<(usize, f64)>> = HashMap::new();
+    let mut fallback_rows: Vec<usize> = Vec::new();
+    for (row_idx, prm) in combos.iter().enumerate() {
         let period = prm.period.unwrap();
         let ma_type = prm.ma_type.as_ref().unwrap();
-        let nbdev = prm.nbdev.unwrap();
         let devtype = prm.devtype.unwrap();
-        match kern {
-            Kernel::Scalar => {
-                zscore_row_scalar(data, first, period, ma_type, nbdev, devtype, out_row)
-            }
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => zscore_row_avx2(data, first, period, ma_type, nbdev, devtype, out_row),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => {
-                zscore_row_avx512(data, first, period, ma_type, nbdev, devtype, out_row)
-            }
-            _ => unreachable!(),
-        }
-    };
-    if parallel {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            out.par_chunks_mut(cols)
-                .enumerate()
-                .for_each(|(row, slice)| do_row(row, slice));
-        }
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            for (row, slice) in out.chunks_mut(cols).enumerate() {
-                do_row(row, slice);
-            }
-        }
-    } else {
-        for (row, slice) in out.chunks_mut(cols).enumerate() {
-            do_row(row, slice);
+        if devtype == 0 && ma_type == "sma" {
+            groups
+                .entry(period)
+                .or_default()
+                .push((row_idx, prm.nbdev.unwrap()));
+        } else {
+            fallback_rows.push(row_idx);
         }
     }
+
+    let prefixes = if groups.is_empty() {
+        None
+    } else {
+        Some(build_sma_std_prefixes(data))
+    };
+
+    let writer = RowWriter {
+        ptr: out.as_mut_ptr(),
+        cols,
+    };
+
+    for (period, rows_for_period) in groups.into_iter() {
+        let warmup_end = first + period - 1;
+        let mut base = vec![f64::NAN; cols];
+
+        match kern {
+            Kernel::Scalar => {
+                let pre = prefixes.as_ref().expect("prefixes missing for scalar path");
+                zscore_sma_std_from_prefix_scalar(data, period, warmup_end, pre, &mut base);
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 => unsafe {
+                let pre = prefixes.as_ref().expect("prefixes missing for AVX2 path");
+                zscore_sma_std_from_prefix_avx2(data, period, warmup_end, pre, &mut base);
+            },
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 => unsafe {
+                let pre = prefixes.as_ref().expect("prefixes missing for AVX512 path");
+                zscore_sma_std_from_prefix_avx512(data, period, warmup_end, pre, &mut base);
+            },
+            _ => unreachable!(),
+        }
+
+        let base_ref = &base;
+
+        let write_scalar = |row_idx: usize, nbdev: f64| unsafe {
+            writer.with_row(row_idx, |dst| {
+                scale_copy_row_scalar(base_ref, warmup_end, nbdev, dst);
+            });
+        };
+
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        let write_avx2 = |row_idx: usize, nbdev: f64| unsafe {
+            writer.with_row(row_idx, |dst| {
+                scale_copy_row_avx2(base_ref, warmup_end, nbdev, dst);
+            });
+        };
+
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        let write_avx512 = |row_idx: usize, nbdev: f64| unsafe {
+            writer.with_row(row_idx, |dst| {
+                scale_copy_row_avx512(base_ref, warmup_end, nbdev, dst);
+            });
+        };
+
+        let dispatch_write = |row_idx: usize, nbdev: f64| match kern {
+            Kernel::Scalar => write_scalar(row_idx, nbdev),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 => write_avx2(row_idx, nbdev),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 => write_avx512(row_idx, nbdev),
+            _ => unreachable!(),
+        };
+
+        if parallel {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                use rayon::prelude::*;
+                rows_for_period
+                    .par_iter()
+                    .for_each(|(row_idx, nb)| dispatch_write(*row_idx, *nb));
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                for (row_idx, nb) in rows_for_period.iter() {
+                    dispatch_write(*row_idx, *nb);
+                }
+            }
+        } else {
+            for (row_idx, nb) in rows_for_period.iter() {
+                dispatch_write(*row_idx, *nb);
+            }
+        }
+    }
+
+    if !fallback_rows.is_empty() {
+        let do_row = |row: usize| unsafe {
+            let prm = &combos[row];
+            let period = prm.period.unwrap();
+            let ma_type = prm.ma_type.as_ref().unwrap();
+            let nbdev = prm.nbdev.unwrap();
+            let devtype = prm.devtype.unwrap();
+            writer.with_row(row, |dst| match kern {
+                Kernel::Scalar => {
+                    zscore_row_scalar(data, first, period, ma_type, nbdev, devtype, dst)
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 => zscore_row_avx2(data, first, period, ma_type, nbdev, devtype, dst),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 => {
+                    zscore_row_avx512(data, first, period, ma_type, nbdev, devtype, dst)
+                }
+                _ => unreachable!(),
+            });
+        };
+
+        if parallel {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                use rayon::prelude::*;
+                fallback_rows.par_iter().for_each(|&row| do_row(row));
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                for &row in &fallback_rows {
+                    do_row(row);
+                }
+            }
+        } else {
+            for &row in &fallback_rows {
+                do_row(row);
+            }
+        }
+    }
+
     Ok(combos)
 }
 
@@ -1288,6 +1849,50 @@ pub fn zscore_py<'py>(
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "zscore_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, period_range, nbdev_range=(1.0, 1.0, 0.0), device_id=0))]
+pub fn zscore_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    data_f32: numpy::PyReadonlyArray1<'py, f32>,
+    period_range: (usize, usize, usize),
+    nbdev_range: (f64, f64, f64),
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, Bound<'py, PyDict>)> {
+    use crate::cuda::cuda_available;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let slice_in = data_f32.as_slice()?;
+    let sweep = ZscoreBatchRange {
+        period: period_range,
+        ma_type: ("sma".to_string(), "sma".to_string(), "".to_string()),
+        nbdev: nbdev_range,
+        devtype: (0, 0, 0),
+    };
+
+    let (inner, combos) = py.allow_threads(|| {
+        let cuda = CudaZscore::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.zscore_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    let dict = PyDict::new(py);
+    let periods: Vec<u64> = combos.iter().map(|(p, _)| *p as u64).collect();
+    let nbdevs: Vec<f64> = combos.iter().map(|(_, nb)| *nb as f64).collect();
+    let devtypes: Vec<u64> = combos.iter().map(|_| 0u64).collect();
+    let ma_types = PyList::new(py, vec!["sma"; combos.len()])?;
+
+    dict.set_item("periods", periods.into_pyarray(py))?;
+    dict.set_item("nbdevs", nbdevs.into_pyarray(py))?;
+    dict.set_item("ma_types", ma_types)?;
+    dict.set_item("devtypes", devtypes.into_pyarray(py))?;
+
+    Ok((DeviceArrayF32Py { inner }, dict))
 }
 
 #[cfg(feature = "python")]

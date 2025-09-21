@@ -1847,7 +1847,7 @@ mod tests {
 								);
                                 } else {
                                     prop_assert!(
-									val <= 1e-6, // Allow tiny positive due to MA smoothing  
+									val <= 1e-6, // Allow tiny positive due to MA smoothing
 									"Expected negative Coppock for decreasing data, got {} at index {}",
 									val, i
 								);

@@ -1661,7 +1661,7 @@ mod tests {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in K output \
 						 with params: rsi_period={}, stoch_period={}, k={}, d={} (param set {})",
-						test_name, val, bits, i, 
+						test_name, val, bits, i,
 						params.rsi_period.unwrap_or(14),
 						params.stoch_period.unwrap_or(14),
 						params.k.unwrap_or(3),

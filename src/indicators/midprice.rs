@@ -1617,16 +1617,16 @@ mod tests {
 			.run(&strat, |(highs, lows, period)| {
 				let params = MidpriceParams { period: Some(period) };
 				let input = MidpriceInput::from_slices(&highs, &lows, params);
-				
+
 				// Get outputs from both test kernel and scalar reference
 				let MidpriceOutput { values: out } = midprice_with_kernel(&input, kernel)?;
 				let MidpriceOutput { values: ref_out } = midprice_with_kernel(&input, Kernel::Scalar)?;
-				
+
 				// Find first valid index
 				let first_valid = (0..highs.len())
 					.find(|&i| !highs[i].is_nan() && !lows[i].is_nan())
 					.unwrap_or(0);
-				
+
 				// Property 1: Warmup period - first (first_valid + period - 1) values should be NaN
 				let warmup_end = first_valid + period - 1;
 				for i in 0..warmup_end.min(out.len()) {
@@ -1636,29 +1636,29 @@ mod tests {
 						i, out[i]
 					);
 				}
-				
+
 				// Properties for valid output values
 				for i in warmup_end..out.len() {
 					let y = out[i];
 					let r = ref_out[i];
 					let window_start = i + 1 - period;
-					
+
 					// Property 2: Output bounds - midprice should be between min(low) and max(high) in window
 					let window_high = &highs[window_start..=i];
 					let window_low = &lows[window_start..=i];
 					let max_high = window_high.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 					let min_low = window_low.iter().cloned().fold(f64::INFINITY, f64::min);
-					
+
 					// Adaptive tolerance based on magnitude
 					let magnitude = y.abs().max(1.0);
 					let tolerance = (magnitude * f64::EPSILON * 10.0).max(1e-9);
-					
+
 					prop_assert!(
 						y.is_nan() || (y >= min_low - tolerance && y <= max_high + tolerance),
 						"Midprice {} at index {} outside bounds [{}, {}]",
 						y, i, min_low, max_high
 					);
-					
+
 					// Property 3: Kernel consistency
 					if y.is_finite() && r.is_finite() {
 						let ulp_diff = y.to_bits().abs_diff(r.to_bits());
@@ -1674,7 +1674,7 @@ mod tests {
 							i, y, r
 						);
 					}
-					
+
 					// Property 4: Period=1 special case
 					if period == 1 {
 						let expected = (highs[i] + lows[i]) / 2.0;
@@ -1684,7 +1684,7 @@ mod tests {
 							y, expected, i
 						);
 					}
-					
+
 					// Property 5: Constant data
 					if window_high.windows(2).all(|w| (w[0] - w[1]).abs() < tolerance) &&
 					   window_low.windows(2).all(|w| (w[0] - w[1]).abs() < tolerance) {
@@ -1695,7 +1695,7 @@ mod tests {
 							y, expected, i
 						);
 					}
-					
+
 					// Property 6: Mathematical correctness
 					let actual_max_high = window_high.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 					let actual_min_low = window_low.iter().cloned().fold(f64::INFINITY, f64::min);
@@ -1705,7 +1705,7 @@ mod tests {
 						"Midprice {} != expected {} at index {}",
 						y, expected, i
 					);
-					
+
 					// Property 7: Midprice always within actual high and low at current index
 					// The midprice of the window should be between the lowest low and highest high
 					// but also should never exceed the current bar's high or go below current bar's low
@@ -1717,7 +1717,7 @@ mod tests {
 							y, lows[i], highs[i], i
 						);
 					}
-					
+
 					// Property 8: Monotonicity check for strictly monotonic data
 					// If both high and low arrays are strictly increasing/decreasing in the window,
 					// the midprice should follow the trend
@@ -1726,7 +1726,7 @@ mod tests {
 						let high_decreasing = window_high.windows(2).all(|w| w[1] <= w[0] + tolerance);
 						let low_increasing = window_low.windows(2).all(|w| w[1] >= w[0] - tolerance);
 						let low_decreasing = window_low.windows(2).all(|w| w[1] <= w[0] + tolerance);
-						
+
 						// If both arrays are monotonic in the same direction
 						if high_increasing && low_increasing {
 							// Previous midprice should be less than or equal to current
@@ -1746,7 +1746,7 @@ mod tests {
 						}
 					}
 				}
-				
+
 				Ok(())
 			})?;
 

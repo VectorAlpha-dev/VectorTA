@@ -1168,11 +1168,11 @@ mod tests {
 				let input = MassInput::from_slices(&high, &low, params);
 
 				// Calculate output with the test kernel
-				let MassOutput { values: out } = 
+				let MassOutput { values: out } =
 					mass_with_kernel(&input, kernel).unwrap();
-				
+
 				// Calculate reference output with scalar kernel
-				let MassOutput { values: ref_out } = 
+				let MassOutput { values: ref_out } =
 					mass_with_kernel(&input, Kernel::Scalar).unwrap();
 
 				// Property 1: Warmup period validation
@@ -1217,7 +1217,7 @@ mod tests {
 							y > 0.0,
 							"Mass Index should be positive at idx {}, got {}", i, y
 						);
-						
+
 						// Mass Index rarely exceeds 2.5*period in realistic conditions
 						prop_assert!(
 							y <= (period as f64) * 2.5,
@@ -1232,23 +1232,23 @@ mod tests {
 					let ranges: Vec<f64> = (window_start..window_end)
 						.map(|j| high[j] - low[j])
 						.collect();
-					
+
 					// Check if range is constant across the window
 					let is_constant_range = ranges.windows(2)
 						.all(|w| (w[0] - w[1]).abs() < 1e-9);
-					
+
 					// Only check convergence if we're well past the warmup and range has been stable
 					// Need at least 2*period bars after range becomes stable for convergence
 					if is_constant_range && y.is_finite() && i >= warmup_end + 2 * period {
 						let avg_range = ranges.iter().sum::<f64>() / ranges.len() as f64;
-						
+
 						// For zero or near-zero range
 						if avg_range < f64::EPSILON {
 							prop_assert!(
 								(y - period as f64).abs() <= 1e-6,
 								"Zero range Mass Index should be ~{} at idx {}, got {}", period, i, y
 							);
-						} 
+						}
 						// For constant non-zero range with reasonable size
 						else if avg_range > 0.01 && avg_range < 100.0 {
 							// Only check when range is in a reasonable band
@@ -1256,7 +1256,7 @@ mod tests {
 							let tolerance = (period as f64) * 0.2 + 2.0;
 							prop_assert!(
 								(y - period as f64).abs() <= tolerance,
-								"Constant range Mass Index should be close to {} at idx {}, got {} (tolerance: {})", 
+								"Constant range Mass Index should be close to {} at idx {}, got {} (tolerance: {})",
 								period, i, y, tolerance
 							);
 						}
@@ -1283,13 +1283,13 @@ mod tests {
 					if i >= warmup_end + period && y.is_finite() {
 						// Calculate average range in current window
 						let avg_range = ranges.iter().sum::<f64>() / ranges.len() as f64;
-						
+
 						// For very low volatility (near zero range), Mass Index converges toward period
 						// Note: convergence is gradual and depends on the EMA smoothing
 						if avg_range < 0.001 {
 							// More realistic tolerance based on how far from zero the range is
-							let tolerance = if avg_range < 1e-10 { 
-								1.0 
+							let tolerance = if avg_range < 1e-10 {
+								1.0
 							} else {
 								// Scale tolerance with period for very small but non-zero ranges
 								(period as f64) * 0.25 + 2.0
@@ -1300,7 +1300,7 @@ mod tests {
 								period, i, y, avg_range, tolerance
 							);
 						}
-						
+
 						// For significant volatility changes, verify response
 						if i > warmup_end + period + 5 {
 							// Compare current and previous window volatility
@@ -1310,7 +1310,7 @@ mod tests {
 								.map(|j| high[j] - low[j])
 								.collect();
 							let prev_avg_range = prev_ranges.iter().sum::<f64>() / prev_ranges.len() as f64;
-							
+
 							// If volatility doubled, Mass Index should show some increase
 							if avg_range > prev_avg_range * 2.0 && prev_avg_range > 0.1 {
 								let prev_mass = out[i - 5];
@@ -1323,7 +1323,7 @@ mod tests {
 								}
 							}
 						}
-						
+
 						// General bounds check
 						prop_assert!(
 							y >= (period as f64) * 0.3 && y <= (period as f64) * 2.5,

@@ -1287,7 +1287,7 @@ mod tests {
 				// Property 3: Values after warmup are within window bounds
 				for i in warmup_end..data.len() {
 					let y = out[i];
-					
+
 					// Skip if NaN (shouldn't happen after warmup but be safe)
 					if y.is_nan() {
 						continue;
@@ -1296,10 +1296,10 @@ mod tests {
 					// Get the window that contributed to this output
 					let window_start = i + 1 - period;
 					let window = &data[window_start..=i];
-					
+
 					let lo = window.iter().cloned().fold(f64::INFINITY, f64::min);
 					let hi = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-					
+
 					// Allow small tolerance for floating point
 					let tolerance = 1e-9 + (hi - lo).abs() * 1e-12;
 					prop_assert!(
@@ -1354,11 +1354,11 @@ mod tests {
 					if out[i].is_nan() && ref_out[i].is_nan() {
 						continue;
 					}
-					
+
 					// Check for exact bit-level equality since they use same implementation
 					let y_bits = out[i].to_bits();
 					let r_bits = ref_out[i].to_bits();
-					
+
 					prop_assert_eq!(
 						y_bits,
 						r_bits,
@@ -1380,13 +1380,13 @@ mod tests {
 					if out[i].is_nan() {
 						continue;
 					}
-					
+
 					let window_start = i + 1 - period;
 					let window = &data[window_start..=i];
-					
+
 					let all_positive = window.iter().all(|&x| x > 0.0);
 					let all_negative = window.iter().all(|&x| x < 0.0);
-					
+
 					if all_positive {
 						prop_assert!(
 							out[i] > 0.0,
@@ -1396,7 +1396,7 @@ mod tests {
 							i
 						);
 					}
-					
+
 					if all_negative {
 						prop_assert!(
 							out[i] < 0.0,
@@ -1417,35 +1417,35 @@ mod tests {
 						if out[i].is_nan() {
 							continue;
 						}
-						
+
 						let window_start = i + 1 - period;
 						let window = &data[window_start..=i];
-						
+
 						// Only test if window has significant variation
 						let window_min = window.iter().cloned().fold(f64::INFINITY, f64::min);
 						let window_max = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 						let range = window_max - window_min;
-						
+
 						if range > 1.0 {
 							// Get values from different parts of the window
 							let middle_idx = period / 2;
 							let middle_value = window[middle_idx];
 							let first_value = window[0];
 							let last_value = window[period - 1];
-							
+
 							// For a clearly ascending or descending pattern through the window,
 							// the output should be closer to the middle than to the extremes
-							let clearly_ascending = first_value < middle_value && middle_value < last_value 
+							let clearly_ascending = first_value < middle_value && middle_value < last_value
 								&& (last_value - first_value) > range * 0.8;
 							let clearly_descending = first_value > middle_value && middle_value > last_value
 								&& (first_value - last_value) > range * 0.8;
-							
+
 							if clearly_ascending || clearly_descending {
 								// Output should be closer to middle than to either extreme
 								let dist_to_middle = (out[i] - middle_value).abs();
 								let dist_to_first = (out[i] - first_value).abs();
 								let dist_to_last = (out[i] - last_value).abs();
-								
+
 								// The output should be closer to the middle value than to the extremes
 								// Allow some tolerance since weights don't completely ignore edges
 								prop_assert!(

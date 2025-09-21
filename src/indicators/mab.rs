@@ -2298,7 +2298,7 @@ mod tests {
 
 				// Test with the specified kernel
 				let result = mab_with_kernel(&input, kernel).unwrap();
-				
+
 				// Also compute with scalar kernel for reference
 				let ref_params = params.clone();
 				let ref_input = MabInput::from_slice(&data, ref_params);
@@ -2318,7 +2318,7 @@ mod tests {
 
 					// Check NaN consistency
 					if upper.is_nan() {
-						prop_assert!(ref_upper.is_nan(), 
+						prop_assert!(ref_upper.is_nan(),
 							"[{}] NaN mismatch in upperband at idx {}: kernel={:?} has NaN but scalar doesn't",
 							test_name, i, kernel);
 					}
@@ -2407,7 +2407,7 @@ mod tests {
 					let upper = result.upperband[i];
 					let middle = result.middleband[i];
 					let lower = result.lowerband[i];
-					
+
 					if upper.is_finite() && middle.is_finite() && lower.is_finite() {
 						prop_assert!(
 							upper >= middle - 1e-10,
@@ -2429,7 +2429,7 @@ mod tests {
 						let upper = result.upperband[i];
 						let middle = result.middleband[i];
 						let lower = result.lowerband[i];
-						
+
 						if upper.is_finite() && middle.is_finite() && lower.is_finite() {
 							prop_assert!(
 								(upper - middle).abs() <= 1e-9,
@@ -2451,16 +2451,16 @@ mod tests {
 					let upper = result.upperband[i];
 					let middle = result.middleband[i];
 					let lower = result.lowerband[i];
-					
+
 					if upper.is_finite() && middle.is_finite() && lower.is_finite() {
 						let upper_spread = upper - middle;
 						let lower_spread = middle - lower;
-						
+
 						// The ratio of spreads should approximately match the ratio of multipliers
 						if upper_spread > 1e-10 && lower_spread > 1e-10 {
 							let spread_ratio = upper_spread / lower_spread;
 							let multiplier_ratio = devup / devdn;
-							
+
 							prop_assert!(
 								(spread_ratio - multiplier_ratio).abs() <= multiplier_ratio * 0.05,
 								"[{}] Deviation multiplier ratio mismatch at idx {}: spread_ratio={} vs multiplier_ratio={}",
@@ -2474,7 +2474,7 @@ mod tests {
 				// The middle band is always the fast MA
 				use crate::indicators::sma::{sma, SmaInput, SmaParams};
 				use crate::indicators::ema::{ema, EmaInput, EmaParams};
-				
+
 				let fast_ma = if fast_is_ema {
 					let ema_params = EmaParams { period: Some(fast_period) };
 					let ema_input = EmaInput::from_slice(&data, ema_params);
@@ -2501,11 +2501,11 @@ mod tests {
 					let upper = result.upperband[i];
 					let middle = result.middleband[i];
 					let lower = result.lowerband[i];
-					
+
 					if upper.is_finite() && middle.is_finite() && lower.is_finite() {
 						let upper_spread = upper - middle;
 						let lower_spread = middle - lower;
-						
+
 						prop_assert!(
 							upper_spread >= -1e-10,
 							"[{}] Negative upper spread at idx {}: {}",
@@ -2516,7 +2516,7 @@ mod tests {
 							"[{}] Negative lower spread at idx {}: {}",
 							test_name, i, lower_spread
 						);
-						
+
 						// Spread should be reasonable relative to the data range
 						let data_range = data.iter()
 							.filter(|x| x.is_finite())
@@ -2524,7 +2524,7 @@ mod tests {
 								(min.min(x), max.max(x))
 							});
 						let range_span = data_range.1 - data_range.0;
-						
+
 						// Spread should be reasonable - using a very generous bound
 						// to accommodate high volatility scenarios
 						if range_span > 0.0 {
@@ -2587,17 +2587,17 @@ mod tests {
 					};
 					let equal_input = MabInput::from_slice(&data, equal_params);
 					let equal_result = mab_with_kernel(&equal_input, kernel).unwrap();
-					
-					// When periods are equal and MA types are the same, 
+
+					// When periods are equal and MA types are the same,
 					// the bands should be very close together
 					if params.fast_ma_type == params.slow_ma_type {
 						for i in first_valid_output..data.len().min(first_valid_output + 10) {
-							if equal_result.upperband[i].is_finite() && 
-							   equal_result.middleband[i].is_finite() && 
+							if equal_result.upperband[i].is_finite() &&
+							   equal_result.middleband[i].is_finite() &&
 							   equal_result.lowerband[i].is_finite() {
 								let upper_spread = equal_result.upperband[i] - equal_result.middleband[i];
 								let lower_spread = equal_result.middleband[i] - equal_result.lowerband[i];
-								
+
 								// Spreads should be very small when periods are equal
 								prop_assert!(
 									upper_spread <= 1e-6 || upper_spread <= equal_result.middleband[i].abs() * 1e-6,

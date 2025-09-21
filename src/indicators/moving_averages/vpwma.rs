@@ -33,8 +33,12 @@
 
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::{
+    cuda::moving_averages::CudaVpwma, indicators::moving_averages::alma::DeviceArrayF32Py,
+};
 #[cfg(feature = "python")]
-use numpy::{IntoPyArray, PyArray1};
+use numpy::{IntoPyArray, PyArray1, PyUntypedArrayMethods};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
@@ -738,7 +742,7 @@ impl VpwmaBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &VpwmaBatchRange) -> Vec<VpwmaParams> {
+pub fn expand_grid_vpwma(r: &VpwmaBatchRange) -> Vec<VpwmaParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
         if step == 0 || start == end {
             return vec![start];
@@ -805,7 +809,7 @@ fn vpwma_batch_inner(
         return Err(VpwmaError::EmptyInputData);
     }
 
-    let combos = expand_grid(sweep);
+    let combos = expand_grid_vpwma(sweep);
     if combos.is_empty() {
         return Err(VpwmaError::InvalidPeriod {
             period: 0,
@@ -926,7 +930,7 @@ fn vpwma_batch_inner(
 }
 
 #[inline(always)]
-fn vpwma_batch_inner_into(
+pub fn vpwma_batch_inner_into(
     data: &[f64],
     sweep: &VpwmaBatchRange,
     kern: Kernel,
@@ -937,7 +941,7 @@ fn vpwma_batch_inner_into(
         return Err(VpwmaError::EmptyInputData);
     }
 
-    let combos = expand_grid(sweep);
+    let combos = expand_grid_vpwma(sweep);
     if combos.is_empty() {
         return Err(VpwmaError::InvalidPeriod {
             period: 0,
@@ -2049,7 +2053,7 @@ pub fn vpwma_batch_py<'py>(
     };
 
     // Expand grid once to know rows*cols
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid_vpwma(&sweep);
     let rows = combos.len();
     let cols = slice_in.len();
 
@@ -2095,6 +2099,80 @@ pub fn vpwma_batch_py<'py>(
     dict.set_item("powers", powers.into_pyarray(py))?;
 
     Ok(dict)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "vpwma_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, period_range, power_range, device_id=0))]
+pub fn vpwma_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    data_f32: numpy::PyReadonlyArray1<'py, f32>,
+    period_range: (usize, usize, usize),
+    power_range: (f64, f64, f64),
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, Bound<'py, pyo3::types::PyDict>)> {
+    use crate::cuda::cuda_available;
+    use numpy::IntoPyArray;
+    use pyo3::types::PyDict;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let sweep = VpwmaBatchRange {
+        period: period_range,
+        power: power_range,
+    };
+
+    let slice_in = data_f32.as_slice()?;
+
+    let (inner, combos) = py.allow_threads(|| {
+        let cuda = CudaVpwma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.vpwma_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    let dict = PyDict::new(py);
+    let periods: Vec<u64> = combos.iter().map(|c| c.period.unwrap() as u64).collect();
+    let powers: Vec<f64> = combos.iter().map(|c| c.power.unwrap()).collect();
+    dict.set_item("periods", periods.into_pyarray(py))?;
+    dict.set_item("powers", powers.into_pyarray(py))?;
+
+    Ok((DeviceArrayF32Py { inner }, dict))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "vpwma_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, period, power, device_id=0))]
+pub fn vpwma_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    period: usize,
+    power: f64,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use numpy::PyUntypedArrayMethods;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let flat_in = data_tm_f32.as_slice()?;
+    let rows = data_tm_f32.shape()[0];
+    let cols = data_tm_f32.shape()[1];
+    let params = VpwmaParams {
+        period: Some(period),
+        power: Some(power),
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaVpwma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.vpwma_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "wasm")]
@@ -2149,7 +2227,7 @@ pub fn vpwma_batch_metadata_js(
         power: (power_start, power_end, power_step),
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid_vpwma(&sweep);
     let mut metadata = Vec::with_capacity(combos.len() * 2);
 
     for combo in combos {
@@ -2422,7 +2500,7 @@ pub fn vpwma_batch_into(
             period: (period_start, period_end, period_step),
             power: (power_start, power_end, power_step),
         };
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid_vpwma(&sweep);
         let rows = combos.len();
         let cols = data_len;
 

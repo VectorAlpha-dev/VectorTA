@@ -1337,7 +1337,7 @@ mod tests {
                     if bits == 0x11111111_11111111 {
                         panic!(
                             "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with params: period={}, devup={}, devdn={}, source={}",
-                            test_name, val, bits, i, 
+                            test_name, val, bits, i,
                             params.period.unwrap_or(20),
                             params.devup.unwrap_or(2.0),
                             params.devdn.unwrap_or(2.0),

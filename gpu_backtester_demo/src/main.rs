@@ -186,7 +186,7 @@ fn main() -> Result<()> {
         // Build fast tile weights and periods
         fast_w_flat.resize(pf * max_pf, 0.0);
         fast_inv.resize(pf, 0.0);
-        for i in 0..pf { 
+        for i in 0..pf {
             let per = fast_periods[f_start + i];
             let (w, inv) = compute_weights_f32(per, cli.offset, cli.sigma);
             fast_inv[i] = inv;

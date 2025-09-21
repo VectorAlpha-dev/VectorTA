@@ -1484,7 +1484,7 @@ mod tests {
 
 				// Find first non-NaN value in data
 				let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(data.len());
-				
+
 				// Property 1: JMA warmup behavior
 				// JMA outputs NaN before first_valid, then starts outputting values immediately
 				// This is different from other indicators that wait for the full warmup period
@@ -1494,7 +1494,7 @@ mod tests {
 						"idx {}: expected NaN before first valid input, got {}", i, out[i]
 					);
 				}
-				
+
 				// JMA should have a valid value at first_valid index (if within bounds)
 				if first_valid < out.len() {
 					prop_assert!(
@@ -1518,21 +1518,21 @@ mod tests {
 				if warmup_estimate + 20 < data.len() {
 					let window_start = warmup_estimate;
 					let window_end = (warmup_estimate + 50).min(data.len());
-					
+
 					let input_slice = &data[window_start..window_end];
 					let output_slice = &out[window_start..window_end];
-					
+
 					if input_slice.iter().all(|x| x.is_finite()) && output_slice.iter().all(|x| x.is_finite()) {
 						let input_mean: f64 = input_slice.iter().sum::<f64>() / input_slice.len() as f64;
 						let output_mean: f64 = output_slice.iter().sum::<f64>() / output_slice.len() as f64;
-						
+
 						let input_var: f64 = input_slice.iter()
 							.map(|x| (x - input_mean).powi(2))
 							.sum::<f64>() / input_slice.len() as f64;
 						let output_var: f64 = output_slice.iter()
 							.map(|x| (x - output_mean).powi(2))
 							.sum::<f64>() / output_slice.len() as f64;
-						
+
 						// JMA should reduce variance (smoothing effect)
 						if input_var > 1e-10 {
 							prop_assert!(
@@ -1584,7 +1584,7 @@ mod tests {
 							} else {
 								r_bits - y_bits
 							};
-							
+
 							// JMA uses iterative calculations that can accumulate small differences
 							// Allow more tolerance for SIMD implementations
 							let abs_diff = (out[i] - ref_out[i]).abs();
@@ -1593,7 +1593,7 @@ mod tests {
 							} else {
 								abs_diff
 							};
-							
+
 							prop_assert!(
 								diff_bits <= 1000 || abs_diff < 1e-9 || rel_diff < 1e-12,
 								"kernel consistency failed at idx {}: {:?}={}, Scalar={}, diff_bits={}, abs_diff={}, rel_diff={}",
@@ -1617,13 +1617,13 @@ mod tests {
 						// Check trend following behavior
 						let check_start = warmup_estimate + 10;
 						let check_end = (warmup_estimate + 30).min(data.len() - 1);
-						
+
 						// Count how many times phased output leads/lags neutral
 						let mut lead_count = 0;
 						let mut lag_count = 0;
-						
+
 						for i in check_start..check_end {
-							if data[i].is_finite() && data[i-1].is_finite() && 
+							if data[i].is_finite() && data[i-1].is_finite() &&
 							   out[i].is_finite() && out_neutral[i].is_finite() {
 								let data_change = data[i] - data[i-1];
 								if data_change.abs() > 1e-10 {
@@ -1646,7 +1646,7 @@ mod tests {
 								}
 							}
 						}
-						
+
 						// Phase should have some effect
 						if phase > 10.0 {
 							prop_assert!(
@@ -1677,11 +1677,11 @@ mod tests {
 						// Calculate responsiveness as average absolute difference from input
 						let check_start = warmup_estimate2;
 						let check_end = (warmup_estimate2 + 30).min(data.len());
-						
+
 						let mut high_power_responsiveness = 0.0;
 						let mut low_power_responsiveness = 0.0;
 						let mut count = 0;
-						
+
 						for i in check_start..check_end {
 							if data[i].is_finite() && out[i].is_finite() && out_low_power[i].is_finite() {
 								high_power_responsiveness += (out[i] - data[i]).abs();
@@ -1689,11 +1689,11 @@ mod tests {
 								count += 1;
 							}
 						}
-						
+
 						if count > 0 {
 							high_power_responsiveness /= count as f64;
 							low_power_responsiveness /= count as f64;
-							
+
 							// Higher power should generally be closer to the raw data (more responsive)
 							// But this is not always strictly true due to the adaptive nature
 							// So we only check for significant differences

@@ -1517,41 +1517,41 @@ mod tests {
 				for i in 0..data.len() {
 					let y = out[i];
 					let r = ref_out[i];
-					
+
 					if !y.is_finite() || !r.is_finite() {
-						prop_assert!(y.to_bits() == r.to_bits(), 
+						prop_assert!(y.to_bits() == r.to_bits(),
 							"[{}] finite/NaN mismatch at idx {}: {} vs {}", test_name, i, y, r);
 						continue;
 					}
-					
+
 					let ulp_diff = y.to_bits().abs_diff(r.to_bits());
 					prop_assert!(
 						(y - r).abs() <= 1e-9 || ulp_diff <= 4,
-						"[{}] kernel mismatch at idx {}: {} vs {} (ULP={})", 
+						"[{}] kernel mismatch at idx {}: {} vs {} (ULP={})",
 						test_name, i, y, r, ulp_diff
 					);
 				}
 
 				// Property 2: Warmup period - VIDYA starts outputting at first + long_period - 2
 				let first = data.iter().position(|&x| !x.is_nan()).unwrap_or(0);
-				let first_valid_idx = if first + long_period >= 2 { 
-					first + long_period - 2 
-				} else { 
-					0 
+				let first_valid_idx = if first + long_period >= 2 {
+					first + long_period - 2
+				} else {
+					0
 				};
-				
+
 				// Values before first_valid_idx should be NaN
 				for i in 0..first_valid_idx.min(data.len()) {
-					prop_assert!(out[i].is_nan(), 
+					prop_assert!(out[i].is_nan(),
 						"[{}] Expected NaN during warmup at idx {}, got {}", test_name, i, out[i]);
 				}
-				
+
 				// Property 3: First valid output should be at first_valid_idx
 				if first_valid_idx < data.len() {
 					prop_assert!(!out[first_valid_idx].is_nan(),
 						"[{}] Expected valid value at first_valid_idx {}, got NaN", test_name, first_valid_idx);
 				}
-				
+
 				// For the rest of the test, use the actual warmup_end as defined by the implementation
 				let warmup_end = first + long_period - 2;
 
@@ -1564,7 +1564,7 @@ mod tests {
 					// Increase margin for high alpha values which can cause temporary overshooting
 					// VIDYA with high alpha can overshoot during sudden volatility changes
 					let alpha_factor = 1.0 + alpha * 2.0;  // Range 1.0 to 3.0 for alpha 0 to 1
-					let margin = if range < 1.0 { 
+					let margin = if range < 1.0 {
 						// For tiny ranges, use a percentage of the average magnitude
 						let avg_magnitude = (data_max.abs() + data_min.abs()) / 2.0;
 						avg_magnitude * 0.3 * alpha_factor  // More lenient for tiny ranges
@@ -1572,7 +1572,7 @@ mod tests {
 						// For normal ranges, allow more overshooting with high alpha
 						range * 0.15 * alpha_factor  // Increased from 0.1 to 0.15
 					};
-					
+
 					for i in (warmup_end + 1)..data.len() {
 						let y = out[i];
 						if y.is_finite() {
@@ -1623,11 +1623,11 @@ mod tests {
 					let mut same_direction_count = 0;
 					let mut total_movements = 0;
 					let mut frozen_periods = 0;
-					
+
 					for i in (warmup_end + 1)..data.len() {
 						let price_change = data[i] - data[i - 1];
 						let vidya_change = out[i] - out[i - 1];
-						
+
 						// Count frozen periods (VIDYA not moving despite price movement)
 						if price_change.abs() > 1e-6 && vidya_change.abs() <= 1e-10 {
 							frozen_periods += 1;
@@ -1640,7 +1640,7 @@ mod tests {
 							}
 						}
 					}
-					
+
 					// VIDYA should follow price direction when it's actually moving
 					// Lower threshold to 40% to account for lagging behavior and edge cases
 					// Skip check if VIDYA is frozen more than 50% of the time (indicates very low volatility data)
@@ -1653,14 +1653,14 @@ mod tests {
 						);
 					}
 				}
-				
+
 				// Property 8: No poison values in output
 				for (i, &val) in out.iter().enumerate() {
 					if val.is_finite() {
 						let bits = val.to_bits();
 						prop_assert!(
-							bits != 0x11111111_11111111 && 
-							bits != 0x22222222_22222222 && 
+							bits != 0x11111111_11111111 &&
+							bits != 0x22222222_22222222 &&
 							bits != 0x33333333_33333333,
 							"[{}] Found poison value {} (0x{:016X}) at index {}",
 							test_name, val, bits, i

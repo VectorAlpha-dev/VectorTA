@@ -6,7 +6,7 @@
 //!
 //! ## Parameters
 //! - **n1**: Channel Length (default: 17)
-//! - **n2**: Average Length (default: 6)  
+//! - **n2**: Average Length (default: 6)
 //! - **n3**: Short Length (default: 4)
 //! - **mode**: Calculation mode (default: tradition_mg)
 //! - **use_volume**: Whether to use volume data (default: false)

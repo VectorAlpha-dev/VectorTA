@@ -19,7 +19,7 @@
 //!
 //! ## Developer Notes
 //! - **AVX2 kernel**: Stub implementation - just calls scalar version
-//! - **AVX512 kernel**: Stub implementation - just calls scalar version  
+//! - **AVX512 kernel**: Stub implementation - just calls scalar version
 //! - **Streaming update**: O(1) complexity - performs simple EMA calculations
 //! - **Memory optimization**: Uses alloc_with_nan_prefix helper function
 //! - **Optimization opportunities**:

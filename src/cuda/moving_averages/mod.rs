@@ -1,3 +1,23 @@
 pub mod alma_wrapper;
+pub mod buff_averages_wrapper;
+pub mod frama_wrapper;
+pub mod hma_wrapper;
+pub mod linreg_wrapper;
+pub mod nma_wrapper;
+pub mod sma_wrapper;
+pub mod supersmoother_wrapper;
+pub mod trendflex_wrapper;
+pub mod vpwma_wrapper;
+pub mod zlema_wrapper;
 
 pub use alma_wrapper::{CudaAlma, DeviceArrayF32};
+pub use buff_averages_wrapper::{CudaBuffAverages, CudaBuffAveragesError};
+pub use frama_wrapper::{CudaFrama, CudaFramaError};
+pub use hma_wrapper::{CudaHma, CudaHmaError};
+pub use linreg_wrapper::{CudaLinreg, CudaLinregError};
+pub use nma_wrapper::{CudaNma, CudaNmaError};
+pub use sma_wrapper::{CudaSma, CudaSmaError};
+pub use supersmoother_wrapper::{CudaSuperSmoother, CudaSuperSmootherError};
+pub use trendflex_wrapper::{CudaTrendflex, CudaTrendflexError};
+pub use vpwma_wrapper::{CudaVpwma, CudaVpwmaError};
+pub use zlema_wrapper::{CudaZlema, CudaZlemaError};

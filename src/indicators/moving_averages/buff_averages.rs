@@ -16,13 +16,19 @@
 //!
 //! ## Developer Status
 //! - **AVX2 kernel**: STUB - Falls back to scalar implementation
-//! - **AVX512 kernel**: STUB - Falls back to scalar implementation  
+//! - **AVX512 kernel**: STUB - Falls back to scalar implementation
 //! - **Streaming update**: O(n) - Iterates through both buffers for each update
 //! - **Optimization needed**: Implement SIMD kernels for better performance
 //! - **Streaming improvement**: Could be optimized to O(1) with running sums
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::CudaBuffAverages;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -613,9 +619,9 @@ unsafe fn hsum256_pd(v: __m256d) -> f64 {
     // Sum 4 lanes -> scalar
     let hi: __m128d = _mm256_extractf128_pd::<1>(v);
     let lo: __m128d = _mm256_castpd256_pd128(v);
-    let sum2: __m128d = _mm_add_pd(lo, hi);               // [a0+a2, a1+a3]
-    let hi64: __m128d = _mm_unpackhi_pd(sum2, sum2);      // [a1+a3, a1+a3]
-    let sum: __m128d = _mm_add_sd(sum2, hi64);            // [total, _]
+    let sum2: __m128d = _mm_add_pd(lo, hi); // [a0+a2, a1+a3]
+    let hi64: __m128d = _mm_unpackhi_pd(sum2, sum2); // [a1+a3, a1+a3]
+    let sum: __m128d = _mm_add_sd(sum2, hi64); // [total, _]
     _mm_cvtsd_f64(sum)
 }
 
@@ -892,6 +898,308 @@ unsafe fn buff_averages_avx512(
             fast_numerator += new_p * new_v;
             fast_denominator += new_v;
         }
+        fast_out[k] = if fast_denominator != 0.0 {
+            fast_numerator / fast_denominator
+        } else {
+            0.0
+        };
+    }
+}
+
+// ==================== SHARED MASKED INPUT HELPERS ====================
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+pub unsafe fn build_masked_pv_v_avx2(
+    price: &[f64],
+    volume: &[f64],
+    pv: &mut [f64],
+    vv: &mut [f64],
+) {
+    debug_assert_eq!(price.len(), volume.len());
+    debug_assert_eq!(pv.len(), price.len());
+    debug_assert_eq!(vv.len(), price.len());
+
+    let n = price.len();
+    let mut i = 0usize;
+
+    while i + 4 <= n {
+        let p = _mm256_loadu_pd(price.as_ptr().add(i));
+        let v = _mm256_loadu_pd(volume.as_ptr().add(i));
+
+        let mp = _mm256_cmp_pd(p, p, _CMP_ORD_Q);
+        let mv = _mm256_cmp_pd(v, v, _CMP_ORD_Q);
+        let m = _mm256_and_pd(mp, mv);
+
+        let pvv = _mm256_mul_pd(p, v);
+        let pv_masked = _mm256_and_pd(pvv, m);
+        let vv_masked = _mm256_and_pd(v, m);
+
+        _mm256_storeu_pd(pv.as_mut_ptr().add(i), pv_masked);
+        _mm256_storeu_pd(vv.as_mut_ptr().add(i), vv_masked);
+
+        i += 4;
+    }
+
+    while i < n {
+        let p = *price.get_unchecked(i);
+        let v = *volume.get_unchecked(i);
+        if !p.is_nan() && !v.is_nan() {
+            *pv.get_unchecked_mut(i) = p * v;
+            *vv.get_unchecked_mut(i) = v;
+        } else {
+            *pv.get_unchecked_mut(i) = 0.0;
+            *vv.get_unchecked_mut(i) = 0.0;
+        }
+        i += 1;
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f,fma")]
+pub unsafe fn build_masked_pv_v_avx512(
+    price: &[f64],
+    volume: &[f64],
+    pv: &mut [f64],
+    vv: &mut [f64],
+) {
+    debug_assert_eq!(price.len(), volume.len());
+    debug_assert_eq!(pv.len(), price.len());
+    debug_assert_eq!(vv.len(), price.len());
+
+    let n = price.len();
+    let mut i = 0usize;
+
+    while i + 8 <= n {
+        let p = _mm512_loadu_pd(price.as_ptr().add(i));
+        let v = _mm512_loadu_pd(volume.as_ptr().add(i));
+
+        let mp: __mmask8 = _mm512_cmp_pd_mask(p, p, _CMP_ORD_Q);
+        let mv: __mmask8 = _mm512_cmp_pd_mask(v, v, _CMP_ORD_Q);
+        let m: __mmask8 = mp & mv;
+
+        let pvv = _mm512_mul_pd(p, v);
+        let pv_masked = _mm512_maskz_mov_pd(m, pvv);
+        let vv_masked = _mm512_maskz_mov_pd(m, v);
+
+        _mm512_storeu_pd(pv.as_mut_ptr().add(i), pv_masked);
+        _mm512_storeu_pd(vv.as_mut_ptr().add(i), vv_masked);
+
+        i += 8;
+    }
+
+    while i < n {
+        let p = *price.get_unchecked(i);
+        let v = *volume.get_unchecked(i);
+        if !p.is_nan() && !v.is_nan() {
+            *pv.get_unchecked_mut(i) = p * v;
+            *vv.get_unchecked_mut(i) = v;
+        } else {
+            *pv.get_unchecked_mut(i) = 0.0;
+            *vv.get_unchecked_mut(i) = 0.0;
+        }
+        i += 1;
+    }
+}
+
+// ==================== PER-ROW MASKED SIMD KERNELS ====================
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+pub unsafe fn buff_averages_row_avx2_from_masked(
+    pv: &[f64],
+    vv: &[f64],
+    fast_period: usize,
+    slow_period: usize,
+    first: usize,
+    fast_out: &mut [f64],
+    slow_out: &mut [f64],
+) {
+    let len = pv.len();
+    if len == 0 {
+        return;
+    }
+
+    let warm = first + slow_period - 1;
+    if warm >= len {
+        return;
+    }
+
+    let end = warm + 1;
+
+    // Slow init window
+    let mut i = end - slow_period;
+    let mut s_num_v = _mm256_setzero_pd();
+    let mut s_den_v = _mm256_setzero_pd();
+    while i + 4 <= end {
+        let pv4 = _mm256_loadu_pd(pv.as_ptr().add(i));
+        let v4 = _mm256_loadu_pd(vv.as_ptr().add(i));
+        s_num_v = _mm256_add_pd(s_num_v, pv4);
+        s_den_v = _mm256_add_pd(s_den_v, v4);
+        i += 4;
+    }
+    let mut slow_numerator = hsum256_pd(s_num_v);
+    let mut slow_denominator = hsum256_pd(s_den_v);
+    while i < end {
+        slow_numerator += *pv.get_unchecked(i);
+        slow_denominator += *vv.get_unchecked(i);
+        i += 1;
+    }
+
+    // Fast init window
+    let mut j = end - fast_period;
+    let mut f_num_v = _mm256_setzero_pd();
+    let mut f_den_v = _mm256_setzero_pd();
+    while j + 4 <= end {
+        let pv4 = _mm256_loadu_pd(pv.as_ptr().add(j));
+        let v4 = _mm256_loadu_pd(vv.as_ptr().add(j));
+        f_num_v = _mm256_add_pd(f_num_v, pv4);
+        f_den_v = _mm256_add_pd(f_den_v, v4);
+        j += 4;
+    }
+    let mut fast_numerator = hsum256_pd(f_num_v);
+    let mut fast_denominator = hsum256_pd(f_den_v);
+    while j < end {
+        fast_numerator += *pv.get_unchecked(j);
+        fast_denominator += *vv.get_unchecked(j);
+        j += 1;
+    }
+
+    slow_out[warm] = if slow_denominator != 0.0 {
+        slow_numerator / slow_denominator
+    } else {
+        0.0
+    };
+    fast_out[warm] = if fast_denominator != 0.0 {
+        fast_numerator / fast_denominator
+    } else {
+        0.0
+    };
+
+    for k in (warm + 1)..len {
+        let old_s = k - slow_period;
+        let new_pv = *pv.get_unchecked(k);
+        let new_vv = *vv.get_unchecked(k);
+        let old_pv = *pv.get_unchecked(old_s);
+        let old_vv = *vv.get_unchecked(old_s);
+        slow_numerator -= old_pv;
+        slow_denominator -= old_vv;
+        slow_numerator += new_pv;
+        slow_denominator += new_vv;
+        slow_out[k] = if slow_denominator != 0.0 {
+            slow_numerator / slow_denominator
+        } else {
+            0.0
+        };
+
+        let old_f = k - fast_period;
+        let old_fp = *pv.get_unchecked(old_f);
+        let old_fv = *vv.get_unchecked(old_f);
+        fast_numerator -= old_fp;
+        fast_denominator -= old_fv;
+        fast_numerator += new_pv;
+        fast_denominator += new_vv;
+        fast_out[k] = if fast_denominator != 0.0 {
+            fast_numerator / fast_denominator
+        } else {
+            0.0
+        };
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f,fma")]
+pub unsafe fn buff_averages_row_avx512_from_masked(
+    pv: &[f64],
+    vv: &[f64],
+    fast_period: usize,
+    slow_period: usize,
+    first: usize,
+    fast_out: &mut [f64],
+    slow_out: &mut [f64],
+) {
+    let len = pv.len();
+    if len == 0 {
+        return;
+    }
+
+    let warm = first + slow_period - 1;
+    if warm >= len {
+        return;
+    }
+
+    let end = warm + 1;
+
+    // Slow init window
+    let mut i = end - slow_period;
+    let mut s_num_v = _mm512_setzero_pd();
+    let mut s_den_v = _mm512_setzero_pd();
+    while i + 8 <= end {
+        let pv8 = _mm512_loadu_pd(pv.as_ptr().add(i));
+        let v8 = _mm512_loadu_pd(vv.as_ptr().add(i));
+        s_num_v = _mm512_add_pd(s_num_v, pv8);
+        s_den_v = _mm512_add_pd(s_den_v, v8);
+        i += 8;
+    }
+    let mut slow_numerator = _mm512_reduce_add_pd(s_num_v);
+    let mut slow_denominator = _mm512_reduce_add_pd(s_den_v);
+    while i < end {
+        slow_numerator += *pv.get_unchecked(i);
+        slow_denominator += *vv.get_unchecked(i);
+        i += 1;
+    }
+
+    // Fast init window
+    let mut j = end - fast_period;
+    let mut f_num_v = _mm512_setzero_pd();
+    let mut f_den_v = _mm512_setzero_pd();
+    while j + 8 <= end {
+        let pv8 = _mm512_loadu_pd(pv.as_ptr().add(j));
+        let v8 = _mm512_loadu_pd(vv.as_ptr().add(j));
+        f_num_v = _mm512_add_pd(f_num_v, pv8);
+        f_den_v = _mm512_add_pd(f_den_v, v8);
+        j += 8;
+    }
+    let mut fast_numerator = _mm512_reduce_add_pd(f_num_v);
+    let mut fast_denominator = _mm512_reduce_add_pd(f_den_v);
+    while j < end {
+        fast_numerator += *pv.get_unchecked(j);
+        fast_denominator += *vv.get_unchecked(j);
+        j += 1;
+    }
+
+    slow_out[warm] = if slow_denominator != 0.0 {
+        slow_numerator / slow_denominator
+    } else {
+        0.0
+    };
+    fast_out[warm] = if fast_denominator != 0.0 {
+        fast_numerator / fast_denominator
+    } else {
+        0.0
+    };
+
+    for k in (warm + 1)..len {
+        let old_s = k - slow_period;
+        let new_pv = *pv.get_unchecked(k);
+        let new_vv = *vv.get_unchecked(k);
+        let old_pv = *pv.get_unchecked(old_s);
+        let old_vv = *vv.get_unchecked(old_s);
+        slow_numerator -= old_pv;
+        slow_denominator -= old_vv;
+        slow_numerator += new_pv;
+        slow_denominator += new_vv;
+        slow_out[k] = if slow_denominator != 0.0 {
+            slow_numerator / slow_denominator
+        } else {
+            0.0
+        };
+
+        let old_f = k - fast_period;
+        let old_fp = *pv.get_unchecked(old_f);
+        let old_fv = *vv.get_unchecked(old_f);
+        fast_numerator -= old_fp;
+        fast_denominator -= old_fv;
+        fast_numerator += new_pv;
+        fast_denominator += new_vv;
         fast_out[k] = if fast_denominator != 0.0 {
             fast_numerator / fast_denominator
         } else {
@@ -1181,6 +1489,23 @@ fn buff_averages_batch_inner_into_parallel(
         _ => Kernel::Scalar,
     };
 
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    let masked_buffers: Option<(Vec<f64>, Vec<f64>)> =
+        if matches!(simd, Kernel::Avx2 | Kernel::Avx512) {
+            let mut pv = vec![0.0; price.len()];
+            let mut vv = vec![0.0; price.len()];
+            unsafe {
+                match simd {
+                    Kernel::Avx2 => build_masked_pv_v_avx2(price, volume, &mut pv, &mut vv),
+                    Kernel::Avx512 => build_masked_pv_v_avx512(price, volume, &mut pv, &mut vv),
+                    _ => {}
+                }
+            }
+            Some((pv, vv))
+        } else {
+            None
+        };
+
     // Compute each row - either parallel or sequential
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
@@ -1194,7 +1519,40 @@ fn buff_averages_batch_inner_into_parallel(
                 .enumerate()
                 .for_each(|(row, (fr, sr))| {
                     let (fp, sp) = combos[row];
-                    buff_averages_compute_into(price, volume, fp, sp, first, simd, fr, sr);
+                    let handled = {
+                        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                        {
+                            if let Some((pv, vv)) = masked_buffers.as_ref() {
+                                unsafe {
+                                    match simd {
+                                        Kernel::Avx2 => {
+                                            buff_averages_row_avx2_from_masked(
+                                                pv, vv, fp, sp, first, fr, sr,
+                                            );
+                                            true
+                                        }
+                                        Kernel::Avx512 => {
+                                            buff_averages_row_avx512_from_masked(
+                                                pv, vv, fp, sp, first, fr, sr,
+                                            );
+                                            true
+                                        }
+                                        _ => false,
+                                    }
+                                }
+                            } else {
+                                false
+                            }
+                        }
+                        #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+                        {
+                            false
+                        }
+                    };
+
+                    if !handled {
+                        buff_averages_compute_into(price, volume, fp, sp, first, simd, fr, sr);
+                    }
                 });
         }
 
@@ -1204,7 +1562,40 @@ fn buff_averages_batch_inner_into_parallel(
             for (row, &(fp, sp)) in combos.iter().enumerate() {
                 let fr = &mut fast_out[row * cols..(row + 1) * cols];
                 let sr = &mut slow_out[row * cols..(row + 1) * cols];
-                buff_averages_compute_into(price, volume, fp, sp, first, simd, fr, sr);
+                let handled = {
+                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                    {
+                        if let Some((pv, vv)) = masked_buffers.as_ref() {
+                            unsafe {
+                                match simd {
+                                    Kernel::Avx2 => {
+                                        buff_averages_row_avx2_from_masked(
+                                            pv, vv, fp, sp, first, fr, sr,
+                                        );
+                                        true
+                                    }
+                                    Kernel::Avx512 => {
+                                        buff_averages_row_avx512_from_masked(
+                                            pv, vv, fp, sp, first, fr, sr,
+                                        );
+                                        true
+                                    }
+                                    _ => false,
+                                }
+                            }
+                        } else {
+                            false
+                        }
+                    }
+                    #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+                    {
+                        false
+                    }
+                };
+
+                if !handled {
+                    buff_averages_compute_into(price, volume, fp, sp, first, simd, fr, sr);
+                }
             }
         }
     } else {
@@ -1212,7 +1603,40 @@ fn buff_averages_batch_inner_into_parallel(
         for (row, &(fp, sp)) in combos.iter().enumerate() {
             let fr = &mut fast_out[row * cols..(row + 1) * cols];
             let sr = &mut slow_out[row * cols..(row + 1) * cols];
-            buff_averages_compute_into(price, volume, fp, sp, first, simd, fr, sr);
+            let handled = {
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                {
+                    if let Some((pv, vv)) = masked_buffers.as_ref() {
+                        unsafe {
+                            match simd {
+                                Kernel::Avx2 => {
+                                    buff_averages_row_avx2_from_masked(
+                                        pv, vv, fp, sp, first, fr, sr,
+                                    );
+                                    true
+                                }
+                                Kernel::Avx512 => {
+                                    buff_averages_row_avx512_from_masked(
+                                        pv, vv, fp, sp, first, fr, sr,
+                                    );
+                                    true
+                                }
+                                _ => false,
+                            }
+                        }
+                    } else {
+                        false
+                    }
+                }
+                #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+                {
+                    false
+                }
+            };
+
+            if !handled {
+                buff_averages_compute_into(price, volume, fp, sp, first, simd, fr, sr);
+            }
         }
     }
 
@@ -1409,6 +1833,41 @@ pub fn buff_averages_batch_py<'py>(
             .into_pyarray(py),
     )?;
     Ok(d)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "buff_averages_cuda_batch_dev")]
+#[pyo3(signature = (price_f32, volume_f32, fast_range, slow_range, device_id=0))]
+pub fn buff_averages_cuda_batch_dev_py(
+    py: Python<'_>,
+    price_f32: PyReadonlyArray1<'_, f32>,
+    volume_f32: PyReadonlyArray1<'_, f32>,
+    fast_range: (usize, usize, usize),
+    slow_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let price = price_f32.as_slice()?;
+    let volume = volume_f32.as_slice()?;
+    let sweep = BuffAveragesBatchRange {
+        fast_period: fast_range,
+        slow_period: slow_range,
+    };
+
+    let (fast_dev, slow_dev) = py.allow_threads(|| {
+        let cuda =
+            CudaBuffAverages::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.buff_averages_batch_dev(price, volume, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok((
+        DeviceArrayF32Py { inner: fast_dev },
+        DeviceArrayF32Py { inner: slow_dev },
+    ))
 }
 
 #[cfg(feature = "python")]

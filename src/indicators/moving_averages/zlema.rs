@@ -26,6 +26,10 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::{
+    cuda::moving_averages::CudaZlema, indicators::moving_averages::alma::DeviceArrayF32Py,
+};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
@@ -1614,6 +1618,41 @@ pub fn zlema_batch_py<'py>(
     )?;
 
     Ok(dict.into())
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "zlema_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, period_range, device_id=0))]
+pub fn zlema_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    data_f32: numpy::PyReadonlyArray1<'py, f32>,
+    period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, Bound<'py, pyo3::types::PyDict>)> {
+    use crate::cuda::cuda_available;
+    use numpy::IntoPyArray;
+    use pyo3::types::PyDict;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let slice_in = data_f32.as_slice()?;
+    let sweep = ZlemaBatchRange {
+        period: period_range,
+    };
+
+    let (inner, combos) = py.allow_threads(|| {
+        let cuda = CudaZlema::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.zlema_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    let dict = PyDict::new(py);
+    let periods: Vec<u64> = combos.iter().map(|c| c.period.unwrap() as u64).collect();
+    dict.set_item("periods", periods.into_pyarray(py))?;
+
+    Ok((DeviceArrayF32Py { inner }, dict))
 }
 
 #[cfg(feature = "wasm")]

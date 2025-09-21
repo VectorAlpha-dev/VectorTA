@@ -29,7 +29,7 @@
 //!
 //! ## Developer Notes
 //! - **AVX2 kernel**: STUB - calls scalar implementation
-//! - **AVX512 kernel**: STUB - calls scalar implementation  
+//! - **AVX512 kernel**: STUB - calls scalar implementation
 //! - **Streaming**: Not implemented
 //! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy)
 //! - **Batch operations**: ✅ Implemented with parallel processing support

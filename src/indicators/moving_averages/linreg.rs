@@ -35,6 +35,10 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::{
+    cuda::moving_averages::CudaLinreg, indicators::moving_averages::alma::DeviceArrayF32Py,
+};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -504,7 +508,7 @@ fn linreg_batch_inner(
     parallel: bool,
 ) -> Result<LinRegBatchOutput, LinRegError> {
     // ------------- 0. sanity checks -------------
-    let combos = expand_grid(sweep);
+    let combos = expand_grid_linreg(sweep);
     if combos.is_empty() {
         return Err(LinRegError::InvalidPeriod {
             period: 0,
@@ -593,7 +597,7 @@ pub fn linreg_batch_inner_into(
     out: &mut [f64],
 ) -> Result<Vec<LinRegParams>, LinRegError> {
     // ------------- 0. prelim checks -------------
-    let combos = expand_grid(sweep);
+    let combos = expand_grid_linreg(sweep);
     if combos.is_empty() {
         return Err(LinRegError::InvalidPeriod {
             period: 0,
@@ -774,7 +778,7 @@ fn round_up8(x: usize) -> usize {
 // --- EXPOSED BATCH EXPANSION ---
 
 #[inline(always)]
-fn expand_grid(r: &LinRegBatchRange) -> Vec<LinRegParams> {
+pub fn expand_grid_linreg(r: &LinRegBatchRange) -> Vec<LinRegParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
         if step == 0 || start == end {
             return vec![start];
@@ -1481,7 +1485,7 @@ pub fn linreg_batch_py<'py>(
     };
 
     // Calculate dimensions
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid_linreg(&sweep);
     let rows = combos.len();
     let cols = slice_in.len();
 
@@ -1521,6 +1525,73 @@ pub fn linreg_batch_py<'py>(
     )?;
 
     Ok(dict)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "linreg_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, period_range, device_id=0))]
+pub fn linreg_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    data_f32: PyReadonlyArray1<'py, f32>,
+    period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, Bound<'py, PyDict>)> {
+    use crate::cuda::cuda_available;
+    use numpy::IntoPyArray;
+    use pyo3::types::PyDict;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let slice_in = data_f32.as_slice()?;
+    let sweep = LinRegBatchRange {
+        period: period_range,
+    };
+
+    let (inner, combos) = py.allow_threads(|| {
+        let cuda = CudaLinreg::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.linreg_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    let dict = PyDict::new(py);
+    let periods: Vec<u64> = combos.iter().map(|c| c.period.unwrap() as u64).collect();
+    dict.set_item("periods", periods.into_pyarray(py))?;
+
+    Ok((DeviceArrayF32Py { inner }, dict))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "linreg_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, period, device_id=0))]
+pub fn linreg_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    period: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use numpy::PyUntypedArrayMethods;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let flat_in = data_tm_f32.as_slice()?;
+    let rows = data_tm_f32.shape()[0];
+    let cols = data_tm_f32.shape()[1];
+    let params = LinRegParams {
+        period: Some(period),
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaLinreg::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.linreg_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "python")]
@@ -1714,7 +1785,7 @@ pub fn linreg_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid_linreg(&sweep);
         let rows = combos.len();
         let cols = len;
 

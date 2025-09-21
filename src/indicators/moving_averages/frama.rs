@@ -38,6 +38,10 @@ use crate::utilities::helpers::{
     alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
     make_uninit_matrix,
 };
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::{
+    cuda::moving_averages::CudaFrama, indicators::moving_averages::alma::DeviceArrayF32Py,
+};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -2430,6 +2434,114 @@ pub fn frama_batch_py<'py>(
     dict.set_item("scs", scs.into_pyarray(py))?;
     dict.set_item("fcs", fcs.into_pyarray(py))?;
     Ok(dict)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "frama_cuda_batch_dev")]
+#[pyo3(signature = (high_f32, low_f32, close_f32, window_range, sc_range, fc_range, device_id=0))]
+pub fn frama_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    high_f32: numpy::PyReadonlyArray1<'py, f32>,
+    low_f32: numpy::PyReadonlyArray1<'py, f32>,
+    close_f32: numpy::PyReadonlyArray1<'py, f32>,
+    window_range: (usize, usize, usize),
+    sc_range: (usize, usize, usize),
+    fc_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, Bound<'py, PyDict>)> {
+    use crate::cuda::cuda_available;
+    use numpy::IntoPyArray;
+    use pyo3::types::PyDict;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let high_slice = high_f32.as_slice()?;
+    let low_slice = low_f32.as_slice()?;
+    let close_slice = close_f32.as_slice()?;
+    if high_slice.len() != low_slice.len() || high_slice.len() != close_slice.len() {
+        return Err(PyValueError::new_err("mismatched slice lengths"));
+    }
+
+    let sweep = FramaBatchRange {
+        window: window_range,
+        sc: sc_range,
+        fc: fc_range,
+    };
+
+    let (inner, combos) = py.allow_threads(|| {
+        let cuda = CudaFrama::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.frama_batch_dev(high_slice, low_slice, close_slice, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    let dict = PyDict::new(py);
+    let windows: Vec<u64> = combos.iter().map(|c| c.window.unwrap() as u64).collect();
+    let scs: Vec<u64> = combos.iter().map(|c| c.sc.unwrap() as u64).collect();
+    let fcs: Vec<u64> = combos.iter().map(|c| c.fc.unwrap() as u64).collect();
+    dict.set_item("windows", windows.into_pyarray(py))?;
+    dict.set_item("scs", scs.into_pyarray(py))?;
+    dict.set_item("fcs", fcs.into_pyarray(py))?;
+
+    Ok((DeviceArrayF32Py { inner }, dict))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "frama_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm_f32, low_tm_f32, close_tm_f32, window, sc, fc, device_id=0))]
+pub fn frama_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    high_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    low_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    close_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    window: usize,
+    sc: usize,
+    fc: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use numpy::PyUntypedArrayMethods;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let high_shape = high_tm_f32.shape();
+    let low_shape = low_tm_f32.shape();
+    let close_shape = close_tm_f32.shape();
+    if low_shape != high_shape || close_shape != high_shape {
+        return Err(PyValueError::new_err(
+            "high, low, and close arrays must share the same shape",
+        ));
+    }
+
+    let rows = high_shape[0];
+    let cols = high_shape[1];
+    let high_slice = high_tm_f32.as_slice()?;
+    let low_slice = low_tm_f32.as_slice()?;
+    let close_slice = close_tm_f32.as_slice()?;
+
+    let params = FramaParams {
+        window: Some(window),
+        sc: Some(sc),
+        fc: Some(fc),
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaFrama::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.frama_many_series_one_param_time_major_dev(
+            high_slice,
+            low_slice,
+            close_slice,
+            cols,
+            rows,
+            &params,
+        )
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "python")]

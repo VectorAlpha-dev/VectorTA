@@ -223,7 +223,7 @@ use my_project::indicators::{
     wclprice::{wclprice as wclprice_raw, WclpriceInput},
     willr::{willr as willr_raw, WillrInput},
     wto::{wto_with_kernel, WtoBatchBuilder, WtoInput},
-    zscore::{zscore as zscore_raw, ZscoreInput},
+    zscore::{zscore as zscore_raw, zscore_with_kernel, ZscoreBatchBuilder, ZscoreInput},
 };
 
 use my_project::utilities::data_loader::{read_candles_from_csv, Candles};
@@ -1085,6 +1085,7 @@ bench_scalars!(
 
 make_kernel_wrappers!(alma, alma_with_kernel, AlmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(buff_averages, buff_averages_with_kernel, BuffAveragesInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(zscore, zscore_with_kernel, ZscoreInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(macz, macz_with_kernel, MaczInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(cwma, cwma_with_kernel, CwmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(dema, dema_with_kernel, DemaInputS; Scalar,Avx2,Avx512);
@@ -1154,6 +1155,11 @@ make_kernel_wrappers!(vama, vama_with_kernel, VamaInputS; Scalar,Avx2,Avx512);
 
 make_batch_wrappers!(
     alma_batch, AlmaBatchBuilder, AlmaInputS;
+    ScalarBatch, Avx2Batch, Avx512Batch
+);
+
+make_batch_wrappers!(
+    zscore_batch, ZscoreBatchBuilder, ZscoreInputS;
     ScalarBatch, Avx2Batch, Avx512Batch
 );
 
@@ -1516,6 +1522,13 @@ bench_variants!(
     buff_averages_batch_scalarbatch,
     buff_averages_batch_avx2batch,
     buff_averages_batch_avx512batch
+);
+
+bench_variants!(
+    zscore_batch => ZscoreInputS; Some(14);
+    zscore_batch_scalarbatch,
+    zscore_batch_avx2batch,
+    zscore_batch_avx512batch
 );
 
 bench_variants!(
@@ -1944,6 +1957,13 @@ bench_variants!(
     buff_averages_scalar,
     buff_averages_avx2,
     buff_averages_avx512,
+);
+
+bench_variants!(
+    zscore => ZscoreInputS; Some(14);
+    zscore_scalar,
+    zscore_avx2,
+    zscore_avx512,
 );
 
 bench_variants!(
@@ -2438,6 +2458,8 @@ criterion_main!(
     benches_alma_batch,
     benches_buff_averages,
     benches_buff_averages_batch,
+    benches_zscore,
+    benches_zscore_batch,
     benches_macz,
     benches_macz_batch,
     benches_cwma,

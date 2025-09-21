@@ -827,7 +827,7 @@ mod tests {
                         let expected_nvi = prev_nvi + prev_nvi * expected_pct;
 
                         prop_assert!(
-							(curr_nvi - expected_nvi).abs() < 1e-9 || 
+							(curr_nvi - expected_nvi).abs() < 1e-9 ||
 							(curr_nvi - expected_nvi).abs() / expected_nvi.abs() < 1e-9,
 							"NVI calculation error at index {} (scenario {}): expected {}, got {}, \
 							prev_nvi={}, pct_change={}, volume {} -> {}",

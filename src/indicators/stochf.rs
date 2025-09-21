@@ -1772,7 +1772,7 @@ mod tests {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at K index {} \
 						 with params: fastk_period={}, fastd_period={}, fastd_matype={} (param set {})",
-						test_name, val, bits, i, 
+						test_name, val, bits, i,
 						params.fastk_period.unwrap_or(5),
 						params.fastd_period.unwrap_or(3),
 						params.fastd_matype.unwrap_or(0),

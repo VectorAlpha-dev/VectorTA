@@ -2135,9 +2135,9 @@ mod tests {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in vol array \
 						 with params: vis_atr={}, vis_std={}, sed_atr={}, sed_std={}, threshold={} (param set {})",
-						test_name, val, bits, i, 
-						params.vis_atr.unwrap(), params.vis_std.unwrap(), 
-						params.sed_atr.unwrap(), params.sed_std.unwrap(), 
+						test_name, val, bits, i,
+						params.vis_atr.unwrap(), params.vis_std.unwrap(),
+						params.sed_atr.unwrap(), params.sed_std.unwrap(),
 						params.threshold.unwrap(), param_idx
 					);
                 }
@@ -2146,9 +2146,9 @@ mod tests {
                     panic!(
 						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in vol array \
 						 with params: vis_atr={}, vis_std={}, sed_atr={}, sed_std={}, threshold={} (param set {})",
-						test_name, val, bits, i, 
-						params.vis_atr.unwrap(), params.vis_std.unwrap(), 
-						params.sed_atr.unwrap(), params.sed_std.unwrap(), 
+						test_name, val, bits, i,
+						params.vis_atr.unwrap(), params.vis_std.unwrap(),
+						params.sed_atr.unwrap(), params.sed_std.unwrap(),
 						params.threshold.unwrap(), param_idx
 					);
                 }
@@ -2157,9 +2157,9 @@ mod tests {
                     panic!(
 						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in vol array \
 						 with params: vis_atr={}, vis_std={}, sed_atr={}, sed_std={}, threshold={} (param set {})",
-						test_name, val, bits, i, 
-						params.vis_atr.unwrap(), params.vis_std.unwrap(), 
-						params.sed_atr.unwrap(), params.sed_std.unwrap(), 
+						test_name, val, bits, i,
+						params.vis_atr.unwrap(), params.vis_std.unwrap(),
+						params.sed_atr.unwrap(), params.sed_std.unwrap(),
 						params.threshold.unwrap(), param_idx
 					);
                 }
@@ -2178,9 +2178,9 @@ mod tests {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in anti array \
 						 with params: vis_atr={}, vis_std={}, sed_atr={}, sed_std={}, threshold={} (param set {})",
-						test_name, val, bits, i, 
-						params.vis_atr.unwrap(), params.vis_std.unwrap(), 
-						params.sed_atr.unwrap(), params.sed_std.unwrap(), 
+						test_name, val, bits, i,
+						params.vis_atr.unwrap(), params.vis_std.unwrap(),
+						params.sed_atr.unwrap(), params.sed_std.unwrap(),
 						params.threshold.unwrap(), param_idx
 					);
                 }
@@ -2189,9 +2189,9 @@ mod tests {
                     panic!(
 						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in anti array \
 						 with params: vis_atr={}, vis_std={}, sed_atr={}, sed_std={}, threshold={} (param set {})",
-						test_name, val, bits, i, 
-						params.vis_atr.unwrap(), params.vis_std.unwrap(), 
-						params.sed_atr.unwrap(), params.sed_std.unwrap(), 
+						test_name, val, bits, i,
+						params.vis_atr.unwrap(), params.vis_std.unwrap(),
+						params.sed_atr.unwrap(), params.sed_std.unwrap(),
 						params.threshold.unwrap(), param_idx
 					);
                 }
@@ -2200,9 +2200,9 @@ mod tests {
                     panic!(
 						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in anti array \
 						 with params: vis_atr={}, vis_std={}, sed_atr={}, sed_std={}, threshold={} (param set {})",
-						test_name, val, bits, i, 
-						params.vis_atr.unwrap(), params.vis_std.unwrap(), 
-						params.sed_atr.unwrap(), params.sed_std.unwrap(), 
+						test_name, val, bits, i,
+						params.vis_atr.unwrap(), params.vis_std.unwrap(),
+						params.sed_atr.unwrap(), params.sed_std.unwrap(),
 						params.threshold.unwrap(), param_idx
 					);
                 }

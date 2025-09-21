@@ -26,6 +26,10 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::{
+    cuda::moving_averages::CudaTrendflex, indicators::moving_averages::alma::DeviceArrayF32Py,
+};
 use aligned_vec::{AVec, ConstAlign, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -1165,6 +1169,11 @@ fn expand_grid(r: &TrendFlexBatchRange) -> Vec<TrendFlexParams> {
 }
 
 #[inline(always)]
+pub fn expand_grid_trendflex(r: &TrendFlexBatchRange) -> Vec<TrendFlexParams> {
+    expand_grid(r)
+}
+
+#[inline(always)]
 pub fn trendflex_batch_slice(
     data: &[f64],
     sweep: &TrendFlexBatchRange,
@@ -2214,6 +2223,75 @@ pub fn trendflex_batch_py<'py>(
     )?;
 
     Ok(dict)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "trendflex_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, period_range, device_id=0))]
+pub fn trendflex_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    data_f32: numpy::PyReadonlyArray1<'py, f32>,
+    period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, Bound<'py, pyo3::types::PyDict>)> {
+    use crate::cuda::cuda_available;
+    use numpy::IntoPyArray;
+    use pyo3::types::PyDict;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let slice_in = data_f32.as_slice()?;
+    let sweep = TrendFlexBatchRange {
+        period: period_range,
+    };
+
+    let (inner, combos) = py.allow_threads(|| {
+        let cuda =
+            CudaTrendflex::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.trendflex_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    let dict = PyDict::new(py);
+    let periods: Vec<u64> = combos.iter().map(|c| c.period.unwrap() as u64).collect();
+    dict.set_item("periods", periods.into_pyarray(py))?;
+
+    Ok((DeviceArrayF32Py { inner }, dict))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "trendflex_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, period, device_id=0))]
+pub fn trendflex_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    period: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use numpy::PyUntypedArrayMethods;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let flat_in = data_tm_f32.as_slice()?;
+    let rows = data_tm_f32.shape()[0];
+    let cols = data_tm_f32.shape()[1];
+    let params = TrendFlexParams {
+        period: Some(period),
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda =
+            CudaTrendflex::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.trendflex_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "wasm")]
