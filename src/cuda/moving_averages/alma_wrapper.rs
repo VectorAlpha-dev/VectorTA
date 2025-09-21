@@ -581,9 +581,13 @@ impl CudaAlma {
                 let period = prm.period.unwrap() as usize;
                 let offset = prm.offset.unwrap();
                 let sigma = prm.sigma.unwrap();
-                let (weights, inv_norm) = compute_weights_cpu_f32(period, offset, sigma);
+                let (mut weights, inv_norm) = compute_weights_cpu_f32(period, offset, sigma);
                 periods_i32[idx] = period as i32;
-                inv_norms[idx] = inv_norm;
+                // Pre-scale weights to eliminate per-output multiply in kernels
+                if inv_norm != 0.0 {
+                    for w in &mut weights { *w *= inv_norm; }
+                }
+                inv_norms[idx] = 1.0; // now a dummy in kernels
                 let base = idx * max_period;
                 weights_flat[base..base + period].copy_from_slice(&weights);
             }
@@ -711,15 +715,19 @@ impl CudaAlma {
             unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
                 .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
 
-        // Prefer host-precomputed weights/normalization for accuracy
-        let (weights_host, inv_norm) = compute_weights_cpu_f32(period, offset as f64, sigma as f64);
+        // Prefer host-precomputed weights/normalization for accuracy.
+        // Pre-scale weights to eliminate per-output multiply in kernels.
+        let (mut weights_host, inv_norm) = compute_weights_cpu_f32(period, offset as f64, sigma as f64);
+        if inv_norm != 0.0 {
+            for w in &mut weights_host { *w *= inv_norm; }
+        }
         let d_weights = DeviceBuffer::from_slice(&weights_host)
             .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
         self.launch_many_series_kernel_precomputed(
             &d_prices,
             &d_weights,
             period,
-            inv_norm,
+            1.0,
             cols,
             rows,
             &d_first_valids,
@@ -1336,9 +1344,10 @@ pub mod benches {
             let period = prm.period.unwrap() as usize;
             let offset = prm.offset.unwrap();
             let sigma = prm.sigma.unwrap();
-            let (weights, inv_norm) = super::compute_weights_cpu_f32(period, offset, sigma);
+            let (mut weights, inv_norm) = super::compute_weights_cpu_f32(period, offset, sigma);
             periods_i32[idx] = period as i32;
-            inv_norms[idx] = inv_norm;
+            if inv_norm != 0.0 { for w in &mut weights { *w *= inv_norm; } }
+            inv_norms[idx] = 1.0;
             let base = idx * max_period;
             weights_flat[base..base + period].copy_from_slice(&weights);
         }
@@ -1390,9 +1399,10 @@ pub mod benches {
         let mut weights_flat = vec![0f32; n_combos * max_period];
         for (idx, prm) in combos.iter().enumerate() {
             let period = prm.period.unwrap() as usize;
-            let (weights, inv_norm) = super::compute_weights_cpu_f32(period, prm.offset.unwrap(), prm.sigma.unwrap());
+            let (mut weights, inv_norm) = super::compute_weights_cpu_f32(period, prm.offset.unwrap(), prm.sigma.unwrap());
             periods_i32[idx] = period as i32;
-            inv_norms[idx] = inv_norm;
+            if inv_norm != 0.0 { for w in &mut weights { *w *= inv_norm; } }
+            inv_norms[idx] = 1.0;
             let base = idx * max_period;
             weights_flat[base..base + period].copy_from_slice(&weights);
         }
@@ -1447,7 +1457,8 @@ pub mod benches {
         });
         let prices_tm = gen_time_major_prices(COLS, ROWS);
         let period = 64usize;
-        let (weights, inv_norm) = super::compute_weights_cpu_f32(period, 0.85, 6.0);
+        let (mut weights, inv_norm) = super::compute_weights_cpu_f32(period, 0.85, 6.0);
+        if inv_norm != 0.0 { for w in &mut weights { *w *= inv_norm; } }
         let mut first_valids = vec![0i32; COLS];
         for s in 0..COLS {
             let mut fv = 0usize;
@@ -1459,7 +1470,7 @@ pub mod benches {
         let d_weights = DeviceBuffer::from_slice(&weights).expect("d_weights");
         let d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(COLS * ROWS, &cuda.stream) }.expect("d_out_tm");
         cuda.synchronize().expect("sync after prep");
-        Box::new(AlmaManySeriesDeviceState { cuda, d_prices_tm, d_first_valids, d_weights, d_out_tm, cols: COLS, rows: ROWS, period, inv_norm, warmed: false })
+        Box::new(AlmaManySeriesDeviceState { cuda, d_prices_tm, d_first_valids, d_weights, d_out_tm, cols: COLS, rows: ROWS, period, inv_norm: 1.0, warmed: false })
     }
 
     fn prep_alma_many_series_one_param() -> Box<dyn CudaBenchState> {
@@ -1477,7 +1488,8 @@ pub mod benches {
         let period = 64usize;
         let offset = 0.85f64;
         let sigma = 6.0f64;
-        let (weights, inv_norm) = super::compute_weights_cpu_f32(period, offset, sigma);
+        let (mut weights, inv_norm) = super::compute_weights_cpu_f32(period, offset, sigma);
+        if inv_norm != 0.0 { for w in &mut weights { *w *= inv_norm; } }
 
         // Compute first_valids
         let mut first_valids = vec![0i32; cols];
@@ -1508,7 +1520,7 @@ pub mod benches {
             cols,
             rows,
             period,
-            inv_norm,
+            inv_norm: 1.0,
             warmed: false,
         })
     }

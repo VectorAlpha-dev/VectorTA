@@ -144,6 +144,43 @@ float alma_dot(const float* __restrict__ x,
 #endif
 }
 
+// Fused two-output dot product using the same weights. Computes outputs at
+// consecutive positions (b and b+1) from a shared buffer `buf`.
+__device__ __forceinline__
+void alma_dot2_shared(const float* __restrict__ buf, int b,
+                      const float* __restrict__ w, int n,
+                      float& s0_out, float& s1_out) {
+#if ALMA_COMPENSATED_DOT
+  float s0 = 0.f, c0 = 0.f;
+  float s1 = 0.f, c1 = 0.f;
+  #pragma unroll 4
+  for (int i = 0; i < n; ++i) {
+    float wi = w[i];
+    float t0 = __fmaf_rn(buf[b + i],     wi, 0.f);
+    float y0 = t0 - c0;
+    float u0 = s0 + y0;
+    c0 = (u0 - s0) - y0;
+    s0 = u0;
+
+    float t1 = __fmaf_rn(buf[b + i + 1], wi, 0.f);
+    float y1 = t1 - c1;
+    float u1 = s1 + y1;
+    c1 = (u1 - s1) - y1;
+    s1 = u1;
+  }
+  s0_out = s0; s1_out = s1;
+#else
+  float s0 = 0.f, s1 = 0.f;
+  #pragma unroll 4
+  for (int i = 0; i < n; ++i) {
+    float wi = w[i];
+    s0 = __fmaf_rn(buf[b + i],     wi, s0);
+    s1 = __fmaf_rn(buf[b + i + 1], wi, s1);
+  }
+  s0_out = s0; s1_out = s1;
+#endif
+}
+
 // Strided dot-product x[0], x[stride], x[2*stride], ...
 __device__ __forceinline__
 float alma_dot_stride(const float* __restrict__ x,
@@ -226,7 +263,11 @@ void alma_batch_f32_onthefly(const float* __restrict__ prices,
 
   __shared__ float inv_norm_s;
   alma_compute_weights_and_invnorm(period, m, s2, weights, &inv_norm_s);
-  const float inv_norm = inv_norm_s;
+  // Pre-scale weights once per CTA to eliminate per-output multiply
+  for (int i = threadIdx.x; i < period; i += blockDim.x) {
+    weights[i] *= inv_norm_s;
+  }
+  __syncthreads();
 
   int t      = blockIdx.x * blockDim.x + threadIdx.x;
   int stride = gridDim.x  * blockDim.x;
@@ -235,7 +276,7 @@ void alma_batch_f32_onthefly(const float* __restrict__ prices,
     float outv = NAN;
     if (t >= warm) {
       int start = t - period + 1;
-      outv = alma_dot(&prices[start], weights, period) * inv_norm;
+      outv = alma_dot(&prices[start], weights, period);
     }
     out[base_o + t] = outv;
     t += stride;
@@ -258,7 +299,6 @@ void alma_batch_f32(const float* __restrict__ prices,
   if (combo >= n_combos) return;
 
   const int   period   = periods[combo];
-  const float inv_norm = inv_norms[combo];
 
   extern __shared__ float sh[];
   float* w = sh; // [period]
@@ -277,7 +317,7 @@ void alma_batch_f32(const float* __restrict__ prices,
     float outv = NAN;
     if (t >= warm) {
       int start = t - period + 1;
-      outv = alma_dot(&prices[start], w, period) * inv_norm;
+      outv = alma_dot(&prices[start], w, period);
     }
     out[base_o + t] = outv;
     t += stride;
@@ -311,7 +351,6 @@ struct AlmaBatchTiledPrecomputed {
     if (combo >= n_combos) return;
 
     const int   period   = periods[combo];
-    const float inv_norm = inv_norms[combo];
 
     const int t0 = blockIdx.x * TILE;
     if (t0 >= series_len) return;
@@ -380,7 +419,7 @@ struct AlmaBatchTiledPrecomputed {
       float outv = NAN;
       if (t >= warm) {
         int start = threadIdx.x;
-        outv = alma_dot(&buf[start], w, period) * inv_norm;
+        outv = alma_dot(&buf[start], w, period);
       }
       out[combo_base + t] = outv;
     }
@@ -427,7 +466,6 @@ struct AlmaBatchTiledPrecomputed2X {
     if (combo >= n_combos) return;
 
     const int   period   = periods[combo];
-    const float inv_norm = inv_norms[combo];
 
     const int t0 = blockIdx.x * TILE_OUT;
     if (t0 >= series_len) return;
@@ -495,15 +533,19 @@ struct AlmaBatchTiledPrecomputed2X {
     int t = t0 + b;
     float out0 = NAN, out1 = NAN;
     if (t < series_len) {
-      if (t >= warm) {
-        float s0 = alma_dot(&buf[b], w, period);
-        out0 = s0 * inv_norm;
-      }
-      if ((t + 1) < series_len) {
-        if ((t + 1) >= warm) {
-          float s1 = alma_dot(&buf[b + 1], w, period);
-          out1 = s1 * inv_norm;
-        }
+      const bool can0 = (t >= warm);
+      const bool can1 = ((t + 1) < series_len) && ((t + 1) >= warm);
+      if (can0 && can1) {
+        float s0, s1;
+        alma_dot2_shared(buf, b, w, period, s0, s1);
+        out0 = s0;
+        out1 = s1;
+      } else if (can0) {
+        // Only t is valid
+        out0 = alma_dot(&buf[b], w, period);
+      } else if (can1) {
+        // Only t+1 is valid
+        out1 = alma_dot(&buf[b + 1], w, period);
       }
       out[combo_base + t] = out0;
       if ((t + 1) < series_len) out[combo_base + t + 1] = out1;
@@ -568,7 +610,8 @@ void alma_multi_series_one_param_f32(const float* __restrict__ prices_tm,
   int start = t - period + 1;
   const float* xptr = &prices_tm[start * num_series + s];
   float acc = alma_dot_stride(xptr, num_series, w, period);
-  out_tm[out_idx] = acc * inv_norm;
+  // Treat weights as pre-normalized; drop per-output multiply
+  out_tm[out_idx] = acc;
 }
 
 // ------------- 6) Device-side precompute (weights + inv_norm) ---------------
@@ -594,12 +637,11 @@ void alma_precompute_weights_f32(const int*   __restrict__ periods,
 
   __shared__ float inv_norm_s;
   alma_compute_weights_and_invnorm(period, m, s2, w, &inv_norm_s);
-  const float inv_norm = inv_norm_s;
-
+  // Pre-scale weights by inv_norm to eliminate output multiply.
   for (int i = threadIdx.x; i < period; i += blockDim.x) {
-    weights_flat[combo * max_period + i] = w[i];
+    weights_flat[combo * max_period + i] = w[i] * inv_norm_s;
   }
-  if (threadIdx.x == 0) inv_norms[combo] = inv_norm;
+  if (threadIdx.x == 0) inv_norms[combo] = 1.0f; // now a dummy
 }
 
 // ------------- 7) Many-series tiled (2D block), precomputed weights ---------
@@ -691,7 +733,8 @@ void alma_ms1p_tiled_core(const float* __restrict__ prices_tm,
   int start = threadIdx.x; // within tile
   const float* xptr = &tile[start * TY_ + threadIdx.y];
   float acc = alma_dot_stride(xptr, TY_, w, period);
-  out_tm[out_idx] = acc * inv_norm;
+  // Weights are pre-normalized; drop multiply
+  out_tm[out_idx] = acc;
 }
 
 #define DEFINE_ALMA_MS1P_TILED(NAME, TX, TY)                                     \
