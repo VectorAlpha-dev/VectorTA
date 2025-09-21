@@ -31,6 +31,15 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::CudaEhlersEcema;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use numpy::{PyReadonlyArray2, PyUntypedArrayMethods};
+
 // Feature-gated imports for WASM bindings
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
@@ -1243,6 +1252,81 @@ pub fn ehlers_ecema_batch_py<'py>(
     dict.set_item("rows", rows)?;
     dict.set_item("cols", cols)?;
     Ok(dict)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "ehlers_ecema_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, length_range, gain_limit_range, pine_compatible=false, confirmed_only=false, device_id=0))]
+pub fn ehlers_ecema_cuda_batch_dev_py(
+    py: Python<'_>,
+    data_f32: PyReadonlyArray1<'_, f32>,
+    length_range: (usize, usize, usize),
+    gain_limit_range: (usize, usize, usize),
+    pine_compatible: bool,
+    confirmed_only: bool,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let slice_in = data_f32.as_slice()?;
+    let sweep = EhlersEcemaBatchRange {
+        length: length_range,
+        gain_limit: gain_limit_range,
+    };
+    let params = EhlersEcemaParams {
+        length: None,
+        gain_limit: None,
+        pine_compatible: Some(pine_compatible),
+        confirmed_only: Some(confirmed_only),
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda =
+            CudaEhlersEcema::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.ehlers_ecema_batch_dev(slice_in, &sweep, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "ehlers_ecema_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, length=20, gain_limit=50, pine_compatible=false, confirmed_only=false, device_id=0))]
+pub fn ehlers_ecema_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm_f32: PyReadonlyArray2<'_, f32>,
+    length: usize,
+    gain_limit: usize,
+    pine_compatible: bool,
+    confirmed_only: bool,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let flat_in = data_tm_f32.as_slice()?;
+    let shape = data_tm_f32.shape();
+    let rows = shape[0];
+    let cols = shape[1];
+    let params = EhlersEcemaParams {
+        length: Some(length),
+        gain_limit: Some(gain_limit),
+        pine_compatible: Some(pine_compatible),
+        confirmed_only: Some(confirmed_only),
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda =
+            CudaEhlersEcema::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.ehlers_ecema_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "python")]

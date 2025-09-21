@@ -21,8 +21,16 @@
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::CudaTradjema;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use numpy::PyUntypedArrayMethods;
 #[cfg(feature = "python")]
-use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
@@ -720,6 +728,94 @@ pub fn tradjema_batch_py<'py>(
             .into_pyarray(py),
     )?;
     Ok(dict)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "tradjema_cuda_batch_dev")]
+#[pyo3(signature = (high_f32, low_f32, close_f32, length_range, mult_range, device_id=0))]
+pub fn tradjema_cuda_batch_dev_py(
+    py: Python<'_>,
+    high_f32: PyReadonlyArray1<'_, f32>,
+    low_f32: PyReadonlyArray1<'_, f32>,
+    close_f32: PyReadonlyArray1<'_, f32>,
+    length_range: (usize, usize, usize),
+    mult_range: (f64, f64, f64),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let high = high_f32.as_slice()?;
+    let low = low_f32.as_slice()?;
+    let close = close_f32.as_slice()?;
+
+    if high.len() != low.len() || low.len() != close.len() {
+        return Err(PyValueError::new_err(
+            "All OHLC arrays must have the same length",
+        ));
+    }
+
+    let sweep = TradjemaBatchRange {
+        length: length_range,
+        mult: mult_range,
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda =
+            CudaTradjema::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.tradjema_batch_dev(high, low, close, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "tradjema_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm_f32, low_tm_f32, close_tm_f32, length, mult, device_id=0))]
+pub fn tradjema_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    high_tm_f32: PyReadonlyArray2<'_, f32>,
+    low_tm_f32: PyReadonlyArray2<'_, f32>,
+    close_tm_f32: PyReadonlyArray2<'_, f32>,
+    length: usize,
+    mult: f64,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let shape = high_tm_f32.shape();
+    if shape != low_tm_f32.shape() || shape != close_tm_f32.shape() {
+        return Err(PyValueError::new_err(
+            "OHLC tensors must share the same shape",
+        ));
+    }
+    if shape.len() != 2 {
+        return Err(PyValueError::new_err("expected 2D arrays (time, series)"));
+    }
+    let rows = shape[0];
+    let cols = shape[1];
+
+    let high = high_tm_f32.as_slice()?;
+    let low = low_tm_f32.as_slice()?;
+    let close = close_tm_f32.as_slice()?;
+
+    let params = TradjemaParams {
+        length: Some(length),
+        mult: Some(mult),
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda =
+            CudaTradjema::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.tradjema_many_series_one_param_time_major_dev(high, low, close, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "python")]
