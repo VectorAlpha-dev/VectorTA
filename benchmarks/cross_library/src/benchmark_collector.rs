@@ -18,7 +18,7 @@ impl BenchmarkCollector {
             measurements: Mutex::new(Vec::new()),
         }
     }
-    
+
     /// Add a measurement
     pub fn add_measurement(
         &self,
@@ -34,27 +34,27 @@ impl BenchmarkCollector {
             data_size,
             1, // Single iteration for Criterion benchmarks
         );
-        
+
         if let Ok(mut measurements) = self.measurements.lock() {
             measurements.push(measurement);
         }
     }
-    
+
     /// Export all collected measurements to JSON
     pub fn export_to_json(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         let measurements = self.measurements.lock().unwrap();
-        
+
         if measurements.is_empty() {
             println!("⚠️ No measurements collected, skipping JSON export");
             return Ok(());
         }
-        
+
         let export = BenchmarkJsonExport::from_measurements(&measurements, None);
         export.save_to_file(path)?;
-        
+
         println!("\n✅ Benchmark results exported to: {}", path.display());
         println!("   Total measurements: {}", measurements.len());
-        
+
         // Count unique indicators and libraries
         let mut indicators = std::collections::HashSet::new();
         let mut libraries = std::collections::HashSet::new();
@@ -62,10 +62,10 @@ impl BenchmarkCollector {
             indicators.insert(&m.indicator);
             libraries.insert(&m.library);
         }
-        
+
         println!("   Indicators tested: {}", indicators.len());
         println!("   Libraries compared: {}", libraries.len());
-        
+
         Ok(())
     }
 }

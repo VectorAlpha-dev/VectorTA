@@ -23,8 +23,14 @@
 //! - **Memory optimization**: Properly uses zero-copy helper functions (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
 //! - **TODO**: Implement actual SIMD kernels for AVX2/AVX512
 //! - **Note**: Streaming implementation maintains separate state for each calculation stage
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::wavetrend::CudaWavetrend;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "python")]
-use numpy::{IntoPyArray, PyArray1};
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
@@ -329,23 +335,21 @@ pub fn wavetrend_with_kernel(
     }
 }
 
-pub fn wavetrend_scalar(
+fn wavetrend_kernel_dispatch(
     data: &[f64],
     channel_len: usize,
     average_len: usize,
     ma_len: usize,
     factor: f64,
     first: usize,
+    kernel: Kernel,
 ) -> Result<WavetrendOutput, WavetrendError> {
-    // Calculate warmup period
     let warmup_period = first + channel_len - 1 + average_len - 1 + ma_len - 1;
 
-    // Allocate output arrays with NaN prefix using helper functions
     let mut wt1_final = alloc_with_nan_prefix(data.len(), warmup_period);
     let mut wt2_final = alloc_with_nan_prefix(data.len(), warmup_period);
     let mut diff_final = alloc_with_nan_prefix(data.len(), warmup_period);
 
-    // Use the compute_into function to avoid intermediate allocations
     wavetrend_compute_into(
         data,
         channel_len,
@@ -357,7 +361,7 @@ pub fn wavetrend_scalar(
         &mut wt1_final,
         &mut wt2_final,
         &mut diff_final,
-        Kernel::Scalar,
+        kernel,
     )?;
 
     Ok(WavetrendOutput {
@@ -365,6 +369,25 @@ pub fn wavetrend_scalar(
         wt2: wt2_final,
         wt_diff: diff_final,
     })
+}
+
+pub fn wavetrend_scalar(
+    data: &[f64],
+    channel_len: usize,
+    average_len: usize,
+    ma_len: usize,
+    factor: f64,
+    first: usize,
+) -> Result<WavetrendOutput, WavetrendError> {
+    wavetrend_kernel_dispatch(
+        data,
+        channel_len,
+        average_len,
+        ma_len,
+        factor,
+        first,
+        Kernel::Scalar,
+    )
 }
 
 use std::collections::VecDeque;
@@ -379,7 +402,15 @@ pub unsafe fn wavetrend_avx2(
     factor: f64,
     first: usize,
 ) -> Result<WavetrendOutput, WavetrendError> {
-    wavetrend_scalar(data, channel_len, average_len, ma_len, factor, first)
+    wavetrend_kernel_dispatch(
+        data,
+        channel_len,
+        average_len,
+        ma_len,
+        factor,
+        first,
+        Kernel::Avx2,
+    )
 }
 
 // AVX512 stub logic for short/long
@@ -410,7 +441,15 @@ pub unsafe fn wavetrend_avx512_short(
     factor: f64,
     first: usize,
 ) -> Result<WavetrendOutput, WavetrendError> {
-    wavetrend_scalar(data, channel_len, average_len, ma_len, factor, first)
+    wavetrend_kernel_dispatch(
+        data,
+        channel_len,
+        average_len,
+        ma_len,
+        factor,
+        first,
+        Kernel::Avx512,
+    )
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -423,7 +462,15 @@ pub unsafe fn wavetrend_avx512_long(
     factor: f64,
     first: usize,
 ) -> Result<WavetrendOutput, WavetrendError> {
-    wavetrend_scalar(data, channel_len, average_len, ma_len, factor, first)
+    wavetrend_kernel_dispatch(
+        data,
+        channel_len,
+        average_len,
+        ma_len,
+        factor,
+        first,
+        Kernel::Avx512,
+    )
 }
 
 #[inline(always)]
@@ -504,6 +551,7 @@ fn wavetrend_compute_into(
     // This avoids double work when using alloc_with_nan_prefix or init_matrix_prefixes
 
     let data_valid = &data[first..];
+    let simd_kernel = kernel.to_non_batch();
 
     // We need working space for intermediate calculations
     // Use stack allocation for small periods, heap for large
@@ -532,6 +580,7 @@ fn wavetrend_compute_into(
             ci,
             wt1,
             wt2,
+            simd_kernel,
         )?;
 
         // Copy results to output starting from warmup_period
@@ -566,6 +615,7 @@ fn wavetrend_compute_into(
             &mut ci,
             &mut wt1,
             &mut wt2,
+            simd_kernel,
         )?;
 
         // Copy results to output starting from warmup_period
@@ -601,6 +651,7 @@ fn wavetrend_core_computation(
     ci: &mut [f64],
     wt1: &mut [f64],
     wt2: &mut [f64],
+    kernel: Kernel,
 ) -> Result<(), WavetrendError> {
     // Stage 1: ESA = EMA(channel_length) on price
     ema_compute_into(data, channel_len, esa);
@@ -611,27 +662,16 @@ fn wavetrend_core_computation(
     if data.len() <= STACK_LIMIT {
         let mut abs_diff_buf = [0.0f64; STACK_LIMIT];
         let abs_diff = &mut abs_diff_buf[..data.len()];
-        for i in 0..data.len() {
-            abs_diff[i] = (data[i] - esa[i]).abs();
-        }
+        compute_abs_diff(abs_diff, data, esa, kernel);
         ema_compute_into(abs_diff, channel_len, de);
     } else {
         let mut abs_diff = vec![0.0; data.len()];
-        for i in 0..data.len() {
-            abs_diff[i] = (data[i] - esa[i]).abs();
-        }
+        compute_abs_diff(&mut abs_diff, data, esa, kernel);
         ema_compute_into(&abs_diff, channel_len, de);
     }
 
     // Stage 3: CI = (price - ESA) / (factor * DE)
-    for i in 0..data.len() {
-        let den = factor * de[i];
-        if den != 0.0 && !data[i].is_nan() && !esa[i].is_nan() && !de[i].is_nan() {
-            ci[i] = (data[i] - esa[i]) / den;
-        } else {
-            ci[i] = f64::NAN;
-        }
-    }
+    compute_ci(ci, data, esa, de, factor, kernel);
 
     // Stage 4: WT1 = EMA(average_length) on CI
     ema_compute_into(ci, average_len, wt1);
@@ -640,6 +680,201 @@ fn wavetrend_core_computation(
     sma_compute_into(wt1, ma_len, wt2);
 
     Ok(())
+}
+
+#[inline(always)]
+fn compute_abs_diff(out: &mut [f64], data: &[f64], esa: &[f64], kernel: Kernel) {
+    let simd = kernel.to_non_batch();
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    {
+        match simd {
+            Kernel::Avx512 => unsafe {
+                absdiff_vec_avx512(out, data, esa);
+                return;
+            },
+            Kernel::Avx2 => unsafe {
+                absdiff_vec_avx2(out, data, esa);
+                return;
+            },
+            _ => {}
+        }
+    }
+
+    for i in 0..out.len() {
+        out[i] = (data[i] - esa[i]).abs();
+    }
+}
+
+#[inline(always)]
+fn compute_ci(out: &mut [f64], data: &[f64], esa: &[f64], de: &[f64], factor: f64, kernel: Kernel) {
+    let simd = kernel.to_non_batch();
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    {
+        match simd {
+            Kernel::Avx512 => unsafe {
+                ci_vec_avx512(out, data, esa, de, factor);
+                return;
+            },
+            Kernel::Avx2 => unsafe {
+                ci_vec_avx2(out, data, esa, de, factor);
+                return;
+            },
+            _ => {}
+        }
+    }
+
+    for i in 0..out.len() {
+        let den = factor * de[i];
+        if den != 0.0 && !data[i].is_nan() && !esa[i].is_nan() && !de[i].is_nan() {
+            out[i] = (data[i] - esa[i]) / den;
+        } else {
+            out[i] = f64::NAN;
+        }
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn absdiff_vec_avx2(dst: &mut [f64], a: &[f64], b: &[f64]) {
+    let n = dst.len();
+    let pa = a.as_ptr();
+    let pb = b.as_ptr();
+    let pd = dst.as_mut_ptr();
+    let sign = _mm256_set1_pd(-0.0f64);
+    let mut i = 0usize;
+    while i + 4 <= n {
+        let va = _mm256_loadu_pd(pa.add(i));
+        let vb = _mm256_loadu_pd(pb.add(i));
+        let vd = _mm256_sub_pd(va, vb);
+        let vabs = _mm256_andnot_pd(sign, vd);
+        _mm256_storeu_pd(pd.add(i), vabs);
+        i += 4;
+    }
+    while i < n {
+        *pd.add(i) = (*pa.add(i) - *pb.add(i)).abs();
+        i += 1;
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn ci_vec_avx2(dst: &mut [f64], data: &[f64], esa: &[f64], de: &[f64], factor: f64) {
+    let n = dst.len();
+    let px = data.as_ptr();
+    let pe = esa.as_ptr();
+    let pd = de.as_ptr();
+    let pr = dst.as_mut_ptr();
+
+    let vf = _mm256_set1_pd(factor);
+    let vzero = _mm256_set1_pd(0.0);
+    let vnan = _mm256_set1_pd(f64::NAN);
+
+    let mut i = 0usize;
+    while i + 4 <= n {
+        let vx = _mm256_loadu_pd(px.add(i));
+        let ve = _mm256_loadu_pd(pe.add(i));
+        let vd = _mm256_loadu_pd(pd.add(i));
+
+        let vnum = _mm256_sub_pd(vx, ve);
+        let vden = _mm256_mul_pd(vf, vd);
+        let vci = _mm256_div_pd(vnum, vden);
+
+        let ord_x = _mm256_cmp_pd(vx, vx, _CMP_ORD_Q);
+        let ord_e = _mm256_cmp_pd(ve, ve, _CMP_ORD_Q);
+        let ord_d = _mm256_cmp_pd(vd, vd, _CMP_ORD_Q);
+        let ord_all = _mm256_and_pd(ord_x, _mm256_and_pd(ord_e, ord_d));
+        let den_zero = _mm256_cmp_pd(vden, vzero, _CMP_EQ_OQ);
+        let valid = _mm256_andnot_pd(den_zero, ord_all);
+
+        let vres = _mm256_blendv_pd(vnan, vci, valid);
+        _mm256_storeu_pd(pr.add(i), vres);
+        i += 4;
+    }
+    while i < n {
+        let x = *px.add(i);
+        let e = *pe.add(i);
+        let d = *pd.add(i);
+        let den = factor * d;
+        *pr.add(i) = if den != 0.0 && x.is_finite() && e.is_finite() && d.is_finite() {
+            (x - e) / den
+        } else {
+            f64::NAN
+        };
+        i += 1;
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+unsafe fn absdiff_vec_avx512(dst: &mut [f64], a: &[f64], b: &[f64]) {
+    let n = dst.len();
+    let pa = a.as_ptr();
+    let pb = b.as_ptr();
+    let pd = dst.as_mut_ptr();
+    let sign = _mm512_set1_epi64(0x8000_0000_0000_0000u64 as i64);
+    let sign_pd = _mm512_castsi512_pd(sign);
+
+    let mut i = 0usize;
+    while i + 8 <= n {
+        let va = _mm512_loadu_pd(pa.add(i));
+        let vb = _mm512_loadu_pd(pb.add(i));
+        let vd = _mm512_sub_pd(va, vb);
+        let vabs = _mm512_andnot_pd(sign_pd, vd);
+        _mm512_storeu_pd(pd.add(i), vabs);
+        i += 8;
+    }
+    while i < n {
+        *pd.add(i) = (*pa.add(i) - *pb.add(i)).abs();
+        i += 1;
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+unsafe fn ci_vec_avx512(dst: &mut [f64], data: &[f64], esa: &[f64], de: &[f64], factor: f64) {
+    let n = dst.len();
+    let px = data.as_ptr();
+    let pe = esa.as_ptr();
+    let pdv = de.as_ptr();
+    let pr = dst.as_mut_ptr();
+
+    let vf = _mm512_set1_pd(factor);
+    let vzero = _mm512_set1_pd(0.0);
+    let vnan = _mm512_set1_pd(f64::NAN);
+
+    let mut i = 0usize;
+    while i + 8 <= n {
+        let vx = _mm512_loadu_pd(px.add(i));
+        let ve = _mm512_loadu_pd(pe.add(i));
+        let vd = _mm512_loadu_pd(pdv.add(i));
+
+        let vnum = _mm512_sub_pd(vx, ve);
+        let vden = _mm512_mul_pd(vf, vd);
+        let vci = _mm512_div_pd(vnum, vden);
+
+        let ord_x = _mm512_cmp_pd_mask(vx, vx, _CMP_ORD_Q);
+        let ord_e = _mm512_cmp_pd_mask(ve, ve, _CMP_ORD_Q);
+        let ord_d = _mm512_cmp_pd_mask(vd, vd, _CMP_ORD_Q);
+        let ord_all = ord_x & ord_e & ord_d;
+        let den_zero = _mm512_cmp_pd_mask(vden, vzero, _CMP_EQ_OQ);
+        let valid = ord_all & (!den_zero);
+
+        let vres = _mm512_mask_mov_pd(vnan, valid, vci);
+        _mm512_storeu_pd(pr.add(i), vres);
+        i += 8;
+    }
+    while i < n {
+        let x = *px.add(i);
+        let e = *pe.add(i);
+        let d = *pdv.add(i);
+        let den = factor * d;
+        *pr.add(i) = if den != 0.0 && x.is_finite() && e.is_finite() && d.is_finite() {
+            (x - e) / den
+        } else {
+            f64::NAN
+        };
+        i += 1;
+    }
 }
 
 // Helper function for in-place EMA computation
@@ -744,6 +979,14 @@ pub fn wavetrend_into_slice(
         dst_wt_diff[i] = f64::NAN;
     }
 
+    let chosen = match kern {
+        Kernel::Auto => detect_best_kernel(),
+        Kernel::ScalarBatch => Kernel::Scalar,
+        Kernel::Avx2Batch => Kernel::Avx2,
+        Kernel::Avx512Batch => Kernel::Avx512,
+        other => other,
+    };
+
     // Compute directly into output slices
     wavetrend_compute_into(
         data,
@@ -756,7 +999,7 @@ pub fn wavetrend_into_slice(
         dst_wt1,
         dst_wt2,
         dst_wt_diff,
-        kern,
+        chosen,
     )?;
 
     Ok(())
@@ -950,10 +1193,10 @@ pub struct WavetrendBatchRange {
 impl Default for WavetrendBatchRange {
     fn default() -> Self {
         Self {
-            channel_length: (9, 9, 1),
-            average_length: (12, 12, 1),
-            ma_length: (3, 3, 1),
-            factor: (0.015, 0.015, 0.0),
+            channel_length: (6, 12, 3),
+            average_length: (9, 15, 3),
+            ma_length: (2, 4, 1),
+            factor: (0.010, 0.020, 0.005),
         }
     }
 }
@@ -1217,18 +1460,44 @@ fn wavetrend_batch_inner(
 
     let do_row = |row: usize, w1: &mut [f64], w2: &mut [f64], wd: &mut [f64]| unsafe {
         let p = &combos[row];
-        let r = wavetrend_row_scalar(
-            data,
-            first,
-            p.channel_length.unwrap(),
-            p.average_length.unwrap(),
-            p.ma_length.unwrap(),
-            p.factor.unwrap_or(0.015),
-            w1,
-            w2,
-            wd,
-        );
-        if let Err(e) = r {
+        let row_kernel = match kern {
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 => wavetrend_row_avx512(
+                data,
+                first,
+                p.channel_length.unwrap(),
+                p.average_length.unwrap(),
+                p.ma_length.unwrap(),
+                p.factor.unwrap_or(0.015),
+                w1,
+                w2,
+                wd,
+            ),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 => wavetrend_row_avx2(
+                data,
+                first,
+                p.channel_length.unwrap(),
+                p.average_length.unwrap(),
+                p.ma_length.unwrap(),
+                p.factor.unwrap_or(0.015),
+                w1,
+                w2,
+                wd,
+            ),
+            _ => wavetrend_row_scalar(
+                data,
+                first,
+                p.channel_length.unwrap(),
+                p.average_length.unwrap(),
+                p.ma_length.unwrap(),
+                p.factor.unwrap_or(0.015),
+                w1,
+                w2,
+                wd,
+            ),
+        };
+        if let Err(e) = row_kernel {
             panic!("wavetrend row error: {:?}", e);
         }
     };
@@ -1419,32 +1688,18 @@ unsafe fn wavetrend_row_scalar(
     wt2: &mut [f64],
     wd: &mut [f64],
 ) -> Result<(), WavetrendError> {
-    debug_assert_eq!(wt1.len(), data.len());
-    debug_assert_eq!(wt2.len(), data.len());
-    debug_assert_eq!(wd.len(), data.len());
-
-    // Compute warmup exactly once here. Row buffers already have NaN prefixes
-    // from init_matrix_prefixes, so we only write from warmup onward.
-    let warmup = first + channel_len - 1 + average_len - 1 + ma_len - 1;
-
-    // Run the core computation into the provided row slices.
-    // It will write NaNs for [..warmup], but to avoid redundant work
-    // we pass warmup through and skip re-filling the prefix below.
-    wavetrend_compute_into(
+    wavetrend_row_with_kernel(
         data,
+        first,
         channel_len,
         average_len,
         ma_len,
         factor,
-        first,
-        warmup,
         wt1,
         wt2,
         wd,
         Kernel::Scalar,
-    )?;
-
-    Ok(())
+    )
 }
 
 // AVX2/AVX512 batch row stubs - always point to scalar
@@ -1461,7 +1716,7 @@ unsafe fn wavetrend_row_avx2(
     wt2: &mut [f64],
     wd: &mut [f64],
 ) -> Result<(), WavetrendError> {
-    wavetrend_row_scalar(
+    wavetrend_row_with_kernel(
         data,
         first,
         channel_len,
@@ -1471,6 +1726,7 @@ unsafe fn wavetrend_row_avx2(
         wt1,
         wt2,
         wd,
+        Kernel::Avx2,
     )
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1486,7 +1742,7 @@ unsafe fn wavetrend_row_avx512(
     wt2: &mut [f64],
     wd: &mut [f64],
 ) -> Result<(), WavetrendError> {
-    wavetrend_row_scalar(
+    wavetrend_row_with_kernel(
         data,
         first,
         channel_len,
@@ -1496,6 +1752,7 @@ unsafe fn wavetrend_row_avx512(
         wt1,
         wt2,
         wd,
+        Kernel::Avx512,
     )
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1511,7 +1768,7 @@ unsafe fn wavetrend_row_avx512_short(
     wt2: &mut [f64],
     wd: &mut [f64],
 ) -> Result<(), WavetrendError> {
-    wavetrend_row_scalar(
+    wavetrend_row_with_kernel(
         data,
         first,
         channel_len,
@@ -1521,6 +1778,7 @@ unsafe fn wavetrend_row_avx512_short(
         wt1,
         wt2,
         wd,
+        Kernel::Avx512,
     )
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1536,7 +1794,7 @@ unsafe fn wavetrend_row_avx512_long(
     wt2: &mut [f64],
     wd: &mut [f64],
 ) -> Result<(), WavetrendError> {
-    wavetrend_row_scalar(
+    wavetrend_row_with_kernel(
         data,
         first,
         channel_len,
@@ -1546,6 +1804,41 @@ unsafe fn wavetrend_row_avx512_long(
         wt1,
         wt2,
         wd,
+        Kernel::Avx512,
+    )
+}
+
+#[inline(always)]
+unsafe fn wavetrend_row_with_kernel(
+    data: &[f64],
+    first: usize,
+    channel_len: usize,
+    average_len: usize,
+    ma_len: usize,
+    factor: f64,
+    wt1: &mut [f64],
+    wt2: &mut [f64],
+    wd: &mut [f64],
+    kernel: Kernel,
+) -> Result<(), WavetrendError> {
+    debug_assert_eq!(wt1.len(), data.len());
+    debug_assert_eq!(wt2.len(), data.len());
+    debug_assert_eq!(wd.len(), data.len());
+
+    let warmup = first + channel_len - 1 + average_len - 1 + ma_len - 1;
+
+    wavetrend_compute_into(
+        data,
+        channel_len,
+        average_len,
+        ma_len,
+        factor,
+        first,
+        warmup,
+        wt1,
+        wt2,
+        wd,
+        kernel,
     )
 }
 #[cfg(test)]
@@ -2914,6 +3207,73 @@ pub fn wavetrend_batch_py<'py>(
             .collect::<Vec<_>>()
             .into_pyarray(py),
     )?;
+
+    Ok(dict)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "wavetrend_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, channel_length_range, average_length_range, ma_length_range, factor_range, device_id=0))]
+pub fn wavetrend_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    data_f32: numpy::PyReadonlyArray1<'py, f32>,
+    channel_length_range: (usize, usize, usize),
+    average_length_range: (usize, usize, usize),
+    ma_length_range: (usize, usize, usize),
+    factor_range: (f64, f64, f64),
+    device_id: usize,
+) -> PyResult<Bound<'py, PyDict>> {
+    use numpy::IntoPyArray;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let slice_in = data_f32.as_slice()?;
+    let sweep = WavetrendBatchRange {
+        channel_length: channel_length_range,
+        average_length: average_length_range,
+        ma_length: ma_length_range,
+        factor: factor_range,
+    };
+
+    let batch = py.allow_threads(|| {
+        let cuda =
+            CudaWavetrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.wavetrend_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    let dict = PyDict::new(py);
+    dict.set_item("wt1", Py::new(py, DeviceArrayF32Py { inner: batch.wt1 })?)?;
+    dict.set_item("wt2", Py::new(py, DeviceArrayF32Py { inner: batch.wt2 })?)?;
+    dict.set_item(
+        "wt_diff",
+        Py::new(
+            py,
+            DeviceArrayF32Py {
+                inner: batch.wt_diff,
+            },
+        )?,
+    )?;
+
+    let channels: Vec<usize> = batch
+        .combos
+        .iter()
+        .map(|p| p.channel_length.unwrap())
+        .collect();
+    let averages: Vec<usize> = batch
+        .combos
+        .iter()
+        .map(|p| p.average_length.unwrap())
+        .collect();
+    let mas: Vec<usize> = batch.combos.iter().map(|p| p.ma_length.unwrap()).collect();
+    let factors: Vec<f64> = batch.combos.iter().map(|p| p.factor.unwrap()).collect();
+
+    dict.set_item("channel_lengths", channels.into_pyarray(py))?;
+    dict.set_item("average_lengths", averages.into_pyarray(py))?;
+    dict.set_item("ma_lengths", mas.into_pyarray(py))?;
+    dict.set_item("factors", factors.into_pyarray(py))?;
 
     Ok(dict)
 }

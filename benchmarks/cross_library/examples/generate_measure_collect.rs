@@ -83,7 +83,7 @@ fn main() {
     println!("    ");
     println!("    // Measure Rust Native");
     println!("    match indicator.rust_name {{");
-    
+
     for (name, input_code, func) in &indicators {
         println!("        \"{}\" => {{", name);
         println!("            let input = {};", input_code);
@@ -95,7 +95,7 @@ fn main() {
         println!("            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, duration, data.len());");
         println!("        }}");
     }
-    
+
     println!("        _ => {{}}  // Skip unmapped indicators");
     println!("    }}");
     println!("    ");

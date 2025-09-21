@@ -6,6 +6,8 @@
 #[cfg(feature = "cuda")]
 pub mod moving_averages;
 #[cfg(feature = "cuda")]
+pub mod wavetrend;
+#[cfg(feature = "cuda")]
 pub mod wclprice;
 
 #[cfg(feature = "cuda")]

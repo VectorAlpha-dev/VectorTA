@@ -27,13 +27,13 @@ pub unsafe extern "C" fn rust_sma(
 
     let input_slice = slice::from_raw_parts(input, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = sma::SmaParams {
         period: Some(period as usize),
     };
-    
+
     let sma_input = sma::SmaInput::from_slice(input_slice, params);
-    
+
     match sma::sma(&sma_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -57,13 +57,13 @@ pub unsafe extern "C" fn rust_ema(
 
     let input_slice = slice::from_raw_parts(input, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = ema::EmaParams {
         period: Some(period as usize),
     };
-    
+
     let ema_input = ema::EmaInput::from_slice(input_slice, params);
-    
+
     match ema::ema(&ema_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -87,13 +87,13 @@ pub unsafe extern "C" fn rust_rsi(
 
     let input_slice = slice::from_raw_parts(input, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = rsi::RsiParams {
         period: Some(period as usize),
     };
-    
+
     let rsi_input = rsi::RsiInput::from_slice(input_slice, params);
-    
+
     match rsi::rsi(&rsi_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -121,24 +121,24 @@ pub unsafe extern "C" fn rust_atr(
     let low_slice = slice::from_raw_parts(low, size as usize);
     let close_slice = slice::from_raw_parts(close, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = atr::AtrParams {
         length: Some(period as usize),
     };
-    
+
     // ATR needs a Candles structure, we'll create a minimal one
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
     let mut hlcc4 = vec![0.0; size as usize];
-    
+
     for i in 0..size as usize {
         hl2[i] = (high_slice[i] + low_slice[i]) / 2.0;
         hlc3[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 3.0;
         ohlc4[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 4.0; // Using close as open substitute
         hlcc4[i] = (high_slice[i] + low_slice[i] + close_slice[i] + close_slice[i]) / 4.0;
     }
-    
+
     let candles = Candles {
         high: high_slice.to_vec(),
         low: low_slice.to_vec(),
@@ -151,9 +151,9 @@ pub unsafe extern "C" fn rust_atr(
         ohlc4,
         hlcc4,
     };
-    
+
     let atr_input = atr::AtrInput::from_candles(&candles, params);
-    
+
     match atr::atr(&atr_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -174,7 +174,7 @@ pub unsafe extern "C" fn rust_bbands(
     output_middle: *mut c_double,
     output_upper: *mut c_double,
 ) -> c_int {
-    if input.is_null() || output_lower.is_null() || output_middle.is_null() || 
+    if input.is_null() || output_lower.is_null() || output_middle.is_null() ||
        output_upper.is_null() || size <= 0 || period <= 0 {
         return -1;
     }
@@ -183,7 +183,7 @@ pub unsafe extern "C" fn rust_bbands(
     let lower_slice = slice::from_raw_parts_mut(output_lower, size as usize);
     let middle_slice = slice::from_raw_parts_mut(output_middle, size as usize);
     let upper_slice = slice::from_raw_parts_mut(output_upper, size as usize);
-    
+
     let params = bollinger_bands::BollingerBandsParams {
         period: Some(period as usize),
         devup: Some(stddev),
@@ -191,9 +191,9 @@ pub unsafe extern "C" fn rust_bbands(
         matype: Some("sma".to_string()),
         devtype: Some(0),
     };
-    
+
     let bb_input = bollinger_bands::BollingerBandsInput::from_slice(input_slice, params);
-    
+
     match bollinger_bands::bollinger_bands(&bb_input) {
         Ok(result) => {
             lower_slice.copy_from_slice(&result.lower_band);
@@ -217,7 +217,7 @@ pub unsafe extern "C" fn rust_macd(
     output_signal: *mut c_double,
     output_histogram: *mut c_double,
 ) -> c_int {
-    if input.is_null() || output_macd.is_null() || output_signal.is_null() || 
+    if input.is_null() || output_macd.is_null() || output_signal.is_null() ||
        output_histogram.is_null() || size <= 0 {
         return -1;
     }
@@ -226,16 +226,16 @@ pub unsafe extern "C" fn rust_macd(
     let macd_slice = slice::from_raw_parts_mut(output_macd, size as usize);
     let signal_slice = slice::from_raw_parts_mut(output_signal, size as usize);
     let histogram_slice = slice::from_raw_parts_mut(output_histogram, size as usize);
-    
+
     let params = macd::MacdParams {
         fast_period: Some(short_period as usize),
         slow_period: Some(long_period as usize),
         signal_period: Some(signal_period as usize),
         ma_type: Some("ema".to_string()),
     };
-    
+
     let macd_input = macd::MacdInput::from_slice(input_slice, params);
-    
+
     match macd::macd(&macd_input) {
         Ok(result) => {
             macd_slice.copy_from_slice(&result.macd);
@@ -257,7 +257,7 @@ pub unsafe extern "C" fn rust_adx(
     period: c_int,
     output: *mut c_double,
 ) -> c_int {
-    if high.is_null() || low.is_null() || close.is_null() || output.is_null() || 
+    if high.is_null() || low.is_null() || close.is_null() || output.is_null() ||
        size <= 0 || period <= 0 {
         return -1;
     }
@@ -266,24 +266,24 @@ pub unsafe extern "C" fn rust_adx(
     let low_slice = slice::from_raw_parts(low, size as usize);
     let close_slice = slice::from_raw_parts(close, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = adx::AdxParams {
         period: Some(period as usize),
     };
-    
+
     // ADX needs a Candles structure
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
     let mut hlcc4 = vec![0.0; size as usize];
-    
+
     for i in 0..size as usize {
         hl2[i] = (high_slice[i] + low_slice[i]) / 2.0;
         hlc3[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 3.0;
         ohlc4[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 4.0;
         hlcc4[i] = (high_slice[i] + low_slice[i] + close_slice[i] + close_slice[i]) / 4.0;
     }
-    
+
     let candles = Candles {
         high: high_slice.to_vec(),
         low: low_slice.to_vec(),
@@ -296,9 +296,9 @@ pub unsafe extern "C" fn rust_adx(
         ohlc4,
         hlcc4,
     };
-    
+
     let adx_input = adx::AdxInput::from_candles(&candles, params);
-    
+
     match adx::adx(&adx_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -318,7 +318,7 @@ pub unsafe extern "C" fn rust_cci(
     period: c_int,
     output: *mut c_double,
 ) -> c_int {
-    if high.is_null() || low.is_null() || close.is_null() || output.is_null() || 
+    if high.is_null() || low.is_null() || close.is_null() || output.is_null() ||
        size <= 0 || period <= 0 {
         return -1;
     }
@@ -327,24 +327,24 @@ pub unsafe extern "C" fn rust_cci(
     let low_slice = slice::from_raw_parts(low, size as usize);
     let close_slice = slice::from_raw_parts(close, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = cci::CciParams {
         period: Some(period as usize),
     };
-    
+
     // CCI needs a Candles structure for typical price calculation
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
     let mut hlcc4 = vec![0.0; size as usize];
-    
+
     for i in 0..size as usize {
         hl2[i] = (high_slice[i] + low_slice[i]) / 2.0;
         hlc3[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 3.0;
         ohlc4[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 4.0;
         hlcc4[i] = (high_slice[i] + low_slice[i] + close_slice[i] + close_slice[i]) / 4.0;
     }
-    
+
     let candles = Candles {
         high: high_slice.to_vec(),
         low: low_slice.to_vec(),
@@ -357,9 +357,9 @@ pub unsafe extern "C" fn rust_cci(
         ohlc4,
         hlcc4,
     };
-    
+
     let cci_input = cci::CciInput::from_candles(&candles, "hlc3", params);
-    
+
     match cci::cci(&cci_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -383,13 +383,13 @@ pub unsafe extern "C" fn rust_dema(
 
     let input_slice = slice::from_raw_parts(input, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = dema::DemaParams {
         period: Some(period as usize),
     };
-    
+
     let dema_input = dema::DemaInput::from_slice(input_slice, params);
-    
+
     match dema::dema(&dema_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -413,13 +413,13 @@ pub unsafe extern "C" fn rust_tema(
 
     let input_slice = slice::from_raw_parts(input, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = tema::TemaParams {
         period: Some(period as usize),
     };
-    
+
     let tema_input = tema::TemaInput::from_slice(input_slice, params);
-    
+
     match tema::tema(&tema_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -443,13 +443,13 @@ pub unsafe extern "C" fn rust_wma(
 
     let input_slice = slice::from_raw_parts(input, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = wma::WmaParams {
         period: Some(period as usize),
     };
-    
+
     let wma_input = wma::WmaInput::from_slice(input_slice, params);
-    
+
     match wma::wma(&wma_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -473,13 +473,13 @@ pub unsafe extern "C" fn rust_kama(
 
     let input_slice = slice::from_raw_parts(input, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = kama::KamaParams {
         period: Some(period as usize),
     };
-    
+
     let kama_input = kama::KamaInput::from_slice(input_slice, params);
-    
+
     match kama::kama(&kama_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -503,13 +503,13 @@ pub unsafe extern "C" fn rust_trima(
 
     let input_slice = slice::from_raw_parts(input, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = trima::TrimaParams {
         period: Some(period as usize),
     };
-    
+
     let trima_input = trima::TrimaInput::from_slice(input_slice, params);
-    
+
     match trima::trima(&trima_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -533,13 +533,13 @@ pub unsafe extern "C" fn rust_hma(
 
     let input_slice = slice::from_raw_parts(input, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = hma::HmaParams {
         period: Some(period as usize),
     };
-    
+
     let hma_input = hma::HmaInput::from_slice(input_slice, params);
-    
+
     match hma::hma(&hma_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -562,7 +562,7 @@ pub unsafe extern "C" fn rust_stoch(
     output_k: *mut c_double,
     output_d: *mut c_double,
 ) -> c_int {
-    if high.is_null() || low.is_null() || close.is_null() || 
+    if high.is_null() || low.is_null() || close.is_null() ||
        output_k.is_null() || output_d.is_null() || size <= 0 {
         return -1;
     }
@@ -572,7 +572,7 @@ pub unsafe extern "C" fn rust_stoch(
     let close_slice = slice::from_raw_parts(close, size as usize);
     let k_slice = slice::from_raw_parts_mut(output_k, size as usize);
     let d_slice = slice::from_raw_parts_mut(output_d, size as usize);
-    
+
     let params = stoch::StochParams {
         fastk_period: Some(k_period as usize),
         slowk_period: Some(k_smooth as usize),
@@ -580,20 +580,20 @@ pub unsafe extern "C" fn rust_stoch(
         slowd_period: Some(d_smooth as usize),
         slowd_ma_type: Some("sma".to_string()),
     };
-    
+
     // Create Candles structure
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
     let mut hlcc4 = vec![0.0; size as usize];
-    
+
     for i in 0..size as usize {
         hl2[i] = (high_slice[i] + low_slice[i]) / 2.0;
         hlc3[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 3.0;
         ohlc4[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 4.0;
         hlcc4[i] = (high_slice[i] + low_slice[i] + close_slice[i] + close_slice[i]) / 4.0;
     }
-    
+
     let candles = Candles {
         high: high_slice.to_vec(),
         low: low_slice.to_vec(),
@@ -606,9 +606,9 @@ pub unsafe extern "C" fn rust_stoch(
         ohlc4,
         hlcc4,
     };
-    
+
     let stoch_input = stoch::StochInput::from_candles(&candles, params);
-    
+
     match stoch::stoch(&stoch_input) {
         Ok(result) => {
             k_slice.copy_from_slice(&result.k);
@@ -629,7 +629,7 @@ pub unsafe extern "C" fn rust_ad(
     volume: *const c_double,
     output: *mut c_double,
 ) -> c_int {
-    if high.is_null() || low.is_null() || close.is_null() || volume.is_null() || 
+    if high.is_null() || low.is_null() || close.is_null() || volume.is_null() ||
        output.is_null() || size <= 0 {
         return -1;
     }
@@ -639,20 +639,20 @@ pub unsafe extern "C" fn rust_ad(
     let close_slice = slice::from_raw_parts(close, size as usize);
     let volume_slice = slice::from_raw_parts(volume, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     // Create Candles structure
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
     let mut hlcc4 = vec![0.0; size as usize];
-    
+
     for i in 0..size as usize {
         hl2[i] = (high_slice[i] + low_slice[i]) / 2.0;
         hlc3[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 3.0;
         ohlc4[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 4.0;
         hlcc4[i] = (high_slice[i] + low_slice[i] + close_slice[i] + close_slice[i]) / 4.0;
     }
-    
+
     let candles = Candles {
         high: high_slice.to_vec(),
         low: low_slice.to_vec(),
@@ -665,9 +665,9 @@ pub unsafe extern "C" fn rust_ad(
         ohlc4,
         hlcc4,
     };
-    
+
     let ad_input = ad::AdInput::from_candles(&candles, ad::AdParams {});
-    
+
     match ad::ad(&ad_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -689,7 +689,7 @@ pub unsafe extern "C" fn rust_adosc(
     slow_period: c_int,
     output: *mut c_double,
 ) -> c_int {
-    if high.is_null() || low.is_null() || close.is_null() || volume.is_null() || 
+    if high.is_null() || low.is_null() || close.is_null() || volume.is_null() ||
        output.is_null() || size <= 0 {
         return -1;
     }
@@ -699,25 +699,25 @@ pub unsafe extern "C" fn rust_adosc(
     let close_slice = slice::from_raw_parts(close, size as usize);
     let volume_slice = slice::from_raw_parts(volume, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = adosc::AdoscParams {
         short_period: Some(fast_period as usize),
         long_period: Some(slow_period as usize),
     };
-    
+
     // Create Candles structure
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
     let mut hlcc4 = vec![0.0; size as usize];
-    
+
     for i in 0..size as usize {
         hl2[i] = (high_slice[i] + low_slice[i]) / 2.0;
         hlc3[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 3.0;
         ohlc4[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 4.0;
         hlcc4[i] = (high_slice[i] + low_slice[i] + close_slice[i] + close_slice[i]) / 4.0;
     }
-    
+
     let candles = Candles {
         high: high_slice.to_vec(),
         low: low_slice.to_vec(),
@@ -730,9 +730,9 @@ pub unsafe extern "C" fn rust_adosc(
         ohlc4,
         hlcc4,
     };
-    
+
     let adosc_input = adosc::AdoscInput::from_candles(&candles, params);
-    
+
     match adosc::adosc(&adosc_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -752,7 +752,7 @@ pub unsafe extern "C" fn rust_adxr(
     period: c_int,
     output: *mut c_double,
 ) -> c_int {
-    if high.is_null() || low.is_null() || close.is_null() || output.is_null() || 
+    if high.is_null() || low.is_null() || close.is_null() || output.is_null() ||
        size <= 0 || period <= 0 {
         return -1;
     }
@@ -761,24 +761,24 @@ pub unsafe extern "C" fn rust_adxr(
     let low_slice = slice::from_raw_parts(low, size as usize);
     let close_slice = slice::from_raw_parts(close, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = adxr::AdxrParams {
         period: Some(period as usize),
     };
-    
+
     // Create Candles structure
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
     let mut hlcc4 = vec![0.0; size as usize];
-    
+
     for i in 0..size as usize {
         hl2[i] = (high_slice[i] + low_slice[i]) / 2.0;
         hlc3[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 3.0;
         ohlc4[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 4.0;
         hlcc4[i] = (high_slice[i] + low_slice[i] + close_slice[i] + close_slice[i]) / 4.0;
     }
-    
+
     let candles = Candles {
         high: high_slice.to_vec(),
         low: low_slice.to_vec(),
@@ -791,9 +791,9 @@ pub unsafe extern "C" fn rust_adxr(
         ohlc4,
         hlcc4,
     };
-    
+
     let adxr_input = adxr::AdxrInput::from_candles(&candles, params);
-    
+
     match adxr::adxr(&adxr_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -818,25 +818,25 @@ pub unsafe extern "C" fn rust_ao(
     let high_slice = slice::from_raw_parts(high, size as usize);
     let low_slice = slice::from_raw_parts(low, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = ao::AoParams {
         short_period: Some(5),
         long_period: Some(34),
     };
-    
+
     // Create Candles structure
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
     let mut hlcc4 = vec![0.0; size as usize];
-    
+
     for i in 0..size as usize {
         hl2[i] = (high_slice[i] + low_slice[i]) / 2.0;
         hlc3[i] = (high_slice[i] + low_slice[i]) / 2.0;
         ohlc4[i] = (high_slice[i] + low_slice[i]) / 2.0;
         hlcc4[i] = (high_slice[i] + low_slice[i]) / 2.0;
     }
-    
+
     let candles = Candles {
         high: high_slice.to_vec(),
         low: low_slice.to_vec(),
@@ -849,9 +849,9 @@ pub unsafe extern "C" fn rust_ao(
         ohlc4,
         hlcc4,
     };
-    
+
     let ao_input = ao::AoInput::from_candles(&candles, "hl2", params);
-    
+
     match ao::ao(&ao_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -876,14 +876,14 @@ pub unsafe extern "C" fn rust_apo(
 
     let input_slice = slice::from_raw_parts(input, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = apo::ApoParams {
         short_period: Some(fast_period as usize),
         long_period: Some(slow_period as usize),
     };
-    
+
     let apo_input = apo::ApoInput::from_slice(input_slice, params);
-    
+
     match apo::apo(&apo_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -903,7 +903,7 @@ pub unsafe extern "C" fn rust_aroon(
     output_down: *mut c_double,
     output_up: *mut c_double,
 ) -> c_int {
-    if high.is_null() || low.is_null() || output_down.is_null() || 
+    if high.is_null() || low.is_null() || output_down.is_null() ||
        output_up.is_null() || size <= 0 || period <= 0 {
         return -1;
     }
@@ -912,24 +912,24 @@ pub unsafe extern "C" fn rust_aroon(
     let low_slice = slice::from_raw_parts(low, size as usize);
     let down_slice = slice::from_raw_parts_mut(output_down, size as usize);
     let up_slice = slice::from_raw_parts_mut(output_up, size as usize);
-    
+
     let params = aroon::AroonParams {
         length: Some(period as usize),
     };
-    
-    // Create minimal Candles structure  
+
+    // Create minimal Candles structure
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
     let mut hlcc4 = vec![0.0; size as usize];
-    
+
     for i in 0..size as usize {
         hl2[i] = (high_slice[i] + low_slice[i]) / 2.0;
         hlc3[i] = (high_slice[i] + low_slice[i]) / 3.0;
         ohlc4[i] = (high_slice[i] + low_slice[i]) / 4.0;
         hlcc4[i] = (high_slice[i] + low_slice[i]) / 4.0;
     }
-    
+
     let candles = Candles {
         high: high_slice.to_vec(),
         low: low_slice.to_vec(),
@@ -942,9 +942,9 @@ pub unsafe extern "C" fn rust_aroon(
         ohlc4,
         hlcc4,
     };
-    
+
     let aroon_input = aroon::AroonInput::from_candles(&candles, params);
-    
+
     match aroon::aroon(&aroon_input) {
         Ok(result) => {
             down_slice.copy_from_slice(&result.aroon_down);
@@ -971,24 +971,24 @@ pub unsafe extern "C" fn rust_aroonosc(
     let high_slice = slice::from_raw_parts(high, size as usize);
     let low_slice = slice::from_raw_parts(low, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = aroonosc::AroonOscParams {
         length: Some(period as usize),
     };
-    
+
     // Create Candles structure
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
     let mut hlcc4 = vec![0.0; size as usize];
-    
+
     for i in 0..size as usize {
         hl2[i] = (high_slice[i] + low_slice[i]) / 2.0;
         hlc3[i] = (high_slice[i] + low_slice[i]) / 2.0;
         ohlc4[i] = (high_slice[i] + low_slice[i]) / 2.0;
         hlcc4[i] = (high_slice[i] + low_slice[i]) / 2.0;
     }
-    
+
     let candles = Candles {
         high: high_slice.to_vec(),
         low: low_slice.to_vec(),
@@ -1001,9 +1001,9 @@ pub unsafe extern "C" fn rust_aroonosc(
         ohlc4,
         hlcc4,
     };
-    
+
     let aroonosc_input = aroonosc::AroonOscInput::from_candles(&candles, params);
-    
+
     match aroonosc::aroon_osc(&aroonosc_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -1023,7 +1023,7 @@ pub unsafe extern "C" fn rust_bop(
     close: *const c_double,
     output: *mut c_double,
 ) -> c_int {
-    if open.is_null() || high.is_null() || low.is_null() || close.is_null() || 
+    if open.is_null() || high.is_null() || low.is_null() || close.is_null() ||
        output.is_null() || size <= 0 {
         return -1;
     }
@@ -1033,20 +1033,20 @@ pub unsafe extern "C" fn rust_bop(
     let low_slice = slice::from_raw_parts(low, size as usize);
     let close_slice = slice::from_raw_parts(close, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     // Create Candles structure
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
     let mut hlcc4 = vec![0.0; size as usize];
-    
+
     for i in 0..size as usize {
         hl2[i] = (high_slice[i] + low_slice[i]) / 2.0;
         hlc3[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 3.0;
         ohlc4[i] = (open_slice[i] + high_slice[i] + low_slice[i] + close_slice[i]) / 4.0;
         hlcc4[i] = (high_slice[i] + low_slice[i] + close_slice[i] + close_slice[i]) / 4.0;
     }
-    
+
     let candles = Candles {
         high: high_slice.to_vec(),
         low: low_slice.to_vec(),
@@ -1059,9 +1059,9 @@ pub unsafe extern "C" fn rust_bop(
         ohlc4,
         hlcc4,
     };
-    
+
     let bop_input = bop::BopInput::from_candles(&candles, bop::BopParams {});
-    
+
     match bop::bop(&bop_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -1085,13 +1085,13 @@ pub unsafe extern "C" fn rust_cmo(
 
     let input_slice = slice::from_raw_parts(input, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = cmo::CmoParams {
         period: Some(period as usize),
     };
-    
+
     let cmo_input = cmo::CmoInput::from_slice(input_slice, params);
-    
+
     match cmo::cmo(&cmo_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -1112,7 +1112,7 @@ pub unsafe extern "C" fn rust_di(
     output_plus: *mut c_double,
     output_minus: *mut c_double,
 ) -> c_int {
-    if high.is_null() || low.is_null() || close.is_null() || 
+    if high.is_null() || low.is_null() || close.is_null() ||
        output_plus.is_null() || output_minus.is_null() || size <= 0 || period <= 0 {
         return -1;
     }
@@ -1122,24 +1122,24 @@ pub unsafe extern "C" fn rust_di(
     let close_slice = slice::from_raw_parts(close, size as usize);
     let plus_slice = slice::from_raw_parts_mut(output_plus, size as usize);
     let minus_slice = slice::from_raw_parts_mut(output_minus, size as usize);
-    
+
     let params = di::DiParams {
         period: Some(period as usize),
     };
-    
+
     // Create Candles structure
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
     let mut hlcc4 = vec![0.0; size as usize];
-    
+
     for i in 0..size as usize {
         hl2[i] = (high_slice[i] + low_slice[i]) / 2.0;
         hlc3[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 3.0;
         ohlc4[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 4.0;
         hlcc4[i] = (high_slice[i] + low_slice[i] + close_slice[i] + close_slice[i]) / 4.0;
     }
-    
+
     let candles = Candles {
         high: high_slice.to_vec(),
         low: low_slice.to_vec(),
@@ -1152,9 +1152,9 @@ pub unsafe extern "C" fn rust_di(
         ohlc4,
         hlcc4,
     };
-    
+
     let di_input = di::DiInput::from_candles(&candles, params);
-    
+
     match di::di(&di_input) {
         Ok(result) => {
             plus_slice.copy_from_slice(&result.plus);
@@ -1179,13 +1179,13 @@ pub unsafe extern "C" fn rust_dpo(
 
     let input_slice = slice::from_raw_parts(input, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = dpo::DpoParams {
         period: Some(period as usize),
     };
-    
+
     let dpo_input = dpo::DpoInput::from_slice(input_slice, params);
-    
+
     match dpo::dpo(&dpo_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -1205,7 +1205,7 @@ pub unsafe extern "C" fn rust_dx(
     period: c_int,
     output: *mut c_double,
 ) -> c_int {
-    if high.is_null() || low.is_null() || close.is_null() || output.is_null() || 
+    if high.is_null() || low.is_null() || close.is_null() || output.is_null() ||
        size <= 0 || period <= 0 {
         return -1;
     }
@@ -1214,24 +1214,24 @@ pub unsafe extern "C" fn rust_dx(
     let low_slice = slice::from_raw_parts(low, size as usize);
     let close_slice = slice::from_raw_parts(close, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = dx::DxParams {
         period: Some(period as usize),
     };
-    
+
     // Create Candles structure
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
     let mut hlcc4 = vec![0.0; size as usize];
-    
+
     for i in 0..size as usize {
         hl2[i] = (high_slice[i] + low_slice[i]) / 2.0;
         hlc3[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 3.0;
         ohlc4[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 4.0;
         hlcc4[i] = (high_slice[i] + low_slice[i] + close_slice[i] + close_slice[i]) / 4.0;
     }
-    
+
     let candles = Candles {
         high: high_slice.to_vec(),
         low: low_slice.to_vec(),
@@ -1244,9 +1244,9 @@ pub unsafe extern "C" fn rust_dx(
         ohlc4,
         hlcc4,
     };
-    
+
     let dx_input = dx::DxInput::from_candles(&candles, params);
-    
+
     match dx::dx(&dx_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -1266,7 +1266,7 @@ pub unsafe extern "C" fn rust_fisher(
     output_fisher: *mut c_double,
     output_signal: *mut c_double,
 ) -> c_int {
-    if high.is_null() || low.is_null() || output_fisher.is_null() || 
+    if high.is_null() || low.is_null() || output_fisher.is_null() ||
        output_signal.is_null() || size <= 0 || period <= 0 {
         return -1;
     }
@@ -1275,24 +1275,24 @@ pub unsafe extern "C" fn rust_fisher(
     let low_slice = slice::from_raw_parts(low, size as usize);
     let fisher_slice = slice::from_raw_parts_mut(output_fisher, size as usize);
     let signal_slice = slice::from_raw_parts_mut(output_signal, size as usize);
-    
+
     let params = fisher::FisherParams {
         period: Some(period as usize),
     };
-    
+
     // Create Candles structure
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
     let mut hlcc4 = vec![0.0; size as usize];
-    
+
     for i in 0..size as usize {
         hl2[i] = (high_slice[i] + low_slice[i]) / 2.0;
         hlc3[i] = (high_slice[i] + low_slice[i]) / 2.0;
         ohlc4[i] = (high_slice[i] + low_slice[i]) / 2.0;
         hlcc4[i] = (high_slice[i] + low_slice[i]) / 2.0;
     }
-    
+
     let candles = Candles {
         high: high_slice.to_vec(),
         low: low_slice.to_vec(),
@@ -1305,9 +1305,9 @@ pub unsafe extern "C" fn rust_fisher(
         ohlc4,
         hlcc4,
     };
-    
+
     let fisher_input = fisher::FisherInput::from_candles(&candles, params);
-    
+
     match fisher::fisher(&fisher_input) {
         Ok(result) => {
             fisher_slice.copy_from_slice(&result.fisher);
@@ -1339,24 +1339,24 @@ pub unsafe extern "C" fn rust_mfi(
     let close_slice = slice::from_raw_parts(close, size as usize);
     let volume_slice = slice::from_raw_parts(volume, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = mfi::MfiParams {
         period: Some(period as usize),
     };
-    
+
     // Create Candles structure
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
     let mut hlcc4 = vec![0.0; size as usize];
-    
+
     for i in 0..size as usize {
         hl2[i] = (high_slice[i] + low_slice[i]) / 2.0;
         hlc3[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 3.0;
         ohlc4[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 4.0;
         hlcc4[i] = (high_slice[i] + low_slice[i] + close_slice[i] + close_slice[i]) / 4.0;
     }
-    
+
     let candles = Candles {
         high: high_slice.to_vec(),
         low: low_slice.to_vec(),
@@ -1369,9 +1369,9 @@ pub unsafe extern "C" fn rust_mfi(
         ohlc4,
         hlcc4,
     };
-    
+
     let mfi_input = mfi::MfiInput::from_candles(&candles, "hlc3", params);
-    
+
     match mfi::mfi(&mfi_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -1395,13 +1395,13 @@ pub unsafe extern "C" fn rust_mom(
 
     let input_slice = slice::from_raw_parts(input, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = mom::MomParams {
         period: Some(period as usize),
     };
-    
+
     let mom_input = mom::MomInput::from_slice(input_slice, params);
-    
+
     match mom::mom(&mom_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -1421,7 +1421,7 @@ pub unsafe extern "C" fn rust_natr(
     period: c_int,
     output: *mut c_double,
 ) -> c_int {
-    if high.is_null() || low.is_null() || close.is_null() || output.is_null() || 
+    if high.is_null() || low.is_null() || close.is_null() || output.is_null() ||
        size <= 0 || period <= 0 {
         return -1;
     }
@@ -1430,24 +1430,24 @@ pub unsafe extern "C" fn rust_natr(
     let low_slice = slice::from_raw_parts(low, size as usize);
     let close_slice = slice::from_raw_parts(close, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = natr::NatrParams {
         period: Some(period as usize),
     };
-    
+
     // Create Candles structure
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
     let mut hlcc4 = vec![0.0; size as usize];
-    
+
     for i in 0..size as usize {
         hl2[i] = (high_slice[i] + low_slice[i]) / 2.0;
         hlc3[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 3.0;
         ohlc4[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 4.0;
         hlcc4[i] = (high_slice[i] + low_slice[i] + close_slice[i] + close_slice[i]) / 4.0;
     }
-    
+
     let candles = Candles {
         high: high_slice.to_vec(),
         low: low_slice.to_vec(),
@@ -1460,9 +1460,9 @@ pub unsafe extern "C" fn rust_natr(
         ohlc4,
         hlcc4,
     };
-    
+
     let natr_input = natr::NatrInput::from_candles(&candles, params);
-    
+
     match natr::natr(&natr_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -1487,20 +1487,20 @@ pub unsafe extern "C" fn rust_obv(
     let close_slice = slice::from_raw_parts(close, size as usize);
     let volume_slice = slice::from_raw_parts(volume, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     // Create Candles structure
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
     let mut hlcc4 = vec![0.0; size as usize];
-    
+
     for i in 0..size as usize {
         hl2[i] = close_slice[i];
         hlc3[i] = close_slice[i];
         ohlc4[i] = close_slice[i];
         hlcc4[i] = close_slice[i];
     }
-    
+
     let candles = Candles {
         high: vec![0.0; size as usize],
         low: vec![0.0; size as usize],
@@ -1513,9 +1513,9 @@ pub unsafe extern "C" fn rust_obv(
         ohlc4,
         hlcc4,
     };
-    
+
     let obv_input = obv::ObvInput::from_candles(&candles, obv::ObvParams {});
-    
+
     match obv::obv(&obv_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -1537,7 +1537,7 @@ pub unsafe extern "C" fn rust_ppo(
     output_signal: *mut c_double,
     output_hist: *mut c_double,
 ) -> c_int {
-    if input.is_null() || output_ppo.is_null() || output_signal.is_null() || 
+    if input.is_null() || output_ppo.is_null() || output_signal.is_null() ||
        output_hist.is_null() || size <= 0 {
         return -1;
     }
@@ -1546,15 +1546,15 @@ pub unsafe extern "C" fn rust_ppo(
     let ppo_slice = slice::from_raw_parts_mut(output_ppo, size as usize);
     let signal_slice = slice::from_raw_parts_mut(output_signal, size as usize);
     let hist_slice = slice::from_raw_parts_mut(output_hist, size as usize);
-    
+
     let params = ppo::PpoParams {
         fast_period: Some(fast_period as usize),
         slow_period: Some(slow_period as usize),
         ma_type: Some("ema".to_string()),
     };
-    
+
     let ppo_input = ppo::PpoInput::from_slice(input_slice, params);
-    
+
     match ppo::ppo(&ppo_input) {
         Ok(result) => {
             // PPO only returns a single output
@@ -1584,13 +1584,13 @@ pub unsafe extern "C" fn rust_roc(
 
     let input_slice = slice::from_raw_parts(input, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = roc::RocParams {
         period: Some(period as usize),
     };
-    
+
     let roc_input = roc::RocInput::from_slice(input_slice, params);
-    
+
     match roc::roc(&roc_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -1614,13 +1614,13 @@ pub unsafe extern "C" fn rust_rocr(
 
     let input_slice = slice::from_raw_parts(input, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = rocr::RocrParams {
         period: Some(period as usize),
     };
-    
+
     let rocr_input = rocr::RocrInput::from_slice(input_slice, params);
-    
+
     match rocr::rocr(&rocr_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -1644,13 +1644,13 @@ pub unsafe extern "C" fn rust_rocp(
 
     let input_slice = slice::from_raw_parts(input, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = rocp::RocpParams {
         period: Some(period as usize),
     };
-    
+
     let rocp_input = rocp::RocpInput::from_slice(input_slice, params);
-    
+
     match rocp::rocp(&rocp_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -1674,14 +1674,14 @@ pub unsafe extern "C" fn rust_stddev(
 
     let input_slice = slice::from_raw_parts(input, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = stddev::StdDevParams {
         period: Some(period as usize),
         nbdev: Some(1.0),
     };
-    
+
     let stddev_input = stddev::StdDevInput::from_slice(input_slice, params);
-    
+
     match stddev::stddev(&stddev_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -1703,7 +1703,7 @@ pub unsafe extern "C" fn rust_ultosc(
     period3: c_int,
     output: *mut c_double,
 ) -> c_int {
-    if high.is_null() || low.is_null() || close.is_null() || output.is_null() || 
+    if high.is_null() || low.is_null() || close.is_null() || output.is_null() ||
        size <= 0 || period1 <= 0 || period2 <= 0 || period3 <= 0 {
         return -1;
     }
@@ -1712,26 +1712,26 @@ pub unsafe extern "C" fn rust_ultosc(
     let low_slice = slice::from_raw_parts(low, size as usize);
     let close_slice = slice::from_raw_parts(close, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = ultosc::UltOscParams {
         timeperiod1: Some(period1 as usize),
         timeperiod2: Some(period2 as usize),
         timeperiod3: Some(period3 as usize),
     };
-    
+
     // Create Candles structure
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
     let mut hlcc4 = vec![0.0; size as usize];
-    
+
     for i in 0..size as usize {
         hl2[i] = (high_slice[i] + low_slice[i]) / 2.0;
         hlc3[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 3.0;
         ohlc4[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 4.0;
         hlcc4[i] = (high_slice[i] + low_slice[i] + close_slice[i] + close_slice[i]) / 4.0;
     }
-    
+
     let candles = Candles {
         high: high_slice.to_vec(),
         low: low_slice.to_vec(),
@@ -1744,9 +1744,9 @@ pub unsafe extern "C" fn rust_ultosc(
         ohlc4,
         hlcc4,
     };
-    
+
     let ultosc_input = ultosc::UltOscInput::from_candles(&candles, "high", "low", "close", params);
-    
+
     match ultosc::ultosc(&ultosc_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -1770,14 +1770,14 @@ pub unsafe extern "C" fn rust_var(
 
     let input_slice = slice::from_raw_parts(input, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = var::VarParams {
         period: Some(period as usize),
         nbdev: Some(1.0),
     };
-    
+
     let var_input = var::VarInput::from_slice(input_slice, params);
-    
+
     match var::var(&var_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -1797,7 +1797,7 @@ pub unsafe extern "C" fn rust_willr(
     period: c_int,
     output: *mut c_double,
 ) -> c_int {
-    if high.is_null() || low.is_null() || close.is_null() || output.is_null() || 
+    if high.is_null() || low.is_null() || close.is_null() || output.is_null() ||
        size <= 0 || period <= 0 {
         return -1;
     }
@@ -1806,24 +1806,24 @@ pub unsafe extern "C" fn rust_willr(
     let low_slice = slice::from_raw_parts(low, size as usize);
     let close_slice = slice::from_raw_parts(close, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = willr::WillrParams {
         period: Some(period as usize),
     };
-    
-    // Create Candles structure  
+
+    // Create Candles structure
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
     let mut hlcc4 = vec![0.0; size as usize];
-    
+
     for i in 0..size as usize {
         hl2[i] = (high_slice[i] + low_slice[i]) / 2.0;
         hlc3[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 3.0;
         ohlc4[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 4.0;
         hlcc4[i] = (high_slice[i] + low_slice[i] + close_slice[i] + close_slice[i]) / 4.0;
     }
-    
+
     let candles = Candles {
         high: high_slice.to_vec(),
         low: low_slice.to_vec(),
@@ -1836,9 +1836,9 @@ pub unsafe extern "C" fn rust_willr(
         ohlc4,
         hlcc4,
     };
-    
+
     let willr_input = willr::WillrInput::from_candles(&candles, params);
-    
+
     match willr::willr(&willr_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -1858,7 +1858,7 @@ pub unsafe extern "C" fn rust_dm(
     output_plus: *mut c_double,
     output_minus: *mut c_double,
 ) -> c_int {
-    if high.is_null() || low.is_null() || output_plus.is_null() || 
+    if high.is_null() || low.is_null() || output_plus.is_null() ||
        output_minus.is_null() || size <= 0 || period <= 0 {
         return -1;
     }
@@ -1867,24 +1867,24 @@ pub unsafe extern "C" fn rust_dm(
     let low_slice = slice::from_raw_parts(low, size as usize);
     let plus_slice = slice::from_raw_parts_mut(output_plus, size as usize);
     let minus_slice = slice::from_raw_parts_mut(output_minus, size as usize);
-    
+
     let params = dm::DmParams {
         period: Some(period as usize),
     };
-    
+
     // Create Candles structure
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
     let mut hlcc4 = vec![0.0; size as usize];
-    
+
     for i in 0..size as usize {
         hl2[i] = (high_slice[i] + low_slice[i]) / 2.0;
         hlc3[i] = (high_slice[i] + low_slice[i]) / 2.0;
         ohlc4[i] = (high_slice[i] + low_slice[i]) / 2.0;
         hlcc4[i] = (high_slice[i] + low_slice[i]) / 2.0;
     }
-    
+
     let candles = Candles {
         high: high_slice.to_vec(),
         low: low_slice.to_vec(),
@@ -1897,9 +1897,9 @@ pub unsafe extern "C" fn rust_dm(
         ohlc4,
         hlcc4,
     };
-    
+
     let dm_input = dm::DmInput::from_candles(&candles, params);
-    
+
     match dm::dm(&dm_input) {
         Ok(result) => {
             plus_slice.copy_from_slice(&result.plus);
@@ -1924,13 +1924,13 @@ pub unsafe extern "C" fn rust_fosc(
 
     let input_slice = slice::from_raw_parts(input, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = fosc::FoscParams {
         period: Some(period as usize),
     };
-    
+
     let fosc_input = fosc::FoscInput::from_slice(input_slice, params);
-    
+
     match fosc::fosc(&fosc_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -1964,25 +1964,25 @@ pub unsafe extern "C" fn rust_kvo(
     let volume_slice = slice::from_raw_parts(volume, size as usize);
     let kvo_slice = slice::from_raw_parts_mut(output_kvo, size as usize);
     let signal_slice = slice::from_raw_parts_mut(output_signal, size as usize);
-    
+
     let params = kvo::KvoParams {
         short_period: Some(short_period as usize),
         long_period: Some(long_period as usize),
     };
-    
+
     // Create Candles structure
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
     let mut hlcc4 = vec![0.0; size as usize];
-    
+
     for i in 0..size as usize {
         hl2[i] = (high_slice[i] + low_slice[i]) / 2.0;
         hlc3[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 3.0;
         ohlc4[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 4.0;
         hlcc4[i] = (high_slice[i] + low_slice[i] + close_slice[i] + close_slice[i]) / 4.0;
     }
-    
+
     let candles = Candles {
         high: high_slice.to_vec(),
         low: low_slice.to_vec(),
@@ -1995,9 +1995,9 @@ pub unsafe extern "C" fn rust_kvo(
         ohlc4,
         hlcc4,
     };
-    
+
     let kvo_input = kvo::KvoInput::from_candles(&candles, params);
-    
+
     match kvo::kvo(&kvo_input) {
         Ok(result) => {
             kvo_slice.copy_from_slice(&result.values);
@@ -2025,13 +2025,13 @@ pub unsafe extern "C" fn rust_linreg(
 
     let input_slice = slice::from_raw_parts(input, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = linreg::LinRegParams {
         period: Some(period as usize),
     };
-    
+
     let linreg_input = linreg::LinRegInput::from_slice(input_slice, params);
-    
+
     match linreg::linreg(&linreg_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -2057,24 +2057,24 @@ pub unsafe extern "C" fn rust_mass(
     let high_slice = slice::from_raw_parts(high, size as usize);
     let low_slice = slice::from_raw_parts(low, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = mass::MassParams {
         period: Some(period as usize),
     };
-    
+
     // Create Candles structure
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
     let mut hlcc4 = vec![0.0; size as usize];
-    
+
     for i in 0..size as usize {
         hl2[i] = (high_slice[i] + low_slice[i]) / 2.0;
         hlc3[i] = (high_slice[i] + low_slice[i]) / 2.0;
         ohlc4[i] = (high_slice[i] + low_slice[i]) / 2.0;
         hlcc4[i] = (high_slice[i] + low_slice[i]) / 2.0;
     }
-    
+
     let candles = Candles {
         high: high_slice.to_vec(),
         low: low_slice.to_vec(),
@@ -2087,9 +2087,9 @@ pub unsafe extern "C" fn rust_mass(
         ohlc4,
         hlcc4,
     };
-    
+
     let mass_input = mass::MassInput::from_candles(&candles, "high", "low", params);
-    
+
     match mass::mass(&mass_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -2114,20 +2114,20 @@ pub unsafe extern "C" fn rust_medprice(
     let high_slice = slice::from_raw_parts(high, size as usize);
     let low_slice = slice::from_raw_parts(low, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     // Create Candles structure
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
     let mut hlcc4 = vec![0.0; size as usize];
-    
+
     for i in 0..size as usize {
         hl2[i] = (high_slice[i] + low_slice[i]) / 2.0;
         hlc3[i] = (high_slice[i] + low_slice[i]) / 2.0;
         ohlc4[i] = (high_slice[i] + low_slice[i]) / 2.0;
         hlcc4[i] = (high_slice[i] + low_slice[i]) / 2.0;
     }
-    
+
     let candles = Candles {
         high: high_slice.to_vec(),
         low: low_slice.to_vec(),
@@ -2140,9 +2140,9 @@ pub unsafe extern "C" fn rust_medprice(
         ohlc4,
         hlcc4,
     };
-    
+
     let medprice_input = medprice::MedpriceInput::from_candles(&candles, "high", "low", medprice::MedpriceParams {});
-    
+
     match medprice::medprice(&medprice_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -2166,13 +2166,13 @@ pub unsafe extern "C" fn rust_midpoint(
 
     let input_slice = slice::from_raw_parts(input, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = midpoint::MidpointParams {
         period: Some(period as usize),
     };
-    
+
     let midpoint_input = midpoint::MidpointInput::from_slice(input_slice, params);
-    
+
     match midpoint::midpoint(&midpoint_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -2198,24 +2198,24 @@ pub unsafe extern "C" fn rust_midprice(
     let high_slice = slice::from_raw_parts(high, size as usize);
     let low_slice = slice::from_raw_parts(low, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = midprice::MidpriceParams {
         period: Some(period as usize),
     };
-    
+
     // Create Candles structure
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
     let mut hlcc4 = vec![0.0; size as usize];
-    
+
     for i in 0..size as usize {
         hl2[i] = (high_slice[i] + low_slice[i]) / 2.0;
         hlc3[i] = (high_slice[i] + low_slice[i]) / 2.0;
         ohlc4[i] = (high_slice[i] + low_slice[i]) / 2.0;
         hlcc4[i] = (high_slice[i] + low_slice[i]) / 2.0;
     }
-    
+
     let candles = Candles {
         high: high_slice.to_vec(),
         low: low_slice.to_vec(),
@@ -2228,9 +2228,9 @@ pub unsafe extern "C" fn rust_midprice(
         ohlc4,
         hlcc4,
     };
-    
+
     let midprice_input = midprice::MidpriceInput::from_candles(&candles, "high", "low", params);
-    
+
     match midprice::midprice(&midprice_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -2255,20 +2255,20 @@ pub unsafe extern "C" fn rust_nvi(
     let close_slice = slice::from_raw_parts(close, size as usize);
     let volume_slice = slice::from_raw_parts(volume, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     // Create Candles structure
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
     let mut hlcc4 = vec![0.0; size as usize];
-    
+
     for i in 0..size as usize {
         hl2[i] = close_slice[i];
         hlc3[i] = close_slice[i];
         ohlc4[i] = close_slice[i];
         hlcc4[i] = close_slice[i];
     }
-    
+
     let candles = Candles {
         high: vec![0.0; size as usize],
         low: vec![0.0; size as usize],
@@ -2281,9 +2281,9 @@ pub unsafe extern "C" fn rust_nvi(
         ohlc4,
         hlcc4,
     };
-    
+
     let nvi_input = nvi::NviInput::from_candles(&candles, "close", nvi::NviParams {});
-    
+
     match nvi::nvi(&nvi_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -2308,20 +2308,20 @@ pub unsafe extern "C" fn rust_pvi(
     let close_slice = slice::from_raw_parts(close, size as usize);
     let volume_slice = slice::from_raw_parts(volume, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     // Create Candles structure
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
     let mut hlcc4 = vec![0.0; size as usize];
-    
+
     for i in 0..size as usize {
         hl2[i] = close_slice[i];
         hlc3[i] = close_slice[i];
         ohlc4[i] = close_slice[i];
         hlcc4[i] = close_slice[i];
     }
-    
+
     let candles = Candles {
         high: vec![0.0; size as usize],
         low: vec![0.0; size as usize],
@@ -2334,9 +2334,9 @@ pub unsafe extern "C" fn rust_pvi(
         ohlc4,
         hlcc4,
     };
-    
+
     let pvi_input = pvi::PviInput::from_candles(&candles, "close", "volume", pvi::PviParams { initial_value: Some(1000.0) });
-    
+
     match pvi::pvi(&pvi_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -2362,24 +2362,24 @@ pub unsafe extern "C" fn rust_qstick(
     let open_slice = slice::from_raw_parts(open, size as usize);
     let close_slice = slice::from_raw_parts(close, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = qstick::QstickParams {
         period: Some(period as usize),
     };
-    
+
     // Create Candles structure
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
     let mut hlcc4 = vec![0.0; size as usize];
-    
+
     for i in 0..size as usize {
         hl2[i] = (open_slice[i] + close_slice[i]) / 2.0;
         hlc3[i] = (open_slice[i] + close_slice[i]) / 2.0;
         ohlc4[i] = (open_slice[i] + close_slice[i]) / 2.0;
         hlcc4[i] = (open_slice[i] + close_slice[i]) / 2.0;
     }
-    
+
     let candles = Candles {
         high: vec![0.0; size as usize],
         low: vec![0.0; size as usize],
@@ -2392,9 +2392,9 @@ pub unsafe extern "C" fn rust_qstick(
         ohlc4,
         hlcc4,
     };
-    
+
     let qstick_input = qstick::QstickInput::from_candles(&candles, "open", "close", params);
-    
+
     match qstick::qstick(&qstick_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -2421,25 +2421,25 @@ pub unsafe extern "C" fn rust_sar(
     let high_slice = slice::from_raw_parts(high, size as usize);
     let low_slice = slice::from_raw_parts(low, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = sar::SarParams {
         acceleration: Some(accel_start),
         maximum: Some(accel_max),
     };
-    
+
     // Create Candles structure
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
     let mut hlcc4 = vec![0.0; size as usize];
-    
+
     for i in 0..size as usize {
         hl2[i] = (high_slice[i] + low_slice[i]) / 2.0;
         hlc3[i] = (high_slice[i] + low_slice[i]) / 2.0;
         ohlc4[i] = (high_slice[i] + low_slice[i]) / 2.0;
         hlcc4[i] = (high_slice[i] + low_slice[i]) / 2.0;
     }
-    
+
     let candles = Candles {
         high: high_slice.to_vec(),
         low: low_slice.to_vec(),
@@ -2452,9 +2452,9 @@ pub unsafe extern "C" fn rust_sar(
         ohlc4,
         hlcc4,
     };
-    
+
     let sar_input = sar::SarInput::from_candles(&candles, params);
-    
+
     match sar::sar(&sar_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -2483,7 +2483,7 @@ pub unsafe extern "C" fn rust_srsi(
     let input_slice = slice::from_raw_parts(input, size as usize);
     let k_slice = slice::from_raw_parts_mut(output_k, size as usize);
     let d_slice = slice::from_raw_parts_mut(output_d, size as usize);
-    
+
     let params = srsi::SrsiParams {
         source: Some("close".to_string()),
         rsi_period: Some(rsi_period as usize),
@@ -2491,9 +2491,9 @@ pub unsafe extern "C" fn rust_srsi(
         k: Some(k_period as usize),
         d: Some(d_period as usize),
     };
-    
+
     let srsi_input = srsi::SrsiInput::from_slice(input_slice, params);
-    
+
     match srsi::srsi(&srsi_input) {
         Ok(result) => {
             k_slice.copy_from_slice(&result.k);
@@ -2516,7 +2516,7 @@ pub unsafe extern "C" fn rust_stochf(
     output_k: *mut c_double,
     output_d: *mut c_double,
 ) -> c_int {
-    if high.is_null() || low.is_null() || close.is_null() || 
+    if high.is_null() || low.is_null() || close.is_null() ||
        output_k.is_null() || output_d.is_null() || size <= 0 {
         return -1;
     }
@@ -2526,26 +2526,26 @@ pub unsafe extern "C" fn rust_stochf(
     let close_slice = slice::from_raw_parts(close, size as usize);
     let k_slice = slice::from_raw_parts_mut(output_k, size as usize);
     let d_slice = slice::from_raw_parts_mut(output_d, size as usize);
-    
+
     let params = stochf::StochfParams {
         fastk_period: Some(fastk_period as usize),
         fastd_period: Some(fastd_period as usize),
         fastd_matype: Some(0), // 0 = SMA
     };
-    
+
     // Create Candles structure
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
     let mut hlcc4 = vec![0.0; size as usize];
-    
+
     for i in 0..size as usize {
         hl2[i] = (high_slice[i] + low_slice[i]) / 2.0;
         hlc3[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 3.0;
         ohlc4[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 4.0;
         hlcc4[i] = (high_slice[i] + low_slice[i] + close_slice[i] + close_slice[i]) / 4.0;
     }
-    
+
     let candles = Candles {
         high: high_slice.to_vec(),
         low: low_slice.to_vec(),
@@ -2558,9 +2558,9 @@ pub unsafe extern "C" fn rust_stochf(
         ohlc4,
         hlcc4,
     };
-    
+
     let stochf_input = stochf::StochfInput::from_candles(&candles, params);
-    
+
     match stochf::stochf(&stochf_input) {
         Ok(result) => {
             k_slice.copy_from_slice(&result.k);
@@ -2585,13 +2585,13 @@ pub unsafe extern "C" fn rust_trix(
 
     let input_slice = slice::from_raw_parts(input, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = trix::TrixParams {
         period: Some(period as usize),
     };
-    
+
     let trix_input = trix::TrixInput::from_slice(input_slice, params);
-    
+
     match trix::trix(&trix_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -2615,13 +2615,13 @@ pub unsafe extern "C" fn rust_tsf(
 
     let input_slice = slice::from_raw_parts(input, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = tsf::TsfParams {
         period: Some(period as usize),
     };
-    
+
     let tsf_input = tsf::TsfInput::from_slice(input_slice, params);
-    
+
     match tsf::tsf(&tsf_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -2647,15 +2647,15 @@ pub unsafe extern "C" fn rust_vidya(
 
     let input_slice = slice::from_raw_parts(input, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = vidya::VidyaParams {
         short_period: Some(short_period as usize),
         long_period: Some(long_period as usize),
         alpha: Some(alpha),
     };
-    
+
     let vidya_input = vidya::VidyaInput::from_slice(input_slice, params);
-    
+
     match vidya::vidya(&vidya_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -2680,14 +2680,14 @@ pub unsafe extern "C" fn rust_vosc(
 
     let volume_slice = slice::from_raw_parts(volume, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = vosc::VoscParams {
         short_period: Some(short_period as usize),
         long_period: Some(long_period as usize),
     };
-    
+
     let vosc_input = vosc::VoscInput::from_slice(volume_slice, params);
-    
+
     match vosc::vosc(&vosc_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -2713,24 +2713,24 @@ pub unsafe extern "C" fn rust_vwma(
     let close_slice = slice::from_raw_parts(close, size as usize);
     let volume_slice = slice::from_raw_parts(volume, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = vwma::VwmaParams {
         period: Some(period as usize),
     };
-    
+
     // Create Candles structure
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
     let mut hlcc4 = vec![0.0; size as usize];
-    
+
     for i in 0..size as usize {
         hl2[i] = close_slice[i];
         hlc3[i] = close_slice[i];
         ohlc4[i] = close_slice[i];
         hlcc4[i] = close_slice[i];
     }
-    
+
     let candles = Candles {
         high: vec![0.0; size as usize],
         low: vec![0.0; size as usize],
@@ -2743,9 +2743,9 @@ pub unsafe extern "C" fn rust_vwma(
         ohlc4,
         hlcc4,
     };
-    
+
     let vwma_input = vwma::VwmaInput::from_candles(&candles, "close", params);
-    
+
     match vwma::vwma(&vwma_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -2772,20 +2772,20 @@ pub unsafe extern "C" fn rust_wad(
     let low_slice = slice::from_raw_parts(low, size as usize);
     let close_slice = slice::from_raw_parts(close, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     // Create Candles structure
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
     let mut hlcc4 = vec![0.0; size as usize];
-    
+
     for i in 0..size as usize {
         hl2[i] = (high_slice[i] + low_slice[i]) / 2.0;
         hlc3[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 3.0;
         ohlc4[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 4.0;
         hlcc4[i] = (high_slice[i] + low_slice[i] + close_slice[i] + close_slice[i]) / 4.0;
     }
-    
+
     let candles = Candles {
         high: high_slice.to_vec(),
         low: low_slice.to_vec(),
@@ -2798,9 +2798,9 @@ pub unsafe extern "C" fn rust_wad(
         ohlc4,
         hlcc4,
     };
-    
+
     let wad_input = wad::WadInput::from_candles(&candles);
-    
+
     match wad::wad(&wad_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -2827,20 +2827,20 @@ pub unsafe extern "C" fn rust_wclprice(
     let low_slice = slice::from_raw_parts(low, size as usize);
     let close_slice = slice::from_raw_parts(close, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     // Create Candles structure - wclprice is (high + low + 2*close) / 4
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
     let mut hlcc4 = vec![0.0; size as usize];
-    
+
     for i in 0..size as usize {
         hl2[i] = (high_slice[i] + low_slice[i]) / 2.0;
         hlc3[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 3.0;
         ohlc4[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 4.0;
         hlcc4[i] = (high_slice[i] + low_slice[i] + close_slice[i] + close_slice[i]) / 4.0;
     }
-    
+
     let candles = Candles {
         high: high_slice.to_vec(),
         low: low_slice.to_vec(),
@@ -2853,9 +2853,9 @@ pub unsafe extern "C" fn rust_wclprice(
         ohlc4,
         hlcc4,
     };
-    
+
     let wclprice_input = wclprice::WclpriceInput::from_candles(&candles);
-    
+
     match wclprice::wclprice(&wclprice_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -2879,13 +2879,13 @@ pub unsafe extern "C" fn rust_wilders(
 
     let input_slice = slice::from_raw_parts(input, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = wilders::WildersParams {
         period: Some(period as usize),
     };
-    
+
     let wilders_input = wilders::WildersInput::from_slice(input_slice, params);
-    
+
     match wilders::wilders(&wilders_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -2909,13 +2909,13 @@ pub unsafe extern "C" fn rust_zlema(
 
     let input_slice = slice::from_raw_parts(input, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = zlema::ZlemaParams {
         period: Some(period as usize),
     };
-    
+
     let zlema_input = zlema::ZlemaInput::from_slice(input_slice, params);
-    
+
     match zlema::zlema(&zlema_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -2939,13 +2939,13 @@ pub unsafe extern "C" fn rust_linearreg_slope(
 
     let input_slice = slice::from_raw_parts(input, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = my_project::indicators::linearreg_slope::LinearRegSlopeParams {
         period: Some(period as usize),
     };
-    
+
     let linreg_input = my_project::indicators::linearreg_slope::LinearRegSlopeInput::from_slice(input_slice, params);
-    
+
     match my_project::indicators::linearreg_slope::linearreg_slope(&linreg_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -2969,13 +2969,13 @@ pub unsafe extern "C" fn rust_linearreg_intercept(
 
     let input_slice = slice::from_raw_parts(input, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     let params = my_project::indicators::linearreg_intercept::LinearRegInterceptParams {
         period: Some(period as usize),
     };
-    
+
     let linreg_input = my_project::indicators::linearreg_intercept::LinearRegInterceptInput::from_slice(input_slice, params);
-    
+
     match my_project::indicators::linearreg_intercept::linearreg_intercept(&linreg_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -3002,7 +3002,7 @@ pub unsafe extern "C" fn rust_emv(
     let low_slice = slice::from_raw_parts(low, size as usize);
     let volume_slice = slice::from_raw_parts(volume, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     // Create candles data
     let candles = Candles {
         high: high_slice.to_vec(),
@@ -3016,9 +3016,9 @@ pub unsafe extern "C" fn rust_emv(
         ohlc4: vec![0.0; size as usize],
         hlcc4: vec![0.0; size as usize],
     };
-    
+
     let emv_input = my_project::indicators::emv::EmvInput::from_candles(&candles);
-    
+
     match my_project::indicators::emv::emv(&emv_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -3044,7 +3044,7 @@ pub unsafe extern "C" fn rust_cvi(
     let high_slice = slice::from_raw_parts(high, size as usize);
     let low_slice = slice::from_raw_parts(low, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     // Create candles data
     let candles = Candles {
         high: high_slice.to_vec(),
@@ -3058,13 +3058,13 @@ pub unsafe extern "C" fn rust_cvi(
         ohlc4: vec![0.0; size as usize],
         hlcc4: vec![0.0; size as usize],
     };
-    
+
     let params = my_project::indicators::cvi::CviParams {
         period: Some(period as usize),
     };
-    
+
     let cvi_input = my_project::indicators::cvi::CviInput::from_candles(&candles, params);
-    
+
     match my_project::indicators::cvi::cvi(&cvi_input) {
         Ok(result) => {
             output_slice.copy_from_slice(&result.values);
@@ -3091,7 +3091,7 @@ pub unsafe extern "C" fn rust_tr(
     let low_slice = slice::from_raw_parts(low, size as usize);
     let close_slice = slice::from_raw_parts(close, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     // Calculate true range manually since we might not have a dedicated TR indicator
     output_slice[0] = high_slice[0] - low_slice[0];
     for i in 1..size as usize {
@@ -3100,7 +3100,7 @@ pub unsafe extern "C" fn rust_tr(
         let lc = (low_slice[i] - close_slice[i - 1]).abs();
         output_slice[i] = hl.max(hc).max(lc);
     }
-    
+
     0
 }
 
@@ -3123,12 +3123,12 @@ pub unsafe extern "C" fn rust_avgprice(
     let low_slice = slice::from_raw_parts(low, size as usize);
     let close_slice = slice::from_raw_parts(close, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     // Calculate average price (OHLC/4)
     for i in 0..size as usize {
         output_slice[i] = (open_slice[i] + high_slice[i] + low_slice[i] + close_slice[i]) / 4.0;
     }
-    
+
     0
 }
 
@@ -3149,12 +3149,12 @@ pub unsafe extern "C" fn rust_typprice(
     let low_slice = slice::from_raw_parts(low, size as usize);
     let close_slice = slice::from_raw_parts(close, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
-    
+
     // Calculate typical price (HLC/3)
     for i in 0..size as usize {
         output_slice[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 3.0;
     }
-    
+
     0
 }
 

@@ -7,14 +7,14 @@ use std::path::Path;
 
 fn main() {
     println!("🚀 Unified Three-Tier Benchmark System Demo\n");
-    
+
     // Create the unified runner
     let mut runner = UnifiedBenchmarkRunner::new();
-    
+
     // Step 1: Profile FFI overhead ONCE
     println!("Step 1: Profiling FFI overhead...");
     runner.profile_ffi_overhead(10000, 1000);
-    
+
     // Load test data
     let data_path = Path::new("../../src/data/10kCandles.csv");
     let data = if data_path.exists() {
@@ -31,10 +31,10 @@ fn main() {
             volume: vec![1000.0; 10000],
         }
     };
-    
+
     println!("\nStep 2: Running benchmarks (once per library)...");
     let iterations = 100;
-    
+
     // Benchmark 1: Rust Native (direct call)
     println!("  • Benchmarking Rust Native SMA...");
     runner.benchmark(
@@ -47,7 +47,7 @@ fn main() {
             let _ = sma::sma(&input);
         },
     );
-    
+
     // Benchmark 2: Rust FFI (through C interface)
     println!("  • Benchmarking Rust FFI SMA...");
     let mut rust_output = vec![0.0; data.len()];
@@ -67,7 +67,7 @@ fn main() {
             }
         },
     );
-    
+
     // Benchmark 3: Tulip (C library through FFI)
     println!("  • Benchmarking Tulip SMA...");
     let mut tulip_output = vec![0.0; data.len()];
@@ -91,10 +91,10 @@ fn main() {
             }
         },
     );
-    
+
     // Step 3: Generate three comparison reports from the SAME measurements
     println!("\nStep 3: Generating three-tier analysis from single measurement set...");
-    
+
     println!("\n{}", "=".repeat(80));
     println!("📊 RAW PERFORMANCE (What Users Experience)");
     println!("{}", "=".repeat(80));
@@ -105,7 +105,7 @@ fn main() {
             result.throughput_mops
         );
     }
-    
+
     println!("\n{}", "=".repeat(80));
     println!("🧮 ALGORITHM EFFICIENCY (FFI Overhead Removed)");
     println!("{}", "=".repeat(80));
@@ -117,7 +117,7 @@ fn main() {
             result.throughput_mops
         );
     }
-    
+
     println!("\n{}", "=".repeat(80));
     println!("⚖️ EQUAL FOOTING (All Through FFI)");
     println!("{}", "=".repeat(80));
@@ -128,14 +128,14 @@ fn main() {
             result.throughput_mops
         );
     }
-    
+
     // Show statistics
     println!("{}", runner.get_statistics());
-    
+
     // Generate full report
     println!("\n📄 Full Report:");
     println!("{}", runner.generate_full_report());
-    
+
     println!("\n✅ Key Insight: We ran each benchmark ONCE but analyzed it THREE ways!");
     println!("   This is much more efficient than running three separate benchmark suites.");
 }

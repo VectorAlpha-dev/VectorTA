@@ -1108,7 +1108,69 @@ fn voss_row_scalar(
     voss: &mut [f64],
     filt: &mut [f64],
 ) {
-    voss_scalar(data, period, predict, bandwidth, first, voss, filt)
+    use std::f64::consts::PI;
+
+    let order = 3 * predict;
+    let min_index = period.max(5).max(order);
+    let start = first + min_index;
+    if start >= data.len() {
+        return;
+    }
+
+    let f1 = (2.0 * PI / period as f64).cos();
+    let g1 = (bandwidth * 2.0 * PI / period as f64).cos();
+    let s1 = 1.0 / g1 - (1.0 / (g1 * g1) - 1.0).sqrt();
+    let c1 = 0.5 * (1.0 - s1);
+    let c2 = f1 * (1.0 + s1);
+    let c3 = -s1;
+
+    if start >= 2 {
+        filt[start - 2] = 0.0;
+        filt[start - 1] = 0.0;
+    }
+
+    let mut prev_f1 = 0.0;
+    let mut prev_f2 = 0.0;
+    let scale = (3 + order) as f64 / 2.0;
+
+    if order == 0 {
+        for i in start..data.len() {
+            let f = c1 * (data[i] - data[i - 2]) + c2 * prev_f1 + c3 * prev_f2;
+            filt[i] = f;
+            prev_f2 = prev_f1;
+            prev_f1 = f;
+            voss[i] = scale * f;
+        }
+        return;
+    }
+
+    let inv_order = 1.0 / order as f64;
+    let mut a_sum = 0.0f64;
+    let mut d_sum = 0.0f64;
+
+    for i in start..data.len() {
+        let f = c1 * (data[i] - data[i - 2]) + c2 * prev_f1 + c3 * prev_f2;
+        filt[i] = f;
+        prev_f2 = prev_f1;
+        prev_f1 = f;
+
+        let sumc = d_sum * inv_order;
+        let vi = scale * f - sumc;
+        voss[i] = vi;
+
+        let old_idx = i - order;
+        let v_old = voss[old_idx];
+        let v_old_nz = if old_idx >= first && !v_old.is_nan() {
+            v_old
+        } else {
+            0.0
+        };
+        let v_new_nz = if vi.is_nan() { 0.0 } else { vi };
+
+        let a_prev = a_sum;
+        a_sum = a_prev - v_old_nz + v_new_nz;
+        d_sum = d_sum - a_prev + (order as f64) * v_new_nz;
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
