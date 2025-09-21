@@ -1418,22 +1418,22 @@ mod tests {
 							let mut typical_price = Vec::with_capacity(data_len);
 							let mut volume = Vec::with_capacity(data_len);
 							let mut price = base_price;
-							
+
 							for i in 0..data_len {
 								// Random walk for price using pre-generated random values
 								let change = changes[i] * volatility;
 								price *= 1.0 + change;
 								price = price.max(0.01); // Ensure positive prices
 								typical_price.push(price);
-								
+
 								// Correlated volume (higher volume on bigger moves)
 								let vol = volume_mult * (0.5 + vol_factors[i] + change.abs() * 2.0);
 								volume.push(vol.max(0.0));
 							}
-							
+
 							(typical_price, volume, period)
 						}),
-						
+
 						// 15% constant price data
 						15 => prop::collection::vec(100.0f64..1000.0f64, 1..=1)
 							.prop_map(move |prices| {
@@ -1442,13 +1442,13 @@ mod tests {
 								let volume = vec![10000.0; data_len];
 								(typical_price, volume, period)
 							}),
-						
+
 						// 15% trending data with volume correlation
 						15 => prop::bool::ANY.prop_map(move |uptrend| {
 							let mut typical_price = Vec::with_capacity(data_len);
 							let mut volume = Vec::with_capacity(data_len);
 							let start_price = 100.0;
-							
+
 							for i in 0..data_len {
 								let trend_factor = if uptrend {
 									1.0 + (i as f64 / data_len as f64) * 2.0  // Up to 3x increase
@@ -1459,10 +1459,10 @@ mod tests {
 								// Higher volume on trend moves
 								volume.push(10000.0 * (1.0 + i as f64 / data_len as f64) * 2.0);
 							}
-							
+
 							(typical_price, volume, period)
 						}),
-						
+
 						// 10% edge cases (zero/small volumes)
 						1 => Just((
 							(0..data_len).map(|i| 100.0 + (i as f64)).collect::<Vec<_>>(),

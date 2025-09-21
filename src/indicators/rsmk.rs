@@ -1728,7 +1728,7 @@ mod tests {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) in indicator at index {} \
 						 with params: lookback={}, period={}, signal_period={}, matype={}, signal_matype={} (param set {})",
-						test_name, val, bits, i, 
+						test_name, val, bits, i,
 						params.lookback.unwrap_or(90),
 						params.period.unwrap_or(3),
 						params.signal_period.unwrap_or(20),

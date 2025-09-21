@@ -58,14 +58,14 @@
 /// | `maaq_into(inPtr,outPtr,len,period,fast_period,slow_period)` | `maaq_into` | In-place single-run | Detects `inPtr === outPtr` and uses a temp scratch buffer to avoid alias corruption. │
 /// | `maaq_batch_into(inPtr,outPtr,len,config)` | `maaq_batch_into` | In-place grid sweep | Serial on WASM for portability. │
 ///
-/// **Performance**  
-/// * Zero heap allocations inside hot loops  
+/// **Performance**
+/// * Zero heap allocations inside hot loops
 /// * ~1.5×–2.0× faster than the safe API for repeated calls on pre-allocated
 ///   buffers (measured in Chrome 125, 10 k-point series, 100 updates/s).
 ///
-/// **Caveats**  
-/// * **No bounds or lifetime checks** – treat pointers as raw FFI.  
-/// * Always wrap calls in `try { … } finally { free() }`.  
+/// **Caveats**
+/// * **No bounds or lifetime checks** – treat pointers as raw FFI.
+/// * Always wrap calls in `try { … } finally { free() }`.
 /// * Recreate `TypedArray` views after *any* WASM call (memory may grow).
 ///
 /// ```javascript
@@ -85,19 +85,25 @@
 ///
 /// ---
 /// ## Porting other indicators
-/// 1. Expose a safe `_js` wrapper returning a `Vec<f64>`.  
-/// 2. Provide `*_alloc` / `*_free` helpers.  
-/// 3. Add `*_into` for zero-copy execution (check `inPtr === outPtr`).  
+/// 1. Expose a safe `_js` wrapper returning a `Vec<f64>`.
+/// 2. Provide `*_alloc` / `*_free` helpers.
+/// 3. Add `*_into` for zero-copy execution (check `inPtr === outPtr`).
 /// 4. Mirror the batch pattern if parameter sweeps are needed.
 ///
 /// ---
 /// ## Memory-safety checklist
-/// 1. Guard every unsafe pointer with null-checks.  
-/// 2. Validate `period > 0 && period ≤ len` *before* slicing.  
-/// 3. Overwrite warm-up (prefix) indices with `NaN` in `*_into` helpers.  
-/// 4. Document warm-up length (`period – 1`) for stream consistency.  
+/// 1. Guard every unsafe pointer with null-checks.
+/// 2. Validate `period > 0 && period ≤ len` *before* slicing.
+/// 3. Overwrite warm-up (prefix) indices with `NaN` in `*_into` helpers.
+/// 4. Document warm-up length (`period – 1`) for stream consistency.
 ///
 /// ---
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::CudaMaaq;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -798,7 +804,7 @@ impl MaaqBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &MaaqBatchRange) -> Vec<MaaqParams> {
+pub fn expand_grid(r: &MaaqBatchRange) -> Vec<MaaqParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
         if step == 0 || start == end {
             return vec![start];
@@ -1917,7 +1923,7 @@ mod tests {
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
-use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
@@ -2033,6 +2039,75 @@ pub fn maaq_batch_py<'py>(
     )?;
 
     Ok(dict)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "maaq_cuda_batch_dev")]
+#[pyo3(signature = (data, period_range, fast_period_range, slow_period_range, device_id=0))]
+pub fn maaq_cuda_batch_dev_py(
+    py: Python<'_>,
+    data: numpy::PyReadonlyArray1<'_, f64>,
+    period_range: (usize, usize, usize),
+    fast_period_range: (usize, usize, usize),
+    slow_period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use numpy::PyArrayMethods;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let slice_in = data.as_slice()?;
+    let sweep = MaaqBatchRange {
+        period: period_range,
+        fast_period: fast_period_range,
+        slow_period: slow_period_range,
+    };
+    let data_f32: Vec<f32> = slice_in.iter().map(|&v| v as f32).collect();
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaMaaq::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.maaq_batch_dev(&data_f32, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "maaq_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, period, fast_period, slow_period, device_id=0))]
+pub fn maaq_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    period: usize,
+    fast_period: usize,
+    slow_period: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use numpy::PyUntypedArrayMethods;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let flat_in = data_tm_f32.as_slice()?;
+    let rows = data_tm_f32.shape()[0];
+    let cols = data_tm_f32.shape()[1];
+    let params = MaaqParams {
+        period: Some(period),
+        fast_period: Some(fast_period),
+        slow_period: Some(slow_period),
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaMaaq::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.maaq_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "python")]

@@ -219,7 +219,9 @@ use my_project::indicators::{
     vwap::{vwap as vwap_raw, VwapInput},
     vwmacd::{vwmacd as vwmacd_raw, VwmacdInput},
     wad::{wad as wad_raw, WadInput},
-    wavetrend::{wavetrend as wavetrend_raw, WavetrendInput},
+    wavetrend::{
+        wavetrend as wavetrend_raw, wavetrend_with_kernel, WavetrendBatchBuilder, WavetrendInput,
+    },
     wclprice::{wclprice as wclprice_raw, WclpriceInput},
     willr::{willr as willr_raw, WillrInput},
     wto::{wto_with_kernel, WtoBatchBuilder, WtoInput},
@@ -1151,9 +1153,15 @@ make_kernel_wrappers!(fvg_trailing_stop, fvg_trailing_stop_with_kernel, FvgTrail
 make_kernel_wrappers!(halftrend, halftrend_with_kernel, HalfTrendInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(reverse_rsi, reverse_rsi_with_kernel, ReverseRsiInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(vama, vama_with_kernel, VamaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(wavetrend, wavetrend_with_kernel, WavetrendInputS; Scalar,Avx2,Avx512);
 
 make_batch_wrappers!(
     alma_batch, AlmaBatchBuilder, AlmaInputS;
+    ScalarBatch, Avx2Batch, Avx512Batch
+);
+
+make_batch_wrappers!(
+    wavetrend_batch, WavetrendBatchBuilder, WavetrendInputS;
     ScalarBatch, Avx2Batch, Avx512Batch
 );
 
@@ -2340,6 +2348,20 @@ bench_variants!(
 );
 
 bench_variants!(
+    wavetrend => WavetrendInputS; None;
+    wavetrend_scalar,
+    wavetrend_avx2,
+    wavetrend_avx512,
+);
+
+bench_variants!(
+    wavetrend_batch => WavetrendInputS; None;
+    wavetrend_batch_scalarbatch,
+    wavetrend_batch_avx2batch,
+    wavetrend_batch_avx512batch,
+);
+
+bench_variants!(
     nama => NamaInputS; None;
     nama_scalar,
     nama_avx2,
@@ -2529,6 +2551,8 @@ criterion_main!(
     benches_vpwma,
     benches_vpwma_batch,
     benches_vwma,
+    benches_wavetrend,
+    benches_wavetrend_batch,
     benches_wilders,
     benches_wilders_batch,
     benches_wma,

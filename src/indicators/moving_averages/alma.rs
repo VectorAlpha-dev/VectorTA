@@ -1,3 +1,5 @@
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::DeviceArrayF32;
 /// # ALMA - Arnaud Legoux Moving Average
 ///
 /// A Gaussian-weighted moving average designed to reduce lag while maintaining smoothness.
@@ -27,8 +29,6 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::moving_averages::DeviceArrayF32;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
@@ -2568,7 +2568,6 @@ pub fn alma_cuda_many_series_one_param_dev_py(
 }
 
 // FP32-only, user-supplied output (zero extra copies)
-
 
 #[cfg(feature = "python")]
 pub fn register_alma_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {

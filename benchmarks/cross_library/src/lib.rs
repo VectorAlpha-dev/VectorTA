@@ -55,24 +55,24 @@ pub mod tulip {
     ) -> Result<(), String> {
         let c_name = std::ffi::CString::new(name).unwrap();
         let indicator = ti_find_indicator(c_name.as_ptr());
-        
+
         if indicator.is_null() {
             return Err(format!("Indicator '{}' not found", name));
         }
 
         let info = &*indicator;
-        
+
         // Verify input/output counts
         if inputs.len() != info.inputs as usize {
             return Err(format!(
-                "Expected {} inputs, got {}", 
+                "Expected {} inputs, got {}",
                 info.inputs, inputs.len()
             ));
         }
-        
+
         if outputs.len() != info.outputs as usize {
             return Err(format!(
-                "Expected {} outputs, got {}", 
+                "Expected {} outputs, got {}",
                 info.outputs, outputs.len()
             ));
         }
@@ -82,7 +82,7 @@ pub mod tulip {
             .iter()
             .map(|slice| slice.as_ptr() as *const TulipReal)
             .collect();
-        
+
         let mut output_ptrs: Vec<*mut TulipReal> = outputs
             .iter_mut()
             .map(|slice| slice.as_mut_ptr() as *mut TulipReal)
@@ -108,7 +108,7 @@ pub mod tulip {
     pub unsafe fn get_start_index(name: &str, options: &[f64]) -> Result<usize, String> {
         let c_name = std::ffi::CString::new(name).unwrap();
         let indicator = ti_find_indicator(c_name.as_ptr());
-        
+
         if indicator.is_null() {
             return Err(format!("Indicator '{}' not found", name));
         }
@@ -116,7 +116,7 @@ pub mod tulip {
         let info = &*indicator;
         let start_fn = info.start.expect("Start function not found");
         let start = start_fn(options.as_ptr() as *const TulipReal);
-        
+
         Ok(start as usize)
     }
 }

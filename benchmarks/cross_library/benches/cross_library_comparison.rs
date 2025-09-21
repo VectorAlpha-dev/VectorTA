@@ -8,11 +8,11 @@ use my_project::indicators::moving_averages::{
 };
 use my_project::indicators::{
     rsi, atr, bollinger_bands, macd, adx, cci, stoch, aroon,
-    ao, cmo, di, mfi, mom, obv, ppo, roc, 
+    ao, cmo, di, mfi, mom, obv, ppo, roc,
     srsi, trix, willr,
     // Additional momentum indicators
     apo, dpo, rocr, rocp,
-    // Volume indicators  
+    // Volume indicators
     ad, adosc, emv,
     // Other indicators
     adxr, aroonosc, bop, dm, dx, fisher, fosc, kvo,
@@ -117,7 +117,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["high", "low", "close"],
             options: vec![14.0],
         },
-        
+
         // === Additional Moving Averages ===
         IndicatorMapping {
             rust_name: "dema",
@@ -161,7 +161,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["close"],
             options: vec![14.0],
         },
-        
+
         // === Momentum Indicators ===
         IndicatorMapping {
             rust_name: "apo",
@@ -219,7 +219,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["high", "low", "close"],
             options: vec![14.0],
         },
-        
+
         // === Volume Indicators ===
         IndicatorMapping {
             rust_name: "ad",
@@ -249,7 +249,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["high", "low", "close", "volume"],
             options: vec![14.0],
         },
-        
+
         // === Other Common Indicators ===
         IndicatorMapping {
             rust_name: "ao",
@@ -293,7 +293,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["high", "low", "close"],
             options: vec![7.0, 14.0, 28.0],
         },
-        
+
         // === Additional indicators for full coverage ===
         // ADXR
         IndicatorMapping {
@@ -653,14 +653,14 @@ fn create_candles(data: &CandleData) -> Candles {
     let mut hlc3 = vec![0.0; data.len()];
     let mut ohlc4 = vec![0.0; data.len()];
     let mut hlcc4 = vec![0.0; data.len()];
-    
+
     for i in 0..data.len() {
         hl2[i] = (data.high[i] + data.low[i]) / 2.0;
         hlc3[i] = (data.high[i] + data.low[i] + data.close[i]) / 3.0;
         ohlc4[i] = (data.open[i] + data.high[i] + data.low[i] + data.close[i]) / 4.0;
         hlcc4[i] = (data.high[i] + data.low[i] + data.close[i] + data.close[i]) / 4.0;
     }
-    
+
     Candles {
         high: data.high.clone(),
         low: data.low.clone(),
@@ -683,7 +683,7 @@ fn benchmark_rust_indicator(
 ) {
     let group_name = format!("{}/{}", indicator.rust_name, size_name);
     let mut group = c.benchmark_group(&group_name);
-    
+
     // Set throughput based on data size
     group.throughput(Throughput::Elements(data.len() as u64));
     group.measurement_time(Duration::from_millis(900));
@@ -718,8 +718,8 @@ fn benchmark_rust_indicator(
         }
         "bollinger_bands" => {
             let input = bollinger_bands::BollingerBandsInput::from_slice(
-                &data.close, 
-                bollinger_bands::BollingerBandsParams { 
+                &data.close,
+                bollinger_bands::BollingerBandsParams {
                     period: Some(20),
                     devup: Some(2.0),
                     devdn: Some(2.0),
@@ -819,9 +819,9 @@ fn benchmark_rust_indicator(
             });
         }
         "macd" => {
-            let input = macd::MacdInput::from_slice(&data.close, macd::MacdParams { 
-                fast_period: Some(12), 
-                slow_period: Some(26), 
+            let input = macd::MacdInput::from_slice(&data.close, macd::MacdParams {
+                fast_period: Some(12),
+                slow_period: Some(26),
                 signal_period: Some(9),
                 ma_type: None
             });
@@ -850,8 +850,8 @@ fn benchmark_rust_indicator(
             });
         }
         "ppo" => {
-            let input = ppo::PpoInput::from_slice(&data.close, ppo::PpoParams { 
-                fast_period: Some(12), 
+            let input = ppo::PpoInput::from_slice(&data.close, ppo::PpoParams {
+                fast_period: Some(12),
                 slow_period: Some(26),
                 ma_type: None
             });
@@ -871,12 +871,12 @@ fn benchmark_rust_indicator(
         }
         "stoch" => {
             let candles = create_candles(data);
-            let input = stoch::StochInput::from_candles(&candles, stoch::StochParams { 
+            let input = stoch::StochInput::from_candles(&candles, stoch::StochParams {
                 fastk_period: Some(14),
-                slowk_period: Some(5), 
+                slowk_period: Some(5),
                 slowk_ma_type: Some("sma".to_string()),
-                slowd_period: Some(3), 
-                slowd_ma_type: Some("sma".to_string()) 
+                slowd_period: Some(3),
+                slowd_ma_type: Some("sma".to_string())
             });
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
@@ -885,12 +885,12 @@ fn benchmark_rust_indicator(
             });
         }
         "stochrsi" => {
-            let input = srsi::SrsiInput::from_slice(&data.close, srsi::SrsiParams { 
+            let input = srsi::SrsiInput::from_slice(&data.close, srsi::SrsiParams {
                 rsi_period: Some(14),
                 stoch_period: Some(14),
-                k: Some(3), 
+                k: Some(3),
                 d: Some(3),
-                source: None 
+                source: None
             });
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
@@ -1245,9 +1245,9 @@ fn benchmark_rust_indicator(
         }
         "sar" | "psar" => {
             let candles = create_candles(data);
-            let input = sar::SarInput::from_candles(&candles, sar::SarParams { 
-                acceleration: Some(0.02), 
-                maximum: Some(0.2) 
+            let input = sar::SarInput::from_candles(&candles, sar::SarParams {
+                acceleration: Some(0.02),
+                maximum: Some(0.2)
             });
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
@@ -1549,7 +1549,7 @@ fn benchmark_rust_indicator(
                 });
             });
         }
-        
+
         "dmi" => {
             let mut plus_di = vec![0.0; data.len()];
             let mut minus_di = vec![0.0; data.len()];
@@ -1948,10 +1948,10 @@ fn benchmark_rust_indicator(
     let _has_talib = false;
     #[cfg(feature = "talib")]
     let _has_talib = std::env::var("TALIB_PATH").is_ok();
-    
+
     let mut output_buffers: Vec<Vec<f64>> = match indicator.tulip_name {
         "bbands" => vec![vec![0.0; data.len()]; 3], // 3 outputs
-        "macd" => vec![vec![0.0; data.len()]; 3],   // 3 outputs  
+        "macd" => vec![vec![0.0; data.len()]; 3],   // 3 outputs
         "stoch" | "stochf" | "stochrsi" => vec![vec![0.0; data.len()]; 2],  // 2 outputs
         "aroon" | "di" | "dm" => vec![vec![0.0; data.len()]; 2],  // 2 outputs
         _ => vec![vec![0.0; data.len()]; 1],        // 1 output
@@ -1974,7 +1974,7 @@ fn benchmark_rust_indicator(
                 .iter_mut()
                 .map(|v| &mut v[..])
                 .collect();
-            
+
             unsafe {
                 let _ = black_box(tulip::call_indicator(
                     indicator.tulip_name,
@@ -1993,15 +1993,15 @@ fn benchmark_rust_indicator(
     {
         if _has_talib && indicator.talib_name.is_some() {
             use cross_library_benchmark::talib_wrapper;
-            
+
             let mut talib_outputs: Vec<Vec<f64>> = match indicator.tulip_name {
                 "bbands" => vec![vec![0.0; data.len()]; 3], // 3 outputs
-                "macd" => vec![vec![0.0; data.len()]; 3],   // 3 outputs  
+                "macd" => vec![vec![0.0; data.len()]; 3],   // 3 outputs
                 "stoch" => vec![vec![0.0; data.len()]; 2],  // 2 outputs
                 "aroon" => vec![vec![0.0; data.len()]; 2],  // 2 outputs
                 _ => vec![vec![0.0; data.len()]; 1],        // 1 output
             };
-            
+
             group.bench_function("talib", |b| {
                 b.iter(|| {
                     unsafe {
@@ -2504,7 +2504,7 @@ fn benchmark_rust_indicator(
             });
         }
     }
-    
+
     group.finish();
 }
 
@@ -2523,7 +2523,7 @@ impl Drop for JsonExporter {
 fn setup_benchmarks(c: &mut Criterion) {
     // Create exporter that will save JSON when dropped
     let _json_exporter = JsonExporter;
-    
+
     let mappings = get_indicator_mappings();
 
     for (size_name, csv_path) in DATA_SIZES {
@@ -2536,7 +2536,7 @@ fn setup_benchmarks(c: &mut Criterion) {
         let data = CandleData::from_csv(path)
             .expect(&format!("Failed to load {}", csv_path));
 
-        // Benchmark all indicators  
+        // Benchmark all indicators
         for mapping in mappings.iter() {
             // Measure and collect results
             measure_and_collect(mapping, &data, size_name);
@@ -2550,7 +2550,7 @@ fn measure_and_collect(indicator: &IndicatorMapping, data: &CandleData, _size_na
     // Quick measurement for each library to collect in JSON
     let iterations = 10;
     let candles = create_candles(data);
-    
+
     // Measure Rust Native - ALL indicators
     let rust_start = Instant::now();
     match indicator.rust_name {
@@ -2573,20 +2573,20 @@ fn measure_and_collect(indicator: &IndicatorMapping, data: &CandleData, _size_na
             }
         }
         "bollinger_bands" => {
-            let input = bollinger_bands::BollingerBandsInput::from_slice(&data.close, 
-                bollinger_bands::BollingerBandsParams { 
-                    period: Some(20), devup: Some(2.0), devdn: Some(2.0), 
-                    matype: Some("sma".to_string()), devtype: Some(0) 
+            let input = bollinger_bands::BollingerBandsInput::from_slice(&data.close,
+                bollinger_bands::BollingerBandsParams {
+                    period: Some(20), devup: Some(2.0), devdn: Some(2.0),
+                    matype: Some("sma".to_string()), devtype: Some(0)
                 });
             for _ in 0..iterations {
                 let _ = black_box(bollinger_bands::bollinger_bands(&input));
             }
         }
         "macd" => {
-            let input = macd::MacdInput::from_slice(&data.close, 
-                macd::MacdParams { 
-                    fast_period: Some(12), slow_period: Some(26), 
-                    signal_period: Some(9), ma_type: None 
+            let input = macd::MacdInput::from_slice(&data.close,
+                macd::MacdParams {
+                    fast_period: Some(12), slow_period: Some(26),
+                    signal_period: Some(9), ma_type: None
                 });
             for _ in 0..iterations {
                 let _ = black_box(macd::macd(&input));
@@ -2599,10 +2599,10 @@ fn measure_and_collect(indicator: &IndicatorMapping, data: &CandleData, _size_na
             }
         }
         "stoch" => {
-            let input = stoch::StochInput::from_candles(&candles, 
-                stoch::StochParams { 
-                    fastk_period: Some(14), slowk_period: Some(3), 
-                    slowk_ma_type: None, slowd_period: Some(3), slowd_ma_type: None 
+            let input = stoch::StochInput::from_candles(&candles,
+                stoch::StochParams {
+                    fastk_period: Some(14), slowk_period: Some(3),
+                    slowk_ma_type: None, slowd_period: Some(3), slowd_ma_type: None
                 });
             for _ in 0..iterations {
                 let _ = black_box(stoch::stoch(&input));
@@ -2681,7 +2681,7 @@ fn measure_and_collect(indicator: &IndicatorMapping, data: &CandleData, _size_na
             }
         }
         "apo" => {
-            let input = apo::ApoInput::from_slice(&data.close, 
+            let input = apo::ApoInput::from_slice(&data.close,
                 apo::ApoParams { short_period: Some(12), long_period: Some(26) });
             for _ in 0..iterations {
                 let _ = black_box(apo::apo(&input));
@@ -2706,7 +2706,7 @@ fn measure_and_collect(indicator: &IndicatorMapping, data: &CandleData, _size_na
             }
         }
         "ppo" => {
-            let input = ppo::PpoInput::from_slice(&data.close, 
+            let input = ppo::PpoInput::from_slice(&data.close,
                 ppo::PpoParams { fast_period: Some(12), slow_period: Some(26), ma_type: None });
             for _ in 0..iterations {
                 let _ = black_box(ppo::ppo(&input));
@@ -2743,7 +2743,7 @@ fn measure_and_collect(indicator: &IndicatorMapping, data: &CandleData, _size_na
             }
         }
         "adosc" => {
-            let input = adosc::AdoscInput::from_candles(&candles, 
+            let input = adosc::AdoscInput::from_candles(&candles,
                 adosc::AdoscParams { short_period: Some(3), long_period: Some(10) });
             for _ in 0..iterations {
                 let _ = black_box(adosc::adosc(&input));
@@ -2762,7 +2762,7 @@ fn measure_and_collect(indicator: &IndicatorMapping, data: &CandleData, _size_na
             }
         }
         "ao" => {
-            let input = ao::AoInput::from_candles(&candles, "hl2", 
+            let input = ao::AoInput::from_candles(&candles, "hl2",
                 ao::AoParams { short_period: Some(5), long_period: Some(34) });
             for _ in 0..iterations {
                 let _ = black_box(ao::ao(&input));
@@ -2793,7 +2793,7 @@ fn measure_and_collect(indicator: &IndicatorMapping, data: &CandleData, _size_na
             }
         }
         "ultosc" => {
-            let input = ultosc::UltOscInput::from_candles(&candles, "high", "low", "close", 
+            let input = ultosc::UltOscInput::from_candles(&candles, "high", "low", "close",
                 ultosc::UltOscParams { timeperiod1: Some(7), timeperiod2: Some(14), timeperiod3: Some(28) });
             for _ in 0..iterations {
                 let _ = black_box(ultosc::ultosc(&input));
@@ -2848,14 +2848,14 @@ fn measure_and_collect(indicator: &IndicatorMapping, data: &CandleData, _size_na
             }
         }
         "kvo" => {
-            let input = kvo::KvoInput::from_candles(&candles, 
+            let input = kvo::KvoInput::from_candles(&candles,
                 kvo::KvoParams { short_period: Some(34), long_period: Some(55) });
             for _ in 0..iterations {
                 let _ = black_box(kvo::kvo(&input));
             }
         }
         "linearreg_slope" => {
-            let input = linearreg_slope::LinearRegSlopeInput::from_slice(&data.close, 
+            let input = linearreg_slope::LinearRegSlopeInput::from_slice(&data.close,
                 linearreg_slope::LinearRegSlopeParams { period: Some(14) });
             for _ in 0..iterations {
                 let _ = black_box(linearreg_slope::linearreg_slope(&input));
@@ -2868,14 +2868,14 @@ fn measure_and_collect(indicator: &IndicatorMapping, data: &CandleData, _size_na
             }
         }
         "linearreg_intercept" => {
-            let input = linearreg_intercept::LinearRegInterceptInput::from_slice(&data.close, 
+            let input = linearreg_intercept::LinearRegInterceptInput::from_slice(&data.close,
                 linearreg_intercept::LinearRegInterceptParams { period: Some(14) });
             for _ in 0..iterations {
                 let _ = black_box(linearreg_intercept::linearreg_intercept(&input));
             }
         }
         "mass" => {
-            let input = mass::MassInput::from_candles(&candles, "high", "low", 
+            let input = mass::MassInput::from_candles(&candles, "high", "low",
                 mass::MassParams { period: Some(25) });
             for _ in 0..iterations {
                 let _ = black_box(mass::mass(&input));
@@ -2918,21 +2918,21 @@ fn measure_and_collect(indicator: &IndicatorMapping, data: &CandleData, _size_na
             }
         }
         "sar" | "psar" => {
-            let input = sar::SarInput::from_candles(&candles, 
+            let input = sar::SarInput::from_candles(&candles,
                 sar::SarParams { acceleration: Some(0.02), maximum: Some(0.2) });
             for _ in 0..iterations {
                 let _ = black_box(sar::sar(&input));
             }
         }
         "srsi" | "stochrsi" => {
-            let input = srsi::SrsiInput::from_slice(&data.close, 
+            let input = srsi::SrsiInput::from_slice(&data.close,
                 srsi::SrsiParams { rsi_period: Some(14), stoch_period: Some(14), k: Some(3), d: Some(3), source: None });
             for _ in 0..iterations {
                 let _ = black_box(srsi::srsi(&input));
             }
         }
         "stochf" => {
-            let input = stochf::StochfInput::from_candles(&candles, 
+            let input = stochf::StochfInput::from_candles(&candles,
                 stochf::StochfParams { fastk_period: Some(5), fastd_period: Some(3), fastd_matype: None });
             for _ in 0..iterations {
                 let _ = black_box(stochf::stochf(&input));
@@ -2951,14 +2951,14 @@ fn measure_and_collect(indicator: &IndicatorMapping, data: &CandleData, _size_na
             }
         }
         "vidya" => {
-            let input = vidya::VidyaInput::from_slice(&data.close, 
+            let input = vidya::VidyaInput::from_slice(&data.close,
                 vidya::VidyaParams { short_period: Some(2), long_period: Some(5), alpha: Some(0.2) });
             for _ in 0..iterations {
                 let _ = black_box(vidya::vidya(&input));
             }
         }
         "vosc" => {
-            let input = vosc::VoscInput::from_candles(&candles, "volume", 
+            let input = vosc::VoscInput::from_candles(&candles, "volume",
                 vosc::VoscParams { short_period: Some(5), long_period: Some(10) });
             for _ in 0..iterations {
                 let _ = black_box(vosc::vosc(&input));
@@ -3013,7 +3013,7 @@ fn measure_and_collect(indicator: &IndicatorMapping, data: &CandleData, _size_na
     }
     let rust_duration = rust_start.elapsed() / iterations as u32;
     COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, rust_duration, data.len());
-    
+
     // Measure Rust via FFI (subset of indicators with wrappers)
     let rust_ffi_start = Instant::now();
     match indicator.rust_name {
@@ -3129,7 +3129,7 @@ fn measure_and_collect(indicator: &IndicatorMapping, data: &CandleData, _size_na
     }
     let rust_ffi_duration = rust_ffi_start.elapsed() / iterations as u32;
     COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustFFI, rust_ffi_duration, data.len());
-    
+
     // Measure Tulip
     unsafe {
         // Determine number of outputs based on indicator
@@ -3139,11 +3139,11 @@ fn measure_and_collect(indicator: &IndicatorMapping, data: &CandleData, _size_na
             "aroon" | "di" | "dm" => 2,
             _ => 1,
         };
-        
+
         let mut output_buffers: Vec<Vec<f64>> = (0..output_count)
             .map(|_| vec![0.0; data.len()])
             .collect();
-        
+
         // Prepare inputs based on indicator requirements
         let inputs: Vec<&[f64]> = indicator.inputs.iter().map(|&input_name| {
             match input_name {
@@ -3155,12 +3155,12 @@ fn measure_and_collect(indicator: &IndicatorMapping, data: &CandleData, _size_na
                 _ => panic!("Unknown input: {}", input_name),
             }
         }).collect();
-        
+
         let mut output_refs: Vec<&mut [f64]> = output_buffers
             .iter_mut()
             .map(|v| &mut v[..])
             .collect();
-        
+
         let tulip_start = Instant::now();
         for _ in 0..iterations {
             let _ = tulip::call_indicator(
@@ -3174,13 +3174,13 @@ fn measure_and_collect(indicator: &IndicatorMapping, data: &CandleData, _size_na
         let tulip_duration = tulip_start.elapsed() / iterations as u32;
         COLLECTOR.add_measurement(indicator.rust_name, LibraryType::TulipFFI, tulip_duration, data.len());
     }
-    
+
     // Measure TA-LIB (if available and mapped)
     #[cfg(not(feature = "talib"))]
     let _has_talib = false;
     #[cfg(feature = "talib")]
     let _has_talib = std::env::var("TALIB_PATH").is_ok();
-    
+
     #[cfg(feature = "talib")]
     if _has_talib {
         if let Some(name) = indicator.talib_name {

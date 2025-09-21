@@ -57,14 +57,14 @@
 //! | `fwma_into(inPtr,outPtr,len,period)` | `fwma_into` | In-place single-run | Detects `inPtr === outPtr` and uses a temp scratch buffer to avoid alias corruption. |
 //! | `fwma_batch_into(inPtr,outPtr,len, …range…)` | `fwma_batch_into` | In-place grid sweep | Serial on WASM for portability. |
 //!
-//! **Performance**  
-//! * Zero heap allocations inside hot loops  
+//! **Performance**
+//! * Zero heap allocations inside hot loops
 //! * ~1.5×–2.0× faster than the safe API for repeated calls on pre-allocated
 //!   buffers (measured on 10k-point series, 100 updates/s).
 //!
-//! **Caveats**  
-//! * **No bounds or lifetime checks** – treat pointers as raw FFI.  
-//! * Always wrap calls in `try { … } finally { free() }`.  
+//! **Caveats**
+//! * **No bounds or lifetime checks** – treat pointers as raw FFI.
+//! * Always wrap calls in `try { … } finally { free() }`.
 //! * Recreate `TypedArray` views after *any* WASM call (memory may grow).
 //!
 //! ```javascript
@@ -84,9 +84,9 @@
 //!
 //! ---
 //! ### Memory-safety checklist
-//! 1. Guard every unsafe pointer with null-checks.  
-//! 2. Validate `period > 0 && period ≤ len` *before* slicing.  
-//! 3. Overwrite warm-up (prefix) indices with `NaN` in `*_into` helpers.  
+//! 1. Guard every unsafe pointer with null-checks.
+//! 2. Validate `period > 0 && period ≤ len` *before* slicing.
+//! 3. Overwrite warm-up (prefix) indices with `NaN` in `*_into` helpers.
 //! 4. Document warm-up length (`period – 1`) for stream consistency.
 //!
 //! ---
@@ -102,6 +102,12 @@
 //!   - Consider pre-computing normalized Fibonacci weights for common periods
 //!   - WASM performance is excellent with SIMD128 support
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::CudaFwma;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 use crate::utilities::aligned_vector::AlignedVec;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -114,7 +120,7 @@ use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(feature = "python")]
-use numpy::{IntoPyArray, PyArray1};
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
@@ -2062,6 +2068,67 @@ mod tests {
             );
         }
     }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "fwma_cuda_batch_dev")]
+#[pyo3(signature = (data, period_range, device_id=0))]
+pub fn fwma_cuda_batch_dev_py(
+    py: Python<'_>,
+    data: PyReadonlyArray1<'_, f64>,
+    period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use numpy::PyArrayMethods;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let slice_in = data.as_slice()?;
+    let sweep = FwmaBatchRange {
+        period: period_range,
+    };
+    let data_f32: Vec<f32> = slice_in.iter().map(|&v| v as f32).collect();
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaFwma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.fwma_batch_dev(&data_f32, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "fwma_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, period, device_id=0))]
+pub fn fwma_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    period: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use numpy::PyUntypedArrayMethods;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let flat_in = data_tm_f32.as_slice()?;
+    let rows = data_tm_f32.shape()[0];
+    let cols = data_tm_f32.shape()[1];
+    let params = FwmaParams {
+        period: Some(period),
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaFwma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.fwma_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "python")]

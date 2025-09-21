@@ -16,7 +16,7 @@ use crate::*;
         outNBElement: *mut c_int,
         outReal: *mut c_double,
     ) -> c_int;
-    
+
     // Exponential Moving Average
     pub fn TA_EMA(
         startIdx: c_int,
@@ -27,7 +27,7 @@ use crate::*;
         outNBElement: *mut c_int,
         outReal: *mut c_double,
     ) -> c_int;
-    
+
     // Relative Strength Index
     pub fn TA_RSI(
         startIdx: c_int,
@@ -38,7 +38,7 @@ use crate::*;
         outNBElement: *mut c_int,
         outReal: *mut c_double,
     ) -> c_int;
-    
+
     // Bollinger Bands
     pub fn TA_BBANDS(
         startIdx: c_int,
@@ -54,7 +54,7 @@ use crate::*;
         outRealMiddleBand: *mut c_double,
         outRealLowerBand: *mut c_double,
     ) -> c_int;
-    
+
     // MACD
     pub fn TA_MACD(
         startIdx: c_int,
@@ -69,7 +69,7 @@ use crate::*;
         outMACDSignal: *mut c_double,
         outMACDHist: *mut c_double,
     ) -> c_int;
-    
+
     // Average True Range
     pub fn TA_ATR(
         startIdx: c_int,
@@ -82,7 +82,7 @@ use crate::*;
         outNBElement: *mut c_int,
         outReal: *mut c_double,
     ) -> c_int;
-    
+
     // Stochastic
     pub fn TA_STOCH(
         startIdx: c_int,
@@ -100,7 +100,7 @@ use crate::*;
         outSlowK: *mut c_double,
         outSlowD: *mut c_double,
     ) -> c_int;
-    
+
     // Aroon
     pub fn TA_AROON(
         startIdx: c_int,
@@ -113,7 +113,7 @@ use crate::*;
         outAroonDown: *mut c_double,
         outAroonUp: *mut c_double,
     ) -> c_int;
-    
+
     // ADX
     pub fn TA_ADX(
         startIdx: c_int,
@@ -126,7 +126,7 @@ use crate::*;
         outNBElement: *mut c_int,
         outReal: *mut c_double,
     ) -> c_int;
-    
+
     // CCI
     pub fn TA_CCI(
         startIdx: c_int,
@@ -139,7 +139,7 @@ use crate::*;
         outNBElement: *mut c_int,
         outReal: *mut c_double,
     ) -> c_int;
-    
+
     // Additional Moving Averages
     pub fn TA_DEMA(
         startIdx: c_int,
@@ -150,7 +150,7 @@ use crate::*;
         outNBElement: *mut c_int,
         outReal: *mut c_double,
     ) -> c_int;
-    
+
     pub fn TA_TEMA(
         startIdx: c_int,
         endIdx: c_int,
@@ -160,7 +160,7 @@ use crate::*;
         outNBElement: *mut c_int,
         outReal: *mut c_double,
     ) -> c_int;
-    
+
     pub fn TA_WMA(
         startIdx: c_int,
         endIdx: c_int,
@@ -170,7 +170,7 @@ use crate::*;
         outNBElement: *mut c_int,
         outReal: *mut c_double,
     ) -> c_int;
-    
+
     pub fn TA_KAMA(
         startIdx: c_int,
         endIdx: c_int,
@@ -180,7 +180,7 @@ use crate::*;
         outNBElement: *mut c_int,
         outReal: *mut c_double,
     ) -> c_int;
-    
+
     pub fn TA_TRIMA(
         startIdx: c_int,
         endIdx: c_int,
@@ -190,9 +190,9 @@ use crate::*;
         outNBElement: *mut c_int,
         outReal: *mut c_double,
     ) -> c_int;
-    
+
     // HMA is not in TA-LIB, but we'll add other indicators
-    
+
     // Momentum indicators
     pub fn TA_APO(
         startIdx: c_int,
@@ -205,7 +205,7 @@ use crate::*;
         outNBElement: *mut c_int,
         outReal: *mut c_double,
     ) -> c_int;
-    
+
     pub fn TA_CMO(
         startIdx: c_int,
         endIdx: c_int,
@@ -215,7 +215,7 @@ use crate::*;
         outNBElement: *mut c_int,
         outReal: *mut c_double,
     ) -> c_int;
-    
+
     pub fn TA_MOM(
         startIdx: c_int,
         endIdx: c_int,
@@ -225,7 +225,7 @@ use crate::*;
         outNBElement: *mut c_int,
         outReal: *mut c_double,
     ) -> c_int;
-    
+
     pub fn TA_PPO(
         startIdx: c_int,
         endIdx: c_int,
@@ -237,7 +237,7 @@ use crate::*;
         outNBElement: *mut c_int,
         outReal: *mut c_double,
     ) -> c_int;
-    
+
     pub fn TA_ROC(
         startIdx: c_int,
         endIdx: c_int,
@@ -247,7 +247,7 @@ use crate::*;
         outNBElement: *mut c_int,
         outReal: *mut c_double,
     ) -> c_int;
-    
+
     pub fn TA_ROCR(
         startIdx: c_int,
         endIdx: c_int,
@@ -257,7 +257,7 @@ use crate::*;
         outNBElement: *mut c_int,
         outReal: *mut c_double,
     ) -> c_int;
-    
+
     pub fn TA_WILLR(
         startIdx: c_int,
         endIdx: c_int,
@@ -269,7 +269,7 @@ use crate::*;
         outNBElement: *mut c_int,
         outReal: *mut c_double,
     ) -> c_int;
-    
+
     // Volume indicators
     pub fn TA_AD(
         startIdx: c_int,
@@ -282,7 +282,7 @@ use crate::*;
         outNBElement: *mut c_int,
         outReal: *mut c_double,
     ) -> c_int;
-    
+
     pub fn TA_ADOSC(
         startIdx: c_int,
         endIdx: c_int,
@@ -296,7 +296,7 @@ use crate::*;
         outNBElement: *mut c_int,
         outReal: *mut c_double,
     ) -> c_int;
-    
+
     pub fn TA_OBV(
         startIdx: c_int,
         endIdx: c_int,
@@ -306,7 +306,7 @@ use crate::*;
         outNBElement: *mut c_int,
         outReal: *mut c_double,
     ) -> c_int;
-    
+
     pub fn TA_MFI(
         startIdx: c_int,
         endIdx: c_int,
@@ -319,7 +319,7 @@ use crate::*;
         outNBElement: *mut c_int,
         outReal: *mut c_double,
     ) -> c_int;
-    
+
     // Other indicators
     pub fn TA_NATR(
         startIdx: c_int,
@@ -332,7 +332,7 @@ use crate::*;
         outNBElement: *mut c_int,
         outReal: *mut c_double,
     ) -> c_int;
-    
+
     pub fn TA_STDDEV(
         startIdx: c_int,
         endIdx: c_int,
@@ -343,7 +343,7 @@ use crate::*;
         outNBElement: *mut c_int,
         outReal: *mut c_double,
     ) -> c_int;
-    
+
     pub fn TA_VAR(
         startIdx: c_int,
         endIdx: c_int,
@@ -354,7 +354,7 @@ use crate::*;
         outNBElement: *mut c_int,
         outReal: *mut c_double,
     ) -> c_int;
-    
+
     pub fn TA_ULTOSC(
         startIdx: c_int,
         endIdx: c_int,
@@ -368,7 +368,7 @@ use crate::*;
         outNBElement: *mut c_int,
         outReal: *mut c_double,
     ) -> c_int;
-    
+
     pub fn TA_BOP(
         startIdx: c_int,
         endIdx: c_int,
@@ -380,7 +380,7 @@ use crate::*;
         outNBElement: *mut c_int,
         outReal: *mut c_double,
     ) -> c_int;
-    
+
 */
 
 // Safe wrapper functions for TA-LIB indicators
@@ -392,7 +392,7 @@ pub unsafe fn talib_sma(
     let size = input.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_SMA(
         0,
         size - 1,
@@ -402,16 +402,16 @@ pub unsafe fn talib_sma(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_SMA failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -423,7 +423,7 @@ pub unsafe fn talib_ema(
     let size = input.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_EMA(
         0,
         size - 1,
@@ -433,16 +433,16 @@ pub unsafe fn talib_ema(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_EMA failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -454,7 +454,7 @@ pub unsafe fn talib_rsi(
     let size = input.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_RSI(
         0,
         size - 1,
@@ -464,16 +464,16 @@ pub unsafe fn talib_rsi(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_RSI failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -489,7 +489,7 @@ pub unsafe fn talib_bbands(
     let size = input.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_BBANDS(
         0,
         size - 1,
@@ -504,18 +504,18 @@ pub unsafe fn talib_bbands(
         output_middle.as_mut_ptr().add(out_beg_idx as usize),
         output_lower.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_BBANDS failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output_upper[i] = f64::NAN;
         output_middle[i] = f64::NAN;
         output_lower[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -531,7 +531,7 @@ pub unsafe fn talib_macd(
     let size = input.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_MACD(
         0,
         size - 1,
@@ -545,18 +545,18 @@ pub unsafe fn talib_macd(
         output_signal.as_mut_ptr().add(out_beg_idx as usize),
         output_hist.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_MACD failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output_macd[i] = f64::NAN;
         output_signal[i] = f64::NAN;
         output_hist[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -570,7 +570,7 @@ pub unsafe fn talib_atr(
     let size = high.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_ATR(
         0,
         size - 1,
@@ -582,16 +582,16 @@ pub unsafe fn talib_atr(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_ATR failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -608,7 +608,7 @@ pub unsafe fn talib_stoch(
     let size = high.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_STOCH(
         0,
         size - 1,
@@ -625,17 +625,17 @@ pub unsafe fn talib_stoch(
         output_k.as_mut_ptr().add(out_beg_idx as usize),
         output_d.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_STOCH failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output_k[i] = f64::NAN;
         output_d[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -650,7 +650,7 @@ pub unsafe fn talib_ad(
     let size = high.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_AD(
         0,
         size - 1,
@@ -662,16 +662,16 @@ pub unsafe fn talib_ad(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_AD failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -688,7 +688,7 @@ pub unsafe fn talib_adosc(
     let size = high.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_ADOSC(
         0,
         size - 1,
@@ -702,16 +702,16 @@ pub unsafe fn talib_adosc(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_ADOSC failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -726,7 +726,7 @@ pub unsafe fn talib_adx(
     let size = high.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_ADX(
         0,
         size - 1,
@@ -738,16 +738,16 @@ pub unsafe fn talib_adx(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_ADX failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -762,7 +762,7 @@ pub unsafe fn talib_adxr(
     let size = high.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_ADXR(
         0,
         size - 1,
@@ -774,16 +774,16 @@ pub unsafe fn talib_adxr(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_ADXR failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -798,7 +798,7 @@ pub unsafe fn talib_apo(
     let size = input.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_APO(
         0,
         size - 1,
@@ -810,16 +810,16 @@ pub unsafe fn talib_apo(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_APO failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -834,7 +834,7 @@ pub unsafe fn talib_aroon(
     let size = high.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_AROON(
         0,
         size - 1,
@@ -846,17 +846,17 @@ pub unsafe fn talib_aroon(
         output_down.as_mut_ptr().add(out_beg_idx as usize),
         output_up.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_AROON failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output_down[i] = f64::NAN;
         output_up[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -870,7 +870,7 @@ pub unsafe fn talib_aroonosc(
     let size = high.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_AROONOSC(
         0,
         size - 1,
@@ -881,16 +881,16 @@ pub unsafe fn talib_aroonosc(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_AROONOSC failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -905,7 +905,7 @@ pub unsafe fn talib_bop(
     let size = high.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_BOP(
         0,
         size - 1,
@@ -917,16 +917,16 @@ pub unsafe fn talib_bop(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_BOP failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -941,7 +941,7 @@ pub unsafe fn talib_cci(
     let size = high.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_CCI(
         0,
         size - 1,
@@ -953,16 +953,16 @@ pub unsafe fn talib_cci(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_CCI failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -975,7 +975,7 @@ pub unsafe fn talib_cmo(
     let size = input.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_CMO(
         0,
         size - 1,
@@ -985,16 +985,16 @@ pub unsafe fn talib_cmo(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_CMO failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -1007,7 +1007,7 @@ pub unsafe fn talib_dema(
     let size = input.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_DEMA(
         0,
         size - 1,
@@ -1017,16 +1017,16 @@ pub unsafe fn talib_dema(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_DEMA failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -1041,7 +1041,7 @@ pub unsafe fn talib_dx(
     let size = high.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_DX(
         0,
         size - 1,
@@ -1053,16 +1053,16 @@ pub unsafe fn talib_dx(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_DX failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -1077,7 +1077,7 @@ pub unsafe fn talib_plus_di(
     let size = high.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_PLUS_DI(
         0,
         size - 1,
@@ -1089,16 +1089,16 @@ pub unsafe fn talib_plus_di(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_PLUS_DI failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -1113,7 +1113,7 @@ pub unsafe fn talib_minus_di(
     let size = high.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_MINUS_DI(
         0,
         size - 1,
@@ -1125,16 +1125,16 @@ pub unsafe fn talib_minus_di(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_MINUS_DI failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -1148,7 +1148,7 @@ pub unsafe fn talib_plus_dm(
     let size = high.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_PLUS_DM(
         0,
         size - 1,
@@ -1159,16 +1159,16 @@ pub unsafe fn talib_plus_dm(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_PLUS_DM failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -1182,7 +1182,7 @@ pub unsafe fn talib_minus_dm(
     let size = high.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_MINUS_DM(
         0,
         size - 1,
@@ -1193,16 +1193,16 @@ pub unsafe fn talib_minus_dm(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_MINUS_DM failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -1215,7 +1215,7 @@ pub unsafe fn talib_kama(
     let size = input.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_KAMA(
         0,
         size - 1,
@@ -1225,16 +1225,16 @@ pub unsafe fn talib_kama(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_KAMA failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -1247,7 +1247,7 @@ pub unsafe fn talib_linearreg(
     let size = input.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_LINEARREG(
         0,
         size - 1,
@@ -1257,16 +1257,16 @@ pub unsafe fn talib_linearreg(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_LINEARREG failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -1279,7 +1279,7 @@ pub unsafe fn talib_medprice(
     let size = high.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_MEDPRICE(
         0,
         size - 1,
@@ -1289,16 +1289,16 @@ pub unsafe fn talib_medprice(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_MEDPRICE failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -1314,7 +1314,7 @@ pub unsafe fn talib_mfi(
     let size = high.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_MFI(
         0,
         size - 1,
@@ -1327,16 +1327,16 @@ pub unsafe fn talib_mfi(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_MFI failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -1349,7 +1349,7 @@ pub unsafe fn talib_midpoint(
     let size = input.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_MIDPOINT(
         0,
         size - 1,
@@ -1359,16 +1359,16 @@ pub unsafe fn talib_midpoint(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_MIDPOINT failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -1382,7 +1382,7 @@ pub unsafe fn talib_midprice(
     let size = high.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_MIDPRICE(
         0,
         size - 1,
@@ -1393,16 +1393,16 @@ pub unsafe fn talib_midprice(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_MIDPRICE failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -1415,7 +1415,7 @@ pub unsafe fn talib_mom(
     let size = input.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_MOM(
         0,
         size - 1,
@@ -1425,16 +1425,16 @@ pub unsafe fn talib_mom(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_MOM failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -1449,7 +1449,7 @@ pub unsafe fn talib_natr(
     let size = high.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_NATR(
         0,
         size - 1,
@@ -1461,16 +1461,16 @@ pub unsafe fn talib_natr(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_NATR failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -1483,7 +1483,7 @@ pub unsafe fn talib_obv(
     let size = input.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_OBV(
         0,
         size - 1,
@@ -1493,16 +1493,16 @@ pub unsafe fn talib_obv(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_OBV failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -1517,7 +1517,7 @@ pub unsafe fn talib_ppo(
     let size = input.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_PPO(
         0,
         size - 1,
@@ -1529,16 +1529,16 @@ pub unsafe fn talib_ppo(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_PPO failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -1551,7 +1551,7 @@ pub unsafe fn talib_roc(
     let size = input.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_ROC(
         0,
         size - 1,
@@ -1561,16 +1561,16 @@ pub unsafe fn talib_roc(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_ROC failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -1583,7 +1583,7 @@ pub unsafe fn talib_rocp(
     let size = input.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_ROCP(
         0,
         size - 1,
@@ -1593,16 +1593,16 @@ pub unsafe fn talib_rocp(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_ROCP failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -1615,7 +1615,7 @@ pub unsafe fn talib_rocr(
     let size = input.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_ROCR(
         0,
         size - 1,
@@ -1625,16 +1625,16 @@ pub unsafe fn talib_rocr(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_ROCR failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -1649,7 +1649,7 @@ pub unsafe fn talib_sar(
     let size = high.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_SAR(
         0,
         size - 1,
@@ -1661,16 +1661,16 @@ pub unsafe fn talib_sar(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_SAR failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -1684,7 +1684,7 @@ pub unsafe fn talib_stddev(
     let size = input.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_STDDEV(
         0,
         size - 1,
@@ -1695,16 +1695,16 @@ pub unsafe fn talib_stddev(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_STDDEV failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -1722,7 +1722,7 @@ pub unsafe fn talib_stochf(
     let size = high.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_STOCHF(
         0,
         size - 1,
@@ -1737,17 +1737,17 @@ pub unsafe fn talib_stochf(
         output_k.as_mut_ptr().add(out_beg_idx as usize),
         output_d.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_STOCHF failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output_k[i] = f64::NAN;
         output_d[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -1764,7 +1764,7 @@ pub unsafe fn talib_stochrsi(
     let size = input.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_STOCHRSI(
         0,
         size - 1,
@@ -1778,17 +1778,17 @@ pub unsafe fn talib_stochrsi(
         output_k.as_mut_ptr().add(out_beg_idx as usize),
         output_d.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_STOCHRSI failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output_k[i] = f64::NAN;
         output_d[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -1801,7 +1801,7 @@ pub unsafe fn talib_tema(
     let size = input.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_TEMA(
         0,
         size - 1,
@@ -1811,16 +1811,16 @@ pub unsafe fn talib_tema(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_TEMA failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -1833,7 +1833,7 @@ pub unsafe fn talib_trima(
     let size = input.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_TRIMA(
         0,
         size - 1,
@@ -1843,16 +1843,16 @@ pub unsafe fn talib_trima(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_TRIMA failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -1865,7 +1865,7 @@ pub unsafe fn talib_trix(
     let size = input.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_TRIX(
         0,
         size - 1,
@@ -1875,16 +1875,16 @@ pub unsafe fn talib_trix(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_TRIX failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -1897,7 +1897,7 @@ pub unsafe fn talib_tsf(
     let size = input.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_TSF(
         0,
         size - 1,
@@ -1907,16 +1907,16 @@ pub unsafe fn talib_tsf(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_TSF failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -1933,7 +1933,7 @@ pub unsafe fn talib_ultosc(
     let size = high.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_ULTOSC(
         0,
         size - 1,
@@ -1947,16 +1947,16 @@ pub unsafe fn talib_ultosc(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_ULTOSC failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -1970,7 +1970,7 @@ pub unsafe fn talib_var(
     let size = input.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_VAR(
         0,
         size - 1,
@@ -1981,16 +1981,16 @@ pub unsafe fn talib_var(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_VAR failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -2004,7 +2004,7 @@ pub unsafe fn talib_wclprice(
     let size = high.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_WCLPRICE(
         0,
         size - 1,
@@ -2015,16 +2015,16 @@ pub unsafe fn talib_wclprice(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_WCLPRICE failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -2039,7 +2039,7 @@ pub unsafe fn talib_willr(
     let size = high.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_WILLR(
         0,
         size - 1,
@@ -2051,16 +2051,16 @@ pub unsafe fn talib_willr(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_WILLR failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -2073,7 +2073,7 @@ pub unsafe fn talib_wma(
     let size = input.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_WMA(
         0,
         size - 1,
@@ -2083,16 +2083,16 @@ pub unsafe fn talib_wma(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_WMA failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -2105,7 +2105,7 @@ pub unsafe fn talib_linearreg_slope(
     let size = input.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_LINEARREG_SLOPE(
         0,
         size - 1,
@@ -2115,16 +2115,16 @@ pub unsafe fn talib_linearreg_slope(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_LINEARREG_SLOPE failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -2137,7 +2137,7 @@ pub unsafe fn talib_linearreg_intercept(
     let size = input.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_LINEARREG_INTERCEPT(
         0,
         size - 1,
@@ -2147,16 +2147,16 @@ pub unsafe fn talib_linearreg_intercept(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_LINEARREG_INTERCEPT failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -2169,7 +2169,7 @@ pub unsafe fn talib_linearreg_angle(
     let size = input.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_LINEARREG_ANGLE(
         0,
         size - 1,
@@ -2179,16 +2179,16 @@ pub unsafe fn talib_linearreg_angle(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_LINEARREG_ANGLE failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -2202,7 +2202,7 @@ pub unsafe fn talib_typprice(
     let size = high.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_TYPPRICE(
         0,
         size - 1,
@@ -2213,16 +2213,16 @@ pub unsafe fn talib_typprice(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_TYPPRICE failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -2237,7 +2237,7 @@ pub unsafe fn talib_avgprice(
     let size = high.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_AVGPRICE(
         0,
         size - 1,
@@ -2249,16 +2249,16 @@ pub unsafe fn talib_avgprice(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_AVGPRICE failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -2272,7 +2272,7 @@ pub unsafe fn talib_trange(
     let size = high.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_TRANGE(
         0,
         size - 1,
@@ -2283,16 +2283,16 @@ pub unsafe fn talib_trange(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_TRANGE failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -2305,7 +2305,7 @@ pub unsafe fn talib_min(
     let size = input.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_MIN(
         0,
         size - 1,
@@ -2315,16 +2315,16 @@ pub unsafe fn talib_min(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_MIN failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -2337,7 +2337,7 @@ pub unsafe fn talib_max(
     let size = input.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_MAX(
         0,
         size - 1,
@@ -2347,16 +2347,16 @@ pub unsafe fn talib_max(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_MAX failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }
 
@@ -2369,7 +2369,7 @@ pub unsafe fn talib_sum(
     let size = input.len() as c_int;
     let mut out_beg_idx: c_int = 0;
     let mut out_nb_element: c_int = 0;
-    
+
     let ret = TA_SUM(
         0,
         size - 1,
@@ -2379,15 +2379,15 @@ pub unsafe fn talib_sum(
         &mut out_nb_element,
         output.as_mut_ptr().add(out_beg_idx as usize),
     );
-    
+
     if ret != TA_RetCode_TA_SUCCESS {
         return Err(format!("TA_SUM failed with code {:?}", ret));
     }
-    
+
     // Fill the beginning with NaN
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
-    
+
     Ok(())
 }

@@ -2098,22 +2098,22 @@ mod tests {
 			.run(&strat, |(high, low, close, period, multiplier, ma_type)| {
 				// Use close as source for testing
 				let source = close.clone();
-				
+
 				let params = KeltnerParams {
 					period: Some(period),
 					multiplier: Some(multiplier),
 					ma_type: Some(ma_type.clone()),
 				};
 				let input = KeltnerInput::from_slice(&high, &low, &close, &source, params.clone());
-				
+
 				let result = keltner_with_kernel(&input, kernel).unwrap();
 				let scalar_result = keltner_with_kernel(&input, Kernel::Scalar).unwrap();
-				
+
 				// Check output lengths
 				prop_assert_eq!(result.upper_band.len(), close.len());
 				prop_assert_eq!(result.middle_band.len(), close.len());
 				prop_assert_eq!(result.lower_band.len(), close.len());
-				
+
 				// Check warmup period (first period-1 values should be NaN)
 				let warmup = period - 1;
 				for i in 0..warmup.min(close.len()) {
@@ -2130,22 +2130,22 @@ mod tests {
 						"Lower band[{}] should be NaN during warmup", i
 					);
 				}
-				
+
 				// Check valid values after warmup
 				for i in warmup..close.len() {
 					let upper = result.upper_band[i];
 					let middle = result.middle_band[i];
 					let lower = result.lower_band[i];
-					
+
 					let scalar_upper = scalar_result.upper_band[i];
 					let scalar_middle = scalar_result.middle_band[i];
 					let scalar_lower = scalar_result.lower_band[i];
-					
+
 					// Skip if any value is NaN
 					if upper.is_nan() || middle.is_nan() || lower.is_nan() {
 						continue;
 					}
-					
+
 					// Property 1: Band relationships must hold
 					prop_assert!(
 						upper >= middle - 1e-10,
@@ -2155,14 +2155,14 @@ mod tests {
 						middle >= lower - 1e-10,
 						"Middle band {} must be >= lower band {} at index {}", middle, lower, i
 					);
-					
+
 					// Property 2: Spread must be positive
 					let spread = upper - lower;
 					prop_assert!(
 						spread >= -1e-10,
 						"Spread {} must be positive at index {}", spread, i
 					);
-					
+
 					// Property 2b: Spread consistency between kernels (validates ATR calculation)
 					if i >= warmup + period {
 						// Compare with scalar result to ensure consistency
@@ -2175,12 +2175,12 @@ mod tests {
 							);
 						}
 					}
-					
+
 					// Property 3: Middle band should be within reasonable price range
 					let window_start = i.saturating_sub(period - 1);
 					let window_high = high[window_start..=i].iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
 					let window_low = low[window_start..=i].iter().fold(f64::INFINITY, |a, &b| a.min(b));
-					
+
 					// Middle band should be within the general price range (with some tolerance for MA calculations)
 					prop_assert!(
 						middle <= window_high * 1.05 + 1.0,
@@ -2190,7 +2190,7 @@ mod tests {
 						middle >= window_low * 0.95 - 1.0,
 						"Middle band {} below window low {} at index {}", middle, window_low, i
 					);
-					
+
 					// Property 4: Kernel consistency check
 					let tolerance = 1e-9;
 					prop_assert!(
@@ -2208,58 +2208,58 @@ mod tests {
 						"Lower band kernel mismatch at {}: {} vs {} (diff: {})",
 						i, lower, scalar_lower, (lower - scalar_lower).abs()
 					);
-					
+
 					// Property 5: Check for poison values
 					#[cfg(debug_assertions)]
 					{
 						let upper_bits = upper.to_bits();
 						let middle_bits = middle.to_bits();
 						let lower_bits = lower.to_bits();
-						
+
 						prop_assert!(
-							upper_bits != 0x11111111_11111111 && 
-							upper_bits != 0x22222222_22222222 && 
+							upper_bits != 0x11111111_11111111 &&
+							upper_bits != 0x22222222_22222222 &&
 							upper_bits != 0x33333333_33333333,
 							"Found poison value in upper band at index {}", i
 						);
 						prop_assert!(
-							middle_bits != 0x11111111_11111111 && 
-							middle_bits != 0x22222222_22222222 && 
+							middle_bits != 0x11111111_11111111 &&
+							middle_bits != 0x22222222_22222222 &&
 							middle_bits != 0x33333333_33333333,
 							"Found poison value in middle band at index {}", i
 						);
 						prop_assert!(
-							lower_bits != 0x11111111_11111111 && 
-							lower_bits != 0x22222222_22222222 && 
+							lower_bits != 0x11111111_11111111 &&
+							lower_bits != 0x22222222_22222222 &&
 							lower_bits != 0x33333333_33333333,
 							"Found poison value in lower band at index {}", i
 						);
 					}
-					
+
 					// Property 6: For truly constant prices (high=low=close), bands should converge
 					// Check if all values in the window are identical
 					let all_same = high[window_start..=i].windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) &&
 					               low[window_start..=i].windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) &&
 					               close[window_start..=i].windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
-					
+
 					// Also check if high == low == close (truly constant price, no spread)
 					let no_spread = high[window_start..=i].iter()
 						.zip(low[window_start..=i].iter())
 						.zip(close[window_start..=i].iter())
 						.all(|((h, l), c)| (h - l).abs() < 1e-10 && (h - c).abs() < 1e-10);
-					
+
 					if all_same && no_spread && i >= warmup + period * 3 {
 						// For truly constant prices with no spread, ATR should eventually become 0
 						// and bands should converge to be very close (extra time for EMA stabilization)
 						let band_spread = upper - lower;
 						prop_assert!(
 							band_spread < 0.01 || band_spread < middle * 0.001,
-							"Bands should converge for constant prices with no spread, but spread is {} at index {} (middle: {})", 
+							"Bands should converge for constant prices with no spread, but spread is {} at index {} (middle: {})",
 							band_spread, i, middle
 						);
 					}
 				}
-				
+
 				Ok(())
 			})
 			.unwrap();

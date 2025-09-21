@@ -1,6 +1,6 @@
 //! # Kurtosis
 //!
-//! Kurtosis is a measure of the "tailedness" of a distribution, computed over a sliding window.  
+//! Kurtosis is a measure of the "tailedness" of a distribution, computed over a sliding window.
 //! This indicator returns the excess kurtosis, using the uncorrected moment-based formula.
 //! Higher kurtosis indicates heavier tails and more outliers.
 //!

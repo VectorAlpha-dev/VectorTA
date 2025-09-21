@@ -1,3 +1,25 @@
 pub mod alma_wrapper;
+pub mod edcf_wrapper;
+pub mod ehlers_kama_wrapper;
+pub mod ehma_wrapper;
+pub mod fwma_wrapper;
+pub mod hwma_wrapper;
+pub mod maaq_wrapper;
+pub mod pwma_wrapper;
+pub mod smma_wrapper;
+pub mod swma_wrapper;
+pub mod trima_wrapper;
+pub mod vwap_wrapper;
 
 pub use alma_wrapper::{CudaAlma, DeviceArrayF32};
+pub use edcf_wrapper::CudaEdcf;
+pub use ehlers_kama_wrapper::CudaEhlersKama;
+pub use ehma_wrapper::CudaEhma;
+pub use fwma_wrapper::CudaFwma;
+pub use hwma_wrapper::CudaHwma;
+pub use maaq_wrapper::CudaMaaq;
+pub use pwma_wrapper::CudaPwma;
+pub use smma_wrapper::CudaSmma;
+pub use swma_wrapper::CudaSwma;
+pub use trima_wrapper::CudaTrima;
+pub use vwap_wrapper::CudaVwap;

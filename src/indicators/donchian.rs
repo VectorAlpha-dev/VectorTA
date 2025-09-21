@@ -1645,7 +1645,7 @@ mod tests {
                         panic!(
 							"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
 							 in {} at row {} col {} (flat index {}) with params: period={}",
-							test, cfg_idx, val, bits, band_name, row, col, idx, 
+							test, cfg_idx, val, bits, band_name, row, col, idx,
 							combo.period.unwrap_or(20)
 						);
                     }

@@ -1950,28 +1950,28 @@ mod tests {
 				for i in warmup..data.len() {
 					let y = line[i];
 					let r = ref_line[i];
-					
+
 					if !y.is_finite() || !r.is_finite() {
 						prop_assert!(y.to_bits() == r.to_bits(), "NaN/Inf mismatch at idx {i}: {y} vs {r}");
 						continue;
 					}
-					
+
 					let ulp_diff = y.to_bits().abs_diff(r.to_bits());
 					prop_assert!(
 						(y - r).abs() <= 1e-9 || ulp_diff <= 4,
 						"KST line kernel mismatch idx {i}: {y} vs {r} (ULP={ulp_diff})"
 					);
 				}
-				
+
 				for i in signal_warmup..data.len() {
 					let y = signal[i];
 					let r = ref_signal[i];
-					
+
 					if !y.is_finite() || !r.is_finite() {
 						prop_assert!(y.to_bits() == r.to_bits(), "Signal NaN/Inf mismatch at idx {i}: {y} vs {r}");
 						continue;
 					}
-					
+
 					let ulp_diff = y.to_bits().abs_diff(r.to_bits());
 					prop_assert!(
 						(y - r).abs() <= 1e-9 || ulp_diff <= 4,
@@ -2028,18 +2028,18 @@ mod tests {
 						.map(|w| (w[1] - w[0]).abs())
 						.filter(|x| x.is_finite())
 						.collect();
-					
+
 					let signal_diffs: Vec<f64> = signal[stable_start..data.len()-1]
 						.windows(2)
 						.map(|w| (w[1] - w[0]).abs())
 						.filter(|x| x.is_finite())
 						.collect();
-					
+
 					if line_diffs.len() > 15 && signal_diffs.len() > 15 {
 						// Check mean variance for smoothness
 						let line_variance: f64 = line_diffs.iter().sum::<f64>() / line_diffs.len() as f64;
 						let signal_variance: f64 = signal_diffs.iter().sum::<f64>() / signal_diffs.len() as f64;
-						
+
 						// Signal should generally be smoother than the line
 						// But with edge case data (plateaus, jumps), allow more tolerance
 						if line_variance > 1e-10 && signal_variance > 1e-10 {
@@ -2065,7 +2065,7 @@ mod tests {
 				};
 				// KST max is approximately 10 * max_roc (sum of weights 1+2+3+4)
 				let kst_bound = max_roc * 10.0;
-				
+
 				for i in warmup..data.len() {
 					if line[i].is_finite() {
 						prop_assert!(
@@ -2112,10 +2112,10 @@ mod tests {
 							.filter(|x| x.is_finite())
 							.cloned()
 							.collect();
-						
+
 						if !valid_values.is_empty() && signal[i].is_finite() {
 							let line_avg = valid_values.iter().sum::<f64>() / valid_values.len() as f64;
-							
+
 							// Tighter tolerance: 0.5% for large values, absolute tolerance for small values
 							let tolerance = if line_avg.abs() > 100.0 {
 								0.005  // 0.5% for large values
@@ -2124,9 +2124,9 @@ mod tests {
 							} else {
 								0.01   // 1% for small values (original)
 							};
-							
+
 							prop_assert!(
-								(signal[i] - line_avg).abs() <= 1e-6 || 
+								(signal[i] - line_avg).abs() <= 1e-6 ||
 								(signal[i] - line_avg).abs() / line_avg.abs().max(1.0) <= tolerance,
 								"Signal deviates from KST trend at idx {i}: signal={}, line_avg={}, tolerance={}%",
 								signal[i], line_avg, tolerance * 100.0

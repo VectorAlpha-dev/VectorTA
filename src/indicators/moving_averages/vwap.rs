@@ -30,6 +30,12 @@
 //!   - Consider SIMD for batch processing multiple anchors simultaneously
 //!   - Optimize timestamp grouping calculations with vector operations
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::CudaVwap;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
@@ -643,7 +649,7 @@ impl VwapBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid_vwap(r: &VwapBatchRange) -> Vec<VwapParams> {
+pub(crate) fn expand_grid_vwap(r: &VwapBatchRange) -> Vec<VwapParams> {
     if r.anchor.2 == 0 || r.anchor.0 == r.anchor.1 {
         return vec![VwapParams {
             anchor: Some(r.anchor.0.clone()),
@@ -682,7 +688,12 @@ fn anchor_to_num_and_unit(anchor: &str) -> Option<(u32, char)> {
 }
 
 #[inline]
-fn first_valid_vwap_index(timestamps: &[i64], volumes: &[f64], count: u32, unit: char) -> usize {
+pub(crate) fn first_valid_vwap_index(
+    timestamps: &[i64],
+    volumes: &[f64],
+    count: u32,
+    unit: char,
+) -> usize {
     if timestamps.is_empty() {
         return 0;
     }
@@ -895,7 +906,7 @@ fn vwap_batch_inner_into(
 }
 
 #[inline]
-fn parse_anchor(anchor: &str) -> Result<(u32, char), Box<dyn std::error::Error>> {
+pub(crate) fn parse_anchor(anchor: &str) -> Result<(u32, char), Box<dyn std::error::Error>> {
     let mut idx = 0;
     for (pos, ch) in anchor.char_indices() {
         if !ch.is_ascii_digit() {
@@ -927,7 +938,7 @@ fn parse_anchor(anchor: &str) -> Result<(u32, char), Box<dyn std::error::Error>>
 }
 
 #[inline]
-fn floor_to_month(ts_ms: i64, count: u32) -> Result<i64, Box<dyn Error>> {
+pub(crate) fn floor_to_month(ts_ms: i64, count: u32) -> Result<i64, Box<dyn Error>> {
     // Convert timestamp to real calendar month
     let seconds = ts_ms / 1000;
     let nanos = ((ts_ms % 1000) * 1_000_000) as u32;
@@ -1910,6 +1921,47 @@ pub fn vwap_batch_py<'py>(
     dict.set_item("anchors", anchors_list)?;
 
     Ok(dict)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "vwap_cuda_batch_dev")]
+#[pyo3(signature = (timestamps, volumes, prices, anchor_range, device_id=0))]
+pub fn vwap_cuda_batch_dev_py(
+    py: Python<'_>,
+    timestamps: numpy::PyReadonlyArray1<'_, i64>,
+    volumes: numpy::PyReadonlyArray1<'_, f64>,
+    prices: numpy::PyReadonlyArray1<'_, f64>,
+    anchor_range: (String, String, u32),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use numpy::PyArrayMethods;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let ts_slice = timestamps.as_slice()?;
+    let vol_slice = volumes.as_slice()?;
+    let price_slice = prices.as_slice()?;
+
+    if ts_slice.len() != vol_slice.len() || vol_slice.len() != price_slice.len() {
+        return Err(PyValueError::new_err(
+            "timestamps, volumes, and prices must share the same length",
+        ));
+    }
+
+    let (start, end, step) = anchor_range;
+    let sweep = VwapBatchRange {
+        anchor: (start, end, step),
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaVwap::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.vwap_batch_dev(ts_slice, vol_slice, price_slice, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "wasm")]

@@ -85,7 +85,7 @@ impl ReportGenerator {
 
         // Group results by indicator and data size
         let mut grouped: HashMap<(String, String), HashMap<String, BenchmarkResult>> = HashMap::new();
-        
+
         for result in &self.results {
             let key = (result.indicator.clone(), result.data_size.clone());
             grouped.entry(key)
@@ -109,12 +109,12 @@ impl ReportGenerator {
                 let rust_ffi_time = rust_ffi_result.map(|r| r.median_time_ms).unwrap_or(rust_time);
                 let tulip_time = tulip.median_time_ms;
                 let talib_time = talib_result.map(|r| r.median_time_ms);
-                
+
                 let ratio = rust_time / tulip_time;
                 let ffi_overhead = ((rust_ffi_time / rust_time) - 1.0) * 100.0;
-                
-                let ratio_class = if ratio < 0.8 { "fast" } 
-                                 else if ratio < 1.2 { "moderate" } 
+
+                let ratio_class = if ratio < 0.8 { "fast" }
+                                 else if ratio < 1.2 { "moderate" }
                                  else { "slow" };
 
                 html.push_str(&format!(
@@ -125,12 +125,12 @@ impl ReportGenerator {
                 ));
             }
         }
-        
+
         html.push_str("</table>\n");
 
         // Add charts
         html.push_str("<h2>Performance Charts</h2>\n");
-        
+
         // Generate and embed charts (only when html-reports feature is enabled)
         #[cfg(feature = "html-reports")]
         {
@@ -140,7 +140,7 @@ impl ReportGenerator {
 
         // Add summary statistics
         html.push_str("<h2>Summary</h2>\n<ul>\n");
-        
+
         let rust_wins = grouped.iter()
             .filter(|(_, libs)| {
                 if let (Some(rust), Some(tulip)) = (libs.get("rust"), libs.get("tulip")) {
@@ -150,13 +150,13 @@ impl ReportGenerator {
                 }
             })
             .count();
-        
+
         let total_comparisons = grouped.len();
         let win_percentage = (rust_wins as f64 / total_comparisons as f64) * 100.0;
-        
-        html.push_str(&format!("<li>Rust outperforms Tulip in {}/{} cases ({:.1}%)</li>\n", 
+
+        html.push_str(&format!("<li>Rust outperforms Tulip in {}/{} cases ({:.1}%)</li>\n",
                                rust_wins, total_comparisons, win_percentage));
-        
+
         // Calculate average speedup
         let speedups: Vec<f64> = grouped.iter()
             .filter_map(|(_, libs)| {
@@ -167,7 +167,7 @@ impl ReportGenerator {
                 }
             })
             .collect();
-        
+
         if !speedups.is_empty() {
             let avg_speedup = speedups.iter().sum::<f64>() / speedups.len() as f64;
             html.push_str(&format!("<li>Average speedup vs Tulip: {:.2}x</li>\n", avg_speedup));
@@ -177,7 +177,7 @@ impl ReportGenerator {
 
         let mut file = File::create(output_path)?;
         file.write_all(html.as_bytes())?;
-        
+
         Ok(())
     }
 
@@ -215,7 +215,7 @@ impl ReportGenerator {
 
     pub fn generate_csv_report(&self, output_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         let mut wtr = csv::Writer::from_path(output_path)?;
-        
+
         wtr.write_record(&[
             "indicator", "data_size", "library", "mean_ms", "median_ms", "throughput_mb_s"
         ])?;

@@ -27,6 +27,11 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::{
+    cuda::{cuda_available, moving_averages::CudaHwma},
+    indicators::moving_averages::alma::DeviceArrayF32Py,
+};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -771,7 +776,7 @@ impl HwmaBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &HwmaBatchRange) -> Vec<HwmaParams> {
+pub fn expand_grid(r: &HwmaBatchRange) -> Vec<HwmaParams> {
     fn axis((start, end, step): (f64, f64, f64)) -> Vec<f64> {
         if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
             return vec![start];
@@ -1074,7 +1079,7 @@ pub fn expand_grid_hwma(r: &HwmaBatchRange) -> Vec<HwmaParams> {
 
 // Python bindings
 #[cfg(feature = "python")]
-use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
@@ -1198,6 +1203,73 @@ pub fn hwma_batch_py<'py>(
     )?;
 
     Ok(dict)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "hwma_cuda_batch_dev")]
+#[pyo3(signature = (data, na_range, nb_range, nc_range, device_id=0))]
+pub fn hwma_cuda_batch_dev_py(
+    py: Python<'_>,
+    data: PyReadonlyArray1<'_, f64>,
+    na_range: (f64, f64, f64),
+    nb_range: (f64, f64, f64),
+    nc_range: (f64, f64, f64),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let slice_in = data.as_slice()?;
+    let sweep = HwmaBatchRange {
+        na: na_range,
+        nb: nb_range,
+        nc: nc_range,
+    };
+    let data_f32: Vec<f32> = slice_in.iter().map(|&v| v as f32).collect();
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaHwma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.hwma_batch_dev(&data_f32, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "hwma_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, na, nb, nc, device_id=0))]
+pub fn hwma_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm_f32: PyReadonlyArray2<'_, f32>,
+    na: f64,
+    nb: f64,
+    nc: f64,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use numpy::PyUntypedArrayMethods;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let flat_in = data_tm_f32.as_slice()?;
+    let rows = data_tm_f32.shape()[0];
+    let cols = data_tm_f32.shape()[1];
+    let params = HwmaParams {
+        na: Some(na),
+        nb: Some(nb),
+        nc: Some(nc),
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaHwma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.hwma_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "python")]

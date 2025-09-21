@@ -16,7 +16,7 @@
 //!
 //! ## Developer Status
 //! - **AVX2 kernel**: STUB - Falls back to scalar implementation
-//! - **AVX512 kernel**: STUB - Falls back to scalar implementation  
+//! - **AVX512 kernel**: STUB - Falls back to scalar implementation
 //! - **Streaming update**: O(n) - Iterates through both buffers for each update
 //! - **Optimization needed**: Implement SIMD kernels for better performance
 //! - **Streaming improvement**: Could be optimized to O(1) with running sums

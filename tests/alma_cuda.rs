@@ -6,11 +6,11 @@ use my_project::indicators::moving_averages::alma::{
 use my_project::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
+use cust::memory::CopyDestination;
+#[cfg(feature = "cuda")]
 use my_project::cuda::cuda_available;
 #[cfg(feature = "cuda")]
 use my_project::cuda::moving_averages::CudaAlma;
-#[cfg(feature = "cuda")]
-use cust::memory::CopyDestination;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -142,12 +142,7 @@ fn alma_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
     let cuda = CudaAlma::new(0).expect("CudaAlma::new");
     let data_tm_f32: Vec<f32> = data_tm.iter().map(|&v| v as f32).collect();
     let gpu_handle = cuda
-        .alma_multi_series_one_param_time_major_dev(
-            &data_tm_f32,
-            num_series,
-            series_len,
-            &params,
-        )
+        .alma_multi_series_one_param_time_major_dev(&data_tm_f32, num_series, series_len, &params)
         .expect("cuda alma_multi_series_one_param_time_major_dev");
 
     assert_eq!(gpu_handle.rows, series_len);

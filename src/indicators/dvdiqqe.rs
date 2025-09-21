@@ -2107,7 +2107,7 @@ impl DvdiqqeStreamPy {
 #[pyo3(name = "dvdiqqe", signature = (
     open,
     high,
-    low, 
+    low,
     close,
     volume=None,
     period=None,

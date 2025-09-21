@@ -40,15 +40,15 @@ impl CudaAlma {
     pub fn new(device_id: usize) -> Result<Self, CudaAlmaError> {
         let device = CudaDevice::new(device_id)
             .map_err(|e| CudaAlmaError::CudaError(e.to_string()))?;
-        
+
         // TODO: Implement proper PTX loading once we understand the cudarc 0.12 API better
         // For now, this is a placeholder implementation
-        
+
         Ok(Self {
             device,
         })
     }
-    
+
     /// Process batch ALMA calculations on GPU
     pub fn alma_batch(&self,
         _data: &[f64],
@@ -65,17 +65,17 @@ fn compute_weights_cpu(period: usize, offset: f64, sigma: f64) -> (Vec<f64>, f64
     let m = offset * (period - 1) as f64;
     let s = period as f64 / sigma;
     let s2 = 2.0 * s * s;
-    
+
     let mut weights = Vec::with_capacity(period);
     let mut norm = 0.0;
-    
+
     for i in 0..period {
         let diff = i as f64 - m;
         let w = (-(diff * diff) / s2).exp();
         weights.push(w);
         norm += w;
     }
-    
+
     (weights, 1.0 / norm)
 }
 
@@ -87,7 +87,7 @@ fn expand_grid(r: &AlmaBatchRange) -> Vec<AlmaParams> {
         }
         (start..=end).step_by(step).collect()
     }
-    
+
     fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
         if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
             return vec![start];
@@ -100,11 +100,11 @@ fn expand_grid(r: &AlmaBatchRange) -> Vec<AlmaParams> {
         }
         v
     }
-    
+
     let periods = axis_usize(r.period);
     let offsets = axis_f64(r.offset);
     let sigmas = axis_f64(r.sigma);
-    
+
     let mut out = Vec::with_capacity(periods.len() * offsets.len() * sigmas.len());
     for &p in &periods {
         for &o in &offsets {

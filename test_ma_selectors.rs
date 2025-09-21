@@ -6,14 +6,14 @@ fn main() {
     // Test data
     let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
     let period = 3;
-    
+
     // Test new MAs in batch selector
     println!("Testing batch selector (ma):");
-    
+
     let test_mas = vec![
         "dma", "ehlers_ecema", "ehlers_kama", "ehma", "nama", "sama", "vama"
     ];
-    
+
     for ma_type in test_mas {
         match ma(ma_type, MaData::Slice(&data), period) {
             Ok(result) => {
@@ -24,14 +24,14 @@ fn main() {
             }
         }
     }
-    
+
     // Test new MAs in streaming selector
     println!("\nTesting streaming selector (ma_stream):");
-    
+
     let test_stream_mas = vec![
         "dma", "ehlers_ecema", "ehlers_kama", "ehma", "nama", "sama", "vama", "volatility_adjusted_ma"
     ];
-    
+
     for ma_type in test_stream_mas {
         match ma_stream(ma_type, period) {
             Ok(mut stream) => {
@@ -47,6 +47,6 @@ fn main() {
             }
         }
     }
-    
+
     println!("\n✅ Test complete!");
 }

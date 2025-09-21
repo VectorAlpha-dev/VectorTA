@@ -2824,7 +2824,7 @@ mod tests {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) in MACD at index {} \
 						 with params: fast={}, slow={}, signal={}, fast_ma={}, slow_ma={}, signal_ma={} (param set {})",
-						test_name, val, bits, i, 
+						test_name, val, bits, i,
 						params.fast_period.unwrap_or(12),
 						params.slow_period.unwrap_or(26),
 						params.signal_period.unwrap_or(9),

@@ -9,7 +9,7 @@ pub fn cuda_available() -> bool {
     if let Ok(count) = CudaDevice::count() {
         return count > 0;
     }
-    
+
     // If that fails, try creating a device directly
     // This works better in WSL2 environments
     panic::catch_unwind(|| {

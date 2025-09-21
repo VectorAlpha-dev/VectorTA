@@ -1913,7 +1913,7 @@ mod tests {
                         panic!(
 							"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
 							 in {} with params: order={} (param set {})",
-							test_name, val, bits, i, array_name, 
+							test_name, val, bits, i, array_name,
 							params.order.unwrap_or(3), param_idx
 						);
                     }

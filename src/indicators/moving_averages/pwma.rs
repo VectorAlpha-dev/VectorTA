@@ -19,6 +19,12 @@
 //! - **Memory optimization**: ✅ Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix) for output vectors
 //! - **Note**: Pascal weights are precomputed and normalized, suitable for SIMD vectorization
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::CudaPwma;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -661,7 +667,7 @@ impl PwmaBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid_pwma(r: &PwmaBatchRange) -> Vec<PwmaParams> {
+pub fn expand_grid(r: &PwmaBatchRange) -> Vec<PwmaParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
         if step == 0 || start == end {
             return vec![start];
@@ -726,7 +732,7 @@ fn pwma_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<PwmaBatchOutput, PwmaError> {
-    let combos = expand_grid_pwma(sweep);
+    let combos = expand_grid(sweep);
     if combos.is_empty() {
         return Err(PwmaError::InvalidPeriod {
             period: 0,
@@ -827,7 +833,7 @@ fn pwma_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<PwmaParams>, PwmaError> {
-    let combos = expand_grid_pwma(sweep);
+    let combos = expand_grid(sweep);
     if combos.is_empty() {
         return Err(PwmaError::InvalidPeriod {
             period: 0,
@@ -1792,7 +1798,7 @@ pub fn pwma_batch_py<'py>(
         period: period_range,
     };
 
-    let combos = expand_grid_pwma(&sweep);
+    let combos = expand_grid(&sweep);
     let rows = combos.len();
     let cols = slice_in.len();
 
@@ -1827,6 +1833,67 @@ pub fn pwma_batch_py<'py>(
     )?;
 
     Ok(dict)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "pwma_cuda_batch_dev")]
+#[pyo3(signature = (data, period_range, device_id=0))]
+pub fn pwma_cuda_batch_dev_py(
+    py: Python<'_>,
+    data: PyReadonlyArray1<'_, f64>,
+    period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use numpy::PyArrayMethods;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let slice_in = data.as_slice()?;
+    let sweep = PwmaBatchRange {
+        period: period_range,
+    };
+    let data_f32: Vec<f32> = slice_in.iter().map(|&v| v as f32).collect();
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaPwma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.pwma_batch_dev(&data_f32, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "pwma_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, period, device_id=0))]
+pub fn pwma_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    period: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use numpy::PyUntypedArrayMethods;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let flat_in = data_tm_f32.as_slice()?;
+    let rows = data_tm_f32.shape()[0];
+    let cols = data_tm_f32.shape()[1];
+    let params = PwmaParams {
+        period: Some(period),
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaPwma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.pwma_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "wasm")]
@@ -1875,7 +1942,7 @@ pub fn pwma_batch_metadata_js(
         period: (period_start, period_end, period_step),
     };
 
-    let combos = expand_grid_pwma(&sweep);
+    let combos = expand_grid(&sweep);
     let metadata: Vec<f64> = combos
         .iter()
         .map(|combo| combo.period.unwrap() as f64)
@@ -1896,7 +1963,7 @@ pub fn pwma_batch_rows_cols_js(
         period: (period_start, period_end, period_step),
     };
 
-    let combos = expand_grid_pwma(&sweep);
+    let combos = expand_grid(&sweep);
     let rows = combos.len();
     let cols = data_len;
 
@@ -1991,7 +2058,7 @@ pub fn pwma_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-        let combos = expand_grid_pwma(&sweep);
+        let combos = expand_grid(&sweep);
         let rows = combos.len();
         let cols = len;
 

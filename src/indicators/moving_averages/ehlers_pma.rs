@@ -6,7 +6,7 @@
 //! ## Algorithm
 //! The indicator computes two weighted moving averages (WMAs) with fixed weights:
 //! 1. First WMA: 7-period weighted average with weights [7,6,5,4,3,2,1]/28
-//! 2. Second WMA: Same weighted average applied to the first WMA  
+//! 2. Second WMA: Same weighted average applied to the first WMA
 //! 3. Predict: 2 × WMA1 - WMA2 (extrapolation)
 //! 4. Trigger: 4-period weighted average of Predict with weights [4,3,2,1]/10
 //!
@@ -214,7 +214,7 @@ pub fn ehlers_pma(input: &EhlersPmaInput) -> Result<EhlersPmaOutput, EhlersPmaEr
 /// or when specific performance characteristics are required.
 ///
 /// # Arguments
-/// * `input` - Input data containing price series and parameters  
+/// * `input` - Input data containing price series and parameters
 /// * `kernel` - Explicit kernel selection (Scalar, AVX2, AVX512, or Auto)
 ///
 /// # Returns
