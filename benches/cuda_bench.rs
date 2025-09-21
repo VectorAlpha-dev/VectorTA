@@ -77,8 +77,38 @@ fn run_registered_benches(c: &mut Criterion) {
         return;
     }
 
+    // Optional: make kernel launches synchronous for easier host-side timing
+    // If the user has set CUDA_LAUNCH_BLOCKING externally, respect it. Otherwise,
+    // leave it unset; benches already synchronize after each launch.
+    // std::env::set_var("CUDA_LAUNCH_BLOCKING", "1");
+
+    // Helper: active warm-up to stabilize clocks (GPU boost) and caches.
+    // Default 1500 ms; overridable via CUDA_BENCH_WARMUP_MS.
+    fn active_warmup<S: cuda::CudaBenchState + ?Sized>(state: &mut S) {
+        let warm_ms: u64 = std::env::var("CUDA_BENCH_WARMUP_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(1500);
+        if warm_ms == 0 { return; }
+        let t0 = Instant::now();
+        while t0.elapsed().as_millis() < warm_ms as u128 {
+            state.launch();
+        }
+    }
+
     for scen in collect_registered_profiles() {
         let mut group = c.benchmark_group(scen.group);
+        // Group-level timing knobs (overridable via env for experimentation)
+        let g_warm_ms: u64 = std::env::var("CUDA_BENCH_GROUP_WARMUP_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(300);
+        let g_meas_ms: u64 = std::env::var("CUDA_BENCH_GROUP_MEASURE_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(1200);
+        group.warm_up_time(Duration::from_millis(g_warm_ms));
+        group.measurement_time(Duration::from_millis(g_meas_ms));
         if let Some(n) = scen.sample_size {
             let n = n.max(10);
             group.sample_size(n);
@@ -99,8 +129,8 @@ fn run_registered_benches(c: &mut Criterion) {
         }
         let prep = scen.prep;
         let mut state = prep();
-        // Pre-warm once to avoid measuring JIT/first-launch overhead
-        state.launch();
+        // Pre-warm: run for a short, configurable time to stabilize clocks.
+        active_warmup(&mut *state);
         let inner = scen.inner_iters.unwrap_or(1);
         if inner > 1 {
             // Normalize to per-launch timing using iter_custom (divide elapsed by `inner`).
