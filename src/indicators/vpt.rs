@@ -666,12 +666,18 @@ pub unsafe fn vpt_row_scalar(price: &[f64], volume: &[f64], out: &mut [f64]) {
 #[inline(always)]
 pub unsafe fn vpt_row_scalar_from(price: &[f64], volume: &[f64], start_i: usize, out: &mut [f64]) {
     let n = price.len();
-    // seed = VPT value at index (start_i - 1); not written to out
-    let mut prev_vpt_val = if start_i >= 2 {
+    if start_i >= n {
+        return;
+    }
+
+    assert!(start_i > 0, "vpt_row_scalar_from requires start_i >= 1");
+
+    // Seed with VPT value at index (start_i - 1); not written to out.
+    let mut prev = if start_i >= 2 {
         let k = start_i - 1;
-        let p0 = price[k - 1];
-        let p1 = price[k];
-        let v1 = volume[k];
+        let p0 = *price.get_unchecked(k - 1);
+        let p1 = *price.get_unchecked(k);
+        let v1 = *volume.get_unchecked(k);
         if p0.is_nan() || p0 == 0.0 || p1.is_nan() || v1.is_nan() {
             f64::NAN
         } else {
@@ -681,21 +687,32 @@ pub unsafe fn vpt_row_scalar_from(price: &[f64], volume: &[f64], start_i: usize,
         0.0
     };
 
-    for i in start_i..n {
-        let p0 = price[i - 1];
-        let p1 = price[i];
-        let v1 = volume[i];
+    // Tight loop with unchecked indexing to remove bounds checks.
+    let p_ptr = price.as_ptr();
+    let v_ptr = volume.as_ptr();
+    let o_ptr = out.as_mut_ptr();
+
+    let mut i = start_i;
+    while i < n {
+        let p0 = *p_ptr.add(i - 1);
+        let p1 = *p_ptr.add(i);
+        let v1 = *v_ptr.add(i);
+
         let cur = if p0.is_nan() || p0 == 0.0 || p1.is_nan() || v1.is_nan() {
             f64::NAN
         } else {
             v1 * ((p1 - p0) / p0)
         };
-        out[i] = if cur.is_nan() || prev_vpt_val.is_nan() {
+
+        let val = if cur.is_nan() || prev.is_nan() {
             f64::NAN
         } else {
-            cur + prev_vpt_val
+            cur + prev
         };
-        prev_vpt_val = out[i];
+
+        *o_ptr.add(i) = val;
+        prev = val;
+        i += 1;
     }
 }
 

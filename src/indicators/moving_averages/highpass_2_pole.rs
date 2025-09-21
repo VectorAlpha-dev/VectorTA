@@ -35,10 +35,16 @@ use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::{cuda_available, moving_averages::CudaHighPass2};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use numpy::{PyReadonlyArray1, PyReadonlyArray2};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
@@ -1870,6 +1876,75 @@ pub fn highpass_2_pole_batch_py<'py>(
     )?;
 
     Ok(dict)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "highpass_2_pole_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, period_range=(48, 48, 0), k_range=(0.707, 0.707, 0.0), device_id=0))]
+pub fn highpass_2_pole_cuda_batch_dev_py(
+    py: Python<'_>,
+    data_f32: PyReadonlyArray1<'_, f32>,
+    period_range: (usize, usize, usize),
+    k_range: (f64, f64, f64),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let slice_in = data_f32.as_slice()?;
+    let sweep = HighPass2BatchRange {
+        period: period_range,
+        k: k_range,
+    };
+
+    let inner = py.allow_threads(|| -> PyResult<_> {
+        let cuda =
+            CudaHighPass2::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.highpass2_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "highpass_2_pole_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, period, k, device_id=0))]
+pub fn highpass_2_pole_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm_f32: PyReadonlyArray2<'_, f32>,
+    period: usize,
+    k: f64,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    if period < 2 {
+        return Err(PyValueError::new_err("period must be >= 2"));
+    }
+    if !(k > 0.0) || !k.is_finite() {
+        return Err(PyValueError::new_err("k must be positive and finite"));
+    }
+
+    let flat = data_tm_f32.as_slice()?;
+    let shape = data_tm_f32.shape();
+    let series_len = shape[0];
+    let num_series = shape[1];
+    let params = HighPass2Params {
+        period: Some(period),
+        k: Some(k),
+    };
+
+    let inner = py.allow_threads(|| -> PyResult<_> {
+        let cuda =
+            CudaHighPass2::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.highpass2_many_series_one_param_time_major_dev(flat, num_series, series_len, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "python")]

@@ -17,10 +17,14 @@
 //! - **Memory optimization**: GOOD - Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix)
 //! - **Overall status**: WELL-OPTIMIZED - Algorithm is inherently sequential, SIMD not applicable
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::{cuda_available, moving_averages::CudaMwdx};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
-use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
@@ -1561,6 +1565,66 @@ pub fn mwdx_batch_py<'py>(
     )?;
 
     Ok(dict)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "mwdx_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, factor_range=(0.2, 0.2, 0.0), device_id=0))]
+pub fn mwdx_cuda_batch_dev_py(
+    py: Python<'_>,
+    data_f32: PyReadonlyArray1<'_, f32>,
+    factor_range: (f64, f64, f64),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let slice_in = data_f32.as_slice()?;
+    let sweep = MwdxBatchRange {
+        factor: factor_range,
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaMwdx::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.mwdx_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "mwdx_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, factor, device_id=0))]
+pub fn mwdx_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm_f32: PyReadonlyArray2<'_, f32>,
+    factor: f64,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let flat = data_tm_f32.as_slice()?;
+    let shape = data_tm_f32.shape();
+    if shape.len() != 2 {
+        return Err(PyValueError::new_err("expected a 2D array"));
+    }
+    let series_len = shape[0];
+    let num_series = shape[1];
+    let params = MwdxParams {
+        factor: Some(factor),
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaMwdx::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.mwdx_many_series_one_param_time_major_dev(flat, num_series, series_len, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "wasm")]

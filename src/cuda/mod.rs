@@ -6,6 +6,8 @@
 #[cfg(feature = "cuda")]
 pub mod moving_averages;
 #[cfg(feature = "cuda")]
+pub mod oscillators;
+#[cfg(feature = "cuda")]
 pub mod wto_wrapper;
 
 #[cfg(feature = "cuda")]
