@@ -17,6 +17,10 @@
 //! - **Batch Support**: ✓ Full parallel batch implementation (though no parameters to sweep)
 //! - **TODO**: Implement actual AVX2/AVX512 SIMD kernels for vectorized arithmetic
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::{cuda_available, CudaWclprice};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
@@ -279,19 +283,19 @@ pub fn wclprice_scalar(
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub fn wclprice_avx512(
+pub unsafe fn wclprice_avx2(
     high: &[f64],
     low: &[f64],
     close: &[f64],
     first_valid: usize,
     out: &mut [f64],
 ) {
-    unsafe { wclprice_avx512_short(high, low, close, first_valid, out) }
+    wclprice_scalar(high, low, close, first_valid, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub fn wclprice_avx2(
+pub unsafe fn wclprice_avx512(
     high: &[f64],
     low: &[f64],
     close: &[f64],
@@ -345,7 +349,7 @@ pub fn wclprice_row_avx2(
     first_valid: usize,
     out: &mut [f64],
 ) {
-    wclprice_avx2(high, low, close, first_valid, out)
+    unsafe { wclprice_avx2(high, low, close, first_valid, out) }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -357,7 +361,7 @@ pub fn wclprice_row_avx512(
     first_valid: usize,
     out: &mut [f64],
 ) {
-    wclprice_avx512(high, low, close, first_valid, out)
+    unsafe { wclprice_avx512(high, low, close, first_valid, out) }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -689,6 +693,34 @@ pub fn wclprice_batch_py<'py>(
     dict.set_item("offsets", vec![0.0f64].into_pyarray(py))?;
     dict.set_item("sigmas", vec![0.0f64].into_pyarray(py))?;
     Ok(dict)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "wclprice_cuda_dev")]
+#[pyo3(signature = (high, low, close, device_id=0))]
+pub fn wclprice_cuda_dev_py(
+    py: Python<'_>,
+    high: numpy::PyReadonlyArray1<'_, f32>,
+    low: numpy::PyReadonlyArray1<'_, f32>,
+    close: numpy::PyReadonlyArray1<'_, f32>,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let hs = high.as_slice()?;
+    let ls = low.as_slice()?;
+    let cs = close.as_slice()?;
+
+    let inner = py.allow_threads(|| {
+        let cuda =
+            CudaWclprice::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.wclprice_dev(hs, ls, cs)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "wasm")]

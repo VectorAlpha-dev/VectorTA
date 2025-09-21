@@ -21,6 +21,13 @@
 //! - **Note**: Sequential nature of JMA calculations limits SIMD benefits, but implementations leverage
 //!   instruction-level parallelism through loop unrolling
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::CudaJma;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -1947,8 +1954,10 @@ mod tests {
 // Python bindings
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use numpy::PyUntypedArrayMethods;
 #[cfg(feature = "python")]
-use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
@@ -2071,6 +2080,74 @@ pub fn jma_batch_py<'py>(
     )?;
 
     Ok(dict)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "jma_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, period_range, phase_range=(50.0, 50.0, 0.0), power_range=(2, 2, 0), device_id=0))]
+pub fn jma_cuda_batch_dev_py(
+    py: Python<'_>,
+    data_f32: PyReadonlyArray1<'_, f32>,
+    period_range: (usize, usize, usize),
+    phase_range: (f64, f64, f64),
+    power_range: (u32, u32, u32),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let slice_in = data_f32.as_slice()?;
+    let sweep = JmaBatchRange {
+        period: period_range,
+        phase: phase_range,
+        power: power_range,
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaJma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.jma_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "jma_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (prices_tm_f32, period, phase=50.0, power=2, device_id=0))]
+pub fn jma_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    prices_tm_f32: PyReadonlyArray2<'_, f32>,
+    period: usize,
+    phase: f64,
+    power: u32,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let shape = prices_tm_f32.shape();
+    if shape.len() != 2 {
+        return Err(PyValueError::new_err("prices matrix must be 2-dimensional"));
+    }
+    let rows = shape[0];
+    let cols = shape[1];
+    let prices_flat = prices_tm_f32.as_slice()?;
+    let params = JmaParams {
+        period: Some(period),
+        phase: Some(phase),
+        power: Some(power),
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaJma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.jma_many_series_one_param_time_major_dev(prices_flat, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "python")]

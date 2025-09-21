@@ -31,8 +31,16 @@
 //!   - Consider incremental updates for O(1) streaming performance
 //!   - Optimize gain search algorithm with SIMD
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::CudaDma;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use numpy::PyUntypedArrayMethods;
 #[cfg(feature = "python")]
-use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
@@ -774,6 +782,276 @@ unsafe fn dma_simd128(
     );
 }
 
+// === DROP-IN: AVX2 & AVX512 DMA kernels (full SIMD variants) ==================
+// Paste inside this file, replacing the current dma_avx2/dma_avx512 stubs.
+// No API changes. Scalar logic preserved. SIMD accelerates:
+//  - SMA/WMA seeding with vector dot-products
+//  - Adaptive gain search (vectorized over candidate gains)
+//
+// Feature gates match alma.rs style: nightly-avx + x86_64.
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn hsum256d(v: __m256d) -> f64 {
+    let mut buf = [0.0f64; 4];
+    _mm256_storeu_pd(buf.as_mut_ptr(), v);
+    buf[0] + buf[1] + buf[2] + buf[3]
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn hsum512d(v: __m512d) -> f64 {
+    let mut buf = [0.0f64; 8];
+    _mm512_storeu_pd(buf.as_mut_ptr(), v);
+    buf.iter().sum()
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn vabs256d(x: __m256d) -> __m256d {
+    // clear sign bit
+    let sign = _mm256_set1_pd(-0.0);
+    _mm256_andnot_pd(sign, x)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn vabs512d(x: __m512d) -> __m512d {
+    let sign = _mm512_set1_epi64(i64::MIN as i64);
+    let xi = _mm512_castpd_si512(x);
+    let cleared = _mm512_andnot_si512(sign, xi);
+    _mm512_castsi512_pd(cleared)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn sum_unweighted_avx2(ptr: *const f64, len: usize) -> f64 {
+    let mut i = 0usize;
+    let mut acc = _mm256_setzero_pd();
+    while i + 4 <= len {
+        let v = _mm256_loadu_pd(ptr.add(i));
+        acc = _mm256_add_pd(acc, v);
+        i += 4;
+    }
+    let mut s = hsum256d(acc);
+    while i < len {
+        s += *ptr.add(i);
+        i += 1;
+    }
+    s
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn sum_unweighted_avx512(ptr: *const f64, len: usize) -> f64 {
+    let mut i = 0usize;
+    let mut acc = _mm512_setzero_pd();
+    while i + 8 <= len {
+        let v = _mm512_loadu_pd(ptr.add(i));
+        acc = _mm512_add_pd(acc, v);
+        i += 8;
+    }
+    let mut s = hsum512d(acc);
+    while i < len {
+        s += *ptr.add(i);
+        i += 1;
+    }
+    s
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn seed_wma_window_avx2(ptr: *const f64, len: usize) -> (f64, f64) {
+    // returns (simple_sum, weighted_sum with weights 1..len oldest..newest)
+    let mut i = 0usize;
+    let mut acc_v = _mm256_setzero_pd();
+    let mut acc_wv = _mm256_setzero_pd();
+    let inc = _mm256_set_pd(3.0, 2.0, 1.0, 0.0); // lanes: [3,2,1,0] -> lane0=0
+    let mut wbase = 1.0f64;
+    while i + 4 <= len {
+        let v = _mm256_loadu_pd(ptr.add(i));
+        let w = _mm256_add_pd(_mm256_set1_pd(wbase), inc);
+        acc_v = _mm256_add_pd(acc_v, v);
+        acc_wv = _mm256_add_pd(acc_wv, _mm256_mul_pd(w, v));
+        wbase += 4.0;
+        i += 4;
+    }
+    let mut s = hsum256d(acc_v);
+    let mut sw = hsum256d(acc_wv);
+    while i < len {
+        let val = *ptr.add(i);
+        s += val;
+        sw += (i as f64 + 1.0) * val;
+        i += 1;
+    }
+    (s, sw)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn seed_wma_window_avx512(ptr: *const f64, len: usize) -> (f64, f64) {
+    let mut i = 0usize;
+    let mut acc_v = _mm512_setzero_pd();
+    let mut acc_wv = _mm512_setzero_pd();
+    let inc = _mm512_set_pd(7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 0.0); // lane0=0
+    let mut wbase = 1.0f64;
+    while i + 8 <= len {
+        let v = _mm512_loadu_pd(ptr.add(i));
+        let w = _mm512_add_pd(_mm512_set1_pd(wbase), inc);
+        acc_v = _mm512_add_pd(acc_v, v);
+        acc_wv = _mm512_add_pd(acc_wv, _mm512_mul_pd(w, v));
+        wbase += 8.0;
+        i += 8;
+    }
+    let mut s = hsum512d(acc_v);
+    let mut sw = hsum512d(acc_wv);
+    while i < len {
+        let val = *ptr.add(i);
+        s += val;
+        sw += (i as f64 + 1.0) * val;
+        i += 1;
+    }
+    (s, sw)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn best_gain_search_avx2(
+    x: f64,
+    e0_prev: f64,
+    ec_prev: f64,
+    alpha_e: f64,
+    ema_gain_limit: usize,
+) -> f64 {
+    // search g in {0, 0.1, ..., ema_gain_limit/10}
+    let width = 4usize;
+    let dx = _mm256_set1_pd(x - ec_prev);
+    let x_v = _mm256_set1_pd(x);
+    let e0_v = _mm256_set1_pd(e0_prev);
+    let ec_prev_v = _mm256_set1_pd(ec_prev);
+    let a_v = _mm256_set1_pd(alpha_e);
+    let om_a_v = _mm256_set1_pd(1.0 - alpha_e);
+    let inf_v = _mm256_set1_pd(f64::INFINITY);
+    let limit_f = ema_gain_limit as f64;
+    let limit_v = _mm256_set1_pd(limit_f);
+    let scale = _mm256_set1_pd(0.1);
+
+    let mut best_err = _mm256_set1_pd(f64::INFINITY);
+    let mut best_g = _mm256_set1_pd(0.0);
+
+    let mut idx = 0usize;
+    while idx <= ema_gain_limit {
+        // idx_v = [idx, idx+1, idx+2, idx+3]
+        let base = _mm256_set1_pd(idx as f64);
+        let inc = _mm256_set_pd(3.0, 2.0, 1.0, 0.0);
+        let idx_v = _mm256_add_pd(base, inc);
+
+        // valid mask: idx_v <= limit
+        let gt_mask = _mm256_cmp_pd(idx_v, limit_v, _CMP_GT_OQ);
+
+        let g = _mm256_mul_pd(idx_v, scale);
+        let e0_plus = _mm256_fmadd_pd(g, dx, e0_v); // e0 + g*(x-ec_prev)
+        let pred = _mm256_fmadd_pd(a_v, e0_plus, _mm256_mul_pd(om_a_v, ec_prev_v));
+        let err = vabs256d(_mm256_sub_pd(x_v, pred));
+
+        // set err=INF for invalid lanes
+        let err_masked = _mm256_blendv_pd(err, inf_v, gt_mask);
+
+        // update best per-lane
+        let lt = _mm256_cmp_pd(err_masked, best_err, _CMP_LT_OQ);
+        best_err = _mm256_blendv_pd(best_err, err_masked, lt);
+        best_g = _mm256_blendv_pd(best_g, g, lt);
+
+        idx += width;
+    }
+
+    // reduce lanes: choose smallest error, then smallest g in a tie
+    let mut e = [0.0f64; 4];
+    let mut g = [0.0f64; 4];
+    _mm256_storeu_pd(e.as_mut_ptr(), best_err);
+    _mm256_storeu_pd(g.as_mut_ptr(), best_g);
+
+    let mut best_e = f64::INFINITY;
+    let mut best_gg = 0.0;
+    for k in 0..4 {
+        let ek = e[k];
+        let gk = g[k];
+        if ek < best_e || (ek == best_e && gk < best_gg) {
+            best_e = ek;
+            best_gg = gk;
+        }
+    }
+    best_gg
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn best_gain_search_avx512(
+    x: f64,
+    e0_prev: f64,
+    ec_prev: f64,
+    alpha_e: f64,
+    ema_gain_limit: usize,
+) -> f64 {
+    let width = 8usize;
+    let dx = _mm512_set1_pd(x - ec_prev);
+    let x_v = _mm512_set1_pd(x);
+    let e0_v = _mm512_set1_pd(e0_prev);
+    let ec_prev_v = _mm512_set1_pd(ec_prev);
+    let a_v = _mm512_set1_pd(alpha_e);
+    let om_a_v = _mm512_set1_pd(1.0 - alpha_e);
+    let inf_v = _mm512_set1_pd(f64::INFINITY);
+    let limit_f = ema_gain_limit as f64;
+    let limit_v = _mm512_set1_pd(limit_f);
+    let scale = _mm512_set1_pd(0.1);
+
+    let mut best_err = _mm512_set1_pd(f64::INFINITY);
+    let mut best_g = _mm512_set1_pd(0.0);
+
+    let mut idx = 0usize;
+    while idx <= ema_gain_limit {
+        // idx_v = [idx..idx+7]
+        let base = _mm512_set1_pd(idx as f64);
+        let inc = _mm512_set_pd(7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 0.0); // lane0=0
+        let idx_v = _mm512_add_pd(base, inc);
+
+        let k_invalid = _mm512_cmp_pd_mask(idx_v, limit_v, _CMP_GT_OQ);
+
+        let g = _mm512_mul_pd(idx_v, scale);
+        let e0_plus = _mm512_fmadd_pd(g, dx, e0_v); // e0 + g*(x-ec_prev)
+        let pred = _mm512_fmadd_pd(a_v, e0_plus, _mm512_mul_pd(om_a_v, ec_prev_v));
+        let err = vabs512d(_mm512_sub_pd(x_v, pred));
+
+        // err = INF where invalid
+        let err_masked = _mm512_mask_mov_pd(err, k_invalid, inf_v);
+
+        // update best per-lane
+        let k_lt = _mm512_cmp_pd_mask(err_masked, best_err, _CMP_LT_OQ);
+        best_err = _mm512_mask_mov_pd(best_err, k_lt, err_masked);
+        best_g = _mm512_mask_mov_pd(best_g, k_lt, g);
+
+        idx += width;
+    }
+
+    // reduce lanes
+    let mut e = [0.0f64; 8];
+    let mut g = [0.0f64; 8];
+    _mm512_storeu_pd(e.as_mut_ptr(), best_err);
+    _mm512_storeu_pd(g.as_mut_ptr(), best_g);
+
+    let mut best_e = f64::INFINITY;
+    let mut best_gg = 0.0;
+    for k in 0..8 {
+        let ek = e[k];
+        let gk = g[k];
+        if ek < best_e || (ek == best_e && gk < best_gg) {
+            best_e = ek;
+            best_gg = gk;
+        }
+    }
+    best_gg
+}
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn dma_avx2(
@@ -782,18 +1060,230 @@ unsafe fn dma_avx2(
     ema_length: usize,
     ema_gain_limit: usize,
     hull_ma_type: &str,
-    first_val: usize,
+    first: usize,
     out: &mut [f64],
 ) {
-    dma_scalar(
-        data,
-        hull_length,
-        ema_length,
-        ema_gain_limit,
-        hull_ma_type,
-        first_val,
-        out,
-    );
+    let n = data.len();
+    if n == 0 {
+        return;
+    }
+
+    // --- Adaptive EMA state
+    let alpha_e = 2.0 / (ema_length as f64 + 1.0);
+    let i0_e = first + ema_length.saturating_sub(1);
+    let mut e0_prev = 0.0;
+    let mut e0_init_done = false;
+    let mut ec_prev = 0.0;
+    let mut ec_init_done = false;
+
+    // --- Hull shared
+    let half = hull_length / 2;
+    let sqrt_len = (hull_length as f64).sqrt().round() as usize;
+
+    let mut hull_val = f64::NAN;
+
+    // ---- Hull = WMA path state
+    let wsum = |p: usize| -> f64 { (p * (p + 1)) as f64 / 2.0 };
+    let i0_half = first + half.saturating_sub(1);
+    let i0_full = first + hull_length.saturating_sub(1);
+
+    let mut a_half = 0.0;
+    let mut s_half = 0.0;
+    let mut half_ready = false;
+
+    let mut a_full = 0.0;
+    let mut s_full = 0.0;
+    let mut full_ready = false;
+
+    // Diff rolling stage for both hull types
+    let mut diff_ring: Vec<f64> = Vec::with_capacity(sqrt_len.max(1));
+    let mut diff_pos: usize = 0;
+    let mut diff_filled = 0usize;
+
+    // WMA(diff) state
+    let mut a_diff = 0.0;
+    let mut s_diff = 0.0;
+    let mut diff_wma_init_done = false;
+
+    // EMA(diff) state
+    let alpha_sqrt = if sqrt_len > 0 {
+        2.0 / (sqrt_len as f64 + 1.0)
+    } else {
+        0.0
+    };
+    let mut diff_ema = 0.0;
+    let mut diff_ema_init_done = false;
+    let mut diff_sum_seed = 0.0;
+
+    // EMA(half/full) state for Hull=EMA
+    let mut e_half_prev = 0.0;
+    let mut e_half_init_done = false;
+    let mut e_full_prev = 0.0;
+    let mut e_full_init_done = false;
+    let alpha_half = if half > 0 {
+        2.0 / (half as f64 + 1.0)
+    } else {
+        0.0
+    };
+    let alpha_full = if hull_length > 0 {
+        2.0 / (hull_length as f64 + 1.0)
+    } else {
+        0.0
+    };
+
+    let is_wma = hull_ma_type == "WMA";
+
+    for i in first..n {
+        let x = data[i];
+
+        // e0 seed/update (vectorized SMA seed)
+        if !e0_init_done {
+            if i >= i0_e {
+                let start = i + 1 - ema_length;
+                let sum = sum_unweighted_avx2(data.as_ptr().add(start), ema_length);
+                e0_prev = sum / ema_length as f64;
+                e0_init_done = true;
+            }
+        } else {
+            e0_prev = alpha_e * x + (1.0 - alpha_e) * e0_prev;
+        }
+
+        // ----------------- Hull computation -> diff_now
+        let mut diff_now = f64::NAN;
+
+        if is_wma {
+            // seed/update WMA(half)
+            if half > 0 {
+                if !half_ready {
+                    if i >= i0_half {
+                        let start = i + 1 - half;
+                        let (sum, wsum_local) =
+                            seed_wma_window_avx2(data.as_ptr().add(start), half);
+                        a_half = sum;
+                        s_half = wsum_local;
+                        half_ready = true;
+                    }
+                } else {
+                    let a_prev = a_half;
+                    a_half = a_prev + x - data[i - half];
+                    s_half = s_half + (half as f64) * x - a_prev;
+                }
+            }
+
+            // seed/update WMA(full)
+            if hull_length > 0 {
+                if !full_ready {
+                    if i >= i0_full {
+                        let start = i + 1 - hull_length;
+                        let (sum, wsum_local) =
+                            seed_wma_window_avx2(data.as_ptr().add(start), hull_length);
+                        a_full = sum;
+                        s_full = wsum_local;
+                        full_ready = true;
+                    }
+                } else {
+                    let a_prev = a_full;
+                    a_full = a_prev + x - data[i - hull_length];
+                    s_full = s_full + (hull_length as f64) * x - a_prev;
+                }
+            }
+
+            if half_ready && full_ready {
+                let w_half = s_half / wsum(half).max(1.0);
+                let w_full = s_full / wsum(hull_length).max(1.0);
+                diff_now = 2.0 * w_half - w_full;
+            }
+        } else {
+            // Hull via EMA(half/full) and EMA(sqrt) over diff
+            if half > 0 {
+                if !e_half_init_done {
+                    if i >= i0_half {
+                        let start = i + 1 - half;
+                        let sum = sum_unweighted_avx2(data.as_ptr().add(start), half);
+                        e_half_prev = sum / half as f64;
+                        e_half_init_done = true;
+                    }
+                } else {
+                    e_half_prev = alpha_half * x + (1.0 - alpha_half) * e_half_prev;
+                }
+            }
+
+            if hull_length > 0 {
+                if !e_full_init_done {
+                    if i >= i0_full {
+                        let start = i + 1 - hull_length;
+                        let sum = sum_unweighted_avx2(data.as_ptr().add(start), hull_length);
+                        e_full_prev = sum / hull_length as f64;
+                        e_full_init_done = true;
+                    }
+                } else {
+                    e_full_prev = alpha_full * x + (1.0 - alpha_full) * e_full_prev;
+                }
+            }
+
+            if e_half_init_done && e_full_init_done {
+                diff_now = 2.0 * e_half_prev - e_full_prev;
+            }
+        }
+
+        // feed diff into final smoother
+        if diff_now.is_finite() && sqrt_len > 0 {
+            if diff_filled < sqrt_len {
+                diff_ring.push(diff_now);
+                diff_sum_seed += diff_now;
+                diff_filled += 1;
+
+                if diff_filled == sqrt_len {
+                    if is_wma {
+                        // seed WMA(diff) with SIMD
+                        let (a0, s0) = seed_wma_window_avx2(diff_ring.as_ptr(), sqrt_len);
+                        a_diff = a0;
+                        s_diff = s0;
+                        diff_wma_init_done = true;
+                        let wsum_d = (sqrt_len * (sqrt_len + 1)) as f64 / 2.0;
+                        hull_val = s_diff / wsum_d.max(1.0);
+                    } else {
+                        diff_ema = diff_sum_seed / sqrt_len as f64;
+                        diff_ema_init_done = true;
+                        hull_val = diff_ema;
+                    }
+                }
+            } else {
+                let old = diff_ring[diff_pos];
+                diff_ring[diff_pos] = diff_now;
+                diff_pos = (diff_pos + 1) % sqrt_len;
+
+                if is_wma {
+                    let a_prev = a_diff;
+                    a_diff = a_prev + diff_now - old;
+                    s_diff = s_diff + (sqrt_len as f64) * diff_now - a_prev;
+                    let wsum_d = (sqrt_len * (sqrt_len + 1)) as f64 / 2.0;
+                    hull_val = s_diff / wsum_d.max(1.0);
+                } else {
+                    diff_ema = alpha_sqrt * diff_now + (1.0 - alpha_sqrt) * diff_ema;
+                    hull_val = diff_ema;
+                }
+            }
+        }
+
+        // --- Adaptive EMA 'ec' using best gain at this i (SIMD search)
+        let mut ec_now = f64::NAN;
+        if e0_init_done {
+            if !ec_init_done {
+                ec_prev = e0_prev;
+                ec_init_done = true;
+                ec_now = ec_prev;
+            } else {
+                let g_best = best_gain_search_avx2(x, e0_prev, ec_prev, alpha_e, ema_gain_limit);
+                ec_now = alpha_e * (e0_prev + g_best * (x - ec_prev)) + (1.0 - alpha_e) * ec_prev;
+                ec_prev = ec_now;
+            }
+        }
+
+        if hull_val.is_finite() && ec_now.is_finite() {
+            out[i] = 0.5 * (hull_val + ec_now);
+        }
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -804,20 +1294,231 @@ unsafe fn dma_avx512(
     ema_length: usize,
     ema_gain_limit: usize,
     hull_ma_type: &str,
-    first_val: usize,
+    first: usize,
     out: &mut [f64],
 ) {
-    dma_scalar(
-        data,
-        hull_length,
-        ema_length,
-        ema_gain_limit,
-        hull_ma_type,
-        first_val,
-        out,
-    );
-}
+    let n = data.len();
+    if n == 0 {
+        return;
+    }
 
+    // --- Adaptive EMA state
+    let alpha_e = 2.0 / (ema_length as f64 + 1.0);
+    let i0_e = first + ema_length.saturating_sub(1);
+    let mut e0_prev = 0.0;
+    let mut e0_init_done = false;
+    let mut ec_prev = 0.0;
+    let mut ec_init_done = false;
+
+    // --- Hull shared
+    let half = hull_length / 2;
+    let sqrt_len = (hull_length as f64).sqrt().round() as usize;
+
+    let mut hull_val = f64::NAN;
+
+    // ---- Hull = WMA path state
+    let wsum = |p: usize| -> f64 { (p * (p + 1)) as f64 / 2.0 };
+    let i0_half = first + half.saturating_sub(1);
+    let i0_full = first + hull_length.saturating_sub(1);
+
+    let mut a_half = 0.0;
+    let mut s_half = 0.0;
+    let mut half_ready = false;
+
+    let mut a_full = 0.0;
+    let mut s_full = 0.0;
+    let mut full_ready = false;
+
+    // Diff rolling stage for both hull types
+    let mut diff_ring: Vec<f64> = Vec::with_capacity(sqrt_len.max(1));
+    let mut diff_pos: usize = 0;
+    let mut diff_filled = 0usize;
+
+    // WMA(diff) state
+    let mut a_diff = 0.0;
+    let mut s_diff = 0.0;
+    let mut diff_wma_init_done = false;
+
+    // EMA(diff) state
+    let alpha_sqrt = if sqrt_len > 0 {
+        2.0 / (sqrt_len as f64 + 1.0)
+    } else {
+        0.0
+    };
+    let mut diff_ema = 0.0;
+    let mut diff_ema_init_done = false;
+    let mut diff_sum_seed = 0.0;
+
+    // EMA(half/full) state for Hull=EMA
+    let mut e_half_prev = 0.0;
+    let mut e_half_init_done = false;
+    let mut e_full_prev = 0.0;
+    let mut e_full_init_done = false;
+    let alpha_half = if half > 0 {
+        2.0 / (half as f64 + 1.0)
+    } else {
+        0.0
+    };
+    let alpha_full = if hull_length > 0 {
+        2.0 / (hull_length as f64 + 1.0)
+    } else {
+        0.0
+    };
+
+    let is_wma = hull_ma_type == "WMA";
+
+    for i in first..n {
+        let x = data[i];
+
+        // e0 seed/update (vectorized SMA seed)
+        if !e0_init_done {
+            if i >= i0_e {
+                let start = i + 1 - ema_length;
+                let sum = sum_unweighted_avx512(data.as_ptr().add(start), ema_length);
+                e0_prev = sum / ema_length as f64;
+                e0_init_done = true;
+            }
+        } else {
+            e0_prev = alpha_e * x + (1.0 - alpha_e) * e0_prev;
+        }
+
+        // ----------------- Hull computation -> diff_now
+        let mut diff_now = f64::NAN;
+
+        if is_wma {
+            // seed/update WMA(half)
+            if half > 0 {
+                if !half_ready {
+                    if i >= i0_half {
+                        let start = i + 1 - half;
+                        let (sum, wsum_local) =
+                            seed_wma_window_avx512(data.as_ptr().add(start), half);
+                        a_half = sum;
+                        s_half = wsum_local;
+                        half_ready = true;
+                    }
+                } else {
+                    let a_prev = a_half;
+                    a_half = a_prev + x - data[i - half];
+                    s_half = s_half + (half as f64) * x - a_prev;
+                }
+            }
+
+            // seed/update WMA(full)
+            if hull_length > 0 {
+                if !full_ready {
+                    if i >= i0_full {
+                        let start = i + 1 - hull_length;
+                        let (sum, wsum_local) =
+                            seed_wma_window_avx512(data.as_ptr().add(start), hull_length);
+                        a_full = sum;
+                        s_full = wsum_local;
+                        full_ready = true;
+                    }
+                } else {
+                    let a_prev = a_full;
+                    a_full = a_prev + x - data[i - hull_length];
+                    s_full = s_full + (hull_length as f64) * x - a_prev;
+                }
+            }
+
+            if half_ready && full_ready {
+                let w_half = s_half / wsum(half).max(1.0);
+                let w_full = s_full / wsum(hull_length).max(1.0);
+                diff_now = 2.0 * w_half - w_full;
+            }
+        } else {
+            // Hull via EMA(half/full) and EMA(sqrt) over diff
+            if half > 0 {
+                if !e_half_init_done {
+                    if i >= i0_half {
+                        let start = i + 1 - half;
+                        let sum = sum_unweighted_avx512(data.as_ptr().add(start), half);
+                        e_half_prev = sum / half as f64;
+                        e_half_init_done = true;
+                    }
+                } else {
+                    e_half_prev = alpha_half * x + (1.0 - alpha_half) * e_half_prev;
+                }
+            }
+
+            if hull_length > 0 {
+                if !e_full_init_done {
+                    if i >= i0_full {
+                        let start = i + 1 - hull_length;
+                        let sum = sum_unweighted_avx512(data.as_ptr().add(start), hull_length);
+                        e_full_prev = sum / hull_length as f64;
+                        e_full_init_done = true;
+                    }
+                } else {
+                    e_full_prev = alpha_full * x + (1.0 - alpha_full) * e_full_prev;
+                }
+            }
+
+            if e_half_init_done && e_full_init_done {
+                diff_now = 2.0 * e_half_prev - e_full_prev;
+            }
+        }
+
+        // feed diff into final smoother
+        if diff_now.is_finite() && sqrt_len > 0 {
+            if diff_filled < sqrt_len {
+                diff_ring.push(diff_now);
+                diff_sum_seed += diff_now;
+                diff_filled += 1;
+
+                if diff_filled == sqrt_len {
+                    if is_wma {
+                        // seed WMA(diff) with SIMD
+                        let (a0, s0) = seed_wma_window_avx512(diff_ring.as_ptr(), sqrt_len);
+                        a_diff = a0;
+                        s_diff = s0;
+                        diff_wma_init_done = true;
+                        let wsum_d = (sqrt_len * (sqrt_len + 1)) as f64 / 2.0;
+                        hull_val = s_diff / wsum_d.max(1.0);
+                    } else {
+                        diff_ema = diff_sum_seed / sqrt_len as f64;
+                        diff_ema_init_done = true;
+                        hull_val = diff_ema;
+                    }
+                }
+            } else {
+                let old = diff_ring[diff_pos];
+                diff_ring[diff_pos] = diff_now;
+                diff_pos = (diff_pos + 1) % sqrt_len;
+
+                if is_wma {
+                    let a_prev = a_diff;
+                    a_diff = a_prev + diff_now - old;
+                    s_diff = s_diff + (sqrt_len as f64) * diff_now - a_prev;
+                    let wsum_d = (sqrt_len * (sqrt_len + 1)) as f64 / 2.0;
+                    hull_val = s_diff / wsum_d.max(1.0);
+                } else {
+                    diff_ema = alpha_sqrt * diff_now + (1.0 - alpha_sqrt) * diff_ema;
+                    hull_val = diff_ema;
+                }
+            }
+        }
+
+        // --- Adaptive EMA 'ec' using best gain at this i (SIMD search)
+        let mut ec_now = f64::NAN;
+        if e0_init_done {
+            if !ec_init_done {
+                ec_prev = e0_prev;
+                ec_init_done = true;
+                ec_now = ec_prev;
+            } else {
+                let g_best = best_gain_search_avx512(x, e0_prev, ec_prev, alpha_e, ema_gain_limit);
+                ec_now = alpha_e * (e0_prev + g_best * (x - ec_prev)) + (1.0 - alpha_e) * ec_prev;
+                ec_prev = ec_now;
+            }
+        }
+
+        if hull_val.is_finite() && ec_now.is_finite() {
+            out[i] = 0.5 * (hull_val + ec_now);
+        }
+    }
+}
 #[derive(Debug, Clone)]
 pub struct DmaStream {
     // params
@@ -1690,6 +2391,74 @@ pub fn dma_batch_py<'py>(
     )?;
 
     Ok(dict)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "dma_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, hull_length_range, ema_length_range, ema_gain_limit_range, hull_ma_type="WMA", device_id=0))]
+pub fn dma_cuda_batch_dev_py(
+    py: Python<'_>,
+    data_f32: numpy::PyReadonlyArray1<'_, f32>,
+    hull_length_range: (usize, usize, usize),
+    ema_length_range: (usize, usize, usize),
+    ema_gain_limit_range: (usize, usize, usize),
+    hull_ma_type: &str,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let sweep = DmaBatchRange {
+        hull_length: hull_length_range,
+        ema_length: ema_length_range,
+        ema_gain_limit: ema_gain_limit_range,
+        hull_ma_type: hull_ma_type.to_string(),
+    };
+
+    let slice_in = data_f32.as_slice()?;
+    let inner = py.allow_threads(|| {
+        let cuda = CudaDma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.dma_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "dma_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, hull_length, ema_length, ema_gain_limit, hull_ma_type="WMA", device_id=0))]
+pub fn dma_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm_f32: PyReadonlyArray2<'_, f32>,
+    hull_length: usize,
+    ema_length: usize,
+    ema_gain_limit: usize,
+    hull_ma_type: &str,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let flat_in: &[f32] = data_tm_f32.as_slice()?;
+    let rows = data_tm_f32.shape()[0];
+    let cols = data_tm_f32.shape()[1];
+    let params = DmaParams {
+        hull_length: Some(hull_length),
+        ema_length: Some(ema_length),
+        ema_gain_limit: Some(ema_gain_limit),
+        hull_ma_type: Some(hull_ma_type.to_string()),
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaDma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.dma_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "wasm")]

@@ -220,7 +220,7 @@ use my_project::indicators::{
     vwmacd::{vwmacd as vwmacd_raw, VwmacdInput},
     wad::{wad as wad_raw, WadInput},
     wavetrend::{wavetrend as wavetrend_raw, WavetrendInput},
-    wclprice::{wclprice as wclprice_raw, WclpriceInput},
+    wclprice::{wclprice as wclprice_raw, wclprice_with_kernel, WclpriceInput},
     willr::{willr as willr_raw, WillrInput},
     wto::{wto_with_kernel, WtoBatchBuilder, WtoInput},
     zscore::{zscore as zscore_raw, ZscoreInput},
@@ -1133,6 +1133,7 @@ make_kernel_wrappers!(volume_adjusted_ma, VolumeAdjustedMa_with_kernel, VolumeAd
 make_kernel_wrappers!(vlma, vlma_with_kernel, VlmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(vpwma, vpwma_with_kernel, VpwmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(vwma, vwma_with_kernel, VwmaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(wclprice, wclprice_with_kernel, WclpriceInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(wilders, wilders_with_kernel, WildersInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(wma, wma_with_kernel, WmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(zlema, zlema_with_kernel, ZlemaInputS; Scalar,Avx2,Avx512);

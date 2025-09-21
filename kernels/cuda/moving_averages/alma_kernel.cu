@@ -31,6 +31,11 @@
 #define ALMA_HAS_PIPELINE 0
 #endif
 
+#ifdef ALMA_PIPELINE_DISABLED
+#undef ALMA_HAS_PIPELINE
+#define ALMA_HAS_PIPELINE 0
+#endif
+
 // Grid: blockIdx.y = parameter combo, blockIdx.x/threadIdx.x = time indices
 extern "C" __global__
 void alma_batch_f32_onthefly(const float* __restrict__ prices,

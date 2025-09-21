@@ -77,7 +77,10 @@ pub use dma::{
 
 pub use edcf::{edcf, EdcfInput, EdcfOutput, EdcfParams};
 pub use ehlers_kama::{ehlers_kama, EhlersKamaInput, EhlersKamaOutput, EhlersKamaParams};
-pub use ehlers_pma::{ehlers_pma, EhlersPmaInput, EhlersPmaOutput, EhlersPmaParams};
+pub use ehlers_pma::{
+    ehlers_pma, expand_grid as expand_grid_ehlers_pma, EhlersPmaBatchRange, EhlersPmaInput,
+    EhlersPmaOutput, EhlersPmaParams,
+};
 pub use uma::{uma, UmaInput, UmaOutput, UmaParams};
 pub use volatility_adjusted_ma::{
     vama as volatility_adjusted_ma, VamaInput as VolatilityAdjustedMaInput,

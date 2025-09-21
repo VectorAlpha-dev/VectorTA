@@ -20,6 +20,12 @@
 //! - **Memory optimization**: GOOD - Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix)
 //! - **Optimization needed**: Implement SIMD kernels for parallel pole processing
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::CudaGaussian;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -2675,6 +2681,72 @@ pub fn gaussian_batch_py<'py>(
     )?;
 
     Ok(dict)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "gaussian_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, period_range, poles_range, device_id=0))]
+pub fn gaussian_cuda_batch_dev_py(
+    py: Python<'_>,
+    data_f32: numpy::PyReadonlyArray1<'_, f32>,
+    period_range: (usize, usize, usize),
+    poles_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let slice = data_f32.as_slice()?;
+    let sweep = GaussianBatchRange {
+        period: period_range,
+        poles: poles_range,
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda =
+            CudaGaussian::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.gaussian_batch_dev(slice, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "gaussian_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (prices_tm_f32, period, poles, device_id=0))]
+pub fn gaussian_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    prices_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    period: usize,
+    poles: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use numpy::PyUntypedArrayMethods;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let shape = prices_tm_f32.shape();
+    let rows = shape[0];
+    let cols = shape[1];
+
+    let flat = prices_tm_f32.as_slice()?;
+    let params = GaussianParams {
+        period: Some(period),
+        poles: Some(poles),
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda =
+            CudaGaussian::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.gaussian_many_series_one_param_time_major_dev(flat, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "wasm")]
