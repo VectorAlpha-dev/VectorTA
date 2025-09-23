@@ -75,8 +75,8 @@ fn alma_cuda_one_series_many_params_matches_cpu() -> Result<(), Box<dyn std::err
         .copy_to(&mut gpu_host)
         .expect("copy cuda alma batch result to host");
 
-    // fp32 kernel vs fp64 CPU: allow a modest tolerance
-    let tol = 1e-5;
+    // fp32 kernel vs fp64 CPU: tighter tolerance due to EFT-compensated dot
+    let tol = 5e-6;
     for i in 0..(cpu.rows * cpu.cols) {
         let a = cpu.values[i];
         let b = gpu_host[i] as f64;
@@ -157,8 +157,8 @@ fn alma_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
         .copy_to(&mut gpu_tm)
         .expect("copy many-series result to host");
 
-    // GPU uses compensated dot accumulation by default; require tight tolerance.
-    let tol = 1e-3;
+    // GPU uses EFT-compensated dot; tighten tolerance further.
+    let tol = 3e-4;
     for i in 0..(num_series * series_len) {
         let a = cpu_tm[i];
         let b = gpu_tm[i] as f64;

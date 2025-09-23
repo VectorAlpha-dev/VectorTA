@@ -42,7 +42,9 @@
 
 // Enable Kahan-Neumaier compensated accumulation in dot-products by default
 #ifndef ALMA_COMPENSATED_DOT
-  #define ALMA_COMPENSATED_DOT 1
+  // 0 = uncompensated, 1 = Kahan/Neumaier (current default), 2 = EFT (Ogita–Rump–Oishi)
+  // Enable EFT by default for improved FP32 accuracy; can be overridden via NVCC -D.
+  #define ALMA_COMPENSATED_DOT 2
 #endif
 
 
@@ -119,6 +121,14 @@ float alma_dot_uncomp(const float* __restrict__ x,
   return s;
 }
 
+// Error-Free Transform (EFT) helpers
+__device__ __forceinline__ void alma_two_sum(float a, float b, float& s, float& e) {
+  float t = a + b;
+  float z = t - a;
+  e = (a - (t - z)) + (b - z);
+  s = t;
+}
+
 __device__ __forceinline__
 float alma_dot_comp(const float* __restrict__ x,
                     const float* __restrict__ w, int n) {
@@ -134,10 +144,29 @@ float alma_dot_comp(const float* __restrict__ x,
   return s;
 }
 
+// Compensated dot using EFT with FMA (Ogita–Rump–Oishi)
+__device__ __forceinline__
+float alma_dot_comp_eft(const float* __restrict__ x,
+                        const float* __restrict__ w, int n) {
+  float sh = 0.0f, sl = 0.0f; // high and low parts of the sum
+  #pragma unroll 4
+  for (int i = 0; i < n; ++i) {
+    float p  = __fmaf_rn(x[i], w[i], 0.0f);   // rounded product
+    float pe = __fmaf_rn(x[i], w[i], -p);     // exact product error
+    float s, e;
+    alma_two_sum(sh, p, s, e);                // sum with error
+    sh = s;
+    sl += e + pe;                             // accumulate all errors
+  }
+  return sh + sl;                             // quick renormalization
+}
+
 __device__ __forceinline__
 float alma_dot(const float* __restrict__ x,
               const float* __restrict__ w, int n) {
-#if ALMA_COMPENSATED_DOT
+#if ALMA_COMPENSATED_DOT == 2
+  return alma_dot_comp_eft(x, w, n);
+#elif ALMA_COMPENSATED_DOT
   return alma_dot_comp(x, w, n);
 #else
   return alma_dot_uncomp(x, w, n);
@@ -181,6 +210,29 @@ void alma_dot2_shared(const float* __restrict__ buf, int b,
 #endif
 }
 
+// EFT-based two-output dot product
+__device__ __forceinline__
+void alma_dot2_shared_eft(const float* __restrict__ buf, int b,
+                          const float* __restrict__ w, int n,
+                          float& s0_out, float& s1_out) {
+  float h0 = 0.f, l0 = 0.f;
+  float h1 = 0.f, l1 = 0.f;
+  #pragma unroll 4
+  for (int i = 0; i < n; ++i) {
+    float wi = w[i];
+
+    float p0  = __fmaf_rn(buf[b + i],     wi, 0.f);
+    float pe0 = __fmaf_rn(buf[b + i],     wi, -p0);
+    float s, e; alma_two_sum(h0, p0, s, e); h0 = s; l0 += e + pe0;
+
+    float p1  = __fmaf_rn(buf[b + i + 1], wi, 0.f);
+    float pe1 = __fmaf_rn(buf[b + i + 1], wi, -p1);
+    alma_two_sum(h1, p1, s, e); h1 = s; l1 += e + pe1;
+  }
+  s0_out = h0 + l0;
+  s1_out = h1 + l1;
+}
+
 // Strided dot-product x[0], x[stride], x[2*stride], ...
 __device__ __forceinline__
 float alma_dot_stride(const float* __restrict__ x,
@@ -216,7 +268,8 @@ void alma_compute_weights_and_invnorm(int period, float m, float s2,
   float local = 0.f;
   for (int i = threadIdx.x; i < period; i += blockDim.x) {
     float d  = float(i) - m;
-    float wi = __expf(-(d * d) / s2);
+    // Use expf for improved accuracy of Gaussian tails; may be mapped to __expf under fast-math.
+    float wi = expf(-(d * d) / s2);
     weights[i] = wi;
     local     += wi;
   }
@@ -537,7 +590,11 @@ struct AlmaBatchTiledPrecomputed2X {
       const bool can1 = ((t + 1) < series_len) && ((t + 1) >= warm);
       if (can0 && can1) {
         float s0, s1;
+        #if ALMA_COMPENSATED_DOT == 2
+        alma_dot2_shared_eft(buf, b, w, period, s0, s1);
+        #else
         alma_dot2_shared(buf, b, w, period, s0, s1);
+        #endif
         out0 = s0;
         out1 = s1;
       } else if (can0) {

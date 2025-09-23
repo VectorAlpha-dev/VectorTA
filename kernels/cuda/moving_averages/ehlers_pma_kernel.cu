@@ -379,47 +379,37 @@ extern "C" __global__ void ehlers_pma_ms1p_tiled_f32_tx1_ty4(
     const int warm_trigger = warm_wma2 + 3;
     if (warm_wma1 >= series_len) { return; }
 
-    double wma1_ring[7];
-    double predict_ring[4];
-    for (int i = 0; i < 7; ++i) { wma1_ring[i] = nan64(); }
-    for (int i = 0; i < 4; ++i) { predict_ring[i] = nan64(); }
+    float wma1_ring[7];
+    ff predict_ring[4];
+    for (int i = 0; i < 7; ++i) { wma1_ring[i] = nan32(); }
+    for (int i = 0; i < 4; ++i) { predict_ring[i].hi = nan32(); predict_ring[i].lo = 0.f; }
     int ring_head = 0;
     int predict_head = 0;
 
     for (int row = first_valid; row < series_len; ++row) {
-        double wma1_val = nan64();
+        float wma1_val = nan32();
         if (row >= warm_wma1) {
             const int idx = row * stride + series;
-            const double p1 = static_cast<double>(prices_tm[idx - stride]);
-            const double p2 = static_cast<double>(prices_tm[idx - 2 * stride]);
-            const double p3 = static_cast<double>(prices_tm[idx - 3 * stride]);
-            const double p4 = static_cast<double>(prices_tm[idx - 4 * stride]);
-            const double p5 = static_cast<double>(prices_tm[idx - 5 * stride]);
-            const double p6 = static_cast<double>(prices_tm[idx - 6 * stride]);
-            const double p7 = static_cast<double>(prices_tm[idx - 7 * stride]);
-            const double num = 7.0 * p1 + 6.0 * p2 + 5.0 * p3 + 4.0 * p4 + 3.0 * p5 + 2.0 * p6 + 1.0 * p7;
-            wma1_val = num / 28.0;
+            wma1_val = wma7_from_prices_tm_f32(prices_tm, idx, stride);
         }
         wma1_ring[ring_head] = wma1_val;
         ring_head = (ring_head + 1) % 7;
 
         if (row >= warm_wma2) {
-            const double wma2_val = wma7_from_ring(wma1_ring, ring_head);
-            const double current_wma1 = wma1_ring[(ring_head + 6) % 7];
-            const double predict_val = 2.0 * current_wma1 - wma2_val;
+            const float wma2_val = wma7_from_ring_f32(wma1_ring, ring_head);
+            const float current_wma1 = wma1_ring[(ring_head + 6) % 7];
+            const float two_m = __fadd_rn(current_wma1, current_wma1);
+            const ff pred = two_sum(two_m, -wma2_val);
+            const float predict_val = __fadd_rn(pred.hi, pred.lo);
             const int idx = row * stride + series;
-            out_predict_tm[idx] = static_cast<float>(predict_val);
+            out_predict_tm[idx] = predict_val;
 
-            predict_ring[predict_head] = predict_val;
+            predict_ring[predict_head] = pred;
             predict_head = (predict_head + 1) % 4;
 
             if (row >= warm_trigger) {
-                const double p0 = predict_ring[(predict_head + 0) % 4];
-                const double p1 = predict_ring[(predict_head + 1) % 4];
-                const double p2 = predict_ring[(predict_head + 2) % 4];
-                const double p3 = predict_ring[(predict_head + 3) % 4];
-                const double trigger_val = (4.0 * p3 + 3.0 * p2 + 2.0 * p1 + 1.0 * p0) / 10.0;
-                out_trigger_tm[idx] = static_cast<float>(trigger_val);
+                const float trigger_val = trigger4_from_ff_ring(predict_ring, predict_head);
+                out_trigger_tm[idx] = trigger_val;
             }
         }
     }

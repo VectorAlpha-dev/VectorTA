@@ -118,17 +118,15 @@ void ehlers_kama_batch_f32(const float* __restrict__ prices,
     out[base + start] = prev;
 
     for (int i = start + 1; i < series_len; ++i) {
+        const float newest = prices[i];
+        const float newest_diff = fabsf(newest - prices[i - 1]);
         const int drop_idx = i - period;
         if (drop_idx > first) {
             const float drop = fabsf(prices[drop_idx] - prices[drop_idx - 1]);
-            const float newest = prices[i];
-            const float newest_diff = fabsf(newest - prices[i - 1]);
             float net = newest_diff - drop;
             kahan_add(net, delta_sum, delta_c);
             if (delta_sum < 0.0f) delta_sum = 0.0f;
         } else {
-            const float newest = prices[i];
-            const float newest_diff = fabsf(newest - prices[i - 1]);
             kahan_add(newest_diff, delta_sum, delta_c);
         }
 
@@ -244,23 +242,19 @@ void ehlers_kama_multi_series_one_param_f32(const float* __restrict__ prices_tm,
     out_tm[start * stride + series_idx] = prev;
 
     for (int t = start + 1; t < series_len; ++t) {
+        const int cur_idx = t * stride + series_idx;
+        const int prev_idx = (t - 1) * stride + series_idx;
+        const float newest = prices_tm[cur_idx];
+        const float newest_diff = fabsf(newest - prices_tm[prev_idx]);
         const int drop_idx = t - period;
         if (drop_idx > first) {
             const int idx_drop = drop_idx * stride + series_idx;
             const int idx_drop_prev = (drop_idx - 1) * stride + series_idx;
             const float drop = fabsf(prices_tm[idx_drop] - prices_tm[idx_drop_prev]);
-            const int cur_idx = t * stride + series_idx;
-            const int prev_idx = (t - 1) * stride + series_idx;
-            const float newest = prices_tm[cur_idx];
-            const float newest_diff = fabsf(newest - prices_tm[prev_idx]);
             float net = newest_diff - drop;
             kahan_add(net, delta_sum, delta_c);
             if (delta_sum < 0.0f) delta_sum = 0.0f;
         } else {
-            const int cur_idx = t * stride + series_idx;
-            const int prev_idx = (t - 1) * stride + series_idx;
-            const float newest = prices_tm[cur_idx];
-            const float newest_diff = fabsf(newest - prices_tm[prev_idx]);
             kahan_add(newest_diff, delta_sum, delta_c);
         }
 
@@ -374,23 +368,19 @@ void ehlers_kama_multi_series_one_param_2d_f32(const float* __restrict__ prices_
     out_tm[start * stride + series_idx] = prev;
 
     for (int t = start + 1; t < series_len; ++t) {
+        const int cur_idx = t * stride + series_idx;
+        const int prev_idx = (t - 1) * stride + series_idx;
+        const float newest = prices_tm[cur_idx];
+        const float newest_diff = fabsf(newest - prices_tm[prev_idx]);
         const int drop_idx = t - period;
         if (drop_idx > first) {
             const int idx_drop = drop_idx * stride + series_idx;
             const int idx_drop_prev = (drop_idx - 1) * stride + series_idx;
             const float drop = fabsf(prices_tm[idx_drop] - prices_tm[idx_drop_prev]);
-            const int cur_idx = t * stride + series_idx;
-            const int prev_idx = (t - 1) * stride + series_idx;
-            const float newest = prices_tm[cur_idx];
-            const float newest_diff = fabsf(newest - prices_tm[prev_idx]);
             float net = newest_diff - drop;
             kahan_add(net, delta_sum, delta_c);
             if (delta_sum < 0.0f) delta_sum = 0.0f;
         } else {
-            const int cur_idx = t * stride + series_idx;
-            const int prev_idx = (t - 1) * stride + series_idx;
-            const float newest = prices_tm[cur_idx];
-            const float newest_diff = fabsf(newest - prices_tm[prev_idx]);
             kahan_add(newest_diff, delta_sum, delta_c);
         }
 

@@ -43,6 +43,30 @@ struct Cli {
     #[arg(long, default_value_t = 0.0, alias = "fee")]
     commission: f32,
 
+    /// Neutral band as a fraction of |slow| to avoid churn (0 disables it)
+    #[arg(long, default_value_t = 0.0)]
+    eps_rel: f32,
+
+    /// Enable long-only (restrict to {0,+1})
+    #[arg(long, default_value_t = false)]
+    long_only: bool,
+
+    /// Do not flip directly; exit then wait
+    #[arg(long, default_value_t = false)]
+    no_flip: bool,
+
+    /// Use t-1 signal and enter/exit on next bar
+    #[arg(long, default_value_t = false)]
+    trade_on_next: bool,
+
+    /// Enforce fast_period < slow_period (skip invalid combos)
+    #[arg(long, default_value_t = true)]
+    enforce_fast_lt_slow: bool,
+
+    /// Also compute signed exposure (net position avg) into metric[6]
+    #[arg(long, default_value_t = false)]
+    signed_exposure: bool,
+
     /// Max tile sizes (Pf_tile and Ps_tile). If 0, auto-choose a conservative value.
     #[arg(long, default_value_t = 0)]
     fast_tile: usize,
@@ -145,6 +169,27 @@ fn main() -> Result<()> {
     let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/double_crossover.ptx"));
     let bt_module = Module::from_ptx(ptx, &[])?;
 
+    // Precompute log returns once on device (lr[0]=0, lr[t]=log(p[t])-log(p[t-1]))
+    let mut d_lr: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(t_len)? };
+    {
+        let kernel = bt_module.get_function("compute_log_returns_f32")?;
+        let block_x: u32 = 256;
+        let grid_x: u32 = ((t_len as u32) + block_x - 1) / block_x;
+        unsafe {
+            let mut pr = d_prices.as_device_ptr().as_raw();
+            let mut t_i = t_len as i32;
+            let mut lr = d_lr.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut pr as *mut _ as *mut c_void,
+                &mut t_i as *mut _ as *mut c_void,
+                &mut lr as *mut _ as *mut c_void,
+            ];
+            let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
+            stream.launch(&kernel, (grid_x, 1, 1), (block_x, 1, 1), 0, args)?;
+            stream.synchronize()?;
+        }
+    }
+
     // Simple tile planner
     let (pf_tile, ps_tile) = choose_tiles(cli.fast_tile, cli.slow_tile, t_len, max_pf, max_ps, cli.metrics)?;
 
@@ -167,8 +212,10 @@ fn main() -> Result<()> {
     let mut slow_inv: Vec<f32> = Vec::new();
 
     // Device buffers declared here to be reused across tiles when size matches; otherwise reallocated
-    let mut d_fast_ma: Option<DeviceBuffer<f32>> = None;
-    let mut d_slow_ma: Option<DeviceBuffer<f32>> = None;
+    let mut d_fast_ma: Option<DeviceBuffer<f32>> = None;      // [Pf, T] row-major
+    let mut d_slow_ma: Option<DeviceBuffer<f32>> = None;      // [Ps, T] row-major
+    let mut d_fast_ma_tm: Option<DeviceBuffer<f32>> = None;   // [T, Pf] time-major
+    let mut d_slow_ma_tm: Option<DeviceBuffer<f32>> = None;   // [T, Ps] time-major
     let mut d_fast_w: Option<DeviceBuffer<f32>> = None;
     let mut d_slow_w: Option<DeviceBuffer<f32>> = None;
     let mut d_fast_inv: Option<DeviceBuffer<f32>> = None;
@@ -265,53 +312,103 @@ fn main() -> Result<()> {
                 d_slow_ma.as_mut().unwrap(),
             ).map_err(|e| anyhow!("{:?}", e))?;
 
-            // Launch backtest for this tile region writing directly to the global output if present,
-            // otherwise into a temporary tile buffer that we copy back to host.
-            let kernel = bt_module.get_function("double_cross_backtest_f32")?;
+            // Transpose MAs to time-major for coalesced reads: [Pf, T] -> [T, Pf]; [Ps, T] -> [T, Ps]
+            let tr = bt_module.get_function("transpose_row_to_tm")?;
+            // Fast
+            if d_fast_ma_tm.as_ref().map(|b| b.len()) != Some(t_len * pf) {
+                d_fast_ma_tm = Some(unsafe { DeviceBuffer::<f32>::uninitialized(t_len * pf)? });
+            }
+            unsafe {
+                let mut in_ptr = d_fast_ma.as_ref().unwrap().as_device_ptr().as_raw();
+                let mut rows = pf as i32;
+                let mut cols = t_len as i32;
+                let mut out_ptr = d_fast_ma_tm.as_ref().unwrap().as_device_ptr().as_raw();
+                let block_x: u32 = 256;
+                let grid_x: u32 = (((pf * t_len) as u32) + block_x - 1) / block_x;
+                let args: &mut [*mut c_void] = &mut [
+                    &mut in_ptr as *mut _ as *mut c_void,
+                    &mut rows as *mut _ as *mut c_void,
+                    &mut cols as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
+                stream.launch(&tr, (grid_x, 1, 1), (block_x, 1, 1), 0, args)?;
+                stream.synchronize()?;
+            }
+            // Slow
+            if d_slow_ma_tm.as_ref().map(|b| b.len()) != Some(t_len * ps) {
+                d_slow_ma_tm = Some(unsafe { DeviceBuffer::<f32>::uninitialized(t_len * ps)? });
+            }
+            unsafe {
+                let mut in_ptr = d_slow_ma.as_ref().unwrap().as_device_ptr().as_raw();
+                let mut rows = ps as i32;
+                let mut cols = t_len as i32;
+                let mut out_ptr = d_slow_ma_tm.as_ref().unwrap().as_device_ptr().as_raw();
+                let block_x: u32 = 256;
+                let grid_x: u32 = (((ps * t_len) as u32) + block_x - 1) / block_x;
+                let args: &mut [*mut c_void] = &mut [
+                    &mut in_ptr as *mut _ as *mut c_void,
+                    &mut rows as *mut _ as *mut c_void,
+                    &mut cols as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
+                stream.launch(&tr, (grid_x, 1, 1), (block_x, 1, 1), 0, args)?;
+                stream.synchronize()?;
+            }
+
+            // Launch backtest (grid-stride inside kernel)
+            let kernel = bt_module.get_function("double_cross_backtest_tm_flex_f32")?;
             let pairs = pf * ps;
             let block_x: u32 = 256;
             let grid_x: u32 = ((pairs as u32) + block_x - 1) / block_x;
+            let mut flags: u32 = 0;
+            if cli.long_only { flags |= 1u32 << 0; }
+            if cli.no_flip { flags |= 1u32 << 1; }
+            if cli.trade_on_next { flags |= 1u32 << 2; }
+            if cli.enforce_fast_lt_slow { flags |= 1u32 << 3; }
+            if cli.signed_exposure { flags |= 1u32 << 4; }
 
             let mut tile_host_buf: Vec<f32> = Vec::new();
             if let Some(ref d_global) = d_metrics_global {
                 // d_metrics_global exists; launch kernel to write directly there.
                 unsafe {
-                    let mut f_ma = d_fast_ma.as_ref().unwrap().as_device_ptr().as_raw();
+                    let mut f_ma_tm = d_fast_ma_tm.as_ref().unwrap().as_device_ptr().as_raw();
+                    let mut s_ma_tm = d_slow_ma_tm.as_ref().unwrap().as_device_ptr().as_raw();
+                    let mut lr = d_lr.as_device_ptr().as_raw();
+                    let mut T = t_len as i32;
                     let mut pf_tile_i = pf as i32;
-                    let mut pf_total_i = f_total as i32;
-                    let mut f_off = f_start as i32;
-
-                    let mut s_ma = d_slow_ma.as_ref().unwrap().as_device_ptr().as_raw();
                     let mut ps_tile_i = ps as i32;
+                    let mut pf_total_i = f_total as i32;
                     let mut ps_total_i = s_total as i32;
+                    let mut f_off = f_start as i32;
                     let mut s_off = s_start as i32;
-
                     let mut f_per = d_fast_periods.as_device_ptr().as_raw();
                     let mut s_per = d_slow_periods.as_device_ptr().as_raw();
-
-                    let mut pr = d_prices.as_device_ptr().as_raw();
-                    let mut T = t_len as i32;
                     let mut fv = first_valid as i32;
-
                     let mut commission = cli.commission as f32;
+                    let mut eps_rel = cli.eps_rel as f32;
+                    let mut flags_u = flags as u32;
                     let mut M = metrics as i32;
                     let mut out = d_global.as_device_ptr().as_raw();
 
                     let args: &mut [*mut c_void] = &mut [
-                        &mut f_ma as *mut _ as *mut c_void,
+                        &mut f_ma_tm as *mut _ as *mut c_void,
+                        &mut s_ma_tm as *mut _ as *mut c_void,
+                        &mut lr as *mut _ as *mut c_void,
+                        &mut T as *mut _ as *mut c_void,
                         &mut pf_tile_i as *mut _ as *mut c_void,
-                        &mut pf_total_i as *mut _ as *mut c_void,
-                        &mut f_off as *mut _ as *mut c_void,
-                        &mut s_ma as *mut _ as *mut c_void,
                         &mut ps_tile_i as *mut _ as *mut c_void,
+                        &mut pf_total_i as *mut _ as *mut c_void,
                         &mut ps_total_i as *mut _ as *mut c_void,
+                        &mut f_off as *mut _ as *mut c_void,
                         &mut s_off as *mut _ as *mut c_void,
                         &mut f_per as *mut _ as *mut c_void,
                         &mut s_per as *mut _ as *mut c_void,
-                        &mut pr as *mut _ as *mut c_void,
-                        &mut T as *mut _ as *mut c_void,
                         &mut fv as *mut _ as *mut c_void,
                         &mut commission as *mut _ as *mut c_void,
+                        &mut eps_rel as *mut _ as *mut c_void,
+                        &mut flags_u as *mut _ as *mut c_void,
                         &mut M as *mut _ as *mut c_void,
                         &mut out as *mut _ as *mut c_void,
                     ];
@@ -323,42 +420,42 @@ fn main() -> Result<()> {
                 // We'll allocate a scratch device buffer for the tile metrics
                 let mut d_tile: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(pairs * metrics)? };
                 unsafe {
-                    let mut f_ma = d_fast_ma.as_ref().unwrap().as_device_ptr().as_raw();
-                    let mut pf_tile_i = pf as i32;
-                    let mut pf_total_i = f_total as i32;
-                    let mut f_off = f_start as i32;
-
-                    let mut s_ma = d_slow_ma.as_ref().unwrap().as_device_ptr().as_raw();
-                    let mut ps_tile_i = ps as i32;
-                    let mut ps_total_i = s_total as i32;
-                    let mut s_off = s_start as i32;
-
-                    let mut f_per = d_fast_periods.as_device_ptr().as_raw();
-                    let mut s_per = d_slow_periods.as_device_ptr().as_raw();
-
-                    let mut pr = d_prices.as_device_ptr().as_raw();
+                    let mut f_ma_tm = d_fast_ma_tm.as_ref().unwrap().as_device_ptr().as_raw();
+                    let mut s_ma_tm = d_slow_ma_tm.as_ref().unwrap().as_device_ptr().as_raw();
+                    let mut lr = d_lr.as_device_ptr().as_raw();
                     let mut T = t_len as i32;
+                    let mut pf_tile_i = pf as i32;
+                    let mut ps_tile_i = ps as i32;
+                    let mut pf_total_i = pf as i32; // local dims
+                    let mut ps_total_i = ps as i32; // local dims
+                    let mut f_off = 0i32;
+                    let mut s_off = 0i32;
+                    let mut f_per = d_fast_p.as_ref().unwrap().as_device_ptr().as_raw();
+                    let mut s_per = d_slow_p.as_ref().unwrap().as_device_ptr().as_raw();
                     let mut fv = first_valid as i32;
-
                     let mut commission = cli.commission as f32;
+                    let mut eps_rel = cli.eps_rel as f32;
+                    let mut flags_u = flags as u32;
                     let mut M = metrics as i32;
                     let mut out = d_tile.as_device_ptr().as_raw();
 
                     let args: &mut [*mut c_void] = &mut [
-                        &mut f_ma as *mut _ as *mut c_void,
+                        &mut f_ma_tm as *mut _ as *mut c_void,
+                        &mut s_ma_tm as *mut _ as *mut c_void,
+                        &mut lr as *mut _ as *mut c_void,
+                        &mut T as *mut _ as *mut c_void,
                         &mut pf_tile_i as *mut _ as *mut c_void,
-                        &mut pf_total_i as *mut _ as *mut c_void,
-                        &mut f_off as *mut _ as *mut c_void,
-                        &mut s_ma as *mut _ as *mut c_void,
                         &mut ps_tile_i as *mut _ as *mut c_void,
+                        &mut pf_total_i as *mut _ as *mut c_void,
                         &mut ps_total_i as *mut _ as *mut c_void,
+                        &mut f_off as *mut _ as *mut c_void,
                         &mut s_off as *mut _ as *mut c_void,
                         &mut f_per as *mut _ as *mut c_void,
                         &mut s_per as *mut _ as *mut c_void,
-                        &mut pr as *mut _ as *mut c_void,
-                        &mut T as *mut _ as *mut c_void,
                         &mut fv as *mut _ as *mut c_void,
                         &mut commission as *mut _ as *mut c_void,
+                        &mut eps_rel as *mut _ as *mut c_void,
+                        &mut flags_u as *mut _ as *mut c_void,
                         &mut M as *mut _ as *mut c_void,
                         &mut out as *mut _ as *mut c_void,
                     ];
