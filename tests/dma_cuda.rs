@@ -72,7 +72,7 @@ fn dma_cuda_batch_wma_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         .copy_to(&mut gpu_host)
         .expect("copy dma gpu results");
 
-    let tol = 1e-3;
+    let tol = 3e-4;
     for idx in 0..(cpu.rows * cpu.cols) {
         let a = cpu.values[idx];
         let b = gpu_host[idx] as f64;
@@ -130,7 +130,7 @@ fn dma_cuda_batch_ema_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         .copy_to(&mut gpu_host)
         .expect("copy dma gpu results");
 
-    let tol = 1e-3;
+    let tol = 3e-4;
     for idx in 0..(cpu.rows * cpu.cols) {
         let a = cpu.values[idx];
         let b = gpu_host[idx] as f64;

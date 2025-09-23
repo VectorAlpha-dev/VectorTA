@@ -15,14 +15,60 @@ use crate::indicators::moving_averages::ehlers_pma::{
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::DeviceBuffer;
+use cust::memory::{DeviceBuffer, mem_get_info};
 use cust::module::Module;
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
-use cust::sys as cu;
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+// -------- Kernel selection policy (parity with ALMA) --------
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchThreadsPerOutput { One, Two }
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelPolicy {
+    Auto,
+    Plain { block_x: u32 },
+    Tiled { tile: u32, per_thread: BatchThreadsPerOutput },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelPolicy {
+    Auto,
+    OneD { block_x: u32 },
+    Tiled2D { tx: u32, ty: u32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CudaEhlersPmaPolicy {
+    pub batch: BatchKernelPolicy,
+    pub many_series: ManySeriesKernelPolicy,
+}
+
+impl Default for CudaEhlersPmaPolicy {
+    fn default() -> Self {
+        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+    }
+}
+
+// -------- Introspection (selected kernel) --------
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+    Tiled1x { tile: u32 },
+    Tiled2x { tile: u32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+    Tiled2D { tx: u32, ty: u32 },
+}
 
 #[derive(Debug)]
 pub enum CudaEhlersPmaError {
@@ -63,6 +109,12 @@ pub struct CudaEhlersPma {
     module: Module,
     stream: Stream,
     _context: Context,
+    device_id: u32,
+    policy: CudaEhlersPmaPolicy,
+    last_batch: Option<BatchKernelSelected>,
+    last_many: Option<ManySeriesKernelSelected>,
+    debug_batch_logged: bool,
+    debug_many_logged: bool,
 }
 
 impl CudaEhlersPma {
@@ -83,7 +135,61 @@ impl CudaEhlersPma {
             module,
             stream,
             _context: context,
+            device_id: device_id as u32,
+            policy: CudaEhlersPmaPolicy::default(),
+            last_batch: None,
+            last_many: None,
+            debug_batch_logged: false,
+            debug_many_logged: false,
         })
+    }
+
+    /// Create using an explicit policy (tests/benches).
+    pub fn new_with_policy(device_id: usize, policy: CudaEhlersPmaPolicy) -> Result<Self, CudaEhlersPmaError> {
+        let mut s = Self::new(device_id)?;
+        s.policy = policy;
+        Ok(s)
+    }
+    pub fn set_policy(&mut self, policy: CudaEhlersPmaPolicy) { self.policy = policy; }
+    pub fn policy(&self) -> &CudaEhlersPmaPolicy { &self.policy }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+
+    /// Explicit synchronize to aid deterministic timing.
+    pub fn synchronize(&self) -> Result<(), CudaEhlersPmaError> {
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaEhlersPmaError::Cuda(e.to_string()))
+    }
+
+    #[inline]
+    fn maybe_log_batch_debug(&self) {
+        static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
+        if self.debug_batch_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_batch {
+                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] EHLERS_PMA batch selected kernel: {:?}", sel);
+                }
+                unsafe { (*(self as *const _ as *mut CudaEhlersPma)).debug_batch_logged = true; }
+            }
+        }
+    }
+
+    #[inline]
+    fn maybe_log_many_debug(&self) {
+        static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
+        if self.debug_many_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_many {
+                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] EHLERS_PMA many-series selected kernel: {:?}", sel);
+                }
+                unsafe { (*(self as *const _ as *mut CudaEhlersPma)).debug_many_logged = true; }
+            }
+        }
     }
 
     #[inline]
@@ -95,19 +201,7 @@ impl CudaEhlersPma {
     }
 
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> {
-        unsafe {
-            let mut free = 0usize;
-            let mut total = 0usize;
-            if cu::cuMemGetInfo_v2(&mut free as *mut usize, &mut total as *mut usize)
-                == cu::CUresult::CUDA_SUCCESS
-            {
-                Some((free, total))
-            } else {
-                None
-            }
-        }
-    }
+    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
 
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
@@ -184,7 +278,7 @@ impl CudaEhlersPma {
                 .map_err(|e| CudaEhlersPmaError::Cuda(e.to_string()))?
         };
 
-        self.launch_batch_kernel(
+        self.launch_batch_kernel_select(
             &d_prices,
             series_len,
             n_combos,
@@ -192,6 +286,11 @@ impl CudaEhlersPma {
             &mut d_predict,
             &mut d_trigger,
         )?;
+
+        // Synchronize for deterministic timing of VRAM handle return
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaEhlersPmaError::Cuda(e.to_string()))?;
 
         Ok(DeviceEhlersPmaPair {
             predict: DeviceArrayF32 {
@@ -207,7 +306,7 @@ impl CudaEhlersPma {
         })
     }
 
-    fn launch_batch_kernel(
+    fn launch_batch_kernel_select(
         &self,
         d_prices: &DeviceBuffer<f32>,
         series_len: usize,
@@ -216,13 +315,40 @@ impl CudaEhlersPma {
         d_predict: &mut DeviceBuffer<f32>,
         d_trigger: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaEhlersPmaError> {
-        let func = self
-            .module
-            .get_function("ehlers_pma_batch_f32")
-            .map_err(|e| CudaEhlersPmaError::Cuda(e.to_string()))?;
+        // Select function based on policy and symbol availability
+        let mut func_name = "ehlers_pma_batch_f32";
+        let mut block_x = 1u32;
+        match self.policy.batch {
+            BatchKernelPolicy::Plain { block_x: bx } => {
+                block_x = bx.max(1);
+                unsafe { (*(self as *const _ as *mut CudaEhlersPma)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
+            }
+            BatchKernelPolicy::Tiled { tile, per_thread } => {
+                let cand = match tile { 256 => "ehlers_pma_batch_tiled_f32_tile256", _ => "ehlers_pma_batch_tiled_f32_tile128" };
+                if self.module.get_function(cand).is_ok() {
+                    func_name = cand;
+                    unsafe { (*(self as *const _ as *mut CudaEhlersPma)).last_batch = Some(match per_thread { BatchThreadsPerOutput::One => BatchKernelSelected::Tiled1x { tile }, BatchThreadsPerOutput::Two => BatchKernelSelected::Tiled2x { tile } }); }
+                } else {
+                    unsafe { (*(self as *const _ as *mut CudaEhlersPma)).last_batch = Some(BatchKernelSelected::Plain { block_x: 1 }); }
+                }
+            }
+            BatchKernelPolicy::Auto => {
+                if self.module.get_function("ehlers_pma_batch_tiled_f32_tile256").is_ok() {
+                    func_name = "ehlers_pma_batch_tiled_f32_tile256";
+                    unsafe { (*(self as *const _ as *mut CudaEhlersPma)).last_batch = Some(BatchKernelSelected::Tiled1x { tile: 256 }); }
+                } else if self.module.get_function("ehlers_pma_batch_tiled_f32_tile128").is_ok() {
+                    func_name = "ehlers_pma_batch_tiled_f32_tile128";
+                    unsafe { (*(self as *const _ as *mut CudaEhlersPma)).last_batch = Some(BatchKernelSelected::Tiled1x { tile: 128 }); }
+                } else {
+                    unsafe { (*(self as *const _ as *mut CudaEhlersPma)).last_batch = Some(BatchKernelSelected::Plain { block_x: 1 }); }
+                }
+            }
+        }
+        self.maybe_log_batch_debug();
 
+        let func = self.module.get_function(func_name).map_err(|e| CudaEhlersPmaError::Cuda(e.to_string()))?;
         let grid: GridSize = (n_combos as u32, 1, 1).into();
-        let block: BlockSize = (1, 1, 1).into();
+        let block: BlockSize = (block_x.max(1), 1, 1).into();
         let shared = 0u32;
 
         unsafe {
@@ -323,7 +449,7 @@ impl CudaEhlersPma {
                 .map_err(|e| CudaEhlersPmaError::Cuda(e.to_string()))?
         };
 
-        self.launch_many_series_kernel(
+        self.launch_many_series_kernel_select(
             &d_prices_tm,
             cols,
             rows,
@@ -331,6 +457,10 @@ impl CudaEhlersPma {
             &mut d_predict_tm,
             &mut d_trigger_tm,
         )?;
+
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaEhlersPmaError::Cuda(e.to_string()))?;
 
         Ok(DeviceEhlersPmaPair {
             predict: DeviceArrayF32 {
@@ -346,7 +476,7 @@ impl CudaEhlersPma {
         })
     }
 
-    fn launch_many_series_kernel(
+    fn launch_many_series_kernel_select(
         &self,
         d_prices_tm: &DeviceBuffer<f32>,
         cols: usize,
@@ -355,13 +485,40 @@ impl CudaEhlersPma {
         d_predict_tm: &mut DeviceBuffer<f32>,
         d_trigger_tm: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaEhlersPmaError> {
+        let (fname, (bx, by, bz), (gx, gy, gz), sel) = match self.policy.many_series {
+            ManySeriesKernelPolicy::Tiled2D { tx, ty } => {
+                let fname = match (tx, ty) {
+                    (1, 4) => "ehlers_pma_ms1p_tiled_f32_tx1_ty4",
+                    (1, 2) => "ehlers_pma_ms1p_tiled_f32_tx1_ty2",
+                    _ => "ehlers_pma_many_series_one_param_f32",
+                };
+                let grid_x = ((cols as u32) + ty - 1) / ty;
+                (fname, (tx.max(1), ty.max(1), 1u32), (grid_x, 1u32, 1u32), Some(ManySeriesKernelSelected::Tiled2D { tx, ty }))
+            }
+            ManySeriesKernelPolicy::OneD { block_x } => {
+                ("ehlers_pma_many_series_one_param_f32", (block_x.max(1), 1u32, 1u32), (cols as u32, 1u32, 1u32), Some(ManySeriesKernelSelected::OneD { block_x }))
+            }
+            ManySeriesKernelPolicy::Auto => {
+                if cols >= 16 && self.module.get_function("ehlers_pma_ms1p_tiled_f32_tx1_ty4").is_ok() {
+                    let grid_x = ((cols as u32) + 4 - 1) / 4;
+                    ("ehlers_pma_ms1p_tiled_f32_tx1_ty4", (1u32, 4u32, 1u32), (grid_x, 1u32, 1u32), Some(ManySeriesKernelSelected::Tiled2D { tx: 1, ty: 4 }))
+                } else if cols >= 8 && self.module.get_function("ehlers_pma_ms1p_tiled_f32_tx1_ty2").is_ok() {
+                    let grid_x = ((cols as u32) + 2 - 1) / 2;
+                    ("ehlers_pma_ms1p_tiled_f32_tx1_ty2", (1u32, 2u32, 1u32), (grid_x, 1u32, 1u32), Some(ManySeriesKernelSelected::Tiled2D { tx: 1, ty: 2 }))
+                } else {
+                    ("ehlers_pma_many_series_one_param_f32", (1u32, 1u32, 1u32), (cols as u32, 1u32, 1u32), Some(ManySeriesKernelSelected::OneD { block_x: 1 }))
+                }
+            }
+        };
+        if let Some(selv) = sel { unsafe { (*(self as *const _ as *mut CudaEhlersPma)).last_many = Some(selv); } }
+        self.maybe_log_many_debug();
+
         let func = self
             .module
-            .get_function("ehlers_pma_many_series_one_param_f32")
+            .get_function(fname)
             .map_err(|e| CudaEhlersPmaError::Cuda(e.to_string()))?;
-
-        let grid: GridSize = (cols as u32, 1, 1).into();
-        let block: BlockSize = (1, 1, 1).into();
+        let block: BlockSize = (bx, by, bz).into();
+        let grid: GridSize = (gx, gy, gz).into();
         let shared = 0u32;
 
         unsafe {
@@ -427,6 +584,55 @@ impl CudaEhlersPma {
         Ok((pair.rows(), pair.cols(), combos))
     }
 
+    /// Batch launch using device-resident price series. Caller supplies
+    /// `series_len` and `first_valid`.
+    pub fn ehlers_pma_batch_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        sweep: &EhlersPmaBatchRange,
+    ) -> Result<DeviceEhlersPmaPair, CudaEhlersPmaError> {
+        if series_len == 0 { return Err(CudaEhlersPmaError::InvalidInput("series_len is zero".into())); }
+        if series_len - first_valid < 14 {
+            return Err(CudaEhlersPmaError::InvalidInput(format!(
+                "not enough valid data (needed >= 14, valid = {})",
+                series_len.saturating_sub(first_valid)
+            )));
+        }
+        let combos = expand_grid(sweep);
+        if combos.is_empty() {
+            return Err(CudaEhlersPmaError::InvalidInput("no parameter combinations for Ehlers PMA".into()));
+        }
+
+        let n_combos = combos.len();
+        let mut d_predict: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized(n_combos * series_len)
+                .map_err(|e| CudaEhlersPmaError::Cuda(e.to_string()))?
+        };
+        let mut d_trigger: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized(n_combos * series_len)
+                .map_err(|e| CudaEhlersPmaError::Cuda(e.to_string()))?
+        };
+
+        self.launch_batch_kernel_select(
+            d_prices,
+            series_len,
+            n_combos,
+            first_valid,
+            &mut d_predict,
+            &mut d_trigger,
+        )?;
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaEhlersPmaError::Cuda(e.to_string()))?;
+
+        Ok(DeviceEhlersPmaPair {
+            predict: DeviceArrayF32 { buf: d_predict, rows: n_combos, cols: series_len },
+            trigger: DeviceArrayF32 { buf: d_trigger, rows: n_combos, cols: series_len },
+        })
+    }
+
     /// Batch launch using pre-allocated device buffers (benchmark helper).
     #[allow(clippy::too_many_arguments)]
     pub fn ehlers_pma_batch_device(
@@ -448,7 +654,7 @@ impl CudaEhlersPma {
                 "arguments exceed kernel limits".into(),
             ));
         }
-        self.launch_batch_kernel(
+        self.launch_batch_kernel_select(
             d_prices,
             series_len,
             n_combos,
@@ -520,7 +726,7 @@ impl CudaEhlersPma {
                 "arguments exceed kernel limits".into(),
             ));
         }
-        self.launch_many_series_kernel(
+        self.launch_many_series_kernel_select(
             d_prices_tm,
             cols,
             rows,
