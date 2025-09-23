@@ -66,7 +66,7 @@ fn ehlers_pma_cuda_one_series_many_params_matches_cpu() -> Result<(), Box<dyn st
         .copy_to(&mut gpu_trigger)
         .expect("copy trigger");
 
-    let tol = 5e-5;
+    let tol = 2e-5;
     for combo in 0..sweep.combos {
         for idx in 0..series_len {
             let cpu_p = cpu.predict[idx];
@@ -153,7 +153,7 @@ fn ehlers_pma_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std
         .copy_to(&mut gpu_trigger_tm)
         .expect("copy trigger tm");
 
-    let tol = 5e-5;
+    let tol = 2e-5;
     for idx in 0..num_series * series_len {
         let cpu_p = cpu_predict_tm[idx];
         let gpu_p = gpu_predict_tm[idx] as f64;
