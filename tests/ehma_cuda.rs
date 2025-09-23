@@ -62,7 +62,7 @@ fn ehma_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         .copy_to(&mut gpu_host)
         .expect("copy cuda ehma batch result");
 
-    let tol = 2.5e-4f64;
+    let tol = 1.0e-4f64;
     for idx in 0..(cpu.rows * cpu.cols) {
         let a = cpu.values[idx];
         let b = gpu_host[idx] as f64;
@@ -129,7 +129,7 @@ fn ehma_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
         .copy_to(&mut gpu_tm)
         .expect("copy cuda ehma many-series result");
 
-    let tol = 2.5e-4f64;
+    let tol = 1.0e-4f64;
     for idx in 0..(num_series * series_len) {
         let a = cpu_tm[idx];
         let b = gpu_tm[idx] as f64;

@@ -30,6 +30,7 @@ fn collect_registered_profiles() -> Vec<CudaBenchScenario> {
     v.extend(my_project::cuda::moving_averages::volume_adjusted_ma_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::moving_averages::vwma_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::moving_averages::vwap_wrapper::benches::bench_profiles());
+    v.extend(my_project::cuda::moving_averages::edcf_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::moving_averages::pwma_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::moving_averages::nma_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::moving_averages::kama_wrapper::benches::bench_profiles());
