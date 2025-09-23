@@ -65,7 +65,7 @@ fn ehlers_itrend_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Erro
         .copy_to(&mut gpu_flat)
         .expect("copy itrend cuda batch result to host");
 
-    let tol = 5e-4;
+    let tol = 3e-4;
     for idx in 0..cpu.values.len() {
         let cpu_val = cpu.values[idx];
         let gpu_val = gpu_flat[idx] as f64;
@@ -143,7 +143,7 @@ fn ehlers_itrend_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn 
         .copy_to(&mut gpu_tm)
         .expect("copy itrend cuda many-series result to host");
 
-    let tol = 5e-4;
+    let tol = 3e-4;
     for idx in 0..gpu_tm.len() {
         let cpu_val = cpu_tm[idx];
         let gpu_val = gpu_tm[idx] as f64;

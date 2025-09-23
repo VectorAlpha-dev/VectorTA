@@ -13,6 +13,11 @@
 #include <math.h>
 #include <math_constants.h>
 
+// FMA-based linear interpolation: prev + a * (x - prev)
+__device__ __forceinline__ float lerp_fma(float prev, float x, float a) {
+    return __fmaf_rn(a, x - prev, prev);
+}
+
 __device__ __forceinline__ float ring_get(const float buf[7], int center, int offset) {
     int idx = center - offset;
     idx += 7;
@@ -40,8 +45,8 @@ void ehlers_itrend_batch_f32(const float* __restrict__ prices,
         return;
     }
 
-    extern __shared__ float shared[];
-    float* sum_ring = shared;
+    extern __shared__ __align__(16) unsigned char shraw[];
+    float* sum_ring = reinterpret_cast<float*>(shraw);
 
     for (int idx = threadIdx.x; idx < max_shared_dc; idx += blockDim.x) {
         sum_ring[idx] = 0.0f;
@@ -84,7 +89,10 @@ void ehlers_itrend_batch_f32(const float* __restrict__ prices,
         const float x2 = (i >= 2) ? prices[i - 2] : 0.0f;
         const float x3 = (i >= 3) ? prices[i - 3] : 0.0f;
 
-        const float fir_val = (4.0f * x0 + 3.0f * x1 + 2.0f * x2 + x3) * 0.1f;
+        const float fir_val = 0.1f *
+            __fmaf_rn(4.0f, x0,
+            __fmaf_rn(3.0f, x1,
+            __fmaf_rn(2.0f, x2, x3)));
         fir_buf[ring_ptr] = fir_val;
 
         const float fir_0 = ring_get(fir_buf, ring_ptr, 0);
@@ -92,9 +100,10 @@ void ehlers_itrend_batch_f32(const float* __restrict__ prices,
         const float fir_4 = ring_get(fir_buf, ring_ptr, 4);
         const float fir_6 = ring_get(fir_buf, ring_ptr, 6);
 
-        const float h_in = coeff_0962 * fir_0 + coeff_5769 * fir_2 - coeff_5769 * fir_4 -
-                           coeff_0962 * fir_6;
-        const float period_mult = 0.075f * prev_mesa + 0.54f;
+        const float h_in = __fmaf_rn(coeff_0962, fir_0,
+                           __fmaf_rn(coeff_5769, fir_2,
+                           __fmaf_rn(-coeff_5769, fir_4, -coeff_0962 * fir_6)));
+        const float period_mult = __fmaf_rn(0.075f, prev_mesa, 0.54f);
         const float det_val = h_in * period_mult;
         det_buf[ring_ptr] = det_val;
 
@@ -105,8 +114,9 @@ void ehlers_itrend_batch_f32(const float* __restrict__ prices,
         const float det_2 = ring_get(det_buf, ring_ptr, 2);
         const float det_4 = ring_get(det_buf, ring_ptr, 4);
         const float det_6 = ring_get(det_buf, ring_ptr, 6);
-        const float h_in_q1 = coeff_0962 * det_0 + coeff_5769 * det_2 -
-                              coeff_5769 * det_4 - coeff_0962 * det_6;
+        const float h_in_q1 = __fmaf_rn(coeff_0962, det_0,
+                               __fmaf_rn(coeff_5769, det_2,
+                               __fmaf_rn(-coeff_5769, det_4, -coeff_0962 * det_6)));
         const float q1_val = h_in_q1 * period_mult;
         q1_buf[ring_ptr] = q1_val;
 
@@ -114,34 +124,35 @@ void ehlers_itrend_batch_f32(const float* __restrict__ prices,
         const float i1_2 = ring_get(i1_buf, ring_ptr, 2);
         const float i1_4 = ring_get(i1_buf, ring_ptr, 4);
         const float i1_6 = ring_get(i1_buf, ring_ptr, 6);
-        const float j_i_val =
-            (coeff_0962 * i1_0 + coeff_5769 * i1_2 - coeff_5769 * i1_4 -
-             coeff_0962 * i1_6) * period_mult;
+        const float j_i_val = __fmaf_rn(coeff_0962, i1_0,
+                               __fmaf_rn(coeff_5769, i1_2,
+                               __fmaf_rn(-coeff_5769, i1_4, -coeff_0962 * i1_6))) * period_mult;
 
         const float q1_0 = ring_get(q1_buf, ring_ptr, 0);
         const float q1_2 = ring_get(q1_buf, ring_ptr, 2);
         const float q1_4 = ring_get(q1_buf, ring_ptr, 4);
         const float q1_6 = ring_get(q1_buf, ring_ptr, 6);
-        const float j_q_val =
-            (coeff_0962 * q1_0 + coeff_5769 * q1_2 - coeff_5769 * q1_4 -
-             coeff_0962 * q1_6) * period_mult;
+        const float j_q_val = __fmaf_rn(coeff_0962, q1_0,
+                               __fmaf_rn(coeff_5769, q1_2,
+                               __fmaf_rn(-coeff_5769, q1_4, -coeff_0962 * q1_6))) * period_mult;
 
-        const float i2_cur = 0.2f * (i1_val - j_q_val) + 0.8f * prev_i2;
-        const float q2_cur = 0.2f * (q1_val + j_i_val) + 0.8f * prev_q2;
+        const float i2_cur = __fmaf_rn(0.2f, (i1_val - j_q_val), 0.8f * prev_i2);
+        const float q2_cur = __fmaf_rn(0.2f, (q1_val + j_i_val), 0.8f * prev_q2);
 
         const float re_val = i2_cur * prev_i2 + q2_cur * prev_q2;
         const float im_val = i2_cur * prev_q2 - q2_cur * prev_i2;
         prev_i2 = i2_cur;
         prev_q2 = q2_cur;
 
-        const float re_smooth = 0.2f * re_val + 0.8f * prev_re;
-        const float im_smooth = 0.2f * im_val + 0.8f * prev_im;
+        const float re_smooth = lerp_fma(prev_re, re_val, 0.2f);
+        const float im_smooth = lerp_fma(prev_im, im_val, 0.2f);
         prev_re = re_smooth;
         prev_im = im_smooth;
 
         float new_mesa = 0.0f;
         if (re_smooth != 0.0f && im_smooth != 0.0f) {
-            new_mesa = 2.0f * CUDART_PI_F / atanf(im_smooth / re_smooth);
+            const float phase = atan2f(im_smooth, re_smooth);
+            new_mesa = 2.0f * CUDART_PI_F / phase;
         }
         const float up_lim = 1.5f * prev_mesa;
         if (new_mesa > up_lim) {
@@ -156,9 +167,9 @@ void ehlers_itrend_batch_f32(const float* __restrict__ prices,
         } else if (new_mesa > 50.0f) {
             new_mesa = 50.0f;
         }
-        const float final_mesa = 0.2f * new_mesa + 0.8f * prev_mesa;
+        const float final_mesa = lerp_fma(prev_mesa, new_mesa, 0.2f);
         prev_mesa = final_mesa;
-        const float sp_val = 0.33f * final_mesa + 0.67f * prev_smooth;
+        const float sp_val = lerp_fma(prev_smooth, final_mesa, 0.33f);
         prev_smooth = sp_val;
 
         int dcp = static_cast<int>(floorf(sp_val + 0.5f));
@@ -175,17 +186,22 @@ void ehlers_itrend_batch_f32(const float* __restrict__ prices,
             sum_idx = 0;
         }
 
-        float sum_src = 0.0f;
+        float sum_src = 0.0f, c = 0.0f;
         int idx2 = sum_idx;
         for (int cnt = 0; cnt < dcp; ++cnt) {
             idx2 = (idx2 == 0) ? (max_dc - 1) : (idx2 - 1);
-            sum_src += sum_ring[idx2];
+            float y = sum_ring[idx2] - c;
+            float t = sum_src + y;
+            c = (t - sum_src) - y;
+            sum_src = t;
         }
         const float it_val = sum_src / static_cast<float>(dcp);
 
         const float eit_val = (i < warmup)
             ? x0
-            : (4.0f * it_val + 3.0f * prev_it1 + 2.0f * prev_it2 + prev_it3) * 0.1f;
+            : 0.1f * __fmaf_rn(4.0f, it_val,
+                      __fmaf_rn(3.0f, prev_it1,
+                      __fmaf_rn(2.0f, prev_it2, prev_it3)));
 
         prev_it3 = prev_it2;
         prev_it2 = prev_it1;
@@ -218,7 +234,8 @@ void ehlers_itrend_many_series_one_param_f32(
 
     const int stride = num_series;
 
-    extern __shared__ float sum_ring[];
+    extern __shared__ __align__(16) unsigned char shraw[];
+    float* sum_ring = reinterpret_cast<float*>(shraw);
     for (int idx = threadIdx.x; idx < max_dc; idx += blockDim.x) {
         sum_ring[idx] = 0.0f;
     }
@@ -261,7 +278,10 @@ void ehlers_itrend_many_series_one_param_f32(
         const float x2 = (t >= 2) ? prices_tm[(t - 2) * stride + series_idx] : 0.0f;
         const float x3 = (t >= 3) ? prices_tm[(t - 3) * stride + series_idx] : 0.0f;
 
-        const float fir_val = (4.0f * x0 + 3.0f * x1 + 2.0f * x2 + x3) * 0.1f;
+        const float fir_val = 0.1f *
+            __fmaf_rn(4.0f, x0,
+            __fmaf_rn(3.0f, x1,
+            __fmaf_rn(2.0f, x2, x3)));
         fir_buf[ring_ptr] = fir_val;
 
         const float fir_0 = ring_get(fir_buf, ring_ptr, 0);
@@ -269,9 +289,10 @@ void ehlers_itrend_many_series_one_param_f32(
         const float fir_4 = ring_get(fir_buf, ring_ptr, 4);
         const float fir_6 = ring_get(fir_buf, ring_ptr, 6);
 
-        const float h_in = coeff_0962 * fir_0 + coeff_5769 * fir_2 - coeff_5769 * fir_4 -
-                           coeff_0962 * fir_6;
-        const float period_mult = 0.075f * prev_mesa + 0.54f;
+        const float h_in = __fmaf_rn(coeff_0962, fir_0,
+                           __fmaf_rn(coeff_5769, fir_2,
+                           __fmaf_rn(-coeff_5769, fir_4, -coeff_0962 * fir_6)));
+        const float period_mult = __fmaf_rn(0.075f, prev_mesa, 0.54f);
         const float det_val = h_in * period_mult;
         det_buf[ring_ptr] = det_val;
 
@@ -282,8 +303,9 @@ void ehlers_itrend_many_series_one_param_f32(
         const float det_2 = ring_get(det_buf, ring_ptr, 2);
         const float det_4 = ring_get(det_buf, ring_ptr, 4);
         const float det_6 = ring_get(det_buf, ring_ptr, 6);
-        const float h_in_q1 = coeff_0962 * det_0 + coeff_5769 * det_2 -
-                              coeff_5769 * det_4 - coeff_0962 * det_6;
+        const float h_in_q1 = __fmaf_rn(coeff_0962, det_0,
+                               __fmaf_rn(coeff_5769, det_2,
+                               __fmaf_rn(-coeff_5769, det_4, -coeff_0962 * det_6)));
         const float q1_val = h_in_q1 * period_mult;
         q1_buf[ring_ptr] = q1_val;
 
@@ -291,34 +313,35 @@ void ehlers_itrend_many_series_one_param_f32(
         const float i1_2 = ring_get(i1_buf, ring_ptr, 2);
         const float i1_4 = ring_get(i1_buf, ring_ptr, 4);
         const float i1_6 = ring_get(i1_buf, ring_ptr, 6);
-        const float j_i_val =
-            (coeff_0962 * i1_0 + coeff_5769 * i1_2 - coeff_5769 * i1_4 -
-             coeff_0962 * i1_6) * period_mult;
+        const float j_i_val = __fmaf_rn(coeff_0962, i1_0,
+                               __fmaf_rn(coeff_5769, i1_2,
+                               __fmaf_rn(-coeff_5769, i1_4, -coeff_0962 * i1_6))) * period_mult;
 
         const float q1_0 = ring_get(q1_buf, ring_ptr, 0);
         const float q1_2 = ring_get(q1_buf, ring_ptr, 2);
         const float q1_4 = ring_get(q1_buf, ring_ptr, 4);
         const float q1_6 = ring_get(q1_buf, ring_ptr, 6);
-        const float j_q_val =
-            (coeff_0962 * q1_0 + coeff_5769 * q1_2 - coeff_5769 * q1_4 -
-             coeff_0962 * q1_6) * period_mult;
+        const float j_q_val = __fmaf_rn(coeff_0962, q1_0,
+                               __fmaf_rn(coeff_5769, q1_2,
+                               __fmaf_rn(-coeff_5769, q1_4, -coeff_0962 * q1_6))) * period_mult;
 
-        const float i2_cur = 0.2f * (i1_val - j_q_val) + 0.8f * prev_i2;
-        const float q2_cur = 0.2f * (q1_val + j_i_val) + 0.8f * prev_q2;
+        const float i2_cur = __fmaf_rn(0.2f, (i1_val - j_q_val), 0.8f * prev_i2);
+        const float q2_cur = __fmaf_rn(0.2f, (q1_val + j_i_val), 0.8f * prev_q2);
 
         const float re_val = i2_cur * prev_i2 + q2_cur * prev_q2;
         const float im_val = i2_cur * prev_q2 - q2_cur * prev_i2;
         prev_i2 = i2_cur;
         prev_q2 = q2_cur;
 
-        const float re_smooth = 0.2f * re_val + 0.8f * prev_re;
-        const float im_smooth = 0.2f * im_val + 0.8f * prev_im;
+        const float re_smooth = lerp_fma(prev_re, re_val, 0.2f);
+        const float im_smooth = lerp_fma(prev_im, im_val, 0.2f);
         prev_re = re_smooth;
         prev_im = im_smooth;
 
         float new_mesa = 0.0f;
         if (re_smooth != 0.0f && im_smooth != 0.0f) {
-            new_mesa = 2.0f * CUDART_PI_F / atanf(im_smooth / re_smooth);
+            const float phase = atan2f(im_smooth, re_smooth);
+            new_mesa = 2.0f * CUDART_PI_F / phase;
         }
         const float up_lim = 1.5f * prev_mesa;
         if (new_mesa > up_lim) {
@@ -333,9 +356,9 @@ void ehlers_itrend_many_series_one_param_f32(
         } else if (new_mesa > 50.0f) {
             new_mesa = 50.0f;
         }
-        const float final_mesa = 0.2f * new_mesa + 0.8f * prev_mesa;
+        const float final_mesa = lerp_fma(prev_mesa, new_mesa, 0.2f);
         prev_mesa = final_mesa;
-        const float sp_val = 0.33f * final_mesa + 0.67f * prev_smooth;
+        const float sp_val = lerp_fma(prev_smooth, final_mesa, 0.33f);
         prev_smooth = sp_val;
 
         int dcp = static_cast<int>(floorf(sp_val + 0.5f));
@@ -352,17 +375,22 @@ void ehlers_itrend_many_series_one_param_f32(
             sum_idx = 0;
         }
 
-        float sum_src = 0.0f;
+        float sum_src = 0.0f, c = 0.0f;
         int idx2 = sum_idx;
         for (int cnt = 0; cnt < dcp; ++cnt) {
             idx2 = (idx2 == 0) ? (max_dc - 1) : (idx2 - 1);
-            sum_src += sum_ring[idx2];
+            float y = sum_ring[idx2] - c;
+            float t = sum_src + y;
+            c = (t - sum_src) - y;
+            sum_src = t;
         }
         const float it_val = sum_src / static_cast<float>(dcp);
 
         const float eit_val = (t < warmup)
             ? x0
-            : (4.0f * it_val + 3.0f * prev_it1 + 2.0f * prev_it2 + prev_it3) * 0.1f;
+            : 0.1f * __fmaf_rn(4.0f, it_val,
+                      __fmaf_rn(3.0f, prev_it1,
+                      __fmaf_rn(2.0f, prev_it2, prev_it3)));
 
         prev_it3 = prev_it2;
         prev_it2 = prev_it1;

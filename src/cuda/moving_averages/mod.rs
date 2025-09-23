@@ -81,7 +81,13 @@ pub mod zlema_wrapper;
 pub use alma_wrapper::{CudaAlma, DeviceArrayF32};
 pub use buff_averages_wrapper::{CudaBuffAverages, CudaBuffAveragesError};
 #[cfg(feature = "cuda")]
-pub use cwma_wrapper::CudaCwma;
+pub use cwma_wrapper::{
+    CudaCwma,
+    CudaCwmaPolicy,
+    BatchKernelPolicy,
+    BatchThreadsPerOutput,
+    ManySeriesKernelPolicy,
+};
 #[cfg(feature = "cuda")]
 pub use dema_wrapper::{CudaDema, CudaDemaError};
 pub use dma_wrapper::CudaDma;
@@ -89,7 +95,14 @@ pub use edcf_wrapper::CudaEdcf;
 #[cfg(feature = "cuda")]
 pub use ehlers_ecema_wrapper::CudaEhlersEcema;
 #[cfg(feature = "cuda")]
-pub use ehlers_itrend_wrapper::{CudaEhlersITrend, CudaEhlersITrendError};
+pub use ehlers_itrend_wrapper::{
+    CudaEhlersITrend,
+    CudaEhlersITrendError,
+    CudaEhlersITrendPolicy,
+    BatchKernelPolicy as EhlersItrendBatchKernelPolicy,
+    BatchThreadsPerOutput as EhlersItrendBatchThreadsPerOutput,
+    ManySeriesKernelPolicy as EhlersItrendManySeriesKernelPolicy,
+};
 pub use ehlers_kama_wrapper::CudaEhlersKama;
 pub use ehlers_pma_wrapper::{CudaEhlersPma, DeviceEhlersPmaPair};
 pub use ehma_wrapper::CudaEhma;
