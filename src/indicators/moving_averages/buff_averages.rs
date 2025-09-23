@@ -1870,6 +1870,44 @@ pub fn buff_averages_cuda_batch_dev_py(
     ))
 }
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "buff_averages_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (prices_tm_f32, volumes_tm_f32, cols, rows, fast_period, slow_period, device_id=0))]
+pub fn buff_averages_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    prices_tm_f32: PyReadonlyArray1<'_, f32>,
+    volumes_tm_f32: PyReadonlyArray1<'_, f32>,
+    cols: usize,
+    rows: usize,
+    fast_period: usize,
+    slow_period: usize,
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let prices = prices_tm_f32.as_slice()?;
+    let volumes = volumes_tm_f32.as_slice()?;
+
+    let (fast_dev, slow_dev) = py.allow_threads(|| {
+        let cuda = CudaBuffAverages::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda
+            .buff_averages_many_series_one_param_time_major_dev(
+                prices,
+                volumes,
+                cols,
+                rows,
+                fast_period,
+                slow_period,
+            )
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok((DeviceArrayF32Py { inner: fast_dev }, DeviceArrayF32Py { inner: slow_dev }))
+}
+
 #[cfg(feature = "python")]
 #[pyclass(name = "BuffAveragesStream")]
 pub struct BuffAveragesStreamPy {

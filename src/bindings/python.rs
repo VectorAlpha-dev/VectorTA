@@ -190,7 +190,9 @@ use crate::indicators::moving_averages::alma::{
     alma_cuda_batch_dev_py, alma_cuda_many_series_one_param_dev_py,
 };
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::buff_averages::buff_averages_cuda_batch_dev_py;
+use crate::indicators::moving_averages::buff_averages::{
+    buff_averages_cuda_batch_dev_py, buff_averages_cuda_many_series_one_param_dev_py,
+};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::buff_averages::{
     buff_averages_batch_py, buff_averages_py, BuffAveragesStreamPy,
@@ -1705,6 +1707,10 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(feature = "cuda")]
     {
         m.add_function(wrap_pyfunction!(buff_averages_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(
+            buff_averages_cuda_many_series_one_param_dev_py,
+            m
+        )?)?;
     }
 
     // QQE

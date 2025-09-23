@@ -24,6 +24,7 @@ fn collect_registered_profiles() -> Vec<CudaBenchScenario> {
     v.extend(my_project::cuda::moving_averages::jsa_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::moving_averages::ehlers_itrend_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::moving_averages::ehlers_kama_wrapper::benches::bench_profiles());
+    v.extend(my_project::cuda::moving_averages::ehlers_ecema_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::moving_averages::vpwma_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::moving_averages::vama_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::moving_averages::volume_adjusted_ma_wrapper::benches::bench_profiles());

@@ -68,7 +68,8 @@ fn ehlers_ecema_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error
     let mut gpu_host = vec![0f32; handle.len()];
     handle.buf.copy_to(&mut gpu_host)?;
 
-    let tol = 3e-5;
+    // FP32 compensated is the default for batch; allow slightly looser tol
+    let tol = 1e-4;
     for idx in 0..gpu_host.len() {
         let cpu_v = cpu.values[idx];
         let gpu_v = gpu_host[idx] as f64;

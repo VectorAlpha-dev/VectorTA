@@ -41,10 +41,58 @@ impl fmt::Display for CudaEhlersEcemaError {
 
 impl std::error::Error for CudaEhlersEcemaError {}
 
+/// Kernel selection policy, mirroring the ALMA interface for consistency.
+#[derive(Clone, Copy, Debug)]
+pub enum BatchThreadsPerOutput { One, Two }
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelPolicy {
+    Auto,
+    Plain { block_x: u32 },
+    Tiled { tile: u32, per_thread: BatchThreadsPerOutput },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelPolicy {
+    Auto,
+    OneD { block_x: u32 },
+    Tiled2D { tx: u32, ty: u32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CudaEhlersEcemaPolicy {
+    pub batch: BatchKernelPolicy,
+    pub many_series: ManySeriesKernelPolicy,
+}
+impl Default for CudaEhlersEcemaPolicy {
+    fn default() -> Self {
+        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+    }
+}
+
+/// Introspection: record last selected kernel for debugging/bench logging.
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelSelected {
+    PlainOneBlockPerCombo { block_x: u32 },
+    ThreadPerCombo { block_x: u32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+    Tiled2D { tx: u32, ty: u32 },
+}
+
 pub struct CudaEhlersEcema {
     module: Module,
     stream: Stream,
     _context: Context,
+    device_id: u32,
+    policy: CudaEhlersEcemaPolicy,
+    last_batch: Option<BatchKernelSelected>,
+    last_many: Option<ManySeriesKernelSelected>,
+    debug_batch_logged: bool,
+    debug_many_logged: bool,
 }
 
 impl CudaEhlersEcema {
@@ -65,7 +113,49 @@ impl CudaEhlersEcema {
             module,
             stream,
             _context: context,
+            device_id: device_id as u32,
+            policy: CudaEhlersEcemaPolicy::default(),
+            last_batch: None,
+            last_many: None,
+            debug_batch_logged: false,
+            debug_many_logged: false,
         })
+    }
+
+    /// Create using an explicit kernel selection policy.
+    pub fn new_with_policy(device_id: usize, policy: CudaEhlersEcemaPolicy) -> Result<Self, CudaEhlersEcemaError> {
+        let mut s = Self::new(device_id)?;
+        s.policy = policy;
+        Ok(s)
+    }
+    /// Change current policy.
+    pub fn set_policy(&mut self, policy: CudaEhlersEcemaPolicy) { self.policy = policy; }
+    /// Retrieve current policy.
+    pub fn policy(&self) -> &CudaEhlersEcemaPolicy { &self.policy }
+    /// Last selected batch kernel (if any).
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
+    /// Last selected many-series kernel (if any).
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+
+    #[inline]
+    fn maybe_log_batch_debug(&self) {
+        if self.debug_batch_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_batch {
+                eprintln!("[DEBUG] ECEMA batch selected kernel: {:?}", sel);
+                unsafe { (*(self as *const _ as *mut CudaEhlersEcema)).debug_batch_logged = true; }
+            }
+        }
+    }
+    #[inline]
+    fn maybe_log_many_debug(&self) {
+        if self.debug_many_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_many {
+                eprintln!("[DEBUG] ECEMA many-series selected kernel: {:?}", sel);
+                unsafe { (*(self as *const _ as *mut CudaEhlersEcema)).debug_many_logged = true; }
+            }
+        }
     }
 
     fn mem_check_enabled() -> bool {
@@ -73,6 +163,23 @@ impl CudaEhlersEcema {
             Ok(v) => v != "0" && v.to_lowercase() != "false",
             Err(_) => true,
         }
+    }
+
+    #[inline]
+    fn env_bool(key: &str) -> Option<bool> {
+        env::var(key).ok().and_then(|v| {
+            let s = v.trim().to_ascii_lowercase();
+            match s.as_str() {
+                "1" | "true" | "yes" | "on" => Some(true),
+                "0" | "false" | "no" | "off" => Some(false),
+                _ => None,
+            }
+        })
+    }
+
+    #[inline]
+    fn env_u32(key: &str) -> Option<u32> {
+        env::var(key).ok().and_then(|v| v.trim().parse::<u32>().ok())
     }
 
     fn device_mem_info() -> Option<(usize, usize)> {
@@ -184,7 +291,7 @@ impl CudaEhlersEcema {
         Ok((combos, first_valid, series_len))
     }
 
-    fn launch_batch_kernel(
+    fn launch_batch_plain(
         &self,
         d_prices: &DeviceBuffer<f32>,
         d_lengths: &DeviceBuffer<i32>,
@@ -196,9 +303,12 @@ impl CudaEhlersEcema {
         first_valid: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaEhlersEcemaError> {
-        const BLOCK_X: u32 = 128;
+        let block_x: u32 = match self.policy.batch {
+            BatchKernelPolicy::Plain { block_x } => block_x.max(1),
+            _ => 1,
+        };
         let grid: GridSize = (n_combos as u32, 1, 1).into();
-        let block: BlockSize = (BLOCK_X, 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
 
         let func = self
             .module
@@ -230,6 +340,72 @@ impl CudaEhlersEcema {
                 .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
         }
+        unsafe {
+            let this = self as *const _ as *mut CudaEhlersEcema;
+            (*this).last_batch = Some(BatchKernelSelected::PlainOneBlockPerCombo { block_x });
+        }
+        self.maybe_log_batch_debug();
+        Ok(())
+    }
+
+    fn launch_batch_thread_per_combo(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        d_lengths: &DeviceBuffer<i32>,
+        d_gain_limits: &DeviceBuffer<i32>,
+        d_pine_flags: &DeviceBuffer<u8>,
+        d_confirmed_flags: &DeviceBuffer<u8>,
+        series_len: usize,
+        n_combos: usize,
+        first_valid: usize,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaEhlersEcemaError> {
+        // Batch block size heuristic with env override.
+        let block_x_env = Self::env_u32("ECEMA_BLOCK_X");
+        let block_x: u32 = match self.policy.batch {
+            BatchKernelPolicy::Tiled { tile, .. } => tile.max(1),
+            BatchKernelPolicy::Plain { block_x } => block_x.max(1),
+            BatchKernelPolicy::Auto => block_x_env.unwrap_or(128).max(1),
+        };
+        let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
+        let grid: GridSize = (grid_x, 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+
+        let func = self
+            .module
+            .get_function("ehlers_ecema_batch_thread_per_combo_f32")
+            .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+
+        unsafe {
+            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+            let mut lengths_ptr = d_lengths.as_device_ptr().as_raw();
+            let mut gains_ptr = d_gain_limits.as_device_ptr().as_raw();
+            let mut pine_ptr = d_pine_flags.as_device_ptr().as_raw();
+            let mut confirmed_ptr = d_confirmed_flags.as_device_ptr().as_raw();
+            let mut series_len_i = series_len as i32;
+            let mut combos_i = n_combos as i32;
+            let mut first_valid_i = first_valid as i32;
+            let mut out_ptr = d_out.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut prices_ptr as *mut _ as *mut c_void,
+                &mut lengths_ptr as *mut _ as *mut c_void,
+                &mut gains_ptr as *mut _ as *mut c_void,
+                &mut pine_ptr as *mut _ as *mut c_void,
+                &mut confirmed_ptr as *mut _ as *mut c_void,
+                &mut series_len_i as *mut _ as *mut c_void,
+                &mut combos_i as *mut _ as *mut c_void,
+                &mut first_valid_i as *mut _ as *mut c_void,
+                &mut out_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream
+                .launch(&func, grid, block, 0, args)
+                .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+        }
+        unsafe {
+            let this = self as *const _ as *mut CudaEhlersEcema;
+            (*this).last_batch = Some(BatchKernelSelected::ThreadPerCombo { block_x });
+        }
+        self.maybe_log_batch_debug();
         Ok(())
     }
 
@@ -295,17 +471,43 @@ impl CudaEhlersEcema {
             unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
                 .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
 
-        self.launch_batch_kernel(
-            &d_prices,
-            &d_lengths,
-            &d_gains,
-            &d_pine,
-            &d_confirmed,
-            series_len,
-            n_combos,
-            first_valid,
-            &mut d_out,
-        )?;
+        // Select kernel according to policy. Default to thread-per-combo when available.
+        let have_thread_per_combo = self.module.get_function("ehlers_ecema_batch_thread_per_combo_f32").is_ok();
+        let force_plain = Self::env_bool("ECEMA_FORCE_PLAIN").unwrap_or(false);
+        let force_tiled = Self::env_bool("ECEMA_FORCE_TILED").unwrap_or(false);
+        let use_thread_per_combo = match self.policy.batch {
+            BatchKernelPolicy::Auto => {
+                if force_plain { false } else if force_tiled { true } else { have_thread_per_combo }
+            }
+            BatchKernelPolicy::Plain { .. } => false,
+            BatchKernelPolicy::Tiled { .. } => true,
+        };
+
+        if use_thread_per_combo {
+            self.launch_batch_thread_per_combo(
+                &d_prices,
+                &d_lengths,
+                &d_gains,
+                &d_pine,
+                &d_confirmed,
+                series_len,
+                n_combos,
+                first_valid,
+                &mut d_out,
+            )?
+        } else {
+            self.launch_batch_plain(
+                &d_prices,
+                &d_lengths,
+                &d_gains,
+                &d_pine,
+                &d_confirmed,
+                series_len,
+                n_combos,
+                first_valid,
+                &mut d_out,
+            )?
+        }
 
         self.stream
             .synchronize()
@@ -374,17 +576,37 @@ impl CudaEhlersEcema {
                 "series_len and n_combos must be positive".into(),
             ));
         }
-        self.launch_batch_kernel(
-            d_prices,
-            d_lengths,
-            d_gain_limits,
-            d_pine_flags,
-            d_confirmed_flags,
-            series_len as usize,
-            n_combos as usize,
-            first_valid.max(0) as usize,
-            d_out,
-        )
+        let have_thread_per_combo = self.module.get_function("ehlers_ecema_batch_thread_per_combo_f32").is_ok();
+        let use_thread_per_combo = match self.policy.batch {
+            BatchKernelPolicy::Auto => have_thread_per_combo,
+            BatchKernelPolicy::Plain { .. } => false,
+            BatchKernelPolicy::Tiled { .. } => true,
+        };
+        if use_thread_per_combo {
+            self.launch_batch_thread_per_combo(
+                d_prices,
+                d_lengths,
+                d_gain_limits,
+                d_pine_flags,
+                d_confirmed_flags,
+                series_len as usize,
+                n_combos as usize,
+                first_valid.max(0) as usize,
+                d_out,
+            )
+        } else {
+            self.launch_batch_plain(
+                d_prices,
+                d_lengths,
+                d_gain_limits,
+                d_pine_flags,
+                d_confirmed_flags,
+                series_len as usize,
+                n_combos as usize,
+                first_valid.max(0) as usize,
+                d_out,
+            )
+        }
     }
 
     fn prepare_many_series_inputs(
@@ -460,41 +682,163 @@ impl CudaEhlersEcema {
         d_first_valids: &DeviceBuffer<i32>,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaEhlersEcemaError> {
-        const BLOCK_X: u32 = 128;
-        let grid: GridSize = (cols as u32, 1, 1).into();
-        let block: BlockSize = (BLOCK_X, 1, 1).into();
+        match self.policy.many_series {
+            ManySeriesKernelPolicy::Auto | ManySeriesKernelPolicy::OneD { .. } => {
+                let force_2d = Self::env_bool("ECEMA_FORCE_2D").unwrap_or(false);
+                let force_1d = Self::env_bool("ECEMA_FORCE_1D").unwrap_or(false);
+                let series_2d_min = Self::env_u32("ECEMA_2D_MIN_SERIES").unwrap_or(2048) as usize;
 
-        let func = self
-            .module
-            .get_function("ehlers_ecema_many_series_one_param_time_major_f32")
-            .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+                // Auto switch to 2D for large number of series, unless forced.
+                if matches!(self.policy.many_series, ManySeriesKernelPolicy::Auto)
+                    && !force_1d
+                    && (force_2d || cols >= series_2d_min)
+                {
+                    // Choose tx/ty with env overrides, defaults tuned for occupancy.
+                    let tx = Self::env_u32("ECEMA_2D_TX").unwrap_or(128).max(1);
+                    let ty = Self::env_u32("ECEMA_2D_TY").unwrap_or(2).max(1);
+                    let series_per_block = (tx * ty) as usize;
+                    let total_blocks = ((cols + series_per_block - 1) / series_per_block) as u32;
+                    let grid_x = ((cols as u32) + tx - 1) / tx;
+                    let grid_y = ((total_blocks + grid_x - 1) / grid_x).max(1);
+                    let grid: GridSize = (grid_x, grid_y, 1).into();
+                    let block: BlockSize = (tx, ty, 1).into();
+                    let func_name = if self.module.get_function("ehlers_ecema_many_series_one_param_2d_f32").is_ok() {
+                        "ehlers_ecema_many_series_one_param_2d_f32"
+                    } else if self.module.get_function("ehlers_ecema_many_series_one_param_1d_f32").is_ok() {
+                        "ehlers_ecema_many_series_one_param_1d_f32"
+                    } else {
+                        "ehlers_ecema_many_series_one_param_time_major_f32"
+                    };
+                    let func = self.module.get_function(func_name)
+                        .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+                    unsafe {
+                        let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+                        let mut cols_i = cols as i32;
+                        let mut rows_i = rows as i32;
+                        let mut length_i = length as i32;
+                        let mut gain_limit_i = gain_limit as i32;
+                        let mut pine_flag = if pine_mode { 1u8 } else { 0u8 };
+                        let mut confirmed_flag = if confirmed { 1u8 } else { 0u8 };
+                        let mut first_ptr = d_first_valids.as_device_ptr().as_raw();
+                        let mut out_ptr = d_out.as_device_ptr().as_raw();
+                        let args: &mut [*mut c_void] = &mut [
+                            &mut prices_ptr as *mut _ as *mut c_void,
+                            &mut cols_i as *mut _ as *mut c_void,
+                            &mut rows_i as *mut _ as *mut c_void,
+                            &mut length_i as *mut _ as *mut c_void,
+                            &mut gain_limit_i as *mut _ as *mut c_void,
+                            &mut pine_flag as *mut _ as *mut c_void,
+                            &mut confirmed_flag as *mut _ as *mut c_void,
+                            &mut first_ptr as *mut _ as *mut c_void,
+                            &mut out_ptr as *mut _ as *mut c_void,
+                        ];
+                        self.stream.launch(&func, grid, block, 0, args)
+                            .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+                    }
+                    unsafe {
+                        let this = self as *const _ as *mut CudaEhlersEcema;
+                        (*this).last_many = Some(ManySeriesKernelSelected::Tiled2D { tx, ty });
+                    }
+                    self.maybe_log_many_debug();
+                    return Ok(());
+                }
 
-        unsafe {
-            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
-            let mut cols_i = cols as i32;
-            let mut rows_i = rows as i32;
-            let mut length_i = length as i32;
-            let mut gain_limit_i = gain_limit as i32;
-            let mut pine_flag = if pine_mode { 1u8 } else { 0u8 };
-            let mut confirmed_flag = if confirmed { 1u8 } else { 0u8 };
-            let mut first_ptr = d_first_valids.as_device_ptr().as_raw();
-            let mut out_ptr = d_out.as_device_ptr().as_raw();
-            let args: &mut [*mut c_void] = &mut [
-                &mut prices_ptr as *mut _ as *mut c_void,
-                &mut cols_i as *mut _ as *mut c_void,
-                &mut rows_i as *mut _ as *mut c_void,
-                &mut length_i as *mut _ as *mut c_void,
-                &mut gain_limit_i as *mut _ as *mut c_void,
-                &mut pine_flag as *mut _ as *mut c_void,
-                &mut confirmed_flag as *mut _ as *mut c_void,
-                &mut first_ptr as *mut _ as *mut c_void,
-                &mut out_ptr as *mut _ as *mut c_void,
-            ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+                let block_x = match self.policy.many_series {
+                    ManySeriesKernelPolicy::OneD { block_x } => block_x.max(1),
+                    _ => Self::env_u32("ECEMA_ONE_D_BLOCK_X").unwrap_or(128).max(1),
+                };
+                let grid_x = ((cols as u32) + block_x - 1) / block_x;
+                let grid: GridSize = (grid_x, 1, 1).into();
+                let block: BlockSize = (block_x, 1, 1).into();
+                let func_name = if self.module.get_function("ehlers_ecema_many_series_one_param_1d_f32").is_ok() {
+                    "ehlers_ecema_many_series_one_param_1d_f32"
+                } else {
+                    "ehlers_ecema_many_series_one_param_time_major_f32"
+                };
+                let func = self.module.get_function(func_name)
+                    .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+                unsafe {
+                    let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+                    let mut cols_i = cols as i32;
+                    let mut rows_i = rows as i32;
+                    let mut length_i = length as i32;
+                    let mut gain_limit_i = gain_limit as i32;
+                    let mut pine_flag = if pine_mode { 1u8 } else { 0u8 };
+                    let mut confirmed_flag = if confirmed { 1u8 } else { 0u8 };
+                    let mut first_ptr = d_first_valids.as_device_ptr().as_raw();
+                    let mut out_ptr = d_out.as_device_ptr().as_raw();
+                    let args: &mut [*mut c_void] = &mut [
+                        &mut prices_ptr as *mut _ as *mut c_void,
+                        &mut cols_i as *mut _ as *mut c_void,
+                        &mut rows_i as *mut _ as *mut c_void,
+                        &mut length_i as *mut _ as *mut c_void,
+                        &mut gain_limit_i as *mut _ as *mut c_void,
+                        &mut pine_flag as *mut _ as *mut c_void,
+                        &mut confirmed_flag as *mut _ as *mut c_void,
+                        &mut first_ptr as *mut _ as *mut c_void,
+                        &mut out_ptr as *mut _ as *mut c_void,
+                    ];
+                    self.stream.launch(&func, grid, block, 0, args)
+                        .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+                }
+                unsafe {
+                    let this = self as *const _ as *mut CudaEhlersEcema;
+                    (*this).last_many = Some(ManySeriesKernelSelected::OneD { block_x });
+                }
+                self.maybe_log_many_debug();
+                Ok(())
+            }
+            ManySeriesKernelPolicy::Tiled2D { tx, ty } => {
+                let tx = tx.max(1);
+                let ty = ty.max(1);
+                let series_per_block = (tx * ty) as usize;
+                let total_blocks = ((cols + series_per_block - 1) / series_per_block) as u32;
+                // Split across grid.x with width tx and grid.y slices covering the remainder
+                let grid_x = ((cols as u32) + tx - 1) / tx; // number of tiles along x
+                let grid_y = ((total_blocks + grid_x - 1) / grid_x).max(1);
+                let grid: GridSize = (grid_x, grid_y, 1).into();
+                let block: BlockSize = (tx, ty, 1).into();
+                let func_name = if self.module.get_function("ehlers_ecema_many_series_one_param_2d_f32").is_ok() {
+                    "ehlers_ecema_many_series_one_param_2d_f32"
+                } else if self.module.get_function("ehlers_ecema_many_series_one_param_1d_f32").is_ok() {
+                    "ehlers_ecema_many_series_one_param_1d_f32"
+                } else {
+                    "ehlers_ecema_many_series_one_param_time_major_f32"
+                };
+                let func = self.module.get_function(func_name)
+                    .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+                unsafe {
+                    let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+                    let mut cols_i = cols as i32;
+                    let mut rows_i = rows as i32;
+                    let mut length_i = length as i32;
+                    let mut gain_limit_i = gain_limit as i32;
+                    let mut pine_flag = if pine_mode { 1u8 } else { 0u8 };
+                    let mut confirmed_flag = if confirmed { 1u8 } else { 0u8 };
+                    let mut first_ptr = d_first_valids.as_device_ptr().as_raw();
+                    let mut out_ptr = d_out.as_device_ptr().as_raw();
+                    let args: &mut [*mut c_void] = &mut [
+                        &mut prices_ptr as *mut _ as *mut c_void,
+                        &mut cols_i as *mut _ as *mut c_void,
+                        &mut rows_i as *mut _ as *mut c_void,
+                        &mut length_i as *mut _ as *mut c_void,
+                        &mut gain_limit_i as *mut _ as *mut c_void,
+                        &mut pine_flag as *mut _ as *mut c_void,
+                        &mut confirmed_flag as *mut _ as *mut c_void,
+                        &mut first_ptr as *mut _ as *mut c_void,
+                        &mut out_ptr as *mut _ as *mut c_void,
+                    ];
+                    self.stream.launch(&func, grid, block, 0, args)
+                        .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+                }
+                unsafe {
+                    let this = self as *const _ as *mut CudaEhlersEcema;
+                    (*this).last_many = Some(ManySeriesKernelSelected::Tiled2D { tx, ty });
+                }
+                self.maybe_log_many_debug();
+                Ok(())
+            }
         }
-        Ok(())
     }
 
     fn run_many_series_kernel(
