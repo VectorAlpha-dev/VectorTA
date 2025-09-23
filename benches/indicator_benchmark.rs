@@ -2355,6 +2355,13 @@ bench_variants!(
 );
 
 bench_variants!(
+    wclprice => WclpriceInputS; None;
+    wclprice_scalar,
+    wclprice_avx2,
+    wclprice_avx512,
+);
+
+bench_variants!(
     wma => WmaInputS; None;
     wma_scalar,
     wma_avx2,
@@ -2621,6 +2628,7 @@ criterion_main!(
     benches_wavetrend,
     benches_wavetrend_batch,
     benches_wilders,
+    benches_wclprice,
     benches_wilders_batch,
     benches_wma,
     benches_wma_batch,
