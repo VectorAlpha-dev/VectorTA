@@ -223,7 +223,7 @@ use my_project::indicators::{
         wavetrend as wavetrend_raw, wavetrend_with_kernel, WavetrendBatchBuilder, WavetrendInput,
     },
     wclprice::{wclprice as wclprice_raw, wclprice_with_kernel, WclpriceInput},
-    willr::{willr as willr_raw, WillrBatchBuilder, WillrData, WillrInput},
+    willr::{willr as willr_raw, WillrBatchBuilder, WillrBuilder, WillrData, WillrInput},
     wto::{wto_with_kernel, WtoBatchBuilder, WtoInput},
     zscore::{zscore as zscore_raw, zscore_with_kernel, ZscoreBatchBuilder, ZscoreInput},
 };
@@ -2630,5 +2630,31 @@ criterion_main!(
     benches_chandelier_exit_batch,
     benches_otto_batch,
     benches_percentile_nearest_rank,
-    benches_percentile_nearest_rank_batch
+    benches_percentile_nearest_rank_batch,
+    benches_willr_period
 );
+
+// Focused WILLR period sweep (scalar) to compare naive vs deque path
+fn bench_willr_period(c: &mut Criterion) {
+    let mut group = c.benchmark_group("willr_period");
+    // Use the 100k dataset for stability
+    let candles = &*CANDLES_100K;
+    // Probe common and large periods that cross the hybrid threshold
+    let periods = [14usize, 64usize, 128usize, 256usize, 512usize];
+    for &p in &periods {
+        group.bench_with_input(BenchmarkId::new("scalar", format!("p{p}_100k")), &p, |b, &pp| {
+            b.iter(|| {
+                WillrBuilder::new()
+                    .kernel(Kernel::Scalar)
+                    .period(pp)
+                    .apply(candles)
+                    .map(|_| ())
+                    .map_err(|e| anyhow!(e.to_string()))
+                    .unwrap()
+            })
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(benches_willr_period, bench_willr_period);
