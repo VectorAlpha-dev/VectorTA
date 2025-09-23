@@ -15,9 +15,10 @@
 //! - **`Err(ZscoreError)`** otherwise.
 //!
 //! ## Developer Notes
-//! - **AVX2/AVX512 Kernels**: Stub implementations that delegate to scalar. Functions exist but just call scalar version. Could vectorize mean and deviation calculations.
-//! - **Streaming Performance**: O(n) implementation - copies entire buffer to ordered array, then calls MA and deviation functions which iterate again. Very inefficient - allocates new vectors on each update. Should maintain running statistics.
-//! - **Memory Optimization**: Uses `alloc_with_nan_prefix` and batch helpers properly. However, streaming allocates temporary vectors on each update which is wasteful.
+//! - SIMD (single-series): kept as stubs delegating to scalar; rolling deps limit wins. Documented choice per guide.
+//! - Scalar fast paths: SMA path is O(1) with rolling sums; EMA path optimized to O(1) using window sums and EMA-based MSE.
+//! - Batch (row-specific): SMA+stddev path shares prefix sums and uses AVX2/AVX512 for base/scale copy; selected at runtime.
+//! - Streaming: current implementation is O(n) per update; future work could maintain rolling stats to avoid temporaries.
 
 #[cfg(feature = "cuda")]
 use crate::cuda::{CudaZscore, CudaZscoreError};
@@ -415,7 +416,7 @@ pub unsafe fn zscore_scalar_classic_sma(
     Ok(ZscoreOutput { values: out })
 }
 
-// Classic kernel with inline EMA and standard deviation
+// Classic kernel with inline EMA mean + population stddev around EMA (O(1) per step)
 #[inline]
 pub unsafe fn zscore_scalar_classic_ema(
     data: &[f64],
@@ -423,70 +424,72 @@ pub unsafe fn zscore_scalar_classic_ema(
     first: usize,
     nbdev: f64,
 ) -> Result<ZscoreOutput, ZscoreError> {
+    let n = data.len();
     let warmup_end = first + period - 1;
-    let mut out = alloc_with_nan_prefix(data.len(), warmup_end);
+    let mut out = alloc_with_nan_prefix(n, warmup_end);
 
-    // EMA alpha factor
-    let alpha = 2.0 / (period as f64 + 1.0);
+    if n <= warmup_end {
+        return Ok(ZscoreOutput { values: out });
+    }
+
+    let den = period as f64;
+    let alpha = 2.0 / (den + 1.0);
     let one_minus_alpha = 1.0 - alpha;
 
-    // Initialize EMA with SMA
+    // Initialize rolling window sums and seed EMA with SMA
     let mut sum = 0.0;
-    let mut sum_sqr = 0.0;
-    for j in first..warmup_end + 1 {
-        let val = data[j];
-        sum += val;
-        sum_sqr += val * val;
+    let mut sum2 = 0.0;
+    {
+        let mut j = first;
+        while j <= warmup_end {
+            let v = data[j];
+            sum += v;
+            sum2 += v * v;
+            j += 1;
+        }
     }
-    let mut ema = sum / period as f64;
+    let mut ema = sum / den;
 
-    // Initialize exponentially weighted variance (start with sample variance)
-    let initial_variance = (sum_sqr / period as f64) - (ema * ema);
-    let mut ema_variance = initial_variance.max(0.0);
-    let mut stddev = ema_variance.sqrt() * nbdev;
+    // Compute σ as sqrt(E[(x - EMA)^2]) using window sums
+    let mut mse = (sum2 / den) - 2.0 * ema * (sum / den) + ema * ema;
+    if mse < 0.0 {
+        mse = 0.0; // numerical guard
+    }
+    let mut sd = mse.sqrt() * nbdev;
 
-    // First valid value
-    out[warmup_end] = if stddev == 0.0 || stddev.is_nan() {
+    // First valid value at warmup_end
+    out[warmup_end] = if sd == 0.0 || sd.is_nan() {
         f64::NAN
     } else {
-        (data[warmup_end] - ema) / stddev
+        (data[warmup_end] - ema) / sd
     };
 
-    // Rolling EMA and standard deviation calculation
-    // Use a circular buffer for efficient window management
-    use std::collections::VecDeque;
-    let mut window = VecDeque::with_capacity(period);
-    for j in first..=warmup_end {
-        window.push_back(data[j]);
-    }
+    // Rolling updates (O(1) per step)
+    let mut i = warmup_end + 1;
+    while i < n {
+        let new = data[i];
+        let old = data[i - period];
 
-    for i in warmup_end + 1..data.len() {
-        let new_val = data[i];
+        // Update sliding window sums
+        sum += new - old;
+        sum2 += new * new - old * old;
 
         // Update EMA
-        ema = alpha * new_val + one_minus_alpha * ema;
+        ema = alpha * new + one_minus_alpha * ema;
 
-        // Update rolling window (O(1) operations)
-        if window.len() == period {
-            window.pop_front();
+        // Window MSE relative to current EMA
+        mse = (sum2 / den) - 2.0 * ema * (sum / den) + ema * ema;
+        if mse < 0.0 {
+            mse = 0.0;
         }
-        window.push_back(new_val);
+        sd = mse.sqrt() * nbdev;
 
-        // Calculate standard deviation over the current window
-        // Note: We must recalculate because the EMA has changed
-        let mut sum_sq_diff = 0.0;
-        for &val in &window {
-            let diff = val - ema;
-            sum_sq_diff += diff * diff;
-        }
-        stddev = (sum_sq_diff / window.len() as f64).sqrt() * nbdev;
-
-        // Calculate z-score
-        out[i] = if stddev == 0.0 || stddev.is_nan() {
+        out[i] = if sd == 0.0 || sd.is_nan() {
             f64::NAN
         } else {
-            (new_val - ema) / stddev
+            (new - ema) / sd
         };
+        i += 1;
     }
 
     Ok(ZscoreOutput { values: out })
@@ -1515,7 +1518,7 @@ impl RowWriter {
     }
 }
 
-// Classic row kernel with inline EMA and standard deviation for batch processing
+// Classic row kernel with inline EMA mean + population stddev around EMA (O(1) per step) for batch processing
 #[inline(always)]
 unsafe fn zscore_row_scalar_classic_ema(
     data: &[f64],
@@ -1524,55 +1527,67 @@ unsafe fn zscore_row_scalar_classic_ema(
     nbdev: f64,
     out: &mut [f64],
 ) {
+    let n = data.len();
     let warmup_end = first + period - 1;
 
-    // EMA alpha factor
-    let alpha = 2.0 / (period as f64 + 1.0);
+    if n <= warmup_end {
+        return;
+    }
+
+    let den = period as f64;
+    let alpha = 2.0 / (den + 1.0);
     let one_minus_alpha = 1.0 - alpha;
 
-    // Initialize EMA with SMA
+    // Initialize rolling sums and seed EMA with SMA
     let mut sum = 0.0;
-    for j in first..warmup_end + 1 {
-        sum += data[j];
+    let mut sum2 = 0.0;
+    {
+        let mut j = first;
+        while j <= warmup_end {
+            let v = data[j];
+            sum += v;
+            sum2 += v * v;
+            j += 1;
+        }
     }
-    let mut ema = sum / period as f64;
+    let mut ema = sum / den;
 
-    // Calculate initial standard deviation
-    let mut sum_sq_diff = 0.0;
-    for j in first..warmup_end + 1 {
-        let diff = data[j] - ema;
-        sum_sq_diff += diff * diff;
+    // Initial stddev around EMA using window sums
+    let mut mse = (sum2 / den) - 2.0 * ema * (sum / den) + ema * ema;
+    if mse < 0.0 {
+        mse = 0.0;
     }
-    let mut stddev = (sum_sq_diff / period as f64).sqrt() * nbdev;
+    let mut sd = mse.sqrt() * nbdev;
 
-    // First valid value
-    out[warmup_end] = if stddev == 0.0 || stddev.is_nan() {
+    out[warmup_end] = if sd == 0.0 || sd.is_nan() {
         f64::NAN
     } else {
-        (data[warmup_end] - ema) / stddev
+        (data[warmup_end] - ema) / sd
     };
 
-    // Rolling EMA and standard deviation calculation
-    for i in warmup_end + 1..data.len() {
-        // Update EMA
-        ema = alpha * data[i] + one_minus_alpha * ema;
+    // Rolling updates
+    let mut i = warmup_end + 1;
+    while i < n {
+        let new = data[i];
+        let old = data[i - period];
 
-        // Calculate standard deviation over the window
-        sum_sq_diff = 0.0;
-        let start_idx = if i >= period { i - period + 1 } else { first };
-        for j in start_idx..=i {
-            let diff = data[j] - ema;
-            sum_sq_diff += diff * diff;
+        sum += new - old;
+        sum2 += new * new - old * old;
+
+        ema = alpha * new + one_minus_alpha * ema;
+
+        mse = (sum2 / den) - 2.0 * ema * (sum / den) + ema * ema;
+        if mse < 0.0 {
+            mse = 0.0;
         }
-        let window_size = i - start_idx + 1;
-        stddev = (sum_sq_diff / window_size as f64).sqrt() * nbdev;
+        sd = mse.sqrt() * nbdev;
 
-        // Calculate z-score
-        out[i] = if stddev == 0.0 || stddev.is_nan() {
+        out[i] = if sd == 0.0 || sd.is_nan() {
             f64::NAN
         } else {
-            (data[i] - ema) / stddev
+            (new - ema) / sd
         };
+        i += 1;
     }
 }
 
@@ -2093,6 +2108,121 @@ unsafe fn zscore_compute_into_scalar(
         *v = f64::NAN;
     }
 
+    if data.len() <= warmup_end {
+        return Ok(());
+    }
+
+    // Fast paths for devtype 0 (standard deviation)
+    if devtype == 0 {
+        // SMA mean + population stddev via rolling sums
+        if ma_type == "sma" {
+            let den = period as f64;
+
+            let mut sum = 0.0;
+            let mut sum2 = 0.0;
+            {
+                let mut j = first;
+                while j <= warmup_end {
+                    let v = data[j];
+                    sum += v;
+                    sum2 += v * v;
+                    j += 1;
+                }
+            }
+
+            let mut mean = sum / den;
+            let mut var = sum2 / den - mean * mean;
+            let mut sd = if var <= 0.0 { 0.0 } else { var.sqrt() * nbdev };
+
+            out[warmup_end] = if sd == 0.0 || sd.is_nan() {
+                f64::NAN
+            } else {
+                (data[warmup_end] - mean) / sd
+            };
+
+            let mut i = warmup_end + 1;
+            while i < data.len() {
+                let new = data[i];
+                let old = data[i - period];
+
+                sum += new - old;
+                sum2 += new * new - old * old;
+
+                mean = sum / den;
+                var = sum2 / den - mean * mean;
+                sd = if var <= 0.0 { 0.0 } else { var.sqrt() * nbdev };
+
+                out[i] = if sd == 0.0 || sd.is_nan() {
+                    f64::NAN
+                } else {
+                    (new - mean) / sd
+                };
+                i += 1;
+            }
+
+            return Ok(());
+        }
+
+        // EMA mean + population stddev around EMA via window sums and EMA updates
+        if ma_type == "ema" {
+            let den = period as f64;
+            let alpha = 2.0 / (den + 1.0);
+            let one_minus_alpha = 1.0 - alpha;
+
+            let mut sum = 0.0;
+            let mut sum2 = 0.0;
+            {
+                let mut j = first;
+                while j <= warmup_end {
+                    let v = data[j];
+                    sum += v;
+                    sum2 += v * v;
+                    j += 1;
+                }
+            }
+            let mut ema = sum / den;
+
+            let mut mse = (sum2 / den) - 2.0 * ema * (sum / den) + ema * ema;
+            if mse < 0.0 {
+                mse = 0.0;
+            }
+            let mut sd = mse.sqrt() * nbdev;
+
+            out[warmup_end] = if sd == 0.0 || sd.is_nan() {
+                f64::NAN
+            } else {
+                (data[warmup_end] - ema) / sd
+            };
+
+            let mut i = warmup_end + 1;
+            while i < data.len() {
+                let new = data[i];
+                let old = data[i - period];
+
+                sum += new - old;
+                sum2 += new * new - old * old;
+
+                ema = alpha * new + one_minus_alpha * ema;
+
+                mse = (sum2 / den) - 2.0 * ema * (sum / den) + ema * ema;
+                if mse < 0.0 {
+                    mse = 0.0;
+                }
+                sd = mse.sqrt() * nbdev;
+
+                out[i] = if sd == 0.0 || sd.is_nan() {
+                    f64::NAN
+                } else {
+                    (new - ema) / sd
+                };
+                i += 1;
+            }
+
+            return Ok(());
+        }
+    }
+
+    // Generic fallback for all other MA types or devtypes
     let means = ma(ma_type, MaData::Slice(data), period)
         .map_err(|e| ZscoreError::MaError(e.to_string()))?;
     let dev_input = DevInput {

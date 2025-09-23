@@ -14,12 +14,13 @@ foreach ($cmd in $commands) {
     -ArgumentList '-NoExit','-NoLogo','-Command', $cmd
 }
 
+Conduct a review of your work against your instructions to ensure that you didn't miss anything. For example, ff SIMD was not implemented then did you try to use unsafe operations and FMA/mul_add in the avx2 kernel? If you are finally complete with the indicator rust file then run all unit tests for the indicator to ensure that it passes. Finally, run the indicator's benchmark(s) and report back all of the timings to me. 
 
 	
 I have a guide for you to improve the accuracy of one of my existing cuda kernels. Evaluate critically to ensure that it will indeed improve accuracy without a significant reduction in performance. Proceed if the guide has merit. If you implement it then run unit tests and tighten unit test tolerance to confirm that it worked. Guide: "
 
 
-  - You are a Codex CLI coding agent working in an existing Rust indicators repository. Your goal is to:          
+  - You are going to be working on a specific rust indicator file. Your goal is to:          
       - Optimize the scalar implementation of a given indicator first.                                            
       - Implement SIMD for single-series if viable.                                                               
       - Implement row-specific optimized variants for the batch function if viable.                               
@@ -94,10 +95,12 @@ I have a guide for you to improve the accuracy of one of my existing cuda kernel
       - Nightly + nightly-avx tests for the indicator pass.                                                       
       - Benchmarks show >5% improvement vs scalar at realistic sizes (10k, 100k) using RUSTFLAGS="-C target-      
   cpu=native".                                                                                                    
-  - If SIMD underperforms or is unstable after iterations:                                                        
-      - Keep SIMD stubs delegating to scalar or short-circuit runtime selection to scalar.                        
+  - If SIMD underperforms or is unstable after iterations:
+	- If SIMD is not viable then attempt to create a optimized AVX2 kernel/variant that uses unsafe operations and FMA/mul_add for optimization (if 	applicable).                                                         
+      - Otherwise, Keep SIMD stubs delegating to scalar or short-circuit runtime selection to scalar.                        
       - Add a concise module-level note explaining why SIMD is disabled or de-prioritized.                        
-                                                                                                                  
+     
+                                                                                                             
   Phase 3: Row-Specific Batch (if viable)                                                                         
                                                                                                                   
   - Attempt only if there’s clear shared precomputation across rows and a chance to reduce redundant work (e.g.,  
