@@ -52,7 +52,8 @@ class TestDemaCuda:
         gpu = cp.asarray(handle)
         gpu_first = cp.asnumpy(gpu)[0]
 
-        assert_close(gpu_first, cpu, rtol=1e-5, atol=1e-6, msg="DEMA CUDA batch vs CPU mismatch")
+        # Tighter tolerances thanks to FMA delta updates in CUDA kernel
+        assert_close(gpu_first, cpu, rtol=5e-6, atol=5e-7, msg="DEMA CUDA batch vs CPU mismatch")
 
     def test_dema_cuda_batch_multiple_periods(self, test_data):
         close = test_data["close"][:2048]
@@ -69,4 +70,4 @@ class TestDemaCuda:
 
         gpu = cp.asnumpy(cp.asarray(handle))
         assert gpu.shape == cpu.shape
-        assert_close(gpu, cpu, rtol=1e-5, atol=1e-6, msg="DEMA CUDA sweep mismatch")
+        assert_close(gpu, cpu, rtol=5e-6, atol=5e-7, msg="DEMA CUDA sweep mismatch")

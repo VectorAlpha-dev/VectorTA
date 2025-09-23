@@ -1900,6 +1900,35 @@ pub fn dema_cuda_batch_dev_py(
     Ok(DeviceArrayF32Py { inner })
 }
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "dema_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, period, device_id=0))]
+pub fn dema_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    period: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    if period == 0 {
+        return Err(PyValueError::new_err("period must be positive"));
+    }
+    let flat = data_tm_f32.as_slice()?;
+    let shape = data_tm_f32.shape();
+    let series_len = shape[0];
+    let num_series = shape[1];
+    let params = DemaParams { period: Some(period) };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaDema::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.dema_many_series_one_param_time_major_dev(flat, num_series, series_len, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
 // ================== WASM API ====================
 //
 // DEMA WebAssembly bindings providing both safe and zero-copy APIs for browser/Node.js environments.

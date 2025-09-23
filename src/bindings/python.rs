@@ -198,7 +198,9 @@ use crate::indicators::moving_averages::buff_averages::{
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::cwma::{cwma_batch_py, cwma_py, CwmaStreamPy};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::dema::dema_cuda_batch_dev_py;
+use crate::indicators::moving_averages::dema::{
+    dema_cuda_batch_dev_py, dema_cuda_many_series_one_param_dev_py,
+};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::dema::{dema_batch_py, dema_py, DemaStreamPy};
 #[cfg(feature = "python")]
@@ -765,6 +767,7 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(feature = "cuda")]
     {
         m.add_function(wrap_pyfunction!(dema_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(dema_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
     // Register EDCF functions with their user-facing names

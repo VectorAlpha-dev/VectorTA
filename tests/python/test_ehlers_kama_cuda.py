@@ -55,7 +55,7 @@ class TestEhlersKamaCuda:
         gpu = cp.asnumpy(cp.asarray(handle)).astype(np.float64)
 
         assert gpu.shape == cpu_values.shape
-        assert_close(gpu, cpu_values, rtol=4e-4, atol=6e-4, msg="CUDA batch vs CPU mismatch")
+        assert_close(gpu, cpu_values, rtol=2e-4, atol=3e-4, msg="CUDA batch vs CPU mismatch")
 
     def test_ehlers_kama_cuda_many_series_one_param_matches_cpu(self, price_series):
         T = 1024
@@ -80,7 +80,7 @@ class TestEhlersKamaCuda:
         assert_close(
             gpu_tm,
             cpu_tm,
-            rtol=4e-4,
-            atol=6e-4,
+            rtol=2e-4,
+            atol=3e-4,
             msg="CUDA many-series vs CPU mismatch",
         )
