@@ -62,6 +62,12 @@ Cross-crate demos:
 
 Goal: implement AVX2/AVX512 kernels that are functionally identical to scalar and measurably faster. Success means all unit tests pass and AVX2/AVX512 benchmarks beat scalar. Do not benchmark batch mode unless you implemented per-row optimized kernels for the batch function.
 
+- Scalar-first optimization (required before SIMD)
+  - Optimize the safe scalar implementation of the indicator first and treat it as the reference path. Do not convert a safe API to unsafe just for speed.
+  - If the scalar indicator calls helpers, inline/loop-jam them when possible unless they use dynamic dispatch (e.g., the "MA" selector).
+  - After each scalar change, run the indicator’s unit tests and its benches; keep only consistently positive improvements. Do not change unit test reference values.
+  - Use `src/indicators/moving_averages/alma.rs` as the gold standard for API shape, warmup handling, allocation, and optimization patterns.
+
 - Guarding and targets
   - Gate all SIMD with `#[cfg(feature = "nightly-avx")]` and `#[cfg(target_arch = "x86_64")]`.
   - Keep scalar codepath as the reference implementation; SIMD must match outputs bit-for-bit or within existing tolerances.
@@ -69,6 +75,10 @@ Goal: implement AVX2/AVX512 kernels that are functionally identical to scalar an
 - Kernel selection
   - Use existing helpers `detect_best_kernel()` / `detect_best_batch_kernel()` to pick AVX512 → AVX2 → SSE2 → Scalar at runtime.
   - Use `skip_if_unsupported!(kernel, fn_name)` in tests/benches to conditionally skip where HW support is missing.
+
+- Benchmark registration (required before SIMD)
+  - Ensure the indicator is registered in `benches/indicator_benchmark.rs` so scalar vs AVX2/AVX512 comparisons can run.
+  - If missing, add minimal registrations matching existing patterns (single-series first; batch optional).
 
 - API and performance patterns
   - Treat `src/indicators/moving_averages/alma.rs` as the gold standard for API shape, docs, warmup handling, allocation, and optimization.
