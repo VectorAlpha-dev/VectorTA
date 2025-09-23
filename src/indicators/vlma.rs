@@ -14,13 +14,11 @@
 //! - **`Err(VlmaError)`** on invalid parameters or insufficient data.
 //!
 //! ## Developer Notes
-//! - **SIMD Status**: AVX2 and AVX512 kernels are stubs (call scalar implementation)
-//! - **Streaming Performance**: O(n) - recalculates MA and deviation on each update (inefficient)
-//! - **Memory Optimization**: ✓ Uses alloc_with_nan_prefix for output allocation
-//! - **Batch Support**: ✓ Full parallel batch parameter sweep implementation
-//! - **TODO**:
-//!   - Implement actual AVX2/AVX512 SIMD kernels
-//!   - Optimize streaming to O(1) with incremental MA/deviation updates
+//! - SIMD: AVX2/AVX512 remain stubs (delegate to scalar). VLMA is sequential and branchy; time-wise SIMD offers no clear win, so selection short-circuits to scalar.
+//! - Scalar: hot loop optimized with branch-reduced period updates and a LUT for smoothing constants; preserves warmup/outputs.
+//! - Streaming: O(n) reference MA/deviation; future work could add incremental updates to reduce recalculation.
+//! - Memory: uses `alloc_with_nan_prefix` and avoids O(N) temporaries beyond required reference series.
+//! - Batch: parallel per-row sweep wired; row-specific SIMD kernels not implemented due to limited benefit.
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -358,18 +356,14 @@ fn vlma_compute_into(
     unsafe {
         match kernel {
             Kernel::Scalar | Kernel::ScalarBatch => {
-                // Classic kernel dispatch temporarily disabled to maintain test compatibility
-                // The implementation is complete but causes numerical differences
-                // To enable: uncomment the if block below
-                /*
-                // Dispatch to classic kernel for default MA type (SMA)
-                if matype == "sma" {
-                    vlma_scalar_classic(data, min_period, max_period, matype, devtype, first, out)?;
+                // Fast path: inline SMA + stddev when requested (matches reference semantics)
+                if matype == "sma" && devtype == 0 {
+                    vlma_scalar_sma_stddev_into(
+                        data, min_period, max_period, first, out,
+                    )?;
                 } else {
                     vlma_scalar_into(data, min_period, max_period, matype, devtype, first, out)?;
                 }
-                */
-                vlma_scalar_into(data, min_period, max_period, matype, devtype, first, out)?;
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => {
@@ -397,113 +391,160 @@ pub unsafe fn vlma_scalar_classic(
     first_valid: usize,
     out: &mut [f64],
 ) -> Result<(), VlmaError> {
-    // Only optimize for default MA type (SMA)
-    if matype != "sma" {
-        // Fall back to regular implementation
-        return vlma_scalar_into(
-            data,
-            min_period,
-            max_period,
-            matype,
-            devtype,
-            first_valid,
-            out,
-        );
+    // Delegate to fast SMA+StdDev path if applicable; else fallback to generic scalar
+    if matype == "sma" && devtype == 0 {
+        return vlma_scalar_sma_stddev_into(data, min_period, max_period, first_valid, out);
     }
-
-    // Inline SMA calculation for reference series
-    let len = data.len();
-    let mut mean = alloc_with_nan_prefix(len, first_valid + max_period - 1);
-
-    // Calculate initial SMA
-    let mut sum = 0.0;
-    for i in first_valid..(first_valid + max_period.min(len - first_valid)) {
-        if !data[i].is_nan() {
-            sum += data[i];
-        }
-    }
-
-    if first_valid + max_period <= len {
-        mean[first_valid + max_period - 1] = sum / max_period as f64;
-
-        // Rolling SMA
-        for i in (first_valid + max_period)..len {
-            if !data[i].is_nan() && !data[i - max_period].is_nan() {
-                sum += data[i] - data[i - max_period];
-                mean[i] = sum / max_period as f64;
-            }
-        }
-    }
-
-    // Compute deviation (still uses the deviation function)
-    let dev = deviation(&DevInput::from_slice(
+    vlma_scalar_into(
         data,
-        DevParams {
-            period: Some(max_period),
-            devtype: Some(devtype),
-        },
-    ))
-    .map_err(|e| VlmaError::DevError(e.to_string()))?;
+        min_period,
+        max_period,
+        matype,
+        devtype,
+        first_valid,
+        out,
+    )
+}
 
-    // Do not write to `out` before warmup. Track state internally.
+/// Optimized VLMA path for matype="sma" and devtype=0 (standard deviation)
+/// Computes rolling SMA and stddev in a single O(n) pass with NaN tracking,
+/// and applies the same band logic and warmup semantics as the reference path.
+#[inline(always)]
+pub unsafe fn vlma_scalar_sma_stddev_into(
+    data: &[f64],
+    min_period: usize,
+    max_period: usize,
+    first_valid: usize,
+    out: &mut [f64],
+) -> Result<(), VlmaError> {
+    debug_assert_eq!(out.len(), data.len());
+    let len = data.len();
+    if len == 0 {
+        return Ok(());
+    }
+
+    // Warmup and initial seed
     let warm_end = first_valid + max_period - 1;
+    let x0 = *data.get_unchecked(first_valid);
+    *out.get_unchecked_mut(first_valid) = x0;
 
-    // EMA state - start with the first valid value
-    let mut last_val = data[first_valid];
-    let mut last_period = max_period as f64;
+    // Period LUT and state
+    let min_pi = if min_period == 0 { 1 } else { min_period };
+    let max_pi = core::cmp::max(max_period, min_pi);
+    let mut last_p: usize = max_pi;
+    let mut sc_lut = Vec::with_capacity(max_pi + 1);
+    sc_lut.push(0.0);
+    for p in 1..=max_pi {
+        sc_lut.push(2.0 / (p as f64 + 1.0));
+    }
 
-    // Write the initial value at first_valid (special VLMA behavior)
-    out[first_valid] = last_val;
+    // Bands constants
+    const D175: f64 = 1.75;
+    const D025: f64 = 0.25;
 
-    // Main VLMA calculation loop
-    for i in (first_valid + 1)..data.len() {
-        let value = data[i];
+    // EMA-like state
+    let mut last_val = x0;
 
-        if value.is_nan() {
-            continue;
+    // 1) Advance warmup without adaptation (match reference behavior)
+    let mut i = first_valid + 1;
+    while i < len && i < warm_end {
+        let x = *data.get_unchecked(i);
+        if !x.is_nan() {
+            let sc = *sc_lut.get_unchecked(last_p);
+            last_val = (x - last_val).mul_add(sc, last_val);
         }
+        i += 1;
+    }
 
-        // Variable period calculation
-        let mut new_period = if i >= warm_end && !mean[i].is_nan() && !dev.values[i].is_nan() {
-            let m = mean[i];
-            let d = dev.values[i];
+    if warm_end >= len {
+        return Ok(());
+    }
 
-            // Define the bands
-            let a = m - d;
-            let b = m - d * 0.5;
-            let c = m + d * 0.5;
-            let d_upper = m + d;
-
-            if value < a || value > d_upper {
-                last_period - 1.0
-            } else if value >= b && value <= c {
-                last_period + 1.0
-            } else {
-                last_period
-            }
+    // 2) Initialize rolling sums for the first full window ending at warm_end
+    let mut sum = 0.0_f64;
+    let mut sumsq = 0.0_f64;
+    let mut nan_count: usize = 0;
+    for k in 0..max_period {
+        let v = *data.get_unchecked(first_valid + k);
+        if v.is_finite() {
+            sum += v;
+            sumsq += v * v;
         } else {
-            last_period
-        };
+            nan_count += 1;
+        }
+    }
+    let inv_n = 1.0 / (max_period as f64);
 
-        // Clamp period to valid range
-        if new_period < min_period as f64 {
-            new_period = min_period as f64;
-        } else if new_period > max_period as f64 {
-            new_period = max_period as f64;
+    // 3) Steady-state loop: compute mean/dev on the fly and adapt period
+    i = warm_end;
+    while i < len {
+        let x = *data.get_unchecked(i);
+
+        if x.is_nan() {
+            // passthrough NaN after warmup; keep last state
+            *out.get_unchecked_mut(i) = f64::NAN;
+        } else {
+            // Mean and stddev for current window (ending at i)
+            let (m, dv) = if nan_count == 0 {
+                let m = sum * inv_n;
+                let var = (sumsq * inv_n) - m * m;
+                let dv = if var < 0.0 { 0.0 } else { var.sqrt() };
+                (m, dv)
+            } else {
+                (f64::NAN, f64::NAN)
+            };
+
+            // Adapt period using same band rules
+            let prev_p = if last_p == 0 { max_pi } else { last_p };
+            let mut next_p = prev_p;
+            if m.is_finite() && dv.is_finite() {
+                let d175 = dv * D175;
+                let d025 = dv * D025;
+                let a = m - d175;
+                let b = m - d025;
+                let c = m + d025;
+                let d = m + d175;
+                let inc_fast = ((x < a) as i32) | ((x > d) as i32);
+                let inc_slow = ((x >= b) as i32) & ((x <= c) as i32);
+                let delta = inc_slow - inc_fast;
+                let p_tmp = prev_p as isize + delta as isize;
+                next_p = if p_tmp < min_pi as isize {
+                    min_pi
+                } else if p_tmp > max_pi as isize {
+                    max_pi
+                } else {
+                    p_tmp as usize
+                };
+            }
+
+            // EMA-like update
+            let sc = *sc_lut.get_unchecked(next_p);
+            last_val = (x - last_val).mul_add(sc, last_val);
+            last_p = next_p;
+            *out.get_unchecked_mut(i) = last_val;
         }
 
-        // Weighted adaptive average (EMA-like calculation)
-        let sc = 2.0 / (new_period + 1.0);
-        let new_val = value * sc + (1.0 - sc) * last_val;
-
-        // Update state
-        last_period = new_period;
-        last_val = new_val;
-
-        // Write output (skip warmup except for first_valid)
-        if i >= warm_end {
-            out[i] = new_val;
+        // Prepare rolling window for next position (i+1)
+        let next = i + 1;
+        if next < len {
+            let out_idx = next - max_period;
+            let v_out = *data.get_unchecked(out_idx);
+            if v_out.is_finite() {
+                sum -= v_out;
+                sumsq -= v_out * v_out;
+            } else {
+                nan_count = nan_count.saturating_sub(1);
+            }
+            let v_in = *data.get_unchecked(next);
+            if v_in.is_finite() {
+                sum += v_in;
+                sumsq += v_in * v_in;
+            } else {
+                nan_count += 1;
+            }
         }
+
+        i = next;
     }
 
     Ok(())
@@ -519,7 +560,9 @@ unsafe fn vlma_scalar_into(
     first_valid: usize,
     out: &mut [f64],
 ) -> Result<(), VlmaError> {
-    // Precompute reference series
+    debug_assert_eq!(out.len(), data.len());
+
+    // Reference series via existing builders to preserve semantics/accuracy
     let mean = ma(matype, MaData::Slice(data), max_period)
         .map_err(|e| VlmaError::MaError(e.to_string()))?;
     let dev = deviation(&DevInput::from_slice(
@@ -531,69 +574,134 @@ unsafe fn vlma_scalar_into(
     ))
     .map_err(|e| VlmaError::DevError(e.to_string()))?;
 
-    // Do not write to `out` before warmup. Track state internally.
+    let len = data.len();
+    if len == 0 {
+        return Ok(());
+    }
+
+    // Warmup boundary; caller will set warmup NaNs afterwards
     let warm_end = first_valid + max_period - 1;
 
-    // EMA state - start with the first valid value
-    let mut last_val = data[first_valid];
-    let mut last_period = max_period as f64;
+    // Initial state and seed
+    let x0 = *data.get_unchecked(first_valid);
+    *out.get_unchecked_mut(first_valid) = x0;
 
-    // VLMA specific: Write the initial value at first_valid (differs from ALMA)
-    out[first_valid] = data[first_valid];
+    // Keep periods as integer indices and precompute smoothing constants
+    let min_pi = if min_period == 0 { 1 } else { min_period };
+    let max_pi = core::cmp::max(max_period, min_pi);
+    let mut last_p: usize = max_pi;
 
-    // Start from first_valid + 1 for the EMA calculation
-    for i in (first_valid + 1)..data.len() {
-        if data[i].is_nan() {
-            // Preserve NaN; do not propagate previous value
-            if i >= warm_end {
-                out[i] = f64::NAN;
-            }
+    // sc_lut[p] = 2 / (p + 1)
+    let mut sc_lut = Vec::with_capacity(max_pi + 1);
+    sc_lut.push(0.0); // unused index 0
+    for p in 1..=max_pi {
+        sc_lut.push(2.0 / (p as f64 + 1.0));
+    }
+    debug_assert_eq!(sc_lut.len(), max_pi + 1);
+
+    // Band multipliers
+    const D175: f64 = 1.75;
+    const D025: f64 = 0.25;
+
+    // Current EMA-like value
+    let mut last_val = x0;
+
+    // Phase 1: advance through warmup without writes (except first_valid already written)
+    let mut i = first_valid + 1;
+    while i < len && i < warm_end {
+        let x = *data.get_unchecked(i);
+        if x.is_nan() {
+            i += 1;
             continue;
         }
 
-        let (m, dv) = (mean[i], dev[i]);
-        let prev_p = if last_period == 0.0 {
-            max_period as f64
-        } else {
-            last_period
-        };
+        let m = mean[i];
+        let dv = dev[i];
 
-        let mut new_p = if m.is_finite() && dv.is_finite() {
-            let a = m - 1.75 * dv;
-            let b = m - 0.25 * dv;
-            let c = m + 0.25 * dv;
-            let d = m + 1.75 * dv;
+        // Previous period and next period selection
+        let prev_p = if last_p == 0 { max_pi } else { last_p };
+        let mut next_p = prev_p;
 
-            if data[i] < a || data[i] > d {
-                prev_p - 1.0
-            } else if data[i] >= b && data[i] <= c {
-                prev_p + 1.0
+        if m.is_finite() && dv.is_finite() {
+            let d175 = dv * D175;
+            let d025 = dv * D025;
+
+            let a = m - d175;
+            let b = m - d025;
+            let c = m + d025;
+            let d = m + d175;
+
+            // delta = +1 in [b, c], -1 if < a or > d, else 0
+            let inc_fast = ((x < a) as i32) | ((x > d) as i32);
+            let inc_slow = ((x >= b) as i32) & ((x <= c) as i32);
+            let delta = inc_slow - inc_fast; // -1, 0, or +1
+
+            let p_tmp = prev_p as isize + delta as isize;
+            next_p = if p_tmp < min_pi as isize {
+                min_pi
+            } else if p_tmp > max_pi as isize {
+                max_pi
             } else {
-                prev_p
-            }
-        } else {
-            prev_p
-        };
-
-        if new_p < min_period as f64 {
-            new_p = min_period as f64;
-        }
-        if new_p > max_period as f64 {
-            new_p = max_period as f64;
+                p_tmp as usize
+            };
         }
 
-        let sc = 2.0 / (new_p + 1.0);
-        let new_val = data[i] * sc + (1.0 - sc) * last_val;
+        // EMA-like update: y = last + sc * (x - last)
+        let sc = *sc_lut.get_unchecked(next_p);
+        last_val = (x - last_val).mul_add(sc, last_val);
+        last_p = next_p;
 
-        last_val = new_val;
-        last_period = new_p;
-
-        if i >= warm_end {
-            out[i] = new_val;
-        } // write only after warmup
+        i += 1;
     }
 
-    // Note: indices < warm_end will be set to NaN by caller (`vlma_into_slice` or wasm wrapper).
+    // Phase 2: steady-state with writes
+    while i < len {
+        let x = *data.get_unchecked(i);
+
+        if x.is_nan() {
+            // Explicit NaN passthrough after warmup
+            *out.get_unchecked_mut(i) = f64::NAN;
+            i += 1;
+            continue;
+        }
+
+        let m = mean[i];
+        let dv = dev[i];
+
+        let prev_p = if last_p == 0 { max_pi } else { last_p };
+        let mut next_p = prev_p;
+
+        if m.is_finite() && dv.is_finite() {
+            let d175 = dv * D175;
+            let d025 = dv * D025;
+
+            let a = m - d175;
+            let b = m - d025;
+            let c = m + d025;
+            let d = m + d175;
+
+            let inc_fast = ((x < a) as i32) | ((x > d) as i32);
+            let inc_slow = ((x >= b) as i32) & ((x <= c) as i32);
+            let delta = inc_slow - inc_fast;
+
+            let p_tmp = prev_p as isize + delta as isize;
+            next_p = if p_tmp < min_pi as isize {
+                min_pi
+            } else if p_tmp > max_pi as isize {
+                max_pi
+            } else {
+                p_tmp as usize
+            };
+        }
+
+        let sc = *sc_lut.get_unchecked(next_p);
+        last_val = (x - last_val).mul_add(sc, last_val);
+        last_p = next_p;
+
+        *out.get_unchecked_mut(i) = last_val;
+        i += 1;
+    }
+
     Ok(())
 }
 
