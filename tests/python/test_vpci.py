@@ -55,14 +55,14 @@ class TestVpci:
         assert_close(
             vpci[-5:], 
             expected['last_5_vpci'],
-            rtol=1e-1,  # VPCI values are large, so use larger tolerance
+            rtol=5e-2,  # tightened tolerance
             msg="VPCI last 5 values mismatch"
         )
         
         assert_close(
             vpcis[-5:], 
             expected['last_5_vpcis'],
-            rtol=1e-1,  # VPCIS values are large, so use larger tolerance
+            rtol=5e-2,  # tightened tolerance
             msg="VPCIS last 5 values mismatch"
         )
         

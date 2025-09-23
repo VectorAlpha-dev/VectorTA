@@ -75,8 +75,8 @@ test('VPCI accuracy', () => {
     const actualLastFiveVpci = vpci.slice(-5);
     const actualLastFiveVpcis = vpcis.slice(-5);
     
-    assertArrayClose(actualLastFiveVpci, expectedLastFiveVpci, 1e-1, 'VPCI last 5 values mismatch');
-    assertArrayClose(actualLastFiveVpcis, expectedLastFiveVpcis, 1e-1, 'VPCIS last 5 values mismatch');
+    assertArrayClose(actualLastFiveVpci, expectedLastFiveVpci, 5e-2, 'VPCI last 5 values mismatch');
+    assertArrayClose(actualLastFiveVpcis, expectedLastFiveVpcis, 5e-2, 'VPCIS last 5 values mismatch');
 });
 
 test('VPCI with default parameters', () => {

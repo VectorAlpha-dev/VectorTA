@@ -209,7 +209,7 @@ use my_project::indicators::{
     ui::{ui as ui_raw, UiInput},
     ultosc::{ultosc as ultosc_raw, UltOscInput},
     var::{var as var_raw, VarInput},
-    vi::{vi as vi_raw, ViInput},
+    vi::{vi as vi_raw, ViBatchBuilder, ViData, ViInput},
     vidya::{vidya_with_kernel, VidyaBatchBuilder, VidyaInput},
     vlma::{vlma_with_kernel, VlmaBatchBuilder, VlmaInput},
     vosc::{vosc as vosc_raw, VoscInput},
@@ -1449,6 +1449,37 @@ make_batch_wrappers!(vpwma_batch, VpwmaBatchBuilder, VpwmaInputS; ScalarBatch, A
 make_batch_wrappers!(wilders_batch, WildersBatchBuilder, WildersInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(wma_batch, WmaBatchBuilder, WmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(zlema_batch, ZlemaBatchBuilder, ZlemaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+// VI requires OHLC; provide custom batch wrappers
+fn vi_batch_scalarbatch(input: &ViInputS) -> anyhow::Result<()> {
+    let (high, low, close) = match &input.data {
+        ViData::Candles { candles } => (&candles.high[..], &candles.low[..], &candles.close[..]),
+        ViData::Slices { high, low, close } => (*high, *low, *close),
+    };
+    ViBatchBuilder::new()
+        .kernel(Kernel::ScalarBatch)
+        .apply_slices(high, low, close)?;
+    Ok(())
+}
+fn vi_batch_avx2batch(input: &ViInputS) -> anyhow::Result<()> {
+    let (high, low, close) = match &input.data {
+        ViData::Candles { candles } => (&candles.high[..], &candles.low[..], &candles.close[..]),
+        ViData::Slices { high, low, close } => (*high, *low, *close),
+    };
+    ViBatchBuilder::new()
+        .kernel(Kernel::Avx2Batch)
+        .apply_slices(high, low, close)?;
+    Ok(())
+}
+fn vi_batch_avx512batch(input: &ViInputS) -> anyhow::Result<()> {
+    let (high, low, close) = match &input.data {
+        ViData::Candles { candles } => (&candles.high[..], &candles.low[..], &candles.close[..]),
+        ViData::Slices { high, low, close } => (*high, *low, *close),
+    };
+    ViBatchBuilder::new()
+        .kernel(Kernel::Avx512Batch)
+        .apply_slices(high, low, close)?;
+    Ok(())
+}
 // ChandelierExit needs special handling for apply_slices
 fn chandelier_exit_batch_scalarbatch(input: &ChandelierExitInputS) -> anyhow::Result<()> {
     // ChandelierExit requires high, low, and close data
@@ -1896,6 +1927,13 @@ bench_variants!(
     vpwma_batch_scalarbatch,
     vpwma_batch_avx2batch,
     vpwma_batch_avx512batch,
+);
+
+bench_variants!(
+    vi_batch => ViInputS; Some(227);
+    vi_batch_scalarbatch,
+    vi_batch_avx2batch,
+    vi_batch_avx512batch,
 );
 
 bench_variants!(
@@ -2634,6 +2672,7 @@ criterion_main!(
     benches_wma_batch,
     benches_zlema,
     benches_zlema_batch,
+    benches_vi_batch,
     benches_chandelier_exit,
     benches_chandelier_exit_batch,
     benches_otto_batch,
