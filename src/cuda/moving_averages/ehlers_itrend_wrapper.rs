@@ -1,9 +1,9 @@
 //! CUDA support for the Ehlers Instantaneous Trend (ITrend) indicator.
 //!
 //! Provides zero-copy device handles for both batch parameter sweeps and
-//! time-major many-series execution, mirroring the ALMA CUDA API surface. The
-//! kernels operate purely in FP32 while this wrapper validates parameters,
-//! prepares grid ranges, and stages device buffers.
+//! time-major many-series execution. The wrapper mirrors key ALMA wrapper
+//! facilities (policies, introspection, VRAM checks, deterministic sync),
+//! adapted to the recursive nature of ITrend.
 
 #![cfg(feature = "cuda")]
 
@@ -14,13 +14,15 @@ use crate::indicators::moving_averages::ehlers_itrend::{
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::DeviceBuffer;
-use cust::module::Module;
+use cust::memory::{mem_get_info, DeviceBuffer};
+use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
+use std::env;
 use std::convert::TryFrom;
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug)]
 pub enum CudaEhlersITrendError {
@@ -39,10 +41,51 @@ impl fmt::Display for CudaEhlersITrendError {
 
 impl std::error::Error for CudaEhlersITrendError {}
 
+// -------- Kernel policy + introspection (API parity with ALMA) --------
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchThreadsPerOutput { One, Two }
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelPolicy {
+    Auto,
+    Plain { block_x: u32 },
+    Tiled { tile: u32, per_thread: BatchThreadsPerOutput },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelPolicy {
+    Auto,
+    OneD { block_x: u32 },
+    Tiled2D { tx: u32, ty: u32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CudaEhlersITrendPolicy {
+    pub batch: BatchKernelPolicy,
+    pub many_series: ManySeriesKernelPolicy,
+}
+impl Default for CudaEhlersITrendPolicy {
+    fn default() -> Self {
+        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelSelected { Plain { block_x: u32 } }
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }
+
 pub struct CudaEhlersITrend {
     module: Module,
     stream: Stream,
     _context: Context,
+    device_id: u32,
+    policy: CudaEhlersITrendPolicy,
+    last_batch: Option<BatchKernelSelected>,
+    last_many: Option<ManySeriesKernelSelected>,
+    debug_batch_logged: bool,
+    debug_many_logged: bool,
 }
 
 struct PreparedEhlersBatch {
@@ -67,12 +110,23 @@ impl CudaEhlersITrend {
         cust::init(CudaFlags::empty()).map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?;
         let device = Device::get_device(device_id as u32)
             .map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?;
-        let context =
-            Context::new(device).map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?;
+        let context = Context::new(device).map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?;
 
-        let ptx = include_str!(concat!(env!("OUT_DIR"), "/ehlers_itrend_kernel.ptx"));
-        let module =
-            Module::from_ptx(ptx, &[]).map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?;
+        let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/ehlers_itrend_kernel.ptx"));
+        let jit_opts = &[
+            ModuleJitOption::DetermineTargetFromContext,
+            ModuleJitOption::OptLevel(OptLevel::O2),
+        ];
+        let module = match Module::from_ptx(ptx, jit_opts) {
+            Ok(m) => m,
+            Err(_) => {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                    m
+                } else {
+                    Module::from_ptx(ptx, &[]).map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?
+                }
+            }
+        };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?;
 
@@ -80,7 +134,60 @@ impl CudaEhlersITrend {
             module,
             stream,
             _context: context,
+            device_id: device_id as u32,
+            policy: CudaEhlersITrendPolicy::default(),
+            last_batch: None,
+            last_many: None,
+            debug_batch_logged: false,
+            debug_many_logged: false,
         })
+    }
+
+    pub fn new_with_policy(device_id: usize, policy: CudaEhlersITrendPolicy) -> Result<Self, CudaEhlersITrendError> {
+        let mut s = Self::new(device_id)?;
+        s.policy = policy;
+        Ok(s)
+    }
+    pub fn set_policy(&mut self, policy: CudaEhlersITrendPolicy) { self.policy = policy; }
+    pub fn policy(&self) -> &CudaEhlersITrendPolicy { &self.policy }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn synchronize(&self) -> Result<(), CudaEhlersITrendError> { self.stream.synchronize().map_err(|e| CudaEhlersITrendError::Cuda(e.to_string())) }
+
+    // VRAM helpers
+    #[inline]
+    fn mem_check_enabled() -> bool { match env::var("CUDA_MEM_CHECK") { Ok(v) => v != "0" && !v.eq_ignore_ascii_case("false"), Err(_) => true } }
+    #[inline]
+    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    #[inline]
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+        if !Self::mem_check_enabled() { return true; }
+        if let Some((free, _total)) = Self::device_mem_info() { required_bytes.saturating_add(headroom_bytes) <= free } else { true }
+    }
+
+    #[inline]
+    fn maybe_log_batch_debug(&self) {
+        static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
+        if self.debug_batch_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_batch {
+                let per = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                if per || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) { eprintln!("[DEBUG] EHLERS_ITREND batch selected kernel: {:?}", sel); }
+                unsafe { (*(self as *const _ as *mut CudaEhlersITrend)).debug_batch_logged = true; }
+            }
+        }
+    }
+    #[inline]
+    fn maybe_log_many_debug(&self) {
+        static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
+        if self.debug_many_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_many {
+                let per = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                if per || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) { eprintln!("[DEBUG] EHLERS_ITREND many-series selected kernel: {:?}", sel); }
+                unsafe { (*(self as *const _ as *mut CudaEhlersITrend)).debug_many_logged = true; }
+            }
+        }
     }
 
     pub fn ehlers_itrend_batch_dev(
@@ -90,6 +197,19 @@ impl CudaEhlersITrend {
     ) -> Result<DeviceArrayF32, CudaEhlersITrendError> {
         let prepared = Self::prepare_batch_inputs(data_f32, sweep)?;
         let n_combos = prepared.combos.len();
+
+        // VRAM check: prices + per-combo params + output
+        let prices_bytes = prepared.series_len * std::mem::size_of::<f32>();
+        let params_bytes = n_combos * (2 * std::mem::size_of::<i32>());
+        let out_bytes = n_combos * prepared.series_len * std::mem::size_of::<f32>();
+        let required = prices_bytes + params_bytes + out_bytes;
+        let headroom = 64 * 1024 * 1024; // 64MB safety
+        if !Self::will_fit(required, headroom) {
+            return Err(CudaEhlersITrendError::InvalidInput(format!(
+                "estimated device memory {:.2} MB exceeds free VRAM",
+                (required as f64) / (1024.0 * 1024.0)
+            )));
+        }
 
         let d_prices = DeviceBuffer::from_slice(data_f32)
             .map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?;
@@ -118,6 +238,40 @@ impl CudaEhlersITrend {
             rows: n_combos,
             cols: prepared.series_len,
         })
+    }
+
+    /// Device input → VRAM output; expands param sweep on host and launches batch kernel.
+    pub fn ehlers_itrend_batch_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        sweep: &EhlersITrendBatchRange,
+    ) -> Result<DeviceArrayF32, CudaEhlersITrendError> {
+        if series_len == 0 { return Err(CudaEhlersITrendError::InvalidInput("series_len is zero".into())); }
+        if first_valid >= series_len { return Err(CudaEhlersITrendError::InvalidInput("first_valid out of range".into())); }
+        let combos = expand_grid_cuda(sweep)?;
+        if combos.is_empty() { return Err(CudaEhlersITrendError::InvalidInput("no parameter combinations".into())); }
+        let n_combos = combos.len();
+        let mut warmups: Vec<i32> = Vec::with_capacity(n_combos);
+        let mut max_dcs: Vec<i32> = Vec::with_capacity(n_combos);
+        let mut max_shared_dc: usize = 0;
+        for prm in &combos {
+            let w = prm.warmup_bars.unwrap_or(12);
+            let m = prm.max_dc_period.unwrap_or(50);
+            if w == 0 || m == 0 { return Err(CudaEhlersITrendError::InvalidInput("warmup/max_dc must be positive".into())); }
+            if series_len - first_valid < w { return Err(CudaEhlersITrendError::InvalidInput(format!("not enough valid data for warmup {} (valid = {})", w, series_len - first_valid))); }
+            warmups.push(w as i32);
+            max_dcs.push(m as i32);
+            max_shared_dc = max_shared_dc.max(m);
+        }
+        let d_warmups = DeviceBuffer::from_slice(&warmups).map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?;
+        let d_max_dcs = DeviceBuffer::from_slice(&max_dcs).map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
+            .map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?;
+        self.launch_batch_kernel(d_prices, &d_warmups, &d_max_dcs, series_len, first_valid, n_combos, max_shared_dc, &mut d_out)?;
+        self.synchronize()?;
+        Ok(DeviceArrayF32 { buf: d_out, rows: n_combos, cols: series_len })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -190,6 +344,18 @@ impl CudaEhlersITrend {
     ) -> Result<DeviceArrayF32, CudaEhlersITrendError> {
         let prepared =
             Self::prepare_many_series_inputs(data_tm_f32, num_series, series_len, params)?;
+
+        // VRAM check: input + output + first_valids (small)
+        let in_bytes = num_series * series_len * std::mem::size_of::<f32>();
+        let out_bytes = in_bytes;
+        let params_bytes = num_series * std::mem::size_of::<i32>();
+        let required = in_bytes + out_bytes + params_bytes;
+        if !Self::will_fit(required, 64 * 1024 * 1024) {
+            return Err(CudaEhlersITrendError::InvalidInput(format!(
+                "estimated device memory {:.2} MB exceeds free VRAM",
+                (required as f64) / (1024.0 * 1024.0)
+            )));
+        }
 
         let d_prices = DeviceBuffer::from_slice(data_tm_f32)
             .map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?;
@@ -291,7 +457,8 @@ impl CudaEhlersITrend {
             .map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?;
 
         let grid: GridSize = (n_combos as u32, 1, 1).into();
-        let block: BlockSize = (128, 1, 1).into();
+        let block_x = match self.policy.batch { BatchKernelPolicy::Plain { block_x } => block_x, _ => 128 };
+        let block: BlockSize = (block_x, 1, 1).into();
         let shared_bytes = (max_shared_dc * std::mem::size_of::<f32>()) as u32;
 
         let mut series_len_i = i32::try_from(series_len).map_err(|_| {
@@ -325,10 +492,9 @@ impl CudaEhlersITrend {
                 .launch(&func, grid, block, shared_bytes, &mut args)
                 .map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?;
         }
-
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))
+        unsafe { (*(self as *const _ as *mut CudaEhlersITrend)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
+        self.maybe_log_batch_debug();
+        self.stream.synchronize().map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))
     }
 
     fn launch_many_series_kernel(
@@ -351,7 +517,8 @@ impl CudaEhlersITrend {
             .map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?;
 
         let grid: GridSize = (num_series as u32, 1, 1).into();
-        let block: BlockSize = (128, 1, 1).into();
+        let block_x = match self.policy.many_series { ManySeriesKernelPolicy::OneD { block_x } => block_x, _ => 128 };
+        let block: BlockSize = (block_x, 1, 1).into();
         let shared_bytes = (max_dc * std::mem::size_of::<f32>()) as u32;
 
         let mut num_series_i = i32::try_from(num_series).map_err(|_| {
@@ -382,10 +549,9 @@ impl CudaEhlersITrend {
                 .launch(&func, grid, block, shared_bytes, &mut args)
                 .map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?;
         }
-
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))
+        unsafe { (*(self as *const _ as *mut CudaEhlersITrend)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
+        self.maybe_log_many_debug();
+        self.stream.synchronize().map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))
     }
 
     fn prepare_batch_inputs(
