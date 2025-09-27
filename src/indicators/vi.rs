@@ -762,41 +762,19 @@ fn vi_batch_inner(
     let mut pfx_tr = vec![0.0f64; cols];
     let mut pfx_vp = vec![0.0f64; cols];
     let mut pfx_vm = vec![0.0f64; cols];
-    if cols > 0 {
-        // indices before `first` remain 0.0 in prefix arrays
-        if first < cols {
-            // seed at `first`
-            let tr0 = high[first] - low[first];
-            pfx_tr[first] = tr0;
-            pfx_vp[first] = 0.0;
-            pfx_vm[first] = 0.0;
-            // build cumulative sums from first+1 ..
-            let mut i = first + 1;
-            let mut prev_h = high[first];
-            let mut prev_l = low[first];
-            let mut prev_c = close[first];
-            while i < cols {
-                let hi = high[i];
-                let lo = low[i];
-                // TR components
-                let hl = hi - lo;
-                let hc = (hi - prev_c).abs();
-                let lc = (lo - prev_c).abs();
-                let tr_i = hl.max(hc.max(lc));
-                // VP/VM components
-                let vp_i = (hi - prev_l).abs();
-                let vm_i = (lo - prev_h).abs();
-
-                pfx_tr[i] = pfx_tr[i - 1] + tr_i;
-                pfx_vp[i] = pfx_vp[i - 1] + vp_i;
-                pfx_vm[i] = pfx_vm[i - 1] + vm_i;
-
-                prev_h = hi;
-                prev_l = lo;
-                prev_c = close[i];
-                i += 1;
+    if cols > 0 && first < cols {
+        unsafe {
+            match kern {
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 | Kernel::Avx512Batch => {
+                    vi_prefix_avx512(high, low, close, first, &mut pfx_tr, &mut pfx_vp, &mut pfx_vm)
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 | Kernel::Avx2Batch => {
+                    vi_prefix_avx2(high, low, close, first, &mut pfx_tr, &mut pfx_vp, &mut pfx_vm)
+                }
+                _ => vi_prefix_scalar(high, low, close, first, &mut pfx_tr, &mut pfx_vp, &mut pfx_vm),
             }
-            // fill any trailing (none) – already handled
         }
     }
 
@@ -983,32 +961,18 @@ fn vi_batch_inner_into(
     let mut pfx_tr = vec![0.0f64; cols];
     let mut pfx_vp = vec![0.0f64; cols];
     let mut pfx_vm = vec![0.0f64; cols];
-    if cols > 0 {
-        if first < cols {
-            let tr0 = high[first] - low[first];
-            pfx_tr[first] = tr0;
-            pfx_vp[first] = 0.0;
-            pfx_vm[first] = 0.0;
-            let mut i = first + 1;
-            let mut prev_h = high[first];
-            let mut prev_l = low[first];
-            let mut prev_c = close[first];
-            while i < cols {
-                let hi = high[i];
-                let lo = low[i];
-                let hl = hi - lo;
-                let hc = (hi - prev_c).abs();
-                let lc = (lo - prev_c).abs();
-                let tr_i = hl.max(hc.max(lc));
-                let vp_i = (hi - prev_l).abs();
-                let vm_i = (lo - prev_h).abs();
-                pfx_tr[i] = pfx_tr[i - 1] + tr_i;
-                pfx_vp[i] = pfx_vp[i - 1] + vp_i;
-                pfx_vm[i] = pfx_vm[i - 1] + vm_i;
-                prev_h = hi;
-                prev_l = lo;
-                prev_c = close[i];
-                i += 1;
+    if cols > 0 && first < cols {
+        unsafe {
+            match kernel {
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 | Kernel::Avx512Batch => {
+                    vi_prefix_avx512(high, low, close, first, &mut pfx_tr, &mut pfx_vp, &mut pfx_vm)
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 | Kernel::Avx2Batch => {
+                    vi_prefix_avx2(high, low, close, first, &mut pfx_tr, &mut pfx_vp, &mut pfx_vm)
+                }
+                _ => vi_prefix_scalar(high, low, close, first, &mut pfx_tr, &mut pfx_vp, &mut pfx_vm),
             }
         }
     }
@@ -1060,6 +1024,207 @@ fn vi_batch_inner_into(
         }
     }
     Ok(combos)
+}
+
+#[inline(always)]
+unsafe fn vi_prefix_scalar(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    first: usize,
+    pfx_tr: &mut [f64],
+    pfx_vp: &mut [f64],
+    pfx_vm: &mut [f64],
+) {
+    let n = high.len();
+    pfx_tr[first] = high[first] - low[first];
+    pfx_vp[first] = 0.0;
+    pfx_vm[first] = 0.0;
+    let mut prev_h = high[first];
+    let mut prev_l = low[first];
+    let mut prev_c = close[first];
+    let mut i = first + 1;
+    while i < n {
+        let hi = high[i];
+        let lo = low[i];
+        let hl = hi - lo;
+        let hc = (hi - prev_c).abs();
+        let lc = (lo - prev_c).abs();
+        let tr_i = hl.max(hc.max(lc));
+        let vp_i = (hi - prev_l).abs();
+        let vm_i = (lo - prev_h).abs();
+        pfx_tr[i] = pfx_tr[i - 1] + tr_i;
+        pfx_vp[i] = pfx_vp[i - 1] + vp_i;
+        pfx_vm[i] = pfx_vm[i - 1] + vm_i;
+        prev_h = hi;
+        prev_l = lo;
+        prev_c = close[i];
+        i += 1;
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn abs256(x: __m256d) -> __m256d {
+    let zero = _mm256_set1_pd(0.0);
+    _mm256_max_pd(x, _mm256_sub_pd(zero, x))
+}
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn vi_prefix_avx2(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    first: usize,
+    pfx_tr: &mut [f64],
+    pfx_vp: &mut [f64],
+    pfx_vm: &mut [f64],
+) {
+    use core::arch::x86_64::*;
+    let n = high.len();
+    pfx_tr[first] = high[first] - low[first];
+    pfx_vp[first] = 0.0;
+    pfx_vm[first] = 0.0;
+    let mut i = first + 1;
+    // Scalar carry from previous element
+    let mut carry_tr = pfx_tr[i - 1];
+    let mut carry_vp = pfx_vp[i - 1];
+    let mut carry_vm = pfx_vm[i - 1];
+    let step = 4;
+    while i + step <= n {
+        let v_hi = _mm256_loadu_pd(high.as_ptr().add(i));
+        let v_lo = _mm256_loadu_pd(low.as_ptr().add(i));
+        let v_cl_prev = _mm256_loadu_pd(close.as_ptr().add(i - 1));
+        let v_lo_prev = _mm256_loadu_pd(low.as_ptr().add(i - 1));
+        let v_hi_prev = _mm256_loadu_pd(high.as_ptr().add(i - 1));
+
+        let hl = _mm256_sub_pd(v_hi, v_lo);
+        let hc = abs256(_mm256_sub_pd(v_hi, v_cl_prev));
+        let lc = abs256(_mm256_sub_pd(v_lo, v_cl_prev));
+        let tr_v = _mm256_max_pd(hl, _mm256_max_pd(hc, lc));
+        let vp_v = abs256(_mm256_sub_pd(v_hi, v_lo_prev));
+        let vm_v = abs256(_mm256_sub_pd(v_lo, v_hi_prev));
+
+        let mut tr_tmp = [0.0f64; 4];
+        let mut vp_tmp = [0.0f64; 4];
+        let mut vm_tmp = [0.0f64; 4];
+        _mm256_storeu_pd(tr_tmp.as_mut_ptr(), tr_v);
+        _mm256_storeu_pd(vp_tmp.as_mut_ptr(), vp_v);
+        _mm256_storeu_pd(vm_tmp.as_mut_ptr(), vm_v);
+        let mut k = 0;
+        while k < step {
+            carry_tr += tr_tmp[k];
+            carry_vp += vp_tmp[k];
+            carry_vm += vm_tmp[k];
+            pfx_tr[i + k] = carry_tr;
+            pfx_vp[i + k] = carry_vp;
+            pfx_vm[i + k] = carry_vm;
+            k += 1;
+        }
+
+        i += step;
+    }
+    while i < n {
+        let hi = *high.get_unchecked(i);
+        let lo = *low.get_unchecked(i);
+        let prev_c = *close.get_unchecked(i - 1);
+        let prev_l = *low.get_unchecked(i - 1);
+        let prev_h = *high.get_unchecked(i - 1);
+        let hl = hi - lo;
+        let hc = (hi - prev_c).abs();
+        let lc = (lo - prev_c).abs();
+        let tr_i = hl.max(hc.max(lc));
+        let vp_i = (hi - prev_l).abs();
+        let vm_i = (lo - prev_h).abs();
+        carry_tr += tr_i;
+        carry_vp += vp_i;
+        carry_vm += vm_i;
+        pfx_tr[i] = carry_tr;
+        pfx_vp[i] = carry_vp;
+        pfx_vm[i] = carry_vm;
+        i += 1;
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn abs512(x: __m512d) -> __m512d {
+    let zero = _mm512_set1_pd(0.0);
+    _mm512_max_pd(x, _mm512_sub_pd(zero, x))
+}
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn vi_prefix_avx512(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    first: usize,
+    pfx_tr: &mut [f64],
+    pfx_vp: &mut [f64],
+    pfx_vm: &mut [f64],
+) {
+    use core::arch::x86_64::*;
+    let n = high.len();
+    pfx_tr[first] = high[first] - low[first];
+    pfx_vp[first] = 0.0;
+    pfx_vm[first] = 0.0;
+    let mut i = first + 1;
+    let mut carry_tr = pfx_tr[i - 1];
+    let mut carry_vp = pfx_vp[i - 1];
+    let mut carry_vm = pfx_vm[i - 1];
+    let step = 8;
+    while i + step <= n {
+        let v_hi = _mm512_loadu_pd(high.as_ptr().add(i));
+        let v_lo = _mm512_loadu_pd(low.as_ptr().add(i));
+        let v_cl_prev = _mm512_loadu_pd(close.as_ptr().add(i - 1));
+        let v_lo_prev = _mm512_loadu_pd(low.as_ptr().add(i - 1));
+        let v_hi_prev = _mm512_loadu_pd(high.as_ptr().add(i - 1));
+
+        let hl = _mm512_sub_pd(v_hi, v_lo);
+        let hc = abs512(_mm512_sub_pd(v_hi, v_cl_prev));
+        let lc = abs512(_mm512_sub_pd(v_lo, v_cl_prev));
+        let tr_v = _mm512_max_pd(hl, _mm512_max_pd(hc, lc));
+        let vp_v = abs512(_mm512_sub_pd(v_hi, v_lo_prev));
+        let vm_v = abs512(_mm512_sub_pd(v_lo, v_hi_prev));
+
+        let mut tr_tmp = [0.0f64; 8];
+        let mut vp_tmp = [0.0f64; 8];
+        let mut vm_tmp = [0.0f64; 8];
+        _mm512_storeu_pd(tr_tmp.as_mut_ptr(), tr_v);
+        _mm512_storeu_pd(vp_tmp.as_mut_ptr(), vp_v);
+        _mm512_storeu_pd(vm_tmp.as_mut_ptr(), vm_v);
+        let mut k = 0;
+        while k < step {
+            carry_tr += tr_tmp[k];
+            carry_vp += vp_tmp[k];
+            carry_vm += vm_tmp[k];
+            pfx_tr[i + k] = carry_tr;
+            pfx_vp[i + k] = carry_vp;
+            pfx_vm[i + k] = carry_vm;
+            k += 1;
+        }
+        i += step;
+    }
+    while i < n {
+        let hi = *high.get_unchecked(i);
+        let lo = *low.get_unchecked(i);
+        let prev_c = *close.get_unchecked(i - 1);
+        let prev_l = *low.get_unchecked(i - 1);
+        let prev_h = *high.get_unchecked(i - 1);
+        let hl = hi - lo;
+        let hc = (hi - prev_c).abs();
+        let lc = (lo - prev_c).abs();
+        let tr_i = hl.max(hc.max(lc));
+        let vp_i = (hi - prev_l).abs();
+        let vm_i = (lo - prev_h).abs();
+        carry_tr += tr_i;
+        carry_vp += vp_i;
+        carry_vm += vm_i;
+        pfx_tr[i] = carry_tr;
+        pfx_vp[i] = carry_vp;
+        pfx_vm[i] = carry_vm;
+        i += 1;
+    }
 }
 
 // ==========================

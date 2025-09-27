@@ -15,9 +15,11 @@
 //! - **values**: Vector of reverse RSI values with NaN prefix during warmup period
 //!
 //! ## Developer Notes
-//! - **AVX2/AVX512 Kernels**: Not implemented (no kernel dispatch in compute function)
+//! - **SIMD status**: Reverse RSI is dominated by sequential EMA recurrences; only the short warmup is vectorizable.
+//!   A loop‑jammed scalar path is fastest on CPUs tested; SIMD kernels are intentionally not selected.
 //! - **Streaming**: Implemented with O(1) update performance (maintains EMAs)
 //! - **Zero-copy Memory**: Uses alloc_with_nan_prefix and make_uninit_matrix for batch operations
+//! - **SIMD stubs**: AVX2/AVX512 stubs route to an unsafe, faster scalar kernel; Scalar stays safe for WASM.
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
@@ -394,85 +396,224 @@ fn reverse_rsi_prepare<'a>(
     Ok((data, first, rsi_len, rsi_lvl, ema_len))
 }
 
-#[inline]
+// Safe scalar reference implementation (no unsafe, used for Scalar and WASM)
+#[inline(always)]
+fn reverse_rsi_compute_into_scalar_safe(
+    data: &[f64],
+    first: usize,
+    rsi_length: usize,
+    rsi_level: f64,
+    out: &mut [f64],
+) -> Result<(), ReverseRsiError> {
+    // Preconditions are validated by reverse_rsi_prepare
+    let len = data.len();
+    let ema_len = (2 * rsi_length) - 1;
+
+    // ---- Constants (precompute to avoid recomputation in the hot loop) ----
+    let l = rsi_level;
+    let inv = 100.0 - l;
+    let rs_target = l / inv; // L / (100 - L)
+    let neg_scale = inv / l; // (100 - L) / L
+    let n_minus_1 = (rsi_length - 1) as f64;
+    let rs_coeff = n_minus_1 * rs_target; // precompute n_minus_1 * (L/(100-L))
+
+    // Wilder-equivalent EMA parameters (α = 2/(ema_len+1))
+    let alpha = 2.0 / (ema_len as f64 + 1.0);
+    let beta = 1.0 - alpha;
+
+    // ---- Warmup: compute SMA of up/down over ema_len samples starting at `first` ----
+    let warm_end = first + ema_len; // exclusive
+    let mut sum_up = 0.0f64;
+    let mut sum_dn = 0.0f64;
+    for i in first..warm_end {
+        let cur = data[i];
+        let prev = if i == first { 0.0 } else { data[i - 1] };
+        if cur.is_finite() && prev.is_finite() {
+            let d = cur - prev;
+            sum_up += d.max(0.0);
+            sum_dn += (-d).max(0.0);
+        }
+    }
+
+    let mut up_ema = sum_up / (ema_len as f64);
+    let mut dn_ema = sum_dn / (ema_len as f64);
+
+    // ---- First output at index warm_idx = warm_end - 1 ----
+    let warm_idx = warm_end - 1;
+    let base = data[warm_idx];
+    let x = rs_coeff.mul_add(dn_ema, -n_minus_1 * up_ema);
+    if x >= 0.0 {
+        out[warm_idx] = base + x;
+    } else {
+        let v = base + x * neg_scale;
+        out[warm_idx] = if v.is_finite() { v } else { 0.0 };
+    }
+
+    // ---- Main loop ----
+    for i in warm_end..len {
+        let cur = data[i];
+        let prev = data[i - 1];
+        let valid = cur.is_finite() && prev.is_finite();
+        let d = if valid { cur - prev } else { 0.0 };
+        let up = d.max(0.0);
+        let dn = (-d).max(0.0);
+
+        up_ema = beta.mul_add(up_ema, alpha * up);
+        dn_ema = beta.mul_add(dn_ema, alpha * dn);
+
+        let x = rs_coeff.mul_add(dn_ema, -n_minus_1 * up_ema);
+        if x >= 0.0 {
+            out[i] = cur + x;
+        } else {
+            let v = cur + x * neg_scale;
+            out[i] = if v.is_finite() { v } else { 0.0 };
+        }
+    }
+
+    Ok(())
+}
+
+// Unsafe optimized compute used as AVX2/AVX512 stub (no explicit SIMD intrinsics)
+#[inline(always)]
+unsafe fn reverse_rsi_compute_into_unsafe_fast(
+    data: &[f64],
+    first: usize,
+    rsi_length: usize,
+    rsi_level: f64,
+    out: &mut [f64],
+) -> Result<(), ReverseRsiError> {
+    let len = data.len();
+    let ema_len = (2 * rsi_length) - 1;
+
+    let l = rsi_level;
+    let inv = 100.0 - l;
+    let rs_target = l / inv;
+    let neg_scale = inv / l;
+    let n_minus_1 = (rsi_length - 1) as f64;
+    let rs_coeff = n_minus_1 * rs_target;
+
+    let alpha = 2.0 / (ema_len as f64 + 1.0);
+    let beta = 1.0 - alpha;
+
+    let warm_end = first + ema_len;
+    let mut sum_up = 0.0f64;
+    let mut sum_dn = 0.0f64;
+
+    let all_finite = data[first..].iter().all(|v| v.is_finite());
+
+    let mut i = first;
+    if all_finite {
+        while i < warm_end {
+            let cur = *data.get_unchecked(i);
+            let prev = if i == first { 0.0 } else { *data.get_unchecked(i - 1) };
+            let d = cur - prev;
+            sum_up += d.max(0.0);
+            sum_dn += (-d).max(0.0);
+            i += 1;
+        }
+    } else {
+        while i < warm_end {
+            let cur = *data.get_unchecked(i);
+            let prev = if i == first { 0.0 } else { *data.get_unchecked(i - 1) };
+            if cur.is_finite() & prev.is_finite() {
+                let d = cur - prev;
+                sum_up += d.max(0.0);
+                sum_dn += (-d).max(0.0);
+            }
+            i += 1;
+        }
+    }
+
+    let mut up_ema = sum_up / (ema_len as f64);
+    let mut dn_ema = sum_dn / (ema_len as f64);
+
+    let warm_idx = warm_end - 1;
+    let base = *data.get_unchecked(warm_idx);
+    let x0 = rs_coeff.mul_add(dn_ema, -n_minus_1 * up_ema);
+    let m0 = (x0 >= 0.0) as i32 as f64;
+    let scale0 = neg_scale + m0 * (1.0 - neg_scale);
+    let v0 = base + x0 * scale0;
+    *out.get_unchecked_mut(warm_idx) = if v0.is_finite() || x0 >= 0.0 { v0 } else { 0.0 };
+
+    i = warm_end;
+    if all_finite {
+        while i < len {
+            let cur = *data.get_unchecked(i);
+            let prev = *data.get_unchecked(i - 1);
+            let d = cur - prev;
+            let up = d.max(0.0);
+            let dn = (-d).max(0.0);
+            up_ema = beta.mul_add(up_ema, alpha * up);
+            dn_ema = beta.mul_add(dn_ema, alpha * dn);
+            let x = rs_coeff.mul_add(dn_ema, -n_minus_1 * up_ema);
+            let m = (x >= 0.0) as i32 as f64;
+            let scale = neg_scale + m * (1.0 - neg_scale);
+            let v = cur + x * scale;
+            *out.get_unchecked_mut(i) = if v.is_finite() || x >= 0.0 { v } else { 0.0 };
+            i += 1;
+        }
+    } else {
+        while i < len {
+            let cur = *data.get_unchecked(i);
+            let prev = *data.get_unchecked(i - 1);
+            let valid = cur.is_finite() & prev.is_finite();
+            let d = if valid { cur - prev } else { 0.0 };
+            let up = d.max(0.0);
+            let dn = (-d).max(0.0);
+            up_ema = beta.mul_add(up_ema, alpha * up);
+            dn_ema = beta.mul_add(dn_ema, alpha * dn);
+            let x = rs_coeff.mul_add(dn_ema, -n_minus_1 * up_ema);
+            let m = (x >= 0.0) as i32 as f64;
+            let scale = neg_scale + m * (1.0 - neg_scale);
+            let v = cur + x * scale;
+            *out.get_unchecked_mut(i) = if v.is_finite() || x >= 0.0 { v } else { 0.0 };
+            i += 1;
+        }
+    }
+
+    Ok(())
+}
+
+// AVX2 stub: uses the unsafe fast scalar implementation
+#[inline(always)]
+fn reverse_rsi_compute_into_avx2_stub(
+    data: &[f64],
+    first: usize,
+    rsi_length: usize,
+    rsi_level: f64,
+    out: &mut [f64],
+) -> Result<(), ReverseRsiError> {
+    unsafe { reverse_rsi_compute_into_unsafe_fast(data, first, rsi_length, rsi_level, out) }
+}
+
+// AVX512 stub: currently same as AVX2 stub
+#[inline(always)]
+fn reverse_rsi_compute_into_avx512_stub(
+    data: &[f64],
+    first: usize,
+    rsi_length: usize,
+    rsi_level: f64,
+    out: &mut [f64],
+) -> Result<(), ReverseRsiError> {
+    reverse_rsi_compute_into_avx2_stub(data, first, rsi_length, rsi_level, out)
+}
+
+// Kernel-dispatching entry used by public APIs
+#[inline(always)]
 fn reverse_rsi_compute_into(
     data: &[f64],
     first: usize,
     rsi_length: usize,
     rsi_level: f64,
-    ema_kern: Kernel, // <— honor kernel
+    kern: Kernel,
     out: &mut [f64],
 ) -> Result<(), ReverseRsiError> {
-    use core::mem::MaybeUninit;
-
-    let len = data.len();
-    let ema_len = (2 * rsi_length) - 1;
-
-    // 2 × len uninit scratch without UB or leaks
-    let mut scratch = make_uninit_matrix(2, len);
-    let (up_mu, dn_mu) = scratch.split_at_mut(len);
-
-    // Initialize all cells via MaybeUninit::write
-    for i in 0..first {
-        up_mu[i].write(0.0);
-        dn_mu[i].write(0.0);
+    let k = to_non_batch(match kern { Kernel::Auto => detect_best_kernel(), x => x });
+    match k {
+        Kernel::Avx512 => reverse_rsi_compute_into_avx512_stub(data, first, rsi_length, rsi_level, out),
+        Kernel::Avx2 => reverse_rsi_compute_into_avx2_stub(data, first, rsi_length, rsi_level, out),
+        _ => reverse_rsi_compute_into_scalar_safe(data, first, rsi_length, rsi_level, out),
     }
-    for i in first..len {
-        let cur = data[i];
-        if cur.is_finite() {
-            let prev = if i == first {
-                0.0
-            } else {
-                let p = data[i - 1];
-                if p.is_finite() {
-                    p
-                } else {
-                    0.0
-                }
-            };
-            let d = cur - prev;
-            up_mu[i].write(d.max(0.0));
-            dn_mu[i].write((-d).max(0.0));
-        } else {
-            up_mu[i].write(0.0);
-            dn_mu[i].write(0.0);
-        }
-    }
-
-    // Safe views after full init (read-only is fine)
-    let up_buf: &[f64] = unsafe { core::slice::from_raw_parts(up_mu.as_ptr() as *const f64, len) };
-    let dn_buf: &[f64] = unsafe { core::slice::from_raw_parts(dn_mu.as_ptr() as *const f64, len) };
-
-    // Pre-NAN outputs; avoid post pass
-    let mut up_ema = alloc_with_nan_prefix(len, first + ema_len - 1);
-    let mut dn_ema = alloc_with_nan_prefix(len, first + ema_len - 1);
-
-    let p = EmaParams {
-        period: Some(ema_len),
-    };
-    ema_into_slice_or_wrap(
-        &mut up_ema,
-        &EmaInput::from_slice(up_buf, p.clone()),
-        ema_kern,
-    )?;
-    ema_into_slice_or_wrap(&mut dn_ema, &EmaInput::from_slice(dn_buf, p), ema_kern)?;
-
-    for i in (first + ema_len - 1)..len {
-        let u = up_ema[i];
-        let d = dn_ema[i];
-        let x = (rsi_length - 1) as f64 * (d * rsi_level / (100.0 - rsi_level) - u);
-        out[i] = if x >= 0.0 {
-            data[i] + x
-        } else {
-            let v = data[i] + x * ((100.0 - rsi_level) / rsi_level);
-            if v.is_finite() {
-                v
-            } else {
-                0.0
-            }
-        };
-    }
-    Ok(())
 }
 
 #[inline(always)]
@@ -513,6 +654,19 @@ pub fn reverse_rsi_with_kernel(
     let mut out = alloc_with_nan_prefix(data.len(), first + ema_len - 1);
     reverse_rsi_compute_into(data, first, rsi_len, rsi_lvl, kernel, &mut out)?; // pass kernel
     Ok(ReverseRsiOutput { values: out })
+}
+
+// ============= OPTIONAL SIMD STUBS (public, cfg-gated) =============
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
+pub fn reverse_rsi_avx2(input: &ReverseRsiInput) -> Result<ReverseRsiOutput, ReverseRsiError> {
+    reverse_rsi_with_kernel(input, Kernel::Avx2)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
+pub fn reverse_rsi_avx512(input: &ReverseRsiInput) -> Result<ReverseRsiOutput, ReverseRsiError> {
+    reverse_rsi_with_kernel(input, Kernel::Avx512)
 }
 
 #[inline]

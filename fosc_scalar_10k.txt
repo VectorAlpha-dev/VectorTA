@@ -1,0 +1,6 @@
+fosc/fosc_scalar/10k    time:   [9.5782 µs 9.6175 µs 9.6697 µs]
+                        thrpt:  [7.7051 GiB/s 7.7469 GiB/s 7.7787 GiB/s]
+slope  [9.5782 µs 9.6697 µs] R^2            [0.9987143 0.9984769]
+mean   [9.6150 µs 9.7420 µs] std. dev.      [70.379 ns 123.92 ns]
+median [9.5656 µs 9.7664 µs] med. abs. dev. [1.3510 ns 157.97 ns]
+

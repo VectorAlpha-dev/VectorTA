@@ -1,0 +1,1740 @@
+   Compiling my_project v0.1.0 (/mnt/c/Rust Projects/my_project-bindings-3)
+    Finished `bench` profile [optimized] target(s) in 2m 09s
+     Running benches/indicator_benchmark.rs (target/release/deps/indicator_benchmark-8e42ba5f6c959d08)
+Gnuplot not found, using plotters backend
+acosc_bench/scalar/10k: benchmark
+acosc_bench/scalar/100k: benchmark
+acosc_bench/scalar/1M: benchmark
+
+ad_bench/scalar/10k: benchmark
+ad_bench/scalar/100k: benchmark
+ad_bench/scalar/1M: benchmark
+
+adosc_bench/scalar/10k: benchmark
+adosc_bench/scalar/100k: benchmark
+adosc_bench/scalar/1M: benchmark
+
+adx_bench/scalar/10k: benchmark
+adx_bench/scalar/100k: benchmark
+adx_bench/scalar/1M: benchmark
+
+adxr_bench/scalar/10k: benchmark
+adxr_bench/scalar/100k: benchmark
+adxr_bench/scalar/1M: benchmark
+
+alligator_bench/scalar/10k: benchmark
+alligator_bench/scalar/100k: benchmark
+alligator_bench/scalar/1M: benchmark
+
+alphatrend_bench/scalar/10k: benchmark
+alphatrend_bench/scalar/100k: benchmark
+alphatrend_bench/scalar/1M: benchmark
+
+ao_bench/scalar/10k: benchmark
+ao_bench/scalar/100k: benchmark
+ao_bench/scalar/1M: benchmark
+
+apo_bench/scalar/10k: benchmark
+apo_bench/scalar/100k: benchmark
+apo_bench/scalar/1M: benchmark
+
+aroon_bench/scalar/10k: benchmark
+aroon_bench/scalar/100k: benchmark
+aroon_bench/scalar/1M: benchmark
+
+aroon_osc_bench/scalar/10k: benchmark
+aroon_osc_bench/scalar/100k: benchmark
+aroon_osc_bench/scalar/1M: benchmark
+
+atr_bench/scalar/10k: benchmark
+atr_bench/scalar/100k: benchmark
+atr_bench/scalar/1M: benchmark
+
+bandpass_bench/scalar/10k: benchmark
+bandpass_bench/scalar/100k: benchmark
+bandpass_bench/scalar/1M: benchmark
+
+bollinger_bands_bench/scalar/10k: benchmark
+bollinger_bands_bench/scalar/100k: benchmark
+bollinger_bands_bench/scalar/1M: benchmark
+
+bollinger_bands_width_bench/scalar/10k: benchmark
+bollinger_bands_width_bench/scalar/100k: benchmark
+bollinger_bands_width_bench/scalar/1M: benchmark
+
+bop_bench/scalar/10k: benchmark
+bop_bench/scalar/100k: benchmark
+bop_bench/scalar/1M: benchmark
+
+cci_bench/scalar/10k: benchmark
+cci_bench/scalar/100k: benchmark
+cci_bench/scalar/1M: benchmark
+
+cfo_bench/scalar/10k: benchmark
+cfo_bench/scalar/100k: benchmark
+cfo_bench/scalar/1M: benchmark
+
+cg_bench/scalar/10k: benchmark
+cg_bench/scalar/100k: benchmark
+cg_bench/scalar/1M: benchmark
+
+chande_bench/scalar/10k: benchmark
+chande_bench/scalar/100k: benchmark
+chande_bench/scalar/1M: benchmark
+
+chop_bench/scalar/10k: benchmark
+chop_bench/scalar/100k: benchmark
+chop_bench/scalar/1M: benchmark
+
+cksp_bench/scalar/10k: benchmark
+cksp_bench/scalar/100k: benchmark
+cksp_bench/scalar/1M: benchmark
+
+cmo_bench/scalar/10k: benchmark
+cmo_bench/scalar/100k: benchmark
+cmo_bench/scalar/1M: benchmark
+
+coppock_bench/scalar/10k: benchmark
+coppock_bench/scalar/100k: benchmark
+coppock_bench/scalar/1M: benchmark
+
+cora_wave_bench/scalar/10k: benchmark
+cora_wave_bench/scalar/100k: benchmark
+cora_wave_bench/scalar/1M: benchmark
+
+correl_hl_bench/scalar/10k: benchmark
+correl_hl_bench/scalar/100k: benchmark
+correl_hl_bench/scalar/1M: benchmark
+
+correlation_cycle_bench/scalar/10k: benchmark
+correlation_cycle_bench/scalar/100k: benchmark
+correlation_cycle_bench/scalar/1M: benchmark
+
+cvi_bench/scalar/10k: benchmark
+cvi_bench/scalar/100k: benchmark
+cvi_bench/scalar/1M: benchmark
+
+damiani_volatmeter_bench/scalar/10k: benchmark
+damiani_volatmeter_bench/scalar/100k: benchmark
+damiani_volatmeter_bench/scalar/1M: benchmark
+
+dec_osc_bench/scalar/10k: benchmark
+dec_osc_bench/scalar/100k: benchmark
+dec_osc_bench/scalar/1M: benchmark
+
+decycler_bench/scalar/10k: benchmark
+decycler_bench/scalar/100k: benchmark
+decycler_bench/scalar/1M: benchmark
+
+devstop_bench/scalar/10k: benchmark
+devstop_bench/scalar/100k: benchmark
+devstop_bench/scalar/1M: benchmark
+
+di_bench/scalar/10k: benchmark
+di_bench/scalar/100k: benchmark
+di_bench/scalar/1M: benchmark
+
+dm_bench/scalar/10k: benchmark
+dm_bench/scalar/100k: benchmark
+dm_bench/scalar/1M: benchmark
+
+donchian_bench/scalar/10k: benchmark
+donchian_bench/scalar/100k: benchmark
+donchian_bench/scalar/1M: benchmark
+
+dpo_bench/scalar/10k: benchmark
+dpo_bench/scalar/100k: benchmark
+dpo_bench/scalar/1M: benchmark
+
+dti_bench/scalar/10k: benchmark
+dti_bench/scalar/100k: benchmark
+dti_bench/scalar/1M: benchmark
+
+dx_bench/scalar/10k: benchmark
+dx_bench/scalar/100k: benchmark
+dx_bench/scalar/1M: benchmark
+
+efi_bench/scalar/10k: benchmark
+efi_bench/scalar/100k: benchmark
+efi_bench/scalar/1M: benchmark
+
+emd_bench/scalar/10k: benchmark
+emd_bench/scalar/100k: benchmark
+emd_bench/scalar/1M: benchmark
+
+emv_bench/scalar/10k: benchmark
+emv_bench/scalar/100k: benchmark
+emv_bench/scalar/1M: benchmark
+
+er_bench/scalar/10k: benchmark
+er_bench/scalar/100k: benchmark
+er_bench/scalar/1M: benchmark
+
+eri_bench/scalar/10k: benchmark
+eri_bench/scalar/100k: benchmark
+eri_bench/scalar/1M: benchmark
+
+fisher_bench/scalar/10k: benchmark
+fisher_bench/scalar/100k: benchmark
+fisher_bench/scalar/1M: benchmark
+
+fosc_bench/scalar/10k: benchmark
+fosc_bench/scalar/100k: benchmark
+fosc_bench/scalar/1M: benchmark
+
+gatorosc_bench/scalar/10k: benchmark
+gatorosc_bench/scalar/100k: benchmark
+gatorosc_bench/scalar/1M: benchmark
+
+ift_rsi_bench/scalar/10k: benchmark
+ift_rsi_bench/scalar/100k: benchmark
+ift_rsi_bench/scalar/1M: benchmark
+
+kaufmanstop_bench/scalar/10k: benchmark
+kaufmanstop_bench/scalar/100k: benchmark
+kaufmanstop_bench/scalar/1M: benchmark
+
+kdj_bench/scalar/10k: benchmark
+kdj_bench/scalar/100k: benchmark
+kdj_bench/scalar/1M: benchmark
+
+keltner_bench/scalar/10k: benchmark
+keltner_bench/scalar/100k: benchmark
+keltner_bench/scalar/1M: benchmark
+
+kst_bench/scalar/10k: benchmark
+kst_bench/scalar/100k: benchmark
+kst_bench/scalar/1M: benchmark
+
+kurtosis_bench/scalar/10k: benchmark
+kurtosis_bench/scalar/100k: benchmark
+kurtosis_bench/scalar/1M: benchmark
+
+kvo_bench/scalar/10k: benchmark
+kvo_bench/scalar/100k: benchmark
+kvo_bench/scalar/1M: benchmark
+
+linearreg_angle_bench/scalar/10k: benchmark
+linearreg_angle_bench/scalar/100k: benchmark
+linearreg_angle_bench/scalar/1M: benchmark
+
+linearreg_intercept_bench/scalar/10k: benchmark
+linearreg_intercept_bench/scalar/100k: benchmark
+linearreg_intercept_bench/scalar/1M: benchmark
+
+linearreg_slope_bench/scalar/10k: benchmark
+linearreg_slope_bench/scalar/100k: benchmark
+linearreg_slope_bench/scalar/1M: benchmark
+
+lpc_bench/scalar/10k: benchmark
+lpc_bench/scalar/100k: benchmark
+lpc_bench/scalar/1M: benchmark
+
+lrsi_bench/scalar/10k: benchmark
+lrsi_bench/scalar/100k: benchmark
+lrsi_bench/scalar/1M: benchmark
+
+mab_bench/scalar/10k: benchmark
+mab_bench/scalar/100k: benchmark
+mab_bench/scalar/1M: benchmark
+
+macd_bench/scalar/10k: benchmark
+macd_bench/scalar/100k: benchmark
+macd_bench/scalar/1M: benchmark
+
+marketfi_bench/scalar/10k: benchmark
+marketfi_bench/scalar/100k: benchmark
+marketfi_bench/scalar/1M: benchmark
+
+mass_bench/scalar/10k: benchmark
+mass_bench/scalar/100k: benchmark
+mass_bench/scalar/1M: benchmark
+
+mean_ad_bench/scalar/10k: benchmark
+mean_ad_bench/scalar/100k: benchmark
+mean_ad_bench/scalar/1M: benchmark
+
+medium_ad_bench/scalar/10k: benchmark
+medium_ad_bench/scalar/100k: benchmark
+medium_ad_bench/scalar/1M: benchmark
+
+medprice_bench/scalar/10k: benchmark
+medprice_bench/scalar/100k: benchmark
+medprice_bench/scalar/1M: benchmark
+
+mfi_bench/scalar/10k: benchmark
+mfi_bench/scalar/100k: benchmark
+mfi_bench/scalar/1M: benchmark
+
+midpoint_bench/scalar/10k: benchmark
+midpoint_bench/scalar/100k: benchmark
+midpoint_bench/scalar/1M: benchmark
+
+midprice_bench/scalar/10k: benchmark
+midprice_bench/scalar/100k: benchmark
+midprice_bench/scalar/1M: benchmark
+
+minmax_bench/scalar/10k: benchmark
+minmax_bench/scalar/100k: benchmark
+minmax_bench/scalar/1M: benchmark
+
+mod_god_mode_bench/scalar/10k: benchmark
+mod_god_mode_bench/scalar/100k: benchmark
+mod_god_mode_bench/scalar/1M: benchmark
+
+mom_bench/scalar/10k: benchmark
+mom_bench/scalar/100k: benchmark
+mom_bench/scalar/1M: benchmark
+
+msw_bench/scalar/10k: benchmark
+msw_bench/scalar/100k: benchmark
+msw_bench/scalar/1M: benchmark
+
+nadaraya_watson_envelope_bench/scalar/10k: benchmark
+nadaraya_watson_envelope_bench/scalar/100k: benchmark
+nadaraya_watson_envelope_bench/scalar/1M: benchmark
+
+natr_bench/scalar/10k: benchmark
+natr_bench/scalar/100k: benchmark
+natr_bench/scalar/1M: benchmark
+
+nvi_bench/scalar/10k: benchmark
+nvi_bench/scalar/100k: benchmark
+nvi_bench/scalar/1M: benchmark
+
+obv_bench/scalar/10k: benchmark
+obv_bench/scalar/100k: benchmark
+obv_bench/scalar/1M: benchmark
+
+otto_bench/scalar/10k: benchmark
+otto_bench/scalar/100k: benchmark
+otto_bench/scalar/1M: benchmark
+
+pfe_bench/scalar/10k: benchmark
+pfe_bench/scalar/100k: benchmark
+pfe_bench/scalar/1M: benchmark
+
+pivot_bench/scalar/10k: benchmark
+pivot_bench/scalar/100k: benchmark
+pivot_bench/scalar/1M: benchmark
+
+pma_bench/scalar/10k: benchmark
+pma_bench/scalar/100k: benchmark
+pma_bench/scalar/1M: benchmark
+
+ppo_bench/scalar/10k: benchmark
+ppo_bench/scalar/100k: benchmark
+ppo_bench/scalar/1M: benchmark
+
+prb_bench/scalar/10k: benchmark
+prb_bench/scalar/100k: benchmark
+prb_bench/scalar/1M: benchmark
+
+pvi_bench/scalar/10k: benchmark
+pvi_bench/scalar/100k: benchmark
+pvi_bench/scalar/1M: benchmark
+
+qqe_bench/scalar/10k: benchmark
+qqe_bench/scalar/100k: benchmark
+qqe_bench/scalar/1M: benchmark
+
+qstick_bench/scalar/10k: benchmark
+qstick_bench/scalar/100k: benchmark
+qstick_bench/scalar/1M: benchmark
+
+roc_bench/scalar/10k: benchmark
+roc_bench/scalar/100k: benchmark
+roc_bench/scalar/1M: benchmark
+
+rocp_bench/scalar/10k: benchmark
+rocp_bench/scalar/100k: benchmark
+rocp_bench/scalar/1M: benchmark
+
+rocr_bench/scalar/10k: benchmark
+rocr_bench/scalar/100k: benchmark
+rocr_bench/scalar/1M: benchmark
+
+rsi_bench/scalar/10k: benchmark
+rsi_bench/scalar/100k: benchmark
+rsi_bench/scalar/1M: benchmark
+
+rsmk_bench/scalar/10k: benchmark
+rsmk_bench/scalar/100k: benchmark
+rsmk_bench/scalar/1M: benchmark
+
+rsx_bench/scalar/10k: benchmark
+rsx_bench/scalar/100k: benchmark
+rsx_bench/scalar/1M: benchmark
+
+rvi_bench/scalar/10k: benchmark
+rvi_bench/scalar/100k: benchmark
+rvi_bench/scalar/1M: benchmark
+
+safezonestop_bench/scalar/10k: benchmark
+safezonestop_bench/scalar/100k: benchmark
+safezonestop_bench/scalar/1M: benchmark
+
+sar_bench/scalar/10k: benchmark
+sar_bench/scalar/100k: benchmark
+sar_bench/scalar/1M: benchmark
+
+squeeze_momentum_bench/scalar/10k: benchmark
+squeeze_momentum_bench/scalar/100k: benchmark
+squeeze_momentum_bench/scalar/1M: benchmark
+
+srsi_bench/scalar/10k: benchmark
+srsi_bench/scalar/100k: benchmark
+srsi_bench/scalar/1M: benchmark
+
+stc_bench/scalar/10k: benchmark
+stc_bench/scalar/100k: benchmark
+stc_bench/scalar/1M: benchmark
+
+stddev_bench/scalar/10k: benchmark
+stddev_bench/scalar/100k: benchmark
+stddev_bench/scalar/1M: benchmark
+
+stoch_bench/scalar/10k: benchmark
+stoch_bench/scalar/100k: benchmark
+stoch_bench/scalar/1M: benchmark
+
+stochf_bench/scalar/10k: benchmark
+stochf_bench/scalar/100k: benchmark
+stochf_bench/scalar/1M: benchmark
+
+supertrend_bench/scalar/10k: benchmark
+supertrend_bench/scalar/100k: benchmark
+supertrend_bench/scalar/1M: benchmark
+
+trix_bench/scalar/10k: benchmark
+trix_bench/scalar/100k: benchmark
+trix_bench/scalar/1M: benchmark
+
+tsf_bench/scalar/10k: benchmark
+tsf_bench/scalar/100k: benchmark
+tsf_bench/scalar/1M: benchmark
+
+tsi_bench/scalar/10k: benchmark
+tsi_bench/scalar/100k: benchmark
+tsi_bench/scalar/1M: benchmark
+
+ttm_squeeze_bench/scalar/10k: benchmark
+ttm_squeeze_bench/scalar/100k: benchmark
+ttm_squeeze_bench/scalar/1M: benchmark
+
+ttm_trend_bench/scalar/10k: benchmark
+ttm_trend_bench/scalar/100k: benchmark
+ttm_trend_bench/scalar/1M: benchmark
+
+ui_bench/scalar/10k: benchmark
+ui_bench/scalar/100k: benchmark
+ui_bench/scalar/1M: benchmark
+
+ultosc_bench/scalar/10k: benchmark
+ultosc_bench/scalar/100k: benchmark
+ultosc_bench/scalar/1M: benchmark
+
+var_bench/scalar/10k: benchmark
+var_bench/scalar/100k: benchmark
+var_bench/scalar/1M: benchmark
+
+vi_bench/scalar/10k: benchmark
+vi_bench/scalar/100k: benchmark
+vi_bench/scalar/1M: benchmark
+
+vosc_bench/scalar/10k: benchmark
+vosc_bench/scalar/100k: benchmark
+vosc_bench/scalar/1M: benchmark
+
+voss_bench/scalar/10k: benchmark
+voss_bench/scalar/100k: benchmark
+voss_bench/scalar/1M: benchmark
+
+vpci_bench/scalar/10k: benchmark
+vpci_bench/scalar/100k: benchmark
+vpci_bench/scalar/1M: benchmark
+
+vpt_bench/scalar/10k: benchmark
+vpt_bench/scalar/100k: benchmark
+vpt_bench/scalar/1M: benchmark
+
+vwap_bench/scalar/10k: benchmark
+vwap_bench/scalar/100k: benchmark
+vwap_bench/scalar/1M: benchmark
+
+vwmacd_bench/scalar/10k: benchmark
+vwmacd_bench/scalar/100k: benchmark
+vwmacd_bench/scalar/1M: benchmark
+
+wad_bench/scalar/10k: benchmark
+wad_bench/scalar/100k: benchmark
+wad_bench/scalar/1M: benchmark
+
+wavetrend_bench/scalar/10k: benchmark
+wavetrend_bench/scalar/100k: benchmark
+wavetrend_bench/scalar/1M: benchmark
+
+wclprice_bench/scalar/10k: benchmark
+wclprice_bench/scalar/100k: benchmark
+wclprice_bench/scalar/1M: benchmark
+
+willr_bench/scalar/10k: benchmark
+willr_bench/scalar/100k: benchmark
+willr_bench/scalar/1M: benchmark
+
+zscore_bench/scalar/10k: benchmark
+zscore_bench/scalar/100k: benchmark
+zscore_bench/scalar/1M: benchmark
+
+buff_averages_bench/scalar/10k: benchmark
+buff_averages_bench/scalar/100k: benchmark
+buff_averages_bench/scalar/1M: benchmark
+
+volume_adjusted_ma_bench/scalar/10k: benchmark
+volume_adjusted_ma_bench/scalar/100k: benchmark
+volume_adjusted_ma_bench/scalar/1M: benchmark
+
+net_myrsi_bench/scalar/10k: benchmark
+net_myrsi_bench/scalar/100k: benchmark
+net_myrsi_bench/scalar/1M: benchmark
+
+cci_cycle_bench/scalar/10k: benchmark
+cci_cycle_bench/scalar/100k: benchmark
+cci_cycle_bench/scalar/1M: benchmark
+
+fvg_trailing_stop_bench/scalar/10k: benchmark
+fvg_trailing_stop_bench/scalar/100k: benchmark
+fvg_trailing_stop_bench/scalar/1M: benchmark
+
+halftrend_bench/scalar/10k: benchmark
+halftrend_bench/scalar/100k: benchmark
+halftrend_bench/scalar/1M: benchmark
+
+reverse_rsi_bench/scalar/10k: benchmark
+reverse_rsi_bench/scalar/100k: benchmark
+reverse_rsi_bench/scalar/1M: benchmark
+
+vama_bench/scalar/10k: benchmark
+vama_bench/scalar/100k: benchmark
+vama_bench/scalar/1M: benchmark
+
+kaufmanstop/kaufmanstop_scalar/10k: benchmark
+kaufmanstop/kaufmanstop_avx2/10k: benchmark
+kaufmanstop/kaufmanstop_avx512/10k: benchmark
+kaufmanstop/kaufmanstop_scalar/100k: benchmark
+kaufmanstop/kaufmanstop_avx2/100k: benchmark
+kaufmanstop/kaufmanstop_avx512/100k: benchmark
+kaufmanstop/kaufmanstop_scalar/1M: benchmark
+kaufmanstop/kaufmanstop_avx2/1M: benchmark
+kaufmanstop/kaufmanstop_avx512/1M: benchmark
+
+alma/alma_scalar/10k: benchmark
+alma/alma_avx2/10k: benchmark
+alma/alma_avx512/10k: benchmark
+alma/alma_scalar/100k: benchmark
+alma/alma_avx2/100k: benchmark
+alma/alma_avx512/100k: benchmark
+alma/alma_scalar/1M: benchmark
+alma/alma_avx2/1M: benchmark
+alma/alma_avx512/1M: benchmark
+
+alma_batch/alma_batch_scalarbatch/10k: benchmark
+alma_batch/alma_batch_avx2batch/10k: benchmark
+alma_batch/alma_batch_avx512batch/10k: benchmark
+alma_batch/alma_batch_scalarbatch/100k: benchmark
+alma_batch/alma_batch_avx2batch/100k: benchmark
+alma_batch/alma_batch_avx512batch/100k: benchmark
+alma_batch/alma_batch_scalarbatch/1M: benchmark
+alma_batch/alma_batch_avx2batch/1M: benchmark
+alma_batch/alma_batch_avx512batch/1M: benchmark
+
+mod_god_mode/mod_god_mode_scalar/10k: benchmark
+mod_god_mode/mod_god_mode_avx2/10k: benchmark
+mod_god_mode/mod_god_mode_avx512/10k: benchmark
+mod_god_mode/mod_god_mode_scalar/100k: benchmark
+mod_god_mode/mod_god_mode_avx2/100k: benchmark
+mod_god_mode/mod_god_mode_avx512/100k: benchmark
+mod_god_mode/mod_god_mode_scalar/1M: benchmark
+mod_god_mode/mod_god_mode_avx2/1M: benchmark
+mod_god_mode/mod_god_mode_avx512/1M: benchmark
+
+buff_averages/buff_averages_scalar/10k: benchmark
+buff_averages/buff_averages_avx2/10k: benchmark
+buff_averages/buff_averages_avx512/10k: benchmark
+buff_averages/buff_averages_scalar/100k: benchmark
+buff_averages/buff_averages_avx2/100k: benchmark
+buff_averages/buff_averages_avx512/100k: benchmark
+buff_averages/buff_averages_scalar/1M: benchmark
+buff_averages/buff_averages_avx2/1M: benchmark
+buff_averages/buff_averages_avx512/1M: benchmark
+
+buff_averages_batch/buff_averages_batch_scalarbatch/10k: benchmark
+buff_averages_batch/buff_averages_batch_avx2batch/10k: benchmark
+buff_averages_batch/buff_averages_batch_avx512batch/10k: benchmark
+buff_averages_batch/buff_averages_batch_scalarbatch/100k: benchmark
+buff_averages_batch/buff_averages_batch_avx2batch/100k: benchmark
+buff_averages_batch/buff_averages_batch_avx512batch/100k: benchmark
+buff_averages_batch/buff_averages_batch_scalarbatch/1M: benchmark
+buff_averages_batch/buff_averages_batch_avx2batch/1M: benchmark
+buff_averages_batch/buff_averages_batch_avx512batch/1M: benchmark
+
+zscore/zscore_scalar/10k: benchmark
+zscore/zscore_avx2/10k: benchmark
+zscore/zscore_avx512/10k: benchmark
+zscore/zscore_scalar/100k: benchmark
+zscore/zscore_avx2/100k: benchmark
+zscore/zscore_avx512/100k: benchmark
+zscore/zscore_scalar/1M: benchmark
+zscore/zscore_avx2/1M: benchmark
+zscore/zscore_avx512/1M: benchmark
+
+zscore_batch/zscore_batch_scalarbatch/10k: benchmark
+zscore_batch/zscore_batch_avx2batch/10k: benchmark
+zscore_batch/zscore_batch_avx512batch/10k: benchmark
+zscore_batch/zscore_batch_scalarbatch/100k: benchmark
+zscore_batch/zscore_batch_avx2batch/100k: benchmark
+zscore_batch/zscore_batch_avx512batch/100k: benchmark
+zscore_batch/zscore_batch_scalarbatch/1M: benchmark
+zscore_batch/zscore_batch_avx2batch/1M: benchmark
+zscore_batch/zscore_batch_avx512batch/1M: benchmark
+
+macz/macz_scalar/10k: benchmark
+macz/macz_avx2/10k: benchmark
+macz/macz_avx512/10k: benchmark
+macz/macz_scalar/100k: benchmark
+macz/macz_avx2/100k: benchmark
+macz/macz_avx512/100k: benchmark
+macz/macz_scalar/1M: benchmark
+macz/macz_avx2/1M: benchmark
+macz/macz_avx512/1M: benchmark
+
+macz_batch/macz_batch_scalarbatch/10k: benchmark
+macz_batch/macz_batch_avx2batch/10k: benchmark
+macz_batch/macz_batch_avx512batch/10k: benchmark
+macz_batch/macz_batch_scalarbatch/100k: benchmark
+macz_batch/macz_batch_avx2batch/100k: benchmark
+macz_batch/macz_batch_avx512batch/100k: benchmark
+macz_batch/macz_batch_scalarbatch/1M: benchmark
+macz_batch/macz_batch_avx2batch/1M: benchmark
+macz_batch/macz_batch_avx512batch/1M: benchmark
+
+cwma/cwma_scalar/10k: benchmark
+cwma/cwma_avx2/10k: benchmark
+cwma/cwma_avx512/10k: benchmark
+cwma/cwma_scalar/100k: benchmark
+cwma/cwma_avx2/100k: benchmark
+cwma/cwma_avx512/100k: benchmark
+cwma/cwma_scalar/1M: benchmark
+cwma/cwma_avx2/1M: benchmark
+cwma/cwma_avx512/1M: benchmark
+
+cwma_batch/cwma_batch_scalarbatch/10k: benchmark
+cwma_batch/cwma_batch_avx2batch/10k: benchmark
+cwma_batch/cwma_batch_avx512batch/10k: benchmark
+cwma_batch/cwma_batch_scalarbatch/100k: benchmark
+cwma_batch/cwma_batch_avx2batch/100k: benchmark
+cwma_batch/cwma_batch_avx512batch/100k: benchmark
+cwma_batch/cwma_batch_scalarbatch/1M: benchmark
+cwma_batch/cwma_batch_avx2batch/1M: benchmark
+cwma_batch/cwma_batch_avx512batch/1M: benchmark
+
+dema/dema_scalar/10k: benchmark
+dema/dema_avx2/10k: benchmark
+dema/dema_avx512/10k: benchmark
+dema/dema_scalar/100k: benchmark
+dema/dema_avx2/100k: benchmark
+dema/dema_avx512/100k: benchmark
+dema/dema_scalar/1M: benchmark
+dema/dema_avx2/1M: benchmark
+dema/dema_avx512/1M: benchmark
+
+dema_batch/dema_batch_scalarbatch/10k: benchmark
+dema_batch/dema_batch_avx2batch/10k: benchmark
+dema_batch/dema_batch_avx512batch/10k: benchmark
+dema_batch/dema_batch_scalarbatch/100k: benchmark
+dema_batch/dema_batch_avx2batch/100k: benchmark
+dema_batch/dema_batch_avx512batch/100k: benchmark
+dema_batch/dema_batch_scalarbatch/1M: benchmark
+dema_batch/dema_batch_avx2batch/1M: benchmark
+dema_batch/dema_batch_avx512batch/1M: benchmark
+
+edcf/edcf_scalar/10k: benchmark
+edcf/edcf_avx2/10k: benchmark
+edcf/edcf_avx512/10k: benchmark
+edcf/edcf_scalar/100k: benchmark
+edcf/edcf_avx2/100k: benchmark
+edcf/edcf_avx512/100k: benchmark
+edcf/edcf_scalar/1M: benchmark
+edcf/edcf_avx2/1M: benchmark
+edcf/edcf_avx512/1M: benchmark
+
+edcf_batch/edcf_batch_scalarbatch/10k: benchmark
+edcf_batch/edcf_batch_avx2batch/10k: benchmark
+edcf_batch/edcf_batch_avx512batch/10k: benchmark
+edcf_batch/edcf_batch_scalarbatch/100k: benchmark
+edcf_batch/edcf_batch_avx2batch/100k: benchmark
+edcf_batch/edcf_batch_avx512batch/100k: benchmark
+edcf_batch/edcf_batch_scalarbatch/1M: benchmark
+edcf_batch/edcf_batch_avx2batch/1M: benchmark
+edcf_batch/edcf_batch_avx512batch/1M: benchmark
+
+ehlers_ecema/ehlers_ecema_scalar/10k: benchmark
+ehlers_ecema/ehlers_ecema_avx2/10k: benchmark
+ehlers_ecema/ehlers_ecema_avx512/10k: benchmark
+ehlers_ecema/ehlers_ecema_scalar/100k: benchmark
+ehlers_ecema/ehlers_ecema_avx2/100k: benchmark
+ehlers_ecema/ehlers_ecema_avx512/100k: benchmark
+ehlers_ecema/ehlers_ecema_scalar/1M: benchmark
+ehlers_ecema/ehlers_ecema_avx2/1M: benchmark
+ehlers_ecema/ehlers_ecema_avx512/1M: benchmark
+
+ehlers_ecema_batch/ehlers_ecema_batch_scalarbatch/10k: benchmark
+ehlers_ecema_batch/ehlers_ecema_batch_avx2batch/10k: benchmark
+ehlers_ecema_batch/ehlers_ecema_batch_avx512batch/10k: benchmark
+ehlers_ecema_batch/ehlers_ecema_batch_scalarbatch/100k: benchmark
+ehlers_ecema_batch/ehlers_ecema_batch_avx2batch/100k: benchmark
+ehlers_ecema_batch/ehlers_ecema_batch_avx512batch/100k: benchmark
+ehlers_ecema_batch/ehlers_ecema_batch_scalarbatch/1M: benchmark
+ehlers_ecema_batch/ehlers_ecema_batch_avx2batch/1M: benchmark
+ehlers_ecema_batch/ehlers_ecema_batch_avx512batch/1M: benchmark
+
+ehlers_itrend/ehlers_itrend_scalar/10k: benchmark
+ehlers_itrend/ehlers_itrend_avx2/10k: benchmark
+ehlers_itrend/ehlers_itrend_avx512/10k: benchmark
+ehlers_itrend/ehlers_itrend_scalar/100k: benchmark
+ehlers_itrend/ehlers_itrend_avx2/100k: benchmark
+ehlers_itrend/ehlers_itrend_avx512/100k: benchmark
+ehlers_itrend/ehlers_itrend_scalar/1M: benchmark
+ehlers_itrend/ehlers_itrend_avx2/1M: benchmark
+ehlers_itrend/ehlers_itrend_avx512/1M: benchmark
+
+ehlers_itrend_batch/ehlers_itrend_batch_scalarbatch/10k: benchmark
+ehlers_itrend_batch/ehlers_itrend_batch_avx2batch/10k: benchmark
+ehlers_itrend_batch/ehlers_itrend_batch_avx512batch/10k: benchmark
+ehlers_itrend_batch/ehlers_itrend_batch_scalarbatch/100k: benchmark
+ehlers_itrend_batch/ehlers_itrend_batch_avx2batch/100k: benchmark
+ehlers_itrend_batch/ehlers_itrend_batch_avx512batch/100k: benchmark
+ehlers_itrend_batch/ehlers_itrend_batch_scalarbatch/1M: benchmark
+ehlers_itrend_batch/ehlers_itrend_batch_avx2batch/1M: benchmark
+ehlers_itrend_batch/ehlers_itrend_batch_avx512batch/1M: benchmark
+
+ehlers_pma/ehlers_pma_scalar/10k: benchmark
+ehlers_pma/ehlers_pma_avx2/10k: benchmark
+ehlers_pma/ehlers_pma_avx512/10k: benchmark
+ehlers_pma/ehlers_pma_scalar/100k: benchmark
+ehlers_pma/ehlers_pma_avx2/100k: benchmark
+ehlers_pma/ehlers_pma_avx512/100k: benchmark
+ehlers_pma/ehlers_pma_scalar/1M: benchmark
+ehlers_pma/ehlers_pma_avx2/1M: benchmark
+ehlers_pma/ehlers_pma_avx512/1M: benchmark
+
+ehlers_pma_batch/ehlers_pma_batch_scalarbatch/10k: benchmark
+ehlers_pma_batch/ehlers_pma_batch_avx2batch/10k: benchmark
+ehlers_pma_batch/ehlers_pma_batch_avx512batch/10k: benchmark
+ehlers_pma_batch/ehlers_pma_batch_scalarbatch/100k: benchmark
+ehlers_pma_batch/ehlers_pma_batch_avx2batch/100k: benchmark
+ehlers_pma_batch/ehlers_pma_batch_avx512batch/100k: benchmark
+ehlers_pma_batch/ehlers_pma_batch_scalarbatch/1M: benchmark
+ehlers_pma_batch/ehlers_pma_batch_avx2batch/1M: benchmark
+ehlers_pma_batch/ehlers_pma_batch_avx512batch/1M: benchmark
+
+ehlers_kama/ehlers_kama_scalar/10k: benchmark
+ehlers_kama/ehlers_kama_avx2/10k: benchmark
+ehlers_kama/ehlers_kama_avx512/10k: benchmark
+ehlers_kama/ehlers_kama_scalar/100k: benchmark
+ehlers_kama/ehlers_kama_avx2/100k: benchmark
+ehlers_kama/ehlers_kama_avx512/100k: benchmark
+ehlers_kama/ehlers_kama_scalar/1M: benchmark
+ehlers_kama/ehlers_kama_avx2/1M: benchmark
+ehlers_kama/ehlers_kama_avx512/1M: benchmark
+
+ehlers_kama_batch/ehlers_kama_batch_scalarbatch/10k: benchmark
+ehlers_kama_batch/ehlers_kama_batch_avx2batch/10k: benchmark
+ehlers_kama_batch/ehlers_kama_batch_avx512batch/10k: benchmark
+ehlers_kama_batch/ehlers_kama_batch_scalarbatch/100k: benchmark
+ehlers_kama_batch/ehlers_kama_batch_avx2batch/100k: benchmark
+ehlers_kama_batch/ehlers_kama_batch_avx512batch/100k: benchmark
+ehlers_kama_batch/ehlers_kama_batch_scalarbatch/1M: benchmark
+ehlers_kama_batch/ehlers_kama_batch_avx2batch/1M: benchmark
+ehlers_kama_batch/ehlers_kama_batch_avx512batch/1M: benchmark
+
+ema/ema_scalar/10k: benchmark
+ema/ema_avx2/10k: benchmark
+ema/ema_avx512/10k: benchmark
+ema/ema_scalar/100k: benchmark
+ema/ema_avx2/100k: benchmark
+ema/ema_avx512/100k: benchmark
+ema/ema_scalar/1M: benchmark
+ema/ema_avx2/1M: benchmark
+ema/ema_avx512/1M: benchmark
+
+ema_batch/ema_batch_scalarbatch/10k: benchmark
+ema_batch/ema_batch_avx2batch/10k: benchmark
+ema_batch/ema_batch_avx512batch/10k: benchmark
+ema_batch/ema_batch_scalarbatch/100k: benchmark
+ema_batch/ema_batch_avx2batch/100k: benchmark
+ema_batch/ema_batch_avx512batch/100k: benchmark
+ema_batch/ema_batch_scalarbatch/1M: benchmark
+ema_batch/ema_batch_avx2batch/1M: benchmark
+ema_batch/ema_batch_avx512batch/1M: benchmark
+
+epma/epma_scalar/10k: benchmark
+epma/epma_avx2/10k: benchmark
+epma/epma_avx512/10k: benchmark
+epma/epma_scalar/100k: benchmark
+epma/epma_avx2/100k: benchmark
+epma/epma_avx512/100k: benchmark
+epma/epma_scalar/1M: benchmark
+epma/epma_avx2/1M: benchmark
+epma/epma_avx512/1M: benchmark
+
+epma_batch/epma_batch_scalarbatch/10k: benchmark
+epma_batch/epma_batch_avx2batch/10k: benchmark
+epma_batch/epma_batch_avx512batch/10k: benchmark
+epma_batch/epma_batch_scalarbatch/100k: benchmark
+epma_batch/epma_batch_avx2batch/100k: benchmark
+epma_batch/epma_batch_avx512batch/100k: benchmark
+epma_batch/epma_batch_scalarbatch/1M: benchmark
+epma_batch/epma_batch_avx2batch/1M: benchmark
+epma_batch/epma_batch_avx512batch/1M: benchmark
+
+frama/frama_scalar/10k: benchmark
+frama/frama_avx2/10k: benchmark
+frama/frama_avx512/10k: benchmark
+frama/frama_scalar/100k: benchmark
+frama/frama_avx2/100k: benchmark
+frama/frama_avx512/100k: benchmark
+frama/frama_scalar/1M: benchmark
+frama/frama_avx2/1M: benchmark
+frama/frama_avx512/1M: benchmark
+
+frama_batch/frama_batch_scalarbatch/10k: benchmark
+frama_batch/frama_batch_avx2batch/10k: benchmark
+frama_batch/frama_batch_avx512batch/10k: benchmark
+frama_batch/frama_batch_scalarbatch/100k: benchmark
+frama_batch/frama_batch_avx2batch/100k: benchmark
+frama_batch/frama_batch_avx512batch/100k: benchmark
+frama_batch/frama_batch_scalarbatch/1M: benchmark
+frama_batch/frama_batch_avx2batch/1M: benchmark
+frama_batch/frama_batch_avx512batch/1M: benchmark
+
+fwma/fwma_scalar/10k: benchmark
+fwma/fwma_avx2/10k: benchmark
+fwma/fwma_avx512/10k: benchmark
+fwma/fwma_scalar/100k: benchmark
+fwma/fwma_avx2/100k: benchmark
+fwma/fwma_avx512/100k: benchmark
+fwma/fwma_scalar/1M: benchmark
+fwma/fwma_avx2/1M: benchmark
+fwma/fwma_avx512/1M: benchmark
+
+fwma_batch/fwma_batch_scalarbatch/10k: benchmark
+fwma_batch/fwma_batch_avx2batch/10k: benchmark
+fwma_batch/fwma_batch_avx512batch/10k: benchmark
+fwma_batch/fwma_batch_scalarbatch/100k: benchmark
+fwma_batch/fwma_batch_avx2batch/100k: benchmark
+fwma_batch/fwma_batch_avx512batch/100k: benchmark
+fwma_batch/fwma_batch_scalarbatch/1M: benchmark
+fwma_batch/fwma_batch_avx2batch/1M: benchmark
+fwma_batch/fwma_batch_avx512batch/1M: benchmark
+
+gaussian/gaussian_scalar/10k: benchmark
+gaussian/gaussian_avx2/10k: benchmark
+gaussian/gaussian_avx512/10k: benchmark
+gaussian/gaussian_scalar/100k: benchmark
+gaussian/gaussian_avx2/100k: benchmark
+gaussian/gaussian_avx512/100k: benchmark
+gaussian/gaussian_scalar/1M: benchmark
+gaussian/gaussian_avx2/1M: benchmark
+gaussian/gaussian_avx512/1M: benchmark
+
+gaussian_batch/gaussian_batch_scalarbatch/10k: benchmark
+gaussian_batch/gaussian_batch_avx2batch/10k: benchmark
+gaussian_batch/gaussian_batch_avx512batch/10k: benchmark
+gaussian_batch/gaussian_batch_scalarbatch/100k: benchmark
+gaussian_batch/gaussian_batch_avx2batch/100k: benchmark
+gaussian_batch/gaussian_batch_avx512batch/100k: benchmark
+gaussian_batch/gaussian_batch_scalarbatch/1M: benchmark
+gaussian_batch/gaussian_batch_avx2batch/1M: benchmark
+gaussian_batch/gaussian_batch_avx512batch/1M: benchmark
+
+highpass_2_pole/highpass_2_pole_scalar/10k: benchmark
+highpass_2_pole/highpass_2_pole_avx2/10k: benchmark
+highpass_2_pole/highpass_2_pole_avx512/10k: benchmark
+highpass_2_pole/highpass_2_pole_scalar/100k: benchmark
+highpass_2_pole/highpass_2_pole_avx2/100k: benchmark
+highpass_2_pole/highpass_2_pole_avx512/100k: benchmark
+highpass_2_pole/highpass_2_pole_scalar/1M: benchmark
+highpass_2_pole/highpass_2_pole_avx2/1M: benchmark
+highpass_2_pole/highpass_2_pole_avx512/1M: benchmark
+
+highpass_2_pole_batch/highpass_2_pole_batch_scalarbatch/10k: benchmark
+highpass_2_pole_batch/highpass_2_pole_batch_avx2batch/10k: benchmark
+highpass_2_pole_batch/highpass_2_pole_batch_avx512batch/10k: benchmark
+highpass_2_pole_batch/highpass_2_pole_batch_scalarbatch/100k: benchmark
+highpass_2_pole_batch/highpass_2_pole_batch_avx2batch/100k: benchmark
+highpass_2_pole_batch/highpass_2_pole_batch_avx512batch/100k: benchmark
+highpass_2_pole_batch/highpass_2_pole_batch_scalarbatch/1M: benchmark
+highpass_2_pole_batch/highpass_2_pole_batch_avx2batch/1M: benchmark
+highpass_2_pole_batch/highpass_2_pole_batch_avx512batch/1M: benchmark
+
+highpass/highpass_scalar/10k: benchmark
+highpass/highpass_avx2/10k: benchmark
+highpass/highpass_avx512/10k: benchmark
+highpass/highpass_scalar/100k: benchmark
+highpass/highpass_avx2/100k: benchmark
+highpass/highpass_avx512/100k: benchmark
+highpass/highpass_scalar/1M: benchmark
+highpass/highpass_avx2/1M: benchmark
+highpass/highpass_avx512/1M: benchmark
+
+highpass_batch/highpass_batch_scalarbatch/10k: benchmark
+highpass_batch/highpass_batch_avx2batch/10k: benchmark
+highpass_batch/highpass_batch_avx512batch/10k: benchmark
+highpass_batch/highpass_batch_scalarbatch/100k: benchmark
+highpass_batch/highpass_batch_avx2batch/100k: benchmark
+highpass_batch/highpass_batch_avx512batch/100k: benchmark
+highpass_batch/highpass_batch_scalarbatch/1M: benchmark
+highpass_batch/highpass_batch_avx2batch/1M: benchmark
+highpass_batch/highpass_batch_avx512batch/1M: benchmark
+
+hma/hma_scalar/10k: benchmark
+hma/hma_avx2/10k: benchmark
+hma/hma_avx512/10k: benchmark
+hma/hma_scalar/100k: benchmark
+hma/hma_avx2/100k: benchmark
+hma/hma_avx512/100k: benchmark
+hma/hma_scalar/1M: benchmark
+hma/hma_avx2/1M: benchmark
+hma/hma_avx512/1M: benchmark
+
+hma_batch/hma_batch_scalarbatch/10k: benchmark
+hma_batch/hma_batch_avx2batch/10k: benchmark
+hma_batch/hma_batch_avx512batch/10k: benchmark
+hma_batch/hma_batch_scalarbatch/100k: benchmark
+hma_batch/hma_batch_avx2batch/100k: benchmark
+hma_batch/hma_batch_avx512batch/100k: benchmark
+hma_batch/hma_batch_scalarbatch/1M: benchmark
+hma_batch/hma_batch_avx2batch/1M: benchmark
+hma_batch/hma_batch_avx512batch/1M: benchmark
+
+hwma/hwma_scalar/10k: benchmark
+hwma/hwma_avx2/10k: benchmark
+hwma/hwma_avx512/10k: benchmark
+hwma/hwma_scalar/100k: benchmark
+hwma/hwma_avx2/100k: benchmark
+hwma/hwma_avx512/100k: benchmark
+hwma/hwma_scalar/1M: benchmark
+hwma/hwma_avx2/1M: benchmark
+hwma/hwma_avx512/1M: benchmark
+
+hwma_batch/hwma_batch_scalarbatch/10k: benchmark
+hwma_batch/hwma_batch_avx2batch/10k: benchmark
+hwma_batch/hwma_batch_avx512batch/10k: benchmark
+hwma_batch/hwma_batch_scalarbatch/100k: benchmark
+hwma_batch/hwma_batch_avx2batch/100k: benchmark
+hwma_batch/hwma_batch_avx512batch/100k: benchmark
+hwma_batch/hwma_batch_scalarbatch/1M: benchmark
+hwma_batch/hwma_batch_avx2batch/1M: benchmark
+hwma_batch/hwma_batch_avx512batch/1M: benchmark
+
+jma/jma_scalar/10k: benchmark
+jma/jma_avx2/10k: benchmark
+jma/jma_avx512/10k: benchmark
+jma/jma_scalar/100k: benchmark
+jma/jma_avx2/100k: benchmark
+jma/jma_avx512/100k: benchmark
+jma/jma_scalar/1M: benchmark
+jma/jma_avx2/1M: benchmark
+jma/jma_avx512/1M: benchmark
+
+jma_batch/jma_batch_scalarbatch/10k: benchmark
+jma_batch/jma_batch_avx2batch/10k: benchmark
+jma_batch/jma_batch_avx512batch/10k: benchmark
+jma_batch/jma_batch_scalarbatch/100k: benchmark
+jma_batch/jma_batch_avx2batch/100k: benchmark
+jma_batch/jma_batch_avx512batch/100k: benchmark
+jma_batch/jma_batch_scalarbatch/1M: benchmark
+jma_batch/jma_batch_avx2batch/1M: benchmark
+jma_batch/jma_batch_avx512batch/1M: benchmark
+
+jsa/jsa_scalar/10k: benchmark
+jsa/jsa_avx2/10k: benchmark
+jsa/jsa_avx512/10k: benchmark
+jsa/jsa_scalar/100k: benchmark
+jsa/jsa_avx2/100k: benchmark
+jsa/jsa_avx512/100k: benchmark
+jsa/jsa_scalar/1M: benchmark
+jsa/jsa_avx2/1M: benchmark
+jsa/jsa_avx512/1M: benchmark
+
+jsa_batch/jsa_batch_scalarbatch/10k: benchmark
+jsa_batch/jsa_batch_avx2batch/10k: benchmark
+jsa_batch/jsa_batch_avx512batch/10k: benchmark
+jsa_batch/jsa_batch_scalarbatch/100k: benchmark
+jsa_batch/jsa_batch_avx2batch/100k: benchmark
+jsa_batch/jsa_batch_avx512batch/100k: benchmark
+jsa_batch/jsa_batch_scalarbatch/1M: benchmark
+jsa_batch/jsa_batch_avx2batch/1M: benchmark
+jsa_batch/jsa_batch_avx512batch/1M: benchmark
+
+kama/kama_scalar/10k: benchmark
+kama/kama_avx2/10k: benchmark
+kama/kama_avx512/10k: benchmark
+kama/kama_scalar/100k: benchmark
+kama/kama_avx2/100k: benchmark
+kama/kama_avx512/100k: benchmark
+kama/kama_scalar/1M: benchmark
+kama/kama_avx2/1M: benchmark
+kama/kama_avx512/1M: benchmark
+
+kama_batch/kama_batch_scalarbatch/10k: benchmark
+kama_batch/kama_batch_avx2batch/10k: benchmark
+kama_batch/kama_batch_avx512batch/10k: benchmark
+kama_batch/kama_batch_scalarbatch/100k: benchmark
+kama_batch/kama_batch_avx2batch/100k: benchmark
+kama_batch/kama_batch_avx512batch/100k: benchmark
+kama_batch/kama_batch_scalarbatch/1M: benchmark
+kama_batch/kama_batch_avx2batch/1M: benchmark
+kama_batch/kama_batch_avx512batch/1M: benchmark
+
+linreg/linreg_scalar/10k: benchmark
+linreg/linreg_avx2/10k: benchmark
+linreg/linreg_avx512/10k: benchmark
+linreg/linreg_scalar/100k: benchmark
+linreg/linreg_avx2/100k: benchmark
+linreg/linreg_avx512/100k: benchmark
+linreg/linreg_scalar/1M: benchmark
+linreg/linreg_avx2/1M: benchmark
+linreg/linreg_avx512/1M: benchmark
+
+linreg_batch/linreg_batch_scalarbatch/10k: benchmark
+linreg_batch/linreg_batch_avx2batch/10k: benchmark
+linreg_batch/linreg_batch_avx512batch/10k: benchmark
+linreg_batch/linreg_batch_scalarbatch/100k: benchmark
+linreg_batch/linreg_batch_avx2batch/100k: benchmark
+linreg_batch/linreg_batch_avx512batch/100k: benchmark
+linreg_batch/linreg_batch_scalarbatch/1M: benchmark
+linreg_batch/linreg_batch_avx2batch/1M: benchmark
+linreg_batch/linreg_batch_avx512batch/1M: benchmark
+
+maaq/maaq_scalar/10k: benchmark
+maaq/maaq_avx2/10k: benchmark
+maaq/maaq_avx512/10k: benchmark
+maaq/maaq_scalar/100k: benchmark
+maaq/maaq_avx2/100k: benchmark
+maaq/maaq_avx512/100k: benchmark
+maaq/maaq_scalar/1M: benchmark
+maaq/maaq_avx2/1M: benchmark
+maaq/maaq_avx512/1M: benchmark
+
+maaq_batch/maaq_batch_scalarbatch/10k: benchmark
+maaq_batch/maaq_batch_avx2batch/10k: benchmark
+maaq_batch/maaq_batch_avx512batch/10k: benchmark
+maaq_batch/maaq_batch_scalarbatch/100k: benchmark
+maaq_batch/maaq_batch_avx2batch/100k: benchmark
+maaq_batch/maaq_batch_avx512batch/100k: benchmark
+maaq_batch/maaq_batch_scalarbatch/1M: benchmark
+maaq_batch/maaq_batch_avx2batch/1M: benchmark
+maaq_batch/maaq_batch_avx512batch/1M: benchmark
+
+mama/mama_scalar/10k: benchmark
+mama/mama_avx2/10k: benchmark
+mama/mama_avx512/10k: benchmark
+mama/mama_scalar/100k: benchmark
+mama/mama_avx2/100k: benchmark
+mama/mama_avx512/100k: benchmark
+mama/mama_scalar/1M: benchmark
+mama/mama_avx2/1M: benchmark
+mama/mama_avx512/1M: benchmark
+
+mama_batch/mama_batch_scalarbatch/10k: benchmark
+mama_batch/mama_batch_avx2batch/10k: benchmark
+mama_batch/mama_batch_avx512batch/10k: benchmark
+mama_batch/mama_batch_scalarbatch/100k: benchmark
+mama_batch/mama_batch_avx2batch/100k: benchmark
+mama_batch/mama_batch_avx512batch/100k: benchmark
+mama_batch/mama_batch_scalarbatch/1M: benchmark
+mama_batch/mama_batch_avx2batch/1M: benchmark
+mama_batch/mama_batch_avx512batch/1M: benchmark
+
+mwdx/mwdx_scalar/10k: benchmark
+mwdx/mwdx_avx2/10k: benchmark
+mwdx/mwdx_avx512/10k: benchmark
+mwdx/mwdx_scalar/100k: benchmark
+mwdx/mwdx_avx2/100k: benchmark
+mwdx/mwdx_avx512/100k: benchmark
+mwdx/mwdx_scalar/1M: benchmark
+mwdx/mwdx_avx2/1M: benchmark
+mwdx/mwdx_avx512/1M: benchmark
+
+mwdx_batch/mwdx_batch_scalarbatch/10k: benchmark
+mwdx_batch/mwdx_batch_avx2batch/10k: benchmark
+mwdx_batch/mwdx_batch_avx512batch/10k: benchmark
+mwdx_batch/mwdx_batch_scalarbatch/100k: benchmark
+mwdx_batch/mwdx_batch_avx2batch/100k: benchmark
+mwdx_batch/mwdx_batch_avx512batch/100k: benchmark
+mwdx_batch/mwdx_batch_scalarbatch/1M: benchmark
+mwdx_batch/mwdx_batch_avx2batch/1M: benchmark
+mwdx_batch/mwdx_batch_avx512batch/1M: benchmark
+
+nma/nma_scalar/10k: benchmark
+nma/nma_avx2/10k: benchmark
+nma/nma_avx512/10k: benchmark
+nma/nma_scalar/100k: benchmark
+nma/nma_avx2/100k: benchmark
+nma/nma_avx512/100k: benchmark
+nma/nma_scalar/1M: benchmark
+nma/nma_avx2/1M: benchmark
+nma/nma_avx512/1M: benchmark
+
+nma_batch/nma_batch_scalarbatch/10k: benchmark
+nma_batch/nma_batch_avx2batch/10k: benchmark
+nma_batch/nma_batch_avx512batch/10k: benchmark
+nma_batch/nma_batch_scalarbatch/100k: benchmark
+nma_batch/nma_batch_avx2batch/100k: benchmark
+nma_batch/nma_batch_avx512batch/100k: benchmark
+nma_batch/nma_batch_scalarbatch/1M: benchmark
+nma_batch/nma_batch_avx2batch/1M: benchmark
+nma_batch/nma_batch_avx512batch/1M: benchmark
+
+pwma/pwma_scalar/10k: benchmark
+pwma/pwma_avx2/10k: benchmark
+pwma/pwma_avx512/10k: benchmark
+pwma/pwma_scalar/100k: benchmark
+pwma/pwma_avx2/100k: benchmark
+pwma/pwma_avx512/100k: benchmark
+pwma/pwma_scalar/1M: benchmark
+pwma/pwma_avx2/1M: benchmark
+pwma/pwma_avx512/1M: benchmark
+
+pwma_batch/pwma_batch_scalarbatch/10k: benchmark
+pwma_batch/pwma_batch_avx2batch/10k: benchmark
+pwma_batch/pwma_batch_avx512batch/10k: benchmark
+pwma_batch/pwma_batch_scalarbatch/100k: benchmark
+pwma_batch/pwma_batch_avx2batch/100k: benchmark
+pwma_batch/pwma_batch_avx512batch/100k: benchmark
+pwma_batch/pwma_batch_scalarbatch/1M: benchmark
+pwma_batch/pwma_batch_avx2batch/1M: benchmark
+pwma_batch/pwma_batch_avx512batch/1M: benchmark
+
+reflex/reflex_scalar/10k: benchmark
+reflex/reflex_avx2/10k: benchmark
+reflex/reflex_avx512/10k: benchmark
+reflex/reflex_scalar/100k: benchmark
+reflex/reflex_avx2/100k: benchmark
+reflex/reflex_avx512/100k: benchmark
+reflex/reflex_scalar/1M: benchmark
+reflex/reflex_avx2/1M: benchmark
+reflex/reflex_avx512/1M: benchmark
+
+reflex_batch/reflex_batch_scalarbatch/10k: benchmark
+reflex_batch/reflex_batch_avx2batch/10k: benchmark
+reflex_batch/reflex_batch_avx512batch/10k: benchmark
+reflex_batch/reflex_batch_scalarbatch/100k: benchmark
+reflex_batch/reflex_batch_avx2batch/100k: benchmark
+reflex_batch/reflex_batch_avx512batch/100k: benchmark
+reflex_batch/reflex_batch_scalarbatch/1M: benchmark
+reflex_batch/reflex_batch_avx2batch/1M: benchmark
+reflex_batch/reflex_batch_avx512batch/1M: benchmark
+
+sinwma/sinwma_scalar/10k: benchmark
+sinwma/sinwma_avx2/10k: benchmark
+sinwma/sinwma_avx512/10k: benchmark
+sinwma/sinwma_scalar/100k: benchmark
+sinwma/sinwma_avx2/100k: benchmark
+sinwma/sinwma_avx512/100k: benchmark
+sinwma/sinwma_scalar/1M: benchmark
+sinwma/sinwma_avx2/1M: benchmark
+sinwma/sinwma_avx512/1M: benchmark
+
+sinwma_batch/sinwma_batch_scalarbatch/10k: benchmark
+sinwma_batch/sinwma_batch_avx2batch/10k: benchmark
+sinwma_batch/sinwma_batch_avx512batch/10k: benchmark
+sinwma_batch/sinwma_batch_scalarbatch/100k: benchmark
+sinwma_batch/sinwma_batch_avx2batch/100k: benchmark
+sinwma_batch/sinwma_batch_avx512batch/100k: benchmark
+sinwma_batch/sinwma_batch_scalarbatch/1M: benchmark
+sinwma_batch/sinwma_batch_avx2batch/1M: benchmark
+sinwma_batch/sinwma_batch_avx512batch/1M: benchmark
+
+sma/sma_scalar/10k: benchmark
+sma/sma_avx2/10k: benchmark
+sma/sma_avx512/10k: benchmark
+sma/sma_scalar/100k: benchmark
+sma/sma_avx2/100k: benchmark
+sma/sma_avx512/100k: benchmark
+sma/sma_scalar/1M: benchmark
+sma/sma_avx2/1M: benchmark
+sma/sma_avx512/1M: benchmark
+
+sma_batch/sma_batch_scalarbatch/10k: benchmark
+sma_batch/sma_batch_avx2batch/10k: benchmark
+sma_batch/sma_batch_avx512batch/10k: benchmark
+sma_batch/sma_batch_scalarbatch/100k: benchmark
+sma_batch/sma_batch_avx2batch/100k: benchmark
+sma_batch/sma_batch_avx512batch/100k: benchmark
+sma_batch/sma_batch_scalarbatch/1M: benchmark
+sma_batch/sma_batch_avx2batch/1M: benchmark
+sma_batch/sma_batch_avx512batch/1M: benchmark
+
+smma/smma_scalar/10k: benchmark
+smma/smma_avx2/10k: benchmark
+smma/smma_avx512/10k: benchmark
+smma/smma_scalar/100k: benchmark
+smma/smma_avx2/100k: benchmark
+smma/smma_avx512/100k: benchmark
+smma/smma_scalar/1M: benchmark
+smma/smma_avx2/1M: benchmark
+smma/smma_avx512/1M: benchmark
+
+smma_batch/smma_batch_scalarbatch/10k: benchmark
+smma_batch/smma_batch_avx2batch/10k: benchmark
+smma_batch/smma_batch_avx512batch/10k: benchmark
+smma_batch/smma_batch_scalarbatch/100k: benchmark
+smma_batch/smma_batch_avx2batch/100k: benchmark
+smma_batch/smma_batch_avx512batch/100k: benchmark
+smma_batch/smma_batch_scalarbatch/1M: benchmark
+smma_batch/smma_batch_avx2batch/1M: benchmark
+smma_batch/smma_batch_avx512batch/1M: benchmark
+
+sqwma/sqwma_scalar/10k: benchmark
+sqwma/sqwma_avx2/10k: benchmark
+sqwma/sqwma_avx512/10k: benchmark
+sqwma/sqwma_scalar/100k: benchmark
+sqwma/sqwma_avx2/100k: benchmark
+sqwma/sqwma_avx512/100k: benchmark
+sqwma/sqwma_scalar/1M: benchmark
+sqwma/sqwma_avx2/1M: benchmark
+sqwma/sqwma_avx512/1M: benchmark
+
+sqwma_batch/sqwma_batch_scalarbatch/10k: benchmark
+sqwma_batch/sqwma_batch_avx2batch/10k: benchmark
+sqwma_batch/sqwma_batch_avx512batch/10k: benchmark
+sqwma_batch/sqwma_batch_scalarbatch/100k: benchmark
+sqwma_batch/sqwma_batch_avx2batch/100k: benchmark
+sqwma_batch/sqwma_batch_avx512batch/100k: benchmark
+sqwma_batch/sqwma_batch_scalarbatch/1M: benchmark
+sqwma_batch/sqwma_batch_avx2batch/1M: benchmark
+sqwma_batch/sqwma_batch_avx512batch/1M: benchmark
+
+srwma/srwma_scalar/10k: benchmark
+srwma/srwma_avx2/10k: benchmark
+srwma/srwma_avx512/10k: benchmark
+srwma/srwma_scalar/100k: benchmark
+srwma/srwma_avx2/100k: benchmark
+srwma/srwma_avx512/100k: benchmark
+srwma/srwma_scalar/1M: benchmark
+srwma/srwma_avx2/1M: benchmark
+srwma/srwma_avx512/1M: benchmark
+
+srwma_batch/srwma_batch_scalarbatch/10k: benchmark
+srwma_batch/srwma_batch_avx2batch/10k: benchmark
+srwma_batch/srwma_batch_avx512batch/10k: benchmark
+srwma_batch/srwma_batch_scalarbatch/100k: benchmark
+srwma_batch/srwma_batch_avx2batch/100k: benchmark
+srwma_batch/srwma_batch_avx512batch/100k: benchmark
+srwma_batch/srwma_batch_scalarbatch/1M: benchmark
+srwma_batch/srwma_batch_avx2batch/1M: benchmark
+srwma_batch/srwma_batch_avx512batch/1M: benchmark
+
+supersmoother/supersmoother_scalar/10k: benchmark
+supersmoother/supersmoother_avx2/10k: benchmark
+supersmoother/supersmoother_avx512/10k: benchmark
+supersmoother/supersmoother_scalar/100k: benchmark
+supersmoother/supersmoother_avx2/100k: benchmark
+supersmoother/supersmoother_avx512/100k: benchmark
+supersmoother/supersmoother_scalar/1M: benchmark
+supersmoother/supersmoother_avx2/1M: benchmark
+supersmoother/supersmoother_avx512/1M: benchmark
+
+supersmoother_batch/supersmoother_batch_scalarbatch/10k: benchmark
+supersmoother_batch/supersmoother_batch_avx2batch/10k: benchmark
+supersmoother_batch/supersmoother_batch_avx512batch/10k: benchmark
+supersmoother_batch/supersmoother_batch_scalarbatch/100k: benchmark
+supersmoother_batch/supersmoother_batch_avx2batch/100k: benchmark
+supersmoother_batch/supersmoother_batch_avx512batch/100k: benchmark
+supersmoother_batch/supersmoother_batch_scalarbatch/1M: benchmark
+supersmoother_batch/supersmoother_batch_avx2batch/1M: benchmark
+supersmoother_batch/supersmoother_batch_avx512batch/1M: benchmark
+
+supersmoother_3_pole/supersmoother_3_pole_scalar/10k: benchmark
+supersmoother_3_pole/supersmoother_3_pole_avx2/10k: benchmark
+supersmoother_3_pole/supersmoother_3_pole_avx512/10k: benchmark
+supersmoother_3_pole/supersmoother_3_pole_scalar/100k: benchmark
+supersmoother_3_pole/supersmoother_3_pole_avx2/100k: benchmark
+supersmoother_3_pole/supersmoother_3_pole_avx512/100k: benchmark
+supersmoother_3_pole/supersmoother_3_pole_scalar/1M: benchmark
+supersmoother_3_pole/supersmoother_3_pole_avx2/1M: benchmark
+supersmoother_3_pole/supersmoother_3_pole_avx512/1M: benchmark
+
+supersmoother_3_pole_batch/supersmoother_3_pole_batch_scalarbatch/10k: benchmark
+supersmoother_3_pole_batch/supersmoother_3_pole_batch_avx2batch/10k: benchmark
+supersmoother_3_pole_batch/supersmoother_3_pole_batch_avx512batch/10k: benchmark
+supersmoother_3_pole_batch/supersmoother_3_pole_batch_scalarbatch/100k: benchmark
+supersmoother_3_pole_batch/supersmoother_3_pole_batch_avx2batch/100k: benchmark
+supersmoother_3_pole_batch/supersmoother_3_pole_batch_avx512batch/100k: benchmark
+supersmoother_3_pole_batch/supersmoother_3_pole_batch_scalarbatch/1M: benchmark
+supersmoother_3_pole_batch/supersmoother_3_pole_batch_avx2batch/1M: benchmark
+supersmoother_3_pole_batch/supersmoother_3_pole_batch_avx512batch/1M: benchmark
+
+swma/swma_scalar/10k: benchmark
+swma/swma_avx2/10k: benchmark
+swma/swma_avx512/10k: benchmark
+swma/swma_scalar/100k: benchmark
+swma/swma_avx2/100k: benchmark
+swma/swma_avx512/100k: benchmark
+swma/swma_scalar/1M: benchmark
+swma/swma_avx2/1M: benchmark
+swma/swma_avx512/1M: benchmark
+
+swma_batch/swma_batch_scalarbatch/10k: benchmark
+swma_batch/swma_batch_avx2batch/10k: benchmark
+swma_batch/swma_batch_avx512batch/10k: benchmark
+swma_batch/swma_batch_scalarbatch/100k: benchmark
+swma_batch/swma_batch_avx2batch/100k: benchmark
+swma_batch/swma_batch_avx512batch/100k: benchmark
+swma_batch/swma_batch_scalarbatch/1M: benchmark
+swma_batch/swma_batch_avx2batch/1M: benchmark
+swma_batch/swma_batch_avx512batch/1M: benchmark
+
+tema/tema_scalar/10k: benchmark
+tema/tema_avx2/10k: benchmark
+tema/tema_avx512/10k: benchmark
+tema/tema_scalar/100k: benchmark
+tema/tema_avx2/100k: benchmark
+tema/tema_avx512/100k: benchmark
+tema/tema_scalar/1M: benchmark
+tema/tema_avx2/1M: benchmark
+tema/tema_avx512/1M: benchmark
+
+tema_batch/tema_batch_scalarbatch/10k: benchmark
+tema_batch/tema_batch_avx2batch/10k: benchmark
+tema_batch/tema_batch_avx512batch/10k: benchmark
+tema_batch/tema_batch_scalarbatch/100k: benchmark
+tema_batch/tema_batch_avx2batch/100k: benchmark
+tema_batch/tema_batch_avx512batch/100k: benchmark
+tema_batch/tema_batch_scalarbatch/1M: benchmark
+tema_batch/tema_batch_avx2batch/1M: benchmark
+tema_batch/tema_batch_avx512batch/1M: benchmark
+
+tilson/tilson_scalar/10k: benchmark
+tilson/tilson_avx2/10k: benchmark
+tilson/tilson_avx512/10k: benchmark
+tilson/tilson_scalar/100k: benchmark
+tilson/tilson_avx2/100k: benchmark
+tilson/tilson_avx512/100k: benchmark
+tilson/tilson_scalar/1M: benchmark
+tilson/tilson_avx2/1M: benchmark
+tilson/tilson_avx512/1M: benchmark
+
+tilson_batch/tilson_batch_scalarbatch/10k: benchmark
+tilson_batch/tilson_batch_avx2batch/10k: benchmark
+tilson_batch/tilson_batch_avx512batch/10k: benchmark
+tilson_batch/tilson_batch_scalarbatch/100k: benchmark
+tilson_batch/tilson_batch_avx2batch/100k: benchmark
+tilson_batch/tilson_batch_avx512batch/100k: benchmark
+tilson_batch/tilson_batch_scalarbatch/1M: benchmark
+tilson_batch/tilson_batch_avx2batch/1M: benchmark
+tilson_batch/tilson_batch_avx512batch/1M: benchmark
+
+trendflex/trendflex_scalar/10k: benchmark
+trendflex/trendflex_avx2/10k: benchmark
+trendflex/trendflex_avx512/10k: benchmark
+trendflex/trendflex_scalar/100k: benchmark
+trendflex/trendflex_avx2/100k: benchmark
+trendflex/trendflex_avx512/100k: benchmark
+trendflex/trendflex_scalar/1M: benchmark
+trendflex/trendflex_avx2/1M: benchmark
+trendflex/trendflex_avx512/1M: benchmark
+
+trendflex_batch/trendflex_batch_scalarbatch/10k: benchmark
+trendflex_batch/trendflex_batch_avx2batch/10k: benchmark
+trendflex_batch/trendflex_batch_avx512batch/10k: benchmark
+trendflex_batch/trendflex_batch_scalarbatch/100k: benchmark
+trendflex_batch/trendflex_batch_avx2batch/100k: benchmark
+trendflex_batch/trendflex_batch_avx512batch/100k: benchmark
+trendflex_batch/trendflex_batch_scalarbatch/1M: benchmark
+trendflex_batch/trendflex_batch_avx2batch/1M: benchmark
+trendflex_batch/trendflex_batch_avx512batch/1M: benchmark
+
+trima/trima_scalar/10k: benchmark
+trima/trima_avx2/10k: benchmark
+trima/trima_avx512/10k: benchmark
+trima/trima_scalar/100k: benchmark
+trima/trima_avx2/100k: benchmark
+trima/trima_avx512/100k: benchmark
+trima/trima_scalar/1M: benchmark
+trima/trima_avx2/1M: benchmark
+trima/trima_avx512/1M: benchmark
+
+trima_batch/trima_batch_scalarbatch/10k: benchmark
+trima_batch/trima_batch_avx2batch/10k: benchmark
+trima_batch/trima_batch_avx512batch/10k: benchmark
+trima_batch/trima_batch_scalarbatch/100k: benchmark
+trima_batch/trima_batch_avx2batch/100k: benchmark
+trima_batch/trima_batch_avx512batch/100k: benchmark
+trima_batch/trima_batch_scalarbatch/1M: benchmark
+trima_batch/trima_batch_avx2batch/1M: benchmark
+trima_batch/trima_batch_avx512batch/1M: benchmark
+
+uma/uma_scalar/10k: benchmark
+uma/uma_avx2/10k: benchmark
+uma/uma_avx512/10k: benchmark
+uma/uma_scalar/100k: benchmark
+uma/uma_avx2/100k: benchmark
+uma/uma_avx512/100k: benchmark
+uma/uma_scalar/1M: benchmark
+uma/uma_avx2/1M: benchmark
+uma/uma_avx512/1M: benchmark
+
+uma_batch/uma_batch_scalarbatch/10k: benchmark
+uma_batch/uma_batch_avx2batch/10k: benchmark
+uma_batch/uma_batch_avx512batch/10k: benchmark
+uma_batch/uma_batch_scalarbatch/100k: benchmark
+uma_batch/uma_batch_avx2batch/100k: benchmark
+uma_batch/uma_batch_avx512batch/100k: benchmark
+uma_batch/uma_batch_scalarbatch/1M: benchmark
+uma_batch/uma_batch_avx2batch/1M: benchmark
+uma_batch/uma_batch_avx512batch/1M: benchmark
+
+chandelier_exit/chandelier_exit_scalar/10k: benchmark
+chandelier_exit/chandelier_exit_avx2/10k: benchmark
+chandelier_exit/chandelier_exit_avx512/10k: benchmark
+chandelier_exit/chandelier_exit_scalar/100k: benchmark
+chandelier_exit/chandelier_exit_avx2/100k: benchmark
+chandelier_exit/chandelier_exit_avx512/100k: benchmark
+chandelier_exit/chandelier_exit_scalar/1M: benchmark
+chandelier_exit/chandelier_exit_avx2/1M: benchmark
+chandelier_exit/chandelier_exit_avx512/1M: benchmark
+
+percentile_nearest_rank/percentile_nearest_rank_scalar/10k: benchmark
+percentile_nearest_rank/percentile_nearest_rank_avx2/10k: benchmark
+percentile_nearest_rank/percentile_nearest_rank_avx512/10k: benchmark
+percentile_nearest_rank/percentile_nearest_rank_scalar/100k: benchmark
+percentile_nearest_rank/percentile_nearest_rank_avx2/100k: benchmark
+percentile_nearest_rank/percentile_nearest_rank_avx512/100k: benchmark
+percentile_nearest_rank/percentile_nearest_rank_scalar/1M: benchmark
+percentile_nearest_rank/percentile_nearest_rank_avx2/1M: benchmark
+percentile_nearest_rank/percentile_nearest_rank_avx512/1M: benchmark
+
+vidya/vidya_scalar/10k: benchmark
+vidya/vidya_avx2/10k: benchmark
+vidya/vidya_avx512/10k: benchmark
+vidya/vidya_scalar/100k: benchmark
+vidya/vidya_avx2/100k: benchmark
+vidya/vidya_avx512/100k: benchmark
+vidya/vidya_scalar/1M: benchmark
+vidya/vidya_avx2/1M: benchmark
+vidya/vidya_avx512/1M: benchmark
+
+vidya_batch/vidya_batch_scalarbatch/10k: benchmark
+vidya_batch/vidya_batch_avx2batch/10k: benchmark
+vidya_batch/vidya_batch_avx512batch/10k: benchmark
+vidya_batch/vidya_batch_scalarbatch/100k: benchmark
+vidya_batch/vidya_batch_avx2batch/100k: benchmark
+vidya_batch/vidya_batch_avx512batch/100k: benchmark
+vidya_batch/vidya_batch_scalarbatch/1M: benchmark
+vidya_batch/vidya_batch_avx2batch/1M: benchmark
+vidya_batch/vidya_batch_avx512batch/1M: benchmark
+
+vlma/vlma_scalar/10k: benchmark
+vlma/vlma_avx2/10k: benchmark
+vlma/vlma_avx512/10k: benchmark
+vlma/vlma_scalar/100k: benchmark
+vlma/vlma_avx2/100k: benchmark
+vlma/vlma_avx512/100k: benchmark
+vlma/vlma_scalar/1M: benchmark
+vlma/vlma_avx2/1M: benchmark
+vlma/vlma_avx512/1M: benchmark
+
+vlma_batch/vlma_batch_scalarbatch/10k: benchmark
+vlma_batch/vlma_batch_avx2batch/10k: benchmark
+vlma_batch/vlma_batch_avx512batch/10k: benchmark
+vlma_batch/vlma_batch_scalarbatch/100k: benchmark
+vlma_batch/vlma_batch_avx2batch/100k: benchmark
+vlma_batch/vlma_batch_avx512batch/100k: benchmark
+vlma_batch/vlma_batch_scalarbatch/1M: benchmark
+vlma_batch/vlma_batch_avx2batch/1M: benchmark
+vlma_batch/vlma_batch_avx512batch/1M: benchmark
+
+volume_adjusted_ma/volume_adjusted_ma_scalar/10k: benchmark
+volume_adjusted_ma/volume_adjusted_ma_avx2/10k: benchmark
+volume_adjusted_ma/volume_adjusted_ma_avx512/10k: benchmark
+volume_adjusted_ma/volume_adjusted_ma_scalar/100k: benchmark
+volume_adjusted_ma/volume_adjusted_ma_avx2/100k: benchmark
+volume_adjusted_ma/volume_adjusted_ma_avx512/100k: benchmark
+volume_adjusted_ma/volume_adjusted_ma_scalar/1M: benchmark
+volume_adjusted_ma/volume_adjusted_ma_avx2/1M: benchmark
+volume_adjusted_ma/volume_adjusted_ma_avx512/1M: benchmark
+
+volume_adjusted_ma_batch/volume_adjusted_ma_batch_scalarbatch/10k: benchmark
+volume_adjusted_ma_batch/volume_adjusted_ma_batch_avx2batch/10k: benchmark
+volume_adjusted_ma_batch/volume_adjusted_ma_batch_avx512batch/10k: benchmark
+volume_adjusted_ma_batch/volume_adjusted_ma_batch_scalarbatch/100k: benchmark
+volume_adjusted_ma_batch/volume_adjusted_ma_batch_avx2batch/100k: benchmark
+volume_adjusted_ma_batch/volume_adjusted_ma_batch_avx512batch/100k: benchmark
+volume_adjusted_ma_batch/volume_adjusted_ma_batch_scalarbatch/1M: benchmark
+volume_adjusted_ma_batch/volume_adjusted_ma_batch_avx2batch/1M: benchmark
+volume_adjusted_ma_batch/volume_adjusted_ma_batch_avx512batch/1M: benchmark
+
+vpwma/vpwma_scalar/10k: benchmark
+vpwma/vpwma_avx2/10k: benchmark
+vpwma/vpwma_avx512/10k: benchmark
+vpwma/vpwma_scalar/100k: benchmark
+vpwma/vpwma_avx2/100k: benchmark
+vpwma/vpwma_avx512/100k: benchmark
+vpwma/vpwma_scalar/1M: benchmark
+vpwma/vpwma_avx2/1M: benchmark
+vpwma/vpwma_avx512/1M: benchmark
+
+vpwma_batch/vpwma_batch_scalarbatch/10k: benchmark
+vpwma_batch/vpwma_batch_avx2batch/10k: benchmark
+vpwma_batch/vpwma_batch_avx512batch/10k: benchmark
+vpwma_batch/vpwma_batch_scalarbatch/100k: benchmark
+vpwma_batch/vpwma_batch_avx2batch/100k: benchmark
+vpwma_batch/vpwma_batch_avx512batch/100k: benchmark
+vpwma_batch/vpwma_batch_scalarbatch/1M: benchmark
+vpwma_batch/vpwma_batch_avx2batch/1M: benchmark
+vpwma_batch/vpwma_batch_avx512batch/1M: benchmark
+
+prb_batch/prb_batch_scalarbatch/10k: benchmark
+prb_batch/prb_batch_avx2batch/10k: benchmark
+prb_batch/prb_batch_avx512batch/10k: benchmark
+prb_batch/prb_batch_scalarbatch/100k: benchmark
+prb_batch/prb_batch_avx2batch/100k: benchmark
+prb_batch/prb_batch_avx512batch/100k: benchmark
+prb_batch/prb_batch_scalarbatch/1M: benchmark
+prb_batch/prb_batch_avx2batch/1M: benchmark
+prb_batch/prb_batch_avx512batch/1M: benchmark
+
+squeeze_momentum_batch/squeeze_momentum_batch_scalarbatch/10k: benchmark
+squeeze_momentum_batch/squeeze_momentum_batch_avx2batch/10k: benchmark
+squeeze_momentum_batch/squeeze_momentum_batch_avx512batch/10k: benchmark
+squeeze_momentum_batch/squeeze_momentum_batch_scalarbatch/100k: benchmark
+squeeze_momentum_batch/squeeze_momentum_batch_avx2batch/100k: benchmark
+squeeze_momentum_batch/squeeze_momentum_batch_avx512batch/100k: benchmark
+squeeze_momentum_batch/squeeze_momentum_batch_scalarbatch/1M: benchmark
+squeeze_momentum_batch/squeeze_momentum_batch_avx2batch/1M: benchmark
+squeeze_momentum_batch/squeeze_momentum_batch_avx512batch/1M: benchmark
+
+willr_batch/willr_batch_scalarbatch/10k: benchmark
+willr_batch/willr_batch_avx2batch/10k: benchmark
+willr_batch/willr_batch_avx512batch/10k: benchmark
+willr_batch/willr_batch_scalarbatch/100k: benchmark
+willr_batch/willr_batch_avx2batch/100k: benchmark
+willr_batch/willr_batch_avx512batch/100k: benchmark
+willr_batch/willr_batch_scalarbatch/1M: benchmark
+willr_batch/willr_batch_avx2batch/1M: benchmark
+willr_batch/willr_batch_avx512batch/1M: benchmark
+
+vwma/vwma_scalar/10k: benchmark
+vwma/vwma_avx2/10k: benchmark
+vwma/vwma_avx512/10k: benchmark
+vwma/vwma_scalar/100k: benchmark
+vwma/vwma_avx2/100k: benchmark
+vwma/vwma_avx512/100k: benchmark
+vwma/vwma_scalar/1M: benchmark
+vwma/vwma_avx2/1M: benchmark
+vwma/vwma_avx512/1M: benchmark
+
+wavetrend/wavetrend_scalar/10k: benchmark
+wavetrend/wavetrend_avx2/10k: benchmark
+wavetrend/wavetrend_avx512/10k: benchmark
+wavetrend/wavetrend_scalar/100k: benchmark
+wavetrend/wavetrend_avx2/100k: benchmark
+wavetrend/wavetrend_avx512/100k: benchmark
+wavetrend/wavetrend_scalar/1M: benchmark
+wavetrend/wavetrend_avx2/1M: benchmark
+wavetrend/wavetrend_avx512/1M: benchmark
+
+wavetrend_batch/wavetrend_batch_scalarbatch/10k: benchmark
+wavetrend_batch/wavetrend_batch_avx2batch/10k: benchmark
+wavetrend_batch/wavetrend_batch_avx512batch/10k: benchmark
+wavetrend_batch/wavetrend_batch_scalarbatch/100k: benchmark
+wavetrend_batch/wavetrend_batch_avx2batch/100k: benchmark
+wavetrend_batch/wavetrend_batch_avx512batch/100k: benchmark
+wavetrend_batch/wavetrend_batch_scalarbatch/1M: benchmark
+wavetrend_batch/wavetrend_batch_avx2batch/1M: benchmark
+wavetrend_batch/wavetrend_batch_avx512batch/1M: benchmark
+
+fosc/fosc_scalar/10k: benchmark
+fosc/fosc_avx2/10k: benchmark
+fosc/fosc_avx512/10k: benchmark
+fosc/fosc_scalar/100k: benchmark
+fosc/fosc_avx2/100k: benchmark
+fosc/fosc_avx512/100k: benchmark
+fosc/fosc_scalar/1M: benchmark
+fosc/fosc_avx2/1M: benchmark
+fosc/fosc_avx512/1M: benchmark
+
+wilders/wilders_scalar/10k: benchmark
+wilders/wilders_avx2/10k: benchmark
+wilders/wilders_avx512/10k: benchmark
+wilders/wilders_scalar/100k: benchmark
+wilders/wilders_avx2/100k: benchmark
+wilders/wilders_avx512/100k: benchmark
+wilders/wilders_scalar/1M: benchmark
+wilders/wilders_avx2/1M: benchmark
+wilders/wilders_avx512/1M: benchmark
+
+wclprice/wclprice_scalar/10k: benchmark
+wclprice/wclprice_avx2/10k: benchmark
+wclprice/wclprice_avx512/10k: benchmark
+wclprice/wclprice_scalar/100k: benchmark
+wclprice/wclprice_avx2/100k: benchmark
+wclprice/wclprice_avx512/100k: benchmark
+wclprice/wclprice_scalar/1M: benchmark
+wclprice/wclprice_avx2/1M: benchmark
+wclprice/wclprice_avx512/1M: benchmark
+
+wilders_batch/wilders_batch_scalarbatch/10k: benchmark
+wilders_batch/wilders_batch_avx2batch/10k: benchmark
+wilders_batch/wilders_batch_avx512batch/10k: benchmark
+wilders_batch/wilders_batch_scalarbatch/100k: benchmark
+wilders_batch/wilders_batch_avx2batch/100k: benchmark
+wilders_batch/wilders_batch_avx512batch/100k: benchmark
+wilders_batch/wilders_batch_scalarbatch/1M: benchmark
+wilders_batch/wilders_batch_avx2batch/1M: benchmark
+wilders_batch/wilders_batch_avx512batch/1M: benchmark
+
+wma/wma_scalar/10k: benchmark
+wma/wma_avx2/10k: benchmark
+wma/wma_avx512/10k: benchmark
+wma/wma_scalar/100k: benchmark
+wma/wma_avx2/100k: benchmark
+wma/wma_avx512/100k: benchmark
+wma/wma_scalar/1M: benchmark
+wma/wma_avx2/1M: benchmark
+wma/wma_avx512/1M: benchmark
+
+wma_batch/wma_batch_scalarbatch/10k: benchmark
+wma_batch/wma_batch_avx2batch/10k: benchmark
+wma_batch/wma_batch_avx512batch/10k: benchmark
+wma_batch/wma_batch_scalarbatch/100k: benchmark
+wma_batch/wma_batch_avx2batch/100k: benchmark
+wma_batch/wma_batch_avx512batch/100k: benchmark
+wma_batch/wma_batch_scalarbatch/1M: benchmark
+wma_batch/wma_batch_avx2batch/1M: benchmark
+wma_batch/wma_batch_avx512batch/1M: benchmark
+
+zlema/zlema_scalar/10k: benchmark
+zlema/zlema_avx2/10k: benchmark
+zlema/zlema_avx512/10k: benchmark
+zlema/zlema_scalar/100k: benchmark
+zlema/zlema_avx2/100k: benchmark
+zlema/zlema_avx512/100k: benchmark
+zlema/zlema_scalar/1M: benchmark
+zlema/zlema_avx2/1M: benchmark
+zlema/zlema_avx512/1M: benchmark
+
+zlema_batch/zlema_batch_scalarbatch/10k: benchmark
+zlema_batch/zlema_batch_avx2batch/10k: benchmark
+zlema_batch/zlema_batch_avx512batch/10k: benchmark
+zlema_batch/zlema_batch_scalarbatch/100k: benchmark
+zlema_batch/zlema_batch_avx2batch/100k: benchmark
+zlema_batch/zlema_batch_avx512batch/100k: benchmark
+zlema_batch/zlema_batch_scalarbatch/1M: benchmark
+zlema_batch/zlema_batch_avx2batch/1M: benchmark
+zlema_batch/zlema_batch_avx512batch/1M: benchmark
+
+stochf/stochf_scalar/10k: benchmark
+stochf/stochf_avx2/10k: benchmark
+stochf/stochf_avx512/10k: benchmark
+stochf/stochf_scalar/100k: benchmark
+stochf/stochf_avx2/100k: benchmark
+stochf/stochf_avx512/100k: benchmark
+stochf/stochf_scalar/1M: benchmark
+stochf/stochf_avx2/1M: benchmark
+stochf/stochf_avx512/1M: benchmark
+
+vi_batch/vi_batch_scalarbatch/10k: benchmark
+vi_batch/vi_batch_avx2batch/10k: benchmark
+vi_batch/vi_batch_avx512batch/10k: benchmark
+vi_batch/vi_batch_scalarbatch/100k: benchmark
+vi_batch/vi_batch_avx2batch/100k: benchmark
+vi_batch/vi_batch_avx512batch/100k: benchmark
+vi_batch/vi_batch_scalarbatch/1M: benchmark
+vi_batch/vi_batch_avx2batch/1M: benchmark
+vi_batch/vi_batch_avx512batch/1M: benchmark
+
+chandelier_exit/chandelier_exit_scalar/10k: benchmark
+chandelier_exit/chandelier_exit_avx2/10k: benchmark
+chandelier_exit/chandelier_exit_avx512/10k: benchmark
+chandelier_exit/chandelier_exit_scalar/100k: benchmark
+chandelier_exit/chandelier_exit_avx2/100k: benchmark
+chandelier_exit/chandelier_exit_avx512/100k: benchmark
+chandelier_exit/chandelier_exit_scalar/1M: benchmark
+chandelier_exit/chandelier_exit_avx2/1M: benchmark
+chandelier_exit/chandelier_exit_avx512/1M: benchmark
+
+chandelier_exit_batch/chandelier_exit_batch_scalarbatch/10k: benchmark
+chandelier_exit_batch/chandelier_exit_batch_avx2batch/10k: benchmark
+chandelier_exit_batch/chandelier_exit_batch_avx512batch/10k: benchmark
+chandelier_exit_batch/chandelier_exit_batch_scalarbatch/100k: benchmark
+chandelier_exit_batch/chandelier_exit_batch_avx2batch/100k: benchmark
+chandelier_exit_batch/chandelier_exit_batch_avx512batch/100k: benchmark
+chandelier_exit_batch/chandelier_exit_batch_scalarbatch/1M: benchmark
+chandelier_exit_batch/chandelier_exit_batch_avx2batch/1M: benchmark
+chandelier_exit_batch/chandelier_exit_batch_avx512batch/1M: benchmark
+
+otto_batch/otto_batch_scalarbatch/10k: benchmark
+otto_batch/otto_batch_avx2batch/10k: benchmark
+otto_batch/otto_batch_avx512batch/10k: benchmark
+otto_batch/otto_batch_scalarbatch/100k: benchmark
+otto_batch/otto_batch_avx2batch/100k: benchmark
+otto_batch/otto_batch_avx512batch/100k: benchmark
+otto_batch/otto_batch_scalarbatch/1M: benchmark
+otto_batch/otto_batch_avx2batch/1M: benchmark
+otto_batch/otto_batch_avx512batch/1M: benchmark
+
+percentile_nearest_rank/percentile_nearest_rank_scalar/10k: benchmark
+percentile_nearest_rank/percentile_nearest_rank_avx2/10k: benchmark
+percentile_nearest_rank/percentile_nearest_rank_avx512/10k: benchmark
+percentile_nearest_rank/percentile_nearest_rank_scalar/100k: benchmark
+percentile_nearest_rank/percentile_nearest_rank_avx2/100k: benchmark
+percentile_nearest_rank/percentile_nearest_rank_avx512/100k: benchmark
+percentile_nearest_rank/percentile_nearest_rank_scalar/1M: benchmark
+percentile_nearest_rank/percentile_nearest_rank_avx2/1M: benchmark
+percentile_nearest_rank/percentile_nearest_rank_avx512/1M: benchmark
+
+percentile_nearest_rank_batch/percentile_nearest_rank_batch_scalarbatch/10k: benchmark
+percentile_nearest_rank_batch/percentile_nearest_rank_batch_avx2batch/10k: benchmark
+percentile_nearest_rank_batch/percentile_nearest_rank_batch_avx512batch/10k: benchmark
+percentile_nearest_rank_batch/percentile_nearest_rank_batch_scalarbatch/100k: benchmark
+percentile_nearest_rank_batch/percentile_nearest_rank_batch_avx2batch/100k: benchmark
+percentile_nearest_rank_batch/percentile_nearest_rank_batch_avx512batch/100k: benchmark
+percentile_nearest_rank_batch/percentile_nearest_rank_batch_scalarbatch/1M: benchmark
+percentile_nearest_rank_batch/percentile_nearest_rank_batch_avx2batch/1M: benchmark
+percentile_nearest_rank_batch/percentile_nearest_rank_batch_avx512batch/1M: benchmark
+
+net_myrsi/net_myrsi_scalar/10k: benchmark
+net_myrsi/net_myrsi_avx2/10k: benchmark
+net_myrsi/net_myrsi_avx512/10k: benchmark
+net_myrsi/net_myrsi_scalar/100k: benchmark
+net_myrsi/net_myrsi_avx2/100k: benchmark
+net_myrsi/net_myrsi_avx512/100k: benchmark
+net_myrsi/net_myrsi_scalar/1M: benchmark
+net_myrsi/net_myrsi_avx2/1M: benchmark
+net_myrsi/net_myrsi_avx512/1M: benchmark
+
+net_myrsi_batch/net_myrsi_batch_scalarbatch/10k: benchmark
+net_myrsi_batch/net_myrsi_batch_avx2batch/10k: benchmark
+net_myrsi_batch/net_myrsi_batch_avx512batch/10k: benchmark
+net_myrsi_batch/net_myrsi_batch_scalarbatch/100k: benchmark
+net_myrsi_batch/net_myrsi_batch_avx2batch/100k: benchmark
+net_myrsi_batch/net_myrsi_batch_avx512batch/100k: benchmark
+net_myrsi_batch/net_myrsi_batch_scalarbatch/1M: benchmark
+net_myrsi_batch/net_myrsi_batch_avx2batch/1M: benchmark
+net_myrsi_batch/net_myrsi_batch_avx512batch/1M: benchmark
+
+kvo_batch/kvo_batch_scalarbatch/10k: benchmark
+kvo_batch/kvo_batch_avx2batch/10k: benchmark
+kvo_batch/kvo_batch_avx512batch/10k: benchmark
+kvo_batch/kvo_batch_scalarbatch/100k: benchmark
+kvo_batch/kvo_batch_avx2batch/100k: benchmark
+kvo_batch/kvo_batch_avx512batch/100k: benchmark
+kvo_batch/kvo_batch_scalarbatch/1M: benchmark
+kvo_batch/kvo_batch_avx2batch/1M: benchmark
+kvo_batch/kvo_batch_avx512batch/1M: benchmark
+

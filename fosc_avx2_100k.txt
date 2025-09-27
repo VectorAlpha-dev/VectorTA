@@ -1,0 +1,10 @@
+fosc/fosc_avx2/100k     time:   [98.585 µs 99.267 µs 100.01 µs]
+                        thrpt:  [7.4499 GiB/s 7.5056 GiB/s 7.5575 GiB/s]
+                 change:
+                        time:   [+1.1411% +2.1381% +3.1897%] (p = 0.00 < 0.05)
+                        thrpt:  [-3.0911% -2.0933% -1.1282%]
+                        Performance has regressed.
+slope  [98.585 µs 100.01 µs] R^2            [0.9972159 0.9970483]
+mean   [98.916 µs 100.44 µs] std. dev.      [691.34 ns 1.6339 µs]
+median [98.671 µs 100.85 µs] med. abs. dev. [312.05 ns 2.4157 µs]
+

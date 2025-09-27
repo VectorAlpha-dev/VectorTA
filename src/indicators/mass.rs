@@ -15,7 +15,10 @@
 //! - **values**: Vector of Mass Index values with NaN prefix during warmup period
 //!
 //! ## Developer Notes
-//! - **AVX2/AVX512 Kernels**: Stubs that call scalar implementation
+//! - **SIMD status**: AVX2/AVX512 mirror scalar math and add light prefetching. Due to loop-carried EMA
+//!   dependencies, lane-wise SIMD is not viable; expected gains are modest and workload-dependent.
+//! - **Batch status**: Row-specific batch kernels not attempted here. A future pass can precompute the ratio
+//!   and a prefix sum once, then fill rows via differences for multi-x speedups without changing outputs.
 //! - **Streaming**: Implemented with O(1) update performance
 //! - **Zero-copy Memory**: Uses alloc_with_nan_prefix and make_uninit_matrix for batch operations
 
@@ -247,8 +250,9 @@ fn mass_prepare<'a>(
         });
     }
 
+    // SIMD prefetch variant shows mixed results; default Auto short-circuits to Scalar for stability.
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
     Ok((high, low, period, first, chosen))
@@ -321,36 +325,71 @@ pub fn mass_scalar(
     first_valid_idx: usize,
     out: &mut [f64],
 ) {
-    let alpha = 2.0 / 10.0;
-    let inv_alpha = 1.0 - alpha;
+    // Constants for EMA(9)
+    const ALPHA: f64 = 2.0 / 10.0; // 0.2
+    const INV_ALPHA: f64 = 1.0 - ALPHA; // 0.8
+
+    let n = high.len();
+    if n == 0 {
+        return;
+    }
+
+    // Warmup boundaries
+    let start_ema2 = first_valid_idx + 8;
+    let start_ratio = first_valid_idx + 16;
+    let start_out = start_ratio + (period - 1);
+
+    // Initial EMA seeds
     let mut ema1 = high[first_valid_idx] - low[first_valid_idx];
     let mut ema2 = ema1;
-    let mut ring = vec![0.0; period];
-    let mut ring_index = 0;
-    let mut sum_ratio = 0.0;
 
-    for i in first_valid_idx..high.len() {
-        let hl = high[i] - low[i];
-        ema1 = ema1.mul_add(inv_alpha, hl * alpha);
+    // Cacheline-aligned ring buffer
+    let mut ring: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, period);
+    ring.resize(period, 0.0);
 
-        if i == first_valid_idx + 8 {
-            ema2 = ema1;
-        }
+    let mut ring_index: usize = 0;
+    let mut sum_ratio: f64 = 0.0;
 
-        if i >= first_valid_idx + 8 {
-            ema2 = ema2.mul_add(inv_alpha, ema1 * alpha);
-        }
+    unsafe {
+        let hp = high.as_ptr();
+        let lp = low.as_ptr();
+        let outp = out.as_mut_ptr();
+        let rp = ring.as_mut_ptr();
 
-        if i >= first_valid_idx + 16 {
-            let ratio = ema1 / ema2;
-            sum_ratio -= ring[ring_index];
-            ring[ring_index] = ratio;
-            sum_ratio += ratio;
-            ring_index = (ring_index + 1) % period;
+        let mut i = first_valid_idx;
+        while i < n {
+            let hl = *hp.add(i) - *lp.add(i);
+            // ema1 = ema1 * 0.8 + hl * 0.2
+            ema1 = ema1.mul_add(INV_ALPHA, hl * ALPHA);
 
-            if i >= first_valid_idx + 16 + (period - 1) {
-                out[i] = sum_ratio;
+            if i == start_ema2 {
+                ema2 = ema1;
             }
+            if i >= start_ema2 {
+                // ema2 = ema2 * 0.8 + ema1 * 0.2
+                ema2 = ema2.mul_add(INV_ALPHA, ema1 * ALPHA);
+
+                if i >= start_ratio {
+                    let ratio = ema1 / ema2;
+
+                    // Sliding sum via ring buffer
+                    sum_ratio -= *rp.add(ring_index);
+                    *rp.add(ring_index) = ratio;
+                    sum_ratio += ratio;
+
+                    // Advance ring index without modulo
+                    ring_index += 1;
+                    if ring_index == period {
+                        ring_index = 0;
+                    }
+
+                    if i >= start_out {
+                        *outp.add(i) = sum_ratio;
+                    }
+                }
+            }
+
+            i += 1;
         }
     }
 }
@@ -380,7 +419,76 @@ pub fn mass_avx2(
     first_valid_idx: usize,
     out: &mut [f64],
 ) {
-    mass_scalar(high, low, period, first_valid_idx, out);
+    use core::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+
+    const ALPHA: f64 = 2.0 / 10.0;
+    const INV_ALPHA: f64 = 1.0 - ALPHA;
+
+    let n = high.len();
+    if n == 0 {
+        return;
+    }
+
+    let start_ema2 = first_valid_idx + 8;
+    let start_ratio = first_valid_idx + 16;
+    let start_out = start_ratio + (period - 1);
+
+    let mut ema1 = high[first_valid_idx] - low[first_valid_idx];
+    let mut ema2 = ema1;
+
+    let mut ring: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, period);
+    ring.resize(period, 0.0);
+
+    let mut ring_index: usize = 0;
+    let mut sum_ratio: f64 = 0.0;
+
+    unsafe {
+        let hp = high.as_ptr();
+        let lp = low.as_ptr();
+        let outp = out.as_mut_ptr();
+        let rp = ring.as_mut_ptr();
+
+        const PF_DIST: usize = 64;
+
+        let mut i = first_valid_idx;
+        while i < n {
+            let pf = i + PF_DIST;
+            if pf < n {
+                _mm_prefetch(hp.add(pf) as *const i8, _MM_HINT_T0);
+                _mm_prefetch(lp.add(pf) as *const i8, _MM_HINT_T0);
+                _mm_prefetch(outp.add(pf) as *const i8, _MM_HINT_T0);
+            }
+
+            let hl = *hp.add(i) - *lp.add(i);
+            ema1 = ema1.mul_add(INV_ALPHA, hl * ALPHA);
+
+            if i == start_ema2 {
+                ema2 = ema1;
+            }
+            if i >= start_ema2 {
+                ema2 = ema2.mul_add(INV_ALPHA, ema1 * ALPHA);
+
+                if i >= start_ratio {
+                    let ratio = ema1 / ema2;
+
+                    sum_ratio -= *rp.add(ring_index);
+                    *rp.add(ring_index) = ratio;
+                    sum_ratio += ratio;
+
+                    ring_index += 1;
+                    if ring_index == period {
+                        ring_index = 0;
+                    }
+
+                    if i >= start_out {
+                        *outp.add(i) = sum_ratio;
+                    }
+                }
+            }
+
+            i += 1;
+        }
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -392,7 +500,9 @@ pub unsafe fn mass_avx512_short(
     first_valid_idx: usize,
     out: &mut [f64],
 ) {
-    mass_scalar(high, low, period, first_valid_idx, out);
+    // For single recursive EMA chain, heavy SIMD gives no lane-parallelism.
+    // Use the AVX2 prefetch variant for potential small wins.
+    mass_avx2(high, low, period, first_valid_idx, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -404,7 +514,7 @@ pub unsafe fn mass_avx512_long(
     first_valid_idx: usize,
     out: &mut [f64],
 ) {
-    mass_scalar(high, low, period, first_valid_idx, out);
+    mass_avx2(high, low, period, first_valid_idx, out);
 }
 
 #[derive(Debug, Clone)]
@@ -543,8 +653,9 @@ pub fn mass_batch_with_kernel(
     sweep: &MassBatchRange,
     k: Kernel,
 ) -> Result<MassBatchOutput, MassError> {
+    // Batch Auto defaults to ScalarBatch to avoid mixed SIMD results; callers may request SIMD explicitly.
     let kernel = match k {
-        Kernel::Auto => detect_best_batch_kernel(),
+        Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         _ => {
             return Err(MassError::InvalidPeriod {
@@ -686,18 +797,9 @@ fn mass_batch_inner(
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
-    // Resolve Auto kernel for WASM
+    // Resolve Auto: default to Scalar for stability (explicit SIMD is still available)
     let actual_kern = match kern {
-        Kernel::Auto => {
-            #[cfg(target_arch = "wasm32")]
-            {
-                Kernel::Scalar
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                detect_best_kernel()
-            }
-        }
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -761,7 +863,7 @@ unsafe fn mass_row_scalar(high: &[f64], low: &[f64], period: usize, first: usize
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn mass_row_avx2(high: &[f64], low: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    mass_scalar(high, low, period, first, out);
+    mass_avx2(high, low, period, first, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -783,7 +885,7 @@ unsafe fn mass_row_avx512_short(
     first: usize,
     out: &mut [f64],
 ) {
-    mass_scalar(high, low, period, first, out);
+    mass_avx2(high, low, period, first, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -795,7 +897,7 @@ unsafe fn mass_row_avx512_long(
     first: usize,
     out: &mut [f64],
 ) {
-    mass_scalar(high, low, period, first, out);
+    mass_avx2(high, low, period, first, out);
 }
 
 // Tests
@@ -1613,7 +1715,7 @@ pub fn mass_batch_py<'py>(
     let combos = py
         .allow_threads(|| {
             let kernel = match kern {
-                Kernel::Auto => detect_best_batch_kernel(),
+                Kernel::Auto => Kernel::ScalarBatch,
                 k => k,
             };
             let simd = match kernel {
@@ -1694,18 +1796,9 @@ fn mass_batch_inner_into(
         }
     }
 
-    // Resolve Auto kernel for WASM
+    // Resolve Auto to Scalar for stability (explicit SIMD still allowed)
     let actual_kern = match kern {
-        Kernel::Auto => {
-            #[cfg(target_arch = "wasm32")]
-            {
-                Kernel::Scalar
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                detect_best_kernel()
-            }
-        }
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 

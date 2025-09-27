@@ -1,0 +1,6 @@
+kaufmanstop_bench/scalar/100k
+                        time:   [118.99 µs 119.81 µs 120.92 µs]
+                        thrpt:  [6.1614 GiB/s 6.2186 GiB/s 6.2615 GiB/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+

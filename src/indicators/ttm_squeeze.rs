@@ -15,9 +15,9 @@
 //! - **squeeze**: Squeeze state (0=NoSqz, 1=LowSqz, 2=MidSqz, 3=HighSqz)
 //!
 //! ## Developer Notes
-//! - **AVX2/AVX512 Kernels**: Not implemented - no SIMD-specific functions found. Indicator only delegates to SMA which may have SIMD optimizations. Direct SIMD optimization opportunity for BB/KC band calculations and linear regression.
-//! - **Streaming Performance**: O(n) implementation - recalculates SMA, standard deviation, and TR on each update by iterating through entire ring buffer. Could be optimized to O(1) with running sums.
-//! - **Memory Optimization**: Uses `alloc_with_nan_prefix` for TR calculation. Main calculation doesn't use batch helpers. Streaming uses fixed-size ring buffers which is memory efficient.
+//! - SIMD: not implemented for this indicator; workload is sequential/windowed and largely memory-bound/branch-heavy. Keep scalar as reference path.
+//! - Scalar classic path optimized: O(1) rolling updates for mean/stddev/TR with monotonic deques for highs/lows and closed-form linreg; used for default params.
+//! - Allocation: follows alma.rs patterns (warmup NaN prefix; zero-copy helpers). Batch uses per-row scalar; no row-specific batch kernel wired yet.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyUntypedArrayMethods};
@@ -1013,151 +1013,234 @@ pub unsafe fn ttm_squeeze_scalar_classic(
     squeeze: &mut [f64],
 ) -> Result<(), TtmSqueezeError> {
     let len = close.len();
-
-    // Step 1: Calculate SMA of close prices inline
-    let mut sma_values = vec![f64::NAN; len];
-
-    // Initialize first SMA value
-    if first + length - 1 < len {
-        let mut sum = 0.0;
-        for i in first..(first + length) {
-            sum += close[i];
-        }
-        sma_values[first + length - 1] = sum / length as f64;
-
-        // Continue with sliding window
-        for i in (first + length)..len {
-            sum = sum - close[i - length] + close[i];
-            sma_values[i] = sum / length as f64;
-        }
+    if len == 0 || length < 2 || warmup >= len {
+        return Ok(());
     }
 
-    // Step 2: Calculate True Range inline
-    let mut tr = vec![f64::NAN; len];
-    for i in first..len {
-        tr[i] = if i == first {
-            high[i] - low[i]
-        } else {
-            let pc = close[i - 1];
-            let hl = high[i] - low[i];
-            let hc = (high[i] - pc).abs();
-            let lc = (low[i] - pc).abs();
-            hl.max(hc).max(lc)
-        };
-    }
+    // Precompute constants for closed-form linear regression on x = 0..n-1
+    let n = length as f64;
+    let sx = 0.5 * n * (n - 1.0);
+    let sx2 = (n - 1.0) * n * (2.0 * n - 1.0) / 6.0;
+    let den = n * sx2 - sx * sx; // > 0 for n >= 2
+    let inv_n = 1.0 / n;
+    let half_nm1 = 0.5 * (n - 1.0);
 
-    // Step 3: Calculate SMA of True Range for Keltner Channel deviation
-    let mut dev_kc = vec![f64::NAN; len];
+    // Rolling buffers and sums for close and TR
+    let mut cbuf = vec![0.0f64; length];
+    let mut trbuf = vec![0.0f64; length];
+    let mut cpos = 0usize;
+    let mut trpos = 0usize;
 
-    // Initialize first TR SMA value
-    if first + length - 1 < len {
-        let mut sum = 0.0;
-        for i in first..(first + length) {
-            sum += tr[i];
-        }
-        dev_kc[first + length - 1] = sum / length as f64;
+    let mut sum0 = 0.0f64; // Σ close
+    let mut sum1 = 0.0f64; // Σ (r * close), r=0..n-1
+    let mut sumsq = 0.0f64; // Σ close^2
+    let mut tr_sum = 0.0f64; // Σ TR
 
-        // Continue with sliding window
-        for i in (first + length)..len {
-            sum = sum - tr[i - length] + tr[i];
-            dev_kc[i] = sum / length as f64;
-        }
-    }
+    // Monotonic deques for highest/lowest indices over window
+    let cap = length;
+    let mut max_q = vec![0usize; cap];
+    let mut min_q = vec![0usize; cap];
+    let (mut max_head, mut max_tail, mut max_len) = (0usize, 0usize, 0usize);
+    let (mut min_head, mut min_tail, mut min_len) = (0usize, 0usize, 0usize);
 
-    // Step 4: Main loop - compute BB/KC bands and momentum
-    for i in warmup..len {
-        let m = sma_values[i];
-        let dkc = dev_kc[i];
-        if m.is_nan() || dkc.is_nan() {
-            continue;
-        }
+    // Precompute constant squared multipliers to avoid sqrt and extra muls
+    let bb_sq = bb_mult * bb_mult;
+    let kc_low_sq = kc_mult_low * kc_mult_low;
+    let kc_mid_sq = kc_mult_mid * kc_mult_mid;
+    let kc_high_sq = kc_mult_high * kc_mult_high;
 
-        // Calculate standard deviation for Bollinger Bands inline
-        let start = i + 1 - length;
-        let mut sum = 0.0;
-        let mut cnt = 0usize;
-        for j in start..=i {
-            let v = close[j];
-            if v.is_nan() {
-                continue;
-            }
-            let d = v - m;
-            sum += d * d;
-            cnt += 1;
-        }
+    // Seed initial window [first..=warmup]
+    {
+        let mut r = 0usize;
+        let mut i = first;
+        while i <= warmup {
+            let c = *close.get_unchecked(i);
+            *cbuf.get_unchecked_mut(cpos) = c;
+            sum0 += c;
+            sumsq = c.mul_add(c, sumsq);
+            sum1 += (r as f64) * c;
 
-        if cnt > 1 {
-            let std = (sum / cnt as f64).sqrt();
-            let bb_upper = m + bb_mult * std;
-            let bb_lower = m - bb_mult * std;
-
-            // Calculate Keltner Channels
-            let kc_upper_low = m + dkc * kc_mult_low;
-            let kc_lower_low = m - dkc * kc_mult_low;
-            let kc_upper_mid = m + dkc * kc_mult_mid;
-            let kc_lower_mid = m - dkc * kc_mult_mid;
-            let kc_upper_high = m + dkc * kc_mult_high;
-            let kc_lower_high = m - dkc * kc_mult_high;
-
-            // Determine squeeze state
-            let no_sqz = bb_lower < kc_lower_low || bb_upper > kc_upper_low;
-            squeeze[i] = if no_sqz {
-                0.0 // NoSqz
-            } else if bb_lower >= kc_lower_high || bb_upper <= kc_upper_high {
-                3.0 // HighSqz
-            } else if bb_lower >= kc_lower_mid || bb_upper <= kc_upper_mid {
-                2.0 // MidSqz
+            // True Range
+            let tr_val = if i == first {
+                *high.get_unchecked(i) - *low.get_unchecked(i)
             } else {
-                1.0 // LowSqz
+                let pc = *close.get_unchecked(i - 1);
+                let hl = *high.get_unchecked(i) - *low.get_unchecked(i);
+                let hc = (*high.get_unchecked(i) - pc).abs();
+                let lc = (*low.get_unchecked(i) - pc).abs();
+                if hl >= hc { if hl >= lc { hl } else { lc } } else { if hc >= lc { hc } else { lc } }
             };
+            *trbuf.get_unchecked_mut(trpos) = tr_val;
+            tr_sum += tr_val;
+
+            // Push into max deque (highs)
+            while max_len > 0 {
+                let back_pos = if max_tail == 0 { cap - 1 } else { max_tail - 1 };
+                let back_idx = *max_q.get_unchecked(back_pos);
+                if *high.get_unchecked(i) <= *high.get_unchecked(back_idx) { break; }
+                max_tail = back_pos;
+                max_len -= 1;
+            }
+            *max_q.get_unchecked_mut(max_tail) = i;
+            max_tail += 1; if max_tail == cap { max_tail = 0; }
+            max_len += 1;
+
+            // Push into min deque (lows)
+            while min_len > 0 {
+                let back_pos = if min_tail == 0 { cap - 1 } else { min_tail - 1 };
+                let back_idx = *min_q.get_unchecked(back_pos);
+                if *low.get_unchecked(i) >= *low.get_unchecked(back_idx) { break; }
+                min_tail = back_pos;
+                min_len -= 1;
+            }
+            *min_q.get_unchecked_mut(min_tail) = i;
+            min_tail += 1; if min_tail == cap { min_tail = 0; }
+            min_len += 1;
+
+            cpos += 1; if cpos == length { cpos = 0; }
+            trpos += 1; if trpos == length { trpos = 0; }
+            r += 1;
+            i += 1;
+        }
+    }
+
+    // Compute outputs at warmup
+    {
+        let m = sum0 * inv_n;
+        let var = (-m).mul_add(m, sumsq * inv_n);
+        let var_pos = if var > 0.0 { var } else { 0.0 };
+        let dkc = tr_sum * inv_n;
+        let dkc2 = dkc * dkc;
+
+        // Compare without sqrt: bb_mult*std <= kc_mult*dkc  <=>  bb_sq*var <= kc_sq*dkc^2
+        let bbv = bb_sq * var_pos;
+        let t_low = kc_low_sq * dkc2;
+        let t_mid = kc_mid_sq * dkc2;
+        let t_high = kc_high_sq * dkc2;
+
+        *squeeze.get_unchecked_mut(warmup) = if bbv > t_low {
+            0.0 // NoSqz
+        } else if bbv <= t_high {
+            3.0 // HighSqz
+        } else if bbv <= t_mid {
+            2.0 // MidSqz
+        } else {
+            1.0 // LowSqz
+        };
+
+        // Highest/lowest from deques
+        let hi_idx = *max_q.get_unchecked(max_head);
+        let lo_idx = *min_q.get_unchecked(min_head);
+        let highest = *high.get_unchecked(hi_idx);
+        let lowest  = *low.get_unchecked(lo_idx);
+
+        // Momentum via closed-form linear regression
+        let midpoint = 0.5 * (highest + lowest);
+        let avg = 0.5 * (midpoint + m);
+        let sy  = sum0 - avg * n;
+        let sxy = sum1 - avg * sx;
+        let slope = n.mul_add(sxy, -(sx * sy)) / den;
+        *momentum.get_unchecked_mut(warmup) = sy * inv_n + slope * half_nm1;
+    }
+
+    // Main loop
+    let mut i = warmup + 1;
+    while i < len {
+        let start_idx = i + 1 - length;
+
+        // Evict expired indices from deques
+        while max_len > 0 {
+            let front_idx = *max_q.get_unchecked(max_head);
+            if front_idx >= start_idx { break; }
+            max_head += 1; if max_head == cap { max_head = 0; }
+            max_len -= 1;
+        }
+        while min_len > 0 {
+            let front_idx = *min_q.get_unchecked(min_head);
+            if front_idx >= start_idx { break; }
+            min_head += 1; if min_head == cap { min_head = 0; }
+            min_len -= 1;
         }
 
-        // Calculate momentum: linreg(close - avg(avg(highest, lowest), sma(close)))
-        // Find highest high and lowest low over the period
-        let mut highest = f64::NEG_INFINITY;
-        let mut lowest = f64::INFINITY;
-        let mut has_valid = false;
-
-        for j in start..=i {
-            if high[j].is_finite() && low[j].is_finite() {
-                highest = highest.max(high[j]);
-                lowest = lowest.min(low[j]);
-                has_valid = true;
-            }
+        // Push new index into deques
+        while max_len > 0 {
+            let back_pos = if max_tail == 0 { cap - 1 } else { max_tail - 1 };
+            let back_idx = *max_q.get_unchecked(back_pos);
+            if *high.get_unchecked(i) <= *high.get_unchecked(back_idx) { break; }
+            max_tail = back_pos; max_len -= 1;
         }
+        *max_q.get_unchecked_mut(max_tail) = i;
+        max_tail += 1; if max_tail == cap { max_tail = 0; }
+        max_len += 1;
 
-        if has_valid {
-            // midpoint = average of highest and lowest
-            let midpoint = (highest + lowest) * 0.5;
-            // Average of midpoint and close SMA
-            let avg = (midpoint + m) * 0.5;
-
-            // Linear regression on close - avg
-            let mut sx = 0.0;
-            let mut sy = 0.0;
-            let mut sxy = 0.0;
-            let mut sx2 = 0.0;
-            let mut n = 0.0;
-
-            for (k, j) in (start..=i).enumerate() {
-                let y = close[j] - avg;
-                if y.is_nan() {
-                    continue;
-                }
-                let x = k as f64;
-                sx += x;
-                sy += y;
-                sxy += x * y;
-                sx2 += x * x;
-                n += 1.0;
-            }
-
-            if n >= 2.0 {
-                let slope = (n * sxy - sx * sy) / (n * sx2 - sx * sx);
-                let intercept = (sy - slope * sx) / n;
-                momentum[i] = intercept + slope * ((length - 1) as f64);
-            }
+        while min_len > 0 {
+            let back_pos = if min_tail == 0 { cap - 1 } else { min_tail - 1 };
+            let back_idx = *min_q.get_unchecked(back_pos);
+            if *low.get_unchecked(i) >= *low.get_unchecked(back_idx) { break; }
+            min_tail = back_pos; min_len -= 1;
         }
+        *min_q.get_unchecked_mut(min_tail) = i;
+        min_tail += 1; if min_tail == cap { min_tail = 0; }
+        min_len += 1;
+
+        // Rolling updates for close sums
+        let old = *cbuf.get_unchecked(cpos);
+        let new = *close.get_unchecked(i);
+        let sum0_old = sum0;
+        sum0 += new - old;
+        sumsq = new.mul_add(new, sumsq - old * old);
+        sum1 = sum1 - sum0_old + old + (n - 1.0) * new;
+        *cbuf.get_unchecked_mut(cpos) = new;
+        cpos += 1; if cpos == length { cpos = 0; }
+
+        // Rolling update for TR SMA
+        let old_tr = *trbuf.get_unchecked(trpos);
+        let pc = *close.get_unchecked(i - 1);
+        let hi_i = *high.get_unchecked(i);
+        let lo_i = *low.get_unchecked(i);
+        let hl = hi_i - lo_i;
+        let hc = (hi_i - pc).abs();
+        let lc = (lo_i - pc).abs();
+        let tr_new = hl.max(hc).max(lc);
+        tr_sum += tr_new - old_tr;
+        *trbuf.get_unchecked_mut(trpos) = tr_new;
+        trpos += 1; if trpos == length { trpos = 0; }
+
+        // BB/KC
+        let m = sum0 * inv_n;
+        let var = (-m).mul_add(m, sumsq * inv_n);
+        let var_pos = if var > 0.0 { var } else { 0.0 };
+        let dkc = tr_sum * inv_n;
+        let dkc2 = dkc * dkc;
+        let bbv = bb_sq * var_pos;
+        let t_low = kc_low_sq * dkc2;
+        let t_mid = kc_mid_sq * dkc2;
+        let t_high = kc_high_sq * dkc2;
+        *squeeze.get_unchecked_mut(i) = if bbv > t_low {
+            0.0
+        } else if bbv <= t_high {
+            3.0
+        } else if bbv <= t_mid {
+            2.0
+        } else {
+            1.0
+        };
+
+        // Highest/lowest for momentum from deques
+        let hi_idx = *max_q.get_unchecked(max_head);
+        let lo_idx = *min_q.get_unchecked(min_head);
+        let highest = *high.get_unchecked(hi_idx);
+        let lowest  = *low.get_unchecked(lo_idx);
+
+        // LinReg on (close - avg(avg(highest, lowest), m))
+        let midpoint = 0.5 * (highest + lowest);
+        let avg = 0.5 * (midpoint + m);
+        let sy  = sum0 - avg * n;
+        let sxy = sum1 - avg * sx;
+        let slope = n.mul_add(sxy, -(sx * sy)) / den;
+        *momentum.get_unchecked_mut(i) = sy * inv_n + slope * half_nm1;
+
+        i += 1;
     }
 
     Ok(())

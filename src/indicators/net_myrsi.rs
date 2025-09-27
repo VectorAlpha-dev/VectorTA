@@ -10,10 +10,11 @@
 //! - `Vec<f64>` - NET MyRSI values matching input length
 //!
 //! ## Developer Status
-//! **AVX2**: Not implemented (no SIMD functions found)
-//! **AVX512**: Not implemented (no SIMD functions found)
-//! **Streaming**: O(n) - Requires full window for NET calculation
-//! **Memory**: Good - Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
+//! - SIMD: AVX2 and AVX512 kernels implemented (ordered compares + popcount).
+//! - Scalar: Fused one-pass kernel (MyRSI + NET), no O(N) temporaries.
+//! - Streaming: O(n) with O(1) MyRSI update, O(period) NET update.
+//! - Batch: Row-specific optimized variant not implemented (future work).
+//! - Memory: Uses `alloc_with_nan_prefix` and `make_uninit_matrix` patterns.
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
@@ -215,12 +216,57 @@ pub enum NetMyrsiError {
 
 // ==================== CORE COMPUTATION ====================
 /// Helper function to compute NET MyRSI into a slice
+///
+/// Notes (developer):
+/// - Scalar path is fully fused (MyRSI + NET in one pass) and avoids O(N) temporaries.
+/// - AVX2/AVX512 variants accelerate the pairwise “lt-gt” counting used by NET updates.
+/// - Warmup parity: out[first + period - 1] is set to 0.0 for period > 1 (NaN for period == 1).
 #[inline(always)]
-fn net_myrsi_compute_into(data: &[f64], period: usize, first: usize, out: &mut [f64], _k: Kernel) {
-    // preserve out[..first+period-1] NaNs
-    let mut tmp = alloc_with_nan_prefix(data.len(), first + period - 1);
-    compute_myrsi_from(data, period, first, &mut tmp);
-    compute_net_from(&tmp, period, first, out);
+fn net_myrsi_compute_into(
+    data: &[f64],
+    period: usize,
+    first: usize,
+    out: &mut [f64],
+    kernel: Kernel,
+) {
+    // Normalize batch kernels to single-series variants for this helper
+    let k = match kernel {
+        Kernel::Scalar | Kernel::ScalarBatch => Kernel::Scalar,
+        Kernel::Avx2 | Kernel::Avx2Batch => Kernel::Avx2,
+        Kernel::Avx512 | Kernel::Avx512Batch => Kernel::Avx512,
+        Kernel::Auto => detect_best_kernel(),
+    };
+
+    // Dispatch to best available implementation (cover all Kernel variants)
+    unsafe {
+        match kernel {
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                net_myrsi_kernel_scalar(data, period, first, out)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => net_myrsi_kernel_avx2(data, period, first, out),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                net_myrsi_kernel_avx512(data, period, first, out)
+            }
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                net_myrsi_kernel_scalar(data, period, first, out)
+            }
+            Kernel::Auto => {
+                match k {
+                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                    Kernel::Avx512 => net_myrsi_kernel_avx512(data, period, first, out),
+                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                    Kernel::Avx2 => net_myrsi_kernel_avx2(data, period, first, out),
+                    #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+                    Kernel::Avx2 | Kernel::Avx512 => net_myrsi_kernel_scalar(data, period, first, out),
+                    Kernel::Scalar => net_myrsi_kernel_scalar(data, period, first, out),
+                    Kernel::Auto | Kernel::ScalarBatch | Kernel::Avx2Batch | Kernel::Avx512Batch => unreachable!(),
+                }
+            }
+        }
+    }
 }
 
 /// MyRSI calculation based on John F. Ehlers' formula
@@ -269,6 +315,406 @@ fn compute_net_from(myrsi: &[f64], period: usize, first: usize, out: &mut [f64])
             }
         }
         out[idx] = num / denom;
+    }
+}
+
+// ==================== OPTIMIZED KERNELS ====================
+#[inline(always)]
+fn net_myrsi_kernel_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
+    let len = data.len();
+    if len <= first + 1 {
+        return;
+    }
+
+    // ---- Rolling MyRSI state (O(1) per step) ----
+    let mut cu = 0.0f64;
+    let mut cd = 0.0f64;
+    let mut diffs = vec![0.0f64; period];
+    let mut d_head = 0usize;
+    let mut d_count = 0usize;
+
+    // ---- Rolling NET state (O(period) per step) ----
+    let mut myr = vec![0.0f64; period];
+    let mut m_head = 0usize;
+    let mut m_count = 0usize;
+    let mut num: i32 = 0;
+    let denom = (period * (period - 1)) as f64 * 0.5;
+
+    // Warmup parity: first computable NET index is (first + period - 1)
+    let warm = first + period - 1;
+    if warm < out.len() {
+        // Match original semantics for period==1 (denom == 0): NaN at warmup index
+        out[warm] = if period > 1 { 0.0 } else { f64::NAN };
+    }
+
+    // Helper: sum over slice of (#(v < s) - #(v > s))
+    #[inline(always)]
+    fn lt_minus_gt_scalar(slice: &[f64], s: f64) -> i32 {
+        let mut lt: i32 = 0;
+        let mut gt: i32 = 0;
+        for &v in slice {
+            lt += (v < s) as i32;
+            gt += (v > s) as i32;
+        }
+        lt - gt
+    }
+
+    // Streaming pass
+    let mut i = first + 1;
+    while i < len {
+        let newer = data[i];
+        let older = data[i - 1];
+        let diff = newer - older;
+
+        // add newest diff
+        cu += ((diff > 0.0) as i32 as f64) * diff;
+        cd += ((diff < 0.0) as i32 as f64) * (-diff);
+
+        if d_count < period {
+            diffs[d_head] = diff;
+            d_head += 1;
+            if d_head == period {
+                d_head = 0;
+            }
+            d_count += 1;
+        } else {
+            let old = diffs[d_head];
+            cu -= ((old > 0.0) as i32 as f64) * old;
+            cd -= ((old < 0.0) as i32 as f64) * (-old);
+            diffs[d_head] = diff;
+            d_head += 1;
+            if d_head == period {
+                d_head = 0;
+            }
+        }
+
+        if d_count >= period {
+            let sum = cu + cd;
+            let r = if sum != 0.0 { (cu - cd) / sum } else { 0.0 };
+
+            if m_count < period {
+                // add pairs (older, r) for all existing
+                let add = lt_minus_gt_scalar(&myr[..m_head], r);
+                num += add;
+                myr[m_head] = r;
+                m_head += 1;
+                if m_head == period {
+                    m_head = 0;
+                }
+                m_count += 1;
+            } else {
+                // remove pairs contributed by oldest element z
+                let z = myr[m_head];
+                let rm1 = if m_head + 1 < period {
+                    lt_minus_gt_scalar(&myr[m_head + 1..period], z)
+                } else {
+                    0
+                };
+                let rm2 = if m_head > 0 {
+                    lt_minus_gt_scalar(&myr[..m_head], z)
+                } else {
+                    0
+                };
+                num += rm1 + rm2;
+
+                // add pairs contributed by new r
+                let ad1 = if m_head + 1 < period {
+                    lt_minus_gt_scalar(&myr[m_head + 1..period], r)
+                } else {
+                    0
+                };
+                let ad2 = if m_head > 0 {
+                    lt_minus_gt_scalar(&myr[..m_head], r)
+                } else {
+                    0
+                };
+                num += ad1 + ad2;
+
+                myr[m_head] = r;
+                m_head += 1;
+                if m_head == period {
+                    m_head = 0;
+                }
+            }
+
+            if denom != 0.0 {
+                out[i] = (num as f64) / denom;
+            }
+        }
+
+        i += 1;
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn net_myrsi_kernel_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
+    use core::arch::x86_64::*;
+    if data.len() <= first + 1 {
+        return;
+    }
+
+    let mut cu = 0.0f64;
+    let mut cd = 0.0f64;
+    let mut diffs = vec![0.0f64; period];
+    let mut d_head = 0usize;
+    let mut d_count = 0usize;
+
+    let mut myr = vec![0.0f64; period];
+    let mut m_head = 0usize;
+    let mut m_count = 0usize;
+    let mut num: i32 = 0;
+    let denom = (period * (period - 1)) as f64 * 0.5;
+
+    let warm = first + period - 1;
+    if warm < out.len() {
+        out[warm] = if period > 1 { 0.0 } else { f64::NAN };
+    }
+
+    #[inline(always)]
+    unsafe fn lt_minus_gt_avx2(ptr: *const f64, len: usize, s: f64) -> i32 {
+        let mut lt: i32 = 0;
+        let mut gt: i32 = 0;
+        let mut p = ptr;
+        let mut n = len;
+        let vs = _mm256_set1_pd(s);
+
+        while n >= 4 {
+            let v = _mm256_loadu_pd(p);
+            let mlt = _mm256_cmp_pd(v, vs, _CMP_LT_OQ);
+            let mgt = _mm256_cmp_pd(v, vs, _CMP_GT_OQ);
+            lt += (_mm256_movemask_pd(mlt) as u32).count_ones() as i32;
+            gt += (_mm256_movemask_pd(mgt) as u32).count_ones() as i32;
+            p = p.add(4);
+            n -= 4;
+        }
+        let slice = core::slice::from_raw_parts(p, n);
+        let mut i = 0usize;
+        while i < slice.len() {
+            let v = *slice.get_unchecked(i);
+            lt += (v < s) as i32;
+            gt += (v > s) as i32;
+            i += 1;
+        }
+        lt - gt
+    }
+
+    #[inline(always)]
+    unsafe fn lt_minus_gt_avx2_two(a: &[f64], b: &[f64], s: f64) -> i32 {
+        lt_minus_gt_avx2(a.as_ptr(), a.len(), s) + lt_minus_gt_avx2(b.as_ptr(), b.len(), s)
+    }
+
+    let len = data.len();
+    let mut i = first + 1;
+    while i < len {
+        let newer = data[i];
+        let older = data[i - 1];
+        let diff = newer - older;
+
+        cu += ((diff > 0.0) as i32 as f64) * diff;
+        cd += ((diff < 0.0) as i32 as f64) * (-diff);
+
+        if d_count < period {
+            *diffs.get_unchecked_mut(d_head) = diff;
+            d_head += 1;
+            if d_head == period {
+                d_head = 0;
+            }
+            d_count += 1;
+        } else {
+            let old = *diffs.get_unchecked(d_head);
+            cu -= ((old > 0.0) as i32 as f64) * old;
+            cd -= ((old < 0.0) as i32 as f64) * (-old);
+            *diffs.get_unchecked_mut(d_head) = diff;
+            d_head += 1;
+            if d_head == period {
+                d_head = 0;
+            }
+        }
+
+        if d_count >= period {
+            let sum = cu + cd;
+            let r = if sum != 0.0 { (cu - cd) / sum } else { 0.0 };
+
+            if m_count < period {
+                let add = lt_minus_gt_avx2(myr.as_ptr(), m_head, r);
+                num += add;
+                *myr.get_unchecked_mut(m_head) = r;
+                m_head += 1;
+                if m_head == period {
+                    m_head = 0;
+                }
+                m_count += 1;
+            } else {
+                let z = *myr.get_unchecked(m_head);
+                let ad_rm = if m_head + 1 < period {
+                    lt_minus_gt_avx2_two(&myr[m_head + 1..period], &myr[..m_head], z)
+                } else {
+                    lt_minus_gt_avx2(myr.as_ptr(), m_head, z)
+                };
+                num += ad_rm;
+
+                let ad_new = if m_head + 1 < period {
+                    lt_minus_gt_avx2_two(&myr[m_head + 1..period], &myr[..m_head], r)
+                } else {
+                    lt_minus_gt_avx2(myr.as_ptr(), m_head, r)
+                };
+                num += ad_new;
+
+                *myr.get_unchecked_mut(m_head) = r;
+                m_head += 1;
+                if m_head == period {
+                    m_head = 0;
+                }
+            }
+
+            if denom != 0.0 {
+                out[i] = (num as f64) / denom;
+            }
+        }
+
+        i += 1;
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn net_myrsi_kernel_avx512(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
+    use core::arch::x86_64::*;
+    if data.len() <= first + 1 {
+        return;
+    }
+
+    let mut cu = 0.0f64;
+    let mut cd = 0.0f64;
+    let mut diffs = vec![0.0f64; period];
+    let mut d_head = 0usize;
+    let mut d_count = 0usize;
+
+    let mut myr = vec![0.0f64; period];
+    let mut m_head = 0usize;
+    let mut m_count = 0usize;
+    let mut num: i32 = 0;
+    let denom = (period * (period - 1)) as f64 * 0.5;
+
+    let warm = first + period - 1;
+    if warm < out.len() {
+        out[warm] = if period > 1 { 0.0 } else { f64::NAN };
+    }
+
+    #[inline(always)]
+    unsafe fn lt_minus_gt_avx512(ptr: *const f64, len: usize, s: f64) -> i32 {
+        let mut lt: i32 = 0;
+        let mut gt: i32 = 0;
+        let mut p = ptr;
+        let mut n = len;
+        let vs = _mm512_set1_pd(s);
+
+        while n >= 8 {
+            let v = _mm512_loadu_pd(p);
+            let mlt: __mmask8 = _mm512_cmp_pd_mask(v, vs, _CMP_LT_OQ);
+            let mgt: __mmask8 = _mm512_cmp_pd_mask(v, vs, _CMP_GT_OQ);
+            lt += (mlt as u32).count_ones() as i32;
+            gt += (mgt as u32).count_ones() as i32;
+            p = p.add(8);
+            n -= 8;
+        }
+        if n >= 4 {
+            let v = _mm256_loadu_pd(p);
+            let vs2 = _mm256_set1_pd(s);
+            let mlt = _mm256_cmp_pd(v, vs2, _CMP_LT_OQ);
+            let mgt = _mm256_cmp_pd(v, vs2, _CMP_GT_OQ);
+            lt += (_mm256_movemask_pd(mlt) as u32).count_ones() as i32;
+            gt += (_mm256_movemask_pd(mgt) as u32).count_ones() as i32;
+            p = p.add(4);
+            n -= 4;
+        }
+        let slice = core::slice::from_raw_parts(p, n);
+        let mut i = 0usize;
+        while i < slice.len() {
+            let v = *slice.get_unchecked(i);
+            lt += (v < s) as i32;
+            gt += (v > s) as i32;
+            i += 1;
+        }
+        lt - gt
+    }
+
+    #[inline(always)]
+    unsafe fn lt_minus_gt_avx512_two(a: &[f64], b: &[f64], s: f64) -> i32 {
+        lt_minus_gt_avx512(a.as_ptr(), a.len(), s) + lt_minus_gt_avx512(b.as_ptr(), b.len(), s)
+    }
+
+    let len = data.len();
+    let mut i = first + 1;
+    while i < len {
+        let newer = data[i];
+        let older = data[i - 1];
+        let diff = newer - older;
+
+        cu += ((diff > 0.0) as i32 as f64) * diff;
+        cd += ((diff < 0.0) as i32 as f64) * (-diff);
+
+        if d_count < period {
+            *diffs.get_unchecked_mut(d_head) = diff;
+            d_head += 1;
+            if d_head == period {
+                d_head = 0;
+            }
+            d_count += 1;
+        } else {
+            let old = *diffs.get_unchecked(d_head);
+            cu -= ((old > 0.0) as i32 as f64) * old;
+            cd -= ((old < 0.0) as i32 as f64) * (-old);
+            *diffs.get_unchecked_mut(d_head) = diff;
+            d_head += 1;
+            if d_head == period {
+                d_head = 0;
+            }
+        }
+
+        if d_count >= period {
+            let sum = cu + cd;
+            let r = if sum != 0.0 { (cu - cd) / sum } else { 0.0 };
+
+            if m_count < period {
+                let add = lt_minus_gt_avx512(myr.as_ptr(), m_head, r);
+                num += add;
+                *myr.get_unchecked_mut(m_head) = r;
+                m_head += 1;
+                if m_head == period {
+                    m_head = 0;
+                }
+                m_count += 1;
+            } else {
+                let z = *myr.get_unchecked(m_head);
+                let ad_rm = if m_head + 1 < period {
+                    lt_minus_gt_avx512_two(&myr[m_head + 1..period], &myr[..m_head], z)
+                } else {
+                    lt_minus_gt_avx512(myr.as_ptr(), m_head, z)
+                };
+                num += ad_rm;
+
+                let ad_new = if m_head + 1 < period {
+                    lt_minus_gt_avx512_two(&myr[m_head + 1..period], &myr[..m_head], r)
+                } else {
+                    lt_minus_gt_avx512(myr.as_ptr(), m_head, r)
+                };
+                num += ad_new;
+
+                *myr.get_unchecked_mut(m_head) = r;
+                m_head += 1;
+                if m_head == period {
+                    m_head = 0;
+                }
+            }
+
+            if denom != 0.0 {
+                out[i] = (num as f64) / denom;
+            }
+        }
+
+        i += 1;
     }
 }
 

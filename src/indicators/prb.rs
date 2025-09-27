@@ -16,10 +16,10 @@
 //! - `lower_band`: Vec<f64> - Lower band values
 //!
 //! ## Developer Status
-//! **AVX2**: Stub (calls scalar)
-//! **AVX512**: Stub (calls scalar)
-//! **Streaming**: O(n²) - Full regression recalc on each update
-//! **Memory**: Good - Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
+//! - Scalar optimized: fixed-design LS with O(order²) per-bar sliding update; Horner eval.
+//! - AVX2/AVX512: stubs delegate to scalar; no measurable wins expected.
+//! - Batch: shares fixed-design (LU, binom, n^r) across rows with same (period, order).
+//! - Memory: Good — uses `alloc_with_nan_prefix` and `make_uninit_matrix`.
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
@@ -856,7 +856,7 @@ fn prb_compute_into(
     Ok(())
 }
 
-/// Scalar implementation - zero-copy and allocation-lean
+/// Scalar implementation — precompute fixed design, slide RHS in O(order^2)
 #[inline]
 fn prb_scalar(
     data: &[f64],
@@ -873,7 +873,11 @@ fn prb_scalar(
     out_lower: &mut [f64],
 ) -> Result<(), PrbError> {
     let len = data.len();
+    if len == 0 {
+        return Err(PrbError::EmptyInputData);
+    }
 
+    // Optional smoothing buffer
     let smoothed_buf;
     let smoothed: &[f64] = if smooth_data {
         smoothed_buf = ssf_filter(data, smooth_period, first);
@@ -882,54 +886,326 @@ fn prb_scalar(
         data
     };
 
-    let mut ws = PrbWorkspace {
-        x_power_sums: Vec::new(),
-        xy_sums: Vec::new(),
-        matrix: Vec::new(),
-        l: Vec::new(),
-        u: Vec::new(),
-        y: Vec::new(),
-        coeffs: Vec::new(),
-        x_vals: Vec::new(),
-    };
-    ws.ensure(polynomial_order, regression_period);
+    let n = regression_period;
+    let k = polynomial_order;
+    let m = k + 1; // matrix size
+    let n_f = n as f64;
 
-    let warmup = first + regression_period - 1 + equ_from;
-    // Adjust x_pos to include equ_from for Pine Script parity
-    let x_pos = (regression_period as f64) - (regression_offset as f64) + (equ_from as f64);
+    // Warmup and evaluation x-position (constant)
+    let warmup = first + n - 1 + equ_from;
+    if warmup >= len {
+        return Err(PrbError::NotEnoughValidData {
+            needed: n,
+            valid: len.saturating_sub(first),
+        });
+    }
+    let x_pos = n_f - (regression_offset as f64) + (equ_from as f64);
+
+    // Precompute power sums Sx[p] = sum_{j=1..n} j^p for p in 0..=2*k
+    let max_pow = 2 * k;
+    let mut sx = vec![0.0f64; max_pow + 1];
+    for j in 1..=n {
+        let jf = j as f64;
+        let mut pwr = 1.0;
+        // p = 0
+        sx[0] += 1.0;
+        // p = 1..=2k
+        for p in 1..=max_pow {
+            pwr *= jf;
+            sx[p] += pwr;
+        }
+    }
+
+    // Build normal-equations matrix A (m x m): A[i,j] = Sx[i+j]
+    let mut a = vec![0.0f64; m * m];
+    for i in 0..m {
+        for j in 0..m {
+            a[i * m + j] = sx[i + j];
+        }
+    }
+
+    // Single LU factorization of A (reused for all windows)
+    let (l, u) = lu_decomposition(&a, m)?;
+
+    // Precompute binomial coefficients up to order k and n^r
+    let stride = m;
+    let mut binom = vec![0.0f64; stride * stride];
+    for r in 0..=k {
+        let r_off = r * stride;
+        binom[r_off + 0] = 1.0;
+        binom[r_off + r] = 1.0;
+        for c in 1..r {
+            let prev = (r - 1) * stride;
+            binom[r_off + c] = binom[prev + (c - 1)] + binom[prev + c];
+        }
+    }
+    let mut n_pow = vec![0.0f64; m];
+    n_pow[0] = 1.0;
+    for r in 1..=k {
+        n_pow[r] = n_pow[r - 1] * n_f;
+    }
+
+    // Initialize first window RHS moments S[p] and rolling stats
+    let mut start = warmup + 1 - n - equ_from; // equals `first`
+    let mut s_xy = vec![0.0f64; m];
+    let mut sum = 0.0f64;
+    let mut sumsq = 0.0f64;
+    {
+        let y_win = &smoothed[start..start + n];
+        for (idx, &y) in y_win.iter().enumerate() {
+            sum += y;
+            sumsq += y * y;
+
+            let jf = (idx as f64) + 1.0; // j in 1..=n
+            s_xy[0] += y;
+            let mut w = jf;
+            for p in 1..=k {
+                s_xy[p] = y.mul_add(w, s_xy[p]);
+                w *= jf;
+            }
+        }
+    }
+
+    // Work buffers for solves and coefficients
+    let mut tmp_y = vec![0.0f64; m];
+    let mut coeffs = vec![0.0f64; m];
+    let mut s_prev = vec![0.0f64; m];
+    let inv_n = 1.0 / n_f;
 
     for i in warmup..len {
-        // Window ends equ_from bars ago (Pine Script's "Forecast From" behavior)
-        let start = i + 1 - regression_period - equ_from;
-        let y_win = &smoothed[start..start + regression_period];
-
-        poly_coeffs_into(
-            &ws.x_vals[..regression_period],
-            y_win,
-            polynomial_order,
-            &mut ws.x_power_sums,
-            &mut ws.xy_sums,
-            &mut ws.matrix,
-            &mut ws.l,
-            &mut ws.u,
-            &mut ws.y,
-            &mut ws.coeffs,
-        )?;
-
-        let reg = evaluate_polynomial(&ws.coeffs[..=polynomial_order], x_pos);
-
-        // one-pass variance not required; two-pass is fine and allocation-free
-        let mean = y_win.iter().sum::<f64>() / (regression_period as f64);
-        let mut s = 0.0;
-        for &v in y_win {
-            let d = v - mean;
-            s += d * d;
+        // Forward substitution: L * tmp_y = s_xy
+        for r in 0..m {
+            let mut acc = s_xy[r];
+            let row = r * m;
+            for c in 0..r {
+                acc -= l[row + c] * tmp_y[c];
+            }
+            let diag = l[row + r]; // in our LU diag is 1.0, keep general
+            tmp_y[r] = acc / diag;
         }
-        let stdev = (s / regression_period as f64).sqrt();
+        // Back substitution: U * coeffs = tmp_y
+        for r in (0..m).rev() {
+            let row = r * m;
+            let mut acc = tmp_y[r];
+            for c in (r + 1)..m {
+                acc -= u[row + c] * coeffs[c];
+            }
+            let diag = u[row + r];
+            coeffs[r] = acc / diag;
+        }
+
+        // Evaluate polynomial at x_pos via Horner + FMA
+        let mut reg = 0.0f64;
+        for p in (0..m).rev() {
+            reg = reg.mul_add(x_pos, coeffs[p]);
+        }
+
+        // Rolling standard deviation from sum and sumsq
+        let mean = sum * inv_n;
+        let var = (sumsq * inv_n) - mean * mean;
+        let stdev = if var > 0.0 { var.sqrt() } else { 0.0 };
 
         out[i] = reg;
         out_upper[i] = reg + ndev * stdev;
         out_lower[i] = reg - ndev * stdev;
+
+        // Prepare next window
+        if i + 1 == len {
+            break;
+        }
+        let y_old = smoothed[start];
+        let y_new_idx = start + n;
+        if y_new_idx >= len {
+            break;
+        }
+        let y_new = smoothed[y_new_idx];
+
+        // Preserve previous S for update
+        s_prev.copy_from_slice(&s_xy);
+
+        // Update S_0, sum, sumsq
+        s_xy[0] = s_prev[0] - y_old + y_new;
+        sum = sum - y_old + y_new;
+        sumsq = sumsq - y_old * y_old + y_new * y_new;
+
+        // Update higher-order moments via binomial shift
+        for r in 1..=k {
+            let row = r * stride;
+            let mut acc = 0.0f64;
+            for m2 in 0..=r {
+                let sign = if ((r - m2) & 1) == 1 { -1.0 } else { 1.0 };
+                acc += sign * binom[row + m2] * s_prev[m2];
+            }
+            s_xy[r] = acc + n_pow[r] * y_new;
+        }
+
+        start += 1;
+    }
+
+    Ok(())
+}
+
+// ===== Fixed-design helpers for batch reuse =====
+struct PrbFixedDesign {
+    m: usize,
+    l: Vec<f64>,
+    u: Vec<f64>,
+    binom: Vec<f64>,
+    n_pow: Vec<f64>,
+}
+
+#[inline]
+fn build_fixed_design(n: usize, k: usize) -> Result<PrbFixedDesign, PrbError> {
+    let m = k + 1;
+
+    // Power sums over j=1..n
+    let max_pow = 2 * k;
+    let mut sx = vec![0.0f64; max_pow + 1];
+    for j in 1..=n {
+        let jf = j as f64;
+        let mut pwr = 1.0;
+        sx[0] += 1.0;
+        for p in 1..=max_pow {
+            pwr *= jf;
+            sx[p] += pwr;
+        }
+    }
+
+    // Normal-equations matrix and LU
+    let mut a = vec![0.0f64; m * m];
+    for i in 0..m {
+        for j in 0..m {
+            a[i * m + j] = sx[i + j];
+        }
+    }
+    let (l, u) = lu_decomposition(&a, m)?;
+
+    // Binomial table and powers of n
+    let mut binom = vec![0.0f64; m * m];
+    for r in 0..=k {
+        let r_off = r * m;
+        binom[r_off + 0] = 1.0;
+        binom[r_off + r] = 1.0;
+        for c in 1..r {
+            let prev = (r - 1) * m;
+            binom[r_off + c] = binom[prev + (c - 1)] + binom[prev + c];
+        }
+    }
+    let mut n_pow = vec![0.0f64; m];
+    n_pow[0] = 1.0;
+    let n_f = n as f64;
+    for r in 1..=k {
+        n_pow[r] = n_pow[r - 1] * n_f;
+    }
+
+    Ok(PrbFixedDesign { m, l, u, binom, n_pow })
+}
+
+#[inline]
+fn prb_run_with_fixed_design(
+    smoothed: &[f64],
+    n: usize,
+    k: usize,
+    regression_offset: i32,
+    ndev: f64,
+    equ_from: usize,
+    first: usize,
+    pre: &PrbFixedDesign,
+    out: &mut [f64],
+    out_upper: &mut [f64],
+    out_lower: &mut [f64],
+) -> Result<(), PrbError> {
+    let len = smoothed.len();
+    let warmup = first + n - 1 + equ_from;
+    if warmup >= len {
+        return Err(PrbError::NotEnoughValidData {
+            needed: n,
+            valid: len.saturating_sub(first),
+        });
+    }
+    let n_f = n as f64;
+    let x_pos = n_f - (regression_offset as f64) + (equ_from as f64);
+    let inv_n = 1.0 / n_f;
+
+    let m = pre.m;
+    let l = &pre.l;
+    let u = &pre.u;
+    let binom = &pre.binom;
+    let n_pow = &pre.n_pow;
+
+    // Initialize window moments and rolling stats
+    let mut start = warmup + 1 - n - equ_from;
+    let mut s_xy = vec![0.0f64; m];
+    let mut sum = 0.0f64;
+    let mut sumsq = 0.0f64;
+    for (idx, &y) in smoothed[start..start + n].iter().enumerate() {
+        sum += y;
+        sumsq += y * y;
+        let jf = (idx as f64) + 1.0;
+        s_xy[0] += y;
+        let mut w = jf;
+        for p in 1..=k {
+            s_xy[p] = y.mul_add(w, s_xy[p]);
+            w *= jf;
+        }
+    }
+
+    let mut tmp_y = vec![0.0f64; m];
+    let mut coeffs = vec![0.0f64; m];
+    let mut s_prev = vec![0.0f64; m];
+
+    for i in warmup..len {
+        // Solve
+        for r in 0..m {
+            let mut acc = s_xy[r];
+            let row = r * m;
+            for c in 0..r {
+                acc -= l[row + c] * tmp_y[c];
+            }
+            tmp_y[r] = acc / l[row + r];
+        }
+        for r in (0..m).rev() {
+            let mut acc = tmp_y[r];
+            let row = r * m;
+            for c in (r + 1)..m {
+                acc -= u[row + c] * coeffs[c];
+            }
+            coeffs[r] = acc / u[row + r];
+        }
+
+        // Evaluate via Horner
+        let mut reg = 0.0f64;
+        for p in (0..m).rev() {
+            reg = reg.mul_add(x_pos, coeffs[p]);
+        }
+        let mean = sum * inv_n;
+        let var = (sumsq * inv_n) - mean * mean;
+        let stdev = if var > 0.0 { var.sqrt() } else { 0.0 };
+        out[i] = reg;
+        out_upper[i] = reg + ndev * stdev;
+        out_lower[i] = reg - ndev * stdev;
+
+        if i + 1 == len { break; }
+
+        let y_old = smoothed[start];
+        let y_new_idx = start + n;
+        if y_new_idx >= len { break; }
+        let y_new = smoothed[y_new_idx];
+
+        s_prev.copy_from_slice(&s_xy);
+        s_xy[0] = s_prev[0] - y_old + y_new;
+        sum = sum - y_old + y_new;
+        sumsq = sumsq - y_old * y_old + y_new * y_new;
+        for r in 1..=k {
+            let row = r * m;
+            let mut acc = 0.0f64;
+            for m2 in 0..=r {
+                let sign = if ((r - m2) & 1) == 1 { -1.0 } else { 1.0 };
+                acc += sign * binom[row + m2] * s_prev[m2];
+            }
+            s_xy[r] = acc + n_pow[r] * y_new;
+        }
+        start += 1;
     }
     Ok(())
 }
@@ -1411,6 +1687,36 @@ fn prb_batch_inner(
     let out_lo: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(g_lo.as_mut_ptr() as *mut f64, g_lo.len()) };
 
+    // Precompute fixed-design caches for (regression_period, polynomial_order)
+    use std::collections::{BTreeSet, HashMap};
+    let mut keyset: BTreeSet<(usize, usize)> = BTreeSet::new();
+    for c in &combos {
+        keyset.insert((
+            c.regression_period.unwrap_or(100),
+            c.polynomial_order.unwrap_or(2),
+        ));
+    }
+    let mut pre_map_local: HashMap<(usize, usize), PrbFixedDesign> = HashMap::with_capacity(keyset.len());
+    for (n, k) in keyset {
+        pre_map_local.insert((n, k), build_fixed_design(n, k)?);
+    }
+    let pre_map = std::sync::Arc::new(pre_map_local);
+
+    // Optional smoothing cache per unique smooth_period (row-specific reuse)
+    let smoothed_map = if smooth_data {
+        let mut sps: BTreeSet<usize> = BTreeSet::new();
+        for c in &combos {
+            sps.insert(c.smooth_period.unwrap_or(10));
+        }
+        let mut map: HashMap<usize, Vec<f64>> = HashMap::with_capacity(sps.len());
+        for sp in sps {
+            map.insert(sp, ssf_filter(data, sp, first));
+        }
+        Some(std::sync::Arc::new(map))
+    } else {
+        None
+    };
+
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1418,7 +1724,8 @@ fn prb_batch_inner(
             let main_ptr = out_main.as_mut_ptr() as usize;
             let up_ptr = out_up.as_mut_ptr() as usize;
             let lo_ptr = out_lo.as_mut_ptr() as usize;
-
+            let pre_map = pre_map.clone();
+            let smoothed_map = smoothed_map.clone();
             (0..rows)
                 .into_par_iter()
                 .try_for_each(|row| -> Result<(), PrbError> {
@@ -1436,22 +1743,47 @@ fn prb_batch_inner(
                             (lo_ptr as *mut f64).add(row * cols),
                             cols,
                         );
-
-                        prb_compute_into(
-                            data,
-                            smooth_data,
-                            c.smooth_period.unwrap_or(10),
-                            c.regression_period.unwrap_or(100),
-                            c.polynomial_order.unwrap_or(2),
-                            c.regression_offset.unwrap_or(0),
-                            c.ndev.unwrap_or(2.0),
-                            c.equ_from.unwrap_or(0),
-                            first,
-                            kern,
-                            r_main,
-                            r_up,
-                            r_lo,
-                        )
+                        // Per-row smoothing (reused when possible)
+                        if smooth_data {
+                            let sp = c.smooth_period.unwrap_or(10);
+                            let sm_ref = smoothed_map
+                                .as_ref()
+                                .and_then(|m| m.get(&sp))
+                                .expect("missing smoothed cache");
+                            let n = c.regression_period.unwrap_or(100);
+                            let k = c.polynomial_order.unwrap_or(2);
+                            let pre = pre_map.get(&(n, k)).expect("missing precompute");
+                            prb_run_with_fixed_design(
+                                sm_ref,
+                                n,
+                                k,
+                                c.regression_offset.unwrap_or(0),
+                                c.ndev.unwrap_or(2.0),
+                                c.equ_from.unwrap_or(0),
+                                first,
+                                pre,
+                                r_main,
+                                r_up,
+                                r_lo,
+                            )
+                        } else {
+                            let n = c.regression_period.unwrap_or(100);
+                            let k = c.polynomial_order.unwrap_or(2);
+                            let pre = pre_map.get(&(n, k)).expect("missing precompute");
+                            prb_run_with_fixed_design(
+                                data,
+                                n,
+                                k,
+                                c.regression_offset.unwrap_or(0),
+                                c.ndev.unwrap_or(2.0),
+                                c.equ_from.unwrap_or(0),
+                                first,
+                                pre,
+                                r_main,
+                                r_up,
+                                r_lo,
+                            )
+                        }
                     }
                 })?;
         }
@@ -1487,21 +1819,46 @@ fn prb_batch_inner(
             let r_up = &mut out_up[row * cols..(row + 1) * cols];
             let r_lo = &mut out_lo[row * cols..(row + 1) * cols];
 
-            prb_compute_into(
-                data,
-                smooth_data,
-                c.smooth_period.unwrap_or(10),
-                c.regression_period.unwrap_or(100),
-                c.polynomial_order.unwrap_or(2),
-                c.regression_offset.unwrap_or(0),
-                c.ndev.unwrap_or(2.0),
-                c.equ_from.unwrap_or(0),
-                first,
-                kern,
-                r_main,
-                r_up,
-                r_lo,
-            )?;
+            if smooth_data {
+                let sp = c.smooth_period.unwrap_or(10);
+                let sm_ref = smoothed_map
+                    .as_ref()
+                    .and_then(|m| m.get(&sp))
+                    .expect("missing smoothed cache");
+                let n = c.regression_period.unwrap_or(100);
+                let k = c.polynomial_order.unwrap_or(2);
+                let pre = pre_map.get(&(n, k)).expect("missing precompute");
+                prb_run_with_fixed_design(
+                    sm_ref,
+                    n,
+                    k,
+                    c.regression_offset.unwrap_or(0),
+                    c.ndev.unwrap_or(2.0),
+                    c.equ_from.unwrap_or(0),
+                    first,
+                    pre,
+                    r_main,
+                    r_up,
+                    r_lo,
+                )?;
+            } else {
+                let n = c.regression_period.unwrap_or(100);
+                let k = c.polynomial_order.unwrap_or(2);
+                let pre = pre_map.get(&(n, k)).expect("missing precompute");
+                prb_run_with_fixed_design(
+                    data,
+                    n,
+                    k,
+                    c.regression_offset.unwrap_or(0),
+                    c.ndev.unwrap_or(2.0),
+                    c.equ_from.unwrap_or(0),
+                    first,
+                    pre,
+                    r_main,
+                    r_up,
+                    r_lo,
+                )?;
+            }
         }
     }
 

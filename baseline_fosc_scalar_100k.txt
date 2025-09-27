@@ -1,0 +1,6 @@
+fosc_bench/scalar/100k  time:   [121.48 µs 122.57 µs 124.13 µs]
+                        thrpt:  [6.0022 GiB/s 6.0786 GiB/s 6.1333 GiB/s]
+slope  [121.48 µs 124.13 µs] R^2            [0.9949489 0.9934008]
+mean   [122.21 µs 124.18 µs] std. dev.      [939.92 ns 2.0928 µs]
+median [121.76 µs 124.35 µs] med. abs. dev. [262.71 ns 2.9334 µs]
+
