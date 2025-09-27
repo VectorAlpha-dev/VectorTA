@@ -19,10 +19,10 @@
 //! - **`Err(MaczError)`** on failure
 //!
 //! ## Developer Notes
-//! - **AVX2**: Stub implementation - calls scalar function (notes that SMA has AVX2 internally)
-//! - **AVX512**: Stub implementation - calls scalar function (notes that SMA has AVX512 internally)
-//! - **Streaming**: O(1) with efficient circular buffer management and incremental computations
-//! - **Memory**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
+//! - SIMD status: Sliding-window maintenance dominates; AVX2/AVX512 stubs delegate to scalar for correctness and speed.
+//! - Batch status: Row-specific kernels not implemented; revisit when sweeps share lz/lsd to exploit shared precompute.
+//! - Streaming: O(1) with efficient circular buffer management and incremental computations.
+//! - Memory: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes).
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
@@ -744,8 +744,9 @@ fn macz_prepare<'a>(
     };
 
     let warm_hist = macz_warm_len(first, slow, lz, lsd, sig);
+    // SIMD underperforms for MAC-Z (sliding-window bound); short-circuit Auto to Scalar.
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
     Ok((
@@ -936,8 +937,16 @@ pub fn macz_scalar(data: &[f64], params: &MaczParams, out: &mut [f64]) -> Result
     macz_into_slice(out, &input, Kernel::Scalar)
 }
 
-/// Classic kernel optimization for MACZ with inline SMA calculations
-/// This eliminates function call overhead for all SMA operations
+/// Classic kernel optimization for MACZ with tight, single-pass loop-jamming.
+/// This version avoids allocating full-length temporaries and computes everything
+/// with rolling sums/counters in one pass. It strictly matches Pine-style behavior:
+/// - SMA windows (fast/slow/signal) return NaN if any NaN is in the window
+/// - Population stdev (ddof=0) via E[x^2] - (E[x])^2
+/// - ZVWAP variance is computed against the fixed VWAP mean for the window
+/// - Laguerre smoothing only updates state on finite inputs (NaN input => NaN output)
+///
+/// Safety: caller guarantees `out` is prefilled with NaNs up to `warm_hist`.
+#[inline(always)]
 pub unsafe fn macz_scalar_classic(
     data: &[f64],
     vol: Option<&[f64]>,
@@ -951,162 +960,260 @@ pub unsafe fn macz_scalar_classic(
     use_lag: bool,
     gamma: f64,
     first_valid_idx: usize,
-    warm_hist: usize, // Passed in to match caller's expectation
+    warm_hist: usize, // == (first_valid_idx + max(slow,lz,lsd) - 1) + sig - 1
     out: &mut [f64],
 ) -> Result<(), MaczError> {
     let len = data.len();
+    if len == 0 {
+        return Err(MaczError::EmptyInputData);
+    }
 
-    // Calculate warmup periods
+    // Window start indices for validity checks
+    let fast_start = first_valid_idx + fast - 1;
+    let slow_start = first_valid_idx + slow - 1;
+    let lz_start = first_valid_idx + lz - 1;
+    let lsd_start = first_valid_idx + lsd - 1;
     let warm_m = first_valid_idx + slow.max(lz).max(lsd) - 1;
-    // warm_hist is passed in and should match warm_m + sig - 1
 
-    // Note: The output buffer already has NaN prefixes set by the caller up to warm_hist
+    // Rolling sums + NaN counters
+    let mut sum_fast = 0.0_f64;
+    let mut n_fast_nan = 0usize;
+    let mut sum_slow = 0.0_f64;
+    let mut n_slow_nan = 0usize;
 
-    // VWAP calculation (inline SMA when no volume)
-    let mut vwap = alloc_with_nan_prefix(len, first_valid_idx + lz - 1);
-    if vol.is_some() {
-        // Use existing VWAP calculation with volume
-        calculate_vwap_into(data, vol, lz, first_valid_idx, Kernel::Scalar, &mut vwap)?;
-    } else {
-        // Inline SMA for VWAP (no volume case)
-        let mut sum = 0.0;
-        for i in first_valid_idx..(first_valid_idx + lz) {
-            sum += data[i];
+    let mut sum_lz = 0.0_f64;
+    let mut sum2_lz = 0.0_f64;
+    let mut n_lz_nan = 0usize; // for Z + VWAP(no-volume)
+    let mut sum_lsd = 0.0_f64;
+    let mut sum2_lsd = 0.0_f64;
+    let mut n_lsd_nan = 0usize; // for src stdev
+
+    let has_volume = vol.is_some();
+    let vols = if has_volume { vol.unwrap() } else { &[][..] };
+    let mut sum_pv = 0.0_f64; // ∑ (price*volume) over lz
+    let mut sum_v = 0.0_f64; // ∑ volume over lz
+    let mut n_vwap_nan = 0usize; // count of (x or v) NaN bars inside lz
+
+    // Laguerre state
+    let mut l0 = 0.0_f64;
+    let mut l1 = 0.0_f64;
+    let mut l2 = 0.0_f64;
+    let mut l3 = 0.0_f64;
+
+    // Signal SMA state over MAC-Z (strict SMA: any NaN in window => signal = NaN)
+    let mut sig_ring: Vec<f64> = vec![f64::NAN; sig];
+    let mut sig_sum = 0.0_f64;
+    let mut sig_count = 0usize; // number of samples currently in the ring (<= sig)
+    let mut sig_nan = 0usize; // NaNs in the current ring window
+    let mut sig_head = 0usize; // modulo-free ring index
+
+    // Precompute reciprocals to reduce divisions in hot loop
+    let inv_fast = 1.0 / (fast as f64);
+    let inv_slow = 1.0 / (slow as f64);
+    let inv_lz = 1.0 / (lz as f64);
+    let inv_lsd = 1.0 / (lsd as f64);
+    let inv_sig = 1.0 / (sig as f64);
+
+    // Main loop (single pass; tight loop-jamming)
+    for i in first_valid_idx..len {
+        let x = *data.get_unchecked(i);
+        let x_is_nan = x.is_nan();
+
+        // --- Add current sample to all rolling windows ---
+        if x_is_nan {
+            n_fast_nan += 1;
+            n_slow_nan += 1;
+            n_lz_nan += 1;
+            n_lsd_nan += 1;
+        } else {
+            sum_fast = sum_fast + x;
+            sum_slow = sum_slow + x;
+            sum_lz = sum_lz + x;
+            sum2_lz = sum2_lz + x * x;
+            sum_lsd = sum_lsd + x;
+            sum2_lsd = sum2_lsd + x * x;
         }
-        vwap[first_valid_idx + lz - 1] = sum / lz as f64;
 
-        for i in (first_valid_idx + lz)..len {
-            sum += data[i] - data[i - lz];
-            vwap[i] = sum / lz as f64;
+        if has_volume {
+            let v = *vols.get_unchecked(i);
+            if x_is_nan || v.is_nan() {
+                n_vwap_nan += 1;
+            } else {
+                // fused multiply-add for pv accumulation
+                sum_pv = x.mul_add(v, sum_pv);
+                sum_v = sum_v + v;
+            }
         }
-    }
 
-    // ZVWAP calculation
-    let mut zvwap = alloc_with_nan_prefix(len, first_valid_idx + lz - 1);
-    calculate_zvwap_into(data, &vwap, lz, first_valid_idx, &mut zvwap)?;
+        // --- Remove exiting samples when windows overflow ---
+        if i >= first_valid_idx + fast {
+            let xo = *data.get_unchecked(i - fast);
+            if xo.is_nan() {
+                n_fast_nan -= 1;
+            } else {
+                sum_fast -= xo;
+            }
+        }
+        if i >= first_valid_idx + slow {
+            let xo = *data.get_unchecked(i - slow);
+            if xo.is_nan() {
+                n_slow_nan -= 1;
+            } else {
+                sum_slow -= xo;
+            }
+        }
+        if i >= first_valid_idx + lz {
+            let xo = *data.get_unchecked(i - lz);
+            if xo.is_nan() {
+                n_lz_nan -= 1;
+            } else {
+                sum_lz -= xo;
+                sum2_lz -= xo * xo;
+            }
+            if has_volume {
+                let vo = *vols.get_unchecked(i - lz);
+                if xo.is_nan() || vo.is_nan() {
+                    n_vwap_nan -= 1;
+                } else {
+                    sum_pv -= xo * vo;
+                    sum_v -= vo;
+                }
+            }
+        }
+        if i >= first_valid_idx + lsd {
+            let xo = *data.get_unchecked(i - lsd);
+            if xo.is_nan() {
+                n_lsd_nan -= 1;
+            } else {
+                sum_lsd -= xo;
+                sum2_lsd -= xo * xo;
+            }
+        }
 
-    // Fast MA - inline SMA calculation
-    let mut fast_ma = alloc_with_nan_prefix(len, first_valid_idx + fast - 1);
-    let mut fast_sum = 0.0;
-    for i in first_valid_idx..(first_valid_idx + fast) {
-        fast_sum += data[i];
-    }
-    fast_ma[first_valid_idx + fast - 1] = fast_sum / fast as f64;
+        // --- Fast/Slow SMA & MACD ---
+        let have_fast = i >= fast_start && n_fast_nan == 0;
+        let have_slow = i >= slow_start && n_slow_nan == 0;
 
-    for i in (first_valid_idx + fast)..len {
-        fast_sum += data[i] - data[i - fast];
-        fast_ma[i] = fast_sum / fast as f64;
-    }
+        let fast_ma = if have_fast { sum_fast * inv_fast } else { f64::NAN };
+        let slow_ma = if have_slow { sum_slow * inv_slow } else { f64::NAN };
 
-    // Slow MA - inline SMA calculation
-    let mut slow_ma = alloc_with_nan_prefix(len, first_valid_idx + slow - 1);
-    let mut slow_sum = 0.0;
-    for i in first_valid_idx..(first_valid_idx + slow) {
-        slow_sum += data[i];
-    }
-    slow_ma[first_valid_idx + slow - 1] = slow_sum / slow as f64;
-
-    for i in (first_valid_idx + slow)..len {
-        slow_sum += data[i] - data[i - slow];
-        slow_ma[i] = slow_sum / slow as f64;
-    }
-
-    // MACD calculation
-    let mut macd = alloc_with_nan_prefix(len, first_valid_idx + slow - 1);
-    for i in (first_valid_idx + slow - 1)..len {
-        let f = fast_ma[i];
-        let s = slow_ma[i];
-        macd[i] = if f.is_nan() || s.is_nan() {
+        let macd = if fast_ma.is_nan() || slow_ma.is_nan() {
             f64::NAN
         } else {
-            f - s
+            fast_ma - slow_ma
         };
-    }
 
-    // StdDev on source - inline mean calculation
-    let mut stdev = alloc_with_nan_prefix(len, first_valid_idx + lsd - 1);
-
-    // Calculate initial mean and variance
-    let mut mean_sum = 0.0;
-    for i in first_valid_idx..(first_valid_idx + lsd) {
-        mean_sum += data[i];
-    }
-    let mean = mean_sum / lsd as f64;
-
-    let mut var_sum = 0.0;
-    for i in first_valid_idx..(first_valid_idx + lsd) {
-        let diff = data[i] - mean;
-        var_sum += diff * diff;
-    }
-    stdev[first_valid_idx + lsd - 1] = (var_sum / lsd as f64).sqrt();
-
-    // Rolling stddev calculation
-    for i in (first_valid_idx + lsd)..len {
-        mean_sum += data[i] - data[i - lsd];
-        let mean = mean_sum / lsd as f64;
-
-        var_sum = 0.0;
-        for j in (i - lsd + 1)..=i {
-            let diff = data[j] - mean;
-            var_sum += diff * diff;
-        }
-        stdev[i] = (var_sum / lsd as f64).sqrt();
-    }
-
-    // MAC-Z raw calculation
-    let mut macz_t = alloc_with_nan_prefix(len, warm_m);
-    for i in warm_m..len {
-        let z = zvwap[i];
-        let m = macd[i];
-        let sd = stdev[i];
-        macz_t[i] = if z.is_nan() || m.is_nan() || sd.is_nan() || sd <= 0.0 {
-            f64::NAN
+        // --- VWAP (over lz) ---
+        let vwap_i = if i >= lz_start {
+            if has_volume {
+                if n_vwap_nan == 0 && sum_v > 0.0 {
+                    sum_pv / sum_v
+                } else {
+                    f64::NAN
+                }
+            } else if n_lz_nan == 0 {
+                sum_lz * inv_lz
+            } else {
+                f64::NAN
+            }
         } else {
-            z * a + (m / sd) * b
-        };
-    }
-
-    // Smoothing (Laguerre or direct copy)
-    let mut macz = alloc_with_nan_prefix(len, warm_m);
-    if use_lag {
-        apply_laguerre(&macz_t, gamma, &mut macz);
-    } else {
-        macz[warm_m..].copy_from_slice(&macz_t[warm_m..]);
-    }
-
-    // Signal MA - inline SMA calculation
-    let mut signal = alloc_with_nan_prefix(len, warm_hist);
-    let mut sig_sum = 0.0;
-    let sig_start = warm_m;
-
-    // Initial signal sum
-    for i in sig_start..(sig_start + sig) {
-        if i < len && !macz[i].is_nan() {
-            sig_sum += macz[i];
-        }
-    }
-
-    if sig_start + sig - 1 < len {
-        signal[sig_start + sig - 1] = sig_sum / sig as f64;
-    }
-
-    // Rolling signal
-    for i in (sig_start + sig)..len {
-        if !macz[i].is_nan() && !macz[i - sig].is_nan() {
-            sig_sum += macz[i] - macz[i - sig];
-            signal[i] = sig_sum / sig as f64;
-        }
-    }
-
-    // Histogram calculation (output)
-    for i in warm_hist..len {
-        let s = signal[i];
-        let m = macz[i];
-        out[i] = if s.is_nan() || m.is_nan() {
             f64::NAN
-        } else {
-            m - s
         };
+
+        // --- ZVWAP (population variance around fixed VWAP mean) ---
+        let zvwap = if i >= lz_start && n_lz_nan == 0 && !vwap_i.is_nan() && x.is_finite() {
+            // var = E[x^2] - 2*mu*E[x] + mu^2
+            let e = sum_lz * inv_lz;
+            let e2 = sum2_lz * inv_lz;
+            let var = (-2.0 * vwap_i).mul_add(e, e2) + vwap_i * vwap_i;
+            let sd = var.max(0.0).sqrt();
+            if sd > 0.0 {
+                (x - vwap_i) / sd
+            } else {
+                0.0
+            }
+        } else {
+            f64::NAN
+        };
+
+        // --- Population stdev on source over lsd: sqrt(E[x^2] - E[x]^2) ---
+        let sd_src = if i >= lsd_start && n_lsd_nan == 0 {
+            let e = sum_lsd * inv_lsd;
+            let e2 = sum2_lsd * inv_lsd;
+            (e2 - e * e).max(0.0).sqrt()
+        } else {
+            f64::NAN
+        };
+
+        // --- MAC-Z raw at warm_m: z*a + (macd/sd_src)*b ---
+        let macz_raw = if i >= warm_m
+            && sd_src.is_finite()
+            && sd_src > 0.0
+            && zvwap.is_finite()
+            && macd.is_finite()
+        {
+            zvwap.mul_add(a, (macd / sd_src) * b)
+        } else {
+            f64::NAN
+        };
+
+        // --- Optional Laguerre smoothing (only updates on finite input) ---
+        let macz_val = if use_lag {
+            if macz_raw.is_finite() {
+                let one_minus_g = 1.0 - gamma;
+                let new_l0 = macz_raw.mul_add(one_minus_g, gamma * l0);
+                let new_l1 = (-gamma).mul_add(new_l0, l0 + gamma * l1);
+                let new_l2 = (-gamma).mul_add(new_l1, l1 + gamma * l2);
+                let new_l3 = (-gamma).mul_add(new_l2, l2 + gamma * l3);
+                l0 = new_l0;
+                l1 = new_l1;
+                l2 = new_l2;
+                l3 = new_l3;
+                (l0 + 2.0 * l1 + 2.0 * l2 + l3) / 6.0
+            } else {
+                f64::NAN
+            }
+        } else {
+            macz_raw
+        };
+
+        // --- Signal SMA over MAC-Z (strict). Start accumulating from warm_m. ---
+        if i >= warm_m {
+            if sig_count == sig {
+                let leaving = *sig_ring.get_unchecked(sig_head);
+                if leaving.is_nan() {
+                    if sig_nan > 0 {
+                        sig_nan -= 1;
+                    }
+                } else {
+                    sig_sum -= leaving;
+                }
+            } else {
+                sig_count += 1;
+            }
+            *sig_ring.get_unchecked_mut(sig_head) = macz_val;
+            if macz_val.is_nan() {
+                sig_nan += 1;
+            } else {
+                sig_sum += macz_val;
+            }
+            sig_head += 1;
+            if sig_head == sig { sig_head = 0; }
+
+            // --- Histogram -> out (only tail; prefix already NaN) ---
+            if i >= warm_hist {
+                let signal = if sig_count == sig && sig_nan == 0 {
+                    sig_sum * inv_sig
+                } else {
+                    f64::NAN
+                };
+                *out.get_unchecked_mut(i) = if macz_val.is_nan() || signal.is_nan() {
+                    f64::NAN
+                } else {
+                    macz_val - signal
+                };
+            }
+        }
     }
 
     Ok(())

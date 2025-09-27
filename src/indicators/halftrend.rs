@@ -25,11 +25,11 @@
 //! - Output lengths match input data length with NaN padding for warmup period
 //!
 //! ## Developer Notes
-//! - **AVX2 kernel**: STUB - calls scalar implementation (lines 568-591)
-//! - **AVX512 kernel**: STUB - calls scalar implementation (lines 596-620)
-//! - **Streaming**: Not implemented
-//! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy) for all six outputs (lines 365-370)
-//! - **Batch operations**: ✅ Implemented with parallel processing support
+//! - Scalar: optimized with monotonic deques for O(1) rolling extrema; classic fast-path (amplitude=2) uses direct two-point window.
+//! - SIMD: stubs delegate to scalar due to loop-carried deps; no measurable gains expected vs scalar.
+//! - Memory: uses `alloc_with_nan_prefix` for all six outputs (zero-copy warmup prefix).
+//! - Batch: precomputes ATR/SMA per unique period and rolling extrema per amplitude; rows reuse shared series.
+//! - Streaming: not implemented.
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
@@ -682,53 +682,41 @@ pub unsafe fn halftrend_scalar_classic(
         }
     }
 
-    // Step 3: Core HalfTrend calculation (matching halftrend_scalar logic)
-    // Initialize state variables
+    // Step 3: Core HalfTrend calculation
+    // Classic fast path (amplitude == 2) — avoid deque overhead and use direct 2-point window
     let mut current_trend = 0i32;
     let mut next_trend = 0i32;
+    let mut up = 0.0f64;
+    let mut down = 0.0f64;
     let mut max_low_price = if warm > 0 { low[warm - 1] } else { low[0] };
     let mut min_high_price = if warm > 0 { high[warm - 1] } else { high[0] };
-    let mut up = 0.0;
-    let mut down = 0.0;
 
+    let ch_half = channel_deviation * 0.5;
     for i in warm..len {
-        // Default signals to NaN for this index
         buy_signal[i] = qnan;
         sell_signal[i] = qnan;
 
-        // Calculate atr2 and dev
-        let atr2 = atr_values[i] / 2.0;
-        let dev = channel_deviation * atr2;
+        // Window [i-1, i] for amplitude == 2
+        let (high_price, low_price) = if i > 0 {
+            let hp = if high[i] > high[i - 1] { high[i] } else { high[i - 1] };
+            let lp = if low[i] < low[i - 1] { low[i] } else { low[i - 1] };
+            (hp, lp)
+        } else {
+            (high[i], low[i])
+        };
 
-        // Find highest and lowest prices within amplitude window (sliding window)
-        let start = if i >= amplitude { i - amplitude + 1 } else { 0 };
-        let mut high_price = high[start];
-        let mut low_price = low[start];
-        for j in (start + 1)..=i {
-            if high[j] > high_price {
-                high_price = high[j];
-            }
-            if low[j] < low_price {
-                low_price = low[j];
-            }
-        }
+        let prev_low = if i > 0 { low[i - 1] } else { low[0] };
+        let prev_high = if i > 0 { high[i - 1] } else { high[0] };
 
-        // Pine-style nz(low[1], low) and nz(high[1], high) to avoid underflow
-        let prev_low = if i > 0 { low[i - 1] } else { low[i] };
-        let prev_high = if i > 0 { high[i - 1] } else { high[i] };
-
-        // Main HalfTrend logic (matching standard scalar implementation)
         if next_trend == 1 {
-            max_low_price = max_low_price.max(low_price);
-
+            if low_price > max_low_price { max_low_price = low_price; }
             if highma[i] < max_low_price && close[i] < prev_low {
                 current_trend = 1;
                 next_trend = 0;
                 min_high_price = high_price;
             }
         } else {
-            min_high_price = min_high_price.min(high_price);
-
+            if high_price < min_high_price { min_high_price = high_price; }
             if lowma[i] > min_high_price && close[i] > prev_high {
                 current_trend = 0;
                 next_trend = 1;
@@ -736,36 +724,27 @@ pub unsafe fn halftrend_scalar_classic(
             }
         }
 
-        // Calculate HalfTrend line and channels
+        let a = atr_values[i];
+        let atr2 = 0.5 * a;
+        let dev = a.mul_add(ch_half, 0.0);
+
         if current_trend == 0 {
-            // Uptrend
             if i > warm && trend[i - 1] != 0.0 {
-                // Trend changed from down to up - signal event
-                up = if down == 0.0 { down } else { down };
+                up = down;
                 buy_signal[i] = up - atr2;
             } else {
-                up = if i == warm || up == 0.0 {
-                    max_low_price
-                } else {
-                    max_low_price.max(up)
-                };
+                up = if i == warm || up == 0.0 { max_low_price } else if max_low_price > up { max_low_price } else { up };
             }
             halftrend[i] = up;
             atr_high[i] = up + dev;
             atr_low[i] = up - dev;
             trend[i] = 0.0;
         } else {
-            // Downtrend
             if i > warm && trend[i - 1] != 1.0 {
-                // Trend changed from up to down - signal event
-                down = if up == 0.0 { up } else { up };
+                down = up;
                 sell_signal[i] = down + atr2;
             } else {
-                down = if i == warm || down == 0.0 {
-                    min_high_price
-                } else {
-                    min_high_price.min(down)
-                };
+                down = if i == warm || down == 0.0 { min_high_price } else if min_high_price < down { min_high_price } else { down };
             }
             halftrend[i] = down;
             atr_high[i] = down + dev;
@@ -797,63 +776,90 @@ pub fn halftrend_scalar(
     let len = high.len();
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
 
-    // Initialize state variables (ensure start_idx >= 1 from warmup calculation)
+    // Monotonic deques for rolling max(high) and min(low)
+    let cap = amplitude.max(1);
+    let mut max_idx = vec![0usize; cap];
+    let mut max_val = vec![0.0f64; cap];
+    let mut min_idx = vec![0usize; cap];
+    let mut min_val = vec![0.0f64; cap];
+    let (mut max_head, mut max_tail, mut max_cnt) = (0usize, 0usize, 0usize);
+    let (mut min_head, mut min_tail, mut min_cnt) = (0usize, 0usize, 0usize);
+
+    #[inline(always)]
+    fn inc(i: usize, cap: usize) -> usize { let j = i + 1; if j == cap { 0 } else { j } }
+    #[inline(always)]
+    fn dec(i: usize, cap: usize) -> usize { if i == 0 { cap - 1 } else { i - 1 } }
+
+    if start_idx < len {
+        debug_assert!(start_idx + 1 >= cap);
+        let wstart0 = start_idx + 1 - cap;
+        for k in wstart0..=start_idx {
+            let hv = high[k];
+            while max_cnt > 0 {
+                let back = dec(max_tail, cap);
+                if max_val[back] <= hv { max_tail = back; max_cnt -= 1; } else { break; }
+            }
+            max_val[max_tail] = hv; max_idx[max_tail] = k; max_tail = inc(max_tail, cap); max_cnt += 1;
+
+            let lv = low[k];
+            while min_cnt > 0 {
+                let back = dec(min_tail, cap);
+                if min_val[back] >= lv { min_tail = back; min_cnt -= 1; } else { break; }
+            }
+            min_val[min_tail] = lv; min_idx[min_tail] = k; min_tail = inc(min_tail, cap); min_cnt += 1;
+        }
+    }
+
+    // Initialize state variables
     let mut current_trend = 0i32;
     let mut next_trend = 0i32;
-    let mut max_low_price = if start_idx > 0 {
-        low[start_idx - 1]
-    } else {
-        low[0]
-    };
-    let mut min_high_price = if start_idx > 0 {
-        high[start_idx - 1]
-    } else {
-        high[0]
-    };
-    let mut up = 0.0;
-    let mut down = 0.0;
+    let mut up = 0.0f64;
+    let mut down = 0.0f64;
+    let mut max_low_price = if start_idx > 0 { low[start_idx - 1] } else { low[0] };
+    let mut min_high_price = if start_idx > 0 { high[start_idx - 1] } else { high[0] };
+
+    let ch_half = channel_deviation * 0.5;
 
     for i in start_idx..len {
-        // Default signals to NaN for this index
         buy_signal[i] = qnan;
         sell_signal[i] = qnan;
 
-        // Calculate atr2 and dev
-        let atr2 = atr_values[i] / 2.0;
-        let dev = channel_deviation * atr2;
+        if i > start_idx {
+            let wstart = i + 1 - cap;
+            while max_cnt > 0 && max_idx[max_head] < wstart { max_head = inc(max_head, cap); max_cnt -= 1; }
+            while min_cnt > 0 && min_idx[min_head] < wstart { min_head = inc(min_head, cap); min_cnt -= 1; }
 
-        // Find highest and lowest prices within amplitude window
-        let start = if i >= amplitude { i - amplitude + 1 } else { 0 };
-        let high_price = high[start..=i]
-            .iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(idx, _)| high[start + idx])
-            .unwrap_or(high[i]);
+            let hv = high[i];
+            while max_cnt > 0 {
+                let back = dec(max_tail, cap);
+                if max_val[back] <= hv { max_tail = back; max_cnt -= 1; } else { break; }
+            }
+            max_val[max_tail] = hv; max_idx[max_tail] = i; max_tail = inc(max_tail, cap); max_cnt += 1;
 
-        let low_price = low[start..=i]
-            .iter()
-            .enumerate()
-            .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(idx, _)| low[start + idx])
-            .unwrap_or(low[i]);
+            let lv = low[i];
+            while min_cnt > 0 {
+                let back = dec(min_tail, cap);
+                if min_val[back] >= lv { min_tail = back; min_cnt -= 1; } else { break; }
+            }
+            min_val[min_tail] = lv; min_idx[min_tail] = i; min_tail = inc(min_tail, cap); min_cnt += 1;
+        }
 
-        // Pine-style nz(low[1], low) and nz(high[1], high) to avoid underflow
-        let prev_low = if i > 0 { low[i - 1] } else { low[i] };
-        let prev_high = if i > 0 { high[i - 1] } else { high[i] };
+        debug_assert!(max_cnt > 0 && min_cnt > 0);
+        let high_price = max_val[max_head];
+        let low_price = min_val[min_head];
 
-        // Main HalfTrend logic
+        let prev_low = if i > 0 { low[i - 1] } else { low[0] };
+        let prev_high = if i > 0 { high[i - 1] } else { high[0] };
+
         if next_trend == 1 {
-            max_low_price = max_low_price.max(low_price);
-
+            if low_price > max_low_price { max_low_price = low_price; }
             if highma[i] < max_low_price && close[i] < prev_low {
                 current_trend = 1;
                 next_trend = 0;
                 min_high_price = high_price;
             }
         } else {
-            min_high_price = min_high_price.min(high_price);
-
+            if high_price < min_high_price { min_high_price = high_price; }
             if lowma[i] > min_high_price && close[i] > prev_high {
                 current_trend = 0;
                 next_trend = 1;
@@ -861,36 +867,27 @@ pub fn halftrend_scalar(
             }
         }
 
-        // Calculate HalfTrend line and channels
+        let a = atr_values[i];
+        let atr2 = 0.5 * a;
+        let dev = a * ch_half;
+
         if current_trend == 0 {
-            // Uptrend
             if i > start_idx && trend[i - 1] != 0.0 {
-                // Trend changed from down to up - signal event
-                up = if down == 0.0 { down } else { down };
+                up = down;
                 buy_signal[i] = up - atr2;
             } else {
-                up = if i == start_idx || up == 0.0 {
-                    max_low_price
-                } else {
-                    max_low_price.max(up)
-                };
+                up = if i == start_idx || up == 0.0 { max_low_price } else if max_low_price > up { max_low_price } else { up };
             }
             halftrend[i] = up;
             atr_high[i] = up + dev;
             atr_low[i] = up - dev;
             trend[i] = 0.0;
         } else {
-            // Downtrend
             if i > start_idx && trend[i - 1] != 1.0 {
-                // Trend changed from up to down - signal event
-                down = if up == 0.0 { up } else { up };
+                down = up;
                 sell_signal[i] = down + atr2;
             } else {
-                down = if i == start_idx || down == 0.0 {
-                    min_high_price
-                } else {
-                    min_high_price.min(down)
-                };
+                down = if i == start_idx || down == 0.0 { min_high_price } else if min_high_price < down { min_high_price } else { down };
             }
             halftrend[i] = down;
             atr_high[i] = down + dev;
@@ -2280,6 +2277,140 @@ fn halftrend_row_into(
     );
 }
 
+#[inline(always)]
+fn rolling_max_series(src: &[f64], win: usize) -> Vec<f64> {
+    let n = src.len();
+    if n == 0 { return Vec::new(); }
+    let cap = win.max(1);
+    let mut idx = vec![0usize; cap];
+    let mut val = vec![0.0f64; cap];
+    let (mut head, mut tail, mut cnt) = (0usize, 0usize, 0usize);
+    #[inline(always)] fn inc(i: usize, cap: usize) -> usize { let j = i + 1; if j == cap { 0 } else { j } }
+    #[inline(always)] fn dec(i: usize, cap: usize) -> usize { if i == 0 { cap - 1 } else { i - 1 } }
+    let mut out = vec![f64::NAN; n];
+    for i in 0..n {
+        let wstart = i.saturating_add(1).saturating_sub(cap);
+        while cnt > 0 && idx[head] < wstart { head = inc(head, cap); cnt -= 1; }
+        let x = src[i];
+        while cnt > 0 {
+            let back = dec(tail, cap);
+            if val[back] <= x { tail = back; cnt -= 1; } else { break; }
+        }
+        val[tail] = x; idx[tail] = i; tail = inc(tail, cap); cnt += 1;
+        out[i] = val[head];
+    }
+    out
+}
+
+#[inline(always)]
+fn rolling_min_series(src: &[f64], win: usize) -> Vec<f64> {
+    let n = src.len();
+    if n == 0 { return Vec::new(); }
+    let cap = win.max(1);
+    let mut idx = vec![0usize; cap];
+    let mut val = vec![0.0f64; cap];
+    let (mut head, mut tail, mut cnt) = (0usize, 0usize, 0usize);
+    #[inline(always)] fn inc(i: usize, cap: usize) -> usize { let j = i + 1; if j == cap { 0 } else { j } }
+    #[inline(always)] fn dec(i: usize, cap: usize) -> usize { if i == 0 { cap - 1 } else { i - 1 } }
+    let mut out = vec![f64::NAN; n];
+    for i in 0..n {
+        let wstart = i.saturating_add(1).saturating_sub(cap);
+        while cnt > 0 && idx[head] < wstart { head = inc(head, cap); cnt -= 1; }
+        let x = src[i];
+        while cnt > 0 {
+            let back = dec(tail, cap);
+            if val[back] >= x { tail = back; cnt -= 1; } else { break; }
+        }
+        val[tail] = x; idx[tail] = i; tail = inc(tail, cap); cnt += 1;
+        out[i] = val[head];
+    }
+    out
+}
+
+#[inline(always)]
+fn halftrend_row_into_precomputed(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    ch_dev: f64,
+    atr: &[f64],
+    highma: &[f64],
+    lowma: &[f64],
+    warm: usize,
+    roll_high: &[f64],
+    roll_low: &[f64],
+    out_halftrend: &mut [f64],
+    out_trend: &mut [f64],
+    out_atr_high: &mut [f64],
+    out_atr_low: &mut [f64],
+    out_buy: &mut [f64],
+    out_sell: &mut [f64],
+) {
+    let len = close.len();
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    let ch_half = ch_dev * 0.5;
+
+    let mut current_trend = 0i32;
+    let mut next_trend = 0i32;
+    let mut up = 0.0f64;
+    let mut down = 0.0f64;
+    let mut max_low_price = if warm > 0 { low[warm - 1] } else { low[0] };
+    let mut min_high_price = if warm > 0 { high[warm - 1] } else { high[0] };
+
+    for i in warm..len {
+        out_buy[i] = qnan;
+        out_sell[i] = qnan;
+
+        let high_price = roll_high[i];
+        let low_price = roll_low[i];
+        let prev_low = if i > 0 { low[i - 1] } else { low[0] };
+        let prev_high = if i > 0 { high[i - 1] } else { high[0] };
+
+        if next_trend == 1 {
+            if low_price > max_low_price { max_low_price = low_price; }
+            if highma[i] < max_low_price && close[i] < prev_low {
+                current_trend = 1;
+                next_trend = 0;
+                min_high_price = high_price;
+            }
+        } else {
+            if high_price < min_high_price { min_high_price = high_price; }
+            if lowma[i] > min_high_price && close[i] > prev_high {
+                current_trend = 0;
+                next_trend = 1;
+                max_low_price = low_price;
+            }
+        }
+
+        let a = atr[i];
+        let atr2 = 0.5 * a;
+        let dev = a.mul_add(ch_half, 0.0);
+
+        if current_trend == 0 {
+            if i > warm && out_trend[i - 1] != 0.0 {
+                up = down;
+                out_buy[i] = up - atr2;
+            } else {
+                up = if i == warm || up == 0.0 { max_low_price } else if max_low_price > up { max_low_price } else { up };
+            }
+            out_halftrend[i] = up;
+            out_atr_high[i] = up + dev;
+            out_atr_low[i] = up - dev;
+            out_trend[i] = 0.0;
+        } else {
+            if i > warm && out_trend[i - 1] != 1.0 {
+                down = up;
+                out_sell[i] = down + atr2;
+            } else {
+                down = if i == warm || down == 0.0 { min_high_price } else if min_high_price < down { min_high_price } else { down };
+            }
+            out_halftrend[i] = down;
+            out_atr_high[i] = down + dev;
+            out_atr_low[i] = down - dev;
+            out_trend[i] = 1.0;
+        }
+    }
+}
 /// Batch inner that assumes warm prefixes are already set
 #[inline(always)]
 pub fn halftrend_batch_rows_into(
@@ -2334,6 +2465,13 @@ pub fn halftrend_batch_rows_into(
                 .values,
         );
     }
+    // Precompute rolling extrema per unique amplitude (shared across rows)
+    let mut roll_high_map: HashMap<usize, Vec<f64>> = HashMap::new();
+    let mut roll_low_map: HashMap<usize, Vec<f64>> = HashMap::new();
+    for &a in &uniq_amp {
+        roll_high_map.insert(a, rolling_max_series(high, a));
+        roll_low_map.insert(a, rolling_min_series(low, a));
+    }
     let mut atr_map: HashMap<usize, Vec<f64>> = HashMap::new();
     for &p in &uniq_atr {
         atr_map.insert(
@@ -2370,9 +2508,11 @@ pub fn halftrend_batch_rows_into(
         let hma = hi_map.get(&amp).unwrap().as_slice();
         let lma = lo_map.get(&amp).unwrap().as_slice();
         let av = atr_map.get(&ap).unwrap().as_slice();
+        let rhi = roll_high_map.get(&amp).unwrap().as_slice();
+        let rlo = roll_low_map.get(&amp).unwrap().as_slice();
 
-        halftrend_row_into(
-            high, low, close, amp, ch, av, hma, lma, warm, ht, tr, ah, al, bs, ss,
+        halftrend_row_into_precomputed(
+            high, low, close, ch, av, hma, lma, warm, rhi, rlo, ht, tr, ah, al, bs, ss,
         );
     }
 

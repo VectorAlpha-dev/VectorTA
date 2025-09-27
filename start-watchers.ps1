@@ -14,13 +14,18 @@ foreach ($cmd in $commands) {
     -ArgumentList '-NoExit','-NoLogo','-Command', $cmd
 }
 
-Conduct a review of your work against your instructions to ensure that you didn't miss anything. For example, ff SIMD was not implemented then did you try to use unsafe operations and FMA/mul_add in the avx2 kernel? If you are finally complete with the indicator rust file then run all unit tests for the indicator to ensure that it passes. Finally, run the indicator's benchmark(s) and report back all of the timings to me. 
+I need you to check for the existence of any custom benchmarks in the benchmark rust file. If present, they should be removed, and the indicator(s) should instead be registered into my existing benchmark macros instead. The current macros are allow for benching of all kernel variants if setup correctly. There's no need for per-indicator custom benchmark setup. 
 
-	
-I have a guide for you to improve the accuracy of one of my existing cuda kernels. Evaluate critically to ensure that it will indeed improve accuracy without a significant reduction in performance. Proceed if the guide has merit. If you implement it then run unit tests and tighten unit test tolerance to confirm that it worked. Guide: "
+I want you to double check to confirm that this implementation is indeed more optimized or faster than the original implementation that we started with.
+ 
+Do you see any further room for improvement/optimization? 
+
+Accurate? All unit tests pass? No unit test reference values or tolerances were changed? No memory copy operations? No prefilling of any vectors? Are you the certain that the current scalar implemenation is faster than the original? Any further room for optimization?
+
+Conduct a review of your work against your instructions to ensure that you didn't miss anything. For example, if SIMD was not implemented then did you try to use unsafe operations and FMA/mul_add in the avx2 kernel? Have you looked into the possibility of row optimized variants for the batch function? Did you maintain zero memory copy operations and only write into uninitialized memory like you were supposed to? If you replaced the origianl scalar implementation, is the new implementation faster according to the benchmarks that you ran? If you are finally complete with the indicator rust file then run all unit tests for the indicator to ensure that it passes. Finally, run the indicator's benchmark(s) and report back all of the timings to me. 
 
 
-  - You are going to be working on a specific rust indicator file. Your goal is to:          
+  - You are going to be working on a specific rust indicator file. Do not worry about cuda kernels. Your goal is to:          
       - Optimize the scalar implementation of a given indicator first.                                            
       - Implement SIMD for single-series if viable.                                                               
       - Implement row-specific optimized variants for the batch function if viable.                               
@@ -39,7 +44,7 @@ I have a guide for you to improve the accuracy of one of my existing cuda kernel
   - If SIMD or row-specific kernels already exist, review, validate, and iterate; on repeated failure or          
   underperformance, revert selection to the last known-good kernels and document why.                             
   - Ensure the indicator is registered in benches/indicator_benchmark.rs before doing SIMD work so benchmarking   
-  is possible.                                                                                                    
+  is possible. That includes all kernel variants, including batch. Just register them into my existing macros. Don't add custom benches.                                                                                                      
                                                                                                                   
   Plan (use update_plan)                                                                                          
                                                                                                                   
@@ -148,4 +153,5 @@ I have a guide for you to improve the accuracy of one of my existing cuda kernel
                                                                                                                   
   - Gold standard: src/indicators/moving_averages/alma.rs                                                         
   - Bench registration: benches/indicator_benchmark.rs     
-To start off, I have a possible optimized scalar kernel that is untested and not benchmarked. You may want to initially benchmark the indicator so that you can compare with the optimzied scalar variant. Initial optimized scalar variant: "
+
+To start off, I have a possible optimized scalar kernel in addition to possible SIMD kernels that is untested and not benchmarked. You may want to initially benchmark the indicator so that you can compare with the optimzied scalar variant. Keep in mind that the suggested scalar variant may have deque operations which can be slower than a loop jammed implmentation. Initial optimized variant(s) (could be slower than what we already have so benchmark the current implementation first). Full Guide contianing drop-ins :"

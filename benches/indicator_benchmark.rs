@@ -139,14 +139,17 @@ use my_project::indicators::{
     kaufmanstop::{kaufmanstop as kaufmanstop_raw, KaufmanstopInput},
     kdj::{kdj as kdj_raw, KdjInput},
     keltner::{keltner as keltner_raw, KeltnerInput},
-    kst::{kst as kst_raw, KstInput},
+    kst::{kst as kst_raw, KstBatchBuilder, KstInput},
     kurtosis::{kurtosis as kurtosis_raw, KurtosisInput},
     kvo::{kvo as kvo_raw, KvoInput},
     linearreg_angle::{linearreg_angle as linearreg_angle_raw, Linearreg_angleInput},
     linearreg_intercept::{
         linearreg_intercept as linearreg_intercept_raw, LinearRegInterceptInput,
     },
-    linearreg_slope::{linearreg_slope as linearreg_slope_raw, LinearRegSlopeInput},
+    linearreg_slope::{
+        linearreg_slope as linearreg_slope_raw, linearreg_slope_with_kernel, LinearRegSlopeBatchBuilder,
+        LinearRegSlopeInput,
+    },
     lpc::{lpc as lpc_raw, LpcInput},
     lrsi::{lrsi as lrsi_raw, LrsiInput},
     mab::{mab as mab_raw, MabInput},
@@ -157,7 +160,7 @@ use my_project::indicators::{
     mean_ad::{mean_ad as mean_ad_raw, MeanAdInput},
     medium_ad::{medium_ad as medium_ad_raw, MediumAdInput},
     medprice::{medprice as medprice_raw, MedpriceInput},
-    mfi::{mfi as mfi_raw, MfiInput},
+    mfi::{mfi as mfi_raw, MfiBatchBuilder, MfiBatchRange, MfiData, MfiInput},
     midpoint::{midpoint as midpoint_raw, MidpointInput},
     midprice::{midprice as midprice_raw, MidpriceInput},
     minmax::{minmax as minmax_raw, MinmaxInput},
@@ -165,12 +168,14 @@ use my_project::indicators::{
     mom::{mom as mom_raw, MomInput},
     msw::{msw as msw_raw, MswInput},
     nadaraya_watson_envelope::{
-        nadaraya_watson_envelope as nadaraya_watson_envelope_raw, NweInput,
+        nadaraya_watson_envelope as nadaraya_watson_envelope_raw,
+        nadaraya_watson_envelope_with_kernel,
+        NweInput,
     },
     natr::{natr as natr_raw, NatrInput},
     nvi::{nvi as nvi_raw, NviInput},
     obv::{obv as obv_raw, ObvInput},
-    ott::OttInput,
+    ott::{ott as ott_raw, ott_with_kernel, OttBatchBuilder, OttInput},
     otto::{otto as otto_raw, OttoBatchBuilder, OttoInput},
     percentile_nearest_rank::{
         percentile_nearest_rank_with_kernel, PercentileNearestRankBatchBuilder,
@@ -178,16 +183,16 @@ use my_project::indicators::{
     },
     pfe::{pfe as pfe_raw, PfeInput},
     pivot::{pivot as pivot_raw, PivotInput},
-    pma::{pma as pma_raw, PmaInput},
+    pma::{pma as pma_raw, pma_with_kernel, PmaBatchBuilder, PmaInput},
     ppo::{ppo as ppo_raw, PpoInput},
     prb::{prb as prb_raw, PrbInput},
     pvi::{pvi as pvi_raw, PviInput},
     qqe::{qqe as qqe_raw, QqeInput},
-    qstick::{qstick as qstick_raw, QstickInput},
+    qstick::{qstick as qstick_raw, qstick_with_kernel, QstickBatchBuilder, QstickBatchRange, QstickData, QstickInput},
     range_filter::{range_filter_with_kernel, RangeFilterBatchBuilder, RangeFilterInput},
     roc::{roc as roc_raw, RocInput},
     rocp::{rocp as rocp_raw, RocpInput},
-    rocr::{rocr as rocr_raw, RocrInput},
+    rocr::{rocr as rocr_raw, rocr_with_kernel, RocrInput},
     rsi::{rsi as rsi_raw, RsiInput},
     rsmk::{rsmk as rsmk_raw, RsmkInput},
     rsx::{rsx as rsx_raw, RsxInput},
@@ -197,22 +202,25 @@ use my_project::indicators::{
     squeeze_momentum::{squeeze_momentum as squeeze_momentum_raw, SqueezeMomentumInput},
     srsi::{srsi as srsi_raw, SrsiInput},
     stc::{stc as stc_raw, StcInput},
-    stddev::{stddev as stddev_raw, StdDevInput},
+    stddev::{stddev as stddev_raw, StdDevBatchBuilder, StdDevInput},
     stoch::{stoch as stoch_raw, StochInput},
     stochf::{stochf as stochf_raw, StochfInput},
     supertrend::{supertrend as supertrend_raw, SuperTrendInput},
     trix::{trix as trix_raw, TrixInput},
-    tsf::{tsf as tsf_raw, TsfInput},
+    tsf::{tsf as tsf_raw, tsf_with_kernel, TsfInput},
     tsi::{tsi as tsi_raw, TsiInput},
     ttm_squeeze::{ttm_squeeze as ttm_squeeze_raw, TtmSqueezeInput},
     ttm_trend::{ttm_trend as ttm_trend_raw, TtmTrendInput},
     ui::{ui as ui_raw, UiInput},
-    ultosc::{ultosc as ultosc_raw, UltOscInput},
+    ultosc::{
+        ultosc as ultosc_raw, ultosc_with_kernel, UltOscBatchBuilder, UltOscBatchRange, UltOscData,
+        UltOscInput,
+    },
     var::{var as var_raw, VarInput},
     vi::{vi as vi_raw, ViInput},
     vidya::{vidya_with_kernel, VidyaBatchBuilder, VidyaInput},
     vlma::{vlma_with_kernel, VlmaBatchBuilder, VlmaInput},
-    vosc::{vosc as vosc_raw, VoscInput},
+    vosc::{vosc as vosc_raw, VoscInput, VoscBatchBuilder},
     voss::{voss as voss_raw, VossInput},
     vpci::{vpci as vpci_raw, VpciInput},
     vpt::{vpt as vpt_raw, VptInput},
@@ -228,7 +236,7 @@ use my_project::indicators::{
     zscore::{zscore as zscore_raw, zscore_with_kernel, ZscoreBatchBuilder, ZscoreInput},
 };
 
-use my_project::utilities::data_loader::{read_candles_from_csv, Candles};
+use my_project::utilities::data_loader::{read_candles_from_csv, source_type, Candles};
 
 // (other_indicators section removed - NAMA moved to moving_averages)
 
@@ -726,6 +734,7 @@ impl_input_len!(
     NviInputS,
     ObvInputS,
     OttoInputS,
+    OttInputS,
     PercentileNearestRankInputS,
     PfeInputS,
     PivotInputS,
@@ -888,6 +897,7 @@ bench_wrappers! {
     (natr_bench, natr_raw, NatrInputS),
     (nvi_bench, nvi_raw, NviInputS),
     (obv_bench, obv_raw, ObvInputS),
+    (ott_bench, ott_raw, OttInputS),
     (otto_bench, otto_raw, OttoInputS),
     (pfe_bench, pfe_raw, PfeInputS),
     (pivot_bench, pivot_raw, PivotInputS),
@@ -1029,6 +1039,7 @@ bench_scalars!(
     natr_bench   => NatrInputS,
     nvi_bench    => NviInputS,
     obv_bench    => ObvInputS,
+    ott_bench    => OttInputS,
     otto_bench   => OttoInputS,
     pfe_bench    => PfeInputS,
     pivot_bench  => PivotInputS,
@@ -1098,6 +1109,7 @@ make_kernel_wrappers!(ehlers_pma, ehlers_pma_with_kernel, EhlersPmaInputS; Scala
 make_kernel_wrappers!(ehlers_kama, ehlers_kama_with_kernel, EhlersKamaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(ema, ema_with_kernel, EmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(epma, epma_with_kernel, EpmaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(pma, pma_with_kernel, PmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(frama, frama_with_kernel, FramaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(fwma, fwma_with_kernel, FwmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(gaussian, gaussian_with_kernel, GaussianInputS; Scalar,Avx2,Avx512);
@@ -1140,6 +1152,18 @@ make_kernel_wrappers!(wclprice, wclprice_with_kernel, WclpriceInputS; Scalar,Avx
 make_kernel_wrappers!(wilders, wilders_with_kernel, WildersInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(wma, wma_with_kernel, WmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(zlema, zlema_with_kernel, ZlemaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(tsf, tsf_with_kernel, TsfInputS; Scalar,Avx2,Avx512);
+// Add ROCR kernel-specific wrappers to compare scalar vs SIMD
+make_kernel_wrappers!(rocr, rocr_with_kernel, RocrInputS; Scalar,Avx2,Avx512);
+// OTT kernel-specific wrappers to compare scalar vs SIMD
+make_kernel_wrappers!(ott, ott_with_kernel, OttInputS; Scalar,Avx2,Avx512);
+// LinearRegSlope kernel-specific wrappers to compare scalar vs SIMD
+make_kernel_wrappers!(
+    linearreg_slope,
+    linearreg_slope_with_kernel,
+    LinearRegSlopeInputS;
+    Scalar,Avx2,Avx512
+);
 
 // Other indicators kernel wrappers
 make_kernel_wrappers!(avsl, avsl_with_kernel, AvslInputS; Scalar,Avx2,Avx512);
@@ -1156,9 +1180,68 @@ make_kernel_wrappers!(halftrend, halftrend_with_kernel, HalfTrendInputS; Scalar,
 make_kernel_wrappers!(reverse_rsi, reverse_rsi_with_kernel, ReverseRsiInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(vama, vama_with_kernel, VamaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(wavetrend, wavetrend_with_kernel, WavetrendInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(ultosc, ultosc_with_kernel, UltOscInputS; Scalar,Avx2,Avx512);
+ make_kernel_wrappers!(qstick, qstick_with_kernel, QstickInputS; Scalar,Avx2,Avx512);
+ make_kernel_wrappers!(nadaraya_watson_envelope, nadaraya_watson_envelope_with_kernel, NweInputS; Scalar,Avx2,Avx512);
+
+// VOSC batch wrappers
+make_batch_wrappers!(
+    vosc_batch, VoscBatchBuilder, VoscInputS;
+    ScalarBatch, Avx2Batch, Avx512Batch
+);
+
+// MFI batch wrappers
+#[inline(always)]
+fn mfi_batch_scalarbatch(input: &MfiInputS) -> anyhow::Result<()> {
+    let (tp, vol) = match &input.data {
+        MfiData::Candles { candles, source } => (source_type(candles, source), &candles.volume[..]),
+        MfiData::Slices { typical_price, volume } => (*typical_price, *volume),
+    };
+    // Wider sweep to exercise shared precompute path
+    let sweep = MfiBatchRange { period: (5, 200, 5) };
+    MfiBatchBuilder::new()
+        .kernel(Kernel::ScalarBatch)
+        .period_range(sweep.period.0, sweep.period.1, sweep.period.2)
+        .apply_slices(tp, vol)?;
+    Ok(())
+}
+
+#[inline(always)]
+fn mfi_batch_avx2batch(input: &MfiInputS) -> anyhow::Result<()> {
+    let (tp, vol) = match &input.data {
+        MfiData::Candles { candles, source } => (source_type(candles, source), &candles.volume[..]),
+        MfiData::Slices { typical_price, volume } => (*typical_price, *volume),
+    };
+    let sweep = MfiBatchRange { period: (5, 200, 5) };
+    MfiBatchBuilder::new()
+        .kernel(Kernel::Avx2Batch)
+        .period_range(sweep.period.0, sweep.period.1, sweep.period.2)
+        .apply_slices(tp, vol)?;
+    Ok(())
+}
+
+#[inline(always)]
+fn mfi_batch_avx512batch(input: &MfiInputS) -> anyhow::Result<()> {
+    let (tp, vol) = match &input.data {
+        MfiData::Candles { candles, source } => (source_type(candles, source), &candles.volume[..]),
+        MfiData::Slices { typical_price, volume } => (*typical_price, *volume),
+    };
+    let sweep = MfiBatchRange { period: (5, 200, 5) };
+    MfiBatchBuilder::new()
+        .kernel(Kernel::Avx512Batch)
+        .period_range(sweep.period.0, sweep.period.1, sweep.period.2)
+        .apply_slices(tp, vol)?;
+    Ok(())
+}
 
 make_batch_wrappers!(
     alma_batch, AlmaBatchBuilder, AlmaInputS;
+    ScalarBatch, Avx2Batch, Avx512Batch
+);
+
+// OTT batch wrappers
+make_batch_wrappers!(
+    ott_batch, OttBatchBuilder, OttInputS;
     ScalarBatch, Avx2Batch, Avx512Batch
 );
 
@@ -1171,6 +1254,115 @@ make_batch_wrappers!(
     zscore_batch, ZscoreBatchBuilder, ZscoreInputS;
     ScalarBatch, Avx2Batch, Avx512Batch
 );
+
+// LinearRegSlope batch wrappers
+make_batch_wrappers!(
+    linearreg_slope_batch, LinearRegSlopeBatchBuilder, LinearRegSlopeInputS;
+    ScalarBatch, Avx2Batch, Avx512Batch
+);
+
+#[inline(always)]
+fn qstick_batch_scalarbatch(input: &QstickInputS) -> anyhow::Result<()> {
+    let (open, close) = match &input.data {
+        QstickData::Candles { candles, open_source, close_source } => (
+            source_type(candles, open_source),
+            source_type(candles, close_source),
+        ),
+        QstickData::Slices { open, close } => (*open, *close),
+    };
+    let sweep = QstickBatchRange { period: (5, 50, 5) };
+    QstickBatchBuilder::new()
+        .kernel(Kernel::ScalarBatch)
+        .period_range(sweep.period.0, sweep.period.1, sweep.period.2)
+        .apply_slices(open, close)?;
+    Ok(())
+}
+
+#[inline(always)]
+fn qstick_batch_avx2batch(input: &QstickInputS) -> anyhow::Result<()> {
+    let (open, close) = match &input.data {
+        QstickData::Candles { candles, open_source, close_source } => (
+            source_type(candles, open_source),
+            source_type(candles, close_source),
+        ),
+        QstickData::Slices { open, close } => (*open, *close),
+    };
+    let sweep = QstickBatchRange { period: (5, 50, 5) };
+    QstickBatchBuilder::new()
+        .kernel(Kernel::Avx2Batch)
+        .period_range(sweep.period.0, sweep.period.1, sweep.period.2)
+        .apply_slices(open, close)?;
+    Ok(())
+}
+
+#[inline(always)]
+fn qstick_batch_avx512batch(input: &QstickInputS) -> anyhow::Result<()> {
+    let (open, close) = match &input.data {
+        QstickData::Candles { candles, open_source, close_source } => (
+            source_type(candles, open_source),
+            source_type(candles, close_source),
+        ),
+        QstickData::Slices { open, close } => (*open, *close),
+    };
+    let sweep = QstickBatchRange { period: (5, 50, 5) };
+    QstickBatchBuilder::new()
+        .kernel(Kernel::Avx512Batch)
+        .period_range(sweep.period.0, sweep.period.1, sweep.period.2)
+        .apply_slices(open, close)?;
+    Ok(())
+}
+
+// UltOsc requires OHLC; provide custom batch wrappers similar to WILLR
+#[inline(always)]
+fn ultosc_batch_scalarbatch(input: &UltOscInputS) -> anyhow::Result<()> {
+    let (high, low, close) = match &input.data {
+        UltOscData::Candles { candles, .. } => (&candles.high[..], &candles.low[..], &candles.close[..]),
+        UltOscData::Slices { high, low, close } => (*high, *low, *close),
+    };
+    let sweep = UltOscBatchRange {
+        timeperiod1: (5, 9, 2),
+        timeperiod2: (12, 16, 2),
+        timeperiod3: (26, 30, 2),
+    };
+    UltOscBatchBuilder::new()
+        .kernel(Kernel::ScalarBatch)
+        .apply_slice(high, low, close, &sweep)?;
+    Ok(())
+}
+
+#[inline(always)]
+fn ultosc_batch_avx2batch(input: &UltOscInputS) -> anyhow::Result<()> {
+    let (high, low, close) = match &input.data {
+        UltOscData::Candles { candles, .. } => (&candles.high[..], &candles.low[..], &candles.close[..]),
+        UltOscData::Slices { high, low, close } => (*high, *low, *close),
+    };
+    let sweep = UltOscBatchRange {
+        timeperiod1: (5, 9, 2),
+        timeperiod2: (12, 16, 2),
+        timeperiod3: (26, 30, 2),
+    };
+    UltOscBatchBuilder::new()
+        .kernel(Kernel::Avx2Batch)
+        .apply_slice(high, low, close, &sweep)?;
+    Ok(())
+}
+
+#[inline(always)]
+fn ultosc_batch_avx512batch(input: &UltOscInputS) -> anyhow::Result<()> {
+    let (high, low, close) = match &input.data {
+        UltOscData::Candles { candles, .. } => (&candles.high[..], &candles.low[..], &candles.close[..]),
+        UltOscData::Slices { high, low, close } => (*high, *low, *close),
+    };
+    let sweep = UltOscBatchRange {
+        timeperiod1: (5, 9, 2),
+        timeperiod2: (12, 16, 2),
+        timeperiod3: (26, 30, 2),
+    };
+    UltOscBatchBuilder::new()
+        .kernel(Kernel::Avx512Batch)
+        .apply_slice(high, low, close, &sweep)?;
+    Ok(())
+}
 
 // Custom implementation for BuffAverages which requires price and volume
 // Note: For simplicity, we'll just use default test data rather than trying to extract from the complex input structure
@@ -1240,6 +1432,12 @@ make_batch_wrappers!(
     ScalarBatch, Avx2Batch, Avx512Batch
 );
 
+// StdDev batch wrappers
+make_batch_wrappers!(
+    stddev_batch, StdDevBatchBuilder, StdDevInputS;
+    ScalarBatch, Avx2Batch, Avx512Batch
+);
+
 make_batch_wrappers!(
     ehlers_kama_batch, EhlersKamaBatchBuilder, EhlersKamaInputS;
     ScalarBatch, Avx2Batch, Avx512Batch
@@ -1252,6 +1450,11 @@ make_batch_wrappers!(
 
 make_batch_wrappers!(
     epma_batch, EpmaBatchBuilder, EpmaInputS;
+    ScalarBatch, Avx2Batch, Avx512Batch
+);
+
+make_batch_wrappers!(
+    pma_batch, PmaBatchBuilder, PmaInputS;
     ScalarBatch, Avx2Batch, Avx512Batch
 );
 
@@ -1554,6 +1757,7 @@ make_batch_wrappers!(cci_cycle_batch, CciCycleBatchBuilder, CciCycleInputS; Scal
 // make_batch_wrappers!(halftrend_batch, HalfTrendBatchBuilder, HalfTrendInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(reverse_rsi_batch, ReverseRsiBatchBuilder, ReverseRsiInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(vama_batch, VamaBatchBuilder, VamaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(kst_batch, KstBatchBuilder, KstInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 
 bench_variants!(
     alma_batch => AlmaInputS; Some(232);
@@ -1576,11 +1780,65 @@ bench_variants!(
     zscore_batch_avx512batch
 );
 
+// LinearRegSlope batch variants (advisory unless row-specific kernels are optimized)
+bench_variants!(
+    linearreg_slope_batch => LinearRegSlopeInputS; Some(14);
+    linearreg_slope_batch_scalarbatch,
+    linearreg_slope_batch_avx2batch,
+    linearreg_slope_batch_avx512batch
+);
+
+// ROCR scalar-vs-SIMD single-series variants
+bench_variants!(
+    rocr => RocrInputS; None;
+    rocr_scalar,
+    rocr_avx2,
+    rocr_avx512
+);
+
+// LinearRegSlope scalar-vs-SIMD single-series variants
+bench_variants!(
+    linearreg_slope => LinearRegSlopeInputS; Some(14);
+    linearreg_slope_scalar,
+    linearreg_slope_avx2,
+    linearreg_slope_avx512
+);
+
+// OTT scalar-vs-SIMD single-series variants
+bench_variants!(
+    ott => OttInputS; None;
+    ott_scalar,
+    ott_avx2,
+    ott_avx512
+);
+
+bench_variants!(
+    stddev_batch => StdDevInputS; Some(5);
+    stddev_batch_scalarbatch,
+    stddev_batch_avx2batch,
+    stddev_batch_avx512batch
+);
+
 bench_variants!(
     macz_batch => MaczInputS; Some(232);
     macz_batch_scalarbatch,
     macz_batch_avx2batch,
     macz_batch_avx512batch
+);
+
+// OTT batch variants (advisory unless row-specific kernels are optimized)
+bench_variants!(
+    ott_batch => OttInputS; None;
+    ott_batch_scalarbatch,
+    ott_batch_avx2batch,
+    ott_batch_avx512batch
+);
+
+bench_variants!(
+    kst_batch => KstInputS; None;
+    kst_batch_scalarbatch,
+    kst_batch_avx2batch,
+    kst_batch_avx512batch
 );
 
 bench_variants!(
@@ -1651,6 +1909,13 @@ bench_variants!(
     epma_batch_scalarbatch,
     epma_batch_avx2batch,
     epma_batch_avx512batch,
+);
+
+bench_variants!(
+    pma_batch => PmaInputS; Some(227);
+    pma_batch_scalarbatch,
+    pma_batch_avx2batch,
+    pma_batch_avx512batch,
 );
 
 bench_variants!(
@@ -2005,6 +2270,13 @@ bench_variants!(
 );
 
 bench_variants!(
+    nadaraya_watson_envelope => NweInputS; None;
+    nadaraya_watson_envelope_scalar,
+    nadaraya_watson_envelope_avx2,
+    nadaraya_watson_envelope_avx512,
+);
+
+bench_variants!(
     buff_averages => BuffAveragesInputS; None;
     buff_averages_scalar,
     buff_averages_avx2,
@@ -2079,6 +2351,13 @@ bench_variants!(
     epma_scalar,
     epma_avx2,
     epma_avx512,
+);
+
+bench_variants!(
+    pma => PmaInputS; None;
+    pma_scalar,
+    pma_avx2,
+    pma_avx512,
 );
 
 bench_variants!(
@@ -2426,6 +2705,20 @@ bench_variants!(
 );
 
 bench_variants!(
+    tsf => TsfInputS; None;
+    tsf_scalar,
+    tsf_avx2,
+    tsf_avx512,
+);
+
+bench_variants!(
+    vosc_batch => VoscInputS; Some(227);
+    vosc_batch_scalarbatch,
+    vosc_batch_avx2batch,
+    vosc_batch_avx512batch,
+);
+
+bench_variants!(
     nama => NamaInputS; None;
     nama_scalar,
     nama_avx2,
@@ -2518,14 +2811,61 @@ bench_variants!(
     vama_batch_avx512batch
 );
 
+bench_variants!(
+    ultosc => UltOscInputS; None;
+    ultosc_scalar,
+    ultosc_avx2,
+    ultosc_avx512,
+);
+
+bench_variants!(
+    qstick => QstickInputS; None;
+    qstick_scalar,
+    qstick_avx2,
+    qstick_avx512,
+);
+
+bench_variants!(
+    ultosc_batch => UltOscInputS; Some(28);
+    ultosc_batch_scalarbatch,
+    ultosc_batch_avx2batch,
+    ultosc_batch_avx512batch,
+);
+
+bench_variants!(
+    qstick_batch => QstickInputS; Some(5);
+    qstick_batch_scalarbatch,
+    qstick_batch_avx2batch,
+    qstick_batch_avx512batch,
+);
+
+// MFI batch benchmarks
+bench_variants!(
+    mfi_batch => MfiInputS; Some(14);
+    mfi_batch_scalarbatch,
+    mfi_batch_avx2batch,
+    mfi_batch_avx512batch,
+);
+
 criterion_main!(
     benches_scalar,
+    benches_rocr,
+    benches_linearreg_slope,
+    benches_ott,
+    benches_ultosc,
+    benches_qstick,
+    benches_mfi_batch,
+    benches_ultosc_batch,
+    benches_qstick_batch,
     benches_alma,
+    benches_nadaraya_watson_envelope,
     benches_alma_batch,
     benches_buff_averages,
     benches_buff_averages_batch,
     benches_zscore,
     benches_zscore_batch,
+    benches_linearreg_slope_batch,
+    benches_stddev_batch,
     benches_macz,
     benches_macz_batch,
     benches_cwma,
@@ -2539,6 +2879,7 @@ criterion_main!(
     benches_ehlers_itrend,
     benches_ehlers_itrend_batch,
     benches_ehlers_pma,
+    benches_pma,
     benches_ehlers_pma_batch,
     benches_ehlers_kama,
     benches_ehlers_kama_batch,
@@ -2546,6 +2887,7 @@ criterion_main!(
     benches_ema_batch,
     benches_epma,
     benches_epma_batch,
+    benches_pma_batch,
     benches_frama,
     benches_frama_batch,
     benches_fwma,
@@ -2616,19 +2958,25 @@ criterion_main!(
     benches_volume_adjusted_ma_batch,
     benches_vpwma,
     benches_vpwma_batch,
+    benches_kst_batch,
     benches_willr_batch,
     benches_vwma,
     benches_wavetrend,
     benches_wavetrend_batch,
+    benches_vosc_batch,
     benches_wilders,
     benches_wilders_batch,
+    benches_ott_batch,
     benches_wma,
     benches_wma_batch,
     benches_zlema,
     benches_zlema_batch,
+    benches_tsf,
     benches_chandelier_exit,
     benches_chandelier_exit_batch,
     benches_otto_batch,
     benches_percentile_nearest_rank,
     benches_percentile_nearest_rank_batch
 );
+
+// TSF variants are included in the main group list below.

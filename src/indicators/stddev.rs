@@ -23,6 +23,7 @@
 //! - **Err(StdDevError)** otherwise.
 //!
 //! ## Developer Notes
+//! - Decision: SIMD kept as stubs delegating to scalar; rolling dependency + memory-bound behavior did not show >5% wins at 100k. Revisit with alternative formulations (e.g., multi-output tiling) if needed.
 //! - **AVX2/AVX512 Kernels**: SIMD implementations delegate to scalar for API parity. Rolling sum and sum-of-squares could be vectorized for periods > 8.
 //! - **Streaming Performance**: Efficient O(1) implementation using ring buffer with running sum and sum-of-squares. Optimal for real-time applications.
 //! - **Memory Optimization**: Uses zero-copy helper functions (`alloc_with_nan_prefix`, `make_uninit_matrix`). No cache-aligned buffers needed as computation is memory-bound rather than compute-bound.
@@ -709,17 +710,191 @@ fn stddev_batch_inner(
     };
     std::mem::forget(buf_mu);
 
-    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+    // Build prefix sums once (n+1 to simplify window differences); track NaNs like zscore
+    #[derive(Clone)]
+    struct StdPrefixes { ps: Vec<f64>, ps2: Vec<f64>, pnan: Vec<i32> }
+    #[inline]
+    fn build_std_prefixes(data: &[f64]) -> StdPrefixes {
+        let n = data.len();
+        let mut ps = vec![0.0f64; n + 1];
+        let mut ps2 = vec![0.0f64; n + 1];
+        let mut pnan = vec![0i32; n + 1];
+        for i in 0..n {
+            let v = data[i];
+            if v.is_nan() {
+                ps[i + 1] = ps[i];
+                ps2[i + 1] = ps2[i];
+                pnan[i + 1] = pnan[i] + 1;
+            } else {
+                ps[i + 1] = ps[i] + v;
+                ps2[i + 1] = ps2[i] + v * v;
+                pnan[i + 1] = pnan[i];
+            }
+        }
+        StdPrefixes { ps, ps2, pnan }
+    }
+
+    #[inline]
+    fn stddev_from_prefix_scalar(
+        warmup_end: usize,
+        period: usize,
+        nbdev: f64,
+        pre: &StdPrefixes,
+        out_row: &mut [f64],
+    ) {
+        let n = out_row.len();
+        if n <= warmup_end { return; }
+
+        // Precompute reciprocals to avoid per-element divisions
+        let inv_den = 1.0 / (period as f64);
+        let inv_den2 = inv_den * inv_den;
+
+        // Fast path: no NaNs anywhere in the slice ⇒ skip per-element NaN checks
+        let no_nans = pre.pnan[n] == 0;
+        if no_nans {
+            for i in warmup_end..n {
+                let sum = pre.ps[i + 1] - pre.ps[i + 1 - period];
+                let sum2 = pre.ps2[i + 1] - pre.ps2[i + 1 - period];
+                // var = sum2 * inv_den - (sum * sum) * inv_den2
+                let var = sum2.mul_add(inv_den, - (sum * sum) * inv_den2);
+                out_row[i] = if var <= 0.0 { 0.0 } else { var.sqrt() * nbdev };
+            }
+            return;
+        }
+
+        // General path: handle NaNs per-window
+        for i in warmup_end..n {
+            if pre.pnan[i + 1] - pre.pnan[i + 1 - period] > 0 {
+                out_row[i] = f64::NAN;
+                continue;
+            }
+            let sum = pre.ps[i + 1] - pre.ps[i + 1 - period];
+            let sum2 = pre.ps2[i + 1] - pre.ps2[i + 1 - period];
+            let var = sum2.mul_add(inv_den, - (sum * sum) * inv_den2);
+            out_row[i] = if var <= 0.0 { 0.0 } else { var.sqrt() * nbdev };
+        }
+    }
+
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    #[inline]
+    unsafe fn stddev_from_prefix_avx2(
+        warmup_end: usize,
+        period: usize,
+        nbdev: f64,
+        pre: &StdPrefixes,
+        out_row: &mut [f64],
+    ) {
+        use core::arch::x86_64::*;
+        let n = out_row.len();
+        if n <= warmup_end { return; }
+        let no_nans = pre.pnan[n] == 0;
+        if !no_nans {
+            // Fallback to scalar with NaN handling
+            stddev_from_prefix_scalar(warmup_end, period, nbdev, pre, out_row);
+            return;
+        }
+
+        let inv_den = 1.0 / (period as f64);
+        let inv_den2 = inv_den * inv_den;
+        let v_inv_den = _mm256_set1_pd(inv_den);
+        let v_inv_den2 = _mm256_set1_pd(inv_den2);
+        let v_nbdev = _mm256_set1_pd(nbdev);
+        let v_zero = _mm256_set1_pd(0.0);
+
+        let mut i = warmup_end;
+        while i + 4 <= n {
+            // Sums
+            let s_hi = _mm256_loadu_pd(pre.ps.as_ptr().add(i + 1));
+            let s_lo = _mm256_loadu_pd(pre.ps.as_ptr().add(i + 1 - period));
+            let sum = _mm256_sub_pd(s_hi, s_lo);
+
+            let q_hi = _mm256_loadu_pd(pre.ps2.as_ptr().add(i + 1));
+            let q_lo = _mm256_loadu_pd(pre.ps2.as_ptr().add(i + 1 - period));
+            let sum2 = _mm256_sub_pd(q_hi, q_lo);
+
+            // var = sum2*inv_den - (sum*sum)*inv_den2
+            let sum_sq = _mm256_mul_pd(sum, sum);
+            let term = _mm256_mul_pd(sum_sq, v_inv_den2);
+            let var = _mm256_sub_pd(_mm256_mul_pd(sum2, v_inv_den), term);
+            let var_pos = _mm256_max_pd(var, v_zero);
+            let stdv = _mm256_sqrt_pd(var_pos);
+            let outv = _mm256_mul_pd(stdv, v_nbdev);
+            _mm256_storeu_pd(out_row.as_mut_ptr().add(i), outv);
+            i += 4;
+        }
+        // Tail
+        if i < n {
+            stddev_from_prefix_scalar(i, period, nbdev, pre, out_row);
+        }
+    }
+
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    #[inline]
+    unsafe fn stddev_from_prefix_avx512(
+        warmup_end: usize,
+        period: usize,
+        nbdev: f64,
+        pre: &StdPrefixes,
+        out_row: &mut [f64],
+    ) {
+        use core::arch::x86_64::*;
+        let n = out_row.len();
+        if n <= warmup_end { return; }
+        let no_nans = pre.pnan[n] == 0;
+        if !no_nans {
+            stddev_from_prefix_scalar(warmup_end, period, nbdev, pre, out_row);
+            return;
+        }
+
+        let inv_den = 1.0 / (period as f64);
+        let inv_den2 = inv_den * inv_den;
+        let v_inv_den = _mm512_set1_pd(inv_den);
+        let v_inv_den2 = _mm512_set1_pd(inv_den2);
+        let v_nbdev = _mm512_set1_pd(nbdev);
+        let v_zero = _mm512_set1_pd(0.0);
+
+        let mut i = warmup_end;
+        while i + 8 <= n {
+            let s_hi = _mm512_loadu_pd(pre.ps.as_ptr().add(i + 1));
+            let s_lo = _mm512_loadu_pd(pre.ps.as_ptr().add(i + 1 - period));
+            let sum = _mm512_sub_pd(s_hi, s_lo);
+
+            let q_hi = _mm512_loadu_pd(pre.ps2.as_ptr().add(i + 1));
+            let q_lo = _mm512_loadu_pd(pre.ps2.as_ptr().add(i + 1 - period));
+            let sum2 = _mm512_sub_pd(q_hi, q_lo);
+
+            let sum_sq = _mm512_mul_pd(sum, sum);
+            let term = _mm512_mul_pd(sum_sq, v_inv_den2);
+            let var = _mm512_sub_pd(_mm512_mul_pd(sum2, v_inv_den), term);
+            let var_pos = _mm512_max_pd(var, v_zero);
+            let stdv = _mm512_sqrt_pd(var_pos);
+            let outv = _mm512_mul_pd(stdv, v_nbdev);
+            _mm512_storeu_pd(out_row.as_mut_ptr().add(i), outv);
+            i += 8;
+        }
+        if i < n {
+            stddev_from_prefix_scalar(i, period, nbdev, pre, out_row);
+        }
+    }
+
+    let prefixes = build_std_prefixes(data);
+
+    let do_row = |row: usize, out_row: &mut [f64]| {
         let period = combos[row].period.unwrap();
         let nbdev = combos[row].nbdev.unwrap();
+        let warmup_end = first + period - 1;
         match kern {
-            Kernel::Scalar => stddev_row_scalar(data, first, period, nbdev, out_row),
+            Kernel::Scalar => stddev_from_prefix_scalar(warmup_end, period, nbdev, &prefixes, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => stddev_row_avx2(data, first, period, nbdev, out_row),
+            Kernel::Avx2 => unsafe {
+                stddev_from_prefix_avx2(warmup_end, period, nbdev, &prefixes, out_row)
+            },
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => stddev_row_avx512(data, first, period, nbdev, out_row),
+            Kernel::Avx512 => unsafe {
+                stddev_from_prefix_avx512(warmup_end, period, nbdev, &prefixes, out_row)
+            },
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-            Kernel::Avx2 | Kernel::Avx512 => stddev_row_scalar(data, first, period, nbdev, out_row),
+            Kernel::Avx2 | Kernel::Avx512 => stddev_from_prefix_scalar(warmup_end, period, nbdev, &prefixes, out_row),
             _ => unreachable!(),
         }
     };

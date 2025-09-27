@@ -232,8 +232,90 @@ pub fn wad_scalar(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]) {
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn wad_avx2(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]) {
-    // stub, API parity
-    wad_scalar(high, low, close, out)
+    // Optimized unsafe unrolled variant using mul_add to encourage FMA
+    // Not true vector SIMD due to loop-carried dependencies, but faster on some CPUs.
+    let n = close.len();
+    if n == 0 {
+        return;
+    }
+
+    *out.get_unchecked_mut(0) = 0.0;
+
+    let mut acc = 0.0f64;
+    let mut pc = *close.get_unchecked(0);
+
+    let hp = high.as_ptr();
+    let lp = low.as_ptr();
+    let cp = close.as_ptr();
+    let op = out.as_mut_ptr();
+
+    let mut i = 1usize;
+    while i + 3 < n {
+        // step 0
+        let c0 = *cp.add(i);
+        let h0 = *hp.add(i);
+        let l0 = *lp.add(i);
+        let trh0 = if pc > h0 { pc } else { h0 };
+        let trl0 = if pc < l0 { pc } else { l0 };
+        let gt0 = (c0 > pc) as i32 as f64;
+        let lt0 = (c0 < pc) as i32 as f64;
+        let ad0 = gt0.mul_add(c0 - trl0, lt0 * (c0 - trh0));
+        acc += ad0;
+        *op.add(i) = acc;
+
+        // step 1
+        let c1 = *cp.add(i + 1);
+        let h1 = *hp.add(i + 1);
+        let l1 = *lp.add(i + 1);
+        let trh1 = if c0 > h1 { c0 } else { h1 };
+        let trl1 = if c0 < l1 { c0 } else { l1 };
+        let gt1 = (c1 > c0) as i32 as f64;
+        let lt1 = (c1 < c0) as i32 as f64;
+        let ad1 = gt1.mul_add(c1 - trl1, lt1 * (c1 - trh1));
+        acc += ad1;
+        *op.add(i + 1) = acc;
+
+        // step 2
+        let c2 = *cp.add(i + 2);
+        let h2 = *hp.add(i + 2);
+        let l2 = *lp.add(i + 2);
+        let trh2 = if c1 > h2 { c1 } else { h2 };
+        let trl2 = if c1 < l2 { c1 } else { l2 };
+        let gt2 = (c2 > c1) as i32 as f64;
+        let lt2 = (c2 < c1) as i32 as f64;
+        let ad2 = gt2.mul_add(c2 - trl2, lt2 * (c2 - trh2));
+        acc += ad2;
+        *op.add(i + 2) = acc;
+
+        // step 3
+        let c3 = *cp.add(i + 3);
+        let h3 = *hp.add(i + 3);
+        let l3 = *lp.add(i + 3);
+        let trh3 = if c2 > h3 { c2 } else { h3 };
+        let trl3 = if c2 < l3 { c2 } else { l3 };
+        let gt3 = (c3 > c2) as i32 as f64;
+        let lt3 = (c3 < c2) as i32 as f64;
+        let ad3 = gt3.mul_add(c3 - trl3, lt3 * (c3 - trh3));
+        acc += ad3;
+        *op.add(i + 3) = acc;
+
+        pc = c3;
+        i += 4;
+    }
+    while i < n {
+        let c = *cp.add(i);
+        let h = *hp.add(i);
+        let l = *lp.add(i);
+        let trh = if pc > h { pc } else { h };
+        let trl = if pc < l { pc } else { l };
+        let gt = (c > pc) as i32 as f64;
+        let lt = (c < pc) as i32 as f64;
+        let ad = gt.mul_add(c - trl, lt * (c - trh));
+        acc += ad;
+        *op.add(i) = acc;
+        pc = c;
+        i += 1;
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]

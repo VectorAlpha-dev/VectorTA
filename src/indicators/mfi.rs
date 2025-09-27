@@ -11,9 +11,11 @@
 //! - `Vec<f64>` - MFI values (0-100 scale) matching input length
 //!
 //! ## Developer Status
+//! **SIMD**: Present but disabled by design for single-series; stubs dispatch to scalar due to loop-carried deps.
 //! **AVX2**: Stub (calls scalar)
-//! **AVX512**: Has short/long variants but all stubs
+//! **AVX512**: Has short/long variants but both stubs
 //! **Streaming**: O(1) - Uses ring buffers for running sums
+//! **Batch**: Row-specific scalar path uses prefix sums of pos/neg flows; accuracy matches scalar. Faster for larger sweeps; for few rows, scalar repeats can be competitive.
 //! **Memory**: Good - Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
 
 #[cfg(feature = "python")]
@@ -231,85 +233,115 @@ pub unsafe fn mfi_scalar(
     first: usize,
     out: &mut [f64],
 ) {
+    // Assumptions validated by mfi_prepare / callers:
+    // - typical_price.len() == volume.len() == out.len()
+    // - period > 0
+    // - first + period <= len
+    // - Warmup prefix (..first+period-1) is already prefilled by the caller when needed.
     let len = typical_price.len();
-
-    // Initialize warmup period with NaN
-    let idx_mfi_start = first + period - 1;
-    for i in 0..idx_mfi_start.min(out.len()) {
-        out[i] = f64::NAN;
+    if len == 0 {
+        return;
     }
 
-    let mut pos_buf = vec![0.0; period];
-    let mut neg_buf = vec![0.0; period];
-    let mut pos_sum = 0.0;
-    let mut neg_sum = 0.0;
+    // Ring buffers for rolling sums (always zero-initialized)
+    let mut pos_buf = vec![0.0f64; period];
+    let mut neg_buf = vec![0.0f64; period];
 
-    let mut prev_typical = typical_price[first];
-    let mut ring_idx = 0;
+    // Raw pointers to avoid bounds checks in hot loops
+    let tp_ptr = typical_price.as_ptr();
+    let vol_ptr = volume.as_ptr();
+    let out_ptr = out.as_mut_ptr();
+    let pos_ptr = pos_buf.as_mut_ptr();
+    let neg_ptr = neg_buf.as_mut_ptr();
 
-    // Fill the initial period
-    for i in (first + 1)..(first + period) {
-        let diff = typical_price[i] - prev_typical;
-        prev_typical = typical_price[i];
-        let flow = typical_price[i] * volume[i];
-        if diff > 0.0 {
-            pos_buf[ring_idx] = flow;
-            neg_buf[ring_idx] = 0.0;
-            pos_sum += flow;
-        } else if diff < 0.0 {
-            neg_buf[ring_idx] = flow;
-            pos_buf[ring_idx] = 0.0;
-            neg_sum += flow;
-        } else {
-            pos_buf[ring_idx] = 0.0;
-            neg_buf[ring_idx] = 0.0;
+    let mut pos_sum = 0.0f64;
+    let mut neg_sum = 0.0f64;
+
+    // Keep previous typical price (first valid)
+    let mut prev = *tp_ptr.add(first);
+    let mut ring = 0usize;
+
+    // ---- Seed window: fill the first (period - 1) money-flow slots ----
+    // We deliberately start at `first + 1` because the classification requires a previous bar.
+    // This exactly matches the existing semantics and unit tests.
+    let seed_start = first + 1;
+    let seed_end = first + period; // exclusive; last index written is first+period-1
+    let mut i = seed_start;
+    while i < seed_end {
+        // diff and flow for bar i
+        let tp_i = *tp_ptr.add(i);
+        let flow = tp_i * *vol_ptr.add(i);
+        let diff = tp_i - prev;
+        prev = tp_i;
+
+        // Branchless classification into positive / negative buckets
+        // (true as i32 -> 1/0 -> cast to f64)
+        let gt = (diff > 0.0) as i32 as f64;
+        let lt = (diff < 0.0) as i32 as f64;
+        let pos_new = flow * gt;
+        let neg_new = flow * lt;
+
+        // Write into ring and update sums
+        *pos_ptr.add(ring) = pos_new;
+        *neg_ptr.add(ring) = neg_new;
+        pos_sum += pos_new;
+        neg_sum += neg_new;
+
+        ring += 1;
+        if ring == period {
+            ring = 0;
         }
-        ring_idx = (ring_idx + 1) % period;
+        i += 1;
     }
 
-    // Calculate first MFI value
-    let idx_mfi_start = first + period - 1;
-    if idx_mfi_start < len {
+    // ---- First MFI value at index first + period - 1 ----
+    let idx0 = seed_end - 1; // == first + period - 1
+    if idx0 < len {
         let total = pos_sum + neg_sum;
-        out[idx_mfi_start] = if total < 1e-14 {
-            0.0
-        } else {
-            100.0 * (pos_sum / total)
-        };
+        // Same zero-denominator handling as before
+        let val = if total < 1e-14 { 0.0 } else { 100.0 * (pos_sum / total) };
+        *out_ptr.add(idx0) = val;
     }
 
-    // Rolling calculation for remaining values
-    for i in (first + period)..len {
-        let old_pos = pos_buf[ring_idx];
-        let old_neg = neg_buf[ring_idx];
+    // ---- Rolling window for the remainder ----
+    i = seed_end;
+    while i < len {
+        // Remove the element that falls out of the window
+        let old_pos = *pos_ptr.add(ring);
+        let old_neg = *neg_ptr.add(ring);
         pos_sum -= old_pos;
         neg_sum -= old_neg;
 
-        let diff = typical_price[i] - prev_typical;
-        prev_typical = typical_price[i];
-        let flow = typical_price[i] * volume[i];
+        // Compute flow and direction for the new bar
+        let tp_i = *tp_ptr.add(i);
+        let flow = tp_i * *vol_ptr.add(i);
+        let diff = tp_i - prev;
+        prev = tp_i;
 
-        if diff > 0.0 {
-            pos_buf[ring_idx] = flow;
-            neg_buf[ring_idx] = 0.0;
-            pos_sum += flow;
-        } else if diff < 0.0 {
-            neg_buf[ring_idx] = flow;
-            pos_buf[ring_idx] = 0.0;
-            neg_sum += flow;
-        } else {
-            pos_buf[ring_idx] = 0.0;
-            neg_buf[ring_idx] = 0.0;
+        // Branchless classification
+        let gt = (diff > 0.0) as i32 as f64;
+        let lt = (diff < 0.0) as i32 as f64;
+        let pos_new = flow * gt;
+        let neg_new = flow * lt;
+
+        // Insert into ring & update sums
+        *pos_ptr.add(ring) = pos_new;
+        *neg_ptr.add(ring) = neg_new;
+        pos_sum += pos_new;
+        neg_sum += neg_new;
+
+        // Write output
+        let total = pos_sum + neg_sum;
+        let val = if total < 1e-14 { 0.0 } else { 100.0 * (pos_sum / total) };
+        *out_ptr.add(i) = val;
+
+        // Advance ring head (branch instead of modulo to avoid div)
+        ring += 1;
+        if ring == period {
+            ring = 0;
         }
 
-        ring_idx = (ring_idx + 1) % period;
-
-        let total = pos_sum + neg_sum;
-        out[i] = if total < 1e-14 {
-            0.0
-        } else {
-            100.0 * (pos_sum / total)
-        };
+        i += 1;
     }
 }
 
@@ -703,15 +735,30 @@ fn mfi_batch_inner(
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
+    // Heuristic: use shared prefix-sum path only when row count is large enough to amortize precompute
+    let rows = combos.len();
+    let use_prefix = rows >= 8; // tuned threshold; adjust if needed
+
+    let (pos_prefix, neg_prefix) = if use_prefix {
+        let (pp, np) = unsafe { precompute_flow_prefixes_select(typical_price, volume, first, kern) };
+        (Some(pp), Some(np))
+    } else {
+        (None, None)
+    };
+
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
-        match kern {
-            Kernel::Scalar => mfi_row_scalar(typical_price, volume, first, period, out_row),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => mfi_row_avx2(typical_price, volume, first, period, out_row),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => mfi_row_avx512(typical_price, volume, first, period, out_row),
-            _ => unreachable!(),
+        if let (Some(ref pp), Some(ref np)) = (pos_prefix.as_ref(), neg_prefix.as_ref()) {
+            mfi_row_from_prefixes(pp, np, first, period, out_row)
+        } else {
+            match kern {
+                Kernel::Scalar => mfi_row_scalar(typical_price, volume, first, period, out_row),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 => mfi_row_avx2(typical_price, volume, first, period, out_row),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 => mfi_row_avx512(typical_price, volume, first, period, out_row),
+                _ => unreachable!(),
+            }
         }
     };
 
@@ -793,15 +840,34 @@ fn mfi_batch_inner_into(
         return Err(MfiError::EmptyData);
     }
 
+    // Heuristic: only precompute prefixes if many rows; always fill warmup per row in into-slice variant
+    let rows = combos.len();
+    let use_prefix = rows >= 8;
+    let (pos_prefix, neg_prefix) = if use_prefix {
+        let (pp, np) = unsafe { precompute_flow_prefixes_select(typical_price, volume, first, kern) };
+        (Some(pp), Some(np))
+    } else {
+        (None, None)
+    };
+
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
-        match kern {
-            Kernel::Scalar => mfi_row_scalar(typical_price, volume, first, period, out_row),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => mfi_row_avx2(typical_price, volume, first, period, out_row),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => mfi_row_avx512(typical_price, volume, first, period, out_row),
-            _ => unreachable!(),
+        // Warmup fill
+        let warmup_end = first + period - 1;
+        for v in &mut out_row[..warmup_end] {
+            *v = f64::NAN;
+        }
+        if let (Some(ref pp), Some(ref np)) = (pos_prefix.as_ref(), neg_prefix.as_ref()) {
+            mfi_row_from_prefixes(pp, np, first, period, out_row)
+        } else {
+            match kern {
+                Kernel::Scalar => mfi_row_scalar(typical_price, volume, first, period, out_row),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 => mfi_row_avx2(typical_price, volume, first, period, out_row),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 => mfi_row_avx512(typical_price, volume, first, period, out_row),
+                _ => unreachable!(),
+            }
         }
     };
 
@@ -827,6 +893,196 @@ fn mfi_batch_inner_into(
     }
 
     Ok(combos)
+}
+
+#[inline(always)]
+unsafe fn precompute_flow_prefixes_scalar(
+    typical_price: &[f64],
+    volume: &[f64],
+    first: usize,
+) -> (Vec<f64>, Vec<f64>) {
+    let len = typical_price.len();
+    let tp_ptr = typical_price.as_ptr();
+    let vol_ptr = volume.as_ptr();
+
+    // Positive/negative flow prefix sums (exclusive at index 0)
+    let mut pos_prefix = vec![0.0f64; len];
+    let mut neg_prefix = vec![0.0f64; len];
+
+    if len == 0 {
+        return (pos_prefix, neg_prefix);
+    }
+
+    let mut i = first + 1;
+    let mut prev = *tp_ptr.add(first);
+    while i < len {
+        let tp_i = *tp_ptr.add(i);
+        let flow = tp_i * *vol_ptr.add(i);
+        let diff = tp_i - prev;
+        prev = tp_i;
+        // Branchless classify
+        let gt = (diff > 0.0) as i32 as f64;
+        let lt = (diff < 0.0) as i32 as f64;
+        let pos = flow * gt;
+        let neg = flow * lt;
+
+        // Build prefix sums
+        pos_prefix[i] = pos_prefix[i - 1] + pos;
+        neg_prefix[i] = neg_prefix[i - 1] + neg;
+        i += 1;
+    }
+
+    // Fill the region before `first+1` with zeros (already zeroed) and also carry forward prefix at `first`
+    if first > 0 {
+        pos_prefix[first] = 0.0;
+        neg_prefix[first] = 0.0;
+        // ensure continuity: for j in 1..=first-1 already zeros
+    }
+
+    (pos_prefix, neg_prefix)
+}
+
+#[inline(always)]
+unsafe fn precompute_flow_prefixes_select(
+    typical_price: &[f64],
+    volume: &[f64],
+    first: usize,
+    kern: Kernel,
+) -> (Vec<f64>, Vec<f64>) {
+    match kern {
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Avx2 | Kernel::Avx512 => precompute_flow_prefixes_avx2(typical_price, volume, first),
+        _ => precompute_flow_prefixes_scalar(typical_price, volume, first),
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn precompute_flow_prefixes_avx2(
+    typical_price: &[f64],
+    volume: &[f64],
+    first: usize,
+) -> (Vec<f64>, Vec<f64>) {
+    use core::arch::x86_64::*;
+    let len = typical_price.len();
+    let mut pos_prefix = vec![0.0f64; len];
+    let mut neg_prefix = vec![0.0f64; len];
+    if len == 0 {
+        return (pos_prefix, neg_prefix);
+    }
+
+    // Running sums to build prefix directly
+    let mut pos_sum = 0.0f64;
+    let mut neg_sum = 0.0f64;
+    // Ensure prefix at 'first' is zero (flows start after first)
+    if first < len {
+        pos_prefix[first] = 0.0;
+        neg_prefix[first] = 0.0;
+    }
+
+    let mut i = first + 1;
+    let tp_ptr = typical_price.as_ptr();
+    let vol_ptr = volume.as_ptr();
+    let zero = _mm256_set1_pd(0.0);
+
+    while i + 4 <= len {
+        // Load current tp and previous tp
+        let tp_cur = _mm256_loadu_pd(tp_ptr.add(i));
+        let tp_prev = _mm256_loadu_pd(tp_ptr.add(i - 1));
+        let vol_cur = _mm256_loadu_pd(vol_ptr.add(i));
+
+        // flow = tp * vol
+        let flow = _mm256_mul_pd(tp_cur, vol_cur);
+        // diff = tp[i] - tp[i-1]
+        let diff = _mm256_sub_pd(tp_cur, tp_prev);
+        // masks
+        let m_gt = _mm256_cmp_pd(diff, zero, _CMP_GT_OQ);
+        let m_lt = _mm256_cmp_pd(diff, zero, _CMP_LT_OQ);
+        // classify
+        let pos_v = _mm256_and_pd(flow, m_gt);
+        let neg_v = _mm256_and_pd(flow, m_lt);
+
+        // Store to temporaries and build prefix scalarly within the chunk
+        let mut pos_tmp = [0.0f64; 4];
+        let mut neg_tmp = [0.0f64; 4];
+        _mm256_storeu_pd(pos_tmp.as_mut_ptr(), pos_v);
+        _mm256_storeu_pd(neg_tmp.as_mut_ptr(), neg_v);
+
+        // Unrolled accumulation for the 4-lane chunk
+        // Lane 0
+        pos_sum += pos_tmp[0];
+        neg_sum += neg_tmp[0];
+        *pos_prefix.get_unchecked_mut(i) = pos_sum;
+        *neg_prefix.get_unchecked_mut(i) = neg_sum;
+        // Lane 1
+        pos_sum += pos_tmp[1];
+        neg_sum += neg_tmp[1];
+        *pos_prefix.get_unchecked_mut(i + 1) = pos_sum;
+        *neg_prefix.get_unchecked_mut(i + 1) = neg_sum;
+        // Lane 2
+        pos_sum += pos_tmp[2];
+        neg_sum += neg_tmp[2];
+        *pos_prefix.get_unchecked_mut(i + 2) = pos_sum;
+        *neg_prefix.get_unchecked_mut(i + 2) = neg_sum;
+        // Lane 3
+        pos_sum += pos_tmp[3];
+        neg_sum += neg_tmp[3];
+        *pos_prefix.get_unchecked_mut(i + 3) = pos_sum;
+        *neg_prefix.get_unchecked_mut(i + 3) = neg_sum;
+
+        i += 4;
+    }
+
+    // Tail
+    while i < len {
+        let tp_i = *tp_ptr.add(i);
+        let flow = tp_i * *vol_ptr.add(i);
+        let diff = tp_i - *tp_ptr.add(i - 1);
+        let gt = (diff > 0.0) as i32 as f64;
+        let lt = (diff < 0.0) as i32 as f64;
+        pos_sum += flow * gt;
+        neg_sum += flow * lt;
+        *pos_prefix.get_unchecked_mut(i) = pos_sum;
+        *neg_prefix.get_unchecked_mut(i) = neg_sum;
+        i += 1;
+    }
+
+    (pos_prefix, neg_prefix)
+}
+
+#[inline(always)]
+unsafe fn mfi_row_from_prefixes(
+    pos_prefix: &[f64],
+    neg_prefix: &[f64],
+    first: usize,
+    period: usize,
+    out: &mut [f64],
+) {
+    let len = out.len();
+    if len == 0 {
+        return;
+    }
+    let idx0 = first + period - 1;
+    if idx0 >= len {
+        return;
+    }
+    // First value uses period-1 flows: [idx0-(period-1)+1 ..= idx0] => prefix[idx0] - prefix[first]
+    let pos0 = pos_prefix[idx0] - pos_prefix[first];
+    let neg0 = neg_prefix[idx0] - neg_prefix[first];
+    let tot0 = pos0 + neg0;
+    *out.get_unchecked_mut(idx0) = if tot0 < 1e-14 { 0.0 } else { 100.0 * (pos0 / tot0) };
+
+    // Subsequent values use full `period` flows: [i - period + 1 ..= i] => prefix[i] - prefix[i - period]
+    let mut i = idx0 + 1;
+    while i < len {
+        let base = i - period;
+        let pos_sum = pos_prefix[i] - pos_prefix[base];
+        let neg_sum = neg_prefix[i] - neg_prefix[base];
+        let total = pos_sum + neg_sum;
+        let val = if total < 1e-14 { 0.0 } else { 100.0 * (pos_sum / total) };
+        *out.get_unchecked_mut(i) = val;
+        i += 1;
+    }
 }
 
 #[inline(always)]

@@ -13,10 +13,10 @@
 //! - **`Err(OttError)`** on failure
 //!
 //! ## Developer Notes
-//! - **AVX2**: Stub implementation - calls scalar function
-//! - **AVX512**: Stub implementation - calls scalar function
+//! - SIMD: Loop-carried dependencies prevent time-wise vectorization; AVX2/AVX512 stubs delegate to scalar (FMA-friendly via mul_add).
 //! - **Streaming**: O(1) for most MA types, O(n) for VAR type due to buffer recalculation
-//! - **Memory**: Partially uses zero-copy helpers (alloc_with_nan_prefix) but missing make_uninit_matrix usage in batch operations
+//! - **Batch**: Reuses MA per (period, ma_type) across rows to avoid redundant computation; results identical to single-series path.
+//! - **Memory**: Uses zero-copy helpers; batch initializes warmup prefixes per-row.
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
@@ -65,6 +65,7 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 
 // Standard library imports
+use std::collections::HashMap;
 use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
@@ -821,6 +822,9 @@ pub unsafe fn ott_scalar_classic(
 }
 
 // ==================== SCALAR IMPLEMENTATION ====================
+/// Fully loop-jammed scalar OTT kernel following Pine semantics.
+/// - Seeds stops once from first valid MA (avoids per-iter NaN branches)
+/// - Hoists invariants and uses mul_add for FMA-friendly codegen
 #[inline]
 pub fn ott_scalar(
     _data: &[f64],
@@ -830,63 +834,76 @@ pub fn ott_scalar(
     _period: usize,
     out: &mut [f64],
 ) {
-    let fark = percent * 0.01;
-    // first_val is now ma_first (first valid MA value)
+    let len = ma_values.len();
+    if first_val >= len {
+        return;
+    }
 
-    // Initialize direction
-    let mut dir = 1i32;
-    let mut long_stop = f64::NAN;
-    let mut short_stop = f64::NAN;
+    // Precompute constants once
+    let fark = percent * 0.01; // percent / 100
+    let scale_minus = 1.0 - (percent * 0.005); // (200 - percent) / 200
 
-    for i in first_val..ma_values.len() {
+    // Seed state from the first non-NaN MA value
+    let mut i = first_val;
+    let mut m = ma_values[i];
+    if m.is_nan() {
+        if let Some(next) = ma_values[first_val..].iter().position(|x| !x.is_nan()) {
+            i = first_val + next;
+            m = ma_values[i];
+        } else {
+            return;
+        }
+    }
+
+    // Initialize stops and direction
+    let mut long_stop = m.mul_add(-fark, m); // m * (1 - fark)
+    let mut short_stop = m.mul_add(fark, m); // m * (1 + fark)
+    let mut dir: i32 = 1;
+
+    // First output (MT = long_stop when dir == 1)
+    let mt0 = long_stop;
+    let scale0 = if m > mt0 { scale_minus + fark } else { scale_minus };
+    out[i] = mt0 * scale0;
+    i += 1;
+
+    // Main loop
+    while i < len {
         let mavg = ma_values[i];
+        if !mavg.is_nan() {
+            // Candidate stops
+            let cand_long = mavg.mul_add(-fark, mavg); // mavg * (1 - fark)
+            let cand_short = mavg.mul_add(fark, mavg); // mavg * (1 + fark)
 
-        if mavg.is_nan() {
-            continue;
+            // Snapshot previous stops for direction decision
+            let lprev = long_stop;
+            let sprev = short_stop;
+
+            // Update long stop
+            if mavg > lprev {
+                long_stop = if cand_long > lprev { cand_long } else { lprev };
+            } else {
+                long_stop = cand_long;
+            }
+            // Update short stop
+            if mavg < sprev {
+                short_stop = if cand_short < sprev { cand_short } else { sprev };
+            } else {
+                short_stop = cand_short;
+            }
+
+            // Direction switch uses previous stops
+            if dir == -1 && mavg > sprev {
+                dir = 1;
+            } else if dir == 1 && mavg < lprev {
+                dir = -1;
+            }
+
+            // MT and OTT
+            let mt = if dir == 1 { long_stop } else { short_stop };
+            let scale = if mavg > mt { scale_minus + fark } else { scale_minus };
+            out[i] = mt * scale;
         }
-
-        let offset = mavg * fark;
-
-        // Calculate long stop - following PineScript logic exactly
-        let long_stop_prev = if long_stop.is_nan() {
-            mavg - offset
-        } else {
-            long_stop
-        };
-        long_stop = if mavg > long_stop_prev {
-            (mavg - offset).max(long_stop_prev)
-        } else {
-            mavg - offset
-        };
-
-        // Calculate short stop - following PineScript logic exactly
-        let short_stop_prev = if short_stop.is_nan() {
-            mavg + offset
-        } else {
-            short_stop
-        };
-        short_stop = if mavg < short_stop_prev {
-            (mavg + offset).min(short_stop_prev)
-        } else {
-            mavg + offset
-        };
-
-        // Determine direction - following PineScript logic exactly
-        if dir == -1 && mavg > short_stop_prev {
-            dir = 1;
-        } else if dir == 1 && mavg < long_stop_prev {
-            dir = -1;
-        }
-
-        // Calculate MT (Main Trend)
-        let mt = if dir == 1 { long_stop } else { short_stop };
-
-        // Calculate OTT - following PineScript logic exactly
-        out[i] = if mavg > mt {
-            mt * (200.0 + percent) / 200.0
-        } else {
-            mt * (200.0 - percent) / 200.0
-        };
+        i += 1;
     }
 }
 
@@ -1352,6 +1369,22 @@ fn ott_batch_inner_into(
         k => k,
     };
 
+    // Precompute and cache MA per (period, ma_type) to avoid recomputation across rows
+    let mut ma_cache: HashMap<(usize, String), (Vec<f64>, usize)> = HashMap::new();
+    for prm in &combos {
+        let p = prm.period.unwrap();
+        let mt = prm.ma_type.as_deref().unwrap().to_uppercase();
+        if !ma_cache.contains_key(&(p, mt.clone())) {
+            let ma = calculate_moving_average(data, p, &mt, row_kern).map_err(|e| {
+                OttError::MaCalculationFailed {
+                    reason: e.to_string(),
+                }
+            })?;
+            let ma_first = ma.iter().position(|&x| !x.is_nan()).unwrap_or(cols);
+            ma_cache.insert((p, mt), (ma, ma_first));
+        }
+    }
+
     // Work over MaybeUninit to avoid UB and still keep zero-copy
     let out_mu: &mut [MaybeUninit<f64>] = unsafe {
         core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
@@ -1363,15 +1396,11 @@ fn ott_batch_inner_into(
         let pct = prm.percent.unwrap();
         let mt = prm.ma_type.as_deref().unwrap();
 
-        // compute MA once for the row
-        let ma = calculate_moving_average(data, p, mt, row_kern).map_err(|e| {
-            OttError::MaCalculationFailed {
-                reason: e.to_string(),
-            }
-        })?;
-
-        // warmup based on MA itself (parity with single-run ott_with_kernel)
-        let ma_first = ma.iter().position(|&x| !x.is_nan()).unwrap_or(cols);
+        // Lookup precomputed MA and warmup
+        let key = (p, mt.to_uppercase());
+        let (ma, ma_first) = ma_cache
+            .get(&key)
+            .expect("missing MA cache entry");
 
         // materialize row as &mut [f64]
         let row: &mut [f64] = unsafe {
@@ -1379,12 +1408,12 @@ fn ott_batch_inner_into(
         };
 
         // ensure full initialization of the prefix
-        for v in &mut row[..ma_first.min(cols)] {
+        for v in &mut row[..(*ma_first).min(cols)] {
             *v = f64::NAN;
         }
 
         // compute OTT into initialized row
-        ott_compute_into(data, &ma, pct, ma_first, p, row_kern, row);
+        ott_compute_into(data, ma, pct, *ma_first, p, row_kern, row);
         Ok(())
     };
 

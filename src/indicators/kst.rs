@@ -22,18 +22,15 @@
 //!
 //! ## Developer Notes
 //! ### Implementation Status
-//! - **AVX2 Kernel**: Stub (unreachable - calls scalar through underlying indicators)
-//! - **AVX512 Kernel**: Stub with short/long variants (unreachable - calls scalar)
-//! - **Streaming Update**: O(1) - efficient with circular buffers for ROC and SMA calculations
-//! - **Memory Optimization**: Fully optimized with `alloc_with_nan_prefix` for output vectors
-//! - **Batch Operations**: Fully implemented with `make_uninit_matrix` and `init_matrix_prefixes`
+//! - SIMD (per-row): Disabled by design — loop-carried ring-buffer deps make time-lane SIMD ineffective; runtime selection short-circuits to scalar.
+//! - AVX2/AVX512 stubs: Present for parity but delegate to the scalar path.
+//! - Scalar kernel: Single-pass, builds line and signal together; avoids modulo in hot paths; uses mul_add; stack-first rings (WASM-safe).
+//! - Memory: Uses `alloc_with_nan_prefix` and batch helpers; no O(N) temporaries beyond outputs and small rings.
+//! - Batch: Parallel-by-row; row-specific SIMD/caching not yet implemented (see TODO below).
 //!
 //! ### TODO - Performance Improvements
-//! - [ ] Implement actual AVX2 SIMD kernel (currently stub)
-//! - [ ] Implement actual AVX512 SIMD kernel (currently stub)
-//! - [ ] Optimize multiple ROC calculations with SIMD
-//! - [ ] Vectorize weighted sum calculations
-//! - [ ] Consider caching intermediate ROC/SMA values for batch operations
+//! - [ ] Row-specific batch optimization: cache ROC streams shared across rows (by identical r1..r4), then update only SMA rings per row.
+//! - [ ] If revisiting SIMD, focus on batch lane-packing across rows; per-row SIMD over 4 ROCs is unlikely to beat scalar consistently.
 
 use crate::indicators::moving_averages::sma::{
     sma, SmaData, SmaError, SmaInput, SmaOutput, SmaParams,
@@ -437,155 +434,161 @@ fn kst_compute_into(
     let (s1, s2, s3, s4) = s;
     let (r1, r2, r3, r4) = r;
 
-    // use stack buffers to avoid wasm memory.grow detaching JS views
+    // ---- Small stack buffers to avoid wasm memory.grow detaching JS views
     const STACK: usize = 256;
     let mut sb1 = [0.0f64; STACK];
     let mut sb2 = [0.0f64; STACK];
     let mut sb3 = [0.0f64; STACK];
     let mut sb4 = [0.0f64; STACK];
-    let mut vb1;
-    let mut vb2;
-    let mut vb3;
-    let mut vb4;
+    let mut sbs = [0.0f64; STACK]; // signal ring
 
-    let (b1, b2, b3, b4): (&mut [f64], &mut [f64], &mut [f64], &mut [f64]) = {
-        vb1 = if s1 > STACK {
-            vec![0.0; s1]
-        } else {
-            Vec::new()
-        };
-        vb2 = if s2 > STACK {
-            vec![0.0; s2]
-        } else {
-            Vec::new()
-        };
-        vb3 = if s3 > STACK {
-            vec![0.0; s3]
-        } else {
-            Vec::new()
-        };
-        vb4 = if s4 > STACK {
-            vec![0.0; s4]
-        } else {
-            Vec::new()
-        };
-        let b1 = if s1 <= STACK {
-            &mut sb1[..s1]
-        } else {
-            vb1.as_mut_slice()
-        };
-        let b2 = if s2 <= STACK {
-            &mut sb2[..s2]
-        } else {
-            vb2.as_mut_slice()
-        };
-        let b3 = if s3 <= STACK {
-            &mut sb3[..s3]
-        } else {
-            vb3.as_mut_slice()
-        };
-        let b4 = if s4 <= STACK {
-            &mut sb4[..s4]
-        } else {
-            vb4.as_mut_slice()
-        };
-        (b1, b2, b3, b4)
+    let mut v1_heap;
+    let mut v2_heap;
+    let mut v3_heap;
+    let mut v4_heap;
+    let mut vs_heap;
+
+    // Select ring buffers (stack or heap) for SMA(ROC) and signal
+    let (b1, b2, b3, b4, sbuf): (&mut [f64], &mut [f64], &mut [f64], &mut [f64], &mut [f64]) = {
+        v1_heap = if s1 > STACK { vec![0.0; s1] } else { Vec::new() };
+        v2_heap = if s2 > STACK { vec![0.0; s2] } else { Vec::new() };
+        v3_heap = if s3 > STACK { vec![0.0; s3] } else { Vec::new() };
+        v4_heap = if s4 > STACK { vec![0.0; s4] } else { Vec::new() };
+        vs_heap = if sig > STACK { vec![0.0; sig] } else { Vec::new() };
+
+        let b1 = if s1 <= STACK { &mut sb1[..s1] } else { v1_heap.as_mut_slice() };
+        let b2 = if s2 <= STACK { &mut sb2[..s2] } else { v2_heap.as_mut_slice() };
+        let b3 = if s3 <= STACK { &mut sb3[..s3] } else { v3_heap.as_mut_slice() };
+        let b4 = if s4 <= STACK { &mut sb4[..s4] } else { v4_heap.as_mut_slice() };
+        let sbuf = if sig <= STACK { &mut sbs[..sig] } else { vs_heap.as_mut_slice() };
+        (b1, b2, b3, b4, sbuf)
     };
 
+    // State for four SMA(ROC) rings
     let mut i1 = 0usize;
     let mut i2 = 0usize;
     let mut i3 = 0usize;
     let mut i4 = 0usize;
-    let mut sum1 = 0.0;
-    let mut sum2 = 0.0;
-    let mut sum3 = 0.0;
-    let mut sum4 = 0.0;
+    let mut sum1 = 0.0f64;
+    let mut sum2 = 0.0f64;
+    let mut sum3 = 0.0f64;
+    let mut sum4 = 0.0f64;
+
+    // Precompute reciprocals and weights (use mul_add later)
     let inv1 = 1.0 / (s1 as f64);
     let inv2 = 1.0 / (s2 as f64);
     let inv3 = 1.0 / (s3 as f64);
     let inv4 = 1.0 / (s4 as f64);
+    let w2 = inv2 + inv2;                    // 2*inv2
+    let w3 = inv3 + inv3 + inv3;             // 3*inv3
+    let w4 = (4.0f64) * inv4;                // 4*inv4
 
-    let start_line = first + warm_line;
+    // Absolute indices where each ROC becomes available
+    let start1 = first + r1;
+    let start2 = first + r2;
+    let start3 = first + r3;
+    let start4 = first + r4;
 
-    for i in first..len {
-        let mut v1 = 0.0;
-        if i >= first + r1 && data[i - r1].is_finite() && data[i].is_finite() {
-            let p = data[i - r1];
-            if p != 0.0 {
-                v1 = ((data[i] / p) - 1.0) * 100.0;
-            }
-        }
-        let mut v2 = 0.0;
-        if i >= first + r2 && data[i - r2].is_finite() && data[i].is_finite() {
-            let p = data[i - r2];
-            if p != 0.0 {
-                v2 = ((data[i] / p) - 1.0) * 100.0;
-            }
-        }
-        let mut v3 = 0.0;
-        if i >= first + r3 && data[i - r3].is_finite() && data[i].is_finite() {
-            let p = data[i - r3];
-            if p != 0.0 {
-                v3 = ((data[i] / p) - 1.0) * 100.0;
-            }
-        }
-        let mut v4 = 0.0;
-        if i >= first + r4 && data[i - r4].is_finite() && data[i].is_finite() {
-            let p = data[i - r4];
-            if p != 0.0 {
-                v4 = ((data[i] / p) - 1.0) * 100.0;
-            }
-        }
+    // Absolute warmups for line/signal
+    let start_line = first + warm_line;     // first index allowed to write KST line
+    let warm_sig_abs = first + warm_sig;    // first index allowed to write signal
 
-        if i >= first + r1 {
-            sum1 -= b1[i1];
-            b1[i1] = v1;
-            sum1 += v1;
-            i1 = (i1 + 1) % s1;
-        }
-        if i >= first + r2 {
-            sum2 -= b2[i2];
-            b2[i2] = v2;
-            sum2 += v2;
-            i2 = (i2 + 1) % s2;
-        }
-        if i >= first + r3 {
-            sum3 -= b3[i3];
-            b3[i3] = v3;
-            sum3 += v3;
-            i3 = (i3 + 1) % s3;
-        }
-        if i >= first + r4 {
-            sum4 -= b4[i4];
-            b4[i4] = v4;
-            sum4 += v4;
-            i4 = (i4 + 1) % s4;
-        }
+    // Signal ring state (built up as soon as line starts)
+    let mut sidx = 0usize;
+    let mut ssum = 0.0f64;
+    let mut sbuilt = 0usize; // how many valid entries currently in signal ring [0..=sig]
 
-        if i < start_line {
-            continue;
-        } // hard gate: no writes before all components are ready
-
-        let k = (sum1 * inv1) + 2.0 * (sum2 * inv2) + 3.0 * (sum3 * inv3) + 4.0 * (sum4 * inv4);
-        out_line[i] = k;
+    // Fast helpers
+    #[inline(always)]
+    fn safe_roc(curr: f64, prev: f64) -> f64 {
+        // Matches prior semantics: zeros when not computable; ignores non-finite inputs.
+        if prev != 0.0 && curr.is_finite() && prev.is_finite() {
+            ((curr / prev) - 1.0) * 100.0
+        } else {
+            0.0
+        }
     }
 
-    // signal
-    let sig_start = start_line;
-    let sig_warm = first + warm_sig;
-    let mut ssum = 0.0;
-    for i in sig_start..(sig_start + sig).min(len) {
-        let v = out_line[i];
-        if v.is_finite() {
-            ssum += v;
+    // Hot loop
+    unsafe {
+        let out_line_ptr = out_line.as_mut_ptr();
+        let out_sig_ptr  = out_sig.as_mut_ptr();
+        let data_ptr     = data.as_ptr();
+
+        let b1_ptr = b1.as_mut_ptr();
+        let b2_ptr = b2.as_mut_ptr();
+        let b3_ptr = b3.as_mut_ptr();
+        let b4_ptr = b4.as_mut_ptr();
+        let sb_ptr = sbuf.as_mut_ptr();
+
+        // Small inlined "ring update": sum += v - old; buf[idx] = v; idx=(idx+1) with branchless wrap
+        #[inline(always)]
+        unsafe fn ring_update(buf: *mut f64, idx: &mut usize, cap: usize, sum: &mut f64, v: f64) {
+            let old = *buf.add(*idx);
+            *sum = (*sum) + (v - old);
+            *buf.add(*idx) = v;
+            *idx += 1;
+            if *idx == cap { *idx = 0; }
         }
-    }
-    if sig_warm < len {
-        out_sig[sig_warm] = ssum / (sig as f64);
-    }
-    for i in (sig_start + sig)..len {
-        ssum += out_line[i] - out_line[i - sig];
-        out_sig[i] = ssum / (sig as f64);
+
+        for i in first..len {
+            // Current price (may be NaN; safe_roc handles it)
+            let x = *data_ptr.add(i);
+
+            // Four ROC updates become active at their own starts.
+            if i >= start1 {
+                let p = *data_ptr.add(i - r1);
+                let v = safe_roc(x, p);
+                ring_update(b1_ptr, &mut i1, s1, &mut sum1, v);
+            }
+            if i >= start2 {
+                let p = *data_ptr.add(i - r2);
+                let v = safe_roc(x, p);
+                ring_update(b2_ptr, &mut i2, s2, &mut sum2, v);
+            }
+            if i >= start3 {
+                let p = *data_ptr.add(i - r3);
+                let v = safe_roc(x, p);
+                ring_update(b3_ptr, &mut i3, s3, &mut sum3, v);
+            }
+            if i >= start4 {
+                let p = *data_ptr.add(i - r4);
+                let v = safe_roc(x, p);
+                ring_update(b4_ptr, &mut i4, s4, &mut sum4, v);
+            }
+
+            // Gate writes until all components are available
+            if i < start_line {
+                continue;
+            }
+
+            // KST line using FMAs: sum1*inv1 + 2*sum2*inv2 + 3*sum3*inv3 + 4*sum4*inv4
+            // Evaluate as nested mul_add to reduce rounding and latency.
+            let kst = sum1.mul_add(inv1, sum2.mul_add(w2, sum3.mul_add(w3, sum4 * w4)));
+            *out_line_ptr.add(i) = kst;
+
+            // Build signal in the same pass (simple SMA over last `sig` KST values)
+            // Note: sbuf was zero-initialized; we update ssum += kst - old_value
+            if sbuilt < sig {
+                let old = *sb_ptr.add(sidx); // initially 0.0
+                ssum += kst - old;
+                *sb_ptr.add(sidx) = kst;
+                sidx += 1;
+                if sidx == sig { sidx = 0; }
+                sbuilt += 1;
+
+                if i >= warm_sig_abs {
+                    *out_sig_ptr.add(i) = ssum / (sig as f64);
+                }
+            } else {
+                let old = *sb_ptr.add(sidx);
+                ssum += kst - old;
+                *sb_ptr.add(sidx) = kst;
+                sidx += 1;
+                if sidx == sig { sidx = 0; }
+                *out_sig_ptr.add(i) = ssum / (sig as f64);
+            }
+        }
     }
 }
 
@@ -1030,15 +1033,200 @@ fn kst_batch_inner(
         _ => Kernel::Scalar,
     };
 
-    // Closure to process each row. The unwrap() is safe because:
-    // 1. expand_grid() ensures all parameters in combos are Some(valid_value)
-    // 2. We've already validated data is not empty above
-    // So kst_prepare() cannot fail with InvalidPeriod or EmptyInputData
+    // --- Row-specific batch optimization: ROC caching across rows with identical (r1..r4)
+    use std::collections::HashMap;
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+    struct R4(usize, usize, usize, usize);
+
+    // Group rows by ROC tuple
+    let mut groups: HashMap<R4, Vec<usize>> = HashMap::new();
+    for (idx, prm) in combos.iter().enumerate() {
+        groups
+            .entry(R4(
+                prm.roc_period1.unwrap(),
+                prm.roc_period2.unwrap(),
+                prm.roc_period3.unwrap(),
+                prm.roc_period4.unwrap(),
+            ))
+            .or_default()
+            .push(idx);
+    }
+
+    // Precompute ROC streams per group
+    fn compute_roc_streams(
+        data: &[f64],
+        first: usize,
+        r: (usize, usize, usize, usize),
+    ) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
+        let len = data.len();
+        let (r1, r2, r3, r4) = r;
+        let mut v1 = vec![0.0f64; len];
+        let mut v2 = vec![0.0f64; len];
+        let mut v3 = vec![0.0f64; len];
+        let mut v4 = vec![0.0f64; len];
+        for i in first..len {
+            let x = data[i];
+            if i >= first + r1 {
+                let p = data[i - r1];
+                if x.is_finite() && p.is_finite() && p != 0.0 {
+                    v1[i] = ((x / p) - 1.0) * 100.0;
+                }
+            }
+            if i >= first + r2 {
+                let p = data[i - r2];
+                if x.is_finite() && p.is_finite() && p != 0.0 {
+                    v2[i] = ((x / p) - 1.0) * 100.0;
+                }
+            }
+            if i >= first + r3 {
+                let p = data[i - r3];
+                if x.is_finite() && p.is_finite() && p != 0.0 {
+                    v3[i] = ((x / p) - 1.0) * 100.0;
+                }
+            }
+            if i >= first + r4 {
+                let p = data[i - r4];
+                if x.is_finite() && p.is_finite() && p != 0.0 {
+                    v4[i] = ((x / p) - 1.0) * 100.0;
+                }
+            }
+        }
+        (v1, v2, v3, v4)
+    }
+
+    struct Streams {
+        v1: Vec<f64>,
+        v2: Vec<f64>,
+        v3: Vec<f64>,
+        v4: Vec<f64>,
+    }
+
+    let mut streams_map: HashMap<R4, Streams> = HashMap::with_capacity(groups.len());
+    for (key @ R4(r1, r2, r3, r4), _rows) in groups.iter() {
+        let (v1, v2, v3, v4) = compute_roc_streams(data, first, (*r1, *r2, *r3, *r4));
+        streams_map.insert(*key, Streams { v1, v2, v3, v4 });
+    }
+
+    // Per-row compute using shared ROC streams
     let do_row = |row: usize, ldst: &mut [f64], sdst: &mut [f64]| {
         let prm = &combos[row];
-        let input = KstInput::from_slice(data, *prm);
-        let (_d, s, r, sig, first, wl, ws, _chosen) = kst_prepare(&input, simd).unwrap();
-        kst_compute_into(data, s, r, sig, first, wl, ws, ldst, sdst);
+        let s = (
+            prm.sma_period1.unwrap(),
+            prm.sma_period2.unwrap(),
+            prm.sma_period3.unwrap(),
+            prm.sma_period4.unwrap(),
+        );
+        let r = (
+            prm.roc_period1.unwrap(),
+            prm.roc_period2.unwrap(),
+            prm.roc_period3.unwrap(),
+            prm.roc_period4.unwrap(),
+        );
+        let sig = prm.signal_period.unwrap();
+        let wl = (r.0 + s.0 - 1)
+            .max(r.1 + s.1 - 1)
+            .max(r.2 + s.2 - 1)
+            .max(r.3 + s.3 - 1);
+        let ws = wl + sig - 1;
+
+        // Fetch streams
+        let key = R4(r.0, r.1, r.2, r.3);
+        let st = streams_map.get(&key).unwrap();
+
+        // Compute from streams: SMA(roc) rings + weighted sum + signal ring
+        let len = ldst.len();
+        let (s1, s2, s3, s4) = s;
+        let inv1 = 1.0 / (s1 as f64);
+        let inv2 = 1.0 / (s2 as f64);
+        let inv3 = 1.0 / (s3 as f64);
+        let inv4 = 1.0 / (s4 as f64);
+        let w2 = inv2 + inv2;
+        let w3 = inv3 + inv3 + inv3;
+        let w4 = 4.0f64 * inv4;
+
+        // rings
+        let mut b1 = vec![0.0f64; s1];
+        let mut b2 = vec![0.0f64; s2];
+        let mut b3 = vec![0.0f64; s3];
+        let mut b4 = vec![0.0f64; s4];
+        let mut i1 = 0usize;
+        let mut i2 = 0usize;
+        let mut i3 = 0usize;
+        let mut i4 = 0usize;
+        let mut sum1 = 0.0f64;
+        let mut sum2 = 0.0f64;
+        let mut sum3 = 0.0f64;
+        let mut sum4 = 0.0f64;
+
+        let start_line = first + wl;
+        let warm_sig_abs = first + ws;
+
+        // signal ring
+        let mut sbuf = vec![0.0f64; sig];
+        let mut sidx = 0usize;
+        let mut ssum = 0.0f64;
+        let mut sbuilt = 0usize;
+
+        unsafe {
+            let b1p = b1.as_mut_ptr();
+            let b2p = b2.as_mut_ptr();
+            let b3p = b3.as_mut_ptr();
+            let b4p = b4.as_mut_ptr();
+            let sbp = sbuf.as_mut_ptr();
+            let lptr = ldst.as_mut_ptr();
+            let sptr = sdst.as_mut_ptr();
+            let v1p = st.v1.as_ptr();
+            let v2p = st.v2.as_ptr();
+            let v3p = st.v3.as_ptr();
+            let v4p = st.v4.as_ptr();
+
+            #[inline(always)]
+            unsafe fn ring_update(buf: *mut f64, idx: &mut usize, cap: usize, sum: &mut f64, v: f64) {
+                let old = *buf.add(*idx);
+                *sum = (*sum) + (v - old);
+                *buf.add(*idx) = v;
+                *idx += 1;
+                if *idx == cap { *idx = 0; }
+            }
+
+            for i in first..len {
+                let v1 = *v1p.add(i);
+                let v2 = *v2p.add(i);
+                let v3 = *v3p.add(i);
+                let v4 = *v4p.add(i);
+
+                ring_update(b1p, &mut i1, s1, &mut sum1, v1);
+                ring_update(b2p, &mut i2, s2, &mut sum2, v2);
+                ring_update(b3p, &mut i3, s3, &mut sum3, v3);
+                ring_update(b4p, &mut i4, s4, &mut sum4, v4);
+
+                if i < start_line {
+                    continue;
+                }
+
+                let kst = sum1.mul_add(inv1, sum2.mul_add(w2, sum3.mul_add(w3, sum4 * w4)));
+                *lptr.add(i) = kst;
+
+                if sbuilt < sig {
+                    let old = *sbp.add(sidx);
+                    ssum += kst - old;
+                    *sbp.add(sidx) = kst;
+                    sidx += 1;
+                    if sidx == sig { sidx = 0; }
+                    sbuilt += 1;
+                    if i >= warm_sig_abs {
+                        *sptr.add(i) = ssum / (sig as f64);
+                    }
+                } else {
+                    let old = *sbp.add(sidx);
+                    ssum += kst - old;
+                    *sbp.add(sidx) = kst;
+                    sidx += 1;
+                    if sidx == sig { sidx = 0; }
+                    *sptr.add(i) = ssum / (sig as f64);
+                }
+            }
+        }
     };
 
     if parallel {
@@ -1153,15 +1341,194 @@ fn kst_batch_inner_into(
         _ => Kernel::Scalar,
     };
 
-    // Closure to process each row. The unwrap() is safe because:
-    // 1. expand_grid() ensures all parameters in combos are Some(valid_value)
-    // 2. We've already validated data is not empty above
-    // So kst_prepare() cannot fail with InvalidPeriod or EmptyInputData
+    // --- Row-specific batch optimization: ROC caching across rows with identical (r1..r4)
+    use std::collections::HashMap;
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+    struct R4(usize, usize, usize, usize);
+
+    // Group rows by ROC tuple
+    let mut groups: HashMap<R4, Vec<usize>> = HashMap::new();
+    for (idx, prm) in combos.iter().enumerate() {
+        groups
+            .entry(R4(
+                prm.roc_period1.unwrap(),
+                prm.roc_period2.unwrap(),
+                prm.roc_period3.unwrap(),
+                prm.roc_period4.unwrap(),
+            ))
+            .or_default()
+            .push(idx);
+    }
+
+    fn compute_roc_streams(
+        data: &[f64],
+        first: usize,
+        r: (usize, usize, usize, usize),
+    ) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
+        let len = data.len();
+        let (r1, r2, r3, r4) = r;
+        let mut v1 = vec![0.0f64; len];
+        let mut v2 = vec![0.0f64; len];
+        let mut v3 = vec![0.0f64; len];
+        let mut v4 = vec![0.0f64; len];
+        for i in first..len {
+            let x = data[i];
+            if i >= first + r1 {
+                let p = data[i - r1];
+                if x.is_finite() && p.is_finite() && p != 0.0 {
+                    v1[i] = ((x / p) - 1.0) * 100.0;
+                }
+            }
+            if i >= first + r2 {
+                let p = data[i - r2];
+                if x.is_finite() && p.is_finite() && p != 0.0 {
+                    v2[i] = ((x / p) - 1.0) * 100.0;
+                }
+            }
+            if i >= first + r3 {
+                let p = data[i - r3];
+                if x.is_finite() && p.is_finite() && p != 0.0 {
+                    v3[i] = ((x / p) - 1.0) * 100.0;
+                }
+            }
+            if i >= first + r4 {
+                let p = data[i - r4];
+                if x.is_finite() && p.is_finite() && p != 0.0 {
+                    v4[i] = ((x / p) - 1.0) * 100.0;
+                }
+            }
+        }
+        (v1, v2, v3, v4)
+    }
+
+    struct Streams {
+        v1: Vec<f64>,
+        v2: Vec<f64>,
+        v3: Vec<f64>,
+        v4: Vec<f64>,
+    }
+
+    let mut streams_map: HashMap<R4, Streams> = HashMap::with_capacity(groups.len());
+    for (key @ R4(r1, r2, r3, r4), _rows) in groups.iter() {
+        let (v1, v2, v3, v4) = compute_roc_streams(data, first, (*r1, *r2, *r3, *r4));
+        streams_map.insert(*key, Streams { v1, v2, v3, v4 });
+    }
+
     let do_row = |row: usize, ldst: &mut [f64], sdst: &mut [f64]| {
         let prm = &combos[row];
-        let input = KstInput::from_slice(data, *prm);
-        let (_d, s, r, sig, first, wl, ws, _chosen) = kst_prepare(&input, simd).unwrap();
-        kst_compute_into(data, s, r, sig, first, wl, ws, ldst, sdst);
+        let s = (
+            prm.sma_period1.unwrap(),
+            prm.sma_period2.unwrap(),
+            prm.sma_period3.unwrap(),
+            prm.sma_period4.unwrap(),
+        );
+        let r = (
+            prm.roc_period1.unwrap(),
+            prm.roc_period2.unwrap(),
+            prm.roc_period3.unwrap(),
+            prm.roc_period4.unwrap(),
+        );
+        let sig = prm.signal_period.unwrap();
+        let wl = (r.0 + s.0 - 1)
+            .max(r.1 + s.1 - 1)
+            .max(r.2 + s.2 - 1)
+            .max(r.3 + s.3 - 1);
+        let ws = wl + sig - 1;
+
+        let key = R4(r.0, r.1, r.2, r.3);
+        let st = streams_map.get(&key).unwrap();
+
+        let len = ldst.len();
+        let (s1, s2, s3, s4) = s;
+        let inv1 = 1.0 / (s1 as f64);
+        let inv2 = 1.0 / (s2 as f64);
+        let inv3 = 1.0 / (s3 as f64);
+        let inv4 = 1.0 / (s4 as f64);
+        let w2 = inv2 + inv2;
+        let w3 = inv3 + inv3 + inv3;
+        let w4 = 4.0f64 * inv4;
+
+        let mut b1 = vec![0.0f64; s1];
+        let mut b2 = vec![0.0f64; s2];
+        let mut b3 = vec![0.0f64; s3];
+        let mut b4 = vec![0.0f64; s4];
+        let mut i1 = 0usize;
+        let mut i2 = 0usize;
+        let mut i3 = 0usize;
+        let mut i4 = 0usize;
+        let mut sum1 = 0.0f64;
+        let mut sum2 = 0.0f64;
+        let mut sum3 = 0.0f64;
+        let mut sum4 = 0.0f64;
+
+        let start_line = first + wl;
+        let warm_sig_abs = first + ws;
+
+        let mut sbuf = vec![0.0f64; sig];
+        let mut sidx = 0usize;
+        let mut ssum = 0.0f64;
+        let mut sbuilt = 0usize;
+
+        unsafe {
+            let b1p = b1.as_mut_ptr();
+            let b2p = b2.as_mut_ptr();
+            let b3p = b3.as_mut_ptr();
+            let b4p = b4.as_mut_ptr();
+            let sbp = sbuf.as_mut_ptr();
+            let lptr = ldst.as_mut_ptr();
+            let sptr = sdst.as_mut_ptr();
+            let v1p = st.v1.as_ptr();
+            let v2p = st.v2.as_ptr();
+            let v3p = st.v3.as_ptr();
+            let v4p = st.v4.as_ptr();
+
+            #[inline(always)]
+            unsafe fn ring_update(buf: *mut f64, idx: &mut usize, cap: usize, sum: &mut f64, v: f64) {
+                let old = *buf.add(*idx);
+                *sum = (*sum) + (v - old);
+                *buf.add(*idx) = v;
+                *idx += 1;
+                if *idx == cap { *idx = 0; }
+            }
+
+            for i in first..len {
+                let v1 = *v1p.add(i);
+                let v2 = *v2p.add(i);
+                let v3 = *v3p.add(i);
+                let v4 = *v4p.add(i);
+
+                ring_update(b1p, &mut i1, s1, &mut sum1, v1);
+                ring_update(b2p, &mut i2, s2, &mut sum2, v2);
+                ring_update(b3p, &mut i3, s3, &mut sum3, v3);
+                ring_update(b4p, &mut i4, s4, &mut sum4, v4);
+
+                if i < start_line {
+                    continue;
+                }
+
+                let kst = sum1.mul_add(inv1, sum2.mul_add(w2, sum3.mul_add(w3, sum4 * w4)));
+                *lptr.add(i) = kst;
+
+                if sbuilt < sig {
+                    let old = *sbp.add(sidx);
+                    ssum += kst - old;
+                    *sbp.add(sidx) = kst;
+                    sidx += 1;
+                    if sidx == sig { sidx = 0; }
+                    sbuilt += 1;
+                    if i >= warm_sig_abs {
+                        *sptr.add(i) = ssum / (sig as f64);
+                    }
+                } else {
+                    let old = *sbp.add(sidx);
+                    ssum += kst - old;
+                    *sbp.add(sidx) = kst;
+                    sidx += 1;
+                    if sidx == sig { sidx = 0; }
+                    *sptr.add(i) = ssum / (sig as f64);
+                }
+            }
+        }
     };
 
     if parallel {

@@ -16,11 +16,11 @@
 //! - **values**: Ultimate Oscillator values as `Vec<f64>` (length matches input, range 0-100)
 //!
 //! ## Developer Notes
-//! - **AVX2/AVX512 kernels**: Currently stubs that call scalar implementation
-//! - **Streaming update**: O(1) performance with efficient circular buffer and running sums
-//! - **Memory optimization**: Properly uses zero-copy helper functions (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
-//! - **TODO**: Implement actual SIMD kernels for AVX2/AVX512
-//! - **Note**: Streaming implementation is well-optimized with incremental sum updates
+//! - **AVX2/AVX512 kernels**: Currently stubs delegating to the scalar path.
+//! - **Scalar path**: Optimized single-pass O(1) per-step using a ring buffer and running sums.
+//! - **Batch**: Shares precomputed CMTL/TR across rows to avoid redundant work.
+//! - **TODO**: Real SIMD kernels. Prior attempts show limited wins due to per-step dependencies and branching in TR.
+//!   Keep stubs for now; revisit with layout changes or prefix-sum strategies.
 
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -452,157 +452,131 @@ unsafe fn ultosc_scalar_impl(
     tr_buf: &mut [f64],
 ) {
     let len = high.len();
-    let max_period = p1.max(p2).max(p3);
+    if len == 0 {
+        return;
+    }
 
-    let mut sum1_a = 0.0;
-    let mut sum1_b = 0.0;
-    let mut sum2_a = 0.0;
-    let mut sum2_b = 0.0;
-    let mut sum3_a = 0.0;
-    let mut sum3_b = 0.0;
+    let max_p = p1.max(p2).max(p3);
+    debug_assert!(max_p > 0 && max_p <= len);
 
-    let start_idx = first_valid + max_period - 1;
-    let mut buf_idx = 0;
+    // Start computing outputs when the largest window is filled
+    let start_idx = first_valid + max_p - 1;
 
-    // Calculate values for warmup period
-    for i in first_valid..=start_idx {
-        if i >= len {
-            break;
-        }
+    // Weights: 100 * (4*BP1/TR1 + 2*BP2/TR2 + 1*BP3/TR3) / 7
+    let inv7_100: f64 = 100.0f64 / 7.0f64;
+    let w1: f64 = inv7_100 * 4.0f64;
+    let w2: f64 = inv7_100 * 2.0f64;
+    let w3: f64 = inv7_100 * 1.0f64;
 
-        let cmtl_val;
-        let tr_val;
+    // Rolling sums for the three windows
+    let mut sum1_a = 0.0f64;
+    let mut sum1_b = 0.0f64;
+    let mut sum2_a = 0.0f64;
+    let mut sum2_b = 0.0f64;
+    let mut sum3_a = 0.0f64;
+    let mut sum3_b = 0.0f64;
 
-        if high[i].is_nan() || low[i].is_nan() || close[i].is_nan() || close[i - 1].is_nan() {
-            cmtl_val = f64::NAN;
-            tr_val = f64::NAN;
+    // Ring buffer index and element count processed since first_valid
+    let mut buf_idx: usize = 0;
+    let mut count: usize = 0;
+
+    // Single-pass loop from first_valid to end
+    let mut i = first_valid;
+    while i < len {
+        let hi = *high.get_unchecked(i);
+        let lo = *low.get_unchecked(i);
+        let ci = *close.get_unchecked(i);
+        let prev_c = *close.get_unchecked(i - 1);
+
+        // Compute today's BP (close - true_low) and TR
+        let (cmtl_val, tr_val) = if hi.is_nan() || lo.is_nan() || ci.is_nan() || prev_c.is_nan() {
+            (f64::NAN, f64::NAN)
         } else {
-            let true_low = low[i].min(close[i - 1]);
-            let mut true_range = high[i] - low[i];
-            let diff1 = (high[i] - close[i - 1]).abs();
-            if diff1 > true_range {
-                true_range = diff1;
+            let tl = if lo < prev_c { lo } else { prev_c };
+
+            let mut tr = hi - lo;
+            let d1 = (hi - prev_c).abs();
+            if d1 > tr {
+                tr = d1;
             }
-            let diff2 = (low[i] - close[i - 1]).abs();
-            if diff2 > true_range {
-                true_range = diff2;
+            let d2 = (lo - prev_c).abs();
+            if d2 > tr {
+                tr = d2;
             }
-            cmtl_val = close[i] - true_low;
-            tr_val = true_range;
-        }
-
-        cmtl_buf[buf_idx] = cmtl_val;
-        tr_buf[buf_idx] = tr_val;
-        buf_idx = (buf_idx + 1) % max_period;
-    }
-
-    // Initialize sums for each period
-    for i in 0..p1 {
-        let idx = (buf_idx + max_period - p1 + i) % max_period;
-        if !cmtl_buf[idx].is_nan() && !tr_buf[idx].is_nan() {
-            sum1_a += cmtl_buf[idx];
-            sum1_b += tr_buf[idx];
-        }
-    }
-
-    for i in 0..p2 {
-        let idx = (buf_idx + max_period - p2 + i) % max_period;
-        if !cmtl_buf[idx].is_nan() && !tr_buf[idx].is_nan() {
-            sum2_a += cmtl_buf[idx];
-            sum2_b += tr_buf[idx];
-        }
-    }
-
-    for i in 0..p3 {
-        let idx = (buf_idx + max_period - p3 + i) % max_period;
-        if !cmtl_buf[idx].is_nan() && !tr_buf[idx].is_nan() {
-            sum3_a += cmtl_buf[idx];
-            sum3_b += tr_buf[idx];
-        }
-    }
-
-    // Main calculation loop
-    let mut today = start_idx;
-    while today < len {
-        // Calculate current ULTOSC value
-        let v1 = if sum1_b != 0.0 {
-            4.0 * (sum1_a / sum1_b)
-        } else {
-            0.0
+            (ci - tl, tr)
         };
-        let v2 = if sum2_b != 0.0 {
-            2.0 * (sum2_a / sum2_b)
-        } else {
-            0.0
-        };
-        let v3 = if sum3_b != 0.0 { sum3_a / sum3_b } else { 0.0 };
-        out[today] = 100.0 * (v1 + v2 + v3) / 7.0;
 
-        // Prepare for next iteration
-        if today + 1 < len {
-            // Calculate new values
-            let cmtl_val;
-            let tr_val;
-
-            if high[today + 1].is_nan()
-                || low[today + 1].is_nan()
-                || close[today + 1].is_nan()
-                || close[today].is_nan()
-            {
-                cmtl_val = f64::NAN;
-                tr_val = f64::NAN;
-            } else {
-                let true_low = low[today + 1].min(close[today]);
-                let mut true_range = high[today + 1] - low[today + 1];
-                let diff1 = (high[today + 1] - close[today]).abs();
-                if diff1 > true_range {
-                    true_range = diff1;
-                }
-                let diff2 = (low[today + 1] - close[today]).abs();
-                if diff2 > true_range {
-                    true_range = diff2;
-                }
-                cmtl_val = close[today + 1] - true_low;
-                tr_val = true_range;
+        // For each window, remove the value that falls out (if the window is already full)
+        if count >= p1 {
+            let mut old_idx1 = buf_idx + max_p - p1;
+            if old_idx1 >= max_p {
+                old_idx1 -= max_p;
             }
-
-            // Remove oldest values from sums
-            let old_idx_1 = (buf_idx + max_period - p1) % max_period;
-            if !cmtl_buf[old_idx_1].is_nan() && !tr_buf[old_idx_1].is_nan() {
-                sum1_a -= cmtl_buf[old_idx_1];
-                sum1_b -= tr_buf[old_idx_1];
+            let old_c = *cmtl_buf.get_unchecked(old_idx1);
+            let old_t = *tr_buf.get_unchecked(old_idx1);
+            if !old_c.is_nan() && !old_t.is_nan() {
+                sum1_a -= old_c;
+                sum1_b -= old_t;
             }
-
-            let old_idx_2 = (buf_idx + max_period - p2) % max_period;
-            if !cmtl_buf[old_idx_2].is_nan() && !tr_buf[old_idx_2].is_nan() {
-                sum2_a -= cmtl_buf[old_idx_2];
-                sum2_b -= tr_buf[old_idx_2];
+        }
+        if count >= p2 {
+            let mut old_idx2 = buf_idx + max_p - p2;
+            if old_idx2 >= max_p {
+                old_idx2 -= max_p;
             }
-
-            let old_idx_3 = (buf_idx + max_period - p3) % max_period;
-            if !cmtl_buf[old_idx_3].is_nan() && !tr_buf[old_idx_3].is_nan() {
-                sum3_a -= cmtl_buf[old_idx_3];
-                sum3_b -= tr_buf[old_idx_3];
+            let old_c = *cmtl_buf.get_unchecked(old_idx2);
+            let old_t = *tr_buf.get_unchecked(old_idx2);
+            if !old_c.is_nan() && !old_t.is_nan() {
+                sum2_a -= old_c;
+                sum2_b -= old_t;
             }
-
-            // Add new values to buffer
-            cmtl_buf[buf_idx] = cmtl_val;
-            tr_buf[buf_idx] = tr_val;
-
-            // Add new values to sums
-            if !cmtl_val.is_nan() && !tr_val.is_nan() {
-                sum1_a += cmtl_val;
-                sum1_b += tr_val;
-                sum2_a += cmtl_val;
-                sum2_b += tr_val;
-                sum3_a += cmtl_val;
-                sum3_b += tr_val;
+        }
+        if count >= p3 {
+            let mut old_idx3 = buf_idx + max_p - p3;
+            if old_idx3 >= max_p {
+                old_idx3 -= max_p;
             }
-
-            buf_idx = (buf_idx + 1) % max_period;
+            let old_c = *cmtl_buf.get_unchecked(old_idx3);
+            let old_t = *tr_buf.get_unchecked(old_idx3);
+            if !old_c.is_nan() && !old_t.is_nan() {
+                sum3_a -= old_c;
+                sum3_b -= old_t;
+            }
         }
 
-        today += 1;
+        // Write new values into the ring buffer
+        *cmtl_buf.get_unchecked_mut(buf_idx) = cmtl_val;
+        *tr_buf.get_unchecked_mut(buf_idx) = tr_val;
+
+        // Add today's values to all active sums (skip NaNs to match semantics)
+        if !cmtl_val.is_nan() && !tr_val.is_nan() {
+            sum1_a += cmtl_val;
+            sum1_b += tr_val;
+            sum2_a += cmtl_val;
+            sum2_b += tr_val;
+            sum3_a += cmtl_val;
+            sum3_b += tr_val;
+        }
+
+        // We can produce output once the largest window is filled
+        count += 1;
+        if i >= start_idx {
+            let t1 = if sum1_b != 0.0 { sum1_a / sum1_b } else { 0.0 };
+            let t2 = if sum2_b != 0.0 { sum2_a / sum2_b } else { 0.0 };
+            let t3 = if sum3_b != 0.0 { sum3_a / sum3_b } else { 0.0 };
+
+            // out[i] = w1*t1 + w2*t2 + w3*t3 (use FMA chain)
+            let acc = f64::mul_add(w2, t2, w3 * t3);
+            *out.get_unchecked_mut(i) = f64::mul_add(w1, t1, acc);
+        }
+
+        // Advance ring buffer
+        buf_idx += 1;
+        if buf_idx == max_p {
+            buf_idx = 0;
+        }
+
+        i += 1;
     }
 }
 
@@ -1002,18 +976,63 @@ pub fn ultosc_batch_inner_into(
     let rows = combos.len();
     let cols = len;
 
-    let do_row = |row: usize, row_out: &mut [f64]| unsafe {
+    // Row-specific batch optimization: precompute prefix sums of CMTL and TR once
+    // pcmtl[i+1] = sum of valid CMTL up to i, ptr[i+1] = sum of valid TR up to i
+    let mut pcmtl = vec![0.0f64; len + 1];
+    let mut ptr = vec![0.0f64; len + 1];
+    for i in 0..len {
+        let (mut add_c, mut add_t) = (0.0f64, 0.0f64);
+        if i >= first_valid_idx {
+            let hi = high[i];
+            let lo = low[i];
+            let ci = close[i];
+            let pc = close[i - 1];
+            if hi.is_finite() && lo.is_finite() && ci.is_finite() && pc.is_finite() {
+                let tl = if lo < pc { lo } else { pc };
+                let mut trv = hi - lo;
+                let d1 = (hi - pc).abs();
+                if d1 > trv {
+                    trv = d1;
+                }
+                let d2 = (lo - pc).abs();
+                if d2 > trv {
+                    trv = d2;
+                }
+                add_c = ci - tl;
+                add_t = trv;
+            }
+        }
+        pcmtl[i + 1] = pcmtl[i] + add_c;
+        ptr[i + 1] = ptr[i] + add_t;
+    }
+
+    let do_row = |row: usize, row_out: &mut [f64]| {
         let p1 = combos[row].timeperiod1.unwrap();
         let p2 = combos[row].timeperiod2.unwrap();
         let p3 = combos[row].timeperiod3.unwrap();
+        let start = first_valid_idx + p1.max(p2).max(p3) - 1;
 
-        match simd {
-            Kernel::Scalar => ultosc_scalar(high, low, close, p1, p2, p3, first_valid_idx, row_out),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => ultosc_avx2(high, low, close, p1, p2, p3, first_valid_idx, row_out),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => ultosc_avx512(high, low, close, p1, p2, p3, first_valid_idx, row_out),
-            _ => unreachable!(),
+        let inv7_100: f64 = 100.0f64 / 7.0f64;
+        let w1: f64 = inv7_100 * 4.0f64;
+        let w2: f64 = inv7_100 * 2.0f64;
+        let w3: f64 = inv7_100 * 1.0f64;
+
+        // Only fill indices from start..len; warmup was already initialized to NaN
+        for i in start..len {
+            // Window sums via prefix differences
+            let s1a = pcmtl[i + 1] - pcmtl[i + 1 - p1];
+            let s1b = ptr[i + 1] - ptr[i + 1 - p1];
+            let s2a = pcmtl[i + 1] - pcmtl[i + 1 - p2];
+            let s2b = ptr[i + 1] - ptr[i + 1 - p2];
+            let s3a = pcmtl[i + 1] - pcmtl[i + 1 - p3];
+            let s3b = ptr[i + 1] - ptr[i + 1 - p3];
+
+            let t1 = if s1b != 0.0 { s1a / s1b } else { 0.0 };
+            let t2 = if s2b != 0.0 { s2a / s2b } else { 0.0 };
+            let t3 = if s3b != 0.0 { s3a / s3b } else { 0.0 };
+
+            let acc = f64::mul_add(w2, t2, w3 * t3);
+            row_out[i] = f64::mul_add(w1, t1, acc);
         }
     };
 

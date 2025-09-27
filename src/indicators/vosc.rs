@@ -12,11 +12,12 @@
 //! - **`Err(VoscError)`** on invalid parameters or insufficient data.
 //!
 //! ## Developer Notes
-//! - **SIMD Status**: AVX2 and AVX512 kernels are stubs (call scalar implementation)
-//! - **Streaming Performance**: O(1) - maintains separate ring buffers for short/long periods
+//! - **SIMD Status**: AVX2/AVX512 remain stubs (sequential dependency limits gains)
+//! - **Streaming Performance**: O(1) — maintains separate ring buffers for short/long periods
+//! - **Scalar Path**: Tightened with unchecked indexing + loop-jamming (faster, tests unchanged)
 //! - **Memory Optimization**: ✓ Uses alloc_with_nan_prefix for output allocation
-//! - **Batch Support**: ✓ Full parallel batch parameter sweep implementation
-//! - **TODO**: Implement actual AVX2/AVX512 SIMD kernels for rolling sum calculations
+//! - **Batch Support**: ✓ Row-specific optimization via shared prefix sums across parameter rows
+//! - **Note**: Sliding update per time step is inherently sequential; SIMD adds little benefit here.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -290,32 +291,66 @@ pub fn vosc_scalar(
     first_valid: usize,
     out: &mut [f64],
 ) {
-    let mut short_sum = 0.0;
-    let mut long_sum = 0.0;
-    for i in first_valid..(first_valid + long_period) {
-        let v = data[i];
-        if i >= (first_valid + long_period - short_period) {
-            short_sum += v;
-        }
-        long_sum += v;
-    }
-
+    // Precompute reciprocals to avoid repeated divisions
     let short_div = 1.0 / (short_period as f64);
     let long_div = 1.0 / (long_period as f64);
-    let init_idx = first_valid + long_period - 1;
-    let mut savg = short_sum * short_div;
-    let mut lavg = long_sum * long_div;
-    out[init_idx] = 100.0 * (savg - lavg) / lavg;
 
-    for i in (first_valid + long_period)..data.len() {
-        short_sum += data[i];
-        short_sum -= data[i - short_period];
-        long_sum += data[i];
-        long_sum -= data[i - long_period];
+    // Window bounds
+    let start = first_valid;
+    let end_init = start + long_period; // exclusive upper bound of the first long window
+    let short_start = end_init - short_period;
 
-        savg = short_sum * short_div;
-        lavg = long_sum * long_div;
-        out[i] = 100.0 * (savg - lavg) / lavg;
+    let mut short_sum = 0.0f64;
+    let mut long_sum = 0.0f64;
+
+    // Initial window accumulation (single pass, loop-jammed)
+    unsafe {
+        let mut i = start;
+        while i < end_init {
+            let v = *data.get_unchecked(i);
+            long_sum += v;
+            if i >= short_start {
+                short_sum += v;
+            }
+            i += 1;
+        }
+
+        // First valid output index
+        let mut idx = end_init - 1;
+
+        // Write initial value
+        let mut lavg = long_sum * long_div;
+        let mut savg = short_sum * short_div;
+        *out.get_unchecked_mut(idx) = 100.0 * (savg - lavg) / lavg;
+
+        // Sliding window (tight loop; unchecked indexing; loop-jammed)
+        let mut t_s = end_init - short_period; // j - short_period (for j = end_init)
+        let mut t_l = start;                   // j - long_period  (for j = end_init)
+
+        let mut j = end_init;
+        let len = data.len();
+
+        while j < len {
+            let x_new = *data.get_unchecked(j);
+
+            // Preserve update order: add then subtract for each sum
+            short_sum += x_new;
+            short_sum -= *data.get_unchecked(t_s);
+
+            long_sum += x_new;
+            long_sum -= *data.get_unchecked(t_l);
+
+            t_s += 1;
+            t_l += 1;
+
+            idx += 1;
+
+            lavg = long_sum * long_div;
+            savg = short_sum * short_div;
+            *out.get_unchecked_mut(idx) = 100.0 * (savg - lavg) / lavg;
+
+            j += 1;
+        }
     }
 }
 
@@ -374,6 +409,36 @@ pub fn vosc_row_scalar(
     out: &mut [f64],
 ) {
     vosc_scalar(data, short_period, long_period, first, out)
+}
+
+#[inline(always)]
+fn vosc_row_scalar_prefix(
+    data: &[f64],
+    prefix: &[f64],
+    first: usize,
+    short_period: usize,
+    long_period: usize,
+    out: &mut [f64],
+) {
+    let warm = first + long_period - 1;
+    let short_div = 1.0 / (short_period as f64);
+    let long_div = 1.0 / (long_period as f64);
+    let len = data.len();
+    if warm >= len {
+        return; // nothing to write; warmup covers all
+    }
+    unsafe {
+        let mut i = warm;
+        while i < len {
+            let ip1 = i + 1;
+            let long_sum = *prefix.get_unchecked(ip1) - *prefix.get_unchecked(ip1 - long_period);
+            let short_sum = *prefix.get_unchecked(ip1) - *prefix.get_unchecked(ip1 - short_period);
+            let lavg = long_sum * long_div;
+            let savg = short_sum * short_div;
+            *out.get_unchecked_mut(i) = 100.0 * (savg - lavg) / lavg;
+            i += 1;
+        }
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -568,12 +633,17 @@ pub fn vosc_batch_with_kernel(
             })
         }
     };
-    let simd = match kernel {
+    let mut simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
         _ => unreachable!(),
     };
+    // On stable builds (no nightly-avx), coerce to Scalar to avoid unreachable paths in benches
+    #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+    {
+        simd = Kernel::Scalar;
+    }
     vosc_batch_par_slice(data, sweep, simd)
 }
 
@@ -695,11 +765,21 @@ fn vosc_batch_inner(
     // Convert back to mutable slices for processing
     let mut values = values;
 
+    // Shared prefix sums for all rows to avoid redundant sliding sums
+    // prefix[k] = sum(data[0..k]) with prefix[0] = 0, length = data.len() + 1
+    let mut prefix = Vec::with_capacity(cols + 1);
+    prefix.push(0.0f64);
+    let mut acc = 0.0f64;
+    for &v in data.iter() {
+        acc += v;
+        prefix.push(acc);
+    }
+
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let short = combos[row].short_period.unwrap();
         let long = combos[row].long_period.unwrap();
         match kern {
-            Kernel::Scalar => vosc_row_scalar(data, first, short, long, out_row),
+            Kernel::Scalar => vosc_row_scalar_prefix(data, &prefix, first, short, long, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 => vosc_row_avx2(data, first, short, long, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -781,12 +861,21 @@ fn vosc_batch_inner_into(
     };
     init_matrix_prefixes(out_mu, cols, &warm);
 
+    // Shared prefix sums for all rows
+    let mut prefix = Vec::with_capacity(cols + 1);
+    prefix.push(0.0f64);
+    let mut acc = 0.0f64;
+    for &v in data.iter() {
+        acc += v;
+        prefix.push(acc);
+    }
+
     // Row executor
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let s = combos[row].short_period.unwrap();
         let l = combos[row].long_period.unwrap();
         match kern {
-            Kernel::Scalar => vosc_row_scalar(data, first, s, l, out_row),
+            Kernel::Scalar => vosc_row_scalar_prefix(data, &prefix, first, s, l, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 => vosc_row_avx2(data, first, s, l, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]

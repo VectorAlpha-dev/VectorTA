@@ -12,10 +12,10 @@
 //! - **`Err(QstickError)`** on failure
 //!
 //! ## Developer Notes
-//! - **AVX2**: Stub implementation - calls scalar function
-//! - **AVX512**: Multiple stub functions (qstick_avx512, qstick_avx512_short, qstick_avx512_long) - all call scalar
-//! - **Streaming**: O(1) with efficient circular buffer and running sum
-//! - **Memory**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
+//! - SIMD enabled for initial window sum (AVX2/AVX512); rolling update stays scalar and unrolled.
+//! - Scalar path is optimized, safe, and warmup-compatible (no temporaries, single pass).
+//! - Batch (Avx2/Avx512) uses shared prefix of (close - open) across rows to remove redundant work.
+//! - Memory: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -266,18 +266,82 @@ pub fn qstick_scalar(
     first_valid: usize,
     out: &mut [f64],
 ) {
-    let mut sum = 0.0;
-    // Compute initial sum of differences
-    for i in first_valid..first_valid + period {
-        sum += close[i] - open[i];
+    // Pre-checked by caller: period in [1..], len - first_valid >= period
+    let len = open.len().min(close.len());
+    if len == 0 {
+        return;
     }
-    let inv_period = 1.0 / (period as f64);
-    out[first_valid + period - 1] = sum * inv_period;
 
-    // Rolling window computation
-    for i in (first_valid + period)..close.len() {
-        sum += (close[i] - open[i]) - (close[i - period] - open[i - period]);
-        out[i] = sum * inv_period;
+    let start = first_valid;
+    let warm = start + period - 1;
+    let inv_p = 1.0 / (period as f64);
+
+    // Fast path: period == 1 ⇒ QStick = close - open
+    if period == 1 {
+        let mut i = start;
+        // Unroll by 4, safe indexing
+        while i + 3 < len {
+            out[i] = close[i] - open[i];
+            out[i + 1] = close[i + 1] - open[i + 1];
+            out[i + 2] = close[i + 2] - open[i + 2];
+            out[i + 3] = close[i + 3] - open[i + 3];
+            i += 4;
+        }
+        while i < len {
+            out[i] = close[i] - open[i];
+            i += 1;
+        }
+        return;
+    }
+
+    // Initial window sum of (close - open)
+    let mut sum = 0.0f64;
+    let end_init = start + period;
+    let mut k = start;
+    // Unroll by 4 for fewer branches
+    let end_unroll = start + ((period) & !3usize);
+    while k < end_unroll {
+        sum += (close[k] - open[k])
+            + (close[k + 1] - open[k + 1])
+            + (close[k + 2] - open[k + 2])
+            + (close[k + 3] - open[k + 3]);
+        k += 4;
+    }
+    while k < end_init {
+        sum += close[k] - open[k];
+        k += 1;
+    }
+
+    out[warm] = sum * inv_p;
+
+    // Rolling update: add entering diff, subtract leaving diff; unrolled by 4
+    let mut i_new = warm + 1;
+    let mut i_old = start;
+    while i_new + 3 < len {
+        // 0
+        sum = (sum + (close[i_new] - open[i_new])) - (close[i_old] - open[i_old]);
+        out[i_new] = sum * inv_p;
+        // 1
+        sum = (sum + (close[i_new + 1] - open[i_new + 1]))
+            - (close[i_old + 1] - open[i_old + 1]);
+        out[i_new + 1] = sum * inv_p;
+        // 2
+        sum = (sum + (close[i_new + 2] - open[i_new + 2]))
+            - (close[i_old + 2] - open[i_old + 2]);
+        out[i_new + 2] = sum * inv_p;
+        // 3
+        sum = (sum + (close[i_new + 3] - open[i_new + 3]))
+            - (close[i_old + 3] - open[i_old + 3]);
+        out[i_new + 3] = sum * inv_p;
+
+        i_new += 4;
+        i_old += 4;
+    }
+    while i_new < len {
+        sum = (sum + (close[i_new] - open[i_new])) - (close[i_old] - open[i_old]);
+        out[i_new] = sum * inv_p;
+        i_new += 1;
+        i_old += 1;
     }
 }
 
@@ -290,7 +354,7 @@ pub fn qstick_avx512(
     first_valid: usize,
     out: &mut [f64],
 ) {
-    qstick_scalar(open, close, period, first_valid, out)
+    unsafe { qstick_avx512_impl(open, close, period, first_valid, out) }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -302,7 +366,7 @@ pub fn qstick_avx2(
     first_valid: usize,
     out: &mut [f64],
 ) {
-    qstick_scalar(open, close, period, first_valid, out)
+    unsafe { qstick_avx2_impl(open, close, period, first_valid, out) }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -327,6 +391,208 @@ pub fn qstick_avx512_long(
     out: &mut [f64],
 ) {
     qstick_avx512(open, close, period, first_valid, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn qstick_avx2_impl(
+    open: &[f64],
+    close: &[f64],
+    period: usize,
+    first_valid: usize,
+    out: &mut [f64],
+) {
+    let len = open.len().min(close.len());
+    if len == 0 {
+        return;
+    }
+    let start = first_valid;
+    let warm = start + period - 1;
+    let inv_p = 1.0 / (period as f64);
+
+    // period == 1
+    if period == 1 {
+        let mut i = start;
+        while i + 3 < len {
+            let c = _mm256_loadu_pd(close.as_ptr().add(i));
+            let o = _mm256_loadu_pd(open.as_ptr().add(i));
+            let d = _mm256_sub_pd(c, o);
+            _mm256_storeu_pd(out.as_mut_ptr().add(i), d);
+            i += 4;
+        }
+        while i < len {
+            *out.get_unchecked_mut(i) = *close.get_unchecked(i) - *open.get_unchecked(i);
+            i += 1;
+        }
+        return;
+    }
+
+    // Initial window sum using AVX2
+    let mut v_sum = _mm256_setzero_pd();
+    let mut k = 0usize;
+    let vec_end = period & !3usize; // multiple of 4
+    while k < vec_end {
+        let idx = start + k;
+        let c = _mm256_loadu_pd(close.as_ptr().add(idx));
+        let o = _mm256_loadu_pd(open.as_ptr().add(idx));
+        let d = _mm256_sub_pd(c, o);
+        v_sum = _mm256_add_pd(v_sum, d);
+        k += 4;
+    }
+    // horizontal reduce v_sum
+    let hi = _mm256_extractf128_pd(v_sum, 1);
+    let lo = _mm256_castpd256_pd128(v_sum);
+    let s2 = _mm_add_pd(lo, hi);
+    let s1 = _mm_hadd_pd(s2, s2);
+    let mut sum = _mm_cvtsd_f64(s1);
+
+    while k < period {
+        let idx = start + k;
+        sum += *close.get_unchecked(idx) - *open.get_unchecked(idx);
+        k += 1;
+    }
+
+    *out.get_unchecked_mut(warm) = sum * inv_p;
+
+    // Rolling update remains scalar; unroll by 4
+    let mut i_new = warm + 1;
+    let mut i_old = start;
+    while i_new + 3 < len {
+        // 0
+        sum = (sum + (*close.get_unchecked(i_new) - *open.get_unchecked(i_new)))
+            - (*close.get_unchecked(i_old) - *open.get_unchecked(i_old));
+        *out.get_unchecked_mut(i_new) = sum * inv_p;
+        // 1
+        sum = (sum
+            + (*close.get_unchecked(i_new + 1) - *open.get_unchecked(i_new + 1)))
+            - (*close.get_unchecked(i_old + 1) - *open.get_unchecked(i_old + 1));
+        *out.get_unchecked_mut(i_new + 1) = sum * inv_p;
+        // 2
+        sum = (sum
+            + (*close.get_unchecked(i_new + 2) - *open.get_unchecked(i_new + 2)))
+            - (*close.get_unchecked(i_old + 2) - *open.get_unchecked(i_old + 2));
+        *out.get_unchecked_mut(i_new + 2) = sum * inv_p;
+        // 3
+        sum = (sum
+            + (*close.get_unchecked(i_new + 3) - *open.get_unchecked(i_new + 3)))
+            - (*close.get_unchecked(i_old + 3) - *open.get_unchecked(i_old + 3));
+        *out.get_unchecked_mut(i_new + 3) = sum * inv_p;
+
+        i_new += 4;
+        i_old += 4;
+    }
+    while i_new < len {
+        sum = (sum + (*close.get_unchecked(i_new) - *open.get_unchecked(i_new)))
+            - (*close.get_unchecked(i_old) - *open.get_unchecked(i_old));
+        *out.get_unchecked_mut(i_new) = sum * inv_p;
+        i_new += 1;
+        i_old += 1;
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+unsafe fn qstick_avx512_impl(
+    open: &[f64],
+    close: &[f64],
+    period: usize,
+    first_valid: usize,
+    out: &mut [f64],
+) {
+    let len = open.len().min(close.len());
+    if len == 0 {
+        return;
+    }
+    let start = first_valid;
+    let warm = start + period - 1;
+    let inv_p = 1.0 / (period as f64);
+
+    // period == 1
+    if period == 1 {
+        let mut i = start;
+        while i + 7 < len {
+            let c = _mm512_loadu_pd(close.as_ptr().add(i));
+            let o = _mm512_loadu_pd(open.as_ptr().add(i));
+            let d = _mm512_sub_pd(c, o);
+            _mm512_storeu_pd(out.as_mut_ptr().add(i), d);
+            i += 8;
+        }
+        while i < len {
+            *out.get_unchecked_mut(i) = *close.get_unchecked(i) - *open.get_unchecked(i);
+            i += 1;
+        }
+        return;
+    }
+
+    // Initial window sum using AVX512
+    let mut v_sum = _mm512_setzero_pd();
+    let mut k = 0usize;
+    let vec_end = period & !7usize; // multiple of 8
+    while k < vec_end {
+        let idx = start + k;
+        let c = _mm512_loadu_pd(close.as_ptr().add(idx));
+        let o = _mm512_loadu_pd(open.as_ptr().add(idx));
+        let d = _mm512_sub_pd(c, o);
+        v_sum = _mm512_add_pd(v_sum, d);
+        k += 8;
+    }
+    // reduce 8-lane vector to scalar
+    let lo256 = _mm512_castpd512_pd256(v_sum);
+    let hi256 = _mm512_extractf64x4_pd(v_sum, 1);
+    let lo_hi128 = _mm256_extractf128_pd(lo256, 1);
+    let lo_lo128 = _mm256_castpd256_pd128(lo256);
+    let lo_s2 = _mm_add_pd(lo_lo128, lo_hi128);
+    let lo_s1 = _mm_hadd_pd(lo_s2, lo_s2);
+    let s_lo = _mm_cvtsd_f64(lo_s1);
+
+    let hi_hi128 = _mm256_extractf128_pd(hi256, 1);
+    let hi_lo128 = _mm256_castpd256_pd128(hi256);
+    let hi_s2 = _mm_add_pd(hi_lo128, hi_hi128);
+    let hi_s1 = _mm_hadd_pd(hi_s2, hi_s2);
+    let s_hi = _mm_cvtsd_f64(hi_s1);
+
+    let mut sum = s_lo + s_hi;
+    while k < period {
+        let idx = start + k;
+        sum += *close.get_unchecked(idx) - *open.get_unchecked(idx);
+        k += 1;
+    }
+
+    *out.get_unchecked_mut(warm) = sum * inv_p;
+
+    // Rolling update remains scalar; unroll by 4
+    let mut i_new = warm + 1;
+    let mut i_old = start;
+    while i_new + 3 < len {
+        sum = (sum + (*close.get_unchecked(i_new) - *open.get_unchecked(i_new)))
+            - (*close.get_unchecked(i_old) - *open.get_unchecked(i_old));
+        *out.get_unchecked_mut(i_new) = sum * inv_p;
+
+        sum = (sum
+            + (*close.get_unchecked(i_new + 1) - *open.get_unchecked(i_new + 1)))
+            - (*close.get_unchecked(i_old + 1) - *open.get_unchecked(i_old + 1));
+        *out.get_unchecked_mut(i_new + 1) = sum * inv_p;
+
+        sum = (sum
+            + (*close.get_unchecked(i_new + 2) - *open.get_unchecked(i_new + 2)))
+            - (*close.get_unchecked(i_old + 2) - *open.get_unchecked(i_old + 2));
+        *out.get_unchecked_mut(i_new + 2) = sum * inv_p;
+
+        sum = (sum
+            + (*close.get_unchecked(i_new + 3) - *open.get_unchecked(i_new + 3)))
+            - (*close.get_unchecked(i_old + 3) - *open.get_unchecked(i_old + 3));
+        *out.get_unchecked_mut(i_new + 3) = sum * inv_p;
+
+        i_new += 4;
+        i_old += 4;
+    }
+    while i_new < len {
+        sum = (sum + (*close.get_unchecked(i_new) - *open.get_unchecked(i_new)))
+            - (*close.get_unchecked(i_old) - *open.get_unchecked(i_old));
+        *out.get_unchecked_mut(i_new) = sum * inv_p;
+        i_new += 1;
+        i_old += 1;
+    }
 }
 
 #[inline]
@@ -593,7 +859,17 @@ fn qstick_batch_inner_into(
         }
     }
 
-    // Treat output as uninitialized, like alma_batch_inner_into
+    // If using AVX2/AVX512 batch kernels, compute shared prefix of (close - open)
+    // to eliminate redundant work across rows. ScalarBatch path remains per-row.
+    match kern {
+        Kernel::Avx2Batch | Kernel::Avx512Batch => {
+            qstick_batch_shared_prefix_into(open, close, &combos, first, cols, out);
+            return Ok(combos);
+        }
+        _ => {}
+    }
+
+    // Treat output as uninitialized, like alma_batch_inner_into for per-row path
     let out_mu: &mut [MaybeUninit<f64>] = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
@@ -639,6 +915,79 @@ fn qstick_batch_inner_into(
     }
 
     Ok(combos)
+}
+
+#[inline(always)]
+fn qstick_batch_shared_prefix_into(
+    open: &[f64],
+    close: &[f64],
+    combos: &[QstickParams],
+    first: usize,
+    cols: usize,
+    out: &mut [f64],
+) {
+    let len = cols;
+    if len == 0 {
+        return;
+    }
+    // Build diff d[i] = close[i] - open[i] and prefix P where P[0]=0, P[i+1]=P[i]+d[i]
+    let mut prefix = Vec::with_capacity(len + 1);
+    prefix.push(0.0);
+    let mut acc = 0.0f64;
+    // Before `first`, diffs are treated as zero; start accumulation at `first`
+    let mut i = 0usize;
+    while i < first && i < len {
+        prefix.push(acc);
+        i += 1;
+    }
+    while i + 3 < len {
+        let d0 = close[i] - open[i];
+        let d1 = close[i + 1] - open[i + 1];
+        let d2 = close[i + 2] - open[i + 2];
+        let d3 = close[i + 3] - open[i + 3];
+        acc += d0;
+        prefix.push(acc);
+        acc += d1;
+        prefix.push(acc);
+        acc += d2;
+        prefix.push(acc);
+        acc += d3;
+        prefix.push(acc);
+        i += 4;
+    }
+    while i < len {
+        acc += close[i] - open[i];
+        prefix.push(acc);
+        i += 1;
+    }
+
+    // For each row, fill from warmup onward using prefix sums
+    for (row, combo) in combos.iter().enumerate() {
+        let p = combo.period.unwrap_or(5);
+        let warm = first + p - 1;
+        if warm >= len {
+            continue;
+        }
+        let row_start = row * cols;
+        let inv_p = 1.0 / (p as f64);
+        let mut j = warm;
+        while j + 3 < len {
+            let s0 = prefix[j + 1] - prefix[j + 1 - p];
+            let s1 = prefix[j + 2] - prefix[j + 2 - p];
+            let s2 = prefix[j + 3] - prefix[j + 3 - p];
+            let s3 = prefix[j + 4] - prefix[j + 4 - p];
+            out[row_start + j] = s0 * inv_p;
+            out[row_start + j + 1] = s1 * inv_p;
+            out[row_start + j + 2] = s2 * inv_p;
+            out[row_start + j + 3] = s3 * inv_p;
+            j += 4;
+        }
+        while j < len {
+            let s = prefix[j + 1] - prefix[j + 1 - p];
+            out[row_start + j] = s * inv_p;
+            j += 1;
+        }
+    }
 }
 
 #[inline(always)]

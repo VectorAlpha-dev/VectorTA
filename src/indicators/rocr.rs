@@ -10,10 +10,10 @@
 //! - `Vec<f64>` - ROCR values centered at 1.0, matching input length
 //!
 //! ## Developer Status
-//! **AVX2**: Stub (calls scalar)
-//! **AVX512**: Has short/long variants but all stubs
-//! **Streaming**: O(1) - Simple ring buffer lookup
-//! **Memory**: Good - Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
+//! - SIMD implemented (AVX2/AVX512) but disabled by default: memory-bound, no speedup vs scalar.
+//!   Auto kernel selection short-circuits to scalar; explicit SIMD remains for benchmarking.
+//! - Streaming: O(1) — simple ring-buffer lookup.
+//! - Memory: Good — uses `alloc_with_nan_prefix` and `make_uninit_matrix`.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -218,8 +218,9 @@ fn rocr_prepare<'a>(
         });
     }
 
+    // SIMD underperforms for ROCR (memory-bound, simple ratio). Short-circuit Auto to Scalar.
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
     Ok((data, period, first, chosen))
@@ -290,13 +291,79 @@ pub fn rocr_scalar(data: &[f64], period: usize, first_val: usize, out: &mut [f64
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn rocr_avx512(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-    rocr_scalar(data, period, first_valid, out)
+    unsafe {
+        let start = first_valid + period;
+        let len = data.len();
+        if start >= len {
+            return;
+        }
+
+        #[cfg(target_feature = "avx512f")]
+        {
+            let mut i = start;
+            let end = len;
+            let step = 8usize;
+            let zero = _mm512_set1_pd(0.0);
+            while i + step <= end {
+                let cur = _mm512_loadu_pd(data.as_ptr().add(i));
+                let pst = _mm512_loadu_pd(data.as_ptr().add(i - period));
+                let m_zero = _mm512_cmp_pd_mask(pst, zero, _CMP_EQ_OQ);
+                let m_nan = _mm512_cmp_pd_mask(pst, pst, _CMP_UNORD_Q);
+                let m_bad = m_zero | m_nan;
+                let div = _mm512_div_pd(cur, pst);
+                let res = _mm512_mask_mov_pd(div, m_bad, zero);
+                _mm512_storeu_pd(out.as_mut_ptr().add(i), res);
+                i += step;
+            }
+            for j in i..end {
+                let p = *data.get_unchecked(j - period);
+                let c = *data.get_unchecked(j);
+                *out.get_unchecked_mut(j) = if p == 0.0 || p.is_nan() { 0.0 } else { c / p };
+            }
+            return;
+        }
+
+        rocr_scalar(data, period, first_valid, out)
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn rocr_avx2(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-    rocr_scalar(data, period, first_valid, out)
+    unsafe {
+        let start = first_valid + period;
+        let len = data.len();
+        if start >= len {
+            return;
+        }
+
+        #[cfg(target_feature = "avx2")]
+        {
+            let mut i = start;
+            let end = len;
+            let step = 4usize;
+            let zero = _mm256_set1_pd(0.0);
+            while i + step <= end {
+                let cur = _mm256_loadu_pd(data.as_ptr().add(i));
+                let pst = _mm256_loadu_pd(data.as_ptr().add(i - period));
+                let m_zero = _mm256_cmp_pd(pst, zero, _CMP_EQ_OQ);
+                let m_nan = _mm256_cmp_pd(pst, pst, _CMP_UNORD_Q);
+                let m_bad = _mm256_or_pd(m_zero, m_nan);
+                let div = _mm256_div_pd(cur, pst);
+                let res = _mm256_blendv_pd(div, zero, m_bad);
+                _mm256_storeu_pd(out.as_mut_ptr().add(i), res);
+                i += step;
+            }
+            for j in i..end {
+                let p = *data.get_unchecked(j - period);
+                let c = *data.get_unchecked(j);
+                *out.get_unchecked_mut(j) = if p == 0.0 || p.is_nan() { 0.0 } else { c / p };
+            }
+            return;
+        }
+
+        rocr_scalar(data, period, first_valid, out)
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -427,8 +494,9 @@ pub fn rocr_batch_with_kernel(
     sweep: &RocrBatchRange,
     k: Kernel,
 ) -> Result<RocrBatchOutput, RocrError> {
+    // Disable SIMD auto-selection for ROCR batch: scalar is consistently fastest.
     let kernel = match k {
-        Kernel::Auto => detect_best_batch_kernel(),
+        Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         _ => {
             return Err(RocrError::InvalidPeriod {
@@ -679,25 +747,83 @@ unsafe fn rocr_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn rocr_row_avx2(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
+    #[cfg(target_feature = "avx2")]
+    {
+        let start = first + period;
+        let len = data.len();
+        if start >= len {
+            return;
+        }
+        let mut i = start;
+        let end = len;
+        let step = 4usize;
+        let zero = _mm256_set1_pd(0.0);
+        while i + step <= end {
+            let cur = _mm256_loadu_pd(data.as_ptr().add(i));
+            let pst = _mm256_loadu_pd(data.as_ptr().add(i - period));
+            let m_zero = _mm256_cmp_pd(pst, zero, _CMP_EQ_OQ);
+            let m_nan = _mm256_cmp_pd(pst, pst, _CMP_UNORD_Q);
+            let m_bad = _mm256_or_pd(m_zero, m_nan);
+            let div = _mm256_div_pd(cur, pst);
+            let res = _mm256_blendv_pd(div, zero, m_bad);
+            _mm256_storeu_pd(out.as_mut_ptr().add(i), res);
+            i += step;
+        }
+        for j in i..end {
+            let p = *data.get_unchecked(j - period);
+            let c = *data.get_unchecked(j);
+            *out.get_unchecked_mut(j) = if p == 0.0 || p.is_nan() { 0.0 } else { c / p };
+        }
+        return;
+    }
     rocr_row_scalar(data, first, period, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn rocr_row_avx512(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
+    #[cfg(target_feature = "avx512f")]
+    {
+        let start = first + period;
+        let len = data.len();
+        if start >= len {
+            return;
+        }
+        let mut i = start;
+        let end = len;
+        let step = 8usize;
+        let zero = _mm512_set1_pd(0.0);
+        while i + step <= end {
+            let cur = _mm512_loadu_pd(data.as_ptr().add(i));
+            let pst = _mm512_loadu_pd(data.as_ptr().add(i - period));
+            let m_zero = _mm512_cmp_pd_mask(pst, zero, _CMP_EQ_OQ);
+            let m_nan = _mm512_cmp_pd_mask(pst, pst, _CMP_UNORD_Q);
+            let m_bad = m_zero | m_nan;
+            let div = _mm512_div_pd(cur, pst);
+            let res = _mm512_mask_mov_pd(div, m_bad, zero);
+            _mm512_storeu_pd(out.as_mut_ptr().add(i), res);
+            i += step;
+        }
+        for j in i..end {
+            let p = *data.get_unchecked(j - period);
+            let c = *data.get_unchecked(j);
+            *out.get_unchecked_mut(j) = if p == 0.0 || p.is_nan() { 0.0 } else { c / p };
+        }
+        return;
+    }
     rocr_row_scalar(data, first, period, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn rocr_row_avx512_short(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-    rocr_row_scalar(data, first, period, out)
+    rocr_row_avx512(data, first, period, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn rocr_row_avx512_long(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-    rocr_row_scalar(data, first, period, out)
+    rocr_row_avx512(data, first, period, out)
 }
 
 #[inline(always)]
