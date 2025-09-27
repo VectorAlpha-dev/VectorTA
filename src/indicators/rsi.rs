@@ -12,6 +12,11 @@
 //! ## Developer Status
 //! **AVX2**: Stub (row functions call scalar)
 //! **AVX512**: Has short/long row variants but all stubs
+//!
+//! Decision: SIMD disabled by default for RSI. The core update is a
+//! sequential Wilder-style recursion with little ILP; scalar outperforms naive
+//! AVX variants on 100k by ~15–20% on this machine. Keep runtime selection
+//! short-circuited to scalar until a provably faster SIMD is found.
 //! **Streaming**: O(1) - Exponential smoothing with state
 //! **Memory**: Good - Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
 

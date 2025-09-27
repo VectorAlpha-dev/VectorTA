@@ -13,19 +13,12 @@
 //!   - `signal`: The lagged Fisher values (previous Fisher value)
 //!
 //! ## Developer Notes
-//! ### Implementation Status
-//! - **AVX2 Kernel**: Stub (calls scalar implementation)
-//! - **AVX512 Kernel**: Stub (calls scalar implementation)
-//! - **Streaming Update**: O(1) - efficient with circular buffer for min/max tracking
-//! - **Memory Optimization**: Fully optimized with `alloc_with_nan_prefix` for output vectors
-//! - **Batch Operations**: Fully implemented with `make_uninit_matrix` and `init_matrix_prefixes`
-//!
-//! ### TODO - Performance Improvements
-//! - [ ] Implement actual AVX2 SIMD kernel (currently stub)
-//! - [ ] Implement actual AVX512 SIMD kernel (currently stub)
-//! - [ ] Vectorize min/max finding in rolling window
-//! - [ ] Optimize Fisher transform calculation with SIMD
-//! - [ ] Consider using SIMD for the constrain and transform operations
+//! - SIMD status: AVX2/AVX512 stubs intentionally delegate to scalar. The core is a
+//!   loop-carried recurrence with per-step sliding-window extrema; wide data parallelism
+//!   offers no consistent wins on realistic periods.
+//! - Scalar path: tight, safe O(period) inner scan starting at warmup to avoid branches.
+//! - Batch: reuses a shared HL2 midpoint precompute across rows to avoid redundant work.
+//! - Streaming: kept simple O(period) scan for clarity and identical outputs.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
@@ -295,17 +288,19 @@ pub fn fisher_scalar_into(
     fisher_out: &mut [f64],
     signal_out: &mut [f64],
 ) {
-    let data_len = high.len().min(low.len());
-    let mut prev_fish = 0.0;
-    let mut val1 = 0.0;
+    let len = high.len().min(low.len());
+    if period == 0 || first >= len {
+        return;
+    }
 
-    for i in first..data_len {
-        if i < first + period - 1 {
-            continue;
-        }
+    let mut prev_fish = 0.0f64;
+    let mut val1 = 0.0f64;
+    let warm = first + period - 1;
+
+    for i in warm..len {
         let start = i + 1 - period;
 
-        // Calculate min/max from midpoint values
+        // Scan window min/max using HL2 midpoint
         let (mut min_val, mut max_val) = (f64::MAX, f64::MIN);
         for j in start..=i {
             let midpoint = 0.5 * (high[j] + low[j]);
@@ -318,15 +313,15 @@ pub fn fisher_scalar_into(
         }
 
         let range = (max_val - min_val).max(0.001);
-        let current_hl = 0.5 * (high[i] + low[i]);
-        val1 = 0.33 * 2.0 * ((current_hl - min_val) / range - 0.5) + 0.67 * val1;
+        let hl = 0.5 * (high[i] + low[i]);
+        val1 = 0.67f64.mul_add(val1, 0.66 * ((hl - min_val) / range - 0.5));
         if val1 > 0.99 {
             val1 = 0.999;
         } else if val1 < -0.99 {
             val1 = -0.999;
         }
         signal_out[i] = prev_fish;
-        let new_fish = 0.5 * ((1.0 + val1) / (1.0 - val1)).ln() + 0.5 * prev_fish;
+        let new_fish = 0.5f64.mul_add(((1.0 + val1) / (1.0 - val1)).ln(), 0.5 * prev_fish);
         fisher_out[i] = new_fish;
         prev_fish = new_fish;
     }
@@ -646,11 +641,16 @@ fn fisher_batch_inner(
         core::slice::from_raw_parts_mut(signal_guard.as_mut_ptr() as *mut f64, signal_guard.len())
     };
 
+    // Shared precompute: HL2 midpoints reused across parameter rows
+    let hl: Vec<f64> = (0..data_len)
+        .map(|i| 0.5 * (high[i] + low[i]))
+        .collect();
+
     let do_row = |row: usize, out_fish: &mut [f64], out_signal: &mut [f64]| {
         let period = combos[row].period.unwrap();
         match kern {
             Kernel::Scalar | Kernel::ScalarBatch => {
-                fisher_row_scalar_direct(high, low, first, period, out_fish, out_signal)
+                fisher_row_scalar_from_hl(&hl, first, period, out_fish, out_signal)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => {
@@ -665,7 +665,7 @@ fn fisher_batch_inner(
                 fisher_row_scalar_direct(high, low, first, period, out_fish, out_signal)
             }
             Kernel::Auto => {
-                fisher_row_scalar_direct(high, low, first, period, out_fish, out_signal)
+                fisher_row_scalar_from_hl(&hl, first, period, out_fish, out_signal)
             } // Should be resolved before here
         }
     };
@@ -780,11 +780,16 @@ fn fisher_batch_inner_into(
         }
     }
 
+    // Shared precompute: HL2 midpoints reused across parameter rows
+    let hl: Vec<f64> = (0..data_len)
+        .map(|i| 0.5 * (high[i] + low[i]))
+        .collect();
+
     let do_row = |row: usize, out_fish: &mut [f64], out_signal: &mut [f64]| {
         let period = combos[row].period.unwrap();
         match kern {
             Kernel::Scalar | Kernel::ScalarBatch => {
-                fisher_row_scalar_direct(high, low, first, period, out_fish, out_signal)
+                fisher_row_scalar_from_hl(&hl, first, period, out_fish, out_signal)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => {
@@ -799,7 +804,7 @@ fn fisher_batch_inner_into(
                 fisher_row_scalar_direct(high, low, first, period, out_fish, out_signal)
             }
             Kernel::Auto => {
-                fisher_row_scalar_direct(high, low, first, period, out_fish, out_signal)
+                fisher_row_scalar_from_hl(&hl, first, period, out_fish, out_signal)
             } // Should be resolved before here
         }
     };
@@ -846,17 +851,20 @@ fn fisher_row_scalar_direct(
     out_fish: &mut [f64],
     out_signal: &mut [f64],
 ) {
-    let data_len = high.len().min(low.len());
-    let mut prev_fish = 0.0;
-    let mut val1 = 0.0;
+    let len = high.len().min(low.len());
+    if period == 0 || first >= len {
+        return;
+    }
 
-    for i in first..data_len {
-        if i < first + period - 1 {
-            continue;
-        }
+    let mut prev_fish = 0.0f64;
+    let mut val1 = 0.0f64;
+
+    let warm = first + period - 1;
+
+    for i in warm..len {
         let start = i + 1 - period;
 
-        // Calculate min/max from midpoint values
+        // Scan window min/max using HL2 midpoint
         let (mut min_val, mut max_val) = (f64::MAX, f64::MIN);
         for j in start..=i {
             let midpoint = 0.5 * (high[j] + low[j]);
@@ -869,17 +877,59 @@ fn fisher_row_scalar_direct(
         }
 
         let range = (max_val - min_val).max(0.001);
-        let current_hl = 0.5 * (high[i] + low[i]);
-        val1 = 0.33 * 2.0 * ((current_hl - min_val) / range - 0.5) + 0.67 * val1;
-
+        let hl = 0.5 * (high[i] + low[i]);
+        val1 = 0.67 * val1 + 0.66 * ((hl - min_val) / range - 0.5);
         if val1 > 0.99 {
             val1 = 0.999;
         } else if val1 < -0.99 {
             val1 = -0.999;
         }
-
         out_signal[i] = prev_fish;
         let new_fish = 0.5 * ((1.0 + val1) / (1.0 - val1)).ln() + 0.5 * prev_fish;
+        out_fish[i] = new_fish;
+        prev_fish = new_fish;
+    }
+}
+
+#[inline(always)]
+fn fisher_row_scalar_from_hl(
+    hl: &[f64],
+    first: usize,
+    period: usize,
+    out_fish: &mut [f64],
+    out_signal: &mut [f64],
+) {
+    let len = hl.len();
+    if period == 0 || first >= len {
+        return;
+    }
+
+    let mut prev_fish = 0.0f64;
+    let mut val1 = 0.0f64;
+    let warm = first + period - 1;
+
+    for i in warm..len {
+        let start = i + 1 - period;
+        let (mut min_val, mut max_val) = (f64::MAX, f64::MIN);
+        for &v in &hl[start..=i] {
+            if v > max_val {
+                max_val = v;
+            }
+            if v < min_val {
+                min_val = v;
+            }
+        }
+
+        let range = (max_val - min_val).max(0.001);
+        let v = hl[i];
+        val1 = 0.67f64.mul_add(val1, 0.66 * ((v - min_val) / range - 0.5));
+        if val1 > 0.99 {
+            val1 = 0.999;
+        } else if val1 < -0.99 {
+            val1 = -0.999;
+        }
+        out_signal[i] = prev_fish;
+        let new_fish = 0.5f64.mul_add(((1.0 + val1) / (1.0 - val1)).ln(), 0.5 * prev_fish);
         out_fish[i] = new_fish;
         prev_fish = new_fish;
     }
@@ -970,14 +1020,15 @@ impl FisherStream {
         }
         let range = (max_val - min_val).max(0.001);
         let current_hl = self.buffer[(self.head + self.period - 1) % self.period];
-        self.val1 = 0.33 * 2.0 * ((current_hl - min_val) / range - 0.5) + 0.67 * self.val1;
+        self.val1 = 0.67f64.mul_add(self.val1, 0.66 * ((current_hl - min_val) / range - 0.5));
         if self.val1 > 0.99 {
             self.val1 = 0.999;
         } else if self.val1 < -0.99 {
             self.val1 = -0.999;
         }
         let new_signal = self.prev_fish;
-        let new_fish = 0.5 * ((1.0 + self.val1) / (1.0 - self.val1)).ln() + 0.5 * self.prev_fish;
+        let new_fish =
+            0.5f64.mul_add(((1.0 + self.val1) / (1.0 - self.val1)).ln(), 0.5 * self.prev_fish);
         self.prev_fish = new_fish;
         (new_fish, new_signal)
     }

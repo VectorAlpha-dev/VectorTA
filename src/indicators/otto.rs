@@ -16,10 +16,11 @@
 //! - **`Err(OttoError)`** on failure
 //!
 //! ## Developer Notes
-//! - **AVX2**: No dedicated SIMD implementation - uses component indicators' SIMD kernels
-//! - **AVX512**: No dedicated SIMD implementation - uses component indicators' SIMD kernels
-//! - **Streaming**: O(n) - recalculates entire buffer on each update (critical performance issue)
-//! - **Memory**: Does NOT use zero-copy helpers - uses regular Vec allocations throughout (needs optimization)
+//! - SIMD: Disabled for OTTO. Loop-carried recurrences (VIDYA, OTT state) make lane-parallelism ineffective; runtime short-circuits to scalar.
+//! - Scalar path: Optimized single-pass kernel computes CMO(9) and three VIDYA tracks together (slow/2, slow, slow*fast), then LOTT and OTT.
+//! - Batch: Row-specific optimization precomputes the CMO(9) stream once per series and reuses it across rows.
+//! - Streaming: Still O(n) per update; not optimized here.
+//! - Memory: Uses standard Vec; MA selection remains dynamic; no unsafe in scalar.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
@@ -37,7 +38,9 @@ use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel,
+};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 
@@ -710,93 +713,201 @@ pub fn otto_into_slices(
     input: &OttoInput,
     _kern: Kernel,
 ) -> Result<(), OttoError> {
-    let (data, first, ott_p, needed, ott_percent, ma_type) = otto_prepare(input)?;
-    if hott_dst.len() != data.len() || lott_dst.len() != data.len() {
+    let (data, _first, ott_p, _needed, ott_percent, ma_type) = otto_prepare(input)?;
+    let n = data.len();
+    if hott_dst.len() != n || lott_dst.len() != n {
         return Err(OttoError::InvalidPeriod {
             period: hott_dst.len(),
-            data_len: data.len(),
+            data_len: n,
         });
     }
 
-    // compute subseries
-    let slow_vidya = input.get_slow_vidya_length();
-    let fast_vidya = input.get_fast_vidya_length();
+    // Periods for VIDYA tracks (match original logic)
+    let slow = input.get_slow_vidya_length();
+    let fast = input.get_fast_vidya_length();
+    let p1 = slow / 2;
+    let p2 = slow;
+    let p3 = slow.saturating_mul(fast);
+
+    // Preserve error semantics for zero-length VIDYA periods
+    if p1 == 0 || p2 == 0 || p3 == 0 {
+        return Err(OttoError::InvalidPeriod { period: 0, data_len: n });
+    }
+
     let coco = input.get_correcting_constant();
 
-    let mov1 = vidya(data, slow_vidya / 2)?; // Vec
-    let mov2 = vidya(data, slow_vidya)?; // Vec
-    let mov3 = vidya(data, slow_vidya * fast_vidya)?; // Vec
+    // Base VIDYA alphas
+    let a1_base = 2.0 / (p1 as f64 + 1.0);
+    let a2_base = 2.0 / (p2 as f64 + 1.0);
+    let a3_base = 2.0 / (p3 as f64 + 1.0);
 
-    // LOTT - calculate for all data since vidya produces values from the start
-    for i in 0..data.len() {
-        let mut v = f64::NAN;
-        if !mov1[i].is_nan() && !mov2[i].is_nan() && !mov3[i].is_nan() {
-            v = mov1[i] / (mov2[i] - mov3[i] + coco);
-        }
-        lott_dst[i] = v;
-    }
+    // CMO sliding window (period fixed at 9)
+    const CMO_P: usize = 9;
+    let mut ring_up = [0.0f64; CMO_P];
+    let mut ring_dn = [0.0f64; CMO_P];
+    let mut sum_up = 0.0f64;
+    let mut sum_dn = 0.0f64;
+    let mut head = 0usize;
 
-    // MA on LOTT
-    let mavg = calculate_ma(lott_dst, ott_p, &ma_type)?;
-    let fark = ott_percent * 0.01;
+    // VIDYA state
+    let mut v1 = 0.0f64;
+    let mut v2 = 0.0f64;
+    let mut v3 = 0.0f64;
 
-    let mut long_stop_prev = f64::NAN;
-    let mut short_stop_prev = f64::NAN;
-    let mut dir_prev = 1i32;
+    // prev sample for diff
+    let mut prev_x = if n > 0 { data[0] } else { f64::NAN };
 
-    // Start processing where we have valid MA values
-    let start = mavg.iter().position(|&x| !x.is_nan()).unwrap_or(data.len());
-    if start < data.len() && !mavg[start].is_nan() {
-        long_stop_prev = mavg[start] * (1.0 - fark);
-        short_stop_prev = mavg[start] * (1.0 + fark);
-    }
+    for i in 0..n {
+        let x = data[i];
+        let val = if x.is_nan() { 0.0 } else { x };
 
-    for i in start..data.len() {
-        let ma = mavg[i];
-        if ma.is_nan() {
-            if i > 0 {
-                hott_dst[i] = hott_dst[i - 1];
+        if i > 0 {
+            let mut d = x - prev_x;
+            if !x.is_finite() || !prev_x.is_finite() {
+                d = 0.0;
             }
-            continue;
+
+            if i >= CMO_P {
+                sum_up -= ring_up[head];
+                sum_dn -= ring_dn[head];
+            }
+
+            let (up, dn) = if d > 0.0 { (d, 0.0) } else { (0.0, -d) };
+            ring_up[head] = up;
+            ring_dn[head] = dn;
+            sum_up += up;
+            sum_dn += dn;
+
+            head += 1;
+            if head == CMO_P {
+                head = 0;
+            }
+
+            prev_x = x;
         }
-        if i == start {
-            let mt = long_stop_prev;
-            hott_dst[i] = if ma > mt {
-                mt * (200.0 + ott_percent) / 200.0
-            } else {
-                mt * (200.0 - ott_percent) / 200.0
-            };
+
+        let cmo_abs = if i >= CMO_P {
+            let denom = sum_up + sum_dn;
+            if denom != 0.0 { ((sum_up - sum_dn) / denom).abs() } else { 0.0 }
         } else {
-            let ls = ma * (1.0 - fark);
-            let ss = ma * (1.0 + fark);
-            let long_stop = if ma > long_stop_prev {
-                ls.max(long_stop_prev)
+            0.0
+        };
+
+        // Adaptive alphas and VIDYA updates (preserve arithmetic layout)
+        let a1 = a1_base * cmo_abs;
+        let a2 = a2_base * cmo_abs;
+        let a3 = a3_base * cmo_abs;
+        v1 = a1 * val + (1.0 - a1) * v1;
+        v2 = a2 * val + (1.0 - a2) * v2;
+        v3 = a3 * val + (1.0 - a3) * v3;
+
+        // LOTT for this bar
+        let denom_l = (v2 - v3) + coco;
+        lott_dst[i] = v1 / denom_l;
+    }
+
+    // Two paths for MA(LOTT): fast integrated VIDYA (default path "VAR"), or generic MA via selector
+    let fark = ott_percent * 0.01;
+    let scale_up = (200.0 + ott_percent) / 200.0;
+    let scale_dn = (200.0 - ott_percent) / 200.0;
+
+    if ma_type == "VAR" {
+        // Integrated MA path: VIDYA(LOTT) with CMO(9) computed on LOTT using a sliding window
+        const CMO_P2: usize = 9;
+        let mut ring_up2 = [0.0f64; CMO_P2];
+        let mut ring_dn2 = [0.0f64; CMO_P2];
+        let mut sum_up2 = 0.0f64;
+        let mut sum_dn2 = 0.0f64;
+        let mut head2 = 0usize;
+        let mut prev_lott = lott_dst[0];
+
+        // Base alpha for VIDYA on LOTT
+        let a_base = 2.0 / (ott_p as f64 + 1.0);
+        let mut ma_prev = 0.0f64;
+
+        // OTT state machine
+        let mut long_stop_prev = f64::NAN;
+        let mut short_stop_prev = f64::NAN;
+        let mut dir_prev: i32 = 1;
+
+        for i in 0..n {
+            // CMO on LOTT diffs
+            if i > 0 {
+                let x = lott_dst[i];
+                let mut d = x - prev_lott;
+                if !x.is_finite() || !prev_lott.is_finite() { d = 0.0; }
+                if i >= CMO_P2 {
+                    sum_up2 -= ring_up2[head2];
+                    sum_dn2 -= ring_dn2[head2];
+                }
+                let (up, dn) = if d > 0.0 { (d, 0.0) } else { (0.0, -d) };
+                ring_up2[head2] = up; ring_dn2[head2] = dn; sum_up2 += up; sum_dn2 += dn;
+                head2 += 1; if head2 == CMO_P2 { head2 = 0; }
+                prev_lott = x;
+            }
+
+            let c_abs = if i >= CMO_P2 {
+                let denom = sum_up2 + sum_dn2; if denom != 0.0 { ((sum_up2 - sum_dn2) / denom).abs() } else { 0.0 }
+            } else { 0.0 };
+
+            // VIDYA(LOTT)
+            let a = a_base * c_abs;
+            let ma = a * lott_dst[i] + (1.0 - a) * ma_prev;
+            ma_prev = ma;
+
+            // OTT update (start at i=0)
+            if i == 0 {
+                long_stop_prev = ma * (1.0 - fark);
+                short_stop_prev = ma * (1.0 + fark);
+                let mt = long_stop_prev;
+                hott_dst[i] = if ma > mt { mt * scale_up } else { mt * scale_dn };
             } else {
-                ls
-            };
-            let short_stop = if ma < short_stop_prev {
-                ss.min(short_stop_prev)
-            } else {
-                ss
-            };
-            let dir = if dir_prev == -1 && ma > short_stop_prev {
-                1
-            } else if dir_prev == 1 && ma < long_stop_prev {
-                -1
-            } else {
-                dir_prev
-            };
-            let mt = if dir == 1 { long_stop } else { short_stop };
-            hott_dst[i] = if ma > mt {
-                mt * (200.0 + ott_percent) / 200.0
-            } else {
-                mt * (200.0 - ott_percent) / 200.0
-            };
-            long_stop_prev = long_stop;
-            short_stop_prev = short_stop;
-            dir_prev = dir;
+                let ls = ma * (1.0 - fark);
+                let ss = ma * (1.0 + fark);
+                let long_stop = if ma > long_stop_prev { ls.max(long_stop_prev) } else { ls };
+                let short_stop = if ma < short_stop_prev { ss.min(short_stop_prev) } else { ss };
+                let dir = if dir_prev == -1 && ma > short_stop_prev { 1 }
+                          else if dir_prev == 1 && ma < long_stop_prev { -1 }
+                          else { dir_prev };
+                let mt = if dir == 1 { long_stop } else { short_stop };
+                hott_dst[i] = if ma > mt { mt * scale_up } else { mt * scale_dn };
+                long_stop_prev = long_stop; short_stop_prev = short_stop; dir_prev = dir;
+            }
+        }
+    } else {
+        // Generic MA path using selector, then OTT second pass
+        let mavg = calculate_ma(lott_dst, ott_p, &ma_type)?;
+
+        // OTT state machine
+        let mut long_stop_prev = f64::NAN;
+        let mut short_stop_prev = f64::NAN;
+        let mut dir_prev: i32 = 1;
+
+        let start = mavg.iter().position(|&x| !x.is_nan()).unwrap_or(n);
+        for i in 0..start.min(n) { hott_dst[i] = f64::NAN; }
+        if start < n {
+            let ma0 = mavg[start];
+            long_stop_prev = ma0 * (1.0 - fark);
+            short_stop_prev = ma0 * (1.0 + fark);
+            let mt0 = long_stop_prev;
+            hott_dst[start] = if ma0 > mt0 { mt0 * scale_up } else { mt0 * scale_dn };
+            for i in (start + 1)..n {
+                let ma = mavg[i];
+                if ma.is_nan() { hott_dst[i] = hott_dst[i - 1]; continue; }
+                let ls = ma * (1.0 - fark);
+                let ss = ma * (1.0 + fark);
+                let long_stop = if ma > long_stop_prev { ls.max(long_stop_prev) } else { ls };
+                let short_stop = if ma < short_stop_prev { ss.min(short_stop_prev) } else { ss };
+                let dir = if dir_prev == -1 && ma > short_stop_prev { 1 }
+                          else if dir_prev == 1 && ma < long_stop_prev { -1 }
+                          else { dir_prev };
+                let mt = if dir == 1 { long_stop } else { short_stop };
+                hott_dst[i] = if ma > mt { mt * scale_up } else { mt * scale_dn };
+                long_stop_prev = long_stop; short_stop_prev = short_stop; dir_prev = dir;
+            }
         }
     }
+
     Ok(())
 }
 
@@ -808,9 +919,9 @@ pub fn otto_with_kernel(input: &OttoInput, kern: Kernel) -> Result<OttoOutput, O
         return Err(OttoError::EmptyInputData);
     }
 
-    // Initialize with all NaN, let otto_into_slices determine where values start
-    let mut hott = vec![f64::NAN; data.len()];
-    let mut lott = vec![f64::NAN; data.len()];
+    // Allocate uninitialized outputs; kernel writes all indices deterministically
+    let mut hott = alloc_with_nan_prefix(data.len(), 0);
+    let mut lott = alloc_with_nan_prefix(data.len(), 0);
 
     otto_into_slices(&mut hott, &mut lott, input, chosen)?;
     Ok(OttoOutput { hott, lott })
@@ -966,6 +1077,42 @@ fn expand_grid_otto(r: &OttoBatchRange) -> Vec<OttoParams> {
     v
 }
 
+// Precompute abs(CMO) with sliding window period 9 for reuse in batch
+#[inline]
+fn cmo_abs9_stream(data: &[f64]) -> Vec<f64> {
+    const CMO_P: usize = 9;
+    let n = data.len();
+    let mut out = vec![0.0f64; n];
+    if n == 0 { return out; }
+
+    let mut ring_up = [0.0f64; CMO_P];
+    let mut ring_dn = [0.0f64; CMO_P];
+    let mut sum_up = 0.0f64;
+    let mut sum_dn = 0.0f64;
+    let mut head = 0usize;
+    let mut prev_x = data[0];
+
+    for i in 0..n {
+        let x = data[i];
+        if i > 0 {
+            let mut d = x - prev_x;
+            if !x.is_finite() || !prev_x.is_finite() { d = 0.0; }
+            if i >= CMO_P { sum_up -= ring_up[head]; sum_dn -= ring_dn[head]; }
+            let (up, dn) = if d > 0.0 { (d, 0.0) } else { (0.0, -d) };
+            ring_up[head] = up; ring_dn[head] = dn; sum_up += up; sum_dn += dn;
+            head += 1; if head == CMO_P { head = 0; }
+            prev_x = x;
+        }
+        if i >= CMO_P {
+            let denom = sum_up + sum_dn;
+            out[i] = if denom != 0.0 { ((sum_up - sum_dn) / denom).abs() } else { 0.0 };
+        } else {
+            out[i] = 0.0;
+        }
+    }
+    out
+}
+
 pub fn otto_batch_with_kernel(
     data: &[f64],
     sweep: &OttoBatchRange,
@@ -993,19 +1140,84 @@ pub fn otto_batch_with_kernel(
     let mut hott = vec![f64::NAN; rows * cols];
     let mut lott = vec![f64::NAN; rows * cols];
 
-    // row loop; kernel currently selects scalar path but is threaded for parity
+    // Precompute shared CMO abs(9) stream once for all rows
+    let cmo_abs = cmo_abs9_stream(data);
+
+    // Row loop; compute with shared CMO
     for (row, prm) in combos.iter().enumerate() {
         let input = OttoInput::from_slice(data, prm.clone());
-        let row_h = &mut hott[row * cols..(row + 1) * cols];
+        // Validate params and derive per-row settings via existing helper to preserve semantics
+        let (_d, _first, ott_p, _needed, ott_percent, ma_type) = otto_prepare(&input)?;
+
+        let n = data.len();
+        let slow = input.get_slow_vidya_length();
+        let fast = input.get_fast_vidya_length();
+        let p1 = slow / 2;
+        let p2 = slow;
+        let p3 = slow.saturating_mul(fast);
+        if p1 == 0 || p2 == 0 || p3 == 0 {
+            return Err(OttoError::InvalidPeriod { period: 0, data_len: n });
+        }
+
+        let a1_base = 2.0 / (p1 as f64 + 1.0);
+        let a2_base = 2.0 / (p2 as f64 + 1.0);
+        let a3_base = 2.0 / (p3 as f64 + 1.0);
+        let coco = input.get_correcting_constant();
+
         let row_l = &mut lott[row * cols..(row + 1) * cols];
-        otto_into_slices(
-            row_h,
-            row_l,
-            &input,
-            match kernel {
-                _ => Kernel::Scalar,
-            },
-        )?; // keep scalar, API-parity ready
+        let row_h = &mut hott[row * cols..(row + 1) * cols];
+
+        // VIDYA ×3 + LOTT using shared CMO
+        let mut v1 = 0.0f64;
+        let mut v2 = 0.0f64;
+        let mut v3 = 0.0f64;
+        for i in 0..n {
+            let x = data[i];
+            let val = if x.is_nan() { 0.0 } else { x };
+            let c = cmo_abs[i];
+            let a1 = a1_base * c;
+            let a2 = a2_base * c;
+            let a3 = a3_base * c;
+            v1 = a1 * val + (1.0 - a1) * v1;
+            v2 = a2 * val + (1.0 - a2) * v2;
+            v3 = a3 * val + (1.0 - a3) * v3;
+            row_l[i] = v1 / ((v2 - v3) + coco);
+        }
+
+        // MA(LOTT) per row and OTT state machine
+        let mavg = calculate_ma(row_l, ott_p, &ma_type)?;
+        let fark = ott_percent * 0.01;
+        let scale_up = (200.0 + ott_percent) / 200.0;
+        let scale_dn = (200.0 - ott_percent) / 200.0;
+
+        let mut long_stop_prev = f64::NAN;
+        let mut short_stop_prev = f64::NAN;
+        let mut dir_prev: i32 = 1;
+
+        let start = mavg.iter().position(|&x| !x.is_nan()).unwrap_or(n);
+        for i in 0..start.min(n) { row_h[i] = f64::NAN; }
+
+        if start < n {
+            let ma0 = mavg[start];
+            long_stop_prev = ma0 * (1.0 - fark);
+            short_stop_prev = ma0 * (1.0 + fark);
+            let mt0 = long_stop_prev;
+            row_h[start] = if ma0 > mt0 { mt0 * scale_up } else { mt0 * scale_dn };
+            for i in (start + 1)..n {
+                let ma = mavg[i];
+                if ma.is_nan() { row_h[i] = row_h[i - 1]; continue; }
+                let ls = ma * (1.0 - fark);
+                let ss = ma * (1.0 + fark);
+                let long_stop = if ma > long_stop_prev { ls.max(long_stop_prev) } else { ls };
+                let short_stop = if ma < short_stop_prev { ss.min(short_stop_prev) } else { ss };
+                let dir = if dir_prev == -1 && ma > short_stop_prev { 1 }
+                          else if dir_prev == 1 && ma < long_stop_prev { -1 }
+                          else { dir_prev };
+                let mt = if dir == 1 { long_stop } else { short_stop };
+                row_h[i] = if ma > mt { mt * scale_up } else { mt * scale_dn };
+                long_stop_prev = long_stop; short_stop_prev = short_stop; dir_prev = dir;
+            }
+        }
     }
 
     Ok(OttoBatchOutput {

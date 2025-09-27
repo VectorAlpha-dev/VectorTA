@@ -12,8 +12,10 @@
 //! - `Vec<f64>` - PPO values as percentage, matching input length
 //!
 //! ## Developer Status
-//! **AVX2**: Stub (calls scalar)
-//! **AVX512**: Has short/long variants but all stubs
+//! **Scalar**: Optimized (loop-jammed SMA/EMA, fewer divisions, FMA)
+//! **AVX2**: Stub (delegates to optimized scalar)
+//! **AVX512**: Stub (short/long variants delegate to scalar)
+//! Rationale: PPO EMA/SMA are loop-carried; post-ratio is cheap, SIMD offers no win.
 //! **Streaming**: O(n) - Recalculates full MA on each update
 //! **Memory**: Good - Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
 
@@ -46,6 +48,7 @@ use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
+use std::collections::HashMap;
 use thiserror::Error;
 
 impl<'a> AsRef<[f64]> for PpoInput<'a> {
@@ -357,20 +360,25 @@ pub unsafe fn ppo_scalar(
     first: usize,
     out: &mut [f64],
 ) {
-    // Check for classic kernel optimization
+    // Fast paths for the two hot MA types
     if ma_type == "ema" {
-        return ppo_scalar_classic_ema(data, fast, slow, first, out);
+        ppo_scalar_classic_ema(data, fast, slow, first, out);
+        return;
     } else if ma_type == "sma" {
-        return ppo_scalar_classic_sma(data, fast, slow, first, out);
+        ppo_scalar_classic_sma(data, fast, slow, first, out);
+        return;
     }
 
-    // Fall back to regular implementation for other MA types
-    // MA failures should be impossible after validation; if they occur, write NaN and return.
+    // Generic fallback via MA engine (unchanged semantics).
+    // If MA fails (shouldn't after earlier validation), write NaNs for the valid tail.
+    let start = first + slow - 1;
     let fast_ma = match ma(ma_type, MaData::Slice(data), fast) {
         Ok(v) => v,
         Err(_) => {
-            for i in (first + slow - 1)..data.len() {
-                out[i] = f64::NAN;
+            let mut i = start;
+            while i < data.len() {
+                *out.get_unchecked_mut(i) = f64::NAN;
+                i += 1;
             }
             return;
         }
@@ -378,21 +386,29 @@ pub unsafe fn ppo_scalar(
     let slow_ma = match ma(ma_type, MaData::Slice(data), slow) {
         Ok(v) => v,
         Err(_) => {
-            for i in (first + slow - 1)..data.len() {
-                out[i] = f64::NAN;
+            let mut i = start;
+            while i < data.len() {
+                *out.get_unchecked_mut(i) = f64::NAN;
+                i += 1;
             }
             return;
         }
     };
 
-    for i in (first + slow - 1)..data.len() {
-        let sf = slow_ma[i];
-        let ff = fast_ma[i];
-        out[i] = if sf.is_nan() || ff.is_nan() || sf == 0.0 {
+    let n = data.len();
+    let mut i = start;
+    while i < n {
+        let sf = *slow_ma.get_unchecked(i);
+        let ff = *fast_ma.get_unchecked(i);
+        let y = if sf == 0.0 || sf.is_nan() || ff.is_nan() {
             f64::NAN
         } else {
-            100.0 * (ff - sf) / sf
+            // 100 * (ff/sf - 1)
+            let ratio = ff / sf;
+            f64::mul_add(ratio, 100.0, -100.0)
         };
+        *out.get_unchecked_mut(i) = y;
+        i += 1;
     }
 }
 
@@ -405,57 +421,66 @@ pub unsafe fn ppo_scalar_classic_ema(
     first: usize,
     out: &mut [f64],
 ) {
-    // EMA alpha factors
-    let fast_alpha = 2.0 / (fast as f64 + 1.0);
-    let slow_alpha = 2.0 / (slow as f64 + 1.0);
+    // Constants
+    let n = data.len();
+    let start_idx = first + slow - 1;
 
-    // Initialize EMAs with SMA
-    let mut fast_sum = 0.0;
-    let mut slow_sum = 0.0;
+    let fa = 2.0 / (fast as f64 + 1.0);
+    let sa = 2.0 / (slow as f64 + 1.0);
+    let fb = 1.0 - fa;
+    let sb = 1.0 - sa;
 
-    // Calculate initial SMAs for EMA initialization
-    for i in first..first + fast.min(data.len() - first) {
-        fast_sum += data[i];
-        if i < first + slow {
-            slow_sum += data[i];
+    // Build initial SMA windows for both EMAs in one pass over the first `slow`
+    // Fast window is the last `fast` elements within the first `slow` values
+    let mut slow_sum = 0.0f64;
+    let mut fast_sum = 0.0f64;
+    let overlap = slow - fast;
+    let mut k = 0usize;
+    while k < slow {
+        let v = *data.get_unchecked(first + k);
+        slow_sum += v;
+        if k >= overlap {
+            fast_sum += v;
         }
+        k += 1;
     }
 
-    for i in first + fast..first + slow.min(data.len() - first) {
-        slow_sum += data[i];
+    // Initial EMA values
+    let mut fast_ema = fast_sum / (fast as f64);
+    let mut slow_ema = slow_sum / (slow as f64);
+
+    // Advance fast EMA up to start_idx so both are aligned
+    let mut i = first + fast;
+    while i <= start_idx {
+        let x = *data.get_unchecked(i);
+        fast_ema = f64::mul_add(fa, x, fb * fast_ema);
+        i += 1;
     }
 
-    let mut fast_ema = fast_sum / fast as f64;
-    let mut slow_ema = slow_sum / slow as f64;
+    // First PPO output
+    *out.get_unchecked_mut(start_idx) = if slow_ema == 0.0 || slow_ema.is_nan() || fast_ema.is_nan()
+    {
+        f64::NAN
+    } else {
+        let ratio = fast_ema / slow_ema;
+        f64::mul_add(ratio, 100.0, -100.0)
+    };
 
-    // Process data with inline EMA calculations
-    for i in first..data.len() {
-        if i >= first + fast - 1 {
-            if i == first + fast - 1 {
-                // First EMA value is the SMA
-                fast_ema = fast_sum / fast as f64;
-            } else {
-                // Update EMA
-                fast_ema = fast_alpha * data[i] + (1.0 - fast_alpha) * fast_ema;
-            }
-        }
+    // Main loop
+    let mut j = start_idx + 1;
+    while j < n {
+        let x = *data.get_unchecked(j);
+        fast_ema = f64::mul_add(fa, x, fb * fast_ema);
+        slow_ema = f64::mul_add(sa, x, sb * slow_ema);
 
-        if i >= first + slow - 1 {
-            if i == first + slow - 1 {
-                // First EMA value is the SMA
-                slow_ema = slow_sum / slow as f64;
-            } else {
-                // Update EMA
-                slow_ema = slow_alpha * data[i] + (1.0 - slow_alpha) * slow_ema;
-            }
-
-            // Calculate PPO
-            out[i] = if slow_ema == 0.0 || slow_ema.is_nan() || fast_ema.is_nan() {
-                f64::NAN
-            } else {
-                100.0 * (fast_ema - slow_ema) / slow_ema
-            };
-        }
+        let y = if slow_ema == 0.0 || slow_ema.is_nan() || fast_ema.is_nan() {
+            f64::NAN
+        } else {
+            let ratio = fast_ema / slow_ema;
+            f64::mul_add(ratio, 100.0, -100.0)
+        };
+        *out.get_unchecked_mut(j) = y;
+        j += 1;
     }
 }
 
@@ -468,52 +493,58 @@ pub unsafe fn ppo_scalar_classic_sma(
     first: usize,
     out: &mut [f64],
 ) {
-    // SMA calculation logic matching the exact behavior of sma_scalar
-
-    // Calculate slow SMA sum starting from 'first'
-    let mut slow_sum = 0.0;
-    for i in 0..slow {
-        slow_sum += data[first + i];
-    }
-
-    // For fast SMA at index (first + slow - 1), we need the window
-    // from (first + slow - fast) to (first + slow - 1)
-    let mut fast_sum = 0.0;
-    let fast_start = first + slow - fast;
-    for i in 0..fast {
-        fast_sum += data[fast_start + i];
-    }
-
-    // First valid index for both SMAs is at (first + slow - 1)
+    // Constants
+    let n = data.len();
     let start_idx = first + slow - 1;
 
-    // Calculate first PPO value
-    let fast_ma = fast_sum / fast as f64;
-    let slow_ma = slow_sum / slow as f64;
-    out[start_idx] = if slow_ma == 0.0 || slow_ma.is_nan() || fast_ma.is_nan() {
+    // Precompute constants so each step is one division total:
+    // PPO = 100 * ((fast_sum/fast) - (slow_sum/slow)) / (slow_sum/slow)
+    //     = 100 * ((fast_sum * (slow/fast)) / slow_sum - 1)
+    let k = (slow as f64) / (fast as f64);
+
+    // Build both rolling sums in one pass over the first `slow`
+    let mut slow_sum = 0.0f64;
+    let mut fast_sum = 0.0f64;
+    let overlap = slow - fast; // where fast window begins inside the slow window
+    let mut t = 0usize;
+    while t < slow {
+        let v = *data.get_unchecked(first + t);
+        slow_sum += v;
+        if t >= overlap {
+            fast_sum += v;
+        }
+        t += 1;
+    }
+
+    // First PPO at start_idx
+    *out.get_unchecked_mut(start_idx) = if slow_sum == 0.0 || slow_sum.is_nan() || fast_sum.is_nan()
+    {
         f64::NAN
     } else {
-        100.0 * (fast_ma - slow_ma) / slow_ma
+        let ratio = (fast_sum * k) / slow_sum;
+        f64::mul_add(ratio, 100.0, -100.0)
     };
 
-    // Process remaining data with rolling window
-    for i in start_idx + 1..data.len() {
-        // Update fast SMA rolling sum
-        fast_sum += data[i] - data[i - fast];
+    // Rolling window updates
+    let mut i = start_idx + 1;
+    while i < n {
+        let add = *data.get_unchecked(i);
+        // subtract the element leaving each window
+        let sub_fast = *data.get_unchecked(i - fast);
+        let sub_slow = *data.get_unchecked(i - slow);
 
-        // Update slow SMA rolling sum
-        slow_sum += data[i] - data[i - slow];
+        fast_sum += add - sub_fast;
+        slow_sum += add - sub_slow;
 
-        // Calculate new SMAs
-        let fast_ma = fast_sum / fast as f64;
-        let slow_ma = slow_sum / slow as f64;
-
-        // Calculate PPO
-        out[i] = if slow_ma == 0.0 || slow_ma.is_nan() || fast_ma.is_nan() {
+        let y = if slow_sum == 0.0 || slow_sum.is_nan() || fast_sum.is_nan() {
             f64::NAN
         } else {
-            100.0 * (fast_ma - slow_ma) / slow_ma
+            let ratio = (fast_sum * k) / slow_sum;
+            f64::mul_add(ratio, 100.0, -100.0)
         };
+        *out.get_unchecked_mut(i) = y;
+
+        i += 1;
     }
 }
 
@@ -763,38 +794,87 @@ fn ppo_batch_inner_into(
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
 
+    // Row-specific optimization: precompute MA series for SMA/EMA once per unique period
+    let ma_type = sweep.ma_type.as_str();
+    let use_cached = ma_type == "sma" || ma_type == "ema";
+    let mut ma_cache: HashMap<usize, Vec<f64>> = HashMap::new();
+    if use_cached {
+        // Collect unique periods across fast and slow
+        let mut uniq: Vec<usize> = Vec::new();
+        for c in &combos {
+            let f = c.fast_period.unwrap();
+            let s = c.slow_period.unwrap();
+            if !uniq.contains(&f) {
+                uniq.push(f);
+            }
+            if !uniq.contains(&s) {
+                uniq.push(s);
+            }
+        }
+        for &p in &uniq {
+            if let Ok(v) = ma(ma_type, MaData::Slice(data), p) {
+                ma_cache.insert(p, v);
+            } else {
+                // In case of MA failure (unexpected), insert a NaN vector to keep behavior predictable
+                let mut v = vec![f64::NAN; data.len()];
+                ma_cache.insert(p, v);
+            }
+        }
+    }
+
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let p = &combos[row];
         let out_row: &mut [f64] =
             std::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
-        match kern {
-            Kernel::Scalar => ppo_row_scalar(
-                data,
-                first,
-                p.fast_period.unwrap(),
-                p.slow_period.unwrap(),
-                p.ma_type.as_ref().unwrap(),
-                out_row,
-            ),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => ppo_row_avx2(
-                data,
-                first,
-                p.fast_period.unwrap(),
-                p.slow_period.unwrap(),
-                p.ma_type.as_ref().unwrap(),
-                out_row,
-            ),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => ppo_row_avx512(
-                data,
-                first,
-                p.fast_period.unwrap(),
-                p.slow_period.unwrap(),
-                p.ma_type.as_ref().unwrap(),
-                out_row,
-            ),
-            _ => unreachable!(),
+        if use_cached {
+            let fast = p.fast_period.unwrap();
+            let slow = p.slow_period.unwrap();
+            let fast_ma = ma_cache.get(&fast).unwrap();
+            let slow_ma = ma_cache.get(&slow).unwrap();
+            let mut i = first + slow - 1;
+            let n = data.len();
+            while i < n {
+                let sf = *slow_ma.get_unchecked(i);
+                let ff = *fast_ma.get_unchecked(i);
+                let y = if sf == 0.0 || sf.is_nan() || ff.is_nan() {
+                    f64::NAN
+                } else {
+                    let ratio = ff / sf;
+                    f64::mul_add(ratio, 100.0, -100.0)
+                };
+                *out_row.get_unchecked_mut(i) = y;
+                i += 1;
+            }
+        } else {
+            match kern {
+                Kernel::Scalar => ppo_row_scalar(
+                    data,
+                    first,
+                    p.fast_period.unwrap(),
+                    p.slow_period.unwrap(),
+                    p.ma_type.as_ref().unwrap(),
+                    out_row,
+                ),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 => ppo_row_avx2(
+                    data,
+                    first,
+                    p.fast_period.unwrap(),
+                    p.slow_period.unwrap(),
+                    p.ma_type.as_ref().unwrap(),
+                    out_row,
+                ),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 => ppo_row_avx512(
+                    data,
+                    first,
+                    p.fast_period.unwrap(),
+                    p.slow_period.unwrap(),
+                    p.ma_type.as_ref().unwrap(),
+                    out_row,
+                ),
+                _ => unreachable!(),
+            }
         }
     };
 
@@ -868,36 +948,84 @@ fn ppo_batch_inner(
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
+    // Row-specific optimization: precompute MA series for SMA/EMA once per unique period
+    let ma_type = sweep.ma_type.as_str();
+    let use_cached = ma_type == "sma" || ma_type == "ema";
+    let mut ma_cache: HashMap<usize, Vec<f64>> = HashMap::new();
+    if use_cached {
+        // Collect unique periods across fast and slow
+        let mut uniq: Vec<usize> = Vec::new();
+        for c in &combos {
+            let f = c.fast_period.unwrap();
+            let s = c.slow_period.unwrap();
+            if !uniq.contains(&f) {
+                uniq.push(f);
+            }
+            if !uniq.contains(&s) {
+                uniq.push(s);
+            }
+        }
+        for &p in &uniq {
+            if let Ok(v) = ma(ma_type, MaData::Slice(data), p) {
+                ma_cache.insert(p, v);
+            } else {
+                let v = vec![f64::NAN; data.len()];
+                ma_cache.insert(p, v);
+            }
+        }
+    }
+
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let p = &combos[row];
-        match kern {
-            Kernel::Scalar => ppo_row_scalar(
-                data,
-                first,
-                p.fast_period.unwrap(),
-                p.slow_period.unwrap(),
-                p.ma_type.as_ref().unwrap(),
-                out_row,
-            ),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => ppo_row_avx2(
-                data,
-                first,
-                p.fast_period.unwrap(),
-                p.slow_period.unwrap(),
-                p.ma_type.as_ref().unwrap(),
-                out_row,
-            ),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => ppo_row_avx512(
-                data,
-                first,
-                p.fast_period.unwrap(),
-                p.slow_period.unwrap(),
-                p.ma_type.as_ref().unwrap(),
-                out_row,
-            ),
-            _ => unreachable!(),
+        if use_cached {
+            let fast = p.fast_period.unwrap();
+            let slow = p.slow_period.unwrap();
+            let fast_ma = ma_cache.get(&fast).unwrap();
+            let slow_ma = ma_cache.get(&slow).unwrap();
+            let mut i = first + slow - 1;
+            let n = data.len();
+            while i < n {
+                let sf = *slow_ma.get_unchecked(i);
+                let ff = *fast_ma.get_unchecked(i);
+                let y = if sf == 0.0 || sf.is_nan() || ff.is_nan() {
+                    f64::NAN
+                } else {
+                    let ratio = ff / sf;
+                    f64::mul_add(ratio, 100.0, -100.0)
+                };
+                *out_row.get_unchecked_mut(i) = y;
+                i += 1;
+            }
+        } else {
+            match kern {
+                Kernel::Scalar => ppo_row_scalar(
+                    data,
+                    first,
+                    p.fast_period.unwrap(),
+                    p.slow_period.unwrap(),
+                    p.ma_type.as_ref().unwrap(),
+                    out_row,
+                ),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 => ppo_row_avx2(
+                    data,
+                    first,
+                    p.fast_period.unwrap(),
+                    p.slow_period.unwrap(),
+                    p.ma_type.as_ref().unwrap(),
+                    out_row,
+                ),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 => ppo_row_avx512(
+                    data,
+                    first,
+                    p.fast_period.unwrap(),
+                    p.slow_period.unwrap(),
+                    p.ma_type.as_ref().unwrap(),
+                    out_row,
+                ),
+                _ => unreachable!(),
+            }
         }
     };
 

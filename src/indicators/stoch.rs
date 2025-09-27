@@ -19,7 +19,9 @@
 //! - **d**: %D line as `Vec<f64>` (length matches input, range 0-100)
 //!
 //! ## Developer Notes
-//! - **AVX2/AVX512 kernels**: Currently stubs that call scalar implementation
+//! - **AVX2/AVX512 kernels**: Implemented AVX2 single-series and row kernels; AVX512 implemented.
+//!   Runtime selection uses `detect_best_kernel()` (AVX512 → AVX2 → Scalar). Gains observed here are modest; if
+//!   you prefer conservative behavior, pass `Kernel::Scalar` explicitly.
 //! - **Streaming update**: O(n) performance due to recalculating min/max over full buffers
 //! - **Memory optimization**: Properly uses zero-copy helper functions (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
 //! - **TODO**: Implement actual SIMD kernels for AVX2/AVX512
@@ -360,6 +362,7 @@ pub fn stoch_with_kernel(input: &StochInput, kernel: Kernel) -> Result<StochOutp
     // Use alloc_with_nan_prefix for zero-copy allocation
     let mut k_raw = alloc_with_nan_prefix(data_len, first_valid_idx + fastk_period - 1);
 
+    // Runtime selection prefers the best available SIMD when `Kernel::Auto` is used.
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
         other => other,
@@ -472,13 +475,24 @@ pub fn stoch_scalar(
     first_val: usize,
     out: &mut [f64],
 ) {
-    for i in (first_val + fastk_period - 1)..close.len() {
-        let denom = hh[i] - ll[i];
-        if denom.abs() < f64::EPSILON {
-            out[i] = 50.0;
-        } else {
-            out[i] = 100.0 * (close[i] - ll[i]) / denom;
-        }
+    // Compute K starting at the first valid index; keep scalar path safe.
+    let start = first_val + fastk_period - 1;
+    if start >= close.len() {
+        return;
+    }
+
+    let scale = 100.0_f64;
+    let n = close.len() - start;
+
+    // Work on tail-sliced views to enable tighter indexing and potential bounds-check elision
+    let c = &close[start..];
+    let h = &hh[start..];
+    let l = &ll[start..];
+    let outv = &mut out[start..];
+
+    for (o, (&cv, (&hv, &lv))) in outv.iter_mut().zip(c.iter().zip(h.iter().zip(l.iter()))) {
+        let d = hv - lv;
+        *o = if d.abs() < f64::EPSILON { 50.0 } else { (cv - lv) * (scale / d) };
     }
 }
 
@@ -494,7 +508,84 @@ pub fn stoch_avx2(
     first_valid: usize,
     out: &mut [f64],
 ) {
-    stoch_scalar(high, low, close, hh, ll, fastk_period, first_valid, out)
+    unsafe { stoch_avx2_impl(high, low, close, hh, ll, fastk_period, first_valid, out) }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn stoch_avx2_impl(
+    _high: &[f64],
+    _low: &[f64],
+    close: &[f64],
+    hh: &[f64],
+    ll: &[f64],
+    fastk_period: usize,
+    first_valid: usize,
+    out: &mut [f64],
+) {
+    let start = first_valid + fastk_period - 1;
+    if start >= close.len() {
+        return;
+    }
+
+    let n = close.len() - start;
+    let mut i = 0usize;
+
+    let c_ptr = close.as_ptr().add(start);
+    let h_ptr = hh.as_ptr().add(start);
+    let l_ptr = ll.as_ptr().add(start);
+    let o_ptr = out.as_mut_ptr().add(start);
+
+    const STEP: usize = 4;
+    let vec_end = n & !(STEP - 1);
+
+    let scale = _mm256_set1_pd(100.0);
+    let fifty = _mm256_set1_pd(50.0);
+    let eps = _mm256_set1_pd(f64::EPSILON);
+    let sign_mask = _mm256_set1_pd(-0.0); // for abs via andnot
+
+    while i + STEP <= vec_end {
+        // First block
+        let c0 = _mm256_loadu_pd(c_ptr.add(i));
+        let h0 = _mm256_loadu_pd(h_ptr.add(i));
+        let l0 = _mm256_loadu_pd(l_ptr.add(i));
+        let d0 = _mm256_sub_pd(h0, l0);
+        let n0 = _mm256_sub_pd(c0, l0);
+        let a0 = _mm256_andnot_pd(sign_mask, d0);
+        let m0 = _mm256_cmp_pd(a0, eps, _CMP_LT_OQ);
+        let inv0 = _mm256_div_pd(scale, d0);
+        let v0 = _mm256_mul_pd(n0, inv0);
+        let o0 = _mm256_blendv_pd(v0, fifty, m0);
+
+        // Second block (if available)
+        if i + 2 * STEP <= vec_end {
+            let c1 = _mm256_loadu_pd(c_ptr.add(i + STEP));
+            let h1 = _mm256_loadu_pd(h_ptr.add(i + STEP));
+            let l1 = _mm256_loadu_pd(l_ptr.add(i + STEP));
+            let d1 = _mm256_sub_pd(h1, l1);
+            let n1 = _mm256_sub_pd(c1, l1);
+            let a1 = _mm256_andnot_pd(sign_mask, d1);
+            let m1 = _mm256_cmp_pd(a1, eps, _CMP_LT_OQ);
+            let inv1 = _mm256_div_pd(scale, d1);
+            let v1 = _mm256_mul_pd(n1, inv1);
+            let o1 = _mm256_blendv_pd(v1, fifty, m1);
+
+            _mm256_storeu_pd(o_ptr.add(i), o0);
+            _mm256_storeu_pd(o_ptr.add(i + STEP), o1);
+            i += 2 * STEP;
+        } else {
+            _mm256_storeu_pd(o_ptr.add(i), o0);
+            i += STEP;
+        }
+    }
+
+    while i < n {
+        let c = *c_ptr.add(i);
+        let l = *l_ptr.add(i);
+        let d = *h_ptr.add(i) - l;
+        *o_ptr.add(i) = if d.abs() < f64::EPSILON { 50.0 } else { (c - l) * (100.0 / d) };
+        i += 1;
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -509,7 +600,7 @@ pub fn stoch_avx512_short(
     first_valid: usize,
     out: &mut [f64],
 ) {
-    stoch_scalar(high, low, close, hh, ll, fastk_period, first_valid, out)
+    unsafe { stoch_avx512_impl(high, low, close, hh, ll, fastk_period, first_valid, out) }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -524,7 +615,84 @@ pub fn stoch_avx512_long(
     first_valid: usize,
     out: &mut [f64],
 ) {
-    stoch_scalar(high, low, close, hh, ll, fastk_period, first_valid, out)
+    unsafe { stoch_avx512_impl(high, low, close, hh, ll, fastk_period, first_valid, out) }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+unsafe fn stoch_avx512_impl(
+    _high: &[f64],
+    _low: &[f64],
+    close: &[f64],
+    hh: &[f64],
+    ll: &[f64],
+    fastk_period: usize,
+    first_valid: usize,
+    out: &mut [f64],
+) {
+    let start = first_valid + fastk_period - 1;
+    if start >= close.len() {
+        return;
+    }
+
+    let n = close.len() - start;
+
+    let c_ptr = close.as_ptr().add(start);
+    let h_ptr = hh.as_ptr().add(start);
+    let l_ptr = ll.as_ptr().add(start);
+    let o_ptr = out.as_mut_ptr().add(start);
+
+    const STEP: usize = 8;
+    let vec_end = n & !(STEP - 1);
+
+    let scale = _mm512_set1_pd(100.0);
+    let fifty = _mm512_set1_pd(50.0);
+    let eps = _mm512_set1_pd(f64::EPSILON);
+    let sign_mask = _mm512_set1_pd(-0.0);
+
+    let mut i = 0usize;
+    while i + STEP <= vec_end {
+        // Block 0
+        let c0 = _mm512_loadu_pd(c_ptr.add(i));
+        let h0 = _mm512_loadu_pd(h_ptr.add(i));
+        let l0 = _mm512_loadu_pd(l_ptr.add(i));
+        let d0 = _mm512_sub_pd(h0, l0);
+        let n0 = _mm512_sub_pd(c0, l0);
+        let a0 = _mm512_andnot_pd(sign_mask, d0);
+        let m0: __mmask8 = _mm512_cmp_pd_mask(a0, eps, _CMP_LT_OQ);
+        let inv0 = _mm512_div_pd(scale, d0);
+        let v0 = _mm512_mul_pd(n0, inv0);
+        let o0 = _mm512_mask_blend_pd(m0, v0, fifty);
+
+        // Try second block
+        if i + 2 * STEP <= vec_end {
+            let c1 = _mm512_loadu_pd(c_ptr.add(i + STEP));
+            let h1 = _mm512_loadu_pd(h_ptr.add(i + STEP));
+            let l1 = _mm512_loadu_pd(l_ptr.add(i + STEP));
+            let d1 = _mm512_sub_pd(h1, l1);
+            let n1 = _mm512_sub_pd(c1, l1);
+            let a1 = _mm512_andnot_pd(sign_mask, d1);
+            let m1: __mmask8 = _mm512_cmp_pd_mask(a1, eps, _CMP_LT_OQ);
+            let inv1 = _mm512_div_pd(scale, d1);
+            let v1 = _mm512_mul_pd(n1, inv1);
+            let o1 = _mm512_mask_blend_pd(m1, v1, fifty);
+
+            _mm512_storeu_pd(o_ptr.add(i), o0);
+            _mm512_storeu_pd(o_ptr.add(i + STEP), o1);
+            i += 2 * STEP;
+        } else {
+            _mm512_storeu_pd(o_ptr.add(i), o0);
+            i += STEP;
+        }
+    }
+
+    while i < n {
+        let c = *c_ptr.add(i);
+        let l = *l_ptr.add(i);
+        let d = *h_ptr.add(i) - l;
+        *o_ptr.add(i) = if d.abs() < f64::EPSILON { 50.0 } else { (c - l) * (100.0 / d) };
+        i += 1;
+    }
 }
 
 // === Batch API ===
@@ -931,13 +1099,23 @@ unsafe fn stoch_row_scalar(
     first: usize,
     out: &mut [f64],
 ) {
-    for i in (first + fastk_period - 1)..close.len() {
-        let denom = hh[i] - ll[i];
-        if denom.abs() < f64::EPSILON {
-            out[i] = 50.0;
-        } else {
-            out[i] = 100.0 * (close[i] - ll[i]) / denom;
-        }
+    // Same optimized core as single-series, kept within the existing unsafe boundary
+    let start = first + fastk_period - 1;
+    if start >= close.len() {
+        return;
+    }
+
+    let scale = 100.0_f64;
+    let n = close.len() - start;
+
+    let c = &close[start..];
+    let h = &hh[start..];
+    let l = &ll[start..];
+    let outv = &mut out[start..];
+
+    for (o, (&cv, (&hv, &lv))) in outv.iter_mut().zip(c.iter().zip(h.iter().zip(l.iter()))) {
+        let d = hv - lv;
+        *o = if d.abs() < f64::EPSILON { 50.0 } else { (cv - lv) * (scale / d) };
     }
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -952,7 +1130,81 @@ unsafe fn stoch_row_avx2(
     first: usize,
     out: &mut [f64],
 ) {
-    stoch_row_scalar(high, low, close, hh, ll, fastk_period, first, out)
+    stoch_row_avx2_impl(high, low, close, hh, ll, fastk_period, first, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn stoch_row_avx2_impl(
+    _high: &[f64],
+    _low: &[f64],
+    close: &[f64],
+    hh: &[f64],
+    ll: &[f64],
+    fastk_period: usize,
+    first: usize,
+    out: &mut [f64],
+) {
+    let start = first + fastk_period - 1;
+    if start >= close.len() {
+        return;
+    }
+    let n = close.len() - start;
+
+    let mut i = 0usize;
+    let c_ptr = close.as_ptr().add(start);
+    let h_ptr = hh.as_ptr().add(start);
+    let l_ptr = ll.as_ptr().add(start);
+    let o_ptr = out.as_mut_ptr().add(start);
+
+    const STEP: usize = 4;
+    let vec_end = n & !(STEP - 1);
+
+    let scale = _mm256_set1_pd(100.0);
+    let fifty = _mm256_set1_pd(50.0);
+    let eps = _mm256_set1_pd(f64::EPSILON);
+    let sign_mask = _mm256_set1_pd(-0.0);
+
+    while i + STEP <= vec_end {
+        let c0 = _mm256_loadu_pd(c_ptr.add(i));
+        let h0 = _mm256_loadu_pd(h_ptr.add(i));
+        let l0 = _mm256_loadu_pd(l_ptr.add(i));
+        let d0 = _mm256_sub_pd(h0, l0);
+        let n0 = _mm256_sub_pd(c0, l0);
+        let a0 = _mm256_andnot_pd(sign_mask, d0);
+        let m0 = _mm256_cmp_pd(a0, eps, _CMP_LT_OQ);
+        let inv0 = _mm256_div_pd(scale, d0);
+        let v0 = _mm256_mul_pd(n0, inv0);
+        let o0 = _mm256_blendv_pd(v0, fifty, m0);
+
+        if i + 2 * STEP <= vec_end {
+            let c1 = _mm256_loadu_pd(c_ptr.add(i + STEP));
+            let h1 = _mm256_loadu_pd(h_ptr.add(i + STEP));
+            let l1 = _mm256_loadu_pd(l_ptr.add(i + STEP));
+            let d1 = _mm256_sub_pd(h1, l1);
+            let n1 = _mm256_sub_pd(c1, l1);
+            let a1 = _mm256_andnot_pd(sign_mask, d1);
+            let m1 = _mm256_cmp_pd(a1, eps, _CMP_LT_OQ);
+            let inv1 = _mm256_div_pd(scale, d1);
+            let v1 = _mm256_mul_pd(n1, inv1);
+            let o1 = _mm256_blendv_pd(v1, fifty, m1);
+
+            _mm256_storeu_pd(o_ptr.add(i), o0);
+            _mm256_storeu_pd(o_ptr.add(i + STEP), o1);
+            i += 2 * STEP;
+        } else {
+            _mm256_storeu_pd(o_ptr.add(i), o0);
+            i += STEP;
+        }
+    }
+
+    while i < n {
+        let c = *c_ptr.add(i);
+        let l = *l_ptr.add(i);
+        let d = *h_ptr.add(i) - l;
+        *o_ptr.add(i) = if d.abs() < f64::EPSILON { 50.0 } else { (c - l) * (100.0 / d) };
+        i += 1;
+    }
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
@@ -984,7 +1236,7 @@ unsafe fn stoch_row_avx512_short(
     first: usize,
     out: &mut [f64],
 ) {
-    stoch_row_scalar(high, low, close, hh, ll, fastk_period, first, out)
+    stoch_row_avx512_impl(high, low, close, hh, ll, fastk_period, first, out)
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
@@ -998,7 +1250,81 @@ unsafe fn stoch_row_avx512_long(
     first: usize,
     out: &mut [f64],
 ) {
-    stoch_row_scalar(high, low, close, hh, ll, fastk_period, first, out)
+    stoch_row_avx512_impl(high, low, close, hh, ll, fastk_period, first, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+unsafe fn stoch_row_avx512_impl(
+    _high: &[f64],
+    _low: &[f64],
+    close: &[f64],
+    hh: &[f64],
+    ll: &[f64],
+    fastk_period: usize,
+    first: usize,
+    out: &mut [f64],
+) {
+    let start = first + fastk_period - 1;
+    if start >= close.len() {
+        return;
+    }
+    let n = close.len() - start;
+
+    let c_ptr = close.as_ptr().add(start);
+    let h_ptr = hh.as_ptr().add(start);
+    let l_ptr = ll.as_ptr().add(start);
+    let o_ptr = out.as_mut_ptr().add(start);
+
+    const STEP: usize = 8;
+    let vec_end = n & !(STEP - 1);
+
+    let scale = _mm512_set1_pd(100.0);
+    let fifty = _mm512_set1_pd(50.0);
+    let eps = _mm512_set1_pd(f64::EPSILON);
+    let sign_mask = _mm512_set1_pd(-0.0);
+
+    let mut i = 0usize;
+    while i + STEP <= vec_end {
+        let c0 = _mm512_loadu_pd(c_ptr.add(i));
+        let h0 = _mm512_loadu_pd(h_ptr.add(i));
+        let l0 = _mm512_loadu_pd(l_ptr.add(i));
+        let d0 = _mm512_sub_pd(h0, l0);
+        let n0 = _mm512_sub_pd(c0, l0);
+        let a0 = _mm512_andnot_pd(sign_mask, d0);
+        let m0: __mmask8 = _mm512_cmp_pd_mask(a0, eps, _CMP_LT_OQ);
+        let inv0 = _mm512_div_pd(scale, d0);
+        let v0 = _mm512_mul_pd(n0, inv0);
+        let o0 = _mm512_mask_blend_pd(m0, v0, fifty);
+
+        if i + 2 * STEP <= vec_end {
+            let c1 = _mm512_loadu_pd(c_ptr.add(i + STEP));
+            let h1 = _mm512_loadu_pd(h_ptr.add(i + STEP));
+            let l1 = _mm512_loadu_pd(l_ptr.add(i + STEP));
+            let d1 = _mm512_sub_pd(h1, l1);
+            let n1 = _mm512_sub_pd(c1, l1);
+            let a1 = _mm512_andnot_pd(sign_mask, d1);
+            let m1: __mmask8 = _mm512_cmp_pd_mask(a1, eps, _CMP_LT_OQ);
+            let inv1 = _mm512_div_pd(scale, d1);
+            let v1 = _mm512_mul_pd(n1, inv1);
+            let o1 = _mm512_mask_blend_pd(m1, v1, fifty);
+
+            _mm512_storeu_pd(o_ptr.add(i), o0);
+            _mm512_storeu_pd(o_ptr.add(i + STEP), o1);
+            i += 2 * STEP;
+        } else {
+            _mm512_storeu_pd(o_ptr.add(i), o0);
+            i += STEP;
+        }
+    }
+
+    while i < n {
+        let c = *c_ptr.add(i);
+        let l = *l_ptr.add(i);
+        let d = *h_ptr.add(i) - l;
+        *o_ptr.add(i) = if d.abs() < f64::EPSILON { 50.0 } else { (c - l) * (100.0 / d) };
+        i += 1;
+    }
 }
 
 // === Streaming ===

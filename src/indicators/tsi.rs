@@ -12,11 +12,13 @@
 //! - **`Err(TsiError)`** on invalid parameters or insufficient data.
 //!
 //! ## Developer Notes
-//! - **SIMD Status**: AVX2 and AVX512 kernels are stubs (call scalar/streaming implementation)
-//! - **Streaming Performance**: O(1) - uses nested EMA streams with minimal state
-//! - **Memory Optimization**: ✓ Uses alloc_with_nan_prefix for output allocation
-//! - **Batch Support**: ✓ Full parallel batch parameter sweep implementation
-//! - **TODO**: Implement actual AVX2/AVX512 SIMD kernels for double EMA calculations
+//! - SIMD: AVX2/AVX512 are present as stubs and short‑circuit to the scalar path.
+//!   Rationale: TSI is inherently sequential (EMA recursion), so per‑element
+//!   vectorization does not provide wins; keeping scalar as reference.
+//! - Scalar: Optimized inlined double‑EMA kernel for all periods; classic fast path
+//!   used for default (25,13). Robust NaN handling and no O(N) temporaries.
+//! - Memory: Uses `alloc_with_nan_prefix` / matrix helpers for zero‑copy prefixes.
+//! - Batch: Parallel per‑row evaluation; rows use the optimized scalar kernel.
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -325,6 +327,118 @@ fn tsi_compute_into_streaming(
     Ok(())
 }
 
+/// Optimized scalar kernel for arbitrary periods.
+///
+/// This implementation inlines the double-EMA updates for numerator/denominator
+/// and handles NaNs robustly. It preserves warmup semantics: indices before
+/// `first + long + short` remain NaN (caller sets the prefix), and gaps in the
+/// input (NaN/inf) produce NaNs without poisoning EMA state.
+#[inline(always)]
+fn tsi_compute_into_inline(
+    data: &[f64],
+    long: usize,
+    short: usize,
+    first: usize,
+    out: &mut [f64],
+) -> Result<(), TsiError> {
+    let n = data.len();
+    if n == 0 || first >= n {
+        return Ok(());
+    }
+
+    // Precompute coefficients
+    let long_alpha = 2.0 / (long as f64 + 1.0);
+    let short_alpha = 2.0 / (short as f64 + 1.0);
+    let long_1minus = 1.0 - long_alpha;
+    let short_1minus = 1.0 - short_alpha;
+
+    let warmup_end = first + long + short;
+
+    // Previous finite value (by contract, data[first] is finite)
+    let mut prev = data[first];
+
+    // Find the first finite value after `first` to seed momentum/EMAs
+    let mut i = first + 1;
+    while i < n {
+        let cur = data[i];
+        if cur.is_finite() {
+            break;
+        } else {
+            // Preserve NaN gaps; prefix before warmup is already NaN-initialized
+            if i >= warmup_end {
+                out[i] = f64::NAN;
+            }
+            i += 1;
+        }
+    }
+    if i >= n {
+        return Ok(());
+    }
+
+    // Seed all EMA chains with the first valid momentum
+    let mut momentum = data[i] - prev;
+    prev = data[i];
+
+    let mut ema_long_num = momentum;
+    let mut ema_short_num = momentum;
+    let mut ema_long_den = momentum.abs();
+    let mut ema_short_den = ema_long_den;
+
+    // Warmup phase (no writes beyond caller's NaN prefix)
+    let mut idx = i + 1;
+    let end_warm = warmup_end.min(n);
+    while idx < end_warm {
+        let cur = data[idx];
+        if cur.is_finite() {
+            momentum = cur - prev;
+            prev = cur;
+
+            let am = momentum.abs();
+
+            // Inline EMA updates (loop-jammed)
+            ema_long_num = long_alpha * momentum + long_1minus * ema_long_num;
+            ema_short_num = short_alpha * ema_long_num + short_1minus * ema_short_num;
+
+            ema_long_den = long_alpha * am + long_1minus * ema_long_den;
+            ema_short_den = short_alpha * ema_long_den + short_1minus * ema_short_den;
+        }
+        // else: skip NaN/inf without touching prev or EMA state
+        idx += 1;
+    }
+
+    // Output phase
+    while idx < n {
+        let cur = data[idx];
+        if cur.is_finite() {
+            momentum = cur - prev;
+            prev = cur;
+
+            let am = momentum.abs();
+
+            // Inline EMA updates (numerator + denominator)
+            ema_long_num = long_alpha * momentum + long_1minus * ema_long_num;
+            ema_short_num = short_alpha * ema_long_num + short_1minus * ema_short_num;
+
+            ema_long_den = long_alpha * am + long_1minus * ema_long_den;
+            ema_short_den = short_alpha * ema_long_den + short_1minus * ema_short_den;
+
+            // Compute TSI; avoid divide-by-zero and clamp to [-100, 100]
+            let den = ema_short_den;
+            let val = if den == 0.0 {
+                f64::NAN
+            } else {
+                (100.0 * (ema_short_num / den)).clamp(-100.0, 100.0)
+            };
+            out[idx] = val;
+        } else {
+            out[idx] = f64::NAN; // preserve NaN gaps in output
+        }
+        idx += 1;
+    }
+
+    Ok(())
+}
+
 #[inline]
 pub fn tsi(input: &TsiInput) -> Result<TsiOutput, TsiError> {
     tsi_with_kernel(input, Kernel::Auto)
@@ -347,8 +461,8 @@ pub fn tsi_with_kernel(input: &TsiInput, kernel: Kernel) -> Result<TsiOutput, Ts
             tsi_scalar_classic(data, long, short, first, &mut out)?;
         }
     } else {
-        // no SIMD specialization here; streams are scalar
-        tsi_compute_into_streaming(data, long, short, first, &mut out)?;
+        // Use inline scalar kernel for general periods
+        tsi_compute_into_inline(data, long, short, first, &mut out)?;
     }
     Ok(TsiOutput { values: out })
 }
@@ -375,7 +489,8 @@ pub fn tsi_into_slice(dst: &mut [f64], input: &TsiInput, kern: Kernel) -> Result
             tsi_scalar_classic(data, long, short, first, dst)?;
         }
     } else {
-        tsi_compute_into_streaming(data, long, short, first, dst)?;
+        // Use inline scalar kernel for general periods
+        tsi_compute_into_inline(data, long, short, first, dst)?;
     }
     Ok(())
 }
@@ -394,7 +509,7 @@ pub unsafe fn tsi_scalar(
     if long == 25 && short == 13 {
         tsi_scalar_classic(data, long, short, first, &mut out)?;
     } else {
-        tsi_compute_into_streaming(data, long, short, first, &mut out)?;
+        tsi_compute_into_inline(data, long, short, first, &mut out)?;
     }
     Ok(TsiOutput { values: out })
 }
@@ -920,7 +1035,7 @@ pub unsafe fn tsi_row_scalar_into(
     out_row: &mut [f64],
 ) -> Result<(), TsiError> {
     // out_row length equals data.len(); NaN prefixes already set by init_matrix_prefixes
-    tsi_compute_into_streaming(data, long, short, first, out_row)
+    tsi_compute_into_inline(data, long, short, first, out_row)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
