@@ -15,12 +15,14 @@
 //! - **`Err(KdjError)`** on failure
 //!
 //! ## Developer Status
-//! - **SIMD Kernels**: AVX2 (stub), AVX512 (stubs - short/long variants)
-//! - **Streaming**: Not implemented
-//! - **Memory**: Good zero-copy usage (alloc_with_nan_prefix, make_uninit_matrix)
+//! - SIMD: Delegates to scalar. Rolling max/min via deques is sequential/branchy; SIMD shows no consistent win (>5%).
+//! - Scalar: Fused single-pass for HH/LL and SMA/EMA smoothing; avoids extra temporaries and dynamic MA where possible.
+//! - Batch: Reuses precomputed stochastic per unique `fast_k` across rows to cut duplicate work.
+//! - Streaming: Not implemented
+//! - Memory: Good zero-copy usage (alloc_with_nan_prefix, make_uninit_matrix)
 
 use crate::indicators::moving_averages::ma::{ma, MaData};
-use crate::indicators::utility_functions::{max_rolling, min_rolling, RollingError};
+use crate::indicators::utility_functions::RollingError;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -291,40 +293,32 @@ pub fn kdj_scalar(
     slow_d_ma_type: &str,
     first_valid_idx: usize,
 ) -> Result<KdjOutput, KdjError> {
-    let hh = max_rolling(high, fast_k_period)?;
-    let ll = min_rolling(low, fast_k_period)?;
-
-    // Calculate warmup period - max of all MA warmups
-    let stoch_warmup = first_valid_idx + fast_k_period - 1;
-    let k_warmup = stoch_warmup + slow_k_period - 1;
-    let d_warmup = k_warmup + slow_d_period - 1;
-
-    // Use alloc_with_nan_prefix for stoch instead of vec!
-    let mut stoch = alloc_with_nan_prefix(high.len(), stoch_warmup);
-    for i in stoch_warmup..high.len() {
-        let denom = hh[i] - ll[i];
-        if denom == 0.0 || denom.is_nan() {
-            stoch[i] = f64::NAN;
-        } else {
-            stoch[i] = 100.0 * ((close[i] - ll[i]) / denom);
-        }
+    // Allocate outputs up-front and compute directly into them
+    let len = high.len();
+    let mut k: Vec<f64> = Vec::with_capacity(len);
+    let mut d: Vec<f64> = Vec::with_capacity(len);
+    let mut j: Vec<f64> = Vec::with_capacity(len);
+    unsafe {
+        k.set_len(len);
+        d.set_len(len);
+        j.set_len(len);
     }
 
-    // MA calls return Vec<f64> - unavoidable for dynamic MA selection
-    let k = ma(slow_k_ma_type, MaData::Slice(&stoch), slow_k_period)
-        .map_err(|e| KdjError::MaError(e.to_string().into()))?;
-    let d = ma(slow_d_ma_type, MaData::Slice(&k), slow_d_period)
-        .map_err(|e| KdjError::MaError(e.to_string().into()))?;
+    kdj_compute_into_scalar(
+        high,
+        low,
+        close,
+        first_valid_idx,
+        fast_k_period,
+        slow_k_period,
+        slow_k_ma_type,
+        slow_d_period,
+        slow_d_ma_type,
+        &mut k,
+        &mut d,
+        &mut j,
+    )?;
 
-    // Use alloc_with_nan_prefix for j instead of vec!
-    let mut j = alloc_with_nan_prefix(high.len(), d_warmup);
-    for i in d_warmup..high.len() {
-        if k[i].is_nan() || d[i].is_nan() {
-            j[i] = f64::NAN;
-        } else {
-            j[i] = 3.0 * k[i] - 2.0 * d[i];
-        }
-    }
     Ok(KdjOutput { k, d, j })
 }
 
@@ -449,40 +443,343 @@ fn kdj_compute_into_scalar(
     d_out: &mut [f64],
     j_out: &mut [f64],
 ) -> Result<(), KdjError> {
-    let hh = max_rolling(high, fast_k)?;
-    let ll = min_rolling(low, fast_k)?;
+    use std::collections::VecDeque;
+
+    let len = high.len();
+    if len == 0 {
+        return Err(KdjError::EmptyData);
+    }
 
     let stoch_warm = first + fast_k - 1;
-    let mut stoch = alloc_with_nan_prefix(high.len(), stoch_warm);
-    for i in stoch_warm..high.len() {
-        let denom = hh[i] - ll[i];
-        stoch[i] = if denom == 0.0 || denom.is_nan() {
+    let k_warm = stoch_warm + slow_k - 1;
+    let d_warm = k_warm + slow_d - 1;
+
+    // Fast paths: fully fused single pass for SMA/SMA and EMA/EMA
+    let sma_k = slow_k_ma.eq_ignore_ascii_case("sma");
+    let sma_d = slow_d_ma.eq_ignore_ascii_case("sma");
+    if sma_k && sma_d {
+        // Init NaN prefixes
+        for i in 0..k_warm.min(len) {
+            k_out[i] = f64::NAN;
+        }
+        for i in 0..d_warm.min(len) {
+            d_out[i] = f64::NAN;
+            j_out[i] = f64::NAN;
+        }
+
+        let mut maxdq: VecDeque<usize> = VecDeque::with_capacity(fast_k + 1);
+        let mut mindq: VecDeque<usize> = VecDeque::with_capacity(fast_k + 1);
+
+        let mut stoch_ring = vec![f64::NAN; slow_k];
+        let mut sum_k = 0.0f64;
+        let mut cnt_k: usize = 0;
+
+        let mut k_ring = vec![f64::NAN; slow_d];
+        let mut sum_d = 0.0f64;
+        let mut cnt_d: usize = 0;
+
+        for i in first..len {
+            // update max deque
+            let hi = unsafe { *high.get_unchecked(i) };
+            while let Some(&idx) = maxdq.back() {
+                if unsafe { *high.get_unchecked(idx) } <= hi {
+                    maxdq.pop_back();
+                } else {
+                    break;
+                }
+            }
+            maxdq.push_back(i);
+            while let Some(&idx) = maxdq.front() {
+                if idx + fast_k <= i {
+                    maxdq.pop_front();
+                } else {
+                    break;
+                }
+            }
+
+            // update min deque
+            let lo = unsafe { *low.get_unchecked(i) };
+            while let Some(&idx) = mindq.back() {
+                if unsafe { *low.get_unchecked(idx) } >= lo {
+                    mindq.pop_back();
+                } else {
+                    break;
+                }
+            }
+            mindq.push_back(i);
+            while let Some(&idx) = mindq.front() {
+                if idx + fast_k <= i {
+                    mindq.pop_front();
+                } else {
+                    break;
+                }
+            }
+
+            if i < stoch_warm {
+                continue;
+            }
+
+            // compute stoch
+            let hh = unsafe { *high.get_unchecked(*maxdq.front().unwrap()) };
+            let ll = unsafe { *low.get_unchecked(*mindq.front().unwrap()) };
+            let denom = hh - ll;
+            let stoch_i = if denom == 0.0 || denom.is_nan() {
+                f64::NAN
+            } else {
+                let c = unsafe { *close.get_unchecked(i) };
+                100.0 * ((c - ll) / denom)
+            };
+
+            // feed K SMA
+            let pos_k = i % slow_k;
+            let old_st = stoch_ring[pos_k];
+            if !old_st.is_nan() {
+                sum_k -= old_st;
+                cnt_k -= 1;
+            }
+            stoch_ring[pos_k] = stoch_i;
+            if !stoch_i.is_nan() {
+                sum_k += stoch_i;
+                cnt_k += 1;
+            }
+
+            if i >= k_warm {
+                let k_val = if cnt_k > 0 { sum_k / (cnt_k as f64) } else { f64::NAN };
+                unsafe { *k_out.get_unchecked_mut(i) = k_val };
+
+                // feed D SMA
+                let pos_d = i % slow_d;
+                let old_k = k_ring[pos_d];
+                if !old_k.is_nan() {
+                    sum_d -= old_k;
+                    cnt_d -= 1;
+                }
+                k_ring[pos_d] = k_val;
+                if !k_val.is_nan() {
+                    sum_d += k_val;
+                    cnt_d += 1;
+                }
+
+                if i >= d_warm {
+                    let d_val = if cnt_d > 0 { sum_d / (cnt_d as f64) } else { f64::NAN };
+                    unsafe {
+                        *d_out.get_unchecked_mut(i) = d_val;
+                        *j_out.get_unchecked_mut(i) = if k_val.is_nan() || d_val.is_nan() {
+                            f64::NAN
+                        } else {
+                            3.0 * k_val - 2.0 * d_val
+                        };
+                    }
+                }
+            }
+        }
+        return Ok(());
+    }
+
+    let ema_k = slow_k_ma.eq_ignore_ascii_case("ema");
+    let ema_d = slow_d_ma.eq_ignore_ascii_case("ema");
+    if ema_k && ema_d {
+        // Init NaN prefixes
+        for i in 0..k_warm.min(len) {
+            k_out[i] = f64::NAN;
+        }
+        for i in 0..d_warm.min(len) {
+            d_out[i] = f64::NAN;
+            j_out[i] = f64::NAN;
+        }
+
+        let mut maxdq: VecDeque<usize> = VecDeque::with_capacity(fast_k + 1);
+        let mut mindq: VecDeque<usize> = VecDeque::with_capacity(fast_k + 1);
+
+        let alpha_k = 2.0 / (slow_k as f64 + 1.0);
+        let om_alpha_k = 1.0 - alpha_k;
+        let alpha_d = 2.0 / (slow_d as f64 + 1.0);
+        let om_alpha_d = 1.0 - alpha_d;
+
+        let mut sum_init_k = 0.0f64;
+        let mut cnt_init_k: usize = 0;
+        let mut ema_kv = f64::NAN;
+
+        let mut sum_init_d = 0.0f64;
+        let mut cnt_init_d: usize = 0;
+        let mut ema_dv = f64::NAN;
+
+        for i in first..len {
+            // update deques
+            let hi = unsafe { *high.get_unchecked(i) };
+            while let Some(&idx) = maxdq.back() {
+                if unsafe { *high.get_unchecked(idx) } <= hi {
+                    maxdq.pop_back();
+                } else {
+                    break;
+                }
+            }
+            maxdq.push_back(i);
+            while let Some(&idx) = maxdq.front() {
+                if idx + fast_k <= i {
+                    maxdq.pop_front();
+                } else {
+                    break;
+                }
+            }
+
+            let lo = unsafe { *low.get_unchecked(i) };
+            while let Some(&idx) = mindq.back() {
+                if unsafe { *low.get_unchecked(idx) } >= lo {
+                    mindq.pop_back();
+                } else {
+                    break;
+                }
+            }
+            mindq.push_back(i);
+            while let Some(&idx) = mindq.front() {
+                if idx + fast_k <= i {
+                    mindq.pop_front();
+                } else {
+                    break;
+                }
+            }
+
+            if i < stoch_warm {
+                continue;
+            }
+
+            let hh = unsafe { *high.get_unchecked(*maxdq.front().unwrap()) };
+            let ll = unsafe { *low.get_unchecked(*mindq.front().unwrap()) };
+            let denom = hh - ll;
+            let stoch_i = if denom == 0.0 || denom.is_nan() {
+                f64::NAN
+            } else {
+                let c = unsafe { *close.get_unchecked(i) };
+                100.0 * ((c - ll) / denom)
+            };
+
+            if i <= k_warm {
+                if !stoch_i.is_nan() {
+                    sum_init_k += stoch_i;
+                    cnt_init_k += 1;
+                }
+                if i == k_warm {
+                    ema_kv = if cnt_init_k > 0 { sum_init_k / (cnt_init_k as f64) } else { f64::NAN };
+                    unsafe { *k_out.get_unchecked_mut(i) = ema_kv };
+                    if !ema_kv.is_nan() {
+                        sum_init_d += ema_kv;
+                        cnt_init_d += 1;
+                    }
+                }
+                continue;
+            }
+
+            // i > k_warm
+            if !stoch_i.is_nan() && !ema_kv.is_nan() {
+                ema_kv = stoch_i.mul_add(alpha_k, om_alpha_k * ema_kv);
+            } else if !stoch_i.is_nan() && ema_kv.is_nan() {
+                ema_kv = stoch_i;
+            }
+            unsafe { *k_out.get_unchecked_mut(i) = ema_kv };
+
+            if i <= d_warm {
+                if !ema_kv.is_nan() {
+                    sum_init_d += ema_kv;
+                    cnt_init_d += 1;
+                }
+                if i == d_warm {
+                    ema_dv = if cnt_init_d > 0 { sum_init_d / (cnt_init_d as f64) } else { f64::NAN };
+                    unsafe {
+                        *d_out.get_unchecked_mut(i) = ema_dv;
+                        *j_out.get_unchecked_mut(i) = if ema_kv.is_nan() || ema_dv.is_nan() {
+                            f64::NAN
+                        } else {
+                            3.0 * ema_kv - 2.0 * ema_dv
+                        };
+                    }
+                }
+                continue;
+            }
+
+            // i > d_warm
+            if !ema_kv.is_nan() && !ema_dv.is_nan() {
+                ema_dv = ema_kv.mul_add(alpha_d, om_alpha_d * ema_dv);
+            } else if !ema_kv.is_nan() && ema_dv.is_nan() {
+                ema_dv = ema_kv;
+            }
+            unsafe {
+                *d_out.get_unchecked_mut(i) = ema_dv;
+                *j_out.get_unchecked_mut(i) = if ema_kv.is_nan() || ema_dv.is_nan() {
+                    f64::NAN
+                } else {
+                    3.0 * ema_kv - 2.0 * ema_dv
+                };
+            }
+        }
+        return Ok(());
+    }
+
+    // Generic MA path: build stochastic once using fused deques, then apply dynamic MA
+    let mut stoch = alloc_with_nan_prefix(len, stoch_warm);
+
+    let mut maxdq: VecDeque<usize> = VecDeque::with_capacity(fast_k + 1);
+    let mut mindq: VecDeque<usize> = VecDeque::with_capacity(fast_k + 1);
+
+    for i in first..len {
+        let hi = unsafe { *high.get_unchecked(i) };
+        while let Some(&idx) = maxdq.back() {
+            if unsafe { *high.get_unchecked(idx) } <= hi {
+                maxdq.pop_back();
+            } else {
+                break;
+            }
+        }
+        maxdq.push_back(i);
+        while let Some(&idx) = maxdq.front() {
+            if idx + fast_k <= i {
+                maxdq.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        let lo = unsafe { *low.get_unchecked(i) };
+        while let Some(&idx) = mindq.back() {
+            if unsafe { *low.get_unchecked(idx) } >= lo {
+                mindq.pop_back();
+            } else {
+                break;
+            }
+        }
+        mindq.push_back(i);
+        while let Some(&idx) = mindq.front() {
+            if idx + fast_k <= i {
+                mindq.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        if i < stoch_warm {
+            continue;
+        }
+
+        let hh = unsafe { *high.get_unchecked(*maxdq.front().unwrap()) };
+        let ll = unsafe { *low.get_unchecked(*mindq.front().unwrap()) };
+        let denom = hh - ll;
+        let val = if denom == 0.0 || denom.is_nan() {
             f64::NAN
         } else {
-            100.0 * ((close[i] - ll[i]) / denom)
+            let c = unsafe { *close.get_unchecked(i) };
+            100.0 * ((c - ll) / denom)
         };
+        unsafe { *stoch.get_unchecked_mut(i) = val };
     }
 
-    // Use classic kernel for common MA types
-    if (slow_k_ma == "sma" || slow_k_ma == "SMA") && (slow_d_ma == "sma" || slow_d_ma == "SMA") {
-        return kdj_classic_sma(&stoch, slow_k, slow_d, stoch_warm, k_out, d_out, j_out);
-    } else if (slow_k_ma == "ema" || slow_k_ma == "EMA")
-        && (slow_d_ma == "ema" || slow_d_ma == "EMA")
-    {
-        return kdj_classic_ema(&stoch, slow_k, slow_d, stoch_warm, k_out, d_out, j_out);
-    }
-
-    // Fall back to generic MA for other types
     let k_vec = ma(slow_k_ma, MaData::Slice(&stoch), slow_k)
         .map_err(|e| KdjError::MaError(e.to_string().into()))?;
     let d_vec = ma(slow_d_ma, MaData::Slice(&k_vec), slow_d)
         .map_err(|e| KdjError::MaError(e.to_string().into()))?;
 
-    // Copy once into caller's buffers.
     k_out.copy_from_slice(&k_vec);
     d_out.copy_from_slice(&d_vec);
 
-    // J warmup equals D warmup.
     let j_warm = stoch_warm + slow_k - 1 + slow_d - 1;
     for i in 0..j_warm.min(j_out.len()) {
         j_out[i] = f64::NAN;
@@ -1171,11 +1468,77 @@ fn kdj_batch_inner(
         k => k,
     };
 
-    let do_row = |row: usize,
-                  out_k: &mut [f64],
-                  out_d: &mut [f64],
-                  out_j: &mut [f64]|
-     -> Result<(), KdjError> {
+    // If multiple rows share the same fast_k, precompute stochastic once per unique fast_k and reuse
+    let unique_fast: std::collections::BTreeSet<usize> = combos
+        .iter()
+        .map(|c| c.fast_k_period.unwrap())
+        .collect();
+
+    // Build a cache when reuse exists; otherwise fall back to per-row compute
+    let use_stoch_cache = unique_fast.len() < combos.len();
+    let mut stoch_cache: std::collections::HashMap<usize, Vec<f64>> = std::collections::HashMap::new();
+    if use_stoch_cache {
+        use std::collections::VecDeque;
+        for &fk in &unique_fast {
+            let stoch_warm = first + fk - 1;
+            let mut stoch = alloc_with_nan_prefix(cols, stoch_warm);
+            let mut maxdq: VecDeque<usize> = VecDeque::with_capacity(fk + 1);
+            let mut mindq: VecDeque<usize> = VecDeque::with_capacity(fk + 1);
+            for i in first..cols {
+                let hi = unsafe { *high.get_unchecked(i) };
+                while let Some(&idx) = maxdq.back() {
+                    if unsafe { *high.get_unchecked(idx) } <= hi {
+                        maxdq.pop_back();
+                    } else {
+                        break;
+                    }
+                }
+                maxdq.push_back(i);
+                while let Some(&idx) = maxdq.front() {
+                    if idx + fk <= i {
+                        maxdq.pop_front();
+                    } else {
+                        break;
+                    }
+                }
+
+                let lo = unsafe { *low.get_unchecked(i) };
+                while let Some(&idx) = mindq.back() {
+                    if unsafe { *low.get_unchecked(idx) } >= lo {
+                        mindq.pop_back();
+                    } else {
+                        break;
+                    }
+                }
+                mindq.push_back(i);
+                while let Some(&idx) = mindq.front() {
+                    if idx + fk <= i {
+                        mindq.pop_front();
+                    } else {
+                        break;
+                    }
+                }
+
+                if i < stoch_warm {
+                    continue;
+                }
+
+                let hh = unsafe { *high.get_unchecked(*maxdq.front().unwrap()) };
+                let ll = unsafe { *low.get_unchecked(*mindq.front().unwrap()) };
+                let denom = hh - ll;
+                let val = if denom == 0.0 || denom.is_nan() {
+                    f64::NAN
+                } else {
+                    let c = unsafe { *close.get_unchecked(i) };
+                    100.0 * ((c - ll) / denom)
+                };
+                unsafe { *stoch.get_unchecked_mut(i) = val };
+            }
+            stoch_cache.insert(fk, stoch);
+        }
+    }
+
+    let do_row = |row: usize, out_k: &mut [f64], out_d: &mut [f64], out_j: &mut [f64]| -> Result<(), KdjError> {
         let prm = &combos[row];
         let fast_k = prm.fast_k_period.unwrap();
         let slow_k = prm.slow_k_period.unwrap();
@@ -1183,29 +1546,56 @@ fn kdj_batch_inner(
         let slow_d = prm.slow_d_period.unwrap();
         let slow_d_ma = prm.slow_d_ma_type.as_deref().unwrap_or("sma");
 
-        // Use the chosen kernel for batch processing
+        if use_stoch_cache {
+            let stoch = stoch_cache.get(&fast_k).expect("stoch cache missing fast_k");
+            let stoch_warm = first + fast_k - 1;
+            // Prefer classic kernels for common types
+            if slow_k_ma.eq_ignore_ascii_case("sma") && slow_d_ma.eq_ignore_ascii_case("sma") {
+                return kdj_classic_sma(stoch, slow_k, slow_d, stoch_warm, out_k, out_d, out_j);
+            }
+            if slow_k_ma.eq_ignore_ascii_case("ema") && slow_d_ma.eq_ignore_ascii_case("ema") {
+                return kdj_classic_ema(stoch, slow_k, slow_d, stoch_warm, out_k, out_d, out_j);
+            }
+            // Generic MA path
+            let k_vec = ma(slow_k_ma, MaData::Slice(stoch), slow_k)
+                .map_err(|e| KdjError::MaError(e.to_string().into()))?;
+            let d_vec = ma(slow_d_ma, MaData::Slice(&k_vec), slow_d)
+                .map_err(|e| KdjError::MaError(e.to_string().into()))?;
+            out_k.copy_from_slice(&k_vec);
+            out_d.copy_from_slice(&d_vec);
+            let j_warm = stoch_warm + slow_k - 1 + slow_d - 1;
+            for i in 0..j_warm.min(cols) {
+                out_j[i] = f64::NAN;
+            }
+            for i in j_warm..cols {
+                out_j[i] = if out_k[i].is_nan() || out_d[i].is_nan() {
+                    f64::NAN
+                } else {
+                    3.0 * out_k[i] - 2.0 * out_d[i]
+                };
+            }
+            return Ok(());
+        }
+
+        // Fall back to original per-row kernel selection
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => kdj_row_scalar(
-                high, low, close, first, fast_k, slow_k, slow_k_ma, slow_d, slow_d_ma, out_k,
-                out_d, out_j,
+                high, low, close, first, fast_k, slow_k, slow_k_ma, slow_d, slow_d_ma, out_k, out_d, out_j,
             ),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => unsafe {
                 kdj_row_avx2(
-                    high, low, close, first, fast_k, slow_k, slow_k_ma, slow_d, slow_d_ma, out_k,
-                    out_d, out_j,
+                    high, low, close, first, fast_k, slow_k, slow_k_ma, slow_d, slow_d_ma, out_k, out_d, out_j,
                 )
             },
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => unsafe {
                 kdj_row_avx512(
-                    high, low, close, first, fast_k, slow_k, slow_k_ma, slow_d, slow_d_ma, out_k,
-                    out_d, out_j,
+                    high, low, close, first, fast_k, slow_k, slow_k_ma, slow_d, slow_d_ma, out_k, out_d, out_j,
                 )
             },
             _ => kdj_row_scalar(
-                high, low, close, first, fast_k, slow_k, slow_k_ma, slow_d, slow_d_ma, out_k,
-                out_d, out_j,
+                high, low, close, first, fast_k, slow_k, slow_k_ma, slow_d, slow_d_ma, out_k, out_d, out_j,
             ),
         }
     };
@@ -3266,7 +3656,7 @@ fn kdj_classic_ema(
         // Continue EMA for K
         for i in (k_warm + 1)..len {
             if !stoch[i].is_nan() {
-                ema_k = alpha_k * stoch[i] + one_minus_alpha_k * ema_k;
+                ema_k = stoch[i].mul_add(alpha_k, one_minus_alpha_k * ema_k);
                 k_out[i] = ema_k;
             } else {
                 k_out[i] = ema_k; // Carry forward last valid value
@@ -3301,7 +3691,7 @@ fn kdj_classic_ema(
         // Continue EMA for D
         for i in (d_warm + 1)..len {
             if !k_out[i].is_nan() {
-                ema_d = alpha_d * k_out[i] + one_minus_alpha_d * ema_d;
+                ema_d = k_out[i].mul_add(alpha_d, one_minus_alpha_d * ema_d);
                 d_out[i] = ema_d;
             } else {
                 d_out[i] = ema_d; // Carry forward last valid value

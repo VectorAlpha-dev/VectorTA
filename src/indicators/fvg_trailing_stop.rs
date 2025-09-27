@@ -18,18 +18,14 @@
 //!
 //! ## Developer Notes
 //! ### Implementation Status
-//! - **AVX2 Kernel**: Not implemented (no SIMD kernels for this indicator)
-//! - **AVX512 Kernel**: Not implemented (no SIMD kernels for this indicator)
-//! - **Streaming Update**: O(1) - efficient with VecDeque for FVG tracking
-//! - **Memory Optimization**: Fully optimized with `alloc_with_nan_prefix` for all output vectors
-//! - **Batch Operations**: Not implemented (complex state management makes batching difficult)
+//! - Decision: SIMD disabled for single-series; scalar is faster and stateful/time-dependent across bars.
+//! - AVX2/AVX512 stubs short-circuit to scalar at runtime; nightly tests still cover them.
+//! - Scalar path optimized: removed VecDeque sums/retains and O(w) smoothing loops; now O(1) ring updates.
+//! - Batch uses the same scalar kernel per row (Rayon-parallel); row-specific shared-precompute left for future work.
 //!
 //! ### TODO - Performance Improvements
-//! - [ ] Consider adding SIMD kernels for SMA calculations
-//! - [ ] Optimize FVG detection logic
-//! - [ ] Implement batch operations if use case emerges
-//! - [ ] Consider caching smoothed values to avoid recalculation
-//! - [ ] Optimize the trailing stop update logic
+//! - [ ] Row-specific batch: precompute FVG candidates and close prefix sums if/when needed.
+//! - [ ] Revisit SIMD only if structure changes make it beneficial.
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
@@ -202,50 +198,113 @@ fn fvg_ts_scalar(
     upper_ts: &mut [f64],
     lower_ts: &mut [f64],
 ) {
+    // Safety: all slices are validated by the caller (same length, non-null).
     let len = high.len();
-    // State - pre-allocate history buffers to avoid reallocation
-    let mut bull_lvls: VecDeque<f64> = VecDeque::with_capacity(lookback);
-    let mut bear_lvls: VecDeque<f64> = VecDeque::with_capacity(lookback);
+    debug_assert_eq!(len, low.len());
+    debug_assert_eq!(len, close.len());
+    debug_assert_eq!(len, upper.len());
+    debug_assert_eq!(len, lower.len());
+    debug_assert_eq!(len, upper_ts.len());
+    debug_assert_eq!(len, lower_ts.len());
+
+    // FVG level buffers (small: O(lookback))
+    let mut bull_buf = vec![0.0f64; lookback];
+    let mut bear_buf = vec![0.0f64; lookback];
+    let mut bull_len: usize = 0;
+    let mut bear_len: usize = 0;
+
+    // Last index where bull/bear average was non-NaN
     let mut last_bull_non_na: Option<usize> = None;
     let mut last_bear_non_na: Option<usize> = None;
-    let mut bull_hist = vec![f64::NAN; len];
-    let mut bear_hist = vec![f64::NAN; len];
-    let mut os: Option<i8> = None;
-    let mut ts: Option<f64> = None;
+
+    // Fixed-window smoothing over x-series with O(1) updates via ring buffers
+    let w = smoothing_len;
+    let mut bull_ring_vals = vec![0.0f64; w];
+    let mut bull_ring_nan = vec![false; w];
+    let mut bear_ring_vals = vec![0.0f64; w];
+    let mut bear_ring_nan = vec![false; w];
+
+    let mut bull_sum = 0.0f64;
+    let mut bear_sum = 0.0f64;
+    let mut bull_nan_cnt = 0usize;
+    let mut bear_nan_cnt = 0usize;
+    let mut bull_ring_count = 0usize;
+    let mut bear_ring_count = 0usize;
+    let mut bull_ring_idx = 0usize;
+    let mut bear_ring_idx = 0usize;
+
+    // OS/TS state
+    let mut os: Option<i8> = None; // -1 (short), 1 (long)
+    let mut ts: Option<f64> = None; // trailing stop value
     let mut ts_prev: Option<f64> = None;
 
     for i in 0..len {
-        // defaults stay NaN; warm prefix already written by allocator
-        // FVG detection
+        // ---------- FVG detection (needs i >= 2) ----------
         if i >= 2 && !high[i - 2].is_nan() && !low[i - 2].is_nan() && !close[i - 1].is_nan() {
             if low[i] > high[i - 2] && close[i - 1] > high[i - 2] {
-                bull_lvls.push_back(high[i - 2]);
-                if bull_lvls.len() > lookback {
-                    bull_lvls.pop_front();
+                if bull_len < lookback {
+                    bull_buf[bull_len] = high[i - 2];
+                    bull_len += 1;
+                } else {
+                    // shift-left by 1 (lookback is small)
+                    for k in 1..lookback {
+                        bull_buf[k - 1] = bull_buf[k];
+                    }
+                    bull_buf[lookback - 1] = high[i - 2];
                 }
             }
             if high[i] < low[i - 2] && close[i - 1] < low[i - 2] {
-                bear_lvls.push_back(low[i - 2]);
-                if bear_lvls.len() > lookback {
-                    bear_lvls.pop_front();
+                if bear_len < lookback {
+                    bear_buf[bear_len] = low[i - 2];
+                    bear_len += 1;
+                } else {
+                    for k in 1..lookback {
+                        bear_buf[k - 1] = bear_buf[k];
+                    }
+                    bear_buf[lookback - 1] = low[i - 2];
                 }
             }
         }
-        // mitigation
-        let c = close[i];
-        bull_lvls.retain(|&lvl| c >= lvl);
-        bear_lvls.retain(|&lvl| c <= lvl);
 
-        let bull_avg = if bull_lvls.is_empty() {
-            f64::NAN
+        // ---------- Mitigation: retain only levels passing the condition ----------
+        let c = close[i];
+
+        let mut new_bull_len = 0usize;
+        let mut bull_acc = 0.0f64;
+        for k in 0..bull_len {
+            let v = bull_buf[k];
+            if c >= v {
+                bull_buf[new_bull_len] = v;
+                new_bull_len += 1;
+                bull_acc += v;
+            }
+        }
+        bull_len = new_bull_len;
+
+        let mut new_bear_len = 0usize;
+        let mut bear_acc = 0.0f64;
+        for k in 0..bear_len {
+            let v = bear_buf[k];
+            if c <= v {
+                bear_buf[new_bear_len] = v;
+                new_bear_len += 1;
+                bear_acc += v;
+            }
+        }
+        bear_len = new_bear_len;
+
+        // Fast averages (or NaN if empty)
+        let bull_avg = if bull_len > 0 {
+            bull_acc / (bull_len as f64)
         } else {
-            bull_lvls.iter().sum::<f64>() / (bull_lvls.len() as f64)
-        };
-        let bear_avg = if bear_lvls.is_empty() {
             f64::NAN
-        } else {
-            bear_lvls.iter().sum::<f64>() / (bear_lvls.len() as f64)
         };
+        let bear_avg = if bear_len > 0 {
+            bear_acc / (bear_len as f64)
+        } else {
+            f64::NAN
+        };
+
         if !bull_avg.is_nan() {
             last_bull_non_na = Some(i);
         }
@@ -253,10 +312,10 @@ fn fvg_ts_scalar(
             last_bear_non_na = Some(i);
         }
 
-        // progressive SMA fallbacks
+        // ---------- Progressive SMA fallbacks over `close` ----------
         let bull_bs = if bull_avg.is_nan() {
             match last_bull_non_na {
-                Some(last) => ((i - last).max(1)).min(smoothing_len),
+                Some(last) => ((i - last).max(1)).min(w),
                 None => 1,
             }
         } else {
@@ -264,78 +323,111 @@ fn fvg_ts_scalar(
         };
         let bear_bs = if bear_avg.is_nan() {
             match last_bear_non_na {
-                Some(last) => ((i - last).max(1)).min(smoothing_len),
+                Some(last) => ((i - last).max(1)).min(w),
                 None => 1,
             }
         } else {
             1
         };
 
-        let bull_sma = if bull_avg.is_nan() && i + 1 >= bull_bs {
-            let mut sum = 0.0;
-            for j in (i + 1 - bull_bs)..=i {
-                sum += close[j];
+        let bull_sma = if bull_avg.is_nan() && (i + 1) >= bull_bs {
+            let mut s = 0.0f64;
+            let start = i + 1 - bull_bs;
+            for j in start..=i {
+                s += close[j];
             }
-            sum / bull_bs as f64
+            s / (bull_bs as f64)
         } else {
             f64::NAN
         };
-        let bear_sma = if bear_avg.is_nan() && i + 1 >= bear_bs {
-            let mut sum = 0.0;
-            for j in (i + 1 - bear_bs)..=i {
-                sum += close[j];
+        let bear_sma = if bear_avg.is_nan() && (i + 1) >= bear_bs {
+            let mut s = 0.0f64;
+            let start = i + 1 - bear_bs;
+            for j in start..=i {
+                s += close[j];
             }
-            sum / bear_bs as f64
+            s / (bear_bs as f64)
         } else {
             f64::NAN
         };
 
-        let x_bull = if !bull_avg.is_nan() {
-            bull_avg
-        } else {
-            bull_sma
-        };
-        let x_bear = if !bear_avg.is_nan() {
-            bear_avg
-        } else {
-            bear_sma
-        };
-        bull_hist[i] = x_bull;
-        bear_hist[i] = x_bear;
+        // x-series inputs to smoothing
+        let x_bull = if !bull_avg.is_nan() { bull_avg } else { bull_sma };
+        let x_bear = if !bear_avg.is_nan() { bear_avg } else { bear_sma };
 
-        // fixed-window SMA over x-series; NaN if any NaN in window
-        let mut bull_disp = f64::NAN;
-        let mut bear_disp = f64::NAN;
-        if i + 1 >= smoothing_len {
-            let start = i + 1 - smoothing_len;
-            let mut ok = true;
-            let mut s = 0.0;
-            for j in start..=i {
-                let v = bull_hist[j];
-                if v.is_nan() {
-                    ok = false;
-                    break;
-                }
-                s += v;
+        // ---------- Fixed-window SMA over x-series via O(1) ring update ----------
+        // Update bull ring
+        if bull_ring_count < w {
+            let is_nan = x_bull.is_nan();
+            bull_ring_nan[bull_ring_count] = is_nan;
+            bull_ring_vals[bull_ring_count] = if is_nan { 0.0 } else { x_bull };
+            if is_nan {
+                bull_nan_cnt += 1;
+            } else {
+                bull_sum += x_bull;
             }
-            if ok {
-                bull_disp = s / smoothing_len as f64;
+            bull_ring_count += 1;
+        } else {
+            let idx = bull_ring_idx;
+            if bull_ring_nan[idx] {
+                bull_nan_cnt -= 1;
+            } else {
+                bull_sum -= bull_ring_vals[idx];
             }
-            let mut ok2 = true;
-            let mut s2 = 0.0;
-            for j in start..=i {
-                let v = bear_hist[j];
-                if v.is_nan() {
-                    ok2 = false;
-                    break;
-                }
-                s2 += v;
+            let is_nan = x_bull.is_nan();
+            bull_ring_nan[idx] = is_nan;
+            if is_nan {
+                bull_ring_vals[idx] = 0.0;
+                bull_nan_cnt += 1;
+            } else {
+                bull_ring_vals[idx] = x_bull;
+                bull_sum += x_bull;
             }
-            if ok2 {
-                bear_disp = s2 / smoothing_len as f64;
-            }
+            bull_ring_idx = if idx + 1 == w { 0 } else { idx + 1 };
         }
 
+        // Update bear ring
+        if bear_ring_count < w {
+            let is_nan = x_bear.is_nan();
+            bear_ring_nan[bear_ring_count] = is_nan;
+            bear_ring_vals[bear_ring_count] = if is_nan { 0.0 } else { x_bear };
+            if is_nan {
+                bear_nan_cnt += 1;
+            } else {
+                bear_sum += x_bear;
+            }
+            bear_ring_count += 1;
+        } else {
+            let idx = bear_ring_idx;
+            if bear_ring_nan[idx] {
+                bear_nan_cnt -= 1;
+            } else {
+                bear_sum -= bear_ring_vals[idx];
+            }
+            let is_nan = x_bear.is_nan();
+            bear_ring_nan[idx] = is_nan;
+            if is_nan {
+                bear_ring_vals[idx] = 0.0;
+                bear_nan_cnt += 1;
+            } else {
+                bear_ring_vals[idx] = x_bear;
+                bear_sum += x_bear;
+            }
+            bear_ring_idx = if idx + 1 == w { 0 } else { idx + 1 };
+        }
+
+        let bull_disp = if bull_ring_count >= w && bull_nan_cnt == 0 {
+            bull_sum / (w as f64)
+        } else {
+            f64::NAN
+        };
+        let bear_disp = if bear_ring_count >= w && bear_nan_cnt == 0 {
+            bear_sum / (w as f64)
+        } else {
+            f64::NAN
+        };
+
+        // ---------- OS/TS updates ----------
         let prev_os = os;
         let next_os = if !bear_disp.is_nan() && c > bear_disp {
             Some(1)
@@ -393,10 +485,10 @@ fn fvg_ts_scalar(
             }
         }
 
+        // ---------- Output write ----------
         let show = ts.is_some() || ts_prev.is_some();
-        let ts_nz = ts.or(ts_prev);
+        let ts_nz = if ts.is_some() { ts } else { ts_prev };
 
-        // Always write values to avoid leaving poison values in debug mode
         if os == Some(1) && show {
             upper[i] = f64::NAN;
             lower[i] = bull_disp;
@@ -408,12 +500,12 @@ fn fvg_ts_scalar(
             upper_ts[i] = ts_nz.unwrap_or(f64::NAN);
             lower_ts[i] = f64::NAN;
         } else {
-            // Ensure all arrays have values written (not poison)
             upper[i] = f64::NAN;
             lower[i] = f64::NAN;
             upper_ts[i] = f64::NAN;
             lower_ts[i] = f64::NAN;
         }
+
         ts_prev = ts;
     }
 }
@@ -875,26 +967,280 @@ pub fn fvg_ts_batch_inner_into(
         k => k,
     };
 
+    // --------- Row-shared precompute (independent of parameters) ---------
+    // 1) Precompute FVG candidates per bar (bull: high[i-2], bear: low[i-2])
+    let len = h.len();
+    let mut bull_cand = vec![f64::NAN; len];
+    let mut bear_cand = vec![f64::NAN; len];
+    if len >= 3 {
+        for i in 2..len {
+            let hi2 = h[i - 2];
+            let lo2 = l[i - 2];
+            let cm1 = c[i - 1];
+            let hi = h[i];
+            let lo = l[i];
+            if !(hi2.is_nan() || lo2.is_nan() || cm1.is_nan()) {
+                if lo > hi2 && cm1 > hi2 {
+                    bull_cand[i] = hi2;
+                }
+                if hi < lo2 && cm1 < lo2 {
+                    bear_cand[i] = lo2;
+                }
+            }
+        }
+    }
+
+    // 2) Precompute prefix sums for close with NaNs treated as 0 and a NaN counter
+    //    This enables O(1) progressive SMA fallback while preserving NaN semantics.
+    let mut pref_sum_close = vec![0.0f64; len + 1];
+    let mut pref_nan_count = vec![0usize; len + 1];
+    for i in 0..len {
+        let is_nan = c[i].is_nan();
+        pref_sum_close[i + 1] = pref_sum_close[i] + if is_nan { 0.0 } else { c[i] };
+        pref_nan_count[i + 1] = pref_nan_count[i] + if is_nan { 1 } else { 0 };
+    }
+
     let do_one = |row: usize, dst: &mut [f64]| {
+        let look = combos[row].unmitigated_fvg_lookback.unwrap();
         let sm = combos[row].smoothing_length.unwrap_or(9);
+        let rst = combos[row].reset_on_cross.unwrap_or(false);
         let warm = (first + 2 + sm.saturating_sub(1)).min(cols);
         let (u_block, rest) = dst.split_at_mut(cols);
         let (l_block, rest) = rest.split_at_mut(cols);
         let (uts_block, lts_block) = rest.split_at_mut(cols);
 
-        fvg_ts_compute_into(
-            h,
-            l,
-            c,
-            combos[row].unmitigated_fvg_lookback.unwrap(),
-            sm,
-            combos[row].reset_on_cross.unwrap_or(false),
-            u_block,
-            l_block,
-            uts_block,
-            lts_block,
-            chosen,
-        );
+        // Fast per-row compute using shared precomputes
+        let mut bull_buf = vec![0.0f64; look];
+        let mut bear_buf = vec![0.0f64; look];
+        let mut bull_len = 0usize;
+        let mut bear_len = 0usize;
+        let mut last_bull_non_na: Option<usize> = None;
+        let mut last_bear_non_na: Option<usize> = None;
+
+        let mut bull_ring_vals = vec![0.0f64; sm];
+        let mut bull_ring_nan = vec![false; sm];
+        let mut bear_ring_vals = vec![0.0f64; sm];
+        let mut bear_ring_nan = vec![false; sm];
+        let mut bull_sum = 0.0f64;
+        let mut bear_sum = 0.0f64;
+        let mut bull_nan_cnt = 0usize;
+        let mut bear_nan_cnt = 0usize;
+        let mut bull_ring_count = 0usize;
+        let mut bear_ring_count = 0usize;
+        let mut bull_ring_idx = 0usize;
+        let mut bear_ring_idx = 0usize;
+
+        let mut os: Option<i8> = None;
+        let mut ts: Option<f64> = None;
+        let mut ts_prev: Option<f64> = None;
+
+        for i in 0..cols {
+            // Push candidates from shared streams
+            let bc = bull_cand[i];
+            if !bc.is_nan() {
+                if bull_len < look {
+                    bull_buf[bull_len] = bc;
+                    bull_len += 1;
+                } else {
+                    for k in 1..look {
+                        bull_buf[k - 1] = bull_buf[k];
+                    }
+                    bull_buf[look - 1] = bc;
+                }
+            }
+            let ec = bear_cand[i];
+            if !ec.is_nan() {
+                if bear_len < look {
+                    bear_buf[bear_len] = ec;
+                    bear_len += 1;
+                } else {
+                    for k in 1..look {
+                        bear_buf[k - 1] = bear_buf[k];
+                    }
+                    bear_buf[look - 1] = ec;
+                }
+            }
+
+            // Mitigation
+            let price = c[i];
+            let mut new_bull_len = 0usize;
+            let mut bull_acc = 0.0f64;
+            for k in 0..bull_len {
+                let v = bull_buf[k];
+                if price >= v {
+                    bull_buf[new_bull_len] = v;
+                    new_bull_len += 1;
+                    bull_acc += v;
+                }
+            }
+            bull_len = new_bull_len;
+
+            let mut new_bear_len = 0usize;
+            let mut bear_acc = 0.0f64;
+            for k in 0..bear_len {
+                let v = bear_buf[k];
+                if price <= v {
+                    bear_buf[new_bear_len] = v;
+                    new_bear_len += 1;
+                    bear_acc += v;
+                }
+            }
+            bear_len = new_bear_len;
+
+            let bull_avg = if bull_len > 0 {
+                bull_acc / (bull_len as f64)
+            } else {
+                f64::NAN
+            };
+            let bear_avg = if bear_len > 0 {
+                bear_acc / (bear_len as f64)
+            } else {
+                f64::NAN
+            };
+            if !bull_avg.is_nan() {
+                last_bull_non_na = Some(i);
+            }
+            if !bear_avg.is_nan() {
+                last_bear_non_na = Some(i);
+            }
+
+            // Progressive SMA fallback via prefix sums (preserve NaN semantics)
+            let bull_bs = if bull_avg.is_nan() {
+                match last_bull_non_na {
+                    Some(last) => ((i - last).max(1)).min(sm),
+                    None => 1,
+                }
+            } else {
+                1
+            };
+            let bear_bs = if bear_avg.is_nan() {
+                match last_bear_non_na {
+                    Some(last) => ((i - last).max(1)).min(sm),
+                    None => 1,
+                }
+            } else {
+                1
+            };
+
+            let bull_sma = if bull_avg.is_nan() && (i + 1) >= bull_bs {
+                let s = pref_sum_close[i + 1] - pref_sum_close[i + 1 - bull_bs];
+                let nans = pref_nan_count[i + 1] - pref_nan_count[i + 1 - bull_bs];
+                if nans == 0 { s / (bull_bs as f64) } else { f64::NAN }
+            } else {
+                f64::NAN
+            };
+            let bear_sma = if bear_avg.is_nan() && (i + 1) >= bear_bs {
+                let s = pref_sum_close[i + 1] - pref_sum_close[i + 1 - bear_bs];
+                let nans = pref_nan_count[i + 1] - pref_nan_count[i + 1 - bear_bs];
+                if nans == 0 { s / (bear_bs as f64) } else { f64::NAN }
+            } else {
+                f64::NAN
+            };
+
+            let x_bull = if !bull_avg.is_nan() { bull_avg } else { bull_sma };
+            let x_bear = if !bear_avg.is_nan() { bear_avg } else { bear_sma };
+
+            // Ring update for smoothing
+            if bull_ring_count < sm {
+                let is_nan = x_bull.is_nan();
+                bull_ring_nan[bull_ring_count] = is_nan;
+                bull_ring_vals[bull_ring_count] = if is_nan { 0.0 } else { x_bull };
+                if is_nan { bull_nan_cnt += 1 } else { bull_sum += x_bull }
+                bull_ring_count += 1;
+            } else {
+                let idx = bull_ring_idx;
+                if bull_ring_nan[idx] { bull_nan_cnt -= 1 } else { bull_sum -= bull_ring_vals[idx] }
+                let is_nan = x_bull.is_nan();
+                bull_ring_nan[idx] = is_nan;
+                if is_nan { bull_ring_vals[idx] = 0.0; bull_nan_cnt += 1 } else { bull_ring_vals[idx] = x_bull; bull_sum += x_bull }
+                bull_ring_idx = if idx + 1 == sm { 0 } else { idx + 1 };
+            }
+
+            if bear_ring_count < sm {
+                let is_nan = x_bear.is_nan();
+                bear_ring_nan[bear_ring_count] = is_nan;
+                bear_ring_vals[bear_ring_count] = if is_nan { 0.0 } else { x_bear };
+                if is_nan { bear_nan_cnt += 1 } else { bear_sum += x_bear }
+                bear_ring_count += 1;
+            } else {
+                let idx = bear_ring_idx;
+                if bear_ring_nan[idx] { bear_nan_cnt -= 1 } else { bear_sum -= bear_ring_vals[idx] }
+                let is_nan = x_bear.is_nan();
+                bear_ring_nan[idx] = is_nan;
+                if is_nan { bear_ring_vals[idx] = 0.0; bear_nan_cnt += 1 } else { bear_ring_vals[idx] = x_bear; bear_sum += x_bear }
+                bear_ring_idx = if idx + 1 == sm { 0 } else { idx + 1 };
+            }
+
+            let bull_disp = if bull_ring_count >= sm && bull_nan_cnt == 0 {
+                bull_sum / (sm as f64)
+            } else {
+                f64::NAN
+            };
+            let bear_disp = if bear_ring_count >= sm && bear_nan_cnt == 0 {
+                bear_sum / (sm as f64)
+            } else {
+                f64::NAN
+            };
+
+            // OS/TS
+            let prev_os = os;
+            let next_os = if !bear_disp.is_nan() && price > bear_disp {
+                Some(1)
+            } else if !bull_disp.is_nan() && price < bull_disp {
+                Some(-1)
+            } else {
+                os
+            };
+            os = next_os;
+
+            if let (Some(cur), Some(prev)) = (os, prev_os) {
+                if cur == 1 && prev != 1 {
+                    ts = Some(bull_disp);
+                } else if cur == -1 && prev != -1 {
+                    ts = Some(bear_disp);
+                } else if cur == 1 {
+                    if let Some(t) = ts { ts = Some(bull_disp.max(t)); }
+                } else if cur == -1 {
+                    if let Some(t) = ts { ts = Some(bear_disp.min(t)); }
+                }
+            } else {
+                if os == Some(1) { if let Some(t) = ts { ts = Some(bull_disp.max(t)); } }
+                if os == Some(-1) { if let Some(t) = ts { ts = Some(bear_disp.min(t)); } }
+            }
+
+            if rst {
+                if os == Some(1) {
+                    if let Some(t) = ts { if price < t { ts = None; } }
+                    else if !bear_disp.is_nan() && price > bear_disp { ts = Some(bull_disp); }
+                } else if os == Some(-1) {
+                    if let Some(t) = ts { if price > t { ts = None; } }
+                    else if !bull_disp.is_nan() && price < bull_disp { ts = Some(bear_disp); }
+                }
+            }
+
+            // Output
+            let show = ts.is_some() || ts_prev.is_some();
+            let ts_nz = if ts.is_some() { ts } else { ts_prev };
+            if os == Some(1) && show {
+                u_block[i] = f64::NAN;
+                l_block[i] = bull_disp;
+                uts_block[i] = f64::NAN;
+                lts_block[i] = ts_nz.unwrap_or(f64::NAN);
+            } else if os == Some(-1) && show {
+                u_block[i] = bear_disp;
+                l_block[i] = f64::NAN;
+                uts_block[i] = ts_nz.unwrap_or(f64::NAN);
+                lts_block[i] = f64::NAN;
+            } else {
+                u_block[i] = f64::NAN;
+                l_block[i] = f64::NAN;
+                uts_block[i] = f64::NAN;
+                lts_block[i] = f64::NAN;
+            }
+            ts_prev = ts;
+        }
+
+        // Enforce warmup prefix to NaN for all 4 outputs
         for buf in [u_block, l_block, uts_block, lts_block] {
             for v in &mut buf[..warm] {
                 *v = f64::NAN;

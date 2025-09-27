@@ -14,9 +14,14 @@
 //! - **values**: Vector of mean absolute deviation values with NaN prefix during warmup period
 //!
 //! ## Developer Notes
-//! - **AVX2/AVX512 Kernels**: Stubs that call scalar implementation
-//! - **Streaming**: Implemented with O(n) update performance (recalculates mean over period)
-//! - **Zero-copy Memory**: NOT using alloc_with_nan_prefix (uses vec![f64::NAN]), but uses make_uninit_matrix for batch operations
+//! - SIMD: AVX2/AVX512 paths delegate to the optimized scalar. The recurrence is
+//!   inherently sequential (sliding mean and residual ring), so vectorizing across
+//!   time offers limited benefit. Runtime selection still works but returns scalar.
+//! - Scalar: Single-pass streaming with incremental SMA update, hoisted `inv_p`,
+//!   modulo-free ring index, and `alloc_with_nan_prefix` for warmup-only NaN writes.
+//!   This avoids full-vector prefill and repeated divisions.
+//! - Batch: Uses uninitialized matrix helpers and initializes NaN prefixes per-row
+//!   via `init_matrix_prefixes`; rows call the same optimized row-scalar kernel.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -257,63 +262,77 @@ pub fn mean_ad_scalar(
     }
 
     let n = data.len();
-    let mut out = vec![f64::NAN; n];
 
+    // Early out if the initial SMA window doesn't fit
     if first + period > n {
+        let out = alloc_with_nan_prefix(n, n);
         return Ok(MeanAdOutput { values: out });
     }
 
-    // Compute rolling SMA of prices
-    let mut sum = 0.0;
+    // Hoist reciprocal to avoid repeated divisions
+    let inv_p = 1.0f64 / (period as f64);
+
+    // Warmup prefix length (NaNs) = first + 2*period - 2
+    let warmup_end = first + (period << 1) - 2;
+    let mut out = alloc_with_nan_prefix(n, warmup_end.min(n));
+
+    // === Initial SMA over [first .. first+period) ===
+    let mut sum = 0.0f64;
     for i in first..(first + period) {
         sum += data[i];
     }
-    let mut sma = sum / (period as f64);
+    let mut sma = sum * inv_p;
 
-    // Circular buffer for residuals (pointwise absolute deviations)
-    let mut residual_buffer = vec![0.0; period];
-    let mut buffer_index = 0;
-    let mut residual_sum = 0.0;
+    // === Residual ring buffer ===
+    let mut residual_buffer = vec![0.0f64; period];
+    let mut buffer_index = 0usize;
+    let mut residual_sum = 0.0f64;
 
-    // Fill residual buffer for first period of SMAs
-    // Each residual is |x_t - SMA_t| where SMA_t is the SMA ending at time t
-    for t in (first + period - 1)..(first + 2 * period - 1).min(n) {
+    // === Fill residual buffer for first `period` SMAs ===
+    let start_t = first + period - 1;
+    let fill_t_end = (start_t + period - 1).min(n.saturating_sub(1));
+    for t in start_t..=fill_t_end {
         let residual = (data[t] - sma).abs();
         residual_buffer[buffer_index] = residual;
-        buffer_index = (buffer_index + 1) % period;
         residual_sum += residual;
-
-        // Advance SMA for next time point if there's more data
-        if t + 1 < n && t + 1 >= first + period {
-            sum += data[t + 1] - data[t + 1 - period];
-            sma = sum / (period as f64);
+        buffer_index += 1;
+        if buffer_index == period {
+            buffer_index = 0;
         }
-    }
-
-    // First output after warmup period
-    let first_output = first + 2 * period - 2;
-    if first_output < n {
-        out[first_output] = residual_sum / (period as f64);
-    }
-
-    // Continue streaming for remaining data
-    for t in (first + 2 * period - 1)..n {
-        // Current residual against current SMA
-        let residual = (data[t] - sma).abs();
-
-        // Update residual buffer and sum
-        residual_sum += residual - residual_buffer[buffer_index];
-        residual_buffer[buffer_index] = residual;
-        buffer_index = (buffer_index + 1) % period;
-
-        // Output MA of residuals
-        out[t] = residual_sum / (period as f64);
-
-        // Advance SMA for next step
         if t + 1 < n {
             sum += data[t + 1] - data[t + 1 - period];
-            sma = sum / (period as f64);
+            sma = sum * inv_p;
         }
+    }
+
+    // === First valid output ===
+    if warmup_end < n {
+        out[warmup_end] = residual_sum * inv_p;
+    }
+
+    // === Main streaming loop ===
+    let mut t = start_t + period; // warmup_end + 1
+    while t < n {
+        let residual = (data[t] - sma).abs();
+
+        // Update residual ring and sum
+        let old = residual_buffer[buffer_index];
+        residual_sum += residual - old;
+        residual_buffer[buffer_index] = residual;
+        buffer_index += 1;
+        if buffer_index == period {
+            buffer_index = 0;
+        }
+
+        // Write output (rolling mean of residuals)
+        out[t] = residual_sum * inv_p;
+
+        // Advance SMA for next t
+        if t + 1 < n {
+            sum += data[t + 1] - data[t + 1 - period];
+            sma = sum * inv_p;
+        }
+        t += 1;
     }
 
     Ok(MeanAdOutput { values: out })
@@ -676,57 +695,66 @@ pub fn mean_ad_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [
     }
 
     let n = data.len();
+    let inv_p = 1.0f64 / (period as f64);
 
     // Compute rolling SMA of prices
-    let mut sum = 0.0;
+    let mut sum = 0.0f64;
     for i in first..(first + period) {
         sum += data[i];
     }
-    let mut sma = sum / (period as f64);
+    let mut sma = sum * inv_p;
 
-    // Circular buffer for residuals (pointwise absolute deviations)
-    let mut residual_buffer = vec![0.0; period];
-    let mut buffer_index = 0;
-    let mut residual_sum = 0.0;
+    // Residual ring buffer
+    let mut residual_buffer = vec![0.0f64; period];
+    let mut buffer_index = 0usize;
+    let mut residual_sum = 0.0f64;
 
-    // Fill residual buffer for first period of SMAs
-    for t in (first + period - 1)..(first + 2 * period - 1).min(n) {
+    // Fill residual buffer for first `period` SMAs
+    let start_t = first + period - 1;
+    let fill_t_end = (start_t + period - 1).min(n.saturating_sub(1));
+    for t in start_t..=fill_t_end {
         let residual = (data[t] - sma).abs();
         residual_buffer[buffer_index] = residual;
-        buffer_index = (buffer_index + 1) % period;
         residual_sum += residual;
-
-        // Advance SMA for next time point
-        if t + 1 < n && t + 1 >= first + period {
+        buffer_index += 1;
+        if buffer_index == period {
+            buffer_index = 0;
+        }
+        if t + 1 < n {
             sum += data[t + 1] - data[t + 1 - period];
-            sma = sum / (period as f64);
+            sma = sum * inv_p;
         }
     }
 
     // First output after warmup period
-    let first_output = first + 2 * period - 2;
+    let first_output = first + (period << 1) - 2;
     if first_output < n {
-        out[first_output] = residual_sum / (period as f64);
+        out[first_output] = residual_sum * inv_p;
     }
 
     // Continue streaming for remaining data
-    for t in (first + 2 * period - 1)..n {
-        // Current residual against current SMA
+    let mut t = start_t + period; // first_output + 1
+    while t < n {
         let residual = (data[t] - sma).abs();
 
         // Update residual buffer and sum
-        residual_sum += residual - residual_buffer[buffer_index];
+        let old = residual_buffer[buffer_index];
+        residual_sum += residual - old;
         residual_buffer[buffer_index] = residual;
-        buffer_index = (buffer_index + 1) % period;
+        buffer_index += 1;
+        if buffer_index == period {
+            buffer_index = 0;
+        }
 
         // Output MA of residuals
-        out[t] = residual_sum / (period as f64);
+        out[t] = residual_sum * inv_p;
 
         // Advance SMA for next step
         if t + 1 < n {
             sum += data[t + 1] - data[t + 1 - period];
-            sma = sum / (period as f64);
+            sma = sum * inv_p;
         }
+        t += 1;
     }
 }
 

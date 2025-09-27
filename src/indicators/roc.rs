@@ -17,6 +17,7 @@
 //! - **AVX2/AVX512 Kernels**: Stubs that call scalar implementation
 //! - **Streaming**: Implemented with O(1) update performance (circular buffer)
 //! - **Zero-copy Memory**: Uses alloc_with_nan_prefix and make_uninit_matrix for batch operations
+//! - Decision: Scalar kept as reference path; attempts to unroll/slice in safe Rust regressed on 100k. SIMD kept as stubs (memory-bound/branching); row kernel uses pointer-based loop for batch parity.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -30,6 +31,8 @@ use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+use core::arch::x86_64::*;
 
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -228,13 +231,18 @@ fn roc_prepare<'a>(
 fn roc_compute_into(data: &[f64], period: usize, first: usize, kernel: Kernel, out: &mut [f64]) {
     unsafe {
         match kernel {
-            Kernel::Scalar | Kernel::ScalarBatch => roc_scalar(data, period, first, out),
+            Kernel::Scalar => roc_scalar(data, period, first, out),
+            Kernel::ScalarBatch => roc_scalar(data, period, first, out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => {
+            Kernel::Avx2 => roc_avx2(data, period, first, out),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2Batch => {
                 roc_row_avx2(data, first, period, 0, std::ptr::null(), 0.0, out)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => {
+            Kernel::Avx512 => roc_avx512(data, period, first, out),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512Batch => {
                 roc_row_avx512(data, first, period, 0, std::ptr::null(), 0.0, out)
             }
             _ => unreachable!(),
@@ -294,26 +302,110 @@ pub unsafe fn roc_indicator_avx512_long(input: &RocInput) -> Result<RocOutput, R
 pub fn roc_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     let len = data.len();
     let start = first + period;
-    for i in start..len {
-        let curr = data[i];
-        let prev = data[i - period];
-        if prev == 0.0 || prev.is_nan() {
-            out[i] = 0.0;
+    // Safe, bounds-check-minimized iteration using slice zips
+    let dst = &mut out[start..];
+    let curr = &data[start..];
+    let prev = &data[first..(len - period)];
+    for ((d, &c), &p) in dst.iter_mut().zip(curr.iter()).zip(prev.iter()) {
+        if p == 0.0 || p.is_nan() {
+            *d = 0.0;
         } else {
-            out[i] = ((curr / prev) - 1.0) * 100.0;
+            *d = ((c / p) - 1.0) * 100.0;
         }
     }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
 #[inline]
 pub unsafe fn roc_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    roc_scalar(data, period, first, out)
+    // Process 4 lanes at a time using AVX2
+    let len = data.len();
+    let start = first + period;
+    if start >= len { return; }
+
+    let n = len - start;
+    let base_curr = data.as_ptr().add(start);
+    let base_prev = data.as_ptr().add(first);
+    let base_out = out.as_mut_ptr().add(start);
+
+    let v_zero = _mm256_set1_pd(0.0);
+    let v_m100 = _mm256_set1_pd(-100.0);
+    let v_100 = _mm256_set1_pd(100.0);
+
+    let mut i = 0usize;
+    while i + 4 <= n {
+        let c = _mm256_loadu_pd(base_curr.add(i));
+        let p = _mm256_loadu_pd(base_prev.add(i));
+
+        // invalid when p == 0.0 or p is NaN
+        let mask_zero = _mm256_cmp_pd(p, v_zero, _CMP_EQ_OQ);
+        let mask_nan = _mm256_cmp_pd(p, p, _CMP_UNORD_Q);
+        let mask_invalid = _mm256_or_pd(mask_zero, mask_nan);
+
+        // r = (c / p)*100 - 100, using FMA for the mul-add part
+        let div = _mm256_div_pd(c, p);
+        let res = _mm256_fmadd_pd(div, v_100, v_m100);
+
+        // Blend: if invalid -> 0.0 else res
+        let blended = _mm256_blendv_pd(res, v_zero, mask_invalid);
+        _mm256_storeu_pd(base_out.add(i), blended);
+        i += 4;
+    }
+
+    // Scalar tail
+    while i < n {
+        let p = *base_prev.add(i);
+        let c = *base_curr.add(i);
+        *base_out.add(i) = if p == 0.0 || p.is_nan() { 0.0 } else { ((c / p) - 1.0) * 100.0 };
+        i += 1;
+    }
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f,fma")]
 #[inline]
 pub unsafe fn roc_avx512(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    roc_scalar(data, period, first, out)
+    // Process 8 lanes at a time using AVX-512
+    let len = data.len();
+    let start = first + period;
+    if start >= len { return; }
+
+    let n = len - start;
+    let base_curr = data.as_ptr().add(start);
+    let base_prev = data.as_ptr().add(first);
+    let base_out = out.as_mut_ptr().add(start);
+
+    let v_zero = _mm512_set1_pd(0.0);
+    let v_m100 = _mm512_set1_pd(-100.0);
+    let v_100 = _mm512_set1_pd(100.0);
+
+    let mut i = 0usize;
+    while i + 8 <= n {
+        let c = _mm512_loadu_pd(base_curr.add(i));
+        let p = _mm512_loadu_pd(base_prev.add(i));
+
+        // invalid when p == 0.0 or p is NaN
+        let k_zero = _mm512_cmp_pd_mask(p, v_zero, _CMP_EQ_OQ);
+        let k_nan = _mm512_cmp_pd_mask(p, p, _CMP_UNORD_Q);
+        let k_invalid = k_zero | k_nan;
+
+        // r = (c / p)*100 - 100
+        let div = _mm512_div_pd(c, p);
+        let res = _mm512_fmadd_pd(div, v_100, v_m100);
+
+        // zero for invalid lanes
+        let blended = _mm512_mask_mov_pd(res, k_invalid, v_zero);
+        _mm512_storeu_pd(base_out.add(i), blended);
+        i += 8;
+    }
+
+    // Scalar tail
+    while i < n {
+        let p = *base_prev.add(i);
+        let c = *base_curr.add(i);
+        *base_out.add(i) = if p == 0.0 || p.is_nan() { 0.0 } else { ((c / p) - 1.0) * 100.0 };
+        i += 1;
+    }
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
@@ -338,7 +430,48 @@ pub unsafe fn roc_row_scalar(
     _inv_n: f64,
     out: &mut [f64],
 ) {
-    roc_scalar(data, period, first, out)
+    // Optimized row kernel mirroring roc_scalar semantics with pointer arithmetic.
+    let len = data.len();
+    let start = first + period;
+    if start >= len {
+        return;
+    }
+
+    let base_ptr = data.as_ptr();
+    let prev_ptr = base_ptr.add(first);
+    let curr_ptr = base_ptr.add(start);
+    let dst_ptr = out.as_mut_ptr().add(start);
+
+    let n = len - start;
+    let mut i = 0usize;
+
+    // Unroll by 4
+    while i + 4 <= n {
+        let p0 = *prev_ptr.add(i + 0);
+        let p1 = *prev_ptr.add(i + 1);
+        let p2 = *prev_ptr.add(i + 2);
+        let p3 = *prev_ptr.add(i + 3);
+
+        let c0 = *curr_ptr.add(i + 0);
+        let c1 = *curr_ptr.add(i + 1);
+        let c2 = *curr_ptr.add(i + 2);
+        let c3 = *curr_ptr.add(i + 3);
+
+        *dst_ptr.add(i + 0) = if p0 == 0.0 || p0.is_nan() { 0.0 } else { ((c0 / p0) - 1.0) * 100.0 };
+        *dst_ptr.add(i + 1) = if p1 == 0.0 || p1.is_nan() { 0.0 } else { ((c1 / p1) - 1.0) * 100.0 };
+        *dst_ptr.add(i + 2) = if p2 == 0.0 || p2.is_nan() { 0.0 } else { ((c2 / p2) - 1.0) * 100.0 };
+        *dst_ptr.add(i + 3) = if p3 == 0.0 || p3.is_nan() { 0.0 } else { ((c3 / p3) - 1.0) * 100.0 };
+
+        i += 4;
+    }
+
+    // Tail
+    while i < n {
+        let p = *prev_ptr.add(i);
+        let c = *curr_ptr.add(i);
+        *dst_ptr.add(i) = if p == 0.0 || p.is_nan() { 0.0 } else { ((c / p) - 1.0) * 100.0 };
+        i += 1;
+    }
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
@@ -351,7 +484,7 @@ pub unsafe fn roc_row_avx2(
     _inv_n: f64,
     out: &mut [f64],
 ) {
-    roc_scalar(data, period, first, out)
+    roc_row_scalar(data, first, period, _stride, _weights, _inv_n, out)
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
@@ -364,7 +497,7 @@ pub unsafe fn roc_row_avx512(
     _inv_n: f64,
     out: &mut [f64],
 ) {
-    roc_scalar(data, period, first, out)
+    roc_row_scalar(data, first, period, _stride, _weights, _inv_n, out)
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
@@ -377,7 +510,7 @@ pub unsafe fn roc_row_avx512_short(
     _inv_n: f64,
     out: &mut [f64],
 ) {
-    roc_scalar(data, period, first, out)
+    roc_row_scalar(data, first, period, _stride, _weights, _inv_n, out)
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
@@ -390,7 +523,7 @@ pub unsafe fn roc_row_avx512_long(
     _inv_n: f64,
     out: &mut [f64],
 ) {
-    roc_scalar(data, period, first, out)
+    roc_row_scalar(data, first, period, _stride, _weights, _inv_n, out)
 }
 
 // --- Stream API ---

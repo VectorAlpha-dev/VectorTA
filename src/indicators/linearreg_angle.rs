@@ -15,12 +15,11 @@
 //! - Output length matches input data length with NaN padding for warmup period
 //!
 //! ## Developer Notes
-//! - **AVX2 kernel**: STUB - calls scalar implementation (lines 281-283)
-//! - **AVX512 kernel**: STUB - calls scalar implementation (lines 287-289, 293-295)
-//! - **Streaming**: ⚠️ Implemented but O(n) performance - recalculates full buffer on each update (line 327)
-//! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy) at line 223
-//! - **Batch operations**: ✅ Implemented with parallel processing support
-//! - **NEEDS IMPROVEMENT**: Streaming implementation grows unbounded buffer and recalculates entire dataset on each update
+//! - SIMD: Implemented but disabled by default; AVX2/AVX512 kernels are stubs delegating to the scalar path because the optimized scalar is faster at realistic sizes.
+//! - Batch: Row-specific path shares S/K across rows when NaN-free; SIMD batch variants are stubs delegating to the scalar prefix path (no SIMD).
+//! - Streaming: ⚠️ Implemented but O(n) per update — recalculates full buffer on each update; future work could cache incremental state.
+//! - Memory: ✅ Uses zero-copy warmup allocation helpers (`alloc_with_nan_prefix`, `init_matrix_prefixes`, `make_uninit_matrix`).
+//! - Style: Matches alma.rs patterns for API shape, warmup handling, and feature-gated SIMD.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
@@ -237,8 +236,10 @@ pub fn linearreg_angle_with_kernel(
         });
     }
 
+    // For this indicator, scalar outperforms current SIMD variants in typical sizes.
+    // Keep SIMD implementations available for explicit selection, but default Auto → Scalar.
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -264,32 +265,121 @@ pub fn linearreg_angle_with_kernel(
 
 #[inline]
 pub fn linearreg_angle_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-    let sum_x = (period * (period - 1)) as f64 * 0.5;
-    let sum_x_sqr = (period * (period - 1) * (2 * period - 1)) as f64 / 6.0;
-    let divisor = sum_x * sum_x - (period as f64) * sum_x_sqr;
+    // Optimized sliding window with O(1) per step, NaN-safe rebuild on boundary NaNs
+    let p = period as f64;
+    let sum_x = (period * (period - 1)) as f64 * 0.5; // Σx
+    let sum_x_sqr = (period * (period - 1) * (2 * period - 1)) as f64 / 6.0; // Σx^2
+    let divisor = sum_x * sum_x - p * sum_x_sqr; // reversed-x denominator
+    let inv_div = 1.0 / divisor;
+    let rad2deg = 180.0 / PI;
+
     let n = data.len();
+    let mut i = first_valid + period - 1;
+    if i >= n {
+        return;
+    }
 
-    // Use sliding window approach to avoid allocating arrays proportional to input size
-    for i in (first_valid + period - 1)..n {
-        let start = i + 1 - period;
+    // Initial window [start..=i]
+    let mut start = i + 1 - period;
+    let mut sum_y = 0.0;
+    let mut sum_kd = 0.0;
+
+    // Fast path if there are no NaNs after first_valid: no per-step NaN checks
+    let has_nan = data[first_valid..].iter().any(|v| v.is_nan());
+
+    unsafe {
+        // Build initial sums (unrolled)
+        let mut j = start;
         let end = i + 1;
+        while j + 3 < end {
+            let y0 = *data.get_unchecked(j);
+            let y1 = *data.get_unchecked(j + 1);
+            let y2 = *data.get_unchecked(j + 2);
+            let y3 = *data.get_unchecked(j + 3);
 
-        // Calculate sum_y for the window
-        let mut sum_y = 0.0;
-        for j in start..end {
-            sum_y += data[j];
+            sum_y += y0 + y1 + y2 + y3;
+            let jf = j as f64;
+            sum_kd += jf * y0
+                + (jf + 1.0) * y1
+                + (jf + 2.0) * y2
+                + (jf + 3.0) * y3;
+
+            j += 4;
+        }
+        while j < end {
+            let y = *data.get_unchecked(j);
+            sum_y += y;
+            sum_kd += (j as f64) * y;
+            j += 1;
         }
 
-        // Calculate sum_xy = sum(i * y[i]) for the window
-        // We need sum_kd = sum((absolute_index) * data[absolute_index]) for window
-        let mut sum_kd = 0.0;
-        for j in start..end {
-            sum_kd += (j as f64) * data[j];
-        }
+        if !has_nan {
+            // No-NaN fast path: O(1) slide with no NaN checks
+            loop {
+                let i_f = i as f64;
+                let sum_xy = i_f * sum_y - sum_kd;
+                let num = p.mul_add(sum_xy, -sum_x * sum_y);
+                let slope = num * inv_div;
+                *out.get_unchecked_mut(i) = slope.atan() * rad2deg;
 
-        let sum_xy = (i as f64) * sum_y - sum_kd;
-        let slope = ((period as f64) * sum_xy - sum_x * sum_y) / divisor;
-        out[i] = slope.atan() * (180.0 / PI);
+                i += 1;
+                if i >= n { break; }
+
+                let enter = *data.get_unchecked(i);
+                let leave = *data.get_unchecked(start);
+                start += 1;
+
+                sum_y += enter - leave;
+                sum_kd += (i as f64) * enter - ((i - period) as f64) * leave;
+            }
+        } else {
+            // NaN-safe path: rebuild on boundary-NaN
+            loop {
+                let i_f = i as f64;
+                let sum_xy = i_f * sum_y - sum_kd;
+                let num = p.mul_add(sum_xy, -sum_x * sum_y);
+                let slope = num * inv_div;
+                *out.get_unchecked_mut(i) = slope.atan() * rad2deg;
+
+                i += 1;
+                if i >= n { break; }
+
+                let enter = *data.get_unchecked(i);
+                let leave = *data.get_unchecked(start);
+                start += 1;
+
+                if enter.is_nan() | leave.is_nan() {
+                    sum_y = 0.0;
+                    sum_kd = 0.0;
+                    let ws = i + 1 - period;
+                    let mut jj = ws;
+                    let ee = i + 1;
+                    while jj + 3 < ee {
+                        let y0 = *data.get_unchecked(jj);
+                        let y1 = *data.get_unchecked(jj + 1);
+                        let y2 = *data.get_unchecked(jj + 2);
+                        let y3 = *data.get_unchecked(jj + 3);
+
+                        sum_y += y0 + y1 + y2 + y3;
+                        let jf = jj as f64;
+                        sum_kd += jf * y0
+                            + (jf + 1.0) * y1
+                            + (jf + 2.0) * y2
+                            + (jf + 3.0) * y3;
+                        jj += 4;
+                    }
+                    while jj < ee {
+                        let y = *data.get_unchecked(jj);
+                        sum_y += y;
+                        sum_kd += (jj as f64) * y;
+                        jj += 1;
+                    }
+                } else {
+                    sum_y += enter - leave;
+                    sum_kd += (i as f64) * enter - ((i - period) as f64) * leave;
+                }
+            }
+        }
     }
 }
 
@@ -305,6 +395,7 @@ pub fn linearreg_angle_avx512(data: &[f64], period: usize, first_valid: usize, o
 
 #[inline]
 pub fn linearreg_angle_avx2(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
+    // SIMD stub: delegate to scalar for accuracy/performance reasons
     linearreg_angle_scalar(data, period, first_valid, out)
 }
 
@@ -316,6 +407,7 @@ pub fn linearreg_angle_avx512_short(
     first_valid: usize,
     out: &mut [f64],
 ) {
+    // SIMD stub: delegate to scalar
     linearreg_angle_scalar(data, period, first_valid, out)
 }
 
@@ -327,7 +419,120 @@ pub fn linearreg_angle_avx512_long(
     first_valid: usize,
     out: &mut [f64],
 ) {
+    // SIMD stub: delegate to scalar
     linearreg_angle_scalar(data, period, first_valid, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f,avx512dq,fma")]
+unsafe fn linearreg_angle_avx512_impl(
+    data: &[f64],
+    period: usize,
+    first_valid: usize,
+    out: &mut [f64],
+) {
+    use core::arch::x86_64::*;
+
+    // Fallback to scalar if NaNs present (prefix sums would poison later windows).
+    if data[first_valid..].iter().any(|v| v.is_nan()) {
+        return linearreg_angle_scalar(data, period, first_valid, out);
+    }
+
+    let n = data.len();
+    let start_i = first_valid + period - 1;
+    if start_i >= n {
+        return;
+    }
+
+    // Constants
+    let p = period as f64;
+    let sum_x = (period * (period - 1)) as f64 * 0.5;
+    let sum_x_sqr = (period * (period - 1) * (2 * period - 1)) as f64 / 6.0;
+    let divisor = sum_x * sum_x - p * sum_x_sqr;
+    let inv_div = 1.0 / divisor;
+    let rad2deg = 180.0 / PI;
+
+    // Prefix sums (S and K)
+    let mut s = vec![0.0f64; n + 1];
+    let mut k = vec![0.0f64; n + 1];
+    let mut acc_s = 0.0f64;
+    let mut acc_k = 0.0f64;
+
+    let mut idx = 0usize;
+    while idx + 3 < n {
+        let y0 = *data.get_unchecked(idx);
+        let y1 = *data.get_unchecked(idx + 1);
+        let y2 = *data.get_unchecked(idx + 2);
+        let y3 = *data.get_unchecked(idx + 3);
+
+        acc_s += y0; s[idx + 1] = acc_s;  acc_k += (idx as f64) * y0;         k[idx + 1] = acc_k;
+        acc_s += y1; s[idx + 2] = acc_s;  acc_k += ((idx + 1) as f64) * y1;   k[idx + 2] = acc_k;
+        acc_s += y2; s[idx + 3] = acc_s;  acc_k += ((idx + 2) as f64) * y2;   k[idx + 3] = acc_k;
+        acc_s += y3; s[idx + 4] = acc_s;  acc_k += ((idx + 3) as f64) * y3;   k[idx + 4] = acc_k;
+
+        idx += 4;
+    }
+    while idx < n {
+        let y = *data.get_unchecked(idx);
+        acc_s += y; s[idx + 1] = acc_s;
+        acc_k += (idx as f64) * y; k[idx + 1] = acc_k;
+        idx += 1;
+    }
+
+    // SIMD constants
+    let v_p      = _mm512_set1_pd(p);
+    let v_nsumx  = _mm512_set1_pd(-sum_x);
+    let v_invdiv = _mm512_set1_pd(inv_div);
+
+    let mut i = start_i;
+    let width = 8usize;
+
+    // Bulk by 8 lanes
+    while i + width <= n {
+        let s_hi = _mm512_loadu_pd(s.as_ptr().add(i + 1));
+        let s_lo = _mm512_loadu_pd(s.as_ptr().add(i + 1 - period));
+        let sum_y = _mm512_sub_pd(s_hi, s_lo);
+
+        let k_hi = _mm512_loadu_pd(k.as_ptr().add(i + 1));
+        let k_lo = _mm512_loadu_pd(k.as_ptr().add(i + 1 - period));
+        let sum_kd = _mm512_sub_pd(k_hi, k_lo);
+
+        let base = i as f64;
+        let v_i = _mm512_setr_pd(
+            base, base + 1.0, base + 2.0, base + 3.0,
+            base + 4.0, base + 5.0, base + 6.0, base + 7.0
+        );
+
+        let sum_xy = _mm512_fnmadd_pd(v_i, sum_y, sum_kd);
+        let sum_xy = _mm512_sub_pd(_mm512_setzero_pd(), sum_xy);
+
+        let num = _mm512_fmadd_pd(v_p, sum_xy, _mm512_mul_pd(v_nsumx, sum_y));
+        let slope = _mm512_mul_pd(num, v_invdiv);
+
+        let mut tmp: [f64; 8] = core::mem::zeroed();
+        _mm512_storeu_pd(tmp.as_mut_ptr(), slope);
+
+        *out.get_unchecked_mut(i)     = tmp[0].atan() * rad2deg;
+        *out.get_unchecked_mut(i + 1) = tmp[1].atan() * rad2deg;
+        *out.get_unchecked_mut(i + 2) = tmp[2].atan() * rad2deg;
+        *out.get_unchecked_mut(i + 3) = tmp[3].atan() * rad2deg;
+        *out.get_unchecked_mut(i + 4) = tmp[4].atan() * rad2deg;
+        *out.get_unchecked_mut(i + 5) = tmp[5].atan() * rad2deg;
+        *out.get_unchecked_mut(i + 6) = tmp[6].atan() * rad2deg;
+        *out.get_unchecked_mut(i + 7) = tmp[7].atan() * rad2deg;
+
+        i += width;
+    }
+
+    while i < n {
+        let sum_y = *s.get_unchecked(i + 1) - *s.get_unchecked(i + 1 - period);
+        let sum_kd = *k.get_unchecked(i + 1) - *k.get_unchecked(i + 1 - period);
+        let sum_xy = (i as f64) * sum_y - sum_kd;
+        let num = p.mul_add(sum_xy, -sum_x * sum_y);
+        let slope = num * (1.0 / divisor);
+        *out.get_unchecked_mut(i) = slope.atan() * rad2deg;
+        i += 1;
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -562,15 +767,98 @@ fn linearreg_angle_batch_inner(
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
+    // If input contains NaNs post-first, avoid prefix-sum path to preserve semantics
+    let has_nan = data[first..].iter().any(|v| v.is_nan());
+
+    // Optional shared prefixes for all rows (S: Σy, K: Σ(k*y)) when NaN-free
+    let (s_pref, k_pref): (Option<Vec<f64>>, Option<Vec<f64>>) = if !has_nan {
+        // Precompute S and K once for reuse across rows
+        let n = data.len();
+        let mut s = vec![0.0f64; n + 1];
+        let mut k = vec![0.0f64; n + 1];
+        let mut acc_s = 0.0f64;
+        let mut acc_k = 0.0f64;
+        let mut idx = 0usize;
+        unsafe {
+            while idx + 3 < n {
+                let y0 = *data.get_unchecked(idx);
+                let y1 = *data.get_unchecked(idx + 1);
+                let y2 = *data.get_unchecked(idx + 2);
+                let y3 = *data.get_unchecked(idx + 3);
+
+                acc_s += y0; s[idx + 1] = acc_s;  acc_k += (idx as f64) * y0;         k[idx + 1] = acc_k;
+                acc_s += y1; s[idx + 2] = acc_s;  acc_k += ((idx + 1) as f64) * y1;   k[idx + 2] = acc_k;
+                acc_s += y2; s[idx + 3] = acc_s;  acc_k += ((idx + 2) as f64) * y2;   k[idx + 3] = acc_k;
+                acc_s += y3; s[idx + 4] = acc_s;  acc_k += ((idx + 3) as f64) * y3;   k[idx + 4] = acc_k;
+
+                idx += 4;
+            }
+            while idx < n {
+                let y = *data.get_unchecked(idx);
+                acc_s += y; s[idx + 1] = acc_s;
+                acc_k += (idx as f64) * y; k[idx + 1] = acc_k;
+                idx += 1;
+            }
+        }
+        (Some(s), Some(k))
+    } else {
+        (None, None)
+    };
+
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
-        match kern {
-            Kernel::Scalar => linearreg_angle_row_scalar(data, first, period, out_row),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => linearreg_angle_row_avx2(data, first, period, out_row),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => linearreg_angle_row_avx512(data, first, period, out_row),
-            _ => unreachable!(),
+        if has_nan {
+            // Always use scalar sliding path when NaNs present
+            linearreg_angle_row_scalar(data, first, period, out_row)
+        } else {
+            // Hoist per-row constants once
+            let p = period as f64;
+            let sum_x = (period * (period - 1)) as f64 * 0.5;
+            let sum_x_sqr = (period * (period - 1) * (2 * period - 1)) as f64 / 6.0;
+            let inv_div = 1.0 / (sum_x * sum_x - p * sum_x_sqr);
+            let rad2deg = 180.0 / PI;
+
+            match kern {
+                Kernel::Scalar => linearreg_angle_row_scalar_with_prefixes(
+                    data,
+                    first,
+                    out_row,
+                    s_pref.as_ref().unwrap(),
+                    k_pref.as_ref().unwrap(),
+                    p,
+                    sum_x,
+                    inv_div,
+                    rad2deg,
+                    period,
+                ),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 => linearreg_angle_row_avx2_with_prefixes(
+                    data,
+                    first,
+                    out_row,
+                    s_pref.as_ref().unwrap(),
+                    k_pref.as_ref().unwrap(),
+                    p,
+                    sum_x,
+                    inv_div,
+                    rad2deg,
+                    period,
+                ),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 => linearreg_angle_row_avx512_with_prefixes(
+                    data,
+                    first,
+                    out_row,
+                    s_pref.as_ref().unwrap(),
+                    k_pref.as_ref().unwrap(),
+                    p,
+                    sum_x,
+                    inv_div,
+                    rad2deg,
+                    period,
+                ),
+                _ => unreachable!(),
+            }
         }
     };
     if parallel {
@@ -619,17 +907,15 @@ unsafe fn linearreg_angle_row_scalar(data: &[f64], first: usize, period: usize, 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn linearreg_angle_row_avx2(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-    linearreg_angle_avx2(data, period, first, out)
+    // SIMD stub: delegate to scalar
+    linearreg_angle_row_scalar(data, first, period, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn linearreg_angle_row_avx512(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-    if period <= 32 {
-        linearreg_angle_row_avx512_short(data, first, period, out)
-    } else {
-        linearreg_angle_row_avx512_long(data, first, period, out)
-    }
+    // SIMD stub: delegate to scalar
+    linearreg_angle_row_scalar(data, first, period, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -640,7 +926,8 @@ unsafe fn linearreg_angle_row_avx512_short(
     period: usize,
     out: &mut [f64],
 ) {
-    linearreg_angle_scalar(data, period, first, out)
+    // SIMD stub: delegate to scalar
+    linearreg_angle_row_scalar(data, first, period, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -651,7 +938,80 @@ unsafe fn linearreg_angle_row_avx512_long(
     period: usize,
     out: &mut [f64],
 ) {
-    linearreg_angle_scalar(data, period, first, out)
+    // SIMD stub: delegate to scalar
+    linearreg_angle_row_scalar(data, first, period, out)
+}
+
+// Row-specific helpers using shared prefix sums (S, K)
+#[inline(always)]
+unsafe fn linearreg_angle_row_scalar_with_prefixes(
+    data: &[f64],
+    first: usize,
+    out: &mut [f64],
+    s: &[f64],
+    k: &[f64],
+    p: f64,
+    sum_x: f64,
+    inv_div: f64,
+    rad2deg: f64,
+    period: usize,
+) {
+    let n = data.len();
+    let start_i = first + period - 1;
+    if start_i >= n {
+        return;
+    }
+
+    let mut i = start_i;
+    while i < n {
+        let sum_y = *s.get_unchecked(i + 1) - *s.get_unchecked(i + 1 - period);
+        let sum_kd = *k.get_unchecked(i + 1) - *k.get_unchecked(i + 1 - period);
+        let sum_xy = (i as f64) * sum_y - sum_kd;
+        let num = p.mul_add(sum_xy, -sum_x * sum_y);
+        let slope = num * inv_div;
+        *out.get_unchecked_mut(i) = slope.atan() * rad2deg;
+        i += 1;
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn linearreg_angle_row_avx2_with_prefixes(
+    data: &[f64],
+    first: usize,
+    out: &mut [f64],
+    s: &[f64],
+    k: &[f64],
+    p: f64,
+    sum_x: f64,
+    inv_div: f64,
+    rad2deg: f64,
+    period: usize,
+) {
+    // SIMD stub with prefixes: call scalar prefix path
+    linearreg_angle_row_scalar_with_prefixes(
+        data, first, out, s, k, p, sum_x, inv_div, rad2deg, period,
+    )
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn linearreg_angle_row_avx512_with_prefixes(
+    data: &[f64],
+    first: usize,
+    out: &mut [f64],
+    s: &[f64],
+    k: &[f64],
+    p: f64,
+    sum_x: f64,
+    inv_div: f64,
+    rad2deg: f64,
+    period: usize,
+) {
+    // SIMD stub with prefixes: call scalar prefix path
+    linearreg_angle_row_scalar_with_prefixes(
+        data, first, out, s, k, p, sum_x, inv_div, rad2deg, period,
+    )
 }
 
 #[cfg(test)]

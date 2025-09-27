@@ -16,9 +16,9 @@
 //! - **Err(VptError)** otherwise.
 //!
 //! ## Developer Notes
-//! - **AVX2/AVX512 Kernels**: Stub implementations that delegate to scalar. Comments indicate "API parity only". Cumulative nature makes SIMD challenging but could vectorize price change calculations.
-//! - **Streaming Performance**: O(1) implementation with simple cumulative sum tracking. Very efficient - only stores last price and VPT value.
-//! - **Memory Optimization**: Uses `alloc_with_nan_prefix` and batch helpers properly. Streaming is optimal with minimal state.
+//! - Decision: SIMD remains disabled (stubs delegate to scalar). The cumulative (prefix-sum) dependency dominates; vectorizing only the per-step increment yields little benefit without a parallel scan. Revisit if a segmented/scan strategy is introduced.
+//! - Streaming Performance: O(1) implementation with simple cumulative sum tracking. Very efficient - only stores last price and VPT value.
+//! - Memory Optimization: Uses `alloc_with_nan_prefix` and batch helpers properly. Streaming is optimal with minimal state.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -224,28 +224,73 @@ pub unsafe fn vpt_scalar(price: &[f64], volume: &[f64]) -> Result<VptOutput, Vpt
     let first = vpt_first_valid(price, volume).ok_or(VptError::NotEnoughValidData)?;
     let mut res = alloc_with_nan_prefix(n, first + 1);
 
-    // seed cumulative with vpt_val at `first`
-    let p0 = price[first - 1];
-    let p1 = price[first];
-    let v1 = volume[first];
-    let mut prev_cum = v1 * ((p1 - p0) / p0);
+    // Raw pointers to avoid bounds checks inside the hot loop.
+    let p_ptr = price.as_ptr();
+    let v_ptr = volume.as_ptr();
+    let o_ptr = res.as_mut_ptr();
 
-    for i in (first + 1)..n {
-        let p0 = price[i - 1];
-        let p1 = price[i];
-        let v1 = volume[i];
-        let cur = if p0.is_nan() || p0 == 0.0 || p1.is_nan() || v1.is_nan() {
+    // Seed with the VPT increment at index `first` (not written to output).
+    let mut prev = {
+        let p0 = *p_ptr.add(first - 1);
+        let p1 = *p_ptr.add(first);
+        let v1 = *v_ptr.add(first);
+        if p0 != p0 || p0 == 0.0 || p1 != p1 || v1 != v1 {
+            f64::NAN
+        } else {
+            // Keep operation order identical to reference: v1 * ((p1 - p0) / p0)
+            v1 * ((p1 - p0) / p0)
+        }
+    };
+
+    // Main loop, unrolled by 2 to reduce loop overhead.
+    let mut i = first + 1;
+    while i + 1 < n {
+        // iteration i
+        let p0 = *p_ptr.add(i - 1);
+        let p1 = *p_ptr.add(i);
+        let v1 = *v_ptr.add(i);
+        let cur = if p0 != p0 || p0 == 0.0 || p1 != p1 || v1 != v1 {
             f64::NAN
         } else {
             v1 * ((p1 - p0) / p0)
         };
-        res[i] = if cur.is_nan() || prev_cum.is_nan() {
+        let val = if (cur == cur) & (prev == prev) { cur + prev } else { f64::NAN };
+        *o_ptr.add(i) = val;
+        prev = val;
+
+        // iteration i + 1
+        let j = i + 1;
+        let p0b = *p_ptr.add(j - 1);
+        let p1b = *p_ptr.add(j);
+        let v1b = *v_ptr.add(j);
+        let cur1 = if p0b != p0b || p0b == 0.0 || p1b != p1b || v1b != v1b {
             f64::NAN
         } else {
-            cur + prev_cum
+            v1b * ((p1b - p0b) / p0b)
         };
-        prev_cum = res[i];
+        let val1 = if (cur1 == cur1) & (prev == prev) { cur1 + prev } else { f64::NAN };
+        *o_ptr.add(j) = val1;
+        prev = val1;
+
+        i = j + 1;
     }
+
+    // Tail
+    while i < n {
+        let p0 = *p_ptr.add(i - 1);
+        let p1 = *p_ptr.add(i);
+        let v1 = *v_ptr.add(i);
+        let cur = if p0 != p0 || p0 == 0.0 || p1 != p1 || v1 != v1 {
+            f64::NAN
+        } else {
+            v1 * ((p1 - p0) / p0)
+        };
+        let val = if (cur == cur) & (prev == prev) { cur + prev } else { f64::NAN };
+        *o_ptr.add(i) = val;
+        prev = val;
+        i += 1;
+    }
+
     Ok(VptOutput { values: res })
 }
 
@@ -672,13 +717,17 @@ pub unsafe fn vpt_row_scalar_from(price: &[f64], volume: &[f64], start_i: usize,
 
     assert!(start_i > 0, "vpt_row_scalar_from requires start_i >= 1");
 
-    // Seed with VPT value at index (start_i - 1); not written to out.
+    let p_ptr = price.as_ptr();
+    let v_ptr = volume.as_ptr();
+    let o_ptr = out.as_mut_ptr();
+
+    // Seed with the increment at index (start_i - 1); not written to out.
     let mut prev = if start_i >= 2 {
         let k = start_i - 1;
-        let p0 = *price.get_unchecked(k - 1);
-        let p1 = *price.get_unchecked(k);
-        let v1 = *volume.get_unchecked(k);
-        if p0.is_nan() || p0 == 0.0 || p1.is_nan() || v1.is_nan() {
+        let p0 = *p_ptr.add(k - 1);
+        let p1 = *p_ptr.add(k);
+        let v1 = *v_ptr.add(k);
+        if p0 != p0 || p0 == 0.0 || p1 != p1 || v1 != v1 {
             f64::NAN
         } else {
             v1 * ((p1 - p0) / p0)
@@ -687,29 +736,50 @@ pub unsafe fn vpt_row_scalar_from(price: &[f64], volume: &[f64], start_i: usize,
         0.0
     };
 
-    // Tight loop with unchecked indexing to remove bounds checks.
-    let p_ptr = price.as_ptr();
-    let v_ptr = volume.as_ptr();
-    let o_ptr = out.as_mut_ptr();
-
+    // Main loop, unrolled by 2.
     let mut i = start_i;
-    while i < n {
+    while i + 1 < n {
+        // iteration i
         let p0 = *p_ptr.add(i - 1);
         let p1 = *p_ptr.add(i);
         let v1 = *v_ptr.add(i);
-
-        let cur = if p0.is_nan() || p0 == 0.0 || p1.is_nan() || v1.is_nan() {
+        let cur = if p0 != p0 || p0 == 0.0 || p1 != p1 || v1 != v1 {
             f64::NAN
         } else {
             v1 * ((p1 - p0) / p0)
         };
+        let val = if (cur == cur) & (prev == prev) { cur + prev } else { f64::NAN };
+        *o_ptr.add(i) = val;
+        prev = val;
 
-        let val = if cur.is_nan() || prev.is_nan() {
+        // iteration i + 1
+        let j = i + 1;
+        let p0b = *p_ptr.add(j - 1);
+        let p1b = *p_ptr.add(j);
+        let v1b = *v_ptr.add(j);
+        let cur1 = if p0b != p0b || p0b == 0.0 || p1b != p1b || v1b != v1b {
             f64::NAN
         } else {
-            cur + prev
+            v1b * ((p1b - p0b) / p0b)
         };
+        let val1 = if (cur1 == cur1) & (prev == prev) { cur1 + prev } else { f64::NAN };
+        *o_ptr.add(j) = val1;
+        prev = val1;
 
+        i = j + 1;
+    }
+
+    // Tail
+    while i < n {
+        let p0 = *p_ptr.add(i - 1);
+        let p1 = *p_ptr.add(i);
+        let v1 = *v_ptr.add(i);
+        let cur = if p0 != p0 || p0 == 0.0 || p1 != p1 || v1 != v1 {
+            f64::NAN
+        } else {
+            v1 * ((p1 - p0) / p0)
+        };
+        let val = if (cur == cur) & (prev == prev) { cur + prev } else { f64::NAN };
         *o_ptr.add(i) = val;
         prev = val;
         i += 1;
@@ -1059,7 +1129,7 @@ mod tests {
         for (i, &value) in output.values[start_index..].iter().enumerate() {
             let expected_value = expected_last_five[i];
             assert!(
-                (value - expected_value).abs() < 1e-3,
+                (value - expected_value).abs() < 1e-9,
                 "VPT mismatch at final bars, index {}: expected {}, got {}",
                 i,
                 expected_value,

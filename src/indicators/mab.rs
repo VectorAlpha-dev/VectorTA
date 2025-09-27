@@ -16,9 +16,10 @@
 //! - **`Err(MabError)`** on failure
 //!
 //! ## Developer Status
-//! - **SIMD Kernels**: AVX2 (stub), AVX512 (stub)
+//! - **SIMD Kernels**: AVX2/AVX512 enabled via runtime selection; scalar remains reference path.
 //! - **Streaming**: O(1) performance
 //! - **Memory**: Good zero-copy usage (alloc_with_nan_prefix, make_uninit_matrix)
+//! - Note: Row-specific batch fast-path uses shared dev vector when only devup/devdn vary.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
@@ -312,29 +313,7 @@ pub fn mab_into_slice(
         });
     }
 
-    // Classic kernel available but disabled - revert to original implementation
-    // To enable classic kernel optimization, uncomment the following and comment out the code below:
-    /*
-    let fast_ma_type = input.get_fast_ma_type();
-    let slow_ma_type = input.get_slow_ma_type();
-
-    if fast_ma_type == "sma" && slow_ma_type == "sma" {
-        // Use optimized classic kernel for SMA/SMA
-        unsafe {
-            return mab_scalar_classic_sma(
-                data,
-                fast_period,
-                slow_period,
-                devup,
-                devdn,
-                first,
-                upper_dst,
-                middle_dst,
-                lower_dst,
-            );
-        }
-    }
-    */
+    // Classic kernel available but currently not used by default.
 
     // Fall back to general implementation for other MA type combinations
     let fast_ma_type = input.get_fast_ma_type();
@@ -424,7 +403,7 @@ pub fn mab(input: &MabInput) -> Result<MabOutput, MabError> {
     mab_with_kernel(input, kernel)
 }
 
-fn mab_with_kernel(input: &MabInput, kernel: Kernel) -> Result<MabOutput, MabError> {
+pub fn mab_with_kernel(input: &MabInput, kernel: Kernel) -> Result<MabOutput, MabError> {
     let data = input.as_ref();
     let (_, _, _, warmup, _, _, _) = mab_prepare2(input, kernel)?; // also validates sizes
 
@@ -562,18 +541,102 @@ pub unsafe fn mab_avx2(
     mid: &mut [f64],
     lower: &mut [f64],
 ) {
-    // Just call the scalar implementation
-    mab_scalar(
-        fast_ma,
-        slow_ma,
-        fast_period,
-        devup,
-        devdn,
-        first_output,
-        upper,
-        mid,
-        lower,
-    );
+    use core::arch::x86_64::*;
+    let n = fast_ma.len();
+    if first_output >= n {
+        return;
+    }
+    debug_assert!(fast_period > 0);
+    debug_assert!(first_output + 1 >= fast_period);
+
+    let start = first_output + 1 - fast_period;
+    let m = n - start;
+
+    // scratch buffers
+    let mut diffsq: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, m);
+    diffsq.set_len(m);
+    let mut prefix: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, m + 1);
+    prefix.set_len(m + 1);
+
+    let f0 = fast_ma.as_ptr().add(start);
+    let s0 = slow_ma.as_ptr().add(start);
+    let dptr = diffsq.as_mut_ptr();
+
+    // squared diffs
+    let mut k = 0usize;
+    while k + 4 <= m {
+        let vf = _mm256_loadu_pd(f0.add(k));
+        let vs = _mm256_loadu_pd(s0.add(k));
+        let vd = _mm256_sub_pd(vf, vs);
+        let vd2 = _mm256_mul_pd(vd, vd);
+        _mm256_storeu_pd(dptr.add(k), vd2);
+        k += 4;
+    }
+    while k < m {
+        let d = *f0.add(k) - *s0.add(k);
+        *dptr.add(k) = d * d;
+        k += 1;
+    }
+
+    // prefix sum
+    let pptr = prefix.as_mut_ptr();
+    *pptr = 0.0;
+    let mut acc = 0.0f64;
+    k = 0;
+    while k < m {
+        acc += *dptr.add(k);
+        *pptr.add(k + 1) = acc;
+        k += 1;
+    }
+
+    let invf = 1.0 / (fast_period as f64);
+    let vinvf = _mm256_set1_pd(invf);
+    let vup = _mm256_set1_pd(devup);
+    let vdn = _mm256_set1_pd(devdn);
+
+    let mut i = first_output;
+
+    // peel to 4-alignment
+    while i < n && (i & 3) != 0 {
+        let base = i - start;
+        let sum = *pptr.add(base + 1) - *pptr.add(base + 1 - fast_period);
+        let dev = (sum * invf).sqrt();
+        let sm = *slow_ma.as_ptr().add(i);
+        *mid.as_mut_ptr().add(i) = *fast_ma.as_ptr().add(i);
+        *upper.as_mut_ptr().add(i) = sm + devup * dev;
+        *lower.as_mut_ptr().add(i) = sm - devdn * dev;
+        i += 1;
+    }
+
+    while i + 3 < n {
+        let base = i - start;
+        let pend = _mm256_loadu_pd(pptr.add(base + 1));
+        let psta = _mm256_loadu_pd(pptr.add(base + 1 - fast_period));
+        let vsum = _mm256_sub_pd(pend, psta);
+        let vdev = _mm256_sqrt_pd(_mm256_mul_pd(vsum, vinvf));
+
+        let vfast = _mm256_loadu_pd(fast_ma.as_ptr().add(i));
+        let vslow = _mm256_loadu_pd(slow_ma.as_ptr().add(i));
+
+        _mm256_storeu_pd(mid.as_mut_ptr().add(i), vfast);
+        let vupper = _mm256_fmadd_pd(vup, vdev, vslow);
+        let vlower = _mm256_fnmadd_pd(vdn, vdev, vslow);
+        _mm256_storeu_pd(upper.as_mut_ptr().add(i), vupper);
+        _mm256_storeu_pd(lower.as_mut_ptr().add(i), vlower);
+
+        i += 4;
+    }
+
+    while i < n {
+        let base = i - start;
+        let sum = *pptr.add(base + 1) - *pptr.add(base + 1 - fast_period);
+        let dev = (sum * invf).sqrt();
+        let sm = *slow_ma.as_ptr().add(i);
+        *mid.as_mut_ptr().add(i) = *fast_ma.as_ptr().add(i);
+        *upper.as_mut_ptr().add(i) = sm + devup * dev;
+        *lower.as_mut_ptr().add(i) = sm - devdn * dev;
+        i += 1;
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -589,18 +652,98 @@ pub unsafe fn mab_avx512(
     mid: &mut [f64],
     lower: &mut [f64],
 ) {
-    // Just call the scalar implementation
-    mab_scalar(
-        fast_ma,
-        slow_ma,
-        fast_period,
-        devup,
-        devdn,
-        first_output,
-        upper,
-        mid,
-        lower,
-    );
+    use core::arch::x86_64::*;
+    let n = fast_ma.len();
+    if first_output >= n {
+        return;
+    }
+    debug_assert!(fast_period > 0);
+    debug_assert!(first_output + 1 >= fast_period);
+
+    let start = first_output + 1 - fast_period;
+    let m = n - start;
+
+    let mut diffsq: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, m);
+    diffsq.set_len(m);
+    let mut prefix: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, m + 1);
+    prefix.set_len(m + 1);
+
+    let f0 = fast_ma.as_ptr().add(start);
+    let s0 = slow_ma.as_ptr().add(start);
+    let dptr = diffsq.as_mut_ptr();
+
+    let mut k = 0usize;
+    while k + 8 <= m {
+        let vf = _mm512_loadu_pd(f0.add(k));
+        let vs = _mm512_loadu_pd(s0.add(k));
+        let vd = _mm512_sub_pd(vf, vs);
+        let vd2 = _mm512_mul_pd(vd, vd);
+        _mm512_storeu_pd(dptr.add(k), vd2);
+        k += 8;
+    }
+    while k < m {
+        let d = *f0.add(k) - *s0.add(k);
+        *dptr.add(k) = d * d;
+        k += 1;
+    }
+
+    let pptr = prefix.as_mut_ptr();
+    *pptr = 0.0;
+    let mut acc = 0.0f64;
+    k = 0;
+    while k < m {
+        acc += *dptr.add(k);
+        *pptr.add(k + 1) = acc;
+        k += 1;
+    }
+
+    let invf = 1.0 / (fast_period as f64);
+    let vinvf = _mm512_set1_pd(invf);
+    let vup = _mm512_set1_pd(devup);
+    let vdn = _mm512_set1_pd(devdn);
+
+    let mut i = first_output;
+
+    while i < n && (i & 7) != 0 {
+        let base = i - start;
+        let sum = *pptr.add(base + 1) - *pptr.add(base + 1 - fast_period);
+        let dev = (sum * invf).sqrt();
+        let sm = *slow_ma.as_ptr().add(i);
+        *mid.as_mut_ptr().add(i) = *fast_ma.as_ptr().add(i);
+        *upper.as_mut_ptr().add(i) = sm + devup * dev;
+        *lower.as_mut_ptr().add(i) = sm - devdn * dev;
+        i += 1;
+    }
+
+    while i + 7 < n {
+        let base = i - start;
+        let pend = _mm512_loadu_pd(pptr.add(base + 1));
+        let psta = _mm512_loadu_pd(pptr.add(base + 1 - fast_period));
+        let vsum = _mm512_sub_pd(pend, psta);
+        let vdev = _mm512_sqrt_pd(_mm512_mul_pd(vsum, vinvf));
+
+        let vfast = _mm512_loadu_pd(fast_ma.as_ptr().add(i));
+        let vslow = _mm512_loadu_pd(slow_ma.as_ptr().add(i));
+
+        _mm512_storeu_pd(mid.as_mut_ptr().add(i), vfast);
+        let vupper = _mm512_fmadd_pd(vup, vdev, vslow);
+        let vlower = _mm512_fnmadd_pd(vdn, vdev, vslow);
+        _mm512_storeu_pd(upper.as_mut_ptr().add(i), vupper);
+        _mm512_storeu_pd(lower.as_mut_ptr().add(i), vlower);
+
+        i += 8;
+    }
+
+    while i < n {
+        let base = i - start;
+        let sum = *pptr.add(base + 1) - *pptr.add(base + 1 - fast_period);
+        let dev = (sum * invf).sqrt();
+        let sm = *slow_ma.as_ptr().add(i);
+        *mid.as_mut_ptr().add(i) = *fast_ma.as_ptr().add(i);
+        *upper.as_mut_ptr().add(i) = sm + devup * dev;
+        *lower.as_mut_ptr().add(i) = sm - devdn * dev;
+        i += 1;
+    }
 }
 
 // Stream implementation
@@ -1042,6 +1185,170 @@ fn mab_batch_inner_into(
             lower_len: lower_out.len(),
             expected: rows * cols,
         });
+    }
+
+    // Fast-path: if all rows share identical MA definitions (types + periods), only devup/devdn vary,
+    // we can reuse a single dev vector and the same fast/slow MAs across rows.
+    if !combos.is_empty() {
+        let p0 = &combos[0];
+        let all_same_ma = combos.iter().all(|p| {
+            p.fast_period == p0.fast_period
+                && p.slow_period == p0.slow_period
+                && p.fast_ma_type == p0.fast_ma_type
+                && p.slow_ma_type == p0.slow_ma_type
+        });
+
+        if all_same_ma {
+            // Build shared MAs and dev vector once
+            use crate::indicators::ema::{ema, EmaInput, EmaParams};
+            use crate::indicators::sma::{sma, SmaInput, SmaParams};
+
+            let n = input.len();
+            let first = input.iter().position(|x| !x.is_nan()).unwrap_or(0);
+            let fast = p0.fast_period.unwrap();
+            let slow = p0.slow_period.unwrap();
+            let fast_ma_type = p0
+                .fast_ma_type
+                .as_deref()
+                .unwrap_or("sma");
+            let slow_ma_type = p0
+                .slow_ma_type
+                .as_deref()
+                .unwrap_or("sma");
+
+            let fast_ma = match fast_ma_type {
+                "ema" => {
+                    let params = EmaParams { period: Some(fast) };
+                    ema(&EmaInput::from_slice(input, params))
+                        .map_err(|_| MabError::NotEnoughValidData {
+                            need: fast,
+                            valid: n - first,
+                        })?
+                        .values
+                }
+                _ => {
+                    let params = SmaParams { period: Some(fast) };
+                    sma(&SmaInput::from_slice(input, params))
+                        .map_err(|_| MabError::NotEnoughValidData {
+                            need: fast,
+                            valid: n - first,
+                        })?
+                        .values
+                }
+            };
+
+            let slow_ma = match slow_ma_type {
+                "ema" => {
+                    let params = EmaParams { period: Some(slow) };
+                    ema(&EmaInput::from_slice(input, params))
+                        .map_err(|_| MabError::NotEnoughValidData {
+                            need: slow,
+                            valid: n - first,
+                        })?
+                        .values
+                }
+                _ => {
+                    let params = SmaParams { period: Some(slow) };
+                    sma(&SmaInput::from_slice(input, params))
+                        .map_err(|_| MabError::NotEnoughValidData {
+                            need: slow,
+                            valid: n - first,
+                        })?
+                        .values
+                }
+            };
+
+            // Compute dev vector once using uninitialized, aligned storage
+            let need_total = fast.max(slow) + fast - 1;
+            let warmup = first + need_total - 1;
+            let first_output = warmup + 1;
+
+            if first_output < n {
+                let mut dev: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, n);
+                unsafe { dev.set_len(n); }
+
+                unsafe {
+                    let f_ptr = fast_ma.as_ptr();
+                    let s_ptr = slow_ma.as_ptr();
+                    let d_ptr = dev.as_mut_ptr();
+
+                    let start = first_output + 1 - fast;
+                    let mut sum_sq = 0.0f64;
+                    let mut k = 0usize;
+                    while k < fast {
+                        let idx = start + k;
+                        let diff = *f_ptr.add(idx) - *s_ptr.add(idx);
+                        sum_sq += diff * diff;
+                        k += 1;
+                    }
+                    // first output
+                    *d_ptr.add(first_output) = (sum_sq / fast as f64).sqrt();
+
+                    // rolling
+                    let mut i = first_output + 1;
+                    while i < n {
+                        let old_idx = i - fast;
+                        let old = *f_ptr.add(old_idx) - *s_ptr.add(old_idx);
+                        let new = *f_ptr.add(i) - *s_ptr.add(i);
+                        sum_sq += new * new - old * old;
+                        *d_ptr.add(i) = (sum_sq / fast as f64).sqrt();
+                        i += 1;
+                    }
+                }
+
+                let fill_row = |row: usize, u: &mut [f64], m: &mut [f64], l: &mut [f64]| {
+                    let pr = &combos[row];
+                    let devup = pr.devup.unwrap();
+                    let devdn = pr.devdn.unwrap();
+                    for i in first_output..n {
+                        let d = dev[i];
+                        m[i] = fast_ma[i];
+                        u[i] = slow_ma[i] + devup * d;
+                        l[i] = slow_ma[i] - devdn * d;
+                    }
+                    Ok(())
+                };
+
+                if parallel {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        use rayon::prelude::*;
+                        upper_out
+                            .par_chunks_mut(cols)
+                            .zip(middle_out.par_chunks_mut(cols))
+                            .zip(lower_out.par_chunks_mut(cols))
+                            .enumerate()
+                            .try_for_each(|(row, ((u, m), l))| fill_row(row, u, m, l))?;
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        for row in 0..rows {
+                            let s = row * cols;
+                            fill_row(
+                                row,
+                                &mut upper_out[s..s + cols],
+                                &mut middle_out[s..s + cols],
+                                &mut lower_out[s..s + cols],
+                            )?;
+                        }
+                    }
+                } else {
+                    for row in 0..rows {
+                        let s = row * cols;
+                        fill_row(
+                            row,
+                            &mut upper_out[s..s + cols],
+                            &mut middle_out[s..s + cols],
+                            &mut lower_out[s..s + cols],
+                        )?;
+                    }
+                }
+
+                return Ok(combos);
+            }
+
+            // If first_output >= n, fast-path produces no writes; fall through to generic path
+        }
     }
 
     let process_row = |row: usize, u: &mut [f64], m: &mut [f64], l: &mut [f64]| {
