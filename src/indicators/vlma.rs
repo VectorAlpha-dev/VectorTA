@@ -18,7 +18,8 @@
 //! - Scalar: hot loop optimized with branch-reduced period updates and a LUT for smoothing constants; preserves warmup/outputs.
 //! - Streaming: O(n) reference MA/deviation; future work could add incremental updates to reduce recalculation.
 //! - Memory: uses `alloc_with_nan_prefix` and avoids O(N) temporaries beyond required reference series.
-//! - Batch: parallel per-row sweep wired; row-specific SIMD kernels not implemented due to limited benefit.
+//! - Batch: parallel per-row sweep. Added row-optimized fast path for SMA + stddev using shared prefix sums
+//!   to compute mean/stddev in O(1) per index; other matypes/devtypes fall back to scalar per row.
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -437,6 +438,7 @@ pub unsafe fn vlma_scalar_sma_stddev_into(
     for p in 1..=max_pi {
         sc_lut.push(2.0 / (p as f64 + 1.0));
     }
+    let sc_ptr = sc_lut.as_ptr();
 
     // Bands constants
     const D175: f64 = 1.75;
@@ -450,7 +452,7 @@ pub unsafe fn vlma_scalar_sma_stddev_into(
     while i < len && i < warm_end {
         let x = *data.get_unchecked(i);
         if !x.is_nan() {
-            let sc = *sc_lut.get_unchecked(last_p);
+            let sc = *sc_ptr.add(last_p);
             last_val = (x - last_val).mul_add(sc, last_val);
         }
         i += 1;
@@ -518,7 +520,7 @@ pub unsafe fn vlma_scalar_sma_stddev_into(
             }
 
             // EMA-like update
-            let sc = *sc_lut.get_unchecked(next_p);
+            let sc = *sc_ptr.add(next_p);
             last_val = (x - last_val).mul_add(sc, last_val);
             last_p = next_p;
             *out.get_unchecked_mut(i) = last_val;
@@ -598,6 +600,7 @@ unsafe fn vlma_scalar_into(
         sc_lut.push(2.0 / (p as f64 + 1.0));
     }
     debug_assert_eq!(sc_lut.len(), max_pi + 1);
+    let sc_ptr = sc_lut.as_ptr();
 
     // Band multipliers
     const D175: f64 = 1.75;
@@ -647,7 +650,7 @@ unsafe fn vlma_scalar_into(
         }
 
         // EMA-like update: y = last + sc * (x - last)
-        let sc = *sc_lut.get_unchecked(next_p);
+        let sc = *sc_ptr.add(next_p);
         last_val = (x - last_val).mul_add(sc, last_val);
         last_p = next_p;
 
@@ -694,7 +697,7 @@ unsafe fn vlma_scalar_into(
             };
         }
 
-        let sc = *sc_lut.get_unchecked(next_p);
+        let sc = *sc_ptr.add(next_p);
         last_val = (x - last_val).mul_add(sc, last_val);
         last_p = next_p;
 
@@ -724,6 +727,113 @@ unsafe fn vlma_row_scalar(
         first_valid,
         out,
     )
+}
+
+/// Row-optimized VLMA using shared prefix sums (SMA + stddev only)
+#[inline(always)]
+unsafe fn vlma_row_fast_sma_std_prefix(
+    data: &[f64],
+    min_period: usize,
+    max_period: usize,
+    first_valid: usize,
+    ps_sum: &[f64],
+    ps_sumsq: &[f64],
+    ps_cnt: &[usize],
+    out: &mut [f64],
+) -> Result<(), VlmaError> {
+    debug_assert_eq!(out.len(), data.len());
+    let len = data.len();
+    if len == 0 {
+        return Ok(());
+    }
+
+    let warm_end = first_valid + max_period - 1;
+    let x0 = *data.get_unchecked(first_valid);
+    // Initial value at first_valid is pre-set by caller; keep in sync
+    *out.get_unchecked_mut(first_valid) = x0;
+
+    let min_pi = if min_period == 0 { 1 } else { min_period };
+    let max_pi = core::cmp::max(max_period, min_pi);
+    let mut last_p: usize = max_pi;
+
+    // Smoothing constants LUT
+    let mut sc_lut = Vec::with_capacity(max_pi + 1);
+    sc_lut.push(0.0);
+    for p in 1..=max_pi {
+        sc_lut.push(2.0 / (p as f64 + 1.0));
+    }
+    let sc_ptr = sc_lut.as_ptr();
+
+    const D175: f64 = 1.75;
+    const D025: f64 = 0.25;
+
+    let mut last_val = x0;
+
+    // Warmup advance
+    let mut i = first_valid + 1;
+    while i < len && i < warm_end {
+        let x = *data.get_unchecked(i);
+        if x.is_finite() {
+            let sc = *sc_ptr.add(last_p);
+            last_val = (x - last_val).mul_add(sc, last_val);
+        }
+        i += 1;
+    }
+    if warm_end >= len {
+        return Ok(());
+    }
+
+    // Steady-state
+    while i < len {
+        let x = *data.get_unchecked(i);
+        if !x.is_finite() {
+            *out.get_unchecked_mut(i) = f64::NAN;
+        } else {
+            // Window [i-max_period+1, i]
+            let start = i + 1 - max_period;
+            let cnt = *ps_cnt.get_unchecked(i + 1) - *ps_cnt.get_unchecked(start);
+            let (m, dv) = if cnt == max_period {
+                let sum = *ps_sum.get_unchecked(i + 1) - *ps_sum.get_unchecked(start);
+                let sumsq = *ps_sumsq.get_unchecked(i + 1) - *ps_sumsq.get_unchecked(start);
+                let inv = 1.0 / (max_period as f64);
+                let m = sum * inv;
+                let var = (sumsq * inv) - m * m;
+                let dv = if var < 0.0 { 0.0 } else { var.sqrt() };
+                (m, dv)
+            } else {
+                (f64::NAN, f64::NAN)
+            };
+
+            let prev_p = if last_p == 0 { max_pi } else { last_p };
+            let mut next_p = prev_p;
+            if m.is_finite() && dv.is_finite() {
+                let d175 = dv * D175;
+                let d025 = dv * D025;
+                let a = m - d175;
+                let b = m - d025;
+                let c = m + d025;
+                let d = m + d175;
+                let inc_fast = ((x < a) as i32) | ((x > d) as i32);
+                let inc_slow = ((x >= b) as i32) & ((x <= c) as i32);
+                let delta = inc_slow - inc_fast;
+                let p_tmp = prev_p as isize + delta as isize;
+                next_p = if p_tmp < min_pi as isize {
+                    min_pi
+                } else if p_tmp > max_pi as isize {
+                    max_pi
+                } else {
+                    p_tmp as usize
+                };
+            }
+            let sc = *sc_ptr.add(next_p);
+            last_val = (x - last_val).mul_add(sc, last_val);
+            last_p = next_p;
+            *out.get_unchecked_mut(i) = last_val;
+        }
+        i += 1;
+    }
+
+    Ok(())
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1301,6 +1411,52 @@ pub fn vlma_batch_inner_into(
     let rows = combos.len();
     let cols = data.len();
 
+    // Detect if we can use the shared-prefix fast path (SMA + stddev rows present)
+    let any_sma_std = combos
+        .iter()
+        .any(|c| c.matype.as_deref() == Some("sma") && c.devtype == Some(0));
+
+    // Optional shared prefix sums for mean/stddev across rows
+    let (ps_sum, ps_sumsq, ps_cnt);
+    let ps_sum_ref: Option<&[f64]>;
+    let ps_sumsq_ref: Option<&[f64]>;
+    let ps_cnt_ref: Option<&[usize]>;
+    if any_sma_std {
+        // Build prefix sums once: ps[i+1] = sum of finite(data[0..=i])
+        let mut sum = 0.0_f64;
+        let mut sumsq = 0.0_f64;
+        let mut cnt = 0_usize;
+        let mut ps_s = Vec::with_capacity(cols + 1);
+        let mut ps_q = Vec::with_capacity(cols + 1);
+        let mut ps_c = Vec::with_capacity(cols + 1);
+        ps_s.push(0.0);
+        ps_q.push(0.0);
+        ps_c.push(0);
+        for &v in data.iter() {
+            if v.is_finite() {
+                sum += v;
+                sumsq += v * v;
+                cnt += 1;
+            }
+            ps_s.push(sum);
+            ps_q.push(sumsq);
+            ps_c.push(cnt);
+        }
+        ps_sum = ps_s;
+        ps_sumsq = ps_q;
+        ps_cnt = ps_c;
+        ps_sum_ref = Some(&ps_sum);
+        ps_sumsq_ref = Some(&ps_sumsq);
+        ps_cnt_ref = Some(&ps_cnt);
+    } else {
+        ps_sum = Vec::new();
+        ps_sumsq = Vec::new();
+        ps_cnt = Vec::new();
+        ps_sum_ref = None;
+        ps_sumsq_ref = None;
+        ps_cnt_ref = None;
+    }
+
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let min_period = combos[row].min_period.unwrap();
         let max_period = combos[row].max_period.unwrap();
@@ -1308,10 +1464,24 @@ pub fn vlma_batch_inner_into(
         let devtype = combos[row].devtype.unwrap();
         match kern {
             Kernel::Scalar => {
-                vlma_row_scalar(
-                    data, min_period, max_period, matype, devtype, first, out_row,
-                )
-                .unwrap();
+                if matype == "sma" && devtype == 0 {
+                    vlma_row_fast_sma_std_prefix(
+                        data,
+                        min_period,
+                        max_period,
+                        first,
+                        ps_sum_ref.unwrap(),
+                        ps_sumsq_ref.unwrap(),
+                        ps_cnt_ref.unwrap(),
+                        out_row,
+                    )
+                    .unwrap();
+                } else {
+                    vlma_row_scalar(
+                        data, min_period, max_period, matype, devtype, first, out_row,
+                    )
+                    .unwrap();
+                }
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 => {

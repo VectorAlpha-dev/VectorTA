@@ -13,9 +13,9 @@
 //! - **values**: Vector of median absolute deviation values with NaN prefix during warmup period
 //!
 //! ## Developer Notes
-//! - **AVX2/AVX512 Kernels**: Stubs that call scalar implementation
-//! - **Streaming**: Implemented with O(n log n) update performance (sorts period-sized buffer)
-//! - **Zero-copy Memory**: Uses alloc_with_nan_prefix and make_uninit_matrix for batch operations
+//! - SIMD enabled: AVX2/AVX512 accelerate copy/NaN-scan and |x−median|; selection remains scalar. Gains are period-dependent (>5% for larger windows).
+//! - Streaming: simple O(p log p) update via sort for small p; matches batch outputs.
+//! - Zero-copy memory: uses `alloc_with_nan_prefix` and `make_uninit_matrix` for batch operations.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -211,7 +211,16 @@ pub fn medium_ad_with_kernel(
     let mut out = alloc_with_nan_prefix(len, first + period - 1);
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => {
+            // Prefer AVX512 when available; short-circuit AVX2 to scalar (underperforms on typical periods)
+            match detect_best_kernel() {
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 => Kernel::Avx512,
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 => Kernel::Scalar,
+                other => other,
+            }
+        }
         other => other,
     };
 
@@ -234,60 +243,313 @@ pub fn medium_ad_scalar(data: &[f64], period: usize, first_valid: usize, out: &m
     // alloc_with_nan_prefix already wrote NaNs up to warm = first_valid + period - 1
     use core::cmp::Ordering;
 
-    let mut buf = vec![0.0; period];
-    let mid = period / 2;
+    #[inline(always)]
+    fn fast_abs_f64(x: f64) -> f64 {
+        // Clear sign bit; safe because NaNs are excluded before use
+        f64::from_bits(x.to_bits() & 0x7FFF_FFFF_FFFF_FFFF)
+    }
 
-    // helper: total median from select_nth (handles even period)
     #[inline(always)]
     fn median_from(buf: &mut [f64], mid: usize) -> f64 {
-        // partition around mid
-        buf.select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+        // Comparator avoids Option path since NaNs are pre-excluded
+        buf.select_nth_unstable_by(mid, |a, b| {
+            if *a < *b {
+                Ordering::Less
+            } else if *a > *b {
+                Ordering::Greater
+            } else {
+                Ordering::Equal
+            }
+        });
         if (buf.len() & 1) == 1 {
-            buf[mid]
+            // odd length
+            unsafe { *buf.get_unchecked(mid) }
         } else {
-            // need the max of the lower partition
-            let lo_max = buf[..mid].iter().copied().fold(f64::NEG_INFINITY, f64::max);
-            0.5 * (lo_max + buf[mid])
+            // even length: average of max(lower half) and buf[mid]
+            let mut lo_max = f64::NEG_INFINITY;
+            let left = unsafe { core::slice::from_raw_parts(buf.as_ptr(), mid) };
+            for &v in left.iter() {
+                if v > lo_max {
+                    lo_max = v;
+                }
+            }
+            0.5 * (lo_max + unsafe { *buf.get_unchecked(mid) })
         }
     }
 
-    for i in (first_valid + period - 1)..data.len() {
-        let window = &data[i + 1 - period..=i];
+    let len = data.len();
+    if period == 1 {
+        let start = first_valid;
+        for i in start..len {
+            let v = unsafe { *data.get_unchecked(i) };
+            unsafe { *out.get_unchecked_mut(i) = if v.is_nan() { f64::NAN } else { 0.0 } };
+        }
+        return;
+    }
 
-        // Strict NaN policy: any NaN in window -> NaN out (unchanged from your logic)
-        if window.iter().any(|&v| v.is_nan()) {
-            out[i] = f64::NAN;
+    // Uninitialized scratch buffer (fully written before any read)
+    let mut buf: Vec<f64> = Vec::with_capacity(period);
+    unsafe { buf.set_len(period) };
+    let mid = period >> 1;
+    let warm = first_valid + period - 1;
+
+    for i in warm..len {
+        let start = i + 1 - period;
+
+        // Pass 1: copy window into scratch & detect NaN in a single jammed loop
+        let mut has_nan = false;
+        unsafe {
+            let dp = data.as_ptr().add(start);
+            let bp = buf.as_mut_ptr();
+            let mut k = 0usize;
+
+            // unroll by 4
+            while k + 4 <= period {
+                let a = *dp.add(k);
+                let b = *dp.add(k + 1);
+                let c = *dp.add(k + 2);
+                let d = *dp.add(k + 3);
+                *bp.add(k) = a;
+                *bp.add(k + 1) = b;
+                *bp.add(k + 2) = c;
+                *bp.add(k + 3) = d;
+                has_nan |= (a != a) | (b != b) | (c != c) | (d != d);
+                k += 4;
+            }
+            while k < period {
+                let v = *dp.add(k);
+                *bp.add(k) = v;
+                has_nan |= v != v;
+                k += 1;
+            }
+        }
+        if has_nan {
+            unsafe { *out.get_unchecked_mut(i) = f64::NAN };
             continue;
         }
 
-        // Copy window into scratch once
-        unsafe {
-            core::ptr::copy_nonoverlapping(window.as_ptr(), buf.as_mut_ptr(), period);
-        }
-
-        // Median of window
+        // Median of window (in-place partition)
         let med = median_from(&mut buf, mid);
 
-        // In-place absolute deviations, then median again -> MAD
-        for x in &mut buf {
-            *x = (*x - med).abs();
+        // Pass 2: transform to |x - med|, jammed & unrolled
+        unsafe {
+            let bp = buf.as_mut_ptr();
+            let mut k = 0usize;
+            while k + 4 <= period {
+                let a = *bp.add(k) - med;
+                let b = *bp.add(k + 1) - med;
+                let c = *bp.add(k + 2) - med;
+                let d = *bp.add(k + 3) - med;
+                *bp.add(k) = fast_abs_f64(a);
+                *bp.add(k + 1) = fast_abs_f64(b);
+                *bp.add(k + 2) = fast_abs_f64(c);
+                *bp.add(k + 3) = fast_abs_f64(d);
+                k += 4;
+            }
+            while k < period {
+                let t = *bp.add(k) - med;
+                *bp.add(k) = fast_abs_f64(t);
+                k += 1;
+            }
         }
-        let mad = median_from(&mut buf, mid);
 
-        out[i] = mad;
+        // Median of absolute deviations
+        let mad = median_from(&mut buf, mid);
+        unsafe { *out.get_unchecked_mut(i) = mad };
     }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn medium_ad_avx512(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-    unsafe { medium_ad_scalar(data, period, first_valid, out) }
+    use core::cmp::Ordering;
+    unsafe {
+        let len = data.len();
+        // Uninitialized scratch buffer (fully written before any read)
+        let mut buf: Vec<f64> = Vec::with_capacity(period);
+        unsafe { buf.set_len(period) };
+        let mid = period >> 1;
+        let sign_mask = _mm512_set1_pd(-0.0);
+
+        #[inline(always)]
+        fn median_from(buf: &mut [f64], mid: usize) -> f64 {
+            buf.select_nth_unstable_by(mid, |a, b| {
+                if *a < *b {
+                    Ordering::Less
+                } else if *a > *b {
+                    Ordering::Greater
+                } else {
+                    Ordering::Equal
+                }
+            });
+            if (buf.len() & 1) == 1 {
+                unsafe { *buf.get_unchecked(mid) }
+            } else {
+                let mut lo_max = f64::NEG_INFINITY;
+                for &v in (&buf[..mid]).iter() {
+                    if v > lo_max {
+                        lo_max = v;
+                    }
+                }
+                0.5 * (lo_max + unsafe { *buf.get_unchecked(mid) })
+            }
+        }
+
+        let warm = first_valid + period - 1;
+        for i in warm..len {
+            let start = i + 1 - period;
+
+            // SIMD copy + NaN detection (512-bit chunks of 8)
+            let mut has_nan = false;
+            let mut k = 0usize;
+            while k + 8 <= period {
+                let v = _mm512_loadu_pd(data.as_ptr().add(start + k));
+                _mm512_storeu_pd(buf.as_mut_ptr().add(k), v);
+                let m = _mm512_cmp_pd_mask(v, v, 0x03);
+                if m != 0 {
+                    has_nan = true;
+                }
+                k += 8;
+            }
+            // tail: AVX2 (4) then scalar
+            while k + 4 <= period {
+                let v = _mm256_loadu_pd(data.as_ptr().add(start + k));
+                _mm256_storeu_pd(buf.as_mut_ptr().add(k), v);
+                let nan_mask = _mm256_cmp_pd(v, v, 0x03);
+                if _mm256_movemask_pd(nan_mask) != 0 {
+                    has_nan = true;
+                }
+                k += 4;
+            }
+            while k < period {
+                let val = *data.get_unchecked(start + k);
+                *buf.get_unchecked_mut(k) = val;
+                has_nan |= val != val;
+                k += 1;
+            }
+            if has_nan {
+                *out.get_unchecked_mut(i) = f64::NAN;
+                continue;
+            }
+
+            let med = median_from(&mut buf, mid);
+
+            // SIMD |x - med|
+            let mv = _mm512_set1_pd(med);
+            let mut k = 0usize;
+            while k + 8 <= period {
+                let x = _mm512_loadu_pd(buf.as_ptr().add(k));
+                let d = _mm512_sub_pd(x, mv);
+                let ad = _mm512_andnot_pd(sign_mask, d);
+                _mm512_storeu_pd(buf.as_mut_ptr().add(k), ad);
+                k += 8;
+            }
+            while k + 4 <= period {
+                let x = _mm256_loadu_pd(buf.as_ptr().add(k));
+                let mv4 = _mm256_set1_pd(med);
+                let sign4 = _mm256_set1_pd(-0.0);
+                let d = _mm256_sub_pd(x, mv4);
+                let ad = _mm256_andnot_pd(sign4, d);
+                _mm256_storeu_pd(buf.as_mut_ptr().add(k), ad);
+                k += 4;
+            }
+            while k < period {
+                let t = *buf.get_unchecked(k) - med;
+                *buf.get_unchecked_mut(k) = f64::from_bits(t.to_bits() & 0x7FFF_FFFF_FFFF_FFFF);
+                k += 1;
+            }
+
+            *out.get_unchecked_mut(i) = median_from(&mut buf, mid);
+        }
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn medium_ad_avx2(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-    unsafe { medium_ad_scalar(data, period, first_valid, out) }
+    use core::cmp::Ordering;
+    unsafe {
+        let len = data.len();
+        // Uninitialized scratch buffer (fully written before any read)
+        let mut buf: Vec<f64> = Vec::with_capacity(period);
+        unsafe { buf.set_len(period) };
+        let mid = period >> 1;
+        let sign_mask = _mm256_set1_pd(-0.0); // for abs: andnot(sign_mask, x)
+
+        #[inline(always)]
+        fn median_from(buf: &mut [f64], mid: usize) -> f64 {
+            buf.select_nth_unstable_by(mid, |a, b| {
+                if *a < *b {
+                    Ordering::Less
+                } else if *a > *b {
+                    Ordering::Greater
+                } else {
+                    Ordering::Equal
+                }
+            });
+            if (buf.len() & 1) == 1 {
+                unsafe { *buf.get_unchecked(mid) }
+            } else {
+                let mut lo_max = f64::NEG_INFINITY;
+                for &v in (&buf[..mid]).iter() {
+                    if v > lo_max {
+                        lo_max = v;
+                    }
+                }
+                0.5 * (lo_max + unsafe { *buf.get_unchecked(mid) })
+            }
+        }
+
+        let warm = first_valid + period - 1;
+        for i in warm..len {
+            let start = i + 1 - period;
+
+            // SIMD copy + NaN detection
+            let mut has_nan = false;
+            let mut k = 0usize;
+            while k + 4 <= period {
+                let v = _mm256_loadu_pd(data.as_ptr().add(start + k));
+                _mm256_storeu_pd(buf.as_mut_ptr().add(k), v);
+                // unordered compare (x != x) → NaN
+                let nan_mask = _mm256_cmp_pd(v, v, 0x03);
+                if _mm256_movemask_pd(nan_mask) != 0 {
+                    has_nan = true;
+                }
+                k += 4;
+            }
+            while k < period {
+                let val = *data.get_unchecked(start + k);
+                *buf.get_unchecked_mut(k) = val;
+                has_nan |= val != val;
+                k += 1;
+            }
+            if has_nan {
+                *out.get_unchecked_mut(i) = f64::NAN;
+                continue;
+            }
+
+            // median (scalar quickselect)
+            let med = median_from(&mut buf, mid);
+
+            // SIMD |x - med|
+            let mv = _mm256_set1_pd(med);
+            let mut k = 0usize;
+            while k + 4 <= period {
+                let x = _mm256_loadu_pd(buf.as_ptr().add(k));
+                let d = _mm256_sub_pd(x, mv);
+                let ad = _mm256_andnot_pd(sign_mask, d);
+                _mm256_storeu_pd(buf.as_mut_ptr().add(k), ad);
+                k += 4;
+            }
+            while k < period {
+                let t = *buf.get_unchecked(k) - med;
+                *buf.get_unchecked_mut(k) = f64::from_bits(t.to_bits() & 0x7FFF_FFFF_FFFF_FFFF);
+                k += 1;
+            }
+
+            *out.get_unchecked_mut(i) = median_from(&mut buf, mid);
+        }
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -309,7 +571,14 @@ pub fn medium_ad_batch_with_kernel(
     k: Kernel,
 ) -> Result<MediumAdBatchOutput, MediumAdError> {
     let kernel = match k {
-        Kernel::Auto => detect_best_batch_kernel(),
+        Kernel::Auto => {
+            // Prefer AVX512Batch; short-circuit AVX2Batch to ScalarBatch (underperforms on typical periods)
+            match detect_best_batch_kernel() {
+                Kernel::Avx512Batch => Kernel::Avx512Batch,
+                Kernel::Avx2Batch => Kernel::ScalarBatch,
+                other => other,
+            }
+        }
         other if other.is_batch() => other,
         _ => {
             return Err(MediumAdError::InvalidPeriod {
@@ -630,39 +899,113 @@ fn medium_ad_batch_inner_into(
 #[inline(always)]
 unsafe fn medium_ad_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
     use core::cmp::Ordering;
-    let mut buf = vec![0.0; period];
-    let mid = period / 2;
 
     #[inline(always)]
+    fn fast_abs_f64(x: f64) -> f64 {
+        f64::from_bits(x.to_bits() & 0x7FFF_FFFF_FFFF_FFFF)
+    }
+    #[inline(always)]
     fn median_from(buf: &mut [f64], mid: usize) -> f64 {
-        buf.select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+        buf.select_nth_unstable_by(mid, |a, b| {
+            if *a < *b {
+                Ordering::Less
+            } else if *a > *b {
+                Ordering::Greater
+            } else {
+                Ordering::Equal
+            }
+        });
         if (buf.len() & 1) == 1 {
-            buf[mid]
+            unsafe { *buf.get_unchecked(mid) }
         } else {
-            let lo_max = buf[..mid].iter().copied().fold(f64::NEG_INFINITY, f64::max);
-            0.5 * (lo_max + buf[mid])
+            let mut lo_max = f64::NEG_INFINITY;
+            let left = unsafe { core::slice::from_raw_parts(buf.as_ptr(), mid) };
+            for &v in left.iter() {
+                if v > lo_max {
+                    lo_max = v;
+                }
+            }
+            0.5 * (lo_max + unsafe { *buf.get_unchecked(mid) })
         }
     }
 
-    for i in (first + period - 1)..data.len() {
-        let window = &data[i + 1 - period..=i];
-        if window.iter().any(|&v| v.is_nan()) {
-            out[i] = f64::NAN;
+    if period == 1 {
+        let warm = first;
+        for i in warm..data.len() {
+            let v = *data.get_unchecked(i);
+            *out.get_unchecked_mut(i) = if v.is_nan() { f64::NAN } else { 0.0 };
+        }
+        return;
+    }
+
+    // Uninitialized scratch buffer (fully written before any read)
+    let mut buf: Vec<f64> = Vec::with_capacity(period);
+    unsafe { buf.set_len(period) };
+    let mid = period >> 1;
+    let warm = first + period - 1;
+
+    for i in warm..data.len() {
+        let start = i + 1 - period;
+
+        // copy+NaN scan (jammed, unrolled)
+        let mut has_nan = false;
+        let dp = data.as_ptr().add(start);
+        let bp = buf.as_mut_ptr();
+        let mut k = 0usize;
+        while k + 4 <= period {
+            let a = *dp.add(k);
+            let b = *dp.add(k + 1);
+            let c = *dp.add(k + 2);
+            let d = *dp.add(k + 3);
+            *bp.add(k) = a;
+            *bp.add(k + 1) = b;
+            *bp.add(k + 2) = c;
+            *bp.add(k + 3) = d;
+            has_nan |= (a != a) | (b != b) | (c != c) | (d != d);
+            k += 4;
+        }
+        while k < period {
+            let v = *dp.add(k);
+            *bp.add(k) = v;
+            has_nan |= v != v;
+            k += 1;
+        }
+        if has_nan {
+            *out.get_unchecked_mut(i) = f64::NAN;
             continue;
         }
-        core::ptr::copy_nonoverlapping(window.as_ptr(), buf.as_mut_ptr(), period);
+
         let med = median_from(&mut buf, mid);
-        for x in &mut buf {
-            *x = (*x - med).abs();
+
+        // in-place |x - med|
+        let bp = buf.as_mut_ptr();
+        let mut k = 0usize;
+        while k + 4 <= period {
+            let a = *bp.add(k) - med;
+            let b = *bp.add(k + 1) - med;
+            let c = *bp.add(k + 2) - med;
+            let d = *bp.add(k + 3) - med;
+            *bp.add(k) = fast_abs_f64(a);
+            *bp.add(k + 1) = fast_abs_f64(b);
+            *bp.add(k + 2) = fast_abs_f64(c);
+            *bp.add(k + 3) = fast_abs_f64(d);
+            k += 4;
         }
-        out[i] = median_from(&mut buf, mid);
+        while k < period {
+            let t = *bp.add(k) - med;
+            *bp.add(k) = fast_abs_f64(t);
+            k += 1;
+        }
+
+        *out.get_unchecked_mut(i) = median_from(&mut buf, mid);
     }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn medium_ad_row_avx2(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-    medium_ad_row_scalar(data, first, period, out)
+    // Reuse per-slice AVX2 path
+    medium_ad_avx2(data, period, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -678,13 +1021,13 @@ unsafe fn medium_ad_row_avx512(data: &[f64], first: usize, period: usize, out: &
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn medium_ad_row_avx512_short(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-    medium_ad_row_scalar(data, first, period, out)
+    medium_ad_avx512(data, period, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn medium_ad_row_avx512_long(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-    medium_ad_row_scalar(data, first, period, out)
+    medium_ad_avx512(data, period, first, out)
 }
 
 #[derive(Debug, Clone)]

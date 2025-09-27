@@ -16,7 +16,15 @@
 //! - **values**: RVI oscillator values as `Vec<f64>` (length matches input, range 0-100)
 //!
 //! ## Developer Notes
-//! - **AVX2/AVX512 kernels**: Currently stubs that call scalar implementation
+//! - **AVX2/AVX512 kernels**: Currently stubs that call scalar implementation.
+//!   Decision: SIMD disabled for now — hot path is branchy (NaN-aware rolling
+//!   stddev/MAD/MEDAD + SMA/EMA smoothing), and initial attempts do not show
+//!   clear wins over the optimized scalar path. Runtime selection short-circuits
+//!   to scalar via stubs; revisit with stddev-only SIMD specialization if profiling
+//!   shows consistent >5% gains.
+//! - **Row-specific batch**: Not attempted; differing periods and NaN-aware windows
+//!   limit cross-row reuse. Batch uses scalar per row via selector; treat batch
+//!   benches as advisory.
 //! - **Streaming update**: Not implemented - always returns None (needs complex state tracking)
 //! - **Memory optimization**: Properly uses zero-copy helper functions (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
 //! - **TODO**: Implement actual SIMD kernels for AVX2/AVX512
@@ -410,6 +418,9 @@ pub fn rvi_scalar(
     let warmup = first + period.saturating_sub(1) + ma_len.saturating_sub(1);
 
     // -------- rolling deviation state --------
+    // Hoist invariants used in hot loops
+    let inv_p = 1.0f64 / period as f64;
+    let inv_m = 1.0f64 / ma_len as f64;
     // StdDev uses running sum + sumsq. MAD/MEDAD use ring buffers reused across all steps.
     let mut sum = 0.0f64;
     let mut sumsq = 0.0f64;
@@ -420,11 +431,7 @@ pub fn rvi_scalar(
     let mut r_filled = false;
 
     // Scratch reused for median step
-    let mut scratch = if devtype == 2 {
-        vec![0.0f64; period]
-    } else {
-        Vec::new()
-    };
+    let mut scratch = if devtype == 2 { vec![0.0f64; period] } else { Vec::new() };
 
     // -------- smoothing state for up/down --------
     // SMA: ring + running sums; EMA: α + prev states with ALMA's "seed = SMA(period)" rule
@@ -448,11 +455,8 @@ pub fn rvi_scalar(
     let mut dn_cnt = 0usize;
 
     // EMA state
-    let alpha = if !use_sma {
-        2.0 / (ma_len as f64 + 1.0)
-    } else {
-        0.0
-    };
+    let alpha = if !use_sma { 2.0 / (ma_len as f64 + 1.0) } else { 0.0 };
+    let one_m_alpha = 1.0 - alpha;
     let mut up_prev = 0.0f64;
     let mut dn_prev = 0.0f64;
     let mut up_started = false;
@@ -484,6 +488,161 @@ pub fn rvi_scalar(
         }
     }
 
+    // Loop-jammed fast path for StdDev (devtype == 0)
+    if devtype == 0 {
+        // Previous value for diff
+        let mut prev = data[0];
+        if use_sma {
+            // SMA smoothing
+            for i in 0..n {
+                let x = data[i];
+                let d = if i == 0 || x.is_nan() || prev.is_nan() { f64::NAN } else { x - prev };
+                prev = x;
+
+                let dev = if i + 1 < period {
+                    f64::NAN
+                } else if i == period - 1 {
+                    if sum.is_nan() { f64::NAN } else {
+                        let mean = sum * inv_p;
+                        let mean_sq = sumsq * inv_p;
+                        (mean_sq - mean * mean).sqrt()
+                    }
+                } else {
+                    let leaving = data[i - period];
+                    if leaving.is_nan() || x.is_nan() || sum.is_nan() || sumsq.is_nan() {
+                        // rebuild window from scratch (handle NaNs)
+                        sum = 0.0; sumsq = 0.0;
+                        let start = i + 1 - period;
+                        let mut bad = false;
+                        for k in start..=i {
+                            let v = data[k];
+                            if v.is_nan() { bad = true; break; }
+                            sum += v;
+                            sumsq += v * v;
+                        }
+                        if bad { sum = f64::NAN; sumsq = f64::NAN; f64::NAN } else {
+                            let mean = sum * inv_p;
+                            let mean_sq = sumsq * inv_p;
+                            (mean_sq - mean * mean).sqrt()
+                        }
+                    } else {
+                        sum += x - leaving;
+                        sumsq += x * x - leaving * leaving;
+                        let mean = sum * inv_p;
+                        let mean_sq = sumsq * inv_p;
+                        (mean_sq - mean * mean).sqrt()
+                    }
+                };
+
+                let (up_i, dn_i) = if d.is_nan() || dev.is_nan() {
+                    (f64::NAN, f64::NAN)
+                } else if d > 0.0 {
+                    (dev, 0.0)
+                } else if d < 0.0 {
+                    (0.0, dev)
+                } else {
+                    (0.0, 0.0)
+                };
+
+                // SMA rings
+                let up_s = if up_i.is_nan() {
+                    up_sum = 0.0; up_cnt = 0; up_h = 0; f64::NAN
+                } else if up_cnt < ma_len {
+                    unsafe { *up_ring.get_unchecked_mut(up_h) = up_i; }
+                    up_sum += up_i; up_h = (up_h + 1) % ma_len; up_cnt += 1;
+                    if up_cnt == ma_len { up_sum * inv_m } else { f64::NAN }
+                } else {
+                    let old = unsafe { *up_ring.get_unchecked(up_h) };
+                    unsafe { *up_ring.get_unchecked_mut(up_h) = up_i; }
+                    up_h = (up_h + 1) % ma_len; up_sum += up_i - old; up_sum * inv_m
+                };
+
+                let dn_s = if dn_i.is_nan() {
+                    dn_sum = 0.0; dn_cnt = 0; dn_h = 0; f64::NAN
+                } else if dn_cnt < ma_len {
+                    unsafe { *dn_ring.get_unchecked_mut(dn_h) = dn_i; }
+                    dn_sum += dn_i; dn_h = (dn_h + 1) % ma_len; dn_cnt += 1;
+                    if dn_cnt == ma_len { dn_sum * inv_m } else { f64::NAN }
+                } else {
+                    let old = unsafe { *dn_ring.get_unchecked(dn_h) };
+                    unsafe { *dn_ring.get_unchecked_mut(dn_h) = dn_i; }
+                    dn_h = (dn_h + 1) % ma_len; dn_sum += dn_i - old; dn_sum * inv_m
+                };
+
+                if i >= warmup {
+                    if up_s.is_nan() || dn_s.is_nan() {
+                        out[i] = f64::NAN;
+                    } else {
+                        let denom = up_s + dn_s;
+                        out[i] = if denom.abs() < f64::EPSILON { f64::NAN } else { 100.0 * (up_s / denom) };
+                    }
+                }
+            }
+        } else {
+            // EMA smoothing (with SMA seed)
+            for i in 0..n {
+                let x = data[i];
+                let d = if i == 0 || x.is_nan() || prev.is_nan() { f64::NAN } else { x - prev };
+                prev = x;
+
+                let dev = if i + 1 < period {
+                    f64::NAN
+                } else if i == period - 1 {
+                    if sum.is_nan() { f64::NAN } else {
+                        let mean = sum * inv_p;
+                        let mean_sq = sumsq * inv_p;
+                        (mean_sq - mean * mean).sqrt()
+                    }
+                } else {
+                    let leaving = data[i - period];
+                    if leaving.is_nan() || x.is_nan() || sum.is_nan() || sumsq.is_nan() {
+                        sum = 0.0; sumsq = 0.0; let start = i + 1 - period; let mut bad = false;
+                        for k in start..=i {
+                            let v = data[k]; if v.is_nan() { bad = true; break; }
+                            sum += v; sumsq += v * v;
+                        }
+                        if bad { sum = f64::NAN; sumsq = f64::NAN; f64::NAN } else {
+                            let mean = sum * inv_p; let mean_sq = sumsq * inv_p; (mean_sq - mean * mean).sqrt()
+                        }
+                    } else {
+                        sum += x - leaving; sumsq += x * x - leaving * leaving;
+                        let mean = sum * inv_p; let mean_sq = sumsq * inv_p; (mean_sq - mean * mean).sqrt()
+                    }
+                };
+
+                let (up_i, dn_i) = if d.is_nan() || dev.is_nan() {
+                    (f64::NAN, f64::NAN)
+                } else if d > 0.0 { (dev, 0.0) } else if d < 0.0 { (0.0, dev) } else { (0.0, 0.0) };
+
+                let up_s = if up_i.is_nan() {
+                    up_started = false; up_seed_sum = 0.0; up_seed_cnt = 0; f64::NAN
+                } else if !up_started {
+                    up_seed_sum += up_i; up_seed_cnt += 1; if up_seed_cnt == ma_len { up_prev = up_seed_sum * inv_m; up_started = true; up_prev } else { f64::NAN }
+                } else {
+                    up_prev = alpha.mul_add(up_i, one_m_alpha * up_prev); up_prev
+                };
+
+                let dn_s = if dn_i.is_nan() {
+                    dn_started = false; dn_seed_sum = 0.0; dn_seed_cnt = 0; f64::NAN
+                } else if !dn_started {
+                    dn_seed_sum += dn_i; dn_seed_cnt += 1; if dn_seed_cnt == ma_len { dn_prev = dn_seed_sum * inv_m; dn_started = true; dn_prev } else { f64::NAN }
+                } else {
+                    dn_prev = alpha.mul_add(dn_i, one_m_alpha * dn_prev); dn_prev
+                };
+
+                if i >= warmup {
+                    if up_s.is_nan() || dn_s.is_nan() {
+                        out[i] = f64::NAN;
+                    } else {
+                        let denom = up_s + dn_s;
+                        out[i] = if denom.abs() < f64::EPSILON { f64::NAN } else { 100.0 * (up_s / denom) };
+                    }
+                }
+            }
+        }
+        return;
+    }
+
     for i in 0..n {
         let x = data[i];
 
@@ -506,8 +665,8 @@ pub fn rvi_scalar(
                         if sum.is_nan() {
                             f64::NAN
                         } else {
-                            let mean = sum / period as f64;
-                            let mean_sq = sumsq / period as f64;
+                            let mean = sum * inv_p;
+                            let mean_sq = sumsq * inv_p;
                             (mean_sq - mean * mean).sqrt()
                         }
                     } else {
@@ -533,15 +692,15 @@ pub fn rvi_scalar(
                                 sumsq = f64::NAN;
                                 f64::NAN
                             } else {
-                                let mean = sum / period as f64;
-                                let mean_sq = sumsq / period as f64;
+                                let mean = sum * inv_p;
+                                let mean_sq = sumsq * inv_p;
                                 (mean_sq - mean * mean).sqrt()
                             }
                         } else {
                             sum += incoming - leaving;
                             sumsq += incoming * incoming - leaving * leaving;
-                            let mean = sum / period as f64;
-                            let mean_sq = sumsq / period as f64;
+                            let mean = sum * inv_p;
+                            let mean_sq = sumsq * inv_p;
                             (mean_sq - mean * mean).sqrt()
                         }
                     }
@@ -562,15 +721,19 @@ pub fn rvi_scalar(
                         } else {
                             // compute mean/median over the filled ring [0..period] and return MAD
                             let mut s = 0.0;
-                            for k in 0..period {
-                                s += ring[k];
+                            unsafe {
+                                for k in 0..period {
+                                    s += *ring.get_unchecked(k);
+                                }
                             }
-                            let mean = s / period as f64;
+                            let mean = s * inv_p;
                             let mut abs_sum = 0.0;
-                            for k in 0..period {
-                                abs_sum += (ring[k] - mean).abs();
+                            unsafe {
+                                for k in 0..period {
+                                    abs_sum += (*ring.get_unchecked(k) - mean).abs();
+                                }
                             }
-                            abs_sum / period as f64
+                            abs_sum * inv_p
                         }
                     } else {
                         let leaving = data[i - period];
@@ -583,20 +746,24 @@ pub fn rvi_scalar(
                             f64::NAN
                         } else {
                             // slide
-                            ring[r_head] = incoming;
+                            unsafe { *ring.get_unchecked_mut(r_head) = incoming; }
                             r_head = (r_head + 1) % period;
                             r_filled = true;
                             // compute mean + MAD
                             let mut s = 0.0;
-                            for k in 0..period {
-                                s += ring[k];
+                            unsafe {
+                                for k in 0..period {
+                                    s += *ring.get_unchecked(k);
+                                }
                             }
-                            let mean = s / period as f64;
+                            let mean = s * inv_p;
                             let mut abs_sum = 0.0;
-                            for k in 0..period {
-                                abs_sum += (ring[k] - mean).abs();
+                            unsafe {
+                                for k in 0..period {
+                                    abs_sum += (*ring.get_unchecked(k) - mean).abs();
+                                }
                             }
-                            abs_sum / period as f64
+                            abs_sum * inv_p
                         }
                     }
                 }
@@ -615,8 +782,10 @@ pub fn rvi_scalar(
                             f64::NAN
                         } else {
                             // compute median over the filled ring [0..period] and return MEDAD
-                            for k in 0..period {
-                                scratch[k] = ring[k];
+                            unsafe {
+                                for k in 0..period {
+                                    *scratch.get_unchecked_mut(k) = *ring.get_unchecked(k);
+                                }
                             }
                             scratch.sort_by(|a, b| {
                                 a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
@@ -627,10 +796,12 @@ pub fn rvi_scalar(
                                 (scratch[period / 2 - 1] + scratch[period / 2]) * 0.5
                             };
                             let mut abs_sum = 0.0;
-                            for k in 0..period {
-                                abs_sum += (ring[k] - median).abs();
+                            unsafe {
+                                for k in 0..period {
+                                    abs_sum += (*ring.get_unchecked(k) - median).abs();
+                                }
                             }
-                            abs_sum / period as f64
+                            abs_sum * inv_p
                         }
                     } else {
                         let leaving = data[i - period];
@@ -641,13 +812,16 @@ pub fn rvi_scalar(
                             }
                             f64::NAN
                         } else {
-                            ring[r_head] = incoming;
+                            unsafe { *ring.get_unchecked_mut(r_head) = incoming; }
                             r_head = (r_head + 1) % period;
                             r_filled = true;
 
                             // copy into scratch in window order
-                            for k in 0..period {
-                                scratch[k] = ring[(r_head + k) % period];
+                            unsafe {
+                                for k in 0..period {
+                                    *scratch.get_unchecked_mut(k) =
+                                        *ring.get_unchecked((r_head + k) % period);
+                                }
                             }
                             scratch.sort_by(|a, b| {
                                 a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
@@ -659,10 +833,13 @@ pub fn rvi_scalar(
                             };
                             let mut abs_sum = 0.0;
                             // Calculate deviations from original ring values, not sorted scratch
-                            for k in 0..period {
-                                abs_sum += (ring[(r_head + k) % period] - median).abs();
+                            unsafe {
+                                for k in 0..period {
+                                    abs_sum += (*ring.get_unchecked((r_head + k) % period) - median)
+                                        .abs();
+                                }
                             }
-                            abs_sum / period as f64
+                            abs_sum * inv_p
                         }
                     }
                 }
@@ -691,21 +868,21 @@ pub fn rvi_scalar(
                 f64::NAN
             } else {
                 if up_cnt < ma_len {
-                    up_ring[up_h] = up_i;
+                    unsafe { *up_ring.get_unchecked_mut(up_h) = up_i; }
                     up_sum += up_i;
                     up_h = (up_h + 1) % ma_len;
                     up_cnt += 1;
                     if up_cnt == ma_len {
-                        up_sum / ma_len as f64
+                        up_sum * inv_m
                     } else {
                         f64::NAN
                     }
                 } else {
-                    let old = up_ring[up_h];
-                    up_ring[up_h] = up_i;
+                    let old = unsafe { *up_ring.get_unchecked(up_h) };
+                    unsafe { *up_ring.get_unchecked_mut(up_h) = up_i; }
                     up_h = (up_h + 1) % ma_len;
                     up_sum += up_i - old;
-                    up_sum / ma_len as f64
+                    up_sum * inv_m
                 }
             };
             // SMA down
@@ -716,21 +893,21 @@ pub fn rvi_scalar(
                 f64::NAN
             } else {
                 if dn_cnt < ma_len {
-                    dn_ring[dn_h] = dn_i;
+                    unsafe { *dn_ring.get_unchecked_mut(dn_h) = dn_i; }
                     dn_sum += dn_i;
                     dn_h = (dn_h + 1) % ma_len;
                     dn_cnt += 1;
                     if dn_cnt == ma_len {
-                        dn_sum / ma_len as f64
+                        dn_sum * inv_m
                     } else {
                         f64::NAN
                     }
                 } else {
-                    let old = dn_ring[dn_h];
-                    dn_ring[dn_h] = dn_i;
+                    let old = unsafe { *dn_ring.get_unchecked(dn_h) };
+                    unsafe { *dn_ring.get_unchecked_mut(dn_h) = dn_i; }
                     dn_h = (dn_h + 1) % ma_len;
                     dn_sum += dn_i - old;
-                    dn_sum / ma_len as f64
+                    dn_sum * inv_m
                 }
             };
             (up_smooth, dn_smooth)
@@ -745,14 +922,14 @@ pub fn rvi_scalar(
                 up_seed_sum += up_i;
                 up_seed_cnt += 1;
                 if up_seed_cnt == ma_len {
-                    up_prev = up_seed_sum / ma_len as f64;
+                    up_prev = up_seed_sum * inv_m;
                     up_started = true;
                     up_prev
                 } else {
                     f64::NAN
                 }
             } else {
-                up_prev = alpha * up_i + (1.0 - alpha) * up_prev;
+                up_prev = alpha.mul_add(up_i, one_m_alpha * up_prev);
                 up_prev
             };
             let dn_smooth = if dn_i.is_nan() {
@@ -764,14 +941,14 @@ pub fn rvi_scalar(
                 dn_seed_sum += dn_i;
                 dn_seed_cnt += 1;
                 if dn_seed_cnt == ma_len {
-                    dn_prev = dn_seed_sum / ma_len as f64;
+                    dn_prev = dn_seed_sum * inv_m;
                     dn_started = true;
                     dn_prev
                 } else {
                     f64::NAN
                 }
             } else {
-                dn_prev = alpha * dn_i + (1.0 - alpha) * dn_prev;
+                dn_prev = alpha.mul_add(dn_i, one_m_alpha * dn_prev);
                 dn_prev
             };
             (up_smooth, dn_smooth)
