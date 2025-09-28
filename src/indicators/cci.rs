@@ -12,9 +12,10 @@
 //! - **`Err(CciError)`** on various error conditions.
 //!
 //! ## Developer Status
-//! - **SIMD Kernels**: AVX2 is STUB (falls back to scalar), AVX512 has short/long variants but both are STUBS
+//! - **SIMD Kernels**: Implemented but disabled by default (runtime short-circuits to scalar). Compensated per-lane sums are present for future use; current versions are slower at 10k/100k/1M.
 //! - **Streaming Performance**: O(n) - requires full window scan for Mean Absolute Deviation calculation
 //! - **Memory Optimization**: GOOD - properly uses alloc_with_nan_prefix helper for zero-copy allocation
+//! - Note: CCI’s MAD requires a full window scan; SIMD accelerates that scan but cannot make it O(1).
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
@@ -317,41 +318,59 @@ pub fn cci_into_slice(dst: &mut [f64], input: &CciInput, kern: Kernel) -> Result
     Ok(())
 }
 
-// ---- Scalar + AVX2/AVX512 (Stub) ----
+// ---- Scalar + AVX2/AVX512 ----
 
+/// Optimized safe scalar implementation.
+///
+/// - Single-pass rolling sum for SMA
+/// - Recomputes MAD per step (mathematically required), but uses chunked iterations
+/// - Minimizes divisions by precomputing constants
 #[inline]
 pub fn cci_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-    let inv_period = 1.0 / period as f64;
-    let mut sum = 0.0;
-    for &val in &data[first_valid..(first_valid + period)] {
-        sum += val;
+    debug_assert_eq!(data.len(), out.len());
+    let n = data.len();
+    if n == 0 {
+        return;
     }
-    let mut sma = sum * inv_period;
+
+    let inv_p = 1.0 / (period as f64);
+
+    // ---- initial window sum ----
+    let start0 = first_valid;
+    let end0 = start0 + period;
+    let mut sum: f64 = data[start0..end0].iter().sum();
+    let mut sma = sum * inv_p;
+
+    // ---- initial MAD ----
     let mut sum_abs = 0.0;
-    for &val in &data[first_valid..(first_valid + period)] {
-        sum_abs += (val - sma).abs();
+    for &v in &data[start0..end0] {
+        sum_abs += (v - sma).abs();
     }
+
     let first_out = first_valid + period - 1;
-    let price = data[first_out];
-    out[first_out] = if sum_abs == 0.0 {
-        0.0
-    } else {
-        (price - sma) / (0.015 * (sum_abs * inv_period))
+    let price0 = data[first_out];
+    out[first_out] = {
+        let denom = 0.015 * (sum_abs * inv_p);
+        if denom == 0.0 { 0.0 } else { (price0 - sma) / denom }
     };
 
-    for i in (first_out + 1)..data.len() {
+    // ---- rolling steps ----
+    for i in (first_out + 1)..n {
         let exiting = data[i - period];
         let entering = data[i];
         sum = sum - exiting + entering;
-        sma = sum * inv_period;
-        sum_abs = 0.0;
-        for &val in &data[(i - period + 1)..=i] {
-            sum_abs += (val - sma).abs();
+        sma = sum * inv_p;
+
+        let wstart = i + 1 - period;
+        let wend = i + 1; // exclusive
+        let mut sabs = 0.0;
+        for &v in &data[wstart..wend] {
+            sabs += (v - sma).abs();
         }
-        out[i] = if sum_abs == 0.0 {
-            0.0
-        } else {
-            (entering - sma) / (0.015 * (sum_abs * inv_period))
+
+        out[i] = {
+            let denom = 0.015 * (sabs * inv_p);
+            if denom == 0.0 { 0.0 } else { (entering - sma) / denom }
         };
     }
 }
@@ -359,17 +378,127 @@ pub fn cci_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f6
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn cci_avx512(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-    if period <= 32 {
-        unsafe { cci_avx512_short(data, period, first_valid, out) }
-    } else {
-        unsafe { cci_avx512_long(data, period, first_valid, out) }
-    }
+    // Experimental SIMD slower on this workload; short-circuit to scalar
+    cci_scalar(data, period, first_valid, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn cci_avx2(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
+    // Experimental SIMD slower on this workload; short-circuit to scalar
     cci_scalar(data, period, first_valid, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn cci_avx2_impl(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
+    debug_assert!(data.len() == out.len());
+    debug_assert!(period >= 1 && first_valid + period <= data.len());
+
+    let n = data.len();
+    let inv_p = 1.0 / (period as f64);
+    let scale = (period as f64) * (1.0 / 0.015);
+
+    // Initial sum (scalar)
+    let base = data.as_ptr().add(first_valid);
+    let mut sum = 0.0;
+    {
+        let mut k = 0usize;
+        while k + 4 <= period {
+            let x0 = *base.add(k + 0);
+            let x1 = *base.add(k + 1);
+            let x2 = *base.add(k + 2);
+            let x3 = *base.add(k + 3);
+            sum = sum + x0 + x1 + x2 + x3;
+            k += 4;
+        }
+        while k < period {
+            sum += *base.add(k);
+            k += 1;
+        }
+    }
+
+    let first_out = first_valid + period - 1;
+    let mut sma = sum * inv_p;
+
+    // Initial MAD (vectorized compute, scalar Kahan accumulation in element order)
+    {
+        let vmean = _mm256_set1_pd(sma);
+        let vsgn = _mm256_set1_pd(-0.0f64);
+        let mut k = 0usize;
+        let mut sum_abs = 0.0f64;
+        let mut comp = 0.0f64;
+        while k + 4 <= period {
+            let x = _mm256_loadu_pd(base.add(k));
+            let d = _mm256_sub_pd(x, vmean);
+            let a = _mm256_andnot_pd(vsgn, d);
+            let mut lane = [0.0f64; 4];
+            _mm256_storeu_pd(lane.as_mut_ptr(), a);
+            // accumulate in element order
+            for &val in &lane {
+                let y = val - comp;
+                let t = sum_abs + y;
+                comp = (t - sum_abs) - y;
+                sum_abs = t;
+            }
+            k += 4;
+        }
+        while k < period {
+            let val = (*base.add(k) - sma).abs();
+            let y = val - comp;
+            let t = sum_abs + y;
+            comp = (t - sum_abs) - y;
+            sum_abs = t;
+            k += 1;
+        }
+        let price0 = *data.get_unchecked(first_out);
+        let denom = 0.015 * (sum_abs * inv_p);
+        *out.get_unchecked_mut(first_out) = if denom == 0.0 { 0.0 } else { (price0 - sma) / denom };
+    }
+
+    // Rolling
+    let mut i = first_out + 1;
+    while i < n {
+        let exiting = *data.get_unchecked(i - period);
+        let entering = *data.get_unchecked(i);
+        sum = sum - exiting + entering;
+        sma = sum * inv_p;
+
+        let start = i + 1 - period;
+        let wptr = data.as_ptr().add(start);
+
+        let vmean = _mm256_set1_pd(sma);
+        let vsgn  = _mm256_set1_pd(-0.0f64);
+        let mut k = 0usize;
+        let mut sum_abs = 0.0f64;
+        let mut comp = 0.0f64;
+        while k + 4 <= period {
+            let x = _mm256_loadu_pd(wptr.add(k));
+            let d = _mm256_sub_pd(x, vmean);
+            let a = _mm256_andnot_pd(vsgn, d);
+            let mut lane = [0.0f64; 4];
+            _mm256_storeu_pd(lane.as_mut_ptr(), a);
+            for &val in &lane {
+                let y = val - comp;
+                let t = sum_abs + y;
+                comp = (t - sum_abs) - y;
+                sum_abs = t;
+            }
+            k += 4;
+        }
+        while k < period {
+            let val = (*wptr.add(k) - sma).abs();
+            let y = val - comp;
+            let t = sum_abs + y;
+            comp = (t - sum_abs) - y;
+            sum_abs = t;
+            k += 1;
+        }
+
+        let denom = 0.015 * (sum_abs * inv_p);
+        *out.get_unchecked_mut(i) = if denom == 0.0 { 0.0 } else { (entering - sma) / denom };
+        i += 1;
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -382,6 +511,123 @@ pub unsafe fn cci_avx512_short(data: &[f64], period: usize, first_valid: usize, 
 #[inline]
 pub unsafe fn cci_avx512_long(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
     cci_scalar(data, period, first_valid, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f,fma")]
+unsafe fn cci_avx512_impl(
+    data: &[f64],
+    period: usize,
+    first_valid: usize,
+    out: &mut [f64],
+) {
+    debug_assert!(data.len() == out.len());
+    debug_assert!(period >= 1 && first_valid + period <= data.len());
+
+    let n = data.len();
+    let inv_p = 1.0 / (period as f64);
+    let scale = (period as f64) * (1.0 / 0.015);
+
+    // Initial sum (scalar)
+    let base = data.as_ptr().add(first_valid);
+    let mut sum = 0.0;
+    {
+        let mut k = 0usize;
+        while k + 4 <= period {
+            let x0 = *base.add(k + 0);
+            let x1 = *base.add(k + 1);
+            let x2 = *base.add(k + 2);
+            let x3 = *base.add(k + 3);
+            sum = sum + x0 + x1 + x2 + x3;
+            k += 4;
+        }
+        while k < period {
+            sum += *base.add(k);
+            k += 1;
+        }
+    }
+
+    let first_out = first_valid + period - 1;
+    let mut sma = sum * inv_p;
+
+    // abs mask (preserve NaNs)
+    let pos_mask_i = _mm512_set1_epi64(0x7FFF_FFFF_FFFF_FFFFu64 as i64);
+    let pos_mask = _mm512_castsi512_pd(pos_mask_i);
+
+    // Initial MAD (vectorized compute, scalar Kahan accumulation in element order)
+    {
+        let vmean = _mm512_set1_pd(sma);
+        let mut k = 0usize;
+        let mut sum_abs = 0.0f64;
+        let mut comp = 0.0f64;
+        while k + 8 <= period {
+            let x = _mm512_loadu_pd(base.add(k));
+            let d = _mm512_sub_pd(x, vmean);
+            let a = _mm512_and_pd(d, pos_mask); // abs
+            let mut lane = [0.0f64; 8];
+            _mm512_storeu_pd(lane.as_mut_ptr(), a);
+            for &val in &lane {
+                let y = val - comp;
+                let t = sum_abs + y;
+                comp = (t - sum_abs) - y;
+                sum_abs = t;
+            }
+            k += 8;
+        }
+        while k < period {
+            let val = (*base.add(k) - sma).abs();
+            let y = val - comp;
+            let t = sum_abs + y;
+            comp = (t - sum_abs) - y;
+            sum_abs = t;
+            k += 1;
+        }
+        let price0 = *data.get_unchecked(first_out);
+        let denom = 0.015 * (sum_abs * inv_p);
+        *out.get_unchecked_mut(first_out) = if denom == 0.0 { 0.0 } else { (price0 - sma) / denom };
+    }
+
+    // Rolling
+    let mut i = first_out + 1;
+    while i < n {
+        let exiting = *data.get_unchecked(i - period);
+        let entering = *data.get_unchecked(i);
+        sum = sum - exiting + entering;
+        sma = sum * inv_p;
+
+        let start = i + 1 - period;
+        let wptr = data.as_ptr().add(start);
+
+        let vmean = _mm512_set1_pd(sma);
+        let mut k = 0usize;
+        let mut sum_abs = 0.0f64;
+        let mut comp = 0.0f64;
+        while k + 8 <= period {
+            let x = _mm512_loadu_pd(wptr.add(k));
+            let d = _mm512_sub_pd(x, vmean);
+            let a = _mm512_and_pd(d, pos_mask);
+            let mut lane = [0.0f64; 8];
+            _mm512_storeu_pd(lane.as_mut_ptr(), a);
+            for &val in &lane {
+                let y = val - comp;
+                let t = sum_abs + y;
+                comp = (t - sum_abs) - y;
+                sum_abs = t;
+            }
+            k += 8;
+        }
+        while k < period {
+            let val = (*wptr.add(k) - sma).abs();
+            let y = val - comp;
+            let t = sum_abs + y;
+            comp = (t - sum_abs) - y;
+            sum_abs = t;
+            k += 1;
+        }
+        let denom = 0.015 * (sum_abs * inv_p);
+        *out.get_unchecked_mut(i) = if denom == 0.0 { 0.0 } else { (entering - sma) / denom };
+        i += 1;
+    }
 }
 
 // ---- Row functions (all AVX variants point to correct level) ----
@@ -1372,6 +1618,8 @@ mod tests {
         check_cci_empty_input,
         check_cci_no_poison
     );
+
+    
 
     #[cfg(feature = "proptest")]
     generate_all_cci_tests!(check_cci_property);

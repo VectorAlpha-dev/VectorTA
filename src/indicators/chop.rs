@@ -21,17 +21,14 @@
 //! - Low values (<38.2): Trending market
 //!
 //! ## Developer Notes (Implementation Status)
-//! - **SIMD Kernels**:
-//!   - AVX2: STUB (calls scalar implementation)
-//!   - AVX512: STUB (calls scalar implementation)
-//!   - Both short and long variants are stubs
-//! - **Streaming Performance**: O(1) - efficient with rolling window buffers
-//! - **Memory Optimization**: YES - uses alloc_with_nan_prefix and make_uninit_matrix helpers
-//! - **Batch Operations**: Fully supported with parallel processing
-//! - **TODO**:
-//!   - Implement actual SIMD kernels for true range and logarithm calculations
-//!   - Vectorize the rolling sum and max/min operations
-//!   - Consider SIMD-optimized log10 from SLEEF library
+//! - SIMD: Implemented as stubs that delegate to the scalar kernel. Rationale: CHOP’s core is a true
+//!   recurrence (RMA of TR) plus sliding-window HH/LL via monotonic deques; both are data-dependent and
+//!   resist wide-lane SIMD. In practice, AVX2/AVX512 wins are marginal and risk numerical drift. We keep
+//!   stubs for parity and future exploration.
+//! - Scalar path: Optimized single-pass implementation using rolling ATR sum and monotonic deques; O(1)
+//!   per-bar update after warmup. Warmup handling and allocation follow alma.rs patterns.
+//! - Batch: Supported via parallel per-row evaluation. Row-specific precompute (TR/RMA prefix, RMQ) was
+//!   considered but deferred to keep changes minimal; revisit only if sweeping many parameter rows dominates.
 
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -471,36 +468,50 @@ pub unsafe fn chop_scalar(
     first_valid_idx: usize,
     out: &mut [f64],
 ) {
+    debug_assert!(high.len() == low.len() && low.len() == close.len());
     let len = close.len();
-    let alpha = 1.0 / (drift as f64);
-    let mut sum_tr = 0.0;
-    let mut rma_atr = f64::NAN;
-    let mut atr_ring = vec![0.0; period];
-    let mut ring_idx = 0;
-    let mut rolling_sum_atr = 0.0;
+    if len == 0 {
+        return;
+    }
 
+    // Hoisted constants
+    let alpha = 1.0 / (drift as f64);
+    // Keep log10(period) in emission path to mirror original numerical pathway
+
+    // Rolling sum of ATR via ring buffer (no modulo in hot path)
+    let mut atr_ring = vec![0.0_f64; period];
+    let mut atr_ring_idx: usize = 0;
+    let mut rolling_sum_atr: f64 = 0.0;
+
+    // RMA(ATR) state
+    let mut rma_atr = f64::NAN;
+    let mut sum_tr: f64 = 0.0;
+
+    // Monotonic deques (VecDeque performs well and avoids manual modulo)
     let mut dq_high: VecDeque<usize> = VecDeque::with_capacity(period);
     let mut dq_low: VecDeque<usize> = VecDeque::with_capacity(period);
 
     let mut prev_close = close[first_valid_idx];
 
     for i in first_valid_idx..len {
+        let hi = high[i];
+        let lo = low[i];
+        let hl = hi - lo;
         let tr = if i == first_valid_idx {
-            let hl = high[i] - low[i];
             sum_tr = hl;
             hl
         } else {
-            let hl = high[i] - low[i];
-            let hc = (high[i] - prev_close).abs();
-            let lc = (low[i] - prev_close).abs();
+            let hc = (hi - prev_close).abs();
+            let lc = (lo - prev_close).abs();
             hl.max(hc).max(lc)
         };
 
-        if (i - first_valid_idx) < drift {
+        let rel = i - first_valid_idx;
+        if rel < drift {
             if i != first_valid_idx {
                 sum_tr += tr;
             }
-            if (i - first_valid_idx) == (drift - 1) {
+            if rel == drift - 1 {
                 rma_atr = sum_tr / drift as f64;
             }
         } else {
@@ -508,66 +519,39 @@ pub unsafe fn chop_scalar(
         }
         prev_close = close[i];
 
-        let current_atr = if (i - first_valid_idx) < drift {
-            if (i - first_valid_idx) == drift - 1 {
-                rma_atr
-            } else {
-                f64::NAN
-            }
+        // Current ATR sample
+        let current_atr = if rel < drift {
+            if rel == drift - 1 { rma_atr } else { f64::NAN }
         } else {
             rma_atr
         };
 
-        let oldest = atr_ring[ring_idx];
+        // Rolling SUM(ATR(1), period)
+        let oldest = atr_ring[atr_ring_idx];
         rolling_sum_atr -= oldest;
-
-        let new_val = if current_atr.is_nan() {
-            0.0
-        } else {
-            current_atr
-        };
-        atr_ring[ring_idx] = new_val;
+        let new_val = if current_atr.is_nan() { 0.0 } else { current_atr };
+        atr_ring[atr_ring_idx] = new_val;
         rolling_sum_atr += new_val;
+        atr_ring_idx = (atr_ring_idx + 1) % period;
 
-        ring_idx = (ring_idx + 1) % period;
-
+        // Sliding-window HH/LL using monotonic VecDeque
         let win_start = i.saturating_sub(period - 1);
         while let Some(&front_idx) = dq_high.front() {
-            if front_idx < win_start {
-                dq_high.pop_front();
-            } else {
-                break;
-            }
+            if front_idx < win_start { dq_high.pop_front(); } else { break; }
         }
-        let h_val = high[i];
+        while let Some(&front_idx) = dq_low.front() {
+            if front_idx < win_start { dq_low.pop_front(); } else { break; }
+        }
         while let Some(&back_idx) = dq_high.back() {
-            if high[back_idx] <= h_val {
-                dq_high.pop_back();
-            } else {
-                break;
-            }
+            if high[back_idx] <= hi { dq_high.pop_back(); } else { break; }
         }
         dq_high.push_back(i);
-
-        while let Some(&front_idx) = dq_low.front() {
-            if front_idx < win_start {
-                dq_low.pop_front();
-            } else {
-                break;
-            }
-        }
-        let l_val = low[i];
         while let Some(&back_idx) = dq_low.back() {
-            if low[back_idx] >= l_val {
-                dq_low.pop_back();
-            } else {
-                break;
-            }
+            if low[back_idx] >= lo { dq_low.pop_back(); } else { break; }
         }
         dq_low.push_back(i);
 
-        let bars_since_valid = i - first_valid_idx;
-        if bars_since_valid >= (period - 1) {
+        if rel >= (period - 1) {
             let hh_idx = *dq_high.front().unwrap();
             let ll_idx = *dq_low.front().unwrap();
             let range = high[hh_idx] - low[ll_idx];

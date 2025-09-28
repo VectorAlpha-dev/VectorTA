@@ -13,6 +13,8 @@
 //! - **`Err(DecyclerError)`** otherwise.
 //!
 //! ## Developer Notes
+//! - SIMD note: time-recursive; single-series AVX2/AVX512 underperforms, so stubs delegate to scalar.
+//! - Batch note: precomputes second-difference once and reuses across rows for better throughput.
 //! - **AVX2 kernel**: STUB - calls scalar implementation
 //! - **AVX512 kernel**: STUB - calls scalar implementation (both short and long variants)
 //! - **Streaming**: Not implemented
@@ -299,14 +301,9 @@ unsafe fn decycler_scalar_into(
 ) -> Result<(), DecyclerError> {
     use std::f64::consts::PI;
 
-    // Remove any prefix writes here; prefix NaNs are handled by caller
-    let mut hp_prev2 = 0.0;
-    let mut hp_prev1 = 0.0;
-
-    let angle = 2.0 * PI * k / (hp_period as f64);
-    let sin_val = angle.sin();
-    let cos_val = angle.cos();
-    // Add epsilon guard to avoid division by near-zero
+    // Compute coefficients once
+    let angle = (2.0 * PI * k) * (hp_period as f64).recip();
+    let (sin_val, cos_val) = angle.sin_cos();
     const EPSILON: f64 = 1e-10;
     let cos_safe = if cos_val.abs() < EPSILON {
         EPSILON.copysign(cos_val)
@@ -320,12 +317,8 @@ unsafe fn decycler_scalar_into(
     let one_minus_alpha_sq = one_minus_alpha * one_minus_alpha;
 
     // Initialize internal state only; DO NOT write to output
-    if data.len() > first {
-        hp_prev2 = data[first];
-    }
-    if data.len() > (first + 1) {
-        hp_prev1 = data[first + 1];
-    }
+    let mut hp_prev2 = data[first];
+    let mut hp_prev1 = data[first + 1];
 
     // Start writing results only from first+2 onwards
     for i in (first + 2)..data.len() {
@@ -333,8 +326,11 @@ unsafe fn decycler_scalar_into(
         let prev1 = data[i - 1];
         let prev2 = data[i - 2];
 
-        let hp_val = c * current - 2.0 * c * prev1 + c * prev2 + 2.0 * one_minus_alpha * hp_prev1
-            - one_minus_alpha_sq * hp_prev2;
+        let s0 = current * c;
+        let s1 = prev1.mul_add(-2.0 * c, s0);
+        let s2 = prev2.mul_add(c, s1);
+        let s3 = hp_prev1.mul_add(2.0 * one_minus_alpha, s2);
+        let hp_val = hp_prev2.mul_add(-one_minus_alpha_sq, s3);
 
         // Shift the hp values
         hp_prev2 = hp_prev1;
@@ -413,9 +409,8 @@ pub fn decycler_scalar(
     let mut hp_prev2 = 0.0;
     let mut hp_prev1 = 0.0;
 
-    let angle = 2.0 * PI * k / (hp_period as f64);
-    let sin_val = angle.sin();
-    let cos_val = angle.cos();
+    let angle = (2.0 * PI * k) * (hp_period as f64).recip();
+    let (sin_val, cos_val) = angle.sin_cos();
     // Add epsilon guard to avoid division by near-zero
     const EPSILON: f64 = 1e-10;
     let cos_safe = if cos_val.abs() < EPSILON {
@@ -443,8 +438,11 @@ pub fn decycler_scalar(
         let prev1 = data[i - 1];
         let prev2 = data[i - 2];
 
-        let hp_val = c * current - 2.0 * c * prev1 + c * prev2 + 2.0 * one_minus_alpha * hp_prev1
-            - one_minus_alpha_sq * hp_prev2;
+        let s0 = current * c;
+        let s1 = prev1.mul_add(-2.0 * c, s0);
+        let s2 = prev2.mul_add(c, s1);
+        let s3 = hp_prev1.mul_add(2.0 * one_minus_alpha, s2);
+        let hp_val = hp_prev2.mul_add(-one_minus_alpha_sq, s3);
 
         // Shift the hp values
         hp_prev2 = hp_prev1;
@@ -819,14 +817,9 @@ unsafe fn decycler_row_scalar(
 ) {
     use std::f64::consts::PI;
 
-    // We only need to keep track of the last 2 hp values
-    let mut hp_prev2 = 0.0;
-    let mut hp_prev1 = 0.0;
-
-    let angle = 2.0 * PI * k / (hp_period as f64);
-    let sin_val = angle.sin();
-    let cos_val = angle.cos();
-    // Add epsilon guard to avoid division by near-zero
+    // Coefficients
+    let angle = (2.0 * PI * k) * (hp_period as f64).recip();
+    let (sin_val, cos_val) = angle.sin_cos();
     const EPSILON: f64 = 1e-10;
     let cos_safe = if cos_val.abs() < EPSILON {
         EPSILON.copysign(cos_val)
@@ -840,12 +833,8 @@ unsafe fn decycler_row_scalar(
     let one_minus_alpha_sq = one_minus_alpha * one_minus_alpha;
 
     // Initialize internal state only; DO NOT write to output
-    if data.len() > first {
-        hp_prev2 = data[first];
-    }
-    if data.len() > (first + 1) {
-        hp_prev1 = data[first + 1];
-    }
+    let mut hp_prev2 = data[first];
+    let mut hp_prev1 = data[first + 1];
 
     // Start writing results only from first+2 onwards
     for i in (first + 2)..data.len() {
@@ -853,8 +842,11 @@ unsafe fn decycler_row_scalar(
         let prev1 = data[i - 1];
         let prev2 = data[i - 2];
 
-        let hp_val = c * current - 2.0 * c * prev1 + c * prev2 + 2.0 * one_minus_alpha * hp_prev1
-            - one_minus_alpha_sq * hp_prev2;
+        let s0 = current * c;
+        let s1 = prev1.mul_add(-2.0 * c, s0);
+        let s2 = prev2.mul_add(c, s1);
+        let s3 = hp_prev1.mul_add(2.0 * one_minus_alpha, s2);
+        let hp_val = hp_prev2.mul_add(-one_minus_alpha_sq, s3);
 
         // Shift the hp values
         hp_prev2 = hp_prev1;
@@ -1780,6 +1772,13 @@ fn decycler_batch_inner_into(
     let rows = combos.len();
     let cols = data.len();
 
+    // Precompute second difference once for reuse across rows:
+    // d[i] = x[i] - 2*x[i-1] + x[i-2]
+    let mut diff: Vec<f64> = vec![0.0; cols];
+    for i in (first + 2)..cols {
+        diff[i] = data[i] - 2.0 * data[i - 1] + data[i - 2];
+    }
+
     // Treat out as MaybeUninit to allow caller to set NaN prefixes via init_matrix_prefixes
     let out_mu = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
@@ -1790,11 +1789,35 @@ fn decycler_batch_inner_into(
         let k = combos[row].k.unwrap();
         let dst = std::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
-        match kern {
-            Kernel::Scalar | Kernel::ScalarBatch => {
-                decycler_row_scalar(data, first, hp_period, k, dst)
-            }
-            _ => decycler_row_scalar(data, first, hp_period, k, dst),
+        // Compute coefficients per row
+        let angle = (2.0 * std::f64::consts::PI * k) * (hp_period as f64).recip();
+        let (sin_val, cos_val) = angle.sin_cos();
+        const EPSILON: f64 = 1e-10;
+        let cos_safe = if cos_val.abs() < EPSILON {
+            EPSILON.copysign(cos_val)
+        } else {
+            cos_val
+        };
+        let alpha = 1.0 + ((sin_val - 1.0) / cos_safe);
+        let one_minus_alpha_half = 1.0 - alpha / 2.0;
+        let c = one_minus_alpha_half * one_minus_alpha_half;
+        let one_minus_alpha = 1.0 - alpha;
+        let one_minus_alpha_sq = one_minus_alpha * one_minus_alpha;
+
+        // State
+        let mut hp_prev2 = data[first];
+        let mut hp_prev1 = data[first + 1];
+
+        // Write only from first+2 onward; warmups already NaN
+        for i in (first + 2)..cols {
+            let current = data[i];
+            let s3 = hp_prev1.mul_add(2.0 * one_minus_alpha, c * diff[i]);
+            let hp_val = hp_prev2.mul_add(-one_minus_alpha_sq, s3);
+
+            hp_prev2 = hp_prev1;
+            hp_prev1 = hp_val;
+
+            dst[i] = current - hp_val;
         }
     };
 
