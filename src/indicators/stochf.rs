@@ -17,12 +17,11 @@
 //! - **d**: Fast %D line as `Vec<f64>` (length matches input, range 0-100)
 //!
 //! ## Developer Notes
-//! - **AVX2/AVX512 kernels**: Currently stubs that call scalar implementation
-//! - **Streaming update**: O(n) performance due to recalculating min/max over full buffers
-//! - **Memory optimization**: Properly uses zero-copy helper functions (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
-//! - **TODO**: Implement actual SIMD kernels for AVX2/AVX512
-//! - **TODO**: Optimize streaming to maintain rolling min/max for O(1) updates
-//! - **Note**: Currently limited to SMA for %D calculation, could extend to other MA types
+//! - Scalar path optimized: O(n) via monotonic deques for rolling high/low (no O(n·k)).
+//! - SIMD status: AVX2/AVX512 remain stubs delegating to scalar. The deque-based hot path is not a good SIMD fit; underperforms when forced. Revisit only with a different algorithmic layout.
+//! - Streaming update still uses naive O(k) per tick; separate to the batch/scalar kernels.
+//! - Memory: follows ALMA patterns (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes).
+//! - %D supports SMA (matype=0). Other MA types are out of scope for now.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
@@ -300,8 +299,10 @@ pub fn stochf_into_slice(
         });
     }
 
+    // SIMD underperforms for this indicator due to deque-based algorithm.
+    // Short-circuit Auto to Scalar to avoid slower SIMD selection.
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -479,23 +480,87 @@ pub unsafe fn stochf_scalar(
 ) {
     let len = high.len();
 
-    for i in (first_valid_idx + fastk_period - 1)..len {
-        let start = i + 1 - fastk_period;
-        let (mut hh, mut ll) = (f64::NEG_INFINITY, f64::INFINITY);
-        for j in start..=i {
-            let h_j = high[j];
-            let l_j = low[j];
-            if h_j > hh {
-                hh = h_j;
+    // Heuristic: for very small windows, a direct scan is faster.
+    if fastk_period <= 16 {
+        for i in (first_valid_idx + fastk_period - 1)..len {
+            let start = i + 1 - fastk_period;
+            let (mut hh, mut ll) = (f64::NEG_INFINITY, f64::INFINITY);
+            for j in start..=i {
+                let h_j = high[j];
+                let l_j = low[j];
+                if h_j > hh { hh = h_j; }
+                if l_j < ll { ll = l_j; }
             }
-            if l_j < ll {
-                ll = l_j;
+            if hh == ll {
+                k_vals[i] = if close[i] == hh { 100.0 } else { 0.0 };
+            } else {
+                k_vals[i] = 100.0 * (close[i] - ll) / (hh - ll);
             }
         }
-        if hh == ll {
-            k_vals[i] = if close[i] == hh { 100.0 } else { 0.0 };
-        } else {
-            k_vals[i] = 100.0 * (close[i] - ll) / (hh - ll);
+    } else {
+        // Monotonic deques (ring buffers) for rolling highest-high and lowest-low
+        let cap = fastk_period;
+        let mut qh = vec![0usize; cap];
+        let mut ql = vec![0usize; cap];
+        let mut qh_head = 0usize;
+        let mut ql_head = 0usize;
+        let mut qh_len = 0usize;
+        let mut ql_len = 0usize;
+
+        let k_start = first_valid_idx + fastk_period - 1;
+
+        let mut i = first_valid_idx;
+        while i < len {
+            // Expire elements sliding out of the window [i+1-fastk_period, i]
+            if i + 1 >= fastk_period {
+                let window_start = i + 1 - fastk_period;
+                while qh_len > 0 {
+                    let front_idx = qh[qh_head];
+                    if front_idx >= window_start { break; }
+                    qh_head = (qh_head + 1) % cap; qh_len -= 1;
+                }
+                while ql_len > 0 {
+                    let front_idx = ql[ql_head];
+                    if front_idx >= window_start { break; }
+                    ql_head = (ql_head + 1) % cap; ql_len -= 1;
+                }
+            }
+
+            let h_i = high[i];
+            if h_i == h_i { // not NaN
+                while qh_len > 0 {
+                    let back_pos = (qh_head + qh_len - 1) % cap;
+                    let back_idx = qh[back_pos];
+                    if !(high[back_idx] <= h_i) { break; }
+                    qh_len -= 1;
+                }
+                let ins_pos = (qh_head + qh_len) % cap; qh[ins_pos] = i; qh_len += 1;
+            }
+
+            let l_i = low[i];
+            if l_i == l_i { // not NaN
+                while ql_len > 0 {
+                    let back_pos = (ql_head + ql_len - 1) % cap;
+                    let back_idx = ql[back_pos];
+                    if !(low[back_idx] >= l_i) { break; }
+                    ql_len -= 1;
+                }
+                let ins_pos = (ql_head + ql_len) % cap; ql[ins_pos] = i; ql_len += 1;
+            }
+
+            if i >= k_start {
+                let hh = if qh_len > 0 { high[qh[qh_head]] } else { f64::NEG_INFINITY };
+                let ll = if ql_len > 0 { low[ql[ql_head]] } else { f64::INFINITY };
+                let c_i = close[i];
+                let denom = hh - ll;
+                k_vals[i] = if denom == 0.0 {
+                    if c_i == hh { 100.0 } else { 0.0 }
+                } else {
+                    let inv = 100.0 / denom; c_i.mul_add(inv, (-ll) * inv)
+                };
+            }
+
+            i += 1;
         }
     }
     if matype != 0 {
@@ -538,17 +603,94 @@ pub unsafe fn stochf_avx2(
     k_vals: &mut [f64],
     d_vals: &mut [f64],
 ) {
-    stochf_scalar(
-        high,
-        low,
-        close,
-        fastk_period,
-        fastd_period,
-        matype,
-        first_valid_idx,
-        k_vals,
-        d_vals,
-    );
+    // For small windows, use AVX2-accelerated min/max reduction; otherwise fall back to scalar (deque).
+    if fastk_period <= 32 {
+        let len = high.len();
+        let start_i = first_valid_idx + fastk_period - 1;
+        let neg_inf = _mm256_set1_pd(f64::NEG_INFINITY);
+        let pos_inf = _mm256_set1_pd(f64::INFINITY);
+        for i in start_i..len {
+            let start = i + 1 - fastk_period;
+            // Vector reduce max(high[start..=i]) with NaNs treated as -INF
+            let mut vmax = neg_inf;
+            let mut vmin = pos_inf;
+            let mut j = start;
+            let end = i + 1;
+            while j + 4 <= end {
+                let vh = _mm256_loadu_pd(high.as_ptr().add(j));
+                let vl = _mm256_loadu_pd(low.as_ptr().add(j));
+                let mask_h = _mm256_cmp_pd(vh, vh, _CMP_ORD_Q);
+                let mask_l = _mm256_cmp_pd(vl, vl, _CMP_ORD_Q);
+                let vh_nnan = _mm256_blendv_pd(neg_inf, vh, mask_h);
+                let vl_nnan = _mm256_blendv_pd(pos_inf, vl, mask_l);
+                vmax = _mm256_max_pd(vmax, vh_nnan);
+                vmin = _mm256_min_pd(vmin, vl_nnan);
+                j += 4;
+            }
+            // Horizontal reduce 256-bit vectors to scalars
+            let vmax_lo = _mm256_castpd256_pd128(vmax);
+            let vmax_hi = _mm256_extractf128_pd(vmax, 1);
+            let vmax_128 = _mm_max_pd(vmax_lo, vmax_hi);
+            let vmax_hi64 = _mm_unpackhi_pd(vmax_128, vmax_128);
+            let mut hh = f64::max(_mm_cvtsd_f64(vmax_128), _mm_cvtsd_f64(vmax_hi64));
+
+            let vmin_lo = _mm256_castpd256_pd128(vmin);
+            let vmin_hi = _mm256_extractf128_pd(vmin, 1);
+            let vmin_128 = _mm_min_pd(vmin_lo, vmin_hi);
+            let vmin_hi64 = _mm_unpackhi_pd(vmin_128, vmin_128);
+            let mut ll = f64::min(_mm_cvtsd_f64(vmin_128), _mm_cvtsd_f64(vmin_hi64));
+
+            // Tail elements
+            while j < end {
+                let h = *high.get_unchecked(j);
+                let l = *low.get_unchecked(j);
+                if h == h && h > hh { hh = h; }
+                if l == l && l < ll { ll = l; }
+                j += 1;
+            }
+
+            // Compute %K
+            if hh == ll {
+                k_vals[i] = if *close.get_unchecked(i) == hh { 100.0 } else { 0.0 };
+            } else {
+                let inv = 100.0 / (hh - ll);
+                k_vals[i] = (*close.get_unchecked(i)).mul_add(inv, (-ll) * inv);
+            }
+        }
+
+        // %D (SMA)
+        if matype != 0 {
+            d_vals.fill(f64::NAN);
+        } else {
+            let mut sma_sum = 0.0;
+            let mut count = 0usize;
+            let len = k_vals.len();
+            for i in 0..len {
+                let v = *k_vals.get_unchecked(i);
+                if v.is_nan() {
+                    d_vals[i] = f64::NAN;
+                    continue;
+                }
+                if count < fastd_period {
+                    sma_sum += v;
+                    count += 1;
+                    if count == fastd_period {
+                        d_vals[i] = sma_sum / (fastd_period as f64);
+                    } else {
+                        d_vals[i] = f64::NAN;
+                    }
+                } else {
+                    let vold = *k_vals.get_unchecked(i - fastd_period);
+                    d_vals[i] = (sma_sum + v - vold) / (fastd_period as f64);
+                    sma_sum += v - vold;
+                }
+            }
+        }
+    } else {
+        stochf_scalar(
+            high, low, close, fastk_period, fastd_period, matype, first_valid_idx, k_vals, d_vals,
+        );
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1232,23 +1374,84 @@ unsafe fn stochf_row_scalar(
 ) {
     let len = high.len();
 
-    for i in (first + fastk_period - 1)..len {
-        let start = i + 1 - fastk_period;
-        let (mut hh, mut ll) = (f64::NEG_INFINITY, f64::INFINITY);
-        for j in start..=i {
-            let h = high[j];
-            let l = low[j];
-            if h > hh {
-                hh = h;
+    if fastk_period <= 16 {
+        for i in (first + fastk_period - 1)..len {
+            let start = i + 1 - fastk_period;
+            let (mut hh, mut ll) = (f64::NEG_INFINITY, f64::INFINITY);
+            for j in start..=i {
+                let h = high[j];
+                let l = low[j];
+                if h > hh { hh = h; }
+                if l < ll { ll = l; }
             }
-            if l < ll {
-                ll = l;
+            if hh == ll {
+                k_out[i] = if close[i] == hh { 100.0 } else { 0.0 };
+            } else {
+                k_out[i] = 100.0 * (close[i] - ll) / (hh - ll);
             }
         }
-        if hh == ll {
-            k_out[i] = if close[i] == hh { 100.0 } else { 0.0 };
-        } else {
-            k_out[i] = 100.0 * (close[i] - ll) / (hh - ll);
+    } else {
+        // Per-row monotonic deques for highest-high and lowest-low
+        let cap = fastk_period;
+        let mut qh = vec![0usize; cap];
+        let mut ql = vec![0usize; cap];
+        let mut qh_head = 0usize;
+        let mut ql_head = 0usize;
+        let mut qh_len = 0usize;
+        let mut ql_len = 0usize;
+
+        let k_start = first + fastk_period - 1;
+        let mut i = first;
+        while i < len {
+            if i + 1 >= fastk_period {
+                let window_start = i + 1 - fastk_period;
+                while qh_len > 0 {
+                    let front_idx = qh[qh_head];
+                    if front_idx >= window_start { break; }
+                    qh_head = (qh_head + 1) % cap; qh_len -= 1;
+                }
+                while ql_len > 0 {
+                    let front_idx = ql[ql_head];
+                    if front_idx >= window_start { break; }
+                    ql_head = (ql_head + 1) % cap; ql_len -= 1;
+                }
+            }
+
+            let h_i = high[i];
+            if h_i == h_i {
+                while qh_len > 0 {
+                    let back_pos = (qh_head + qh_len - 1) % cap;
+                    let back_idx = qh[back_pos];
+                    if !(high[back_idx] <= h_i) { break; }
+                    qh_len -= 1;
+                }
+                let ins_pos = (qh_head + qh_len) % cap; qh[ins_pos] = i; qh_len += 1;
+            }
+
+            let l_i = low[i];
+            if l_i == l_i {
+                while ql_len > 0 {
+                    let back_pos = (ql_head + ql_len - 1) % cap;
+                    let back_idx = ql[back_pos];
+                    if !(low[back_idx] >= l_i) { break; }
+                    ql_len -= 1;
+                }
+                let ins_pos = (ql_head + ql_len) % cap; ql[ins_pos] = i; ql_len += 1;
+            }
+
+            if i >= k_start {
+                let hh = if qh_len > 0 { high[qh[qh_head]] } else { f64::NEG_INFINITY };
+                let ll = if ql_len > 0 { low[ql[ql_head]] } else { f64::INFINITY };
+                let c_i = close[i];
+                let denom = hh - ll;
+                k_out[i] = if denom == 0.0 {
+                    if c_i == hh { 100.0 } else { 0.0 }
+                } else {
+                    let inv = 100.0 / denom; c_i.mul_add(inv, (-ll) * inv)
+                };
+            }
+
+            i += 1;
         }
     }
     if matype != 0 {

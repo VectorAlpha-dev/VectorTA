@@ -1,0 +1,6 @@
+deviation/deviation_scalar/100k
+                        time:   [291.28 µs 298.96 µs 304.62 µs]
+                        thrpt:  [24.458 GiB/s 24.922 GiB/s 25.579 GiB/s]
+Found 2 outliers among 10 measurements (20.00%)
+  2 (20.00%) high severe
+

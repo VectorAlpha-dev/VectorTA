@@ -9,10 +9,12 @@
 //! - `Ok(AcoscOutput)` with vectors of `osc` and `change`
 //!
 //! ## Developer Notes
-//! - **AVX2/AVX512 kernels**: Stubs (all call scalar implementation)
-//! - **Streaming update**: O(1) - uses ring buffers with fixed-size arrays
-//! - **Memory optimization**: Uses zero-copy helpers (alloc_with_nan_prefix)
-//! - **Optimization needed**: Implement actual SIMD kernels for batch processing
+//! - SIMD status: Implemented as stubs delegating to scalar. Sliding-sum dependencies (SMA5, SMA34, SMA5(AO))
+//!   make effective time-axis SIMD limited; scalar path is faster/stable. Revisit only with fused precompute.
+//! - Scalar path: Single-pass, ring buffers, manual index wrap (no `%`) and warmup prefix writes from index 38.
+//! - Streaming update: O(1) via fixed-size ring buffers; matches batch results after warmup.
+//! - Memory: Zero-copy/uninitialized allocation with NaN warmup via `alloc_with_nan_prefix`.
+//! - Row-specific batch: Not applicable (no tunable params; single row). Keep batch helper for API parity.
 
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
@@ -194,7 +196,7 @@ fn acosc_compute_into(
     }
 }
 
-#[inline]
+#[inline(always)]
 pub fn acosc_scalar(high: &[f64], low: &[f64], osc: &mut [f64], change: &mut [f64]) {
     // SCALAR LOGIC UNCHANGED
     const PERIOD_SMA5: usize = 5;
@@ -224,11 +226,17 @@ pub fn acosc_scalar(high: &[f64], low: &[f64], osc: &mut [f64], change: &mut [f6
         let med = (high[i] + low[i]) * 0.5;
         sum34 += med - queue34[idx34];
         queue34[idx34] = med;
-        idx34 = (idx34 + 1) % PERIOD_SMA34;
+        idx34 += 1;
+        if idx34 == PERIOD_SMA34 {
+            idx34 = 0;
+        }
         let sma34 = sum34 * INV34;
         sum5 += med - queue5[idx5];
         queue5[idx5] = med;
-        idx5 = (idx5 + 1) % PERIOD_SMA5;
+        idx5 += 1;
+        if idx5 == PERIOD_SMA5 {
+            idx5 = 0;
+        }
         let sma5 = sum5 * INV5;
         let ao = sma5 - sma34;
         sum5_ao += ao;
@@ -243,17 +251,26 @@ pub fn acosc_scalar(high: &[f64], low: &[f64], osc: &mut [f64], change: &mut [f6
         let med = (high[i] + low[i]) * 0.5;
         sum34 += med - queue34[idx34];
         queue34[idx34] = med;
-        idx34 = (idx34 + 1) % PERIOD_SMA34;
+        idx34 += 1;
+        if idx34 == PERIOD_SMA34 {
+            idx34 = 0;
+        }
         let sma34 = sum34 * INV34;
         sum5 += med - queue5[idx5];
         queue5[idx5] = med;
-        idx5 = (idx5 + 1) % PERIOD_SMA5;
+        idx5 += 1;
+        if idx5 == PERIOD_SMA5 {
+            idx5 = 0;
+        }
         let sma5 = sum5 * INV5;
         let ao = sma5 - sma34;
         let old_ao = queue5_ao[idx5_ao];
         sum5_ao += ao - old_ao;
         queue5_ao[idx5_ao] = ao;
-        idx5_ao = (idx5_ao + 1) % PERIOD_SMA5;
+        idx5_ao += 1;
+        if idx5_ao == PERIOD_SMA5 {
+            idx5_ao = 0;
+        }
         let sma5_ao = sum5_ao * INV5;
         let res = ao - sma5_ao;
         let mom = res - prev_res;

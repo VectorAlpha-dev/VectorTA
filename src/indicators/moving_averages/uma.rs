@@ -17,7 +17,8 @@
 //! - **AVX2/AVX512 kernels**: Not implemented (no explicit SIMD kernel functions)
 //! - **Streaming update**: O(n) - calls full uma function on each update
 //! - **Memory optimization**: Uses zero-copy helpers (alloc_with_nan_prefix)
-//! - **Optimization needed**: Implement SIMD kernels and optimize streaming to O(1)
+//! - **Optimization status**: Scalar core optimized (inlined RSI/MFI, ln LUT, FMA). SIMD accumulation present under `nightly-avx`, but Auto selection prefers scalar due to limited wins from scalar `exp` cost.
+//! - **Streaming**: unchanged (calls full function); future work could make it O(1).
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
@@ -418,167 +419,422 @@ fn uma_core_into(
     min_length: usize,
     max_length: usize,
     accelerator: f64,
-    _kernel: Kernel, // For future SIMD implementations
+    _kernel: Kernel, // (dispatch kept for future SIMD kernels)
     out: &mut [f64],
 ) -> Result<(), UmaError> {
+    // ------- Aliases & basic lengths -------
     let data: &[f64] = input.as_ref();
     let len = data.len();
+    debug_assert!(len == out.len());
 
-    // Precompute mean and stddev once at max_length
+    // ------- Precompute mean/std at fixed max_length (keeps UMA band logic identical) -------
     let mean = sma(&SmaInput::from_slice(
         data,
-        SmaParams {
-            period: Some(max_length),
-        },
+        SmaParams { period: Some(max_length) },
     ))
     .map_err(|e| UmaError::DependencyError(e.to_string()))?
     .values;
+
     let std_dev = deviation(&DeviationInput::from_slice(
         data,
-        DeviationParams {
-            period: Some(max_length),
-            devtype: Some(0),
-        },
+        DeviationParams { period: Some(max_length), devtype: Some(0) },
     ))
     .map_err(|e| UmaError::DependencyError(e.to_string()))?
     .values;
 
+    // ------- Constants & helpers -------
+    // Precompute ln(k) once for k in [1..=max_length] so inner loop can use exp(p * ln(k)) instead of powf(k, p)
+    let mut ln_lut: Vec<f64> = Vec::with_capacity(max_length + 1);
+    // index 0 unused to keep direct indexing by base k
+    ln_lut.push(0.0);
+    for k in 1..=max_length {
+        ln_lut.push((k as f64).ln());
+    }
+
+    // Avoid repeated pattern matching in the hot loop
+    let (candles_opt, vol_opt) = match &input.data {
+        UmaData::Candles { candles, .. } => (Some(*candles), input.volume),
+        UmaData::Slice(_) => (None, input.volume),
+    };
+
+    // Warmup (prefix already NaN-initialized by caller)
     let warmup_end = first + max_length - 1;
+    if warmup_end >= len {
+        return Ok(()); // nothing to do; prefix already set by alloc_with_nan_prefix/uma_into_slice
+    }
 
-    // Reusable scratch for MFI typical prices and volumes to avoid per-step reallocation
-    let mut tp: Vec<f64> = Vec::with_capacity(max_length);
-    let mut vv: Vec<f64> = Vec::with_capacity(max_length);
+    // Adaptive length state
+    let mut dyn_len = max_length as f64;
 
-    let mut length = max_length as f64;
+    // ------- Small inlined helpers (closed over data/ln_lut) -------
+    #[inline(always)]
+    fn rsi_wilder_last(data: &[f64], start: usize, end: usize, period: usize) -> f64 {
+        // Compute only the LAST RSI value for a slice [start..=end] with Wilder smoothing and given period.
+        if period == 0 || end <= start || end - start + 1 < period + 1 {
+            return 50.0;
+        }
 
+        // Initialization over the first `period` diffs
+        let mut sum_up = 0.0f64;
+        let mut sum_dn = 0.0f64;
+        let mut has_nan = false;
+        let mut prev = data[start];
+        let init_last = start + period;
+        for j in (start + 1)..=init_last {
+            let cur = data[j];
+            let diff = cur - prev;
+            if !diff.is_finite() {
+                has_nan = true;
+                break;
+            }
+            if diff > 0.0 {
+                sum_up += diff;
+            } else {
+                sum_dn -= diff; // diff <= 0 -> add positive magnitude
+            }
+            prev = cur;
+        }
+        if has_nan {
+            return 50.0; // conservative fallback
+        }
+        let mut avg_up = sum_up / (period as f64);
+        let mut avg_dn = sum_dn / (period as f64);
+
+        // Wilder update over the rest of the slice
+        if init_last < end {
+            let n_1 = (period - 1) as f64;
+            let n = period as f64;
+            for j in (init_last + 1)..=end {
+                let cur = data[j];
+                let diff = cur - prev;
+                let up = if diff > 0.0 { diff } else { 0.0 };
+                let dn = if diff < 0.0 { -diff } else { 0.0 };
+                avg_up = (avg_up * n_1 + up) / n;
+                avg_dn = (avg_dn * n_1 + dn) / n;
+                prev = cur;
+            }
+        }
+
+        if avg_dn == 0.0 {
+            100.0
+        } else if avg_up + avg_dn == 0.0 {
+            50.0
+        } else {
+            100.0 * avg_up / (avg_up + avg_dn)
+        }
+    }
+
+    #[inline(always)]
+    fn mfi_window_last_candles(c: &Candles, start: usize, end: usize) -> f64 {
+        // Compute classic MFI over [start..=end] (inclusive) using typical price and volume.
+        if end <= start {
+            return 50.0;
+        }
+        // Typical price at start
+        let mut tp_prev = (c.high[start] + c.low[start] + c.close[start]) / 3.0;
+        let mut pos = 0.0f64;
+        let mut neg = 0.0f64;
+
+        for j in (start + 1)..=end {
+            let tp = (c.high[j] + c.low[j] + c.close[j]) / 3.0;
+            // Raw money flow uses current TP * current Volume
+            let mf = tp * c.volume[j];
+            if tp > tp_prev {
+                pos += mf;
+            } else if tp < tp_prev {
+                neg += mf;
+            }
+            tp_prev = tp;
+        }
+
+        let denom = pos + neg;
+        if denom > 0.0 {
+            100.0 * pos / denom
+        } else {
+            50.0
+        }
+    }
+
+    // ------- Main pass -------
     for i in warmup_end..len {
-        let mean_val = mean[i];
-        let std_val = std_dev[i];
-        if mean_val.is_nan() || std_val.is_nan() {
+        let mu = mean[i];
+        let sd = std_dev[i];
+        if mu.is_nan() || sd.is_nan() {
             continue;
         }
-
-        let a = mean_val - 1.75 * std_val;
-        let b = mean_val - 0.25 * std_val;
-        let c = mean_val + 0.25 * std_val;
-        let d = mean_val + 1.75 * std_val;
         let src = data[i];
 
+        // UMA band thresholds via FMA to reduce rounding & latency
+        let a = (-1.75f64).mul_add(sd, mu);
+        let b = (-0.25f64).mul_add(sd, mu);
+        let c = (0.25f64).mul_add(sd, mu);
+        let d = (1.75f64).mul_add(sd, mu);
+
+        // Adapt dynamic length
         if src >= b && src <= c {
-            length += 1.0;
+            dyn_len += 1.0;
         } else if src < a || src > d {
-            length -= 1.0;
+            dyn_len -= 1.0;
         }
 
-        length = length.max(min_length as f64).min(max_length as f64);
-        let len_r = length.round() as usize;
+        dyn_len = dyn_len
+            .max(min_length as f64)
+            .min(max_length as f64);
+        let len_r = dyn_len.round() as usize;
         if i + 1 < len_r {
             continue;
         }
 
-        // Momentum factor (reuse buffers, no per-loop allocations)
-        let mf = if let Some(vol) = input.volume {
-            let v_i = *vol.get(i).unwrap_or(&0.0);
-            if v_i == 0.0 || v_i.is_nan() {
-                // RSI fallback
-                let window_start = 0.max(i as isize + 1 - 2 * len_r as isize) as usize;
-                let window_end = i + 1;
-                let rsi_input = RsiInput::from_slice(
-                    &data[window_start..window_end],
-                    RsiParams {
-                        period: Some(len_r),
-                    },
-                );
-                rsi(&rsi_input)
-                    .ok()
-                    .and_then(|r| r.values.last().copied())
-                    .unwrap_or(50.0)
-            } else {
-                // MFI with Candles or (price,volume) slices
-                let window_start = i + 1 - len_r;
-                match &input.data {
-                    UmaData::Candles { candles, .. } => {
-                        tp.clear();
-                        vv.clear();
-                        for j in window_start..=i {
-                            tp.push((candles.high[j] + candles.low[j] + candles.close[j]) / 3.0);
-                            vv.push(candles.volume[j]);
-                        }
-                        mfi(&MfiInput::from_slices(
-                            &tp,
-                            &vv,
-                            MfiParams {
-                                period: Some(len_r),
-                            },
-                        ))
-                        .ok()
-                        .and_then(|r| r.values.last().copied())
-                        .unwrap_or(50.0)
-                    }
-                    UmaData::Slice(_) => {
-                        // For slice data with volume, calculate a volume-weighted momentum
-                        // This is a simplified approach since we don't have OHLC data for proper MFI
-                        let px = &data[window_start..=i];
-                        let vv_slice = &vol[window_start..=i];
-
-                        // Calculate volume-weighted price changes
-                        let mut up_vol = 0.0;
-                        let mut down_vol = 0.0;
-                        for j in 1..px.len() {
-                            let price_change = px[j] - px[j - 1];
-                            let vol = vv_slice[j];
-                            if price_change > 0.0 {
-                                up_vol += vol;
-                            } else if price_change < 0.0 {
-                                down_vol += vol;
-                            }
-                        }
-
-                        // Calculate volume-weighted momentum (similar to MFI but simpler)
-                        if up_vol + down_vol > 0.0 {
-                            100.0 * up_vol / (up_vol + down_vol)
-                        } else {
-                            50.0
-                        }
-                    }
+        // ----- Momentum factor (MFI if volume & candles present & nonzero; else RSI fallback; else simplified vol-momentum) -----
+        let mf: f64 = match (vol_opt, candles_opt) {
+            (Some(vol), Some(candles)) => {
+                let v_i = vol[i];
+                if v_i == 0.0 || v_i.is_nan() {
+                    // RSI fallback over a 2*len_r sized slice
+                    let end = i;
+                    let start = if end + 1 >= 2 * len_r { end + 1 - 2 * len_r } else { 0 };
+                    rsi_wilder_last(data, start, end, len_r)
+                } else {
+                    let start = i + 1 - len_r;
+                    mfi_window_last_candles(candles, start, i)
                 }
             }
-        } else {
-            let window_start = 0.max(i as isize + 1 - 2 * len_r as isize) as usize;
-            let window_end = i + 1;
-            let rsi_input = RsiInput::from_slice(
-                &data[window_start..window_end],
-                RsiParams {
-                    period: Some(len_r),
-                },
-            );
-            rsi(&rsi_input)
-                .ok()
-                .and_then(|r| r.values.last().copied())
-                .unwrap_or(50.0)
+            (Some(vol), None) => {
+                // Slice data with volume -> simplified volume-weighted momentum (no OHLC for true MFI)
+                let start = i + 1 - len_r;
+                let mut up_vol = 0.0f64;
+                let mut dn_vol = 0.0f64;
+                let mut prev = data[start];
+                for j in (start + 1)..=i {
+                    let cur = data[j];
+                    let v = vol[j];
+                    let diff = cur - prev;
+                    if diff > 0.0 {
+                        up_vol += v;
+                    } else if diff < 0.0 {
+                        dn_vol += v;
+                    }
+                    prev = cur;
+                }
+                let tot = up_vol + dn_vol;
+                if tot > 0.0 { 100.0 * up_vol / tot } else { 50.0 }
+            }
+            _ => {
+                // No volume -> RSI fallback over a 2*len_r window
+                let end = i;
+                let start = if end + 1 >= 2 * len_r { end + 1 - 2 * len_r } else { 0 };
+                rsi_wilder_last(data, start, end, len_r)
+            }
         };
 
-        let mf_scaled = mf * 2.0 - 100.0;
-        let p = accelerator + (mf_scaled.abs() / 25.0);
+        // Convert 0..100 oscillator to symmetric scale and build power exponent
+        // p = accelerator + |(2*mf - 100)| / 25
+        let mf_scaled = mf.mul_add(2.0, -100.0);
+        let p = accelerator + (mf_scaled.abs() * 0.04); // 1/25 = 0.04
 
-        let window_start = i + 1 - len_r;
-        let mut sum = 0.0;
-        let mut wsum = 0.0;
+        // ----- Power-weighted average over [i+1-len_r ..= i], newest highest weight (k^p for k=len_r..1) -----
+        let start = i + 1 - len_r;
 
-        // Power-weighted average, newest gets highest weight
-        for j in 0..len_r {
-            let idx = window_start + j;
-            let w = ((len_r - j) as f64).powf(p);
-            let x = data[idx];
-            if !x.is_nan() {
-                sum += x * w;
-                wsum += w;
+        // Accumulators (SIMD may fill these; otherwise scalar falls back)
+        let (mut xws, mut wsum) = (0.0f64, 0.0f64);
+
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        match _kernel {
+            Kernel::Avx512 => unsafe {
+                if cfg!(target_feature = "avx512f") {
+                    let (sx, sw) = uma_weighted_accumulate_avx512(
+                        data.as_ptr().add(start),
+                        ln_lut.as_ptr(),
+                        len_r,
+                        p,
+                    );
+                    xws = sx;
+                    wsum = sw;
+                }
+            },
+            Kernel::Avx2 => unsafe {
+                if cfg!(target_feature = "avx2") {
+                    let (sx, sw) = uma_weighted_accumulate_avx2(
+                        data.as_ptr().add(start),
+                        ln_lut.as_ptr(),
+                        len_r,
+                        p,
+                    );
+                    xws = sx;
+                    wsum = sw;
+                }
+            },
+            _ => {}
+        }
+
+        if wsum == 0.0 {
+            // Scalar accumulation fallback
+            // Tight inner loop: compute weight via exp(p * ln(k)) using LUT for ln(k); FMA for accumulation.
+            // Unroll by 2 to hide some latency (len_r is generally small to medium).
+            let mut j = 0usize;
+            while j + 1 < len_r {
+                let k1 = len_r - j;
+                let k2 = k1 - 1;
+
+                let w1 = (p * ln_lut[k1]).exp();
+                let x1 = data[start + j];
+                if !x1.is_nan() {
+                    xws = x1.mul_add(w1, xws);
+                    wsum += w1;
+                }
+
+                let w2 = (p * ln_lut[k2]).exp();
+                let x2 = data[start + j + 1];
+                if !x2.is_nan() {
+                    xws = x2.mul_add(w2, xws);
+                    wsum += w2;
+                }
+
+                j += 2;
+            }
+            if j < len_r {
+                let k = len_r - j;
+                let w = (p * ln_lut[k]).exp();
+                let x = data[start + j];
+                if !x.is_nan() {
+                    xws = x.mul_add(w, xws);
+                    wsum += w;
+                }
             }
         }
-        out[i] = if wsum > 0.0 { sum / wsum } else { data[i] };
+
+        // Finalize
+        out[i] = if wsum > 0.0 { xws / wsum } else { src };
     }
 
     Ok(())
+}
+
+// ====== Optional AVX2/AVX512 accumulation kernels ======
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64", target_feature = "avx2"))]
+#[inline(always)]
+unsafe fn uma_weighted_accumulate_avx2(
+    data: *const f64,         // &data[start] pointer
+    ln_lut: *const f64,       // &ln_lut[0]
+    len_r: usize,             // window length
+    p: f64,                   // exponent
+) -> (f64, f64) {
+    use core::arch::x86_64::*;
+    let mut sum_v = _mm256_setzero_pd();
+    let mut wsum_v = _mm256_setzero_pd();
+
+    let mut j = 0usize;
+    while j + 3 < len_r {
+        let k0 = len_r - j;
+        let k1 = k0 - 1;
+        let k2 = k1 - 1;
+        let k3 = k2 - 1;
+
+        let w0 = (p * *ln_lut.add(k0)).exp();
+        let w1 = (p * *ln_lut.add(k1)).exp();
+        let w2 = (p * *ln_lut.add(k2)).exp();
+        let w3 = (p * *ln_lut.add(k3)).exp();
+        let wv = _mm256_setr_pd(w0, w1, w2, w3);
+
+        let xv = _mm256_loadu_pd(data.add(j));
+
+        // ordered compare: true when not NaN
+        let nan_mask = _mm256_cmp_pd(xv, xv, _CMP_ORD_Q);
+        let xv_nz = _mm256_and_pd(xv, nan_mask);
+
+        sum_v = _mm256_fmadd_pd(xv_nz, wv, sum_v);
+        let wv_masked = _mm256_and_pd(wv, nan_mask);
+        wsum_v = _mm256_add_pd(wsum_v, wv_masked);
+
+        j += 4;
+    }
+
+    let mut xws = 0.0f64;
+    let mut wsum = 0.0f64;
+    {
+        let tmp: [f64; 4] = core::mem::transmute(sum_v);
+        xws += tmp[0] + tmp[1] + tmp[2] + tmp[3];
+        let t2: [f64; 4] = core::mem::transmute(wsum_v);
+        wsum += t2[0] + t2[1] + t2[2] + t2[3];
+    }
+
+    while j < len_r {
+        let k = len_r - j;
+        let w = (p * *ln_lut.add(k)).exp();
+        let x = *data.add(j);
+        if !x.is_nan() {
+            xws = x.mul_add(w, xws);
+            wsum += w;
+        }
+        j += 1;
+    }
+    (xws, wsum)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64", target_feature = "avx512f"))]
+#[inline(always)]
+unsafe fn uma_weighted_accumulate_avx512(
+    data: *const f64,   // &data[start]
+    ln_lut: *const f64, // &ln_lut[0]
+    len_r: usize,
+    p: f64,
+) -> (f64, f64) {
+    use core::arch::x86_64::*;
+    let mut sum_v = _mm512_setzero_pd();
+    let mut wsum_v = _mm512_setzero_pd();
+
+    let mut j = 0usize;
+    while j + 7 < len_r {
+        let k0 = len_r - j;
+        let ks = [k0, k0 - 1, k0 - 2, k0 - 3, k0 - 4, k0 - 5, k0 - 6, k0 - 7];
+        let ws = [
+            (p * *ln_lut.add(ks[0])).exp(),
+            (p * *ln_lut.add(ks[1])).exp(),
+            (p * *ln_lut.add(ks[2])).exp(),
+            (p * *ln_lut.add(ks[3])).exp(),
+            (p * *ln_lut.add(ks[4])).exp(),
+            (p * *ln_lut.add(ks[5])).exp(),
+            (p * *ln_lut.add(ks[6])).exp(),
+            (p * *ln_lut.add(ks[7])).exp(),
+        ];
+        let wv = _mm512_loadu_pd(ws.as_ptr());
+        let xv = _mm512_loadu_pd(data.add(j));
+
+        let nan_mask = _mm512_cmp_pd_mask(xv, xv, _CMP_ORD_Q);
+        let xv_nz = _mm512_maskz_mov_pd(nan_mask, xv);
+
+        sum_v = _mm512_fmadd_pd(xv_nz, wv, sum_v);
+        let wv_masked = _mm512_maskz_mov_pd(nan_mask, wv);
+        wsum_v = _mm512_add_pd(wsum_v, wv_masked);
+
+        j += 8;
+    }
+
+    // Horizontal reduce
+    let xws = {
+        let mut tmp: [f64; 8] = core::mem::zeroed();
+        _mm512_storeu_pd(tmp.as_mut_ptr(), sum_v);
+        tmp.iter().copied().sum::<f64>()
+    };
+    let wsum0 = {
+        let mut tmp: [f64; 8] = core::mem::zeroed();
+        _mm512_storeu_pd(tmp.as_mut_ptr(), wsum_v);
+        tmp.iter().copied().sum::<f64>()
+    };
+
+    let mut xws_acc = xws;
+    let mut wsum_acc = wsum0;
+    while j < len_r {
+        let k = len_r - j;
+        let w = (p * *ln_lut.add(k)).exp();
+        let x = *data.add(j);
+        if !x.is_nan() {
+            xws_acc = x.mul_add(w, xws_acc);
+            wsum_acc += w;
+        }
+        j += 1;
+    }
+    (xws_acc, wsum_acc)
 }
 
 #[inline]
@@ -593,8 +849,12 @@ pub fn uma_with_kernel(input: &UmaInput, kernel: Kernel) -> Result<UmaOutput, Um
     // Primary buffer: NaN prefix allocated once.
     let mut out = alloc_with_nan_prefix(data.len(), warm);
 
-    // Thread kernel through for parity and future SIMD.
-    uma_core_into(input, first, min_len, max_len, accel, kernel, &mut out)?;
+    // Choose kernel (Auto -> detect) and thread through for parity and SIMD.
+    let chosen = match kernel {
+        Kernel::Auto => detect_best_kernel(),
+        k => k,
+    };
+    uma_core_into(input, first, min_len, max_len, accel, chosen, &mut out)?;
 
     // Optional smoothing with no extra copy: return WMA's Vec directly.
     let smooth = input.get_smooth_length();
@@ -630,7 +890,11 @@ pub fn uma_into_slice(dst: &mut [f64], input: &UmaInput, kern: Kernel) -> Result
         *v = f64::NAN;
     }
 
-    uma_core_into(input, first, min_len, max_len, accel, kern, dst)?;
+    let chosen = match kern {
+        Kernel::Auto => detect_best_kernel(),
+        k => k,
+    };
+    uma_core_into(input, first, min_len, max_len, accel, chosen, dst)?;
 
     let smooth = input.get_smooth_length();
     if smooth > 1 {

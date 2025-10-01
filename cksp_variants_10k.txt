@@ -1,0 +1,13 @@
+cksp/cksp_scalar/10k    time:   [225.33 µs 228.10 µs 230.41 µs]
+                        thrpt:  [331.12 MiB/s 334.47 MiB/s 338.59 MiB/s]
+                 change:
+                        time:   [-8.5347% -7.2921% -6.1016%] (p = 0.00 < 0.05)
+                        thrpt:  [+6.4980% +7.8657% +9.3311%]
+                        Performance has improved.
+cksp/cksp_avx2/10k      time:   [227.03 µs 231.18 µs 238.07 µs]
+                        thrpt:  [320.48 MiB/s 330.03 MiB/s 336.05 MiB/s]
+cksp/cksp_avx512/10k    time:   [229.14 µs 230.18 µs 231.42 µs]
+                        thrpt:  [329.67 MiB/s 331.45 MiB/s 332.96 MiB/s]
+Found 2 outliers among 10 measurements (20.00%)
+  2 (20.00%) high severe
+

@@ -1,0 +1,8 @@
+correlation_cycle/correlation_cycle_avx512/100k
+                        time:   [2.7021 ms 2.7362 ms 2.7676 ms]
+                        thrpt:  [275.67 MiB/s 278.84 MiB/s 282.35 MiB/s]
+                 change:
+                        time:   [-3.4271% -2.1910% -1.0220%] (p = 0.00 < 0.05)
+                        thrpt:  [+1.0325% +2.2401% +3.5487%]
+                        Performance has improved.
+

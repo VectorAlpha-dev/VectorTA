@@ -1,0 +1,8 @@
+aroon_osc/aroon_osc_scalar/100k
+                        time:   [760.82 µs 776.03 µs 794.70 µs]
+                        thrpt:  [14.063 GiB/s 14.401 GiB/s 14.689 GiB/s]
+                 change:
+                        time:   [+2.1593% +4.4357% +6.8782%] (p = 0.00 < 0.05)
+                        thrpt:  [-6.4355% -4.2473% -2.1137%]
+                        Performance has regressed.
+

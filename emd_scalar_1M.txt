@@ -1,0 +1,3 @@
+emd_bench/scalar/1M     time:   [6.7965 ms 7.0052 ms 7.1219 ms]
+                        thrpt:  [1.0462 GiB/s 1.0636 GiB/s 1.0962 GiB/s]
+

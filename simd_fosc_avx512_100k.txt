@@ -1,0 +1,6 @@
+fosc/fosc_avx512/100k   time:   [139.60 µs 140.83 µs 141.97 µs]
+                        thrpt:  [5.2481 GiB/s 5.2906 GiB/s 5.3369 GiB/s]
+slope  [139.60 µs 141.97 µs] R^2            [0.9965252 0.9967134]
+mean   [139.55 µs 141.14 µs] std. dev.      [325.76 ns 1.8034 µs]
+median [139.35 µs 141.43 µs] med. abs. dev. [91.993 ns 2.2728 µs]
+

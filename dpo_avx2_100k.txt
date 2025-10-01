@@ -1,0 +1,6 @@
+dpo/dpo_avx2/100k       time:   [37.617 µs 37.788 µs 38.041 µs]
+                        thrpt:  [19.586 GiB/s 19.717 GiB/s 19.806 GiB/s]
+Found 2 outliers among 10 measurements (20.00%)
+  1 (10.00%) high mild
+  1 (10.00%) high severe
+

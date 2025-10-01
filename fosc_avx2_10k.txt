@@ -1,0 +1,6 @@
+fosc/fosc_avx2/10k      time:   [9.6382 µs 9.6988 µs 9.7329 µs]
+                        thrpt:  [7.6550 GiB/s 7.6819 GiB/s 7.7303 GiB/s]
+slope  [9.6382 µs 9.7329 µs] R^2            [0.9986475 0.9991424]
+mean   [9.6328 µs 9.6963 µs] std. dev.      [20.609 ns 67.520 ns]
+median [9.6187 µs 9.6988 µs] med. abs. dev. [9.0658 ns 89.848 ns]
+

@@ -1,0 +1,36 @@
+gaussian_batch/gaussian_batch_scalarbatch/10k
+                        time:   [4.6939 ms 4.9281 ms 5.0774 ms]
+                        thrpt:  [3.3457 GiB/s 3.4470 GiB/s 3.6190 GiB/s]
+gaussian_batch/gaussian_batch_avx2batch/10k
+                        time:   [4.5480 ms 4.6983 ms 4.8539 ms]
+                        thrpt:  [3.4998 GiB/s 3.6156 GiB/s 3.7351 GiB/s]
+gaussian_batch/gaussian_batch_avx512batch/10k
+                        time:   [4.7941 ms 4.8835 ms 4.9692 ms]
+                        thrpt:  [3.4185 GiB/s 3.4785 GiB/s 3.5434 GiB/s]
+Found 2 outliers among 10 measurements (20.00%)
+  2 (20.00%) high severe
+gaussian_batch/gaussian_batch_scalarbatch/100k
+                        time:   [23.228 ms 23.898 ms 24.812 ms]
+                        thrpt:  [6.8464 GiB/s 7.1083 GiB/s 7.3133 GiB/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+gaussian_batch/gaussian_batch_avx2batch/100k
+                        time:   [24.298 ms 25.216 ms 26.007 ms]
+                        thrpt:  [6.5318 GiB/s 6.7366 GiB/s 6.9913 GiB/s]
+gaussian_batch/gaussian_batch_avx512batch/100k
+                        time:   [26.061 ms 27.541 ms 28.251 ms]
+                        thrpt:  [6.0129 GiB/s 6.1681 GiB/s 6.5183 GiB/s]
+gaussian_batch/gaussian_batch_scalarbatch/1M
+                        time:   [223.82 ms 229.47 ms 235.61 ms]
+                        thrpt:  [7.2098 GiB/s 7.4029 GiB/s 7.5897 GiB/s]
+Found 2 outliers among 10 measurements (20.00%)
+  2 (20.00%) high mild
+gaussian_batch/gaussian_batch_avx2batch/1M
+                        time:   [219.30 ms 226.76 ms 235.38 ms]
+                        thrpt:  [7.2170 GiB/s 7.4912 GiB/s 7.7463 GiB/s]
+gaussian_batch/gaussian_batch_avx512batch/1M
+                        time:   [233.36 ms 240.73 ms 250.94 ms]
+                        thrpt:  [6.7695 GiB/s 7.0565 GiB/s 7.2794 GiB/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+

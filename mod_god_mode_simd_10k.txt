@@ -1,0 +1,6 @@
+kaufmanstop/kaufmanstop_avx2/100k
+                        time:   [112.12 µs 113.15 µs 115.18 µs]
+                        thrpt:  [6.4686 GiB/s 6.5845 GiB/s 6.6452 GiB/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+

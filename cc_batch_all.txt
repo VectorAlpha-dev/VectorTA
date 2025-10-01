@@ -1,0 +1,34 @@
+correlation_cycle_batch/correlation_cycle_batch_scalarbatch/10k
+                        time:   [5.4624 ms 5.5536 ms 5.6743 ms]
+                        thrpt:  [13.446 MiB/s 13.738 MiB/s 13.967 MiB/s]
+correlation_cycle_batch/correlation_cycle_batch_avx2batch/10k
+                        time:   [4.3162 ms 4.4490 ms 4.5784 ms]
+                        thrpt:  [16.664 MiB/s 17.149 MiB/s 17.676 MiB/s]
+correlation_cycle_batch/correlation_cycle_batch_avx512batch/10k
+                        time:   [4.3394 ms 4.4652 ms 4.6663 ms]
+                        thrpt:  [16.350 MiB/s 17.087 MiB/s 17.582 MiB/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+correlation_cycle_batch/correlation_cycle_batch_scalarbatch/100k
+                        time:   [43.402 ms 45.374 ms 47.509 ms]
+                        thrpt:  [16.059 MiB/s 16.815 MiB/s 17.579 MiB/s]
+correlation_cycle_batch/correlation_cycle_batch_avx2batch/100k
+                        time:   [31.040 ms 32.332 ms 33.588 ms]
+                        thrpt:  [22.715 MiB/s 23.597 MiB/s 24.579 MiB/s]
+correlation_cycle_batch/correlation_cycle_batch_avx512batch/100k
+                        time:   [30.923 ms 31.395 ms 31.744 ms]
+                        thrpt:  [24.034 MiB/s 24.301 MiB/s 24.672 MiB/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) low mild
+correlation_cycle_batch/correlation_cycle_batch_scalarbatch/1M
+                        time:   [426.81 ms 440.25 ms 455.22 ms]
+                        thrpt:  [16.760 MiB/s 17.330 MiB/s 17.875 MiB/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+correlation_cycle_batch/correlation_cycle_batch_avx2batch/1M
+                        time:   [306.38 ms 318.46 ms 330.48 ms]
+                        thrpt:  [23.086 MiB/s 23.957 MiB/s 24.901 MiB/s]
+correlation_cycle_batch/correlation_cycle_batch_avx512batch/1M
+                        time:   [332.19 ms 344.95 ms 358.68 ms]
+                        thrpt:  [21.271 MiB/s 22.117 MiB/s 22.967 MiB/s]
+

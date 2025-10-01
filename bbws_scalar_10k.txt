@@ -1,0 +1,6 @@
+bollinger_bands_width_bench/scalar/10k
+                        time:   [12.935 µs 13.011 µs 13.072 µs]
+                        thrpt:  [5.6998 GiB/s 5.7264 GiB/s 5.7598 GiB/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+

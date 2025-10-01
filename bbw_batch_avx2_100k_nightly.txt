@@ -1,0 +1,7 @@
+bollinger_bands_width_batch/bollinger_bands_width_batch_avx2batch/100k
+                        time:   [70.311 ms 71.454 ms 72.529 ms]
+                        thrpt:  [10.519 MiB/s 10.677 MiB/s 10.851 MiB/s]
+Found 3 outliers among 10 measurements (30.00%)
+  2 (20.00%) low mild
+  1 (10.00%) high mild
+

@@ -1,0 +1,9 @@
+ehma/ehma_scalar/100k   time:   [303.10 µs 305.53 µs 308.90 µs]
+                        thrpt:  [2.4119 GiB/s 2.4386 GiB/s 2.4581 GiB/s]
+                 change:
+                        time:   [-11.396% -9.9478% -8.0043%] (p = 0.00 < 0.05)
+                        thrpt:  [+8.7008% +11.047% +12.862%]
+                        Performance has improved.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+

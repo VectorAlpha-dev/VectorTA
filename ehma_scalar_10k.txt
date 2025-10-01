@@ -1,0 +1,5 @@
+ehma/ehma_scalar/10k    time:   [29.505 µs 30.100 µs 30.931 µs]
+                        thrpt:  [2.4088 GiB/s 2.4753 GiB/s 2.5252 GiB/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+

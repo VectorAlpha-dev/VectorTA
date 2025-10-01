@@ -14,9 +14,16 @@
 //! - **values**: Vector of percentile values with NaN prefix during warmup period
 //!
 //! ## Developer Notes
-//! - **AVX2/AVX512 Kernels**: Not implemented (kernel parameter reserved but unused)
-//! - **Streaming**: Implemented with O(n log n) update performance (sorts window on each update)
-//! - **Zero-copy Memory**: Uses alloc_with_nan_prefix and make_uninit_matrix for batch operations
+//! - SIMD status: Not implemented. Generic PNR relies on order-statistic selection with irregular
+//!   control flow; prior attempts (Introselect/partial selection) underperformed the simple
+//!   sort-based scalar path at realistic window sizes. Runtime selection short-circuits to scalar.
+//! - Streaming: O(n log n) per update (sorts filtered window each step), kept for correctness and
+//!   consistently better real-world performance vs generic partial selection for typical lengths.
+//! - Batch: Adds a light row-specific optimization that shares the sorted window across rows that
+//!   have the same `length` but different `percentage` values (enabled when `parallel == false`).
+//!   This preserves warmup semantics and reduces redundant work when multiple percentiles are
+//!   requested per length. Default benches (single percentage per length) see no change.
+//! - Zero-copy Memory: Uses alloc_with_nan_prefix and make_uninit_matrix for batch operations
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
@@ -200,31 +207,62 @@ fn pnr_compute_into(
     out: &mut [f64],
 ) {
     // warmup prefix already set by caller when needed
-    let mut window = Vec::with_capacity(length);
+    let n = data.len();
+    if n == 0 { return; }
     let start_i = first + length - 1;
+    if start_i >= n { return; }
 
-    for i in start_i..data.len() {
-        window.clear();
-        // collect last `length` samples ending at i (Pine semantics, newest first)
-        for j in 0..length {
-            let idx = i - j;
-            let v = data[idx];
-            if !v.is_nan() {
-                window.push(v);
+    // maintain a sorted window of non-NaN values for the current i
+    let mut sorted: Vec<f64> = Vec::with_capacity(length);
+    let window_start0 = start_i + 1 - length;
+    for idx in window_start0..=start_i {
+        let v = data[idx];
+        if !v.is_nan() { sorted.push(v); }
+    }
+    sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+
+    let p_frac = percentage * 0.01;
+    let k_const_usize = {
+        let raw = (p_frac.mul_add(length as f64, 0.0)).round() as isize - 1;
+        let mut k = if raw <= 0 { 0usize } else { raw as usize };
+        if k >= length { k = length - 1; }
+        k
+    };
+    let mut i = start_i;
+    loop {
+        if sorted.is_empty() {
+            out[i] = f64::NAN;
+        } else {
+            let wl = sorted.len();
+            let idx = if wl == length {
+                k_const_usize
+            } else {
+                let raw = (p_frac.mul_add(wl as f64, 0.0)).round() as isize - 1;
+                let mut k = if raw <= 0 { 0usize } else { raw as usize };
+                if k >= wl { k = wl - 1; }
+                k
+            };
+            out[i] = sorted[idx];
+        }
+
+        if i + 1 >= n { break; }
+
+        // Slide window: remove outgoing data[i - length + 1], insert incoming data[i+1]
+        let out_idx = i + 1 - length;
+        let v_out = data[out_idx];
+        if !v_out.is_nan() {
+            if let Ok(pos) = sorted.binary_search_by(|x| x.partial_cmp(&v_out).unwrap()) {
+                sorted.remove(pos);
+            }
+        }
+        let v_in = data[i + 1];
+        if !v_in.is_nan() {
+            match sorted.binary_search_by(|x| x.partial_cmp(&v_in).unwrap()) {
+                Ok(pos) | Err(pos) => sorted.insert(pos, v_in),
             }
         }
 
-        if window.is_empty() {
-            out[i] = f64::NAN;
-            continue;
-        }
-        window.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-        // nearest-rank index based on the actual window size
-        let wl = window.len() as f64;
-        let raw = (percentage / 100.0 * wl).round() as isize - 1;
-        let idx = raw.max(0) as usize;
-        out[i] = window[idx.min(window.len() - 1)];
+        i += 1;
     }
 }
 
@@ -841,28 +879,111 @@ fn pnr_batch_inner_into(
         k => k,
     };
 
-    let do_row = |row: usize, dst_row: &mut [f64]| {
-        let length = combos[row].length.unwrap_or(15);
-        let percentage = combos[row].percentage.unwrap_or(50.0);
-        // warmup NaNs were already written by init_matrix_prefixes
-        pnr_compute_into(data, length, percentage, first, chosen, dst_row);
-    };
+    // Group rows by identical length so we can share sorted windows across different percentages
+    use std::collections::HashMap;
+    let mut by_len: HashMap<usize, Vec<(usize, f64)>> = HashMap::new();
+    for (row, p) in combos.iter().enumerate() {
+        let len = p.length.unwrap_or(15);
+        let perc = p.percentage.unwrap_or(50.0);
+        by_len.entry(len).or_default().push((row, perc));
+    }
 
-    if parallel {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            use rayon::prelude::*;
-            out.par_chunks_mut(cols)
-                .enumerate()
-                .for_each(|(row, s)| do_row(row, s));
-        }
-        #[cfg(target_arch = "wasm32")]
-        for (row, s) in out.chunks_mut(cols).enumerate() {
-            do_row(row, s);
+    let has_benefit = by_len.values().any(|v| v.len() > 1);
+
+    if parallel || !has_benefit {
+        // Fallback: per-row evaluation (parallelizable and simple). Keeps current behavior.
+        let do_row = |row: usize, dst_row: &mut [f64]| {
+            let length = combos[row].length.unwrap_or(15);
+            let percentage = combos[row].percentage.unwrap_or(50.0);
+            // warmup NaNs were already written by init_matrix_prefixes
+            pnr_compute_into(data, length, percentage, first, chosen, dst_row);
+        };
+
+        if parallel {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                use rayon::prelude::*;
+                out.par_chunks_mut(cols)
+                    .enumerate()
+                    .for_each(|(row, s)| do_row(row, s));
+            }
+            #[cfg(target_arch = "wasm32")]
+            for (row, s) in out.chunks_mut(cols).enumerate() {
+                do_row(row, s);
+            }
+        } else {
+            for (row, s) in out.chunks_mut(cols).enumerate() {
+                do_row(row, s);
+            }
         }
     } else {
-        for (row, s) in out.chunks_mut(cols).enumerate() {
-            do_row(row, s);
+        // Row-specific optimization: for each length, maintain a single sorted window across time
+        // and index it for each percentage in the group. This avoids rebuilding/sorting each step.
+        for (length, rows) in by_len.into_iter() {
+            let start_i = first + length - 1;
+            if start_i >= cols { continue; }
+
+            // Precompute per-row fractions and constant index for full-length windows
+            let mut rows_info: Vec<(usize, f64, usize)> = Vec::with_capacity(rows.len());
+            for &(row, perc) in &rows {
+                let p_frac = perc * 0.01;
+                let raw = (p_frac.mul_add(length as f64, 0.0)).round() as isize - 1;
+                let mut k = if raw <= 0 { 0usize } else { raw as usize };
+                if k >= length { k = length - 1; }
+                rows_info.push((row, p_frac, k));
+            }
+
+            // Build initial window at start_i
+            let mut sorted: Vec<f64> = Vec::with_capacity(length);
+            let window_start0 = start_i + 1 - length;
+            for idx in window_start0..=start_i {
+                let v = data[idx];
+                if !v.is_nan() { sorted.push(v); }
+            }
+            sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+
+            let mut i = start_i;
+            loop {
+                if sorted.is_empty() {
+                    // propagate NaN to all rows in this group
+                    for &(row, _, _) in &rows_info {
+                        out[row * cols + i] = f64::NAN;
+                    }
+                } else {
+                    let wl = sorted.len();
+                    let full = wl == length;
+                    for &(row, p_frac, k_const) in &rows_info {
+                        let idx = if full {
+                            k_const
+                        } else {
+                            let raw = (p_frac.mul_add(wl as f64, 0.0)).round() as isize - 1;
+                            let mut k = if raw <= 0 { 0usize } else { raw as usize };
+                            if k >= wl { k = wl - 1; }
+                            k
+                        };
+                        out[row * cols + i] = sorted[idx];
+                    }
+                }
+
+                if i + 1 >= cols { break; }
+
+                // Slide: remove outgoing, insert incoming
+                let out_idx = i + 1 - length;
+                let v_out = data[out_idx];
+                if !v_out.is_nan() {
+                    if let Ok(pos) = sorted.binary_search_by(|x| x.partial_cmp(&v_out).unwrap()) {
+                        sorted.remove(pos);
+                    }
+                }
+                let v_in = data[i + 1];
+                if !v_in.is_nan() {
+                    match sorted.binary_search_by(|x| x.partial_cmp(&v_in).unwrap()) {
+                        Ok(pos) | Err(pos) => sorted.insert(pos, v_in),
+                    }
+                }
+
+                i += 1;
+            }
         }
     }
     Ok(())

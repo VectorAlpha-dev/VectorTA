@@ -501,106 +501,67 @@ fn vpci_scalar_into_from_psums(
         return;
     }
 
-    // Helper closures for rolling stats via prefix sums
     #[inline(always)]
-    fn sma(ps: &[f64], start: usize, len: usize) -> f64 {
-        window_sum(ps, start, start + len - 1) / (len as f64)
-    }
-    #[inline(always)]
-    fn vwma(ps_cv: &[f64], ps_vol: &[f64], start: usize, len: usize) -> f64 {
-        let sum_v = window_sum(ps_vol, start, start + len - 1);
-        if sum_v == 0.0 {
-            return f64::NAN;
-        }
-        window_sum(ps_cv, start, start + len - 1) / sum_v
+    fn zf(x: f64) -> f64 {
+        if x.is_finite() { x } else { 0.0 }
     }
 
-    // Compute VPCI and VPCIS
+    let inv_long = 1.0 / (long as f64);
+    let inv_short = 1.0 / (short as f64);
+
+    // Rolling numerator for VPCIS = SMA(VPCI*Volume, short)
     let mut sum_vpci_vol_short = 0.0;
-    let mut have_vpcis_window = false;
 
     for i in warmup..n {
-        let long_start = (i + 1).saturating_sub(long);
-        let short_start = (i + 1).saturating_sub(short);
+        let end = i + 1;
+        let long_start = end.saturating_sub(long);
+        let short_start = end.saturating_sub(short);
 
-        let vwma_l = vwma(ps_cv, ps_vol, long_start, long);
-        let sma_l = sma(ps_close, long_start, long);
-        let vwma_s = vwma(ps_cv, ps_vol, short_start, short);
-        let sma_s = sma(ps_close, short_start, short);
-        let sma_v_s = sma(ps_vol, short_start, short);
-        let sma_v_l = sma(ps_vol, long_start, long);
+        // Prefix-sum window diffs
+        let sc_l = ps_close[end] - ps_close[long_start];
+        let sv_l = ps_vol[end] - ps_vol[long_start];
+        let scv_l = ps_cv[end] - ps_cv[long_start];
 
+        let sc_s = ps_close[end] - ps_close[short_start];
+        let sv_s = ps_vol[end] - ps_vol[short_start];
+        let scv_s = ps_cv[end] - ps_cv[short_start];
+
+        // SMAs (use reciprocals for constants)
+        let sma_l = sc_l * inv_long;
+        let sma_s = sc_s * inv_short;
+        let sma_v_l = sv_l * inv_long;
+        let sma_v_s = sv_s * inv_short;
+
+        // VWMAs with zero-denominator guards
+        let vwma_l = if sv_l != 0.0 { scv_l / sv_l } else { f64::NAN };
+        let vwma_s = if sv_s != 0.0 { scv_s / sv_s } else { f64::NAN };
+
+        // Components
         let vpc = vwma_l - sma_l;
-        let vpr = if sma_s != 0.0 {
-            vwma_s / sma_s
-        } else {
-            f64::NAN
-        };
-        let vm = if sma_v_l != 0.0 {
-            sma_v_s / sma_v_l
-        } else {
-            f64::NAN
-        };
+        let vpr = if sma_s != 0.0 { vwma_s / sma_s } else { f64::NAN };
+        let vm = if sma_v_l != 0.0 { sma_v_s / sma_v_l } else { f64::NAN };
 
+        // VPCI
         let vpci = vpc * vpr * vm;
         vpci_out[i] = vpci;
 
-        // VPCIS window starts once we have short items ending at i.
-        // Initialize once at i == warmup: include indices [i - short + 1 .. i], but clamp lower bound to warmup.
-        if !have_vpcis_window {
-            if i + 1 >= warmup + short {
-                // first full short window entirely ≥ warmup
-                sum_vpci_vol_short = 0.0;
-                for k in (i + 1 - short)..=i {
-                    if k >= warmup {
-                        let x = vpci_out[k];
-                        let v = volume[k];
-                        if x.is_finite() && v.is_finite() {
-                            sum_vpci_vol_short += x * v;
-                        }
-                    }
-                }
-                have_vpcis_window = true;
-            } else {
-                // Partial window that includes < warmup indices: include only k ≥ warmup
-                sum_vpci_vol_short = 0.0;
-                for k in warmup..=i {
-                    let x = vpci_out[k];
-                    let v = volume[k];
-                    if x.is_finite() && v.is_finite() {
-                        sum_vpci_vol_short += x * v;
-                    }
-                }
-                // Still allowed to emit based on definition used in your scalar version
-                have_vpcis_window = true;
-            }
-        } else {
-            // Slide by one
-            let add_k = i;
-            if add_k >= warmup {
-                let x_add = vpci_out[add_k];
-                let v_add = volume[add_k];
-                if x_add.is_finite() && v_add.is_finite() {
-                    sum_vpci_vol_short += x_add * v_add;
-                }
-            }
-            let rm_k = i.saturating_sub(short);
-            if rm_k >= warmup {
-                let x_rm = vpci_out[rm_k];
-                let v_rm = volume[rm_k];
-                if x_rm.is_finite() && v_rm.is_finite() {
-                    sum_vpci_vol_short -= x_rm * v_rm;
-                }
-            }
+        // Update rolling numerator for VPCIS: sum of (VPCI * Volume) over last `short`
+        let v_i = volume[i];
+        sum_vpci_vol_short += zf(vpci) * zf(v_i);
+        if i >= warmup + short {
+            let rm_idx = i - short;
+            let vpci_rm = vpci_out[rm_idx];
+            let v_rm = volume[rm_idx];
+            sum_vpci_vol_short -= zf(vpci_rm) * zf(v_rm);
         }
 
         // VPCIS = SMA(VPCI*Volume, short) / SMA(Volume, short)
         let denom = sma_v_s;
-        if denom != 0.0 && denom.is_finite() {
-            vpcis_out[i] = (sum_vpci_vol_short / (short as f64)) / denom;
+        vpcis_out[i] = if denom != 0.0 && denom.is_finite() {
+            (sum_vpci_vol_short * inv_short) / denom
         } else {
-            vpcis_out[i] = f64::NAN;
-        }
+            f64::NAN
+        };
     }
 }
 
@@ -1219,7 +1180,7 @@ mod tests {
         for (i, &val) in vpci_last_five.iter().enumerate() {
             let diff = (val - expected_vpci[i]).abs();
             assert!(
-                diff < 1e-1,
+                diff < 5e-2,
                 "[{}] VPCI mismatch at idx {}: got {}, expected {}",
                 test_name,
                 i,
@@ -1230,7 +1191,7 @@ mod tests {
         for (i, &val) in vpcis_last_five.iter().enumerate() {
             let diff = (val - expected_vpcis[i]).abs();
             assert!(
-                diff < 1e-1,
+                diff < 5e-2,
                 "[{}] VPCIS mismatch at idx {}: got {}, expected {}",
                 test_name,
                 i,
@@ -1766,7 +1727,7 @@ mod tests {
         let start = row.len() - 5;
         for (i, &v) in row[start..].iter().enumerate() {
             assert!(
-                (v - expected[i]).abs() < 1e-1,
+                (v - expected[i]).abs() < 5e-2,
                 "[{test}] default-row mismatch at idx {i}: {v} vs {expected:?}"
             );
         }

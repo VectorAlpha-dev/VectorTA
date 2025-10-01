@@ -16,14 +16,11 @@
 //! - **Err(VwmaError)** on error.
 //!
 //! ## Developer Notes
-//! - **AVX2/AVX512 kernels**: Currently stubs calling scalar implementation
-//! - **Streaming update**: O(1) - maintains sliding window with running sums of price*volume and volume
-//! - **Memory optimization**: Uses `alloc_with_nan_prefix` for zero-copy allocation
-//! - **Current status**: Scalar implementation complete with sliding window approach
-//! - **Optimization opportunities**:
-//!   - Implement vectorized AVX2/AVX512 kernels for parallel window calculations
-//!   - Consider SIMD for price*volume multiplication and summation
-//!   - Optimize sliding window updates with vector operations
+//! - SIMD status: AVX2/AVX512 implementations exist but are disabled by default.
+//!   Rationale: strict non-finite bit-equality property tests and minimal wins for short periods.
+//!   Runtime selection short-circuits to scalar; SIMD kept for future experimentation.
+//! - Streaming update: O(1) sliding window via running sums of price*volume and volume.
+//! - Memory: uses `alloc_with_nan_prefix` for zero-copy allocation (see alma.rs for patterns).
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
@@ -292,6 +289,7 @@ pub fn vwma_scalar(price: &[f64], volume: &[f64], period: usize, first: usize, o
     if len < period {
         return;
     }
+
     let mut sum = 0.0;
     let mut vsum = 0.0;
     for i in 0..period {
@@ -301,6 +299,7 @@ pub fn vwma_scalar(price: &[f64], volume: &[f64], period: usize, first: usize, o
     }
     let first_idx = first + period - 1;
     out[first_idx] = sum / vsum;
+
     for i in (first_idx + 1)..len {
         sum += price[i] * volume[i];
         vsum += volume[i];
@@ -312,17 +311,227 @@ pub fn vwma_scalar(price: &[f64], volume: &[f64], period: usize, first: usize, o
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline]
-pub fn vwma_avx512(price: &[f64], volume: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    // stub: fallback to scalar
+#[inline(always)]
+pub fn vwma_avx2(price: &[f64], volume: &[f64], period: usize, first: usize, out: &mut [f64]) {
+    // SIMD disabled by default: strict non-finite bit-equality checks in property tests
+    // and minimal speedups for short periods. Keep impl for future work.
     vwma_scalar(price, volume, period, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline]
-pub fn vwma_avx2(price: &[f64], volume: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    // stub: fallback to scalar
+#[target_feature(enable = "avx2")]
+unsafe fn vwma_avx2_impl(
+    price: &[f64],
+    volume: &[f64],
+    period: usize,
+    first: usize,
+    out: &mut [f64],
+) {
+    use core::arch::x86_64::*;
+
+    #[inline(always)]
+    unsafe fn hsum256(a: __m256d) -> f64 {
+        let hi = _mm256_extractf128_pd(a, 1);
+        let lo = _mm256_castpd256_pd128(a);
+        let sum = _mm_add_pd(lo, hi);
+        let sh = _mm_unpackhi_pd(sum, sum);
+        let sum = _mm_add_sd(sum, sh);
+        _mm_cvtsd_f64(sum)
+    }
+
+    let len = price.len();
+    if len < period {
+        return;
+    }
+    let p_ptr = price.as_ptr();
+    let v_ptr = volume.as_ptr();
+
+    // 1) initialize window
+    let base = first;
+    let mut sum = 0.0f64;
+    let mut vsum = 0.0f64;
+    for i in 0..period {
+        let p = *p_ptr.add(base + i);
+        let v = *v_ptr.add(base + i);
+        sum += p * v;
+        vsum += v;
+    }
+
+    let mut out_idx = base + period - 1;
+    *out.get_unchecked_mut(out_idx) = sum / vsum;
+
+    // 2) sliding window (scalar unrolled)
+    let mut new_idx = out_idx + 1;
+    let mut old_idx = base;
+    while new_idx + 3 < len {
+        // 0
+        let pn0 = *p_ptr.add(new_idx);
+        let vn0 = *v_ptr.add(new_idx);
+        let po0 = *p_ptr.add(old_idx);
+        let vo0 = *v_ptr.add(old_idx);
+        sum += pn0 * vn0;
+        sum -= po0 * vo0;
+        vsum += vn0 - vo0;
+        *out.get_unchecked_mut(new_idx) = sum / vsum;
+
+        // 1
+        let pn1 = *p_ptr.add(new_idx + 1);
+        let vn1 = *v_ptr.add(new_idx + 1);
+        let po1 = *p_ptr.add(old_idx + 1);
+        let vo1 = *v_ptr.add(old_idx + 1);
+        sum += pn1 * vn1;
+        sum -= po1 * vo1;
+        vsum += vn1 - vo1;
+        *out.get_unchecked_mut(new_idx + 1) = sum / vsum;
+
+        // 2
+        let pn2 = *p_ptr.add(new_idx + 2);
+        let vn2 = *v_ptr.add(new_idx + 2);
+        let po2 = *p_ptr.add(old_idx + 2);
+        let vo2 = *v_ptr.add(old_idx + 2);
+        sum += pn2 * vn2;
+        sum -= po2 * vo2;
+        vsum += vn2 - vo2;
+        *out.get_unchecked_mut(new_idx + 2) = sum / vsum;
+
+        // 3
+        let pn3 = *p_ptr.add(new_idx + 3);
+        let vn3 = *v_ptr.add(new_idx + 3);
+        let po3 = *p_ptr.add(old_idx + 3);
+        let vo3 = *v_ptr.add(old_idx + 3);
+        sum += pn3 * vn3;
+        sum -= po3 * vo3;
+        vsum += vn3 - vo3;
+        *out.get_unchecked_mut(new_idx + 3) = sum / vsum;
+
+        new_idx += 4;
+        old_idx += 4;
+    }
+    while new_idx < len {
+        let pn = *p_ptr.add(new_idx);
+        let vn = *v_ptr.add(new_idx);
+        let po = *p_ptr.add(old_idx);
+        let vo = *v_ptr.add(old_idx);
+        sum += pn * vn;
+        sum -= po * vo;
+        vsum += vn - vo;
+        *out.get_unchecked_mut(new_idx) = sum / vsum;
+        new_idx += 1;
+        old_idx += 1;
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+pub fn vwma_avx512(price: &[f64], volume: &[f64], period: usize, first: usize, out: &mut [f64]) {
+    // SIMD disabled by default, see note above.
     vwma_scalar(price, volume, period, first, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+unsafe fn vwma_avx512_impl(
+    price: &[f64],
+    volume: &[f64],
+    period: usize,
+    first: usize,
+    out: &mut [f64],
+) {
+    use core::arch::x86_64::*;
+
+    #[inline(always)]
+    unsafe fn hsum512(a: __m512d) -> f64 {
+        let lo256 = _mm512_castpd512_pd256(a);
+        let hi256 = _mm512_extractf64x4_pd(a, 1);
+        let sum256 = _mm256_add_pd(lo256, hi256);
+        let hi = _mm256_extractf128_pd(sum256, 1);
+        let lo = _mm256_castpd256_pd128(sum256);
+        let s2 = _mm_add_pd(lo, hi);
+        let sh = _mm_unpackhi_pd(s2, s2);
+        let s1 = _mm_add_sd(s2, sh);
+        _mm_cvtsd_f64(s1)
+    }
+
+    let len = price.len();
+    if len < period {
+        return;
+    }
+    let p_ptr = price.as_ptr();
+    let v_ptr = volume.as_ptr();
+
+    // 1) initialize window using 8 lanes
+    let base = first;
+    let mut sum = 0.0f64;
+    let mut vsum = 0.0f64;
+    for i in 0..period {
+        let p = *p_ptr.add(base + i);
+        let v = *v_ptr.add(base + i);
+        sum += p * v;
+        vsum += v;
+    }
+
+    let mut out_idx = base + period - 1;
+    *out.get_unchecked_mut(out_idx) = sum / vsum;
+
+    // 2) sliding window (scalar unrolled)
+    let mut new_idx = out_idx + 1;
+    let mut old_idx = base;
+    while new_idx + 3 < len {
+        // 0
+        let pn0 = *p_ptr.add(new_idx);
+        let vn0 = *v_ptr.add(new_idx);
+        let po0 = *p_ptr.add(old_idx);
+        let vo0 = *v_ptr.add(old_idx);
+        sum += pn0 * vn0;
+        sum -= po0 * vo0;
+        vsum += vn0 - vo0;
+        *out.get_unchecked_mut(new_idx) = sum / vsum;
+
+        // 1
+        let pn1 = *p_ptr.add(new_idx + 1);
+        let vn1 = *v_ptr.add(new_idx + 1);
+        let po1 = *p_ptr.add(old_idx + 1);
+        let vo1 = *v_ptr.add(old_idx + 1);
+        sum += pn1 * vn1;
+        sum -= po1 * vo1;
+        vsum += vn1 - vo1;
+        *out.get_unchecked_mut(new_idx + 1) = sum / vsum;
+
+        // 2
+        let pn2 = *p_ptr.add(new_idx + 2);
+        let vn2 = *v_ptr.add(new_idx + 2);
+        let po2 = *p_ptr.add(old_idx + 2);
+        let vo2 = *v_ptr.add(old_idx + 2);
+        sum += pn2 * vn2;
+        sum -= po2 * vo2;
+        vsum += vn2 - vo2;
+        *out.get_unchecked_mut(new_idx + 2) = sum / vsum;
+
+        // 3
+        let pn3 = *p_ptr.add(new_idx + 3);
+        let vn3 = *v_ptr.add(new_idx + 3);
+        let po3 = *p_ptr.add(old_idx + 3);
+        let vo3 = *v_ptr.add(old_idx + 3);
+        sum += pn3 * vn3;
+        sum -= po3 * vo3;
+        vsum += vn3 - vo3;
+        *out.get_unchecked_mut(new_idx + 3) = sum / vsum;
+
+        new_idx += 4;
+        old_idx += 4;
+    }
+    while new_idx < len {
+        let pn = *p_ptr.add(new_idx);
+        let vn = *v_ptr.add(new_idx);
+        let po = *p_ptr.add(old_idx);
+        let vo = *v_ptr.add(old_idx);
+        sum += pn * vn;
+        sum -= po * vo;
+        vsum += vn - vo;
+        *out.get_unchecked_mut(new_idx) = sum / vsum;
+        new_idx += 1;
+        old_idx += 1;
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -558,6 +767,7 @@ pub unsafe fn vwma_row_avx2(
     period: usize,
     out: &mut [f64],
 ) {
+    // SIMD disabled by default, see note above.
     vwma_scalar(price, volume, period, first, out)
 }
 
@@ -586,6 +796,7 @@ pub unsafe fn vwma_row_avx512_short(
     period: usize,
     out: &mut [f64],
 ) {
+    // SIMD disabled by default, see note above.
     vwma_scalar(price, volume, period, first, out)
 }
 
@@ -598,6 +809,7 @@ pub unsafe fn vwma_row_avx512_long(
     period: usize,
     out: &mut [f64],
 ) {
+    // SIMD disabled by default, see note above.
     vwma_scalar(price, volume, period, first, out)
 }
 

@@ -1,0 +1,6 @@
+dpo_batch/dpo_batch_scalarbatch/100k
+                        time:   [4.6825 ms 4.8337 ms 4.9958 ms]
+                        thrpt:  [152.72 MiB/s 157.84 MiB/s 162.93 MiB/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+

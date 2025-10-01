@@ -11,9 +11,10 @@
 //! - **`Err(LrsiError)`** on failure
 //!
 //! ## Developer Status
-//! - **SIMD Kernels**: AVX2 (stub), AVX512 (stubs - short/long variants)
+//! - **SIMD Kernels**: AVX2/AVX512 delegate to scalar (IIR dependency across time prevents lane speedup)
 //! - **Streaming**: O(1) performance
 //! - **Memory**: Good zero-copy usage (alloc_with_nan_prefix, make_uninit_matrix)
+//! - **Batch**: Row kernels reuse a precomputed mid-price series for all rows
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
@@ -328,120 +329,121 @@ pub fn lrsi_into_slice(dst: &mut [f64], input: &LrsiInput, kern: Kernel) -> Resu
 
 #[inline]
 pub fn lrsi_scalar_hl(high: &[f64], low: &[f64], alpha: f64, first: usize, out: &mut [f64]) {
+    debug_assert_eq!(high.len(), low.len());
+
+    let len = high.len();
+    if len == 0 {
+        return;
+    }
+
     let gamma = 1.0 - alpha;
+    let mgamma = -gamma;
+    let warm = first + 3;
 
     // Initialize state from first valid price
-    let first_price = (high[first] + low[first]) / 2.0;
+    let first_price = (high[first] + low[first]) * 0.5;
     let mut l0 = first_price;
     let mut l1 = first_price;
     let mut l2 = first_price;
     let mut l3 = first_price;
 
-    // Advance states over the warmup, but do not write outputs yet
-    for i in (first + 1)..high.len() {
-        let p = (high[i] + low[i]) / 2.0;
+    for i in (first + 1)..len {
+        // mid-price = (high + low) * 0.5
+        let p = (high[i] + low[i]) * 0.5;
 
         if p.is_nan() {
-            // Must write NaN to avoid uninitialized memory in batch paths
-            if i >= first + 3 {
+            // Keep poison-free contract after warmup
+            if i >= warm {
                 out[i] = f64::NAN;
             }
-            continue; // Skip state update but wrote the value
+            continue;
         }
 
-        let new_l0 = alpha * p + gamma * l0;
-        let new_l1 = -gamma * new_l0 + l0 + gamma * l1;
-        let new_l2 = -gamma * new_l1 + l1 + gamma * l2;
-        let new_l3 = -gamma * new_l2 + l2 + gamma * l3;
+        // 4-stage Laguerre filter using FMAs where profitable
+        let t0 = (p - l0).mul_add(alpha, l0);
+        let t1 = gamma.mul_add(l1, mgamma.mul_add(t0, l0));
+        let t2 = gamma.mul_add(l2, mgamma.mul_add(t1, l1));
+        let t3 = gamma.mul_add(l3, mgamma.mul_add(t2, l2));
 
-        // Only write once we have 4 samples: i >= first + 3
-        if i >= first + 3 {
-            let mut cu = 0.0;
-            let mut cd = 0.0;
-            if new_l0 >= new_l1 {
-                cu += new_l0 - new_l1
-            } else {
-                cd += new_l1 - new_l0
-            }
-            if new_l1 >= new_l2 {
-                cu += new_l1 - new_l2
-            } else {
-                cd += new_l2 - new_l1
-            }
-            if new_l2 >= new_l3 {
-                cu += new_l2 - new_l3
-            } else {
-                cd += new_l3 - new_l2
-            }
+        if i >= warm {
+            // Differences
+            let d01 = t0 - t1;
+            let d12 = t1 - t2;
+            let d23 = t2 - t3;
 
-            out[i] = if (cu + cd).abs() < f64::EPSILON {
-                0.0
-            } else {
-                cu / (cu + cd)
-            };
+            // Branchless up/down components via abs identities
+            let a01 = d01.abs();
+            let a12 = d12.abs();
+            let a23 = d23.abs();
+
+            let sum_abs = a01 + a12 + a23; // cu + cd
+            let cu = 0.5 * (d01 + a01 + d12 + a12 + d23 + a23);
+
+            let v = if sum_abs <= f64::EPSILON { 0.0 } else { cu / sum_abs };
+            // Numerical safety: clamp to [0,1]
+            out[i] = v.min(1.0).max(0.0);
         }
 
-        l0 = new_l0;
-        l1 = new_l1;
-        l2 = new_l2;
-        l3 = new_l3;
+        // Commit state
+        l0 = t0;
+        l1 = t1;
+        l2 = t2;
+        l3 = t3;
     }
 }
 
 // Keep old function for compatibility with row functions
 #[inline]
 pub fn lrsi_scalar(price: &[f64], alpha: f64, first: usize, out: &mut [f64]) {
+    let len = price.len();
+    if len == 0 {
+        return;
+    }
+
     let gamma = 1.0 - alpha;
+    let mgamma = -gamma;
+    let warm = first + 3;
+
     let mut l0 = price[first];
-    let mut l1 = price[first];
-    let mut l2 = price[first];
-    let mut l3 = price[first];
+    let mut l1 = l0;
+    let mut l2 = l0;
+    let mut l3 = l0;
 
-    for i in (first + 1)..price.len() {
+    for i in (first + 1)..len {
         let p = price[i];
-
         if p.is_nan() {
-            // Must write NaN to avoid uninitialized memory in batch paths
-            if i >= first + 3 {
+            if i >= warm {
                 out[i] = f64::NAN;
             }
-            continue; // Skip state update but wrote the value
+            continue;
         }
 
-        let new_l0 = alpha * p + gamma * l0;
-        let new_l1 = -gamma * new_l0 + l0 + gamma * l1;
-        let new_l2 = -gamma * new_l1 + l1 + gamma * l2;
-        let new_l3 = -gamma * new_l2 + l2 + gamma * l3;
+        let t0 = (p - l0).mul_add(alpha, l0);
+        let t1 = gamma.mul_add(l1, mgamma.mul_add(t0, l0));
+        let t2 = gamma.mul_add(l2, mgamma.mul_add(t1, l1));
+        let t3 = gamma.mul_add(l3, mgamma.mul_add(t2, l2));
 
-        if i >= first + 3 {
-            let mut cu = 0.0;
-            let mut cd = 0.0;
-            if new_l0 >= new_l1 {
-                cu += new_l0 - new_l1
-            } else {
-                cd += new_l1 - new_l0
-            }
-            if new_l1 >= new_l2 {
-                cu += new_l1 - new_l2
-            } else {
-                cd += new_l2 - new_l1
-            }
-            if new_l2 >= new_l3 {
-                cu += new_l2 - new_l3
-            } else {
-                cd += new_l3 - new_l2
-            }
-            out[i] = if (cu + cd).abs() < f64::EPSILON {
-                0.0
-            } else {
-                cu / (cu + cd)
-            };
+        if i >= warm {
+            let d01 = t0 - t1;
+            let d12 = t1 - t2;
+            let d23 = t2 - t3;
+
+            let a01 = d01.abs();
+            let a12 = d12.abs();
+            let a23 = d23.abs();
+
+            let sum_abs = a01 + a12 + a23;
+            let cu = 0.5 * (d01 + a01 + d12 + a12 + d23 + a23);
+
+            let v = if sum_abs <= f64::EPSILON { 0.0 } else { cu / sum_abs };
+            // Numerical safety: clamp to [0,1]
+            out[i] = v.min(1.0).max(0.0);
         }
 
-        l0 = new_l0;
-        l1 = new_l1;
-        l2 = new_l2;
-        l3 = new_l3;
+        l0 = t0;
+        l1 = t1;
+        l2 = t2;
+        l3 = t3;
     }
 }
 
@@ -1854,15 +1856,15 @@ fn lrsi_batch_inner_into(
         return Err(LrsiError::EmptyData);
     }
 
-    // Find first valid price
-    let first = (0..high.len())
-        .find(|&i| ((high[i] + low[i]) / 2.0).is_finite())
+    // Precompute mid-price once for all rows and find first valid index
+    let len = high.len();
+    let mut prices = Vec::with_capacity(len);
+    prices.extend((0..len).map(|i| (high[i] + low[i]) * 0.5));
+    let first = (0..len)
+        .find(|&i| prices[i].is_finite())
         .ok_or(LrsiError::AllValuesNaN)?;
-    if high.len() - first < 4 {
-        return Err(LrsiError::NotEnoughValidData {
-            needed: 4,
-            valid: high.len() - first,
-        });
+    if len - first < 4 {
+        return Err(LrsiError::NotEnoughValidData { needed: 4, valid: len - first });
     }
 
     let rows = combos.len();
@@ -1890,11 +1892,11 @@ fn lrsi_batch_inner_into(
         }
 
         match kern {
-            Kernel::Scalar => lrsi_row_scalar_hl(high, low, first, alpha, dst_row),
+            Kernel::Scalar => lrsi_row_scalar(&prices, first, alpha, dst_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => lrsi_row_avx2_hl(high, low, first, alpha, dst_row),
+            Kernel::Avx2 => lrsi_row_avx2(&prices, first, alpha, dst_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => lrsi_row_avx512_hl(high, low, first, alpha, dst_row),
+            Kernel::Avx512 => lrsi_row_avx512(&prices, first, alpha, dst_row),
             Kernel::Auto | _ => unreachable!(),
         }
     };

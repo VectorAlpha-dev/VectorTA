@@ -1,0 +1,11 @@
+uma/uma_scalar/10k      time:   [989.11 µs 996.80 µs 1.0007 ms]
+                        thrpt:  [76.241 MiB/s 76.539 MiB/s 77.134 MiB/s]
+
+uma/uma_avx2/10k        time:   [992.49 µs 995.78 µs 999.17 µs]
+                        thrpt:  [76.357 MiB/s 76.617 MiB/s 76.871 MiB/s]
+
+uma/uma_avx512/10k      time:   [997.94 µs 1.0028 ms 1.0083 ms]
+                        thrpt:  [75.665 MiB/s 76.083 MiB/s 76.452 MiB/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+

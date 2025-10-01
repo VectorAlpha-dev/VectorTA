@@ -1,0 +1,6 @@
+bollinger_bands_width/bollinger_bands_width_avx512/1M
+                        time:   [2.0695 ms 2.0829 ms 2.1018 ms]
+                        thrpt:  [3.5448 GiB/s 3.5770 GiB/s 3.6001 GiB/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+

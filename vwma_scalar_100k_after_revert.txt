@@ -1,0 +1,10 @@
+vwma/vwma_scalar/100k   time:   [73.720 µs 73.843 µs 74.103 µs]
+                        thrpt:  [10.054 GiB/s 10.090 GiB/s 10.107 GiB/s]
+                 change:
+                        time:   [-44.690% -43.946% -43.349%] (p = 0.00 < 0.05)
+                        thrpt:  [+76.519% +78.400% +80.799%]
+                        Performance has improved.
+Found 3 outliers among 10 measurements (30.00%)
+  2 (20.00%) low mild
+  1 (10.00%) high severe
+

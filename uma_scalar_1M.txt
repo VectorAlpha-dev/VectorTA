@@ -1,0 +1,5 @@
+uma/uma_scalar/1M       time:   [107.06 ms 108.68 ms 110.66 ms]
+                        thrpt:  [68.944 MiB/s 70.198 MiB/s 71.265 MiB/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+

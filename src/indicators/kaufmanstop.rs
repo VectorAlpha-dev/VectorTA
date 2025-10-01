@@ -14,7 +14,8 @@
 //! - **`Err(KaufmanstopError)`** on failure
 //!
 //! ## Developer Status
-//! - **SIMD Kernels**: AVX2 (stub), AVX512 (stubs - short/long variants)
+//! - **SIMD Kernels**: AVX2/AVX512 enabled (AXPY-style) — disabled by default for Auto since scalar is as fast or faster on typical CPUs (memory-bound). Use explicit Avx2/Avx512 kernels only for experimentation.
+//! - **Row-Specific Batch**: Not implemented; MA cost dominates and AXPY write per row is cheap. Potential future work: group by (ma_type, period) and reuse `range_ma` across rows.
 //! - **Streaming**: O(n) performance (recalculates MA on full buffer each update)
 //! - **Memory**: Good zero-copy usage (alloc_with_nan_prefix, make_uninit_matrix)
 use crate::indicators::moving_averages::ma::{ma, MaData};
@@ -348,8 +349,9 @@ pub fn kaufmanstop_with_kernel(
     let ma_input = MaData::Slice(&hl_diff[first_valid_idx..]);
     let hl_diff_ma = ma(ma_type, ma_input, period).map_err(|_| KaufmanstopError::AllValuesNaN)?;
 
+    // SIMD underperforms vs scalar (memory-bound AXPY); default to Scalar for Auto.
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -404,15 +406,42 @@ pub fn kaufmanstop_scalar(
     direction: &str,
     out: &mut [f64],
 ) {
-    for (i, &val) in range_ma.iter().enumerate() {
-        let idx = first + i;
-        if idx < high.len() {
-            if direction.eq_ignore_ascii_case("long") {
-                out[idx] = low[idx] - val * mult;
-            } else {
-                out[idx] = high[idx] + val * mult;
-            }
-        }
+    debug_assert_eq!(high.len(), low.len());
+    debug_assert_eq!(out.len(), high.len());
+
+    if first >= high.len() {
+        return;
+    }
+
+    // Select base series and multiplier sign once (avoid per-iteration branch)
+    let is_long = direction.eq_ignore_ascii_case("long");
+    let base = if is_long { low } else { high };
+    let signed_mult = if is_long { -mult } else { mult };
+
+    // Number of outputs we can write safely
+    let n = core::cmp::min(range_ma.len(), high.len() - first);
+    if n == 0 {
+        return;
+    }
+
+    // Slice once to eliminate bounds checks in the hot loop
+    let rm = &range_ma[..n];
+    let base_s = &base[first..first + n];
+    let out_s = &mut out[first..first + n];
+
+    // Process in chunks of 4 for a touch of unrolling; tail handled after
+    let chunks = rm.len() & !3usize;
+    let mut i = 0usize;
+    while i < chunks {
+        out_s[i + 0] = base_s[i + 0] + rm[i + 0] * signed_mult;
+        out_s[i + 1] = base_s[i + 1] + rm[i + 1] * signed_mult;
+        out_s[i + 2] = base_s[i + 2] + rm[i + 2] * signed_mult;
+        out_s[i + 3] = base_s[i + 3] + rm[i + 3] * signed_mult;
+        i += 4;
+    }
+    while i < rm.len() {
+        out_s[i] = base_s[i] + rm[i] * signed_mult;
+        i += 1;
     }
 }
 
@@ -428,7 +457,49 @@ pub fn kaufmanstop_avx2(
     direction: &str,
     out: &mut [f64],
 ) {
-    kaufmanstop_scalar(high, low, range_ma, period, first, mult, direction, out)
+    use core::arch::x86_64::*;
+
+    debug_assert_eq!(high.len(), low.len());
+    debug_assert_eq!(out.len(), high.len());
+    if first >= high.len() {
+        return;
+    }
+
+    let is_long = direction.eq_ignore_ascii_case("long");
+    let base = if is_long { low } else { high };
+    let signed_mult = if is_long { -mult } else { mult };
+
+    let n = core::cmp::min(range_ma.len(), high.len() - first);
+    if n == 0 {
+        return;
+    }
+
+    unsafe {
+        let base_ptr = base.as_ptr().add(first);
+        let rm_ptr = range_ma.as_ptr();
+        let out_ptr = out.as_mut_ptr().add(first);
+
+        let mut i = 0usize;
+        if n >= 4 {
+            let m = _mm256_set1_pd(signed_mult);
+            let n_vec = n & !3usize;
+            while i < n_vec {
+                let r = _mm256_loadu_pd(rm_ptr.add(i));
+                let b = _mm256_loadu_pd(base_ptr.add(i));
+                let prod = _mm256_mul_pd(r, m);
+                let res = _mm256_add_pd(b, prod);
+                _mm256_storeu_pd(out_ptr.add(i), res);
+                i += 4;
+            }
+        }
+
+        while i < n {
+            let r = *rm_ptr.add(i);
+            let b = *base_ptr.add(i);
+            *out_ptr.add(i) = b + r * signed_mult;
+            i += 1;
+        }
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -464,7 +535,7 @@ pub unsafe fn kaufmanstop_avx512_short(
     direction: &str,
     out: &mut [f64],
 ) {
-    kaufmanstop_scalar(high, low, range_ma, _period, first, mult, direction, out)
+    kaufmanstop_avx512_impl(high, low, range_ma, first, mult, direction, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -479,7 +550,61 @@ pub unsafe fn kaufmanstop_avx512_long(
     direction: &str,
     out: &mut [f64],
 ) {
-    kaufmanstop_scalar(high, low, range_ma, _period, first, mult, direction, out)
+    kaufmanstop_avx512_impl(high, low, range_ma, first, mult, direction, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn kaufmanstop_avx512_impl(
+    high: &[f64],
+    low: &[f64],
+    range_ma: &[f64],
+    first: usize,
+    mult: f64,
+    direction: &str,
+    out: &mut [f64],
+) {
+    use core::arch::x86_64::*;
+
+    debug_assert_eq!(high.len(), low.len());
+    debug_assert_eq!(out.len(), high.len());
+    if first >= high.len() {
+        return;
+    }
+
+    let is_long = direction.eq_ignore_ascii_case("long");
+    let base = if is_long { low } else { high };
+    let signed_mult = if is_long { -mult } else { mult };
+
+    let n = core::cmp::min(range_ma.len(), high.len() - first);
+    if n == 0 {
+        return;
+    }
+
+    let base_ptr = base.as_ptr().add(first);
+    let rm_ptr = range_ma.as_ptr();
+    let out_ptr = out.as_mut_ptr().add(first);
+
+    let mut i = 0usize;
+    if n >= 8 {
+        let m = _mm512_set1_pd(signed_mult);
+        let n_vec = n & !7usize;
+        while i < n_vec {
+            let r = _mm512_loadu_pd(rm_ptr.add(i));
+            let b = _mm512_loadu_pd(base_ptr.add(i));
+            let prod = _mm512_mul_pd(r, m);
+            let res = _mm512_add_pd(b, prod);
+            _mm512_storeu_pd(out_ptr.add(i), res);
+            i += 8;
+        }
+    }
+
+    while i < n {
+        let r = *rm_ptr.add(i);
+        let b = *base_ptr.add(i);
+        *out_ptr.add(i) = b + r * signed_mult;
+        i += 1;
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -733,7 +858,8 @@ pub fn kaufmanstop_batch_with_kernel(
     k: Kernel,
 ) -> Result<KaufmanstopBatchOutput, KaufmanstopError> {
     let kernel = match k {
-        Kernel::Auto => detect_best_batch_kernel(),
+        // SIMD underperforms for this indicator; prefer ScalarBatch for Auto.
+        Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         _ => {
             return Err(KaufmanstopError::InvalidPeriod {
@@ -969,7 +1095,7 @@ pub unsafe fn kaufmanstop_row_avx2(
     direction: &str,
     out: &mut [f64],
 ) {
-    kaufmanstop_scalar(high, low, range_ma, period, first, mult, direction, out)
+    kaufmanstop_avx2(high, low, range_ma, period, first, mult, direction, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1003,7 +1129,7 @@ pub unsafe fn kaufmanstop_row_avx512_short(
     direction: &str,
     out: &mut [f64],
 ) {
-    kaufmanstop_scalar(high, low, range_ma, period, first, mult, direction, out)
+    kaufmanstop_avx512_impl(high, low, range_ma, first, mult, direction, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1018,7 +1144,7 @@ pub unsafe fn kaufmanstop_row_avx512_long(
     direction: &str,
     out: &mut [f64],
 ) {
-    kaufmanstop_scalar(high, low, range_ma, period, first, mult, direction, out)
+    kaufmanstop_avx512_impl(high, low, range_ma, first, mult, direction, out)
 }
 
 #[inline(always)]
@@ -1268,8 +1394,9 @@ pub fn kaufmanstop_into_slice(
     let ma_input = MaData::Slice(&hl_diff[first_valid_idx..]);
     let hl_diff_ma = ma(ma_type, ma_input, period).map_err(|_| KaufmanstopError::AllValuesNaN)?;
 
+    // SIMD underperforms vs scalar (memory-bound AXPY); default to Scalar for Auto.
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 

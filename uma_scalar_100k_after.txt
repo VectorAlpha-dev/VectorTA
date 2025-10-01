@@ -1,0 +1,7 @@
+uma/uma_scalar/100k     time:   [10.107 ms 10.207 ms 10.339 ms]
+                        thrpt:  [73.790 MiB/s 74.746 MiB/s 75.485 MiB/s]
+                 change:
+                        time:   [-47.024% -46.313% -45.560%] (p = 0.00 < 0.05)
+                        thrpt:  [+83.690% +86.266% +88.763%]
+                        Performance has improved.
+

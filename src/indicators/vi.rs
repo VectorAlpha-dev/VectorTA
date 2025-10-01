@@ -15,11 +15,15 @@
 //! - **minus**: VI- (negative vortex) line as `Vec<f64>` (length matches input)
 //!
 //! ## Developer Notes
-//! - **AVX2/AVX512 kernels**: Currently stubs that call scalar implementation
-//! - **Streaming update**: O(1) performance with circular buffers for TR, VP, and VM components
-//! - **Memory optimization**: Properly uses zero-copy helper functions (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
-//! - **TODO**: Implement actual SIMD kernels for AVX2/AVX512
-//! - **Note**: Streaming requires previous values (prev_high, prev_low, prev_close) for TR calculation
+//! - SIMD status: Implementations present but short-circuited to scalar. The VI hot loop is a
+//!   sliding-window recurrence (rolling sums) with per-step dependencies; precomputing full
+//!   temporaries for SIMD regresses overall performance and allocation. Current scalar is fastest.
+//!   Revisit if data layout changes make wide precompute profitable.
+//! - Streaming update: O(1) sliding-window kernel via circular buffers for TR/VP/VM.
+//! - Batch optimization: Row-specific batch now shares precomputed prefix sums of TR/VP/VM across
+//!   all periods; avoids redundant work between rows while preserving exact outputs.
+//! - Memory optimization: Uses zero-copy/uninitialized output helpers and minimal temporaries.
+//! - Note: Streaming requires previous values (prev_high, prev_low, prev_close) for TR calculation.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -299,7 +303,7 @@ pub fn vi_into_slice(
     Ok(())
 }
 
-#[inline]
+#[inline(always)]
 pub unsafe fn vi_scalar(
     high: &[f64],
     low: &[f64],
@@ -309,34 +313,127 @@ pub unsafe fn vi_scalar(
     plus: &mut [f64],
     minus: &mut [f64],
 ) {
-    let length = high.len();
-    let mut tr = vec![0.0; length];
-    let mut vp = vec![0.0; length];
-    let mut vm = vec![0.0; length];
-    tr[first] = high[first] - low[first];
-    for i in (first + 1)..length {
-        tr[i] = (high[i] - low[i])
-            .max((high[i] - close[i - 1]).abs())
-            .max((low[i] - close[i - 1]).abs());
-        vp[i] = (high[i] - low[i - 1]).abs();
-        vm[i] = (low[i] - high[i - 1]).abs();
+    let n = high.len();
+    if n == 0 {
+        return;
     }
-    let mut sum_tr = 0.0;
+
+    // Warm index where first valid output is produced
+    let warm = first + period - 1;
+
+    // Raw pointers to avoid bounds checks in tight loops
+    let h = high.as_ptr();
+    let l = low.as_ptr();
+    let c = close.as_ptr();
+    let p_out = plus.as_mut_ptr();
+    let m_out = minus.as_mut_ptr();
+
+    // Ring buffers (size = period) to support O(1) sliding window updates
+    let mut tr_buf = vec![0.0f64; period];
+    let mut vp_buf = vec![0.0f64; period];
+    let mut vm_buf = vec![0.0f64; period];
+
+    // Seed with the first valid bar
+    let mut prev_h = *h.add(first);
+    let mut prev_l = *l.add(first);
+    let mut prev_c = *c.add(first);
+
+    let mut sum_tr = prev_h - prev_l; // TR at 'first' bar
     let mut sum_vp = 0.0;
     let mut sum_vm = 0.0;
-    for i in first..(first + period) {
-        sum_tr += tr[i];
-        sum_vp += vp[i];
-        sum_vm += vm[i];
+
+    tr_buf[0] = sum_tr; // vp_buf[0] and vm_buf[0] remain 0.0 by definition
+    vp_buf[0] = 0.0;
+    vm_buf[0] = 0.0;
+
+    // Fill the initial window [first+1 ..= warm]
+    let mut r = if period == 1 { 0 } else { 1 }; // next ring slot
+    let mut i = first + 1;
+    while i <= warm {
+        let hi = *h.add(i);
+        let lo = *l.add(i);
+
+        // True Range = max( hi-lo, |hi-prev_close|, |lo-prev_close| )
+        let hl = hi - lo;
+        let hc = (hi - prev_c).abs();
+        let lc = (lo - prev_c).abs();
+        let tr_i = hl.max(hc.max(lc));
+
+        // Vortex movements
+        let vp_i = (hi - prev_l).abs();
+        let vm_i = (lo - prev_h).abs();
+
+        sum_tr += tr_i;
+        sum_vp += vp_i;
+        sum_vm += vm_i;
+
+        tr_buf[r] = tr_i;
+        vp_buf[r] = vp_i;
+        vm_buf[r] = vm_i;
+
+        // advance previous bar
+        prev_h = hi;
+        prev_l = lo;
+        prev_c = *c.add(i);
+
+        // advance ring index
+        r += 1;
+        if r == period {
+            r = 0;
+        }
+
+        i += 1;
     }
-    plus[first + period - 1] = sum_vp / sum_tr;
-    minus[first + period - 1] = sum_vm / sum_tr;
-    for i in (first + period)..length {
-        sum_tr += tr[i] - tr[i - period];
-        sum_vp += vp[i] - vp[i - period];
-        sum_vm += vm[i] - vm[i - period];
-        plus[i] = sum_vp / sum_tr;
-        minus[i] = sum_vm / sum_tr;
+
+    // First defined outputs at 'warm'
+    *p_out.add(warm) = sum_vp / sum_tr;
+    *m_out.add(warm) = sum_vm / sum_tr;
+
+    // Slide the window forward for the remaining bars
+    let mut idx = warm + 1;
+    while idx < n {
+        let hi = *h.add(idx);
+        let lo = *l.add(idx);
+
+        // New contributions
+        let hl = hi - lo;
+        let hc = (hi - prev_c).abs();
+        let lc = (lo - prev_c).abs();
+        let tr_new = hl.max(hc.max(lc));
+        let vp_new = (hi - prev_l).abs();
+        let vm_new = (lo - prev_h).abs();
+
+        // Old contributions leaving the window (ring slot r)
+        let tr_old = tr_buf[r];
+        let vp_old = vp_buf[r];
+        let vm_old = vm_buf[r];
+
+        // Update running sums
+        sum_tr += tr_new - tr_old;
+        sum_vp += vp_new - vp_old;
+        sum_vm += vm_new - vm_old;
+
+        // Store new values into the ring
+        tr_buf[r] = tr_new;
+        vp_buf[r] = vp_new;
+        vm_buf[r] = vm_new;
+
+        // Write outputs
+        *p_out.add(idx) = sum_vp / sum_tr;
+        *m_out.add(idx) = sum_vm / sum_tr;
+
+        // advance previous bar
+        prev_h = hi;
+        prev_l = lo;
+        prev_c = *c.add(idx);
+
+        // advance ring index
+        r += 1;
+        if r == period {
+            r = 0;
+        }
+
+        idx += 1;
     }
 }
 
@@ -661,25 +758,40 @@ fn vi_batch_inner(
     let minus: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(minus_guard.as_mut_ptr() as *mut f64, minus_guard.len())
     };
-    let do_row = |row: usize, plus_row: &mut [f64], minus_row: &mut [f64]| unsafe {
+    // Row-specific batch optimization: precompute prefix sums for TR, VP, VM once
+    let mut pfx_tr = vec![0.0f64; cols];
+    let mut pfx_vp = vec![0.0f64; cols];
+    let mut pfx_vm = vec![0.0f64; cols];
+    if cols > 0 && first < cols {
+        unsafe {
+            match kern {
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 | Kernel::Avx512Batch => {
+                    vi_prefix_avx512(high, low, close, first, &mut pfx_tr, &mut pfx_vp, &mut pfx_vm)
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 | Kernel::Avx2Batch => {
+                    vi_prefix_avx2(high, low, close, first, &mut pfx_tr, &mut pfx_vp, &mut pfx_vm)
+                }
+                _ => vi_prefix_scalar(high, low, close, first, &mut pfx_tr, &mut pfx_vp, &mut pfx_vm),
+            }
+        }
+    }
+
+    let do_row = |row: usize, plus_row: &mut [f64], minus_row: &mut [f64]| {
         let period = combos[row].period.unwrap();
-        match kern {
-            Kernel::Scalar | Kernel::ScalarBatch => {
-                vi_row_scalar(high, low, close, first, period, plus_row, minus_row)
-            }
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => {
-                vi_row_avx2(high, low, close, first, period, plus_row, minus_row)
-            }
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => {
-                vi_row_avx512(high, low, close, first, period, plus_row, minus_row)
-            }
-            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
-                vi_row_scalar(high, low, close, first, period, plus_row, minus_row)
-            }
-            _ => unreachable!("Unexpected kernel type: {:?}", kern),
+        let warm = first + period - 1;
+        if warm >= cols {
+            return;
+        }
+        let mut i = warm;
+        while i < cols {
+            let tr_sum = if i >= period { pfx_tr[i] - pfx_tr[i - period] } else { pfx_tr[i] };
+            let vp_sum = if i >= period { pfx_vp[i] - pfx_vp[i - period] } else { pfx_vp[i] };
+            let vm_sum = if i >= period { pfx_vm[i] - pfx_vm[i - period] } else { pfx_vm[i] };
+            plus_row[i] = vp_sum / tr_sum;
+            minus_row[i] = vm_sum / tr_sum;
+            i += 1;
         }
     };
     if parallel {
@@ -844,28 +956,46 @@ fn vi_batch_inner_into(
         });
     }
 
-    let do_row = |row: usize, p_row: &mut [f64], m_row: &mut [f64]| {
-        let period = combos[row].period.unwrap();
+    // Row-specific batch optimization: precompute prefix sums for TR, VP, VM once
+    let cols = close.len();
+    let mut pfx_tr = vec![0.0f64; cols];
+    let mut pfx_vp = vec![0.0f64; cols];
+    let mut pfx_vm = vec![0.0f64; cols];
+    if cols > 0 && first < cols {
         unsafe {
             match kernel {
-                Kernel::Scalar | Kernel::ScalarBatch => {
-                    vi_scalar(high, low, close, period, first, p_row, m_row)
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 | Kernel::Avx512Batch => {
+                    vi_prefix_avx512(high, low, close, first, &mut pfx_tr, &mut pfx_vp, &mut pfx_vm)
                 }
                 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
                 Kernel::Avx2 | Kernel::Avx2Batch => {
-                    vi_avx2(high, low, close, period, first, p_row, m_row)
+                    vi_prefix_avx2(high, low, close, first, &mut pfx_tr, &mut pfx_vp, &mut pfx_vm)
                 }
-                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                Kernel::Avx512 | Kernel::Avx512Batch => {
-                    vi_avx512(high, low, close, period, first, p_row, m_row)
-                }
-                // For WASM or non-x86_64, fallback to scalar
-                _ => vi_scalar(high, low, close, period, first, p_row, m_row),
+                _ => vi_prefix_scalar(high, low, close, first, &mut pfx_tr, &mut pfx_vp, &mut pfx_vm),
             }
         }
-        for i in 0..(first + period - 1) {
+    }
+
+    let do_row = |row: usize, p_row: &mut [f64], m_row: &mut [f64]| {
+        let period = combos[row].period.unwrap();
+        let warm = first + period - 1;
+        // set NaN prefix per row
+        for i in 0..warm.min(cols) {
             p_row[i] = f64::NAN;
             m_row[i] = f64::NAN;
+        }
+        if warm >= cols {
+            return;
+        }
+        let mut i = warm;
+        while i < cols {
+            let tr_sum = if i >= period { pfx_tr[i] - pfx_tr[i - period] } else { pfx_tr[i] };
+            let vp_sum = if i >= period { pfx_vp[i] - pfx_vp[i - period] } else { pfx_vp[i] };
+            let vm_sum = if i >= period { pfx_vm[i] - pfx_vm[i - period] } else { pfx_vm[i] };
+            p_row[i] = vp_sum / tr_sum;
+            m_row[i] = vm_sum / tr_sum;
+            i += 1;
         }
     };
 
@@ -894,6 +1024,207 @@ fn vi_batch_inner_into(
         }
     }
     Ok(combos)
+}
+
+#[inline(always)]
+unsafe fn vi_prefix_scalar(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    first: usize,
+    pfx_tr: &mut [f64],
+    pfx_vp: &mut [f64],
+    pfx_vm: &mut [f64],
+) {
+    let n = high.len();
+    pfx_tr[first] = high[first] - low[first];
+    pfx_vp[first] = 0.0;
+    pfx_vm[first] = 0.0;
+    let mut prev_h = high[first];
+    let mut prev_l = low[first];
+    let mut prev_c = close[first];
+    let mut i = first + 1;
+    while i < n {
+        let hi = high[i];
+        let lo = low[i];
+        let hl = hi - lo;
+        let hc = (hi - prev_c).abs();
+        let lc = (lo - prev_c).abs();
+        let tr_i = hl.max(hc.max(lc));
+        let vp_i = (hi - prev_l).abs();
+        let vm_i = (lo - prev_h).abs();
+        pfx_tr[i] = pfx_tr[i - 1] + tr_i;
+        pfx_vp[i] = pfx_vp[i - 1] + vp_i;
+        pfx_vm[i] = pfx_vm[i - 1] + vm_i;
+        prev_h = hi;
+        prev_l = lo;
+        prev_c = close[i];
+        i += 1;
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn abs256(x: __m256d) -> __m256d {
+    let zero = _mm256_set1_pd(0.0);
+    _mm256_max_pd(x, _mm256_sub_pd(zero, x))
+}
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn vi_prefix_avx2(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    first: usize,
+    pfx_tr: &mut [f64],
+    pfx_vp: &mut [f64],
+    pfx_vm: &mut [f64],
+) {
+    use core::arch::x86_64::*;
+    let n = high.len();
+    pfx_tr[first] = high[first] - low[first];
+    pfx_vp[first] = 0.0;
+    pfx_vm[first] = 0.0;
+    let mut i = first + 1;
+    // Scalar carry from previous element
+    let mut carry_tr = pfx_tr[i - 1];
+    let mut carry_vp = pfx_vp[i - 1];
+    let mut carry_vm = pfx_vm[i - 1];
+    let step = 4;
+    while i + step <= n {
+        let v_hi = _mm256_loadu_pd(high.as_ptr().add(i));
+        let v_lo = _mm256_loadu_pd(low.as_ptr().add(i));
+        let v_cl_prev = _mm256_loadu_pd(close.as_ptr().add(i - 1));
+        let v_lo_prev = _mm256_loadu_pd(low.as_ptr().add(i - 1));
+        let v_hi_prev = _mm256_loadu_pd(high.as_ptr().add(i - 1));
+
+        let hl = _mm256_sub_pd(v_hi, v_lo);
+        let hc = abs256(_mm256_sub_pd(v_hi, v_cl_prev));
+        let lc = abs256(_mm256_sub_pd(v_lo, v_cl_prev));
+        let tr_v = _mm256_max_pd(hl, _mm256_max_pd(hc, lc));
+        let vp_v = abs256(_mm256_sub_pd(v_hi, v_lo_prev));
+        let vm_v = abs256(_mm256_sub_pd(v_lo, v_hi_prev));
+
+        let mut tr_tmp = [0.0f64; 4];
+        let mut vp_tmp = [0.0f64; 4];
+        let mut vm_tmp = [0.0f64; 4];
+        _mm256_storeu_pd(tr_tmp.as_mut_ptr(), tr_v);
+        _mm256_storeu_pd(vp_tmp.as_mut_ptr(), vp_v);
+        _mm256_storeu_pd(vm_tmp.as_mut_ptr(), vm_v);
+        let mut k = 0;
+        while k < step {
+            carry_tr += tr_tmp[k];
+            carry_vp += vp_tmp[k];
+            carry_vm += vm_tmp[k];
+            pfx_tr[i + k] = carry_tr;
+            pfx_vp[i + k] = carry_vp;
+            pfx_vm[i + k] = carry_vm;
+            k += 1;
+        }
+
+        i += step;
+    }
+    while i < n {
+        let hi = *high.get_unchecked(i);
+        let lo = *low.get_unchecked(i);
+        let prev_c = *close.get_unchecked(i - 1);
+        let prev_l = *low.get_unchecked(i - 1);
+        let prev_h = *high.get_unchecked(i - 1);
+        let hl = hi - lo;
+        let hc = (hi - prev_c).abs();
+        let lc = (lo - prev_c).abs();
+        let tr_i = hl.max(hc.max(lc));
+        let vp_i = (hi - prev_l).abs();
+        let vm_i = (lo - prev_h).abs();
+        carry_tr += tr_i;
+        carry_vp += vp_i;
+        carry_vm += vm_i;
+        pfx_tr[i] = carry_tr;
+        pfx_vp[i] = carry_vp;
+        pfx_vm[i] = carry_vm;
+        i += 1;
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn abs512(x: __m512d) -> __m512d {
+    let zero = _mm512_set1_pd(0.0);
+    _mm512_max_pd(x, _mm512_sub_pd(zero, x))
+}
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn vi_prefix_avx512(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    first: usize,
+    pfx_tr: &mut [f64],
+    pfx_vp: &mut [f64],
+    pfx_vm: &mut [f64],
+) {
+    use core::arch::x86_64::*;
+    let n = high.len();
+    pfx_tr[first] = high[first] - low[first];
+    pfx_vp[first] = 0.0;
+    pfx_vm[first] = 0.0;
+    let mut i = first + 1;
+    let mut carry_tr = pfx_tr[i - 1];
+    let mut carry_vp = pfx_vp[i - 1];
+    let mut carry_vm = pfx_vm[i - 1];
+    let step = 8;
+    while i + step <= n {
+        let v_hi = _mm512_loadu_pd(high.as_ptr().add(i));
+        let v_lo = _mm512_loadu_pd(low.as_ptr().add(i));
+        let v_cl_prev = _mm512_loadu_pd(close.as_ptr().add(i - 1));
+        let v_lo_prev = _mm512_loadu_pd(low.as_ptr().add(i - 1));
+        let v_hi_prev = _mm512_loadu_pd(high.as_ptr().add(i - 1));
+
+        let hl = _mm512_sub_pd(v_hi, v_lo);
+        let hc = abs512(_mm512_sub_pd(v_hi, v_cl_prev));
+        let lc = abs512(_mm512_sub_pd(v_lo, v_cl_prev));
+        let tr_v = _mm512_max_pd(hl, _mm512_max_pd(hc, lc));
+        let vp_v = abs512(_mm512_sub_pd(v_hi, v_lo_prev));
+        let vm_v = abs512(_mm512_sub_pd(v_lo, v_hi_prev));
+
+        let mut tr_tmp = [0.0f64; 8];
+        let mut vp_tmp = [0.0f64; 8];
+        let mut vm_tmp = [0.0f64; 8];
+        _mm512_storeu_pd(tr_tmp.as_mut_ptr(), tr_v);
+        _mm512_storeu_pd(vp_tmp.as_mut_ptr(), vp_v);
+        _mm512_storeu_pd(vm_tmp.as_mut_ptr(), vm_v);
+        let mut k = 0;
+        while k < step {
+            carry_tr += tr_tmp[k];
+            carry_vp += vp_tmp[k];
+            carry_vm += vm_tmp[k];
+            pfx_tr[i + k] = carry_tr;
+            pfx_vp[i + k] = carry_vp;
+            pfx_vm[i + k] = carry_vm;
+            k += 1;
+        }
+        i += step;
+    }
+    while i < n {
+        let hi = *high.get_unchecked(i);
+        let lo = *low.get_unchecked(i);
+        let prev_c = *close.get_unchecked(i - 1);
+        let prev_l = *low.get_unchecked(i - 1);
+        let prev_h = *high.get_unchecked(i - 1);
+        let hl = hi - lo;
+        let hc = (hi - prev_c).abs();
+        let lc = (lo - prev_c).abs();
+        let tr_i = hl.max(hc.max(lc));
+        let vp_i = (hi - prev_l).abs();
+        let vm_i = (lo - prev_h).abs();
+        carry_tr += tr_i;
+        carry_vp += vp_i;
+        carry_vm += vm_i;
+        pfx_tr[i] = carry_tr;
+        pfx_vp[i] = carry_vp;
+        pfx_vm[i] = carry_vm;
+        i += 1;
+    }
 }
 
 // ==========================

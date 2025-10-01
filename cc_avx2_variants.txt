@@ -1,0 +1,27 @@
+correlation_cycle/correlation_cycle_avx2/10k
+                        time:   [183.19 µs 183.83 µs 184.66 µs]
+                        thrpt:  [413.15 MiB/s 415.02 MiB/s 416.48 MiB/s]
+                 change:
+                        time:   [-0.6687% +0.1802% +0.9962%] (p = 0.69 > 0.05)
+                        thrpt:  [-0.9864% -0.1799% +0.6732%]
+                        No change in performance detected.
+Found 2 outliers among 10 measurements (20.00%)
+  1 (10.00%) low mild
+  1 (10.00%) high severe
+correlation_cycle/correlation_cycle_avx2/100k
+                        time:   [2.4581 ms 2.4987 ms 2.5212 ms]
+                        thrpt:  [302.61 MiB/s 305.34 MiB/s 310.38 MiB/s]
+                 change:
+                        time:   [-2.7342% -1.2091% +0.2835%] (p = 0.15 > 0.05)
+                        thrpt:  [-0.2827% +1.2239% +2.8111%]
+                        No change in performance detected.
+correlation_cycle/correlation_cycle_avx2/1M
+                        time:   [26.550 ms 26.716 ms 27.014 ms]
+                        thrpt:  [282.43 MiB/s 285.57 MiB/s 287.36 MiB/s]
+                 change:
+                        time:   [-4.2113% -2.9251% -1.3079%] (p = 0.00 < 0.05)
+                        thrpt:  [+1.3252% +3.0132% +4.3964%]
+                        Performance has improved.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+

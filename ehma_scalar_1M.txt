@@ -1,0 +1,5 @@
+ehma/ehma_scalar/1M     time:   [2.9789 ms 2.9858 ms 2.9935 ms]
+                        thrpt:  [2.4890 GiB/s 2.4953 GiB/s 2.5011 GiB/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+

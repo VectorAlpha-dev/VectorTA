@@ -1,0 +1,12 @@
+mod_god_mode/mod_god_mode_scalar/1M
+                        time:   [20.208 ms 20.333 ms 20.495 ms]
+                        thrpt:  [372.25 MiB/s 375.22 MiB/s 377.55 MiB/s]
+
+mod_god_mode/mod_god_mode_avx512/1M
+                        time:   [22.695 ms 22.899 ms 23.089 ms]
+                        thrpt:  [330.43 MiB/s 333.18 MiB/s 336.17 MiB/s]
+
+mod_god_mode/mod_god_mode_avx2/1M
+                        time:   [22.407 ms 22.622 ms 22.843 ms]
+                        thrpt:  [334.00 MiB/s 337.25 MiB/s 340.50 MiB/s]
+

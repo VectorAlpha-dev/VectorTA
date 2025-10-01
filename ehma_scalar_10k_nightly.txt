@@ -1,0 +1,7 @@
+ehma/ehma_scalar/10k    time:   [31.557 µs 31.897 µs 32.524 µs]
+                        thrpt:  [2.2908 GiB/s 2.3359 GiB/s 2.3610 GiB/s]
+                 change:
+                        time:   [+5.8976% +8.4172% +11.053%] (p = 0.00 < 0.05)
+                        thrpt:  [-9.9533% -7.7637% -5.5692%]
+                        Performance has regressed.
+

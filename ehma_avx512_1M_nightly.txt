@@ -1,0 +1,5 @@
+ehma/ehma_avx512/1M     time:   [2.3210 ms 2.3500 ms 2.3889 ms]
+                        thrpt:  [3.1188 GiB/s 3.1705 GiB/s 3.2100 GiB/s]
+Found 2 outliers among 10 measurements (20.00%)
+  2 (20.00%) high mild
+
