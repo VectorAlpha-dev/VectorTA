@@ -1,0 +1,96 @@
+dpo_bench/scalar/10k    time:   [3.7079 µs 3.7286 µs 3.7619 µs]
+                        thrpt:  [19.805 GiB/s 19.982 GiB/s 20.094 GiB/s]
+Found 2 outliers among 10 measurements (20.00%)
+  2 (20.00%) high mild
+dpo_bench/scalar/100k   time:   [36.918 µs 36.958 µs 37.000 µs]
+                        thrpt:  [20.137 GiB/s 20.159 GiB/s 20.182 GiB/s]
+                 change:
+                        time:   [+0.6379% +0.9997% +1.3099%] (p = 0.00 < 0.05)
+                        thrpt:  [-1.2929% -0.9898% -0.6339%]
+                        Change within noise threshold.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) low mild
+dpo_bench/scalar/1M     time:   [370.79 µs 372.31 µs 373.76 µs]
+                        thrpt:  [19.934 GiB/s 20.012 GiB/s 20.094 GiB/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+
+dpo/dpo_scalar/10k      time:   [3.6288 µs 3.6721 µs 3.6972 µs]
+                        thrpt:  [20.152 GiB/s 20.289 GiB/s 20.532 GiB/s]
+dpo/dpo_avx2/10k        time:   [3.7840 µs 3.7934 µs 3.8083 µs]
+                        thrpt:  [19.564 GiB/s 19.641 GiB/s 19.690 GiB/s]
+dpo/dpo_avx512/10k      time:   [3.7502 µs 3.7653 µs 3.7969 µs]
+                        thrpt:  [19.623 GiB/s 19.787 GiB/s 19.867 GiB/s]
+dpo/dpo_scalar/100k     time:   [36.197 µs 36.435 µs 36.986 µs]
+                        thrpt:  [20.144 GiB/s 20.449 GiB/s 20.584 GiB/s]
+                 change:
+                        time:   [+1.5363% +2.7901% +4.0757%] (p = 0.00 < 0.05)
+                        thrpt:  [-3.9161% -2.7144% -1.5131%]
+                        Performance has regressed.
+dpo/dpo_avx2/100k       time:   [38.306 µs 40.463 µs 42.268 µs]
+                        thrpt:  [17.627 GiB/s 18.413 GiB/s 19.450 GiB/s]
+                 change:
+                        time:   [+2.2808% +4.7165% +7.8785%] (p = 0.00 < 0.05)
+                        thrpt:  [-7.3031% -4.5041% -2.2299%]
+                        Performance has regressed.
+Found 4 outliers among 10 measurements (40.00%)
+  1 (10.00%) low severe
+  1 (10.00%) low mild
+  2 (20.00%) high severe
+dpo/dpo_avx512/100k     time:   [37.501 µs 37.698 µs 37.905 µs]
+                        thrpt:  [19.656 GiB/s 19.764 GiB/s 19.867 GiB/s]
+                 change:
+                        time:   [+1.8612% +2.3330% +2.8340%] (p = 0.00 < 0.05)
+                        thrpt:  [-2.7559% -2.2798% -1.8272%]
+                        Performance has regressed.
+dpo/dpo_scalar/1M       time:   [371.74 µs 372.73 µs 374.66 µs]
+                        thrpt:  [19.886 GiB/s 19.989 GiB/s 20.042 GiB/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+dpo/dpo_avx2/1M         time:   [385.74 µs 387.53 µs 389.23 µs]
+                        thrpt:  [19.142 GiB/s 19.226 GiB/s 19.315 GiB/s]
+dpo/dpo_avx512/1M       time:   [385.57 µs 389.19 µs 391.16 µs]
+                        thrpt:  [19.047 GiB/s 19.144 GiB/s 19.323 GiB/s]
+
+dpo_batch/dpo_batch_scalarbatch/10k
+                        time:   [2.0552 ms 2.0608 ms 2.0692 ms]
+                        thrpt:  [36.871 MiB/s 37.022 MiB/s 37.123 MiB/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+dpo_batch/dpo_batch_avx2batch/10k
+                        time:   [2.0634 ms 2.1046 ms 2.1447 ms]
+                        thrpt:  [35.574 MiB/s 36.251 MiB/s 36.975 MiB/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+dpo_batch/dpo_batch_avx512batch/10k
+                        time:   [2.0443 ms 2.0660 ms 2.0841 ms]
+                        thrpt:  [36.608 MiB/s 36.928 MiB/s 37.321 MiB/s]
+dpo_batch/dpo_batch_scalarbatch/100k
+                        time:   [3.9726 ms 4.0530 ms 4.1452 ms]
+                        thrpt:  [184.06 MiB/s 188.24 MiB/s 192.05 MiB/s]
+                 change:
+                        time:   [-23.435% -18.623% -14.471%] (p = 0.00 < 0.05)
+                        thrpt:  [+16.919% +22.885% +30.607%]
+                        Performance has improved.
+Found 2 outliers among 10 measurements (20.00%)
+  2 (20.00%) high mild
+dpo_batch/dpo_batch_avx2batch/100k
+                        time:   [3.9969 ms 4.0676 ms 4.1151 ms]
+                        thrpt:  [185.40 MiB/s 187.57 MiB/s 190.88 MiB/s]
+dpo_batch/dpo_batch_avx512batch/100k
+                        time:   [3.9249 ms 3.9735 ms 4.0328 ms]
+                        thrpt:  [189.18 MiB/s 192.00 MiB/s 194.39 MiB/s]
+dpo_batch/dpo_batch_scalarbatch/1M
+                        time:   [29.287 ms 29.451 ms 29.693 ms]
+                        thrpt:  [256.94 MiB/s 259.06 MiB/s 260.50 MiB/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+dpo_batch/dpo_batch_avx2batch/1M
+                        time:   [29.393 ms 30.017 ms 30.480 ms]
+                        thrpt:  [250.30 MiB/s 254.17 MiB/s 259.56 MiB/s]
+dpo_batch/dpo_batch_avx512batch/1M
+                        time:   [29.514 ms 29.887 ms 30.402 ms]
+                        thrpt:  [250.95 MiB/s 255.28 MiB/s 258.50 MiB/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+

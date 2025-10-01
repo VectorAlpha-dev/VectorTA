@@ -1,0 +1,10 @@
+aroon_osc_batch/aroon_osc_batch_scalarbatch/100k
+                        time:   [3.3640 ms 3.4097 ms 3.5057 ms]
+                        thrpt:  [3.1879 GiB/s 3.2777 GiB/s 3.3222 GiB/s]
+                 change:
+                        time:   [+6.2003% +10.583% +15.362%] (p = 0.00 < 0.05)
+                        thrpt:  [-13.316% -9.5702% -5.8383%]
+                        Performance has regressed.
+Found 2 outliers among 10 measurements (20.00%)
+  2 (20.00%) high severe
+

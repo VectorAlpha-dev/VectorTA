@@ -1,0 +1,6 @@
+vwma/vwma_avx2/1M       time:   [734.68 µs 741.47 µs 747.98 µs]
+                        thrpt:  [9.9609 GiB/s 10.048 GiB/s 10.141 GiB/s]
+Found 2 outliers among 10 measurements (20.00%)
+  1 (10.00%) high mild
+  1 (10.00%) high severe
+

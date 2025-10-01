@@ -1,0 +1,4 @@
+uma_batch/uma_batch_avx2batch/100k
+                        time:   [10.001 ms 10.028 ms 10.053 ms]
+                        thrpt:  [16.897 GiB/s 16.940 GiB/s 16.985 GiB/s]
+

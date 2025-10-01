@@ -14,11 +14,11 @@
 //! - **`Err(GaussianError)`** otherwise.
 //!
 //! ## Developer Status
-//! - **AVX2 kernel**: STUB - Falls back to scalar implementation
-//! - **AVX512 kernel**: STUB - Falls back to scalar implementation
-//! - **Streaming update**: O(1) - Efficient incremental calculation for each pole
-//! - **Memory optimization**: GOOD - Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix)
-//! - **Optimization needed**: Implement SIMD kernels for parallel pole processing
+//! - **Single-series SIMD (AVX2/AVX512)**: Delegates to the FMA-optimized scalar path. Recurrence across time prevents effective lane parallelism; SIMD here does not outperform scalar.
+//! - **Batch SIMD (AVX2/AVX512)**: Implemented with row-tiling (4 lanes AVX2, 8 lanes AVX512) and runtime selection.
+//! - **Streaming update**: O(1) per sample via cascaded one-pole stages.
+//! - **Memory**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix).
+//! - **Notes**: Keep scalar as reference; changes must not alter unit-test references.
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
@@ -398,7 +398,7 @@ unsafe fn gaussian_poles1_fma(inp: &[f64], alpha: f64, out: &mut [f64]) {
     let mut prev = 0.0;
     for i in 0..inp.len() {
         let x = *inp.get_unchecked(i);
-        prev = c1.mul_add(prev, c0 * x); // FMA: prev = c0*x + c1*prev
+        prev = c1.mul_add(prev, c0 * x);
         *out.get_unchecked_mut(i) = prev;
     }
 }
@@ -416,7 +416,7 @@ unsafe fn gaussian_poles2_fma(inp: &[f64], alpha: f64, out: &mut [f64]) {
 
     for i in 0..inp.len() {
         let x = *inp.get_unchecked(i);
-        let y = c2.mul_add(prev0, c1.mul_add(prev1, c0 * x)); // 2 × FMA chain
+        let y = c2.mul_add(prev0, c1.mul_add(prev1, c0 * x));
         prev0 = prev1;
         prev1 = y;
         *out.get_unchecked_mut(i) = y;
@@ -440,13 +440,7 @@ unsafe fn gaussian_poles3_fma(inp: &[f64], alpha: f64, out: &mut [f64]) {
 
     for i in 0..inp.len() {
         let x = *inp.get_unchecked(i);
-        let y = c3.mul_add(
-            p0,
-            c2.mul_add(
-                p1,
-                c1.mul_add(p2, c0 * x), // 3‑deep FMA chain
-            ),
-        );
+        let y = c3.mul_add(p0, c2.mul_add(p1, c1.mul_add(p2, c0 * x)));
         p0 = p1;
         p1 = p2;
         p2 = y;
@@ -478,10 +472,7 @@ unsafe fn gaussian_poles4_fma(inp: &[f64], alpha: f64, out: &mut [f64]) {
             p0,
             c3.mul_add(
                 p1,
-                c2.mul_add(
-                    p2,
-                    c1.mul_add(p3, c0 * x), // 4‑deep FMA chain
-                ),
+                c2.mul_add(p2, c1.mul_add(p3, c0 * x)),
             ),
         );
         p0 = p1;

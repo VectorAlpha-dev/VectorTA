@@ -1,0 +1,8 @@
+correlation_cycle/correlation_cycle_scalar/100k
+                        time:   [3.2417 ms 3.2624 ms 3.2787 ms]
+                        thrpt:  [232.70 MiB/s 233.85 MiB/s 235.35 MiB/s]
+                 change:
+                        time:   [-2.1148% -1.2898% -0.4790%] (p = 0.01 < 0.05)
+                        thrpt:  [+0.4813% +1.3066% +2.1605%]
+                        Change within noise threshold.
+

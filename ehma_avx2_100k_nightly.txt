@@ -1,0 +1,5 @@
+ehma/ehma_avx2/100k     time:   [194.81 µs 195.81 µs 197.79 µs]
+                        thrpt:  [3.7669 GiB/s 3.8049 GiB/s 3.8245 GiB/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+

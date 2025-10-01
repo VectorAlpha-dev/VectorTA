@@ -1,0 +1,9 @@
+cksp_bench/scalar/100k  time:   [2.7677 ms 2.8022 ms 2.8532 ms]
+                        thrpt:  [267.40 MiB/s 272.27 MiB/s 275.66 MiB/s]
+                 change:
+                        time:   [-15.010% -11.737% -9.1901%] (p = 0.00 < 0.05)
+                        thrpt:  [+10.120% +13.298% +17.661%]
+                        Performance has improved.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+

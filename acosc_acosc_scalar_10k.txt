@@ -1,0 +1,3 @@
+acosc/acosc_scalar/10k  time:   [13.917 µs 13.959 µs 13.996 µs]
+                        thrpt:  [5.3235 GiB/s 5.3374 GiB/s 5.3538 GiB/s]
+

@@ -1,0 +1,3 @@
+ehma/ehma_avx512/100k   time:   [226.61 µs 227.75 µs 229.67 µs]
+                        thrpt:  [3.2440 GiB/s 3.2714 GiB/s 3.2879 GiB/s]
+

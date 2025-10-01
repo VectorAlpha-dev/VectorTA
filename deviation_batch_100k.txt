@@ -1,0 +1,12 @@
+deviation_batch/deviation_batch_scalarbatch/100k
+                        time:   [84.752 ms 85.730 ms 86.725 ms]
+                        thrpt:  [87.972 MiB/s 88.994 MiB/s 90.020 MiB/s]
+
+deviation_batch/deviation_batch_avx2batch/100k
+                        time:   [86.499 ms 87.901 ms 89.333 ms]
+                        thrpt:  [85.404 MiB/s 86.795 MiB/s 88.202 MiB/s]
+
+deviation_batch/deviation_batch_avx512batch/100k
+                        time:   [86.211 ms 87.918 ms 89.662 ms]
+                        thrpt:  [85.090 MiB/s 86.779 MiB/s 88.497 MiB/s]
+

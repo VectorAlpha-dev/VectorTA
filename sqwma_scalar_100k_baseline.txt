@@ -1,0 +1,3 @@
+sqwma/sqwma_scalar/100k time:   [296.37 µs 308.20 µs 318.95 µs]
+                        thrpt:  [2.3360 GiB/s 2.4174 GiB/s 2.5139 GiB/s]
+

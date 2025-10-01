@@ -1,0 +1,27 @@
+dpo/dpo_scalar/100k     time:   [72.351 µs 72.999 µs 73.617 µs]
+                        thrpt:  [10.121 GiB/s 10.206 GiB/s 10.298 GiB/s]
+                 change:
+                        time:   [+95.907% +98.423% +100.91%] (p = 0.00 < 0.05)
+                        thrpt:  [-50.226% -49.603% -48.955%]
+                        Performance has regressed.
+Found 2 outliers among 10 measurements (20.00%)
+  1 (10.00%) low mild
+  1 (10.00%) high mild
+
+dpo/dpo_avx2/100k       time:   [36.966 µs 37.032 µs 37.128 µs]
+                        thrpt:  [20.067 GiB/s 20.119 GiB/s 20.155 GiB/s]
+                 change:
+                        time:   [-8.9292% -6.2057% -4.0476%] (p = 0.00 < 0.05)
+                        thrpt:  [+4.2184% +6.6163% +9.8047%]
+                        Performance has improved.
+Found 2 outliers among 10 measurements (20.00%)
+  1 (10.00%) high mild
+  1 (10.00%) high severe
+
+dpo/dpo_avx512/100k     time:   [36.426 µs 36.717 µs 37.001 µs]
+                        thrpt:  [20.136 GiB/s 20.292 GiB/s 20.454 GiB/s]
+                 change:
+                        time:   [-3.6551% -2.9210% -2.1306%] (p = 0.00 < 0.05)
+                        thrpt:  [+2.1770% +3.0089% +3.7938%]
+                        Performance has improved.
+

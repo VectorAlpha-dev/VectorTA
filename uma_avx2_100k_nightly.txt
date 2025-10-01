@@ -1,0 +1,3 @@
+uma/uma_avx2/100k       time:   [10.206 ms 10.406 ms 10.605 ms]
+                        thrpt:  [71.943 MiB/s 73.314 MiB/s 74.752 MiB/s]
+

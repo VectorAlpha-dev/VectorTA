@@ -1,0 +1,4 @@
+bollinger_bands_width/bollinger_bands_width_scalar/100k
+                        time:   [129.47 µs 131.04 µs 131.74 µs]
+                        thrpt:  [5.6553 GiB/s 5.6857 GiB/s 5.7545 GiB/s]
+

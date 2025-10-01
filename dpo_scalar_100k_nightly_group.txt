@@ -1,0 +1,3 @@
+dpo/dpo_scalar/100k     time:   [35.726 µs 36.123 µs 36.412 µs]
+                        thrpt:  [20.462 GiB/s 20.625 GiB/s 20.855 GiB/s]
+

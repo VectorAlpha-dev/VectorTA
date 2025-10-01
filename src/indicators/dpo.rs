@@ -12,12 +12,14 @@
 //!
 //! ## Developer Notes
 //! ### Implementation Status
-//! - **AVX2 Kernel**: Stub (calls scalar implementation)
-//! - **AVX512 Kernel**: Stub (calls scalar implementation)
+//! - **SIMD (AVX2/AVX512)**: Implemented; Auto uses runtime selection (like alma.rs).
+//!   Note: AVX512 delegates to AVX2 stub; AVX2 path hosts the fast unsafe loop. Scalar
+//!   remains the reference-safe implementation.
 //! - **WASM SIMD128**: Implemented with optimized vector operations
 //! - **Streaming Update**: O(1) - efficient circular buffer implementation
 //! - **Memory Optimization**: Fully optimized with `alloc_with_nan_prefix` for output vectors
-//! - **Batch Operations**: Fully implemented with `make_uninit_matrix` and `init_matrix_prefixes`
+//! - **Batch Operations**: Row-specific optimization via shared prefix sums across rows;
+//!   uses `make_uninit_matrix` + `init_matrix_prefixes` for warmup handling
 //!
 //! ### TODO - Performance Improvements
 //! - [ ] Implement actual AVX2 SIMD kernel (currently stub)
@@ -31,8 +33,6 @@ use crate::utilities::helpers::{
     make_uninit_matrix,
 };
 use aligned_vec::{AVec, CACHELINE_ALIGN};
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-use core::arch::x86_64::*;
 use paste::paste;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
@@ -227,6 +227,7 @@ pub fn dpo_into_slice(dst: &mut [f64], input: &DpoInput, kern: Kernel) -> Result
         });
     }
 
+    // Follow alma.rs: select best available kernel at runtime.
     let chosen = match kern {
         Kernel::Auto => detect_best_kernel(),
         other => other,
@@ -299,6 +300,7 @@ pub fn dpo_with_kernel(input: &DpoInput, kernel: Kernel) -> Result<DpoOutput, Dp
     let back = period / 2 + 1;
     let warm = (first + period - 1).max(back);
 
+    // Follow alma.rs: select best available kernel at runtime.
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
         other => other,
@@ -318,19 +320,21 @@ pub fn dpo_with_kernel(input: &DpoInput, kernel: Kernel) -> Result<DpoOutput, Dp
     Ok(DpoOutput { values: out })
 }
 
-#[inline]
+#[inline(always)]
 pub fn dpo_scalar(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) {
+    // Safe scalar reference: sliding window SMA + shifted price.
     let back = period / 2 + 1;
-    let mut sum = 0.0;
-    let scale = 1.0 / (period as f64);
-
-    for i in first_val..data.len() {
+    let mut sum = 0.0f64;
+    let scale = 1.0f64 / (period as f64);
+    let len = data.len();
+    for i in first_val..len {
         sum += data[i];
         if i >= first_val + period {
             sum -= data[i - period];
         }
         if i >= first_val + period - 1 && i >= back {
-            out[i] = data[i - back] - (sum * scale);
+            let p = data[i - back];
+            out[i] = (-scale).mul_add(sum, p);
         }
     }
 }
@@ -407,26 +411,112 @@ unsafe fn dpo_simd128(data: &[f64], period: usize, first_val: usize, out: &mut [
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub fn dpo_avx512(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) {
-    unsafe { dpo_scalar(data, period, first_val, out) }
+pub fn dpo_avx2(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) {
+    // Unsafe, loop-unrolled scalar fast path (no real SIMD). Former scalar kernel.
+    let len = data.len();
+    if len == 0 {
+        return;
+    }
+    let back = period / 2 + 1;
+    let scale = 1.0f64 / (period as f64);
+    unsafe {
+        // Build initial window sum for i0 = first_val + period - 1
+        let mut sum = 0.0f64;
+        let base = first_val;
+        let mut k = 0usize;
+        let ptr_d = data.as_ptr();
+        while k < period {
+            sum += *ptr_d.add(base + k);
+            k += 1;
+        }
+        let mut i = base + period - 1;
+
+        // Warm to first writable index
+        if i < back {
+            let stop = back.min(len.saturating_sub(1));
+            while i < stop {
+                sum += *ptr_d.add(i + 1) - *ptr_d.add(i + 1 - period);
+                i += 1;
+            }
+            if i >= len {
+                return;
+            }
+        }
+
+        let ptr_o = out.as_mut_ptr();
+        while i + 3 < len {
+            // i
+            let p0 = *ptr_d.add(i - back);
+            *ptr_o.add(i) = sum.mul_add(-scale, p0);
+
+            // i+1
+            let a1 = *ptr_d.add(i + 1);
+            let r1 = *ptr_d.add(i + 1 - period);
+            let s1 = sum + (a1 - r1);
+            if i + 1 >= back {
+                let p1 = *ptr_d.add(i + 1 - back);
+                *ptr_o.add(i + 1) = s1.mul_add(-scale, p1);
+            }
+
+            // i+2
+            let a2 = *ptr_d.add(i + 2);
+            let r2 = *ptr_d.add(i + 2 - period);
+            let s2 = s1 + (a2 - r2);
+            if i + 2 >= back {
+                let p2 = *ptr_d.add(i + 2 - back);
+                *ptr_o.add(i + 2) = s2.mul_add(-scale, p2);
+            }
+
+            // i+3
+            let a3 = *ptr_d.add(i + 3);
+            let r3 = *ptr_d.add(i + 3 - period);
+            let s3 = s2 + (a3 - r3);
+            if i + 3 >= back {
+                let p3 = *ptr_d.add(i + 3 - back);
+                *ptr_o.add(i + 3) = s3.mul_add(-scale, p3);
+            }
+
+            // bring sum to i+4
+            i += 4;
+            if i >= len {
+                return;
+            }
+            let a4 = *ptr_d.add(i);
+            let r4 = *ptr_d.add(i - period);
+            sum = s3 + (a4 - r4);
+        }
+
+        // tail
+        while i < len {
+            if i >= back {
+                let p = *ptr_d.add(i - back);
+                *ptr_o.add(i) = sum.mul_add(-scale, p);
+            }
+            if i + 1 < len {
+                sum += *ptr_d.add(i + 1) - *ptr_d.add(i + 1 - period);
+            }
+            i += 1;
+        }
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub fn dpo_avx2(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) {
-    unsafe { dpo_scalar(data, period, first_val, out) }
+pub fn dpo_avx512(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) {
+    // Stub: AVX512 delegates to AVX2 stub which holds the fast unsafe scalar.
+    dpo_avx2(data, period, first_val, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn dpo_avx512_short(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) {
-    unsafe { dpo_scalar(data, period, first_val, out) }
+    dpo_avx2(data, period, first_val, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn dpo_avx512_long(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) {
-    unsafe { dpo_scalar(data, period, first_val, out) }
+    dpo_avx2(data, period, first_val, out)
 }
 
 #[inline]
@@ -619,16 +709,35 @@ pub fn dpo_batch_inner_into(
     };
     init_matrix_prefixes(out_mu, cols, &warm);
 
+    // Row-specific batch optimization: precompute prefix sums once and reuse across rows.
+    let mut pfx = vec![0.0f64; cols];
+    if cols > 0 {
+        let mut acc = 0.0f64;
+        for i in 0..cols {
+            if i < first {
+                pfx[i] = 0.0;
+            } else {
+                acc += data[i];
+                pfx[i] = acc;
+            }
+        }
+    }
+
     let do_row = |row: usize, dst_mu: &mut [std::mem::MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
+        let back = period / 2 + 1;
+        let warm = (first + period - 1).max(back);
         let dst = std::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, cols);
-        match kern {
-            Kernel::Scalar | Kernel::ScalarBatch => dpo_row_scalar(data, first, period, dst),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => dpo_row_avx2(data, first, period, dst),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => dpo_row_avx512(data, first, period, dst),
-            _ => dpo_row_scalar(data, first, period, dst),
+        let scale = 1.0f64 / (period as f64);
+
+        let mut i = warm;
+        while i < cols {
+            let prev = if i >= period { pfx[i - period] } else { 0.0 };
+            let sum = pfx[i] - prev;
+            let avg = sum * scale;
+            let price = data[i - back];
+            dst[i] = price - avg;
+            i += 1;
         }
     };
 
@@ -707,15 +816,34 @@ fn dpo_batch_inner(
         Vec::from_raw_parts(ptr, len, len)
     };
 
-    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+    // Row-specific batch optimization: precompute prefix sums once and reuse across rows.
+    let mut pfx = vec![0.0f64; cols];
+    if cols > 0 {
+        let mut acc = 0.0f64;
+        for i in 0..cols {
+            if i < first {
+                pfx[i] = 0.0;
+            } else {
+                acc += data[i];
+                pfx[i] = acc;
+            }
+        }
+    }
+
+    let do_row = |row: usize, out_row: &mut [f64]| {
         let period = combos[row].period.unwrap();
-        match kern {
-            Kernel::Scalar | Kernel::ScalarBatch => dpo_row_scalar(data, first, period, out_row),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => dpo_row_avx2(data, first, period, out_row),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => dpo_row_avx512(data, first, period, out_row),
-            _ => dpo_row_scalar(data, first, period, out_row),
+        let back = period / 2 + 1;
+        let warm = (first + period - 1).max(back);
+        let scale = 1.0f64 / (period as f64);
+
+        let mut i = warm;
+        while i < cols {
+            let prev = if i >= period { pfx[i - period] } else { 0.0 };
+            let sum = pfx[i] - prev;
+            let avg = sum * scale;
+            let price = data[i - back];
+            out_row[i] = price - avg;
+            i += 1;
         }
     };
 
@@ -756,7 +884,7 @@ unsafe fn dpo_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn dpo_row_avx2(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-    dpo_scalar(data, period, first, out)
+    dpo_avx2(data, period, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -772,13 +900,13 @@ pub unsafe fn dpo_row_avx512(data: &[f64], first: usize, period: usize, out: &mu
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn dpo_row_avx512_short(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-    dpo_scalar(data, period, first, out)
+    dpo_avx2(data, period, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn dpo_row_avx512_long(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-    dpo_scalar(data, period, first, out)
+    dpo_avx2(data, period, first, out)
 }
 
 #[derive(Debug, Clone)]

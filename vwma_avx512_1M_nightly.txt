@@ -1,0 +1,3 @@
+vwma/vwma_avx512/1M     time:   [734.27 µs 749.24 µs 755.92 µs]
+                        thrpt:  [9.8563 GiB/s 9.9441 GiB/s 10.147 GiB/s]
+

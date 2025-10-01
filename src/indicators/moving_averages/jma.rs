@@ -14,12 +14,14 @@
 //! - **`Err(JmaError)`** otherwise.
 //!
 //! ## Developer Notes
-//! - **AVX2 kernel**: ✅ Fully implemented - vectorized computations with FMA operations
-//! - **AVX512 kernel**: ✅ Fully implemented - 4-way unrolled loop with 8-wide SIMD vectors for ILP
+//! - **AVX2 kernel**: ✅ Fully implemented – FMA-enabled with loop unrolling for ILP
+//! - **AVX512 kernel**: ✅ Fully implemented – 8-way unrolled scalar-FMA steps to better saturate wide backends
 //! - **Streaming update**: ✅ O(1) complexity - efficient incremental computation with state variables (e0, e1, e2)
 //! - **Memory optimization**: ✅ Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix) for output vectors
 //! - **Note**: Sequential nature of JMA calculations limits SIMD benefits, but implementations leverage
 //!   instruction-level parallelism through loop unrolling
+//! - **Row-specific batch**: Not attempted; potential reuse of e0/e1 across phase-only sweeps exists, but typical
+//!   grids vary period/power as well. Retaining per-row computation avoids complexity with limited upside.
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
@@ -401,21 +403,71 @@ pub fn jma_scalar(
 
     output[first_valid] = j_prev;
 
+    let n = data.len();
     unsafe {
-        for i in (first_valid + 1)..data.len() {
-            let price = *data.get_unchecked(i);
+        // Pointer walk with 4x unrolling for ILP; keep strict op ordering (no FMA)
+        let mut p = data.as_ptr().add(first_valid + 1);
+        let mut q = output.as_mut_ptr().add(first_valid + 1);
+        let end_ptr = data.as_ptr().add(n);
 
-            e0 = one_minus_alpha * price + alpha * e0;
+        while p.add(3) < end_ptr {
+            // step 0
+            let x0 = *p;
+            e0 = one_minus_alpha * x0 + alpha * e0;
+            e1 = (x0 - e0) * one_minus_beta + beta * e1;
+            let d0 = e0 + pr * e1 - j_prev;
+            e2 = d0 * oma_sq + alpha_sq * e2;
+            j_prev += e2;
+            *q = j_prev;
+            p = p.add(1);
+            q = q.add(1);
 
-            e1 = (price - e0) * one_minus_beta + beta * e1;
-            let diff = e0 + pr * e1 - j_prev;
+            // step 1
+            let x1 = *p;
+            e0 = one_minus_alpha * x1 + alpha * e0;
+            e1 = (x1 - e0) * one_minus_beta + beta * e1;
+            let d1 = e0 + pr * e1 - j_prev;
+            e2 = d1 * oma_sq + alpha_sq * e2;
+            j_prev += e2;
+            *q = j_prev;
+            p = p.add(1);
+            q = q.add(1);
 
-            e2 = diff * oma_sq + alpha_sq * e2;
-            let j = j_prev + e2;
+            // step 2
+            let x2 = *p;
+            e0 = one_minus_alpha * x2 + alpha * e0;
+            e1 = (x2 - e0) * one_minus_beta + beta * e1;
+            let d2 = e0 + pr * e1 - j_prev;
+            e2 = d2 * oma_sq + alpha_sq * e2;
+            j_prev += e2;
+            *q = j_prev;
+            p = p.add(1);
+            q = q.add(1);
 
-            *output.get_unchecked_mut(i) = j;
+            // step 3
+            let x3 = *p;
+            e0 = one_minus_alpha * x3 + alpha * e0;
+            e1 = (x3 - e0) * one_minus_beta + beta * e1;
+            let d3 = e0 + pr * e1 - j_prev;
+            e2 = d3 * oma_sq + alpha_sq * e2;
+            j_prev += e2;
+            *q = j_prev;
+            p = p.add(1);
+            q = q.add(1);
+        }
 
-            j_prev = j;
+        // Scalar tail
+        while p < end_ptr {
+            let x = *p;
+            e0 = one_minus_alpha * x + alpha * e0;
+            e1 = (x - e0) * one_minus_beta + beta * e1;
+            let d = e0 + pr * e1 - j_prev;
+            e2 = d * oma_sq + alpha_sq * e2;
+            j_prev += e2;
+            *q = j_prev;
+
+            p = p.add(1);
+            q = q.add(1);
         }
     }
 }
@@ -460,18 +512,66 @@ pub unsafe fn jma_avx2(
 
     output[first_valid] = j_prev;
 
+    let n = data.len();
     unsafe {
-        for i in (first_valid + 1)..data.len() {
-            let price = *data.get_unchecked(i);
+        // Pointer walk with 4x unrolling; leverage FMA via mul_add
+        let mut p = data.as_ptr().add(first_valid + 1);
+        let mut q = output.as_mut_ptr().add(first_valid + 1);
+        let end_ptr = data.as_ptr().add(n);
 
-            e0 = one_minus_alpha.mul_add(price, alpha * e0);
-            e1 = (price - e0).mul_add(one_minus_beta, beta * e1);
-
-            let diff = e0 + pr * e1 - j_prev;
-            e2 = diff.mul_add(oma_sq, alpha_sq * e2);
-
+        while p.add(3) < end_ptr {
+            let x0 = *p;
+            e0 = one_minus_alpha.mul_add(x0, alpha * e0);
+            e1 = (x0 - e0).mul_add(one_minus_beta, beta * e1);
+            let d0 = e0 + pr * e1 - j_prev;
+            e2 = d0.mul_add(oma_sq, alpha_sq * e2);
             j_prev += e2;
-            *output.get_unchecked_mut(i) = j_prev;
+            *q = j_prev;
+            p = p.add(1);
+            q = q.add(1);
+
+            let x1 = *p;
+            e0 = one_minus_alpha.mul_add(x1, alpha * e0);
+            e1 = (x1 - e0).mul_add(one_minus_beta, beta * e1);
+            let d1 = e0 + pr * e1 - j_prev;
+            e2 = d1.mul_add(oma_sq, alpha_sq * e2);
+            j_prev += e2;
+            *q = j_prev;
+            p = p.add(1);
+            q = q.add(1);
+
+            let x2 = *p;
+            e0 = one_minus_alpha.mul_add(x2, alpha * e0);
+            e1 = (x2 - e0).mul_add(one_minus_beta, beta * e1);
+            let d2 = e0 + pr * e1 - j_prev;
+            e2 = d2.mul_add(oma_sq, alpha_sq * e2);
+            j_prev += e2;
+            *q = j_prev;
+            p = p.add(1);
+            q = q.add(1);
+
+            let x3 = *p;
+            e0 = one_minus_alpha.mul_add(x3, alpha * e0);
+            e1 = (x3 - e0).mul_add(one_minus_beta, beta * e1);
+            let d3 = e0 + pr * e1 - j_prev;
+            e2 = d3.mul_add(oma_sq, alpha_sq * e2);
+            j_prev += e2;
+            *q = j_prev;
+            p = p.add(1);
+            q = q.add(1);
+        }
+
+        while p < end_ptr {
+            let x = *p;
+            e0 = one_minus_alpha.mul_add(x, alpha * e0);
+            e1 = (x - e0).mul_add(one_minus_beta, beta * e1);
+            let d = e0 + pr * e1 - j_prev;
+            e2 = d.mul_add(oma_sq, alpha_sq * e2);
+            j_prev += e2;
+            *q = j_prev;
+
+            p = p.add(1);
+            q = q.add(1);
         }
     }
 }
@@ -536,20 +636,30 @@ pub unsafe fn jma_avx512(
     let mut i = first_valid + 1;
     let n = data.len();
 
-    // Unroll loop by 4 (as an example to leverage AVX512 register space for ILP)
-    while i + 3 < n {
-        for k in 0..4 {
-            let price = *data.get_unchecked(i + k);
-
-            e0 = one_minus_alpha.mul_add(price, alpha * e0);
-            e1 = (price - e0).mul_add(one_minus_beta, beta * e1);
-            let diff = e0 + pr * e1 - j_prev;
-            e2 = diff.mul_add(oma_sq, alpha_sq * e2);
-            j_prev += e2;
-
-            *out.get_unchecked_mut(i + k) = j_prev;
+    // Unroll by 8 to better saturate wide FMA backends
+    while i + 7 < n {
+        macro_rules! step {
+            ($idx:expr) => {{
+                let price = *data.get_unchecked(i + $idx);
+                e0 = one_minus_alpha.mul_add(price, alpha * e0);
+                e1 = (price - e0).mul_add(one_minus_beta, beta * e1);
+                let diff = e0 + pr * e1 - j_prev;
+                e2 = diff.mul_add(oma_sq, alpha_sq * e2);
+                j_prev += e2;
+                *out.get_unchecked_mut(i + $idx) = j_prev;
+            }};
         }
-        i += 4;
+
+        step!(0);
+        step!(1);
+        step!(2);
+        step!(3);
+        step!(4);
+        step!(5);
+        step!(6);
+        step!(7);
+
+        i += 8;
     }
 
     // Scalar tail for remaining elements

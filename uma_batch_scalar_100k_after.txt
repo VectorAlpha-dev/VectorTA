@@ -1,0 +1,6 @@
+uma_batch/uma_batch_scalarbatch/100k
+                        time:   [10.025 ms 10.086 ms 10.144 ms]
+                        thrpt:  [16.746 GiB/s 16.842 GiB/s 16.945 GiB/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+

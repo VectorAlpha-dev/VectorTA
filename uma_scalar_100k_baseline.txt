@@ -1,0 +1,5 @@
+uma/uma_scalar/100k     time:   [18.601 ms 18.972 ms 19.346 ms]
+                        thrpt:  [39.436 MiB/s 40.213 MiB/s 41.016 MiB/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) low mild
+

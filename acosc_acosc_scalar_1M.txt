@@ -1,0 +1,3 @@
+acosc/acosc_scalar/1M   time:   [3.9326 ms 4.0174 ms 4.1287 ms]
+                        thrpt:  [1.8046 GiB/s 1.8546 GiB/s 1.8946 GiB/s]
+

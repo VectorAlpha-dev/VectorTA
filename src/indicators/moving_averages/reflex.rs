@@ -20,15 +20,15 @@
 //! - **`Err(ReflexError)`** otherwise.
 //!
 //! ## Developer Notes
-//! - **AVX2 kernel**: ✅ Fully implemented with vectorized sum operations
-//! - **AVX512 kernel**: ✅ Fully implemented with 8-wide vector processing
-//! - **Streaming update**: ⚠️ O(n) - recalculates slope and variance over ring buffer each update
-//! - **Memory optimization**: ✅ Uses `alloc_with_nan_prefix` for zero-copy output allocation
-//! - **Current status**: Production-ready with comprehensive SIMD optimizations
-//! - **Optimization opportunities**:
-//!   - Streaming update complexity is inherent to the algorithm's variance calculation
-//!   - Consider incremental variance updates for potential O(1) streaming
-//!   - AVX implementations are well-optimized with horizontal sum operations
+//! - SIMD: Implemented but delegated to scalar. Scalar was optimized to O(1) per step
+//!   via a ring buffer + closed-form identity and is fastest on AVX2/AVX512-class CPUs.
+//!   Runtime selection maps AVX2/AVX512 requests to the scalar kernel for identical
+//!   numerics and performance stability (see reflex_avx2/reflex_avx512).
+//! - Scalar: Uses zero-copy allocation helpers and avoids O(N) temporaries; only a
+//!   small `(period+1)` ring buffer and a rolling variance are maintained.
+//! - Streaming: `ReflexStream` mirrors the same O(1) math for per-tick updates.
+//! - Batch: Row-specific kernels not attempted; coefficients depend on period, so
+//!   there is no meaningful cross-row reuse to exploit.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -258,259 +258,98 @@ pub fn reflex_into_slice(
 #[inline]
 pub fn reflex_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     let len = data.len();
-    if len == 0 || period < 2 {
+    if len < 2 || period < 2 {
         return;
     }
 
-    // ------------------------------------------------------------------------
-    // 2-pole smoothing filter coefficients (identical to the original version)
-    // ------------------------------------------------------------------------
-    let half_period = (period / 2).max(1);
-    let a = (-1.414_f64 * std::f64::consts::PI / half_period as f64).exp();
-    let a_sq = a * a;
-    let b = 2.0 * a * (1.414_f64 * std::f64::consts::PI / half_period as f64).cos();
-    let c = (1.0 + a_sq - b) * 0.5;
+    // 2‑pole SuperSmoother coefficients (Ehlers)
+    let half_p = (period / 2).max(1) as f64;
+    let a = (-1.414_f64 * std::f64::consts::PI / half_p).exp();
+    let a2 = a * a;
+    let b = 2.0 * a * (1.414_f64 * std::f64::consts::PI / half_p).cos();
+    let c = 0.5 * (1.0 + a2 - b);
 
-    // ------------------------------------------------------------------------
-    // Working buffers
-    // ------------------------------------------------------------------------
-    let mut ssf = vec![0.0; len]; // 2-pole smoothed series
-    let mut ms = vec![0.0; len]; // rolling mean-square of “my_sum”
-    let mut sums = vec![0.0; len]; // raw “my_sum” values (for debugging)
+    // Ring buffer of ssf with length (period + 1)
+    let ring_len = period + 1;
+    let mut ssf = vec![0.0_f64; ring_len];
 
-    // ------------------------------------------------------------------------
-    // Seed the first two ssf values (per the original algorithm)
-    // ------------------------------------------------------------------------
+    // Seed per original algorithm
     ssf[0] = data[0];
     if len > 1 {
         ssf[1] = data[1];
     }
 
-    let period_f = period as f64;
+    // Rolling sum of last `period` ssf values (before including ssf[i])
+    // At i == period this equals sum(ssf[0..period-1]).
+    let mut ssf_sum = if period == 1 { ssf[0] } else { ssf[0] + ssf[1] };
 
-    // ------------------------------------------------------------------------
-    // Main loop
-    // ------------------------------------------------------------------------
+    // Precompute constants for the closed‑form
+    let inv_p = 1.0 / (period as f64);
+    let alpha = 0.5 * (1.0 + inv_p); // (p+1)/(2p)
+    let beta = 1.0 - alpha; // (p-1)/(2p)
+
+    // Exponentially weighted variance proxy
+    let mut ms = 0.0_f64;
+
+    // Main pass
     for i in 2..len {
-        // ---- 1. update the 2-pole smoothed price (ssf[i]) -------------------
-        let d_i = data[i];
-        let d_im1 = data[i - 1];
-        let ssf_im1 = ssf[i - 1];
-        let ssf_im2 = ssf[i - 2];
+        // Indices in the ring
+        let idx = i % ring_len;
+        let idx_im1 = (i - 1) % ring_len;
+        let idx_im2 = (i - 2) % ring_len;
 
-        let ssf_i = c * (d_i + d_im1) + b * ssf_im1 - a_sq * ssf_im2;
-        ssf[i] = ssf_i;
+        // 2‑pole smoothing: ssf[i] = c*(x[i]+x[i-1]) + b*ssf[i-1] - a2*ssf[i-2]
+        let di = data[i];
+        let dim1 = data[i - 1];
+        let ssf_im1 = ssf[idx_im1];
+        let ssf_im2 = ssf[idx_im2];
 
-        // ---- 2. once we have at least `period` values, compute Reflex -------
-        if i >= period {
-            // slope of the line connecting ssf[i-period] … ssf[i]
-            let slope = (ssf[i - period] - ssf_i) / period_f;
+        let t0 = c * (di + dim1);
+        let t1 = (-a2).mul_add(ssf_im2, t0); // t0 - a2*ssf[i-2]
+        let ssf_i = b.mul_add(ssf_im1, t1); // + b*ssf[i-1]
 
-            // ∑_{t = 1..period} ( predicted – past )
-            let mut my_sum = 0.0;
-            for t in 1..=period {
-                let pred = ssf_i + slope * (t as f64);
-                let past = ssf[i - t];
-                my_sum += pred - past;
-            }
-            my_sum /= period_f;
-            sums[i] = my_sum;
+        // Store ssf[i]
+        ssf[idx] = ssf_i;
 
-            // exponentially-weighted rolling variance proxy (ms[i])
-            let ms_im1 = ms[i - 1];
-            let ms_i = 0.04 * my_sum * my_sum + 0.96 * ms_im1;
-            ms[i] = ms_i;
-
-            // ---- 3. write output *only* after the warm-up prefix ------------
-            if i >= period && ms_i > 0.0 {
-                out[i] = my_sum / ms_i.sqrt();
-            }
-            // else: leave the NaN written by `alloc_with_nan_prefix`
+        // Build initial window: accumulate ssf_sum until i == period
+        if i < period {
+            ssf_sum += ssf_i;
+            continue;
         }
+
+        // Closed‑form Reflex "my_sum" (O(1))
+        let idx_ip = (i - period) % ring_len;
+        let ssf_ip = ssf[idx_ip];
+
+        // mean of the last p values (ssf[i-1]..ssf[i-p])
+        let mean_lp = ssf_sum * inv_p;
+        // my_sum = beta*ssf[i] + alpha*ssf[i-p] - mean_last_p
+        let my_sum = ssf_i.mul_add(beta, ssf_ip * alpha) - mean_lp;
+
+        // EW variance proxy & normalization (per Ehlers)
+        ms = (0.96_f64).mul_add(ms, 0.04_f64 * (my_sum * my_sum));
+        if ms > 0.0 {
+            out[i] = my_sum / ms.sqrt();
+        }
+
+        // Roll the mean of last‑p for next step: remove ssf[i-p], add ssf[i]
+        ssf_sum += ssf_i - ssf_ip;
     }
-}
-
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
-unsafe fn hsum_pd256(v: __m256d) -> f64 {
-    // Horizontal sum: 256->128->64
-    let hi = _mm256_extractf128_pd(v, 1);
-    let lo = _mm256_castpd256_pd128(v);
-    let sum = _mm_add_pd(hi, lo);
-    _mm_cvtsd_f64(_mm_add_pd(sum, _mm_unpackhi_pd(sum, sum)))
-}
-
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
-unsafe fn hsum_pd512(v: __m512d) -> f64 {
-    // Horizontal sum: 512->256->128->64
-    let hi256 = _mm512_extractf64x4_pd(v, 1);
-    let lo256 = _mm512_castpd512_pd256(v);
-    hsum_pd256(_mm256_add_pd(hi256, lo256))
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 pub unsafe fn reflex_avx2(data: &[f64], period: usize, _first: usize, out: &mut [f64]) {
-    const STEP: usize = 4;
-    let len = data.len();
-    if len < 3 || period < 2 {
-        return;
-    }
-
-    // 2-pole smoothing filter coefficients
-    let half_p = (period / 2).max(1) as f64;
-    let a = (-1.414_f64 * std::f64::consts::PI / half_p).exp();
-    let a2 = a * a;
-    let b = 2.0 * a * (1.414_f64 * std::f64::consts::PI / half_p).cos();
-    let c = (1.0 + a2 - b) * 0.5;
-
-    let mut ssf = vec![0.0f64; len];
-    let mut ms = 0.0f64; // rolling ms
-
-    ssf[0] = data[0];
-    if len > 1 {
-        ssf[1] = data[1];
-    }
-
-    let inv_p = 1.0 / (period as f64);
-
-    // Reusable vectors for AVX2
-    let tbase = _mm256_setr_pd(1.0, 2.0, 3.0, 4.0);
-
-    for i in 2..len {
-        let ssf_i = c * (data[i] + data[i - 1]) + b.mul_add(ssf[i - 1], -a2 * ssf[i - 2]);
-        ssf[i] = ssf_i;
-
-        if i >= period {
-            let slope = (ssf[i - period] - ssf_i) * inv_p;
-            let slope_v = _mm256_set1_pd(slope);
-            let ssf_i_v = _mm256_set1_pd(ssf_i);
-
-            let mut acc = _mm256_setzero_pd();
-            let chunks = period / STEP;
-            let rem = period % STEP;
-
-            // t runs from 1..=period
-            let mut t_off = 0.0f64;
-
-            // Process full 4-wide blocks
-            for _ in 0..chunks {
-                // pred = ssf_i + slope * (tbase + t_off)
-                let toff_v = _mm256_set1_pd(t_off);
-                let t_vec = _mm256_add_pd(tbase, toff_v);
-                let pred_v = _mm256_fmadd_pd(slope_v, t_vec, ssf_i_v);
-
-                // past = ssf[i - t] for t in (t_off+1 .. t_off+4), contiguous backward
-                let past_ptr = ssf.as_ptr().add(i - (t_off as usize) - 4);
-                let past_v = _mm256_loadu_pd(past_ptr);
-
-                acc = _mm256_add_pd(acc, _mm256_sub_pd(pred_v, past_v));
-                t_off += STEP as f64;
-            }
-
-            let mut my_sum = hsum_pd256(acc);
-
-            // Scalar tail
-            if rem != 0 {
-                let start = chunks * STEP + 1;
-                for t in start..=period {
-                    let pred = ssf_i + slope * (t as f64);
-                    my_sum += pred - ssf[i - t];
-                }
-            }
-
-            my_sum *= inv_p;
-
-            // EW variance proxy
-            ms = 0.04_f64 * my_sum * my_sum + 0.96_f64 * ms;
-            if ms > 0.0 {
-                out[i] = my_sum / ms.sqrt();
-            }
-        }
-    }
+    // After optimizing the scalar path to O(1) per step,
+    // delegating preserves identical numerics and performance characteristics.
+    reflex_scalar(data, period, _first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,avx512dq,fma")]
 pub unsafe fn reflex_avx512(data: &[f64], period: usize, _first: usize, out: &mut [f64]) {
-    const STEP: usize = 8;
-    let len = data.len();
-    if len < 3 || period < 2 {
-        return;
-    }
-
-    // IIR coeffs
-    let half_p = (period / 2).max(1) as f64;
-    let a = (-1.414_f64 * std::f64::consts::PI / half_p).exp();
-    let a2 = a * a;
-    let b = 2.0 * a * (1.414_f64 * std::f64::consts::PI / half_p).cos();
-    let c = (1.0 + a2 - b) * 0.5;
-
-    let mut ssf = vec![0.0f64; len];
-    let mut ms = 0.0f64; // rolling ms; no need to write an array
-
-    ssf[0] = data[0];
-    if len > 1 {
-        ssf[1] = data[1];
-    }
-
-    let inv_p = 1.0 / (period as f64);
-
-    // Reusable vectors
-    let tbase = _mm512_setr_pd(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0);
-
-    for i in 2..len {
-        let ssf_i = c * (data[i] + data[i - 1]) + b.mul_add(ssf[i - 1], -a2 * ssf[i - 2]);
-        ssf[i] = ssf_i;
-
-        if i >= period {
-            let slope = (ssf[i - period] - ssf_i) * inv_p; // (ssf[i-p]-ssf[i])/p
-            let slope_v = _mm512_set1_pd(slope);
-            let ssf_i_v = _mm512_set1_pd(ssf_i);
-
-            let mut acc = _mm512_setzero_pd();
-            let chunks = period / STEP;
-            let rem = period % STEP;
-
-            // t runs from 1..=period; we handle as (tbase + t_off)
-            let mut t_off = 0.0f64;
-
-            // Process full 8-wide blocks
-            for _ in 0..chunks {
-                // pred = ssf_i + slope * (tbase + t_off)
-                let toff_v = _mm512_set1_pd(t_off);
-                let t_vec = _mm512_add_pd(tbase, toff_v);
-                let pred_v = _mm512_fmadd_pd(slope_v, t_vec, ssf_i_v);
-
-                // past = ssf[i - t] for t in (t_off+1 .. t_off+8), contiguous backward
-                let past_ptr = ssf.as_ptr().add(i - (t_off as usize) - 8);
-                let past_v = _mm512_loadu_pd(past_ptr);
-
-                acc = _mm512_add_pd(acc, _mm512_sub_pd(pred_v, past_v));
-                t_off += STEP as f64;
-            }
-
-            let mut my_sum = hsum_pd512(acc);
-
-            // Scalar tail
-            if rem != 0 {
-                let start = chunks * STEP + 1;
-                for t in start..=period {
-                    let pred = ssf_i + slope * (t as f64);
-                    my_sum += pred - ssf[i - t];
-                }
-            }
-
-            my_sum *= inv_p;
-
-            // EW variance proxy (scalar)
-            ms = 0.04_f64 * my_sum * my_sum + 0.96_f64 * ms;
-            if ms > 0.0 {
-                out[i] = my_sum / ms.sqrt();
-            }
-        }
-    }
+    // See note in AVX2 variant.
+    reflex_scalar(data, period, _first, out)
 }
 
 // --- Zero-copy prepare/compute pattern ---
@@ -574,8 +413,12 @@ fn reflex_compute_into(data: &[f64], period: usize, first: usize, kernel: Kernel
             Kernel::Scalar | Kernel::ScalarBatch => reflex_scalar(data, period, first, out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => reflex_avx2(data, period, first, out),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch => reflex_scalar(data, period, first, out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => reflex_avx512(data, period, first, out),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx512 | Kernel::Avx512Batch => reflex_scalar(data, period, first, out),
             _ => unreachable!(),
         }
     }
@@ -993,8 +836,12 @@ fn reflex_batch_inner_into(
             Kernel::Scalar => reflex_row_scalar(data, first, period, dst),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 => reflex_row_avx2(data, first, period, dst),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 => reflex_row_scalar(data, first, period, dst),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 => reflex_row_avx512(data, first, period, dst),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx512 => reflex_row_scalar(data, first, period, dst),
             _ => unreachable!(),
         }
     };

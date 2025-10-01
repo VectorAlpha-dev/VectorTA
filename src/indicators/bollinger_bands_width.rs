@@ -16,11 +16,10 @@
 //! - **`Err(BollingerBandsWidthError)`** otherwise
 //!
 //! ## Developer Notes
-//! - **AVX2 kernel**: STUB - calls scalar implementation
-//! - **AVX512 kernel**: STUB - calls scalar implementation
-//! - **Streaming**: Not implemented
-//! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy)
-//! - **Batch operations**: ✅ Implemented with parallel processing support
+//! - SIMD implemented for initial-window reduction only; loop-carried deps limit gains.
+//! - Runtime selection short-circuits to Scalar for Auto: AVX2/AVX512 underperform for typical periods.
+//! - Memory optimization: ✅ Uses alloc_with_nan_prefix (zero-copy)
+//! - Batch operations: ✅ Implemented with parallel processing support
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
@@ -338,8 +337,9 @@ pub fn bollinger_bands_width_compute_into(
     // Note: The caller is responsible for pre-filling NaN values in the warmup period
     // using alloc_with_nan_prefix or similar methods
 
+    // SIMD path underperforms here; prefer Scalar for Auto.
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -411,8 +411,9 @@ pub fn bollinger_bands_width_into_slice(
     }
 
     // Compute the indicator values into the output slice
+    // SIMD path underperforms here; prefer Scalar for Auto.
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -463,7 +464,7 @@ pub unsafe fn bollinger_bands_width_scalar_into(
     // Dispatch to classic kernels for common cases
     if devtype == 0 {
         // Population standard deviation
-        if matype == "sma" || matype == "SMA" {
+        if matype.eq_ignore_ascii_case("sma") {
             return bollinger_bands_width_scalar_classic_sma(
                 data,
                 period,
@@ -472,7 +473,7 @@ pub unsafe fn bollinger_bands_width_scalar_into(
                 first_valid_idx,
                 out,
             );
-        } else if matype == "ema" || matype == "EMA" {
+        } else if matype.eq_ignore_ascii_case("ema") {
             return bollinger_bands_width_scalar_classic_ema(
                 data,
                 period,
@@ -506,12 +507,15 @@ pub unsafe fn bollinger_bands_width_scalar_into(
         .map_err(|e| BollingerBandsWidthError::UnderlyingFunctionFailed(e.to_string()))?;
     let dev_values = &dev.values; // <- consistent
 
-    for i in (first_valid_idx + period - 1)..data.len() {
-        let m = middle[i];
-        // Optional: if m == 0.0 { out[i] = f64::NAN; continue; }
-        let u = m + devup * dev_values[i];
-        let l = m - devdn * dev_values[i];
-        out[i] = (u - l) / m;
+    let start = first_valid_idx + period - 1;
+    let u_plus_d = devup + devdn;
+    let len = data.len();
+    let mut i = start;
+    while i < len {
+        let m = *middle.get_unchecked(i);
+        let d = *dev_values.get_unchecked(i);
+        *out.get_unchecked_mut(i) = (u_plus_d * d) / m;
+        i += 1;
     }
     Ok(())
 }
@@ -526,48 +530,44 @@ pub unsafe fn bollinger_bands_width_scalar_classic_sma(
     first_valid_idx: usize,
     out: &mut [f64],
 ) -> Result<(), BollingerBandsWidthError> {
-    let start_idx = first_valid_idx + period - 1;
+    debug_assert!(period > 0 && first_valid_idx + period - 1 < data.len());
+    let n = period;
+    let inv_n = 1.0 / (n as f64);
+    let start = first_valid_idx + n - 1;
+    let u_plus_d = devup + devdn;
 
-    // Calculate initial SMA
-    let mut sum = 0.0;
-    for i in 0..period {
-        sum += data[first_valid_idx + i];
+    // Initial window sums
+    let mut sum = 0.0f64;
+    let mut sq_sum = 0.0f64; // sum of squares
+    for i in 0..n {
+        let x = *data.get_unchecked(first_valid_idx + i);
+        sum += x;
+        sq_sum = x.mul_add(x, sq_sum);
     }
-    let mut sma = sum / period as f64;
 
-    // Calculate initial standard deviation (population)
-    let mut sq_sum = 0.0;
-    for i in 0..period {
-        let diff = data[first_valid_idx + i] - sma;
-        sq_sum += diff * diff;
-    }
-    let mut stddev = (sq_sum / period as f64).sqrt();
+    // First output
+    let mut mean = sum * inv_n;
+    let mut var = (sq_sum * inv_n) - mean * mean;
+    if var < 0.0 { var = 0.0; }
+    let mut std = var.sqrt();
+    let mut mid = mean;
+    *out.get_unchecked_mut(start) = (u_plus_d * std) / mid;
 
-    // Calculate first width value
-    let upper = sma + devup * stddev;
-    let lower = sma - devdn * stddev;
-    out[start_idx] = (upper - lower) / sma;
-
-    // Rolling window calculations
-    for i in (start_idx + 1)..data.len() {
-        // Update SMA with rolling window
-        let old_val = data[i - period];
-        let new_val = data[i];
-        sum = sum - old_val + new_val;
-        sma = sum / period as f64;
-
-        // Update standard deviation
-        sq_sum = 0.0;
-        for j in 0..period {
-            let diff = data[i - period + 1 + j] - sma;
-            sq_sum += diff * diff;
-        }
-        stddev = (sq_sum / period as f64).sqrt();
-
-        // Calculate width
-        let upper = sma + devup * stddev;
-        let lower = sma - devdn * stddev;
-        out[i] = (upper - lower) / sma;
+    // Rolling updates
+    let len = data.len();
+    let mut i = start + 1;
+    while i < len {
+        let new_v = *data.get_unchecked(i);
+        let old_v = *data.get_unchecked(i - n);
+        sum += new_v - old_v;
+        sq_sum = new_v.mul_add(new_v, sq_sum - old_v * old_v);
+        mean = sum * inv_n;
+        var = (sq_sum * inv_n) - mean * mean;
+        if var < 0.0 { var = 0.0; }
+        std = var.sqrt();
+        mid = mean;
+        *out.get_unchecked_mut(i) = (u_plus_d * std) / mid;
+        i += 1;
     }
 
     Ok(())
@@ -583,47 +583,52 @@ pub unsafe fn bollinger_bands_width_scalar_classic_ema(
     first_valid_idx: usize,
     out: &mut [f64],
 ) -> Result<(), BollingerBandsWidthError> {
-    let start_idx = first_valid_idx + period - 1;
-    let alpha = 2.0 / (period as f64 + 1.0);
+    debug_assert!(period > 0 && first_valid_idx + period - 1 < data.len());
+    let n = period;
+    let inv_n = 1.0 / (n as f64);
+    let start = first_valid_idx + n - 1;
+    let u_plus_d = devup + devdn;
+    let alpha = 2.0 / (n as f64 + 1.0);
     let beta = 1.0 - alpha;
 
-    // Calculate initial SMA for EMA
-    let mut sum = 0.0;
-    for i in 0..period {
-        sum += data[first_valid_idx + i];
+    // Initial sums over window
+    let mut sum = 0.0f64;
+    let mut sq_sum = 0.0f64; // sum of squares
+    for i in 0..n {
+        let x = *data.get_unchecked(first_valid_idx + i);
+        sum += x;
+        sq_sum = x.mul_add(x, sq_sum);
     }
-    let mut ema = sum / period as f64;
+    // Seed EMA from initial SMA
+    let mut ema = sum * inv_n;
+    let mut mu_w = ema;
+    let mut var_w = (sq_sum * inv_n) - mu_w * mu_w;
+    if var_w < 0.0 { var_w = 0.0; }
+    let mut var_about_ema = var_w;
+    let mut std = var_about_ema.sqrt();
+    *out.get_unchecked_mut(start) = (u_plus_d * std) / ema;
 
-    // Calculate initial standard deviation (population)
-    let mut sq_sum = 0.0;
-    for i in 0..period {
-        let diff = data[first_valid_idx + i] - ema;
-        sq_sum += diff * diff;
-    }
-    let mut stddev = (sq_sum / period as f64).sqrt();
+    // Rolling updates
+    let len = data.len();
+    let mut i = start + 1;
+    while i < len {
+        let new_v = *data.get_unchecked(i);
+        let old_v = *data.get_unchecked(i - n);
 
-    // Calculate first width value
-    let upper = ema + devup * stddev;
-    let lower = ema - devdn * stddev;
-    out[start_idx] = (upper - lower) / ema;
+        sum += new_v - old_v;
+        sq_sum = new_v.mul_add(new_v, sq_sum - old_v * old_v);
+        mu_w = sum * inv_n;
 
-    // EMA and rolling standard deviation
-    for i in (start_idx + 1)..data.len() {
-        // Update EMA
-        ema = alpha * data[i] + beta * ema;
+        ema = alpha * new_v + beta * ema;
 
-        // Calculate standard deviation with current EMA
-        sq_sum = 0.0;
-        for j in 0..period {
-            let diff = data[i - period + 1 + j] - ema;
-            sq_sum += diff * diff;
-        }
-        stddev = (sq_sum / period as f64).sqrt();
+        var_w = (sq_sum * inv_n) - mu_w * mu_w;
+        if var_w < 0.0 { var_w = 0.0; }
+        let diff = mu_w - ema;
+        var_about_ema = var_w + diff * diff;
 
-        // Calculate width
-        let upper = ema + devup * stddev;
-        let lower = ema - devdn * stddev;
-        out[i] = (upper - lower) / ema;
+        std = if var_about_ema > 0.0 { var_about_ema.sqrt() } else { 0.0 };
+        *out.get_unchecked_mut(i) = (u_plus_d * std) / ema;
+        i += 1;
     }
 
     Ok(())
@@ -647,7 +652,98 @@ pub unsafe fn bollinger_bands_width_avx512_into(
     first_valid_idx: usize,
     out: &mut [f64],
 ) -> Result<(), BollingerBandsWidthError> {
-    bollinger_bands_width_scalar_into(data, input, first_valid_idx, out)
+    use core::arch::x86_64::*;
+
+    let period = input.get_period();
+    let devtype = input.get_devtype();
+    let matype = input.get_matype();
+
+    if !(devtype == 0
+        && (matype.eq_ignore_ascii_case("sma") || matype.eq_ignore_ascii_case("ema")))
+    {
+        return bollinger_bands_width_scalar_into(data, input, first_valid_idx, out);
+    }
+
+    let n = period;
+    let inv_n = 1.0 / (n as f64);
+    let start = first_valid_idx + n - 1;
+    let devup = input.get_devup();
+    let devdn = input.get_devdn();
+    let u_plus_d = devup + devdn;
+
+    // AVX-512 accumulate initial window
+    let mut v_sum = _mm512_setzero_pd();
+    let mut v_sumsq = _mm512_setzero_pd();
+    let base = first_valid_idx;
+    let mut idx = base;
+    let end_simd = base + (n & !7);
+    while idx < end_simd {
+        let px = data.as_ptr().add(idx);
+        let x = _mm512_loadu_pd(px);
+        v_sum = _mm512_add_pd(v_sum, x);
+        let x2 = _mm512_mul_pd(x, x);
+        v_sumsq = _mm512_add_pd(v_sumsq, x2);
+        idx += 8;
+    }
+    let mut buf = [0.0f64; 8];
+    _mm512_storeu_pd(buf.as_mut_ptr(), v_sum);
+    let mut sum = buf.iter().sum::<f64>();
+    _mm512_storeu_pd(buf.as_mut_ptr(), v_sumsq);
+    let mut sumsq = buf.iter().sum::<f64>();
+    while idx < base + n {
+        let x = *data.get_unchecked(idx);
+        sum += x;
+        sumsq = x.mul_add(x, sumsq);
+        idx += 1;
+    }
+
+    // Seed middle/variance
+    let mut mu_w = sum * inv_n;
+    let mut ema = mu_w;
+    let mut var_w = (sumsq * inv_n) - mu_w * mu_w;
+    if var_w < 0.0 { var_w = 0.0; }
+    let mut mid = if matype.eq_ignore_ascii_case("sma") { mu_w } else { ema };
+    let mut var_about_mid = if matype.eq_ignore_ascii_case("sma") {
+        var_w
+    } else {
+        let diff = mu_w - ema;
+        var_w + diff * diff
+    };
+    let mut std = if var_about_mid > 0.0 { var_about_mid.sqrt() } else { 0.0 };
+    *out.get_unchecked_mut(start) = (u_plus_d * std) / mid;
+
+    // Streaming phase (scalar updates)
+    let alpha = 2.0 / (n as f64 + 1.0);
+    let beta = 1.0 - alpha;
+    let len = data.len();
+    let mut i = start + 1;
+    while i < len {
+        let new_v = *data.get_unchecked(i);
+        let old_v = *data.get_unchecked(i - n);
+        sum += new_v - old_v;
+        sumsq = new_v.mul_add(new_v, sumsq - old_v * old_v);
+        mu_w = sum * inv_n;
+        if matype.eq_ignore_ascii_case("ema") {
+            ema = alpha * new_v + beta * ema;
+        } else {
+            ema = mu_w;
+        }
+        var_w = (sumsq * inv_n) - mu_w * mu_w;
+        if var_w < 0.0 { var_w = 0.0; }
+        if matype.eq_ignore_ascii_case("sma") {
+            mid = mu_w;
+            var_about_mid = var_w;
+        } else {
+            mid = ema;
+            let diff = mu_w - ema;
+            var_about_mid = var_w + diff * diff;
+        }
+        std = if var_about_mid > 0.0 { var_about_mid.sqrt() } else { 0.0 };
+        *out.get_unchecked_mut(i) = (u_plus_d * std) / mid;
+        i += 1;
+    }
+
+    Ok(())
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -668,7 +764,98 @@ pub unsafe fn bollinger_bands_width_avx2_into(
     first_valid_idx: usize,
     out: &mut [f64],
 ) -> Result<(), BollingerBandsWidthError> {
-    bollinger_bands_width_scalar_into(data, input, first_valid_idx, out)
+    use core::arch::x86_64::*;
+
+    let period = input.get_period();
+    let devtype = input.get_devtype();
+    let matype = input.get_matype();
+
+    if !(devtype == 0
+        && (matype.eq_ignore_ascii_case("sma") || matype.eq_ignore_ascii_case("ema")))
+    {
+        return bollinger_bands_width_scalar_into(data, input, first_valid_idx, out);
+    }
+
+    let n = period;
+    let inv_n = 1.0 / (n as f64);
+    let start = first_valid_idx + n - 1;
+    let devup = input.get_devup();
+    let devdn = input.get_devdn();
+    let u_plus_d = devup + devdn;
+
+    // AVX2 accumulate initial window
+    let mut v_sum = _mm256_setzero_pd();
+    let mut v_sumsq = _mm256_setzero_pd();
+    let base = first_valid_idx;
+    let mut idx = base;
+    let end_simd = base + (n & !3);
+    while idx < end_simd {
+        let px = data.as_ptr().add(idx);
+        let x = _mm256_loadu_pd(px);
+        v_sum = _mm256_add_pd(v_sum, x);
+        let x2 = _mm256_mul_pd(x, x);
+        v_sumsq = _mm256_add_pd(v_sumsq, x2);
+        idx += 4;
+    }
+    let mut buf = [0.0f64; 4];
+    _mm256_storeu_pd(buf.as_mut_ptr(), v_sum);
+    let mut sum = buf[0] + buf[1] + buf[2] + buf[3];
+    _mm256_storeu_pd(buf.as_mut_ptr(), v_sumsq);
+    let mut sumsq = buf[0] + buf[1] + buf[2] + buf[3];
+    while idx < base + n {
+        let x = *data.get_unchecked(idx);
+        sum += x;
+        sumsq = x.mul_add(x, sumsq);
+        idx += 1;
+    }
+
+    // Seed middle/variance
+    let mut mu_w = sum * inv_n;
+    let mut ema = mu_w;
+    let mut var_w = (sumsq * inv_n) - mu_w * mu_w;
+    if var_w < 0.0 { var_w = 0.0; }
+    let mut mid = if matype.eq_ignore_ascii_case("sma") { mu_w } else { ema };
+    let mut var_about_mid = if matype.eq_ignore_ascii_case("sma") {
+        var_w
+    } else {
+        let diff = mu_w - ema;
+        var_w + diff * diff
+    };
+    let mut std = if var_about_mid > 0.0 { var_about_mid.sqrt() } else { 0.0 };
+    *out.get_unchecked_mut(start) = (u_plus_d * std) / mid;
+
+    // Streaming phase (scalar updates)
+    let alpha = 2.0 / (n as f64 + 1.0);
+    let beta = 1.0 - alpha;
+    let len = data.len();
+    let mut i = start + 1;
+    while i < len {
+        let new_v = *data.get_unchecked(i);
+        let old_v = *data.get_unchecked(i - n);
+        sum += new_v - old_v;
+        sumsq = new_v.mul_add(new_v, sumsq - old_v * old_v);
+        mu_w = sum * inv_n;
+        if matype.eq_ignore_ascii_case("ema") {
+            ema = alpha * new_v + beta * ema;
+        } else {
+            ema = mu_w;
+        }
+        var_w = (sumsq * inv_n) - mu_w * mu_w;
+        if var_w < 0.0 { var_w = 0.0; }
+        if matype.eq_ignore_ascii_case("sma") {
+            mid = mu_w;
+            var_about_mid = var_w;
+        } else {
+            mid = ema;
+            let diff = mu_w - ema;
+            var_about_mid = var_w + diff * diff;
+        }
+        std = if var_about_mid > 0.0 { var_about_mid.sqrt() } else { 0.0 };
+        *out.get_unchecked_mut(i) = (u_plus_d * std) / mid;
+        i += 1;
+    }
+
+    Ok(())
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
@@ -1069,6 +1256,15 @@ pub fn bollinger_bands_width_batch_inner_into(
         let dev_values = crate::indicators::deviation::deviation(&dev_input)
             .map_err(|e| BollingerBandsWidthError::DeviationError(e.to_string()))?;
 
+        // Precompute dev/middle ratio for this group once
+        let time_start = first + period - 1;
+        let mut ratio: Vec<f64> = vec![f64::NAN; cols];
+        for i in time_start..cols {
+            let m = middle[i];
+            let d = dev_values.values[i];
+            ratio[i] = d / m;
+        }
+
         // Now compute BBW for each (devup, devdn) combination in this group
         if parallel {
             #[cfg(not(target_arch = "wasm32"))]
@@ -1085,10 +1281,53 @@ pub fn bollinger_bands_width_batch_inner_into(
                     .enumerate()
                     .for_each(|(row_idx, out_row)| {
                         if let Some((u, d)) = row_params[row_idx] {
-                            for i in (first + period - 1)..cols {
-                                let m = middle[i];
-                                let dev = dev_values.values[i];
-                                out_row[i] = ((m + u * dev) - (m - d * dev)) / m;
+                            let u_plus_d = u + d;
+                            // Vectorized scale where available
+                            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                            {
+                                match kern {
+                                    Kernel::Avx512 | Kernel::Avx512Batch => unsafe {
+                                        use core::arch::x86_64::*;
+                                        let k = _mm512_set1_pd(u_plus_d);
+                                        let mut i = time_start;
+                                        while i + 8 <= cols {
+                                            let vr = _mm512_loadu_pd(ratio.as_ptr().add(i));
+                                            let vout = _mm512_mul_pd(k, vr);
+                                            _mm512_storeu_pd(out_row.as_mut_ptr().add(i), vout);
+                                            i += 8;
+                                        }
+                                        while i < cols {
+                                            *out_row.get_unchecked_mut(i) = u_plus_d * *ratio.get_unchecked(i);
+                                            i += 1;
+                                        }
+                                    },
+                                    Kernel::Avx2 | Kernel::Avx2Batch => unsafe {
+                                        use core::arch::x86_64::*;
+                                        let k = _mm256_set1_pd(u_plus_d);
+                                        let mut i = time_start;
+                                        while i + 4 <= cols {
+                                            let vr = _mm256_loadu_pd(ratio.as_ptr().add(i));
+                                            let vout = _mm256_mul_pd(k, vr);
+                                            _mm256_storeu_pd(out_row.as_mut_ptr().add(i), vout);
+                                            i += 4;
+                                        }
+                                        while i < cols {
+                                            *out_row.get_unchecked_mut(i) = u_plus_d * *ratio.get_unchecked(i);
+                                            i += 1;
+                                        }
+                                    },
+                                    _ => {
+                                        for i in time_start..cols {
+                                            out_row[i] = u_plus_d * ratio[i];
+                                        }
+                                    }
+                                }
+                            }
+                            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+                            {
+                                for i in time_start..cols {
+                                    out_row[i] = u_plus_d * ratio[i];
+                                }
                             }
                         }
                     });
@@ -1097,27 +1336,67 @@ pub fn bollinger_bands_width_batch_inner_into(
             #[cfg(target_arch = "wasm32")]
             {
                 for &(idx, devup, devdn) in &indices {
-                    let start = idx * cols;
-                    let end = start + cols;
-                    let out_row = &mut out[start..end];
-                    for i in (first + period - 1)..cols {
-                        let middle_band = middle[i];
-                        let upper_band = middle_band + devup * dev_values.values[i];
-                        let lower_band = middle_band - devdn * dev_values.values[i];
-                        out_row[i] = (upper_band - lower_band) / middle_band;
+                    let row_off = idx * cols;
+                    let end = row_off + cols;
+                    let out_row = &mut out[row_off..end];
+                    let u_plus_d = devup + devdn;
+                    for i in time_start..cols {
+                        out_row[i] = u_plus_d * ratio[i];
                     }
                 }
             }
         } else {
             for &(idx, devup, devdn) in &indices {
-                let start = idx * cols;
-                let end = start + cols;
-                let out_row = &mut out[start..end];
-                for i in (first + period - 1)..cols {
-                    let middle_band = middle[i];
-                    let upper_band = middle_band + devup * dev_values.values[i];
-                    let lower_band = middle_band - devdn * dev_values.values[i];
-                    out_row[i] = (upper_band - lower_band) / middle_band;
+                let row_off = idx * cols;
+                let end = row_off + cols;
+                let out_row = &mut out[row_off..end];
+                let u_plus_d = devup + devdn;
+                // Vectorized scale where available
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                {
+                    match kern {
+                        Kernel::Avx512 | Kernel::Avx512Batch => unsafe {
+                            use core::arch::x86_64::*;
+                            let k = _mm512_set1_pd(u_plus_d);
+                            let mut i = time_start;
+                            while i + 8 <= cols {
+                                let vr = _mm512_loadu_pd(ratio.as_ptr().add(i));
+                                let vout = _mm512_mul_pd(k, vr);
+                                _mm512_storeu_pd(out_row.as_mut_ptr().add(i), vout);
+                                i += 8;
+                            }
+                            while i < cols {
+                                *out_row.get_unchecked_mut(i) = u_plus_d * *ratio.get_unchecked(i);
+                                i += 1;
+                            }
+                        },
+                        Kernel::Avx2 | Kernel::Avx2Batch => unsafe {
+                            use core::arch::x86_64::*;
+                            let k = _mm256_set1_pd(u_plus_d);
+                            let mut i = time_start;
+                            while i + 4 <= cols {
+                                let vr = _mm256_loadu_pd(ratio.as_ptr().add(i));
+                                let vout = _mm256_mul_pd(k, vr);
+                                _mm256_storeu_pd(out_row.as_mut_ptr().add(i), vout);
+                                i += 4;
+                            }
+                            while i < cols {
+                                *out_row.get_unchecked_mut(i) = u_plus_d * *ratio.get_unchecked(i);
+                                i += 1;
+                            }
+                        },
+                        _ => {
+                            for i in time_start..cols {
+                                out_row[i] = u_plus_d * ratio[i];
+                            }
+                        }
+                    }
+                }
+                #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+                {
+                    for i in time_start..cols {
+                        out_row[i] = u_plus_d * ratio[i];
+                    }
                 }
             }
         }

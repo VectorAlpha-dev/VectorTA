@@ -1,0 +1,8 @@
+aroon_osc/aroon_osc_scalar/10k
+                        time:   [72.753 µs 73.534 µs 74.632 µs]
+                        thrpt:  [14.975 GiB/s 15.198 GiB/s 15.361 GiB/s]
+                 change:
+                        time:   [-3.1155% -2.0220% -0.8914%] (p = 0.00 < 0.05)
+                        thrpt:  [+0.8994% +2.0637% +3.2157%]
+                        Change within noise threshold.
+

@@ -1,0 +1,4 @@
+bollinger_bands_width/bollinger_bands_width_avx2/100k
+                        time:   [202.28 µs 202.64 µs 203.21 µs]
+                        thrpt:  [3.6664 GiB/s 3.6768 GiB/s 3.6833 GiB/s]
+

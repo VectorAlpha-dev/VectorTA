@@ -1,0 +1,5 @@
+cksp_bench/scalar/1M    time:   [28.038 ms 28.303 ms 28.567 ms]
+                        thrpt:  [267.07 MiB/s 269.56 MiB/s 272.11 MiB/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) low mild
+

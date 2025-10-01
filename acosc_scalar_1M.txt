@@ -1,0 +1,3 @@
+acosc_bench/scalar/1M   time:   [4.0457 ms 4.1730 ms 4.3511 ms]
+                        thrpt:  [1.7123 GiB/s 1.7854 GiB/s 1.8416 GiB/s]
+

@@ -16,11 +16,13 @@
 //! - **`Err(EhmaError)`** on invalid input or parameters.
 //!
 //! ## Developer Notes
-//! - **AVX2 kernel**: ✅ Fully implemented - 4-wide SIMD with FMA operations, handles reverse weight application
-//! - **AVX512 kernel**: ✅ Fully implemented - 8-wide SIMD with efficient horizontal sum
-//! - **Streaming update**: ⚠️ O(n) complexity - iterates through all period weights on each update
-//!   - TODO: Could potentially optimize with incremental updates for fixed Hann weights
-//! - **Memory optimization**: ✅ Uses zero-copy helpers (alloc_with_nan_prefix) for output vectors
+//! - SIMD status: Enabled with runtime selection (AVX512 → AVX2 → Scalar).
+//!   - AVX2: 4-wide FMA; loads contiguous weights and uses a single lane-reverse permute per chunk.
+//!   - AVX512: 8-wide FMA; loads contiguous weights and reverses lanes via a single permute index.
+//!   - On some CPUs AVX512 may downclock; AVX2 can be faster even when AVX512 is available.
+//! - Streaming update: O(n) per step (dot over the window). Potential incremental scheme left for future work.
+//! - Memory: Uses zero-copy/uninitialized helpers (alloc_with_nan_prefix, make_uninit_matrix).
+//! - Row-specific batch: Not pursued; Hann weights depend on period and offer little cross-row reuse.
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
@@ -394,21 +396,14 @@ pub fn ehma_scalar(
         "`out` must be at least as long as `data`"
     );
 
-    let p4 = period & !3;
-
     for i in (first_val + period - 1)..data.len() {
         let start = i + 1 - period;
         let window = &data[start..start + period];
 
         let mut sum = 0.0;
-        // Apply weights in reverse order: weights[0] to newest, weights[period-1] to oldest
-        // This matches PineScript where i=1 weight goes to src[0] (newest)
-
-        // Simple approach - apply weights in reverse order
+        // Apply weights in reverse order: weights[0] ↔ newest, weights[period-1] ↔ oldest
         for j in 0..period {
-            // window[j] is oldest to newest, weights should be applied newest to oldest
-            // So window[0] (oldest) gets weights[period-1], window[period-1] (newest) gets weights[0]
-            sum += window[j] * weights[period - 1 - j];
+            sum = window[j].mul_add(weights[period - 1 - j], sum);
         }
 
         out[i] = sum * inv_coef;
@@ -470,32 +465,35 @@ unsafe fn ehma_avx2(
         let start = i + 1 - period;
         let window = &data[start..start + period];
 
-        let mut sum_vec = _mm256_setzero_pd();
+        let mut acc = _mm256_setzero_pd();
 
-        // Process 4 elements at a time - apply weights in reverse
-        for j in (0..p4).step_by(4) {
-            let d_vec = _mm256_loadu_pd(&window[j]);
-            // Load weights in reverse order for this chunk
-            // _mm256_set_pd loads in reverse: last arg goes to index 0
-            let w_vec = _mm256_set_pd(
-                weights[period - 4 - j], // Goes to index 3
-                weights[period - 3 - j], // Goes to index 2
-                weights[period - 2 - j], // Goes to index 1
-                weights[period - 1 - j], // Goes to index 0
-            );
-            sum_vec = _mm256_fmadd_pd(d_vec, w_vec, sum_vec);
+        let mut j = 0usize;
+        while j < p4 {
+            // Load 4 data samples (oldest..newest)
+            let d = _mm256_loadu_pd(window.as_ptr().add(j));
+
+            // Load contiguous weights ending at (period-1-j) then reverse lanes
+            let w_block = _mm256_loadu_pd(weights.as_ptr().add(period - 4 - j));
+            // Reverse lanes: [a,b,c,d] -> [d,c,b,a]
+            let w = _mm256_permute4x64_pd(w_block, 0b0001_1011);
+
+            acc = _mm256_fmadd_pd(d, w, acc);
+            j += 4;
         }
 
-        // Horizontal sum
-        let sum_high = _mm256_extractf128_pd(sum_vec, 1);
-        let sum_low = _mm256_castpd256_pd128(sum_vec);
-        let sum128 = _mm_add_pd(sum_high, sum_low);
+        // Horizontal sum of acc
+        let hi = _mm256_extractf128_pd(acc, 1);
+        let lo = _mm256_castpd256_pd128(acc);
+        let sum128 = _mm_add_pd(hi, lo);
         let sum64 = _mm_hadd_pd(sum128, sum128);
         let mut sum = _mm_cvtsd_f64(sum64);
 
-        // Handle remaining elements - apply weights in reverse
-        for j in p4..period {
-            sum += window[j] * weights[period - 1 - j];
+        // Remainder elements
+        while j < period {
+            let d = *window.get_unchecked(j);
+            let w = *weights.get_unchecked(period - 1 - j);
+            sum = d.mul_add(w, sum);
+            j += 1;
         }
 
         out[i] = sum * inv_coef;
@@ -531,36 +529,41 @@ unsafe fn ehma_avx512_impl(
 ) {
     let p8 = period & !7;
 
+    // Constant reverse-index vector for lane reversal.
+    // Note: set_epi64 takes args as (e7,e6,e5,e4,e3,e2,e1,e0) mapping to lanes [7..0].
+    // To produce dest = [b[7], b[6], ..., b[0]], we need lane0=7, lane1=6, ..., lane7=0,
+    // which corresponds to set_epi64(0,1,2,3,4,5,6,7).
+    let rev_idx: __m512i = _mm512_set_epi64(0, 1, 2, 3, 4, 5, 6, 7);
+
     for i in (first_val + period - 1)..data.len() {
         let start = i + 1 - period;
         let window = &data[start..start + period];
 
-        let mut sum_vec = _mm512_setzero_pd();
+        let mut acc = _mm512_setzero_pd();
 
-        // Process 8 elements at a time - apply weights in reverse
-        for j in (0..p8).step_by(8) {
-            let d_vec = _mm512_loadu_pd(&window[j]);
-            // Load weights in reverse order for this chunk
-            // _mm512_set_pd loads in reverse: last arg goes to index 0
-            let w_vec = _mm512_set_pd(
-                weights[period - 8 - j], // Goes to index 7
-                weights[period - 7 - j], // Goes to index 6
-                weights[period - 6 - j], // Goes to index 5
-                weights[period - 5 - j], // Goes to index 4
-                weights[period - 4 - j], // Goes to index 3
-                weights[period - 3 - j], // Goes to index 2
-                weights[period - 2 - j], // Goes to index 1
-                weights[period - 1 - j], // Goes to index 0
-            );
-            sum_vec = _mm512_fmadd_pd(d_vec, w_vec, sum_vec);
+        let mut j = 0usize;
+        while j < p8 {
+            // Load 8 data samples (oldest..newest)
+            let dv = _mm512_loadu_pd(window.as_ptr().add(j));
+
+            // Load contiguous weights ending at (period-1-j): &[period-8-j ..= period-1-j]
+            let w_block = _mm512_loadu_pd(weights.as_ptr().add(period - 8 - j));
+            // Reverse lanes so they correspond to window[j..j+8]
+            let w = _mm512_permutexvar_pd(rev_idx, w_block);
+
+            acc = _mm512_fmadd_pd(dv, w, acc);
+            j += 8;
         }
 
-        // Horizontal sum for AVX512
-        let mut sum = _mm512_reduce_add_pd(sum_vec);
+        // Reduce accumulator
+        let mut sum = _mm512_reduce_add_pd(acc);
 
-        // Handle remaining elements - apply weights in reverse
-        for j in p8..period {
-            sum += window[j] * weights[period - 1 - j];
+        // Remainder
+        while j < period {
+            let d = *window.get_unchecked(j);
+            let w = *weights.get_unchecked(period - 1 - j);
+            sum = d.mul_add(w, sum);
+            j += 1;
         }
 
         out[i] = sum * inv_coef;

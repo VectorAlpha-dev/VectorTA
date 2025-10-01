@@ -1,0 +1,10 @@
+sqwma/sqwma_scalar/100k time:   [355.63 µs 356.46 µs 357.27 µs]
+                        thrpt:  [2.0854 GiB/s 2.0902 GiB/s 2.0950 GiB/s]
+                 change:
+                        time:   [+14.225% +17.225% +20.012%] (p = 0.00 < 0.05)
+                        thrpt:  [-16.675% -14.694% -12.453%]
+                        Performance has regressed.
+Found 3 outliers among 10 measurements (30.00%)
+  2 (20.00%) low mild
+  1 (10.00%) high severe
+

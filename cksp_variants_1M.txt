@@ -1,0 +1,9 @@
+cksp/cksp_scalar/1M     time:   [27.530 ms 27.667 ms 27.794 ms]
+                        thrpt:  [274.50 MiB/s 275.75 MiB/s 277.13 MiB/s]
+cksp/cksp_avx2/1M       time:   [27.408 ms 27.567 ms 27.786 ms]
+                        thrpt:  [274.57 MiB/s 276.76 MiB/s 278.36 MiB/s]
+cksp/cksp_avx512/1M     time:   [27.029 ms 27.282 ms 27.599 ms]
+                        thrpt:  [276.44 MiB/s 279.65 MiB/s 282.26 MiB/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+
