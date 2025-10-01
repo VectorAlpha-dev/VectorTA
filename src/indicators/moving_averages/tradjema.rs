@@ -12,12 +12,12 @@
 //! - **`Err(TradjemaError)`** otherwise.
 //!
 //! ## Developer Status
-//! - **AVX2 kernel**: STUB - Falls back to scalar implementation
-//! - **AVX512 kernel**: STUB - Falls back to scalar implementation
-//! - **Streaming update**: O(n) - Recalculates min/max over TR buffer each update
-//! - **Memory optimization**: Uses zero-copy helpers (alloc_with_nan_prefix) ✓
-//! - **Optimization needed**: Implement SIMD kernels for vectorized processing
-//! - **Streaming improvement**: Could optimize min/max tracking to reduce O(n) updates
+//! - **AVX2 kernel**: STUB — delegates to scalar (EMA dependency limits gains)
+//! - **AVX512 kernel**: STUB — delegates to scalar (EMA dependency limits gains)
+//! - **Scalar hot path**: Uses monotonic deques for TR min/max (O(1) amortized)
+//! - **Memory**: Uses zero-copy helpers (alloc_with_nan_prefix) ✓; O(length) scratch only
+//! - **SIMD status**: Disabled by default; recurrence + deque updates limit benefits
+//! - **Batch**: Precomputes TR once; per-length deques drive all rows
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
@@ -355,95 +355,206 @@ fn tradjema_compute_into_scalar(
     first: usize,
     out: &mut [f64],
 ) {
-    let alpha = 2.0 / (length as f64 + 1.0);
+    debug_assert_eq!(high.len(), low.len());
+    debug_assert_eq!(low.len(), close.len());
+    debug_assert_eq!(close.len(), out.len());
+    debug_assert!(length >= 2);
+
+    let n = out.len();
     let warm = first + length - 1;
+    if warm >= n {
+        // Nothing to compute (validated earlier); keep defensive in release
+        return;
+    }
 
-    // Ring buffer of TRs, no memmoves
-    let mut tr_buf = vec![0.0; length];
-    let mut head = 0usize;
+    let alpha = 2.0 / (length as f64 + 1.0);
 
-    // Seed window [first .. first+length)
-    for k in 0..length {
-        let idx = first + k;
-        let tr = if idx == first {
-            high[idx] - low[idx]
+    // Monotonic deques (ring buffers) for sliding min/max over TR
+    let cap = length;
+    let mut min_vals = vec![0.0f64; cap];
+    let mut min_idx = vec![0usize; cap];
+    let mut max_vals = vec![0.0f64; cap];
+    let mut max_idx = vec![0usize; cap];
+    let (mut min_head, mut min_tail) = (0usize, 0usize);
+    let (mut max_head, mut max_tail) = (0usize, 0usize);
+
+    #[inline(always)]
+    fn inc(i: &mut usize, cap: usize) {
+        *i += 1;
+        if *i == cap {
+            *i = 0;
+        }
+    }
+    #[inline(always)]
+    fn dec(i: usize, cap: usize) -> usize {
+        if i == 0 {
+            cap - 1
         } else {
-            let hl = high[idx] - low[idx];
-            let hc = (high[idx] - close[idx - 1]).abs();
-            let lc = (low[idx] - close[idx - 1]).abs();
-            hl.max(hc).max(lc)
-        };
-        tr_buf[k] = tr;
-    }
-    head = length - 1;
-
-    // Compute min/max over initial window
-    let mut tr_low = tr_buf[0];
-    let mut tr_high = tr_buf[0];
-    for &v in &tr_buf[1..] {
-        if v < tr_low {
-            tr_low = v;
-        }
-        if v > tr_high {
-            tr_high = v;
+            i - 1
         }
     }
+    #[inline(always)]
+    fn minq_push(
+        v: f64,
+        idx: usize,
+        vals: &mut [f64],
+        id: &mut [usize],
+        head: &mut usize,
+        tail: &mut usize,
+        cap: usize,
+    ) {
+        let mut back = dec(*tail, cap);
+        while *tail != *head && vals[back] > v {
+            *tail = back;
+            back = dec(*tail, cap);
+        }
+        vals[*tail] = v;
+        id[*tail] = idx;
+        inc(tail, cap);
+    }
+    #[inline(always)]
+    fn maxq_push(
+        v: f64,
+        idx: usize,
+        vals: &mut [f64],
+        id: &mut [usize],
+        head: &mut usize,
+        tail: &mut usize,
+        cap: usize,
+    ) {
+        let mut back = dec(*tail, cap);
+        while *tail != *head && vals[back] < v {
+            *tail = back;
+            back = dec(*tail, cap);
+        }
+        vals[*tail] = v;
+        id[*tail] = idx;
+        inc(tail, cap);
+    }
+    #[inline(always)]
+    fn q_expire(
+        cur: usize,
+        len: usize,
+        id: &mut [usize],
+        head: &mut usize,
+        tail: &mut usize,
+        cap: usize,
+    ) {
+        let lim = cur.saturating_sub(len);
+        while *head != *tail && id[*head] <= lim {
+            inc(head, cap);
+        }
+    }
 
-    // Pine-compatible 1-bar lag
-    let src_at = |i: usize| close[i - 1];
+    #[inline(always)]
+    fn max3(a: f64, b: f64, c: f64) -> f64 {
+        let m = if a > b { a } else { b };
+        if m > c { m } else { c }
+    }
 
-    let current_tr0 = tr_buf[head];
-    let tr_adj0 = if tr_high != tr_low {
-        (current_tr0 - tr_low) / (tr_high - tr_low)
-    } else {
-        0.0
-    };
-    let mut y = alpha * (1.0 + tr_adj0 * mult) * (src_at(warm) - 0.0);
+    // --- Seed window: [first .. warm] ---
+    // i == first: TR = H-L
+    let tr0 = high[first] - low[first];
+    minq_push(
+        tr0,
+        first,
+        &mut min_vals,
+        &mut min_idx,
+        &mut min_head,
+        &mut min_tail,
+        cap,
+    );
+    maxq_push(
+        tr0,
+        first,
+        &mut max_vals,
+        &mut max_idx,
+        &mut max_head,
+        &mut max_tail,
+        cap,
+    );
+    let mut last_tr = tr0;
+
+    let mut i = first + 1;
+    while i <= warm {
+        let hi = high[i];
+        let lo = low[i];
+        let pc1 = close[i - 1];
+        let tr = max3(hi - lo, (hi - pc1).abs(), (lo - pc1).abs());
+        minq_push(
+            tr,
+            i,
+            &mut min_vals,
+            &mut min_idx,
+            &mut min_head,
+            &mut min_tail,
+            cap,
+        );
+        maxq_push(
+            tr,
+            i,
+            &mut max_vals,
+            &mut max_idx,
+            &mut max_head,
+            &mut max_tail,
+            cap,
+        );
+        last_tr = tr;
+        i += 1;
+    }
+
+    // Compute first output at warm
+    let tr_low = min_vals[min_head];
+    let tr_high = max_vals[max_head];
+    let denom = tr_high - tr_low;
+    let tr_adj0 = if denom != 0.0 { (last_tr - tr_low) / denom } else { 0.0 };
+    let a0 = alpha * (1.0 + tr_adj0 * mult);
+    let src0 = close[warm - 1]; // 1-bar lag
+    let mut y = src0.mul_add(a0, 0.0); // Pine seed (0 + a0*(src0-0))
     out[warm] = y;
 
-    // Main loop
-    for i in (warm + 1)..out.len() {
-        // next TR
-        let hl = high[i] - low[i];
-        let hc = (high[i] - close[i - 1]).abs();
-        let lc = (low[i] - close[i - 1]).abs();
-        let tr_new = hl.max(hc).max(lc);
+    // --- Main loop ---
+    i = warm + 1;
+    while i < n {
+        // expire outdated indices
+        q_expire(i, length, &mut min_idx, &mut min_head, &mut min_tail, cap);
+        q_expire(i, length, &mut max_idx, &mut max_head, &mut max_tail, cap);
 
-        // advance ring; pop old, push new
-        head = (head + 1) % length;
-        let tr_old = std::mem::replace(&mut tr_buf[head], tr_new);
+        // compute TR at i and push
+        let hi = high[i];
+        let lo = low[i];
+        let pc1 = close[i - 1];
+        let tr = max3(hi - lo, (hi - pc1).abs(), (lo - pc1).abs());
+        minq_push(
+            tr,
+            i,
+            &mut min_vals,
+            &mut min_idx,
+            &mut min_head,
+            &mut min_tail,
+            cap,
+        );
+        maxq_push(
+            tr,
+            i,
+            &mut max_vals,
+            &mut max_idx,
+            &mut max_head,
+            &mut max_tail,
+            cap,
+        );
 
-        // update min/max with bounded work; full rescan only when necessary
-        if tr_old <= tr_low || tr_old >= tr_high {
-            // outgoing was an extremum: recompute min/max over window
-            tr_low = tr_buf[0];
-            tr_high = tr_buf[0];
-            for &v in &tr_buf[1..] {
-                if v < tr_low {
-                    tr_low = v;
-                }
-                if v > tr_high {
-                    tr_high = v;
-                }
-            }
-        } else {
-            // outgoing not an extremum: only compare new value
-            if tr_new < tr_low {
-                tr_low = tr_new;
-            }
-            if tr_new > tr_high {
-                tr_high = tr_new;
-            }
-        }
-
-        let tr_adj = if tr_high != tr_low {
-            (tr_new - tr_low) / (tr_high - tr_low)
-        } else {
-            0.0
-        };
+        // normalize and update EMA with lagged source close[i-1]
+        let lo_tr = min_vals[min_head];
+        let hi_tr = max_vals[max_head];
+        let den = hi_tr - lo_tr;
+        let tr_adj = if den != 0.0 { (tr - lo_tr) / den } else { 0.0 };
         let a = alpha * (1.0 + tr_adj * mult);
-        y += a * (src_at(i) - y);
+        let src = pc1;
+        y = (src - y).mul_add(a, y);
         out[i] = y;
+
+        i += 1;
     }
 }
 
@@ -472,11 +583,11 @@ fn tradjema_compute_into(
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => {
-                tradjema_compute_into_scalar(high, low, close, length, mult, first, out)
+                tradjema_compute_into_avx2(high, low, close, length, mult, first, out)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
-                tradjema_compute_into_scalar(high, low, close, length, mult, first, out)
+                tradjema_compute_into_avx512(high, low, close, length, mult, first, out)
             }
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
             Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
@@ -485,6 +596,37 @@ fn tradjema_compute_into(
             _ => unreachable!(),
         }
     }
+}
+
+// AVX stubs: keep selection plumbing intact. EMA dependency and deque updates
+// make across-time vectorization ineffective for single-series, so these
+// delegate to the scalar path for now.
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn tradjema_compute_into_avx2(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    length: usize,
+    mult: f64,
+    first: usize,
+    out: &mut [f64],
+) {
+    tradjema_compute_into_scalar(high, low, close, length, mult, first, out);
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+unsafe fn tradjema_compute_into_avx512(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    length: usize,
+    mult: f64,
+    first: usize,
+    out: &mut [f64],
+) {
+    tradjema_compute_into_scalar(high, low, close, length, mult, first, out);
 }
 
 // ==================== STREAMING IMPLEMENTATION ====================
@@ -1276,7 +1418,150 @@ fn tradjema_batch_inner_into(
         .position(|v| !v.is_nan())
         .ok_or(TradjemaError::AllValuesNaN)?;
 
+    // Precompute TR once for the entire series; shared across rows
+    #[inline(always)]
+    fn precompute_tr(high: &[f64], low: &[f64], close: &[f64], first: usize) -> Vec<f64> {
+        let n = close.len();
+        let mut tr = vec![0.0f64; n];
+        if first < n {
+            tr[first] = high[first] - low[first];
+            let mut i = first + 1;
+            while i < n {
+                let hl = high[i] - low[i];
+                let hc = (high[i] - close[i - 1]).abs();
+                let lc = (low[i] - close[i - 1]).abs();
+                tr[i] = hl.max(hc).max(lc);
+                i += 1;
+            }
+        }
+        tr
+    }
+
+    #[inline(always)]
+    fn compute_from_tr_into(
+        tr: &[f64],
+        close: &[f64],
+        length: usize,
+        mult: f64,
+        first: usize,
+        out: &mut [f64],
+    ) {
+        debug_assert_eq!(tr.len(), close.len());
+        debug_assert_eq!(close.len(), out.len());
+
+        let warm = first + length - 1;
+        if warm >= out.len() {
+            return;
+        }
+        let alpha = 2.0 / (length as f64 + 1.0);
+
+        // monotonic deques for TR window
+        let cap = length;
+        let mut min_vals = vec![0.0f64; cap];
+        let mut min_idx = vec![0usize; cap];
+        let mut max_vals = vec![0.0f64; cap];
+        let mut max_idx = vec![0usize; cap];
+        let (mut min_head, mut min_tail) = (0usize, 0usize);
+        let (mut max_head, mut max_tail) = (0usize, 0usize);
+        #[inline(always)]
+        fn inc(i: &mut usize, cap: usize) {
+            *i += 1;
+            if *i == cap {
+                *i = 0;
+            }
+        }
+        #[inline(always)]
+        fn dec(i: usize, cap: usize) -> usize {
+            if i == 0 { cap - 1 } else { i - 1 }
+        }
+        #[inline(always)]
+        fn minq_push(
+            v: f64,
+            idx: usize,
+            vals: &mut [f64],
+            id: &mut [usize],
+            head: &mut usize,
+            tail: &mut usize,
+            cap: usize,
+        ) {
+            let mut back = dec(*tail, cap);
+            while *tail != *head && vals[back] > v {
+                *tail = back;
+                back = dec(*tail, cap);
+            }
+            vals[*tail] = v;
+            id[*tail] = idx;
+            inc(tail, cap);
+        }
+        #[inline(always)]
+        fn maxq_push(
+            v: f64,
+            idx: usize,
+            vals: &mut [f64],
+            id: &mut [usize],
+            head: &mut usize,
+            tail: &mut usize,
+            cap: usize,
+        ) {
+            let mut back = dec(*tail, cap);
+            while *tail != *head && vals[back] < v {
+                *tail = back;
+                back = dec(*tail, cap);
+            }
+            vals[*tail] = v;
+            id[*tail] = idx;
+            inc(tail, cap);
+        }
+        #[inline(always)]
+        fn q_expire(cur: usize, len: usize, id: &mut [usize], head: &mut usize, tail: &mut usize, cap: usize) {
+            let lim = cur.saturating_sub(len);
+            while *head != *tail && id[*head] <= lim {
+                inc(head, cap);
+            }
+        }
+
+        // seed [first..=warm]
+        let mut i = first;
+        while i <= warm {
+            let v = tr[i];
+            minq_push(v, i, &mut min_vals, &mut min_idx, &mut min_head, &mut min_tail, cap);
+            maxq_push(v, i, &mut max_vals, &mut max_idx, &mut max_head, &mut max_tail, cap);
+            i += 1;
+        }
+        let lo = min_vals[min_head];
+        let hi = max_vals[max_head];
+        let den = hi - lo;
+        let v = tr[warm];
+        let tr_adj0 = if den != 0.0 { (v - lo) / den } else { 0.0 };
+        let a0 = alpha * (1.0 + tr_adj0 * mult);
+        let mut y = a0 * close[warm - 1];
+        out[warm] = y;
+
+        // main loop
+        i = warm + 1;
+        while i < out.len() {
+            q_expire(i, length, &mut min_idx, &mut min_head, &mut min_tail, cap);
+            q_expire(i, length, &mut max_idx, &mut max_head, &mut max_tail, cap);
+
+            let v = tr[i];
+            minq_push(v, i, &mut min_vals, &mut min_idx, &mut min_head, &mut min_tail, cap);
+            maxq_push(v, i, &mut max_vals, &mut max_idx, &mut max_head, &mut max_tail, cap);
+
+            let lo = min_vals[min_head];
+            let hi = max_vals[max_head];
+            let den = hi - lo;
+            let tr_adj = if den != 0.0 { (v - lo) / den } else { 0.0 };
+            let a = alpha * (1.0 + tr_adj * mult);
+            let src = close[i - 1];
+            y += a * (src - y);
+            out[i] = y;
+
+            i += 1;
+        }
+    }
+
     // prefix NaNs already handled by caller via init_matrix_prefixes
+    let pre_tr = precompute_tr(high, low, close, first);
     let do_row = |row: usize, dst: &mut [f64]| {
         let p = &combos[row];
         let length = p.length.unwrap_or(40);
@@ -1284,7 +1569,9 @@ fn tradjema_batch_inner_into(
         if length < 2 {
             return;
         }
-        tradjema_compute_into(high, low, close, length, mult, first, kern, dst);
+        // SIMD selection for batch currently delegates to scalar; reuse shared TR
+        let _ = kern; // keep signature parity
+        compute_from_tr_into(&pre_tr, close, length, mult, first, dst);
     };
 
     if parallel {

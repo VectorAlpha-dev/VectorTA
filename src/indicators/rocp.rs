@@ -10,10 +10,12 @@
 //! - `Vec<f64>` - ROCP values centered at 0, matching input length
 //!
 //! ## Developer Status
-//! **AVX2**: Stub (calls scalar)
-//! **AVX512**: Has short/long variants but all stubs
-//! **Streaming**: O(1) - Simple ring buffer lookup
-//! **Memory**: Good - Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
+//! - SIMD implemented (AVX2/AVX512) but disabled by default: vector f64 division
+//!   underperforms vs safe scalar on current targets at realistic sizes (10k–100k).
+//!   Kernel::Auto short-circuits to Scalar/ScalarBatch. Explicit AVX benches remain
+//!   for future exploration and correctness.
+//! - Streaming: O(1) – simple ring buffer lookup
+//! - Memory: Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
@@ -221,8 +223,10 @@ pub fn rocp_with_kernel(input: &RocpInput, kernel: Kernel) -> Result<RocpOutput,
 
     let mut out = alloc_with_nan_prefix(len, first + period);
 
+    // Disable SIMD for Auto: scalar is consistently as fast or faster for ROCP.
+    // Leave explicit AVX2/AVX512 selection available for testing/benches.
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -278,8 +282,9 @@ pub fn rocp_into_slice(dst: &mut [f64], input: &RocpInput, kern: Kernel) -> Resu
         });
     }
 
+    // Disable SIMD for Auto in the into_slice path as well
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -304,41 +309,102 @@ pub fn rocp_into_slice(dst: &mut [f64], input: &RocpInput, kern: Kernel) -> Resu
 
 #[inline]
 pub fn rocp_scalar(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) {
-    for i in (first_val + period)..data.len() {
-        let prev = data[i - period];
-        out[i] = (data[i] - prev) / prev;
+    // Compute once; avoid index recomputation and bounds checks inside the loop
+    let start = first_val + period;
+    let n = data.len();
+    if start >= n {
+        return;
+    }
+
+    // Align previous and current slices so we can zip without index math
+    let curr = &data[start..];
+    let prev = &data[(start - period)..(n - period)];
+    let dst = &mut out[start..];
+
+    // Zip is optimized by LLVM into a tight loop; keeps scalar path fully safe
+    for ((&c, &p), o) in curr.iter().zip(prev.iter()).zip(dst.iter_mut()) {
+        *o = (c - p) / p;
     }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn rocp_avx512(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) {
-    if period <= 32 {
-        unsafe { rocp_avx512_short(data, period, first_val, out) }
-    } else {
-        unsafe { rocp_avx512_long(data, period, first_val, out) }
+    unsafe {
+        if period <= 32 {
+            rocp_avx512_short(data, period, first_val, out)
+        } else {
+            rocp_avx512_long(data, period, first_val, out)
+        }
     }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn rocp_avx2(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) {
-    // AVX2 stub (uses scalar for now, but keeps API parity)
-    rocp_scalar(data, period, first_val, out)
+    unsafe { rocp_avx2_impl(data, period, first_val, out) }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn rocp_avx2_impl(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) {
+    let start = first_val + period;
+    let n = data.len();
+    if start >= n {
+        return;
+    }
+    let mut i = start;
+    let end = n - ((n - start) & 3);
+    while i + 4 <= end {
+        let c = _mm256_loadu_pd(data.as_ptr().add(i));
+        let p = _mm256_loadu_pd(data.as_ptr().add(i - period));
+        let num = _mm256_sub_pd(c, p);
+        let div = _mm256_div_pd(num, p);
+        _mm256_storeu_pd(out.as_mut_ptr().add(i), div);
+        i += 4;
+    }
+    while i < n {
+        let prev = *data.get_unchecked(i - period);
+        *out.get_unchecked_mut(i) = (*data.get_unchecked(i) - prev) / prev;
+        i += 1;
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn rocp_avx512_short(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) {
-    // AVX512 short stub (uses scalar for now)
-    rocp_scalar(data, period, first_val, out)
+    rocp_avx512_impl(data, period, first_val, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn rocp_avx512_long(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) {
-    // AVX512 long stub (uses scalar for now)
-    rocp_scalar(data, period, first_val, out)
+    rocp_avx512_impl(data, period, first_val, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+unsafe fn rocp_avx512_impl(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) {
+    let start = first_val + period;
+    let n = data.len();
+    if start >= n {
+        return;
+    }
+    let mut i = start;
+    let end = n - ((n - start) & 7);
+    while i + 8 <= end {
+        let c = _mm512_loadu_pd(data.as_ptr().add(i));
+        let p = _mm512_loadu_pd(data.as_ptr().add(i - period));
+        let num = _mm512_sub_pd(c, p);
+        let div = _mm512_div_pd(num, p);
+        _mm512_storeu_pd(out.as_mut_ptr().add(i), div);
+        i += 8;
+    }
+    while i < n {
+        let prev = *data.get_unchecked(i - period);
+        *out.get_unchecked_mut(i) = (*data.get_unchecked(i) - prev) / prev;
+        i += 1;
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -447,8 +513,9 @@ pub fn rocp_batch_with_kernel(
     sweep: &RocpBatchRange,
     k: Kernel,
 ) -> Result<RocpBatchOutput, RocpError> {
+    // Disable SIMD auto-selection for batch: scalar batch is as fast or faster for ROCP
     let kernel = match k {
-        Kernel::Auto => detect_best_batch_kernel(),
+        Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         _ => {
             return Err(RocpError::InvalidPeriod {
@@ -566,15 +633,34 @@ fn rocp_batch_inner(
     let out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
+    // Optional row-optimized variant: precompute reciprocals once and reuse across rows.
+    // Heuristic: only worth it when multiple rows (>= 4) to amortize the O(N) precompute.
+    let use_inv = rows >= 4;
+    let inv: Option<Vec<f64>> = if use_inv {
+        let mut v = Vec::with_capacity(cols);
+        // SAFETY: input slice length is cols; push exactly cols elements
+        for &x in data.iter() {
+            v.push(1.0f64 / x);
+        }
+        Some(v)
+    } else {
+        None
+    };
+
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
-        match kern {
-            Kernel::Scalar => rocp_row_scalar(data, first, period, out_row),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => rocp_row_avx2(data, first, period, out_row),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => rocp_row_avx512(data, first, period, out_row),
-            _ => rocp_row_scalar(data, first, period, out_row),
+        if let (Some(inv), Kernel::Scalar) = (&inv, kern) {
+            // Row-optimized scalar path using shared reciprocals
+            rocp_row_scalar_with_inv(data, first, period, out_row, inv);
+        } else {
+            match kern {
+                Kernel::Scalar => rocp_row_scalar(data, first, period, out_row),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 => rocp_row_avx2(data, first, period, out_row),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 => rocp_row_avx512(data, first, period, out_row),
+                _ => rocp_row_scalar(data, first, period, out_row),
+            }
         }
     };
 
@@ -617,16 +703,47 @@ fn rocp_batch_inner(
 
 #[inline(always)]
 unsafe fn rocp_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-    for i in (first + period)..data.len() {
-        let prev = data[i - period];
-        out[i] = (data[i] - prev) / prev;
+    let start = first + period;
+    let n = data.len();
+    if start >= n {
+        return;
+    }
+
+    let curr = &data[start..];
+    let prev = &data[(start - period)..(n - period)];
+    let dst = &mut out[start..];
+    for ((&c, &p), o) in curr.iter().zip(prev.iter()).zip(dst.iter_mut()) {
+        *o = (c - p) / p;
+    }
+}
+
+#[inline(always)]
+fn rocp_row_scalar_with_inv(
+    data: &[f64],
+    first: usize,
+    period: usize,
+    out: &mut [f64],
+    inv: &[f64],
+) {
+    let start = first + period;
+    let n = data.len();
+    if start >= n {
+        return;
+    }
+
+    // Use shared reciprocals: y = (current / previous) - 1
+    let curr = &data[start..];
+    let inv_prev = &inv[(start - period)..(n - period)];
+    let dst = &mut out[start..];
+    for ((&c, &ip), o) in curr.iter().zip(inv_prev.iter()).zip(dst.iter_mut()) {
+        *o = c * ip - 1.0;
     }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn rocp_row_avx2(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-    rocp_row_scalar(data, first, period, out)
+    rocp_row_avx2_impl(data, first, period, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -642,13 +759,63 @@ pub unsafe fn rocp_row_avx512(data: &[f64], first: usize, period: usize, out: &m
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn rocp_row_avx512_short(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-    rocp_row_scalar(data, first, period, out)
+    rocp_row_avx512_impl(data, first, period, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn rocp_row_avx512_long(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-    rocp_row_scalar(data, first, period, out)
+    rocp_row_avx512_impl(data, first, period, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn rocp_row_avx2_impl(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
+    let start = first + period;
+    let n = data.len();
+    if start >= n {
+        return;
+    }
+    let mut i = start;
+    let end = n - ((n - start) & 3);
+    while i + 4 <= end {
+        let c = _mm256_loadu_pd(data.as_ptr().add(i));
+        let p = _mm256_loadu_pd(data.as_ptr().add(i - period));
+        let num = _mm256_sub_pd(c, p);
+        let div = _mm256_div_pd(num, p);
+        _mm256_storeu_pd(out.as_mut_ptr().add(i), div);
+        i += 4;
+    }
+    while i < n {
+        let prev = *data.get_unchecked(i - period);
+        *out.get_unchecked_mut(i) = (*data.get_unchecked(i) - prev) / prev;
+        i += 1;
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+unsafe fn rocp_row_avx512_impl(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
+    let start = first + period;
+    let n = data.len();
+    if start >= n {
+        return;
+    }
+    let mut i = start;
+    let end = n - ((n - start) & 7);
+    while i + 8 <= end {
+        let c = _mm512_loadu_pd(data.as_ptr().add(i));
+        let p = _mm512_loadu_pd(data.as_ptr().add(i - period));
+        let num = _mm512_sub_pd(c, p);
+        let div = _mm512_div_pd(num, p);
+        _mm512_storeu_pd(out.as_mut_ptr().add(i), div);
+        i += 8;
+    }
+    while i < n {
+        let prev = *data.get_unchecked(i - period);
+        *out.get_unchecked_mut(i) = (*data.get_unchecked(i) - prev) / prev;
+        i += 1;
+    }
 }
 
 // No changes to tests required; batch and scalar logic are unified.
@@ -695,18 +862,34 @@ pub fn rocp_batch_inner_into(
     init_matrix_prefixes(out_mu, cols, &warm);
 
     // 3) Row writer: take MU row, view as f64, compute into it
+    // Optional row-optimized variant: precompute reciprocals once when multiple rows
+    let use_inv = combos.len() >= 4;
+    let inv: Option<Vec<f64>> = if use_inv {
+        let mut v = Vec::with_capacity(cols);
+        for &x in data.iter() {
+            v.push(1.0f64 / x);
+        }
+        Some(v)
+    } else {
+        None
+    };
+
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
         let dst: &mut [f64] =
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
-        match kern {
-            Kernel::Scalar | Kernel::ScalarBatch => rocp_row_scalar(data, first, period, dst),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => rocp_row_avx2(data, first, period, dst),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => rocp_row_avx512(data, first, period, dst),
-            _ => rocp_row_scalar(data, first, period, dst),
+        if let (Some(inv), Kernel::Scalar | Kernel::ScalarBatch) = (&inv, kern) {
+            rocp_row_scalar_with_inv(data, first, period, dst, inv);
+        } else {
+            match kern {
+                Kernel::Scalar | Kernel::ScalarBatch => rocp_row_scalar(data, first, period, dst),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 | Kernel::Avx2Batch => rocp_row_avx2(data, first, period, dst),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 | Kernel::Avx512Batch => rocp_row_avx512(data, first, period, dst),
+                _ => rocp_row_scalar(data, first, period, dst),
+            }
         }
     };
 

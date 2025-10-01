@@ -18,19 +18,14 @@
 //!
 //! ## Developer Notes
 //! ### Implementation Status
-//! - **AVX2 Kernel**: Stub (calls scalar implementation)
-//! - **AVX512 Kernel**: Stub (calls scalar implementation)
-//! - **Streaming Update**: O(n) - recalculates entire history on each update
-//! - **Memory Optimization**: Fully optimized with `alloc_with_nan_prefix` for all output vectors
-//! - **Batch Operations**: Fully implemented with `make_uninit_matrix` and `init_matrix_prefixes`
+//! - SIMD selection enabled: EMA stages use AVX2/AVX512 when available; control-flow identical to scalar.
+//! - Scalar optimized: loop-jammed PVI/NVI build and range computation; no extra volume intermediates.
+//! - Batch (flat) optimized: precomputes volume selection + PVI/NVI once and reuses across rows.
+//! - Streaming update: still O(n); left for future work.
 //!
-//! ### TODO - Performance Improvements
-//! - [ ] Implement actual AVX2 SIMD kernel (currently stub)
-//! - [ ] Implement actual AVX512 SIMD kernel (currently stub)
-//! - [ ] **Critical**: Optimize streaming to O(1) - currently O(n) recalculation
-//! - [ ] Vectorize PVI/NVI divergence calculations
-//! - [ ] Optimize trailing level computations with SIMD
-//! - [ ] Consider caching intermediate EMA values to avoid recalculation
+//! ### TODO
+//! - Consider O(1) streaming update for trailing levels.
+//! - Evaluate further row-specific batch reuse in non-flat inner API.
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
@@ -388,123 +383,99 @@ fn dvdiqqe_compute_into(
     assert_eq!(slow_out.len(), len);
     assert_eq!(center_out.len(), len);
 
+    if len == 0 {
+        return Ok(());
+    }
+
+    // derived constants
     let wper = (period * 2) - 1;
     let warmup = first_valid + wper;
 
-    // tick volume + selection (uses alloc_with_nan_prefix for temps, no final copies)
-    let tick_vol = {
-        let mut out = alloc_with_nan_prefix(len, 0);
-        let mut tickrng_prev = tick;
-        for i in 0..len {
-            let rng = close[i] - open[i];
-            let tickrng = if rng.abs() < tick { tickrng_prev } else { rng };
-            out[i] = (tickrng.abs() / tick).max(0.0);
-            tickrng_prev = tickrng;
-        }
-        out
-    };
-    let vol = {
-        let mut out = alloc_with_nan_prefix(len, 0);
-        match (volume_type.eq_ignore_ascii_case("tick"), volume_opt) {
-            (true, _) => {
-                for i in 0..len {
-                    out[i] = tick_vol[i];
-                }
-            }
-            (false, Some(vs)) => {
-                for i in 0..len {
-                    out[i] = if vs[i].is_finite() {
-                        vs[i]
-                    } else {
-                        tick_vol[i]
-                    };
-                }
-            }
-            (false, None) => {
-                for i in 0..len {
-                    out[i] = tick_vol[i];
-                }
-            }
-        }
-        out
-    };
+    // Phase 1: Build PVI/NVI in one pass with inline tick volume selection
+    let mut pvi = alloc_with_nan_prefix(len, 0);
+    let mut nvi = alloc_with_nan_prefix(len, 0);
 
-    // PVI/NVI
-    let (pvi, nvi) = {
-        let mut pvi = alloc_with_nan_prefix(len, 0);
-        let mut nvi = alloc_with_nan_prefix(len, 0);
-        let mut pvi_prev = 0.0;
-        let mut nvi_prev = 0.0;
-        let mut prev_vol = 0.0;
-        let mut prev_x = 0.0;
-        for i in 0..len {
-            if vol[i] > prev_vol {
-                pvi_prev += close[i] - prev_x;
-            }
-            if vol[i] < prev_vol {
-                nvi_prev -= close[i] - prev_x;
-            }
-            pvi[i] = pvi_prev;
-            nvi[i] = nvi_prev;
-            prev_vol = vol[i];
-            prev_x = close[i];
-        }
-        (pvi, nvi)
-    };
+    let mut pvi_prev = 0.0f64;
+    let mut nvi_prev = 0.0f64;
+    let mut prev_vol = 0.0f64;
+    let mut prev_close = 0.0f64;
+    let mut tickrng_prev = tick;
+    let use_tick_only = volume_type.eq_ignore_ascii_case("tick");
 
-    // EMA(pvi), EMA(nvi)
-    let pvi_ema = {
-        let prm = EmaParams {
-            period: Some(period),
+    for i in 0..len {
+        let oi = open[i];
+        let ci = close[i];
+
+        // pine-like tick volume
+        let rng = ci - oi;
+        let tickrng = if rng.abs() < tick { tickrng_prev } else { rng };
+        let tick_vol = (tickrng.abs() / tick).max(0.0);
+
+        // select real volume or tick fallback
+        let sel_vol = if use_tick_only {
+            tick_vol
+        } else if let Some(vs) = volume_opt {
+            let vv = vs[i];
+            if vv.is_finite() { vv } else { tick_vol }
+        } else {
+            tick_vol
         };
+
+        let d_close = ci - prev_close;
+        if sel_vol > prev_vol {
+            pvi_prev += d_close;
+        }
+        if sel_vol < prev_vol {
+            nvi_prev -= d_close;
+        }
+
+        pvi[i] = pvi_prev;
+        nvi[i] = nvi_prev;
+        prev_close = ci;
+        prev_vol = sel_vol;
+        tickrng_prev = tickrng;
+    }
+
+    // Phase 2: EMA(pvi), EMA(nvi)
+    let pvi_ema = {
+        let prm = EmaParams { period: Some(period) };
         let inp = EmaInput::from_slice(&pvi, prm);
         ema_with_kernel(&inp, kernel).map_err(|e| DvdiqqeError::EmaError(e.to_string()))?
     };
     let nvi_ema = {
-        let prm = EmaParams {
-            period: Some(period),
-        };
+        let prm = EmaParams { period: Some(period) };
         let inp = EmaInput::from_slice(&nvi, prm);
         ema_with_kernel(&inp, kernel).map_err(|e| DvdiqqeError::EmaError(e.to_string()))?
     };
 
-    // divergences and smoothed divergences
-    let (pdiv, ndiv) = {
-        let mut pd = alloc_with_nan_prefix(len, 0);
-        let mut nd = alloc_with_nan_prefix(len, 0);
-        for i in 0..len {
-            pd[i] = pvi[i] - pvi_ema.values[i];
-            nd[i] = nvi[i] - nvi_ema.values[i];
-        }
-        (pd, nd)
-    };
+    // Phase 3: divergences then smoothing EMA (reuse pvi/nvi buffers)
+    for i in 0..len {
+        pvi[i] = pvi[i] - pvi_ema.values[i];
+        nvi[i] = nvi[i] - nvi_ema.values[i];
+    }
+
     let pdiv_ema = {
-        let prm = EmaParams {
-            period: Some(smoothing_period),
-        };
-        let inp = EmaInput::from_slice(&pdiv, prm);
+        let prm = EmaParams { period: Some(smoothing_period) };
+        let inp = EmaInput::from_slice(&pvi, prm);
         ema_with_kernel(&inp, kernel).map_err(|e| DvdiqqeError::EmaError(e.to_string()))?
     };
     let ndiv_ema = {
-        let prm = EmaParams {
-            period: Some(smoothing_period),
-        };
-        let inp = EmaInput::from_slice(&ndiv, prm);
+        let prm = EmaParams { period: Some(smoothing_period) };
+        let inp = EmaInput::from_slice(&nvi, prm);
         ema_with_kernel(&inp, kernel).map_err(|e| DvdiqqeError::EmaError(e.to_string()))?
     };
 
-    // DVDI directly into dst
-    for i in 0..len {
-        dvdi_out[i] = pdiv_ema.values[i] - ndiv_ema.values[i];
+    // Phase 4: compute dvdi and range stream
+    let mut ranges = alloc_with_nan_prefix(len, 1);
+    dvdi_out[0] = pdiv_ema.values[0] - ndiv_ema.values[0];
+    for i in 1..len {
+        let dvdi_i = pdiv_ema.values[i] - ndiv_ema.values[i];
+        ranges[i] = (dvdi_i - dvdi_out[i - 1]).abs();
+        dvdi_out[i] = dvdi_i;
     }
 
-    // trailing levels
-    let wper = (period * 2) - 1;
+    // Phase 5: double-EMA range smoothing using Kernel::Auto
     let avg_range = {
-        let mut ranges = alloc_with_nan_prefix(len, 1);
-        for i in 1..len {
-            ranges[i] = (dvdi_out[i] - dvdi_out[i - 1]).abs();
-        }
         let prm = EmaParams { period: Some(wper) };
         let inp = EmaInput::from_slice(&ranges, prm);
         ema_with_kernel(&inp, Kernel::Auto).map_err(|e| DvdiqqeError::EmaError(e.to_string()))?
@@ -515,9 +486,7 @@ fn dvdiqqe_compute_into(
         ema_with_kernel(&inp, Kernel::Auto).map_err(|e| DvdiqqeError::EmaError(e.to_string()))?
     };
 
-    // warmups - ensure proper NaN for warmup period
-    // Note: dvdi_out already has NaN prefix, but we need to maintain it
-    // after EMA operations which may have overwritten values
+    // Phase 6: Warmup NaNs and trailing levels
     for i in 0..warmup.min(len) {
         dvdi_out[i] = f64::NAN;
         fast_out[i] = f64::NAN;
@@ -527,65 +496,47 @@ fn dvdiqqe_compute_into(
     if warmup < len {
         fast_out[warmup] = dvdi_out[warmup];
         slow_out[warmup] = dvdi_out[warmup];
+
         for i in (warmup + 1)..len {
             let fr = smooth_range.values[i] * fast_mult;
             let sr = smooth_range.values[i] * slow_mult;
 
-            // fast
+            // fast TL
             if dvdi_out[i] > fast_out[i - 1] {
                 let nv = dvdi_out[i] - fr;
-                fast_out[i] = if nv < fast_out[i - 1] {
-                    fast_out[i - 1]
-                } else {
-                    nv
-                };
+                fast_out[i] = if nv < fast_out[i - 1] { fast_out[i - 1] } else { nv };
             } else {
                 let nv = dvdi_out[i] + fr;
-                fast_out[i] = if nv > fast_out[i - 1] {
-                    fast_out[i - 1]
-                } else {
-                    nv
-                };
+                fast_out[i] = if nv > fast_out[i - 1] { fast_out[i - 1] } else { nv };
             }
 
-            // slow
+            // slow TL
             if dvdi_out[i] > slow_out[i - 1] {
                 let nv = dvdi_out[i] - sr;
-                slow_out[i] = if nv < slow_out[i - 1] {
-                    slow_out[i - 1]
-                } else {
-                    nv
-                };
+                slow_out[i] = if nv < slow_out[i - 1] { slow_out[i - 1] } else { nv };
             } else {
                 let nv = dvdi_out[i] + sr;
-                slow_out[i] = if nv > slow_out[i - 1] {
-                    slow_out[i - 1]
-                } else {
-                    nv
-                };
+                slow_out[i] = if nv > slow_out[i - 1] { slow_out[i - 1] } else { nv };
             }
         }
     }
 
-    // center
-    if volume_type.len() > 0 { /* no-op to avoid unused warning when inlining */ }
+    // Phase 7: Center line
+    for i in 0..warmup.min(len) {
+        center_out[i] = f64::NAN;
+    }
     if center_type.eq_ignore_ascii_case("dynamic") {
-        for i in 0..warmup.min(len) {
-            center_out[i] = f64::NAN;
-        }
-        let mut sum = 0.0;
-        let mut cnt = 0.0;
+        let mut sum = 0.0f64;
+        let mut cnt = 0.0f64;
         for i in warmup..len {
-            if dvdi_out[i].is_finite() {
-                sum += dvdi_out[i];
+            let v = dvdi_out[i];
+            if v.is_finite() {
+                sum += v;
                 cnt += 1.0;
             }
             center_out[i] = if cnt > 0.0 { sum / cnt } else { f64::NAN };
         }
     } else {
-        for i in 0..warmup.min(len) {
-            center_out[i] = f64::NAN;
-        }
         for i in warmup..len {
             center_out[i] = 0.0;
         }
@@ -647,7 +598,7 @@ pub fn dvdiqqe_with_kernel(
 
 // ==================== SIMD IMPLEMENTATIONS ====================
 
-/// AVX2 implementation stub (currently uses scalar)
+/// AVX2 implementation: route EMA sub-kernels via AVX2 while preserving scalar flow
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn dvdiqqe_avx2(
@@ -657,19 +608,10 @@ unsafe fn dvdiqqe_avx2(
     center_dst: &mut [f64],
     input: &DvdiqqeInput,
 ) -> Result<(), DvdiqqeError> {
-    // TODO: Implement actual AVX2 optimizations
-    // For now, just call the scalar version
-    dvdiqqe_into_slices(
-        dvdi_dst,
-        fast_dst,
-        slow_dst,
-        center_dst,
-        input,
-        Kernel::Scalar,
-    )
+    dvdiqqe_into_slices(dvdi_dst, fast_dst, slow_dst, center_dst, input, Kernel::Avx2)
 }
 
-/// AVX512 implementation stub (currently uses scalar)
+/// AVX512 implementation: same rationale as AVX2
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,fma")]
 unsafe fn dvdiqqe_avx512(
@@ -679,16 +621,7 @@ unsafe fn dvdiqqe_avx512(
     center_dst: &mut [f64],
     input: &DvdiqqeInput,
 ) -> Result<(), DvdiqqeError> {
-    // TODO: Implement actual AVX512 optimizations
-    // For now, just call the scalar version
-    dvdiqqe_into_slices(
-        dvdi_dst,
-        fast_dst,
-        slow_dst,
-        center_dst,
-        input,
-        Kernel::Scalar,
-    )
+    dvdiqqe_into_slices(dvdi_dst, fast_dst, slow_dst, center_dst, input, Kernel::Avx512)
 }
 
 /// Calculate tick volume identical to Pine Script
@@ -1660,6 +1593,11 @@ fn dvdiqqe_batch_inner_flat(
     let out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
+    // Precompute volume selection and PVI/NVI once across rows (row-invariant)
+    let tick_vol_once = calculate_tick_volume_pine_like(open, close, tick_size);
+    let sel_vol_once = select_volume_pine_like(volume, &tick_vol_once, volume_type);
+    let (pvi_stream, nvi_stream) = build_pvi_nvi_pine_like(close, &sel_vol_once);
+
     let process_row = |row: usize, out_slice: &mut [f64]| -> Result<(), DvdiqqeError> {
         let prm = &combos[row];
         let params = DvdiqqeParams {
@@ -1672,7 +1610,7 @@ fn dvdiqqe_batch_inner_flat(
             tick_size: Some(tick_size),
         };
         let input = DvdiqqeInput::from_slices(open, high, low, close, volume, params);
-        let (o, h, l, c, v, period, smoothing, fast, slow, vt, ct, tick, first_local) =
+        let (_o, _h, _l, c, _v, period, smoothing, fast, slow, _vt, ct, _tick, first_local) =
             dvdiqqe_prepare(&input)?;
 
         // per-series row slices - split the provided slice
@@ -1686,26 +1624,117 @@ fn dvdiqqe_batch_inner_flat(
         let slow_dst = &mut slow_plane[row * cols..(row + 1) * cols];
         let center_dst = &mut center_plane[row * cols..(row + 1) * cols];
 
-        dvdiqqe_compute_into(
-            o,
-            h,
-            l,
-            c,
-            v,
-            period,
-            smoothing,
-            fast,
-            slow,
-            vt,
-            ct,
-            tick,
-            first_local,
-            kern,
-            dvdi_dst,
-            fast_dst,
-            slow_dst,
-            center_dst,
-        )
+        // Compute EMAs on precomputed PVI/NVI for this row
+        let pvi_ema = {
+            let prm = EmaParams { period: Some(period) };
+            let inp = EmaInput::from_slice(&pvi_stream, prm);
+            ema_with_kernel(&inp, kern).map_err(|e| DvdiqqeError::EmaError(e.to_string()))?
+        };
+        let nvi_ema = {
+            let prm = EmaParams { period: Some(period) };
+            let inp = EmaInput::from_slice(&nvi_stream, prm);
+            ema_with_kernel(&inp, kern).map_err(|e| DvdiqqeError::EmaError(e.to_string()))?
+        };
+
+        // divergences and smoothing
+        let mut pdiv = alloc_with_nan_prefix(cols, 0);
+        let mut ndiv = alloc_with_nan_prefix(cols, 0);
+        for i in 0..cols {
+            pdiv[i] = pvi_stream[i] - pvi_ema.values[i];
+            ndiv[i] = nvi_stream[i] - nvi_ema.values[i];
+        }
+        let pdiv_ema = {
+            let prm = EmaParams { period: Some(smoothing) };
+            let inp = EmaInput::from_slice(&pdiv, prm);
+            ema_with_kernel(&inp, kern).map_err(|e| DvdiqqeError::EmaError(e.to_string()))?
+        };
+        let ndiv_ema = {
+            let prm = EmaParams { period: Some(smoothing) };
+            let inp = EmaInput::from_slice(&ndiv, prm);
+            ema_with_kernel(&inp, kern).map_err(|e| DvdiqqeError::EmaError(e.to_string()))?
+        };
+
+        // write dvdi and ranges for TLs
+        let wper = (period * 2) - 1;
+        let warmup = first_local + wper;
+
+        // ensure warmup NaNs (some already set by init_matrix_prefixes)
+        for i in 0..warmup.min(cols) {
+            dvdi_dst[i] = f64::NAN;
+            fast_dst[i] = f64::NAN;
+            slow_dst[i] = f64::NAN;
+        }
+
+        // fill dvdi and range buffer
+        let mut ranges = alloc_with_nan_prefix(cols, 1);
+        if cols > 0 {
+            dvdi_dst[0] = pdiv_ema.values[0] - ndiv_ema.values[0];
+            for i in 1..cols {
+                let dvdi_i = pdiv_ema.values[i] - ndiv_ema.values[i];
+                ranges[i] = (dvdi_i - dvdi_dst[i - 1]).abs();
+                dvdi_dst[i] = dvdi_i;
+            }
+        }
+
+        // Double-EMA range smoothing with Kernel::Auto
+        let avg_range = {
+            let prm = EmaParams { period: Some(wper) };
+            let inp = EmaInput::from_slice(&ranges, prm);
+            ema_with_kernel(&inp, Kernel::Auto).map_err(|e| DvdiqqeError::EmaError(e.to_string()))?
+        };
+        let smooth_range = {
+            let prm = EmaParams { period: Some(wper) };
+            let inp = EmaInput::from_slice(&avg_range.values, prm);
+            ema_with_kernel(&inp, Kernel::Auto).map_err(|e| DvdiqqeError::EmaError(e.to_string()))?
+        };
+
+        // trailing levels
+        if warmup < cols {
+            fast_dst[warmup] = dvdi_dst[warmup];
+            slow_dst[warmup] = dvdi_dst[warmup];
+            for i in (warmup + 1)..cols {
+                let fr = smooth_range.values[i] * fast;
+                let sr = smooth_range.values[i] * slow;
+                if dvdi_dst[i] > fast_dst[i - 1] {
+                    let nv = dvdi_dst[i] - fr;
+                    fast_dst[i] = if nv < fast_dst[i - 1] { fast_dst[i - 1] } else { nv };
+                } else {
+                    let nv = dvdi_dst[i] + fr;
+                    fast_dst[i] = if nv > fast_dst[i - 1] { fast_dst[i - 1] } else { nv };
+                }
+
+                if dvdi_dst[i] > slow_dst[i - 1] {
+                    let nv = dvdi_dst[i] - sr;
+                    slow_dst[i] = if nv < slow_dst[i - 1] { slow_dst[i - 1] } else { nv };
+                } else {
+                    let nv = dvdi_dst[i] + sr;
+                    slow_dst[i] = if nv > slow_dst[i - 1] { slow_dst[i - 1] } else { nv };
+                }
+            }
+        }
+
+        // center
+        for i in 0..warmup.min(cols) {
+            center_dst[i] = f64::NAN;
+        }
+        if ct.eq_ignore_ascii_case("dynamic") {
+            let mut sum = 0.0f64;
+            let mut cnt = 0.0f64;
+            for i in warmup..cols {
+                let v = dvdi_dst[i];
+                if v.is_finite() {
+                    sum += v;
+                    cnt += 1.0;
+                }
+                center_dst[i] = if cnt > 0.0 { sum / cnt } else { f64::NAN };
+            }
+        } else {
+            for i in warmup..cols {
+                center_dst[i] = 0.0;
+            }
+        }
+
+        Ok(())
     };
 
     // Process rows (parallel processing would require unsafe pointer handling,

@@ -14,10 +14,12 @@
 //! - `Err(MacdError)` on failure
 //!
 //! ## Developer Notes
-//! - **AVX2**: Stub implementation - calls scalar function
-//! - **AVX512**: Multiple stub functions (macd_avx512, macd_avx512_short, macd_avx512_long) - all call scalar
-//! - **Streaming**: O(1) for EMA type, O(n) fallback for other MA types - needs optimization for non-EMA
-//! - **Memory**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
+//! - SIMD: AVX2/AVX512 accelerate only the SMA seeding of EMAs; the EMA recurrences
+//!   are sequential by definition. Expect modest speedups on large windows; scalar
+//!   remains the reference path and is single-pass and FMA-enabled.
+//! - Streaming: O(1) for EMA type, O(n) fallback for other MA types. Non-EMA stream
+//!   remains a simple fallback; further optimization is out of scope here.
+//! - Memory: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
@@ -363,7 +365,10 @@ fn macd_prepare<'a>(
 }
 
 #[inline(always)]
-/// Classic kernel - optimized loop-jammed implementation for EMA
+/// Classic EMA kernel – single-pass, SMA-seeded, and warmup-accurate.
+/// Seeds fast/slow with SMA over their first windows, advances fast EMA up to
+/// the slow warmup, then computes MACD, signal (SMA-seeded), and histogram in
+/// a single forward pass. Uses `mul_add` where beneficial.
 fn macd_compute_into_classic_ema(
     data: &[f64],
     fast: usize,
@@ -375,75 +380,110 @@ fn macd_compute_into_classic_ema(
     hist_out: &mut [f64],
 ) -> Result<(), MacdError> {
     let len = data.len();
-
-    // Calculate alphas for EMA
-    let fast_alpha = 2.0 / (fast as f64 + 1.0);
-    let slow_alpha = 2.0 / (slow as f64 + 1.0);
-    let signal_alpha = 2.0 / (signal as f64 + 1.0);
-
-    // Initialize fast EMA with SMA
-    let mut fast_sum = 0.0;
-    for i in 0..fast.min(len - first) {
-        fast_sum += data[first + i];
-    }
-    let mut fast_ema = fast_sum / fast as f64;
-
-    // Initialize slow EMA with SMA
-    let mut slow_sum = 0.0;
-    for i in 0..slow.min(len - first) {
-        slow_sum += data[first + i];
-    }
-    let mut slow_ema = slow_sum / slow as f64;
-
-    // Warmup periods
     let macd_warmup = first + slow - 1;
     let signal_warmup = first + slow + signal - 2;
 
-    // Calculate first valid MACD value
+    // EMA coefficients
+    let af = 2.0 / (fast as f64 + 1.0);
+    let aslow = 2.0 / (slow as f64 + 1.0);
+    let asig = 2.0 / (signal as f64 + 1.0);
+    let omf = 1.0 - af;
+    let oms = 1.0 - aslow;
+    let omsi = 1.0 - asig;
+
+    // Seed fast EMA with SMA over [first .. first+fast)
+    let mut fsum = 0.0;
+    let mut i = 0usize;
+    // small unroll – cheap on short windows
+    while i + 4 <= fast {
+        fsum += data[first + i + 0];
+        fsum += data[first + i + 1];
+        fsum += data[first + i + 2];
+        fsum += data[first + i + 3];
+        i += 4;
+    }
+    while i < fast {
+        fsum += data[first + i];
+        i += 1;
+    }
+    let mut fast_ema = fsum / fast as f64;
+
+    // Seed slow EMA with SMA over [first .. first+slow)
+    let mut ssum = 0.0;
+    let mut j = 0usize;
+    while j + 4 <= slow {
+        ssum += data[first + j + 0];
+        ssum += data[first + j + 1];
+        ssum += data[first + j + 2];
+        ssum += data[first + j + 3];
+        j += 4;
+    }
+    while j < slow {
+        ssum += data[first + j];
+        j += 1;
+    }
+    let mut slow_ema = ssum / slow as f64;
+
+    // Advance FAST EMA from (first+fast) ..= macd_warmup to align with SLOW at macd_warmup
+    let mut t = first + fast;
+    while t <= macd_warmup {
+        let x = data[t];
+        fast_ema = x.mul_add(af, omf * fast_ema);
+        t += 1;
+    }
+
+    // First valid MACD at macd_warmup
     if macd_warmup < len {
-        macd_out[macd_warmup] = fast_ema - slow_ema;
+        let m0 = fast_ema - slow_ema;
+        macd_out[macd_warmup] = m0;
     }
 
-    // Calculate fast and slow EMAs and MACD line
-    for i in (macd_warmup + 1)..len {
-        fast_ema = fast_alpha * data[i] + (1.0 - fast_alpha) * fast_ema;
-        slow_ema = slow_alpha * data[i] + (1.0 - slow_alpha) * slow_ema;
-        macd_out[i] = fast_ema - slow_ema;
-    }
-
-    // Initialize signal EMA with first MACD values
-    if signal_warmup < len && macd_warmup < len {
-        // Initialize signal with SMA of first signal-period MACD values
-        let signal_start = macd_warmup;
-        let signal_init_end = (signal_start + signal).min(len);
-        let mut signal_sum = 0.0;
-        let mut count = 0;
-
-        for i in signal_start..signal_init_end {
-            if !macd_out[i].is_nan() {
-                signal_sum += macd_out[i];
-                count += 1;
-            }
+    // Signal seeding state
+    let mut have_seed = false;
+    let mut se = 0.0_f64;
+    if signal == 1 {
+        // seed immediately with m0
+        if signal_warmup < len {
+            se = macd_out[signal_warmup];
+            have_seed = true;
+            signal_out[signal_warmup] = se;
+            hist_out[signal_warmup] = macd_out[signal_warmup] - se;
         }
+    }
+    let mut sig_accum = if signal > 1 && macd_warmup < len {
+        macd_out[macd_warmup]
+    } else {
+        0.0
+    };
 
-        if count > 0 {
-            let mut signal_ema = signal_sum / count as f64;
+    // Single forward pass from macd_warmup+1 .. len
+    let mut k = macd_warmup.saturating_add(1);
+    while k < len {
+        let x = data[k];
+        fast_ema = x.mul_add(af, omf * fast_ema);
+        slow_ema = x.mul_add(aslow, oms * slow_ema);
+        let m = fast_ema - slow_ema;
+        macd_out[k] = m;
 
-            // Set first valid signal and histogram
-            if signal_warmup < len {
-                signal_out[signal_warmup] = signal_ema;
-                hist_out[signal_warmup] = macd_out[signal_warmup] - signal_ema;
-            }
-
-            // Continue with signal EMA
-            for i in (signal_warmup + 1)..len {
-                if !macd_out[i].is_nan() {
-                    signal_ema = signal_alpha * macd_out[i] + (1.0 - signal_alpha) * signal_ema;
-                    signal_out[i] = signal_ema;
-                    hist_out[i] = macd_out[i] - signal_ema;
+        if !have_seed {
+            if signal > 1 && k <= signal_warmup {
+                sig_accum += m;
+                if k == signal_warmup {
+                    se = sig_accum / (signal as f64);
+                    have_seed = true;
+                    signal_out[k] = se;
+                    hist_out[k] = m - se;
                 }
             }
+        } else {
+            se = m.mul_add(asig, omsi * se);
+            if k >= signal_warmup {
+                signal_out[k] = se;
+                hist_out[k] = m - se;
+            }
         }
+
+        k += 1;
     }
 
     Ok(())
@@ -569,15 +609,40 @@ fn macd_compute_into(
 }
 
 pub fn macd_with_kernel(input: &MacdInput, kernel: Kernel) -> Result<MacdOutput, MacdError> {
-    let (data, fast, slow, signal, ma_type, macd_warmup, signal_warmup, _chosen) =
+    let (data, fast, slow, signal, ma_type, macd_warmup, signal_warmup, chosen) =
         macd_prepare(input, kernel)?;
     let len = data.len();
+    
+    // EMA path can leverage kernel selection; others use scalar fallback
+    if ma_type.eq_ignore_ascii_case("ema") {
+        let first = macd_warmup + 1 - slow;
+        // Dispatch like ALMA: Scalar → AVX2 → AVX512 (feature-gated)
+        unsafe {
+            match chosen {
+                Kernel::Scalar | Kernel::ScalarBatch => {
+                    return macd_scalar(data, fast, slow, signal, &ma_type, first);
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 | Kernel::Avx2Batch => {
+                    return macd_avx2(data, fast, slow, signal, &ma_type, first);
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 | Kernel::Avx512Batch => {
+                    return macd_avx512(data, fast, slow, signal, &ma_type, first);
+                }
+                #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+                Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                    return macd_scalar(data, fast, slow, signal, &ma_type, first);
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
 
+    // Fallback for non-EMA: compute into preallocated buffers (scalar)
     let mut macd = alloc_with_nan_prefix(len, macd_warmup);
     let mut signal_vec = alloc_with_nan_prefix(len, signal_warmup);
     let mut hist = alloc_with_nan_prefix(len, signal_warmup);
-
-    // Use the first value for compute_into
     let first = macd_warmup + 1 - slow;
     macd_compute_into(
         data,
@@ -590,12 +655,7 @@ pub fn macd_with_kernel(input: &MacdInput, kernel: Kernel) -> Result<MacdOutput,
         &mut signal_vec,
         &mut hist,
     )?;
-
-    Ok(MacdOutput {
-        macd,
-        signal: signal_vec,
-        hist,
-    })
+    Ok(MacdOutput { macd, signal: signal_vec, hist })
 }
 
 #[inline(always)]
@@ -690,7 +750,119 @@ pub unsafe fn macd_avx2(
     ma_type: &str,
     first: usize,
 ) -> Result<MacdOutput, MacdError> {
-    macd_scalar(data, fast, slow, signal, ma_type, first)
+    if !ma_type.eq_ignore_ascii_case("ema") {
+        return macd_scalar(data, fast, slow, signal, ma_type, first);
+    }
+
+    // Helpers: horizontal sum and AVX2 reduction
+    #[inline(always)]
+    unsafe fn hsum256_pd(v: __m256d) -> f64 {
+        let hi = _mm256_extractf128_pd(v, 1);
+        let lo = _mm256_castpd256_pd128(v);
+        let sum2 = _mm_add_pd(lo, hi);
+        let shuf = _mm_unpackhi_pd(sum2, sum2);
+        let sum = _mm_add_sd(sum2, shuf);
+        _mm_cvtsd_f64(sum)
+    }
+    #[inline(always)]
+    unsafe fn avx2_sum(ptr: *const f64, n: usize) -> f64 {
+        let mut i = 0usize;
+        let mut a0 = _mm256_setzero_pd();
+        let mut a1 = _mm256_setzero_pd();
+        while i + 8 <= n {
+            let v0 = _mm256_loadu_pd(ptr.add(i));
+            let v1 = _mm256_loadu_pd(ptr.add(i + 4));
+            a0 = _mm256_add_pd(a0, v0);
+            a1 = _mm256_add_pd(a1, v1);
+            i += 8;
+        }
+        let mut acc = _mm256_add_pd(a0, a1);
+        if i + 4 <= n {
+            let v = _mm256_loadu_pd(ptr.add(i));
+            acc = _mm256_add_pd(acc, v);
+            i += 4;
+        }
+        let mut sum = hsum256_pd(acc);
+        while i < n {
+            sum += *ptr.add(i);
+            i += 1;
+        }
+        sum
+    }
+
+    let len = data.len();
+    let macd_warmup = first + slow - 1;
+    let signal_warmup = first + slow + signal - 2;
+
+    let mut macd = alloc_with_nan_prefix(len, macd_warmup);
+    let mut signal_vec = alloc_with_nan_prefix(len, signal_warmup);
+    let mut hist = alloc_with_nan_prefix(len, signal_warmup);
+
+    // EMA coefficients
+    let af = 2.0 / (fast as f64 + 1.0);
+    let aslow = 2.0 / (slow as f64 + 1.0);
+    let asig = 2.0 / (signal as f64 + 1.0);
+    let omf = 1.0 - af;
+    let oms = 1.0 - aslow;
+    let omsi = 1.0 - asig;
+
+    // SIMD-accelerated SMA seeds
+    let base = data.as_ptr().add(first);
+    let mut fast_ema = avx2_sum(base, fast) / fast as f64;
+    let mut slow_ema = avx2_sum(base, slow) / slow as f64;
+
+    // Advance fast EMA to macd_warmup
+    let mut t = first + fast;
+    while t <= macd_warmup {
+        let x = *data.get_unchecked(t);
+        fast_ema = x.mul_add(af, omf * fast_ema);
+        t += 1;
+    }
+
+    let m0 = fast_ema - slow_ema;
+    *macd.get_unchecked_mut(macd_warmup) = m0;
+
+    let mut se = 0.0f64;
+    let mut have_seed = false;
+    if signal == 1 {
+        se = m0;
+        have_seed = true;
+        if signal_warmup < len {
+            *signal_vec.get_unchecked_mut(signal_warmup) = se;
+            *hist.get_unchecked_mut(signal_warmup) = m0 - se;
+        }
+    }
+    let mut sig_accum = if signal > 1 { m0 } else { 0.0 };
+
+    let mut i = macd_warmup + 1;
+    while i < len {
+        let x = *data.get_unchecked(i);
+        fast_ema = x.mul_add(af, omf * fast_ema);
+        slow_ema = x.mul_add(aslow, oms * slow_ema);
+        let m = fast_ema - slow_ema;
+        *macd.get_unchecked_mut(i) = m;
+
+        if !have_seed {
+            if signal > 1 && i <= signal_warmup {
+                sig_accum += m;
+                if i == signal_warmup {
+                    se = sig_accum / (signal as f64);
+                    have_seed = true;
+                    *signal_vec.get_unchecked_mut(i) = se;
+                    *hist.get_unchecked_mut(i) = m - se;
+                }
+            }
+        } else {
+            se = m.mul_add(asig, omsi * se);
+            if i >= signal_warmup {
+                *signal_vec.get_unchecked_mut(i) = se;
+                *hist.get_unchecked_mut(i) = m - se;
+            }
+        }
+        i += 1;
+    }
+
+    Ok(MacdOutput { macd, signal: signal_vec, hist })
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -703,7 +875,109 @@ pub unsafe fn macd_avx512(
     ma_type: &str,
     first: usize,
 ) -> Result<MacdOutput, MacdError> {
-    macd_scalar(data, fast, slow, signal, ma_type, first)
+    if !ma_type.eq_ignore_ascii_case("ema") {
+        return macd_scalar(data, fast, slow, signal, ma_type, first);
+    }
+
+    #[inline(always)]
+    unsafe fn avx512_sum(ptr: *const f64, n: usize) -> f64 {
+        let mut i = 0usize;
+        let mut a0 = _mm512_setzero_pd();
+        let mut a1 = _mm512_setzero_pd();
+        while i + 16 <= n {
+            let v0 = _mm512_loadu_pd(ptr.add(i));
+            let v1 = _mm512_loadu_pd(ptr.add(i + 8));
+            a0 = _mm512_add_pd(a0, v0);
+            a1 = _mm512_add_pd(a1, v1);
+            i += 16;
+        }
+        let mut acc = _mm512_add_pd(a0, a1);
+        if i + 8 <= n {
+            let v = _mm512_loadu_pd(ptr.add(i));
+            acc = _mm512_add_pd(acc, v);
+            i += 8;
+        }
+        let mut sum = _mm512_reduce_add_pd(acc);
+        while i < n {
+            sum += *ptr.add(i);
+            i += 1;
+        }
+        sum
+    }
+
+    let len = data.len();
+    let macd_warmup = first + slow - 1;
+    let signal_warmup = first + slow + signal - 2;
+
+    let mut macd = alloc_with_nan_prefix(len, macd_warmup);
+    let mut signal_vec = alloc_with_nan_prefix(len, signal_warmup);
+    let mut hist = alloc_with_nan_prefix(len, signal_warmup);
+
+    // EMA coefficients
+    let af = 2.0 / (fast as f64 + 1.0);
+    let aslow = 2.0 / (slow as f64 + 1.0);
+    let asig = 2.0 / (signal as f64 + 1.0);
+    let omf = 1.0 - af;
+    let oms = 1.0 - aslow;
+    let omsi = 1.0 - asig;
+
+    // SIMD-accelerated SMA seeds
+    let base = data.as_ptr().add(first);
+    let mut fast_ema = avx512_sum(base, fast) / fast as f64;
+    let mut slow_ema = avx512_sum(base, slow) / slow as f64;
+
+    // Advance fast EMA to macd_warmup
+    let mut t = first + fast;
+    while t <= macd_warmup {
+        let x = *data.get_unchecked(t);
+        fast_ema = x.mul_add(af, omf * fast_ema);
+        t += 1;
+    }
+
+    let m0 = fast_ema - slow_ema;
+    *macd.get_unchecked_mut(macd_warmup) = m0;
+
+    let mut se = 0.0f64;
+    let mut have_seed = false;
+    if signal == 1 {
+        se = m0;
+        have_seed = true;
+        if signal_warmup < len {
+            *signal_vec.get_unchecked_mut(signal_warmup) = se;
+            *hist.get_unchecked_mut(signal_warmup) = m0 - se;
+        }
+    }
+    let mut sig_accum = if signal > 1 { m0 } else { 0.0 };
+
+    let mut i = macd_warmup + 1;
+    while i < len {
+        let x = *data.get_unchecked(i);
+        fast_ema = x.mul_add(af, omf * fast_ema);
+        slow_ema = x.mul_add(aslow, oms * slow_ema);
+        let m = fast_ema - slow_ema;
+        *macd.get_unchecked_mut(i) = m;
+
+        if !have_seed {
+            if signal > 1 && i <= signal_warmup {
+                sig_accum += m;
+                if i == signal_warmup {
+                    se = sig_accum / (signal as f64);
+                    have_seed = true;
+                    *signal_vec.get_unchecked_mut(i) = se;
+                    *hist.get_unchecked_mut(i) = m - se;
+                }
+            }
+        } else {
+            se = m.mul_add(asig, omsi * se);
+            if i >= signal_warmup {
+                *signal_vec.get_unchecked_mut(i) = se;
+                *hist.get_unchecked_mut(i) = m - se;
+            }
+        }
+        i += 1;
+    }
+
+    Ok(MacdOutput { macd, signal: signal_vec, hist })
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]

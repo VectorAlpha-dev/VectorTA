@@ -11,11 +11,10 @@
 //! - **`Err(TrixError)`** on invalid parameters or insufficient data.
 //!
 //! ## Developer Notes
-//! - **SIMD Status**: AVX2 and AVX512 kernels are stubs (call scalar implementation)
-//! - **Streaming Performance**: O(1) - maintains minimal ring buffers for EMA stages
-//! - **Memory Optimization**: ✓ Uses alloc_with_nan_prefix for output allocation
-//! - **Batch Support**: ✓ Full parallel batch parameter sweep implementation
-//! - **TODO**: Implement actual AVX2/AVX512 SIMD kernels for triple EMA calculations
+//! - SIMD: Disabled by default for single-series. Triple EMA is sequential and requires `ln`; no fast portable vector `ln` available. Stubs short-circuit to scalar.
+//! - Scalar: Optimized safe path using loop-jammed EMA1→EMA2→EMA3 with `mul_add`; no O(period) rings.
+//! - Batch: Row-specific optimization precomputes `ln(data)` once and shares across rows; parallel rows enabled.
+//! - Allocation: Uses `alloc_with_nan_prefix` / `make_uninit_matrix` patterns; warmup NaN prefix preserved.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -226,7 +225,7 @@ fn trix_prepare<'a>(
     Ok((data, period, first, chosen, alpha, warmup_end))
 }
 
-/// Single-pass, O(period) memory, writes directly into `out`.
+/// Single-series scalar TRIX: safe, minimized temporaries, warmup-prefilled output.
 #[inline(always)]
 fn trix_compute_into_scalar(
     data: &[f64],
@@ -236,8 +235,8 @@ fn trix_compute_into_scalar(
     out: &mut [f64],
 ) {
     let len = data.len();
-    let warmup_end = first + 3 * (period - 1) + 1;
-    // Ensure warmup NaNs
+    let warmup_end = first + 3 * (period - 1) + 1; // first valid output index
+    // Ensure warmup NaNs (idempotent if caller already prefills)
     for v in &mut out[..warmup_end.min(len)] {
         *v = f64::NAN;
     }
@@ -245,69 +244,97 @@ fn trix_compute_into_scalar(
         return;
     }
 
-    // Stage 1: first EMA over ln(price)
-    // Build first `period` EMA1 values to seed EMA2 SMA.
-    let mut s = 0.0;
-    for i in first..first + period {
-        let v = data[i];
-        let lv = if v.is_nan() { f64::NAN } else { v.ln() };
-        // If NaN occurs inside the seed window, this implies invalid data; keep behavior consistent.
-        s += lv;
-    }
-    let mut ema1 = s / period as f64; // at index idx1 = first + period - 1
+    let inv_n = 1.0 / period as f64;
+    const SCALE: f64 = 10000.0;
 
-    // Generate next period-1 EMA1 values to have period of EMA1 samples
-    let mut ema1_ring: Vec<f64> = Vec::with_capacity(period);
-    ema1_ring.push(ema1);
-    for i in (first + period)..(first + 2 * period - 1) {
+    // ---------------------------
+    // Stage 1 seed: EMA1 via SMA
+    // ---------------------------
+    let mut sum1 = 0.0;
+    let end1 = first + period;
+    let mut i = first;
+    while i < end1 {
+        sum1 += data[i].ln();
+        i += 1;
+    }
+    let mut ema1 = sum1 * inv_n; // EMA1 at idx = first + period - 1
+
+    // Build remaining EMA1 values (period-1 of them) and accumulate for EMA2 SMA
+    let mut sum_ema1 = ema1;
+    let end2 = first + 2 * period - 1;
+    i = end1;
+    while i < end2 {
         let lv = data[i].ln();
-        ema1 = alpha * lv + (1.0 - alpha) * ema1;
-        ema1_ring.push(ema1);
+        ema1 = (lv - ema1).mul_add(alpha, ema1);
+        sum_ema1 += ema1;
+        i += 1;
     }
 
-    // Stage 2: EMA2 seed via SMA of first `period` ema1 values
-    let mut ema2 = ema1_ring.iter().copied().sum::<f64>() / period as f64;
+    // ---------------------------
+    // Stage 2 seed: EMA2 via SMA of first `period` EMA1s
+    // ---------------------------
+    let mut ema2 = sum_ema1 * inv_n; // EMA2 at idx = first + 2*period - 2
 
-    // Build first `period` EMA2 values to seed EMA3 SMA
-    let mut ema2_ring: Vec<f64> = Vec::with_capacity(period);
-    ema2_ring.push(ema2);
-
-    // Continue producing EMA2 values from existing EMA1 ring, then continue with new data
-    for i in (first + 2 * period - 1)..(first + 3 * period - 2) {
+    // Build remaining EMA2 values (period-1 of them) and accumulate for EMA3 SMA
+    let mut sum_ema2 = ema2;
+    let end3 = first + 3 * period - 2;
+    i = end2;
+    while i < end3 {
         let lv = data[i].ln();
-        ema1 = alpha * lv + (1.0 - alpha) * ema1;
-        ema2 = alpha * ema1 + (1.0 - alpha) * ema2;
-        ema2_ring.push(ema2);
+        ema1 = (lv - ema1).mul_add(alpha, ema1);
+        ema2 = (ema1 - ema2).mul_add(alpha, ema2);
+        sum_ema2 += ema2;
+        i += 1;
     }
 
-    // Stage 3: EMA3 seed via SMA of first `period` ema2 values
-    let mut ema3_prev = ema2_ring.iter().copied().sum::<f64>() / period as f64;
+    // ---------------------------
+    // Stage 3 seed: EMA3 via SMA of first `period` EMA2s
+    // ---------------------------
+    let mut ema3_prev = sum_ema2 * inv_n; // EMA3 at idx = first + 3*period - 3
 
-    // Continue stream updating ema1→ema2→ema3, write TRIX
-    // First TRIX sample
-    let mut src = first + 3 * period - 2; // consume the bar that yields EMA3 at warmup_end
-    let lv = data[src].ln();
-    ema1 = alpha * lv + (1.0 - alpha) * ema1;
-    ema2 = alpha * ema1 + (1.0 - alpha) * ema2;
-    let ema3 = alpha * ema2 + (1.0 - alpha) * ema3_prev;
-
-    let out_idx = first + 3 * period - 2; // same as warmup_end
-    out[out_idx] = (ema3 - ema3_prev) * 10000.0;
+    // -----------------------------------------------
+    // Emit first TRIX sample at `warmup_end` (== end3)
+    // -----------------------------------------------
+    let mut src = warmup_end; // == first + 3*period - 2
+    let mut lv = data[src].ln();
+    ema1 = (lv - ema1).mul_add(alpha, ema1);
+    ema2 = (ema1 - ema2).mul_add(alpha, ema2);
+    let mut ema3 = (ema2 - ema3_prev).mul_add(alpha, ema3_prev);
+    out[src] = (ema3 - ema3_prev) * SCALE;
     ema3_prev = ema3;
+    src += 1;
 
-    src = first + 3 * period - 1; // advance
-    let mut out_idx = first + 3 * period - 1;
-
-    while src < len && out_idx < len {
-        let lv = data[src].ln();
-        ema1 = alpha * lv + (1.0 - alpha) * ema1;
-        ema2 = alpha * ema1 + (1.0 - alpha) * ema2;
-        let ema3 = alpha * ema2 + (1.0 - alpha) * ema3_prev;
-        out[out_idx] = (ema3 - ema3_prev) * 10000.0;
+    // ------------------------------------------------
+    // Main loop: fully loop-jammed EMA1→EMA2→EMA3→TRIX
+    // ------------------------------------------------
+    // Unroll by 2 for better ILP; handle tail below.
+    while src + 1 < len {
+        // step 1
+        lv = data[src].ln();
+        ema1 = (lv - ema1).mul_add(alpha, ema1);
+        ema2 = (ema1 - ema2).mul_add(alpha, ema2);
+        ema3 = (ema2 - ema3_prev).mul_add(alpha, ema3_prev);
+        out[src] = (ema3 - ema3_prev) * SCALE;
         ema3_prev = ema3;
-
         src += 1;
-        out_idx += 1;
+
+        // step 2
+        lv = data[src].ln();
+        ema1 = (lv - ema1).mul_add(alpha, ema1);
+        ema2 = (ema1 - ema2).mul_add(alpha, ema2);
+        ema3 = (ema2 - ema3_prev).mul_add(alpha, ema3_prev);
+        out[src] = (ema3 - ema3_prev) * SCALE;
+        ema3_prev = ema3;
+        src += 1;
+    }
+
+    // Tail
+    if src < len {
+        lv = data[src].ln();
+        ema1 = (lv - ema1).mul_add(alpha, ema1);
+        ema2 = (ema1 - ema2).mul_add(alpha, ema2);
+        ema3 = (ema2 - ema3_prev).mul_add(alpha, ema3_prev);
+        out[src] = (ema3 - ema3_prev) * SCALE;
     }
 }
 
@@ -614,10 +641,19 @@ fn trix_batch_inner(
     let values: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
+    // Shared log precompute across rows to avoid redundant ln() work
+    let mut logs: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, cols);
+    unsafe { logs.set_len(cols) };
+    for i in 0..first {
+        logs[i] = 0.0; // unused
+    }
+    for i in first..cols {
+        logs[i] = data[i].ln();
+    }
+
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
-        // All kernels use the same scalar implementation for now
-        trix_row_scalar(data, first, period, out_row)
+        trix_row_scalar_with_logs(&logs, first, period, out_row)
     };
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
@@ -660,6 +696,9 @@ fn trix_batch_inner(
 unsafe fn trix_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
     let len = data.len();
     let alpha = 2.0 / (period as f64 + 1.0);
+    let inv_n = 1.0 / period as f64;
+    const SCALE: f64 = 10000.0;
+
     let warmup_end = first + 3 * (period - 1) + 1;
     for v in &mut out[..warmup_end.min(len)] {
         *v = f64::NAN;
@@ -668,60 +707,186 @@ unsafe fn trix_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [
         return;
     }
 
-    // Seed EMA1
-    let mut s = 0.0;
-    for i in first..first + period {
-        s += data[i].ln();
+    let p = data.as_ptr();
+
+    // ---------------------------
+    // Stage 1 seed: EMA1 via SMA
+    // ---------------------------
+    let mut sum1 = 0.0;
+    let end1 = first + period;
+    let mut i = first;
+    while i < end1 {
+        sum1 += (*p.add(i)).ln();
+        i += 1;
     }
-    let mut ema1 = s / period as f64;
+    let mut ema1 = sum1 * inv_n;
 
-    // Produce first period EMA1s
-    let mut ema1_ring: Vec<f64> = Vec::with_capacity(period);
-    ema1_ring.push(ema1);
-    for i in (first + period)..(first + 2 * period - 1) {
-        let lv = data[i].ln();
-        ema1 = alpha * lv + (1.0 - alpha) * ema1;
-        ema1_ring.push(ema1);
-    }
-
-    // Seed EMA2 from EMA1
-    let mut ema2 = ema1_ring.iter().copied().sum::<f64>() / period as f64;
-    let mut ema2_ring: Vec<f64> = Vec::with_capacity(period);
-    ema2_ring.push(ema2);
-
-    // Continue EMA1 and build EMA2 ring
-    for i in (first + 2 * period - 1)..(first + 3 * period - 2) {
-        let lv = data[i].ln();
-        ema1 = alpha * lv + (1.0 - alpha) * ema1;
-        ema2 = alpha * ema1 + (1.0 - alpha) * ema2;
-        ema2_ring.push(ema2);
+    // Build remaining EMA1 values (period-1) and accumulate for EMA2 SMA
+    let mut sum_ema1 = ema1;
+    let end2 = first + 2 * period - 1;
+    i = end1;
+    while i < end2 {
+        let lv = (*p.add(i)).ln();
+        ema1 = (lv - ema1).mul_add(alpha, ema1);
+        sum_ema1 += ema1;
+        i += 1;
     }
 
-    // Seed EMA3 from EMA2
-    let mut ema3_prev = ema2_ring.iter().copied().sum::<f64>() / period as f64;
+    // ---------------------------
+    // Stage 2 seed: EMA2 via SMA
+    // ---------------------------
+    let mut ema2 = sum_ema1 * inv_n;
 
-    // First TRIX sample
-    let mut src = first + 3 * period - 2; // consume the bar that yields EMA3 at warmup_end
-    let lv = data[src].ln();
-    ema1 = alpha * lv + (1.0 - alpha) * ema1;
-    ema2 = alpha * ema1 + (1.0 - alpha) * ema2;
-    let ema3 = alpha * ema2 + (1.0 - alpha) * ema3_prev;
+    // Build remaining EMA2 values (period-1) and accumulate for EMA3 SMA
+    let mut sum_ema2 = ema2;
+    let end3 = first + 3 * period - 2;
+    i = end2;
+    while i < end3 {
+        let lv = (*p.add(i)).ln();
+        ema1 = (lv - ema1).mul_add(alpha, ema1);
+        ema2 = (ema1 - ema2).mul_add(alpha, ema2);
+        sum_ema2 += ema2;
+        i += 1;
+    }
 
-    let out_idx = first + 3 * period - 2; // same as warmup_end
-    out[out_idx] = (ema3 - ema3_prev) * 10000.0;
+    // ---------------------------
+    // Stage 3 seed: EMA3 via SMA
+    // ---------------------------
+    let mut ema3_prev = sum_ema2 * inv_n;
+
+    // First TRIX sample at warmup_end
+    let mut src = warmup_end;
+    let mut lv = (*p.add(src)).ln();
+    ema1 = (lv - ema1).mul_add(alpha, ema1);
+    ema2 = (ema1 - ema2).mul_add(alpha, ema2);
+    let mut ema3 = (ema2 - ema3_prev).mul_add(alpha, ema3_prev);
+    *out.get_unchecked_mut(src) = (ema3 - ema3_prev) * SCALE;
     ema3_prev = ema3;
+    src += 1;
 
-    src = first + 3 * period - 1; // advance
-    let mut out_idx = first + 3 * period - 1;
-    while src < len && out_idx < len {
-        let lv = data[src].ln();
-        ema1 = alpha * lv + (1.0 - alpha) * ema1;
-        ema2 = alpha * ema1 + (1.0 - alpha) * ema2;
-        let ema3 = alpha * ema2 + (1.0 - alpha) * ema3_prev;
-        out[out_idx] = (ema3 - ema3_prev) * 10000.0;
+    // Main loop, unrolled by 2
+    while src + 1 < len {
+        // step 1
+        lv = (*p.add(src)).ln();
+        ema1 = (lv - ema1).mul_add(alpha, ema1);
+        ema2 = (ema1 - ema2).mul_add(alpha, ema2);
+        ema3 = (ema2 - ema3_prev).mul_add(alpha, ema3_prev);
+        *out.get_unchecked_mut(src) = (ema3 - ema3_prev) * SCALE;
         ema3_prev = ema3;
         src += 1;
-        out_idx += 1;
+
+        // step 2
+        lv = (*p.add(src)).ln();
+        ema1 = (lv - ema1).mul_add(alpha, ema1);
+        ema2 = (ema1 - ema2).mul_add(alpha, ema2);
+        ema3 = (ema2 - ema3_prev).mul_add(alpha, ema3_prev);
+        *out.get_unchecked_mut(src) = (ema3 - ema3_prev) * SCALE;
+        ema3_prev = ema3;
+        src += 1;
+    }
+
+    // Tail
+    if src < len {
+        lv = (*p.add(src)).ln();
+        ema1 = (lv - ema1).mul_add(alpha, ema1);
+        ema2 = (ema1 - ema2).mul_add(alpha, ema2);
+        ema3 = (ema2 - ema3_prev).mul_add(alpha, ema3_prev);
+        *out.get_unchecked_mut(src) = (ema3 - ema3_prev) * SCALE;
+    }
+}
+
+/// Row kernel with shared log precompute. `logs[i] = ln(data[i])`.
+#[inline(always)]
+unsafe fn trix_row_scalar_with_logs(logs: &[f64], first: usize, period: usize, out: &mut [f64]) {
+    let len = logs.len();
+    let alpha = 2.0 / (period as f64 + 1.0);
+    let inv_n = 1.0 / period as f64;
+    const SCALE: f64 = 10000.0;
+
+    let warmup_end = first + 3 * (period - 1) + 1;
+    for v in &mut out[..warmup_end.min(len)] {
+        *v = f64::NAN;
+    }
+    if warmup_end >= len {
+        return;
+    }
+
+    let p = logs.as_ptr();
+
+    // Seed EMA1 via SMA of logs
+    let mut sum1 = 0.0;
+    let end1 = first + period;
+    let mut i = first;
+    while i < end1 {
+        sum1 += *p.add(i);
+        i += 1;
+    }
+    let mut ema1 = sum1 * inv_n;
+
+    // Build remaining EMA1 values and accumulate for EMA2 seed
+    let mut sum_ema1 = ema1;
+    let end2 = first + 2 * period - 1;
+    i = end1;
+    while i < end2 {
+        let lv = *p.add(i);
+        ema1 = (lv - ema1).mul_add(alpha, ema1);
+        sum_ema1 += ema1;
+        i += 1;
+    }
+
+    // Seed EMA2 via SMA of EMA1
+    let mut ema2 = sum_ema1 * inv_n;
+
+    // Build remaining EMA2 values and accumulate for EMA3 seed
+    let mut sum_ema2 = ema2;
+    let end3 = first + 3 * period - 2;
+    i = end2;
+    while i < end3 {
+        let lv = *p.add(i);
+        ema1 = (lv - ema1).mul_add(alpha, ema1);
+        ema2 = (ema1 - ema2).mul_add(alpha, ema2);
+        sum_ema2 += ema2;
+        i += 1;
+    }
+
+    // Seed EMA3 via SMA of EMA2
+    let mut ema3_prev = sum_ema2 * inv_n;
+
+    // Emit TRIX and proceed
+    let mut src = warmup_end;
+    let mut lv = *p.add(src);
+    ema1 = (lv - ema1).mul_add(alpha, ema1);
+    ema2 = (ema1 - ema2).mul_add(alpha, ema2);
+    let mut ema3 = (ema2 - ema3_prev).mul_add(alpha, ema3_prev);
+    *out.get_unchecked_mut(src) = (ema3 - ema3_prev) * SCALE;
+    ema3_prev = ema3;
+    src += 1;
+
+    while src + 1 < len {
+        // step 1
+        lv = *p.add(src);
+        ema1 = (lv - ema1).mul_add(alpha, ema1);
+        ema2 = (ema1 - ema2).mul_add(alpha, ema2);
+        ema3 = (ema2 - ema3_prev).mul_add(alpha, ema3_prev);
+        *out.get_unchecked_mut(src) = (ema3 - ema3_prev) * SCALE;
+        ema3_prev = ema3;
+        src += 1;
+
+        // step 2
+        lv = *p.add(src);
+        ema1 = (lv - ema1).mul_add(alpha, ema1);
+        ema2 = (ema1 - ema2).mul_add(alpha, ema2);
+        ema3 = (ema2 - ema3_prev).mul_add(alpha, ema3_prev);
+        *out.get_unchecked_mut(src) = (ema3 - ema3_prev) * SCALE;
+        ema3_prev = ema3;
+        src += 1;
+    }
+    if src < len {
+        lv = *p.add(src);
+        ema1 = (lv - ema1).mul_add(alpha, ema1);
+        ema2 = (ema1 - ema2).mul_add(alpha, ema2);
+        ema3 = (ema2 - ema3_prev).mul_add(alpha, ema3_prev);
+        *out.get_unchecked_mut(src) = (ema3 - ema3_prev) * SCALE;
     }
 }
 
@@ -875,10 +1040,19 @@ fn trix_batch_inner_into(
     let rows = combos.len();
     let cols = data.len();
 
+    // Shared log precompute across rows
+    let mut logs: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, cols);
+    unsafe { logs.set_len(cols) };
+    for i in 0..first {
+        logs[i] = 0.0;
+    }
+    for i in first..cols {
+        logs[i] = data[i].ln();
+    }
+
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
-        // All kernels use the same scalar implementation for now
-        trix_row_scalar(data, first, period, out_row)
+        trix_row_scalar_with_logs(&logs, first, period, out_row)
     };
 
     if parallel {

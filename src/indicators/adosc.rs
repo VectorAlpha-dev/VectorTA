@@ -12,10 +12,10 @@
 //! - `Err(AdoscError)` otherwise.
 //!
 //! ## Developer Notes
-//! - **AVX2/AVX512 kernels**: Stubs (all call scalar implementation)
-//! - **Streaming update**: O(1) - uses EMA updates with constant computation
-//! - **Memory optimization**: Uses zero-copy helpers (alloc_with_nan_prefix)
-//! - **Optimization needed**: Implement actual SIMD kernels for batch processing
+//! - SIMD status: Loop-carried dependencies (prefix ADL and EMA recurrences) limit gains; AVX2/AVX512 remain stubs that defer to scalar.
+//! - Streaming update: O(1) per bar via EMA; math matches streaming path exactly.
+//! - Memory: Uses zero-copy helpers (alloc_with_nan_prefix).
+//! - Batch optimization: Shares ADL across rows to avoid recomputing MFV/ADL per parameter set.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
@@ -364,48 +364,56 @@ pub unsafe fn adosc_scalar(
     _first: usize,
     len: usize,
 ) -> Result<AdoscOutput, AdoscError> {
+    debug_assert!(len > 0);
+
     let alpha_short = 2.0 / (short as f64 + 1.0);
     let alpha_long = 2.0 / (long as f64 + 1.0);
+    let one_minus_alpha_short = 1.0 - alpha_short;
+    let one_minus_alpha_long = 1.0 - alpha_long;
 
-    // ADOSC starts computing from index 0, no warmup period
-    let mut adosc_values = alloc_with_nan_prefix(len, 0);
-    let mut sum_ad = 0.0;
-    let h = high[0];
-    let l = low[0];
-    let c = close[0];
-    let v = volume[0];
-    let hl = h - l;
-    let mfm = if hl != 0.0 {
-        ((c - l) - (h - c)) / hl
-    } else {
-        0.0
-    };
-    let mfv = mfm * v;
-    sum_ad += mfv;
+    // Allocate output (no warmup for ADOSC)
+    let mut out = alloc_with_nan_prefix(len, 0);
+
+    // Use raw pointers to avoid bounds checks in hot loop
+    let hp = high.as_ptr();
+    let lp = low.as_ptr();
+    let cp = close.as_ptr();
+    let vp = volume.as_ptr();
+    let op = out.as_mut_ptr();
+
+    // Bootstrap at i = 0
+    let h0 = *hp;
+    let l0 = *lp;
+    let c0 = *cp;
+    let v0 = *vp;
+    let hl0 = h0 - l0;
+    let mfm0 = if hl0 != 0.0 { ((c0 - l0) - (h0 - c0)) / hl0 } else { 0.0 };
+    let mfv0 = mfm0 * v0;
+    let mut sum_ad = mfv0;
     let mut short_ema = sum_ad;
     let mut long_ema = sum_ad;
-    adosc_values[0] = short_ema - long_ema;
+    *op = short_ema - long_ema; // exactly 0.0
 
-    for i in 1..len {
-        let h = high[i];
-        let l = low[i];
-        let c = close[i];
-        let v = volume[i];
+    // i = 1..len-1 hot loop
+    let mut i = 1usize;
+    while i < len {
+        let h = *hp.add(i);
+        let l = *lp.add(i);
+        let c = *cp.add(i);
+        let v = *vp.add(i);
+
         let hl = h - l;
-        let mfm = if hl != 0.0 {
-            ((c - l) - (h - c)) / hl
-        } else {
-            0.0
-        };
+        let mfm = if hl != 0.0 { ((c - l) - (h - c)) / hl } else { 0.0 };
         let mfv = mfm * v;
         sum_ad += mfv;
-        short_ema = alpha_short * sum_ad + (1.0 - alpha_short) * short_ema;
-        long_ema = alpha_long * sum_ad + (1.0 - alpha_long) * long_ema;
-        adosc_values[i] = short_ema - long_ema;
+        short_ema = alpha_short * sum_ad + one_minus_alpha_short * short_ema;
+        long_ema = alpha_long * sum_ad + one_minus_alpha_long * long_ema;
+        *op.add(i) = short_ema - long_ema;
+
+        i += 1;
     }
-    Ok(AdoscOutput {
-        values: adosc_values,
-    })
+
+    Ok(AdoscOutput { values: out })
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -667,32 +675,65 @@ fn adosc_batch_inner(
     let values: &mut [f64] = unsafe {
         std::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
+    // Precompute ADL once and share across rows
+    let mut adl = vec![0.0f64; len];
+    unsafe {
+        // Use the same algebra and order to preserve parity
+        let hp = high.as_ptr();
+        let lp = low.as_ptr();
+        let cp = close.as_ptr();
+        let vp = volume.as_ptr();
+        let ap = adl.as_mut_ptr();
+
+        let h0 = *hp;
+        let l0 = *lp;
+        let c0 = *cp;
+        let v0 = *vp;
+        let hl0 = h0 - l0;
+        let mfm0 = if hl0 != 0.0 { ((c0 - l0) - (h0 - c0)) / hl0 } else { 0.0 };
+        let mfv0 = mfm0 * v0;
+        *ap = mfv0; // sum_ad at i=0
+
+        let mut i = 1usize;
+        while i < len {
+            let h = *hp.add(i);
+            let l = *lp.add(i);
+            let c = *cp.add(i);
+            let v = *vp.add(i);
+            let prev = *ap.add(i - 1);
+            let hl = h - l;
+            let mfm = if hl != 0.0 { ((c - l) - (h - c)) / hl } else { 0.0 };
+            let mfv = mfm * v;
+            *ap.add(i) = prev + mfv;
+            i += 1;
+        }
+    }
+
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let prm = &combos[row];
         let short = prm.short_period.unwrap();
         let long = prm.long_period.unwrap();
-        match kern {
-            Kernel::Scalar => {
-                let out = adosc_row_scalar(high, low, close, volume, short, long, first, out_row);
-                if out.is_err() {
-                    out_row.fill(f64::NAN);
-                }
-            }
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => {
-                let out = adosc_row_avx2(high, low, close, volume, short, long, first, out_row);
-                if out.is_err() {
-                    out_row.fill(f64::NAN);
-                }
-            }
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => {
-                let out = adosc_row_avx512(high, low, close, volume, short, long, first, out_row);
-                if out.is_err() {
-                    out_row.fill(f64::NAN);
-                }
-            }
-            _ => unreachable!(),
+
+        // EMA over precomputed ADL (kernel choice does not matter here; SIMD stubs defer to scalar)
+        let alpha_short = 2.0 / (short as f64 + 1.0);
+        let alpha_long = 2.0 / (long as f64 + 1.0);
+        let one_minus_alpha_short = 1.0 - alpha_short;
+        let one_minus_alpha_long = 1.0 - alpha_long;
+
+        let ap = adl.as_ptr();
+        let op = out_row.as_mut_ptr();
+
+        let mut short_ema = *ap; // adl[0]
+        let mut long_ema = *ap;
+        *op = short_ema - long_ema; // 0.0
+
+        let mut i = 1usize;
+        while i < cols {
+            let s = *ap.add(i);
+            short_ema = alpha_short * s + one_minus_alpha_short * short_ema;
+            long_ema = alpha_long * s + one_minus_alpha_long * long_ema;
+            *op.add(i) = short_ema - long_ema;
+            i += 1;
         }
     };
     if parallel {
@@ -773,32 +814,62 @@ pub fn adosc_batch_inner_into(
         });
     }
 
+    // Precompute ADL once and share across rows
+    let mut adl = vec![0.0f64; len];
+    unsafe {
+        let hp = high.as_ptr();
+        let lp = low.as_ptr();
+        let cp = close.as_ptr();
+        let vp = volume.as_ptr();
+        let ap = adl.as_mut_ptr();
+
+        let h0 = *hp;
+        let l0 = *lp;
+        let c0 = *cp;
+        let v0 = *vp;
+        let hl0 = h0 - l0;
+        let mfm0 = if hl0 != 0.0 { ((c0 - l0) - (h0 - c0)) / hl0 } else { 0.0 };
+        let mfv0 = mfm0 * v0;
+        *ap = mfv0;
+
+        let mut i = 1usize;
+        while i < len {
+            let h = *hp.add(i);
+            let l = *lp.add(i);
+            let c = *cp.add(i);
+            let v = *vp.add(i);
+            let prev = *ap.add(i - 1);
+            let hl = h - l;
+            let mfm = if hl != 0.0 { ((c - l) - (h - c)) / hl } else { 0.0 };
+            let mfv = mfm * v;
+            *ap.add(i) = prev + mfv;
+            i += 1;
+        }
+    }
+
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let prm = &combos[row];
         let short = prm.short_period.unwrap();
         let long = prm.long_period.unwrap();
-        match kern {
-            Kernel::Scalar => {
-                let out = adosc_row_scalar(high, low, close, volume, short, long, first, out_row);
-                if out.is_err() {
-                    out_row.fill(f64::NAN);
-                }
-            }
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => {
-                let out = adosc_row_avx2(high, low, close, volume, short, long, first, out_row);
-                if out.is_err() {
-                    out_row.fill(f64::NAN);
-                }
-            }
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => {
-                let out = adosc_row_avx512(high, low, close, volume, short, long, first, out_row);
-                if out.is_err() {
-                    out_row.fill(f64::NAN);
-                }
-            }
-            _ => unreachable!(),
+
+        let alpha_short = 2.0 / (short as f64 + 1.0);
+        let alpha_long = 2.0 / (long as f64 + 1.0);
+        let one_minus_alpha_short = 1.0 - alpha_short;
+        let one_minus_alpha_long = 1.0 - alpha_long;
+
+        let ap = adl.as_ptr();
+        let op = out_row.as_mut_ptr();
+        let mut short_ema = *ap; // adl[0]
+        let mut long_ema = *ap;
+        *op = short_ema - long_ema;
+
+        let mut i = 1usize;
+        while i < cols {
+            let s = *ap.add(i);
+            short_ema = alpha_short * s + one_minus_alpha_short * short_ema;
+            long_ema = alpha_long * s + one_minus_alpha_long * long_ema;
+            *op.add(i) = short_ema - long_ema;
+            i += 1;
         }
     };
 
@@ -837,40 +908,49 @@ pub unsafe fn adosc_row_scalar(
     out: &mut [f64],
 ) -> Result<(), AdoscError> {
     let len = out.len();
+    debug_assert!(len > 0);
+
     let alpha_short = 2.0 / (short as f64 + 1.0);
     let alpha_long = 2.0 / (long as f64 + 1.0);
-    let mut sum_ad = 0.0;
-    let h = high[0];
-    let l = low[0];
-    let c = close[0];
-    let v = volume[0];
-    let hl = h - l;
-    let mfm = if hl != 0.0 {
-        ((c - l) - (h - c)) / hl
-    } else {
-        0.0
-    };
-    let mfv = mfm * v;
-    sum_ad += mfv;
+    let one_minus_alpha_short = 1.0 - alpha_short;
+    let one_minus_alpha_long = 1.0 - alpha_long;
+
+    let hp = high.as_ptr();
+    let lp = low.as_ptr();
+    let cp = close.as_ptr();
+    let vp = volume.as_ptr();
+    let op = out.as_mut_ptr();
+
+    // i = 0 bootstrap
+    let h0 = *hp;
+    let l0 = *lp;
+    let c0 = *cp;
+    let v0 = *vp;
+    let hl0 = h0 - l0;
+    let mfm0 = if hl0 != 0.0 { ((c0 - l0) - (h0 - c0)) / hl0 } else { 0.0 };
+    let mfv0 = mfm0 * v0;
+    let mut sum_ad = mfv0;
     let mut short_ema = sum_ad;
     let mut long_ema = sum_ad;
-    out[0] = short_ema - long_ema;
-    for i in 1..len {
-        let h = high[i];
-        let l = low[i];
-        let c = close[i];
-        let v = volume[i];
+    *op = short_ema - long_ema;
+
+    // i = 1..len-1
+    let mut i = 1usize;
+    while i < len {
+        let h = *hp.add(i);
+        let l = *lp.add(i);
+        let c = *cp.add(i);
+        let v = *vp.add(i);
+
         let hl = h - l;
-        let mfm = if hl != 0.0 {
-            ((c - l) - (h - c)) / hl
-        } else {
-            0.0
-        };
+        let mfm = if hl != 0.0 { ((c - l) - (h - c)) / hl } else { 0.0 };
         let mfv = mfm * v;
         sum_ad += mfv;
-        short_ema = alpha_short * sum_ad + (1.0 - alpha_short) * short_ema;
-        long_ema = alpha_long * sum_ad + (1.0 - alpha_long) * long_ema;
-        out[i] = short_ema - long_ema;
+        short_ema = alpha_short * sum_ad + one_minus_alpha_short * short_ema;
+        long_ema = alpha_long * sum_ad + one_minus_alpha_long * long_ema;
+        *op.add(i) = short_ema - long_ema;
+
+        i += 1;
     }
     Ok(())
 }
