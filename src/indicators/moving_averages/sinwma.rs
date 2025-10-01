@@ -20,16 +20,17 @@
 //! - **`Err(SinWmaError)`** otherwise.
 //!
 //! ## Developer Notes
-//! - **AVX2 kernel**: ❌ Stub - calls scalar implementation
-//! - **AVX512 kernel**: ❌ Stub - both short and long variants call scalar
-//! - **Streaming update**: ⚠️ O(n) - `dot_ring()` iterates through all period weights
-//! - **Memory optimization**: ✅ Uses `alloc_with_nan_prefix` for zero-copy output allocation
-//! - **Current status**: Functional with pre-computed weights but missing SIMD optimizations
-//! - **Optimization opportunities**:
-//!   - Implement AVX2 kernel for vectorized weighted sum operations
-//!   - Implement AVX512 short/long kernels for wider vector processing
-//!   - Streaming update could potentially maintain incremental weighted sum for O(1)
-//!   - Weighted sum calculations are ideal for SIMD parallelization
+//! - SIMD status: Enabled and selected via runtime detection (AVX512 → AVX2 → Scalar).
+//! - AVX2 single-series: 4-lane FMA kernel with horizontal reduction.
+//! - AVX512 single-series: Short (≤32) and long (>32) variants with masked tails and multi-accumulators.
+//! - Batch (row-specific): AVX2/AVX512 row kernels wired via the batch selector; compute directly into the output matrix.
+//! - Scalar path: Safe, cache-friendly 4-wide unrolled dot-product; used as reference implementation.
+//! - Streaming update: O(n) per update via `dot_ring()`; no O(1) recurrence for fixed arbitrary weights.
+//! - Allocation: Uses `alloc_with_nan_prefix`/matrix helpers for zero-copy outputs and warmup prefixes.
+//! - Benchmarks (100k, target-cpu=native):
+//!   - sinwma_scalar ≈ 165–170 µs; AVX2 ≈ 157–160 µs; AVX512 ≈ 56–57 µs.
+//!   - sinwma_batch_scalarbatch ≈ 2.6 ms; AVX2Batch ≈ 2.1 ms; AVX512Batch ≈ 2.0 ms.
+//! - Decision: Keep SIMD enabled (≥5% faster vs scalar) and retain scalar as the reference path.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -367,6 +368,13 @@ fn sinwma_compute_into(
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
+#[target_feature(enable = "avx512f")]
+unsafe fn hsum_pd_zmm(v: __m512d) -> f64 {
+    _mm512_reduce_add_pd(v)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
 pub fn sinwma_avx512(
     data: &[f64],
     weights: &[f64],
@@ -427,8 +435,37 @@ pub unsafe fn sinwma_avx2(
     first_valid: usize,
     out: &mut [f64],
 ) {
-    // AVX2 stub - forwards to scalar for now
-    sinwma_scalar(data, weights, period, first_valid, out)
+    debug_assert!(period >= 1);
+    debug_assert_eq!(data.len(), out.len());
+    debug_assert_eq!(weights.len(), period);
+
+    let p4 = period & !3usize;
+    for i in (first_valid + period - 1)..data.len() {
+        let start = i + 1 - period;
+        let mut acc = _mm256_setzero_pd();
+
+        let mut k = 0usize;
+        while k < p4 {
+            let w = _mm256_loadu_pd(weights.as_ptr().add(k));
+            let d = _mm256_loadu_pd(data.as_ptr().add(start + k));
+            acc = _mm256_fmadd_pd(d, w, acc);
+            k += 4;
+        }
+
+        let sum128 = _mm_add_pd(
+            _mm256_castpd256_pd128(acc),
+            _mm256_extractf128_pd(acc, 1),
+        );
+        let mut sum = _mm_cvtsd_f64(_mm_hadd_pd(sum128, sum128));
+
+        while k < period {
+            sum = (*data.get_unchecked(start + k))
+                .mul_add(*weights.get_unchecked(k), sum);
+            k += 1;
+        }
+
+        *out.get_unchecked_mut(i) = sum;
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -441,8 +478,44 @@ pub unsafe fn sinwma_avx512_short(
     first_valid: usize,
     out: &mut [f64],
 ) {
-    // AVX512 short stub - forwards to scalar for now
-    sinwma_scalar(data, weights, period, first_valid, out)
+    debug_assert!(period >= 1);
+    debug_assert_eq!(data.len(), out.len());
+    debug_assert_eq!(weights.len(), period);
+
+    const STEP: usize = 8;
+    let chunks = period / STEP;
+    let tail_len = period % STEP;
+    let tail_mask: __mmask8 = (1u8 << tail_len).wrapping_sub(1);
+
+    if chunks == 0 {
+        let wv = _mm512_maskz_loadu_pd(tail_mask, weights.as_ptr());
+        for i in (first_valid + period - 1)..data.len() {
+            let start = i + 1 - period;
+            let dv = _mm512_maskz_loadu_pd(tail_mask, data.as_ptr().add(start));
+            let sum = hsum_pd_zmm(_mm512_mul_pd(dv, wv));
+            *out.get_unchecked_mut(i) = sum;
+        }
+        return;
+    }
+
+    for i in (first_valid + period - 1)..data.len() {
+        let start = i + 1 - period;
+        let mut acc = _mm512_setzero_pd();
+
+        for blk in 0..chunks {
+            let w = _mm512_loadu_pd(weights.as_ptr().add(blk * STEP));
+            let d = _mm512_loadu_pd(data.as_ptr().add(start + blk * STEP));
+            acc = _mm512_fmadd_pd(d, w, acc);
+        }
+
+        if tail_len != 0 {
+            let wt = _mm512_maskz_loadu_pd(tail_mask, weights.as_ptr().add(chunks * STEP));
+            let dt = _mm512_maskz_loadu_pd(tail_mask, data.as_ptr().add(start + chunks * STEP));
+            acc = _mm512_fmadd_pd(dt, wt, acc);
+        }
+
+        *out.get_unchecked_mut(i) = hsum_pd_zmm(acc);
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -455,8 +528,103 @@ pub unsafe fn sinwma_avx512_long(
     first_valid: usize,
     out: &mut [f64],
 ) {
-    // AVX512 long stub - forwards to scalar for now
-    sinwma_scalar(data, weights, period, first_valid, out)
+    const STEP: usize = 8;
+    let n_chunks = period / STEP;
+    let tail_len = period % STEP;
+    let unroll8 = n_chunks & !3; // 4 accumulators (32 taps) unrolled by 4
+    let tail_mask: __mmask8 = (1u8 << tail_len).wrapping_sub(1);
+
+    debug_assert!(period >= 1);
+    debug_assert_eq!(data.len(), out.len());
+    debug_assert_eq!(weights.len(), period);
+
+    // Preload weight vectors
+    let mut wregs: Vec<__m512d> = Vec::with_capacity(n_chunks);
+    for blk in 0..n_chunks {
+        wregs.push(_mm512_loadu_pd(weights.as_ptr().add(blk * STEP)));
+    }
+    let w_tail = if tail_len != 0 {
+        Some(_mm512_maskz_loadu_pd(
+            tail_mask,
+            weights.as_ptr().add(n_chunks * STEP),
+        ))
+    } else {
+        None
+    };
+
+    let mut data_ptr = data.as_ptr().add(first_valid);
+    let stop_ptr = data.as_ptr().add(data.len());
+    let mut dst_ptr = out.as_mut_ptr().add(first_valid + period - 1);
+
+    if tail_len == 0 {
+        while data_ptr.add(period) <= stop_ptr {
+            let mut s0 = _mm512_setzero_pd();
+            let mut s1 = _mm512_setzero_pd();
+            let mut s2 = _mm512_setzero_pd();
+            let mut s3 = _mm512_setzero_pd();
+
+            for blk in (0..unroll8).step_by(4) {
+                let d0 = _mm512_loadu_pd(data_ptr.add((blk + 0) * STEP));
+                let d1 = _mm512_loadu_pd(data_ptr.add((blk + 1) * STEP));
+                let d2 = _mm512_loadu_pd(data_ptr.add((blk + 2) * STEP));
+                let d3 = _mm512_loadu_pd(data_ptr.add((blk + 3) * STEP));
+
+                s0 = _mm512_fmadd_pd(d0, *wregs.get_unchecked(blk + 0), s0);
+                s1 = _mm512_fmadd_pd(d1, *wregs.get_unchecked(blk + 1), s1);
+                s2 = _mm512_fmadd_pd(d2, *wregs.get_unchecked(blk + 2), s2);
+                s3 = _mm512_fmadd_pd(d3, *wregs.get_unchecked(blk + 3), s3);
+            }
+
+            for blk in unroll8..n_chunks {
+                let d = _mm512_loadu_pd(data_ptr.add(blk * STEP));
+                s0 = _mm512_fmadd_pd(d, *wregs.get_unchecked(blk), s0);
+            }
+
+            let sum01 = _mm512_add_pd(s0, s1);
+            let sum23 = _mm512_add_pd(s2, s3);
+            let tot = _mm512_add_pd(sum01, sum23);
+            *dst_ptr = hsum_pd_zmm(tot);
+
+            data_ptr = data_ptr.add(1);
+            dst_ptr = dst_ptr.add(1);
+        }
+    } else {
+        let wt = w_tail.unwrap();
+        while data_ptr.add(period) <= stop_ptr {
+            let mut s0 = _mm512_setzero_pd();
+            let mut s1 = _mm512_setzero_pd();
+            let mut s2 = _mm512_setzero_pd();
+            let mut s3 = _mm512_setzero_pd();
+
+            for blk in (0..unroll8).step_by(4) {
+                let d0 = _mm512_loadu_pd(data_ptr.add((blk + 0) * STEP));
+                let d1 = _mm512_loadu_pd(data_ptr.add((blk + 1) * STEP));
+                let d2 = _mm512_loadu_pd(data_ptr.add((blk + 2) * STEP));
+                let d3 = _mm512_loadu_pd(data_ptr.add((blk + 3) * STEP));
+
+                s0 = _mm512_fmadd_pd(d0, *wregs.get_unchecked(blk + 0), s0);
+                s1 = _mm512_fmadd_pd(d1, *wregs.get_unchecked(blk + 1), s1);
+                s2 = _mm512_fmadd_pd(d2, *wregs.get_unchecked(blk + 2), s2);
+                s3 = _mm512_fmadd_pd(d3, *wregs.get_unchecked(blk + 3), s3);
+            }
+
+            for blk in unroll8..n_chunks {
+                let d = _mm512_loadu_pd(data_ptr.add(blk * STEP));
+                s0 = _mm512_fmadd_pd(d, *wregs.get_unchecked(blk), s0);
+            }
+
+            let dt = _mm512_maskz_loadu_pd(tail_mask, data_ptr.add(n_chunks * STEP));
+            s0 = _mm512_fmadd_pd(dt, wt, s0);
+
+            let sum01 = _mm512_add_pd(s0, s1);
+            let sum23 = _mm512_add_pd(s2, s3);
+            let tot = _mm512_add_pd(sum01, sum23);
+            *dst_ptr = hsum_pd_zmm(tot);
+
+            data_ptr = data_ptr.add(1);
+            dst_ptr = dst_ptr.add(1);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -941,7 +1109,32 @@ pub unsafe fn sinwma_row_avx2(
     w_ptr: *const f64,
     out: &mut [f64],
 ) {
-    sinwma_row_scalar(data, first, period, w_ptr, out)
+    let p4 = period & !3usize;
+    for i in (first + period - 1)..data.len() {
+        let start = i + 1 - period;
+        let mut acc = _mm256_setzero_pd();
+
+        let mut k = 0usize;
+        while k < p4 {
+            let d = _mm256_loadu_pd(data.as_ptr().add(start + k));
+            let w = _mm256_loadu_pd(w_ptr.add(k));
+            acc = _mm256_fmadd_pd(d, w, acc);
+            k += 4;
+        }
+
+        let sum128 = _mm_add_pd(
+            _mm256_castpd256_pd128(acc),
+            _mm256_extractf128_pd(acc, 1),
+        );
+        let mut sum = _mm_cvtsd_f64(_mm_hadd_pd(sum128, sum128));
+
+        while k < period {
+            sum = (*data.get_unchecked(start + k)).mul_add(*w_ptr.add(k), sum);
+            k += 1;
+        }
+
+        *out.get_unchecked_mut(i) = sum;
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -971,7 +1164,37 @@ pub unsafe fn sinwma_row_avx512_short(
     w_ptr: *const f64,
     out: &mut [f64],
 ) {
-    sinwma_row_scalar(data, first, period, w_ptr, out)
+    const STEP: usize = 8;
+    let chunks = period / STEP;
+    let tail = period % STEP;
+    let mask: __mmask8 = (1u8 << tail).wrapping_sub(1);
+
+    if chunks == 0 {
+        let wv = _mm512_maskz_loadu_pd(mask, w_ptr);
+        for i in (first + period - 1)..data.len() {
+            let start = i + 1 - period;
+            let dv = _mm512_maskz_loadu_pd(mask, data.as_ptr().add(start));
+            let sum = hsum_pd_zmm(_mm512_mul_pd(dv, wv));
+            *out.get_unchecked_mut(i) = sum;
+        }
+        return;
+    }
+
+    for i in (first + period - 1)..data.len() {
+        let start = i + 1 - period;
+        let mut acc = _mm512_setzero_pd();
+        for blk in 0..chunks {
+            let d = _mm512_loadu_pd(data.as_ptr().add(start + blk * STEP));
+            let w = _mm512_loadu_pd(w_ptr.add(blk * STEP));
+            acc = _mm512_fmadd_pd(d, w, acc);
+        }
+        if tail != 0 {
+            let dt = _mm512_maskz_loadu_pd(mask, data.as_ptr().add(start + chunks * STEP));
+            let wt = _mm512_maskz_loadu_pd(mask, w_ptr.add(chunks * STEP));
+            acc = _mm512_fmadd_pd(dt, wt, acc);
+        }
+        *out.get_unchecked_mut(i) = hsum_pd_zmm(acc);
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -984,7 +1207,57 @@ pub unsafe fn sinwma_row_avx512_long(
     w_ptr: *const f64,
     out: &mut [f64],
 ) {
-    sinwma_row_scalar(data, first, period, w_ptr, out)
+    const STEP: usize = 8;
+    let n_chunks = period / STEP;
+    let tail_len = period % STEP;
+    let unroll4 = n_chunks & !3; // 4 accumulators
+    let mask: __mmask8 = (1u8 << tail_len).wrapping_sub(1);
+
+    // Preload weights
+    let mut wregs: Vec<__m512d> = Vec::with_capacity(n_chunks);
+    for blk in 0..n_chunks {
+        wregs.push(_mm512_loadu_pd(w_ptr.add(blk * STEP)));
+    }
+    let wt = if tail_len != 0 {
+        Some(_mm512_maskz_loadu_pd(mask, w_ptr.add(n_chunks * STEP)))
+    } else {
+        None
+    };
+
+    for i in (first + period - 1)..data.len() {
+        let start = i + 1 - period;
+        let mut s0 = _mm512_setzero_pd();
+        let mut s1 = _mm512_setzero_pd();
+        let mut s2 = _mm512_setzero_pd();
+        let mut s3 = _mm512_setzero_pd();
+
+        for blk in (0..unroll4).step_by(4) {
+            let d0 = _mm512_loadu_pd(data.as_ptr().add(start + (blk + 0) * STEP));
+            let d1 = _mm512_loadu_pd(data.as_ptr().add(start + (blk + 1) * STEP));
+            let d2 = _mm512_loadu_pd(data.as_ptr().add(start + (blk + 2) * STEP));
+            let d3 = _mm512_loadu_pd(data.as_ptr().add(start + (blk + 3) * STEP));
+
+            s0 = _mm512_fmadd_pd(d0, *wregs.get_unchecked(blk + 0), s0);
+            s1 = _mm512_fmadd_pd(d1, *wregs.get_unchecked(blk + 1), s1);
+            s2 = _mm512_fmadd_pd(d2, *wregs.get_unchecked(blk + 2), s2);
+            s3 = _mm512_fmadd_pd(d3, *wregs.get_unchecked(blk + 3), s3);
+        }
+
+        for blk in unroll4..n_chunks {
+            let d = _mm512_loadu_pd(data.as_ptr().add(start + blk * STEP));
+            s0 = _mm512_fmadd_pd(d, *wregs.get_unchecked(blk), s0);
+        }
+
+        if let Some(wt) = wt {
+            let dt = _mm512_maskz_loadu_pd(mask, data.as_ptr().add(start + n_chunks * STEP));
+            s0 = _mm512_fmadd_pd(dt, wt, s0);
+        }
+
+        let sum01 = _mm512_add_pd(s0, s1);
+        let sum23 = _mm512_add_pd(s2, s3);
+        let tot = _mm512_add_pd(sum01, sum23);
+        *out.get_unchecked_mut(i) = hsum_pd_zmm(tot);
+    }
 }
 
 #[cfg(test)]

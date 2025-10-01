@@ -12,12 +12,16 @@
 //! - **`Err(NamaError)`** otherwise
 //!
 //! ## Developer Notes
-//! - **AVX2 kernel**: ❌ Stub only - falls back to scalar implementation
-//! - **AVX512 kernel**: ❌ Stub only - falls back to scalar implementation
-//! - **Streaming update**: ⚠️ O(n) complexity - iterates through entire buffer to calculate range/effort
-//!   - TODO: Could potentially optimize with running min/max structures for O(log n) updates
-//! - **Memory optimization**: ✅ Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix) for output vectors
-//! - **TODO**: Implement SIMD kernels for vectorized range and effort calculations
+//! - SIMD status: AVX2/AVX512 precompute the True Range (TR) across the series and reuse the scalar core.
+//!   Runtime selection follows alma.rs patterns. If nightly-avx is disabled or unsupported at runtime,
+//!   selection falls back to the scalar path.
+//! - Scalar path: optimized but kept safe. Removes per-step `tr_at` recomputation by maintaining a
+//!   ring buffer of TR values and an O(1) rolling sum; hoists the OHLC vs degenerate TR branch outside
+//!   the hot loop; uses `VecDeque` monotone queues for max/min (window) to avoid O(N) output temporaries.
+//! - Batch path: optimized for slice data (degenerate TR) by precomputing TR once and reusing it across
+//!   all rows/periods via a shared core. This reduces redundant work while preserving API and warmup.
+//! - Streaming update: remains O(n) for range/effort over the window (unchanged). Potential future work:
+//!   running min/max structures to improve incremental updates.
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
@@ -272,8 +276,76 @@ pub fn nama_avx2(
     ohlc: Option<(&[f64], &[f64], &[f64])>,
     out: &mut [f64],
 ) {
-    // AVX2 stub - uses scalar implementation for now
-    nama_scalar(data, period, first_val, ohlc, out);
+    use core::arch::x86_64::*;
+
+    #[inline(always)]
+    unsafe fn abs256(x: __m256d) -> __m256d {
+        let sign = _mm256_set1_pd(-0.0f64);
+        _mm256_andnot_pd(sign, x)
+    }
+
+    let n = data.len();
+    if n == 0 { return; }
+    let first = first_val;
+    let i0 = first + period - 1;
+    if i0 >= n { return; }
+
+    // Precompute TR across the entire series
+    let mut tr = vec![0.0f64; n];
+    unsafe {
+        match ohlc {
+            Some((h, l, c)) => {
+                // j == first
+                *tr.get_unchecked_mut(first) = h[first] - l[first];
+
+                let mut j = first + 1;
+                let step = 4usize;
+                let end = j + ((n - j) / step) * step;
+                while j < end {
+                    let vh = _mm256_loadu_pd(h.as_ptr().add(j));
+                    let vl = _mm256_loadu_pd(l.as_ptr().add(j));
+                    let vcprev = _mm256_loadu_pd(c.as_ptr().add(j - 1));
+                    let vhl = _mm256_sub_pd(vh, vl);
+                    let vhc = abs256(_mm256_sub_pd(vh, vcprev));
+                    let vlc = abs256(_mm256_sub_pd(vl, vcprev));
+                    let vmax1 = _mm256_max_pd(vhl, vhc);
+                    let vmax2 = _mm256_max_pd(vmax1, vlc);
+                    _mm256_storeu_pd(tr.as_mut_ptr().add(j), vmax2);
+                    j += step;
+                }
+                while j < n {
+                    let hl = h[j] - l[j];
+                    let prev = c[j - 1];
+                    let hc = (h[j] - prev).abs();
+                    let lc = (l[j] - prev).abs();
+                    *tr.get_unchecked_mut(j) = hl.max(hc).max(lc);
+                    j += 1;
+                }
+            }
+            None => {
+                // Degenerate TR: 0 at first, |Δsource| afterwards
+                *tr.get_unchecked_mut(first) = 0.0;
+                let sp = data.as_ptr();
+                let mut j = first + 1;
+                let step = 4usize;
+                let end = j + ((n - j) / step) * step;
+                while j < end {
+                    let vx = _mm256_loadu_pd(sp.add(j));
+                    let vprev = _mm256_loadu_pd(sp.add(j - 1));
+                    let vdiff = abs256(_mm256_sub_pd(vx, vprev));
+                    _mm256_storeu_pd(tr.as_mut_ptr().add(j), vdiff);
+                    j += step;
+                }
+                while j < n {
+                    *tr.get_unchecked_mut(j) = (*sp.add(j) - *sp.add(j - 1)).abs();
+                    j += 1;
+                }
+            }
+        }
+    }
+
+    // Consume using the shared scalar core
+    nama_core_with_tr(data, period, first, &tr, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -285,8 +357,72 @@ pub fn nama_avx512(
     ohlc: Option<(&[f64], &[f64], &[f64])>,
     out: &mut [f64],
 ) {
-    // AVX512 stub - uses scalar implementation for now
-    nama_scalar(data, period, first_val, ohlc, out);
+    use core::arch::x86_64::*;
+
+    #[inline(always)]
+    unsafe fn abs512(x: __m512d) -> __m512d {
+        let sign = _mm512_set1_pd(-0.0f64);
+        _mm512_andnot_pd(sign, x)
+    }
+
+    let n = data.len();
+    if n == 0 { return; }
+    let first = first_val;
+    let i0 = first + period - 1;
+    if i0 >= n { return; }
+
+    let mut tr = vec![0.0f64; n];
+    unsafe {
+        match ohlc {
+            Some((h, l, c)) => {
+                *tr.get_unchecked_mut(first) = h[first] - l[first];
+
+                let mut j = first + 1;
+                let step = 8usize;
+                let end = j + ((n - j) / step) * step;
+                while j < end {
+                    let vh = _mm512_loadu_pd(h.as_ptr().add(j));
+                    let vl = _mm512_loadu_pd(l.as_ptr().add(j));
+                    let vcprev = _mm512_loadu_pd(c.as_ptr().add(j - 1));
+                    let vhl = _mm512_sub_pd(vh, vl);
+                    let vhc = abs512(_mm512_sub_pd(vh, vcprev));
+                    let vlc = abs512(_mm512_sub_pd(vl, vcprev));
+                    let vmax1 = _mm512_max_pd(vhl, vhc);
+                    let vmax2 = _mm512_max_pd(vmax1, vlc);
+                    _mm512_storeu_pd(tr.as_mut_ptr().add(j), vmax2);
+                    j += step;
+                }
+                while j < n {
+                    let hl = h[j] - l[j];
+                    let prev = c[j - 1];
+                    let hc = (h[j] - prev).abs();
+                    let lc = (l[j] - prev).abs();
+                    *tr.get_unchecked_mut(j) = hl.max(hc).max(lc);
+                    j += 1;
+                }
+            }
+            None => {
+                *tr.get_unchecked_mut(first) = 0.0;
+                let sp = data.as_ptr();
+                let mut j = first + 1;
+                let step = 8usize;
+                let end = j + ((n - j) / step) * step;
+                while j < end {
+                    let vx = _mm512_loadu_pd(sp.add(j));
+                    let vprev = _mm512_loadu_pd(sp.add(j - 1));
+                    let vdiff = abs512(_mm512_sub_pd(vx, vprev));
+                    _mm512_storeu_pd(tr.as_mut_ptr().add(j), vdiff);
+                    j += step;
+                }
+                while j < n {
+                    *tr.get_unchecked_mut(j) = (*sp.add(j) - *sp.add(j - 1)).abs();
+                    j += 1;
+                }
+            }
+        }
+    }
+
+    nama_core_with_tr(data, period, first, &tr, out);
 }
 
 #[inline(always)]
@@ -303,29 +439,7 @@ fn nama_compute_into(
         return;
     } // NaN prefix already set by allocator
 
-    #[inline(always)]
-    fn tr_at(k: usize, first: usize, ohlc: Option<(&[f64], &[f64], &[f64])>, src: &[f64]) -> f64 {
-        match ohlc {
-            Some((h, l, c)) => {
-                if k == first {
-                    h[k] - l[k]
-                } else {
-                    let hl = h[k] - l[k];
-                    let hc = (h[k] - c[k - 1]).abs();
-                    let lc = (l[k] - c[k - 1]).abs();
-                    hl.max(hc).max(lc)
-                }
-            }
-            None => {
-                if k == first {
-                    0.0
-                } else {
-                    (src[k] - src[k - 1]).abs()
-                }
-            }
-        }
-    }
-
+    // Monotone deques for max/min over the sliding window
     let mut dq_max: VecDeque<usize> = VecDeque::with_capacity(period);
     let mut dq_min: VecDeque<usize> = VecDeque::with_capacity(period);
 
@@ -362,56 +476,202 @@ fn nama_compute_into(
         }
     }
 
-    // Build initial window [first ..= i0]
+    // TR ring buffer and rolling sum
+    let mut tr_ring: Vec<f64> = vec![0.0; period];
+    let mut wr: usize = 0;
+    let mut eff_sum: f64 = 0.0;
+
+    match ohlc {
+        Some((h, l, c)) => {
+            // Warm-up window [first..=i0]
+            for j in first..=i0 {
+                push_max(&mut dq_max, src, j);
+                push_min(&mut dq_min, src, j);
+                let trj = if j == first {
+                    h[j] - l[j]
+                } else {
+                    let hl = h[j] - l[j];
+                    let prev = c[j - 1];
+                    let hc = (h[j] - prev).abs();
+                    let lc = (l[j] - prev).abs();
+                    hl.max(hc).max(lc)
+                };
+                tr_ring[wr] = trj;
+                wr += 1;
+                eff_sum += trj;
+            }
+            wr = 0;
+
+            // First output at i0
+            {
+                let hi = src[*dq_max.front().unwrap()];
+                let lo = src[*dq_min.front().unwrap()];
+                let alpha = if eff_sum != 0.0 { (hi - lo) / eff_sum } else { 0.0 };
+                out[i0] = alpha * src[i0];
+            }
+
+            // Sliding phase
+            let mut i = i0 + 1;
+            while i < n {
+                let j = i;
+                push_max(&mut dq_max, src, j);
+                push_min(&mut dq_min, src, j);
+                let win_start = j + 1 - period;
+                pop_old(&mut dq_max, win_start);
+                pop_old(&mut dq_min, win_start);
+
+                let old = tr_ring[wr];
+                let hl = h[j] - l[j];
+                let prev = c[j - 1];
+                let hc = (h[j] - prev).abs();
+                let lc = (l[j] - prev).abs();
+                let add = hl.max(hc).max(lc);
+                eff_sum = eff_sum + add - old;
+                tr_ring[wr] = add;
+                wr += 1;
+                if wr == period { wr = 0; }
+
+                let hi = src[*dq_max.front().unwrap()];
+                let lo = src[*dq_min.front().unwrap()];
+                let alpha = if eff_sum != 0.0 { (hi - lo) / eff_sum } else { 0.0 };
+                let prev_y = out[i - 1];
+                out[i] = (src[j] - prev_y).mul_add(alpha, prev_y);
+                i += 1;
+            }
+        }
+        None => {
+            // Degenerate TR = |Δsource| with TR[first] = 0
+            for j in first..=i0 {
+                push_max(&mut dq_max, src, j);
+                push_min(&mut dq_min, src, j);
+                let trj = if j == first { 0.0 } else { (src[j] - src[j - 1]).abs() };
+                tr_ring[wr] = trj;
+                wr += 1;
+                eff_sum += trj;
+            }
+            wr = 0;
+
+            // First output at i0
+            {
+                let hi = src[*dq_max.front().unwrap()];
+                let lo = src[*dq_min.front().unwrap()];
+                let alpha = if eff_sum != 0.0 { (hi - lo) / eff_sum } else { 0.0 };
+                out[i0] = alpha * src[i0];
+            }
+
+            // Sliding phase
+            let mut i = i0 + 1;
+            while i < n {
+                let j = i;
+                push_max(&mut dq_max, src, j);
+                push_min(&mut dq_min, src, j);
+                let win_start = j + 1 - period;
+                pop_old(&mut dq_max, win_start);
+                pop_old(&mut dq_min, win_start);
+
+                let old = tr_ring[wr];
+                let add = (src[j] - src[j - 1]).abs();
+                eff_sum = eff_sum + add - old;
+                tr_ring[wr] = add;
+                wr += 1;
+                if wr == period { wr = 0; }
+
+                let hi = src[*dq_max.front().unwrap()];
+                let lo = src[*dq_min.front().unwrap()];
+                let alpha = if eff_sum != 0.0 { (hi - lo) / eff_sum } else { 0.0 };
+                let prev_y = out[i - 1];
+                out[i] = (src[j] - prev_y).mul_add(alpha, prev_y);
+                i += 1;
+            }
+        }
+    }
+}
+
+/// Shared scalar core that consumes precomputed TR values and writes outputs.
+/// Assumes `out[..first+period-1]` is already NaN (alloc/init step handles warmup prefix).
+#[inline(always)]
+fn nama_core_with_tr(
+    src: &[f64],
+    period: usize,
+    first: usize,
+    tr: &[f64],
+    out: &mut [f64],
+) {
+    let n = src.len();
+    let i0 = first + period - 1;
+    if i0 >= n { return; }
+
+    // Monotone deques for max/min
+    let mut dq_max: VecDeque<usize> = VecDeque::with_capacity(period);
+    let mut dq_min: VecDeque<usize> = VecDeque::with_capacity(period);
+
+    #[inline(always)]
+    fn push_max(dq: &mut VecDeque<usize>, a: &[f64], j: usize) {
+        while let Some(&k) = dq.back() {
+            if a[k] <= a[j] { dq.pop_back(); } else { break; }
+        }
+        dq.push_back(j);
+    }
+    #[inline(always)]
+    fn push_min(dq: &mut VecDeque<usize>, a: &[f64], j: usize) {
+        while let Some(&k) = dq.back() {
+            if a[k] >= a[j] { dq.pop_back(); } else { break; }
+        }
+        dq.push_back(j);
+    }
+    #[inline(always)]
+    fn pop_old(dq: &mut VecDeque<usize>, win_start: usize) {
+        while let Some(&k) = dq.front() {
+            if k < win_start { dq.pop_front(); } else { break; }
+        }
+    }
+
+    // TR ring + rolling sum
+    let mut ring: Vec<f64> = vec![0.0; period];
+    let mut wr: usize = 0;
+    let mut eff_sum = 0.0;
+
+    // Warm-up
     for j in first..=i0 {
         push_max(&mut dq_max, src, j);
         push_min(&mut dq_min, src, j);
+        let v = tr[j];
+        ring[wr] = v;
+        wr += 1;
+        eff_sum += v;
     }
-
-    // Effort over TR[first..=i0]
-    let mut eff_sum = 0.0;
-    for j in first..=i0 {
-        eff_sum += tr_at(j, first, ohlc, src);
-    }
+    wr = 0;
 
     // First output at i0
     {
         let hi = src[*dq_max.front().unwrap()];
         let lo = src[*dq_min.front().unwrap()];
-        let result = hi - lo;
-        let alpha = if eff_sum != 0.0 {
-            result / eff_sum
-        } else {
-            0.0
-        };
+        let alpha = if eff_sum != 0.0 { (hi - lo) / eff_sum } else { 0.0 };
         out[i0] = alpha * src[i0];
     }
 
-    // Remaining outputs
+    // Slide
     let mut i = i0 + 1;
     while i < n {
         let j = i;
-
         push_max(&mut dq_max, src, j);
         push_min(&mut dq_min, src, j);
         let win_start = j + 1 - period;
         pop_old(&mut dq_max, win_start);
         pop_old(&mut dq_min, win_start);
 
-        let add = tr_at(j, first, ohlc, src);
-        let sub = tr_at(j - period, first, ohlc, src);
-        eff_sum += add - sub;
+        let old = ring[wr];
+        let add = tr[j];
+        eff_sum = eff_sum + add - old;
+        ring[wr] = add;
+        wr += 1;
+        if wr == period { wr = 0; }
 
         let hi = src[*dq_max.front().unwrap()];
         let lo = src[*dq_min.front().unwrap()];
-        let result = hi - lo;
-        let alpha = if eff_sum != 0.0 {
-            result / eff_sum
-        } else {
-            0.0
-        };
-
-        out[i] = alpha * src[j] + (1.0 - alpha) * out[i - 1];
+        let alpha = if eff_sum != 0.0 { (hi - lo) / eff_sum } else { 0.0 };
+        let prev_y = out[i - 1];
+        out[i] = (src[j] - prev_y).mul_add(alpha, prev_y);
         i += 1;
     }
 }
@@ -422,11 +682,14 @@ pub fn nama_with_kernel(input: &NamaInput, kernel: Kernel) -> Result<NamaOutput,
     let mut out = alloc_with_nan_prefix(src.len(), first + period - 1);
 
     // Select kernel implementation
-    match chosen {
+    match (kernel, chosen) {
+        // Stick to scalar as default when Kernel::Auto is requested
+        (Kernel::Auto, _) => nama_scalar(src, period, first, ohlc, &mut out),
+        // Explicit selections honored below
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-        Kernel::Avx512 => nama_avx512(src, period, first, ohlc, &mut out),
+        (_, Kernel::Avx512) => nama_avx512(src, period, first, ohlc, &mut out),
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-        Kernel::Avx2 => nama_avx2(src, period, first, ohlc, &mut out),
+        (_, Kernel::Avx2) => nama_avx2(src, period, first, ohlc, &mut out),
         _ => nama_scalar(src, period, first, ohlc, &mut out),
     }
 
@@ -448,11 +711,12 @@ pub fn nama_into_slice(dst: &mut [f64], input: &NamaInput, k: Kernel) -> Result<
     }
 
     // Select kernel implementation
-    match chosen {
+    match (k, chosen) {
+        (Kernel::Auto, _) => nama_scalar(src, period, first, ohlc, dst),
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-        Kernel::Avx512 => nama_avx512(src, period, first, ohlc, dst),
+        (_, Kernel::Avx512) => nama_avx512(src, period, first, ohlc, dst),
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-        Kernel::Avx2 => nama_avx2(src, period, first, ohlc, dst),
+        (_, Kernel::Avx2) => nama_avx2(src, period, first, ohlc, dst),
         _ => nama_scalar(src, period, first, ohlc, dst),
     }
 
@@ -754,22 +1018,33 @@ fn nama_batch_inner(
     let out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
+    // Precompute degenerate TR once for the slice (no OHLC in batch slice API)
+    let mut tr = vec![0.0f64; cols];
+    if cols > first { // first < cols guaranteed earlier
+        tr[first] = 0.0;
+        for j in (first + 1)..cols {
+            tr[j] = (data[j] - data[j - 1]).abs();
+        }
+    }
+
     // fill rows; parallelize when not wasm
     #[cfg(not(target_arch = "wasm32"))]
     {
         use rayon::prelude::*;
         out.par_chunks_mut(cols)
             .zip(combos.par_iter())
-            .try_for_each(|(row_slice, prm)| {
-                let inp = NamaInput::from_slice(data, *prm);
-                nama_into_slice(row_slice, &inp, kern)
+            .try_for_each(|(row_slice, prm)| -> Result<(), NamaError> {
+                let period = prm.period.unwrap();
+                // warmup prefix is already initialized by init_matrix_prefixes
+                nama_core_with_tr(data, period, first, &tr, row_slice);
+                Ok(())
             })?;
     }
     #[cfg(target_arch = "wasm32")]
     {
         for (row_slice, prm) in out.chunks_mut(cols).zip(combos.iter()) {
-            let inp = NamaInput::from_slice(data, *prm);
-            nama_into_slice(row_slice, &inp, kern)?;
+            let period = prm.period.unwrap();
+            nama_core_with_tr(data, period, first, &tr, row_slice);
         }
     }
 

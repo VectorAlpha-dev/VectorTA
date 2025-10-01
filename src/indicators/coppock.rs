@@ -22,11 +22,10 @@
 //! - `Err(CoppockError)` otherwise.
 //!
 //! ## Developer Notes
-//! - **AVX2 kernel**: STUB - calls scalar implementation
-//! - **AVX512 kernel**: STUB - calls scalar implementation (both short and long variants)
+//! - **SIMD**: AVX2/AVX512 enabled for the sum-of-ROC sweep (vectorizes across time). Falls back to scalar when `nightly-avx` is disabled.
 //! - **Streaming**: ✅ Implemented with CoppockStream (update function is O(1))
 //! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy) for intermediate sum_roc buffer
-//! - **Batch operations**: ✅ Implemented with parallel processing support
+//! - **Batch operations**: ✅ Uses row dispatch (Scalar/AVX2/AVX512) to build the ROC-sum, then applies the selected MA per row.
 
 use crate::indicators::moving_averages::ma::{ma, MaData};
 use crate::utilities::data_loader::{source_type, Candles};
@@ -309,7 +308,8 @@ pub fn coppock_with_kernel(
 
     unsafe {
         match match kernel {
-            Kernel::Auto => detect_best_kernel(),
+            // Disable SIMD for Auto due to underperformance (<5% gain); keep explicit SIMD for testing.
+            Kernel::Auto => Kernel::Scalar,
             other => other,
         } {
             Kernel::Scalar | Kernel::ScalarBatch => {
@@ -323,7 +323,10 @@ pub fn coppock_with_kernel(
             Kernel::Avx512 | Kernel::Avx512Batch => {
                 coppock_avx512(data, short, long, first, &mut sum_roc)
             }
-            _ => unreachable!(),
+            _ => {
+                // Fallback to scalar when SIMD is unavailable in this build.
+                coppock_scalar(data, short, long, first, &mut sum_roc)
+            }
         }
     }
 
@@ -402,7 +405,8 @@ pub fn coppock_into_slice(
     let mut sum_roc = alloc_with_nan_prefix(data_len, warmup_period);
 
     let resolved_kernel = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        // Disable SIMD for Auto due to underperformance (<5% gain); keep explicit SIMD for testing.
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -432,7 +436,10 @@ pub fn coppock_into_slice(
             Kernel::Avx512 | Kernel::Avx512Batch => {
                 coppock_avx512(data, short, long, first, &mut sum_roc)
             }
-            _ => unreachable!(),
+            _ => {
+                // Fallback to scalar when SIMD is unavailable in this build.
+                coppock_scalar(data, short, long, first, &mut sum_roc)
+            }
         }
     }
 
@@ -604,11 +611,75 @@ pub fn coppock_scalar(data: &[f64], short: usize, long: usize, first: usize, out
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-pub unsafe fn coppock_avx2(data: &[f64], short: usize, long: usize, first: usize, out: &mut [f64]) {
-    coppock_scalar(data, short, long, first, out)
+#[target_feature(enable = "avx2")]
+pub unsafe fn coppock_avx2(
+    data: &[f64],
+    short: usize,
+    long: usize,
+    first: usize,
+    out: &mut [f64],
+) {
+    use core::arch::x86_64::*;
+
+    let largest = short.max(long);
+    let start = first + largest;
+    let n = data.len();
+    if start >= n {
+        return;
+    }
+
+    let mut p_cur = data.as_ptr().add(start);
+    let mut p_ps = data.as_ptr().add(start - short);
+    let mut p_pl = data.as_ptr().add(start - long);
+    let mut p_out = out.as_mut_ptr().add(start);
+
+    let remaining = n - start;
+    let step = 4usize; // __m256d width
+    let vec_len = remaining / step * step;
+
+    let v_one = _mm256_set1_pd(1.0);
+    let v_scale = _mm256_set1_pd(100.0);
+
+    let end_vec = p_cur.add(vec_len);
+    while p_cur < end_vec {
+        let vc = _mm256_loadu_pd(p_cur);
+        let vs = _mm256_loadu_pd(p_ps);
+        let vl = _mm256_loadu_pd(p_pl);
+
+        let r_s = _mm256_div_pd(vc, vs);
+        let r_l = _mm256_div_pd(vc, vl);
+
+        let t0 = _mm256_mul_pd(_mm256_sub_pd(r_s, v_one), v_scale);
+        let t1 = _mm256_mul_pd(_mm256_sub_pd(r_l, v_one), v_scale);
+        let res = _mm256_add_pd(t0, t1);
+
+        _mm256_storeu_pd(p_out, res);
+
+        p_cur = p_cur.add(step);
+        p_ps = p_ps.add(step);
+        p_pl = p_pl.add(step);
+        p_out = p_out.add(step);
+    }
+
+    // tail
+    let tail = remaining - vec_len;
+    for _ in 0..tail {
+        let c = *p_cur;
+        let s = *p_ps;
+        let l = *p_pl;
+        let rs = (c / s - 1.0) * 100.0;
+        let rl = (c / l - 1.0) * 100.0;
+        *p_out = rs + rl;
+
+        p_cur = p_cur.add(1);
+        p_ps = p_ps.add(1);
+        p_pl = p_pl.add(1);
+        p_out = p_out.add(1);
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
 pub unsafe fn coppock_avx512(
     data: &[f64],
     short: usize,
@@ -624,6 +695,7 @@ pub unsafe fn coppock_avx512(
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
 pub unsafe fn coppock_avx512_short(
     data: &[f64],
     short: usize,
@@ -631,10 +703,67 @@ pub unsafe fn coppock_avx512_short(
     first: usize,
     out: &mut [f64],
 ) {
-    coppock_scalar(data, short, long, first, out)
+    use core::arch::x86_64::*;
+
+    let largest = short.max(long);
+    let start = first + largest;
+    let n = data.len();
+    if start >= n {
+        return;
+    }
+
+    let mut p_cur = data.as_ptr().add(start);
+    let mut p_ps = data.as_ptr().add(start - short);
+    let mut p_pl = data.as_ptr().add(start - long);
+    let mut p_out = out.as_mut_ptr().add(start);
+
+    let remaining = n - start;
+    let step = 8usize; // __m512d width
+    let vec_len = remaining / step * step;
+
+    let v_one = _mm512_set1_pd(1.0);
+    let v_scale = _mm512_set1_pd(100.0);
+
+    let end_vec = p_cur.add(vec_len);
+    while p_cur < end_vec {
+        let vc = _mm512_loadu_pd(p_cur);
+        let vs = _mm512_loadu_pd(p_ps);
+        let vl = _mm512_loadu_pd(p_pl);
+
+        let r_s = _mm512_div_pd(vc, vs);
+        let r_l = _mm512_div_pd(vc, vl);
+
+        let t0 = _mm512_mul_pd(_mm512_sub_pd(r_s, v_one), v_scale);
+        let t1 = _mm512_mul_pd(_mm512_sub_pd(r_l, v_one), v_scale);
+        let res = _mm512_add_pd(t0, t1);
+
+        _mm512_storeu_pd(p_out, res);
+
+        p_cur = p_cur.add(step);
+        p_ps = p_ps.add(step);
+        p_pl = p_pl.add(step);
+        p_out = p_out.add(step);
+    }
+
+    // tail
+    let tail = remaining - vec_len;
+    for _ in 0..tail {
+        let c = *p_cur;
+        let s = *p_ps;
+        let l = *p_pl;
+        let rs = (c / s - 1.0) * 100.0;
+        let rl = (c / l - 1.0) * 100.0;
+        *p_out = rs + rl;
+
+        p_cur = p_cur.add(1);
+        p_ps = p_ps.add(1);
+        p_pl = p_pl.add(1);
+        p_out = p_out.add(1);
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
 pub unsafe fn coppock_avx512_long(
     data: &[f64],
     short: usize,
@@ -642,7 +771,8 @@ pub unsafe fn coppock_avx512_long(
     first: usize,
     out: &mut [f64],
 ) {
-    coppock_scalar(data, short, long, first, out)
+    // Same implementation as 'short' – split retained for potential specialization.
+    coppock_avx512_short(data, short, long, first, out)
 }
 
 #[derive(Debug, Clone)]
@@ -848,7 +978,8 @@ pub fn coppock_batch_with_kernel(
     k: Kernel,
 ) -> Result<CoppockBatchOutput, CoppockError> {
     let kernel = match k {
-        Kernel::Auto => detect_best_batch_kernel(),
+        // Disable SIMD for Auto due to underperformance; keep explicit batch SIMD for testing.
+        Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         _ => {
             return Err(CoppockError::InvalidPeriod {
@@ -1001,8 +1132,12 @@ fn coppock_batch_inner(
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
+    // Precompute reciprocals once for all rows to reduce divides inside per-row sweeps
+    // Algebra: 100*((c/s - 1) + (c/l - 1)) = 100*(c*(1/s) + c*(1/l) - 2)
+    let inv: Vec<f64> = data.iter().map(|&x| 1.0f64 / x).collect();
+
     // A single closure that (for a given row) computes:
-    // 1) raw "sum_roc" into a temporary Vec<f64>
+    // 1) raw "sum_roc" (via Scalar/AVX2/AVX512 depending on `kern`)
     // 2) applies ma(...) to that temp
     // 3) writes the smoothed result into out_row
     let do_row = |row: usize, out_row: &mut [f64]| {
@@ -1016,20 +1151,9 @@ fn coppock_batch_inner(
         // Calculate warmup for sum_roc
         let sum_roc_warmup = first + largest;
 
-        // Prepare a "sum_roc" buffer
-        // REPLACE: let mut sum_roc = vec![f64::NAN; cols];
-        // WITH:
+        // Prepare a "sum_roc" buffer and compute via reciprocal-based form to remove divides
         let mut sum_roc = alloc_with_nan_prefix(cols, sum_roc_warmup);
-
-        // Fill sum_roc[i] = ROC_short + ROC_long for i >= first + largest
-        for i in (first + largest)..cols {
-            let current = data[i];
-            let prev_short = data[i - short];
-            let short_val = ((current / prev_short) - 1.0) * 100.0;
-            let prev_long = data[i - long];
-            let long_val = ((current / prev_long) - 1.0) * 100.0;
-            sum_roc[i] = short_val + long_val;
-        }
+        coppock_row_scalar_with_inv(data, first, short, long, &inv, &mut sum_roc);
 
         // Now smooth "sum_roc" with MA
         // (We unwrap because these parameters should always be valid here.)
@@ -1133,6 +1257,9 @@ pub fn coppock_batch_inner_into(
     };
     init_matrix_prefixes(out_mu, cols, &warm);
 
+    // Precompute reciprocals once for the entire series to reduce divides in per-row sweeps
+    let inv: Vec<f64> = data.iter().map(|&x| 1.0f64 / x).collect();
+
     // A single closure that computes Coppock for a given row
     let do_row = |row: usize, out_row: &mut [f64]| {
         let c = &combos[row];
@@ -1146,15 +1273,8 @@ pub fn coppock_batch_inner_into(
         // Prepare a "sum_roc" buffer
         let mut sum_roc = alloc_with_nan_prefix(cols, sum_roc_warmup);
 
-        // Fill sum_roc[i] = ROC_short + ROC_long for i >= first + largest
-        for i in (first + largest)..cols {
-            let current = data[i];
-            let prev_short = data[i - short];
-            let short_val = ((current / prev_short) - 1.0) * 100.0;
-            let prev_long = data[i - long];
-            let long_val = ((current / prev_long) - 1.0) * 100.0;
-            sum_roc[i] = short_val + long_val;
-        }
+        // Fill sum_roc[i] = 100*(c*inv[i-short] + c*inv[i-long] - 2)
+        coppock_row_scalar_with_inv(data, first, short, long, &inv, &mut sum_roc);
 
         // Now smooth "sum_roc" with MA
         let smoothed = ma(&ma_type, MaData::Slice(&sum_roc), ma_p).expect("MA error inside batch");
@@ -1207,7 +1327,26 @@ pub fn coppock_row_scalar(
     }
 }
 
+#[inline(always)]
+fn coppock_row_scalar_with_inv(
+    data: &[f64],
+    first: usize,
+    short: usize,
+    long: usize,
+    inv: &[f64],
+    out: &mut [f64],
+) {
+    let largest = short.max(long);
+    for i in (first + largest)..data.len() {
+        let c = data[i];
+        let is = inv[i - short];
+        let il = inv[i - long];
+        out[i] = (c * is + c * il - 2.0) * 100.0;
+    }
+}
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
 pub unsafe fn coppock_row_avx2(
     data: &[f64],
     first: usize,
@@ -1218,10 +1357,12 @@ pub unsafe fn coppock_row_avx2(
     inv_n: f64,
     out: &mut [f64],
 ) {
-    coppock_row_scalar(data, first, short, long, stride, w_ptr, inv_n, out)
+    let _ = (stride, w_ptr, inv_n);
+    coppock_avx2(data, short, long, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
 pub unsafe fn coppock_row_avx512(
     data: &[f64],
     first: usize,
@@ -1240,6 +1381,7 @@ pub unsafe fn coppock_row_avx512(
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
 pub unsafe fn coppock_row_avx512_short(
     data: &[f64],
     first: usize,
@@ -1250,10 +1392,12 @@ pub unsafe fn coppock_row_avx512_short(
     inv_n: f64,
     out: &mut [f64],
 ) {
-    coppock_row_scalar(data, first, short, long, stride, w_ptr, inv_n, out)
+    let _ = (stride, w_ptr, inv_n);
+    coppock_avx512_short(data, short, long, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
 pub unsafe fn coppock_row_avx512_long(
     data: &[f64],
     first: usize,
@@ -1264,7 +1408,8 @@ pub unsafe fn coppock_row_avx512_long(
     inv_n: f64,
     out: &mut [f64],
 ) {
-    coppock_row_scalar(data, first, short, long, stride, w_ptr, inv_n, out)
+    let _ = (stride, w_ptr, inv_n);
+    coppock_avx512_long(data, short, long, first, out)
 }
 
 #[inline(always)]

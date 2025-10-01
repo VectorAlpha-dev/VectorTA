@@ -130,7 +130,7 @@ use my_project::indicators::{
     efi::{efi as efi_raw, EfiInput},
     emd::{emd as emd_raw, EmdInput},
     emv::{emv as emv_raw, EmvInput},
-    er::{er as er_raw, ErInput},
+    er::{er as er_raw, er_with_kernel, ErBatchBuilder, ErInput},
     eri::{eri as eri_raw, EriInput},
     fisher::{fisher as fisher_raw, FisherInput},
     fosc::{fosc as fosc_raw, FoscInput},
@@ -227,6 +227,8 @@ use my_project::indicators::{
     wto::{wto_with_kernel, WtoBatchBuilder, WtoInput},
     zscore::{zscore as zscore_raw, zscore_with_kernel, ZscoreBatchBuilder, ZscoreInput},
 };
+// DVDIQQE indicator (single-series)
+use my_project::indicators::dvdiqqe::{dvdiqqe_with_kernel, DvdiqqeInput};
 
 // Bring stc_with_kernel for kernel-specific benches
 use my_project::indicators::stc::stc_with_kernel;
@@ -422,6 +424,8 @@ pub type WildersInputS = WildersInput<'static>;
 pub type WillrInputS = WillrInput<'static>;
 pub type WmaInputS = WmaInput<'static>;
 pub type ZlemaInputS = ZlemaInput<'static>;
+// DVDIQQE single-series input type
+pub type DvdiqqeInputS = DvdiqqeInput<'static>;
 
 // Other indicators InputS types
 pub type AvslInputS = AvslInput<'static>;
@@ -1087,12 +1091,31 @@ bench_scalars!(
 );
 
 make_kernel_wrappers!(alma, alma_with_kernel, AlmaInputS; Scalar,Avx2,Avx512);
+// ADOSC single-series variants (Scalar, AVX2, AVX512)
+make_kernel_wrappers!(
+    adosc,
+    my_project::indicators::adosc::adosc_with_kernel,
+    AdoscInputS;
+    Scalar,Avx2,Avx512
+);
+// AO single-series kernel wrappers (Scalar/AVX2/AVX512)
+make_kernel_wrappers!(
+    ao,
+    my_project::indicators::ao::ao_with_kernel,
+    AoInputS;
+    Scalar,Avx2,Avx512
+);
+// ATR single-series kernel variants (Scalar, AVX2, AVX512)
+make_kernel_wrappers!(atr, my_project::indicators::atr::atr_with_kernel, AtrInputS; Scalar,Avx2,Avx512);
+// DVDIQQE single-series kernel variants (Scalar, AVX2, AVX512)
+make_kernel_wrappers!(dvdiqqe, dvdiqqe_with_kernel, DvdiqqeInputS; Scalar,Avx2,Avx512);
 // MACD single-series kernel variants (Scalar, AVX2, AVX512)
 make_kernel_wrappers!(macd, my_project::indicators::macd::macd_with_kernel, MacdInputS; Scalar,Avx2,Avx512);
 // MSW single-series kernel variants (Scalar, AVX2, AVX512)
 make_kernel_wrappers!(msw, my_project::indicators::msw::msw_with_kernel, MswInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(buff_averages, buff_averages_with_kernel, BuffAveragesInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(zscore, zscore_with_kernel, ZscoreInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(er, er_with_kernel, ErInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(macz, macz_with_kernel, MaczInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(cwma, cwma_with_kernel, CwmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(dema, dema_with_kernel, DemaInputS; Scalar,Avx2,Avx512);
@@ -1168,6 +1191,14 @@ make_kernel_wrappers!(rocp, my_project::indicators::rocp::rocp_with_kernel, Rocp
 // STC (single-series) kernel wrappers for Scalar/AVX2/AVX512
 make_kernel_wrappers!(stc, stc_with_kernel, StcInputS; Scalar,Avx2,Avx512);
 
+// Damiani Volatmeter single-series variants (Scalar/AVX2/AVX512)
+make_kernel_wrappers!(
+    damiani_volatmeter,
+    my_project::indicators::damiani_volatmeter::damiani_volatmeter_with_kernel,
+    DamianiVolatmeterInputS;
+    Scalar,Avx2,Avx512
+);
+
 // Other indicators kernel wrappers
 make_kernel_wrappers!(avsl, avsl_with_kernel, AvslInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(dma, dma_with_kernel, DmaInputS; Scalar,Avx2,Avx512);
@@ -1200,8 +1231,92 @@ make_kernel_wrappers!(
     Scalar,Avx2,Avx512
 );
 
+// Coppock single-series variants (Scalar, AVX2, AVX512)
+make_kernel_wrappers!(
+    coppock,
+    my_project::indicators::coppock::coppock_with_kernel,
+    CoppockInputS;
+    Scalar,Avx2,Avx512
+);
+
+// BOP single-series variants (Scalar, AVX2, AVX512)
+make_kernel_wrappers!(
+    bop,
+    my_project::indicators::bop::bop_with_kernel,
+    BopInputS;
+    Scalar,Avx2,Avx512
+);
+
 make_batch_wrappers!(
     alma_batch, AlmaBatchBuilder, AlmaInputS;
+    ScalarBatch, Avx2Batch, Avx512Batch
+);
+
+// ADOSC batch wrappers (ScalarBatch/Avx2Batch/Avx512Batch)
+// ADOSC batch wrappers require OHLCV slices
+#[inline(always)]
+fn adosc_batch_scalarbatch(input: &AdoscInputS) -> anyhow::Result<()> {
+    use my_project::indicators::adosc::AdoscBatchBuilder;
+    let (h, l, c, v) = match &input.data {
+        my_project::indicators::adosc::AdoscData::Candles { candles } => (
+            candles.high.as_slice(),
+            candles.low.as_slice(),
+            candles.close.as_slice(),
+            candles.volume.as_slice(),
+        ),
+        my_project::indicators::adosc::AdoscData::Slices { high, low, close, volume } =>
+            (*high, *low, *close, *volume),
+    };
+    AdoscBatchBuilder::new()
+        .kernel(Kernel::ScalarBatch)
+        .apply_slices(h, l, c, v)
+        .map(|_| ())
+        .map_err(|e| anyhow!(e.to_string()))
+}
+#[inline(always)]
+fn adosc_batch_avx2batch(input: &AdoscInputS) -> anyhow::Result<()> {
+    use my_project::indicators::adosc::AdoscBatchBuilder;
+    let (h, l, c, v) = match &input.data {
+        my_project::indicators::adosc::AdoscData::Candles { candles } => (
+            candles.high.as_slice(),
+            candles.low.as_slice(),
+            candles.close.as_slice(),
+            candles.volume.as_slice(),
+        ),
+        my_project::indicators::adosc::AdoscData::Slices { high, low, close, volume } =>
+            (*high, *low, *close, *volume),
+    };
+    AdoscBatchBuilder::new()
+        .kernel(Kernel::Avx2Batch)
+        .apply_slices(h, l, c, v)
+        .map(|_| ())
+        .map_err(|e| anyhow!(e.to_string()))
+}
+#[inline(always)]
+fn adosc_batch_avx512batch(input: &AdoscInputS) -> anyhow::Result<()> {
+    use my_project::indicators::adosc::AdoscBatchBuilder;
+    let (h, l, c, v) = match &input.data {
+        my_project::indicators::adosc::AdoscData::Candles { candles } => (
+            candles.high.as_slice(),
+            candles.low.as_slice(),
+            candles.close.as_slice(),
+            candles.volume.as_slice(),
+        ),
+        my_project::indicators::adosc::AdoscData::Slices { high, low, close, volume } =>
+            (*high, *low, *close, *volume),
+    };
+    AdoscBatchBuilder::new()
+        .kernel(Kernel::Avx512Batch)
+        .apply_slices(h, l, c, v)
+        .map(|_| ())
+        .map_err(|e| anyhow!(e.to_string()))
+}
+
+// AO batch wrappers (ScalarBatch/Avx2Batch/Avx512Batch)
+make_batch_wrappers!(
+    ao_batch,
+    my_project::indicators::ao::AoBatchBuilder,
+    AoInputS;
     ScalarBatch, Avx2Batch, Avx512Batch
 );
 
@@ -1265,6 +1380,106 @@ make_batch_wrappers!(
     ScalarBatch, Avx2Batch, Avx512Batch
 );
 
+// Coppock batch variants (ScalarBatch, AVX2Batch, AVX512Batch)
+make_batch_wrappers!(
+    coppock_batch, my_project::indicators::coppock::CoppockBatchBuilder, CoppockInputS;
+    ScalarBatch, Avx2Batch, Avx512Batch
+);
+bench_variants!(
+    coppock_batch => CoppockInputS; None;
+    coppock_batch_scalarbatch,
+    coppock_batch_avx2batch,
+    coppock_batch_avx512batch
+);
+
+// ADOSC single-series benches (scalar vs AVX2 vs AVX512)
+bench_variants!(
+    adosc => AdoscInputS; None;
+    adosc_scalar,
+    adosc_avx2,
+    adosc_avx512
+);
+
+// ADOSC batch benches (ScalarBatch vs AVX2Batch vs AVX512Batch)
+bench_variants!(
+    adosc_batch => AdoscInputS; None;
+    adosc_batch_scalarbatch,
+    adosc_batch_avx2batch,
+    adosc_batch_avx512batch
+);
+
+// BOP single-series kernel variants
+bench_variants!(
+    bop => BopInputS; None;
+    bop_scalar,
+    bop_avx2,
+    bop_avx512
+);
+
+// ATR single-series benches (scalar vs AVX2 vs AVX512)
+bench_variants!(
+    atr => AtrInputS; None;
+    atr_scalar,
+    atr_avx2,
+    atr_avx512
+);
+
+// ATR batch wrappers (OHLC slices)
+#[inline(always)]
+fn atr_batch_scalarbatch(input: &AtrInputS) -> anyhow::Result<()> {
+    let (high, low, close) = match &input.data {
+        my_project::indicators::atr::AtrData::Candles { candles } => (
+            candles.high.as_slice(),
+            candles.low.as_slice(),
+            candles.close.as_slice(),
+        ),
+        my_project::indicators::atr::AtrData::Slices { high, low, close } => (*high, *low, *close),
+    };
+    my_project::indicators::atr::AtrBatchBuilder::new()
+        .kernel(Kernel::ScalarBatch)
+        .apply_slices(high, low, close)
+        .map(|_| ())
+        .map_err(|e| anyhow!(e.to_string()))
+}
+#[inline(always)]
+fn atr_batch_avx2batch(input: &AtrInputS) -> anyhow::Result<()> {
+    let (high, low, close) = match &input.data {
+        my_project::indicators::atr::AtrData::Candles { candles } => (
+            candles.high.as_slice(),
+            candles.low.as_slice(),
+            candles.close.as_slice(),
+        ),
+        my_project::indicators::atr::AtrData::Slices { high, low, close } => (*high, *low, *close),
+    };
+    my_project::indicators::atr::AtrBatchBuilder::new()
+        .kernel(Kernel::Avx2Batch)
+        .apply_slices(high, low, close)
+        .map(|_| ())
+        .map_err(|e| anyhow!(e.to_string()))
+}
+#[inline(always)]
+fn atr_batch_avx512batch(input: &AtrInputS) -> anyhow::Result<()> {
+    let (high, low, close) = match &input.data {
+        my_project::indicators::atr::AtrData::Candles { candles } => (
+            candles.high.as_slice(),
+            candles.low.as_slice(),
+            candles.close.as_slice(),
+        ),
+        my_project::indicators::atr::AtrData::Slices { high, low, close } => (*high, *low, *close),
+    };
+    my_project::indicators::atr::AtrBatchBuilder::new()
+        .kernel(Kernel::Avx512Batch)
+        .apply_slices(high, low, close)
+        .map(|_| ())
+        .map_err(|e| anyhow!(e.to_string()))
+}
+bench_variants!(
+    atr_batch => AtrInputS; None;
+    atr_batch_scalarbatch,
+    atr_batch_avx2batch,
+    atr_batch_avx512batch
+);
+
 make_batch_wrappers!(
     dema_batch, DemaBatchBuilder, DemaInputS;
     ScalarBatch, Avx2Batch, Avx512Batch
@@ -1306,6 +1521,12 @@ make_batch_wrappers!(
     ScalarBatch, Avx2Batch, Avx512Batch
 );
 
+// ER batch variants
+make_batch_wrappers!(
+    er_batch, ErBatchBuilder, ErInputS;
+    ScalarBatch, Avx2Batch, Avx512Batch
+);
+
 make_batch_wrappers!(
     epma_batch, EpmaBatchBuilder, EpmaInputS;
     ScalarBatch, Avx2Batch, Avx512Batch
@@ -1341,6 +1562,18 @@ fn pivot_batch_scalarbatch(input: &PivotInputS) -> anyhow::Result<()> {
     PivotBatchBuilder::new().kernel(Kernel::ScalarBatch).apply_slice(h, l, c, o)?;
     Ok(())
 }
+
+// InputLen for DVDIQQE (single-series)
+impl InputLen for DvdiqqeInputS {
+    fn with_len(len: usize) -> Self {
+        match len {
+            10_000 => DvdiqqeInput::with_default_candles(&*CANDLES_10K),
+            100_000 => DvdiqqeInput::with_default_candles(&*CANDLES_100K),
+            1_000_000 => DvdiqqeInput::with_default_candles(&*CANDLES_1M),
+            _ => panic!("unsupported len {len}"),
+        }
+    }
+}
 #[inline(always)]
 fn pivot_batch_avx2batch(input: &PivotInputS) -> anyhow::Result<()> {
     let (h, l, c, o) = match input.as_ref() {
@@ -1375,6 +1608,14 @@ bench_variants!(
     pivot_batch_scalarbatch,
     pivot_batch_avx2batch,
     pivot_batch_avx512batch,
+);
+
+// Coppock single-series benches (scalar vs AVX2 vs AVX512)
+bench_variants!(
+    coppock => CoppockInputS; None;
+    coppock_scalar,
+    coppock_avx2,
+    coppock_avx512
 );
 
 make_batch_wrappers!(highpass_2_pole_batch, HighPass2BatchBuilder, HighPass2InputS; ScalarBatch, Avx2Batch, Avx512Batch);
@@ -1711,6 +1952,13 @@ make_batch_wrappers!(cci_cycle_batch, CciCycleBatchBuilder, CciCycleInputS; Scal
 // make_batch_wrappers!(halftrend_batch, HalfTrendBatchBuilder, HalfTrendInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(reverse_rsi_batch, ReverseRsiBatchBuilder, ReverseRsiInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(vama_batch, VamaBatchBuilder, VamaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+// Damiani Volatmeter batch variants (ScalarBatch/Avx2Batch/Avx512Batch)
+make_batch_wrappers!(
+    damiani_volatmeter_batch,
+    my_project::indicators::damiani_volatmeter::DamianiVolatmeterBatchBuilder,
+    DamianiVolatmeterInputS;
+    ScalarBatch, Avx2Batch, Avx512Batch
+);
 
 bench_variants!(
     alma_batch => AlmaInputS; Some(232);
@@ -1719,12 +1967,51 @@ bench_variants!(
     alma_batch_avx512batch
 );
 
+// AO single-series variants (scalar vs AVX2 vs AVX512)
+bench_variants!(
+    ao => AoInputS; None;
+    ao_scalar,
+    ao_avx2,
+    ao_avx512
+);
+
+// AO batch variants (ScalarBatch/AVX2Batch/AVX512Batch)
+bench_variants!(
+    ao_batch => AoInputS; None;
+    ao_batch_scalarbatch,
+    ao_batch_avx2batch,
+    ao_batch_avx512batch
+);
+
+bench_variants!(
+    damiani_volatmeter_batch => DamianiVolatmeterInputS; None;
+    damiani_volatmeter_batch_scalarbatch,
+    damiani_volatmeter_batch_avx2batch,
+    damiani_volatmeter_batch_avx512batch
+);
+
 // MACD single-series: compare scalar vs AVX2 vs AVX512
 bench_variants!(
     macd => MacdInputS; None;
     macd_scalar,
     macd_avx2,
     macd_avx512,
+);
+
+// Damiani Volatmeter single-series variants (Scalar/AVX2/AVX512)
+bench_variants!(
+    damiani_volatmeter => DamianiVolatmeterInputS; None;
+    damiani_volatmeter_scalar,
+    damiani_volatmeter_avx2,
+    damiani_volatmeter_avx512,
+);
+
+// ER single-series: compare scalar vs AVX2 vs AVX512
+bench_variants!(
+    er => ErInputS; None;
+    er_scalar,
+    er_avx2,
+    er_avx512,
 );
 
 // MACD batch variants (ScalarBatch/Avx2Batch/Avx512Batch)
@@ -1751,6 +2038,13 @@ bench_variants!(
     zscore_batch_scalarbatch,
     zscore_batch_avx2batch,
     zscore_batch_avx512batch
+);
+
+bench_variants!(
+    er_batch => ErInputS; None;
+    er_batch_scalarbatch,
+    er_batch_avx2batch,
+    er_batch_avx512batch
 );
 
 bench_variants!(
@@ -2800,6 +3094,14 @@ bench_variants!(
     ui_avx512,
 );
 
+// DVDIQQE single-series variants (Scalar vs AVX2/AVX512)
+bench_variants!(
+    dvdiqqe => DvdiqqeInputS; None;
+    dvdiqqe_scalar,
+    dvdiqqe_avx2,
+    dvdiqqe_avx512,
+);
+
 // UI batch variants
 make_batch_wrappers!(
     ui_batch,
@@ -2814,6 +3116,59 @@ bench_variants!(
     ui_batch_scalarbatch,
     ui_batch_avx2batch,
     ui_batch_avx512batch
+);
+
+// DI batch variants (OHLC slices required)
+#[inline(always)]
+fn di_batch_scalarbatch(input: &DiInputS) -> anyhow::Result<()> {
+    let (high, low, close) = match &input.data {
+        my_project::indicators::di::DiData::Candles { candles } => (
+            candles.high.as_slice(),
+            candles.low.as_slice(),
+            candles.close.as_slice(),
+        ),
+        my_project::indicators::di::DiData::Slices { high, low, close } => (*high, *low, *close),
+    };
+    my_project::indicators::di::DiBatchBuilder::new()
+        .kernel(Kernel::ScalarBatch)
+        .apply_slices(high, low, close)?;
+    Ok(())
+}
+#[inline(always)]
+fn di_batch_avx2batch(input: &DiInputS) -> anyhow::Result<()> {
+    let (high, low, close) = match &input.data {
+        my_project::indicators::di::DiData::Candles { candles } => (
+            candles.high.as_slice(),
+            candles.low.as_slice(),
+            candles.close.as_slice(),
+        ),
+        my_project::indicators::di::DiData::Slices { high, low, close } => (*high, *low, *close),
+    };
+    my_project::indicators::di::DiBatchBuilder::new()
+        .kernel(Kernel::Avx2Batch)
+        .apply_slices(high, low, close)?;
+    Ok(())
+}
+#[inline(always)]
+fn di_batch_avx512batch(input: &DiInputS) -> anyhow::Result<()> {
+    let (high, low, close) = match &input.data {
+        my_project::indicators::di::DiData::Candles { candles } => (
+            candles.high.as_slice(),
+            candles.low.as_slice(),
+            candles.close.as_slice(),
+        ),
+        my_project::indicators::di::DiData::Slices { high, low, close } => (*high, *low, *close),
+    };
+    my_project::indicators::di::DiBatchBuilder::new()
+        .kernel(Kernel::Avx512Batch)
+        .apply_slices(high, low, close)?;
+    Ok(())
+}
+bench_variants!(
+    di_batch => DiInputS; Some(27);
+    di_batch_scalarbatch,
+    di_batch_avx2batch,
+    di_batch_avx512batch
 );
 
 // MSW batch variants
@@ -2850,11 +3205,18 @@ bench_variants!(
 
 criterion_main!(
     benches_scalar,
+    benches_ao,
+    benches_ao_batch,
+    benches_atr,
+    benches_atr_batch,
+    benches_er,
     benches_obv,
     benches_trix,
     benches_trix_batch,
     benches_alma,
+    benches_adosc,
     benches_alma_batch,
+    benches_adosc_batch,
     benches_macd,
     benches_macd_batch,
     benches_buff_averages,
@@ -2941,6 +3303,8 @@ criterion_main!(
     benches_tema_batch,
     benches_tilson,
     benches_tilson_batch,
+    benches_tradjema,
+    benches_tradjema_batch,
     benches_trendflex,
     benches_trendflex_batch,
     benches_trima,
@@ -2955,14 +3319,18 @@ criterion_main!(
     benches_vlma_batch,
     benches_volume_adjusted_ma,
     benches_volume_adjusted_ma_batch,
+    benches_er_batch,
     benches_vpwma,
     benches_vpwma_batch,
     benches_willr_batch,
     benches_vwma,
     benches_wavetrend,
+    benches_nama,
     benches_wto,
     benches_wavetrend_batch,
     benches_wto_batch,
+    benches_nama_batch,
+    benches_di_batch,
     benches_wilders,
     benches_wilders_batch,
     benches_wma,
@@ -2975,6 +3343,9 @@ criterion_main!(
     benches_percentile_nearest_rank,
     benches_percentile_nearest_rank_batch,
     benches_keltner_batch,
+    benches_bop,
+    benches_coppock,
+    benches_coppock_batch,
     benches_ui,
     benches_gatorosc
     ,benches_ui_batch
@@ -2983,4 +3354,7 @@ criterion_main!(
     ,benches_rocp
     ,benches_medium_ad
     ,benches_medium_ad_batch
+    ,benches_dvdiqqe
+    ,benches_damiani_volatmeter
+    ,benches_damiani_volatmeter_batch
 );

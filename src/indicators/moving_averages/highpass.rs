@@ -12,15 +12,17 @@
 //! - **`Err(HighPassError)`** otherwise.
 //!
 //! ## Developer Status
-//! - **AVX2 kernel**: STUB - Falls back to scalar implementation
-//! - **AVX512 kernel**: STUB - Falls back to AVX2 (which falls back to scalar)
-//! - **Streaming update**: O(1) - Efficient incremental calculation with previous state
-//! - **Memory optimization**: NEEDS IMPROVEMENT - Uses regular vec![] instead of zero-copy helpers
-//! - **Optimization needed**: Implement SIMD kernels, adopt zero-copy helpers (alloc_with_nan_prefix)
+//! - SIMD: single-series uses deep unrolling + FMA; true lane SIMD not applicable due to IIR dependence.
+//! - AVX2/AVX512: serial kernels with 16× ILP and prefetch; AVX512 routes to AVX2.
+//! - Batch: row-specific path precomputes Δx once and reuses across rows.
+//! - Streaming update: O(1) with prior state.
+//! - Allocation: uses zero-copy helpers; no O(N) output prefill.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, make_uninit_matrix};
+use crate::utilities::helpers::{
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, make_uninit_matrix,
+};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -243,13 +245,14 @@ pub fn highpass_with_kernel(
         return Err(HighPassError::InvalidAlpha { cos_val });
     }
 
+    // SIMD underperforms for this IIR; prefer scalar on Auto
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
-    // Highpass writes all values, allocate without NaN prefix
-    let mut out = vec![0.0; len];
+    // Highpass writes all values; allocate without warmup prefix using zero-copy helper
+    let mut out = alloc_with_nan_prefix(len, 0);
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => highpass_scalar(data, period, &mut out),
@@ -313,8 +316,9 @@ fn highpass_with_kernel_into(
         return Err(HighPassError::InvalidAlpha { cos_val });
     }
 
+    // SIMD underperforms for this IIR; prefer scalar on Auto
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -335,7 +339,7 @@ fn highpass_with_kernel_into(
     Ok(())
 }
 
-// Optimized scalar implementation with pointer arithmetic
+// Optimized scalar implementation with pointer arithmetic (2× unrolled)
 #[inline(always)]
 pub unsafe fn highpass_scalar(data: &[f64], period: usize, out: &mut [f64]) {
     use core::f64::consts::PI;
@@ -387,10 +391,11 @@ pub unsafe fn highpass_scalar(data: &[f64], period: usize, out: &mut [f64]) {
     }
 }
 
-// AVX2 stub
+// AVX2 ILP kernel (serial due to recurrence)
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline]
+#[inline(always)]
 pub unsafe fn highpass_avx2(data: &[f64], period: usize, out: &mut [f64]) {
+    use core::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
     use core::f64::consts::PI;
 
     let n = data.len();
@@ -398,48 +403,139 @@ pub unsafe fn highpass_avx2(data: &[f64], period: usize, out: &mut [f64]) {
         return;
     }
 
-    // --- pre-compute coefficients ---------------------------------------
-    let k = 1.0;
-    let theta = 2.0 * PI * k / period as f64;
-    let alpha = 1.0 + ((theta.sin() - 1.0) / theta.cos());
+    let theta = 2.0 * PI / period as f64;
+    let sin_t = theta.sin();
+    let cos_t = theta.cos();
+    let alpha = 1.0 + (sin_t - 1.0) / cos_t;
+
     let c = 1.0 - 0.5 * alpha; // (1-α/2)
     let oma = 1.0 - alpha; // (1-α)
 
-    // --- seed -----------------------------------------------------------
-    out[0] = data[0];
+    // seed
+    let mut src = data.as_ptr();
+    let mut dst = out.as_mut_ptr();
+    let mut x_prev = *src;
+    let mut y_prev = x_prev;
+    *dst = y_prev;
+
     if n == 1 {
         return;
     }
 
-    // --- pointer loop, 2× unrolled -------------------------------------
-    let mut src = data.as_ptr().add(1);
-    let mut dst = out.as_mut_ptr().add(1);
-    let mut y_im1 = out[0];
-    let mut x_im1 = data[0];
+    src = src.add(1);
+    dst = dst.add(1);
     let mut rem = n - 1;
 
+    // 16× unrolled main loop with simple L1 prefetch
+    while rem >= 16 {
+        _mm_prefetch(src.add(64) as *const i8, _MM_HINT_T0);
+
+        let x0 = *src;
+        let y0 = oma.mul_add(y_prev, c * (x0 - x_prev));
+        *dst = y0;
+        let x1 = *src.add(1);
+        let y1 = oma.mul_add(y0, c * (x1 - x0));
+        *dst.add(1) = y1;
+        let x2 = *src.add(2);
+        let y2 = oma.mul_add(y1, c * (x2 - x1));
+        *dst.add(2) = y2;
+        let x3 = *src.add(3);
+        let y3 = oma.mul_add(y2, c * (x3 - x2));
+        *dst.add(3) = y3;
+        let x4 = *src.add(4);
+        let y4 = oma.mul_add(y3, c * (x4 - x3));
+        *dst.add(4) = y4;
+        let x5 = *src.add(5);
+        let y5 = oma.mul_add(y4, c * (x5 - x4));
+        *dst.add(5) = y5;
+        let x6 = *src.add(6);
+        let y6 = oma.mul_add(y5, c * (x6 - x5));
+        *dst.add(6) = y6;
+        let x7 = *src.add(7);
+        let y7 = oma.mul_add(y6, c * (x7 - x6));
+        *dst.add(7) = y7;
+        let x8 = *src.add(8);
+        let y8 = oma.mul_add(y7, c * (x8 - x7));
+        *dst.add(8) = y8;
+        let x9 = *src.add(9);
+        let y9 = oma.mul_add(y8, c * (x9 - x8));
+        *dst.add(9) = y9;
+        let x10 = *src.add(10);
+        let y10 = oma.mul_add(y9, c * (x10 - x9));
+        *dst.add(10) = y10;
+        let x11 = *src.add(11);
+        let y11 = oma.mul_add(y10, c * (x11 - x10));
+        *dst.add(11) = y11;
+        let x12 = *src.add(12);
+        let y12 = oma.mul_add(y11, c * (x12 - x11));
+        *dst.add(12) = y12;
+        let x13 = *src.add(13);
+        let y13 = oma.mul_add(y12, c * (x13 - x12));
+        *dst.add(13) = y13;
+        let x14 = *src.add(14);
+        let y14 = oma.mul_add(y13, c * (x14 - x13));
+        *dst.add(14) = y14;
+        let x15 = *src.add(15);
+        let y15 = oma.mul_add(y14, c * (x15 - x14));
+        *dst.add(15) = y15;
+
+        x_prev = x15;
+        y_prev = y15;
+        src = src.add(16);
+        dst = dst.add(16);
+        rem -= 16;
+    }
+
+    while rem >= 8 {
+        let x0 = *src;
+        let y0 = oma.mul_add(y_prev, c * (x0 - x_prev));
+        *dst = y0;
+        let x1 = *src.add(1);
+        let y1 = oma.mul_add(y0, c * (x1 - x0));
+        *dst.add(1) = y1;
+        let x2 = *src.add(2);
+        let y2 = oma.mul_add(y1, c * (x2 - x1));
+        *dst.add(2) = y2;
+        let x3 = *src.add(3);
+        let y3 = oma.mul_add(y2, c * (x3 - x2));
+        *dst.add(3) = y3;
+        let x4 = *src.add(4);
+        let y4 = oma.mul_add(y3, c * (x4 - x3));
+        *dst.add(4) = y4;
+        let x5 = *src.add(5);
+        let y5 = oma.mul_add(y4, c * (x5 - x4));
+        *dst.add(5) = y5;
+        let x6 = *src.add(6);
+        let y6 = oma.mul_add(y5, c * (x6 - x5));
+        *dst.add(6) = y6;
+        let x7 = *src.add(7);
+        let y7 = oma.mul_add(y6, c * (x7 - x6));
+        *dst.add(7) = y7;
+
+        x_prev = x7;
+        y_prev = y7;
+        src = src.add(8);
+        dst = dst.add(8);
+        rem -= 8;
+    }
+
     while rem >= 2 {
-        // y[i]
-        let x_i = *src;
-        let y_i = oma.mul_add(y_im1, c * (x_i - x_im1));
-        *dst = y_i;
-
-        // y[i+1]
-        let x_ip1 = *src.add(1);
-        let y_ip1 = oma.mul_add(y_i, c * (x_ip1 - x_i));
-        *dst.add(1) = y_ip1;
-
-        // rotate state
-        x_im1 = x_ip1;
-        y_im1 = y_ip1;
+        let x0 = *src;
+        let y0 = oma.mul_add(y_prev, c * (x0 - x_prev));
+        *dst = y0;
+        let x1 = *src.add(1);
+        let y1 = oma.mul_add(y0, c * (x1 - x0));
+        *dst.add(1) = y1;
+        x_prev = x1;
+        y_prev = y1;
         src = src.add(2);
         dst = dst.add(2);
         rem -= 2;
     }
 
     if rem == 1 {
-        let x_i = *src;
-        *dst = oma.mul_add(y_im1, c * (x_i - x_im1));
+        let x0 = *src;
+        *dst = oma.mul_add(y_prev, c * (x0 - x_prev));
     }
 }
 
@@ -550,8 +646,9 @@ pub fn highpass_batch_with_kernel(
     sweep: &HighPassBatchRange,
     k: Kernel,
 ) -> Result<HighPassBatchOutput, HighPassError> {
+    // Row-specific path is serial per row; prefer scalar on Auto
     let kernel = match k {
-        Kernel::Auto => detect_best_batch_kernel(),
+        Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         _ => return Err(HighPassError::InvalidKernel),
     };
@@ -1411,6 +1508,15 @@ fn highpass_batch_inner_into(
     };
     // No NaN initialization needed - highpass writes all values
 
+    // Precompute Δx once per series: dx[0]=0, dx[i]=x[i]-x[i-1]
+    let mut dx: Vec<f64> = Vec::with_capacity(cols);
+    if cols > 0 {
+        dx.push(data[0]); // store x0 in slot 0 for convenience; we'll treat dx[0] as x0
+        for i in 1..cols {
+            dx.push(data[i] - data[i - 1]);
+        }
+    }
+
     // ---------- worker that fills one row ----------
     let do_row = |row: usize, dst_mu: &mut [std::mem::MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
@@ -1419,13 +1525,73 @@ fn highpass_batch_inner_into(
         let out_row =
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
-        match kern {
-            Kernel::Scalar => highpass_row_scalar(data, period, out_row),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => highpass_row_avx2(data, period, out_row),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => highpass_row_avx512(data, period, out_row),
-            _ => unreachable!(),
+        // Compute coefficients as in streaming path
+        let theta = 2.0 * std::f64::consts::PI / period as f64;
+        let sin_t = theta.sin();
+        let cos_t = theta.cos();
+        let alpha = 1.0 + (sin_t - 1.0) / cos_t;
+        let c = 1.0 - 0.5 * alpha;
+        let oma = 1.0 - alpha;
+
+        // y[0] = x0
+        let mut y_prev = dx[0];
+        out_row[0] = y_prev;
+
+        // Process i=1..n-1 using shared Δx
+        let mut i = 1usize;
+        let n = cols;
+        // 8× unrolled loop
+        while i + 7 < n {
+            let d1 = dx[i];
+            let y1 = oma.mul_add(y_prev, c * d1);
+            out_row[i] = y1;
+
+            let d2 = dx[i + 1];
+            let y2 = oma.mul_add(y1, c * d2);
+            out_row[i + 1] = y2;
+
+            let d3 = dx[i + 2];
+            let y3 = oma.mul_add(y2, c * d3);
+            out_row[i + 2] = y3;
+
+            let d4 = dx[i + 3];
+            let y4 = oma.mul_add(y3, c * d4);
+            out_row[i + 3] = y4;
+
+            let d5 = dx[i + 4];
+            let y5 = oma.mul_add(y4, c * d5);
+            out_row[i + 4] = y5;
+
+            let d6 = dx[i + 5];
+            let y6 = oma.mul_add(y5, c * d6);
+            out_row[i + 5] = y6;
+
+            let d7 = dx[i + 6];
+            let y7 = oma.mul_add(y6, c * d7);
+            out_row[i + 6] = y7;
+
+            let d8 = dx[i + 7];
+            let y8 = oma.mul_add(y7, c * d8);
+            out_row[i + 7] = y8;
+
+            y_prev = y8;
+            i += 8;
+        }
+
+        while i + 1 < n {
+            let d1 = dx[i];
+            let y1 = oma.mul_add(y_prev, c * d1);
+            out_row[i] = y1;
+            let d2 = dx[i + 1];
+            let y2 = oma.mul_add(y1, c * d2);
+            out_row[i + 1] = y2;
+            y_prev = y2;
+            i += 2;
+        }
+
+        if i < n {
+            let d = dx[i];
+            out_row[i] = oma.mul_add(y_prev, c * d);
         }
     };
 

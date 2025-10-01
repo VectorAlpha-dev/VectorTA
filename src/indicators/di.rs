@@ -14,9 +14,10 @@
 //! - **`Err(DiError)`** on various error conditions.
 //!
 //! ## Developer Status
-//! - **SIMD Kernels**: AVX2 and AVX512 are STUBS - fall back to scalar implementation
-//! - **Streaming Performance**: O(n) - requires full window recalculation for all directional movements
-//! - **Memory Optimization**: GOOD - uses alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes for batch operations
+//! - SIMD: AVX2/AVX512 stubs delegate to scalar. Time-axis dependency from Wilder smoothing makes SIMD unhelpful here.
+//! - Scalar: Single-pass, loop-jammed with precomputed constants and `mul_add` (FMA) for Wilder smoothing.
+//! - Batch: Uses shared per-bar precompute (±DM/TR) across rows to reduce redundant work; warmup prefixes preserved.
+//! - Memory: Uses `alloc_with_nan_prefix`, `make_uninit_matrix`, `init_matrix_prefixes` for zero-copy/warmup handling.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
@@ -367,74 +368,105 @@ pub unsafe fn di_scalar_into(
     out_plus: &mut [f64],
     out_minus: &mut [f64],
 ) {
-    let mut prev_high = high[first_idx];
-    let mut prev_low = low[first_idx];
-    let mut prev_close = close[first_idx];
+    let n = high.len();
+    if n == 0 {
+        return;
+    }
+
+    // Wilder constants
+    let pf = period as f64;
+    let invp = pf.recip();
+    let keep = 1.0 - invp; // 1 - 1/p
+
+    // Initialize from first valid bar
+    let mut prev_h = high[first_idx];
+    let mut prev_l = low[first_idx];
+    let mut prev_c = close[first_idx];
+
+    // Accumulate initial window [first_idx+1 .. first_idx+period)
+    let start = first_idx + 1;
+    let stop = first_idx + period;
     let mut plus_dm_sum = 0.0;
     let mut minus_dm_sum = 0.0;
     let mut tr_sum = 0.0;
 
-    for i in (first_idx + 1)..(first_idx + period) {
-        let diff_p = high[i] - prev_high;
-        let diff_m = prev_low - low[i];
-        prev_high = high[i];
-        prev_low = low[i];
-        let tr = true_range(high[i], low[i], prev_close);
-        prev_close = close[i];
-        if diff_p > 0.0 && diff_p > diff_m {
-            plus_dm_sum += diff_p;
+    let mut i = start;
+    while i < stop {
+        let ch = high[i];
+        let cl = low[i];
+        let cc = close[i];
+
+        let dp = ch - prev_h;
+        let dm = prev_l - cl;
+        if dp > dm && dp > 0.0 {
+            plus_dm_sum += dp;
         }
-        if diff_m > 0.0 && diff_m > diff_p {
-            minus_dm_sum += diff_m;
+        if dm > dp && dm > 0.0 {
+            minus_dm_sum += dm;
+        }
+
+        // True range inline (max of 3)
+        let mut tr = ch - cl;
+        let tr2 = (ch - prev_c).abs();
+        let tr3 = (cl - prev_c).abs();
+        if tr2 > tr {
+            tr = tr2;
+        }
+        if tr3 > tr {
+            tr = tr3;
         }
         tr_sum += tr;
+
+        prev_h = ch;
+        prev_l = cl;
+        prev_c = cc;
+        i += 1;
     }
 
-    let mut idx = first_idx + period - 1;
-    let mut current_plus_dm = plus_dm_sum;
-    let mut current_minus_dm = minus_dm_sum;
-    let mut current_tr = tr_sum;
+    // Smoothed state
+    let mut cur_plus = plus_dm_sum;
+    let mut cur_minus = minus_dm_sum;
+    let mut cur_tr = tr_sum;
 
-    out_plus[idx] = if current_tr == 0.0 {
-        0.0
-    } else {
-        (current_plus_dm / current_tr) * 100.0
-    };
-    out_minus[idx] = if current_tr == 0.0 {
-        0.0
-    } else {
-        (current_minus_dm / current_tr) * 100.0
-    };
+    // First valid index and write first output
+    let mut idx = stop - 1;
+    let mut scale = if cur_tr == 0.0 { 0.0 } else { 100.0 / cur_tr };
+    out_plus[idx] = cur_plus * scale;
+    out_minus[idx] = cur_minus * scale;
     idx += 1;
 
-    while idx < high.len() {
-        let diff_p = high[idx] - prev_high;
-        let diff_m = prev_low - low[idx];
-        prev_high = high[idx];
-        prev_low = low[idx];
-        let tr = true_range(high[idx], low[idx], prev_close);
-        prev_close = close[idx];
-        if diff_p > 0.0 && diff_p > diff_m {
-            current_plus_dm = current_plus_dm - (current_plus_dm / (period as f64)) + diff_p;
-        } else {
-            current_plus_dm = current_plus_dm - (current_plus_dm / (period as f64));
+    // Main streaming loop
+    while idx < n {
+        let ch = high[idx];
+        let cl = low[idx];
+        let cc = close[idx];
+
+        let dp = ch - prev_h;
+        let dm = prev_l - cl;
+        let inc_p = if dp > dm && dp > 0.0 { dp } else { 0.0 };
+        let inc_m = if dm > dp && dm > 0.0 { dm } else { 0.0 };
+
+        cur_plus = cur_plus.mul_add(keep, inc_p);
+        cur_minus = cur_minus.mul_add(keep, inc_m);
+
+        let mut tr = ch - cl;
+        let tr2 = (ch - prev_c).abs();
+        let tr3 = (cl - prev_c).abs();
+        if tr2 > tr {
+            tr = tr2;
         }
-        if diff_m > 0.0 && diff_m > diff_p {
-            current_minus_dm = current_minus_dm - (current_minus_dm / (period as f64)) + diff_m;
-        } else {
-            current_minus_dm = current_minus_dm - (current_minus_dm / (period as f64));
+        if tr3 > tr {
+            tr = tr3;
         }
-        current_tr = current_tr - (current_tr / (period as f64)) + tr;
-        out_plus[idx] = if current_tr == 0.0 {
-            0.0
-        } else {
-            (current_plus_dm / current_tr) * 100.0
-        };
-        out_minus[idx] = if current_tr == 0.0 {
-            0.0
-        } else {
-            (current_minus_dm / current_tr) * 100.0
-        };
+        cur_tr = cur_tr.mul_add(keep, tr);
+
+        scale = if cur_tr == 0.0 { 0.0 } else { 100.0 / cur_tr };
+        out_plus[idx] = cur_plus * scale;
+        out_minus[idx] = cur_minus * scale;
+
+        prev_h = ch;
+        prev_l = cl;
+        prev_c = cc;
         idx += 1;
     }
 }
@@ -834,9 +866,46 @@ fn di_batch_inner_into(
         init_matrix_prefixes(minus_mu, cols, &warm);
     }
 
+    // Shared per-bar primitives to reduce redundant work across rows
+    let mut up = vec![0.0f64; n];
+    let mut dn = vec![0.0f64; n];
+    let mut tr = vec![0.0f64; n];
+    {
+        let mut prev_h = high[first];
+        let mut prev_l = low[first];
+        let mut prev_c = close[first];
+        let mut i = first + 1;
+        while i < n {
+            let ch = high[i];
+            let cl = low[i];
+            let dp = ch - prev_h;
+            let dm = prev_l - cl;
+            if dp > dm && dp > 0.0 {
+                up[i] = dp;
+            }
+            if dm > dp && dm > 0.0 {
+                dn[i] = dm;
+            }
+            let mut t = ch - cl;
+            let t2 = (ch - prev_c).abs();
+            let t3 = (cl - prev_c).abs();
+            if t2 > t {
+                t = t2;
+            }
+            if t3 > t {
+                t = t3;
+            }
+            tr[i] = t;
+            prev_h = ch;
+            prev_l = cl;
+            prev_c = close[i];
+            i += 1;
+        }
+    }
+
     let do_row = |row: usize, out_plus: &mut [f64], out_minus: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
-        let result = di_row_scalar(high, low, close, period, first, out_plus, out_minus);
+        let result = di_row_scalar_precomputed(&up, &dn, &tr, period, first, out_plus, out_minus);
         debug_assert!(result.is_ok());
     };
 
@@ -931,9 +1000,46 @@ fn di_batch_inner(
         core::slice::from_raw_parts_mut(minus_guard.as_mut_ptr() as *mut f64, minus_guard.len())
     };
 
+    // Shared per-bar primitives to reduce redundant work across rows
+    let mut up = vec![0.0f64; n];
+    let mut dn = vec![0.0f64; n];
+    let mut tr = vec![0.0f64; n];
+    {
+        let mut prev_h = high[first];
+        let mut prev_l = low[first];
+        let mut prev_c = close[first];
+        let mut i = first + 1;
+        while i < n {
+            let ch = high[i];
+            let cl = low[i];
+            let dp = ch - prev_h;
+            let dm = prev_l - cl;
+            if dp > dm && dp > 0.0 {
+                up[i] = dp;
+            }
+            if dm > dp && dm > 0.0 {
+                dn[i] = dm;
+            }
+            let mut t = ch - cl;
+            let t2 = (ch - prev_c).abs();
+            let t3 = (cl - prev_c).abs();
+            if t2 > t {
+                t = t2;
+            }
+            if t3 > t {
+                t = t3;
+            }
+            tr[i] = t;
+            prev_h = ch;
+            prev_l = cl;
+            prev_c = close[i];
+            i += 1;
+        }
+    }
+
     let do_row = |row: usize, out_plus: &mut [f64], out_minus: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
-        let result = di_row_scalar(high, low, close, period, first, out_plus, out_minus);
+        let result = di_row_scalar_precomputed(&up, &dn, &tr, period, first, out_plus, out_minus);
         debug_assert!(result.is_ok());
     };
 
@@ -1002,74 +1108,156 @@ pub unsafe fn di_row_scalar(
     out_minus: &mut [f64],
 ) -> Result<(), DiError> {
     let n = high.len();
-    let mut prev_high = high[first];
-    let mut prev_low = low[first];
-    let mut prev_close = close[first];
+    if n == 0 {
+        return Ok(());
+    }
+
+    // Wilder constants
+    let pf = period as f64;
+    let invp = pf.recip();
+    let keep = 1.0 - invp;
+
+    // Initialize from first valid bar
+    let mut prev_h = high[first];
+    let mut prev_l = low[first];
+    let mut prev_c = close[first];
+
+    // Accumulate initial window
+    let start = first + 1;
+    let stop = first + period;
     let mut plus_dm_sum = 0.0;
     let mut minus_dm_sum = 0.0;
     let mut tr_sum = 0.0;
 
-    for i in (first + 1)..(first + period) {
-        let diff_p = high[i] - prev_high;
-        let diff_m = prev_low - low[i];
-        prev_high = high[i];
-        prev_low = low[i];
-        let tr = true_range(high[i], low[i], prev_close);
-        prev_close = close[i];
-        if diff_p > 0.0 && diff_p > diff_m {
-            plus_dm_sum += diff_p;
+    let mut i = start;
+    while i < stop {
+        let ch = high[i];
+        let cl = low[i];
+        let cc = close[i];
+
+        let dp = ch - prev_h;
+        let dm = prev_l - cl;
+        if dp > dm && dp > 0.0 {
+            plus_dm_sum += dp;
         }
-        if diff_m > 0.0 && diff_m > diff_p {
-            minus_dm_sum += diff_m;
+        if dm > dp && dm > 0.0 {
+            minus_dm_sum += dm;
+        }
+
+        let mut tr = ch - cl;
+        let tr2 = (ch - prev_c).abs();
+        let tr3 = (cl - prev_c).abs();
+        if tr2 > tr {
+            tr = tr2;
+        }
+        if tr3 > tr {
+            tr = tr3;
         }
         tr_sum += tr;
+
+        prev_h = ch;
+        prev_l = cl;
+        prev_c = cc;
+        i += 1;
     }
 
-    let mut idx = first + period - 1;
-    let mut current_plus_dm = plus_dm_sum;
-    let mut current_minus_dm = minus_dm_sum;
-    let mut current_tr = tr_sum;
+    let mut cur_plus = plus_dm_sum;
+    let mut cur_minus = minus_dm_sum;
+    let mut cur_tr = tr_sum;
 
-    out_plus[idx] = if current_tr == 0.0 {
-        0.0
-    } else {
-        (current_plus_dm / current_tr) * 100.0
-    };
-    out_minus[idx] = if current_tr == 0.0 {
-        0.0
-    } else {
-        (current_minus_dm / current_tr) * 100.0
-    };
+    let mut idx = stop - 1;
+    let mut scale = if cur_tr == 0.0 { 0.0 } else { 100.0 / cur_tr };
+    out_plus[idx] = cur_plus * scale;
+    out_minus[idx] = cur_minus * scale;
     idx += 1;
 
     while idx < n {
-        let diff_p = high[idx] - prev_high;
-        let diff_m = prev_low - low[idx];
-        prev_high = high[idx];
-        prev_low = low[idx];
-        let tr = true_range(high[idx], low[idx], prev_close);
-        prev_close = close[idx];
-        if diff_p > 0.0 && diff_p > diff_m {
-            current_plus_dm = current_plus_dm - (current_plus_dm / (period as f64)) + diff_p;
-        } else {
-            current_plus_dm = current_plus_dm - (current_plus_dm / (period as f64));
+        let ch = high[idx];
+        let cl = low[idx];
+        let cc = close[idx];
+
+        let dp = ch - prev_h;
+        let dm = prev_l - cl;
+        let inc_p = if dp > dm && dp > 0.0 { dp } else { 0.0 };
+        let inc_m = if dm > dp && dm > 0.0 { dm } else { 0.0 };
+
+        cur_plus = cur_plus.mul_add(keep, inc_p);
+        cur_minus = cur_minus.mul_add(keep, inc_m);
+
+        let mut tr = ch - cl;
+        let tr2 = (ch - prev_c).abs();
+        let tr3 = (cl - prev_c).abs();
+        if tr2 > tr {
+            tr = tr2;
         }
-        if diff_m > 0.0 && diff_m > diff_p {
-            current_minus_dm = current_minus_dm - (current_minus_dm / (period as f64)) + diff_m;
-        } else {
-            current_minus_dm = current_minus_dm - (current_minus_dm / (period as f64));
+        if tr3 > tr {
+            tr = tr3;
         }
-        current_tr = current_tr - (current_tr / (period as f64)) + tr;
-        out_plus[idx] = if current_tr == 0.0 {
-            0.0
-        } else {
-            (current_plus_dm / current_tr) * 100.0
-        };
-        out_minus[idx] = if current_tr == 0.0 {
-            0.0
-        } else {
-            (current_minus_dm / current_tr) * 100.0
-        };
+        cur_tr = cur_tr.mul_add(keep, tr);
+
+        scale = if cur_tr == 0.0 { 0.0 } else { 100.0 / cur_tr };
+        out_plus[idx] = cur_plus * scale;
+        out_minus[idx] = cur_minus * scale;
+
+        prev_h = ch;
+        prev_l = cl;
+        prev_c = cc;
+        idx += 1;
+    }
+    Ok(())
+}
+
+/// Optimized per-row kernel using shared precomputed increments across rows.
+#[inline(always)]
+pub unsafe fn di_row_scalar_precomputed(
+    up: &[f64],
+    dn: &[f64],
+    tr: &[f64],
+    period: usize,
+    first: usize,
+    out_plus: &mut [f64],
+    out_minus: &mut [f64],
+) -> Result<(), DiError> {
+    let n = up.len();
+    if n == 0 {
+        return Ok(());
+    }
+
+    let pf = period as f64;
+    let invp = pf.recip();
+    let keep = 1.0 - invp;
+
+    let start = first + 1;
+    let stop = first + period;
+    let mut plus_dm_sum = 0.0;
+    let mut minus_dm_sum = 0.0;
+    let mut tr_sum = 0.0;
+
+    let mut i = start;
+    while i < stop {
+        plus_dm_sum += up[i];
+        minus_dm_sum += dn[i];
+        tr_sum += tr[i];
+        i += 1;
+    }
+
+    let mut cur_plus = plus_dm_sum;
+    let mut cur_minus = minus_dm_sum;
+    let mut cur_tr = tr_sum;
+
+    let mut idx = stop - 1;
+    let mut scale = if cur_tr == 0.0 { 0.0 } else { 100.0 / cur_tr };
+    out_plus[idx] = cur_plus * scale;
+    out_minus[idx] = cur_minus * scale;
+    idx += 1;
+
+    while idx < n {
+        cur_plus = cur_plus.mul_add(keep, up[idx]);
+        cur_minus = cur_minus.mul_add(keep, dn[idx]);
+        cur_tr = cur_tr.mul_add(keep, tr[idx]);
+        scale = if cur_tr == 0.0 { 0.0 } else { 100.0 / cur_tr };
+        out_plus[idx] = cur_plus * scale;
+        out_minus[idx] = cur_minus * scale;
         idx += 1;
     }
     Ok(())

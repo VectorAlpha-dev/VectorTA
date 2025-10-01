@@ -12,11 +12,13 @@
 //! - **Err(SuperSmoother3PoleError)** otherwise.
 //!
 //! ## Developer Notes
-//! - **AVX2 kernel**: ❌ Stub only - falls back to scalar implementation
-//! - **AVX512 kernel**: ❌ Stub only - falls back to scalar implementation
+//! - **AVX2 kernel**: ✅ Uses scalar core under `#[target_feature(enable = "avx2,fma")]`
+//! - **AVX512 kernel**: ✅ Uses scalar core under `#[target_feature(enable = "avx512f,fma")]`
 //! - **Streaming update**: ✅ O(1) complexity - efficient recursive calculation using only last 3 output values
 //! - **Memory optimization**: ✅ Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix) for output vectors
-//! - **TODO**: Implement SIMD kernels for recursive filter calculations (challenging due to sequential dependencies)
+//! - **Note**: True wide-lane SIMD across time is limited by the IIR dependency chain.
+//!   AVX2/AVX512 variants rely on FMA and more aggressive scheduling; primary speedups come
+//!   from the optimized scalar core (loop-jammed, cached state, partial unroll, fewer bounds checks).
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
@@ -265,38 +267,76 @@ pub unsafe fn supersmoother_3_pole_compute_into(
         return;
     }
 
-    // Calculate coefficients
-    let a = (-PI / period as f64).exp();
-    let b = 2.0 * a * (1.738_f64 * PI / period as f64).cos();
+    // ----- Coefficients (compute once) -----
+    // Structure and math follow the reference implementation; we only reduce
+    // duplicate work and enable FMA-friendly ordering.
+    let inv_p = 1.0 / (period as f64);
+    let a = (-PI * inv_p).exp();
+    let b = 2.0 * a * (1.738_f64 * PI * inv_p).cos();
     let c = a * a;
-    let coef_source = 1.0 - c * c - b + b * c;
+    let c2 = c * c;
+
+    let coef_source = 1.0 - c2 - b + b * c;
     let coef_prev1 = b + c;
     let coef_prev2 = -c - b * c;
-    let coef_prev3 = c * c;
+    let coef_prev3 = c2;
 
-    // Pass through first 3 values starting from 'first'
-    // Do not write below 'first' - preserve NaN prefix
-    if first < n {
-        out[first] = data[first];
-    }
+    // ----- Pass-through first 3 values from 'first' (preserve NaN prefix) -----
+    *out.get_unchecked_mut(first) = *data.get_unchecked(first);
     if first + 1 < n {
-        out[first + 1] = data[first + 1];
+        *out.get_unchecked_mut(first + 1) = *data.get_unchecked(first + 1);
     }
     if first + 2 < n {
-        out[first + 2] = data[first + 2];
+        *out.get_unchecked_mut(first + 2) = *data.get_unchecked(first + 2);
     }
 
-    // Recursive calculation from index first+3 onwards
-    if first + 3 >= n {
+    // If nothing beyond the first three exists, we're done.
+    let mut i = first + 3;
+    if i >= n {
         return;
     }
 
-    for i in (first + 3)..n {
-        let d_i = data[i];
-        let o_im1 = out[i - 1];
-        let o_im2 = out[i - 2];
-        let o_im3 = out[i - 3];
-        out[i] = coef_source * d_i + coef_prev1 * o_im1 + coef_prev2 * o_im2 + coef_prev3 * o_im3;
+    // Keep last 3 outputs hot in registers to avoid reloads
+    let mut y0 = *out.get_unchecked(first);
+    let mut y1 = *out.get_unchecked(first + 1);
+    let mut y2 = *out.get_unchecked(first + 2);
+
+    // Main loop: partially unrolled by 2 for better ILP and fewer loop overheads.
+    while i + 1 < n {
+        // step i
+        let di = *data.get_unchecked(i);
+        let t0 = coef_prev1.mul_add(y2, coef_source * di);
+        let t1 = coef_prev2.mul_add(y1, t0);
+        let y3 = coef_prev3.mul_add(y0, t1);
+        *out.get_unchecked_mut(i) = y3;
+
+        // rotate
+        y0 = y1;
+        y1 = y2;
+        y2 = y3;
+        i += 1;
+
+        // step i (paired)
+        let di1 = *data.get_unchecked(i);
+        let t0b = coef_prev1.mul_add(y2, coef_source * di1);
+        let t1b = coef_prev2.mul_add(y1, t0b);
+        let y4 = coef_prev3.mul_add(y0, t1b);
+        *out.get_unchecked_mut(i) = y4;
+
+        // rotate
+        y0 = y1;
+        y1 = y2;
+        y2 = y4;
+        i += 1;
+    }
+
+    // Handle possible tail element
+    if i < n {
+        let di = *data.get_unchecked(i);
+        let t0 = coef_prev1.mul_add(y2, coef_source * di);
+        let t1 = coef_prev2.mul_add(y1, t0);
+        let y3 = coef_prev3.mul_add(y0, t1);
+        *out.get_unchecked_mut(i) = y3;
     }
 }
 
@@ -311,9 +351,8 @@ pub unsafe fn supersmoother_3_pole_scalar(
     supersmoother_3_pole_compute_into(data, period, first, 0, out);
 }
 
-// AVX2/AVX512 stubs (forward to scalar)
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
+#[target_feature(enable = "avx2,fma")]
 pub unsafe fn supersmoother_3_pole_avx2(
     data: &[f64],
     period: usize,
@@ -324,7 +363,7 @@ pub unsafe fn supersmoother_3_pole_avx2(
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
+#[target_feature(enable = "avx512f,fma")]
 pub unsafe fn supersmoother_3_pole_avx512(
     data: &[f64],
     period: usize,
@@ -349,7 +388,7 @@ pub unsafe fn supersmoother_3_pole_row_scalar(
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
+#[target_feature(enable = "avx2,fma")]
 pub unsafe fn supersmoother_3_pole_row_avx2(
     data: &[f64],
     first: usize,
@@ -363,7 +402,7 @@ pub unsafe fn supersmoother_3_pole_row_avx2(
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
+#[target_feature(enable = "avx512f,fma")]
 pub unsafe fn supersmoother_3_pole_row_avx512(
     data: &[f64],
     first: usize,

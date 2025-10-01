@@ -20,16 +20,16 @@
 //! - For short: Lowest Low[period] + ATR[period] * multiplier
 //!
 //! ## Developer Notes (Implementation Status)
-//! - **SIMD Kernels**:
-//!   - AVX2: STUB (calls scalar implementation)
-//!   - AVX512: STUB (calls scalar implementation)
-//!   - Both short and long variants are stubs
-//! - **Streaming Performance**: O(1) - efficient with rolling windows for ATR and max/min
-//! - **Memory Optimization**: YES - uses alloc_with_nan_prefix and make_uninit_matrix helpers
-//! - **Batch Operations**: Fully supported with parallel processing
-//! - **TODO**:
-//!   - Implement actual SIMD kernels for ATR and rolling max/min operations
-//!   - Consider SIMD for the final stop calculation combining components
+//! - **Scalar path**: Single-pass O(n) using Wilder ATR (RMA) + monotonic deques for rolling
+//!   max/min. Warmup uses NaN prefix identical to alma.rs patterns.
+//! - **SIMD Kernels**: AVX2/AVX512 present as stubs delegating to the scalar implementation.
+//!   Rationale: the hot loop is sequential (ATR recurrence) and deque-bound (rolling max/min),
+//!   so end-to-end AVX wins are typically within noise; we short-circuit to scalar for
+//!   performance stability and identical numerics.
+//! - **Streaming Performance**: O(1) with deques in the streaming API.
+//! - **Memory Optimization**: Uses `alloc_with_nan_prefix`/matrix helpers; no O(N) temps per output.
+//! - **Batch**: Parallel per-row supported. Potential future optimization: precompute the TR stream
+//!   once across rows; current design favors simplicity and clarity.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -445,45 +445,130 @@ pub fn chande_scalar(
     out: &mut [f64],
 ) {
     let len = high.len();
+    if first >= len {
+        return;
+    }
+
     let alpha = 1.0 / period as f64;
-    let mut sum_tr = 0.0;
-    let mut rma = f64::NAN;
-    for i in first..len {
-        let tr = if i == first {
-            high[i] - low[i]
-        } else {
-            let hl = high[i] - low[i];
-            let hc = (high[i] - close[i - 1]).abs();
-            let lc = (low[i] - close[i - 1]).abs();
-            hl.max(hc).max(lc)
-        };
-        if i < first + period {
-            sum_tr += tr;
-            if i == first + period - 1 {
-                rma = sum_tr / period as f64;
-            }
-        } else {
-            rma += alpha * (tr - rma);
-        }
-        if i >= first + period - 1 && !rma.is_nan() {
-            let start = i + 1 - period;
-            if dir == "long" {
-                let mut m = f64::MIN;
-                for j in start..=i {
-                    if high[j] > m {
-                        m = high[j];
-                    }
-                }
-                out[i] = m - rma * mult;
+    let warmup = first + period - 1;
+
+    // Wilder's ATR via RMA over True Range, single pass
+    let mut sum_tr = 0.0f64;
+    let mut rma = 0.0f64;
+    let mut prev_close = close[first];
+
+    // Monotonic deques: store indices, access values from slices
+    use std::collections::VecDeque;
+
+    if dir == "long" {
+        // Max-deque over highs
+        let mut dq: VecDeque<usize> = VecDeque::with_capacity(period);
+        for i in first..len {
+            // True Range
+            let hi = high[i];
+            let lo = low[i];
+            let tr = if i == first {
+                hi - lo
             } else {
-                let mut m = f64::MAX;
-                for j in start..=i {
-                    if low[j] < m {
-                        m = low[j];
+                let hl = hi - lo;
+                let hc = (hi - prev_close).abs();
+                let lc = (lo - prev_close).abs();
+                hl.max(hc).max(lc)
+            };
+
+            // Maintain deque window (remove out-of-window indices once full)
+            if i >= warmup {
+                let window_start = i + 1 - period;
+                while let Some(&j) = dq.front() {
+                    if j < window_start {
+                        dq.pop_front();
+                    } else {
+                        break;
                     }
                 }
-                out[i] = m + rma * mult;
             }
+            // Push current index, maintain decreasing values
+            while let Some(&j) = dq.back() {
+                if high[j] <= hi {
+                    dq.pop_back();
+                } else {
+                    break;
+                }
+            }
+            dq.push_back(i);
+
+            // ATR update
+            if i < warmup {
+                sum_tr += tr;
+            } else if i == warmup {
+                sum_tr += tr;
+                rma = sum_tr / period as f64;
+                // Output: HighestHigh - ATR * mult using FMA
+                let max_h = high[*dq.front().expect("deque nonempty at warmup")];
+                out[i] = (-rma).mul_add(mult, max_h);
+            } else {
+                // Steady-state RMA update with FMA
+                rma = alpha.mul_add(tr - rma, rma);
+                let max_h = high[*dq.front().expect("deque nonempty in steady state")];
+                out[i] = (-rma).mul_add(mult, max_h);
+            }
+
+            prev_close = close[i];
+        }
+    } else {
+        // dir == "short": Min-deque over lows
+        let mut dq: VecDeque<usize> = VecDeque::with_capacity(period);
+        for i in first..len {
+            // True Range
+            let hi = high[i];
+            let lo = low[i];
+            let tr = if i == first {
+                hi - lo
+            } else {
+                let hl = hi - lo;
+                let hc = (hi - prev_close).abs();
+                let lc = (lo - prev_close).abs();
+                hl.max(hc).max(lc)
+            };
+
+            // Maintain deque window (remove out-of-window indices once full)
+            if i >= warmup {
+                let window_start = i + 1 - period;
+                while let Some(&j) = dq.front() {
+                    if j < window_start {
+                        dq.pop_front();
+                    } else {
+                        break;
+                    }
+                }
+            }
+            // Push current index, maintain increasing values
+            while let Some(&j) = dq.back() {
+                if low[j] >= lo {
+                    dq.pop_back();
+                } else {
+                    break;
+                }
+            }
+            dq.push_back(i);
+
+            // ATR update
+            if i < warmup {
+                sum_tr += tr;
+            } else if i == warmup {
+                sum_tr += tr;
+                rma = sum_tr / period as f64;
+                // Output: LowestLow + ATR * mult using FMA
+                let min_l = low[*dq.front().expect("deque nonempty at warmup")];
+                out[i] = rma.mul_add(mult, min_l);
+            } else {
+                // Steady-state RMA update with FMA
+                rma = alpha.mul_add(tr - rma, rma);
+                let min_l = low[*dq.front().expect("deque nonempty in steady state")];
+                out[i] = rma.mul_add(mult, min_l);
+            }
+
+            prev_close = close[i];
         }
     }
 }
@@ -500,7 +585,7 @@ pub fn chande_avx2(
     first: usize,
     out: &mut [f64],
 ) {
-    chande_scalar(high, low, close, period, mult, dir, first, out)
+    unsafe { chande_fast_unchecked(high, low, close, period, mult, dir, first, out) }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -515,11 +600,8 @@ pub fn chande_avx512(
     first: usize,
     out: &mut [f64],
 ) {
-    if period <= 32 {
-        unsafe { chande_avx512_short(high, low, close, period, mult, dir, first, out) }
-    } else {
-        unsafe { chande_avx512_long(high, low, close, period, mult, dir, first, out) }
-    }
+    // Reuse the same fast scalar-optimized kernel; AVX512 not beneficial end-to-end.
+    unsafe { chande_fast_unchecked(high, low, close, period, mult, dir, first, out) }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -534,7 +616,7 @@ pub unsafe fn chande_avx512_short(
     first: usize,
     out: &mut [f64],
 ) {
-    chande_scalar(high, low, close, period, mult, dir, first, out)
+    chande_fast_unchecked(high, low, close, period, mult, dir, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -549,7 +631,119 @@ pub unsafe fn chande_avx512_long(
     first: usize,
     out: &mut [f64],
 ) {
-    chande_scalar(high, low, close, period, mult, dir, first, out)
+    chande_fast_unchecked(high, low, close, period, mult, dir, first, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn chande_fast_unchecked(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    mult: f64,
+    dir: &str,
+    first: usize,
+    out: &mut [f64],
+) {
+    use std::collections::VecDeque;
+    let len = high.len();
+    if first >= len {
+        return;
+    }
+    let alpha = 1.0 / period as f64;
+    let warmup = first + period - 1;
+
+    let hp = high.as_ptr();
+    let lp = low.as_ptr();
+    let cp = close.as_ptr();
+    let op = out.as_mut_ptr();
+
+    let mut prev_close = *cp.add(first);
+    let mut sum_tr = 0.0f64;
+    let mut rma = 0.0f64;
+
+    if dir == "long" {
+        let mut dq: VecDeque<usize> = VecDeque::with_capacity(period);
+        for i in first..len {
+            let hi = *hp.add(i);
+            let lo = *lp.add(i);
+            let hl = hi - lo;
+            let tr = if i == first {
+                hl
+            } else {
+                let hc = (hi - prev_close).abs();
+                let lc = (lo - prev_close).abs();
+                let t = if hl >= hc { hl } else { hc };
+                if t >= lc { t } else { lc }
+            };
+
+            if i >= warmup {
+                let window_start = i + 1 - period;
+                while let Some(&j) = dq.front() {
+                    if j < window_start { dq.pop_front(); } else { break; }
+                }
+            }
+            while let Some(&j) = dq.back() {
+                if *hp.add(j) <= hi { dq.pop_back(); } else { break; }
+            }
+            dq.push_back(i);
+
+            if i < warmup {
+                sum_tr += tr;
+            } else if i == warmup {
+                sum_tr += tr;
+                rma = sum_tr / period as f64;
+                let max_h = *hp.add(*dq.front().unwrap());
+                *op.add(i) = (-rma).mul_add(mult, max_h);
+            } else {
+                rma = alpha.mul_add(tr - rma, rma);
+                let max_h = *hp.add(*dq.front().unwrap());
+                *op.add(i) = (-rma).mul_add(mult, max_h);
+            }
+            prev_close = *cp.add(i);
+        }
+    } else {
+        let mut dq: VecDeque<usize> = VecDeque::with_capacity(period);
+        for i in first..len {
+            let hi = *hp.add(i);
+            let lo = *lp.add(i);
+            let hl = hi - lo;
+            let tr = if i == first {
+                hl
+            } else {
+                let hc = (hi - prev_close).abs();
+                let lc = (lo - prev_close).abs();
+                let t = if hl >= hc { hl } else { hc };
+                if t >= lc { t } else { lc }
+            };
+
+            if i >= warmup {
+                let window_start = i + 1 - period;
+                while let Some(&j) = dq.front() {
+                    if j < window_start { dq.pop_front(); } else { break; }
+                }
+            }
+            while let Some(&j) = dq.back() {
+                if *lp.add(j) >= lo { dq.pop_back(); } else { break; }
+            }
+            dq.push_back(i);
+
+            if i < warmup {
+                sum_tr += tr;
+            } else if i == warmup {
+                sum_tr += tr;
+                rma = sum_tr / period as f64;
+                let min_l = *lp.add(*dq.front().unwrap());
+                *op.add(i) = rma.mul_add(mult, min_l);
+            } else {
+                rma = alpha.mul_add(tr - rma, rma);
+                let min_l = *lp.add(*dq.front().unwrap());
+                *op.add(i) = rma.mul_add(mult, min_l);
+            }
+            prev_close = *cp.add(i);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1095,7 +1289,7 @@ unsafe fn chande_row_avx2(
     dir: &str,
     out: &mut [f64],
 ) {
-    chande_row_scalar(high, low, close, first, period, mult, dir, out)
+    chande_fast_unchecked(high, low, close, period, mult, dir, first, out)
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
@@ -1127,7 +1321,7 @@ unsafe fn chande_row_avx512_short(
     dir: &str,
     out: &mut [f64],
 ) {
-    chande_row_scalar(high, low, close, first, period, mult, dir, out)
+    chande_fast_unchecked(high, low, close, period, mult, dir, first, out)
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
@@ -1141,7 +1335,7 @@ unsafe fn chande_row_avx512_long(
     dir: &str,
     out: &mut [f64],
 ) {
-    chande_row_scalar(high, low, close, first, period, mult, dir, out)
+    chande_fast_unchecked(high, low, close, period, mult, dir, first, out)
 }
 #[cfg(test)]
 mod tests {

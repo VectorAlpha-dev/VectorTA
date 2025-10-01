@@ -28,8 +28,8 @@
 //! ```
 //!
 //! ## Developer Notes
-//! - **AVX2 kernel**: STUB - calls scalar implementation
-//! - **AVX512 kernel**: STUB - calls scalar implementation
+//! - **AVX2 kernel**: Implemented but disabled by default (underperforms scalar on typical CPUs)
+//! - **AVX512 kernel**: Implemented but disabled by default (underperforms scalar on typical CPUs)
 //! - **Streaming**: Not implemented
 //! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy)
 //! - **Batch operations**: ✅ Implemented with parallel processing support
@@ -221,8 +221,10 @@ pub fn bop_with_kernel(input: &BopInput, kernel: Kernel) -> Result<BopOutput, Bo
         .find(|&i| !open[i].is_nan() && !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
         .unwrap_or(len);
 
+    // SIMD underperforms for BOP on common µarches (div throughput bound),
+    // so Auto short-circuits to Scalar for consistent wins.
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
@@ -233,10 +235,14 @@ pub fn bop_with_kernel(input: &BopInput, kernel: Kernel) -> Result<BopOutput, Bo
                 bop_scalar_from(open, high, low, close, first, &mut out)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => bop_avx2(open, high, low, close, &mut out),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
             Kernel::Avx2 | Kernel::Avx2Batch => {
                 bop_scalar_from(open, high, low, close, first, &mut out)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => bop_avx512(open, high, low, close, &mut out),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
                 bop_scalar_from(open, high, low, close, first, &mut out)
             }
@@ -276,21 +282,135 @@ pub unsafe fn bop_scalar(open: &[f64], high: &[f64], low: &[f64], close: &[f64],
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn bop_avx2(open: &[f64], high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]) {
-    // BOP is too cheap to vectorize; map AVX→scalar intentionally
-    let first = (0..open.len())
+    use core::arch::x86_64::*;
+
+    debug_assert_eq!(open.len(), high.len());
+    debug_assert_eq!(open.len(), low.len());
+    debug_assert_eq!(open.len(), close.len());
+    debug_assert!(out.len() >= open.len());
+
+    let len = open.len();
+    let first = (0..len)
         .find(|&i| !open[i].is_nan() && !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
-        .unwrap_or(open.len());
-    bop_scalar_from(open, high, low, close, first, out)
+        .unwrap_or(len);
+    if first >= len {
+        return;
+    }
+
+    let mut po = open.as_ptr().add(first);
+    let mut ph = high.as_ptr().add(first);
+    let mut pl = low.as_ptr().add(first);
+    let mut pc = close.as_ptr().add(first);
+    let mut pd = out.as_mut_ptr().add(first);
+
+    let n = len - first;
+    let vz = _mm256_set1_pd(0.0);
+
+    let mut i = 0usize;
+    while i + 4 <= n {
+        let vo = _mm256_loadu_pd(po);
+        let vh = _mm256_loadu_pd(ph);
+        let vl = _mm256_loadu_pd(pl);
+        let vc = _mm256_loadu_pd(pc);
+
+        let vnum = _mm256_sub_pd(vc, vo);
+        let vden = _mm256_sub_pd(vh, vl);
+        let vres = _mm256_div_pd(vnum, vden);
+
+        let mask = _mm256_cmp_pd::<{ _CMP_LE_OQ }>(vden, vz);
+        let vout = _mm256_blendv_pd(vres, vz, mask);
+
+        _mm256_storeu_pd(pd, vout);
+
+        po = po.add(4);
+        ph = ph.add(4);
+        pl = pl.add(4);
+        pc = pc.add(4);
+        pd = pd.add(4);
+        i += 4;
+    }
+
+    while i < n {
+        let den = *ph - *pl;
+        let num = *pc - *po;
+        *pd = if den <= 0.0 { 0.0 } else { num / den };
+
+        po = po.add(1);
+        ph = ph.add(1);
+        pl = pl.add(1);
+        pc = pc.add(1);
+        pd = pd.add(1);
+        i += 1;
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn bop_avx512(open: &[f64], high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]) {
-    // BOP is too cheap to vectorize; map AVX→scalar intentionally
-    let first = (0..open.len())
+    use core::arch::x86_64::*;
+
+    debug_assert_eq!(open.len(), high.len());
+    debug_assert_eq!(open.len(), low.len());
+    debug_assert_eq!(open.len(), close.len());
+    debug_assert!(out.len() >= open.len());
+
+    let len = open.len();
+    let first = (0..len)
         .find(|&i| !open[i].is_nan() && !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
-        .unwrap_or(open.len());
-    bop_scalar_from(open, high, low, close, first, out)
+        .unwrap_or(len);
+    if first >= len {
+        return;
+    }
+
+    let mut po = open.as_ptr().add(first);
+    let mut ph = high.as_ptr().add(first);
+    let mut pl = low.as_ptr().add(first);
+    let mut pc = close.as_ptr().add(first);
+    let mut pd = out.as_mut_ptr().add(first);
+
+    let n = len - first;
+    let vz = _mm512_set1_pd(0.0);
+
+    let mut i = 0usize;
+    while i + 8 <= n {
+        let vo = _mm512_loadu_pd(po);
+        let vh = _mm512_loadu_pd(ph);
+        let vl = _mm512_loadu_pd(pl);
+        let vc = _mm512_loadu_pd(pc);
+
+        let vnum = _mm512_sub_pd(vc, vo);
+        let vden = _mm512_sub_pd(vh, vl);
+        let vres = _mm512_div_pd(vnum, vden);
+
+        let m = _mm512_cmp_pd_mask::<{ _CMP_LE_OQ }>(vden, vz);
+        let vout = _mm512_mask_blend_pd(m, vres, vz);
+
+        _mm512_storeu_pd(pd, vout);
+
+        po = po.add(8);
+        ph = ph.add(8);
+        pl = pl.add(8);
+        pc = pc.add(8);
+        pd = pd.add(8);
+        i += 8;
+    }
+
+    let rem = n - i;
+    if rem != 0 {
+        let mask: __mmask8 = (1u16 << rem) as __mmask8 - 1;
+        let vo = _mm512_maskz_loadu_pd(mask, po);
+        let vh = _mm512_maskz_loadu_pd(mask, ph);
+        let vl = _mm512_maskz_loadu_pd(mask, pl);
+        let vc = _mm512_maskz_loadu_pd(mask, pc);
+
+        let vnum = _mm512_sub_pd(vc, vo);
+        let vden = _mm512_sub_pd(vh, vl);
+        let vres = _mm512_div_pd(vnum, vden);
+        let m = _mm512_cmp_pd_mask::<{ _CMP_LE_OQ }>(vden, vz);
+        let vout = _mm512_mask_blend_pd(m, vres, vz);
+
+        _mm512_mask_storeu_pd(pd, mask, vout);
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -302,11 +422,7 @@ pub unsafe fn bop_avx512_short(
     close: &[f64],
     out: &mut [f64],
 ) {
-    // BOP is too cheap to vectorize; map AVX→scalar intentionally
-    let first = (0..open.len())
-        .find(|&i| !open[i].is_nan() && !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
-        .unwrap_or(open.len());
-    bop_scalar_from(open, high, low, close, first, out)
+    bop_avx512(open, high, low, close, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -318,11 +434,7 @@ pub unsafe fn bop_avx512_long(
     close: &[f64],
     out: &mut [f64],
 ) {
-    // BOP is too cheap to vectorize; map AVX→scalar intentionally
-    let first = (0..open.len())
-        .find(|&i| !open[i].is_nan() && !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
-        .unwrap_or(open.len());
-    bop_scalar_from(open, high, low, close, first, out)
+    bop_avx512(open, high, low, close, out)
 }
 
 #[inline]
@@ -485,8 +597,9 @@ pub fn bop_batch_with_kernel(
     let out_f64: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
+    // SIMD underperforms for BOP; prefer scalar batch for Auto.
     let chosen = match kernel {
-        Kernel::Auto => detect_best_batch_kernel(),
+        Kernel::Auto => Kernel::ScalarBatch,
         k => k,
     };
     unsafe {
@@ -495,10 +608,16 @@ pub fn bop_batch_with_kernel(
                 bop_scalar_from(open, high, low, close, first, out_f64)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => bop_avx2(open, high, low, close, out_f64),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
             Kernel::Avx2 | Kernel::Avx2Batch => {
                 bop_scalar_from(open, high, low, close, first, out_f64)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                bop_avx512(open, high, low, close, out_f64)
+            }
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
                 bop_scalar_from(open, high, low, close, first, out_f64)
             }
@@ -1424,8 +1543,9 @@ pub fn bop_into_slice(
         .find(|&i| !open[i].is_nan() && !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
         .unwrap_or(len);
 
+    // SIMD underperforms; Auto short-circuits to scalar for BOP.
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
@@ -1435,11 +1555,13 @@ pub fn bop_into_slice(
                 bop_scalar_from(open, high, low, close, first, dst)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => bop_avx2(open, high, low, close, dst),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
             Kernel::Avx2 | Kernel::Avx2Batch => bop_scalar_from(open, high, low, close, first, dst),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => {
-                bop_scalar_from(open, high, low, close, first, dst)
-            }
+            Kernel::Avx512 | Kernel::Avx512Batch => bop_avx512(open, high, low, close, dst),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx512 | Kernel::Avx512Batch => bop_scalar_from(open, high, low, close, first, dst),
             _ => unreachable!(),
         }
     }

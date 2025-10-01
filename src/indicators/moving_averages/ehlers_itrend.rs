@@ -12,10 +12,11 @@
 //! - **values**: Instantaneous trendline with adaptive smoothing
 //!
 //! ## Developer Status
-//! - **AVX2 kernel**: NOT APPLICABLE - Inherently sequential algorithm
-//! - **AVX512 kernel**: NOT APPLICABLE - Inherently sequential algorithm
+//! - **AVX2 kernel**: Disabled (delegates to scalar) — inherently sequential per-step state
+//! - **AVX512 kernel**: Disabled (delegates to scalar) — inherently sequential per-step state
 //! - **Streaming update**: O(1) - Efficient incremental calculation
 //! - **Memory optimization**: GOOD - Uses zero-copy helpers (alloc_with_nan_prefix)
+//! - **Batch note**: Row-specific batch reuses a shared 4-tap WMA (fir) precompute across rows
 //! - **Overall status**: WELL-OPTIMIZED - Algorithm inherently sequential, streaming is efficient
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -231,8 +232,13 @@ pub fn ehlers_itrend_scalar_tail(
     let mut ring_ptr = 0usize;
 
     #[inline(always)]
-    fn get_ring(buf: &[f64; 7], center: usize, offset: usize) -> f64 {
-        buf[(7 + center - offset) % 7]
+    fn ring_get(buf: &[f64; 7], center: usize, off: usize) -> f64 {
+        // Compute (center + 7 - off) % 7 without modulo
+        let mut idx = center + 7 - off;
+        if idx >= 7 {
+            idx -= 7;
+        }
+        buf[idx]
     }
 
     for i in 0..length {
@@ -244,37 +250,37 @@ pub fn ehlers_itrend_scalar_tail(
         let fir_val = (4.0 * x0 + 3.0 * x1 + 2.0 * x2 + x3) / 10.0;
         fir_buf[ring_ptr] = fir_val;
 
-        let fir_0 = get_ring(&fir_buf, ring_ptr, 0);
-        let fir_2 = get_ring(&fir_buf, ring_ptr, 2);
-        let fir_4 = get_ring(&fir_buf, ring_ptr, 4);
-        let fir_6 = get_ring(&fir_buf, ring_ptr, 6);
+        let fir_0 = ring_get(&fir_buf, ring_ptr, 0);
+        let fir_2 = ring_get(&fir_buf, ring_ptr, 2);
+        let fir_4 = ring_get(&fir_buf, ring_ptr, 4);
+        let fir_6 = ring_get(&fir_buf, ring_ptr, 6);
 
         let h_in = 0.0962 * fir_0 + 0.5769 * fir_2 - 0.5769 * fir_4 - 0.0962 * fir_6;
         let period_mult = 0.075 * prev_mesa + 0.54;
         let det_val = h_in * period_mult;
         det_buf[ring_ptr] = det_val;
 
-        let i1_val = get_ring(&det_buf, ring_ptr, 3);
+        let i1_val = ring_get(&det_buf, ring_ptr, 3);
         i1_buf[ring_ptr] = i1_val;
 
-        let det_0 = get_ring(&det_buf, ring_ptr, 0);
-        let det_2 = get_ring(&det_buf, ring_ptr, 2);
-        let det_4 = get_ring(&det_buf, ring_ptr, 4);
-        let det_6 = get_ring(&det_buf, ring_ptr, 6);
+        let det_0 = ring_get(&det_buf, ring_ptr, 0);
+        let det_2 = ring_get(&det_buf, ring_ptr, 2);
+        let det_4 = ring_get(&det_buf, ring_ptr, 4);
+        let det_6 = ring_get(&det_buf, ring_ptr, 6);
         let h_in_q1 = 0.0962 * det_0 + 0.5769 * det_2 - 0.5769 * det_4 - 0.0962 * det_6;
         let q1_val = h_in_q1 * period_mult;
         q1_buf[ring_ptr] = q1_val;
 
-        let i1_0 = get_ring(&i1_buf, ring_ptr, 0);
-        let i1_2 = get_ring(&i1_buf, ring_ptr, 2);
-        let i1_4 = get_ring(&i1_buf, ring_ptr, 4);
-        let i1_6 = get_ring(&i1_buf, ring_ptr, 6);
+        let i1_0 = ring_get(&i1_buf, ring_ptr, 0);
+        let i1_2 = ring_get(&i1_buf, ring_ptr, 2);
+        let i1_4 = ring_get(&i1_buf, ring_ptr, 4);
+        let i1_6 = ring_get(&i1_buf, ring_ptr, 6);
         let j_i_val = (0.0962 * i1_0 + 0.5769 * i1_2 - 0.5769 * i1_4 - 0.0962 * i1_6) * period_mult;
 
-        let q1_0 = get_ring(&q1_buf, ring_ptr, 0);
-        let q1_2 = get_ring(&q1_buf, ring_ptr, 2);
-        let q1_4 = get_ring(&q1_buf, ring_ptr, 4);
-        let q1_6 = get_ring(&q1_buf, ring_ptr, 6);
+        let q1_0 = ring_get(&q1_buf, ring_ptr, 0);
+        let q1_2 = ring_get(&q1_buf, ring_ptr, 2);
+        let q1_4 = ring_get(&q1_buf, ring_ptr, 4);
+        let q1_6 = ring_get(&q1_buf, ring_ptr, 6);
         let j_q_val = (0.0962 * q1_0 + 0.5769 * q1_2 - 0.5769 * q1_4 - 0.0962 * q1_6) * period_mult;
 
         let mut i2_cur = 0.2 * (i1_val - j_q_val) + 0.8 * prev_i2;
@@ -313,7 +319,10 @@ pub fn ehlers_itrend_scalar_tail(
         dcp = dcp.clamp(1, max_dc);
 
         sum_ring[sum_idx] = x0;
-        sum_idx = (sum_idx + 1) % max_dc;
+        sum_idx += 1;
+        if sum_idx == max_dc {
+            sum_idx = 0;
+        }
         let mut sum_src = 0.0;
         let mut idx2 = sum_idx;
         for _ in 0..dcp {
@@ -335,7 +344,10 @@ pub fn ehlers_itrend_scalar_tail(
         if i >= warm {
             out[i] = eit_val; // preserve NaN prefix
         }
-        ring_ptr = (ring_ptr + 1) % 7;
+        ring_ptr += 1;
+        if ring_ptr == 7 {
+            ring_ptr = 0;
+        }
     }
 }
 
@@ -564,7 +576,8 @@ pub unsafe fn ehlers_itrend_unsafe_scalar(
     let mut det = [0.0; 7];
     let mut i1 = [0.0; 7];
     let mut q1 = [0.0; 7];
-    let mut sum = [0.0; 64];
+    // Use dynamic ring sized to max_dc to avoid overflow when max_dc > 64
+    let mut sum: Vec<f64> = vec![0.0; max_dc];
 
     let (mut i2p, mut q2p, mut rep, mut imp) = (0.0, 0.0, 0.0, 0.0);
     let (mut mesa_p, mut sm_p) = (0.0, 0.0);
@@ -639,7 +652,7 @@ pub unsafe fn ehlers_itrend_unsafe_scalar(
 
         let dcp = sp_v.round().clamp(1.0, max_dc as f64) as usize;
 
-        sum[sp] = x0;
+        *sum.get_unchecked_mut(sp) = x0;
         sp += 1;
         if sp == max_dc {
             sp = 0;
@@ -649,7 +662,7 @@ pub unsafe fn ehlers_itrend_unsafe_scalar(
         let mut j = sp;
         for _ in 0..dcp {
             j = if j == 0 { max_dc - 1 } else { j - 1 };
-            acc += sum[j];
+            acc += *sum.get_unchecked(j);
         }
         let it = acc / dcp as f64;
 
@@ -1113,6 +1126,23 @@ fn ehlers_itrend_batch_inner_into(
         core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
 
+    // Precompute shared 4-tap WMA smoother (fir) once for all rows
+    #[inline(always)]
+    fn precompute_wma4(src: &[f64]) -> Vec<f64> {
+        let n = src.len();
+        let mut fir = Vec::with_capacity(n);
+        for i in 0..n {
+            let x0 = src[i];
+            let x1 = if i >= 1 { src[i - 1] } else { 0.0 };
+            let x2 = if i >= 2 { src[i - 2] } else { 0.0 };
+            let x3 = if i >= 3 { src[i - 3] } else { 0.0 };
+            fir.push((4.0 * x0 + 3.0 * x1 + 2.0 * x2 + x3) / 10.0);
+        }
+        fir
+    }
+
+    let fir_series = precompute_wma4(data);
+
     // ────────────────────────────────────────────────────────────────────
     // ❸ closure that writes one row; receives &mut [MaybeUninit<f64>]
     //     and casts that slice to &mut [f64] for the kernel call
@@ -1122,7 +1152,7 @@ fn ehlers_itrend_batch_inner_into(
         let warmup = p.warmup_bars.unwrap();
         let max_dc = p.max_dc_period.unwrap();
         let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
-        ehlers_itrend_row_scalar_tail(data, warmup, max_dc, first, dst);
+        ehlers_itrend_row_scalar_tail_with_fir(data, &fir_series, warmup, max_dc, first, dst);
     };
 
     // ────────────────────────────────────────────────────────────────────
@@ -1229,6 +1259,156 @@ pub fn ehlers_itrend_row_scalar_tail(
 ) {
     let warm = warm_index(first, warmup_bars);
     ehlers_itrend_scalar_tail(data, warmup_bars, max_dc, first, warm, out);
+}
+
+#[inline(always)]
+fn ehlers_itrend_row_scalar_tail_with_fir(
+    data: &[f64],
+    fir: &[f64],
+    warmup_bars: usize,
+    max_dc: usize,
+    first: usize,
+    out: &mut [f64],
+) {
+    debug_assert_eq!(data.len(), fir.len());
+    debug_assert_eq!(data.len(), out.len());
+
+    let warm = warm_index(first, warmup_bars);
+
+    let length = data.len();
+    let mut fir_buf = [0.0; 7];
+    let mut det_buf = [0.0; 7];
+    let mut i1_buf = [0.0; 7];
+    let mut q1_buf = [0.0; 7];
+    let (mut prev_i2, mut prev_q2) = (0.0, 0.0);
+    let (mut prev_re, mut prev_im) = (0.0, 0.0);
+    let (mut prev_mesa, mut prev_smooth) = (0.0, 0.0);
+    let mut sum_ring = vec![0.0; max_dc];
+    let mut sum_idx = 0usize;
+    let (mut prev_it1, mut prev_it2, mut prev_it3) = (0.0, 0.0, 0.0);
+    let mut ring_ptr = 0usize;
+
+    #[inline(always)]
+    fn ring_get(buf: &[f64; 7], center: usize, off: usize) -> f64 {
+        let mut idx = center + 7 - off;
+        if idx >= 7 {
+            idx -= 7;
+        }
+        buf[idx]
+    }
+
+    for i in 0..length {
+        let x0 = data[i];
+
+        let fir_val = fir[i];
+        fir_buf[ring_ptr] = fir_val;
+
+        let fir_0 = ring_get(&fir_buf, ring_ptr, 0);
+        let fir_2 = ring_get(&fir_buf, ring_ptr, 2);
+        let fir_4 = ring_get(&fir_buf, ring_ptr, 4);
+        let fir_6 = ring_get(&fir_buf, ring_ptr, 6);
+
+        let h_in = 0.0962 * fir_0 + 0.5769 * fir_2 - 0.5769 * fir_4 - 0.0962 * fir_6;
+        let period_mult = 0.075 * prev_mesa + 0.54;
+        let det_val = h_in * period_mult;
+        det_buf[ring_ptr] = det_val;
+
+        let i1_val = ring_get(&det_buf, ring_ptr, 3);
+        i1_buf[ring_ptr] = i1_val;
+
+        let det_0 = ring_get(&det_buf, ring_ptr, 0);
+        let det_2 = ring_get(&det_buf, ring_ptr, 2);
+        let det_4 = ring_get(&det_buf, ring_ptr, 4);
+        let det_6 = ring_get(&det_buf, ring_ptr, 6);
+        let h_in_q1 = 0.0962 * det_0 + 0.5769 * det_2 - 0.5769 * det_4 - 0.0962 * det_6;
+        let q1_val = h_in_q1 * period_mult;
+        q1_buf[ring_ptr] = q1_val;
+
+        let i1_0 = ring_get(&i1_buf, ring_ptr, 0);
+        let i1_2 = ring_get(&i1_buf, ring_ptr, 2);
+        let i1_4 = ring_get(&i1_buf, ring_ptr, 4);
+        let i1_6 = ring_get(&i1_buf, ring_ptr, 6);
+        let j_i_val = (0.0962 * i1_0 + 0.5769 * i1_2 - 0.5769 * i1_4 - 0.0962 * i1_6) * period_mult;
+
+        let q1_0 = ring_get(&q1_buf, ring_ptr, 0);
+        let q1_2 = ring_get(&q1_buf, ring_ptr, 2);
+        let q1_4 = ring_get(&q1_buf, ring_ptr, 4);
+        let q1_6 = ring_get(&q1_buf, ring_ptr, 6);
+        let j_q_val = (0.0962 * q1_0 + 0.5769 * q1_2 - 0.5769 * q1_4 - 0.0962 * q1_6) * period_mult;
+
+        let mut i2_cur = i1_val - j_q_val;
+        let mut q2_cur = q1_val + j_i_val;
+        i2_cur = 0.2 * i2_cur + 0.8 * prev_i2;
+        q2_cur = 0.2 * q2_cur + 0.8 * prev_q2;
+
+        let re_val = i2_cur * prev_i2 + q2_cur * prev_q2;
+        let im_val = i2_cur * prev_q2 - q2_cur * prev_i2;
+        prev_i2 = i2_cur;
+        prev_q2 = q2_cur;
+
+        let re_smooth = 0.2 * re_val + 0.8 * prev_re;
+        let im_smooth = 0.2 * im_val + 0.8 * prev_im;
+        prev_re = re_smooth;
+        prev_im = im_smooth;
+
+        let mut new_mesa = 0.0;
+        if re_smooth != 0.0 && im_smooth != 0.0 {
+            new_mesa = 2.0 * core::f64::consts::PI / (im_smooth / re_smooth).atan();
+        }
+        let up_lim = 1.5 * prev_mesa;
+        if new_mesa > up_lim {
+            new_mesa = up_lim;
+        }
+        let low_lim = 0.67 * prev_mesa;
+        if new_mesa < low_lim {
+            new_mesa = low_lim;
+        }
+        new_mesa = new_mesa.clamp(6.0, 50.0);
+        let final_mesa = 0.2 * new_mesa + 0.8 * prev_mesa;
+        prev_mesa = final_mesa;
+        let sp_val = 0.33 * final_mesa + 0.67 * prev_smooth;
+        prev_smooth = sp_val;
+
+        let mut dcp = (sp_val + 0.5).floor() as usize;
+        if dcp == 0 {
+            dcp = 1;
+        } else if dcp > max_dc {
+            dcp = max_dc;
+        }
+
+        // mean of last dcp of original data
+        sum_ring[sum_idx] = x0;
+        sum_idx += 1;
+        if sum_idx == max_dc {
+            sum_idx = 0;
+        }
+        let mut sum_src = 0.0;
+        let mut idx2 = sum_idx;
+        for _ in 0..dcp {
+            idx2 = if idx2 == 0 { max_dc - 1 } else { idx2 - 1 };
+            sum_src += sum_ring[idx2];
+        }
+        let it_val = sum_src / dcp as f64;
+
+        let eit_val = if i < warmup_bars {
+            x0
+        } else {
+            (4.0 * it_val + 3.0 * prev_it1 + 2.0 * prev_it2 + prev_it3) / 10.0
+        };
+
+        prev_it3 = prev_it2;
+        prev_it2 = prev_it1;
+        prev_it1 = it_val;
+
+        if i >= warm {
+            out[i] = eit_val;
+        }
+
+        ring_ptr += 1;
+        if ring_ptr == 7 {
+            ring_ptr = 0;
+        }
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────

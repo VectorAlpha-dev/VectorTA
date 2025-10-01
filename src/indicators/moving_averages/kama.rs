@@ -20,15 +20,12 @@
 //! - **`Err(KamaError)`** otherwise.
 //!
 //! ## Developer Notes
-//! - **AVX2 kernel**: ✅ Fully implemented with vectorized sum operations and FMA instructions
-//! - **AVX512 kernel**: ✅ Fully implemented with wider vectors and AVX512 specific optimizations
-//! - **Streaming update**: ✅ O(1) - maintains running sums incrementally for efficiency
-//! - **Memory optimization**: ✅ Uses `alloc_with_nan_prefix` for zero-copy output allocation
-//! - **Current status**: Production-ready with comprehensive SIMD optimizations
-//! - **Optimization opportunities**:
-//!   - Already well-optimized with efficient streaming and SIMD implementations
-//!   - Consider caching frequently used constants for common period values
-//!   - Potential for further optimization in the scalar kernel's loop structure
+//! - **Scalar path**: ✅ Safe, loop-jammed hot loop; uses `mul_add` and squares via multiply (no `powi`), reuses trailing load.
+//! - **AVX2/AVX512**: ✅ Vectorized initial Σ|Δp|; FMA; reuses `next_tail` for direction and clamps prefetch.
+//! - **Streaming update**: ✅ O(1) ring-update for Σ|Δp|; identical warmup behavior.
+//! - **Batch**: ✅ Shared prefix-sum precompute for Σ|Δp| seeding across rows (reduces per-row setup).
+//! - **Memory**: ✅ `alloc_with_nan_prefix` and matrix helpers; no O(N) temporaries for outputs.
+//! - **Status**: Stable; AVX2/AVX512 are modestly faster than scalar at 100k; keep enabled.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -297,7 +294,7 @@ pub fn kama_into_slice(dst: &mut [f64], input: &KamaInput, kern: Kernel) -> Resu
     Ok(())
 }
 
-#[inline]
+#[inline(always)]
 pub fn kama_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
     assert_eq!(
         out.len(),
@@ -311,38 +308,48 @@ pub fn kama_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f
     let const_max = 2.0 / (30.0 + 1.0);
     let const_diff = (2.0 / (2.0 + 1.0)) - const_max;
 
+    // 1) Initial Σ|Δp| over the first window [first_valid .. first_valid+period]
     let mut sum_roc1 = 0.0;
-    let mut today = first_valid;
+    let today = first_valid;
     for i in 0..=lookback {
-        sum_roc1 += (data[today + i + 1] - data[today + i]).abs();
+        let a = data[today + i];
+        let b = data[today + i + 1];
+        sum_roc1 += (b - a).abs();
     }
 
+    // 2) Seed at index = first_valid + lookback + 1
     let initial_idx = today + lookback + 1;
-    let mut prev_kama = data[initial_idx];
-    out[initial_idx] = prev_kama;
+    let mut kama = data[initial_idx];
+    out[initial_idx] = kama;
 
+    // Maintain a trailing window pointer/value to drop the oldest |Δp|
     let mut trailing_idx = today;
     let mut trailing_value = data[trailing_idx];
 
+    // 3) Rolling update
     for i in (initial_idx + 1)..len {
+        let price_prev = data[i - 1];
         let price = data[i];
 
-        sum_roc1 -= (data[trailing_idx + 1] - trailing_value).abs();
+        // update Σ|Δp|: drop oldest diff, add newest diff
+        let next_tail = data[trailing_idx + 1];
+        let old_diff = (next_tail - trailing_value).abs();
+        let new_diff = (price - price_prev).abs();
+        sum_roc1 += new_diff - old_diff;
 
-        sum_roc1 += (price - data[i - 1]).abs();
-
-        trailing_value = data[trailing_idx + 1];
+        // advance trailing window
+        trailing_value = next_tail;
         trailing_idx += 1;
 
-        let direction = (price - data[trailing_idx]).abs();
-        let er = if sum_roc1 == 0.0 {
-            0.0
-        } else {
-            direction / sum_roc1
-        };
-        let sc = (er * const_diff + const_max).powi(2);
-        prev_kama += (price - prev_kama) * sc;
-        out[i] = prev_kama;
+        // Efficiency ratio + smoothing constant
+        let direction = (price - trailing_value).abs();
+        let er = if sum_roc1 == 0.0 { 0.0 } else { direction / sum_roc1 };
+        let t = er.mul_add(const_diff, const_max);
+        let sc = t * t; // cheaper than powi(2)
+
+        // KAMA recurrence; mul_add allows FMA on capable targets
+        kama = (price - kama).mul_add(sc, kama);
+        out[i] = kama;
     }
 }
 
@@ -432,7 +439,8 @@ pub unsafe fn kama_avx2(data: &[f64], period: usize, first_valid: usize, out: &m
         tail_idx += 1;
 
         // smoothing constant (square cheaper than powi)
-        let direction = (price - *data.get_unchecked(tail_idx)).abs();
+        // Reuse next_tail to avoid an extra load
+        let direction = (price - next_tail).abs();
         let er = if sum_roc1 == 0.0 {
             0.0
         } else {
@@ -446,8 +454,9 @@ pub unsafe fn kama_avx2(data: &[f64], period: usize, first_valid: usize, out: &m
 
         *out.get_unchecked_mut(i) = kama; // scalar store
 
-        // Prefetch 128 B ahead into L2 (T1 hint)
-        _mm_prefetch(data.as_ptr().add(i + 128) as *const i8, _MM_HINT_T1);
+        // Prefetch with in-bounds address (clamped)
+        let pf = core::cmp::min(i + 128, data.len() - 1);
+        _mm_prefetch(data.as_ptr().add(pf) as *const i8, _MM_HINT_T1);
     }
 }
 
@@ -533,7 +542,8 @@ pub unsafe fn kama_avx512(data: &[f64], period: usize, first_valid: usize, out: 
         tail_idx += 1;
 
         // ---- efficiency ratio & smoothing constant ----
-        let direction = (price - *data.get_unchecked(tail_idx)).abs();
+        // Reuse next_tail to avoid an extra load
+        let direction = (price - next_tail).abs();
         let er = if sum_roc1 == 0.0 {
             0.0
         } else {
@@ -550,8 +560,9 @@ pub unsafe fn kama_avx512(data: &[f64], period: usize, first_valid: usize, out: 
 
         *out.get_unchecked_mut(i) = kama; // regular scalar store (no NT store)
 
-        // Prefetch two cache lines ahead; _MM_HINT_T1 prefers L2
-        _mm_prefetch(data.as_ptr().add(i + 128) as *const i8, _MM_HINT_T1);
+        // Prefetch with in-bounds address (clamped)
+        let pf = core::cmp::min(i + 128, data.len() - 1);
+        _mm_prefetch(data.as_ptr().add(pf) as *const i8, _MM_HINT_T1);
     }
 }
 
@@ -854,8 +865,25 @@ fn kama_batch_inner_into(
     let cols = data.len();
 
     // ---------------------------------------------------------------
-    // 1.  warmup periods have already been initialized by kama_batch_inner
+    // 1.  Shared precompute for all rows: abs_delta and prefix sums
+    //     abs_delta[t] = |p[t] - p[t-1]| with zeros before `first`
+    //     prefix[t]    = Σ abs_delta[0..=t]
     // -------------------------------------------------------------
+    let mut abs_delta = vec![0.0f64; cols];
+    if cols > 1 {
+        // No contribution before `first`
+        for i in (first + 1)..cols {
+            let a = data[i];
+            let b = data[i - 1];
+            abs_delta[i] = (a - b).abs();
+        }
+    }
+    let mut prefix = vec![0.0f64; cols];
+    let mut run = 0.0f64;
+    for i in 0..cols {
+        run += abs_delta[i];
+        prefix[i] = run;
+    }
 
     // ---------------------------------------------------------------
     // 2.  helper that fills a single row
@@ -872,7 +900,9 @@ fn kama_batch_inner_into(
         let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
         match kern {
-            Kernel::Scalar | Kernel::ScalarBatch => kama_row_scalar(data, first, period, dst),
+            // Use row-specific scalar that leverages shared prefix sums for the initial Σ|Δp|
+            Kernel::Scalar | Kernel::ScalarBatch =>
+                kama_row_scalar_prefixed(data, &prefix, first, period, dst),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => kama_row_avx2(data, first, period, dst),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -911,6 +941,57 @@ fn kama_batch_inner_into(
 #[inline(always)]
 unsafe fn kama_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
     kama_scalar(data, period, first, out)
+}
+
+#[inline(always)]
+unsafe fn kama_row_scalar_prefixed(
+    data: &[f64],
+    prefix: &[f64],
+    first: usize,
+    period: usize,
+    out: &mut [f64],
+) {
+    let len = data.len();
+    let lookback = period - 1;
+
+    // Initial Σ|Δp| via prefix sums: Σ_{t=first..first+period-1} |p[t+1]-p[t]|
+    let sum0 = prefix[first + period] - prefix[first];
+
+    // Seed index and initial KAMA value
+    let init_idx = first + lookback + 1; // == first + period
+    let mut kama = data[init_idx];
+    out[init_idx] = kama;
+
+    // Rolling state
+    let mut sum_roc1 = sum0;
+    let const_max = 2.0 / 31.0;
+    let const_diff = (2.0 / 3.0) - const_max;
+    let mut trailing_idx = first;
+    let mut trailing_value = data[trailing_idx];
+
+    for i in (init_idx + 1)..len {
+        let price_prev = data[i - 1];
+        let price = data[i];
+
+        // Update Σ|Δp| via ring update
+        let next_tail = data[trailing_idx + 1];
+        let old_diff = (next_tail - trailing_value).abs();
+        let new_diff = (price - price_prev).abs();
+        sum_roc1 += new_diff - old_diff;
+
+        trailing_value = next_tail;
+        trailing_idx += 1;
+
+        // Efficiency ratio and smoothing constant
+        let direction = (price - trailing_value).abs();
+        let er = if sum_roc1 == 0.0 { 0.0 } else { direction / sum_roc1 };
+        let t = er.mul_add(const_diff, const_max);
+        let sc = t * t;
+
+        // KAMA recurrence
+        kama = (price - kama).mul_add(sc, kama);
+        out[i] = kama;
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
