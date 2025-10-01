@@ -16,11 +16,11 @@
 //! - **changed**: Trend change signal as `Vec<f64>` (1.0 for change, 0.0 otherwise)
 //!
 //! ## Developer Notes
-//! - **AVX2/AVX512 kernels**: Currently stubs that call scalar implementation
-//! - **Streaming update**: O(1) performance with embedded ATR stream and efficient state tracking
-//! - **Memory optimization**: Properly uses zero-copy helper functions (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
-//! - **TODO**: Implement actual SIMD kernels for AVX2/AVX512
-//! - **Note**: Streaming implementation is well-optimized with ATR stream integration
+//! - SIMD status: Implemented as stubs delegating to scalar. Disabled by default due to sequential data dependency across time steps; no clear win over scalar. Revisit only with a different layout or algorithmic change.
+//! - Scalar path: Hot loop optimized (state tracking, fewer branches, tight indexing). No extra allocations.
+//! - Batch path: Row-specific optimization — ATR is precomputed once per unique period and reused across rows.
+//! - Streaming update: O(1) with embedded ATR stream and efficient state tracking.
+//! - Memory: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes).
 
 use crate::indicators::atr::{atr, AtrData, AtrError, AtrInput, AtrOutput, AtrParams};
 use crate::utilities::data_loader::{source_type, Candles};
@@ -43,6 +43,7 @@ use rayon::prelude::*;
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
 use std::convert::AsRef;
+use std::collections::HashMap;
 use thiserror::Error;
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
@@ -332,6 +333,20 @@ fn supertrend_compute_into(
                     changed_out,
                 );
             }
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                supertrend_scalar(
+                    high,
+                    low,
+                    close,
+                    period,
+                    factor,
+                    first_valid_idx,
+                    &atr_values,
+                    trend_out,
+                    changed_out,
+                );
+            }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => {
                 supertrend_avx2(
@@ -430,78 +445,89 @@ pub fn supertrend_scalar(
     changed: &mut [f64],
 ) {
     let len = high.len();
-    if first_valid_idx + period > len {
+    let start = first_valid_idx + period;
+    if start > len {
         return;
     }
 
-    // Initialize first valid point
-    let warmup_idx = first_valid_idx + period - 1;
-    let half_range = (high[warmup_idx] + low[warmup_idx]) / 2.0;
-    let mut prev_upper_band = half_range + factor * atr_values[period - 1];
-    let mut prev_lower_band = half_range - factor * atr_values[period - 1];
+    // SAFETY: All pointer arithmetic is guarded by bounds derived from inputs above.
+    unsafe {
+        let h_ptr = high.as_ptr();
+        let l_ptr = low.as_ptr();
+        let c_ptr = close.as_ptr();
+        let atr_ptr = atr_values.as_ptr();
+        let tr_ptr = trend.as_mut_ptr();
+        let ch_ptr = changed.as_mut_ptr();
 
-    // Set initial trend based on close position
-    if close[warmup_idx] <= prev_upper_band {
-        trend[warmup_idx] = prev_upper_band;
-    } else {
-        trend[warmup_idx] = prev_lower_band;
-    }
-    changed[warmup_idx] = 0.0;
+        // Warmup output index and initial bands
+        let warmup = start - 1;
+        let hw = *h_ptr.add(warmup);
+        let lw = *l_ptr.add(warmup);
+        let hl2_w = (hw + lw) * 0.5;
+        let atr_w = *atr_ptr.add(period - 1);
+        let mut prev_upper_band = hl2_w + factor * atr_w;
+        let mut prev_lower_band = hl2_w - factor * atr_w;
 
-    // Process remaining points
-    for i in (first_valid_idx + period)..len {
-        let atr_idx = i - first_valid_idx;
-        let half_range = (high[i] + low[i]) / 2.0;
-        let upper_basic = half_range + factor * atr_values[atr_idx];
-        let lower_basic = half_range - factor * atr_values[atr_idx];
-
-        // Update bands based on previous close
-        let prev_close = close[i - 1];
-        let mut curr_upper_band = upper_basic;
-        let mut curr_lower_band = lower_basic;
-
-        if prev_close <= prev_upper_band {
-            curr_upper_band = f64::min(upper_basic, prev_upper_band);
-        }
-        if prev_close >= prev_lower_band {
-            curr_lower_band = f64::max(lower_basic, prev_lower_band);
-        }
-
-        // Determine current trend and change flag
-        let prev_trend = trend[i - 1];
-        let curr_close = close[i];
-
-        if (prev_trend - prev_upper_band).abs() < f64::EPSILON {
-            // Previous trend was upper band
-            if curr_close <= curr_upper_band {
-                trend[i] = curr_upper_band;
-                changed[i] = 0.0;
-            } else {
-                trend[i] = curr_lower_band;
-                changed[i] = 1.0;
-            }
-        } else if (prev_trend - prev_lower_band).abs() < f64::EPSILON {
-            // Previous trend was lower band
-            if curr_close >= curr_lower_band {
-                trend[i] = curr_lower_band;
-                changed[i] = 0.0;
-            } else {
-                trend[i] = curr_upper_band;
-                changed[i] = 1.0;
-            }
+        // Initialize state from warmup close
+        let mut last_close = *c_ptr.add(warmup);
+        let mut upper_state = if last_close <= prev_upper_band {
+            *tr_ptr.add(warmup) = prev_upper_band;
+            true
         } else {
-            // Fallback (shouldn't happen in normal operation)
-            if curr_close <= curr_upper_band {
-                trend[i] = curr_upper_band;
-            } else {
-                trend[i] = curr_lower_band;
-            }
-            changed[i] = 0.0;
-        }
+            *tr_ptr.add(warmup) = prev_lower_band;
+            false
+        };
+        *ch_ptr.add(warmup) = 0.0;
 
-        // Update previous bands for next iteration
-        prev_upper_band = curr_upper_band;
-        prev_lower_band = curr_lower_band;
+        // Main loop
+        let mut i = warmup + 1;
+        while i < len {
+            let atr_i = *atr_ptr.add(i - first_valid_idx);
+            let hi = *h_ptr.add(i);
+            let lo = *l_ptr.add(i);
+            let hl2 = (hi + lo) * 0.5;
+            let upper_basic = factor.mul_add(atr_i, hl2);
+            let lower_basic = (-factor).mul_add(atr_i, hl2);
+
+            // Tighten using previous close vs previous bands
+            let prev_close = last_close;
+            let mut curr_upper_band = upper_basic;
+            if prev_close <= prev_upper_band {
+                curr_upper_band = curr_upper_band.min(prev_upper_band);
+            }
+            let mut curr_lower_band = lower_basic;
+            if prev_close >= prev_lower_band {
+                curr_lower_band = curr_lower_band.max(prev_lower_band);
+            }
+
+            // Trend decision from previous state
+            let curr_close = *c_ptr.add(i);
+            if upper_state {
+                if curr_close <= curr_upper_band {
+                    *tr_ptr.add(i) = curr_upper_band;
+                    *ch_ptr.add(i) = 0.0;
+                } else {
+                    *tr_ptr.add(i) = curr_lower_band;
+                    *ch_ptr.add(i) = 1.0;
+                    upper_state = false;
+                }
+            } else {
+                if curr_close >= curr_lower_band {
+                    *tr_ptr.add(i) = curr_lower_band;
+                    *ch_ptr.add(i) = 0.0;
+                } else {
+                    *tr_ptr.add(i) = curr_upper_band;
+                    *ch_ptr.add(i) = 1.0;
+                    upper_state = true;
+                }
+            }
+
+            // Carry state forward
+            prev_upper_band = curr_upper_band;
+            prev_lower_band = curr_lower_band;
+            last_close = curr_close;
+            i += 1;
+        }
     }
 }
 
@@ -706,70 +732,63 @@ pub unsafe fn supertrend_scalar_classic(
 
     // Initialize first valid point
     let half_range = (high[warmup] + low[warmup]) / 2.0;
-    let mut prev_upper_band = half_range + factor * atr_values[warmup];
-    let mut prev_lower_band = half_range - factor * atr_values[warmup];
+    let mut prev_upper_band = factor.mul_add(atr_values[warmup], half_range);
+    let mut prev_lower_band = (-factor).mul_add(atr_values[warmup], half_range);
 
-    // Set initial trend based on close position
-    if close[warmup] <= prev_upper_band {
+    // Initialize state from warmup close
+    let mut last_close = close[warmup];
+    let mut upper_state = if last_close <= prev_upper_band {
         trend_out[warmup] = prev_upper_band;
+        true
     } else {
         trend_out[warmup] = prev_lower_band;
-    }
+        false
+    };
     changed_out[warmup] = 0.0;
 
     // Process remaining points
     for i in (warmup + 1)..n {
         let half_range = (high[i] + low[i]) / 2.0;
-        let upper_basic = half_range + factor * atr_values[i];
-        let lower_basic = half_range - factor * atr_values[i];
+        let upper_basic = factor.mul_add(atr_values[i], half_range);
+        let lower_basic = (-factor).mul_add(atr_values[i], half_range);
 
         // Update bands based on previous close
-        let prev_close = close[i - 1];
+        let prev_close = last_close;
         let mut curr_upper_band = upper_basic;
         let mut curr_lower_band = lower_basic;
-
         if prev_close <= prev_upper_band {
-            curr_upper_band = upper_basic.min(prev_upper_band);
+            curr_upper_band = curr_upper_band.min(prev_upper_band);
         }
         if prev_close >= prev_lower_band {
-            curr_lower_band = lower_basic.max(prev_lower_band);
+            curr_lower_band = curr_lower_band.max(prev_lower_band);
         }
 
-        // Determine current trend and change flag
-        let prev_trend = trend_out[i - 1];
+        // Determine current trend and change flag using previous state
         let curr_close = close[i];
-
-        if (prev_trend - prev_upper_band).abs() < f64::EPSILON {
-            // Previous trend was upper band
+        if upper_state {
             if curr_close <= curr_upper_band {
                 trend_out[i] = curr_upper_band;
                 changed_out[i] = 0.0;
             } else {
                 trend_out[i] = curr_lower_band;
                 changed_out[i] = 1.0;
+                upper_state = false;
             }
-        } else if (prev_trend - prev_lower_band).abs() < f64::EPSILON {
-            // Previous trend was lower band
+        } else {
             if curr_close >= curr_lower_band {
                 trend_out[i] = curr_lower_band;
                 changed_out[i] = 0.0;
             } else {
                 trend_out[i] = curr_upper_band;
                 changed_out[i] = 1.0;
+                upper_state = true;
             }
-        } else {
-            // Fallback (shouldn't happen in normal operation)
-            if curr_close <= curr_upper_band {
-                trend_out[i] = curr_upper_band;
-            } else {
-                trend_out[i] = curr_lower_band;
-            }
-            changed_out[i] = 0.0;
         }
 
         // Update previous bands for next iteration
         prev_upper_band = curr_upper_band;
         prev_lower_band = curr_lower_band;
+        last_close = curr_close;
     }
 
     Ok(())
@@ -1116,19 +1135,28 @@ fn supertrend_batch_inner(
         core::slice::from_raw_parts_mut(changed_guard.as_mut_ptr() as *mut f64, changed_guard.len())
     };
 
+    // Row-specific optimization: precompute ATR per unique period and reuse across rows.
+    let mut atr_cache: HashMap<usize, Vec<f64>> = HashMap::new();
+    {
+        let mut periods: Vec<usize> = combos.iter().map(|c| c.period.unwrap()).collect();
+        periods.sort_unstable();
+        periods.dedup();
+        for &p in &periods {
+            let atr_input = AtrInput::from_slices(
+                &high[first_valid_idx..],
+                &low[first_valid_idx..],
+                &close[first_valid_idx..],
+                AtrParams { length: Some(p) },
+            );
+            let AtrOutput { values } = atr(&atr_input)?;
+            atr_cache.insert(p, values);
+        }
+    }
+
     let do_row = |row: usize, trend_row: &mut [f64], changed_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
         let factor = combos[row].factor.unwrap();
-        // Calculate ATR for this parameter combo
-        let atr_input = AtrInput::from_slices(
-            &high[first_valid_idx..],
-            &low[first_valid_idx..],
-            &close[first_valid_idx..],
-            AtrParams {
-                length: Some(period),
-            },
-        );
-        let AtrOutput { values: atr_values } = atr(&atr_input).unwrap();
+        let atr_values = atr_cache.get(&period).unwrap().as_slice();
         match kern {
             Kernel::Scalar => supertrend_row_scalar(
                 high,
@@ -1137,7 +1165,19 @@ fn supertrend_batch_inner(
                 period,
                 factor,
                 first_valid_idx,
-                &atr_values,
+                atr_values,
+                trend_row,
+                changed_row,
+            ),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx512 => supertrend_row_scalar(
+                high,
+                low,
+                close,
+                period,
+                factor,
+                first_valid_idx,
+                atr_values,
                 trend_row,
                 changed_row,
             ),
@@ -1149,7 +1189,7 @@ fn supertrend_batch_inner(
                 period,
                 factor,
                 first_valid_idx,
-                &atr_values,
+                atr_values,
                 trend_row,
                 changed_row,
             ),
@@ -1161,7 +1201,7 @@ fn supertrend_batch_inner(
                 period,
                 factor,
                 first_valid_idx,
-                &atr_values,
+                atr_values,
                 trend_row,
                 changed_row,
             ),

@@ -13,12 +13,12 @@
 //! - **`Err(WildersError)`** otherwise.
 //!
 //! ## Developer Status
-//! - **AVX2 kernel**: STUB - Falls back to scalar implementation
-//! - **AVX512 kernel**: STUB - Falls back to scalar implementation
+//! - **AVX2/AVX512**: Implemented for initial warmup sum (8/4‑wide accumulation);
+//!   rolling recurrence remains scalar due to data dependency. Runtime selection follows alma.rs.
 //! - **Streaming update**: O(1) - Efficient rolling window approach
 //! - **Memory optimization**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix) ✓
-//! - **Optimization needed**: Implement SIMD kernels for vectorized processing
-//! - **Note**: Streaming implementation is already well-optimized
+//! - **SIMD note**: For single-series, speedups mainly come from large `period` where warmup dominates.
+//!   Recurrence uses `mul_add` when available for slight speed and improved numerical stability.
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
@@ -272,17 +272,71 @@ pub fn wilders_with_kernel(
 
 #[inline]
 pub fn wilders_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-    let mut sum = 0.0;
-    for i in 0..period {
-        sum += data[first_valid + i];
+    debug_assert!(period > 0);
+    debug_assert_eq!(data.len(), out.len());
+
+    let len = data.len();
+    if len == 0 {
+        return;
     }
+
     let wma_start = first_valid + period - 1;
-    let mut val = sum / (period as f64);
-    out[wma_start] = val;
-    let alpha = 1.0 / (period as f64);
-    for i in (wma_start + 1)..data.len() {
-        val = (data[i] - val) * alpha + val;
-        out[i] = val;
+
+    // SAFETY: callers ensure indices are valid; pre-warmup prefix is already painted (NaN).
+    // We only write from wma_start..len.
+    unsafe {
+        // Initial sum over the first `period` finite values starting at `first_valid`.
+        let mut sum = 0.0f64;
+        let mut p = data.as_ptr().add(first_valid);
+
+        // Unroll by 4 for good codegen and fewer bounds checks.
+        let chunks4 = period / 4;
+        for _ in 0..chunks4 {
+            sum += *p.add(0) + *p.add(1) + *p.add(2) + *p.add(3);
+            p = p.add(4);
+        }
+        match period - (chunks4 * 4) {
+            3 => sum += *p.add(0) + *p.add(1) + *p.add(2),
+            2 => sum += *p.add(0) + *p.add(1),
+            1 => sum += *p.add(0),
+            0 => {}
+            _ => core::hint::unreachable_unchecked(),
+        }
+
+        // First output after warmup: simple average
+        let inv_n = 1.0 / (period as f64);
+        let mut y = sum * inv_n;
+        *out.get_unchecked_mut(wma_start) = y;
+
+        // Fast path: period == 1 → identity after warmup
+        if period == 1 {
+            let mut i = wma_start + 1;
+            while i < len {
+                *out.get_unchecked_mut(i) = *data.get_unchecked(i);
+                i += 1;
+            }
+            return;
+        }
+
+        let alpha = inv_n;
+        // Slight unroll-by-2 for the dependency chain to trim loop overhead.
+        let mut i = wma_start + 1;
+        let end_even = wma_start + 1 + ((len - (wma_start + 1)) & !1);
+        while i < end_even {
+            let x0 = *data.get_unchecked(i);
+            y = (x0 - y).mul_add(alpha, y);
+            *out.get_unchecked_mut(i) = y;
+
+            let x1 = *data.get_unchecked(i + 1);
+            y = (x1 - y).mul_add(alpha, y);
+            *out.get_unchecked_mut(i + 1) = y;
+            i += 2;
+        }
+        if i < len {
+            let x = *data.get_unchecked(i);
+            y = (x - y).mul_add(alpha, y);
+            *out.get_unchecked_mut(i) = y;
+        }
     }
 }
 
@@ -364,13 +418,79 @@ pub fn wilders_into_slice(
     Ok(())
 }
 
-// --- AVX2 and AVX512 stubs (API parity, always point to scalar) ---
+// --- AVX2 and AVX512 (vectorized warmup sum; scalar recurrence) ---
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 #[target_feature(enable = "avx2")]
 pub unsafe fn wilders_avx2(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-    wilders_scalar(data, period, first_valid, out)
+    use core::arch::x86_64::*;
+
+    debug_assert!(period > 0);
+    debug_assert_eq!(data.len(), out.len());
+    let len = data.len();
+    if len == 0 {
+        return;
+    }
+
+    let wma_start = first_valid + period - 1;
+
+    // 4‑lane accumulation for initial window
+    let mut vacc = _mm256_setzero_pd();
+    let mut p = data.as_ptr().add(first_valid);
+    let chunks4 = period / 4;
+    for _ in 0..chunks4 {
+        let v = _mm256_loadu_pd(p);
+        vacc = _mm256_add_pd(vacc, v);
+        p = p.add(4);
+    }
+    // Reduce to scalar
+    let hi = _mm256_extractf128_pd(vacc, 1);
+    let lo = _mm256_castpd256_pd128(vacc);
+    let v2 = _mm_add_pd(lo, hi);
+    let sh = _mm_permute_pd(v2, 0b01);
+    let v1 = _mm_add_sd(v2, sh);
+    let mut sum = _mm_cvtsd_f64(v1);
+
+    match period - (chunks4 * 4) {
+        3 => sum += *p.add(0) + *p.add(1) + *p.add(2),
+        2 => sum += *p.add(0) + *p.add(1),
+        1 => sum += *p.add(0),
+        0 => {}
+        _ => core::hint::unreachable_unchecked(),
+    }
+
+    let inv_n = 1.0 / (period as f64);
+    let mut y = sum * inv_n;
+    *out.get_unchecked_mut(wma_start) = y;
+
+    if period == 1 {
+        let mut i = wma_start + 1;
+        while i < len {
+            *out.get_unchecked_mut(i) = *data.get_unchecked(i);
+            i += 1;
+        }
+        return;
+    }
+
+    let alpha = inv_n;
+    let mut i = wma_start + 1;
+    let end_even = wma_start + 1 + ((len - (wma_start + 1)) & !1);
+    while i < end_even {
+        let x0 = *data.get_unchecked(i);
+        y = (x0 - y).mul_add(alpha, y);
+        *out.get_unchecked_mut(i) = y;
+
+        let x1 = *data.get_unchecked(i + 1);
+        y = (x1 - y).mul_add(alpha, y);
+        *out.get_unchecked_mut(i + 1) = y;
+        i += 2;
+    }
+    if i < len {
+        let x = *data.get_unchecked(i);
+        y = (x - y).mul_add(alpha, y);
+        *out.get_unchecked_mut(i) = y;
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -393,7 +513,80 @@ pub unsafe fn wilders_avx512_short(
     first_valid: usize,
     out: &mut [f64],
 ) {
-    wilders_scalar(data, period, first_valid, out)
+    use core::arch::x86_64::*;
+
+    debug_assert!(period > 0);
+    debug_assert_eq!(data.len(), out.len());
+    let len = data.len();
+    if len == 0 {
+        return;
+    }
+
+    let wma_start = first_valid + period - 1;
+
+    // 8‑wide accumulation for initial window
+    let mut vacc = _mm512_setzero_pd();
+    let mut p = data.as_ptr().add(first_valid);
+    let chunks8 = period / 8;
+    for _ in 0..chunks8 {
+        let v = _mm512_loadu_pd(p);
+        vacc = _mm512_add_pd(vacc, v);
+        p = p.add(8);
+    }
+    // Reduce 512→256→128→scalar
+    let vhi256 = _mm512_extractf64x4_pd(vacc, 1);
+    let vlo256 = _mm512_castpd512_pd256(vacc);
+    let v256 = _mm256_add_pd(vlo256, vhi256);
+    let hi = _mm256_extractf128_pd(v256, 1);
+    let lo = _mm256_castpd256_pd128(v256);
+    let v2 = _mm_add_pd(lo, hi);
+    let sh = _mm_permute_pd(v2, 0b01);
+    let v1 = _mm_add_sd(v2, sh);
+    let mut sum = _mm_cvtsd_f64(v1);
+
+    match period - (chunks8 * 8) {
+        7 => sum += *p.add(0) + *p.add(1) + *p.add(2) + *p.add(3) + *p.add(4) + *p.add(5) + *p.add(6),
+        6 => sum += *p.add(0) + *p.add(1) + *p.add(2) + *p.add(3) + *p.add(4) + *p.add(5),
+        5 => sum += *p.add(0) + *p.add(1) + *p.add(2) + *p.add(3) + *p.add(4),
+        4 => sum += *p.add(0) + *p.add(1) + *p.add(2) + *p.add(3),
+        3 => sum += *p.add(0) + *p.add(1) + *p.add(2),
+        2 => sum += *p.add(0) + *p.add(1),
+        1 => sum += *p.add(0),
+        0 => {}
+        _ => core::hint::unreachable_unchecked(),
+    }
+
+    let inv_n = 1.0 / (period as f64);
+    let mut y = sum * inv_n;
+    *out.get_unchecked_mut(wma_start) = y;
+
+    if period == 1 {
+        let mut i = wma_start + 1;
+        while i < len {
+            *out.get_unchecked_mut(i) = *data.get_unchecked(i);
+            i += 1;
+        }
+        return;
+    }
+
+    let alpha = inv_n;
+    let mut i = wma_start + 1;
+    let end_even = wma_start + 1 + ((len - (wma_start + 1)) & !1);
+    while i < end_even {
+        let x0 = *data.get_unchecked(i);
+        y = (x0 - y).mul_add(alpha, y);
+        *out.get_unchecked_mut(i) = y;
+
+        let x1 = *data.get_unchecked(i + 1);
+        y = (x1 - y).mul_add(alpha, y);
+        *out.get_unchecked_mut(i + 1) = y;
+        i += 2;
+    }
+    if i < len {
+        let x = *data.get_unchecked(i);
+        y = (x - y).mul_add(alpha, y);
+        *out.get_unchecked_mut(i) = y;
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -405,7 +598,93 @@ pub unsafe fn wilders_avx512_long(
     first_valid: usize,
     out: &mut [f64],
 ) {
-    wilders_scalar(data, period, first_valid, out)
+    use core::arch::x86_64::*;
+
+    debug_assert!(period > 0);
+    debug_assert_eq!(data.len(), out.len());
+    let len = data.len();
+    if len == 0 {
+        return;
+    }
+
+    let wma_start = first_valid + period - 1;
+
+    // For longer periods, unroll by 16 doubles per iter using 2 accumulators
+    let mut vacc0 = _mm512_setzero_pd();
+    let mut vacc1 = _mm512_setzero_pd();
+    let mut p = data.as_ptr().add(first_valid);
+    let chunks16 = period / 16;
+    for _ in 0..chunks16 {
+        let v0 = _mm512_loadu_pd(p);
+        let v1 = _mm512_loadu_pd(p.add(8));
+        vacc0 = _mm512_add_pd(vacc0, v0);
+        vacc1 = _mm512_add_pd(vacc1, v1);
+        p = p.add(16);
+    }
+    let mut vacc = _mm512_add_pd(vacc0, vacc1);
+
+    // Handle leftover 8‑wide chunk
+    let rem = period - (chunks16 * 16);
+    if rem >= 8 {
+        let v = _mm512_loadu_pd(p);
+        vacc = _mm512_add_pd(vacc, v);
+        p = p.add(8);
+    }
+
+    // Reduce to scalar
+    let vhi256 = _mm512_extractf64x4_pd(vacc, 1);
+    let vlo256 = _mm512_castpd512_pd256(vacc);
+    let v256 = _mm256_add_pd(vlo256, vhi256);
+    let hi = _mm256_extractf128_pd(v256, 1);
+    let lo = _mm256_castpd256_pd128(v256);
+    let v2 = _mm_add_pd(lo, hi);
+    let sh = _mm_permute_pd(v2, 0b01);
+    let v1 = _mm_add_sd(v2, sh);
+    let mut sum = _mm_cvtsd_f64(v1);
+
+    match period - (chunks16 * 16) - (rem / 8) * 8 {
+        7 => sum += *p.add(0) + *p.add(1) + *p.add(2) + *p.add(3) + *p.add(4) + *p.add(5) + *p.add(6),
+        6 => sum += *p.add(0) + *p.add(1) + *p.add(2) + *p.add(3) + *p.add(4) + *p.add(5),
+        5 => sum += *p.add(0) + *p.add(1) + *p.add(2) + *p.add(3) + *p.add(4),
+        4 => sum += *p.add(0) + *p.add(1) + *p.add(2) + *p.add(3),
+        3 => sum += *p.add(0) + *p.add(1) + *p.add(2),
+        2 => sum += *p.add(0) + *p.add(1),
+        1 => sum += *p.add(0),
+        0 => {}
+        _ => core::hint::unreachable_unchecked(),
+    }
+
+    let inv_n = 1.0 / (period as f64);
+    let mut y = sum * inv_n;
+    *out.get_unchecked_mut(wma_start) = y;
+
+    if period == 1 {
+        let mut i = wma_start + 1;
+        while i < len {
+            *out.get_unchecked_mut(i) = *data.get_unchecked(i);
+            i += 1;
+        }
+        return;
+    }
+
+    let alpha = inv_n;
+    let mut i = wma_start + 1;
+    let end_even = wma_start + 1 + ((len - (wma_start + 1)) & !1);
+    while i < end_even {
+        let x0 = *data.get_unchecked(i);
+        y = (x0 - y).mul_add(alpha, y);
+        *out.get_unchecked_mut(i) = y;
+
+        let x1 = *data.get_unchecked(i + 1);
+        y = (x1 - y).mul_add(alpha, y);
+        *out.get_unchecked_mut(i + 1) = y;
+        i += 2;
+    }
+    if i < len {
+        let x = *data.get_unchecked(i);
+        y = (x - y).mul_add(alpha, y);
+        *out.get_unchecked_mut(i) = y;
+    }
 }
 
 // --- Streaming (WildersStream) ---
@@ -634,24 +913,55 @@ fn wilders_batch_inner(
     let mut raw = make_uninit_matrix(rows, cols);
     init_matrix_prefixes(&mut raw, cols, &warm);
 
+    // Precompute prefix sums once for all rows: P[i] = sum(data[first..first+i])
+    let mut pref = Vec::with_capacity((cols - first) + 1);
+    pref.push(0.0);
+    let mut acc = 0.0f64;
+    for &x in &data[first..] {
+        acc += x;
+        pref.push(acc);
+    }
+
     // -----------------------------------------
     // 3. helper that fills a single row
     // -----------------------------------------
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
-
-        // transmute this row to &mut [f64]
         let out_row = std::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
-        match kern {
-            Kernel::Scalar => wilders_row_scalar(data, first, period, out_row),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => wilders_row_avx2(data, first, period, out_row),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => wilders_row_avx512(data, first, period, out_row),
-            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-            Kernel::Avx2 | Kernel::Avx512 => wilders_row_scalar(data, first, period, out_row),
-            _ => unreachable!(),
+        // Initial average via prefix sums
+        let wma_start = first + period - 1;
+        let sum = pref[period] - pref[0];
+        let inv_n = 1.0 / (period as f64);
+        let mut y = sum * inv_n;
+        *out_row.get_unchecked_mut(wma_start) = y;
+
+        if period == 1 {
+            let mut i = wma_start + 1;
+            while i < cols {
+                *out_row.get_unchecked_mut(i) = *data.get_unchecked(i);
+                i += 1;
+            }
+            return;
+        }
+
+        let alpha = inv_n;
+        let mut i = wma_start + 1;
+        let end_even = wma_start + 1 + ((cols - (wma_start + 1)) & !1);
+        while i < end_even {
+            let x0 = *data.get_unchecked(i);
+            y = (x0 - y).mul_add(alpha, y);
+            *out_row.get_unchecked_mut(i) = y;
+
+            let x1 = *data.get_unchecked(i + 1);
+            y = (x1 - y).mul_add(alpha, y);
+            *out_row.get_unchecked_mut(i + 1) = y;
+            i += 2;
+        }
+        if i < cols {
+            let x = *data.get_unchecked(i);
+            y = (x - y).mul_add(alpha, y);
+            *out_row.get_unchecked_mut(i) = y;
         }
     };
 
@@ -732,20 +1042,54 @@ pub fn wilders_batch_inner_into(
         .collect();
     init_matrix_prefixes(out_mu, cols, &warm);
 
+    // Precompute prefix sums once for all rows: P[i] = sum(data[first..first+i])
+    let mut pref = Vec::with_capacity((cols - first) + 1);
+    pref.push(0.0);
+    let mut acc = 0.0f64;
+    for &x in &data[first..] {
+        acc += x;
+        pref.push(acc);
+    }
+
     // 2) Row writer that fills post-warm cells
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
         let dst: &mut [f64] =
             std::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
-        match kern {
-            Kernel::Scalar => wilders_row_scalar(data, first, period, dst),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => wilders_row_avx2(data, first, period, dst),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => wilders_row_avx512(data, first, period, dst),
-            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-            Kernel::Avx2 | Kernel::Avx512 => wilders_row_scalar(data, first, period, dst),
-            _ => unreachable!(),
+
+        // Initial average via prefix sums
+        let wma_start = first + period - 1;
+        let sum = pref[period] - pref[0];
+        let inv_n = 1.0 / (period as f64);
+        let mut y = sum * inv_n;
+        *dst.get_unchecked_mut(wma_start) = y;
+
+        if period == 1 {
+            let mut i = wma_start + 1;
+            while i < cols {
+                *dst.get_unchecked_mut(i) = *data.get_unchecked(i);
+                i += 1;
+            }
+            return;
+        }
+
+        let alpha = inv_n;
+        let mut i = wma_start + 1;
+        let end_even = wma_start + 1 + ((cols - (wma_start + 1)) & !1);
+        while i < end_even {
+            let x0 = *data.get_unchecked(i);
+            y = (x0 - y).mul_add(alpha, y);
+            *dst.get_unchecked_mut(i) = y;
+
+            let x1 = *data.get_unchecked(i + 1);
+            y = (x1 - y).mul_add(alpha, y);
+            *dst.get_unchecked_mut(i + 1) = y;
+            i += 2;
+        }
+        if i < cols {
+            let x = *data.get_unchecked(i);
+            y = (x - y).mul_add(alpha, y);
+            *dst.get_unchecked_mut(i) = y;
         }
     };
 

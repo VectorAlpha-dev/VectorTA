@@ -12,7 +12,7 @@
 //! - **`Err(TtmTrendError)`** otherwise.
 //!
 //! ## Developer Notes
-//! - **AVX2/AVX512 Kernels**: Stub implementations that delegate to scalar. SIMD functions exist but just call scalar version. Could vectorize the rolling average and comparison operations.
+//! - **AVX2/AVX512 Kernels**: Fast-path enabled for period = 1 (vectorized close > source). For general periods, the rolling-sum dependency is inherently serial; SIMD underperforms vs scalar, so we short-circuit to scalar.
 //! - **Streaming Performance**: O(1) implementation using running sum with add/subtract pattern. Efficiently maintains sum as window slides.
 //! - **Memory Optimization**: Uses `alloc_with_nan_prefix` and `make_uninit_matrix` for batch operations. Properly uses zero-copy helpers throughout.
 
@@ -281,17 +281,37 @@ pub fn ttm_trend_with_kernel(
     input: &TtmTrendInput,
     kernel: Kernel,
 ) -> Result<TtmTrendOutput, TtmTrendError> {
+    // Prepare once and dispatch like alma.rs
     let (source, close, period, first, chosen) = ttm_prepare(input, kernel)?;
     let len = source.len().min(close.len());
-    let warm = first + period - 1;
 
-    // Use your helper
-    let mut tmp = alloc_with_nan_prefix(len, warm);
-    // Call the compute function directly with prepared params to avoid double work
-    ttm_numeric_compute_with_params(&mut tmp, source, close, period, first, chosen)?;
+    // Direct boolean compute to avoid f64 tmp + map
+    let mut values = vec![false; len];
 
-    // Map NaN prefix -> false; 1.0 -> true; 0.0 -> false
-    let values: Vec<bool> = tmp.into_iter().map(|v| v == 1.0).collect();
+    // Warmup semantics are handled by implementations; ensure prefix is clean
+    // Dispatch by kernel (SIMD paths fall back to scalar when not available)
+    #[allow(unused_variables)]
+    {
+        match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                ttm_trend_scalar(source, close, period, first, &mut values)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => {
+                ttm_trend_avx2(source, close, period, first, &mut values)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                ttm_trend_avx512(source, close, period, first, &mut values)
+            }
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                ttm_trend_scalar(source, close, period, first, &mut values)
+            }
+            _ => unreachable!(),
+        }
+    }
+
     Ok(TtmTrendOutput { values })
 }
 
@@ -303,16 +323,36 @@ pub fn ttm_trend_scalar(
     first: usize,
     out: &mut [bool],
 ) {
-    out.fill(false); // ensures no uninit "true" values
+    let n = source.len().min(close.len()).min(out.len());
+    if n == 0 {
+        return;
+    }
+
+    // Warmup prefix is false
+    let warmup_end = first + period - 1;
+    out.fill(false);
+    if warmup_end >= n {
+        return;
+    }
+
+    if period == 1 {
+        let mut i = first;
+        while i < n {
+            out[i] = close[i] > source[i];
+            i += 1;
+        }
+        return;
+    }
+
     let mut sum = 0.0;
     for &v in &source[first..first + period] {
         sum += v;
     }
     let inv_period = 1.0 / (period as f64);
-    let mut idx = first + period - 1;
+    let mut idx = warmup_end;
     out[idx] = close[idx] > sum * inv_period;
     idx += 1;
-    while idx < source.len().min(close.len()) {
+    while idx < n {
         sum += source[idx] - source[idx - period];
         out[idx] = close[idx] > sum * inv_period;
         idx += 1;
@@ -328,7 +368,40 @@ pub fn ttm_trend_avx512(
     first: usize,
     out: &mut [bool],
 ) {
-    unsafe { ttm_trend_avx512_short(source, close, period, first, out) }
+    // Fast path for period == 1; otherwise fallback to scalar (serial dependency)
+    if period == 1 {
+        unsafe {
+            let n = source.len().min(close.len()).min(out.len());
+            out.fill(false);
+            if first >= n {
+                return;
+            }
+            let mut i = first;
+            const W: usize = 8; // 512-bit holds 8 f64
+            while i + W <= n {
+                let s = _mm512_loadu_pd(source.as_ptr().add(i));
+                let c = _mm512_loadu_pd(close.as_ptr().add(i));
+                let m: u8 = _mm512_cmp_pd_mask(c, s, _CMP_GT_OQ);
+                // Write 8 bools from mask bits
+                (*out.get_unchecked_mut(i + 0)) = (m & (1 << 0)) != 0;
+                (*out.get_unchecked_mut(i + 1)) = (m & (1 << 1)) != 0;
+                (*out.get_unchecked_mut(i + 2)) = (m & (1 << 2)) != 0;
+                (*out.get_unchecked_mut(i + 3)) = (m & (1 << 3)) != 0;
+                (*out.get_unchecked_mut(i + 4)) = (m & (1 << 4)) != 0;
+                (*out.get_unchecked_mut(i + 5)) = (m & (1 << 5)) != 0;
+                (*out.get_unchecked_mut(i + 6)) = (m & (1 << 6)) != 0;
+                (*out.get_unchecked_mut(i + 7)) = (m & (1 << 7)) != 0;
+                i += W;
+            }
+            while i < n {
+                *out.get_unchecked_mut(i) = *close.get_unchecked(i) > *source.get_unchecked(i);
+                i += 1;
+            }
+        }
+        return;
+    }
+    // Default
+    ttm_trend_scalar(source, close, period, first, out)
 }
 
 #[inline]
@@ -339,6 +412,39 @@ pub fn ttm_trend_avx2(
     first: usize,
     out: &mut [bool],
 ) {
+    // Fast path for period == 1; otherwise fallback to scalar
+    if period == 1 {
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        unsafe {
+            let n = source.len().min(close.len()).min(out.len());
+            out.fill(false);
+            if first >= n {
+                return;
+            }
+            let mut i = first;
+            const W: usize = 4; // 256-bit holds 4 f64
+            while i + W <= n {
+                let s = _mm256_loadu_pd(source.as_ptr().add(i));
+                let c = _mm256_loadu_pd(close.as_ptr().add(i));
+                let m = _mm256_cmp_pd(c, s, _CMP_GT_OQ);
+                let bits = _mm256_movemask_pd(m) as i32;
+                (*out.get_unchecked_mut(i + 0)) = (bits & (1 << 0)) != 0;
+                (*out.get_unchecked_mut(i + 1)) = (bits & (1 << 1)) != 0;
+                (*out.get_unchecked_mut(i + 2)) = (bits & (1 << 2)) != 0;
+                (*out.get_unchecked_mut(i + 3)) = (bits & (1 << 3)) != 0;
+                i += W;
+            }
+            while i < n {
+                *out.get_unchecked_mut(i) = *close.get_unchecked(i) > *source.get_unchecked(i);
+                i += 1;
+            }
+        }
+        #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+        {
+            ttm_trend_scalar(source, close, period, first, out)
+        }
+        return;
+    }
     ttm_trend_scalar(source, close, period, first, out)
 }
 
@@ -1624,17 +1730,28 @@ pub fn ttm_trend_into_slice(
     input: &TtmTrendInput,
     kern: Kernel,
 ) -> Result<(), TtmTrendError> {
-    let len = input.as_slices().0.len().min(input.as_slices().1.len());
+    let (source, close, period, first, chosen) = ttm_prepare(input, kern)?;
+    let len = source.len().min(close.len());
     if dst.len() != len {
-        return Err(TtmTrendError::OutputLenMismatch {
-            expected: len,
-            got: dst.len(),
-        });
+        return Err(TtmTrendError::OutputLenMismatch { expected: len, got: dst.len() });
     }
-    let mut tmp = vec![f64::NAN; len];
-    ttm_trend_into_slice_f64(&mut tmp, input, kern)?;
-    for (i, v) in tmp.iter().enumerate() {
-        dst[i] = *v == 1.0;
+    match chosen {
+        Kernel::Scalar | Kernel::ScalarBatch => {
+            ttm_trend_scalar(source, close, period, first, dst)
+        }
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Avx2 | Kernel::Avx2Batch => {
+            ttm_trend_avx2(source, close, period, first, dst)
+        }
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Avx512 | Kernel::Avx512Batch => {
+            ttm_trend_avx512(source, close, period, first, dst)
+        }
+        #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+        Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+            ttm_trend_scalar(source, close, period, first, dst)
+        }
+        _ => unreachable!(),
     }
     Ok(())
 }

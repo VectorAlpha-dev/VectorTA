@@ -251,7 +251,9 @@ fn mwdx_compute_into(data: &[f64], fac: f64, kernel: Kernel, out: &mut [f64]) {
             Kernel::Avx2 | Kernel::Avx2Batch => mwdx_avx2(data, fac, out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => mwdx_avx512(data, fac, out),
-            _ => unreachable!(),
+            // Fallback: when SIMD kernels are not compiled, use scalar to avoid panics in benches
+            #[allow(unreachable_patterns)]
+            _ => mwdx_scalar(data, fac, out),
         }
     }
 }
@@ -287,28 +289,60 @@ pub fn mwdx_into_slice(dst: &mut [f64], input: &MwdxInput, kern: Kernel) -> Resu
     Ok(())
 }
 
-#[inline]
+#[inline(always)]
 pub unsafe fn mwdx_scalar(data: &[f64], fac: f64, out: &mut [f64]) {
     let n = data.len();
     if n == 0 {
         return;
     }
-    let first = data.iter().position(|x| !x.is_nan()).unwrap_or(n);
-    if first == n {
-        // all NaNs: ensure output is NaN-only
-        for j in 0..n {
-            out[j] = f64::NAN;
+
+    let pin = data.as_ptr();
+    let pout = out.as_mut_ptr();
+
+    // 1) Single-pass leading-NaN scan + paint
+    let mut i = 0usize;
+    while i < n {
+        let x = *pin.add(i);
+        if x.is_nan() {
+            pout.add(i).write(f64::NAN);
+            i += 1;
+        } else {
+            break;
         }
+    }
+
+    // All-NaN input
+    if i == n {
         return;
     }
-    // prefix = NaN (only the warmup)
-    for j in 0..first {
-        out[j] = f64::NAN;
+
+    // 2) Seed from the first finite value
+    let mut prev = *pin.add(i);
+    pout.add(i).write(prev);
+    i += 1;
+
+    // 3) Main recurrence with dependency, unrolled by 2
+    let one_minus_fac = 1.0 - fac;
+    while i + 1 < n {
+        // step i
+        let x0 = *pin.add(i);
+        let y0 = fac * x0 + one_minus_fac * prev;
+        pout.add(i).write(y0);
+
+        // step i+1 (uses y0)
+        let x1 = *pin.add(i + 1);
+        let y1 = fac * x1 + one_minus_fac * y0;
+        pout.add(i + 1).write(y1);
+
+        prev = y1;
+        i += 2;
     }
-    // start from the first real value
-    out[first] = data[first];
-    for i in (first + 1)..n {
-        out[i] = fac * data[i] + (1.0 - fac) * out[i - 1];
+
+    // 4) Tail element if length is odd
+    if i < n {
+        let x = *pin.add(i);
+        let y = fac * x + one_minus_fac * prev;
+        pout.add(i).write(y);
     }
 }
 
@@ -571,7 +605,9 @@ fn mwdx_batch_inner(
             Kernel::Avx2 => mwdx_row_avx2(data, fac, first, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 => mwdx_row_avx512(data, fac, first, out_row),
-            _ => unreachable!(),
+            // Fallback when SIMD batch kernels are not compiled
+            #[allow(unreachable_patterns)]
+            _ => mwdx_row_scalar(data, fac, first, out_row),
         }
     };
 
@@ -681,7 +717,9 @@ fn mwdx_batch_inner_into(
             Kernel::Avx2 => mwdx_row_avx2(data, fac, first, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 => mwdx_row_avx512(data, fac, first, out_row),
-            _ => unreachable!(),
+            // Fallback when SIMD batch kernels are not compiled
+            #[allow(unreachable_patterns)]
+            _ => mwdx_row_scalar(data, fac, first, out_row),
         }
     };
 
@@ -711,13 +749,41 @@ fn mwdx_batch_inner_into(
 
 #[inline(always)]
 unsafe fn mwdx_row_scalar(data: &[f64], fac: f64, first: usize, out: &mut [f64]) {
+    // NOTE: In batch paths, [0..first) has already been painted (usually NaNs) by init_matrix_prefixes.
     let n = data.len();
-    if n == 0 {
+    if n == 0 || first >= n {
+        // empty series OR all-NaN series (first == n): nothing to do
         return;
     }
-    out[first] = data[first];
-    for i in (first + 1)..n {
-        out[i] = fac * data[i] + (1.0 - fac) * out[i - 1];
+
+    let pin = data.as_ptr();
+    let pout = out.as_mut_ptr();
+
+    // Seed from the first finite sample for this row.
+    let mut i = first;
+    let mut prev = *pin.add(i);
+    pout.add(i).write(prev);
+    i += 1;
+
+    // Same unrolled dependency-preserving recurrence as the scalar path.
+    let one_minus_fac = 1.0 - fac;
+    while i + 1 < n {
+        let x0 = *pin.add(i);
+        let y0 = fac * x0 + one_minus_fac * prev;
+        pout.add(i).write(y0);
+
+        let x1 = *pin.add(i + 1);
+        let y1 = fac * x1 + one_minus_fac * y0;
+        pout.add(i + 1).write(y1);
+
+        prev = y1;
+        i += 2;
+    }
+
+    if i < n {
+        let x = *pin.add(i);
+        let y = fac * x + one_minus_fac * prev;
+        pout.add(i).write(y);
     }
 }
 

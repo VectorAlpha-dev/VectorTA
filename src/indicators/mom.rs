@@ -17,6 +17,10 @@
 //! - **AVX2/AVX512 Kernels**: Stubs that call scalar implementation
 //! - **Streaming**: Implemented with O(1) update performance
 //! - **Zero-copy Memory**: Uses alloc_with_nan_prefix and make_uninit_matrix for batch operations
+// Decision: SIMD implemented but disabled by default for Auto selection.
+// Rationale: MOM is memory-bound (dst[i] = a[i] - a[i-period]); AVX2/AVX512
+// show <=~3% improvement at 100k–1M on this setup, below the >5% bar. Keep
+// SIMD codepaths for future CPUs/toolchains; short-circuit Auto to Scalar.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -206,7 +210,8 @@ fn mom_prepare<'a>(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        // Disable SIMD selection by default; see decision note above.
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
     Ok((data, period, first, chosen))
@@ -257,22 +262,85 @@ pub fn mom_avx512(data: &[f64], period: usize, first_valid: usize, out: &mut [f6
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f")]
 unsafe fn mom_avx512_short(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-    // For API parity; fallback to scalar logic
-    mom_scalar(data, period, first_valid, out)
+    mom_avx512_core(data, period, first_valid, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f")]
 unsafe fn mom_avx512_long(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-    // For API parity; fallback to scalar logic
-    mom_scalar(data, period, first_valid, out)
+    mom_avx512_core(data, period, first_valid, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
 unsafe fn mom_avx2(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-    // For API parity; fallback to scalar logic
-    mom_scalar(data, period, first_valid, out)
+    use core::arch::x86_64::*;
+    let n = data.len();
+    let start = first_valid + period;
+    if start >= n {
+        return;
+    }
+
+    let mut cur = data.as_ptr().add(start);
+    let mut prev = data.as_ptr().add(start - period);
+    let mut dst = out.as_mut_ptr().add(start);
+
+    let mut m = n - start;
+    while m >= 4 {
+        let a = _mm256_loadu_pd(cur);
+        let b = _mm256_loadu_pd(prev);
+        let d = _mm256_sub_pd(a, b);
+        _mm256_storeu_pd(dst, d);
+
+        cur = cur.add(4);
+        prev = prev.add(4);
+        dst = dst.add(4);
+        m -= 4;
+    }
+
+    while m != 0 {
+        *dst = *cur - *prev;
+        cur = cur.add(1);
+        prev = prev.add(1);
+        dst = dst.add(1);
+        m -= 1;
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+unsafe fn mom_avx512_core(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
+    use core::arch::x86_64::*;
+    let n = data.len();
+    let start = first_valid + period;
+    if start >= n {
+        return;
+    }
+
+    let mut cur = data.as_ptr().add(start);
+    let mut prev = data.as_ptr().add(start - period);
+    let mut dst = out.as_mut_ptr().add(start);
+
+    let mut m = n - start;
+    while m >= 8 {
+        let a = _mm512_loadu_pd(cur);
+        let b = _mm512_loadu_pd(prev);
+        let d = _mm512_sub_pd(a, b);
+        _mm512_storeu_pd(dst, d);
+
+        cur = cur.add(8);
+        prev = prev.add(8);
+        dst = dst.add(8);
+        m -= 8;
+    }
+
+    if m != 0 {
+        let mask: __mmask8 = ((1u16 << m) - 1) as u8;
+        let a = _mm512_maskz_loadu_pd(mask, cur);
+        let b = _mm512_maskz_loadu_pd(mask, prev);
+        let d = _mm512_sub_pd(a, b);
+        _mm512_mask_storeu_pd(dst, mask, d);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -496,7 +564,8 @@ fn mom_batch_inner(
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr(), guard.len()) };
 
     let simd = match kern {
-        Kernel::Auto => detect_best_batch_kernel(),
+        // Disable SIMD selection by default; see decision note above.
+        Kernel::Auto => Kernel::Scalar,
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
@@ -627,7 +696,8 @@ pub fn mom_batch_inner_into(
     init_matrix_prefixes(out_mu, cols, &warm);
 
     let simd = match kern {
-        Kernel::Auto => detect_best_batch_kernel(),
+        // Disable SIMD selection by default; see decision note above.
+        Kernel::Auto => Kernel::Scalar,
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,

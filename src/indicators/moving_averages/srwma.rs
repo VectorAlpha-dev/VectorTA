@@ -13,12 +13,11 @@
 //! - **`Err(SrwmaError)`** otherwise.
 //!
 //! ## Developer Notes
-//! - **AVX2 kernel**: ❌ Stub only - falls back to scalar implementation
-//! - **AVX512 kernel**: ⚠️ Partially stubbed - has short/long path structure but both call scalar
-//! - **Streaming update**: ⚠️ O(n) complexity - iterates through all period weights for each update
-//!   - TODO: Could optimize to O(1) with incremental weight updates using square root properties
-//! - **Memory optimization**: ✅ Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix) for output vectors
-//! - **TODO**: Implement AVX2 kernel and complete AVX512 short/long path implementations for vectorized weighted averaging
+//! - **SIMD status**: Implemented AVX2 and AVX512 single-series + batch-row kernels.
+//!   - Runtime selection short-circuits to Scalar for `period <= 32` where SIMD underperforms.
+//!   - For longer periods, AVX512 engages via `Kernel::Auto` (subject to CPU support).
+//! - **Streaming update**: O(n) per update (full dot). Future work: explore incremental updates.
+//! - **Memory**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix) for outputs.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -229,6 +228,9 @@ pub fn srwma_with_kernel(input: &SrwmaInput, kernel: Kernel) -> Result<SrwmaOutp
         other => other,
     };
 
+    // Heuristic: For small periods, the unrolled scalar path outperforms SIMD
+    // due to lane reversal + horizontal reductions overhead. Short-circuit to
+    // scalar for period <= 32.
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => {
@@ -236,11 +238,19 @@ pub fn srwma_with_kernel(input: &SrwmaInput, kernel: Kernel) -> Result<SrwmaOutp
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => {
-                srwma_avx2(data, &weights, period, first, inv_norm, &mut out)
+                if period <= 32 {
+                    srwma_scalar(data, &weights, period, first, inv_norm, &mut out)
+                } else {
+                    srwma_avx2(data, &weights, period, first, inv_norm, &mut out)
+                }
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
-                srwma_avx512(data, &weights, period, first, inv_norm, &mut out)
+                if period <= 32 {
+                    srwma_scalar(data, &weights, period, first, inv_norm, &mut out)
+                } else {
+                    srwma_avx512(data, &weights, period, first, inv_norm, &mut out)
+                }
             }
             _ => unreachable!(),
         }
@@ -275,28 +285,100 @@ pub fn srwma_scalar(
     inv_norm: f64,
     out: &mut [f64],
 ) {
-    assert_eq!(
-        weights.len(),
-        period - 1,
-        "weights.len() must be period - 1"
-    );
-    assert!(
-        out.len() >= data.len(),
-        "`out` must be at least as long as `data`"
-    );
+    assert_eq!(weights.len(), period - 1, "weights.len() must be period - 1");
+    assert!(out.len() >= data.len(), "`out` must be at least as long as `data`");
 
     let wlen = period - 1;
     let start_idx = first_val + period + 1;
     let len = data.len();
 
-    for i in start_idx..len {
-        let mut sum = 0.0;
-        for k in 0..wlen {
-            let d = data[i - k];
-            let w = weights[k];
-            sum += d * w;
+    // Hot path: compute reverse dot with unrolling + fused mul-add to
+    // improve ILP and numerical agreement without extra allocations.
+    unsafe {
+        let w_ptr = weights.as_ptr();
+        for i in start_idx..len {
+            let dp = data.as_ptr().add(i);
+
+            let mut s0 = 0.0f64;
+            let mut s1 = 0.0f64;
+            let mut s2 = 0.0f64;
+            let mut s3 = 0.0f64;
+            let mut s4 = 0.0f64;
+            let mut s5 = 0.0f64;
+            let mut s6 = 0.0f64;
+            let mut s7 = 0.0f64;
+
+            let mut k = 0usize;
+
+            // Unroll by 8
+            while k + 8 <= wlen {
+                let x0 = *dp.sub(k + 0);
+                let w0 = *w_ptr.add(k + 0);
+                s0 = x0.mul_add(w0, s0);
+
+                let x1 = *dp.sub(k + 1);
+                let w1 = *w_ptr.add(k + 1);
+                s1 = x1.mul_add(w1, s1);
+
+                let x2 = *dp.sub(k + 2);
+                let w2 = *w_ptr.add(k + 2);
+                s2 = x2.mul_add(w2, s2);
+
+                let x3 = *dp.sub(k + 3);
+                let w3 = *w_ptr.add(k + 3);
+                s3 = x3.mul_add(w3, s3);
+
+                let x4 = *dp.sub(k + 4);
+                let w4 = *w_ptr.add(k + 4);
+                s4 = x4.mul_add(w4, s4);
+
+                let x5 = *dp.sub(k + 5);
+                let w5 = *w_ptr.add(k + 5);
+                s5 = x5.mul_add(w5, s5);
+
+                let x6 = *dp.sub(k + 6);
+                let w6 = *w_ptr.add(k + 6);
+                s6 = x6.mul_add(w6, s6);
+
+                let x7 = *dp.sub(k + 7);
+                let w7 = *w_ptr.add(k + 7);
+                s7 = x7.mul_add(w7, s7);
+
+                k += 8;
+            }
+
+            // Unroll by 4
+            while k + 4 <= wlen {
+                let x0 = *dp.sub(k + 0);
+                let w0 = *w_ptr.add(k + 0);
+                s0 = x0.mul_add(w0, s0);
+
+                let x1 = *dp.sub(k + 1);
+                let w1 = *w_ptr.add(k + 1);
+                s1 = x1.mul_add(w1, s1);
+
+                let x2 = *dp.sub(k + 2);
+                let w2 = *w_ptr.add(k + 2);
+                s2 = x2.mul_add(w2, s2);
+
+                let x3 = *dp.sub(k + 3);
+                let w3 = *w_ptr.add(k + 3);
+                s3 = x3.mul_add(w3, s3);
+
+                k += 4;
+            }
+
+            // Remainder
+            while k < wlen {
+                let x = *dp.sub(k);
+                let w = *w_ptr.add(k);
+                s0 = x.mul_add(w, s0);
+                k += 1;
+            }
+
+            let sum = ((s0 + s1) + (s2 + s3)) + ((s4 + s5) + (s6 + s7));
+            *out.get_unchecked_mut(i) = sum * inv_norm;
         }
-        out[i] = sum * inv_norm;
     }
 }
 
@@ -310,7 +392,7 @@ pub fn srwma_avx2(
     inv_norm: f64,
     out: &mut [f64],
 ) {
-    srwma_scalar(data, weights, period, first_valid, inv_norm, out)
+    unsafe { srwma_row_avx2(data, first_valid, period, period - 1, weights.as_ptr(), inv_norm, out) }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -323,7 +405,7 @@ pub fn srwma_avx512_short(
     inv_norm: f64,
     out: &mut [f64],
 ) {
-    srwma_scalar(data, weights, period, first_valid, inv_norm, out)
+    unsafe { srwma_row_avx512_short(data, first_valid, period, period - 1, weights.as_ptr(), inv_norm, out) }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -336,7 +418,7 @@ pub fn srwma_avx512_long(
     inv_norm: f64,
     out: &mut [f64],
 ) {
-    srwma_scalar(data, weights, period, first_valid, inv_norm, out)
+    unsafe { srwma_row_avx512_long(data, first_valid, period, period - 1, weights.as_ptr(), inv_norm, out) }
 }
 
 #[inline]
@@ -744,10 +826,83 @@ unsafe fn srwma_row_scalar(
     let start_idx = first + period + 1;
 
     for i in start_idx..len {
-        let mut sum = 0.0;
-        for k in 0..wlen {
-            sum += *data.get_unchecked(i - k) * *w_ptr.add(k);
+        let dp = data.as_ptr().add(i);
+
+        let mut s0 = 0.0f64;
+        let mut s1 = 0.0f64;
+        let mut s2 = 0.0f64;
+        let mut s3 = 0.0f64;
+        let mut s4 = 0.0f64;
+        let mut s5 = 0.0f64;
+        let mut s6 = 0.0f64;
+        let mut s7 = 0.0f64;
+
+        let mut k = 0usize;
+
+        while k + 8 <= wlen {
+            let x0 = *dp.sub(k + 0);
+            let w0 = *w_ptr.add(k + 0);
+            s0 = x0.mul_add(w0, s0);
+
+            let x1 = *dp.sub(k + 1);
+            let w1 = *w_ptr.add(k + 1);
+            s1 = x1.mul_add(w1, s1);
+
+            let x2 = *dp.sub(k + 2);
+            let w2 = *w_ptr.add(k + 2);
+            s2 = x2.mul_add(w2, s2);
+
+            let x3 = *dp.sub(k + 3);
+            let w3 = *w_ptr.add(k + 3);
+            s3 = x3.mul_add(w3, s3);
+
+            let x4 = *dp.sub(k + 4);
+            let w4 = *w_ptr.add(k + 4);
+            s4 = x4.mul_add(w4, s4);
+
+            let x5 = *dp.sub(k + 5);
+            let w5 = *w_ptr.add(k + 5);
+            s5 = x5.mul_add(w5, s5);
+
+            let x6 = *dp.sub(k + 6);
+            let w6 = *w_ptr.add(k + 6);
+            s6 = x6.mul_add(w6, s6);
+
+            let x7 = *dp.sub(k + 7);
+            let w7 = *w_ptr.add(k + 7);
+            s7 = x7.mul_add(w7, s7);
+
+            k += 8;
         }
+
+        while k + 4 <= wlen {
+            let x0 = *dp.sub(k + 0);
+            let w0 = *w_ptr.add(k + 0);
+            s0 = x0.mul_add(w0, s0);
+
+            let x1 = *dp.sub(k + 1);
+            let w1 = *w_ptr.add(k + 1);
+            s1 = x1.mul_add(w1, s1);
+
+            let x2 = *dp.sub(k + 2);
+            let w2 = *w_ptr.add(k + 2);
+            s2 = x2.mul_add(w2, s2);
+
+            let x3 = *dp.sub(k + 3);
+            let w3 = *w_ptr.add(k + 3);
+            s3 = x3.mul_add(w3, s3);
+
+            k += 4;
+        }
+
+        while k < wlen {
+            let x = *dp.sub(k);
+            let w = *w_ptr.add(k);
+            s0 = x.mul_add(w, s0);
+            k += 1;
+        }
+
+        let sum = ((s0 + s1) + (s2 + s3)) + ((s4 + s5) + (s6 + s7));
         out[i] = sum * inv_n;
     }
 }
@@ -763,7 +918,52 @@ unsafe fn srwma_row_avx2(
     inv_n: f64,
     out: &mut [f64],
 ) {
-    srwma_row_scalar(data, first, period, stride, w_ptr, inv_n, out);
+    #[target_feature(enable = "avx2,fma")]
+    unsafe fn hadd_m256d(x: __m256d) -> f64 {
+        let hi = _mm256_extractf128_pd(x, 1);
+        let lo = _mm256_castpd256_pd128(x);
+        let sum2 = _mm_add_pd(lo, hi);
+        let sum1 = _mm_hadd_pd(sum2, sum2);
+        _mm_cvtsd_f64(sum1)
+    }
+
+    #[target_feature(enable = "avx2,fma")]
+    unsafe fn inner(
+        data: &[f64],
+        first: usize,
+        period: usize,
+        _stride: usize,
+        w_ptr: *const f64,
+        inv_n: f64,
+        out: &mut [f64],
+    ) {
+        let wlen = period - 1;
+        let len = data.len();
+        let start_idx = first + period + 1;
+
+        const REV: i32 = 0x1B; // reverse 4 lanes
+        for i in start_idx..len {
+            let mut vacc = _mm256_setzero_pd();
+            let dp = data.as_ptr().add(i);
+
+            let mut k = 0usize;
+            while k + 4 <= wlen {
+                let wv = _mm256_loadu_pd(w_ptr.add(k));
+                let dv = _mm256_loadu_pd(dp.sub(k + 3));
+                let dv = _mm256_permute4x64_pd(dv, REV);
+                vacc = _mm256_fmadd_pd(dv, wv, vacc);
+                k += 4;
+            }
+            let mut acc = hadd_m256d(vacc);
+            while k < wlen {
+                acc = (*dp.sub(k)).mul_add(*w_ptr.add(k), acc);
+                k += 1;
+            }
+            out[i] = acc * inv_n;
+        }
+    }
+
+    inner(data, first, period, stride, w_ptr, inv_n, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -795,7 +995,53 @@ unsafe fn srwma_row_avx512_short(
     inv_n: f64,
     out: &mut [f64],
 ) {
-    srwma_row_scalar(data, first, period, _stride, w_ptr, inv_n, out);
+    #[target_feature(enable = "avx512f,fma")]
+    unsafe fn dot8_rev(dp: *const f64, w_ptr: *const f64, k: usize) -> f64 {
+        let wv = _mm512_loadu_pd(w_ptr.add(k));
+        let dv = _mm512_loadu_pd(dp.sub(k + 7));
+        let rev_idx = _mm512_setr_epi64(7, 6, 5, 4, 3, 2, 1, 0);
+        let dv = _mm512_permutexvar_pd(rev_idx, dv);
+        let prod = _mm512_mul_pd(dv, wv);
+        _mm512_reduce_add_pd(prod)
+    }
+
+    #[target_feature(enable = "avx512f,fma")]
+    unsafe fn inner(
+        data: &[f64],
+        first: usize,
+        period: usize,
+        _stride: usize,
+        w_ptr: *const f64,
+        inv_n: f64,
+        out: &mut [f64],
+    ) {
+        let wlen = period - 1;
+        let len = data.len();
+        let start_idx = first + period + 1;
+
+        for i in start_idx..len {
+            let mut vacc = _mm512_setzero_pd();
+            let dp = data.as_ptr().add(i);
+
+            let mut k = 0usize;
+            while k + 8 <= wlen {
+                let wv = _mm512_loadu_pd(w_ptr.add(k));
+                let dv = _mm512_loadu_pd(dp.sub(k + 7));
+                let rev_idx = _mm512_setr_epi64(7, 6, 5, 4, 3, 2, 1, 0);
+                let dv = _mm512_permutexvar_pd(rev_idx, dv);
+                vacc = _mm512_fmadd_pd(dv, wv, vacc);
+                k += 8;
+            }
+            let mut acc = _mm512_reduce_add_pd(vacc);
+            while k < wlen {
+                acc = (*dp.sub(k)).mul_add(*w_ptr.add(k), acc);
+                k += 1;
+            }
+            out[i] = acc * inv_n;
+        }
+    }
+
+    inner(data, first, period, _stride, w_ptr, inv_n, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -809,7 +1055,54 @@ unsafe fn srwma_row_avx512_long(
     inv_n: f64,
     out: &mut [f64],
 ) {
-    srwma_row_scalar(data, first, period, _stride, w_ptr, inv_n, out);
+    // Same implementation as short for now; kept separate for potential tuning.
+    #[target_feature(enable = "avx512f,fma")]
+    unsafe fn dot8_rev(dp: *const f64, w_ptr: *const f64, k: usize) -> f64 {
+        let wv = _mm512_loadu_pd(w_ptr.add(k));
+        let dv = _mm512_loadu_pd(dp.sub(k + 7));
+        let rev_idx = _mm512_setr_epi64(7, 6, 5, 4, 3, 2, 1, 0);
+        let dv = _mm512_permutexvar_pd(rev_idx, dv);
+        let prod = _mm512_mul_pd(dv, wv);
+        _mm512_reduce_add_pd(prod)
+    }
+
+    #[target_feature(enable = "avx512f,fma")]
+    unsafe fn inner(
+        data: &[f64],
+        first: usize,
+        period: usize,
+        _stride: usize,
+        w_ptr: *const f64,
+        inv_n: f64,
+        out: &mut [f64],
+    ) {
+        let wlen = period - 1;
+        let len = data.len();
+        let start_idx = first + period + 1;
+
+        for i in start_idx..len {
+            let mut vacc = _mm512_setzero_pd();
+            let dp = data.as_ptr().add(i);
+
+            let mut k = 0usize;
+            while k + 8 <= wlen {
+                let wv = _mm512_loadu_pd(w_ptr.add(k));
+                let dv = _mm512_loadu_pd(dp.sub(k + 7));
+                let rev_idx = _mm512_setr_epi64(7, 6, 5, 4, 3, 2, 1, 0);
+                let dv = _mm512_permutexvar_pd(rev_idx, dv);
+                vacc = _mm512_fmadd_pd(dv, wv, vacc);
+                k += 8;
+            }
+            let mut acc = _mm512_reduce_add_pd(vacc);
+            while k < wlen {
+                acc = (*dp.sub(k)).mul_add(*w_ptr.add(k), acc);
+                k += 1;
+            }
+            out[i] = acc * inv_n;
+        }
+    }
+
+    inner(data, first, period, _stride, w_ptr, inv_n, out)
 }
 
 #[derive(Debug, Clone)]

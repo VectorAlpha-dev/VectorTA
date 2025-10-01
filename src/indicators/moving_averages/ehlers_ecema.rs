@@ -18,7 +18,7 @@
 //! - **AVX512 kernel**: STUB - Falls back to scalar implementation
 //! - **Streaming update**: O(n) - Recalculates EMA from scratch each update
 //! - **Memory optimization**: GOOD - Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix)
-//! - **Optimization needed**: Implement SIMD kernels, optimize streaming to O(1) with incremental updates
+//! - **Decision note**: Scalar kernel optimized to O(1) per bar using a closed-form minimizer on the discrete gain grid; SIMD remains stubbed due to strict loop-carried dependency across time.
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
@@ -569,54 +569,93 @@ unsafe fn ehlers_ecema_scalar_into_with_mode(
     confirmed_only: bool,
     out: &mut [f64],
 ) {
+    // Keep parity with prior debug assertions
     let len = data.len();
     debug_assert_eq!(out.len(), len);
     debug_assert_eq!(ema_values.len(), len);
 
-    // Determine start index based on mode
-    let start_idx = if pine_compatible {
-        first // Pine mode: start from first valid value
-    } else {
-        first + length - 1 // Regular mode: wait for warmup
-    };
+    // Determine start index by mode (prefix already NaN-initialized by caller)
+    let start_idx = if pine_compatible { first } else { first + length - 1 };
+    if start_idx >= len {
+        return;
+    }
 
+    // Constants / raw ptr aliases to enable unchecked indexing efficiently
+    let gL: i32 = gain_limit as i32; // integer gain bounds in tenths ([-gL, gL])
+    let step_s: f64 = 0.1; // gain step (tenths -> f64)
+    let data_ptr = data.as_ptr();
+    let ema_ptr = ema_values.as_ptr();
+    let out_ptr = out.as_mut_ptr();
+
+    // Main recurrence using closed-form minimizer on the discrete grid
     for i in start_idx..len {
+        // Source (confirmed_only uses prior candle if possible)
         let src = if confirmed_only && i > 0 {
-            *data.get_unchecked(i - 1)
+            *data_ptr.add(i - 1)
         } else {
-            *data.get_unchecked(i)
+            *data_ptr.add(i)
         };
-        let ema = *ema_values.get_unchecked(i);
 
-        // Get previous ecEma value
+        // EMA for this bar (precomputed outside)
+        let ema_i = *ema_ptr.add(i);
+
+        // Previous EC-EMA (mode-dependent seed at the first computed index)
         let prev_ec = if i == start_idx {
-            if pine_compatible {
-                0.0 // Pine mode: start with 0 (nz(ecEma[1]) = 0)
-            } else {
-                ema // Regular mode: use EMA as initial value
-            }
+            if pine_compatible { 0.0 } else { ema_i }
         } else {
-            *out.get_unchecked(i - 1)
+            *out_ptr.add(i - 1)
         };
 
-        let mut least_error = f64::INFINITY;
-        let mut best_gain = 0.0;
+        // Algebra:
+        // test_ec = alpha*(ema_i + g*(src - prev_ec)) + beta*prev_ec
+        //         = base + s*k, where k is integer tenths and s = alpha*(src - prev_ec)/10
+        // base = alpha*ema_i + beta*prev_ec
+        let delta = src - prev_ec;
+        let c = alpha * delta;
+        let base = alpha.mul_add(ema_i, beta * prev_ec);
+        let d = src - base; // desired residual to minimize |d - s*k|
+        let s = c * step_s; // slope per integer step
 
-        // Test different gain values to find the one with minimum error
-        for gain_int in -(gain_limit as i32)..=(gain_limit as i32) {
-            let gain = gain_int as f64 / 10.0;
-            let test_ec_ema = alpha * (ema + gain * (src - prev_ec)) + beta * prev_ec;
-            let error = (src - test_ec_ema).abs();
+        // Choose integer k_best matching the original scan’s tie-breaking:
+        // - If s == 0 (error independent of k), original loop picks first k (-gL).
+        // - Else, evaluate the two nearest integers around k_cont = d/s.
+        //   On exact ties pick the smaller integer (same as first encountered in the scan).
+        let k_best: i32 = if !s.is_finite() || !d.is_finite() || s.abs() <= f64::MIN_POSITIVE {
+            -gL
+        } else {
+            let k_cont = d / s; // ideal real-valued k
+            // If clearly out of bounds, the constrained minimizer is at the boundary
+            if k_cont <= (-(gL as f64) - 1.0) {
+                -gL
+            } else if k_cont >= (gL as f64 + 1.0) {
+                gL
+            } else {
+                // Check the two neighbors: floor and floor+1
+                let mut k0 = k_cont.floor() as i32;
+                let mut k1 = k0 + 1;
+                // Clamp both to legal bounds
+                if k0 < -gL {
+                    k0 = -gL;
+                } else if k0 > gL {
+                    k0 = gL;
+                }
+                if k1 < -gL {
+                    k1 = -gL;
+                } else if k1 > gL {
+                    k1 = gL;
+                }
 
-            if error < least_error {
-                least_error = error;
-                best_gain = gain;
+                // Errors at the two candidate integers
+                let e0 = (d - s * (k0 as f64)).abs();
+                let e1 = (d - s * (k1 as f64)).abs();
+
+                // Tie -> pick smaller integer (mirrors '<' update in original scan)
+                if e0 <= e1 { k0 } else { k1 }
             }
-        }
+        };
 
-        // Calculate final value with best gain
-        let final_ec_ema = alpha * (ema + best_gain * (src - prev_ec)) + beta * prev_ec;
-        *out.get_unchecked_mut(i) = final_ec_ema;
+        // Final EC-EMA for this bar: base + s*k_best (use FMA)
+        *out_ptr.add(i) = (k_best as f64).mul_add(s, base);
     }
 }
 
@@ -1133,27 +1172,35 @@ impl EhlersEcemaStream {
             self.prev_ecema = 0.0; // Pine: nz(ecEma[1]) = 0 on first bar
         }
 
-        // Find best gain
-        let mut least_error = 1000000.0;
-        let mut best_gain = 0.0;
-
-        for gain_int in -(self.gain_limit as i32)..=(self.gain_limit as i32) {
-            let gain = gain_int as f64 / 10.0;
-            let test_ec_ema = self.alpha * (ema_value + gain * (src - self.prev_ecema))
-                + self.beta * self.prev_ecema;
-            let error = (src - test_ec_ema).abs();
-
-            if error < least_error {
-                least_error = error;
-                best_gain = gain;
+        // Closed-form minimizer on discrete gain grid (tenths)
+        let gL: i32 = self.gain_limit as i32;
+        let delta = src - self.prev_ecema;
+        let c = self.alpha * delta;
+        let base = self.alpha.mul_add(ema_value, self.beta * self.prev_ecema);
+        let d = src - base;
+        let s = c * 0.1;
+        let k_best: i32 = if !s.is_finite() || !d.is_finite() || s.abs() <= f64::MIN_POSITIVE {
+            -gL
+        } else {
+            let k_cont = d / s;
+            if k_cont <= (-(gL as f64) - 1.0) {
+                -gL
+            } else if k_cont >= (gL as f64 + 1.0) {
+                gL
+            } else {
+                let mut k0 = k_cont.floor() as i32;
+                let mut k1 = k0 + 1;
+                if k0 < -gL { k0 = -gL; } else if k0 > gL { k0 = gL; }
+                if k1 < -gL { k1 = -gL; } else if k1 > gL { k1 = gL; }
+                let e0 = (d - s * (k0 as f64)).abs();
+                let e1 = (d - s * (k1 as f64)).abs();
+                if e0 <= e1 { k0 } else { k1 }
             }
-        }
+        };
 
-        // Calculate final error-correcting EMA with best gain
-        let ec_ema = self.alpha * (ema_value + best_gain * (src - self.prev_ecema))
-            + self.beta * self.prev_ecema;
+        // Final EC-EMA with best k
+        let ec_ema = (k_best as f64).mul_add(s, base);
         self.prev_ecema = ec_ema;
-
         ec_ema
     }
 

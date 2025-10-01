@@ -15,15 +15,11 @@
 //! - **`Err(JsaError)`** otherwise.
 //!
 //! ## Developer Notes
-//! - **AVX2 kernel**: ❌ Stub - calls scalar implementation
-//! - **AVX512 kernel**: ❌ Stub - both short and long variants call scalar
-//! - **Streaming update**: ✅ O(1) - simple average of current value with value at period offset
-//! - **Memory optimization**: ✅ Uses `alloc_with_nan_prefix` for zero-copy output allocation
-//! - **Current status**: Basic implementation with stub SIMD kernels
-//! - **Optimization opportunities**:
-//!   - Implement AVX2 kernel with vectorized (data[i] + data[i-period]) * 0.5
-//!   - Implement AVX512 kernel for wider vector processing
-//!   - Very simple calculation makes this ideal for SIMD optimization
+//! - **SIMD status**: ✅ AVX2 and AVX512 enabled; exact `(x + y) * 0.5` order for bit‑exact match to scalar.
+//! - **Streaming update**: ✅ O(1) average of current value with value at period offset.
+//! - **Memory**: ✅ `alloc_with_nan_prefix` and init helpers ensure zero-copy/uninitialized semantics.
+//! - **Batch row SIMD**: ✅ Per-row AVX2/AVX512 variants; no shared precompute to exploit across rows.
+//! - **Rationale**: Kernel is bandwidth-bound but benefits from fewer loop branches and wider lanes.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -332,21 +328,119 @@ pub fn jsa_scalar(data: &[f64], period: usize, first_val: usize, out: &mut [f64]
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
 pub unsafe fn jsa_avx2(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) {
-    // Just call scalar, as AVX2 stub
-    jsa_scalar(data, period, first_val, out)
+    use core::arch::x86_64::*;
+    let len = data.len();
+    let start = first_val + period;
+    if start >= len {
+        return;
+    }
+
+    let dp = data.as_ptr();
+    let op = out.as_mut_ptr();
+
+    let mut p_cur = dp.add(start);
+    let mut p_past = dp.add(start - period);
+    let mut p_out = op.add(start);
+    let end = op.add(len);
+
+    let half = _mm256_set1_pd(0.5);
+
+    while p_out.add(4) <= end {
+        let x = _mm256_loadu_pd(p_cur);
+        let y = _mm256_loadu_pd(p_past);
+        let s = _mm256_add_pd(x, y);
+        let a = _mm256_mul_pd(s, half);
+        _mm256_storeu_pd(p_out, a);
+        p_cur = p_cur.add(4);
+        p_past = p_past.add(4);
+        p_out = p_out.add(4);
+    }
+
+    while p_out < end {
+        *p_out = (*p_cur + *p_past) * 0.5;
+        p_cur = p_cur.add(1);
+        p_past = p_past.add(1);
+        p_out = p_out.add(1);
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
 pub unsafe fn jsa_avx512_short(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) {
-    // Just call scalar, as AVX512-short stub
-    jsa_scalar(data, period, first_val, out)
+    use core::arch::x86_64::*;
+    let len = data.len();
+    let start = first_val + period;
+    if start >= len {
+        return;
+    }
+
+    let dp = data.as_ptr();
+    let op = out.as_mut_ptr();
+
+    let mut p_cur = dp.add(start);
+    let mut p_past = dp.add(start - period);
+    let mut p_out = op.add(start);
+    let end = op.add(len);
+
+    let half = _mm512_set1_pd(0.5);
+
+    while p_out.add(8) <= end {
+        let x = _mm512_loadu_pd(p_cur);
+        let y = _mm512_loadu_pd(p_past);
+        let s = _mm512_add_pd(x, y);
+        let a = _mm512_mul_pd(s, half);
+        _mm512_storeu_pd(p_out, a);
+        p_cur = p_cur.add(8);
+        p_past = p_past.add(8);
+        p_out = p_out.add(8);
+    }
+
+    while p_out < end {
+        *p_out = (*p_cur + *p_past) * 0.5;
+        p_cur = p_cur.add(1);
+        p_past = p_past.add(1);
+        p_out = p_out.add(1);
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
 pub unsafe fn jsa_avx512_long(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) {
-    // Just call scalar, as AVX512-long stub
-    jsa_scalar(data, period, first_val, out)
+    use core::arch::x86_64::*;
+    let len = data.len();
+    let start = first_val + period;
+    if start >= len {
+        return;
+    }
+
+    let dp = data.as_ptr();
+    let op = out.as_mut_ptr();
+
+    let mut p_cur = dp.add(start);
+    let mut p_past = dp.add(start - period);
+    let mut p_out = op.add(start);
+    let end = op.add(len);
+
+    let half = _mm512_set1_pd(0.5);
+
+    while p_out.add(8) <= end {
+        let x = _mm512_loadu_pd(p_cur);
+        let y = _mm512_loadu_pd(p_past);
+        let s = _mm512_add_pd(x, y);
+        let a = _mm512_mul_pd(s, half);
+        _mm512_storeu_pd(p_out, a);
+        p_cur = p_cur.add(8);
+        p_past = p_past.add(8);
+        p_out = p_out.add(8);
+    }
+    while p_out < end {
+        *p_out = (*p_cur + *p_past) * 0.5;
+        p_cur = p_cur.add(1);
+        p_past = p_past.add(1);
+        p_out = p_out.add(1);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -735,8 +829,39 @@ unsafe fn jsa_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn jsa_row_avx2(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-    // AVX2 stub - call scalar
-    jsa_row_scalar(data, first, period, out)
+    use core::arch::x86_64::*;
+    let len = data.len();
+    let start = first + period;
+    if start >= len {
+        return;
+    }
+
+    let dp = data.as_ptr();
+    let op = out.as_mut_ptr();
+
+    let mut p_cur = dp.add(start);
+    let mut p_past = dp.add(start - period);
+    let mut p_out = op.add(start);
+    let end = op.add(len);
+
+    let half = _mm256_set1_pd(0.5);
+
+    while p_out.add(4) <= end {
+        let x = _mm256_loadu_pd(p_cur);
+        let y = _mm256_loadu_pd(p_past);
+        let s = _mm256_add_pd(x, y);
+        let a = _mm256_mul_pd(s, half);
+        _mm256_storeu_pd(p_out, a);
+        p_cur = p_cur.add(4);
+        p_past = p_past.add(4);
+        p_out = p_out.add(4);
+    }
+    while p_out < end {
+        *p_out = (*p_cur + *p_past) * 0.5;
+        p_cur = p_cur.add(1);
+        p_past = p_past.add(1);
+        p_out = p_out.add(1);
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -752,15 +877,73 @@ unsafe fn jsa_row_avx512(data: &[f64], first: usize, period: usize, out: &mut [f
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn jsa_row_avx512_short(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-    // AVX512-short stub - call scalar
-    jsa_row_scalar(data, first, period, out)
+    use core::arch::x86_64::*;
+    let len = data.len();
+    let start = first + period;
+    if start >= len { return; }
+
+    let dp = data.as_ptr();
+    let op = out.as_mut_ptr();
+
+    let mut p_cur = dp.add(start);
+    let mut p_past = dp.add(start - period);
+    let mut p_out = op.add(start);
+    let end = op.add(len);
+
+    let half = _mm512_set1_pd(0.5);
+
+    while p_out.add(8) <= end {
+        let x = _mm512_loadu_pd(p_cur);
+        let y = _mm512_loadu_pd(p_past);
+        let s = _mm512_add_pd(x, y);
+        let a = _mm512_mul_pd(s, half);
+        _mm512_storeu_pd(p_out, a);
+        p_cur = p_cur.add(8);
+        p_past = p_past.add(8);
+        p_out = p_out.add(8);
+    }
+    while p_out < end {
+        *p_out = (*p_cur + *p_past) * 0.5;
+        p_cur = p_cur.add(1);
+        p_past = p_past.add(1);
+        p_out = p_out.add(1);
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn jsa_row_avx512_long(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-    // AVX512-long stub - call scalar
-    jsa_row_scalar(data, first, period, out)
+    use core::arch::x86_64::*;
+    let len = data.len();
+    let start = first + period;
+    if start >= len { return; }
+
+    let dp = data.as_ptr();
+    let op = out.as_mut_ptr();
+
+    let mut p_cur = dp.add(start);
+    let mut p_past = dp.add(start - period);
+    let mut p_out = op.add(start);
+    let end = op.add(len);
+
+    let half = _mm512_set1_pd(0.5);
+
+    while p_out.add(8) <= end {
+        let x = _mm512_loadu_pd(p_cur);
+        let y = _mm512_loadu_pd(p_past);
+        let s = _mm512_add_pd(x, y);
+        let a = _mm512_mul_pd(s, half);
+        _mm512_storeu_pd(p_out, a);
+        p_cur = p_cur.add(8);
+        p_past = p_past.add(8);
+        p_out = p_out.add(8);
+    }
+    while p_out < end {
+        *p_out = (*p_cur + *p_past) * 0.5;
+        p_cur = p_cur.add(1);
+        p_past = p_past.add(1);
+        p_out = p_out.add(1);
+    }
 }
 
 // Python bindings

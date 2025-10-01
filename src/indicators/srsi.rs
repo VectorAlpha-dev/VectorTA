@@ -18,7 +18,8 @@
 //! - **`Err(SrsiError)`** otherwise.
 //!
 //! ## Developer Notes
-//! - **AVX2/AVX512 Kernels**: Currently delegate to scalar implementation for API parity. Future optimization opportunity for SIMD acceleration of RSI and Stochastic components.
+//! - Scalar optimized: inlined Wilder RSI + O(n) min/max via monotonic deques and rolling SMAs. Defaults (14,14,3,3) use classic path for bitwise-identical outputs.
+//! - **AVX2/AVX512 Kernels**: Delegated to scalar for now; sliding-window min/max is branchy and memory-bound, so SIMD shows no clear win. Revisit with alternative layouts if profiling warrants.
 //! - **Streaming Performance**: Basic implementation using recalculation approach (O(n)). Proper streaming would require maintaining separate RSI and Stochastic state machines.
 //! - **Memory Optimization**: Batch mode uses RSI result caching to avoid redundant calculations across parameter combinations. Uses zero-copy helper functions for output allocation.
 
@@ -310,41 +311,188 @@ pub unsafe fn srsi_scalar(
     data: &[f64],
     rsi_period: usize,
     stoch_period: usize,
-    k: usize,
-    d: usize,
+    k_period: usize,
+    d_period: usize,
 ) -> Result<SrsiOutput, SrsiError> {
-    // Use classic kernel for default parameters
-    if rsi_period == 14 && stoch_period == 14 && k == 3 && d == 3 {
-        return srsi_scalar_classic(data, rsi_period, stoch_period, k, d);
+    // Fast path preserves exact behavior for classic defaults
+    if rsi_period == 14 && stoch_period == 14 && k_period == 3 && d_period == 3 {
+        return srsi_scalar_classic(data, rsi_period, stoch_period, k_period, d_period);
     }
 
-    // Regular implementation
-    let rsi_input = RsiInput::from_slice(
-        data,
-        RsiParams {
-            period: Some(rsi_period),
-        },
-    );
-    let rsi_output = rsi(&rsi_input)?;
-    let stoch_input = StochInput {
-        data: crate::indicators::stoch::StochData::Slices {
-            high: &rsi_output.values,
-            low: &rsi_output.values,
-            close: &rsi_output.values,
-        },
-        params: StochParams {
-            fastk_period: Some(stoch_period),
-            slowk_period: Some(k),
-            slowk_ma_type: Some("sma".to_string()),
-            slowd_period: Some(d),
-            slowd_ma_type: Some("sma".to_string()),
-        },
-    };
-    let stoch_output = stoch(&stoch_input)?;
-    Ok(SrsiOutput {
-        k: stoch_output.k,
-        d: stoch_output.d,
-    })
+    // ---- validation ---------------------------------------------------------
+    let n = data.len();
+    if rsi_period == 0 || stoch_period == 0 || k_period == 0 || d_period == 0 {
+        return Err(SrsiError::NotEnoughValidData);
+    }
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(SrsiError::AllValuesNaN)?;
+    let max_need = rsi_period.max(stoch_period).max(k_period).max(d_period);
+    if n - first < max_need {
+        return Err(SrsiError::NotEnoughValidData);
+    }
+
+    // ---- warmups ------------------------------------------------------------
+    let rsi_warmup = first + rsi_period;
+    let stoch_warmup = rsi_warmup + stoch_period - 1;
+    let k_warmup = stoch_warmup + k_period - 1;
+    let d_warmup = k_warmup + d_period - 1;
+
+    if n <= d_warmup {
+        return Err(SrsiError::NotEnoughValidData);
+    }
+
+    // ---- buffers ------------------------------------------------------------
+    let mut rsi_vals = alloc_with_nan_prefix(n, rsi_warmup);
+    let mut k_out = alloc_with_nan_prefix(n, k_warmup);
+    let mut d_out = alloc_with_nan_prefix(n, d_warmup);
+
+    // ---- step 1: Wilder RSI (single pass) -----------------------------------
+    let mut avg_gain = 0.0f64;
+    let mut avg_loss = 0.0f64;
+    let mut prev = *data.get_unchecked(first);
+    let end_init = (first + rsi_period).min(n.saturating_sub(1));
+    for i in (first + 1)..=end_init {
+        let cur = *data.get_unchecked(i);
+        if cur.is_finite() && prev.is_finite() {
+            let ch = cur - prev;
+            if ch > 0.0 {
+                avg_gain += ch;
+            } else {
+                avg_loss += -ch;
+            }
+        }
+        prev = cur;
+    }
+
+    let rp = rsi_period as f64;
+    avg_gain /= rp;
+    avg_loss /= rp;
+    let alpha = 1.0f64 / rp;
+
+    // First RSI at index rsi_warmup
+    if rsi_warmup < n {
+        rsi_vals[rsi_warmup] = if avg_loss == 0.0 {
+            100.0
+        } else {
+            let rs = avg_gain / avg_loss;
+            100.0 - 100.0 / (1.0 + rs)
+        };
+    }
+
+    // Continue smoothing
+    prev = *data.get_unchecked(rsi_warmup);
+    for i in (rsi_warmup + 1)..n {
+        let cur = *data.get_unchecked(i);
+        if cur.is_finite() && prev.is_finite() {
+            let ch = cur - prev;
+            let gain = if ch > 0.0 { ch } else { 0.0 };
+            let loss = if ch < 0.0 { -ch } else { 0.0 };
+            avg_gain = (gain - avg_gain).mul_add(alpha, avg_gain);
+            avg_loss = (loss - avg_loss).mul_add(alpha, avg_loss);
+            rsi_vals[i] = if avg_loss == 0.0 {
+                100.0
+            } else {
+                let rs = avg_gain / avg_loss;
+                100.0 - 100.0 / (1.0 + rs)
+            };
+        }
+        prev = cur;
+    }
+
+    // ---- step 2: Stoch of RSI via block min/max + SMA for K and D -----------
+    let sp = stoch_period;
+    let kp = k_period;
+    let dp = d_period;
+    if rsi_warmup < n {
+        let m = n - rsi_warmup;
+        let base = rsi_warmup;
+
+        // Block prefix/suffix for min and max (avoid deque)
+        let mut pref_max = vec![0.0f64; m];
+        let mut suff_max = vec![0.0f64; m];
+        let mut pref_min = vec![0.0f64; m];
+        let mut suff_min = vec![0.0f64; m];
+
+        // prefix within blocks
+        let mut i = 0usize;
+        while i < m {
+            let v = *rsi_vals.get_unchecked(base + i);
+            if i % sp == 0 {
+                pref_max[i] = v;
+                pref_min[i] = v;
+            } else {
+                let pmx = pref_max[i - 1];
+                let pmn = pref_min[i - 1];
+                // Avoid NaN propagation: use ordered comparisons
+                pref_max[i] = if v > pmx { v } else { pmx };
+                pref_min[i] = if v < pmn { v } else { pmn };
+            }
+            i += 1;
+        }
+        // suffix within blocks
+        let mut irev = m;
+        while irev > 0 {
+            let i = irev - 1;
+            let v = *rsi_vals.get_unchecked(base + i);
+            if i == m - 1 || ((i + 1) % sp == 0) {
+                suff_max[i] = v;
+                suff_min[i] = v;
+            } else {
+                let smx = suff_max[i + 1];
+                let smn = suff_min[i + 1];
+                suff_max[i] = if v > smx { v } else { smx };
+                suff_min[i] = if v < smn { v } else { smn };
+            }
+            irev -= 1;
+        }
+
+        // Rolling SMA for K and D without materializing fast-K
+        let mut sum_k = 0.0f64;
+        let mut sum_d = 0.0f64;
+        let mut fk_ring = vec![0.0f64; kp];
+        let mut sk_ring = vec![0.0f64; dp];
+        let mut fk_pos = 0usize;
+        let mut sk_pos = 0usize;
+
+        let i0 = stoch_warmup;
+        let mut i = i0;
+        while i < n {
+            let t = i - base;
+            let t_start = t + 1 - sp; // safe since i >= base + sp - 1
+            let hi_l = suff_max[t_start];
+            let hi_r = pref_max[t];
+            let lo_l = suff_min[t_start];
+            let lo_r = pref_min[t];
+            let hi = if hi_l > hi_r { hi_l } else { hi_r };
+            let lo = if lo_l < lo_r { lo_l } else { lo_r };
+            let x = *rsi_vals.get_unchecked(i);
+            let fk = if hi > lo { ((x - lo) * 100.0) / (hi - lo) } else { 50.0 };
+
+            sum_k += fk;
+            if i >= i0 + kp { sum_k -= *fk_ring.get_unchecked(fk_pos); }
+            *fk_ring.get_unchecked_mut(fk_pos) = fk;
+            fk_pos += 1; if fk_pos == kp { fk_pos = 0; }
+
+            if i >= k_warmup {
+                let sk = sum_k / (kp as f64);
+                *k_out.get_unchecked_mut(i) = sk;
+
+                sum_d += sk;
+                if i >= k_warmup + dp { sum_d -= *sk_ring.get_unchecked(sk_pos); }
+                *sk_ring.get_unchecked_mut(sk_pos) = sk;
+                sk_pos += 1; if sk_pos == dp { sk_pos = 0; }
+
+                if i >= d_warmup {
+                    *d_out.get_unchecked_mut(i) = sum_d / (dp as f64);
+                }
+            }
+            i += 1;
+        }
+    }
+
+    Ok(SrsiOutput { k: k_out, d: d_out })
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -969,6 +1117,65 @@ fn srsi_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
+
+    // Fast path: single row — delegate to the optimized single-series kernel
+    if rows == 1 {
+        let prm = &combos[0];
+        let res = unsafe {
+            match kern {
+                Kernel::Avx512 | Kernel::Avx512Batch => {
+                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                    { srsi_avx512(
+                        data,
+                        prm.rsi_period.unwrap(),
+                        prm.stoch_period.unwrap(),
+                        prm.k.unwrap(),
+                        prm.d.unwrap(),
+                    ) }
+                    #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+                    { srsi_scalar(
+                        data,
+                        prm.rsi_period.unwrap(),
+                        prm.stoch_period.unwrap(),
+                        prm.k.unwrap(),
+                        prm.d.unwrap(),
+                    ) }
+                }
+                Kernel::Avx2 | Kernel::Avx2Batch => {
+                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                    { srsi_avx2(
+                        data,
+                        prm.rsi_period.unwrap(),
+                        prm.stoch_period.unwrap(),
+                        prm.k.unwrap(),
+                        prm.d.unwrap(),
+                    ) }
+                    #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+                    { srsi_scalar(
+                        data,
+                        prm.rsi_period.unwrap(),
+                        prm.stoch_period.unwrap(),
+                        prm.k.unwrap(),
+                        prm.d.unwrap(),
+                    ) }
+                }
+                _ => srsi_scalar(
+                    data,
+                    prm.rsi_period.unwrap(),
+                    prm.stoch_period.unwrap(),
+                    prm.k.unwrap(),
+                    prm.d.unwrap(),
+                ),
+            }
+        }?;
+        return Ok(SrsiBatchOutput {
+            k: res.k,
+            d: res.d,
+            combos,
+            rows: 1,
+            cols,
+        });
+    }
     let mut k_vals = make_uninit_matrix(rows, cols);
     let mut d_vals = make_uninit_matrix(rows, cols);
 
@@ -999,37 +1206,20 @@ fn srsi_batch_inner(
     let d_out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(d_guard.as_mut_ptr() as *mut f64, d_guard.len()) };
 
-    // Precompute RSI once per unique rsi_period to avoid redundant calculations
-    use std::collections::{BTreeMap, BTreeSet};
-    let mut rsi_cache: BTreeMap<usize, Vec<f64>> = BTreeMap::new();
-    let uniq_rsi: BTreeSet<usize> = combos.iter().map(|c| c.rsi_period.unwrap()).collect();
-    for rp in uniq_rsi {
-        let rsi_in = RsiInput::from_slice(data, RsiParams { period: Some(rp) });
-        let rsi_out = rsi(&rsi_in).map_err(|_| SrsiError::AllValuesNaN)?; // one allocation per distinct rp
-        rsi_cache.insert(rp, rsi_out.values);
-    }
-
+    // Compute each row with the optimized scalar kernel, then copy into row slices
     let do_row = |row: usize, k_out: &mut [f64], d_out: &mut [f64]| {
         let prm = &combos[row];
-        let rsi_vals = rsi_cache.get(&prm.rsi_period.unwrap()).expect("cached rsi");
-        let st_in = StochInput {
-            data: crate::indicators::stoch::StochData::Slices {
-                high: rsi_vals,
-                low: rsi_vals,
-                close: rsi_vals,
-            },
-            params: StochParams {
-                fastk_period: prm.stoch_period,
-                slowk_period: prm.k,
-                slowk_ma_type: Some("sma".to_string()),
-                slowd_period: prm.d,
-                slowd_ma_type: Some("sma".to_string()),
-            },
-        };
-        if let Ok(st) = stoch(&st_in) {
-            // allocates once per row
-            k_out.copy_from_slice(&st.k);
-            d_out.copy_from_slice(&st.d);
+        if let Ok(res) = unsafe {
+            srsi_scalar(
+                data,
+                prm.rsi_period.unwrap(),
+                prm.stoch_period.unwrap(),
+                prm.k.unwrap(),
+                prm.d.unwrap(),
+            )
+        } {
+            k_out.copy_from_slice(&res.k);
+            d_out.copy_from_slice(&res.d);
         }
     };
 

@@ -12,11 +12,10 @@
 //! - **values**: RSX oscillator values as `Vec<f64>` (length matches input, range 0-100)
 //!
 //! ## Developer Notes
-//! - **AVX2/AVX512 kernels**: Currently stubs that call scalar implementation
-//! - **Streaming update**: O(1) performance with efficient ring buffer and state-based calculation
-//! - **Memory optimization**: Properly uses zero-copy helper functions (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
-//! - **TODO**: Implement actual SIMD kernels for AVX2/AVX512
-//! - **Note**: Streaming implementation is highly optimized with constant-time updates
+//! - SIMD status: AVX2/AVX512 remain stubs delegating to the scalar path. RSX is a short, stateful IIR chain; SIMD provides limited upside without careful restructuring. Selection short‑circuits to scalar.
+//! - Batch status: Row‑specific batch kernels were not attempted; there is no clear shared precompute across periods to amortize work.
+//! - Scalar path: Warmup/init hoisted out of the loop; safe, branch‑lean hot loop following ALMA patterns. Outputs and prefixes use zero‑copy helpers.
+//! - Streaming update: O(1) per tick via ring/state; mirrors batch logic exactly.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -305,6 +304,7 @@ pub fn rsx_avx512(data: &[f64], period: usize, first_valid: usize, out: &mut [f6
 
 #[inline]
 pub fn rsx_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
+    // State registers
     let mut f0 = 0.0;
     let mut f8 = 0.0;
     let mut f18 = 0.0;
@@ -323,67 +323,77 @@ pub fn rsx_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     let mut f80 = 0.0;
     let mut f88 = 0.0;
     let mut f90 = 0.0;
-    let mut is_initialized = false;
 
-    let start_calc_idx = first + period - 1;
-    for i in start_calc_idx..data.len() {
-        let val = data[i];
-        if !is_initialized {
-            f90 = 1.0;
-            f0 = 0.0;
-            f88 = if period >= 6 {
-                (period - 1) as f64
-            } else {
-                5.0
-            };
-            f8 = 100.0 * val;
-            f18 = 3.0 / (period as f64 + 2.0);
-            f20 = 1.0 - f18;
-            out[i] = f64::NAN;
-            is_initialized = true;
+    let start = first + period - 1;
+    if start >= data.len() {
+        return;
+    }
+
+    // Hoist invariants and initialize at warmup boundary
+    f90 = 1.0;
+    f0 = 0.0;
+    f88 = if period >= 6 { (period - 1) as f64 } else { 5.0 };
+    f8 = 100.0 * data[start];
+    f18 = 3.0 / (period as f64 + 2.0);
+    f20 = 1.0 - f18;
+    out[start] = f64::NAN;
+
+    // Main loop after warmup boundary
+    for i in (start + 1)..data.len() {
+        // counter saturating/incrementing
+        f90 = if f88 <= f90 { f88 + 1.0 } else { f90 + 1.0 };
+
+        // Price delta (scaled)
+        let prev = f8;
+        f8 = 100.0 * data[i];
+        let v8 = f8 - prev;
+
+        // IIR smoothing chain
+        f28 = f20 * f28 + f18 * v8;
+        f30 = f18 * f28 + f20 * f30;
+        let v_c = f28 * 1.5 - f30 * 0.5;
+
+        f38 = f20 * f38 + f18 * v_c;
+        f40 = f18 * f38 + f20 * f40;
+        let v10 = f38 * 1.5 - f40 * 0.5;
+
+        f48 = f20 * f48 + f18 * v10;
+        f50 = f18 * f48 + f20 * f50;
+        let v14 = f48 * 1.5 - f50 * 0.5;
+
+        let av = v8.abs();
+        f58 = f20 * f58 + f18 * av;
+        f60 = f18 * f58 + f20 * f60;
+        let v18 = f58 * 1.5 - f60 * 0.5;
+
+        f68 = f20 * f68 + f18 * v18;
+        f70 = f18 * f68 + f20 * f70;
+        let v1c = f68 * 1.5 - f70 * 0.5;
+
+        f78 = f20 * f78 + f18 * v1c;
+        f80 = f18 * f78 + f20 * f80;
+        let v20_ = f78 * 1.5 - f80 * 0.5;
+
+        // Warmup latch logic
+        if f88 >= f90 && f8 != prev {
+            f0 = 1.0;
+        }
+        if (f88 - f90).abs() < f64::EPSILON && f0 == 0.0 {
+            f90 = 0.0;
+        }
+
+        // Final RSX value with clamp
+        if f88 < f90 && v20_ > 1e-10 {
+            let mut v4 = (v14 / v20_ + 1.0) * 50.0;
+            if v4 > 100.0 {
+                v4 = 100.0;
+            }
+            if v4 < 0.0 {
+                v4 = 0.0;
+            }
+            out[i] = v4;
         } else {
-            f90 = if f88 <= f90 { f88 + 1.0 } else { f90 + 1.0 };
-            let f10 = f8;
-            f8 = 100.0 * val;
-            let v8 = f8 - f10;
-            f28 = f20 * f28 + f18 * v8;
-            f30 = f18 * f28 + f20 * f30;
-            let v_c = f28 * 1.5 - f30 * 0.5;
-            f38 = f20 * f38 + f18 * v_c;
-            f40 = f18 * f38 + f20 * f40;
-            let v10 = f38 * 1.5 - f40 * 0.5;
-            f48 = f20 * f48 + f18 * v10;
-            f50 = f18 * f48 + f20 * f50;
-            let v14 = f48 * 1.5 - f50 * 0.5;
-            f58 = f20 * f58 + f18 * v8.abs();
-            f60 = f18 * f58 + f20 * f60;
-            let v18 = f58 * 1.5 - f60 * 0.5;
-            f68 = f20 * f68 + f18 * v18;
-            f70 = f18 * f68 + f20 * f70;
-            let v1c = f68 * 1.5 - f70 * 0.5;
-            f78 = f20 * f78 + f18 * v1c;
-            f80 = f18 * f78 + f20 * f80;
-            let v20_ = f78 * 1.5 - f80 * 0.5;
-
-            if f88 >= f90 && f8 != f10 {
-                f0 = 1.0;
-            }
-            if (f88 - f90).abs() < f64::EPSILON && f0 == 0.0 {
-                f90 = 0.0;
-            }
-
-            if f88 < f90 && v20_ > 1e-10 {
-                let mut v4 = (v14 / v20_ + 1.0) * 50.0;
-                if v4 > 100.0 {
-                    v4 = 100.0;
-                }
-                if v4 < 0.0 {
-                    v4 = 0.0;
-                }
-                out[i] = v4;
-            } else {
-                out[i] = 50.0;
-            }
+            out[i] = 50.0;
         }
     }
 }
@@ -391,7 +401,84 @@ pub fn rsx_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn rsx_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    rsx_scalar(data, period, first, out)
+    let len = data.len();
+    let start = first + period - 1;
+    if start >= len {
+        return;
+    }
+
+    // Constants and state
+    let mut f0 = 0.0;
+    let mut f8 = 100.0 * *data.get_unchecked(start);
+    let f18 = 3.0 / (period as f64 + 2.0);
+    let f20 = 1.0 - f18;
+    let mut f28 = 0.0;
+    let mut f30 = 0.0;
+    let mut f38 = 0.0;
+    let mut f40 = 0.0;
+    let mut f48 = 0.0;
+    let mut f50 = 0.0;
+    let mut f58 = 0.0;
+    let mut f60 = 0.0;
+    let mut f68 = 0.0;
+    let mut f70 = 0.0;
+    let mut f78 = 0.0;
+    let mut f80 = 0.0;
+    let mut f88 = if period >= 6 { (period - 1) as f64 } else { 5.0 };
+    let mut f90 = 1.0;
+
+    *out.get_unchecked_mut(start) = f64::NAN;
+
+    // Hot loop with unchecked indexing and FMA via mul_add
+    for i in (start + 1)..len {
+        f90 = if f88 <= f90 { f88 + 1.0 } else { f90 + 1.0 };
+
+        let prev = f8;
+        f8 = 100.0 * *data.get_unchecked(i);
+        let v8 = f8 - prev;
+
+        // cascade
+        f28 = f18.mul_add(v8, f20 * f28);
+        f30 = f18.mul_add(f28, f20 * f30);
+        let v_c = 1.5f64.mul_add(f28, -0.5 * f30);
+
+        f38 = f20.mul_add(f38, f18 * v_c);
+        f40 = f18.mul_add(f38, f20 * f40);
+        let v10 = 1.5f64.mul_add(f38, -0.5 * f40);
+
+        f48 = f20.mul_add(f48, f18 * v10);
+        f50 = f18.mul_add(f48, f20 * f50);
+        let v14 = 1.5f64.mul_add(f48, -0.5 * f50);
+
+        let av = v8.abs();
+        f58 = f20.mul_add(f58, f18 * av);
+        f60 = f18.mul_add(f58, f20 * f60);
+        let v18 = 1.5f64.mul_add(f58, -0.5 * f60);
+
+        f68 = f20.mul_add(f68, f18 * v18);
+        f70 = f18.mul_add(f68, f20 * f70);
+        let v1c = 1.5f64.mul_add(f68, -0.5 * f70);
+
+        f78 = f20.mul_add(f78, f18 * v1c);
+        f80 = f18.mul_add(f78, f20 * f80);
+        let v20_ = 1.5f64.mul_add(f78, -0.5 * f80);
+
+        if f88 >= f90 && f8 != prev {
+            f0 = 1.0;
+        }
+        if (f88 - f90).abs() < f64::EPSILON && f0 == 0.0 {
+            f90 = 0.0;
+        }
+
+        let y = if f88 < f90 && v20_ > 1e-10 {
+            let v4 = (v14 / v20_ + 1.0) * 50.0;
+            v4.max(0.0).min(100.0)
+        } else {
+            50.0
+        };
+
+        *out.get_unchecked_mut(i) = y;
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]

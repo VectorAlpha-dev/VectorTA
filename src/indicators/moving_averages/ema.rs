@@ -22,6 +22,8 @@
 //! - **Memory optimization**: ✅ Uses zero-copy helpers (alloc_with_nan_prefix) for output vectors
 //! - **Note**: EMA is inherently sequential (each value depends on the previous), making SIMD parallelization
 //!   less beneficial than for window-based indicators. The scalar implementation is already optimal.
+//! - **Batch (rows) SIMD**: ❌ Not implemented; EMA row kernels retain a scalar per-row update with unchecked indexing
+//!   and fast finite checks. Vertical SIMD across rows may be revisited if typical row-counts justify the complexity.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -280,6 +282,13 @@ pub fn ema_with_kernel(input: &EmaInput, kernel: Kernel) -> Result<EmaOutput, Em
     Ok(EmaOutput { values: out })
 }
 
+#[inline(always)]
+fn is_finite_fast(x: f64) -> bool {
+    // True for finite values; false for ±Inf/NaN
+    const EXP_MASK: u64 = 0x7ff0_0000_0000_0000;
+    (x.to_bits() & EXP_MASK) != EXP_MASK
+}
+
 /// Computes EMA directly into a provided output slice, avoiding allocation.
 /// The output slice must be the same length as the input data.
 #[inline]
@@ -340,7 +349,7 @@ unsafe fn ema_scalar_into(
     let warmup_end = (first_val + period).min(len);
     for i in (first_val + 1)..warmup_end {
         let x = *data.get_unchecked(i);
-        if x.is_finite() {
+        if is_finite_fast(x) {
             valid_count += 1;
             mean = ((valid_count as f64 - 1.0) * mean + x) / valid_count as f64;
             *out.get_unchecked_mut(i) = mean;
@@ -355,7 +364,7 @@ unsafe fn ema_scalar_into(
         let mut prev = mean;
         for i in warmup_end..len {
             let x = *data.get_unchecked(i);
-            if x.is_finite() {
+            if is_finite_fast(x) {
                 prev = beta.mul_add(prev, alpha * x);
                 *out.get_unchecked_mut(i) = prev;
             } else {
@@ -746,36 +755,38 @@ unsafe fn ema_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f
     let alpha = 2.0 / (period as f64 + 1.0);
     let beta = 1.0 - alpha;
 
+    let len = data.len();
+
     // Use running mean for the first period samples, like the stream does
-    let mut mean = data[first];
-    out[first] = mean;
+    let mut mean = unsafe { *data.get_unchecked(first) };
+    unsafe { *out.get_unchecked_mut(first) = mean };
     let mut valid_count = 1usize;
 
     // Running mean phase (indices first+1 to first+period-1)
-    let warmup_end = (first + period).min(data.len());
+    let warmup_end = (first + period).min(len);
     for i in (first + 1)..warmup_end {
-        let x = data[i];
-        if x.is_finite() {
+        let x = unsafe { *data.get_unchecked(i) };
+        if is_finite_fast(x) {
             valid_count += 1;
             mean = ((valid_count as f64 - 1.0) * mean + x) / valid_count as f64;
-            out[i] = mean;
+            unsafe { *out.get_unchecked_mut(i) = mean };
         } else {
             // Skip NaN values like stream does - carry forward previous value
-            out[i] = mean;
+            unsafe { *out.get_unchecked_mut(i) = mean };
         }
     }
 
     // EMA phase (from first+period onwards)
-    if warmup_end < data.len() {
+    if warmup_end < len {
         let mut prev = mean;
-        for i in warmup_end..data.len() {
-            let x = data[i];
-            if x.is_finite() {
-                prev = beta * prev + alpha * x;
-                out[i] = prev;
+        for i in warmup_end..len {
+            let x = unsafe { *data.get_unchecked(i) };
+            if is_finite_fast(x) {
+                prev = beta.mul_add(prev, alpha * x);
+                unsafe { *out.get_unchecked_mut(i) = prev };
             } else {
                 // Skip NaN values - carry forward previous value
-                out[i] = prev;
+                unsafe { *out.get_unchecked_mut(i) = prev };
             }
         }
     }

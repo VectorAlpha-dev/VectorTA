@@ -11,11 +11,15 @@
 //! - **`Err(WillrError)`** on invalid parameters or insufficient data.
 //!
 //! ## Developer Notes
-//! - **SIMD Status**: AVX2 and AVX512 kernels are stubs (call scalar implementation)
-//! - **Streaming Performance**: O(1) - maintains rolling high/low buffers
-//! - **Memory Optimization**: ✓ Uses alloc_with_nan_prefix, make_uninit_matrix for batching
-//! - **Batch Support**: ✓ Full parallel batch parameter sweep implementation
-//! - **TODO**: Implement actual AVX2/AVX512 SIMD kernels for min/max operations
+//! - **Scalar kernel**: Hybrid selection
+//!   - Small periods (<= 64): naive O(period) scan (fastest for common WILLR periods like 14)
+//!   - Large periods  (> 64): monotonic-deque O(1) sliding window for high/low
+//! - **SIMD status**: AVX2/AVX512 stubs currently delegate to scalar. Branchy min/max windows did not
+//!   show consistent wins in preliminary attempts; revisit with alternative layouts if needed.
+//! - **Streaming Performance**: O(1) update API (ring buffers) available via `WillrStream`
+//! - **Memory Optimization**: ✓ Uses `alloc_with_nan_prefix` and `make_uninit_matrix` for batching
+//! - **Batch Support**: ✓ Row-specific optimized batch via sparse tables (shared across rows)
+//! - **TODO**: Only enable SIMD selection once kernels beat scalar by >5% at 10k/100k.
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::oscillators::CudaWillr;
@@ -338,36 +342,231 @@ pub fn willr_scalar(
     first_valid: usize,
     out: &mut [f64],
 ) {
+    // Heuristic: the naive O(period) scan is typically faster for small windows
+    // (common WILLR periods ~14). Switch to deque only for larger windows.
+    const DEQUE_SWITCH: usize = 32;
+    if period <= DEQUE_SWITCH {
+        return willr_scalar_naive(high, low, close, period, first_valid, out);
+    }
+
+    willr_scalar_deque(high, low, close, period, first_valid, out);
+}
+
+#[inline(always)]
+fn willr_scalar_naive(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    first_valid: usize,
+    out: &mut [f64],
+) {
     for i in (first_valid + period - 1)..high.len() {
-        // Check close[i] once before the inner loop
         if close[i].is_nan() {
             out[i] = f64::NAN;
             continue;
         }
-
         let start = i + 1 - period;
         let (mut h, mut l) = (f64::NEG_INFINITY, f64::INFINITY);
         let mut has_nan = false;
         for j in start..=i {
-            if high[j].is_nan() || low[j].is_nan() {
+            let hj = high[j];
+            let lj = low[j];
+            if hj.is_nan() || lj.is_nan() {
                 has_nan = true;
                 break;
             }
-            if high[j] > h {
-                h = high[j];
+            if hj > h {
+                h = hj;
             }
-            if low[j] < l {
-                l = low[j];
+            if lj < l {
+                l = lj;
             }
         }
         if has_nan || h.is_infinite() || l.is_infinite() {
             out[i] = f64::NAN;
         } else {
             let denom = h - l;
-            if denom == 0.0 {
-                out[i] = 0.0;
+            out[i] = if denom == 0.0 { 0.0 } else { (h - close[i]) / denom * -100.0 };
+        }
+    }
+}
+
+#[inline(always)]
+fn willr_scalar_deque(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    first_valid: usize,
+    out: &mut [f64],
+) {
+    let n = high.len();
+    if n == 0 {
+        return;
+    }
+
+    // First index where the value is computable
+    let start_i = first_valid + period - 1;
+    if start_i >= n {
+        return;
+    }
+
+    let cap = period; // capacity for ring buffers
+
+    // Monotonic deques implemented as ring buffers (store indices)
+    let mut dq_max = vec![0usize; cap];
+    let mut head_max = 0usize;
+    let mut len_max = 0usize;
+
+    let mut dq_min = vec![0usize; cap];
+    let mut head_min = 0usize;
+    let mut len_min = 0usize;
+
+    // Rolling NaN tracker for the (high|low) window
+    let mut nan_ring = vec![0u8; cap];
+    let mut ring_pos = 0usize;
+    let mut nan_count: usize = 0;
+
+    // Prime the structures with the first window: [l0 .. start_i]
+    let l0 = start_i + 1 - period;
+    for j in l0..=start_i {
+        let hj = high[j];
+        let lj = low[j];
+        let is_nan = (hj.is_nan() || lj.is_nan()) as u8;
+
+        nan_count += is_nan as usize;
+        nan_ring[ring_pos] = is_nan;
+        ring_pos += 1;
+        if ring_pos == cap {
+            ring_pos = 0;
+        }
+
+        if is_nan == 0 {
+            // Maintain decreasing deque for highs (pop while back <= hj)
+            while len_max != 0 {
+                let back_pos = (head_max + len_max - 1) % cap;
+                let back_idx = dq_max[back_pos];
+                if high[back_idx] <= hj {
+                    len_max -= 1;
+                } else {
+                    break;
+                }
+            }
+            let ins_pos = (head_max + len_max) % cap;
+            dq_max[ins_pos] = j;
+            len_max += 1;
+
+            // Maintain increasing deque for lows (pop while back >= lj)
+            while len_min != 0 {
+                let back_pos = (head_min + len_min - 1) % cap;
+                let back_idx = dq_min[back_pos];
+                if low[back_idx] >= lj {
+                    len_min -= 1;
+                } else {
+                    break;
+                }
+            }
+            let ins_pos = (head_min + len_min) % cap;
+            dq_min[ins_pos] = j;
+            len_min += 1;
+        }
+    }
+
+    // Main pass
+    for i in start_i..n {
+        let c = close[i];
+
+        if c.is_nan() || nan_count != 0 || len_max == 0 || len_min == 0 {
+            out[i] = f64::NAN;
+        } else {
+            // Current window extrema are at deque fronts
+            let h_idx = dq_max[head_max];
+            let l_idx = dq_min[head_min];
+            let h = high[h_idx];
+            let l = low[l_idx];
+
+            if !(h.is_finite() && l.is_finite()) {
+                out[i] = f64::NAN;
             } else {
-                out[i] = (h - close[i]) / denom * -100.0;
+                let denom = h - l;
+                out[i] = if denom == 0.0 { 0.0 } else { (h - c) / denom * -100.0 };
+            }
+        }
+
+        // Slide the window by one: incorporate i+1 and drop (i+1 - period)
+        let next = i + 1;
+        if next < n {
+            // Remove outdated indices (<= next - period) from fronts
+            let cutoff = next - period;
+
+            while len_max != 0 {
+                let f_idx = dq_max[head_max];
+                if f_idx <= cutoff {
+                    head_max += 1;
+                    if head_max == cap {
+                        head_max = 0;
+                    }
+                    len_max -= 1;
+                } else {
+                    break;
+                }
+            }
+            while len_min != 0 {
+                let f_idx = dq_min[head_min];
+                if f_idx <= cutoff {
+                    head_min += 1;
+                    if head_min == cap {
+                        head_min = 0;
+                    }
+                    len_min -= 1;
+                } else {
+                    break;
+                }
+            }
+
+            // Add new sample at `next`
+            let hj = high[next];
+            let lj = low[next];
+            let new_nan = (hj.is_nan() || lj.is_nan()) as u8;
+
+            // Update rolling NaN count via ring overwrite (subtract old, add new)
+            let old_nan = nan_ring[ring_pos] as usize;
+            nan_count = nan_count + (new_nan as usize) - old_nan;
+            nan_ring[ring_pos] = new_nan;
+            ring_pos += 1;
+            if ring_pos == cap {
+                ring_pos = 0;
+            }
+
+            if new_nan == 0 {
+                // Push into max deque (highs)
+                while len_max != 0 {
+                    let back_pos = (head_max + len_max - 1) % cap;
+                    let back_idx = dq_max[back_pos];
+                    if high[back_idx] <= hj {
+                        len_max -= 1;
+                    } else {
+                        break;
+                    }
+                }
+                let ins_pos = (head_max + len_max) % cap;
+                dq_max[ins_pos] = next;
+                len_max += 1;
+
+                // Push into min deque (lows)
+                while len_min != 0 {
+                    let back_pos = (head_min + len_min - 1) % cap;
+                    let back_idx = dq_min[back_pos];
+                    if low[back_idx] >= lj {
+                        len_min -= 1;
+                    } else {
+                        break;
+                    }
+                }
+                let ins_pos = (head_min + len_min) % cap;
+                dq_min[ins_pos] = next;
+                len_min += 1;
             }
         }
     }

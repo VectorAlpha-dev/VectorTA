@@ -14,7 +14,8 @@
 //! - **values**: Vector of PFE values with NaN prefix during warmup period
 //!
 //! ## Developer Notes
-//! - **AVX2/AVX512 Kernels**: Stubs that call scalar implementation
+//! - **Decision**: Single-series SIMD not enabled; time dependency makes it unhelpful beyond init. Batch path uses shared prefix sums and is fastest.
+//! - **AVX2/AVX512 Kernels**: Implemented for row init; runtime selection remains but single-series uses the scalar core.
 //! - **Streaming**: Implemented with O(1) update performance (maintains running sum)
 //! - **Zero-copy Memory**: Uses alloc_with_nan_prefix and make_uninit_matrix for batch operations
 #[cfg(feature = "python")]
@@ -247,52 +248,78 @@ fn pfe_compute_into(
     period: usize,
     smoothing: usize,
     first: usize,
-    _kernel: Kernel, // SIMD ignored per instructions
+    _kernel: Kernel, // single-series SIMD not beneficial; keep scalar safe path
     out: &mut [f64],
 ) {
     let len = data.len();
-    let start = first + period; // earliest computable t
+    if len == 0 { return; }
+
+    // Earliest computable index for PFE
+    let start = first + period;
+    if start >= len { return; }
+
+    // Precompute constants
+    let p = period as f64;
+    let p2 = p * p;
     let alpha = 2.0 / (smoothing as f64 + 1.0);
+    let one_minus_alpha = 1.0 - alpha;
 
+    // Maintain a ring buffer of the last `period` short-leg segment lengths sqrt(1 + (ΔP)^2)
+    let mut seg = vec![0.0f64; period];
+    let mut head = 0usize; // points at oldest element
+    let mut denom = 0.0f64;
+
+    // Initialize denominator for t = start
+    // steps from k = start - period + 1 ..= start, each step uses data[k] - data[k-1]
+    let base = start - period + 1;
+    for j in 0..period {
+        let k = base + j;
+        let d = data[k] - data[k - 1];
+        let s = (d.mul_add(d, 1.0)).sqrt();
+        seg[j] = s;
+        denom += s;
+    }
+
+    // EMA state
     let mut ema_started = false;
-    let mut ema_val = 0.0;
+    let mut ema_val = 0.0f64;
 
+    // Rolling loop: O(n), 1 sqrt per step
     for t in start..len {
-        let diff = data[t] - data[t - period];
-        let long_leg = (diff.mul_add(diff, (period as f64).powi(2))).sqrt();
+        let cur = data[t];
+        let past = data[t - period];
+        let diff = cur - past;
 
-        // sum_{k=t-period+1..t} sqrt(1 + (ΔP)^2)
-        let mut short_leg = 0.0;
-        for k in (t - period + 1)..=t {
-            let d = data[k] - data[k - 1];
-            short_leg += (1.0 + d * d).sqrt();
-        }
+        // Long leg = sqrt(diff^2 + period^2)
+        let long_leg = (diff.mul_add(diff, p2)).sqrt();
 
-        let raw = if short_leg.abs() < f64::EPSILON {
-            0.0
-        } else {
-            100.0 * long_leg / short_leg
-        };
-        let signed = if diff.is_nan() {
-            f64::NAN
-        } else if diff > 0.0 {
-            raw
-        } else {
-            -raw
-        };
+        // Compute raw, protect against vanishing denom
+        let raw = if denom <= f64::EPSILON { 0.0 } else { 100.0 * (long_leg / denom) };
+        let signed = if diff > 0.0 { raw } else { -raw };
 
-        let val = if signed.is_nan() {
-            f64::NAN
-        } else if !ema_started {
+        // EMA smoothing with standard warmup seed
+        let val = if !ema_started {
             ema_started = true;
             ema_val = signed;
             signed
         } else {
-            ema_val = alpha * signed + (1.0 - alpha) * ema_val;
+            ema_val = alpha.mul_add(signed, one_minus_alpha * ema_val);
             ema_val
         };
 
         out[t] = val;
+
+        // Prepare denominator for next t (t+1)
+        if t + 1 < len {
+            let old = seg[head];
+            let next = data[t + 1];
+            let new_d = next - cur; // step between t and t+1
+            let new_s = (new_d.mul_add(new_d, 1.0)).sqrt();
+            denom += new_s - old;
+            seg[head] = new_s;
+            head += 1;
+            if head == period { head = 0; }
+        }
     }
 }
 
@@ -522,26 +549,18 @@ pub fn pfe_batch_inner_into(
         }
     }
 
+    // Shared prefix sums: prefix[i] = sum_{k=1..i} sqrt(1 + (ΔP_k)^2)
+    let mut prefix = vec![0.0f64; cols];
+    for i in 1..cols {
+        let d = data[i] - data[i - 1];
+        let s = (d.mul_add(d, 1.0)).sqrt();
+        prefix[i] = prefix[i - 1] + s;
+    }
+
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
         let smoothing = combos[row].smoothing.unwrap();
-        match kern {
-            Kernel::Scalar => {
-                let out = pfe_row_scalar(data, first, period, smoothing, out_row);
-                out;
-            }
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => {
-                let out = pfe_row_avx2(data, first, period, smoothing, out_row);
-                out;
-            }
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => {
-                let out = pfe_row_avx512(data, first, period, smoothing, out_row);
-                out;
-            }
-            _ => unreachable!(),
-        }
+        let _ = pfe_row_scalar_with_prefix(data, &prefix, first, period, smoothing, out_row);
     };
 
     if parallel {
@@ -605,26 +624,18 @@ fn pfe_batch_inner(
     let values_slice: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, rows * cols) };
 
+    // Shared prefix sums across rows for batch speedup
+    let mut prefix = vec![0.0f64; cols];
+    for i in 1..cols {
+        let d = data[i] - data[i - 1];
+        let s = (d.mul_add(d, 1.0)).sqrt();
+        prefix[i] = prefix[i - 1] + s;
+    }
+
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
         let smoothing = combos[row].smoothing.unwrap();
-        match kern {
-            Kernel::Scalar => {
-                let out = pfe_row_scalar(data, first, period, smoothing, out_row);
-                out;
-            }
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => {
-                let out = pfe_row_avx2(data, first, period, smoothing, out_row);
-                out;
-            }
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => {
-                let out = pfe_row_avx512(data, first, period, smoothing, out_row);
-                out;
-            }
-            _ => unreachable!(),
-        }
+        let _ = pfe_row_scalar_with_prefix(data, &prefix, first, period, smoothing, out_row);
     };
 
     if parallel {
@@ -674,46 +685,89 @@ unsafe fn pfe_row_scalar(
 ) {
     let len = data.len();
     let start = first + period;
-    let alpha = 2.0 / (smoothing as f64 + 1.0);
 
+    let p = period as f64;
+    let p2 = p * p;
+    let alpha = 2.0 / (smoothing as f64 + 1.0);
+    let one_minus_alpha = 1.0 - alpha;
+
+    // Ring buffer of short-leg segment lengths over the last `period` steps
+    let mut seg = vec![0.0f64; period];
+    let mut head = 0usize;
+    let mut denom = 0.0f64;
+
+    // Initialize denominator at `start`
+    let base = start - period + 1;
+    // Unroll by 4
+    let mut j = 0usize;
+    let stop = period & !3;
+    while j < stop {
+        let k0 = base + j;
+        let d0 = *data.get_unchecked(k0) - *data.get_unchecked(k0 - 1);
+        let k1 = k0 + 1;
+        let d1 = *data.get_unchecked(k1) - *data.get_unchecked(k1 - 1);
+        let k2 = k1 + 1;
+        let d2 = *data.get_unchecked(k2) - *data.get_unchecked(k2 - 1);
+        let k3 = k2 + 1;
+        let d3 = *data.get_unchecked(k3) - *data.get_unchecked(k3 - 1);
+
+        let s0 = (d0.mul_add(d0, 1.0)).sqrt();
+        let s1 = (d1.mul_add(d1, 1.0)).sqrt();
+        let s2 = (d2.mul_add(d2, 1.0)).sqrt();
+        let s3 = (d3.mul_add(d3, 1.0)).sqrt();
+
+        *seg.get_unchecked_mut(j) = s0;
+        *seg.get_unchecked_mut(j + 1) = s1;
+        *seg.get_unchecked_mut(j + 2) = s2;
+        *seg.get_unchecked_mut(j + 3) = s3;
+
+        denom += s0 + s1 + s2 + s3;
+        j += 4;
+    }
+    while j < period {
+        let k = base + j;
+        let d = *data.get_unchecked(k) - *data.get_unchecked(k - 1);
+        let s = (d.mul_add(d, 1.0)).sqrt();
+        *seg.get_unchecked_mut(j) = s;
+        denom += s;
+        j += 1;
+    }
+
+    // EMA state
     let mut ema_started = false;
-    let mut ema_val = 0.0;
+    let mut ema_val = 0.0f64;
 
     for t in start..len {
-        let diff = data[t] - data[t - period];
-        let long_leg = (diff.mul_add(diff, (period as f64).powi(2))).sqrt();
+        let cur = *data.get_unchecked(t);
+        let past = *data.get_unchecked(t - period);
+        let diff = cur - past;
 
-        let mut short_leg = 0.0;
-        for k in (t - period + 1)..=t {
-            let d = data[k] - data[k - 1];
-            short_leg += (1.0 + d * d).sqrt();
-        }
+        let long_leg = (diff.mul_add(diff, p2)).sqrt();
+        let raw = if denom <= f64::EPSILON { 0.0 } else { 100.0 * (long_leg / denom) };
+        let signed = if diff > 0.0 { raw } else { -raw };
 
-        let raw = if short_leg.abs() < f64::EPSILON {
-            0.0
-        } else {
-            100.0 * long_leg / short_leg
-        };
-        let signed = if diff.is_nan() {
-            f64::NAN
-        } else if diff > 0.0 {
-            raw
-        } else {
-            -raw
-        };
-
-        let val = if signed.is_nan() {
-            f64::NAN
-        } else if !ema_started {
+        let val = if !ema_started {
             ema_started = true;
             ema_val = signed;
             signed
         } else {
-            ema_val = alpha * signed + (1.0 - alpha) * ema_val;
+            ema_val = alpha.mul_add(signed, one_minus_alpha * ema_val);
             ema_val
         };
 
-        out_row[t] = val;
+        *out_row.get_unchecked_mut(t) = val;
+
+        if t + 1 < len {
+            let old = *seg.get_unchecked(head);
+            let next = *data.get_unchecked(t + 1);
+            let new_d = next - cur;
+            let new_s = (new_d.mul_add(new_d, 1.0)).sqrt();
+            denom += new_s - old;
+            *seg.get_unchecked_mut(head) = new_s;
+
+            head += 1;
+            if head == period { head = 0; }
+        }
     }
 }
 
@@ -726,7 +780,91 @@ unsafe fn pfe_row_avx2(
     smoothing: usize,
     out: &mut [f64],
 ) {
-    pfe_row_scalar(data, first, period, smoothing, out)
+    use core::arch::x86_64::*;
+
+    let len = data.len();
+    let start = first + period;
+
+    let p = period as f64;
+    let p2 = p * p;
+    let alpha = 2.0 / (smoothing as f64 + 1.0);
+    let one_minus_alpha = 1.0 - alpha;
+
+    // Allocate contiguous ring buffer for segment lengths
+    let mut seg = vec![0.0f64; period];
+    let mut head = 0usize;
+
+    // Vectorized initialization of denominator at `start`
+    let base = start - period + 1;
+    let mut denom = 0.0f64;
+
+    let ones = _mm256_set1_pd(1.0);
+
+    let mut j = 0usize;
+    let stop = period & !3;
+    while j < stop {
+        let k0 = base + j;
+
+        let prev = _mm256_loadu_pd(data.as_ptr().add(k0 - 1));
+        let curr = _mm256_loadu_pd(data.as_ptr().add(k0));
+        let diff = _mm256_sub_pd(curr, prev);
+        let sq = _mm256_sqrt_pd(_mm256_add_pd(_mm256_mul_pd(diff, diff), ones));
+
+        _mm256_storeu_pd(seg.as_mut_ptr().add(j), sq);
+
+        let hadd1 = _mm256_hadd_pd(sq, sq);
+        let lo = _mm256_extractf128_pd(hadd1, 0);
+        let hi = _mm256_extractf128_pd(hadd1, 1);
+        let sum2 = _mm_add_pd(lo, hi);
+        denom += _mm_cvtsd_f64(sum2);
+
+        j += 4;
+    }
+    while j < period {
+        let k = base + j;
+        let d = *data.get_unchecked(k) - *data.get_unchecked(k - 1);
+        let s = (d.mul_add(d, 1.0)).sqrt();
+        *seg.get_unchecked_mut(j) = s;
+        denom += s;
+        j += 1;
+    }
+
+    // EMA state
+    let mut ema_started = false;
+    let mut ema_val = 0.0f64;
+
+    for t in start..len {
+        let cur = *data.get_unchecked(t);
+        let past = *data.get_unchecked(t - period);
+        let diff = cur - past;
+
+        let long_leg = (diff.mul_add(diff, p2)).sqrt();
+        let raw = if denom <= f64::EPSILON { 0.0 } else { 100.0 * (long_leg / denom) };
+        let signed = if diff > 0.0 { raw } else { -raw };
+
+        let val = if !ema_started {
+            ema_started = true;
+            ema_val = signed;
+            signed
+        } else {
+            ema_val = alpha.mul_add(signed, one_minus_alpha * ema_val);
+            ema_val
+        };
+
+        *out.get_unchecked_mut(t) = val;
+
+        if t + 1 < len {
+            let old = *seg.get_unchecked(head);
+            let next = *data.get_unchecked(t + 1);
+            let new_d = next - cur;
+            let new_s = (new_d.mul_add(new_d, 1.0)).sqrt();
+            denom += new_s - old;
+            *seg.get_unchecked_mut(head) = new_s;
+
+            head += 1;
+            if head == period { head = 0; }
+        }
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -738,7 +876,137 @@ unsafe fn pfe_row_avx512(
     smoothing: usize,
     out: &mut [f64],
 ) {
-    pfe_row_scalar(data, first, period, smoothing, out)
+    use core::arch::x86_64::*;
+
+    let len = data.len();
+    let start = first + period;
+
+    let p = period as f64;
+    let p2 = p * p;
+    let alpha = 2.0 / (smoothing as f64 + 1.0);
+    let one_minus_alpha = 1.0 - alpha;
+
+    // Allocate contiguous ring buffer for segment lengths
+    let mut seg = vec![0.0f64; period];
+    let mut head = 0usize;
+
+    // Vectorized initialization of denominator at `start`
+    let base = start - period + 1;
+    let mut denom = 0.0f64;
+
+    let ones = _mm512_set1_pd(1.0);
+
+    let mut j = 0usize;
+    let stop = period & !7;
+    while j < stop {
+        let k0 = base + j;
+
+        let prev = _mm512_loadu_pd(data.as_ptr().add(k0 - 1));
+        let curr = _mm512_loadu_pd(data.as_ptr().add(k0));
+        let diff = _mm512_sub_pd(curr, prev);
+        let sq = _mm512_sqrt_pd(_mm512_add_pd(_mm512_mul_pd(diff, diff), ones));
+
+        _mm512_storeu_pd(seg.as_mut_ptr().add(j), sq);
+
+        let lo256 = _mm512_extractf64x4_pd(sq, 0);
+        let hi256 = _mm512_extractf64x4_pd(sq, 1);
+        let hadd_lo = _mm256_hadd_pd(lo256, lo256);
+        let hadd_hi = _mm256_hadd_pd(hi256, hi256);
+        let lo_pair = _mm_add_pd(_mm256_extractf128_pd(hadd_lo, 0), _mm256_extractf128_pd(hadd_lo, 1));
+        let hi_pair = _mm_add_pd(_mm256_extractf128_pd(hadd_hi, 0), _mm256_extractf128_pd(hadd_hi, 1));
+        denom += _mm_cvtsd_f64(lo_pair) + _mm_cvtsd_f64(hi_pair);
+
+        j += 8;
+    }
+    while j < period {
+        let k = base + j;
+        let d = *data.get_unchecked(k) - *data.get_unchecked(k - 1);
+        let s = (d.mul_add(d, 1.0)).sqrt();
+        *seg.get_unchecked_mut(j) = s;
+        denom += s;
+        j += 1;
+    }
+
+    // EMA state
+    let mut ema_started = false;
+    let mut ema_val = 0.0f64;
+
+    for t in start..len {
+        let cur = *data.get_unchecked(t);
+        let past = *data.get_unchecked(t - period);
+        let diff = cur - past;
+
+        let long_leg = (diff.mul_add(diff, p2)).sqrt();
+        let raw = if denom <= f64::EPSILON { 0.0 } else { 100.0 * (long_leg / denom) };
+        let signed = if diff > 0.0 { raw } else { -raw };
+
+        let val = if !ema_started {
+            ema_started = true;
+            ema_val = signed;
+            signed
+        } else {
+            ema_val = alpha.mul_add(signed, one_minus_alpha * ema_val);
+            ema_val
+        };
+
+        *out.get_unchecked_mut(t) = val;
+
+        if t + 1 < len {
+            let old = *seg.get_unchecked(head);
+            let next = *data.get_unchecked(t + 1);
+            let new_d = next - cur;
+            let new_s = (new_d.mul_add(new_d, 1.0)).sqrt();
+            denom += new_s - old;
+            *seg.get_unchecked_mut(head) = new_s;
+
+            head += 1;
+            if head == period { head = 0; }
+        }
+    }
+}
+
+// Batch optimization: shared prefix sums of step lengths
+#[inline(always)]
+unsafe fn pfe_row_scalar_with_prefix(
+    data: &[f64],
+    prefix: &[f64], // prefix[i] = sum_{k=1..i} sqrt(1 + (ΔP)^2) with ΔP at k
+    first: usize,
+    period: usize,
+    smoothing: usize,
+    out_row: &mut [f64],
+) {
+    let len = data.len();
+    let start = first + period;
+
+    let p = period as f64;
+    let p2 = p * p;
+    let alpha = 2.0 / (smoothing as f64 + 1.0);
+    let one_minus_alpha = 1.0 - alpha;
+
+    let mut ema_started = false;
+    let mut ema_val = 0.0f64;
+
+    for t in start..len {
+        let cur = *data.get_unchecked(t);
+        let past = *data.get_unchecked(t - period);
+        let diff = cur - past;
+
+        let long_leg = (diff.mul_add(diff, p2)).sqrt();
+        let denom = *prefix.get_unchecked(t) - *prefix.get_unchecked(t - period);
+        let raw = if denom <= f64::EPSILON { 0.0 } else { 100.0 * (long_leg / denom) };
+        let signed = if diff > 0.0 { raw } else { -raw };
+
+        let val = if !ema_started {
+            ema_started = true;
+            ema_val = signed;
+            signed
+        } else {
+            ema_val = alpha.mul_add(signed, one_minus_alpha * ema_val);
+            ema_val
+        };
+
+        *out_row.get_unchecked_mut(t) = val;
+    }
 }
 
 use std::collections::VecDeque;

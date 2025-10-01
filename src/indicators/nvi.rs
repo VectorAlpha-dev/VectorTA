@@ -10,10 +10,16 @@
 //! - `Vec<f64>` - NVI values starting at 1000, matching input length
 //!
 //! ## Developer Status
-//! **AVX2**: Stub (calls scalar)
-//! **AVX512**: Has short/long variants but all stubs
+//! **AVX2**: Implemented (sequential update for parity)
+//! **AVX512**: Implemented (sequential update for parity)
 //! **Streaming**: O(1) - Simple state tracking
 //! **Memory**: Good - Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
+//!
+//! Decision notes:
+//! - SIMD kernels parallelize price/volume diffs but apply updates sequentially to match
+//!   the streaming/scalar path bit-for-bit (no FMA). Gains observed on long series.
+//! - Row-specific batch not applicable (single cumulative row); batch SIMD stubs
+//!   short-circuit to scalar row compute.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
@@ -320,10 +326,12 @@ pub fn nvi_into_slice(
 }
 
 pub fn nvi_scalar(close: &[f64], volume: &[f64], first_valid: usize, out: &mut [f64]) {
-    assert!(
+    // Optimized scalar kernel: single pass, no bounds checks inside the loop.
+    debug_assert!(
         close.len() == volume.len() && volume.len() == out.len(),
         "Input slices must all have the same length."
     );
+
     let len = close.len();
     if len == 0 || first_valid >= len {
         return;
@@ -331,56 +339,197 @@ pub fn nvi_scalar(close: &[f64], volume: &[f64], first_valid: usize, out: &mut [
 
     // Start NVI at first valid index
     let mut nvi_val = 1000.0;
-    if first_valid < len {
-        out[first_valid] = nvi_val;
-    }
 
-    if first_valid + 1 >= len {
-        return;
-    }
+    unsafe {
+        let close_ptr = close.as_ptr();
+        let vol_ptr = volume.as_ptr();
+        let out_ptr = out.as_mut_ptr();
 
-    // Track previous day's close & volume for bar-to-bar comparison
-    let mut prev_close = close[first_valid];
-    let mut prev_volume = volume[first_valid];
+        // Initialize first valid cell (prefix NaNs are managed by caller)
+        *out_ptr.add(first_valid) = nvi_val;
 
-    // For each subsequent bar
-    for i in (first_valid + 1)..len {
-        // 3a) Only update when volume has decreased from the prior bar
-        if volume[i] < prev_volume {
-            // Percentage change in price from yesterday --> today
-            let pct_change = (close[i] - prev_close) / prev_close; // :contentReference[oaicite:4]{index=4}
-                                                                   // Apply Fosback formula: NVI_t = NVI_{t-1} + (pct_change)*NVI_{t-1}
-            nvi_val += nvi_val * pct_change; // :contentReference[oaicite:5]{index=5}
+        // Early exit if there's no next bar
+        let mut i = first_valid + 1;
+        if i >= len {
+            return;
         }
-        // 3b) Otherwise, carry forward the same NVI
-        out[i] = nvi_val;
 
-        // 3c) Update “previous bar” references
-        prev_close = close[i];
-        prev_volume = volume[i];
+        // Previous bar state (kept in registers)
+        let mut prev_close = *close_ptr.add(i - 1);
+        let mut prev_volume = *vol_ptr.add(i - 1);
+
+        // Tight pointer loop with no bound checks inside
+        while i < len {
+            let c = *close_ptr.add(i);
+            let v = *vol_ptr.add(i);
+
+            // Only adjust NVI if volume decreased
+            if v < prev_volume {
+                // Keep exact arithmetic as in streaming path (no FMA) to satisfy 1e-9 checks
+                let pct = (c - prev_close) / prev_close;
+                nvi_val += nvi_val * pct;
+            }
+
+            *out_ptr.add(i) = nvi_val;
+
+            prev_close = c;
+            prev_volume = v;
+            i += 1;
+        }
     }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn nvi_avx2(close: &[f64], volume: &[f64], first_valid: usize, out: &mut [f64]) {
-    nvi_scalar(close, volume, first_valid, out)
+    let len = close.len();
+    if len == 0 || first_valid >= len {
+        return;
+    }
+
+    let close_ptr = close.as_ptr();
+    let vol_ptr = volume.as_ptr();
+    let out_ptr = out.as_mut_ptr();
+
+    // Start value
+    let mut nvi_val = 1000.0;
+    *out_ptr.add(first_valid) = nvi_val;
+
+    // Nothing more to do?
+    let mut i = first_valid + 1;
+    if i >= len {
+        return;
+    }
+
+    // Process 4 steps per block: compute pct in parallel, apply sequentially
+    while i + 3 < len {
+        let curr_c = _mm256_loadu_pd(close_ptr.add(i) as *const f64); // [c[i..i+3]]
+        let prev_c = _mm256_loadu_pd(close_ptr.add(i - 1) as *const f64); // [c[i-1..i+2]]
+
+        let curr_v = _mm256_loadu_pd(vol_ptr.add(i) as *const f64); // [v[i..i+3]]
+        let prev_v = _mm256_loadu_pd(vol_ptr.add(i - 1) as *const f64); // [v[i-1..i+2]]
+
+        // pct = (curr - prev) / prev
+        let delta = _mm256_sub_pd(curr_c, prev_c);
+        let pct_raw = _mm256_div_pd(delta, prev_c);
+
+        // mask lanes where volume decreased (curr_v < prev_v); else pct = 0.0
+        let mask = _mm256_cmp_pd(curr_v, prev_v, _CMP_LT_OQ);
+        let pct_masked = _mm256_and_pd(pct_raw, mask);
+
+        // Spill pcts to stack and apply in-order to preserve scalar rounding
+        let mut pcts: [f64; 4] = [0.0; 4];
+        _mm256_storeu_pd(pcts.as_mut_ptr(), pct_masked);
+
+        // Sequential updates for exact parity with scalar/streaming path
+        nvi_val += nvi_val * pcts[0];
+        *out_ptr.add(i) = nvi_val;
+
+        nvi_val += nvi_val * pcts[1];
+        *out_ptr.add(i + 1) = nvi_val;
+
+        nvi_val += nvi_val * pcts[2];
+        *out_ptr.add(i + 2) = nvi_val;
+
+        nvi_val += nvi_val * pcts[3];
+        *out_ptr.add(i + 3) = nvi_val;
+
+        i += 4;
+    }
+
+    // Handle the tail (0..=3 items) scalar, identical semantics
+    while i < len {
+        let c = *close_ptr.add(i);
+        let v = *vol_ptr.add(i);
+
+        if v < *vol_ptr.add(i - 1) {
+            let pct = (c - *close_ptr.add(i - 1)) / *close_ptr.add(i - 1);
+            nvi_val += nvi_val * pct;
+        }
+        *out_ptr.add(i) = nvi_val;
+        i += 1;
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn nvi_avx512(close: &[f64], volume: &[f64], first_valid: usize, out: &mut [f64]) {
-    nvi_scalar(close, volume, first_valid, out)
+    let len = close.len();
+    if len == 0 || first_valid >= len {
+        return;
+    }
+
+    let close_ptr = close.as_ptr();
+    let vol_ptr = volume.as_ptr();
+    let out_ptr = out.as_mut_ptr();
+
+    let mut nvi_val = 1000.0;
+    *out_ptr.add(first_valid) = nvi_val;
+
+    let mut i = first_valid + 1;
+    if i >= len {
+        return;
+    }
+
+    while i + 7 < len {
+        let curr_c = _mm512_loadu_pd(close_ptr.add(i) as *const f64); // [c[i..i+7]]
+        let prev_c = _mm512_loadu_pd(close_ptr.add(i - 1) as *const f64); // [c[i-1..i+6]]
+
+        let curr_v = _mm512_loadu_pd(vol_ptr.add(i) as *const f64); // [v[i..i+7]]
+        let prev_v = _mm512_loadu_pd(vol_ptr.add(i - 1) as *const f64); // [v[i-1..i+6]]
+
+        let delta = _mm512_sub_pd(curr_c, prev_c);
+        let pct_raw = _mm512_div_pd(delta, prev_c);
+
+        // maskz: if curr_v < prev_v keep pct_raw, else 0.0
+        let m = _mm512_cmp_pd_mask(curr_v, prev_v, _CMP_LT_OQ);
+        let pct_masked = _mm512_maskz_mov_pd(m, pct_raw);
+
+        let mut pcts: [f64; 8] = [0.0; 8];
+        _mm512_storeu_pd(pcts.as_mut_ptr(), pct_masked);
+
+        // Apply sequentially to preserve scalar parity
+        nvi_val += nvi_val * pcts[0];
+        *out_ptr.add(i) = nvi_val;
+        nvi_val += nvi_val * pcts[1];
+        *out_ptr.add(i + 1) = nvi_val;
+        nvi_val += nvi_val * pcts[2];
+        *out_ptr.add(i + 2) = nvi_val;
+        nvi_val += nvi_val * pcts[3];
+        *out_ptr.add(i + 3) = nvi_val;
+        nvi_val += nvi_val * pcts[4];
+        *out_ptr.add(i + 4) = nvi_val;
+        nvi_val += nvi_val * pcts[5];
+        *out_ptr.add(i + 5) = nvi_val;
+        nvi_val += nvi_val * pcts[6];
+        *out_ptr.add(i + 6) = nvi_val;
+        nvi_val += nvi_val * pcts[7];
+        *out_ptr.add(i + 7) = nvi_val;
+
+        i += 8;
+    }
+
+    while i < len {
+        let c = *close_ptr.add(i);
+        let v = *vol_ptr.add(i);
+
+        if v < *vol_ptr.add(i - 1) {
+            let pct = (c - *close_ptr.add(i - 1)) / *close_ptr.add(i - 1);
+            nvi_val += nvi_val * pct;
+        }
+        *out_ptr.add(i) = nvi_val;
+        i += 1;
+    }
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn nvi_avx512_short(close: &[f64], volume: &[f64], first: usize, out: &mut [f64]) {
-    nvi_scalar(close, volume, first, out)
+    nvi_avx512(close, volume, first, out)
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn nvi_avx512_long(close: &[f64], volume: &[f64], first: usize, out: &mut [f64]) {
-    nvi_scalar(close, volume, first, out)
+    nvi_avx512(close, volume, first, out)
 }
 
 #[inline(always)]
