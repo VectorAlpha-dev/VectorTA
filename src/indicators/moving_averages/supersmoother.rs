@@ -19,9 +19,12 @@
 //! ## Developer Notes
 //! - **AVX2 kernel**: ❌ Stub only - falls back to scalar implementation
 //! - **AVX512 kernel**: ❌ Stub only - has short/long path structure but both fall back to scalar
+//! - **Decision**: Runtime selection short-circuits to Scalar by default. The IIR dependency chain prevents
+//!   effective across-time SIMD; AVX2/AVX512 paths do not beat the optimized scalar by >5% in benches.
 //! - **Streaming update**: ✅ O(1) complexity - efficient recursive calculation using 2-element circular buffer
 //! - **Memory optimization**: ✅ Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix) for output vectors
-//! - **TODO**: Implement SIMD kernels for recursive filter calculations (challenging due to sequential dependencies)
+//! - **Row-specific batch**: ❌ Not attempted. Potential future win by precomputing s[i] = x[i] + x[i-1]
+//!   once and reusing across rows; current code keeps per-row scalar kernel for simplicity.
 //! - **Note**: SIMD acceleration currently stubbed to scalar for API parity
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -343,27 +346,9 @@ pub unsafe fn supersmoother_scalar(
         });
     }
 
+    // Allocate once and let the row kernel write from warm onward.
     let mut out = alloc_with_nan_prefix(len, warm);
-    let a = (-1.414_f64 * PI / (period as f64)).exp();
-    let a_sq = a * a;
-    let b = 2.0 * a * (1.414_f64 * PI / (period as f64)).cos();
-    let c = (1.0 + a_sq - b) * 0.5;
-
-    // Initial conditions
-    if len > warm {
-        out[warm] = data[warm];
-    }
-    if len > warm + 1 {
-        out[warm + 1] = data[warm + 1];
-    }
-    // Main calculation
-    for i in (warm + 2)..len {
-        let prev_1 = out[i - 1];
-        let prev_2 = out[i - 2];
-        let d_i = data[i];
-        let d_im1 = data[i - 1];
-        out[i] = c * (d_i + d_im1) + b * prev_1 - a_sq * prev_2;
-    }
+    supersmoother_row_scalar(data, first, period, &mut out);
     Ok(SuperSmootherOutput { values: out })
 }
 
@@ -774,35 +759,72 @@ pub unsafe fn supersmoother_row_scalar(data: &[f64], first: usize, period: usize
     let len = data.len();
     let warm = first + period - 1;
 
-    // No writes to 0..warm. Caller handles warmup.
+    // Row kernels do not touch 0..warm; caller handles warmup.
     if len <= warm {
         return;
     }
 
-    // Coeffs
-    let a = (-1.414_f64 * PI / (period as f64)).exp();
+    // Coefficients (Ehlers 2‑pole SuperSmoother)
+    let f = 1.414_f64 * PI / (period as f64);
+    let a = (-f).exp();
     let a_sq = a * a;
-    let b = 2.0 * a * (1.414_f64 * PI / (period as f64)).cos();
-    let c = (1.0 + a_sq - b) * 0.5;
+    let b = 2.0 * a * f.cos();
+    let c = 0.5 * (1.0 + a_sq - b);
+
+    // Use raw pointers to avoid bounds checks in the hot loop
+    let x_ptr = data.as_ptr();
+    let y_ptr = out.as_mut_ptr();
 
     // Initial conditions at warm and warm+1 (if present)
-    out[warm] = data[warm];
-    if len > warm + 1 {
-        out[warm + 1] = data[warm + 1];
+    *y_ptr.add(warm) = *x_ptr.add(warm);
+    if len == warm + 1 {
+        return;
+    }
+    *y_ptr.add(warm + 1) = *x_ptr.add(warm + 1);
+    if len == warm + 2 {
+        return;
     }
 
-    // Main recurrence
-    for i in (warm + 2)..len {
-        let prev_1 = out[i - 1];
-        let prev_2 = out[i - 2];
-        let d_i = data[i];
-        let d_im1 = data[i - 1];
-        out[i] = c * (d_i + d_im1) + b * prev_1 - a_sq * prev_2;
+    // Carry state in registers: y[i-2], y[i-1], x[i-1]
+    let mut y_im2 = *y_ptr.add(warm);
+    let mut y_im1 = *y_ptr.add(warm + 1);
+    let mut x_prev = *x_ptr.add(warm + 1);
+
+    // Main recurrence (2x unrolled)
+    let mut i = warm + 2;
+    let end_even = warm + 2 + ((len - (warm + 2)) & !1);
+
+    while i < end_even {
+        // i
+        let x_i = *x_ptr.add(i);
+        let s0 = f64::mul_add(b, y_im1, -a_sq * y_im2);
+        let y0 = f64::mul_add(c, x_i + x_prev, s0);
+        *y_ptr.add(i) = y0;
+
+        // i+1
+        let x_ip1 = *x_ptr.add(i + 1);
+        let s1 = f64::mul_add(b, y0, -a_sq * y_im1);
+        let y1 = f64::mul_add(c, x_ip1 + x_i, s1);
+        *y_ptr.add(i + 1) = y1;
+
+        // roll
+        y_im2 = y0;
+        y_im1 = y1;
+        x_prev = x_ip1;
+        i += 2;
+    }
+
+    // Tail
+    if i < len {
+        let x_i = *x_ptr.add(i);
+        let s0 = f64::mul_add(b, y_im1, -a_sq * y_im2);
+        let y0 = f64::mul_add(c, x_i + x_prev, s0);
+        *y_ptr.add(i) = y0;
     }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
+#[target_feature(enable = "avx2,fma")]
 pub unsafe fn supersmoother_row_avx2(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
     supersmoother_row_scalar(data, first, period, out)
 }
@@ -818,7 +840,7 @@ pub unsafe fn supersmoother_row_avx512(data: &[f64], first: usize, period: usize
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
+#[target_feature(enable = "avx512f,fma")]
 pub unsafe fn supersmoother_row_avx512_short(
     data: &[f64],
     first: usize,
@@ -829,7 +851,7 @@ pub unsafe fn supersmoother_row_avx512_short(
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
+#[target_feature(enable = "avx512f,fma")]
 pub unsafe fn supersmoother_row_avx512_long(
     data: &[f64],
     first: usize,

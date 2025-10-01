@@ -14,9 +14,10 @@
 //! - **`Err(CoraWaveError)`** on various error conditions.
 //!
 //! ## Developer Status
-//! - **SIMD Kernels**: AVX2 and AVX512 are STUBS - fall back to scalar implementation
-//! - **Streaming Performance**: O(1) - efficient incremental calculation with pre-computed weights
-//! - **Memory Optimization**: EXCELLENT - uses alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes throughout
+//! - SIMD: AVX2/AVX512 stubs delegate to scalar. CoRa’s time-recursive update has a strict dependency chain, so cross-time SIMD offers no win; keep scalar as fastest.
+//! - Scalar: Optimized to O(1) per step for CoRa using geometric-weight recurrence; WMA smoothing recomputed per emission to match streaming numerics exactly.
+//! - Batch: Row kernel uses the same O(1) CoRa update per row. Row-SIMD across rows is plausible but not yet implemented; runtime selection short-circuits to scalar.
+//! - Memory: Uses alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes; warmup/NaN semantics unchanged.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
@@ -408,50 +409,231 @@ pub fn cora_wave_scalar_with_weights(
     first_val: usize,
     out: &mut [f64],
 ) {
-    let period = weights.len();
+    let n = data.len();
+    let p = weights.len();
+    if p == 0 || n == 0 {
+        return;
+    }
 
+    // Fast path: no smoothing
     if smooth_period == 1 {
-        for i in (first_val + period - 1)..data.len() {
-            let start = i + 1 - period;
-            let mut sum = 0.0;
-            for j in 0..period {
-                sum += data[start + j] * weights[j];
+        if p == 1 {
+            let start = first_val;
+            if start < n {
+                for i in start..n {
+                    unsafe {
+                        let v = *data.get_unchecked(i);
+                        *out.get_unchecked_mut(i) = v * inv_wsum;
+                    }
+                }
             }
-            out[i] = sum * inv_wsum;
+            return;
+        }
+
+        // geometric parameters from weights
+        let w0 = unsafe { *weights.get_unchecked(0) };
+        let w1 = unsafe { *weights.get_unchecked(1) };
+        let inv_R = w0 / w1; // == 1/R
+        let a_old = w0 * inv_R; // == a
+        let w_last = unsafe { *weights.get_unchecked(p - 1) };
+
+        let warm0 = first_val + p - 1;
+        if warm0 >= n {
+            return;
+        }
+        let start0 = warm0 + 1 - p;
+
+        // initial dot at warm0
+        let mut acc0 = 0.0;
+        let mut acc1 = 0.0;
+        let mut acc2 = 0.0;
+        let mut acc3 = 0.0;
+        let mut j = 0usize;
+        let end4 = p & !3usize;
+
+        unsafe {
+            let xptr = data.as_ptr().add(start0);
+            let wptr = weights.as_ptr();
+            while j < end4 {
+                let x0 = *xptr.add(j);
+                let x1 = *xptr.add(j + 1);
+                let x2 = *xptr.add(j + 2);
+                let x3 = *xptr.add(j + 3);
+
+                let y0 = *wptr.add(j);
+                let y1 = *wptr.add(j + 1);
+                let y2 = *wptr.add(j + 2);
+                let y3 = *wptr.add(j + 3);
+
+                acc0 = x0.mul_add(y0, acc0);
+                acc1 = x1.mul_add(y1, acc1);
+                acc2 = x2.mul_add(y2, acc2);
+                acc3 = x3.mul_add(y3, acc3);
+
+                j += 4;
+            }
+            let mut S = (acc0 + acc1) + (acc2 + acc3);
+            while j < p {
+                let x = *xptr.add(j);
+                let y = *wptr.add(j);
+                S = x.mul_add(y, S);
+                j += 1;
+            }
+
+            *out.get_unchecked_mut(warm0) = S * inv_wsum;
+
+            // O(1) recurrence forward
+            let mut i = warm0;
+            while i + 1 < n {
+                let x_old = *data.get_unchecked(i + 1 - p);
+                let x_new = *data.get_unchecked(i + 1);
+                S = (S * inv_R) - a_old * x_old + w_last * x_new;
+                *out.get_unchecked_mut(i + 1) = S * inv_wsum;
+                i += 1;
+            }
         }
         return;
     }
 
-    // Zero-copy ring: uninitialized until fully populated
-    let mut ring_mu: Vec<MaybeUninit<f64>> = make_uninit_matrix(1, smooth_period);
-    let mut head = 0usize;
-    let wma_sum: f64 = (1..=smooth_period).map(|k| k as f64).sum();
-    let warm0 = first_val + period - 1;
-    let warm_total = warm0 + smooth_period - 1;
+    // Smoothing (WMA 1..m) — recompute weighted sum each emission to match streaming numerics
+    let m = smooth_period;
+    let wma_sum = (m as f64) * ((m as f64) + 1.0) * 0.5;
 
-    for i in warm0..data.len() {
-        // CoRa at i
-        let start = i + 1 - period;
-        let mut sum = 0.0;
-        for j in 0..period {
-            sum += data[start + j] * unsafe { *weights.get_unchecked(j) };
+    if p == 1 {
+        let warm0 = first_val; // p-1 == 0
+        if warm0 >= n {
+            return;
         }
-        let cora = sum * inv_wsum;
 
-        // push into ring
+        let mut ring_mu: Vec<MaybeUninit<f64>> = make_uninit_matrix(1, m);
+        let mut head = 0usize;
+        let warm_total = warm0 + m - 1;
         unsafe {
-            ring_mu.get_unchecked_mut(head).write(cora);
-        }
-        head = (head + 1) % smooth_period;
+            // fill ring with raw values
+            for i in warm0..n {
+                ring_mu
+                    .get_unchecked_mut(head)
+                    .write(*data.get_unchecked(i));
+                head = (head + 1) % m;
 
-        if i >= warm_total {
+                if i >= warm_total {
+                    let mut acc = 0.0;
+                    for k in 0..m {
+                        let idx = (head + k) % m; // oldest..newest
+                        let v = *ring_mu.get_unchecked(idx).assume_init_ref();
+                        acc += v * ((k + 1) as f64);
+                    }
+                    *out.get_unchecked_mut(i) = acc / wma_sum;
+                }
+            }
+        }
+        return;
+    }
+
+    // General p>=2: CoRa geometric recurrence + O(1) WMA
+    let w0 = unsafe { *weights.get_unchecked(0) };
+    let w1 = unsafe { *weights.get_unchecked(1) };
+    let inv_R = w0 / w1; // 1/R
+    let a_old = w0 * inv_R; // a
+    let w_last = unsafe { *weights.get_unchecked(p - 1) };
+
+    let warm0 = first_val + p - 1;
+    if warm0 >= n {
+        return;
+    }
+    let start0 = warm0 + 1 - p;
+
+    // initial dot
+    let mut acc0 = 0.0;
+    let mut acc1 = 0.0;
+    let mut acc2 = 0.0;
+    let mut acc3 = 0.0;
+    let mut j = 0usize;
+    let end4 = p & !3usize;
+
+    unsafe {
+        let xptr = data.as_ptr().add(start0);
+        let wptr = weights.as_ptr();
+        while j < end4 {
+            let x0 = *xptr.add(j);
+            let x1 = *xptr.add(j + 1);
+            let x2 = *xptr.add(j + 2);
+            let x3 = *xptr.add(j + 3);
+
+            let y0 = *wptr.add(j);
+            let y1 = *wptr.add(j + 1);
+            let y2 = *wptr.add(j + 2);
+            let y3 = *wptr.add(j + 3);
+
+            acc0 = x0.mul_add(y0, acc0);
+            acc1 = x1.mul_add(y1, acc1);
+            acc2 = x2.mul_add(y2, acc2);
+            acc3 = x3.mul_add(y3, acc3);
+
+            j += 4;
+        }
+        let mut S = (acc0 + acc1) + (acc2 + acc3);
+        while j < p {
+            let x = *xptr.add(j);
+            let y = *wptr.add(j);
+            S = x.mul_add(y, S);
+            j += 1;
+        }
+
+        // ring for CoRa outputs
+        let mut ring_mu: Vec<MaybeUninit<f64>> = make_uninit_matrix(1, m);
+        let mut fill = 0usize;
+
+        let mut y = S * inv_wsum;
+        ring_mu.get_unchecked_mut(fill).write(y);
+        fill += 1;
+
+        let warm_total = warm0 + m - 1;
+        let mut i = warm0;
+        while i + 1 <= warm_total && i + 1 < n {
+            let x_old = *data.get_unchecked(i + 1 - p);
+            let x_new = *data.get_unchecked(i + 1);
+            S = (S * inv_R) - a_old * x_old + w_last * x_new;
+            y = S * inv_wsum;
+            ring_mu.get_unchecked_mut(fill).write(y);
+            fill += 1;
+            i += 1;
+        }
+        if warm_total >= n {
+            return;
+        }
+
+        // switch to recompute WMA per emission to match streaming
+        let mut head = 0usize;
+        // emit first
+        {
             let mut acc = 0.0;
-            for k in 0..smooth_period {
-                let idx = (head + k) % smooth_period; // oldest..newest
-                let v = unsafe { *ring_mu.get_unchecked(idx).assume_init_ref() };
+            for k in 0..m {
+                let idx = (head + k) % m;
+                let v = *ring_mu.get_unchecked(idx).assume_init_ref();
                 acc += v * ((k + 1) as f64);
             }
-            out[i] = acc / wma_sum;
+            *out.get_unchecked_mut(warm_total) = acc / wma_sum;
+        }
+
+        // stream forward
+        while i + 1 < n {
+            let x_old = *data.get_unchecked(i + 1 - p);
+            let x_new = *data.get_unchecked(i + 1);
+            S = (S * inv_R) - a_old * x_old + w_last * x_new;
+            let y_new = S * inv_wsum;
+
+            ring_mu.get_unchecked_mut(head).write(y_new);
+            head = (head + 1) % m;
+
+            let mut acc = 0.0;
+            for k in 0..m {
+                let idx = (head + k) % m;
+                let v = *ring_mu.get_unchecked(idx).assume_init_ref();
+                acc += v * ((k + 1) as f64);
+            }
+            *out.get_unchecked_mut(i + 1) = acc / wma_sum;
+            i += 1;
         }
     }
 }
@@ -1092,44 +1274,236 @@ unsafe fn cora_wave_row_scalar_with_weights(
     smooth_period: usize,
     out: &mut [f64],
 ) {
+    let n = data.len();
+    let p = period;
+    if p == 0 || n == 0 {
+        return;
+    }
+
+    // No smoothing
     if smooth_period == 1 {
-        for i in (first + period - 1)..data.len() {
-            let start = i + 1 - period;
-            let mut sum = 0.0;
-            for j in 0..period {
-                sum += *data.get_unchecked(start + j) * *w_ptr.add(j);
+        if p == 1 {
+            let warm0 = first;
+            let mut i = warm0;
+            while i < n {
+                *out.get_unchecked_mut(i) = *data.get_unchecked(i) * inv_wsum;
+                i += 1;
             }
-            *out.get_unchecked_mut(i) = sum * inv_wsum;
+            return;
+        }
+
+        // geometric params
+        let w0 = *w_ptr.add(0);
+        let w1 = *w_ptr.add(1);
+        let inv_R = w0 / w1; // 1/R
+        let a_old = w0 * inv_R; // a
+        let w_last = *w_ptr.add(p - 1); // a*R^p
+
+        let warm0 = first + p - 1;
+        if warm0 >= n {
+            return;
+        }
+        let start0 = warm0 + 1 - p;
+
+        // initial dot
+        let mut acc0 = 0.0;
+        let mut acc1 = 0.0;
+        let mut acc2 = 0.0;
+        let mut acc3 = 0.0;
+        let mut j = 0usize;
+        let end4 = p & !3usize;
+        let xptr = data.as_ptr().add(start0);
+
+        while j < end4 {
+            let x0 = *xptr.add(j);
+            let x1 = *xptr.add(j + 1);
+            let x2 = *xptr.add(j + 2);
+            let x3 = *xptr.add(j + 3);
+
+            let y0 = *w_ptr.add(j);
+            let y1 = *w_ptr.add(j + 1);
+            let y2 = *w_ptr.add(j + 2);
+            let y3 = *w_ptr.add(j + 3);
+
+            acc0 = x0.mul_add(y0, acc0);
+            acc1 = x1.mul_add(y1, acc1);
+            acc2 = x2.mul_add(y2, acc2);
+            acc3 = x3.mul_add(y3, acc3);
+
+            j += 4;
+        }
+        let mut S = (acc0 + acc1) + (acc2 + acc3);
+        while j < p {
+            let x = *xptr.add(j);
+            let y = *w_ptr.add(j);
+            S = x.mul_add(y, S);
+            j += 1;
+        }
+
+        *out.get_unchecked_mut(warm0) = S * inv_wsum;
+
+        // stream recurrence
+        let mut i = warm0;
+        while i + 1 < n {
+            let x_old = *data.get_unchecked(i + 1 - p);
+            let x_new = *data.get_unchecked(i + 1);
+            S = (S * inv_R) - a_old * x_old + w_last * x_new;
+            *out.get_unchecked_mut(i + 1) = S * inv_wsum;
+            i += 1;
         }
         return;
     }
 
-    // ring with MaybeUninit
-    let mut ring_mu: Vec<MaybeUninit<f64>> = make_uninit_matrix(1, smooth_period);
+    // Smoothing path (WMA 1..m) with O(1) updates
+    let m = smooth_period;
+    let wma_sum = (m as f64) * ((m as f64) + 1.0) * 0.5;
+
+    if p == 1 {
+        let warm0 = first;
+        if warm0 >= n {
+            return;
+        }
+
+        // O(1) WMA update with ring buffer
+        let mut ring_mu: Vec<MaybeUninit<f64>> = make_uninit_matrix(1, m);
+        let mut fill = 0usize;
+
+        let warm_total = warm0 + m - 1;
+        let mut i = warm0;
+        while i <= warm_total && i < n {
+            ring_mu.get_unchecked_mut(fill).write(*data.get_unchecked(i));
+            fill += 1;
+            i += 1;
+        }
+        if warm_total >= n {
+            return;
+        }
+
+        // Seed sums
+        let mut Ssum = 0.0;
+        let mut Wsum = 0.0;
+        for k in 0..m {
+            let v = *ring_mu.get_unchecked(k).assume_init_ref();
+            Ssum += v;
+            Wsum += v * ((k + 1) as f64);
+        }
+        let mut head = 0usize;
+        let mut t = warm_total;
+        *out.get_unchecked_mut(t) = Wsum / wma_sum;
+
+        while t + 1 < n {
+            let y_old = *ring_mu.get_unchecked(head).assume_init_ref();
+            let y_new = *data.get_unchecked(t + 1);
+
+            Wsum = Wsum - Ssum + (m as f64) * y_new;
+
+            ring_mu.get_unchecked_mut(head).write(y_new);
+            Ssum = Ssum + y_new - y_old;
+            head = (head + 1) % m;
+
+            *out.get_unchecked_mut(t + 1) = Wsum / wma_sum;
+            t += 1;
+        }
+        return;
+    }
+
+    // p >= 2
+    let w0 = *w_ptr.add(0);
+    let w1 = *w_ptr.add(1);
+    let inv_R = w0 / w1; // 1/R
+    let a_old = w0 * inv_R; // a
+    let w_last = *w_ptr.add(p - 1); // a*R^p
+
+    let warm0 = first + p - 1;
+    if warm0 >= n {
+        return;
+    }
+    let start0 = warm0 + 1 - p;
+
+    // Initial dot
+    let mut acc0 = 0.0;
+    let mut acc1 = 0.0;
+    let mut acc2 = 0.0;
+    let mut acc3 = 0.0;
+    let mut j = 0usize;
+    let end4 = p & !3usize;
+    let xptr = data.as_ptr().add(start0);
+    while j < end4 {
+        let x0 = *xptr.add(j);
+        let x1 = *xptr.add(j + 1);
+        let x2 = *xptr.add(j + 2);
+        let x3 = *xptr.add(j + 3);
+
+        let y0 = *w_ptr.add(j);
+        let y1 = *w_ptr.add(j + 1);
+        let y2 = *w_ptr.add(j + 2);
+        let y3 = *w_ptr.add(j + 3);
+
+        acc0 = x0.mul_add(y0, acc0);
+        acc1 = x1.mul_add(y1, acc1);
+        acc2 = x2.mul_add(y2, acc2);
+        acc3 = x3.mul_add(y3, acc3);
+
+        j += 4;
+    }
+    let mut S = (acc0 + acc1) + (acc2 + acc3);
+    while j < p {
+        let x = *xptr.add(j);
+        let y = *w_ptr.add(j);
+        S = x.mul_add(y, S);
+        j += 1;
+    }
+
+    // WMA ring for CoRa(y) with O(1) update
+    let mut ring_mu: Vec<MaybeUninit<f64>> = make_uninit_matrix(1, m);
+    let mut fill = 0usize;
+
+    let mut y = S * inv_wsum;
+    ring_mu.get_unchecked_mut(fill).write(y);
+    fill += 1;
+
+    let warm_total = warm0 + m - 1;
+    let mut i = warm0;
+    while i + 1 <= warm_total && i + 1 < n {
+        let x_old = *data.get_unchecked(i + 1 - p);
+        let x_new = *data.get_unchecked(i + 1);
+        S = (S * inv_R) - a_old * x_old + w_last * x_new;
+        y = S * inv_wsum;
+        ring_mu.get_unchecked_mut(fill).write(y);
+        fill += 1;
+        i += 1;
+    }
+    if warm_total >= n {
+        return;
+    }
+
+    // Seed sums
+    let mut Ssum = 0.0;
+    let mut Wsum = 0.0;
+    for k in 0..m {
+        let v = *ring_mu.get_unchecked(k).assume_init_ref();
+        Ssum += v;
+        Wsum += v * ((k + 1) as f64);
+    }
     let mut head = 0usize;
-    let wma_sum: f64 = (1..=smooth_period).map(|k| k as f64).sum();
-    let warm0 = first + period - 1;
-    let warm_total = warm0 + smooth_period - 1;
+    *out.get_unchecked_mut(warm_total) = Wsum / wma_sum;
 
-    for i in warm0..data.len() {
-        let start = i + 1 - period;
-        let mut acc = 0.0;
-        for j in 0..period {
-            acc += *data.get_unchecked(start + j) * *w_ptr.add(j);
-        }
-        let cora = acc * inv_wsum;
+    // Stream forward
+    while i + 1 < n {
+        let x_old = *data.get_unchecked(i + 1 - p);
+        let x_new = *data.get_unchecked(i + 1);
+        S = (S * inv_R) - a_old * x_old + w_last * x_new;
+        let y_new = S * inv_wsum;
 
-        ring_mu.get_unchecked_mut(head).write(cora);
-        head = (head + 1) % smooth_period;
+        Wsum = Wsum - Ssum + (m as f64) * y_new;
 
-        if i >= warm_total {
-            let mut s = 0.0;
-            for k in 0..smooth_period {
-                let idx = (head + k) % smooth_period;
-                s += *ring_mu.get_unchecked(idx).assume_init_ref() * ((k + 1) as f64);
-            }
-            *out.get_unchecked_mut(i) = s / wma_sum;
-        }
+        let y_old = *ring_mu.get_unchecked(head).assume_init_ref();
+        ring_mu.get_unchecked_mut(head).write(y_new);
+        Ssum = Ssum + y_new - y_old;
+        head = (head + 1) % m;
+
+        *out.get_unchecked_mut(i + 1) = Wsum / wma_sum;
+        i += 1;
     }
 }
 

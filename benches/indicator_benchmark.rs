@@ -88,12 +88,12 @@ use my_project::indicators::{
     acosc::{acosc as acosc_raw, AcoscInput},
     ad::{ad as ad_raw, AdInput},
     adosc::{adosc as adosc_raw, AdoscInput},
-    adx::{adx as adx_raw, AdxInput},
+    adx::{adx as adx_raw, adx_with_kernel, AdxBatchBuilder, AdxInput},
     adxr::{adxr as adxr_raw, AdxrInput},
     alligator::{alligator as alligator_raw, AlligatorInput},
     alphatrend::{alphatrend as alphatrend_raw, AlphaTrendInput},
     ao::{ao as ao_raw, AoInput},
-    apo::{apo as apo_raw, ApoInput},
+    apo::{apo as apo_raw, apo_with_kernel, ApoBatchBuilder, ApoInput},
     aroon::{aroon as aroon_raw, AroonInput},
     aroonosc::{aroon_osc as aroon_osc_raw, AroonOscInput},
     atr::{atr as atr_raw, AtrInput},
@@ -113,7 +113,7 @@ use my_project::indicators::{
     cksp::{cksp as cksp_raw, CkspInput},
     cmo::{cmo as cmo_raw, CmoInput},
     coppock::{coppock as coppock_raw, CoppockInput},
-    cora_wave::{cora_wave as cora_wave_raw, CoraWaveInput},
+    cora_wave::{cora_wave as cora_wave_raw, CoraWaveBatchBuilder, CoraWaveInput},
     correl_hl::{correl_hl as correl_hl_raw, CorrelHlInput},
     correlation_cycle::{correlation_cycle as correlation_cycle_raw, CorrelationCycleInput},
     cvi::{cvi as cvi_raw, CviInput},
@@ -122,16 +122,16 @@ use my_project::indicators::{
     decycler::{decycler as decycler_raw, DecyclerInput},
     devstop::{devstop as devstop_raw, DevStopInput},
     di::{di as di_raw, DiInput},
-    dm::{dm as dm_raw, DmInput},
+    dm::{dm as dm_raw, DmBatchBuilder, DmData, DmInput},
     donchian::{donchian as donchian_raw, DonchianInput},
     dpo::{dpo as dpo_raw, DpoInput},
     dti::{dti as dti_raw, DtiInput},
-    dx::{dx as dx_raw, DxInput},
+    dx::{dx as dx_raw, DxBatchBuilder, DxData, DxInput},
     efi::{efi as efi_raw, EfiInput},
     emd::{emd as emd_raw, EmdInput},
     emv::{emv as emv_raw, EmvInput},
     er::{er as er_raw, ErInput},
-    eri::{eri as eri_raw, EriInput},
+    eri::{eri as eri_raw, eri_with_kernel, EriInput},
     fisher::{fisher as fisher_raw, FisherInput},
     fosc::{fosc as fosc_raw, FoscInput},
     gatorosc::{gatorosc as gatorosc_raw, GatorOscInput},
@@ -235,6 +235,8 @@ use my_project::indicators::{
     wto::{wto_with_kernel, WtoBatchBuilder, WtoInput},
     zscore::{zscore as zscore_raw, zscore_with_kernel, ZscoreBatchBuilder, ZscoreInput},
 };
+// DM kernel entry for single-series variant benches
+use my_project::indicators::dm::dm_with_kernel;
 
 use my_project::utilities::data_loader::{read_candles_from_csv, source_type, Candles};
 
@@ -1097,6 +1099,7 @@ bench_scalars!(
 );
 
 make_kernel_wrappers!(alma, alma_with_kernel, AlmaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(adx, adx_with_kernel, AdxInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(buff_averages, buff_averages_with_kernel, BuffAveragesInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(zscore, zscore_with_kernel, ZscoreInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(macz, macz_with_kernel, MaczInputS; Scalar,Avx2,Avx512);
@@ -1165,9 +1168,14 @@ make_kernel_wrappers!(
     Scalar,Avx2,Avx512
 );
 
+// APO kernel-specific wrappers to compare scalar vs SIMD
+make_kernel_wrappers!(apo, apo_with_kernel, ApoInputS; Scalar,Avx2,Avx512);
+
 // Other indicators kernel wrappers
 make_kernel_wrappers!(avsl, avsl_with_kernel, AvslInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(dma, dma_with_kernel, DmaInputS; Scalar,Avx2,Avx512);
+// DM kernel-specific wrappers to compare scalar vs SIMD
+make_kernel_wrappers!(dm, dm_with_kernel, DmInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(ehma, ehma_with_kernel, EhmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(range_filter, range_filter_with_kernel, RangeFilterInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(sama, sama_with_kernel, SamaInputS; Scalar,Avx2,Avx512);
@@ -1183,6 +1191,7 @@ make_kernel_wrappers!(wavetrend, wavetrend_with_kernel, WavetrendInputS; Scalar,
 make_kernel_wrappers!(ultosc, ultosc_with_kernel, UltOscInputS; Scalar,Avx2,Avx512);
  make_kernel_wrappers!(qstick, qstick_with_kernel, QstickInputS; Scalar,Avx2,Avx512);
  make_kernel_wrappers!(nadaraya_watson_envelope, nadaraya_watson_envelope_with_kernel, NweInputS; Scalar,Avx2,Avx512);
+ make_kernel_wrappers!(eri, eri_with_kernel, EriInputS; Scalar,Avx2,Avx512);
 
 // VOSC batch wrappers
 make_batch_wrappers!(
@@ -1204,6 +1213,116 @@ fn mfi_batch_scalarbatch(input: &MfiInputS) -> anyhow::Result<()> {
         .period_range(sweep.period.0, sweep.period.1, sweep.period.2)
         .apply_slices(tp, vol)?;
     Ok(())
+}
+
+// DX batch wrappers
+#[inline(always)]
+fn dx_batch_scalarbatch(input: &DxInputS) -> anyhow::Result<()> {
+    let (high, low, close) = match &input.data {
+        my_project::indicators::dx::DxData::Candles { candles } => (
+            source_type(candles, "high"),
+            source_type(candles, "low"),
+            source_type(candles, "close"),
+        ),
+        my_project::indicators::dx::DxData::HlcSlices { high, low, close } => (*high, *low, *close),
+    };
+    DxBatchBuilder::new()
+        .kernel(Kernel::ScalarBatch)
+        .period_range(10, 30, 5)
+        .apply_hlc(high, low, close)
+        .map(|_| ())
+        .map_err(|e| anyhow!(e.to_string()))
+}
+
+// ADX batch wrappers (H/L/C inputs)
+#[inline(always)]
+fn adx_batch_scalarbatch(input: &AdxInputS) -> anyhow::Result<()> {
+    let (high, low, close) = match &input.data {
+        my_project::indicators::adx::AdxData::Candles { candles } => (
+            source_type(candles, "high"),
+            source_type(candles, "low"),
+            source_type(candles, "close"),
+        ),
+        my_project::indicators::adx::AdxData::Slices { high, low, close } => (*high, *low, *close),
+    };
+    AdxBatchBuilder::new()
+        .kernel(Kernel::ScalarBatch)
+        .period_range(10, 30, 5)
+        .apply_slices(high, low, close)
+        .map(|_| ())
+        .map_err(|e| anyhow!(e.to_string()))
+}
+
+#[inline(always)]
+fn adx_batch_avx2batch(input: &AdxInputS) -> anyhow::Result<()> {
+    let (high, low, close) = match &input.data {
+        my_project::indicators::adx::AdxData::Candles { candles } => (
+            source_type(candles, "high"),
+            source_type(candles, "low"),
+            source_type(candles, "close"),
+        ),
+        my_project::indicators::adx::AdxData::Slices { high, low, close } => (*high, *low, *close),
+    };
+    AdxBatchBuilder::new()
+        .kernel(Kernel::Avx2Batch)
+        .period_range(10, 30, 5)
+        .apply_slices(high, low, close)
+        .map(|_| ())
+        .map_err(|e| anyhow!(e.to_string()))
+}
+
+#[inline(always)]
+fn adx_batch_avx512batch(input: &AdxInputS) -> anyhow::Result<()> {
+    let (high, low, close) = match &input.data {
+        my_project::indicators::adx::AdxData::Candles { candles } => (
+            source_type(candles, "high"),
+            source_type(candles, "low"),
+            source_type(candles, "close"),
+        ),
+        my_project::indicators::adx::AdxData::Slices { high, low, close } => (*high, *low, *close),
+    };
+    AdxBatchBuilder::new()
+        .kernel(Kernel::Avx512Batch)
+        .period_range(10, 30, 5)
+        .apply_slices(high, low, close)
+        .map(|_| ())
+        .map_err(|e| anyhow!(e.to_string()))
+}
+
+#[inline(always)]
+fn dx_batch_avx2batch(input: &DxInputS) -> anyhow::Result<()> {
+    let (high, low, close) = match &input.data {
+        my_project::indicators::dx::DxData::Candles { candles } => (
+            source_type(candles, "high"),
+            source_type(candles, "low"),
+            source_type(candles, "close"),
+        ),
+        my_project::indicators::dx::DxData::HlcSlices { high, low, close } => (*high, *low, *close),
+    };
+    DxBatchBuilder::new()
+        .kernel(Kernel::Avx2Batch)
+        .period_range(10, 30, 5)
+        .apply_hlc(high, low, close)
+        .map(|_| ())
+        .map_err(|e| anyhow!(e.to_string()))
+}
+
+#[inline(always)]
+fn dx_batch_avx512batch(input: &DxInputS) -> anyhow::Result<()> {
+    let (high, low, close) = match &input.data {
+        my_project::indicators::dx::DxData::Candles { candles } => (
+            source_type(candles, "high"),
+            source_type(candles, "low"),
+            source_type(candles, "close"),
+        ),
+        my_project::indicators::dx::DxData::HlcSlices { high, low, close } => (*high, *low, *close),
+    };
+    DxBatchBuilder::new()
+        .kernel(Kernel::Avx512Batch)
+        .period_range(10, 30, 5)
+        .apply_hlc(high, low, close)
+        .map(|_| ())
+        .map_err(|e| anyhow!(e.to_string()))
 }
 
 #[inline(always)]
@@ -1235,6 +1354,18 @@ fn mfi_batch_avx512batch(input: &MfiInputS) -> anyhow::Result<()> {
 }
 
 make_batch_wrappers!(
+    apo_batch, ApoBatchBuilder, ApoInputS;
+    ScalarBatch, Avx2Batch, Avx512Batch
+);
+
+bench_variants!(
+    apo_batch => ApoInputS; None;
+    apo_batch_scalarbatch,
+    apo_batch_avx2batch,
+    apo_batch_avx512batch,
+);
+
+make_batch_wrappers!(
     alma_batch, AlmaBatchBuilder, AlmaInputS;
     ScalarBatch, Avx2Batch, Avx512Batch
 );
@@ -1242,6 +1373,12 @@ make_batch_wrappers!(
 // OTT batch wrappers
 make_batch_wrappers!(
     ott_batch, OttBatchBuilder, OttInputS;
+    ScalarBatch, Avx2Batch, Avx512Batch
+);
+
+// Cora Wave batch wrappers
+make_batch_wrappers!(
+    cora_wave_batch, CoraWaveBatchBuilder, CoraWaveInputS;
     ScalarBatch, Avx2Batch, Avx512Batch
 );
 
@@ -1765,6 +1902,12 @@ bench_variants!(
     alma_batch_avx2batch,
     alma_batch_avx512batch
 );
+bench_variants!(
+    adx_batch => AdxInputS; Some(14);
+    adx_batch_scalarbatch,
+    adx_batch_avx2batch,
+    adx_batch_avx512batch,
+);
 
 bench_variants!(
     buff_averages_batch => BuffAveragesInputS; None;
@@ -1794,6 +1937,61 @@ bench_variants!(
     rocr_scalar,
     rocr_avx2,
     rocr_avx512
+);
+
+// DM scalar-vs-SIMD single-series variants
+bench_variants!(
+    dm => DmInputS; None;
+    dm_scalar,
+    dm_avx2,
+    dm_avx512
+);
+
+// DM batch wrappers (two-slice input)
+#[inline(always)]
+fn dm_batch_scalarbatch(input: &DmInputS) -> anyhow::Result<()> {
+    let (high, low) = match &input.data {
+        DmData::Candles { candles } => (&candles.high[..], &candles.low[..]),
+        DmData::Slices { high, low } => (*high, *low),
+    };
+    DmBatchBuilder::new()
+        .kernel(Kernel::ScalarBatch)
+        .apply_slices(high, low)
+        .map(|_| ())
+        .map_err(|e| anyhow!(e.to_string()))
+}
+
+#[inline(always)]
+fn dm_batch_avx2batch(input: &DmInputS) -> anyhow::Result<()> {
+    let (high, low) = match &input.data {
+        DmData::Candles { candles } => (&candles.high[..], &candles.low[..]),
+        DmData::Slices { high, low } => (*high, *low),
+    };
+    DmBatchBuilder::new()
+        .kernel(Kernel::Avx2Batch)
+        .apply_slices(high, low)
+        .map(|_| ())
+        .map_err(|e| anyhow!(e.to_string()))
+}
+
+#[inline(always)]
+fn dm_batch_avx512batch(input: &DmInputS) -> anyhow::Result<()> {
+    let (high, low) = match &input.data {
+        DmData::Candles { candles } => (&candles.high[..], &candles.low[..]),
+        DmData::Slices { high, low } => (*high, *low),
+    };
+    DmBatchBuilder::new()
+        .kernel(Kernel::Avx512Batch)
+        .apply_slices(high, low)
+        .map(|_| ())
+        .map_err(|e| anyhow!(e.to_string()))
+}
+
+bench_variants!(
+    dm_batch => DmInputS; Some(14);
+    dm_batch_scalarbatch,
+    dm_batch_avx2batch,
+    dm_batch_avx512batch,
 );
 
 // LinearRegSlope scalar-vs-SIMD single-series variants
@@ -1832,6 +2030,14 @@ bench_variants!(
     ott_batch_scalarbatch,
     ott_batch_avx2batch,
     ott_batch_avx512batch
+);
+
+// CoRa Wave batch variants (advisory unless row-specific SIMD is optimized)
+bench_variants!(
+    cora_wave_batch => CoraWaveInputS; None;
+    cora_wave_batch_scalarbatch,
+    cora_wave_batch_avx2batch,
+    cora_wave_batch_avx512batch,
 );
 
 bench_variants!(
@@ -1944,6 +2150,13 @@ bench_variants!(
     highpass_2_pole_batch_scalarbatch,
     highpass_2_pole_batch_avx2batch,
     highpass_2_pole_batch_avx512batch,
+);
+
+bench_variants!(
+    apo => ApoInputS; None;
+    apo_scalar,
+    apo_avx2,
+    apo_avx512,
 );
 
 bench_variants!(
@@ -2270,6 +2483,13 @@ bench_variants!(
 );
 
 bench_variants!(
+    adx => AdxInputS; Some(14);
+    adx_scalar,
+    adx_avx2,
+    adx_avx512,
+);
+
+bench_variants!(
     nadaraya_watson_envelope => NweInputS; None;
     nadaraya_watson_envelope_scalar,
     nadaraya_watson_envelope_avx2,
@@ -2281,6 +2501,13 @@ bench_variants!(
     buff_averages_scalar,
     buff_averages_avx2,
     buff_averages_avx512,
+);
+
+bench_variants!(
+    eri => EriInputS; None;
+    eri_scalar,
+    eri_avx2,
+    eri_avx512,
 );
 
 bench_variants!(
@@ -2847,14 +3074,27 @@ bench_variants!(
     mfi_batch_avx512batch,
 );
 
+// DX batch benchmarks (period sweep 10..=30 step 5; window representative: 14)
+bench_variants!(
+    dx_batch => DxInputS; Some(14);
+    dx_batch_scalarbatch,
+);
+
 criterion_main!(
     benches_scalar,
+    benches_apo,
+    benches_apo_batch,
     benches_rocr,
+    benches_dm,
+    benches_dm_batch,
     benches_linearreg_slope,
     benches_ott,
     benches_ultosc,
     benches_qstick,
     benches_mfi_batch,
+    benches_dx_batch,
+    benches_adx,
+    benches_adx_batch,
     benches_ultosc_batch,
     benches_qstick_batch,
     benches_alma,
@@ -2863,6 +3103,7 @@ criterion_main!(
     benches_buff_averages,
     benches_buff_averages_batch,
     benches_zscore,
+    benches_eri,
     benches_zscore_batch,
     benches_linearreg_slope_batch,
     benches_stddev_batch,
@@ -2870,6 +3111,7 @@ criterion_main!(
     benches_macz_batch,
     benches_cwma,
     benches_cwma_batch,
+    benches_cora_wave_batch,
     benches_dema,
     benches_dema_batch,
     benches_edcf,
@@ -2976,7 +3218,10 @@ criterion_main!(
     benches_chandelier_exit_batch,
     benches_otto_batch,
     benches_percentile_nearest_rank,
-    benches_percentile_nearest_rank_batch
+    benches_percentile_nearest_rank_batch,
+    // AVSL single + batch groups (added for SIMD/Scalar comparisons)
+    benches_avsl,
+    benches_avsl_batch
 );
 
 // TSF variants are included in the main group list below.

@@ -20,7 +20,7 @@ I want you to double check to confirm that this implementation is indeed more op
  
 Do you see any further room for improvement/optimization? 
 
-Accurate? All unit tests pass? No unit test reference values or tolerances were changed? No memory copy operations? No prefilling of any vectors? Are you the certain that the current scalar implemenation is faster than the original? Any further room for optimization?
+Accurate? All unit tests pass? No unit test reference values or tolerances were changed? No memory copy operations? No prefilling of any vectors? Are you the certain that the current scalar implemenation is faster than the original? Any further room for optimization? Also, provide the full benchmark results (Simd kernels as well) if you haven't already done so.
 
 Conduct a review of your work against your instructions to ensure that you didn't miss anything. For example, if SIMD was not implemented then did you try to use unsafe operations and FMA/mul_add in the avx2 kernel? Have you looked into the possibility of row optimized variants for the batch function? Did you maintain zero memory copy operations and only write into uninitialized memory like you were supposed to? If you replaced the origianl scalar implementation, is the new implementation faster according to the benchmarks that you ran? If you are finally complete with the indicator rust file then run all unit tests for the indicator to ensure that it passes. Finally, run the indicator's benchmark(s) and report back all of the timings to me. 
 
@@ -45,7 +45,7 @@ Conduct a review of your work against your instructions to ensure that you didn'
   underperformance, revert selection to the last known-good kernels and document why.                             
   - Ensure the indicator is registered in benches/indicator_benchmark.rs before doing SIMD work so benchmarking   
   is possible. That includes all kernel variants, including batch. Just register them into my existing macros. Don't add custom benches.                                                                                                      
-                                                                                                                  
+  - Always use zero memory copy operations, always write outputs into uninitialized memory via my existing helper functions already used in the indicator.                                                                                                                
   Plan (use update_plan)                                                                                          
                                                                                                                   
   1. Baseline read + verify registration                                                                          
@@ -59,7 +59,7 @@ Conduct a review of your work against your instructions to ensure that you didn'
   9. Document decisions                                                                                           
                                                                                                                   
   Keep exactly one step in progress; mark completed as you go. Adjust the plan if new work emerges.               
-                                                                                                                  
+  Be careful as the existing implementation may already be well optimized so bench first before modifying the original implementation.                                                                                                               
   Baseline Tasks                                                                                                  
                                                                                                                   
   - Read AGENTS.md in scope; follow its conventions strictly.                                                     

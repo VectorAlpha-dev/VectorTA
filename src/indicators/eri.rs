@@ -12,9 +12,10 @@
 //! - **`Err(EriError)`** on failure
 //!
 //! ## Developer Status
-//! - **SIMD Kernels**: AVX2 (stub), AVX512 (stubs - short/long variants)
+//! - **SIMD Kernels**: AVX2 and AVX512 implemented (single-series + row variants)
 //! - **Streaming**: Not implemented
 //! - **Memory**: Good zero-copy usage (alloc_with_nan_prefix, make_uninit_matrix)
+//! - Decision: Scalar path kept safe; classic SMA/EMA and SIMD paths use tightly scoped unsafe for speed.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
@@ -358,9 +359,48 @@ pub fn eri_scalar(
     bull: &mut [f64],
     bear: &mut [f64],
 ) {
-    for i in (first_valid + period - 1)..high.len() {
-        bull[i] = high[i] - ma[i];
-        bear[i] = low[i] - ma[i];
+    let mut i = first_valid + period - 1;
+    let n = high.len();
+    if i >= n {
+        return;
+    }
+
+    // Unroll by 4, then 2, then tail
+    while i + 4 <= n {
+        let m0 = ma[i + 0];
+        bull[i + 0] = high[i + 0] - m0;
+        bear[i + 0] = low[i + 0] - m0;
+
+        let m1 = ma[i + 1];
+        bull[i + 1] = high[i + 1] - m1;
+        bear[i + 1] = low[i + 1] - m1;
+
+        let m2 = ma[i + 2];
+        bull[i + 2] = high[i + 2] - m2;
+        bear[i + 2] = low[i + 2] - m2;
+
+        let m3 = ma[i + 3];
+        bull[i + 3] = high[i + 3] - m3;
+        bear[i + 3] = low[i + 3] - m3;
+
+        i += 4;
+    }
+
+    if i + 2 <= n {
+        let m0 = ma[i + 0];
+        bull[i + 0] = high[i + 0] - m0;
+        bear[i + 0] = low[i + 0] - m0;
+
+        let m1 = ma[i + 1];
+        bull[i + 1] = high[i + 1] - m1;
+        bear[i + 1] = low[i + 1] - m1;
+        i += 2;
+    }
+
+    if i < n {
+        let m0 = ma[i];
+        bull[i] = high[i] - m0;
+        bear[i] = low[i] - m0;
     }
 }
 
@@ -388,6 +428,11 @@ pub fn eri_avx2(
     bull: &mut [f64],
     bear: &mut [f64],
 ) {
+    // Prefer SIMD when available; otherwise fall back to scalar
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    unsafe {
+        return eri_avx2_core(high, low, ma, period, first_valid, bull, bear);
+    }
     eri_scalar(high, low, ma, period, first_valid, bull, bear)
 }
 
@@ -402,7 +447,7 @@ pub fn eri_avx512_short(
     bull: &mut [f64],
     bear: &mut [f64],
 ) {
-    eri_scalar(high, low, ma, period, first_valid, bull, bear)
+    unsafe { eri_avx512_core(high, low, ma, period, first_valid, bull, bear) }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -416,7 +461,197 @@ pub fn eri_avx512_long(
     bull: &mut [f64],
     bear: &mut [f64],
 ) {
-    eri_scalar(high, low, ma, period, first_valid, bull, bear)
+    unsafe { eri_avx512_core(high, low, ma, period, first_valid, bull, bear) }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn eri_avx2_core(
+    high: &[f64],
+    low: &[f64],
+    ma: &[f64],
+    period: usize,
+    first_valid: usize,
+    bull: &mut [f64],
+    bear: &mut [f64],
+) {
+    use core::arch::x86_64::*;
+
+    let mut i = first_valid + period - 1;
+    let n = high.len();
+    if i >= n {
+        return;
+    }
+    let len = n - i;
+
+    let mut h_ptr = high.as_ptr().add(i);
+    let mut l_ptr = low.as_ptr().add(i);
+    let mut m_ptr = ma.as_ptr().add(i);
+    let mut b_ptr = bull.as_mut_ptr().add(i);
+    let mut r_ptr = bear.as_mut_ptr().add(i);
+
+    let mut k = 0usize;
+    while k + 4 <= len {
+        let h = _mm256_loadu_pd(h_ptr);
+        let l = _mm256_loadu_pd(l_ptr);
+        let m = _mm256_loadu_pd(m_ptr);
+
+        let b = _mm256_sub_pd(h, m);
+        let r = _mm256_sub_pd(l, m);
+
+        _mm256_storeu_pd(b_ptr, b);
+        _mm256_storeu_pd(r_ptr, r);
+
+        h_ptr = h_ptr.add(4);
+        l_ptr = l_ptr.add(4);
+        m_ptr = m_ptr.add(4);
+        b_ptr = b_ptr.add(4);
+        r_ptr = r_ptr.add(4);
+        k += 4;
+    }
+
+    if k + 2 <= len {
+        let h = _mm_loadu_pd(h_ptr);
+        let l = _mm_loadu_pd(l_ptr);
+        let m = _mm_loadu_pd(m_ptr);
+
+        let b = _mm_sub_pd(h, m);
+        let r = _mm_sub_pd(l, m);
+
+        _mm_storeu_pd(b_ptr, b);
+        _mm_storeu_pd(r_ptr, r);
+
+        h_ptr = h_ptr.add(2);
+        l_ptr = l_ptr.add(2);
+        m_ptr = m_ptr.add(2);
+        b_ptr = b_ptr.add(2);
+        r_ptr = r_ptr.add(2);
+        k += 2;
+    }
+
+    if k < len {
+        let m0 = *m_ptr;
+        *b_ptr = *h_ptr - m0;
+        *r_ptr = *l_ptr - m0;
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
+#[target_feature(enable = "avx512f")]
+unsafe fn eri_avx512_core(
+    high: &[f64],
+    low: &[f64],
+    ma: &[f64],
+    period: usize,
+    first_valid: usize,
+    bull: &mut [f64],
+    bear: &mut [f64],
+) {
+    use core::arch::x86_64::*;
+
+    let mut i = first_valid + period - 1;
+    let n = high.len();
+    if i >= n {
+        return;
+    }
+    let len = n - i;
+
+    let mut h_ptr = high.as_ptr().add(i);
+    let mut l_ptr = low.as_ptr().add(i);
+    let mut m_ptr = ma.as_ptr().add(i);
+    let mut b_ptr = bull.as_mut_ptr().add(i);
+    let mut r_ptr = bear.as_mut_ptr().add(i);
+
+    let mut k = 0usize;
+    while k + 8 <= len {
+        let h = _mm512_loadu_pd(h_ptr);
+        let l = _mm512_loadu_pd(l_ptr);
+        let m = _mm512_loadu_pd(m_ptr);
+
+        let b = _mm512_sub_pd(h, m);
+        let r = _mm512_sub_pd(l, m);
+
+        _mm512_storeu_pd(b_ptr, b);
+        _mm512_storeu_pd(r_ptr, r);
+
+        h_ptr = h_ptr.add(8);
+        l_ptr = l_ptr.add(8);
+        m_ptr = m_ptr.add(8);
+        b_ptr = b_ptr.add(8);
+        r_ptr = r_ptr.add(8);
+        k += 8;
+    }
+
+    if k + 4 <= len {
+        #[cfg(target_feature = "avx2")]
+        {
+            let h = _mm256_loadu_pd(h_ptr);
+            let l = _mm256_loadu_pd(l_ptr);
+            let m = _mm256_loadu_pd(m_ptr);
+
+            let b = _mm256_sub_pd(h, m);
+            let r = _mm256_sub_pd(l, m);
+
+            _mm256_storeu_pd(b_ptr, b);
+            _mm256_storeu_pd(r_ptr, r);
+
+            h_ptr = h_ptr.add(4);
+            l_ptr = l_ptr.add(4);
+            m_ptr = m_ptr.add(4);
+            b_ptr = b_ptr.add(4);
+            r_ptr = r_ptr.add(4);
+            k += 4;
+        }
+        #[cfg(not(target_feature = "avx2"))]
+        {
+            let m0 = *m_ptr.add(0);
+            *b_ptr.add(0) = *h_ptr.add(0) - m0;
+            *r_ptr.add(0) = *l_ptr.add(0) - m0;
+            let m1 = *m_ptr.add(1);
+            *b_ptr.add(1) = *h_ptr.add(1) - m1;
+            *r_ptr.add(1) = *l_ptr.add(1) - m1;
+            let m2 = *m_ptr.add(2);
+            *b_ptr.add(2) = *h_ptr.add(2) - m2;
+            *r_ptr.add(2) = *l_ptr.add(2) - m2;
+            let m3 = *m_ptr.add(3);
+            *b_ptr.add(3) = *h_ptr.add(3) - m3;
+            *r_ptr.add(3) = *l_ptr.add(3) - m3;
+
+            h_ptr = h_ptr.add(4);
+            l_ptr = l_ptr.add(4);
+            m_ptr = m_ptr.add(4);
+            b_ptr = b_ptr.add(4);
+            r_ptr = r_ptr.add(4);
+            k += 4;
+        }
+    }
+
+    if k + 2 <= len {
+        let h = _mm_loadu_pd(h_ptr);
+        let l = _mm_loadu_pd(l_ptr);
+        let m = _mm_loadu_pd(m_ptr);
+
+        let b = _mm_sub_pd(h, m);
+        let r = _mm_sub_pd(l, m);
+
+        _mm_storeu_pd(b_ptr, b);
+        _mm_storeu_pd(r_ptr, r);
+
+        h_ptr = h_ptr.add(2);
+        l_ptr = l_ptr.add(2);
+        m_ptr = m_ptr.add(2);
+        b_ptr = b_ptr.add(2);
+        r_ptr = r_ptr.add(2);
+        k += 2;
+    }
+
+    if k < len {
+        let m0 = *m_ptr;
+        *b_ptr = *h_ptr - m0;
+        *r_ptr = *l_ptr - m0;
+    }
 }
 
 #[inline]
@@ -795,9 +1030,64 @@ unsafe fn eri_row_scalar(
     bull: &mut [f64],
     bear: &mut [f64],
 ) {
-    for i in (first + period - 1)..high.len() {
-        bull[i] = high[i] - ma[i];
-        bear[i] = low[i] - ma[i];
+    let mut i = first + period - 1;
+    let n = high.len();
+    if i >= n {
+        return;
+    }
+
+    let len = n - i;
+    let mut h_ptr = high.as_ptr().add(i);
+    let mut l_ptr = low.as_ptr().add(i);
+    let mut m_ptr = ma.as_ptr().add(i);
+    let mut b_ptr = bull.as_mut_ptr().add(i);
+    let mut r_ptr = bear.as_mut_ptr().add(i);
+
+    let mut k = 0usize;
+    while k + 4 <= len {
+        let m0 = *m_ptr.add(0);
+        *b_ptr.add(0) = *h_ptr.add(0) - m0;
+        *r_ptr.add(0) = *l_ptr.add(0) - m0;
+
+        let m1 = *m_ptr.add(1);
+        *b_ptr.add(1) = *h_ptr.add(1) - m1;
+        *r_ptr.add(1) = *l_ptr.add(1) - m1;
+
+        let m2 = *m_ptr.add(2);
+        *b_ptr.add(2) = *h_ptr.add(2) - m2;
+        *r_ptr.add(2) = *l_ptr.add(2) - m2;
+
+        let m3 = *m_ptr.add(3);
+        *b_ptr.add(3) = *h_ptr.add(3) - m3;
+        *r_ptr.add(3) = *l_ptr.add(3) - m3;
+
+        h_ptr = h_ptr.add(4);
+        l_ptr = l_ptr.add(4);
+        m_ptr = m_ptr.add(4);
+        b_ptr = b_ptr.add(4);
+        r_ptr = r_ptr.add(4);
+        k += 4;
+    }
+    if k + 2 <= len {
+        let m0 = *m_ptr.add(0);
+        *b_ptr.add(0) = *h_ptr.add(0) - m0;
+        *r_ptr.add(0) = *l_ptr.add(0) - m0;
+
+        let m1 = *m_ptr.add(1);
+        *b_ptr.add(1) = *h_ptr.add(1) - m1;
+        *r_ptr.add(1) = *l_ptr.add(1) - m1;
+
+        h_ptr = h_ptr.add(2);
+        l_ptr = l_ptr.add(2);
+        m_ptr = m_ptr.add(2);
+        b_ptr = b_ptr.add(2);
+        r_ptr = r_ptr.add(2);
+        k += 2;
+    }
+    if k < len {
+        let m0 = *m_ptr;
+        *b_ptr = *h_ptr - m0;
+        *r_ptr = *l_ptr - m0;
     }
 }
 
@@ -812,7 +1102,7 @@ unsafe fn eri_row_avx2(
     bull: &mut [f64],
     bear: &mut [f64],
 ) {
-    eri_row_scalar(high, low, ma, first, period, bull, bear)
+    eri_avx2_core(high, low, ma, period, first, bull, bear)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -844,7 +1134,7 @@ unsafe fn eri_row_avx512_short(
     bull: &mut [f64],
     bear: &mut [f64],
 ) {
-    eri_row_scalar(high, low, ma, first, period, bull, bear)
+    eri_avx512_core(high, low, ma, period, first, bull, bear)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -858,7 +1148,7 @@ unsafe fn eri_row_avx512_long(
     bull: &mut [f64],
     bear: &mut [f64],
 ) {
-    eri_row_scalar(high, low, ma, first, period, bull, bear)
+    eri_avx512_core(high, low, ma, period, first, bull, bear)
 }
 
 #[derive(Debug, Clone)]

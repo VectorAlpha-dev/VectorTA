@@ -16,8 +16,7 @@
 //! - **`Err(LinRegError)`** otherwise.
 //!
 //! ## Developer Notes
-//! - **AVX2 kernel**: ❌ Stub - calls scalar implementation
-//! - **AVX512 kernel**: ❌ Stub - calls scalar implementation
+//! - **AVX2/AVX512 kernels**: Implemented but disabled by default (Auto short-circuits to Scalar). On typical CPUs, AVX downclocks and the small one-time init SIMD gives net slower results at 100k. Revisit with prefix sums-based row kernels.
 //! - **Streaming update**: ⚠️ O(n) - `dot_ring()` recalculates regression over full buffer
 //! - **Memory optimization**: ✅ Uses `alloc_with_nan_prefix` for zero-copy output allocation
 //! - **Current status**: Functional with efficient scalar implementation but missing SIMD optimizations
@@ -239,7 +238,8 @@ fn linreg_prepare<'a>(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        // SIMD underperforms for this indicator; keep Auto on the scalar path
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -325,7 +325,7 @@ pub fn linreg_compute_into(
     Ok(())
 }
 
-#[inline]
+#[inline(always)]
 fn linreg_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     // ---- invariant pre‑computations ---------------------------------------------------------
     let period_f = period as f64;
@@ -337,19 +337,19 @@ fn linreg_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     // ---- prime running sums with the first (period‑1) points -------------------------------
     let mut y_sum = 0.0;
     let mut xy_sum = 0.0;
-    {
-        let init_slice = &data[first..first + period - 1];
-        // k = 0‑based here; (k+1) gives us x ∈ [1, period‑1]
-        for (k, &v) in init_slice.iter().enumerate() {
-            let x = (k + 1) as f64;
-            y_sum += v;
-            xy_sum += v * x;
-        }
+    let init_slice = &data[first..first + period - 1];
+    let mut k = 1usize;
+    for &v in init_slice.iter() {
+        y_sum += v;
+        xy_sum += (k as f64) * v;
+        k += 1;
     }
 
     // ---- main rolling loop -----------------------------------------------------------------
+    let len = data.len();
     let mut idx = first + period - 1; // index of *last* element in the current window
-    while idx < data.len() {
+    let mut old_idx = first;          // index of the oldest element in the current window
+    while idx < len {
         let new_val = data[idx];
         y_sum += new_val; // include newest sample
         xy_sum += new_val * period_f; // its x = period
@@ -361,22 +361,161 @@ fn linreg_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
 
         // slide window: remove oldest point and shift indices by ‑1
         xy_sum -= y_sum; // Σ(x·y) → Σ((x‑1)·y)
-        y_sum -= data[idx + 1 - period]; // drop y_{t‑period+1}
+        y_sum -= data[old_idx]; // drop y_{t‑period+1}
 
         idx += 1;
+        old_idx += 1;
     }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 pub unsafe fn linreg_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    linreg_scalar(data, period, first, out);
+    use core::arch::x86_64::*;
+
+    // ---- invariants -----------------------------------------------------------
+    let pf = period as f64;
+    let x_sum = ((period * (period + 1)) / 2) as f64; // Σx
+    let x2_sum = ((period * (period + 1) * (2 * period + 1)) / 6) as f64; // Σx²
+    let denom_inv = 1.0 / (pf * x2_sum - x_sum * x_sum);
+    let inv_pf = 1.0 / pf;
+
+    // ---- vectorized init over first (period-1) -------------------------------
+    let mut y_sum = 0.0f64;
+    let mut xy_sum = 0.0f64;
+
+    let init_len = period.saturating_sub(1);
+    let mut p = data.as_ptr().add(first);
+
+    // process 4 at a time
+    let vec_blocks = init_len / 4;
+    if vec_blocks > 0 {
+        let base = _mm256_setr_pd(1.0, 2.0, 3.0, 4.0);
+        let mut off = 0.0f64;
+        let mut y_acc = _mm256_set1_pd(0.0);
+        let mut xy_acc = _mm256_set1_pd(0.0);
+
+        for _ in 0..vec_blocks {
+            let y = _mm256_loadu_pd(p);
+            let x = _mm256_add_pd(base, _mm256_set1_pd(off));
+            y_acc = _mm256_add_pd(y_acc, y);
+            xy_acc = _mm256_fmadd_pd(y, x, xy_acc);
+            p = p.add(4);
+            off += 4.0;
+        }
+
+        // horizontal reduce by store + scalar sum (cheap; one-time)
+        let mut buf = [0.0f64; 4];
+        _mm256_storeu_pd(buf.as_mut_ptr(), y_acc);
+        y_sum += buf.iter().sum::<f64>();
+        _mm256_storeu_pd(buf.as_mut_ptr(), xy_acc);
+        xy_sum += buf.iter().sum::<f64>();
+    }
+
+    // scalar tail for remaining (period-1) % 4
+    let tail = init_len & 3;
+    let mut k_off = (vec_blocks * 4 + 1) as f64; // next x value
+    for _ in 0..tail {
+        let v = *p;
+        y_sum += v;
+        xy_sum += k_off * v;
+        k_off += 1.0;
+        p = p.add(1);
+    }
+
+    // ---- main rolling loop ---------------------------------------------------
+    let len = data.len();
+    let mut idx = first + period - 1;
+    let mut old_idx = first;
+    while idx < len {
+        let new_v = *data.get_unchecked(idx);
+        y_sum += new_v;
+        xy_sum = f64::mul_add(pf, new_v, xy_sum);
+
+        let b = (pf * xy_sum - x_sum * y_sum) * denom_inv;
+        let a = (y_sum - b * x_sum) * inv_pf;
+        *out.get_unchecked_mut(idx) = a + b * pf;
+
+        xy_sum -= y_sum;
+        y_sum -= *data.get_unchecked(old_idx);
+        idx += 1;
+        old_idx += 1;
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,avx512dq,fma")]
 pub unsafe fn linreg_avx512(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    linreg_scalar(data, period, first, out);
+    use core::arch::x86_64::*;
+
+    // ---- invariants -----------------------------------------------------------
+    let pf = period as f64;
+    let x_sum = ((period * (period + 1)) / 2) as f64; // Σx
+    let x2_sum = ((period * (period + 1) * (2 * period + 1)) / 6) as f64; // Σx²
+    let denom_inv = 1.0 / (pf * x2_sum - x_sum * x_sum);
+    let inv_pf = 1.0 / pf;
+
+    // ---- vectorized init over first (period-1) -------------------------------
+    let mut y_sum = 0.0f64;
+    let mut xy_sum = 0.0f64;
+
+    let init_len = period.saturating_sub(1);
+    let mut p = data.as_ptr().add(first);
+
+    // process 8 at a time
+    let vec_blocks = init_len / 8;
+    if vec_blocks > 0 {
+        let base = _mm512_setr_pd(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0);
+        let mut off = 0.0f64;
+        let mut y_acc = _mm512_set1_pd(0.0);
+        let mut xy_acc = _mm512_set1_pd(0.0);
+
+        for _ in 0..vec_blocks {
+            let y = _mm512_loadu_pd(p);
+            let x = _mm512_add_pd(base, _mm512_set1_pd(off));
+            y_acc = _mm512_add_pd(y_acc, y);
+            xy_acc = _mm512_fmadd_pd(y, x, xy_acc);
+            p = p.add(8);
+            off += 8.0;
+        }
+
+        // horizontal reduce by store + scalar sum
+        let mut buf = [0.0f64; 8];
+        _mm512_storeu_pd(buf.as_mut_ptr(), y_acc);
+        y_sum += buf.iter().sum::<f64>();
+        _mm512_storeu_pd(buf.as_mut_ptr(), xy_acc);
+        xy_sum += buf.iter().sum::<f64>();
+    }
+
+    // scalar tail for remaining (period-1) % 8
+    let tail = init_len & 7;
+    let mut k_off = (vec_blocks * 8 + 1) as f64; // next x value
+    for _ in 0..tail {
+        let v = *p;
+        y_sum += v;
+        xy_sum += k_off * v;
+        k_off += 1.0;
+        p = p.add(1);
+    }
+
+    // ---- main rolling loop ---------------------------------------------------
+    let len = data.len();
+    let mut idx = first + period - 1;
+    let mut old_idx = first;
+    while idx < len {
+        let new_v = *data.get_unchecked(idx);
+        y_sum += new_v;
+        xy_sum = f64::mul_add(pf, new_v, xy_sum);
+
+        let b = (pf * xy_sum - x_sum * y_sum) * denom_inv;
+        let a = (y_sum - b * x_sum) * inv_pf;
+        *out.get_unchecked_mut(idx) = a + b * pf;
+
+        xy_sum -= y_sum;
+        y_sum -= *data.get_unchecked(old_idx);
+        idx += 1;
+        old_idx += 1;
+    }
 }
 
 // --- BATCH RANGE/BUILDER/OUTPUT/GRID ---
@@ -464,7 +603,8 @@ pub fn linreg_batch_with_kernel(
     k: Kernel,
 ) -> Result<LinRegBatchOutput, LinRegError> {
     let kernel = match k {
-        Kernel::Auto => detect_best_batch_kernel(),
+        // Row-specific SIMD not implemented; default to ScalarBatch for best results
+        Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         _ => {
             return Err(LinRegError::InvalidPeriod {
@@ -627,7 +767,7 @@ pub fn linreg_batch_inner_into(
         });
     }
 
-    // ------------- 1. cast output slice to MaybeUninit -------------
+    // ------------- 1a. cast output slice to MaybeUninit -------------
     let out_uninit = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
@@ -638,6 +778,12 @@ pub fn linreg_batch_inner_into(
     // paint the prefixes with NaN
     unsafe { init_matrix_prefixes(out_uninit, cols, &warm) };
 
+    // ------------- 1b. (optional) shared prefix sums over valid region -------------
+    // NOTE: A row-optimized variant using prefix sums (S, SP) was evaluated but
+    // did not outperform the rolling-update scalar row kernel on this workload.
+    // We keep the implementation below (linreg_row_prefix_sums_scalar) for future
+    // experiments, but do not compute prefix sums by default to avoid overhead.
+
     // ------------- 2. per-row worker ------------
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
@@ -647,6 +793,7 @@ pub fn linreg_batch_inner_into(
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
         match kern {
+            // Keep fastest known-good path
             Kernel::Scalar => linreg_row_scalar(data, first, period, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 => linreg_row_avx2(data, first, period, out_row),
@@ -685,6 +832,40 @@ pub fn linreg_batch_inner_into(
 #[inline(always)]
 unsafe fn linreg_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
     linreg_scalar(data, period, first, out)
+}
+
+#[inline(always)]
+unsafe fn linreg_row_prefix_sums_scalar(
+    data: &[f64],
+    first: usize,
+    period: usize,
+    out: &mut [f64],
+    s: &[f64],
+    sp: &[f64],
+) {
+    let len = data.len();
+    let pf = period as f64;
+    let x_sum = ((period * (period + 1)) / 2) as f64; // Σx
+    let x2_sum = ((period * (period + 1) * (2 * period + 1)) / 6) as f64; // Σx²
+    let denom_inv = 1.0 / (pf * x2_sum - x_sum * x_sum);
+    let inv_pf = 1.0 / pf;
+
+    // Start at the first full window
+    let mut idx = first + period - 1;
+    while idx < len {
+        // 1-based position within the valid region [first..]
+        let pos = idx - first + 1;
+        let y_sum = s.get_unchecked(pos) - s.get_unchecked(pos - period);
+        // Rebase absolute-index prefix sum to local x ∈ [1..period]
+        let xy_sum = (sp.get_unchecked(pos) - sp.get_unchecked(pos - period))
+            - ((pos - period) as f64) * y_sum;
+
+        let b = (pf * xy_sum - x_sum * y_sum) * denom_inv;
+        let a = (y_sum - b * x_sum) * inv_pf;
+        *out.get_unchecked_mut(idx) = a + b * pf;
+
+        idx += 1;
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]

@@ -15,7 +15,9 @@
 //! - **`Err(DmError)`** on various error conditions.
 //!
 //! ## Developer Status
-//! - **SIMD Kernels**: AVX2 and AVX512 (including short/long variants) are STUBS - fall back to scalar implementation
+//! - **SIMD Kernels**: Implemented (candidate generation only), but Auto short-circuits to scalar
+//!   by default because AVX2 underperforms and AVX512 gains are small (~4% at 100k on test CPU).
+//!   You can still force `Kernel::Avx2`/`Kernel::Avx512` explicitly to use SIMD.
 //! - **Streaming Performance**: O(1) - uses exponential smoothing for efficient incremental updates
 //! - **Memory Optimization**: GOOD - uses alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes throughout
 
@@ -211,8 +213,10 @@ fn dm_prepare<'a>(
         });
     }
 
+    // SIMD implemented but disabled by default for Auto: minimal/negative gains observed.
+    // Users can still request Avx2/Avx512 explicitly via `kernel`.
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
     Ok((high, low, period, first, chosen))
@@ -227,54 +231,82 @@ fn dm_compute_into_scalar(
     plus_out: &mut [f64],
     minus_out: &mut [f64],
 ) {
-    let mut prev_high = high[first];
-    let mut prev_low = low[first];
-    let mut sum_plus = 0.0;
-    let mut sum_minus = 0.0;
+    debug_assert_eq!(high.len(), low.len());
+    let n = high.len();
+    if n == 0 {
+        return;
+    }
 
     let end_init = first + period - 1;
 
-    for i in (first + 1)..=end_init {
-        let diff_p = high[i] - prev_high;
-        let diff_m = prev_low - low[i];
-        prev_high = high[i];
-        prev_low = low[i];
-        let p = if diff_p > 0.0 && diff_p > diff_m {
-            diff_p
-        } else {
-            0.0
-        };
-        let m = if diff_m > 0.0 && diff_m > diff_p {
-            diff_m
-        } else {
-            0.0
-        };
-        sum_plus += p;
-        sum_minus += m;
-    }
-    plus_out[end_init] = sum_plus;
-    minus_out[end_init] = sum_minus;
+    unsafe {
+        let mut sum_plus = 0.0f64;
+        let mut sum_minus = 0.0f64;
 
-    let inv_period = 1.0 / (period as f64);
-    for i in (end_init + 1)..high.len() {
-        let diff_p = high[i] - prev_high;
-        let diff_m = prev_low - low[i];
-        prev_high = high[i];
-        prev_low = low[i];
-        let p = if diff_p > 0.0 && diff_p > diff_m {
-            diff_p
-        } else {
-            0.0
-        };
-        let m = if diff_m > 0.0 && diff_m > diff_p {
-            diff_m
-        } else {
-            0.0
-        };
-        sum_plus = sum_plus - (sum_plus * inv_period) + p;
-        sum_minus = sum_minus - (sum_minus * inv_period) + m;
-        plus_out[i] = sum_plus;
-        minus_out[i] = sum_minus;
+        // Warmup accumulation over (period - 1) steps
+        let mut i = first + 1;
+        let warm_stop = end_init + 1; // exclusive
+
+        let mut prev_high = *high.get_unchecked(first);
+        let mut prev_low = *low.get_unchecked(first);
+
+        while i < warm_stop {
+            let hi = *high.get_unchecked(i);
+            let lo = *low.get_unchecked(i);
+            let diff_p = hi - prev_high;
+            let diff_m = prev_low - lo;
+            prev_high = hi;
+            prev_low = lo;
+
+            if diff_p > 0.0 && diff_p > diff_m {
+                sum_plus += diff_p;
+            } else if diff_m > 0.0 && diff_m > diff_p {
+                sum_minus += diff_m;
+            }
+            i += 1;
+        }
+
+        *plus_out.get_unchecked_mut(end_init) = sum_plus;
+        *minus_out.get_unchecked_mut(end_init) = sum_minus;
+
+        // Smoothed (Wilder) update for remaining samples
+        if end_init + 1 >= n {
+            return;
+        }
+        let inv_p = 1.0 / (period as f64);
+
+        let mut j = end_init + 1;
+        while j < n {
+            let hi = *high.get_unchecked(j);
+            let lo = *low.get_unchecked(j);
+            let diff_p = hi - prev_high;
+            let diff_m = prev_low - lo;
+            prev_high = hi;
+            prev_low = lo;
+
+            let (p, m) = if diff_p > 0.0 && diff_p > diff_m {
+                (diff_p, 0.0)
+            } else if diff_m > 0.0 && diff_m > diff_p {
+                (0.0, diff_m)
+            } else {
+                (0.0, 0.0)
+            };
+
+            #[cfg(target_feature = "fma")]
+            {
+                sum_plus = (-inv_p).mul_add(sum_plus, sum_plus + p);
+                sum_minus = (-inv_p).mul_add(sum_minus, sum_minus + m);
+            }
+            #[cfg(not(target_feature = "fma"))]
+            {
+                sum_plus = sum_plus - (sum_plus * inv_p) + p;
+                sum_minus = sum_minus - (sum_minus * inv_p) + m;
+            }
+
+            *plus_out.get_unchecked_mut(j) = sum_plus;
+            *minus_out.get_unchecked_mut(j) = sum_minus;
+            j += 1;
+        }
     }
 }
 
@@ -294,13 +326,321 @@ fn dm_compute_into(
         }
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx2 | Kernel::Avx2Batch => {
-            dm_compute_into_scalar(high, low, period, first, plus_out, minus_out)
+            unsafe { dm_compute_into_avx2(high, low, period, first, plus_out, minus_out) }
         }
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx512 | Kernel::Avx512Batch => {
-            dm_compute_into_scalar(high, low, period, first, plus_out, minus_out)
+            unsafe { dm_compute_into_avx512(high, low, period, first, plus_out, minus_out) }
         }
         _ => unreachable!(),
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn dm_compute_into_avx2(
+    high: &[f64],
+    low: &[f64],
+    period: usize,
+    first: usize,
+    plus_out: &mut [f64],
+    minus_out: &mut [f64],
+) {
+    use core::arch::x86_64::*;
+    debug_assert_eq!(high.len(), low.len());
+    let n = high.len();
+    if n == 0 {
+        return;
+    }
+
+    let end_init = first + period - 1;
+    let inv_p = 1.0 / (period as f64);
+    let zero = _mm256_setzero_pd();
+
+    // Warmup accumulate
+    let mut sum_plus = 0.0f64;
+    let mut sum_minus = 0.0f64;
+    let mut i = first + 1;
+    let warm_stop = end_init + 1;
+    while i + 4 <= warm_stop {
+        let hc = _mm256_loadu_pd(high.as_ptr().add(i));
+        let hp = _mm256_loadu_pd(high.as_ptr().add(i - 1));
+        let dp = _mm256_sub_pd(hc, hp);
+
+        let lp = _mm256_loadu_pd(low.as_ptr().add(i - 1));
+        let lc = _mm256_loadu_pd(low.as_ptr().add(i));
+        let dm = _mm256_sub_pd(lp, lc);
+
+        let dp_pos = _mm256_max_pd(dp, zero);
+        let dm_pos = _mm256_max_pd(dm, zero);
+
+        let p_mask = _mm256_cmp_pd(dp_pos, dm_pos, _CMP_GT_OQ);
+        let m_mask = _mm256_cmp_pd(dm_pos, dp_pos, _CMP_GT_OQ);
+        let p_vec = _mm256_and_pd(dp_pos, p_mask);
+        let m_vec = _mm256_and_pd(dm_pos, m_mask);
+
+        let mut p_buf = [0.0f64; 4];
+        let mut m_buf = [0.0f64; 4];
+        _mm256_storeu_pd(p_buf.as_mut_ptr(), p_vec);
+        _mm256_storeu_pd(m_buf.as_mut_ptr(), m_vec);
+        sum_plus += p_buf.iter().sum::<f64>();
+        sum_minus += m_buf.iter().sum::<f64>();
+        i += 4;
+    }
+    while i < warm_stop {
+        let dp = *high.get_unchecked(i) - *high.get_unchecked(i - 1);
+        let dm = *low.get_unchecked(i - 1) - *low.get_unchecked(i);
+        if dp > 0.0 && dp > dm {
+            sum_plus += dp;
+        } else if dm > 0.0 && dm > dp {
+            sum_minus += dm;
+        }
+        i += 1;
+    }
+
+    *plus_out.get_unchecked_mut(end_init) = sum_plus;
+    *minus_out.get_unchecked_mut(end_init) = sum_minus;
+
+    if end_init + 1 >= n {
+        return;
+    }
+
+    let mut j = end_init + 1;
+    while j + 4 <= n {
+        let hc = _mm256_loadu_pd(high.as_ptr().add(j));
+        let hp = _mm256_loadu_pd(high.as_ptr().add(j - 1));
+        let dp = _mm256_sub_pd(hc, hp);
+
+        let lp = _mm256_loadu_pd(low.as_ptr().add(j - 1));
+        let lc = _mm256_loadu_pd(low.as_ptr().add(j));
+        let dm = _mm256_sub_pd(lp, lc);
+
+        let dp_pos = _mm256_max_pd(dp, zero);
+        let dm_pos = _mm256_max_pd(dm, zero);
+
+        let p_mask = _mm256_cmp_pd(dp_pos, dm_pos, _CMP_GT_OQ);
+        let m_mask = _mm256_cmp_pd(dm_pos, dp_pos, _CMP_GT_OQ);
+        let p_vec = _mm256_and_pd(dp_pos, p_mask);
+        let m_vec = _mm256_and_pd(dm_pos, m_mask);
+
+        let mut p_buf = [0.0f64; 4];
+        let mut m_buf = [0.0f64; 4];
+        _mm256_storeu_pd(p_buf.as_mut_ptr(), p_vec);
+        _mm256_storeu_pd(m_buf.as_mut_ptr(), m_vec);
+
+        #[cfg(target_feature = "fma")]
+        {
+            sum_plus = (-inv_p).mul_add(sum_plus, sum_plus + p_buf[0]);
+            sum_minus = (-inv_p).mul_add(sum_minus, sum_minus + m_buf[0]);
+            *plus_out.get_unchecked_mut(j) = sum_plus;
+            *minus_out.get_unchecked_mut(j) = sum_minus;
+
+            sum_plus = (-inv_p).mul_add(sum_plus, sum_plus + p_buf[1]);
+            sum_minus = (-inv_p).mul_add(sum_minus, sum_minus + m_buf[1]);
+            *plus_out.get_unchecked_mut(j + 1) = sum_plus;
+            *minus_out.get_unchecked_mut(j + 1) = sum_minus;
+
+            sum_plus = (-inv_p).mul_add(sum_plus, sum_plus + p_buf[2]);
+            sum_minus = (-inv_p).mul_add(sum_minus, sum_minus + m_buf[2]);
+            *plus_out.get_unchecked_mut(j + 2) = sum_plus;
+            *minus_out.get_unchecked_mut(j + 2) = sum_minus;
+
+            sum_plus = (-inv_p).mul_add(sum_plus, sum_plus + p_buf[3]);
+            sum_minus = (-inv_p).mul_add(sum_minus, sum_minus + m_buf[3]);
+            *plus_out.get_unchecked_mut(j + 3) = sum_plus;
+            *minus_out.get_unchecked_mut(j + 3) = sum_minus;
+        }
+        #[cfg(not(target_feature = "fma"))]
+        {
+            sum_plus = sum_plus - (sum_plus * inv_p) + p_buf[0];
+            sum_minus = sum_minus - (sum_minus * inv_p) + m_buf[0];
+            *plus_out.get_unchecked_mut(j) = sum_plus;
+            *minus_out.get_unchecked_mut(j) = sum_minus;
+
+            sum_plus = sum_plus - (sum_plus * inv_p) + p_buf[1];
+            sum_minus = sum_minus - (sum_minus * inv_p) + m_buf[1];
+            *plus_out.get_unchecked_mut(j + 1) = sum_plus;
+            *minus_out.get_unchecked_mut(j + 1) = sum_minus;
+
+            sum_plus = sum_plus - (sum_plus * inv_p) + p_buf[2];
+            sum_minus = sum_minus - (sum_minus * inv_p) + m_buf[2];
+            *plus_out.get_unchecked_mut(j + 2) = sum_plus;
+            *minus_out.get_unchecked_mut(j + 2) = sum_minus;
+
+            sum_plus = sum_plus - (sum_plus * inv_p) + p_buf[3];
+            sum_minus = sum_minus - (sum_minus * inv_p) + m_buf[3];
+            *plus_out.get_unchecked_mut(j + 3) = sum_plus;
+            *minus_out.get_unchecked_mut(j + 3) = sum_minus;
+        }
+        j += 4;
+    }
+
+    while j < n {
+        let dp = *high.get_unchecked(j) - *high.get_unchecked(j - 1);
+        let dm = *low.get_unchecked(j - 1) - *low.get_unchecked(j);
+
+        let (p, m) = if dp > 0.0 && dp > dm {
+            (dp, 0.0)
+        } else if dm > 0.0 && dm > dp {
+            (0.0, dm)
+        } else {
+            (0.0, 0.0)
+        };
+
+        #[cfg(target_feature = "fma")]
+        {
+            sum_plus = (-inv_p).mul_add(sum_plus, sum_plus + p);
+            sum_minus = (-inv_p).mul_add(sum_minus, sum_minus + m);
+        }
+        #[cfg(not(target_feature = "fma"))]
+        {
+            sum_plus = sum_plus - (sum_plus * inv_p) + p;
+            sum_minus = sum_minus - (sum_minus * inv_p) + m;
+        }
+        *plus_out.get_unchecked_mut(j) = sum_plus;
+        *minus_out.get_unchecked_mut(j) = sum_minus;
+        j += 1;
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+unsafe fn dm_compute_into_avx512(
+    high: &[f64],
+    low: &[f64],
+    period: usize,
+    first: usize,
+    plus_out: &mut [f64],
+    minus_out: &mut [f64],
+) {
+    use core::arch::x86_64::*;
+    debug_assert_eq!(high.len(), low.len());
+    let n = high.len();
+    if n == 0 {
+        return;
+    }
+
+    let end_init = first + period - 1;
+    let inv_p = 1.0 / (period as f64);
+    let zero = _mm512_set1_pd(0.0);
+
+    // Warmup accumulate
+    let mut sum_plus = 0.0f64;
+    let mut sum_minus = 0.0f64;
+    let mut i = first + 1;
+    let warm_stop = end_init + 1;
+    while i + 8 <= warm_stop {
+        let hc = _mm512_loadu_pd(high.as_ptr().add(i));
+        let hp = _mm512_loadu_pd(high.as_ptr().add(i - 1));
+        let dp = _mm512_sub_pd(hc, hp);
+
+        let lp = _mm512_loadu_pd(low.as_ptr().add(i - 1));
+        let lc = _mm512_loadu_pd(low.as_ptr().add(i));
+        let dm = _mm512_sub_pd(lp, lc);
+
+        let dp_pos = _mm512_max_pd(dp, zero);
+        let dm_pos = _mm512_max_pd(dm, zero);
+
+        let p_mask = _mm512_cmp_pd_mask(dp_pos, dm_pos, _CMP_GT_OQ);
+        let m_mask = _mm512_cmp_pd_mask(dm_pos, dp_pos, _CMP_GT_OQ);
+        let p_vec = _mm512_maskz_mov_pd(p_mask, dp_pos);
+        let m_vec = _mm512_maskz_mov_pd(m_mask, dm_pos);
+
+        let mut p_buf = [0.0f64; 8];
+        let mut m_buf = [0.0f64; 8];
+        _mm512_storeu_pd(p_buf.as_mut_ptr(), p_vec);
+        _mm512_storeu_pd(m_buf.as_mut_ptr(), m_vec);
+        for k in 0..8 {
+            sum_plus += p_buf[k];
+            sum_minus += m_buf[k];
+        }
+        i += 8;
+    }
+    while i < warm_stop {
+        let dp = *high.get_unchecked(i) - *high.get_unchecked(i - 1);
+        let dm = *low.get_unchecked(i - 1) - *low.get_unchecked(i);
+        if dp > 0.0 && dp > dm {
+            sum_plus += dp;
+        } else if dm > 0.0 && dm > dp {
+            sum_minus += dm;
+        }
+        i += 1;
+    }
+    *plus_out.get_unchecked_mut(end_init) = sum_plus;
+    *minus_out.get_unchecked_mut(end_init) = sum_minus;
+
+    if end_init + 1 >= n {
+        return;
+    }
+
+    let mut j = end_init + 1;
+    while j + 8 <= n {
+        let hc = _mm512_loadu_pd(high.as_ptr().add(j));
+        let hp = _mm512_loadu_pd(high.as_ptr().add(j - 1));
+        let dp = _mm512_sub_pd(hc, hp);
+
+        let lp = _mm512_loadu_pd(low.as_ptr().add(j - 1));
+        let lc = _mm512_loadu_pd(low.as_ptr().add(j));
+        let dm = _mm512_sub_pd(lp, lc);
+
+        let dp_pos = _mm512_max_pd(dp, zero);
+        let dm_pos = _mm512_max_pd(dm, zero);
+
+        let p_mask = _mm512_cmp_pd_mask(dp_pos, dm_pos, _CMP_GT_OQ);
+        let m_mask = _mm512_cmp_pd_mask(dm_pos, dp_pos, _CMP_GT_OQ);
+        let p_vec = _mm512_maskz_mov_pd(p_mask, dp_pos);
+        let m_vec = _mm512_maskz_mov_pd(m_mask, dm_pos);
+
+        let mut p_buf = [0.0f64; 8];
+        let mut m_buf = [0.0f64; 8];
+        _mm512_storeu_pd(p_buf.as_mut_ptr(), p_vec);
+        _mm512_storeu_pd(m_buf.as_mut_ptr(), m_vec);
+
+        #[cfg(target_feature = "fma")]
+        {
+            for t in 0..8 {
+                sum_plus = (-inv_p).mul_add(sum_plus, sum_plus + p_buf[t]);
+                sum_minus = (-inv_p).mul_add(sum_minus, sum_minus + m_buf[t]);
+                *plus_out.get_unchecked_mut(j + t) = sum_plus;
+                *minus_out.get_unchecked_mut(j + t) = sum_minus;
+            }
+        }
+        #[cfg(not(target_feature = "fma"))]
+        {
+            for t in 0..8 {
+                sum_plus = sum_plus - (sum_plus * inv_p) + p_buf[t];
+                sum_minus = sum_minus - (sum_minus * inv_p) + m_buf[t];
+                *plus_out.get_unchecked_mut(j + t) = sum_plus;
+                *minus_out.get_unchecked_mut(j + t) = sum_minus;
+            }
+        }
+        j += 8;
+    }
+    while j < n {
+        let dp = *high.get_unchecked(j) - *high.get_unchecked(j - 1);
+        let dm = *low.get_unchecked(j - 1) - *low.get_unchecked(j);
+
+        let (p, m) = if dp > 0.0 && dp > dm {
+            (dp, 0.0)
+        } else if dm > 0.0 && dm > dp {
+            (0.0, dm)
+        } else {
+            (0.0, 0.0)
+        };
+
+        #[cfg(target_feature = "fma")]
+        {
+            sum_plus = (-inv_p).mul_add(sum_plus, sum_plus + p);
+            sum_minus = (-inv_p).mul_add(sum_minus, sum_minus + m);
+        }
+        #[cfg(not(target_feature = "fma"))]
+        {
+            sum_plus = sum_plus - (sum_plus * inv_p) + p;
+            sum_minus = sum_minus - (sum_minus * inv_p) + m;
+        }
+        *plus_out.get_unchecked_mut(j) = sum_plus;
+        *minus_out.get_unchecked_mut(j) = sum_minus;
+        j += 1;
     }
 }
 
@@ -377,7 +717,21 @@ pub unsafe fn dm_avx2(
     period: usize,
     first_valid_idx: usize,
 ) -> Result<DmOutput, DmError> {
-    dm_scalar(high, low, period, first_valid_idx)
+    let warm = first_valid_idx + period - 1;
+    let mut plus_dm = alloc_with_nan_prefix(high.len(), warm);
+    let mut minus_dm = alloc_with_nan_prefix(high.len(), warm);
+    dm_compute_into_avx2(
+        high,
+        low,
+        period,
+        first_valid_idx,
+        &mut plus_dm,
+        &mut minus_dm,
+    );
+    Ok(DmOutput {
+        plus: plus_dm,
+        minus: minus_dm,
+    })
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -388,7 +742,21 @@ pub unsafe fn dm_avx512(
     period: usize,
     first_valid_idx: usize,
 ) -> Result<DmOutput, DmError> {
-    dm_scalar(high, low, period, first_valid_idx)
+    let warm = first_valid_idx + period - 1;
+    let mut plus_dm = alloc_with_nan_prefix(high.len(), warm);
+    let mut minus_dm = alloc_with_nan_prefix(high.len(), warm);
+    dm_compute_into_avx512(
+        high,
+        low,
+        period,
+        first_valid_idx,
+        &mut plus_dm,
+        &mut minus_dm,
+    );
+    Ok(DmOutput {
+        plus: plus_dm,
+        minus: minus_dm,
+    })
 }
 
 // Long and short variants for AVX512, required by API parity

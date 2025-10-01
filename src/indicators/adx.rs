@@ -18,14 +18,14 @@
 //! - **`Err(AdxError)`** otherwise.
 //!
 //! ## Developer Notes
-//! - **AVX2/AVX512 kernels**: Currently stubs calling scalar implementation
+//! - **Decision**: SIMD enabled for warmup (AVX2/AVX512); main loop stays scalar to preserve determinism (streaming parity ≤ 1e-8).
+//! - **AVX2/AVX512 kernels**: Warmup window vectorized; main pass remains scalar
 //! - **Streaming update**: O(1) - maintains running smoothed values (ATR, +DM, -DM, ADX)
 //! - **Memory optimization**: Uses `alloc_with_nan_prefix` for zero-copy allocation
 //! - **Current status**: Scalar implementation complete with Wilder's smoothing
 //! - **Optimization opportunities**:
-//!   - Implement vectorized AVX2/AVX512 kernels for directional movement calculations
-//!   - Consider SIMD for parallel ATR and DM smoothing operations
-//!   - Optimize DX calculation with vector operations
+//!   - Row-specific batch: not implemented in this pass. Clear next step is shared precompute of TR/+DM/−DM across rows, then per-period smoothing.
+//!   - Main pass is sequential by definition (Wilder smoothing); keep arithmetic order stable
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
@@ -305,136 +305,534 @@ pub fn adx_with_kernel(input: &AdxInput, kernel: Kernel) -> Result<AdxOutput, Ad
 #[inline]
 pub fn adx_scalar(high: &[f64], low: &[f64], close: &[f64], period: usize, out: &mut [f64]) {
     let len = close.len();
-    let mut tr_sum = 0.0;
-    let mut plus_dm_sum = 0.0;
-    let mut minus_dm_sum = 0.0;
+    if len <= period {
+        return;
+    }
 
+    // Wilder constants
     let period_f64 = period as f64;
     let reciprocal_period = 1.0 / period_f64;
     let one_minus_rp = 1.0 - reciprocal_period;
     let period_minus_one = period_f64 - 1.0;
 
-    for i in 1..=period {
-        let curr_high = high[i];
-        let curr_low = low[i];
-        let prev_close = close[i - 1];
-        let prev_high = high[i - 1];
-        let prev_low = low[i - 1];
+    // --- Warmup accumulation over [1..=period] ---
+    let mut tr_sum = 0.0f64;
+    let mut plus_dm_sum = 0.0f64;
+    let mut minus_dm_sum = 0.0f64;
 
-        let tr = (curr_high - curr_low)
-            .max((curr_high - prev_close).abs())
-            .max((curr_low - prev_close).abs());
+    // Carry previous bar values explicitly to avoid repeated indexing of i-1
+    let mut prev_h = high[0];
+    let mut prev_l = low[0];
+    let mut prev_c = close[0];
 
-        let up_move = curr_high - prev_high;
-        let down_move = prev_low - curr_low;
+    let mut i = 1usize;
+    while i <= period {
+        let ch = high[i];
+        let cl = low[i];
 
-        if up_move > down_move && up_move > 0.0 {
-            plus_dm_sum += up_move;
+        // TR = max{ H-L, |H - prevC|, |L - prevC| }
+        let hl = ch - cl;
+        let hpc = (ch - prev_c).abs();
+        let lpc = (cl - prev_c).abs();
+        let tr = hl.max(hpc).max(lpc);
+
+        // Wilder +DM/-DM gating
+        let up = ch - prev_h;
+        let down = prev_l - cl;
+        if up > down && up > 0.0 {
+            plus_dm_sum += up;
         }
-        if down_move > up_move && down_move > 0.0 {
-            minus_dm_sum += down_move;
+        if down > up && down > 0.0 {
+            minus_dm_sum += down;
         }
-
         tr_sum += tr;
+
+        // advance prev*
+        prev_h = ch;
+        prev_l = cl;
+        prev_c = close[i];
+        i += 1;
     }
 
+    // Smoothed running sums from warmup window
     let mut atr = tr_sum;
     let mut plus_dm_smooth = plus_dm_sum;
     let mut minus_dm_smooth = minus_dm_sum;
 
-    let plus_di_prev = (plus_dm_smooth / atr) * 100.0;
-    let minus_di_prev = (minus_dm_smooth / atr) * 100.0;
-
-    let sum_di = plus_di_prev + minus_di_prev;
-    let initial_dx = if sum_di != 0.0 {
-        ((plus_di_prev - minus_di_prev).abs() / sum_di) * 100.0
+    // Initial DX from first smoothed window (avoid 0/0 -> NaN)
+    let (plus_di_prev, minus_di_prev) = if atr != 0.0 {
+        (
+            (plus_dm_smooth / atr) * 100.0,
+            (minus_dm_smooth / atr) * 100.0,
+        )
+    } else {
+        (0.0, 0.0)
+    };
+    let sum_di_prev = plus_di_prev + minus_di_prev;
+    let mut dx_sum = if sum_di_prev != 0.0 {
+        ((plus_di_prev - minus_di_prev).abs() / sum_di_prev) * 100.0
     } else {
         0.0
     };
+    let mut dx_count = 1usize;
+    let mut last_adx = 0.0f64;
 
-    let mut dx_sum = initial_dx;
-    let mut dx_count = 1;
-    let mut last_adx = 0.0;
-    let mut have_adx = false;
+    // Prepare previous bar as index `period`
+    let mut prev_h = high[period];
+    let mut prev_l = low[period];
+    let mut prev_c = close[period];
 
-    for i in (period + 1)..len {
-        let curr_high = high[i];
-        let curr_low = low[i];
-        let prev_close = close[i - 1];
-        let prev_high = high[i - 1];
-        let prev_low = low[i - 1];
+    // --- Main sequential pass ---
+    let mut i = period + 1;
+    while i < len {
+        let ch = high[i];
+        let cl = low[i];
 
-        let tr = (curr_high - curr_low)
-            .max((curr_high - prev_close).abs())
-            .max((curr_low - prev_close).abs());
+        let hl = ch - cl;
+        let hpc = (ch - prev_c).abs();
+        let lpc = (cl - prev_c).abs();
+        let tr = hl.max(hpc).max(lpc);
 
-        let up_move = curr_high - prev_high;
-        let down_move = prev_low - curr_low;
+        let up = ch - prev_h;
+        let down = prev_l - cl;
+        let plus_dm = if up > down && up > 0.0 { up } else { 0.0 };
+        let minus_dm = if down > up && down > 0.0 { down } else { 0.0 };
 
-        let plus_dm = if up_move > down_move && up_move > 0.0 {
-            up_move
-        } else {
-            0.0
-        };
-        let minus_dm = if down_move > up_move && down_move > 0.0 {
-            down_move
-        } else {
-            0.0
-        };
-
+        // Wilder smoothing (preserve arithmetic order; avoid mul_add)
         atr = atr * one_minus_rp + tr;
         plus_dm_smooth = plus_dm_smooth * one_minus_rp + plus_dm;
         minus_dm_smooth = minus_dm_smooth * one_minus_rp + minus_dm;
 
-        let plus_di_current = (plus_dm_smooth / atr) * 100.0;
-        let minus_di_current = (minus_dm_smooth / atr) * 100.0;
-
-        let sum_di_current = plus_di_current + minus_di_current;
-        let dx = if sum_di_current != 0.0 {
-            let diff = (plus_di_current - minus_di_current).abs();
-            (diff / sum_di_current) * 100.0
+        // Avoid 0/0 when ATR == 0
+        let (plus_di, minus_di) = if atr != 0.0 {
+            (
+                (plus_dm_smooth / atr) * 100.0,
+                (minus_dm_smooth / atr) * 100.0,
+            )
+        } else {
+            (0.0, 0.0)
+        };
+        let sum_di = plus_di + minus_di;
+        let dx = if sum_di != 0.0 {
+            ((plus_di - minus_di).abs() / sum_di) * 100.0
         } else {
             0.0
         };
 
+        // Build initial ADX as mean of `period` DXs, then smooth
         if dx_count < period {
             dx_sum += dx;
             dx_count += 1;
             if dx_count == period {
                 last_adx = dx_sum * reciprocal_period;
                 out[i] = last_adx;
-                have_adx = true;
             }
-        } else if have_adx {
-            let adx_current = ((last_adx * period_minus_one) + dx) * reciprocal_period;
-            out[i] = adx_current;
-            last_adx = adx_current;
+        } else {
+            last_adx = (last_adx * period_minus_one + dx) * reciprocal_period;
+            out[i] = last_adx;
         }
+
+        // advance prev*
+        prev_h = ch;
+        prev_l = cl;
+        prev_c = close[i];
+        i += 1;
     }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn adx_avx2(high: &[f64], low: &[f64], close: &[f64], period: usize, out: &mut [f64]) {
-    adx_scalar(high, low, close, period, out)
+    use core::arch::x86_64::*;
+    let len = close.len();
+    if len <= period {
+        return;
+    }
+
+    let period_f64 = period as f64;
+    let reciprocal_period = 1.0 / period_f64;
+    let one_minus_rp = 1.0 - reciprocal_period;
+    let period_minus_one = period_f64 - 1.0;
+
+    unsafe {
+        let hp = high.as_ptr();
+        let lp = low.as_ptr();
+        let cp = close.as_ptr();
+
+        // Warmup: vectorized over [1..=period]
+        let mut tr_sum = 0.0f64;
+        let mut plus_dm_sum = 0.0f64;
+        let mut minus_dm_sum = 0.0f64;
+
+        let mut prev_h_scalar = *hp.add(0);
+        let mut prev_l_scalar = *lp.add(0);
+        let mut prev_c_scalar = *cp.add(0);
+
+        let zero = _mm256_setzero_pd();
+        let sign_mask = _mm256_set1_pd(-0.0f64);
+
+        let mut i = 1usize;
+        while i + 3 <= period {
+            let ch = _mm256_loadu_pd(hp.add(i));
+            let cl = _mm256_loadu_pd(lp.add(i));
+            let pch = _mm256_loadu_pd(hp.add(i - 1));
+            let pcl = _mm256_loadu_pd(lp.add(i - 1));
+            let pcc = _mm256_loadu_pd(cp.add(i - 1));
+
+            let hl = _mm256_sub_pd(ch, cl);
+            let hpc = _mm256_andnot_pd(sign_mask, _mm256_sub_pd(ch, pcc));
+            let lpc = _mm256_andnot_pd(sign_mask, _mm256_sub_pd(cl, pcc));
+            let t0 = _mm256_max_pd(hl, hpc);
+            let trv = _mm256_max_pd(t0, lpc);
+
+            let up = _mm256_sub_pd(ch, pch);
+            let down = _mm256_sub_pd(pcl, cl);
+            let m_up_gt_down = _mm256_cmp_pd(up, down, _CMP_GT_OQ);
+            let m_up_gt_zero = _mm256_cmp_pd(up, zero, _CMP_GT_OQ);
+            let m_dn_gt_up = _mm256_cmp_pd(down, up, _CMP_GT_OQ);
+            let m_dn_gt_zero = _mm256_cmp_pd(down, zero, _CMP_GT_OQ);
+            let plus_mask = _mm256_and_pd(m_up_gt_down, m_up_gt_zero);
+            let minus_mask = _mm256_and_pd(m_dn_gt_up, m_dn_gt_zero);
+            let plus_v = _mm256_and_pd(plus_mask, up);
+            let minus_v = _mm256_and_pd(minus_mask, down);
+
+            let mut buf_tr = [0.0f64; 4];
+            let mut buf_p = [0.0f64; 4];
+            let mut buf_m = [0.0f64; 4];
+            _mm256_storeu_pd(buf_tr.as_mut_ptr(), trv);
+            _mm256_storeu_pd(buf_p.as_mut_ptr(), plus_v);
+            _mm256_storeu_pd(buf_m.as_mut_ptr(), minus_v);
+
+            tr_sum += buf_tr[0];
+            plus_dm_sum += buf_p[0];
+            minus_dm_sum += buf_m[0];
+            tr_sum += buf_tr[1];
+            plus_dm_sum += buf_p[1];
+            minus_dm_sum += buf_m[1];
+            tr_sum += buf_tr[2];
+            plus_dm_sum += buf_p[2];
+            minus_dm_sum += buf_m[2];
+            tr_sum += buf_tr[3];
+            plus_dm_sum += buf_p[3];
+            minus_dm_sum += buf_m[3];
+
+            // advance prev scalars to last processed lane (i+3)
+            prev_h_scalar = *hp.add(i + 3);
+            prev_l_scalar = *lp.add(i + 3);
+            prev_c_scalar = *cp.add(i + 3);
+
+            i += 4;
+        }
+        while i <= period {
+            let ch = *hp.add(i);
+            let cl = *lp.add(i);
+            let hl = ch - cl;
+            let hpc = (ch - prev_c_scalar).abs();
+            let lpc = (cl - prev_c_scalar).abs();
+            let t0 = if hl > hpc { hl } else { hpc };
+            let tr = if t0 > lpc { t0 } else { lpc };
+            let up = ch - prev_h_scalar;
+            let down = prev_l_scalar - cl;
+            if up > down && up > 0.0 {
+                plus_dm_sum += up;
+            }
+            if down > up && down > 0.0 {
+                minus_dm_sum += down;
+            }
+            tr_sum += tr;
+            prev_h_scalar = ch;
+            prev_l_scalar = cl;
+            prev_c_scalar = *cp.add(i);
+            i += 1;
+        }
+
+        let mut atr = tr_sum;
+        let mut plus_dm_smooth = plus_dm_sum;
+        let mut minus_dm_smooth = minus_dm_sum;
+
+        let (plus_di_prev, minus_di_prev) = if atr != 0.0 {
+            (
+                (plus_dm_smooth / atr) * 100.0,
+                (minus_dm_smooth / atr) * 100.0,
+            )
+        } else {
+            (0.0, 0.0)
+        };
+        let sum_di_prev = plus_di_prev + minus_di_prev;
+        let mut dx_sum = if sum_di_prev != 0.0 {
+            ((plus_di_prev - minus_di_prev).abs() / sum_di_prev) * 100.0
+        } else {
+            0.0
+        };
+        let mut dx_count = 1usize;
+        let mut last_adx = 0.0f64;
+
+        let mut prev_h = *hp.add(period);
+        let mut prev_l = *lp.add(period);
+        let mut prev_c = *cp.add(period);
+
+        let mut i = period + 1;
+        while i < len {
+            let ch = *hp.add(i);
+            let cl = *lp.add(i);
+
+            let hl = ch - cl;
+            let hpc = (ch - prev_c).abs();
+            let lpc = (cl - prev_c).abs();
+            let t0 = if hl > hpc { hl } else { hpc };
+            let tr = if t0 > lpc { t0 } else { lpc };
+
+            let up = ch - prev_h;
+            let down = prev_l - cl;
+            let plus_dm = if up > down && up > 0.0 { up } else { 0.0 };
+            let minus_dm = if down > up && down > 0.0 { down } else { 0.0 };
+
+            atr = atr * one_minus_rp + tr;
+            plus_dm_smooth = plus_dm_smooth * one_minus_rp + plus_dm;
+            minus_dm_smooth = minus_dm_smooth * one_minus_rp + minus_dm;
+
+            let (plus_di, minus_di) = if atr != 0.0 {
+                (
+                    (plus_dm_smooth / atr) * 100.0,
+                    (minus_dm_smooth / atr) * 100.0,
+                )
+            } else {
+                (0.0, 0.0)
+            };
+            let sum_di = plus_di + minus_di;
+            let dx = if sum_di != 0.0 {
+                ((plus_di - minus_di).abs() / sum_di) * 100.0
+            } else {
+                0.0
+            };
+
+            if dx_count < period {
+                dx_sum += dx;
+                dx_count += 1;
+                if dx_count == period {
+                    last_adx = dx_sum * reciprocal_period;
+                    *out.get_unchecked_mut(i) = last_adx;
+                }
+            } else {
+                last_adx = (last_adx * period_minus_one + dx) * reciprocal_period;
+                *out.get_unchecked_mut(i) = last_adx;
+            }
+
+            prev_h = ch;
+            prev_l = cl;
+            prev_c = *cp.add(i);
+            i += 1;
+        }
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn adx_avx512(high: &[f64], low: &[f64], close: &[f64], period: usize, out: &mut [f64]) {
-    adx_scalar(high, low, close, period, out)
+    use core::arch::x86_64::*;
+    let len = close.len();
+    if len <= period {
+        return;
+    }
+
+    let period_f64 = period as f64;
+    let reciprocal_period = 1.0 / period_f64;
+    let one_minus_rp = 1.0 - reciprocal_period;
+    let period_minus_one = period_f64 - 1.0;
+
+    unsafe {
+        let hp = high.as_ptr();
+        let lp = low.as_ptr();
+        let cp = close.as_ptr();
+
+        let mut tr_sum = 0.0f64;
+        let mut plus_dm_sum = 0.0f64;
+        let mut minus_dm_sum = 0.0f64;
+
+        let mut prev_h_scalar = *hp.add(0);
+        let mut prev_l_scalar = *lp.add(0);
+        let mut prev_c_scalar = *cp.add(0);
+
+        let zero = _mm512_setzero_pd();
+        let sign_mask = _mm512_set1_pd(-0.0f64);
+
+        let mut i = 1usize;
+        while i + 7 <= period {
+            let ch = _mm512_loadu_pd(hp.add(i));
+            let cl = _mm512_loadu_pd(lp.add(i));
+            let pch = _mm512_loadu_pd(hp.add(i - 1));
+            let pcl = _mm512_loadu_pd(lp.add(i - 1));
+            let pcc = _mm512_loadu_pd(cp.add(i - 1));
+
+            let hl = _mm512_sub_pd(ch, cl);
+            let hpc = _mm512_andnot_pd(sign_mask, _mm512_sub_pd(ch, pcc));
+            let lpc = _mm512_andnot_pd(sign_mask, _mm512_sub_pd(cl, pcc));
+            let t0 = _mm512_max_pd(hl, hpc);
+            let trv = _mm512_max_pd(t0, lpc);
+
+            let up = _mm512_sub_pd(ch, pch);
+            let down = _mm512_sub_pd(pcl, cl);
+            let m_up_gt_down = _mm512_cmp_pd_mask(up, down, _CMP_GT_OQ);
+            let m_up_gt_zero = _mm512_cmp_pd_mask(up, zero, _CMP_GT_OQ);
+            let m_dn_gt_up = _mm512_cmp_pd_mask(down, up, _CMP_GT_OQ);
+            let m_dn_gt_zero = _mm512_cmp_pd_mask(down, zero, _CMP_GT_OQ);
+            let m_plus = m_up_gt_down & m_up_gt_zero;
+            let m_minus = m_dn_gt_up & m_dn_gt_zero;
+            let plus_v = _mm512_maskz_mov_pd(m_plus, up);
+            let minus_v = _mm512_maskz_mov_pd(m_minus, down);
+
+            let mut buf_tr = [0.0f64; 8];
+            let mut buf_p = [0.0f64; 8];
+            let mut buf_m = [0.0f64; 8];
+            _mm512_storeu_pd(buf_tr.as_mut_ptr(), trv);
+            _mm512_storeu_pd(buf_p.as_mut_ptr(), plus_v);
+            _mm512_storeu_pd(buf_m.as_mut_ptr(), minus_v);
+
+            tr_sum += buf_tr[0];
+            plus_dm_sum += buf_p[0];
+            minus_dm_sum += buf_m[0];
+            tr_sum += buf_tr[1];
+            plus_dm_sum += buf_p[1];
+            minus_dm_sum += buf_m[1];
+            tr_sum += buf_tr[2];
+            plus_dm_sum += buf_p[2];
+            minus_dm_sum += buf_m[2];
+            tr_sum += buf_tr[3];
+            plus_dm_sum += buf_p[3];
+            minus_dm_sum += buf_m[3];
+            tr_sum += buf_tr[4];
+            plus_dm_sum += buf_p[4];
+            minus_dm_sum += buf_m[4];
+            tr_sum += buf_tr[5];
+            plus_dm_sum += buf_p[5];
+            minus_dm_sum += buf_m[5];
+            tr_sum += buf_tr[6];
+            plus_dm_sum += buf_p[6];
+            minus_dm_sum += buf_m[6];
+            tr_sum += buf_tr[7];
+            plus_dm_sum += buf_p[7];
+            minus_dm_sum += buf_m[7];
+
+            // advance prev scalars to last processed lane (i+7)
+            prev_h_scalar = *hp.add(i + 7);
+            prev_l_scalar = *lp.add(i + 7);
+            prev_c_scalar = *cp.add(i + 7);
+
+            i += 8;
+        }
+        while i <= period {
+            let ch = *hp.add(i);
+            let cl = *lp.add(i);
+            let hl = ch - cl;
+            let hpc = (ch - prev_c_scalar).abs();
+            let lpc = (cl - prev_c_scalar).abs();
+            let t0 = if hl > hpc { hl } else { hpc };
+            let tr = if t0 > lpc { t0 } else { lpc };
+            let up = ch - prev_h_scalar;
+            let down = prev_l_scalar - cl;
+            if up > down && up > 0.0 {
+                plus_dm_sum += up;
+            }
+            if down > up && down > 0.0 {
+                minus_dm_sum += down;
+            }
+            tr_sum += tr;
+            prev_h_scalar = ch;
+            prev_l_scalar = cl;
+            prev_c_scalar = *cp.add(i);
+            i += 1;
+        }
+
+        let mut atr = tr_sum;
+        let mut plus_dm_smooth = plus_dm_sum;
+        let mut minus_dm_smooth = minus_dm_sum;
+
+        let (plus_di_prev, minus_di_prev) = if atr != 0.0 {
+            (
+                (plus_dm_smooth / atr) * 100.0,
+                (minus_dm_smooth / atr) * 100.0,
+            )
+        } else {
+            (0.0, 0.0)
+        };
+        let sum_di_prev = plus_di_prev + minus_di_prev;
+        let mut dx_sum = if sum_di_prev != 0.0 {
+            ((plus_di_prev - minus_di_prev).abs() / sum_di_prev) * 100.0
+        } else {
+            0.0
+        };
+        let mut dx_count = 1usize;
+        let mut last_adx = 0.0f64;
+
+        let mut prev_h = *hp.add(period);
+        let mut prev_l = *lp.add(period);
+        let mut prev_c = *cp.add(period);
+
+        let mut i = period + 1;
+        while i < len {
+            let ch = *hp.add(i);
+            let cl = *lp.add(i);
+
+            let hl = ch - cl;
+            let hpc = (ch - prev_c).abs();
+            let lpc = (cl - prev_c).abs();
+            let t0 = if hl > hpc { hl } else { hpc };
+            let tr = if t0 > lpc { t0 } else { lpc };
+
+            let up = ch - prev_h;
+            let down = prev_l - cl;
+            let plus_dm = if up > down && up > 0.0 { up } else { 0.0 };
+            let minus_dm = if down > up && down > 0.0 { down } else { 0.0 };
+
+            atr = atr * one_minus_rp + tr;
+            plus_dm_smooth = plus_dm_smooth * one_minus_rp + plus_dm;
+            minus_dm_smooth = minus_dm_smooth * one_minus_rp + minus_dm;
+
+            let (plus_di, minus_di) = if atr != 0.0 {
+                (
+                    (plus_dm_smooth / atr) * 100.0,
+                    (minus_dm_smooth / atr) * 100.0,
+                )
+            } else {
+                (0.0, 0.0)
+            };
+            let sum_di = plus_di + minus_di;
+            let dx = if sum_di != 0.0 {
+                ((plus_di - minus_di).abs() / sum_di) * 100.0
+            } else {
+                0.0
+            };
+
+            if dx_count < period {
+                dx_sum += dx;
+                dx_count += 1;
+                if dx_count == period {
+                    last_adx = dx_sum * reciprocal_period;
+                    *out.get_unchecked_mut(i) = last_adx;
+                }
+            } else {
+                last_adx = (last_adx * period_minus_one + dx) * reciprocal_period;
+                *out.get_unchecked_mut(i) = last_adx;
+            }
+
+            prev_h = ch;
+            prev_l = cl;
+            prev_c = *cp.add(i);
+            i += 1;
+        }
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn adx_avx512_short(high: &[f64], low: &[f64], close: &[f64], period: usize, out: &mut [f64]) {
-    adx_scalar(high, low, close, period, out)
+    adx_avx512(high, low, close, period, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn adx_avx512_long(high: &[f64], low: &[f64], close: &[f64], period: usize, out: &mut [f64]) {
-    adx_scalar(high, low, close, period, out)
+    adx_avx512(high, low, close, period, out)
 }
 
 #[inline]
@@ -483,6 +881,243 @@ impl Default for AdxBatchRange {
             period: (14, 50, 1),
         }
     }
+}
+
+const ADX_SHARED_PRECOMP_THRESHOLD: usize = 16;
+
+#[inline(always)]
+fn precompute_streams_scalar(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    first: usize,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    let tail_len = high.len() - first;
+    let mut tr = Vec::with_capacity(tail_len);
+    let mut pdm = Vec::with_capacity(tail_len);
+    let mut mdm = Vec::with_capacity(tail_len);
+    tr.push(0.0);
+    pdm.push(0.0);
+    mdm.push(0.0);
+    let mut prev_h = high[first];
+    let mut prev_l = low[first];
+    let mut prev_c = close[first];
+    let mut j = 1usize;
+    while first + j < high.len() {
+        let ch = high[first + j];
+        let cl = low[first + j];
+        let hl = ch - cl;
+        let hpc = (ch - prev_c).abs();
+        let lpc = (cl - prev_c).abs();
+        let trj = hl.max(hpc).max(lpc);
+        let up = ch - prev_h;
+        let down = prev_l - cl;
+        let plus = if up > down && up > 0.0 { up } else { 0.0 };
+        let minus = if down > up && down > 0.0 { down } else { 0.0 };
+        tr.push(trj);
+        pdm.push(plus);
+        mdm.push(minus);
+        prev_h = ch;
+        prev_l = cl;
+        prev_c = close[first + j];
+        j += 1;
+    }
+    (tr, pdm, mdm)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
+unsafe fn precompute_streams_avx2(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    first: usize,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    use core::arch::x86_64::*;
+    let tail_len = high.len() - first;
+    let mut tr = Vec::with_capacity(tail_len);
+    let mut pdm = Vec::with_capacity(tail_len);
+    let mut mdm = Vec::with_capacity(tail_len);
+    tr.push(0.0);
+    pdm.push(0.0);
+    mdm.push(0.0);
+
+    let hp = high.as_ptr();
+    let lp = low.as_ptr();
+    let cp = close.as_ptr();
+
+    let sign_mask = _mm256_set1_pd(-0.0f64);
+    let zero = _mm256_setzero_pd();
+
+    let mut prev_h_scalar = *hp.add(first);
+    let mut prev_l_scalar = *lp.add(first);
+    let mut prev_c_scalar = *cp.add(first);
+
+    let mut j = 1usize;
+    while j + 3 < tail_len {
+        let base = first + j;
+        let ch = _mm256_loadu_pd(hp.add(base));
+        let cl = _mm256_loadu_pd(lp.add(base));
+        let pch = _mm256_loadu_pd(hp.add(base - 1));
+        let pcl = _mm256_loadu_pd(lp.add(base - 1));
+        let pcc = _mm256_loadu_pd(cp.add(base - 1));
+
+        let hl = _mm256_sub_pd(ch, cl);
+        let hpc = _mm256_andnot_pd(sign_mask, _mm256_sub_pd(ch, pcc));
+        let lpc = _mm256_andnot_pd(sign_mask, _mm256_sub_pd(cl, pcc));
+        let t0 = _mm256_max_pd(hl, hpc);
+        let trv = _mm256_max_pd(t0, lpc);
+
+        let up = _mm256_sub_pd(ch, pch);
+        let down = _mm256_sub_pd(pcl, cl);
+        let m_up_gt_down = _mm256_cmp_pd(up, down, _CMP_GT_OQ);
+        let m_up_gt_zero = _mm256_cmp_pd(up, zero, _CMP_GT_OQ);
+        let m_dn_gt_up = _mm256_cmp_pd(down, up, _CMP_GT_OQ);
+        let m_dn_gt_zero = _mm256_cmp_pd(down, zero, _CMP_GT_OQ);
+        let plus_mask = _mm256_and_pd(m_up_gt_down, m_up_gt_zero);
+        let minus_mask = _mm256_and_pd(m_dn_gt_up, m_dn_gt_zero);
+        let plus_v = _mm256_and_pd(plus_mask, up);
+        let minus_v = _mm256_and_pd(minus_mask, down);
+
+        let mut buf_tr = [0.0f64; 4];
+        let mut buf_p = [0.0f64; 4];
+        let mut buf_m = [0.0f64; 4];
+        _mm256_storeu_pd(buf_tr.as_mut_ptr(), trv);
+        _mm256_storeu_pd(buf_p.as_mut_ptr(), plus_v);
+        _mm256_storeu_pd(buf_m.as_mut_ptr(), minus_v);
+
+        tr.push(buf_tr[0]);
+        pdm.push(buf_p[0]);
+        mdm.push(buf_m[0]);
+        tr.push(buf_tr[1]);
+        pdm.push(buf_p[1]);
+        mdm.push(buf_m[1]);
+        tr.push(buf_tr[2]);
+        pdm.push(buf_p[2]);
+        mdm.push(buf_m[2]);
+        tr.push(buf_tr[3]);
+        pdm.push(buf_p[3]);
+        mdm.push(buf_m[3]);
+
+        prev_h_scalar = *hp.add(base + 3);
+        prev_l_scalar = *lp.add(base + 3);
+        prev_c_scalar = *cp.add(base + 3);
+        j += 4;
+    }
+    while j < tail_len {
+        let ch = *hp.add(first + j);
+        let cl = *lp.add(first + j);
+        let hl = ch - cl;
+        let hpc = (ch - prev_c_scalar).abs();
+        let lpc = (cl - prev_c_scalar).abs();
+        let trj = if hl > hpc { hl } else { hpc }.max(lpc);
+        let up = ch - prev_h_scalar;
+        let down = prev_l_scalar - cl;
+        let plus = if up > down && up > 0.0 { up } else { 0.0 };
+        let minus = if down > up && down > 0.0 { down } else { 0.0 };
+        tr.push(trj);
+        pdm.push(plus);
+        mdm.push(minus);
+        prev_h_scalar = ch;
+        prev_l_scalar = cl;
+        prev_c_scalar = *cp.add(first + j);
+        j += 1;
+    }
+    (tr, pdm, mdm)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
+unsafe fn precompute_streams_avx512(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    first: usize,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    use core::arch::x86_64::*;
+    let tail_len = high.len() - first;
+    let mut tr = Vec::with_capacity(tail_len);
+    let mut pdm = Vec::with_capacity(tail_len);
+    let mut mdm = Vec::with_capacity(tail_len);
+    tr.push(0.0);
+    pdm.push(0.0);
+    mdm.push(0.0);
+
+    let hp = high.as_ptr();
+    let lp = low.as_ptr();
+    let cp = close.as_ptr();
+
+    let sign_mask = _mm512_set1_pd(-0.0f64);
+    let zero = _mm512_setzero_pd();
+
+    let mut prev_h_scalar = *hp.add(first);
+    let mut prev_l_scalar = *lp.add(first);
+    let mut prev_c_scalar = *cp.add(first);
+
+    let mut j = 1usize;
+    while j + 7 < tail_len {
+        let base = first + j;
+        let ch = _mm512_loadu_pd(hp.add(base));
+        let cl = _mm512_loadu_pd(lp.add(base));
+        let pch = _mm512_loadu_pd(hp.add(base - 1));
+        let pcl = _mm512_loadu_pd(lp.add(base - 1));
+        let pcc = _mm512_loadu_pd(cp.add(base - 1));
+
+        let hl = _mm512_sub_pd(ch, cl);
+        let hpc = _mm512_andnot_pd(sign_mask, _mm512_sub_pd(ch, pcc));
+        let lpc = _mm512_andnot_pd(sign_mask, _mm512_sub_pd(cl, pcc));
+        let t0 = _mm512_max_pd(hl, hpc);
+        let trv = _mm512_max_pd(t0, lpc);
+
+        let up = _mm512_sub_pd(ch, pch);
+        let down = _mm512_sub_pd(pcl, cl);
+        let m_up_gt_down = _mm512_cmp_pd_mask(up, down, _CMP_GT_OQ);
+        let m_up_gt_zero = _mm512_cmp_pd_mask(up, zero, _CMP_GT_OQ);
+        let m_dn_gt_up = _mm512_cmp_pd_mask(down, up, _CMP_GT_OQ);
+        let m_dn_gt_zero = _mm512_cmp_pd_mask(down, zero, _CMP_GT_OQ);
+        let m_plus = m_up_gt_down & m_up_gt_zero;
+        let m_minus = m_dn_gt_up & m_dn_gt_zero;
+        let plus_v = _mm512_maskz_mov_pd(m_plus, up);
+        let minus_v = _mm512_maskz_mov_pd(m_minus, down);
+
+        let mut buf_tr = [0.0f64; 8];
+        let mut buf_p = [0.0f64; 8];
+        let mut buf_m = [0.0f64; 8];
+        _mm512_storeu_pd(buf_tr.as_mut_ptr(), trv);
+        _mm512_storeu_pd(buf_p.as_mut_ptr(), plus_v);
+        _mm512_storeu_pd(buf_m.as_mut_ptr(), minus_v);
+
+        // push in lane order
+        for k in 0..8 {
+            tr.push(buf_tr[k]);
+            pdm.push(buf_p[k]);
+            mdm.push(buf_m[k]);
+        }
+        prev_h_scalar = *hp.add(base + 7);
+        prev_l_scalar = *lp.add(base + 7);
+        prev_c_scalar = *cp.add(base + 7);
+        j += 8;
+    }
+    while j < tail_len {
+        let ch = *hp.add(first + j);
+        let cl = *lp.add(first + j);
+        let hl = ch - cl;
+        let hpc = (ch - prev_c_scalar).abs();
+        let lpc = (cl - prev_c_scalar).abs();
+        let trj = if hl > hpc { hl } else { hpc }.max(lpc);
+        let up = ch - prev_h_scalar;
+        let down = prev_l_scalar - cl;
+        let plus = if up > down && up > 0.0 { up } else { 0.0 };
+        let minus = if down > up && down > 0.0 { down } else { 0.0 };
+        tr.push(trj);
+        pdm.push(plus);
+        mdm.push(minus);
+        prev_h_scalar = ch;
+        prev_l_scalar = cl;
+        prev_c_scalar = *cp.add(first + j);
+        j += 1;
+    }
+    (tr, pdm, mdm)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -625,6 +1260,113 @@ fn adx_batch_inner_into(
     };
     init_matrix_prefixes(&mut { out_mu }, cols, &warms);
 
+    let use_shared = combos.len() >= ADX_SHARED_PRECOMP_THRESHOLD;
+
+    if use_shared {
+        let (tr_stream, plus_stream, minus_stream) = {
+            match kern {
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 => unsafe { precompute_streams_avx512(high, low, close, first) },
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 => unsafe { precompute_streams_avx2(high, low, close, first) },
+                _ => precompute_streams_scalar(high, low, close, first),
+            }
+        };
+
+        // Per-row smoother over shared streams (enabled for large row sweeps)
+        let do_row_shared = |row: usize, row_mu: &mut [std::mem::MaybeUninit<f64>]| unsafe {
+            let p = combos[row].period.unwrap();
+            let row_f64 = core::slice::from_raw_parts_mut(row_mu.as_mut_ptr() as *mut f64, row_mu.len());
+            let dst_tail = &mut row_f64[first..];
+
+            let pf = p as f64;
+            let rp = 1.0 / pf;
+            let one_minus_rp = 1.0 - rp;
+            let pm1 = pf - 1.0;
+
+            // Warmup sums over j = 1..=p using precomputed streams
+            let mut atr = 0.0f64;
+            let mut plus_s = 0.0f64;
+            let mut minus_s = 0.0f64;
+            let mut j = 1usize;
+            while j <= p {
+                atr += tr_stream[j];
+                plus_s += plus_stream[j];
+                minus_s += minus_stream[j];
+                j += 1;
+            }
+            let (plus_di_prev, minus_di_prev) = if atr != 0.0 {
+                ((plus_s / atr) * 100.0, (minus_s / atr) * 100.0)
+            } else {
+                (0.0, 0.0)
+            };
+            let sum_di_prev = plus_di_prev + minus_di_prev;
+            let mut dx_sum = if sum_di_prev != 0.0 {
+                ((plus_di_prev - minus_di_prev).abs() / sum_di_prev) * 100.0
+            } else {
+                0.0
+            };
+            let mut dx_count = 1usize;
+            let mut last_adx = 0.0f64;
+
+            // Sequential smoothing over j = p+1..tail_len-1
+            let tail_len = tr_stream.len();
+            let mut j = p + 1;
+            while j < tail_len {
+                atr = atr * one_minus_rp + tr_stream[j];
+                plus_s = plus_s * one_minus_rp + plus_stream[j];
+                minus_s = minus_s * one_minus_rp + minus_stream[j];
+
+                let (plus_di, minus_di) = if atr != 0.0 {
+                    ((plus_s / atr) * 100.0, (minus_s / atr) * 100.0)
+                } else {
+                    (0.0, 0.0)
+                };
+                let sum_di = plus_di + minus_di;
+                let dx = if sum_di != 0.0 {
+                    ((plus_di - minus_di).abs() / sum_di) * 100.0
+                } else {
+                    0.0
+                };
+
+                if dx_count < p {
+                    dx_sum += dx;
+                    dx_count += 1;
+                    if dx_count == p {
+                        last_adx = dx_sum * rp;
+                        dst_tail[j] = last_adx;
+                    }
+                } else {
+                    last_adx = (last_adx * pm1 + dx) * rp;
+                    dst_tail[j] = last_adx;
+                }
+                j += 1;
+            }
+        };
+
+        let out_mu2 = unsafe {
+            std::slice::from_raw_parts_mut(
+                out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>,
+                out.len(),
+            )
+        };
+        let rows_iter = (0..rows).zip(out_mu2.chunks_mut(cols));
+        if parallel {
+            #[cfg(not(target_arch = "wasm32"))]
+            rows_iter.par_bridge().for_each(|(r, s)| do_row_shared(r, s));
+            #[cfg(target_arch = "wasm32")]
+            for (r, s) in rows_iter {
+                do_row_shared(r, s);
+            }
+        } else {
+            for (r, s) in rows_iter {
+                do_row_shared(r, s);
+            }
+        }
+        return Ok(combos);
+    }
+
+    // Fallback: original per-row computation (good for few rows)
     let do_row = |row: usize, row_mu: &mut [std::mem::MaybeUninit<f64>]| unsafe {
         let p = combos[row].period.unwrap();
         let row_f64 =
@@ -746,36 +1488,145 @@ fn adx_batch_inner(
         .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    // 3) compute into the matrix in place
+    // 3) compute into the matrix in place using shared TR/+DM/−DM streams (for many rows)
     let mut guard = ManuallyDrop::new(buf_mu);
     let values: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
+    let use_shared = combos.len() >= ADX_SHARED_PRECOMP_THRESHOLD;
+
+    if use_shared {
+        let (tr_stream, plus_stream, minus_stream) = {
+            match kern {
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 => unsafe { precompute_streams_avx512(high, low, close, first) },
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 => unsafe { precompute_streams_avx2(high, low, close, first) },
+                _ => precompute_streams_scalar(high, low, close, first),
+            }
+        };
+
+        let do_row = |row: usize, out_row: &mut [f64]| {
+            let p = combos[row].period.unwrap();
+            let pf = p as f64;
+            let rp = 1.0 / pf;
+            let one_minus_rp = 1.0 - rp;
+            let pm1 = pf - 1.0;
+            let dst_tail = &mut out_row[first..];
+
+            // warmup sums j=1..=p
+            let mut atr = 0.0f64;
+            let mut plus_s = 0.0f64;
+            let mut minus_s = 0.0f64;
+            let mut j = 1usize;
+            while j <= p {
+                atr += tr_stream[j];
+                plus_s += plus_stream[j];
+                minus_s += minus_stream[j];
+                j += 1;
+            }
+            let (plus_di_prev, minus_di_prev) = if atr != 0.0 {
+                ((plus_s / atr) * 100.0, (minus_s / atr) * 100.0)
+            } else {
+                (0.0, 0.0)
+            };
+            let sum_di_prev = plus_di_prev + minus_di_prev;
+            let mut dx_sum = if sum_di_prev != 0.0 {
+                ((plus_di_prev - minus_di_prev).abs() / sum_di_prev) * 100.0
+            } else {
+                0.0
+            };
+            let mut dx_count = 1usize;
+            let mut last_adx = 0.0f64;
+
+            // main pass j=p+1 .. tail_len-1
+            let tail_len = tr_stream.len();
+            let mut j = p + 1;
+            while j < tail_len {
+                atr = atr * one_minus_rp + tr_stream[j];
+                plus_s = plus_s * one_minus_rp + plus_stream[j];
+                minus_s = minus_s * one_minus_rp + minus_stream[j];
+
+                let (plus_di, minus_di) = if atr != 0.0 {
+                    ((plus_s / atr) * 100.0, (minus_s / atr) * 100.0)
+                } else {
+                    (0.0, 0.0)
+                };
+                let sum_di = plus_di + minus_di;
+                let dx = if sum_di != 0.0 {
+                    ((plus_di - minus_di).abs() / sum_di) * 100.0
+                } else {
+                    0.0
+                };
+
+                if dx_count < p {
+                    dx_sum += dx;
+                    dx_count += 1;
+                    if dx_count == p {
+                        last_adx = dx_sum * rp;
+                        dst_tail[j] = last_adx;
+                    }
+                } else {
+                    last_adx = (last_adx * pm1 + dx) * rp;
+                    dst_tail[j] = last_adx;
+                }
+                j += 1;
+            }
+        };
+
+        if parallel {
+            #[cfg(not(target_arch = "wasm32"))]
+            values
+                .par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(r, s)| do_row(r, s));
+            #[cfg(target_arch = "wasm32")]
+            for (r, s) in values.chunks_mut(cols).enumerate() {
+                do_row(r, s);
+            }
+        } else {
+            for (r, s) in values.chunks_mut(cols).enumerate() {
+                do_row(r, s);
+            }
+        }
+
+        let values = unsafe {
+            Vec::from_raw_parts(
+                guard.as_mut_ptr() as *mut f64,
+                guard.len(),
+                guard.capacity(),
+            )
+        };
+
+        return Ok(AdxBatchOutput {
+            values,
+            combos,
+            rows,
+            cols,
+        });
+    }
+
+    // Fallback: original per-row computation (good for few rows)
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let p = combos[row].period.unwrap();
+        let pf = p as f64;
+        let rp = 1.0 / pf;
+        let one_minus_rp = 1.0 - rp;
+        let pm1 = pf - 1.0;
         let dst_tail = &mut out_row[first..];
         match kern {
-            Kernel::Scalar => {
-                adx_row_scalar(&high[first..], &low[first..], &close[first..], p, dst_tail)
-            }
+            Kernel::Scalar => adx_row_scalar(&high[first..], &low[first..], &close[first..], p, dst_tail),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => {
-                adx_row_avx2(&high[first..], &low[first..], &close[first..], p, dst_tail)
-            }
+            Kernel::Avx2 => adx_row_avx2(&high[first..], &low[first..], &close[first..], p, dst_tail),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => {
-                adx_row_avx512(&high[first..], &low[first..], &close[first..], p, dst_tail)
-            }
+            Kernel::Avx512 => adx_row_avx512(&high[first..], &low[first..], &close[first..], p, dst_tail),
             _ => adx_row_scalar(&high[first..], &low[first..], &close[first..], p, dst_tail),
         }
     };
 
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
-        values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(r, s)| do_row(r, s));
+        values.par_chunks_mut(cols).enumerate().for_each(|(r, s)| do_row(r, s));
         #[cfg(target_arch = "wasm32")]
         for (r, s) in values.chunks_mut(cols).enumerate() {
             do_row(r, s);
@@ -816,7 +1667,7 @@ pub unsafe fn adx_row_avx2(
     period: usize,
     out: &mut [f64],
 ) {
-    adx_row_scalar(high, low, close, period, out)
+    adx_avx2(high, low, close, period, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -828,7 +1679,7 @@ pub unsafe fn adx_row_avx512(
     period: usize,
     out: &mut [f64],
 ) {
-    adx_row_scalar(high, low, close, period, out)
+    adx_avx512(high, low, close, period, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -840,7 +1691,7 @@ pub unsafe fn adx_row_avx512_short(
     period: usize,
     out: &mut [f64],
 ) {
-    adx_row_scalar(high, low, close, period, out)
+    adx_avx512(high, low, close, period, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -852,7 +1703,7 @@ pub unsafe fn adx_row_avx512_long(
     period: usize,
     out: &mut [f64],
 ) {
-    adx_row_scalar(high, low, close, period, out)
+    adx_avx512(high, low, close, period, out)
 }
 
 #[derive(Debug, Clone)]

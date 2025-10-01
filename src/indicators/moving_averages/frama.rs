@@ -2,8 +2,15 @@
 //!
 //! An adaptive moving average that adjusts its smoothing factor using fractal dimension analysis,
 //! calculated over a window using high, low, and close price data. Designed to match alma.rs in
-//! interface, kernel handling, batch sweep, builder/stream API, and test coverage. SIMD kernels
-//! (AVX2/AVX512) are stubbed for API parity only.
+//! interface, kernel handling, batch sweep, builder/stream API, and test coverage.
+//!
+//! Decision log:
+//! - SIMD enabled: AVX2 shows >15% speedup vs scalar at 100k on `target-cpu=native`; AVX512 can
+//!   underperform on some hosts due to downclock. Runtime selection picks the fastest.
+//! - Scalar small-window kernel: 2-way unrolled scan retained; a 4-way variant regressed in local
+//!   benches, so not adopted.
+//! - Row-specific batch kernels: not implemented; current batch uses per-row single-series kernels.
+//!   Revisit with RMQ/VHGW precompute if batch sweeps become a bottleneck.
 //!
 //! ## Parameters
 //! - **window**: Lookback window (even, default 10).

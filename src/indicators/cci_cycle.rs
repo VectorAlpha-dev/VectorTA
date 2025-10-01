@@ -12,9 +12,10 @@
 //! - **`Err(CciCycleError)`** on various error conditions.
 //!
 //! ## Developer Status
-//! - **SIMD Kernels**: AVX2 and AVX512 are STUBS - fall back to scalar implementation
+//! - **SIMD Kernels**: AVX2/AVX512 accelerate the double-EMA stage; stochastic passes remain scalar
 //! - **Streaming Performance**: O(n) - requires full recalculation due to dependencies on CCI, EMA, and SMMA calculations
 //! - **Memory Optimization**: GOOD - properly uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
+//! - Decision: Stochastic min/max now uses O(n) monotonic deques; SIMD not beneficial there due to data-dependent control flow.
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
@@ -61,6 +62,72 @@ use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
+
+// ==================== INTERNAL HELPERS (optimized) ====================
+#[inline(always)]
+fn fmadd(a: f64, b: f64, c: f64) -> f64 {
+    // a*b + c using fused multiply-add when available.
+    // Rust maps mul_add to a hardware FMA when supported.
+    a.mul_add(b, c)
+}
+
+// Monotonic index deque with power-of-two ring buffer for O(1) ops.
+#[derive(Clone)]
+struct MonoIdxDeque {
+    buf: Vec<usize>,
+    head: usize,
+    tail: usize,
+    mask: usize,
+}
+impl MonoIdxDeque {
+    #[inline(always)]
+    fn with_cap_pow2(cap_hint: usize) -> Self {
+        let cap = cap_hint.next_power_of_two().max(8);
+        Self {
+            buf: vec![0; cap],
+            head: 0,
+            tail: 0,
+            mask: cap - 1,
+        }
+    }
+    #[inline(always)]
+    fn is_empty(&self) -> bool {
+        self.head == self.tail
+    }
+    #[inline(always)]
+    fn front(&self) -> usize {
+        debug_assert!(!self.is_empty());
+        // safety: masked index in-bounds
+        unsafe { *self.buf.get_unchecked(self.head & self.mask) }
+    }
+    #[inline(always)]
+    fn back(&self) -> usize {
+        debug_assert!(!self.is_empty());
+        unsafe { *self.buf.get_unchecked((self.tail.wrapping_sub(1)) & self.mask) }
+    }
+    #[inline(always)]
+    fn push_back(&mut self, idx: usize) {
+        let pos = self.tail & self.mask;
+        unsafe { *self.buf.get_unchecked_mut(pos) = idx };
+        self.tail = self.tail.wrapping_add(1);
+    }
+    #[inline(always)]
+    fn pop_back(&mut self) {
+        debug_assert!(!self.is_empty());
+        self.tail = self.tail.wrapping_sub(1);
+    }
+    #[inline(always)]
+    fn pop_front(&mut self) {
+        debug_assert!(!self.is_empty());
+        self.head = self.head.wrapping_add(1);
+    }
+    #[inline(always)]
+    fn evict_older_than(&mut self, min_idx: usize) {
+        while !self.is_empty() && self.front() < min_idx {
+            self.pop_front();
+        }
+    }
+}
 
 // ==================== TRAIT IMPLEMENTATIONS ====================
 impl<'a> AsRef<[f64]> for CciCycleInput<'a> {
@@ -419,16 +486,22 @@ fn cci_cycle_compute_from_parts(
     let de_warm = first + length - 1;
 
     // A) double_ema into `work` (overwrite old CCI), NaN only up to warm
-    for i in 0..de_warm {
+    let warm_lim = de_warm.min(len);
+    for i in 0..warm_lim {
         work[i] = f64::NAN;
     }
-    for i in de_warm..len {
-        let s = ema_short[i];
-        let l = ema_long[i];
-        if !s.is_nan() && !l.is_nan() {
-            work[i] = 2.0 * s - l;
-        } else {
-            work[i] = f64::NAN;
+    if warm_lim < len {
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        unsafe {
+            match kernel {
+                Kernel::Avx512 => double_ema_avx512(work, ema_short, ema_long, warm_lim),
+                Kernel::Avx2 => double_ema_avx2(work, ema_short, ema_long, warm_lim),
+                _ => double_ema_scalar(work, ema_short, ema_long, warm_lim),
+            }
+        }
+        #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+        {
+            double_ema_scalar(work, ema_short, ema_long, warm_lim);
         }
     }
 
@@ -447,9 +520,258 @@ fn cci_cycle_compute_from_parts(
             .map_err(|e| CciCycleError::SmmaError(e.to_string()))?;
     }
 
-    // C) First pass: stochastic on `ccis`, EMA-like smoothing into `work` (pf)
+    // C + D) Choose best strategy: for small windows, naive scans are often faster;
+    // for moderate/large windows, O(n) deques win.
+    const SMALL_THRESH: usize = 16;
+    if length <= SMALL_THRESH {
+        naive_pf_and_normalize_scalar(&ccis, length, first, factor, work, out);
+    } else {
+        fused_pf_and_normalize_scalar(&ccis, length, first, factor, work, out);
+    }
+
+    Ok(())
+}
+
+// ---- Double-EMA implementations ----
+#[inline(always)]
+fn double_ema_scalar(work: &mut [f64], ema_short: &[f64], ema_long: &[f64], start: usize) {
+    let len = work.len();
+    let mut i = start;
+    while i < len {
+        let s = ema_short[i];
+        let l = ema_long[i];
+        work[i] = s + s - l; // NaNs propagate naturally
+        i += 1;
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn double_ema_avx2(
+    work: &mut [f64],
+    ema_short: &[f64],
+    ema_long: &[f64],
+    start: usize,
+) {
+    let len = work.len();
+    let mut i = start;
+    while i + 4 <= len {
+        let s = _mm256_loadu_pd(ema_short.as_ptr().add(i));
+        let l = _mm256_loadu_pd(ema_long.as_ptr().add(i));
+        let two_s = _mm256_add_pd(s, s);
+        let res = _mm256_sub_pd(two_s, l);
+        _mm256_storeu_pd(work.as_mut_ptr().add(i), res);
+        i += 4;
+    }
+    while i < len {
+        let s = *ema_short.get_unchecked(i);
+        let l = *ema_long.get_unchecked(i);
+        *work.get_unchecked_mut(i) = s + s - l;
+        i += 1;
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn double_ema_avx512(
+    work: &mut [f64],
+    ema_short: &[f64],
+    ema_long: &[f64],
+    start: usize,
+) {
+    let len = work.len();
+    let mut i = start;
+    while i + 8 <= len {
+        let s = _mm512_loadu_pd(ema_short.as_ptr().add(i));
+        let l = _mm512_loadu_pd(ema_long.as_ptr().add(i));
+        let two_s = _mm512_add_pd(s, s);
+        let res = _mm512_sub_pd(two_s, l);
+        _mm512_storeu_pd(work.as_mut_ptr().add(i), res);
+        i += 8;
+    }
+    while i < len {
+        let s = *ema_short.get_unchecked(i);
+        let l = *ema_long.get_unchecked(i);
+        *work.get_unchecked_mut(i) = s + s - l;
+        i += 1;
+    }
+}
+
+// ---- Fused O(n) stochastic passes using deques ----
+#[inline(always)]
+fn fused_pf_and_normalize_scalar(
+    ccis: &[f64],
+    length: usize,
+    first: usize,
+    factor: f64,
+    work: &mut [f64], // pf destination
+    out: &mut [f64],
+) {
+    let len = ccis.len();
+    if len == 0 {
+        return;
+    }
+
     let stoch_warm = first + length - 1;
-    for i in 0..stoch_warm {
+    // Ensure prefix is NaN for pf (work)
+    for i in 0..stoch_warm.min(len) {
+        work[i] = f64::NAN;
+    }
+
+    let cap_hint = length * 2;
+    let mut q_min_cc = MonoIdxDeque::with_cap_pow2(cap_hint);
+    let mut q_max_cc = MonoIdxDeque::with_cap_pow2(cap_hint);
+    let mut q_min_pf = MonoIdxDeque::with_cap_pow2(cap_hint);
+    let mut q_max_pf = MonoIdxDeque::with_cap_pow2(cap_hint);
+
+    let zero_smooth = factor == 0.0;
+
+    let mut prev_f1 = f64::NAN;
+    let mut prev_pf = f64::NAN;
+    let mut prev_out = f64::NAN; // mirrors out[i-1] semantics exactly
+
+    for i in 0..len {
+        // Update CCIS window deques for [i-(length-1), i]
+        let start_cc = i.saturating_sub(length - 1);
+        q_min_cc.evict_older_than(start_cc);
+        q_max_cc.evict_older_than(start_cc);
+
+        // Push current ccis value if finite
+        let x = ccis[i];
+        if x.is_finite() {
+            while !q_min_cc.is_empty() {
+                let back = q_min_cc.back();
+                let bv = unsafe { *ccis.get_unchecked(back) };
+                if x <= bv {
+                    q_min_cc.pop_back();
+                } else {
+                    break;
+                }
+            }
+            q_min_cc.push_back(i);
+
+            while !q_max_cc.is_empty() {
+                let back = q_max_cc.back();
+                let bv = unsafe { *ccis.get_unchecked(back) };
+                if x >= bv {
+                    q_max_cc.pop_back();
+                } else {
+                    break;
+                }
+            }
+            q_max_cc.push_back(i);
+        }
+
+        // Compute pf (EMA-like of %K on ccis) only after warmup
+        let mut pf_i = f64::NAN;
+        if i >= stoch_warm {
+            if !x.is_nan() {
+                let mut cur_f1 = f64::NAN;
+                if !q_min_cc.is_empty() && !q_max_cc.is_empty() {
+                    let mn = unsafe { *ccis.get_unchecked(q_min_cc.front()) };
+                    let mx = unsafe { *ccis.get_unchecked(q_max_cc.front()) };
+                    if mn.is_finite() && mx.is_finite() {
+                        let range = mx - mn;
+                        if range > 0.0 {
+                            cur_f1 = ((x - mn) / range) * 100.0;
+                        } else {
+                            cur_f1 = if prev_f1.is_nan() { 50.0 } else { prev_f1 };
+                        }
+                    }
+                }
+                if !cur_f1.is_nan() {
+                    pf_i = if prev_pf.is_nan() || zero_smooth {
+                        cur_f1
+                    } else {
+                        fmadd(cur_f1 - prev_pf, factor, prev_pf)
+                    };
+                }
+                prev_f1 = cur_f1;
+                prev_pf = pf_i;
+            } else {
+                // x is NaN: reset %K state
+                prev_f1 = f64::NAN;
+                // keep prev_pf as-is to mirror original smoothing across NaN gaps in pf stage
+            }
+        }
+        work[i] = pf_i;
+
+        // Normalize pf into out
+        let p = pf_i;
+        if p.is_nan() {
+            out[i] = f64::NAN;
+            // Important: keep prev_out in sync with out[i-1] semantics
+            prev_out = out[i];
+            continue;
+        }
+
+        let start_pf = i.saturating_sub(length - 1);
+        q_min_pf.evict_older_than(start_pf);
+        q_max_pf.evict_older_than(start_pf);
+
+        while !q_min_pf.is_empty() {
+            let back = q_min_pf.back();
+            let bv = unsafe { *work.get_unchecked(back) };
+            if p <= bv {
+                q_min_pf.pop_back();
+            } else {
+                break;
+            }
+        }
+        q_min_pf.push_back(i);
+
+        while !q_max_pf.is_empty() {
+            let back = q_max_pf.back();
+            let bv = unsafe { *work.get_unchecked(back) };
+            if p >= bv {
+                q_max_pf.pop_back();
+            } else {
+                break;
+            }
+        }
+        q_max_pf.push_back(i);
+
+        let mn = unsafe { *work.get_unchecked(q_min_pf.front()) };
+        let mx = unsafe { *work.get_unchecked(q_max_pf.front()) };
+        let out_i = if mn.is_finite() && mx.is_finite() {
+            let range = mx - mn;
+            if range > 0.0 {
+                let f2 = ((p - mn) / range) * 100.0;
+                if prev_out.is_nan() || zero_smooth {
+                    f2
+                } else {
+                    fmadd(f2 - prev_out, factor, prev_out)
+                }
+            } else {
+                if i > 0 { prev_out } else { 50.0 }
+            }
+        } else {
+            f64::NAN
+        };
+        out[i] = out_i;
+        // Keep prev_out equal to out[i] (may be NaN), matching original semantics
+        prev_out = out_i;
+    }
+}
+
+// Naive O(n*length) variant matching original semantics; typically faster for small windows.
+#[inline(always)]
+fn naive_pf_and_normalize_scalar(
+    ccis: &[f64],
+    length: usize,
+    first: usize,
+    factor: f64,
+    work: &mut [f64], // pf destination
+    out: &mut [f64],
+) {
+    let len = ccis.len();
+    if len == 0 {
+        return;
+    }
+
+    // First pass: stochastic on `ccis`, EMA-like smoothing into `work` (pf)
+    let stoch_warm = first + length - 1;
+    for i in 0..stoch_warm.min(len) {
         work[i] = f64::NAN;
     }
 
@@ -493,10 +815,10 @@ fn cci_cycle_compute_from_parts(
 
         let pf_i = if cur_f1.is_nan() {
             f64::NAN
-        } else if prev_pf.is_nan() {
+        } else if prev_pf.is_nan() || factor == 0.0 {
             cur_f1
         } else {
-            prev_pf + factor * (cur_f1 - prev_pf)
+            fmadd(cur_f1 - prev_pf, factor, prev_pf)
         };
 
         work[i] = pf_i;
@@ -504,7 +826,7 @@ fn cci_cycle_compute_from_parts(
         prev_pf = pf_i;
     }
 
-    // D) Second pass: normalize `work` (pf) into `out`
+    // Second pass: normalize `work` (pf) into `out`
     for i in 0..len {
         let p = work[i];
         if p.is_nan() {
@@ -532,17 +854,15 @@ fn cci_cycle_compute_from_parts(
         if range > 0.0 {
             let f2 = ((p - mn) / range) * 100.0;
             let prev = if i > 0 { out[i - 1] } else { f64::NAN };
-            out[i] = if prev.is_nan() {
+            out[i] = if prev.is_nan() || factor == 0.0 {
                 f2
             } else {
-                prev + factor * (f2 - prev)
+                fmadd(f2 - prev, factor, prev)
             };
         } else {
             out[i] = if i > 0 { out[i - 1] } else { 50.0 };
         }
     }
-
-    Ok(())
 }
 
 // ==================== STREAMING SUPPORT ====================

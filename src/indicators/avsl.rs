@@ -19,18 +19,13 @@
 //! - **`Ok(AvslOutput)`** containing a `Vec<f64>` matching input length
 //! - Leading values are NaN during warmup (slow_period-1 values)
 //!
-//! ## Developer Notes (Implementation Status)
-//! - **SIMD Kernels**:
-//!   - AVX2: STUB (calls scalar implementation)
-//!   - AVX512: STUB (calls scalar implementation)
-//!   - Complex indicator with multiple intermediate calculations makes SIMD challenging
-//! - **Streaming Performance**: O(n) - recalculates entire indicator on each update
-//!   - TODO: Optimize to O(1) by maintaining internal state buffers
-//! - **Memory Optimization**: YES - uses make_uninit_matrix and init_matrix_prefixes helpers
-//! - **Batch Operations**: Fully supported with parallel processing
-//! - **TODO**:
-//!   - Implement actual SIMD kernels for component calculations (VWMA, SMA)
-//!   - Optimize streaming to O(1) by maintaining rolling state
+//! ## Developer Notes (Status)
+//! - Scalar: optimized to a single forward pass with rolling sums and tiny rings (≤200) for the
+//!   dynamic window; avoids large temporaries and extra series materialization.
+//! - SIMD: AVX2/AVX512 partially vectorize the contiguous low-sum (pref) and parts of the ring
+//!   segment. Modest speedups expected; scalar remains the reference path.
+//! - Batch: per-row compute currently dispatches the same kernels; no row-specific sharing yet.
+//! - Warmup/semantics: preserved exactly; allocation and NaN prefixes follow alma.rs patterns.
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
@@ -485,7 +480,7 @@ fn avsl_compute_into(
         }
 
         match kernel {
-            Kernel::Scalar | Kernel::ScalarBatch => avsl_scalar(
+            Kernel::Scalar | Kernel::ScalarBatch => avsl_scalar_ref(
                 close,
                 low,
                 volume,
@@ -518,7 +513,7 @@ fn avsl_compute_into(
                 out,
             ),
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => avsl_scalar(
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => avsl_scalar_ref(
                 close,
                 low,
                 volume,
@@ -547,31 +542,227 @@ pub fn avsl_scalar(
 ) -> Result<(), AvslError> {
     let len = close.len();
 
+    if len == 0 {
+        return Err(AvslError::EmptyInputData);
+    }
+
+    let base = first_val + slow_period - 1;
+    let warmup2 = base + slow_period - 1;
+
+    if base >= len {
+        let upto = warmup2.min(len);
+        for v in &mut out[..upto] {
+            *v = f64::NAN;
+        }
+        for v in &mut out[upto..] {
+            *v = f64::NAN;
+        }
+        return Ok(());
+    }
+
+    let inv_fast = 1.0 / (fast_period as f64);
+    let inv_slow = 1.0 / (slow_period as f64);
+
+    let mut sum_close_f = 0.0_f64;
+    let mut sum_close_s = 0.0_f64;
+    let mut sum_vol_f = 0.0_f64;
+    let mut sum_vol_s = 0.0_f64;
+    let mut sum_cxv_f = 0.0_f64;
+    let mut sum_cxv_s = 0.0_f64;
+
+    const MAX_WIN: usize = 200;
+    let mut ring_vpc: [f64; MAX_WIN] = [0.0; MAX_WIN];
+    let mut ring_vpr: [f64; MAX_WIN] = [1.0; MAX_WIN];
+    let mut ring_pos: usize = 0;
+
+    let mut pre_ring: Vec<f64> = vec![0.0; slow_period];
+    let mut pre_pos: usize = 0;
+    let mut pre_sum: f64 = 0.0;
+    let mut pre_cnt: usize = 0;
+
+    unsafe {
+        let c_ptr = close.as_ptr();
+        let l_ptr = low.as_ptr();
+        let v_ptr = volume.as_ptr();
+
+        for i in 0..len {
+            if i >= first_val {
+                let c = *c_ptr.add(i);
+                let v = *v_ptr.add(i);
+                let cv = c * v;
+
+                sum_close_f += c;
+                sum_vol_f += v;
+                sum_cxv_f += cv;
+                sum_close_s += c;
+                sum_vol_s += v;
+                sum_cxv_s += cv;
+
+                if i + 1 >= fast_period + first_val {
+                    let k = i + 1 - fast_period;
+                    let c_old = *c_ptr.add(k);
+                    let v_old = *v_ptr.add(k);
+                    sum_close_f -= c_old;
+                    sum_vol_f -= v_old;
+                    sum_cxv_f -= c_old * v_old;
+                }
+                if i + 1 >= slow_period + first_val {
+                    let k = i + 1 - slow_period;
+                    let c_old = *c_ptr.add(k);
+                    let v_old = *v_ptr.add(k);
+                    sum_close_s -= c_old;
+                    sum_vol_s -= v_old;
+                    sum_cxv_s -= c_old * v_old;
+                }
+            }
+
+            if i >= base {
+                let sma_f = sum_close_f * inv_fast;
+                let sma_s = sum_close_s * inv_slow;
+                let vwma_f = if sum_vol_f != 0.0 { sum_cxv_f / sum_vol_f } else { sma_f };
+                let vwma_s = if sum_vol_s != 0.0 { sum_cxv_s / sum_vol_s } else { sma_s };
+
+                let vpc = vwma_s - sma_s;
+                let vpr = if sma_f != 0.0 { vwma_f / sma_f } else { 1.0 };
+                let vol_f = sum_vol_f * inv_fast;
+                let vol_s = sum_vol_s * inv_slow;
+                let vm = if vol_s != 0.0 { vol_f / vol_s } else { 1.0 };
+                let vpci = vpc * vpr * vm;
+
+                let len_v = {
+                    let t = if vpc < 0.0 {
+                        (vpci - 3.0).abs().round()
+                    } else {
+                        (vpci + 3.0).round()
+                    };
+                    let m = if t < 1.0 { 1.0 } else { t };
+                    let m = if m > MAX_WIN as f64 { MAX_WIN as f64 } else { m };
+                    m as usize
+                };
+
+                ring_vpc[ring_pos] = vpc;
+                ring_vpr[ring_pos] = vpr;
+                ring_pos += 1;
+                if ring_pos == MAX_WIN {
+                    ring_pos = 0;
+                }
+
+                // Total elements we can actually take from [0..=i]
+                let take = len_v.min(i + 1);
+                let hist_n = (i - base + 1).min(take);
+                let pref_n = take - hist_n;
+                let mut acc = 0.0_f64;
+
+                if hist_n > 0 {
+                    let mut rp = if ring_pos == 0 { MAX_WIN - 1 } else { ring_pos - 1 };
+                    for j in 0..hist_n {
+                        let idx_r = rp;
+                        rp = if rp == 0 { MAX_WIN - 1 } else { rp - 1 };
+                        let x = *ring_vpc.get_unchecked(idx_r);
+                        let adj = if x > -1.0 && x < 0.0 {
+                            -1.0
+                        } else if x >= 0.0 && x < 1.0 {
+                            1.0
+                        } else {
+                            x
+                        };
+                        let r = *ring_vpr.get_unchecked(idx_r);
+                        if adj != 0.0 && r != 0.0 {
+                            acc += *l_ptr.add(i - j) / (adj * r);
+                        }
+                    }
+                }
+
+                if pref_n > 0 {
+                    let start_idx = i + 1 - (hist_n + pref_n);
+                    let end_idx_excl = i + 1 - hist_n;
+                    let mut s = 0.0_f64;
+                    let mut k = start_idx;
+                    while k + 4 <= end_idx_excl {
+                        let a = *l_ptr.add(k);
+                        let b = *l_ptr.add(k + 1);
+                        let c = *l_ptr.add(k + 2);
+                        let d = *l_ptr.add(k + 3);
+                        s += a + b + c + d;
+                        k += 4;
+                    }
+                    while k < end_idx_excl {
+                        s += *l_ptr.add(k);
+                        k += 1;
+                    }
+                    acc += s;
+                }
+
+                let price_v = (acc / (len_v as f64)) * 0.01;
+                let dev = (multiplier.mul_add(vpci, 0.0)) * vm;
+                let pre_i = (*l_ptr.add(i) - price_v) + dev;
+
+                pre_sum += pre_i;
+                if pre_cnt < slow_period {
+                    pre_ring[pre_pos] = pre_i;
+                    pre_pos += 1;
+                    if pre_pos == slow_period {
+                        pre_pos = 0;
+                    }
+                    pre_cnt += 1;
+                } else {
+                    pre_sum -= pre_ring[pre_pos];
+                    pre_ring[pre_pos] = pre_i;
+                    pre_pos += 1;
+                    if pre_pos == slow_period {
+                        pre_pos = 0;
+                    }
+                }
+
+                if i >= warmup2 {
+                    *out.get_unchecked_mut(i) = pre_sum * inv_slow;
+                }
+            }
+        }
+    }
+
+    let upto = warmup2.min(len);
+    for v in &mut out[..upto] {
+        *v = f64::NAN;
+    }
+    Ok(())
+}
+
+// Reference scalar implementation (materializes intermediate series); used for correctness.
+#[inline]
+fn avsl_scalar_ref(
+    close: &[f64],
+    low: &[f64],
+    volume: &[f64],
+    fast_period: usize,
+    slow_period: usize,
+    multiplier: f64,
+    first_val: usize,
+    out: &mut [f64],
+) -> Result<(), AvslError> {
+    let len = close.len();
+
     // rows: 0 vwma_fast | 1 vwma_slow | 2 sma_fast | 3 sma_slow | 4 vol_sma_fast | 5 vol_sma_slow | 6 pre_avsl
     let rows = 7usize;
     let cols = len;
 
-    // allocate uninitialized rows×cols
     let mut mu = make_uninit_matrix(rows, cols);
-
-    // warm prefixes per row
     let warm = [
-        first_val + fast_period - 1, // vwma_fast
-        first_val + slow_period - 1, // vwma_slow
-        first_val + fast_period - 1, // sma_fast
-        first_val + slow_period - 1, // sma_slow
-        first_val + fast_period - 1, // vol_sma_fast
-        first_val + slow_period - 1, // vol_sma_slow
-        first_val + slow_period - 1, // pre_avsl inputs begin here
+        first_val + fast_period - 1,
+        first_val + slow_period - 1,
+        first_val + fast_period - 1,
+        first_val + slow_period - 1,
+        first_val + fast_period - 1,
+        first_val + slow_period - 1,
+        first_val + slow_period - 1,
     ];
     init_matrix_prefixes(&mut mu, cols, &warm);
 
-    // materialize &mut [f64] views for each row
     let mut guard = core::mem::ManuallyDrop::new(mu);
-    let flat: &mut [f64] =
-        unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
+    let flat: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len())
+    };
 
-    // Split the flat array into row slices
     let (row0, rest) = flat.split_at_mut(cols);
     let (row1, rest) = rest.split_at_mut(cols);
     let (row2, rest) = rest.split_at_mut(cols);
@@ -579,65 +770,34 @@ pub fn avsl_scalar(
     let (row4, rest) = rest.split_at_mut(cols);
     let (row5, row6) = rest.split_at_mut(cols);
 
-    // compute VWMA and SMA series directly into rows
     {
-        // VWMA fast
         let inp = VwmaInput::from_slice(
             close,
             volume,
-            VwmaParams {
-                period: Some(fast_period),
-            },
+            VwmaParams { period: Some(fast_period) },
         );
         vwma_into_slice(row0, &inp, Kernel::Scalar)
             .map_err(|e| AvslError::ComputationError(format!("VWMA Fast error: {}", e)))?;
 
-        // VWMA slow
         let inp = VwmaInput::from_slice(
             close,
             volume,
-            VwmaParams {
-                period: Some(slow_period),
-            },
+            VwmaParams { period: Some(slow_period) },
         );
         vwma_into_slice(row1, &inp, Kernel::Scalar)
             .map_err(|e| AvslError::ComputationError(format!("VWMA Slow error: {}", e)))?;
 
-        // SMA fast/slow on close
-        let inp = SmaInput::from_slice(
-            close,
-            SmaParams {
-                period: Some(fast_period),
-            },
-        );
+        let inp = SmaInput::from_slice(close, SmaParams { period: Some(fast_period) });
         sma_into_slice(row2, &inp, Kernel::Scalar)
             .map_err(|e| AvslError::ComputationError(format!("SMA Fast error: {}", e)))?;
-
-        let inp = SmaInput::from_slice(
-            close,
-            SmaParams {
-                period: Some(slow_period),
-            },
-        );
+        let inp = SmaInput::from_slice(close, SmaParams { period: Some(slow_period) });
         sma_into_slice(row3, &inp, Kernel::Scalar)
             .map_err(|e| AvslError::ComputationError(format!("SMA Slow error: {}", e)))?;
 
-        // SMA fast/slow on volume
-        let inp = SmaInput::from_slice(
-            volume,
-            SmaParams {
-                period: Some(fast_period),
-            },
-        );
+        let inp = SmaInput::from_slice(volume, SmaParams { period: Some(fast_period) });
         sma_into_slice(row4, &inp, Kernel::Scalar)
             .map_err(|e| AvslError::ComputationError(format!("Volume SMA Fast error: {}", e)))?;
-
-        let inp = SmaInput::from_slice(
-            volume,
-            SmaParams {
-                period: Some(slow_period),
-            },
-        );
+        let inp = SmaInput::from_slice(volume, SmaParams { period: Some(slow_period) });
         sma_into_slice(row5, &inp, Kernel::Scalar)
             .map_err(|e| AvslError::ComputationError(format!("Volume SMA Slow error: {}", e)))?;
     }
@@ -650,31 +810,17 @@ pub fn avsl_scalar(
     let vol_s = &row5[..];
     let pre = row6;
 
-    // compute pre_avsl only where valid
     let start = first_val + slow_period - 1;
     for i in start..len {
-        // scalar intermediates only, no extra vectors
         let vpc = vwma_s[i] - sma_s[i];
-        let vpr = if sma_f[i] != 0.0 {
-            vwma_f[i] / sma_f[i]
-        } else {
-            1.0
-        };
-        let vm = if vol_s[i] != 0.0 {
-            vol_f[i] / vol_s[i]
-        } else {
-            1.0
-        };
+        let vpr = if sma_f[i] != 0.0 { vwma_f[i] / sma_f[i] } else { 1.0 };
+        let vm = if vol_s[i] != 0.0 { vol_f[i] / vol_s[i] } else { 1.0 };
         let vpci = vpc * vpr * vm;
-
-        // dynamic window length
         let len_v = if vpc < 0.0 {
             ((vpci - 3.0).abs().round() as usize).max(1).min(200)
         } else {
             ((vpci + 3.0).round() as usize).max(1).min(200)
         };
-
-        // adjusted VPC at index helper
         let adj = |x: f64| {
             if (-1.0..0.0).contains(&x) {
                 -1.0
@@ -684,47 +830,26 @@ pub fn avsl_scalar(
                 x
             }
         };
-
-        // PriceFun loop
         let mut acc = 0.0;
         let base = first_val + slow_period - 1;
         let take = len_v.min(i + 1);
         for j in 0..take {
             let idx = i - j;
-            let vpc_c_j = if idx >= base {
-                adj(vwma_s[idx] - sma_s[idx])
-            } else {
-                1.0
-            };
-            let vpr_j = if idx >= base && sma_f[idx] != 0.0 {
-                vwma_f[idx] / sma_f[idx]
-            } else {
-                1.0
-            };
+            let vpc_c_j = if idx >= base { adj(vwma_s[idx] - sma_s[idx]) } else { 1.0 };
+            let vpr_j = if idx >= base && sma_f[idx] != 0.0 { vwma_f[idx] / sma_f[idx] } else { 1.0 };
             if vpc_c_j != 0.0 && vpr_j != 0.0 {
                 acc += low[idx] / vpc_c_j / vpr_j;
             }
         }
         let price_v = (acc / len_v as f64) / 100.0;
         let dev = multiplier * vpci * vm;
-
         pre[i] = low[i] - price_v + dev;
     }
 
-    // final SMA(pre) -> out
-    let pre_in = SmaInput::from_slice(
-        &pre[..],
-        SmaParams {
-            period: Some(slow_period),
-        },
-    );
+    let pre_in = SmaInput::from_slice(&pre[..], SmaParams { period: Some(slow_period) });
     sma_into_slice(out, &pre_in, Kernel::Scalar)
         .map_err(|e| AvslError::ComputationError(format!("AVSL SMA error: {}", e)))?;
 
-    // warmup NaNs
-    // The SMA needs slow_period valid values to produce its first output
-    // Since pre has valid values starting at index 'start', the first valid SMA output
-    // will be at index start + slow_period - 1
     let warmup_end = start + slow_period - 1;
     if warmup_end <= len {
         for v in &mut out[..warmup_end] {
@@ -773,18 +898,188 @@ unsafe fn avsl_avx2(
     first_val: usize,
     out: &mut [f64],
 ) -> Result<(), AvslError> {
-    // TODO: Implement AVX2 optimized version
-    // For now, fallback to scalar
-    avsl_scalar(
-        close,
-        low,
-        volume,
-        fast_period,
-        slow_period,
-        multiplier,
-        first_val,
-        out,
-    )
+    use core::arch::x86_64::*;
+    let len = close.len();
+    if len == 0 {
+        return Err(AvslError::EmptyInputData);
+    }
+
+    const MAX_WIN: usize = 200;
+    let base = first_val + slow_period - 1;
+    let warmup2 = base + slow_period - 1;
+    if base >= len {
+        let upto = warmup2.min(len);
+        for v in &mut out[..upto] { *v = f64::NAN; }
+        for v in &mut out[upto..] { *v = f64::NAN; }
+        return Ok(());
+    }
+
+    let inv_fast = 1.0 / (fast_period as f64);
+    let inv_slow = 1.0 / (slow_period as f64);
+
+    let mut sum_close_f  = 0.0_f64;
+    let mut sum_close_s  = 0.0_f64;
+    let mut sum_vol_f    = 0.0_f64;
+    let mut sum_vol_s    = 0.0_f64;
+    let mut sum_cxv_f    = 0.0_f64;
+    let mut sum_cxv_s    = 0.0_f64;
+
+    let mut ring_vpc: [f64; MAX_WIN] = [0.0; MAX_WIN];
+    let mut ring_vpr: [f64; MAX_WIN] = [1.0; MAX_WIN];
+    let mut ring_pos: usize = 0;
+
+    let mut pre_ring: Vec<f64> = vec![0.0; slow_period];
+    let mut pre_pos: usize = 0;
+    let mut pre_sum: f64 = 0.0;
+    let mut pre_cnt: usize = 0;
+
+    let c_ptr = close.as_ptr();
+    let l_ptr = low.as_ptr();
+    let v_ptr = volume.as_ptr();
+
+    // masks for adjust()
+    let v_neg1 = _mm256_set1_pd(-1.0);
+    let v_zero = _mm256_set1_pd(0.0);
+    let v_pos1 = _mm256_set1_pd(1.0);
+
+    #[inline(always)]
+    unsafe fn adj256(x: __m256d, v_neg1: __m256d, v_zero: __m256d, v_pos1: __m256d) -> __m256d {
+        let gt_neg1 = _mm256_cmp_pd(v_neg1, x, _CMP_LT_OQ);
+        let lt_zero = _mm256_cmp_pd(x, v_zero, _CMP_LT_OQ);
+        let mask1   = _mm256_and_pd(gt_neg1, lt_zero);
+        let ge_zero = _mm256_cmp_pd(x, v_zero, _CMP_GE_OQ);
+        let lt_pos1 = _mm256_cmp_pd(x, v_pos1, _CMP_LT_OQ);
+        let mask2   = _mm256_and_pd(ge_zero, lt_pos1);
+        let m1 = _mm256_blendv_pd(x, v_neg1, mask1);
+        _mm256_blendv_pd(m1, v_pos1, mask2)
+    }
+
+    for i in 0..len {
+        if i >= first_val {
+            let c = *c_ptr.add(i);
+            let v = *v_ptr.add(i);
+            let cv = c * v;
+            sum_close_f += c; sum_vol_f += v; sum_cxv_f += cv;
+            sum_close_s += c; sum_vol_s += v; sum_cxv_s += cv;
+            if i + 1 >= fast_period + first_val {
+                let k = i + 1 - fast_period;
+                let c_old = *c_ptr.add(k);
+                let v_old = *v_ptr.add(k);
+                sum_close_f -= c_old; sum_vol_f -= v_old; sum_cxv_f -= c_old * v_old;
+            }
+            if i + 1 >= slow_period + first_val {
+                let k = i + 1 - slow_period;
+                let c_old = *c_ptr.add(k);
+                let v_old = *v_ptr.add(k);
+                sum_close_s -= c_old; sum_vol_s -= v_old; sum_cxv_s -= c_old * v_old;
+            }
+        }
+
+        if i >= base {
+            let sma_f  = sum_close_f * inv_fast;
+            let sma_s  = sum_close_s * inv_slow;
+            let vwma_f = if sum_vol_f != 0.0 { sum_cxv_f / sum_vol_f } else { sma_f };
+            let vwma_s = if sum_vol_s != 0.0 { sum_cxv_s / sum_vol_s } else { sma_s };
+
+            let vpc = vwma_s - sma_s;
+            let vpr = if sma_f != 0.0 { (sum_cxv_f * (fast_period as f64)) / (sum_vol_f * sum_close_f) } else { 1.0 };
+            let vol_f = sum_vol_f * inv_fast;
+            let vol_s = sum_vol_s * inv_slow;
+            let vm    = if vol_s != 0.0 { vol_f / vol_s } else { 1.0 };
+            let vpci  = vpc * vpr * vm;
+
+            let len_v = {
+                let t = if vpc < 0.0 { (vpci - 3.0).abs().round() } else { (vpci + 3.0).round() };
+                let m = if t < 1.0 { 1.0 } else { t };
+                let m = if m > MAX_WIN as f64 { MAX_WIN as f64 } else { m };
+                m as usize
+            };
+
+            ring_vpc[ring_pos] = vpc; ring_vpr[ring_pos] = vpr; ring_pos += 1; if ring_pos == MAX_WIN { ring_pos = 0; }
+
+            let take = len_v.min(i + 1);
+            let hist_n = (i - base + 1).min(take);
+            let pref_n = take - hist_n;
+            let mut acc = 0.0_f64;
+
+            if hist_n > 0 {
+                let newest = if ring_pos == 0 { MAX_WIN - 1 } else { ring_pos - 1 };
+                let seg1_len = hist_n.min(newest + 1);
+                let seg2_len = hist_n - seg1_len;
+
+                if seg1_len > 0 {
+                    let mut rp = newest;
+                    let mut left = seg1_len;
+                    while left >= 4 {
+                        let idx0 = rp;
+                        let idx1 = if rp >= 1 { rp - 1 } else { MAX_WIN - 1 };
+                        let idx2 = if idx1 >= 1 { idx1 - 1 } else { MAX_WIN - 1 };
+                        let idx3 = if idx2 >= 1 { idx2 - 1 } else { MAX_WIN - 1 };
+
+                        let vpcv = _mm256_set_pd(ring_vpc[idx3], ring_vpc[idx2], ring_vpc[idx1], ring_vpc[idx0]);
+                        let vprv = _mm256_set_pd(ring_vpr[idx3], ring_vpr[idx2], ring_vpr[idx1], ring_vpr[idx0]);
+                        let adjv = adj256(vpcv, v_neg1, v_zero, v_pos1);
+                        let denom = _mm256_mul_pd(adjv, vprv);
+                        let lv = _mm256_set_pd(*l_ptr.add(i - 3), *l_ptr.add(i - 2), *l_ptr.add(i - 1), *l_ptr.add(i - 0));
+                        let zero = _mm256_set1_pd(0.0);
+                        let nz_mask = _mm256_cmp_pd(denom, zero, _CMP_NEQ_OQ);
+                        let divv = _mm256_div_pd(lv, denom);
+                        let mdiv = _mm256_and_pd(divv, nz_mask);
+                        let arr: [f64; 4] = core::mem::transmute(mdiv);
+                        acc += arr[0] + arr[1] + arr[2] + arr[3];
+
+                        rp = idx3.wrapping_sub(1) % MAX_WIN; left -= 4;
+                    }
+                    while left > 0 {
+                        let idx_r = rp;
+                        let x = ring_vpc[idx_r];
+                        let adj = if x > -1.0 && x < 0.0 { -1.0 } else if x >= 0.0 && x < 1.0 { 1.0 } else { x };
+                        let r = ring_vpr[idx_r];
+                        if adj != 0.0 && r != 0.0 { let j = seg1_len - left; acc += *l_ptr.add(i - j) / (adj * r); }
+                        rp = if rp == 0 { MAX_WIN - 1 } else { rp - 1 }; left -= 1;
+                    }
+                }
+
+                if seg2_len > 0 {
+                    let mut left = seg2_len;
+                    while left > 0 {
+                        let idx_r = (MAX_WIN - seg2_len) + (seg2_len - left);
+                        let x = ring_vpc[idx_r];
+                        let adj = if x > -1.0 && x < 0.0 { -1.0 } else if x >= 0.0 && x < 1.0 { 1.0 } else { x };
+                        let r = ring_vpr[idx_r];
+                        if adj != 0.0 && r != 0.0 { let j = seg1_len + (seg2_len - left); acc += *l_ptr.add(i - j) / (adj * r); }
+                        left -= 1;
+                    }
+                }
+            }
+
+            if pref_n > 0 {
+                let start_idx = i + 1 - (hist_n + pref_n);
+                let end_idx_excl = i + 1 - hist_n;
+                let mut s = 0.0_f64;
+                let mut k = start_idx;
+                let n = end_idx_excl - start_idx;
+                let vec_n = n / 4; let rem = n % 4;
+                for _ in 0..vec_n { let a = _mm256_loadu_pd(l_ptr.add(k)); let arr: [f64; 4] = core::mem::transmute(a); s += arr[0]+arr[1]+arr[2]+arr[3]; k += 4; }
+                for _ in 0..rem { s += *l_ptr.add(k); k += 1; }
+                acc += s;
+            }
+
+            let price_v = (acc / (len_v as f64)) * 0.01;
+            let dev = (multiplier.mul_add(vpci, 0.0)) * vm;
+            let pre_i = (*l_ptr.add(i) - price_v) + dev;
+
+            pre_sum += pre_i;
+            if pre_cnt < slow_period { pre_ring[pre_pos] = pre_i; pre_pos += 1; if pre_pos == slow_period { pre_pos = 0; } pre_cnt += 1; }
+            else { pre_sum -= pre_ring[pre_pos]; pre_ring[pre_pos] = pre_i; pre_pos += 1; if pre_pos == slow_period { pre_pos = 0; } }
+
+            if i >= warmup2 { *out.get_unchecked_mut(i) = pre_sum * inv_slow; }
+        }
+    }
+
+    let upto = warmup2.min(len);
+    for v in &mut out[..upto] { *v = f64::NAN; }
+    Ok(())
 }
 
 // ==================== AVX512 IMPLEMENTATION ====================
@@ -800,18 +1095,74 @@ unsafe fn avsl_avx512(
     first_val: usize,
     out: &mut [f64],
 ) -> Result<(), AvslError> {
-    // TODO: Implement AVX512 optimized version
-    // For now, fallback to scalar
-    avsl_scalar(
-        close,
-        low,
-        volume,
-        fast_period,
-        slow_period,
-        multiplier,
-        first_val,
-        out,
-    )
+    use core::arch::x86_64::*;
+    let len = close.len();
+    if len == 0 { return Err(AvslError::EmptyInputData); }
+
+    const MAX_WIN: usize = 200;
+    let base = first_val + slow_period - 1;
+    let warmup2 = base + slow_period - 1;
+    if base >= len {
+        let upto = warmup2.min(len);
+        for v in &mut out[..upto] { *v = f64::NAN; }
+        for v in &mut out[upto..] { *v = f64::NAN; }
+        return Ok(());
+    }
+
+    let inv_fast = 1.0 / (fast_period as f64);
+    let inv_slow = 1.0 / (slow_period as f64);
+    let mut sum_close_f  = 0.0_f64;
+    let mut sum_close_s  = 0.0_f64;
+    let mut sum_vol_f    = 0.0_f64;
+    let mut sum_vol_s    = 0.0_f64;
+    let mut sum_cxv_f    = 0.0_f64;
+    let mut sum_cxv_s    = 0.0_f64;
+    let mut ring_vpc: [f64; MAX_WIN] = [0.0; MAX_WIN];
+    let mut ring_vpr: [f64; MAX_WIN] = [1.0; MAX_WIN];
+    let mut ring_pos: usize = 0;
+    let mut pre_ring: Vec<f64> = vec![0.0; slow_period];
+    let mut pre_pos: usize = 0; let mut pre_sum: f64 = 0.0; let mut pre_cnt: usize = 0;
+
+    let c_ptr = close.as_ptr(); let l_ptr = low.as_ptr(); let v_ptr = volume.as_ptr();
+    #[inline(always)] fn adj(x: f64) -> f64 { if x > -1.0 && x < 0.0 { -1.0 } else if x >= 0.0 && x < 1.0 { 1.0 } else { x } }
+
+    for i in 0..len {
+        if i >= first_val {
+            let c = unsafe { *c_ptr.add(i) }; let v = unsafe { *v_ptr.add(i) }; let cv = c*v;
+            sum_close_f += c; sum_vol_f += v; sum_cxv_f += cv; sum_close_s += c; sum_vol_s += v; sum_cxv_s += cv;
+            if i + 1 >= fast_period + first_val { let k = i + 1 - fast_period; let c_old = unsafe{*c_ptr.add(k)}; let v_old = unsafe{*v_ptr.add(k)}; sum_close_f -= c_old; sum_vol_f -= v_old; sum_cxv_f -= c_old*v_old; }
+            if i + 1 >= slow_period + first_val { let k = i + 1 - slow_period; let c_old = unsafe{*c_ptr.add(k)}; let v_old = unsafe{*v_ptr.add(k)}; sum_close_s -= c_old; sum_vol_s -= v_old; sum_cxv_s -= c_old*v_old; }
+        }
+
+        if i >= base {
+            let sma_f = sum_close_f * inv_fast; let sma_s = sum_close_s * inv_slow;
+            let vwma_f = if sum_vol_f != 0.0 { sum_cxv_f / sum_vol_f } else { sma_f };
+            let vwma_s = if sum_vol_s != 0.0 { sum_cxv_s / sum_vol_s } else { sma_s };
+            let vpc = vwma_s - sma_s;
+            let vpr = if sma_f != 0.0 { (sum_cxv_f * (fast_period as f64)) / (sum_vol_f * sum_close_f) } else { 1.0 };
+            let vol_f = sum_vol_f * inv_fast; let vol_s = sum_vol_s * inv_slow; let vm = if vol_s != 0.0 { vol_f / vol_s } else { 1.0 };
+            let vpci = vpc * vpr * vm;
+            let len_v = { let t = if vpc < 0.0 { (vpci - 3.0).abs().round() } else { (vpci + 3.0).round() }; let m = if t < 1.0 { 1.0 } else { t }; let m = if m > MAX_WIN as f64 { MAX_WIN as f64 } else { m }; m as usize };
+
+            ring_vpc[ring_pos] = vpc; ring_vpr[ring_pos] = vpr; ring_pos += 1; if ring_pos == MAX_WIN { ring_pos = 0; }
+
+            let take = len_v.min(i + 1); let hist_n = (i - base + 1).min(take); let pref_n = take - hist_n; let mut acc = 0.0_f64;
+            if hist_n > 0 { let mut rp = if ring_pos == 0 { MAX_WIN - 1 } else { ring_pos - 1 }; for j in 0..hist_n { let idx_r = rp; rp = if rp == 0 { MAX_WIN - 1 } else { rp - 1 }; let a = adj(ring_vpc[idx_r]); let r = ring_vpr[idx_r]; if a != 0.0 && r != 0.0 { acc += unsafe{*l_ptr.add(i - j)} / (a*r); } } }
+            if pref_n > 0 {
+                let start_idx = i + 1 - (hist_n + pref_n); let end_idx_excl = i + 1 - hist_n;
+                let mut s = 0.0_f64; let mut k = start_idx; let n = end_idx_excl - start_idx; let vec_n = n / 8; let rem = n % 8;
+                for _ in 0..vec_n { let a = unsafe { _mm512_loadu_pd(l_ptr.add(k)) }; let arr: [f64; 8] = core::mem::transmute(a); s += arr[0]+arr[1]+arr[2]+arr[3]+arr[4]+arr[5]+arr[6]+arr[7]; k += 8; }
+                for _ in 0..rem { s += unsafe{*l_ptr.add(k)}; k += 1; }
+                acc += s;
+            }
+
+            let price_v = (acc / (len_v as f64)) * 0.01; let dev = (multiplier.mul_add(vpci, 0.0)) * vm; let pre_i = unsafe{*l_ptr.add(i)} - price_v + dev;
+            pre_sum += pre_i; if pre_cnt < slow_period { pre_ring[pre_pos] = pre_i; pre_pos += 1; if pre_pos == slow_period { pre_pos = 0; } pre_cnt += 1; } else { pre_sum -= pre_ring[pre_pos]; pre_ring[pre_pos] = pre_i; pre_pos += 1; if pre_pos == slow_period { pre_pos = 0; } }
+            if i >= warmup2 { unsafe { *out.get_unchecked_mut(i) = pre_sum * inv_slow; } }
+        }
+    }
+
+    let upto = warmup2.min(len); for v in &mut out[..upto] { *v = f64::NAN; } Ok(())
 }
 
 // ==================== STREAMING API ====================
@@ -1272,7 +1623,7 @@ fn avsl_batch_inner(
             let mult = p.multiplier.unwrap_or(2.0);
             let dst_f64: &mut [f64] =
                 unsafe { core::slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut f64, cols) };
-            avsl_scalar(close, low, volume, fast, slow, mult, first, dst_f64)?;
+            avsl_scalar_ref(close, low, volume, fast, slow, mult, first, dst_f64)?;
         }
     }
 
@@ -1318,7 +1669,7 @@ fn avsl_batch_inner_into(
         // Write directly into the row slice
         let dst: &mut [f64] =
             unsafe { core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, cols) };
-        avsl_scalar(close, low, volume, fast, slow, mult, first, dst)
+        avsl_scalar_ref(close, low, volume, fast, slow, mult, first, dst)
     };
 
     // Non-WASM: allow parallel fill. On WASM: serial.

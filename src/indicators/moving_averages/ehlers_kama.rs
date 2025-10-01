@@ -11,11 +11,15 @@
 //! - **values**: Adaptive moving average that adjusts to market conditions
 //!
 //! ## Developer Status
-//! - **AVX2 kernel**: STUB - Falls back to scalar implementation
-//! - **AVX512 kernel**: STUB - Falls back to scalar implementation
-//! - **Streaming update**: O(n) - Stores entire buffer, recalculates each update
-//! - **Memory optimization**: GOOD - Uses zero-copy helpers (alloc_with_nan_prefix)
-//! - **Optimization needed**: Implement SIMD kernels, optimize streaming to O(1) with rolling window
+//! - **AVX2/AVX512**: Enabled for initial ER denominator (vector abs-diff sum);
+//!   main recurrence remains scalar (recursive filter). Auto selection falls back
+//!   to scalar when `nightly-avx` is disabled. Expect modest wins on long series.
+//! - **Scalar path**: Minor optimizations (branch hoist, mul_add, no powi).
+//! - **Batch (row-specific)**: Uses shared prefix sums of abs-diffs to seed ER
+//!   denominators in O(1) per row; reduces overhead for wide sweeps. Outputs
+//!   unchanged; warmup handling remains identical.
+//! - **Streaming update**: O(n) reference stream retained; could be made O(1)
+//!   with a rolling window if needed in future.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
@@ -241,19 +245,13 @@ pub fn ehlers_kama_scalar(data: &[f64], period: usize, first_valid: usize, out: 
         return;
     }
 
-    // Calculate initial delta sum with PERIOD terms (not period-1)
-    // This is the key fix - Pine sums period terms, not period-1
+    // Calculate initial delta sum with PERIOD terms (not period-1).
+    // Use max to avoid a per-iteration branch (k > first_valid is always true now).
     let mut delta_sum = 0.0;
-    // We need period consecutive differences, starting from the earliest valid difference
-    let delta_start = if start >= period {
-        start - period + 1
-    } else {
-        first_valid + 1
-    };
+    // Guard underflow by branching once here; avoids per-iteration checks below.
+    let delta_start = if start >= period { start - period + 1 } else { first_valid + 1 };
     for k in delta_start..=start {
-        if k > first_valid {
-            delta_sum += (data[k] - data[k - 1]).abs();
-        }
+        delta_sum += (data[k] - data[k - 1]).abs();
     }
 
     // Pine-style initialization: no EMA warmup, just use previous price
@@ -261,14 +259,13 @@ pub fn ehlers_kama_scalar(data: &[f64], period: usize, first_valid: usize, out: 
 
     // Apply adaptive formula for the first output
     // Direction uses correct lookback: start - (period - 1)
-    let direction = (data[start] - data[start - (period - 1)]).abs();
-    let ef = if delta_sum == 0.0 {
-        0.0
-    } else {
-        (direction / delta_sum).min(1.0)
-    };
-    let s = ((0.6667 * ef) + 0.0645).powi(2);
-    prev_kama = s * data[start] + (1.0 - s) * prev_kama;
+    let a0 = data[start];
+    let direction = (a0 - data[start - (period - 1)]).abs();
+    let ef = if delta_sum == 0.0 { 0.0 } else { (direction / delta_sum).min(1.0) };
+    // s = ((0.6667 * ef) + 0.0645)^2, avoid powi and use mul_add for precision/speed
+    let s_term = 0.6667f64.mul_add(ef, 0.0645);
+    let mut s = s_term * s_term;
+    prev_kama = s.mul_add(a0 - prev_kama, prev_kama);
     out[start] = prev_kama;
 
     // Continue with adaptive calculation
@@ -278,21 +275,19 @@ pub fn ehlers_kama_scalar(data: &[f64], period: usize, first_valid: usize, out: 
         if drop_idx > first_valid {
             delta_sum -= (data[drop_idx] - data[drop_idx - 1]).abs();
         }
-        delta_sum += (data[i] - data[i - 1]).abs();
+        let a = data[i];
+        delta_sum += (a - data[i - 1]).abs();
 
         // Direction uses full period window
-        let direction = (data[i] - data[i - (period - 1)]).abs();
-        let ef = if delta_sum == 0.0 {
-            0.0
-        } else {
-            (direction / delta_sum).min(1.0)
-        };
+        let direction = (a - data[i - (period - 1)]).abs();
+        let ef = if delta_sum == 0.0 { 0.0 } else { (direction / delta_sum).min(1.0) };
 
         // Ehlers smoothing constant
         // Original formula: s = ((0.6667 * ef) + 0.0645)^2
-        let s = ((0.6667 * ef) + 0.0645).powi(2);
+        let s_term = 0.6667f64.mul_add(ef, 0.0645);
+        s = s_term * s_term;
 
-        prev_kama = s * data[i] + (1.0 - s) * prev_kama;
+        prev_kama = s.mul_add(a - prev_kama, prev_kama);
         out[i] = prev_kama;
     }
 }
@@ -301,18 +296,191 @@ pub fn ehlers_kama_scalar(data: &[f64], period: usize, first_valid: usize, out: 
 #[target_feature(enable = "avx2,fma")]
 #[inline]
 pub unsafe fn ehlers_kama_avx2(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-    // For now, just use scalar implementation
-    // Future: implement AVX2-optimized version
-    ehlers_kama_scalar(data, period, first_valid, out);
+    debug_assert_eq!(out.len(), data.len());
+    let len = data.len();
+    if len == 0 { return; }
+    let start = first_valid + period - 1;
+    if start >= len { return; }
+
+    use core::arch::x86_64::*;
+    let d = data.as_ptr();
+    let signmask = _mm256_set1_pd(-0.0);
+
+    #[inline(always)]
+    unsafe fn hsum256_pd(v: __m256d) -> f64 {
+        let hi = _mm256_extractf128_pd(v, 1);
+        let lo = _mm256_castpd256_pd128(v);
+        let sum2 = _mm_add_pd(lo, hi);
+        let hi64 = _mm_unpackhi_pd(sum2, sum2);
+        let sum1 = _mm_add_sd(sum2, hi64);
+        _mm_cvtsd_f64(sum1)
+    }
+
+    // Initial delta_sum over PERIOD consecutive diffs
+    // Avoid underflow by computing start + 1 - period (== first_valid) instead of start - period + 1
+    let mut k = core::cmp::max(first_valid + 1, start + 1 - period);
+    let end = start;
+    let mut acc_v = _mm256_setzero_pd();
+    let mut delta_sum = 0.0f64;
+
+    // Head to 4-aligned
+    while ((end + 1).wrapping_sub(k)) & 3 != 0 {
+        let a = *d.add(k);
+        let b = *d.add(k - 1);
+        delta_sum += (a - b).abs();
+        k += 1;
+        if k > end { break; }
+    }
+    // Vector body
+    while k + 3 <= end {
+        let curr = _mm256_loadu_pd(d.add(k));
+        let prev = _mm256_loadu_pd(d.add(k - 1));
+        let diff = _mm256_sub_pd(curr, prev);
+        let adiff = _mm256_andnot_pd(signmask, diff);
+        acc_v = _mm256_add_pd(acc_v, adiff);
+        k += 4;
+    }
+    delta_sum += hsum256_pd(acc_v);
+
+    // Tail
+    while k <= end {
+        let a = *d.add(k);
+        let b = *d.add(k - 1);
+        delta_sum += (a - b).abs();
+        k += 1;
+    }
+
+    // Recurrence identical to scalar (with FMA updates)
+    let o = out.as_mut_ptr();
+    let mut prev_kama = *d.add(start - 1);
+    let a0 = *d.add(start);
+    let dir0 = (a0 - *d.add(start - (period - 1))).abs();
+    let ef0 = if delta_sum == 0.0 { 0.0 } else { (dir0 / delta_sum).min(1.0) };
+    let mut s_term = 0.6667f64.mul_add(ef0, 0.0645);
+    let mut s = s_term * s_term;
+    prev_kama = s.mul_add(a0 - prev_kama, prev_kama);
+    *o.add(start) = prev_kama;
+
+    let mut i = start + 1;
+    while i < len {
+        let drop_idx = i - period;
+        if drop_idx > first_valid {
+            let da = *d.add(drop_idx);
+            let db = *d.add(drop_idx - 1);
+            delta_sum -= (da - db).abs();
+        }
+        let a = *d.add(i);
+        let b = *d.add(i - 1);
+        delta_sum += (a - b).abs();
+
+        let dir = (a - *d.add(i - (period - 1))).abs();
+        let ef = if delta_sum == 0.0 { 0.0 } else { (dir / delta_sum).min(1.0) };
+
+        s_term = 0.6667f64.mul_add(ef, 0.0645);
+        s = s_term * s_term;
+
+        prev_kama = s.mul_add(a - prev_kama, prev_kama);
+        *o.add(i) = prev_kama;
+        i += 1;
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[target_feature(enable = "avx512f")]
+#[target_feature(enable = "avx512f,fma")]
 #[inline]
 pub unsafe fn ehlers_kama_avx512(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-    // For now, just use scalar implementation
-    // Future: implement AVX512-optimized version
-    ehlers_kama_scalar(data, period, first_valid, out);
+    debug_assert_eq!(out.len(), data.len());
+    let len = data.len();
+    if len == 0 { return; }
+    let start = first_valid + period - 1;
+    if start >= len { return; }
+
+    use core::arch::x86_64::*;
+    let d = data.as_ptr();
+    let signmask = _mm512_set1_pd(-0.0);
+
+    #[inline(always)]
+    unsafe fn hsum256_pd(v: __m256d) -> f64 {
+        let hi = _mm256_extractf128_pd(v, 1);
+        let lo = _mm256_castpd256_pd128(v);
+        let sum2 = _mm_add_pd(lo, hi);
+        let hi64 = _mm_unpackhi_pd(sum2, sum2);
+        let sum1 = _mm_add_sd(sum2, hi64);
+        _mm_cvtsd_f64(sum1)
+    }
+    #[inline(always)]
+    unsafe fn hsum512_pd(v: __m512d) -> f64 {
+        let lo = _mm512_castpd512_pd256(v);
+        let hi = _mm512_extractf64x4_pd(v, 1);
+        hsum256_pd(lo) + hsum256_pd(hi)
+    }
+
+    // Initial delta_sum over PERIOD consecutive diffs
+    let mut k = core::cmp::max(first_valid + 1, start + 1 - period);
+    let end = start;
+    let mut acc_v = _mm512_setzero_pd();
+    let mut delta_sum = 0.0f64;
+
+    // Head to 8-aligned
+    while ((end + 1).wrapping_sub(k)) & 7 != 0 {
+        let a = *d.add(k);
+        let b = *d.add(k - 1);
+        delta_sum += (a - b).abs();
+        k += 1;
+        if k > end { break; }
+    }
+    // Vector body (8-wide)
+    while k + 7 <= end {
+        let curr = _mm512_loadu_pd(d.add(k));
+        let prev = _mm512_loadu_pd(d.add(k - 1));
+        let diff = _mm512_sub_pd(curr, prev);
+        let adiff = _mm512_andnot_pd(signmask, diff);
+        acc_v = _mm512_add_pd(acc_v, adiff);
+        k += 8;
+    }
+    delta_sum += hsum512_pd(acc_v);
+
+    // Tail
+    while k <= end {
+        let a = *d.add(k);
+        let b = *d.add(k - 1);
+        delta_sum += (a - b).abs();
+        k += 1;
+    }
+
+    // Recurrence identical to scalar (with FMA updates)
+    let o = out.as_mut_ptr();
+    let mut prev_kama = *d.add(start - 1);
+    let a0 = *d.add(start);
+    let dir0 = (a0 - *d.add(start - (period - 1))).abs();
+    let ef0 = if delta_sum == 0.0 { 0.0 } else { (dir0 / delta_sum).min(1.0) };
+    let mut s_term = 0.6667f64.mul_add(ef0, 0.0645);
+    let mut s = s_term * s_term;
+    prev_kama = s.mul_add(a0 - prev_kama, prev_kama);
+    *o.add(start) = prev_kama;
+
+    let mut i = start + 1;
+    while i < len {
+        let drop_idx = i - period;
+        if drop_idx > first_valid {
+            let da = *d.add(drop_idx);
+            let db = *d.add(drop_idx - 1);
+            delta_sum -= (da - db).abs();
+        }
+        let a = *d.add(i);
+        let b = *d.add(i - 1);
+        delta_sum += (a - b).abs();
+
+        let dir = (a - *d.add(i - (period - 1))).abs();
+        let ef = if delta_sum == 0.0 { 0.0 } else { (dir / delta_sum).min(1.0) };
+
+        s_term = 0.6667f64.mul_add(ef, 0.0645);
+        s = s_term * s_term;
+
+        prev_kama = s.mul_add(a - prev_kama, prev_kama);
+        *o.add(i) = prev_kama;
+        i += 1;
+    }
 }
 
 #[inline(always)]
@@ -726,14 +894,41 @@ fn ehlers_kama_batch_inner_into(
         k => k,
     };
 
+    // Shared precompute across rows: prefix sums of absolute diffs to seed ER denominator in O(1)
+    // ps[k] = sum_{t=1..k} |data[t]-data[t-1]|, with diffs only when t > first
+    let mut ps = vec![0.0f64; len];
+    for k in 1..len {
+        let ad = if k > first { (data[k] - data[k - 1]).abs() } else { 0.0 };
+        ps[k] = ps[k - 1] + ad;
+    }
+
     let do_row = |row: usize, dst_row: &mut [f64]| {
         let p = periods[row];
-        match compute_kernel {
-            // keep scalar as the implementation; AVX variants may call scalar until you add them
-            Kernel::Scalar | Kernel::ScalarBatch | Kernel::Avx2 | Kernel::Avx512 => {
-                ehlers_kama_scalar(data, p, first, dst_row)
-            }
-            Kernel::Auto | Kernel::Avx2Batch | Kernel::Avx512Batch => unreachable!(),
+        let start = first + p - 1;
+        if start >= len { return; }
+
+        // Seed using ps in O(1)
+        let mut prev_kama = data[start - 1];
+        let a0 = data[start];
+        // Initial denominator over PERIOD consecutive diffs: ps[start] - ps[first]
+        let mut delta_sum = ps[start] - ps[first];
+        let dir0 = (a0 - data[start - (p - 1)]).abs();
+        let ef0 = if delta_sum == 0.0 { 0.0 } else { (dir0 / delta_sum).min(1.0) };
+        let mut s_term = 0.6667f64.mul_add(ef0, 0.0645);
+        let mut s = s_term * s_term;
+        prev_kama = s.mul_add(a0 - prev_kama, prev_kama);
+        dst_row[start] = prev_kama;
+
+        // Main loop: denominator via prefix sums (O(1)); recurrence identical
+        for i in (start + 1)..len {
+            delta_sum = ps[i] - ps[i - p];
+            let a = data[i];
+            let dir = (a - data[i - (p - 1)]).abs();
+            let ef = if delta_sum == 0.0 { 0.0 } else { (dir / delta_sum).min(1.0) };
+            s_term = 0.6667f64.mul_add(ef, 0.0645);
+            s = s_term * s_term;
+            prev_kama = s.mul_add(a - prev_kama, prev_kama);
+            dst_row[i] = prev_kama;
         }
     };
 

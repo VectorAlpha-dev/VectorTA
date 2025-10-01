@@ -22,16 +22,12 @@
 //!
 //! ## Developer Notes (Implementation Status)
 //! - **SIMD Kernels**:
-//!   - AVX2: STUB (calls scalar implementation)
-//!   - AVX512: STUB (calls scalar implementation)
-//!   - Both short and long variants are stubs
-//! - **Streaming Performance**: O(1) - efficient with maintained filter state
-//! - **Memory Optimization**: YES - uses alloc_with_nan_prefix and make_uninit_matrix helpers
-//! - **Batch Operations**: Fully supported with parallel processing
-//! - **TODO**:
-//!   - Implement actual SIMD kernels for high-pass filter calculations
-//!   - Vectorize the recursive filter operations
-//!   - Consider SIMD for trigonometric coefficient calculations
+//!   - AVX2/AVX512: kept as stubs by design (delegate to scalar). The inner loop is a 2-pole IIR with loop-carried dependencies; direct time-axis SIMD does not yield wins without look-ahead transforms and adds complexity. Runtime selection remains, but stubs short-circuit to scalar for correctness and speed.
+//! - **Scalar Path**: optimized to precompute constants, reduce multiplies, and reuse prior raw samples to cut loads; semantics unchanged (warmup handling preserved).
+//! - **Streaming Performance**: O(1) with maintained filter state.
+//! - **Memory Optimization**: YES — uses `alloc_with_nan_prefix` and `make_uninit_matrix` helpers.
+//! - **Batch Operations**: Supported; parallel row execution. A future optimization is to group rows by equal `hp_period` and SIMD-scale across `k` per tick to avoid redundant filter work.
+//! - **Decision**: Single-series SIMD remains disabled due to IIR feedback; consider row-specific SIMD across `k` only if period-grouped workloads are common and show >5% gains.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
@@ -354,70 +350,71 @@ pub fn dec_osc_scalar(data: &[f64], period: usize, k_val: f64, first: usize, out
     );
 
     let len = data.len();
-    let half_period = (period as f64) * 0.5;
+    if len == 0 || first + 1 >= len {
+        return;
+    }
 
-    let angle1 = 2.0 * PI * 0.707 / (period as f64);
-    let sin1 = angle1.sin();
-    let cos1 = angle1.cos();
+    // Precompute constants once; use sin_cos to reduce transcendentals.
+    let p = period as f64;
+    let half_p = p * 0.5;
+
+    let angle1 = 2.0 * PI * 0.707 / p;
+    let (sin1, cos1) = angle1.sin_cos();
     let alpha1 = 1.0 + ((sin1 - 1.0) / cos1);
-    let c1 = (1.0 - alpha1 / 2.0) * (1.0 - alpha1 / 2.0);
-    let one_minus_alpha1 = 1.0 - alpha1;
-    let one_minus_alpha1_sq = one_minus_alpha1 * one_minus_alpha1;
+    let t1 = 1.0 - alpha1 * 0.5;
+    let c1 = t1 * t1;
+    let oma1 = 1.0 - alpha1;
+    let two_oma1 = oma1 + oma1;
+    let oma1_sq = oma1 * oma1;
 
-    let angle2 = 2.0 * PI * 0.707 / half_period;
-    let sin2 = angle2.sin();
-    let cos2 = angle2.cos();
+    let angle2 = 2.0 * PI * 0.707 / half_p;
+    let (sin2, cos2) = angle2.sin_cos();
     let alpha2 = 1.0 + ((sin2 - 1.0) / cos2);
-    let c2 = (1.0 - alpha2 / 2.0) * (1.0 - alpha2 / 2.0);
-    let one_minus_alpha2 = 1.0 - alpha2;
-    let one_minus_alpha2_sq = one_minus_alpha2 * one_minus_alpha2;
+    let t2 = 1.0 - alpha2 * 0.5;
+    let c2 = t2 * t2;
+    let oma2 = 1.0 - alpha2;
+    let two_oma2 = oma2 + oma2;
+    let oma2_sq = oma2 * oma2;
 
-    let mut hp_prev_2;
-    let mut hp_prev_1;
-    let mut decosc_prev_2;
-    let mut decosc_prev_1;
+    let scale = 100.0 * k_val;
 
-    {
-        let val0 = data[first];
-        out[first] = f64::NAN;
-        hp_prev_2 = val0;
-        hp_prev_1 = val0;
-        decosc_prev_2 = 0.0;
-        decosc_prev_1 = 0.0;
-    }
+    // Warmup exactly two leading NaNs from `first`.
+    out[first] = f64::NAN;
+    out[first + 1] = f64::NAN;
 
-    if first + 1 < len {
-        let val1 = data[first + 1];
-        out[first + 1] = f64::NAN;
-        hp_prev_2 = hp_prev_1;
-        hp_prev_1 = val1;
+    // Seed states to match existing behavior and cache prior raw samples.
+    let mut x2 = data[first];
+    let mut x1 = data[first + 1];
+    let mut hp_prev_2 = x2;
+    let mut hp_prev_1 = x1;
+    let mut decosc_prev_2 = 0.0f64;
+    let mut decosc_prev_1 = 0.0f64;
 
-        let dec = val1 - hp_prev_1;
-        decosc_prev_2 = decosc_prev_1;
-        decosc_prev_1 = dec;
-    }
+    // Main loop: fuse filter sections and scale; keep scalar-safe.
     for i in (first + 2)..len {
         let d0 = data[i];
-        let d1 = data[i - 1];
-        let d2 = data[i - 2];
 
-        let hp0 = c1 * d0 - 2.0 * c1 * d1 + c1 * d2 + 2.0 * one_minus_alpha1 * hp_prev_1
-            - one_minus_alpha1_sq * hp_prev_2;
+        // First 2‑pole high‑pass on raw data (reuse cached x1/x2)
+        let dx = d0 - 2.0 * x1 + x2;
+        let hp0 = c1 * dx + two_oma1 * hp_prev_1 - oma1_sq * hp_prev_2;
 
+        // Decycle and second high‑pass on decycled series
         let dec = d0 - hp0;
-        let d_dec1 = d1 - hp_prev_1;
-        let d_dec2 = d2 - hp_prev_2;
+        let d_dec1 = x1 - hp_prev_1;
+        let d_dec2 = x2 - hp_prev_2;
+        let decdx = dec - 2.0 * d_dec1 + d_dec2;
+        let osc0 = c2 * decdx + two_oma2 * decosc_prev_1 - oma2_sq * decosc_prev_2;
 
-        let decosc0 =
-            c2 * dec - 2.0 * c2 * d_dec1 + c2 * d_dec2 + 2.0 * one_minus_alpha2 * decosc_prev_1
-                - one_minus_alpha2_sq * decosc_prev_2;
+        // Final percentage scaling vs price
+        out[i] = scale * osc0 / d0;
 
-        out[i] = 100.0 * k_val * decosc0 / d0;
-
+        // Roll states and cached raw samples
         hp_prev_2 = hp_prev_1;
         hp_prev_1 = hp0;
         decosc_prev_2 = decosc_prev_1;
-        decosc_prev_1 = decosc0;
+        decosc_prev_1 = osc0;
+        x2 = x1;
+        x1 = d0;
     }
 }
 
