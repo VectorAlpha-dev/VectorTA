@@ -1,3 +1,0 @@
-acosc/acosc_avx2/1M     time:   [3.9111 ms 3.9571 ms 3.9936 ms]
-                        thrpt:  [1.8656 GiB/s 1.8828 GiB/s 1.9050 GiB/s]
-

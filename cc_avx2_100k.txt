@@ -1,8 +1,0 @@
-correlation_cycle/correlation_cycle_avx2/100k
-                        time:   [2.4733 ms 2.4954 ms 2.5152 ms]
-                        thrpt:  [303.33 MiB/s 305.74 MiB/s 308.47 MiB/s]
-                 change:
-                        time:   [-1.6147% -0.2540% +1.1813%] (p = 0.73 > 0.05)
-                        thrpt:  [-1.1675% +0.2547% +1.6412%]
-                        No change in performance detected.
-

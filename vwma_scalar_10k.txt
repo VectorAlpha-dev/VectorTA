@@ -1,3 +1,0 @@
-vwma/vwma_scalar/10k    time:   [7.3456 µs 7.3660 µs 7.3871 µs]
-                        thrpt:  [10.086 GiB/s 10.115 GiB/s 10.143 GiB/s]
-

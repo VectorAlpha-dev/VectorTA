@@ -1,5 +1,0 @@
-vwma/vwma_avx2/10k      time:   [7.1004 µs 7.2130 µs 7.2890 µs]
-                        thrpt:  [10.222 GiB/s 10.329 GiB/s 10.493 GiB/s]
-Found 2 outliers among 10 measurements (20.00%)
-  2 (20.00%) high mild
-

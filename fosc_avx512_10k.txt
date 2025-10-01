@@ -1,8 +1,0 @@
-fosc/fosc_avx512/10k    time:   [14.058 µs 14.080 µs 14.137 µs]
-                        thrpt:  [5.2704 GiB/s 5.2916 GiB/s 5.2999 GiB/s]
-Found 1 outliers among 10 measurements (10.00%)
-  1 (10.00%) high severe
-slope  [14.058 µs 14.137 µs] R^2            [0.9988078 0.9985439]
-mean   [14.068 µs 14.395 µs] std. dev.      [17.046 ns 491.03 ns]
-median [14.056 µs 14.139 µs] med. abs. dev. [7.3405 ns 98.327 ns]
-

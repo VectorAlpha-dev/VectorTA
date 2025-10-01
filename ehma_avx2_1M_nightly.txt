@@ -1,3 +1,0 @@
-ehma/ehma_avx2/1M       time:   [2.0715 ms 2.1642 ms 2.2568 ms]
-                        thrpt:  [3.3014 GiB/s 3.4426 GiB/s 3.5966 GiB/s]
-

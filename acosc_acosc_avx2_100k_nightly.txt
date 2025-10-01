@@ -1,3 +1,0 @@
-acosc/acosc_avx2/100k   time:   [139.37 µs 140.11 µs 140.91 µs]
-                        thrpt:  [5.2876 GiB/s 5.3178 GiB/s 5.3458 GiB/s]
-

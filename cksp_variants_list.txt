@@ -1,3 +1,0 @@
-57:bollinger_bands_width_bench/scalar/10k: benchmark
-58:bollinger_bands_width_bench/scalar/100k: benchmark
-59:bollinger_bands_width_bench/scalar/1M: benchmark

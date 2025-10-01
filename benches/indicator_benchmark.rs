@@ -139,11 +139,11 @@ use my_project::indicators::{
     decycler::{decycler as decycler_raw, DecyclerInput},
     devstop::{devstop as devstop_raw, DevStopInput},
     di::{di as di_raw, DiInput},
-    dm::{dm as dm_raw, DmBatchBuilder, DmData, DmInput},
+    dm::{dm as dm_raw, DmBatchBuilder, DmInput},
     donchian::{donchian as donchian_raw, donchian_with_kernel, DonchianInput},
     dpo::{dpo as dpo_raw, dpo_with_kernel, DpoBatchBuilder, DpoInput},
     dti::{dti as dti_raw, dti_with_kernel, DtiInput},
-    dx::{dx as dx_raw, DxBatchBuilder, DxData, DxInput},
+    dx::{dx as dx_raw, DxBatchBuilder, DxInput},
     efi::{efi as efi_raw, efi_with_kernel, EfiInput},
     emd::{emd as emd_raw, EmdInput},
     emv::{emv as emv_raw, emv_with_kernel, EmvInput},
@@ -179,7 +179,7 @@ use my_project::indicators::{
     mean_ad::{mean_ad as mean_ad_raw, MeanAdInput},
     medium_ad::{medium_ad as medium_ad_raw, MediumAdInput},
     medprice::{medprice as medprice_raw, MedpriceInput},
-    mfi::{mfi as mfi_raw, MfiBatchBuilder, MfiBatchRange, MfiData, MfiInput},
+    mfi::{mfi as mfi_raw, MfiBatchBuilder, MfiData, MfiInput},
     midpoint::{midpoint as midpoint_raw, MidpointInput},
     midprice::{midprice as midprice_raw, MidpriceInput},
     minmax::{minmax as minmax_raw, MinmaxInput},
@@ -191,7 +191,7 @@ use my_project::indicators::{
         nadaraya_watson_envelope_with_kernel,
         NweInput,
     },
-    natr::{natr as natr_raw, natr_with_kernel, NatrBatchBuilder, NatrData, NatrInput},
+    natr::{natr as natr_raw, natr_with_kernel, NatrBatchBuilder, NatrInput},
     nvi::{nvi as nvi_raw, nvi_with_kernel, NviInput},
     obv::{obv as obv_raw, ObvInput},
     ott::{ott as ott_raw, ott_with_kernel, OttBatchBuilder, OttInput},
@@ -207,7 +207,7 @@ use my_project::indicators::{
     prb::{prb as prb_raw, PrbBatchBuilder, PrbInput},
     pvi::{pvi as pvi_raw, pvi_with_kernel, PviBatchBuilder, PviInput},
     qqe::{qqe as qqe_raw, QqeInput},
-    qstick::{qstick as qstick_raw, qstick_with_kernel, QstickBatchBuilder, QstickBatchRange, QstickData, QstickInput},
+    qstick::{qstick as qstick_raw, qstick_with_kernel, QstickBatchBuilder, QstickData, QstickInput},
     range_filter::{range_filter_with_kernel, RangeFilterBatchBuilder, RangeFilterInput},
     roc::{roc as roc_raw, RocInput},
     rocp::{rocp as rocp_raw, RocpInput},
@@ -217,14 +217,14 @@ use my_project::indicators::{
     rsx::{rsx as rsx_raw, rsx_with_kernel, RsxBatchBuilder, RsxInput},
     rvi::{rvi as rvi_raw, RviInput},
     safezonestop::{safezonestop as safezonestop_raw, SafeZoneStopInput},
-    sar::{sar as sar_raw, sar_with_kernel, SarBatchBuilder, SarData, SarInput},
+    sar::{sar as sar_raw, sar_with_kernel, SarBatchBuilder, SarInput},
     squeeze_momentum::{
         squeeze_momentum as squeeze_momentum_raw, SqueezeMomentumBatchBuilder, SqueezeMomentumInput,
     },
     srsi::{srsi as srsi_raw, srsi_with_kernel, SrsiBatchBuilder, SrsiInput},
     stc::{stc as stc_raw, StcInput},
     stddev::{stddev as stddev_raw, StdDevBatchBuilder, StdDevInput},
-    stoch::{stoch as stoch_raw, stoch_with_kernel, StochBatchBuilder, StochData, StochInput},
+    stoch::{stoch as stoch_raw, stoch_with_kernel, StochBatchBuilder, StochInput},
     stochf::{stochf as stochf_raw, stochf_with_kernel, StochfInput},
     supertrend::{supertrend as supertrend_raw, supertrend_with_kernel, SuperTrendInput},
     trix::{trix_with_kernel, TrixBatchBuilder, TrixInput},
@@ -238,7 +238,7 @@ use my_project::indicators::{
         UltOscInput,
     },
     var::{var as var_raw, var_with_kernel, VarBatchBuilder, VarInput},
-    vi::{vi as vi_raw, ViBatchBuilder, ViData, ViInput},
+    vi::{vi as vi_raw, ViBatchBuilder, ViInput},
     vidya::{vidya_with_kernel, VidyaBatchBuilder, VidyaInput},
     vlma::{vlma_with_kernel, VlmaBatchBuilder, VlmaInput},
     vosc::{vosc as vosc_raw, VoscInput, VoscBatchBuilder},
@@ -252,10 +252,10 @@ use my_project::indicators::{
         wavetrend as wavetrend_raw, wavetrend_with_kernel, WavetrendBatchBuilder, WavetrendInput,
     },
     wclprice::{wclprice as wclprice_raw, wclprice_with_kernel, WclpriceInput},
-    willr::{willr as willr_raw, WillrBatchBuilder, WillrBuilder, WillrData, WillrInput},
+    willr::{willr as willr_raw, WillrBatchBuilder, WillrInput},
     wto::{wto_with_kernel, WtoBatchBuilder, WtoInput},
     zscore::{zscore as zscore_raw, zscore_with_kernel, ZscoreBatchBuilder, ZscoreInput},
-    deviation::{deviation as deviation_raw, deviation_with_kernel, DeviationBatchBuilder, DeviationInput},
+    deviation::{deviation_with_kernel, DeviationBatchBuilder, DeviationInput},
     // ASO (Average Sentiment Oscillator)
     aso::{aso_with_kernel, AsoBatchBuilder, AsoData, AsoInput},
 };
@@ -630,6 +630,505 @@ macro_rules! make_batch_wrappers {
                     Ok(())
                 }
             )+
+        }
+    };
+}
+
+// Generic helpers for common multi-slice batch inputs to avoid per-indicator boilerplate.
+// HL (high/low) wrappers. Default apply method is `apply_slices` unless overridden.
+macro_rules! make_hl_batch_wrappers {
+    ( $stem:ident, $builder:path, $ityp:ty, $data:path ) => {
+        make_hl_batch_wrappers!($stem, $builder, $ityp, $data, apply_slices);
+    };
+    ( $stem:ident, $builder:path, $ityp:ty, $data:path, $apply:ident ) => {
+        paste::paste! {
+            #[inline(always)]
+            fn [<$stem _scalarbatch>](input: &$ityp) -> anyhow::Result<()> {
+                let (high, low) = match &input.data {
+                    $data::Candles { candles } => (&candles.high[..], &candles.low[..]),
+                    $data::Slices { high, low } => (*high, *low),
+                };
+                <$builder>::new()
+                    .kernel(Kernel::ScalarBatch)
+                    .$apply(high, low)
+                    .map(|_| ())
+                    .map_err(|e| anyhow!(e.to_string()))
+            }
+            #[inline(always)]
+            fn [<$stem _avx2batch>](input: &$ityp) -> anyhow::Result<()> {
+                let (high, low) = match &input.data {
+                    $data::Candles { candles } => (&candles.high[..], &candles.low[..]),
+                    $data::Slices { high, low } => (*high, *low),
+                };
+                <$builder>::new()
+                    .kernel(Kernel::Avx2Batch)
+                    .$apply(high, low)
+                    .map(|_| ())
+                    .map_err(|e| anyhow!(e.to_string()))
+            }
+            #[inline(always)]
+            fn [<$stem _avx512batch>](input: &$ityp) -> anyhow::Result<()> {
+                let (high, low) = match &input.data {
+                    $data::Candles { candles } => (&candles.high[..], &candles.low[..]),
+                    $data::Slices { high, low } => (*high, *low),
+                };
+                <$builder>::new()
+                    .kernel(Kernel::Avx512Batch)
+                    .$apply(high, low)
+                    .map(|_| ())
+                    .map_err(|e| anyhow!(e.to_string()))
+            }
+        }
+    };
+}
+
+// HLC (high/low/close) wrappers. Default apply method is `apply_slices` unless overridden.
+macro_rules! make_hlc_batch_wrappers {
+    ( $stem:ident, $builder:path, $ityp:ty, $data:path ) => {
+        make_hlc_batch_wrappers!($stem, $builder, $ityp, $data, apply_slices);
+    };
+    ( $stem:ident, $builder:path, $ityp:ty, $data:path, $apply:ident ) => {
+        paste::paste! {
+            #[inline(always)]
+            fn [<$stem _scalarbatch>](input: &$ityp) -> anyhow::Result<()> {
+                let (high, low, close) = match &input.data {
+                    $data::Candles { candles } => (&candles.high[..], &candles.low[..], &candles.close[..]),
+                    $data::Slices { high, low, close } => (*high, *low, *close),
+                };
+                <$builder>::new()
+                    .kernel(Kernel::ScalarBatch)
+                    .$apply(high, low, close)
+                    .map(|_| ())
+                    .map_err(|e| anyhow!(e.to_string()))
+            }
+            #[inline(always)]
+            fn [<$stem _avx2batch>](input: &$ityp) -> anyhow::Result<()> {
+                let (high, low, close) = match &input.data {
+                    $data::Candles { candles } => (&candles.high[..], &candles.low[..], &candles.close[..]),
+                    $data::Slices { high, low, close } => (*high, *low, *close),
+                };
+                <$builder>::new()
+                    .kernel(Kernel::Avx2Batch)
+                    .$apply(high, low, close)
+                    .map(|_| ())
+                    .map_err(|e| anyhow!(e.to_string()))
+            }
+            #[inline(always)]
+            fn [<$stem _avx512batch>](input: &$ityp) -> anyhow::Result<()> {
+                let (high, low, close) = match &input.data {
+                    $data::Candles { candles } => (&candles.high[..], &candles.low[..], &candles.close[..]),
+                    $data::Slices { high, low, close } => (*high, *low, *close),
+                };
+                <$builder>::new()
+                    .kernel(Kernel::Avx512Batch)
+                    .$apply(high, low, close)
+                    .map(|_| ())
+                    .map_err(|e| anyhow!(e.to_string()))
+            }
+        }
+    };
+}
+
+// OHLC (open/high/low/close) wrappers with configurable apply method name
+macro_rules! make_ohlc_batch_wrappers {
+    ( $stem:ident, $builder:path, $ityp:ty, $data:path ) => {
+        make_ohlc_batch_wrappers!($stem, $builder, $ityp, $data, apply_slices);
+    };
+    ( $stem:ident, $builder:path, $ityp:ty, $data:path, $apply:ident ) => {
+        paste::paste! {
+            #[inline(always)]
+            fn [<$stem _scalarbatch>](input: &$ityp) -> anyhow::Result<()> {
+                let (high, low, close, open) = match input.as_ref() {
+                    $data::Candles { candles } => (
+                        &candles.high[..],
+                        &candles.low[..],
+                        &candles.close[..],
+                        &candles.open[..],
+                    ),
+                    $data::Slices { high, low, close, open } => (*high, *low, *close, *open),
+                };
+                <$builder>::new()
+                    .kernel(Kernel::ScalarBatch)
+                    .$apply(high, low, close, open)?;
+                Ok(())
+            }
+            #[inline(always)]
+            fn [<$stem _avx2batch>](input: &$ityp) -> anyhow::Result<()> {
+                let (high, low, close, open) = match input.as_ref() {
+                    $data::Candles { candles } => (
+                        &candles.high[..],
+                        &candles.low[..],
+                        &candles.close[..],
+                        &candles.open[..],
+                    ),
+                    $data::Slices { high, low, close, open } => (*high, *low, *close, *open),
+                };
+                <$builder>::new()
+                    .kernel(Kernel::Avx2Batch)
+                    .$apply(high, low, close, open)?;
+                Ok(())
+            }
+            #[inline(always)]
+            fn [<$stem _avx512batch>](input: &$ityp) -> anyhow::Result<()> {
+                let (high, low, close, open) = match input.as_ref() {
+                    $data::Candles { candles } => (
+                        &candles.high[..],
+                        &candles.low[..],
+                        &candles.close[..],
+                        &candles.open[..],
+                    ),
+                    $data::Slices { high, low, close, open } => (*high, *low, *close, *open),
+                };
+                <$builder>::new()
+                    .kernel(Kernel::Avx512Batch)
+                    .$apply(high, low, close, open)?;
+                Ok(())
+            }
+        }
+    };
+}
+
+// OHLCV (open/high/low/close/volume) wrappers; default to apply_slices
+macro_rules! make_ohlcv_batch_wrappers {
+    ( $stem:ident, $builder:path, $ityp:ty, $data:path ) => {
+        make_ohlcv_batch_wrappers!($stem, $builder, $ityp, $data, apply_slices);
+    };
+    ( $stem:ident, $builder:path, $ityp:ty, $data:path, $apply:ident ) => {
+        paste::paste! {
+            #[inline(always)]
+            fn [<$stem _scalarbatch>](input: &$ityp) -> anyhow::Result<()> {
+                let (high, low, close, volume) = match &input.data {
+                    $data::Candles { candles } => (
+                        &candles.high[..],
+                        &candles.low[..],
+                        &candles.close[..],
+                        &candles.volume[..],
+                    ),
+                    $data::Slices { high, low, close, volume } => (*high, *low, *close, *volume),
+                };
+                <$builder>::new()
+                    .kernel(Kernel::ScalarBatch)
+                    .$apply(high, low, close, volume)?;
+                Ok(())
+            }
+            #[inline(always)]
+            fn [<$stem _avx2batch>](input: &$ityp) -> anyhow::Result<()> {
+                let (high, low, close, volume) = match &input.data {
+                    $data::Candles { candles } => (
+                        &candles.high[..],
+                        &candles.low[..],
+                        &candles.close[..],
+                        &candles.volume[..],
+                    ),
+                    $data::Slices { high, low, close, volume } => (*high, *low, *close, *volume),
+                };
+                <$builder>::new()
+                    .kernel(Kernel::Avx2Batch)
+                    .$apply(high, low, close, volume)?;
+                Ok(())
+            }
+            #[inline(always)]
+            fn [<$stem _avx512batch>](input: &$ityp) -> anyhow::Result<()> {
+                let (high, low, close, volume) = match &input.data {
+                    $data::Candles { candles } => (
+                        &candles.high[..],
+                        &candles.low[..],
+                        &candles.close[..],
+                        &candles.volume[..],
+                    ),
+                    $data::Slices { high, low, close, volume } => (*high, *low, *close, *volume),
+                };
+                <$builder>::new()
+                    .kernel(Kernel::Avx512Batch)
+                    .$apply(high, low, close, volume)?;
+                Ok(())
+            }
+        }
+    };
+}
+
+// Generic pair-from-input wrappers: caller provides expression yielding (a, b)
+macro_rules! make_pair_from_input_wrappers {
+    ( $stem:ident, $builder:path, $ityp:ty, $pair_expr:expr ) => {
+        paste::paste! {
+            #[inline(always)]
+            fn [<$stem _scalarbatch>](input: &$ityp) -> anyhow::Result<()> {
+                let (a, b) = $pair_expr(input)?;
+                <$builder>::new().kernel(Kernel::ScalarBatch).apply_slices(a, b)?;
+                Ok(())
+            }
+            #[inline(always)]
+            fn [<$stem _avx2batch>](input: &$ityp) -> anyhow::Result<()> {
+                let (a, b) = $pair_expr(input)?;
+                <$builder>::new().kernel(Kernel::Avx2Batch).apply_slices(a, b)?;
+                Ok(())
+            }
+            #[inline(always)]
+            fn [<$stem _avx512batch>](input: &$ityp) -> anyhow::Result<()> {
+                let (a, b) = $pair_expr(input)?;
+                <$builder>::new()
+                    .kernel(Kernel::Avx512Batch)
+                    .apply_slices(a, b)?;
+                Ok(())
+            }
+        }
+    };
+}
+
+
+// Pair extractor + builder customizer closure
+macro_rules! make_pair_with_builder_wrappers {
+    ( $stem:ident, $builder:path, $ityp:ty, $pair_expr:expr, $cfg:expr ) => {
+        paste::paste! {
+            #[inline(always)]
+            fn [<$stem _scalarbatch>](input: &$ityp) -> anyhow::Result<()> {
+                let (a, b) = $pair_expr(input)?;
+                let builder = { let tmp = <$builder>::new().kernel(Kernel::ScalarBatch); ($cfg)(tmp) };
+                builder.apply_slices(a, b)?;
+                Ok(())
+            }
+            #[inline(always)]
+            fn [<$stem _avx2batch>](input: &$ityp) -> anyhow::Result<()> {
+                let (a, b) = $pair_expr(input)?;
+                let builder = { let tmp = <$builder>::new().kernel(Kernel::Avx2Batch); ($cfg)(tmp) };
+                builder.apply_slices(a, b)?;
+                Ok(())
+            }
+            #[inline(always)]
+            fn [<$stem _avx512batch>](input: &$ityp) -> anyhow::Result<()> {
+                let (a, b) = $pair_expr(input)?;
+                let builder = { let tmp = <$builder>::new().kernel(Kernel::Avx512Batch); ($cfg)(tmp) };
+                builder.apply_slices(a, b)?;
+                Ok(())
+            }
+        }
+    };
+}
+
+
+// HLC with builder config (method-chain suffix)
+// HLC with builder config (method-chain suffix) — Removed in favor of extractor-based variants
+// make_hlc_with_config_wrappers, make_hlc_with_config_and_method_wrappers, and
+// make_hlc_with_arg_wrappers were specialized to enum shapes. Replace with the
+// more general extractor-based helpers below to cover tuple/named variants.
+
+// Triple-slice (HLC) with builder config using an extractor closure
+
+// Triple extractor + builder customizer closure
+macro_rules! make_triple_with_builder_wrappers {
+    ( $stem:ident, $builder:path, $ityp:ty, $extract:expr, $cfg:expr ) => {
+        paste::paste! {
+            #[inline(always)]
+            fn [<$stem _scalarbatch>](input: &$ityp) -> anyhow::Result<()> {
+                let (a, b, c) = $extract(input)?;
+                let builder = { let tmp = <$builder>::new().kernel(Kernel::ScalarBatch); ($cfg)(tmp) };
+                builder.apply_slices(a, b, c)?;
+                Ok(())
+            }
+            #[inline(always)]
+            fn [<$stem _avx2batch>](input: &$ityp) -> anyhow::Result<()> {
+                let (a, b, c) = $extract(input)?;
+                let builder = { let tmp = <$builder>::new().kernel(Kernel::Avx2Batch); ($cfg)(tmp) };
+                builder.apply_slices(a, b, c)?;
+                Ok(())
+            }
+            #[inline(always)]
+            fn [<$stem _avx512batch>](input: &$ityp) -> anyhow::Result<()> {
+                let (a, b, c) = $extract(input)?;
+                let builder = { let tmp = <$builder>::new().kernel(Kernel::Avx512Batch); ($cfg)(tmp) };
+                builder.apply_slices(a, b, c)?;
+                Ok(())
+            }
+        }
+    };
+}
+
+// Triple-slice (HLC) with builder config and a custom apply method ident
+
+// Triple extractor + builder customizer closure + custom apply method
+macro_rules! make_triple_with_builder_and_method_wrappers {
+    ( $stem:ident, $builder:path, $ityp:ty, $extract:expr, $cfg:expr, $method:ident ) => {
+        paste::paste! {
+            #[inline(always)]
+            fn [<$stem _scalarbatch>](input: &$ityp) -> anyhow::Result<()> {
+                let (a, b, c) = $extract(input)?;
+                let builder = { let tmp = <$builder>::new().kernel(Kernel::ScalarBatch); ($cfg)(tmp) };
+                builder.$method(a, b, c)?;
+                Ok(())
+            }
+            #[inline(always)]
+            fn [<$stem _avx2batch>](input: &$ityp) -> anyhow::Result<()> {
+                let (a, b, c) = $extract(input)?;
+                let builder = { let tmp = <$builder>::new().kernel(Kernel::Avx2Batch); ($cfg)(tmp) };
+                builder.$method(a, b, c)?;
+                Ok(())
+            }
+            #[inline(always)]
+            fn [<$stem _avx512batch>](input: &$ityp) -> anyhow::Result<()> {
+                let (a, b, c) = $extract(input)?;
+                let builder = { let tmp = <$builder>::new().kernel(Kernel::Avx512Batch); ($cfg)(tmp) };
+                builder.$method(a, b, c)?;
+                Ok(())
+            }
+        }
+    };
+}
+
+// Triple-slice (HLC) with an extra argument and custom apply method
+macro_rules! make_triple_with_arg_wrappers {
+    ( $stem:ident, $builder:path, $ityp:ty, $extract:expr, $arg:expr, $apply:ident ) => {
+        paste::paste! {
+            #[inline(always)]
+            fn [<$stem _scalarbatch>](input: &$ityp) -> anyhow::Result<()> {
+                let (a, b, c) = $extract(input)?;
+                let arg = $arg;
+                <$builder>::new().kernel(Kernel::ScalarBatch).$apply(a, b, c, &arg)?;
+                Ok(())
+            }
+            #[inline(always)]
+            fn [<$stem _avx2batch>](input: &$ityp) -> anyhow::Result<()> {
+                let (a, b, c) = $extract(input)?;
+                let arg = $arg;
+                <$builder>::new().kernel(Kernel::Avx2Batch).$apply(a, b, c, &arg)?;
+                Ok(())
+            }
+            #[inline(always)]
+            fn [<$stem _avx512batch>](input: &$ityp) -> anyhow::Result<()> {
+                let (a, b, c) = $extract(input)?;
+                let arg = $arg;
+                <$builder>::new().kernel(Kernel::Avx512Batch).$apply(a, b, c, &arg)?;
+                Ok(())
+            }
+        }
+    };
+}
+
+// Quad-slice extractor with custom apply method (e.g., H/L/C plus src)
+macro_rules! make_quad_with_method_wrappers {
+    ( $stem:ident, $builder:path, $ityp:ty, $extract:expr, $apply:ident ) => {
+        paste::paste! {
+            #[inline(always)]
+            fn [<$stem _scalarbatch>](input: &$ityp) -> anyhow::Result<()> {
+                let (a,b,c,d) = $extract(input)?;
+                <$builder>::new().kernel(Kernel::ScalarBatch).$apply(a,b,c,d)?;
+                Ok(())
+            }
+            #[inline(always)]
+            fn [<$stem _avx2batch>](input: &$ityp) -> anyhow::Result<()> {
+                let (a,b,c,d) = $extract(input)?;
+                <$builder>::new().kernel(Kernel::Avx2Batch).$apply(a,b,c,d)?;
+                Ok(())
+            }
+            #[inline(always)]
+            fn [<$stem _avx512batch>](input: &$ityp) -> anyhow::Result<()> {
+                let (a,b,c,d) = $extract(input)?;
+                <$builder>::new().kernel(Kernel::Avx512Batch).$apply(a,b,c,d)?;
+                Ok(())
+            }
+        }
+    };
+}
+
+// Single-slice apply (builder.apply(data))
+macro_rules! make_single_apply_wrappers {
+    ( $stem:ident, $builder:path, $ityp:ty, $apply:ident ) => {
+        paste::paste! {
+            #[inline(always)]
+            fn [<$stem _scalarbatch>](input: &$ityp) -> anyhow::Result<()> {
+                let data: &[f64] = input.as_ref();
+                <$builder>::new().kernel(Kernel::ScalarBatch).$apply(data)?;
+                Ok(())
+            }
+            #[inline(always)]
+            fn [<$stem _avx2batch>](input: &$ityp) -> anyhow::Result<()> {
+                let data: &[f64] = input.as_ref();
+                <$builder>::new().kernel(Kernel::Avx2Batch).$apply(data)?;
+                Ok(())
+            }
+            #[inline(always)]
+            fn [<$stem _avx512batch>](input: &$ityp) -> anyhow::Result<()> {
+                let data: &[f64] = input.as_ref();
+                <$builder>::new().kernel(Kernel::Avx512Batch).$apply(data)?;
+                Ok(())
+            }
+        }
+    };
+}
+
+// Single-slice apply with extra arg (e.g., UMA apply_slice(slice, None))
+macro_rules! make_single_slice_with_arg_wrappers {
+    ( $stem:ident, $builder:path, $ityp:ty, $arg:expr, $apply:ident ) => {
+        paste::paste! {
+            #[inline(always)]
+            fn [<$stem _scalarbatch>](input: &$ityp) -> anyhow::Result<()> {
+                let slice: &[f64] = input.as_ref();
+                <$builder>::new().kernel(Kernel::ScalarBatch).$apply(slice, $arg)?;
+                Ok(())
+            }
+            #[inline(always)]
+            fn [<$stem _avx2batch>](input: &$ityp) -> anyhow::Result<()> {
+                let slice: &[f64] = input.as_ref();
+                <$builder>::new().kernel(Kernel::Avx2Batch).$apply(slice, $arg)?;
+                Ok(())
+            }
+            #[inline(always)]
+            fn [<$stem _avx512batch>](input: &$ityp) -> anyhow::Result<()> {
+                let slice: &[f64] = input.as_ref();
+                <$builder>::new().kernel(Kernel::Avx512Batch).$apply(slice, $arg)?;
+                Ok(())
+            }
+        }
+    };
+}
+
+// Four-slice extraction wrappers with custom extract order
+macro_rules! make_quad_from_input_wrappers {
+    ( $stem:ident, $builder:path, $ityp:ty, $data:path, $extract:expr ) => {
+        paste::paste! {
+            #[inline(always)]
+            fn [<$stem _scalarbatch>](input: &$ityp) -> anyhow::Result<()> {
+                let (a,b,c,d) = $extract(input)?;
+                <$builder>::new().kernel(Kernel::ScalarBatch).apply_slices(a,b,c,d)?;
+                Ok(())
+            }
+            #[inline(always)]
+            fn [<$stem _avx2batch>](input: &$ityp) -> anyhow::Result<()> {
+                let (a,b,c,d) = $extract(input)?;
+                <$builder>::new().kernel(Kernel::Avx2Batch).apply_slices(a,b,c,d)?;
+                Ok(())
+            }
+            #[inline(always)]
+            fn [<$stem _avx512batch>](input: &$ityp) -> anyhow::Result<()> {
+                let (a,b,c,d) = $extract(input)?;
+                <$builder>::new().kernel(Kernel::Avx512Batch).apply_slices(a,b,c,d)?;
+                Ok(())
+            }
+        }
+    };
+}
+
+// Three-slice extraction wrappers with custom extract order
+macro_rules! make_triple_from_input_wrappers {
+    ( $stem:ident, $builder:path, $ityp:ty, $extract:expr ) => {
+        paste::paste! {
+            #[inline(always)]
+            fn [<$stem _scalarbatch>](input: &$ityp) -> anyhow::Result<()> {
+                let (a,b,c) = $extract(input)?;
+                <$builder>::new().kernel(Kernel::ScalarBatch).apply_slices(a,b,c)?;
+                Ok(())
+            }
+            #[inline(always)]
+            fn [<$stem _avx2batch>](input: &$ityp) -> anyhow::Result<()> {
+                let (a,b,c) = $extract(input)?;
+                <$builder>::new().kernel(Kernel::Avx2Batch).apply_slices(a,b,c)?;
+                Ok(())
+            }
+            #[inline(always)]
+            fn [<$stem _avx512batch>](input: &$ityp) -> anyhow::Result<()> {
+                let (a,b,c) = $extract(input)?;
+                <$builder>::new().kernel(Kernel::Avx512Batch).apply_slices(a,b,c)?;
+                Ok(())
+            }
         }
     };
 }
@@ -1260,125 +1759,25 @@ make_kernel_wrappers!(adxr, adxr_with_kernel, AdxrInputS; Scalar,Avx2,Avx512);
 // Stochastic Oscillator (single-series) kernel wrappers
 make_kernel_wrappers!(stoch, stoch_with_kernel, StochInputS; Scalar,Avx2,Avx512);
 
-// Stochastic Oscillator (batch) custom wrappers (OHLC inputs)
-#[inline(always)]
-fn stoch_batch_scalarbatch(input: &StochInputS) -> anyhow::Result<()> {
-    let (high, low, close) = match &input.data {
-        StochData::Candles { candles } => (&candles.high[..], &candles.low[..], &candles.close[..]),
-        StochData::Slices { high, low, close } => (*high, *low, *close),
-    };
-    StochBatchBuilder::new()
-        .kernel(Kernel::ScalarBatch)
-        .apply_slices(high, low, close)?;
-    Ok(())
-}
-
-// SAR (batch) custom wrappers (high/low inputs)
-#[inline(always)]
-fn sar_batch_scalarbatch(input: &SarInputS) -> anyhow::Result<()> {
-    let (high, low) = match &input.data {
-        SarData::Candles { candles } => (&candles.high[..], &candles.low[..]),
-        SarData::Slices { high, low } => (*high, *low),
-    };
-    SarBatchBuilder::new()
-        .kernel(Kernel::ScalarBatch)
-        .apply_slices(high, low)
-        .map(|_| ())
-        .map_err(|e| anyhow!(e.to_string()))
-}
-
-#[inline(always)]
-fn sar_batch_avx2batch(input: &SarInputS) -> anyhow::Result<()> {
-    let (high, low) = match &input.data {
-        SarData::Candles { candles } => (&candles.high[..], &candles.low[..]),
-        SarData::Slices { high, low } => (*high, *low),
-    };
-    SarBatchBuilder::new()
-        .kernel(Kernel::Avx2Batch)
-        .apply_slices(high, low)
-        .map(|_| ())
-        .map_err(|e| anyhow!(e.to_string()))
-}
-
-#[inline(always)]
-fn sar_batch_avx512batch(input: &SarInputS) -> anyhow::Result<()> {
-    let (high, low) = match &input.data {
-        SarData::Candles { candles } => (&candles.high[..], &candles.low[..]),
-        SarData::Slices { high, low } => (*high, *low),
-    };
-    SarBatchBuilder::new()
-        .kernel(Kernel::Avx512Batch)
-        .apply_slices(high, low)
-        .map(|_| ())
-        .map_err(|e| anyhow!(e.to_string()))
-}
-
-#[inline(always)]
-fn stoch_batch_avx2batch(input: &StochInputS) -> anyhow::Result<()> {
-    let (high, low, close) = match &input.data {
-        StochData::Candles { candles } => (&candles.high[..], &candles.low[..], &candles.close[..]),
-        StochData::Slices { high, low, close } => (*high, *low, *close),
-    };
-    StochBatchBuilder::new()
-        .kernel(Kernel::Avx2Batch)
-        .apply_slices(high, low, close)?;
-    Ok(())
-}
-
-#[inline(always)]
-fn stoch_batch_avx512batch(input: &StochInputS) -> anyhow::Result<()> {
-    let (high, low, close) = match &input.data {
-        StochData::Candles { candles } => (&candles.high[..], &candles.low[..], &candles.close[..]),
-        StochData::Slices { high, low, close } => (*high, *low, *close),
-    };
-    StochBatchBuilder::new()
-        .kernel(Kernel::Avx512Batch)
-        .apply_slices(high, low, close)?;
-    Ok(())
-}
-
-// Fisher (batch) custom wrappers (high/low inputs)
-#[inline(always)]
-fn fisher_batch_scalarbatch(input: &FisherInputS) -> anyhow::Result<()> {
-    use my_project::indicators::fisher::{FisherBatchBuilder, FisherData};
-    let (high, low) = match &input.data {
-        FisherData::Candles { candles } => (&candles.high[..], &candles.low[..]),
-        FisherData::Slices { high, low } => (*high, *low),
-    };
-    FisherBatchBuilder::new()
-        .kernel(Kernel::ScalarBatch)
-        .apply_slices(high, low)
-        .map(|_| ())
-        .map_err(|e| anyhow!(e.to_string()))
-}
-
-#[inline(always)]
-fn fisher_batch_avx2batch(input: &FisherInputS) -> anyhow::Result<()> {
-    use my_project::indicators::fisher::{FisherBatchBuilder, FisherData};
-    let (high, low) = match &input.data {
-        FisherData::Candles { candles } => (&candles.high[..], &candles.low[..]),
-        FisherData::Slices { high, low } => (*high, *low),
-    };
-    FisherBatchBuilder::new()
-        .kernel(Kernel::Avx2Batch)
-        .apply_slices(high, low)
-        .map(|_| ())
-        .map_err(|e| anyhow!(e.to_string()))
-}
-
-#[inline(always)]
-fn fisher_batch_avx512batch(input: &FisherInputS) -> anyhow::Result<()> {
-    use my_project::indicators::fisher::{FisherBatchBuilder, FisherData};
-    let (high, low) = match &input.data {
-        FisherData::Candles { candles } => (&candles.high[..], &candles.low[..]),
-        FisherData::Slices { high, low } => (*high, *low),
-    };
-    FisherBatchBuilder::new()
-        .kernel(Kernel::Avx512Batch)
-        .apply_slices(high, low)
-        .map(|_| ())
-        .map_err(|e| anyhow!(e.to_string()))
-}
+// Batch wrappers generated via macros (avoid per-indicator boilerplate)
+make_hlc_batch_wrappers!(
+    stoch_batch,
+    StochBatchBuilder,
+    StochInputS,
+    my_project::indicators::stoch::StochData
+);
+make_hl_batch_wrappers!(
+    sar_batch,
+    SarBatchBuilder,
+    SarInputS,
+    my_project::indicators::sar::SarData
+);
+make_hl_batch_wrappers!(
+    fisher_batch,
+    my_project::indicators::fisher::FisherBatchBuilder,
+    FisherInputS,
+    my_project::indicators::fisher::FisherData
+);
 make_kernel_wrappers!(deviation, deviation_with_kernel, DeviationInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(correlation_cycle, correlation_cycle_with_kernel, CorrelationCycleInputS; Scalar,Avx2,Avx512);
 // StochF single-series kernels
@@ -1597,159 +1996,60 @@ make_batch_wrappers!(
     ScalarBatch, Avx2Batch, Avx512Batch
 );
 
-// MFI batch wrappers
-#[inline(always)]
-fn mfi_batch_scalarbatch(input: &MfiInputS) -> anyhow::Result<()> {
-    let (tp, vol) = match &input.data {
-        MfiData::Candles { candles, source } => (source_type(candles, source), &candles.volume[..]),
-        MfiData::Slices { typical_price, volume } => (*typical_price, *volume),
-    };
-    // Wider sweep to exercise shared precompute path
-    let sweep = MfiBatchRange { period: (5, 200, 5) };
-    MfiBatchBuilder::new()
-        .kernel(Kernel::ScalarBatch)
-        .period_range(sweep.period.0, sweep.period.1, sweep.period.2)
-        .apply_slices(tp, vol)?;
-    Ok(())
-}
+// MFI: pair extractor + period sweep config
+make_pair_with_builder_wrappers!(
+    mfi_batch,
+    MfiBatchBuilder,
+    MfiInputS,
+    |input: &MfiInputS| -> anyhow::Result<(&[f64], &[f64])> {
+        let (tp, vol) = match &input.data {
+            MfiData::Candles { candles, source } => (source_type(candles, source), &candles.volume[..]),
+            MfiData::Slices { typical_price, volume } => (*typical_price, *volume),
+        };
+        Ok((tp, vol))
+    },
+    |b: MfiBatchBuilder| b.period_range(5, 200, 5)
+);
 
-// DX batch wrappers
-#[inline(always)]
-fn dx_batch_scalarbatch(input: &DxInputS) -> anyhow::Result<()> {
-    let (high, low, close) = match &input.data {
-        my_project::indicators::dx::DxData::Candles { candles } => (
-            source_type(candles, "high"),
-            source_type(candles, "low"),
-            source_type(candles, "close"),
-        ),
-        my_project::indicators::dx::DxData::HlcSlices { high, low, close } => (*high, *low, *close),
-    };
-    DxBatchBuilder::new()
-        .kernel(Kernel::ScalarBatch)
-        .period_range(10, 30, 5)
-        .apply_hlc(high, low, close)
-        .map(|_| ())
-        .map_err(|e| anyhow!(e.to_string()))
-}
+make_triple_with_builder_wrappers!(
+    adx_batch,
+    AdxBatchBuilder,
+    AdxInputS,
+    |input: &AdxInputS| -> anyhow::Result<(&[f64], &[f64], &[f64])> {
+        use my_project::indicators::adx::AdxData;
+        let (h,l,c) = match &input.data {
+            AdxData::Candles { candles } => (
+                source_type(candles, "high"),
+                source_type(candles, "low"),
+                source_type(candles, "close"),
+            ),
+            AdxData::Slices { high, low, close } => (*high, *low, *close),
+        };
+        Ok((h,l,c))
+    },
+    |b: AdxBatchBuilder| b.period_range(10, 30, 5)
+);
 
-// ADX batch wrappers (H/L/C inputs)
-#[inline(always)]
-fn adx_batch_scalarbatch(input: &AdxInputS) -> anyhow::Result<()> {
-    let (high, low, close) = match &input.data {
-        my_project::indicators::adx::AdxData::Candles { candles } => (
-            source_type(candles, "high"),
-            source_type(candles, "low"),
-            source_type(candles, "close"),
-        ),
-        my_project::indicators::adx::AdxData::Slices { high, low, close } => (*high, *low, *close),
-    };
-    AdxBatchBuilder::new()
-        .kernel(Kernel::ScalarBatch)
-        .period_range(10, 30, 5)
-        .apply_slices(high, low, close)
-        .map(|_| ())
-        .map_err(|e| anyhow!(e.to_string()))
-}
+make_triple_with_builder_and_method_wrappers!(
+    dx_batch,
+    DxBatchBuilder,
+    DxInputS,
+    |input: &DxInputS| -> anyhow::Result<(&[f64], &[f64], &[f64])> {
+        use my_project::indicators::dx::DxData;
+        let (h,l,c) = match &input.data {
+            DxData::Candles { candles } => (
+                source_type(candles, "high"),
+                source_type(candles, "low"),
+                source_type(candles, "close"),
+            ),
+            DxData::HlcSlices { high, low, close } => (*high, *low, *close),
+        };
+        Ok((h,l,c))
+    },
+    |b: DxBatchBuilder| b.period_range(10, 30, 5),
+    apply_hlc
+);
 
-#[inline(always)]
-fn adx_batch_avx2batch(input: &AdxInputS) -> anyhow::Result<()> {
-    let (high, low, close) = match &input.data {
-        my_project::indicators::adx::AdxData::Candles { candles } => (
-            source_type(candles, "high"),
-            source_type(candles, "low"),
-            source_type(candles, "close"),
-        ),
-        my_project::indicators::adx::AdxData::Slices { high, low, close } => (*high, *low, *close),
-    };
-    AdxBatchBuilder::new()
-        .kernel(Kernel::Avx2Batch)
-        .period_range(10, 30, 5)
-        .apply_slices(high, low, close)
-        .map(|_| ())
-        .map_err(|e| anyhow!(e.to_string()))
-}
-
-#[inline(always)]
-fn adx_batch_avx512batch(input: &AdxInputS) -> anyhow::Result<()> {
-    let (high, low, close) = match &input.data {
-        my_project::indicators::adx::AdxData::Candles { candles } => (
-            source_type(candles, "high"),
-            source_type(candles, "low"),
-            source_type(candles, "close"),
-        ),
-        my_project::indicators::adx::AdxData::Slices { high, low, close } => (*high, *low, *close),
-    };
-    AdxBatchBuilder::new()
-        .kernel(Kernel::Avx512Batch)
-        .period_range(10, 30, 5)
-        .apply_slices(high, low, close)
-        .map(|_| ())
-        .map_err(|e| anyhow!(e.to_string()))
-}
-
-#[inline(always)]
-fn dx_batch_avx2batch(input: &DxInputS) -> anyhow::Result<()> {
-    let (high, low, close) = match &input.data {
-        my_project::indicators::dx::DxData::Candles { candles } => (
-            source_type(candles, "high"),
-            source_type(candles, "low"),
-            source_type(candles, "close"),
-        ),
-        my_project::indicators::dx::DxData::HlcSlices { high, low, close } => (*high, *low, *close),
-    };
-    DxBatchBuilder::new()
-        .kernel(Kernel::Avx2Batch)
-        .period_range(10, 30, 5)
-        .apply_hlc(high, low, close)
-        .map(|_| ())
-        .map_err(|e| anyhow!(e.to_string()))
-}
-
-#[inline(always)]
-fn dx_batch_avx512batch(input: &DxInputS) -> anyhow::Result<()> {
-    let (high, low, close) = match &input.data {
-        my_project::indicators::dx::DxData::Candles { candles } => (
-            source_type(candles, "high"),
-            source_type(candles, "low"),
-            source_type(candles, "close"),
-        ),
-        my_project::indicators::dx::DxData::HlcSlices { high, low, close } => (*high, *low, *close),
-    };
-    DxBatchBuilder::new()
-        .kernel(Kernel::Avx512Batch)
-        .period_range(10, 30, 5)
-        .apply_hlc(high, low, close)
-        .map(|_| ())
-        .map_err(|e| anyhow!(e.to_string()))
-}
-
-#[inline(always)]
-fn mfi_batch_avx2batch(input: &MfiInputS) -> anyhow::Result<()> {
-    let (tp, vol) = match &input.data {
-        MfiData::Candles { candles, source } => (source_type(candles, source), &candles.volume[..]),
-        MfiData::Slices { typical_price, volume } => (*typical_price, *volume),
-    };
-    let sweep = MfiBatchRange { period: (5, 200, 5) };
-    MfiBatchBuilder::new()
-        .kernel(Kernel::Avx2Batch)
-        .period_range(sweep.period.0, sweep.period.1, sweep.period.2)
-        .apply_slices(tp, vol)?;
-    Ok(())
-}
-
-#[inline(always)]
-fn mfi_batch_avx512batch(input: &MfiInputS) -> anyhow::Result<()> {
-    let (tp, vol) = match &input.data {
-        MfiData::Candles { candles, source } => (source_type(candles, source), &candles.volume[..]),
-        MfiData::Slices { typical_price, volume } => (*typical_price, *volume),
-    };
-    let sweep = MfiBatchRange { period: (5, 200, 5) };
-    MfiBatchBuilder::new()
-        .kernel(Kernel::Avx512Batch)
-        .period_range(sweep.period.0, sweep.period.1, sweep.period.2)
-        .apply_slices(tp, vol)?;
-    Ok(())
-}
 
 make_batch_wrappers!(
     apo_batch, ApoBatchBuilder, ApoInputS;
@@ -1768,65 +2068,12 @@ make_batch_wrappers!(
     ScalarBatch, Avx2Batch, Avx512Batch
 );
 
-// ADOSC batch wrappers (ScalarBatch/Avx2Batch/Avx512Batch)
-// ADOSC batch wrappers require OHLCV slices
-#[inline(always)]
-fn adosc_batch_scalarbatch(input: &AdoscInputS) -> anyhow::Result<()> {
-    use my_project::indicators::adosc::AdoscBatchBuilder;
-    let (h, l, c, v) = match &input.data {
-        my_project::indicators::adosc::AdoscData::Candles { candles } => (
-            candles.high.as_slice(),
-            candles.low.as_slice(),
-            candles.close.as_slice(),
-            candles.volume.as_slice(),
-        ),
-        my_project::indicators::adosc::AdoscData::Slices { high, low, close, volume } =>
-            (*high, *low, *close, *volume),
-    };
-    AdoscBatchBuilder::new()
-        .kernel(Kernel::ScalarBatch)
-        .apply_slices(h, l, c, v)
-        .map(|_| ())
-        .map_err(|e| anyhow!(e.to_string()))
-}
-#[inline(always)]
-fn adosc_batch_avx2batch(input: &AdoscInputS) -> anyhow::Result<()> {
-    use my_project::indicators::adosc::AdoscBatchBuilder;
-    let (h, l, c, v) = match &input.data {
-        my_project::indicators::adosc::AdoscData::Candles { candles } => (
-            candles.high.as_slice(),
-            candles.low.as_slice(),
-            candles.close.as_slice(),
-            candles.volume.as_slice(),
-        ),
-        my_project::indicators::adosc::AdoscData::Slices { high, low, close, volume } =>
-            (*high, *low, *close, *volume),
-    };
-    AdoscBatchBuilder::new()
-        .kernel(Kernel::Avx2Batch)
-        .apply_slices(h, l, c, v)
-        .map(|_| ())
-        .map_err(|e| anyhow!(e.to_string()))
-}
-#[inline(always)]
-fn adosc_batch_avx512batch(input: &AdoscInputS) -> anyhow::Result<()> {
-    use my_project::indicators::adosc::AdoscBatchBuilder;
-    let (h, l, c, v) = match &input.data {
-        my_project::indicators::adosc::AdoscData::Candles { candles } => (
-            candles.high.as_slice(),
-            candles.low.as_slice(),
-            candles.close.as_slice(),
-            candles.volume.as_slice(),
-        ),
-        my_project::indicators::adosc::AdoscData::Slices { high, low, close, volume } =>
-            (*high, *low, *close, *volume),
-    };
-    AdoscBatchBuilder::new()
-        .kernel(Kernel::Avx512Batch)
-        .apply_slices(h, l, c, v)
-        .map(|_| ())
-        .map_err(|e| anyhow!(e.to_string()))
-}
+make_ohlcv_batch_wrappers!(
+    adosc_batch,
+    my_project::indicators::adosc::AdoscBatchBuilder,
+    AdoscInputS,
+    my_project::indicators::adosc::AdoscData
+);
 
 // AO batch wrappers (ScalarBatch/Avx2Batch/Avx512Batch)
 make_batch_wrappers!(
@@ -1866,54 +2113,20 @@ make_batch_wrappers!(
 );
 
 // Custom batch wrappers for KVO (multi-series input: high/low/close/volume)
-paste::paste! {
-    #[inline(always)]
-    fn kvo_batch_scalarbatch(_input: &KvoInputS) -> anyhow::Result<()> {
-        KvoBatchBuilder::new()
-            .kernel(Kernel::ScalarBatch)
-            .apply_candles(&CANDLES_10K)?;
-        Ok(())
-    }
-    #[inline(always)]
-    fn kvo_batch_avx2batch(_input: &KvoInputS) -> anyhow::Result<()> {
-        KvoBatchBuilder::new()
-            .kernel(Kernel::Avx2Batch)
-            .apply_candles(&CANDLES_10K)?;
-        Ok(())
-    }
-    #[inline(always)]
-    fn kvo_batch_avx512batch(_input: &KvoInputS) -> anyhow::Result<()> {
-        KvoBatchBuilder::new()
-            .kernel(Kernel::Avx512Batch)
-            .apply_candles(&CANDLES_10K)?;
-        Ok(())
-    }
-}
+make_ohlcv_batch_wrappers!(
+    kvo_batch,
+    KvoBatchBuilder,
+    KvoInputS,
+    my_project::indicators::kvo::KvoData
+);
 
 // Custom batch wrappers for CKSP to use candles (high/low/close)
-paste::paste! {
-    #[inline(always)]
-    fn cksp_batch_scalarbatch(_input: &CkspInputS) -> anyhow::Result<()> {
-        CkspBatchBuilder::new()
-            .kernel(Kernel::ScalarBatch)
-            .apply_candles(&CANDLES_10K)?;
-        Ok(())
-    }
-    #[inline(always)]
-    fn cksp_batch_avx2batch(_input: &CkspInputS) -> anyhow::Result<()> {
-        CkspBatchBuilder::new()
-            .kernel(Kernel::Avx2Batch)
-            .apply_candles(&CANDLES_10K)?;
-        Ok(())
-    }
-    #[inline(always)]
-    fn cksp_batch_avx512batch(_input: &CkspInputS) -> anyhow::Result<()> {
-        CkspBatchBuilder::new()
-            .kernel(Kernel::Avx512Batch)
-            .apply_candles(&CANDLES_10K)?;
-        Ok(())
-    }
-}
+make_hlc_batch_wrappers!(
+    cksp_batch,
+    CkspBatchBuilder,
+    CkspInputS,
+    my_project::indicators::cksp::CkspData
+);
 
 impl InputLen for DeviationInputS {
     fn with_len(len: usize) -> Self {
@@ -1927,29 +2140,12 @@ impl InputLen for DeviationInputS {
 }
 
 // Custom batch wrappers for Squeeze Momentum to use candles (high/low/close)
-paste::paste! {
-    #[inline(always)]
-    fn squeeze_momentum_batch_scalarbatch(_input: &SqueezeMomentumInputS) -> anyhow::Result<()> {
-        SqueezeMomentumBatchBuilder::new()
-            .kernel(Kernel::ScalarBatch)
-            .apply_candles(&CANDLES_10K)?;
-        Ok(())
-    }
-    #[inline(always)]
-    fn squeeze_momentum_batch_avx2batch(_input: &SqueezeMomentumInputS) -> anyhow::Result<()> {
-        SqueezeMomentumBatchBuilder::new()
-            .kernel(Kernel::Avx2Batch)
-            .apply_candles(&CANDLES_10K)?;
-        Ok(())
-    }
-    #[inline(always)]
-    fn squeeze_momentum_batch_avx512batch(_input: &SqueezeMomentumInputS) -> anyhow::Result<()> {
-        SqueezeMomentumBatchBuilder::new()
-            .kernel(Kernel::Avx512Batch)
-            .apply_candles(&CANDLES_10K)?;
-        Ok(())
-    }
-}
+make_hlc_batch_wrappers!(
+    squeeze_momentum_batch,
+    SqueezeMomentumBatchBuilder,
+    SqueezeMomentumInputS,
+    my_project::indicators::squeeze_momentum::SqueezeMomentumData
+);
 
 
 // LinearRegSlope batch wrappers
@@ -1958,224 +2154,88 @@ make_batch_wrappers!(
     ScalarBatch, Avx2Batch, Avx512Batch
 );
 
-#[inline(always)]
-fn qstick_batch_scalarbatch(input: &QstickInputS) -> anyhow::Result<()> {
-    let (open, close) = match &input.data {
-        QstickData::Candles { candles, open_source, close_source } => (
-            source_type(candles, open_source),
-            source_type(candles, close_source),
-        ),
-        QstickData::Slices { open, close } => (*open, *close),
-    };
-    let sweep = QstickBatchRange { period: (5, 50, 5) };
-    QstickBatchBuilder::new()
-        .kernel(Kernel::ScalarBatch)
-        .period_range(sweep.period.0, sweep.period.1, sweep.period.2)
-        .apply_slices(open, close)?;
-    Ok(())
-}
+make_pair_with_builder_wrappers!(
+    qstick_batch,
+    QstickBatchBuilder,
+    QstickInputS,
+    |input: &QstickInputS| -> anyhow::Result<(&[f64], &[f64])> {
+        let (open, close) = match &input.data {
+            QstickData::Candles { candles, open_source, close_source } => (
+                source_type(candles, open_source),
+                source_type(candles, close_source),
+            ),
+            QstickData::Slices { open, close } => (*open, *close),
+        };
+        Ok((open, close))
+    },
+    |b: QstickBatchBuilder| b.period_range(5, 50, 5)
+);
+
+make_triple_with_arg_wrappers!(
+    ultosc_batch,
+    UltOscBatchBuilder,
+    UltOscInputS,
+    |input: &UltOscInputS| -> anyhow::Result<(&[f64], &[f64], &[f64])> {
+        let (h, l, c) = match &input.data {
+            UltOscData::Candles { candles, .. } => (&candles.high[..], &candles.low[..], &candles.close[..]),
+            UltOscData::Slices { high, low, close } => (*high, *low, *close),
+        };
+        Ok((h, l, c))
+    },
+    UltOscBatchRange { timeperiod1: (5, 9, 2), timeperiod2: (12, 16, 2), timeperiod3: (26, 30, 2) },
+    apply_slice
+);
 
 #[inline(always)]
-fn qstick_batch_avx2batch(input: &QstickInputS) -> anyhow::Result<()> {
-    let (open, close) = match &input.data {
-        QstickData::Candles { candles, open_source, close_source } => (
-            source_type(candles, open_source),
-            source_type(candles, close_source),
-        ),
-        QstickData::Slices { open, close } => (*open, *close),
+fn buff_averages_pair(input: &BuffAveragesInputS) -> anyhow::Result<(&[f64], &[f64])> {
+    use my_project::indicators::moving_averages::buff_averages::BuffAveragesData;
+    let price: &[f64] = input.as_ref();
+    let volume: &[f64] = match (&input.volume, &input.data) {
+        (Some(v), _) => *v,
+        (None, BuffAveragesData::Candles { candles, .. }) => &candles.volume[..],
+        _ => return Err(anyhow!("buff_averages_batch requires volume data")),
     };
-    let sweep = QstickBatchRange { period: (5, 50, 5) };
-    QstickBatchBuilder::new()
-        .kernel(Kernel::Avx2Batch)
-        .period_range(sweep.period.0, sweep.period.1, sweep.period.2)
-        .apply_slices(open, close)?;
-    Ok(())
+    Ok((price, volume))
 }
 
-#[inline(always)]
-fn qstick_batch_avx512batch(input: &QstickInputS) -> anyhow::Result<()> {
-    let (open, close) = match &input.data {
-        QstickData::Candles { candles, open_source, close_source } => (
-            source_type(candles, open_source),
-            source_type(candles, close_source),
-        ),
-        QstickData::Slices { open, close } => (*open, *close),
-    };
-    let sweep = QstickBatchRange { period: (5, 50, 5) };
-    QstickBatchBuilder::new()
-        .kernel(Kernel::Avx512Batch)
-        .period_range(sweep.period.0, sweep.period.1, sweep.period.2)
-        .apply_slices(open, close)?;
-    Ok(())
-}
+make_pair_from_input_wrappers!(
+    buff_averages_batch,
+    BuffAveragesBatchBuilder,
+    BuffAveragesInputS,
+    buff_averages_pair
+);
 
-// UltOsc requires OHLC; provide custom batch wrappers similar to WILLR
-#[inline(always)]
-fn ultosc_batch_scalarbatch(input: &UltOscInputS) -> anyhow::Result<()> {
-    let (high, low, close) = match &input.data {
-        UltOscData::Candles { candles, .. } => (&candles.high[..], &candles.low[..], &candles.close[..]),
-        UltOscData::Slices { high, low, close } => (*high, *low, *close),
-    };
-    let sweep = UltOscBatchRange {
-        timeperiod1: (5, 9, 2),
-        timeperiod2: (12, 16, 2),
-        timeperiod3: (26, 30, 2),
-    };
-    UltOscBatchBuilder::new()
-        .kernel(Kernel::ScalarBatch)
-        .apply_slice(high, low, close, &sweep)?;
-    Ok(())
-}
-
-#[inline(always)]
-fn ultosc_batch_avx2batch(input: &UltOscInputS) -> anyhow::Result<()> {
-    let (high, low, close) = match &input.data {
-        UltOscData::Candles { candles, .. } => (&candles.high[..], &candles.low[..], &candles.close[..]),
-        UltOscData::Slices { high, low, close } => (*high, *low, *close),
-    };
-    let sweep = UltOscBatchRange {
-        timeperiod1: (5, 9, 2),
-        timeperiod2: (12, 16, 2),
-        timeperiod3: (26, 30, 2),
-    };
-    UltOscBatchBuilder::new()
-        .kernel(Kernel::Avx2Batch)
-        .apply_slice(high, low, close, &sweep)?;
-    Ok(())
-}
-
-#[inline(always)]
-fn ultosc_batch_avx512batch(input: &UltOscInputS) -> anyhow::Result<()> {
-    let (high, low, close) = match &input.data {
-        UltOscData::Candles { candles, .. } => (&candles.high[..], &candles.low[..], &candles.close[..]),
-        UltOscData::Slices { high, low, close } => (*high, *low, *close),
-    };
-    let sweep = UltOscBatchRange {
-        timeperiod1: (5, 9, 2),
-        timeperiod2: (12, 16, 2),
-        timeperiod3: (26, 30, 2),
-    };
-    UltOscBatchBuilder::new()
-        .kernel(Kernel::Avx512Batch)
-        .apply_slice(high, low, close, &sweep)?;
-    Ok(())
-}
-
-// Custom implementation for BuffAverages which requires price and volume
-// Note: For simplicity, we'll just use default test data rather than trying to extract from the complex input structure
-paste::paste! {
-    #[inline(always)]
-    fn buff_averages_batch_scalarbatch(_input: &BuffAveragesInputS) -> anyhow::Result<()> {
-        // Use default test data for batch benchmarks
-        let data = &CANDLES_10K.close;
-        let volume = &CANDLES_10K.volume;
-        BuffAveragesBatchBuilder::new()
-            .kernel(Kernel::ScalarBatch)
-            .apply_slices(data, volume)?;
-        Ok(())
+make_pair_from_input_wrappers!(
+    pvi_batch,
+    PviBatchBuilder,
+    PviInputS,
+    |input: &PviInputS| -> anyhow::Result<(&[f64], &[f64])> {
+        use my_project::indicators::pvi::PviData;
+        let (close, volume) = match &input.data {
+            PviData::Candles { candles, close_source, volume_source } => (
+                source_type(candles, close_source),
+                source_type(candles, volume_source),
+            ),
+            PviData::Slices { close, volume } => (*close, *volume),
+        };
+        Ok((close, volume))
     }
-    #[inline(always)]
-    fn buff_averages_batch_avx2batch(_input: &BuffAveragesInputS) -> anyhow::Result<()> {
-        let data = &CANDLES_10K.close;
-        let volume = &CANDLES_10K.volume;
-        BuffAveragesBatchBuilder::new()
-            .kernel(Kernel::Avx2Batch)
-            .apply_slices(data, volume)?;
-        Ok(())
-    }
-    #[inline(always)]
-    fn buff_averages_batch_avx512batch(_input: &BuffAveragesInputS) -> anyhow::Result<()> {
-        let data = &CANDLES_10K.close;
-        let volume = &CANDLES_10K.volume;
-        BuffAveragesBatchBuilder::new()
-            .kernel(Kernel::Avx512Batch)
-            .apply_slices(data, volume)?;
-        Ok(())
-    }
-}
-
-// Custom implementation for PVI which requires close and volume
-paste::paste! {
-    #[inline(always)]
-    fn pvi_batch_scalarbatch(_input: &PviInputS) -> anyhow::Result<()> {
-        let close = &CANDLES_10K.close;
-        let volume = &CANDLES_10K.volume;
-        PviBatchBuilder::new()
-            .kernel(Kernel::ScalarBatch)
-            .apply_slices(close, volume)?;
-        Ok(())
-    }
-    #[inline(always)]
-    fn pvi_batch_avx2batch(_input: &PviInputS) -> anyhow::Result<()> {
-        let close = &CANDLES_10K.close;
-        let volume = &CANDLES_10K.volume;
-        PviBatchBuilder::new()
-            .kernel(Kernel::Avx2Batch)
-            .apply_slices(close, volume)?;
-        Ok(())
-    }
-    #[inline(always)]
-    fn pvi_batch_avx512batch(_input: &PviInputS) -> anyhow::Result<()> {
-        let close = &CANDLES_10K.close;
-        let volume = &CANDLES_10K.volume;
-        PviBatchBuilder::new()
-            .kernel(Kernel::Avx512Batch)
-            .apply_slices(close, volume)?;
-        Ok(())
-    }
-}
+);
 
 // Custom implementation for ASO which requires full OHLC
-paste::paste! {
-    #[inline(always)]
-    fn aso_batch_scalarbatch(input: &AsoInputS) -> anyhow::Result<()> {
-        match &input.data {
-            AsoData::Candles { candles, .. } => {
-                AsoBatchBuilder::new()
-                    .kernel(Kernel::ScalarBatch)
-                    .apply_candles(candles)?;
-            }
-            AsoData::Slices { open, high, low, close } => {
-                AsoBatchBuilder::new()
-                    .kernel(Kernel::ScalarBatch)
-                    .apply_slices(open, high, low, close)?;
-            }
-        }
-        Ok(())
+make_quad_from_input_wrappers!(
+    aso_batch,
+    AsoBatchBuilder,
+    AsoInputS,
+    my_project::indicators::aso::AsoData,
+    |input: &AsoInputS| -> anyhow::Result<(&[f64], &[f64], &[f64], &[f64])> {
+        let (o,h,l,c) = match &input.data {
+            AsoData::Candles { candles, .. } => (&candles.open[..], &candles.high[..], &candles.low[..], &candles.close[..]),
+            AsoData::Slices { open, high, low, close } => (*open, *high, *low, *close),
+        };
+        Ok((o,h,l,c))
     }
-    #[inline(always)]
-    fn aso_batch_avx2batch(input: &AsoInputS) -> anyhow::Result<()> {
-        match &input.data {
-            AsoData::Candles { candles, .. } => {
-                AsoBatchBuilder::new()
-                    .kernel(Kernel::Avx2Batch)
-                    .apply_candles(candles)?;
-            }
-            AsoData::Slices { open, high, low, close } => {
-                AsoBatchBuilder::new()
-                    .kernel(Kernel::Avx2Batch)
-                    .apply_slices(open, high, low, close)?;
-            }
-        }
-        Ok(())
-    }
-    #[inline(always)]
-    fn aso_batch_avx512batch(input: &AsoInputS) -> anyhow::Result<()> {
-        match &input.data {
-            AsoData::Candles { candles, .. } => {
-                AsoBatchBuilder::new()
-                    .kernel(Kernel::Avx512Batch)
-                    .apply_candles(candles)?;
-            }
-            AsoData::Slices { open, high, low, close } => {
-                AsoBatchBuilder::new()
-                    .kernel(Kernel::Avx512Batch)
-                    .apply_slices(open, high, low, close)?;
-            }
-        }
-        Ok(())
-    }
-}
+);
 
 make_batch_wrappers!(
     macz_batch, MaczBatchBuilder, MaczInputS;
@@ -2231,55 +2291,13 @@ bench_variants!(
     atr_avx512
 );
 
-// ATR batch wrappers (OHLC slices)
-#[inline(always)]
-fn atr_batch_scalarbatch(input: &AtrInputS) -> anyhow::Result<()> {
-    let (high, low, close) = match &input.data {
-        my_project::indicators::atr::AtrData::Candles { candles } => (
-            candles.high.as_slice(),
-            candles.low.as_slice(),
-            candles.close.as_slice(),
-        ),
-        my_project::indicators::atr::AtrData::Slices { high, low, close } => (*high, *low, *close),
-    };
-    my_project::indicators::atr::AtrBatchBuilder::new()
-        .kernel(Kernel::ScalarBatch)
-        .apply_slices(high, low, close)
-        .map(|_| ())
-        .map_err(|e| anyhow!(e.to_string()))
-}
-#[inline(always)]
-fn atr_batch_avx2batch(input: &AtrInputS) -> anyhow::Result<()> {
-    let (high, low, close) = match &input.data {
-        my_project::indicators::atr::AtrData::Candles { candles } => (
-            candles.high.as_slice(),
-            candles.low.as_slice(),
-            candles.close.as_slice(),
-        ),
-        my_project::indicators::atr::AtrData::Slices { high, low, close } => (*high, *low, *close),
-    };
-    my_project::indicators::atr::AtrBatchBuilder::new()
-        .kernel(Kernel::Avx2Batch)
-        .apply_slices(high, low, close)
-        .map(|_| ())
-        .map_err(|e| anyhow!(e.to_string()))
-}
-#[inline(always)]
-fn atr_batch_avx512batch(input: &AtrInputS) -> anyhow::Result<()> {
-    let (high, low, close) = match &input.data {
-        my_project::indicators::atr::AtrData::Candles { candles } => (
-            candles.high.as_slice(),
-            candles.low.as_slice(),
-            candles.close.as_slice(),
-        ),
-        my_project::indicators::atr::AtrData::Slices { high, low, close } => (*high, *low, *close),
-    };
-    my_project::indicators::atr::AtrBatchBuilder::new()
-        .kernel(Kernel::Avx512Batch)
-        .apply_slices(high, low, close)
-        .map(|_| ())
-        .map_err(|e| anyhow!(e.to_string()))
-}
+// ATR batch wrappers (OHLC slices) via macro
+make_hlc_batch_wrappers!(
+    atr_batch,
+    my_project::indicators::atr::AtrBatchBuilder,
+    AtrInputS,
+    my_project::indicators::atr::AtrData
+);
 bench_variants!(
     atr_batch => AtrInputS; None;
     atr_batch_scalarbatch,
@@ -2365,21 +2383,14 @@ make_batch_wrappers!(
     ScalarBatch, Avx2Batch, Avx512Batch
 );
 
-// Pivot batch custom wrappers (needs OHLC slices)
-#[inline(always)]
-fn pivot_batch_scalarbatch(input: &PivotInputS) -> anyhow::Result<()> {
-    let (h, l, c, o) = match input.as_ref() {
-        PivotData::Candles { candles } => (
-            candles.high.as_slice(),
-            candles.low.as_slice(),
-            candles.close.as_slice(),
-            candles.open.as_slice(),
-        ),
-        PivotData::Slices { high, low, close, open } => (*high, *low, *close, *open),
-    };
-    PivotBatchBuilder::new().kernel(Kernel::ScalarBatch).apply_slice(h, l, c, o)?;
-    Ok(())
-}
+// Pivot batch wrappers via macro (uses apply_slice(h,l,c,o))
+make_ohlc_batch_wrappers!(
+    pivot_batch,
+    PivotBatchBuilder,
+    PivotInputS,
+    PivotData,
+    apply_slice
+);
 
 // InputLen for DVDIQQE (single-series)
 impl InputLen for DvdiqqeInputS {
@@ -2391,34 +2402,6 @@ impl InputLen for DvdiqqeInputS {
             _ => panic!("unsupported len {len}"),
         }
     }
-}
-#[inline(always)]
-fn pivot_batch_avx2batch(input: &PivotInputS) -> anyhow::Result<()> {
-    let (h, l, c, o) = match input.as_ref() {
-        PivotData::Candles { candles } => (
-            candles.high.as_slice(),
-            candles.low.as_slice(),
-            candles.close.as_slice(),
-            candles.open.as_slice(),
-        ),
-        PivotData::Slices { high, low, close, open } => (*high, *low, *close, *open),
-    };
-    PivotBatchBuilder::new().kernel(Kernel::Avx2Batch).apply_slice(h, l, c, o)?;
-    Ok(())
-}
-#[inline(always)]
-fn pivot_batch_avx512batch(input: &PivotInputS) -> anyhow::Result<()> {
-    let (h, l, c, o) = match input.as_ref() {
-        PivotData::Candles { candles } => (
-            candles.high.as_slice(),
-            candles.low.as_slice(),
-            candles.close.as_slice(),
-            candles.open.as_slice(),
-        ),
-        PivotData::Slices { high, low, close, open } => (*high, *low, *close, *open),
-    };
-    PivotBatchBuilder::new().kernel(Kernel::Avx512Batch).apply_slice(h, l, c, o)?;
-    Ok(())
 }
 
 bench_variants!(
@@ -2461,457 +2444,149 @@ make_batch_wrappers!(swma_batch, SwmaBatchBuilder, SwmaInputS; ScalarBatch, Avx2
 make_batch_wrappers!(tema_batch, TemaBatchBuilder, TemaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(tilson_batch, TilsonBatchBuilder, TilsonInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(prb_batch, PrbBatchBuilder, PrbInputS; ScalarBatch, Avx2Batch, Avx512Batch);
-// Custom batch wrappers for TRADJEMA (requires OHLC data)
-#[inline(always)]
-fn tradjema_batch_scalarbatch(input: &TradjemaInputS) -> anyhow::Result<()> {
-    use my_project::indicators::moving_averages::tradjema::{TradjemaBatchBuilder, TradjemaData};
-    use my_project::utilities::enums::Kernel;
-
-    let (high, low, close) = match &input.data {
-        TradjemaData::Candles { candles } => {
-            (&candles.high[..], &candles.low[..], &candles.close[..])
-        }
-        TradjemaData::Slices { high, low, close } => (*high, *low, *close),
-    };
-
-    TradjemaBatchBuilder::new()
-        .kernel(Kernel::ScalarBatch)
-        .apply_slices(&high, &low, &close)?;
-    Ok(())
-}
-
-#[inline(always)]
-fn tradjema_batch_avx2batch(input: &TradjemaInputS) -> anyhow::Result<()> {
-    use my_project::indicators::moving_averages::tradjema::{TradjemaBatchBuilder, TradjemaData};
-    use my_project::utilities::enums::Kernel;
-
-    let (high, low, close) = match &input.data {
-        TradjemaData::Candles { candles } => {
-            (&candles.high[..], &candles.low[..], &candles.close[..])
-        }
-        TradjemaData::Slices { high, low, close } => (*high, *low, *close),
-    };
-
-    TradjemaBatchBuilder::new()
-        .kernel(Kernel::Avx2Batch)
-        .apply_slices(&high, &low, &close)?;
-    Ok(())
-}
-
-#[inline(always)]
-fn tradjema_batch_avx512batch(input: &TradjemaInputS) -> anyhow::Result<()> {
-    use my_project::indicators::moving_averages::tradjema::{TradjemaBatchBuilder, TradjemaData};
-    use my_project::utilities::enums::Kernel;
-
-    let (high, low, close) = match &input.data {
-        TradjemaData::Candles { candles } => {
-            (&candles.high[..], &candles.low[..], &candles.close[..])
-        }
-        TradjemaData::Slices { high, low, close } => (*high, *low, *close),
-    };
-
-    TradjemaBatchBuilder::new()
-        .kernel(Kernel::Avx512Batch)
-        .apply_slices(&high, &low, &close)?;
-    Ok(())
-}
+make_hlc_batch_wrappers!(
+    tradjema_batch,
+    my_project::indicators::moving_averages::tradjema::TradjemaBatchBuilder,
+    TradjemaInputS,
+    my_project::indicators::moving_averages::tradjema::TradjemaData
+);
 
 make_batch_wrappers!(trendflex_batch, TrendFlexBatchBuilder, TrendFlexInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(trima_batch, TrimaBatchBuilder, TrimaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(pfe_batch, PfeBatchBuilder, PfeInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 // UMA needs special handling for volume parameter
-fn uma_batch_scalarbatch(input: &UmaInputS) -> anyhow::Result<()> {
-    let slice: &[f64] = input.as_ref();
-    UmaBatchBuilder::new()
-        .kernel(Kernel::ScalarBatch)
-        .apply_slice(slice, None)?;
-    Ok(())
-}
-fn uma_batch_avx2batch(input: &UmaInputS) -> anyhow::Result<()> {
-    let slice: &[f64] = input.as_ref();
-    UmaBatchBuilder::new()
-        .kernel(Kernel::Avx2Batch)
-        .apply_slice(slice, None)?;
-    Ok(())
-}
-fn uma_batch_avx512batch(input: &UmaInputS) -> anyhow::Result<()> {
-    let slice: &[f64] = input.as_ref();
-    UmaBatchBuilder::new()
-        .kernel(Kernel::Avx512Batch)
-        .apply_slice(slice, None)?;
-    Ok(())
-}
+make_single_slice_with_arg_wrappers!(
+    uma_batch,
+    UmaBatchBuilder,
+    UmaInputS,
+    None,
+    apply_slice
+);
 
-fn willr_batch_scalarbatch(input: &WillrInputS) -> anyhow::Result<()> {
-    let (high, low, close) = match &input.data {
-        WillrData::Candles { candles } => (&candles.high[..], &candles.low[..], &candles.close[..]),
-        WillrData::Slices { high, low, close } => (*high, *low, *close),
-    };
-
-    WillrBatchBuilder::new()
-        .kernel(Kernel::ScalarBatch)
-        .apply_slices(high, low, close)?;
-    Ok(())
-}
-
-fn willr_batch_avx2batch(input: &WillrInputS) -> anyhow::Result<()> {
-    let (high, low, close) = match &input.data {
-        WillrData::Candles { candles } => (&candles.high[..], &candles.low[..], &candles.close[..]),
-        WillrData::Slices { high, low, close } => (*high, *low, *close),
-    };
-
-    WillrBatchBuilder::new()
-        .kernel(Kernel::Avx2Batch)
-        .apply_slices(high, low, close)?;
-    Ok(())
-}
-
-fn willr_batch_avx512batch(input: &WillrInputS) -> anyhow::Result<()> {
-    let (high, low, close) = match &input.data {
-        WillrData::Candles { candles } => (&candles.high[..], &candles.low[..], &candles.close[..]),
-        WillrData::Slices { high, low, close } => (*high, *low, *close),
-    };
-
-    WillrBatchBuilder::new()
-        .kernel(Kernel::Avx512Batch)
-        .apply_slices(high, low, close)?;
-    Ok(())
-}
+make_hlc_batch_wrappers!(
+    willr_batch,
+    WillrBatchBuilder,
+    WillrInputS,
+    my_project::indicators::willr::WillrData
+);
 make_batch_wrappers!(vidya_batch, VidyaBatchBuilder, VidyaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(vlma_batch, VlmaBatchBuilder, VlmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(mom_batch, MomBatchBuilder, MomInputS; ScalarBatch, Avx2Batch, Avx512Batch);
-// CVI needs OHLC (high/low) custom batch wrappers
-#[inline(always)]
-fn cvi_batch_scalarbatch(input: &CviInputS) -> anyhow::Result<()> {
-    use my_project::utilities::enums::Kernel;
-    let (high, low) = match &input.data {
-        my_project::indicators::cvi::CviData::Candles(c) => (&c.high[..], &c.low[..]),
-        my_project::indicators::cvi::CviData::Slices { high, low } => (*high, *low),
-    };
-    CviBatchBuilder::new()
-        .kernel(Kernel::ScalarBatch)
-        .apply_slices(high, low)?;
-    Ok(())
-}
-
-#[inline(always)]
-fn cvi_batch_avx2batch(input: &CviInputS) -> anyhow::Result<()> {
-    use my_project::utilities::enums::Kernel;
-    let (high, low) = match &input.data {
-        my_project::indicators::cvi::CviData::Candles(c) => (&c.high[..], &c.low[..]),
-        my_project::indicators::cvi::CviData::Slices { high, low } => (*high, *low),
-    };
-    CviBatchBuilder::new()
-        .kernel(Kernel::Avx2Batch)
-        .apply_slices(high, low)?;
-    Ok(())
-}
-
-#[inline(always)]
-fn cvi_batch_avx512batch(input: &CviInputS) -> anyhow::Result<()> {
-    use my_project::utilities::enums::Kernel;
-    let (high, low) = match &input.data {
-        my_project::indicators::cvi::CviData::Candles(c) => (&c.high[..], &c.low[..]),
-        my_project::indicators::cvi::CviData::Slices { high, low } => (*high, *low),
-    };
-    CviBatchBuilder::new()
-        .kernel(Kernel::Avx512Batch)
-        .apply_slices(high, low)?;
-    Ok(())
-}
-
-// Custom implementation for VolumeAdjustedMa which requires price and volume
-// Note: For simplicity, we'll just use default test data rather than trying to extract from the complex input structure
-paste::paste! {
-    #[inline(always)]
-    fn volume_adjusted_ma_batch_scalarbatch(_input: &VolumeAdjustedMaInputS) -> anyhow::Result<()> {
-        // Use default test data for batch benchmarks
-        let data = &CANDLES_10K.close;
-        let volume = &CANDLES_10K.volume;
-        VolumeAdjustedMaBatchBuilder::new()
-            .kernel(Kernel::ScalarBatch)
-            .apply_slices(data, volume)?;
-        Ok(())
+// CVI (HL) batch wrappers via extractor-based pair helper
+make_pair_from_input_wrappers!(
+    cvi_batch,
+    CviBatchBuilder,
+    CviInputS,
+    |input: &CviInputS| -> anyhow::Result<(&[f64], &[f64])> {
+        use my_project::indicators::cvi::CviData;
+        let pair = match &input.data {
+            CviData::Candles(c) => (&c.high[..], &c.low[..]),
+            CviData::Slices { high, low } => (*high, *low),
+        };
+        Ok(pair)
     }
-    #[inline(always)]
-    fn volume_adjusted_ma_batch_avx2batch(_input: &VolumeAdjustedMaInputS) -> anyhow::Result<()> {
-        let data = &CANDLES_10K.close;
-        let volume = &CANDLES_10K.volume;
-        VolumeAdjustedMaBatchBuilder::new()
-            .kernel(Kernel::Avx2Batch)
-            .apply_slices(data, volume)?;
-        Ok(())
+);
+
+make_pair_from_input_wrappers!(
+    volume_adjusted_ma_batch,
+    VolumeAdjustedMaBatchBuilder,
+    VolumeAdjustedMaInputS,
+    |input: &VolumeAdjustedMaInputS| -> anyhow::Result<(&[f64], &[f64])> {
+        use my_project::indicators::moving_averages::volume_adjusted_ma::VolumeAdjustedMaData;
+        let (data, volume) = match &input.data {
+            VolumeAdjustedMaData::Candles { candles, source } => (
+                source_type(candles, source),
+                &candles.volume[..],
+            ),
+            VolumeAdjustedMaData::Slice { data, volume } => (*data, *volume),
+        };
+        Ok((data, volume))
     }
-    #[inline(always)]
-    fn volume_adjusted_ma_batch_avx512batch(_input: &VolumeAdjustedMaInputS) -> anyhow::Result<()> {
-        let data = &CANDLES_10K.close;
-        let volume = &CANDLES_10K.volume;
-        VolumeAdjustedMaBatchBuilder::new()
-            .kernel(Kernel::Avx512Batch)
-            .apply_slices(data, volume)?;
-        Ok(())
-    }
-}
+);
 
 make_batch_wrappers!(vpwma_batch, VpwmaBatchBuilder, VpwmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(wilders_batch, WildersBatchBuilder, WildersInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(wma_batch, WmaBatchBuilder, WmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(zlema_batch, ZlemaBatchBuilder, ZlemaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
-// VI requires OHLC; provide custom batch wrappers
-fn vi_batch_scalarbatch(input: &ViInputS) -> anyhow::Result<()> {
-    let (high, low, close) = match &input.data {
-        ViData::Candles { candles } => (&candles.high[..], &candles.low[..], &candles.close[..]),
-        ViData::Slices { high, low, close } => (*high, *low, *close),
-    };
-    ViBatchBuilder::new()
-        .kernel(Kernel::ScalarBatch)
-        .apply_slices(high, low, close)?;
-    Ok(())
-}
-fn vi_batch_avx2batch(input: &ViInputS) -> anyhow::Result<()> {
-    let (high, low, close) = match &input.data {
-        ViData::Candles { candles } => (&candles.high[..], &candles.low[..], &candles.close[..]),
-        ViData::Slices { high, low, close } => (*high, *low, *close),
-    };
-    ViBatchBuilder::new()
-        .kernel(Kernel::Avx2Batch)
-        .apply_slices(high, low, close)?;
-    Ok(())
-}
-fn vi_batch_avx512batch(input: &ViInputS) -> anyhow::Result<()> {
-    let (high, low, close) = match &input.data {
-        ViData::Candles { candles } => (&candles.high[..], &candles.low[..], &candles.close[..]),
-        ViData::Slices { high, low, close } => (*high, *low, *close),
-    };
-    ViBatchBuilder::new()
-        .kernel(Kernel::Avx512Batch)
-        .apply_slices(high, low, close)?;
-    Ok(())
-}
-// Keltner batch custom wrappers (needs OHLC slices + source)
-#[inline(always)]
-fn keltner_batch_scalarbatch(input: &KeltnerInputS) -> anyhow::Result<()> {
-    let src: &[f64] = input.as_ref();
-    let (h, l, c) = match &input.data {
-        my_project::indicators::keltner::KeltnerData::Candles { candles, .. } => (
-            candles.high.as_slice(),
-            candles.low.as_slice(),
-            candles.close.as_slice(),
-        ),
-        my_project::indicators::keltner::KeltnerData::Slice(h, l, c, _) => (*h, *l, *c),
-    };
-    my_project::indicators::keltner::KeltnerBatchBuilder::new()
-        .kernel(Kernel::ScalarBatch)
-        .apply_slice(h, l, c, src)?;
-    Ok(())
-}
-#[inline(always)]
-fn keltner_batch_avx2batch(input: &KeltnerInputS) -> anyhow::Result<()> {
-    let src: &[f64] = input.as_ref();
-    let (h, l, c) = match &input.data {
-        my_project::indicators::keltner::KeltnerData::Candles { candles, .. } => (
-            candles.high.as_slice(),
-            candles.low.as_slice(),
-            candles.close.as_slice(),
-        ),
-        my_project::indicators::keltner::KeltnerData::Slice(h, l, c, _) => (*h, *l, *c),
-    };
-    my_project::indicators::keltner::KeltnerBatchBuilder::new()
-        .kernel(Kernel::Avx2Batch)
-        .apply_slice(h, l, c, src)?;
-    Ok(())
-}
-#[inline(always)]
-fn keltner_batch_avx512batch(input: &KeltnerInputS) -> anyhow::Result<()> {
-    let src: &[f64] = input.as_ref();
-    let (h, l, c) = match &input.data {
-        my_project::indicators::keltner::KeltnerData::Candles { candles, .. } => (
-            candles.high.as_slice(),
-            candles.low.as_slice(),
-            candles.close.as_slice(),
-        ),
-        my_project::indicators::keltner::KeltnerData::Slice(h, l, c, _) => (*h, *l, *c),
-    };
-    my_project::indicators::keltner::KeltnerBatchBuilder::new()
-        .kernel(Kernel::Avx512Batch)
-        .apply_slice(h, l, c, src)?;
-    Ok(())
-}
+make_hlc_batch_wrappers!(
+    vi_batch,
+    ViBatchBuilder,
+    ViInputS,
+    my_project::indicators::vi::ViData
+);
+// Keltner (HLC + src) via 4-slice extractor + custom apply method
+make_quad_with_method_wrappers!(
+    keltner_batch,
+    my_project::indicators::keltner::KeltnerBatchBuilder,
+    KeltnerInputS,
+    |input: &KeltnerInputS| -> anyhow::Result<(&[f64], &[f64], &[f64], &[f64])> {
+        use my_project::indicators::keltner::KeltnerData;
+        let (h,l,c,s) = match &input.data {
+            KeltnerData::Candles { candles, source } => (
+                candles.high.as_slice(),
+                candles.low.as_slice(),
+                candles.close.as_slice(),
+                source_type(candles, source),
+            ),
+            KeltnerData::Slice(h, l, c, s) => (*h, *l, *c, *s),
+        };
+        Ok((h,l,c,s))
+    },
+    apply_slice
+);
 make_batch_wrappers!(trix_batch, TrixBatchBuilder, TrixInputS; ScalarBatch, Avx2Batch, Avx512Batch);
-// ChandelierExit needs special handling for apply_slices
-fn chandelier_exit_batch_scalarbatch(input: &ChandelierExitInputS) -> anyhow::Result<()> {
-    // ChandelierExit requires high, low, and close data
-    // For benchmarking, we'll use the same data for all three
-    let slice: &[f64] = input.as_ref();
-    CeBatchBuilder::new()
-        .kernel(Kernel::ScalarBatch)
-        .apply_slices(slice, slice, slice)?;
-    Ok(())
-}
-fn chandelier_exit_batch_avx2batch(input: &ChandelierExitInputS) -> anyhow::Result<()> {
-    let slice: &[f64] = input.as_ref();
-    CeBatchBuilder::new()
-        .kernel(Kernel::Avx2Batch)
-        .apply_slices(slice, slice, slice)?;
-    Ok(())
-}
-fn chandelier_exit_batch_avx512batch(input: &ChandelierExitInputS) -> anyhow::Result<()> {
-    let slice: &[f64] = input.as_ref();
-    CeBatchBuilder::new()
-        .kernel(Kernel::Avx512Batch)
-        .apply_slices(slice, slice, slice)?;
-    Ok(())
-}
+// Chandelier Exit (HLC) batch wrappers via macro
+make_hlc_batch_wrappers!(
+    chandelier_exit_batch,
+    CeBatchBuilder,
+    ChandelierExitInputS,
+    my_project::indicators::chandelier_exit::ChandelierExitData
+);
 // PercentileNearestRank needs special handling for apply method
-fn percentile_nearest_rank_batch_scalarbatch(
-    input: &PercentileNearestRankInputS,
-) -> anyhow::Result<()> {
-    let slice: &[f64] = input.as_ref();
-    PercentileNearestRankBatchBuilder::new()
-        .kernel(Kernel::ScalarBatch)
-        .apply(slice)?;
-    Ok(())
-}
-fn percentile_nearest_rank_batch_avx2batch(
-    input: &PercentileNearestRankInputS,
-) -> anyhow::Result<()> {
-    let slice: &[f64] = input.as_ref();
-    PercentileNearestRankBatchBuilder::new()
-        .kernel(Kernel::Avx2Batch)
-        .apply(slice)?;
-    Ok(())
-}
-fn percentile_nearest_rank_batch_avx512batch(
-    input: &PercentileNearestRankInputS,
-) -> anyhow::Result<()> {
-    let slice: &[f64] = input.as_ref();
-    PercentileNearestRankBatchBuilder::new()
-        .kernel(Kernel::Avx512Batch)
-        .apply(slice)?;
-    Ok(())
-}
+make_single_apply_wrappers!(
+    percentile_nearest_rank_batch,
+    PercentileNearestRankBatchBuilder,
+    PercentileNearestRankInputS,
+    apply
+);
 
 make_batch_wrappers!(otto_batch, OttoBatchBuilder, OttoInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(var_batch, VarBatchBuilder, VarInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 
-// NATR (OHLC batch) wrappers
-#[inline(always)]
-fn natr_batch_scalarbatch(input: &NatrInputS) -> anyhow::Result<()> {
-    let (high, low, close) = match &input.data {
-        NatrData::Candles { candles } => (&candles.high[..], &candles.low[..], &candles.close[..]),
-        NatrData::Slices { high, low, close } => (*high, *low, *close),
-    };
-    NatrBatchBuilder::new()
-        .kernel(Kernel::ScalarBatch)
-        .apply_slices(high, low, close)?;
-    Ok(())
-}
+// NATR (OHLC batch) wrappers via macro
+make_hlc_batch_wrappers!(
+    natr_batch,
+    NatrBatchBuilder,
+    NatrInputS,
+    my_project::indicators::natr::NatrData
+);
 
-// Donchian batch custom wrappers (high/low inputs)
-#[inline(always)]
-fn donchian_batch_scalarbatch(input: &DonchianInputS) -> anyhow::Result<()> {
-    use my_project::indicators::donchian::DonchianBatchBuilder;
-    let (high, low) = match &input.data {
-        my_project::indicators::donchian::DonchianData::Candles { candles } => {
-            (&candles.high[..], &candles.low[..])
-        }
-        my_project::indicators::donchian::DonchianData::Slices { high, low } => (*high, *low),
-    };
-    DonchianBatchBuilder::new()
-        .kernel(Kernel::ScalarBatch)
-        .apply_slices(high, low)?;
-    Ok(())
-}
-
-#[inline(always)]
-fn donchian_batch_avx2batch(input: &DonchianInputS) -> anyhow::Result<()> {
-    use my_project::indicators::donchian::DonchianBatchBuilder;
-    let (high, low) = match &input.data {
-        my_project::indicators::donchian::DonchianData::Candles { candles } => {
-            (&candles.high[..], &candles.low[..])
-        }
-        my_project::indicators::donchian::DonchianData::Slices { high, low } => (*high, *low),
-    };
-    DonchianBatchBuilder::new()
-        .kernel(Kernel::Avx2Batch)
-        .apply_slices(high, low)?;
-    Ok(())
-}
-
-#[inline(always)]
-fn donchian_batch_avx512batch(input: &DonchianInputS) -> anyhow::Result<()> {
-    use my_project::indicators::donchian::DonchianBatchBuilder;
-    let (high, low) = match &input.data {
-        my_project::indicators::donchian::DonchianData::Candles { candles } => {
-            (&candles.high[..], &candles.low[..])
-        }
-        my_project::indicators::donchian::DonchianData::Slices { high, low } => (*high, *low),
-    };
-    DonchianBatchBuilder::new()
-        .kernel(Kernel::Avx512Batch)
-        .apply_slices(high, low)?;
-    Ok(())
-}
-
-#[inline(always)]
-fn natr_batch_avx2batch(input: &NatrInputS) -> anyhow::Result<()> {
-    let (high, low, close) = match &input.data {
-        NatrData::Candles { candles } => (&candles.high[..], &candles.low[..], &candles.close[..]),
-        NatrData::Slices { high, low, close } => (*high, *low, *close),
-    };
-    NatrBatchBuilder::new()
-        .kernel(Kernel::Avx2Batch)
-        .apply_slices(high, low, close)?;
-    Ok(())
-}
-
-#[inline(always)]
-fn natr_batch_avx512batch(input: &NatrInputS) -> anyhow::Result<()> {
-    let (high, low, close) = match &input.data {
-        NatrData::Candles { candles } => (&candles.high[..], &candles.low[..], &candles.close[..]),
-        NatrData::Slices { high, low, close } => (*high, *low, *close),
-    };
-    NatrBatchBuilder::new()
-        .kernel(Kernel::Avx512Batch)
-        .apply_slices(high, low, close)?;
-    Ok(())
-}
+// Donchian (HL batch) wrappers via macro
+make_hl_batch_wrappers!(
+    donchian_batch,
+    my_project::indicators::donchian::DonchianBatchBuilder,
+    DonchianInputS,
+    my_project::indicators::donchian::DonchianData
+);
 
 // Other indicators batch wrappers
 // Custom implementation for AVSL which requires close, low, and volume
 // Note: For simplicity, we'll just use default test data rather than trying to extract from the complex input structure
 paste::paste! {
-    #[inline(always)]
-    fn avsl_batch_scalarbatch(_input: &AvslInputS) -> anyhow::Result<()> {
-        // Use default test data for batch benchmarks
-        let close = &CANDLES_10K.close;
-        let low = &CANDLES_10K.low;
-        let volume = &CANDLES_10K.volume;
-        AvslBatchBuilder::new()
-            .kernel(Kernel::ScalarBatch)
-            .apply_slices(close, low, volume)?;
-        Ok(())
+// AVSL batch wrappers via triple extractor (close, low, volume)
+make_triple_from_input_wrappers!(
+    avsl_batch,
+    AvslBatchBuilder,
+    AvslInputS,
+    |input: &AvslInputS| -> anyhow::Result<(&[f64], &[f64], &[f64])> {
+        use my_project::indicators::avsl::AvslData;
+        let (close, low, vol) = match &input.data {
+            AvslData::Candles { candles, .. } => (&candles.close[..], &candles.low[..], &candles.volume[..]),
+            AvslData::Slices { close, low, volume } => (*close, *low, *volume),
+        };
+        Ok((close, low, vol))
     }
-    #[inline(always)]
-    fn avsl_batch_avx2batch(_input: &AvslInputS) -> anyhow::Result<()> {
-        let close = &CANDLES_10K.close;
-        let low = &CANDLES_10K.low;
-        let volume = &CANDLES_10K.volume;
-        AvslBatchBuilder::new()
-            .kernel(Kernel::Avx2Batch)
-            .apply_slices(close, low, volume)?;
-        Ok(())
-    }
-    #[inline(always)]
-    fn avsl_batch_avx512batch(_input: &AvslInputS) -> anyhow::Result<()> {
-        let close = &CANDLES_10K.close;
-        let low = &CANDLES_10K.low;
-        let volume = &CANDLES_10K.volume;
-        AvslBatchBuilder::new()
-            .kernel(Kernel::Avx512Batch)
-            .apply_slices(close, low, volume)?;
-        Ok(())
-    }
+);
 }
 make_batch_wrappers!(dma_batch, DmaBatchBuilder, DmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(ehma_batch, EhmaBatchBuilder, EhmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
@@ -3221,45 +2896,13 @@ bench_variants!(
     dm_avx512
 );
 
-// DM batch wrappers (two-slice input)
-#[inline(always)]
-fn dm_batch_scalarbatch(input: &DmInputS) -> anyhow::Result<()> {
-    let (high, low) = match &input.data {
-        DmData::Candles { candles } => (&candles.high[..], &candles.low[..]),
-        DmData::Slices { high, low } => (*high, *low),
-    };
-    DmBatchBuilder::new()
-        .kernel(Kernel::ScalarBatch)
-        .apply_slices(high, low)
-        .map(|_| ())
-        .map_err(|e| anyhow!(e.to_string()))
-}
-
-#[inline(always)]
-fn dm_batch_avx2batch(input: &DmInputS) -> anyhow::Result<()> {
-    let (high, low) = match &input.data {
-        DmData::Candles { candles } => (&candles.high[..], &candles.low[..]),
-        DmData::Slices { high, low } => (*high, *low),
-    };
-    DmBatchBuilder::new()
-        .kernel(Kernel::Avx2Batch)
-        .apply_slices(high, low)
-        .map(|_| ())
-        .map_err(|e| anyhow!(e.to_string()))
-}
-
-#[inline(always)]
-fn dm_batch_avx512batch(input: &DmInputS) -> anyhow::Result<()> {
-    let (high, low) = match &input.data {
-        DmData::Candles { candles } => (&candles.high[..], &candles.low[..]),
-        DmData::Slices { high, low } => (*high, *low),
-    };
-    DmBatchBuilder::new()
-        .kernel(Kernel::Avx512Batch)
-        .apply_slices(high, low)
-        .map(|_| ())
-        .map_err(|e| anyhow!(e.to_string()))
-}
+// DM (HL) batch wrappers via macro
+make_hl_batch_wrappers!(
+    dm_batch,
+    DmBatchBuilder,
+    DmInputS,
+    my_project::indicators::dm::DmData
+);
 
 bench_variants!(
     dm_batch => DmInputS; Some(14);
@@ -4657,42 +4300,14 @@ bench_variants!(
     aroon_osc_avx512
 );
 
-// Aroon Oscillator batch benches (needs high+low)
-#[inline(always)]
-fn aroon_osc_batch_scalarbatch(input: &AroonOscInputS) -> anyhow::Result<()> {
-    use my_project::indicators::aroonosc::AroonOscBatchBuilder;
-    let high = input.get_high();
-    let low = input.get_low();
-    AroonOscBatchBuilder::new()
-        .kernel(Kernel::ScalarBatch)
-        .apply_slices(high, low)
-        .map(|_| ())
-        .map_err(|e| anyhow::anyhow!(e.to_string()))
-}
-
-#[inline(always)]
-fn aroon_osc_batch_avx2batch(input: &AroonOscInputS) -> anyhow::Result<()> {
-    use my_project::indicators::aroonosc::AroonOscBatchBuilder;
-    let high = input.get_high();
-    let low = input.get_low();
-    AroonOscBatchBuilder::new()
-        .kernel(Kernel::Avx2Batch)
-        .apply_slices(high, low)
-        .map(|_| ())
-        .map_err(|e| anyhow::anyhow!(e.to_string()))
-}
-
-#[inline(always)]
-fn aroon_osc_batch_avx512batch(input: &AroonOscInputS) -> anyhow::Result<()> {
-    use my_project::indicators::aroonosc::AroonOscBatchBuilder;
-    let high = input.get_high();
-    let low = input.get_low();
-    AroonOscBatchBuilder::new()
-        .kernel(Kernel::Avx512Batch)
-        .apply_slices(high, low)
-        .map(|_| ())
-        .map_err(|e| anyhow::anyhow!(e.to_string()))
-}
+make_pair_from_input_wrappers!(
+    aroon_osc_batch,
+    my_project::indicators::aroonosc::AroonOscBatchBuilder,
+    AroonOscInputS,
+    |input: &AroonOscInputS| -> anyhow::Result<(&[f64], &[f64])> {
+        Ok((input.get_high(), input.get_low()))
+    }
+);
 
 bench_variants!(
     aroon_osc_batch => AroonOscInputS; Some(14);
@@ -4791,52 +4406,13 @@ bench_variants!(
     ui_batch_avx512batch
 );
 
-// DI batch variants (OHLC slices required)
-#[inline(always)]
-fn di_batch_scalarbatch(input: &DiInputS) -> anyhow::Result<()> {
-    let (high, low, close) = match &input.data {
-        my_project::indicators::di::DiData::Candles { candles } => (
-            candles.high.as_slice(),
-            candles.low.as_slice(),
-            candles.close.as_slice(),
-        ),
-        my_project::indicators::di::DiData::Slices { high, low, close } => (*high, *low, *close),
-    };
-    my_project::indicators::di::DiBatchBuilder::new()
-        .kernel(Kernel::ScalarBatch)
-        .apply_slices(high, low, close)?;
-    Ok(())
-}
-#[inline(always)]
-fn di_batch_avx2batch(input: &DiInputS) -> anyhow::Result<()> {
-    let (high, low, close) = match &input.data {
-        my_project::indicators::di::DiData::Candles { candles } => (
-            candles.high.as_slice(),
-            candles.low.as_slice(),
-            candles.close.as_slice(),
-        ),
-        my_project::indicators::di::DiData::Slices { high, low, close } => (*high, *low, *close),
-    };
-    my_project::indicators::di::DiBatchBuilder::new()
-        .kernel(Kernel::Avx2Batch)
-        .apply_slices(high, low, close)?;
-    Ok(())
-}
-#[inline(always)]
-fn di_batch_avx512batch(input: &DiInputS) -> anyhow::Result<()> {
-    let (high, low, close) = match &input.data {
-        my_project::indicators::di::DiData::Candles { candles } => (
-            candles.high.as_slice(),
-            candles.low.as_slice(),
-            candles.close.as_slice(),
-        ),
-        my_project::indicators::di::DiData::Slices { high, low, close } => (*high, *low, *close),
-    };
-    my_project::indicators::di::DiBatchBuilder::new()
-        .kernel(Kernel::Avx512Batch)
-        .apply_slices(high, low, close)?;
-    Ok(())
-}
+// DI (HLC) batch wrappers via macro
+make_hlc_batch_wrappers!(
+    di_batch,
+    my_project::indicators::di::DiBatchBuilder,
+    DiInputS,
+    my_project::indicators::di::DiData
+);
 bench_variants!(
     di_batch => DiInputS; Some(27);
     di_batch_scalarbatch,
@@ -4916,6 +4492,8 @@ bench_variants!(
 bench_variants!(
     dx_batch => DxInputS; Some(14);
     dx_batch_scalarbatch,
+    dx_batch_avx2batch,
+    dx_batch_avx512batch,
 );
 
 criterion_main!(

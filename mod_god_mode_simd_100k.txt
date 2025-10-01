@@ -1,4 +1,0 @@
-kaufmanstop/kaufmanstop_avx512/100k
-                        time:   [112.84 µs 114.66 µs 116.56 µs]
-                        thrpt:  [6.3919 GiB/s 6.4980 GiB/s 6.6025 GiB/s]
-

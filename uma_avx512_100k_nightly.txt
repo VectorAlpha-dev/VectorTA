@@ -1,5 +1,0 @@
-uma/uma_avx512/100k     time:   [9.7544 ms 9.8353 ms 9.9503 ms]
-                        thrpt:  [76.675 MiB/s 77.571 MiB/s 78.215 MiB/s]
-Found 1 outliers among 10 measurements (10.00%)
-  1 (10.00%) high mild
-

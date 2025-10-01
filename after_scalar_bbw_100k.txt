@@ -1,8 +1,0 @@
-bollinger_bands_width_bench/scalar/100k
-                        time:   [127.34 µs 128.77 µs 130.15 µs]
-                        thrpt:  [5.7248 GiB/s 5.7859 GiB/s 5.8509 GiB/s]
-                 change:
-                        time:   [-83.583% -83.022% -82.417%] (p = 0.00 < 0.05)
-                        thrpt:  [+468.73% +489.00% +509.11%]
-                        Performance has improved.
-

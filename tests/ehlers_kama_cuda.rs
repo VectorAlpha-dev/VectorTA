@@ -11,7 +11,9 @@ use cust::memory::CopyDestination;
 use my_project::cuda::cuda_available;
 #[cfg(feature = "cuda")]
 use my_project::cuda::moving_averages::CudaEhlersKama;
+#[cfg(feature = "cuda")]
 use my_project::cuda::moving_averages::ehlers_kama_wrapper::ManySeriesKernelPolicy as EKManyPolicy;
+#[cfg(feature = "cuda")]
 use my_project::cuda::moving_averages::ehlers_kama_wrapper::CudaEhlersKamaPolicy as EKPolicy;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {

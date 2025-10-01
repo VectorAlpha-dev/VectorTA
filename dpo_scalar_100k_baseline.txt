@@ -1,3 +1,0 @@
-dpo_bench/scalar/100k   time:   [80.199 µs 80.768 µs 81.248 µs]
-                        thrpt:  [9.1702 GiB/s 9.2247 GiB/s 9.2901 GiB/s]
-

@@ -1,3 +1,0 @@
-emd_bench/scalar/10k    time:   [27.646 µs 27.821 µs 28.091 µs]
-                        thrpt:  [2.6523 GiB/s 2.6780 GiB/s 2.6950 GiB/s]
-

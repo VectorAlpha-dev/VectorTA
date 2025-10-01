@@ -1,7 +1,0 @@
-emd_bench/scalar/100k   time:   [512.54 µs 517.03 µs 521.14 µs]
-                        thrpt:  [1.4297 GiB/s 1.4410 GiB/s 1.4537 GiB/s]
-                 change:
-                        time:   [+2.0260% +3.7330% +5.4860%] (p = 0.00 < 0.05)
-                        thrpt:  [-5.2007% -3.5987% -1.9857%]
-                        Performance has regressed.
-

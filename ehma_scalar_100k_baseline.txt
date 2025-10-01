@@ -1,3 +1,0 @@
-ehma/ehma_scalar/100k   time:   [301.23 µs 314.91 µs 329.90 µs]
-                        thrpt:  [2.2584 GiB/s 2.3659 GiB/s 2.4734 GiB/s]
-

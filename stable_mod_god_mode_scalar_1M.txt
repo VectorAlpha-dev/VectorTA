@@ -1,7 +1,0 @@
-mod_god_mode_bench/scalar/1M
-                        time:   [20.517 ms 20.616 ms 20.862 ms]
-                        thrpt:  [365.71 MiB/s 370.07 MiB/s 371.85 MiB/s]
-Found 2 outliers among 10 measurements (20.00%)
-  1 (10.00%) high mild
-  1 (10.00%) high severe
-

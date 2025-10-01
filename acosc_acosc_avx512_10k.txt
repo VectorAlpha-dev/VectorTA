@@ -1,3 +1,0 @@
-acosc/acosc_avx512/10k  time:   [13.678 µs 13.725 µs 13.792 µs]
-                        thrpt:  [5.4019 GiB/s 5.4285 GiB/s 5.4471 GiB/s]
-

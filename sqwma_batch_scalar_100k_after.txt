@@ -1,6 +1,0 @@
-sqwma_batch/sqwma_batch_scalarbatch/100k
-                        time:   [246.78 µs 248.21 µs 250.29 µs]
-                        thrpt:  [678.71 GiB/s 684.40 GiB/s 688.37 GiB/s]
-Found 1 outliers among 10 measurements (10.00%)
-  1 (10.00%) low mild
-

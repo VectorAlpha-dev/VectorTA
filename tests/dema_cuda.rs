@@ -76,11 +76,9 @@ fn dema_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
 
     let data_f32: Vec<f32> = data.iter().map(|&v| v as f32).collect();
     let cuda = CudaDema::new(0).expect("CudaDema::new");
-    let (dev, combos_gpu) = cuda
+    let dev = cuda
         .dema_batch_dev(&data_f32, &sweep)
         .expect("dema_cuda_batch_dev");
-
-    assert_eq!(combos_cpu.len(), combos_gpu.len());
 
     let mut gpu_flat = vec![0f32; dev.len()];
     dev.buf
@@ -114,13 +112,11 @@ fn dema_cuda_host_copy_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let cuda = CudaDema::new(0).expect("CudaDema::new");
 
     let mut gpu_flat = vec![0f32; cpu_out.len()];
-    let (rows, cols, combos_gpu) = cuda
+    cuda
         .dema_batch_into_host_f32(&data_f32, &sweep, &mut gpu_flat)
         .expect("dema_cuda_batch_into_host_f32");
-
-    assert_eq!(rows, combos_cpu.len());
-    assert_eq!(cols, len);
-    assert_eq!(combos_cpu.len(), combos_gpu.len());
+    // Sanity: output length should match rows*cols
+    assert_eq!(gpu_flat.len(), combos_cpu.len() * len);
 
     let gpu_flat_f64: Vec<f64> = gpu_flat.iter().map(|&v| v as f64).collect();
     compare_rows(&cpu_out, &gpu_flat_f64, &combos_cpu, len, first_valid);

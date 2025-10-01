@@ -1,8 +1,0 @@
-gaussian/gaussian_scalar/100k
-                        time:   [279.85 µs 282.94 µs 286.41 µs]
-                        thrpt:  [2.6014 GiB/s 2.6333 GiB/s 2.6623 GiB/s]
-                 change:
-                        time:   [-4.0785% -3.3177% -2.5610%] (p = 0.00 < 0.05)
-                        thrpt:  [+2.6283% +3.4315% +4.2519%]
-                        Performance has improved.
-

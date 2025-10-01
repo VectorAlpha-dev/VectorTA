@@ -1,5 +1,0 @@
-uma/uma_avx2/1M         time:   [103.15 ms 104.50 ms 106.17 ms]
-                        thrpt:  [71.862 MiB/s 73.012 MiB/s 73.966 MiB/s]
-Found 2 outliers among 10 measurements (20.00%)
-  2 (20.00%) high mild
-

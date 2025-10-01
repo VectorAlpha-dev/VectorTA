@@ -1,7 +1,0 @@
-ehma_batch/ehma_batch_scalarbatch/100k
-                        time:   [300.52 µs 305.37 µs 311.78 µs]
-                        thrpt:  [480.33 GiB/s 490.41 GiB/s 498.33 GiB/s]
-Found 2 outliers among 10 measurements (20.00%)
-  1 (10.00%) high mild
-  1 (10.00%) high severe
-

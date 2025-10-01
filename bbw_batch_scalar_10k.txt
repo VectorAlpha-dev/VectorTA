@@ -1,6 +1,0 @@
-bollinger_bands_width_batch/bollinger_bands_width_batch_scalarbatch/10k
-                        time:   [52.341 ms 53.202 ms 54.497 ms]
-                        thrpt:  [1.4000 MiB/s 1.4340 MiB/s 1.4576 MiB/s]
-Found 1 outliers among 10 measurements (10.00%)
-  1 (10.00%) high severe
-

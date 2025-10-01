@@ -1,5 +1,0 @@
-dpo/dpo_avx512/100k     time:   [36.721 µs 36.769 µs 36.846 µs]
-                        thrpt:  [20.221 GiB/s 20.263 GiB/s 20.290 GiB/s]
-Found 1 outliers among 10 measurements (10.00%)
-  1 (10.00%) high mild
-

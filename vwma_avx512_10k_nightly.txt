@@ -1,6 +1,0 @@
-vwma/vwma_avx512/10k    time:   [7.0921 µs 7.1402 µs 7.1903 µs]
-                        thrpt:  [10.362 GiB/s 10.435 GiB/s 10.505 GiB/s]
-Found 2 outliers among 10 measurements (20.00%)
-  1 (10.00%) high mild
-  1 (10.00%) high severe
-

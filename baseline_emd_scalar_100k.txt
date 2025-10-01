@@ -1,3 +1,0 @@
-emd_bench/scalar/100k   time:   [614.27 µs 691.71 µs 772.64 µs]
-                        thrpt:  [987.44 MiB/s 1.0771 GiB/s 1.2129 GiB/s]
-

@@ -1,6 +1,0 @@
-ehma_batch/ehma_batch_avx2batch/100k
-                        time:   [180.71 µs 182.25 µs 185.83 µs]
-                        thrpt:  [805.86 GiB/s 821.69 GiB/s 828.73 GiB/s]
-Found 1 outliers among 10 measurements (10.00%)
-  1 (10.00%) high mild
-

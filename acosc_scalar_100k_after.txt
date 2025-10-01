@@ -1,3 +1,0 @@
-acosc_bench/scalar/100k time:   [137.87 µs 147.87 µs 161.43 µs]
-                        thrpt:  [4.6153 GiB/s 5.0387 GiB/s 5.4039 GiB/s]
-

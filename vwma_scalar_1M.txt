@@ -1,3 +1,0 @@
-vwma/vwma_scalar/1M     time:   [725.49 µs 729.29 µs 736.69 µs]
-                        thrpt:  [10.114 GiB/s 10.216 GiB/s 10.270 GiB/s]
-

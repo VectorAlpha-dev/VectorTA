@@ -1,6 +1,0 @@
-fosc/fosc_scalar/1M     time:   [981.23 µs 985.23 µs 992.45 µs]
-                        thrpt:  [7.5072 GiB/s 7.5622 GiB/s 7.5931 GiB/s]
-slope  [981.23 µs 992.45 µs] R^2            [0.9983502 0.9976199]
-mean   [979.18 µs 993.83 µs] std. dev.      [6.5494 µs 15.769 µs]
-median [977.58 µs 996.64 µs] med. abs. dev. [2.8092 µs 23.818 µs]
-

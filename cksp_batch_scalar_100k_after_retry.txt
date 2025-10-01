@@ -1,4 +1,0 @@
-cksp_batch/cksp_batch_scalarbatch/100k
-                        time:   [12.608 ms 12.780 ms 12.953 ms]
-                        thrpt:  [58.902 MiB/s 59.700 MiB/s 60.511 MiB/s]
-

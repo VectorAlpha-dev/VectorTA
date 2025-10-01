@@ -1,4 +1,0 @@
-bollinger_bands_width_batch/bollinger_bands_width_batch_avx512batch/100k
-                        time:   [69.502 ms 69.990 ms 70.454 ms]
-                        thrpt:  [10.829 MiB/s 10.901 MiB/s 10.977 MiB/s]
-

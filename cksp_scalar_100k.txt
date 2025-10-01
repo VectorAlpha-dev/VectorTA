@@ -1,3 +1,0 @@
-cksp_bench/scalar/100k  time:   [2.7550 ms 2.7686 ms 2.7810 ms]
-                        thrpt:  [274.34 MiB/s 275.56 MiB/s 276.93 MiB/s]
-

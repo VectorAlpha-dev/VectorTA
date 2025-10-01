@@ -1,4 +1,0 @@
-bollinger_bands_width_bench/scalar/1M
-                        time:   [1.3073 ms 1.3161 ms 1.3248 ms]
-                        thrpt:  [5.6240 GiB/s 5.6612 GiB/s 5.6993 GiB/s]
-

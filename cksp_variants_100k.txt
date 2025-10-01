@@ -1,9 +1,0 @@
-cksp/cksp_scalar/100k   time:   [2.6720 ms 2.6774 ms 2.6836 ms]
-                        thrpt:  [284.30 MiB/s 284.96 MiB/s 285.53 MiB/s]
-Found 2 outliers among 10 measurements (20.00%)
-  2 (20.00%) high severe
-cksp/cksp_avx2/100k     time:   [2.7074 ms 2.7312 ms 2.7756 ms]
-                        thrpt:  [274.88 MiB/s 279.34 MiB/s 281.80 MiB/s]
-cksp/cksp_avx512/100k   time:   [2.6996 ms 2.7107 ms 2.7223 ms]
-                        thrpt:  [280.26 MiB/s 281.45 MiB/s 282.62 MiB/s]
-

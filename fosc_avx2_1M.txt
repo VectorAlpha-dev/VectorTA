@@ -1,6 +1,0 @@
-fosc/fosc_avx2/1M       time:   [978.59 µs 984.51 µs 991.30 µs]
-                        thrpt:  [7.5160 GiB/s 7.5678 GiB/s 7.6136 GiB/s]
-slope  [978.59 µs 991.30 µs] R^2            [0.9980360 0.9978266]
-mean   [979.98 µs 990.71 µs] std. dev.      [5.9955 µs 10.645 µs]
-median [976.95 µs 993.73 µs] med. abs. dev. [2.2922 µs 14.677 µs]
-
