@@ -15,14 +15,14 @@
 //! - **`Err(SwmaError)`** otherwise.
 //!
 //! ## Developer Notes
-//! - **AVX2/AVX512 kernels**: Currently stubs calling scalar implementation
-//! - **Streaming update**: O(n) - `dot_ring()` iterates through weights for each update
-//! - **Memory optimization**: Uses `alloc_with_nan_prefix` for zero-copy allocation
-//! - **Current status**: Main scalar implementation complete, SIMD kernels need implementation
-//! - **Optimization opportunities**:
-//!   - Implement vectorized AVX2/AVX512 kernels for weight application
-//!   - Consider caching weight calculations for common periods
-//!   - Optimize dot_ring() in streaming kernel for better cache locality
+//! - Scalar path optimized to O(n) via two-stage box filters (triangle = SMA ⊗ SMA).
+//! - SIMD (AVX2/AVX512) stubs route to the optimized scalar; data dependencies limit gains.
+//! - Batch row kernels reuse the same O(n) per-row algorithm; prefix sums variant under review.
+//! - Streaming path remains ring-dot for now; future work may apply a two-accumulator stream.
+//!
+//! ## Decision Log
+//! - SIMD underperforms on single-series due to loop-carried deps; keep stubs delegating to scalar.
+//! - Row-specific shared-prefix (S2) batch kernel not yet implemented; revisit if needed.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -392,28 +392,89 @@ fn build_symmetric_triangle_avec(n: usize) -> AVec<f64> {
 #[inline]
 pub fn swma_scalar(
     data: &[f64],
-    weights: &[f64],
+    _weights: &[f64], // kept for signature parity; not used by O(n) algo
     period: usize,
     first_val: usize,
     out: &mut [f64],
 ) {
-    assert_eq!(weights.len(), period);
-    assert!(out.len() >= data.len());
-    let p4 = period & !3;
-    for i in (first_val + period - 1)..data.len() {
-        let start = i + 1 - period;
-        let window = &data[start..start + period];
-        let mut sum = 0.0;
-        for (d4, w4) in window[..p4]
-            .chunks_exact(4)
-            .zip(weights[..p4].chunks_exact(4))
-        {
-            sum += d4[0] * w4[0] + d4[1] * w4[1] + d4[2] * w4[2] + d4[3] * w4[3];
+    debug_assert!(out.len() >= data.len());
+    debug_assert!(period >= 1);
+
+    let len = data.len();
+    if len == 0 {
+        return;
+    }
+
+    // Map triangle length -> two boxcar lengths (a, b) with a + b - 1 = period
+    let (a, b) = if (period & 1) != 0 {
+        let m = (period + 1) >> 1;
+        (m, m)
+    } else {
+        let m = period >> 1;
+        (m, m + 1)
+    };
+
+    // Early-outs for small periods for numerical parity with reference
+    // period == 1 is identity after warmup
+    if period == 1 {
+        unsafe {
+            for i in first_val..len {
+                *out.get_unchecked_mut(i) = *data.get_unchecked(i);
+            }
         }
-        for (d, w) in window[p4..].iter().zip(&weights[p4..]) {
-            sum += d * w;
+        return;
+    }
+    // period == 2 is exact simple average of last two points
+    if period == 2 {
+        unsafe {
+            for i in (first_val + 1)..len {
+                *out.get_unchecked_mut(i) =
+                    (*data.get_unchecked(i - 1) + *data.get_unchecked(i)) * 0.5;
+            }
         }
-        out[i] = sum;
+        return;
+    }
+
+    let inv_ab = 1.0 / ((a as f64) * (b as f64));
+    let start_full_a = first_val + a - 1;
+    let start_full_ab = first_val + period - 1; // == first + (a+b-2)
+
+    // Ring buffer of last b "a-window sums" (unnormalized)
+    let mut ring = AVec::<f64>::with_capacity(CACHELINE_ALIGN, b);
+    ring.resize(b, 0.0);
+    let mut rb_idx = 0usize;
+
+    // Running sums
+    let mut s1_sum = 0.0_f64; // sum over last 'a' raw samples
+    let mut s2_sum = 0.0_f64; // sum over last 'b' of the s1_sum values
+
+    unsafe {
+        for i in first_val..len {
+            // accumulate current sample into the 'a' window sum
+            s1_sum += *data.get_unchecked(i);
+
+            if i >= start_full_a {
+                // s1_sum now equals sum over data[i-(a-1) ..= i]
+                // update second accumulator with ring-buffered prior
+                let old = *ring.get_unchecked(rb_idx);
+                s2_sum = s2_sum + (s1_sum - old);
+                *ring.get_unchecked_mut(rb_idx) = s1_sum;
+
+                // bump ring index (manual wrap)
+                rb_idx += 1;
+                if rb_idx == b {
+                    rb_idx = 0;
+                }
+
+                // write output once both windows are full
+                if i >= start_full_ab {
+                    *out.get_unchecked_mut(i) = s2_sum * inv_ab;
+                }
+
+                // slide 'a'-window: drop sample that leaves next iteration
+                s1_sum -= *data.get_unchecked(i + 1 - a);
+            }
+        }
     }
 }
 
@@ -997,22 +1058,65 @@ unsafe fn swma_row_scalar(
     data: &[f64],
     first: usize,
     period: usize,
-    w_ptr: *const f64,
+    _w_ptr: *const f64, // unused in O(n) algorithm
     out: &mut [f64],
 ) {
-    let p4 = period & !3;
-    for i in (first + period - 1)..data.len() {
-        let start = i + 1 - period;
-        let mut sum = 0.0;
-        for k in (0..p4).step_by(4) {
-            let w = std::slice::from_raw_parts(w_ptr.add(k), 4);
-            let d = &data[start + k..start + k + 4];
-            sum += d[0] * w[0] + d[1] * w[1] + d[2] * w[2] + d[3] * w[3];
+    let len = data.len();
+    if len == 0 {
+        return;
+    }
+
+    let (a, b) = if (period & 1) != 0 {
+        let m = (period + 1) >> 1;
+        (m, m)
+    } else {
+        let m = period >> 1;
+        (m, m + 1)
+    };
+
+    if period == 1 {
+        for i in first..len {
+            *out.get_unchecked_mut(i) = *data.get_unchecked(i);
         }
-        for k in p4..period {
-            sum += *data.get_unchecked(start + k) * *w_ptr.add(k);
+        return;
+    }
+    if period == 2 {
+        for i in (first + 1)..len {
+            *out.get_unchecked_mut(i) =
+                (*data.get_unchecked(i - 1) + *data.get_unchecked(i)) * 0.5;
         }
-        out[i] = sum;
+        return;
+    }
+
+    let inv_ab = 1.0 / ((a as f64) * (b as f64));
+    let start_full_a = first + a - 1;
+    let start_full_ab = first + period - 1;
+
+    let mut ring = AVec::<f64>::with_capacity(CACHELINE_ALIGN, b);
+    ring.resize(b, 0.0);
+    let mut rb_idx = 0usize;
+
+    let mut s1_sum = 0.0_f64;
+    let mut s2_sum = 0.0_f64;
+
+    for i in first..len {
+        s1_sum += *data.get_unchecked(i);
+
+        if i >= start_full_a {
+            let old = *ring.get_unchecked(rb_idx);
+            s2_sum = s2_sum + (s1_sum - old);
+            *ring.get_unchecked_mut(rb_idx) = s1_sum;
+            rb_idx += 1;
+            if rb_idx == b {
+                rb_idx = 0;
+            }
+
+            if i >= start_full_ab {
+                *out.get_unchecked_mut(i) = s2_sum * inv_ab;
+            }
+
+            s1_sum -= *data.get_unchecked(i + 1 - a);
+        }
     }
 }
 

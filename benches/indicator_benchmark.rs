@@ -3012,6 +3012,9 @@ criterion_main!(
     benches_vlma_batch,
     benches_volume_adjusted_ma,
     benches_volume_adjusted_ma_batch,
+    // DMA (single + batch)
+    benches_dma,
+    benches_dma_batch,
     benches_vpwma,
     benches_vpwma_batch,
     benches_willr_batch,

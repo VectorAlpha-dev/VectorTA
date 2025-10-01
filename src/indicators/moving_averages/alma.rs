@@ -2508,7 +2508,7 @@ pub fn alma_cuda_batch_dev_py(
     device_id: usize,
 ) -> PyResult<DeviceArrayF32Py> {
     use crate::cuda::cuda_available;
-    use crate::cuda::moving_averages::CudaAlma;
+    use crate::cuda::moving_averages::{alma_wrapper::AlmaMode, CudaAlma};
 
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
@@ -2542,7 +2542,7 @@ pub fn alma_cuda_many_series_one_param_dev_py(
     device_id: usize,
 ) -> PyResult<DeviceArrayF32Py> {
     use crate::cuda::cuda_available;
-    use crate::cuda::moving_averages::CudaAlma;
+    use crate::cuda::moving_averages::{alma_wrapper::AlmaMode, CudaAlma};
     use numpy::PyUntypedArrayMethods;
 
     if !cuda_available() {

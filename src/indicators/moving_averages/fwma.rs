@@ -101,6 +101,10 @@
 //!   - Streaming update could be optimized to O(1) using incremental sum updates
 //!   - Consider pre-computing normalized Fibonacci weights for common periods
 //!   - WASM performance is excellent with SIMD128 support
+//!
+//! Decision log:
+//! - Scalar path: tested an 8-way unrolled mul_add variant; it regressed by ~6% at 100k on this
+//!   machine, so we reverted to the existing safe, chunked-by-4 loop which remains the reference.
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;

@@ -12,12 +12,10 @@
 //! - **`Err(TrimaError)`** otherwise.
 //!
 //! ## Developer Status
-//! - **AVX2 kernel**: STUB - Falls back to scalar implementation
-//! - **AVX512 kernel**: STUB - Falls back to scalar implementation
-//! - **Streaming update**: O(1) - Efficient rolling sum approach
-//! - **Memory optimization**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix) ✓
-//! - **Optimization needed**: Implement SIMD kernels for better performance
-//! - **Note**: Streaming implementation is already well-optimized
+//! - SIMD enabled (AVX2/AVX512): vectorizes initial accumulation; rolling core remains scalar.
+//! - Streaming update: O(1) via two rolling sums; no full-size temporaries.
+//! - Memory: uses zero-copy helpers for outputs; tiny O(period) ring buffer only.
+//! - Rationale: TRIMA = SMA(SMA(x, m1), m2); SIMD helps initial sums; main loop is sequential.
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -274,11 +272,11 @@ fn trima_compute_into(
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => {
-                trima_scalar_optimized(data, period, m1, m2, first, out)
+                trima_avx2(data, period, first, out);
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
-                trima_scalar_optimized(data, period, m1, m2, first, out)
+                trima_avx512(data, period, first, out);
             }
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
             Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
@@ -302,8 +300,99 @@ unsafe fn trima_scalar_optimized(
     first: usize,
     out: &mut [f64],
 ) {
-    // Use the classic kernel for optimized performance
-    trima_scalar_classic(data, period, first, out);
+    debug_assert_eq!(data.len(), out.len());
+    let n = data.len();
+    if n == 0 {
+        return;
+    }
+    let warm = first + period - 1;
+    if warm >= n {
+        // nothing to write (caller already validated lengths)
+        return;
+    }
+
+    // Precompute reciprocals to turn divisions into multiplies
+    let inv_m1 = 1.0 / (m1 as f64);
+    let inv_m2 = 1.0 / (m2 as f64);
+
+    // 1) Initial m1-sum (partially unrolled)
+    let base = data.as_ptr().add(first);
+    let mut sum1 = 0.0;
+    {
+        let mut j = 0usize;
+        let end_unroll = m1 & !3usize; // floor to multiple of 4
+        while j < end_unroll {
+            sum1 += *base.add(j)
+                + *base.add(j + 1)
+                + *base.add(j + 2)
+                + *base.add(j + 3);
+            j += 4;
+        }
+        while j < m1 {
+            sum1 += *base.add(j);
+            j += 1;
+        }
+    }
+
+    // 2) Build m2 of SMA1s into a small ring
+    let mut ring: Vec<f64> = Vec::with_capacity(m2);
+    let mut sum2 = 0.0;
+
+    // time index t corresponds to the index of the SMA1 we just produced
+    let mut t = first + m1 - 1;
+
+    // Pointers to advance sum1 in O(1) without bounds checks
+    let mut p_new = data.as_ptr().add(first + m1); // element to be added next
+    let mut p_old = data.as_ptr().add(first); // element to be removed next
+
+    // First SMA1
+    {
+        let s1 = sum1 * inv_m1;
+        ring.push(s1);
+        sum2 += s1;
+    }
+
+    // Fill the remaining (m2 - 1) SMA1s and accumulate sum2
+    while ring.len() < m2 {
+        t += 1; // move to the index for the next SMA1
+        // Maintain the rolling m1-sum
+        sum1 += *p_new - *p_old;
+        p_new = p_new.add(1);
+        p_old = p_old.add(1);
+
+        let s1 = sum1 * inv_m1;
+        ring.push(s1);
+        sum2 += s1;
+    }
+
+    // At this point, t == warm and sum2 holds the sum of the last m2 SMA1s.
+    *out.get_unchecked_mut(warm) = sum2 * inv_m2;
+
+    // 3) Main rolling loop
+    let mut head = 0usize; // ring write index / oldest element
+    t += 1; // next index to produce TRIMA for
+    while t < n {
+        // Update m1 rolling sum
+        sum1 += *p_new - *p_old;
+        p_new = p_new.add(1);
+        p_old = p_old.add(1);
+
+        // New SMA1 and ring maintenance for sum2
+        let new_s1 = sum1 * inv_m1;
+        let old_s1 = *ring.get_unchecked(head);
+        sum2 += new_s1 - old_s1;
+        *ring.get_unchecked_mut(head) = new_s1;
+
+        head += 1;
+        if head == m2 {
+            head = 0;
+        }
+
+        // Write TRIMA aligned at index t
+        *out.get_unchecked_mut(t) = sum2 * inv_m2;
+
+        t += 1;
+    }
 }
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
@@ -515,17 +604,201 @@ pub fn trima_avx512(data: &[f64], period: usize, first: usize, out: &mut [f64]) 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn trima_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    trima_scalar(data, period, first, out)
+    debug_assert_eq!(data.len(), out.len());
+    let n = data.len();
+    if n == 0 {
+        return;
+    }
+
+    let m1 = (period + 1) / 2;
+    let m2 = period - m1 + 1;
+    let warm = first + period - 1;
+    if warm >= n {
+        return;
+    }
+
+    let inv_m1 = 1.0 / (m1 as f64);
+    let inv_m2 = 1.0 / (m2 as f64);
+
+    // Vectorized initial m1-sum (unaligned loads)
+    let mut sum1 = sum_u_avx2(data.as_ptr().add(first), m1);
+
+    // Ramp: build m2 SMA1s into a small ring
+    let mut ring: Vec<f64> = Vec::with_capacity(m2);
+    let mut sum2 = 0.0;
+
+    let mut t = first + m1 - 1;
+    let mut p_new = data.as_ptr().add(first + m1);
+    let mut p_old = data.as_ptr().add(first);
+
+    // First SMA1
+    {
+        let s1 = sum1 * inv_m1;
+        ring.push(s1);
+        sum2 += s1;
+    }
+
+    while ring.len() < m2 {
+        t += 1;
+        sum1 += *p_new - *p_old;
+        p_new = p_new.add(1);
+        p_old = p_old.add(1);
+
+        let s1 = sum1 * inv_m1;
+        ring.push(s1);
+        sum2 += s1;
+    }
+
+    *out.get_unchecked_mut(warm) = sum2 * inv_m2;
+
+    // Rolling (sequential) core
+    let mut head = 0usize;
+    t += 1;
+    while t < n {
+        sum1 += *p_new - *p_old;
+        p_new = p_new.add(1);
+        p_old = p_old.add(1);
+
+        let new_s1 = sum1 * inv_m1;
+        let old_s1 = *ring.get_unchecked(head);
+        sum2 += new_s1 - old_s1;
+        *ring.get_unchecked_mut(head) = new_s1;
+
+        head += 1;
+        if head == m2 {
+            head = 0;
+        }
+
+        *out.get_unchecked_mut(t) = sum2 * inv_m2;
+        t += 1;
+    }
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn trima_avx512_short(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    trima_scalar(data, period, first, out)
+    debug_assert_eq!(data.len(), out.len());
+    let n = data.len();
+    if n == 0 {
+        return;
+    }
+
+    let m1 = (period + 1) / 2;
+    let m2 = period - m1 + 1;
+    let warm = first + period - 1;
+    if warm >= n {
+        return;
+    }
+
+    let inv_m1 = 1.0 / (m1 as f64);
+    let inv_m2 = 1.0 / (m2 as f64);
+
+    // Vectorized initial m1-sum
+    let mut sum1 = sum_u_avx512(data.as_ptr().add(first), m1);
+
+    let mut ring: Vec<f64> = Vec::with_capacity(m2);
+    let mut sum2 = 0.0;
+
+    let mut t = first + m1 - 1;
+    let mut p_new = data.as_ptr().add(first + m1);
+    let mut p_old = data.as_ptr().add(first);
+
+    let s1 = sum1 * inv_m1;
+    ring.push(s1);
+    sum2 += s1;
+
+    while ring.len() < m2 {
+        t += 1;
+        sum1 += *p_new - *p_old;
+        p_new = p_new.add(1);
+        p_old = p_old.add(1);
+
+        let s1 = sum1 * inv_m1;
+        ring.push(s1);
+        sum2 += s1;
+    }
+
+    *out.get_unchecked_mut(warm) = sum2 * inv_m2;
+
+    let mut head = 0usize;
+    t += 1;
+    while t < n {
+        sum1 += *p_new - *p_old;
+        p_new = p_new.add(1);
+        p_old = p_old.add(1);
+
+        let new_s1 = sum1 * inv_m1;
+        let old_s1 = *ring.get_unchecked(head);
+        sum2 += new_s1 - old_s1;
+        *ring.get_unchecked_mut(head) = new_s1;
+
+        head += 1;
+        if head == m2 {
+            head = 0;
+        }
+
+        *out.get_unchecked_mut(t) = sum2 * inv_m2;
+        t += 1;
+    }
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn trima_avx512_long(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    trima_scalar(data, period, first, out)
+    trima_avx512_short(data, period, first, out)
+}
+
+// ────────────────────── AVX helpers ──────────────────────
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn hsum256d(v: __m256d) -> f64 {
+    let hi = _mm256_extractf128_pd(v, 1);
+    let lo = _mm256_castpd256_pd128(v);
+    let sum128 = _mm_add_pd(lo, hi);
+    let shuffled = _mm_unpackhi_pd(sum128, sum128);
+    _mm_cvtsd_f64(_mm_add_sd(sum128, shuffled))
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn sum_u_avx2(ptr: *const f64, len: usize) -> f64 {
+    let mut acc = _mm256_setzero_pd();
+    let mut p = ptr;
+    let chunks = len / 4;
+    for _ in 0..chunks {
+        acc = _mm256_add_pd(acc, _mm256_loadu_pd(p));
+        p = p.add(4);
+    }
+    let mut s = hsum256d(acc);
+    for i in 0..(len & 3) {
+        s += *p.add(i);
+    }
+    s
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn hsum512d(v: __m512d) -> f64 {
+    // Reduce 8 lanes → 4 → 2 → 1
+    let v4 = _mm256_add_pd(_mm512_castpd512_pd256(v), _mm512_extractf64x4_pd(v, 1));
+    let v2 = _mm_add_pd(_mm256_castpd256_pd128(v4), _mm256_extractf128_pd(v4, 1));
+    let hi = _mm_unpackhi_pd(v2, v2);
+    _mm_cvtsd_f64(_mm_add_sd(v2, hi))
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn sum_u_avx512(ptr: *const f64, len: usize) -> f64 {
+    let mut acc = _mm512_setzero_pd();
+    let mut p = ptr;
+    let chunks = len / 8;
+    for _ in 0..chunks {
+        acc = _mm512_add_pd(acc, _mm512_loadu_pd(p));
+        p = p.add(8);
+    }
+    let mut s = hsum512d(acc);
+    for i in 0..(len & 7) {
+        s += *p.add(i);
+    }
+    s
 }
 
 #[inline(always)]
@@ -538,8 +811,9 @@ pub fn trima_row_scalar(
     _inv_n: f64,
     out: &mut [f64],
 ) {
-    // Use classic kernel for row operations
-    trima_scalar_classic(data, period, first, out);
+    let m1 = (period + 1) / 2;
+    let m2 = period - m1 + 1;
+    unsafe { trima_scalar_optimized(data, period, m1, m2, first, out) }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -553,7 +827,7 @@ pub unsafe fn trima_row_avx2(
     _inv_n: f64,
     out: &mut [f64],
 ) {
-    trima_scalar(data, period, first, out)
+    trima_avx2(data, period, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
