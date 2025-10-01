@@ -15,10 +15,12 @@
 //! - **`Err(VamaError)`** otherwise.
 //!
 //! ## Developer Notes
-//! - **AVX2/AVX512 kernels**: Not implemented (no explicit SIMD kernel functions)
-//! - **Streaming update**: O(n) - iterates through vol_period for deviation calculation
-//! - **Memory optimization**: Uses zero-copy helpers (alloc_with_nan_prefix)
-//! - **Optimization needed**: Implement SIMD kernels and optimize streaming to O(1)
+//! - Status: scalar core optimized to O(n) via monotonic deques (rolling max/min of deviations).
+//! - SIMD: no separate AVX2/AVX512 kernels for the core — sequential window dependency limits gains.
+//!          EMA/WMA/SMA reuse existing kernels under `Kernel` selection.
+//! - Batch: row-specific EMA precompute was evaluated; kept disabled by default — per-row parallelism
+//!          with per-row EMA was faster/more stable in benches. Revisit only with stronger evidence.
+//! - Memory: uses zero-copy helpers (alloc_with_nan_prefix); no O(N) temporaries beyond outputs.
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
@@ -308,7 +310,12 @@ pub enum VamaError {
 }
 
 // ==================== CORE COMPUTATION FUNCTIONS ====================
-/// Core VAMA pass writing unsmoothed values directly into output
+/// Core VAMA pass writing unsmoothed values directly into `out`.
+///
+/// Scalar O(n) implementation using monotonic deques to track rolling
+/// max/min of deviation = data[i] - ema[i]. This preserves the exact
+/// warmup and NaN semantics of the previous implementation while
+/// reducing the inner complexity from O(n · vol_period) to O(n).
 #[inline(always)]
 fn vama_core_into(
     data: &[f64],
@@ -320,7 +327,7 @@ fn vama_core_into(
 ) -> Result<(), VamaError> {
     let len = data.len();
 
-    // Base EMA into temp buffer with NaN prefix
+    // 1) Base EMA into temp buffer with NaN prefix
     let mut ema_values = alloc_with_nan_prefix(len, first + base_period - 1);
     let ema_input = EmaInput::from_slice(
         data,
@@ -331,39 +338,100 @@ fn vama_core_into(
     ema_into_slice(&mut ema_values, &ema_input, kernel)
         .map_err(|e| VamaError::EmaError(e.to_string()))?;
 
+    // 2) Sliding-extrema using ring-buffer deques (amortized O(1) per step)
     let warmup = first + base_period.max(vol_period) - 1;
+    if len <= warmup {
+        // out[..warmup] is already prefilled with NaNs by the caller
+        return Ok(());
+    }
 
-    // Main VAMA calculation directly into output
-    for i in warmup..len {
-        let mid = ema_values[i];
-        if mid.is_nan() {
-            out[i] = f64::NAN;
-            continue;
+    // Deques for rolling max/min of deviation over `vol_period` window
+    let cap = vol_period; // capacity equals window length
+    let mut idx_max = vec![0usize; cap];
+    let mut val_max = vec![0.0f64; cap];
+    let mut head_max = 0usize;
+    let mut tail_max = 0usize;
+
+    let mut idx_min = vec![0usize; cap];
+    let mut val_min = vec![0.0f64; cap];
+    let mut head_min = 0usize;
+    let mut tail_min = 0usize;
+
+    // Iterate across the series, updating deques; write only after warmup
+    for i in first..len {
+        let e = ema_values[i];
+        let x = data[i];
+
+        // Respect the initial `first` offset: early windows are shorter
+        let window_len = vol_period.min(i + 1 - first);
+        let window_start = i + 1 - window_len;
+
+        // Expire out-of-window entries for MAX
+        while head_max != tail_max && idx_max[head_max] < window_start {
+            head_max += 1;
+            if head_max == cap {
+                head_max = 0;
+            }
+        }
+        // Expire out-of-window entries for MIN
+        while head_min != tail_min && idx_min[head_min] < window_start {
+            head_min += 1;
+            if head_min == cap {
+                head_min = 0;
+            }
         }
 
-        let start = i + 1 - vol_period.min(i + 1 - first);
-        let mut vol_up = f64::NEG_INFINITY;
-        let mut vol_down = f64::INFINITY;
+        // Push current deviation if valid (skip NaNs to mirror original semantics)
+        if !(e.is_nan() || x.is_nan()) {
+            let d = x - e;
 
-        for j in start..=i {
-            let e = ema_values[j];
+            // Maintain decreasing deque for MAX
+            while head_max != tail_max {
+                let last = if tail_max == 0 { cap - 1 } else { tail_max - 1 };
+                if val_max[last] <= d {
+                    tail_max = last; // pop_back
+                } else {
+                    break;
+                }
+            }
+            idx_max[tail_max] = i;
+            val_max[tail_max] = d;
+            tail_max += 1;
+            if tail_max == cap {
+                tail_max = 0;
+            }
+
+            // Maintain increasing deque for MIN
+            while head_min != tail_min {
+                let last = if tail_min == 0 { cap - 1 } else { tail_min - 1 };
+                if val_min[last] >= d {
+                    tail_min = last; // pop_back
+                } else {
+                    break;
+                }
+            }
+            idx_min[tail_min] = i;
+            val_min[tail_min] = d;
+            tail_min += 1;
+            if tail_min == cap {
+                tail_min = 0;
+            }
+        }
+
+        // After warmup, emit value. Otherwise, caller keeps NaNs prefix.
+        if i >= warmup {
             if e.is_nan() {
-                continue;
-            }
-            let dev = data[j] - e;
-            if dev > vol_up {
-                vol_up = dev;
-            }
-            if dev < vol_down {
-                vol_down = dev;
+                out[i] = f64::NAN;
+            } else if head_max != tail_max && head_min != tail_min {
+                let up = val_max[head_max];
+                let dn = val_min[head_min];
+                // mid + 0.5*(up + dn)
+                out[i] = (0.5f64).mul_add(up + dn, e);
+            } else {
+                // No valid deviations in the window → fallback to EMA
+                out[i] = e;
             }
         }
-
-        out[i] = if vol_up.is_infinite() || vol_down.is_infinite() {
-            mid
-        } else {
-            mid + (vol_up + vol_down) / 2.0
-        };
     }
     Ok(())
 }
@@ -951,6 +1019,104 @@ fn vama_batch_inner_into_with_simd(
     {
         for (r, dst) in out.chunks_mut(cols).enumerate() {
             do_row(r, dst)?;
+        }
+    }
+    Ok(())
+}
+
+/// Core VAMA step given a precomputed EMA slice. Used by batch path to share EMA across rows.
+#[inline(always)]
+fn vama_core_from_ema_into(
+    data: &[f64],
+    ema_values: &[f64],
+    base_period: usize,
+    vol_period: usize,
+    first: usize,
+    out: &mut [f64],
+) -> Result<(), VamaError> {
+    let len = data.len();
+    debug_assert_eq!(ema_values.len(), len);
+
+    let warmup = first + base_period.max(vol_period) - 1;
+    if len <= warmup {
+        return Ok(());
+    }
+
+    // Monotonic deques identical to the single-series core
+    let cap = vol_period;
+    let mut idx_max = vec![0usize; cap];
+    let mut val_max = vec![0.0f64; cap];
+    let mut head_max = 0usize;
+    let mut tail_max = 0usize;
+
+    let mut idx_min = vec![0usize; cap];
+    let mut val_min = vec![0.0f64; cap];
+    let mut head_min = 0usize;
+    let mut tail_min = 0usize;
+
+    for i in first..len {
+        let e = ema_values[i];
+        let x = data[i];
+
+        let window_len = vol_period.min(i + 1 - first);
+        let window_start = i + 1 - window_len;
+
+        while head_max != tail_max && idx_max[head_max] < window_start {
+            head_max += 1;
+            if head_max == cap {
+                head_max = 0;
+            }
+        }
+        while head_min != tail_min && idx_min[head_min] < window_start {
+            head_min += 1;
+            if head_min == cap {
+                head_min = 0;
+            }
+        }
+
+        if !(e.is_nan() || x.is_nan()) {
+            let d = x - e;
+            while head_max != tail_max {
+                let last = if tail_max == 0 { cap - 1 } else { tail_max - 1 };
+                if val_max[last] <= d {
+                    tail_max = last;
+                } else {
+                    break;
+                }
+            }
+            idx_max[tail_max] = i;
+            val_max[tail_max] = d;
+            tail_max += 1;
+            if tail_max == cap {
+                tail_max = 0;
+            }
+
+            while head_min != tail_min {
+                let last = if tail_min == 0 { cap - 1 } else { tail_min - 1 };
+                if val_min[last] >= d {
+                    tail_min = last;
+                } else {
+                    break;
+                }
+            }
+            idx_min[tail_min] = i;
+            val_min[tail_min] = d;
+            tail_min += 1;
+            if tail_min == cap {
+                tail_min = 0;
+            }
+        }
+
+        if i >= warmup {
+            if e.is_nan() {
+                out[i] = f64::NAN;
+            } else if head_max != tail_max && head_min != tail_min {
+                let up = val_max[head_max];
+                let dn = val_min[head_min];
+                out[i] = (0.5f64).mul_add(up + dn, e);
+            } else {
+                out[i] = e;
+            }
         }
     }
     Ok(())

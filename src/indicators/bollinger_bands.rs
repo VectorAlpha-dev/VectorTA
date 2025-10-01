@@ -14,11 +14,15 @@
 //! - Proper error types for invalid input, params, or kernel mismatch.
 //!
 //! ## Developer Notes
-//! - **AVX2 kernel**: STUB - calls scalar implementation
-//! - **AVX512 kernel**: STUB - calls scalar implementation
+//! - **AVX2/AVX512 kernels**: Accelerate the final blend step (upper/middle/lower)
+//!   for non-SMA (and SMA with non-stddev) by vectorizing the writes; fall back
+//!   to the optimized scalar SMA+stddev path where loop-carried dependencies
+//!   dominate and SIMD provides little benefit.
 //! - **Streaming**: Not implemented
 //! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy) for all three bands
 //! - **Batch operations**: ✅ Implemented with parallel processing support
+//! - **Row-specific batch**: Not specialized for SMA+stddev; a future optimization is
+//!   to share prefix sums across rows (periods/devups/devdns) when beneficial.
 use crate::indicators::deviation::{deviation, DevInput, DevParams};
 use crate::indicators::moving_averages::ma::{ma, MaData};
 use crate::utilities::data_loader::{source_type, Candles};
@@ -354,27 +358,51 @@ pub fn bollinger_bands_compute_into(
         return Ok(());
     }
 
-    // Precompute middle and deviation once to avoid any per-row panics.
-    let middle = ma(matype, MaData::Slice(data), period)
-        .map_err(|e| BollingerBandsError::UnderlyingFunctionFailed(e.to_string()))?;
-    let dev_values = deviation(&DevInput::from_slice(
-        data,
-        DevParams {
-            period: Some(period),
-            devtype: Some(devtype),
+    // Use SIMD row kernels when requested and available; otherwise, fall back to scalar.
+    match kernel {
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Avx2 => unsafe {
+            bb_row_avx2(
+                data, matype, period, devtype, devup, devdn, first, out_u, out_m, out_l,
+            );
+            Ok(())
         },
-    ))
-    .map_err(|e| BollingerBandsError::UnderlyingFunctionFailed(e.to_string()))?;
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Avx512 => unsafe {
+            bb_row_avx512(
+                data, matype, period, devtype, devup, devdn, first, out_u, out_m, out_l,
+            );
+            Ok(())
+        },
+        _ => {
+            // Precompute middle and deviation once; jam the blend in a tight scalar loop.
+            let middle = ma(matype, MaData::Slice(data), period)
+                .map_err(|e| BollingerBandsError::UnderlyingFunctionFailed(e.to_string()))?;
+            let dev_values = deviation(&DevInput::from_slice(
+                data,
+                DevParams {
+                    period: Some(period),
+                    devtype: Some(devtype),
+                },
+            ))
+            .map_err(|e| BollingerBandsError::UnderlyingFunctionFailed(e.to_string()))?;
 
-    // Identical writes for all kernels here; AVX variants may stay as stubs.
-    for i in (first + period - 1)..data.len() {
-        let m = middle[i];
-        let d = dev_values[i];
-        out_m[i] = m;
-        out_u[i] = m + devup * d;
-        out_l[i] = m - devdn * d;
+            let start = first + period - 1;
+            let n = data.len();
+            let mut i = start;
+            while i < n {
+                let m = unsafe { *middle.get_unchecked(i) };
+                let d = unsafe { *dev_values.values.get_unchecked(i) };
+                unsafe {
+                    *out_m.get_unchecked_mut(i) = m;
+                    *out_u.get_unchecked_mut(i) = devup.mul_add(d, m);
+                    *out_l.get_unchecked_mut(i) = (-devdn).mul_add(d, m);
+                }
+                i += 1;
+            }
+            Ok(())
+        }
     }
-    Ok(())
 }
 
 pub fn bollinger_bands_with_kernel(
@@ -546,7 +574,12 @@ pub unsafe fn bollinger_bands_avx2(
     )
 }
 
-/// Classic kernel - optimized loop-jammed implementation for SMA
+/// Classic kernel - optimized loop-jammed implementation for SMA + stddev (devtype=0).
+/// Falls back to generic computation for non-stddev deviation types to preserve correctness.
+///
+/// Safety:
+/// - Caller guarantees `out_*` slices have length == `data.len()`.
+/// - Warm-up NaN prefix is handled by the caller (already done before invoking this).
 unsafe fn bb_row_scalar_classic_sma(
     data: &[f64],
     period: usize,
@@ -558,73 +591,112 @@ unsafe fn bb_row_scalar_classic_sma(
     out_m: &mut [f64],
     out_l: &mut [f64],
 ) {
-    // Direct inline SMA calculation
     let n = data.len();
-    let warmup_end = first + period - 1;
-
-    if warmup_end >= n {
+    let warm = first + period - 1;
+    if warm >= n {
         return;
     }
 
-    // Initialize SMA
-    let mut sum = 0.0;
-    for j in 0..period {
-        sum += data[first + j];
-    }
-    let mut sma_val = sum / period as f64;
+    // If deviation is not standard deviation (devtype != 0), use the generic path
+    // to preserve correctness for mean_ad / median_ad.
+    if devtype != 0 {
+        let ma_data = MaData::Slice(data);
+        let dev_input = DevInput::from_slice(
+            data,
+            DevParams {
+                period: Some(period),
+                devtype: Some(devtype),
+            },
+        );
 
-    // Initialize standard deviation calculation
-    let mut sum_sq = 0.0;
-    for j in 0..period {
-        let val = data[first + j];
-        sum_sq += val * val;
+        let middle = ma("sma", ma_data, period)
+            .expect("MA(sma) computation failed in bb_row_scalar_classic_sma");
+        let dev_values = deviation(&dev_input)
+            .expect("Deviation computation failed in bb_row_scalar_classic_sma");
+
+        let mut i = warm;
+        while i < n {
+            let m = *middle.get_unchecked(i);
+            let d = *dev_values.values.get_unchecked(i);
+            *out_m.get_unchecked_mut(i) = m;
+            *out_u.get_unchecked_mut(i) = devup.mul_add(d, m);
+            *out_l.get_unchecked_mut(i) = (-devdn).mul_add(d, m);
+            i += 1;
+        }
+        return;
     }
 
-    // Compute first valid point
-    let mean = sma_val;
-    let variance = if devtype == 0 {
-        // Population variance
-        sum_sq / period as f64 - mean * mean
+    // ----------- Fast rolling SMA + stddev (devtype == 0) -----------
+    let inv_n = 1.0 / (period as f64);
+    let use_sample = false; // population variance per repo convention
+
+    // Compute initial window sums using raw pointers to avoid bounds checks.
+    let mut sum = 0.0f64;
+    let mut sum_sq = 0.0f64;
+
+    let mut p = data.as_ptr().add(first);
+    for _ in 0..period {
+        let v = unsafe { *p };
+        sum += v;
+        sum_sq = v.mul_add(v, sum_sq);
+        p = unsafe { p.add(1) };
+    }
+
+    // Emit first valid point at index `warm`.
+    let mean = sum * inv_n;
+    // Population variance: Var = E[x^2] - (E[x])^2
+    let var0 = if !use_sample {
+        (-mean).mul_add(mean, sum_sq * inv_n)
+    } else if period > 1 {
+        (sum_sq - sum * mean) / ((period - 1) as f64)
     } else {
-        // Sample variance
-        (sum_sq - period as f64 * mean * mean) / (period - 1) as f64
+        0.0
     };
-    let stddev = variance.max(0.0).sqrt();
+    let std0 = var0.max(0.0).sqrt();
 
-    out_m[warmup_end] = mean;
-    out_u[warmup_end] = mean + devup * stddev;
-    out_l[warmup_end] = mean - devdn * stddev;
+    unsafe {
+        *out_m.get_unchecked_mut(warm) = mean;
+        *out_u.get_unchecked_mut(warm) = devup.mul_add(std0, mean);
+        *out_l.get_unchecked_mut(warm) = (-devdn).mul_add(std0, mean);
+    }
 
-    // Rolling window for remaining values
-    for i in (warmup_end + 1)..n {
-        let old_val = data[i - period];
-        let new_val = data[i];
+    // Rolling update with two moving pointers for old/new elements.
+    let mut i = warm + 1;
+    let mut p_new = unsafe { data.as_ptr().add(i) };
+    let mut p_old = unsafe { data.as_ptr().add(i - period) };
+    while i < n {
+        let new = unsafe { *p_new };
+        let old = unsafe { *p_old };
 
-        // Update SMA
-        sum += new_val - old_val;
-        sma_val = sum / period as f64;
+        // Update sum and sum of squares
+        sum += new - old;
+        let tmp = sum_sq - old * old;
+        sum_sq = new.mul_add(new, tmp);
 
-        // Update sum of squares
-        sum_sq += new_val * new_val - old_val * old_val;
-
-        // Compute standard deviation
-        let mean = sma_val;
-        let variance = if devtype == 0 {
-            // Population variance
-            sum_sq / period as f64 - mean * mean
+        let m = sum * inv_n;
+        let var = if !use_sample {
+            (-m).mul_add(m, sum_sq * inv_n)
+        } else if period > 1 {
+            (sum_sq - sum * m) / ((period - 1) as f64)
         } else {
-            // Sample variance
-            (sum_sq - period as f64 * mean * mean) / (period - 1) as f64
+            0.0
         };
-        let stddev = variance.max(0.0).sqrt();
+        let sd = var.max(0.0).sqrt();
 
-        out_m[i] = mean;
-        out_u[i] = mean + devup * stddev;
-        out_l[i] = mean - devdn * stddev;
+        unsafe {
+            *out_m.get_unchecked_mut(i) = m;
+            *out_u.get_unchecked_mut(i) = devup.mul_add(sd, m);
+            *out_l.get_unchecked_mut(i) = (-devdn).mul_add(sd, m);
+        }
+
+        i += 1;
+        p_new = unsafe { p_new.add(1) };
+        p_old = unsafe { p_old.add(1) };
     }
 }
 
-/// Regular kernel - uses function calls for flexibility with any MA type
+/// Regular kernel - uses function calls for flexibility with any MA type,
+/// but jams the final blend and uses pointer math + FMA for speed.
 unsafe fn bb_row_scalar(
     data: &[f64],
     matype: &str,
@@ -637,17 +709,13 @@ unsafe fn bb_row_scalar(
     out_m: &mut [f64],
     out_l: &mut [f64],
 ) {
-    // Use classic kernel for SMA
-    if matype == "sma" || matype == "SMA" {
+    if matype.eq_ignore_ascii_case("sma") {
         bb_row_scalar_classic_sma(
             data, period, devtype, devup, devdn, first, out_u, out_m, out_l,
         );
         return;
     }
 
-    // SAFETY: This function must write to all elements from (first + period - 1) onwards
-    // Since this is called from bollinger_bands_compute_into which already handles errors,
-    // we can use expect here knowing the computation should succeed
     let ma_data = MaData::Slice(data);
     let dev_input = DevInput::from_slice(
         data,
@@ -660,17 +728,25 @@ unsafe fn bb_row_scalar(
     let middle = ma(matype, ma_data, period).expect("MA computation failed in bb_row_scalar");
     let dev_values = deviation(&dev_input).expect("Deviation computation failed in bb_row_scalar");
 
-    for i in (first + period - 1)..data.len() {
-        let m = middle[i];
-        let d = dev_values[i];
-        out_m[i] = m;
-        out_u[i] = m + devup * d;
-        out_l[i] = m - devdn * d;
+    let n = data.len();
+    let warm = first + period - 1;
+    if warm >= n {
+        return;
+    }
+
+    let mut i = warm;
+    while i < n {
+        let m = *middle.get_unchecked(i);
+        let d = *dev_values.values.get_unchecked(i);
+
+        *out_m.get_unchecked_mut(i) = m;
+        *out_u.get_unchecked_mut(i) = devup.mul_add(d, m);
+        *out_l.get_unchecked_mut(i) = (-devdn).mul_add(d, m);
+
+        i += 1;
     }
 }
 
-// NOTE: AVX2 implementation currently delegates to scalar as a safe fallback.
-// Future optimization: implement actual AVX2 SIMD operations.
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 unsafe fn bb_row_avx2(
     data: &[f64],
@@ -684,13 +760,80 @@ unsafe fn bb_row_avx2(
     out_m: &mut [f64],
     out_l: &mut [f64],
 ) {
-    bb_row_scalar(
-        data, matype, period, devtype, devup, devdn, first, out_u, out_m, out_l,
-    )
+    use core::arch::x86_64::*;
+
+    let n = data.len();
+    let warm = first + period - 1;
+    if warm >= n {
+        return;
+    }
+
+    // For the SMA+stddev case, the scalar rolling kernel is optimal.
+    if matype.eq_ignore_ascii_case("sma") && devtype == 0 {
+        bb_row_scalar_classic_sma(
+            data, period, devtype, devup, devdn, first, out_u, out_m, out_l,
+        );
+        return;
+    }
+
+    // Precompute middle & deviation with flexible engines.
+    let ma_data = MaData::Slice(data);
+    let dev_input = DevInput::from_slice(
+        data,
+        DevParams {
+            period: Some(period),
+            devtype: Some(devtype),
+        },
+    );
+    let middle = ma(matype, ma_data, period).expect("MA computation failed in bb_row_avx2");
+    let dev_values =
+        deviation(&dev_input).expect("Deviation computation failed in bb_row_avx2");
+
+    let du = unsafe { _mm256_set1_pd(devup) };
+    let dd = unsafe { _mm256_set1_pd(devdn) };
+
+    let mut i = warm;
+    let step = 4usize;
+
+    // Vectorized loop
+    while i + step <= n {
+        let m = unsafe { _mm256_loadu_pd(middle.as_ptr().add(i)) };
+        let dv = unsafe { _mm256_loadu_pd(dev_values.values.as_ptr().add(i)) };
+
+        // upper = m + devup * dv
+        // lower = m - devdn * dv
+        #[cfg(target_feature = "fma")]
+        let up = unsafe { _mm256_fmadd_pd(du, dv, m) };
+        #[cfg(not(target_feature = "fma"))]
+        let up = unsafe { _mm256_add_pd(m, _mm256_mul_pd(du, dv)) };
+
+        #[cfg(target_feature = "fma")]
+        let lo = unsafe { _mm256_fnmadd_pd(dd, dv, m) }; // m - dd*dv
+        #[cfg(not(target_feature = "fma"))]
+        let lo = unsafe { _mm256_sub_pd(m, _mm256_mul_pd(dd, dv)) };
+
+        unsafe {
+            _mm256_storeu_pd(out_m.as_mut_ptr().add(i), m);
+            _mm256_storeu_pd(out_u.as_mut_ptr().add(i), up);
+            _mm256_storeu_pd(out_l.as_mut_ptr().add(i), lo);
+        }
+
+        i += step;
+    }
+
+    // Scalar tail
+    while i < n {
+        let m = unsafe { *middle.get_unchecked(i) };
+        let d = unsafe { *dev_values.values.get_unchecked(i) };
+        unsafe {
+            *out_m.get_unchecked_mut(i) = m;
+            *out_u.get_unchecked_mut(i) = devup.mul_add(d, m);
+            *out_l.get_unchecked_mut(i) = (-devdn).mul_add(d, m);
+        }
+        i += 1;
+    }
 }
 
-// NOTE: AVX512 implementation currently delegates to scalar as a safe fallback.
-// Future optimization: implement actual AVX512 SIMD operations.
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 unsafe fn bb_row_avx512(
     data: &[f64],
@@ -704,9 +847,77 @@ unsafe fn bb_row_avx512(
     out_m: &mut [f64],
     out_l: &mut [f64],
 ) {
-    bb_row_scalar(
-        data, matype, period, devtype, devup, devdn, first, out_u, out_m, out_l,
-    )
+    use core::arch::x86_64::*;
+
+    let n = data.len();
+    let warm = first + period - 1;
+    if warm >= n {
+        return;
+    }
+
+    // For the SMA+stddev case, the scalar rolling kernel is optimal.
+    if matype.eq_ignore_ascii_case("sma") && devtype == 0 {
+        bb_row_scalar_classic_sma(
+            data, period, devtype, devup, devdn, first, out_u, out_m, out_l,
+        );
+        return;
+    }
+
+    // Precompute middle & deviation with flexible engines.
+    let ma_data = MaData::Slice(data);
+    let dev_input = DevInput::from_slice(
+        data,
+        DevParams {
+            period: Some(period),
+            devtype: Some(devtype),
+        },
+    );
+    let middle = ma(matype, ma_data, period).expect("MA computation failed in bb_row_avx512");
+    let dev_values =
+        deviation(&dev_input).expect("Deviation computation failed in bb_row_avx512");
+
+    let du = unsafe { _mm512_set1_pd(devup) };
+    let dd = unsafe { _mm512_set1_pd(devdn) };
+
+    let mut i = warm;
+    let step = 8usize;
+
+    while i + step <= n {
+        let m = unsafe { _mm512_loadu_pd(middle.as_ptr().add(i)) };
+        let dv = unsafe { _mm512_loadu_pd(dev_values.values.as_ptr().add(i)) };
+
+        // upper = m + devup * dv
+        // lower = m - devdn * dv
+        #[cfg(target_feature = "fma")]
+        let up = unsafe { _mm512_fmadd_pd(du, dv, m) };
+        #[cfg(not(target_feature = "fma"))]
+        let up = unsafe { _mm512_add_pd(m, _mm512_mul_pd(du, dv)) };
+
+        #[cfg(target_feature = "fma")]
+        let lo = unsafe { _mm512_fnmadd_pd(dd, dv, m) }; // m - dd*dv
+        #[cfg(not(target_feature = "fma"))]
+        let lo = unsafe { _mm512_sub_pd(m, _mm512_mul_pd(dd, dv)) };
+
+        unsafe {
+            _mm512_storeu_pd(out_m.as_mut_ptr().add(i), m);
+            _mm512_storeu_pd(out_u.as_mut_ptr().add(i), up);
+            _mm512_storeu_pd(out_l.as_mut_ptr().add(i), lo);
+        }
+
+        i += step;
+    }
+
+    // Scalar tail
+    while i < n {
+        let m = unsafe { *middle.get_unchecked(i) };
+        let d = unsafe { *dev_values.values.get_unchecked(i) };
+        unsafe {
+            *out_m.get_unchecked_mut(i) = m;
+            *out_u.get_unchecked_mut(i) = devup.mul_add(d, m);
+            *out_l.get_unchecked_mut(i) = (-devdn).mul_add(d, m);
+        }
+        i += 1;
+    }
 }
 
 #[derive(Debug, Clone)]

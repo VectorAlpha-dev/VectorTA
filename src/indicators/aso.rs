@@ -12,10 +12,15 @@
 //! - **`Err(AsoError)`** otherwise.
 //!
 //! ## Developer Notes
-//! - **AVX2/AVX512 kernels**: Stubs (both fallback to scalar implementation)
-//! - **Streaming update**: O(n) - iterates through period to find group high/low
-//! - **Memory optimization**: Uses zero-copy helpers (alloc_with_nan_prefix)
-//! - **Optimization needed**: Implement SIMD kernels and optimize streaming to O(1)
+//! - Scalar: hybrid path. Uses naive O(period) scan for short windows and
+//!   monotonic deques (O(1) amortized) for long windows; warmup ramp and
+//!   zero-copy allocation preserved.
+//! - SIMD (AVX2/AVX512): stubs delegating to scalar. Wide-SIMD across time is
+//!   not beneficial here due to data dependencies and deque control-flow.
+//!   Selection routes to scalar for Avx2/Avx512 variants.
+//! - Batch: per-row compute reuses the scalar kernel. Row-specific cross-row
+//!   sharing (e.g., precomputed intrabar, per-period extrema) deferred.
+//! - Streaming: unchanged (O(n) inner scan). Future work could adopt deques.
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
@@ -456,78 +461,244 @@ pub fn aso_scalar(
     out_bears: &mut [f64],
 ) {
     let len = close.len();
+    if len == 0 {
+        return;
+    }
 
-    // Period-sized rings + running sums. No len-sized temps.
-    let mut ring_b = vec![0.0; period];
-    let mut ring_e = vec![0.0; period];
-    let mut sum_b = 0.0;
-    let mut sum_e = 0.0;
-    let mut head = 0usize;
-    let mut filled = 0usize; // number of valid entries currently in ring
-
-    // Start producing outputs at warm = first_val + period - 1
+    // Warm-up index; outputs start at i >= warm.
     let warm = first_val + period - 1;
 
-    for i in first_val..len {
-        // intrabar
-        let intrarange = high[i] - low[i];
-        let k1 = if intrarange == 0.0 { 1.0 } else { intrarange };
-        let intrabarbulls = (((close[i] - low[i]) + (high[i] - open[i])) * 50.0) / k1;
-        let intrabarbears = (((high[i] - close[i]) + (open[i] - low[i])) * 50.0) / k1;
+    // Hybrid: naive scan for short windows; monotonic deques for long windows.
+    const DEQUE_THRESHOLD: usize = 64;
+    if period <= DEQUE_THRESHOLD {
+        // Naive O(period) scan (original path), with rolling average ramp.
+        let mut ring_b = vec![0.0; period];
+        let mut ring_e = vec![0.0; period];
+        let mut sum_b = 0.0;
+        let mut sum_e = 0.0;
+        let mut head = 0usize;
+        let mut filled = 0usize;
 
-        // group over last `period` bars; only defined if we have enough valid data
+        for i in first_val..len {
+            // intrabar
+            let intrarange = high[i] - low[i];
+            let k1 = if intrarange == 0.0 { 1.0 } else { intrarange };
+            let intrabarbulls = (((close[i] - low[i]) + (high[i] - open[i])) * 50.0) / k1;
+            let intrabarbears = (((high[i] - close[i]) + (open[i] - low[i])) * 50.0) / k1;
+
+            if i >= warm {
+                let start = i + 1 - period;
+
+                let mut gl = f64::MAX;
+                let mut gh = f64::MIN;
+                for j in start..=i {
+                    let lj = unsafe { *low.get_unchecked(j) };
+                    let hj = unsafe { *high.get_unchecked(j) };
+                    if lj < gl {
+                        gl = lj;
+                    }
+                    if hj > gh {
+                        gh = hj;
+                    }
+                }
+                let gopen = unsafe { *open.get_unchecked(start) };
+                let gr = gh - gl;
+                let k2 = if gr == 0.0 { 1.0 } else { gr };
+
+                let groupbulls = (((close[i] - gl) + (gh - gopen)) * 50.0) / k2;
+                let groupbears = (((gh - close[i]) + (gopen - gl)) * 50.0) / k2;
+
+                let b = match mode {
+                    0 => 0.5 * (intrabarbulls + groupbulls),
+                    1 => intrabarbulls,
+                    2 => groupbulls,
+                    _ => 0.5 * (intrabarbulls + groupbulls),
+                };
+                let e = match mode {
+                    0 => 0.5 * (intrabarbears + groupbears),
+                    1 => intrabarbears,
+                    2 => groupbears,
+                    _ => 0.5 * (intrabarbears + groupbears),
+                };
+
+                let old_b = if filled == period { ring_b[head] } else { 0.0 };
+                let old_e = if filled == period { ring_e[head] } else { 0.0 };
+                sum_b += b - old_b;
+                sum_e += e - old_e;
+                ring_b[head] = b;
+                ring_e[head] = e;
+                head = (head + 1) % period;
+                if filled < period {
+                    filled += 1;
+                }
+
+                let n = filled; // 1..=period ramp
+                unsafe {
+                    *out_bulls.get_unchecked_mut(i) = sum_b / n as f64;
+                    *out_bears.get_unchecked_mut(i) = sum_e / n as f64;
+                }
+            }
+        }
+        return;
+    }
+
+    // Long-window path: monotonic deques with rolling average ramp.
+    let mut ring_b = vec![0.0f64; period];
+    let mut ring_e = vec![0.0f64; period];
+    let mut sum_b = 0.0f64;
+    let mut sum_e = 0.0f64;
+    let mut rhead = 0usize;
+    let mut filled = 0usize;
+
+    let mut dq_min = vec![0usize; period];
+    let mut dq_max = vec![0usize; period];
+    let mut min_head = 0usize;
+    let mut min_tail = 0usize;
+    let mut min_len = 0usize;
+    let mut max_head = 0usize;
+    let mut max_tail = 0usize;
+    let mut max_len = 0usize;
+
+    for i in first_val..len {
+        let oi = unsafe { *open.get_unchecked(i) };
+        let hi = unsafe { *high.get_unchecked(i) };
+        let li = unsafe { *low.get_unchecked(i) };
+        let ci = unsafe { *close.get_unchecked(i) };
+
+        while min_len > 0 {
+            let back = if min_tail == 0 { period - 1 } else { min_tail - 1 };
+            let j = unsafe { *dq_min.get_unchecked(back) };
+            let lj = unsafe { *low.get_unchecked(j) };
+            if li <= lj {
+                min_tail = back;
+                min_len -= 1;
+            } else {
+                break;
+            }
+        }
+        if min_len == period {
+            min_head += 1;
+            if min_head == period {
+                min_head = 0;
+            }
+            min_len -= 1;
+        }
+        unsafe { *dq_min.get_unchecked_mut(min_tail) = i; }
+        min_tail += 1;
+        if min_tail == period {
+            min_tail = 0;
+        }
+        min_len += 1;
+
+        while max_len > 0 {
+            let back = if max_tail == 0 { period - 1 } else { max_tail - 1 };
+            let j = unsafe { *dq_max.get_unchecked(back) };
+            let hj = unsafe { *high.get_unchecked(j) };
+            if hi >= hj {
+                max_tail = back;
+                max_len -= 1;
+            } else {
+                break;
+            }
+        }
+        if max_len == period {
+            max_head += 1;
+            if max_head == period {
+                max_head = 0;
+            }
+            max_len -= 1;
+        }
+        unsafe { *dq_max.get_unchecked_mut(max_tail) = i; }
+        max_tail += 1;
+        if max_tail == period {
+            max_tail = 0;
+        }
+        max_len += 1;
+
         if i >= warm {
             let start = i + 1 - period;
 
-            let mut gl = f64::MAX;
-            let mut gh = f64::MIN;
-            for j in start..=i {
-                let lj = unsafe { *low.get_unchecked(j) };
-                let hj = unsafe { *high.get_unchecked(j) };
-                if lj < gl {
-                    gl = lj;
+            while min_len > 0 && unsafe { *dq_min.get_unchecked(min_head) } < start {
+                min_head += 1;
+                if min_head == period {
+                    min_head = 0;
                 }
-                if hj > gh {
-                    gh = hj;
-                }
+                min_len -= 1;
             }
+            while max_len > 0 && unsafe { *dq_max.get_unchecked(max_head) } < start {
+                max_head += 1;
+                if max_head == period {
+                    max_head = 0;
+                }
+                max_len -= 1;
+            }
+
+            debug_assert!(min_len > 0 && max_len > 0);
+            let gl = unsafe {
+                let idx = *dq_min.get_unchecked(min_head);
+                *low.get_unchecked(idx)
+            };
+            let gh = unsafe {
+                let idx = *dq_max.get_unchecked(max_head);
+                *high.get_unchecked(idx)
+            };
             let gopen = unsafe { *open.get_unchecked(start) };
+
+            let intrarange = hi - li;
+            let inv_k1 = if intrarange != 0.0 { 1.0 / intrarange } else { 1.0 };
+            let scale1 = 50.0 * inv_k1;
+            let intrabarbulls = ((ci - li) + (hi - oi)) * scale1;
+            let intrabarbears = ((hi - ci) + (oi - li)) * scale1;
+
             let gr = gh - gl;
-            let k2 = if gr == 0.0 { 1.0 } else { gr };
+            let inv_k2 = if gr != 0.0 { 1.0 / gr } else { 1.0 };
+            let scale2 = 50.0 * inv_k2;
+            let groupbulls = ((ci - gl) + (gh - gopen)) * scale2;
+            let groupbears = ((gh - ci) + (gopen - gl)) * scale2;
 
-            let groupbulls = (((close[i] - gl) + (gh - gopen)) * 50.0) / k2;
-            let groupbears = (((gh - close[i]) + (gopen - gl)) * 50.0) / k2;
-
-            let b = match mode {
-                0 => 0.5 * (intrabarbulls + groupbulls),
-                1 => intrabarbulls,
-                2 => groupbulls,
-                _ => 0.5 * (intrabarbulls + groupbulls),
+            let b = if mode == 0 {
+                0.5 * (intrabarbulls + groupbulls)
+            } else if mode == 1 {
+                intrabarbulls
+            } else {
+                groupbulls
             };
-            let e = match mode {
-                0 => 0.5 * (intrabarbears + groupbears),
-                1 => intrabarbears,
-                2 => groupbears,
-                _ => 0.5 * (intrabarbears + groupbears),
+            let e = if mode == 0 {
+                0.5 * (intrabarbears + groupbears)
+            } else if mode == 1 {
+                intrabarbears
+            } else {
+                groupbears
             };
 
-            // rolling window of defined values
-            let old_b = if filled == period { ring_b[head] } else { 0.0 };
-            let old_e = if filled == period { ring_e[head] } else { 0.0 };
+            let old_b = if filled == period {
+                unsafe { *ring_b.get_unchecked(rhead) }
+            } else {
+                0.0
+            };
+            let old_e = if filled == period {
+                unsafe { *ring_e.get_unchecked(rhead) }
+            } else {
+                0.0
+            };
             sum_b += b - old_b;
             sum_e += e - old_e;
-            ring_b[head] = b;
-            ring_e[head] = e;
-            head = (head + 1) % period;
+            unsafe {
+                *ring_b.get_unchecked_mut(rhead) = b;
+                *ring_e.get_unchecked_mut(rhead) = e;
+            }
+            rhead += 1;
+            if rhead == period {
+                rhead = 0;
+            }
             if filled < period {
                 filled += 1;
             }
 
-            // emit output, divide by actual count to mirror alma.rs ramp
-            let n = filled; // grows 1..=period, then stays at period
+            let n = filled as f64;
             unsafe {
-                *out_bulls.get_unchecked_mut(i) = sum_b / n as f64;
-                *out_bears.get_unchecked_mut(i) = sum_e / n as f64;
+                *out_bulls.get_unchecked_mut(i) = sum_b / n;
+                *out_bears.get_unchecked_mut(i) = sum_e / n;
             }
         }
     }
@@ -569,7 +740,7 @@ unsafe fn aso_avx2(
     out_bulls: &mut [f64],
     out_bears: &mut [f64],
 ) {
-    // For now, fallback to scalar
+    // SIMD underperforms for ASO (control-flow + deque heavy). Delegate to scalar.
     aso_scalar(
         open, high, low, close, period, mode, first_val, out_bulls, out_bears,
     );
@@ -589,7 +760,7 @@ unsafe fn aso_avx512(
     out_bulls: &mut [f64],
     out_bears: &mut [f64],
 ) {
-    // For now, fallback to scalar
+    // SIMD underperforms for ASO (control-flow + deque heavy). Delegate to scalar.
     aso_scalar(
         open, high, low, close, period, mode, first_val, out_bulls, out_bears,
     );
@@ -1544,6 +1715,8 @@ mod tests {
     #[cfg(feature = "proptest")]
     use proptest::prelude::*;
     use std::error::Error;
+
+    
 
     fn check_aso_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);

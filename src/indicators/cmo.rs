@@ -12,8 +12,8 @@
 //! - **`Err(CmoError)`** otherwise.
 //!
 //! ## Developer Notes
-//! - **AVX2 kernel**: STUB - calls scalar implementation
-//! - **AVX512 kernel**: STUB - calls scalar implementation (both short and long variants)
+//! - **AVX2 kernel**: Implemented (warm-up vectorized only). Underperforms (<5%) vs scalar at 100k; Auto short-circuits to scalar.
+//! - **AVX512 kernel**: Implemented (warm-up vectorized only). Underperforms vs scalar; Auto short-circuits to scalar.
 //! - **Streaming**: Not implemented
 //! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy)
 //! - **Batch operations**: ✅ Implemented with parallel processing support
@@ -223,10 +223,20 @@ fn cmo_prepare<'a>(
             valid: len - first,
         });
     }
-    let chosen = match k {
-        Kernel::Auto => detect_best_kernel(),
+    let mut chosen = match k {
+        // SIMD underperforms (<5%) for CMO; keep Auto on scalar.
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
+    // Normalize any batch kernels to their single-series equivalents here.
+    if chosen.is_batch() {
+        chosen = match chosen {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => chosen,
+        };
+    }
     Ok((data, period, first, chosen))
 }
 
@@ -335,22 +345,248 @@ pub fn cmo_avx512(data: &[f64], period: usize, first_valid: usize, out: &mut [f6
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn cmo_avx2(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-    // AVX2 stub: use scalar
-    cmo_scalar(data, period, first_valid, out)
+    // Vectorize warm-up, then scalar rolling update for parity
+    unsafe { cmo_avx2_impl(data, period, first_valid, out) }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn cmo_avx512_short(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-    // AVX512 short stub: use scalar
-    cmo_scalar(data, period, first_valid, out)
+    cmo_avx512_impl(data, period, first_valid, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn cmo_avx512_long(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-    // AVX512 long stub: use scalar
-    cmo_scalar(data, period, first_valid, out)
+    cmo_avx512_impl(data, period, first_valid, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn cmo_avx2_impl(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
+    use core::arch::x86_64::*;
+
+    debug_assert!(out.len() == data.len());
+
+    #[inline(always)]
+    unsafe fn hsum256_pd(v: __m256d) -> f64 {
+        let hi = _mm256_extractf128_pd(v, 1);
+        let lo = _mm256_castpd256_pd128(v);
+        let sum2 = _mm_add_pd(lo, hi);
+        let hi64 = _mm_unpackhi_pd(sum2, sum2);
+        _mm_cvtsd_f64(_mm_add_sd(sum2, hi64))
+    }
+
+    let len = data.len();
+    let start = first_valid + 1;
+    let init_end = first_valid + period;
+
+    let inv_period = 1.0 / (period as f64);
+    let period_m1 = (period - 1) as f64;
+
+    // Warm-up accumulation
+    let mut acc_gain_v = _mm256_setzero_pd();
+    let mut acc_loss_v = _mm256_setzero_pd();
+    let half_v = _mm256_set1_pd(0.5);
+    let abs_mask = _mm256_castsi256_pd(_mm256_set1_epi64x(0x7FFF_FFFF_FFFF_FFFFu64 as i64));
+
+    let mut sum_gain = 0.0f64;
+    let mut sum_loss = 0.0f64;
+
+    let mut i = start;
+    while i + 3 <= init_end {
+        let curr_v = _mm256_loadu_pd(data.as_ptr().add(i));
+        let prev_v = _mm256_loadu_pd(data.as_ptr().add(i - 1));
+        let diff_v = _mm256_sub_pd(curr_v, prev_v);
+
+        let ad_v = _mm256_and_pd(diff_v, abs_mask);
+        let gain_v = _mm256_mul_pd(_mm256_add_pd(ad_v, diff_v), half_v);
+        let loss_v = _mm256_mul_pd(_mm256_sub_pd(ad_v, diff_v), half_v);
+
+        acc_gain_v = _mm256_add_pd(acc_gain_v, gain_v);
+        acc_loss_v = _mm256_add_pd(acc_loss_v, loss_v);
+
+        i += 4;
+    }
+
+    sum_gain += hsum256_pd(acc_gain_v);
+    sum_loss += hsum256_pd(acc_loss_v);
+
+    // Scalar tail of warm-up
+    let mut prev = if i == start {
+        *data.get_unchecked(first_valid)
+    } else {
+        *data.get_unchecked(i - 1)
+    };
+
+    while i <= init_end {
+        let curr = *data.get_unchecked(i);
+        let diff = curr - prev;
+        prev = curr;
+
+        let ad = diff.abs();
+        sum_gain += 0.5 * (ad + diff);
+        sum_loss += 0.5 * (ad - diff);
+        i += 1;
+    }
+
+    // First output at warm-up end
+    let mut avg_gain = sum_gain * inv_period;
+    let mut avg_loss = sum_loss * inv_period;
+    {
+        let sum_gl = avg_gain + avg_loss;
+        *out.get_unchecked_mut(init_end) = if sum_gl != 0.0 {
+            100.0 * ((avg_gain - avg_loss) / sum_gl)
+        } else {
+            0.0
+        };
+    }
+
+    // Rolling update (scalar)
+    while i < len {
+        let curr = *data.get_unchecked(i);
+        let diff = curr - prev;
+        prev = curr;
+
+        let ad = diff.abs();
+        let gain = 0.5 * (ad + diff);
+        let loss = 0.5 * (ad - diff);
+
+        avg_gain *= period_m1;
+        avg_loss *= period_m1;
+        avg_gain += gain;
+        avg_loss += loss;
+        avg_gain *= inv_period;
+        avg_loss *= inv_period;
+
+        let sum_gl = avg_gain + avg_loss;
+        *out.get_unchecked_mut(i) = if sum_gl != 0.0 {
+            100.0 * ((avg_gain - avg_loss) / sum_gl)
+        } else {
+            0.0
+        };
+
+        i += 1;
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+unsafe fn cmo_avx512_impl(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
+    use core::arch::x86_64::*;
+
+    debug_assert!(out.len() == data.len());
+
+    #[inline(always)]
+    unsafe fn hsum256_pd(v: __m256d) -> f64 {
+        let hi = _mm256_extractf128_pd(v, 1);
+        let lo = _mm256_castpd256_pd128(v);
+        let sum2 = _mm_add_pd(lo, hi);
+        let hi64 = _mm_unpackhi_pd(sum2, sum2);
+        _mm_cvtsd_f64(_mm_add_sd(sum2, hi64))
+    }
+
+    #[inline(always)]
+    unsafe fn hsum512_pd(v: __m512d) -> f64 {
+        let lo256 = _mm512_castpd512_pd256(v);
+        let hi256 = _mm512_extractf64x4_pd(v, 1);
+        hsum256_pd(_mm256_add_pd(lo256, hi256))
+    }
+
+    let len = data.len();
+    let start = first_valid + 1;
+    let init_end = first_valid + period;
+
+    let inv_period = 1.0 / (period as f64);
+    let period_m1 = (period - 1) as f64;
+
+    // Warm-up accumulation (8 diffs per iter)
+    let mut acc_gain_v = _mm512_setzero_pd();
+    let mut acc_loss_v = _mm512_setzero_pd();
+    let half_v = _mm512_set1_pd(0.5);
+    let abs_mask_i = _mm512_set1_epi64(0x7FFF_FFFF_FFFF_FFFFu64 as i64);
+
+    let mut sum_gain = 0.0f64;
+    let mut sum_loss = 0.0f64;
+
+    let mut i = start;
+    while i + 7 <= init_end {
+        let curr_v = _mm512_loadu_pd(data.as_ptr().add(i));
+        let prev_v = _mm512_loadu_pd(data.as_ptr().add(i - 1));
+        let diff_v = _mm512_sub_pd(curr_v, prev_v);
+
+        let diff_i = _mm512_castpd_si512(diff_v);
+        let abs_i = _mm512_and_si512(diff_i, abs_mask_i);
+        let ad_v = _mm512_castsi512_pd(abs_i);
+
+        let gain_v = _mm512_mul_pd(_mm512_add_pd(ad_v, diff_v), half_v);
+        let loss_v = _mm512_mul_pd(_mm512_sub_pd(ad_v, diff_v), half_v);
+
+        acc_gain_v = _mm512_add_pd(acc_gain_v, gain_v);
+        acc_loss_v = _mm512_add_pd(acc_loss_v, loss_v);
+
+        i += 8;
+    }
+
+    sum_gain += hsum512_pd(acc_gain_v);
+    sum_loss += hsum512_pd(acc_loss_v);
+
+    // Scalar tail of warm-up
+    let mut prev = if i == start {
+        *data.get_unchecked(first_valid)
+    } else {
+        *data.get_unchecked(i - 1)
+    };
+
+    while i <= init_end {
+        let curr = *data.get_unchecked(i);
+        let diff = curr - prev;
+        prev = curr;
+
+        let ad = diff.abs();
+        sum_gain += 0.5 * (ad + diff);
+        sum_loss += 0.5 * (ad - diff);
+        i += 1;
+    }
+
+    // First output at warm-up end
+    let mut avg_gain = sum_gain * inv_period;
+    let mut avg_loss = sum_loss * inv_period;
+    {
+        let sum_gl = avg_gain + avg_loss;
+        *out.get_unchecked_mut(init_end) = if sum_gl != 0.0 {
+            100.0 * ((avg_gain - avg_loss) / sum_gl)
+        } else {
+            0.0
+        };
+    }
+
+    // Rolling update (scalar)
+    while i < len {
+        let curr = *data.get_unchecked(i);
+        let diff = curr - prev;
+        prev = curr;
+
+        let ad = diff.abs();
+        let gain = 0.5 * (ad + diff);
+        let loss = 0.5 * (ad - diff);
+
+        avg_gain *= period_m1;
+        avg_loss *= period_m1;
+        avg_gain += gain;
+        avg_loss += loss;
+        avg_gain *= inv_period;
+        avg_loss *= inv_period;
+
+        let sum_gl = avg_gain + avg_loss;
+        *out.get_unchecked_mut(i) = if sum_gl != 0.0 {
+            100.0 * ((avg_gain - avg_loss) / sum_gl)
+        } else {
+            0.0
+        };
+
+        i += 1;
+    }
 }
 
 #[inline(always)]
@@ -360,7 +596,8 @@ pub fn cmo_batch_with_kernel(
     k: Kernel,
 ) -> Result<CmoBatchOutput, CmoError> {
     let kernel = match k {
-        Kernel::Auto => detect_best_batch_kernel(),
+        // SIMD batch underperforms/unused for CMO; default to scalar batch
+        Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         _ => {
             return Err(CmoError::InvalidPeriod {
@@ -531,16 +768,27 @@ fn cmo_batch_inner(
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
+    // Precompute per-step gain/loss and their prefix sums once for all rows
+    let len = data.len();
+    let start = first + 1;
+    let mut gains = vec![0.0f64; len];
+    let mut losses = vec![0.0f64; len];
+    for i in start..len {
+        let diff = data[i] - data[i - 1];
+        let ad = diff.abs();
+        gains[i] = 0.5 * (ad + diff);
+        losses[i] = 0.5 * (ad - diff);
+    }
+    let mut pg = vec![0.0f64; len + 1];
+    let mut pl = vec![0.0f64; len + 1];
+    for i in 0..len {
+        pg[i + 1] = pg[i] + gains[i];
+        pl[i + 1] = pl[i] + losses[i];
+    }
+
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
-        match kern {
-            Kernel::Scalar => cmo_row_scalar(data, first, period, out_row),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => cmo_row_avx2(data, first, period, out_row),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => cmo_row_avx512(data, first, period, out_row),
-            _ => unreachable!(),
-        }
+        cmo_row_from_gl(&gains, &losses, &pg, &pl, first, period, out_row);
     };
 
     if parallel {
@@ -615,19 +863,30 @@ fn cmo_batch_inner_into(
     let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
     init_matrix_prefixes(out_mu, cols, &warm);
 
-    // 2b) Now compute rows writing real values after warmup.
+    // 2b) Precompute per-step gain/loss and prefix sums once
+    let len = data.len();
+    let start = first + 1;
+    let mut gains = vec![0.0f64; len];
+    let mut losses = vec![0.0f64; len];
+    for i in start..len {
+        let diff = data[i] - data[i - 1];
+        let ad = diff.abs();
+        gains[i] = 0.5 * (ad + diff);
+        losses[i] = 0.5 * (ad - diff);
+    }
+    let mut pg = vec![0.0f64; len + 1];
+    let mut pl = vec![0.0f64; len + 1];
+    for i in 0..len {
+        pg[i + 1] = pg[i] + gains[i];
+        pl[i + 1] = pl[i] + losses[i];
+    }
+
+    // 2c) Now compute rows writing real values after warmup using precompute.
     let do_row = |row: usize, row_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
         let row_dst: &mut [f64] =
             std::slice::from_raw_parts_mut(row_mu.as_mut_ptr() as *mut f64, row_mu.len());
-        match kern {
-            Kernel::Scalar => cmo_row_scalar(data, first, period, row_dst),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => cmo_row_avx2(data, first, period, row_dst),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => cmo_row_avx512(data, first, period, row_dst),
-            _ => unreachable!(),
-        }
+        cmo_row_from_gl(&gains, &losses, &pg, &pl, first, period, row_dst);
     };
 
     if parallel {
@@ -710,6 +969,61 @@ unsafe fn cmo_row_avx512_short(data: &[f64], first: usize, period: usize, out: &
 #[inline(always)]
 unsafe fn cmo_row_avx512_long(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
     cmo_avx512_long(data, period, first, out)
+}
+
+#[inline(always)]
+unsafe fn cmo_row_from_gl(
+    gains: &[f64],
+    losses: &[f64],
+    pg: &[f64],
+    pl: &[f64],
+    first: usize,
+    period: usize,
+    out: &mut [f64],
+) {
+    let len = out.len();
+    let start = first + 1;
+    let init_end = first + period;
+    let inv_period = 1.0 / (period as f64);
+    let period_m1 = (period - 1) as f64;
+
+    // Warm-up sums via prefix differences
+    let sum_gain = pg[init_end + 1] - pg[start];
+    let sum_loss = pl[init_end + 1] - pl[start];
+    let mut avg_gain = sum_gain * inv_period;
+    let mut avg_loss = sum_loss * inv_period;
+
+    // First output at warm-up end
+    {
+        let sum_gl = avg_gain + avg_loss;
+        *out.get_unchecked_mut(init_end) = if sum_gl != 0.0 {
+            100.0 * ((avg_gain - avg_loss) / sum_gl)
+        } else {
+            0.0
+        };
+    }
+
+    // Rolling update using precomputed gains/losses
+    let mut i = init_end + 1;
+    while i < len {
+        let g = *gains.get_unchecked(i);
+        let l = *losses.get_unchecked(i);
+
+        avg_gain *= period_m1;
+        avg_loss *= period_m1;
+        avg_gain += g;
+        avg_loss += l;
+        avg_gain *= inv_period;
+        avg_loss *= inv_period;
+
+        let sum_gl = avg_gain + avg_loss;
+        *out.get_unchecked_mut(i) = if sum_gl != 0.0 {
+            100.0 * ((avg_gain - avg_loss) / sum_gl)
+        } else {
+            0.0
+        };
+        i += 1;
+    }
 }
 
 #[derive(Debug, Clone)]

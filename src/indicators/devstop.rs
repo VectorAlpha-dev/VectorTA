@@ -14,11 +14,12 @@
 //! - **`Err(DevStopError)`** otherwise.
 //!
 //! ## Developer Notes
-//! - **AVX2 kernel**: Routes to devstop_into_slice (not a real SIMD implementation)
-//! - **AVX512 kernel**: Routes to devstop_into_slice (not a real SIMD implementation)
+//! - **Decision**: Single-series SIMD offers little gain due to strong recurrences; we route AVX2/AVX512 to the fused scalar classic path when applicable (devtype=stddev + SMA/EMA), otherwise fall back to the generic path.
+//! - **AVX2/AVX512 kernels**: Route to fused scalar for classic SMA/EMA; otherwise delegate to `devstop_into_slice`.
 //! - **Streaming**: Not implemented
 //! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy)
 //! - **Batch operations**: ✅ Implemented with parallel processing support
+//! - **Row-specific batch**: Implemented for classic stddev + SMA/EMA using shared precompute of r and prefix sums; other devtypes fall back to generic path.
 
 use crate::indicators::deviation::{deviation, DevInput, DevParams};
 use crate::indicators::moving_averages::ma::{ma, MaData};
@@ -554,8 +555,8 @@ pub fn devstop_with_kernel(
         k => k,
     };
 
-    // Allocate output without NaN prefix (devstop_into_slice will handle it)
-    let warm = devstop_warmup(first, period);
+    // Allocate output without NaN prefix (devstop_into_slice/fused kernels set warmup)
+    let _warm = devstop_warmup(first, period);
     let mut out = vec![0.0; len];
 
     // Pass resolved kernel directly
@@ -600,8 +601,22 @@ pub fn devstop_avx2(
     input: &DevStopInput,
     out: &mut [f64],
 ) {
-    let _ = (high, low, period, first);
-    let _ = devstop_into_slice(out, input, Kernel::Avx2);
+    // Fast path: classic stddev with SMA/EMA → use fused scalar kernel for speed/correctness
+    let devtype = input.get_devtype();
+    let is_long = input.get_direction().eq_ignore_ascii_case("long");
+    let mult = input.get_mult();
+    let ma_type = input.get_ma_type();
+    unsafe {
+        if devtype == 0 && (ma_type.eq_ignore_ascii_case("sma") || ma_type.eq_ignore_ascii_case("ema")) {
+            let _ = if ma_type.eq_ignore_ascii_case("sma") {
+                devstop_scalar_classic_sma(high, low, period, mult, is_long, first, out)
+            } else {
+                devstop_scalar_classic_ema(high, low, period, mult, is_long, first, out)
+            };
+        } else {
+            let _ = devstop_into_slice(out, input, Kernel::Avx2);
+        }
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -614,8 +629,21 @@ pub fn devstop_avx512(
     input: &DevStopInput,
     out: &mut [f64],
 ) {
-    let _ = (high, low, period, first);
-    let _ = devstop_into_slice(out, input, Kernel::Avx512);
+    let devtype = input.get_devtype();
+    let is_long = input.get_direction().eq_ignore_ascii_case("long");
+    let mult = input.get_mult();
+    let ma_type = input.get_ma_type();
+    unsafe {
+        if devtype == 0 && (ma_type.eq_ignore_ascii_case("sma") || ma_type.eq_ignore_ascii_case("ema")) {
+            let _ = if ma_type.eq_ignore_ascii_case("sma") {
+                devstop_scalar_classic_sma(high, low, period, mult, is_long, first, out)
+            } else {
+                devstop_scalar_classic_ema(high, low, period, mult, is_long, first, out)
+            };
+        } else {
+            let _ = devstop_into_slice(out, input, Kernel::Avx512);
+        }
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -911,6 +939,210 @@ fn devstop_batch_inner(
         }
         k => k, // Pass through non-batch kernels
     };
+
+    // Row-specific optimized batch for classic stddev + SMA/EMA
+    let all_classic = combos.iter().all(|c| {
+        let dt = c.devtype.unwrap_or(0);
+        let mt = c
+            .ma_type
+            .as_ref()
+            .map(|s| s.as_str())
+            .unwrap_or("sma");
+        dt == 0 && (mt.eq_ignore_ascii_case("sma") || mt.eq_ignore_ascii_case("ema"))
+    });
+
+    if all_classic {
+        let len = cols;
+        // Precompute 2-bar range r and prefix sums over finite values only
+        let mut r = vec![f64::NAN; len];
+        if first + 1 < len {
+            let mut prev_h = high[first];
+            let mut prev_l = low[first];
+            for i in (first + 1)..len {
+                let h = high[i];
+                let l = low[i];
+                if !h.is_nan() && !prev_h.is_nan() && !l.is_nan() && !prev_l.is_nan() {
+                    let hi2 = if h > prev_h { h } else { prev_h };
+                    let lo2 = if l < prev_l { l } else { prev_l };
+                    r[i] = hi2 - lo2;
+                }
+                prev_h = h;
+                prev_l = l;
+            }
+        }
+        // Exclusive prefix sums for sum, sumsq, and finite count
+        let mut p1 = vec![0.0f64; len + 1];
+        let mut p2 = vec![0.0f64; len + 1];
+        let mut pc = vec![0usize; len + 1];
+        for i in 0..len {
+            let ri = r[i];
+            p1[i + 1] = p1[i];
+            p2[i + 1] = p2[i];
+            pc[i + 1] = pc[i];
+            if ri.is_finite() {
+                p1[i + 1] += ri;
+                p2[i + 1] += ri * ri;
+                pc[i + 1] += 1;
+            }
+        }
+
+        let process_row = |row: usize, dst_row_mu: &mut [f64]| -> Result<(), DevStopError> {
+            let prm = &combos[row];
+            let period = prm.period.unwrap_or(20);
+            let mult = prm.mult.unwrap_or(0.0);
+            let is_long = prm
+                .direction
+                .as_ref()
+                .map(|d| d.as_str())
+                .unwrap_or("long")
+                .eq_ignore_ascii_case("long");
+            let ma_type = prm
+                .ma_type
+                .as_ref()
+                .map(|s| s.as_str())
+                .unwrap_or("sma");
+
+            let start_base = first + period;
+            if start_base >= len {
+                return Ok(());
+            }
+            let start_final = start_base + period - 1;
+
+            // EMA state
+            let mut ema = 0.0f64;
+            let mut use_ema = ma_type.eq_ignore_ascii_case("ema");
+            let (alpha, beta) = if use_ema {
+                let a = 2.0 / (period as f64 + 1.0);
+                (a, 1.0 - a)
+            } else {
+                (0.0, 0.0)
+            };
+            if use_ema {
+                let a = first + 1;
+                let b = start_base;
+                let cnt0 = pc[b] - pc[a];
+                if cnt0 > 0 {
+                    ema = (p1[b] - p1[a]) / (cnt0 as f64);
+                } else {
+                    ema = f64::NAN;
+                }
+            }
+
+            // Monotonic deque over base with capacity = period
+            let mut base_ring = vec![f64::NAN; period];
+            let mut dq_buf = vec![0usize; period];
+            let mut dq_head = 0usize;
+            let mut dq_len = 0usize;
+            #[inline(always)]
+            fn dq_idx_at(buf: &[usize], head: usize, cap: usize, k: usize) -> usize {
+                unsafe { *buf.get_unchecked((head + k) % cap) }
+            }
+            #[inline(always)]
+            fn dq_back_idx(buf: &[usize], head: usize, len: usize, cap: usize) -> usize {
+                unsafe { *buf.get_unchecked((head + len - 1) % cap) }
+            }
+            #[inline(always)]
+            fn dq_pop_back(len: &mut usize) { *len -= 1; }
+            #[inline(always)]
+            fn dq_pop_front(head: &mut usize, len: &mut usize, cap: usize) { *head = (*head + 1) % cap; *len -= 1; }
+            #[inline(always)]
+            fn dq_push_back(buf: &mut [usize], head: usize, len: &mut usize, cap: usize, value: usize) {
+                let pos = (head + *len) % cap;
+                unsafe { *buf.get_unchecked_mut(pos) = value; }
+                *len += 1;
+            }
+
+            for i in start_base..len {
+                if use_ema {
+                    let ri = r[i];
+                    if ri.is_finite() {
+                        ema = ri.mul_add(alpha, beta * ema);
+                    }
+                }
+                let a = i + 1 - period;
+                let b = i + 1;
+                let cnt = pc[b] - pc[a];
+                let (avtr, sigma) = if cnt == 0 {
+                    (f64::NAN, f64::NAN)
+                } else if use_ema {
+                    let e1 = (p1[b] - p1[a]) / (cnt as f64);
+                    let e2 = (p2[b] - p2[a]) / (cnt as f64);
+                    let var = (e2 - 2.0 * ema * e1 + ema * ema).max(0.0);
+                    (ema, var.sqrt())
+                } else {
+                    let e1 = (p1[b] - p1[a]) / (cnt as f64);
+                    let e2 = (p2[b] - p2[a]) / (cnt as f64);
+                    let var = (e2 - e1 * e1).max(0.0);
+                    (e1, var.sqrt())
+                };
+
+                let h = high[i];
+                let l = low[i];
+                let base = if is_long {
+                    if h.is_nan() || avtr.is_nan() || sigma.is_nan() { f64::NAN } else { h - avtr - mult * sigma }
+                } else {
+                    if l.is_nan() || avtr.is_nan() || sigma.is_nan() { f64::NAN } else { l + avtr + mult * sigma }
+                };
+
+                let slot = i % period;
+                base_ring[slot] = base;
+                if is_long {
+                    while dq_len > 0 {
+                        let j = dq_back_idx(&dq_buf, dq_head, dq_len, period);
+                        let bj = base_ring[j % period];
+                        if bj.is_nan() || bj <= base { dq_pop_back(&mut dq_len); } else { break; }
+                    }
+                } else {
+                    while dq_len > 0 {
+                        let j = dq_back_idx(&dq_buf, dq_head, dq_len, period);
+                        let bj = base_ring[j % period];
+                        if bj.is_nan() || bj >= base { dq_pop_back(&mut dq_len); } else { break; }
+                    }
+                }
+                dq_push_back(&mut dq_buf, dq_head, &mut dq_len, period, i);
+
+                let cut = i + 1 - period;
+                while dq_len > 0 && dq_idx_at(&dq_buf, dq_head, period, 0) < cut {
+                    dq_pop_front(&mut dq_head, &mut dq_len, period);
+                }
+
+                if i >= start_final {
+                    let out_val = if dq_len > 0 {
+                        let j = dq_idx_at(&dq_buf, dq_head, period, 0);
+                        base_ring[j % period]
+                    } else { f64::NAN };
+                    dst_row_mu[i] = out_val;
+                }
+            }
+            Ok(())
+        };
+
+        if parallel {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                use rayon::prelude::*;
+                out.par_chunks_mut(cols)
+                    .enumerate()
+                    .try_for_each(|(row, sl)| process_row(row, sl))?;
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                for (row, sl) in out.chunks_mut(cols).enumerate() {
+                    process_row(row, sl)?;
+                }
+            }
+        } else {
+            for (row, sl) in out.chunks_mut(cols).enumerate() {
+                process_row(row, sl)?;
+            }
+        }
+
+        let values = unsafe {
+            Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, guard.len(), guard.capacity())
+        };
+        core::mem::forget(guard);
+        return Ok(DevStopBatchOutput { values, combos, rows, cols });
+    }
 
     let do_row = |row: usize, dst_row_mu: &mut [f64]| -> Result<(), DevStopError> {
         let prm = &combos[row];
@@ -1633,7 +1865,256 @@ pub fn devstop_batch_unified_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-/// Optimized DevStop calculation with inline SMA and standard deviation
+/// Fused, single-pass DevStop classic kernel:
+/// - Builds 2-bar range on the fly
+/// - Maintains rolling SMA or EMA of the range
+/// - Maintains rolling standard deviation via two-moment identities
+/// - Computes base and final rolling extrema with a monotonic deque
+#[inline]
+unsafe fn devstop_scalar_classic_fused<const EMA: bool>(
+    high: &[f64],
+    low: &[f64],
+    period: usize,
+    mult: f64,
+    is_long: bool,
+    first: usize,
+    dst: &mut [f64],
+) -> Result<(), DevStopError> {
+    debug_assert_eq!(high.len(), low.len());
+    let len = high.len();
+    if len == 0 {
+        return Ok(());
+    }
+    if period == 0 {
+        return Err(DevStopError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
+    }
+
+    // Indices & warmup math
+    let start_base = first + period; // first index where base is defined
+    let start_final = start_base + period - 1; // first index where final rolling extrema is defined
+    let warm = start_final; // all < start_final => NaN
+
+    // NaN warm prefix (and truncate if warm > len)
+    let warm_end = warm.min(len);
+    for j in 0..warm_end {
+        *dst.get_unchecked_mut(j) = f64::NAN;
+    }
+    if start_base >= len {
+        return Ok(());
+    }
+
+    #[inline(always)]
+    fn fma(a: f64, b: f64, c: f64) -> f64 {
+        a.mul_add(b, c)
+    }
+    #[inline(always)]
+    fn max0(x: f64) -> f64 {
+        if x < 0.0 {
+            0.0
+        } else {
+            x
+        }
+    }
+
+    // Prefill range ring: r[k] for k in [first+1 .. start_base-1] (period-1 items)
+    let mut r_ring = vec![f64::NAN; period];
+    let mut r_ins_pos = 0usize;
+    let mut r_inserted = 0usize;
+
+    let mut sum = 0.0f64; // Σ r
+    let mut sum2 = 0.0f64; // Σ r^2
+    let mut cnt = 0usize; // number of finite r's currently in ring
+
+    let mut prev_h = *high.get_unchecked(first);
+    let mut prev_l = *low.get_unchecked(first);
+    let end_init = start_base.min(len);
+
+    for k in (first + 1)..end_init {
+        let h = *high.get_unchecked(k);
+        let l = *low.get_unchecked(k);
+        let r = if h.is_nan() || l.is_nan() || prev_h.is_nan() || prev_l.is_nan() {
+            f64::NAN
+        } else {
+            let hi2 = if h > prev_h { h } else { prev_h };
+            let lo2 = if l < prev_l { l } else { prev_l };
+            hi2 - lo2
+        };
+        *r_ring.get_unchecked_mut(r_ins_pos) = r;
+        r_ins_pos += 1;
+        r_inserted += 1;
+        if r.is_finite() {
+            sum += r;
+            sum2 = fma(r, r, sum2);
+            cnt += 1;
+        }
+        prev_h = h;
+        prev_l = l;
+    }
+    r_ins_pos = (period - 1) % period;
+
+    // EMA state (initialized with SMA of available prefill; matches classic_ema boot)
+    let mut ema = if EMA {
+        if cnt > 0 { sum / (cnt as f64) } else { f64::NAN }
+    } else {
+        0.0
+    };
+    let alpha = if EMA { 2.0 / (period as f64 + 1.0) } else { 0.0 };
+    let beta = if EMA { 1.0 - alpha } else { 0.0 };
+
+    // Monotonic deque for rolling extrema over `base`
+    let mut base_ring = vec![f64::NAN; period];
+    let cap = period;
+    let mut dq_buf = vec![0usize; cap]; // absolute indices
+    let mut dq_head = 0usize;
+    let mut dq_len = 0usize;
+    #[inline(always)]
+    fn dq_idx_at(buf: &[usize], head: usize, cap: usize, k: usize) -> usize {
+        unsafe { *buf.get_unchecked((head + k) % cap) }
+    }
+    #[inline(always)]
+    fn dq_back_idx(buf: &[usize], head: usize, len: usize, cap: usize) -> usize {
+        unsafe { *buf.get_unchecked((head + len - 1) % cap) }
+    }
+    #[inline(always)]
+    fn dq_pop_back(len: &mut usize) {
+        *len -= 1;
+    }
+    #[inline(always)]
+    fn dq_pop_front(head: &mut usize, len: &mut usize, cap: usize) {
+        *head = (*head + 1) % cap;
+        *len -= 1;
+    }
+    #[inline(always)]
+    fn dq_push_back(buf: &mut [usize], head: usize, len: &mut usize, cap: usize, value: usize) {
+        let pos = (head + *len) % cap;
+        unsafe { *buf.get_unchecked_mut(pos) = value; }
+        *len += 1;
+    }
+
+    // Main streaming loop (one pass)
+    for i in start_base..len {
+        let h = *high.get_unchecked(i);
+        let l = *low.get_unchecked(i);
+
+        // 2-bar range using (i-1, i)
+        let r_new = if h.is_nan() || l.is_nan() || prev_h.is_nan() || prev_l.is_nan() {
+            f64::NAN
+        } else {
+            let hi2 = if h > prev_h { h } else { prev_h };
+            let lo2 = if l < prev_l { l } else { prev_l };
+            hi2 - lo2
+        };
+        prev_h = h;
+        prev_l = l;
+
+        // Sliding update of Σr and Σr^2
+        let had_full = r_inserted >= period;
+        let old = if had_full {
+            *r_ring.get_unchecked(r_ins_pos)
+        } else {
+            f64::NAN
+        };
+        if had_full && old.is_finite() {
+            sum -= old;
+            sum2 -= old * old;
+            cnt -= 1;
+        }
+        // Insert new
+        *r_ring.get_unchecked_mut(r_ins_pos) = r_new;
+        r_ins_pos = (r_ins_pos + 1) % period;
+        r_inserted += 1;
+        if r_new.is_finite() {
+            sum += r_new;
+            sum2 = fma(r_new, r_new, sum2);
+            cnt += 1;
+        }
+
+        // Update EMA (if enabled)
+        if EMA && r_new.is_finite() {
+            ema = r_new.mul_add(alpha, beta * ema);
+        }
+
+        // Compute avtr and stddev
+        let (avtr, sigma) = if cnt == 0 {
+            (f64::NAN, f64::NAN)
+        } else if EMA {
+            let inv = 1.0 / (cnt as f64);
+            let e1 = sum * inv; // E[r]
+            let e2 = sum2 * inv; // E[r^2]
+            let var = max0(e2 - (2.0 * ema) * e1 + ema * ema);
+            (ema, var.sqrt())
+        } else {
+            let inv = 1.0 / (cnt as f64);
+            let mean = sum * inv; // E[r]
+            let var = max0((sum2 - (sum * sum) * inv) * inv); // E[r^2] - (E[r])^2
+            (mean, var.sqrt())
+        };
+
+        // Base value
+        let base = if is_long {
+            if h.is_nan() || avtr.is_nan() || sigma.is_nan() {
+                f64::NAN
+            } else {
+                h - avtr - mult * sigma
+            }
+        } else {
+            if l.is_nan() || avtr.is_nan() || sigma.is_nan() {
+                f64::NAN
+            } else {
+                l + avtr + mult * sigma
+            }
+        };
+
+        // Store base and update deque
+        let bslot = i % period;
+        *base_ring.get_unchecked_mut(bslot) = base;
+        if is_long {
+            while dq_len > 0 {
+                let j = dq_back_idx(&dq_buf, dq_head, dq_len, cap);
+                let bj = *base_ring.get_unchecked(j % period);
+                if bj.is_nan() || bj <= base {
+                    dq_pop_back(&mut dq_len);
+                } else {
+                    break;
+                }
+            }
+        } else {
+            while dq_len > 0 {
+                let j = dq_back_idx(&dq_buf, dq_head, dq_len, cap);
+                let bj = *base_ring.get_unchecked(j % period);
+                if bj.is_nan() || bj >= base {
+                    dq_pop_back(&mut dq_len);
+                } else {
+                    break;
+                }
+            }
+        }
+        dq_push_back(&mut dq_buf, dq_head, &mut dq_len, cap, i);
+
+        // Drop expired
+        let cut = i + 1 - period;
+        while dq_len > 0 && dq_idx_at(&dq_buf, dq_head, cap, 0) < cut {
+            dq_pop_front(&mut dq_head, &mut dq_len, cap);
+        }
+
+        // Emit final value
+        if i >= start_final {
+            let out = if dq_len > 0 {
+                let j = dq_idx_at(&dq_buf, dq_head, cap, 0);
+                *base_ring.get_unchecked(j % period)
+            } else {
+                f64::NAN
+            };
+            *dst.get_unchecked_mut(i) = out;
+        }
+    }
+    Ok(())
+}
+
+/// Optimized DevStop calculation with inline SMA and standard deviation (fused kernel)
 #[inline]
 pub unsafe fn devstop_scalar_classic_sma(
     high: &[f64],
@@ -1644,179 +2125,10 @@ pub unsafe fn devstop_scalar_classic_sma(
     first: usize,
     dst: &mut [f64],
 ) -> Result<(), DevStopError> {
-    let len = high.len();
-    use std::collections::VecDeque;
-
-    // Build range with rolling(2) max/min
-    let mut range = vec![f64::NAN; len];
-    if first + 1 < len {
-        let mut prev_h = high[first];
-        let mut prev_l = low[first];
-        for i in (first + 1)..len {
-            let h = high[i];
-            let l = low[i];
-            if !h.is_nan() && !prev_h.is_nan() && !l.is_nan() && !prev_l.is_nan() {
-                let hi2 = if h > prev_h { h } else { prev_h };
-                let lo2 = if l < prev_l { l } else { prev_l };
-                range[i] = hi2 - lo2;
-            }
-            prev_h = h;
-            prev_l = l;
-        }
-    }
-
-    // Calculate initial SMA and standard deviation for the range
-    let start_idx = first + period;
-    if start_idx >= len {
-        return Err(DevStopError::NotEnoughValidData {
-            needed: period,
-            valid: len - first,
-        });
-    }
-
-    // Initial SMA of range
-    let mut sum = 0.0;
-    let mut valid_count = 0;
-    for i in 0..period {
-        let val = range[first + 1 + i]; // range starts at first+1
-        if !val.is_nan() {
-            sum += val;
-            valid_count += 1;
-        }
-    }
-    if valid_count == 0 {
-        return Err(DevStopError::AllValuesNaN);
-    }
-    let mut sma = sum / valid_count as f64;
-
-    // Initial standard deviation (population)
-    let mut sq_sum = 0.0;
-    for i in 0..period {
-        let val = range[first + 1 + i];
-        if !val.is_nan() {
-            let diff = val - sma;
-            sq_sum += diff * diff;
-        }
-    }
-    let mut stddev = (sq_sum / valid_count as f64).sqrt();
-
-    // Setup for rolling max/min
-    let mut dq: VecDeque<usize> = VecDeque::with_capacity(period + 1);
-    let mut ring: Vec<f64> = vec![f64::NAN; period];
-    let start_base = first + period;
-    let start_final = start_base + period - 1;
-    let warm = first + 2 * period - 1;
-
-    // Fill warmup with NaN
-    for v in &mut dst[..warm.min(len)] {
-        *v = f64::NAN;
-    }
-
-    // Main loop with rolling calculations
-    for i in start_base..len {
-        // Update rolling SMA and stddev for range
-        if i > start_base {
-            let old_idx = i - period;
-            let new_idx = i;
-            if old_idx >= first + 1 && new_idx < len {
-                let old_val = range[old_idx];
-                let new_val = range[new_idx];
-
-                // Update sum for SMA
-                if !old_val.is_nan() && !new_val.is_nan() {
-                    sum = sum - old_val + new_val;
-                } else if !old_val.is_nan() {
-                    sum -= old_val;
-                    valid_count -= 1;
-                } else if !new_val.is_nan() {
-                    sum += new_val;
-                    valid_count += 1;
-                }
-
-                if valid_count > 0 {
-                    sma = sum / valid_count as f64;
-
-                    // Recalculate standard deviation
-                    sq_sum = 0.0;
-                    for j in 0..period {
-                        let idx = i - period + 1 + j;
-                        if idx < len {
-                            let val = range[idx];
-                            if !val.is_nan() {
-                                let diff = val - sma;
-                                sq_sum += diff * diff;
-                            }
-                        }
-                    }
-                    stddev = (sq_sum / valid_count as f64).sqrt();
-                }
-            }
-        }
-
-        // Calculate base value
-        let base = if is_long {
-            if high[i].is_nan() || sma.is_nan() || stddev.is_nan() {
-                f64::NAN
-            } else {
-                high[i] - sma - mult * stddev
-            }
-        } else {
-            if low[i].is_nan() || sma.is_nan() || stddev.is_nan() {
-                f64::NAN
-            } else {
-                low[i] + sma + mult * stddev
-            }
-        };
-
-        // Store in ring buffer
-        ring[i % period] = base;
-
-        // Update deque for rolling max/min
-        if is_long {
-            while let Some(&j) = dq.back() {
-                let bj = ring[j % period];
-                if bj.is_nan() || bj <= base {
-                    dq.pop_back();
-                } else {
-                    break;
-                }
-            }
-        } else {
-            while let Some(&j) = dq.back() {
-                let bj = ring[j % period];
-                if bj.is_nan() || bj >= base {
-                    dq.pop_back();
-                } else {
-                    break;
-                }
-            }
-        }
-        dq.push_back(i);
-
-        // Drop out-of-window elements
-        let cut = if i >= period { i + 1 - period } else { 0 };
-        while let Some(&j) = dq.front() {
-            if j < cut {
-                dq.pop_front();
-            } else {
-                break;
-            }
-        }
-
-        // Output final value
-        if i >= start_final {
-            if let Some(&j) = dq.front() {
-                dst[i] = ring[j % period];
-            } else {
-                dst[i] = f64::NAN;
-            }
-        }
-    }
-
-    Ok(())
+    devstop_scalar_classic_fused::<false>(high, low, period, mult, is_long, first, dst)
 }
 
-/// Optimized DevStop calculation with inline EMA and standard deviation
+/// Optimized DevStop calculation with inline EMA and standard deviation (fused kernel)
 #[inline]
 pub unsafe fn devstop_scalar_classic_ema(
     high: &[f64],
@@ -1827,153 +2139,7 @@ pub unsafe fn devstop_scalar_classic_ema(
     first: usize,
     dst: &mut [f64],
 ) -> Result<(), DevStopError> {
-    let len = high.len();
-    use std::collections::VecDeque;
-
-    // Build range with rolling(2) max/min
-    let mut range = vec![f64::NAN; len];
-    if first + 1 < len {
-        let mut prev_h = high[first];
-        let mut prev_l = low[first];
-        for i in (first + 1)..len {
-            let h = high[i];
-            let l = low[i];
-            if !h.is_nan() && !prev_h.is_nan() && !l.is_nan() && !prev_l.is_nan() {
-                let hi2 = if h > prev_h { h } else { prev_h };
-                let lo2 = if l < prev_l { l } else { prev_l };
-                range[i] = hi2 - lo2;
-            }
-            prev_h = h;
-            prev_l = l;
-        }
-    }
-
-    // Calculate initial SMA for EMA startup
-    let start_idx = first + period;
-    if start_idx >= len {
-        return Err(DevStopError::NotEnoughValidData {
-            needed: period,
-            valid: len - first,
-        });
-    }
-
-    // Initial SMA of range for EMA
-    let mut sum = 0.0;
-    let mut valid_count = 0;
-    for i in 0..period {
-        let val = range[first + 1 + i];
-        if !val.is_nan() {
-            sum += val;
-            valid_count += 1;
-        }
-    }
-    if valid_count == 0 {
-        return Err(DevStopError::AllValuesNaN);
-    }
-    let mut ema = sum / valid_count as f64;
-    let alpha = 2.0 / (period as f64 + 1.0);
-    let beta = 1.0 - alpha;
-
-    // Setup for rolling max/min
-    let mut dq: VecDeque<usize> = VecDeque::with_capacity(period + 1);
-    let mut ring: Vec<f64> = vec![f64::NAN; period];
-    let start_base = first + period;
-    let start_final = start_base + period - 1;
-    let warm = first + 2 * period - 1;
-
-    // Fill warmup with NaN
-    for v in &mut dst[..warm.min(len)] {
-        *v = f64::NAN;
-    }
-
-    // Main loop with EMA and rolling calculations
-    for i in start_base..len {
-        // Update EMA
-        if i < len && !range[i].is_nan() {
-            ema = alpha * range[i] + beta * ema;
-        }
-
-        // Calculate standard deviation with current EMA
-        let mut sq_sum = 0.0;
-        let mut count = 0;
-        for j in 0..period {
-            let idx = i - period + 1 + j;
-            if idx >= first + 1 && idx < len {
-                let val = range[idx];
-                if !val.is_nan() {
-                    let diff = val - ema;
-                    sq_sum += diff * diff;
-                    count += 1;
-                }
-            }
-        }
-        let stddev = if count > 0 {
-            (sq_sum / count as f64).sqrt()
-        } else {
-            f64::NAN
-        };
-
-        // Calculate base value
-        let base = if is_long {
-            if high[i].is_nan() || ema.is_nan() || stddev.is_nan() {
-                f64::NAN
-            } else {
-                high[i] - ema - mult * stddev
-            }
-        } else {
-            if low[i].is_nan() || ema.is_nan() || stddev.is_nan() {
-                f64::NAN
-            } else {
-                low[i] + ema + mult * stddev
-            }
-        };
-
-        // Store in ring buffer
-        ring[i % period] = base;
-
-        // Update deque for rolling max/min
-        if is_long {
-            while let Some(&j) = dq.back() {
-                let bj = ring[j % period];
-                if bj.is_nan() || bj <= base {
-                    dq.pop_back();
-                } else {
-                    break;
-                }
-            }
-        } else {
-            while let Some(&j) = dq.back() {
-                let bj = ring[j % period];
-                if bj.is_nan() || bj >= base {
-                    dq.pop_back();
-                } else {
-                    break;
-                }
-            }
-        }
-        dq.push_back(i);
-
-        // Drop out-of-window elements
-        let cut = if i >= period { i + 1 - period } else { 0 };
-        while let Some(&j) = dq.front() {
-            if j < cut {
-                dq.pop_front();
-            } else {
-                break;
-            }
-        }
-
-        // Output final value
-        if i >= start_final {
-            if let Some(&j) = dq.front() {
-                dst[i] = ring[j % period];
-            } else {
-                dst[i] = f64::NAN;
-            }
-        }
-    }
-
-    Ok(())
+    devstop_scalar_classic_fused::<true>(high, low, period, mult, is_long, first, dst)
 }
 
 #[cfg(test)]

@@ -20,16 +20,13 @@
 //! - **`Err(SamaError)`** otherwise.
 //!
 //! ## Developer Notes
-//! - **AVX2 kernel**: ❌ Stub - calls scalar implementation
-//! - **AVX512 kernel**: ❌ Stub - calls scalar implementation
-//! - **Streaming update**: ⚠️ O(n) - scans entire buffer for highest/lowest values each update
-//! - **Memory optimization**: ⚠️ Does NOT use zero-copy helpers - allocates with `vec![f64::NAN; data.len()]`
-//! - **Current status**: Functional but missing SIMD optimizations and memory optimization
-//! - **Optimization opportunities**:
-//!   - Implement AVX2/AVX512 kernels for vectorized min/max operations
-//!   - Switch to `alloc_with_nan_prefix` for zero-copy output allocation
-//!   - Consider sliding window min/max algorithm for O(log n) or O(1) streaming updates
-//!   - The highest/lowest calculation is well-suited for SIMD parallelization
+//! - Scalar: optimized with O(1) amortized rolling high/low via monotonic deques; updates use `mul_add`.
+//! - Allocation: uses `alloc_with_nan_prefix` (NaN prefix only; no O(N) full init).
+//! - SIMD (AVX2/AVX512): kept as stubs delegating to scalar. Loop-carried dependency and deque maintenance
+//!   make time-domain SIMD ineffective vs. the algorithmic win.
+//! - Batch: row-specific optimization precomputes rolling highs/lows once per unique `length` and
+//!   reuses them across rows; each row performs only the adaptive EMA step.
+//! - Rationale: SIMD disabled by default due to negligible gains after deque optimization.
 
 #[cfg(feature = "python")]
 use numpy::PyUntypedArrayMethods;
@@ -267,8 +264,8 @@ pub fn sama_with_kernel(input: &SamaInput, kernel: Kernel) -> Result<SamaOutput,
     let (data, length, maj_length, min_length, first, chosen) = sama_prepare(input, kernel)?;
 
     // Pine-compatible: start computing immediately but maintain proper warmup
-    // We allocate the full array and compute will fill in values starting from first
-    let mut out = vec![f64::NAN; data.len()];
+    // Allocate with NaN prefix only; rest is uninitialized and will be written by compute
+    let mut out = alloc_with_nan_prefix(data.len(), first);
     sama_compute_into(
         data, length, maj_length, min_length, first, chosen, &mut out,
     );
@@ -286,13 +283,12 @@ pub fn sama_into_slice(dst: &mut [f64], input: &SamaInput, kern: Kernel) -> Resu
         });
     }
 
-    // Initialize dst with NaN first
-    for v in dst.iter_mut() {
+    // Compute writes values from `first` onward
+    sama_compute_into(data, length, maj_length, min_length, first, chosen, dst);
+    // Prefix is NaN by convention
+    for v in &mut dst[..first] {
         *v = f64::NAN;
     }
-
-    // Now compute will fill in values starting from first
-    sama_compute_into(data, length, maj_length, min_length, first, chosen, dst);
     Ok(())
 }
 
@@ -399,54 +395,105 @@ pub fn sama_scalar(
         return;
     }
 
-    let min_alpha = 2.0 / (min_length as f64 + 1.0);
+    // Precompute alphas and delta once
     let maj_alpha = 2.0 / (maj_length as f64 + 1.0);
+    let min_alpha = 2.0 / (min_length as f64 + 1.0);
+    let delta = min_alpha - maj_alpha;
+
+    // Monotonic deques for rolling max/min over inclusive window [i-length .. i]
+    // Implemented as ring buffers of indices with capacity length + 1
+    let cap = length + 1;
+    let mut max_idx = vec![0usize; cap];
+    let mut min_idx = vec![0usize; cap];
+    let mut max_head = 0usize;
+    let mut min_head = 0usize;
+    let mut max_len = 0usize;
+    let mut min_len = 0usize;
 
     let mut sama_val = f64::NAN;
-    let start_idx = first;
 
-    for i in start_idx..n {
-        // if current src is NaN, output NaN but DO NOT reset state
-        if data[i].is_nan() {
+    for i in first..n {
+        let p = data[i];
+        if p.is_nan() {
+            // Preserve continuity but output NaN
             out[i] = f64::NAN;
             continue;
         }
 
-        let period_start = i.saturating_sub(length);
+        let wstart = i.saturating_sub(length);
 
-        let mut hh = f64::NEG_INFINITY;
-        let mut ll = f64::INFINITY;
-        for j in period_start..=i {
-            let v = data[j];
-            if v.is_nan() {
-                continue;
-            }
-            if v > hh {
-                hh = v;
-            }
-            if v < ll {
-                ll = v;
-            }
+        // Drop outdated indices from heads (max)
+        while max_len > 0 {
+            let idx = max_idx[max_head];
+            if idx >= wstart { break; }
+            max_head += 1;
+            if max_head == cap { max_head = 0; }
+            max_len -= 1;
+        }
+        // Drop outdated indices from heads (min)
+        while min_len > 0 {
+            let idx = min_idx[min_head];
+            if idx >= wstart { break; }
+            min_head += 1;
+            if min_head == cap { min_head = 0; }
+            min_len -= 1;
         }
 
-        let mult = if hh != ll {
-            (2.0 * data[i] - ll - hh).abs() / (hh - ll)
-        } else {
-            0.0
-        };
+        // Push current index into MAX deque (monotonically decreasing values)
+        while max_len > 0 {
+            let last_pos = (max_head + max_len - 1) % cap;
+            let last_idx = max_idx[last_pos];
+            let last_val = data[last_idx];
+            if last_val <= p {
+                max_len -= 1;
+            } else {
+                break;
+            }
+        }
+        let ins_pos_max = (max_head + max_len) % cap;
+        max_idx[ins_pos_max] = i;
+        max_len += 1;
 
-        let final_alpha = (mult * (min_alpha - maj_alpha) + maj_alpha).powi(2);
+        // Push current index into MIN deque (monotonically increasing values)
+        while min_len > 0 {
+            let last_pos = (min_head + min_len - 1) % cap;
+            let last_idx = min_idx[last_pos];
+            let last_val = data[last_idx];
+            if last_val >= p {
+                min_len -= 1;
+            } else {
+                break;
+            }
+        }
+        let ins_pos_min = (min_head + min_len) % cap;
+        min_idx[ins_pos_min] = i;
+        min_len += 1;
+
+        // With current i pushed, deques are non-empty
+        let hh = data[max_idx[max_head]];
+        let ll = data[min_idx[min_head]];
+
+        // mult = |2*p - ll - hh| / (hh - ll) (guard zero denom)
+        let denom = hh - ll;
+        let c = (p + p) - (hh + ll);
+        let mult = if denom > 0.0 { c.abs() / denom } else { 0.0 };
+
+        // final_alpha = (maj_alpha + mult * delta)^2
+        let a = mult.mul_add(delta, maj_alpha);
+        let alpha = a * a;
 
         if sama_val.is_nan() {
-            // Initialize with first price for proper moving average behavior
-            sama_val = data[i];
+            // Seed with first valid price
+            sama_val = p;
         } else {
-            sama_val = (data[i] - sama_val) * final_alpha + sama_val;
+            let diff = p - sama_val;
+            sama_val = diff.mul_add(alpha, sama_val);
         }
 
         out[i] = sama_val;
     }
 }
+
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
@@ -763,14 +810,136 @@ fn sama_batch_inner_into(
         });
     }
 
-    // Helper: compute one row directly into its slice to avoid temp Vec
+    // Row-specific batch optimization:
+    // Precompute rolling highs/lows once per unique `length` using O(n) deques.
+    // Then each row runs only the adaptive EMA using the shared extrema.
+    use std::collections::HashMap;
+    let mut uniq_lengths: Vec<usize> = Vec::new();
+    uniq_lengths.reserve(combos.len());
+    for prm in combos.iter() {
+        let l = prm.length.unwrap_or(200);
+        if !uniq_lengths.contains(&l) {
+            uniq_lengths.push(l);
+        }
+    }
+
+    // Helper to build rolling extrema arrays (inclusive window [i-length .. i])
+    fn build_rolling_extrema(data: &[f64], length: usize) -> (Vec<f64>, Vec<f64>) {
+        let n = data.len();
+        let cap = length + 1;
+        let mut max_idx = vec![0usize; cap];
+        let mut min_idx = vec![0usize; cap];
+        let mut max_head = 0usize;
+        let mut min_head = 0usize;
+        let mut max_len = 0usize;
+        let mut min_len = 0usize;
+        let mut hh = vec![f64::NAN; n];
+        let mut ll = vec![f64::NAN; n];
+
+        for i in 0..n {
+            let p = data[i];
+            let wstart = i.saturating_sub(length);
+
+            // Drop outdated
+            while max_len > 0 {
+                let idx = max_idx[max_head];
+                if idx >= wstart { break; }
+                max_head += 1;
+                if max_head == cap { max_head = 0; }
+                max_len -= 1;
+            }
+            while min_len > 0 {
+                let idx = min_idx[min_head];
+                if idx >= wstart { break; }
+                min_head += 1;
+                if min_head == cap { min_head = 0; }
+                min_len -= 1;
+            }
+
+            // Push current if finite (ignore NaNs inside window)
+            if !p.is_nan() {
+                while max_len > 0 {
+                    let last_pos = (max_head + max_len - 1) % cap;
+                    let last_idx = max_idx[last_pos];
+                    if data[last_idx] <= p {
+                        max_len -= 1;
+                    } else {
+                        break;
+                    }
+                }
+                let ins_pos_max = (max_head + max_len) % cap;
+                max_idx[ins_pos_max] = i;
+                max_len += 1;
+
+                while min_len > 0 {
+                    let last_pos = (min_head + min_len - 1) % cap;
+                    let last_idx = min_idx[last_pos];
+                    if data[last_idx] >= p {
+                        min_len -= 1;
+                    } else {
+                        break;
+                    }
+                }
+                let ins_pos_min = (min_head + min_len) % cap;
+                min_idx[ins_pos_min] = i;
+                min_len += 1;
+            }
+
+            if max_len > 0 && min_len > 0 {
+                hh[i] = data[max_idx[max_head]];
+                ll[i] = data[min_idx[min_head]];
+            }
+        }
+        (hh, ll)
+    }
+
+    // Build shared extrema per unique length
+    let mut hh_map: HashMap<usize, Vec<f64>> = HashMap::with_capacity(uniq_lengths.len());
+    let mut ll_map: HashMap<usize, Vec<f64>> = HashMap::with_capacity(uniq_lengths.len());
+    for &l in &uniq_lengths {
+        let (hh, ll) = build_rolling_extrema(data, l);
+        hh_map.insert(l, hh);
+        ll_map.insert(l, ll);
+    }
+
+    // Helper: compute one row using shared extrema
     let do_row = |row: usize, row_dst: &mut [f64]| {
         let prm = &combos[row];
         let length = prm.length.unwrap_or(200);
         let maj_length = prm.maj_length.unwrap_or(14);
         let min_length = prm.min_length.unwrap_or(6);
-        // Write results directly into row_dst
-        sama_compute_into(data, length, maj_length, min_length, first, kern, row_dst);
+
+        let maj_alpha = 2.0 / (maj_length as f64 + 1.0);
+        let min_alpha = 2.0 / (min_length as f64 + 1.0);
+        let delta = min_alpha - maj_alpha;
+
+        let hh = &hh_map[&length];
+        let ll = &ll_map[&length];
+
+        let mut sama_val = f64::NAN;
+        for i in first..cols {
+            let p = data[i];
+            if p.is_nan() {
+                row_dst[i] = f64::NAN;
+                continue;
+            }
+
+            let h = hh[i];
+            let l = ll[i];
+            let denom = h - l;
+            let c = (p + p) - (h + l);
+            let mult = if denom > 0.0 { c.abs() / denom } else { 0.0 };
+            let a = mult.mul_add(delta, maj_alpha);
+            let alpha = a * a;
+
+            if sama_val.is_nan() {
+                sama_val = p;
+            } else {
+                let diff = p - sama_val;
+                sama_val = diff.mul_add(alpha, sama_val);
+            }
+            row_dst[i] = sama_val;
+        }
     };
 
     if parallel {

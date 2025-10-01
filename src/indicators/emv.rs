@@ -10,7 +10,11 @@
 //! - **`Err(EmvError)`** on failure
 //!
 //! ## Developer Status
-//! - **SIMD Kernels**: AVX2 (stub), AVX512 (stubs - short/long variants)
+//! - **SIMD Kernels**: AVX2/AVX512 present as stubs delegating to scalar. EMV has a strict
+//!   loop-carried dependency on the prior valid midpoint and NaN/zero-range semantics, making
+//!   wide SIMD non-viable without complex masked prefix-scan logic and risking parity. Runtime
+//!   selection keeps kernels for parity but they currently short-circuit to the scalar path.
+//! - **Row-specific batch**: Not applicable — EMV has no parameters; batch is a single row.
 //! - **Streaming**: O(1) performance
 //! - **Memory**: Good zero-copy usage (alloc_with_nan_prefix, make_uninit_matrix)
 use crate::utilities::data_loader::{source_type, Candles};
@@ -289,19 +293,28 @@ pub fn emv_into_slice(dst: &mut [f64], input: &EmvInput, kern: Kernel) -> Result
 pub fn emv_scalar(high: &[f64], low: &[f64], volume: &[f64], first: usize, out: &mut [f64]) {
     let len = high.len().min(low.len()).min(volume.len());
     let mut last_mid = 0.5 * (high[first] + low[first]);
+
+    // Tight, safe scalar loop with hoisted loads to minimize bounds checks
     for i in (first + 1)..len {
-        if high[i].is_nan() || low[i].is_nan() || volume[i].is_nan() {
+        let h = high[i];
+        let l = low[i];
+        let v = volume[i];
+
+        if h.is_nan() || l.is_nan() || v.is_nan() {
             out[i] = f64::NAN;
             continue;
         }
-        let current_mid = 0.5 * (high[i] + low[i]);
-        let range = high[i] - low[i];
+
+        // Keep arithmetic order identical to streaming path
+        let current_mid = 0.5 * (h + l);
+        let range = h - l;
         if range == 0.0 {
             out[i] = f64::NAN;
-            last_mid = current_mid;
+            last_mid = current_mid; // advance last_mid on zero-range
             continue;
         }
-        let br = volume[i] / 10000.0 / range;
+
+        let br = v / 10000.0 / range;
         out[i] = (current_mid - last_mid) / br;
         last_mid = current_mid;
     }
@@ -310,17 +323,52 @@ pub fn emv_scalar(high: &[f64], low: &[f64], volume: &[f64], first: usize, out: 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn emv_avx512(high: &[f64], low: &[f64], volume: &[f64], first: usize, out: &mut [f64]) {
-    if high.len() <= 32 {
-        unsafe { emv_avx512_short(high, low, volume, first, out) }
-    } else {
-        unsafe { emv_avx512_long(high, low, volume, first, out) }
-    }
+    // Delegate to AVX2 stub which uses an unsafe pointer-walk scalar kernel.
+    // Rationale: EMV is dependency-bound; SIMD is not beneficial without complex
+    // masked scans. Keep parity by reusing the same kernel.
+    emv_avx2(high, low, volume, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn emv_avx2(high: &[f64], low: &[f64], volume: &[f64], first: usize, out: &mut [f64]) {
-    emv_scalar(high, low, volume, first, out);
+    // Unsafe pointer-walk variant of the scalar kernel to minimize bound checks.
+    // Keeps arithmetic order identical to streaming for parity.
+    let len = high.len().min(low.len()).min(volume.len());
+    let mut last_mid = 0.5 * (high[first] + low[first]);
+    unsafe {
+        let h_ptr = high.as_ptr();
+        let l_ptr = low.as_ptr();
+        let v_ptr = volume.as_ptr();
+        let o_ptr = out.as_mut_ptr();
+
+        let mut i = first + 1;
+        while i < len {
+            let h = *h_ptr.add(i);
+            let l = *l_ptr.add(i);
+            let v = *v_ptr.add(i);
+
+            if !(h.is_nan() || l.is_nan() || v.is_nan()) {
+                let range = h - l;
+                let current_mid = 0.5 * (h + l);
+
+                if range == 0.0 {
+                    *o_ptr.add(i) = f64::NAN;
+                    last_mid = current_mid;
+                } else {
+                    let br = (v / 10000.0) / range;
+                    let dmid = current_mid - last_mid;
+                    *o_ptr.add(i) = dmid / br;
+                    last_mid = current_mid;
+                }
+            } else {
+                // Any NaN in inputs -> NaN output; do not advance last_mid.
+                *o_ptr.add(i) = f64::NAN;
+            }
+
+            i += 1;
+        }
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -332,7 +380,8 @@ pub unsafe fn emv_avx512_short(
     first: usize,
     out: &mut [f64],
 ) {
-    emv_scalar(high, low, volume, first, out);
+    // Route to the AVX2 stub to keep a single parity-preserving kernel.
+    emv_avx2(high, low, volume, first, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -344,7 +393,8 @@ pub unsafe fn emv_avx512_long(
     first: usize,
     out: &mut [f64],
 ) {
-    emv_scalar(high, low, volume, first, out);
+    // Route to the AVX2 stub to keep a single parity-preserving kernel.
+    emv_avx2(high, low, volume, first, out);
 }
 
 #[derive(Debug, Clone)]
