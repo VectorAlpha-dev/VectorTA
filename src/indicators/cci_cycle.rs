@@ -1870,6 +1870,8 @@ mod tests {
         check_cci_cycle_streaming
     );
 
+    
+
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_sweep);
 

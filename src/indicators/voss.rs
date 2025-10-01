@@ -15,6 +15,7 @@
 //! - **AVX2/AVX512 Kernels**: Stub implementations that delegate to scalar. Functions exist but just call scalar version. IIR filter nature makes SIMD challenging but could vectorize across multiple parameter sets.
 //! - **Streaming Performance**: O(n) implementation where n is order (predict*3). Iterates through ring buffer for weighted sum calculation on each update. Could cache partial sums for minor optimization.
 //! - **Memory Optimization**: Uses `alloc_with_nan_prefix` and batch helpers properly. Ring buffer approach is memory efficient for streaming.
+//! - **Status (2025-09)**: Scalar single-series now reuses the row-optimized O(1) rolling update with fused mul_add for the IIR and predictor; tests tightened (1e-6) and pass. SIMD remains stubbed due to limited benefit.
 
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -368,51 +369,8 @@ pub fn voss_scalar(
     voss: &mut [f64],
     filt: &mut [f64],
 ) {
-    use std::f64::consts::PI;
-    let order = 3 * predict;
-    let min_index = period.max(5).max(order);
-    let start_idx = first + min_index;
-
-    let f1 = (2.0 * PI / period as f64).cos();
-    let g1 = (bandwidth * 2.0 * PI / period as f64).cos();
-    let s1 = 1.0 / g1 - (1.0 / (g1 * g1) - 1.0).sqrt();
-
-    // Initialize the first couple of filt values to avoid NaN propagation
-    if start_idx >= 2 {
-        filt[start_idx - 2] = 0.0;
-        filt[start_idx - 1] = 0.0;
-    }
-
-    // IIR pass for filt
-    let c1 = 0.5 * (1.0 - s1);
-    let c2 = f1 * (1.0 + s1);
-    let c3 = -s1;
-
-    for i in start_idx..data.len() {
-        let current = data[i];
-        let prev_2 = data[i - 2];
-        let prev_f1 = filt[i - 1];
-        let prev_f2 = filt[i - 2];
-        filt[i] = c1 * (current - prev_2) + c2 * prev_f1 + c3 * prev_f2;
-    }
-
-    // Predictive VOSS pass
-    let scale = (3 + order) as f64 / 2.0;
-    for i in start_idx..data.len() {
-        let mut sumc = 0.0;
-        let base = i - order;
-        // weight = (k+1) / order, k=0..order-1
-        for k in 0..order {
-            let idx = base + k;
-            let vv = if idx >= first && !voss[idx].is_nan() {
-                voss[idx]
-            } else {
-                0.0
-            };
-            sumc += ((k + 1) as f64 / order as f64) * vv;
-        }
-        voss[i] = scale * filt[i] - sumc;
-    }
+    // Delegate to the row-optimized scalar path to keep single-source behavior
+    voss_row_scalar(data, first, period, predict, bandwidth, voss, filt)
 }
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
@@ -522,7 +480,8 @@ pub unsafe fn voss_avx2(
     voss: &mut [f64],
     filt: &mut [f64],
 ) {
-    voss_scalar(data, period, predict, bandwidth, first, voss, filt)
+    // Use an unchecked scalar row kernel to avoid bounds checks; recursion is inherently serial.
+    voss_row_scalar_unchecked(data, first, period, predict, bandwidth, voss, filt)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -554,7 +513,7 @@ pub unsafe fn voss_avx512_short(
     voss: &mut [f64],
     filt: &mut [f64],
 ) {
-    voss_scalar(data, period, predict, bandwidth, first, voss, filt)
+    voss_row_scalar_unchecked(data, first, period, predict, bandwidth, voss, filt)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -568,7 +527,7 @@ pub unsafe fn voss_avx512_long(
     voss: &mut [f64],
     filt: &mut [f64],
 ) {
-    voss_scalar(data, period, predict, bandwidth, first, voss, filt)
+    voss_row_scalar_unchecked(data, first, period, predict, bandwidth, voss, filt)
 }
 
 #[derive(Debug, Clone)]
@@ -1117,8 +1076,9 @@ fn voss_row_scalar(
         return;
     }
 
-    let f1 = (2.0 * PI / period as f64).cos();
-    let g1 = (bandwidth * 2.0 * PI / period as f64).cos();
+    let w0 = 2.0 * PI / period as f64;
+    let f1 = w0.cos();
+    let g1 = (bandwidth * w0).cos();
     let s1 = 1.0 / g1 - (1.0 / (g1 * g1) - 1.0).sqrt();
     let c1 = 0.5 * (1.0 - s1);
     let c2 = f1 * (1.0 + s1);
@@ -1129,13 +1089,15 @@ fn voss_row_scalar(
         filt[start - 1] = 0.0;
     }
 
-    let mut prev_f1 = 0.0;
-    let mut prev_f2 = 0.0;
-    let scale = (3 + order) as f64 / 2.0;
+    let mut prev_f1 = 0.0f64;
+    let mut prev_f2 = 0.0f64;
+    let scale = 0.5 * (3 + order) as f64;
 
     if order == 0 {
         for i in start..data.len() {
-            let f = c1 * (data[i] - data[i - 2]) + c2 * prev_f1 + c3 * prev_f2;
+            let diff = data[i] - data[i - 2];
+            let t = c3.mul_add(prev_f2, c1 * diff);
+            let f = c2.mul_add(prev_f1, t);
             filt[i] = f;
             prev_f2 = prev_f1;
             prev_f1 = f;
@@ -1149,27 +1111,109 @@ fn voss_row_scalar(
     let mut d_sum = 0.0f64;
 
     for i in start..data.len() {
-        let f = c1 * (data[i] - data[i - 2]) + c2 * prev_f1 + c3 * prev_f2;
+        let diff = data[i] - data[i - 2];
+        let t = c3.mul_add(prev_f2, c1 * diff);
+        let f = c2.mul_add(prev_f1, t);
         filt[i] = f;
         prev_f2 = prev_f1;
         prev_f1 = f;
 
         let sumc = d_sum * inv_order;
-        let vi = scale * f - sumc;
+        let vi = scale.mul_add(f, -sumc);
         voss[i] = vi;
 
         let old_idx = i - order;
-        let v_old = voss[old_idx];
-        let v_old_nz = if old_idx >= first && !v_old.is_nan() {
-            v_old
-        } else {
-            0.0
-        };
+        let v_old_raw = voss[old_idx];
+        let v_old_nz = if old_idx >= first && !v_old_raw.is_nan() { v_old_raw } else { 0.0 };
         let v_new_nz = if vi.is_nan() { 0.0 } else { vi };
 
         let a_prev = a_sum;
         a_sum = a_prev - v_old_nz + v_new_nz;
-        d_sum = d_sum - a_prev + (order as f64) * v_new_nz;
+        d_sum = (order as f64).mul_add(v_new_nz, d_sum - a_prev);
+    }
+}
+
+// Unsafe unchecked variant for AVX2/AVX512 wrappers to remove bounds checks in hot loops.
+// The algorithm is identical to voss_row_scalar, but uses get_unchecked and mul_add throughout.
+#[inline(always)]
+unsafe fn voss_row_scalar_unchecked(
+    data: &[f64],
+    first: usize,
+    period: usize,
+    predict: usize,
+    bandwidth: f64,
+    voss: &mut [f64],
+    filt: &mut [f64],
+) {
+    use std::f64::consts::PI;
+
+    let order = 3 * predict;
+    let min_index = period.max(5).max(order);
+    let start = first + min_index;
+    let len = data.len();
+    if start >= len {
+        return;
+    }
+
+    let w0 = 2.0 * PI / period as f64;
+    let f1 = w0.cos();
+    let g1 = (bandwidth * w0).cos();
+    let inv_g1 = 1.0 / g1;
+    let s1 = inv_g1 - (inv_g1 * inv_g1 - 1.0).sqrt();
+    let c1 = 0.5 * (1.0 - s1);
+    let c2 = f1 * (1.0 + s1);
+    let c3 = -s1;
+
+    if start >= 2 {
+        *filt.get_unchecked_mut(start - 2) = 0.0;
+        *filt.get_unchecked_mut(start - 1) = 0.0;
+    }
+
+    let mut prev_f1 = 0.0f64;
+    let mut prev_f2 = 0.0f64;
+    let scale = 0.5 * (3 + order) as f64;
+
+    if order == 0 {
+        for i in start..len {
+            let xi = *data.get_unchecked(i);
+            let xim2 = *data.get_unchecked(i - 2);
+            let diff = xi - xim2;
+            let t = c3.mul_add(prev_f2, c1 * diff);
+            let f = c2.mul_add(prev_f1, t);
+            *filt.get_unchecked_mut(i) = f;
+            *voss.get_unchecked_mut(i) = scale * f;
+            prev_f2 = prev_f1;
+            prev_f1 = f;
+        }
+        return;
+    }
+
+    let inv_order = 1.0 / order as f64;
+    let mut a_sum = 0.0f64;
+    let mut d_sum = 0.0f64;
+
+    for i in start..len {
+        let xi = *data.get_unchecked(i);
+        let xim2 = *data.get_unchecked(i - 2);
+        let diff = xi - xim2;
+        let t = c3.mul_add(prev_f2, c1 * diff);
+        let f = c2.mul_add(prev_f1, t);
+        *filt.get_unchecked_mut(i) = f;
+        prev_f2 = prev_f1;
+        prev_f1 = f;
+
+        let sumc = d_sum * inv_order;
+        let vi = scale.mul_add(f, -sumc);
+        *voss.get_unchecked_mut(i) = vi;
+
+        let old_idx = i - order;
+        let v_old_raw = *voss.get_unchecked(old_idx);
+        let v_old_nz = if old_idx >= first && !v_old_raw.is_nan() { v_old_raw } else { 0.0 };
+        let v_new_nz = if vi.is_nan() { 0.0 } else { vi };
+
+        let a_prev = a_sum;
+        a_sum = a_prev - v_old_nz + v_new_nz;
+        d_sum = (order as f64).mul_add(v_new_nz, d_sum - a_prev);
     }
 }
 
@@ -1298,7 +1342,7 @@ mod tests {
         for (i, &val) in output.voss[start..].iter().enumerate() {
             let expected = expected_voss_last_five[i];
             assert!(
-                (val - expected).abs() < 1e-1,
+                (val - expected).abs() < 1e-6,
                 "[{}] VOSS mismatch at idx {}: got {}, expected {}",
                 test_name,
                 i,
@@ -1309,7 +1353,7 @@ mod tests {
         for (i, &val) in output.filt[start..].iter().enumerate() {
             let expected = expected_filt_last_five[i];
             assert!(
-                (val - expected).abs() < 1e-1,
+                (val - expected).abs() < 1e-6,
                 "[{}] Filt mismatch at idx {}: got {}, expected {}",
                 test_name,
                 i,

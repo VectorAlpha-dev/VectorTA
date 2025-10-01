@@ -18,7 +18,7 @@
 //! - **wt_diff**: Difference (WT2 - WT1) as `Vec<f64>`
 //!
 //! ## Developer Notes
-//! - **AVX2/AVX512 kernels**: Currently stubs that call scalar implementation
+//! - **AVX2/AVX512 kernels**: AVX2 implements a fused single‑pass path (with FMA); AVX512 remains a stub.
 //! - **Streaming update**: O(1) performance with efficient state management for all EMA/SMA stages
 //! - **Memory optimization**: Properly uses zero-copy helper functions (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
 //! - **TODO**: Implement actual SIMD kernels for AVX2/AVX512
@@ -312,6 +312,7 @@ pub fn wavetrend_with_kernel(
         return Err(WavetrendError::NotEnoughValidData { needed, valid });
     }
 
+    // Auto: select best available kernel (AVX512 → AVX2 → Scalar)
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
         other => other,
@@ -402,15 +403,140 @@ pub unsafe fn wavetrend_avx2(
     factor: f64,
     first: usize,
 ) -> Result<WavetrendOutput, WavetrendError> {
-    wavetrend_kernel_dispatch(
+    // Fused single-pass AVX2 variant (uses FMA via mul_add); maintains scalar semantics.
+    let warmup_period = first + channel_len - 1 + average_len - 1 + ma_len - 1;
+
+    let mut wt1_out = alloc_with_nan_prefix(data.len(), warmup_period);
+    let mut wt2_out = alloc_with_nan_prefix(data.len(), warmup_period);
+    let mut diff_out = alloc_with_nan_prefix(data.len(), warmup_period);
+
+    wavetrend_fused_avx2_into(
         data,
         channel_len,
         average_len,
         ma_len,
         factor,
         first,
-        Kernel::Avx2,
-    )
+        warmup_period,
+        &mut wt1_out,
+        &mut wt2_out,
+        &mut diff_out,
+    );
+
+    Ok(WavetrendOutput { wt1: wt1_out, wt2: wt2_out, wt_diff: diff_out })
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+#[target_feature(enable = "fma")]
+unsafe fn wavetrend_fused_avx2_into(
+    data: &[f64],
+    channel_len: usize,
+    average_len: usize,
+    ma_len: usize,
+    factor: f64,
+    first: usize,
+    warmup_period: usize,
+    dst_wt1: &mut [f64],
+    dst_wt2: &mut [f64],
+    dst_wt_diff: &mut [f64],
+) {
+    let n = data.len();
+    if n == 0 {
+        return;
+    }
+
+    // EMA coefficients
+    let alpha_ch = 2.0 / (channel_len as f64 + 1.0);
+    let beta_ch = 1.0 - alpha_ch;
+    let alpha_avg = 2.0 / (average_len as f64 + 1.0);
+    let beta_avg = 1.0 - alpha_avg;
+
+    // EMA states
+    let mut esa_state: f64 = f64::NAN;
+    let mut de_state: f64 = f64::NAN;
+    let mut wt1_state: f64 = f64::NAN;
+    let mut esa_seeded = false;
+    let mut de_seeded = false;
+    let mut wt1_seeded = false;
+
+    // WT2 ring buffer (window over positions)
+    let mut ring_vals = vec![f64::NAN; ma_len];
+    let mut ring_mask = vec![0u8; ma_len];
+    let mut head = 0usize;
+    let mut sma_sum = 0.0f64;
+    let mut sma_count = 0usize;
+    let inv_ma = 1.0 / (ma_len as f64);
+
+    for idx in first..n {
+        let x = data[idx];
+        let mut wt1_i = f64::NAN;
+        let mut wt2_i = f64::NAN;
+
+        if x.is_finite() {
+            // ESA = alpha_ch*x + beta_ch*esa_prev  (use mul_add for FMA)
+            if !esa_seeded {
+                esa_state = x;
+                esa_seeded = true;
+            } else {
+                esa_state = x.mul_add(alpha_ch, beta_ch * esa_state);
+            }
+
+            let abs_diff = (x - esa_state).abs();
+            if !de_seeded {
+                de_state = abs_diff;
+                de_seeded = true;
+            } else {
+                de_state = abs_diff.mul_add(alpha_ch, beta_ch * de_state);
+            }
+
+            let den = factor * de_state;
+            if den != 0.0 && den.is_finite() && esa_state.is_finite() {
+                let ci = (x - esa_state) / den;
+                if ci.is_finite() {
+                    if !wt1_seeded {
+                        wt1_state = ci;
+                        wt1_seeded = true;
+                    } else {
+                        wt1_state = ci.mul_add(alpha_avg, beta_avg * wt1_state);
+                    }
+                    wt1_i = wt1_state;
+                }
+            }
+        }
+
+        // ma_len > 0 is guaranteed by validated params
+        if ring_mask[head] != 0 {
+            sma_sum -= ring_vals[head];
+            sma_count -= 1;
+        }
+        if wt1_i.is_finite() {
+            ring_vals[head] = wt1_i;
+            ring_mask[head] = 1;
+            sma_sum += wt1_i;
+            sma_count += 1;
+        } else {
+            ring_vals[head] = f64::NAN;
+            ring_mask[head] = 0;
+        }
+        head += 1;
+        if head == ma_len {
+            head = 0;
+        }
+        if sma_count == ma_len {
+            wt2_i = sma_sum * inv_ma;
+        }
+
+        if idx >= warmup_period {
+            dst_wt1[idx] = wt1_i;
+            dst_wt2[idx] = wt2_i;
+            dst_wt_diff[idx] = if wt1_i.is_finite() && wt2_i.is_finite() {
+                wt2_i - wt1_i
+            } else {
+                f64::NAN
+            };
+        }
+    }
 }
 
 // AVX512 stub logic for short/long
@@ -547,6 +673,124 @@ fn wavetrend_compute_into(
     dst_wt_diff: &mut [f64],
     kernel: Kernel,
 ) -> Result<(), WavetrendError> {
+    // Fast path: single-pass, loop‑jammed scalar kernel.
+    // Caller guarantees NaN prefix is already initialized in dst_* slices.
+    if matches!(kernel.to_non_batch(), Kernel::Scalar) {
+        let n = data.len();
+        if n == 0 {
+            return Ok(());
+        }
+
+        // Precompute EMA coefficients
+        let alpha_ch = 2.0 / (channel_len as f64 + 1.0);
+        let beta_ch = 1.0 - alpha_ch;
+        let alpha_avg = 2.0 / (average_len as f64 + 1.0);
+        let beta_avg = 1.0 - alpha_avg;
+
+        // EMA states (seed lazily on first finite value)
+        let mut esa_state: f64 = f64::NAN;
+        let mut de_state: f64 = f64::NAN;
+        let mut wt1_state: f64 = f64::NAN;
+        let mut esa_seeded = false;
+        let mut de_seeded = false;
+        let mut wt1_seeded = false;
+
+        // WT2 = SMA(ma_len) over WT1, implemented as a sliding window.
+        // Track finite-membership explicitly to mirror sma_compute_into semantics.
+        let mut ring_vals = vec![f64::NAN; ma_len];
+        let mut ring_mask = vec![0u8; ma_len]; // 1 = finite member present at slot, 0 = NaN
+        let mut head = 0usize;
+        let mut sma_sum = 0.0f64;
+        let mut sma_count = 0usize; // number of finite WT1s in the last ma_len positions
+
+        // Process from the first finite input onward; indices < first are already NaN in dst_*.
+        for idx in first..n {
+            let x = data[idx];
+
+            // Defaults (NaN during warmup or invalid stages)
+            let mut wt1_i = f64::NAN;
+            let mut wt2_i = f64::NAN;
+
+            // ─────────── ESA and DE EMAs ───────────
+            if x.is_finite() {
+                // ESA = EMA(channel_len) on price
+                if !esa_seeded {
+                    esa_state = x;
+                    esa_seeded = true;
+                } else {
+                    esa_state = alpha_ch * x + beta_ch * esa_state;
+                }
+
+                // DE = EMA(channel_len) on |price − ESA|
+                let abs_diff = (x - esa_state).abs();
+                if !de_seeded {
+                    de_state = abs_diff;
+                    de_seeded = true;
+                } else {
+                    de_state = alpha_ch * abs_diff + beta_ch * de_state;
+                }
+
+                // ─────────── CI and WT1 EMA(average_len) ───────────
+                let den = factor * de_state;
+                if den != 0.0 && den.is_finite() && esa_state.is_finite() {
+                    let ci = (x - esa_state) / den;
+                    if ci.is_finite() {
+                        if !wt1_seeded {
+                            wt1_state = ci;
+                            wt1_seeded = true;
+                        } else {
+                            wt1_state = alpha_avg * ci + beta_avg * wt1_state;
+                        }
+                        wt1_i = wt1_state;
+                    }
+                }
+            }
+            // Else: input NaN → produce NaN this step and DO NOT advance EMA states (skip), matching ema_compute_into behavior.
+
+            // ─────────── WT2 = SMA(ma_len) over WT1 (window over positions, not over finite samples) ───────────
+            if ma_len > 0 {
+                // Remove the value leaving the window (slot `head`)
+                if ring_mask[head] != 0 {
+                    sma_sum -= ring_vals[head];
+                    sma_count -= 1;
+                }
+                // Insert current WT1 (finite or NaN) into the window
+                if wt1_i.is_finite() {
+                    ring_vals[head] = wt1_i;
+                    ring_mask[head] = 1;
+                    sma_sum += wt1_i;
+                    sma_count += 1;
+                } else {
+                    ring_vals[head] = f64::NAN;
+                    ring_mask[head] = 0;
+                }
+                head += 1;
+                if head == ma_len {
+                    head = 0;
+                }
+
+                // Emit WT2 only when the last `ma_len` positions are all finite (count == ma_len),
+                // exactly mirroring sma_compute_into's behavior.
+                if sma_count == ma_len {
+                    wt2_i = sma_sum / (ma_len as f64);
+                }
+            }
+
+            // ─────────── Commit outputs only after warmup (prefix already NaN) ───────────
+            if idx >= warmup_period {
+                dst_wt1[idx] = wt1_i;
+                dst_wt2[idx] = wt2_i;
+                dst_wt_diff[idx] = if wt1_i.is_finite() && wt2_i.is_finite() {
+                    wt2_i - wt1_i
+                } else {
+                    f64::NAN
+                };
+            }
+        }
+
+        return Ok(());
+    }
+
     // Note: Caller is responsible for NaN prefix initialization
     // This avoids double work when using alloc_with_nan_prefix or init_matrix_prefixes
 
@@ -1276,8 +1520,9 @@ pub fn wavetrend_batch_with_kernel(
     sweep: &WavetrendBatchRange,
     k: Kernel,
 ) -> Result<WavetrendBatchOutput, WavetrendError> {
+    // Prefer optimized scalar batch for Auto to avoid slower SIMD rows.
     let kernel = match k {
-        Kernel::Auto => detect_best_batch_kernel(),
+        Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         _ => {
             return Err(WavetrendError::InvalidChannelLen {

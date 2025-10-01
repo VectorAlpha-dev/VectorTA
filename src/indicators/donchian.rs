@@ -16,9 +16,14 @@
 //! - **`Err(DonchianError)`** on various error conditions.
 //!
 //! ## Developer Status
-//! - **SIMD Kernels**: AVX2 and AVX512 are STUBS - fall back to scalar implementation
-//! - **Streaming Performance**: O(n) - requires full window scan for min/max calculations
-//! - **Memory Optimization**: GOOD - uses alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes for efficient memory usage
+//! - **SIMD Kernels**: AVX2 and AVX512 are stubs delegating to the scalar path by default.
+//! - **Scalar Performance**: O(n) via van Herk / Gil–Werman (vHGW) prefix/suffix extrema on
+//!   sanitized streams with NaN-gated outputs; typically memory-bound and very fast for large `n`.
+//!   For very small periods (<=32), a direct window scan is used for better constants.
+//! - **Batch Rows**: Each row uses the same optimized scalar kernel (vHGW or small-period path).
+//!   Reusing a global validity prefix across rows is a possible future tweak; omitted to keep scope minimal.
+//! - **Memory Optimization**: Uses `alloc_with_nan_prefix` and uninitialized matrix helpers for outputs;
+//!   scalar kernel avoids per-window scans and performs two linear passes with small, cache-friendly temporaries.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -256,8 +261,28 @@ pub fn donchian_with_kernel(
                 &mut middleband,
                 &mut lowerband,
             ),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch => donchian_scalar(
+                high,
+                low,
+                period,
+                first_valid_idx,
+                &mut upperband,
+                &mut middleband,
+                &mut lowerband,
+            ),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => donchian_avx512(
+                high,
+                low,
+                period,
+                first_valid_idx,
+                &mut upperband,
+                &mut middleband,
+                &mut lowerband,
+            ),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx512 | Kernel::Avx512Batch => donchian_scalar(
                 high,
                 low,
                 period,
@@ -287,32 +312,238 @@ pub fn donchian_scalar(
     middle: &mut [f64],
     lower: &mut [f64],
 ) {
-    for i in (first_valid + period - 1)..high.len() {
-        let start = i + 1 - period;
-        let (mut maxv, mut minv) = (f64::NEG_INFINITY, f64::INFINITY);
-        let mut has_nan = false;
-        for k in 0..period {
-            let h = high[start + k];
-            let l = low[start + k];
-            if h.is_nan() || l.is_nan() {
-                has_nan = true;
-                break;
-            }
-            if h > maxv {
-                maxv = h;
-            }
-            if l < minv {
-                minv = l;
+    let n = high.len();
+    if n == 0 || period == 0 {
+        return;
+    }
+    debug_assert_eq!(low.len(), n);
+    debug_assert_eq!(upper.len(), n);
+    debug_assert_eq!(middle.len(), n);
+    debug_assert_eq!(lower.len(), n);
+
+    let warmup = first_valid + period - 1;
+
+    // Fast path: period == 1 → echo inputs beyond warmup with NaN gating.
+    if period == 1 {
+        let start = warmup;
+        unsafe {
+            let hp = high.as_ptr();
+            let lp = low.as_ptr();
+            let up = upper.as_mut_ptr();
+            let mp = middle.as_mut_ptr();
+            let lw = lower.as_mut_ptr();
+            for i in start..n {
+                let h = *hp.add(i);
+                let l = *lp.add(i);
+                if h.is_nan() || l.is_nan() {
+                    *up.add(i) = f64::NAN;
+                    *lw.add(i) = f64::NAN;
+                    *mp.add(i) = f64::NAN;
+                } else {
+                    *up.add(i) = h;
+                    *lw.add(i) = l;
+                    *mp.add(i) = (h - l).mul_add(0.5, l);
+                }
             }
         }
-        if has_nan {
-            upper[i] = f64::NAN;
-            lower[i] = f64::NAN;
-            middle[i] = f64::NAN;
-        } else {
-            upper[i] = maxv;
-            lower[i] = minv;
-            middle[i] = 0.5 * (maxv + minv);
+        return;
+    }
+
+    // Heuristic: for small periods, the direct window scan has lower constants
+    if period <= 32 {
+        unsafe {
+            let hp = high.as_ptr();
+            let lp = low.as_ptr();
+            let up = upper.as_mut_ptr();
+            let mp = middle.as_mut_ptr();
+            let lw = lower.as_mut_ptr();
+            for i in warmup..n {
+                let start = i + 1 - period;
+                let mut maxv = f64::NEG_INFINITY;
+                let mut minv = f64::INFINITY;
+                let mut has_nan = false;
+                for k in 0..period {
+                    let h = *hp.add(start + k);
+                    let l = *lp.add(start + k);
+                    if h.is_nan() || l.is_nan() {
+                        has_nan = true;
+                        break;
+                    }
+                    if h > maxv {
+                        maxv = h;
+                    }
+                    if l < minv {
+                        minv = l;
+                    }
+                }
+                if has_nan {
+                    *up.add(i) = f64::NAN;
+                    *lw.add(i) = f64::NAN;
+                    *mp.add(i) = f64::NAN;
+                } else {
+                    *up.add(i) = maxv;
+                    *lw.add(i) = minv;
+                    *mp.add(i) = (maxv - minv).mul_add(0.5, minv);
+                }
+            }
+        }
+        return;
+    }
+
+    // Heuristic: for small periods, use direct window scan (lower constants)
+    if period <= 32 {
+        unsafe {
+            let hp = high.as_ptr();
+            let lp = low.as_ptr();
+            let up = upper.as_mut_ptr();
+            let mp = middle.as_mut_ptr();
+            let lw = lower.as_mut_ptr();
+            for i in warmup..n {
+                let start = i + 1 - period;
+                let mut maxv = f64::NEG_INFINITY;
+                let mut minv = f64::INFINITY;
+                let mut has_nan = false;
+                for k in 0..period {
+                    let h = *hp.add(start + k);
+                    let l = *lp.add(start + k);
+                    if h.is_nan() || l.is_nan() {
+                        has_nan = true;
+                        break;
+                    }
+                    if h > maxv {
+                        maxv = h;
+                    }
+                    if l < minv {
+                        minv = l;
+                    }
+                }
+                if has_nan {
+                    *up.add(i) = f64::NAN;
+                    *lw.add(i) = f64::NAN;
+                    *mp.add(i) = f64::NAN;
+                } else {
+                    *up.add(i) = maxv;
+                    *lw.add(i) = minv;
+                    *mp.add(i) = (maxv - minv).mul_add(0.5, minv);
+                }
+            }
+        }
+        return;
+    }
+
+    // vHGW forward prefix on sanitized streams + validity bitmap
+    let mut g_max = AVec::<f64>::with_capacity(CACHELINE_ALIGN, n);
+    let mut g_min = AVec::<f64>::with_capacity(CACHELINE_ALIGN, n);
+    let mut valid: Vec<u8> = Vec::with_capacity(n);
+    unsafe {
+        g_max.set_len(n);
+        g_min.set_len(n);
+        valid.set_len(n);
+        let hp = high.as_ptr();
+        let lp = low.as_ptr();
+        let gp_max = g_max.as_mut_ptr();
+        let gp_min = g_min.as_mut_ptr();
+        let vp = valid.as_mut_ptr();
+
+        let mut acc_max = f64::NEG_INFINITY;
+        let mut acc_min = f64::INFINITY;
+        let mut k: usize = 0;
+
+        for i in 0..n {
+            let h = *hp.add(i);
+            let l = *lp.add(i);
+            let ok = h.is_finite() & l.is_finite();
+            *vp.add(i) = ok as u8;
+            let hv = if ok { h } else { f64::NEG_INFINITY };
+            let lv = if ok { l } else { f64::INFINITY };
+            if k == 0 {
+                acc_max = hv;
+                acc_min = lv;
+            } else {
+                if hv > acc_max {
+                    acc_max = hv;
+                }
+                if lv < acc_min {
+                    acc_min = lv;
+                }
+            }
+            *gp_max.add(i) = acc_max;
+            *gp_min.add(i) = acc_min;
+            k += 1;
+            if k == period {
+                k = 0;
+            }
+        }
+    }
+
+    // Prefix sum of validity for O(1) all-valid window test
+    let mut ps: Vec<u32> = Vec::with_capacity(n + 1);
+    unsafe {
+        ps.set_len(n + 1);
+        let psp = ps.as_mut_ptr();
+        let vp = valid.as_ptr();
+        *psp.add(0) = 0;
+        for i in 0..n {
+            let prev = *psp.add(i);
+            let add = *vp.add(i) as u32;
+            *psp.add(i + 1) = prev + add;
+        }
+    }
+
+    // Backward suffix pass and produce outputs
+    unsafe {
+        let hp = high.as_ptr();
+        let lp = low.as_ptr();
+        let up = upper.as_mut_ptr();
+        let mp = middle.as_mut_ptr();
+        let lw = lower.as_mut_ptr();
+        let gp_max = g_max.as_ptr();
+        let gp_min = g_min.as_ptr();
+        let psp = ps.as_ptr();
+
+        let mut acc_max = f64::NEG_INFINITY;
+        let mut acc_min = f64::INFINITY;
+
+        for j in (0..n).rev() {
+            let h = *hp.add(j);
+            let l = *lp.add(j);
+            let ok = h.is_finite() & l.is_finite();
+            let hv = if ok { h } else { f64::NEG_INFINITY };
+            let lv = if ok { l } else { f64::INFINITY };
+
+            if j == n - 1 || ((j + 1) % period) == 0 {
+                acc_max = hv;
+                acc_min = lv;
+            } else {
+                if hv > acc_max {
+                    acc_max = hv;
+                }
+                if lv < acc_min {
+                    acc_min = lv;
+                }
+            }
+
+            let i = j + period - 1;
+            if i >= n || i < warmup { continue; }
+
+            // All-valid window check in O(1)
+            let all_valid = {
+                let vcnt = *psp.add(i + 1) - *psp.add(i + 1 - period);
+                vcnt == period as u32
+            };
+            if all_valid {
+                let gm = *gp_max.add(i);
+                let gn = *gp_min.add(i);
+                let maxv = if acc_max > gm { acc_max } else { gm };
+                let minv = if acc_min < gn { acc_min } else { gn };
+                *up.add(i) = maxv;
+                *lw.add(i) = minv;
+                *mp.add(i) = (maxv - minv).mul_add(0.5, minv);
+            } else {
+                *up.add(i) = f64::NAN;
+                *lw.add(i) = f64::NAN;
+                *mp.add(i) = f64::NAN;
+            }
         }
     }
 }
@@ -434,8 +665,28 @@ pub fn donchian_into_slice(
                 middle_dst,
                 lower_dst,
             ),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch => donchian_scalar(
+                high,
+                low,
+                period,
+                first_valid_idx,
+                upper_dst,
+                middle_dst,
+                lower_dst,
+            ),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => donchian_avx512(
+                high,
+                low,
+                period,
+                first_valid_idx,
+                upper_dst,
+                middle_dst,
+                lower_dst,
+            ),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx512 | Kernel::Avx512Batch => donchian_scalar(
                 high,
                 low,
                 period,
@@ -762,33 +1013,169 @@ unsafe fn donchian_row_scalar(
     middle: &mut [f64],
     lower: &mut [f64],
 ) {
-    for i in (first + period - 1)..high.len() {
-        let start = i + 1 - period;
-        let (mut maxv, mut minv) = (f64::NEG_INFINITY, f64::INFINITY);
-        let mut has_nan = false;
-        for k in 0..period {
-            let h = high[start + k];
-            let l = low[start + k];
+    let n = high.len();
+    if n == 0 || period == 0 {
+        return;
+    }
+    let warmup = first + period - 1;
+
+    // Fast path for p == 1
+    if period == 1 {
+        let hp = high.as_ptr();
+        let lp = low.as_ptr();
+        let up = upper.as_mut_ptr();
+        let mp = middle.as_mut_ptr();
+        let lw = lower.as_mut_ptr();
+        for i in warmup..n {
+            let h = *hp.add(i);
+            let l = *lp.add(i);
             if h.is_nan() || l.is_nan() {
-                has_nan = true;
-                break;
-            }
-            if h > maxv {
-                maxv = h;
-            }
-            if l < minv {
-                minv = l;
+                *up.add(i) = f64::NAN;
+                *lw.add(i) = f64::NAN;
+                *mp.add(i) = f64::NAN;
+            } else {
+                *up.add(i) = h;
+                *lw.add(i) = l;
+                *mp.add(i) = (h - l).mul_add(0.5, l);
             }
         }
-        if has_nan {
-            upper[i] = f64::NAN;
-            lower[i] = f64::NAN;
-            middle[i] = f64::NAN;
+        return;
+    }
+
+    // Heuristic: for small periods, use direct window scan
+    if period <= 32 {
+        let hp = high.as_ptr();
+        let lp = low.as_ptr();
+        let up = upper.as_mut_ptr();
+        let mp = middle.as_mut_ptr();
+        let lw = lower.as_mut_ptr();
+        for i in warmup..n {
+            let start = i + 1 - period;
+            let mut maxv = f64::NEG_INFINITY;
+            let mut minv = f64::INFINITY;
+            let mut has_nan = false;
+            for k in 0..period {
+                let h = *hp.add(start + k);
+                let l = *lp.add(start + k);
+                if h.is_nan() || l.is_nan() {
+                    has_nan = true;
+                    break;
+                }
+                if h > maxv { maxv = h; }
+                if l < minv { minv = l; }
+            }
+            if has_nan {
+                *up.add(i) = f64::NAN;
+                *lw.add(i) = f64::NAN;
+                *mp.add(i) = f64::NAN;
+            } else {
+                *up.add(i) = maxv;
+                *lw.add(i) = minv;
+                *mp.add(i) = (maxv - minv).mul_add(0.5, minv);
+            }
+        }
+        return;
+    }
+
+    // vHGW forward prefix on sanitized streams + validity bitmap
+    let mut g_max = AVec::<f64>::with_capacity(CACHELINE_ALIGN, n);
+    let mut g_min = AVec::<f64>::with_capacity(CACHELINE_ALIGN, n);
+    let mut valid: Vec<u8> = Vec::with_capacity(n);
+    g_max.set_len(n);
+    g_min.set_len(n);
+    valid.set_len(n);
+    let hp = high.as_ptr();
+    let lp = low.as_ptr();
+    let gp_max = g_max.as_mut_ptr();
+    let gp_min = g_min.as_mut_ptr();
+    let vp = valid.as_mut_ptr();
+
+    let mut acc_max = f64::NEG_INFINITY;
+    let mut acc_min = f64::INFINITY;
+    let mut k: usize = 0;
+    for i in 0..n {
+        let h = *hp.add(i);
+        let l = *lp.add(i);
+        let ok = h.is_finite() & l.is_finite();
+        *vp.add(i) = ok as u8;
+        let hv = if ok { h } else { f64::NEG_INFINITY };
+        let lv = if ok { l } else { f64::INFINITY };
+        if k == 0 {
+            acc_max = hv;
+            acc_min = lv;
         } else {
-            upper[i] = maxv;
-            lower[i] = minv;
-            middle[i] = 0.5 * (maxv + minv);
+            if hv > acc_max {
+                acc_max = hv;
+            }
+            if lv < acc_min {
+                acc_min = lv;
+            }
         }
+        *gp_max.add(i) = acc_max;
+        *gp_min.add(i) = acc_min;
+        k += 1;
+        if k == period { k = 0; }
+    }
+
+    // Backward suffix with rolling validity; produce outputs
+    let up = upper.as_mut_ptr();
+    let mp = middle.as_mut_ptr();
+    let lw = lower.as_mut_ptr();
+    let gp_max = g_max.as_ptr();
+    let gp_min = g_min.as_ptr();
+    let vp = valid.as_ptr();
+
+    acc_max = f64::NEG_INFINITY;
+    acc_min = f64::INFINITY;
+    let mut have_vcnt = false;
+    let mut vcnt: u32 = 0;
+    for j in (0..n).rev() {
+        let h = *hp.add(j);
+        let l = *lp.add(j);
+        let ok = h.is_finite() & l.is_finite();
+        let hv = if ok { h } else { f64::NEG_INFINITY };
+        let lv = if ok { l } else { f64::INFINITY };
+
+        if j == n - 1 || ((j + 1) % period) == 0 {
+            acc_max = hv;
+            acc_min = lv;
+        } else {
+            if hv > acc_max { acc_max = hv; }
+            if lv < acc_min { acc_min = lv; }
+        }
+
+        let i = j + period - 1;
+        if i < n {
+            if !have_vcnt {
+                let start = i + 1 - period;
+                let mut sum: u32 = 0;
+                for t in start..=i { sum += *vp.add(t) as u32; }
+                vcnt = sum;
+                have_vcnt = true;
+            } else {
+                if i + 1 < n {
+                    vcnt = vcnt - (*vp.add(i + 1) as u32) + (*vp.add(i + 1 - period) as u32);
+                }
+            }
+        }
+
+        if i >= n || i < warmup { continue; }
+
+        let all_valid = vcnt == period as u32;
+        if all_valid {
+            let gm = *gp_max.add(i);
+            let gn = *gp_min.add(i);
+            let maxv = if acc_max > gm { acc_max } else { gm };
+            let minv = if acc_min < gn { acc_min } else { gn };
+            *up.add(i) = maxv;
+            *lw.add(i) = minv;
+            *mp.add(i) = (maxv - minv).mul_add(0.5, minv);
+        } else {
+            *up.add(i) = f64::NAN;
+            *lw.add(i) = f64::NAN;
+            *mp.add(i) = f64::NAN;
+        }
+
     }
 }
 

@@ -21,14 +21,10 @@
 //! - **`Ok(AdxrOutput)`** on success, else **`Err(AdxrError)`**.
 //!
 //! ## Developer Notes
-//! - **AVX2/AVX512 kernels**: Currently stubs calling scalar implementation
-//! - **Streaming update**: O(1) - maintains ADX history buffer and running smoothed values
-//! - **Memory optimization**: Uses `alloc_with_nan_prefix` for zero-copy allocation
-//! - **Current status**: Scalar implementation complete, builds on ADX calculation
-//! - **Optimization opportunities**:
-//!   - Implement vectorized AVX2/AVX512 kernels for ADX and averaging operations
-//!   - Consider SIMD for parallel processing of ADX buffer
-//!   - Optimize history buffer management with circular buffer techniques
+//! - Decision: SIMD path delegates to scalar. Wilder smoothing is time‑recursive and single‑series SIMD shows limited wins; scalar is fused and efficient.
+//! - Row‑specific batch: not attempted yet; clear gains likely via shared TR/+DM/−DM precompute and prefix sums across rows.
+//! - Streaming update: O(1) – maintains ADX history buffer and running smoothed values.
+//! - Memory: output uses `alloc_with_nan_prefix`; scalar kernel avoids O(N) temporaries by using a small ADX ring buffer.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
@@ -354,131 +350,140 @@ pub fn adxr_scalar(
     out: &mut [f64],
 ) {
     let len = close.len();
-    // ADX values start appearing at first + 2 * period
-    let adx_warmup = first + 2 * period;
-    let mut adx_vals = alloc_with_nan_prefix(len, adx_warmup);
-    let period_f64 = period as f64;
-    let reciprocal_period = 1.0 / period_f64;
-    let one_minus_rp = 1.0 - reciprocal_period;
+    if len == 0 { return; }
 
-    let mut tr_sum = 0.0;
+    let p = period as f64;
+    let rp = 1.0 / p;
+    let om = 1.0 - rp;
+    let pm1 = p - 1.0;
+    let warmup_start = first + 2 * period;
+
+    // Wilder bootstrap sums over the first `period` deltas.
+    let mut atr_sum = 0.0;
     let mut plus_dm_sum = 0.0;
     let mut minus_dm_sum = 0.0;
 
-    for i in (first + 1)..=(first + period) {
+    // ---- Bootstrap: accumulate TR/+DM/-DM over [first+1 .. first+period]
+    // Using safe indexing to keep scalar path safe.
+    let stop = (first + period).min(len.saturating_sub(1));
+    for i in (first + 1)..=stop {
         let prev_close = close[i - 1];
-        let curr_high = high[i];
-        let curr_low = low[i];
-        let prev_high = high[i - 1];
-        let prev_low = low[i - 1];
+        let ch = high[i];
+        let cl = low[i];
+        let ph = high[i - 1];
+        let pl = low[i - 1];
 
-        let tr = (curr_high - curr_low)
-            .max((curr_high - prev_close).abs())
-            .max((curr_low - prev_close).abs());
-        tr_sum += tr;
+        // True range = max( high-low, |high-prev_close|, |low-prev_close| )
+        let a = ch - cl;
+        let b = (ch - prev_close).abs();
+        let c = (cl - prev_close).abs();
+        let tr = a.max(b).max(c);
+        atr_sum += tr;
 
-        let up_move = curr_high - prev_high;
-        let down_move = prev_low - curr_low;
-        if up_move > down_move && up_move > 0.0 {
-            plus_dm_sum += up_move;
-        }
-        if down_move > up_move && down_move > 0.0 {
-            minus_dm_sum += down_move;
-        }
+        let up = ch - ph;
+        let down = pl - cl;
+        if up > down && up > 0.0 { plus_dm_sum += up; }
+        if down > up && down > 0.0 { minus_dm_sum += down; }
     }
 
-    let mut atr = tr_sum;
-    let mut plus_dm_smooth = plus_dm_sum;
-    let mut minus_dm_smooth = minus_dm_sum;
+    // First DX from bootstrap
+    let plus_di0 = if atr_sum != 0.0 { (plus_dm_sum / atr_sum) * 100.0 } else { 0.0 };
+    let minus_di0 = if atr_sum != 0.0 { (minus_dm_sum / atr_sum) * 100.0 } else { 0.0 };
+    let di_sum0 = plus_di0 + minus_di0;
+    let initial_dx = if di_sum0 != 0.0 {
+        ((plus_di0 - minus_di0).abs() / di_sum0) * 100.0
+    } else { 0.0 };
 
-    let plus_di_initial = if atr != 0.0 {
-        (plus_dm_smooth / atr) * 100.0
-    } else {
-        0.0
-    };
-    let minus_di_initial = if atr != 0.0 {
-        (minus_dm_smooth / atr) * 100.0
-    } else {
-        0.0
-    };
-    let di_sum = plus_di_initial + minus_di_initial;
-    let initial_dx = if di_sum != 0.0 {
-        ((plus_di_initial - minus_di_initial).abs() / di_sum) * 100.0
-    } else {
-        0.0
-    };
+    // Running state for Wilder smoothing.
+    let mut atr = atr_sum;
+    let mut pdm_s = plus_dm_sum;
+    let mut mdm_s = minus_dm_sum;
 
+    // Build initial ADX as the average of the first `period` DX values
     let mut dx_sum = initial_dx;
-    let mut dx_count = 1;
-    let mut last_adx = f64::NAN;
+    let mut dx_count: usize = 1;
+    let mut adx_last = f64::NAN;
     let mut have_adx = false;
 
-    for i in (first + period + 1)..len {
+    // Keep only the last `period` ADX values to form ADXR without a full-sized buffer.
+    let mut adx_ring = vec![f64::NAN; period];
+    let mut head = 0usize;
+
+    // Main pass over bars [first+period+1 .. len)
+    let mut i = first + period + 1;
+    while i < len {
         let prev_close = close[i - 1];
-        let curr_high = high[i];
-        let curr_low = low[i];
-        let prev_high = high[i - 1];
-        let prev_low = low[i - 1];
+        let ch = high[i];
+        let cl = low[i];
+        let ph = high[i - 1];
+        let pl = low[i - 1];
 
-        let tr = (curr_high - curr_low)
-            .max((curr_high - prev_close).abs())
-            .max((curr_low - prev_close).abs());
-        let up_move = curr_high - prev_high;
-        let down_move = prev_low - curr_low;
-        let plus_dm = if up_move > down_move && up_move > 0.0 {
-            up_move
-        } else {
-            0.0
-        };
-        let minus_dm = if down_move > up_move && down_move > 0.0 {
-            down_move
-        } else {
-            0.0
-        };
+        // TR and directional moves
+        let a = ch - cl;
+        let b = (ch - prev_close).abs();
+        let c = (cl - prev_close).abs();
+        let tr = a.max(b).max(c);
 
-        atr = atr * one_minus_rp + tr;
-        plus_dm_smooth = plus_dm_smooth * one_minus_rp + plus_dm;
-        minus_dm_smooth = minus_dm_smooth * one_minus_rp + minus_dm;
+        let up = ch - ph;
+        let down = pl - cl;
+        let plus_dm  = if up   > down && up   > 0.0 { up   } else { 0.0 };
+        let minus_dm = if down > up   && down > 0.0 { down } else { 0.0 };
 
-        let plus_di = if atr != 0.0 {
-            (plus_dm_smooth / atr) * 100.0
-        } else {
-            0.0
-        };
-        let minus_di = if atr != 0.0 {
-            (minus_dm_smooth / atr) * 100.0
-        } else {
-            0.0
-        };
+        // Wilder smoothing via (p-1)/p * prev + current
+        atr   = atr.mul_add(om, tr);
+        pdm_s = pdm_s.mul_add(om, plus_dm);
+        mdm_s = mdm_s.mul_add(om, minus_dm);
+
+        // DI and DX
+        let plus_di  = if atr != 0.0 { (pdm_s / atr) * 100.0 } else { 0.0 };
+        let minus_di = if atr != 0.0 { (mdm_s / atr) * 100.0 } else { 0.0 };
         let sum_di = plus_di + minus_di;
         let dx = if sum_di != 0.0 {
             ((plus_di - minus_di).abs() / sum_di) * 100.0
-        } else {
-            0.0
-        };
+        } else { 0.0 };
 
+        // Build/extend ADX
         if dx_count < period {
             dx_sum += dx;
             dx_count += 1;
+
+            if i >= warmup_start {
+                out[i] = f64::NAN;
+            }
+
             if dx_count == period {
-                last_adx = dx_sum * reciprocal_period;
-                adx_vals[i] = last_adx;
+                // First ADX (simple average of the first `period` DX values)
+                adx_last = dx_sum * rp;
                 have_adx = true;
+
+                // Push into ring; ADXR requires the ADX from `period` bars ago
+                let prev_adx = adx_ring[head];
+                adx_ring[head] = adx_last;
+                head += 1;
+                if head == period { head = 0; }
+
+                if i >= warmup_start {
+                    let v = if prev_adx.is_finite() { 0.5 * (adx_last + prev_adx) } else { f64::NAN };
+                    out[i] = v;
+                }
             }
         } else if have_adx {
-            let adx_current = ((last_adx * (period_f64 - 1.0)) + dx) * reciprocal_period;
-            adx_vals[i] = adx_current;
-            last_adx = adx_current;
+            // Wilder-smoothed ADX
+            let adx_curr = (adx_last * pm1 + dx) * rp;
+            adx_last = adx_curr;
+
+            let prev_adx = adx_ring[head];
+            adx_ring[head] = adx_curr;
+            head += 1;
+            if head == period { head = 0; }
+
+            if i >= warmup_start {
+                let v = if prev_adx.is_finite() { 0.5 * (adx_curr + prev_adx) } else { f64::NAN };
+                out[i] = v;
+            }
         }
-    }
-    for i in (first + 2 * period)..len {
-        let adx_i = adx_vals[i];
-        let adx_im_p = adx_vals[i - period];
-        if adx_i.is_finite() && adx_im_p.is_finite() {
-            out[i] = (adx_i + adx_im_p) / 2.0;
-        } else {
-            out[i] = f64::NAN;
-        }
+
+        i += 1;
     }
 }
 
@@ -510,7 +515,9 @@ pub fn adxr_avx2(
     first: usize,
     out: &mut [f64],
 ) {
-    adxr_scalar(high, low, close, period, first, out)
+    // Use an unchecked, fused variant to remove bounds checks while
+    // keeping the scalar algorithm. This leverages FMA via mul_add.
+    unsafe { adxr_scalar_unchecked(high, low, close, period, first, out) }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -537,6 +544,177 @@ pub fn adxr_avx512_long(
     out: &mut [f64],
 ) {
     adxr_scalar(high, low, close, period, first, out)
+}
+
+/// Unchecked single-series ADXR kernel used by AVX2 wrapper.
+/// Identical math to `adxr_scalar` but uses unchecked indexing to
+/// avoid bounds checks in the hot loops. The caller must guarantee
+/// valid slice lengths and indices.
+#[inline]
+unsafe fn adxr_scalar_unchecked(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    first: usize,
+    out: &mut [f64],
+) {
+    let len = close.len();
+    if len == 0 {
+        return;
+    }
+
+    let p = period as f64;
+    let rp = 1.0 / p;
+    let om = 1.0 - rp;
+    let pm1 = p - 1.0;
+    let warmup_start = first + 2 * period;
+
+    // Bootstrap sums over first window
+    let mut atr_sum = 0.0;
+    let mut plus_dm_sum = 0.0;
+    let mut minus_dm_sum = 0.0;
+
+    let mut i = first + 1;
+    let stop = core::cmp::min(first + period, len - 1);
+    while i <= stop {
+        let prev_close = *close.get_unchecked(i - 1);
+        let ch = *high.get_unchecked(i);
+        let cl = *low.get_unchecked(i);
+        let ph = *high.get_unchecked(i - 1);
+        let pl = *low.get_unchecked(i - 1);
+
+        let a = ch - cl;
+        let b = (ch - prev_close).abs();
+        let c = (cl - prev_close).abs();
+        let tr = a.max(b).max(c);
+        atr_sum += tr;
+
+        let up = ch - ph;
+        let down = pl - cl;
+        if up > down && up > 0.0 {
+            plus_dm_sum += up;
+        }
+        if down > up && down > 0.0 {
+            minus_dm_sum += down;
+        }
+        i += 1;
+    }
+
+    let plus_di0 = if atr_sum != 0.0 {
+        (plus_dm_sum / atr_sum) * 100.0
+    } else {
+        0.0
+    };
+    let minus_di0 = if atr_sum != 0.0 {
+        (minus_dm_sum / atr_sum) * 100.0
+    } else {
+        0.0
+    };
+    let di_sum0 = plus_di0 + minus_di0;
+    let initial_dx = if di_sum0 != 0.0 {
+        ((plus_di0 - minus_di0).abs() / di_sum0) * 100.0
+    } else {
+        0.0
+    };
+
+    // Running Wilder state
+    let mut atr = atr_sum;
+    let mut pdm_s = plus_dm_sum;
+    let mut mdm_s = minus_dm_sum;
+
+    // ADX accumulation
+    let mut dx_sum = initial_dx;
+    let mut dx_count: usize = 1;
+    let mut adx_last = f64::NAN;
+    let mut have_adx = false;
+
+    // Ring buffer to compute ADXR without O(N) temp
+    let mut adx_ring = vec![f64::NAN; period];
+    let mut head = 0usize;
+
+    i = first + period + 1;
+    while i < len {
+        let prev_close = *close.get_unchecked(i - 1);
+        let ch = *high.get_unchecked(i);
+        let cl = *low.get_unchecked(i);
+        let ph = *high.get_unchecked(i - 1);
+        let pl = *low.get_unchecked(i - 1);
+
+        let a = ch - cl;
+        let b = (ch - prev_close).abs();
+        let c = (cl - prev_close).abs();
+        let tr = a.max(b).max(c);
+
+        let up = ch - ph;
+        let down = pl - cl;
+        let plus_dm = if up > down && up > 0.0 { up } else { 0.0 };
+        let minus_dm = if down > up && down > 0.0 { down } else { 0.0 };
+
+        atr = atr.mul_add(om, tr);
+        pdm_s = pdm_s.mul_add(om, plus_dm);
+        mdm_s = mdm_s.mul_add(om, minus_dm);
+
+        let plus_di = if atr != 0.0 { (pdm_s / atr) * 100.0 } else { 0.0 };
+        let minus_di = if atr != 0.0 { (mdm_s / atr) * 100.0 } else { 0.0 };
+        let sum_di = plus_di + minus_di;
+        let dx = if sum_di != 0.0 {
+            ((plus_di - minus_di).abs() / sum_di) * 100.0
+        } else {
+            0.0
+        };
+
+        if dx_count < period {
+            dx_sum += dx;
+            dx_count += 1;
+
+            if i >= warmup_start {
+                *out.get_unchecked_mut(i) = f64::NAN;
+            }
+
+            if dx_count == period {
+                adx_last = dx_sum * rp;
+                have_adx = true;
+
+                let prev_adx = *adx_ring.get_unchecked(head);
+                *adx_ring.get_unchecked_mut(head) = adx_last;
+                head += 1;
+                if head == period {
+                    head = 0;
+                }
+
+                if i >= warmup_start {
+                    let v = if prev_adx.is_finite() {
+                        0.5 * (adx_last + prev_adx)
+                    } else {
+                        f64::NAN
+                    };
+                    *out.get_unchecked_mut(i) = v;
+                }
+            }
+        } else if have_adx {
+            let adx_curr = (adx_last * pm1 + dx) * rp;
+            adx_last = adx_curr;
+
+            let prev_adx = *adx_ring.get_unchecked(head);
+            *adx_ring.get_unchecked_mut(head) = adx_curr;
+            head += 1;
+            if head == period {
+                head = 0;
+            }
+
+            if i >= warmup_start {
+                let v = if prev_adx.is_finite() {
+                    0.5 * (adx_curr + prev_adx)
+                } else {
+                    f64::NAN
+                };
+                *out.get_unchecked_mut(i) = v;
+            }
+        }
+
+        i += 1;
+    }
 }
 
 #[inline(always)]
@@ -680,6 +858,154 @@ fn expand_grid(r: &AdxrBatchRange) -> Vec<AdxrParams> {
     out
 }
 
+// Shared precomputation reused by all rows in batch ADXR.
+#[inline]
+fn shared_precompute_tr_dm(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    first: usize,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
+    let len = close.len();
+    let mut tr_all = vec![0.0; len];
+    let mut pdm_all = vec![0.0; len];
+    let mut mdm_all = vec![0.0; len];
+
+    // Compute TR, +DM, -DM for all i >= first+1
+    for i in (first + 1)..len {
+        let prev_close = close[i - 1];
+        let ch = high[i];
+        let cl = low[i];
+        let ph = high[i - 1];
+        let pl = low[i - 1];
+
+        let a = ch - cl;
+        let b = (ch - prev_close).abs();
+        let c = (cl - prev_close).abs();
+        tr_all[i] = a.max(b).max(c);
+
+        let up = ch - ph;
+        let down = pl - cl;
+        pdm_all[i] = if up > down && up > 0.0 { up } else { 0.0 };
+        mdm_all[i] = if down > up && down > 0.0 { down } else { 0.0 };
+    }
+
+    // Build prefix sums starting at start = first+1 so that prefix[k] = sum of first k elements
+    let start = first + 1;
+    let pre_len = len.saturating_sub(start);
+    let mut prefix_tr = vec![0.0; pre_len + 1];
+    let mut prefix_pdm = vec![0.0; pre_len + 1];
+    let mut prefix_mdm = vec![0.0; pre_len + 1];
+    for k in 1..=pre_len {
+        let i = start + (k - 1);
+        prefix_tr[k] = prefix_tr[k - 1] + tr_all[i];
+        prefix_pdm[k] = prefix_pdm[k - 1] + pdm_all[i];
+        prefix_mdm[k] = prefix_mdm[k - 1] + mdm_all[i];
+    }
+
+    (tr_all, pdm_all, mdm_all, prefix_tr, prefix_pdm, prefix_mdm)
+}
+
+#[inline]
+fn adxr_row_from_precomputed(
+    tr_all: &[f64],
+    pdm_all: &[f64],
+    mdm_all: &[f64],
+    prefix_tr: &[f64],
+    prefix_pdm: &[f64],
+    prefix_mdm: &[f64],
+    first: usize,
+    period: usize,
+    out: &mut [f64],
+) {
+    let len = tr_all.len();
+    if len == 0 { return; }
+
+    let p = period as f64;
+    let rp = 1.0 / p;
+    let om = 1.0 - rp;
+    let pm1 = p - 1.0;
+    let warmup_start = first + 2 * period;
+
+    // Bootstrap sums via prefix sums
+    let atr0 = prefix_tr.get(period).copied().unwrap_or(0.0);
+    let pdm0 = prefix_pdm.get(period).copied().unwrap_or(0.0);
+    let mdm0 = prefix_mdm.get(period).copied().unwrap_or(0.0);
+
+    let plus_di0 = if atr0 != 0.0 { (pdm0 / atr0) * 100.0 } else { 0.0 };
+    let minus_di0 = if atr0 != 0.0 { (mdm0 / atr0) * 100.0 } else { 0.0 };
+    let di_sum0 = plus_di0 + minus_di0;
+    let initial_dx = if di_sum0 != 0.0 {
+        ((plus_di0 - minus_di0).abs() / di_sum0) * 100.0
+    } else { 0.0 };
+
+    let mut atr = atr0;
+    let mut pdm_s = pdm0;
+    let mut mdm_s = mdm0;
+
+    let mut dx_sum = initial_dx;
+    let mut dx_count: usize = 1;
+    let mut adx_last = f64::NAN;
+    let mut have_adx = false;
+    let mut adx_ring = vec![f64::NAN; period];
+    let mut head = 0usize;
+
+    let mut i = first + period + 1;
+    while i < len {
+        let tr = tr_all[i];
+        let plus_dm = pdm_all[i];
+        let minus_dm = mdm_all[i];
+
+        atr   = atr.mul_add(om, tr);
+        pdm_s = pdm_s.mul_add(om, plus_dm);
+        mdm_s = mdm_s.mul_add(om, minus_dm);
+
+        let plus_di  = if atr != 0.0 { (pdm_s / atr) * 100.0 } else { 0.0 };
+        let minus_di = if atr != 0.0 { (mdm_s / atr) * 100.0 } else { 0.0 };
+        let sum_di = plus_di + minus_di;
+        let dx = if sum_di != 0.0 {
+            ((plus_di - minus_di).abs() / sum_di) * 100.0
+        } else { 0.0 };
+
+        if dx_count < period {
+            dx_sum += dx;
+            dx_count += 1;
+            if i >= warmup_start {
+                out[i] = f64::NAN;
+            }
+            if dx_count == period {
+                adx_last = dx_sum * rp;
+                have_adx = true;
+
+                let prev_adx = adx_ring[head];
+                adx_ring[head] = adx_last;
+                head += 1;
+                if head == period { head = 0; }
+
+                if i >= warmup_start {
+                    let v = if prev_adx.is_finite() { 0.5 * (adx_last + prev_adx) } else { f64::NAN };
+                    out[i] = v;
+                }
+            }
+        } else if have_adx {
+            let adx_curr = (adx_last * pm1 + dx) * rp;
+            adx_last = adx_curr;
+
+            let prev_adx = adx_ring[head];
+            adx_ring[head] = adx_curr;
+            head += 1;
+            if head == period { head = 0; }
+
+            if i >= warmup_start {
+                let v = if prev_adx.is_finite() { 0.5 * (adx_curr + prev_adx) } else { f64::NAN };
+                out[i] = v;
+            }
+        }
+
+        i += 1;
+    }
+}
+
 #[inline(always)]
 pub fn adxr_batch_slice(
     high: &[f64],
@@ -756,19 +1082,50 @@ fn adxr_batch_inner(
         std::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
+    // Shared precompute of TR, +DM, -DM and their prefix sums once per dataset
+    let (tr_all, pdm_all, mdm_all, prefix_tr, prefix_pdm, prefix_mdm) =
+        shared_precompute_tr_dm(high, low, close, first);
+
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
 
         match kern {
-            Kernel::Scalar => adxr_row_scalar(high, low, close, first, period, out_row),
+            // Delegate to a fused row kernel that reuses shared precompute
+            Kernel::Scalar => adxr_row_from_precomputed(
+                &tr_all,
+                &pdm_all,
+                &mdm_all,
+                &prefix_tr,
+                &prefix_pdm,
+                &prefix_mdm,
+                first,
+                period,
+                out_row,
+            ),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => adxr_row_avx2(high, low, close, first, period, out_row),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => adxr_row_avx512(high, low, close, first, period, out_row),
+            Kernel::Avx2 | Kernel::Avx512 => adxr_row_from_precomputed(
+                &tr_all,
+                &pdm_all,
+                &mdm_all,
+                &prefix_tr,
+                &prefix_pdm,
+                &prefix_mdm,
+                first,
+                period,
+                out_row,
+            ),
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-            Kernel::Avx2 | Kernel::Avx512 => {
-                adxr_row_scalar(high, low, close, first, period, out_row)
-            }
+            Kernel::Avx2 | Kernel::Avx512 => adxr_row_from_precomputed(
+                &tr_all,
+                &pdm_all,
+                &mdm_all,
+                &prefix_tr,
+                &prefix_pdm,
+                &prefix_mdm,
+                first,
+                period,
+                out_row,
+            ),
             _ => unreachable!(),
         }
     };
@@ -871,19 +1228,51 @@ pub fn adxr_batch_inner_into(
     };
     init_matrix_prefixes(out_mu, cols, &warm);
 
+    // Shared precompute of TR, +DM, -DM and prefix sums once per dataset
+    let (tr_all, pdm_all, mdm_all, prefix_tr, prefix_pdm, prefix_mdm) =
+        shared_precompute_tr_dm(high, low, close, first);
+
     // Row executor
     let do_row = |row: usize, dst_mu: &mut [std::mem::MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
         let dst = std::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
         match kern {
-            Kernel::Scalar => adxr_row_scalar(high, low, close, first, period, dst),
+            Kernel::Scalar => adxr_row_from_precomputed(
+                &tr_all,
+                &pdm_all,
+                &mdm_all,
+                &prefix_tr,
+                &prefix_pdm,
+                &prefix_mdm,
+                first,
+                period,
+                dst,
+            ),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => adxr_row_avx2(high, low, close, first, period, dst),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => adxr_row_avx512(high, low, close, first, period, dst),
+            Kernel::Avx2 | Kernel::Avx512 => adxr_row_from_precomputed(
+                &tr_all,
+                &pdm_all,
+                &mdm_all,
+                &prefix_tr,
+                &prefix_pdm,
+                &prefix_mdm,
+                first,
+                period,
+                dst,
+            ),
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-            Kernel::Avx2 | Kernel::Avx512 => adxr_row_scalar(high, low, close, first, period, dst),
+            Kernel::Avx2 | Kernel::Avx512 => adxr_row_from_precomputed(
+                &tr_all,
+                &pdm_all,
+                &mdm_all,
+                &prefix_tr,
+                &prefix_pdm,
+                &prefix_mdm,
+                first,
+                period,
+                dst,
+            ),
             _ => unreachable!("pass non-batch kernel"),
         }
     };

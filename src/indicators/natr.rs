@@ -12,10 +12,10 @@
 //! - `Vec<f64>` - NATR values (percentage) matching input length
 //!
 //! ## Developer Status
-//! **AVX2**: Stub (calls scalar)
-//! **AVX512**: Has short/long variants but all stubs
+//! **SIMD**: Implemented AVX2/AVX512 for TR batching; recurrence remains scalar
 //! **Streaming**: O(1) - Uses exponential smoothing
 //! **Memory**: Good - Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
+//! Note: SIMD yields modest gains by vectorizing True Range computation only.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -286,44 +286,80 @@ pub fn natr_scalar(
     first: usize,
     out: &mut [f64],
 ) {
+    let len = out.len();
+    if first >= len { return; }
+
+    let inv_p: f64 = 1.0 / (period as f64);
+    let k100: f64 = 100.0;
+
+    // Warmup: arithmetic mean of TR over the first `period` values starting at `first`.
+    let warm_end = first + period - 1;
     let mut sum_tr = 0.0;
-    let mut prev_atr = 0.0;
-    let mut count_since_first = 0usize;
+    // i == first
+    sum_tr += high[first] - low[first];
+    for i in (first + 1)..=warm_end {
+        let hi = high[i];
+        let lo = low[i];
+        let pc = close[i - 1];
+        let tr = (hi - lo).max((hi - pc).abs()).max((lo - pc).abs());
+        sum_tr += tr;
+    }
 
-    for i in first..out.len() {
-        let tr = if i == first {
-            high[i] - low[i]
-        } else {
-            let tr_curr = high[i] - low[i];
-            let tr_prev_close_high = (high[i] - close[i - 1]).abs();
-            let tr_prev_close_low = (low[i] - close[i - 1]).abs();
-            tr_curr.max(tr_prev_close_high).max(tr_prev_close_low)
-        };
+    let mut atr = sum_tr * inv_p;
+    let c_we = close[warm_end];
+    out[warm_end] = if c_we.is_finite() && c_we != 0.0 { (atr / c_we) * k100 } else { f64::NAN };
 
-        if count_since_first < period {
-            sum_tr += tr;
-            if count_since_first == period - 1 {
-                prev_atr = sum_tr / (period as f64);
-                let c = close[i];
-                if c.is_finite() && c != 0.0 {
-                    out[i] = (prev_atr / c) * 100.0;
-                } else {
-                    out[i] = f64::NAN;
-                }
-            }
-        } else {
-            let new_atr = ((prev_atr * ((period - 1) as f64)) + tr) / (period as f64);
-            prev_atr = new_atr;
+    // Main loop: unrolled by 4 for better ILP; Wilder smoothing remains sequential.
+    let mut idx = warm_end + 1;
+    while idx + 3 < len {
+        let pc0 = close[idx - 1];
+        let pc1 = close[idx + 0];
+        let pc2 = close[idx + 1];
+        let pc3 = close[idx + 2];
 
-            let c = close[i];
-            if c.is_finite() && c != 0.0 {
-                out[i] = (new_atr / c) * 100.0;
-            } else {
-                out[i] = f64::NAN;
-            }
-        }
+        let h0 = high[idx + 0];
+        let h1 = high[idx + 1];
+        let h2 = high[idx + 2];
+        let h3 = high[idx + 3];
+        let l0 = low[idx + 0];
+        let l1 = low[idx + 1];
+        let l2 = low[idx + 2];
+        let l3 = low[idx + 3];
 
-        count_since_first += 1;
+        let tr0 = (h0 - l0).max((h0 - pc0).abs()).max((l0 - pc0).abs());
+        let tr1 = (h1 - l1).max((h1 - pc1).abs()).max((l1 - pc1).abs());
+        let tr2 = (h2 - l2).max((h2 - pc2).abs()).max((l2 - pc2).abs());
+        let tr3 = (h3 - l3).max((h3 - pc3).abs()).max((l3 - pc3).abs());
+
+        atr = (tr0 - atr).mul_add(inv_p, atr);
+        let c0 = close[idx + 0];
+        out[idx + 0] = if c0.is_finite() && c0 != 0.0 { (atr / c0) * k100 } else { f64::NAN };
+
+        atr = (tr1 - atr).mul_add(inv_p, atr);
+        let c1v = close[idx + 1];
+        out[idx + 1] = if c1v.is_finite() && c1v != 0.0 { (atr / c1v) * k100 } else { f64::NAN };
+
+        atr = (tr2 - atr).mul_add(inv_p, atr);
+        let c2v = close[idx + 2];
+        out[idx + 2] = if c2v.is_finite() && c2v != 0.0 { (atr / c2v) * k100 } else { f64::NAN };
+
+        atr = (tr3 - atr).mul_add(inv_p, atr);
+        let c3v = close[idx + 3];
+        out[idx + 3] = if c3v.is_finite() && c3v != 0.0 { (atr / c3v) * k100 } else { f64::NAN };
+
+        idx += 4;
+    }
+
+    while idx < len {
+        let hi = high[idx];
+        let lo = low[idx];
+        let pc = close[idx - 1];
+        let tr = (hi - lo).max((hi - pc).abs()).max((lo - pc).abs());
+        atr = (tr - atr).mul_add(inv_p, atr);
+
+        let cv = close[idx];
+        out[idx] = if cv.is_finite() && cv != 0.0 { (atr / cv) * k100 } else { f64::NAN };
+        idx += 1;
     }
 }
 
@@ -338,15 +374,13 @@ pub fn natr_avx512(
     out: &mut [f64],
 ) {
     unsafe {
-        if period <= 32 {
-            natr_avx512_short(high, low, close, period, first, out);
-        } else {
-            natr_avx512_long(high, low, close, period, first, out);
-        }
+        // Unified body works for all periods
+        natr_avx512_body(high, low, close, period, first, out);
     }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
 #[inline]
 pub unsafe fn natr_avx2(
     high: &[f64],
@@ -356,7 +390,218 @@ pub unsafe fn natr_avx2(
     first: usize,
     out: &mut [f64],
 ) {
-    natr_scalar(high, low, close, period, first, out);
+    use core::arch::x86_64::*;
+    debug_assert!(high.len() == low.len() && high.len() == close.len() && high.len() == out.len());
+    let len = out.len();
+    if first >= len { return; }
+
+    let inv_p: f64 = 1.0 / (period as f64);
+    let k100: f64 = 100.0;
+
+    let h = high.as_ptr();
+    let l = low.as_ptr();
+    let c = close.as_ptr();
+    let o = out.as_mut_ptr();
+
+    // Warm-up sum
+    let mut i = first;
+    let mut sum_tr = *h.add(i) - *l.add(i);
+    i += 1;
+    let warm_end = first + period - 1;
+
+    let sign = _mm256_set1_pd(-0.0_f64);
+    while i + 3 <= warm_end {
+        let vh = _mm256_loadu_pd(h.add(i));
+        let vl = _mm256_loadu_pd(l.add(i));
+        let vpc = _mm256_loadu_pd(c.add(i - 1));
+
+        let vhl = _mm256_sub_pd(vh, vl);
+        let vhc = _mm256_sub_pd(vh, vpc);
+        let vlc = _mm256_sub_pd(vl, vpc);
+        let abs_hc = _mm256_andnot_pd(sign, vhc);
+        let abs_lc = _mm256_andnot_pd(sign, vlc);
+        let mx1 = _mm256_max_pd(vhl, abs_hc);
+        let vtr = _mm256_max_pd(mx1, abs_lc);
+
+        let mut tmp = [0.0f64; 4];
+        _mm256_storeu_pd(tmp.as_mut_ptr(), vtr);
+        sum_tr += tmp[0] + tmp[1] + tmp[2] + tmp[3];
+
+        i += 4;
+    }
+    while i <= warm_end {
+        let hi = *h.add(i);
+        let lo = *l.add(i);
+        let pc = *c.add(i - 1);
+        let tr = (hi - lo).max((hi - pc).abs()).max((lo - pc).abs());
+        sum_tr += tr;
+        i += 1;
+    }
+
+    let mut atr = sum_tr * inv_p;
+    let c_we = *c.add(warm_end);
+    *o.add(warm_end) = if c_we.is_finite() && c_we != 0.0 { (atr / c_we) * k100 } else { f64::NAN };
+
+    // Main loop: batch TR in AVX2, sequential recurrence
+    let mut idx = warm_end + 1;
+    while idx + 3 < len {
+        let vh = _mm256_loadu_pd(h.add(idx));
+        let vl = _mm256_loadu_pd(l.add(idx));
+        let vpc = _mm256_loadu_pd(c.add(idx - 1));
+
+        let vhl = _mm256_sub_pd(vh, vl);
+        let vhc = _mm256_sub_pd(vh, vpc);
+        let vlc = _mm256_sub_pd(vl, vpc);
+        let abs_hc = _mm256_andnot_pd(sign, vhc);
+        let abs_lc = _mm256_andnot_pd(sign, vlc);
+        let mx1 = _mm256_max_pd(vhl, abs_hc);
+        let vtr = _mm256_max_pd(mx1, abs_lc);
+
+        let mut tr = [0.0f64; 4];
+        _mm256_storeu_pd(tr.as_mut_ptr(), vtr);
+
+        atr = (tr[0] - atr).mul_add(inv_p, atr);
+        let c0 = *c.add(idx + 0);
+        *o.add(idx + 0) = if c0.is_finite() && c0 != 0.0 { (atr / c0) * k100 } else { f64::NAN };
+
+        atr = (tr[1] - atr).mul_add(inv_p, atr);
+        let c1 = *c.add(idx + 1);
+        *o.add(idx + 1) = if c1.is_finite() && c1 != 0.0 { (atr / c1) * k100 } else { f64::NAN };
+
+        atr = (tr[2] - atr).mul_add(inv_p, atr);
+        let c2 = *c.add(idx + 2);
+        *o.add(idx + 2) = if c2.is_finite() && c2 != 0.0 { (atr / c2) * k100 } else { f64::NAN };
+
+        atr = (tr[3] - atr).mul_add(inv_p, atr);
+        let c3 = *c.add(idx + 3);
+        *o.add(idx + 3) = if c3.is_finite() && c3 != 0.0 { (atr / c3) * k100 } else { f64::NAN };
+
+        idx += 4;
+    }
+    while idx < len {
+        let hi = *h.add(idx);
+        let lo = *l.add(idx);
+        let pc = *c.add(idx - 1);
+        let tr = (hi - lo).max((hi - pc).abs()).max((lo - pc).abs());
+        atr = (tr - atr).mul_add(inv_p, atr);
+
+        let cv = *c.add(idx);
+        *o.add(idx) = if cv.is_finite() && cv != 0.0 { (atr / cv) * k100 } else { f64::NAN };
+        idx += 1;
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
+#[target_feature(enable = "avx512f")]
+unsafe fn natr_avx512_body(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    first: usize,
+    out: &mut [f64],
+) {
+    use core::arch::x86_64::*;
+    debug_assert!(high.len() == low.len() && high.len() == close.len() && high.len() == out.len());
+    let len = out.len();
+    if first >= len { return; }
+
+    let inv_p: f64 = 1.0 / (period as f64);
+    let k100: f64 = 100.0;
+
+    let h = high.as_ptr();
+    let l = low.as_ptr();
+    let c = close.as_ptr();
+    let o = out.as_mut_ptr();
+
+    // Warm-up
+    let mut i = first;
+    let mut sum_tr = *h.add(i) - *l.add(i);
+    i += 1;
+    let warm_end = first + period - 1;
+
+    let sign = _mm512_set1_pd(-0.0_f64);
+    while i + 7 <= warm_end {
+        let vh = _mm512_loadu_pd(h.add(i));
+        let vl = _mm512_loadu_pd(l.add(i));
+        let vpc = _mm512_loadu_pd(c.add(i - 1));
+
+        let vhl = _mm512_sub_pd(vh, vl);
+        let vhc = _mm512_sub_pd(vh, vpc);
+        let vlc = _mm512_sub_pd(vl, vpc);
+        let abs_hc = _mm512_andnot_pd(sign, vhc);
+        let abs_lc = _mm512_andnot_pd(sign, vlc);
+        let mx1 = _mm512_max_pd(vhl, abs_hc);
+        let vtr = _mm512_max_pd(mx1, abs_lc);
+
+        let mut tmp = [0.0f64; 8];
+        _mm512_storeu_pd(tmp.as_mut_ptr(), vtr);
+        sum_tr += tmp.iter().sum::<f64>();
+
+        i += 8;
+    }
+    while i <= warm_end {
+        let hi = *h.add(i);
+        let lo = *l.add(i);
+        let pc = *c.add(i - 1);
+        let tr = (hi - lo).max((hi - pc).abs()).max((lo - pc).abs());
+        sum_tr += tr;
+        i += 1;
+    }
+
+    let mut atr = sum_tr * inv_p;
+    let c_we = *c.add(warm_end);
+    *o.add(warm_end) = if c_we.is_finite() && c_we != 0.0 { (atr / c_we) * k100 } else { f64::NAN };
+
+    // Main loop
+    let mut idx = warm_end + 1;
+    while idx + 7 < len {
+        let vh = _mm512_loadu_pd(h.add(idx));
+        let vl = _mm512_loadu_pd(l.add(idx));
+        let vpc = _mm512_loadu_pd(c.add(idx - 1));
+
+        let vhl = _mm512_sub_pd(vh, vl);
+        let vhc = _mm512_sub_pd(vh, vpc);
+        let vlc = _mm512_sub_pd(vl, vpc);
+        let abs_hc = _mm512_andnot_pd(sign, vhc);
+        let abs_lc = _mm512_andnot_pd(sign, vlc);
+        let mx1 = _mm512_max_pd(vhl, abs_hc);
+        let vtr = _mm512_max_pd(mx1, abs_lc);
+
+        let mut tr = [0.0f64; 8];
+        _mm512_storeu_pd(tr.as_mut_ptr(), vtr);
+
+        atr = (tr[0] - atr).mul_add(inv_p, atr); let c0 = *c.add(idx + 0);
+        *o.add(idx + 0) = if c0.is_finite() && c0 != 0.0 { (atr / c0) * k100 } else { f64::NAN };
+        atr = (tr[1] - atr).mul_add(inv_p, atr); let c1 = *c.add(idx + 1);
+        *o.add(idx + 1) = if c1.is_finite() && c1 != 0.0 { (atr / c1) * k100 } else { f64::NAN };
+        atr = (tr[2] - atr).mul_add(inv_p, atr); let c2 = *c.add(idx + 2);
+        *o.add(idx + 2) = if c2.is_finite() && c2 != 0.0 { (atr / c2) * k100 } else { f64::NAN };
+        atr = (tr[3] - atr).mul_add(inv_p, atr); let c3 = *c.add(idx + 3);
+        *o.add(idx + 3) = if c3.is_finite() && c3 != 0.0 { (atr / c3) * k100 } else { f64::NAN };
+        atr = (tr[4] - atr).mul_add(inv_p, atr); let c4 = *c.add(idx + 4);
+        *o.add(idx + 4) = if c4.is_finite() && c4 != 0.0 { (atr / c4) * k100 } else { f64::NAN };
+        atr = (tr[5] - atr).mul_add(inv_p, atr); let c5 = *c.add(idx + 5);
+        *o.add(idx + 5) = if c5.is_finite() && c5 != 0.0 { (atr / c5) * k100 } else { f64::NAN };
+        atr = (tr[6] - atr).mul_add(inv_p, atr); let c6 = *c.add(idx + 6);
+        *o.add(idx + 6) = if c6.is_finite() && c6 != 0.0 { (atr / c6) * k100 } else { f64::NAN };
+        atr = (tr[7] - atr).mul_add(inv_p, atr); let c7 = *c.add(idx + 7);
+        *o.add(idx + 7) = if c7.is_finite() && c7 != 0.0 { (atr / c7) * k100 } else { f64::NAN };
+
+        idx += 8;
+    }
+    while idx < len {
+        let hi = *h.add(idx);
+        let lo = *l.add(idx);
+        let pc = *c.add(idx - 1);
+        let tr = (hi - lo).max((hi - pc).abs()).max((lo - pc).abs());
+        atr = (tr - atr).mul_add(inv_p, atr);
+
+        let cv = *c.add(idx);
+        *o.add(idx) = if cv.is_finite() && cv != 0.0 { (atr / cv) * k100 } else { f64::NAN };
+        idx += 1;
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -369,7 +614,7 @@ pub unsafe fn natr_avx512_short(
     first: usize,
     out: &mut [f64],
 ) {
-    natr_scalar(high, low, close, period, first, out);
+    natr_avx512_body(high, low, close, period, first, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -382,7 +627,7 @@ pub unsafe fn natr_avx512_long(
     first: usize,
     out: &mut [f64],
 ) {
-    natr_scalar(high, low, close, period, first, out);
+    natr_avx512_body(high, low, close, period, first, out);
 }
 
 #[derive(Debug, Clone)]
@@ -661,35 +906,103 @@ fn natr_batch_inner(
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
-    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-        let period = combos[row].period.unwrap();
-        match kern {
-            Kernel::Scalar => natr_row_scalar(high, low, close, first, period, out_row),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => natr_row_avx2(high, low, close, first, period, out_row),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => natr_row_avx512(high, low, close, first, period, out_row),
-            _ => unreachable!(),
-        }
-    };
+    let use_tr_shared = combos.len() >= 24; // enable shared TR only for larger sweeps
 
-    if parallel {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            out.par_chunks_mut(cols)
-                .enumerate()
-                .for_each(|(row, slice)| do_row(row, slice));
+    if use_tr_shared {
+        // Precompute TR once and reuse across rows (row-optimized batch)
+        let mut tr: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, len);
+        tr.resize(len, 0.0);
+        if first < len {
+            tr[first] = high[first] - low[first];
+            let mut i = first + 1;
+            while i < len {
+                let hi = high[i];
+                let lo = low[i];
+                let pc = close[i - 1];
+                let trv = (hi - lo).max((hi - pc).abs()).max((lo - pc).abs());
+                tr[i] = trv;
+                i += 1;
+            }
+        }
+        // Prefix sums for O(1) warmup ATR per row
+        let mut pref: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, len + 1);
+        pref.resize(len + 1, 0.0);
+        for i in first..len {
+            pref[i + 1] = pref[i] + tr[i];
         }
 
-        #[cfg(target_arch = "wasm32")]
-        {
+        let do_row = |row: usize, out_row: &mut [f64]| {
+            let period = combos[row].period.unwrap();
+            let inv_p = 1.0 / (period as f64);
+            let k100 = 100.0;
+            let warm_end = first + period - 1;
+
+            // Warmup ATR via prefix sum
+            let sum_tr = pref[warm_end + 1] - pref[first];
+            let mut atr = sum_tr * inv_p;
+            let cw = close[warm_end];
+            out_row[warm_end] = if cw.is_finite() && cw != 0.0 { (atr / cw) * k100 } else { f64::NAN };
+
+            // Main recurrence using TR
+            let mut i = warm_end + 1;
+            while i < len {
+                atr = (tr[i] - atr).mul_add(inv_p, atr);
+                let cv = close[i];
+                out_row[i] = if cv.is_finite() && cv != 0.0 { (atr / cv) * k100 } else { f64::NAN };
+                i += 1;
+            }
+        };
+
+        if parallel {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                out.par_chunks_mut(cols)
+                    .enumerate()
+                    .for_each(|(row, slice)| do_row(row, slice));
+            }
+
+            #[cfg(target_arch = "wasm32")]
+            {
+                for (row, slice) in out.chunks_mut(cols).enumerate() {
+                    do_row(row, slice);
+                }
+            }
+        } else {
             for (row, slice) in out.chunks_mut(cols).enumerate() {
                 do_row(row, slice);
             }
         }
     } else {
-        for (row, slice) in out.chunks_mut(cols).enumerate() {
-            do_row(row, slice);
+        let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+            let period = combos[row].period.unwrap();
+            match kern {
+                Kernel::Scalar => natr_row_scalar(high, low, close, first, period, out_row),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 => natr_row_avx2(high, low, close, first, period, out_row),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 => natr_row_avx512(high, low, close, first, period, out_row),
+                _ => unreachable!(),
+            }
+        };
+
+        if parallel {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                out.par_chunks_mut(cols)
+                    .enumerate()
+                    .for_each(|(row, slice)| do_row(row, slice));
+            }
+
+            #[cfg(target_arch = "wasm32")]
+            {
+                for (row, slice) in out.chunks_mut(cols).enumerate() {
+                    do_row(row, slice);
+                }
+            }
+        } else {
+            for (row, slice) in out.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
         }
     }
 
@@ -764,35 +1077,100 @@ fn natr_batch_inner_into(
         }
     }
 
-    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-        let period = combos[row].period.unwrap();
-        match kern {
-            Kernel::Scalar => natr_row_scalar(high, low, close, first, period, out_row),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => natr_row_avx2(high, low, close, first, period, out_row),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => natr_row_avx512(high, low, close, first, period, out_row),
-            _ => unreachable!(),
+    let use_tr_shared = combos.len() >= 24;
+    if use_tr_shared {
+        // Precompute TR once and reuse for all rows
+        let mut tr: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, len);
+        tr.resize(len, 0.0);
+        if first < len {
+            tr[first] = high[first] - low[first];
+            let mut i = first + 1;
+            while i < len {
+                let hi = high[i];
+                let lo = low[i];
+                let pc = close[i - 1];
+                let trv = (hi - lo).max((hi - pc).abs()).max((lo - pc).abs());
+                tr[i] = trv;
+                i += 1;
+            }
         }
-    };
-
-    if parallel {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            out.par_chunks_mut(cols)
-                .enumerate()
-                .for_each(|(row, slice)| do_row(row, slice));
+        // Prefix sums for O(1) warmup ATR per row
+        let mut pref: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, len + 1);
+        pref.resize(len + 1, 0.0);
+        for i in first..len {
+            pref[i + 1] = pref[i] + tr[i];
         }
 
-        #[cfg(target_arch = "wasm32")]
-        {
+        let do_row = |row: usize, out_row: &mut [f64]| {
+            let period = combos[row].period.unwrap();
+            let inv_p = 1.0 / (period as f64);
+            let k100 = 100.0;
+            let warm_end = first + period - 1;
+
+            let sum_tr = pref[warm_end + 1] - pref[first];
+            let mut atr = sum_tr * inv_p;
+            let cw = close[warm_end];
+            out_row[warm_end] = if cw.is_finite() && cw != 0.0 { (atr / cw) * k100 } else { f64::NAN };
+
+            let mut i = warm_end + 1;
+            while i < len {
+                atr = (tr[i] - atr).mul_add(inv_p, atr);
+                let cv = close[i];
+                out_row[i] = if cv.is_finite() && cv != 0.0 { (atr / cv) * k100 } else { f64::NAN };
+                i += 1;
+            }
+        };
+
+        if parallel {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                out.par_chunks_mut(cols)
+                    .enumerate()
+                    .for_each(|(row, slice)| do_row(row, slice));
+            }
+
+            #[cfg(target_arch = "wasm32")]
+            {
+                for (row, slice) in out.chunks_mut(cols).enumerate() {
+                    do_row(row, slice);
+                }
+            }
+        } else {
             for (row, slice) in out.chunks_mut(cols).enumerate() {
                 do_row(row, slice);
             }
         }
     } else {
-        for (row, slice) in out.chunks_mut(cols).enumerate() {
-            do_row(row, slice);
+        let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+            let period = combos[row].period.unwrap();
+            match kern {
+                Kernel::Scalar => natr_row_scalar(high, low, close, first, period, out_row),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 => natr_row_avx2(high, low, close, first, period, out_row),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 => natr_row_avx512(high, low, close, first, period, out_row),
+                _ => unreachable!(),
+            }
+        };
+
+        if parallel {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                out.par_chunks_mut(cols)
+                    .enumerate()
+                    .for_each(|(row, slice)| do_row(row, slice));
+            }
+
+            #[cfg(target_arch = "wasm32")]
+            {
+                for (row, slice) in out.chunks_mut(cols).enumerate() {
+                    do_row(row, slice);
+                }
+            }
+        } else {
+            for (row, slice) in out.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
         }
     }
 
@@ -811,6 +1189,39 @@ unsafe fn natr_row_scalar(
     natr_scalar(high, low, close, period, first, out)
 }
 
+#[inline(always)]
+unsafe fn natr_row_scalar_from_tr(
+    tr: &[f64],
+    close: &[f64],
+    first: usize,
+    period: usize,
+    out: &mut [f64],
+) {
+    let len = out.len();
+    if first >= len { return; }
+    let inv_p = 1.0 / (period as f64);
+    let k100 = 100.0;
+    let warm_end = first + period - 1;
+
+    // Warmup ATR from TR
+    let mut sum_tr = 0.0;
+    for i in first..=warm_end {
+        sum_tr += tr[i];
+    }
+    let mut atr = sum_tr * inv_p;
+    let cw = close[warm_end];
+    out[warm_end] = if cw.is_finite() && cw != 0.0 { (atr / cw) * k100 } else { f64::NAN };
+
+    // Main recurrence using TR stream
+    let mut i = warm_end + 1;
+    while i < len {
+        atr = (tr[i] - atr).mul_add(inv_p, atr);
+        let cv = close[i];
+        out[i] = if cv.is_finite() && cv != 0.0 { (atr / cv) * k100 } else { f64::NAN };
+        i += 1;
+    }
+}
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn natr_row_avx2(
@@ -821,7 +1232,7 @@ unsafe fn natr_row_avx2(
     period: usize,
     out: &mut [f64],
 ) {
-    natr_scalar(high, low, close, period, first, out)
+    natr_avx2(high, low, close, period, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -834,11 +1245,7 @@ pub unsafe fn natr_row_avx512(
     period: usize,
     out: &mut [f64],
 ) {
-    if period <= 32 {
-        natr_row_avx512_short(high, low, close, first, period, out);
-    } else {
-        natr_row_avx512_long(high, low, close, first, period, out);
-    }
+    natr_avx512(high, low, close, period, first, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -851,7 +1258,7 @@ pub unsafe fn natr_row_avx512_short(
     period: usize,
     out: &mut [f64],
 ) {
-    natr_scalar(high, low, close, period, first, out)
+    natr_avx512_body(high, low, close, period, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -864,7 +1271,32 @@ pub unsafe fn natr_row_avx512_long(
     period: usize,
     out: &mut [f64],
 ) {
-    natr_scalar(high, low, close, period, first, out)
+    natr_avx512_body(high, low, close, period, first, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn natr_row_avx2_from_tr(
+    tr: &[f64],
+    close: &[f64],
+    first: usize,
+    period: usize,
+    out: &mut [f64],
+) {
+    // Recurrence is scalar; use the TR-optimized scalar row path
+    natr_row_scalar_from_tr(tr, close, first, period, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn natr_row_avx512_from_tr(
+    tr: &[f64],
+    close: &[f64],
+    first: usize,
+    period: usize,
+    out: &mut [f64],
+) {
+    natr_row_scalar_from_tr(tr, close, first, period, out)
 }
 
 #[cfg(test)]

@@ -14,10 +14,10 @@
 //! - **values**: Variance values as `Vec<f64>` (length matches input)
 //!
 //! ## Developer Notes
-//! - **AVX2/AVX512 kernels**: Currently stubs that call scalar implementation
+//! - **SIMD kernels**: AVX2 uses vectorized init + scalar rolling; AVX512 currently delegates to scalar
 //! - **Streaming update**: O(1) performance with Welford's online algorithm for incremental variance
 //! - **Memory optimization**: Properly uses zero-copy helper functions (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
-//! - **TODO**: Implement actual SIMD kernels for AVX2/AVX512
+//! - **SIMD status**: Implemented as stubs delegating to scalar; variance is memory-bound with a tight dependency chain on rolling sums, so SIMD showed no consistent win in preliminary attempts. Revisit if layout changes or additional precompute become available.
 //! - **Note**: Streaming implementation is highly optimized using running sums and sum of squares
 
 #[cfg(feature = "python")]
@@ -281,22 +281,38 @@ pub fn var_scalar(
     let nbdev2 = nbdev * nbdev;
     let inv_p = 1.0 / (period as f64);
 
-    let mut sum = 0.0;
-    let mut sum_sq = 0.0;
-
-    for &v in &data[first..first + period] {
-        sum += v;
-        sum_sq += v * v;
+    // Initialize first window with light unrolling via chunks for better ILP
+    let mut sum = 0.0f64;
+    let mut sum_sq = 0.0f64;
+    let init = &data[first..first + period];
+    let mut it = init.chunks_exact(4);
+    for c in &mut it {
+        let x0 = c[0];
+        let x1 = c[1];
+        let x2 = c[2];
+        let x3 = c[3];
+        sum += x0 + x1 + x2 + x3;
+        sum_sq += x0 * x0 + x1 * x1 + x2 * x2 + x3 * x3;
+    }
+    for &x in it.remainder() {
+        sum += x;
+        sum_sq += x * x;
     }
 
-    out[first + period - 1] = (sum_sq * inv_p - (sum * inv_p).powi(2)) * nbdev2;
+    let idx0 = first + period - 1;
+    let mean0 = sum * inv_p;
+    out[idx0] = (sum_sq * inv_p - mean0 * mean0) * nbdev2;
 
-    for i in (first + period)..len {
-        let old = data[i - period];
-        let new = data[i];
+    // Rolling updates using zipped old/new slices to avoid index-bound checks in the hot loop
+    let olds = &data[first..(len - period)];
+    let news = &data[(first + period)..len];
+    let mut out_i = idx0 + 1;
+    for (&old, &new) in olds.iter().zip(news.iter()) {
         sum += new - old;
         sum_sq += new * new - old * old;
-        out[i] = (sum_sq * inv_p - (sum * inv_p).powi(2)) * nbdev2;
+        let mean = sum * inv_p;
+        out[out_i] = (sum_sq * inv_p - mean * mean) * nbdev2;
+        out_i += 1;
     }
 
     Ok(())
@@ -311,8 +327,55 @@ pub fn var_avx2(
     nbdev: f64,
     out: &mut [f64],
 ) -> Result<(), VarError> {
-    // Stub: points to scalar logic for API parity
-    var_scalar(data, period, first, nbdev, out)
+    let len = data.len();
+    let nbdev2 = nbdev * nbdev;
+    let inv_p = 1.0 / (period as f64);
+
+    // AVX2-accelerated initialization of the first window (sum and sum of squares)
+    let mut sum = 0.0f64;
+    let mut sum_sq = 0.0f64;
+    unsafe {
+        let mut idx = first;
+        let end = first + period;
+        while idx + 4 <= end {
+            let v = _mm256_loadu_pd(data.as_ptr().add(idx));
+            let v2 = _mm256_mul_pd(v, v);
+
+            let mut tmp: [f64; 4] = core::mem::zeroed();
+            _mm256_storeu_pd(tmp.as_mut_ptr(), v);
+            sum += tmp[0] + tmp[1] + tmp[2] + tmp[3];
+
+            _mm256_storeu_pd(tmp.as_mut_ptr(), v2);
+            sum_sq += tmp[0] + tmp[1] + tmp[2] + tmp[3];
+
+            idx += 4;
+        }
+        while idx < end {
+            let x = *data.get_unchecked(idx);
+            sum += x;
+            sum_sq += x * x;
+            idx += 1;
+        }
+    }
+
+    let idx0 = first + period - 1;
+    let mean0 = sum * inv_p;
+    out[idx0] = (sum_sq * inv_p - mean0 * mean0) * nbdev2;
+
+    // Rolling updates – keep scalar/unrolled semantics; use mul_add to enable FMA
+    let olds = &data[first..(len - period)];
+    let news = &data[(first + period)..len];
+    let mut out_i = idx0 + 1;
+    for (&old, &new) in olds.iter().zip(news.iter()) {
+        sum += new - old;
+        // Avoid FMA here to keep parity with scalar rounding within test tolerances
+        sum_sq += new * new - old * old;
+        let mean = sum * inv_p;
+        out[out_i] = (sum_sq * inv_p - mean * mean) * nbdev2;
+        out_i += 1;
+    }
+
+    Ok(())
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -407,23 +470,71 @@ pub unsafe fn var_row_scalar(
     out: &mut [f64],
 ) {
     let len = data.len();
-    let nbdev2 = nbdev * nbdev;
     let inv_p = 1.0 / (period as f64);
+    let nbdev2 = nbdev * nbdev;
 
-    let mut sum = 0.0;
-    let mut sum_sq = 0.0;
-    for &v in &data[first..first + period] {
-        sum += v;
-        sum_sq += v * v;
+    // Rolling sums
+    let mut sum = 0.0f64;
+    let mut sum_sq = 0.0f64;
+
+    // Initialize the first window [first .. first+period) with partial unrolling
+    let mut p = data.as_ptr().add(first);
+    let end = p.add(period);
+    while p.add(4) <= end {
+        let x0 = *p;
+        let x1 = *p.add(1);
+        let x2 = *p.add(2);
+        let x3 = *p.add(3);
+        sum += x0 + x1 + x2 + x3;
+        sum_sq += x0 * x0 + x1 * x1 + x2 * x2 + x3 * x3;
+        p = p.add(4);
     }
-    out[first + period - 1] = (sum_sq * inv_p - (sum * inv_p).powi(2)) * nbdev2;
+    while p < end {
+        let x = *p;
+        sum += x;
+        sum_sq += x * x;
+        p = p.add(1);
+    }
 
-    for i in (first + period)..len {
-        let old = data[i - period];
-        let new = data[i];
-        sum += new - old;
-        sum_sq += new * new - old * old;
-        out[i] = (sum_sq * inv_p - (sum * inv_p).powi(2)) * nbdev2;
+    // First output at index = first + period - 1
+    let idx0 = first + period - 1;
+    let mean0 = sum * inv_p;
+    *out.get_unchecked_mut(idx0) = (sum_sq * inv_p - mean0 * mean0) * nbdev2;
+
+    // Rolling updates, unrolled by 2 for some ILP
+    let mut i = idx0 + 1;
+    while i + 1 < len {
+        // step i
+        {
+            let new0 = *data.get_unchecked(i);
+            let old0 = *data.get_unchecked(i - period);
+            sum += new0 - old0;
+            sum_sq += new0 * new0 - old0 * old0;
+            let mean = sum * inv_p;
+            *out.get_unchecked_mut(i) = (sum_sq * inv_p - mean * mean) * nbdev2;
+        }
+
+        // step i+1
+        {
+            let new1 = *data.get_unchecked(i + 1);
+            let old1 = *data.get_unchecked(i + 1 - period);
+            sum += new1 - old1;
+            sum_sq += new1 * new1 - old1 * old1;
+            let mean = sum * inv_p;
+            *out.get_unchecked_mut(i + 1) = (sum_sq * inv_p - mean * mean) * nbdev2;
+        }
+
+        i += 2;
+    }
+
+    // Tail element if one remains
+    if i < len {
+        let newx = *data.get_unchecked(i);
+        let oldx = *data.get_unchecked(i - period);
+        sum += newx - oldx;
+        sum_sq += newx * newx - oldx * oldx;
+        let mean = sum * inv_p;
+        *out.get_unchecked_mut(i) = (sum_sq * inv_p - mean * mean) * nbdev2;
     }
 }
 
@@ -632,6 +743,28 @@ fn round_up8(x: usize) -> usize {
     (x + 7) & !7
 }
 
+// Row-optimized batch via shared prefix sums (PS/PSQ).
+// Disabled by default: in local tests (47 rows, 100k) per-row rolling was faster than PS/PSQ.
+// Keep present for future experiments or different layouts.
+const ENABLE_VAR_BATCH_PREFIX_SUMS: bool = false;
+
+#[inline(always)]
+fn make_prefix_sums(data: &[f64], first: usize) -> (Vec<f64>, Vec<f64>) {
+    let len = data.len();
+    let mut ps = vec![0.0f64; len + 1];
+    let mut psq = vec![0.0f64; len + 1];
+    let mut s = 0.0f64;
+    let mut s2 = 0.0f64;
+    for j in first..len {
+        let x = data[j];
+        s += x;
+        s2 += x * x;
+        ps[j + 1] = s;
+        psq[j + 1] = s2;
+    }
+    (ps, psq)
+}
+
 #[inline(always)]
 fn var_batch_inner(
     data: &[f64],
@@ -673,39 +806,77 @@ fn var_batch_inner(
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
-    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-        let period = combos[row].period.unwrap();
-        let nbdev = combos[row].nbdev.unwrap();
-        match kern {
-            Kernel::Scalar => var_row_scalar(data, first, period, stride, nbdev, out_row),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => var_row_avx2(data, first, period, stride, nbdev, out_row),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => var_row_avx512(data, first, period, stride, nbdev, out_row),
-            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-            Kernel::Avx2 | Kernel::Avx512 => {
-                var_row_scalar(data, first, period, stride, nbdev, out_row)
+    // Row-optimized variant using shared prefix sums for Scalar path
+    if ENABLE_VAR_BATCH_PREFIX_SUMS && matches!(kern, Kernel::Scalar) {
+        let (ps, psq) = make_prefix_sums(data, first);
+        let compute_row = |row: usize, out_row: &mut [f64]| {
+            let period = combos[row].period.unwrap();
+            let inv_p = 1.0 / (period as f64);
+            let nbdev2 = combos[row].nbdev.unwrap() * combos[row].nbdev.unwrap();
+            let start = first + period - 1;
+            for i in start..cols {
+                let s = ps[i + 1] - ps[i + 1 - period];
+                let s2 = psq[i + 1] - psq[i + 1 - period];
+                let m = s * inv_p;
+                out_row[i] = (s2 * inv_p - m * m) * nbdev2;
             }
-            _ => unreachable!(),
-        }
-    };
-    if parallel {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            out.par_chunks_mut(cols)
-                .enumerate()
-                .for_each(|(row, slice)| do_row(row, slice));
-        }
+        };
 
-        #[cfg(target_arch = "wasm32")]
-        {
+        if parallel {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                out.par_chunks_mut(cols)
+                    .enumerate()
+                    .for_each(|(row, slice)| compute_row(row, slice));
+            }
+
+            #[cfg(target_arch = "wasm32")]
+            {
+                for (row, slice) in out.chunks_mut(cols).enumerate() {
+                    compute_row(row, slice);
+                }
+            }
+        } else {
             for (row, slice) in out.chunks_mut(cols).enumerate() {
-                do_row(row, slice);
+                compute_row(row, slice);
             }
         }
     } else {
-        for (row, slice) in out.chunks_mut(cols).enumerate() {
-            do_row(row, slice);
+        // Fallback: per-row rolling kernels (Avx2/Avx512 paths or explicit selection)
+        let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+            let period = combos[row].period.unwrap();
+            let nbdev = combos[row].nbdev.unwrap();
+            match kern {
+                Kernel::Scalar => var_row_scalar(data, first, period, stride, nbdev, out_row),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 => var_row_avx2(data, first, period, stride, nbdev, out_row),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 => var_row_avx512(data, first, period, stride, nbdev, out_row),
+                #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+                Kernel::Avx2 | Kernel::Avx512 => {
+                    var_row_scalar(data, first, period, stride, nbdev, out_row)
+                }
+                _ => unreachable!(),
+            }
+        };
+        if parallel {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                out.par_chunks_mut(cols)
+                    .enumerate()
+                    .for_each(|(row, slice)| do_row(row, slice));
+            }
+
+            #[cfg(target_arch = "wasm32")]
+            {
+                for (row, slice) in out.chunks_mut(cols).enumerate() {
+                    do_row(row, slice);
+                }
+            }
+        } else {
+            for (row, slice) in out.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
         }
     }
 
@@ -1878,40 +2049,72 @@ fn var_batch_inner_into(
     let stride = round_up8(max_period);
     let cols = data.len();
 
-    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-        let period = combos[row].period.unwrap();
-        let nbdev = combos[row].nbdev.unwrap();
-        match kern {
-            Kernel::Scalar => var_row_scalar(data, first, period, stride, nbdev, out_row),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => var_row_avx2(data, first, period, stride, nbdev, out_row),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => var_row_avx512(data, first, period, stride, nbdev, out_row),
-            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-            Kernel::Avx2 | Kernel::Avx512 => {
-                var_row_scalar(data, first, period, stride, nbdev, out_row)
+    if ENABLE_VAR_BATCH_PREFIX_SUMS && matches!(kern, Kernel::Scalar) {
+        let (ps, psq) = make_prefix_sums(data, first);
+        let compute_row = |row: usize, out_row: &mut [f64]| {
+            let period = combos[row].period.unwrap();
+            let inv_p = 1.0 / (period as f64);
+            let nbdev2 = combos[row].nbdev.unwrap() * combos[row].nbdev.unwrap();
+            let start = first + period - 1;
+            for i in start..cols {
+                let s = ps[i + 1] - ps[i + 1 - period];
+                let s2 = psq[i + 1] - psq[i + 1 - period];
+                let m = s * inv_p;
+                out_row[i] = (s2 * inv_p - m * m) * nbdev2;
             }
-            _ => unreachable!(),
-        }
-    };
-
-    if parallel {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            out.par_chunks_mut(cols)
-                .enumerate()
-                .for_each(|(row, slice)| do_row(row, slice));
-        }
-
-        #[cfg(target_arch = "wasm32")]
-        {
+        };
+        if parallel {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                out.par_chunks_mut(cols)
+                    .enumerate()
+                    .for_each(|(row, slice)| compute_row(row, slice));
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                for (row, slice) in out.chunks_mut(cols).enumerate() {
+                    compute_row(row, slice);
+                }
+            }
+        } else {
             for (row, slice) in out.chunks_mut(cols).enumerate() {
-                do_row(row, slice);
+                compute_row(row, slice);
             }
         }
     } else {
-        for (row, slice) in out.chunks_mut(cols).enumerate() {
-            do_row(row, slice);
+        let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+            let period = combos[row].period.unwrap();
+            let nbdev = combos[row].nbdev.unwrap();
+            match kern {
+                Kernel::Scalar => var_row_scalar(data, first, period, stride, nbdev, out_row),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 => var_row_avx2(data, first, period, stride, nbdev, out_row),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 => var_row_avx512(data, first, period, stride, nbdev, out_row),
+                #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+                Kernel::Avx2 | Kernel::Avx512 => {
+                    var_row_scalar(data, first, period, stride, nbdev, out_row)
+                }
+                _ => unreachable!(),
+            }
+        };
+        if parallel {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                out.par_chunks_mut(cols)
+                    .enumerate()
+                    .for_each(|(row, slice)| do_row(row, slice));
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                for (row, slice) in out.chunks_mut(cols).enumerate() {
+                    do_row(row, slice);
+                }
+            }
+        } else {
+            for (row, slice) in out.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
         }
     }
 

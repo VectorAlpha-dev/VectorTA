@@ -11,10 +11,14 @@
 //! - **`Err(MinmaxError)`** on failure
 //!
 //! ## Developer Notes
-//! - **AVX2**: Stub implementation - calls scalar function
-//! - **AVX512**: Multiple stub functions (minmax_avx512_short, minmax_avx512_long) - all call scalar
-//! - **Streaming**: O(n) for each update - scans entire window for min/max comparison (needs optimization)
-//! - **Memory**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
+//! - Scalar path optimized: hybrid small-order loop (unsafe, tight hot loop) and large-order O(n) prefix–suffix
+//!   (van Herk / Gil–Werman) precompute. Preserves strict inequalities and finiteness semantics.
+//! - SIMD (AVX2/AVX512): kept as stubs delegating to scalar. Pattern is memory/dependency-bound; measured gains
+//!   are negligible over the optimized scalar path. Selection short-circuits to scalar.
+//! - Batch row-specific SIMD: not implemented. Potential future work via shared RMQ/sparse-tables for min/max
+//!   and prefix finiteness counts across orders; would allow O(1) window queries per row.
+//! - Streaming: unchanged; still O(n) per update over the window. Not performance-critical here.
+//! - Memory: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes).
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -425,6 +429,15 @@ pub fn minmax_scalar(
     last_min: &mut [f64],
     last_max: &mut [f64],
 ) {
+    #[inline(always)]
+    fn fmin(a: f64, b: f64) -> f64 {
+        if a < b { a } else { b }
+    }
+    #[inline(always)]
+    fn fmax(a: f64, b: f64) -> f64 {
+        if a > b { a } else { b }
+    }
+
     let len = high.len();
 
     // prefix [0..first_valid_idx)
@@ -435,67 +448,213 @@ pub fn minmax_scalar(
         last_max[i] = f64::NAN;
     }
 
+    // Fast small-order path keeps the original structure but removes bounds checks in hot loops.
+    const SMALL_ORDER_THRESHOLD: usize = 8;
+    if order <= SMALL_ORDER_THRESHOLD {
+        let mut last_min_val = f64::NAN;
+        let mut last_max_val = f64::NAN;
+        for i in first_valid_idx..len {
+            // default to NaN at this index
+            let mut min_here = f64::NAN;
+            let mut max_here = f64::NAN;
+
+            if i >= order && i + order < len {
+                // Safety: indices are checked above; we only do unchecked within bounds.
+                unsafe {
+                    let ch = *high.get_unchecked(i);
+                    let cl = *low.get_unchecked(i);
+                    if ch.is_finite() & cl.is_finite() {
+                        let mut less_than_neighbors = true;
+                        let mut greater_than_neighbors = true;
+
+                        let mut o = 1usize;
+                        while o <= order {
+                            let lh = *high.get_unchecked(i - o);
+                            let rh = *high.get_unchecked(i + o);
+                            let ll = *low.get_unchecked(i - o);
+                            let rl = *low.get_unchecked(i + o);
+
+                            if less_than_neighbors {
+                                // all neighbors must be finite and strictly greater than center low
+                                if !(ll.is_finite() & rl.is_finite()) || !(cl < ll && cl < rl) {
+                                    less_than_neighbors = false;
+                                }
+                            }
+                            if greater_than_neighbors {
+                                if !(lh.is_finite() & rh.is_finite()) || !(ch > lh && ch > rh) {
+                                    greater_than_neighbors = false;
+                                }
+                            }
+
+                            if !less_than_neighbors && !greater_than_neighbors {
+                                break;
+                            }
+                            o += 1;
+                        }
+
+                        if less_than_neighbors {
+                            min_here = cl;
+                        }
+                        if greater_than_neighbors {
+                            max_here = ch;
+                        }
+                    }
+                }
+            }
+
+            is_min[i] = min_here;
+            is_max[i] = max_here;
+
+            if min_here.is_finite() {
+                last_min_val = min_here;
+            }
+            if max_here.is_finite() {
+                last_max_val = max_here;
+            }
+
+            last_min[i] = last_min_val;
+            last_max[i] = last_max_val;
+        }
+        return;
+    }
+
+    // Large-order O(n) path via block decomposition (van Herk/Gil–Werman)
+    let n = len;
+    if first_valid_idx >= n {
+        return;
+    }
+
+    // Precompute left/right prefix-min (low), prefix-max (high), and finiteness masks for neighbors
+    let mut left_min_low = vec![0.0f64; n];
+    let mut right_min_low = vec![0.0f64; n];
+    let mut left_max_high = vec![0.0f64; n];
+    let mut right_max_high = vec![0.0f64; n];
+
+    let mut left_all_low = vec![0u8; n];
+    let mut right_all_low = vec![0u8; n];
+    let mut left_all_high = vec![0u8; n];
+    let mut right_all_high = vec![0u8; n];
+
+    // Forward pass: compute left_* within blocks of size `order`
+    for i in 0..n {
+        unsafe {
+            let l = *low.get_unchecked(i);
+            let h = *high.get_unchecked(i);
+            let lf = l.is_finite() as u8;
+            let hf = h.is_finite() as u8;
+            if i % order == 0 {
+                *left_min_low.get_unchecked_mut(i) = l;
+                *left_max_high.get_unchecked_mut(i) = h;
+                *left_all_low.get_unchecked_mut(i) = lf;
+                *left_all_high.get_unchecked_mut(i) = hf;
+            } else {
+                let p = i - 1;
+                *left_min_low.get_unchecked_mut(i) =
+                    fmin(*left_min_low.get_unchecked(p), l);
+                *left_max_high.get_unchecked_mut(i) =
+                    fmax(*left_max_high.get_unchecked(p), h);
+                *left_all_low.get_unchecked_mut(i) =
+                    *left_all_low.get_unchecked(p) & lf;
+                *left_all_high.get_unchecked_mut(i) =
+                    *left_all_high.get_unchecked(p) & hf;
+            }
+        }
+    }
+
+    // Backward pass: compute right_* within blocks of size `order`
+    for i_rev in 0..n {
+        let i = n - 1 - i_rev;
+        unsafe {
+            let l = *low.get_unchecked(i);
+            let h = *high.get_unchecked(i);
+            let lf = l.is_finite() as u8;
+            let hf = h.is_finite() as u8;
+            if ((i + 1) % order) == 0 || i == n - 1 {
+                *right_min_low.get_unchecked_mut(i) = l;
+                *right_max_high.get_unchecked_mut(i) = h;
+                *right_all_low.get_unchecked_mut(i) = lf;
+                *right_all_high.get_unchecked_mut(i) = hf;
+            } else {
+                let n1 = i + 1;
+                *right_min_low.get_unchecked_mut(i) =
+                    fmin(*right_min_low.get_unchecked(n1), l);
+                *right_max_high.get_unchecked_mut(i) =
+                    fmax(*right_max_high.get_unchecked(n1), h);
+                *right_all_low.get_unchecked_mut(i) =
+                    *right_all_low.get_unchecked(n1) & lf;
+                *right_all_high.get_unchecked_mut(i) =
+                    *right_all_high.get_unchecked(n1) & hf;
+            }
+        }
+    }
+
+    // Final pass: compute local extrema and forward-fill
     let mut last_min_val = f64::NAN;
     let mut last_max_val = f64::NAN;
+    for i in first_valid_idx..n {
+        unsafe {
+            let ch = *high.get_unchecked(i);
+            let cl = *low.get_unchecked(i);
+            let mut min_here = f64::NAN;
+            let mut max_here = f64::NAN;
 
-    for i in first_valid_idx..len {
-        let ch = high[i];
-        let cl = low[i];
+            if i >= order && i + order < n && ch.is_finite() && cl.is_finite() {
+                let s_l = i - order;
+                let e_l = i - 1;
+                let s_r = i + 1;
+                let e_r = i + order;
 
-        // default to NaN at this index
-        let mut min_here = f64::NAN;
-        let mut max_here = f64::NAN;
+                // All neighbors must be finite on both sides
+                let left_low_ok =
+                    (*right_all_low.get_unchecked(s_l) & *left_all_low.get_unchecked(e_l)) == 1;
+                let right_low_ok =
+                    (*right_all_low.get_unchecked(s_r) & *left_all_low.get_unchecked(e_r)) == 1;
+                let left_high_ok =
+                    (*right_all_high.get_unchecked(s_l) & *left_all_high.get_unchecked(e_l)) == 1;
+                let right_high_ok =
+                    (*right_all_high.get_unchecked(s_r) & *left_all_high.get_unchecked(e_r)) == 1;
 
-        // only consider if the window is fully inside bounds and center is finite
-        if i >= order && i + order < len && ch.is_finite() && cl.is_finite() {
-            // neighbors must all be finite
-            let mut less_than_neighbors = true;
-            let mut greater_than_neighbors = true;
-
-            for o in 1..=order {
-                let lh = high[i - o];
-                let rh = high[i + o];
-                let ll = low[i - o];
-                let rl = low[i + o];
-
-                if !(ll.is_finite() && rl.is_finite()) {
-                    less_than_neighbors = false;
-                } else if !(cl < ll && cl < rl) {
-                    less_than_neighbors = false;
+                if left_low_ok & right_low_ok {
+                    let lmin = fmin(
+                        *right_min_low.get_unchecked(s_l),
+                        *left_min_low.get_unchecked(e_l),
+                    );
+                    let rmin = fmin(
+                        *right_min_low.get_unchecked(s_r),
+                        *left_min_low.get_unchecked(e_r),
+                    );
+                    if cl < lmin && cl < rmin {
+                        min_here = cl;
+                    }
                 }
 
-                if !(lh.is_finite() && rh.is_finite()) {
-                    greater_than_neighbors = false;
-                } else if !(ch > lh && ch > rh) {
-                    greater_than_neighbors = false;
-                }
-
-                if !less_than_neighbors && !greater_than_neighbors {
-                    break;
+                if left_high_ok & right_high_ok {
+                    let lmax = fmax(
+                        *right_max_high.get_unchecked(s_l),
+                        *left_max_high.get_unchecked(e_l),
+                    );
+                    let rmax = fmax(
+                        *right_max_high.get_unchecked(s_r),
+                        *left_max_high.get_unchecked(e_r),
+                    );
+                    if ch > lmax && ch > rmax {
+                        max_here = ch;
+                    }
                 }
             }
 
-            if less_than_neighbors {
-                min_here = cl;
+            *is_min.get_unchecked_mut(i) = min_here;
+            *is_max.get_unchecked_mut(i) = max_here;
+
+            if min_here.is_finite() {
+                last_min_val = min_here;
             }
-            if greater_than_neighbors {
-                max_here = ch;
+            if max_here.is_finite() {
+                last_max_val = max_here;
             }
+            *last_min.get_unchecked_mut(i) = last_min_val;
+            *last_max.get_unchecked_mut(i) = last_max_val;
         }
-
-        // write this row fully
-        is_min[i] = min_here;
-        is_max[i] = max_here;
-
-        if min_here.is_finite() {
-            last_min_val = min_here;
-        }
-        if max_here.is_finite() {
-            last_max_val = max_here;
-        }
-
-        last_min[i] = last_min_val;
-        last_max[i] = last_max_val;
     }
 }
 

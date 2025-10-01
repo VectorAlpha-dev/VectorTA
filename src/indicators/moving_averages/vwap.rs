@@ -24,11 +24,13 @@
 //! - **AVX2/AVX512 kernels**: Currently stubs calling scalar implementation
 //! - **Streaming update**: O(1) - maintains running sums for current anchor period
 //! - **Memory optimization**: Uses `alloc_with_nan_prefix` for zero-copy allocation
-//! - **Current status**: Scalar implementation complete with anchor-based grouping
-//! - **Optimization opportunities**:
-//!   - Implement vectorized AVX2/AVX512 kernels for price*volume calculations
-//!   - Consider SIMD for batch processing multiple anchors simultaneously
-//!   - Optimize timestamp grouping calculations with vector operations
+//! - **Current status**:
+//!   - Scalar path optimized (pointer indexing, small unroll, fused `mul_add`).
+//!   - SIMD kept as stubs via runtime selection (segmented prefix + int division limits wins).
+//!   - Batch path now reuses a precomputed `pv[i] = price[i]*volume[i]` across rows.
+//! - **Notes**:
+//!   - Decision: keep SIMD disabled by default for VWAP; runtime selection short-circuits to scalar.
+//!   - Rationale: per-element bucket IDs require integer division; segmented prefix-sum makes effective SIMD complex and data-dependent; stubs ensure correctness.
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
@@ -434,38 +436,133 @@ pub fn vwap_scalar(
 ) -> Result<(), VwapError> {
     debug_assert_eq!(out.len(), prices.len(), "output slice length mismatch");
 
-    let mut current_group_id = -1_i64;
-    let mut volume_sum = 0.0;
-    let mut vol_price_sum = 0.0;
+    // Running state for the current anchor bucket
+    let mut current_group_id: i64 = i64::MIN; // sentinel that won't match real gids
+    let mut volume_sum: f64 = 0.0;
+    let mut vol_price_sum: f64 = 0.0;
 
-    for i in 0..prices.len() {
-        let ts_ms = timestamps[i];
-        let price = prices[i];
-        let volume = volumes[i];
-        let group_id = match unit_char {
-            'm' => ts_ms / ((count as i64) * 60_000),
-            'h' => ts_ms / ((count as i64) * 3_600_000),
-            'd' => ts_ms / ((count as i64) * 86_400_000),
-            'M' => floor_to_month(ts_ms, count)
-                .map_err(|_| VwapError::MonthConversionError { ts_ms })?,
-            _ => return Err(VwapError::UnsupportedAnchorUnit { unit_char }),
-        };
-
-        if group_id != current_group_id {
-            current_group_id = group_id;
-            volume_sum = 0.0;
-            vol_price_sum = 0.0;
-        }
-        volume_sum += volume;
-        vol_price_sum += volume * price;
-
-        out[i] = if volume_sum > 0.0 {
-            vol_price_sum / volume_sum
-        } else {
-            f64::NAN
-        };
+    let n = prices.len();
+    if n == 0 {
+        return Ok(());
     }
-    Ok(())
+
+    // Fast path for minute/hour/day anchors: single integer division per element
+    unsafe {
+        let ts_ptr = timestamps.as_ptr();
+        let vol_ptr = volumes.as_ptr();
+        let pr_ptr = prices.as_ptr();
+        let out_ptr = out.as_mut_ptr();
+
+        if unit_char == 'm' || unit_char == 'h' || unit_char == 'd' {
+            const MINUTE_MS: i64 = 60_000;
+            const HOUR_MS: i64 = 3_600_000;
+            const DAY_MS: i64 = 86_400_000;
+
+            let unit_ms: i64 = match unit_char {
+                'm' => MINUTE_MS,
+                'h' => HOUR_MS,
+                _ => DAY_MS, // 'd'
+            };
+            let bucket_ms: i64 = (count as i64) * unit_ms;
+
+            // Unroll by 2 to reduce loop overhead
+            let mut i: usize = 0;
+            let unroll_end = n & !1usize; // round down to even
+
+            while i < unroll_end {
+                // ---- iteration i ----
+                let ts0 = *ts_ptr.add(i);
+                let gid0 = ts0 / bucket_ms;
+                if gid0 != current_group_id {
+                    current_group_id = gid0;
+                    volume_sum = 0.0;
+                    vol_price_sum = 0.0;
+                }
+                let v0 = *vol_ptr.add(i);
+                let p0 = *pr_ptr.add(i);
+                volume_sum += v0;
+                vol_price_sum = p0.mul_add(v0, vol_price_sum);
+                *out_ptr.add(i) = if volume_sum > 0.0 {
+                    vol_price_sum / volume_sum
+                } else {
+                    f64::NAN
+                };
+
+                // ---- iteration i+1 ----
+                let idx1 = i + 1;
+                let ts1 = *ts_ptr.add(idx1);
+                let gid1 = ts1 / bucket_ms;
+                if gid1 != current_group_id {
+                    current_group_id = gid1;
+                    volume_sum = 0.0;
+                    vol_price_sum = 0.0;
+                }
+                let v1 = *vol_ptr.add(idx1);
+                let p1 = *pr_ptr.add(idx1);
+                volume_sum += v1;
+                vol_price_sum = p1.mul_add(v1, vol_price_sum);
+                *out_ptr.add(idx1) = if volume_sum > 0.0 {
+                    vol_price_sum / volume_sum
+                } else {
+                    f64::NAN
+                };
+
+                i += 2;
+            }
+
+            // Remainder
+            if unroll_end != n {
+                let ts = *ts_ptr.add(unroll_end);
+                let gid = ts / bucket_ms;
+                if gid != current_group_id {
+                    current_group_id = gid;
+                    volume_sum = 0.0;
+                    vol_price_sum = 0.0;
+                }
+                let v = *vol_ptr.add(unroll_end);
+                let p = *pr_ptr.add(unroll_end);
+                volume_sum += v;
+                vol_price_sum = p.mul_add(v, vol_price_sum);
+                *out_ptr.add(unroll_end) = if volume_sum > 0.0 {
+                    vol_price_sum / volume_sum
+                } else {
+                    f64::NAN
+                };
+            }
+
+            return Ok(());
+        }
+
+        // Month-based grouping: precise calendar bucketing per element
+        if unit_char == 'M' {
+            let mut i: usize = 0;
+            while i < n {
+                let ts = *ts_ptr.add(i);
+                let gid = match floor_to_month(ts, count) {
+                    Ok(g) => g,
+                    Err(_) => return Err(VwapError::MonthConversionError { ts_ms: ts }),
+                };
+                if gid != current_group_id {
+                    current_group_id = gid;
+                    volume_sum = 0.0;
+                    vol_price_sum = 0.0;
+                }
+                let v = *vol_ptr.add(i);
+                let p = *pr_ptr.add(i);
+                volume_sum += v;
+                vol_price_sum = p.mul_add(v, vol_price_sum);
+                *out_ptr.add(i) = if volume_sum > 0.0 {
+                    vol_price_sum / volume_sum
+                } else {
+                    f64::NAN
+                };
+                i += 1;
+            }
+            return Ok(());
+        }
+    }
+
+    Err(VwapError::UnsupportedAnchorUnit { unit_char })
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -770,6 +867,14 @@ fn vwap_batch_inner(
     }
     init_matrix_prefixes(&mut raw, cols, &warm);
 
+    // Shared precompute across rows: price*volume vector to halve inner-loop FLOPs
+    // Safe: computed once per batch and reused for all parameter rows.
+    let pv: Vec<f64> = prices
+        .iter()
+        .zip(volumes.iter())
+        .map(|(&p, &v)| p * v)
+        .collect();
+
     // ---------- 2. closure to fill one row in-place --------------------------
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let params = combos.get(row).unwrap();
@@ -783,7 +888,7 @@ fn vwap_batch_inner(
 
         match kern {
             Kernel::Scalar => {
-                vwap_row_scalar(timestamps, volumes, prices, count, unit_char, out_row)
+                vwap_row_scalar_pv(timestamps, volumes, &pv, count, unit_char, out_row)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 => vwap_row_avx2(timestamps, volumes, prices, count, unit_char, out_row),
@@ -857,6 +962,13 @@ fn vwap_batch_inner_into(
         return Err(VwapError::NoData);
     }
 
+    // Shared precompute across rows: price*volume vector
+    let pv: Vec<f64> = prices
+        .iter()
+        .zip(volumes.iter())
+        .map(|(&p, &v)| p * v)
+        .collect();
+
     // ---------- 2. closure to fill one row in-place --------------------------
     let do_row = |row: usize, dst: &mut [f64]| unsafe {
         let params = combos.get(row).unwrap();
@@ -869,7 +981,7 @@ fn vwap_batch_inner_into(
 
         match kern {
             Kernel::Scalar => {
-                vwap_row_scalar(timestamps, volumes, prices, count, unit_char, out_row)
+                vwap_row_scalar_pv(timestamps, volumes, &pv, count, unit_char, out_row)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 => vwap_row_avx2(timestamps, volumes, prices, count, unit_char, out_row),
@@ -971,6 +1083,107 @@ pub unsafe fn vwap_row_scalar(
     out: &mut [f64],
 ) {
     vwap_scalar(timestamps, volumes, prices, count, unit_char, out);
+}
+
+#[inline(always)]
+unsafe fn vwap_row_scalar_pv(
+    timestamps: &[i64],
+    volumes: &[f64],
+    pv: &[f64],
+    count: u32,
+    unit_char: char,
+    out: &mut [f64],
+) {
+    debug_assert_eq!(pv.len(), out.len(), "pv length must match out len");
+    // Re-implement the scalar loop but reuse precomputed pv[i] instead of price*volume
+    let n = out.len();
+    if n == 0 {
+        return;
+    }
+    let mut current_group_id: i64 = i64::MIN;
+    let mut volume_sum: f64 = 0.0;
+    let mut vol_price_sum: f64 = 0.0;
+
+    let ts_ptr = timestamps.as_ptr();
+    let vol_ptr = volumes.as_ptr();
+    let pv_ptr = pv.as_ptr();
+    let out_ptr = out.as_mut_ptr();
+
+    if unit_char == 'm' || unit_char == 'h' || unit_char == 'd' {
+        const MINUTE_MS: i64 = 60_000;
+        const HOUR_MS: i64 = 3_600_000;
+        const DAY_MS: i64 = 86_400_000;
+        let unit_ms: i64 = match unit_char { 'm' => MINUTE_MS, 'h' => HOUR_MS, _ => DAY_MS };
+        let bucket_ms: i64 = (count as i64) * unit_ms;
+
+        let mut i: usize = 0;
+        let unroll_end = n & !1usize;
+        while i < unroll_end {
+            let ts0 = *ts_ptr.add(i);
+            let gid0 = ts0 / bucket_ms;
+            if gid0 != current_group_id {
+                current_group_id = gid0;
+                volume_sum = 0.0;
+                vol_price_sum = 0.0;
+            }
+            let v0 = *vol_ptr.add(i);
+            let pv0 = *pv_ptr.add(i);
+            volume_sum += v0;
+            vol_price_sum += pv0;
+            *out_ptr.add(i) = if volume_sum > 0.0 { vol_price_sum / volume_sum } else { f64::NAN };
+
+            let idx1 = i + 1;
+            let ts1 = *ts_ptr.add(idx1);
+            let gid1 = ts1 / bucket_ms;
+            if gid1 != current_group_id {
+                current_group_id = gid1;
+                volume_sum = 0.0;
+                vol_price_sum = 0.0;
+            }
+            let v1 = *vol_ptr.add(idx1);
+            let pv1 = *pv_ptr.add(idx1);
+            volume_sum += v1;
+            vol_price_sum += pv1;
+            *out_ptr.add(idx1) = if volume_sum > 0.0 { vol_price_sum / volume_sum } else { f64::NAN };
+
+            i += 2;
+        }
+        if unroll_end != n {
+            let ts = *ts_ptr.add(unroll_end);
+            let gid = ts / bucket_ms;
+            if gid != current_group_id {
+                current_group_id = gid;
+                volume_sum = 0.0;
+                vol_price_sum = 0.0;
+            }
+            let v = *vol_ptr.add(unroll_end);
+            let pvx = *pv_ptr.add(unroll_end);
+            volume_sum += v;
+            vol_price_sum += pvx;
+            *out_ptr.add(unroll_end) = if volume_sum > 0.0 { vol_price_sum / volume_sum } else { f64::NAN };
+        }
+        return;
+    }
+
+    if unit_char == 'M' {
+        let mut i: usize = 0;
+        while i < n {
+            let ts = *ts_ptr.add(i);
+            let gid = match floor_to_month(ts, count) { Ok(g) => g, Err(_) => return };
+            if gid != current_group_id {
+                current_group_id = gid;
+                volume_sum = 0.0;
+                vol_price_sum = 0.0;
+            }
+            let v = *vol_ptr.add(i);
+            let pvx = *pv_ptr.add(i);
+            volume_sum += v;
+            vol_price_sum += pvx;
+            *out_ptr.add(i) = if volume_sum > 0.0 { vol_price_sum / volume_sum } else { f64::NAN };
+            i += 1;
+        }
+        return;
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]

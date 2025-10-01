@@ -12,9 +12,10 @@
 //! - **`Err(CorrelHlError)`** on various error conditions.
 //!
 //! ## Developer Status
-//! - **SIMD Kernels**: AVX2 is STUB, AVX512 has short/long variants but both are STUBS - fall back to scalar
+//! - **SIMD Kernels**: AVX2/AVX512 implemented to accelerate initial/rebuild reductions; slide remains scalar O(1).
 //! - **Streaming Performance**: O(1) - uses running sums for efficient incremental correlation calculation
-//! - **Memory Optimization**: GOOD - uses alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes for batch operations
+//! - **Batch**: Row-specific optimized variant via shared prefix sums over (h, h², l, l², h·l), segmenting on NaNs.
+//! - **Memory**: Uses alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes for warmup-friendly allocations
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
@@ -300,27 +301,21 @@ pub fn correl_hl_into_slice(
 
 #[inline]
 pub fn correl_hl_scalar(high: &[f64], low: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    let mut sum_h = 0.0;
-    let mut sum_h2 = 0.0;
-    let mut sum_l = 0.0;
-    let mut sum_l2 = 0.0;
-    let mut sum_hl = 0.0;
+    // Running sums over current window
+    let mut sum_h = 0.0_f64;
+    let mut sum_h2 = 0.0_f64;
+    let mut sum_l = 0.0_f64;
+    let mut sum_l2 = 0.0_f64;
+    let mut sum_hl = 0.0_f64;
 
-    let pf = period as f64;
+    let inv_pf = 1.0 / (period as f64);
 
     #[inline(always)]
-    fn corr_from_sums(
-        sum_h: f64,
-        sum_h2: f64,
-        sum_l: f64,
-        sum_l2: f64,
-        sum_hl: f64,
-        period: f64,
-    ) -> f64 {
-        let cov = sum_hl - (sum_h * sum_l / period);
-        let var_h = sum_h2 - (sum_h * sum_h / period);
-        let var_l = sum_l2 - (sum_l * sum_l / period);
-
+    fn corr_from_sums(sum_h: f64, sum_h2: f64, sum_l: f64, sum_l2: f64, sum_hl: f64, inv_pf: f64) -> f64 {
+        // Pearson r = cov / (std_x * std_y) with cov = E[xy] - E[x]E[y]
+        let cov = sum_hl - (sum_h * sum_l) * inv_pf;
+        let var_h = sum_h2 - (sum_h * sum_h) * inv_pf;
+        let var_l = sum_l2 - (sum_l * sum_l) * inv_pf;
         if var_h <= 0.0 || var_l <= 0.0 {
             0.0
         } else {
@@ -328,58 +323,217 @@ pub fn correl_hl_scalar(high: &[f64], low: &[f64], period: usize, first: usize, 
         }
     }
 
-    for i in first..(first + period) {
-        let h = high[i];
-        let l = low[i];
+    // Initialize first window [first, first+period)
+    let init_start = first;
+    let init_end = first + period;
+    let mut j = init_start;
+    // Unroll by 4 safely
+    while j + 4 <= init_end {
+        let h0 = high[j + 0];
+        let l0 = low[j + 0];
+        let h1 = high[j + 1];
+        let l1 = low[j + 1];
+        let h2 = high[j + 2];
+        let l2 = low[j + 2];
+        let h3 = high[j + 3];
+        let l3 = low[j + 3];
+
+        sum_h += h0 + h1 + h2 + h3;
+        sum_l += l0 + l1 + l2 + l3;
+        sum_h2 += h0 * h0 + h1 * h1 + h2 * h2 + h3 * h3;
+        sum_l2 += l0 * l0 + l1 * l1 + l2 * l2 + l3 * l3;
+        sum_hl += h0 * l0 + h1 * l1 + h2 * l2 + h3 * l3;
+        j += 4;
+    }
+    while j < init_end {
+        let h = high[j];
+        let l = low[j];
         sum_h += h;
-        sum_h2 += h * h;
         sum_l += l;
+        sum_h2 += h * h;
         sum_l2 += l * l;
         sum_hl += h * l;
+        j += 1;
     }
 
-    out[first + period - 1] = corr_from_sums(sum_h, sum_h2, sum_l, sum_l2, sum_hl, pf);
+    let warm = init_end - 1;
+    out[warm] = corr_from_sums(sum_h, sum_h2, sum_l, sum_l2, sum_hl, inv_pf);
 
-    for i in (first + period)..high.len() {
+    // Slide window
+    let n = high.len();
+    for i in init_end..n {
         let old_idx = i - period;
         let new_idx = i;
-
         let old_h = high[old_idx];
         let old_l = low[old_idx];
         let new_h = high[new_idx];
         let new_l = low[new_idx];
 
         if old_h.is_nan() || old_l.is_nan() || new_h.is_nan() || new_l.is_nan() {
+            // Rebuild current window [i+1-period, i+1)
+            let start = i + 1 - period;
+            let end = i + 1;
             sum_h = 0.0;
-            sum_h2 = 0.0;
             sum_l = 0.0;
+            sum_h2 = 0.0;
             sum_l2 = 0.0;
             sum_hl = 0.0;
-            for j in (i - period + 1)..=i {
-                let hh = high[j];
-                let ll = low[j];
-                sum_h += hh;
-                sum_h2 += hh * hh;
-                sum_l += ll;
-                sum_l2 += ll * ll;
-                sum_hl += hh * ll;
+            let mut k = start;
+            while k + 4 <= end {
+                let h0 = high[k + 0];
+                let l0 = low[k + 0];
+                let h1 = high[k + 1];
+                let l1 = low[k + 1];
+                let h2 = high[k + 2];
+                let l2 = low[k + 2];
+                let h3 = high[k + 3];
+                let l3 = low[k + 3];
+                sum_h += h0 + h1 + h2 + h3;
+                sum_l += l0 + l1 + l2 + l3;
+                sum_h2 += h0 * h0 + h1 * h1 + h2 * h2 + h3 * h3;
+                sum_l2 += l0 * l0 + l1 * l1 + l2 * l2 + l3 * l3;
+                sum_hl += h0 * l0 + h1 * l1 + h2 * l2 + h3 * l3;
+                k += 4;
+            }
+            while k < end {
+                let h = high[k];
+                let l = low[k];
+                sum_h += h;
+                sum_l += l;
+                sum_h2 += h * h;
+                sum_l2 += l * l;
+                sum_hl += h * l;
+                k += 1;
             }
         } else {
+            // O(1) update, use mul_add for hl to reduce rounding error
             sum_h += new_h - old_h;
-            sum_h2 += new_h * new_h - old_h * old_h;
             sum_l += new_l - old_l;
+            sum_h2 += new_h * new_h - old_h * old_h;
             sum_l2 += new_l * new_l - old_l * old_l;
-            sum_hl += new_h * new_l - old_h * old_l;
+            let old_hl = old_h * old_l;
+            sum_hl = new_h.mul_add(new_l, sum_hl - old_hl);
         }
 
-        out[i] = corr_from_sums(sum_h, sum_h2, sum_l, sum_l2, sum_hl, pf);
+        out[i] = corr_from_sums(sum_h, sum_h2, sum_l, sum_l2, sum_hl, inv_pf);
     }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn correl_hl_avx2(high: &[f64], low: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    correl_hl_scalar(high, low, period, first, out)
+    // AVX2 accelerates the initial and rebuild reductions; the O(1) slide stays scalar.
+    unsafe {
+        #[inline(always)]
+        unsafe fn hsum256_pd(v: __m256d) -> f64 {
+            let hi: __m128d = _mm256_extractf128_pd(v, 1);
+            let lo: __m128d = _mm256_castpd256_pd128(v);
+            let sum2 = _mm_add_pd(lo, hi);
+            let shuf = _mm_unpackhi_pd(sum2, sum2);
+            let sum1 = _mm_add_sd(sum2, shuf);
+            _mm_cvtsd_f64(sum1)
+        }
+
+        #[inline(always)]
+        unsafe fn sum_window_avx2(
+            high: &[f64],
+            low: &[f64],
+            start: usize,
+            end: usize, // exclusive
+        ) -> (f64, f64, f64, f64, f64) {
+            let mut v_h = _mm256_setzero_pd();
+            let mut v_l = _mm256_setzero_pd();
+            let mut v_h2 = _mm256_setzero_pd();
+            let mut v_l2 = _mm256_setzero_pd();
+            let mut v_hl = _mm256_setzero_pd();
+
+            let mut i = start;
+            let ptr_h = high.as_ptr();
+            let ptr_l = low.as_ptr();
+
+            while i + 4 <= end {
+                let mh = _mm256_loadu_pd(ptr_h.add(i));
+                let ml = _mm256_loadu_pd(ptr_l.add(i));
+                v_h = _mm256_add_pd(v_h, mh);
+                v_l = _mm256_add_pd(v_l, ml);
+                let mh2 = _mm256_mul_pd(mh, mh);
+                let ml2 = _mm256_mul_pd(ml, ml);
+                v_h2 = _mm256_add_pd(v_h2, mh2);
+                v_l2 = _mm256_add_pd(v_l2, ml2);
+                let mhl = _mm256_mul_pd(mh, ml);
+                v_hl = _mm256_add_pd(v_hl, mhl);
+                i += 4;
+            }
+
+            let mut sum_h = hsum256_pd(v_h);
+            let mut sum_l = hsum256_pd(v_l);
+            let mut sum_h2 = hsum256_pd(v_h2);
+            let mut sum_l2 = hsum256_pd(v_l2);
+            let mut sum_hl = hsum256_pd(v_hl);
+
+            while i < end {
+                let h = *high.get_unchecked(i);
+                let l = *low.get_unchecked(i);
+                sum_h += h;
+                sum_l += l;
+                sum_h2 += h * h;
+                sum_l2 += l * l;
+                sum_hl += h * l;
+                i += 1;
+            }
+            (sum_h, sum_h2, sum_l, sum_l2, sum_hl)
+        }
+
+        #[inline(always)]
+        fn corr_from_sums(sum_h: f64, sum_h2: f64, sum_l: f64, sum_l2: f64, sum_hl: f64, inv_pf: f64) -> f64 {
+            let cov = sum_hl - (sum_h * sum_l) * inv_pf;
+            let varh = sum_h2 - (sum_h * sum_h) * inv_pf;
+            let varl = sum_l2 - (sum_l * sum_l) * inv_pf;
+            if varh <= 0.0 || varl <= 0.0 {
+                0.0
+            } else {
+                cov / (varh.sqrt() * varl.sqrt())
+            }
+        }
+
+        let inv_pf = 1.0 / (period as f64);
+        let init_start = first;
+        let init_end = first + period;
+
+        let (mut sum_h, mut sum_h2, mut sum_l, mut sum_l2, mut sum_hl) =
+            sum_window_avx2(high, low, init_start, init_end);
+
+        let warm = init_end - 1;
+        out[warm] = corr_from_sums(sum_h, sum_h2, sum_l, sum_l2, sum_hl, inv_pf);
+
+        let n = high.len();
+        for i in init_end..n {
+            let old_idx = i - period;
+            let new_idx = i;
+            let old_h = *high.get_unchecked(old_idx);
+            let old_l = *low.get_unchecked(old_idx);
+            let new_h = *high.get_unchecked(new_idx);
+            let new_l = *low.get_unchecked(new_idx);
+
+            if old_h.is_nan() || old_l.is_nan() || new_h.is_nan() || new_l.is_nan() {
+                let (sh, sh2, sl, sl2, shl) = sum_window_avx2(high, low, i + 1 - period, i + 1);
+                sum_h = sh;
+                sum_h2 = sh2;
+                sum_l = sl;
+                sum_l2 = sl2;
+                sum_hl = shl;
+            } else {
+                sum_h += new_h - old_h;
+                sum_l += new_l - old_l;
+                sum_h2 += new_h * new_h - old_h * old_h;
+                sum_l2 += new_l * new_l - old_l * old_l;
+                let old_hl = old_h * old_l;
+                sum_hl = new_h.mul_add(new_l, sum_hl - old_hl);
+            }
+
+            out[i] = corr_from_sums(sum_h, sum_h2, sum_l, sum_l2, sum_hl, inv_pf);
+        }
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -401,7 +555,8 @@ pub unsafe fn correl_hl_avx512_short(
     first: usize,
     out: &mut [f64],
 ) {
-    correl_hl_scalar(high, low, period, first, out)
+    // AVX512 short reuses the long kernel body.
+    correl_hl_avx512_long(high, low, period, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -413,7 +568,125 @@ pub unsafe fn correl_hl_avx512_long(
     first: usize,
     out: &mut [f64],
 ) {
-    correl_hl_scalar(high, low, period, first, out)
+    #[inline(always)]
+    unsafe fn hsum256_pd(v: __m256d) -> f64 {
+        let hi: __m128d = _mm256_extractf128_pd(v, 1);
+        let lo: __m128d = _mm256_castpd256_pd128(v);
+        let sum2 = _mm_add_pd(lo, hi);
+        let shuf = _mm_unpackhi_pd(sum2, sum2);
+        let sum1 = _mm_add_sd(sum2, shuf);
+        _mm_cvtsd_f64(sum1)
+    }
+
+    #[inline(always)]
+    unsafe fn hsum512_pd(v: __m512d) -> f64 {
+        let lo256: __m256d = _mm512_castpd512_pd256(v);
+        let hi256: __m256d = _mm512_extractf64x4_pd(v, 1);
+        hsum256_pd(_mm256_add_pd(lo256, hi256))
+    }
+
+    #[inline(always)]
+    unsafe fn sum_window_avx512(
+        high: &[f64],
+        low: &[f64],
+        start: usize,
+        end: usize, // exclusive
+    ) -> (f64, f64, f64, f64, f64) {
+        let mut v_h = _mm512_setzero_pd();
+        let mut v_l = _mm512_setzero_pd();
+        let mut v_h2 = _mm512_setzero_pd();
+        let mut v_l2 = _mm512_setzero_pd();
+        let mut v_hl = _mm512_setzero_pd();
+
+        let ptr_h = high.as_ptr();
+        let ptr_l = low.as_ptr();
+
+        let mut i = start;
+        while i + 8 <= end {
+            let mh = _mm512_loadu_pd(ptr_h.add(i));
+            let ml = _mm512_loadu_pd(ptr_l.add(i));
+            v_h = _mm512_add_pd(v_h, mh);
+            v_l = _mm512_add_pd(v_l, ml);
+            let mh2 = _mm512_mul_pd(mh, mh);
+            let ml2 = _mm512_mul_pd(ml, ml);
+            v_h2 = _mm512_add_pd(v_h2, mh2);
+            v_l2 = _mm512_add_pd(v_l2, ml2);
+            let mhl = _mm512_mul_pd(mh, ml);
+            v_hl = _mm512_add_pd(v_hl, mhl);
+            i += 8;
+        }
+
+        // masked tail
+        let rem = (end - i) as i32; // 0..7
+        if rem != 0 {
+            let mask: __mmask8 = ((1u16 << rem) - 1) as __mmask8;
+            let mh = _mm512_maskz_loadu_pd(mask, ptr_h.add(i));
+            let ml = _mm512_maskz_loadu_pd(mask, ptr_l.add(i));
+            v_h = _mm512_add_pd(v_h, mh);
+            v_l = _mm512_add_pd(v_l, ml);
+            v_h2 = _mm512_add_pd(v_h2, _mm512_mul_pd(mh, mh));
+            v_l2 = _mm512_add_pd(v_l2, _mm512_mul_pd(ml, ml));
+            v_hl = _mm512_add_pd(v_hl, _mm512_mul_pd(mh, ml));
+        }
+
+        (
+            hsum512_pd(v_h),
+            hsum512_pd(v_h2),
+            hsum512_pd(v_l),
+            hsum512_pd(v_l2),
+            hsum512_pd(v_hl),
+        )
+    }
+
+    #[inline(always)]
+    fn corr_from_sums(sum_h: f64, sum_h2: f64, sum_l: f64, sum_l2: f64, sum_hl: f64, inv_pf: f64) -> f64 {
+        let cov = sum_hl - (sum_h * sum_l) * inv_pf;
+        let varh = sum_h2 - (sum_h * sum_h) * inv_pf;
+        let varl = sum_l2 - (sum_l * sum_l) * inv_pf;
+        if varh <= 0.0 || varl <= 0.0 {
+            0.0
+        } else {
+            cov / (varh.sqrt() * varl.sqrt())
+        }
+    }
+
+    let inv_pf = 1.0 / (period as f64);
+    let init_start = first;
+    let init_end = first + period;
+
+    let (mut sum_h, mut sum_h2, mut sum_l, mut sum_l2, mut sum_hl) =
+        sum_window_avx512(high, low, init_start, init_end);
+
+    let warm = init_end - 1;
+    out[warm] = corr_from_sums(sum_h, sum_h2, sum_l, sum_l2, sum_hl, inv_pf);
+
+    let n = high.len();
+    for i in init_end..n {
+        let old_idx = i - period;
+        let new_idx = i;
+        let old_h = *high.get_unchecked(old_idx);
+        let old_l = *low.get_unchecked(old_idx);
+        let new_h = *high.get_unchecked(new_idx);
+        let new_l = *low.get_unchecked(new_idx);
+
+        if old_h.is_nan() || old_l.is_nan() || new_h.is_nan() || new_l.is_nan() {
+            let (sh, sh2, sl, sl2, shl) = sum_window_avx512(high, low, i + 1 - period, i + 1);
+            sum_h = sh;
+            sum_h2 = sh2;
+            sum_l = sl;
+            sum_l2 = sl2;
+            sum_hl = shl;
+        } else {
+            sum_h += new_h - old_h;
+            sum_l += new_l - old_l;
+            sum_h2 += new_h * new_h - old_h * old_h;
+            sum_l2 += new_l * new_l - old_l * old_l;
+            let old_hl = old_h * old_l;
+            sum_hl = new_h.mul_add(new_l, sum_hl - old_hl);
+        }
+
+        out[i] = corr_from_sums(sum_h, sum_h2, sum_l, sum_l2, sum_hl, inv_pf);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -730,15 +1003,60 @@ fn correl_hl_batch_inner(
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
-    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-        let period = combos[row].period.unwrap();
-        match kern {
-            Kernel::Scalar => correl_hl_row_scalar(high, low, first, period, out_row),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => correl_hl_row_avx2(high, low, first, period, out_row),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => correl_hl_row_avx512(high, low, first, period, out_row),
-            _ => unreachable!(),
+    // Precompute prefix sums once across series
+    let n = high.len();
+    let mut ps_h = vec![0.0f64; n + 1];
+    let mut ps_h2 = vec![0.0f64; n + 1];
+    let mut ps_l = vec![0.0f64; n + 1];
+    let mut ps_l2 = vec![0.0f64; n + 1];
+    let mut ps_hl = vec![0.0f64; n + 1];
+    let mut ps_nan = vec![0i32; n + 1];
+    for i in 0..n {
+        let h = high[i];
+        let l = low[i];
+        let (ph, ph2, pl, pl2, phl) = (ps_h[i], ps_h2[i], ps_l[i], ps_l2[i], ps_hl[i]);
+        if h.is_nan() || l.is_nan() {
+            ps_h[i + 1] = ph;
+            ps_h2[i + 1] = ph2;
+            ps_l[i + 1] = pl;
+            ps_l2[i + 1] = pl2;
+            ps_hl[i + 1] = phl;
+            ps_nan[i + 1] = ps_nan[i] + 1;
+        } else {
+            ps_h[i + 1] = ph + h;
+            ps_h2[i + 1] = ph2 + h * h;
+            ps_l[i + 1] = pl + l;
+            ps_l2[i + 1] = pl2 + l * l;
+            ps_hl[i + 1] = phl + h * l;
+            ps_nan[i + 1] = ps_nan[i];
+        }
+    }
+
+    let do_row = |row: usize, out_row: &mut [f64]| {
+        let p = combos[row].period.unwrap();
+        let inv_pf = 1.0 / (p as f64);
+        let warm = first + p - 1;
+        for i in warm..n {
+            let end = i + 1;
+            let start = end - p;
+            let nan_w = ps_nan[end] - ps_nan[start];
+            if nan_w != 0 {
+                out_row[i] = f64::NAN;
+            } else {
+                let sum_h = ps_h[end] - ps_h[start];
+                let sum_l = ps_l[end] - ps_l[start];
+                let sum_h2 = ps_h2[end] - ps_h2[start];
+                let sum_l2 = ps_l2[end] - ps_l2[start];
+                let sum_hl = ps_hl[end] - ps_hl[start];
+                let cov = sum_hl - (sum_h * sum_l) * inv_pf;
+                let var_h = sum_h2 - (sum_h * sum_h) * inv_pf;
+                let var_l = sum_l2 - (sum_l * sum_l) * inv_pf;
+                if var_h <= 0.0 || var_l <= 0.0 {
+                    out_row[i] = 0.0;
+                } else {
+                    out_row[i] = cov / (var_h.sqrt() * var_l.sqrt());
+                }
+            }
         }
     };
 
@@ -824,19 +1142,66 @@ fn correl_hl_batch_inner_into(
     };
     init_matrix_prefixes(out_mu, cols, &warm);
 
+    // Precompute prefix sums across the entire series for h, h^2, l, l^2, h*l
+    // and a prefix count of indices where either high or low is NaN.
+    let n = high.len();
+    let mut ps_h = vec![0.0f64; n + 1];
+    let mut ps_h2 = vec![0.0f64; n + 1];
+    let mut ps_l = vec![0.0f64; n + 1];
+    let mut ps_l2 = vec![0.0f64; n + 1];
+    let mut ps_hl = vec![0.0f64; n + 1];
+    let mut ps_nan = vec![0i32; n + 1];
+    for i in 0..n {
+        let h = high[i];
+        let l = low[i];
+        let (prev_h, prev_h2, prev_l, prev_l2, prev_hl) = (ps_h[i], ps_h2[i], ps_l[i], ps_l2[i], ps_hl[i]);
+        if h.is_nan() || l.is_nan() {
+            ps_h[i + 1] = prev_h;
+            ps_h2[i + 1] = prev_h2;
+            ps_l[i + 1] = prev_l;
+            ps_l2[i + 1] = prev_l2;
+            ps_hl[i + 1] = prev_hl;
+            ps_nan[i + 1] = ps_nan[i] + 1;
+        } else {
+            ps_h[i + 1] = prev_h + h;
+            ps_h2[i + 1] = prev_h2 + h * h;
+            ps_l[i + 1] = prev_l + l;
+            ps_l2[i + 1] = prev_l2 + l * l;
+            ps_hl[i + 1] = prev_hl + h * l;
+            ps_nan[i + 1] = ps_nan[i];
+        }
+    }
+
     // Row compute writes valid cells; no need to touch warm prefix again.
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| {
-        let period = combos[row].period.unwrap();
+        let p = combos[row].period.unwrap();
+        let inv_pf = 1.0 / (p as f64);
         let dst: &mut [f64] = unsafe {
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len())
         };
-        match kern {
-            Kernel::Scalar => unsafe { correl_hl_row_scalar(high, low, first, period, dst) },
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => unsafe { correl_hl_row_avx2(high, low, first, period, dst) },
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => unsafe { correl_hl_row_avx512(high, low, first, period, dst) },
-            _ => unsafe { correl_hl_row_scalar(high, low, first, period, dst) },
+        // Compute from warm index onward using prefix sums; preserve NaNs for windows crossing any NaN.
+        let warm = first + p - 1;
+        for i in warm..n {
+            let end = i + 1;
+            let start = end - p;
+            let nan_w = ps_nan[end] - ps_nan[start];
+            if nan_w != 0 {
+                dst[i] = f64::NAN;
+            } else {
+                let sum_h = ps_h[end] - ps_h[start];
+                let sum_l = ps_l[end] - ps_l[start];
+                let sum_h2 = ps_h2[end] - ps_h2[start];
+                let sum_l2 = ps_l2[end] - ps_l2[start];
+                let sum_hl = ps_hl[end] - ps_hl[start];
+                let cov = sum_hl - (sum_h * sum_l) * inv_pf;
+                let var_h = sum_h2 - (sum_h * sum_h) * inv_pf;
+                let var_l = sum_l2 - (sum_l * sum_l) * inv_pf;
+                if var_h <= 0.0 || var_l <= 0.0 {
+                    dst[i] = 0.0;
+                } else {
+                    dst[i] = cov / (var_h.sqrt() * var_l.sqrt());
+                }
+            }
         }
     };
 

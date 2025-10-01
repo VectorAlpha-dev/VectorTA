@@ -25,11 +25,13 @@
 //!   - AVX2: STUB (calls scalar implementation)
 //!   - AVX512: STUB (calls scalar implementation)
 //!   - Recursive nature of filter makes SIMD optimization challenging
+//!   - Rationale: second-order IIR has output dependencies; naive lane-parallel SIMD across time offers no real parallelism without algorithmic changes. Scalar kept as reference and optimized.
 //! - **Streaming Performance**: O(1) - efficient buffered state updates
 //! - **Memory Optimization**: PARTIAL
 //!   - Batch operations: YES - uses make_uninit_matrix and init_matrix_prefixes
 //!   - Single operations: NO - could benefit from alloc_with_nan_prefix
 //! - **Batch Operations**: Fully supported with parallel processing
+//!   - Row-specific batch optimization: High-pass stage is deduplicated across rows sharing the same hp_period.
 //! - **TODO**:
 //!   - Implement actual SIMD kernels (may require algorithm restructuring)
 //!   - Add alloc_with_nan_prefix for single indicator calculations
@@ -268,6 +270,8 @@ fn bandpass_prepare<'a>(
         return Err(BandPassError::TriggerPeriodTooSmall { trigger_period });
     }
 
+    // Use standard runtime selection so CPUs with AVX2/AVX512 can pick those variants.
+    // Our AVX stubs route to an unchecked scalar kernel (bounds-check-free), which can be faster.
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
         k => k,
@@ -304,8 +308,8 @@ pub fn bandpass_with_kernel(
     let gamma = (2.0 * std::f64::consts::PI * bandwidth / period as f64).cos();
     let alpha = 1.0 / gamma - ((1.0 / (gamma * gamma)) - 1.0).sqrt();
 
-    // Allocate bp - will be initialized by bandpass_scalar
-    let mut bp = vec![f64::NAN; len];
+    // Allocate bp with NaN prefix only; remainder left uninitialized to reduce writes
+    let mut bp = alloc_with_nan_prefix(len, warmup_bp);
 
     // compute bp
     unsafe {
@@ -328,8 +332,8 @@ pub fn bandpass_with_kernel(
         *v = f64::NAN;
     }
 
-    // bp_normalized
-    let mut bp_normalized = vec![f64::NAN; len];
+    // bp_normalized with NaN prefix only
+    let mut bp_normalized = alloc_with_nan_prefix(len, warmup_bp);
 
     // normalize only after warmup_bp
     let k = 0.991;
@@ -347,31 +351,33 @@ pub fn bandpass_with_kernel(
         };
     }
 
-    // trigger on normalized - only process valid portion to avoid compounding warmup
-    let mut trigger = vec![f64::NAN; len];
+    // trigger on normalized - only process valid portion (zero-copy into suffix)
+    let mut trigger = alloc_with_nan_prefix(len, warmup_bp);
     if warmup_bp < len {
         let mut trigger_params = HighPassParams::default();
         trigger_params.period = Some(trigger_period);
-        let trigger_input = HighPassInput::from_slice(&bp_normalized[warmup_bp..], trigger_params);
-        let trigger_result = highpass(&trigger_input)?;
-        // Copy trigger values back, accounting for offset
-        trigger[warmup_bp..].copy_from_slice(&trigger_result.values);
+        let trig_inp = HighPassInput::from_slice(&bp_normalized[warmup_bp..], trigger_params);
+        crate::indicators::moving_averages::highpass::highpass_into_slice(
+            &mut trigger[warmup_bp..],
+            &trig_inp,
+            chosen,
+        )?;
     }
 
-    // Signal is calculated for all indices, but NaN where inputs are NaN
-    let mut signal = vec![f64::NAN; len];
-    for i in 0..len {
+    // Signal: allocate with warm prefix and fill only valid suffix
+    let first_trig = trigger.iter().position(|x| !x.is_nan()).unwrap_or(len);
+    let warm_sig = warmup_bp.max(first_trig);
+    let mut signal = alloc_with_nan_prefix(len, warm_sig);
+    for i in warm_sig..len {
         let bn = bp_normalized[i];
         let tr = trigger[i];
-        if !bn.is_nan() && !tr.is_nan() {
-            if bn < tr {
-                signal[i] = 1.0;
-            } else if bn > tr {
-                signal[i] = -1.0;
-            } else {
-                signal[i] = 0.0;
-            }
-        }
+        signal[i] = if bn < tr {
+            1.0
+        } else if bn > tr {
+            -1.0
+        } else {
+            0.0
+        };
     }
 
     Ok(BandPassOutput {
@@ -450,19 +456,20 @@ pub fn bandpass_into_slice(
         bpn_dst[i] = if peak != 0.0 { v / peak } else { 0.0 };
     }
 
-    // trigger into trig_dst via highpass - only process valid portion
+    // trigger into trig_dst via highpass - only process valid portion (zero-copy)
     for v in trig_dst.iter_mut() {
         *v = f64::NAN;
     }
     if warm_bp < len {
         let mut trigger_params = HighPassParams::default();
         trigger_params.period = Some(trigger_period);
-        let trig_vec = highpass(&HighPassInput::from_slice(
-            &bpn_dst[warm_bp..],
-            trigger_params,
-        ))?
-        .values;
-        trig_dst[warm_bp..].copy_from_slice(&trig_vec);
+        let trig_inp = HighPassInput::from_slice(&bpn_dst[warm_bp..], trigger_params);
+        // Reuse the same kernel family selection for consistency
+        crate::indicators::moving_averages::highpass::highpass_into_slice(
+            &mut trig_dst[warm_bp..],
+            &trig_inp,
+            chosen,
+        )?;
     }
 
     // warm for signal
@@ -488,46 +495,115 @@ pub fn bandpass_into_slice(
 
 #[inline(always)]
 pub fn bandpass_scalar(hp: &[f64], period: usize, alpha: f64, beta: f64, out: &mut [f64]) {
+    // Safe, FMA‑friendly, loop‑unrolled scalar kernel
+    //
+    // Recurrence:
+    //   out[i] = a*(hp[i] - hp[i-2]) + c*out[i-1] + d*out[i-2]
+    // where a = 0.5*(1 - alpha), c = beta*(1 + alpha), d = -alpha.
+    //
+    // Notes:
+    // - Keeps scalar path safe (no unsafe/raw pointers).
+    // - Hoists invariants and uses mul_add to enable FMA fusion.
+    // - Unrolls by 4, then 2, then 1 to reduce loop overhead.
     let len = hp.len();
-    if len >= 2 {
-        // Initialize the first two values from hp for the recursive calculation
-        if len > 0 {
-            out[0] = hp[0];
-        }
-        if len > 1 {
-            out[1] = hp[1];
-        }
+    if len == 0 {
+        return;
+    }
 
-        for i in 2..len {
-            out[i] = 0.5 * (1.0 - alpha) * hp[i] - 0.5 * (1.0 - alpha) * hp[i - 2]
-                + beta * (1.0 + alpha) * out[i - 1]
-                - alpha * out[i - 2];
-        }
+    // Seed preserves existing semantics
+    out[0] = hp[0];
+    if len == 1 {
+        return;
+    }
+    out[1] = hp[1];
+    if len == 2 {
+        return;
+    }
+
+    // Hoisted coefficients
+    let a = 0.5 * (1.0 - alpha);
+    let c = beta * (1.0 + alpha);
+    let d = -alpha;
+
+    // Running state of previous outputs
+    let mut y_im2 = out[0];
+    let mut y_im1 = out[1];
+
+    // Main unrolled loop by 4
+    let mut i = 2usize;
+    while i + 3 < len {
+        // i
+        let delta0 = hp[i] - hp[i - 2];
+        let y0 = d.mul_add(y_im2, c.mul_add(y_im1, a * delta0));
+        out[i] = y0;
+
+        // i+1
+        let delta1 = hp[i + 1] - hp[i - 1];
+        let y1 = d.mul_add(y_im1, c.mul_add(y0, a * delta1));
+        out[i + 1] = y1;
+
+        // i+2
+        let delta2 = hp[i + 2] - hp[i];
+        let y2 = d.mul_add(y0, c.mul_add(y1, a * delta2));
+        out[i + 2] = y2;
+
+        // i+3
+        let delta3 = hp[i + 3] - hp[i + 1];
+        let y3 = d.mul_add(y1, c.mul_add(y2, a * delta3));
+        out[i + 3] = y3;
+
+        // advance state
+        y_im2 = y2;
+        y_im1 = y3;
+        i += 4;
+    }
+
+    // Remainder by 2
+    while i + 1 < len {
+        let delta0 = hp[i] - hp[i - 2];
+        let y0 = d.mul_add(y_im2, c.mul_add(y_im1, a * delta0));
+        out[i] = y0;
+
+        let delta1 = hp[i + 1] - hp[i - 1];
+        let y1 = d.mul_add(y_im1, c.mul_add(y0, a * delta1));
+        out[i + 1] = y1;
+
+        y_im2 = y0;
+        y_im1 = y1;
+        i += 2;
+    }
+
+    // Tail 1
+    if i < len {
+        let delta = hp[i] - hp[i - 2];
+        out[i] = d.mul_add(y_im2, c.mul_add(y_im1, a * delta));
     }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub fn bandpass_avx2(hp: &[f64], period: usize, alpha: f64, beta: f64, out: &mut [f64]) {
-    bandpass_scalar(hp, period, alpha, beta, out)
+    // Unsafe, bounds-check-free variant using raw pointers and mul_add.
+    // This keeps the exact scalar recurrence but removes index checks.
+    unsafe { bandpass_scalar_unchecked(hp, alpha, beta, out) }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub fn bandpass_avx512(hp: &[f64], period: usize, alpha: f64, beta: f64, out: &mut [f64]) {
-    bandpass_scalar(hp, period, alpha, beta, out)
+    unsafe { bandpass_scalar_unchecked(hp, alpha, beta, out) }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub fn bandpass_avx512_short(hp: &[f64], period: usize, alpha: f64, beta: f64, out: &mut [f64]) {
-    bandpass_scalar(hp, period, alpha, beta, out)
+    unsafe { bandpass_scalar_unchecked(hp, alpha, beta, out) }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub fn bandpass_avx512_long(hp: &[f64], period: usize, alpha: f64, beta: f64, out: &mut [f64]) {
-    bandpass_scalar(hp, period, alpha, beta, out)
+    unsafe { bandpass_scalar_unchecked(hp, alpha, beta, out) }
 }
 
 #[derive(Debug, Clone)]
@@ -946,6 +1022,41 @@ fn bandpass_batch_inner_into(
         _ => Kernel::Scalar,
     };
 
+    // Precompute per-row metadata and deduplicate HP computations across rows
+    struct RowMeta {
+        period: usize,
+        bandwidth: f64,
+        hp_p: usize,
+        trig_p: usize,
+        ksel: Kernel,
+    }
+
+    let mut metas = Vec::with_capacity(rows);
+    for &p in combos.iter() {
+        let period = p.period.unwrap();
+        let bandwidth = p.bandwidth.unwrap();
+        let (_d, _len, _per, _bw, hp_p, trig_p, ksel) =
+            bandpass_prepare(&BandPassInput::from_slice(data, p), simd)?;
+        metas.push(RowMeta {
+            period,
+            bandwidth,
+            hp_p,
+            trig_p,
+            ksel,
+        });
+    }
+
+    use std::collections::HashMap;
+    let mut hp_cache: HashMap<usize, Vec<f64>> = HashMap::new();
+    for meta in metas.iter() {
+        if !hp_cache.contains_key(&meta.hp_p) {
+            let mut hp_params = HighPassParams::default();
+            hp_params.period = Some(meta.hp_p);
+            let hp = highpass(&HighPassInput::from_slice(data, hp_params))?.values;
+            hp_cache.insert(meta.hp_p, hp);
+        }
+    }
+
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -961,9 +1072,9 @@ fn bandpass_batch_inner_into(
             (0..rows)
                 .into_par_iter()
                 .try_for_each(|row| -> Result<(), BandPassError> {
-                    let p = combos[row];
-                    let period = p.period.unwrap();
-                    let bandwidth = p.bandwidth.unwrap();
+                    let m = &metas[row];
+                    let period = m.period;
+                    let bandwidth = m.bandwidth;
 
                     // Per-row slices using raw pointers
                     let bp_r = unsafe {
@@ -990,15 +1101,9 @@ fn bandpass_batch_inner_into(
                             cols,
                         )
                     };
-
-                    // Prepare (re-validate once)
-                    let (_d, _len, _per, _bw, hp_p, trig_p, ksel) =
-                        bandpass_prepare(&BandPassInput::from_slice(data, p), simd)?;
-
-                    // Workspace HP
-                    let mut hp_params = HighPassParams::default();
-                    hp_params.period = Some(hp_p);
-                    let hp = highpass(&HighPassInput::from_slice(data, hp_params))?.values;
+                    let trig_p = m.trig_p;
+                    let ksel = m.ksel;
+                    let hp = hp_cache.get(&m.hp_p).expect("hp cache missing");
 
                     // Warmups (consistent with bandpass_with_kernel)
                     let first_valid_hp = hp.iter().position(|&x| !x.is_nan()).unwrap_or(0);
@@ -1045,10 +1150,12 @@ fn bandpass_batch_inner_into(
                     if warm_bp < cols {
                         let mut trig_params = HighPassParams::default();
                         trig_params.period = Some(trig_p);
-                        let trig_vec =
-                            highpass(&HighPassInput::from_slice(&bpn_r[warm_bp..], trig_params))?
-                                .values;
-                        trg_r[warm_bp..].copy_from_slice(&trig_vec);
+                        let trig_inp = HighPassInput::from_slice(&bpn_r[warm_bp..], trig_params);
+                        crate::indicators::moving_averages::highpass::highpass_into_slice(
+                            &mut trg_r[warm_bp..],
+                            &trig_inp,
+                            ksel,
+                        )?;
                     }
 
                     // signal
@@ -1080,24 +1187,18 @@ fn bandpass_batch_inner_into(
         #[cfg(target_arch = "wasm32")]
         {
             for row in 0..rows {
-                let p = combos[row];
-                let period = p.period.unwrap();
-                let bandwidth = p.bandwidth.unwrap();
+                let m = &metas[row];
+                let period = m.period;
+                let bandwidth = m.bandwidth;
 
                 // Per-row slices
                 let bp_r = &mut bp_out[row * cols..(row + 1) * cols];
                 let bpn_r = &mut bpn_out[row * cols..(row + 1) * cols];
                 let sig_r = &mut sig_out[row * cols..(row + 1) * cols];
                 let trg_r = &mut trg_out[row * cols..(row + 1) * cols];
-
-                // Prepare (re-validate once)
-                let (_d, _len, _per, _bw, hp_p, trig_p, ksel) =
-                    bandpass_prepare(&BandPassInput::from_slice(data, p), simd)?;
-
-                // Workspace HP
-                let mut hp_params = HighPassParams::default();
-                hp_params.period = Some(hp_p);
-                let hp = highpass(&HighPassInput::from_slice(data, hp_params))?.values;
+                let trig_p = m.trig_p;
+                let ksel = m.ksel;
+                let hp = hp_cache.get(&m.hp_p).expect("hp cache missing");
 
                 // Warmups (consistent with bandpass_with_kernel)
                 let first_valid_hp = hp.iter().position(|&x| !x.is_nan()).unwrap_or(0);
@@ -1144,10 +1245,12 @@ fn bandpass_batch_inner_into(
                 if warm_bp < cols {
                     let mut trig_params = HighPassParams::default();
                     trig_params.period = Some(trig_p);
-                    let trig_vec =
-                        highpass(&HighPassInput::from_slice(&bpn_r[warm_bp..], trig_params))?
-                            .values;
-                    trg_r[warm_bp..].copy_from_slice(&trig_vec);
+                    let trig_inp = HighPassInput::from_slice(&bpn_r[warm_bp..], trig_params);
+                    crate::indicators::moving_averages::highpass::highpass_into_slice(
+                        &mut trg_r[warm_bp..],
+                        &trig_inp,
+                        ksel,
+                    )?;
                 }
 
                 // signal
@@ -1281,13 +1384,13 @@ pub fn bandpass_row_scalar(hp: &[f64], period: usize, alpha: f64, beta: f64, out
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub fn bandpass_row_avx2(hp: &[f64], period: usize, alpha: f64, beta: f64, out: &mut [f64]) {
-    bandpass_scalar(hp, period, alpha, beta, out)
+    unsafe { bandpass_scalar_unchecked(hp, alpha, beta, out) }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub fn bandpass_row_avx512(hp: &[f64], period: usize, alpha: f64, beta: f64, out: &mut [f64]) {
-    bandpass_scalar(hp, period, alpha, beta, out)
+    unsafe { bandpass_scalar_unchecked(hp, alpha, beta, out) }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1299,13 +1402,86 @@ pub fn bandpass_row_avx512_short(
     beta: f64,
     out: &mut [f64],
 ) {
-    bandpass_scalar(hp, period, alpha, beta, out)
+    unsafe { bandpass_scalar_unchecked(hp, alpha, beta, out) }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub fn bandpass_row_avx512_long(hp: &[f64], period: usize, alpha: f64, beta: f64, out: &mut [f64]) {
-    bandpass_scalar(hp, period, alpha, beta, out)
+    unsafe { bandpass_scalar_unchecked(hp, alpha, beta, out) }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn bandpass_scalar_unchecked(hp: &[f64], alpha: f64, beta: f64, out: &mut [f64]) {
+    debug_assert!(out.len() >= hp.len());
+    let len = hp.len();
+    if len == 0 {
+        return;
+    }
+
+    let out_ptr = out.as_mut_ptr();
+    let hp_ptr = hp.as_ptr();
+
+    // Seed
+    *out_ptr.add(0) = *hp_ptr.add(0);
+    if len == 1 {
+        return;
+    }
+    *out_ptr.add(1) = *hp_ptr.add(1);
+    if len == 2 {
+        return;
+    }
+
+    let a = 0.5 * (1.0 - alpha);
+    let c = beta * (1.0 + alpha);
+    let d = -alpha;
+
+    let mut y_im2 = *out_ptr.add(0);
+    let mut y_im1 = *out_ptr.add(1);
+
+    let mut i = 2usize;
+    while i + 3 < len {
+        let delta0 = *hp_ptr.add(i) - *hp_ptr.add(i - 2);
+        let y0 = d.mul_add(y_im2, c.mul_add(y_im1, a * delta0));
+        *out_ptr.add(i) = y0;
+
+        let delta1 = *hp_ptr.add(i + 1) - *hp_ptr.add(i - 1);
+        let y1 = d.mul_add(y_im1, c.mul_add(y0, a * delta1));
+        *out_ptr.add(i + 1) = y1;
+
+        let delta2 = *hp_ptr.add(i + 2) - *hp_ptr.add(i);
+        let y2 = d.mul_add(y0, c.mul_add(y1, a * delta2));
+        *out_ptr.add(i + 2) = y2;
+
+        let delta3 = *hp_ptr.add(i + 3) - *hp_ptr.add(i + 1);
+        let y3 = d.mul_add(y1, c.mul_add(y2, a * delta3));
+        *out_ptr.add(i + 3) = y3;
+
+        y_im2 = y2;
+        y_im1 = y3;
+        i += 4;
+    }
+
+    while i + 1 < len {
+        let delta0 = *hp_ptr.add(i) - *hp_ptr.add(i - 2);
+        let y0 = d.mul_add(y_im2, c.mul_add(y_im1, a * delta0));
+        *out_ptr.add(i) = y0;
+
+        let delta1 = *hp_ptr.add(i + 1) - *hp_ptr.add(i - 1);
+        let y1 = d.mul_add(y_im1, c.mul_add(y0, a * delta1));
+        *out_ptr.add(i + 1) = y1;
+
+        y_im2 = y0;
+        y_im1 = y1;
+        i += 2;
+    }
+
+    if i < len {
+        let delta = *hp_ptr.add(i) - *hp_ptr.add(i - 2);
+        let y = d.mul_add(y_im2, c.mul_add(y_im1, a * delta));
+        *out_ptr.add(i) = y;
+    }
 }
 
 #[inline(always)]

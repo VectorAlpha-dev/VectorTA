@@ -78,6 +78,7 @@ use my_project::indicators::moving_averages::{
 };
 
 use my_project::indicators::{
+    bandpass::{bandpass as bandpass_raw, bandpass_with_kernel, BandPassBatchBuilder, BandPassInput},
     cci_cycle::{cci_cycle, cci_cycle_with_kernel, CciCycleBatchBuilder, CciCycleInput},
     fvg_trailing_stop::{fvg_trailing_stop, fvg_trailing_stop_with_kernel, FvgTrailingStopInput},
     halftrend::{halftrend, halftrend_with_kernel, HalfTrendInput},
@@ -96,7 +97,7 @@ use my_project::indicators::{
     ad::{ad as ad_raw, ad_with_kernel, AdInput},
     adosc::{adosc as adosc_raw, AdoscInput},
     adx::{adx as adx_raw, adx_with_kernel, AdxBatchBuilder, AdxInput},
-    adxr::{adxr as adxr_raw, AdxrInput},
+    adxr::{adxr as adxr_raw, adxr_with_kernel, AdxrInput},
     alligator::{alligator as alligator_raw, AlligatorInput},
     alphatrend::{alphatrend as alphatrend_raw, alphatrend_with_kernel, AlphaTrendInput},
     ao::{ao as ao_raw, AoInput},
@@ -105,7 +106,7 @@ use my_project::indicators::{
     aroonosc::{aroon_osc as aroon_osc_raw, AroonOscInput},
     atr::{atr as atr_raw, AtrInput},
     avsl::{avsl_with_kernel, AvslBatchBuilder, AvslInput},
-    bandpass::{bandpass as bandpass_raw, BandPassInput},
+    // bandpass import moved above to group with kernel builder/use
     bollinger_bands::{
         bollinger_bands as bollinger_bands_raw, bollinger_bands_with_kernel,
         BollingerBandsBatchBuilder, BollingerBandsInput,
@@ -117,7 +118,7 @@ use my_project::indicators::{
         BollingerBandsWidthInput,
     },
     bop::{bop as bop_raw, BopInput},
-    cci::{cci as cci_raw, CciInput},
+    cci::{cci as cci_raw, cci_with_kernel, CciInput},
     cfo::{cfo as cfo_raw, cfo_with_kernel, CfoBatchBuilder, CfoInput},
     cg::{cg as cg_raw, cg_with_kernel, CgInput},
     chande::{chande as chande_raw, ChandeInput},
@@ -139,11 +140,11 @@ use my_project::indicators::{
     devstop::{devstop as devstop_raw, DevStopInput},
     di::{di as di_raw, DiInput},
     dm::{dm as dm_raw, DmBatchBuilder, DmData, DmInput},
-    donchian::{donchian as donchian_raw, DonchianInput},
+    donchian::{donchian as donchian_raw, donchian_with_kernel, DonchianInput},
     dpo::{dpo as dpo_raw, dpo_with_kernel, DpoBatchBuilder, DpoInput},
     dti::{dti as dti_raw, dti_with_kernel, DtiInput},
     dx::{dx as dx_raw, DxBatchBuilder, DxData, DxInput},
-    efi::{efi as efi_raw, EfiInput},
+    efi::{efi as efi_raw, efi_with_kernel, EfiInput},
     emd::{emd as emd_raw, EmdInput},
     emv::{emv as emv_raw, emv_with_kernel, EmvInput},
     er::{er as er_raw, er_with_kernel, ErBatchBuilder, ErInput},
@@ -156,7 +157,7 @@ use my_project::indicators::{
     kdj::{kdj as kdj_raw, KdjInput},
     keltner::{keltner as keltner_raw, KeltnerInput},
     kst::{kst as kst_raw, KstBatchBuilder, KstInput},
-    kurtosis::{kurtosis as kurtosis_raw, KurtosisInput},
+    kurtosis::{kurtosis as kurtosis_raw, kurtosis_with_kernel, KurtosisInput},
     kvo::{kvo as kvo_raw, KvoBatchBuilder, KvoInput},
     linearreg_angle::{
         linearreg_angle as linearreg_angle_raw, linearreg_angle_with_kernel, Linearreg_angleInput,
@@ -173,7 +174,7 @@ use my_project::indicators::{
     mab::{mab as mab_raw, mab_with_kernel, MabInput},
     macd::{macd as macd_raw, MacdInput},
     macz::{macz_with_kernel, MaczBatchBuilder, MaczInput},
-    marketefi::{marketefi as marketfi_raw, MarketefiInput},
+    marketefi::{marketefi as marketfi_raw, marketefi_with_kernel, MarketefiInput},
     mass::{mass as mass_raw, MassInput},
     mean_ad::{mean_ad as mean_ad_raw, MeanAdInput},
     medium_ad::{medium_ad as medium_ad_raw, MediumAdInput},
@@ -190,7 +191,7 @@ use my_project::indicators::{
         nadaraya_watson_envelope_with_kernel,
         NweInput,
     },
-    natr::{natr as natr_raw, NatrInput},
+    natr::{natr as natr_raw, natr_with_kernel, NatrBatchBuilder, NatrData, NatrInput},
     nvi::{nvi as nvi_raw, nvi_with_kernel, NviInput},
     obv::{obv as obv_raw, ObvInput},
     ott::{ott as ott_raw, ott_with_kernel, OttBatchBuilder, OttInput},
@@ -202,7 +203,7 @@ use my_project::indicators::{
     pfe::{pfe as pfe_raw, PfeBatchBuilder, PfeInput},
     pivot::{pivot as pivot_raw, pivot_with_kernel, PivotBatchBuilder, PivotData, PivotInput},
     pma::{pma as pma_raw, pma_with_kernel, PmaBatchBuilder, PmaInput},
-    ppo::{ppo as ppo_raw, PpoInput},
+    ppo::{ppo as ppo_raw, ppo_with_kernel, PpoInput},
     prb::{prb as prb_raw, PrbBatchBuilder, PrbInput},
     pvi::{pvi as pvi_raw, pvi_with_kernel, PviBatchBuilder, PviInput},
     qqe::{qqe as qqe_raw, QqeInput},
@@ -216,14 +217,14 @@ use my_project::indicators::{
     rsx::{rsx as rsx_raw, rsx_with_kernel, RsxBatchBuilder, RsxInput},
     rvi::{rvi as rvi_raw, RviInput},
     safezonestop::{safezonestop as safezonestop_raw, SafeZoneStopInput},
-    sar::{sar as sar_raw, SarInput},
+    sar::{sar as sar_raw, sar_with_kernel, SarBatchBuilder, SarData, SarInput},
     squeeze_momentum::{
         squeeze_momentum as squeeze_momentum_raw, SqueezeMomentumBatchBuilder, SqueezeMomentumInput,
     },
     srsi::{srsi as srsi_raw, srsi_with_kernel, SrsiBatchBuilder, SrsiInput},
     stc::{stc as stc_raw, StcInput},
     stddev::{stddev as stddev_raw, StdDevBatchBuilder, StdDevInput},
-    stoch::{stoch as stoch_raw, StochInput},
+    stoch::{stoch as stoch_raw, stoch_with_kernel, StochBatchBuilder, StochData, StochInput},
     stochf::{stochf as stochf_raw, stochf_with_kernel, StochfInput},
     supertrend::{supertrend as supertrend_raw, supertrend_with_kernel, SuperTrendInput},
     trix::{trix_with_kernel, TrixBatchBuilder, TrixInput},
@@ -236,7 +237,7 @@ use my_project::indicators::{
         ultosc as ultosc_raw, ultosc_with_kernel, UltOscBatchBuilder, UltOscBatchRange, UltOscData,
         UltOscInput,
     },
-    var::{var as var_raw, VarInput},
+    var::{var as var_raw, var_with_kernel, VarBatchBuilder, VarInput},
     vi::{vi as vi_raw, ViBatchBuilder, ViData, ViInput},
     vidya::{vidya_with_kernel, VidyaBatchBuilder, VidyaInput},
     vlma::{vlma_with_kernel, VlmaBatchBuilder, VlmaInput},
@@ -258,6 +259,7 @@ use my_project::indicators::{
     // ASO (Average Sentiment Oscillator)
     aso::{aso_with_kernel, AsoBatchBuilder, AsoData, AsoInput},
 };
+use my_project::indicators::correl_hl::correl_hl_with_kernel;
 // DVDIQQE indicator (single-series)
 use my_project::indicators::dvdiqqe::{dvdiqqe_with_kernel, DvdiqqeInput};
 
@@ -1131,6 +1133,7 @@ bench_scalars!(
 );
 
 make_kernel_wrappers!(alma, alma_with_kernel, AlmaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(bandpass, bandpass_with_kernel, BandPassInputS; Scalar,Avx2,Avx512);
 // ACOSC single-series kernels (Scalar/Avx2/Avx512)
 make_kernel_wrappers!(
     acosc,
@@ -1165,7 +1168,9 @@ make_kernel_wrappers!(macd, my_project::indicators::macd::macd_with_kernel, Macd
 make_kernel_wrappers!(msw, my_project::indicators::msw::msw_with_kernel, MswInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(adx, adx_with_kernel, AdxInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(buff_averages, buff_averages_with_kernel, BuffAveragesInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(correl_hl, correl_hl_with_kernel, CorrelHlInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(zscore, zscore_with_kernel, ZscoreInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(var, var_with_kernel, VarInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(cmo, cmo_with_kernel, CmoInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(srsi, srsi_with_kernel, SrsiInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(er, er_with_kernel, ErInputS; Scalar,Avx2,Avx512);
@@ -1174,7 +1179,11 @@ make_kernel_wrappers!(mom, mom_with_kernel, MomInputS; Scalar,Avx2,Avx512);
 // ASO single-series wrappers (Scalar/AVX2/AVX512)
 make_kernel_wrappers!(aso, aso_with_kernel, AsoInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(cwma, cwma_with_kernel, CwmaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(natr, natr_with_kernel, NatrInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(marketfi, marketefi_with_kernel, MarketefiInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(efi, efi_with_kernel, EfiInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(dema, dema_with_kernel, DemaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(cci, cci_with_kernel, CciInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(edcf, edcf_with_kernel, EdcfInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(ehlers_ecema, ehlers_ecema_with_kernel, EhlersEcemaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(ehlers_itrend, ehlers_itrend_with_kernel, EhlersITrendInputS; Scalar,Avx2,Avx512);
@@ -1242,6 +1251,134 @@ make_kernel_wrappers!(wclprice, wclprice_with_kernel, WclpriceInputS; Scalar,Avx
 make_kernel_wrappers!(wilders, wilders_with_kernel, WildersInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(wma, wma_with_kernel, WmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(zlema, zlema_with_kernel, ZlemaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(sar, sar_with_kernel, SarInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(ppo, ppo_with_kernel, PpoInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(kurtosis, kurtosis_with_kernel, KurtosisInputS; Scalar,Avx2,Avx512);
+// ADXR single-series kernel wrappers (add explicit kernel variants)
+make_kernel_wrappers!(adxr, adxr_with_kernel, AdxrInputS; Scalar,Avx2,Avx512);
+
+// Stochastic Oscillator (single-series) kernel wrappers
+make_kernel_wrappers!(stoch, stoch_with_kernel, StochInputS; Scalar,Avx2,Avx512);
+
+// Stochastic Oscillator (batch) custom wrappers (OHLC inputs)
+#[inline(always)]
+fn stoch_batch_scalarbatch(input: &StochInputS) -> anyhow::Result<()> {
+    let (high, low, close) = match &input.data {
+        StochData::Candles { candles } => (&candles.high[..], &candles.low[..], &candles.close[..]),
+        StochData::Slices { high, low, close } => (*high, *low, *close),
+    };
+    StochBatchBuilder::new()
+        .kernel(Kernel::ScalarBatch)
+        .apply_slices(high, low, close)?;
+    Ok(())
+}
+
+// SAR (batch) custom wrappers (high/low inputs)
+#[inline(always)]
+fn sar_batch_scalarbatch(input: &SarInputS) -> anyhow::Result<()> {
+    let (high, low) = match &input.data {
+        SarData::Candles { candles } => (&candles.high[..], &candles.low[..]),
+        SarData::Slices { high, low } => (*high, *low),
+    };
+    SarBatchBuilder::new()
+        .kernel(Kernel::ScalarBatch)
+        .apply_slices(high, low)
+        .map(|_| ())
+        .map_err(|e| anyhow!(e.to_string()))
+}
+
+#[inline(always)]
+fn sar_batch_avx2batch(input: &SarInputS) -> anyhow::Result<()> {
+    let (high, low) = match &input.data {
+        SarData::Candles { candles } => (&candles.high[..], &candles.low[..]),
+        SarData::Slices { high, low } => (*high, *low),
+    };
+    SarBatchBuilder::new()
+        .kernel(Kernel::Avx2Batch)
+        .apply_slices(high, low)
+        .map(|_| ())
+        .map_err(|e| anyhow!(e.to_string()))
+}
+
+#[inline(always)]
+fn sar_batch_avx512batch(input: &SarInputS) -> anyhow::Result<()> {
+    let (high, low) = match &input.data {
+        SarData::Candles { candles } => (&candles.high[..], &candles.low[..]),
+        SarData::Slices { high, low } => (*high, *low),
+    };
+    SarBatchBuilder::new()
+        .kernel(Kernel::Avx512Batch)
+        .apply_slices(high, low)
+        .map(|_| ())
+        .map_err(|e| anyhow!(e.to_string()))
+}
+
+#[inline(always)]
+fn stoch_batch_avx2batch(input: &StochInputS) -> anyhow::Result<()> {
+    let (high, low, close) = match &input.data {
+        StochData::Candles { candles } => (&candles.high[..], &candles.low[..], &candles.close[..]),
+        StochData::Slices { high, low, close } => (*high, *low, *close),
+    };
+    StochBatchBuilder::new()
+        .kernel(Kernel::Avx2Batch)
+        .apply_slices(high, low, close)?;
+    Ok(())
+}
+
+#[inline(always)]
+fn stoch_batch_avx512batch(input: &StochInputS) -> anyhow::Result<()> {
+    let (high, low, close) = match &input.data {
+        StochData::Candles { candles } => (&candles.high[..], &candles.low[..], &candles.close[..]),
+        StochData::Slices { high, low, close } => (*high, *low, *close),
+    };
+    StochBatchBuilder::new()
+        .kernel(Kernel::Avx512Batch)
+        .apply_slices(high, low, close)?;
+    Ok(())
+}
+
+// Fisher (batch) custom wrappers (high/low inputs)
+#[inline(always)]
+fn fisher_batch_scalarbatch(input: &FisherInputS) -> anyhow::Result<()> {
+    use my_project::indicators::fisher::{FisherBatchBuilder, FisherData};
+    let (high, low) = match &input.data {
+        FisherData::Candles { candles } => (&candles.high[..], &candles.low[..]),
+        FisherData::Slices { high, low } => (*high, *low),
+    };
+    FisherBatchBuilder::new()
+        .kernel(Kernel::ScalarBatch)
+        .apply_slices(high, low)
+        .map(|_| ())
+        .map_err(|e| anyhow!(e.to_string()))
+}
+
+#[inline(always)]
+fn fisher_batch_avx2batch(input: &FisherInputS) -> anyhow::Result<()> {
+    use my_project::indicators::fisher::{FisherBatchBuilder, FisherData};
+    let (high, low) = match &input.data {
+        FisherData::Candles { candles } => (&candles.high[..], &candles.low[..]),
+        FisherData::Slices { high, low } => (*high, *low),
+    };
+    FisherBatchBuilder::new()
+        .kernel(Kernel::Avx2Batch)
+        .apply_slices(high, low)
+        .map(|_| ())
+        .map_err(|e| anyhow!(e.to_string()))
+}
+
+#[inline(always)]
+fn fisher_batch_avx512batch(input: &FisherInputS) -> anyhow::Result<()> {
+    use my_project::indicators::fisher::{FisherBatchBuilder, FisherData};
+    let (high, low) = match &input.data {
+        FisherData::Candles { candles } => (&candles.high[..], &candles.low[..]),
+        FisherData::Slices { high, low } => (*high, *low),
+    };
+    FisherBatchBuilder::new()
+        .kernel(Kernel::Avx512Batch)
+        .apply_slices(high, low)
+        .map(|_| ())
+        .map_err(|e| anyhow!(e.to_string()))
+}
 make_kernel_wrappers!(deviation, deviation_with_kernel, DeviationInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(correlation_cycle, correlation_cycle_with_kernel, CorrelationCycleInputS; Scalar,Avx2,Avx512);
 // StochF single-series kernels
@@ -1334,6 +1471,9 @@ make_kernel_wrappers!(halftrend, halftrend_with_kernel, HalfTrendInputS; Scalar,
 make_kernel_wrappers!(reverse_rsi, reverse_rsi_with_kernel, ReverseRsiInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(vama, vama_with_kernel, VamaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(wavetrend, wavetrend_with_kernel, WavetrendInputS; Scalar,Avx2,Avx512);
+
+// Donchian: add explicit kernel variants alongside the scalar-only bench
+make_kernel_wrappers!(donchian, donchian_with_kernel, DonchianInputS; Scalar,Avx2,Avx512);
 
 // RSX single-series variants
 make_kernel_wrappers!(rsx, rsx_with_kernel, RsxInputS; Scalar,Avx2,Avx512);
@@ -2652,6 +2792,90 @@ fn percentile_nearest_rank_batch_avx512batch(
 }
 
 make_batch_wrappers!(otto_batch, OttoBatchBuilder, OttoInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(var_batch, VarBatchBuilder, VarInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+
+// NATR (OHLC batch) wrappers
+#[inline(always)]
+fn natr_batch_scalarbatch(input: &NatrInputS) -> anyhow::Result<()> {
+    let (high, low, close) = match &input.data {
+        NatrData::Candles { candles } => (&candles.high[..], &candles.low[..], &candles.close[..]),
+        NatrData::Slices { high, low, close } => (*high, *low, *close),
+    };
+    NatrBatchBuilder::new()
+        .kernel(Kernel::ScalarBatch)
+        .apply_slices(high, low, close)?;
+    Ok(())
+}
+
+// Donchian batch custom wrappers (high/low inputs)
+#[inline(always)]
+fn donchian_batch_scalarbatch(input: &DonchianInputS) -> anyhow::Result<()> {
+    use my_project::indicators::donchian::DonchianBatchBuilder;
+    let (high, low) = match &input.data {
+        my_project::indicators::donchian::DonchianData::Candles { candles } => {
+            (&candles.high[..], &candles.low[..])
+        }
+        my_project::indicators::donchian::DonchianData::Slices { high, low } => (*high, *low),
+    };
+    DonchianBatchBuilder::new()
+        .kernel(Kernel::ScalarBatch)
+        .apply_slices(high, low)?;
+    Ok(())
+}
+
+#[inline(always)]
+fn donchian_batch_avx2batch(input: &DonchianInputS) -> anyhow::Result<()> {
+    use my_project::indicators::donchian::DonchianBatchBuilder;
+    let (high, low) = match &input.data {
+        my_project::indicators::donchian::DonchianData::Candles { candles } => {
+            (&candles.high[..], &candles.low[..])
+        }
+        my_project::indicators::donchian::DonchianData::Slices { high, low } => (*high, *low),
+    };
+    DonchianBatchBuilder::new()
+        .kernel(Kernel::Avx2Batch)
+        .apply_slices(high, low)?;
+    Ok(())
+}
+
+#[inline(always)]
+fn donchian_batch_avx512batch(input: &DonchianInputS) -> anyhow::Result<()> {
+    use my_project::indicators::donchian::DonchianBatchBuilder;
+    let (high, low) = match &input.data {
+        my_project::indicators::donchian::DonchianData::Candles { candles } => {
+            (&candles.high[..], &candles.low[..])
+        }
+        my_project::indicators::donchian::DonchianData::Slices { high, low } => (*high, *low),
+    };
+    DonchianBatchBuilder::new()
+        .kernel(Kernel::Avx512Batch)
+        .apply_slices(high, low)?;
+    Ok(())
+}
+
+#[inline(always)]
+fn natr_batch_avx2batch(input: &NatrInputS) -> anyhow::Result<()> {
+    let (high, low, close) = match &input.data {
+        NatrData::Candles { candles } => (&candles.high[..], &candles.low[..], &candles.close[..]),
+        NatrData::Slices { high, low, close } => (*high, *low, *close),
+    };
+    NatrBatchBuilder::new()
+        .kernel(Kernel::Avx2Batch)
+        .apply_slices(high, low, close)?;
+    Ok(())
+}
+
+#[inline(always)]
+fn natr_batch_avx512batch(input: &NatrInputS) -> anyhow::Result<()> {
+    let (high, low, close) = match &input.data {
+        NatrData::Candles { candles } => (&candles.high[..], &candles.low[..], &candles.close[..]),
+        NatrData::Slices { high, low, close } => (*high, *low, *close),
+    };
+    NatrBatchBuilder::new()
+        .kernel(Kernel::Avx512Batch)
+        .apply_slices(high, low, close)?;
+    Ok(())
+}
 
 // Other indicators batch wrappers
 // Custom implementation for AVSL which requires close, low, and volume
@@ -2704,6 +2928,14 @@ make_batch_wrappers!(cmo_batch, CmoBatchBuilder, CmoInputS; ScalarBatch, Avx2Bat
 // make_batch_wrappers!(halftrend_batch, HalfTrendBatchBuilder, HalfTrendInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(reverse_rsi_batch, ReverseRsiBatchBuilder, ReverseRsiInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(vama_batch, VamaBatchBuilder, VamaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(decycler_batch, my_project::indicators::decycler::DecyclerBatchBuilder, DecyclerInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+
+bench_variants!(
+    bandpass => BandPassInputS; None;
+    bandpass_scalar,
+    bandpass_avx2,
+    bandpass_avx512
+);
 make_batch_wrappers!(deviation_batch, DeviationBatchBuilder, DeviationInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 // Correlation Cycle batch wrappers
 make_batch_wrappers!(
@@ -2807,6 +3039,21 @@ bench_variants!(
     buff_averages_batch_avx512batch
 );
 
+make_batch_wrappers!(bandpass_batch, BandPassBatchBuilder, BandPassInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+bench_variants!(
+    bandpass_batch => BandPassInputS; None;
+    bandpass_batch_scalarbatch,
+    bandpass_batch_avx2batch,
+    bandpass_batch_avx512batch
+);
+
+bench_variants!(
+    decycler_batch => DecyclerInputS; None;
+    decycler_batch_scalarbatch,
+    decycler_batch_avx2batch,
+    decycler_batch_avx512batch
+);
+
 bench_variants!(
     linearreg_angle => LinearregAngleInputS; Some(14);
     linearreg_angle_scalar,
@@ -2826,6 +3073,58 @@ bench_variants!(
     zscore_batch_scalarbatch,
     zscore_batch_avx2batch,
     zscore_batch_avx512batch
+);
+
+// SAR single-series kernel variants (Scalar/Avx2/Avx512)
+bench_variants!(
+    sar => SarInputS; None;
+    sar_scalar,
+    sar_avx2,
+    sar_avx512
+);
+
+// CORREL_HL single-series kernel variants (Scalar/Avx2/Avx512)
+bench_variants!(
+    correl_hl => CorrelHlInputS; None;
+    correl_hl_scalar,
+    correl_hl_avx2,
+    correl_hl_avx512
+);
+
+bench_variants!(
+    natr => NatrInputS; None;
+    natr_scalar,
+    natr_avx2,
+    natr_avx512
+);
+
+// EFI single-series kernel variants (Scalar/Avx2/Avx512)
+bench_variants!(
+    efi => EfiInputS; None;
+    efi_scalar,
+    efi_avx2,
+    efi_avx512
+);
+
+bench_variants!(
+    fisher_batch => FisherInputS; None;
+    fisher_batch_scalarbatch,
+    fisher_batch_avx2batch,
+    fisher_batch_avx512batch
+);
+
+bench_variants!(
+    marketfi => MarketefiInputS; None;
+    marketfi_scalar,
+    marketfi_avx2,
+    marketfi_avx512
+);
+
+bench_variants!(
+    var_batch => VarInputS; Some(14);
+    var_batch_scalarbatch,
+    var_batch_avx2batch,
+    var_batch_avx512batch
 );
 
 bench_variants!(
@@ -3041,6 +3340,20 @@ bench_variants!(
    edcf_batch_scalarbatch,
    edcf_batch_avx2batch,
    edcf_batch_avx512batch,
+);
+
+bench_variants!(
+    sar_batch => SarInputS; None;
+    sar_batch_scalarbatch,
+    sar_batch_avx2batch,
+    sar_batch_avx512batch
+);
+
+bench_variants!(
+    natr_batch => NatrInputS; None;
+    natr_batch_scalarbatch,
+    natr_batch_avx2batch,
+    natr_batch_avx512batch
 );
 
 bench_variants!(
@@ -3592,6 +3905,13 @@ bench_variants!(
 );
 
 bench_variants!(
+    var => VarInputS; Some(14);
+    var_scalar,
+    var_avx2,
+    var_avx512,
+);
+
+bench_variants!(
     mab => MabInputS; None;
     mab_scalar,
     mab_avx2,
@@ -3956,6 +4276,22 @@ bench_variants!(
     wilders_avx512,
 );
 
+// Stochastic Oscillator (single-series) variants
+bench_variants!(
+    stoch => StochInputS; None;
+    stoch_scalar,
+    stoch_avx2,
+    stoch_avx512,
+);
+
+// Stochastic Oscillator (batch) variants (use default params; 1 row)
+bench_variants!(
+    stoch_batch => StochInputS; Some(14);
+    stoch_batch_scalarbatch,
+    stoch_batch_avx2batch,
+    stoch_batch_avx512batch,
+);
+
 bench_variants!(
     wclprice => WclpriceInputS; None;
     wclprice_scalar,
@@ -3975,6 +4311,20 @@ bench_variants!(
     zlema_scalar,
     zlema_avx2,
     zlema_avx512,
+);
+
+bench_variants!(
+    donchian => DonchianInputS; None;
+    donchian_scalar,
+    donchian_avx2,
+    donchian_avx512,
+);
+
+bench_variants!(
+    donchian_batch => DonchianInputS; Some(20);
+    donchian_batch_scalarbatch,
+    donchian_batch_avx2batch,
+    donchian_batch_avx512batch,
 );
 
 bench_variants!(
@@ -4227,6 +4577,34 @@ bench_variants!(
     vama_batch_scalarbatch,
     vama_batch_avx2batch,
     vama_batch_avx512batch
+);
+
+bench_variants!(
+    ppo => PpoInputS; None;
+    ppo_scalar,
+    ppo_avx2,
+    ppo_avx512,
+);
+
+bench_variants!(
+    kurtosis => KurtosisInputS; None;
+    kurtosis_scalar,
+    kurtosis_avx2,
+    kurtosis_avx512,
+);
+
+bench_variants!(
+    adxr => AdxrInputS; None;
+    adxr_scalar,
+    adxr_avx2,
+    adxr_avx512,
+);
+
+bench_variants!(
+    cci => CciInputS; Some(14);
+    cci_scalar,
+    cci_avx2,
+    cci_avx512,
 );
 
 bench_variants!(
@@ -4542,6 +4920,22 @@ bench_variants!(
 
 criterion_main!(
     benches_scalar,
+    benches_adxr,
+    benches_bandpass,
+    benches_cci,
+    benches_correl_hl,
+    benches_sar,
+    benches_natr,
+    benches_efi,
+    benches_marketfi,
+    benches_natr_batch,
+    benches_sar_batch,
+    benches_stoch,
+    benches_stoch_batch,
+    benches_fisher_batch,
+    // Range Filter (single + batch)
+    benches_range_filter,
+    benches_range_filter_batch,
     benches_acosc,
     benches_cfo,
     benches_cfo_batch,
@@ -4602,10 +4996,14 @@ criterion_main!(
     benches_macd_batch,
     benches_buff_averages,
     benches_buff_averages_batch,
+    benches_bandpass_batch,
+    benches_decycler_batch,
     benches_zscore,
     benches_mab,
     benches_eri,
     benches_zscore_batch,
+    benches_var,
+    benches_var_batch,
     benches_deviation,
     benches_deviation_batch,
     benches_supertrend,
@@ -4712,6 +5110,9 @@ criterion_main!(
     benches_vlma_batch,
     benches_volume_adjusted_ma,
     benches_volume_adjusted_ma_batch,
+    // DMA (single + batch)
+    benches_dma,
+    benches_dma_batch,
     benches_vama,
     benches_vama_batch,
     benches_sama,
@@ -4753,7 +5154,11 @@ criterion_main!(
     benches_chandelier_exit_batch,
     benches_otto_batch,
     benches_percentile_nearest_rank,
-    benches_percentile_nearest_rank_batch
+    benches_percentile_nearest_rank_batch,
+    benches_ppo,
+    benches_donchian,
+    benches_donchian_batch,
+    benches_kurtosis
     ,benches_net_myrsi
     ,benches_net_myrsi_batch
     ,benches_kvo_batch

@@ -15,9 +15,10 @@
 //! - **`Err(LpcError)`** on failure
 //!
 //! ## Developer Status
-//! - **SIMD Kernels**: AVX2 (stub), AVX512 (stub)
+//! - **SIMD Kernels**: AVX2/AVX512 reuse the optimized scalar core with light prefetching. Per-series SIMD is de-emphasized due to the sequential IIR dependency.
 //! - **Streaming**: Not implemented
 //! - **Memory**: Good zero-copy usage (alloc_with_nan_prefix, make_uninit_matrix)
+//! - Decision: Scalar path optimized (sin_cos, mul_add, alpha caching, unroll-by-2). Batch keeps scalar per-row; row-specific batch SIMD not attempted yet. Consider TR precompute across rows in future.
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
@@ -594,10 +595,10 @@ pub fn lpc_scalar(
 ) {
     let len = src.len();
     // NaN prefixes
-    for i in 0..first {
-        out_filter[i] = f64::NAN;
-        out_high[i] = f64::NAN;
-        out_low[i] = f64::NAN;
+    if first > 0 {
+        out_filter[..first].fill(f64::NAN);
+        out_high[..first].fill(f64::NAN);
+        out_low[..first].fill(f64::NAN);
     }
 
     // Optional dominant-cycle vector (kept to preserve kernel logic)
@@ -615,46 +616,116 @@ pub fn lpc_scalar(
     out_filter[first] = src[first];
     let mut tr_prev = high[first] - low[first];
     let mut ftr_prev = tr_prev;
+    let tm = tr_mult;
 
-    out_high[first] = out_filter[first] + tr_prev * tr_mult;
-    out_low[first] = out_filter[first] - tr_prev * tr_mult;
+    out_high[first] = out_filter[first] + tr_prev * tm;
+    out_low[first] = out_filter[first] - tr_prev * tm;
 
-    // Main loop
-    for i in (first + 1)..len {
-        // Per-bar period without allocating a Vec
-        let p = if let Some(ref dc) = dc {
-            let base = dc[i];
-            let per = if base.is_nan() {
-                fixed_period
-            } else {
-                (base * cycle_mult).round().max(3.0) as usize
-            };
-            per
-        } else {
-            fixed_period
-        };
-
+    // Helpers
+    #[inline(always)]
+    fn alpha_from_period(p: usize) -> f64 {
         let omega = 2.0 * std::f64::consts::PI / (p as f64);
-        let alpha = (1.0 - omega.sin()) / omega.cos();
+        let (s, c) = omega.sin_cos();
+        (1.0 - s) / c
+    }
+    #[inline(always)]
+    fn per_bar_period(dc_opt: Option<&[f64]>, idx: usize, fixed_p: usize, cm: f64) -> usize {
+        if let Some(dc) = dc_opt {
+            let base = dc[idx];
+            if base.is_nan() {
+                fixed_p
+            } else {
+                (base * cm).round().max(3.0) as usize
+            }
+        } else {
+            fixed_p
+        }
+    }
 
-        out_filter[i] = 0.5 * (1.0 - alpha) * (src[i] + src[i - 1]) + alpha * out_filter[i - 1];
+    // Cache alpha when the (rounded) period does not change
+    let mut last_p: usize = if dc.is_none() { fixed_period } else { 0 };
+    let mut alpha: f64 = if dc.is_none() {
+        alpha_from_period(fixed_period)
+    } else {
+        0.0
+    };
 
-        // TR on the fly
+    // Main loop (unrolled by 2)
+    let mut i = first + 1;
+    while i + 1 < len {
+        // i
+        let p_i = per_bar_period(dc.as_deref(), i, fixed_period, cycle_mult);
+        if p_i != last_p {
+            last_p = p_i;
+            alpha = alpha_from_period(last_p);
+        }
+        let one_m_a = 1.0 - alpha;
+        let s_im1 = src[i - 1];
+        let s_i = src[i];
+        let prev_f = out_filter[i - 1];
+        let f_i = alpha.mul_add(prev_f, 0.5 * one_m_a * (s_i + s_im1));
+        out_filter[i] = f_i;
+
         let hl = high[i] - low[i];
         let c_low1 = (close[i] - low[i - 1]).abs();
         let c_hi1 = (close[i] - high[i - 1]).abs();
         let tr_i = hl.max(c_low1).max(c_hi1);
-
-        let ftr = 0.5 * (1.0 - alpha) * (tr_i + tr_prev) + alpha * ftr_prev;
+        let ftr_i = alpha.mul_add(ftr_prev, 0.5 * one_m_a * (tr_i + tr_prev));
         tr_prev = tr_i;
-        ftr_prev = ftr;
+        ftr_prev = ftr_i;
+        out_high[i] = f_i + ftr_i * tm;
+        out_low[i] = f_i - ftr_i * tm;
 
-        out_high[i] = out_filter[i] + ftr * tr_mult;
-        out_low[i] = out_filter[i] - ftr * tr_mult;
+        // i+1
+        let i1 = i + 1;
+        let p_i1 = per_bar_period(dc.as_deref(), i1, fixed_period, cycle_mult);
+        if p_i1 != last_p {
+            last_p = p_i1;
+            alpha = alpha_from_period(last_p);
+        }
+        let one_m_a1 = 1.0 - alpha;
+        let s_i1 = src[i1];
+        let f_i1 = alpha.mul_add(f_i, 0.5 * one_m_a1 * (s_i1 + s_i));
+        out_filter[i1] = f_i1;
+
+        let hl1 = high[i1] - low[i1];
+        let c_low1b = (close[i1] - low[i1 - 1]).abs();
+        let c_hi1b = (close[i1] - high[i1 - 1]).abs();
+        let tr_i1 = hl1.max(c_low1b).max(c_hi1b);
+        let ftr_i1 = alpha.mul_add(ftr_prev, 0.5 * one_m_a1 * (tr_i1 + tr_prev));
+        tr_prev = tr_i1;
+        ftr_prev = ftr_i1;
+        out_high[i1] = f_i1 + ftr_i1 * tm;
+        out_low[i1] = f_i1 - ftr_i1 * tm;
+
+        i += 2;
+    }
+
+    // Tail (at most one)
+    if i < len {
+        let p_i = per_bar_period(dc.as_deref(), i, fixed_period, cycle_mult);
+        if p_i != last_p {
+            last_p = p_i;
+            alpha = alpha_from_period(last_p);
+        }
+        let one_m_a = 1.0 - alpha;
+        let s_im1 = src[i - 1];
+        let s_i = src[i];
+        let prev_f = out_filter[i - 1];
+        let f_i = alpha.mul_add(prev_f, 0.5 * one_m_a * (s_i + s_im1));
+        out_filter[i] = f_i;
+
+        let hl = high[i] - low[i];
+        let c_low1 = (close[i] - low[i - 1]).abs();
+        let c_hi1 = (close[i] - high[i - 1]).abs();
+        let tr_i = hl.max(c_low1).max(c_hi1);
+        let ftr_i = alpha.mul_add(ftr_prev, 0.5 * one_m_a * (tr_i + tr_prev));
+        out_high[i] = f_i + ftr_i * tm;
+        out_low[i] = f_i - ftr_i * tm;
     }
 }
 
-/// AVX2 kernel implementation for LPC computation (stub - uses scalar for now)
+/// AVX2 kernel implementation for LPC computation (prefetch + scalar core)
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 pub fn lpc_avx2(
     high: &[f64],
@@ -671,7 +742,16 @@ pub fn lpc_avx2(
     out_high: &mut [f64],
     out_low: &mut [f64],
 ) {
-    // Currently falls back to scalar implementation
+    // Light prefetch before using the same optimized scalar core.
+    unsafe {
+        // SAFETY: Pointers are derived from valid slices; prefetch does not dereference.
+        if src.len() > first + 32 {
+            _mm_prefetch(src.as_ptr().add(first + 16) as *const i8, _MM_HINT_T0);
+            _mm_prefetch(high.as_ptr().add(first + 16) as *const i8, _MM_HINT_T0);
+            _mm_prefetch(low.as_ptr().add(first + 16) as *const i8, _MM_HINT_T0);
+            _mm_prefetch(close.as_ptr().add(first + 16) as *const i8, _MM_HINT_T0);
+        }
+    }
     lpc_scalar(
         high,
         low,
@@ -689,7 +769,7 @@ pub fn lpc_avx2(
     )
 }
 
-/// AVX512 kernel implementation for LPC computation (stub - uses scalar for now)
+/// AVX512 kernel implementation for LPC computation (prefetch + scalar core)
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 pub fn lpc_avx512(
     high: &[f64],
@@ -706,7 +786,16 @@ pub fn lpc_avx512(
     out_high: &mut [f64],
     out_low: &mut [f64],
 ) {
-    // Currently falls back to scalar implementation
+    // Light prefetch before using the same optimized scalar core.
+    unsafe {
+        // SAFETY: Pointers are derived from valid slices; prefetch does not dereference.
+        if src.len() > first + 64 {
+            _mm_prefetch(src.as_ptr().add(first + 32) as *const i8, _MM_HINT_T0);
+            _mm_prefetch(high.as_ptr().add(first + 32) as *const i8, _MM_HINT_T0);
+            _mm_prefetch(low.as_ptr().add(first + 32) as *const i8, _MM_HINT_T0);
+            _mm_prefetch(close.as_ptr().add(first + 32) as *const i8, _MM_HINT_T0);
+        }
+    }
     lpc_scalar(
         high,
         low,
@@ -840,8 +929,9 @@ fn lpc_compute_into_prefilled(
     out_filter[first] = src[first];
     let mut tr_prev = high[first] - low[first];
     let mut ftr_prev = tr_prev;
-    out_high[first] = out_filter[first] + tr_prev * tr_mult;
-    out_low[first] = out_filter[first] - tr_prev * tr_mult;
+    let tm = tr_mult;
+    out_high[first] = out_filter[first] + tr_prev * tm;
+    out_low[first] = out_filter[first] - tr_prev * tm;
 
     let dc = if cutoff_type.eq_ignore_ascii_case("adaptive") {
         Some(dom_cycle(src, max_cycle_limit))
@@ -849,34 +939,220 @@ fn lpc_compute_into_prefilled(
         None
     };
 
-    for i in (first + 1)..len {
-        let p = if let Some(ref dc) = dc {
-            let base = dc[i];
+    #[inline(always)]
+    fn alpha_from_period(p: usize) -> f64 {
+        let omega = 2.0 * std::f64::consts::PI / (p as f64);
+        let (s, c) = omega.sin_cos();
+        (1.0 - s) / c
+    }
+    #[inline(always)]
+    fn per_bar_period(dc_opt: Option<&[f64]>, idx: usize, fixed_p: usize, cm: f64) -> usize {
+        if let Some(dc) = dc_opt {
+            let base = dc[idx];
             if base.is_nan() {
-                fixed_period
+                fixed_p
             } else {
-                (base * cycle_mult).round().max(3.0) as usize
+                (base * cm).round().max(3.0) as usize
             }
         } else {
-            fixed_period
-        };
+            fixed_p
+        }
+    }
 
-        let omega = 2.0 * std::f64::consts::PI / (p as f64);
-        let alpha = (1.0 - omega.sin()) / omega.cos();
+    let mut last_p: usize = if dc.is_none() { fixed_period } else { 0 };
+    let mut alpha: f64 = if dc.is_none() {
+        alpha_from_period(fixed_period)
+    } else {
+        0.0
+    };
 
-        out_filter[i] = 0.5 * (1.0 - alpha) * (src[i] + src[i - 1]) + alpha * out_filter[i - 1];
+    // Main loop (unrolled by 2)
+    let mut i = first + 1;
+    while i + 1 < len {
+        // i
+        let p_i = per_bar_period(dc.as_deref(), i, fixed_period, cycle_mult);
+        if p_i != last_p {
+            last_p = p_i;
+            alpha = alpha_from_period(last_p);
+        }
+        let one_m_a = 1.0 - alpha;
+        let f_i = alpha.mul_add(out_filter[i - 1], 0.5 * one_m_a * (src[i] + src[i - 1]));
+        out_filter[i] = f_i;
 
         let hl = high[i] - low[i];
         let c_low1 = (close[i] - low[i - 1]).abs();
         let c_hi1 = (close[i] - high[i - 1]).abs();
         let tr_i = hl.max(c_low1).max(c_hi1);
-
-        let ftr = 0.5 * (1.0 - alpha) * (tr_i + tr_prev) + alpha * ftr_prev;
+        let ftr_i = alpha.mul_add(ftr_prev, 0.5 * one_m_a * (tr_i + tr_prev));
         tr_prev = tr_i;
-        ftr_prev = ftr;
+        ftr_prev = ftr_i;
+        out_high[i] = f_i + ftr_i * tm;
+        out_low[i] = f_i - ftr_i * tm;
 
-        out_high[i] = out_filter[i] + ftr * tr_mult;
-        out_low[i] = out_filter[i] - ftr * tr_mult;
+        // i+1
+        let i1 = i + 1;
+        let p_i1 = per_bar_period(dc.as_deref(), i1, fixed_period, cycle_mult);
+        if p_i1 != last_p {
+            last_p = p_i1;
+            alpha = alpha_from_period(last_p);
+        }
+        let one_m_a1 = 1.0 - alpha;
+        let f_i1 = alpha.mul_add(f_i, 0.5 * one_m_a1 * (src[i1] + src[i]));
+        out_filter[i1] = f_i1;
+
+        let hl1 = high[i1] - low[i1];
+        let c_low1b = (close[i1] - low[i1 - 1]).abs();
+        let c_hi1b = (close[i1] - high[i1 - 1]).abs();
+        let tr_i1 = hl1.max(c_low1b).max(c_hi1b);
+        let ftr_i1 = alpha.mul_add(ftr_prev, 0.5 * one_m_a1 * (tr_i1 + tr_prev));
+        tr_prev = tr_i1;
+        ftr_prev = ftr_i1;
+        out_high[i1] = f_i1 + ftr_i1 * tm;
+        out_low[i1] = f_i1 - ftr_i1 * tm;
+
+        i += 2;
+    }
+
+    if i < len {
+        let p_i = per_bar_period(dc.as_deref(), i, fixed_period, cycle_mult);
+        if p_i != last_p {
+            last_p = p_i;
+            alpha = alpha_from_period(last_p);
+        }
+        let one_m_a = 1.0 - alpha;
+        let f_i = alpha.mul_add(out_filter[i - 1], 0.5 * one_m_a * (src[i] + src[i - 1]));
+        out_filter[i] = f_i;
+
+        let hl = high[i] - low[i];
+        let c_low1 = (close[i] - low[i - 1]).abs();
+        let c_hi1 = (close[i] - high[i - 1]).abs();
+        let tr_i = hl.max(c_low1).max(c_hi1);
+        let ftr_i = alpha.mul_add(ftr_prev, 0.5 * one_m_a * (tr_i + tr_prev));
+        out_high[i] = f_i + ftr_i * tm;
+        out_low[i] = f_i - ftr_i * tm;
+    }
+}
+
+/// Variant of compute-into that uses a precomputed true range slice
+#[inline(always)]
+fn lpc_compute_into_prefilled_pretr(
+    // high/low/close are unused when TR is provided, but kept for signature parity
+    _high: &[f64],
+    _low: &[f64],
+    _close: &[f64],
+    src: &[f64],
+    tr: &[f64],
+    cutoff_type: &str,
+    fixed_period: usize,
+    max_cycle_limit: usize,
+    cycle_mult: f64,
+    tr_mult: f64,
+    first: usize,
+    out_filter: &mut [f64],
+    out_high: &mut [f64],
+    out_low: &mut [f64],
+) {
+    let len = src.len();
+    if first >= len {
+        return;
+    }
+
+    // seed (assumes [..first] already NaN)
+    out_filter[first] = src[first];
+    let mut tr_prev = tr[first];
+    let mut ftr_prev = tr_prev;
+    let tm = tr_mult;
+    out_high[first] = out_filter[first] + tr_prev * tm;
+    out_low[first] = out_filter[first] - tr_prev * tm;
+
+    let dc = if cutoff_type.eq_ignore_ascii_case("adaptive") {
+        Some(dom_cycle(src, max_cycle_limit))
+    } else {
+        None
+    };
+
+    #[inline(always)]
+    fn alpha_from_period(p: usize) -> f64 {
+        let omega = 2.0 * std::f64::consts::PI / (p as f64);
+        let (s, c) = omega.sin_cos();
+        (1.0 - s) / c
+    }
+    #[inline(always)]
+    fn per_bar_period(dc_opt: Option<&[f64]>, idx: usize, fixed_p: usize, cm: f64) -> usize {
+        if let Some(dc) = dc_opt {
+            let base = dc[idx];
+            if base.is_nan() {
+                fixed_p
+            } else {
+                (base * cm).round().max(3.0) as usize
+            }
+        } else {
+            fixed_p
+        }
+    }
+
+    let mut last_p: usize = if dc.is_none() { fixed_period } else { 0 };
+    let mut alpha: f64 = if dc.is_none() {
+        alpha_from_period(fixed_period)
+    } else {
+        0.0
+    };
+
+    // Main loop (unrolled by 2)
+    let mut i = first + 1;
+    while i + 1 < len {
+        // i
+        let p_i = per_bar_period(dc.as_deref(), i, fixed_period, cycle_mult);
+        if p_i != last_p {
+            last_p = p_i;
+            alpha = alpha_from_period(last_p);
+        }
+        let one_m_a = 1.0 - alpha;
+        let f_i = alpha.mul_add(out_filter[i - 1], 0.5 * one_m_a * (src[i] + src[i - 1]));
+        out_filter[i] = f_i;
+
+        let tr_i = tr[i];
+        let ftr_i = alpha.mul_add(ftr_prev, 0.5 * one_m_a * (tr_i + tr_prev));
+        tr_prev = tr_i;
+        ftr_prev = ftr_i;
+        out_high[i] = f_i + ftr_i * tm;
+        out_low[i] = f_i - ftr_i * tm;
+
+        // i+1
+        let i1 = i + 1;
+        let p_i1 = per_bar_period(dc.as_deref(), i1, fixed_period, cycle_mult);
+        if p_i1 != last_p {
+            last_p = p_i1;
+            alpha = alpha_from_period(last_p);
+        }
+        let one_m_a1 = 1.0 - alpha;
+        let f_i1 = alpha.mul_add(f_i, 0.5 * one_m_a1 * (src[i1] + src[i]));
+        out_filter[i1] = f_i1;
+
+        let tr_i1 = tr[i1];
+        let ftr_i1 = alpha.mul_add(ftr_prev, 0.5 * one_m_a1 * (tr_i1 + tr_prev));
+        tr_prev = tr_i1;
+        ftr_prev = ftr_i1;
+        out_high[i1] = f_i1 + ftr_i1 * tm;
+        out_low[i1] = f_i1 - ftr_i1 * tm;
+
+        i += 2;
+    }
+
+    if i < len {
+        let p_i = per_bar_period(dc.as_deref(), i, fixed_period, cycle_mult);
+        if p_i != last_p {
+            last_p = p_i;
+            alpha = alpha_from_period(last_p);
+        }
+        let one_m_a = 1.0 - alpha;
+        let f_i = alpha.mul_add(out_filter[i - 1], 0.5 * one_m_a * (src[i] + src[i - 1]));
+        out_filter[i] = f_i;
+
+        let tr_i = tr[i];
+        let ftr_i = alpha.mul_add(ftr_prev, 0.5 * one_m_a * (tr_i + tr_prev));
+        out_high[i] = f_i + ftr_i * tr_mult;
+        out_low[i] = f_i - ftr_i * tr_mult;
     }
 }
 
@@ -1842,6 +2118,8 @@ fn lpc_batch_inner_into(
 ) -> Result<(), LpcError> {
     let combos = expand_grid_lpc(sweep);
     let cols = src.len();
+    // Precompute TR once across all rows to avoid redundant work
+    let tr_series = calculate_true_range(high, low, close);
 
     let kern = match k {
         Kernel::Auto => detect_best_batch_kernel(),
@@ -1862,11 +2140,12 @@ fn lpc_batch_inner_into(
         };
         let (f_dst, h_dst, l_dst) = (rowslice(0), rowslice(1), rowslice(2));
 
-        lpc_compute_into_prefilled(
+        lpc_compute_into_prefilled_pretr(
             high,
             low,
             close,
             src,
+            &tr_series,
             params.cutoff_type.as_ref().unwrap(),
             params.fixed_period.unwrap(),
             params.max_cycle_limit.unwrap(),

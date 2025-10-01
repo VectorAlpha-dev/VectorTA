@@ -18,9 +18,10 @@
 //! - **low_band**: Vector of lower band values
 //!
 //! ## Developer Notes
-//! - **AVX2/AVX512 Kernels**: Stubs that call scalar implementation
-//! - **Streaming**: Implemented with O(1) update performance (maintains running EMAs)
-//! - **Zero-copy Memory**: Uses alloc_with_nan_prefix and make_uninit_matrix for batch operations
+//! - Decision: SIMD kept as stubs. The core loop is inherently sequential (stateful EMAs + clamp), so AVX2/AVX512 do not provide a clear win here. Runtime selection still routes through the stubs which delegate to the scalar path.
+//! - Batch: minor row-specific optimization only when multiple parameter rows are requested (precomputes abs-change once). It is gated to avoid overhead for the common single-row case used in benches/tests.
+//! - Streaming: Implemented with O(1) update performance (maintains running EMAs)
+//! - Zero-copy Memory: Uses alloc_with_nan_prefix and make_uninit_matrix for batch operations
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -481,6 +482,14 @@ pub fn range_filter_with_kernel(
         &mut low_band,
     )?;
 
+    // Ensure warmup prefix remains NaN, matching documented behavior and into_slice()
+    let n = data.len();
+    for i in 0..warmup_end.min(n) {
+        filter[i] = f64::NAN;
+        high_band[i] = f64::NAN;
+        low_band[i] = f64::NAN;
+    }
+
     Ok(RangeFilterOutput {
         filter,
         high_band,
@@ -644,93 +653,225 @@ pub fn range_filter_scalar(
         return Ok(());
     }
 
-    // Calculate average change using conditional EMA with first-sample seeding (Donovan Wall style)
-    let mut ac_ema: f64 = 0.0;
-    let mut ac_initialized = false;
+    // EMA constants hoisted to keep arithmetic identical but reduce per-iter ops
     let alpha_ac = 2.0 / (range_period as f64 + 1.0);
-
-    // Range smoothing EMA state with first-sample seeding
-    let mut range_ema: f64 = 0.0;
-    let mut range_initialized = false;
+    let one_minus_alpha_ac = 1.0 - alpha_ac;
     let alpha_range = if smooth_range {
         2.0 / (smooth_period as f64 + 1.0)
     } else {
         0.0
     };
+    let one_minus_alpha_range = 1.0 - alpha_range;
 
-    // Initialize filter with first valid value
-    let mut prev_filter = f64::NAN;
-    let mut filter_initialized = false;
+    // Running state
+    let mut ac_ema: f64 = 0.0;
+    let mut ac_initialized = false;
+    let mut range_ema: f64 = 0.0;
+    let mut range_initialized = false;
 
-    // Initialize filter with first price (like Pine Script's var rfilt initialization)
-    if first < n {
-        prev_filter = data[first];
-        filter_initialized = true;
+    // Seed filter and prev price from the first valid element
+    let mut prev_filter = if first < n { data[first] } else { f64::NAN };
+    let mut prev_price = prev_filter;
+
+    // Nothing to do if there isn't a next element to form a difference
+    if first + 1 >= n {
+        return Ok(());
     }
 
-    for i in first..n {
-        let price = data[i];
+    // Start from the element after the first valid price to avoid an i==first branch
+    if !smooth_range {
+        // No extra range smoothing path: simpler hot loop
+        for i in (first + 1)..n {
+            let price = data[i];
 
-        // Calculate absolute change (average change)
-        // Note: On first bar (i==first), we can't calculate change, but we still process
-        let abs_change = if i > first {
-            (price - data[i - 1]).abs()
-        } else {
-            // First bar: no previous price to compare
-            // Pine Script would have NA here, but we need to continue for filter initialization
-            f64::NAN
-        };
-
-        // Update Average Change with conditional EMA
-        if !abs_change.is_nan() {
-            if !ac_initialized {
-                // Initialize with first valid abs_change
-                ac_ema = abs_change;
-                ac_initialized = true;
-            } else {
-                // Standard EMA update after initialization
-                ac_ema = alpha_ac * abs_change + (1.0 - alpha_ac) * ac_ema;
+            // Average Change EMA update (Donovan Wall style seeding)
+            let d = price - prev_price;
+            let abs_change = d.abs();
+            if !abs_change.is_nan() {
+                if !ac_initialized {
+                    ac_ema = abs_change;
+                    ac_initialized = true;
+                } else {
+                    ac_ema = alpha_ac * abs_change + one_minus_alpha_ac * ac_ema;
+                }
             }
+
+            if !ac_initialized {
+                prev_price = price;
+                continue;
+            }
+
+            let range = ac_ema * range_size;
+
+            // Clamp previous filter into [price - range, price + range]
+            let min_b = price - range;
+            let max_b = price + range;
+            let current = prev_filter.clamp(min_b, max_b);
+
+            filter[i] = current;
+            high_band[i] = current + range;
+            low_band[i] = current - range;
+
+            prev_filter = current;
+            prev_price = price;
         }
+    } else {
+        // With range smoothing path
+        for i in (first + 1)..n {
+            let price = data[i];
 
-        // Skip if we don't have AC initialized yet
-        if !ac_initialized {
-            // Don't overwrite the pre-filled NaN values
-            continue;
-        }
+            // Average Change EMA update (Donovan Wall style seeding)
+            let d = price - prev_price;
+            let abs_change = d.abs();
+            if !abs_change.is_nan() {
+                if !ac_initialized {
+                    ac_ema = abs_change;
+                    ac_initialized = true;
+                } else {
+                    ac_ema = alpha_ac * abs_change + one_minus_alpha_ac * ac_ema;
+                }
+            }
 
-        // Calculate range
-        let mut range = ac_ema * range_size;
+            if !ac_initialized {
+                prev_price = price;
+                continue;
+            }
 
-        // Smooth range if enabled (with first-sample seeding)
-        if smooth_range {
+            let mut range = ac_ema * range_size;
             if !range_initialized {
-                // Seed with first range value
                 range_ema = range;
                 range_initialized = true;
             } else {
-                // Standard EMA update for range smoothing
-                range_ema = alpha_range * range + (1.0 - alpha_range) * range_ema;
+                range_ema = alpha_range * range + one_minus_alpha_range * range_ema;
             }
             range = range_ema;
+
+            // Clamp previous filter into [price - range, price + range]
+            let min_b = price - range;
+            let max_b = price + range;
+            let current = prev_filter.clamp(min_b, max_b);
+
+            filter[i] = current;
+            high_band[i] = current + range;
+            low_band[i] = current - range;
+
+            prev_filter = current;
+            prev_price = price;
         }
+    }
 
-        // Type 1 Range Filter logic - using close prices
-        let mut current_filter = prev_filter;
+    Ok(())
+}
 
-        // Update filter based on price movement
-        if price - range > prev_filter {
-            current_filter = price - range;
-        } else if price + range < prev_filter {
-            current_filter = price + range;
+#[inline]
+fn range_filter_scalar_with_abs_change(
+    data: &[f64],
+    abs_change: &[f64],
+    range_size: f64,
+    range_period: usize,
+    smooth_range: bool,
+    smooth_period: usize,
+    first: usize,
+    filter: &mut [f64],
+    high_band: &mut [f64],
+    low_band: &mut [f64],
+) -> Result<(), RangeFilterError> {
+    let n = data.len();
+    if n == 0 {
+        return Ok(());
+    }
+
+    // EMA constants
+    let alpha_ac = 2.0 / (range_period as f64 + 1.0);
+    let one_minus_alpha_ac = 1.0 - alpha_ac;
+    let alpha_range = if smooth_range {
+        2.0 / (smooth_period as f64 + 1.0)
+    } else {
+        0.0
+    };
+    let one_minus_alpha_range = 1.0 - alpha_range;
+
+    let mut ac_ema: f64 = 0.0;
+    let mut ac_initialized = false;
+    let mut range_ema: f64 = 0.0;
+    let mut range_initialized = false;
+
+    // Seed prev filter from first valid price
+    let mut prev_filter = if first < n { data[first] } else { f64::NAN };
+
+    if first + 1 >= n {
+        return Ok(());
+    }
+
+    if !smooth_range {
+        for i in (first + 1)..n {
+            let price = data[i];
+
+            // Update AC EMA from precomputed abs_change
+            let ac = abs_change[i];
+            if !ac.is_nan() {
+                if !ac_initialized {
+                    ac_ema = ac;
+                    ac_initialized = true;
+                } else {
+                    ac_ema = alpha_ac * ac + one_minus_alpha_ac * ac_ema;
+                }
+            }
+
+            if !ac_initialized {
+                continue;
+            }
+
+            let range = ac_ema * range_size;
+
+            let min_b = price - range;
+            let max_b = price + range;
+            let current = prev_filter.clamp(min_b, max_b);
+
+            filter[i] = current;
+            high_band[i] = current + range;
+            low_band[i] = current - range;
+
+            prev_filter = current;
         }
+    } else {
+        for i in (first + 1)..n {
+            let price = data[i];
 
-        // Store outputs
-        filter[i] = current_filter;
-        high_band[i] = current_filter + range;
-        low_band[i] = current_filter - range;
+            // Update AC EMA from precomputed abs_change
+            let ac = abs_change[i];
+            if !ac.is_nan() {
+                if !ac_initialized {
+                    ac_ema = ac;
+                    ac_initialized = true;
+                } else {
+                    ac_ema = alpha_ac * ac + one_minus_alpha_ac * ac_ema;
+                }
+            }
 
-        prev_filter = current_filter;
+            if !ac_initialized {
+                continue;
+            }
+
+            let mut range = ac_ema * range_size;
+            if !range_initialized {
+                range_ema = range;
+                range_initialized = true;
+            } else {
+                range_ema = alpha_range * range + one_minus_alpha_range * range_ema;
+            }
+            range = range_ema;
+
+            let min_b = price - range;
+            let max_b = price + range;
+            let current = prev_filter.clamp(min_b, max_b);
+
+            filter[i] = current;
+            high_band[i] = current + range;
+            low_band[i] = current - range;
+
+            prev_filter = current;
+        }
     }
 
     Ok(())
@@ -1043,6 +1184,25 @@ fn range_filter_batch_inner_into(
         _ => actual, // already single
     };
 
+    // Precompute absolute changes once (shared across rows) to avoid redundant work
+    // Only used for scalar rows; AVX stubs currently delegate to scalar as well.
+    let abs_change: Option<Vec<f64>> = {
+        // Only beneficial when multiple rows share it
+        if combos.len() > 1 && first + 1 < cols {
+            let mut diffs = vec![f64::NAN; cols];
+            let mut prev = data[first];
+            for i in (first + 1)..cols {
+                let p = data[i];
+                let d = p - prev;
+                diffs[i] = if d < 0.0 { -d } else { d };
+                prev = p;
+            }
+            Some(diffs)
+        } else {
+            None
+        }
+    };
+
     let do_row = |row: usize,
                   f_row: &mut [f64],
                   h_row: &mut [f64],
@@ -1055,19 +1215,35 @@ fn range_filter_batch_inner_into(
         let smooth_range = p.smooth_range.unwrap_or(true);
         let smooth_period = p.smooth_period.unwrap_or(27);
 
-        // Compute via the kernel switch inside range_filter_compute_into
-        range_filter_compute_into(
-            data,
-            range_size,
-            range_period,
-            smooth_range,
-            smooth_period,
-            first,
-            chosen_single,
-            f_row,
-            h_row,
-            l_row,
-        )
+        // Fast scalar path uses precomputed abs_change if available
+        if let (Kernel::Scalar, Some(ref diffs)) = (chosen_single, &abs_change) {
+            range_filter_scalar_with_abs_change(
+                data,
+                diffs,
+                range_size,
+                range_period,
+                smooth_range,
+                smooth_period,
+                first,
+                f_row,
+                h_row,
+                l_row,
+            )
+        } else {
+            // Fallback to the general kernel dispatch
+            range_filter_compute_into(
+                data,
+                range_size,
+                range_period,
+                smooth_range,
+                smooth_period,
+                first,
+                chosen_single,
+                f_row,
+                h_row,
+                l_row,
+            )
+        }
     };
 
     if parallel {
