@@ -16,8 +16,8 @@
 //!
 //! ## Developer Notes
 //! - SIMD: not implemented for this indicator; workload is sequential/windowed and largely memory-bound/branch-heavy. Keep scalar as reference path.
-//! - Scalar classic path optimized: O(1) rolling updates for mean/stddev/TR with monotonic deques for highs/lows and closed-form linreg; used for default params.
-//! - Allocation: follows alma.rs patterns (warmup NaN prefix; zero-copy helpers). Batch uses per-row scalar; no row-specific batch kernel wired yet.
+//! - Scalar classic path optimized: O(1) rolling updates for mean/stddev/TR with monotonic deques for highs/lows and closed-form linreg; used for default params. Small micro-opt hoists 1/den.
+//! - Batch (ScalarBatch): row-specific path implemented. Rows are grouped by `length` and share a single rolling state; momentum is shared per-length and squeeze levels are computed per-row using squared-threshold compares. Other batch kernels fall back to per-row computation.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyUntypedArrayMethods};
@@ -1022,6 +1022,7 @@ pub unsafe fn ttm_squeeze_scalar_classic(
     let sx = 0.5 * n * (n - 1.0);
     let sx2 = (n - 1.0) * n * (2.0 * n - 1.0) / 6.0;
     let den = n * sx2 - sx * sx; // > 0 for n >= 2
+    let inv_den = 1.0 / den; // hoist division
     let inv_n = 1.0 / n;
     let half_nm1 = 0.5 * (n - 1.0);
 
@@ -1139,7 +1140,7 @@ pub unsafe fn ttm_squeeze_scalar_classic(
         let avg = 0.5 * (midpoint + m);
         let sy  = sum0 - avg * n;
         let sxy = sum1 - avg * sx;
-        let slope = n.mul_add(sxy, -(sx * sy)) / den;
+        let slope = n.mul_add(sxy, -(sx * sy)) * inv_den;
         *momentum.get_unchecked_mut(warmup) = sy * inv_n + slope * half_nm1;
     }
 
@@ -1237,7 +1238,7 @@ pub unsafe fn ttm_squeeze_scalar_classic(
         let avg = 0.5 * (midpoint + m);
         let sy  = sum0 - avg * n;
         let sxy = sum1 - avg * sx;
-        let slope = n.mul_add(sxy, -(sx * sy)) / den;
+        let slope = n.mul_add(sxy, -(sx * sy)) * inv_den;
         *momentum.get_unchecked_mut(i) = sy * inv_n + slope * half_nm1;
 
         i += 1;
@@ -1751,13 +1752,248 @@ pub fn ttm_squeeze_batch_with_kernel(
         _ => unreachable!(),
     };
 
-    // Process each parameter combination
-    for (row, p) in combos.iter().enumerate() {
-        let input = TtmSqueezeInput::from_slices(high, low, close, p.clone());
-        let dst_m = &mut mom_slice[row * cols..(row + 1) * cols];
-        let dst_s = &mut sqz_slice[row * cols..(row + 1) * cols];
+    // Row-specific optimization for ScalarBatch: group rows by length and
+    // share rolling state across rows that only differ by multipliers.
+    if chosen_batch == Kernel::ScalarBatch {
+        // Collect unique lengths
+        let mut lengths: Vec<usize> = Vec::new();
+        for p in &combos {
+            let l = p.length.unwrap_or(20);
+            if !lengths.contains(&l) {
+                lengths.push(l);
+            }
+        }
 
-        ttm_squeeze_into_slices(dst_m, dst_s, &input, row_kernel)?;
+        for l in lengths {
+            if l < 2 || first + l > cols { continue; }
+
+            // Gather rows for this length and precompute squared multipliers
+            struct RowCfg { row: usize, bb_sq: f64, kc_low_sq: f64, kc_mid_sq: f64, kc_high_sq: f64 }
+            let mut group: Vec<RowCfg> = Vec::new();
+            for (idx, p) in combos.iter().enumerate() {
+                if p.length.unwrap_or(20) == l {
+                    let bb = p.bb_mult.unwrap_or(2.0);
+                    let kh = p.kc_mult_high.unwrap_or(1.0);
+                    let km = p.kc_mult_mid.unwrap_or(1.5);
+                    let kl = p.kc_mult_low.unwrap_or(2.0);
+                    group.push(RowCfg { row: idx, bb_sq: bb*bb, kc_low_sq: kl*kl, kc_mid_sq: km*km, kc_high_sq: kh*kh });
+                }
+            }
+            if group.is_empty() { continue; }
+
+            let n = l as f64;
+            let sx  = 0.5 * n * (n - 1.0);
+            let sx2 = (n - 1.0) * n * (2.0 * n - 1.0) / 6.0;
+            let den = n * sx2 - sx * sx;
+            let inv_den = 1.0 / den;
+            let inv_n = 1.0 / n;
+            let half_nm1 = 0.5 * (n - 1.0);
+
+            // Rolling buffers
+            let mut cbuf = vec![0.0f64; l];
+            let mut trbuf = vec![0.0f64; l];
+            let (mut cpos, mut trpos) = (0usize, 0usize);
+            let mut sum0 = 0.0f64;
+            let mut sum1 = 0.0f64;
+            let mut sumsq = 0.0f64;
+            let mut tr_sum = 0.0f64;
+
+            // Deques for highs/lows (indices)
+            let cap = l;
+            let mut max_q = vec![0usize; cap];
+            let mut min_q = vec![0usize; cap];
+            let (mut max_head, mut max_tail, mut max_len) = (0usize, 0usize, 0usize);
+            let (mut min_head, mut min_tail, mut min_len) = (0usize, 0usize, 0usize);
+
+            let warm = first + l - 1;
+
+            // Seed [first ..= warm]
+            let mut r = 0usize;
+            let mut i = first;
+            while i <= warm {
+                let c = close[i];
+                cbuf[cpos] = c;
+                sum0 += c;
+                sumsq = c.mul_add(c, sumsq);
+                sum1 += (r as f64) * c;
+
+                // TR
+                let tr_val = if i == first {
+                    high[i] - low[i]
+                } else {
+                    let pc = close[i - 1];
+                    let hl = high[i] - low[i];
+                    let hc = (high[i] - pc).abs();
+                    let lc = (low[i] - pc).abs();
+                    hl.max(hc).max(lc)
+                };
+                trbuf[trpos] = tr_val;
+                tr_sum += tr_val;
+
+                // max deque
+                while max_len > 0 {
+                    let back_pos = if max_tail == 0 { cap - 1 } else { max_tail - 1 };
+                    let back_idx = max_q[back_pos];
+                    if high[i] <= high[back_idx] { break; }
+                    max_tail = back_pos; max_len -= 1;
+                }
+                max_q[max_tail] = i;
+                max_tail += 1; if max_tail == cap { max_tail = 0; }
+                max_len += 1;
+
+                // min deque
+                while min_len > 0 {
+                    let back_pos = if min_tail == 0 { cap - 1 } else { min_tail - 1 };
+                    let back_idx = min_q[back_pos];
+                    if low[i] >= low[back_idx] { break; }
+                    min_tail = back_pos; min_len -= 1;
+                }
+                min_q[min_tail] = i;
+                min_tail += 1; if min_tail == cap { min_tail = 0; }
+                min_len += 1;
+
+                cpos += 1; if cpos == l { cpos = 0; }
+                trpos += 1; if trpos == l { trpos = 0; }
+                r += 1; i += 1;
+            }
+
+            // Emit at warmup
+            let m = sum0 * inv_n;
+            let var = (-m).mul_add(m, sumsq * inv_n);
+            let var_pos = if var > 0.0 { var } else { 0.0 };
+            let dkc = tr_sum * inv_n;
+            let dkc2 = dkc * dkc;
+
+            // Highest/lowest via deques
+            let hi_idx = max_q[max_head];
+            let lo_idx = min_q[min_head];
+            let highest = high[hi_idx];
+            let lowest = low[lo_idx];
+            let midpoint = 0.5 * (highest + lowest);
+            let avg = 0.5 * (midpoint + m);
+            let sy  = sum0 - avg * n;
+            let sxy = sum1 - avg * sx;
+            let slope = n.mul_add(sxy, -(sx * sy)) * inv_den;
+            let mom_val = sy * inv_n + slope * half_nm1;
+
+            for rc in &group {
+                // Squeeze levels without sqrt
+                let bbv = rc.bb_sq * var_pos;
+                let t_low = rc.kc_low_sq * dkc2;
+                let t_mid = rc.kc_mid_sq * dkc2;
+                let t_high = rc.kc_high_sq * dkc2;
+                let sqz = if bbv > t_low { 0.0 } else if bbv <= t_high { 3.0 } else if bbv <= t_mid { 2.0 } else { 1.0 };
+                let s_off = rc.row * cols + warm;
+                let m_off = rc.row * cols + warm;
+                sqz_slice[s_off] = sqz;
+                mom_slice[m_off] = mom_val;
+            }
+
+            // Slide
+            let mut i = warm + 1;
+            while i < cols {
+                let start_idx = i + 1 - l;
+                // Evict expired
+                while max_len > 0 {
+                    let front_idx = max_q[max_head];
+                    if front_idx >= start_idx { break; }
+                    max_head += 1; if max_head == cap { max_head = 0; }
+                    max_len -= 1;
+                }
+                while min_len > 0 {
+                    let front_idx = min_q[min_head];
+                    if front_idx >= start_idx { break; }
+                    min_head += 1; if min_head == cap { min_head = 0; }
+                    min_len -= 1;
+                }
+
+                // Push new
+                while max_len > 0 {
+                    let back_pos = if max_tail == 0 { cap - 1 } else { max_tail - 1 };
+                    let back_idx = max_q[back_pos];
+                    if high[i] <= high[back_idx] { break; }
+                    max_tail = back_pos; max_len -= 1;
+                }
+                max_q[max_tail] = i;
+                max_tail += 1; if max_tail == cap { max_tail = 0; }
+                max_len += 1;
+
+                while min_len > 0 {
+                    let back_pos = if min_tail == 0 { cap - 1 } else { min_tail - 1 };
+                    let back_idx = min_q[back_pos];
+                    if low[i] >= low[back_idx] { break; }
+                    min_tail = back_pos; min_len -= 1;
+                }
+                min_q[min_tail] = i;
+                min_tail += 1; if min_tail == cap { min_tail = 0; }
+                min_len += 1;
+
+                // Rolling sums
+                let old = cbuf[cpos];
+                let new = close[i];
+                let sum0_old = sum0;
+                sum0 += new - old;
+                sumsq = new.mul_add(new, sumsq - old * old);
+                sum1 = sum1 - sum0_old + old + (n - 1.0) * new;
+                cbuf[cpos] = new;
+                cpos += 1; if cpos == l { cpos = 0; }
+
+                // TR rolling
+                let old_tr = trbuf[trpos];
+                let pc = close[i - 1];
+                let hi_i = high[i];
+                let lo_i = low[i];
+                let hl = hi_i - lo_i;
+                let hc = (hi_i - pc).abs();
+                let lc = (lo_i - pc).abs();
+                let tr_new = hl.max(hc).max(lc);
+                tr_sum += tr_new - old_tr;
+                trbuf[trpos] = tr_new;
+                trpos += 1; if trpos == l { trpos = 0; }
+
+                // Shared metrics
+                let m = sum0 * inv_n;
+                let var = (-m).mul_add(m, sumsq * inv_n);
+                let var_pos = if var > 0.0 { var } else { 0.0 };
+                let dkc = tr_sum * inv_n;
+                let dkc2 = dkc * dkc;
+
+                // Momentum shared
+                let hi_idx = max_q[max_head];
+                let lo_idx = min_q[min_head];
+                let highest = high[hi_idx];
+                let lowest = low[lo_idx];
+                let midpoint = 0.5 * (highest + lowest);
+                let avg = 0.5 * (midpoint + m);
+                let sy  = sum0 - avg * n;
+                let sxy = sum1 - avg * sx;
+                let slope = n.mul_add(sxy, -(sx * sy)) * inv_den;
+                let mom_val = sy * inv_n + slope * half_nm1;
+
+                for rc in &group {
+                    let bbv = rc.bb_sq * var_pos;
+                    let t_low = rc.kc_low_sq * dkc2;
+                    let t_mid = rc.kc_mid_sq * dkc2;
+                    let t_high = rc.kc_high_sq * dkc2;
+                    let sqz = if bbv > t_low { 0.0 } else if bbv <= t_high { 3.0 } else if bbv <= t_mid { 2.0 } else { 1.0 };
+                    let s_off = rc.row * cols + i;
+                    let m_off = rc.row * cols + i;
+                    sqz_slice[s_off] = sqz;
+                    mom_slice[m_off] = mom_val;
+                }
+
+                i += 1;
+            }
+        }
+    } else {
+        // Fallback: process each parameter combination independently
+        for (row, p) in combos.iter().enumerate() {
+            let input = TtmSqueezeInput::from_slices(high, low, close, p.clone());
+            let dst_m = &mut mom_slice[row * cols..(row + 1) * cols];
+            let dst_s = &mut sqz_slice[row * cols..(row + 1) * cols];
+
+            ttm_squeeze_into_slices(dst_m, dst_s, &input, row_kernel)?;
+        }
     }
 
     let momentum = unsafe {

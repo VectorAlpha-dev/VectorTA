@@ -17,11 +17,11 @@
 //! - **d**: Fast %D line as `Vec<f64>` (length matches input, range 0-100)
 //!
 //! ## Developer Notes
-//! - Scalar path optimized: O(n) via monotonic deques for rolling high/low (no O(n·k)).
-//! - SIMD status: AVX2/AVX512 remain stubs delegating to scalar. The deque-based hot path is not a good SIMD fit; underperforms when forced. Revisit only with a different algorithmic layout.
-//! - Streaming update still uses naive O(k) per tick; separate to the batch/scalar kernels.
-//! - Memory: follows ALMA patterns (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes).
-//! - %D supports SMA (matype=0). Other MA types are out of scope for now.
+//! - Scalar: optimized O(n) via ring-indexed monotonic deques; small-window path uses tight direct scans with unrolling; %K and %D (SMA) computed in one pass.
+//! - SIMD: AVX2/AVX512 implemented only for small windows; benches show underperformance vs scalar at 100k (default params). Runtime `Auto` short-circuits to `Scalar`.
+//! - Batch: per-row kernel mirrors scalar optimizations; no cross-row sharing (window-dependent extrema).
+//! - Streaming: still O(k) per tick.
+//! - Memory: follows ALMA patterns (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes). %D supports SMA (matype=0).
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
@@ -414,8 +414,9 @@ pub fn stochf_with_kernel(
     let mut k_vals = alloc_with_nan_prefix(len, k_warmup.min(len));
     let mut d_vals = alloc_with_nan_prefix(len, d_warmup.min(len));
 
+    // SIMD underperforms due to deque-dominant algorithm; prefer Scalar by default
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -478,116 +479,184 @@ pub unsafe fn stochf_scalar(
     k_vals: &mut [f64],
     d_vals: &mut [f64],
 ) {
+    debug_assert_eq!(high.len(), low.len());
+    debug_assert_eq!(high.len(), close.len());
+    debug_assert_eq!(high.len(), k_vals.len());
+    debug_assert_eq!(k_vals.len(), d_vals.len());
+
     let len = high.len();
+    if len == 0 { return; }
 
-    // Heuristic: for very small windows, a direct scan is faster.
+    let hp = high.as_ptr();
+    let lp = low.as_ptr();
+    let cp = close.as_ptr();
+
+    let k_start = first_valid_idx + fastk_period - 1;
+
+    // Small windows: direct scan with unrolling; compute %D (SMA) in the same pass
     if fastk_period <= 16 {
-        for i in (first_valid_idx + fastk_period - 1)..len {
-            let start = i + 1 - fastk_period;
-            let (mut hh, mut ll) = (f64::NEG_INFINITY, f64::INFINITY);
-            for j in start..=i {
-                let h_j = high[j];
-                let l_j = low[j];
-                if h_j > hh { hh = h_j; }
-                if l_j < ll { ll = l_j; }
-            }
-            if hh == ll {
-                k_vals[i] = if close[i] == hh { 100.0 } else { 0.0 };
-            } else {
-                k_vals[i] = 100.0 * (close[i] - ll) / (hh - ll);
-            }
-        }
-    } else {
-        // Monotonic deques (ring buffers) for rolling highest-high and lowest-low
-        let cap = fastk_period;
-        let mut qh = vec![0usize; cap];
-        let mut ql = vec![0usize; cap];
-        let mut qh_head = 0usize;
-        let mut ql_head = 0usize;
-        let mut qh_len = 0usize;
-        let mut ql_len = 0usize;
+        let use_sma_d = matype == 0;
+        let mut d_sum: f64 = 0.0;
+        let mut d_cnt: usize = 0;
 
-        let k_start = first_valid_idx + fastk_period - 1;
-
-        let mut i = first_valid_idx;
+        let mut i = k_start;
         while i < len {
-            // Expire elements sliding out of the window [i+1-fastk_period, i]
-            if i + 1 >= fastk_period {
-                let window_start = i + 1 - fastk_period;
-                while qh_len > 0 {
-                    let front_idx = qh[qh_head];
-                    if front_idx >= window_start { break; }
-                    qh_head = (qh_head + 1) % cap; qh_len -= 1;
-                }
-                while ql_len > 0 {
-                    let front_idx = ql[ql_head];
-                    if front_idx >= window_start { break; }
-                    ql_head = (ql_head + 1) % cap; ql_len -= 1;
-                }
+            let start = i + 1 - fastk_period;
+            let end = i + 1;
+
+            let mut hh = f64::NEG_INFINITY;
+            let mut ll = f64::INFINITY;
+
+            let mut j = start;
+            let unroll_end = end - ((end - j) & 3);
+            while j < unroll_end {
+                let h0 = *hp.add(j);
+                let l0 = *lp.add(j);
+                if h0 > hh { hh = h0; }
+                if l0 < ll { ll = l0; }
+
+                let h1 = *hp.add(j + 1);
+                let l1 = *lp.add(j + 1);
+                if h1 > hh { hh = h1; }
+                if l1 < ll { ll = l1; }
+
+                let h2 = *hp.add(j + 2);
+                let l2 = *lp.add(j + 2);
+                if h2 > hh { hh = h2; }
+                if l2 < ll { ll = l2; }
+
+                let h3 = *hp.add(j + 3);
+                let l3 = *lp.add(j + 3);
+                if h3 > hh { hh = h3; }
+                if l3 < ll { ll = l3; }
+
+                j += 4;
+            }
+            while j < end {
+                let h = *hp.add(j);
+                let l = *lp.add(j);
+                if h > hh { hh = h; }
+                if l < ll { ll = l; }
+                j += 1;
             }
 
-            let h_i = high[i];
-            if h_i == h_i { // not NaN
-                while qh_len > 0 {
-                    let back_pos = (qh_head + qh_len - 1) % cap;
-                    let back_idx = qh[back_pos];
-                    if !(high[back_idx] <= h_i) { break; }
-                    qh_len -= 1;
-                }
-                let ins_pos = (qh_head + qh_len) % cap; qh[ins_pos] = i; qh_len += 1;
-            }
+            let c = *cp.add(i);
+            let denom = hh - ll;
+            let kv = if denom == 0.0 {
+                if c == hh { 100.0 } else { 0.0 }
+            } else {
+                let inv = 100.0 / denom;
+                c.mul_add(inv, (-ll) * inv)
+            };
+            *k_vals.get_unchecked_mut(i) = kv;
 
-            let l_i = low[i];
-            if l_i == l_i { // not NaN
-                while ql_len > 0 {
-                    let back_pos = (ql_head + ql_len - 1) % cap;
-                    let back_idx = ql[back_pos];
-                    if !(low[back_idx] >= l_i) { break; }
-                    ql_len -= 1;
-                }
-                let ins_pos = (ql_head + ql_len) % cap; ql[ins_pos] = i; ql_len += 1;
-            }
-
-            if i >= k_start {
-                let hh = if qh_len > 0 { high[qh[qh_head]] } else { f64::NEG_INFINITY };
-                let ll = if ql_len > 0 { low[ql[ql_head]] } else { f64::INFINITY };
-                let c_i = close[i];
-                let denom = hh - ll;
-                k_vals[i] = if denom == 0.0 {
-                    if c_i == hh { 100.0 } else { 0.0 }
+            if use_sma_d {
+                if kv.is_nan() {
+                    *d_vals.get_unchecked_mut(i) = f64::NAN;
+                } else if d_cnt < fastd_period {
+                    d_sum += kv; d_cnt += 1;
+                    if d_cnt == fastd_period {
+                        *d_vals.get_unchecked_mut(i) = d_sum / (fastd_period as f64);
+                    } else {
+                        *d_vals.get_unchecked_mut(i) = f64::NAN;
+                    }
                 } else {
-                    let inv = 100.0 / denom; c_i.mul_add(inv, (-ll) * inv)
-                };
+                    d_sum += kv - *k_vals.get_unchecked(i - fastd_period);
+                    *d_vals.get_unchecked_mut(i) = d_sum / (fastd_period as f64);
+                }
             }
 
             i += 1;
         }
+
+        if matype != 0 { d_vals.fill(f64::NAN); }
+        return;
     }
-    if matype != 0 {
-        d_vals.fill(f64::NAN);
-    } else {
-        let mut sma_sum = 0.0;
-        let mut count = 0;
-        for i in 0..len {
-            let v = k_vals[i];
-            if v.is_nan() {
-                d_vals[i] = f64::NAN;
-                continue;
+
+    // General path: ring-indexed monotonic deques without modulo in hot path; loop-jammed %D (SMA)
+    let cap = fastk_period;
+    let mut qh = vec![0usize; cap];
+    let mut ql = vec![0usize; cap];
+    let mut qh_head = 0usize;
+    let mut qh_tail = 0usize;
+    let mut ql_head = 0usize;
+    let mut ql_tail = 0usize;
+
+    let use_sma_d = matype == 0;
+    let mut d_sum: f64 = 0.0;
+    let mut d_cnt: usize = 0;
+
+    let mut i = first_valid_idx;
+    while i < len {
+        if i + 1 >= fastk_period {
+            let win_start = i + 1 - fastk_period;
+            while qh_head != qh_tail {
+                let idx = *qh.get_unchecked(qh_head);
+                if idx >= win_start { break; }
+                qh_head += 1; if qh_head == cap { qh_head = 0; }
             }
-            if count < fastd_period {
-                sma_sum += v;
-                count += 1;
-                if count == fastd_period {
-                    d_vals[i] = sma_sum / (fastd_period as f64);
-                } else {
-                    d_vals[i] = f64::NAN;
-                }
-            } else {
-                sma_sum += v - k_vals[i - fastd_period];
-                d_vals[i] = sma_sum / (fastd_period as f64);
+            while ql_head != ql_tail {
+                let idx = *ql.get_unchecked(ql_head);
+                if idx >= win_start { break; }
+                ql_head += 1; if ql_head == cap { ql_head = 0; }
             }
         }
+
+        let h_i = *hp.add(i);
+        if h_i == h_i {
+            while qh_head != qh_tail {
+                let back = if qh_tail == 0 { cap - 1 } else { qh_tail - 1 };
+                let back_idx = *qh.get_unchecked(back);
+                if *hp.add(back_idx) <= h_i { qh_tail = back; } else { break; }
+            }
+            *qh.get_unchecked_mut(qh_tail) = i;
+            qh_tail += 1; if qh_tail == cap { qh_tail = 0; }
+        }
+
+        let l_i = *lp.add(i);
+        if l_i == l_i {
+            while ql_head != ql_tail {
+                let back = if ql_tail == 0 { cap - 1 } else { ql_tail - 1 };
+                let back_idx = *ql.get_unchecked(back);
+                if *lp.add(back_idx) >= l_i { ql_tail = back; } else { break; }
+            }
+            *ql.get_unchecked_mut(ql_tail) = i;
+            ql_tail += 1; if ql_tail == cap { ql_tail = 0; }
+        }
+
+        if i >= k_start {
+            let hh = if qh_head != qh_tail { *hp.add(*qh.get_unchecked(qh_head)) } else { f64::NEG_INFINITY };
+            let ll = if ql_head != ql_tail { *lp.add(*ql.get_unchecked(ql_head)) } else { f64::INFINITY };
+            let c = *cp.add(i);
+            let denom = hh - ll;
+            let kv = if denom == 0.0 {
+                if c == hh { 100.0 } else { 0.0 }
+            } else {
+                let inv = 100.0 / denom; c.mul_add(inv, (-ll) * inv)
+            };
+            *k_vals.get_unchecked_mut(i) = kv;
+
+            if use_sma_d {
+                if kv.is_nan() {
+                    *d_vals.get_unchecked_mut(i) = f64::NAN;
+                } else if d_cnt < fastd_period {
+                    d_sum += kv; d_cnt += 1;
+                    if d_cnt == fastd_period {
+                        *d_vals.get_unchecked_mut(i) = d_sum / (fastd_period as f64);
+                    } else {
+                        *d_vals.get_unchecked_mut(i) = f64::NAN;
+                    }
+                } else {
+                    d_sum += kv - *k_vals.get_unchecked(i - fastd_period);
+                    *d_vals.get_unchecked_mut(i) = d_sum / (fastd_period as f64);
+                }
+            }
+        }
+
+        i += 1;
     }
+
+    if !use_sma_d { d_vals.fill(f64::NAN); }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -609,25 +678,33 @@ pub unsafe fn stochf_avx2(
         let start_i = first_valid_idx + fastk_period - 1;
         let neg_inf = _mm256_set1_pd(f64::NEG_INFINITY);
         let pos_inf = _mm256_set1_pd(f64::INFINITY);
+
+        let use_sma_d = matype == 0;
+        let mut d_sum = 0.0f64;
+        let mut d_cnt: usize = 0;
+
         for i in start_i..len {
             let start = i + 1 - fastk_period;
-            // Vector reduce max(high[start..=i]) with NaNs treated as -INF
+            let end = i + 1;
+
             let mut vmax = neg_inf;
             let mut vmin = pos_inf;
             let mut j = start;
-            let end = i + 1;
             while j + 4 <= end {
                 let vh = _mm256_loadu_pd(high.as_ptr().add(j));
                 let vl = _mm256_loadu_pd(low.as_ptr().add(j));
+
                 let mask_h = _mm256_cmp_pd(vh, vh, _CMP_ORD_Q);
                 let mask_l = _mm256_cmp_pd(vl, vl, _CMP_ORD_Q);
                 let vh_nnan = _mm256_blendv_pd(neg_inf, vh, mask_h);
                 let vl_nnan = _mm256_blendv_pd(pos_inf, vl, mask_l);
+
                 vmax = _mm256_max_pd(vmax, vh_nnan);
                 vmin = _mm256_min_pd(vmin, vl_nnan);
                 j += 4;
             }
-            // Horizontal reduce 256-bit vectors to scalars
+
+            // Horizontal reduce
             let vmax_lo = _mm256_castpd256_pd128(vmax);
             let vmax_hi = _mm256_extractf128_pd(vmax, 1);
             let vmax_128 = _mm_max_pd(vmax_lo, vmax_hi);
@@ -640,7 +717,6 @@ pub unsafe fn stochf_avx2(
             let vmin_hi64 = _mm_unpackhi_pd(vmin_128, vmin_128);
             let mut ll = f64::min(_mm_cvtsd_f64(vmin_128), _mm_cvtsd_f64(vmin_hi64));
 
-            // Tail elements
             while j < end {
                 let h = *high.get_unchecked(j);
                 let l = *low.get_unchecked(j);
@@ -649,43 +725,36 @@ pub unsafe fn stochf_avx2(
                 j += 1;
             }
 
-            // Compute %K
-            if hh == ll {
-                k_vals[i] = if *close.get_unchecked(i) == hh { 100.0 } else { 0.0 };
+            // %K
+            let c = *close.get_unchecked(i);
+            let denom = hh - ll;
+            let kv = if denom == 0.0 {
+                if c == hh { 100.0 } else { 0.0 }
             } else {
-                let inv = 100.0 / (hh - ll);
-                k_vals[i] = (*close.get_unchecked(i)).mul_add(inv, (-ll) * inv);
+                let inv = 100.0 / denom;
+                c.mul_add(inv, (-ll) * inv)
+            };
+            *k_vals.get_unchecked_mut(i) = kv;
+
+            // %D (SMA) loop-jammed
+            if use_sma_d {
+                if kv.is_nan() {
+                    *d_vals.get_unchecked_mut(i) = f64::NAN;
+                } else if d_cnt < fastd_period {
+                    d_sum += kv; d_cnt += 1;
+                    if d_cnt == fastd_period {
+                        *d_vals.get_unchecked_mut(i) = d_sum / (fastd_period as f64);
+                    } else {
+                        *d_vals.get_unchecked_mut(i) = f64::NAN;
+                    }
+                } else {
+                    d_sum += kv - *k_vals.get_unchecked(i - fastd_period);
+                    *d_vals.get_unchecked_mut(i) = d_sum / (fastd_period as f64);
+                }
             }
         }
 
-        // %D (SMA)
-        if matype != 0 {
-            d_vals.fill(f64::NAN);
-        } else {
-            let mut sma_sum = 0.0;
-            let mut count = 0usize;
-            let len = k_vals.len();
-            for i in 0..len {
-                let v = *k_vals.get_unchecked(i);
-                if v.is_nan() {
-                    d_vals[i] = f64::NAN;
-                    continue;
-                }
-                if count < fastd_period {
-                    sma_sum += v;
-                    count += 1;
-                    if count == fastd_period {
-                        d_vals[i] = sma_sum / (fastd_period as f64);
-                    } else {
-                        d_vals[i] = f64::NAN;
-                    }
-                } else {
-                    let vold = *k_vals.get_unchecked(i - fastd_period);
-                    d_vals[i] = (sma_sum + v - vold) / (fastd_period as f64);
-                    sma_sum += v - vold;
-                }
-            }
-        }
+        if !use_sma_d { d_vals.fill(f64::NAN); }
     } else {
         stochf_scalar(
             high, low, close, fastk_period, fastd_period, matype, first_valid_idx, k_vals, d_vals,
@@ -1374,111 +1443,174 @@ unsafe fn stochf_row_scalar(
 ) {
     let len = high.len();
 
+    let hp = high.as_ptr();
+    let lp = low.as_ptr();
+    let cp = close.as_ptr();
+
+    let k_start = first + fastk_period - 1;
+
     if fastk_period <= 16 {
-        for i in (first + fastk_period - 1)..len {
+        let use_sma_d = matype == 0;
+        let mut d_sum: f64 = 0.0;
+        let mut d_cnt: usize = 0;
+
+        let mut i = k_start;
+        while i < len {
             let start = i + 1 - fastk_period;
-            let (mut hh, mut ll) = (f64::NEG_INFINITY, f64::INFINITY);
-            for j in start..=i {
-                let h = high[j];
-                let l = low[j];
+            let end = i + 1;
+
+            let mut hh = f64::NEG_INFINITY;
+            let mut ll = f64::INFINITY;
+
+            let mut j = start;
+            let unroll_end = end - ((end - j) & 3);
+            while j < unroll_end {
+                let h0 = *hp.add(j);
+                let l0 = *lp.add(j);
+                if h0 > hh { hh = h0; }
+                if l0 < ll { ll = l0; }
+
+                let h1 = *hp.add(j + 1);
+                let l1 = *lp.add(j + 1);
+                if h1 > hh { hh = h1; }
+                if l1 < ll { ll = l1; }
+
+                let h2 = *hp.add(j + 2);
+                let l2 = *lp.add(j + 2);
+                if h2 > hh { hh = h2; }
+                if l2 < ll { ll = l2; }
+
+                let h3 = *hp.add(j + 3);
+                let l3 = *lp.add(j + 3);
+                if h3 > hh { hh = h3; }
+                if l3 < ll { ll = l3; }
+
+                j += 4;
+            }
+            while j < end {
+                let h = *hp.add(j);
+                let l = *lp.add(j);
                 if h > hh { hh = h; }
                 if l < ll { ll = l; }
+                j += 1;
             }
-            if hh == ll {
-                k_out[i] = if close[i] == hh { 100.0 } else { 0.0 };
+
+            let c = *cp.add(i);
+            let denom = hh - ll;
+            let kv = if denom == 0.0 {
+                if c == hh { 100.0 } else { 0.0 }
             } else {
-                k_out[i] = 100.0 * (close[i] - ll) / (hh - ll);
-            }
-        }
-    } else {
-        // Per-row monotonic deques for highest-high and lowest-low
-        let cap = fastk_period;
-        let mut qh = vec![0usize; cap];
-        let mut ql = vec![0usize; cap];
-        let mut qh_head = 0usize;
-        let mut ql_head = 0usize;
-        let mut qh_len = 0usize;
-        let mut ql_len = 0usize;
+                let inv = 100.0 / denom; c.mul_add(inv, (-ll) * inv)
+            };
+            *k_out.get_unchecked_mut(i) = kv;
 
-        let k_start = first + fastk_period - 1;
-        let mut i = first;
-        while i < len {
-            if i + 1 >= fastk_period {
-                let window_start = i + 1 - fastk_period;
-                while qh_len > 0 {
-                    let front_idx = qh[qh_head];
-                    if front_idx >= window_start { break; }
-                    qh_head = (qh_head + 1) % cap; qh_len -= 1;
-                }
-                while ql_len > 0 {
-                    let front_idx = ql[ql_head];
-                    if front_idx >= window_start { break; }
-                    ql_head = (ql_head + 1) % cap; ql_len -= 1;
-                }
-            }
-
-            let h_i = high[i];
-            if h_i == h_i {
-                while qh_len > 0 {
-                    let back_pos = (qh_head + qh_len - 1) % cap;
-                    let back_idx = qh[back_pos];
-                    if !(high[back_idx] <= h_i) { break; }
-                    qh_len -= 1;
-                }
-                let ins_pos = (qh_head + qh_len) % cap; qh[ins_pos] = i; qh_len += 1;
-            }
-
-            let l_i = low[i];
-            if l_i == l_i {
-                while ql_len > 0 {
-                    let back_pos = (ql_head + ql_len - 1) % cap;
-                    let back_idx = ql[back_pos];
-                    if !(low[back_idx] >= l_i) { break; }
-                    ql_len -= 1;
-                }
-                let ins_pos = (ql_head + ql_len) % cap; ql[ins_pos] = i; ql_len += 1;
-            }
-
-            if i >= k_start {
-                let hh = if qh_len > 0 { high[qh[qh_head]] } else { f64::NEG_INFINITY };
-                let ll = if ql_len > 0 { low[ql[ql_head]] } else { f64::INFINITY };
-                let c_i = close[i];
-                let denom = hh - ll;
-                k_out[i] = if denom == 0.0 {
-                    if c_i == hh { 100.0 } else { 0.0 }
+            if use_sma_d {
+                if kv.is_nan() {
+                    *d_out.get_unchecked_mut(i) = f64::NAN;
+                } else if d_cnt < fastd_period {
+                    d_sum += kv; d_cnt += 1;
+                    if d_cnt == fastd_period {
+                        *d_out.get_unchecked_mut(i) = d_sum / (fastd_period as f64);
+                    } else {
+                        *d_out.get_unchecked_mut(i) = f64::NAN;
+                    }
                 } else {
-                    let inv = 100.0 / denom; c_i.mul_add(inv, (-ll) * inv)
-                };
+                    d_sum += kv - *k_out.get_unchecked(i - fastd_period);
+                    *d_out.get_unchecked_mut(i) = d_sum / (fastd_period as f64);
+                }
             }
 
             i += 1;
         }
+
+        if matype != 0 { d_out.fill(f64::NAN); }
+        return;
     }
-    if matype != 0 {
-        d_out.fill(f64::NAN);
-    } else {
-        let mut sma_sum = 0.0;
-        let mut count = 0;
-        for i in 0..len {
-            let v = k_out[i];
-            if v.is_nan() {
-                d_out[i] = f64::NAN;
-                continue;
+
+    // General path: ring-indexed monotonic deques without modulo in hot path; loop-jammed %D (SMA)
+    let cap = fastk_period;
+    let mut qh = vec![0usize; cap];
+    let mut ql = vec![0usize; cap];
+    let mut qh_head = 0usize;
+    let mut qh_tail = 0usize;
+    let mut ql_head = 0usize;
+    let mut ql_tail = 0usize;
+
+    let use_sma_d = matype == 0;
+    let mut d_sum: f64 = 0.0;
+    let mut d_cnt: usize = 0;
+
+    let mut i = first;
+    while i < len {
+        if i + 1 >= fastk_period {
+            let win_start = i + 1 - fastk_period;
+            while qh_head != qh_tail {
+                let idx = *qh.get_unchecked(qh_head);
+                if idx >= win_start { break; }
+                qh_head += 1; if qh_head == cap { qh_head = 0; }
             }
-            if count < fastd_period {
-                sma_sum += v;
-                count += 1;
-                if count == fastd_period {
-                    d_out[i] = sma_sum / (fastd_period as f64);
-                } else {
-                    d_out[i] = f64::NAN;
-                }
-            } else {
-                sma_sum += v - k_out[i - fastd_period];
-                d_out[i] = sma_sum / (fastd_period as f64);
+            while ql_head != ql_tail {
+                let idx = *ql.get_unchecked(ql_head);
+                if idx >= win_start { break; }
+                ql_head += 1; if ql_head == cap { ql_head = 0; }
             }
         }
+
+        let h_i = *hp.add(i);
+        if h_i == h_i {
+            while qh_head != qh_tail {
+                let back = if qh_tail == 0 { cap - 1 } else { qh_tail - 1 };
+                let back_idx = *qh.get_unchecked(back);
+                if *hp.add(back_idx) <= h_i { qh_tail = back; } else { break; }
+            }
+            *qh.get_unchecked_mut(qh_tail) = i;
+            qh_tail += 1; if qh_tail == cap { qh_tail = 0; }
+        }
+
+        let l_i = *lp.add(i);
+        if l_i == l_i {
+            while ql_head != ql_tail {
+                let back = if ql_tail == 0 { cap - 1 } else { ql_tail - 1 };
+                let back_idx = *ql.get_unchecked(back);
+                if *lp.add(back_idx) >= l_i { ql_tail = back; } else { break; }
+            }
+            *ql.get_unchecked_mut(ql_tail) = i;
+            ql_tail += 1; if ql_tail == cap { ql_tail = 0; }
+        }
+
+        if i >= k_start {
+            let hh = if qh_head != qh_tail { *hp.add(*qh.get_unchecked(qh_head)) } else { f64::NEG_INFINITY };
+            let ll = if ql_head != ql_tail { *lp.add(*ql.get_unchecked(ql_head)) } else { f64::INFINITY };
+            let c = *cp.add(i);
+            let denom = hh - ll;
+            let kv = if denom == 0.0 {
+                if c == hh { 100.0 } else { 0.0 }
+            } else {
+                let inv = 100.0 / denom; c.mul_add(inv, (-ll) * inv)
+            };
+            *k_out.get_unchecked_mut(i) = kv;
+
+            if use_sma_d {
+                if kv.is_nan() {
+                    *d_out.get_unchecked_mut(i) = f64::NAN;
+                } else if d_cnt < fastd_period {
+                    d_sum += kv; d_cnt += 1;
+                    if d_cnt == fastd_period {
+                        *d_out.get_unchecked_mut(i) = d_sum / (fastd_period as f64);
+                    } else {
+                        *d_out.get_unchecked_mut(i) = f64::NAN;
+                    }
+                } else {
+                    d_sum += kv - *k_out.get_unchecked(i - fastd_period);
+                    *d_out.get_unchecked_mut(i) = d_sum / (fastd_period as f64);
+                }
+            }
+        }
+
+        i += 1;
     }
+
+    if !use_sma_d { d_out.fill(f64::NAN); }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]

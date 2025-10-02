@@ -16,7 +16,7 @@
 //!     - scalar: ~49 µs (single-series bench group)
 //!     - avx2: ~23.6 µs, avx512: ~23.3 µs (>5% vs scalar)
 //!   - Stable scalar-only bench (legacy group `wclprice_bench`): ~31 µs after scalar optimizations.
-//! - Scalar path optimized: branch-free NaN propagation, unrolled by 4, uses `mul_add`.
+//! - Scalar path optimized: branch-free NaN propagation, unrolled by 8/4, uses `mul_add`.
 //! - Streaming Performance: O(1) per element; stateless.
 //! - Memory: uses `alloc_with_nan_prefix` and `make_uninit_matrix` for batch.
 //! - Batch: single-row only (no params); row SIMD reuses single-series kernels.
@@ -281,9 +281,52 @@ pub fn wclprice_scalar(
     const HALF: f64 = 0.5;
     const QUARTER: f64 = 0.25;
 
-    // Manually unroll by 4 to improve ILP and reduce loop overhead while staying safe.
+    // Manually unroll by 8 (then 4) to improve ILP and reduce loop overhead while staying safe.
     let mut i = first_valid;
     let end = len;
+    while i + 8 <= end {
+        let h0 = high[i + 0];
+        let l0 = low[i + 0];
+        let c0 = close[i + 0];
+        out[i + 0] = c0.mul_add(HALF, (h0 + l0) * QUARTER);
+
+        let h1 = high[i + 1];
+        let l1 = low[i + 1];
+        let c1 = close[i + 1];
+        out[i + 1] = c1.mul_add(HALF, (h1 + l1) * QUARTER);
+
+        let h2 = high[i + 2];
+        let l2 = low[i + 2];
+        let c2 = close[i + 2];
+        out[i + 2] = c2.mul_add(HALF, (h2 + l2) * QUARTER);
+
+        let h3 = high[i + 3];
+        let l3 = low[i + 3];
+        let c3 = close[i + 3];
+        out[i + 3] = c3.mul_add(HALF, (h3 + l3) * QUARTER);
+
+        let h4 = high[i + 4];
+        let l4 = low[i + 4];
+        let c4 = close[i + 4];
+        out[i + 4] = c4.mul_add(HALF, (h4 + l4) * QUARTER);
+
+        let h5 = high[i + 5];
+        let l5 = low[i + 5];
+        let c5 = close[i + 5];
+        out[i + 5] = c5.mul_add(HALF, (h5 + l5) * QUARTER);
+
+        let h6 = high[i + 6];
+        let l6 = low[i + 6];
+        let c6 = close[i + 6];
+        out[i + 6] = c6.mul_add(HALF, (h6 + l6) * QUARTER);
+
+        let h7 = high[i + 7];
+        let l7 = low[i + 7];
+        let c7 = close[i + 7];
+        out[i + 7] = c7.mul_add(HALF, (h7 + l7) * QUARTER);
+
+        i += 8;
+    }
     while i + 4 <= end {
         let h0 = high[i];
         let l0 = low[i];
@@ -318,6 +361,7 @@ pub fn wclprice_scalar(
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
+#[target_feature(enable = "avx2,fma")]
 pub unsafe fn wclprice_avx2(
     high: &[f64],
     low: &[f64],
@@ -337,6 +381,30 @@ pub unsafe fn wclprice_avx2(
     let vquart = _mm256_set1_pd(0.25);
 
     const STEP: usize = 4;
+    // Unroll x2: process 8 doubles per iteration
+    while i + 2 * STEP <= end {
+        // i..i+3
+        let h0 = _mm256_loadu_pd(high.as_ptr().add(i));
+        let l0 = _mm256_loadu_pd(low.as_ptr().add(i));
+        let c0 = _mm256_loadu_pd(close.as_ptr().add(i));
+        let hl0 = _mm256_add_pd(h0, l0);
+        let t0 = _mm256_mul_pd(hl0, vquart);
+        // i+4..i+7
+        let h1 = _mm256_loadu_pd(high.as_ptr().add(i + STEP));
+        let l1 = _mm256_loadu_pd(low.as_ptr().add(i + STEP));
+        let c1 = _mm256_loadu_pd(close.as_ptr().add(i + STEP));
+        let hl1 = _mm256_add_pd(h1, l1);
+        let t1 = _mm256_mul_pd(hl1, vquart);
+
+        let y0 = _mm256_fmadd_pd(c0, vhalf, t0);
+        let y1 = _mm256_fmadd_pd(c1, vhalf, t1);
+
+        _mm256_storeu_pd(out.as_mut_ptr().add(i), y0);
+        _mm256_storeu_pd(out.as_mut_ptr().add(i + STEP), y1);
+
+        i += 2 * STEP;
+    }
+    // Remainder vector
     while i + STEP <= end {
         let h = _mm256_loadu_pd(high.as_ptr().add(i));
         let l = _mm256_loadu_pd(low.as_ptr().add(i));
@@ -358,6 +426,7 @@ pub unsafe fn wclprice_avx2(
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
+#[target_feature(enable = "avx512f,fma")]
 pub unsafe fn wclprice_avx512(
     high: &[f64],
     low: &[f64],
@@ -377,6 +446,31 @@ pub unsafe fn wclprice_avx512(
     let vquart = _mm512_set1_pd(0.25);
 
     const STEP: usize = 8;
+    // Unroll x2: process 16 doubles per iteration
+    while i + 2 * STEP <= end {
+        // i..i+7
+        let h0 = _mm512_loadu_pd(high.as_ptr().add(i));
+        let l0 = _mm512_loadu_pd(low.as_ptr().add(i));
+        let c0 = _mm512_loadu_pd(close.as_ptr().add(i));
+        let hl0 = _mm512_add_pd(h0, l0);
+        let t0 = _mm512_mul_pd(hl0, vquart);
+
+        // i+8..i+15
+        let h1 = _mm512_loadu_pd(high.as_ptr().add(i + STEP));
+        let l1 = _mm512_loadu_pd(low.as_ptr().add(i + STEP));
+        let c1 = _mm512_loadu_pd(close.as_ptr().add(i + STEP));
+        let hl1 = _mm512_add_pd(h1, l1);
+        let t1 = _mm512_mul_pd(hl1, vquart);
+
+        let y0 = _mm512_fmadd_pd(c0, vhalf, t0);
+        let y1 = _mm512_fmadd_pd(c1, vhalf, t1);
+
+        _mm512_storeu_pd(out.as_mut_ptr().add(i), y0);
+        _mm512_storeu_pd(out.as_mut_ptr().add(i + STEP), y1);
+
+        i += 2 * STEP;
+    }
+    // Remainder vector
     while i + STEP <= end {
         let h = _mm512_loadu_pd(high.as_ptr().add(i));
         let l = _mm512_loadu_pd(low.as_ptr().add(i));

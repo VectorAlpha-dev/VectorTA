@@ -16,10 +16,11 @@
 //!
 //! ## Developer Notes
 //! - **SIMD status**: Reverse RSI is dominated by sequential EMA recurrences; only the short warmup is vectorizable.
-//!   A loop‑jammed scalar path is fastest on CPUs tested; SIMD kernels are intentionally not selected.
+//!   AVX2/AVX512 warmup vectorization is enabled behind `nightly-avx` and selected at runtime; the main loop remains scalar.
 //! - **Streaming**: Implemented with O(1) update performance (maintains EMAs)
 //! - **Zero-copy Memory**: Uses alloc_with_nan_prefix and make_uninit_matrix for batch operations
-//! - **SIMD stubs**: AVX2/AVX512 stubs route to an unsafe, faster scalar kernel; Scalar stays safe for WASM.
+//! - **SIMD stubs**: When `nightly-avx` is not enabled, AVX2/AVX512 fall back to an unsafe-fast scalar path; the Scalar path stays fully safe (WASM-friendly).
+//! - **Batch note**: ScalarBatch uses a per-length shared-EMA path (row-specific optimization) to avoid redundant EMA recomputation across RSI levels.
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
@@ -409,30 +410,35 @@ fn reverse_rsi_compute_into_scalar_safe(
     let len = data.len();
     let ema_len = (2 * rsi_length) - 1;
 
-    // ---- Constants (precompute to avoid recomputation in the hot loop) ----
+    // ---- Constants (hoisted) ----
     let l = rsi_level;
     let inv = 100.0 - l;
+    let n_minus_1 = (rsi_length - 1) as f64;
     let rs_target = l / inv; // L / (100 - L)
     let neg_scale = inv / l; // (100 - L) / L
-    let n_minus_1 = (rsi_length - 1) as f64;
-    let rs_coeff = n_minus_1 * rs_target; // precompute n_minus_1 * (L/(100-L))
+    let rs_coeff = n_minus_1 * rs_target;
 
     // Wilder-equivalent EMA parameters (α = 2/(ema_len+1))
     let alpha = 2.0 / (ema_len as f64 + 1.0);
     let beta = 1.0 - alpha;
 
-    // ---- Warmup: compute SMA of up/down over ema_len samples starting at `first` ----
+    // ---- Warmup: SMA of up/down over ema_len samples starting at `first` ----
     let warm_end = first + ema_len; // exclusive
+    let all_finite = data[first..].iter().all(|v| v.is_finite());
+
     let mut sum_up = 0.0f64;
     let mut sum_dn = 0.0f64;
+    let mut prev = 0.0f64;
     for i in first..warm_end {
         let cur = data[i];
-        let prev = if i == first { 0.0 } else { data[i - 1] };
-        if cur.is_finite() && prev.is_finite() {
-            let d = cur - prev;
-            sum_up += d.max(0.0);
-            sum_dn += (-d).max(0.0);
-        }
+        let d = if all_finite || (cur.is_finite() && prev.is_finite()) {
+            cur - prev
+        } else {
+            0.0
+        };
+        sum_up += d.max(0.0);
+        sum_dn += (-d).max(0.0);
+        prev = cur;
     }
 
     let mut up_ema = sum_up / (ema_len as f64);
@@ -441,20 +447,21 @@ fn reverse_rsi_compute_into_scalar_safe(
     // ---- First output at index warm_idx = warm_end - 1 ----
     let warm_idx = warm_end - 1;
     let base = data[warm_idx];
-    let x = rs_coeff.mul_add(dn_ema, -n_minus_1 * up_ema);
-    if x >= 0.0 {
-        out[warm_idx] = base + x;
-    } else {
-        let v = base + x * neg_scale;
-        out[warm_idx] = if v.is_finite() { v } else { 0.0 };
-    }
+    let x0 = rs_coeff.mul_add(dn_ema, -n_minus_1 * up_ema);
+    let m0 = (x0 >= 0.0) as i32 as f64; // 1.0 if positive branch, else 0.0
+    let scale0 = neg_scale + m0 * (1.0 - neg_scale); // {neg_scale, 1.0}
+    let v0 = base + x0 * scale0;
+    out[warm_idx] = if v0.is_finite() || x0 >= 0.0 { v0 } else { 0.0 };
 
     // ---- Main loop ----
+    prev = base;
     for i in warm_end..len {
         let cur = data[i];
-        let prev = data[i - 1];
-        let valid = cur.is_finite() && prev.is_finite();
-        let d = if valid { cur - prev } else { 0.0 };
+        let d = if all_finite || (cur.is_finite() && prev.is_finite()) {
+            cur - prev
+        } else {
+            0.0
+        };
         let up = d.max(0.0);
         let dn = (-d).max(0.0);
 
@@ -462,12 +469,11 @@ fn reverse_rsi_compute_into_scalar_safe(
         dn_ema = beta.mul_add(dn_ema, alpha * dn);
 
         let x = rs_coeff.mul_add(dn_ema, -n_minus_1 * up_ema);
-        if x >= 0.0 {
-            out[i] = cur + x;
-        } else {
-            let v = cur + x * neg_scale;
-            out[i] = if v.is_finite() { v } else { 0.0 };
-        }
+        let m = (x >= 0.0) as i32 as f64;
+        let scale = neg_scale + m * (1.0 - neg_scale);
+        let v = cur + x * scale;
+        out[i] = if v.is_finite() || x >= 0.0 { v } else { 0.0 };
+        prev = cur;
     }
 
     Ok(())
@@ -583,6 +589,110 @@ fn reverse_rsi_compute_into_avx2_stub(
     rsi_level: f64,
     out: &mut [f64],
 ) -> Result<(), ReverseRsiError> {
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64", target_feature = "avx2"))]
+    unsafe {
+        use core::arch::x86_64::*;
+        let len = data.len();
+        let ema_len = (2 * rsi_length) - 1;
+
+        // Constants
+        let l = rsi_level;
+        let inv = 100.0 - l;
+        let n_minus_1 = (rsi_length - 1) as f64;
+        let rs_target = l / inv;
+        let neg_scale = inv / l;
+        let rs_coeff = n_minus_1 * rs_target;
+
+        let alpha = 2.0 / (ema_len as f64 + 1.0);
+        let beta = 1.0 - alpha;
+
+        let warm_end = first + ema_len; // exclusive
+        let all_finite = data[first..].iter().all(|v| v.is_finite());
+        if !all_finite {
+            return reverse_rsi_compute_into_unsafe_fast(data, first, rsi_length, rsi_level, out);
+        }
+
+        // --- AVX2 warmup: sum of positive/negative diffs ---
+        let mut sum_up = 0.0f64;
+        let mut sum_dn = 0.0f64;
+
+        // first element uses prev=0.0 to match semantics
+        if first < warm_end {
+            let c0 = *data.get_unchecked(first);
+            let d0 = c0 - 0.0;
+            sum_up += if d0 > 0.0 { d0 } else { 0.0 };
+            sum_dn += if d0 < 0.0 { -d0 } else { 0.0 };
+        }
+
+        let mut i = first + 1;
+        let mut v_up = _mm256_setzero_pd();
+        let mut v_dn = _mm256_setzero_pd();
+        let v_zero = _mm256_setzero_pd();
+
+        while i + 3 < warm_end {
+            let v_cur = _mm256_loadu_pd(data.as_ptr().add(i));
+            let v_prev = _mm256_loadu_pd(data.as_ptr().add(i - 1));
+            let v_d = _mm256_sub_pd(v_cur, v_prev);
+            let v_u = _mm256_max_pd(v_d, v_zero);
+            let v_n = _mm256_max_pd(_mm256_sub_pd(v_zero, v_d), v_zero);
+            v_up = _mm256_add_pd(v_up, v_u);
+            v_dn = _mm256_add_pd(v_dn, v_n);
+            i += 4;
+        }
+
+        // horizontal reduce
+        let mut buf = [0.0f64; 4];
+        _mm256_storeu_pd(buf.as_mut_ptr(), v_up);
+        sum_up += buf[0] + buf[1] + buf[2] + buf[3];
+        _mm256_storeu_pd(buf.as_mut_ptr(), v_dn);
+        sum_dn += buf[0] + buf[1] + buf[2] + buf[3];
+
+        // tail
+        while i < warm_end {
+            let c = *data.get_unchecked(i);
+            let p = *data.get_unchecked(i - 1);
+            let d = c - p;
+            sum_up += if d > 0.0 { d } else { 0.0 };
+            sum_dn += if d < 0.0 { -d } else { 0.0 };
+            i += 1;
+        }
+
+        let mut up_ema = sum_up / (ema_len as f64);
+        let mut dn_ema = sum_dn / (ema_len as f64);
+
+        // first output
+        let warm_idx = warm_end - 1;
+        let base = *data.get_unchecked(warm_idx);
+        let x0 = rs_coeff.mul_add(dn_ema, -n_minus_1 * up_ema);
+        let m0 = (x0 >= 0.0) as i32 as f64;
+        let scale0 = neg_scale + m0 * (1.0 - neg_scale);
+        let v0 = base + x0 * scale0;
+        *out.get_unchecked_mut(warm_idx) = if v0.is_finite() || x0 >= 0.0 { v0 } else { 0.0 };
+
+        // sequential EMA loop
+        let mut j = warm_end;
+        while j < len {
+            let cur = *data.get_unchecked(j);
+            let prev = *data.get_unchecked(j - 1);
+            let d = cur - prev;
+            let up = if d > 0.0 { d } else { 0.0 };
+            let dn = if d < 0.0 { -d } else { 0.0 };
+
+            up_ema = beta.mul_add(up_ema, alpha * up);
+            dn_ema = beta.mul_add(dn_ema, alpha * dn);
+
+            let x = rs_coeff.mul_add(dn_ema, -n_minus_1 * up_ema);
+            let m = (x >= 0.0) as i32 as f64;
+            let scale = neg_scale + m * (1.0 - neg_scale);
+            let val = cur + x * scale;
+            *out.get_unchecked_mut(j) = if val.is_finite() || x >= 0.0 { val } else { 0.0 };
+            j += 1;
+        }
+
+        return Ok(());
+    }
+
+    // portable fallback
     unsafe { reverse_rsi_compute_into_unsafe_fast(data, first, rsi_length, rsi_level, out) }
 }
 
@@ -595,6 +705,107 @@ fn reverse_rsi_compute_into_avx512_stub(
     rsi_level: f64,
     out: &mut [f64],
 ) -> Result<(), ReverseRsiError> {
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64", target_feature = "avx512f"))]
+    unsafe {
+        use core::arch::x86_64::*;
+        let len = data.len();
+        let ema_len = (2 * rsi_length) - 1;
+
+        // Constants
+        let l = rsi_level;
+        let inv = 100.0 - l;
+        let n_minus_1 = (rsi_length - 1) as f64;
+        let rs_target = l / inv;
+        let neg_scale = inv / l;
+        let rs_coeff = n_minus_1 * rs_target;
+
+        let alpha = 2.0 / (ema_len as f64 + 1.0);
+        let beta = 1.0 - alpha;
+
+        let warm_end = first + ema_len; // exclusive
+        let all_finite = data[first..].iter().all(|v| v.is_finite());
+        if !all_finite {
+            return reverse_rsi_compute_into_unsafe_fast(data, first, rsi_length, rsi_level, out);
+        }
+
+        // AVX512 warmup
+        let mut sum_up = 0.0f64;
+        let mut sum_dn = 0.0f64;
+
+        if first < warm_end {
+            let c0 = *data.get_unchecked(first);
+            let d0 = c0 - 0.0;
+            sum_up += if d0 > 0.0 { d0 } else { 0.0 };
+            sum_dn += if d0 < 0.0 { -d0 } else { 0.0 };
+        }
+
+        let mut i = first + 1;
+        let mut v_up = _mm512_setzero_pd();
+        let mut v_dn = _mm512_setzero_pd();
+        let v_zero = _mm512_setzero_pd();
+
+        while i + 7 < warm_end {
+            let v_cur = _mm512_loadu_pd(data.as_ptr().add(i));
+            let v_prev = _mm512_loadu_pd(data.as_ptr().add(i - 1));
+            let v_d = _mm512_sub_pd(v_cur, v_prev);
+            let v_u = _mm512_max_pd(v_d, v_zero);
+            let v_n = _mm512_max_pd(_mm512_sub_pd(v_zero, v_d), v_zero);
+            v_up = _mm512_add_pd(v_up, v_u);
+            v_dn = _mm512_add_pd(v_dn, v_n);
+            i += 8;
+        }
+
+        let mut buf = [0.0f64; 8];
+        _mm512_storeu_pd(buf.as_mut_ptr(), v_up);
+        sum_up += buf.iter().sum::<f64>();
+        _mm512_storeu_pd(buf.as_mut_ptr(), v_dn);
+        sum_dn += buf.iter().sum::<f64>();
+
+        while i < warm_end {
+            let c = *data.get_unchecked(i);
+            let p = *data.get_unchecked(i - 1);
+            let d = c - p;
+            sum_up += if d > 0.0 { d } else { 0.0 };
+            sum_dn += if d < 0.0 { -d } else { 0.0 };
+            i += 1;
+        }
+
+        let mut up_ema = sum_up / (ema_len as f64);
+        let mut dn_ema = sum_dn / (ema_len as f64);
+
+        // first output
+        let warm_idx = warm_end - 1;
+        let base = *data.get_unchecked(warm_idx);
+        let x0 = rs_coeff.mul_add(dn_ema, -n_minus_1 * up_ema);
+        let m0 = (x0 >= 0.0) as i32 as f64;
+        let scale0 = neg_scale + m0 * (1.0 - neg_scale);
+        let v0 = base + x0 * scale0;
+        *out.get_unchecked_mut(warm_idx) = if v0.is_finite() || x0 >= 0.0 { v0 } else { 0.0 };
+
+        // sequential EMA loop
+        let mut j = warm_end;
+        while j < len {
+            let cur = *data.get_unchecked(j);
+            let prev = *data.get_unchecked(j - 1);
+            let d = cur - prev;
+            let up = if d > 0.0 { d } else { 0.0 };
+            let dn = if d < 0.0 { -d } else { 0.0 };
+
+            up_ema = beta.mul_add(up_ema, alpha * up);
+            dn_ema = beta.mul_add(dn_ema, alpha * dn);
+
+            let x = rs_coeff.mul_add(dn_ema, -n_minus_1 * up_ema);
+            let m = (x >= 0.0) as i32 as f64;
+            let scale = neg_scale + m * (1.0 - neg_scale);
+            let val = cur + x * scale;
+            *out.get_unchecked_mut(j) = if val.is_finite() || x >= 0.0 { val } else { 0.0 };
+            j += 1;
+        }
+
+        return Ok(());
+    }
+
+    // If AVX-512F isn't available, use AVX2 path (which itself falls back to scalar-fast)
     reverse_rsi_compute_into_avx2_stub(data, first, rsi_length, rsi_level, out)
 }
 
@@ -928,6 +1139,108 @@ fn reverse_rsi_batch_inner_into(
         Kernel::Auto => detect_best_batch_kernel(),
         k => k,
     });
+
+    // Optimized scalar-batch path: share up/down EMA across rows with identical rsi_length
+    if matches!(kern, Kernel::ScalarBatch | Kernel::Auto) && matches!(row_kern, Kernel::Scalar) {
+        let len = data.len();
+        if len == 0 {
+            return Err(ReverseRsiError::EmptyInputData);
+        }
+        let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+
+        // Group rows by rsi_length
+        let mut groups: std::collections::BTreeMap<usize, Vec<(usize, f64)>> = std::collections::BTreeMap::new();
+        for (row, p) in combos.iter().enumerate() {
+            let l = p.rsi_length.unwrap_or(14);
+            let level = p.rsi_level.unwrap_or(50.0);
+            groups.entry(l).or_default().push((row, level));
+        }
+
+        let all_singletons = groups.values().all(|rows| rows.len() == 1);
+        if all_singletons {
+            // No reuse opportunity; fall back to simple per-row execution
+            for (r, s) in out.chunks_mut(cols).enumerate() {
+                let input = ReverseRsiInput::from_slice(data, combos[r].clone());
+                if reverse_rsi_into_slice(s, &input, row_kern).is_err() {
+                    for v in s { *v = f64::NAN; }
+                }
+            }
+            return Ok(());
+        }
+
+        for (rsi_length, rows) in groups {
+            let ema_len = (2 * rsi_length) - 1;
+            if len - first < ema_len {
+                // not enough data — leave NaNs set by init_matrix_prefixes
+                continue;
+            }
+            let warm_end = first + ema_len;
+            let warm_idx = warm_end - 1;
+            let all_finite = data[first..].iter().all(|v| v.is_finite());
+
+            // warmup sums
+            let mut sum_up = 0.0f64;
+            let mut sum_dn = 0.0f64;
+            let mut prev = 0.0f64;
+            for i in first..warm_end {
+                let cur = data[i];
+                let d = if all_finite || (cur.is_finite() && prev.is_finite()) { cur - prev } else { 0.0 };
+                sum_up += d.max(0.0);
+                sum_dn += (-d).max(0.0);
+                prev = cur;
+            }
+            let mut up_ema = sum_up / (ema_len as f64);
+            let mut dn_ema = sum_dn / (ema_len as f64);
+
+            // constants per length
+            let n_minus_1 = (rsi_length - 1) as f64;
+            let alpha = 2.0 / (ema_len as f64 + 1.0);
+            let beta = 1.0 - alpha;
+
+            // first output for all rows in group
+            let base = data[warm_idx];
+            for &(row, rsi_level) in &rows {
+                let l = rsi_level;
+                if !(0.0 < l && l < 100.0) || !l.is_finite() {
+                    // invalid level — leave NaNs
+                    continue;
+                }
+                let inv = 100.0 - l;
+                let neg_scale = inv / l;
+                let rs_target = l / inv;
+                let x0 = n_minus_1.mul_add(dn_ema * rs_target, -n_minus_1 * up_ema);
+                let m0 = (x0 >= 0.0) as i32 as f64;
+                let scale0 = neg_scale + m0 * (1.0 - neg_scale);
+                let v0 = base + x0 * scale0;
+                out[row * cols + warm_idx] = if v0.is_finite() || x0 >= 0.0 { v0 } else { 0.0 };
+            }
+
+            // main loop: update shared EMAs once, then emit per-row algebra
+            prev = base;
+            for i in warm_end..len {
+                let cur = data[i];
+                let d = if all_finite || (cur.is_finite() && prev.is_finite()) { cur - prev } else { 0.0 };
+                let up = d.max(0.0);
+                let dn = (-d).max(0.0);
+                up_ema = beta.mul_add(up_ema, alpha * up);
+                dn_ema = beta.mul_add(dn_ema, alpha * dn);
+
+                for &(row, rsi_level) in &rows {
+                    let l = rsi_level;
+                    let inv = 100.0 - l;
+                    let rs_target = l / inv;
+                    let neg_scale = inv / l;
+                    let x = n_minus_1.mul_add(dn_ema * rs_target, -n_minus_1 * up_ema);
+                    let m = (x >= 0.0) as i32 as f64;
+                    let scale = neg_scale + m * (1.0 - neg_scale);
+                    let v = cur + x * scale;
+                    out[row * cols + i] = if v.is_finite() || x >= 0.0 { v } else { 0.0 };
+                }
+                prev = cur;
+            }
+        }
+        return Ok(());
+    }
 
     let do_row = |row: usize, dst: &mut [f64]| {
         let input = ReverseRsiInput::from_slice(data, combos[row].clone());

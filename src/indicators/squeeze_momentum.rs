@@ -311,149 +311,24 @@ pub fn squeeze_momentum_into_slices(
         });
     }
 
-    // Use classic kernel for default parameters (all SMA-based calculations)
-    // The default parameters use SMA for all moving averages
-    // Classic kernel provides optimized loop-jammed implementation
-    if lbb == 20 && lkc == 20 && mbb == 2.0 && mkc == 1.5 {
-        // Use the optimized classic kernel for default parameters
-        unsafe {
-            return squeeze_momentum_scalar_classic(
-                high,
-                low,
-                close,
-                lbb,
-                mbb,
-                lkc,
-                mkc,
-                first_valid,
-                squeeze_dst,
-                momentum_dst,
-                signal_dst,
-            );
-        }
+    // Always use the optimized classic scalar kernel (SMA-based BB/KC)
+    // This path is fully loop-jammed and allocation-light, matching alma.rs patterns
+    let _ = kern; // runtime selection currently short-circuits to scalar
+    unsafe {
+        return squeeze_momentum_scalar_classic(
+            high,
+            low,
+            close,
+            lbb,
+            mbb,
+            lkc,
+            mkc,
+            first_valid,
+            squeeze_dst,
+            momentum_dst,
+            signal_dst,
+        );
     }
-
-    // Mark kernel as used (kernels are stubs per requirements)
-    let _ = kern;
-
-    // Warmup prefixes like alma_into_slice
-    let warm_sq = lbb.max(lkc).saturating_sub(1);
-    let warm_m = lkc.saturating_sub(1);
-    let warm_sig = warm_m + 1;
-    squeeze_dst[..warm_sq.min(n)].fill(f64::NAN);
-    momentum_dst[..warm_m.min(n)].fill(f64::NAN);
-    signal_dst[..warm_sig.min(n)].fill(f64::NAN);
-
-    // --- temps use your helpers; outputs are written directly into *_dst ---
-    // BB
-    use crate::indicators::sma::{sma, SmaInput, SmaParams};
-    let bb_sma = sma(&SmaInput::from_slice(
-        close,
-        SmaParams { period: Some(lbb) },
-    ))
-    .map_err(|_e| SqueezeMomentumError::InvalidLength {
-        length: lbb,
-        data_len: n,
-    })?;
-    let dev = stddev_slice(close, lbb);
-
-    // KC mid + TR
-    let kc_sma = sma(&SmaInput::from_slice(
-        close,
-        SmaParams { period: Some(lkc) },
-    ))
-    .map_err(|_| SqueezeMomentumError::InvalidLength {
-        length: lkc,
-        data_len: n,
-    })?;
-    let tr = true_range_slice(high, low, close);
-    let tr_ma = sma(&SmaInput::from_slice(&tr, SmaParams { period: Some(lkc) })).unwrap();
-
-    // KC bands
-    let mut upper_kc = alloc_with_nan_prefix(n, lkc.saturating_sub(1));
-    let mut lower_kc = alloc_with_nan_prefix(n, lkc.saturating_sub(1));
-    for i in first_valid..n {
-        if i + 1 >= lkc && kc_sma.values[i].is_finite() && tr_ma.values[i].is_finite() {
-            let w = tr_ma.values[i] * mkc;
-            upper_kc[i] = kc_sma.values[i] + w;
-            lower_kc[i] = kc_sma.values[i] - w;
-        }
-    }
-
-    // BB bands
-    let mut upper_bb = alloc_with_nan_prefix(n, lbb.saturating_sub(1));
-    let mut lower_bb = alloc_with_nan_prefix(n, lbb.saturating_sub(1));
-    for i in first_valid..n {
-        if i + 1 >= lbb && bb_sma.values[i].is_finite() && dev[i].is_finite() {
-            upper_bb[i] = bb_sma.values[i] + mbb * dev[i];
-            lower_bb[i] = bb_sma.values[i] - mbb * dev[i];
-        }
-    }
-
-    // squeeze state -> write to squeeze_dst
-    for i in first_valid..n {
-        if lower_bb[i].is_finite()
-            && upper_bb[i].is_finite()
-            && lower_kc[i].is_finite()
-            && upper_kc[i].is_finite()
-        {
-            let on = lower_bb[i] > lower_kc[i] && upper_bb[i] < upper_kc[i];
-            let off = lower_bb[i] < lower_kc[i] && upper_bb[i] > upper_kc[i];
-            squeeze_dst[i] = if on {
-                -1.0
-            } else if off {
-                1.0
-            } else {
-                0.0
-            };
-        }
-    }
-
-    // raw momentum -> momentum_dst then linearreg -> momentum_dst
-    let highest = rolling_high_slice(high, lkc);
-    let lowest = rolling_low_slice(low, lkc);
-    let kc_ma = &kc_sma.values;
-
-    let mut raw = alloc_with_nan_prefix(n, lkc.saturating_sub(1));
-    for i in first_valid..n {
-        if i + 1 >= lkc
-            && close[i].is_finite()
-            && highest[i].is_finite()
-            && lowest[i].is_finite()
-            && kc_ma[i].is_finite()
-        {
-            let mid = 0.5 * (highest[i] + lowest[i]);
-            raw[i] = close[i] - 0.5 * (mid + kc_ma[i]);
-        }
-    }
-    // overwrite momentum_dst with linear regression of raw
-    // keep zero-copy by writing directly
-    momentum_dst.copy_from_slice(&linearreg_slice(&raw, lkc));
-
-    // signal (lagged signed acceleration) -> signal_dst
-    for i in first_valid..n.saturating_sub(1) {
-        let curr = momentum_dst[i];
-        let next = momentum_dst[i + 1];
-        if curr.is_finite() && next.is_finite() {
-            signal_dst[i + 1] = if next > 0.0 {
-                if next > curr {
-                    1.0
-                } else {
-                    2.0
-                }
-            } else {
-                if next < curr {
-                    -1.0
-                } else {
-                    -2.0
-                }
-            };
-        } else if i + 1 >= warm_sig {
-            signal_dst[i + 1] = f64::NAN;
-        }
-    }
-
-    Ok(())
 }
 
 pub fn squeeze_momentum_with_kernel(
@@ -1488,50 +1363,68 @@ fn true_range_slice(high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
 }
 fn rolling_high_slice(data: &[f64], period: usize) -> Vec<f64> {
     let warmup = period.saturating_sub(1);
-    let mut output = alloc_with_nan_prefix(data.len(), warmup);
-    if period == 0 || period > data.len() {
+    let n = data.len();
+    let mut output = alloc_with_nan_prefix(n, warmup);
+    if period == 0 || period > n {
         return output;
     }
-    let mut deque = Vec::new();
-    for i in 0..data.len() {
-        if !data[i].is_nan() {
-            deque.push(data[i]);
-        } else {
-            deque.push(f64::NAN);
+
+    // Monotonic deque of indices for finite values (decreasing by value)
+    use std::collections::VecDeque;
+    let mut dq: VecDeque<usize> = VecDeque::with_capacity(period);
+    for i in 0..n {
+        let v = data[i];
+        // Evict out-of-window indices from front
+        while let Some(&front) = dq.front() {
+            if front + period <= i { dq.pop_front(); } else { break; }
+        }
+        // Maintain decreasing order; ignore NaNs
+        if v.is_finite() {
+            while let Some(&idx) = dq.back() {
+                if data[idx] <= v { dq.pop_back(); } else { break; }
+            }
+            dq.push_back(i);
         }
         if i + 1 >= period {
-            if i + 1 > period {
-                deque.remove(0);
-            }
-            output[i] = deque.iter().copied().fold(f64::NAN, |a, b| a.max(b));
+            output[i] = if let Some(&idx) = dq.front() {
+                data[idx]
+            } else {
+                f64::NAN
+            };
         }
     }
     output
 }
 fn rolling_low_slice(data: &[f64], period: usize) -> Vec<f64> {
     let warmup = period.saturating_sub(1);
-    let mut output = alloc_with_nan_prefix(data.len(), warmup);
-    if period == 0 || period > data.len() {
+    let n = data.len();
+    let mut output = alloc_with_nan_prefix(n, warmup);
+    if period == 0 || period > n {
         return output;
     }
-    let mut deque = Vec::new();
-    for i in 0..data.len() {
-        if !data[i].is_nan() {
-            deque.push(data[i]);
-        } else {
-            deque.push(f64::NAN);
+
+    // Monotonic deque of indices for finite values (increasing by value)
+    use std::collections::VecDeque;
+    let mut dq: VecDeque<usize> = VecDeque::with_capacity(period);
+    for i in 0..n {
+        let v = data[i];
+        // Evict out-of-window indices from front
+        while let Some(&front) = dq.front() {
+            if front + period <= i { dq.pop_front(); } else { break; }
+        }
+        // Maintain increasing order; ignore NaNs
+        if v.is_finite() {
+            while let Some(&idx) = dq.back() {
+                if data[idx] >= v { dq.pop_back(); } else { break; }
+            }
+            dq.push_back(i);
         }
         if i + 1 >= period {
-            if i + 1 > period {
-                deque.remove(0);
-            }
-            let mut mn = f64::NAN;
-            for &v in &deque {
-                if !v.is_nan() && (mn.is_nan() || v < mn) {
-                    mn = v;
-                }
-            }
-            output[i] = mn;
+            output[i] = if let Some(&idx) = dq.front() {
+                data[idx]
+            } else {
+                f64::NAN
+            };
         }
     }
     output
