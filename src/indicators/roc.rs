@@ -14,10 +14,10 @@
 //! - **values**: Vector of ROC percentage values with NaN prefix during warmup period
 //!
 //! ## Developer Notes
-//! - **AVX2/AVX512 Kernels**: Stubs that call scalar implementation
+//! - **SIMD**: AVX2/AVX512 single-series kernels implemented; batch SIMD rows currently delegate to scalar.
 //! - **Streaming**: Implemented with O(1) update performance (circular buffer)
 //! - **Zero-copy Memory**: Uses alloc_with_nan_prefix and make_uninit_matrix for batch operations
-//! - Decision: Scalar kept as reference path; attempts to unroll/slice in safe Rust regressed on 100k. SIMD kept as stubs (memory-bound/branching); row kernel uses pointer-based loop for batch parity.
+//! - Decision: Scalar is the reference path. SIMD is available and benchmarked; row-specific batch SIMD not attempted (little shared work). Keep selection to scalar where SIMD underperforms.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -220,8 +220,10 @@ fn roc_prepare<'a>(
             valid: len - first,
         });
     }
+    // ROC is memory-bound and sees no consistent SIMD wins across CPUs.
+    // Prefer Scalar for Auto to avoid regressions; explicit SIMD remains for benchmarking.
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
     Ok((data, period, first, chosen))
@@ -298,7 +300,7 @@ pub unsafe fn roc_indicator_avx512_long(input: &RocInput) -> Result<RocOutput, R
 
 // --- Core Scalar & SIMD ---
 
-#[inline]
+#[inline(always)]
 pub fn roc_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     let len = data.len();
     let start = first + period;
@@ -310,7 +312,8 @@ pub fn roc_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
         if p == 0.0 || p.is_nan() {
             *d = 0.0;
         } else {
-            *d = ((c / p) - 1.0) * 100.0;
+            // Use mul_add to enable FMA where available: (c/p)*100 - 100
+            *d = (c / p).mul_add(100.0, -100.0);
         }
     }
 }

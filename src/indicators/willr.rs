@@ -14,8 +14,9 @@
 //! - **Scalar kernel**: Hybrid selection
 //!   - Small periods (<= 64): naive O(period) scan (fastest for common WILLR periods like 14)
 //!   - Large periods  (> 64): monotonic-deque O(1) sliding window for high/low
-//! - **SIMD status**: AVX2/AVX512 stubs currently delegate to scalar. Branchy min/max windows did not
-//!   show consistent wins in preliminary attempts; revisit with alternative layouts if needed.
+//! - **SIMD status**: AVX2 enabled for small windows (vectorized naive path);
+//!   AVX512 currently delegates to AVX2 due to typical downclock/underperformance
+//!   vs AVX2 on common CPUs. Large windows use the scalar deque path.
 //! - **Streaming Performance**: O(1) update API (ring buffers) available via `WillrStream`
 //! - **Memory Optimization**: ✓ Uses `alloc_with_nan_prefix` and `make_uninit_matrix` for batching
 //! - **Batch Support**: ✓ Row-specific optimized batch via sparse tables (shared across rows)
@@ -342,14 +343,308 @@ pub fn willr_scalar(
     first_valid: usize,
     out: &mut [f64],
 ) {
-    // Heuristic: the naive O(period) scan is typically faster for small windows
-    // (common WILLR periods ~14). Switch to deque only for larger windows.
-    const DEQUE_SWITCH: usize = 32;
-    if period <= DEQUE_SWITCH {
-        return willr_scalar_naive(high, low, close, period, first_valid, out);
+    // Fast exit / preconditions are validated by caller; write only from warmup end.
+    let n = high.len();
+    if n == 0 {
+        return;
+    }
+    let start_i = first_valid + period - 1;
+    if start_i >= n {
+        return;
     }
 
-    willr_scalar_deque(high, low, close, period, first_valid, out);
+    // Heuristic: naive scan is generally faster for WILLR periods (~14);
+    // switch to O(1) deque maintenance for larger windows.
+    const DEQUE_SWITCH: usize = 32;
+
+    unsafe {
+        if period <= DEQUE_SWITCH {
+            // Naive O(period) scan with 4-way unroll and unchecked indexing.
+            for i in start_i..n {
+                let c = *close.get_unchecked(i);
+                if c != c {
+                    *out.get_unchecked_mut(i) = f64::NAN;
+                    continue;
+                }
+
+                let win_start = i + 1 - period;
+                let mut h = f64::NEG_INFINITY;
+                let mut l = f64::INFINITY;
+                let mut any_nan = false;
+
+                let mut j = win_start;
+                let unroll_end = win_start + (period & !3);
+                while j < unroll_end {
+                    let h0 = *high.get_unchecked(j);
+                    let l0 = *low.get_unchecked(j);
+                    let h1 = *high.get_unchecked(j + 1);
+                    let l1 = *low.get_unchecked(j + 1);
+                    let h2 = *high.get_unchecked(j + 2);
+                    let l2 = *low.get_unchecked(j + 2);
+                    let h3 = *high.get_unchecked(j + 3);
+                    let l3 = *low.get_unchecked(j + 3);
+
+                    if (h0 != h0)
+                        | (l0 != l0)
+                        | (h1 != h1)
+                        | (l1 != l1)
+                        | (h2 != h2)
+                        | (l2 != l2)
+                        | (h3 != h3)
+                        | (l3 != l3)
+                    {
+                        any_nan = true;
+                        break;
+                    }
+
+                    if h0 > h {
+                        h = h0;
+                    }
+                    if h1 > h {
+                        h = h1;
+                    }
+                    if h2 > h {
+                        h = h2;
+                    }
+                    if h3 > h {
+                        h = h3;
+                    }
+
+                    if l0 < l {
+                        l = l0;
+                    }
+                    if l1 < l {
+                        l = l1;
+                    }
+                    if l2 < l {
+                        l = l2;
+                    }
+                    if l3 < l {
+                        l = l3;
+                    }
+
+                    j += 4;
+                }
+
+                if !any_nan {
+                    while j <= i {
+                        let hj = *high.get_unchecked(j);
+                        let lj = *low.get_unchecked(j);
+                        if (hj != hj) | (lj != lj) {
+                            any_nan = true;
+                            break;
+                        }
+                        if hj > h {
+                            h = hj;
+                        }
+                        if lj < l {
+                            l = lj;
+                        }
+                        j += 1;
+                    }
+                }
+
+                if any_nan || !(h.is_finite() && l.is_finite()) {
+                    *out.get_unchecked_mut(i) = f64::NAN;
+                } else {
+                    let denom = h - l;
+                    let dst = out.get_unchecked_mut(i);
+                    if denom == 0.0 {
+                        *dst = 0.0;
+                    } else {
+                        let ratio = (h - c) / denom;
+                        *dst = (-100.0f64).mul_add(ratio, 0.0);
+                    }
+                }
+            }
+            return;
+        }
+
+        // Large-window path: monotonic deques with explicit head/tail and no modulo ops.
+        let cap = period;
+
+        // Deques store indices; we manage head/tail/len explicitly.
+        let mut dq_max: Vec<usize> = Vec::with_capacity(cap);
+        dq_max.set_len(cap);
+        let mut dq_min: Vec<usize> = Vec::with_capacity(cap);
+        dq_min.set_len(cap);
+        let mut head_max = 0usize;
+        let mut tail_max = 0usize;
+        let mut len_max = 0usize;
+
+        let mut head_min = 0usize;
+        let mut tail_min = 0usize;
+        let mut len_min = 0usize;
+
+        // Rolling NaN tracker over (high|low) window
+        let mut nan_ring: Vec<u8> = Vec::with_capacity(cap);
+        nan_ring.set_len(cap);
+        let mut ring_pos = 0usize;
+        let mut nan_count: usize = 0;
+
+        // Prime structures for the first computable index
+        let l0 = start_i + 1 - period;
+        let mut j = l0;
+        while j <= start_i {
+            let hj = *high.get_unchecked(j);
+            let lj = *low.get_unchecked(j);
+            let is_nan = ((hj != hj) | (lj != lj)) as u8;
+
+            nan_count += is_nan as usize;
+            *nan_ring.get_unchecked_mut(ring_pos) = is_nan;
+            ring_pos += 1;
+            if ring_pos == cap {
+                ring_pos = 0;
+            }
+
+            if is_nan == 0 {
+                // push into max deque (monotone decreasing)
+                while len_max != 0 {
+                    let back_pos = if tail_max == 0 { cap - 1 } else { tail_max - 1 };
+                    let back_idx = *dq_max.get_unchecked(back_pos);
+                    if *high.get_unchecked(back_idx) <= hj {
+                        tail_max = back_pos;
+                        len_max -= 1;
+                    } else {
+                        break;
+                    }
+                }
+                *dq_max.get_unchecked_mut(tail_max) = j;
+                tail_max += 1;
+                if tail_max == cap {
+                    tail_max = 0;
+                }
+                len_max += 1;
+
+                // push into min deque (monotone increasing)
+                while len_min != 0 {
+                    let back_pos = if tail_min == 0 { cap - 1 } else { tail_min - 1 };
+                    let back_idx = *dq_min.get_unchecked(back_pos);
+                    if *low.get_unchecked(back_idx) >= lj {
+                        tail_min = back_pos;
+                        len_min -= 1;
+                    } else {
+                        break;
+                    }
+                }
+                *dq_min.get_unchecked_mut(tail_min) = j;
+                tail_min += 1;
+                if tail_min == cap {
+                    tail_min = 0;
+                }
+                len_min += 1;
+            }
+            j += 1;
+        }
+
+        // Main sweep
+        for i in start_i..n {
+            let c = *close.get_unchecked(i);
+
+            if (c != c) || (nan_count != 0) || (len_max == 0) || (len_min == 0) {
+                *out.get_unchecked_mut(i) = f64::NAN;
+            } else {
+                let h_idx = *dq_max.get_unchecked(head_max);
+                let l_idx = *dq_min.get_unchecked(head_min);
+                let h = *high.get_unchecked(h_idx);
+                let l = *low.get_unchecked(l_idx);
+                if !(h.is_finite() && l.is_finite()) {
+                    *out.get_unchecked_mut(i) = f64::NAN;
+                } else {
+                    let denom = h - l;
+                    let dst = out.get_unchecked_mut(i);
+                    if denom == 0.0 {
+                        *dst = 0.0;
+                    } else {
+                        let ratio = (h - c) / denom;
+                        *dst = (-100.0f64).mul_add(ratio, 0.0);
+                    }
+                }
+            }
+
+            // Slide window: drop i+1-period, add i+1
+            let next = i + 1;
+            if next < n {
+                let cutoff = next - period;
+
+                // pop outdated from fronts
+                while len_max != 0 {
+                    let f_idx = *dq_max.get_unchecked(head_max);
+                    if f_idx <= cutoff {
+                        head_max += 1;
+                        if head_max == cap {
+                            head_max = 0;
+                        }
+                        len_max -= 1;
+                    } else {
+                        break;
+                    }
+                }
+                while len_min != 0 {
+                    let f_idx = *dq_min.get_unchecked(head_min);
+                    if f_idx <= cutoff {
+                        head_min += 1;
+                        if head_min == cap {
+                            head_min = 0;
+                        }
+                        len_min -= 1;
+                    } else {
+                        break;
+                    }
+                }
+
+                // Update rolling NaN ring (overwrite oldest)
+                let hj = *high.get_unchecked(next);
+                let lj = *low.get_unchecked(next);
+                let new_nan = ((hj != hj) | (lj != lj)) as u8;
+                let old_nan = *nan_ring.get_unchecked(ring_pos) as usize;
+                nan_count = nan_count + (new_nan as usize) - old_nan;
+                *nan_ring.get_unchecked_mut(ring_pos) = new_nan;
+                ring_pos += 1;
+                if ring_pos == cap {
+                    ring_pos = 0;
+                }
+
+                if new_nan == 0 {
+                    // push_back into max deque
+                    while len_max != 0 {
+                        let back_pos = if tail_max == 0 { cap - 1 } else { tail_max - 1 };
+                        let back_idx = *dq_max.get_unchecked(back_pos);
+                        if *high.get_unchecked(back_idx) <= hj {
+                            tail_max = back_pos;
+                            len_max -= 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    *dq_max.get_unchecked_mut(tail_max) = next;
+                    tail_max += 1;
+                    if tail_max == cap {
+                        tail_max = 0;
+                    }
+                    len_max += 1;
+
+                    // push_back into min deque
+                    while len_min != 0 {
+                        let back_pos = if tail_min == 0 { cap - 1 } else { tail_min - 1 };
+                        let back_idx = *dq_min.get_unchecked(back_pos);
+                        if *low.get_unchecked(back_idx) >= lj {
+                            tail_min = back_pos;
+                            len_min -= 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    *dq_min.get_unchecked_mut(tail_min) = next;
+                    tail_min += 1;
+                    if tail_min == cap {
+                        tail_min = 0;
+                    }
+                    len_min += 1;
+                }
+            }
+        }
+    }
 }
 
 #[inline(always)]
@@ -582,7 +877,98 @@ pub unsafe fn willr_avx2(
     first_valid: usize,
     out: &mut [f64],
 ) {
-    willr_scalar(high, low, close, period, first_valid, out)
+    use core::arch::x86_64::*;
+    let n = high.len();
+    if n == 0 {
+        return;
+    }
+    let start_i = first_valid + period - 1;
+    if start_i >= n {
+        return;
+    }
+
+    // Large windows: monotone deque is superior.
+    const VEC_SWITCH: usize = 64;
+    if period > VEC_SWITCH {
+        willr_scalar(high, low, close, period, first_valid, out);
+        return;
+    }
+
+    for i in start_i..n {
+        let c = *close.get_unchecked(i);
+        if c != c {
+            *out.get_unchecked_mut(i) = f64::NAN;
+            continue;
+        }
+
+        let win_start = i + 1 - period;
+        let mut vmax = _mm256_set1_pd(f64::NEG_INFINITY);
+        let mut vmin = _mm256_set1_pd(f64::INFINITY);
+        let mut any_nan_mask = 0i32;
+
+        let mut j = win_start;
+        let vec_end = win_start + (period & !3);
+        while j < vec_end {
+            let hv = _mm256_loadu_pd(high.as_ptr().add(j));
+            let lv = _mm256_loadu_pd(low.as_ptr().add(j));
+
+            let hnan = _mm256_cmp_pd(hv, hv, _CMP_UNORD_Q);
+            let lnan = _mm256_cmp_pd(lv, lv, _CMP_UNORD_Q);
+            let nmask = _mm256_movemask_pd(_mm256_or_pd(hnan, lnan));
+            any_nan_mask |= nmask;
+
+            vmax = _mm256_max_pd(vmax, hv);
+            vmin = _mm256_min_pd(vmin, lv);
+            j += 4;
+        }
+
+        if any_nan_mask != 0 {
+            *out.get_unchecked_mut(i) = f64::NAN;
+            continue;
+        }
+
+        // Reduce vmax/vmin to scalars
+        let vhi_max: __m128d = _mm256_extractf128_pd(vmax, 1);
+        let vlo_max: __m128d = _mm256_castpd256_pd128(vmax);
+        let v128_max = _mm_max_pd(vlo_max, vhi_max);
+        let v64_max_hi = _mm_unpackhi_pd(v128_max, v128_max);
+        let mut h = _mm_cvtsd_f64(_mm_max_sd(v128_max, v64_max_hi));
+
+        let vhi_min: __m128d = _mm256_extractf128_pd(vmin, 1);
+        let vlo_min: __m128d = _mm256_castpd256_pd128(vmin);
+        let v128_min = _mm_min_pd(vlo_min, vhi_min);
+        let v64_min_hi = _mm_unpackhi_pd(v128_min, v128_min);
+        let mut l = _mm_cvtsd_f64(_mm_min_sd(v128_min, v64_min_hi));
+
+        while j <= i {
+            let hj = *high.get_unchecked(j);
+            let lj = *low.get_unchecked(j);
+            if (hj != hj) | (lj != lj) {
+                any_nan_mask = 1;
+                break;
+            }
+            if hj > h {
+                h = hj;
+            }
+            if lj < l {
+                l = lj;
+            }
+            j += 1;
+        }
+
+        if (any_nan_mask != 0) || !(h.is_finite() && l.is_finite()) {
+            *out.get_unchecked_mut(i) = f64::NAN;
+        } else {
+            let denom = h - l;
+            let dst = out.get_unchecked_mut(i);
+            if denom == 0.0 {
+                *dst = 0.0;
+            } else {
+                let ratio = (h - c) / denom;
+                *dst = (-100.0f64).mul_add(ratio, 0.0);
+            }
+        }
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -595,11 +981,9 @@ pub unsafe fn willr_avx512(
     first_valid: usize,
     out: &mut [f64],
 ) {
-    if period <= 32 {
-        willr_avx512_short(high, low, close, period, first_valid, out);
-    } else {
-        willr_avx512_long(high, low, close, period, first_valid, out);
-    }
+    // Delegate to AVX2: On many CPUs AVX512 downclocks and underperforms AVX2 for this kernel.
+    // Keep AVX512 implementations in-tree for future re-evaluation.
+    willr_avx2(high, low, close, period, first_valid, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -612,7 +996,96 @@ pub unsafe fn willr_avx512_short(
     first_valid: usize,
     out: &mut [f64],
 ) {
-    willr_scalar(high, low, close, period, first_valid, out)
+    use core::arch::x86_64::*;
+    let n = high.len();
+    if n == 0 {
+        return;
+    }
+    let start_i = first_valid + period - 1;
+    if start_i >= n {
+        return;
+    }
+
+    for i in start_i..n {
+        let c = *close.get_unchecked(i);
+        if c != c {
+            *out.get_unchecked_mut(i) = f64::NAN;
+            continue;
+        }
+
+        let win_start = i + 1 - period;
+        let mut vmax512 = _mm512_set1_pd(f64::NEG_INFINITY);
+        let mut vmin512 = _mm512_set1_pd(f64::INFINITY);
+        let mut any_nan_mask: u16 = 0;
+
+        let mut j = win_start;
+        let vec_end = win_start + (period & !7);
+        while j < vec_end {
+            let hv = _mm512_loadu_pd(high.as_ptr().add(j));
+            let lv = _mm512_loadu_pd(low.as_ptr().add(j));
+
+            let hnan = _mm512_cmp_pd_mask(hv, hv, _CMP_UNORD_Q);
+            let lnan = _mm512_cmp_pd_mask(lv, lv, _CMP_UNORD_Q);
+            any_nan_mask |= (hnan | lnan) as u16;
+
+            vmax512 = _mm512_max_pd(vmax512, hv);
+            vmin512 = _mm512_min_pd(vmin512, lv);
+            j += 8;
+        }
+
+        if any_nan_mask != 0 {
+            *out.get_unchecked_mut(i) = f64::NAN;
+            continue;
+        }
+
+        // Reduce 512 -> 256 -> 128 -> 64
+        let vmax_lo256 = _mm512_castpd512_pd256(vmax512);
+        let vmax_hi256 = _mm512_extractf64x4_pd(vmax512, 1);
+        let vmax256 = _mm256_max_pd(vmax_lo256, vmax_hi256);
+        let vmax_hi128 = _mm256_extractf128_pd(vmax256, 1);
+        let vmax_lo128 = _mm256_castpd256_pd128(vmax256);
+        let vmax128 = _mm_max_pd(vmax_lo128, vmax_hi128);
+        let vmax64_hi = _mm_unpackhi_pd(vmax128, vmax128);
+        let mut h = _mm_cvtsd_f64(_mm_max_sd(vmax128, vmax64_hi));
+
+        let vmin_lo256 = _mm512_castpd512_pd256(vmin512);
+        let vmin_hi256 = _mm512_extractf64x4_pd(vmin512, 1);
+        let vmin256 = _mm256_min_pd(vmin_lo256, vmin_hi256);
+        let vmin_hi128 = _mm256_extractf128_pd(vmin256, 1);
+        let vmin_lo128 = _mm256_castpd256_pd128(vmin256);
+        let vmin128 = _mm_min_pd(vmin_lo128, vmin_hi128);
+        let vmin64_hi = _mm_unpackhi_pd(vmin128, vmin128);
+        let mut l = _mm_cvtsd_f64(_mm_min_sd(vmin128, vmin64_hi));
+
+        while j <= i {
+            let hj = *high.get_unchecked(j);
+            let lj = *low.get_unchecked(j);
+            if (hj != hj) | (lj != lj) {
+                any_nan_mask = 1;
+                break;
+            }
+            if hj > h {
+                h = hj;
+            }
+            if lj < l {
+                l = lj;
+            }
+            j += 1;
+        }
+
+        if (any_nan_mask != 0) || !(h.is_finite() && l.is_finite()) {
+            *out.get_unchecked_mut(i) = f64::NAN;
+        } else {
+            let denom = h - l;
+            let dst = out.get_unchecked_mut(i);
+            if denom == 0.0 {
+                *dst = 0.0;
+            } else {
+                let ratio = (h - c) / denom;
+                *dst = (-100.0f64).mul_add(ratio, 0.0);
+            }
+        }
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]

@@ -209,7 +209,7 @@ use my_project::indicators::{
     qqe::{qqe as qqe_raw, QqeInput},
     qstick::{qstick as qstick_raw, qstick_with_kernel, QstickBatchBuilder, QstickData, QstickInput},
     range_filter::{range_filter_with_kernel, RangeFilterBatchBuilder, RangeFilterInput},
-    roc::{roc as roc_raw, RocInput},
+    roc::{roc as roc_raw, roc_with_kernel, RocBatchBuilder, RocInput},
     rocp::{rocp as rocp_raw, RocpInput},
     rocr::{rocr as rocr_raw, rocr_with_kernel, RocrInput},
     rsi::{rsi as rsi_raw, rsi_with_kernel, RsiBatchBuilder, RsiInput},
@@ -226,12 +226,14 @@ use my_project::indicators::{
     stddev::{stddev as stddev_raw, StdDevBatchBuilder, StdDevInput},
     stoch::{stoch as stoch_raw, stoch_with_kernel, StochBatchBuilder, StochInput},
     stochf::{stochf as stochf_raw, stochf_with_kernel, StochfInput},
-    supertrend::{supertrend as supertrend_raw, supertrend_with_kernel, SuperTrendInput},
+    supertrend::{
+        supertrend as supertrend_raw, supertrend_with_kernel, SuperTrendBatchBuilder, SuperTrendInput,
+    },
     trix::{trix_with_kernel, TrixBatchBuilder, TrixInput},
     tsf::{tsf as tsf_raw, tsf_with_kernel, TsfInput},
     tsi::{tsi as tsi_raw, TsiInput},
     ttm_squeeze::{ttm_squeeze as ttm_squeeze_raw, TtmSqueezeInput},
-    ttm_trend::{ttm_trend as ttm_trend_raw, TtmTrendInput},
+    ttm_trend::{ttm_trend as ttm_trend_raw, ttm_trend_with_kernel, TtmTrendInput},
     ui::{ui as ui_raw, ui_with_kernel, UiInput},
     ultosc::{
         ultosc as ultosc_raw, ultosc_with_kernel, UltOscBatchBuilder, UltOscBatchRange, UltOscData,
@@ -244,7 +246,7 @@ use my_project::indicators::{
     vosc::{vosc as vosc_raw, VoscInput, VoscBatchBuilder},
     voss::{voss as voss_raw, VossInput},
     vpci::{vpci as vpci_raw, vpci_with_kernel, VpciBatchBuilder, VpciData, VpciInput},
-    vpt::{vpt as vpt_raw, VptInput},
+    vpt::{vpt as vpt_raw, vpt_with_kernel, VptInput},
     vwap::{vwap as vwap_raw, VwapInput},
     vwmacd::{vwmacd as vwmacd_raw, VwmacdInput},
     wad::{wad as wad_raw, WadInput},
@@ -1631,8 +1633,33 @@ bench_scalars!(
     vama_bench => VamaInputS
 );
 
+// Compare VPT Scalar vs AVX2 vs AVX512
+bench_variants!(
+    vpt => VptInputS; None;
+    vpt_scalar,
+    vpt_avx2,
+    vpt_avx512,
+);
+
+// Compare WILLR Scalar vs AVX2 vs AVX512
+bench_variants!(
+    willr => WillrInputS; None;
+    willr_scalar,
+    willr_avx2,
+    willr_avx512,
+);
+
 make_kernel_wrappers!(alma, alma_with_kernel, AlmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(bandpass, bandpass_with_kernel, BandPassInputS; Scalar,Avx2,Avx512);
+// VPT single-series kernel variants (Scalar/AVX2/AVX512)
+make_kernel_wrappers!(vpt, vpt_with_kernel, VptInputS; Scalar,Avx2,Avx512);
+// WILLR single-series kernel variants (Scalar/AVX2/AVX512)
+make_kernel_wrappers!(
+    willr,
+    my_project::indicators::willr::willr_with_kernel,
+    WillrInputS;
+    Scalar,Avx2,Avx512
+);
 // ACOSC single-series kernels (Scalar/Avx2/Avx512)
 make_kernel_wrappers!(
     acosc,
@@ -1640,6 +1667,9 @@ make_kernel_wrappers!(
     AcoscInputS;
     Scalar,Avx2,Avx512
 );
+
+// ROC (single-series) kernel wrappers for Scalar vs AVX2 vs AVX512
+make_kernel_wrappers!(roc, roc_with_kernel, RocInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(cfo, cfo_with_kernel, CfoInputS; Scalar,Avx2,Avx512);
 // AD single-series wrappers (Scalar/AVX2/AVX512)
 make_kernel_wrappers!(ad, ad_with_kernel, AdInputS; Scalar,Avx2,Avx512);
@@ -1674,6 +1704,8 @@ make_kernel_wrappers!(cmo, cmo_with_kernel, CmoInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(srsi, srsi_with_kernel, SrsiInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(rsi, rsi_with_kernel, RsiInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(er, er_with_kernel, ErInputS; Scalar,Avx2,Avx512);
+// TTM Trend single-series variants (Scalar, AVX2, AVX512)
+make_kernel_wrappers!(ttm_trend, ttm_trend_with_kernel, TtmTrendInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(macz, macz_with_kernel, MaczInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(mom, mom_with_kernel, MomInputS; Scalar,Avx2,Avx512);
 // VPCI single-series kernel wrappers (Scalar/AVX2/AVX512)
@@ -1763,6 +1795,13 @@ make_kernel_wrappers!(adxr, adxr_with_kernel, AdxrInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(stoch, stoch_with_kernel, StochInputS; Scalar,Avx2,Avx512);
 
 // Batch wrappers generated via macros (avoid per-indicator boilerplate)
+make_hlc_batch_wrappers!(
+    supertrend_batch,
+    SuperTrendBatchBuilder,
+    SupertrendInputS,
+    my_project::indicators::supertrend::SuperTrendData
+);
+
 make_hlc_batch_wrappers!(
     stoch_batch,
     StochBatchBuilder,
@@ -1912,6 +1951,12 @@ make_batch_wrappers!(
     ScalarBatch, Avx2Batch, Avx512Batch
 );
 
+// ROC batch variants
+make_batch_wrappers!(
+    roc_batch, RocBatchBuilder, RocInputS;
+    ScalarBatch, Avx2Batch, Avx512Batch
+);
+
 // CG: kernel-specific wrappers for SIMD benchmarking
 make_kernel_wrappers!(cg, cg_with_kernel, CgInputS; Scalar,Avx2,Avx512);
 
@@ -1954,6 +1999,38 @@ bench_variants!(
     alphatrend_scalar,
     alphatrend_avx2,
     alphatrend_avx512,
+);
+
+// TTM Trend single-series variants
+bench_variants!(
+    ttm_trend => TtmTrendInputS; None;
+    ttm_trend_scalar,
+    ttm_trend_avx2,
+    ttm_trend_avx512,
+);
+
+// TTM Trend batch variants (pair extractor: (source, close))
+make_pair_from_input_wrappers!(
+    ttm_trend_batch,
+    my_project::indicators::ttm_trend::TtmTrendBatchBuilder,
+    TtmTrendInputS,
+    |input: &TtmTrendInputS| -> anyhow::Result<(&[f64], &[f64])> {
+        use my_project::indicators::ttm_trend::TtmTrendData;
+        let (src, cls): (&[f64], &[f64]) = match &input.data {
+            TtmTrendData::Slices { source, close } => (*source, *close),
+            TtmTrendData::Candles { candles, source } => (
+                source_type(candles, source),
+                source_type(candles, "close"),
+            ),
+        };
+        Ok((src, cls))
+    }
+);
+bench_variants!(
+    ttm_trend_batch => TtmTrendInputS; None;
+    ttm_trend_batch_scalarbatch,
+    ttm_trend_batch_avx2batch,
+    ttm_trend_batch_avx512batch,
 );
 
 // VPCI single-series variants
@@ -2352,6 +2429,14 @@ bench_variants!(
     adosc_batch_scalarbatch,
     adosc_batch_avx2batch,
     adosc_batch_avx512batch
+);
+
+// ROC batch benchmarks (ScalarBatch vs AVX2Batch vs AVX512Batch)
+bench_variants!(
+    roc_batch => RocInputS; None;
+    roc_batch_scalarbatch,
+    roc_batch_avx2batch,
+    roc_batch_avx512batch
 );
 
 // BOP single-series kernel variants
@@ -2965,6 +3050,14 @@ bench_variants!(
     rocr_scalar,
     rocr_avx2,
     rocr_avx512
+);
+
+// ROC scalar-vs-SIMD single-series variants
+bench_variants!(
+    roc => RocInputS; None;
+    roc_scalar,
+    roc_avx2,
+    roc_avx512
 );
 
 // DM scalar-vs-SIMD single-series variants
@@ -4191,6 +4284,13 @@ bench_variants!(
     supertrend_avx512,
 );
 
+bench_variants!(
+    supertrend_batch => SupertrendInputS; Some(10);
+    supertrend_batch_scalarbatch,
+    supertrend_batch_avx2batch,
+    supertrend_batch_avx512batch,
+);
+
 // RSX single-series variants (to compare scalar vs AVX2/AVX512)
 bench_variants!(
     rsx => RsxInputS; None;
@@ -4601,6 +4701,8 @@ bench_variants!(
 
 criterion_main!(
     benches_scalar,
+    benches_roc,
+    benches_roc_batch,
     benches_adxr,
     benches_bandpass,
     benches_cci,
@@ -4631,6 +4733,8 @@ criterion_main!(
     benches_vpci_batch,
     benches_bollinger_bands,
     benches_cg,
+    benches_ttm_trend,
+    benches_ttm_trend_batch,
     benches_ad,
     benches_cmo,
     benches_cmo_batch,
@@ -4694,6 +4798,7 @@ criterion_main!(
     benches_deviation,
     benches_deviation_batch,
     benches_supertrend,
+    benches_supertrend_batch,
     benches_bollinger_bands_batch,
     benches_linearreg_slope_batch,
     benches_stddev_batch,
@@ -4813,6 +4918,7 @@ criterion_main!(
     benches_srsi_batch,
     benches_pfe_batch,
     benches_kst_batch,
+    benches_willr,
     benches_willr_batch,
     benches_vwma,
     benches_wavetrend,
@@ -4856,6 +4962,7 @@ criterion_main!(
     ,benches_aroon_osc_batch
     ,benches_ehma
     ,benches_ehma_batch
+    ,benches_vpt
     ,benches_reverse_rsi
     ,benches_reverse_rsi_batch
     ,benches_ttm_squeeze_batch
