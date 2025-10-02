@@ -15,10 +15,14 @@
 //! - SIMD: AVX2/AVX512 are present as stubs and short‑circuit to the scalar path.
 //!   Rationale: TSI is inherently sequential (EMA recursion), so per‑element
 //!   vectorization does not provide wins; keeping scalar as reference.
-//! - Scalar: Optimized inlined double‑EMA kernel for all periods; classic fast path
-//!   used for default (25,13). Robust NaN handling and no O(N) temporaries.
+//! - Scalar: Inlined double‑EMA kernel with robust NaN handling and no O(N) temporaries.
+//!   Note: FMA/mul_add variants did not show consistent speedups vs the existing safe math,
+//!   so we retained the simpler arithmetic for stability and portability.
 //! - Memory: Uses `alloc_with_nan_prefix` / matrix helpers for zero‑copy prefixes.
-//! - Batch: Parallel per‑row evaluation; rows use the optimized scalar kernel.
+//! - Batch: Parallel per‑row evaluation; rows use the scalar kernel. Row‑specific
+//!   batch kernels (shared precompute across rows) not implemented yet; expected gains
+//!   require additional complexity and are deferred. Runtime selection short‑circuits
+//!   to scalar batch.
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]

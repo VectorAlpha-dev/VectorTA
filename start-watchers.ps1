@@ -20,7 +20,7 @@ I want you to double check to confirm that this implementation is indeed more op
  
 Do you see any further room for improvement/optimization? 
 
-Accurate? All unit tests pass? No unit test reference values or tolerances were changed? No memory copy operations? No prefilling of any vectors? Are you the certain that the current scalar implemenation is faster than the original? Any further room for optimization? Also, provide the full benchmark results (Simd kernels as well) if you haven't already done so.
+Accurate? All unit tests pass? No unit test reference values or tolerances were changed? No memory copy operations? No prefilling of any vectors? Are you the certain that the current scalar implemenation is faster than the original? Any further room for optimization? 
 
 Conduct a review of your work against your instructions to ensure that you didn't miss anything. For example, if SIMD was not implemented then did you try to use unsafe operations and FMA/mul_add in the avx2 kernel? Have you looked into the possibility of row optimized variants for the batch function? Did you maintain zero memory copy operations and only write into uninitialized memory like you were supposed to? If you replaced the origianl scalar implementation, is the new implementation faster according to the benchmarks that you ran? If you are finally complete with the indicator rust file then run all unit tests for the indicator to ensure that it passes. Finally, run the indicator's benchmark(s) and report back all of the timings to me. 
 

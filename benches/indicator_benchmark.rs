@@ -212,7 +212,7 @@ use my_project::indicators::{
     roc::{roc as roc_raw, RocInput},
     rocp::{rocp as rocp_raw, RocpInput},
     rocr::{rocr as rocr_raw, rocr_with_kernel, RocrInput},
-    rsi::{rsi as rsi_raw, RsiInput},
+    rsi::{rsi as rsi_raw, rsi_with_kernel, RsiBatchBuilder, RsiInput},
     rsmk::{rsmk as rsmk_raw, RsmkInput},
     rsx::{rsx as rsx_raw, rsx_with_kernel, RsxBatchBuilder, RsxInput},
     rvi::{rvi as rvi_raw, RviInput},
@@ -1672,6 +1672,7 @@ make_kernel_wrappers!(zscore, zscore_with_kernel, ZscoreInputS; Scalar,Avx2,Avx5
 make_kernel_wrappers!(var, var_with_kernel, VarInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(cmo, cmo_with_kernel, CmoInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(srsi, srsi_with_kernel, SrsiInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(rsi, rsi_with_kernel, RsiInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(er, er_with_kernel, ErInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(macz, macz_with_kernel, MaczInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(mom, mom_with_kernel, MomInputS; Scalar,Avx2,Avx512);
@@ -1832,6 +1833,8 @@ make_kernel_wrappers!(
     Scalar,Avx2,Avx512
 );
 make_kernel_wrappers!(tsf, tsf_with_kernel, TsfInputS; Scalar,Avx2,Avx512);
+// TSI single-series kernel variants (Scalar/AVX2/AVX512)
+make_kernel_wrappers!(tsi, my_project::indicators::tsi::tsi_with_kernel, TsiInputS; Scalar,Avx2,Avx512);
 // Add ROCR kernel-specific wrappers to compare scalar vs SIMD
 make_kernel_wrappers!(rocr, rocr_with_kernel, RocrInputS; Scalar,Avx2,Avx512);
 // OTT kernel-specific wrappers to compare scalar vs SIMD
@@ -1928,6 +1931,14 @@ bench_variants!(
     alphatrend_avx512,
 );
 
+// TSI single-series variants (scalar vs AVX2 vs AVX512)
+bench_variants!(
+    tsi => TsiInputS; None;
+    tsi_scalar,
+    tsi_avx2,
+    tsi_avx512,
+);
+
 
 make_kernel_wrappers!(supertrend, supertrend_with_kernel, SupertrendInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(cvi, cvi_with_kernel, CviInputS; Scalar,Avx2,Avx512);
@@ -1936,6 +1947,18 @@ make_kernel_wrappers!(cvi, cvi_with_kernel, CviInputS; Scalar,Avx2,Avx512);
 make_batch_wrappers!(
     bollinger_bands_batch, BollingerBandsBatchBuilder, BollingerBandsInputS;
     ScalarBatch, Avx2Batch, Avx512Batch
+);
+
+// TSI batch variants (ScalarBatch/AVX2Batch/AVX512Batch)
+make_batch_wrappers!(
+    tsi_batch, my_project::indicators::tsi::TsiBatchBuilder, TsiInputS;
+    ScalarBatch, Avx2Batch, Avx512Batch
+);
+bench_variants!(
+    tsi_batch => TsiInputS; None;
+    tsi_batch_scalarbatch,
+    tsi_batch_avx2batch,
+    tsi_batch_avx512batch
 );
 
 // Bollinger Bands batch variants
@@ -4467,6 +4490,13 @@ bench_variants!(
 );
 
 bench_variants!(
+    rsi => RsiInputS; None;
+    rsi_scalar,
+    rsi_avx2,
+    rsi_avx512,
+);
+
+bench_variants!(
     ultosc_batch => UltOscInputS; Some(28);
     ultosc_batch_scalarbatch,
     ultosc_batch_avx2batch,
@@ -4478,6 +4508,15 @@ bench_variants!(
     qstick_batch_scalarbatch,
     qstick_batch_avx2batch,
     qstick_batch_avx512batch,
+);
+
+// RSI batch benchmarks (representative window: 14)
+make_batch_wrappers!(rsi_batch, RsiBatchBuilder, RsiInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+bench_variants!(
+    rsi_batch => RsiInputS; Some(14);
+    rsi_batch_scalarbatch,
+    rsi_batch_avx2batch,
+    rsi_batch_avx512batch,
 );
 
 // MFI batch benchmarks
@@ -4558,12 +4597,16 @@ criterion_main!(
     benches_ott,
     benches_ultosc,
     benches_qstick,
+    benches_tsi,
+    benches_rsi,
     benches_mfi_batch,
+    benches_rsi_batch,
     benches_dx_batch,
     benches_adx,
     benches_adx_batch,
     benches_ultosc_batch,
     benches_qstick_batch,
+    benches_tsi_batch,
     benches_alma,
     benches_adosc,
     benches_nadaraya_watson_envelope,

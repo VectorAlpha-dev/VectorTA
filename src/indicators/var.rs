@@ -14,10 +14,10 @@
 //! - **values**: Variance values as `Vec<f64>` (length matches input)
 //!
 //! ## Developer Notes
-//! - **SIMD kernels**: AVX2 uses vectorized init + scalar rolling; AVX512 currently delegates to scalar
+//! - **SIMD kernels**: AVX2/AVX512 vectorize the first-window init; rolling remains scalar
 //! - **Streaming update**: O(1) performance with Welford's online algorithm for incremental variance
 //! - **Memory optimization**: Properly uses zero-copy helper functions (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
-//! - **SIMD status**: Implemented as stubs delegating to scalar; variance is memory-bound with a tight dependency chain on rolling sums, so SIMD showed no consistent win in preliminary attempts. Revisit if layout changes or additional precompute become available.
+//! - **SIMD status**: Implemented (AVX2/AVX512 vectorized init) but disabled by default for Auto selection: variance is memory-bound with a tight dependency chain on rolling sums and showed no consistent win. Explicit AVX2/AVX512 remain available for testing/benches. Revisit if layout changes or additional precompute become available.
 //! - **Note**: Streaming implementation is highly optimized using running sums and sum of squares
 
 #[cfg(feature = "python")]
@@ -243,8 +243,18 @@ pub fn var_with_kernel(input: &VarInput, kernel: Kernel) -> Result<VarOutput, Va
         return Err(VarError::InvalidNbdev { nbdev });
     }
 
+    // Runtime selection: keep VAR on scalar by default as SIMD showed no consistent win.
+    // Avx2/Avx512 remain accessible via explicit kernel selection for testing/benches.
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => {
+            let k = detect_best_kernel();
+            match k {
+                Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                    Kernel::Scalar
+                }
+                _ => k,
+            }
+        }
         other => other,
     };
 
@@ -337,19 +347,30 @@ pub fn var_avx2(
     unsafe {
         let mut idx = first;
         let end = first + period;
+
+        // Process in 4-wide chunks; accumulate lanes in original order to minimize rounding deltas
         while idx + 4 <= end {
             let v = _mm256_loadu_pd(data.as_ptr().add(idx));
             let v2 = _mm256_mul_pd(v, v);
 
-            let mut tmp: [f64; 4] = core::mem::zeroed();
-            _mm256_storeu_pd(tmp.as_mut_ptr(), v);
-            sum += tmp[0] + tmp[1] + tmp[2] + tmp[3];
+            // Spill to stack and compute block sums with left-associative order
+            let mut lanes: [f64; 4] = core::mem::zeroed();
+            _mm256_storeu_pd(lanes.as_mut_ptr(), v);
+            let mut t = lanes[0] + lanes[1];
+            t = t + lanes[2];
+            t = t + lanes[3];
+            sum += t;
 
-            _mm256_storeu_pd(tmp.as_mut_ptr(), v2);
-            sum_sq += tmp[0] + tmp[1] + tmp[2] + tmp[3];
+            _mm256_storeu_pd(lanes.as_mut_ptr(), v2);
+            let mut t2 = lanes[0] + lanes[1];
+            t2 = t2 + lanes[2];
+            t2 = t2 + lanes[3];
+            sum_sq += t2;
 
             idx += 4;
         }
+
+        // Scalar tail for any remaining indices
         while idx < end {
             let x = *data.get_unchecked(idx);
             sum += x;
@@ -387,8 +408,95 @@ pub fn var_avx512(
     nbdev: f64,
     out: &mut [f64],
 ) -> Result<(), VarError> {
-    // Stub: points to scalar logic for API parity
-    var_scalar(data, period, first, nbdev, out)
+    use core::arch::x86_64::*;
+
+    let len = data.len();
+    let nbdev2 = nbdev * nbdev;
+    let inv_p = 1.0 / (period as f64);
+
+    let mut sum = 0.0f64;
+    let mut sum_sq = 0.0f64;
+
+    unsafe {
+        // Vectorized initialization of the first window using 8-lane vectors
+        let mut idx = first;
+        let end = first + period;
+        while idx + 8 <= end {
+            let v = _mm512_loadu_pd(data.as_ptr().add(idx));
+            let v2 = _mm512_mul_pd(v, v);
+
+            // Spill lanes; accumulate as two 4-lane blocks to match scalar chunking
+            let mut lanes: [f64; 8] = core::mem::zeroed();
+            _mm512_storeu_pd(lanes.as_mut_ptr(), v);
+            // low 0..3
+            let mut t0 = lanes[0] + lanes[1];
+            t0 = t0 + lanes[2];
+            t0 = t0 + lanes[3];
+            sum += t0;
+            // high 4..7
+            let mut t1 = lanes[4] + lanes[5];
+            t1 = t1 + lanes[6];
+            t1 = t1 + lanes[7];
+            sum += t1;
+
+            _mm512_storeu_pd(lanes.as_mut_ptr(), v2);
+            let mut u0 = lanes[0] + lanes[1];
+            u0 = u0 + lanes[2];
+            u0 = u0 + lanes[3];
+            sum_sq += u0;
+            let mut u1 = lanes[4] + lanes[5];
+            u1 = u1 + lanes[6];
+            u1 = u1 + lanes[7];
+            sum_sq += u1;
+
+            idx += 8;
+        }
+
+        // Handle any remaining 4-wide block to match scalar chunking
+        while idx + 4 <= end {
+            let v4 = _mm256_loadu_pd(data.as_ptr().add(idx));
+            let v4sq = _mm256_mul_pd(v4, v4);
+            let mut lanes4: [f64; 4] = core::mem::zeroed();
+            _mm256_storeu_pd(lanes4.as_mut_ptr(), v4);
+            let mut t = lanes4[0] + lanes4[1];
+            t = t + lanes4[2];
+            t = t + lanes4[3];
+            sum += t;
+            _mm256_storeu_pd(lanes4.as_mut_ptr(), v4sq);
+            let mut u = lanes4[0] + lanes4[1];
+            u = u + lanes4[2];
+            u = u + lanes4[3];
+            sum_sq += u;
+            idx += 4;
+        }
+
+        // Scalar tail for any remaining elements (<4)
+        while idx < end {
+            let x = *data.get_unchecked(idx);
+            sum += x;
+            sum_sq += x * x;
+            idx += 1;
+        }
+
+        // First output
+        let idx0 = first + period - 1;
+        let mean0 = sum * inv_p;
+        out[idx0] = (sum_sq * inv_p - mean0 * mean0) * nbdev2;
+
+        // Rolling updates remain scalar due to dependency chain
+        let olds = &data[first..(len - period)];
+        let news = &data[(first + period)..len];
+        let mut out_i = idx0 + 1;
+        for (&old, &new) in olds.iter().zip(news.iter()) {
+            sum += new - old;
+            sum_sq += new * new - old * old;
+            let mean = sum * inv_p;
+            out[out_i] = (sum_sq * inv_p - mean * mean) * nbdev2;
+            out_i += 1;
+        }
+    }
+
+    Ok(())
 }
 
 // --- WASM Helper Function ---

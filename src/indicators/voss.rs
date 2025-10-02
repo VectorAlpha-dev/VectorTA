@@ -13,9 +13,9 @@
 //!
 //! ## Developer Notes
 //! - **AVX2/AVX512 Kernels**: Stub implementations that delegate to scalar. Functions exist but just call scalar version. IIR filter nature makes SIMD challenging but could vectorize across multiple parameter sets.
-//! - **Streaming Performance**: O(n) implementation where n is order (predict*3). Iterates through ring buffer for weighted sum calculation on each update. Could cache partial sums for minor optimization.
-//! - **Memory Optimization**: Uses `alloc_with_nan_prefix` and batch helpers properly. Ring buffer approach is memory efficient for streaming.
-//! - **Status (2025-09)**: Scalar single-series now reuses the row-optimized O(1) rolling update with fused mul_add for the IIR and predictor; tests tightened (1e-6) and pass. SIMD remains stubbed due to limited benefit.
+//! - **Streaming Performance**: O(n) per-step predictor in streaming (n = order). Could adopt the same O(1) predictor recurrence used in scalar when needed.
+//! - **Memory/Batch**: Uses `alloc_with_nan_prefix` and batch helpers properly.
+//! - **Status (2025-09)**: Scalar single-series uses an O(1) predictor via a tiny ring and rolling numerator/sum; SIMD remains stubbed (serial recurrence). Batch remains per-row compute to avoid extra memory copies.
 
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -1057,6 +1057,8 @@ fn voss_batch_inner(
     })
 }
 
+// (batch predictor-only helper removed to avoid memory copies of filt across rows)
+
 #[inline(always)]
 fn voss_row_scalar(
     data: &[f64],
@@ -1106,9 +1108,12 @@ fn voss_row_scalar(
         return;
     }
 
-    let inv_order = 1.0 / order as f64;
+    let ord_f = order as f64;
+    let inv_order = 1.0 / ord_f;
     let mut a_sum = 0.0f64;
     let mut d_sum = 0.0f64;
+    let mut ring = vec![0.0f64; order];
+    let mut rpos = 0usize;
 
     for i in start..data.len() {
         let diff = data[i] - data[i - 2];
@@ -1122,14 +1127,17 @@ fn voss_row_scalar(
         let vi = scale.mul_add(f, -sumc);
         voss[i] = vi;
 
-        let old_idx = i - order;
-        let v_old_raw = voss[old_idx];
-        let v_old_nz = if old_idx >= first && !v_old_raw.is_nan() { v_old_raw } else { 0.0 };
+        // Roll the O(1) recurrence via ring buffer to avoid voss[i - order] reads
         let v_new_nz = if vi.is_nan() { 0.0 } else { vi };
+        let v_old = ring[rpos];
 
         let a_prev = a_sum;
-        a_sum = a_prev - v_old_nz + v_new_nz;
-        d_sum = (order as f64).mul_add(v_new_nz, d_sum - a_prev);
+        a_sum = a_prev - v_old + v_new_nz;
+        d_sum = ord_f.mul_add(v_new_nz, d_sum - a_prev);
+
+        ring[rpos] = v_new_nz;
+        rpos += 1;
+        if rpos == order { rpos = 0; }
     }
 }
 
@@ -1188,9 +1196,12 @@ unsafe fn voss_row_scalar_unchecked(
         return;
     }
 
-    let inv_order = 1.0 / order as f64;
+    let ord_f = order as f64;
+    let inv_order = 1.0 / ord_f;
     let mut a_sum = 0.0f64;
     let mut d_sum = 0.0f64;
+    let mut ring = vec![0.0f64; order];
+    let mut rpos = 0usize;
 
     for i in start..len {
         let xi = *data.get_unchecked(i);
@@ -1206,14 +1217,16 @@ unsafe fn voss_row_scalar_unchecked(
         let vi = scale.mul_add(f, -sumc);
         *voss.get_unchecked_mut(i) = vi;
 
-        let old_idx = i - order;
-        let v_old_raw = *voss.get_unchecked(old_idx);
-        let v_old_nz = if old_idx >= first && !v_old_raw.is_nan() { v_old_raw } else { 0.0 };
         let v_new_nz = if vi.is_nan() { 0.0 } else { vi };
+        let v_old = *ring.get_unchecked(rpos);
 
         let a_prev = a_sum;
-        a_sum = a_prev - v_old_nz + v_new_nz;
-        d_sum = (order as f64).mul_add(v_new_nz, d_sum - a_prev);
+        a_sum = a_prev - v_old + v_new_nz;
+        d_sum = ord_f.mul_add(v_new_nz, d_sum - a_prev);
+
+        *ring.get_unchecked_mut(rpos) = v_new_nz;
+        rpos += 1;
+        if rpos == order { rpos = 0; }
     }
 }
 

@@ -12,13 +12,13 @@
 //! - **`Err(SarError)`** on invalid parameters or insufficient data.
 //!
 //! ## Developer Notes
-//! - **SIMD Status**: AVX2/AVX512 use an unsafe-indexing specialization (no true vector ops),
-//!   removing bounds checks and using `mul_add`. SAR is strictly sequential, so we avoid
-//!   per-step vectorization; AVX2 showed a >15% speedup vs scalar at 100k on x86_64.
-//! - **Streaming Performance**: O(1) – maintains minimal state for incremental updates.
-//! - **Memory Optimization**: ✓ Uses `alloc_with_nan_prefix` and write-into-slice variants.
-//! - **Batch Support**: ✓ Parallel per-row parameter sweep; no row-specific SIMD since there’s no
-//!   reusable precompute across rows.
+//! - Decision: Keep scalar path safe and unchanged; AVX2/AVX512 keep an unsafe-indexing
+//!   specialization (no true vector ops) that removes bounds checks and uses `mul_add`.
+//!   SAR is inherently sequential; AVX2 improves ~14–15% at 100k on x86_64.
+//! - Streaming Performance: O(1) – maintains minimal state for incremental updates.
+//! - Memory Optimization: ✓ Uses `alloc_with_nan_prefix` and write-into-slice variants.
+//! - Batch Support: ✓ Parallel per-row sweep; row-specific SIMD not attempted (no reusable
+//!   precompute across rows).
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};

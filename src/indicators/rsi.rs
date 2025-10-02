@@ -10,13 +10,14 @@
 //! - `Vec<f64>` - RSI values (0-100 scale) matching input length
 //!
 //! ## Developer Status
-//! **AVX2**: Stub (row functions call scalar)
-//! **AVX512**: Has short/long row variants but all stubs
+//! **AVX2**: Stub (row functions delegate to scalar)
+//! **AVX512**: Short/long variants present but delegate to scalar
 //!
 //! Decision: SIMD disabled by default for RSI. The core update is a
 //! sequential Wilder-style recursion with little ILP; scalar outperforms naive
-//! AVX variants on 100k by ~15–20% on this machine. Keep runtime selection
-//! short-circuited to scalar until a provably faster SIMD is found.
+//! AVX variants. Runtime selection short-circuits to scalar.
+//! Scalar path tightened with 2× unrolling + `mul_add`; batch reuses
+//! rectified deltas via prefix sums to avoid per-row recomputation.
 //! **Streaming**: O(1) - Exponential smoothing with state
 //! **Memory**: Good - Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
 
@@ -244,8 +245,14 @@ fn rsi_compute_into(data: &[f64], period: usize, first: usize, kernel: Kernel, o
             Kernel::Scalar | Kernel::ScalarBatch => {
                 rsi_compute_into_scalar(data, period, first, out)
             }
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch => rsi_compute_into_scalar(data, period, first, out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => rsi_compute_into_scalar(data, period, first, out),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                rsi_compute_into_scalar(data, period, first, out)
+            }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
                 rsi_compute_into_scalar(data, period, first, out)
@@ -311,56 +318,82 @@ pub fn rsi_into_slice(dst: &mut [f64], input: &RsiInput, kern: Kernel) -> Result
 
 #[inline(always)]
 unsafe fn rsi_compute_into_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
+    // Preconditions handled by caller.
     let len = data.len();
-    let inv_period = 1.0 / period as f64;
-    let beta = 1.0 - inv_period;
+    let inv_p = 1.0 / (period as f64);
+    let beta = 1.0 - inv_p;
 
-    let mut avg_gain = 0.0;
-    let mut avg_loss = 0.0;
+    // Warmup: accumulate raw gains/losses over the first `period` deltas.
+    let mut avg_gain = 0.0f64;
+    let mut avg_loss = 0.0f64;
     let mut has_nan = false;
 
-    for i in (first + 1)..=((first + period).min(len - 1)) {
+    let warm_last = core::cmp::min(first + period, len.saturating_sub(1));
+    let mut i = first + 1;
+    while i <= warm_last {
         let delta = data[i] - data[i - 1];
         if !delta.is_finite() {
             has_nan = true;
-            break; // Any NaN in warmup invalidates the calculation
+            break;
         }
         if delta > 0.0 {
             avg_gain += delta;
         } else if delta < 0.0 {
-            avg_loss += -delta;
+            avg_loss -= delta; // delta negative
         }
+        i += 1;
     }
 
-    let initial_rsi = if has_nan {
-        avg_gain = f64::NAN; // Poison the averages so NaN propagates
+    // Initial RSI at index (first + period) if exists.
+    let idx0 = first + period;
+    if has_nan {
+        avg_gain = f64::NAN;
         avg_loss = f64::NAN;
-        f64::NAN // If any NaN in warmup, initial RSI is NaN
-    } else {
-        avg_gain *= inv_period;
-        avg_loss *= inv_period;
-        if avg_gain + avg_loss == 0.0 {
-            50.0
-        } else {
-            100.0 * avg_gain / (avg_gain + avg_loss)
+        if idx0 < len {
+            out[idx0] = f64::NAN;
         }
-    };
-    if first + period < len {
-        out[first + period] = initial_rsi;
+    } else {
+        avg_gain *= inv_p;
+        avg_loss *= inv_p;
+        if idx0 < len {
+            let denom = avg_gain + avg_loss;
+            out[idx0] = if denom == 0.0 { 50.0 } else { 100.0 * avg_gain / denom };
+        }
     }
 
-    for i in (first + period + 1)..len {
-        let delta = data[i] - data[i - 1];
-        let gain = if delta > 0.0 { delta } else { 0.0 };
-        let loss = if delta < 0.0 { -delta } else { 0.0 };
-        avg_gain = inv_period * gain + beta * avg_gain;
-        avg_loss = inv_period * loss + beta * avg_loss;
-        let rsi = if avg_gain + avg_loss == 0.0 {
-            50.0
-        } else {
-            100.0 * avg_gain / (avg_gain + avg_loss)
-        };
-        out[i] = rsi;
+    // Recursive updates (Wilder smoothing) with 2x unrolling and mul_add.
+    let mut j = idx0 + 1;
+    while j + 1 < len {
+        // step j
+        let d1 = data[j] - data[j - 1];
+        let g1 = if d1 > 0.0 { d1 } else { 0.0 };
+        let l1 = if d1 < 0.0 { -d1 } else { 0.0 };
+        avg_gain = avg_gain.mul_add(beta, inv_p * g1);
+        avg_loss = avg_loss.mul_add(beta, inv_p * l1);
+        let denom1 = avg_gain + avg_loss;
+        out[j] = if denom1 == 0.0 { 50.0 } else { 100.0 * avg_gain / denom1 };
+
+        // step j + 1
+        let d2 = data[j + 1] - data[j];
+        let g2 = if d2 > 0.0 { d2 } else { 0.0 };
+        let l2 = if d2 < 0.0 { -d2 } else { 0.0 };
+        avg_gain = avg_gain.mul_add(beta, inv_p * g2);
+        avg_loss = avg_loss.mul_add(beta, inv_p * l2);
+        let denom2 = avg_gain + avg_loss;
+        out[j + 1] = if denom2 == 0.0 { 50.0 } else { 100.0 * avg_gain / denom2 };
+
+        j += 2;
+    }
+
+    // Tail element
+    if j < len {
+        let d = data[j] - data[j - 1];
+        let g = if d > 0.0 { d } else { 0.0 };
+        let l = if d < 0.0 { -d } else { 0.0 };
+        avg_gain = avg_gain.mul_add(beta, inv_p * g);
+        avg_loss = avg_loss.mul_add(beta, inv_p * l);
+        let denom = avg_gain + avg_loss;
+        out[j] = if denom == 0.0 { 50.0 } else { 100.0 * avg_gain / denom };
     }
 }
 
@@ -534,10 +567,79 @@ fn rsi_batch_inner(
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
+    // Precompute per-step rectified deltas and their prefix sums for reuse across rows
+    let mut gains = vec![0.0f64; cols];
+    let mut losses = vec![0.0f64; cols];
+    for i in (first + 1)..cols {
+        let d = data[i] - data[i - 1];
+        if d.is_finite() {
+            if d > 0.0 {
+                gains[i] = d;
+            } else if d < 0.0 {
+                losses[i] = -d;
+            }
+        } else {
+            gains[i] = f64::NAN;
+            losses[i] = f64::NAN;
+        }
+    }
+    let mut pg = vec![0.0f64; cols];
+    let mut pl = vec![0.0f64; cols];
+    for i in 1..cols {
+        pg[i] = pg[i - 1] + gains[i];
+        pl[i] = pl[i - 1] + losses[i];
+    }
+
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
         match kern {
-            Kernel::Scalar => rsi_row_scalar(data, first, period, out_row),
+            // Row-specific optimized scalar using shared rectified deltas
+            Kernel::Scalar | Kernel::Avx2 | Kernel::Avx512 => {
+                let inv_p = 1.0 / (period as f64);
+                let beta = 1.0 - inv_p;
+                let idx0 = first + period;
+                if idx0 < cols {
+                    let sum_g = pg[idx0] - pg[first];
+                    let sum_l = pl[idx0] - pl[first];
+                    let mut avg_g = sum_g * inv_p;
+                    let mut avg_l = sum_l * inv_p;
+                    if sum_g.is_nan() || sum_l.is_nan() {
+                        avg_g = f64::NAN;
+                        avg_l = f64::NAN;
+                        out_row[idx0] = f64::NAN;
+                    } else {
+                        let denom = avg_g + avg_l;
+                        out_row[idx0] = if denom == 0.0 { 50.0 } else { 100.0 * avg_g / denom };
+                    }
+                    let mut j = idx0 + 1;
+                    while j + 1 < cols {
+                        // j
+                        let g1 = gains[j];
+                        let l1 = losses[j];
+                        avg_g = avg_g.mul_add(beta, inv_p * g1);
+                        avg_l = avg_l.mul_add(beta, inv_p * l1);
+                        let denom1 = avg_g + avg_l;
+                        out_row[j] = if denom1 == 0.0 { 50.0 } else { 100.0 * avg_g / denom1 };
+
+                        // j+1
+                        let g2 = gains[j + 1];
+                        let l2 = losses[j + 1];
+                        avg_g = avg_g.mul_add(beta, inv_p * g2);
+                        avg_l = avg_l.mul_add(beta, inv_p * l2);
+                        let denom2 = avg_g + avg_l;
+                        out_row[j + 1] = if denom2 == 0.0 { 50.0 } else { 100.0 * avg_g / denom2 };
+                        j += 2;
+                    }
+                    if j < cols {
+                        let g = gains[j];
+                        let l = losses[j];
+                        avg_g = avg_g.mul_add(beta, inv_p * g);
+                        avg_l = avg_l.mul_add(beta, inv_p * l);
+                        let denom = avg_g + avg_l;
+                        out_row[j] = if denom == 0.0 { 50.0 } else { 100.0 * avg_g / denom };
+                    }
+                }
+            }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 => rsi_row_avx2(data, first, period, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -634,10 +736,78 @@ pub fn rsi_batch_inner_into(
     let values: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(out_mu.as_mut_ptr() as *mut f64, out_mu.len()) };
 
+    // Shared rectified deltas + prefix sums for reuse across rows
+    let mut gains = vec![0.0f64; cols];
+    let mut losses = vec![0.0f64; cols];
+    for i in (first + 1)..cols {
+        let d = data[i] - data[i - 1];
+        if d.is_finite() {
+            if d > 0.0 {
+                gains[i] = d;
+            } else if d < 0.0 {
+                losses[i] = -d;
+            }
+        } else {
+            gains[i] = f64::NAN;
+            losses[i] = f64::NAN;
+        }
+    }
+    let mut pg = vec![0.0f64; cols];
+    let mut pl = vec![0.0f64; cols];
+    for i in 1..cols {
+        pg[i] = pg[i - 1] + gains[i];
+        pl[i] = pl[i - 1] + losses[i];
+    }
+
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
         match kern {
-            Kernel::Scalar => rsi_row_scalar(data, first, period, out_row),
+            Kernel::Scalar | Kernel::Avx2 | Kernel::Avx512 => {
+                let inv_p = 1.0 / (period as f64);
+                let beta = 1.0 - inv_p;
+                let idx0 = first + period;
+                if idx0 < cols {
+                    let sum_g = pg[idx0] - pg[first];
+                    let sum_l = pl[idx0] - pl[first];
+                    let mut avg_g = sum_g * inv_p;
+                    let mut avg_l = sum_l * inv_p;
+                    if sum_g.is_nan() || sum_l.is_nan() {
+                        avg_g = f64::NAN;
+                        avg_l = f64::NAN;
+                        out_row[idx0] = f64::NAN;
+                    } else {
+                        let denom = avg_g + avg_l;
+                        out_row[idx0] = if denom == 0.0 { 50.0 } else { 100.0 * avg_g / denom };
+                    }
+                    let mut j = idx0 + 1;
+                    while j + 1 < cols {
+                        // j
+                        let g1 = gains[j];
+                        let l1 = losses[j];
+                        avg_g = avg_g.mul_add(beta, inv_p * g1);
+                        avg_l = avg_l.mul_add(beta, inv_p * l1);
+                        let denom1 = avg_g + avg_l;
+                        out_row[j] = if denom1 == 0.0 { 50.0 } else { 100.0 * avg_g / denom1 };
+
+                        // j+1
+                        let g2 = gains[j + 1];
+                        let l2 = losses[j + 1];
+                        avg_g = avg_g.mul_add(beta, inv_p * g2);
+                        avg_l = avg_l.mul_add(beta, inv_p * l2);
+                        let denom2 = avg_g + avg_l;
+                        out_row[j + 1] = if denom2 == 0.0 { 50.0 } else { 100.0 * avg_g / denom2 };
+                        j += 2;
+                    }
+                    if j < cols {
+                        let g = gains[j];
+                        let l = losses[j];
+                        avg_g = avg_g.mul_add(beta, inv_p * g);
+                        avg_l = avg_l.mul_add(beta, inv_p * l);
+                        let denom = avg_g + avg_l;
+                        out_row[j] = if denom == 0.0 { 50.0 } else { 100.0 * avg_g / denom };
+                    }
+                }
+            }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 => rsi_row_avx2(data, first, period, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -673,54 +843,75 @@ pub fn rsi_batch_inner_into(
 #[inline(always)]
 unsafe fn rsi_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
     let len = data.len();
-    let inv_period = 1.0 / period as f64;
-    let beta = 1.0 - inv_period;
-    let mut avg_gain = 0.0;
-    let mut avg_loss = 0.0;
+    let inv_p = 1.0 / (period as f64);
+    let beta = 1.0 - inv_p;
+
+    let mut avg_gain = 0.0f64;
+    let mut avg_loss = 0.0f64;
     let mut has_nan = false;
 
-    for i in (first + 1)..=((first + period).min(len - 1)) {
+    let warm_last = core::cmp::min(first + period, len.saturating_sub(1));
+    let mut i = first + 1;
+    while i <= warm_last {
         let delta = data[i] - data[i - 1];
         if !delta.is_finite() {
             has_nan = true;
-            break; // Any NaN in warmup invalidates the calculation
+            break;
         }
         if delta > 0.0 {
             avg_gain += delta;
         } else if delta < 0.0 {
-            avg_loss += -delta;
+            avg_loss -= delta;
         }
+        i += 1;
     }
 
-    let initial_rsi = if has_nan {
-        avg_gain = f64::NAN; // Poison the averages so NaN propagates
+    let idx0 = first + period;
+    if has_nan {
+        avg_gain = f64::NAN;
         avg_loss = f64::NAN;
-        f64::NAN // If any NaN in warmup, initial RSI is NaN
-    } else {
-        avg_gain *= inv_period;
-        avg_loss *= inv_period;
-        if avg_gain + avg_loss == 0.0 {
-            50.0
-        } else {
-            100.0 * avg_gain / (avg_gain + avg_loss)
+        if idx0 < len {
+            out[idx0] = f64::NAN;
         }
-    };
-    if first + period < len {
-        out[first + period] = initial_rsi;
+    } else {
+        avg_gain *= inv_p;
+        avg_loss *= inv_p;
+        if idx0 < len {
+            let denom = avg_gain + avg_loss;
+            out[idx0] = if denom == 0.0 { 50.0 } else { 100.0 * avg_gain / denom };
+        }
     }
 
-    for i in (first + period + 1)..len {
-        let delta = data[i] - data[i - 1];
-        let gain = if delta > 0.0 { delta } else { 0.0 };
-        let loss = if delta < 0.0 { -delta } else { 0.0 };
-        avg_gain = inv_period * gain + beta * avg_gain;
-        avg_loss = inv_period * loss + beta * avg_loss;
-        let rsi = if avg_gain + avg_loss == 0.0 {
-            50.0
-        } else {
-            100.0 * avg_gain / (avg_gain + avg_loss)
-        };
-        out[i] = rsi;
+    let mut j = idx0 + 1;
+    while j + 1 < len {
+        // step j
+        let d1 = data[j] - data[j - 1];
+        let g1 = if d1 > 0.0 { d1 } else { 0.0 };
+        let l1 = if d1 < 0.0 { -d1 } else { 0.0 };
+        avg_gain = avg_gain.mul_add(beta, inv_p * g1);
+        avg_loss = avg_loss.mul_add(beta, inv_p * l1);
+        let denom1 = avg_gain + avg_loss;
+        out[j] = if denom1 == 0.0 { 50.0 } else { 100.0 * avg_gain / denom1 };
+
+        // step j + 1
+        let d2 = data[j + 1] - data[j];
+        let g2 = if d2 > 0.0 { d2 } else { 0.0 };
+        let l2 = if d2 < 0.0 { -d2 } else { 0.0 };
+        avg_gain = avg_gain.mul_add(beta, inv_p * g2);
+        avg_loss = avg_loss.mul_add(beta, inv_p * l2);
+        let denom2 = avg_gain + avg_loss;
+        out[j + 1] = if denom2 == 0.0 { 50.0 } else { 100.0 * avg_gain / denom2 };
+
+        j += 2;
+    }
+    if j < len {
+        let d = data[j] - data[j - 1];
+        let g = if d > 0.0 { d } else { 0.0 };
+        let l = if d < 0.0 { -d } else { 0.0 };
+        avg_gain = avg_gain.mul_add(beta, inv_p * g);
+        avg_loss = avg_loss.mul_add(beta, inv_p * l);
+        let denom = avg_gain + avg_loss;
+        out[j] = if denom == 0.0 { 50.0 } else { 100.0 * avg_gain / denom };
     }
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]

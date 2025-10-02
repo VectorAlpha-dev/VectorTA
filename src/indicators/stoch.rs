@@ -19,12 +19,16 @@
 //! - **d**: %D line as `Vec<f64>` (length matches input, range 0-100)
 //!
 //! ## Developer Notes
-//! - **AVX2/AVX512 kernels**: Implemented AVX2 single-series and row kernels; AVX512 implemented.
-//!   Runtime selection uses `detect_best_kernel()` (AVX512 → AVX2 → Scalar). Gains observed here are modest; if
-//!   you prefer conservative behavior, pass `Kernel::Scalar` explicitly.
+//! - Decision: SIMD kernels are implemented (AVX2/AVX512) and exposed via explicit
+//!   kernel selection; however, `Kernel::Auto` short-circuits to the scalar path.
+//!   On some test machines, wide-vector divides downclock and can offset gains.
+//!   Explicit AVX2/AVX512 entry points remain for benchmarking and future revisits.
 //! - **Streaming update**: O(n) performance due to recalculating min/max over full buffers
 //! - **Memory optimization**: Properly uses zero-copy helper functions (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
-//! - **TODO**: Implement actual SIMD kernels for AVX2/AVX512
+//! - **SIMD status**: Implemented and validated; Auto defaults to scalar for
+//!   stability across CPUs (batch Auto also defaults to ScalarBatch).
+//! - **Batch notes**: Rows are grouped by `fastk_period`; hh/ll and raw %K are
+//!   computed once per group and reused across rows to reduce total work.
 //! - **TODO**: Optimize streaming to maintain rolling min/max for O(1) updates
 
 #[cfg(feature = "python")]
@@ -363,8 +367,10 @@ pub fn stoch_with_kernel(input: &StochInput, kernel: Kernel) -> Result<StochOutp
     let mut k_raw = alloc_with_nan_prefix(data_len, first_valid_idx + fastk_period - 1);
 
     // Runtime selection prefers the best available SIMD when `Kernel::Auto` is used.
+    // Prefer scalar by default: SIMD underperformed in local benches (>0–5%).
+    // Explicit AVX2/AVX512 requests are still honored for benchmarking.
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
     unsafe {
@@ -481,10 +487,10 @@ pub fn stoch_scalar(
         return;
     }
 
-    let scale = 100.0_f64;
-    let n = close.len() - start;
+    const SCALE: f64 = 100.0;
+    const EPS: f64 = f64::EPSILON;
 
-    // Work on tail-sliced views to enable tighter indexing and potential bounds-check elision
+    // Work on tail-sliced views to enable tighter indexing while staying safe
     let c = &close[start..];
     let h = &hh[start..];
     let l = &ll[start..];
@@ -492,7 +498,7 @@ pub fn stoch_scalar(
 
     for (o, (&cv, (&hv, &lv))) in outv.iter_mut().zip(c.iter().zip(h.iter().zip(l.iter()))) {
         let d = hv - lv;
-        *o = if d.abs() < f64::EPSILON { 50.0 } else { (cv - lv) * (scale / d) };
+        *o = if d.abs() < EPS { 50.0 } else { (cv - lv).mul_add(SCALE / d, 0.0) };
     }
 }
 
@@ -788,8 +794,9 @@ pub fn stoch_batch_with_kernel(
     sweep: &StochBatchRange,
     k: Kernel,
 ) -> Result<StochBatchOutput, StochError> {
+    // Align with single-series decision: default to scalar batch for stability/perf
     let kernel = match k {
-        Kernel::Auto => detect_best_batch_kernel(),
+        Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         _ => {
             return Err(StochError::InvalidPeriod {
@@ -967,14 +974,24 @@ fn stoch_batch_inner(
         unsafe { core::slice::from_raw_parts_mut(k_guard.as_mut_ptr() as *mut f64, k_guard.len()) };
     let d_mat: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(d_guard.as_mut_ptr() as *mut f64, d_guard.len()) };
-    let do_row = |row: usize, dst_k: &mut [f64], dst_d: &mut [f64]| {
-        let prm = &combos[row];
 
-        // Build hh/ll with a single NaN prefix alloc per row
-        let mut hh = alloc_with_nan_prefix(cols, first + prm.fastk_period.unwrap() - 1);
-        let mut ll = alloc_with_nan_prefix(cols, first + prm.fastk_period.unwrap() - 1);
-        let highs = max_rolling(&high[first..], prm.fastk_period.unwrap()).unwrap();
-        let lows = min_rolling(&low[first..], prm.fastk_period.unwrap()).unwrap();
+    // Group rows by fastk_period to reuse hh/ll and k_raw across rows
+    use std::collections::HashMap;
+    let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (row, prm) in combos.iter().enumerate() {
+        groups
+            .entry(prm.fastk_period.unwrap())
+            .or_default()
+            .push(row);
+    }
+
+    // Helper to compute k_raw for a given fastk
+    let mut compute_k_raw = |fkp: usize| -> Vec<f64> {
+        // Build hh/ll once per fastk
+        let mut hh = alloc_with_nan_prefix(cols, first + fkp - 1);
+        let mut ll = alloc_with_nan_prefix(cols, first + fkp - 1);
+        let highs = max_rolling(&high[first..], fkp).unwrap();
+        let lows = min_rolling(&low[first..], fkp).unwrap();
         for (i, &v) in highs.iter().enumerate() {
             hh[first + i] = v;
         }
@@ -982,83 +999,42 @@ fn stoch_batch_inner(
             ll[first + i] = v;
         }
 
-        let mut k_raw = alloc_with_nan_prefix(cols, first + prm.fastk_period.unwrap() - 1);
+        let mut k_raw = alloc_with_nan_prefix(cols, first + fkp - 1);
         unsafe {
             match kern {
-                Kernel::Scalar => stoch_row_scalar(
-                    high,
-                    low,
-                    close,
-                    &hh,
-                    &ll,
-                    prm.fastk_period.unwrap(),
-                    first,
-                    &mut k_raw,
-                ),
+                Kernel::Scalar => stoch_row_scalar(high, low, close, &hh, &ll, fkp, first, &mut k_raw),
                 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                Kernel::Avx2 => stoch_row_avx2(
-                    high,
-                    low,
-                    close,
-                    &hh,
-                    &ll,
-                    prm.fastk_period.unwrap(),
-                    first,
-                    &mut k_raw,
-                ),
+                Kernel::Avx2 => stoch_row_avx2(high, low, close, &hh, &ll, fkp, first, &mut k_raw),
                 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                Kernel::Avx512 => stoch_row_avx512(
-                    high,
-                    low,
-                    close,
-                    &hh,
-                    &ll,
-                    prm.fastk_period.unwrap(),
-                    first,
-                    &mut k_raw,
-                ),
+                Kernel::Avx512 => stoch_row_avx512(high, low, close, &hh, &ll, fkp, first, &mut k_raw),
                 _ => unreachable!(),
             }
         }
-
-        let k_vec = ma(
-            prm.slowk_ma_type.as_ref().unwrap(),
-            MaData::Slice(&k_raw),
-            prm.slowk_period.unwrap(),
-        )
-        .unwrap();
-        let d_vec = ma(
-            prm.slowd_ma_type.as_ref().unwrap(),
-            MaData::Slice(&k_vec),
-            prm.slowd_period.unwrap(),
-        )
-        .unwrap();
-
-        dst_k.copy_from_slice(&k_vec);
-        dst_d.copy_from_slice(&d_vec);
+        k_raw
     };
-    if parallel {
-        #[cfg(not(target_arch = "wasm32"))]
-        k_mat
-            .par_chunks_mut(cols)
-            .zip(d_mat.par_chunks_mut(cols))
-            .enumerate()
-            .for_each(|(row, (krow, drow))| do_row(row, krow, drow));
-        #[cfg(target_arch = "wasm32")]
-        for (row, (krow, drow)) in k_mat
-            .chunks_mut(cols)
-            .zip(d_mat.chunks_mut(cols))
-            .enumerate()
-        {
-            do_row(row, krow, drow);
-        }
-    } else {
-        for (row, (krow, drow)) in k_mat
-            .chunks_mut(cols)
-            .zip(d_mat.chunks_mut(cols))
-            .enumerate()
-        {
-            do_row(row, krow, drow);
+
+    // Iterate groups, reuse k_raw for all rows in the group (sequential copy for simplicity/safety)
+    for (fkp, rows_in_group) in groups {
+        let k_raw = compute_k_raw(fkp);
+        for &row in &rows_in_group {
+            let prm = &combos[row];
+            let k_vec = ma(
+                prm.slowk_ma_type.as_ref().unwrap(),
+                MaData::Slice(&k_raw),
+                prm.slowk_period.unwrap(),
+            )
+            .unwrap();
+            let d_vec = ma(
+                prm.slowd_ma_type.as_ref().unwrap(),
+                MaData::Slice(&k_vec),
+                prm.slowd_period.unwrap(),
+            )
+            .unwrap();
+            let start = row * cols;
+            let dst_k = &mut k_mat[start..start + cols];
+            let dst_d = &mut d_mat[start..start + cols];
+            dst_k.copy_from_slice(&k_vec);
+            dst_d.copy_from_slice(&d_vec);
         }
     }
 
@@ -1105,8 +1081,8 @@ unsafe fn stoch_row_scalar(
         return;
     }
 
-    let scale = 100.0_f64;
-    let n = close.len() - start;
+    const SCALE: f64 = 100.0;
+    const EPS: f64 = f64::EPSILON;
 
     let c = &close[start..];
     let h = &hh[start..];
@@ -1115,7 +1091,7 @@ unsafe fn stoch_row_scalar(
 
     for (o, (&cv, (&hv, &lv))) in outv.iter_mut().zip(c.iter().zip(h.iter().zip(l.iter()))) {
         let d = hv - lv;
-        *o = if d.abs() < f64::EPSILON { 50.0 } else { (cv - lv) * (scale / d) };
+        *o = if d.abs() < EPS { 50.0 } else { (cv - lv).mul_add(SCALE / d, 0.0) };
     }
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]

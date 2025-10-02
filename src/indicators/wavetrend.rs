@@ -18,10 +18,10 @@
 //! - **wt_diff**: Difference (WT2 - WT1) as `Vec<f64>`
 //!
 //! ## Developer Notes
-//! - **AVX2/AVX512 kernels**: AVX2 implements a fused single‑pass path (with FMA); AVX512 remains a stub.
+//! - **SIMD status (single-series)**: SIMD underperforms scalar due to sequential EMA dependencies. Runtime selection short-circuits AVX2/AVX512 to the scalar fast path to preserve best performance. SIMD code remains for future evolution.
+//! - **SIMD status (batch)**: SIMD-across-rows currently disabled by default (short-circuited to scalar batch) because it underperforms for typical grids; revisit with shared-stage execution if needed.
 //! - **Streaming update**: O(1) performance with efficient state management for all EMA/SMA stages
 //! - **Memory optimization**: Properly uses zero-copy helper functions (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
-//! - **TODO**: Implement actual SIMD kernels for AVX2/AVX512
 //! - **Note**: Streaming implementation maintains separate state for each calculation stage
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
@@ -313,8 +313,13 @@ pub fn wavetrend_with_kernel(
     }
 
     // Auto: select best available kernel (AVX512 → AVX2 → Scalar)
+    // Note: Single-series AVX2/AVX512 underperform scalar for this indicator due to
+    // sequential EMA dependencies. We short-circuit SIMD to Scalar to preserve best
+    // performance while keeping SIMD code present for future evolution.
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
+        // For single-series, SIMD underperforms; force scalar regardless of build features
+        Kernel::Avx2 | Kernel::Avx512 => Kernel::Scalar,
         other => other,
     };
 
@@ -695,8 +700,9 @@ fn wavetrend_compute_into(
         let mut de_seeded = false;
         let mut wt1_seeded = false;
 
-        // WT2 = SMA(ma_len) over WT1, implemented as a sliding window.
-        // Track finite-membership explicitly to mirror sma_compute_into semantics.
+        // WT2 = SMA(ma_len) over WT1, implemented as a sliding window over positions.
+        // Track finite-membership explicitly to mirror sma_compute_into semantics and
+        // avoid repeated is_finite checks on the leaving element.
         let mut ring_vals = vec![f64::NAN; ma_len];
         let mut ring_mask = vec![0u8; ma_len]; // 1 = finite member present at slot, 0 = NaN
         let mut head = 0usize;
@@ -1523,6 +1529,8 @@ pub fn wavetrend_batch_with_kernel(
     // Prefer optimized scalar batch for Auto to avoid slower SIMD rows.
     let kernel = match k {
         Kernel::Auto => Kernel::ScalarBatch,
+        // SIMD-across-rows currently underperforms for this indicator; short-circuit to scalar batch
+        Kernel::Avx2Batch | Kernel::Avx512Batch => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         _ => {
             return Err(WavetrendError::InvalidChannelLen {
