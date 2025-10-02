@@ -215,7 +215,7 @@ use my_project::indicators::{
     rsi::{rsi as rsi_raw, RsiInput},
     rsmk::{rsmk as rsmk_raw, RsmkInput},
     rsx::{rsx as rsx_raw, rsx_with_kernel, RsxBatchBuilder, RsxInput},
-    rvi::{rvi as rvi_raw, RviInput},
+    rvi::{rvi as rvi_raw, rvi_with_kernel, RviInput},
     safezonestop::{safezonestop as safezonestop_raw, SafeZoneStopInput},
     sar::{sar as sar_raw, sar_with_kernel, SarBatchBuilder, SarInput},
     squeeze_momentum::{
@@ -1663,6 +1663,13 @@ make_kernel_wrappers!(atr, my_project::indicators::atr::atr_with_kernel, AtrInpu
 make_kernel_wrappers!(dvdiqqe, dvdiqqe_with_kernel, DvdiqqeInputS; Scalar,Avx2,Avx512);
 // MACD single-series kernel variants (Scalar, AVX2, AVX512)
 make_kernel_wrappers!(macd, my_project::indicators::macd::macd_with_kernel, MacdInputS; Scalar,Avx2,Avx512);
+// VWMACD single-series kernel variants (Scalar, AVX2, AVX512)
+make_kernel_wrappers!(
+    vwmacd,
+    my_project::indicators::vwmacd::vwmacd_with_kernel,
+    VwmacdInputS;
+    Scalar,Avx2,Avx512
+);
 // MSW single-series kernel variants (Scalar, AVX2, AVX512)
 make_kernel_wrappers!(msw, my_project::indicators::msw::msw_with_kernel, MswInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(adx, adx_with_kernel, AdxInputS; Scalar,Avx2,Avx512);
@@ -1805,9 +1812,19 @@ make_kernel_wrappers!(dti, dti_with_kernel, DtiInputS; Scalar,Avx2,Avx512);
 // EMV: single-series kernel wrappers (SIMD stubs delegate to scalar)
 make_kernel_wrappers!(emv, emv_with_kernel, EmvInputS; Scalar,Avx2,Avx512);
 
+// RVI: single-series kernel wrappers (Scalar/AVX2/AVX512)
+make_kernel_wrappers!(rvi, rvi_with_kernel, RviInputS; Scalar,Avx2,Avx512);
+
 // NVI: kernel-specific wrappers for SIMD benchmarking
 make_kernel_wrappers!(nvi, nvi_with_kernel, NviInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(trix, trix_with_kernel, TrixInputS; Scalar,Avx2,Avx512);
+// RVI: compare Scalar vs AVX2 vs AVX512 at multiple sizes
+bench_variants!(
+    rvi => RviInputS; None;
+    rvi_scalar,
+    rvi_avx2,
+    rvi_avx512,
+);
 // Medium AD: enable Scalar vs AVX2 vs AVX512 comparisons
 make_kernel_wrappers!(
     medium_ad,
@@ -4480,6 +4497,14 @@ bench_variants!(
     qstick_batch_avx512batch,
 );
 
+// VWMACD single-series: compare Scalar vs AVX2 vs AVX512
+bench_variants!(
+    vwmacd => VwmacdInputS; None;
+    vwmacd_scalar,
+    vwmacd_avx2,
+    vwmacd_avx512,
+);
+
 // MFI batch benchmarks
 bench_variants!(
     mfi_batch => MfiInputS; Some(14);
@@ -4548,6 +4573,9 @@ criterion_main!(
     benches_er,
     benches_obv,
     benches_trix,
+    benches_rvi,
+    // STC: enable Scalar vs AVX2 vs AVX512 single-series comparisons
+    benches_stc,
     benches_trix_batch,
     benches_apo,
     benches_apo_batch,
@@ -4705,6 +4733,7 @@ criterion_main!(
     benches_pfe_batch,
     benches_kst_batch,
     benches_willr_batch,
+    benches_vwmacd,
     benches_vwma,
     benches_wavetrend,
     benches_nama,

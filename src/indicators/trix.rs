@@ -236,10 +236,6 @@ fn trix_compute_into_scalar(
 ) {
     let len = data.len();
     let warmup_end = first + 3 * (period - 1) + 1; // first valid output index
-    // Ensure warmup NaNs (idempotent if caller already prefills)
-    for v in &mut out[..warmup_end.min(len)] {
-        *v = f64::NAN;
-    }
     if warmup_end >= len {
         return;
     }
@@ -263,6 +259,25 @@ fn trix_compute_into_scalar(
     let mut sum_ema1 = ema1;
     let end2 = first + 2 * period - 1;
     i = end1;
+    // Unroll by 4
+    while i + 3 < end2 {
+        let mut lv = data[i].ln();
+        ema1 = (lv - ema1).mul_add(alpha, ema1);
+        sum_ema1 += ema1;
+
+        lv = data[i + 1].ln();
+        ema1 = (lv - ema1).mul_add(alpha, ema1);
+        sum_ema1 += ema1;
+
+        lv = data[i + 2].ln();
+        ema1 = (lv - ema1).mul_add(alpha, ema1);
+        sum_ema1 += ema1;
+
+        lv = data[i + 3].ln();
+        ema1 = (lv - ema1).mul_add(alpha, ema1);
+        sum_ema1 += ema1;
+        i += 4;
+    }
     while i < end2 {
         let lv = data[i].ln();
         ema1 = (lv - ema1).mul_add(alpha, ema1);
@@ -279,6 +294,29 @@ fn trix_compute_into_scalar(
     let mut sum_ema2 = ema2;
     let end3 = first + 3 * period - 2;
     i = end2;
+    // Unroll by 4
+    while i + 3 < end3 {
+        let mut lv = data[i].ln();
+        ema1 = (lv - ema1).mul_add(alpha, ema1);
+        ema2 = (ema1 - ema2).mul_add(alpha, ema2);
+        sum_ema2 += ema2;
+
+        lv = data[i + 1].ln();
+        ema1 = (lv - ema1).mul_add(alpha, ema1);
+        ema2 = (ema1 - ema2).mul_add(alpha, ema2);
+        sum_ema2 += ema2;
+
+        lv = data[i + 2].ln();
+        ema1 = (lv - ema1).mul_add(alpha, ema1);
+        ema2 = (ema1 - ema2).mul_add(alpha, ema2);
+        sum_ema2 += ema2;
+
+        lv = data[i + 3].ln();
+        ema1 = (lv - ema1).mul_add(alpha, ema1);
+        ema2 = (ema1 - ema2).mul_add(alpha, ema2);
+        sum_ema2 += ema2;
+        i += 4;
+    }
     while i < end3 {
         let lv = data[i].ln();
         ema1 = (lv - ema1).mul_add(alpha, ema1);
@@ -307,8 +345,8 @@ fn trix_compute_into_scalar(
     // ------------------------------------------------
     // Main loop: fully loop-jammed EMA1→EMA2→EMA3→TRIX
     // ------------------------------------------------
-    // Unroll by 2 for better ILP; handle tail below.
-    while src + 1 < len {
+    // Unroll by 4 for better ILP; handle tail below.
+    while src + 3 < len {
         // step 1
         lv = data[src].ln();
         ema1 = (lv - ema1).mul_add(alpha, ema1);
@@ -316,9 +354,36 @@ fn trix_compute_into_scalar(
         ema3 = (ema2 - ema3_prev).mul_add(alpha, ema3_prev);
         out[src] = (ema3 - ema3_prev) * SCALE;
         ema3_prev = ema3;
-        src += 1;
 
         // step 2
+        let lv1 = data[src + 1].ln();
+        ema1 = (lv1 - ema1).mul_add(alpha, ema1);
+        ema2 = (ema1 - ema2).mul_add(alpha, ema2);
+        ema3 = (ema2 - ema3_prev).mul_add(alpha, ema3_prev);
+        out[src + 1] = (ema3 - ema3_prev) * SCALE;
+        ema3_prev = ema3;
+
+        // step 3
+        let lv2 = data[src + 2].ln();
+        ema1 = (lv2 - ema1).mul_add(alpha, ema1);
+        ema2 = (ema1 - ema2).mul_add(alpha, ema2);
+        ema3 = (ema2 - ema3_prev).mul_add(alpha, ema3_prev);
+        out[src + 2] = (ema3 - ema3_prev) * SCALE;
+        ema3_prev = ema3;
+
+        // step 4
+        let lv3 = data[src + 3].ln();
+        ema1 = (lv3 - ema1).mul_add(alpha, ema1);
+        ema2 = (ema1 - ema2).mul_add(alpha, ema2);
+        ema3 = (ema2 - ema3_prev).mul_add(alpha, ema3_prev);
+        out[src + 3] = (ema3 - ema3_prev) * SCALE;
+        ema3_prev = ema3;
+
+        src += 4;
+    }
+
+    // Tail
+    while src < len {
         lv = data[src].ln();
         ema1 = (lv - ema1).mul_add(alpha, ema1);
         ema2 = (ema1 - ema2).mul_add(alpha, ema2);
@@ -326,15 +391,6 @@ fn trix_compute_into_scalar(
         out[src] = (ema3 - ema3_prev) * SCALE;
         ema3_prev = ema3;
         src += 1;
-    }
-
-    // Tail
-    if src < len {
-        lv = data[src].ln();
-        ema1 = (lv - ema1).mul_add(alpha, ema1);
-        ema2 = (ema1 - ema2).mul_add(alpha, ema2);
-        ema3 = (ema2 - ema3_prev).mul_add(alpha, ema3_prev);
-        out[src] = (ema3 - ema3_prev) * SCALE;
     }
 }
 
@@ -804,9 +860,6 @@ unsafe fn trix_row_scalar_with_logs(logs: &[f64], first: usize, period: usize, o
     const SCALE: f64 = 10000.0;
 
     let warmup_end = first + 3 * (period - 1) + 1;
-    for v in &mut out[..warmup_end.min(len)] {
-        *v = f64::NAN;
-    }
     if warmup_end >= len {
         return;
     }
@@ -827,6 +880,25 @@ unsafe fn trix_row_scalar_with_logs(logs: &[f64], first: usize, period: usize, o
     let mut sum_ema1 = ema1;
     let end2 = first + 2 * period - 1;
     i = end1;
+    // Unroll by 4
+    while i + 3 < end2 {
+        let mut lv = *p.add(i);
+        ema1 = (lv - ema1).mul_add(alpha, ema1);
+        sum_ema1 += ema1;
+
+        lv = *p.add(i + 1);
+        ema1 = (lv - ema1).mul_add(alpha, ema1);
+        sum_ema1 += ema1;
+
+        lv = *p.add(i + 2);
+        ema1 = (lv - ema1).mul_add(alpha, ema1);
+        sum_ema1 += ema1;
+
+        lv = *p.add(i + 3);
+        ema1 = (lv - ema1).mul_add(alpha, ema1);
+        sum_ema1 += ema1;
+        i += 4;
+    }
     while i < end2 {
         let lv = *p.add(i);
         ema1 = (lv - ema1).mul_add(alpha, ema1);
@@ -841,6 +913,29 @@ unsafe fn trix_row_scalar_with_logs(logs: &[f64], first: usize, period: usize, o
     let mut sum_ema2 = ema2;
     let end3 = first + 3 * period - 2;
     i = end2;
+    // Unroll by 4
+    while i + 3 < end3 {
+        let mut lv = *p.add(i);
+        ema1 = (lv - ema1).mul_add(alpha, ema1);
+        ema2 = (ema1 - ema2).mul_add(alpha, ema2);
+        sum_ema2 += ema2;
+
+        lv = *p.add(i + 1);
+        ema1 = (lv - ema1).mul_add(alpha, ema1);
+        ema2 = (ema1 - ema2).mul_add(alpha, ema2);
+        sum_ema2 += ema2;
+
+        lv = *p.add(i + 2);
+        ema1 = (lv - ema1).mul_add(alpha, ema1);
+        ema2 = (ema1 - ema2).mul_add(alpha, ema2);
+        sum_ema2 += ema2;
+
+        lv = *p.add(i + 3);
+        ema1 = (lv - ema1).mul_add(alpha, ema1);
+        ema2 = (ema1 - ema2).mul_add(alpha, ema2);
+        sum_ema2 += ema2;
+        i += 4;
+    }
     while i < end3 {
         let lv = *p.add(i);
         ema1 = (lv - ema1).mul_add(alpha, ema1);
@@ -862,7 +957,8 @@ unsafe fn trix_row_scalar_with_logs(logs: &[f64], first: usize, period: usize, o
     ema3_prev = ema3;
     src += 1;
 
-    while src + 1 < len {
+    // Unroll main loop by 4
+    while src + 3 < len {
         // step 1
         lv = *p.add(src);
         ema1 = (lv - ema1).mul_add(alpha, ema1);
@@ -870,9 +966,34 @@ unsafe fn trix_row_scalar_with_logs(logs: &[f64], first: usize, period: usize, o
         ema3 = (ema2 - ema3_prev).mul_add(alpha, ema3_prev);
         *out.get_unchecked_mut(src) = (ema3 - ema3_prev) * SCALE;
         ema3_prev = ema3;
-        src += 1;
 
         // step 2
+        let lv1 = *p.add(src + 1);
+        ema1 = (lv1 - ema1).mul_add(alpha, ema1);
+        ema2 = (ema1 - ema2).mul_add(alpha, ema2);
+        ema3 = (ema2 - ema3_prev).mul_add(alpha, ema3_prev);
+        *out.get_unchecked_mut(src + 1) = (ema3 - ema3_prev) * SCALE;
+        ema3_prev = ema3;
+
+        // step 3
+        let lv2 = *p.add(src + 2);
+        ema1 = (lv2 - ema1).mul_add(alpha, ema1);
+        ema2 = (ema1 - ema2).mul_add(alpha, ema2);
+        ema3 = (ema2 - ema3_prev).mul_add(alpha, ema3_prev);
+        *out.get_unchecked_mut(src + 2) = (ema3 - ema3_prev) * SCALE;
+        ema3_prev = ema3;
+
+        // step 4
+        let lv3 = *p.add(src + 3);
+        ema1 = (lv3 - ema1).mul_add(alpha, ema1);
+        ema2 = (ema1 - ema2).mul_add(alpha, ema2);
+        ema3 = (ema2 - ema3_prev).mul_add(alpha, ema3_prev);
+        *out.get_unchecked_mut(src + 3) = (ema3 - ema3_prev) * SCALE;
+        ema3_prev = ema3;
+
+        src += 4;
+    }
+    while src < len {
         lv = *p.add(src);
         ema1 = (lv - ema1).mul_add(alpha, ema1);
         ema2 = (ema1 - ema2).mul_add(alpha, ema2);
@@ -880,13 +1001,6 @@ unsafe fn trix_row_scalar_with_logs(logs: &[f64], first: usize, period: usize, o
         *out.get_unchecked_mut(src) = (ema3 - ema3_prev) * SCALE;
         ema3_prev = ema3;
         src += 1;
-    }
-    if src < len {
-        lv = *p.add(src);
-        ema1 = (lv - ema1).mul_add(alpha, ema1);
-        ema2 = (ema1 - ema2).mul_add(alpha, ema2);
-        ema3 = (ema2 - ema3_prev).mul_add(alpha, ema3_prev);
-        *out.get_unchecked_mut(src) = (ema3 - ema3_prev) * SCALE;
     }
 }
 

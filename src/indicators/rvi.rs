@@ -1002,6 +1002,143 @@ pub unsafe fn rvi_avx2(
     rvi_scalar(data, period, ma_len, matype, devtype, first, out)
 }
 
+/// Optimized scalar kernel
+#[inline]
+pub fn rvi_scalar_opt(
+    data: &[f64],
+    period: usize,
+    ma_len: usize,
+    matype: usize,
+    devtype: usize,
+    first: usize,
+    out: &mut [f64],
+) {
+    debug_assert_eq!(out.len(), data.len());
+    let n = data.len();
+    if n == 0 { return; }
+
+    let warmup = first + period.saturating_sub(1) + ma_len.saturating_sub(1);
+    let inv_p = 1.0 / (period as f64);
+    let inv_m = 1.0 / (ma_len as f64);
+    let use_sma = matype == 0;
+
+    // Smoothing state
+    let mut up_sum = 0.0f64; let mut dn_sum = 0.0f64;
+    let mut up_ring = if use_sma { vec![0.0f64; ma_len] } else { Vec::new() };
+    let mut dn_ring = if use_sma { vec![0.0f64; ma_len] } else { Vec::new() };
+    let mut up_h: usize = 0; let mut dn_h: usize = 0; let mut up_cnt: usize = 0; let mut dn_cnt: usize = 0;
+    let alpha = if !use_sma { 2.0 / (ma_len as f64 + 1.0) } else { 0.0 }; let one_m_alpha = 1.0 - alpha;
+    let mut up_prev = 0.0f64; let mut dn_prev = 0.0f64; let mut up_started = false; let mut dn_started = false;
+    let mut up_seed_sum = 0.0f64; let mut dn_seed_sum = 0.0f64; let mut up_seed_cnt = 0usize; let mut dn_seed_cnt = 0usize;
+
+    #[inline(always)]
+    fn bump_idx(idx: &mut usize, len: usize) { *idx += 1; if *idx == len { *idx = 0; } }
+
+    // StdDev fast path: O(1) with NaN-aware valid ring
+    if devtype == 0 {
+        let mut prev = data[0]; let mut sum = 0.0f64; let mut sumsq = 0.0f64;
+        let mut vflag = vec![0u8; period]; let mut vcnt: usize = 0; let mut head: usize = 0;
+        for i in 0..period.min(n) { let x = unsafe { *data.get_unchecked(i) }; if !x.is_nan() { sum += x; sumsq += x * x; vflag[i] = 1; vcnt += 1; } }
+        for i in 0..n {
+            let x = unsafe { *data.get_unchecked(i) };
+            let d = if i == 0 || x.is_nan() || prev.is_nan() { f64::NAN } else { x - prev }; prev = x;
+            let dev = if i + 1 < period { f64::NAN } else if i == period - 1 {
+                if vcnt == period { let mean = sum * inv_p; let mean_sq = sumsq * inv_p; (mean_sq - mean * mean).sqrt() } else { f64::NAN }
+            } else {
+                let leaving_valid = unsafe { *vflag.get_unchecked(head) } != 0;
+                if leaving_valid { let leaving = unsafe { *data.get_unchecked(i - period) }; sum -= leaving; sumsq -= leaving * leaving; vcnt -= 1; }
+                if !x.is_nan() { sum += x; sumsq += x * x; unsafe { *vflag.get_unchecked_mut(head) = 1 }; vcnt += 1; } else { unsafe { *vflag.get_unchecked_mut(head) = 0 }; }
+                bump_idx(&mut head, period);
+                if vcnt == period { let mean = sum * inv_p; let mean_sq = sumsq * inv_p; (mean_sq - mean * mean).sqrt() } else { f64::NAN }
+            };
+
+            let (up_i, dn_i) = if d.is_nan() || dev.is_nan() { (f64::NAN, f64::NAN) } else if d > 0.0 { (dev, 0.0) } else if d < 0.0 { (0.0, dev) } else { (0.0, 0.0) };
+            let up_s = if use_sma { if up_i.is_nan() { up_sum = 0.0; up_cnt = 0; up_h = 0; f64::NAN } else if up_cnt < ma_len { unsafe { *up_ring.get_unchecked_mut(up_h) = up_i; } up_sum += up_i; bump_idx(&mut up_h, ma_len); up_cnt += 1; if up_cnt == ma_len { up_sum * inv_m } else { f64::NAN } } else { let old = unsafe { *up_ring.get_unchecked(up_h) }; unsafe { *up_ring.get_unchecked_mut(up_h) = up_i; } up_sum += up_i - old; bump_idx(&mut up_h, ma_len); up_sum * inv_m } } else { if up_i.is_nan() { up_started = false; up_seed_sum = 0.0; up_seed_cnt = 0; f64::NAN } else if !up_started { up_seed_sum += up_i; up_seed_cnt += 1; if up_seed_cnt == ma_len { up_prev = up_seed_sum * inv_m; up_started = true; up_prev } else { f64::NAN } } else { up_prev = alpha.mul_add(up_i, one_m_alpha * up_prev); up_prev } };
+            let dn_s = if use_sma { if dn_i.is_nan() { dn_sum = 0.0; dn_cnt = 0; dn_h = 0; f64::NAN } else if dn_cnt < ma_len { unsafe { *dn_ring.get_unchecked_mut(dn_h) = dn_i; } dn_sum += dn_i; bump_idx(&mut dn_h, ma_len); dn_cnt += 1; if dn_cnt == ma_len { dn_sum * inv_m } else { f64::NAN } } else { let old = unsafe { *dn_ring.get_unchecked(dn_h) }; unsafe { *dn_ring.get_unchecked_mut(dn_h) = dn_i; } dn_sum += dn_i - old; bump_idx(&mut dn_h, ma_len); dn_sum * inv_m } } else { if dn_i.is_nan() { dn_started = false; dn_seed_sum = 0.0; dn_seed_cnt = 0; f64::NAN } else if !dn_started { dn_seed_sum += dn_i; dn_seed_cnt += 1; if dn_seed_cnt == ma_len { dn_prev = dn_seed_sum * inv_m; dn_started = true; dn_prev } else { f64::NAN } } else { dn_prev = alpha.mul_add(dn_i, one_m_alpha * dn_prev); dn_prev } };
+            if i >= warmup { if up_s.is_nan() || dn_s.is_nan() { out[i] = f64::NAN; } else { let denom = up_s + dn_s; out[i] = if denom.abs() < f64::EPSILON { f64::NAN } else { 100.0 * (up_s / denom) }; } }
+        }
+        return;
+    }
+
+    // MAD / MEDAD path
+    let mut prev = data[0];
+    let mut ring = vec![0.0f64; period];
+    let mut head: usize = 0; let mut filled_cnt: usize = 0; let mut ring_sum = 0.0f64;
+    let mut scratch = if devtype == 2 { vec![0.0f64; period] } else { Vec::new() };
+
+    #[inline(always)]
+    fn abs_dev_mean_unrolled(r: &[f64], mean: f64) -> f64 {
+        let mut acc = 0.0f64; let len = r.len(); let mut k = 0usize;
+        while k + 4 <= len { unsafe { let a0 = *r.get_unchecked(k) - mean; let a1 = *r.get_unchecked(k + 1) - mean; let a2 = *r.get_unchecked(k + 2) - mean; let a3 = *r.get_unchecked(k + 3) - mean; acc += a0.abs() + a1.abs() + a2.abs() + a3.abs(); } k += 4; }
+        while k < len { unsafe { acc += (*r.get_unchecked(k) - mean).abs(); } k += 1; }
+        acc
+    }
+
+    for i in 0..n {
+        let x = unsafe { *data.get_unchecked(i) };
+        let d = if i == 0 || x.is_nan() || prev.is_nan() { f64::NAN } else { x - prev }; prev = x;
+        let dev = if filled_cnt < period {
+            if !x.is_nan() { unsafe { *ring.get_unchecked_mut(head) = x; } ring_sum += x; bump_idx(&mut head, period); filled_cnt += 1;
+                if filled_cnt == period {
+                    if devtype == 1 { let mean = ring_sum * inv_p; abs_dev_mean_unrolled(&ring, mean) * inv_p }
+                    else {
+                        unsafe { core::ptr::copy_nonoverlapping(ring.as_ptr(), scratch.as_mut_ptr(), period); }
+                        let mid = period >> 1;
+                        let cmp = |a: &f64, b: &f64| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
+                        let median = if period & 1 == 1 {
+                            let (_lt, m, _gt) = scratch.select_nth_unstable_by(mid, cmp);
+                            *m
+                        } else {
+                            let m_hi_val = {
+                                let (_lt, m_hi, _gt) = scratch.select_nth_unstable_by(mid, cmp);
+                                *m_hi
+                            };
+                            let lo = {
+                                let lower = &mut scratch[..mid];
+                                let (_lt2, m_lo, _gt2) = lower.select_nth_unstable_by(mid - 1, cmp);
+                                *m_lo
+                            };
+                            (lo + m_hi_val) * 0.5
+                        };
+                        abs_dev_mean_unrolled(&ring, median) * inv_p
+                    }
+                } else { f64::NAN }
+            } else { head = 0; filled_cnt = 0; ring_sum = 0.0; f64::NAN }
+        } else {
+            if x.is_nan() { head = 0; filled_cnt = 0; ring_sum = 0.0; f64::NAN } else {
+                let leaving = unsafe { *ring.get_unchecked(head) }; unsafe { *ring.get_unchecked_mut(head) = x; } bump_idx(&mut head, period); ring_sum += x - leaving;
+                if devtype == 1 { let mean = ring_sum * inv_p; abs_dev_mean_unrolled(&ring, mean) * inv_p }
+                else {
+                    unsafe { core::ptr::copy_nonoverlapping(ring.as_ptr(), scratch.as_mut_ptr(), period); }
+                    let mid = period >> 1;
+                    let cmp = |a: &f64, b: &f64| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
+                    let median = if period & 1 == 1 {
+                        let (_lt, m, _gt) = scratch.select_nth_unstable_by(mid, cmp);
+                        *m
+                    } else {
+                        let m_hi_val = {
+                            let (_lt, m_hi, _gt) = scratch.select_nth_unstable_by(mid, cmp);
+                            *m_hi
+                        };
+                        let lo = {
+                            let lower = &mut scratch[..mid];
+                            let (_lt2, m_lo, _gt2) = lower.select_nth_unstable_by(mid - 1, cmp);
+                            *m_lo
+                        };
+                        (lo + m_hi_val) * 0.5
+                    };
+                    abs_dev_mean_unrolled(&ring, median) * inv_p
+                }
+            }
+        };
+
+        let (up_i, dn_i) = if d.is_nan() || dev.is_nan() { (f64::NAN, f64::NAN) } else if d > 0.0 { (dev, 0.0) } else if d < 0.0 { (0.0, dev) } else { (0.0, 0.0) };
+        let up_s = if use_sma { if up_i.is_nan() { up_sum = 0.0; up_cnt = 0; up_h = 0; f64::NAN } else if up_cnt < ma_len { unsafe { *up_ring.get_unchecked_mut(up_h) = up_i; } up_sum += up_i; bump_idx(&mut up_h, ma_len); up_cnt += 1; if up_cnt == ma_len { up_sum * inv_m } else { f64::NAN } } else { let old = unsafe { *up_ring.get_unchecked(up_h) }; unsafe { *up_ring.get_unchecked_mut(up_h) = up_i; } up_sum += up_i - old; bump_idx(&mut up_h, ma_len); up_sum * inv_m } } else { if up_i.is_nan() { up_started = false; up_seed_sum = 0.0; up_seed_cnt = 0; f64::NAN } else if !up_started { up_seed_sum += up_i; up_seed_cnt += 1; if up_seed_cnt == ma_len { up_prev = up_seed_sum * inv_m; up_started = true; up_prev } else { f64::NAN } } else { up_prev = alpha.mul_add(up_i, one_m_alpha * up_prev); up_prev } };
+        let dn_s = if use_sma { if dn_i.is_nan() { dn_sum = 0.0; dn_cnt = 0; dn_h = 0; f64::NAN } else if dn_cnt < ma_len { unsafe { *dn_ring.get_unchecked_mut(dn_h) = dn_i; } dn_sum += dn_i; bump_idx(&mut dn_h, ma_len); dn_cnt += 1; if dn_cnt == ma_len { dn_sum * inv_m } else { f64::NAN } } else { let old = unsafe { *dn_ring.get_unchecked(dn_h) }; unsafe { *dn_ring.get_unchecked_mut(dn_h) = dn_i; } dn_sum += dn_i - old; bump_idx(&mut dn_h, ma_len); dn_sum * inv_m } } else { if dn_i.is_nan() { dn_started = false; dn_seed_sum = 0.0; dn_seed_cnt = 0; f64::NAN } else if !dn_started { dn_seed_sum += dn_i; dn_seed_cnt += 1; if dn_seed_cnt == ma_len { dn_prev = dn_seed_sum * inv_m; dn_started = true; dn_prev } else { f64::NAN } } else { dn_prev = alpha.mul_add(dn_i, one_m_alpha * dn_prev); dn_prev } };
+        if i >= warmup { if up_s.is_nan() || dn_s.is_nan() { out[i] = f64::NAN; } else { let denom = up_s + dn_s; out[i] = if denom.abs() < f64::EPSILON { f64::NAN } else { 100.0 * (up_s / denom) }; } }
+    }
+}
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn rvi_avx512_short(

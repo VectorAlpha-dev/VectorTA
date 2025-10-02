@@ -13,9 +13,9 @@
 //! - **Err(UiError)** otherwise.
 //!
 //! ## Developer Notes
-//! - Decision: scalar path optimized (monotonic deque + ring-sum). ~25–35% faster at 100k vs prior scalar.
+//! - Decision: scalar path optimized (monotonic deque + ring-sum). Bitmask-valid fast path for period ≤64 tested but disabled by default here due to neutral/slower results; revisit after profiling. Sqrt input clamped at 0 to avoid FP round-off negatives.
 //! - SIMD status: AVX2/AVX512 stubs delegate to scalar (branch-heavy rolling max; SIMD underperforms). Kept for future work.
-//! - Batch status: row-specific SIMD not attempted (insufficient shared precompute across rows). Scalar batch remains the selected path.
+//! - Batch status: row-specific SIMD not attempted; algorithmic batch optimization groups rows by period and scales a base (scalar=1.0) series per row.
 //! - Memory/Perf: uses `alloc_with_nan_prefix` and zero-copy outputs; warmup handling matches alma.rs patterns.
 
 #[cfg(feature = "python")]
@@ -263,7 +263,7 @@ pub fn ui_with_kernel(input: &UiInput, kernel: Kernel) -> Result<UiOutput, UiErr
 pub fn ui_scalar(data: &[f64], period: usize, scalar: f64, first: usize, out: &mut [f64]) {
     // Drop-in scalar kernel, aggressively optimized & loop-jammed.
     // - Monotonic rolling-max via a hand-rolled circular deque (no std::collections).
-    // - Sliding sum over a fixed-size ring buffer with validity flags (avoids is_finite branches).
+    // - Sliding sum via bitmask for period <= 64; byte ring otherwise.
     // - Unchecked indexing in the hot loop to remove bounds checks.
     // - Uses mul_add where appropriate to allow FMA.
     debug_assert_eq!(out.len(), data.len());
@@ -302,10 +302,106 @@ pub fn ui_scalar(data: &[f64], period: usize, scalar: f64, first: usize, out: &m
 
     // --- Sliding window over last `period` squared drawdowns ---
     let mut sq_ring: Vec<f64> = vec![0.0f64; period];
-    let mut valid_ring: Vec<u8> = vec![0u8; period];
     let mut ring_idx = 0usize;
     let mut sum = 0.0f64;
     let mut count = 0usize;
+
+    // Fast path: validity via u64 bitmask when period <= 64
+    // NOTE: Bitmask fast-path was experimentally slower on 10k/100k here;
+    // keep code present but disabled for now.
+    if false && period <= 64 {
+        let mut valid_mask: u64 = 0;
+
+        for i in first..len {
+            // Window start index for rolling max
+            let start = if i + 1 >= period { i + 1 - period } else { 0 };
+
+            // Expire stale indices from the front
+            while dsize != 0 {
+                let j = unsafe { *deq.get_unchecked(head) };
+                if j < start {
+                    inc_wrap(&mut head, cap);
+                    dsize -= 1;
+                } else {
+                    break;
+                }
+            }
+
+            // Push current index if finite, maintaining descending values in deque
+            let xi = unsafe { *data.get_unchecked(i) };
+            let xi_finite = xi.is_finite();
+            if xi_finite {
+                while dsize != 0 {
+                    let mut back = tail;
+                    dec_wrap(&mut back, cap);
+                    let j = unsafe { *deq.get_unchecked(back) };
+                    let xj = unsafe { *data.get_unchecked(j) };
+                    if xj <= xi {
+                        // Pop back
+                        tail = back;
+                        dsize -= 1;
+                    } else {
+                        break;
+                    }
+                }
+                // Push back current index
+                unsafe { *deq.get_unchecked_mut(tail) = i };
+                inc_wrap(&mut tail, cap);
+                dsize += 1;
+            }
+
+            // Compute squared drawdown when the first rolling max is available
+            let mut new_valid = false;
+            let mut new_sq: f64 = 0.0;
+            if i + 1 >= first + period && dsize != 0 {
+                let jmax = unsafe { *deq.get_unchecked(head) };
+                let m = unsafe { *data.get_unchecked(jmax) };
+                if xi_finite && m.is_finite() && m.abs() > f64::EPSILON {
+                    // dd = scalar * (xi - m) / m
+                    let dd = (xi - m) * (scalar / m);
+                    new_sq = dd.mul_add(dd, 0.0);
+                    new_valid = true;
+                }
+            }
+
+            // Update sliding sum/ring via bitmask
+            let bit = 1u64 << ring_idx;
+            if (valid_mask & bit) != 0 {
+                sum -= unsafe { *sq_ring.get_unchecked(ring_idx) };
+                count -= 1;
+                valid_mask &= !bit;
+            }
+            if new_valid {
+                sum += new_sq;
+                count += 1;
+                valid_mask |= bit;
+            }
+            unsafe { *sq_ring.get_unchecked_mut(ring_idx) = new_sq };
+
+            ring_idx += 1;
+            if ring_idx == period {
+                ring_idx = 0;
+            }
+
+            // Emit only after full warmup; always write (avoid leaving poison)
+            if i >= warmup_end {
+                let dst = unsafe { out.get_unchecked_mut(i) };
+                if count == period {
+                    let mut avg = sum * inv_period;
+                    if avg < 0.0 {
+                        avg = 0.0; // guard tiny negative due to FP round-off
+                    }
+                    *dst = avg.sqrt();
+                } else {
+                    *dst = f64::NAN;
+                }
+            }
+        }
+        return;
+    }
+
+    // Fallback: byte-valid ring for period > 64
+    let mut valid_ring: Vec<u8> = vec![0u8; period];
 
     // Hot loop
     // SAFETY: We perform explicit bounds checks on loop limits; inner accesses use unchecked.
@@ -361,7 +457,7 @@ pub fn ui_scalar(data: &[f64], period: usize, scalar: f64, first: usize, out: &m
                 let scaled = scalar / m;
                 let diff = xi - m;
                 let dd = diff * scaled;
-                new_sq = dd.mul_add(dd, 0.0); // dd*dd with potential FMA
+                new_sq = dd.mul_add(dd, 0.0);
                 new_valid = 1;
             }
         }
@@ -389,7 +485,11 @@ pub fn ui_scalar(data: &[f64], period: usize, scalar: f64, first: usize, out: &m
         if i >= warmup_end {
             let dst = unsafe { out.get_unchecked_mut(i) };
             if count == period {
-                *dst = (sum * inv_period).sqrt();
+                let mut avg = sum * inv_period;
+                if avg < 0.0 {
+                    avg = 0.0; // guard tiny negative due to FP round-off
+                }
+                *dst = avg.sqrt();
             } else {
                 *dst = f64::NAN;
             }
@@ -748,55 +848,16 @@ fn ui_batch_inner(
     let rows = combos.len();
     let cols = data.len();
     let mut buf_mu = make_uninit_matrix(rows, cols);
-
-    // per-row warmups include `first`
-    let warm: Vec<usize> = combos
-        .iter()
-        .map(|c| first + (c.period.unwrap() * 2 - 2))
-        .collect();
-    init_matrix_prefixes(&mut buf_mu, cols, &warm);
-
     let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
-    let values: &mut [f64] = unsafe {
+    let out_slice: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
-    let do_row = |row: usize, out_row: &mut [f64]| {
-        let period = combos[row].period.unwrap();
-        let scalar = combos[row].scalar.unwrap();
-        match kern {
-            Kernel::Scalar => ui_row_scalar(data, first, period, scalar, out_row),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => ui_row_avx2(data, first, period, scalar, out_row),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => ui_row_avx512(data, first, period, scalar, out_row),
-            _ => ui_row_scalar(data, first, period, scalar, out_row),
-        }
-    };
-
-    if parallel {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            values
-                .par_chunks_mut(cols)
-                .enumerate()
-                .for_each(|(row, slice)| do_row(row, slice));
-        }
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            for (row, slice) in values.chunks_mut(cols).enumerate() {
-                do_row(row, slice);
-            }
-        }
-    } else {
-        for (row, slice) in values.chunks_mut(cols).enumerate() {
-            do_row(row, slice);
-        }
-    }
+    // Use the grouped row-optimized writer that fills prefixes and rows in one pass.
+    let combos = ui_batch_inner_into(data, sweep, kern, parallel, out_slice)?;
 
     // Convert back to Vec<f64> from ManuallyDrop
-    let values = unsafe {
+    let values_vec = unsafe {
         let ptr = buf_guard.as_mut_ptr() as *mut f64;
         let len = buf_guard.len();
         let cap = buf_guard.capacity();
@@ -805,7 +866,7 @@ fn ui_batch_inner(
     };
 
     Ok(UiBatchOutput {
-        values,
+        values: values_vec,
         combos,
         rows,
         cols,
