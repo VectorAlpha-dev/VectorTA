@@ -23,10 +23,10 @@
 //! - **Err(StdDevError)** otherwise.
 //!
 //! ## Developer Notes
-//! - Decision: SIMD kept as stubs delegating to scalar; rolling dependency + memory-bound behavior did not show >5% wins at 100k. Revisit with alternative formulations (e.g., multi-output tiling) if needed.
-//! - **AVX2/AVX512 Kernels**: SIMD implementations delegate to scalar for API parity. Rolling sum and sum-of-squares could be vectorized for periods > 8.
-//! - **Streaming Performance**: Efficient O(1) implementation using ring buffer with running sum and sum-of-squares. Optimal for real-time applications.
-//! - **Memory Optimization**: Uses zero-copy helper functions (`alloc_with_nan_prefix`, `make_uninit_matrix`). No cache-aligned buffers needed as computation is memory-bound rather than compute-bound.
+//! - Single-series SIMD: kept disabled (delegates to scalar). The rolling update is memory-bound and per-step dependent, and did not show consistent >5% wins at realistic sizes (10k/100k).
+//! - Batch SIMD: row-specific AVX2/AVX512 from prefix sums is enabled and faster than scalar by ~5–10% at 100k on a modern x86_64 CPU.
+//! - Streaming parity: scalar path computes variance with the same operation order as the stream (`mean = sum/den; var = sum2/den - mean*mean`) to ensure bitwise consistency in tests.
+//! - Allocation: follows alma.rs patterns (warmup prefix via `alloc_with_nan_prefix`; batch via `make_uninit_matrix`/`init_matrix_prefixes`).
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
@@ -362,28 +362,34 @@ pub fn stddev_into_slice(
 
 #[inline]
 pub fn stddev_scalar(data: &[f64], period: usize, first: usize, nbdev: f64, out: &mut [f64]) {
+    // Rolling O(1) update of sum and sum of squares.
+    // Compute variance with the same operation order as the stream path
+    // to preserve bitwise-equivalent results in tests:
+    //   mean = sum / den; var = (sum_sqr / den) - (mean * mean)
+    // Using division by a constant `den` matches the streaming update logic.
+    let den = period as f64;
+
     let mut sum = 0.0;
     let mut sum_sqr = 0.0;
     for &val in &data[first..first + period] {
         sum += val;
         sum_sqr += val * val;
     }
-    let mut compute = |sum: f64, sum_sqr: f64| {
-        let mean = sum / period as f64;
-        let var = (sum_sqr / period as f64) - (mean * mean);
-        if var <= 0.0 {
-            0.0
-        } else {
-            var.sqrt() * nbdev
-        }
-    };
-    out[first + period - 1] = compute(sum, sum_sqr);
+
+    // First output at warmup index
+    let mut mean = sum / den;
+    let mut var = (sum_sqr / den) - (mean * mean);
+    out[first + period - 1] = if var <= 0.0 { 0.0 } else { var.sqrt() * nbdev };
+
+    // Subsequent outputs
     for i in (first + period)..data.len() {
         let old = data[i - period];
         let new = data[i];
         sum += new - old;
         sum_sqr += new * new - old * old;
-        out[i] = compute(sum, sum_sqr);
+        mean = sum / den;
+        var = (sum_sqr / den) - (mean * mean);
+        out[i] = if var <= 0.0 { 0.0 } else { var.sqrt() * nbdev };
     }
 }
 

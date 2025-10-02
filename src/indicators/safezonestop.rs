@@ -14,9 +14,9 @@
 //! - **`Err(SafeZoneStopError)`** on invalid parameters or insufficient data.
 //!
 //! ## Developer Notes
-//! - **SIMD Status**: AVX2 and AVX512 kernels are stubs (call scalar implementation)
-//!   Decision: disabled by default — DM smoothing is a scalar recurrence and
-//!   lookback windows are short; measured scalar beats AVX2/AVX512 by >50% at 100k.
+//! - **SIMD Status**: AVX2 and AVX512 kernels are stubs (delegate to scalar).
+//!   Decision: DM smoothing is a scalar recurrence and the rolling extremum is branchy;
+//!   no consistent wins observed across CPUs, so runtime selection short-circuits to scalar.
 //! - **Streaming Performance**: O(1) - efficient monotonic deque for rolling extremum
 //! - **Memory Optimization**: ✓ Uses alloc_with_nan_prefix and zero-copy batch operations
 //! - **Batch Support**: ✓ Full parallel batch parameter sweep implementation

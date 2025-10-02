@@ -16,7 +16,7 @@
 //!
 //! ## Developer Notes
 //! - SIMD (single-series): kept as stubs delegating to scalar; rolling deps limit wins. Documented choice per guide.
-//! - Scalar fast paths: SMA path is O(1) with rolling sums; EMA path optimized to O(1) using window sums and EMA-based MSE.
+//! - Scalar fast paths: SMA path is O(1) with rolling sums; EMA path optimized to O(1) using window sums and EMA-based MSE. Hot loops use FMA (`mul_add`) and unchecked indexing to eliminate bounds checks.
 //! - Batch (row-specific): SMA+stddev path shares prefix sums and uses AVX2/AVX512 for base/scale copy; selected at runtime.
 //! - Streaming: current implementation is O(n) per update; future work could maintain rolling stats to avoid temporaries.
 
@@ -338,16 +338,19 @@ pub unsafe fn zscore_scalar(
     }
 
     let warmup_end = first + period - 1;
-    let mut out = alloc_with_nan_prefix(data.len(), warmup_end);
-    for i in warmup_end..data.len() {
-        let mean = means[i];
-        let sigma = sigmas[i];
-        let value = data[i];
-        out[i] = if sigma == 0.0 || sigma.is_nan() {
+    let n = data.len();
+    let mut out = alloc_with_nan_prefix(n, warmup_end);
+    let mut i = warmup_end;
+    while i < n {
+        let mean = *means.get_unchecked(i);
+        let sigma = *sigmas.get_unchecked(i);
+        let value = *data.get_unchecked(i);
+        *out.get_unchecked_mut(i) = if sigma == 0.0 || sigma.is_nan() {
             f64::NAN
         } else {
             (value - mean) / sigma
         };
+        i += 1;
     }
     Ok(ZscoreOutput { values: out })
 }
@@ -364,53 +367,62 @@ pub unsafe fn zscore_scalar_classic_sma(
     let mut out = alloc_with_nan_prefix(data.len(), warmup_end);
 
     // Calculate initial SMA and sum of squares
-    let mut sum = 0.0;
-    let mut sum_sqr = 0.0;
-    for j in first..warmup_end + 1 {
-        let val = data[j];
-        sum += val;
-        sum_sqr += val * val;
+    let inv = 1.0 / (period as f64);
+    let mut sum = 0.0f64;
+    let mut sum_sqr = 0.0f64;
+    {
+        let mut j = first;
+        while j <= warmup_end {
+            let v = *data.get_unchecked(j);
+            sum += v;
+            // sum_sqr += v*v via FMA for precision/perf
+            sum_sqr = v.mul_add(v, sum_sqr);
+            j += 1;
+        }
     }
-    let mut mean = sum / period as f64;
-
-    // Calculate initial standard deviation using the efficient formula
-    let variance = (sum_sqr / period as f64) - (mean * mean);
-    let mut stddev = if variance <= 0.0 {
-        0.0
-    } else {
-        variance.sqrt() * nbdev
-    };
+    let mut mean = sum * inv;
+    // var = E[x^2] - (E[x])^2 using FMA
+    let mut variance = (-mean).mul_add(mean, sum_sqr * inv);
+    if variance < 0.0 {
+        variance = 0.0;
+    }
+    let mut stddev = if variance == 0.0 { 0.0 } else { variance.sqrt() * nbdev };
 
     // First valid value
-    out[warmup_end] = if stddev == 0.0 || stddev.is_nan() {
+    let xw = *data.get_unchecked(warmup_end);
+    *out.get_unchecked_mut(warmup_end) = if stddev == 0.0 || stddev.is_nan() {
         f64::NAN
     } else {
-        (data[warmup_end] - mean) / stddev
+        (xw - mean) / stddev
     };
 
     // Rolling calculation with efficient updates
-    for i in warmup_end + 1..data.len() {
+    let n = data.len();
+    let mut i = warmup_end + 1;
+    while i < n {
         // Update rolling SMA and sum of squares
-        let old_val = data[i - period];
-        let new_val = data[i];
-        sum = sum - old_val + new_val;
-        sum_sqr = sum_sqr - old_val * old_val + new_val * new_val;
-        mean = sum / period as f64;
+        let old_val = *data.get_unchecked(i - period);
+        let new_val = *data.get_unchecked(i);
+        let dd = new_val - old_val;
+        sum += dd;
+        // new^2 - old^2 = (new - old) * (new + old)
+        sum_sqr = (new_val + old_val).mul_add(dd, sum_sqr);
+        mean = sum * inv;
 
-        // Calculate standard deviation using the efficient formula
-        let variance = (sum_sqr / period as f64) - (mean * mean);
-        stddev = if variance <= 0.0 {
-            0.0
-        } else {
-            variance.sqrt() * nbdev
-        };
+        // Standard deviation using the efficient formula
+        variance = (-mean).mul_add(mean, sum_sqr * inv);
+        if variance < 0.0 {
+            variance = 0.0;
+        }
+        stddev = if variance == 0.0 { 0.0 } else { variance.sqrt() * nbdev };
 
         // Calculate z-score
-        out[i] = if stddev == 0.0 || stddev.is_nan() {
+        *out.get_unchecked_mut(i) = if stddev == 0.0 || stddev.is_nan() {
             f64::NAN
         } else {
             (new_val - mean) / stddev
         };
+        i += 1;
     }
 
     Ok(ZscoreOutput { values: out })
@@ -433,58 +445,65 @@ pub unsafe fn zscore_scalar_classic_ema(
     }
 
     let den = period as f64;
+    let inv = 1.0 / den;
     let alpha = 2.0 / (den + 1.0);
     let one_minus_alpha = 1.0 - alpha;
 
     // Initialize rolling window sums and seed EMA with SMA
-    let mut sum = 0.0;
-    let mut sum2 = 0.0;
+    let mut sum = 0.0f64;
+    let mut sum2 = 0.0f64;
     {
         let mut j = first;
         while j <= warmup_end {
-            let v = data[j];
+            let v = *data.get_unchecked(j);
             sum += v;
-            sum2 += v * v;
+            sum2 = v.mul_add(v, sum2);
             j += 1;
         }
     }
-    let mut ema = sum / den;
+    let mut ema = sum * inv;
 
-    // Compute σ as sqrt(E[(x - EMA)^2]) using window sums
-    let mut mse = (sum2 / den) - 2.0 * ema * (sum / den) + ema * ema;
+    // Compute σ as sqrt(E[(x - EMA)^2]) using window sums with FMA
+    let mut ex = sum * inv;
+    let mut ex2 = sum2 * inv;
+    let mut mse = (-2.0 * ema).mul_add(ex, ema.mul_add(ema, ex2));
     if mse < 0.0 {
         mse = 0.0; // numerical guard
     }
     let mut sd = mse.sqrt() * nbdev;
 
     // First valid value at warmup_end
-    out[warmup_end] = if sd == 0.0 || sd.is_nan() {
+    let xw = *data.get_unchecked(warmup_end);
+    *out.get_unchecked_mut(warmup_end) = if sd == 0.0 || sd.is_nan() {
         f64::NAN
     } else {
-        (data[warmup_end] - ema) / sd
+        (xw - ema) / sd
     };
 
     // Rolling updates (O(1) per step)
     let mut i = warmup_end + 1;
     while i < n {
-        let new = data[i];
-        let old = data[i - period];
+        let new = *data.get_unchecked(i);
+        let old = *data.get_unchecked(i - period);
 
-        // Update sliding window sums
-        sum += new - old;
-        sum2 += new * new - old * old;
+        // Update sliding window expectations
+        let dd = new - old;
+        sum += dd;
+        sum2 = (new + old).mul_add(dd, sum2);
+        ex = sum * inv;
+        ex2 = sum2 * inv;
 
         // Update EMA
-        ema = alpha * new + one_minus_alpha * ema;
+        ema = ema.mul_add(one_minus_alpha, alpha * new);
 
         // Window MSE relative to current EMA
-        mse = (sum2 / den) - 2.0 * ema * (sum / den) + ema * ema;
+        mse = (-2.0 * ema).mul_add(ex, ema.mul_add(ema, ex2));
         if mse < 0.0 {
             mse = 0.0;
         }
         sd = mse.sqrt() * nbdev;
 
-        out[i] = if sd == 0.0 || sd.is_nan() {
+        *out.get_unchecked_mut(i) = if sd == 0.0 || sd.is_nan() {
             f64::NAN
         } else {
             (new - ema) / sd
