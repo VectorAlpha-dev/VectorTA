@@ -15,12 +15,11 @@
 //! - **`Err(WtoError)`** on invalid parameters or insufficient data.
 //!
 //! ## Developer Notes
-//! - **SIMD Status**: Single-series AVX2/AVX512 remain stubbed to scalar. The ESA→D→TCI chain is inherently sequential (EMA over EMA), so wide SIMD offers limited benefit for a single time series. Batch kernels do use AVX2/AVX512 to share precomputation across rows and vectorize CI steps.
+//! - **SIMD Status**: Single-series AVX2/AVX512 use pointer-iterating kernels that mirror the scalar warmup/main split to remove bounds checks and encourage FMA fusion. Because ESA→D→TCI is sequential, gains are modest and can underperform the optimized scalar; runtime Auto short-circuits to Scalar for single-series. Batch kernels use AVX2/AVX512 with grouped precompute for larger wins.
 //! - **Streaming Performance**: O(1) - maintains EMA states and small buffers
 //! - **Memory Optimization**: ✓ Uses make_uninit_matrix, init_matrix_prefixes for zero-copy
 //! - **Batch Support**: ✓ Full parallel batch parameter sweep implementation
-//! - **WebAssembly**: Has SIMD128 implementation for WASM targets
-//! - **TODO**: Implement actual AVX2/AVX512 SIMD kernels for EMA calculations
+//! - **WebAssembly**: SIMD128 stub currently falls back to scalar
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
@@ -365,8 +364,10 @@ fn wto_prepare<'a>(
         });
     }
 
+    // WTO single-series: scalar path is fastest on typical CPUs due to sequential EMA chain.
+    // Short-circuit Auto to Scalar to avoid slower AVX2/AVX512 selections.
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
@@ -474,13 +475,18 @@ pub fn wto_scalar(
     wt2: &mut [f64],
     hist: &mut [f64],
 ) -> Result<(), WtoError> {
-    // Optimized single-pass scalar implementation (safe):
-    // - Computes ESA, D, CI->TCI (WT1), SMA(4) (WT2), and HIST in one pass
-    // - No intermediate O(N) allocations
-    // - Matches PineScript EMA semantics (carry-forward on NaN)
+    // Optimized scalar implementation (safe) with split warmup/main phases:
+    // - Hoists ESA-only warmup to a dedicated loop (fewer hot-loop branches)
+    // - Single-pass CI/TCI update and WT2 4-sample SMA via tiny ring buffer
+    // - No O(N) temporaries; all outputs written in-place
+
+    #[inline(always)]
+    fn fast_abs(x: f64) -> f64 {
+        f64::from_bits(x.to_bits() & 0x7FFF_FFFF_FFFF_FFFF)
+    }
 
     let len = data.len();
-    if len == 0 {
+    if len == 0 || first_val >= len {
         return Ok(());
     }
 
@@ -492,106 +498,113 @@ pub fn wto_scalar(
 
     // Index where CI becomes defined (after ESA warmup)
     let ci_start = first_val + channel_length.saturating_sub(1);
+    if ci_start >= len {
+        return Ok(());
+    }
 
-    // Rolling SMA(4) for WT2 using a tiny ring buffer
+    // ESA init from first valid sample (Pine-style)
+    let mut esa = data[first_val];
+
+    // Phase 1: ESA-only warmup (first_val+1 .. ci_start-1)
+    let mut i = first_val + 1;
+    while i < ci_start {
+        let x = data[i];
+        if x.is_finite() {
+            esa = beta_e.mul_add(esa, alpha_e * x);
+        }
+        i += 1;
+    }
+
+    // Phase 2: main loop (ci_start .. len-1)
+    let mut d = 0.0_f64; // EMA(|x-esa|)
+    let mut tci = 0.0_f64; // EMA(ci)
+
+    // Rolling SMA(4) state for WT2
     let mut ring = [0.0_f64; 4];
     let mut rsum = 0.0_f64;
     let mut rpos = 0usize;
     let mut rlen = 0usize;
 
-    // Initialize ESA at first valid data point (Pine-style)
-    let mut esa = data[first_val];
+    // Constants
+    let k015 = 0.015_f64;
+    let inv4 = 0.25_f64;
 
-    // D and TCI states, initialized on first use
-    let mut d = f64::NAN;
-    let mut d_inited = false;
-    let mut tci = f64::NAN;
-    let mut tci_inited = false;
-
-    // Fill outputs in a single pass
-    for i in 0..len {
-        if i < first_val {
-            wt1[i] = f64::NAN;
-            wt2[i] = f64::NAN;
-            hist[i] = f64::NAN;
-            continue;
+    // Handle the first main step at ci_start
+    {
+        let x = data[ci_start];
+        if x.is_finite() {
+            esa = beta_e.mul_add(esa, alpha_e * x);
         }
+        let abs_diff = if x.is_finite() { fast_abs(x - esa) } else { f64::NAN };
+        d = abs_diff;
 
+        let denom = k015 * d;
+        let ci = if denom != 0.0 && denom.is_finite() {
+            if x.is_finite() { (x - esa) / denom } else { f64::NAN }
+        } else {
+            0.0
+        };
+
+        tci = ci;
+        wt1[ci_start] = tci; // WT1 available at ci_start
+
+        // Seed ring buffer for WT2; WT2/HIST remain NaN until 4 samples collected
+        ring[0] = tci;
+        rsum = tci;
+        rlen = 1;
+        rpos = 1;
+    }
+
+    // Steady-state loop
+    i = ci_start + 1;
+    while i < len {
         let x = data[i];
         let x_fin = x.is_finite();
 
-        // ESA update (carry-forward on NaN)
-        if i == first_val {
-            // already initialized
-        } else if x_fin {
+        // ESA and D updates (carry-forward semantics on NaN)
+        if x_fin {
             esa = beta_e.mul_add(esa, alpha_e * x);
+            let ad = fast_abs(x - esa);
+            d = beta_e.mul_add(d, alpha_e * ad);
         }
 
-        if i < ci_start {
-            // Before CI is valid
-            wt1[i] = f64::NAN;
-            wt2[i] = f64::NAN;
-            hist[i] = f64::NAN;
-            continue;
-        }
-
-        // |x - esa| for D's EMA (Pine EMA semantics)
-        let abs_diff = if x_fin { (x - esa).abs() } else { f64::NAN };
-        if !d_inited {
-            if i == ci_start {
-                d = abs_diff; // may be NaN; follows Pine init from first sample
-                d_inited = true;
-            }
-        } else if abs_diff.is_finite() {
-            d = beta_e.mul_add(d, alpha_e * abs_diff);
-        }
-
-        // CI = (x - esa) / (0.015 * d) with guards; Pine-compatible fallback when invalid
-        let denom = 0.015_f64 * d;
+        // Compute CI with guarded denominator; NaN when src is NaN
         let mut ci = 0.0_f64;
-        if denom != 0.0 && denom.is_finite() {
-            ci = if x_fin { (x - esa) / denom } else { f64::NAN };
+        if x_fin {
+            let denom = k015 * d;
+            if denom != 0.0 && denom.is_finite() {
+                ci = (x - esa) / denom;
+            }
+        } else {
+            ci = f64::NAN;
         }
 
-        // TCI (WT1) EMA over CI (Pine EMA semantics)
-        if !tci_inited {
-            if i == ci_start {
-                tci = ci;
-                tci_inited = true;
-            }
-        } else if ci.is_finite() {
+        // TCI EMA update only for finite CI
+        if ci.is_finite() {
             tci = beta_t.mul_add(tci, alpha_t * ci);
         }
 
-        if tci_inited {
-            // WT1
-            wt1[i] = tci;
+        // Write WT1
+        wt1[i] = tci;
 
-            // SMA(4) for WT2 via rolling ring buffer
-            if rlen < 4 {
-                ring[rlen] = tci;
-                rsum += tci;
-                rlen += 1;
-            } else {
-                rsum += tci - ring[rpos];
-                ring[rpos] = tci;
-                rpos = (rpos + 1) & 3; // modulo 4
-            }
-
-            if rlen == 4 {
-                let sig = 0.25_f64 * rsum;
-                wt2[i] = sig;
-                hist[i] = tci - sig;
-            } else {
-                wt2[i] = f64::NAN;
-                hist[i] = f64::NAN;
-            }
+        // WT2/HIST via rolling SMA(4)
+        if rlen < 4 {
+            ring[rlen] = tci;
+            rsum += tci;
+            rlen += 1;
         } else {
-            // TCI not initialized yet
-            wt1[i] = f64::NAN;
-            wt2[i] = f64::NAN;
-            hist[i] = f64::NAN;
+            rsum += tci - ring[rpos];
+            ring[rpos] = tci;
+            rpos = (rpos + 1) & 3;
         }
+
+        if rlen == 4 {
+            let sig = inv4 * rsum;
+            wt2[i] = sig;
+            hist[i] = tci - sig;
+        }
+
+        i += 1;
     }
 
     Ok(())
@@ -637,6 +650,10 @@ unsafe fn wto_avx2(
     // Unsafe, pointer-based single-pass kernel (branch-minimized, FMA-friendly).
     // Rationale: EMA chain is sequential; we focus on removing bounds checks and
     // enabling mul_add on AVX2+FMA targets selected by runtime detection.
+    #[inline(always)]
+    fn fast_abs(x: f64) -> f64 {
+        f64::from_bits(x.to_bits() & 0x7FFF_FFFF_FFFF_FFFF)
+    }
 
     let len = data.len();
     if len == 0 {
@@ -694,7 +711,7 @@ unsafe fn wto_avx2(
 
         if i >= ci_start {
             // Abs diff for D's EMA (carry-forward semantics on NaN)
-            let abs_diff = if x_fin { (x - esa).abs() } else { f64::NAN };
+            let abs_diff = if x_fin { fast_abs(x - esa) } else { f64::NAN };
             if !d_inited {
                 if i == ci_start {
                     d = abs_diff;
@@ -774,18 +791,131 @@ unsafe fn wto_avx512(
     wt2: &mut [f64],
     hist: &mut [f64],
 ) -> Result<(), WtoError> {
-    // For now, use scalar implementation
-    // AVX512 optimization can be added later for the histogram calculation
-    wto_scalar(
-        data,
-        channel_length,
-        average_length,
-        first_val,
-        Kernel::Avx512,
-        wt1,
-        wt2,
-        hist,
-    )
+    // Pointer-iterating single-series kernel mirroring scalar warmup/main split.
+    // Time dependencies prevent wide-vector parallelism; this variant focuses on
+    // removing bounds checks and keeping state in registers on AVX-512 parts.
+
+    #[inline(always)]
+    fn fast_abs(x: f64) -> f64 {
+        f64::from_bits(x.to_bits() & 0x7FFF_FFFF_FFFF_FFFF)
+    }
+
+    let len = data.len();
+    if len == 0 || first_val >= len {
+        return Ok(());
+    }
+
+    let alpha_e = 2.0 / (channel_length as f64 + 1.0);
+    let beta_e = 1.0 - alpha_e;
+    let alpha_t = 2.0 / (average_length as f64 + 1.0);
+    let beta_t = 1.0 - alpha_t;
+
+    let ci_start = first_val + channel_length.saturating_sub(1);
+    if ci_start >= len {
+        return Ok(());
+    }
+
+    let x_ptr = data.as_ptr();
+    let wt1_ptr = wt1.as_mut_ptr();
+    let wt2_ptr = wt2.as_mut_ptr();
+    let hs_ptr = hist.as_mut_ptr();
+
+    // ESA init and warmup
+    let mut esa = *x_ptr.add(first_val);
+    let mut i = first_val + 1;
+    while i < ci_start {
+        let x = *x_ptr.add(i);
+        if x.is_finite() {
+            esa = beta_e.mul_add(esa, alpha_e * x);
+        }
+        i += 1;
+    }
+
+    // Main path state
+    let mut d = 0.0_f64;
+    let mut tci = 0.0_f64;
+
+    // WT2 SMA(4) ring
+    let mut ring = [0.0_f64; 4];
+    let mut rsum = 0.0_f64;
+    let mut rpos = 0usize;
+    let mut rlen = 0usize;
+
+    let k015 = 0.015_f64;
+    let inv4 = 0.25_f64;
+
+    // ci_start step
+    {
+        let x = *x_ptr.add(ci_start);
+        if x.is_finite() {
+            esa = beta_e.mul_add(esa, alpha_e * x);
+        }
+        let abs_diff = if x.is_finite() { fast_abs(x - esa) } else { f64::NAN };
+        d = abs_diff;
+
+        let denom = k015 * d;
+        let ci = if denom != 0.0 && denom.is_finite() {
+            if x.is_finite() { (x - esa) / denom } else { f64::NAN }
+        } else {
+            0.0
+        };
+        tci = ci;
+        *wt1_ptr.add(ci_start) = tci;
+
+        ring[0] = tci;
+        rsum = tci;
+        rlen = 1;
+        rpos = 1;
+    }
+
+    // steady loop
+    i = ci_start + 1;
+    while i < len {
+        let x = *x_ptr.add(i);
+        let x_fin = x.is_finite();
+
+        if x_fin {
+            esa = beta_e.mul_add(esa, alpha_e * x);
+            let ad = fast_abs(x - esa);
+            d = beta_e.mul_add(d, alpha_e * ad);
+        }
+
+        let mut ci = 0.0_f64;
+        if x_fin {
+            let denom = k015 * d;
+            if denom != 0.0 && denom.is_finite() {
+                ci = (x - esa) / denom;
+            }
+        } else {
+            ci = f64::NAN;
+        }
+
+        if ci.is_finite() {
+            tci = beta_t.mul_add(tci, alpha_t * ci);
+        }
+
+        *wt1_ptr.add(i) = tci;
+
+        if rlen < 4 {
+            ring[rlen] = tci;
+            rsum += tci;
+            rlen += 1;
+        } else {
+            rsum += tci - ring[rpos];
+            ring[rpos] = tci;
+            rpos = (rpos + 1) & 3;
+        }
+
+        if rlen == 4 {
+            let sig = inv4 * rsum;
+            *wt2_ptr.add(i) = sig;
+            *hs_ptr.add(i) = tci - sig;
+        }
+
+        i += 1;
+    }
+
+    Ok(())
 }
 
 // ==================== PYTHON BINDINGS ====================

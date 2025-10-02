@@ -63,6 +63,36 @@ impl<'a> AsRef<[f64]> for VlmaInput<'a> {
     }
 }
 
+// Fast math helpers used by the optimized scalar path. Keep tiny and always-inline
+// to match ALMA-style patterns and avoid call overhead in hot loops.
+#[inline(always)]
+fn fast_ema_update(last: f64, x: f64, sc: f64) -> f64 {
+    // last + sc * (x - last), fused when available
+    (x - last).mul_add(sc, last)
+}
+
+#[inline(always)]
+fn fast_clamp_period(p: isize, min_p: usize, max_p: usize) -> usize {
+    let lo = min_p as isize;
+    let hi = max_p as isize;
+    if p < lo {
+        min_p
+    } else if p > hi {
+        max_p
+    } else {
+        p as usize
+    }
+}
+
+#[inline(always)]
+fn fast_std_from_sums(sum: f64, sumsq: f64, inv_n: f64) -> (f64, f64) {
+    let m = sum * inv_n;
+    // var = E[x^2] - m^2  ==> (sumsq * inv_n) - m*m
+    let var = (-m).mul_add(m, sumsq * inv_n);
+    let dv = if var <= 0.0 { 0.0 } else { var.sqrt() };
+    (m, dv)
+}
+
 #[derive(Debug, Clone)]
 pub enum VlmaData<'a> {
     Candles {
@@ -453,7 +483,7 @@ pub unsafe fn vlma_scalar_sma_stddev_into(
         let x = *data.get_unchecked(i);
         if !x.is_nan() {
             let sc = *sc_ptr.add(last_p);
-            last_val = (x - last_val).mul_add(sc, last_val);
+            last_val = fast_ema_update(last_val, x, sc);
         }
         i += 1;
     }
@@ -521,7 +551,7 @@ pub unsafe fn vlma_scalar_sma_stddev_into(
 
             // EMA-like update
             let sc = *sc_ptr.add(next_p);
-            last_val = (x - last_val).mul_add(sc, last_val);
+            last_val = fast_ema_update(last_val, x, sc);
             last_p = next_p;
             *out.get_unchecked_mut(i) = last_val;
         }

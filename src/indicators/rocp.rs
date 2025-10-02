@@ -12,8 +12,11 @@
 //! ## Developer Status
 //! - SIMD implemented (AVX2/AVX512) but disabled by default: vector f64 division
 //!   underperforms vs safe scalar on current targets at realistic sizes (10k–100k).
-//!   Kernel::Auto short-circuits to Scalar/ScalarBatch. Explicit AVX benches remain
+//!   `Kernel::Auto` short-circuits to `Scalar`/`ScalarBatch`. Explicit AVX benches remain
 //!   for future exploration and correctness.
+//! - Row-specific batch optimization enabled: when rows >= 4, precompute reciprocals
+//!   once and reuse across rows (compute `c * inv(prev) - 1`). This removes a divide
+//!   per output for additional rows while preserving scalar numerics in the single-series path.
 //! - Streaming: O(1) – simple ring buffer lookup
 //! - Memory: Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
 
