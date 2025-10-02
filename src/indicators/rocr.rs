@@ -14,6 +14,8 @@
 //!   Auto kernel selection short-circuits to scalar; explicit SIMD remains for benchmarking.
 //! - Streaming: O(1) — simple ring-buffer lookup.
 //! - Memory: Good — uses `alloc_with_nan_prefix` and `make_uninit_matrix`.
+//! - Batch: Scalar path uses a shared 1/x precompute (row-specific) to reduce per-row work; runtime
+//!   selection still defaults to scalar batch. SIMD batch paths are kept for benchmarking.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -280,11 +282,7 @@ pub fn rocr_into_slice(dst: &mut [f64], input: &RocrInput, kern: Kernel) -> Resu
 pub fn rocr_scalar(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) {
     for i in (first_val + period)..data.len() {
         let past = data[i - period];
-        out[i] = if past == 0.0 || past.is_nan() {
-            0.0
-        } else {
-            data[i] / past
-        };
+        out[i] = if past == 0.0 || past.is_nan() { 0.0 } else { data[i] / past };
     }
 }
 
@@ -303,15 +301,16 @@ pub fn rocr_avx512(data: &[f64], period: usize, first_valid: usize, out: &mut [f
             let mut i = start;
             let end = len;
             let step = 8usize;
-            let zero = _mm512_set1_pd(0.0);
             while i + step <= end {
                 let cur = _mm512_loadu_pd(data.as_ptr().add(i));
                 let pst = _mm512_loadu_pd(data.as_ptr().add(i - period));
-                let m_zero = _mm512_cmp_pd_mask(pst, zero, _CMP_EQ_OQ);
-                let m_nan = _mm512_cmp_pd_mask(pst, pst, _CMP_UNORD_Q);
-                let m_bad = m_zero | m_nan;
-                let div = _mm512_div_pd(cur, pst);
-                let res = _mm512_mask_mov_pd(div, m_bad, zero);
+                // bad = (pst == 0.0) | isnan(pst)
+                let m0 = _mm512_cmp_pd_mask(pst, _mm512_set1_pd(0.0), _CMP_EQ_OQ);
+                let m1 = _mm512_cmp_pd_mask(pst, pst, _CMP_UNORD_Q);
+                let bad = m0 | m1;
+                let good = !bad;
+                // Compute only on good lanes; masked lanes become 0.0 automatically
+                let res = _mm512_maskz_div_pd(good, cur, pst);
                 _mm512_storeu_pd(out.as_mut_ptr().add(i), res);
                 i += step;
             }
@@ -340,24 +339,59 @@ pub fn rocr_avx2(data: &[f64], period: usize, first_valid: usize, out: &mut [f64
         #[cfg(target_feature = "avx2")]
         {
             let mut i = start;
+            let mut p = i - period;
             let end = len;
-            let step = 4usize;
             let zero = _mm256_set1_pd(0.0);
-            while i + step <= end {
-                let cur = _mm256_loadu_pd(data.as_ptr().add(i));
-                let pst = _mm256_loadu_pd(data.as_ptr().add(i - period));
-                let m_zero = _mm256_cmp_pd(pst, zero, _CMP_EQ_OQ);
-                let m_nan = _mm256_cmp_pd(pst, pst, _CMP_UNORD_Q);
-                let m_bad = _mm256_or_pd(m_zero, m_nan);
-                let div = _mm256_div_pd(cur, pst);
-                let res = _mm256_blendv_pd(div, zero, m_bad);
-                _mm256_storeu_pd(out.as_mut_ptr().add(i), res);
-                i += step;
+
+            // Unroll by 2 vectors (8 lanes)
+            while i + 8 <= end {
+                // Block 0
+                let cur0 = _mm256_loadu_pd(data.as_ptr().add(i));
+                let pst0 = _mm256_loadu_pd(data.as_ptr().add(p));
+                let div0 = _mm256_div_pd(cur0, pst0);
+                let m0z = _mm256_cmp_pd(pst0, zero, _CMP_EQ_OQ);
+                let m0n = _mm256_cmp_pd(pst0, pst0, _CMP_UNORD_Q);
+                let m0 = _mm256_or_pd(m0z, m0n);
+                let res0 = _mm256_andnot_pd(m0, div0);
+                _mm256_storeu_pd(out.as_mut_ptr().add(i), res0);
+
+                // Block 1
+                let cur1 = _mm256_loadu_pd(data.as_ptr().add(i + 4));
+                let pst1 = _mm256_loadu_pd(data.as_ptr().add(p + 4));
+                let div1 = _mm256_div_pd(cur1, pst1);
+                let m1z = _mm256_cmp_pd(pst1, zero, _CMP_EQ_OQ);
+                let m1n = _mm256_cmp_pd(pst1, pst1, _CMP_UNORD_Q);
+                let m1 = _mm256_or_pd(m1z, m1n);
+                let res1 = _mm256_andnot_pd(m1, div1);
+                _mm256_storeu_pd(out.as_mut_ptr().add(i + 4), res1);
+
+                i += 8;
+                p += 8;
             }
-            for j in i..end {
-                let p = *data.get_unchecked(j - period);
-                let c = *data.get_unchecked(j);
-                *out.get_unchecked_mut(j) = if p == 0.0 || p.is_nan() { 0.0 } else { c / p };
+
+            while i + 4 <= end {
+                let cur = _mm256_loadu_pd(data.as_ptr().add(i));
+                let pst = _mm256_loadu_pd(data.as_ptr().add(p));
+                let div = _mm256_div_pd(cur, pst);
+                let mz = _mm256_cmp_pd(pst, zero, _CMP_EQ_OQ);
+                let mn = _mm256_cmp_pd(pst, pst, _CMP_UNORD_Q);
+                let m = _mm256_or_pd(mz, mn);
+                let res = _mm256_andnot_pd(m, div);
+                _mm256_storeu_pd(out.as_mut_ptr().add(i), res);
+                i += 4;
+                p += 4;
+            }
+
+            while i < end {
+                let past = *data.get_unchecked(p);
+                let cur = *data.get_unchecked(i);
+                let b = past.to_bits();
+                let is_zero = (b & 0x7fff_ffff_ffff_ffff) == 0;
+                let is_nan = (b & 0x7ff0_0000_0000_0000) == 0x7ff0_0000_0000_0000
+                    && (b & 0x000f_ffff_ffff_ffff) != 0;
+                *out.get_unchecked_mut(i) = if is_zero | is_nan { 0.0 } else { cur / past };
+                i += 1;
+                p += 1;
             }
             return;
         }
@@ -614,11 +648,35 @@ fn rocr_batch_inner(
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
+    // Optional shared precompute for Scalar: inv[j] = valid(data[j]) ? 1/data[j] : 0.0
+    let inv: Option<AVec<f64>> = match kern {
+        Kernel::Scalar => {
+            let mut buf: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, cols);
+            unsafe { buf.set_len(cols) };
+            // Compute from first..; earlier entries don't matter (warmup is NaN)
+            const ABS_MASK: u64 = 0x7fff_ffff_ffff_ffff;
+            const EXP_MASK: u64 = 0x7ff0_0000_0000_0000;
+            const MAN_MASK: u64 = 0x000f_ffff_ffff_ffff;
+            for j in first..cols {
+                let v = data[j];
+                let b = v.to_bits();
+                let is_zero = (b & ABS_MASK) == 0;
+                let is_nan = (b & EXP_MASK) == EXP_MASK && (b & MAN_MASK) != 0;
+                buf[j] = if is_zero | is_nan { 0.0 } else { 1.0 / v };
+            }
+            Some(buf)
+        }
+        _ => None,
+    };
+
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
 
         match kern {
-            Kernel::Scalar => rocr_row_scalar(data, first, period, out_row),
+            Kernel::Scalar => match &inv {
+                Some(inv) => rocr_row_scalar_mul(data, inv.as_slice(), first, period, out_row),
+                None => rocr_row_scalar(data, first, period, out_row),
+            },
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 => rocr_row_avx2(data, first, period, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -733,14 +791,48 @@ fn rocr_batch_inner_into(
 
 #[inline(always)]
 unsafe fn rocr_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-    for i in (first + period)..data.len() {
-        let current = data[i];
-        let past = data[i - period];
-        out[i] = if past == 0.0 || past.is_nan() {
-            0.0
-        } else {
-            current / past
-        };
+    let mut i = first + period;
+    let len = data.len();
+    if i >= len {
+        return;
+    }
+
+    const ABS_MASK: u64 = 0x7fff_ffff_ffff_ffff;
+    const EXP_MASK: u64 = 0x7ff0_0000_0000_0000;
+    const MAN_MASK: u64 = 0x000f_ffff_ffff_ffff;
+
+    #[inline(always)]
+    fn zero_if_bad(den_bits: u64, q: f64) -> f64 {
+        let is_zero = (den_bits & ABS_MASK) == 0;
+        let is_nan = (den_bits & EXP_MASK) == EXP_MASK && (den_bits & MAN_MASK) != 0;
+        let good_mask: u64 = (!(is_zero | is_nan) as u64).wrapping_neg();
+        f64::from_bits(q.to_bits() & good_mask)
+    }
+
+    while i + 4 <= len {
+        let base_p = i - period;
+        let p0 = data[base_p + 0];
+        let p1 = data[base_p + 1];
+        let p2 = data[base_p + 2];
+        let p3 = data[base_p + 3];
+
+        let c0 = data[i + 0];
+        let c1 = data[i + 1];
+        let c2 = data[i + 2];
+        let c3 = data[i + 3];
+
+        out[i + 0] = zero_if_bad(p0.to_bits(), c0 / p0);
+        out[i + 1] = zero_if_bad(p1.to_bits(), c1 / p1);
+        out[i + 2] = zero_if_bad(p2.to_bits(), c2 / p2);
+        out[i + 3] = zero_if_bad(p3.to_bits(), c3 / p3);
+
+        i += 4;
+    }
+    while i < len {
+        let p = data[i - period];
+        let c = data[i];
+        out[i] = zero_if_bad(p.to_bits(), c / p);
+        i += 1;
     }
 }
 
@@ -755,24 +847,59 @@ unsafe fn rocr_row_avx2(data: &[f64], first: usize, period: usize, out: &mut [f6
             return;
         }
         let mut i = start;
+        let mut p = i - period;
         let end = len;
-        let step = 4usize;
         let zero = _mm256_set1_pd(0.0);
-        while i + step <= end {
-            let cur = _mm256_loadu_pd(data.as_ptr().add(i));
-            let pst = _mm256_loadu_pd(data.as_ptr().add(i - period));
-            let m_zero = _mm256_cmp_pd(pst, zero, _CMP_EQ_OQ);
-            let m_nan = _mm256_cmp_pd(pst, pst, _CMP_UNORD_Q);
-            let m_bad = _mm256_or_pd(m_zero, m_nan);
-            let div = _mm256_div_pd(cur, pst);
-            let res = _mm256_blendv_pd(div, zero, m_bad);
-            _mm256_storeu_pd(out.as_mut_ptr().add(i), res);
-            i += step;
+
+        while i + 8 <= end {
+            let cur0 = _mm256_loadu_pd(data.as_ptr().add(i));
+            let pst0 = _mm256_loadu_pd(data.as_ptr().add(p));
+            let div0 = _mm256_div_pd(cur0, pst0);
+            let m0 = _mm256_or_pd(
+                _mm256_cmp_pd(pst0, zero, _CMP_EQ_OQ),
+                _mm256_cmp_pd(pst0, pst0, _CMP_UNORD_Q),
+            );
+            let res0 = _mm256_andnot_pd(m0, div0);
+            _mm256_storeu_pd(out.as_mut_ptr().add(i), res0);
+
+            let cur1 = _mm256_loadu_pd(data.as_ptr().add(i + 4));
+            let pst1 = _mm256_loadu_pd(data.as_ptr().add(p + 4));
+            let div1 = _mm256_div_pd(cur1, pst1);
+            let m1 = _mm256_or_pd(
+                _mm256_cmp_pd(pst1, zero, _CMP_EQ_OQ),
+                _mm256_cmp_pd(pst1, pst1, _CMP_UNORD_Q),
+            );
+            let res1 = _mm256_andnot_pd(m1, div1);
+            _mm256_storeu_pd(out.as_mut_ptr().add(i + 4), res1);
+
+            i += 8;
+            p += 8;
         }
-        for j in i..end {
-            let p = *data.get_unchecked(j - period);
-            let c = *data.get_unchecked(j);
-            *out.get_unchecked_mut(j) = if p == 0.0 || p.is_nan() { 0.0 } else { c / p };
+
+        while i + 4 <= end {
+            let cur = _mm256_loadu_pd(data.as_ptr().add(i));
+            let pst = _mm256_loadu_pd(data.as_ptr().add(p));
+            let div = _mm256_div_pd(cur, pst);
+            let m = _mm256_or_pd(
+                _mm256_cmp_pd(pst, zero, _CMP_EQ_OQ),
+                _mm256_cmp_pd(pst, pst, _CMP_UNORD_Q),
+            );
+            let res = _mm256_andnot_pd(m, div);
+            _mm256_storeu_pd(out.as_mut_ptr().add(i), res);
+            i += 4;
+            p += 4;
+        }
+
+        while i < end {
+            let past = *data.get_unchecked(p);
+            let cur = *data.get_unchecked(i);
+            let b = past.to_bits();
+            let is_zero = (b & 0x7fff_ffff_ffff_ffff) == 0;
+            let is_nan = (b & 0x7ff0_0000_0000_0000) == 0x7ff0_0000_0000_0000
+                && (b & 0x000f_ffff_ffff_ffff) != 0;
+            *out.get_unchecked_mut(i) = if is_zero | is_nan { 0.0 } else { cur / past };
+            i += 1;
+            p += 1;
         }
         return;
     }
@@ -792,15 +919,13 @@ pub unsafe fn rocr_row_avx512(data: &[f64], first: usize, period: usize, out: &m
         let mut i = start;
         let end = len;
         let step = 8usize;
-        let zero = _mm512_set1_pd(0.0);
         while i + step <= end {
             let cur = _mm512_loadu_pd(data.as_ptr().add(i));
             let pst = _mm512_loadu_pd(data.as_ptr().add(i - period));
-            let m_zero = _mm512_cmp_pd_mask(pst, zero, _CMP_EQ_OQ);
-            let m_nan = _mm512_cmp_pd_mask(pst, pst, _CMP_UNORD_Q);
-            let m_bad = m_zero | m_nan;
-            let div = _mm512_div_pd(cur, pst);
-            let res = _mm512_mask_mov_pd(div, m_bad, zero);
+            let m0 = _mm512_cmp_pd_mask(pst, _mm512_set1_pd(0.0), _CMP_EQ_OQ);
+            let m1 = _mm512_cmp_pd_mask(pst, pst, _CMP_UNORD_Q);
+            let good = !(m0 | m1);
+            let res = _mm512_maskz_div_pd(good, cur, pst);
             _mm512_storeu_pd(out.as_mut_ptr().add(i), res);
             i += step;
         }
@@ -829,6 +954,23 @@ pub unsafe fn rocr_row_avx512_long(data: &[f64], first: usize, period: usize, ou
 #[inline(always)]
 pub fn expand_grid_rocr(r: &RocrBatchRange) -> Vec<RocrParams> {
     expand_grid(r)
+}
+
+// Optimized scalar batch row using shared inv[] (1/x) precompute across rows.
+#[inline(always)]
+unsafe fn rocr_row_scalar_mul(
+    data: &[f64],
+    inv: &[f64],
+    first: usize,
+    period: usize,
+    out: &mut [f64],
+) {
+    let mut i = first + period;
+    let len = data.len();
+    while i < len {
+        *out.get_unchecked_mut(i) = *data.get_unchecked(i) * *inv.get_unchecked(i - period);
+        i += 1;
+    }
 }
 
 // Python bindings

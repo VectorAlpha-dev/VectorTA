@@ -12,7 +12,8 @@
 //! - **`Err(VoscError)`** on invalid parameters or insufficient data.
 //!
 //! ## Developer Notes
-//! - **SIMD Status**: AVX2/AVX512 remain stubs (sequential dependency limits gains)
+//! - **SIMD Status**: AVX2/AVX512 implemented for initial accumulation but disabled by default
+//!   (sliding window is loop-carried; <5% gain vs scalar at 100k).
 //! - **Streaming Performance**: O(1) — maintains separate ring buffers for short/long periods
 //! - **Scalar Path**: Tightened with unchecked indexing + loop-jamming (faster, tests unchanged)
 //! - **Memory Optimization**: ✓ Uses alloc_with_nan_prefix for output allocation
@@ -255,8 +256,9 @@ pub fn vosc_with_kernel(input: &VoscInput, kernel: Kernel) -> Result<VoscOutput,
         });
     }
 
+    // SIMD underperforms due to loop-carried dependency; prefer Scalar for Auto.
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -325,7 +327,7 @@ pub fn vosc_scalar(
 
         // Sliding window (tight loop; unchecked indexing; loop-jammed)
         let mut t_s = end_init - short_period; // j - short_period (for j = end_init)
-        let mut t_l = start;                   // j - long_period  (for j = end_init)
+        let mut t_l = start; // j - long_period  (for j = end_init)
 
         let mut j = end_init;
         let len = data.len();
@@ -363,7 +365,85 @@ pub fn vosc_avx512(
     first_valid: usize,
     out: &mut [f64],
 ) {
-    vosc_scalar(data, short_period, long_period, first_valid, out)
+    unsafe {
+        let short_div = 1.0 / (short_period as f64);
+        let long_div = 1.0 / (long_period as f64);
+
+        let start = first_valid;
+        let end_init = start + long_period; // exclusive
+        let short_start = end_init - short_period; // inclusive
+        let len = data.len();
+        let dptr = data.as_ptr();
+
+        let mut short_sum = 0.0f64;
+        let mut long_sum = 0.0f64;
+
+        // [start, short_start) -> long_sum
+        let mut i = start;
+        let end_a = short_start;
+        if end_a > i {
+            let mut acc = _mm512_setzero_pd();
+            while i + 8 <= end_a {
+                let v = _mm512_loadu_pd(dptr.add(i));
+                acc = _mm512_add_pd(acc, v);
+                i += 8;
+            }
+            let mut tmp = [0.0f64; 8];
+            _mm512_storeu_pd(tmp.as_mut_ptr(), acc);
+            long_sum += tmp.iter().sum::<f64>();
+            while i < end_a {
+                long_sum += *dptr.add(i);
+                i += 1;
+            }
+        }
+
+        // [short_start, end_init) -> both sums
+        let end_b = end_init;
+        if end_b > i {
+            let mut acc = _mm512_setzero_pd();
+            while i + 8 <= end_b {
+                let v = _mm512_loadu_pd(dptr.add(i));
+                acc = _mm512_add_pd(acc, v);
+                i += 8;
+            }
+            let mut tmp = [0.0f64; 8];
+            _mm512_storeu_pd(tmp.as_mut_ptr(), acc);
+            let block = tmp.iter().sum::<f64>();
+            long_sum += block;
+            short_sum += block;
+            while i < end_b {
+                let x = *dptr.add(i);
+                long_sum += x;
+                short_sum += x;
+                i += 1;
+            }
+        }
+
+        // first valid output
+        let mut idx = end_b - 1;
+        let mut lavg = long_sum * long_div;
+        let mut savg = short_sum * short_div;
+        *out.get_unchecked_mut(idx) = 100.0 * (savg - lavg) / lavg;
+
+        // sliding (scalar, same as reference)
+        let mut t_s = end_init - short_period;
+        let mut t_l = start;
+        let mut j = end_init;
+        while j < len {
+            let x = *dptr.add(j);
+            short_sum += x;
+            short_sum -= *dptr.add(t_s);
+            long_sum += x;
+            long_sum -= *dptr.add(t_l);
+            t_s += 1;
+            t_l += 1;
+            j += 1;
+            idx += 1;
+            lavg = long_sum * long_div;
+            savg = short_sum * short_div;
+            *out.get_unchecked_mut(idx) = 100.0 * (savg - lavg) / lavg;
+        }
+    }
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
@@ -374,7 +454,85 @@ pub fn vosc_avx2(
     first_valid: usize,
     out: &mut [f64],
 ) {
-    vosc_scalar(data, short_period, long_period, first_valid, out)
+    unsafe {
+        let short_div = 1.0 / (short_period as f64);
+        let long_div = 1.0 / (long_period as f64);
+
+        let start = first_valid;
+        let end_init = start + long_period; // exclusive
+        let short_start = end_init - short_period; // inclusive
+        let len = data.len();
+        let dptr = data.as_ptr();
+
+        let mut short_sum = 0.0f64;
+        let mut long_sum = 0.0f64;
+
+        // [start, short_start) -> long_sum
+        let mut i = start;
+        let end_a = short_start;
+        if end_a > i {
+            let mut acc = _mm256_setzero_pd();
+            while i + 4 <= end_a {
+                let v = _mm256_loadu_pd(dptr.add(i));
+                acc = _mm256_add_pd(acc, v);
+                i += 4;
+            }
+            let mut tmp = [0.0f64; 4];
+            _mm256_storeu_pd(tmp.as_mut_ptr(), acc);
+            long_sum += tmp.iter().sum::<f64>();
+            while i < end_a {
+                long_sum += *dptr.add(i);
+                i += 1;
+            }
+        }
+
+        // [short_start, end_init) -> both sums
+        let end_b = end_init;
+        if end_b > i {
+            let mut acc = _mm256_setzero_pd();
+            while i + 4 <= end_b {
+                let v = _mm256_loadu_pd(dptr.add(i));
+                acc = _mm256_add_pd(acc, v);
+                i += 4;
+            }
+            let mut tmp = [0.0f64; 4];
+            _mm256_storeu_pd(tmp.as_mut_ptr(), acc);
+            let block = tmp.iter().sum::<f64>();
+            long_sum += block;
+            short_sum += block;
+            while i < end_b {
+                let x = *dptr.add(i);
+                long_sum += x;
+                short_sum += x;
+                i += 1;
+            }
+        }
+
+        // first valid output
+        let mut idx = end_b - 1;
+        let mut lavg = long_sum * long_div;
+        let mut savg = short_sum * short_div;
+        *out.get_unchecked_mut(idx) = 100.0 * (savg - lavg) / lavg;
+
+        // sliding (scalar, same as reference)
+        let mut t_s = end_init - short_period;
+        let mut t_l = start;
+        let mut j = end_init;
+        while j < len {
+            let x = *dptr.add(j);
+            short_sum += x;
+            short_sum -= *dptr.add(t_s);
+            long_sum += x;
+            long_sum -= *dptr.add(t_l);
+            t_s += 1;
+            t_l += 1;
+            j += 1;
+            idx += 1;
+            lavg = long_sum * long_div;
+            savg = short_sum * short_div;
+            *out.get_unchecked_mut(idx) = 100.0 * (savg - lavg) / lavg;
+        }
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -623,8 +781,9 @@ pub fn vosc_batch_with_kernel(
     sweep: &VoscBatchRange,
     k: Kernel,
 ) -> Result<VoscBatchOutput, VoscError> {
+    // Batch SIMD underperforms vs. row-specific prefix-sum scalar; default to ScalarBatch.
     let kernel = match k {
-        Kernel::Auto => detect_best_batch_kernel(),
+        Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         _ => {
             return Err(VoscError::InvalidLongPeriod {
@@ -1736,7 +1895,7 @@ pub fn vosc_into_slice(dst: &mut [f64], input: &VoscInput, kern: Kernel) -> Resu
     }
 
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 

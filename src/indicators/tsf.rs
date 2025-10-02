@@ -11,13 +11,18 @@
 //! - **`Err(TsfError)`** on invalid parameters or insufficient data.
 //!
 //! ## Developer Notes
-//! - **Scalar Status**: Optimized O(1) sliding window using S0=∑y and S1=∑(j·y).
-//!   Recovers via O(p) recompute only when NaNs enter/leave the window. Matches tests.
-//! - **Streaming Performance**: O(1) with the same sliding sums as scalar; matches batch outputs.
-//! - **SIMD Status**: AVX2/AVX512 remain stubs that delegate to scalar pending kernels.
-//! - **Memory Optimization**: ✓ Uses alloc_with_nan_prefix for output allocation
-//! - **Batch Support**: ✓ Full parallel batch parameter sweep implementation
-//! - **Note**: SIMD left as stubs for now; scalar path is significantly faster (~3–5× at 100k).
+//! - **Scalar**: Optimized O(1) sliding window using S0=∑y and S1=∑(j·y);
+//!   falls back to O(p) recompute only when NaNs enter/leave the window. Matches tests.
+//! - **SIMD**: AVX2 is implemented (4-at-a-time vector algebra; sequential update retained).
+//!   AVX512 is present but currently forwards to scalar for short/long variants. Runtime Auto
+//!   short-circuits to `Scalar` because SIMD provides marginal/no gains for TSF’s sequential
+//!   recurrence; explicit AVX2/AVX512 requests are honored for testing.
+//! - **Batch**: Parallel per-row scalar path with warmup prefixes; SIMD selection short-circuits
+//!   to scalar for the same reason as single-series.
+//! - **Perf (reference)**: On `RUSTFLAGS="-C target-cpu=native"` single-series 100k:
+//!   - Scalar: ~147–149 µs via `cargo bench --bench indicator_benchmark -- tsf/tsf_scalar/100k`
+//!   - AVX2:   ~190–195 µs via `cargo +nightly bench --features nightly-avx --bench indicator_benchmark -- tsf/tsf_avx2/100k`
+//!   These confirm that Auto should prefer the scalar path on this workload.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};

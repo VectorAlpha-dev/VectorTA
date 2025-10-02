@@ -216,7 +216,10 @@ use my_project::indicators::{
     rsmk::{rsmk as rsmk_raw, RsmkInput},
     rsx::{rsx as rsx_raw, rsx_with_kernel, RsxBatchBuilder, RsxInput},
     rvi::{rvi as rvi_raw, rvi_with_kernel, RviInput},
-    safezonestop::{safezonestop as safezonestop_raw, SafeZoneStopInput},
+    safezonestop::{
+        safezonestop as safezonestop_raw, safezonestop_with_kernel, SafeZoneStopBatchBuilder,
+        SafeZoneStopData, SafeZoneStopInput,
+    },
     sar::{sar as sar_raw, sar_with_kernel, SarBatchBuilder, SarInput},
     squeeze_momentum::{
         squeeze_momentum as squeeze_momentum_raw, SqueezeMomentumBatchBuilder, SqueezeMomentumInput,
@@ -243,7 +246,7 @@ use my_project::indicators::{
     vi::{vi as vi_raw, ViBatchBuilder, ViInput},
     vidya::{vidya_with_kernel, VidyaBatchBuilder, VidyaInput},
     vlma::{vlma_with_kernel, VlmaBatchBuilder, VlmaInput},
-    vosc::{vosc as vosc_raw, VoscInput, VoscBatchBuilder},
+    vosc::{vosc as vosc_raw, vosc_with_kernel, VoscInput, VoscBatchBuilder},
     voss::{voss as voss_raw, VossInput},
     vpci::{vpci as vpci_raw, vpci_with_kernel, VpciBatchBuilder, VpciData, VpciInput},
     vpt::{vpt as vpt_raw, vpt_with_kernel, VptInput},
@@ -1715,6 +1718,15 @@ make_kernel_wrappers!(er, er_with_kernel, ErInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(ttm_trend, ttm_trend_with_kernel, TtmTrendInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(macz, macz_with_kernel, MaczInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(mom, mom_with_kernel, MomInputS; Scalar,Avx2,Avx512);
+// WAD single-series kernel wrappers (Scalar/AVX2/AVX512)
+make_kernel_wrappers!(
+    wad,
+    my_project::indicators::wad::wad_with_kernel,
+    WadInputS;
+    Scalar,Avx2,Avx512
+);
+// VOSC single-series kernel wrappers (Scalar/AVX2/AVX512)
+make_kernel_wrappers!(vosc, vosc_with_kernel, VoscInputS; Scalar,Avx2,Avx512);
 // VPCI single-series kernel wrappers (Scalar/AVX2/AVX512)
 make_kernel_wrappers!(vpci, vpci_with_kernel, VpciInputS; Scalar,Avx2,Avx512);
 // ASO single-series wrappers (Scalar/AVX2/AVX512)
@@ -1793,6 +1805,13 @@ make_kernel_wrappers!(wilders, wilders_with_kernel, WildersInputS; Scalar,Avx2,A
 make_kernel_wrappers!(wma, wma_with_kernel, WmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(zlema, zlema_with_kernel, ZlemaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(sar, sar_with_kernel, SarInputS; Scalar,Avx2,Avx512);
+// SafeZoneStop: single-series kernel variants (Scalar/Avx2/Avx512)
+make_kernel_wrappers!(
+    safezonestop,
+    safezonestop_with_kernel,
+    SafeZoneStopInputS;
+    Scalar,Avx2,Avx512
+);
 make_kernel_wrappers!(ppo, ppo_with_kernel, PpoInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(kurtosis, kurtosis_with_kernel, KurtosisInputS; Scalar,Avx2,Avx512);
 // ADXR single-series kernel wrappers (add explicit kernel variants)
@@ -1820,6 +1839,19 @@ make_hl_batch_wrappers!(
     SarBatchBuilder,
     SarInputS,
     my_project::indicators::sar::SarData
+);
+// SafeZoneStop: batch wrappers require direction; use extractor + builder config
+make_pair_from_input_wrappers!(
+    safezonestop_batch,
+    SafeZoneStopBatchBuilder,
+    SafeZoneStopInputS,
+    |input: &SafeZoneStopInputS| -> anyhow::Result<(&[f64], &[f64])> {
+        let (high, low) = match &input.data {
+            SafeZoneStopData::Candles { candles, .. } => (&candles.high[..], &candles.low[..]),
+            SafeZoneStopData::Slices { high, low, .. } => (*high, *low),
+        };
+        Ok((high, low))
+    }
 );
 make_hl_batch_wrappers!(
     fisher_batch,
@@ -1861,6 +1893,14 @@ bench_variants!(
     acosc_scalar,
     acosc_avx2,
     acosc_avx512
+);
+
+// SafeZoneStop single-series kernel variants (Scalar/Avx2/Avx512)
+bench_variants!(
+    safezonestop => SafeZoneStopInputS; None;
+    safezonestop_scalar,
+    safezonestop_avx2,
+    safezonestop_avx512,
 );
 
 // Bollinger Bands Width single-series kernel variants
@@ -2479,11 +2519,25 @@ make_hlc_batch_wrappers!(
     AtrInputS,
     my_project::indicators::atr::AtrData
 );
+// WAD batch wrappers (HLC slices)
+make_hlc_batch_wrappers!(
+    wad_batch,
+    my_project::indicators::wad::WadBatchBuilder,
+    WadInputS,
+    my_project::indicators::wad::WadData
+);
 bench_variants!(
     atr_batch => AtrInputS; None;
     atr_batch_scalarbatch,
     atr_batch_avx2batch,
     atr_batch_avx512batch
+);
+
+bench_variants!(
+    wad_batch => WadInputS; None;
+    wad_batch_scalarbatch,
+    wad_batch_avx2batch,
+    wad_batch_avx512batch,
 );
 
 make_batch_wrappers!(
@@ -3067,6 +3121,15 @@ bench_variants!(
     rocr_scalar,
     rocr_avx2,
     rocr_avx512
+);
+
+// ROCR batch (single-slice) variants — advisory unless row-specific is optimized
+make_single_apply_wrappers!(rocr_batch, my_project::indicators::rocr::RocrBatchBuilder, RocrInputS, apply_slice);
+bench_variants!(
+    rocr_batch => RocrInputS; None;
+    rocr_batch_scalarbatch,
+    rocr_batch_avx2batch,
+    rocr_batch_avx512batch,
 );
 
 // ROC scalar-vs-SIMD single-series variants
@@ -3743,6 +3806,14 @@ bench_variants!(
     var_avx512,
 );
 
+// WAD scalar vs SIMD (single-series)
+bench_variants!(
+    wad => WadInputS; None;
+    wad_scalar,
+    wad_avx2,
+    wad_avx512,
+);
+
 bench_variants!(
     mab => MabInputS; None;
     mab_scalar,
@@ -4145,6 +4216,14 @@ bench_variants!(
     zlema_avx512,
 );
 
+// VOSC single-series variants (Scalar, AVX2, AVX512)
+bench_variants!(
+    vosc => VoscInputS; None;
+    vosc_scalar,
+    vosc_avx2,
+    vosc_avx512,
+);
+
 bench_variants!(
     donchian => DonchianInputS; None;
     donchian_scalar,
@@ -4236,6 +4315,14 @@ bench_variants!(
     dpo_batch_scalarbatch,
     dpo_batch_avx2batch,
     dpo_batch_avx512batch,
+);
+
+// SafeZoneStop batch (HL + direction) kernel variants
+bench_variants!(
+    safezonestop_batch => SafeZoneStopInputS; None;
+    safezonestop_batch_scalarbatch,
+    safezonestop_batch_avx2batch,
+    safezonestop_batch_avx512batch,
 );
 
 bench_variants!(
@@ -4726,6 +4813,7 @@ bench_variants!(
 
 criterion_main!(
     benches_scalar,
+    benches_safezonestop,
     benches_roc,
     benches_roc_batch,
     benches_adxr,
@@ -4733,6 +4821,7 @@ criterion_main!(
     benches_cci,
     benches_correl_hl,
     benches_sar,
+    benches_safezonestop_batch,
     benches_natr,
     benches_efi,
     benches_marketfi,
@@ -4789,6 +4878,7 @@ criterion_main!(
     benches_apo,
     benches_apo_batch,
     benches_rocr,
+    benches_rocr_batch,
     benches_dm,
     benches_dm_batch,
     benches_linearreg_slope,
@@ -4960,13 +5050,16 @@ criterion_main!(
     benches_wto_batch,
     benches_nama_batch,
     benches_di_batch,
+    benches_vosc,
     benches_vosc_batch,
     benches_wilders,
     benches_wclprice,
     benches_wilders_batch,
     benches_ott_batch,
+    benches_wad,
     benches_wma,
     benches_wma_batch,
+    benches_wad_batch,
     benches_zlema,
     benches_zlema_batch,
     benches_stochf,
