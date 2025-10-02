@@ -328,112 +328,106 @@ pub unsafe fn vi_scalar(
     let p_out = plus.as_mut_ptr();
     let m_out = minus.as_mut_ptr();
 
-    // Ring buffers (size = period) to support O(1) sliding window updates
-    let mut tr_buf = vec![0.0f64; period];
-    let mut vp_buf = vec![0.0f64; period];
-    let mut vm_buf = vec![0.0f64; period];
+    // --- O(1) sliding window via ring buffers (size = period) ---
+    // Use uninitialized vectors to avoid zeroing cost; every slot is written before first read.
+    let mut tr_buf: Vec<f64> = Vec::with_capacity(period);
+    let mut vp_buf: Vec<f64> = Vec::with_capacity(period);
+    let mut vm_buf: Vec<f64> = Vec::with_capacity(period);
+    tr_buf.set_len(period);
+    vp_buf.set_len(period);
+    vm_buf.set_len(period);
+    let trp = tr_buf.as_mut_ptr();
+    let vpp = vp_buf.as_mut_ptr();
+    let vmp = vm_buf.as_mut_ptr();
 
     // Seed with the first valid bar
     let mut prev_h = *h.add(first);
     let mut prev_l = *l.add(first);
     let mut prev_c = *c.add(first);
 
-    let mut sum_tr = prev_h - prev_l; // TR at 'first' bar
-    let mut sum_vp = 0.0;
-    let mut sum_vm = 0.0;
+    // True Range at the very first bar is defined as high - low
+    let mut sum_tr = prev_h - prev_l;
+    let mut sum_vp = 0.0f64;
+    let mut sum_vm = 0.0f64;
 
-    tr_buf[0] = sum_tr; // vp_buf[0] and vm_buf[0] remain 0.0 by definition
-    vp_buf[0] = 0.0;
-    vm_buf[0] = 0.0;
+    // Slot 0 corresponds to 'first' bar contributions
+    *trp.add(0) = sum_tr;
+    *vpp.add(0) = 0.0;
+    *vmp.add(0) = 0.0;
 
-    // Fill the initial window [first+1 ..= warm]
-    let mut r = if period == 1 { 0 } else { 1 }; // next ring slot
+    // If period == 1, the first defined output is at 'warm' immediately
+    if period == 1 {
+        *p_out.add(warm) = 0.0; // sum_vp / sum_tr == 0
+        *m_out.add(warm) = 0.0; // sum_vm / sum_tr == 0
+    }
+
+    // Next ring slot to overwrite (0 already used)
+    let mut r = if period == 1 { 0 } else { 1 };
+
+    // Single pass: build up to 'warm', then keep sliding the window
     let mut i = first + 1;
-    while i <= warm {
+    while i < n {
         let hi = *h.add(i);
         let lo = *l.add(i);
 
-        // True Range = max( hi-lo, |hi-prev_close|, |lo-prev_close| )
+        // --- New contributions ---
+        // TR = max( hi-lo, |hi-prev_close|, |lo-prev_close| )
         let hl = hi - lo;
         let hc = (hi - prev_c).abs();
         let lc = (lo - prev_c).abs();
-        let tr_i = hl.max(hc.max(lc));
-
+        let mut tr_new = if hl > hc { hl } else { hc };
+        if lc > tr_new {
+            tr_new = lc;
+        }
         // Vortex movements
-        let vp_i = (hi - prev_l).abs();
-        let vm_i = (lo - prev_h).abs();
+        let vp_new = (hi - prev_l).abs();
+        let vm_new = (lo - prev_h).abs();
 
-        sum_tr += tr_i;
-        sum_vp += vp_i;
-        sum_vm += vm_i;
+        if i <= warm {
+            // Still filling initial window
+            sum_tr += tr_new;
+            sum_vp += vp_new;
+            sum_vm += vm_new;
 
-        tr_buf[r] = tr_i;
-        vp_buf[r] = vp_i;
-        vm_buf[r] = vm_i;
+            *trp.add(r) = tr_new;
+            *vpp.add(r) = vp_new;
+            *vmp.add(r) = vm_new;
 
-        // advance previous bar
+            if i == warm {
+                // First defined outputs
+                *p_out.add(i) = sum_vp / sum_tr;
+                *m_out.add(i) = sum_vm / sum_tr;
+            }
+        } else {
+            // Slide: drop oldest, add newest
+            let tr_old = *trp.add(r);
+            let vp_old = *vpp.add(r);
+            let vm_old = *vmp.add(r);
+
+            sum_tr += tr_new - tr_old;
+            sum_vp += vp_new - vp_old;
+            sum_vm += vm_new - vm_old;
+
+            *trp.add(r) = tr_new;
+            *vpp.add(r) = vp_new;
+            *vmp.add(r) = vm_new;
+
+            *p_out.add(i) = sum_vp / sum_tr;
+            *m_out.add(i) = sum_vm / sum_tr;
+        }
+
+        // Advance previous bar (for next step's cross-bar diffs)
         prev_h = hi;
         prev_l = lo;
         prev_c = *c.add(i);
 
-        // advance ring index
+        // Advance ring slot with cheap wrap
         r += 1;
         if r == period {
             r = 0;
         }
 
         i += 1;
-    }
-
-    // First defined outputs at 'warm'
-    *p_out.add(warm) = sum_vp / sum_tr;
-    *m_out.add(warm) = sum_vm / sum_tr;
-
-    // Slide the window forward for the remaining bars
-    let mut idx = warm + 1;
-    while idx < n {
-        let hi = *h.add(idx);
-        let lo = *l.add(idx);
-
-        // New contributions
-        let hl = hi - lo;
-        let hc = (hi - prev_c).abs();
-        let lc = (lo - prev_c).abs();
-        let tr_new = hl.max(hc.max(lc));
-        let vp_new = (hi - prev_l).abs();
-        let vm_new = (lo - prev_h).abs();
-
-        // Old contributions leaving the window (ring slot r)
-        let tr_old = tr_buf[r];
-        let vp_old = vp_buf[r];
-        let vm_old = vm_buf[r];
-
-        // Update running sums
-        sum_tr += tr_new - tr_old;
-        sum_vp += vp_new - vp_old;
-        sum_vm += vm_new - vm_old;
-
-        // Store new values into the ring
-        tr_buf[r] = tr_new;
-        vp_buf[r] = vp_new;
-        vm_buf[r] = vm_new;
-
-        // Write outputs
-        *p_out.add(idx) = sum_vp / sum_tr;
-        *m_out.add(idx) = sum_vm / sum_tr;
-
-        // advance previous bar
-        prev_h = hi;
-        prev_l = lo;
-        prev_c = *c.add(idx);
-
-        // advance ring index
-        r += 1;
-        if r == period {
-            r = 0;
-        }
-
-        idx += 1;
     }
 }
 

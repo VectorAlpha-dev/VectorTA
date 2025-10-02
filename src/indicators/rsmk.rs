@@ -19,14 +19,15 @@
 //! - **signal**: Signal line as `Vec<f64>` (length matches input)
 //!
 //! ## Developer Notes
-//! - **AVX2/AVX512 kernels**: Currently stubs that call scalar implementation
-//! - **Streaming update**: O(n) performance due to ma() calls on full arrays each update
-//! - **Memory optimization**: Properly uses zero-copy helper functions (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
-//! - **TODO**: Implement actual SIMD kernels for AVX2/AVX512
-//! - **TODO**: Optimize streaming update to O(1) by maintaining incremental MA state
-//! - Decision: Mixed MA combos (EMA→SMA, SMA→EMA) fused variants are present but disabled by default
-//!   in selection because they underperformed vs. the generic MA pipeline in benchmarks (e.g., ~15–18%
-//!   slower at 100k synthetic samples). The generic path remains the default for those combos.
+//! - SIMD status: AVX2/AVX512 entry points are present and feature-gated. They currently delegate to
+//!   the scalar fused path to guarantee identical results (previous momentum-only vectorization showed
+//!   minor divergence under property tests). Runtime selection continues to prefer the scalar path.
+//! - Streaming update: O(n) per call due to `ma()` over full history; can be improved by incremental
+//!   MA state in a follow-up.
+//! - Memory optimization: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix,
+//!   init_matrix_prefixes) and removes branches in hot loops where IEEE-754 NaN propagation suffices.
+//! - Decision: Mixed MA combos (EMA→SMA, SMA→EMA) fused variants are implemented, but the main
+//!   selection falls back to the generic MA pipeline for those types due to prior underperformance.
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -350,7 +351,9 @@ pub fn rsmk_with_kernel(input: &RsmkInput, kernel: Kernel) -> Result<RsmkOutput,
         .iter()
         .position(|&x| !x.is_nan())
         .ok_or(RsmkError::AllValuesNaN)?;
-    let needed = lookback.max(period).max(signal_period);
+    // Require enough post-first-valid data to cover lookback and both MA windows.
+    // This mirrors classic-kernel behavior (momentum first_valid includes lookback).
+    let needed = lookback + period.max(signal_period);
     if lr.len() - first_valid < needed {
         return Err(RsmkError::NotEnoughValidData {
             needed,
@@ -358,44 +361,29 @@ pub fn rsmk_with_kernel(input: &RsmkInput, kernel: Kernel) -> Result<RsmkOutput,
         });
     }
 
-    // momentum
+    // Dispatch to selected kernel implementation (single-series)
     let mut mom = alloc_with_nan_prefix(lr.len(), first_valid + lookback);
-    for i in (first_valid + lookback)..lr.len() {
-        // safe because bounds checked by loop limits
-        let a = lr[i];
-        let b = lr[i - lookback];
-        mom[i] = if a.is_nan() || b.is_nan() {
-            f64::NAN
-        } else {
-            a - b
-        };
-    }
-
-    // Use classic kernel for common MA type combinations
-    let matype = input.get_ma_type();
-    let sigtype = input.get_signal_ma_type();
-    let mom_first_valid = first_valid + lookback; // momentum starts after lookback
-
-    if (matype == "sma" || matype == "SMA") && (sigtype == "sma" || sigtype == "SMA") {
-        return rsmk_classic_sma(&mom, period, signal_period, mom_first_valid);
-    } else if (matype == "ema" || matype == "EMA") && (sigtype == "ema" || sigtype == "EMA") {
-        return rsmk_classic_ema(&mom, period, signal_period, mom_first_valid);
-        // Note: mixed combos (EMA->SMA, SMA->EMA) currently route to generic MA pipeline
-        // because the fused variants underperformed in profiling. See decision note below.
-    }
-
-    // Fall back to generic MA for other types
-    let mut indicator =
-        ma(matype, MaData::Slice(&mom), period).map_err(|e| RsmkError::MaError(e.to_string()))?;
-    for v in &mut indicator {
-        *v *= 100.0;
-    }
-
-    // signal MA -> reuse Vec directly
-    let signal = ma(sigtype, MaData::Slice(&indicator), signal_period)
-        .map_err(|e| RsmkError::MaError(e.to_string()))?;
-
-    Ok(RsmkOutput { indicator, signal })
+    let ksel = match kernel {
+        Kernel::Auto => detect_best_kernel(),
+        k if k.is_batch() => match k {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => Kernel::Scalar,
+        },
+        k => k,
+    };
+    return match ksel {
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Avx512 => unsafe {
+            rsmk_avx512(&lr, lookback, period, signal_period, input, first_valid, &mut mom)
+        },
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Avx2 => unsafe {
+            rsmk_avx2(&lr, lookback, period, signal_period, input, first_valid, &mut mom)
+        },
+        _ => rsmk_scalar(&lr, lookback, period, signal_period, input, first_valid, &mut mom),
+    };
 }
 
 pub fn rsmk_scalar(
@@ -467,6 +455,13 @@ pub fn rsmk_scalar(
                 let mut ema_sig = 0.0f64; // will be set when seeded
                 let mut acc_sig = ema_ind;
                 let mut cnt_sig = 1usize;
+
+                // If the signal warmup coincides with indicator warmup (signal_period == 1),
+                // seed and write the signal value immediately.
+                if sig_warmup == ind_warmup {
+                    ema_sig = acc_sig / (cnt_sig as f64);
+                    unsafe { *signal.get_unchecked_mut(sig_warmup) = ema_sig; }
+                }
 
                 unsafe {
                     for i in (ind_warmup + 1)..len {
@@ -582,6 +577,12 @@ pub fn rsmk_scalar(
                     *indicator.get_unchecked_mut(ind_warmup) = ema_ind;
                     // Include first indicator into signal window build-up
                     sum_sig += ema_ind; cnt_sig += 1;
+
+                    // If the signal warmup coincides with indicator warmup (signal_period == 1),
+                    // write the first SMA(signal) immediately.
+                    if sig_warmup == ind_warmup {
+                        *signal.get_unchecked_mut(sig_warmup) = sum_sig / cnt_sig as f64;
+                    }
 
                     for i in (ind_warmup + 1)..len {
                         let mv = *mom.get_unchecked(i);
@@ -787,6 +788,7 @@ pub fn rsmk_into_slice(
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
+#[target_feature(enable = "avx2")]
 pub fn rsmk_avx2(
     lr: &[f64],
     lookback: usize,
@@ -796,11 +798,13 @@ pub fn rsmk_avx2(
     first_valid: usize,
     mom: &mut [f64],
 ) -> Result<RsmkOutput, RsmkError> {
+    // Stub to scalar path for correctness; SIMD momentum under review.
     rsmk_scalar(lr, lookback, period, signal_period, input, first_valid, mom)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
+#[target_feature(enable = "avx512f")]
 pub fn rsmk_avx512(
     lr: &[f64],
     lookback: usize,
@@ -819,6 +823,7 @@ pub fn rsmk_avx512(
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
+#[target_feature(enable = "avx512f")]
 pub unsafe fn rsmk_avx512_short(
     lr: &[f64],
     lookback: usize,
@@ -828,11 +833,13 @@ pub unsafe fn rsmk_avx512_short(
     first_valid: usize,
     mom: &mut [f64],
 ) -> Result<RsmkOutput, RsmkError> {
+    // Stub to scalar path for correctness; SIMD momentum under review.
     rsmk_scalar(lr, lookback, period, signal_period, input, first_valid, mom)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
+#[target_feature(enable = "avx512f")]
 pub unsafe fn rsmk_avx512_long(
     lr: &[f64],
     lookback: usize,
@@ -842,7 +849,7 @@ pub unsafe fn rsmk_avx512_long(
     first_valid: usize,
     mom: &mut [f64],
 ) -> Result<RsmkOutput, RsmkError> {
-    rsmk_scalar(lr, lookback, period, signal_period, input, first_valid, mom)
+    rsmk_avx512_short(lr, lookback, period, signal_period, input, first_valid, mom)
 }
 
 #[derive(Debug, Clone)]
@@ -1123,6 +1130,35 @@ fn rsmk_batch_inner_into(
     let rows = combos.len();
     let cols = main.len();
 
+    // Precompute log-ratio once
+    let mut lr = Vec::with_capacity(cols);
+    unsafe { lr.set_len(cols); }
+    for i in 0..cols {
+        let m = main[i];
+        let c = compare[i];
+        unsafe {
+            *lr.get_unchecked_mut(i) = if m.is_nan() || c.is_nan() || c == 0.0 {
+                f64::NAN
+            } else {
+                (m / c).ln()
+            };
+        }
+    }
+
+    // Precompute momentum for each unique lookback and reuse per row
+    use std::collections::HashMap;
+    let mut mom_by_lookback: HashMap<usize, Vec<f64>> = HashMap::new();
+    for &lookback in combos.iter().map(|c| c.lookback.unwrap()).collect::<std::collections::BTreeSet<_>>().iter() {
+        let mut m = alloc_with_nan_prefix(cols, first + lookback);
+        let start = first + lookback;
+        for i in start..cols {
+            let a = unsafe { *lr.get_unchecked(i) };
+            let b = unsafe { *lr.get_unchecked(i - lookback) };
+            unsafe { *m.get_unchecked_mut(i) = a - b };
+        }
+        mom_by_lookback.insert(lookback, m);
+    }
+
     let do_row = |row: usize, ind_row: &mut [f64], sig_row: &mut [f64]| unsafe {
         let prm = &combos[row];
         let lookback = prm.lookback.unwrap();
@@ -1131,34 +1167,8 @@ fn rsmk_batch_inner_into(
         let mt = prm.matype.as_deref().unwrap_or("ema");
         let st = prm.signal_matype.as_deref().unwrap_or("ema");
 
-        // log-ratio
-        let mut lr = Vec::with_capacity(cols);
-        unsafe {
-            lr.set_len(cols);
-        }
-        for i in 0..cols {
-            let m = main[i];
-            let c = compare[i];
-            unsafe {
-                *lr.get_unchecked_mut(i) = if m.is_nan() || c.is_nan() || c == 0.0 {
-                    f64::NAN
-                } else {
-                    (m / c).ln()
-                };
-            }
-        }
-
-        // momentum
-        let mut mom = alloc_with_nan_prefix(cols, first + lookback);
-        for i in (first + lookback)..cols {
-            let a = lr[i];
-            let b = lr[i - lookback];
-            mom[i] = if a.is_nan() || b.is_nan() {
-                f64::NAN
-            } else {
-                a - b
-            };
-        }
+        // Use precomputed momentum for this lookback
+        let mom = mom_by_lookback.get(&lookback).unwrap();
 
         // indicator row
         match ma(mt, MaData::Slice(&mom), period) {
@@ -1290,6 +1300,35 @@ fn rsmk_batch_inner(
         Vec::from_raw_parts(v.as_mut_ptr() as *mut f64, v.len(), v.capacity())
     };
 
+    // Precompute log-ratio once
+    let mut lr = Vec::with_capacity(cols);
+    unsafe { lr.set_len(cols); }
+    for i in 0..cols {
+        let m = main[i];
+        let c = compare[i];
+        unsafe {
+            *lr.get_unchecked_mut(i) = if m.is_nan() || c.is_nan() || c == 0.0 {
+                f64::NAN
+            } else {
+                (m / c).ln()
+            };
+        }
+    }
+
+    // Precompute momentum for each unique lookback and reuse per row
+    use std::collections::HashMap;
+    let mut mom_by_lookback: HashMap<usize, Vec<f64>> = HashMap::new();
+    for &lookback in combos.iter().map(|c| c.lookback.unwrap()).collect::<std::collections::BTreeSet<_>>().iter() {
+        let mut m = alloc_with_nan_prefix(cols, first + lookback);
+        let start = first + lookback;
+        for i in start..cols {
+            let a = unsafe { *lr.get_unchecked(i) };
+            let b = unsafe { *lr.get_unchecked(i - lookback) };
+            unsafe { *m.get_unchecked_mut(i) = a - b };
+        }
+        mom_by_lookback.insert(lookback, m);
+    }
+
     let do_row = |row: usize, ind_row: &mut [f64], sig_row: &mut [f64]| unsafe {
         let prm = &combos[row];
         let lookback = prm.lookback.unwrap();
@@ -1298,34 +1337,8 @@ fn rsmk_batch_inner(
         let mt = prm.matype.as_deref().unwrap_or("ema");
         let st = prm.signal_matype.as_deref().unwrap_or("ema");
 
-        // log-ratio
-        let mut lr = Vec::with_capacity(cols);
-        unsafe {
-            lr.set_len(cols);
-        }
-        for i in 0..cols {
-            let m = main[i];
-            let c = compare[i];
-            unsafe {
-                *lr.get_unchecked_mut(i) = if m.is_nan() || c.is_nan() || c == 0.0 {
-                    f64::NAN
-                } else {
-                    (m / c).ln()
-                };
-            }
-        }
-
-        // momentum
-        let mut mom = alloc_with_nan_prefix(cols, first + lookback);
-        for i in (first + lookback)..cols {
-            let a = lr[i];
-            let b = lr[i - lookback];
-            mom[i] = if a.is_nan() || b.is_nan() {
-                f64::NAN
-            } else {
-                a - b
-            };
-        }
+        // Use precomputed momentum for this lookback
+        let mom = mom_by_lookback.get(&lookback).unwrap();
 
         // indicator row
         match ma(mt, MaData::Slice(&mom), period) {

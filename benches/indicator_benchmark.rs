@@ -243,7 +243,7 @@ use my_project::indicators::{
     vlma::{vlma_with_kernel, VlmaBatchBuilder, VlmaInput},
     vosc::{vosc as vosc_raw, VoscInput, VoscBatchBuilder},
     voss::{voss as voss_raw, VossInput},
-    vpci::{vpci as vpci_raw, VpciInput},
+    vpci::{vpci as vpci_raw, vpci_with_kernel, VpciBatchBuilder, VpciData, VpciInput},
     vpt::{vpt as vpt_raw, VptInput},
     vwap::{vwap as vwap_raw, VwapInput},
     vwmacd::{vwmacd as vwmacd_raw, VwmacdInput},
@@ -1675,6 +1675,8 @@ make_kernel_wrappers!(srsi, srsi_with_kernel, SrsiInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(er, er_with_kernel, ErInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(macz, macz_with_kernel, MaczInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(mom, mom_with_kernel, MomInputS; Scalar,Avx2,Avx512);
+// VPCI single-series kernel wrappers (Scalar/AVX2/AVX512)
+make_kernel_wrappers!(vpci, vpci_with_kernel, VpciInputS; Scalar,Avx2,Avx512);
 // ASO single-series wrappers (Scalar/AVX2/AVX512)
 make_kernel_wrappers!(aso, aso_with_kernel, AsoInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(cwma, cwma_with_kernel, CwmaInputS; Scalar,Avx2,Avx512);
@@ -1782,6 +1784,29 @@ make_kernel_wrappers!(deviation, deviation_with_kernel, DeviationInputS; Scalar,
 make_kernel_wrappers!(correlation_cycle, correlation_cycle_with_kernel, CorrelationCycleInputS; Scalar,Avx2,Avx512);
 // StochF single-series kernels
 make_kernel_wrappers!(stochf, stochf_with_kernel, StochfInputS; Scalar,Avx2,Avx512);
+
+// StochF batch wrappers (HLC inputs)
+make_hlc_batch_wrappers!(
+    stochf_batch,
+    my_project::indicators::stochf::StochfBatchBuilder,
+    StochfInputS,
+    my_project::indicators::stochf::StochfData
+);
+
+// TTM Squeeze batch wrappers (HLC inputs)
+make_hlc_batch_wrappers!(
+    ttm_squeeze_batch,
+    my_project::indicators::ttm_squeeze::TtmSqueezeBatchBuilder,
+    TtmSqueezeInputS,
+    my_project::indicators::ttm_squeeze::TtmSqueezeData
+);
+
+bench_variants!(
+    ttm_squeeze_batch => TtmSqueezeInputS; None;
+    ttm_squeeze_batch_scalarbatch,
+    ttm_squeeze_batch_avx2batch,
+    ttm_squeeze_batch_avx512batch,
+);
 
 // ACOSC kernel variant benches (Scalar/Avx2/Avx512)
 bench_variants!(
@@ -1928,6 +1953,14 @@ bench_variants!(
     alphatrend_avx512,
 );
 
+// VPCI single-series variants
+bench_variants!(
+    vpci => VpciInputS; None;
+    vpci_scalar,
+    vpci_avx2,
+    vpci_avx512,
+);
+
 
 make_kernel_wrappers!(supertrend, supertrend_with_kernel, SupertrendInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(cvi, cvi_with_kernel, CviInputS; Scalar,Avx2,Avx512);
@@ -1952,6 +1985,29 @@ bench_variants!(
     aso_batch_scalarbatch,
     aso_batch_avx2batch,
     aso_batch_avx512batch,
+);
+// VPCI batch wrappers and variants (close, volume)
+make_pair_from_input_wrappers!(
+    vpci_batch,
+    VpciBatchBuilder,
+    VpciInputS,
+    |input: &VpciInputS| -> anyhow::Result<(&[f64], &[f64])> {
+        let (close, volume) = match &input.data {
+            VpciData::Candles { candles, close_source, volume_source } => (
+                source_type(candles, close_source),
+                source_type(candles, volume_source),
+            ),
+            VpciData::Slices { close, volume } => (*close, *volume),
+        };
+        Ok((close, volume))
+    }
+);
+
+bench_variants!(
+    vpci_batch => VpciInputS; None;
+    vpci_batch_scalarbatch,
+    vpci_batch_avx2batch,
+    vpci_batch_avx512batch,
 );
 // Ulcer Index (UI) single-series variants
 make_kernel_wrappers!(ui, ui_with_kernel, UiInputS; Scalar,Avx2,Avx512);
@@ -3977,6 +4033,14 @@ bench_variants!(
     stochf_avx512,
 );
 
+// StochF (batch) variants (use default params; report with fastk window=5)
+bench_variants!(
+    stochf_batch => StochfInputS; Some(5);
+    stochf_batch_scalarbatch,
+    stochf_batch_avx2batch,
+    stochf_batch_avx512batch,
+);
+
 // Other indicators single variants
 bench_variants!(
     avsl => AvslInputS; None;
@@ -4524,6 +4588,8 @@ criterion_main!(
     benches_cksp_batch,
     benches_aso,
     benches_alphatrend,
+    benches_vpci,
+    benches_vpci_batch,
     benches_bollinger_bands,
     benches_cg,
     benches_ad,
@@ -4726,6 +4792,7 @@ criterion_main!(
     benches_zlema,
     benches_zlema_batch,
     benches_stochf,
+    benches_stochf_batch,
     benches_vi_batch,
     benches_tsf,
     benches_chandelier_exit,
@@ -4746,4 +4813,7 @@ criterion_main!(
     ,benches_aroon_osc_batch
     ,benches_ehma
     ,benches_ehma_batch
+    ,benches_reverse_rsi
+    ,benches_reverse_rsi_batch
+    ,benches_ttm_squeeze_batch
 );
