@@ -12,9 +12,10 @@
 //! - **`Err(TtmTrendError)`** otherwise.
 //!
 //! ## Developer Notes
-//! - **AVX2/AVX512 Kernels**: Fast-path enabled for period = 1 (vectorized close > source). For general periods, the rolling-sum dependency is inherently serial; SIMD underperforms vs scalar, so we short-circuit to scalar.
-//! - **Streaming Performance**: O(1) implementation using running sum with add/subtract pattern. Efficiently maintains sum as window slides.
-//! - **Memory Optimization**: Uses `alloc_with_nan_prefix` and `make_uninit_matrix` for batch operations. Properly uses zero-copy helpers throughout.
+//! - SIMD: AVX2/AVX512 enabled for period == 1 (vectorized `close > source`). For period > 1 we short-circuit to the scalar path (rolling-sum dependency is serial).
+//! - Scalar: optimized to avoid whole-slice prefill; only warmup prefixes are written, and the initial-sum build is loop-jammed with warmup marking.
+//! - Batch: row executor now uses a single inclusive prefix sum of `source` shared across rows (per-row average via `psum[i] - psum[i - p]`), eliminating per-row running sums.
+//! - Memory: uses `alloc_with_nan_prefix`/`make_uninit_matrix` patterns as in alma.rs; zero-copy/uninitialized outputs preserved.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -328,11 +329,19 @@ pub fn ttm_trend_scalar(
         return;
     }
 
-    // Warmup prefix is false
+    // Warmup end index (last uncomputable index + 1)
     let warmup_end = first + period - 1;
-    out.fill(false);
     if warmup_end >= n {
+        // Mark what we can and exit
+        for i in 0..n {
+            out[i] = false;
+        }
         return;
+    }
+
+    // Ensure warmup prefix is false without touching the entire slice
+    for i in 0..first {
+        out[i] = false;
     }
 
     if period == 1 {
@@ -344,10 +353,16 @@ pub fn ttm_trend_scalar(
         return;
     }
 
+    // Build initial rolling sum while marking [first, warmup_end) as false
     let mut sum = 0.0;
-    for &v in &source[first..first + period] {
-        sum += v;
+    let mut k = first;
+    while k < warmup_end {
+        sum += source[k];
+        out[k] = false;
+        k += 1;
     }
+    sum += source[warmup_end];
+
     let inv_period = 1.0 / (period as f64);
     let mut idx = warmup_end;
     out[idx] = close[idx] > sum * inv_period;
@@ -372,9 +387,12 @@ pub fn ttm_trend_avx512(
     if period == 1 {
         unsafe {
             let n = source.len().min(close.len()).min(out.len());
-            out.fill(false);
             if first >= n {
                 return;
+            }
+            // Warmup prefix [0, first) = false (avoid whole-slice fill)
+            for i in 0..first {
+                *out.get_unchecked_mut(i) = false;
             }
             let mut i = first;
             const W: usize = 8; // 512-bit holds 8 f64
@@ -417,9 +435,12 @@ pub fn ttm_trend_avx2(
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         unsafe {
             let n = source.len().min(close.len()).min(out.len());
-            out.fill(false);
             if first >= n {
                 return;
+            }
+            // Warmup prefix [0, first) = false
+            for i in 0..first {
+                *out.get_unchecked_mut(i) = false;
             }
             let mut i = first;
             const W: usize = 4; // 256-bit holds 4 f64
@@ -708,10 +729,32 @@ fn ttm_batch_inner_f64(
     let values: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
+    // Inclusive prefix sum of `source` starting at `first` (unused entries before `first` left as 0.0)
+    let mut psum = vec![0.0f64; len];
+    if first < len {
+        psum[first] = source[first];
+        for i in (first + 1)..len {
+            psum[i] = psum[i - 1] + source[i];
+        }
+    }
+
     let do_row = |row: usize, row_dst: &mut [f64]| {
         let p = combos[row].period.unwrap();
-        // prefix already NaN in row_dst[..warm[row]]
-        ttm_numeric_compute_into(source, close, p, first, row_dst);
+        let warm_i = warm[row]; // first + p - 1
+        if warm_i >= len {
+            return; // nothing computable for this row
+        }
+        // First computable index uses the window [first..=warm_i]
+        let inv_p = 1.0 / (p as f64);
+        let mut i = warm_i;
+        row_dst[i] = if close[i] > psum[i] * inv_p { 1.0 } else { 0.0 };
+        i += 1;
+        // Remaining: use psum[i] - psum[i - p]
+        while i < len {
+            let sum = psum[i] - psum[i - p];
+            row_dst[i] = if close[i] > sum * inv_p { 1.0 } else { 0.0 };
+            i += 1;
+        }
     };
 
     if parallel {

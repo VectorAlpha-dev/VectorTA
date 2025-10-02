@@ -18,7 +18,7 @@
 //! - **`Err(SrsiError)`** otherwise.
 //!
 //! ## Developer Notes
-//! - Scalar optimized: inlined Wilder RSI + O(n) min/max via monotonic deques and rolling SMAs. Defaults (14,14,3,3) use classic path for bitwise-identical outputs.
+//! - Scalar optimized: inlined Wilder RSI + O(n) min/max via block prefix/suffix scans (avoids per-iteration modulo) and rolling SMAs. Defaults (14,14,3,3) use classic path for bitwise-identical outputs.
 //! - **AVX2/AVX512 Kernels**: Delegated to scalar for now; sliding-window min/max is branchy and memory-bound, so SIMD shows no clear win. Revisit with alternative layouts if profiling warrants.
 //! - **Streaming Performance**: Basic implementation using recalculation approach (O(n)). Proper streaming would require maintaining separate RSI and Stochastic state machines.
 //! - **Memory Optimization**: Batch mode uses RSI result caching to avoid redundant calculations across parameter combinations. Uses zero-copy helper functions for output allocation.
@@ -409,43 +409,59 @@ pub unsafe fn srsi_scalar(
         let m = n - rsi_warmup;
         let base = rsi_warmup;
 
-        // Block prefix/suffix for min and max (avoid deque)
+        // Block prefix/suffix for min and max (avoid deque and per-iter modulo)
         let mut pref_max = vec![0.0f64; m];
         let mut suff_max = vec![0.0f64; m];
         let mut pref_min = vec![0.0f64; m];
         let mut suff_min = vec![0.0f64; m];
 
-        // prefix within blocks
-        let mut i = 0usize;
-        while i < m {
-            let v = *rsi_vals.get_unchecked(base + i);
-            if i % sp == 0 {
-                pref_max[i] = v;
-                pref_min[i] = v;
-            } else {
-                let pmx = pref_max[i - 1];
-                let pmn = pref_min[i - 1];
-                // Avoid NaN propagation: use ordered comparisons
-                pref_max[i] = if v > pmx { v } else { pmx };
-                pref_min[i] = if v < pmn { v } else { pmn };
+        // Process prefix within blocks of length `sp`
+        let blocks = (m + sp - 1) / sp;
+        let p_pref_max = pref_max.as_mut_ptr();
+        let p_pref_min = pref_min.as_mut_ptr();
+        let p_rsi = rsi_vals.as_ptr().add(base);
+        for b in 0..blocks {
+            let start = b * sp;
+            let end = core::cmp::min(start + sp, m);
+            if start >= end { break; }
+            unsafe {
+                let v0 = *p_rsi.add(start);
+                *p_pref_max.add(start) = v0;
+                *p_pref_min.add(start) = v0;
+                let mut i = start + 1;
+                while i < end {
+                    let v = *p_rsi.add(i);
+                    let pmx = *p_pref_max.add(i - 1);
+                    let pmn = *p_pref_min.add(i - 1);
+                    *p_pref_max.add(i) = if v > pmx { v } else { pmx };
+                    *p_pref_min.add(i) = if v < pmn { v } else { pmn };
+                    i += 1;
+                }
             }
-            i += 1;
         }
-        // suffix within blocks
-        let mut irev = m;
-        while irev > 0 {
-            let i = irev - 1;
-            let v = *rsi_vals.get_unchecked(base + i);
-            if i == m - 1 || ((i + 1) % sp == 0) {
-                suff_max[i] = v;
-                suff_min[i] = v;
-            } else {
-                let smx = suff_max[i + 1];
-                let smn = suff_min[i + 1];
-                suff_max[i] = if v > smx { v } else { smx };
-                suff_min[i] = if v < smn { v } else { smn };
+        // Process suffix within blocks of length `sp`
+        let p_suff_max = suff_max.as_mut_ptr();
+        let p_suff_min = suff_min.as_mut_ptr();
+        for b in 0..blocks {
+            let block_end_excl = core::cmp::min((b + 1) * sp, m);
+            if block_end_excl == 0 { break; }
+            let block_start = block_end_excl - core::cmp::min(sp, block_end_excl);
+            unsafe {
+                let last = block_end_excl - 1;
+                let v_last = *p_rsi.add(last);
+                *p_suff_max.add(last) = v_last;
+                *p_suff_min.add(last) = v_last;
+                let mut i = last;
+                while i > block_start {
+                    let prev = i - 1;
+                    let v = *p_rsi.add(prev);
+                    let smx = *p_suff_max.add(i);
+                    let smn = *p_suff_min.add(i);
+                    *p_suff_max.add(prev) = if v > smx { v } else { smx };
+                    *p_suff_min.add(prev) = if v < smn { v } else { smn };
+                    i = prev;
+                }
             }
-            irev -= 1;
         }
 
         // Rolling SMA for K and D without materializing fast-K
@@ -1197,61 +1213,18 @@ fn srsi_batch_inner(
     init_matrix_prefixes(&mut k_vals, cols, &warmup_periods);
     init_matrix_prefixes(&mut d_vals, cols, &warmup_periods);
 
-    // Convert to mutable slices using ManuallyDrop pattern like ALMA
+    // Create writable views
     let mut k_guard = core::mem::ManuallyDrop::new(k_vals);
     let mut d_guard = core::mem::ManuallyDrop::new(d_vals);
-
-    let k_out: &mut [f64] =
-        unsafe { core::slice::from_raw_parts_mut(k_guard.as_mut_ptr() as *mut f64, k_guard.len()) };
-    let d_out: &mut [f64] =
-        unsafe { core::slice::from_raw_parts_mut(d_guard.as_mut_ptr() as *mut f64, d_guard.len()) };
-
-    // Compute each row with the optimized scalar kernel, then copy into row slices
-    let do_row = |row: usize, k_out: &mut [f64], d_out: &mut [f64]| {
-        let prm = &combos[row];
-        if let Ok(res) = unsafe {
-            srsi_scalar(
-                data,
-                prm.rsi_period.unwrap(),
-                prm.stoch_period.unwrap(),
-                prm.k.unwrap(),
-                prm.d.unwrap(),
-            )
-        } {
-            k_out.copy_from_slice(&res.k);
-            d_out.copy_from_slice(&res.d);
-        }
+    let k_out: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(k_guard.as_mut_ptr() as *mut f64, k_guard.len())
+    };
+    let d_out: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(d_guard.as_mut_ptr() as *mut f64, d_guard.len())
     };
 
-    if parallel {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            k_out
-                .par_chunks_mut(cols)
-                .zip(d_out.par_chunks_mut(cols))
-                .enumerate()
-                .for_each(|(row, (ks, ds))| do_row(row, ks, ds));
-        }
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            for (row, (ks, ds)) in k_out
-                .chunks_mut(cols)
-                .zip(d_out.chunks_mut(cols))
-                .enumerate()
-            {
-                do_row(row, ks, ds);
-            }
-        }
-    } else {
-        for (row, (ks, ds)) in k_out
-            .chunks_mut(cols)
-            .zip(d_out.chunks_mut(cols))
-            .enumerate()
-        {
-            do_row(row, ks, ds);
-        }
-    }
+    // Fill rows using the RSI cache + Stoch path (shared precompute across rows)
+    let combos = srsi_batch_inner_into(data, sweep, kern, parallel, k_out, d_out)?;
 
     // Convert back to Vec using ManuallyDrop pattern
     let k_values = unsafe {
@@ -1270,13 +1243,7 @@ fn srsi_batch_inner(
         )
     };
 
-    Ok(SrsiBatchOutput {
-        k: k_values,
-        d: d_values,
-        combos,
-        rows,
-        cols,
-    })
+    Ok(SrsiBatchOutput { k: k_values, d: d_values, combos, rows, cols })
 }
 
 #[inline(always)]

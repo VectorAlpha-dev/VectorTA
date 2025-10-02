@@ -18,7 +18,7 @@
 //! ## Developer Notes
 //! - SIMD status: Implemented as stubs delegating to scalar. Disabled by default due to sequential data dependency across time steps; no clear win over scalar. Revisit only with a different layout or algorithmic change.
 //! - Scalar path: Hot loop optimized (state tracking, fewer branches, tight indexing). No extra allocations.
-//! - Batch path: Row-specific optimization — ATR is precomputed once per unique period and reused across rows.
+//! - Batch path: Row-specific optimizations — ATR is precomputed once per unique period and HL2 midpoints are shared across rows to avoid redundant work.
 //! - Streaming update: O(1) with embedded ATR stream and efficient state tracking.
 //! - Memory: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes).
 
@@ -479,15 +479,17 @@ pub fn supertrend_scalar(
         };
         *ch_ptr.add(warmup) = 0.0;
 
-        // Main loop
+        // Main loop — reduced index math
         let mut i = warmup + 1;
+        let mut atr_idx = i.saturating_sub(first_valid_idx);
+        let neg_factor = -factor;
         while i < len {
-            let atr_i = *atr_ptr.add(i - first_valid_idx);
+            let atr_i = *atr_ptr.add(atr_idx);
             let hi = *h_ptr.add(i);
             let lo = *l_ptr.add(i);
             let hl2 = (hi + lo) * 0.5;
             let upper_basic = factor.mul_add(atr_i, hl2);
-            let lower_basic = (-factor).mul_add(atr_i, hl2);
+            let lower_basic = neg_factor.mul_add(atr_i, hl2);
 
             // Tighten using previous close vs previous bands
             let prev_close = last_close;
@@ -527,6 +529,7 @@ pub fn supertrend_scalar(
             prev_lower_band = curr_lower_band;
             last_close = curr_close;
             i += 1;
+            atr_idx += 1;
         }
     }
 }
@@ -1153,14 +1156,16 @@ fn supertrend_batch_inner(
         }
     }
 
+    // Shared precompute: HL2 midpoints reused across parameter rows
+    let hl2: Vec<f64> = (0..len).map(|i| 0.5 * (high[i] + low[i])).collect();
+
     let do_row = |row: usize, trend_row: &mut [f64], changed_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
         let factor = combos[row].factor.unwrap();
         let atr_values = atr_cache.get(&period).unwrap().as_slice();
         match kern {
-            Kernel::Scalar => supertrend_row_scalar(
-                high,
-                low,
+            Kernel::Scalar => supertrend_row_scalar_from_hl(
+                &hl2,
                 close,
                 period,
                 factor,
@@ -1170,9 +1175,8 @@ fn supertrend_batch_inner(
                 changed_row,
             ),
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-            Kernel::Avx2 | Kernel::Avx512 => supertrend_row_scalar(
-                high,
-                low,
+            Kernel::Avx2 | Kernel::Avx512 => supertrend_row_scalar_from_hl(
+                &hl2,
                 close,
                 period,
                 factor,
@@ -1287,6 +1291,94 @@ unsafe fn supertrend_row_scalar(
         trend,
         changed,
     );
+}
+
+// Scalar row using precomputed HL2 midpoint shared across rows
+#[inline(always)]
+unsafe fn supertrend_row_scalar_from_hl(
+    hl2: &[f64],
+    close: &[f64],
+    period: usize,
+    factor: f64,
+    first_valid_idx: usize,
+    atr_values: &[f64],
+    trend: &mut [f64],
+    changed: &mut [f64],
+) {
+    let len = hl2.len();
+    let start = first_valid_idx + period;
+    if start > len {
+        return;
+    }
+
+    let hl_ptr = hl2.as_ptr();
+    let c_ptr = close.as_ptr();
+    let atr_ptr = atr_values.as_ptr();
+    let tr_ptr = trend.as_mut_ptr();
+    let ch_ptr = changed.as_mut_ptr();
+
+    // Seed from warmup
+    let warmup = start - 1;
+    let hl2_w = *hl_ptr.add(warmup);
+    let atr_w = *atr_ptr.add(period - 1);
+    let mut prev_upper_band = factor.mul_add(atr_w, hl2_w);
+    let mut prev_lower_band = (-factor).mul_add(atr_w, hl2_w);
+
+    let mut last_close = *c_ptr.add(warmup);
+    let mut upper_state = if last_close <= prev_upper_band {
+        *tr_ptr.add(warmup) = prev_upper_band;
+        true
+    } else {
+        *tr_ptr.add(warmup) = prev_lower_band;
+        false
+    };
+    *ch_ptr.add(warmup) = 0.0;
+
+    // Iterate over the rest
+    let mut i = warmup + 1;
+    while i < len {
+        let atr_i = *atr_ptr.add(i - first_valid_idx);
+        let hl = *hl_ptr.add(i);
+        let upper_basic = factor.mul_add(atr_i, hl);
+        let lower_basic = (-factor).mul_add(atr_i, hl);
+
+        // Tighten against previous close and bands
+        let prev_close = last_close;
+        let mut curr_upper_band = upper_basic;
+        if prev_close <= prev_upper_band {
+            curr_upper_band = curr_upper_band.min(prev_upper_band);
+        }
+        let mut curr_lower_band = lower_basic;
+        if prev_close >= prev_lower_band {
+            curr_lower_band = curr_lower_band.max(prev_lower_band);
+        }
+
+        let curr_close = *c_ptr.add(i);
+        if upper_state {
+            if curr_close <= curr_upper_band {
+                *tr_ptr.add(i) = curr_upper_band;
+                *ch_ptr.add(i) = 0.0;
+            } else {
+                *tr_ptr.add(i) = curr_lower_band;
+                *ch_ptr.add(i) = 1.0;
+                upper_state = false;
+            }
+        } else {
+            if curr_close >= curr_lower_band {
+                *tr_ptr.add(i) = curr_lower_band;
+                *ch_ptr.add(i) = 0.0;
+            } else {
+                *tr_ptr.add(i) = curr_upper_band;
+                *ch_ptr.add(i) = 1.0;
+                upper_state = true;
+            }
+        }
+
+        prev_upper_band = curr_upper_band;
+        prev_lower_band = curr_lower_band;
+        last_close = curr_close;
+        i += 1;
+    }
 }
 
 // AVX2/AVX512 row stubs for API
@@ -1464,6 +1556,9 @@ pub fn supertrend_batch_inner_into(
         }
     }
 
+    // Shared precompute: HL2 midpoints reused across parameter rows
+    let hl2: Vec<f64> = (0..len).map(|i| 0.5 * (high[i] + low[i])).collect();
+
     let do_row = |row: usize, trend_row: &mut [f64], changed_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
         let factor = combos[row].factor.unwrap();
@@ -1477,9 +1572,8 @@ pub fn supertrend_batch_inner_into(
         );
         let AtrOutput { values: atr_values } = atr(&atr_input).unwrap();
         match simd {
-            Kernel::Scalar => supertrend_row_scalar(
-                high,
-                low,
+            Kernel::Scalar => supertrend_row_scalar_from_hl(
+                &hl2,
                 close,
                 period,
                 factor,
@@ -1504,6 +1598,17 @@ pub fn supertrend_batch_inner_into(
             Kernel::Avx512 => supertrend_row_avx512(
                 high,
                 low,
+                close,
+                period,
+                factor,
+                first_valid_idx,
+                &atr_values,
+                trend_row,
+                changed_row,
+            ),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx512 => supertrend_row_scalar_from_hl(
+                &hl2,
                 close,
                 period,
                 factor,
