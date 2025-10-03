@@ -16,10 +16,10 @@ use crate::cuda::moving_averages::DeviceArrayF32;
 /// ## Developer Notes
 /// - **AVX2 kernel**: Fully implemented - processes 4 values per iteration
 /// - **AVX512 kernel**: Fully implemented with optimized short (<= 32) and long (> 32) period variants
-/// - **Streaming update**: O(n) complexity - performs full dot product with ring buffer on each update
-/// - **Optimization opportunities**:
-///   - Streaming kernel could potentially use incremental updates to achieve O(1) complexity
-///   - Consider caching partial sums for the ring buffer implementation
+/// - **Streaming update**: Exact O(period) dot-product per update. Optimized with a mirrored ring
+///   buffer to make the active window contiguous and enable SIMD dot products.
+/// - **Decision**: Streaming uses a mirrored buffer + AVX2/AVX512 contiguous dot for speed; scalar
+///   path remains safe and exact. Outputs match batch ALMA (tests unchanged).
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
@@ -818,21 +818,26 @@ unsafe fn alma_avx512_long(
 #[derive(Debug, Clone)]
 pub struct AlmaStream {
     period: usize,
-    weights: Vec<f64>,
+    // keep weights aligned for fast SIMD loads
+    weights: AVec<f64>,
     inv_norm: f64,
+
+    // canonical ring (for inspection/compat)
     buffer: Vec<f64>,
-    head: usize,
-    filled: bool,
+
+    // mirrored ring — active window is contiguous at &buf2[head .. head+period]
+    buf2: Vec<f64>, // length = 2*period
+
+    head: usize,   // index of oldest element (next overwrite)
+    filled: usize, // number of values seen so far (<= period)
+    kernel: Kernel,
 }
 
 impl AlmaStream {
     pub fn try_new(params: AlmaParams) -> Result<Self, AlmaError> {
         let period = params.period.unwrap_or(9);
         if period == 0 {
-            return Err(AlmaError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(AlmaError::InvalidPeriod { period, data_len: 0 });
         }
         let offset = params.offset.unwrap_or(0.85);
         if !(0.0..=1.0).contains(&offset) || offset.is_nan() || offset.is_infinite() {
@@ -843,54 +848,175 @@ impl AlmaStream {
             return Err(AlmaError::InvalidSigma { sigma });
         }
 
+        // build weights (exact)
         let m = offset * (period - 1) as f64;
         let s = period as f64 / sigma;
         let s2 = 2.0 * s * s;
 
-        let mut weights = Vec::with_capacity(period);
+        let mut weights = AVec::<f64>::with_capacity(CACHELINE_ALIGN, period);
+        weights.resize(period, 0.0);
+
         let mut norm = 0.0;
         for i in 0..period {
             let diff = i as f64 - m;
             let w = (-(diff * diff) / s2).exp();
-            weights.push(w);
+            weights[i] = w;
             norm += w;
         }
         let inv_norm = 1.0 / norm;
+
+        // mirrored ring buffer
+        let buffer = vec![f64::NAN; period];
+        let buf2 = vec![f64::NAN; period * 2];
+        let kernel = detect_best_kernel();
 
         Ok(Self {
             period,
             weights,
             inv_norm,
-            buffer: vec![f64::NAN; period],
+            buffer,
+            buf2,
             head: 0,
-            filled: false,
+            filled: 0,
+            kernel,
         })
     }
 
+    /// Push one value; returns None until warm, then exact ALMA value thereafter.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        self.buffer[self.head] = value;
-        self.head = (self.head + 1) % self.period;
+        let h = self.head;
 
-        if !self.filled && self.head == 0 {
-            self.filled = true;
+        // write into canonical ring
+        self.buffer[h] = value;
+        // mirror writes so our active window is contiguous
+        self.buf2[h] = value;
+        self.buf2[h + self.period] = value;
+
+        // advance head (oldest = next slot to overwrite)
+        let mut new_h = h + 1;
+        if new_h == self.period {
+            new_h = 0;
         }
-        if !self.filled {
-            return None;
+        self.head = new_h;
+
+        // warmup tracking
+        if self.filled < self.period {
+            self.filled += 1;
+            if self.filled < self.period {
+                return None;
+            }
         }
-        Some(self.dot_ring())
+
+        Some(self.dot_at_head())
     }
 
     #[inline(always)]
-    fn dot_ring(&self) -> f64 {
-        let mut sum = 0.0;
-        let mut idx = self.head;
-        for &w in &self.weights {
-            sum += w * self.buffer[idx];
-            idx = (idx + 1) % self.period;
-        }
-        sum * self.inv_norm
+    fn dot_at_head(&self) -> f64 {
+        let start = self.head;
+        let end = start + self.period;
+        let x = &self.buf2[start..end];
+        let w = &self.weights[..self.period];
+        let acc = dot_contiguous(self.kernel, x, w);
+        acc * self.inv_norm
     }
+}
+
+// ---------- contiguous dot helpers (SIMD where available; safe scalar fallback) ----------
+
+#[inline(always)]
+fn dot_scalar_unrolled_safe(x: &[f64], w: &[f64]) -> f64 {
+    debug_assert_eq!(x.len(), w.len());
+    let n = x.len();
+    let mut i = 0usize;
+    let n4 = n & !3;
+    let mut s0 = 0.0f64;
+    let mut s1 = 0.0f64;
+    let mut s2 = 0.0f64;
+    let mut s3 = 0.0f64;
+
+    while i < n4 {
+        s0 += x[i] * w[i];
+        s1 += x[i + 1] * w[i + 1];
+        s2 += x[i + 2] * w[i + 2];
+        s3 += x[i + 3] * w[i + 3];
+        i += 4;
+    }
+    let mut sum = (s0 + s1) + (s2 + s3);
+    while i < n {
+        sum += x[i] * w[i];
+        i += 1;
+    }
+    sum
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn hsum256(v: __m256d) -> f64 {
+    let hi = _mm256_extractf128_pd(v, 1);
+    let lo = _mm256_castpd256_pd128(v);
+    let s = _mm_add_pd(hi, lo);
+    let s = _mm_add_sd(s, _mm_unpackhi_pd(s, s));
+    _mm_cvtsd_f64(s)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn hsum512(v: __m512d) -> f64 { _mm512_reduce_add_pd(v) }
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn dot_avx2(x: *const f64, w: *const f64, n: usize) -> f64 {
+    let mut i = 0usize;
+    let n4 = n & !3;
+    let mut acc = _mm256_setzero_pd();
+    while i < n4 {
+        let xv = _mm256_loadu_pd(x.add(i));
+        let wv = _mm256_loadu_pd(w.add(i));
+        acc = _mm256_fmadd_pd(xv, wv, acc);
+        i += 4;
+    }
+    let mut sum = hsum256(acc);
+    while i < n {
+        sum += *x.add(i) * *w.add(i);
+        i += 1;
+    }
+    sum
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn dot_avx512(x: *const f64, w: *const f64, n: usize) -> f64 {
+    let mut i = 0usize;
+    let n8 = n & !7;
+    let mut acc = _mm512_setzero_pd();
+    while i < n8 {
+        let xv = _mm512_loadu_pd(x.add(i));
+        let wv = _mm512_loadu_pd(w.add(i));
+        acc = _mm512_fmadd_pd(xv, wv, acc);
+        i += 8;
+    }
+    let mut sum = hsum512(acc);
+    while i < n {
+        sum += *x.add(i) * *w.add(i);
+        i += 1;
+    }
+    sum
+}
+
+#[inline(always)]
+fn dot_contiguous(kernel: Kernel, x: &[f64], w: &[f64]) -> f64 {
+    debug_assert_eq!(x.len(), w.len());
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    {
+        match kernel {
+            Kernel::Avx512 | Kernel::Avx512Batch => unsafe { return dot_avx512(x.as_ptr(), w.as_ptr(), x.len()) },
+            Kernel::Avx2 | Kernel::Avx2Batch => unsafe { return dot_avx2(x.as_ptr(), w.as_ptr(), x.len()) },
+            _ => {}
+        }
+    }
+    // safe scalar fallback
+    dot_scalar_unrolled_safe(x, w)
 }
 
 #[derive(Clone, Debug)]
