@@ -17,7 +17,7 @@
 //! ## Developer Status
 //! - SIMD (single-series): AVX2/AVX512 vectorize the initial window; rolling updates stay scalar. In benchmarks at 100k, SIMD is ~on par with scalar (<5% either way).
 //! - SIMD (batch, row-specific): Enabled via masked pv/vv precompute + per-row sliding sums; >25% faster vs scalar batch at 10k on AVX2/AVX512 in local runs.
-//! - Streaming update: offline rolling is O(1) per step; current `BuffAveragesStream` recomputes windows (O(period)) and could be optimized to O(1) with running sums.
+//! - Streaming update: O(1) per tick via ring-buffered masked sums; matches offline warmup and NaN semantics.
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
@@ -1210,18 +1210,37 @@ pub unsafe fn buff_averages_row_avx512_from_masked(
 }
 
 // ==================== STREAMING SUPPORT ====================
-/// Streaming calculator for real-time updates
+/// Streaming calculator for real-time updates (O(1) per tick).
+/// Decision: O(1) ring-buffered masked sums; emits after first_non_nan_price + slow - 1.
 #[derive(Debug, Clone)]
 pub struct BuffAveragesStream {
-    price_buffer: Vec<f64>,
-    volume_buffer: Vec<f64>,
+    // Ring buffers store MASKED values (0 when either price or volume is NaN).
+    ring_pv: Vec<f64>,
+    ring_vv: Vec<f64>,
+
+    // Ring capacity = max(fast, slow) so we can evict the right index for both windows.
+    cap: usize,
+
     fast_period: usize,
     slow_period: usize,
+
+    // Running sums for each window.
+    fast_num: f64,
+    fast_den: f64,
+    slow_num: f64,
+    slow_den: f64,
+
+    // Count of updates processed so far (also the next write position in the ring).
     index: usize,
-    ready: bool,
+
+    // Warmup gating aligned with offline kernel semantics:
+    // We start emitting after (first non-NaN PRICE index) + slow_period - 1.
+    // Implemented by arming a target count once we first see a non-NaN price.
+    warm_target_count: Option<usize>,
 }
 
 impl BuffAveragesStream {
+    #[inline]
     pub fn try_new(params: BuffAveragesParams) -> Result<Self, BuffAveragesError> {
         let fast_period = params.fast_period.unwrap_or(5);
         let slow_period = params.slow_period.unwrap_or(20);
@@ -1232,7 +1251,6 @@ impl BuffAveragesStream {
                 data_len: 0,
             });
         }
-
         if slow_period == 0 {
             return Err(BuffAveragesError::InvalidPeriod {
                 period: slow_period,
@@ -1240,59 +1258,94 @@ impl BuffAveragesStream {
             });
         }
 
+        let cap = core::cmp::max(fast_period, slow_period);
+
         Ok(Self {
-            price_buffer: vec![0.0; slow_period],
-            volume_buffer: vec![0.0; slow_period],
+            ring_pv: vec![0.0; cap],
+            ring_vv: vec![0.0; cap],
+            cap,
             fast_period,
             slow_period,
+            fast_num: 0.0,
+            fast_den: 0.0,
+            slow_num: 0.0,
+            slow_den: 0.0,
             index: 0,
-            ready: false,
+            warm_target_count: None,
         })
     }
 
+    /// Push one (price, volume) and, when warm, return (fast, slow).
+    /// Complexity: O(1) per call; no window recomputation.
+    #[inline]
     pub fn update(&mut self, price: f64, volume: f64) -> Option<(f64, f64)> {
-        let idx = self.index % self.slow_period;
-        self.price_buffer[idx] = price;
-        self.volume_buffer[idx] = volume;
-        self.index += 1;
+        let n = self.index; // number of items already processed (0-based next write)
+        let write_idx = n % self.cap;
 
-        if self.index >= self.slow_period {
-            self.ready = true;
+        // Arm the warmup threshold the first time we see a non-NaN price
+        // (this matches the offline kernel's `first = position(|p| !is_nan)`).
+        if self.warm_target_count.is_none() && !price.is_nan() {
+            // first (this tick) is `n`, first valid output is at index `first + slow - 1`,
+            // i.e., after we have processed `first + slow` elements.
+            self.warm_target_count = Some(n + self.slow_period);
         }
 
-        if self.ready {
-            // Calculate slow buffer
-            let mut slow_num = 0.0;
-            let mut slow_den = 0.0;
-            for i in 0..self.slow_period {
-                slow_num += self.price_buffer[i] * self.volume_buffer[i];
-                slow_den += self.volume_buffer[i];
-            }
-            let slow_buff = if slow_den != 0.0 {
-                slow_num / slow_den
-            } else {
-                0.0
-            };
+        // Compute masked new terms (identical NaN semantics as offline kernels):
+        // If either price or volume is NaN, both contributions are 0.
+        let valid = !price.is_nan() && !volume.is_nan();
+        let pv_new = if valid { price.mul_add(volume, 0.0) } else { 0.0 };
+        let vv_new = if valid { volume } else { 0.0 };
 
-            // Calculate fast buffer
-            let mut fast_num = 0.0;
-            let mut fast_den = 0.0;
-            let start = self.slow_period - self.fast_period;
-            for i in start..self.slow_period {
-                let idx = (self.index - self.slow_period + i) % self.slow_period;
-                fast_num += self.price_buffer[idx] * self.volume_buffer[idx];
-                fast_den += self.volume_buffer[idx];
-            }
-            let fast_buff = if fast_den != 0.0 {
-                fast_num / fast_den
-            } else {
-                0.0
-            };
-
-            Some((fast_buff, slow_buff))
-        } else {
-            None
+        // Remove the elements that fall out of each window after adding this tick.
+        // The element to evict is at logical index (n - period); map it into the ring by % cap.
+        if n >= self.slow_period {
+            let idx_out_slow = (n + self.cap - self.slow_period) % self.cap;
+            let old_pv = unsafe { *self.ring_pv.get_unchecked(idx_out_slow) };
+            let old_vv = unsafe { *self.ring_vv.get_unchecked(idx_out_slow) };
+            self.slow_num -= old_pv;
+            self.slow_den -= old_vv;
         }
+        if n >= self.fast_period {
+            let idx_out_fast = (n + self.cap - self.fast_period) % self.cap;
+            let old_pv = unsafe { *self.ring_pv.get_unchecked(idx_out_fast) };
+            let old_vv = unsafe { *self.ring_vv.get_unchecked(idx_out_fast) };
+            self.fast_num -= old_pv;
+            self.fast_den -= old_vv;
+        }
+
+        // Write new masked values into the ring after evicting.
+        unsafe {
+            *self.ring_pv.get_unchecked_mut(write_idx) = pv_new;
+            *self.ring_vv.get_unchecked_mut(write_idx) = vv_new;
+        }
+
+        // Accumulate into running sums (O(1)).
+        self.slow_num += pv_new;
+        self.slow_den += vv_new;
+        self.fast_num += pv_new;
+        self.fast_den += vv_new;
+
+        // Advance time.
+        self.index = n + 1;
+
+        // Emit only after warm threshold is armed & reached (aligned to offline warmup).
+        if let Some(warm) = self.warm_target_count {
+            if self.index >= warm {
+                // Division: Σ(p·v) / Σ(v). If Σ(v)==0, match offline behavior: return 0.0
+                let slow = if self.slow_den != 0.0 {
+                    self.slow_num / self.slow_den
+                } else {
+                    0.0
+                };
+                let fast = if self.fast_den != 0.0 {
+                    self.fast_num / self.fast_den
+                } else {
+                    0.0
+                };
+                return Some((fast, slow));
+            }
+        }
+        None
     }
 }
 
