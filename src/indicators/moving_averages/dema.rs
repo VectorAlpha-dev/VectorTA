@@ -24,6 +24,10 @@
 //! - Streaming update: O(1) EMA updates; warmup handled by caller via NaN prefix.
 //! - Memory: uses allocation helpers with warmup prefixes (see ALMA pattern).
 //! - Future: Revisit SIMD if layout or math changes improve throughput.
+//!
+//! Decision: Streaming kernel uses fused multiply-add on x86/x86_64 via `mul_add` for
+//! parity with scalar/batch paths and improved stability; non-x86 uses `a*b + c`.
+//! Warmup semantics unchanged; counters use saturating add to avoid wrap.
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::CudaDema;
@@ -699,31 +703,64 @@ impl DemaStream {
     }
 
     #[inline(always)]
+    fn fmadd(a: f64, b: f64, c: f64) -> f64 {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            a.mul_add(b, c)
+        }
+        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+        {
+            a * b + c
+        }
+    }
+
+    #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
+        // Fast seed: identical semantics to original.
         if self.filled == 0 {
             self.ema = value;
             self.ema2 = value;
             self.filled = 1;
-            // For period=1, return value immediately (no warmup needed)
-            // Otherwise return None during warmup period, matching ALMA's API
-            return if self.period == 1 { Some(value) } else { None };
+            // For period==1, return immediately; otherwise warmup with None.
+            return if self.nan_fill == 0 { Some(value) } else { None };
         }
 
-        self.ema = self.ema * self.alpha_1 + value * self.alpha;
-        self.ema2 = self.ema2 * self.alpha_1 + self.ema * self.alpha;
+        // Lift constants into registers
+        let a = self.alpha; // α
+        let a1 = self.alpha_1; // 1−α
 
-        let y = (2.0 * self.ema) - self.ema2;
-        self.filled += 1;
+        // EMA1: ema = ema*(1-α) + value*α
+        self.ema = Self::fmadd(self.ema, a1, value * a);
 
-        // Return value once warmup period is complete (after period-1 None values)
-        // This means we start returning values at index period-1
-        let out = if self.filled > self.nan_fill {
-            Some(y)
-        } else {
-            None
-        };
-        out
+        // EMA2: ema2 = ema2*(1-α) + ema*α
+        self.ema2 = Self::fmadd(self.ema2, a1, self.ema * a);
+
+        // DEMA = 2*EMA1 - EMA2; encourage fused MAD on x86
+        let y = Self::fmadd(self.ema, 2.0, -self.ema2);
+
+        // Advance with saturating add to avoid wrap on extremely long runs
+        self.filled = self.filled.saturating_add(1);
+
+        // Warm‑up policy unchanged: emit only after period−1
+        if self.filled > self.nan_fill { Some(y) } else { None }
     }
+
+    #[inline(always)]
+    pub fn update_nan(&mut self, value: f64) -> f64 {
+        match self.update(value) {
+            Some(v) => v,
+            None => f64::NAN,
+        }
+    }
+}
+
+// Optional fast-math helper for reciprocal if many alphas must be computed.
+// Not used by default to preserve exactness; keep available for future tuning.
+#[inline(always)]
+fn fast_recip_nr1(d: f64) -> f64 {
+    // Precondition: d > 0
+    let x0 = (d as f32).recip() as f64; // fast initial approx
+    x0 * (2.0 - d * x0) // one NR step
 }
 
 #[derive(Clone, Debug)]
