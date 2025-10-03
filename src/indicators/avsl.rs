@@ -888,16 +888,16 @@ unsafe fn avsl_simd128(
 // ==================== AVX2 IMPLEMENTATION ====================
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
-unsafe fn avsl_avx2(
-    close: &[f64],
-    low: &[f64],
-    volume: &[f64],
-    fast_period: usize,
-    slow_period: usize,
-    multiplier: f64,
-    first_val: usize,
-    out: &mut [f64],
-) -> Result<(), AvslError> {
+    unsafe fn avsl_avx2(
+        close: &[f64],
+        low: &[f64],
+        volume: &[f64],
+        fast_period: usize,
+        slow_period: usize,
+        multiplier: f64,
+        first_val: usize,
+        out: &mut [f64],
+    ) -> Result<(), AvslError> {
     use core::arch::x86_64::*;
     let len = close.len();
     if len == 0 {
@@ -961,14 +961,14 @@ unsafe fn avsl_avx2(
             let cv = c * v;
             sum_close_f += c; sum_vol_f += v; sum_cxv_f += cv;
             sum_close_s += c; sum_vol_s += v; sum_cxv_s += cv;
-            if i + 1 >= fast_period + first_val {
-                let k = i + 1 - fast_period;
+            if i + 1 > fast_period + first_val {
+                let k = i + 1 - fast_period - 1;
                 let c_old = *c_ptr.add(k);
                 let v_old = *v_ptr.add(k);
                 sum_close_f -= c_old; sum_vol_f -= v_old; sum_cxv_f -= c_old * v_old;
             }
-            if i + 1 >= slow_period + first_val {
-                let k = i + 1 - slow_period;
+            if i + 1 > slow_period + first_val {
+                let k = i + 1 - slow_period - 1;
                 let c_old = *c_ptr.add(k);
                 let v_old = *v_ptr.add(k);
                 sum_close_s -= c_old; sum_vol_s -= v_old; sum_cxv_s -= c_old * v_old;
@@ -982,7 +982,8 @@ unsafe fn avsl_avx2(
             let vwma_s = if sum_vol_s != 0.0 { sum_cxv_s / sum_vol_s } else { sma_s };
 
             let vpc = vwma_s - sma_s;
-            let vpr = if sma_f != 0.0 { (sum_cxv_f * (fast_period as f64)) / (sum_vol_f * sum_close_f) } else { 1.0 };
+            // Use same FP pathway as scalar for vpr to minimize rounding drift
+            let vpr = if sma_f != 0.0 { vwma_f / sma_f } else { 1.0 };
             let vol_f = sum_vol_f * inv_fast;
             let vol_s = sum_vol_s * inv_slow;
             let vm    = if vol_s != 0.0 { vol_f / vol_s } else { 1.0 };
@@ -1003,52 +1004,16 @@ unsafe fn avsl_avx2(
             let mut acc = 0.0_f64;
 
             if hist_n > 0 {
-                let newest = if ring_pos == 0 { MAX_WIN - 1 } else { ring_pos - 1 };
-                let seg1_len = hist_n.min(newest + 1);
-                let seg2_len = hist_n - seg1_len;
-
-                if seg1_len > 0 {
-                    let mut rp = newest;
-                    let mut left = seg1_len;
-                    while left >= 4 {
-                        let idx0 = rp;
-                        let idx1 = if rp >= 1 { rp - 1 } else { MAX_WIN - 1 };
-                        let idx2 = if idx1 >= 1 { idx1 - 1 } else { MAX_WIN - 1 };
-                        let idx3 = if idx2 >= 1 { idx2 - 1 } else { MAX_WIN - 1 };
-
-                        let vpcv = _mm256_set_pd(ring_vpc[idx3], ring_vpc[idx2], ring_vpc[idx1], ring_vpc[idx0]);
-                        let vprv = _mm256_set_pd(ring_vpr[idx3], ring_vpr[idx2], ring_vpr[idx1], ring_vpr[idx0]);
-                        let adjv = adj256(vpcv, v_neg1, v_zero, v_pos1);
-                        let denom = _mm256_mul_pd(adjv, vprv);
-                        let lv = _mm256_set_pd(*l_ptr.add(i - 3), *l_ptr.add(i - 2), *l_ptr.add(i - 1), *l_ptr.add(i - 0));
-                        let zero = _mm256_set1_pd(0.0);
-                        let nz_mask = _mm256_cmp_pd(denom, zero, _CMP_NEQ_OQ);
-                        let divv = _mm256_div_pd(lv, denom);
-                        let mdiv = _mm256_and_pd(divv, nz_mask);
-                        let arr: [f64; 4] = core::mem::transmute(mdiv);
-                        acc += arr[0] + arr[1] + arr[2] + arr[3];
-
-                        rp = idx3.wrapping_sub(1) % MAX_WIN; left -= 4;
-                    }
-                    while left > 0 {
-                        let idx_r = rp;
-                        let x = ring_vpc[idx_r];
-                        let adj = if x > -1.0 && x < 0.0 { -1.0 } else if x >= 0.0 && x < 1.0 { 1.0 } else { x };
-                        let r = ring_vpr[idx_r];
-                        if adj != 0.0 && r != 0.0 { let j = seg1_len - left; acc += *l_ptr.add(i - j) / (adj * r); }
-                        rp = if rp == 0 { MAX_WIN - 1 } else { rp - 1 }; left -= 1;
-                    }
-                }
-
-                if seg2_len > 0 {
-                    let mut left = seg2_len;
-                    while left > 0 {
-                        let idx_r = (MAX_WIN - seg2_len) + (seg2_len - left);
-                        let x = ring_vpc[idx_r];
-                        let adj = if x > -1.0 && x < 0.0 { -1.0 } else if x >= 0.0 && x < 1.0 { 1.0 } else { x };
-                        let r = ring_vpr[idx_r];
-                        if adj != 0.0 && r != 0.0 { let j = seg1_len + (seg2_len - left); acc += *l_ptr.add(i - j) / (adj * r); }
-                        left -= 1;
+                // Scalar-ordered accumulation for exact parity
+                let mut rp = if ring_pos == 0 { MAX_WIN - 1 } else { ring_pos - 1 };
+                for j in 0..hist_n {
+                    let idx_r = rp;
+                    rp = if rp == 0 { MAX_WIN - 1 } else { rp - 1 };
+                    let x = ring_vpc[idx_r];
+                    let adj = if x > -1.0 && x < 0.0 { -1.0 } else if x >= 0.0 && x < 1.0 { 1.0 } else { x };
+                    let r = ring_vpr[idx_r];
+                    if adj != 0.0 && r != 0.0 {
+                        acc += *l_ptr.add(i - j) / (adj * r);
                     }
                 }
             }
@@ -1058,10 +1023,7 @@ unsafe fn avsl_avx2(
                 let end_idx_excl = i + 1 - hist_n;
                 let mut s = 0.0_f64;
                 let mut k = start_idx;
-                let n = end_idx_excl - start_idx;
-                let vec_n = n / 4; let rem = n % 4;
-                for _ in 0..vec_n { let a = _mm256_loadu_pd(l_ptr.add(k)); let arr: [f64; 4] = core::mem::transmute(a); s += arr[0]+arr[1]+arr[2]+arr[3]; k += 4; }
-                for _ in 0..rem { s += *l_ptr.add(k); k += 1; }
+                while k < end_idx_excl { s += *l_ptr.add(k); k += 1; }
                 acc += s;
             }
 
@@ -1079,8 +1041,11 @@ unsafe fn avsl_avx2(
 
     let upto = warmup2.min(len);
     for v in &mut out[..upto] { *v = f64::NAN; }
+
+    
+
     Ok(())
-}
+    }
 
 // ==================== AVX512 IMPLEMENTATION ====================
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1130,8 +1095,8 @@ unsafe fn avsl_avx512(
         if i >= first_val {
             let c = unsafe { *c_ptr.add(i) }; let v = unsafe { *v_ptr.add(i) }; let cv = c*v;
             sum_close_f += c; sum_vol_f += v; sum_cxv_f += cv; sum_close_s += c; sum_vol_s += v; sum_cxv_s += cv;
-            if i + 1 >= fast_period + first_val { let k = i + 1 - fast_period; let c_old = unsafe{*c_ptr.add(k)}; let v_old = unsafe{*v_ptr.add(k)}; sum_close_f -= c_old; sum_vol_f -= v_old; sum_cxv_f -= c_old*v_old; }
-            if i + 1 >= slow_period + first_val { let k = i + 1 - slow_period; let c_old = unsafe{*c_ptr.add(k)}; let v_old = unsafe{*v_ptr.add(k)}; sum_close_s -= c_old; sum_vol_s -= v_old; sum_cxv_s -= c_old*v_old; }
+            if i + 1 > fast_period + first_val { let k = i + 1 - fast_period - 1; let c_old = unsafe{*c_ptr.add(k)}; let v_old = unsafe{*v_ptr.add(k)}; sum_close_f -= c_old; sum_vol_f -= v_old; sum_cxv_f -= c_old*v_old; }
+            if i + 1 > slow_period + first_val { let k = i + 1 - slow_period - 1; let c_old = unsafe{*c_ptr.add(k)}; let v_old = unsafe{*v_ptr.add(k)}; sum_close_s -= c_old; sum_vol_s -= v_old; sum_cxv_s -= c_old*v_old; }
         }
 
         if i >= base {
@@ -1139,7 +1104,12 @@ unsafe fn avsl_avx512(
             let vwma_f = if sum_vol_f != 0.0 { sum_cxv_f / sum_vol_f } else { sma_f };
             let vwma_s = if sum_vol_s != 0.0 { sum_cxv_s / sum_vol_s } else { sma_s };
             let vpc = vwma_s - sma_s;
-            let vpr = if sma_f != 0.0 { (sum_cxv_f * (fast_period as f64)) / (sum_vol_f * sum_close_f) } else { 1.0 };
+            // Match scalar semantics: when volume sum is zero (vwma = sma), vpr should be 1.0
+            let vpr = if sma_f != 0.0 && sum_vol_f != 0.0 {
+                (sum_cxv_f * (fast_period as f64)) / (sum_vol_f * sum_close_f)
+            } else {
+                1.0
+            };
             let vol_f = sum_vol_f * inv_fast; let vol_s = sum_vol_s * inv_slow; let vm = if vol_s != 0.0 { vol_f / vol_s } else { 1.0 };
             let vpci = vpc * vpr * vm;
             let len_v = { let t = if vpc < 0.0 { (vpci - 3.0).abs().round() } else { (vpci + 3.0).round() }; let m = if t < 1.0 { 1.0 } else { t }; let m = if m > MAX_WIN as f64 { MAX_WIN as f64 } else { m }; m as usize };
@@ -1147,12 +1117,37 @@ unsafe fn avsl_avx512(
             ring_vpc[ring_pos] = vpc; ring_vpr[ring_pos] = vpr; ring_pos += 1; if ring_pos == MAX_WIN { ring_pos = 0; }
 
             let take = len_v.min(i + 1); let hist_n = (i - base + 1).min(take); let pref_n = take - hist_n; let mut acc = 0.0_f64;
-            if hist_n > 0 { let mut rp = if ring_pos == 0 { MAX_WIN - 1 } else { ring_pos - 1 }; for j in 0..hist_n { let idx_r = rp; rp = if rp == 0 { MAX_WIN - 1 } else { rp - 1 }; let a = adj(ring_vpc[idx_r]); let r = ring_vpr[idx_r]; if a != 0.0 && r != 0.0 { acc += unsafe{*l_ptr.add(i - j)} / (a*r); } } }
+            // Accumulate recent portion using exact scalar mapping to ensure parity
+            if hist_n > 0 {
+                let mut rp = if ring_pos == 0 { MAX_WIN - 1 } else { ring_pos - 1 };
+                for j in 0..hist_n {
+                    let idx_r = rp;
+                    rp = if rp == 0 { MAX_WIN - 1 } else { rp - 1 };
+                    let a = adj(ring_vpc[idx_r]);
+                    let r = ring_vpr[idx_r];
+                    if a != 0.0 && r != 0.0 {
+                        acc += unsafe { *l_ptr.add(i - j) } / (a * r);
+                    }
+                }
+            }
             if pref_n > 0 {
-                let start_idx = i + 1 - (hist_n + pref_n); let end_idx_excl = i + 1 - hist_n;
-                let mut s = 0.0_f64; let mut k = start_idx; let n = end_idx_excl - start_idx; let vec_n = n / 8; let rem = n % 8;
-                for _ in 0..vec_n { let a = unsafe { _mm512_loadu_pd(l_ptr.add(k)) }; let arr: [f64; 8] = core::mem::transmute(a); s += arr[0]+arr[1]+arr[2]+arr[3]+arr[4]+arr[5]+arr[6]+arr[7]; k += 8; }
-                for _ in 0..rem { s += unsafe{*l_ptr.add(k)}; k += 1; }
+                let start_idx = i + 1 - (hist_n + pref_n);
+                let end_idx_excl = i + 1 - hist_n;
+                let mut s = 0.0_f64;
+                let mut k = start_idx;
+                let n = end_idx_excl - start_idx;
+                let vec_n = n / 8;
+                let rem = n % 8;
+                for _ in 0..vec_n {
+                    let a = unsafe { _mm512_loadu_pd(l_ptr.add(k)) };
+                    let arr: [f64; 8] = core::mem::transmute(a);
+                    s += arr[0] + arr[1] + arr[2] + arr[3] + arr[4] + arr[5] + arr[6] + arr[7];
+                    k += 8;
+                }
+                for _ in 0..rem {
+                    s += unsafe { *l_ptr.add(k) };
+                    k += 1;
+                }
                 acc += s;
             }
 
@@ -1162,8 +1157,13 @@ unsafe fn avsl_avx512(
         }
     }
 
-    let upto = warmup2.min(len); for v in &mut out[..upto] { *v = f64::NAN; } Ok(())
-}
+    let upto = warmup2.min(len);
+    for v in &mut out[..upto] { *v = f64::NAN; }
+
+    
+
+    Ok(())
+    }
 
 // ==================== STREAMING API ====================
 #[derive(Debug, Clone)]

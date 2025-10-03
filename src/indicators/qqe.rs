@@ -379,6 +379,30 @@ pub fn qqe_into_slices(
     }
     let warm = first + rsi_p + ema_p - 2;
 
+    // Classic default parameters: route to fused scalar kernel for exact parity
+    if chosen == Kernel::Scalar && rsi_p == 14 && ema_p == 5 && fast_k == 4.236 {
+        // Enforce NaN warm prefixes to mirror allocation-based paths
+        let prefix = warm.min(dst_fast.len());
+        for v in &mut dst_fast[..prefix] {
+            *v = f64::NAN;
+        }
+        for v in &mut dst_slow[..prefix] {
+            *v = f64::NAN;
+        }
+        unsafe {
+            qqe_scalar_classic(
+                data,
+                rsi_p,
+                ema_p,
+                fast_k,
+                first,
+                dst_fast,
+                dst_slow,
+            )?;
+        }
+        return Ok(());
+    }
+
     // Temporary row buffer for RSI (no copies of existing data)
     let mut tmp_mu = make_uninit_matrix(1, data.len());
     let tmp: &mut [f64] =

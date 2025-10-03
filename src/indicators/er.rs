@@ -233,8 +233,9 @@ pub fn er_with_kernel(input: &ErInput, kernel: Kernel) -> Result<ErOutput, ErErr
             Kernel::Scalar | Kernel::ScalarBatch => er_scalar(data, period, first, &mut out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => er_avx2(data, period, first, &mut out),
+            // Route AVX512 to scalar until parity is validated across datasets.
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => er_avx512(data, period, first, &mut out),
+            Kernel::Avx512 | Kernel::Avx512Batch => er_scalar(data, period, first, &mut out),
             _ => unreachable!(),
         }
     }
@@ -282,8 +283,9 @@ pub fn er_into_slice(dst: &mut [f64], input: &ErInput, kern: Kernel) -> Result<(
             Kernel::Scalar | Kernel::ScalarBatch => er_scalar(data, period, first, dst),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => er_avx2(data, period, first, dst),
+            // Route AVX512 to scalar until parity is validated across datasets.
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => er_avx512(data, period, first, dst),
+            Kernel::Avx512 | Kernel::Avx512Batch => er_scalar(data, period, first, dst),
             _ => unreachable!(),
         }
     }

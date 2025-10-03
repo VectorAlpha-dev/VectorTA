@@ -229,8 +229,9 @@ pub fn medium_ad_with_kernel(
             Kernel::Scalar | Kernel::ScalarBatch => medium_ad_scalar(data, period, first, &mut out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => medium_ad_avx2(data, period, first, &mut out),
+            // Route AVX512 to scalar for correctness while AVX512 parity is under review.
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => medium_ad_avx512(data, period, first, &mut out),
+            Kernel::Avx512 | Kernel::Avx512Batch => medium_ad_scalar(data, period, first, &mut out),
             _ => unreachable!(),
         }
     }
@@ -1873,8 +1874,9 @@ pub fn medium_ad_into_slice(
         Kernel::Scalar => medium_ad_scalar(data, period, first, dst),
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx2 => medium_ad_avx2(data, period, first, dst),
+        // Delegate AVX512 to scalar to ensure exactness with scalar path.
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-        Kernel::Avx512 => medium_ad_avx512(data, period, first, dst),
+        Kernel::Avx512 => medium_ad_scalar(data, period, first, dst),
         _ => unreachable!(),
     }
 
