@@ -31,7 +31,8 @@
 //! ## Developer Notes
 //! - **AVX2 kernel**: Stub implementation - just calls scalar version
 //! - **AVX512 kernel**: Stub implementation - just calls scalar version
-//! - **Streaming update**: O(n) complexity - maintains ring buffer with SMA/WMA calculations
+//! - **Streaming update**: O(1) per-tick kernel matching batch parity; fixes WMA
+//!   recurrence and replaces O(L) gain sweep with closed-form quantized selection.
 //! - **Memory optimization**: Uses alloc_with_nan_prefix helper function
 //! - **Optimization opportunities**:
 //!   - Implement SIMD kernels for vectorized Hull MA and EMA calculations
@@ -1806,8 +1807,8 @@ impl DmaStream {
                         }
                         self.half_ready = true;
                     } else {
-                        let a_prev =
-                            self.sum_half + kback(&self.ring, self.head, self.cap, self.half); // previous sum before we subtracted out_h
+                        // Reconstruct previous simple sum before this tick: a_prev = (current sum) + out_h - x
+                        let a_prev = self.sum_half + out_h - x;
                         self.s_half = self.s_half + (self.half as f64) * x - a_prev;
                     }
                 }
@@ -1836,8 +1837,8 @@ impl DmaStream {
                     }
                     self.full_ready = true;
                 } else {
-                    let a_prev =
-                        self.sum_full + kback(&self.ring, self.head, self.cap, self.hull_length);
+                    // Reconstruct previous simple sum before this tick: a_prev = (current sum) + out_f - x
+                    let a_prev = self.sum_full + out_f - x;
                     self.s_full = self.s_full + (self.hull_length as f64) * x - a_prev;
                 }
             }
@@ -1914,9 +1915,9 @@ impl DmaStream {
                     hull_val = self.s_diff / wsum.max(1.0);
                 } else if self.diff_wma_ready {
                     let wsum = (self.sqrt_len * (self.sqrt_len + 1)) as f64 / 2.0;
-                    let a_prev = self.a_diff + old; // a_prev before we overwrote `old`
-                    self.a_diff = a_prev + diff_now - old;
+                    let a_prev = self.a_diff;
                     self.s_diff = self.s_diff + (self.sqrt_len as f64) * diff_now - a_prev;
+                    self.a_diff = a_prev + diff_now - old;
                     hull_val = self.s_diff / wsum.max(1.0);
                 }
             } else {
@@ -1944,20 +1945,37 @@ impl DmaStream {
                 self.ec_ready = true;
                 ec_now = self.ec_prev;
             } else {
-                let mut best_err = f64::MAX;
-                let mut best_g = 0.0;
-                for gi in 0..=self.ema_gain_limit {
-                    let g = gi as f64 / 10.0;
-                    let cand = self.alpha_e * (self.e0_prev + g * (x - self.ec_prev))
-                        + (1.0 - self.alpha_e) * self.ec_prev;
-                    let err = (x - cand).abs();
-                    if err < best_err {
-                        best_err = err;
-                        best_g = g;
+                // Closed-form gain selection on 0.1 grid with deterministic tie-break
+                let one_minus_alpha_e = 1.0 - self.alpha_e;
+                let dx = x - self.ec_prev;
+                let t = self.alpha_e * dx;
+                let base = self
+                    .alpha_e
+                    .mul_add(self.e0_prev, one_minus_alpha_e * self.ec_prev);
+                let r = x - base;
+
+                let g_sel = if t == 0.0 {
+                    0.0
+                } else {
+                    let target = (r / t) * 10.0; // grid step 0.1
+                    let limit_i = self.ema_gain_limit as i64;
+                    let mut i0 = target.floor() as i64;
+                    if i0 < 0 {
+                        i0 = 0;
+                    } else if i0 > limit_i {
+                        i0 = limit_i;
                     }
-                }
-                let ec = self.alpha_e * (self.e0_prev + best_g * (x - self.ec_prev))
-                    + (1.0 - self.alpha_e) * self.ec_prev;
+                    let i1 = if i0 < limit_i { i0 + 1 } else { i0 };
+                    let g0 = (i0 as f64) * 0.1;
+                    let g1 = (i1 as f64) * 0.1;
+                    let e0 = (r - t * g0).abs();
+                    let e1 = (r - t * g1).abs();
+                    if e0 <= e1 { g0 } else { g1 }
+                };
+
+                let ec = self
+                    .alpha_e
+                    .mul_add(self.e0_prev + g_sel * dx, (1.0 - self.alpha_e) * self.ec_prev);
                 self.ec_prev = ec;
                 ec_now = ec;
             }
