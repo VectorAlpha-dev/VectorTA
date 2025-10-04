@@ -19,7 +19,9 @@
 //! - SIMD: Disabled for OTTO. Loop-carried recurrences (VIDYA, OTT state) make lane-parallelism ineffective; runtime short-circuits to scalar.
 //! - Scalar path: Optimized single-pass kernel computes CMO(9) and three VIDYA tracks together (slow/2, slow, slow*fast), then LOTT and OTT.
 //! - Batch: Row-specific optimization precomputes the CMO(9) stream once per series and reuses it across rows.
-//! - Streaming: Still O(n) per update; not optimized here.
+//! - Streaming: O(1) per update via ring buffers and running sums.
+//!   Decision: SIMD remains disabled; streaming is now constant-time and
+//!   mirrors the scalar path after warmup (slow*fast + 10).
 //! - Memory: Uses standard Vec; MA selection remains dynamic; no unsafe in scalar.
 
 #[cfg(feature = "python")]
@@ -317,84 +319,508 @@ impl OttoBuilder {
 
 #[derive(Debug, Clone)]
 pub struct OttoStream {
+    // --- params ---
     ott_period: usize,
     ott_percent: f64,
     fast_vidya_length: usize,
     slow_vidya_length: usize,
     correcting_constant: f64,
     ma_type: String,
-    buffer: Vec<f64>,
-    filled: bool,
+
+    // --- warmup gate (preserve existing behavior) ---
+    required_len: usize, // = slow * fast + 10 (keeps previous warmup semantics)
+    idx: usize,          // number of updates seen so far
+
+    // --- precomputed constants (VIDYA/OTT) ---
+    // for VIDYA on source
+    a1_base: f64, // 2/(slow/2 + 1)
+    a2_base: f64, // 2/(slow + 1)
+    a3_base: f64, // 2/(slow*fast + 1)
+    // for MA(LOTT) when ma_type == "VAR"
+    a_ott_base: f64, // 2/(ott_period + 1)
+
+    // OTT % scaling
+    fark: f64,           // ott_percent * 0.01
+    scale_up: f64,       // (200+ott_percent)/200
+    scale_dn: f64,       // (200-ott_percent)/200
+
+    // --- CMO(9) on input (ring buffers) ---
+    ring_up_in: [f64; 9],
+    ring_dn_in: [f64; 9],
+    sum_up_in: f64,
+    sum_dn_in: f64,
+    head_in: usize,
+    prev_x_in: f64,
+    have_prev_in: bool,
+
+    // --- VIDYA states on source ---
+    v1: f64,
+    v2: f64,
+    v3: f64,
+
+    // --- LOTT current ---
+    last_lott: f64,
+
+    // --- MA(LOTT) path states ---
+    // VAR: CMO(9) on LOTT + VIDYA(LOTT)
+    ring_up_lott: [f64; 9],
+    ring_dn_lott: [f64; 9],
+    sum_up_lott: f64,
+    sum_dn_lott: f64,
+    head_lott: usize,
+    prev_lott: f64,
+    have_prev_lott: bool,
+    ma_prev: f64, // used by VAR/EMA/WWMA/ZLEMA/DEMA (ema2 uses its own)
+
+    // EMA/WWMA
+    ema_alpha: f64,
+    ema_init: bool,
+
+    // DEMA
+    dema_alpha: f64,
+    dema_ema1: f64,
+    dema_ema2: f64,
+    dema_init: bool,
+
+    // SMA
+    sma_sum: f64,
+    sma_buf: Vec<f64>,
+    sma_head: usize,
+    sma_count: usize,
+
+    // WMA (linear weights 1..p): O(1) with running sums
+    wma_buf: Vec<f64>,
+    wma_head: usize,
+    wma_count: usize,
+    wma_sumx: f64,  // sum of x (plain sum)
+    wma_sumwx: f64, // weighted sum    (numerator)
+    wma_denom: f64, // p*(p+1)/2
+
+    // TMA = SMA( SMA(src, ceil(L/2)), floor(L/2)+1 )
+    tma_p1: usize,
+    tma_p2: usize,
+    tma_ring1: Vec<f64>,
+    tma_head1: usize,
+    tma_sum1: f64,
+    tma_count1: usize,
+    tma_ring2: Vec<f64>,
+    tma_head2: usize,
+    tma_sum2: f64,
+    tma_count2: usize,
+
+    // ZLEMA = EMA( 2*x - x_lag )
+    zlema_alpha: f64,
+    zlema_prev: f64,
+    zlema_init: bool,
+    zlema_lag: usize,
+    zlema_ring: Vec<f64>,
+    zlema_head: usize,
+    zlema_count: usize,
+
+    // --- OTT state machine ---
+    long_stop_prev: f64,
+    short_stop_prev: f64,
+    dir_prev: i32,
+    ott_init: bool,
 }
 
 impl OttoStream {
+    /// Create a new streaming OTTO with O(1) per update.
     pub fn try_new(params: OttoParams) -> Result<Self, OttoError> {
         let ott_period = params.ott_period.unwrap_or(2);
-        let slow_vidya_length = params.slow_vidya_length.unwrap_or(25);
-        let fast_vidya_length = params.fast_vidya_length.unwrap_or(10);
+        let slow = params.slow_vidya_length.unwrap_or(25);
+        let fast = params.fast_vidya_length.unwrap_or(10);
+        let correcting_constant = params.correcting_constant.unwrap_or(100000.0);
+        let ma_type = params.ma_type.unwrap_or_else(|| "VAR".to_string());
+        let ott_percent = params.ott_percent.unwrap_or(0.6);
 
         if ott_period == 0 {
-            return Err(OttoError::InvalidPeriod {
-                period: ott_period,
-                data_len: 0,
-            });
+            return Err(OttoError::InvalidPeriod { period: 0, data_len: 0 });
         }
 
-        let required_capacity = slow_vidya_length * fast_vidya_length + 10;
+        // VIDYA periods (preserve scalar semantics)
+        let p1 = slow / 2;
+        let p2 = slow;
+        let p3 = slow.saturating_mul(fast);
+        if p1 == 0 || p2 == 0 || p3 == 0 {
+            return Err(OttoError::InvalidPeriod { period: 0, data_len: 0 });
+        }
+
+        // precompute alphas
+        let a1_base = 2.0 / (p1 as f64 + 1.0);
+        let a2_base = 2.0 / (p2 as f64 + 1.0);
+        let a3_base = 2.0 / (p3 as f64 + 1.0);
+        let a_ott_base = 2.0 / (ott_period as f64 + 1.0);
+
+        let required_len = p3 + 10; // keep original streaming warmup
+
+        // OTT constants
+        let fark = ott_percent * 0.01;
+        let scale_up = (200.0 + ott_percent) / 200.0;
+        let scale_dn = (200.0 - ott_percent) / 200.0;
+
+        // SMA / WMA / TMA allocs (small)
+        let sma_buf = vec![0.0; ott_period];
+        let wma_buf = vec![0.0; ott_period];
+        let wma_denom = (ott_period as f64) * (ott_period as f64 + 1.0) * 0.5;
+
+        let tma_p1 = (ott_period + 1) / 2; // ceil(L/2)
+        let tma_p2 = ott_period / 2 + 1;   // floor(L/2)+1
+        let tma_ring1 = vec![0.0; tma_p1.max(1)];
+        let tma_ring2 = vec![0.0; tma_p2.max(1)];
+
+        let zlema_lag = (ott_period.saturating_sub(1)) / 2;
+        let zlema_ring = vec![0.0; zlema_lag + 1];
 
         Ok(Self {
             ott_period,
-            ott_percent: params.ott_percent.unwrap_or(0.6),
-            fast_vidya_length,
-            slow_vidya_length,
-            correcting_constant: params.correcting_constant.unwrap_or(100000.0),
-            ma_type: params.ma_type.unwrap_or_else(|| "VAR".to_string()),
-            buffer: Vec::with_capacity(required_capacity),
-            filled: false,
+            ott_percent,
+            fast_vidya_length: fast,
+            slow_vidya_length: slow,
+            correcting_constant,
+            ma_type,
+
+            required_len,
+            idx: 0,
+
+            a1_base,
+            a2_base,
+            a3_base,
+            a_ott_base,
+
+            fark,
+            scale_up,
+            scale_dn,
+
+            ring_up_in: [0.0; 9],
+            ring_dn_in: [0.0; 9],
+            sum_up_in: 0.0,
+            sum_dn_in: 0.0,
+            head_in: 0,
+            prev_x_in: 0.0,
+            have_prev_in: false,
+
+            v1: 0.0,
+            v2: 0.0,
+            v3: 0.0,
+
+            last_lott: 0.0,
+
+            ring_up_lott: [0.0; 9],
+            ring_dn_lott: [0.0; 9],
+            sum_up_lott: 0.0,
+            sum_dn_lott: 0.0,
+            head_lott: 0,
+            prev_lott: 0.0,
+            have_prev_lott: false,
+            ma_prev: 0.0,
+
+            ema_alpha: 2.0 / (ott_period as f64 + 1.0),
+            ema_init: false,
+
+            dema_alpha: 2.0 / (ott_period as f64 + 1.0),
+            dema_ema1: 0.0,
+            dema_ema2: 0.0,
+            dema_init: false,
+
+            sma_sum: 0.0,
+            sma_buf,
+            sma_head: 0,
+            sma_count: 0,
+
+            wma_buf,
+            wma_head: 0,
+            wma_count: 0,
+            wma_sumx: 0.0,
+            wma_sumwx: 0.0,
+            wma_denom,
+
+            tma_p1,
+            tma_p2,
+            tma_ring1,
+            tma_head1: 0,
+            tma_sum1: 0.0,
+            tma_count1: 0,
+            tma_ring2,
+            tma_head2: 0,
+            tma_sum2: 0.0,
+            tma_count2: 0,
+
+            zlema_alpha: 2.0 / (ott_period as f64 + 1.0),
+            zlema_prev: 0.0,
+            zlema_init: false,
+            zlema_lag,
+            zlema_ring,
+            zlema_head: 0,
+            zlema_count: 0,
+
+            long_stop_prev: f64::NAN,
+            short_stop_prev: f64::NAN,
+            dir_prev: 1,
+            ott_init: false,
         })
     }
 
-    pub fn update(&mut self, value: f64) -> Option<(f64, f64)> {
-        self.buffer.push(value);
-
-        let required_len = self.slow_vidya_length * self.fast_vidya_length + 10;
-
-        if !self.filled && self.buffer.len() >= required_len {
-            self.filled = true;
-        }
-
-        if self.filled {
-            // Keep buffer at required size
-            if self.buffer.len() > required_len {
-                self.buffer.remove(0);
-            }
-
-            let params = OttoParams {
-                ott_period: Some(self.ott_period),
-                ott_percent: Some(self.ott_percent),
-                fast_vidya_length: Some(self.fast_vidya_length),
-                slow_vidya_length: Some(self.slow_vidya_length),
-                correcting_constant: Some(self.correcting_constant),
-                ma_type: Some(self.ma_type.clone()),
-            };
-
-            let input = OttoInput::from_slice(&self.buffer, params);
-
-            match otto(&input) {
-                Ok(output) => {
-                    let last_idx = output.hott.len() - 1;
-                    Some((output.hott[last_idx], output.lott[last_idx]))
-                }
-                Err(_) => None,
-            }
-        } else {
-            None
-        }
+    #[inline]
+    fn cmo_abs_from_ring(sum_up: f64, sum_dn: f64) -> f64 {
+        let denom = sum_up + sum_dn;
+        if denom != 0.0 { ((sum_up - sum_dn) / denom).abs() } else { 0.0 }
     }
 
+    /// Update with one value; returns (HOTT, LOTT) after warmup, otherwise None.
+    #[inline]
+    pub fn update(&mut self, value: f64) -> Option<(f64, f64)> {
+        let i = self.idx;
+        self.idx = self.idx.wrapping_add(1);
+
+        // Pine-style nz() on input
+        let x = if value.is_nan() { 0.0 } else { value };
+
+        // ---- CMO(9) on input, update ring ----
+        if self.have_prev_in {
+            let mut d = value - self.prev_x_in;
+            if !value.is_finite() || !self.prev_x_in.is_finite() { d = 0.0; }
+            if i >= 9 {
+                // remove head
+                self.sum_up_in -= self.ring_up_in[self.head_in];
+                self.sum_dn_in -= self.ring_dn_in[self.head_in];
+            }
+            let (up, dn) = if d > 0.0 { (d, 0.0) } else { (0.0, -d) };
+            self.ring_up_in[self.head_in] = up;
+            self.ring_dn_in[self.head_in] = dn;
+            self.sum_up_in += up;
+            self.sum_dn_in += dn;
+            self.head_in += 1;
+            if self.head_in == 9 { self.head_in = 0; }
+        } else {
+            self.have_prev_in = true;
+        }
+        self.prev_x_in = value;
+
+        // abs(CMO) for VIDYA
+        let c_abs = if i >= 9 { Self::cmo_abs_from_ring(self.sum_up_in, self.sum_dn_in) } else { 0.0 };
+
+        // ---- three VIDYA tracks on source ----
+        // v = a*x + (1-a)*v  => use mul_add when possible
+        let a1 = self.a1_base * c_abs;
+        let a2 = self.a2_base * c_abs;
+        let a3 = self.a3_base * c_abs;
+
+        self.v1 = a1.mul_add(x, (1.0 - a1) * self.v1);
+        self.v2 = a2.mul_add(x, (1.0 - a2) * self.v2);
+        self.v3 = a3.mul_add(x, (1.0 - a3) * self.v3);
+
+        // LOTT = v1 / ((v2 - v3) + coco)
+        let denom_l = (self.v2 - self.v3) + self.correcting_constant;
+        let lott = self.v1 / denom_l;
+        self.last_lott = lott;
+
+        // ---- MA(LOTT) step (O(1) by ma_type) ----
+        let ma_opt = match self.ma_type.as_str() {
+            "VAR" => {
+                // CMO(9) on LOTT, then VIDYA(LOTT) with period = ott_period
+                if self.have_prev_lott {
+                    let mut d = lott - self.prev_lott;
+                    if !lott.is_finite() || !self.prev_lott.is_finite() { d = 0.0; }
+                    if i >= 9 {
+                        self.sum_up_lott -= self.ring_up_lott[self.head_lott];
+                        self.sum_dn_lott -= self.ring_dn_lott[self.head_lott];
+                    }
+                    let (up, dn) = if d > 0.0 { (d, 0.0) } else { (0.0, -d) };
+                    self.ring_up_lott[self.head_lott] = up;
+                    self.ring_dn_lott[self.head_lott] = dn;
+                    self.sum_up_lott += up;
+                    self.sum_dn_lott += dn;
+                    self.head_lott += 1;
+                    if self.head_lott == 9 { self.head_lott = 0; }
+                } else {
+                    self.have_prev_lott = true;
+                }
+                self.prev_lott = lott;
+
+                let c2 = if i >= 9 { Self::cmo_abs_from_ring(self.sum_up_lott, self.sum_dn_lott) } else { 0.0 };
+                let a = self.a_ott_base * c2;
+                self.ma_prev = a.mul_add(lott, (1.0 - a) * self.ma_prev);
+                Some(self.ma_prev)
+            }
+
+            "EMA" => {
+                if !self.ema_init {
+                    self.ma_prev = lott;
+                    self.ema_init = true;
+                } else {
+                    let a = self.ema_alpha;
+                    self.ma_prev = a.mul_add(lott, (1.0 - a) * self.ma_prev);
+                }
+                Some(self.ma_prev)
+            }
+
+            "WWMA" => {
+                // Wilder's smoothing is EMA with alpha = 1/p
+                let a = 1.0 / (self.ott_period as f64);
+                if !self.ema_init {
+                    self.ma_prev = lott;
+                    self.ema_init = true;
+                } else {
+                    self.ma_prev = a.mul_add(lott, (1.0 - a) * self.ma_prev);
+                }
+                Some(self.ma_prev)
+            }
+
+            "DEMA" => {
+                // DEMA = 2*EMA1 - EMA2 (EMA of EMA)
+                let a = self.dema_alpha;
+                if !self.dema_init {
+                    self.dema_ema1 = lott;
+                    self.dema_ema2 = lott;
+                    self.dema_init = true;
+                } else {
+                    self.dema_ema1 = a.mul_add(lott, (1.0 - a) * self.dema_ema1);
+                    self.dema_ema2 = a.mul_add(self.dema_ema1, (1.0 - a) * self.dema_ema2);
+                }
+                Some(2.0 * self.dema_ema1 - self.dema_ema2)
+            }
+
+            "SMA" => {
+                // classic O(1) ring + running sum
+                let p = self.ott_period;
+                let _old = if self.sma_count < p {
+                    self.sma_count += 1;
+                    0.0
+                } else {
+                    let o = self.sma_buf[self.sma_head];
+                    self.sma_sum -= o;
+                    o
+                };
+                self.sma_buf[self.sma_head] = lott;
+                self.sma_sum += lott;
+                self.sma_head += 1;
+                if self.sma_head == p { self.sma_head = 0; }
+                if self.sma_count >= p { Some(self.sma_sum / p as f64) } else { None }
+            }
+
+            "WMA" => {
+                // linear weights 1..p with O(1) recurrence:
+                // sumwx_{t+1} = sumwx_t - sumx_t + p * x_new
+                // sumx_{t+1}  = sumx_t + x_new - x_old
+                let p = self.ott_period;
+                let x_old = if self.wma_count < p {
+                    self.wma_count += 1;
+                    0.0
+                } else {
+                    self.wma_buf[self.wma_head]
+                };
+                // write new
+                self.wma_buf[self.wma_head] = lott;
+                self.wma_head += 1;
+                if self.wma_head == p { self.wma_head = 0; }
+                // update sums
+                self.wma_sumwx = self.wma_sumwx - self.wma_sumx + (p as f64) * lott;
+                self.wma_sumx = self.wma_sumx + lott - x_old;
+                if self.wma_count >= p { Some(self.wma_sumwx / self.wma_denom) } else { None }
+            }
+
+            "TMA" => {
+                // stage 1 SMA
+                let p1 = self.tma_p1;
+                let _o1 = if self.tma_count1 < p1 {
+                    self.tma_count1 += 1;
+                    0.0
+                } else {
+                    let o = self.tma_ring1[self.tma_head1];
+                    self.tma_sum1 -= o;
+                    o
+                };
+                self.tma_ring1[self.tma_head1] = lott;
+                self.tma_sum1 += lott;
+                self.tma_head1 += 1;
+                if self.tma_head1 == p1 { self.tma_head1 = 0; }
+                let stage1 = if self.tma_count1 >= p1 { self.tma_sum1 / p1 as f64 } else { return None };
+
+                // stage 2 SMA over stage1 outputs
+                let p2 = self.tma_p2;
+                let _o2 = if self.tma_count2 < p2 {
+                    self.tma_count2 += 1;
+                    0.0
+                } else {
+                    let o = self.tma_ring2[self.tma_head2];
+                    self.tma_sum2 -= o;
+                    o
+                };
+                self.tma_ring2[self.tma_head2] = stage1;
+                self.tma_sum2 += stage1;
+                self.tma_head2 += 1;
+                if self.tma_head2 == p2 { self.tma_head2 = 0; }
+                if self.tma_count2 >= p2 { Some(self.tma_sum2 / p2 as f64) } else { None }
+            }
+
+            "ZLEMA" => {
+                // x_adj = 2*x - x_lag  (lag = floor((p-1)/2))
+                let lag = self.zlema_lag;
+                let x_lag = if self.zlema_count <= lag { 0.0 } else {
+                    self.zlema_ring[(self.zlema_head + self.zlema_ring.len() - lag - 1) % self.zlema_ring.len()]
+                };
+                let x_adj = 2.0 * lott - x_lag;
+
+                // push into ring
+                if self.zlema_count < self.zlema_ring.len() { self.zlema_count += 1; }
+                self.zlema_ring[self.zlema_head] = lott;
+                self.zlema_head += 1;
+                if self.zlema_head == self.zlema_ring.len() { self.zlema_head = 0; }
+
+                let a = self.zlema_alpha;
+                if !self.zlema_init { self.zlema_prev = x_adj; self.zlema_init = true; }
+                else { self.zlema_prev = a.mul_add(x_adj, (1.0 - a) * self.zlema_prev); }
+                Some(self.zlema_prev)
+            }
+
+            // TSF/HULL not provided in streaming kernel; return None to defer
+            _ => None,
+        };
+
+        // --- gate + OTT state machine ---
+        if self.idx < self.required_len { return None; }
+
+        let ma = match ma_opt { Some(v) => v, None => return None };
+
+        // First bar after warmup initializes OTT trail
+        if !self.ott_init {
+            self.long_stop_prev = ma * (1.0 - self.fark);
+            self.short_stop_prev = ma * (1.0 + self.fark);
+            let mt = self.long_stop_prev;
+            let hott0 = if ma > mt { mt * self.scale_up } else { mt * self.scale_dn };
+            self.ott_init = true;
+            return Some((hott0, lott));
+        }
+
+        // normal OTT step
+        let ls = ma * (1.0 - self.fark);
+        let ss = ma * (1.0 + self.fark);
+        let long_stop = if ma > self.long_stop_prev { ls.max(self.long_stop_prev) } else { ls };
+        let short_stop = if ma < self.short_stop_prev { ss.min(self.short_stop_prev) } else { ss };
+        let dir = if self.dir_prev == -1 && ma > self.short_stop_prev { 1 }
+                  else if self.dir_prev == 1 && ma < self.long_stop_prev { -1 }
+                  else { self.dir_prev };
+        let mt = if dir == 1 { long_stop } else { short_stop };
+        let hott = if ma > mt { mt * self.scale_up } else { mt * self.scale_dn };
+
+        self.long_stop_prev = long_stop;
+        self.short_stop_prev = short_stop;
+        self.dir_prev = dir;
+
+        Some((hott, lott))
+    }
+
+    #[inline]
     pub fn reset(&mut self) {
-        self.buffer.clear();
-        self.filled = false;
+        *self = Self::try_new(OttoParams {
+            ott_period: Some(self.ott_period),
+            ott_percent: Some(self.ott_percent),
+            fast_vidya_length: Some(self.fast_vidya_length),
+            slow_vidya_length: Some(self.slow_vidya_length),
+            correcting_constant: Some(self.correcting_constant),
+            ma_type: Some(self.ma_type.clone()),
+        }).expect("OttoStream::reset: params should remain valid");
     }
 }
 

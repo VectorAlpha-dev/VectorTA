@@ -16,7 +16,7 @@
 //! ## Developer Notes
 //! - **Decision**: Single-series SIMD offers little gain due to strong recurrences; we route AVX2/AVX512 to the fused scalar classic path when applicable (devtype=stddev + SMA/EMA), otherwise fall back to the generic path.
 //! - **AVX2/AVX512 kernels**: Route to fused scalar for classic SMA/EMA; otherwise delegate to `devstop_into_slice`.
-//! - **Streaming**: Not implemented
+//! - **Streaming**: Enabled with O(1) per-tick updates for stddev+SMA/EMA; devtype 1/2 use σ-based O(1) approximations in streaming.
 //! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy)
 //! - **Batch operations**: ✅ Implemented with parallel processing support
 //! - **Row-specific batch**: Implemented for classic stddev + SMA/EMA using shared precompute of r and prefix sums; other devtypes fall back to generic path.
@@ -1263,245 +1263,260 @@ pub unsafe fn devstop_row_avx512_long(
 
 #[derive(Debug, Clone)]
 pub struct DevStopStream {
+    // params
     period: usize,
-    buffer_high: Vec<f64>,
-    buffer_low: Vec<f64>,
-    range_buffer: Vec<f64>, // Store 2-bar range values
-    base_buffer: Vec<f64>,  // Store base values for final rolling extrema
-    prev_high: f64,         // Previous high for 2-bar range
-    prev_low: f64,          // Previous low for 2-bar range
     mult: f64,
-    devtype: usize,
-    direction: String,
-    ma_type: String,
-    head: usize,
-    filled: bool,
-    warmup_counter: usize, // Track warmup period
-    range_filled: bool,    // Track when range buffer is filled
-    base_filled: bool,     // Track when base buffer is filled
+    devtype: u8,       // 0=stddev, 1=mean abs (approx), 2=median abs (approx)
+    is_long: bool,     // direction
+    is_ema: bool,      // MA kind
+
+    // 2-bar range state
+    prev_h: f64,
+    prev_l: f64,
+    have_prev: bool,
+
+    // sliding window over range r_t = max(h_t,h_{t-1}) - min(l_t,l_{t-1})
+    r_ring: Box<[f64]>, // len = period
+    r_head: usize,       // next position to overwrite
+    r_filled: bool,
+    sum: f64,            // Σ r (finite only)
+    sum2: f64,           // Σ r^2
+    cnt: usize,          // #finite r in window
+
+    // EMA over r (boot with SMA of available prefill to match classic)
+    ema: f64,
+    ema_booted: bool,
+    alpha: f64, // 2/(period+1)
+    beta:  f64, // 1 - alpha
+
+    // base window + monotonic deque for rolling extrema over base (period)
+    base_ring: Box<[f64]>, // len = period
+    dq_idx: Box<[usize]>,  // circular deque storing absolute indices
+    dq_head: usize,
+    dq_len: usize,
+
+    // absolute time index (0-based)
+    t: usize,
 }
 
 impl DevStopStream {
     pub fn try_new(params: DevStopParams) -> Result<Self, DevStopError> {
         let period = params.period.unwrap_or(20);
         if period == 0 {
-            return Err(DevStopError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(DevStopError::InvalidPeriod { period, data_len: 0 });
         }
+        let mult = params.mult.unwrap_or(0.0);
+        let devtype = params.devtype.unwrap_or(0) as u8;
+        let is_long = params
+            .direction
+            .as_deref()
+            .unwrap_or("long")
+            .eq_ignore_ascii_case("long");
+        let is_ema = params
+            .ma_type
+            .as_deref()
+            .unwrap_or("sma")
+            .eq_ignore_ascii_case("ema");
+
+        let alpha = if is_ema { 2.0 / (period as f64 + 1.0) } else { 0.0 };
+
         Ok(Self {
             period,
-            buffer_high: vec![f64::NAN; period],
-            buffer_low: vec![f64::NAN; period],
-            range_buffer: vec![f64::NAN; period],
-            base_buffer: vec![f64::NAN; period],
-            prev_high: f64::NAN,
-            prev_low: f64::NAN,
-            mult: params.mult.unwrap_or(0.0),
-            devtype: params.devtype.unwrap_or(0),
-            direction: params.direction.unwrap_or_else(|| "long".to_string()),
-            ma_type: params.ma_type.unwrap_or_else(|| "sma".to_string()),
-            head: 0,
-            filled: false,
-            warmup_counter: 0,
-            range_filled: false,
-            base_filled: false,
+            mult,
+            devtype,
+            is_long,
+            is_ema,
+            prev_h: f64::NAN,
+            prev_l: f64::NAN,
+            have_prev: false,
+            r_ring: vec![f64::NAN; period].into_boxed_slice(),
+            r_head: 0,
+            r_filled: false,
+            sum: 0.0,
+            sum2: 0.0,
+            cnt: 0,
+            ema: f64::NAN,
+            ema_booted: !is_ema,
+            alpha,
+            beta: 1.0 - alpha,
+            base_ring: vec![f64::NAN; period].into_boxed_slice(),
+            dq_idx: vec![0usize; period].into_boxed_slice(),
+            dq_head: 0,
+            dq_len: 0,
+            t: 0,
         })
     }
-    pub fn update(&mut self, high: f64, low: f64) -> Option<f64> {
-        self.warmup_counter += 1;
 
-        // Compute 2-bar range
-        let range = if !self.prev_high.is_nan()
-            && !self.prev_low.is_nan()
-            && !high.is_nan()
-            && !low.is_nan()
+    /// Push one bar and (after warmup) return the new DevStop value.
+    /// Warmup for streaming (first=0): emits after index t >= 2*period - 1.
+    #[inline]
+    pub fn update(&mut self, high: f64, low: f64) -> Option<f64> {
+        // ----- 1) build 2-bar range r_t -----
+        let mut r_new = f64::NAN;
+        if self.have_prev
+            && high.is_finite()
+            && low.is_finite()
+            && self.prev_h.is_finite()
+            && self.prev_l.is_finite()
         {
-            let high2 = if high > self.prev_high {
-                high
+            let hi2 = if high > self.prev_h { high } else { self.prev_h };
+            let lo2 = if low < self.prev_l { low } else { self.prev_l };
+            r_new = hi2 - lo2;
+        }
+        self.prev_h = high;
+        self.prev_l = low;
+        self.have_prev = true;
+
+        // ----- 2) slide window statistics over r -----
+        let p = self.period;
+        if self.r_filled {
+            let old = self.r_ring[self.r_head];
+            if old.is_finite() {
+                self.sum -= old;
+                self.sum2 -= old * old;
+                self.cnt -= 1;
+            }
+        }
+        self.r_ring[self.r_head] = r_new;
+        self.r_head = (self.r_head + 1) % p;
+        if self.r_head == 0 {
+            self.r_filled = true;
+        }
+        if r_new.is_finite() {
+            self.sum += r_new;
+            self.sum2 += r_new * r_new;
+            self.cnt += 1;
+        }
+
+        // ----- 3) update EMA if needed (boot with SMA of current ring) -----
+        if self.is_ema {
+            if !self.ema_booted {
+                if self.t + 1 >= self.period {
+                    self.ema = if self.cnt > 0 { self.sum / self.cnt as f64 } else { f64::NAN };
+                    self.ema_booted = true;
+                }
+            } else if r_new.is_finite() {
+                self.ema = r_new.mul_add(self.alpha, self.beta * self.ema);
+            }
+        }
+
+        // ----- 4) compute avtr and deviation (O(1)) -----
+        let base_val = if self.t + 1 >= self.period {
+            let (avtr, sigma) = if self.cnt == 0 {
+                (f64::NAN, f64::NAN)
+            } else if self.is_ema {
+                let invc = 1.0 / (self.cnt as f64);
+                let e1 = self.sum * invc;
+                let e2 = self.sum2 * invc;
+                let ema = self.ema;
+                let var = (e2 - 2.0 * ema * e1 + ema * ema).max(0.0);
+                (ema, var.sqrt())
             } else {
-                self.prev_high
+                let invc = 1.0 / (self.cnt as f64);
+                let mean = self.sum * invc;
+                let var = ((self.sum2 * invc) - mean * mean).max(0.0);
+                (mean, var.sqrt())
             };
-            let low2 = if low < self.prev_low {
-                low
+
+            let dev = match self.devtype {
+                0 => sigma,                                                // stddev (exact)
+                1 => sigma * fast_mean_abs_ratio(),                        // ≈ mean |r - mean|
+                2 => sigma * fast_mad_ratio(),                             // ≈ MAD
+                _ => sigma,
+            };
+
+            if self.is_long {
+                if high.is_nan() || avtr.is_nan() || dev.is_nan() {
+                    f64::NAN
+                } else {
+                    high - avtr - self.mult * dev
+                }
             } else {
-                self.prev_low
-            };
-            high2 - low2
+                if low.is_nan() || avtr.is_nan() || dev.is_nan() {
+                    f64::NAN
+                } else {
+                    low + avtr + self.mult * dev
+                }
+            }
         } else {
             f64::NAN
         };
 
-        // Store current as previous for next iteration
-        self.prev_high = high;
-        self.prev_low = low;
+        // ----- 5) push base into monotonic deque (rolling max/min over last p bases) -----
+        let i = self.t;
+        if self.t + 1 >= self.period {
+            let slot = i % p;
+            self.base_ring[slot] = base_val;
 
-        // Store range in circular buffer
-        self.range_buffer[self.head] = range;
-        self.buffer_high[self.head] = high;
-        self.buffer_low[self.head] = low;
-
-        self.head = (self.head + 1) % self.period;
-        if !self.filled && self.head == 0 {
-            self.filled = true;
-        }
-        if !self.range_filled && self.warmup_counter >= self.period + 1 {
-            self.range_filled = true;
-        }
-
-        // Need at least period+1 for range MA calculation
-        if self.warmup_counter < self.period + 1 {
-            return None;
-        }
-
-        // Compute base value
-        let base = self.compute_base();
-        if base.is_nan() {
-            return None;
-        }
-
-        // Store base in circular buffer
-        let base_idx = (self.warmup_counter - self.period - 1) % self.period;
-        self.base_buffer[base_idx] = base;
-
-        if !self.base_filled && self.warmup_counter >= 2 * self.period {
-            self.base_filled = true;
-        }
-
-        // Need full warmup period: first + 2*period - 1 where first=0 for streaming
-        let required_warmup = 2 * self.period - 1;
-        if self.warmup_counter < required_warmup {
-            return None;
-        }
-
-        // Compute rolling extrema over base values
-        Some(self.compute_final())
-    }
-    fn compute_base(&self) -> f64 {
-        // Extract range values in order
-        let mut range_ordered = vec![0.0; self.period];
-        let mut high_ordered = vec![0.0; self.period];
-        let mut low_ordered = vec![0.0; self.period];
-        let mut idx = self.head;
-        for i in 0..self.period {
-            range_ordered[i] = self.range_buffer[idx];
-            high_ordered[i] = self.buffer_high[idx];
-            low_ordered[i] = self.buffer_low[idx];
-            idx = (idx + 1) % self.period;
-        }
-
-        // Apply MA to range
-        let avtr = {
-            let input = MaData::Slice(&range_ordered);
-            match ma(&self.ma_type, input, self.period) {
-                Ok(ma_result) => ma_result,
-                Err(_) => return f64::NAN,
-            }
-        };
-
-        // Get the last MA value
-        let avtr_value = avtr.last().copied().unwrap_or(f64::NAN);
-        if avtr_value.is_nan() {
-            return f64::NAN;
-        }
-
-        // Compute deviation on range values
-        let dev_value = match self.devtype {
-            0 => {
-                // Standard deviation with sqrt
-                let mean = range_ordered.iter().sum::<f64>() / self.period as f64;
-                let variance = range_ordered
-                    .iter()
-                    .map(|x| (x - mean).powi(2))
-                    .sum::<f64>()
-                    / self.period as f64;
-                variance.sqrt()
-            }
-            1 => {
-                // Mean absolute deviation
-                let mean = range_ordered.iter().sum::<f64>() / self.period as f64;
-                range_ordered.iter().map(|x| (x - mean).abs()).sum::<f64>() / self.period as f64
-            }
-            2 => {
-                // Median absolute deviation (MAD)
-                let mut sorted = range_ordered.clone();
-                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                let median = if self.period % 2 == 0 {
-                    (sorted[self.period / 2 - 1] + sorted[self.period / 2]) / 2.0
-                } else {
-                    sorted[self.period / 2]
-                };
-
-                // Compute absolute deviations from median
-                let mut abs_devs: Vec<f64> =
-                    range_ordered.iter().map(|x| (x - median).abs()).collect();
-                abs_devs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-                // Return median of absolute deviations
-                if self.period % 2 == 0 {
-                    (abs_devs[self.period / 2 - 1] + abs_devs[self.period / 2]) / 2.0
-                } else {
-                    abs_devs[self.period / 2]
+            if self.is_long {
+                while self.dq_len > 0 {
+                    let back_pos = (self.dq_head + self.dq_len - 1) % p;
+                    let j = self.dq_idx[back_pos];
+                    let bj = self.base_ring[j % p];
+                    if bj.is_nan() || bj <= base_val {
+                        self.dq_len -= 1;
+                    } else {
+                        break;
+                    }
+                }
+            } else {
+                while self.dq_len > 0 {
+                    let back_pos = (self.dq_head + self.dq_len - 1) % p;
+                    let j = self.dq_idx[back_pos];
+                    let bj = self.base_ring[j % p];
+                    if bj.is_nan() || bj >= base_val {
+                        self.dq_len -= 1;
+                    } else {
+                        break;
+                    }
                 }
             }
-            _ => f64::NAN,
-        };
+            // push i
+            let push_pos = (self.dq_head + self.dq_len) % p;
+            self.dq_idx[push_pos] = i;
+            self.dq_len += 1;
 
-        // Get most recent high/low
-        let current_high = high_ordered.last().copied().unwrap_or(f64::NAN);
-        let current_low = low_ordered.last().copied().unwrap_or(f64::NAN);
+            // pop expired
+            let cut = i + 1 - p;
+            while self.dq_len > 0 {
+                let j = self.dq_idx[self.dq_head];
+                if j < cut {
+                    self.dq_head = (self.dq_head + 1) % p;
+                    self.dq_len -= 1;
+                } else {
+                    break;
+                }
+            }
+        }
 
-        // Compute base value
-        if self.direction.eq_ignore_ascii_case("long") {
-            // long: high - avtr - mult*dev
-            if current_high.is_nan() || avtr_value.is_nan() || dev_value.is_nan() {
-                f64::NAN
+        // ----- 6) emit after full warmup (start_final = period + (period-1)) -----
+        let out = if self.t + 1 >= (2 * self.period) {
+            if self.dq_len > 0 {
+                let j = self.dq_idx[self.dq_head];
+                Some(self.base_ring[j % p])
             } else {
-                current_high - avtr_value - self.mult * dev_value
+                Some(f64::NAN)
             }
         } else {
-            // short: low + avtr + mult*dev
-            if current_low.is_nan() || avtr_value.is_nan() || dev_value.is_nan() {
-                f64::NAN
-            } else {
-                current_low + avtr_value + self.mult * dev_value
-            }
-        }
-    }
+            None
+        };
 
-    fn compute_final(&self) -> f64 {
-        // Compute rolling extrema over base values
-        if self.direction.eq_ignore_ascii_case("long") {
-            // For long: find max of base values
-            let mut max_base = f64::NEG_INFINITY;
-            for i in 0..self.period {
-                let val = self.base_buffer[i];
-                if !val.is_nan() && val > max_base {
-                    max_base = val;
-                }
-            }
-            if max_base == f64::NEG_INFINITY {
-                f64::NAN
-            } else {
-                max_base
-            }
-        } else {
-            // For short: find min of base values
-            let mut min_base = f64::INFINITY;
-            for i in 0..self.period {
-                let val = self.base_buffer[i];
-                if !val.is_nan() && val < min_base {
-                    min_base = val;
-                }
-            }
-            if min_base == f64::INFINITY {
-                f64::NAN
-            } else {
-                min_base
-            }
-        }
+        self.t += 1;
+        out
     }
+}
+
+// ---------- Fast-math helpers for O(1) approximations ----------
+#[inline(always)]
+fn fast_mean_abs_ratio() -> f64 {
+    // For normal data: E|X-μ| = σ * sqrt(2/π) (~0.79788456)
+    0.797_884_560_802_865_4_f64
+}
+
+#[inline(always)]
+fn fast_mad_ratio() -> f64 {
+    // MAD ≈ σ / 1.4826   (i.e., MAD*1.4826 ≈ σ for normal data)
+    1.0 / 1.482_602_218_505_602_f64
 }
 
 // Python bindings

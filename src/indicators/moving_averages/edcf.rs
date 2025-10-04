@@ -30,12 +30,11 @@
 //! ## Developer Notes
 //! - **AVX2 kernel**: Fully implemented - vectorized distance calculations with 4-wide SIMD
 //! - **AVX512 kernel**: Fully implemented - optimized with 8-wide SIMD operations
-//! - **Streaming update**: O(n) complexity - recalculates all distances for each update
+//! - **Streaming update**: O(1) per update using rolling sums of prices and squared prices
 //! - **Memory optimization**: Uses alloc_with_nan_prefix but requires full-size distance buffer (memory intensive)
-//! - **Optimization opportunities**:
-//!   - Streaming kernel could cache distances and update incrementally
-//!   - Consider ring buffer approach to avoid full distance recalculation
-//!   - Distance buffer allocation is a major bottleneck in WASM
+//! - **WASM caution**: Distance buffer access remains costly in WASM (see warning above)
+//!
+//! Decision: Streaming path switched to O(1) kernel using rolling sums; matches batch warmup (2·period) and returns None when denominator is zero.
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
@@ -639,30 +638,42 @@ pub unsafe fn edcf_avx512(data: &[f64], period: usize, first_valid: usize, out: 
 }
 
 #[derive(Debug, Clone)]
-/// Streaming variant of the EDCF filter.
+/// Streaming variant of the EDCF filter with O(1) updates.
 pub struct EdcfStream {
     period: usize,
+    // price ring buffer
     buffer: Vec<f64>,
+    // weight ring buffer (w_k for the price at the same index)
     dist: Vec<f64>,
+    // index to overwrite next (points at the oldest sample)
     head: usize,
-    filled: bool,
+    // number of accepted finite samples since last reset
+    count: usize,
+
+    // rolling sums over the *previous p-1* samples (exclude current)
+    sum_prev: f64,
+    sum_prev_sq: f64,
+
+    // rolling window aggregates over the last *p* (w_k, x_k) pairs
+    den: f64,
+    num: f64,
+
+    // cached (p-1) as f64
+    p_minus1_f: f64,
 }
 
 impl EdcfStream {
     /// Creates a new stream with the provided parameters.
+    #[inline]
     pub fn try_new(params: EdcfParams) -> Result<Self, EdcfError> {
         let period = params.period.unwrap_or(15);
         if period == 0 {
-            return Err(EdcfError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(EdcfError::InvalidPeriod { period, data_len: 0 });
         }
 
-        // Use alloc_with_nan_prefix for the buffer (all values should be NaN initially)
+        // Keep parity with existing semantics: price buffer starts as NaN,
+        // weight buffer starts as 0.0 (weights are not defined before p-1 prevs).
         let buffer = alloc_with_nan_prefix(period, period);
-
-        // dist needs to be zero-initialized as it's read before being written
         let dist = vec![0.0; period];
 
         Ok(Self {
@@ -670,53 +681,123 @@ impl EdcfStream {
             buffer,
             dist,
             head: 0,
-            filled: false,
+            count: 0,
+            sum_prev: 0.0,
+            sum_prev_sq: 0.0,
+            den: 0.0,
+            num: 0.0,
+            p_minus1_f: (period - 1) as f64,
         })
     }
+
     #[inline(always)]
-    /// Feeds a new value and returns the filtered result once enough
-    /// observations are available.
+    fn bump_head(&mut self) {
+        // branchy increment is faster than % on hot paths
+        let n = self.head + 1;
+        self.head = if n == self.period { 0 } else { n };
+    }
+
+    /// Feed a new value and return the filtered result once warmup is satisfied.
+    ///
+    /// Warmup matches batch kernels: returns `None` until `count >= 2*period`.
+    /// Returns `None` as well if the current denominator is zero (e.g., constant window).
+    #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
         if !value.is_finite() {
+            // keep state unchanged on non-finite input
             return None;
         }
 
-        // write at head; idx points at the just-written sample x_k
+        let p = self.period;
+
+        // Values that are about to leave the window (valid only once we've seen >= p samples).
+        let old_x = self.buffer[self.head];
+        let old_w = self.dist[self.head];
+        let had_full_window = self.count >= p;
+
+        // --- 1) Compute new weight w_t in O(1) ---
+        // Only defined once we have p-1 previous values; otherwise keep it 0
+        // to mirror the batch kernel's early zeros in the distance buffer.
+        let w_new = if self.count >= (p - 1) {
+            // w_t = (p-1)*x^2 - 2*x*sum_prev + sum_prev_sq
+            let x2 = value * value;
+            self.p_minus1_f.mul_add(x2, self.sum_prev_sq) - (2.0 * value * self.sum_prev)
+        } else {
+            0.0
+        };
+
+        // --- 2) Update rolling aggregates (den,num) for the last p weights ---
+        if had_full_window {
+            // drop the contribution that slides out
+            self.den -= old_w;
+            self.num -= old_w * old_x;
+        }
+        // add the new contribution
+        self.den += w_new;
+        self.num = w_new.mul_add(value, self.num);
+
+        // --- 3) Commit the new sample & weight to the rings ---
         self.buffer[self.head] = value;
-        let idx = self.head;
-        self.head = (self.head + 1) % self.period;
+        self.dist[self.head] = w_new;
+        self.bump_head();
 
-        if !self.filled && self.head == 0 {
-            self.filled = true;
+        // --- 4) Maintain sums of the *previous p-1* values for next step ---
+        // After evaluating w_new with the *current* previous set, we now
+        // insert x_t into that set for the next update and, if necessary, remove the oldest.
+        self.sum_prev += value;
+        self.sum_prev_sq = value.mul_add(value, self.sum_prev_sq);
+        if self.count >= (p - 1) {
+            // remove x_{t-p+1}, which was sitting at `old_x` (head pointed to it before overwrite)
+            if had_full_window {
+                self.sum_prev -= old_x;
+                self.sum_prev_sq -= old_x * old_x;
+            }
         }
-        if !self.filled {
+
+        // --- 5) Advance sample count and decide output ---
+        self.count += 1;
+        if self.count < 2 * p {
             return None;
         }
-
-        // distance of x_k to previous period-1 samples (skip self once)
-        let mut sum_sq = 0.0;
-        let mut pos = idx;
-        for _ in 1..self.period {
-            pos = (pos + self.period - 1) % self.period;
-            let d = value - self.buffer[pos];
-            sum_sq += d * d;
+        if self.den != 0.0 {
+            // Division isolated for easy "fast-math" swap (see helper below)
+            Some(fast_div(self.num, self.den))
+        } else {
+            None
         }
-        self.dist[idx] = sum_sq;
-
-        // weighted average, aligned to idx
-        let mut num = 0.0;
-        let mut den = 0.0;
-        pos = idx;
-        for _ in 0..self.period {
-            let w = self.dist[pos];
-            let v = self.buffer[pos];
-            num += w * v;
-            den += w;
-            pos = (pos + self.period - 1) % self.period;
-        }
-        (den != 0.0).then_some(num / den)
     }
 }
+
+// ------------ Fast-math division hook (optional) ------------
+#[inline(always)]
+fn fast_div(num: f64, den: f64) -> f64 {
+    // Default: rely on the platform's IEEE-754 division.
+    // Swap this for a gated approximation below if you enable the "fast-math" cfg.
+    num / den
+}
+
+/*  If you want a faster (approximate) division, you can enable a feature
+    and use a Newton–Raphson reciprocal seeded from f32. This replaces a costly
+    f64 divide with: 1 f32 divide + 2 f64 muls + 1 f64 add (+ casts).
+
+    Accuracy: after one NR step the relative error is typically < 1e-7 for well-scaled inputs,
+    which is more than sufficient for smoothing indicators. Add a second iteration if you
+    want ~full f64 precision at still-lower latency than a hardware f64 divide on many CPUs.
+
+    Uncomment and compile with `--cfg fast_math_edcf` to use.
+
+#[inline(always)]
+#[cfg(fast_math_edcf)]
+fn fast_div(num: f64, den: f64) -> f64 {
+    // initial guess from single-precision reciprocal
+    let mut r = (1.0f32 / den as f32) as f64;
+    // one Newton step: r <- r * (2 - den*r)
+    r = r * (2.0 - den * r);
+    // OPTIONAL second step for near-IEEE accuracy:
+    // r = r * (2.0 - den * r);
+    num * r
+}
+*/
 
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]

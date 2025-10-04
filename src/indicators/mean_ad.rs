@@ -14,14 +14,11 @@
 //! - **values**: Vector of mean absolute deviation values with NaN prefix during warmup period
 //!
 //! ## Developer Notes
-//! - SIMD: AVX2/AVX512 paths delegate to the optimized scalar. The recurrence is
-//!   inherently sequential (sliding mean and residual ring), so vectorizing across
-//!   time offers limited benefit. Runtime selection still works but returns scalar.
-//! - Scalar: Single-pass streaming with incremental SMA update, hoisted `inv_p`,
-//!   modulo-free ring index, and `alloc_with_nan_prefix` for warmup-only NaN writes.
-//!   This avoids full-vector prefill and repeated divisions.
-//! - Batch: Uses uninitialized matrix helpers and initializes NaN prefixes per-row
-//!   via `init_matrix_prefixes`; rows call the same optimized row-scalar kernel.
+//! - Decision: Streaming uses O(1) sliding windows with two ring buffers (prices + residuals),
+//!   matching batch outputs exactly. First Some(...) appears at index `2*period - 2`.
+//! - SIMD: AVX2/AVX512 paths delegate to scalar; time-recursive recurrence limits gains.
+//! - Scalar: Incremental SMA update, cached reciprocal per call, modulo-free ring indices.
+//! - Batch: Uses uninitialized helpers; NaN warmup prefixes mirror batch semantics.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -822,38 +819,68 @@ impl MeanAdStream {
     }
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        // Add new value to buffer
-        self.buffer[self.head] = value;
-        self.head = (self.head + 1) % self.period;
-        if !self.filled && self.head == 0 {
+        let p = self.period;
+        let inv_p = 1.0f64 / (p as f64);
+
+        // 1) Capture outgoing slots (oldest values in the rings)
+        let price_idx = self.head;
+        let old_x = self.buffer[price_idx];
+
+        let resid_idx = self.mean_head;
+        let old_r = self.mean_buffer[resid_idx];
+
+        // 2) Write incoming price & advance ring index (modulo-free)
+        self.buffer[price_idx] = value;
+        let next_price_idx = price_idx + 1;
+        let wrapped_prices = next_price_idx == p;
+        self.head = if wrapped_prices { 0 } else { next_price_idx };
+
+        // If we just completed the first full price window, flip the flag.
+        let just_filled_prices = !self.filled && wrapped_prices;
+        if just_filled_prices {
             self.filled = true;
         }
+        // Warm up price window: reuse `self.mean` as a running SUM until first window closes.
         if !self.filled {
+            self.mean += value;
             return None;
         }
 
-        // Calculate rolling mean of price window
-        self.mean = self.buffer.iter().copied().sum::<f64>() / (self.period as f64);
+        // 3) O(1) SMA update for current tick using running SUM in `self.mean`
+        let sum_t = if just_filled_prices {
+            // `self.mean` has SUM of the previous (p-1) values here
+            self.mean + value
+        } else {
+            // steady state: drop oldest, add newest
+            self.mean + value - old_x
+        };
+        let mean_t = sum_t * inv_p;
+        // keep SUM in `self.mean` to match batch numerics
+        self.mean = sum_t;
 
-        // Calculate deviation of current value from rolling mean
-        // We're maintaining a rolling window of deviations
-        let new_deviation = (value - self.mean).abs();
+        // 4) Current residual against current SMA
+        let resid_t = (value - mean_t).abs();
 
-        // Add new deviation to deviation buffer
-        self.mean_buffer[self.mean_head] = new_deviation;
-        self.mean_head = (self.mean_head + 1) % self.period;
+        // 5) Push residual & advance residual ring (modulo-free)
+        self.mean_buffer[resid_idx] = resid_t;
+        let next_resid_idx = resid_idx + 1;
+        let wrapped_resids = next_resid_idx == p;
+        self.mean_head = if wrapped_resids { 0 } else { next_resid_idx };
 
-        // We need two full windows: one for mean, one for deviations
-        if !self.mean_filled && self.mean_head == 0 {
-            self.mean_filled = true;
-        }
+        // Warm up residual window: reuse `self.mad` as a running SUM of residuals.
         if !self.mean_filled {
+            self.mad += resid_t;
+            if wrapped_resids {
+                // First MAD becomes available exactly at t = 2*p - 2
+                self.mean_filled = true;
+                return Some(self.mad * inv_p);
+            }
             return None;
         }
 
-        // Calculate rolling mean of deviations
-        self.mad = self.mean_buffer.iter().copied().sum::<f64>() / (self.period as f64);
-        Some(self.mad)
+        // 6) O(1) rolling MAD update once residual window full (keep SUM in `self.mad`)
+        self.mad = self.mad + resid_t - old_r;
+        Some(self.mad * inv_p)
     }
 }
 

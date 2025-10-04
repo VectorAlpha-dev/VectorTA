@@ -20,7 +20,8 @@
 //!   Selection routes to scalar for Avx2/Avx512 variants.
 //! - Batch: per-row compute reuses the scalar kernel. Row-specific cross-row
 //!   sharing (e.g., precomputed intrabar, per-period extrema) deferred.
-//! - Streaming: unchanged (O(n) inner scan). Future work could adopt deques.
+//! - Streaming: O(1) amortized per tick via monotonic deques for rolling
+//!   min/max and a ring+running-sum SMA ramp. Matches scalar outputs.
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
@@ -1205,105 +1206,224 @@ fn aso_batch_inner_into(
     Ok(combos)
 }
 
-// ==================== STREAMING SUPPORT ====================
-/// Streaming calculator for real-time updates
+// ==================== STREAMING SUPPORT (O(1) amortized) ====================
+/// Streaming calculator using monotonic deques for min/max and a ring+sum SMA ramp.
+/// Decision: SIMD stubs remain; streaming optimized to O(1) amortized with parity to scalar.
 #[derive(Debug, Clone)]
 pub struct AsoStream {
-    buffer_open: Vec<f64>,
-    buffer_high: Vec<f64>,
-    buffer_low: Vec<f64>,
-    buffer_close: Vec<f64>,
+    // Ring buffers for the last `period` OHLC values
+    o: Vec<f64>,
+    h: Vec<f64>,
+    l: Vec<f64>,
+    c: Vec<f64>,
+
+    // Rolling SMA of bulls/bears via ring + running sums
+    rb: Vec<f64>,
+    re: Vec<f64>,
+    sum_b: f64,
+    sum_e: f64,
+    head_be: usize,
+    filled_be: usize,
+
+    // Monotonic deques for rolling min(low) and max(high)
+    // We store (absolute index, value) in parallel fixed-size circular arrays
+    dq_min_idx: Vec<usize>,
+    dq_min_val: Vec<f64>,
+    min_head: usize,
+    min_tail: usize,
+    min_len: usize,
+
+    dq_max_idx: Vec<usize>,
+    dq_max_val: Vec<f64>,
+    max_head: usize,
+    max_tail: usize,
+    max_len: usize,
+
     period: usize,
     mode: usize,
-    index: usize,
-    ready: bool,
+    i: usize,    // absolute bar count seen so far (0-based)
+    ready: bool, // true once we have at least `period` bars
 }
 
 impl AsoStream {
+    #[inline]
     pub fn try_new(params: AsoParams) -> Result<Self, AsoError> {
         let period = params.period.unwrap_or(10);
         let mode = params.mode.unwrap_or(0);
 
         if period == 0 {
-            return Err(AsoError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(AsoError::InvalidPeriod { period, data_len: 0 });
         }
-
         if mode > 2 {
             return Err(AsoError::InvalidMode { mode });
         }
 
         Ok(Self {
-            buffer_open: vec![0.0; period],
-            buffer_high: vec![0.0; period],
-            buffer_low: vec![0.0; period],
-            buffer_close: vec![0.0; period],
+            o: vec![0.0; period],
+            h: vec![0.0; period],
+            l: vec![0.0; period],
+            c: vec![0.0; period],
+
+            rb: vec![0.0; period],
+            re: vec![0.0; period],
+            sum_b: 0.0,
+            sum_e: 0.0,
+            head_be: 0,
+            filled_be: 0,
+
+            dq_min_idx: vec![0usize; period],
+            dq_min_val: vec![0.0; period],
+            min_head: 0,
+            min_tail: 0,
+            min_len: 0,
+
+            dq_max_idx: vec![0usize; period],
+            dq_max_val: vec![0.0; period],
+            max_head: 0,
+            max_tail: 0,
+            max_len: 0,
+
             period,
             mode,
-            index: 0,
+            i: 0,
             ready: false,
         })
     }
 
+    /// Multiply by the reciprocal; guard zero to avoid NaNs
+    #[inline(always)]
+    fn inv_or_one(x: f64) -> f64 {
+        if x != 0.0 { x.recip() } else { 1.0 }
+    }
+
+    #[inline]
     pub fn update(&mut self, open: f64, high: f64, low: f64, close: f64) -> Option<(f64, f64)> {
-        let idx = self.index % self.period;
-        self.buffer_open[idx] = open;
-        self.buffer_high[idx] = high;
-        self.buffer_low[idx] = low;
-        self.buffer_close[idx] = close;
-        self.index += 1;
+        let p = self.period;
+        let i = self.i;
+        let idx = i % p;
 
-        if self.index >= self.period {
-            self.ready = true;
-        }
+        // Write newest OHLC into rings
+        self.o[idx] = open;
+        self.h[idx] = high;
+        self.l[idx] = low;
+        self.c[idx] = close;
 
-        if self.ready {
-            // Calculate current sentiment values
-            let intrarange = high - low;
-            let k1 = if intrarange == 0.0 { 1.0 } else { intrarange };
-            let intrabarbulls = (((close - low) + (high - open)) * 50.0) / k1;
-            let intrabarbears = (((high - close) + (open - low)) * 50.0) / k1;
-
-            // Find group low and high
-            let mut grouplow = f64::MAX;
-            let mut grouphigh = f64::MIN;
-            for i in 0..self.period {
-                if self.buffer_low[i] < grouplow {
-                    grouplow = self.buffer_low[i];
-                }
-                if self.buffer_high[i] > grouphigh {
-                    grouphigh = self.buffer_high[i];
-                }
+        // ---- push `low` into monotonic-min deque (nondecreasing by value) ----
+        while self.min_len > 0 {
+            let back = if self.min_tail == 0 { p - 1 } else { self.min_tail - 1 };
+            if low <= self.dq_min_val[back] {
+                // pop back
+                self.min_tail = back;
+                self.min_len -= 1;
+            } else {
+                break;
             }
-
-            let oldest_idx = self.index % self.period;
-            let groupopen = self.buffer_open[oldest_idx];
-            let grouprange = grouphigh - grouplow;
-            let k2 = if grouprange == 0.0 { 1.0 } else { grouprange };
-
-            let groupbulls = (((close - grouplow) + (grouphigh - groupopen)) * 50.0) / k2;
-            let groupbears = (((grouphigh - close) + (groupopen - grouplow)) * 50.0) / k2;
-
-            let bulls = match self.mode {
-                0 => (intrabarbulls + groupbulls) * 0.5,
-                1 => intrabarbulls,
-                2 => groupbulls,
-                _ => (intrabarbulls + groupbulls) * 0.5,
-            };
-
-            let bears = match self.mode {
-                0 => (intrabarbears + groupbears) * 0.5,
-                1 => intrabarbears,
-                2 => groupbears,
-                _ => (intrabarbears + groupbears) * 0.5,
-            };
-
-            Some((bulls, bears))
-        } else {
-            None
         }
+        if self.min_len == p {
+            // Capacity guard (shouldn't trigger in steady state but keep it safe)
+            self.min_head += 1;
+            if self.min_head == p { self.min_head = 0; }
+            self.min_len -= 1;
+        }
+        self.dq_min_idx[self.min_tail] = i;
+        self.dq_min_val[self.min_tail] = low;
+        self.min_tail += 1;
+        if self.min_tail == p { self.min_tail = 0; }
+        self.min_len += 1;
+
+        // ---- push `high` into monotonic-max deque (nonincreasing by value) ----
+        while self.max_len > 0 {
+            let back = if self.max_tail == 0 { p - 1 } else { self.max_tail - 1 };
+            if high >= self.dq_max_val[back] {
+                // pop back
+                self.max_tail = back;
+                self.max_len -= 1;
+            } else {
+                break;
+            }
+        }
+        if self.max_len == p {
+            self.max_head += 1;
+            if self.max_head == p { self.max_head = 0; }
+            self.max_len -= 1;
+        }
+        self.dq_max_idx[self.max_tail] = i;
+        self.dq_max_val[self.max_tail] = high;
+        self.max_tail += 1;
+        if self.max_tail == p { self.max_tail = 0; }
+        self.max_len += 1;
+
+        // Advance bar counter and readiness
+        self.i = i + 1;
+        if self.i >= p { self.ready = true; }
+        if !self.ready {
+            return None;
+        }
+
+        // Oldest absolute index in the window [i - p + 1, i]
+        let start_abs = self.i - p;
+
+        // Evict elements that left the window from deque fronts
+        while self.min_len > 0 && self.dq_min_idx[self.min_head] < start_abs {
+            self.min_head += 1;
+            if self.min_head == p { self.min_head = 0; }
+            self.min_len -= 1;
+        }
+        while self.max_len > 0 && self.dq_max_idx[self.max_head] < start_abs {
+            self.max_head += 1;
+            if self.max_head == p { self.max_head = 0; }
+            self.max_len -= 1;
+        }
+
+        // Group extrema from deque fronts (values stored alongside indices)
+        debug_assert!(self.min_len > 0 && self.max_len > 0);
+        let gl = self.dq_min_val[self.min_head];
+        let gh = self.dq_max_val[self.max_head];
+
+        // Open at the oldest element in the window (ring index avoids a %)
+        let oldest_ring = if idx + 1 == p { 0 } else { idx + 1 };
+        let gopen = self.o[oldest_ring];
+
+        // -------- intrabar sentiment --------
+        let intrarange = high - low;
+        let scale1 = 50.0 * Self::inv_or_one(intrarange);
+        let intrabarbulls = ((close - low) + (high - open)) * scale1;
+        let intrabarbears = ((high - close) + (open - low)) * scale1;
+
+        // -------- group sentiment (rolling window) --------
+        let gr = gh - gl;
+        let scale2 = 50.0 * Self::inv_or_one(gr);
+        let groupbulls = ((close - gl) + (gh - gopen)) * scale2;
+        let groupbears = ((gh - close) + (gopen - gl)) * scale2;
+
+        // Combine per mode (0: average both, 1: intrabar only, 2: group only)
+        let b = match self.mode {
+            0 => 0.5 * (intrabarbulls + groupbulls),
+            1 => intrabarbulls,
+            _ => groupbulls,
+        };
+        let e = match self.mode {
+            0 => 0.5 * (intrabarbears + groupbears),
+            1 => intrabarbears,
+            _ => groupbears,
+        };
+
+        // -------- O(1) rolling SMA ramp of bulls/bears (matches batch/scalar) --------
+        let old_b = if self.filled_be == p { self.rb[self.head_be] } else { 0.0 };
+        let old_e = if self.filled_be == p { self.re[self.head_be] } else { 0.0 };
+
+        self.sum_b += b - old_b;
+        self.sum_e += e - old_e;
+
+        self.rb[self.head_be] = b;
+        self.re[self.head_be] = e;
+
+        self.head_be += 1;
+        if self.head_be == p { self.head_be = 0; }
+        if self.filled_be < p { self.filled_be += 1; }
+
+        let n = self.filled_be as f64;
+        Some((self.sum_b / n, self.sum_e / n))
     }
 }
 

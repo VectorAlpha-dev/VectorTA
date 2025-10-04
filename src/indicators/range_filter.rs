@@ -1718,6 +1718,7 @@ pub fn range_filter_into_flat(
 }
 
 // Streaming support
+// Decision: Streaming uses O(1) state with prev_price + FMA EMA; branchless clamp for stability.
 #[derive(Debug, Clone)]
 pub struct RangeFilterStream {
     range_size: f64,
@@ -1725,49 +1726,50 @@ pub struct RangeFilterStream {
     smooth_range: bool,
     smooth_period: usize,
 
-    // State for average change calculation
-    price_buffer: Vec<f64>,
-    ac_sum: f64,
-    ac_count: usize,
+    // EMA coefficients (precomputed)
+    alpha_ac: f64,
+    one_minus_alpha_ac: f64,
+    alpha_range: f64,
+    one_minus_alpha_range: f64,
+
+    // Running EMA state
     ac_ema: f64,
     ac_initialized: bool,
-    alpha_ac: f64,
 
-    // State for range smoothing
-    range_sum: f64,
-    range_count: usize,
     range_ema: f64,
     range_initialized: bool,
-    alpha_range: f64,
 
-    // State for filter
+    // Previous samples
+    prev_price: f64,
+    have_prev_price: bool,
+
+    // Filter state
     prev_filter: f64,
     filter_initialized: bool,
-
-    // Buffer management
-    buffer_idx: usize,
 }
 
 impl RangeFilterStream {
+    #[inline(always)]
     pub fn try_new(params: RangeFilterParams) -> Result<Self, RangeFilterError> {
         let range_size = params.range_size.unwrap_or(2.618);
+        if !(range_size.is_finite() && range_size > 0.0) {
+            return Err(RangeFilterError::InvalidRangeSize { range_size });
+        }
+
         let range_period = params.range_period.unwrap_or(14);
+        if range_period == 0 {
+            return Err(RangeFilterError::InvalidPeriod { period: range_period, data_len: 0 });
+        }
+
         let smooth_range = params.smooth_range.unwrap_or(true);
         let smooth_period = params.smooth_period.unwrap_or(27);
-
-        if range_period == 0 {
-            return Err(RangeFilterError::InvalidPeriod {
-                period: range_period,
-                data_len: 0,
-            });
-        }
-
         if smooth_range && smooth_period == 0 {
-            return Err(RangeFilterError::InvalidPeriod {
-                period: smooth_period,
-                data_len: 0,
-            });
+            return Err(RangeFilterError::InvalidPeriod { period: smooth_period, data_len: 0 });
         }
+
+        // EMA coefficients
+        let alpha_ac = 2.0 / (range_period as f64 + 1.0);
+        let alpha_range = if smooth_range { 2.0 / (smooth_period as f64 + 1.0) } else { 0.0 };
 
         Ok(Self {
             range_size,
@@ -1775,119 +1777,109 @@ impl RangeFilterStream {
             smooth_range,
             smooth_period,
 
-            price_buffer: Vec::with_capacity(2),
-            ac_sum: 0.0,
-            ac_count: 0,
+            alpha_ac,
+            one_minus_alpha_ac: 1.0 - alpha_ac,
+            alpha_range,
+            one_minus_alpha_range: 1.0 - alpha_range,
+
             ac_ema: 0.0,
             ac_initialized: false,
-            alpha_ac: 2.0 / (range_period as f64 + 1.0),
 
-            range_sum: 0.0,
-            range_count: 0,
             range_ema: 0.0,
             range_initialized: false,
-            alpha_range: if smooth_range {
-                2.0 / (smooth_period as f64 + 1.0)
-            } else {
-                0.0
-            },
+
+            prev_price: f64::NAN,
+            have_prev_price: false,
 
             prev_filter: f64::NAN,
             filter_initialized: false,
-
-            buffer_idx: 0,
         })
     }
 
     #[inline(always)]
+    fn ema_step(prev: f64, x: f64, alpha: f64) -> f64 {
+        // FMA form: prev + alpha*(x - prev) → one rounding on FMA hardware
+        (x - prev).mul_add(alpha, prev)
+    }
+
+    #[inline(always)]
+    fn clamp_branchless(x: f64, lo: f64, hi: f64) -> f64 {
+        // Equivalent to clamp without panic and with predictable control flow
+        hi.min(lo.max(x))
+    }
+
+    /// Push a new price. Returns (filter, high_band, low_band) once enough state exists,
+    /// otherwise None during warmup (needs at least 2 non-NaN prices).
+    #[inline(always)]
     pub fn update(&mut self, price: f64) -> Option<(f64, f64, f64)> {
-        if price.is_nan() {
+        if !price.is_finite() {
             return None;
         }
 
-        // Store price for change calculation
-        self.price_buffer.push(price);
-        if self.price_buffer.len() > 2 {
-            self.price_buffer.remove(0);
+        if !self.have_prev_price {
+            self.prev_price = price;
+            self.have_prev_price = true;
+            return None; // need a delta
         }
 
-        // Calculate absolute change
-        let abs_change = if self.price_buffer.len() >= 2 {
-            (self.price_buffer[1] - self.price_buffer[0]).abs()
-        } else {
-            return None; // Need at least 2 prices
-        };
-
-        // Update Average Change with conditional EMA (first-sample seeding)
+        // --- Update Average Change EMA (seed on first difference) ---
+        let abs_change = (price - self.prev_price).abs();
         if !self.ac_initialized {
-            // Initialize with first valid abs_change
             self.ac_ema = abs_change;
             self.ac_initialized = true;
         } else {
-            // Standard EMA update after initialization
-            self.ac_ema = self.alpha_ac * abs_change + (1.0 - self.alpha_ac) * self.ac_ema;
+            self.ac_ema = Self::ema_step(self.ac_ema, abs_change, self.alpha_ac);
         }
 
-        // Calculate range
-        let mut range = self.ac_ema * self.range_size;
+        // Not enough info yet (shouldn't happen after ac_initialized, but keep symmetry)
+        if !self.ac_initialized {
+            self.prev_price = price;
+            return None;
+        }
 
-        // Smooth range if enabled (with first-sample seeding)
+        // --- Compute / smooth range ---
+        let mut range = self.ac_ema * self.range_size;
         if self.smooth_range {
             if !self.range_initialized {
-                // Seed with first range value
                 self.range_ema = range;
                 self.range_initialized = true;
             } else {
-                // Standard EMA update for range smoothing
-                self.range_ema =
-                    self.alpha_range * range + (1.0 - self.alpha_range) * self.range_ema;
+                self.range_ema = Self::ema_step(self.range_ema, range, self.alpha_range);
             }
             range = self.range_ema;
         }
 
-        // Initialize filter on first valid calculation
+        // --- Initialize filter on first actionable tick ---
         if !self.filter_initialized {
+            // Seed to price, then immediately clamp so first output already respects the band.
             self.prev_filter = price;
             self.filter_initialized = true;
         }
 
-        // Update filter based on price movement
-        let mut current_filter = self.prev_filter;
+        // Clamp previous filter into [price - range, price + range]
+        let lo = price - range;
+        let hi = price + range;
+        let current = Self::clamp_branchless(self.prev_filter, lo, hi);
 
-        if price - range > self.prev_filter {
-            current_filter = price - range;
-        } else if price + range < self.prev_filter {
-            current_filter = price + range;
-        }
+        // Persist state for next tick
+        self.prev_filter = current;
+        self.prev_price = price;
 
-        // Store for next iteration
-        self.prev_filter = current_filter;
-
-        // Return filter, high band, low band
-        Some((
-            current_filter,
-            current_filter + range,
-            current_filter - range,
-        ))
+        Some((current, current + range, current - range))
     }
 
+    /// Returns the last (filter, high, low) if initialized.
     #[inline(always)]
     pub fn current_value(&self) -> Option<(f64, f64, f64)> {
-        if !self.filter_initialized {
+        if !self.filter_initialized || !self.ac_initialized {
             return None;
         }
-
         let range = if self.smooth_range && self.range_initialized {
             self.range_ema
         } else {
             self.ac_ema * self.range_size
         };
-
-        Some((
-            self.prev_filter,
-            self.prev_filter + range,
-            self.prev_filter - range,
-        ))
+        Some((self.prev_filter, self.prev_filter + range, self.prev_filter - range))
     }
 }
 

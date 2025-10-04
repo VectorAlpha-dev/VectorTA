@@ -16,7 +16,7 @@
 //! **AVX2**: Stub (delegates to optimized scalar)
 //! **AVX512**: Stub (short/long variants delegate to scalar)
 //! Rationale: PPO EMA/SMA are loop-carried; post-ratio is cheap, SIMD offers no win.
-//! **Streaming**: O(n) - Recalculates full MA on each update
+//! **Streaming**: O(1) for SMA/EMA; fallback O(n) for other MA types
 //! **Memory**: Good - Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
 
 #[cfg(feature = "python")]
@@ -1166,43 +1166,242 @@ pub unsafe fn ppo_row_avx512_long(
     ppo_scalar(data, fast, slow, ma_type, first, out)
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Streaming PPO — O(1) per update for "sma" and "ema"
+// Fallback to existing MA engine for other ma_type values
+// (Decision: enabled; matches scalar classic kernels; >O(1) fallback unchanged)
+// ──────────────────────────────────────────────────────────────────────────────
+
 pub struct PpoStream {
     fast_period: usize,
     slow_period: usize,
     ma_type: String,
-    data: Vec<f64>,
+    mode: StreamMode,
+}
+
+#[derive(Debug)]
+enum StreamMode {
+    // O(1) SMA path
+    Sma(SmaState),
+    // O(1) EMA path (after an O(slow) one-time seed matching classic EMA path)
+    Ema(EmaState),
+    // Fallback: preserve semantics for unknown ma types (O(n) like before)
+    Generic { data: Vec<f64> },
+}
+
+#[derive(Debug)]
+struct SmaState {
+    started: bool,        // saw first finite value (mirrors `first` logic)
+    fast: usize,
+    slow: usize,
+    k: f64,               // slow / fast (precompute to reduce divisions)
+    // rolling sums + rings
+    fast_sum: f64,
+    slow_sum: f64,
+    fast_buf: Vec<f64>,
+    slow_buf: Vec<f64>,
+    i_fast: usize,
+    i_slow: usize,
+    filled_fast: usize,
+    filled_slow: usize,
+}
+
+#[derive(Debug)]
+struct EmaState {
+    started: bool, // saw first finite
+    fast: usize,
+    slow: usize,
+    // α/β for both EMAs
+    fa: f64, fb: f64,
+    sa: f64, sb: f64,
+    // state
+    fast_ema: f64,
+    slow_ema: f64,
+    seeded: bool,
+    // warmup buffer for initial O(slow) seed (exactly matches classic_ema path)
+    warm: Vec<f64>,
 }
 
 impl PpoStream {
     pub fn try_new(params: PpoParams) -> Result<Self, PpoError> {
-        Ok(Self {
-            fast_period: params.fast_period.unwrap_or(12),
-            slow_period: params.slow_period.unwrap_or(26),
-            ma_type: params.ma_type.clone().unwrap_or_else(|| "sma".to_string()),
-            data: Vec::new(),
-        })
+        let fast = params.fast_period.unwrap_or(12);
+        let slow = params.slow_period.unwrap_or(26);
+        let ma_type = params.ma_type.clone().unwrap_or_else(|| "sma".to_string());
+
+        let mode = match ma_type.as_str() {
+            "sma" => StreamMode::Sma(SmaState {
+                started: false,
+                fast,
+                slow,
+                k: slow as f64 / fast as f64,
+                fast_sum: 0.0,
+                slow_sum: 0.0,
+                fast_buf: Vec::with_capacity(fast),
+                slow_buf: Vec::with_capacity(slow),
+                i_fast: 0,
+                i_slow: 0,
+                filled_fast: 0,
+                filled_slow: 0,
+            }),
+            "ema" => {
+                let fa = 2.0 / (fast as f64 + 1.0);
+                let sa = 2.0 / (slow as f64 + 1.0);
+                StreamMode::Ema(EmaState {
+                    started: false,
+                    fast,
+                    slow,
+                    fa,
+                    fb: 1.0 - fa,
+                    sa,
+                    sb: 1.0 - sa,
+                    fast_ema: f64::NAN,
+                    slow_ema: f64::NAN,
+                    seeded: false,
+                    warm: Vec::with_capacity(slow),
+                })
+            }
+            _ => StreamMode::Generic { data: Vec::new() },
+        };
+
+        Ok(Self { fast_period: fast, slow_period: slow, ma_type, mode })
     }
 
-    /// Update the stream with a new value and return the latest PPO if available.
-    ///
-    /// Returns `None` until enough data has been supplied for the slow moving
-    /// average. Once both averages are ready, it returns `Some(ppo)` where
-    /// `ppo` is `100 * (fast_ma - slow_ma) / slow_ma`.
+    /// O(1) per call for SMA/EMA. For unknown MA types, preserves the old O(n) semantics.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        self.data.push(value);
-        if self.data.len() < self.slow_period {
+        match &mut self.mode {
+            StreamMode::Sma(state) => update_sma(state, value),
+            StreamMode::Ema(state) => update_ema(state, value),
+            // Fallback: same behavior as the original streaming impl
+            StreamMode::Generic { data } => {
+                data.push(value);
+                if data.len() < self.slow_period {
+                    return None;
+                }
+                // preserve original MA engine semantics
+                let fast_ma = ma(&self.ma_type, MaData::Slice(&data), self.fast_period).ok()?;
+                let slow_ma = ma(&self.ma_type, MaData::Slice(&data), self.slow_period).ok()?;
+                let ff = *fast_ma.last()?;
+                let sf = *slow_ma.last()?;
+                if ff.is_nan() || sf.is_nan() || sf == 0.0 {
+                    Some(f64::NAN)
+                } else {
+                    let ratio = ff / sf;
+                    Some(f64::mul_add(ratio, 100.0, -100.0))
+                }
+            }
+        }
+    }
+}
+
+#[inline(always)]
+fn update_sma(s: &mut SmaState, x: f64) -> Option<f64> {
+    // Skip leading NaNs to mirror "first non-NaN" behavior in batch kernels.
+    if !s.started {
+        if x.is_nan() {
             return None;
         }
-        let fast_ma = ma(&self.ma_type, MaData::Slice(&self.data), self.fast_period).ok()?;
-        let slow_ma = ma(&self.ma_type, MaData::Slice(&self.data), self.slow_period).ok()?;
-        let ff = *fast_ma.last()?;
-        let sf = *slow_ma.last()?;
-        if ff.is_nan() || sf.is_nan() || sf == 0.0 {
+        s.started = true;
+    }
+
+    // Fast ring/sum
+    if s.filled_fast < s.fast {
+        s.fast_buf.push(x);
+        s.fast_sum += x;
+        s.filled_fast += 1;
+    } else {
+        let old = s.fast_buf[s.i_fast];
+        s.fast_sum += x - old;
+        s.fast_buf[s.i_fast] = x;
+        s.i_fast = (s.i_fast + 1) % s.fast;
+    }
+
+    // Slow ring/sum
+    if s.filled_slow < s.slow {
+        s.slow_buf.push(x);
+        s.slow_sum += x;
+        s.filled_slow += 1;
+        if s.filled_slow < s.slow {
+            return None; // not warm yet
+        }
+    } else {
+        let old = s.slow_buf[s.i_slow];
+        s.slow_sum += x - old;
+        s.slow_buf[s.i_slow] = x;
+        s.i_slow = (s.i_slow + 1) % s.slow;
+    }
+
+    // 100 * ((fast_sum * (slow/fast)) / slow_sum - 1)
+    let slow_sum = s.slow_sum;
+    let fast_sum = s.fast_sum;
+    if slow_sum == 0.0 || slow_sum.is_nan() || fast_sum.is_nan() {
+        Some(f64::NAN)
+    } else {
+        let ratio = (fast_sum * s.k) / slow_sum;
+        Some(f64::mul_add(ratio, 100.0, -100.0))
+    }
+}
+
+#[inline(always)]
+fn update_ema(e: &mut EmaState, x: f64) -> Option<f64> {
+    // Skip leading NaNs like the batch code
+    if !e.started {
+        if x.is_nan() {
+            return None;
+        }
+        e.started = true;
+    }
+
+    // One-time O(slow) seed that exactly mirrors `ppo_scalar_classic_ema`
+    if !e.seeded {
+        e.warm.push(x);
+        if e.warm.len() < e.slow {
+            return None;
+        }
+
+        // slow EMA seeded as SMA over first `slow` values
+        let mut slow_sum = 0.0f64;
+        for &v in &e.warm {
+            slow_sum += v;
+        }
+        e.slow_ema = slow_sum / e.slow as f64;
+
+        // fast EMA seeded as SMA over the last `fast` inside the first `slow`
+        let mut fast_sum = 0.0f64;
+        let start = e.slow - e.fast; // assumes fast <= slow
+        for &v in &e.warm[start..] {
+            fast_sum += v;
+        }
+        e.fast_ema = fast_sum / e.fast as f64;
+
+        // Advance fast EMA across the intervening points to align with slow
+        for &v in &e.warm[e.fast..] {
+            e.fast_ema = f64::mul_add(e.fa, v, e.fb * e.fast_ema);
+        }
+
+        e.seeded = true;
+
+        let sf = e.slow_ema;
+        let ff = e.fast_ema;
+        return if sf == 0.0 || sf.is_nan() || ff.is_nan() {
             Some(f64::NAN)
         } else {
-            Some(100.0 * (ff - sf) / sf)
-        }
+            let ratio = ff / sf;
+            Some(f64::mul_add(ratio, 100.0, -100.0))
+        };
+    }
+
+    // Steady-state O(1) EMA updates
+    e.fast_ema = f64::mul_add(e.fa, x, e.fb * e.fast_ema);
+    e.slow_ema = f64::mul_add(e.sa, x, e.sb * e.slow_ema);
+
+    let sf = e.slow_ema;
+    let ff = e.fast_ema;
+    if sf == 0.0 || sf.is_nan() || ff.is_nan() {
+        Some(f64::NAN)
+    } else {
+        let ratio = ff / sf;
+        Some(f64::mul_add(ratio, 100.0, -100.0))
     }
 }
 

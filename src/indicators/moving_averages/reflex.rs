@@ -26,7 +26,9 @@
 //!   numerics and performance stability (see reflex_avx2/reflex_avx512).
 //! - Scalar: Uses zero-copy allocation helpers and avoids O(N) temporaries; only a
 //!   small `(period+1)` ring buffer and a rolling variance are maintained.
-//! - Streaming: `ReflexStream` mirrors the same O(1) math for per-tick updates.
+//! - Streaming: `ReflexStream` uses an O(1) kernel with head/tail ring indices,
+//!   precomputed weights, and FMA at identical spots as scalar. No modulo in the
+//!   hot path; numerics match scalar within existing tolerances.
 //! - Batch: Row-specific kernels not attempted; coefficients depend on period, so
 //!   there is no meaningful cross-row reuse to exploit.
 
@@ -430,149 +432,158 @@ fn reflex_compute_into(data: &[f64], period: usize, first: usize, kernel: Kernel
 pub struct ReflexStream {
     period: usize,
 
-    // coefficients (all constant after construction)
-    a: f64,
+    // coefficients
     a_sq: f64,
     b: f64,
     c: f64,
 
-    // we keep a circular buffer of length (period + 1) for all past ssf[]
+    // precomputed normalization weights
+    alpha: f64,  // (p+1)/(2p)
+    beta: f64,   // 1 - alpha
+    inv_p: f64,  // 1/p
+
+    // ring buffer only to recall ssf[t - period] and maintain the rolling sum
     ssf_buf: Vec<f64>,
+    head: usize,  // write position: t mod (period+1)
+    tail: usize,  // position of ssf[t - period] once t >= period
 
-    // running sum of “last period” ssf values:
-    //   at time t (just before computing output if t >= period),
-    //   `ssf_sum` = Σ_{k = t - period .. t - 1} ssf[k].
-    ssf_sum: f64,
-
-    // we need the raw price from one step ago, so we can compute
-    //   ssf[t] = c*(data[t] + data[t-1]) + b*ssf[t-1] - a_sq*ssf[t-2]
-    last_data: Option<f64>,
-
-    // keep a single “ms[t-1]” so that ms[t] = 0.04·my_sum² + 0.96·ms[t-1]
-    last_ms: f64,
-
-    // how many values have been fed in so far (this is “t” in the batch code)
-    count: usize,
+    // rolling state
+    ssf_sum: f64,     // Σ_{k=t-period..t-1} ssf[k] at entry
+    last_ms: f64,     // EW variance proxy MS[t-1]
+    prev_x: f64,      // raw x[t-1]
+    last_ssf1: f64,   // ssf[t-1]
+    last_ssf2: f64,   // ssf[t-2]
+    count: usize,     // t
 }
 
 impl ReflexStream {
+    #[inline]
     pub fn try_new(params: ReflexParams) -> Result<Self, ReflexError> {
         let period = params.period.unwrap_or(20);
         if period < 2 {
             return Err(ReflexError::InvalidPeriod { period });
         }
 
-        // exactly the same coefficients that `reflex_scalar` uses:
-        //
-        //     let half_period = (period / 2).max(1);
-        //     let a      = exp(-1.414 * π / half_period);
-        //     let a_sq   = a * a;
-        //     let b      = 2.0 * a * cos(1.414 * π / half_period);
-        //     let c      = (1.0 + a_sq - b) * 0.5;
-        //
-        // we compute `half_period` as f64 because that’s how the scalar version does it.
-        let half_period = (period / 2).max(1) as f64;
-        let a = (-1.414_f64 * std::f64::consts::PI / half_period).exp();
+        // Same coefficients as scalar (half-period per Ehlers reflex article)
+        let half_p = (period / 2).max(1) as f64;
+        let a = (-1.414_f64 * std::f64::consts::PI / half_p).exp();
         let a_sq = a * a;
-        let b = 2.0 * a * (1.414_f64 * std::f64::consts::PI / half_period).cos();
-        let c = (1.0 + a_sq - b) * 0.5;
+        let b = 2.0 * a * (1.414_f64 * std::f64::consts::PI / half_p).cos();
+        let c = 0.5 * (1.0 + a_sq - b);
+
+        // Closed-form Reflex weights
+        let inv_p = 1.0 / (period as f64);
+        let alpha = 0.5 * (1.0 + inv_p);
+        let beta = 1.0 - alpha;
 
         Ok(Self {
             period,
-
-            a,
             a_sq,
             b,
             c,
+            alpha,
+            beta,
+            inv_p,
 
-            // buffer for ssf[ t mod (period+1) ], so we can index ssf[t-1], ssf[t-2], ssf[t-period]
             ssf_buf: vec![0.0; period + 1],
+            head: 0,
+            tail: 0,
 
-            // at the very start, we have no ssf history => sum = 0
             ssf_sum: 0.0,
-
-            last_data: None,
             last_ms: 0.0,
+            prev_x: 0.0,
+            last_ssf1: 0.0,
+            last_ssf2: 0.0,
             count: 0,
         })
     }
 
-    pub fn update(&mut self, value: f64) -> Option<f64> {
+    /// O(1) update. Returns Some(reflex) once warmup is finished; None during warmup.
+    #[inline(always)]
+    pub fn update(&mut self, x: f64) -> Option<f64> {
+        let p = self.period;
+        let ring_len = p + 1;
         let t = self.count;
-        let period = self.period;
 
-        // 1) compute ssf[t] exactly as in `reflex_scalar`:
-        let ssf_t: f64 = if t == 0 {
-            // at t = 0: ssf[0] = data[0]
-            value
-        } else if t == 1 {
-            // at t = 1: ssf[1] = data[1]
-            value
-        } else {
-            // for t >= 2: ssf[t] = c*(data[t] + data[t-1]) + b*ssf[t-1] - a_sq*ssf[t-2]
-            let prev_data = self.last_data.unwrap();
-            let idx1 = (t - 1) % (period + 1);
-            let idx2 = (t - 2) % (period + 1);
-            let ssf_t1 = self.ssf_buf[idx1];
-            let ssf_t2 = self.ssf_buf[idx2];
-            self.c * (value + prev_data) + self.b * ssf_t1 - self.a_sq * ssf_t2
-        };
-
-        // 2) if t >= period, compute the normalized “Reflex” exactly as in batch:
-        let mut out_val = 0.0;
-        if t >= period {
-            // ssf[t - period]:
-            let idx_period = (t - period) % (period + 1);
-            let ssf_t_period = self.ssf_buf[idx_period];
-
-            let period_f = period as f64;
-            let my_sum = ssf_t + ((ssf_t_period - ssf_t) * (period_f + 1.0) / (2.0 * period_f))
-                - (self.ssf_sum / period_f);
-
-            let my_sum_sq = my_sum * my_sum;
-            let ms_t = 0.04 * my_sum_sq + 0.96 * self.last_ms;
-            self.last_ms = ms_t;
-
-            if ms_t > 0.0 {
-                out_val = my_sum / ms_t.sqrt();
-            } else {
-                out_val = 0.0;
+        // Exact seeding (matches scalar numerics)
+        if t == 0 {
+            // ssf[0] = x
+            self.prev_x = x;
+            self.last_ssf1 = x;
+            self.ssf_buf[self.head] = x;
+            self.head += 1;
+            if self.head == ring_len {
+                self.head = 0;
             }
+            self.ssf_sum += x;
+            self.count = 1;
+            return None;
+        }
+        if t == 1 {
+            // ssf[1] = x
+            self.prev_x = x;
+            self.last_ssf2 = self.last_ssf1;
+            self.last_ssf1 = x;
+            self.ssf_buf[self.head] = x;
+            self.head += 1;
+            if self.head == ring_len {
+                self.head = 0;
+            }
+            self.ssf_sum += x;
+            self.count = 2;
+            return None;
         }
 
-        // 3) update the rolling sum of ssf for the “next” step:
-        //
-        //    If t < period, we haven’t reached a full window yet, so we simply
-        //    add this ssf[t] to `ssf_sum`.  At the moment t == period, that
-        //    means `ssf_sum = Σ_{i=0..period-1} ssf[i]`, which is exactly what
-        //    the batch code wants before computing “my_sum” at i == period.
-        //
-        //    Once t >= period, we must subtract off ssf[t - period] and add
-        //    ssf[t], so that `ssf_sum = Σ_{i = (t - period + 1) .. t}` for the
-        //    next iteration.
-        if t < period {
+        // t >= 2: ssf[t] = c*(x + x[t-1]) + b*ssf[t-1] - a^2*ssf[t-2]
+        let t0 = self.c * (x + self.prev_x);
+        let t1 = (-self.a_sq).mul_add(self.last_ssf2, t0);
+        let ssf_t = self.b.mul_add(self.last_ssf1, t1);
+
+        let mut out = None;
+        if t >= p {
+            // old value leaving the "last p" window
+            let ssf_tp = self.ssf_buf[self.tail];
+
+            // mean of the last p values (ssf[t-1]..ssf[t-p])
+            let mean_lp = self.ssf_sum * self.inv_p;
+
+            // Closed-form Reflex sum: beta*ssf[t] + alpha*ssf[t-p] - mean_last_p
+            let my_sum = self.beta.mul_add(ssf_t, self.alpha * ssf_tp) - mean_lp;
+
+            // EW variance and normalization (FMA matches scalar path)
+            let ms = 0.96_f64.mul_add(self.last_ms, 0.04_f64 * (my_sum * my_sum));
+            self.last_ms = ms;
+            out = if ms > 0.0 {
+                Some(my_sum / ms.sqrt())
+            } else {
+                Some(0.0)
+            };
+
+            // roll window for next call
+            self.ssf_sum += ssf_t - ssf_tp;
+            self.tail += 1;
+            if self.tail == ring_len {
+                self.tail = 0;
+            }
+        } else {
+            // still building first window
             self.ssf_sum += ssf_t;
-        } else {
-            let idx_remove = (t - period) % (period + 1);
-            let remove_ssf = self.ssf_buf[idx_remove];
-            self.ssf_sum = self.ssf_sum - remove_ssf + ssf_t;
         }
 
-        // 4) store the new ssf[t] into our circular buffer:
-        self.ssf_buf[t % (period + 1)] = ssf_t;
-
-        // 5) remember this raw price so the *next* call can use data[t-1]:
-        self.last_data = Some(value);
-
-        // 6) advance the counter:
-        self.count += 1;
-
-        // 7) return `Some(out_val)` only once t >= period; otherwise return None
-        if t >= period {
-            Some(out_val)
-        } else {
-            None
+        // store current, advance head
+        self.ssf_buf[self.head] = ssf_t;
+        self.head += 1;
+        if self.head == ring_len {
+            self.head = 0;
         }
+
+        // advance recurrent state
+        self.prev_x = x;
+        self.last_ssf2 = self.last_ssf1;
+        self.last_ssf1 = ssf_t;
+        self.count = t + 1;
+
+        out
     }
 }
 

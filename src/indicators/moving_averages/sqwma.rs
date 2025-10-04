@@ -14,12 +14,13 @@
 //! - **`Err(SqwmaError)`** otherwise.
 //!
 //! ## Developer Status
-//! - Scalar kernel: Reference O(p) weighted sum (kept for numerical robustness and strict bounds tests).
-//!   We evaluated an O(1) recurrence but reverted due to tight bound checks; see benches below.
-//! - Batch row kernel: O(1) per-step via exact sliding recurrence; warmup preserved.
-//! - AVX2/AVX512: Stubs delegate to scalar/batch for robustness (memory-bound workloads; minimal gains).
-//! - Streaming update: O(p) per update (dot-product) to match scalar outputs exactly.
-//! - Memory: GOOD — zero-copy/uninitialized helpers used; no O(N) temporaries for outputs.
+//! - Scalar kernel: Reference O(p) weighted sum for batch path (strict tests preserved).
+//! - Batch row kernel: O(1) per-step via exact sliding recurrence; periodic rebase every 64 steps.
+//! - AVX2/AVX512: Stubs delegate to scalar/batch (memory-bound; minimal wins expected).
+//! - Streaming update: O(p) per update to match the scalar dot-product path exactly (tests require
+//!   near bit-for-bit equality). The O(1) recurrence state is retained, but we rebase from the ring
+//!   every step to produce identical outputs.
+//! - Memory: GOOD — constant ring buffer; no per-tick allocations; no per-tick Vec growth.
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
@@ -349,69 +350,192 @@ pub unsafe fn sqwma_avx512_long(
     sqwma_scalar(data, weights, period, first, weight_sum, out)
 }
 
+// Decision: O(1) recurrence state is implemented, but to exactly match the
+// scalar dot-product path used in tests, we rebase from the ring every step
+// (O(p) per update). This preserves strict equality while keeping the O(1)
+// logic available for future enablement.
 #[derive(Clone, Debug)]
 pub struct SqwmaStream {
+    // --- config / constants ---
     period: usize,
-    weights: Vec<f64>, // length = period - 1
+    weights: Vec<f64>,
     weight_sum: f64,
-    history: Vec<f64>, // holds the last (period - 1) values, newest at index 0
-    count: usize,      // how many update(...) calls we’ve seen so far
+    inv_weight_sum: f64,
+    p_f: f64,
+    p2: f64,
+    pm1f: f64,
+    c1: f64,
+
+    // --- ring buffer of last p values ---
+    ring: Vec<f64>,
+    tail: usize,
+    len: usize,
+
+    // --- running state for O(1) updates over last (p-1) values ---
+    a_sum: f64,
+    b_sum: f64,
+    r_acc: f64,
+
+    // --- control ---
+    count: usize,
+    seeded: bool,
+    rebase_ctr: usize,
 }
 
 impl SqwmaStream {
     pub fn try_new(params: SqwmaParams) -> Result<Self, SqwmaError> {
         let period = params.period.unwrap_or(14);
         if period < 2 {
-            return Err(SqwmaError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(SqwmaError::InvalidPeriod { period, data_len: 0 });
         }
 
-        // Build exactly (period - 1) weights: (period)^2 down to (2)^2
+        // Build (p-1) weights: p^2, (p-1)^2, ..., 2^2
         let mut weights = Vec::with_capacity(period - 1);
         for i in 0..(period - 1) {
             weights.push((period as f64 - i as f64).powi(2));
         }
-        let weight_sum = weights.iter().sum();
+        let weight_sum: f64 = weights.iter().sum();
+        let inv_weight_sum = 1.0 / weight_sum;
 
         Ok(Self {
             period,
+            p_f: period as f64,
+            p2: (period as f64) * (period as f64),
+            pm1f: (period - 1) as f64,
+            c1: 1.0 - 2.0 * (period as f64),
+
             weights,
             weight_sum,
-            history: Vec::with_capacity(period - 1),
+            inv_weight_sum,
+
+            ring: vec![0.0; period],
+            tail: 0,
+            len: 0,
+
+            a_sum: 0.0,
+            b_sum: 0.0,
+            r_acc: 0.0,
+
             count: 0,
+            seeded: false,
+            rebase_ctr: 0,
         })
     }
 
     #[inline(always)]
-    pub fn update(&mut self, value: f64) -> Option<f64> {
-        self.count += 1;
+    fn ring_push(&mut self, x: f64) -> Option<f64> {
+        // Returns Some(x_out) if the ring was full and an element fell off; otherwise None.
+        if self.len < self.period {
+            let pos = (self.tail + self.len) % self.period;
+            self.ring[pos] = x;
+            self.len += 1;
+            None
+        } else {
+            let x_out = self.ring[self.tail];
+            self.ring[self.tail] = x;
+            self.tail = if self.tail + 1 == self.period { 0 } else { self.tail + 1 };
+            Some(x_out)
+        }
+    }
 
-        // (1) If we have not yet seen (period + 1) values, return None.
-        //     This ensures our first streaming‐output occurs exactly at index j = period+1.
+    #[inline(always)]
+    fn rebase_from_ring(&mut self) {
+        // Recompute A, B, R exactly from the ring for the current j.
+        debug_assert!(self.len == self.period);
+
+        let p = self.period;
+        let m_len = p - 1; // number of points included in A/B/R
+        let mut a = 0.0;
+        let mut b = 0.0;
+        let mut r = 0.0;
+
+        let mut i = 0usize;
+        let u4 = m_len & !3;
+        while i < u4 {
+            let pos0 = (self.tail + p - 1 - i) % p;
+            let pos1 = (self.tail + p - 2 - i) % p;
+            let pos2 = (self.tail + p - 3 - i) % p;
+            let pos3 = (self.tail + p - 4 - i) % p;
+
+            let x0 = self.ring[pos0];
+            let x1 = self.ring[pos1];
+            let x2 = self.ring[pos2];
+            let x3 = self.ring[pos3];
+
+            a += x0 + x1 + x2 + x3;
+            b += (i as f64) * x0
+                + ((i + 1) as f64) * x1
+                + ((i + 2) as f64) * x2
+                + ((i + 3) as f64) * x3;
+
+            r = x0.mul_add(self.weights[i], r);
+            r = x1.mul_add(self.weights[i + 1], r);
+            r = x2.mul_add(self.weights[i + 2], r);
+            r = x3.mul_add(self.weights[i + 3], r);
+
+            i += 4;
+        }
+        while i < m_len {
+            let pos = (self.tail + p - 1 - i) % p;
+            let x = self.ring[pos];
+            a += x;
+            b += (i as f64) * x;
+            r = x.mul_add(self.weights[i], r);
+            i += 1;
+        }
+
+        self.a_sum = a;
+        self.b_sum = b;
+        self.r_acc = r;
+    }
+
+    #[inline(always)]
+    pub fn update(&mut self, value: f64) -> Option<f64> {
+        self.count = self.count.wrapping_add(1);
+
+        // Write into the ring buffer first; capture x_out if we overwrote oldest
+        let x_out_opt = self.ring_push(value);
+
+        // Match scalar/batch warm-up exactly: first output at index j = p + 1
+        // -> in terms of call count, first Some(...) when count >= p + 2.
         if self.count < (self.period + 2) {
-            if self.history.len() == (self.period - 1) {
-                self.history.pop();
-            }
-            self.history.insert(0, value);
             return None;
         }
 
-        // (2) Now that count >= (period + 2), compute the weighted sum directly
-        let mut sum_val = value.mul_add(self.weights[0], 0.0);
-        for k in 1..self.weights.len() {
-            sum_val = self.history[k - 1].mul_add(self.weights[k], sum_val);
+        // Initial seeding (compute A,B,R exactly from ring at j0)
+        if !self.seeded {
+            debug_assert!(self.len == self.period);
+            self.rebase_from_ring();
+            self.seeded = true;
+            self.rebase_ctr = 0;
+            return Some(self.r_acc * self.inv_weight_sum);
         }
-        let result = sum_val / self.weight_sum;
 
-        // (3) Update history by pushing this new value onto the front, pop if necessary.
-        if self.history.len() == (self.period - 1) {
-            self.history.pop();
+        // O(1) recurrence using previous (A,B,R) and x_out = x_{j - p + 1}.
+        // After ring_push(value), tail points at the oldest retained sample,
+        // which is exactly x_out needed by the recurrence.
+        let x_out = self.ring[self.tail];
+        let mut r = self.r_acc;
+        r = self.p2.mul_add(value, r);      // + p^2 * x_in
+        r = (2.0_f64).mul_add(self.b_sum, r);   // + 2 * B_prev
+        r = self.c1.mul_add(self.a_sum, r); // + (1 - 2p) * A_prev
+        r -= x_out;                         // - x_out
+        self.r_acc = r;
+
+        // Update A and B
+        let a_prev = self.a_sum;
+        self.a_sum = a_prev + value - x_out;
+        self.b_sum = self.b_sum + a_prev - self.pm1f * x_out;
+
+        // Rebase every step to ensure exact agreement with the scalar O(p)
+        // path used in tests (keeps outputs bit-close to dot-product).
+        const REBASE_MASK: usize = 0; // always rebase
+        self.rebase_ctr = self.rebase_ctr.wrapping_add(1);
+        if (self.rebase_ctr & REBASE_MASK) == 0 {
+            self.rebase_from_ring();
         }
-        self.history.insert(0, value);
 
-        Some(result)
+        Some(self.r_acc * self.inv_weight_sum)
     }
 }
 

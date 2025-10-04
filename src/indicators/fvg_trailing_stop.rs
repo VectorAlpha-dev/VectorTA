@@ -55,7 +55,7 @@ use crate::utilities::helpers::{
 use crate::utilities::kernel_validation::validate_kernel;
 
 // Standard library imports
-use std::collections::VecDeque;
+// std containers used throughout; streaming uses BinaryHeap/Reverse locally below
 use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
@@ -1391,91 +1391,457 @@ impl FvgTsBatchBuilder {
     }
 }
 
-// ==================== STREAMING SUPPORT ====================
+// ==================== STREAMING SUPPORT (drop-in replacement) ====================
+// Decision: Streaming uses heaps + rings for O(1)–O(log L) updates,
+// matches scalar behavior and fixes i-2 detection + fallback SMA.
+use core::cmp::Ordering;
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
+
+#[inline]
+fn f64_to_bits_pos(v: f64) -> u64 {
+    // We only push positive prices; no NaNs; safe to order by bits.
+    debug_assert!(v.is_finite() && v >= 0.0);
+    v.to_bits()
+}
+
+#[derive(Copy, Clone, Debug)]
+struct Slot {
+    val: f64,
+    alive: bool,
+    stamp: u32,
+}
+
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+struct HeapItem {
+    bits: u64,   // order by numeric value (prices are non-negative)
+    slot: u32,   // slot index in the ring
+    stamp: u32,  // generation to avoid aliasing after overwrite
+    seq: u32,    // tie-breaker to stabilize Ord
+}
+impl Ord for HeapItem {
+    #[inline]
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Max-heap by bits; break ties by seq then slot
+        self.bits
+            .cmp(&other.bits)
+            .then(self.seq.cmp(&other.seq))
+            .then(self.slot.cmp(&other.slot))
+    }
+}
+impl PartialOrd for HeapItem {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 pub struct FvgTrailingStopStream {
     lookback: usize,
     smoothing_len: usize,
     reset_on_cross: bool,
-    kernel: Kernel,
-    // State
-    bull_lvls: VecDeque<f64>,
-    bear_lvls: VecDeque<f64>,
+
+    // -------- Bull (max-heap drops values > close) --------
+    bull_slots: Vec<Slot>,               // fixed-size ring of size lookback
+    bull_head: usize,                    // next write position
+    bull_occ: usize,                     // how many slots currently in use (<= lookback)
+    bull_sum: f64,                       // sum of alive (unmitigated) levels
+    bull_cnt: u32,                       // count of alive levels
+    bull_heap: BinaryHeap<HeapItem>,     // max-heap by value
+    bull_seq: u32,                       // generation/tie
+
+    // -------- Bear (min-heap drops values < close) --------
+    bear_slots: Vec<Slot>,
+    bear_head: usize,
+    bear_occ: usize,
+    bear_sum: f64,
+    bear_cnt: u32,
+    bear_heap: BinaryHeap<Reverse<HeapItem>>,
+    bear_seq: u32,
+
+    // Last bar index where avg wasn’t NaN (for progressive fallback)
     last_bull_non_na: Option<usize>,
     last_bear_non_na: Option<usize>,
-    bull_hist: VecDeque<f64>,
-    bear_hist: VecDeque<f64>,
+
+    // -------- Output smoothing (fixed-window SMA on x-series) --------
+    xbull_vals: Vec<f64>, // size = smoothing_len
+    xbull_idx: usize,
+    xbull_filled: usize,
+    xbull_sum: f64,
+    xbull_nan: u32,
+
+    xbear_vals: Vec<f64>,
+    xbear_idx: usize,
+    xbear_filled: usize,
+    xbear_sum: f64,
+    xbear_nan: u32,
+
+    // -------- Progressive fallback over close: prefix-sum ring (O(1)) --------
+    // We only need the last W+1 prefix totals to compute any "last bs" sum with bs<=W.
+    pref_sum_ring: Vec<f64>, // size = W + 1
+    pref_nan_ring: Vec<u32>, // size = W + 1
+    pref_idx: usize,         // current write index in rings
+    pref_sum_total: f64,     // running total of closes (NaN->0)
+    pref_nan_total: u32,     // running count of NaNs
+
+    // -------- OS/TS state --------
     os: Option<i8>,
     ts: Option<f64>,
     ts_prev: Option<f64>,
     bar_count: usize,
-    prev_high2: f64,
-    prev_low2: f64,
-    prev_close: f64,
+
+    // -------- FVG detection memory (correct i-2 & i-1 wiring) --------
+    // We keep the last two highs/lows explicitly: hi_m2, hi_m1 and lo_m2, lo_m1.
+    hi_m2: f64,
+    hi_m1: f64,
+    lo_m2: f64,
+    lo_m1: f64,
+    cl_m1: f64,
+
+    inv_w: f64, // 1.0 / smoothing_len (fast constant reciprocal)
 }
 
 impl FvgTrailingStopStream {
     pub fn try_new(params: FvgTrailingStopParams) -> Result<Self, FvgTrailingStopError> {
         let lookback = params.unmitigated_fvg_lookback.unwrap_or(5);
         let smoothing_len = params.smoothing_length.unwrap_or(9);
+        if lookback == 0 {
+            return Err(FvgTrailingStopError::InvalidLookback { lookback });
+        }
+        if smoothing_len == 0 {
+            return Err(FvgTrailingStopError::InvalidSmoothingLength {
+                smoothing: smoothing_len,
+            });
+        }
+
+        // Pre-size small, cache-friendly buffers
+        let mut bull_slots = Vec::with_capacity(lookback);
+        bull_slots.resize(
+            lookback,
+            Slot {
+                val: f64::NAN,
+                alive: false,
+                stamp: 0,
+            },
+        );
+        let mut bear_slots = Vec::with_capacity(lookback);
+        bear_slots.resize(
+            lookback,
+            Slot {
+                val: f64::NAN,
+                alive: false,
+                stamp: 0,
+            },
+        );
+
+        let mut xbull_vals = Vec::with_capacity(smoothing_len);
+        xbull_vals.resize(smoothing_len, f64::NAN);
+        let mut xbear_vals = Vec::with_capacity(smoothing_len);
+        xbear_vals.resize(smoothing_len, f64::NAN);
+
+        // prefix-sum rings keep W+1 cumulative totals
+        let mut pref_sum_ring = Vec::with_capacity(smoothing_len + 1);
+        pref_sum_ring.resize(smoothing_len + 1, 0.0);
+        let mut pref_nan_ring = Vec::with_capacity(smoothing_len + 1);
+        pref_nan_ring.resize(smoothing_len + 1, 0);
 
         Ok(Self {
             lookback,
             smoothing_len,
             reset_on_cross: params.reset_on_cross.unwrap_or(false),
-            kernel: Kernel::Auto,
-            bull_lvls: VecDeque::with_capacity(lookback),
-            bear_lvls: VecDeque::with_capacity(lookback),
+
+            bull_slots,
+            bull_head: 0,
+            bull_occ: 0,
+            bull_sum: 0.0,
+            bull_cnt: 0,
+            bull_heap: BinaryHeap::new(),
+            bull_seq: 0,
+
+            bear_slots,
+            bear_head: 0,
+            bear_occ: 0,
+            bear_sum: 0.0,
+            bear_cnt: 0,
+            bear_heap: BinaryHeap::new(),
+            bear_seq: 0,
+
             last_bull_non_na: None,
             last_bear_non_na: None,
-            bull_hist: VecDeque::with_capacity(smoothing_len),
-            bear_hist: VecDeque::with_capacity(smoothing_len),
+
+            xbull_vals,
+            xbull_idx: 0,
+            xbull_filled: 0,
+            xbull_sum: 0.0,
+            xbull_nan: 0,
+
+            xbear_vals,
+            xbear_idx: 0,
+            xbear_filled: 0,
+            xbear_sum: 0.0,
+            xbear_nan: 0,
+
+            pref_sum_ring,
+            pref_nan_ring,
+            pref_idx: 0,           // rings start at prefix (0)
+            pref_sum_total: 0.0,
+            pref_nan_total: 0,
+
             os: None,
             ts: None,
             ts_prev: None,
             bar_count: 0,
-            prev_high2: f64::NAN,
-            prev_low2: f64::NAN,
-            prev_close: f64::NAN,
+
+            hi_m2: f64::NAN,
+            hi_m1: f64::NAN,
+            lo_m2: f64::NAN,
+            lo_m1: f64::NAN,
+            cl_m1: f64::NAN,
+
+            inv_w: 1.0 / (smoothing_len as f64),
         })
     }
 
-    pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<(f64, f64, f64, f64)> {
-        // FVG detection (need at least 3 bars)
-        if self.bar_count >= 2
-            && !self.prev_high2.is_nan()
-            && !self.prev_low2.is_nan()
-            && !self.prev_close.is_nan()
-        {
-            if low > self.prev_high2 && self.prev_close > self.prev_high2 {
-                self.bull_lvls.push_back(self.prev_high2);
-                if self.bull_lvls.len() > self.lookback {
-                    self.bull_lvls.pop_front();
-                }
+    #[inline(always)]
+    fn bull_push(&mut self, v: f64) {
+        if v.is_nan() {
+            return;
+        }
+        let idx = self.bull_head;
+        if self.bull_occ == self.lookback {
+            // evict oldest slot
+            let s = &mut self.bull_slots[idx];
+            if s.alive {
+                self.bull_sum -= s.val;
+                self.bull_cnt -= 1;
+                s.alive = false;
             }
-            if high < self.prev_low2 && self.prev_close < self.prev_low2 {
-                self.bear_lvls.push_back(self.prev_low2);
-                if self.bear_lvls.len() > self.lookback {
-                    self.bear_lvls.pop_front();
+        } else {
+            self.bull_occ += 1;
+        }
+        self.bull_seq = self.bull_seq.wrapping_add(1);
+        let stamp = self.bull_seq;
+
+        self.bull_slots[idx] = Slot {
+            val: v,
+            alive: true,
+            stamp,
+        };
+        self.bull_sum += v;
+        self.bull_cnt += 1;
+
+        self.bull_heap.push(HeapItem {
+            bits: f64_to_bits_pos(v),
+            slot: idx as u32,
+            stamp,
+            seq: stamp,
+        });
+
+        self.bull_head = if idx + 1 == self.lookback { 0 } else { idx + 1 };
+    }
+
+    #[inline(always)]
+    fn bear_push(&mut self, v: f64) {
+        if v.is_nan() {
+            return;
+        }
+        let idx = self.bear_head;
+        if self.bear_occ == self.lookback {
+            // evict oldest slot
+            let s = &mut self.bear_slots[idx];
+            if s.alive {
+                self.bear_sum -= s.val;
+                self.bear_cnt -= 1;
+                s.alive = false;
+            }
+        } else {
+            self.bear_occ += 1;
+        }
+        self.bear_seq = self.bear_seq.wrapping_add(1);
+        let stamp = self.bear_seq;
+
+        self.bear_slots[idx] = Slot {
+            val: v,
+            alive: true,
+            stamp,
+        };
+        self.bear_sum += v;
+        self.bear_cnt += 1;
+
+        let item = HeapItem {
+            bits: f64_to_bits_pos(v),
+            slot: idx as u32,
+            stamp,
+            seq: stamp,
+        };
+        self.bear_heap.push(Reverse(item));
+
+        self.bear_head = if idx + 1 == self.lookback { 0 } else { idx + 1 };
+    }
+
+    #[inline(always)]
+    fn bull_sweep(&mut self, close: f64) {
+        // Pop all v > close from the max-heap (lazy deletion for stale nodes)
+        while let Some(top) = self.bull_heap.peek().copied() {
+            let v = f64::from_bits(top.bits);
+            if !(v > close) {
+                break;
+            }
+            self.bull_heap.pop();
+            let idx = top.slot as usize;
+            if idx < self.bull_slots.len() {
+                let s = &mut self.bull_slots[idx];
+                if s.alive && s.stamp == top.stamp {
+                    s.alive = false;
+                    self.bull_sum -= s.val;
+                    self.bull_cnt -= 1;
                 }
             }
         }
+    }
 
-        // Mitigation
-        self.bull_lvls.retain(|&lvl| close >= lvl);
-        self.bear_lvls.retain(|&lvl| close <= lvl);
+    #[inline(always)]
+    fn bear_sweep(&mut self, close: f64) {
+        // Pop all v < close from the min-heap
+        while let Some(Reverse(top)) = self.bear_heap.peek().copied() {
+            let v = f64::from_bits(top.bits);
+            if !(v < close) {
+                break;
+            }
+            self.bear_heap.pop();
+            let idx = top.slot as usize;
+            if idx < self.bear_slots.len() {
+                let s = &mut self.bear_slots[idx];
+                if s.alive && s.stamp == top.stamp {
+                    s.alive = false;
+                    self.bear_sum -= s.val;
+                    self.bear_cnt -= 1;
+                }
+            }
+        }
+    }
 
-        let bull_avg = if self.bull_lvls.is_empty() {
-            f64::NAN
+    #[inline(always)]
+    fn push_x_and_smooth(
+        vals: &mut [f64],
+        idx: &mut usize,
+        filled: &mut usize,
+        sum: &mut f64,
+        nan: &mut u32,
+        w: usize,
+        inv_w: f64,
+        x: f64,
+    ) -> f64 {
+        let pos = *idx;
+
+        if *filled == w {
+            // evict oldest
+            let old = vals[pos];
+            if old.is_nan() {
+                *nan -= 1;
+            } else {
+                *sum -= old;
+            }
         } else {
-            self.bull_lvls.iter().sum::<f64>() / (self.bull_lvls.len() as f64)
-        };
+            *filled += 1;
+        }
 
-        let bear_avg = if self.bear_lvls.is_empty() {
-            f64::NAN
+        vals[pos] = x;
+        if x.is_nan() {
+            *nan += 1;
         } else {
-            self.bear_lvls.iter().sum::<f64>() / (self.bear_lvls.len() as f64)
-        };
+            *sum += x;
+        }
 
+        *idx = if pos + 1 == w { 0 } else { pos + 1 };
+
+        if *filled == w && *nan == 0 {
+            *sum * inv_w
+        } else {
+            f64::NAN
+        }
+    }
+
+    #[inline(always)]
+    fn prefix_add_close(
+        pref_sum_ring: &mut [f64],
+        pref_nan_ring: &mut [u32],
+        pref_idx: &mut usize,
+        pref_sum_total: &mut f64,
+        pref_nan_total: &mut u32,
+        w: usize,
+        close: f64,
+    ) {
+        // Include this bar's close in running totals (NaN treated as 0 and counted separately)
+        let add = if close.is_nan() { 0.0 } else { close };
+        let add_nan = if close.is_nan() { 1 } else { 0 };
+        *pref_sum_total += add;
+        *pref_nan_total += add_nan;
+
+        // bump index and write current cumulative totals
+        let ring_len = w + 1;
+        let next = if *pref_idx + 1 == ring_len { 0 } else { *pref_idx + 1 };
+        pref_sum_ring[next] = *pref_sum_total;
+        pref_nan_ring[next] = *pref_nan_total;
+        *pref_idx = next;
+    }
+
+    #[inline(always)]
+    fn prefix_last_bs(
+        pref_sum_ring: &[f64],
+        pref_nan_ring: &[u32],
+        pref_idx: usize,
+        w: usize,
+        bs: usize,
+    ) -> (f64, u32) {
+        // Sum & NaN count for the last `bs` closes (including current)
+        debug_assert!(bs >= 1 && bs <= w);
+        let ring_len = w + 1;
+        let prev = (pref_idx + ring_len - bs) % ring_len;
+        let s = pref_sum_ring[pref_idx] - pref_sum_ring[prev];
+        let nans = pref_nan_ring[pref_idx] - pref_nan_ring[prev];
+        (s, nans)
+    }
+
+    pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<(f64, f64, f64, f64)> {
+        // 1) Prefix-sum ring update for close (enables O(1) progressive SMA fallback)
+        Self::prefix_add_close(
+            &mut self.pref_sum_ring,
+            &mut self.pref_nan_ring,
+            &mut self.pref_idx,
+            &mut self.pref_sum_total,
+            &mut self.pref_nan_total,
+            self.smoothing_len,
+            close,
+        );
+
+        // 2) FVG detection using (i-2, i-1, i)
+        //    Bull FVG: low[i]   > high[i-2] && close[i-1] > high[i-2]  -> track v = high[i-2]
+        //    Bear FVG: high[i]  <  low[i-2] && close[i-1] <  low[i-2]  -> track v =  low[i-2]
+        if self.bar_count >= 2 && self.hi_m2.is_finite() && self.lo_m2.is_finite() && self.cl_m1.is_finite() {
+            if low > self.hi_m2 && self.cl_m1 > self.hi_m2 {
+                self.bull_push(self.hi_m2);
+            }
+            if high < self.lo_m2 && self.cl_m1 < self.lo_m2 {
+                self.bear_push(self.lo_m2);
+            }
+        }
+
+        // 3) Mitigation by threshold (amortized O(1), O(log L) per pop via heap)
+        self.bull_sweep(close); // drop all bull levels > close
+        self.bear_sweep(close); // drop all bear levels < close
+
+        // 4) Fast averages of unmitigated FVG levels
+        let bull_avg = if self.bull_cnt > 0 {
+            self.bull_sum / (self.bull_cnt as f64)
+        } else {
+            f64::NAN
+        };
+        let bear_avg = if self.bear_cnt > 0 {
+            self.bear_sum / (self.bear_cnt as f64)
+        } else {
+            f64::NAN
+        };
         if !bull_avg.is_nan() {
             self.last_bull_non_na = Some(self.bar_count);
         }
@@ -1483,7 +1849,7 @@ impl FvgTrailingStopStream {
             self.last_bear_non_na = Some(self.bar_count);
         }
 
-        // Progressive SMA fallbacks
+        // 5) Progressive SMA fallback over close (now exact, O(1) via prefix ring)
         let bull_bs = if bull_avg.is_nan() {
             match self.last_bull_non_na {
                 Some(last) => ((self.bar_count - last).max(1)).min(self.smoothing_len),
@@ -1492,7 +1858,6 @@ impl FvgTrailingStopStream {
         } else {
             1
         };
-
         let bear_bs = if bear_avg.is_nan() {
             match self.last_bear_non_na {
                 Some(last) => ((self.bar_count - last).max(1)).min(self.smoothing_len),
@@ -1502,67 +1867,65 @@ impl FvgTrailingStopStream {
             1
         };
 
-        // For streaming, we don't have full history for progressive SMA
-        // So we'll use the current close as fallback
-        let bull_sma = if bull_avg.is_nan() { close } else { f64::NAN };
-        let bear_sma = if bear_avg.is_nan() { close } else { f64::NAN };
-
-        let x_bull = if !bull_avg.is_nan() {
-            bull_avg
+        let bull_sma = if bull_avg.is_nan() {
+            let (s, nans) = Self::prefix_last_bs(
+                &self.pref_sum_ring,
+                &self.pref_nan_ring,
+                self.pref_idx,
+                self.smoothing_len,
+                bull_bs,
+            );
+            if nans == 0 {
+                s / (bull_bs as f64)
+            } else {
+                f64::NAN
+            }
         } else {
-            bull_sma
+            f64::NAN
         };
-        let x_bear = if !bear_avg.is_nan() {
-            bear_avg
+        let bear_sma = if bear_avg.is_nan() {
+            let (s, nans) = Self::prefix_last_bs(
+                &self.pref_sum_ring,
+                &self.pref_nan_ring,
+                self.pref_idx,
+                self.smoothing_len,
+                bear_bs,
+            );
+            if nans == 0 {
+                s / (bear_bs as f64)
+            } else {
+                f64::NAN
+            }
         } else {
-            bear_sma
+            f64::NAN
         };
 
-        self.bull_hist.push_back(x_bull);
-        if self.bull_hist.len() > self.smoothing_len {
-            self.bull_hist.pop_front();
-        }
+        let x_bull = if !bull_avg.is_nan() { bull_avg } else { bull_sma };
+        let x_bear = if !bear_avg.is_nan() { bear_avg } else { bear_sma };
 
-        self.bear_hist.push_back(x_bear);
-        if self.bear_hist.len() > self.smoothing_len {
-            self.bear_hist.pop_front();
-        }
+        // 6) Fixed-window smoothing (true O(1) ring update, NaN-aware)
+        let bull_disp = Self::push_x_and_smooth(
+            &mut self.xbull_vals,
+            &mut self.xbull_idx,
+            &mut self.xbull_filled,
+            &mut self.xbull_sum,
+            &mut self.xbull_nan,
+            self.smoothing_len,
+            self.inv_w,
+            x_bull,
+        );
+        let bear_disp = Self::push_x_and_smooth(
+            &mut self.xbear_vals,
+            &mut self.xbear_idx,
+            &mut self.xbear_filled,
+            &mut self.xbear_sum,
+            &mut self.xbear_nan,
+            self.smoothing_len,
+            self.inv_w,
+            x_bear,
+        );
 
-        // Fixed-window SMA
-        let mut bull_disp = f64::NAN;
-        let mut bear_disp = f64::NAN;
-
-        if self.bull_hist.len() == self.smoothing_len {
-            let mut ok = true;
-            let mut sum = 0.0;
-            for &v in &self.bull_hist {
-                if v.is_nan() {
-                    ok = false;
-                    break;
-                }
-                sum += v;
-            }
-            if ok {
-                bull_disp = sum / self.smoothing_len as f64;
-            }
-        }
-
-        if self.bear_hist.len() == self.smoothing_len {
-            let mut ok = true;
-            let mut sum = 0.0;
-            for &v in &self.bear_hist {
-                if v.is_nan() {
-                    ok = false;
-                    break;
-                }
-                sum += v;
-            }
-            if ok {
-                bear_disp = sum / self.smoothing_len as f64;
-            }
-        }
-
-        // Update OS and TS
+        // 7) OS/TS updates
         let prev_os = self.os;
         let next_os = if !bear_disp.is_nan() && close > bear_disp {
             Some(1)
@@ -1620,6 +1983,7 @@ impl FvgTrailingStopStream {
             }
         }
 
+        // 8) Outputs
         let show = self.ts.is_some() || self.ts_prev.is_some();
         let ts_nz = self.ts.or(self.ts_prev);
 
@@ -1636,10 +2000,14 @@ impl FvgTrailingStopStream {
 
         self.ts_prev = self.ts;
 
-        // Update state for next bar
-        self.prev_high2 = if self.bar_count >= 1 { high } else { f64::NAN };
-        self.prev_low2 = if self.bar_count >= 1 { low } else { f64::NAN };
-        self.prev_close = close;
+        // 9) Rotate detection memory for next call (correct i-2 maintenance)
+        //     Before update: hi_m2, hi_m1 were (i-2, i-1). Now shift and store current as i.
+        self.hi_m2 = self.hi_m1;
+        self.hi_m1 = high;
+        self.lo_m2 = self.lo_m1;
+        self.lo_m1 = low;
+        self.cl_m1 = close;
+
         self.bar_count += 1;
 
         if self.bar_count >= self.smoothing_len + 2 {

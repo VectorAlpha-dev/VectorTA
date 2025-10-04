@@ -23,7 +23,8 @@
 //!   kernel selection; however, `Kernel::Auto` short-circuits to the scalar path.
 //!   On some test machines, wide-vector divides downclock and can offset gains.
 //!   Explicit AVX2/AVX512 entry points remain for benchmarking and future revisits.
-//! - **Streaming update**: O(n) performance due to recalculating min/max over full buffers
+//! - **Streaming update**: O(1) amortized via monotone deques for rolling HH/LL;
+//!   streaming SMA/EMA for %K and %D. Matches scalar outputs.
 //! - **Memory optimization**: Properly uses zero-copy helper functions (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
 //! - **SIMD status**: Implemented and validated; Auto defaults to scalar for
 //!   stability across CPUs (batch Auto also defaults to ScalarBatch).
@@ -61,6 +62,7 @@ use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
+use std::collections::VecDeque;
 
 // === Input/Output Structs ===
 
@@ -1304,21 +1306,58 @@ unsafe fn stoch_row_avx512_impl(
 }
 
 // === Streaming ===
+//
+// O(1) amortized updates via monotone deques for rolling HH/LL,
+// plus constant-time streaming SMA/EMA for %K and %D.
+
+#[derive(Debug, Clone)]
+struct DeqEntry {
+    val: f64,
+    idx: usize,
+}
 
 #[derive(Debug, Clone)]
 pub struct StochStream {
+    // Parameters
     fastk_period: usize,
     slowk_period: usize,
     slowk_ma_type: String,
     slowd_period: usize,
     slowd_ma_type: String,
-    high_buf: Vec<f64>,
-    low_buf: Vec<f64>,
-    close_buf: Vec<f64>,
+
+    // Rolling window (HH/LL) via monotone deques
+    maxq: VecDeque<DeqEntry>, // non-increasing; front = current highest high
+    minq: VecDeque<DeqEntry>, // non-decreasing; front = current lowest low
+    t: usize,                 // 0-based index of the current bar (monotone)
+    have_window: bool,        // becomes true when we have >= fastk_period bars
+
+    // Streaming %K smoothing state (SMA)
+    k_sma_buf: Vec<f64>,
+    k_sma_sum: f64,
+    k_sma_head: usize,
+    k_sma_count: usize,
+
+    // Streaming %K smoothing state (EMA)
+    k_ema: Option<f64>,
+    k_ema_seed_sum: f64,
+    k_ema_seed_count: usize,
+    alpha_k: f64, // 2/(slowk_period+1) when EMA is selected
+
+    // Streaming %D smoothing state (SMA)
+    d_sma_buf: Vec<f64>,
+    d_sma_sum: f64,
+    d_sma_head: usize,
+    d_sma_count: usize,
+
+    // Streaming %D smoothing state (EMA)
+    d_ema: Option<f64>,
+    d_ema_seed_sum: f64,
+    d_ema_seed_count: usize,
+    alpha_d: f64, // 2/(slowd_period+1) when EMA is selected
+
+    // Fallback ring buffers for non-SMA/EMA smoothing types (same behavior as old code)
     k_stream: Option<Vec<f64>>,
     d_stream: Option<Vec<f64>>,
-    head: usize,
-    filled: bool,
 }
 
 impl StochStream {
@@ -1327,89 +1366,262 @@ impl StochStream {
         let slowk_period = params.slowk_period.unwrap_or(3);
         let slowd_period = params.slowd_period.unwrap_or(3);
         if fastk_period == 0 || slowk_period == 0 || slowd_period == 0 {
-            return Err(StochError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            });
+            return Err(StochError::InvalidPeriod { period: 0, data_len: 0 });
         }
+
+        let slowk_ma_type = params
+            .slowk_ma_type
+            .unwrap_or_else(|| "sma".to_string());
+        let slowd_ma_type = params
+            .slowd_ma_type
+            .unwrap_or_else(|| "sma".to_string());
+
+        // Precompute EMAs’ alpha (ignored for SMA/other)
+        let alpha_k = 2.0 / (slowk_period as f64 + 1.0);
+        let alpha_d = 2.0 / (slowd_period as f64 + 1.0);
+
         Ok(Self {
             fastk_period,
             slowk_period,
-            slowk_ma_type: params.slowk_ma_type.unwrap_or_else(|| "sma".to_string()),
+            slowk_ma_type,
             slowd_period,
-            slowd_ma_type: params.slowd_ma_type.unwrap_or_else(|| "sma".to_string()),
-            high_buf: vec![f64::NAN; fastk_period],
-            low_buf: vec![f64::NAN; fastk_period],
-            close_buf: vec![f64::NAN; fastk_period],
+            slowd_ma_type,
+
+            maxq: VecDeque::with_capacity(fastk_period),
+            minq: VecDeque::with_capacity(fastk_period),
+            t: 0,
+            have_window: false,
+
+            // K-SMA
+            k_sma_buf: vec![f64::NAN; slowk_period.max(1)],
+            k_sma_sum: 0.0,
+            k_sma_head: 0,
+            k_sma_count: 0,
+
+            // K-EMA
+            k_ema: None,
+            k_ema_seed_sum: 0.0,
+            k_ema_seed_count: 0,
+            alpha_k,
+
+            // D-SMA
+            d_sma_buf: vec![f64::NAN; slowd_period.max(1)],
+            d_sma_sum: 0.0,
+            d_sma_head: 0,
+            d_sma_count: 0,
+
+            // D-EMA
+            d_ema: None,
+            d_ema_seed_sum: 0.0,
+            d_ema_seed_count: 0,
+            alpha_d,
+
+            // Fallback for exotic MA types: keep prior behavior
             k_stream: None,
             d_stream: None,
-            head: 0,
-            filled: false,
         })
     }
-    pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<(f64, f64)> {
-        self.high_buf[self.head] = high;
-        self.low_buf[self.head] = low;
-        self.close_buf[self.head] = close;
-        self.head = (self.head + 1) % self.fastk_period;
-        if !self.filled && self.head == 0 {
-            self.filled = true;
+
+    #[inline(always)]
+    fn evict_older_than(dq: &mut VecDeque<DeqEntry>, min_idx: usize) {
+        while let Some(front) = dq.front() {
+            if front.idx < min_idx {
+                dq.pop_front();
+            } else {
+                break;
+            }
         }
-        if !self.filled {
+    }
+
+    #[inline(always)]
+    fn push_maxq(&mut self, val: f64, idx: usize) {
+        while let Some(back) = self.maxq.back() {
+            if back.val <= val {
+                self.maxq.pop_back();
+            } else {
+                break;
+            }
+        }
+        self.maxq.push_back(DeqEntry { val, idx });
+    }
+
+    #[inline(always)]
+    fn push_minq(&mut self, val: f64, idx: usize) {
+        while let Some(back) = self.minq.back() {
+            if back.val >= val {
+                self.minq.pop_back();
+            } else {
+                break;
+            }
+        }
+        self.minq.push_back(DeqEntry { val, idx });
+    }
+
+    /// Update with a single bar and return (slow %K, %D) when available.
+    /// Returns None until at least `fastk_period` points have been seen.
+    pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<(f64, f64)> {
+        // Be strict: ignore non-finite input and do not advance state on NaN/Inf
+        if !high.is_finite() || !low.is_finite() || !close.is_finite() {
             return None;
         }
-        let start = if self.head == 0 { 0 } else { self.head };
-        let mut highs = vec![];
-        let mut lows = vec![];
-        let mut closes = vec![];
-        for i in 0..self.fastk_period {
-            let idx = (start + i) % self.fastk_period;
-            highs.push(self.high_buf[idx]);
-            lows.push(self.low_buf[idx]);
-            closes.push(self.close_buf[idx]);
+
+        let idx = self.t;
+        self.t = self.t.wrapping_add(1); // keep monotone even across wrap (practically unreachable)
+
+        // 1) Push new high/low while preserving monotonicity
+        self.push_maxq(high, idx);
+        self.push_minq(low, idx);
+
+        // 2) Evict stale indices (outside [t-fastk_period+1, t])
+        let seen = idx + 1;
+        if seen >= self.fastk_period {
+            let window_start = seen - self.fastk_period;
+            Self::evict_older_than(&mut self.maxq, window_start);
+            Self::evict_older_than(&mut self.minq, window_start);
+            self.have_window = true;
         }
-        let max_h = highs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        let min_l = lows.iter().cloned().fold(f64::INFINITY, f64::min);
-        let last_close = closes[self.fastk_period - 1];
-        let k_val = if (max_h - min_l).abs() < f64::EPSILON {
+
+        if !self.have_window {
+            return None; // raw %K not ready
+        }
+
+        // 3) Compute raw %K
+        debug_assert!(!self.maxq.is_empty() && !self.minq.is_empty());
+        let hh = self.maxq.front().unwrap().val;
+        let ll = self.minq.front().unwrap().val;
+
+        const SCALE: f64 = 100.0;
+        const EPS: f64 = f64::EPSILON;
+
+        let denom = hh - ll;
+        let k_raw = if denom.abs() < EPS {
             50.0
         } else {
-            100.0 * (last_close - min_l) / (max_h - min_l)
-        };
-        let mut k_vec = self
-            .k_stream
-            .take()
-            .unwrap_or_else(|| vec![f64::NAN; self.slowk_period]);
-        k_vec.remove(0);
-        k_vec.push(k_val);
-        self.k_stream = Some(k_vec.clone());
-
-        // Try to calculate smoothed K, if fails use raw value
-        let k_last = match ma(
-            &self.slowk_ma_type,
-            MaData::Slice(&k_vec),
-            self.slowk_period,
-        ) {
-            Ok(slowk) => *slowk.last().unwrap_or(&f64::NAN),
-            Err(_) => k_val, // If MA fails (e.g., not enough valid data), use raw value
+            // ((close - ll) * (100.0 / denom)) with FMA-friendly form
+            (close - ll).mul_add(SCALE / denom, 0.0)
         };
 
-        let mut d_vec = self
-            .d_stream
-            .take()
-            .unwrap_or_else(|| vec![f64::NAN; self.slowd_period]);
-        d_vec.remove(0);
-        d_vec.push(k_last);
-        self.d_stream = Some(d_vec.clone());
+        // 4) Smooth %K -> slow %K
+        let k_last = if self.slowk_ma_type.eq_ignore_ascii_case("sma") {
+            if self.slowk_period == 1 {
+                k_raw
+            } else if self.k_sma_count < self.slowk_period {
+                // warm-up
+                self.k_sma_sum += k_raw;
+                self.k_sma_buf[self.k_sma_head] = k_raw;
+                self.k_sma_head = (self.k_sma_head + 1) % self.slowk_period;
+                self.k_sma_count += 1;
+                if self.k_sma_count == self.slowk_period {
+                    self.k_sma_sum / self.slowk_period as f64
+                } else {
+                    f64::NAN
+                }
+            } else {
+                // steady-state rolling SMA
+                let old = self.k_sma_buf[self.k_sma_head];
+                self.k_sma_sum += k_raw - old;
+                self.k_sma_buf[self.k_sma_head] = k_raw;
+                self.k_sma_head = (self.k_sma_head + 1) % self.slowk_period;
+                self.k_sma_sum / self.slowk_period as f64
+            }
+        } else if self.slowk_ma_type.eq_ignore_ascii_case("ema") {
+            if self.slowk_period == 1 {
+                self.k_ema = Some(k_raw);
+                k_raw
+            } else if self.k_ema.is_none() {
+                // seed EMA with SMA over first slowk_period K's (classic EMA init)
+                self.k_ema_seed_sum += k_raw;
+                self.k_ema_seed_count += 1;
+                if self.k_ema_seed_count == self.slowk_period {
+                    let seed = self.k_ema_seed_sum / self.slowk_period as f64;
+                    self.k_ema = Some(seed);
+                    seed
+                } else {
+                    f64::NAN
+                }
+            } else {
+                // ema = ema + alpha*(x - ema)  (better numerics)
+                let prev = self.k_ema.unwrap();
+                let ema = prev + self.alpha_k * (k_raw - prev);
+                self.k_ema = Some(ema);
+                ema
+            }
+        } else {
+            // Fallback: keep prior behavior for exotic MA types
+            let mut k_vec = self
+                .k_stream
+                .take()
+                .unwrap_or_else(|| vec![f64::NAN; self.slowk_period]);
+            k_vec.remove(0);
+            k_vec.push(k_raw);
+            self.k_stream = Some(k_vec.clone());
 
-        // Try to calculate smoothed D, if fails use K value
-        let d_last = match ma(
-            &self.slowd_ma_type,
-            MaData::Slice(&d_vec),
-            self.slowd_period,
-        ) {
-            Ok(slowd) => *slowd.last().unwrap_or(&f64::NAN),
-            Err(_) => k_last, // If MA fails (e.g., not enough valid data), use K value
+            match ma(&self.slowk_ma_type, MaData::Slice(&k_vec), self.slowk_period) {
+                Ok(slowk) => *slowk.last().unwrap_or(&f64::NAN),
+                Err(_) => k_raw,
+            }
+        };
+
+        // 5) Smooth slow %K -> %D
+        let d_last = if self.slowd_ma_type.eq_ignore_ascii_case("sma") {
+            if self.slowd_period == 1 {
+                k_last
+            } else if !k_last.is_finite() {
+                f64::NAN
+            } else if self.d_sma_count < self.slowd_period {
+                // warm-up
+                self.d_sma_sum += k_last;
+                self.d_sma_buf[self.d_sma_head] = k_last;
+                self.d_sma_head = (self.d_sma_head + 1) % self.slowd_period;
+                self.d_sma_count += 1;
+                if self.d_sma_count == self.slowd_period {
+                    self.d_sma_sum / self.slowd_period as f64
+                } else {
+                    f64::NAN
+                }
+            } else {
+                let old = self.d_sma_buf[self.d_sma_head];
+                self.d_sma_sum += k_last - old;
+                self.d_sma_buf[self.d_sma_head] = k_last;
+                self.d_sma_head = (self.d_sma_head + 1) % self.slowd_period;
+                self.d_sma_sum / self.slowd_period as f64
+            }
+        } else if self.slowd_ma_type.eq_ignore_ascii_case("ema") {
+            if self.slowd_period == 1 {
+                self.d_ema = Some(k_last);
+                k_last
+            } else if !k_last.is_finite() {
+                f64::NAN
+            } else if self.d_ema.is_none() {
+                self.d_ema_seed_sum += k_last;
+                self.d_ema_seed_count += 1;
+                if self.d_ema_seed_count == self.slowd_period {
+                    let seed = self.d_ema_seed_sum / self.slowd_period as f64;
+                    self.d_ema = Some(seed);
+                    seed
+                } else {
+                    f64::NAN
+                }
+            } else {
+                let prev = self.d_ema.unwrap();
+                let ema = prev + self.alpha_d * (k_last - prev);
+                self.d_ema = Some(ema);
+                ema
+            }
+        } else {
+            // Fallback: prior behavior for exotic MA types
+            let mut d_vec = self
+                .d_stream
+                .take()
+                .unwrap_or_else(|| vec![f64::NAN; self.slowd_period]);
+            d_vec.remove(0);
+            d_vec.push(k_last);
+            self.d_stream = Some(d_vec.clone());
+
+            match ma(&self.slowd_ma_type, MaData::Slice(&d_vec), self.slowd_period) {
+                Ok(slowd) => *slowd.last().unwrap_or(&f64::NAN),
+                Err(_) => k_last,
+            }
         };
 
         Some((k_last, d_last))

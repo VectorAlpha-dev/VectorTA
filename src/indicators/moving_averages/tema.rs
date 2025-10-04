@@ -20,6 +20,8 @@
 //!   TEMA is three cascaded IIR filters with loop-carried dependencies,
 //!   so AVX2/AVX512 over time provides no consistent >5% win. Runtime
 //!   AVX entries delegate to the scalar path for exact numeric parity.
+//! - **Decision note (Streaming)**: O(1) drop-in streaming kernel with hot-path after warmup;
+//!   ignores leading NaNs and matches batch warmup/semantics exactly.
 //! - **Streaming update**: O(1) - maintains three EMA states with simple update calculations
 //! - **Memory optimization**: Uses `alloc_with_nan_prefix` for zero-copy allocation
 //! - **Current status**: Scalar optimized; SIMD and batch SIMD paths delegate to scalar
@@ -322,83 +324,125 @@ pub unsafe fn tema_avx512_long(data: &[f64], period: usize, first_valid: usize, 
 #[derive(Debug, Clone)]
 pub struct TemaStream {
     period: usize,
-    buf: Vec<f64>,
+    // EMA coefficients
+    alpha: f64,
+    one_minus_alpha: f64,
+    // EMA states
     ema1: f64,
     ema2: f64,
     ema3: f64,
-    pos: usize,
-    filled: bool,
-    step: usize,
-    per: f64,
-    per1: f64,
-    valid: usize,
+    // samples processed since first non-NaN
+    count: usize,
+    // precomputed thresholds (in "count" space)
+    start2: usize,   // when EMA2 becomes valid
+    start3: usize,   // when EMA3 becomes valid
+    lookback: usize, // when TEMA becomes valid (count > lookback)
+    // hot-path flag: once true, the first 'if' below is always taken
+    ready: bool,
 }
 
 impl TemaStream {
+    #[inline]
     pub fn try_new(params: TemaParams) -> Result<Self, TemaError> {
         let period = params.period.unwrap_or(9);
         if period == 0 {
-            return Err(TemaError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(TemaError::InvalidPeriod { period, data_len: 0 });
         }
+
+        // α = 2/(N+1); keep both α and (1-α) to avoid recomputing
+        let alpha = 2.0 / (period as f64 + 1.0);
+        let one_minus_alpha = 1.0 - alpha;
+
+        // thresholds in "count" (count = #observations processed since first non-NaN)
+        // EMA2 becomes valid after 'period' observations from first non-NaN
+        let start2 = period;
+        // EMA3 becomes valid after 2*period - 1 observations
+        let start3 = period + period - 1;
+        // first TEMA at count > (period - 1) * 3  (matches batch/scalar warmup)
+        let lookback = (period - 1) * 3;
+
         Ok(Self {
             period,
-            buf: vec![f64::NAN; period],
+            alpha,
+            one_minus_alpha,
             ema1: f64::NAN,
             ema2: 0.0,
             ema3: 0.0,
-            pos: 0,
-            filled: false,
-            step: 0,
-            per: 2.0 / (period as f64 + 1.0),
-            per1: 1.0 - (2.0 / (period as f64 + 1.0)),
-            valid: 0,
+            count: 0,
+            start2,
+            start3,
+            lookback,
+            ready: false,
         })
     }
+
+    /// Push one observation. Returns TEMA once warmed, otherwise `None`.
+    /// Operation order matches the scalar/batch kernels for parity.
     #[inline(always)]
-    pub fn update(&mut self, value: f64) -> Option<f64> {
-        if self.filled {
-            self.ema1 = self.ema1 * self.per1 + value * self.per;
-            self.ema2 = self.ema2 * self.per1 + self.ema1 * self.per;
-            self.ema3 = self.ema3 * self.per1 + self.ema2 * self.per;
-            let tema_val = 3.0 * self.ema1 - 3.0 * self.ema2 + self.ema3;
-            return Some(tema_val);
+    pub fn update(&mut self, x: f64) -> Option<f64> {
+        // -------- Hot path after warmup (single predictable branch) --------
+        if self.ready {
+            // EMA1, EMA2, EMA3 (identical op order to scalar kernel)
+            self.ema1 = self.ema1 * self.one_minus_alpha + x * self.alpha;
+            self.ema2 = self.ema2 * self.one_minus_alpha + self.ema1 * self.alpha;
+            self.ema3 = self.ema3 * self.one_minus_alpha + self.ema2 * self.alpha;
+            return Some(3.0 * self.ema1 - 3.0 * self.ema2 + self.ema3);
         }
 
-        if self.valid == 0 {
-            self.ema1 = value;
-            self.valid += 1;
-            self.buf[self.pos] = value;
-            self.pos = (self.pos + 1) % self.period;
+        // -------- Warmup / state machine --------
+        if self.count == 0 {
+            // Match batch semantics: ignore leading NaNs
+            if x.is_nan() {
+                return None;
+            }
+            self.ema1 = x;
+            self.count = 1;
+
+            // period==1 special case: α=1 -> TEMA equals price immediately
+            if self.period == 1 {
+                self.ema2 = self.ema1; // EMA2 valid immediately for N=1
+                self.ema3 = self.ema2; // EMA3 valid immediately for N=1
+                self.ready = true;
+                return Some(self.ema1); // 3*e1 - 3*e2 + e3 == e1
+            }
             return None;
         }
 
-        self.ema1 = self.ema1 * self.per1 + value * self.per;
-        self.buf[self.pos] = value;
-        self.pos = (self.pos + 1) % self.period;
-        self.valid += 1;
+        // Update EMA1
+        self.ema1 = self.ema1 * self.one_minus_alpha + x * self.alpha;
+        self.count += 1;
 
-        if self.valid == self.period {
+        // Initialize/update EMA2
+        if self.count == self.start2 {
             self.ema2 = self.ema1;
-        } else if self.valid > self.period {
-            self.ema2 = self.ema2 * self.per1 + self.ema1 * self.per;
+        } else if self.count > self.start2 {
+            self.ema2 = self.ema2 * self.one_minus_alpha + self.ema1 * self.alpha;
         }
 
-        if self.valid == 2 * self.period - 1 {
+        // Initialize/update EMA3
+        if self.count == self.start3 {
             self.ema3 = self.ema2;
-        } else if self.valid > 2 * self.period - 1 {
-            self.ema3 = self.ema3 * self.per1 + self.ema2 * self.per;
+        } else if self.count > self.start3 {
+            self.ema3 = self.ema3 * self.one_minus_alpha + self.ema2 * self.alpha;
         }
 
-        if self.valid > (self.period - 1) * 3 {
-            self.filled = true;
-            let tema_val = 3.0 * self.ema1 - 3.0 * self.ema2 + self.ema3;
-            Some(tema_val)
+        if self.count > self.lookback {
+            self.ready = true; // flip into hot path
+            Some(3.0 * self.ema1 - 3.0 * self.ema2 + self.ema3)
         } else {
             None
         }
+    }
+
+    /// Faster contract for trusted non‑NaN streams after warmup.
+    /// Call `update()` until it returns `Some(_)`, then switch to this.
+    #[inline(always)]
+    pub fn update_unchecked(&mut self, x: f64) -> f64 {
+        debug_assert!(self.ready, "call update() until Some(..) first");
+        self.ema1 = self.ema1 * self.one_minus_alpha + x * self.alpha;
+        self.ema2 = self.ema2 * self.one_minus_alpha + self.ema1 * self.alpha;
+        self.ema3 = self.ema3 * self.one_minus_alpha + self.ema2 * self.alpha;
+        3.0 * self.ema1 - 3.0 * self.ema2 + self.ema3
     }
 }
 

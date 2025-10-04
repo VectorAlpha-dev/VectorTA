@@ -576,23 +576,30 @@ pub unsafe fn sar_avx512_long(
 }
 
 // Streaming
+// Decision: Streaming path fixed to follow Wilder's clamp/init rules exactly,
+// matching scalar outputs while remaining O(1) per update.
 
 #[derive(Debug, Clone)]
 pub struct SarStream {
     acceleration: f64,
     maximum: f64,
     state: Option<StreamState>,
+    // Number of valid (finite) bars processed; aligns with warmup handling
     idx: usize,
 }
 
 #[derive(Debug, Clone)]
 struct StreamState {
+    // Wilder state
     trend_up: bool,
     sar: f64,
     ep: f64,
     acc: f64,
-    prev: Option<f64>,
-    prev2: Option<f64>,
+    // Track prior two highs and lows for clamping
+    prev_high: f64,
+    prev_high2: f64,
+    prev_low: f64,
+    prev_low2: f64,
 }
 
 impl SarStream {
@@ -600,10 +607,10 @@ impl SarStream {
         let acceleration = params.acceleration.unwrap_or(0.02);
         let maximum = params.maximum.unwrap_or(0.2);
 
-        if !(acceleration > 0.0) || acceleration.is_nan() || acceleration.is_infinite() {
+        if !(acceleration > 0.0) || !acceleration.is_finite() {
             return Err(SarError::InvalidAcceleration { acceleration });
         }
-        if !(maximum > 0.0) || maximum.is_nan() || maximum.is_infinite() {
+        if !(maximum > 0.0) || !maximum.is_finite() {
             return Err(SarError::InvalidMaximum { maximum });
         }
 
@@ -615,85 +622,119 @@ impl SarStream {
         })
     }
 
+    /// O(1) update. Returns:
+    /// - `None` for the first valid bar (warmup) or if inputs are non-finite,
+    /// - `Some(sar)` for the second valid bar (initial SAR),
+    /// - `Some(next_sar)` thereafter.
+    #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64) -> Option<f64> {
-        self.idx += 1;
+        // Ignore non-finite inputs (do not advance warmup counter)
+        if !high.is_finite() || !low.is_finite() {
+            return None;
+        }
 
         match self.state.as_mut() {
+            // First valid bar: stash highs/lows, no SAR yet
             None => {
                 self.state = Some(StreamState {
                     trend_up: false,
                     sar: f64::NAN,
                     ep: f64::NAN,
                     acc: self.acceleration,
-                    prev: Some(high),
-                    prev2: None,
+                    prev_high: high,
+                    prev_high2: high, // placeholder until bar #2
+                    prev_low: low,
+                    prev_low2: low,   // placeholder until bar #2
                 });
+                self.idx = 1;
                 None
             }
-            Some(st) if self.idx == 2 => {
-                let prev_high = st.prev.unwrap();
-                let prev_low = low;
-                let (trend_up, sar, ep) = if high > prev_high {
-                    (true, prev_low, high)
-                } else {
-                    (false, prev_high, low)
-                };
-                *st = StreamState {
-                    trend_up,
-                    sar,
-                    ep,
-                    acc: self.acceleration,
-                    prev: Some(high),
-                    prev2: st.prev,
-                };
+
+            // We have at least one valid bar in state
+            Some(st) if self.idx == 1 => {
+                // Decide initial trend to match scalar path: h1 > h0
+                let trend_up = high > st.prev_high;
+
+                // For bar #2 (first actionable bar):
+                // - Uptrend: SAR = previous bar's LOW
+                // - Downtrend: SAR = previous bar's HIGH
+                let sar = if trend_up { st.prev_low } else { st.prev_high };
+                let ep = if trend_up { high } else { low };
+
+                // Rotate previous-two windows for clamp rules
+                st.prev_high2 = st.prev_high;
+                st.prev_low2 = st.prev_low;
+                st.prev_high = high;
+                st.prev_low = low;
+
+                st.trend_up = trend_up;
+                st.sar = sar;
+                st.ep = ep;
+                st.acc = self.acceleration;
+
+                self.idx = 2;
                 Some(sar)
             }
+
+            // Normal running state (>= 2 valid bars seen)
             Some(st) => {
-                let mut next_sar = st.sar + st.acc * (st.ep - st.sar);
+                // next_sar = prior_sar + AF * (EP - prior_sar)
+                let mut next_sar = st.acc.mul_add(st.ep - st.sar, st.sar);
+
                 if st.trend_up {
+                    // Reversal?
                     if low < next_sar {
                         st.trend_up = false;
-                        next_sar = st.ep;
-                        st.ep = low;
+                        next_sar = st.ep; // reversal uses previous EP as SAR
+                        st.ep = low;       // new EP is current low
                         st.acc = self.acceleration;
                     } else {
+                        // Continue uptrend: maybe extend EP/AF and clamp to prior TWO lows
                         if high > st.ep {
                             st.ep = high;
                             st.acc = (st.acc + self.acceleration).min(self.maximum);
                         }
-                        if let Some(p) = st.prev {
-                            next_sar = next_sar.min(p);
-                        }
-                        if let Some(p2) = st.prev2 {
-                            next_sar = next_sar.min(p2);
-                        }
+                        next_sar = min3(next_sar, st.prev_low, st.prev_low2);
                     }
                 } else {
+                    // Downtrend
                     if high > next_sar {
                         st.trend_up = true;
-                        next_sar = st.ep;
-                        st.ep = high;
+                        next_sar = st.ep; // reversal uses previous EP as SAR
+                        st.ep = high;      // new EP is current high
                         st.acc = self.acceleration;
                     } else {
+                        // Continue downtrend: maybe extend EP/AF and clamp to prior TWO highs
                         if low < st.ep {
                             st.ep = low;
                             st.acc = (st.acc + self.acceleration).min(self.maximum);
                         }
-                        if let Some(p) = st.prev {
-                            next_sar = next_sar.max(p);
-                        }
-                        if let Some(p2) = st.prev2 {
-                            next_sar = next_sar.max(p2);
-                        }
+                        next_sar = max3(next_sar, st.prev_high, st.prev_high2);
                     }
                 }
-                st.prev2 = st.prev;
-                st.prev = Some(high);
+
+                // Slide two-bar windows
+                st.prev_high2 = st.prev_high;
+                st.prev_low2 = st.prev_low;
+                st.prev_high = high;
+                st.prev_low = low;
+
                 st.sar = next_sar;
+                self.idx += 1;
                 Some(next_sar)
             }
         }
     }
+}
+
+#[inline(always)]
+fn min3(a: f64, b: f64, c: f64) -> f64 {
+    a.min(b.min(c))
+}
+
+#[inline(always)]
+fn max3(a: f64, b: f64, c: f64) -> f64 {
+    a.max(b.max(c))
 }
 
 // Batch

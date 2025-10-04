@@ -18,7 +18,9 @@
 //!   for non-SMA (and SMA with non-stddev) by vectorizing the writes; fall back
 //!   to the optimized scalar SMA+stddev path where loop-carried dependencies
 //!   dominate and SIMD provides little benefit.
-//! - **Streaming**: Not implemented
+//! - **Streaming**: O(1) for SMA/EMA with stddev via ring buffer; generic
+//!   fallback (mean_ad/median_ad or exotic MAs) uses an O(period) path without
+//!   per-tick allocs. Matches batch outputs after warmup.
 //! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy) for all three bands
 //! - **Batch operations**: ✅ Implemented with parallel processing support
 //! - **Row-specific batch**: Not specialized for SMA+stddev; a future optimization is
@@ -922,61 +924,219 @@ unsafe fn bb_row_avx512(
 
 #[derive(Debug, Clone)]
 pub struct BollingerBandsStream {
+    // public configuration (unchanged API)
     pub period: usize,
     pub devup: f64,
     pub devdn: f64,
     pub matype: String,
     pub devtype: usize,
-    pub buffer: Vec<f64>,
+
+    // --- internal state for O(1) fast paths ---
+    buf: Vec<f64>,   // ring buffer capacity == period
+    idx: usize,      // write index (oldest element position)
+    len: usize,      // number of valid samples in buf (<= period)
+    sum: f64,        // Σ x
+    sum_sq: f64,     // Σ x^2
+    inv_n: f64,      // 1.0 / period (cached)
+
+    // EMA state (only used when matype == "ema")
+    alpha: f64,      // 2.0 / (period + 1.0)
+    ema: f64,
+    ema_seeded: bool,
+
+    // scratch for generic fallback path (re-used, no allocs per tick)
+    scratch: Vec<f64>,
+
+    // dispatch
+    fast_path: FastPath,
 }
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum FastPath { SmaStddev, EmaStddev, Generic }
 
 impl BollingerBandsStream {
     pub fn try_new(params: BollingerBandsParams) -> Result<Self, BollingerBandsError> {
         let period = params.period.unwrap_or(20);
+        if period == 0 {
+            return Err(BollingerBandsError::InvalidPeriod { period, data_len: 0 });
+        }
         let devup = params.devup.unwrap_or(2.0);
         let devdn = params.devdn.unwrap_or(2.0);
         let matype = params.matype.unwrap_or_else(|| "sma".to_string());
         let devtype = params.devtype.unwrap_or(0);
 
+        let mt_lc = matype.to_ascii_lowercase();
+        let fast_path = if devtype == 0 && (mt_lc == "sma") {
+            FastPath::SmaStddev
+        } else if devtype == 0 && (mt_lc == "ema") {
+            FastPath::EmaStddev
+        } else {
+            FastPath::Generic
+        };
+
+        let inv_n = 1.0 / (period as f64);
+        let alpha = 2.0 / ((period as f64) + 1.0); // standard EMA smoothing
         Ok(Self {
             period,
             devup,
             devdn,
             matype,
             devtype,
-            buffer: Vec::with_capacity(period),
+            buf: vec![0.0; period],
+            idx: 0,
+            len: 0,
+            sum: 0.0,
+            sum_sq: 0.0,
+            inv_n,
+            alpha,
+            ema: 0.0,
+            ema_seeded: false,
+            scratch: Vec::with_capacity(period),
+            fast_path,
         })
     }
 
     #[inline(always)]
-    pub fn update(&mut self, value: f64) -> Option<(f64, f64, f64)> {
-        if self.buffer.len() == self.period {
-            self.buffer.remove(0);
+    fn reset(&mut self) {
+        self.idx = 0;
+        self.len = 0;
+        self.sum = 0.0;
+        self.sum_sq = 0.0;
+        self.ema = 0.0;
+        self.ema_seeded = false;
+        // buffer values may remain; len=0 ensures they are ignored until refilled
+    }
+
+    /// Build a contiguous (oldest..newest) view of the current window into `self.scratch`.
+    /// Used only by the Generic fallback to call `ma()` / `deviation()`.
+    #[inline(always)]
+    fn window_contiguous<'a>(&'a mut self) -> &'a [f64] {
+        self.scratch.clear();
+        if self.len < self.period {
+            // During warmup, just use what we have in direct order [0..len)
+            self.scratch.extend_from_slice(&self.buf[..self.len]);
+        } else {
+            // Full window: [idx..end) then [0..idx)
+            self.scratch.extend_from_slice(&self.buf[self.idx..]);
+            if self.idx != 0 {
+                self.scratch.extend_from_slice(&self.buf[..self.idx]);
+            }
         }
-        self.buffer.push(value);
-        if self.buffer.len() < self.period || self.buffer.iter().all(|x| x.is_nan()) {
+        debug_assert_eq!(self.scratch.len(), self.len.min(self.period));
+        &self.scratch
+    }
+
+    /// O(1) standard deviation (population) from running sums over the current window.
+    #[inline(always)]
+    fn stddev_current(&self) -> f64 {
+        // Var = E[x^2] - (E[x])^2, with E[.] over the window, population variance (no Bessel's)
+        let mean = self.sum * self.inv_n;
+        let var = (self.sum_sq * self.inv_n) - mean * mean;
+        // Numerically safe clamp against tiny negative due to FP error:
+        let v = if var > 0.0 { var } else { 0.0 };
+        v.sqrt()
+    }
+
+    /// Push one value into the window; updates sums and ring pointers in O(1).
+    /// Returns (old, had_old) where `old` is the evicted sample when the window is full.
+    #[inline(always)]
+    fn push(&mut self, x: f64) -> (f64, bool) {
+        if self.len < self.period {
+            self.buf[self.idx] = x;
+            self.idx += 1;
+            if self.idx == self.period { self.idx = 0; }
+            self.len += 1;
+            self.sum += x;
+            self.sum_sq = x.mul_add(x, self.sum_sq); // sum_sq += x*x
+            (0.0, false)
+        } else {
+            // overwrite oldest (at idx)
+            let old = self.buf[self.idx];
+            self.buf[self.idx] = x;
+            self.idx += 1;
+            if self.idx == self.period { self.idx = 0; }
+
+            // O(1) rolling updates
+            self.sum += x - old;
+            // sum_sq = sum_sq - old^2 + x^2  (use FMA where possible)
+            let tmp = self.sum_sq - old * old;
+            self.sum_sq = x.mul_add(x, tmp);
+            (old, true)
+        }
+    }
+
+    /// O(1) stream update. Returns (upper, middle, lower) once the window is full.
+    #[inline(always)]
+    pub fn update(&mut self, value: f64) -> Option<(f64, f64, f64)> {
+        // Treat non-finite as a break in the series; this mirrors batch behavior
+        // where computation starts at the first finite element.
+        if !value.is_finite() {
+            self.reset();
             return None;
         }
-        let data = self.buffer.as_slice();
-        let ma_data = MaData::Slice(data);
-        let dev_input = DevInput::from_slice(
-            data,
-            DevParams {
-                period: Some(self.period),
-                devtype: Some(self.devtype),
-            },
-        );
 
-        let mid = ma(&self.matype, ma_data, self.period)
-            .ok()
-            .and_then(|v| v.last().copied())
-            .unwrap_or(f64::NAN);
-        let dev = deviation(&dev_input)
-            .ok()
-            .and_then(|v| v.last().copied())
-            .unwrap_or(f64::NAN);
+        // Insert and update ring/sums
+        let _ = self.push(value);
 
-        Some((mid + self.devup * dev, mid, mid - self.devdn * dev))
+        // Warm‑up: wait until we have a full window
+        if self.len < self.period {
+            return None;
+        }
+
+        match self.fast_path {
+            FastPath::SmaStddev => {
+                // middle = SMA, deviation = window stddev (population)
+                let mean = self.sum * self.inv_n;
+                let sd = self.stddev_current();
+                let up = self.devup.mul_add(sd, mean);
+                let lo = (-self.devdn).mul_add(sd, mean);
+                Some((up, mean, lo))
+            }
+            FastPath::EmaStddev => {
+                // deviation = window stddev (same as batch); middle = EMA seeded with first SMA
+                if !self.ema_seeded {
+                    self.ema = self.sum * self.inv_n; // seed EMA with SMA of first window
+                    self.ema_seeded = true;
+                } else {
+                    // ema = α*new + (1-α)*ema
+                    // (value is the newest sample that just entered the window)
+                    self.ema = self.alpha.mul_add(value, (1.0 - self.alpha) * self.ema);
+                }
+                let sd = self.stddev_current();
+                let up = self.devup.mul_add(sd, self.ema);
+                let lo = (-self.devdn).mul_add(sd, self.ema);
+                Some((up, self.ema, lo))
+            }
+            FastPath::Generic => {
+                // Fall back to generic engines for non-stddev deviations or non-SMA/EMA MAs.
+                // Still avoids O(period) shifting thanks to the ring; only one copy into scratch.
+                let matype = self.matype.clone();
+                let period = self.period;
+                let devtype = self.devtype;
+                let devup = self.devup;
+                let devdn = self.devdn;
+                let win = self.window_contiguous();
+
+                // middle
+                let mid = ma(&matype, MaData::Slice(win), period)
+                    .ok()
+                    .and_then(|v| v.last().copied())
+                    .unwrap_or(f64::NAN);
+
+                // deviation (devtype may be mean_ad or median_ad)
+                let dev = deviation(&DevInput::from_slice(
+                        win,
+                        DevParams { period: Some(period), devtype: Some(devtype) },
+                    ))
+                    .ok()
+                    .and_then(|v| v.values.last().copied())
+                    .unwrap_or(f64::NAN);
+
+                let up = devup.mul_add(dev, mid);
+                let lo = (-devdn).mul_add(dev, mid);
+                Some((up, mid, lo))
+            }
+        }
     }
 }
 

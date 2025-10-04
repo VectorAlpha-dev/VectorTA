@@ -939,91 +939,117 @@ unsafe fn rsi_row_avx512_long(data: &[f64], first: usize, period: usize, out: &m
     rsi_row_scalar(data, first, period, out)
 }
 
-// --- Streaming RSI (for parity with alma.rs) ---
-
+// --- Streaming RSI (O(1) time & memory), parity with batch scalar ---
+// Decision: Streaming uses precomputed inv_p/beta, no ring buffer; FMA mirrors batch numerics.
 #[derive(Debug, Clone)]
 pub struct RsiStream {
+    // Params and precomputed constants
     period: usize,
-    buffer: Vec<f64>,
-    head: usize,
-    filled: bool,
+    inv_p: f64,
+    beta: f64,
+
+    // Previous price tracking
+    has_prev: bool,
+    prev: f64,
+
+    // Warm-up accumulation over first `period` deltas
+    seed_count: usize,
+    sum_gain: f64,
+    sum_loss: f64,
+    poisoned: bool,
+
+    // Wilder recursion state after seeding
     avg_gain: f64,
     avg_loss: f64,
-    prev: f64,
-    first: bool,
+    seeded: bool,
 }
 impl RsiStream {
+    #[inline(always)]
     pub fn try_new(params: RsiParams) -> Result<Self, RsiError> {
         let period = params.period.unwrap_or(14);
         if period == 0 {
-            return Err(RsiError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(RsiError::InvalidPeriod { period, data_len: 0 });
         }
-        let mut buffer = Vec::with_capacity(period);
-        unsafe {
-            buffer.set_len(period);
-            for i in 0..period {
-                *buffer.get_unchecked_mut(i) = f64::NAN;
-            }
-        }
+        let inv_p = 1.0 / (period as f64);
         Ok(Self {
             period,
-            buffer,
-            head: 0,
-            filled: false,
+            inv_p,
+            beta: 1.0 - inv_p,
+
+            has_prev: false,
+            prev: f64::NAN,
+
+            seed_count: 0,
+            sum_gain: 0.0,
+            sum_loss: 0.0,
+            poisoned: false,
+
             avg_gain: 0.0,
             avg_loss: 0.0,
-            prev: f64::NAN,
-            first: true,
+            seeded: false,
         })
     }
+
+    /// Push a new price. Returns Some(RSI) once enough data is seen, else None.
+    /// Semantics match batch scalar:
+    /// - any non-finite during warm-up yields NaN at the first RSI sample and NaNs after.
+    /// - non-finite deltas after warm-up have zero effect (treated as 0 change).
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        if self.first {
+        // Need at least two prices to form a delta
+        if !self.has_prev {
             self.prev = value;
-            self.first = false;
+            self.has_prev = true;
             return None;
         }
+
         let delta = value - self.prev;
         self.prev = value;
-        self.buffer[self.head] = delta;
-        self.head = (self.head + 1) % self.period;
 
-        if !self.filled && self.head == 0 {
-            self.filled = true;
-            let mut gain = 0.0;
-            let mut loss = 0.0;
-            for &d in &self.buffer[..self.period] {
-                if d > 0.0 {
-                    gain += d;
+        // Seeding path: collect first `period` deltas
+        if !self.seeded {
+            if !delta.is_finite() {
+                self.poisoned = true;
+            }
+
+            // Branchless rectification; NaN -> 0 via max semantics
+            let gain = delta.max(0.0);
+            let loss = (-delta).max(0.0);
+
+            self.sum_gain += gain;
+            self.sum_loss += loss;
+            self.seed_count += 1;
+
+            if self.seed_count == self.period {
+                self.seeded = true;
+                if self.poisoned {
+                    self.avg_gain = f64::NAN;
+                    self.avg_loss = f64::NAN;
+                    return Some(f64::NAN);
                 } else {
-                    loss += -d;
+                    self.avg_gain = self.sum_gain * self.inv_p;
+                    self.avg_loss = self.sum_loss * self.inv_p;
+                    let denom = self.avg_gain + self.avg_loss;
+                    let rsi = if denom == 0.0 {
+                        50.0
+                    } else {
+                        100.0 * self.avg_gain / denom
+                    };
+                    return Some(rsi);
                 }
-            }
-            self.avg_gain = gain / self.period as f64;
-            self.avg_loss = loss / self.period as f64;
-            if self.avg_gain + self.avg_loss == 0.0 {
-                return Some(50.0);
             } else {
-                return Some(100.0 * self.avg_gain / (self.avg_gain + self.avg_loss));
+                return None;
             }
         }
-        if !self.filled {
-            return None;
-        }
-        let gain = if delta > 0.0 { delta } else { 0.0 };
-        let loss = if delta < 0.0 { -delta } else { 0.0 };
-        let inv_period = 1.0 / self.period as f64;
-        let beta = 1.0 - inv_period;
-        self.avg_gain = inv_period * gain + beta * self.avg_gain;
-        self.avg_loss = inv_period * loss + beta * self.avg_loss;
-        if self.avg_gain + self.avg_loss == 0.0 {
-            Some(50.0)
-        } else {
-            Some(100.0 * self.avg_gain / (self.avg_gain + self.avg_loss))
-        }
+
+        // Steady-state Wilder recursion (FMA mirrors batch numerics)
+        let gain = delta.max(0.0);
+        let loss = (-delta).max(0.0);
+
+        self.avg_gain = self.avg_gain.mul_add(self.beta, self.inv_p * gain);
+        self.avg_loss = self.avg_loss.mul_add(self.beta, self.inv_p * loss);
+        let denom = self.avg_gain + self.avg_loss;
+        Some(if denom == 0.0 { 50.0 } else { 100.0 * self.avg_gain / denom })
     }
 }
 

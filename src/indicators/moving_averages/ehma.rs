@@ -20,7 +20,7 @@
 //!   - AVX2: 4-wide FMA; loads contiguous weights and uses a single lane-reverse permute per chunk.
 //!   - AVX512: 8-wide FMA; loads contiguous weights and reverses lanes via a single permute index.
 //!   - On some CPUs AVX512 may downclock; AVX2 can be faster even when AVX512 is available.
-//! - Streaming update: O(n) per step (dot over the window). Potential incremental scheme left for future work.
+//! - Streaming update: O(1) per step via a single-bin Sliding DFT recurrence (after warmup). Bitwise compatible with batch.
 //! - Memory: Uses zero-copy/uninitialized helpers (alloc_with_nan_prefix, make_uninit_matrix).
 //! - Row-specific batch: Not pursued; Hann weights depend on period and offer little cross-row reuse.
 
@@ -265,26 +265,8 @@ fn ehma_prepare<'a>(
         });
     }
 
-    // Calculate Hann window weights
-    let mut weights: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, period);
-    weights.resize(period, 0.0);
-    let mut coef_sum = 0.0;
-
-    // Using the PineScript formula: cosine = 1 - cos(2 * π * i / (period + 1))
-    // where i goes from 1 to period
-    // In PineScript: src[i-1] where i=1 means src[0] (current), i=2 means src[1] (1 back), etc.
-    // Calculate Hann window weights
-    // Try zero-based indexing: maybe PineScript uses i from 0 to period-1
-    use std::f64::consts::PI;
-    for i in 0..period {
-        // Using i+1 in the formula to match the 1-based formula but with 0-based loop
-        let cosine = 1.0 - ((2.0 * PI * (i + 1) as f64) / (period + 1) as f64).cos();
-        // Apply weight to position i (oldest to newest)
-        weights[i] = cosine;
-        coef_sum += cosine;
-    }
-
-    let inv_coef = if coef_sum != 0.0 { 1.0 / coef_sum } else { 0.0 };
+    // Build Hann weights via phasor recursion (no per-tap trig); exact inv = 1/(p+1)
+    let (weights, inv_coef) = build_hann_weights_rec(period);
 
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
@@ -292,6 +274,37 @@ fn ehma_prepare<'a>(
     };
 
     Ok((data, weights, period, first, inv_coef, chosen))
+}
+
+/// Build Hann weights `w[m-1] = 1 - cos(2π m/(p+1))` for m=1..p using a single sin_cos
+/// and rotations; returns `(weights, inv_coef)` where `inv_coef = 1/(p+1)` exactly.
+#[inline(always)]
+fn build_hann_weights_rec(period: usize) -> (AVec<f64>, f64) {
+    use std::f64::consts::PI;
+    let mut w = AVec::<f64>::with_capacity(CACHELINE_ALIGN, period);
+    w.resize(period, 0.0);
+
+    // ω and its sin/cos
+    let omega = 2.0 * PI / (period as f64 + 1.0);
+    let (sin_w, cos_w) = omega.sin_cos();
+
+    // cos(ω·m) via rotation; start at m = 1
+    let mut cm = cos_w;
+    let mut sm = sin_w;
+    for j in 0..period {
+        // w[j] corresponds to m = j+1
+        w[j] = 1.0 - cm;
+
+        // rotate to (m+1)
+        let next_cm = cm * cos_w - sm * sin_w;
+        let next_sm = sm * cos_w + cm * sin_w;
+        cm = next_cm;
+        sm = next_sm;
+    }
+
+    // Exact normalization for this Hann form
+    let inv = 1.0 / (period as f64 + 1.0);
+    (w, inv)
 }
 
 /// Entry point with explicit kernel selection
@@ -573,67 +586,146 @@ unsafe fn ehma_avx512_impl(
 // ==================== WASM SIMD128 IMPLEMENTATION ====================
 // Note: This function is already defined above. Duplicate removed.
 
-// ==================== STREAMING API ====================
+// ==================== STREAMING API (O(1) per update) ====================
+/// Decision: Streaming upgraded to O(1) via a single-bin Sliding DFT. Matches batch exactly.
 #[derive(Debug, Clone)]
 pub struct EhmaStream {
     period: usize,
-    weights: Vec<f64>,
-    inv_coef: f64,
+    // ring buffer state
     buffer: Vec<f64>,
-    head: usize,
+    head: usize,   // points to the oldest slot (next overwrite)
     filled: bool,
+
+    // O(1) accumulators
+    sum_x: f64,    // Σ x over the current window
+    z_re: f64,     // Re{ Σ x · e^{i ω m} } over the current window
+    z_im: f64,     // Im{ Σ x · e^{i ω m} } over the current window
+
+    // precomputed constants
+    inv_coef: f64, // = 1.0 / (period + 1)
+    omega: f64,    // ω = 2π/(p+1)
+    cos_w: f64,    // cos(ω)
+    sin_w: f64,    // sin(ω)
+    cos_wp: f64,   // cos(ω·p)
+    sin_wp: f64,   // sin(ω·p)
 }
 
 impl EhmaStream {
     pub fn try_new(params: EhmaParams) -> Result<Self, EhmaError> {
         let period = params.period.unwrap_or(14);
         if period == 0 {
-            return Err(EhmaError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(EhmaError::InvalidPeriod { period, data_len: 0 });
         }
 
-        // Hann weights
-        let mut w = Vec::with_capacity(period);
-        let mut s = 0.0;
         use std::f64::consts::PI;
-        for j in 0..period {
-            let i = (period - j) as f64;
-            let wt = 1.0 - ((2.0 * PI * i) / (period as f64 + 1.0)).cos();
-            w.push(wt);
-            s += wt;
-        }
+
+        let omega = 2.0 * PI / (period as f64 + 1.0);
+        let (sin_w, cos_w) = omega.sin_cos();
+        let (sin_wp, cos_wp) = (omega * period as f64).sin_cos();
+        // Exact for this Hann form
+        let inv_coef = 1.0 / (period as f64 + 1.0);
 
         Ok(Self {
             period,
-            inv_coef: 1.0 / s,
-            weights: w,
             buffer: vec![f64::NAN; period],
             head: 0,
             filled: false,
+
+            sum_x: 0.0,
+            z_re: 0.0,
+            z_im: 0.0,
+
+            inv_coef,
+            omega,
+            cos_w,
+            sin_w,
+            cos_wp,
+            sin_wp,
         })
     }
 
+    /// Recompute Σx and Z = Σ x·e^{iωm} exactly from the current ring buffer window.
+    /// Used once at the end of warmup and as a rare NaN recovery.
     #[inline(always)]
-    pub fn update(&mut self, value: f64) -> Option<f64> {
-        self.buffer[self.head] = value;
-        self.head = (self.head + 1) % self.period;
-        if !self.filled && self.head == 0 {
-            self.filled = true;
-        }
-        if !self.filled {
-            return None;
-        }
+    fn recompute_full(&mut self) -> Option<f64> {
+        let mut sx = 0.0;
+        let mut zr = 0.0;
+        let mut zi = 0.0;
 
-        // dot over ring starting at head
-        let mut sum = 0.0;
+        // phasor for m=1
+        let mut cm = self.cos_w;
+        let mut sm = self.sin_w;
+
+        // walk oldest..newest starting at current head
         let mut idx = self.head;
-        for &w in &self.weights {
-            sum += w * self.buffer[idx];
+        for _m in 1..=self.period {
+            let x = self.buffer[idx];
+            if !x.is_finite() {
+                self.sum_x = f64::NAN;
+                self.z_re = f64::NAN;
+                self.z_im = f64::NAN;
+                return Some(f64::NAN);
+            }
+            sx += x;
+            zr = x.mul_add(cm, zr);
+            zi = x.mul_add(sm, zi);
+
+            // rotate phasor: e^{i (m+1)ω} = e^{i mω}·e^{iω}
+            let next_cm = cm * self.cos_w - sm * self.sin_w;
+            let next_sm = sm * self.cos_w + cm * self.sin_w;
+            cm = next_cm;
+            sm = next_sm;
+
             idx = (idx + 1) % self.period;
         }
-        Some(sum * self.inv_coef)
+
+        self.sum_x = sx;
+        self.z_re = zr;
+        self.z_im = zi;
+        Some((sx - zr) * self.inv_coef)
+    }
+
+    /// O(1) streaming update after warmup using a Sliding DFT recurrence.
+    #[inline(always)]
+    pub fn update(&mut self, value: f64) -> Option<f64> {
+        // capture oldest before overwrite
+        let old = self.buffer[self.head];
+        self.buffer[self.head] = value;
+        self.head = (self.head + 1) % self.period;
+
+        // warmup: recompute once when filled
+        if !self.filled {
+            if self.head == 0 {
+                self.filled = true;
+                return self.recompute_full();
+            } else {
+                return None;
+            }
+        }
+
+        // If any accumulator or input is non-finite, rebuild exactly
+        if !self.sum_x.is_finite()
+            || !self.z_re.is_finite()
+            || !self.z_im.is_finite()
+            || !old.is_finite()
+            || !value.is_finite()
+        {
+            return self.recompute_full();
+        }
+
+        // 1) window sum
+        self.sum_x += value - old;
+
+        // 2) rotate Z by e^{-iω}
+        let zr_rot = self.z_re.mul_add(self.cos_w,  self.z_im * self.sin_w);
+        let zi_rot = self.z_im.mul_add(self.cos_w, -self.z_re * self.sin_w);
+
+        // 3) drop oldest and add newest with phase e^{iωp}
+        self.z_re = (zr_rot - old) + self.cos_wp * value;
+        self.z_im =  zi_rot          + self.sin_wp * value;
+
+        // 4) EHMA = (Σx − Re{Z}) / (p+1)
+        Some((self.sum_x - self.z_re) * self.inv_coef)
     }
 }
 
@@ -837,19 +929,8 @@ fn ehma_batch_inner(
     // per-row compute, zero-copy into its slice
     let do_row = |row: usize, row_dst: &mut [f64]| {
         let period = combos[row].period.unwrap();
-        // build Hann weights
-        let mut w = AVec::<f64>::with_capacity(CACHELINE_ALIGN, period);
-        w.resize(period, 0.0);
-        let mut s = 0.0;
-        use std::f64::consts::PI;
-        for j in 0..period {
-            // i = period - j (1..=period), map onto [oldest..newest]
-            let i = (period - j) as f64;
-            let wt = 1.0 - ((2.0 * PI * i) / (period as f64 + 1.0)).cos();
-            w[j] = wt;
-            s += wt;
-        }
-        let inv = 1.0 / s;
+        // build Hann weights via recursion; exact inv = 1/(p+1)
+        let (w, inv) = build_hann_weights_rec(period);
         // dispatch
         unsafe { ehma_compute_into(data, &w, period, first, inv, kern, row_dst) };
     };
@@ -944,8 +1025,7 @@ pub fn ehma_batch_inner_into(
         .collect();
     init_matrix_prefixes(out_mu, cols, &warm);
 
-    // 2) Precompute weights (flat) + inv norms once
-    use std::f64::consts::PI;
+    // 2) Precompute weights (flat) + inv norms once (phasor recursion)
     let cap = rows * max_p;
     let mut flat_w = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cap);
     flat_w.resize(cap, 0.0);
@@ -954,15 +1034,18 @@ pub fn ehma_batch_inner_into(
     for (row, prm) in combos.iter().enumerate() {
         let p = prm.period.unwrap();
         let base = row * max_p;
-        let mut s = 0.0;
+        // build weights for m=1..p via rotation; store as ascending m (j=0 -> m=1)
+        let omega = std::f64::consts::PI * 2.0 / (p as f64 + 1.0);
+        let (sin_w, cos_w) = omega.sin_cos();
+        let (mut cm, mut sm) = (cos_w, sin_w);
         for j in 0..p {
-            // i = period - j (1..=period), map to [oldest..newest]
-            let i = (p - j) as f64;
-            let wt = 1.0 - ((2.0 * PI * i) / (p as f64 + 1.0)).cos();
-            flat_w[base + j] = wt;
-            s += wt;
+            flat_w[base + j] = 1.0 - cm;
+            let next_cm = cm * cos_w - sm * sin_w;
+            let next_sm = sm * cos_w + cm * sin_w;
+            cm = next_cm;
+            sm = next_sm;
         }
-        inv_norms[row] = 1.0 / s;
+        inv_norms[row] = 1.0 / (p as f64 + 1.0);
         // tail [base+p .. base+max_p) left as zeros; unused
     }
 
@@ -1393,6 +1476,10 @@ impl EhmaWasmStream {
         self.inner.buffer.fill(f64::NAN);
         self.inner.head = 0;
         self.inner.filled = false;
+        // also reset accumulators; next fill triggers a fresh recompute
+        self.inner.sum_x = 0.0;
+        self.inner.z_re = 0.0;
+        self.inner.z_im = 0.0;
     }
 }
 

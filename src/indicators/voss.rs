@@ -13,9 +13,9 @@
 //!
 //! ## Developer Notes
 //! - **AVX2/AVX512 Kernels**: Stub implementations that delegate to scalar. Functions exist but just call scalar version. IIR filter nature makes SIMD challenging but could vectorize across multiple parameter sets.
-//! - **Streaming Performance**: O(n) per-step predictor in streaming (n = order). Could adopt the same O(1) predictor recurrence used in scalar when needed.
+//! - **Streaming Performance**: Streaming now uses an O(1) predictor update (ring + A/D accumulators), matching the scalar row kernel’s recurrence and Ehlers’ formulation.
 //! - **Memory/Batch**: Uses `alloc_with_nan_prefix` and batch helpers properly.
-//! - **Status (2025-09)**: Scalar single-series uses an O(1) predictor via a tiny ring and rolling numerator/sum; SIMD remains stubbed (serial recurrence). Batch remains per-row compute to avoid extra memory copies.
+//! - **Status (2025-10)**: Scalar and streaming use the same O(1) predictor; SIMD remains stubbed (serial recurrence). Batch remains per-row compute to avoid extra memory copies.
 
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -543,14 +543,21 @@ pub struct VossStream {
     c3: f64, // -s1
     order: usize,
     warm_left: usize,
-    // state
+    // state for the 2‑pole bandpass (Filt)
     prev_f1: f64,
     prev_f2: f64,
     last_x1: f64,
     last_x2: f64,
-    // voss history for weighted sum
-    ring: Vec<f64>, // length = order
-    rpos: usize,
+    // O(1) predictor state for Voss feedback
+    ring: Vec<f64>,    // last `order` Voss values (nz = NaN->0)
+    rpos: usize,       // write position in `ring`
+    a_sum: f64,        // A_t = sum of last `order` Voss values
+    d_sum: f64,        // D_t = sum of k * Voss[t-k], k=1..order
+    ord_f: f64,        // m as f64
+    inv_order: f64,    // 1/m
+    scale: f64,        // (3 + m)/2
+
+    // optional flag preserved for compatibility
     filled: bool,
 }
 
@@ -569,9 +576,16 @@ impl VossStream {
 
         let order = 3 * predict;
         let min_index = period.max(5).max(order);
-        let g1 = (bandwidth * 2.0 * PI / period as f64).cos();
-        let f1 = (2.0 * PI / period as f64).cos();
-        let s1 = 1.0 / g1 - (1.0 / (g1 * g1) - 1.0).sqrt();
+        // Base radian frequency
+        let w0 = 2.0 * PI / period as f64;
+        let f1 = w0.cos();
+        let g1 = (bandwidth * w0).cos();
+
+        // Numerically-stable s1 computation to avoid cancellation when g1 ≈ 1:
+        // s1 = 1/g1 - sqrt(1/g1^2 - 1) == 1 / (1/g1 + sqrt(1/g1^2 - 1))
+        let inv_g1 = 1.0 / g1;
+        let root = (inv_g1.mul_add(inv_g1, -1.0)).sqrt(); // sqrt(inv_g1^2 - 1)
+        let s1 = 1.0 / (inv_g1 + root);
 
         Ok(Self {
             period,
@@ -588,45 +602,64 @@ impl VossStream {
             prev_f2: 0.0,
             last_x1: f64::NAN,
             last_x2: f64::NAN,
-            ring: vec![0.0; order.max(1)],
+            ring: if order > 0 { vec![0.0; order] } else { Vec::new() },
             rpos: 0,
+            a_sum: 0.0,
+            d_sum: 0.0,
+            ord_f: order as f64,
+            inv_order: if order > 0 { 1.0 / order as f64 } else { 0.0 },
+            scale: 0.5 * (3 + order) as f64,
+
             filled: false,
         })
     }
 
     #[inline(always)]
     pub fn update(&mut self, x: f64) -> Option<(f64, f64)> {
-        // maintain last two raw inputs for x[i-2]
+        // Track last two raw inputs to form x[i] - x[i-2] for the bandpass
         let x_im2 = self.last_x2;
         self.last_x2 = self.last_x1;
         self.last_x1 = x;
 
-        // until we have x[i-2], output is not ready
+        // Two‑pole bandpass (Ehlers)
+        // Filt[i] = c1*(x - x[i-2]) + c2*Filt[i-1] + c3*Filt[i-2]
         let filt_val = if x_im2.is_nan() {
             0.0
         } else {
-            let f = self.c1 * (x - x_im2) + self.c2 * self.prev_f1 + self.c3 * self.prev_f2;
+            let diff = x - x_im2;
+            let t = self.c1 * diff + self.c3 * self.prev_f2;
+            let f = self.c2.mul_add(self.prev_f1, t);
             self.prev_f2 = self.prev_f1;
             self.prev_f1 = f;
             f
         };
 
-        // predictive VOSS: weighted sum of past VOSS values in ring
-        let scale = (3 + self.order) as f64 / 2.0;
-        let mut sumc = 0.0;
-        for k in 0..self.order {
-            // weights 1..order
-            let w = (k + 1) as f64 / self.order as f64;
-            let idx = (self.rpos + self.order - (self.order - 1 - k)) % self.order;
-            sumc += w * self.ring[idx];
-        }
-        let voss_val = scale * filt_val - sumc;
+        // Voss predictor with O(1) feedback update
+        let voss_val = if self.order == 0 {
+            // Predict==0: degenerate case, no feedback window
+            self.scale * filt_val
+        } else {
+            // SumC_t = (1/m) * D_t, where D_t = sum_{k=1..m} k * v_{t-k}
+            let sumc = self.d_sum * self.inv_order;
+            let vi = self.scale.mul_add(filt_val, -sumc);
 
-        // push current voss into ring
-        if self.order > 0 {
-            self.ring[self.rpos] = voss_val;
-            self.rpos = (self.rpos + 1) % self.order;
-        }
+            // Slide the window in O(1):
+            // A' = A - v_old + v_new;    D' = (D - A) + m * v_new
+            let v_new_nz = if vi.is_nan() { 0.0 } else { vi };
+            let v_old = self.ring[self.rpos];
+            let a_prev = self.a_sum;
+            self.a_sum = a_prev - v_old + v_new_nz;
+            self.d_sum = self.ord_f.mul_add(v_new_nz, self.d_sum - a_prev);
+
+            // write & advance ring
+            self.ring[self.rpos] = v_new_nz;
+            self.rpos += 1;
+            if self.rpos == self.order {
+                self.rpos = 0;
+            }
+
+            vi
+        };
 
         if self.warm_left > 0 {
             self.warm_left -= 1;

@@ -1,5 +1,7 @@
 //! # Jurik Moving Average (JMA)
 //!
+//! Decision: Streaming kernel precomputes (1-α), (1-β), α², (1-α)² and clamps phase at init; parity with scalar/batch retained.
+//!
 //! A minimal-lag smoothing methodology developed by Mark Jurik. JMA adapts quickly
 //! to market moves while reducing noise. Parameters (`period`, `phase`, `power`)
 //! control window size, phase shift, and smoothing aggressiveness.
@@ -680,12 +682,21 @@ pub unsafe fn jma_avx512(
 
 #[derive(Debug, Clone)]
 pub struct JmaStream {
+    // Parameters (kept for introspection/debug)
     period: usize,
     phase: f64,
     power: u32,
+
+    // Derived constants
     alpha: f64,
     beta: f64,
-    phase_ratio: f64,
+    phase_ratio: f64,      // ∈ [0.5, 2.5]
+    one_minus_alpha: f64,
+    one_minus_beta: f64,
+    alpha_sq: f64,
+    oma_sq: f64,           // (1 - alpha)^2
+
+    // State
     initialized: bool,
     e0: f64,
     e1: f64,
@@ -694,6 +705,7 @@ pub struct JmaStream {
 }
 
 impl JmaStream {
+    #[inline(always)]
     pub fn try_new(params: JmaParams) -> Result<Self, JmaError> {
         let period = params.period.unwrap_or(7);
         if period == 0 {
@@ -707,23 +719,25 @@ impl JmaStream {
             return Err(JmaError::InvalidPhase { phase });
         }
         let power = params.power.unwrap_or(2);
-        let phase_ratio = if phase < -100.0 {
-            0.5
-        } else if phase > 100.0 {
-            2.5
-        } else {
-            (phase / 100.0) + 1.5
-        };
-        let beta = {
-            let numerator = 0.45 * (period as f64 - 1.0);
-            let denominator = numerator + 2.0;
-            if denominator.abs() < f64::EPSILON {
-                0.0
-            } else {
-                numerator / denominator
-            }
-        };
-        let alpha = beta.powi(power as i32);
+
+        // Branchless clamp to [-100, 100], then map to [0.5, 2.5]
+        let clamped = phase.max(-100.0).min(100.0);
+        let phase_ratio = clamped / 100.0 + 1.5;
+
+        // β = 0.45*(period-1) / (0.45*(period-1) + 2)
+        let numerator = 0.45 * (period as f64 - 1.0);
+        let denominator = numerator + 2.0;
+        let beta = if denominator.abs() < f64::EPSILON { 0.0 } else { numerator / denominator };
+
+        // α = β^power  (power is integer)
+        let alpha = pow_u32(beta, power);
+
+        // Precompute per‑tick constants
+        let one_minus_alpha = 1.0 - alpha;
+        let one_minus_beta = 1.0 - beta;
+        let alpha_sq = alpha * alpha;
+        let oma_sq = one_minus_alpha * one_minus_alpha;
+
         Ok(Self {
             period,
             phase,
@@ -731,6 +745,10 @@ impl JmaStream {
             alpha,
             beta,
             phase_ratio,
+            one_minus_alpha,
+            one_minus_beta,
+            alpha_sq,
+            oma_sq,
             initialized: false,
             e0: f64::NAN,
             e1: 0.0,
@@ -752,14 +770,51 @@ impl JmaStream {
             self.jma_prev = value;
             return Some(value);
         }
-        let src = value;
-        self.e0 = (1.0 - self.alpha) * src + self.alpha * self.e0;
-        self.e1 = (src - self.e0) * (1.0 - self.beta) + self.beta * self.e1;
+        // Standard JMA recurrence: e0/e1/e2 with phase advance
+        self.e0 = self.one_minus_alpha * value + self.alpha * self.e0;
+        self.e1 = (value - self.e0) * self.one_minus_beta + self.beta * self.e1;
         let diff = self.e0 + self.phase_ratio * self.e1 - self.jma_prev;
-        self.e2 = diff * (1.0 - self.alpha).powi(2) + self.alpha.powi(2) * self.e2;
-        self.jma_prev = self.e2 + self.jma_prev;
+        self.e2 = diff * self.oma_sq + self.alpha_sq * self.e2;
+        self.jma_prev += self.e2;
         Some(self.jma_prev)
     }
+
+    /// Optional FMA version – uses fused multiply‑add where available.
+    /// Expect tiny numerical differences (usually < 1 ulp); may be faster on FMA CPUs.
+    #[inline(always)]
+    pub fn update_fma(&mut self, value: f64) -> Option<f64> {
+        if !self.initialized {
+            if value.is_nan() {
+                return None;
+            }
+            self.initialized = true;
+            self.e0 = value;
+            self.e1 = 0.0;
+            self.e2 = 0.0;
+            self.jma_prev = value;
+            return Some(value);
+        }
+
+        self.e0 = self.one_minus_alpha.mul_add(value, self.alpha * self.e0);
+        self.e1 = (value - self.e0).mul_add(self.one_minus_beta, self.beta * self.e1);
+        let diff = self.e0 + self.phase_ratio * self.e1 - self.jma_prev;
+        self.e2 = diff.mul_add(self.oma_sq, self.alpha_sq * self.e2);
+        self.jma_prev += self.e2;
+        Some(self.jma_prev)
+    }
+}
+
+#[inline(always)]
+fn pow_u32(mut base: f64, mut exp: u32) -> f64 {
+    let mut acc = 1.0;
+    while exp != 0 {
+        if (exp & 1) != 0 {
+            acc *= base;
+        }
+        base *= base;
+        exp >>= 1;
+    }
+    acc
 }
 
 #[derive(Clone, Debug)]

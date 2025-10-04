@@ -3,6 +3,7 @@
 //! Decision log:
 //! - SIMD paths intentionally delegate to the scalar kernel to preserve strict streaming parity (<= 1e-9) because vectorization reorders FP ops.
 //! - Scalar kernel optimized (pointer-based, unrolled) for ~18–20% faster at 100k on native CPU.
+//! - Streaming kernel updated to O(1) per tick using running sums; parity with batch/scalar maintained within 1e-9.
 //! - Row-specific batch kernels not implemented; revisit if tolerances relax or shared precompute is allowed.
 //!
 //! The Center of Gravity (CG) indicator attempts to measure the "center" of prices
@@ -637,46 +638,70 @@ impl CgStream {
         })
     }
 
+    /// O(1) streaming update for CG.
+    ///
+    /// Maintains running sums over the last (period - 1) bars:
+    ///   - `price_sum`    = sum x_j
+    ///   - `weighted_sum` = sum (j+1)*x_j, newest j=0 .. oldest j=n-1
+    ///
+    /// Recurrence when a new price `value` arrives and `old` leaves:
+    ///   den_new = den_old - old + value
+    ///   num_new = num_old + den_old + value - (period as f64) * old
+    ///
+    /// Warm-up semantics: first `period` writes return None; the first Some arrives
+    /// on the (period+1)-th value, matching batch/scalar first valid index at `first + period`.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        // 1) Insert the new value into the ring buffer at `head`
-        self.buffer[self.head] = value;
+        debug_assert!(self.period >= 2);
 
-        // 2) Advance head; if we have just filled exactly `period` slots, mark `filled = true` but return None now
-        self.head = (self.head + 1) % self.period;
-        if !self.filled && self.head == 0 {
-            // We have just completed the first `period` writes—do not emit CG yet
-            self.filled = true;
-            return None;
-        }
+        // Write new value at current head, then advance head.
+        let pos = self.head;
+        self.buffer[pos] = value;
+        let next = if pos + 1 == self.period { 0 } else { pos + 1 };
 
-        // 3) If still not filled, return None
+        // Not filled yet? Keep warm-up semantics identical to existing behavior.
         if !self.filled {
+            self.head = next;
+
+            // Just completed the first `period` writes -> initialize running sums
+            // for the (period - 1)-wide window and still return None now.
+            if self.head == 0 {
+                let mut num = 0.0;
+                let mut den = 0.0;
+                let mut idx = self.head;
+                // Accumulate in the same order as cg_scalar for the first window:
+                // newest (weight 1) to oldest (weight n).
+                for k in 0..(self.period - 1) {
+                    idx = if idx == 0 { self.period - 1 } else { idx - 1 };
+                    let p = self.buffer[idx];
+                    num += (1.0 + k as f64) * p;
+                    den += p;
+                }
+                self.weighted_sum = num;
+                self.price_sum = den;
+                self.filled = true;
+            }
             return None;
         }
 
-        // 4) Otherwise, compute CG over the last (period - 1) bars
-        // We need to maintain the exact calculation as the scalar version
-        // The scalar version iterates from newest to oldest: data[i - count] for count in 0..(period-1)
-        // So weight 1 is for the newest value, weight (period-1) is for the oldest value we use
+        // Once filled: O(1) update using the recurrence.
+        // The value leaving the (period-1)-wide window is at `next` after we advanced.
+        let last_old = self.buffer[next];
 
-        let mut num = 0.0;
-        let mut denom = 0.0;
-        let mut idx = self.head;
+        let den_old = self.price_sum;
+        let num_old = self.weighted_sum;
 
-        // Sum exactly (period - 1) bars, matching cg_scalar's inner loop
-        for k in 0..(self.period - 1) {
-            idx = if idx == 0 { self.period - 1 } else { idx - 1 };
-            let price = self.buffer[idx];
-            num += (1.0 + k as f64) * price;
-            denom += price;
-        }
+        let den_new = den_old - last_old + value;
+        // period as f64 used once; avoid repeated casts
+        let num_new = num_old + den_old + value - (self.period as f64) * last_old;
 
-        if denom.abs() > f64::EPSILON {
-            Some(-num / denom)
-        } else {
-            Some(0.0)
-        }
+        self.price_sum = den_new;
+        self.weighted_sum = num_new;
+        self.head = next;
+
+        // Match scalar behavior: guard divide-by-zero and return 0.0 in that case.
+        let out = if den_new.abs() > f64::EPSILON { -num_new / den_new } else { 0.0 };
+        Some(out)
     }
 }
 

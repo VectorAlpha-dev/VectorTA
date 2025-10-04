@@ -18,7 +18,7 @@
 //! - SIMD: Delegates to scalar. Rolling max/min via deques is sequential/branchy; SIMD shows no consistent win (>5%).
 //! - Scalar: Fused single-pass for HH/LL and SMA/EMA smoothing; avoids extra temporaries and dynamic MA where possible.
 //! - Batch: Reuses precomputed stochastic per unique `fast_k` across rows to cut duplicate work.
-//! - Streaming: Not implemented
+//! - Streaming: Implemented with monotonic deques (amortized O(1)); SMA/EMA smoothing matches scalar warmups
 //! - Memory: Good zero-copy usage (alloc_with_nan_prefix, make_uninit_matrix)
 
 use crate::indicators::moving_averages::ma::{ma, MaData};
@@ -1058,36 +1058,78 @@ impl KdjBuilder {
     }
 }
 
-// ========= Stream Processing ==========
+// ========= Stream Processing (drop-in replacement) ==========
+// Decision: Streaming uses monotonic deques + O(1) SMA/EMA smoothing; matches scalar warmups.
+use std::collections::VecDeque;
 
 #[derive(Debug, Clone)]
 pub struct KdjStream {
+    // --- config ---
     fast_k_period: usize,
     slow_k_period: usize,
-    slow_k_ma_type: String,
     slow_d_period: usize,
-    slow_d_ma_type: String,
-    high_buf: Vec<f64>,
-    low_buf: Vec<f64>,
-    close_buf: Vec<f64>,
-    head: usize,
-    filled: bool,
-    // Rolling buffers for smoothing
-    stoch_buf: Vec<f64>, // For slow K smoothing
-    k_buf: Vec<f64>,     // For slow D smoothing
-    stoch_idx: usize,
-    k_idx: usize,
+    // lowercased selectors cached as booleans
+    k_is_sma: bool,
+    k_is_ema: bool,
+    d_is_sma: bool,
+    d_is_ema: bool,
+
+    // --- sliding window for HH/LL via monotonic deques (amortized O(1)) ---
+    i: usize,                    // monotonically increasing update index
+    maxdq: VecDeque<(usize, f64)>, // (idx, high) non-increasing
+    mindq: VecDeque<(usize, f64)>, // (idx, low) non-decreasing
+
+    // --- stage counters (to reproduce batch warm-ups) ---
+    have_fast: bool,      // true once i+1 >= fast_k_period
+    stoch_samples: usize, // # of stoch values since have_fast
+    k_samples: usize,     // # of K values since K warm-up completed
+
+    // --- smoothing state: SMA for K ---
+    stoch_ring: Vec<f64>,
+    stoch_pos: usize,
+    sum_k: f64,
+    cnt_k: usize,
     stoch_filled: bool,
+
+    // --- smoothing state: SMA for D ---
+    k_ring: Vec<f64>,
+    k_pos: usize,
+    sum_d: f64,
+    cnt_d: usize,
     k_filled: bool,
+
+    // --- smoothing state: EMA for K ---
+    alpha_k: f64,
+    om_alpha_k: f64,
+    ema_k: f64,
+    k_ema_inited: bool,
+    init_sum_k: f64,
+    init_cnt_k: usize,
+
+    // --- smoothing state: EMA for D ---
+    alpha_d: f64,
+    om_alpha_d: f64,
+    ema_d: f64,
+    d_ema_inited: bool,
+    init_sum_d: f64,
+    init_cnt_d: usize,
+
+    // --- small LUTs for SMA reciprocals (avoid divides) ---
+    inv_cnt_k: Vec<f64>,
+    inv_cnt_d: Vec<f64>,
 }
 
 impl KdjStream {
     pub fn try_new(params: KdjParams) -> Result<Self, KdjError> {
         let fast_k_period = params.fast_k_period.unwrap_or(9);
         let slow_k_period = params.slow_k_period.unwrap_or(3);
-        let slow_k_ma_type = params.slow_k_ma_type.unwrap_or_else(|| "sma".to_string());
+        let slow_k_ma_type = params
+            .slow_k_ma_type
+            .unwrap_or_else(|| "sma".to_string());
         let slow_d_period = params.slow_d_period.unwrap_or(3);
-        let slow_d_ma_type = params.slow_d_ma_type.unwrap_or_else(|| "sma".to_string());
+        let slow_d_ma_type = params
+            .slow_d_ma_type
+            .unwrap_or_else(|| "sma".to_string());
 
         if fast_k_period == 0 {
             return Err(KdjError::InvalidPeriod {
@@ -1095,92 +1137,301 @@ impl KdjStream {
                 data_len: 0,
             });
         }
+        if slow_k_period == 0 {
+            return Err(KdjError::InvalidPeriod {
+                period: slow_k_period,
+                data_len: 0,
+            });
+        }
+        if slow_d_period == 0 {
+            return Err(KdjError::InvalidPeriod {
+                period: slow_d_period,
+                data_len: 0,
+            });
+        }
+
+        let k_is_sma = slow_k_ma_type.eq_ignore_ascii_case("sma");
+        let k_is_ema = slow_k_ma_type.eq_ignore_ascii_case("ema");
+        let d_is_sma = slow_d_ma_type.eq_ignore_ascii_case("sma");
+        let d_is_ema = slow_d_ma_type.eq_ignore_ascii_case("ema");
+
+        // EMA coefficients
+        let alpha_k = 2.0 / (slow_k_period as f64 + 1.0);
+        let om_alpha_k = 1.0 - alpha_k;
+        let alpha_d = 2.0 / (slow_d_period as f64 + 1.0);
+        let om_alpha_d = 1.0 - alpha_d;
+
+        // Precompute 1/c for c in 1..=period
+        fn build_inv(n: usize) -> Vec<f64> {
+            let mut v = vec![f64::NAN; n + 1];
+            for c in 1..=n {
+                v[c] = 1.0 / (c as f64);
+            }
+            v
+        }
+
         Ok(Self {
             fast_k_period,
             slow_k_period,
-            slow_k_ma_type,
             slow_d_period,
-            slow_d_ma_type,
-            high_buf: vec![f64::NAN; fast_k_period],
-            low_buf: vec![f64::NAN; fast_k_period],
-            close_buf: vec![f64::NAN; fast_k_period],
-            head: 0,
-            filled: false,
-            stoch_buf: vec![f64::NAN; slow_k_period],
-            k_buf: vec![f64::NAN; slow_d_period],
-            stoch_idx: 0,
-            k_idx: 0,
+            k_is_sma,
+            k_is_ema,
+            d_is_sma,
+            d_is_ema,
+
+            i: 0,
+            maxdq: VecDeque::with_capacity(fast_k_period + 1),
+            mindq: VecDeque::with_capacity(fast_k_period + 1),
+
+            have_fast: false,
+            stoch_samples: 0,
+            k_samples: 0,
+
+            stoch_ring: vec![f64::NAN; slow_k_period],
+            stoch_pos: 0,
+            sum_k: 0.0,
+            cnt_k: 0,
             stoch_filled: false,
+
+            k_ring: vec![f64::NAN; slow_d_period],
+            k_pos: 0,
+            sum_d: 0.0,
+            cnt_d: 0,
             k_filled: false,
+
+            alpha_k,
+            om_alpha_k,
+            ema_k: f64::NAN,
+            k_ema_inited: false,
+            init_sum_k: 0.0,
+            init_cnt_k: 0,
+
+            alpha_d,
+            om_alpha_d,
+            ema_d: f64::NAN,
+            d_ema_inited: false,
+            init_sum_d: 0.0,
+            init_cnt_d: 0,
+
+            inv_cnt_k: build_inv(slow_k_period),
+            inv_cnt_d: build_inv(slow_d_period),
         })
     }
 
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<(f64, f64, f64)> {
-        self.high_buf[self.head] = high;
-        self.low_buf[self.head] = low;
-        self.close_buf[self.head] = close;
-        self.head = (self.head + 1) % self.fast_k_period;
+        let idx = self.i;
+        self.i = idx + 1;
 
-        if !self.filled && self.head == 0 {
-            self.filled = true;
+        // ---- Update monotonic deques for HH/LL (ignore NaNs) ----
+        if !high.is_nan() {
+            while let Some(&(_, v)) = self.maxdq.back() {
+                if v <= high {
+                    self.maxdq.pop_back();
+                } else {
+                    break;
+                }
+            }
+            self.maxdq.push_back((idx, high));
         }
-        if !self.filled {
+        if !low.is_nan() {
+            while let Some(&(_, v)) = self.mindq.back() {
+                if v >= low {
+                    self.mindq.pop_back();
+                } else {
+                    break;
+                }
+            }
+            self.mindq.push_back((idx, low));
+        }
+
+        // Expire old entries: keep [idx - fast_k + 1, idx]
+        let expire_before = idx + 1 - self.fast_k_period;
+        while let Some(&(j, _)) = self.maxdq.front() {
+            if j < expire_before {
+                self.maxdq.pop_front();
+            } else {
+                break;
+            }
+        }
+        while let Some(&(j, _)) = self.mindq.front() {
+            if j < expire_before {
+                self.mindq.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        // ---- Enough samples to emit a stochastic reading? ----
+        if !self.have_fast && (idx + 1) >= self.fast_k_period {
+            self.have_fast = true;
+        }
+        if !self.have_fast {
             return None;
         }
 
-        let hh = self
-            .high_buf
-            .iter()
-            .cloned()
-            .fold(f64::NEG_INFINITY, f64::max);
-        let ll = self.low_buf.iter().cloned().fold(f64::INFINITY, f64::min);
-        let stoch = if hh == ll || hh.is_nan() || ll.is_nan() || close.is_nan() {
+        // Stochastic (%K_fast) for this tick
+        let stoch = if close.is_nan() || self.maxdq.is_empty() || self.mindq.is_empty() {
             f64::NAN
         } else {
-            100.0 * ((close - ll) / (hh - ll))
+            let hh = self.maxdq.front().unwrap().1;
+            let ll = self.mindq.front().unwrap().1;
+            let denom = hh - ll;
+            if denom == 0.0 || denom.is_nan() {
+                f64::NAN
+            } else {
+                let inv = 1.0 / denom;
+                (close - ll) * (100.0 * inv)
+            }
         };
+        self.stoch_samples += 1;
 
-        // Update stoch buffer for slow K smoothing
-        self.stoch_buf[self.stoch_idx] = stoch;
-        self.stoch_idx = (self.stoch_idx + 1) % self.slow_k_period;
-        if !self.stoch_filled && self.stoch_idx == 0 {
-            self.stoch_filled = true;
+        // ---- Smooth into %K_slow ----
+        let mut k_val = f64::NAN;
+        let k_now_available: bool;
+
+        if self.k_is_sma || (!self.k_is_ema && !self.k_is_sma) {
+            // SMA K
+            let pos = self.stoch_pos;
+            let old = self.stoch_ring[pos];
+            if !old.is_nan() {
+                self.sum_k -= old;
+                self.cnt_k -= 1;
+            }
+            self.stoch_ring[pos] = stoch;
+            self.stoch_pos = (pos + 1) % self.slow_k_period;
+            if !stoch.is_nan() {
+                self.sum_k += stoch;
+                self.cnt_k += 1;
+            }
+            if !self.stoch_filled && self.stoch_pos == 0 {
+                self.stoch_filled = true;
+            }
+
+            if self.stoch_filled {
+                k_val = if self.cnt_k > 0 {
+                    self.sum_k * self.inv_cnt_k[self.cnt_k]
+                } else {
+                    f64::NAN
+                };
+                k_now_available = true;
+            } else {
+                k_now_available = false;
+            }
+        } else {
+            // EMA K
+            if !self.k_ema_inited {
+                if !stoch.is_nan() {
+                    self.init_sum_k += stoch;
+                    self.init_cnt_k += 1;
+                }
+                if self.stoch_samples == self.slow_k_period {
+                    self.ema_k = if self.init_cnt_k > 0 {
+                        self.init_sum_k * self.inv_cnt_k[self.init_cnt_k]
+                    } else {
+                        f64::NAN
+                    };
+                    self.k_ema_inited = true;
+                    k_val = self.ema_k;
+                    k_now_available = true;
+                } else {
+                    k_now_available = false;
+                }
+            } else {
+                if !stoch.is_nan() && !self.ema_k.is_nan() {
+                    self.ema_k = stoch.mul_add(self.alpha_k, self.om_alpha_k * self.ema_k);
+                } else if !stoch.is_nan() && self.ema_k.is_nan() {
+                    self.ema_k = stoch;
+                }
+                k_val = self.ema_k;
+                k_now_available = true;
+            }
         }
-        if !self.stoch_filled {
+
+        // ---- Smooth K into %D_slow ----
+        if !k_now_available {
             return None;
         }
 
-        // Calculate K using SMA of stoch (for now, EMA can be added later)
-        let k = if self.slow_k_ma_type == "sma" {
-            self.stoch_buf.iter().sum::<f64>() / self.slow_k_period as f64
-        } else {
-            // For now, fall back to SMA for other MA types
-            // TODO: Implement EMA and other MA types with proper state
-            self.stoch_buf.iter().sum::<f64>() / self.slow_k_period as f64
-        };
+        let mut d_val = f64::NAN;
+        let d_now_available: bool;
 
-        // Update k buffer for slow D smoothing
-        self.k_buf[self.k_idx] = k;
-        self.k_idx = (self.k_idx + 1) % self.slow_d_period;
-        if !self.k_filled && self.k_idx == 0 {
-            self.k_filled = true;
+        if self.d_is_sma || (!self.d_is_ema && !self.d_is_sma) {
+            // SMA D
+            let pos = self.k_pos;
+            let old_k = self.k_ring[pos];
+            if !old_k.is_nan() {
+                self.sum_d -= old_k;
+                self.cnt_d -= 1;
+            }
+            self.k_ring[pos] = k_val;
+            self.k_pos = (pos + 1) % self.slow_d_period;
+            if !k_val.is_nan() {
+                self.sum_d += k_val;
+                self.cnt_d += 1;
+            }
+            if !self.k_filled && self.k_pos == 0 {
+                self.k_filled = true;
+            }
+
+            if self.k_filled {
+                d_val = if self.cnt_d > 0 {
+                    self.sum_d * self.inv_cnt_d[self.cnt_d]
+                } else {
+                    f64::NAN
+                };
+                d_now_available = true;
+            } else {
+                d_now_available = false;
+            }
+        } else {
+            // EMA D
+            if !self.d_ema_inited {
+                self.k_samples += 1;
+                if !k_val.is_nan() {
+                    self.init_sum_d += k_val;
+                    self.init_cnt_d += 1;
+                }
+                if self.k_samples == self.slow_d_period {
+                    self.ema_d = if self.init_cnt_d > 0 {
+                        self.init_sum_d * self.inv_cnt_d[self.init_cnt_d]
+                    } else {
+                        f64::NAN
+                    };
+                    self.d_ema_inited = true;
+                    d_val = self.ema_d;
+                    d_now_available = true;
+                } else {
+                    d_now_available = false;
+                }
+            } else {
+                if !k_val.is_nan() && !self.ema_d.is_nan() {
+                    self.ema_d = k_val.mul_add(self.alpha_d, self.om_alpha_d * self.ema_d);
+                } else if !k_val.is_nan() && self.ema_d.is_nan() {
+                    self.ema_d = k_val;
+                }
+                d_val = self.ema_d;
+                d_now_available = true;
+            }
         }
-        if !self.k_filled {
+
+        if !self.d_is_ema {
+            // If D is SMA, count K samples after consuming one K
+            self.k_samples = self.k_samples.saturating_add(1);
+        }
+
+        if !d_now_available {
             return None;
         }
 
-        // Calculate D using SMA of K
-        let d = if self.slow_d_ma_type == "sma" {
-            self.k_buf.iter().sum::<f64>() / self.slow_d_period as f64
+        // J = 3*K - 2*D
+        let j_val = if k_val.is_nan() || d_val.is_nan() {
+            f64::NAN
         } else {
-            // For now, fall back to SMA for other MA types
-            // TODO: Implement EMA and other MA types with proper state
-            self.k_buf.iter().sum::<f64>() / self.slow_d_period as f64
+            k_val.mul_add(3.0, -2.0 * d_val)
         };
 
-        let j = 3.0 * k - 2.0 * d;
-        Some((k, d, j))
+        Some((k_val, d_val, j_val))
     }
 }
 

@@ -17,7 +17,8 @@
 //!
 //! ## Developer Status
 //! - **SIMD Kernels**: AVX2/AVX512 enabled via runtime selection; scalar remains reference path.
-//! - **Streaming**: O(1) performance
+//! - **Streaming**: O(1) performance; RMS of (fast−slow) anchored at slow MA.
+//!   Matches scalar/AVX semantics; middle = fast MA; bands = slow MA ± dev·RMS.
 //! - **Memory**: Good zero-copy usage (alloc_with_nan_prefix, make_uninit_matrix)
 //! - Note: Row-specific batch fast-path uses shared dev vector when only devup/devdn vary.
 
@@ -768,6 +769,15 @@ pub struct MabStream {
     ema_fast: f64,
     ema_slow: f64,
     kernel: Kernel,
+    // Decision: Maintain O(1) streaming with RMS of (fast_ma - slow_ma) over last fast_period.
+    // Stores running sum of squared diffs and ring occupancy to avoid O(n) per tick.
+    sumsq_diff: f64,
+    diffs_filled: usize,
+    inv_fast_len: f64,
+    ready_threshold: usize,
+    k_fast: f64,
+    k_slow: f64,
+    max_period: usize,
 }
 
 impl MabStream {
@@ -783,10 +793,13 @@ impl MabStream {
             return Err("Period cannot be zero".to_string());
         }
 
+        let max_period = fast_period.max(slow_period);
+        let ready_threshold = max_period + fast_period - 1;
+
         Ok(Self {
             fast_buffer: vec![0.0; fast_period],
             slow_buffer: vec![0.0; slow_period],
-            diffs_buffer: vec![0.0; fast_period],
+            diffs_buffer: vec![0.0; fast_period], // stores squared diffs in streaming path
             fast_index: 0,
             slow_index: 0,
             diff_index: 0,
@@ -804,111 +817,136 @@ impl MabStream {
             ema_fast: 0.0,
             ema_slow: 0.0,
             kernel: detect_best_kernel(),
+            // new streaming state
+            sumsq_diff: 0.0,
+            diffs_filled: 0,
+            inv_fast_len: 1.0 / fast_period as f64,
+            ready_threshold,
+            k_fast: 2.0 / (fast_period as f64 + 1.0),
+            k_slow: 2.0 / (slow_period as f64 + 1.0),
+            max_period,
         })
     }
 
     pub fn update(&mut self, value: f64) -> Option<(f64, f64, f64)> {
-        if value.is_nan() {
+        if !value.is_finite() {
             return None;
         }
 
         self.count += 1;
 
-        // Update fast MA
+        // --- 1) Update fast MA ---
         match self.fast_ma_type.as_str() {
             "ema" => {
                 if self.count == 1 {
                     self.ema_fast = value;
-                    self.fast_ma = value;
                 } else {
-                    let k = 2.0 / (self.fast_period as f64 + 1.0);
-                    self.ema_fast = value * k + self.ema_fast * (1.0 - k);
-                    self.fast_ma = self.ema_fast;
+                    // ema = (1-α)*ema + α*x
+                    self.ema_fast = (1.0 - self.k_fast).mul_add(self.ema_fast, self.k_fast * value);
                 }
+                self.fast_ma = self.ema_fast;
             }
             _ => {
-                // SMA
                 if self.count <= self.fast_period {
-                    self.fast_buffer[self.fast_index] = value;
+                    let idx = self.fast_index;
                     self.fast_sum += value;
+                    self.fast_buffer[idx] = value;
                     if self.count == self.fast_period {
-                        self.fast_ma = self.fast_sum / self.fast_period as f64;
+                        self.fast_ma = self.fast_sum * self.inv_fast_len;
+                    }
+                    self.fast_index += 1;
+                    if self.fast_index == self.fast_period {
+                        self.fast_index = 0;
                     }
                 } else {
-                    let old_value = self.fast_buffer[self.fast_index];
-                    self.fast_buffer[self.fast_index] = value;
-                    self.fast_sum += value - old_value;
-                    self.fast_ma = self.fast_sum / self.fast_period as f64;
+                    let idx = self.fast_index;
+                    let old = self.fast_buffer[idx];
+                    self.fast_buffer[idx] = value;
+                    self.fast_sum += value - old;
+                    self.fast_ma = self.fast_sum * self.inv_fast_len;
+                    self.fast_index += 1;
+                    if self.fast_index == self.fast_period {
+                        self.fast_index = 0;
+                    }
                 }
-                self.fast_index = (self.fast_index + 1) % self.fast_period;
             }
         }
 
-        // Update slow MA
+        // --- 2) Update slow MA ---
         match self.slow_ma_type.as_str() {
             "ema" => {
                 if self.count == 1 {
                     self.ema_slow = value;
-                    self.slow_ma = value;
                 } else {
-                    let k = 2.0 / (self.slow_period as f64 + 1.0);
-                    self.ema_slow = value * k + self.ema_slow * (1.0 - k);
-                    self.slow_ma = self.ema_slow;
+                    self.ema_slow = (1.0 - self.k_slow).mul_add(self.ema_slow, self.k_slow * value);
                 }
+                self.slow_ma = self.ema_slow;
             }
             _ => {
-                // SMA
                 if self.count <= self.slow_period {
-                    self.slow_buffer[self.slow_index] = value;
+                    let idx = self.slow_index;
                     self.slow_sum += value;
+                    self.slow_buffer[idx] = value;
                     if self.count == self.slow_period {
                         self.slow_ma = self.slow_sum / self.slow_period as f64;
                     }
+                    self.slow_index += 1;
+                    if self.slow_index == self.slow_period {
+                        self.slow_index = 0;
+                    }
                 } else {
-                    let old_value = self.slow_buffer[self.slow_index];
-                    self.slow_buffer[self.slow_index] = value;
-                    self.slow_sum += value - old_value;
+                    let idx = self.slow_index;
+                    let old = self.slow_buffer[idx];
+                    self.slow_buffer[idx] = value;
+                    self.slow_sum += value - old;
                     self.slow_ma = self.slow_sum / self.slow_period as f64;
+                    self.slow_index += 1;
+                    if self.slow_index == self.slow_period {
+                        self.slow_index = 0;
+                    }
                 }
-                self.slow_index = (self.slow_index + 1) % self.slow_period;
             }
         }
 
-        // We need both MAs to be ready
-        let max_period = self.fast_period.max(self.slow_period);
-        if self.count < max_period {
+        // Need both MAs ready
+        if self.count < self.max_period {
             return None;
         }
 
-        // Calculate diff and update buffer
+        // --- 3) Update rolling RMS of (fast_ma - slow_ma) over last fast_period ---
         let diff = self.fast_ma - self.slow_ma;
-        if self.count <= max_period + self.fast_period - 1 {
-            self.diffs_buffer[self.diff_index] = diff;
-            self.diff_index = (self.diff_index + 1) % self.fast_period;
+        let diff2 = diff * diff;
+
+        if self.diffs_filled < self.fast_period {
+            self.sumsq_diff += diff2;
+            self.diffs_buffer[self.diff_index] = diff2; // store squared diff
+            self.diff_index += 1;
+            if self.diff_index == self.fast_period {
+                self.diff_index = 0;
+            }
+            self.diffs_filled += 1;
         } else {
-            self.diffs_buffer[self.diff_index] = diff;
-            self.diff_index = (self.diff_index + 1) % self.fast_period;
+            let old2 = self.diffs_buffer[self.diff_index];
+            self.sumsq_diff += diff2 - old2;
+            self.diffs_buffer[self.diff_index] = diff2;
+            self.diff_index += 1;
+            if self.diff_index == self.fast_period {
+                self.diff_index = 0;
+            }
         }
 
-        // We need fast_period diffs to calculate std dev
-        if self.count < max_period + self.fast_period - 1 {
+        // First output only after we have fast_period diffs
+        if self.count < self.ready_threshold || self.diffs_filled < self.fast_period {
             return None;
         }
 
-        // Calculate mean and std dev
-        let mean = self.diffs_buffer.iter().sum::<f64>() / self.fast_period as f64;
-        let variance = self
-            .diffs_buffer
-            .iter()
-            .map(|&d| (d - mean).powi(2))
-            .sum::<f64>()
-            / self.fast_period as f64;
-        let std_dev = variance.sqrt();
+        // RMS == sqrt(mean of squares)
+        let dev = (self.sumsq_diff * self.inv_fast_len).sqrt();
 
-        // Calculate bands
-        let upper = self.fast_ma + self.devup * std_dev;
+        // --- 4) Bands: middle = fast MA; upper/lower anchored at slow MA ---
+        let upper = dev.mul_add(self.devup, self.slow_ma);
         let middle = self.fast_ma;
-        let lower = self.fast_ma - self.devdn * std_dev;
+        let lower = (-self.devdn * dev).mul_add(1.0, self.slow_ma);
 
         Some((upper, middle, lower))
     }

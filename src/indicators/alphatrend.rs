@@ -17,7 +17,8 @@
 //! - Runtime selection: Auto keeps kernel detection (SIMD measured >5% faster at 100k/1M here).
 //! - Row-specific batch kernels: not implemented; opportunity exists to precompute TR and
 //!   momentum per unique period across rows. Deferred to a follow-up.
-//! - Streaming update: O(n) full-pass (ATR via sliding window); further O(1) streaming TBD.
+//! - Streaming update: O(1) kernel implemented (ATR via SMA ring, RSI-RMA/MFI sums).
+//!   Emits Some((k1,k2)) after warmup+2 bars; matches scalar semantics.
 //! - Memory: uses zero-copy/uninit helpers (alloc_with_nan_prefix, make_uninit_matrix).
 
 #[cfg(feature = "python")]
@@ -918,18 +919,48 @@ unsafe fn alphatrend_simd128(
     )
 }
 
+/// Decision: O(1) streaming enabled. ATR as SMA(TR), RSI via Wilder RMA or MFI window sums.
+/// Returns Some((k1,k2)) once ATR seeded and 2-bar lag available (> period + 1 bars).
 #[derive(Debug, Clone)]
 pub struct AlphaTrendStream {
-    buffer_high: Vec<f64>,
-    buffer_low: Vec<f64>,
-    buffer_close: Vec<f64>,
-    buffer_volume: Vec<f64>,
-    alpha_trend_history: Vec<f64>,
+    // --- Params ---
     coeff: f64,
     period: usize,
+    inv_period: f64,
     no_volume: bool,
-    index: usize,
-    ready: bool,
+
+    // --- Rolling ATR (SMA of TR) ---
+    tr_ring: Vec<f64>, // length = period
+    tr_sum: f64,
+    tr_idx: usize,
+    tr_filled: usize,
+
+    // --- RSI state (Wilder RMA) ---
+    rsi_seeded: bool,
+    rsi_init_gains: f64,
+    rsi_init_losses: f64,
+    rsi_count: usize,
+    rsi_avg_gain: f64,
+    rsi_avg_loss: f64,
+
+    // --- MFI state (window sums) ---
+    mfi_pos_ring: Vec<f64>, // length = period
+    mfi_neg_ring: Vec<f64>, // length = period
+    mfi_pos_sum: f64,
+    mfi_neg_sum: f64,
+    mfi_idx: usize,
+    mfi_filled: usize,
+    prev_tp: f64,
+
+    // --- Previous prices ---
+    prev_close: f64,
+    have_prev: bool,
+
+    // --- AlphaTrend sticky state & lag ---
+    prev_alpha: f64,
+    prev1: f64,
+    prev2: f64,
+    alpha_count: usize,
 }
 
 impl AlphaTrendStream {
@@ -939,59 +970,208 @@ impl AlphaTrendStream {
         let no_volume = params.no_volume.unwrap_or(false);
 
         if period == 0 {
-            return Err(AlphaTrendError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(AlphaTrendError::InvalidPeriod { period, data_len: 0 });
         }
-
         if coeff <= 0.0 || !coeff.is_finite() {
             return Err(AlphaTrendError::InvalidCoeff { coeff });
         }
 
         Ok(Self {
-            buffer_high: Vec::with_capacity(period * 2),
-            buffer_low: Vec::with_capacity(period * 2),
-            buffer_close: Vec::with_capacity(period * 2),
-            buffer_volume: Vec::with_capacity(period * 2),
-            alpha_trend_history: Vec::new(),
             coeff,
             period,
+            inv_period: 1.0 / (period as f64),
             no_volume,
-            index: 0,
-            ready: false,
+
+            tr_ring: vec![0.0; period],
+            tr_sum: 0.0,
+            tr_idx: 0,
+            tr_filled: 0,
+
+            rsi_seeded: false,
+            rsi_init_gains: 0.0,
+            rsi_init_losses: 0.0,
+            rsi_count: 0,
+            rsi_avg_gain: 0.0,
+            rsi_avg_loss: 0.0,
+
+            mfi_pos_ring: vec![0.0; period],
+            mfi_neg_ring: vec![0.0; period],
+            mfi_pos_sum: 0.0,
+            mfi_neg_sum: 0.0,
+            mfi_idx: 0,
+            mfi_filled: 0,
+            prev_tp: f64::NAN,
+
+            prev_close: f64::NAN,
+            have_prev: false,
+
+            prev_alpha: f64::NAN,
+            prev1: f64::NAN,
+            prev2: f64::NAN,
+            alpha_count: 0,
         })
     }
 
+    /// O(1) update. Returns Some((k1, k2)) once both are defined
+    /// (i.e., after alpha_count >= 3 ⇒ after period + 2 bars from start).
+    #[inline]
     pub fn update(&mut self, high: f64, low: f64, close: f64, volume: f64) -> Option<(f64, f64)> {
-        self.buffer_high.push(high);
-        self.buffer_low.push(low);
-        self.buffer_close.push(close);
-        self.buffer_volume.push(volume);
-        self.index += 1;
-
-        if self.index >= self.period {
-            self.ready = true;
+        // Skip malformed bars without mutating state
+        if !(high.is_finite() && low.is_finite() && close.is_finite() && volume.is_finite()) {
+            return None;
+        }
+        if high < low {
+            return None;
         }
 
-        if self.ready {
-            // Keep only necessary history
-            if self.buffer_high.len() > self.period * 2 {
-                self.buffer_high.remove(0);
-                self.buffer_low.remove(0);
-                self.buffer_close.remove(0);
-                self.buffer_volume.remove(0);
+        // ---------- True Range & ATR (SMA) ----------
+        // TR = max(high-low, |high-prev_close|, |low-prev_close|)
+        let tr = if self.have_prev {
+            let hl = high - low;
+            let hc = (high - self.prev_close).abs();
+            let lc = (low - self.prev_close).abs();
+            if hl >= hc {
+                if hl >= lc { hl } else { lc }
+            } else {
+                if hc >= lc { hc } else { lc }
+            }
+        } else {
+            high - low
+        };
+
+        if self.tr_filled < self.period {
+            self.tr_ring[self.tr_idx] = tr;
+            self.tr_sum += tr;
+            self.tr_filled += 1;
+            self.tr_idx = (self.tr_idx + 1) % self.period;
+        } else {
+            let old = self.tr_ring[self.tr_idx];
+            self.tr_ring[self.tr_idx] = tr;
+            self.tr_sum += tr - old;
+            self.tr_idx = (self.tr_idx + 1) % self.period;
+        }
+        let atr_ready = self.tr_filled == self.period;
+        let atr = if atr_ready { self.tr_sum * self.inv_period } else { f64::NAN };
+
+        // ---------- Momentum regime: RSI or MFI (>=50 test without division) ----------
+        let mut m_ge_50 = false;
+
+        if self.no_volume {
+            // RSI path (Wilder RMA)
+            let (gain, loss) = if self.have_prev {
+                let d = close - self.prev_close;
+                if d >= 0.0 { (d, 0.0) } else { (0.0, -d) }
+            } else {
+                (0.0, 0.0)
+            };
+
+            if !self.rsi_seeded {
+                self.rsi_init_gains += gain;
+                self.rsi_init_losses += loss;
+                self.rsi_count += 1;
+                if self.rsi_count >= self.period {
+                    self.rsi_avg_gain = self.rsi_init_gains * self.inv_period;
+                    self.rsi_avg_loss = self.rsi_init_losses * self.inv_period;
+                    self.rsi_seeded = true;
+                }
+            } else {
+                let n1 = (self.period as f64) - 1.0;
+                self.rsi_avg_gain = (self.rsi_avg_gain * n1 + gain) * self.inv_period;
+                self.rsi_avg_loss = (self.rsi_avg_loss * n1 + loss) * self.inv_period;
             }
 
-            // Calculate current AlphaTrend value
-            // This would need a streaming implementation of ATR, RSI/MFI
-            // For now, return None as full streaming requires more complex state management
-            None
+            if self.rsi_seeded {
+                if self.rsi_avg_loss == 0.0 {
+                    m_ge_50 = self.rsi_avg_gain >= 0.0;
+                } else if self.rsi_avg_gain == 0.0 {
+                    m_ge_50 = false;
+                } else {
+                    m_ge_50 = self.rsi_avg_gain >= self.rsi_avg_loss;
+                }
+            } else {
+                m_ge_50 = false;
+            }
+        } else {
+            // MFI path (window sums using Typical Price)
+            let tp = (high + low + close) / 3.0;
+            if self.have_prev {
+                let mf = (tp * volume).max(0.0);
+                let (pos, neg) = if tp > self.prev_tp {
+                    (mf, 0.0)
+                } else if tp < self.prev_tp {
+                    (0.0, mf)
+                } else {
+                    (0.0, 0.0)
+                };
+
+                if self.mfi_filled < self.period {
+                    self.mfi_pos_sum += pos;
+                    self.mfi_neg_sum += neg;
+                    self.mfi_pos_ring[self.mfi_idx] = pos;
+                    self.mfi_neg_ring[self.mfi_idx] = neg;
+                    self.mfi_idx = (self.mfi_idx + 1) % self.period;
+                    self.mfi_filled += 1;
+                } else {
+                    let op = self.mfi_pos_ring[self.mfi_idx];
+                    let on = self.mfi_neg_ring[self.mfi_idx];
+                    self.mfi_pos_ring[self.mfi_idx] = pos;
+                    self.mfi_neg_ring[self.mfi_idx] = neg;
+                    self.mfi_pos_sum += pos - op;
+                    self.mfi_neg_sum += neg - on;
+                    self.mfi_idx = (self.mfi_idx + 1) % self.period;
+                }
+            }
+
+            if self.mfi_filled == self.period {
+                if self.mfi_neg_sum == 0.0 {
+                    m_ge_50 = self.mfi_pos_sum >= 0.0;
+                } else if self.mfi_pos_sum == 0.0 {
+                    m_ge_50 = false;
+                } else {
+                    m_ge_50 = self.mfi_pos_sum >= self.mfi_neg_sum;
+                }
+            } else {
+                m_ge_50 = false;
+            }
+            self.prev_tp = tp;
+        }
+
+        // ---------- AlphaTrend bands & sticky regime ----------
+        let mut emitted = false;
+        let mut cur = f64::NAN;
+
+        if atr_ready {
+            // up = low - coeff*ATR, down = high + coeff*ATR
+            let up = (-self.coeff).mul_add(atr, low);
+            let dn = self.coeff.mul_add(atr, high);
+
+            cur = if self.alpha_count == 0 {
+                if m_ge_50 { up } else { dn }
+            } else if m_ge_50 {
+                if up < self.prev_alpha { self.prev_alpha } else { up }
+            } else {
+                if dn > self.prev_alpha { self.prev_alpha } else { dn }
+            };
+
+            self.prev2 = self.prev1;
+            self.prev1 = cur;
+            self.prev_alpha = cur;
+            self.alpha_count += 1;
+            emitted = true;
+        }
+
+        // advance shared previous values
+        self.prev_close = close;
+        self.have_prev = true;
+
+        if emitted && self.alpha_count >= 3 {
+            Some((cur, self.prev2))
         } else {
             None
         }
     }
 
+    /// Historical warmup for k1 only (consistent with batch path): period - 1
     #[inline(always)]
     pub fn get_warmup_period(&self) -> usize {
         self.period - 1
@@ -2565,7 +2745,7 @@ mod tests {
     }
 
     fn check_alphatrend_streaming(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        // Note: AlphaTrendStream currently returns None, so this test validates the structure
+        // Validate O(1) streaming behavior: returns Some((k1,k2)) after warmup+2
         let params = AlphaTrendParams {
             coeff: Some(1.0),
             period: Some(14),
@@ -2573,6 +2753,7 @@ mod tests {
         };
 
         let mut stream = AlphaTrendStream::try_new(params)?;
+        let warmup = stream.get_warmup_period();
 
         // Feed some data points
         for i in 0..30 {
@@ -2582,17 +2763,12 @@ mod tests {
             let volume = 1000.0 + i as f64 * 10.0;
 
             let result = stream.update(high, low, close, volume);
-
-            // Current implementation returns None (needs full implementation)
-            // When implemented, should return Some after warmup period
-            if i >= 13 {
-                // After warmup, streaming implementation should return values
-                // Currently returns None - this is expected
-                assert!(
-                    result.is_none(),
-                    "[{}] Streaming not yet fully implemented",
-                    test_name
-                );
+            if i + 1 >= warmup + 3 {
+                // Expect values once k2 lag is available
+                let some = result.expect("streaming should emit after warmup+2");
+                assert!(some.0.is_finite() && some.1.is_finite(), "[{}] Non-finite streaming outputs at i={}", test_name, i);
+            } else {
+                assert!(result.is_none(), "[{}] Should not emit before warmup+2 at i={}", test_name, i);
             }
         }
         Ok(())

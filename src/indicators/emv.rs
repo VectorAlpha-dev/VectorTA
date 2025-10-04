@@ -15,7 +15,9 @@
 //!   wide SIMD non-viable without complex masked prefix-scan logic and risking parity. Runtime
 //!   selection keeps kernels for parity but they currently short-circuit to the scalar path.
 //! - **Row-specific batch**: Not applicable — EMV has no parameters; batch is a single row.
-//! - **Streaming**: O(1) performance
+//! - **Streaming**: O(1) performance with exact parity vs batch. An optional
+//!   fast update helper is provided (multiply-by-reciprocal + Newton refine),
+//!   but default streaming keeps exact arithmetic order for test parity.
 //! - **Memory**: Good zero-copy usage (alloc_with_nan_prefix, make_uninit_matrix)
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -400,14 +402,12 @@ pub unsafe fn emv_avx512_long(
 #[derive(Debug, Clone)]
 pub struct EmvStream {
     last_mid: Option<f64>,
-    initialized: bool,
 }
 
 impl EmvStream {
     pub fn try_new() -> Result<Self, EmvError> {
         Ok(Self {
             last_mid: None,
-            initialized: false,
         })
     }
 
@@ -417,9 +417,8 @@ impl EmvStream {
             return None;
         }
         let current_mid = 0.5 * (high + low);
-        if !self.initialized {
+        if self.last_mid.is_none() {
             self.last_mid = Some(current_mid);
-            self.initialized = true;
             return None;
         }
         let last_mid = self.last_mid.unwrap();
@@ -433,6 +432,55 @@ impl EmvStream {
         self.last_mid = Some(current_mid);
         Some(out)
     }
+
+    /// Optional faster update using reciprocal + Newton refinement.
+    /// Not bit-for-bit identical to batch (re-association); keep `update` as default.
+    #[inline(always)]
+    pub fn update_fast(&mut self, high: f64, low: f64, volume: f64) -> Option<f64> {
+        if high.is_nan() || low.is_nan() || volume.is_nan() {
+            return None;
+        }
+        let current_mid = 0.5 * (high + low);
+        if self.last_mid.is_none() {
+            self.last_mid = Some(current_mid);
+            return None;
+        }
+        let last_mid = self.last_mid.unwrap();
+        let range = high - low;
+        if range == 0.0 {
+            self.last_mid = Some(current_mid);
+            return None;
+        }
+        // Re-associated form with fast reciprocal: (Δmid * range * 10000) * (1/volume)
+        let inv_v = fast_recip_f64(volume);
+        let out = (current_mid - last_mid) * range * 10_000.0 * inv_v;
+        self.last_mid = Some(current_mid);
+        Some(out)
+    }
+}
+
+// --- fast math helpers -------------------------------------------------------
+#[inline(always)]
+fn newton_refine_recip(y0: f64, x: f64) -> f64 {
+    // One Newton-Raphson step for 1/x: y_{n+1} = y_n * (2 - x*y_n)
+    let t = 2.0_f64 - x.mul_add(y0, 0.0);
+    y0 * t
+}
+
+#[inline(always)]
+fn fast_recip_f64(x: f64) -> f64 {
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64", target_feature = "avx512f"))]
+    unsafe {
+        use core::arch::x86_64::*;
+        let vx = _mm512_set1_pd(x);
+        let rcp = _mm512_rcp14_pd(vx);
+        let lo = _mm512_castpd512_pd128(rcp);
+        let y0 = _mm_cvtsd_f64(lo);
+        let y1 = newton_refine_recip(y0, x);
+        let y2 = newton_refine_recip(y1, x);
+        return y2;
+    }
+    1.0 / x
 }
 
 #[derive(Clone, Debug)]

@@ -543,60 +543,167 @@ fn gaussian_poles4(data: &[f64], n: usize, alpha: f64) -> Vec<f64> {
 #[derive(Debug, Clone)]
 pub struct GaussianStream {
     period: usize,
-    poles: usize,
-    alpha: f64,
-    state: Vec<f64>,
+    poles: u8,          // 1..=4
+    alpha: f64,         // smoothing factor
+    one_minus: f64,     // 1 - alpha
+    // Direct IIR coefficients for the y[n-k] feedback and x[n] feedforward.
+    // c[0] = a^p, c[1]..c[p] = binomial feedback with alternating sign.
+    c: [f64; 5],        // only 0..=p used (p<=4)
+    // Previous outputs y[n-1], y[n-2], y[n-3], y[n-4]
+    y: [f64; 4],
+    // Kept for structural compatibility; not used
     idx: usize,
     init: bool,
 }
 
 impl GaussianStream {
+    #[inline]
     pub fn try_new(params: GaussianParams) -> Result<Self, GaussianError> {
         let period = params.period.unwrap_or(14);
         let poles = params.poles.unwrap_or(4);
 
-        // Check for degenerate period=1 case
         if period == 1 {
             return Err(GaussianError::PeriodOneDegenerate);
         }
-
-        // Period must be at least 2 for meaningful Gaussian filtering
         if period < 2 {
             return Err(GaussianError::DegeneratePeriod { period });
         }
-
         if !(1..=4).contains(&poles) {
             return Err(GaussianError::InvalidPoles { poles });
         }
-        let beta = {
-            let numerator = 1.0 - (2.0 * PI / period as f64).cos();
-            let denominator = (2.0_f64).powf(1.0 / poles as f64) - 1.0;
-            numerator / denominator
+
+        // ---- alpha computation (stable & cheap) --------------------------
+        // θ = 2π / period; compute 1 - cos(θ) via 2*sin²(θ/2) to avoid cancellation.
+        let inv_n = 1.0 / (period as f64);
+        let theta = core::f64::consts::PI * 2.0 * inv_n;
+        let one_minus_cos = {
+            let s = (0.5 * theta).sin();
+            2.0 * (s * s)
         };
-        let alpha = {
-            let tmp = beta * beta + 2.0 * beta;
-            -beta + tmp.sqrt()
+
+        // denominator = 2^(1/poles) - 1, but poles ∈ {1,2,3,4} → constants
+        #[inline(always)]
+        fn denom_for_poles(k: usize) -> f64 {
+            match k {
+                1 => 1.0,
+                2 => core::f64::consts::SQRT_2 - 1.0,
+                3 => 0.259_921_049_894_873_2,  // 2^(1/3) - 1
+                4 => 0.189_207_115_002_721_06, // 2^(1/4) - 1
+                _ => unreachable!(),
+            }
+        }
+        let beta = one_minus_cos / denom_for_poles(poles);
+
+        // Numerically stable α from β: α = sqrt(β²+2β) − β  ==  (2β) / (β + sqrt(β²+2β))
+        let alpha = if beta == 0.0 {
+            0.0
+        } else {
+            let r = (beta * beta + 2.0 * beta).sqrt();
+            (2.0 * beta) / (beta + r)
         };
+
+        let one_minus = 1.0 - alpha;
+
+        // ---- precompute direct-recursion coefficients --------------------
+        // Match gaussian_poles{1..4}_fma kernels.
+        let a = alpha;
+        let a2 = a * a;
+        let a3 = a2 * a;
+        let a4 = a2 * a2;
+        let o = one_minus;
+        let o2 = o * o;
+        let o3 = o2 * o;
+        let o4 = o2 * o2;
+
+        let mut c = [0.0; 5];
+        match poles {
+            1 => {
+                c[0] = a;
+                c[1] = o; // y[n] = a*x + o*y[n-1]
+            }
+            2 => {
+                c[0] = a2;
+                c[1] = 2.0 * o;
+                c[2] = -o2; // y[n] = a^2 x + 2o y[n-1] - o^2 y[n-2]
+            }
+            3 => {
+                c[0] = a3;
+                c[1] = 3.0 * o;
+                c[2] = -3.0 * o2;
+                c[3] = o3;
+            }
+            4 => {
+                c[0] = a4;
+                c[1] = 4.0 * o;
+                c[2] = -6.0 * o2;
+                c[3] = 4.0 * o3;
+                c[4] = -o4;
+            }
+            _ => unreachable!(),
+        }
+
         Ok(Self {
             period,
-            poles,
+            poles: poles as u8,
             alpha,
-            state: vec![0.0; poles],
+            one_minus,
+            c,
+            y: [0.0; 4],
             idx: 0,
-            init: false,
+            init: true,
         })
     }
-    pub fn update(&mut self, value: f64) -> f64 {
+
+    /// O(1) per-sample streaming update, unrolled for poles=1..=4.
+    /// Uses `mul_add` to match fused-multiply-add recurrence and minimize rounding.
+    #[inline(always)]
+    pub fn update(&mut self, x: f64) -> f64 {
+        // Local copies help many compilers keep everything in registers.
         let p = self.poles;
-        let a = self.alpha;
-        let mut prev = value;
-        for s in 0..p {
-            let last = self.state[s];
-            let next = a * prev + (1.0 - a) * last;
-            self.state[s] = next;
-            prev = next;
+        let c = self.c;
+        let mut y0 = self.y[0];
+        let mut y1 = self.y[1];
+        let mut y2 = self.y[2];
+        let mut y3 = self.y[3];
+
+        let y = match p {
+            1 => {
+                // y = a*x + (1-a)*y[n-1]
+                self.alpha.mul_add(x, self.one_minus * y0)
+            }
+            2 => {
+                // y = c2*y[n-2] + c1*y[n-1] + c0*x
+                c[2].mul_add(y1, c[1].mul_add(y0, c[0] * x))
+            }
+            3 => {
+                // y = c3*y[n-3] + c2*y[n-2] + c1*y[n-1] + c0*x
+                c[3].mul_add(y2, c[2].mul_add(y1, c[1].mul_add(y0, c[0] * x)))
+            }
+            _ => {
+                // p == 4: y = c4*y[n-4] + c3*y[n-3] + c2*y[n-2] + c1*y[n-1] + c0*x
+                c[4].mul_add(
+                    y3,
+                    c[3].mul_add(y2, c[2].mul_add(y1, c[1].mul_add(y0, c[0] * x))),
+                )
+            }
+        };
+
+        // Shift state: y[n-4]←y[n-3]←y[n-2]←y[n-1]←y
+        self.y[3] = y2;
+        self.y[2] = y1;
+        self.y[1] = y0;
+        self.y[0] = y;
+
+        self.idx = self.idx.wrapping_add(1);
+        y
+    }
+
+    #[inline]
+    pub fn update_many(&mut self, xs: &[f64], out: &mut [f64]) {
+        debug_assert_eq!(xs.len(), out.len());
+        for (i, &x) in xs.iter().enumerate() {
+            out[i] = self.update(x);
         }
-        prev
     }
 }
 

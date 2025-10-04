@@ -934,18 +934,22 @@ fn cvi_batch_inner_into(
     Ok(combos)
 }
 
-// For streaming: not a natural fit for CVI, but provide parity.
+// Streaming kernel: aligned to offline semantics
+// - Warmup emits first value after 2*period - 1 samples
+// - Read lagged EMA before overwriting (matches batch/scalar loops)
+// - O(1) per tick; no modulo in hot path
 #[derive(Debug, Clone)]
 pub struct CviStream {
     period: usize,
     alpha: f64,
-    lag_buffer: Vec<f64>,
-    head: usize,
-    filled: bool,
-    state_val: f64,
+    lag_buffer: Vec<f64>, // ring of last `period` EMA values
+    head: usize,          // next slot to write [0..period-1]
+    warmup_remaining: usize,
+    state_val: f64,       // EMA(H-L)
 }
 
 impl CviStream {
+    #[inline]
     pub fn try_new(
         params: CviParams,
         initial_high: f64,
@@ -953,43 +957,69 @@ impl CviStream {
     ) -> Result<Self, CviError> {
         let period = params.period.unwrap_or(10);
         if period == 0 {
-            return Err(CviError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(CviError::InvalidPeriod { period, data_len: 0 });
         }
+
+        // alpha = 2/(n+1)
         let alpha = 2.0 / (period as f64 + 1.0);
-        let val = initial_high - initial_low;
-        let mut lag_buffer = vec![0.0; period];
-        lag_buffer[0] = val;
+
+        // Seed EMA with the first range (exact semantics across kernels)
+        let ema0 = initial_high - initial_low;
+
+        // Prepare ring buffer; put the seed at slot 0.
+        let mut lag_buffer = vec![0.0; period.max(1)];
+        lag_buffer[0] = ema0;
+
+        // Next write position: 1 (or 0 for period==1 to avoid out-of-bounds)
+        let head = if period > 1 { 1 } else { 0 };
+
+        // Perform exactly (2*period - 2) writes before the first output.
+        // First output occurs on the update corresponding to index 2*period - 1.
+        let warmup_remaining = period.saturating_mul(2).saturating_sub(2);
+
         Ok(Self {
             period,
             alpha,
             lag_buffer,
-            head: 1,
-            filled: false,
-            state_val: val,
+            head,
+            warmup_remaining,
+            state_val: ema0,
         })
     }
+
+    /// Update with new (high, low). Returns None during warmup, then Some(CVI).
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64) -> Option<f64> {
         let range = high - low;
-        self.state_val += (range - self.state_val) * self.alpha;
+        self.update_range(range)
+    }
 
-        self.lag_buffer[self.head] = self.state_val;
-        self.head = (self.head + 1) % self.period;
+    /// Update with a precomputed range (high - low). Same semantics as `update`.
+    #[inline(always)]
+    pub fn update_range(&mut self, range: f64) -> Option<f64> {
+        // EMA_t = EMA_{t-1} + (range - EMA_{t-1}) * alpha
+        // Prefer fused mul_add when available for accuracy/perf parity with scalar FMA codegen.
+        self.state_val = (range - self.state_val).mul_add(self.alpha, self.state_val);
 
-        if !self.filled && self.head == 0 {
-            self.filled = true;
-        }
-
-        if !self.filled {
+        // During warmup, write EMA into the ring and rotate the head.
+        if self.warmup_remaining != 0 {
+            self.lag_buffer[self.head] = self.state_val;
+            let next = self.head + 1;
+            self.head = if next == self.period { 0 } else { next };
+            self.warmup_remaining -= 1;
             return None;
         }
 
-        let old_idx = self.head; // The oldest value is at the current head position
-        let old = self.lag_buffer[old_idx];
-        Some(100.0 * (self.state_val - old) / old)
+        // Matured: read EMA[t - period] from the slot we're about to overwrite,
+        // then compute CVI and write the current EMA.
+        let old = self.lag_buffer[self.head];
+        let out = 100.0 * (self.state_val - old) / old;
+
+        self.lag_buffer[self.head] = self.state_val;
+        let next = self.head + 1;
+        self.head = if next == self.period { 0 } else { next };
+
+        Some(out)
     }
 }
 

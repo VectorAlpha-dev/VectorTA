@@ -748,17 +748,29 @@ pub struct AdStream {
 }
 
 impl AdStream {
+    /// Decision note: streaming keeps exact scalar algebra/order (no FMA) and
+    /// short-circuits on zero volume for a fast common-case bailout.
+    #[inline(always)]
     pub fn try_new() -> Result<Self, AdError> {
         Ok(Self { sum: 0.0 })
     }
 
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, close: f64, volume: f64) -> f64 {
+        // Fast bailout: zero volume contributes nothing; skip all math.
+        if volume == 0.0 {
+            return self.sum;
+        }
+
+        // Money Flow Multiplier denominator
         let hl = high - low;
         if hl != 0.0 {
-            let mfm = ((close - low) - (high - close)) / hl;
-            let mfv = mfm * volume;
-            self.sum += mfv;
+            // Keep the exact numerator form used by scalar/batch to avoid rounding drift
+            // vs. algebraically equivalent variants.
+            let num = (close - low) - (high - close);
+
+            // Preserve operation order with an explicit div then mul to match reference paths.
+            self.sum += (num / hl) * volume;
         }
         self.sum
     }

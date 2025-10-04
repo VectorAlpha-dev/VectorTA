@@ -17,7 +17,7 @@
 //! ## Developer Notes
 //! - SIMD: Implemented but disabled by default; AVX2/AVX512 kernels are stubs delegating to the scalar path because the optimized scalar is faster at realistic sizes.
 //! - Batch: Row-specific path shares S/K across rows when NaN-free; SIMD batch variants are stubs delegating to the scalar prefix path (no SIMD).
-//! - Streaming: ⚠️ Implemented but O(n) per update — recalculates full buffer on each update; future work could cache incremental state.
+//! - Streaming: ✅ O(1) per update via ring buffer maintaining Σy and Σ(k*y); O(period) rebuild only on boundary NaNs (mirrors scalar semantics).
 //! - Memory: ✅ Uses zero-copy warmup allocation helpers (`alloc_with_nan_prefix`, `init_matrix_prefixes`, `make_uninit_matrix`).
 //! - Style: Matches alma.rs patterns for API shape, warmup handling, and feature-gated SIMD.
 
@@ -535,10 +535,33 @@ unsafe fn linearreg_angle_avx512_impl(
     }
 }
 
+/// Decision: Streaming uses an O(1) ring-buffer kernel keeping Σy and Σ(k*y);
+/// rebuilds O(period) only on boundary NaNs to mirror scalar semantics.
 #[derive(Debug, Clone)]
 pub struct Linearreg_angleStream {
     period: usize,
-    buffer: Vec<f64>, // Store all historical data for accurate calculation
+
+    // Ring buffer of the last `period` samples (values only)
+    ring: Vec<f64>,
+    head: usize, // next write position (also oldest when len == period)
+    len: usize,  // number of items currently in the ring (<= period)
+
+    // Running accumulators for the current window [i-(len-1) .. i]
+    // sum_y  = Σ y[k]
+    // sum_kd = Σ (k_abs * y[k]) with absolute index k_abs
+    sum_y: f64,
+    sum_kd: f64,
+
+    // Absolute index of the next incoming sample
+    idx: usize,
+
+    // Precomputed constants for fixed x = 0..(period-1)
+    p: f64,
+    sum_x: f64,   // Σ x = period*(period-1)/2
+    inv_div: f64, // 1 / (sum_x^2 - p * Σx^2)
+    rad2deg: f64, // 180 / π
+
+    // Preserve params for API consistency (builders/bindings)
     params: Linearreg_angleParams,
 }
 
@@ -552,28 +575,94 @@ impl Linearreg_angleStream {
             });
         }
 
+        // Precompute constants for fixed x = 0..N-1
+        let p = period as f64;
+        let sum_x = (period * (period - 1)) as f64 * 0.5;
+        let sum_x_sqr = (period * (period - 1) * (2 * period - 1)) as f64 / 6.0;
+        let divisor = sum_x * sum_x - p * sum_x_sqr;
+        let inv_div = 1.0 / divisor;
+
         Ok(Self {
             period,
-            buffer: Vec::new(), // Start with empty buffer that will grow
+            ring: vec![f64::NAN; period],
+            head: 0,
+            len: 0,
+            sum_y: 0.0,
+            sum_kd: 0.0,
+            idx: 0,
+            p,
+            sum_x,
+            inv_div,
+            rad2deg: 180.0 / std::f64::consts::PI,
             params,
         })
     }
+
+    /// O(1) update on normal steps; O(period) rebuild only if the entering
+    /// or leaving sample is NaN (mirrors scalar semantics). Returns None
+    /// until at least `period` samples have been seen.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        // Append new value to buffer (grows unbounded for accuracy)
-        self.buffer.push(value);
+        let i = self.idx; // absolute index of this sample
+        let had_full = self.len == self.period;
+        let leave = if had_full { self.ring[self.head] } else { 0.0 };
 
-        // Need enough data for the calculation
-        if self.buffer.len() < self.period {
-            return None;
+        // Write into ring and advance head
+        self.ring[self.head] = value;
+        self.head += 1;
+        if self.head == self.period {
+            self.head = 0;
         }
 
-        // Recalculate linearreg_angle on full buffer (O(n) but accurate)
-        let input = Linearreg_angleInput::from_slice(&self.buffer, self.params.clone());
-        match linearreg_angle(&input) {
-            Ok(res) => res.values.last().cloned(),
-            Err(_) => None,
+        if self.len < self.period {
+            // Warmup accumulation for Σy and Σ(k*y)
+            self.len += 1;
+            self.sum_y += value;
+            self.sum_kd += (i as f64) * value;
+        } else if value.is_nan() | leave.is_nan() {
+            // Boundary NaN → rebuild window sums from ring (O(period))
+            self.rebuild_window_sums(i);
+        } else {
+            // Steady slide in O(1)
+            self.sum_y += value - leave;
+            self.sum_kd += (i as f64) * value - ((i - self.period) as f64) * leave;
         }
+
+        let out = if self.len < self.period {
+            None
+        } else {
+            // reversed-x identity: sum_xy = i*sum_y - sum_kd
+            let sum_xy = (i as f64) * self.sum_y - self.sum_kd;
+            let num = self.p.mul_add(sum_xy, -self.sum_x * self.sum_y);
+            let slope = num * self.inv_div;
+            Some(slope.atan() * self.rad2deg)
+        };
+
+        self.idx = i + 1;
+        out
+    }
+
+    /// Rebuild Σy and Σ(k*y) for the current window ending at absolute index `i`.
+    /// The oldest element sits at `head` after the write step.
+    #[inline(always)]
+    fn rebuild_window_sums(&mut self, i: usize) {
+        let win_len = self.len;
+        let mut s_y = 0.0f64;
+        let mut s_kd = 0.0f64;
+
+        // Window absolute indices: [i - (win_len - 1) .. i]
+        let start_abs = i + 1 - win_len;
+
+        for j in 0..win_len {
+            let pos = self.head + j;
+            let rix = if pos >= self.period { pos - self.period } else { pos };
+            let y = self.ring[rix];
+            let k = (start_abs + j) as f64;
+            s_y += y;
+            s_kd += k * y;
+        }
+        self.sum_y = s_y;
+        self.sum_kd = s_kd;
     }
 }
 

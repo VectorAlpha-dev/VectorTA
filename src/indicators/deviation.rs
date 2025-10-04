@@ -48,7 +48,7 @@
 //! ## Developer Notes
 //! - SIMD status: AVX2/AVX512 enable a vectorized first-window init for Standard Deviation (devtype 0,3), then use the O(1) scalar slide. >5% speedup at 1M; modest at 100k. MAD/MedAD fall back to scalar.
 //! - Batch: row-specific stddev uses prefix sums (shared across rows) for O(1) per output; MAD/MedAD remain scalar per-window.
-//! - Streaming: Not implemented
+//! - Streaming: O(1) ring-buffer kernel using Σx/Σx² with branchy wrap and precomputed 1/period; matches batch numerics.
 //! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy)
 //! - **Batch operations**: ✅ Implemented with parallel processing support
 
@@ -1659,6 +1659,8 @@ pub struct DeviationStream {
     sum: f64,
     sum_sq: f64,
     count: usize,
+    // Precomputed 1/period for steady-state
+    inv_p: f64,
 }
 
 impl DeviationStream {
@@ -1683,6 +1685,7 @@ impl DeviationStream {
             sum: 0.0,
             sum_sq: 0.0,
             count: 0,
+            inv_p: 1.0 / (period as f64),
         })
     }
 
@@ -1691,19 +1694,24 @@ impl DeviationStream {
     pub fn update(&mut self, value: f64) -> Option<f64> {
         let old_value = self.buffer[self.head];
         self.buffer[self.head] = value;
-        self.head = (self.head + 1) % self.period;
+        // Branchy wrap beats modulo in hot loops
+        self.head += 1;
+        if self.head == self.period {
+            self.head = 0;
+        }
 
         // Update running sums for O(1) standard deviation
         if self.devtype == 0 || self.devtype == 3 {
+            // Add new first (matches batch slide ordering), then remove old
+            if value.is_finite() {
+                self.sum += value;
+                self.sum_sq = value.mul_add(value, self.sum_sq);
+                self.count += 1;
+            }
             if old_value.is_finite() {
                 self.sum -= old_value;
                 self.sum_sq -= old_value * old_value;
                 self.count -= 1;
-            }
-            if value.is_finite() {
-                self.sum += value;
-                self.sum_sq += value * value;
-                self.count += 1;
             }
         }
 
@@ -1741,9 +1749,9 @@ impl DeviationStream {
             return f64::NAN;
         }
 
-        let n = self.count as f64;
-        let mean = self.sum / n;
-        let var = (self.sum_sq / n) - mean * mean;
+        // At this point, count == period if finite; use precomputed inverse
+        let mean = self.sum * self.inv_p;
+        let var = (self.sum_sq * self.inv_p) - mean * mean;
         var.sqrt()
     }
 
@@ -1805,6 +1813,7 @@ impl DeviationStream {
             sum: 0.0,
             sum_sq: 0.0,
             count: 0,
+            inv_p: 1.0 / (period as f64),
         })
     }
 
@@ -1812,19 +1821,24 @@ impl DeviationStream {
     pub fn update(&mut self, value: f64) -> Option<f64> {
         let old_value = self.buffer[self.head];
         self.buffer[self.head] = value;
-        self.head = (self.head + 1) % self.period;
+        // Branchy wrap beats modulo in hot loops
+        self.head += 1;
+        if self.head == self.period {
+            self.head = 0;
+        }
 
         // Update running sums for O(1) standard deviation
         if self.devtype == 0 || self.devtype == 3 {
+            // Add new first (matches batch slide ordering), then remove old
+            if value.is_finite() {
+                self.sum += value;
+                self.sum_sq = value.mul_add(value, self.sum_sq);
+                self.count += 1;
+            }
             if old_value.is_finite() {
                 self.sum -= old_value;
                 self.sum_sq -= old_value * old_value;
                 self.count -= 1;
-            }
-            if value.is_finite() {
-                self.sum += value;
-                self.sum_sq += value * value;
-                self.count += 1;
             }
         }
 
@@ -1861,9 +1875,9 @@ impl DeviationStream {
             return f64::NAN;
         }
 
-        let n = self.count as f64;
-        let mean = self.sum / n;
-        let var = (self.sum_sq / n) - mean * mean;
+        // At this point, count == period if finite; use precomputed inverse
+        let mean = self.sum * self.inv_p;
+        let var = (self.sum_sq * self.inv_p) - mean * mean;
         var.sqrt()
     }
 

@@ -13,9 +13,9 @@
 //!
 //! ## Developer Status
 //! **SIMD**: Implemented AVX2/AVX512 for TR batching; recurrence remains scalar
-//! **Streaming**: O(1) - Uses exponential smoothing
+//! **Streaming**: O(1) – minimal state Wilder update (prev_close, sum_tr warmup, atr)
 //! **Memory**: Good - Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
-//! Note: SIMD yields modest gains by vectorizing True Range computation only.
+//! Note: Streaming path refactored to lean Wilder kernel; matches batch outputs.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -630,81 +630,85 @@ pub unsafe fn natr_avx512_long(
     natr_avx512_body(high, low, close, period, first, out);
 }
 
+/// Decision: Streaming uses minimal-state Wilder kernel; matches batch within tests.
 #[derive(Debug, Clone)]
 pub struct NatrStream {
     period: usize,
-    tr_buffer: Vec<f64>,
-    close_buffer: Vec<f64>,
-    sum_tr: f64,
-    prev_atr: f64,
-    head: usize,
-    filled: bool,
-    count: usize,
+    alpha: f64,      // 1 / period
+    k100: f64,       // 100.0
+    // Running state
+    count: usize,    // how many updates we've seen
+    sum_tr: f64,     // used only until warmup completes
+    atr: f64,        // valid once ready == true
+    prev_close: f64, // last close (for TR)
+    have_prev: bool, // do we have a previous close yet?
+    ready: bool,     // becomes true at count == period
 }
 
 impl NatrStream {
+    #[inline(always)]
     pub fn try_new(params: NatrParams) -> Result<Self, NatrError> {
         let period = params.period.unwrap_or(14);
         if period == 0 {
-            return Err(NatrError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(NatrError::InvalidPeriod { period, data_len: 0 });
         }
         Ok(Self {
             period,
-            // initialize buffers with zeros to avoid propagating NaNs during
-            // the warm-up phase
-            tr_buffer: vec![0.0; period],
-            close_buffer: vec![0.0; period],
-            sum_tr: 0.0,
-            prev_atr: 0.0,
-            head: 0,
-            filled: false,
+            alpha: 1.0 / (period as f64),
+            k100: 100.0,
             count: 0,
+            sum_tr: 0.0,
+            atr: 0.0,
+            prev_close: 0.0,
+            have_prev: false,
+            ready: false,
         })
     }
 
+    /// O(1) update. Returns:
+    /// - None until warmup completes (i.e., after `period` updates),
+    /// - Some(NaN) if `close` is non-finite or zero at emission step,
+    /// - Some(natr) otherwise.
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
-        let tr = if self.count == 0 {
-            high - low
+        // True Range computation (Wilder):
+        // TR = max(high, prev_close) - min(low, prev_close)
+        // For the very first bar, TR := high - low (no prev_close).
+        let tr = if self.have_prev {
+            let pc = self.prev_close;
+            high.max(pc) - low.min(pc)
         } else {
-            let tr_curr = high - low;
-            let tr_prev_close_high =
-                (high - self.close_buffer[(self.head + self.period - 1) % self.period]).abs();
-            let tr_prev_close_low =
-                (low - self.close_buffer[(self.head + self.period - 1) % self.period]).abs();
-            tr_curr.max(tr_prev_close_high).max(tr_prev_close_low)
+            // first bar only
+            high - low
         };
 
-        self.sum_tr += tr - self.tr_buffer[self.head];
-        self.tr_buffer[self.head] = tr;
-        self.close_buffer[self.head] = close;
-        self.head = (self.head + 1) % self.period;
+        // Prepare next step's prev_close
+        self.prev_close = close;
+        self.have_prev = true;
 
         self.count += 1;
 
-        if !self.filled {
+        if !self.ready {
+            // Warmup: accumulate TRs; when we reach `period`,
+            // initialize ATR as the arithmetic mean of the first `period` TRs.
+            self.sum_tr += tr;
             if self.count == self.period {
-                self.prev_atr = self.sum_tr / (self.period as f64);
-                self.filled = true;
-                if close.is_finite() && close != 0.0 {
-                    return Some((self.prev_atr / close) * 100.0);
-                } else {
-                    return Some(f64::NAN);
-                }
-            }
-            return None;
-        } else {
-            let new_atr =
-                ((self.prev_atr * ((self.period - 1) as f64)) + tr) / (self.period as f64);
-            self.prev_atr = new_atr;
-            if close.is_finite() && close != 0.0 {
-                return Some((new_atr / close) * 100.0);
+                self.atr = self.sum_tr / (self.period as f64);
+                self.ready = true;
             } else {
-                return Some(f64::NAN);
+                return None;
             }
+        } else {
+            // Wilder smoothing (EMA with alpha = 1/period):
+            // atr = atr + alpha * (tr - atr)
+            self.atr = (tr - self.atr).mul_add(self.alpha, self.atr);
+        }
+
+        // NATR = (ATR / close) * 100
+        if close.is_finite() && close != 0.0 {
+            Some((self.atr / close) * self.k100)
+        } else {
+            Some(f64::NAN)
         }
     }
 }

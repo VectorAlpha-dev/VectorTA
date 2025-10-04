@@ -647,57 +647,129 @@ pub unsafe fn tsi_avx512_long(
 }
 
 // Streaming variant
+// Decision: Streaming kernel uses inlined EMA updates with robust NaN handling,
+// warmup parity (long+short), and clamping to [-100, 100]; O(1) time/space.
 #[derive(Debug, Clone)]
 pub struct TsiStream {
+    // periods
     long: usize,
     short: usize,
-    buffer: Vec<f64>,
-    idx: usize,
-    ema_long_num: EmaStream,
-    ema_short_num: EmaStream,
-    ema_long_den: EmaStream,
-    ema_short_den: EmaStream,
+
+    // precomputed EMA coefficients
+    alpha_l: f64,
+    alpha_s: f64,
+
+    // state for momentum -> double EMA(num/den)
+    // Note: initialized lazily on first finite momentum
+    ema_long_num: f64,
+    ema_short_num: f64,
+    ema_long_den: f64,
+    ema_short_den: f64,
+
+    // last finite price seen
+    prev_price: f64,
+    have_prev: bool,
+
+    // whether EMA chains are seeded (set to first momentum)
+    seeded: bool,
+
+    // number of valid momentum updates processed (including seed step)
+    warmup_ctr: usize,
+    warmup_needed: usize, // == long + short
 }
 impl TsiStream {
+    #[inline]
     pub fn try_new(params: TsiParams) -> Result<Self, TsiError> {
         let long = params.long_period.unwrap_or(25);
         let short = params.short_period.unwrap_or(13);
+
+        if long == 0 || short == 0 {
+            return Err(TsiError::InvalidPeriod {
+                long_period: long,
+                short_period: short,
+                data_len: 0,
+            });
+        }
+
+        // α = 2 / (n + 1)  (EMA smoothing factor)
+        let alpha_l = 2.0 / (long as f64 + 1.0);
+        let alpha_s = 2.0 / (short as f64 + 1.0);
+
         Ok(Self {
             long,
             short,
-            buffer: vec![f64::NAN; 1], // Small buffer, OK
-            idx: 0,
-            ema_long_num: EmaStream::try_new(EmaParams { period: Some(long) })?,
-            ema_short_num: EmaStream::try_new(EmaParams {
-                period: Some(short),
-            })?,
-            ema_long_den: EmaStream::try_new(EmaParams { period: Some(long) })?,
-            ema_short_den: EmaStream::try_new(EmaParams {
-                period: Some(short),
-            })?,
+            alpha_l,
+            alpha_s,
+            ema_long_num: 0.0,
+            ema_short_num: 0.0,
+            ema_long_den: 0.0,
+            ema_short_den: 0.0,
+            prev_price: f64::NAN,
+            have_prev: false,
+            seeded: false,
+            warmup_ctr: 0,
+            warmup_needed: long + short,
         })
     }
+
+    /// O(1) per tick. Returns:
+    /// - `None` during warmup or when `value` is non-finite.
+    /// - `Some(NaN)` when denominator becomes zero after warmup.
+    /// - `Some(tsi)` otherwise, clamped to [-100, 100].
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        let mom = if self.idx == 0 {
-            f64::NAN
-        } else {
-            value - self.buffer[0]
-        };
-        self.buffer[0] = value;
-        self.idx += 1;
-        if mom.is_nan() {
+        // Skip non-finite ticks without poisoning state (match offline gaps)
+        if !value.is_finite() {
             return None;
         }
-        let ema_long_num = self.ema_long_num.update(mom)?;
-        let ema_short_num = self.ema_short_num.update(ema_long_num)?;
-        let ema_long_den = self.ema_long_den.update(mom.abs())?;
-        let ema_short_den = self.ema_short_den.update(ema_long_den)?;
-        if ema_short_den == 0.0 {
-            Some(f64::NAN)
-        } else {
-            Some(100.0 * (ema_short_num / ema_short_den))
+
+        // Need a previous finite price to form 1-bar momentum
+        if !self.have_prev {
+            self.prev_price = value;
+            self.have_prev = true;
+            return None;
         }
+
+        // 1-bar momentum
+        let m = value - self.prev_price;
+        self.prev_price = value;
+        let am = m.abs();
+
+        if !self.seeded {
+            // Seed all four EMA chains with the first valid momentum
+            self.ema_long_num = m;
+            self.ema_short_num = m;
+            self.ema_long_den = am;
+            self.ema_short_den = am;
+            self.seeded = true;
+            self.warmup_ctr = 1;
+            return None; // seed step never outputs (match offline)
+        }
+
+        // --- inline EMA updates using single-multiply form: ema += α * (x - ema)
+        // numerator path (m then smoothed)
+        self.ema_long_num += self.alpha_l * (m - self.ema_long_num);
+        self.ema_short_num += self.alpha_s * (self.ema_long_num - self.ema_short_num);
+
+        // denominator path (|m| then smoothed)
+        self.ema_long_den += self.alpha_l * (am - self.ema_long_den);
+        self.ema_short_den += self.alpha_s * (self.ema_long_den - self.ema_short_den);
+
+        self.warmup_ctr += 1;
+
+        // Match offline warmup: need (long + short) momentum updates incl. seed
+        if self.warmup_ctr < self.warmup_needed {
+            return None;
+        }
+
+        // Avoid divide-by-zero; clamp to [-100, 100] like offline kernels
+        let den = self.ema_short_den;
+        if den == 0.0 {
+            return Some(f64::NAN);
+        }
+
+        let tsi = 100.0 * (self.ema_short_num / den);
+        Some(tsi.clamp(-100.0, 100.0))
     }
 }
 

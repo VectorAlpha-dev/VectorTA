@@ -19,7 +19,8 @@
 //! - SIMD status: AVX2/AVX512 implementations exist but are disabled by default.
 //!   Rationale: strict non-finite bit-equality property tests and minimal wins for short periods.
 //!   Runtime selection short-circuits to scalar; SIMD kept for future experimentation.
-//! - Streaming update: O(1) sliding window via running sums of price*volume and volume.
+//! - Streaming: O(1) ring-buffer update with running sums; hot path avoids modulo.
+//!   Exact IEEE math retained (no fast-math) to preserve test reference values.
 //! - Memory: uses `alloc_with_nan_prefix` for zero-copy allocation (see alma.rs for patterns).
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -844,30 +845,47 @@ impl VwmaStream {
         })
     }
     pub fn update(&mut self, price: f64, volume: f64) -> Option<f64> {
+        // Write index always points at the oldest slot.
         let idx = self.head;
+        let new_w = price * volume;
+
         if !self.filled {
-            self.sum += price * volume;
+            // Warm-up: no eviction until the buffer is full.
+            self.sum += new_w;
             self.vsum += volume;
+
             self.prices[idx] = price;
             self.volumes[idx] = volume;
-            self.head += 1;
-            if self.head == self.period {
+
+            // Advance without modulo
+            let next = idx + 1;
+            if next == self.period {
                 self.head = 0;
                 self.filled = true;
-            }
-            if !self.filled {
+                // First valid VWMA becomes available exactly at `period`.
+                return Some(self.sum / self.vsum);
+            } else {
+                self.head = next;
                 return None;
             }
         } else {
+            // Steady-state: evict oldest, insert newest.
             let old_p = self.prices[idx];
             let old_v = self.volumes[idx];
-            self.sum += price * volume - old_p * old_v;
+            let old_w = old_p * old_v;
+
+            self.sum += new_w - old_w;
             self.vsum += volume - old_v;
+
             self.prices[idx] = price;
             self.volumes[idx] = volume;
-            self.head = (self.head + 1) % self.period;
+
+            // Advance without modulo
+            let next = idx + 1;
+            self.head = if next == self.period { 0 } else { next };
+
+            Some(self.sum / self.vsum)
         }
-        Some(self.sum / self.vsum)
     }
 }
 

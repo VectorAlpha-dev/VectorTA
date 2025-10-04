@@ -18,6 +18,7 @@
 //!   AVX512 currently reuses the AVX2 path (sequential in time, lane-widening not beneficial).
 //!   Benchmarks show AVX2/AVX512 > scalar by >5% at 100k on `target-cpu=native`.
 //! - Streaming Update: O(1), matches batch numerics within tight tolerances.
+//!   Uses EMA residual form (`e += α*(x - e)`) with `mul_add` for FMA-friendly performance.
 //! - Memory: Uses `alloc_with_nan_prefix` and batch `make_uninit_matrix`/`init_matrix_prefixes`.
 //! - Batch: Adds row-specific optimization by precomputing base series `x` and `|x|` once and
 //!   reusing across rows to reduce redundant work. Selection maps through the usual kernel API.
@@ -1066,16 +1067,21 @@ impl DtiStream {
             let x_lmd = if dl < 0.0 { -dl } else { 0.0 };
             let x_price = x_hmu - x_lmd;
             let x_price_abs = x_price.abs();
-            self.e0_r = self.alpha_r * x_price + self.alpha_r_1 * self.e0_r;
-            self.e0_s = self.alpha_s * self.e0_r + self.alpha_s_1 * self.e0_s;
-            self.e0_u = self.alpha_u * self.e0_s + self.alpha_u_1 * self.e0_u;
-            self.e1_r = self.alpha_r * x_price_abs + self.alpha_r_1 * self.e1_r;
-            self.e1_s = self.alpha_s * self.e1_r + self.alpha_s_1 * self.e1_s;
-            self.e1_u = self.alpha_u * self.e1_s + self.alpha_u_1 * self.e1_u;
+
+            // Residual-form EMA updates (FMA-friendly via mul_add)
+            self.e0_r = (x_price - self.e0_r).mul_add(self.alpha_r, self.e0_r);
+            self.e0_s = (self.e0_r - self.e0_s).mul_add(self.alpha_s, self.e0_s);
+            self.e0_u = (self.e0_s - self.e0_u).mul_add(self.alpha_u, self.e0_u);
+
+            self.e1_r = (x_price_abs - self.e1_r).mul_add(self.alpha_r, self.e1_r);
+            self.e1_s = (self.e1_r - self.e1_s).mul_add(self.alpha_s, self.e1_s);
+            self.e1_u = (self.e1_s - self.e1_u).mul_add(self.alpha_u, self.e1_u);
+
             self.last_high = Some(high);
             self.last_low = Some(low);
+
             if !self.e1_u.is_nan() && self.e1_u != 0.0 {
-                Some(100.0 * self.e0_u / self.e1_u)
+                Some(fast_div_approx(self.e0_u * 100.0, self.e1_u))
             } else {
                 Some(0.0)
             }
@@ -1085,6 +1091,69 @@ impl DtiStream {
             self.initialized = true;
             None
         }
+    }
+
+    /// Resets EMA state and warm-up.
+    #[inline(always)]
+    pub fn reset(&mut self) {
+        self.e0_r = 0.0;
+        self.e0_s = 0.0;
+        self.e0_u = 0.0;
+        self.e1_r = 0.0;
+        self.e1_s = 0.0;
+        self.e1_u = 0.0;
+        self.last_high = None;
+        self.last_low = None;
+        self.initialized = false;
+    }
+
+    /// Optional O(1) update when deltas (dh, dl) are already known.
+    /// Returns `None` until the stream is seeded by at least one `update`/`update_delta` call.
+    #[inline(always)]
+    pub fn update_delta(&mut self, dh: f64, dl: f64) -> Option<f64> {
+        if let (Some(prev_h), Some(prev_l)) = (self.last_high, self.last_low) {
+            let high = prev_h + dh;
+            let low = prev_l + dl;
+
+            let x_hmu = if dh > 0.0 { dh } else { 0.0 };
+            let x_lmd = if dl < 0.0 { -dl } else { 0.0 };
+            let x_price = x_hmu - x_lmd;
+            let x_price_abs = x_price.abs();
+
+            self.e0_r = (x_price - self.e0_r).mul_add(self.alpha_r, self.e0_r);
+            self.e0_s = (self.e0_r - self.e0_s).mul_add(self.alpha_s, self.e0_s);
+            self.e0_u = (self.e0_s - self.e0_u).mul_add(self.alpha_u, self.e0_u);
+
+            self.e1_r = (x_price_abs - self.e1_r).mul_add(self.alpha_r, self.e1_r);
+            self.e1_s = (self.e1_r - self.e1_s).mul_add(self.alpha_s, self.e1_s);
+            self.e1_u = (self.e1_s - self.e1_u).mul_add(self.alpha_u, self.e1_u);
+
+            self.last_high = Some(high);
+            self.last_low = Some(low);
+
+            if !self.e1_u.is_nan() && self.e1_u != 0.0 {
+                Some(fast_div_approx(self.e0_u * 100.0, self.e1_u))
+            } else {
+                Some(0.0)
+            }
+        } else {
+            None
+        }
+    }
+}
+
+#[inline(always)]
+fn fast_div_approx(num: f64, den: f64) -> f64 {
+    // Guard degenerate cases exactly as call sites do.
+    debug_assert!(den != 0.0);
+    // Seed from f32 reciprocal if in representable range; otherwise fall back to exact divide.
+    let ad = den.abs();
+    if ad <= f32::MAX as f64 && ad >= f32::MIN_POSITIVE as f64 {
+        let r0 = (1.0f32 / den as f32) as f64;
+        let r1 = r0 * (2.0 - den * r0);
+        num * r1
+    } else {
+        num / den
     }
 }
 

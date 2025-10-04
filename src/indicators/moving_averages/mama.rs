@@ -14,7 +14,10 @@
 //! ## Developer Status
 //! - **SIMD status**: AVX2/AVX512 implemented and correct, but underperform scalar; Auto short-circuits to Scalar. Explicit Avx2/Avx512 remain for benches.
 //! - **Scalar kernel**: Optimized (ring=8 mask instead of `% 7`, fused multiply-add where applicable)
-//! - **Streaming update**: O(n) per update (still rebuilds slice once)
+//! - **Streaming update**: O(1) per update (ring-based; no slice rebuild)
+//!
+//! Decision: SIMD underperforms; scalar kept as reference. Streaming path now uses
+//! an O(1) ring-buffer kernel matching the scalar math and warmup behavior.
 //! - **Memory**: Zero-copy/uninitialized helpers in use
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -1188,93 +1191,272 @@ unsafe fn mama_simd128_inplace(
     }
 }
 
-// Stream (online) MAMA
-
-// ---------------------------------------------------------------
-//  Streaming (online) MAMA – in-place version
-// -------------------------------------------------------------
+// Stream (online) MAMA — O(1) per update (no slice rebuilds)
 
 #[derive(Debug, Clone)]
 pub struct MamaStream {
     fast_limit: f64,
     slow_limit: f64,
 
-    // last 10 prices in a ring-buffer
-    buffer: [f64; 10],
-    pos: usize,
-    filled: bool,
+    // --- RING BUFFERS (length=8 → cheap (&MASK) lags 2/4/6, 3-bar i1) ---
+    smooth: [f64; 8],
+    detrender: [f64; 8],
+    i1_buf: [f64; 8],
+    q1_buf: [f64; 8],
+    idx: usize, // current write position in rings (0..7)
 
-    // workspaces that receive the kernel’s output each tick
-    mama_out: [f64; 10],
-    fama_out: [f64; 10],
+    // --- rolling DSP state (mirrors scalar implementation) ---
+    prev_mesa: f64,  // dominant cycle period (EMA-smoothed)
+    prev_phase: f64, // degrees
+    prev_mama: f64,
+    prev_fama: f64,
+    prev_i2: f64,
+    prev_q2: f64,
+    prev_re: f64,
+    prev_im: f64,
+
+    // --- last raw prices for 4-3-2-1 smoother fallbacks during startup ---
+    last1: f64, // t-1
+    last2: f64, // t-2
+    last3: f64, // t-3
+
+    // --- bookkeeping ---
+    seeded: bool, // have we processed the very first tick?
+    seen: usize,  // number of processed samples (bars)
 }
 
 impl MamaStream {
-    // ---------- constructor -----------------------------------
+    #[inline]
     pub fn try_new(params: MamaParams) -> Result<Self, MamaError> {
         let fast_limit = params.fast_limit.unwrap_or(0.5);
         let slow_limit = params.slow_limit.unwrap_or(0.05);
-
-        if fast_limit <= 0.0 || fast_limit.is_nan() || fast_limit.is_infinite() {
+        if fast_limit <= 0.0 || !fast_limit.is_finite() {
             return Err(MamaError::InvalidFastLimit { fast_limit });
         }
-        if slow_limit <= 0.0 || slow_limit.is_nan() || slow_limit.is_infinite() {
+        if slow_limit <= 0.0 || !slow_limit.is_finite() {
             return Err(MamaError::InvalidSlowLimit { slow_limit });
         }
 
         Ok(Self {
             fast_limit,
             slow_limit,
-            buffer: [f64::NAN; 10],
-            pos: 0,
-            filled: false,
-            mama_out: [f64::NAN; 10], // already NaN-prefilled
-            fama_out: [f64::NAN; 10],
+            smooth: [f64::NAN; 8],
+            detrender: [f64::NAN; 8],
+            i1_buf: [f64::NAN; 8],
+            q1_buf: [f64::NAN; 8],
+            idx: 0,
+
+            prev_mesa: 0.0,
+            prev_phase: 0.0,
+            prev_mama: f64::NAN,
+            prev_fama: f64::NAN,
+            prev_i2: 0.0,
+            prev_q2: 0.0,
+            prev_re: 0.0,
+            prev_im: 0.0,
+
+            last1: f64::NAN,
+            last2: f64::NAN,
+            last3: f64::NAN,
+
+            seeded: false,
+            seen: 0,
         })
     }
 
-    // ---------- push one new price ----------------------------
-    pub fn update(&mut self, value: f64) -> Option<(f64, f64)> {
-        // identical rolling state and Hilbert/smoother steps as in mama_scalar_inplace,
-        // but applied only to the current tick using the internal ring state.
-        // Keep your existing ring buffers and rolling vars; do not build a contiguous slice.
+    /// Push one new price. Returns (MAMA, FAMA) after the warmup (10 ticks), else None.
+    #[inline]
+    pub fn update(&mut self, price: f64) -> Option<(f64, f64)> {
+        const RING: usize = 8;
+        const MASK: usize = RING - 1;
+        const H0: f64 = 0.096_2;
+        const H1: f64 = 0.576_9;
+        const H2: f64 = -0.576_9;
+        const H3: f64 = -0.096_2;
+        const DEG_PER_RAD: f64 = 180.0 / std::f64::consts::PI;
 
-        // write value
-        self.buffer[self.pos] = value;
-        let idx = self.pos;
-        self.pos = (self.pos + 1) % 10;
-        if !self.filled && self.pos == 0 {
-            self.filled = true;
+        #[inline(always)]
+        fn hilbert4(x0: f64, x2: f64, x4: f64, x6: f64) -> f64 {
+            // FMA-friendly cascade
+            H0.mul_add(x0, H1.mul_add(x2, H2.mul_add(x4, H3 * x6)))
         }
-        if !self.filled {
+        #[inline(always)]
+        fn lag<const N: usize>(buf: &[f64; N], pos: usize, k: usize) -> f64 {
+            buf[(pos.wrapping_sub(k)) & (N - 1)]
+        }
+
+        // -- one-time seed: set rings to first price, make prev_mama/fama=price, then process bar 0
+        if !self.seeded {
+            // fill rings with 'price' so early lags read 'price' (matches scalar seeding)
+            self.smooth = [price; RING];
+            self.detrender = [price; RING];
+            self.i1_buf = [price; RING];
+            self.q1_buf = [price; RING];
+            self.idx = 0;
+
+            self.prev_mesa = 0.0;
+            self.prev_phase = 0.0;
+            self.prev_mama = price;
+            self.prev_fama = price;
+            self.prev_i2 = 0.0;
+            self.prev_q2 = 0.0;
+            self.prev_re = 0.0;
+            self.prev_im = 0.0;
+
+            self.last1 = price;
+            self.last2 = price;
+            self.last3 = price;
+
+            self.seeded = true;
+
+            // process bar 0 (outputs unused) to keep ring/state identical to scalar path
+            let _ = self.process_one(price, hilbert4, lag::<RING>, DEG_PER_RAD);
+
+            // warmup: do not output yet
             return None;
         }
 
-        // Note: For now, we still need to call the scalar kernel with a slice
-        // This optimization requires rewriting the entire scalar logic inline
-        // which is complex. As a compromise, build the slice only when needed
-        let mut tmp = [0.0_f64; 10];
-        if self.pos == 0 {
-            tmp.copy_from_slice(&self.buffer);
-        } else {
-            let (head, tail) = self.buffer.split_at(self.pos);
-            tmp[..10 - self.pos].copy_from_slice(tail);
-            tmp[10 - self.pos..].copy_from_slice(head);
-        }
+        // process bar t
+        let (mama, fama) = self.process_one(price, hilbert4, lag::<RING>, DEG_PER_RAD);
 
-        // run the in-place scalar kernel
-        unsafe {
-            mama_scalar_inplace(
-                &tmp,
-                self.fast_limit,
-                self.slow_limit,
-                &mut self.mama_out,
-                &mut self.fama_out,
+        // warmup policy: first 10 bars suppressed (consistent with batch/scalar NaN prefix)
+        self.seen += 1;
+        if self.seen < 10 {
+            return None;
+        }
+        Some((mama, fama))
+    }
+
+    #[inline(always)]
+    fn process_one(
+        &mut self,
+        price: f64,
+        hilbert4: impl Fn(f64, f64, f64, f64) -> f64,
+        lag: impl Fn(&[f64; 8], usize, usize) -> f64,
+        deg_per_rad: f64,
+    ) -> (f64, f64) {
+        const MASK: usize = 7; // for N=8 rings
+        let i = self.idx;
+
+        // ---- 4-3-2-1 smoother (startup fallbacks match scalar loop) ------------------------
+        let s1 = if self.seen >= 1 { self.last1 } else { price };
+        let s2 = if self.seen >= 2 { self.last2 } else { price };
+        let s3 = if self.seen >= 3 { self.last3 } else { price };
+        let smooth_val = 0.1 * (4.0_f64.mul_add(price, 3.0_f64.mul_add(s1, 2.0_f64.mul_add(s2, s3))));
+        self.smooth[i] = smooth_val;
+
+        // amplitude correction (Ehlers): 0.075 * Period + 0.54
+        let amp = 0.075_f64.mul_add(self.prev_mesa, 0.54);
+
+        // ---- Hilbert detrender ------------------------------------------------------------
+        let dt = amp
+            * hilbert4(
+                self.smooth[i],
+                lag(&self.smooth, i, 2),
+                lag(&self.smooth, i, 4),
+                lag(&self.smooth, i, 6),
             );
+        self.detrender[i] = dt;
+
+        // ---- In‑phase & Quadrature --------------------------------------------------------
+        let i1 = lag(&self.detrender, i, 3);
+        self.i1_buf[i] = i1;
+
+        let q1 = amp
+            * hilbert4(
+                self.detrender[i],
+                lag(&self.detrender, i, 2),
+                lag(&self.detrender, i, 4),
+                lag(&self.detrender, i, 6),
+            );
+        self.q1_buf[i] = q1;
+
+        // ---- 90° leads --------------------------------------------------------------------
+        let j_i = amp
+            * hilbert4(
+                self.i1_buf[i],
+                lag(&self.i1_buf, i, 2),
+                lag(&self.i1_buf, i, 4),
+                lag(&self.i1_buf, i, 6),
+            );
+        let j_q = amp
+            * hilbert4(
+                self.q1_buf[i],
+                lag(&self.q1_buf, i, 2),
+                lag(&self.q1_buf, i, 4),
+                lag(&self.q1_buf, i, 6),
+            );
+
+        // ---- Homodyne discriminator (EMA) ------------------------------------------------
+        let i2 = i1 - j_q;
+        let q2 = q1 + j_i;
+
+        let old_i2 = self.prev_i2;
+        let old_q2 = self.prev_q2;
+
+        let i2s = 0.2_f64.mul_add(i2, 0.8 * old_i2);
+        let q2s = 0.2_f64.mul_add(q2, 0.8 * old_q2);
+        self.prev_i2 = i2s;
+        self.prev_q2 = q2s;
+
+        let re = 0.2_f64.mul_add(i2s * old_i2 + q2s * old_q2, 0.8 * self.prev_re);
+        let im = 0.2_f64.mul_add(i2s * old_q2 - q2s * old_i2, 0.8 * self.prev_im);
+        self.prev_re = re;
+        self.prev_im = im;
+
+        // ---- Dominant cycle period --------------------------------------------------------
+        let mut mesa = if re != 0.0 && im != 0.0 {
+            // Keep atan_fast to match batch/scalar results
+            2.0 * std::f64::consts::PI / atan_fast(im / re)
+        } else {
+            self.prev_mesa
+        };
+        // clamp & smooth
+        mesa = mesa
+            .min(1.5 * self.prev_mesa)
+            .max(0.67 * self.prev_mesa)
+            .max(6.0)
+            .min(50.0);
+        mesa = 0.2_f64.mul_add(mesa, 0.8 * self.prev_mesa);
+        self.prev_mesa = mesa;
+
+        // ---- Phase & adaptive alpha -------------------------------------------------------
+        let phase = if i1 != 0.0 {
+            atan_fast(q1 / i1) * deg_per_rad
+        } else {
+            self.prev_phase
+        };
+        let mut dphi = self.prev_phase - phase;
+        if dphi < 1.0 {
+            dphi = 1.0;
+        }
+        self.prev_phase = phase;
+
+        let mut alpha = self.fast_limit / dphi;
+        if alpha < self.slow_limit {
+            alpha = self.slow_limit;
+        }
+        if alpha > self.fast_limit {
+            alpha = self.fast_limit;
         }
 
-        // pick the most recent value
-        Some((self.mama_out[9], self.fama_out[9]))
+        // ---- MAMA & FAMA ------------------------------------------------------------------
+        let one_minus_alpha = 1.0 - alpha;
+        let mama = alpha.mul_add(price, one_minus_alpha * self.prev_mama);
+
+        let half_alpha = 0.5 * alpha;
+        let fama = half_alpha.mul_add(mama, (1.0 - half_alpha) * self.prev_fama);
+
+        self.prev_mama = mama;
+        self.prev_fama = fama;
+
+        // ---- advance ring & last price window ---------------------------------------------
+        self.idx = (self.idx + 1) & MASK;
+        self.last3 = self.last2;
+        self.last2 = self.last1;
+        self.last1 = price;
+
+        (mama, fama)
     }
 }
 

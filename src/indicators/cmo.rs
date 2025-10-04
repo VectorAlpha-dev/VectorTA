@@ -14,7 +14,7 @@
 //! ## Developer Notes
 //! - **AVX2 kernel**: Implemented (warm-up vectorized only). Underperforms (<5%) vs scalar at 100k; Auto short-circuits to scalar.
 //! - **AVX512 kernel**: Implemented (warm-up vectorized only). Underperforms vs scalar; Auto short-circuits to scalar.
-//! - **Streaming**: Not implemented
+//! - **Streaming**: Implemented (Wilder-style O(1) update; FMA-friendly)
 //! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy)
 //! - **Batch operations**: ✅ Implemented with parallel processing support
 
@@ -1029,12 +1029,13 @@ unsafe fn cmo_row_from_gl(
 #[derive(Debug, Clone)]
 pub struct CmoStream {
     period: usize,
-    filled: bool,
+    inv_period: f64, // 1/period (precomputed)
     avg_gain: f64,
     avg_loss: f64,
     prev: f64,
-    started: bool,
     head: usize,
+    started: bool,
+    filled: bool,
 }
 
 impl CmoStream {
@@ -1048,55 +1049,61 @@ impl CmoStream {
         }
         Ok(Self {
             period,
-            filled: false,
+            inv_period: 1.0 / (period as f64),
             avg_gain: 0.0,
             avg_loss: 0.0,
             prev: 0.0,
-            started: false,
             head: 0,
+            started: false,
+            filled: false,
         })
     }
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
+        // Seed on the first observed value.
         if !self.started {
             self.prev = value;
             self.started = true;
             return None;
         }
+
+        // Branchless up/down decomposition
         let diff = value - self.prev;
         self.prev = value;
-        let abs_diff = diff.abs();
-        let gain = 0.5 * (diff + abs_diff);
-        let loss = 0.5 * (abs_diff - diff);
 
+        let ad = diff.abs();
+        let gain = 0.5 * (ad + diff);
+        let loss = 0.5 * (ad - diff);
+
+        // Warm-up: accumulate raw sums, then normalize once
         if !self.filled {
             self.avg_gain += gain;
             self.avg_loss += loss;
             self.head += 1;
+
             if self.head == self.period {
-                self.avg_gain /= self.period as f64;
-                self.avg_loss /= self.period as f64;
+                self.avg_gain *= self.inv_period;
+                self.avg_loss *= self.inv_period;
                 self.filled = true;
-                let sum_gl = self.avg_gain + self.avg_loss;
-                return Some(if sum_gl != 0.0 {
-                    100.0 * ((self.avg_gain - self.avg_loss) / sum_gl)
+
+                let denom = self.avg_gain + self.avg_loss;
+                return Some(if denom != 0.0 {
+                    100.0 * (self.avg_gain - self.avg_loss) / denom
                 } else {
                     0.0
                 });
             }
             return None;
         }
-        let period_f = self.period as f64;
-        let period_m1 = (self.period - 1) as f64;
-        self.avg_gain *= period_m1;
-        self.avg_loss *= period_m1;
-        self.avg_gain += gain;
-        self.avg_loss += loss;
-        self.avg_gain /= period_f;
-        self.avg_loss /= period_f;
-        let sum_gl = self.avg_gain + self.avg_loss;
-        Some(if sum_gl != 0.0 {
-            100.0 * ((self.avg_gain - self.avg_loss) / sum_gl)
+
+        // Rolling EMA-like (Wilder) update: avg += (x - avg) * inv_period
+        let ip = self.inv_period;
+        self.avg_gain = (gain - self.avg_gain).mul_add(ip, self.avg_gain);
+        self.avg_loss = (loss - self.avg_loss).mul_add(ip, self.avg_loss);
+
+        let denom = self.avg_gain + self.avg_loss;
+        Some(if denom != 0.0 {
+            100.0 * (self.avg_gain - self.avg_loss) / denom
         } else {
             0.0
         })

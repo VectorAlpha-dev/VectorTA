@@ -15,10 +15,11 @@
 //!
 //! ## Developer Notes
 //! - **AVX2/AVX512 kernels**: Not implemented (no explicit SIMD kernel functions)
-//! - **Streaming update**: O(n) - calls full uma function on each update
+//! - **Streaming update**: O(1) where possible; UMA core O(L)
 //! - **Memory optimization**: Uses zero-copy helpers (alloc_with_nan_prefix)
 //! - **Optimization status**: Scalar core optimized (inlined RSI/MFI, ln LUT, FMA). SIMD accumulation present under `nightly-avx`, but Auto selection prefers scalar due to limited wins from scalar `exp` cost.
-//! - **Streaming**: unchanged (calls full function); future work could make it O(1).
+//! - **Streaming**: optimized. Maintains O(1) updates for mean/σ, momentum, and WMA;
+//!   UMA core remains O(L) per tick due to non-decomposable power weights.
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
@@ -256,84 +257,354 @@ impl UmaBuilder {
     }
 }
 
-// ==================== STREAMING ====================
+// ==================== STREAMING (O(1) where possible; O(L) only for UMA core) ====================
 
+/// SIMD status: streaming keeps scalar-safe logic; UMA core is O(L) per tick.
+/// Rationale: power-weighted sliding average reweights all items as p and L vary; no exact O(1).
 #[derive(Debug, Clone)]
 pub struct UmaStream {
-    buffer: Vec<f64>,
-    volume_buffer: Vec<f64>,
-    params: UmaParams,
+    // ---- configuration (copied from params for fast access) ----
+    accelerator: f64,
+    min_length: usize,
+    max_length: usize,
+    smooth_length: usize,
+
+    // ---- rolling window over prices (size = max_length) ----
+    price: Vec<f64>,
+    volume: Vec<f64>,
+    cap: usize,
+    head: usize,
+    count: usize,
+
+    // rolling sums for mean/std at fixed max_length
+    sum: f64,
+    sumsq: f64,
+
+    // ---- per-diff streaming state ----
+    has_prev: bool,
+    prev_price: f64,
+
+    // prefix sums (ring) of up/down volume contributions over diffs
+    upvol_cum: Vec<f64>,
+    dnvol_cum: Vec<f64>,
+    diff_step: usize,
+
+    // RSI (Wilder) state for no-volume fallback
+    rsi_avg_up: f64,
+    rsi_avg_dn: f64,
+    rsi_inited: bool,
+
+    // UMA dynamic length state
     dynamic_length: f64,
+
+    // ln(k) lookup for k=1..=max_length (index 0 unused)
+    ln_lut: Vec<f64>,
+
+    // ---- WMA(smooth_length) state over raw UMA ----
+    uma_raw: Vec<f64>,
+    uma_raw_head: usize,
+    uma_raw_count: usize,
+    s1: f64,
+    s2: f64,
+    wma_denom: f64,
+
+    // keep params & kernel for parity
+    params: UmaParams,
     kernel: Kernel,
 }
 
 impl UmaStream {
     pub fn try_new(params: UmaParams) -> Result<Self, UmaError> {
-        let max_length = params.max_length.unwrap_or(50);
+        let accelerator = params.accelerator.unwrap_or(1.0);
         let min_length = params.min_length.unwrap_or(5);
+        let max_length = params.max_length.unwrap_or(50);
+        let smooth_len = params.smooth_length.unwrap_or(4);
 
+        if min_length == 0 {
+            return Err(UmaError::InvalidMinLength { min_length });
+        }
+        if max_length == 0 {
+            return Err(UmaError::InvalidMaxLength { max_length, data_len: 0 });
+        }
+        if smooth_len == 0 {
+            return Err(UmaError::InvalidSmoothLength { smooth_length: smooth_len });
+        }
         if min_length > max_length {
-            return Err(UmaError::MinLengthGreaterThanMaxLength {
-                min_length,
-                max_length,
-            });
+            return Err(UmaError::MinLengthGreaterThanMaxLength { min_length, max_length });
+        }
+        if accelerator < 1.0 {
+            return Err(UmaError::InvalidAccelerator { accelerator });
+        }
+
+        // Precompute ln(k) once for k=1..=max_length
+        let mut ln_lut = Vec::with_capacity(max_length + 1);
+        ln_lut.push(0.0); // unused
+        for k in 1..=max_length {
+            ln_lut.push((k as f64).ln());
         }
 
         Ok(Self {
-            buffer: Vec::with_capacity(max_length * 3),
-            volume_buffer: Vec::with_capacity(max_length * 3),
-            params,
+            accelerator,
+            min_length,
+            max_length,
+            smooth_length: smooth_len,
+
+            price: vec![0.0; max_length],
+            volume: vec![0.0; max_length],
+            cap: max_length,
+            head: 0,
+            count: 0,
+
+            sum: 0.0,
+            sumsq: 0.0,
+
+            has_prev: false,
+            prev_price: 0.0,
+
+            upvol_cum: vec![0.0; max_length + 1],
+            dnvol_cum: vec![0.0; max_length + 1],
+            diff_step: 0,
+
+            rsi_avg_up: 0.0,
+            rsi_avg_dn: 0.0,
+            rsi_inited: false,
+
             dynamic_length: max_length as f64,
+            ln_lut,
+
+            uma_raw: vec![0.0; smooth_len],
+            uma_raw_head: 0,
+            uma_raw_count: 0,
+            s1: 0.0,
+            s2: 0.0,
+            wma_denom: (smooth_len as f64) * ((smooth_len as f64) + 1.0) * 0.5,
+
+            params,
             kernel: detect_best_kernel(),
         })
     }
 
+    #[inline]
     pub fn update(&mut self, value: f64) -> Option<f64> {
         self.update_with_volume(value, None)
     }
 
+    /// `volume`: if provided, enables the volume-momentum path (slice-with-volume behavior).
+    /// Otherwise the momentum falls back to RSI (Wilder).
     pub fn update_with_volume(&mut self, value: f64, volume: Option<f64>) -> Option<f64> {
-        self.buffer.push(value);
-        if let Some(v) = volume {
-            self.volume_buffer.push(v);
+        let v = volume.unwrap_or(0.0);
+
+        // --- push into price/volume rings; maintain rolling sum/sumsq over fixed cap ---
+        if self.count == self.cap {
+            // overwriting oldest at head
+            let old = self.price[self.head];
+            self.sum -= old;
+            self.sumsq -= old * old;
         } else {
-            self.volume_buffer.push(0.0);
+            self.count += 1;
         }
+        self.price[self.head] = value;
+        self.volume[self.head] = v;
+        self.sum += value;
+        self.sumsq += value * value;
 
-        let max_length = self.params.max_length.unwrap_or(50);
-        let smooth_length = self.params.smooth_length.unwrap_or(4);
-        let min_needed = max_length + smooth_length;
+        // --- per-diff streaming state (volume up/down buckets + RSI state) ---
+        if self.has_prev {
+            let diff = value - self.prev_price;
+            let up = if diff > 0.0 { diff } else { 0.0 };
+            let dn = if diff < 0.0 { -diff } else { 0.0 };
 
-        if self.buffer.len() < min_needed {
+            // prefix-sum rings for up/down volume (O(1) query for any window length)
+            let cur = (self.diff_step + 1) % (self.cap + 1);
+            let prev = self.diff_step % (self.cap + 1);
+            let up_contrib = if up > 0.0 { v } else { 0.0 };
+            let dn_contrib = if dn > 0.0 { v } else { 0.0 };
+            self.upvol_cum[cur] = self.upvol_cum[prev] + up_contrib;
+            self.dnvol_cum[cur] = self.dnvol_cum[prev] + dn_contrib;
+            self.diff_step += 1;
+
+            // RSI (Wilder) recurrence; alpha chosen from current dynamic length later.
+            if !self.rsi_inited {
+                self.rsi_avg_up = up;
+                self.rsi_avg_dn = dn;
+                self.rsi_inited = true;
+            } else {
+                // Defer weighted update until len_r known; see below.
+            }
+        }
+        self.prev_price = value;
+        self.has_prev = true;
+
+        // advance ring head
+        self.head = (self.head + 1) % self.cap;
+
+        // --- warmup: need at least max_length for μ/σ and then smooth_length values for WMA ---
+        let min_needed = self.max_length + self.smooth_length; // conservative
+        if self.count + ((self.diff_step > 0) as usize) < min_needed {
             return None;
         }
 
-        // Keep buffer size manageable
-        if self.buffer.len() > min_needed * 2 {
-            self.buffer.drain(0..self.buffer.len() - min_needed * 2);
-            self.volume_buffer
-                .drain(0..self.volume_buffer.len() - min_needed * 2);
-        }
+        // --- rolling μ and σ over fixed max_length (population σ) ---
+        let n = self.cap as f64;
+        let mu = self.sum / n;
+        let var = (self.sumsq / n) - mu * mu;
+        let sd = if var > 0.0 { var.sqrt() } else { 0.0 };
 
-        let vol_slice = if !self.volume_buffer.is_empty() {
-            Some(self.volume_buffer.as_slice())
+        // UMA band thresholds
+        let a = (-1.75f64).mul_add(sd, mu);
+        let b = (-0.25f64).mul_add(sd, mu);
+        let c = (0.25f64).mul_add(sd, mu);
+        let d = (1.75f64).mul_add(sd, mu);
+
+        // --- adapt dynamic length (±1 step, then clamp) ---
+        let src = value;
+        if src >= b && src <= c {
+            self.dynamic_length += 1.0;
+        } else if src < a || src > d {
+            self.dynamic_length -= 1.0;
+        }
+        self.dynamic_length = self
+            .dynamic_length
+            .max(self.min_length as f64)
+            .min(self.max_length as f64);
+        let len_r = self.dynamic_length.round().max(1.0) as usize;
+
+        // --- momentum factor: volume-weighted up/down ratio (if volume present), else RSI ---
+        let mf = if v > 0.0 && self.diff_step > 0 {
+            // O(1) query of last len_r diffs from prefix sums
+            let cur = self.diff_step % (self.cap + 1);
+            let prev = (self.diff_step + self.cap + 1 - len_r) % (self.cap + 1);
+            let up_sum = self.upvol_cum[cur] - self.upvol_cum[prev];
+            let dn_sum = self.dnvol_cum[cur] - self.dnvol_cum[prev];
+            let tot = up_sum + dn_sum;
+            if tot > 0.0 { 100.0 * up_sum / tot } else { 50.0 }
         } else {
-            None
+            // Wilder RSI with variable alpha = 1/len_r
+            if self.diff_step > 0 {
+                // Recompute last diff from ring to avoid dependency on overwritten prev
+                let newest_idx = (self.head + self.cap - 1) % self.cap;
+                let prev_idx = (self.head + self.cap - 2) % self.cap;
+                let prevv = self.price[prev_idx];
+                let last_diff = self.price[newest_idx] - prevv;
+                let up = if last_diff > 0.0 { last_diff } else { 0.0 };
+                let dn = if last_diff < 0.0 { -last_diff } else { 0.0 };
+
+                let alpha = 1.0 / (len_r as f64);
+                self.rsi_avg_up = (1.0 - alpha) * self.rsi_avg_up + alpha * up;
+                self.rsi_avg_dn = (1.0 - alpha) * self.rsi_avg_dn + alpha * dn;
+            }
+            if self.rsi_avg_dn == 0.0 {
+                100.0
+            } else {
+                let s = self.rsi_avg_up + self.rsi_avg_dn;
+                if s == 0.0 { 50.0 } else { 100.0 * self.rsi_avg_up / s }
+            }
         };
 
-        let input = UmaInput::from_slice(&self.buffer, vol_slice, self.params.clone());
+        // --- exponent p from oscillator (same formula as batch) ---
+        let mf_scaled = mf.mul_add(2.0, -100.0);
+        let p = self.accelerator + (mf_scaled.abs() * 0.04); // 1/25
 
-        match uma_with_kernel(&input, self.kernel) {
-            Ok(output) => output.values.last().copied(),
-            Err(_) => None,
+        // --- UMA core: power-weighted average over last len_r values (O(len_r)) ---
+        let start = (self.head + self.cap - len_r) % self.cap;
+        let mut xws = 0.0f64;
+        let mut wsum = 0.0f64;
+
+        // Unrolled scalar accumulation with LUT ln(k) and FMA; newest has k=1
+        let mut j = 0usize;
+        while j + 1 < len_r {
+            let k1 = len_r - j;
+            let k2 = k1 - 1;
+
+            let w1 = exp_kernel(p * self.ln_lut[k1]);
+            let idx1 = (start + j) % self.cap;
+            let x1 = self.price[idx1];
+            xws = x1.mul_add(w1, xws);
+            wsum += w1;
+
+            let w2 = exp_kernel(p * self.ln_lut[k2]);
+            let idx2 = (start + j + 1) % self.cap;
+            let x2 = self.price[idx2];
+            xws = x2.mul_add(w2, xws);
+            wsum += w2;
+
+            j += 2;
+        }
+        if j < len_r {
+            let k = len_r - j;
+            let w = exp_kernel(p * self.ln_lut[k]);
+            let idx = (start + j) % self.cap;
+            let x = self.price[idx];
+            xws = x.mul_add(w, xws);
+            wsum += w;
+        }
+
+        let uma_raw = if wsum > 0.0 { xws / wsum } else { src };
+
+        // --- smoothing: O(1) WMA over last `smooth_length` UMA values ---
+        let m = self.smooth_length;
+        if self.uma_raw_count < m {
+            // initial fill with proper weights 1..k
+            self.s1 += uma_raw;
+            self.s2 += uma_raw * ((self.uma_raw_count as f64) + 1.0);
+            self.uma_raw[self.uma_raw_head] = uma_raw;
+            self.uma_raw_head = (self.uma_raw_head + 1) % m;
+            self.uma_raw_count += 1;
+
+            if self.uma_raw_count < m {
+                return None;
+            }
+            // first valid output
+            let out = self.s2 / self.wma_denom;
+            Some(out)
+        } else {
+            // steady state O(1) updates
+            let oldest = self.uma_raw[self.uma_raw_head];
+            let s1_prev = self.s1;
+            self.s1 = self.s1 - oldest + uma_raw;
+            self.s2 = self.s2 - s1_prev + (m as f64) * uma_raw;
+
+            // rotate ring
+            self.uma_raw[self.uma_raw_head] = uma_raw;
+            self.uma_raw_head = (self.uma_raw_head + 1) % m;
+
+            Some(self.s2 / self.wma_denom)
         }
     }
 
     pub fn reset(&mut self) {
-        self.buffer.clear();
-        self.volume_buffer.clear();
-        self.dynamic_length = self.params.max_length.unwrap_or(50) as f64;
+        self.price.fill(0.0);
+        self.volume.fill(0.0);
+        self.head = 0;
+        self.count = 0;
+        self.sum = 0.0;
+        self.sumsq = 0.0;
+
+        self.has_prev = false;
+        self.prev_price = 0.0;
+
+        self.upvol_cum.fill(0.0);
+        self.dnvol_cum.fill(0.0);
+        self.diff_step = 0;
+
+        self.rsi_avg_up = 0.0;
+        self.rsi_avg_dn = 0.0;
+        self.rsi_inited = false;
+
+        self.dynamic_length = self.max_length as f64;
+
+        self.uma_raw.fill(0.0);
+        self.uma_raw_head = 0;
+        self.uma_raw_count = 0;
+        self.s1 = 0.0;
+        self.s2 = 0.0;
     }
+}
+
+// ---- internal helper: swappable exp() (exact by default) ----
+#[inline(always)]
+fn exp_kernel(x: f64) -> f64 {
+    x.exp()
 }
 
 // ==================== ERROR TYPES ====================
@@ -676,14 +947,14 @@ fn uma_core_into(
                 let k1 = len_r - j;
                 let k2 = k1 - 1;
 
-                let w1 = (p * ln_lut[k1]).exp();
+                let w1 = exp_kernel(p * ln_lut[k1]);
                 let x1 = data[start + j];
                 if !x1.is_nan() {
                     xws = x1.mul_add(w1, xws);
                     wsum += w1;
                 }
 
-                let w2 = (p * ln_lut[k2]).exp();
+                let w2 = exp_kernel(p * ln_lut[k2]);
                 let x2 = data[start + j + 1];
                 if !x2.is_nan() {
                     xws = x2.mul_add(w2, xws);
@@ -694,7 +965,7 @@ fn uma_core_into(
             }
             if j < len_r {
                 let k = len_r - j;
-                let w = (p * ln_lut[k]).exp();
+                let w = exp_kernel(p * ln_lut[k]);
                 let x = data[start + j];
                 if !x.is_nan() {
                     xws = x.mul_add(w, xws);
@@ -730,10 +1001,10 @@ unsafe fn uma_weighted_accumulate_avx2(
         let k2 = k1 - 1;
         let k3 = k2 - 1;
 
-        let w0 = (p * *ln_lut.add(k0)).exp();
-        let w1 = (p * *ln_lut.add(k1)).exp();
-        let w2 = (p * *ln_lut.add(k2)).exp();
-        let w3 = (p * *ln_lut.add(k3)).exp();
+    let w0 = exp_kernel(p * *ln_lut.add(k0));
+    let w1 = exp_kernel(p * *ln_lut.add(k1));
+    let w2 = exp_kernel(p * *ln_lut.add(k2));
+    let w3 = exp_kernel(p * *ln_lut.add(k3));
         let wv = _mm256_setr_pd(w0, w1, w2, w3);
 
         let xv = _mm256_loadu_pd(data.add(j));
@@ -760,7 +1031,7 @@ unsafe fn uma_weighted_accumulate_avx2(
 
     while j < len_r {
         let k = len_r - j;
-        let w = (p * *ln_lut.add(k)).exp();
+        let w = exp_kernel(p * *ln_lut.add(k));
         let x = *data.add(j);
         if !x.is_nan() {
             xws = x.mul_add(w, xws);
@@ -788,14 +1059,14 @@ unsafe fn uma_weighted_accumulate_avx512(
         let k0 = len_r - j;
         let ks = [k0, k0 - 1, k0 - 2, k0 - 3, k0 - 4, k0 - 5, k0 - 6, k0 - 7];
         let ws = [
-            (p * *ln_lut.add(ks[0])).exp(),
-            (p * *ln_lut.add(ks[1])).exp(),
-            (p * *ln_lut.add(ks[2])).exp(),
-            (p * *ln_lut.add(ks[3])).exp(),
-            (p * *ln_lut.add(ks[4])).exp(),
-            (p * *ln_lut.add(ks[5])).exp(),
-            (p * *ln_lut.add(ks[6])).exp(),
-            (p * *ln_lut.add(ks[7])).exp(),
+            exp_kernel(p * *ln_lut.add(ks[0])),
+            exp_kernel(p * *ln_lut.add(ks[1])),
+            exp_kernel(p * *ln_lut.add(ks[2])),
+            exp_kernel(p * *ln_lut.add(ks[3])),
+            exp_kernel(p * *ln_lut.add(ks[4])),
+            exp_kernel(p * *ln_lut.add(ks[5])),
+            exp_kernel(p * *ln_lut.add(ks[6])),
+            exp_kernel(p * *ln_lut.add(ks[7])),
         ];
         let wv = _mm512_loadu_pd(ws.as_ptr());
         let xv = _mm512_loadu_pd(data.add(j));
@@ -826,7 +1097,7 @@ unsafe fn uma_weighted_accumulate_avx512(
     let mut wsum_acc = wsum0;
     while j < len_r {
         let k = len_r - j;
-        let w = (p * *ln_lut.add(k)).exp();
+        let w = exp_kernel(p * *ln_lut.add(k));
         let x = *data.add(j);
         if !x.is_nan() {
             xws_acc = x.mul_add(w, xws_acc);

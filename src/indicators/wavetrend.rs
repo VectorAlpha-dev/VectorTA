@@ -20,7 +20,7 @@
 //! ## Developer Notes
 //! - **SIMD status (single-series)**: SIMD underperforms scalar due to sequential EMA dependencies. Runtime selection short-circuits AVX2/AVX512 to the scalar fast path to preserve best performance. SIMD code remains for future evolution.
 //! - **SIMD status (batch)**: SIMD-across-rows currently disabled by default (short-circuited to scalar batch) because it underperforms for typical grids; revisit with shared-stage execution if needed.
-//! - **Streaming update**: O(1) performance with efficient state management for all EMA/SMA stages
+//! - **Streaming update**: O(1) and mirrors batch semantics by inserting one value per bar into the WT2 SMA window (finite or NaN) and emitting only when the last `ma_length` positions are all finite.
 //! - **Memory optimization**: Properly uses zero-copy helper functions (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
 //! - **Note**: Streaming implementation maintains separate state for each calculation stage
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1269,6 +1269,8 @@ pub struct WavetrendStream {
     esa_buf: VecDeque<f64>, // not used for seeding, but we keep it for capacity hint
     last_esa: Option<f64>,
     alpha_ch: f64,
+    // NEW: cache beta for the channel EMA
+    beta_ch: f64,
 
     // ─────────────────────────────────────────────────────────────────────────────────
     // Stage 2: “DE” = EMA(channel_length) on |price − ESA|
@@ -1282,12 +1284,18 @@ pub struct WavetrendStream {
     ci_buf: VecDeque<f64>, // not used for seeding, but kept for capacity hint
     last_wt1: Option<f64>,
     alpha_avg: f64,
+    // NEW: cache beta for the avg EMA
+    beta_avg: f64,
 
     // ─────────────────────────────────────────────────────────────────────────────────
     // Stage 4: “WT2” = SMA(ma_length) on the most recent WT1 values
     //   We keep a sliding window of length ma_length in wt1_buf and a running_sum.
-    wt1_buf: VecDeque<f64>,
+    wt1_buf: VecDeque<f64>,            // ring of length ≤ ma_length; push every bar (finite or NaN)
     running_sum: f64,
+    // NEW: number of finite WT1s in the last ma_length positions (O(1) update)
+    sma_count: usize,
+    // NEW: 1.0 / ma_length to avoid a divide in steady-state
+    inv_ma: f64,
 
     // ─────────────────────────────────────────────────────────────────────────────────
     // history: so that streaming index = batch index. Every time update(...) is called,
@@ -1337,6 +1345,7 @@ impl WavetrendStream {
             esa_buf: VecDeque::with_capacity(channel_length),
             last_esa: None,
             alpha_ch,
+            beta_ch: 1.0 - alpha_ch,
 
             de_buf: VecDeque::with_capacity(channel_length),
             last_de: None,
@@ -1344,92 +1353,113 @@ impl WavetrendStream {
             ci_buf: VecDeque::with_capacity(average_length),
             last_wt1: None,
             alpha_avg,
+            beta_avg: 1.0 - alpha_avg,
 
             wt1_buf: VecDeque::with_capacity(ma_length),
             running_sum: 0.0,
+            sma_count: 0,
+            inv_ma: 1.0 / (ma_length as f64),
 
             history: Vec::new(),
         })
     }
 
-    /// Push one new `price`.  Returns `None` (→ “NaN” in the test harness) until
-    /// all four stages (ESA, DE, WT1, WT2) have produced a finite number.  Once
-    /// all four are valid, returns `Some((wt1, wt2, wt2 − wt1))`.
+    /// O(1) streaming update that mirrors the batch semantics exactly:
+    /// - ESA = EMA(price, channel_length)
+    /// - DE = EMA(|price-ESA|, channel_length)
+    /// - WT1 = EMA(CI, average_length) where CI = (price-ESA) / (factor*DE)
+    /// - WT2 = SMA over the last `ma_length` positions; emit only when all are finite
     #[inline(always)]
     pub fn update(&mut self, price: f64) -> Option<(f64, f64, f64)> {
-        // 1) Record raw price in history so streaming index = batch index.
+        // Keep 1:1 index mapping with batch path
         self.history.push(price);
 
-        // 2) If price is not a finite f64, the scalar EMA would have produced NaN,
-        //    so we return None here (but history was recorded).
-        if !price.is_finite() {
-            return None;
+        // We'll produce a single position into the SMA window no matter what.
+        let mut wt1_val = f64::NAN;
+
+        // ───── ESA & DE update only when input is finite (match scalar EMA behavior) ─────
+        if price.is_finite() {
+            // ESA
+            if let Some(prev) = self.last_esa {
+                let new_esa = ema_step(prev, price, self.alpha_ch, self.beta_ch);
+                self.last_esa = Some(new_esa);
+            } else {
+                self.last_esa = Some(price);
+            }
+
+            // DE = EMA( |price - ESA|, channel_len )
+            if let Some(esa_now) = self.last_esa {
+                let abs_diff = fast_abs_f64(price - esa_now);
+                if let Some(prev_de) = self.last_de {
+                    let new_de = ema_step(prev_de, abs_diff, self.alpha_ch, self.beta_ch);
+                    self.last_de = Some(new_de);
+                } else {
+                    self.last_de = Some(abs_diff);
+                }
+            }
+
+            // CI and WT1
+            if let (Some(esa_now), Some(de_now)) = (self.last_esa, self.last_de) {
+                let den = self.factor * de_now;
+                if den != 0.0 && den.is_finite() && esa_now.is_finite() {
+                    let ci = (price - esa_now) / den;
+                    if ci.is_finite() {
+                        if let Some(prev_wt1) = self.last_wt1 {
+                            let new_wt1 = ema_step(prev_wt1, ci, self.alpha_avg, self.beta_avg);
+                            self.last_wt1 = Some(new_wt1);
+                        } else {
+                            self.last_wt1 = Some(ci);
+                        }
+                        if let Some(v) = self.last_wt1 {
+                            wt1_val = v;
+                        }
+                    }
+                }
+            }
+        }
+        // If price is NaN, we intentionally do NOT advance ESA/DE/WT1,
+        // but we still push a position (NaN) into the WT2 window below.
+
+        // ───── WT2 = SMA over positions (ring implemented with VecDeque) ────────────────
+        // Maintain fixed window length of `ma_length` after startup
+        if self.wt1_buf.len() == self.ma_length {
+            // Remove oldest position
+            if let Some(leaving) = self.wt1_buf.pop_front() {
+                if leaving.is_finite() {
+                    self.running_sum -= leaving;
+                    if self.sma_count > 0 {
+                        self.sma_count -= 1;
+                    }
+                }
+            }
+        }
+        // Insert current position (finite WT1 or NaN)
+        self.wt1_buf.push_back(wt1_val);
+        if wt1_val.is_finite() {
+            self.running_sum += wt1_val;
+            self.sma_count += 1;
         }
 
-        // ─── Stage 1: ESA = EMA(channel_length) on price ────────────────────────────
-        let esa = if let Some(prev_esa) = self.last_esa {
-            // Already seeded: do EMA recurrence:
-            let new_esa = self.alpha_ch * price + (1.0 - self.alpha_ch) * prev_esa;
-            self.last_esa = Some(new_esa);
-            new_esa
+        // Emit only when (a) window has exactly ma_length positions, and (b) all are finite
+        if self.wt1_buf.len() == self.ma_length && self.sma_count == self.ma_length {
+            let wt1 = wt1_val; // guaranteed finite here
+            let wt2 = self.running_sum * self.inv_ma;
+            let diff = wt2 - wt1;
+            Some((wt1, wt2, diff))
         } else {
-            // First-ever finite price: seed ESA = price₀ (exactly what ema_scalar does).
-            self.last_esa = Some(price);
-            price
-        };
-
-        // ─── Stage 2: DE = EMA(channel_length) on |price − ESA| ─────────────────────
-        let abs_diff = (price - esa).abs();
-        let de = if let Some(prev_de) = self.last_de {
-            // Already seeded: do EMA recurrence on abs_diff:
-            let new_de = self.alpha_ch * abs_diff + (1.0 - self.alpha_ch) * prev_de;
-            self.last_de = Some(new_de);
-            new_de
-        } else {
-            // First-ever |price₀ − esa₀|: seed DE = abs_diff₀ (likely 0 at i=0).
-            self.last_de = Some(abs_diff);
-            abs_diff
-        };
-
-        // If DE == 0.0, then scalar would have produced CI = NaN here → return None.
-        if de == 0.0 {
-            return None;
+            None
         }
-
-        // ─── Stage 3: WT1 = EMA(average_length) on CI = (price − ESA)/(factor·DE) ────
-        let ci = (price - esa) / (self.factor * de);
-
-        let wt1 = if let Some(prev_wt1) = self.last_wt1 {
-            // Already seeded: do EMA recurrence on CI
-            let new_wt1 = self.alpha_avg * ci + (1.0 - self.alpha_avg) * prev_wt1;
-            self.last_wt1 = Some(new_wt1);
-            new_wt1
-        } else {
-            // First-ever valid CI: seed WT1 = ci₁ (just like ema_scalar seeds)
-            self.last_wt1 = Some(ci);
-            ci
-        };
-
-        // ─── Stage 4: WT2 = SMA(ma_length) on the most recent ma_length WT1s ─────────
-        // Push new WT1 into the fifo buffer and maintain running_sum:
-        self.wt1_buf.push_back(wt1);
-        self.running_sum += wt1;
-
-        // If we exceed ma_length, pop the oldest and subtract from running_sum:
-        if self.wt1_buf.len() > self.ma_length {
-            let oldest = self.wt1_buf.pop_front().unwrap();
-            self.running_sum -= oldest;
-        }
-
-        // Only once we have at least ma_length many WT1s do we form a valid WT2:
-        if self.wt1_buf.len() < self.ma_length {
-            return None;
-        }
-
-        let wt2 = self.running_sum / (self.ma_length as f64);
-        let diff = wt2 - wt1;
-        Some((wt1, wt2, diff))
     }
+}
+
+#[inline(always)]
+fn ema_step(prev: f64, x: f64, alpha: f64, beta: f64) -> f64 {
+    x.mul_add(alpha, beta * prev)
+}
+
+#[inline(always)]
+fn fast_abs_f64(x: f64) -> f64 {
+    f64::from_bits(x.to_bits() & 0x7FFF_FFFF_FFFF_FFFF)
 }
 
 #[derive(Clone, Debug)]
