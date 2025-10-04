@@ -550,12 +550,19 @@ unsafe fn apo_simd128(data: &[f64], short: usize, long: usize, first: usize, out
 
 // --- Batch, Streaming, and Builder APIs
 
+// Decision: Streaming update uses parity-preserving form s = a*x + (1-a)*s_prev
+// with precomputed (1-a) to reduce per-tick work. An opt-in update_fastmath()
+// implements the delta+FMA form; default update() remains parity-aligned.
+
 #[derive(Clone, Debug)]
 pub struct ApoStream {
     short: usize,
     long: usize,
     alpha_short: f64,
     alpha_long: f64,
+    // precomputed 1 - alpha terms
+    oma_short: f64,
+    oma_long: f64,
     short_ema: f64,
     long_ema: f64,
     filled: bool,
@@ -564,6 +571,7 @@ pub struct ApoStream {
 }
 
 impl ApoStream {
+    #[inline(always)]
     pub fn try_new(params: ApoParams) -> Result<Self, ApoError> {
         let short = params.short_period.unwrap_or(10);
         let long = params.long_period.unwrap_or(20);
@@ -573,11 +581,16 @@ impl ApoStream {
         if short >= long {
             return Err(ApoError::ShortPeriodNotLessThanLong { short, long });
         }
+        // α = 2/(n+1)
+        let alpha_short = 2.0 / (short as f64 + 1.0);
+        let alpha_long = 2.0 / (long as f64 + 1.0);
         Ok(Self {
             short,
             long,
-            alpha_short: 2.0 / (short as f64 + 1.0),
-            alpha_long: 2.0 / (long as f64 + 1.0),
+            alpha_short,
+            alpha_long,
+            oma_short: 1.0 - alpha_short,
+            oma_long: 1.0 - alpha_long,
             short_ema: f64::NAN,
             long_ema: f64::NAN,
             filled: false,
@@ -588,20 +601,64 @@ impl ApoStream {
 
     #[inline(always)]
     pub fn update(&mut self, price: f64) -> Option<f64> {
-        if !self.filled && price.is_nan() {
-            self.nan_leading += 1;
-            return None;
-        }
+        // Preserve leading-NaN semantics
         if !self.filled {
+            if price.is_nan() {
+                self.nan_leading += 1;
+                return None;
+            }
             self.short_ema = price;
             self.long_ema = price;
             self.filled = true;
             self.seen = 1;
             return Some(0.0);
         }
+
         self.seen += 1;
-        self.short_ema = self.alpha_short * price + (1.0 - self.alpha_short) * self.short_ema;
-        self.long_ema = self.alpha_long * price + (1.0 - self.alpha_long) * self.long_ema;
+
+        // Mid-stream NaN: propagate and taint state (mirrors batch behavior)
+        if price.is_nan() {
+            self.short_ema = f64::NAN;
+            self.long_ema = f64::NAN;
+            return Some(f64::NAN);
+        }
+
+        // s = a*x + (1-a)*s_prev (parity-preserving order)
+        let se_prev = self.short_ema;
+        let le_prev = self.long_ema;
+        self.short_ema = self.alpha_short * price + self.oma_short * se_prev;
+        self.long_ema = self.alpha_long * price + self.oma_long * le_prev;
+        Some(self.short_ema - self.long_ema)
+    }
+
+    /// Optional fast-math streaming update using delta form with mul_add (FMA where available).
+    /// Default tests use `update`; use this when tiny rounding differences are acceptable.
+    #[inline(always)]
+    pub fn update_fastmath(&mut self, price: f64) -> Option<f64> {
+        if !self.filled {
+            if price.is_nan() {
+                self.nan_leading += 1;
+                return None;
+            }
+            self.short_ema = price;
+            self.long_ema = price;
+            self.filled = true;
+            self.seen = 1;
+            return Some(0.0);
+        }
+
+        self.seen += 1;
+
+        if price.is_nan() {
+            self.short_ema = f64::NAN;
+            self.long_ema = f64::NAN;
+            return Some(f64::NAN);
+        }
+
+        let ds = price - self.short_ema;
+        let dl = price - self.long_ema;
+        self.short_ema = ds.mul_add(self.alpha_short, self.short_ema);
+        self.long_ema = dl.mul_add(self.alpha_long, self.long_ema);
         Some(self.short_ema - self.long_ema)
     }
 }

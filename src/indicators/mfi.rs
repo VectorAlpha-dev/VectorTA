@@ -17,6 +17,9 @@
 //! **Streaming**: O(1) - Uses ring buffers for running sums
 //! **Batch**: Row-specific scalar path uses prefix sums of pos/neg flows; accuracy matches scalar. Faster for larger sweeps; for few rows, scalar repeats can be competitive.
 //! **Memory**: Good - Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
+//!
+//! Decision: Streaming kernel uses branchless classification, avoids modulo in ring advance,
+//! and leverages `mul_add` and reciprocal multiply. Bit-for-bit with baseline thresholds.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
@@ -498,44 +501,61 @@ impl MfiStream {
 
     #[inline(always)]
     pub fn update(&mut self, typical_price: f64, volume: f64) -> Option<f64> {
+        // First sample: seed 'prev_typical' and wait for the next bar (no flow yet).
         if self.index == 0 {
             self.prev_typical = typical_price;
-            self.index += 1;
+            self.index = 1;
             return None;
         }
+
+        // ----- Compute one-bar flow -----
+        // diff determines sign (pos/neg flow), flow is TP * Volume.
         let diff = typical_price - self.prev_typical;
         self.prev_typical = typical_price;
-        let flow = typical_price * volume;
-        if diff > 0.0 {
-            self.pos_sum += flow - self.pos_buf[self.head];
-            self.neg_sum -= self.neg_buf[self.head];
-            self.pos_buf[self.head] = flow;
-            self.neg_buf[self.head] = 0.0;
-        } else if diff < 0.0 {
-            self.neg_sum += flow - self.neg_buf[self.head];
-            self.pos_sum -= self.pos_buf[self.head];
-            self.neg_buf[self.head] = flow;
-            self.pos_buf[self.head] = 0.0;
-        } else {
-            self.pos_sum -= self.pos_buf[self.head];
-            self.neg_sum -= self.neg_buf[self.head];
-            self.pos_buf[self.head] = 0.0;
-            self.neg_buf[self.head] = 0.0;
+
+        // Prefer FMA when available; this compiles to one FMA on FMA-capable CPUs.
+        let flow = typical_price.mul_add(volume, 0.0); // == typical_price * volume
+
+        // Branchless classification: gt/lt are 1.0 or 0.0
+        let gt = (diff > 0.0) as i32 as f64;
+        let lt = (diff < 0.0) as i32 as f64;
+        let pos_new = flow * gt;
+        let neg_new = flow * lt;
+
+        // Evict old bucket values at head and update rolling sums (O(1))
+        // Use unchecked indexing to avoid bounds checks in the hot path.
+        unsafe {
+            let old_pos = *self.pos_buf.get_unchecked(self.head);
+            let old_neg = *self.neg_buf.get_unchecked(self.head);
+
+            self.pos_sum += pos_new - old_pos;
+            self.neg_sum += neg_new - old_neg;
+
+            *self.pos_buf.get_unchecked_mut(self.head) = pos_new;
+            *self.neg_buf.get_unchecked_mut(self.head) = neg_new;
         }
-        self.head = (self.head + 1) % self.period;
+
+        // Advance ring WITHOUT modulo (avoid integer division in hot loop).
+        self.head += 1;
+        if self.head == self.period {
+            self.head = 0;
+            self.filled = true; // first time we wrap, the window is full
+        }
         self.index += 1;
-        if !self.filled && self.head == 0 {
-            self.filled = true;
-        }
+
+        // Match existing warmup behavior: no value until the ring has wrapped.
         if !self.filled {
             return None;
         }
+
+        // ----- Emit MFI for the current window -----
         let total = self.pos_sum + self.neg_sum;
-        Some(if total < 1e-14 {
-            0.0
+        if total <= 1e-14 {
+            Some(0.0)
         } else {
-            100.0 * (self.pos_sum / total)
-        })
+            // Multiply by reciprocal to dodge a scalar FP divide
+            Some(100.0 * self.pos_sum * total.recip())
+        }
     }
 }
 

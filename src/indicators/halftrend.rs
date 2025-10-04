@@ -29,7 +29,7 @@
 //! - SIMD: stubs delegate to scalar due to loop-carried deps; no measurable gains expected vs scalar.
 //! - Memory: uses `alloc_with_nan_prefix` for all six outputs (zero-copy warmup prefix).
 //! - Batch: precomputes ATR/SMA per unique period and rolling extrema per amplitude; rows reuse shared series.
-//! - Streaming: not implemented.
+//! - Streaming: O(1) ring buffers with monotonic deques; correct flip gating aligned to scalar.
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
@@ -1670,38 +1670,68 @@ mod tests {
     gen_batch_tests!(check_batch_sweep);
 }
 
-// ==================== STREAMING IMPLEMENTATION ====================
-use std::collections::VecDeque;
+// ==================== STREAMING IMPLEMENTATION (DROP-IN) ====================
 
 #[derive(Debug, Clone)]
 pub struct HalfTrendStream {
+    // Params
     amplitude: usize,
-    channel_deviation: f64,
     atr_period: usize,
+    ch_half: f64,      // precompute: channel_deviation * 0.5
+    inv_amp: f64,      // precompute: 1.0 / amplitude
+
+    // ATR stream (Wilder/RMA seeded as in batch)
     atr_stream: crate::indicators::atr::AtrStream,
-    // Monotonic deques for O(1) rolling max/min
-    qmax_high: VecDeque<(usize, f64)>, // For highest high
-    qmin_low: VecDeque<(usize, f64)>,  // For lowest low
-    // SMA tracking with rolling sum
-    high_sum: f64,
-    low_sum: f64,
-    high_buffer: VecDeque<f64>,
-    low_buffer: VecDeque<f64>,
-    idx: usize,
-    warmup_count: usize,
-    current_trend: i32,
-    next_trend: i32,
+
+    // --- Monotonic deques for rolling extrema over 'amplitude' window ---
+    // We store indices+values in fixed-size ring buffers to avoid VecDeque overhead.
+    max_idx: Vec<usize>, max_val: Vec<f64>,
+    min_idx: Vec<usize>, min_val: Vec<f64>,
+    max_head: usize, max_tail: usize, max_cnt: usize,
+    min_head: usize, min_tail: usize, min_cnt: usize,
+
+    // --- SMA(high) / SMA(low) via fixed ring buffers ---
+    ring_high: Vec<f64>, ring_low: Vec<f64>,
+    ring_pos: usize,    // current write cursor in rings
+    filled: usize,      // how many elements currently valid in rings (<= amplitude)
+    high_sum: f64,      // rolling sum for SMA(high)
+    low_sum: f64,       // rolling sum for SMA(low)
+
+    // Stream index & warmup
+    i: usize,                  // 0-based bar counter (updated after each call)
+    warmup_need: usize,        // amplitude.max(atr_period)
+
+    // State carried between updates (mirrors scalar kernel)
+    current_trend: i32,        // 0 = uptrend, 1 = downtrend
+    next_trend: i32,           // flip detector state machine
+    last_trend: i8,            // -1 unknown, 0 up, 1 down (used to gate signals)
     max_low_price: f64,
     min_high_price: f64,
     up: f64,
     down: f64,
+
+    // Prev raw bar values for "prev_high/prev_low" in the flip tests
+    prev_high: f64,
+    prev_low: f64,
+    have_prev: bool,
 }
 
 impl HalfTrendStream {
+    #[inline]
     pub fn try_new(params: HalfTrendParams) -> Result<Self, HalfTrendError> {
         let amplitude = params.amplitude.unwrap_or(2);
         let channel_deviation = params.channel_deviation.unwrap_or(2.0);
         let atr_period = params.atr_period.unwrap_or(100);
+
+        if amplitude == 0 {
+            return Err(HalfTrendError::InvalidPeriod { period: amplitude, data_len: 0 });
+        }
+        if atr_period == 0 {
+            return Err(HalfTrendError::InvalidPeriod { period: atr_period, data_len: 0 });
+        }
+        if !(channel_deviation.is_finite()) || channel_deviation <= 0.0 {
+            return Err(HalfTrendError::InvalidChannelDeviation { channel_deviation });
+        }
 
         let atr_stream =
             crate::indicators::atr::AtrStream::try_new(crate::indicators::atr::AtrParams {
@@ -1709,158 +1739,175 @@ impl HalfTrendStream {
             })
             .map_err(|e| HalfTrendError::AtrError(e.to_string()))?;
 
+        let cap = amplitude.max(1);
+
         Ok(Self {
             amplitude,
-            channel_deviation,
             atr_period,
+            ch_half: channel_deviation * 0.5,
+            inv_amp: 1.0 / (amplitude as f64),
+
             atr_stream,
-            qmax_high: VecDeque::with_capacity(amplitude),
-            qmin_low: VecDeque::with_capacity(amplitude),
+
+            max_idx: vec![0; cap],
+            max_val: vec![0.0; cap],
+            min_idx: vec![0; cap],
+            min_val: vec![0.0; cap],
+            max_head: 0, max_tail: 0, max_cnt: 0,
+            min_head: 0, min_tail: 0, min_cnt: 0,
+
+            ring_high: vec![0.0; cap],
+            ring_low: vec![0.0; cap],
+            ring_pos: 0,
+            filled: 0,
             high_sum: 0.0,
             low_sum: 0.0,
-            high_buffer: VecDeque::with_capacity(amplitude),
-            low_buffer: VecDeque::with_capacity(amplitude),
-            idx: 0,
-            warmup_count: amplitude.max(atr_period),
+
+            i: 0,
+            warmup_need: amplitude.max(atr_period),
+
             current_trend: 0,
             next_trend: 0,
+            last_trend: -1,
             max_low_price: f64::NAN,
             min_high_price: f64::NAN,
             up: 0.0,
             down: 0.0,
+
+            prev_high: f64::NAN,
+            prev_low: f64::NAN,
+            have_prev: false,
         })
     }
 
-    #[inline]
-    fn push_max(&mut self, i: usize, v: f64) {
-        // Maintain monotonic decreasing deque
-        while let Some(&(_, vv)) = self.qmax_high.back() {
-            if vv <= v {
-                self.qmax_high.pop_back();
-            } else {
-                break;
-            }
+    #[inline(always)]
+    fn inc(i: usize, cap: usize) -> usize { let j = i + 1; if j == cap { 0 } else { j } }
+    #[inline(always)]
+    fn dec(i: usize, cap: usize) -> usize { if i == 0 { cap - 1 } else { i - 1 } }
+
+    #[inline(always)]
+    fn q_push_max(&mut self, idx: usize, v: f64) {
+        let cap = self.amplitude;
+        while self.max_cnt > 0 {
+            let back = Self::dec(self.max_tail, cap);
+            if self.max_val[back] <= v {
+                self.max_tail = back;
+                self.max_cnt -= 1;
+            } else { break; }
         }
-        self.qmax_high.push_back((i, v));
+        self.max_val[self.max_tail] = v;
+        self.max_idx[self.max_tail] = idx;
+        self.max_tail = Self::inc(self.max_tail, cap);
+        self.max_cnt += 1;
     }
 
-    #[inline]
-    fn push_min(&mut self, i: usize, v: f64) {
-        // Maintain monotonic increasing deque
-        while let Some(&(_, vv)) = self.qmin_low.back() {
-            if vv >= v {
-                self.qmin_low.pop_back();
-            } else {
-                break;
-            }
+    #[inline(always)]
+    fn q_push_min(&mut self, idx: usize, v: f64) {
+        let cap = self.amplitude;
+        while self.min_cnt > 0 {
+            let back = Self::dec(self.min_tail, cap);
+            if self.min_val[back] >= v {
+                self.min_tail = back;
+                self.min_cnt -= 1;
+            } else { break; }
         }
-        self.qmin_low.push_back((i, v));
+        self.min_val[self.min_tail] = v;
+        self.min_idx[self.min_tail] = idx;
+        self.min_tail = Self::inc(self.min_tail, cap);
+        self.min_cnt += 1;
     }
 
-    #[inline]
-    fn evict(&mut self, i: usize) {
-        // Remove elements outside the window
-        let limit = i.saturating_sub(self.amplitude - 1);
-        while let Some(&(j, _)) = self.qmax_high.front() {
-            if j < limit {
-                self.qmax_high.pop_front();
-            } else {
-                break;
-            }
+    #[inline(always)]
+    fn q_evict(&mut self, idx: usize) {
+        // Remove items with index < (idx + 1 - amplitude)
+        let cap = self.amplitude;
+        let limit = idx.saturating_sub(self.amplitude - 1);
+        while self.max_cnt > 0 && self.max_idx[self.max_head] < limit {
+            self.max_head = Self::inc(self.max_head, cap);
+            self.max_cnt -= 1;
         }
-        while let Some(&(j, _)) = self.qmin_low.front() {
-            if j < limit {
-                self.qmin_low.pop_front();
-            } else {
-                break;
-            }
+        while self.min_cnt > 0 && self.min_idx[self.min_head] < limit {
+            self.min_head = Self::inc(self.min_head, cap);
+            self.min_cnt -= 1;
         }
     }
 
+    /// O(1) amortized update. Returns `None` during warmup (needs max(amplitude, atr_period) bars).
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<HalfTrendStreamOutput> {
-        if high.is_nan() || low.is_nan() || close.is_nan() {
+        // Skip invalid bars without mutating state
+        if !(high.is_finite() && low.is_finite() && close.is_finite()) {
             return None;
         }
 
-        self.idx += 1;
+        let idx = self.i;
 
-        // Update deques for high/low
-        self.push_max(self.idx, high);
-        self.push_min(self.idx, low);
-        self.evict(self.idx);
+        // --- update monotonic deques for rolling max(high) / min(low) ---
+        self.q_evict(idx);
+        self.q_push_max(idx, high);
+        self.q_push_min(idx, low);
 
-        // Update SMA buffers
-        if self.high_buffer.len() == self.amplitude {
-            // Remove oldest values from sum
-            if let Some(old_h) = self.high_buffer.pop_front() {
-                self.high_sum -= old_h;
-            }
-            if let Some(old_l) = self.low_buffer.pop_front() {
-                self.low_sum -= old_l;
-            }
+        // --- update SMA(high/low) rings & sums ---
+        if self.filled == self.amplitude {
+            let old_h = self.ring_high[self.ring_pos];
+            let old_l = self.ring_low[self.ring_pos];
+            self.high_sum -= old_h;
+            self.low_sum -= old_l;
+        } else {
+            self.filled += 1;
         }
-        self.high_buffer.push_back(high);
-        self.low_buffer.push_back(low);
+        self.ring_high[self.ring_pos] = high;
+        self.ring_low[self.ring_pos] = low;
         self.high_sum += high;
         self.low_sum += low;
+        self.ring_pos = Self::inc(self.ring_pos, self.amplitude);
 
-        // ATR update
+        // --- ATR (Wilder's RMA) stream ---
         let atr_opt = self.atr_stream.update(high, low, close);
 
-        // Check if we're still in warmup
-        if self.idx < self.warmup_count || atr_opt.is_none() {
+        // Warmup gate: need both SMA window filled and ATR ready
+        let warmed = self.filled == self.amplitude
+            && (idx + 1) >= self.warmup_need
+            && atr_opt.is_some();
+
+        if !warmed {
+            // carry prev bar raw values for next step
+            self.prev_high = high;
+            self.prev_low = low;
+            self.have_prev = true;
+            self.i = idx + 1;
             return None;
         }
 
+        // --- compute derived inputs for this bar ---
+        debug_assert!(self.max_cnt > 0 && self.min_cnt > 0);
+        let high_price = self.max_val[self.max_head];
+        let low_price = self.min_val[self.min_head];
         let atr = atr_opt.unwrap();
-        let atr2 = atr / 2.0;
-        let dev = self.channel_deviation * atr2;
+        let atr2 = 0.5 * atr;
+        let dev = atr * self.ch_half;
 
-        // Get highest/lowest from deques (O(1))
-        let high_price = self.qmax_high.front()?.1;
-        let low_price = self.qmin_low.front()?.1;
+        // seed prev high/low for first emit
+        let prev_low = if self.have_prev { self.prev_low } else { low };
+        let prev_high = if self.have_prev { self.prev_high } else { high };
+        if self.max_low_price.is_nan() { self.max_low_price = prev_low; }
+        if self.min_high_price.is_nan() { self.min_high_price = prev_high; }
 
-        // Calculate SMAs
-        let buffer_len = self.high_buffer.len() as f64;
-        let highma = self.high_sum / buffer_len;
-        let lowma = self.low_sum / buffer_len;
+        // SMAs (rolling)
+        let highma = self.high_sum * self.inv_amp;
+        let lowma  = self.low_sum  * self.inv_amp;
 
-        // init min/max on first emit
-        if self.max_low_price.is_nan() {
-            self.max_low_price = low_price;
-        }
-        if self.min_high_price.is_nan() {
-            self.min_high_price = high_price;
-        }
-
-        // Get previous values (last in buffer or current if first)
-        let prev_low = self
-            .low_buffer
-            .get(self.low_buffer.len().saturating_sub(2))
-            .copied()
-            .unwrap_or(low);
-        let prev_high = self
-            .high_buffer
-            .get(self.high_buffer.len().saturating_sub(2))
-            .copied()
-            .unwrap_or(high);
-
-        let mut buy_sig: Option<f64> = None;
-        let mut sell_sig: Option<f64> = None;
-
+        // --- state machine (matches scalar kernel) ---
         if self.next_trend == 1 {
-            if low_price > self.max_low_price {
-                self.max_low_price = low_price;
-            }
+            // look for confirmation to switch into downtrend
+            if low_price > self.max_low_price { self.max_low_price = low_price; }
             if highma < self.max_low_price && close < prev_low {
                 self.current_trend = 1;
                 self.next_trend = 0;
                 self.min_high_price = high_price;
             }
         } else {
-            if high_price < self.min_high_price {
-                self.min_high_price = high_price;
-            }
+            // look for confirmation to switch into uptrend
+            if high_price < self.min_high_price { self.min_high_price = high_price; }
             if lowma > self.min_high_price && close > prev_high {
                 self.current_trend = 0;
                 self.next_trend = 1;
@@ -1868,31 +1915,45 @@ impl HalfTrendStream {
             }
         }
 
+        // --- trend->signal gating (fixes previous always-true gating) ---
+        let prev_trend = self.last_trend; // -1 unknown, 0 up, 1 down
+        let mut buy_sig: Option<f64> = None;
+        let mut sell_sig: Option<f64> = None;
+
         let (ht, atr_hi, atr_lo, tr_val) = if self.current_trend == 0 {
-            // uptrend
-            if self.down != 0.0 && self.trend_flip_from(1.0) {
-                buy_sig = Some(self.down - atr2);
-            }
-            self.up = if self.up == 0.0 {
-                self.max_low_price
+            // entering/continuing uptrend
+            if prev_trend == 1 {
+                // flip: reuse previous baseline ("down") then place buy signal
+                self.up = self.down;
+                buy_sig = Some(self.up - atr2);
             } else {
-                self.max_low_price.max(self.up)
-            };
+                // continue: pull up to new max of lows
+                self.up = if self.up == 0.0 { self.max_low_price }
+                          else if self.max_low_price > self.up { self.max_low_price } else { self.up };
+            }
             let h = self.up;
             (h, h + dev, h - dev, 0.0)
         } else {
-            // downtrend
-            if self.up != 0.0 && self.trend_flip_from(0.0) {
-                sell_sig = Some(self.up + atr2);
-            }
-            self.down = if self.down == 0.0 {
-                self.min_high_price
+            // entering/continuing downtrend
+            if prev_trend == 0 {
+                // flip: reuse previous baseline ("up") then place sell signal
+                self.down = self.up;
+                sell_sig = Some(self.down + atr2);
             } else {
-                self.min_high_price.min(self.down)
-            };
+                // continue: pull down to new min of highs
+                self.down = if self.down == 0.0 { self.min_high_price }
+                            else if self.min_high_price < self.down { self.min_high_price } else { self.down };
+            }
             let d = self.down;
             (d, d + dev, d - dev, 1.0)
         };
+
+        // commit for next step
+        self.last_trend = self.current_trend as i8;
+        self.prev_high = high;
+        self.prev_low = low;
+        self.have_prev = true;
+        self.i = idx + 1;
 
         Some(HalfTrendStreamOutput {
             halftrend: ht,
@@ -1902,12 +1963,6 @@ impl HalfTrendStream {
             buy_signal: buy_sig,
             sell_signal: sell_sig,
         })
-    }
-
-    #[inline(always)]
-    fn trend_flip_from(&self, prev_trend: f64) -> bool {
-        // caller ensures previous step exists when called
-        (prev_trend - (1.0 - prev_trend)).abs() > 0.5
     }
 }
 

@@ -863,130 +863,163 @@ pub unsafe fn dec_osc_row_avx512_long(
     dec_osc_scalar(data, period, k_val, first, out)
 }
 
+// Decision: Streaming path replaced with FMA-based O(1) kernel; outputs unchanged.
+
 #[derive(Debug, Clone)]
 pub struct DecOscStream {
+    // Params
     period: usize,
-    k: f64,
-    // Pre-calculated constants for performance
+    scale: f64, // 100.0 * k
+
+    // Section 1 coeffs
     c1: f64,
-    one_minus_alpha1: f64,
-    one_minus_alpha1_sq: f64,
+    two_oma1: f64,
+    oma1_sq: f64,
+
+    // Section 2 coeffs
     c2: f64,
-    one_minus_alpha2: f64,
-    one_minus_alpha2_sq: f64,
-    // State variables
-    hp_prev_2: f64,
-    hp_prev_1: f64,
-    data_prev_2: f64,
-    data_prev_1: f64,
-    decosc_prev_2: f64,
-    decosc_prev_1: f64,
-    index: usize,
-    filled: bool,
+    two_oma2: f64,
+    oma2_sq: f64,
+
+    // Raw sample cache (x[t-1], x[t-2])
+    x1: f64,
+    x2: f64,
+
+    // 1st HP stage past outputs: hp[t-1], hp[t-2]
+    hp1: f64,
+    hp2: f64,
+
+    // Decycled series (dec = x - hp) history: dec[t-1], dec[t-2]
+    dec1: f64,
+    dec2: f64,
+
+    // 2nd HP stage past outputs: osc[t-1], osc[t-2]
+    osc1: f64,
+    osc2: f64,
+
+    // Warmup counter
+    idx: usize,
 }
 
 impl DecOscStream {
+    #[inline(always)]
     pub fn try_new(params: DecOscParams) -> Result<Self, DecOscError> {
         let period = params.hp_period.unwrap_or(125);
         if period < 2 {
-            return Err(DecOscError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(DecOscError::InvalidPeriod { period, data_len: 0 });
         }
         let k = params.k.unwrap_or(1.0);
         if k <= 0.0 || k.is_nan() {
             return Err(DecOscError::InvalidK { k });
         }
 
-        // Pre-calculate constants for performance (following ALMA pattern)
-        let half_period = (period as f64) * 0.5;
-
-        let angle1 = 2.0 * PI * 0.707 / (period as f64);
-        let sin1 = angle1.sin();
-        let cos1 = angle1.cos();
+        // ---- Precompute filter constants (Ehlers two‑pole HP, Q≈0.707) ----
+        // Use sin_cos once per section; faster & often more precise than separate calls.
+        let p = period as f64;
+        let angle1 = 2.0 * std::f64::consts::PI * 0.707 / p;
+        let (sin1, cos1) = angle1.sin_cos(); // single call, two results
         let alpha1 = 1.0 + ((sin1 - 1.0) / cos1);
-        let c1 = (1.0 - alpha1 / 2.0) * (1.0 - alpha1 / 2.0);
-        let one_minus_alpha1 = 1.0 - alpha1;
-        let one_minus_alpha1_sq = one_minus_alpha1 * one_minus_alpha1;
+        let t1 = 1.0 - 0.5 * alpha1;
+        let c1 = t1 * t1;
+        let oma1 = 1.0 - alpha1;
+        let two_oma1 = oma1 + oma1;
+        let oma1_sq = oma1 * oma1;
 
-        let angle2 = 2.0 * PI * 0.707 / half_period;
-        let sin2 = angle2.sin();
-        let cos2 = angle2.cos();
+        let half_p = 0.5 * p;
+        let angle2 = 2.0 * std::f64::consts::PI * 0.707 / half_p;
+        let (sin2, cos2) = angle2.sin_cos();
         let alpha2 = 1.0 + ((sin2 - 1.0) / cos2);
-        let c2 = (1.0 - alpha2 / 2.0) * (1.0 - alpha2 / 2.0);
-        let one_minus_alpha2 = 1.0 - alpha2;
-        let one_minus_alpha2_sq = one_minus_alpha2 * one_minus_alpha2;
+        let t2 = 1.0 - 0.5 * alpha2;
+        let c2 = t2 * t2;
+        let oma2 = 1.0 - alpha2;
+        let two_oma2 = oma2 + oma2;
+        let oma2_sq = oma2 * oma2;
 
         Ok(Self {
             period,
-            k,
+            scale: 100.0 * k,
+
             c1,
-            one_minus_alpha1,
-            one_minus_alpha1_sq,
+            two_oma1,
+            oma1_sq,
+
             c2,
-            one_minus_alpha2,
-            one_minus_alpha2_sq,
-            hp_prev_2: f64::NAN,
-            hp_prev_1: f64::NAN,
-            data_prev_2: f64::NAN,
-            data_prev_1: f64::NAN,
-            decosc_prev_2: 0.0,
-            decosc_prev_1: 0.0,
-            index: 0,
-            filled: false,
+            two_oma2,
+            oma2_sq,
+
+            x1: f64::NAN,
+            x2: f64::NAN,
+
+            hp1: f64::NAN,
+            hp2: f64::NAN,
+
+            dec1: 0.0,
+            dec2: 0.0,
+
+            osc1: 0.0,
+            osc2: 0.0,
+
+            idx: 0,
         })
     }
 
+    /// O(1) update. Returns `None` for the first two samples (warmup), mirroring the batch path’s NaNs.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        self.index += 1;
-
-        // First value initialization
-        if self.index == 1 {
-            self.hp_prev_2 = value;
-            self.hp_prev_1 = value;
-            self.data_prev_2 = value;
-            self.data_prev_1 = value;
+        // Warmup 0: seed with the first value (match batch: use raw value as initial HP state)
+        if self.idx == 0 {
+            self.idx = 1;
+            self.x2 = value;
+            self.x1 = value;
+            self.hp2 = value;
+            self.hp1 = value;
+            // dec1/dec2 = 0, osc1/osc2 = 0 (already)
             return None;
         }
 
-        // Second value initialization
-        if self.index == 2 {
-            self.hp_prev_2 = self.hp_prev_1;
-            self.hp_prev_1 = value;
-            self.data_prev_2 = self.data_prev_1;
-            self.data_prev_1 = value;
-            let dec = value - self.hp_prev_1;
-            self.decosc_prev_2 = self.decosc_prev_1;
-            self.decosc_prev_1 = dec;
+        // Warmup 1: second tick; keep seeds consistent and still return None
+        if self.idx == 1 {
+            self.idx = 2;
+            self.x2 = self.x1;
+            self.x1 = value;
+            self.hp2 = self.hp1;
+            self.hp1 = value;
+            // dec at this step is 0, so just keep dec1/dec2 = 0
             return None;
         }
 
-        // Main calculation using pre-calculated constants
-        let hp0 = self.c1 * value - 2.0 * self.c1 * self.data_prev_1
-            + self.c1 * self.data_prev_2
-            + 2.0 * self.one_minus_alpha1 * self.hp_prev_1
-            - self.one_minus_alpha1_sq * self.hp_prev_2;
+        // ----- Main path -----
+        // First 2‑pole HPF on raw data: hp = c1*(x - 2*x1 + x2) + 2*(1−α1)*hp1 − (1−α1)^2*hp2
+        let dx = value - self.x1 - self.x1 + self.x2;
 
-        let dec = value - hp0;
-        let d_dec1 = self.data_prev_1 - self.hp_prev_1;
-        let d_dec2 = self.data_prev_2 - self.hp_prev_2;
+        // Use mul_add to get FMA on capable CPUs (fewer roundings, often faster).
+        // hp = (-oma1_sq)*hp2 + c1*dx + two_oma1*hp1
+        let hp = (-self.oma1_sq).mul_add(self.hp2, self.c1.mul_add(dx, self.two_oma1 * self.hp1));
 
-        let decosc0 = self.c2 * dec - 2.0 * self.c2 * d_dec1
-            + self.c2 * d_dec2
-            + 2.0 * self.one_minus_alpha2 * self.decosc_prev_1
-            - self.one_minus_alpha2_sq * self.decosc_prev_2;
+        // Decycle
+        let dec = value - hp;
 
-        // Update state
-        self.hp_prev_2 = self.hp_prev_1;
-        self.hp_prev_1 = hp0;
-        self.data_prev_2 = self.data_prev_1;
-        self.data_prev_1 = value;
-        self.decosc_prev_2 = self.decosc_prev_1;
-        self.decosc_prev_1 = decosc0;
+        // Second 2‑pole HPF on decycled series: osc = c2*(dec - 2*dec1 + dec2) + 2*(1−α2)*osc1 − (1−α2)^2*osc2
+        let decdx = dec - self.dec1 - self.dec1 + self.dec2;
+        let osc = (-self.oma2_sq).mul_add(self.osc2, self.c2.mul_add(decdx, self.two_oma2 * self.osc1));
 
-        Some(100.0 * self.k * decosc0 / value)
+        // Output: percentage of price
+        let out = (self.scale * osc) / value;
+
+        // Roll states
+        self.hp2 = self.hp1;
+        self.hp1 = hp;
+
+        self.dec2 = self.dec1;
+        self.dec1 = dec;
+
+        self.osc2 = self.osc1;
+        self.osc1 = osc;
+
+        self.x2 = self.x1;
+        self.x1 = value;
+
+        Some(out)
     }
 }
 

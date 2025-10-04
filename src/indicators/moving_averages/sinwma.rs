@@ -25,7 +25,7 @@
 //! - AVX512 single-series: Short (≤32) and long (>32) variants with masked tails and multi-accumulators.
 //! - Batch (row-specific): AVX2/AVX512 row kernels wired via the batch selector; compute directly into the output matrix.
 //! - Scalar path: Safe, cache-friendly 4-wide unrolled dot-product; used as reference implementation.
-//! - Streaming update: O(n) per update via `dot_ring()`; no O(1) recurrence for fixed arbitrary weights.
+//! - Streaming update: Exact O(1) per update via a sliding‑DFT bin for the sine window; matches batch outputs and handles NaNs.
 //! - Allocation: Uses `alloc_with_nan_prefix`/matrix helpers for zero-copy outputs and warmup prefixes.
 //! - Benchmarks (100k, target-cpu=native):
 //!   - sinwma_scalar ≈ 165–170 µs; AVX2 ≈ 157–160 µs; AVX512 ≈ 56–57 µs.
@@ -627,72 +627,190 @@ pub unsafe fn sinwma_avx512_long(
     }
 }
 
+/// Decision: Streaming uses an exact O(1) sliding‑DFT recurrence for the sine window; outputs match batch.
 #[derive(Debug, Clone)]
 pub struct SinWmaStream {
     period: usize,
-    weights: Vec<f64>,
+
+    // Twiddle r = e^{i alpha} and its p-th power r^p = e^{i p alpha}
+    r_re: f64,
+    r_im: f64,
+    rp_re: f64,
+    rp_im: f64,
+
+    // Coeffs to combine Re/Im(Z) into the sine-windowed dot
+    sinp: f64,
+    cosp: f64,
+
+    // 1 / sum_{k=1}^p sin(k*alpha) for normalization
+    inv_sum: f64,
+
+    // Sliding DFT accumulator Z_t = sum_{j=0}^{p-1} (r^j) x_{t-j}
+    z_re: f64,
+    z_im: f64,
+
+    // Circular buffer of the last p samples, head points to the oldest
     buffer: Vec<f64>,
     head: usize,
     filled: bool,
+
+    // Book-keeping for NaNs and lazy re-init of Z when window becomes clean
+    nan_count: usize,
+    z_valid: bool,
 }
 
 impl SinWmaStream {
+    /// O(1) streaming SINWMA using a sliding-DFT bin:
+    /// Z_{t+1} = r*Z_t + x_new - r^p * x_old
     pub fn try_new(params: SinWmaParams) -> Result<Self, SinWmaError> {
         let period = params.period.unwrap_or(14);
         if period == 0 {
-            return Err(SinWmaError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(SinWmaError::InvalidPeriod { period, data_len: 0 });
         }
 
-        let mut weights = Vec::with_capacity(period);
-        let mut sum_sines = 0.0;
-        for k in 0..period {
-            let angle = (k as f64 + 1.0) * PI / (period as f64 + 1.0);
-            let val = angle.sin();
-            weights.push(val);
-            sum_sines += val;
+        // alpha = pi / (p+1)
+        let alpha = PI / (period as f64 + 1.0);
+
+        // r = e^{i alpha}, r^p = e^{i p alpha}
+        let (sina, cosa) = alpha.sin_cos();
+        let (sinp, cosp) = (alpha * period as f64).sin_cos();
+
+        // Normalization: sum_{k=1}^p sin(k*alpha) = sin(p*alpha/2)/sin(alpha/2)
+        // (since ((p+1)*alpha)/2 = pi/2 => factor 1)
+        let denom = (0.5 * alpha).sin();
+        if denom.abs() < f64::EPSILON {
+            return Err(SinWmaError::ZeroSumSines { sum_sines: 0.0 });
         }
+        let sum_sines = (0.5 * alpha * period as f64).sin() / denom;
         if sum_sines.abs() < f64::EPSILON {
             return Err(SinWmaError::ZeroSumSines { sum_sines });
         }
-        for w in &mut weights {
-            *w /= sum_sines;
-        }
+        let inv_sum = 1.0 / sum_sines;
 
         Ok(Self {
             period,
-            weights,
+            r_re: cosa,
+            r_im: sina,
+            rp_re: cosp,
+            rp_im: sinp,
+            sinp,
+            cosp,
+            inv_sum,
+            z_re: 0.0,
+            z_im: 0.0,
             buffer: vec![f64::NAN; period],
             head: 0,
             filled: false,
+            nan_count: period, // all NaN initially
+            z_valid: false,
         })
     }
 
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        self.buffer[self.head] = value;
-        self.head = (self.head + 1) % self.period;
-
-        if !self.filled && self.head == 0 {
-            self.filled = true;
-        }
+        // Case 1: not yet filled — write, advance head, maybe build Z from scratch.
         if !self.filled {
-            return None;
+            let idx = self.head;
+            let old = self.buffer[idx];
+            if old.is_nan() {
+                self.nan_count = self.nan_count.saturating_sub(1);
+            }
+            if value.is_nan() {
+                self.nan_count += 1;
+            }
+            self.buffer[idx] = value;
+            self.head = (idx + 1) % self.period;
+
+            if self.head != 0 {
+                return None; // still warming up
+            }
+
+            // became full on this write
+            self.filled = true;
+
+            if self.nan_count != 0 {
+                self.z_valid = false;
+                return Some(f64::NAN);
+            }
+
+            // Build Z from scratch: Z = sum_{j=0}^{p-1} (r^j) x_{t-j}
+            self.rebuild_z();
+            return Some(self.output_from_z());
         }
-        Some(self.dot_ring())
+
+        // Case 2: steady-state — O(1) update via sliding DFT
+        let idx_old = self.head;
+        let x_old = self.buffer[idx_old];
+
+        // write new sample and advance head
+        self.buffer[idx_old] = value;
+        self.head = (idx_old + 1) % self.period;
+
+        // keep NaN count; any NaN in window => result is NaN & Z becomes invalid
+        if x_old.is_nan() {
+            self.nan_count = self.nan_count.saturating_sub(1);
+        }
+        if value.is_nan() {
+            self.nan_count += 1;
+        }
+
+        if self.nan_count != 0 {
+            self.z_valid = false;
+            return Some(f64::NAN);
+        }
+
+        // Rebuild Z lazily if it was invalidated by prior NaNs
+        if !self.z_valid {
+            self.rebuild_z();
+            return Some(self.output_from_z());
+        }
+
+        // Z_{t+1} = r*Z_t + x_new - r^p * x_old  (complex arithmetic)
+        let rZ_re = self.r_re.mul_add(self.z_re, -self.r_im * self.z_im);
+        let rZ_im = self.r_re.mul_add(self.z_im, self.r_im * self.z_re);
+
+        // r^p * x_old is just a complex scale of a real
+        self.z_re = rZ_re + value - self.rp_re * x_old;
+        self.z_im = rZ_im - self.rp_im * x_old;
+
+        Some(self.output_from_z())
     }
 
     #[inline(always)]
-    fn dot_ring(&self) -> f64 {
-        let mut sum = 0.0;
-        let mut idx = self.head;
-        for &w in &self.weights {
-            sum += w * self.buffer[idx];
-            idx = (idx + 1) % self.period;
+    fn output_from_z(&self) -> f64 {
+        // y' = sin(p*alpha)*Re(Z) - cos(p*alpha)*Im(Z);    y = y' * inv_sum
+        let y_unscaled = self.sinp.mul_add(self.z_re, -self.cosp * self.z_im);
+        y_unscaled * self.inv_sum
+    }
+
+    #[inline(always)]
+    fn rebuild_z(&mut self) {
+        debug_assert!(self.nan_count == 0, "rebuild_z called on NaN-contaminated window");
+        let newest = (self.head + self.period - 1) % self.period;
+
+        // Accumulate Z = Σ r^j x_{t-j}; start with r^0=1
+        let mut rj_re = 1.0f64;
+        let mut rj_im = 0.0f64;
+
+        let mut zr = 0.0f64;
+        let mut zi = 0.0f64;
+
+        for j in 0..self.period {
+            let idx = (newest + self.period - j) % self.period;
+            let x = self.buffer[idx];
+            zr = rj_re.mul_add(x, zr);
+            zi = rj_im.mul_add(x, zi);
+
+            // r^{j+1} = r^j * r
+            let nr_re = rj_re.mul_add(self.r_re, -rj_im * self.r_im);
+            let nr_im = rj_re.mul_add(self.r_im, rj_im * self.r_re);
+            rj_re = nr_re;
+            rj_im = nr_im;
         }
-        sum
+
+        self.z_re = zr;
+        self.z_im = zi;
+        self.z_valid = true;
     }
 }
 

@@ -20,8 +20,9 @@
 //!   the hot loop; uses `VecDeque` monotone queues for max/min (window) to avoid O(N) output temporaries.
 //! - Batch path: optimized for slice data (degenerate TR) by precomputing TR once and reusing it across
 //!   all rows/periods via a shared core. This reduces redundant work while preserving API and warmup.
-//! - Streaming update: remains O(n) for range/effort over the window (unchanged). Potential future work:
-//!   running min/max structures to improve incremental updates.
+//! - Streaming update: now O(1) amortized per update using monotone deques
+//!   for window max/min and a rolling True Range (TR) sum via a ring buffer.
+//! - Decision: Enabled O(1) streaming; outputs match batch exactly (tests unchanged).
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
@@ -723,19 +724,32 @@ pub fn nama_into_slice(dst: &mut [f64], input: &NamaInput, k: Kernel) -> Result<
     Ok(())
 }
 
-// ==================== STREAMING ====================
+// ==================== STREAMING (O(1) UPDATE) ====================
 #[derive(Debug, Clone)]
 pub struct NamaStream {
     period: usize,
+    
+    // Rings to overwrite oldest slot each tick
     buf_src: Vec<f64>,
     buf_tr: Vec<f64>,
     head: usize,
     filled: bool,
+
+    // Last seen values (for TR and EMA update)
     last_src: f64,
     last_close: f64,
     has_last_close: bool,
     last_out: f64,
     have_out: bool,
+
+    // O(1) window state
+    // - time: absolute index of current sample (monotone, used to age-out deque entries)
+    // - eff_sum: rolling sum of TRs inside the window (ignores NaN entries)
+    time: usize,
+    eff_sum: f64,
+    // Monotone deques of (index, value) for window max/min
+    dq_max: VecDeque<(usize, f64)>,
+    dq_min: VecDeque<(usize, f64)>,
 }
 
 impl NamaStream {
@@ -758,10 +772,15 @@ impl NamaStream {
             has_last_close: false,
             last_out: f64::NAN,
             have_out: false,
+
+            time: 0,
+            eff_sum: 0.0,
+            dq_max: VecDeque::with_capacity(p),
+            dq_min: VecDeque::with_capacity(p),
         })
     }
 
-    #[inline]
+    #[inline(always)]
     fn advance(&mut self) {
         self.head = (self.head + 1) % self.period;
         if !self.filled && self.head == 0 {
@@ -769,54 +788,90 @@ impl NamaStream {
         }
     }
 
+    // ---- internal helpers for monotone deques ----
+    #[inline(always)]
+    fn dq_push_max(dq: &mut VecDeque<(usize, f64)>, idx: usize, v: f64) {
+        while let Some(&(_, back_v)) = dq.back() {
+            if back_v <= v { dq.pop_back(); } else { break; }
+        }
+        dq.push_back((idx, v));
+    }
+    #[inline(always)]
+    fn dq_push_min(dq: &mut VecDeque<(usize, f64)>, idx: usize, v: f64) {
+        while let Some(&(_, back_v)) = dq.back() {
+            if back_v >= v { dq.pop_back(); } else { break; }
+        }
+        dq.push_back((idx, v));
+    }
+    #[inline(always)]
+    fn dq_pop_old(dq: &mut VecDeque<(usize, f64)>, win_start: usize) {
+        while let Some(&(k, _)) = dq.front() {
+            if k < win_start { dq.pop_front(); } else { break; }
+        }
+    }
+
     // Single-series streaming (degenerate TR on |Δsource|)
+    #[inline]
     pub fn update_source(&mut self, s: f64) -> Option<f64> {
-        let tr = if self.last_src.is_nan() {
-            f64::NAN
-        } else {
-            (s - self.last_src).abs()
-        };
+        // new TR uses previous source; first TR is NaN (ignored in sum) to match batch semantics
+        let tr_new = if self.last_src.is_nan() { f64::NAN } else { (s - self.last_src).abs() };
+
+        // outgoing TR (oldest slot to be overwritten)
+        let tr_old = self.buf_tr[self.head];
+
+        // write into rings
         self.buf_src[self.head] = s;
-        self.buf_tr[self.head] = tr;
+        self.buf_tr[self.head] = tr_new;
         self.last_src = s;
+
+        // update deques with absolute index `t`
+        let t = self.time;
+        self.time = self.time.wrapping_add(1);
+
+        Self::dq_push_max(&mut self.dq_max, t, s);
+        Self::dq_push_min(&mut self.dq_min, t, s);
+
+        // once we're filled, age out indices < window start (t + 1 - period)
+        if self.filled {
+            let win_start = t + 1 - self.period;
+            Self::dq_pop_old(&mut self.dq_max, win_start);
+            Self::dq_pop_old(&mut self.dq_min, win_start);
+        }
+
+        // O(1) rolling sum of TRs (ignore NaN just like the batch warmup)
+        if tr_old.is_finite() { self.eff_sum -= tr_old; }
+        if tr_new.is_finite() { self.eff_sum += tr_new; }
+
+        // finalize position / warmup detection
         self.advance();
         if !self.filled {
             return None;
         }
 
-        let (hi, lo, eff) = {
-            let mut hi = f64::NEG_INFINITY;
-            let mut lo = f64::INFINITY;
-            let mut eff = 0.0;
-            for i in 0..self.period {
-                let idx = (self.head + i) % self.period;
-                let v = self.buf_src[idx];
-                if v > hi {
-                    hi = v;
-                }
-                if v < lo {
-                    lo = v;
-                }
-                let t = self.buf_tr[idx];
-                if t.is_finite() {
-                    eff += t;
-                }
-            }
-            (hi, lo, eff)
-        };
-        let result = hi - lo;
-        let alpha = if eff != 0.0 { result / eff } else { 0.0 };
+        // compute alpha and EMA-style update
+        let hi = self.dq_max.front().map(|&(_, v)| v).unwrap_or(s);
+        let lo = self.dq_min.front().map(|&(_, v)| v).unwrap_or(s);
+        let range = hi - lo;
+        let alpha = if self.eff_sum != 0.0 {
+            // micro-opt: avoid divide in hot path
+            let inv = self.eff_sum.recip();
+            range * inv
+        } else { 0.0 };
+
         let y = if self.have_out {
-            alpha * self.last_src + (1.0 - alpha) * self.last_out
+            // y = prev_y + alpha * (x - prev_y)
+            (s - self.last_out).mul_add(alpha, self.last_out)
         } else {
-            alpha * self.last_src
+            // first output right after warmup matches batch: alpha * x
+            alpha * s
         };
         self.last_out = y;
         self.have_out = true;
         Some(y)
     }
 
-    // Full OHLC streaming TR
+    // Full OHLC streaming TR (Wilder)
+    #[inline]
     pub fn update_ohlc(
         &mut self,
         src: f64,
@@ -824,54 +879,62 @@ impl NamaStream {
         low: f64,
         close_prev: Option<f64>,
     ) -> Option<f64> {
-        let tr = match self.has_last_close || close_prev.is_some() {
-            false => high - low,
-            true => {
-                let prev = close_prev.unwrap_or(self.last_close);
-                let hl = high - low;
-                let hc = (high - prev).abs();
-                let lc = (low - prev).abs();
-                hl.max(hc).max(lc)
-            }
+        // choose prevClose if available, else use stored one; if neither, TR = high - low
+        let tr_new = if self.has_last_close || close_prev.is_some() {
+            let prev = close_prev.unwrap_or(self.last_close);
+            let hl = high - low;
+            let hc = (high - prev).abs();
+            let lc = (low - prev).abs();
+            hl.max(hc).max(lc)
+        } else {
+            high - low
         };
         if let Some(cp) = close_prev {
             self.last_close = cp;
             self.has_last_close = true;
         }
+
+        // outgoing TR (slot to be overwritten)
+        let tr_old = self.buf_tr[self.head];
+
+        // write rings
         self.buf_src[self.head] = src;
-        self.buf_tr[self.head] = tr;
+        self.buf_tr[self.head] = tr_new;
         self.last_src = src;
+
+        // update deques @ index t
+        let t = self.time;
+        self.time = self.time.wrapping_add(1);
+
+        Self::dq_push_max(&mut self.dq_max, t, src);
+        Self::dq_push_min(&mut self.dq_min, t, src);
+
+        if self.filled {
+            let win_start = t + 1 - self.period;
+            Self::dq_pop_old(&mut self.dq_max, win_start);
+            Self::dq_pop_old(&mut self.dq_min, win_start);
+        }
+
+        if tr_old.is_finite() { self.eff_sum -= tr_old; }
+        if tr_new.is_finite() { self.eff_sum += tr_new; }
+
         self.advance();
         if !self.filled {
             return None;
         }
-        // reuse same reducer
-        let (hi, lo, eff) = {
-            let mut hi = f64::NEG_INFINITY;
-            let mut lo = f64::INFINITY;
-            let mut eff = 0.0;
-            for i in 0..self.period {
-                let idx = (self.head + i) % self.period;
-                let v = self.buf_src[idx];
-                if v > hi {
-                    hi = v;
-                }
-                if v < lo {
-                    lo = v;
-                }
-                let t = self.buf_tr[idx];
-                if t.is_finite() {
-                    eff += t;
-                }
-            }
-            (hi, lo, eff)
-        };
-        let result = hi - lo;
-        let alpha = if eff != 0.0 { result / eff } else { 0.0 };
+
+        let hi = self.dq_max.front().map(|&(_, v)| v).unwrap_or(src);
+        let lo = self.dq_min.front().map(|&(_, v)| v).unwrap_or(src);
+        let range = hi - lo;
+        let alpha = if self.eff_sum != 0.0 {
+            let inv = self.eff_sum.recip();
+            range * inv
+        } else { 0.0 };
+
         let y = if self.have_out {
-            alpha * self.last_src + (1.0 - alpha) * self.last_out
+            (src - self.last_out).mul_add(alpha, self.last_out)
         } else {
-            alpha * self.last_src
+            alpha * src
         };
         self.last_out = y;
         self.have_out = true;

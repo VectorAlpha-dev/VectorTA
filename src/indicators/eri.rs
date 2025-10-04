@@ -13,9 +13,9 @@
 //!
 //! ## Developer Status
 //! - **SIMD Kernels**: AVX2 and AVX512 implemented (single-series + row variants)
-//! - **Streaming**: Not implemented
+//! - **Streaming**: O(1) SMA/EMA/RMA/DEMA/TEMA/WMA; Generic fallback is O(n)
 //! - **Memory**: Good zero-copy usage (alloc_with_nan_prefix, make_uninit_matrix)
-//! - Decision: Scalar path kept safe; classic SMA/EMA and SIMD paths use tightly scoped unsafe for speed.
+//! - Decision: Scalar path kept safe; streaming uses safe state machines; SIMD paths use tightly scoped unsafe.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
@@ -1151,69 +1151,272 @@ unsafe fn eri_row_avx512_long(
     eri_avx512_core(high, low, ma, period, first, bull, bear)
 }
 
+// Decision note: Streaming enabled; O(1) for SMA/EMA/RMA/DEMA/TEMA/WMA; fallback to generic O(n) only when needed.
 #[derive(Debug, Clone)]
 pub struct EriStream {
     period: usize,
     ma_type: String,
-    ma_buffer: Vec<f64>,
-    high_buffer: Vec<f64>,
-    low_buffer: Vec<f64>,
-    idx: usize,
-    filled: bool,
+    engine: StreamMa,
+    ready: bool,
+}
+
+#[derive(Debug, Clone)]
+enum StreamMa {
+    Sma(SmaState),
+    Ema(EmaState),
+    Rma(EmaState),
+    Dema(DemaState),
+    Tema(TemaState),
+    Wma(WmaState),
+    Generic(GenericState),
+}
+
+#[derive(Debug, Clone)]
+struct SmaState {
+    buf: Vec<f64>,
+    pos: usize,
+    count: usize,
+    sum: f64,
+    inv_n: f64,
+}
+
+#[derive(Debug, Clone)]
+struct EmaState {
+    n: usize,
+    alpha: f64,
+    beta: f64,
+    // warmup via SMA on first n points
+    init_sum: f64,
+    init_count: usize,
+    ema: f64,
+}
+
+#[derive(Debug, Clone)]
+struct DemaState {
+    n: usize,
+    alpha: f64,
+    beta: f64,
+    init_sum: f64,
+    init_count: usize,
+    e1: f64, // EMA
+    e2: f64, // EMA(EMA)
+}
+
+#[derive(Debug, Clone)]
+struct TemaState {
+    n: usize,
+    alpha: f64,
+    beta: f64,
+    init_sum: f64,
+    init_count: usize,
+    e1: f64, // EMA
+    e2: f64, // EMA(EMA)
+    e3: f64, // EMA(EMA(EMA))
+}
+
+#[derive(Debug, Clone)]
+struct WmaState {
+    n: usize,
+    den_inv: f64, // 1 / (n(n+1)/2)
+    buf: Vec<f64>,
+    pos: usize,
+    count: usize,
+    s: f64,  // sum of last n values
+    ws: f64, // weighted sum with weights 1..n (oldest=1, newest=n)
+}
+
+#[derive(Debug, Clone)]
+struct GenericState {
+    n: usize,
+    buf: Vec<f64>,
+    pos: usize,
+    count: usize,
+    scratch: Vec<f64>, // reused to reorder buf chronologically
 }
 
 impl EriStream {
     pub fn try_new(params: EriParams) -> Result<Self, EriError> {
         let period = params.period.unwrap_or(13);
         if period == 0 {
-            return Err(EriError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(EriError::InvalidPeriod { period, data_len: 0 });
         }
-        let ma_type = params.ma_type.unwrap_or_else(|| "ema".to_string());
-        Ok(Self {
-            period,
-            ma_type,
-            ma_buffer: vec![f64::NAN; period],
-            high_buffer: vec![f64::NAN; period],
-            low_buffer: vec![f64::NAN; period],
-            idx: 0,
-            filled: false,
-        })
+        let ma_type = params
+            .ma_type
+            .unwrap_or_else(|| "ema".to_string());
+
+        let engine = make_engine(period, &ma_type);
+        Ok(Self { period, ma_type, engine, ready: false })
     }
+
+    /// O(1) streaming update for SMA/EMA/RMA/DEMA/TEMA/WMA.
+    /// If any input is NaN, the stream resets and returns None (matches batch "first-valid" semantics).
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, source: f64) -> Option<(f64, f64)> {
-        self.ma_buffer[self.idx] = source;
-        self.high_buffer[self.idx] = high;
-        self.low_buffer[self.idx] = low;
-        self.idx = (self.idx + 1) % self.period;
-
-        if !self.filled && self.idx == 0 {
-            self.filled = true;
-        }
-        if !self.filled {
+        if high.is_nan() || low.is_nan() || source.is_nan() {
+            self.reset();
             return None;
         }
 
-        // Compute MA in chronological order by reordering the circular buffer
-        let mut ordered_buffer = vec![0.0; self.period];
-        for i in 0..self.period {
-            let src_idx = (self.idx + i) % self.period;
-            ordered_buffer[i] = self.ma_buffer[src_idx];
-        }
+        let ma_val = match &mut self.engine {
+            StreamMa::Sma(st) => sma_update(st, source),
+            StreamMa::Ema(st) => ema_like_update(st, source),
+            StreamMa::Rma(st) => ema_like_update(st, source),
+            StreamMa::Dema(st) => dema_update(st, source),
+            StreamMa::Tema(st) => tema_update(st, source),
+            StreamMa::Wma(st) => wma_update(st, source),
+            StreamMa::Generic(st) => generic_update(st, &self.ma_type, source),
+        }?;
 
-        let ring_ma = ma(&self.ma_type, MaData::Slice(&ordered_buffer), self.period)
-            .ok()
-            .and_then(|ma_v| ma_v.last().copied())
-            .unwrap_or(f64::NAN);
-
-        // Use the index of the last written element (current data)
-        let cur = (self.idx + self.period - 1) % self.period;
-        let hi = self.high_buffer[cur];
-        let lo = self.low_buffer[cur];
-        Some((hi - ring_ma, lo - ring_ma))
+        self.ready = true;
+        Some((high - ma_val, low - ma_val))
     }
+
+    #[inline(always)]
+    fn reset(&mut self) {
+        self.ready = false;
+        self.engine = make_engine(self.period, &self.ma_type);
+    }
+}
+
+#[inline(always)]
+fn make_engine(period: usize, ma_type: &str) -> StreamMa {
+    let t = ma_type.to_ascii_lowercase();
+    match t.as_str() {
+        "sma" => StreamMa::Sma(SmaState {
+            buf: vec![0.0; period],
+            pos: 0, count: 0, sum: 0.0, inv_n: 1.0 / period as f64,
+        }),
+        "ema" | "ewma" => StreamMa::Ema(EmaState {
+            n: period, alpha: 2.0 / (period as f64 + 1.0), beta: 1.0 - (2.0 / (period as f64 + 1.0)),
+            init_sum: 0.0, init_count: 0, ema: f64::NAN,
+        }),
+        "rma" | "wilder" | "smma" => StreamMa::Rma(EmaState {
+            n: period, alpha: 1.0 / period as f64, beta: 1.0 - (1.0 / period as f64),
+            init_sum: 0.0, init_count: 0, ema: f64::NAN,
+        }),
+        "dema" => StreamMa::Dema(DemaState {
+            n: period, alpha: 2.0 / (period as f64 + 1.0), beta: 1.0 - (2.0 / (period as f64 + 1.0)),
+            init_sum: 0.0, init_count: 0, e1: f64::NAN, e2: f64::NAN,
+        }),
+        "tema" => StreamMa::Tema(TemaState {
+            n: period, alpha: 2.0 / (period as f64 + 1.0), beta: 1.0 - (2.0 / (period as f64 + 1.0)),
+            init_sum: 0.0, init_count: 0, e1: f64::NAN, e2: f64::NAN, e3: f64::NAN,
+        }),
+        "wma" | "lwma" | "linear" | "linear_wma" => {
+            let n = period as f64;
+            let den_inv = 2.0 / (n * (n + 1.0));
+            StreamMa::Wma(WmaState { n: period, den_inv, buf: vec![0.0; period], pos: 0, count: 0, s: 0.0, ws: 0.0 })
+        }
+        _ => StreamMa::Generic(GenericState { n: period, buf: vec![0.0; period], pos: 0, count: 0, scratch: vec![0.0; period] }),
+    }
+}
+
+#[inline(always)]
+fn sma_update(st: &mut SmaState, x: f64) -> Option<f64> {
+    let n = st.buf.len();
+    if st.count < n {
+        st.buf[st.pos] = x;
+        st.sum += x;
+        st.pos = (st.pos + 1) % n;
+        st.count += 1;
+        return (st.count == n).then(|| st.sum * st.inv_n);
+    }
+    let old = st.buf[st.pos];
+    st.buf[st.pos] = x;
+    st.sum += x - old;
+    st.pos = (st.pos + 1) % n;
+    Some(st.sum * st.inv_n)
+}
+
+#[inline(always)]
+fn ema_like_update(st: &mut EmaState, x: f64) -> Option<f64> {
+    if st.init_count < st.n {
+        st.init_sum += x;
+        st.init_count += 1;
+        if st.init_count == st.n {
+            st.ema = st.init_sum / st.n as f64;
+            return Some(st.ema);
+        }
+        return None;
+    }
+    st.ema = x.mul_add(st.alpha, st.beta * st.ema);
+    Some(st.ema)
+}
+
+#[inline(always)]
+fn dema_update(st: &mut DemaState, x: f64) -> Option<f64> {
+    if st.init_count < st.n {
+        st.init_sum += x;
+        st.init_count += 1;
+        if st.init_count == st.n {
+            st.e1 = st.init_sum / st.n as f64;
+            st.e2 = st.e1;
+            return Some(st.e1);
+        }
+        return None;
+    }
+    st.e1 = x.mul_add(st.alpha, st.beta * st.e1);
+    st.e2 = st.e1.mul_add(st.alpha, st.beta * st.e2);
+    Some(2.0f64.mul_add(st.e1, -st.e2))
+}
+
+#[inline(always)]
+fn tema_update(st: &mut TemaState, x: f64) -> Option<f64> {
+    if st.init_count < st.n {
+        st.init_sum += x;
+        st.init_count += 1;
+        if st.init_count == st.n {
+            st.e1 = st.init_sum / st.n as f64;
+            st.e2 = st.e1;
+            st.e3 = st.e2;
+            return Some(st.e1);
+        }
+        return None;
+    }
+    st.e1 = x.mul_add(st.alpha, st.beta * st.e1);
+    st.e2 = st.e1.mul_add(st.alpha, st.beta * st.e2);
+    st.e3 = st.e2.mul_add(st.alpha, st.beta * st.e3);
+    Some((3.0 * st.e1) - (3.0 * st.e2) + st.e3)
+}
+
+#[inline(always)]
+fn wma_update(st: &mut WmaState, x: f64) -> Option<f64> {
+    let n = st.n;
+    if st.count < n {
+        st.buf[st.pos] = x;
+        st.s += x;
+        st.ws += (st.count as f64 + 1.0) * x;
+        st.pos = (st.pos + 1) % n;
+        st.count += 1;
+        return (st.count == n).then(|| st.ws * st.den_inv);
+    }
+    let old = st.buf[st.pos];
+    st.buf[st.pos] = x;
+    let s_prev = st.s;
+    st.s = s_prev - old + x;
+    st.ws = st.ws - s_prev + (n as f64) * x;
+    st.pos = (st.pos + 1) % n;
+    Some(st.ws * st.den_inv)
+}
+
+#[inline(always)]
+fn generic_update(st: &mut GenericState, ma_type: &str, x: f64) -> Option<f64> {
+    let n = st.n;
+    if st.count < n {
+        st.buf[st.pos] = x;
+        st.pos = (st.pos + 1) % n;
+        st.count += 1;
+        return None;
+    }
+    st.buf[st.pos] = x;
+    st.pos = (st.pos + 1) % n;
+
+    for i in 0..n {
+        let src_idx = (st.pos + i) % n;
+        st.scratch[i] = st.buf[src_idx];
+    }
+    let m = ma(ma_type, MaData::Slice(&st.scratch), n).ok()?;
+    m.last().copied()
 }
 
 #[cfg(feature = "python")]

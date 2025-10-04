@@ -13,6 +13,7 @@
 //! - SIMD (AVX2/AVX512): implemented but disabled by default — bootstrap vectorization changes FP reduction order and exceeds strict ULP tolerances in property tests; runtime selection short-circuits to scalar.
 //! - Scalar path: O(1) rolling update retained; attempted loop‑jammed variant regressed on 100k so kept original safe implementation.
 //! - Batch (row-specific): enabled — shared prefix sums (A,B) build once; each row uses closed‑form WMA per index; warmup prefixes preserved via `init_matrix_prefixes`.
+//! - Stream: O(1) per‑tick kernel integrated; matches scalar update order and warmup semantics; uses cached reciprocal for division.
 //! - Memory: uses zero‑copy helpers (`alloc_with_nan_prefix`, `make_uninit_matrix`) and cache‑aligned buffers where helpful.
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -383,12 +384,18 @@ pub fn wma_with_kernel_batch(
     wma_batch_par_slice(data, sweep, simd)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct WmaStream {
     period: usize,
     buffer: Vec<f64>,
     head: usize,
     filled: bool,
+
+    // O(1) state
+    plain_sum: f64,    // sum of window (or survivors during transition)
+    weighted_sum: f64, // W_t == sum_{i=0}^{n-1} (i+1) * x_{t-n+1+i} (or W_t - S_t between updates)
+    inv_div: f64,      // 1 / (n*(n+1)/2)
+    p_f64: f64,        // n as f64
 }
 
 impl WmaStream {
@@ -400,41 +407,86 @@ impl WmaStream {
                 data_len: 0,
             });
         }
+
+        let sum_of_weights = (period * (period + 1)) as f64 * 0.5;
         Ok(Self {
             period,
             buffer: vec![f64::NAN; period],
             head: 0,
             filled: false,
+            plain_sum: 0.0,
+            weighted_sum: 0.0,
+            inv_div: 1.0 / sum_of_weights,
+            p_f64: period as f64,
         })
     }
 
+    /// Pushes `value` and returns the WMA of the last `period` values in O(1),
+    /// or `None` until the buffer first fills.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        self.buffer[self.head] = value;
-        self.head = (self.head + 1) % self.period;
+        // Write new sample into the slot that currently holds the oldest value.
+        let write_idx = self.head;
+        self.buffer[write_idx] = value;
 
-        if !self.filled && self.head == 0 {
-            self.filled = true;
+        // Advance head; after this, `self.head` points at the oldest element
+        // of the current window (i.e., the one to remove on the next tick).
+        self.head += 1;
+        if self.head == self.period {
+            self.head = 0;
         }
+
+        // Warmup: return None until we have seen `period` samples.
         if !self.filled {
-            return None;
-        }
-        Some(self.weighted_average())
-    }
+            if self.head == 0 {
+                // Just filled: compute W_0 and S_0 once (O(n)), then switch to O(1).
+                let mut wsum = 0.0;
+                let mut ssum = 0.0;
+                // At this point `self.head` points at the oldest element.
+                // Accumulate weights 1..n from oldest -> newest.
+                let mut idx = self.head;
+                for w in 1..=self.period {
+                    let v = self.buffer[idx];
+                    ssum += v;
+                    wsum += (w as f64) * v;
+                    idx += 1;
+                    if idx == self.period {
+                        idx = 0;
+                    }
+                }
+                let out = wsum * self.inv_div;
 
-    #[inline(always)]
-    fn weighted_average(&self) -> f64 {
-        let mut sum = 0.0;
-        let mut weight_sum = 0.0;
-        let mut idx = self.head;
-        for i in 0..self.period {
-            let weight = (i + 1) as f64;
-            let val = self.buffer[idx];
-            sum += val * weight;
-            weight_sum += weight;
-            idx = (idx + 1) % self.period;
+                // Prepare rolling invariants for next tick to match scalar kernel order:
+                // - Keep weighted_sum as (W - S) for O(1) update on next tick.
+                // - Keep plain_sum as "survivors" sum (S without the next oldest).
+                self.weighted_sum = wsum - ssum;
+                let oldest_next = self.buffer[self.head]; // oldest in the current window
+                self.plain_sum = ssum - oldest_next;
+
+                self.filled = true;
+                Some(out)
+            } else {
+                None
+            }
+        } else {
+            // O(1) recurrence (exactly mirrors scalar path order):
+            // 1) W += n * new
+            // 2) S += new
+            // 3) out = W / denom
+            // 4) W -= S
+            // 5) S -= oldest
+            let oldest = self.buffer[self.head]; // oldest in the current window
+            self.weighted_sum += self.p_f64 * value;
+            self.plain_sum += value;
+
+            // Multiply by a precomputed reciprocal instead of dividing each tick.
+            let out = self.weighted_sum * self.inv_div;
+
+            self.weighted_sum -= self.plain_sum;
+            self.plain_sum -= oldest;
+
+            Some(out)
         }
-        sum / weight_sum
     }
 }
 

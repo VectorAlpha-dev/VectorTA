@@ -65,6 +65,7 @@ use std::arch::x86_64::*;
 use rayon::prelude::*;
 
 // Standard library imports
+use std::collections::VecDeque;
 use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
@@ -1413,24 +1414,58 @@ fn VolumeAdjustedMa_batch_inner_into_par(
 }
 
 // ==================== STREAMING SUPPORT ====================
+// Decision note: Replace O(n) per update with amortized O(1) streaming kernel preserving batch semantics.
+// Fixed window uses rolling sums; strict path uses a shrinking VecDeque with exact cap and p0 handling.
 #[derive(Debug, Clone)]
 pub struct VolumeAdjustedMaStream {
+    // Params
     length: usize,
     vi_factor: f64,
     strict: bool,
     sample_period: usize,
-    prices: Vec<f64>,  // Now stores all historical data
-    volumes: Vec<f64>, // Now stores all historical data
+
+    // Precomputed
+    len_f: f64,
+    len_inv: f64,
+
+    // Global index (#updates seen so far)
+    n_seen: usize,
+
+    // ---- avg volume state ----
+    // sample_period == 0: cumulative sum / (n_seen)
+    cum_vol_sum: f64,
+    // sample_period > 0: ring of finite volumes + rolling sum
+    sp_sum: f64,
+    sp_ring: Vec<f64>, // stores finite(vol) i.e., NaN -> 0.0
+    sp_pos: usize,
+
+    // ---- p0 history ring ----
+    // We keep the last (cap_for_p0+1) bars so we can fetch p0 = price[i - nmb]
+    // even when inv==0 (strict path uses cap = min(i+1, 10*length)).
+    hist_cap: usize,
+    hist_p: Vec<f64>,
+    hist_v: Vec<f64>,
+    hist_pos: usize,
+    hist_len: usize,
+
+    // ---- fixed-window accumulators (strict == false) ----
+    // sums over last `length` bars (finite volume only; price·vol only if price finite)
+    sum_vol_len: f64,
+    sum_pv_len: f64,
+
+    // ---- variable-window accumulators (strict == true) ----
+    // minimal deque of most-recent bars whose finite-volume sum >= target
+    deq_p: VecDeque<f64>,
+    deq_v: VecDeque<f64>, // finite(vol) in lockstep with deq_p
+    sum_vol_deq: f64,
+    sum_pv_deq: f64,
 }
 
 impl VolumeAdjustedMaStream {
     pub fn try_new(p: VolumeAdjustedMaParams) -> Result<Self, VolumeAdjustedMaError> {
         let length = p.length.unwrap_or(13);
         if length == 0 {
-            return Err(VolumeAdjustedMaError::InvalidPeriod {
-                period: length,
-                data_len: 0,
-            });
+            return Err(VolumeAdjustedMaError::InvalidPeriod { period: length, data_len: 0 });
         }
         let vi = p.vi_factor.unwrap_or(0.67);
         if !vi.is_finite() || vi <= 0.0 {
@@ -1439,115 +1474,226 @@ impl VolumeAdjustedMaStream {
         let strict = p.strict.unwrap_or(true);
         let sp = p.sample_period.unwrap_or(0);
 
+        // History capacity just big enough to replicate scalar p0 semantics:
+        // strict=false => need p0 = data[i-length], so keep length+1
+        // strict=true  => cap = min(i+1, 10*length), need p0 = data[i-cap], so keep 10*length+1
+        let hist_cap = if strict { length.saturating_mul(10) + 1 } else { length + 1 };
+
         Ok(Self {
             length,
             vi_factor: vi,
             strict,
             sample_period: sp,
-            prices: Vec::new(),  // Start empty, will grow dynamically
-            volumes: Vec::new(), // Start empty, will grow dynamically
+
+            len_f: length as f64,
+            len_inv: 1.0 / (length as f64),
+
+            n_seen: 0,
+
+            cum_vol_sum: 0.0,
+
+            sp_sum: 0.0,
+            sp_ring: if sp > 0 { vec![0.0; sp] } else { Vec::new() },
+            sp_pos: 0,
+
+            hist_cap,
+            hist_p: vec![f64::NAN; hist_cap],
+            hist_v: vec![f64::NAN; hist_cap],
+            hist_pos: 0,
+            hist_len: 0,
+
+            sum_vol_len: 0.0,
+            sum_pv_len: 0.0,
+
+            deq_p: VecDeque::with_capacity(if strict { length.saturating_mul(10) } else { 0 }),
+            deq_v: VecDeque::with_capacity(if strict { length.saturating_mul(10) } else { 0 }),
+            sum_vol_deq: 0.0,
+            sum_pv_deq: 0.0,
         })
     }
 
     #[inline(always)]
     pub fn update(&mut self, price: f64, volume: f64) -> Option<f64> {
-        // Store all historical data (O(n) space)
-        self.prices.push(price);
-        self.volumes.push(volume);
+        // Treat non-finite volumes as zero contribution to weights (matches scalar)
+        let v_fin = if volume.is_finite() { volume } else { 0.0 };
+        let pv_fin = if price.is_finite() { price.mul_add(v_fin, 0.0) } else { 0.0 };
 
-        let i = self.prices.len() - 1; // Current index
-
-        // Need at least length bars
-        if i < self.length - 1 {
-            return Some(f64::NAN);
+        // ---- advance global index and write into history ring (for p0) ----
+        let pos = self.hist_pos;
+        self.hist_p[pos] = price;
+        self.hist_v[pos] = volume; // store original, but we use v_fin in sums
+        self.hist_pos = (pos + 1) % self.hist_cap;
+        if self.hist_len < self.hist_cap {
+            self.hist_len += 1;
         }
 
-        // Calculate average volume for normalization
+        // ---- update avg volume state ----
+        self.n_seen += 1;
+
         let avg_volume = if self.sample_period == 0 {
-            // Use all historical data
-            let mut sum = 0.0;
-            for v in &self.volumes {
-                sum += if v.is_finite() { *v } else { 0.0 };
-            }
-            if self.volumes.len() > 0 {
-                sum / (self.volumes.len() as f64)
-            } else {
-                0.0
-            }
+            // cumulative average over all bars 0..=i (denominator is n_seen)
+            self.cum_vol_sum += v_fin;
+            self.cum_vol_sum / (self.n_seen as f64)
         } else {
-            // Use sample_period bars
-            if i < self.sample_period - 1 {
-                // Not enough bars to form the sample window
+            // rolling average over last sample_period bars using ring and sum
+            // add new
+            self.sp_sum += v_fin;
+            // remove oldest if window full
+            if self.n_seen > self.sample_period {
+                self.sp_sum -= self.sp_ring[self.sp_pos];
+            }
+            self.sp_ring[self.sp_pos] = v_fin;
+            self.sp_pos = (self.sp_pos + 1) % self.sample_period;
+
+            // early warmup: need at least sample_period bars
+            if self.n_seen < self.sample_period {
                 return Some(f64::NAN);
             }
-            let start = i + 1 - self.sample_period;
-            let mut sum = 0.0;
-            for j in start..=i {
-                sum += if self.volumes[j].is_finite() {
-                    self.volumes[j]
-                } else {
-                    0.0
-                };
-            }
-            sum / (self.sample_period as f64)
+            self.sp_sum / (self.sample_period as f64)
         };
 
         let vi_th = avg_volume * self.vi_factor;
+        let inv = if vi_th > 0.0 { 1.0 / vi_th } else { 0.0 };
 
-        // Accumulate from current bar backward (O(n) per update)
-        let cap = if self.strict {
-            self.length.saturating_mul(10).min(i + 1)
-        } else {
-            self.length.min(i + 1)
-        };
+        // ---- strict=false: fixed width window of exactly `length` bars ----
+        if !self.strict {
+            // Update rolling sums over last `length` bars (exclude p0)
+            // When we have > length bars total, the element at offset (length+1) becomes p0
+            // and the element at offset (length) leaves the included window.
+            if self.n_seen > self.length {
+                // idx of the element that **leaves** the included window
+                let cap = self.hist_cap;
+                let leaving_idx = (self.hist_pos + cap - (self.length + 1)) % cap;
+                let v_leave = self.hist_v[leaving_idx];
+                let v_leave_fin = if v_leave.is_finite() { v_leave } else { 0.0 };
+                if v_leave_fin != 0.0 {
+                    let p_leave = self.hist_p[leaving_idx];
+                    self.sum_vol_len -= v_leave_fin;
+                    if p_leave.is_finite() {
+                        self.sum_pv_len -= p_leave * v_leave_fin;
+                    }
+                }
+            }
+            // Add the newly included element (current bar)
+            if v_fin != 0.0 {
+                self.sum_vol_len += v_fin;
+                if price.is_finite() {
+                    self.sum_pv_len += pv_fin;
+                }
+            }
 
-        let mut weighted_sum = 0.0;
-        let mut v2i_sum = 0.0;
-        let mut nmb = 0usize;
+            // Need at least `length` bars observed before producing first value
+            if self.n_seen < self.length {
+                return Some(f64::NAN);
+            }
 
-        let mut idx = i;
-        for j in 0..cap {
-            let raw_v2i = if vi_th > 0.0 && self.volumes[idx].is_finite() {
-                self.volumes[idx] / vi_th
+            // inv==0 fast-path: returns p0
+            let cap = self.hist_cap;
+            let p0_idx = (self.hist_pos + cap - (self.length + 1)) % cap;
+            let p0 = self.hist_p[p0_idx];
+            if inv == 0.0 {
+                return Some(if p0.is_finite() { p0 } else { f64::NAN });
+            }
+
+            // weighted_sum = inv * Σ(price·vol)_last_len
+            // v2i_sum     = inv * Σ(vol)_last_len
+            let weighted_sum = self.sum_pv_len * inv;
+            let v2i_sum = self.sum_vol_len * inv;
+
+            return Some(if p0.is_finite() {
+                // ((length - v2i_sum)*p0 + weighted_sum) / length
+                ((self.len_f - v2i_sum).mul_add(p0, weighted_sum)) * self.len_inv
             } else {
                 f64::NAN
-            };
-            let v2i_nz = if raw_v2i.is_finite() { raw_v2i } else { 0.0 };
+            });
+        }
 
-            let p = self.prices[idx];
-            if p.is_finite() {
-                weighted_sum += p * v2i_nz;
-            }
-            v2i_sum += v2i_nz;
+        // ---- strict=true: variable-width by cumulative volume, with CAP = min(n_seen, 10*length) ----
+        // push current bar (maintain deq state even during warmup)
+        self.deq_p.push_back(price);
+        self.deq_v.push_back(v_fin);
+        self.sum_vol_deq += v_fin;
+        if price.is_finite() {
+            self.sum_pv_deq += pv_fin;
+        }
 
-            nmb = j + 1;
+        // Enforce cap on number of bars considered by the scalar loop
+        let cap_bars = self.length.saturating_mul(10).min(self.n_seen);
 
-            if self.strict {
-                if v2i_sum >= self.length as f64 {
-                    break;
+        while self.deq_p.len() > cap_bars {
+            if let (Some(p_old), Some(v_old)) = (self.deq_p.pop_front(), self.deq_v.pop_front()) {
+                self.sum_vol_deq -= v_old;
+                if p_old.is_finite() && v_old != 0.0 {
+                    self.sum_pv_deq -= p_old * v_old;
                 }
-            } else if nmb >= self.length {
-                break;
             }
-
-            if idx == 0 {
-                break;
-            }
-            idx -= 1;
         }
 
-        // Calculate final value
-        if nmb > 0 && i >= nmb {
-            let idx_nmb = i - nmb;
-            let p0 = self.prices[idx_nmb];
-            if p0.is_finite() {
-                Some((weighted_sum - (v2i_sum - self.length as f64) * p0) / (self.length as f64))
+        // Need at least `length` bars observed before producing first value
+        if self.n_seen < self.length {
+            return Some(f64::NAN);
+        }
+
+        // inv==0: mirror scalar early-exit => nmb = cap, result = p0 = data[i-cap]
+        if inv == 0.0 {
+            if cap_bars == 0 || self.hist_len <= cap_bars {
+                return Some(f64::NAN);
+            }
+            let cap = self.hist_cap;
+            let p0_idx = (self.hist_pos + cap - (cap_bars + 1)) % cap;
+            let p0 = self.hist_p[p0_idx];
+            return Some(if p0.is_finite() { p0 } else { f64::NAN });
+        }
+
+        // Target cumulative volume (in original units) required to meet v2i_sum >= length
+        // inv * S_vol >= length  <=>  S_vol >= length / inv  <=>  S_vol >= length * vi_th
+        let target_vol = self.len_f * vi_th;
+
+        // Shrink from the front while we can still satisfy the threshold
+        while let (Some(&v_front), Some(&p_front)) = (self.deq_v.front(), self.deq_p.front()) {
+            if (self.sum_vol_deq - v_front) >= target_vol {
+                // pop front
+                self.deq_v.pop_front();
+                self.deq_p.pop_front();
+                self.sum_vol_deq -= v_front;
+                if p_front.is_finite() && v_front != 0.0 {
+                    self.sum_pv_deq -= p_front * v_front;
+                }
             } else {
-                Some(f64::NAN)
+                break;
             }
-        } else {
-            Some(f64::NAN)
         }
+
+        // Number of bars actually included (nmb)
+        let nmb = self.deq_p.len();
+
+        // Need p0 = data[i - nmb]; ensure we have it
+        if self.hist_len <= nmb {
+            return Some(f64::NAN);
+        }
+        let cap = self.hist_cap;
+        let p0_idx = (self.hist_pos + cap - (nmb + 1)) % cap;
+        let p0 = self.hist_p[p0_idx];
+
+        // Weighted sum and v2i_sum under current inv.
+        // Accumulate in the same order as scalar (from newest to oldest) to match rounding.
+        let mut weighted_sum = 0.0f64;
+        let mut v2i_sum = 0.0f64;
+        for (&p_i, &v_i) in self.deq_p.iter().rev().zip(self.deq_v.iter().rev()) {
+            if v_i != 0.0 {
+                let v2i = v_i * inv;
+                v2i_sum += v2i;
+                if p_i.is_finite() {
+                    weighted_sum = p_i.mul_add(v2i, weighted_sum);
+                }
+            }
+        }
+
+        Some(if p0.is_finite() {
+            ((self.len_f - v2i_sum).mul_add(p0, weighted_sum)) * self.len_inv
+        } else {
+            f64::NAN
+        })
     }
 }
 

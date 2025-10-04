@@ -13,6 +13,8 @@
 //! **AVX2**: Implemented (sequential update for parity)
 //! **AVX512**: Implemented (sequential update for parity)
 //! **Streaming**: O(1) - Simple state tracking
+//! - Streaming kernel uses plain scalars (no Option unwraps) and preserves
+//!   exact arithmetic order for strict parity with scalar/SIMD paths.
 //! **Memory**: Good - Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
 //!
 //! Decision notes:
@@ -149,42 +151,58 @@ impl NviBuilder {
 
 #[derive(Debug, Clone)]
 pub struct NviStream {
-    prev_close: Option<f64>,
-    prev_volume: Option<f64>,
+    // Hot-path state kept as plain scalars to avoid Option unwraps.
+    prev_close: f64,
+    prev_volume: f64,
     nvi_val: f64,
     started: bool,
 }
+
 impl NviStream {
+    #[inline]
     pub fn try_new() -> Result<Self, NviError> {
         Ok(Self {
-            prev_close: None,
-            prev_volume: None,
-            nvi_val: 1000.0,
+            prev_close: 0.0,   // initialized on the first valid sample
+            prev_volume: 0.0,  // initialized on the first valid sample
+            nvi_val: 1000.0,   // StockCharts/Fosback convention
             started: false,
         })
     }
+
+    /// O(1) update. Returns `Some(NVI)` once the stream has seen the first
+    /// finite (non-NaN) close & volume; otherwise returns `None` (warmup).
+    ///
+    /// IMPORTANT: Arithmetic shape intentionally mirrors the scalar kernel:
+    ///     pct = (close - prev_close) / prev_close;
+    ///     nvi += nvi * pct;
+    /// We avoid FMA or (1.0 + pct) * nvi to keep batch/stream parity.
     #[inline(always)]
     pub fn update(&mut self, close: f64, volume: f64) -> Option<f64> {
-        if !self.started && !close.is_nan() && !volume.is_nan() {
-            self.prev_close = Some(close);
-            self.prev_volume = Some(volume);
+        // Warmup: wait for the first finite pair, publish initial 1000.0
+        if !self.started {
+            if close.is_nan() || volume.is_nan() {
+                return None;
+            }
+            self.prev_close = close;
+            self.prev_volume = volume;
             self.started = true;
             return Some(self.nvi_val);
         }
-        if !self.started {
-            return None;
+
+        // Hot path
+        let mut nvi = self.nvi_val;
+        if volume < self.prev_volume {
+            // Keep identical operation ordering for bit-for-bit parity
+            let pct = (close - self.prev_close) / self.prev_close;
+            nvi += nvi * pct;
         }
-        let prev_c = self.prev_close?;
-        let prev_v = self.prev_volume?;
-        let mut new_nvi = self.nvi_val;
-        if volume < prev_v {
-            let pct = (close - prev_c) / prev_c;
-            new_nvi += new_nvi * pct;
-        }
-        self.nvi_val = new_nvi;
-        self.prev_close = Some(close);
-        self.prev_volume = Some(volume);
-        Some(self.nvi_val)
+
+        // Advance state
+        self.nvi_val = nvi;
+        self.prev_close = close;
+        self.prev_volume = volume;
+
+        Some(nvi)
     }
 }
 

@@ -1561,12 +1561,16 @@ fn kst_batch_inner_into(
 
 // Row helper functions removed - no longer needed with direct compute_into approach
 
+/// Streaming KST – O(1) per tick.
+/// Decision: uses cached reciprocals and branchy wrap; reduces divisions/modulo and uses an FMA chain.
 #[derive(Debug, Clone)]
 pub struct KstStream {
+    // periods
     s: (usize, usize, usize, usize),
     r: (usize, usize, usize, usize),
     sig: usize,
-    // ring buffers for ROC SMAs
+
+    // SMA(ROC) rings
     b1: Vec<f64>,
     b2: Vec<f64>,
     b3: Vec<f64>,
@@ -1579,52 +1583,66 @@ pub struct KstStream {
     sum2: f64,
     sum3: f64,
     sum4: f64,
-    inv1: f64,
-    inv2: f64,
-    inv3: f64,
-    inv4: f64,
-    // signal ring
+
+    // precomputed weights for the KST line (FMA chain)
+    inv1: f64, // 1/s1
+    w2: f64,   // 2/s2
+    w3: f64,   // 3/s3
+    w4: f64,   // 4/s4
+
+    // signal SMA ring
     sig_buf: Vec<f64>,
     sig_idx: usize,
     sig_sum: f64,
-    // price history for ROC calculations
-    price_history: Vec<f64>,
-    price_idx: usize,
-    // warm tracking
-    t: usize, // ticks seen
-    warm_line: usize,
-    warm_sig: usize,
+
+    // price + reciprocal rings
+    price_ring: Vec<f64>,
+    recip_ring: Vec<f64>,
+    head: usize, // next write position
+
+    // warmup tracking
+    t: usize,         // ticks seen so far
+    warm_line: usize, // max(r_i + s_i - 1)
+    warm_sig: usize,  // warm_line + sig - 1
+
+    // optional for external inspection
     last_line: f64,
 }
 impl KstStream {
+    #[inline]
     pub fn try_new(params: KstParams) -> Result<Self, KstError> {
         let s1 = params.sma_period1.unwrap_or(10);
         let s2 = params.sma_period2.unwrap_or(10);
         let s3 = params.sma_period3.unwrap_or(10);
         let s4 = params.sma_period4.unwrap_or(15);
+
         let r1 = params.roc_period1.unwrap_or(10);
         let r2 = params.roc_period2.unwrap_or(15);
         let r3 = params.roc_period3.unwrap_or(20);
         let r4 = params.roc_period4.unwrap_or(30);
+
         let sig = params.signal_period.unwrap_or(9);
+
         for &p in [s1, s2, s3, s4, r1, r2, r3, r4, sig].iter() {
             if p == 0 {
-                return Err(KstError::InvalidPeriod {
-                    period: p,
-                    data_len: 0,
-                });
+                return Err(KstError::InvalidPeriod { period: p, data_len: 0 });
             }
         }
+
         let warm_line = (r1 + s1 - 1)
             .max(r2 + s2 - 1)
             .max(r3 + s3 - 1)
             .max(r4 + s4 - 1);
         let warm_sig = warm_line + sig - 1;
+
         let max_roc = r1.max(r2).max(r3).max(r4);
+        let price_cap = max_roc + 1; // head is next write
+
         Ok(Self {
             s: (s1, s2, s3, s4),
             r: (r1, r2, r3, r4),
             sig,
+
             b1: vec![0.0; s1],
             b2: vec![0.0; s2],
             b3: vec![0.0; s3],
@@ -1637,130 +1655,155 @@ impl KstStream {
             sum2: 0.0,
             sum3: 0.0,
             sum4: 0.0,
+
             inv1: 1.0 / (s1 as f64),
-            inv2: 1.0 / (s2 as f64),
-            inv3: 1.0 / (s3 as f64),
-            inv4: 1.0 / (s4 as f64),
-            sig_buf: vec![f64::NAN; sig],
+            w2: (2.0f64) / (s2 as f64),
+            w3: (3.0f64) / (s3 as f64),
+            w4: (4.0f64) / (s4 as f64),
+
+            sig_buf: vec![0.0; sig],
             sig_idx: 0,
             sig_sum: 0.0,
-            price_history: vec![f64::NAN; max_roc + 1],
-            price_idx: 0,
+
+            price_ring: vec![f64::NAN; price_cap],
+            recip_ring: vec![f64::NAN; price_cap],
+            head: 0,
+
             t: 0,
             warm_line,
             warm_sig,
+
             last_line: f64::NAN,
         })
     }
+
+    /// O(1) tick update. Returns (line, signal) or None until fully warmed.
+    #[inline(always)]
     pub fn update(&mut self, price: f64) -> Option<(f64, f64)> {
+        // Write price and its reciprocal (1 division per tick)
+        self.price_ring[self.head] = price;
+        self.recip_ring[self.head] = if price.is_finite() && price != 0.0 {
+            1.0 / price
+        } else {
+            f64::NAN
+        };
+
+        // Advance head without modulo
+        Self::wrap_inc(&mut self.head, self.price_ring.len());
+
+        let cap = self.price_ring.len();
         let (s1, s2, s3, s4) = self.s;
         let (r1, r2, r3, r4) = self.r;
 
-        // Store price in circular buffer
-        self.price_history[self.price_idx] = price;
-        self.price_idx = (self.price_idx + 1) % self.price_history.len();
-
-        // compute inline ROCs only when lookback available
+        // Compute 4 ROC terms using cached reciprocals
         let mut v1 = 0.0;
         if self.t >= r1 {
-            let idx =
-                (self.price_idx + self.price_history.len() - r1 - 1) % self.price_history.len();
-            let p = self.price_history[idx];
-            if p != 0.0 && p.is_finite() {
-                v1 = ((price / p) - 1.0) * 100.0;
+            let idx = Self::back_from_next(self.head, cap, r1 + 1);
+            let pinv = self.recip_ring[idx];
+            if price.is_finite() && pinv.is_finite() {
+                v1 = (price * pinv - 1.0) * 100.0;
             }
         }
         let mut v2 = 0.0;
         if self.t >= r2 {
-            let idx =
-                (self.price_idx + self.price_history.len() - r2 - 1) % self.price_history.len();
-            let p = self.price_history[idx];
-            if p != 0.0 && p.is_finite() {
-                v2 = ((price / p) - 1.0) * 100.0;
+            let idx = Self::back_from_next(self.head, cap, r2 + 1);
+            let pinv = self.recip_ring[idx];
+            if price.is_finite() && pinv.is_finite() {
+                v2 = (price * pinv - 1.0) * 100.0;
             }
         }
         let mut v3 = 0.0;
         if self.t >= r3 {
-            let idx =
-                (self.price_idx + self.price_history.len() - r3 - 1) % self.price_history.len();
-            let p = self.price_history[idx];
-            if p != 0.0 && p.is_finite() {
-                v3 = ((price / p) - 1.0) * 100.0;
+            let idx = Self::back_from_next(self.head, cap, r3 + 1);
+            let pinv = self.recip_ring[idx];
+            if price.is_finite() && pinv.is_finite() {
+                v3 = (price * pinv - 1.0) * 100.0;
             }
         }
         let mut v4 = 0.0;
         if self.t >= r4 {
-            let idx =
-                (self.price_idx + self.price_history.len() - r4 - 1) % self.price_history.len();
-            let p = self.price_history[idx];
-            if p != 0.0 && p.is_finite() {
-                v4 = ((price / p) - 1.0) * 100.0;
+            let idx = Self::back_from_next(self.head, cap, r4 + 1);
+            let pinv = self.recip_ring[idx];
+            if price.is_finite() && pinv.is_finite() {
+                v4 = (price * pinv - 1.0) * 100.0;
             }
         }
 
+        // Update four SMA rings (no modulo in hot path)
         if self.t >= r1 {
             self.sum1 -= self.b1[self.i1];
             self.b1[self.i1] = v1;
             self.sum1 += v1;
-            self.i1 = (self.i1 + 1) % s1;
+            Self::wrap_inc(&mut self.i1, s1);
         }
         if self.t >= r2 {
             self.sum2 -= self.b2[self.i2];
             self.b2[self.i2] = v2;
             self.sum2 += v2;
-            self.i2 = (self.i2 + 1) % s2;
+            Self::wrap_inc(&mut self.i2, s2);
         }
         if self.t >= r3 {
             self.sum3 -= self.b3[self.i3];
             self.b3[self.i3] = v3;
             self.sum3 += v3;
-            self.i3 = (self.i3 + 1) % s3;
+            Self::wrap_inc(&mut self.i3, s3);
         }
         if self.t >= r4 {
             self.sum4 -= self.b4[self.i4];
             self.b4[self.i4] = v4;
             self.sum4 += v4;
-            self.i4 = (self.i4 + 1) % s4;
+            Self::wrap_inc(&mut self.i4, s4);
         }
 
+        // Tick complete
         self.t += 1;
 
+        // Not warmed for KST line yet
         if self.t <= self.warm_line {
             return None;
         }
 
-        let line = (self.sum1 * self.inv1)
-            + 2.0 * (self.sum2 * self.inv2)
-            + 3.0 * (self.sum3 * self.inv3)
-            + 4.0 * (self.sum4 * self.inv4);
+        // KST line via FMA chain: sum1*(1/s1) + sum2*(2/s2) + sum3*(3/s3) + sum4*(4/s4)
+        let line = self
+            .sum1
+            .mul_add(self.inv1, self.sum2.mul_add(self.w2, self.sum3.mul_add(self.w3, self.sum4 * self.w4)));
+
         self.last_line = line;
 
-        // Update signal SMA
-        if self.t == self.warm_line + 1 {
-            // First signal calculation
-            self.sig_buf[0] = line;
-            self.sig_sum = line;
-            self.sig_idx = 1;
-            return Some((line, f64::NAN));
-        } else if self.t <= self.warm_sig {
-            // Building up signal buffer
-            self.sig_buf[self.sig_idx] = line;
-            self.sig_sum += line;
-            self.sig_idx = (self.sig_idx + 1) % self.sig;
-            if self.t == self.warm_sig {
-                let signal = self.sig_sum / (self.sig as f64);
-                return Some((line, signal));
-            }
-            return Some((line, f64::NAN));
+        // Signal SMA ring update; return finite only after full warmup
+        let old = self.sig_buf[self.sig_idx];
+        self.sig_sum += line - old;
+        self.sig_buf[self.sig_idx] = line;
+        Self::wrap_inc(&mut self.sig_idx, self.sig);
+
+        let signal = if self.t >= self.warm_sig {
+            self.sig_sum / (self.sig as f64)
         } else {
-            // Normal operation
-            self.sig_sum -= self.sig_buf[self.sig_idx];
-            self.sig_buf[self.sig_idx] = line;
-            self.sig_sum += line;
-            self.sig_idx = (self.sig_idx + 1) % self.sig;
-            let signal = self.sig_sum / (self.sig as f64);
-            return Some((line, signal));
+            f64::NAN
+        };
+
+        Some((line, signal))
+    }
+
+    // ========= helpers =========
+
+    #[inline(always)]
+    fn wrap_inc(idx: &mut usize, cap: usize) {
+        *idx += 1;
+        if *idx == cap {
+            *idx = 0;
         }
+    }
+
+    /// Compute (next - k) mod cap with a single branch, where k ∈ [0, cap]
+    #[inline(always)]
+    fn back_from_next(next: usize, cap: usize, k: usize) -> usize {
+        debug_assert!(k <= cap);
+        let mut idx = next;
+        if idx < k {
+            idx += cap;
+        }
+        idx - k
     }
 }
 

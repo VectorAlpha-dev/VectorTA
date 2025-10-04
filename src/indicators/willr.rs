@@ -1655,83 +1655,169 @@ pub unsafe fn willr_row_avx512_long(
 }
 
 // --- Streaming implementation ---
+// Decision: O(1) streaming via monotone deques; matches batch semantics (NaN/zero-range/warmup).
+// SIMD unchanged; scalar streaming remains the reference path.
 
+/// Williams %R streaming evaluator with O(1) amortized updates.
+/// Strategy:
+/// - Keep a ring of the last `period` highs/lows so we can read values by index.
+/// - Maintain two monotone deques of global indices:
+///     * dq_max: decreasing by high -> front is window max
+///     * dq_min: increasing by low  -> front is window min
+/// - Track a rolling NaN count for (high|low) over the active window via a small ring of u8.
+/// - `close` NaNs never enter state; they only affect the returned value (NaN if NaN).
 pub struct WillrStream {
     period: usize,
-    high_buffer: Vec<f64>,
-    low_buffer: Vec<f64>,
+
+    // Ring buffers storing last `period` highs/lows; indices are the global tick index % period.
+    high_ring: Vec<f64>,
+    low_ring: Vec<f64>,
+
+    // Rolling NaN tracker for (high|low) window: ring of 0/1 flags + running count.
+    nan_ring: Vec<u8>,
+    nan_count: usize,
+
+    // Monotone deques (store global indices, not ring positions)
+    dq_max: Vec<usize>, // decreasing by high
+    dq_min: Vec<usize>, // increasing by low
+    head_max: usize,
+    tail_max: usize,
+    len_max: usize,
+    head_min: usize,
+    tail_min: usize,
+    len_min: usize,
+
+    // Number of updates seen so far (also the next global index to insert).
     count: usize,
 }
 
 impl WillrStream {
+    #[inline]
     pub fn try_new(params: WillrParams) -> Result<Self, WillrError> {
         let period = params.period.unwrap_or(14);
         if period == 0 {
-            return Err(WillrError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            });
+            return Err(WillrError::InvalidPeriod { period: 0, data_len: 0 });
         }
-
         Ok(Self {
             period,
-            high_buffer: vec![f64::NAN; period],
-            low_buffer: vec![f64::NAN; period],
+            high_ring: vec![f64::NAN; period],
+            low_ring:  vec![f64::NAN; period],
+            nan_ring:  vec![0u8; period],
+            nan_count: 0,
+
+            dq_max: vec![0usize; period],
+            dq_min: vec![0usize; period],
+            head_max: 0, tail_max: 0, len_max: 0,
+            head_min: 0, tail_min: 0, len_min: 0,
+
             count: 0,
         })
     }
 
+    /// O(1) amortized update. Returns:
+    /// - `None` during warmup (< period samples)
+    /// - `Some(NaN)` if `close` is NaN or the window contains NaNs in high/low
+    /// - `Some(value)` otherwise ([-100, 0], 0.0 when high==low)
+    #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
-        // Store values in ring buffer
-        let idx = self.count % self.period;
-        self.high_buffer[idx] = high;
-        self.low_buffer[idx] = low;
-        self.count += 1;
+        let cap = self.period;
+        let t   = self.count;         // global index of this sample
+        let pos = t % cap;            // ring position being overwritten
 
-        // Need at least period values before we can calculate
-        if self.count < self.period {
-            return None;
-        }
+        // 1) Update rolling NaN state first (corresponds to evicting t - cap and adding t).
+        let new_nan = (high.is_nan() || low.is_nan()) as u8;
+        let old_nan = self.nan_ring[pos] as usize;
+        self.nan_ring[pos] = new_nan;
+        self.nan_count = self.nan_count + (new_nan as usize) - old_nan;
 
-        // Calculate Williams %R
-        let start_idx = if self.count > self.period {
-            (self.count - self.period) % self.period
-        } else {
-            0
-        };
+        // Write incoming sample into rings.
+        self.high_ring[pos] = high;
+        self.low_ring[pos]  = low;
 
-        let mut highest_high = f64::NEG_INFINITY;
-        let mut lowest_low = f64::INFINITY;
-        let mut has_nan = false;
+        // 2) Evict outdated indices from deque fronts (anything < oldest allowed index).
+        if t + 1 > cap {
+            let cutoff = t + 1 - cap;
 
-        // Find highest high and lowest low in the period
-        for i in 0..self.period {
-            let buffer_idx = (start_idx + i) % self.period;
-            let h = self.high_buffer[buffer_idx];
-            let l = self.low_buffer[buffer_idx];
-
-            if h.is_nan() || l.is_nan() || close.is_nan() {
-                has_nan = true;
-                break;
+            // max: pop front while idx < cutoff
+            while self.len_max != 0 {
+                let front_idx = self.dq_max[self.head_max];
+                if front_idx < cutoff {
+                    self.head_max += 1;
+                    if self.head_max == cap { self.head_max = 0; }
+                    self.len_max -= 1;
+                } else { break; }
             }
-
-            if h > highest_high {
-                highest_high = h;
-            }
-            if l < lowest_low {
-                lowest_low = l;
+            // min: pop front while idx < cutoff
+            while self.len_min != 0 {
+                let front_idx = self.dq_min[self.head_min];
+                if front_idx < cutoff {
+                    self.head_min += 1;
+                    if self.head_min == cap { self.head_min = 0; }
+                    self.len_min -= 1;
+                } else { break; }
             }
         }
 
-        if has_nan || highest_high.is_infinite() || lowest_low.is_infinite() {
+        // 3) Push current index into monotone deques if (high|low) are not NaN.
+        if new_nan == 0 {
+            // Maintain decreasing deque for highs (pop while back <= high).
+            while self.len_max != 0 {
+                let back_pos = if self.tail_max == 0 { cap - 1 } else { self.tail_max - 1 };
+                let back_idx = self.dq_max[back_pos];
+                let back_val = self.high_ring[back_idx % cap];
+                if back_val <= high {
+                    self.tail_max = back_pos;
+                    self.len_max -= 1;
+                } else { break; }
+            }
+            self.dq_max[self.tail_max] = t;
+            self.tail_max += 1;
+            if self.tail_max == cap { self.tail_max = 0; }
+            self.len_max += 1;
+
+            // Maintain increasing deque for lows (pop while back >= low).
+            while self.len_min != 0 {
+                let back_pos = if self.tail_min == 0 { cap - 1 } else { self.tail_min - 1 };
+                let back_idx = self.dq_min[back_pos];
+                let back_val = self.low_ring[back_idx % cap];
+                if back_val >= low {
+                    self.tail_min = back_pos;
+                    self.len_min -= 1;
+                } else { break; }
+            }
+            self.dq_min[self.tail_min] = t;
+            self.tail_min += 1;
+            if self.tail_min == cap { self.tail_min = 0; }
+            self.len_min += 1;
+        }
+
+        // 4) We have fully slid the window; bump count and decide what to return.
+        self.count = t + 1;
+        if self.count < cap {
+            return None; // warmup
+        }
+
+        // 5) Compute Williams %R for the window ending at t.
+        if close.is_nan() || self.nan_count != 0 || self.len_max == 0 || self.len_min == 0 {
             return Some(f64::NAN);
         }
 
-        let denom = highest_high - lowest_low;
+        let h_idx = self.dq_max[self.head_max];
+        let l_idx = self.dq_min[self.head_min];
+        let h = self.high_ring[h_idx % cap];
+        let l = self.low_ring[l_idx % cap];
+
+        if !(h.is_finite() && l.is_finite()) {
+            return Some(f64::NAN);
+        }
+
+        let denom = h - l;
         if denom == 0.0 {
             Some(0.0)
         } else {
-            Some((highest_high - close) / denom * -100.0)
+            // ((high - close) / (high - low)) * -100, with FMA to reduce rounding.
+            let ratio = (h - close) / denom;
+            Some((-100.0f64).mul_add(ratio, 0.0))
         }
     }
 }

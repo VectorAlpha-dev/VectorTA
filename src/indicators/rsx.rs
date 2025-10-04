@@ -15,7 +15,7 @@
 //! - SIMD status: AVX2 provides a scalar, FMA‑enabled path (via `mul_add`) for a consistent 5–10% speedup on large series; AVX512 reuses the same path. RSX is a short, stateful IIR chain, so there is no cross‑time lane parallelism without complex look‑ahead transforms.
 //! - Batch status: Row‑specific batch kernels were not attempted; there is no clear shared precompute across periods to amortize work beyond minor per‑row wins.
 //! - Scalar path: Warmup/init hoisted out of the loop; safe, branch‑lean hot loop following ALMA patterns. Outputs and prefixes use zero‑copy helpers.
-//! - Streaming update: O(1) per tick via ring/state; mirrors batch logic exactly.
+//! - Streaming update: O(1) per tick via explicit RSX IIR state; mirrors batch logic exactly. Ring buffer removed; warmup semantics preserved (None until `period-1`, then NaN once, then values).
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -508,10 +508,34 @@ unsafe fn rsx_simd128(data: &[f64], period: usize, first: usize, out: &mut [f64]
 #[derive(Debug, Clone)]
 pub struct RsxStream {
     period: usize,
-    buf: Vec<f64>,
-    head: usize,
-    filled: bool,
-    state: Option<[f64; 18]>,
+
+    // Warm-up bookkeeping
+    seen: usize,
+    init_done: bool,
+
+    // Constants
+    alpha: f64, // 3 / (period + 2)
+    beta: f64,  // 1 - alpha
+    f88: f64,   // warm-up target: max(period-1, 5)
+    f90: f64,   // warm-up counter
+
+    // Latch and last price (scaled by 100)
+    f0: f64,
+    f8: f64,
+
+    // IIR chain state registers
+    f28: f64,
+    f30: f64,
+    f38: f64,
+    f40: f64,
+    f48: f64,
+    f50: f64,
+    f58: f64,
+    f60: f64,
+    f68: f64,
+    f70: f64,
+    f78: f64,
+    f80: f64,
 }
 
 impl RsxStream {
@@ -523,99 +547,103 @@ impl RsxStream {
                 data_len: 0,
             });
         }
+
+        let alpha = 3.0 / (period as f64 + 2.0);
+        let beta = 1.0 - alpha;
+
         Ok(Self {
             period,
-            buf: vec![f64::NAN; period],
-            head: 0,
-            filled: false,
-            state: None,
+            seen: 0,
+            init_done: false,
+            alpha,
+            beta,
+            f88: if period >= 6 { (period - 1) as f64 } else { 5.0 },
+            f90: 1.0,
+            f0: 0.0,
+            f8: 0.0,
+            f28: 0.0,
+            f30: 0.0,
+            f38: 0.0,
+            f40: 0.0,
+            f48: 0.0,
+            f50: 0.0,
+            f58: 0.0,
+            f60: 0.0,
+            f68: 0.0,
+            f70: 0.0,
+            f78: 0.0,
+            f80: 0.0,
         })
     }
 
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        self.buf[self.head] = value;
-        self.head = (self.head + 1) % self.period;
+        // Count this tick
+        self.seen += 1;
 
-        if !self.filled && self.head == 0 {
-            self.filled = true;
-            return Some(self.ring_calc(value));
-        }
-
-        if !self.filled {
+        // Before warm-up boundary: return None
+        if !self.init_done && self.seen < self.period {
             return None;
         }
 
-        Some(self.ring_calc(value))
-    }
-
-    #[inline(always)]
-    fn ring_calc(&mut self, val: f64) -> f64 {
-        let period = self.period;
-        let mut s = self.state.unwrap_or([0.0; 18]);
-        let mut out_val = f64::NAN;
-        let mut is_initialized = self.state.is_some();
-
-        if !is_initialized {
-            s[16] = if period >= 6 {
-                (period - 1) as f64
-            } else {
-                5.0
-            };
-            s[17] = 1.0;
-            s[1] = 100.0 * val;
-            s[2] = 3.0 / (period as f64 + 2.0);
-            s[3] = 1.0 - s[2];
-            is_initialized = true;
-            out_val = f64::NAN;
-        } else {
-            s[17] = if s[16] <= s[17] {
-                s[16] + 1.0
-            } else {
-                s[17] + 1.0
-            };
-            let prev = s[1];
-            s[1] = 100.0 * val;
-            let v8 = s[1] - prev;
-            s[4] = s[3] * s[4] + s[2] * v8;
-            s[5] = s[2] * s[4] + s[3] * s[5];
-            let v_c = s[4] * 1.5 - s[5] * 0.5;
-            s[6] = s[3] * s[6] + s[2] * v_c;
-            s[7] = s[2] * s[6] + s[3] * s[7];
-            let v10 = s[6] * 1.5 - s[7] * 0.5;
-            s[8] = s[3] * s[8] + s[2] * v10;
-            s[9] = s[2] * s[8] + s[3] * s[9];
-            let v14 = s[8] * 1.5 - s[9] * 0.5;
-            s[10] = s[3] * s[10] + s[2] * v8.abs();
-            s[11] = s[2] * s[10] + s[3] * s[11];
-            let v18 = s[10] * 1.5 - s[11] * 0.5;
-            s[12] = s[3] * s[12] + s[2] * v18;
-            s[13] = s[2] * s[12] + s[3] * s[13];
-            let v1c = s[12] * 1.5 - s[13] * 0.5;
-            s[14] = s[3] * s[14] + s[2] * v1c;
-            s[15] = s[2] * s[14] + s[3] * s[15];
-            let v20_ = s[14] * 1.5 - s[15] * 0.5;
-            if s[16] >= s[17] && s[1] != prev {
-                s[0] = 1.0;
-            }
-            if (s[16] - s[17]).abs() < f64::EPSILON && s[0] == 0.0 {
-                s[17] = 0.0;
-            }
-            if s[16] < s[17] && v20_ > 1e-10 {
-                let mut v4 = (v14 / v20_ + 1.0) * 50.0;
-                if v4 > 100.0 {
-                    v4 = 100.0;
-                }
-                if v4 < 0.0 {
-                    v4 = 0.0;
-                }
-                out_val = v4;
-            } else {
-                out_val = 50.0;
-            }
+        // Exactly at warm-up boundary: latch initial state and return NaN
+        if !self.init_done {
+            self.init_done = true;
+            self.f0 = 0.0;
+            self.f8 = 100.0 * value;
+            return Some(f64::NAN);
         }
-        self.state = Some(s);
-        out_val
+
+        // Post warm-up: O(1) recursive update
+        self.f90 = if self.f88 <= self.f90 { self.f88 + 1.0 } else { self.f90 + 1.0 };
+
+        let prev = self.f8;
+        self.f8 = 100.0 * value;
+        let v8 = self.f8 - prev;
+
+        // IIR smoothing chain (matches batch scalar math)
+        self.f28 = self.beta * self.f28 + self.alpha * v8;
+        self.f30 = self.alpha * self.f28 + self.beta * self.f30;
+        let v_c = self.f28 * 1.5 - self.f30 * 0.5;
+
+        self.f38 = self.beta * self.f38 + self.alpha * v_c;
+        self.f40 = self.alpha * self.f38 + self.beta * self.f40;
+        let v10 = self.f38 * 1.5 - self.f40 * 0.5;
+
+        self.f48 = self.beta * self.f48 + self.alpha * v10;
+        self.f50 = self.alpha * self.f48 + self.beta * self.f50;
+        let v14 = self.f48 * 1.5 - self.f50 * 0.5;
+
+        let av = v8.abs();
+        self.f58 = self.beta * self.f58 + self.alpha * av;
+        self.f60 = self.alpha * self.f58 + self.beta * self.f60;
+        let v18 = self.f58 * 1.5 - self.f60 * 0.5;
+
+        self.f68 = self.beta * self.f68 + self.alpha * v18;
+        self.f70 = self.alpha * self.f68 + self.beta * self.f70;
+        let v1c = self.f68 * 1.5 - self.f70 * 0.5;
+
+        self.f78 = self.beta * self.f78 + self.alpha * v1c;
+        self.f80 = self.alpha * self.f78 + self.beta * self.f80;
+        let v20_ = self.f78 * 1.5 - self.f80 * 0.5;
+
+        // Warm-up latch logic (unchanged)
+        if self.f88 >= self.f90 && self.f8 != prev {
+            self.f0 = 1.0;
+        }
+        if (self.f88 - self.f90).abs() < f64::EPSILON && self.f0 == 0.0 {
+            self.f90 = 0.0;
+        }
+
+        // Final RSX value with clamp
+        let y = if self.f88 < self.f90 && v20_ > 1e-10 {
+            let v4 = (v14 / v20_ + 1.0) * 50.0;
+            v4.max(0.0).min(100.0)
+        } else {
+            50.0
+        };
+
+        Some(y)
     }
 }
 

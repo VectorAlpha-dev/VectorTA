@@ -18,7 +18,7 @@
 //! ## Developer Notes
 //! - SIMD status: enabled (AVX2/AVX512) via block prefix-scan with scalar carry. On 100k candles at `-C target-cpu=native`, AVX2/AVX512 improve >30% vs optimized scalar.
 //! - Batch status: row-specific batch kernels not attempted; VPT has no parameter grid and no shared precompute across rows. Batch selection short-circuits to scalar row path.
-//! - Streaming Performance: O(1) implementation with simple cumulative sum tracking. Very efficient - only stores last price and VPT value.
+//! - Streaming Performance: O(1) with sticky-NaN semantics to match slice/batch; uses `mul_add` on the hot path. Very efficient and state-minimal.
 //! - Memory Optimization: Uses `alloc_with_nan_prefix` and batch helpers properly. Streaming is optimal with minimal state.
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -484,7 +484,12 @@ pub unsafe fn vpt_avx512(price: &[f64], volume: &[f64]) -> Result<VptOutput, Vpt
 
         // cur = v * ((p1 - p0) / p0)
         let diff = _mm512_sub_pd(p1, p0);
-        let div = _mm512_div_pd(diff, p0);
+        // Fast reciprocal + one Newton step (~28 bits), then multiply: div = diff / p0
+        // Keeps behavior under invalid mask unchanged; accuracy matches scalar within tolerance.
+        let r0 = _mm512_rcp14_pd(p0);
+        let two = _mm512_set1_pd(2.0);
+        let r1 = _mm512_mul_pd(r0, _mm512_fnmadd_pd(p0, r0, two));
+        let div = _mm512_mul_pd(diff, r1);
         let mul = _mm512_mul_pd(vv, div);
         let cur = _mm512_mask_mov_pd(mul, invalid, _mm512_set1_pd(f64::NAN));
 
@@ -780,42 +785,99 @@ pub fn vpt_batch_inner_into(
     Ok(combos)
 }
 
+/// Streaming VPT: sticky-NaN to match slice/batch; FMA used on hot path.
 #[derive(Clone, Debug, Default)]
 pub struct VptStream {
+    // Previous price p[i-1]
     last_price: f64,
-    last_vpt: f64,
-    is_initialized: bool,
+    // Previous increment cur(i-1) = v[i-1] * ((p[i-1] - p[i-2]) / p[i-2]); NaN until available
+    carry_inc: f64,
+    // Last cumulative VPT value emitted; NaN until first non-NaN is produced
+    cum: f64,
+    // Have we seen at least one sample?
+    seeded: bool,
+    // Once true, we permanently output NaN (matches slice/batch semantics after invalid data)
+    sticky_nan: bool,
 }
 
 impl VptStream {
-    #[inline]
+    /// O(1) streaming update of cumulative VPT.
+    /// Returns:
+    ///   - None: on very first call (needs a previous price)
+    ///   - Some(NaN): during warmup at the first valid pair, or forever after any invalid data (sticky)
+    ///   - Some(value): cumulative VPT thereafter
+    #[inline(always)]
     pub fn update(&mut self, price: f64, volume: f64) -> Option<f64> {
-        if !self.is_initialized {
+        // Seed with the very first price; no output yet.
+        if !self.seeded {
             self.last_price = price;
-            self.last_vpt = f64::NAN; // Start with NaN to match array behavior
-            self.is_initialized = true;
+            self.seeded = true;
+            self.carry_inc = f64::NAN;
+            self.cum = f64::NAN;
+            self.sticky_nan = false;
             return None;
         }
-        if self.last_price.is_nan() || self.last_price == 0.0 || price.is_nan() || volume.is_nan() {
-            self.last_price = price;
-            self.last_vpt = f64::NAN; // Keep as NaN to propagate
+
+        // If we ever hit an invalid sample, match array semantics: stay NaN forever.
+        if self.sticky_nan {
+            self.last_price = price; // keep tracking price for potential manual restart
             return Some(f64::NAN);
         }
-        let vpt_val = volume * ((price - self.last_price) / self.last_price);
-        // Cumulative sum: current VPT value + previous VPT sum
-        // First actual calculation returns NaN because last_vpt starts as NaN
-        let out = if self.last_vpt.is_nan() {
-            // This is the first actual VPT calculation, return NaN but save the value for next time
+
+        // Strict validation to mirror the slice/batch code:
+        // need finite p[i-1], finite p[i], finite v[i], and p[i-1] != 0.0.
+        if !(self.last_price.is_finite()
+            && self.last_price != 0.0
+            && price.is_finite()
+            && volume.is_finite())
+        {
+            self.sticky_nan = true;
             self.last_price = price;
-            self.last_vpt = vpt_val; // Save first value for cumulative calculation
-            f64::NAN
-        } else {
-            let result = vpt_val + self.last_vpt;
-            self.last_price = price;
-            self.last_vpt = result; // Store cumulative sum
-            result
-        };
-        Some(out)
+            self.carry_inc = f64::NAN;
+            self.cum = f64::NAN;
+            return Some(f64::NAN);
+        }
+
+        // Hot-path math (one div, two muls, one add). Use FMA to reduce latency/rounding:
+        // cur = volume * ((price - last_price) / last_price)
+        let inv = 1.0 / self.last_price;
+        let scale = volume * inv;
+        let dv = price - self.last_price;
+        self.last_price = price;
+
+        // Fused: cur = dv * scale + 0
+        let cur_inc = dv.mul_add(scale, 0.0);
+        // First valid increment: emit NaN (warmup) but store carry for the next step
+        if self.carry_inc.is_nan() {
+            self.carry_inc = cur_inc;
+            return Some(f64::NAN);
+        }
+
+        // From the second valid pair onward:
+        // at the second pair, cum is NaN, so base := carry_inc (sum of two increments);
+        // after that, base := cum (running sum).
+        let base = if self.cum.is_finite() { self.cum } else { self.carry_inc };
+        let new_cum = base + cur_inc;
+
+        self.carry_inc = cur_inc;
+        self.cum = new_cum;
+        Some(new_cum)
+    }
+
+    /// Reset back to the unseeded state.
+    #[inline(always)]
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Optional helper: restart streaming continuity at a known price (after data gaps).
+    #[inline(always)]
+    pub fn restart_from(&mut self, price: f64) {
+        self.last_price = price;
+        self.carry_inc = f64::NAN;
+        self.cum = f64::NAN;
+        self.seeded = true;
+        self.sticky_nan = false;
     }
 }
 

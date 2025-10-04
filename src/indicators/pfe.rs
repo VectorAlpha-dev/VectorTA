@@ -1009,130 +1009,149 @@ unsafe fn pfe_row_scalar_with_prefix(
     }
 }
 
-use std::collections::VecDeque;
+// Decision: Streaming kernel uses contiguous Vec rings (prices, segments),
+// not VecDeque; exact math retained for test parity. O(1) per tick.
 
 #[derive(Debug, Clone)]
 pub struct PfeStream {
+    // params
     period: usize,
     smoothing: usize,
-    // We keep period+1 elements so that we can always refer to [0] = P_{t-period}
-    // and [period] = P_t.  When length < period+1, return None.
-    buffer: VecDeque<f64>,
+
+    // precomputed constants
+    alpha: f64,
+    one_minus_alpha: f64,
+    p2: f64, // (period as f64)^2
+
+    // ring of last (period + 1) prices
+    prices: Vec<f64>,   // capacity = period + 1 (contiguous)
+    price_pos: usize,   // index of most-recent element in `prices`
+    price_count: usize, // how many prices we have (<= period+1)
+
+    // ring of last `period` short-leg step lengths: sqrt(1 + d^2)
+    seg: Vec<f64>,      // capacity = period
+    seg_pos: usize,     // next position to overwrite in `seg`
+    seg_count: usize,   // how many segments we have (<= period)
+    short_sum: f64,     // running sum of `seg`
+
+    // step state
+    last_price: f64,
+    have_last: bool,
 
     // EMA state
     ema_val: f64,
     started: bool,
-    // Running sum of short leg components
-    short_leg_sum: f64,
 }
 
 impl PfeStream {
     pub fn try_new(params: PfeParams) -> Result<Self, PfeError> {
         let period = params.period.unwrap_or(10);
         if period == 0 {
-            return Err(PfeError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(PfeError::InvalidPeriod { period, data_len: 0 });
         }
         let smoothing = params.smoothing.unwrap_or(5);
         if smoothing == 0 {
             return Err(PfeError::InvalidSmoothing { smoothing });
         }
 
+        let cap_prices = period + 1;
+        let cap_seg = period;
+        let alpha = 2.0 / (smoothing as f64 + 1.0);
+
         Ok(Self {
             period,
             smoothing,
-            buffer: VecDeque::with_capacity(period + 1),
+            alpha,
+            one_minus_alpha: 1.0 - alpha,
+            p2: (period as f64) * (period as f64),
+
+            prices: vec![0.0; cap_prices],
+            price_pos: cap_prices - 1, // so first write lands at 0
+            price_count: 0,
+
+            seg: if cap_seg > 0 { vec![0.0; cap_seg] } else { Vec::new() },
+            seg_pos: 0,
+            seg_count: 0,
+            short_sum: 0.0,
+
+            last_price: 0.0,
+            have_last: false,
+
             ema_val: 0.0,
             started: false,
-            short_leg_sum: 0.0,
         })
     }
 
-    /// Pushes one new price into the stream.  Returns `None` until we have
-    /// collected (period+1) values.  Once we have exactly period+1 values,
-    /// we compute:
-    ///   diff = P_t - P_{t-period},
-    ///   numerator = sqrt(diff² + period²),
-    ///   denominator = sum_{i=0..period-1} sqrt(1 + (ΔP)^2) over the sliding window,
-    ///   raw_pfe = 100 * (numerator / denominator) with correct sign,
-    ///   then EMA-smooth that raw value.
+    /// Push one price. Returns None until `period+1` samples have been seen.
+    #[inline(always)]
     pub fn update(&mut self, price: f64) -> Option<f64> {
-        // 1) Push new price
-        let is_full = self.buffer.len() == self.period + 1;
+        // 1) Update short-leg with the new step (t-1 -> t)
+        if self.have_last {
+            let d = price - self.last_price;
+            // exact hypot-like step: sqrt(1 + d^2)
+            let new_s = (d.mul_add(d, 1.0)).sqrt();
 
-        if is_full {
-            // Update running sum before modifying buffer
-            // Remove the contribution of the oldest segment (buffer[0] to buffer[1])
-            let old_diff = self.buffer[1] - self.buffer[0];
-            self.short_leg_sum -= (1.0 + old_diff.powi(2)).sqrt();
+            if self.seg_count < self.period {
+                // still filling the segment ring
+                self.short_sum += new_s;
+                if self.period > 0 {
+                    self.seg[self.seg_pos] = new_s;
+                    self.seg_pos += 1;
+                    if self.seg_pos == self.period { self.seg_pos = 0; }
+                }
+                self.seg_count += 1;
+            } else if self.period > 0 {
+                // steady state: drop oldest, add newest
+                let old = self.seg[self.seg_pos];
+                self.short_sum += new_s - old;
+                self.seg[self.seg_pos] = new_s;
+                self.seg_pos += 1;
+                if self.seg_pos == self.period { self.seg_pos = 0; }
+            }
+        }
+        self.last_price = price;
+        self.have_last = true;
 
-            // Add the contribution of the new segment (last value to new price)
-            let last_val = self.buffer[self.period];
-            let new_diff = price - last_val;
-            self.short_leg_sum += (1.0 + new_diff.powi(2)).sqrt();
-
-            // Remove oldest price
-            self.buffer.pop_front();
+        // 2) Insert the new price into the price ring
+        let cap_prices = self.period + 1;
+        self.price_pos += 1;
+        if self.price_pos == cap_prices { self.price_pos = 0; }
+        self.prices[self.price_pos] = price;
+        if self.price_count < cap_prices {
+            self.price_count += 1;
         }
 
-        self.buffer.push_back(price);
-
-        // 2) If we don't yet have (period+1) points, return None
-        if self.buffer.len() < self.period + 1 {
+        // 3) Not enough samples yet? No output.
+        if self.price_count < cap_prices {
             return None;
         }
 
-        // First time we have enough data - calculate initial sum
-        if !is_full {
-            self.short_leg_sum = 0.0;
-            for i in 0..self.period {
-                let p_i = self.buffer[i];
-                let p_next = self.buffer[i + 1];
-                let step_diff = p_next - p_i;
-                self.short_leg_sum += (1.0 + step_diff.powi(2)).sqrt();
-            }
-        }
-
-        // 3) Now buffer.len() == period+1.  Let:
-        //      front = P_{t-period},   // buffer[0]
-        //      back  = P_t,            // buffer[period]
-        let front = self.buffer[0];
-        let back = *self.buffer.get(self.period).unwrap();
-
         // 4) Compute diff = P_t - P_{t-period}
-        let diff = back - front;
+        //    Oldest element is the slot after the current (wrap-aware).
+        let past_idx = self.price_pos + 1 - ((self.price_pos + 1) / cap_prices) * cap_prices;
+        let past = self.prices[past_idx];
+        let diff = price - past;
 
-        // 5) Long leg = sqrt(diff² + period²)
-        let long_leg = (diff.powi(2) + (self.period as f64).powi(2)).sqrt();
+        // 5) Long leg = sqrt(diff^2 + period^2); denom = rolling sum of short legs
+        let long_leg = (diff.mul_add(diff, self.p2)).sqrt();
+        let denom = self.short_sum;
 
-        // 6) Short leg is already maintained in self.short_leg_sum
-        let short_leg = self.short_leg_sum;
+        // 6) Raw PFE (guard small denom), sign by diff>0
+        let inv = if denom <= f64::EPSILON { 0.0 } else { 1.0 / denom };
+        let raw = 100.0 * long_leg * inv;
+        let signed = if diff > 0.0 { raw } else { -raw };
 
-        // 7) raw PFE = 100 * (long_leg / short_leg), or 0 if denominator ≈ 0
-        let raw_pfe = if short_leg.abs() < f64::EPSILON {
-            0.0
-        } else {
-            100.0 * long_leg / short_leg
-        };
-
-        // 8) Apply sign based on diff
-        let signed = if diff > 0.0 { raw_pfe } else { -raw_pfe };
-
-        // 9) EMA‐smooth using alpha = 2/(smoothing+1)
-        let alpha = 2.0 / (self.smoothing as f64 + 1.0);
-        let out_val = if !self.started {
-            // seed the EMA on the first available raw value
-            self.ema_val = signed;
+        // 7) EMA smoothing
+        let out = if !self.started {
             self.started = true;
+            self.ema_val = signed;
             signed
         } else {
-            self.ema_val = alpha * signed + (1.0 - alpha) * self.ema_val;
+            self.ema_val = self.alpha.mul_add(signed, self.one_minus_alpha * self.ema_val);
             self.ema_val
         };
 
-        Some(out_val)
+        Some(out)
     }
 }
 

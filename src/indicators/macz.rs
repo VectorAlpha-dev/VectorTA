@@ -21,7 +21,7 @@
 //! ## Developer Notes
 //! - SIMD status: Sliding-window maintenance dominates; AVX2/AVX512 stubs delegate to scalar for correctness and speed.
 //! - Batch status: Row-specific kernels not implemented; revisit when sweeps share lz/lsd to exploit shared precompute.
-//! - Streaming: O(1) with efficient circular buffer management and incremental computations.
+//! - Streaming: O(1) with modulo-free ring and strict signal SMA (no per-tick scans); matches batch warmup and NaN rules.
 //! - Memory: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes).
 
 // ==================== IMPORTS SECTION ====================
@@ -1761,32 +1761,48 @@ fn macz_batch_inner_into_vol(
 #[derive(Debug, Clone)]
 pub struct MaczStream {
     params: MaczParams,
-    // Ring buffers for data
+
+    // Ring buffers (single shared ring of length = max window)
     price_buffer: Vec<f64>,
     volume_buffer: Vec<f64>,
     buffer_size: usize,
+
+    // Logical stream index (number of ingested samples)
     index: usize,
+
+    // NEW: ring "head" (next write position) – avoids modulo on each access
+    head: usize,
+
+    // Whether the ring has wrapped (kept for parity with existing state)
     filled: bool,
 
-    // Rolling sums for moving averages
+    // Rolling sums (O(1))
     fast_sum: f64,
     slow_sum: f64,
 
-    // Rolling sums for VWAP
-    vwap_pv_sum: f64, // price * volume sum
-    vwap_v_sum: f64,  // volume sum
+    // Z-VWAP: ∑x and ∑x² over lz window
+    sum_lz: f64,
+    sum2_lz: f64,
 
-    // Rolling sum and sum of squares for standard deviation
+    // VWAP: ∑(price*vol) and ∑vol over lz window
+    vwap_pv_sum: f64,
+    vwap_v_sum: f64,
+
+    // NEW: number of "bad" bars (non-finite or non-positive volume) in VWAP window
+    vwap_bad: usize,
+
+    // ta.stdev(source, lsd) population: ∑x and ∑x² over lsd window
     stdev_sum: f64,
     stdev_sum2: f64,
 
-    // Rolling sums for Z-score variance over lz
-    sum_lz: f64,  // sum of price over lz
-    sum2_lz: f64, // sum of price^2 over lz
-
-    // Signal MA rolling sum
+    // Signal SMA over MAC‑Z (strict SMA: NaN if any NaN in window)
     signal_sum: f64,
     signal_buffer: Vec<f64>,
+
+    // NEW: O(1) maintenance for the signal window
+    sig_head: usize,
+    sig_count: usize,
+    sig_nan: usize,
 
     // Laguerre filter state
     l0: f64,
@@ -1796,7 +1812,7 @@ pub struct MaczStream {
     use_lag: bool,
     gamma: f64,
 
-    // Current intermediate values
+    // Current intermediates (left for API parity / introspection)
     current_vwap: f64,
     current_zvwap: f64,
     current_fast_ma: f64,
@@ -1805,20 +1821,73 @@ pub struct MaczStream {
     current_stdev: f64,
     current_macz: f64,
     current_signal: f64,
+
+    // ===== NEW: precomputed constants / offsets to avoid work in hot loop =====
+    // Periods
+    fast: usize,
+    slow: usize,
+    lz: usize,
+    lsd: usize,
+    sig: usize,
+
+    // Coefficients
+    a: f64,
+    b: f64,
+
+    // Reciprocals (replace per-tick division)
+    inv_fast: f64,
+    inv_slow: f64,
+    inv_lz: f64,
+    inv_lsd: f64,
+    inv_sig: f64,
+
+    // Warm lengths
+    warm_m: usize,
+    warm_hist: usize,
+
+    // Ring offsets to fetch leaving elements without modulo
+    off_fast: usize,
+    off_slow: usize,
+    off_lz: usize,
+    off_lsd: usize,
 }
 
 impl MaczStream {
     pub fn try_new(params: MaczParams) -> Result<Self, MaczError> {
         let fast = params.fast_length.unwrap_or(12);
         let slow = params.slow_length.unwrap_or(25);
-        let lz = params.lengthz.unwrap_or(20);
-        let lsd = params.length_stdev.unwrap_or(25);
-        let sig = params.signal_length.unwrap_or(9);
+        let lz   = params.lengthz.unwrap_or(20);
+        let lsd  = params.length_stdev.unwrap_or(25);
+        let sig  = params.signal_length.unwrap_or(9);
         let use_lag = params.use_lag.unwrap_or(false);
-        let gamma = params.gamma.unwrap_or(0.02);
+        let gamma   = params.gamma.unwrap_or(0.02);
 
-        // Buffer must be large enough for all periods
-        let buffer_size = slow.max(lz).max(lsd).max(fast);
+        if fast == 0 || slow == 0 || lz == 0 || lsd == 0 || sig == 0 {
+            return Err(MaczError::InvalidParameter { msg: "periods must be > 0".into() });
+        }
+        if !(0.0..1.0).contains(&gamma) {
+            return Err(MaczError::InvalidGamma { gamma });
+        }
+        let a = params.a.unwrap_or(1.0);
+        let b = params.b.unwrap_or(1.0);
+        if !(-2.0..=2.0).contains(&a) { return Err(MaczError::InvalidA { a }); }
+        if !(-2.0..=2.0).contains(&b) { return Err(MaczError::InvalidB { b }); }
+
+        // One shared ring large enough for all windows
+        let buffer_size = fast.max(slow).max(lz).max(lsd);
+
+        // Warm lengths (match batch): first MACZ at warm_m-1, first histogram at warm_hist
+        let warm_m   = slow.max(lz).max(lsd);
+        let warm_hist = warm_m + sig - 1;
+
+        // Precompute reciprocals and modulo-free offsets
+        let inv_fast = 1.0 / (fast as f64);
+        let inv_slow = 1.0 / (slow as f64);
+        let inv_lz   = 1.0 / (lz   as f64);
+        let inv_lsd  = 1.0 / (lsd  as f64);
+        let inv_sig  = 1.0 / (sig  as f64);
+
+        let off = |p: usize| buffer_size - (p % buffer_size);
 
         Ok(Self {
             params,
@@ -1826,29 +1895,30 @@ impl MaczStream {
             volume_buffer: vec![1.0; buffer_size],
             buffer_size,
             index: 0,
+            head: 0,
             filled: false,
 
             fast_sum: 0.0,
             slow_sum: 0.0,
 
+            sum_lz: 0.0,
+            sum2_lz: 0.0,
+
             vwap_pv_sum: 0.0,
             vwap_v_sum: 0.0,
+            vwap_bad: 0,
 
             stdev_sum: 0.0,
             stdev_sum2: 0.0,
 
-            sum_lz: 0.0,
-            sum2_lz: 0.0,
-
             signal_sum: 0.0,
             signal_buffer: vec![f64::NAN; sig],
+            sig_head: 0,
+            sig_count: 0,
+            sig_nan: 0,
 
-            l0: 0.0,
-            l1: 0.0,
-            l2: 0.0,
-            l3: 0.0,
-            use_lag,
-            gamma,
+            l0: 0.0, l1: 0.0, l2: 0.0, l3: 0.0,
+            use_lag, gamma,
 
             current_vwap: f64::NAN,
             current_zvwap: f64::NAN,
@@ -1858,6 +1928,16 @@ impl MaczStream {
             current_stdev: f64::NAN,
             current_macz: f64::NAN,
             current_signal: f64::NAN,
+
+            fast, slow, lz, lsd, sig,
+            a, b,
+            inv_fast, inv_slow, inv_lz, inv_lsd, inv_sig,
+            warm_m, warm_hist,
+
+            off_fast: off(fast),
+            off_slow: off(slow),
+            off_lz:   off(lz),
+            off_lsd:  off(lsd),
         })
     }
 
@@ -1866,177 +1946,141 @@ impl MaczStream {
         Self::try_new(params)
     }
 
+    #[inline(always)]
     pub fn update(&mut self, value: f64, volume: Option<f64>) -> Option<f64> {
         if !value.is_finite() {
-            return None;
+            return None; // strict
+        }
+        let vol = volume.unwrap_or(1.0);
+        let vol_ok = vol.is_finite() && vol > 0.0;
+
+        let bsz = self.buffer_size;
+        let idx = self.head;
+
+        // Helpers: modulo-free index add
+        #[inline(always)]
+        fn add_off(i: usize, off: usize, n: usize) -> usize {
+            let j = i + off;
+            if j >= n { j - n } else { j }
         }
 
-        let vol = volume.unwrap_or(1.0);
-        let fast = self.params.fast_length.unwrap_or(12);
-        let slow = self.params.slow_length.unwrap_or(25);
-        let lz = self.params.lengthz.unwrap_or(20);
-        let lsd = self.params.length_stdev.unwrap_or(25);
-        let sig = self.params.signal_length.unwrap_or(9);
-        let a = self.params.a.unwrap_or(1.0);
-        let b = self.params.b.unwrap_or(1.0);
+        // --- Identify leaving elements (before overwriting head) ---
+        let leaving_fast_idx = add_off(idx, self.off_fast, bsz);
+        let leaving_slow_idx = add_off(idx, self.off_slow, bsz);
+        let leaving_lz_idx   = add_off(idx, self.off_lz,   bsz);
+        let leaving_lsd_idx  = add_off(idx, self.off_lsd,  bsz);
 
-        // indexes and exiting values for each window
-        let idx = self.index % self.buffer_size;
+        let exiting_fast = if self.index >= self.fast { self.price_buffer[leaving_fast_idx] } else { 0.0 };
+        let exiting_slow = if self.index >= self.slow { self.price_buffer[leaving_slow_idx] } else { 0.0 };
+        let exiting_lz   = if self.index >= self.lz   { self.price_buffer[leaving_lz_idx] }   else { 0.0 };
+        let exiting_lsd  = if self.index >= self.lsd  { self.price_buffer[leaving_lsd_idx] }  else { 0.0 };
 
-        let exiting_fast = if self.index >= fast {
-            self.price_buffer[(self.index - fast) % self.buffer_size]
-        } else {
-            0.0
-        };
-        let exiting_slow = if self.index >= slow {
-            self.price_buffer[(self.index - slow) % self.buffer_size]
-        } else {
-            0.0
-        };
-        let exiting_lz = if self.index >= lz {
-            self.price_buffer[(self.index - lz) % self.buffer_size]
-        } else {
-            0.0
-        };
-        let exiting_lsd = if self.index >= lsd {
-            self.price_buffer[(self.index - lsd) % self.buffer_size]
-        } else {
-            0.0
-        };
         let exiting_vwap_price = exiting_lz;
-        let exiting_vwap_vol = if self.index >= lz {
-            self.volume_buffer[(self.index - lz) % self.buffer_size]
-        } else {
-            0.0
-        };
+        let exiting_vwap_vol   = if self.index >= self.lz { self.volume_buffer[leaving_lz_idx] } else { 0.0 };
+        let leaving_vol_ok = exiting_vwap_vol.is_finite() && exiting_vwap_vol > 0.0;
 
-        // write new sample
+        // --- Overwrite head with new sample ---
         self.price_buffer[idx] = value;
         self.volume_buffer[idx] = vol;
 
-        // update sums
+        // --- O(1) rolling sums ---
         self.fast_sum += value - exiting_fast;
         self.slow_sum += value - exiting_slow;
 
-        // lz window for zscore variance
-        self.sum_lz += value - exiting_lz;
-        self.sum2_lz += value * value - exiting_lz * exiting_lz;
+        self.sum_lz  += value - exiting_lz;
+        self.sum2_lz += value.mul_add(value, -exiting_lz * exiting_lz);
 
-        // vwap over lz bars
         self.vwap_pv_sum += value * vol - exiting_vwap_price * exiting_vwap_vol;
-        self.vwap_v_sum += vol - exiting_vwap_vol;
+        self.vwap_v_sum  += vol - exiting_vwap_vol;
 
-        // lsd window for ta.stdev(source, lsd) population
-        self.stdev_sum += value - exiting_lsd;
-        self.stdev_sum2 += value * value - exiting_lsd * exiting_lsd;
+        if !vol_ok { self.vwap_bad += 1; }
+        if self.index >= self.lz && !leaving_vol_ok && self.vwap_bad > 0 { self.vwap_bad -= 1; }
 
-        // The batch warmup is slow.max(lz).max(lsd) + sig - 1
-        // But we need to track our progress differently for streaming
+        self.stdev_sum  += value - exiting_lsd;
+        self.stdev_sum2 += value.mul_add(value, -exiting_lsd * exiting_lsd);
 
-        // First, check if we have enough data to calculate macz (warm_m)
-        let warm_m = slow.max(lz).max(lsd);
-        if self.index < warm_m - 1 {
-            self.index += 1;
-            self.filled |= self.index >= self.buffer_size;
+        // --- advance (logical) index and ring head after ingest ---
+        let i_next = self.index + 1;
+
+        // If we haven't yet filled all inputs required to form MAC-Z, bail early.
+        if i_next < self.warm_m {
+            self.index = i_next;
+            self.head = if idx + 1 == bsz { 0 } else { idx + 1 };
+            self.filled |= self.index >= bsz;
             return None;
         }
 
-        self.index += 1;
-        self.filled |= self.index >= self.buffer_size;
+        // --- Fast/Slow SMA & MACD ---
+        self.current_fast_ma = self.fast_sum * self.inv_fast;
+        self.current_slow_ma = self.slow_sum * self.inv_slow;
+        self.current_macd    = self.current_fast_ma - self.current_slow_ma;
 
-        // fast/slow SMA
-        self.current_fast_ma = self.fast_sum / fast as f64;
-        self.current_slow_ma = self.slow_sum / slow as f64;
-        self.current_macd = self.current_fast_ma - self.current_slow_ma;
+        // --- VWAP (strict): NaN if any bad vol in window or volume sum <= 0 ---
+        if self.vwap_bad == 0 && self.vwap_v_sum > 0.0 {
+            self.current_vwap = self.vwap_pv_sum / self.vwap_v_sum;
 
-        // VWAP and Z-score stdev over lz
-        self.current_vwap = if self.vwap_v_sum > 0.0 {
-            self.vwap_pv_sum / self.vwap_v_sum
+            // --- ZVWAP using population variance around fixed VWAP mean ---
+            let e  = self.sum_lz  * self.inv_lz;
+            let e2 = self.sum2_lz * self.inv_lz;
+            let var = (-2.0 * self.current_vwap).mul_add(e, e2) + self.current_vwap * self.current_vwap;
+            let sd  = var.max(0.0).sqrt();
+            self.current_zvwap = if sd > 0.0 { (value - self.current_vwap) / sd } else { 0.0 };
         } else {
-            f64::NAN
-        };
-        if !self.current_vwap.is_finite() {
-            return None;
+            self.current_vwap = f64::NAN;
+            self.current_zvwap = f64::NAN;
         }
 
-        let ez = self.sum_lz / lz as f64;
-        let ez2 = self.sum2_lz / lz as f64;
-        let var_z =
-            (ez2 - 2.0 * self.current_vwap * ez + self.current_vwap * self.current_vwap).max(0.0);
-        let sd_z = var_z.sqrt();
-        self.current_zvwap = if sd_z > 0.0 {
-            (value - self.current_vwap) / sd_z
-        } else {
-            0.0
-        };
-
-        // stdev(source, lsd) population
-        let mean_lsd = self.stdev_sum / lsd as f64;
-        let var_lsd = (self.stdev_sum2 / lsd as f64) - mean_lsd * mean_lsd;
+        // --- Population stdev on source over lsd: sqrt(E[x^2] - E[x]^2) ---
+        let mean_lsd = self.stdev_sum * self.inv_lsd;
+        let var_lsd  = self.stdev_sum2 * self.inv_lsd - mean_lsd * mean_lsd;
         self.current_stdev = var_lsd.max(0.0).sqrt();
-        if !(self.current_stdev > 0.0) {
-            return None;
-        }
 
-        // MAC-Z raw
-        let macz_raw = self.current_zvwap * a + (self.current_macd / self.current_stdev) * b;
+        // --- MAC-Z raw ---
+        let macz_raw = if self.current_stdev.is_finite()
+            && self.current_stdev > 0.0
+            && self.current_zvwap.is_finite()
+            && self.current_macd.is_finite()
+        { self.current_zvwap.mul_add(self.a, (self.current_macd / self.current_stdev) * self.b) } else { f64::NAN };
 
-        // Laguerre or pass-through
-        if self.use_lag && macz_raw.is_finite() {
-            let new_l0 = (1.0 - self.gamma) * macz_raw + self.gamma * self.l0;
-            let new_l1 = -self.gamma * new_l0 + self.l0 + self.gamma * self.l1;
-            let new_l2 = -self.gamma * new_l1 + self.l1 + self.gamma * self.l2;
-            let new_l3 = -self.gamma * new_l2 + self.l2 + self.gamma * self.l3;
+        // --- Optional Laguerre smoothing (finite inputs only) ---
+        let macz_val = if self.use_lag && macz_raw.is_finite() {
+            let one_minus_g = 1.0 - self.gamma;
+            let new_l0 = macz_raw.mul_add(one_minus_g, self.gamma * self.l0);
+            let new_l1 = (-self.gamma).mul_add(new_l0, self.l0 + self.gamma * self.l1);
+            let new_l2 = (-self.gamma).mul_add(new_l1, self.l1 + self.gamma * self.l2);
+            let new_l3 = (-self.gamma).mul_add(new_l2, self.l2 + self.gamma * self.l3);
+            self.l0 = new_l0; self.l1 = new_l1; self.l2 = new_l2; self.l3 = new_l3;
+            (self.l0 + 2.0 * self.l1 + 2.0 * self.l2 + self.l3) / 6.0
+        } else { macz_raw };
 
-            self.l0 = new_l0;
-            self.l1 = new_l1;
-            self.l2 = new_l2;
-            self.l3 = new_l3;
-
-            self.current_macz = (self.l0 + 2.0 * self.l1 + 2.0 * self.l2 + self.l3) / 6.0;
-        } else {
-            self.current_macz = macz_raw;
-        }
-
-        // Signal SMA over last sig MAC-Z values, strict
-        let sig_pos = (self.index - 1) % sig;
-        let old_sig = self.signal_buffer[sig_pos];
-        self.signal_buffer[sig_pos] = self.current_macz;
-
-        // maintain sum/count strictly for finite values
-        if old_sig.is_finite() {
-            self.signal_sum -= old_sig;
-        }
-        if self.current_macz.is_finite() {
-            self.signal_sum += self.current_macz;
-        }
-
-        // count finite values in the window
-        let mut valid_sig = 0usize;
-        for &v in &self.signal_buffer {
-            if v.is_finite() {
-                valid_sig += 1;
+        // --- Strict signal SMA ring (O(1), starts once MAC-Z is available) ---
+        if i_next >= self.warm_m {
+            if self.sig_count == self.sig {
+                let leaving = self.signal_buffer[self.sig_head];
+                if leaving.is_nan() { if self.sig_nan > 0 { self.sig_nan -= 1; } } else { self.signal_sum -= leaving; }
+            } else {
+                self.sig_count += 1;
             }
+            self.signal_buffer[self.sig_head] = macz_val;
+            if macz_val.is_nan() { self.sig_nan += 1; } else { self.signal_sum += macz_val; }
+            self.sig_head += 1;
+            if self.sig_head == self.sig { self.sig_head = 0; }
         }
 
-        // SMA requires full window of sig values to produce non-NaN signal
-        // We need to match the batch behavior which starts outputting at warm_hist
-        // warm_hist = slow.max(lz).max(lsd) + sig - 1
-        // Note: self.index has already been incremented, so it's now the count of values processed
+        // Advance after all computations
+        self.index = i_next;
+        self.head = if idx + 1 == bsz { 0 } else { idx + 1 };
+        self.filled |= self.index >= bsz;
 
-        let warm_hist = slow.max(lz).max(lsd) + sig - 1;
-        if self.index <= warm_hist {
-            // Still in warmup period, return None
-            None
-        } else if valid_sig >= sig {
-            // We have enough values for a proper signal
-            self.current_signal = self.signal_sum / sig as f64;
+        // Mirror batch warmup behavior: no outputs until > warm_hist
+        if self.index <= self.warm_hist { return None; }
+
+        // Output histogram (NaN if signal window contains any NaN)
+        if self.sig_count == self.sig && self.sig_nan == 0 && macz_val.is_finite() {
+            self.current_macz = macz_val;
+            self.current_signal = self.signal_sum * self.inv_sig;
             Some(self.current_macz - self.current_signal)
-        } else {
-            // Past warmup but signal window not full yet
-            // Batch returns NaN here
-            Some(f64::NAN)
-        }
+        } else { Some(f64::NAN) }
     }
 }
 

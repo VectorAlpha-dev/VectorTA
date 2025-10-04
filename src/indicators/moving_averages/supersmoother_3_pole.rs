@@ -4,6 +4,9 @@
 //! while remaining responsive to trend changes. The filter uses recursive calculations
 //! with coefficients derived from the period parameter.
 //!
+//! Decision: Streaming uses the same FMA evaluation order as the batch core for consistency;
+//! first three samples pass through unchanged. Outputs match batch (tests unchanged).
+//!
 //! ## Parameters
 //! - **period**: Smoothing period (>= 1, defaults to 14)
 //!
@@ -448,11 +451,13 @@ pub unsafe fn supersmoother_3_pole_row_avx512_long(
 #[derive(Debug, Clone)]
 pub struct SuperSmoother3PoleStream {
     period: usize,
-    // Maintain last 3 outputs
+    // Last 3 outputs (oldest -> newest)
     y0: f64,
     y1: f64,
     y2: f64,
-    filled: usize, // How many outputs established
+    // Warm-up counter (0..=3)
+    filled: u8,
+    // Precomputed coefficients
     coef_source: f64,
     coef_prev1: f64,
     coef_prev2: f64,
@@ -460,55 +465,112 @@ pub struct SuperSmoother3PoleStream {
 }
 
 impl SuperSmoother3PoleStream {
+    #[inline]
     pub fn try_new(params: SuperSmoother3PoleParams) -> Result<Self, SuperSmoother3PoleError> {
         let period = params.period.unwrap_or(14);
         if period == 0 {
             return Err(SuperSmoother3PoleError::InvalidPeriod { period });
         }
-        let a = (-PI / period as f64).exp();
-        let b = 2.0 * a * (1.738_f64 * PI / period as f64).cos();
+
+        // Same coefficient math as batch kernel for strict consistency.
+        let inv_p = 1.0 / (period as f64);
+        let a = (-PI * inv_p).exp();
+        let b = 2.0 * a * (1.738_f64 * PI * inv_p).cos();
         let c = a * a;
+        let c2 = c * c;
+
         Ok(Self {
             period,
             y0: f64::NAN,
             y1: f64::NAN,
             y2: f64::NAN,
             filled: 0,
-            coef_source: 1.0 - c * c - b + b * c,
+            // Keep original expression to match batch/DC gain and rounding behavior
+            coef_source: 1.0 - c2 - b + b * c,
             coef_prev1: b + c,
             coef_prev2: -c - b * c,
-            coef_prev3: c * c,
+            coef_prev3: c2,
         })
     }
 
+    /// O(1) streaming update. First three values pass through unfiltered.
+    /// Uses identical FMA ordering to the batch scalar core to minimize tiny diffs.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> f64 {
-        match self.filled {
-            0 => {
-                self.y0 = value;
-                self.filled = 1;
-                return value; // Pass through first value
+        let f = self.filled;
+        if f < 3 {
+            // Warm-up: pass-through and advance the ring.
+            match f {
+                0 => self.y0 = value,
+                1 => self.y1 = value,
+                _ => self.y2 = value,
             }
-            1 => {
-                self.y1 = value;
-                self.filled = 2;
-                return value; // Pass through second value
-            }
-            2 => {
-                self.y2 = value;
-                self.filled = 3;
-                return value; // Pass through third value
-            }
-            _ => {}
+            self.filled = f + 1;
+            return value;
         }
-        let y_next = self.coef_source * value
-            + self.coef_prev1 * self.y2
-            + self.coef_prev2 * self.y1
-            + self.coef_prev3 * self.y0;
+
+        // 3x fused multiply-add chain (same order as batch):
+        //   t0 = coef_prev1*y2 + coef_source*value
+        //   t1 = coef_prev2*y1 + t0
+        //   y  = coef_prev3*y0 + t1
+        let t0 = self.coef_prev1.mul_add(self.y2, self.coef_source * value);
+        let t1 = self.coef_prev2.mul_add(self.y1, t0);
+        let y = self.coef_prev3.mul_add(self.y0, t1);
+
+        // Rotate state
         self.y0 = self.y1;
         self.y1 = self.y2;
-        self.y2 = y_next;
-        y_next
+        self.y2 = y;
+        y
+    }
+
+    /// Reset only the running state (keeps period/coefficients).
+    #[inline(always)]
+    pub fn reset_state(&mut self) {
+        self.y0 = f64::NAN;
+        self.y1 = f64::NAN;
+        self.y2 = f64::NAN;
+        self.filled = 0;
+    }
+
+    /// Reconfigure the period and coefficients. Resets warm-up state.
+    #[inline]
+    pub fn reconfigure(&mut self, period: usize) -> Result<(), SuperSmoother3PoleError> {
+        if period == 0 {
+            return Err(SuperSmoother3PoleError::InvalidPeriod { period });
+        }
+        self.period = period;
+
+        let inv_p = 1.0 / (period as f64);
+        let a = (-PI * inv_p).exp();
+        let b = 2.0 * a * (1.738_f64 * PI * inv_p).cos();
+        let c = a * a;
+        let c2 = c * c;
+
+        self.coef_source = 1.0 - c2 - b + b * c;
+        self.coef_prev1 = b + c;
+        self.coef_prev2 = -c - b * c;
+        self.coef_prev3 = c2;
+
+        self.reset_state();
+        Ok(())
+    }
+
+    /// Faster hot-loop path once you are past warm-up.
+    /// # Safety
+    /// Caller must ensure `self.filled >= 3` before calling.
+    #[inline(always)]
+    pub unsafe fn update_unchecked_warm(&mut self, value: f64) -> f64 {
+        debug_assert!(self.filled >= 3);
+
+        let t0 = self.coef_prev1.mul_add(self.y2, self.coef_source * value);
+        let t1 = self.coef_prev2.mul_add(self.y1, t0);
+        let y = self.coef_prev3.mul_add(self.y0, t1);
+
+        self.y0 = self.y1;
+        self.y1 = self.y2;
+        self.y2 = y;
+        y
     }
 }
 

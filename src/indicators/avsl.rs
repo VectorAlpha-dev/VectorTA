@@ -1165,110 +1165,296 @@ unsafe fn avsl_avx512(
     Ok(())
     }
 
-// ==================== STREAMING API ====================
+// ==================== STREAMING API (O(1) per update) ====================
+// Decision: Streaming path uses rolling sums + small rings to achieve O(1) work per tick,
+// matching scalar semantics and warmup (warmup2). Public API unchanged (try_new, update).
 #[derive(Debug, Clone)]
 pub struct AvslStream {
+    // params
     fast_period: usize,
     slow_period: usize,
     multiplier: f64,
-    close_buffer: Vec<f64>,
-    low_buffer: Vec<f64>,
-    volume_buffer: Vec<f64>,
-    head: usize,
-    filled: bool,
+
+    // precomputed
+    inv_fast: f64,
+    inv_slow: f64,
+    base: usize,     // first index where vpc/vpr are valid: slow - 1 (first==0 in stream)
+    warmup2: usize,  // base + slow - 1
+
+    // time / counters
+    t: usize, // number of updates processed so far (0-based index of current bar)
+
+    // --- rolling sums for SMA/VWMA (fast & slow) ---
+    sum_close_f: f64,
+    sum_vol_f: f64,
+    sum_cxv_f: f64,
+    sum_close_s: f64,
+    sum_vol_s: f64,
+    sum_cxv_s: f64,
+
+    // ring to remove trailing samples for fast/slow windows
+    ring_len: usize, // = max(fast_period, slow_period)
+    ring_pos: usize, // next write position
+    close_ring: Vec<f64>, // len = ring_len
+    vol_ring: Vec<f64>,   // len = ring_len
+    cxv_ring: Vec<f64>,   // len = ring_len (close*volume)
+
+    // --- prefix-sum rings for variable-length last-K queries (K <= 200) ---
+    // We store cumulative sums at index (t+1) % R. Query sum of last K as S[t+1] - S[t+1-K].
+    // Take R = MAX_WIN + 1 so we never overwrite a needed entry (K <= MAX_WIN).
+    csum_low: [f64; AvslStream::R],
+    csum_y: [f64; AvslStream::R], // y_i = low_i / (adj(vpc_i) * vpr_i), 0 before base
+
+    // --- SMA over 'pre' (slow_period) ---
+    pre_ring: Vec<f64>, // len = slow_period
+    pre_pos: usize,
+    pre_sum: f64,
+    pre_cnt: usize, // counts only bars >= base for pre-averaging
 }
 
 impl AvslStream {
+    // constants used by the streaming kernel
+    const MAX_WIN: usize = 200;
+    const R: usize = Self::MAX_WIN + 1; // prefix-sum ring length
+
     pub fn try_new(params: AvslParams) -> Result<Self, AvslError> {
         let fast_period = params.fast_period.unwrap_or(12);
         let slow_period = params.slow_period.unwrap_or(26);
         let multiplier = params.multiplier.unwrap_or(2.0);
 
         if fast_period == 0 {
-            return Err(AvslError::InvalidPeriod {
-                period: fast_period,
-                data_len: 0,
-            });
+            return Err(AvslError::InvalidPeriod { period: fast_period, data_len: 0 });
         }
         if slow_period == 0 {
-            return Err(AvslError::InvalidPeriod {
-                period: slow_period,
-                data_len: 0,
-            });
+            return Err(AvslError::InvalidPeriod { period: slow_period, data_len: 0 });
         }
-        if multiplier <= 0.0 || multiplier.is_nan() || multiplier.is_infinite() {
+        if multiplier <= 0.0 || !multiplier.is_finite() {
             return Err(AvslError::InvalidMultiplier { multiplier });
         }
 
-        // Need buffer size to be at least slow_period for calculations
-        let buffer_size = slow_period * 2; // Keep extra for calculation window
-
+        let ring_len = fast_period.max(slow_period);
         Ok(Self {
             fast_period,
             slow_period,
             multiplier,
-            close_buffer: vec![f64::NAN; buffer_size],
-            low_buffer: vec![f64::NAN; buffer_size],
-            volume_buffer: vec![f64::NAN; buffer_size],
-            head: 0,
-            filled: false,
+            inv_fast: 1.0 / (fast_period as f64),
+            inv_slow: 1.0 / (slow_period as f64),
+            base: slow_period - 1,
+            warmup2: (slow_period - 1) + (slow_period - 1),
+            t: 0,
+
+            sum_close_f: 0.0,
+            sum_vol_f: 0.0,
+            sum_cxv_f: 0.0,
+            sum_close_s: 0.0,
+            sum_vol_s: 0.0,
+            sum_cxv_s: 0.0,
+
+            ring_len,
+            ring_pos: 0,
+            close_ring: vec![0.0; ring_len],
+            vol_ring: vec![0.0; ring_len],
+            cxv_ring: vec![0.0; ring_len],
+
+            csum_low: [0.0; Self::R],
+            csum_y: [0.0; Self::R],
+
+            pre_ring: vec![0.0; slow_period],
+            pre_pos: 0,
+            pre_sum: 0.0,
+            pre_cnt: 0,
         })
     }
 
     #[inline(always)]
-    pub fn update(&mut self, close: f64, low: f64, volume: f64) -> Option<f64> {
-        let buffer_size = self.close_buffer.len();
-
-        self.close_buffer[self.head] = close;
-        self.low_buffer[self.head] = low;
-        self.volume_buffer[self.head] = volume;
-        self.head = (self.head + 1) % buffer_size;
-
-        if !self.filled && self.head == 0 {
-            self.filled = true;
+    fn sum_last(csum: &[f64; Self::R], t_plus_1_mod: usize, t_plus_1: usize, k: usize) -> f64 {
+        if k == 0 {
+            return 0.0;
         }
-
-        // Need at least slow_period values to calculate
-        let values_available = if self.filled { buffer_size } else { self.head };
-        if values_available < self.slow_period {
-            return None;
-        }
-
-        // Use all available data for calculation
-        let data_len = values_available;
-        let start_idx = if self.filled {
-            self.head // Start from oldest data
+        if t_plus_1 >= k {
+            let start = (t_plus_1 - k) % Self::R;
+            csum[t_plus_1_mod] - csum[start]
         } else {
-            0
+            csum[t_plus_1_mod]
+        }
+    }
+
+    #[inline(always)]
+    fn adjust_vpc(x: f64) -> f64 {
+        if x > -1.0 && x < 0.0 {
+            -1.0
+        } else if x >= 0.0 && x < 1.0 {
+            1.0
+        } else {
+            x
+        }
+    }
+
+    #[inline(always)]
+    pub fn update(&mut self, close: f64, low: f64, volume: f64) -> Option<f64> {
+        let i = self.t;
+
+        // ---- 1) Update rolling sums for fast/slow windows (SMA & VWMA) ----
+        let cv = close * volume;
+
+        // positions of samples to drop
+        let rp = self.ring_pos;
+        let rl = self.ring_len;
+
+        let pos_old_fast = (rp + rl - (self.fast_period % rl)) % rl;
+        let pos_old_slow = (rp + rl - (self.slow_period % rl)) % rl;
+
+        // old samples
+        let (c_old_f, v_old_f, cv_old_f) = if i >= self.fast_period {
+            (
+                self.close_ring[pos_old_fast],
+                self.vol_ring[pos_old_fast],
+                self.cxv_ring[pos_old_fast],
+            )
+        } else {
+            (0.0, 0.0, 0.0)
         };
 
-        // Create contiguous slices for calculation
-        let mut close_window = Vec::with_capacity(data_len);
-        let mut low_window = Vec::with_capacity(data_len);
-        let mut volume_window = Vec::with_capacity(data_len);
-
-        for i in 0..data_len {
-            let idx = (start_idx + i) % buffer_size;
-            close_window.push(self.close_buffer[idx]);
-            low_window.push(self.low_buffer[idx]);
-            volume_window.push(self.volume_buffer[idx]);
-        }
-
-        // Calculate AVSL for the full available window
-        let params = AvslParams {
-            fast_period: Some(self.fast_period),
-            slow_period: Some(self.slow_period),
-            multiplier: Some(self.multiplier),
+        let (c_old_s, v_old_s, cv_old_s) = if i >= self.slow_period {
+            (
+                self.close_ring[pos_old_slow],
+                self.vol_ring[pos_old_slow],
+                self.cxv_ring[pos_old_slow],
+            )
+        } else {
+            (0.0, 0.0, 0.0)
         };
-        let input = AvslInput::from_slices(&close_window, &low_window, &volume_window, params);
 
-        match avsl(&input) {
-            Ok(output) => output
-                .values
-                .last()
-                .and_then(|&v| if v.is_nan() { None } else { Some(v) }),
-            Err(_) => None,
+        // add new, remove old (fast)
+        self.sum_close_f += close - c_old_f;
+        self.sum_vol_f += volume - v_old_f;
+        self.sum_cxv_f += cv - cv_old_f;
+
+        // add new, remove old (slow)
+        self.sum_close_s += close - c_old_s;
+        self.sum_vol_s += volume - v_old_s;
+        self.sum_cxv_s += cv - cv_old_s;
+
+        // write into rings and advance
+        self.close_ring[rp] = close;
+        self.vol_ring[rp] = volume;
+        self.cxv_ring[rp] = cv;
+        self.ring_pos = (rp + 1) % rl;
+
+        // ---- 2) Prefix sums for low and y (y is 0 before base to match scalar semantics) ----
+        let t1_mod = (i + 1) % Self::R;
+
+        // Compute vpc/vpr/vm only when i >= base; otherwise y contributes 0
+        let mut y_i = 0.0;
+        if i >= self.base {
+            let sma_f = self.sum_close_f * self.inv_fast;
+            let sma_s = self.sum_close_s * self.inv_slow;
+
+            let vwma_f = if self.sum_vol_f != 0.0 {
+                self.sum_cxv_f / self.sum_vol_f
+            } else {
+                sma_f
+            };
+            let vwma_s = if self.sum_vol_s != 0.0 {
+                self.sum_cxv_s / self.sum_vol_s
+            } else {
+                sma_s
+            };
+
+            let vpc = vwma_s - sma_s;
+            let vpr = if sma_f != 0.0 { vwma_f / sma_f } else { 1.0 };
+
+            let vol_f = self.sum_vol_f * self.inv_fast;
+            let vol_s = self.sum_vol_s * self.inv_slow;
+            let _vm = if vol_s != 0.0 { vol_f / vol_s } else { 1.0 };
+
+            // adj mapping identical to scalar_ref
+            let adj = Self::adjust_vpc(vpc);
+            if adj != 0.0 && vpr != 0.0 {
+                y_i = low / (adj * vpr);
+            }
         }
+
+        // write prefix sums (store cumulative at index t+1)
+        self.csum_low[t1_mod] = self.csum_low[i % Self::R] + low;
+        self.csum_y[t1_mod] = self.csum_y[i % Self::R] + y_i;
+
+        // ---- 3) If i >= base, compute vpci/len_v and the pre value; then feed slow SMA ----
+        let mut out: Option<f64> = None;
+
+        if i >= self.base {
+            let sma_f = self.sum_close_f * self.inv_fast;
+            let sma_s = self.sum_close_s * self.inv_slow;
+            let vwma_f = if self.sum_vol_f != 0.0 {
+                self.sum_cxv_f / self.sum_vol_f
+            } else {
+                sma_f
+            };
+            let vwma_s = if self.sum_vol_s != 0.0 {
+                self.sum_cxv_s / self.sum_vol_s
+            } else {
+                sma_s
+            };
+            let vpc = vwma_s - sma_s;
+            let vpr = if sma_f != 0.0 { vwma_f / sma_f } else { 1.0 };
+            let vol_f = self.sum_vol_f * self.inv_fast;
+            let vol_s = self.sum_vol_s * self.inv_slow;
+            let vm = if vol_s != 0.0 { vol_f / vol_s } else { 1.0 };
+            let vpci = vpc * vpr * vm;
+
+            // len_v per spec, clamped to [1..MAX_WIN]
+            let t_len = if vpc < 0.0 {
+                (vpci - 3.0).abs().round()
+            } else {
+                (vpci + 3.0).round()
+            };
+            let len_v = t_len
+                .max(1.0)
+                .min(Self::MAX_WIN as f64) as usize;
+
+            // take/hist/pref split identical to scalar path
+            let take = len_v.min(i + 1);
+            let hist_n = ((i - self.base + 1).min(take)) as usize;
+            let pref_n = take - hist_n;
+
+            // prefix-sum queries (O(1))
+            let sum_hist_y = Self::sum_last(&self.csum_y, t1_mod, i + 1, hist_n);
+            let sum_take_l = Self::sum_last(&self.csum_low, t1_mod, i + 1, take);
+            let sum_hist_l = Self::sum_last(&self.csum_low, t1_mod, i + 1, hist_n);
+            let acc = sum_hist_y + (sum_take_l - sum_hist_l);
+
+            // price_v and pre_i
+            let inv_len_v = 1.0 / (len_v as f64);
+            let price_v = (acc * inv_len_v) * 0.01;
+            let dev = self.multiplier.mul_add(vpci, 0.0) * vm;
+            let pre_i = (low - price_v) + dev;
+
+            // slow SMA over 'pre'
+            self.pre_sum += pre_i;
+            if self.pre_cnt < self.slow_period {
+                self.pre_ring[self.pre_pos] = pre_i;
+                self.pre_pos += 1;
+                if self.pre_pos == self.slow_period {
+                    self.pre_pos = 0;
+                }
+                self.pre_cnt += 1;
+            } else {
+                self.pre_sum -= self.pre_ring[self.pre_pos];
+                self.pre_ring[self.pre_pos] = pre_i;
+                self.pre_pos += 1;
+                if self.pre_pos == self.slow_period {
+                    self.pre_pos = 0;
+                }
+            }
+
+            if i >= self.warmup2 {
+                out = Some(self.pre_sum * self.inv_slow);
+            }
+        }
+
+        // advance time
+        self.t = i + 1;
+        out
     }
 }
 

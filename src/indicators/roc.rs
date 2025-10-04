@@ -18,6 +18,7 @@
 //! - **Streaming**: Implemented with O(1) update performance (circular buffer)
 //! - **Zero-copy Memory**: Uses alloc_with_nan_prefix and make_uninit_matrix for batch operations
 //! - Decision: Scalar is the reference path. SIMD is available and benchmarked; row-specific batch SIMD not attempted (little shared work). Keep selection to scalar where SIMD underperforms.
+//! - Decision (streaming): Updated to match batch warmup precisely (NaN prefix = first_non_nan + period) and avoid modulus in hot path; uses mul_add for FMA where available.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -360,7 +361,7 @@ pub unsafe fn roc_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64
     while i < n {
         let p = *base_prev.add(i);
         let c = *base_curr.add(i);
-        *base_out.add(i) = if p == 0.0 || p.is_nan() { 0.0 } else { ((c / p) - 1.0) * 100.0 };
+        *base_out.add(i) = if p == 0.0 || p.is_nan() { 0.0 } else { (c / p).mul_add(100.0, -100.0) };
         i += 1;
     }
 }
@@ -460,10 +461,10 @@ pub unsafe fn roc_row_scalar(
         let c2 = *curr_ptr.add(i + 2);
         let c3 = *curr_ptr.add(i + 3);
 
-        *dst_ptr.add(i + 0) = if p0 == 0.0 || p0.is_nan() { 0.0 } else { ((c0 / p0) - 1.0) * 100.0 };
-        *dst_ptr.add(i + 1) = if p1 == 0.0 || p1.is_nan() { 0.0 } else { ((c1 / p1) - 1.0) * 100.0 };
-        *dst_ptr.add(i + 2) = if p2 == 0.0 || p2.is_nan() { 0.0 } else { ((c2 / p2) - 1.0) * 100.0 };
-        *dst_ptr.add(i + 3) = if p3 == 0.0 || p3.is_nan() { 0.0 } else { ((c3 / p3) - 1.0) * 100.0 };
+        *dst_ptr.add(i + 0) = if p0 == 0.0 || p0.is_nan() { 0.0 } else { (c0 / p0).mul_add(100.0, -100.0) };
+        *dst_ptr.add(i + 1) = if p1 == 0.0 || p1.is_nan() { 0.0 } else { (c1 / p1).mul_add(100.0, -100.0) };
+        *dst_ptr.add(i + 2) = if p2 == 0.0 || p2.is_nan() { 0.0 } else { (c2 / p2).mul_add(100.0, -100.0) };
+        *dst_ptr.add(i + 3) = if p3 == 0.0 || p3.is_nan() { 0.0 } else { (c3 / p3).mul_add(100.0, -100.0) };
 
         i += 4;
     }
@@ -472,7 +473,7 @@ pub unsafe fn roc_row_scalar(
     while i < n {
         let p = *prev_ptr.add(i);
         let c = *curr_ptr.add(i);
-        *dst_ptr.add(i) = if p == 0.0 || p.is_nan() { 0.0 } else { ((c / p) - 1.0) * 100.0 };
+        *dst_ptr.add(i) = if p == 0.0 || p.is_nan() { 0.0 } else { (c / p).mul_add(100.0, -100.0) };
         i += 1;
     }
 }
@@ -560,31 +561,42 @@ impl RocStream {
 
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        self.count += 1;
-
-        // We need at least period+1 values before we can calculate ROC
-        // (current value plus period previous values)
-        if self.count <= self.period {
-            // Store the new value and advance
+        // 1) Defer until we see the first finite sample so that warmup is (first + period)
+        if !self.filled {
+            if value.is_nan() {
+                return None; // still in the leading-NaN prelude
+            }
+            // First finite sample: start the ring from a clean point
             self.buffer[self.head] = value;
-            self.head = (self.head + 1) % self.period;
+            // wrap head without %
+            self.head += 1;
+            if self.head == self.period { self.head = 0; }
+            self.filled = true;
+            self.count = 1;            // counts samples since the first finite
+            return None;                // needs 'period' more before first output
+        }
+
+        // 2) Warm up the ring with exactly 'period' values after first finite
+        if self.count < self.period {
+            self.buffer[self.head] = value;
+            self.head += 1;
+            if self.head == self.period { self.head = 0; }
+            self.count += 1;
             return None;
         }
 
-        // Get the value that's about to be replaced (period values ago)
+        // 3) Steady-state O(1): compare against the value 'period' updates ago
         let old_value = self.buffer[self.head];
-
-        // Store the new value
         self.buffer[self.head] = value;
 
-        // Move head forward
-        self.head = (self.head + 1) % self.period;
+        self.head += 1;
+        if self.head == self.period { self.head = 0; }
 
-        // Calculate ROC
-        if old_value.is_nan() || old_value == 0.0 {
+        if old_value == 0.0 || old_value.is_nan() {
             Some(0.0)
         } else {
-            Some(((value / old_value) - 1.0) * 100.0)
+            // Accurate default: ((value / old) * 100) - 100, fused when available
+            Some((value / old_value).mul_add(100.0, -100.0))
         }
     }
 }
