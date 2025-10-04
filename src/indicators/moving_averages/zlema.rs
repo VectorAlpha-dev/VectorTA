@@ -13,7 +13,7 @@
 //! ## Developer Status
 //! - SIMD (AVX2/AVX512): Implemented but disabled by default — EMA is sequential; de-lag vectorization yields <5% on typical sizes.
 //! - Scalar: optimized two-phase loop with unrolled core and unchecked indexing; no change to numerical behavior.
-//! - Streaming: O(1) EMA with lag compensation; matches batch update order (no FMA in recurrence).
+//! - Streaming: O(1), ring = lag+1 with absolute-index warmup/de‑lag gating; no FMA to match scalar/batch.
 //! - Batch rows: no shared precompute to exploit; row kernels delegate to single-series variants.
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -488,16 +488,23 @@ pub fn zlema_row_avx512_long(
 
 #[derive(Debug, Clone)]
 pub struct ZlemaStream {
+    // configuration
     period: usize,
     lag: usize,
     alpha: f64,
-    last_ema: f64,
-    buffer: Vec<f64>,
-    head: usize,
-    filled: bool,
+    decay: f64, // 1 - alpha
+
+    // state
+    last_ema: f64, // current EMA state (NaN until first finite)
+    ring: Vec<f64>,
+    head: usize, // write index in ring [0 .. ring.len())
+    idx: usize,  // total samples seen since construction (absolute index)
+    first_idx: Option<usize>, // absolute index of first non-NaN sample
+    warm_idx: Option<usize>,  // absolute index where outputs become valid: first + period - 1
 }
 
 impl ZlemaStream {
+    #[inline]
     pub fn try_new(params: ZlemaParams) -> Result<Self, ZlemaError> {
         let period = params.period.unwrap_or(14);
         if period == 0 {
@@ -506,87 +513,91 @@ impl ZlemaStream {
                 data_len: 0,
             });
         }
+        let lag = (period - 1) / 2;
+        let alpha = 2.0 / (period as f64 + 1.0);
+
+        // ring holds the last (lag + 1) raw inputs (including NaN), which is the
+        // minimum needed to access x[t - lag] at any time t without modulo.
+        let ring_len = (lag + 1).max(1);
         Ok(Self {
             period,
-            lag: (period - 1) / 2,
-            alpha: 2.0 / (period as f64 + 1.0),
+            lag,
+            alpha,
+            decay: 1.0 - alpha,
             last_ema: f64::NAN,
-            buffer: vec![f64::NAN; period],
+            ring: vec![f64::NAN; ring_len],
             head: 0,
-            filled: false,
+            idx: 0,
+            first_idx: None,
+            warm_idx: None,
         })
     }
+
+    /// O(1) update. Returns `Some(zlema)` once warmed; `None` before warmup.
+    /// Matches batch behavior exactly:
+    ///   - de-lag input starts at absolute index (first + lag)
+    ///   - first EMA sample is the first finite value (no recurrence step)
+    ///   - any NaN taints EMA forever (as in batch)
     #[inline(always)]
-    pub fn update(&mut self, value: f64) -> Option<f64> {
-        // Match batch behavior: NaN taints the EMA state
-        if value.is_nan() {
-            // Store NaN in buffer to propagate through de-lagging
-            self.buffer[self.head] = value;
+    pub fn update(&mut self, x: f64) -> Option<f64> {
+        // 0) write new sample into the ring at current head
+        let pos = self.head;
+        self.ring[pos] = x;
+        // advance head with a single predictable branch (no %)
+        self.head += 1;
+        if self.head == self.ring.len() {
+            self.head = 0;
+        }
 
-            // Advance head pointer
-            self.head = (self.head + 1) % self.period;
-            if !self.filled && self.head == 0 {
-                self.filled = true;
-            }
+        // 1) capture absolute index for this sample
+        let i = self.idx;
+        // wrapping add to avoid potential overflow panics on extremely long runs
+        self.idx = self.idx.wrapping_add(1);
 
-            // Taint the EMA state
+        // 2) NaN handling: preserve batch semantics
+        if x.is_nan() {
+            // Any NaN encountered makes EMA NaN permanently in the batch algorithm.
             self.last_ema = f64::NAN;
-
-            // Count this as a processed sample
-            let samples_seen = if !self.filled {
-                self.head
-            } else {
-                self.period + self.head
+            // warm decision uses absolute warm index if we have one
+            return match self.warm_idx {
+                Some(w) if i >= w => Some(self.last_ema),
+                _ => None,
             };
+        }
 
-            // Return NaN after warmup, None during warmup
-            if samples_seen < self.period {
-                None
-            } else {
-                Some(self.last_ema)
-            }
+        // 3) initialize on the first finite sample (exactly like batch)
+        if self.first_idx.is_none() {
+            self.first_idx = Some(i);
+            // warm index is now known
+            let w = i + (self.period - 1);
+            self.warm_idx = Some(w);
+            // first EMA sample is the raw first value (no recurrence)
+            self.last_ema = x;
+
+            return if i >= w { Some(self.last_ema) } else { None };
+        }
+
+        // 4) compute de-lagged input using absolute gating: i < first + lag ? x : 2x - x[i-lag]
+        let first = self.first_idx.unwrap();
+        let val = if self.lag == 0 || i < first + self.lag {
+            x
         } else {
-            // 1. store the new price in the circular buffer
-            self.buffer[self.head] = value;
+            // with ring.len() = lag + 1, the slot holding x[i - lag] is:
+            //  - pos >= lag : pos - lag
+            //  - else       : pos + 1   (since ring_len - lag == 1)
+            let lag_pos = if pos >= self.lag { pos - self.lag } else { pos + 1 };
+            let x_lag = self.ring[lag_pos];
+            2.0 * x - x_lag
+        };
 
-            // 2. how many *valid* samples have we processed so far?
-            let samples_seen = if !self.filled {
-                self.head + 1 // 0-based → count
-            } else {
-                self.period + self.head + 1 // already wrapped at least once
-            };
+        // 5) standard EMA recurrence (no FMA to match batch/scalar exactly)
+        // last = alpha * val + (1 - alpha) * last
+        self.last_ema = self.alpha * val + self.decay * self.last_ema;
 
-            // 3. advance the head pointer & check wrap-around
-            self.head = (self.head + 1) % self.period;
-            if !self.filled && self.head == 0 {
-                self.filled = true;
-            }
-
-            // 4. choose the correct input for the EMA core
-            let val = if samples_seen <= self.lag {
-                // still in the warm-up zone: no de-lagging yet
-                value
-            } else {
-                let lag_idx = (self.head + self.period - self.lag - 1) % self.period;
-                2.0 * value - self.buffer[lag_idx]
-            };
-
-            // 5. standard EMA recurrence
-            // Initialize on first value, but once tainted with NaN, it stays NaN (matches batch behavior)
-            if self.last_ema.is_nan() && samples_seen == 1 {
-                // First value initialization (not tainted case)
-                self.last_ema = val;
-            } else {
-                // Standard recurrence (preserves NaN if tainted)
-                self.last_ema = self.alpha * val + (1.0 - self.alpha) * self.last_ema;
-            }
-
-            // 6. Only return values after warmup period (period - 1 samples)
-            if samples_seen < self.period {
-                None
-            } else {
-                Some(self.last_ema)
-            }
+        // 6) warm gate using absolute warm index
+        match self.warm_idx {
+            Some(w) if i >= w => Some(self.last_ema),
+            _ => None,
         }
     }
 }

@@ -20,7 +20,8 @@
 //!   EFI uses an EMA recurrence with a strict loop-carried dependency; single-series
 //!   wide vectorization underperforms a tuned scalar loop. Runtime selection keeps
 //!   scalar as the fastest path today (documented decision).
-//! - Streaming: ✅ Implemented with EfiStream (update function is O(1))
+//! - Streaming: ✅ EfiStream uses error-form EMA + FMA and branchless NaN
+//!   checks; semantics match batch exactly with O(1) updates.
 //! - Memory optimization: ✅ Uses alloc_with_nan_prefix (zero-copy) when allocating
 //! - Batch operations: ✅ Implemented with parallel processing support
 //! - Row-specific batch: ✅ Precomputes raw diffs once and shares across rows
@@ -474,30 +475,38 @@ impl EfiStream {
 
     #[inline(always)]
     pub fn update(&mut self, price: f64, volume: f64) -> Option<f64> {
+        // First sample: we don't have a previous price for a diff yet.
         if !self.has_last {
             self.last_price = price;
             self.has_last = true;
             return None;
         }
 
-        let out = if price.is_nan() || self.last_price.is_nan() || volume.is_nan() {
-            if self.filled {
-                self.prev
-            } else {
-                f64::NAN
-            }
+        // Branchless validity for the (price[i], price[i-1], volume[i]) triple.
+        // (x == x) is false iff x is NaN (IEEE-754).
+        let valid = (price == price) & (self.last_price == self.last_price) & (volume == volume);
+
+        // Fast path for invalid triple: carry previous EMA or return NaN until seeded.
+        if !valid {
+            let out = if self.filled { self.prev } else { f64::NAN };
+            self.last_price = price; // keep exact batch semantics
+            return Some(out);
+        }
+
+        // Raw one-bar force
+        let diff = (price - self.last_price) * volume;
+
+        // Seed on first valid triple; afterwards run EMA in error form with FMA
+        let out = if !self.filled {
+            self.prev = diff;
+            self.filled = true;
+            diff
         } else {
-            let diff = (price - self.last_price) * volume;
-            if !self.filled {
-                self.prev = diff;
-                self.filled = true;
-                diff
-            } else {
-                let ema = self.alpha * diff + (1.0 - self.alpha) * self.prev;
-                self.prev = ema;
-                ema
-            }
+            // ema = ema + alpha * (x - ema)
+            self.prev = self.alpha.mul_add(diff - self.prev, self.prev);
+            self.prev
         };
+
         self.last_price = price;
         Some(out)
     }

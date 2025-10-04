@@ -1239,108 +1239,127 @@ pub unsafe fn donchian_row_avx512_long(
     donchian_row_scalar(high, low, first, period, upper, middle, lower)
 }
 
+/// Decision: Streaming path uses monotonic deques with finite-value gating identical to batch.
+/// Amortized O(1) per update; emits NaNs for any window containing non-finite inputs.
 #[derive(Debug, Clone)]
 pub struct DonchianStream {
     period: usize,
-    high_buf: Vec<f64>,
-    low_buf: Vec<f64>,
-    head: usize,
-    filled: bool,
-    // Monotonic deques for O(1) max/min tracking
-    max_deque: VecDeque<(f64, usize)>, // (value, logical_time)
-    min_deque: VecDeque<(f64, usize)>,
-    current_time: usize,
+
+    // Validity ring and rolling count to gate outputs exactly like batch scalar path.
+    valid_ring: Vec<u8>, // 0/1 flags, length == period
+    head: usize,         // write index into valid_ring
+    seen: usize,         // total samples seen so far
+    valid_count: usize,  // number of finite samples in the current window
+
+    // Monotonic deques (value, index). Index is the sample index (0..seen-1).
+    max_deque: VecDeque<(f64, usize)>, // descending by value
+    min_deque: VecDeque<(f64, usize)>, // ascending by value
 }
 
 impl DonchianStream {
     pub fn try_new(params: DonchianParams) -> Result<Self, DonchianError> {
         let period = params.period.unwrap_or(20);
         if period == 0 {
-            return Err(DonchianError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(DonchianError::InvalidPeriod { period, data_len: 0 });
         }
         Ok(Self {
             period,
-            high_buf: vec![f64::NAN; period],
-            low_buf: vec![f64::NAN; period],
+            valid_ring: vec![0; period],
             head: 0,
-            filled: false,
+            seen: 0,
+            valid_count: 0,
             max_deque: VecDeque::with_capacity(period),
             min_deque: VecDeque::with_capacity(period),
-            current_time: 0,
         })
     }
 
     #[inline(always)]
+    fn evict_outdated(&mut self, window_start: usize) {
+        // Pop any candidates that fell out of the window.
+        while let Some(&(_, idx)) = self.max_deque.front() {
+            if idx < window_start {
+                self.max_deque.pop_front();
+            } else {
+                break;
+            }
+        }
+        while let Some(&(_, idx)) = self.min_deque.front() {
+            if idx < window_start {
+                self.min_deque.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Update with the next (high, low).
+    /// Returns:
+    /// - `None` during warmup (fewer than `period` total samples seen)
+    /// - `Some((upper, middle, lower))` thereafter; NaNs if any value in the window is non‑finite.
+    #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64) -> Option<(f64, f64, f64)> {
-        // Check for NaN inputs
-        if high.is_nan() || low.is_nan() {
-            self.high_buf[self.head] = high;
-            self.low_buf[self.head] = low;
-            self.head = (self.head + 1) % self.period;
-            self.current_time += 1;
+        // 1) Validity bookkeeping (require both to be finite to count toward a valid window)
+        let ok = high.is_finite() & low.is_finite();
 
-            if !self.filled && self.head == 0 {
-                self.filled = true;
+        // Rolling window validity count: subtract flag that leaves, add new flag.
+        let leaving = self.valid_ring[self.head] as usize;
+        self.valid_ring[self.head] = ok as u8;
+        self.head += 1;
+        if self.head == self.period {
+            self.head = 0;
+        }
+        self.valid_count = self.valid_count + (ok as usize) - leaving;
+
+        // Time/index of this sample and new window start (inclusive).
+        let t = self.seen;
+        self.seen = t + 1;
+        let window_start = self.seen.saturating_sub(self.period);
+
+        // 2) Window maintenance for the deques (amortized O(1))
+        //    Evict expired from fronts first (based on index/time).
+        self.evict_outdated(window_start);
+
+        //    Only push valid points to the deques (invalid points should not pollute extrema).
+        if ok {
+            // Max deque: keep it decreasing.
+            while let Some(&(v, _)) = self.max_deque.back() {
+                if v <= high {
+                    self.max_deque.pop_back();
+                } else {
+                    break;
+                }
             }
+            self.max_deque.push_back((high, t));
 
-            // Clear deques if we have NaN
-            self.max_deque.clear();
-            self.min_deque.clear();
-
-            if self.filled {
-                return Some((f64::NAN, f64::NAN, f64::NAN));
+            // Min deque: keep it increasing.
+            while let Some(&(v, _)) = self.min_deque.back() {
+                if v >= low {
+                    self.min_deque.pop_back();
+                } else {
+                    break;
+                }
             }
+            self.min_deque.push_back((low, t));
+        }
+
+        // 3) Emit:
+        // Warmup still in progress → no output yet (preserves existing streaming API contract).
+        if self.seen < self.period {
             return None;
         }
 
-        // Store values
-        self.high_buf[self.head] = high;
-        self.low_buf[self.head] = low;
-        self.head = (self.head + 1) % self.period;
-
-        // Remove elements outside the window
-        let window_start = self.current_time.saturating_sub(self.period - 1);
-        while !self.max_deque.is_empty() && self.max_deque.front().unwrap().1 < window_start {
-            self.max_deque.pop_front();
-        }
-        while !self.min_deque.is_empty() && self.min_deque.front().unwrap().1 < window_start {
-            self.min_deque.pop_front();
+        // If any sample in the last `period` is non‑finite, gate to NaNs (matches batch behavior).
+        if self.valid_count != self.period {
+            return Some((f64::NAN, f64::NAN, f64::NAN));
         }
 
-        // Maintain monotonic property for max deque
-        while !self.max_deque.is_empty() && self.max_deque.back().unwrap().0 <= high {
-            self.max_deque.pop_back();
-        }
-        self.max_deque.push_back((high, self.current_time));
+        // Otherwise the deques must be non‑empty and their fronts are the extrema.
+        debug_assert!(!self.max_deque.is_empty() && !self.min_deque.is_empty());
+        let maxv = self.max_deque.front().unwrap().0;
+        let minv = self.min_deque.front().unwrap().0;
 
-        // Maintain monotonic property for min deque
-        while !self.min_deque.is_empty() && self.min_deque.back().unwrap().0 >= low {
-            self.min_deque.pop_back();
-        }
-        self.min_deque.push_back((low, self.current_time));
-
-        self.current_time += 1;
-
-        if !self.filled && self.head == 0 {
-            self.filled = true;
-        }
-
-        if !self.filled {
-            return None;
-        }
-
-        // Get max and min from deque fronts - O(1)
-        let maxv = self.max_deque.front().map(|(v, _)| *v).unwrap_or(f64::NAN);
-        let minv = self.min_deque.front().map(|(v, _)| *v).unwrap_or(f64::NAN);
-
-        if maxv.is_nan() || minv.is_nan() {
-            Some((f64::NAN, f64::NAN, f64::NAN))
-        } else {
-            Some((maxv, 0.5 * (maxv + minv), minv))
-        }
+        let mid = (maxv - minv).mul_add(0.5, minv);
+        Some((maxv, mid, minv))
     }
 }
 

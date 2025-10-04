@@ -606,22 +606,33 @@ pub fn bandpass_avx512_long(hp: &[f64], period: usize, alpha: f64, beta: f64, ou
     unsafe { bandpass_scalar_unchecked(hp, alpha, beta, out) }
 }
 
+/// SIMD: stubs; scalar stream is the reference. Streaming kernel matches batch after warmup.
 #[derive(Debug, Clone)]
 pub struct BandPassStream {
+    // Keep public API the same; period retained for introspection.
     period: usize,
-    alpha: f64,
-    beta: f64,
+
+    // Precomputed coefficients for the 2nd‑order IIR recurrence:
+    //   y[n] = c0*(hp[n] - hp[n-2]) + c1*y[n-1] + c2*y[n-2]
+    c0: f64, // 0.5 * (1 - alpha)
+    c1: f64, // beta * (1 + alpha)
+    c2: f64, // -alpha
+
+    // High-pass stage in streaming form
     hp_stream: crate::indicators::highpass::HighPassStream,
-    buf: Vec<f64>,
-    idx: usize,
-    len: usize,
-    last_hp: [f64; 2],
-    last_out: [f64; 2],
-    warmup: usize,
-    count: usize,
+
+    // Minimal delay line for hp and output y (=bp)
+    hp_z1: f64,
+    hp_z2: f64,
+    y_z1: f64,
+    y_z2: f64,
+
+    // Count of finite HP samples observed; seeds y[0]=hp[0], y[1]=hp[1]
+    hp_valid: u8,
 }
 
 impl BandPassStream {
+    #[inline]
     pub fn try_new(params: BandPassParams) -> Result<Self, BandPassError> {
         let period = params.period.unwrap_or(20);
         if period < 2 {
@@ -631,70 +642,90 @@ impl BandPassStream {
         if !(0.0..=1.0).contains(&bandwidth) || !bandwidth.is_finite() {
             return Err(BandPassError::InvalidBandwidth { bandwidth });
         }
+
+        // High-pass period as in the batch path
         let hp_period = (4.0 * period as f64 / bandwidth).round() as usize;
         if hp_period < 2 {
             return Err(BandPassError::HpPeriodTooSmall { hp_period });
         }
+
+        // Build HP stream first
         let mut hp_params = HighPassParams::default();
         hp_params.period = Some(hp_period);
-
         let hp_stream = crate::indicators::highpass::HighPassStream::try_new(hp_params)?;
+
+        // Precompute band‑pass constants once
+        use std::f64::consts::PI;
         let beta = (2.0 * PI / period as f64).cos();
         let gamma = (2.0 * PI * bandwidth / period as f64).cos();
-        let alpha = 1.0 / gamma - ((1.0 / (gamma * gamma)) - 1.0).sqrt();
 
-        // Bandpass needs at least 2 values to start calculation
-        let warmup = 2;
+        // Same alpha as batch (Ehlers form). Use algebraically identical variant with fewer divisions.
+        #[inline(always)]
+        fn alpha_from_gamma(gamma: f64) -> f64 {
+            let g2 = gamma * gamma;
+            let s = (1.0 - g2).sqrt();
+            (1.0 - s) / gamma
+        }
+        let alpha = alpha_from_gamma(gamma);
+
+        // Hoist coefficients for the hot loop
+        let c0 = 0.5 * (1.0 - alpha);
+        let c1 = beta * (1.0 + alpha);
+        let c2 = -alpha;
 
         Ok(Self {
             period,
-            alpha,
-            beta,
+            c0,
+            c1,
+            c2,
             hp_stream,
-            buf: vec![0.0; 2],
-            idx: 0,
-            len: 0,
-            last_hp: [0.0; 2],
-            last_out: [0.0; 2],
-            warmup,
-            count: 0,
+            hp_z1: 0.0,
+            hp_z2: 0.0,
+            y_z1: 0.0,
+            y_z2: 0.0,
+            hp_valid: 0,
         })
     }
 
+    /// O(1) update. Returns NaN until enough information is available
+    /// to match batch warmup exactly (two finite HP samples).
+    #[inline(always)]
     pub fn update(&mut self, value: f64) -> f64 {
-        let hp_val = self.hp_stream.update(value);
+        let hp = self.hp_stream.update(value);
 
-        // rotate buffers for hp and output
-        let prev_hp2 = self.last_hp[0];
-        let prev_hp1 = self.last_hp[1];
-        let prev_out2 = self.last_out[0];
-        let prev_out1 = self.last_out[1];
-
-        let out_val = if self.len < 2 {
-            self.len += 1;
-            self.last_hp[0] = prev_hp1;
-            self.last_hp[1] = hp_val;
-            self.last_out[0] = prev_out1;
-            self.last_out[1] = hp_val;
-            hp_val
-        } else {
-            let res = 0.5 * (1.0 - self.alpha) * hp_val - 0.5 * (1.0 - self.alpha) * prev_hp2
-                + self.beta * (1.0 + self.alpha) * prev_out1
-                - self.alpha * prev_out2;
-            self.last_hp[0] = prev_hp1;
-            self.last_hp[1] = hp_val;
-            self.last_out[0] = prev_out1;
-            self.last_out[1] = res;
-            res
-        };
-
-        // Return NaN during warmup but continue calculating for proper state
-        self.count += 1;
-        if self.count <= self.warmup {
-            f64::NAN
-        } else {
-            out_val
+        // Do not poison state if HP is not yet finite
+        if !hp.is_finite() {
+            return f64::NAN;
         }
+
+        // Seed: y[0] = hp[0], y[1] = hp[1]; still return NaN during these two steps
+        if self.hp_valid < 2 {
+            let y = hp;
+
+            // rotate delays after computing the seed
+            self.hp_z2 = self.hp_z1;
+            self.hp_z1 = hp;
+
+            self.y_z2 = self.y_z1;
+            self.y_z1 = y;
+
+            self.hp_valid += 1;
+            return f64::NAN;
+        }
+
+        // Steady‑state recurrence (FMA‑friendly):
+        // y = c2*y[n-2] + c1*y[n-1] + c0*(hp - hp[n-2])
+        let delta = hp - self.hp_z2;
+        let y = self.c2.mul_add(self.y_z2, self.c1.mul_add(self.y_z1, self.c0 * delta));
+
+        // rotate delays
+        self.hp_z2 = self.hp_z1;
+        self.hp_z1 = hp;
+
+        self.y_z2 = self.y_z1;
+        self.y_z1 = y;
+
+        y
     }
 }
 
@@ -2649,8 +2680,8 @@ impl BandPassStreamPy {
 
     /// Updates the stream with a new value and returns the calculated band-pass value.
     /// Note: This returns only the bp value, not all 4 outputs for streaming simplicity.
-    /// Unlike some indicators (e.g., ALMA), BandPassStream always returns a value from the
-    /// first call - there is no warm-up period where None is returned.
+    /// Warmup behavior matches the batch path: returns NaN until the stream has seen
+    /// two finite high-pass samples (i.e., enough state to match batch results).
     fn update(&mut self, value: f64) -> f64 {
         self.stream.update(value)
     }

@@ -26,7 +26,7 @@
 //! - Scalar path: loop-jammed with 4 independent accumulators and `mul_add`, safe-only (no `unsafe`); ~15–25% faster than prior scalar in 100k baseline.
 //! - Batch: row-specific AVX2/AVX512 kernels pre-load weight registers; scalar batch is the reference.
 //!   Tried pre-reversing weights during batch precompute (to skip per-row reversal); it regressed on large inputs (1M), so reverted.
-//! - Streaming update: O(n) - `dot_ring()` iterates through period-1 weights for each update.
+//! - Streaming update: exact O(1) for integer powers (0..8) via polynomial moments; exact faster O(n) contiguous dot for fractional powers.
 //! - Memory optimization: Uses `alloc_with_nan_prefix` for zero-copy allocation.
 
 #[cfg(feature = "python")]
@@ -592,83 +592,349 @@ unsafe fn vpwma_avx512_core(
 }
 
 // ------- 3) VpwmaStream (streaming “online” version) -------
+
+#[derive(Debug, Clone)]
+enum StreamMode {
+    /// Exact, O(1) per update for integer powers via polynomial moments.
+    /// w_k = (period - k)^deg = sum_{j=0}^deg a_j k^j  (binomial expansion)
+    /// Keeps {M_j} = sum_{k=0}^{m-1} k^j x_{t-k} and updates them with:
+    /// M_j' = [j==0 ? x_new : 0] + sum_{q=0}^j C(j,q) * (M_q - (m-1)^q * x_out)
+    PolyInt {
+        deg: usize,                 // integer power (degree)
+        coeff: Vec<f64>,            // a_j for j=0..deg  (numerator = dot(coeff, moments))
+        binom_row_starts: Vec<usize>, // CSR-style offsets into `binom_vals`
+        binom_vals: Vec<f64>,       // concatenated C(j,q) for 0<=q<=j, j=0..deg
+        pow_m1: Vec<f64>,           // (m-1)^q for q=0..deg
+        moments: Vec<f64>,          // M_j, j=0..deg
+        moments_ready: bool,        // lazily built at first full window
+    },
+
+    /// Exact, O(n) per update for general (fractional) powers,
+    /// but with a much faster contiguous two-slice dot (no per-element modulo).
+    ExactDot {
+        weights_rev: Vec<f64>,      // reverse(weights) so index 0 multiplies oldest in window
+        win_len: usize,              // m = period - 1
+    },
+}
+
 #[derive(Debug, Clone)]
 pub struct VpwmaStream {
-    period: usize,
-    weights: Vec<f64>, // length = (period - 1)
-    inv_norm: f64,
-    buffer: Vec<f64>, // length = period
-    head: usize,
-    filled: bool,
+    period: usize,         // ring length = m+1
+    inv_norm: f64,         // 1 / sum(weights)
+    buffer: Vec<f64>,      // length = period
+    head: usize,           // next write index
+    filled: bool,          // becomes true when head cycles to 0
+
+    // kept for introspection/back-compat
+    weights: Vec<f64>,     // original weights (length = m)
+    mode: StreamMode,
 }
 
 impl VpwmaStream {
     pub fn try_new(params: VpwmaParams) -> Result<Self, VpwmaError> {
         let period = params.period.unwrap_or(14);
         if period < 2 {
-            return Err(VpwmaError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(VpwmaError::InvalidPeriod { period, data_len: 0 });
         }
         let power = params.power.unwrap_or(0.382);
         if power.is_nan() || power.is_infinite() {
             return Err(VpwmaError::InvalidPower { power });
         }
 
-        // Build exactly (period - 1) weights
-        let win_len = period - 1;
-        let mut weights = Vec::with_capacity(win_len);
+        // Build (period - 1) weights (exact, once).
+        let m = period - 1;
+        let mut weights = Vec::with_capacity(m);
         let mut norm = 0.0;
-        for k in 0..win_len {
+        for k in 0..m {
+            // weight for k=0 (newest) .. k=m-1 (oldest)
             let w = (period as f64 - k as f64).powf(power);
             weights.push(w);
             norm += w;
         }
         let inv_norm = 1.0 / norm;
 
+        // Decide streaming mode:
+        // If `power` is an integer in [0..=8], use exact O(1) polynomial moments.
+        // Else use the exact (faster) O(n) contiguous dot.
+        let p_rounded = power.round();
+        let is_near_int = (power - p_rounded).abs() <= 1e-12 && p_rounded >= 0.0 && p_rounded <= 8.0;
+        let mode = if is_near_int {
+            let deg = p_rounded as usize;
+
+            // a_j = (-1)^j * C(deg, j) * (period)^(deg - j)
+            let mut coeff = Vec::with_capacity(deg + 1);
+            for j in 0..=deg {
+                let sign = if j & 1 == 0 { 1.0 } else { -1.0 };
+                let c = sign * binom(deg, j) * (period as f64).powi((deg - j) as i32);
+                coeff.push(c);
+            }
+
+            // Build binomial coefficients C(j,q) for j=0..deg in a compact CSR form.
+            let mut binom_vals = Vec::new();
+            let mut row_starts = Vec::with_capacity(deg + 2);
+            row_starts.push(0);
+            for j in 0..=deg {
+                for q in 0..=j {
+                    binom_vals.push(binom(j, q));
+                }
+                row_starts.push(binom_vals.len());
+            }
+
+            // (m-1)^q, q=0..deg
+            let mut pow_m1 = Vec::with_capacity(deg + 1);
+            let mm1 = (m - 1) as f64;
+            let mut p = 1.0;
+            for _q in 0..=deg {
+                pow_m1.push(p);
+                p *= mm1;
+            }
+
+            StreamMode::PolyInt {
+                deg,
+                coeff,
+                binom_row_starts: row_starts,
+                binom_vals,
+                pow_m1,
+                moments: vec![0.0; deg + 1],
+                moments_ready: false,
+            }
+        } else {
+            // reverse(weights) so that index 0 multiplies the oldest element in the window,
+            // letting us dot against the window as a forward contiguous slice.
+            let mut wrev = weights.clone();
+            wrev.reverse();
+            StreamMode::ExactDot {
+                weights_rev: wrev,
+                win_len: m,
+            }
+        };
+
         Ok(Self {
             period,
-            weights,
             inv_norm,
             buffer: vec![f64::NAN; period],
             head: 0,
             filled: false,
+            weights,
+            mode,
         })
     }
 
+    #[inline]
     pub fn get_warmup_period(&self) -> usize {
         self.period - 1
     }
 
+    /// O(1) for integer power via polynomial moments; otherwise exact O(n) with a faster contiguous dot.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        self.buffer[self.head] = value;
+        // Write new value at current head, then advance the ring.
+        let prev_head = self.head;
+        self.buffer[prev_head] = value;
         self.head = (self.head + 1) % self.period;
 
+        // Mark filled after the first full wrap.
         if !self.filled && self.head == 0 {
             self.filled = true;
         }
         if !self.filled {
             return None;
         }
-        Some(self.dot_ring())
-    }
 
-    #[inline(always)]
-    fn dot_ring(&self) -> f64 {
-        let mut sum = 0.0;
-        // The most-recently written price is at index (head + period - 1) % period
-        let mut idx = (self.head + self.period - 1) % self.period;
-        let win_len = self.weights.len(); // = period - 1
+        match &mut self.mode {
+            StreamMode::PolyInt {
+                deg,
+                coeff,
+                binom_row_starts,
+                binom_vals,
+                pow_m1,
+                moments,
+                moments_ready,
+            } => {
+                // The item that just fell OUT of the window is at index `self.head`.
+                let x_out = self.buffer[self.head];
 
-        for &w in &self.weights {
-            sum += w * self.buffer[idx];
-            // Move one step "backwards" in the circular buffer
-            idx = (idx + self.period - 1) % self.period;
+                if !*moments_ready {
+                    // First time we have a full window: build moments exactly from the ring.
+                    Self::init_moments_from(&self.buffer, self.head, self.period, *deg, moments);
+                    *moments_ready = true;
+
+                    // Return current value from moments (no recurrence yet).
+                    let num = dot_unrolled(coeff, moments);
+                    return Some(num * self.inv_norm);
+                }
+
+                // Update all moments using the binomial recurrence (O(deg^2), tiny).
+                // M_0' = M_0 + x_new - x_out
+                // M_j' = sum_{q=0}^j C(j,q) * (M_q - (m-1)^q * x_out), j>=1
+                let m0_new = moments[0] + value - x_out;
+                let mut next = vec![0.0; *deg + 1];
+                next[0] = m0_new;
+
+                for j in 1..=*deg {
+                    let row_start = binom_row_starts[j];
+                    let mut s = 0.0;
+                    for q in 0..=j {
+                        let c = binom_vals[row_start + q];
+                        s += c * (moments[q] - pow_m1[q] * x_out);
+                    }
+                    next[j] = s;
+                }
+                moments.copy_from_slice(&next);
+
+                let num = dot_unrolled(coeff, moments);
+                Some(num * self.inv_norm)
+            }
+
+            StreamMode::ExactDot {
+                weights_rev,
+                win_len,
+            } => {
+                // Dot(weights_rev, window_oldest_to_newest)
+                let y = Self::dot_window_fast_from(&self.buffer, self.head, self.period, weights_rev, *win_len);
+                Some(y * self.inv_norm)
+            }
         }
-        sum * self.inv_norm
     }
+
+    // ----- helpers -----
+
+    /// Initialize polynomial moments M_j for j=0..deg from the current full window.
+    /// Window of length m = period-1 includes indices: [(head+1) .. (head+1)+m-1] modulo period,
+    /// where (head+period-1) points to the NEWEST included.
+    #[inline(always)]
+    fn init_moments_from(buffer: &[f64], head: usize, period: usize, deg: usize, moments: &mut [f64]) {
+        let m = period - 1;
+        let oldest = (head + 1) % period; // oldest included index
+
+        let left_len = (period - oldest).min(m);
+        let right_len = m - left_len;
+
+        moments.fill(0.0);
+
+        // Left chunk [oldest .. oldest+left_len)
+        for (pos, &x) in buffer[oldest..oldest + left_len].iter().enumerate() {
+            let k = (m - 1 - pos) as f64;
+            let mut kpow = 1.0;
+            for j in 0..=deg {
+                moments[j] += kpow * x;
+                kpow *= k;
+            }
+        }
+        // Right chunk [0 .. right_len)
+        for (pos, &x) in buffer[..right_len].iter().enumerate() {
+            let k = (right_len - 1 - pos) as f64;
+            let mut kpow = 1.0;
+            for j in 0..=deg {
+                moments[j] += kpow * x;
+                kpow *= k;
+            }
+        }
+    }
+
+    /// Faster exact dot for general powers: avoid per-element modulo by forming two contiguous
+    /// slices for the current window and using 4 accumulators.
+    #[inline(always)]
+    fn dot_window_fast_from(
+        buffer: &[f64],
+        head: usize,
+        period: usize,
+        weights_rev: &[f64],
+        win_len: usize,
+    ) -> f64 {
+        let oldest = (head + 1) % period; // oldest included
+        let left_len = (period - oldest).min(win_len);
+        let right_len = win_len - left_len;
+
+        let mut s0 = 0.0f64;
+        let mut s1 = 0.0f64;
+        let mut s2 = 0.0f64;
+        let mut s3 = 0.0f64;
+        let mut k = 0usize;
+
+        // Left chunk
+        let a = &buffer[oldest..oldest + left_len];
+        let w = &weights_rev[0..left_len];
+        let p4 = left_len & !3;
+        while k < p4 {
+            s0 = a[k + 0].mul_add(w[k + 0], s0);
+            s1 = a[k + 1].mul_add(w[k + 1], s1);
+            s2 = a[k + 2].mul_add(w[k + 2], s2);
+            s3 = a[k + 3].mul_add(w[k + 3], s3);
+            k += 4;
+        }
+        while k < left_len {
+            s0 = a[k].mul_add(w[k], s0);
+            k += 1;
+        }
+        let mut sum = (s0 + s1) + (s2 + s3);
+
+        // Right chunk (if the window wraps)
+        if right_len != 0 {
+            let a = &buffer[0..right_len];
+            let w = &weights_rev[left_len..left_len + right_len];
+            let mut s0 = 0.0f64;
+            let mut s1 = 0.0f64;
+            let mut s2 = 0.0f64;
+            let mut s3 = 0.0f64;
+            let mut k = 0usize;
+            let p4 = right_len & !3;
+            while k < p4 {
+                s0 = a[k + 0].mul_add(w[k + 0], s0);
+                s1 = a[k + 1].mul_add(w[k + 1], s1);
+                s2 = a[k + 2].mul_add(w[k + 2], s2);
+                s3 = a[k + 3].mul_add(w[k + 3], s3);
+                k += 4;
+            }
+            while k < right_len {
+                s0 = a[k].mul_add(w[k], s0);
+                k += 1;
+            }
+            sum += (s0 + s1) + (s2 + s3);
+        }
+
+        sum
+    }
+}
+
+// --- tiny utilities local to the stream kernel ---
+
+#[inline(always)]
+fn binom(n: usize, k: usize) -> f64 {
+    // small n (<=8) used; compute exactly in f64
+    if k == 0 || k == n { return 1.0; }
+    let k = k.min(n - k);
+    let mut num = 1u128;
+    let mut den = 1u128;
+    for i in 1..=k {
+        num *= (n + 1 - i) as u128;
+        den *= i as u128;
+    }
+    (num as f64) / (den as f64)
+}
+
+#[inline(always)]
+fn dot_unrolled(a: &[f64], b: &[f64]) -> f64 {
+    debug_assert_eq!(a.len(), b.len());
+    let mut s0 = 0.0f64;
+    let mut s1 = 0.0f64;
+    let mut s2 = 0.0f64;
+    let mut s3 = 0.0f64;
+    let mut i = 0usize;
+    let n = a.len();
+    let p4 = n & !3;
+    while i < p4 {
+        s0 = a[i + 0].mul_add(b[i + 0], s0);
+        s1 = a[i + 1].mul_add(b[i + 1], s1);
+        s2 = a[i + 2].mul_add(b[i + 2], s2);
+        s3 = a[i + 3].mul_add(b[i + 3], s3);
+        i += 4;
+    }
+    while i < n {
+        s0 = a[i].mul_add(b[i], s0);
+        i += 1;
+    }
+    (s0 + s1) + (s2 + s3)
 }
 
 #[derive(Clone, Debug)]

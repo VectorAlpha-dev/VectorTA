@@ -18,7 +18,8 @@
 //!   offers no consistent wins on realistic periods.
 //! - Scalar path: tight, safe O(period) inner scan starting at warmup to avoid branches.
 //! - Batch: reuses a shared HL2 midpoint precompute across rows to avoid redundant work.
-//! - Streaming: kept simple O(period) scan for clarity and identical outputs.
+//! - Streaming: amortized O(1) min/max via monotonic deques (Lemire),
+//!   preserving arithmetic order and outputs.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
@@ -51,6 +52,7 @@ use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
+use std::collections::VecDeque;
 
 impl<'a> FisherInput<'a> {
     #[inline(always)]
@@ -963,74 +965,99 @@ pub fn fisher_row_avx512_direct(
     fisher_row_scalar_direct(high, low, first, period, out_fish, out_signal)
 }
 
+/// SIMD implemented but disabled for batch; streaming is upgraded to
+/// monotonic deques (amortized O(1)) matching scalar numerics.
 #[derive(Debug, Clone)]
 pub struct FisherStream {
     period: usize,
-    buffer: Vec<f64>,
-    head: usize,
+    // absolute count of samples seen
+    idx: usize,
     filled: bool,
+    // monotonic queues hold (value, index)
+    minq: VecDeque<(f64, usize)>, // non-decreasing -> front is current window min
+    maxq: VecDeque<(f64, usize)>, // non-increasing -> front is current window max
     prev_fish: f64,
     val1: f64,
 }
+
 impl FisherStream {
     pub fn try_new(params: FisherParams) -> Result<Self, FisherError> {
         let period = params.period.unwrap_or(9);
         if period == 0 {
-            return Err(FisherError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(FisherError::InvalidPeriod { period, data_len: 0 });
         }
         Ok(Self {
             period,
-            buffer: vec![f64::NAN; period],
-            head: 0,
+            idx: 0,
             filled: false,
+            minq: VecDeque::with_capacity(period + 1),
+            maxq: VecDeque::with_capacity(period + 1),
             prev_fish: 0.0,
             val1: 0.0,
         })
     }
+
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64) -> Option<(f64, f64)> {
-        let merged = 0.5 * (high + low);
-        self.buffer[self.head] = merged;
-        self.head = (self.head + 1) % self.period;
-        if !self.filled && self.head == 0 {
-            self.filled = true;
+        let v = 0.5 * (high + low);
+        let k = self.idx;
+
+        // ---- monotonic min queue (non-decreasing)
+        while let Some(&(last_v, _)) = self.minq.back() {
+            if last_v >= v { self.minq.pop_back(); } else { break; }
         }
+        self.minq.push_back((v, k));
+
+        // ---- monotonic max queue (non-increasing)
+        while let Some(&(last_v, _)) = self.maxq.back() {
+            if last_v <= v { self.maxq.pop_back(); } else { break; }
+        }
+        self.maxq.push_back((v, k));
+
+        // evict indices that fell out of the window [idx - period + 1, idx]
+        let start = k.saturating_sub(self.period - 1);
+        while let Some(&(_, i)) = self.minq.front() {
+            if i < start { self.minq.pop_front(); } else { break; }
+        }
+        while let Some(&(_, i)) = self.maxq.front() {
+            if i < start { self.maxq.pop_front(); } else { break; }
+        }
+
+        // advance the stream index
+        self.idx = k + 1;
+
+        // warmup: we need 'period' samples before emitting a value
         if !self.filled {
-            return None;
-        }
-        Some(self.dot_ring())
-    }
-    #[inline(always)]
-    fn dot_ring(&mut self) -> (f64, f64) {
-        let mut min_val = f64::MAX;
-        let mut max_val = f64::MIN;
-        let mut idx = self.head;
-        for _ in 0..self.period {
-            let v = self.buffer[idx];
-            if v < min_val {
-                min_val = v;
+            self.filled = self.idx >= self.period;
+            if !self.filled {
+                return None;
             }
-            if v > max_val {
-                max_val = v;
-            }
-            idx = (idx + 1) % self.period;
         }
+
+        // window extrema in O(1)
+        let min_val = self.minq.front().map(|&(x, _)| x).unwrap_or(v);
+        let max_val = self.maxq.front().map(|&(x, _)| x).unwrap_or(v);
+
+        // exact same range guard and arithmetic ordering as scalar/batch path
         let range = (max_val - min_val).max(0.001);
-        let current_hl = self.buffer[(self.head + self.period - 1) % self.period];
-        self.val1 = 0.67f64.mul_add(self.val1, 0.66 * ((current_hl - min_val) / range - 0.5));
+
+        // same 0.67/0.66 recurrence and clamping semantics
+        self.val1 = 0.67f64.mul_add(self.val1, 0.66 * ((v - min_val) / range - 0.5));
         if self.val1 > 0.99 {
             self.val1 = 0.999;
         } else if self.val1 < -0.99 {
             self.val1 = -0.999;
         }
-        let new_signal = self.prev_fish;
-        let new_fish =
-            0.5f64.mul_add(((1.0 + self.val1) / (1.0 - self.val1)).ln(), 0.5 * self.prev_fish);
-        self.prev_fish = new_fish;
-        (new_fish, new_signal)
+
+        // signal is previous fisher; fisher uses the standard Ehlers form
+        let signal = self.prev_fish;
+        let fisher = 0.5f64.mul_add(
+            ((1.0 + self.val1) / (1.0 - self.val1)).ln(),
+            0.5 * self.prev_fish,
+        );
+
+        self.prev_fish = fisher;
+        Some((fisher, signal))
     }
 }
 

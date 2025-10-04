@@ -16,7 +16,7 @@
 //!
 //! ## Developer Notes
 //! - SIMD enabled: AVX2/AVX512 vectorize across time (4/8 lanes) and use FMA; selected at runtime via detect_best_kernel(). Benchmarked >5% faster than scalar at 100k.
-//! - Streaming: O(n) update performance (two dot products per output over `period`).
+//! - Streaming: Kept as O(N) per-tick dot product to match batch numerics exactly under strict 1e-9 tests. A Sliding DFT O(1) variant was evaluated but disabled due to last-bit drift; revisit with a guaranteed-stable SDFT if parity can be ensured.
 //! - Zero-copy Memory: Uses alloc_with_nan_prefix and make_uninit_matrix for batch operations.
 
 #[cfg(feature = "python")]

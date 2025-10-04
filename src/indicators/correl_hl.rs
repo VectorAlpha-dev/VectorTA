@@ -689,109 +689,119 @@ pub unsafe fn correl_hl_avx512_long(
     }
 }
 
+/// Decision: Streaming kernel updated to be NaN-resilient and O(1),
+/// matching batch semantics; uses cached 1/period. Scalar-safe.
 #[derive(Debug, Clone)]
 pub struct CorrelHlStream {
     period: usize,
     buffer_high: Vec<f64>,
     buffer_low: Vec<f64>,
-    head: usize,
-    filled: bool,
-    // Running sums for O(1) correlation calculation
+    head: usize,       // ring write index
+    len: usize,        // number of items currently in the window (<= period)
+    nan_in_win: usize, // count of pairs with NaN currently in the window
+
+    // Running sums over the current window (valid pairs only)
     sum_h: f64,
     sum_h2: f64,
     sum_l: f64,
     sum_l2: f64,
     sum_hl: f64,
-    count: usize, // Count of valid values in buffer
+
+    // Precompute 1/period to avoid a divide per tick
+    inv_pf: f64,
 }
 
 impl CorrelHlStream {
+    #[inline]
     pub fn try_new(params: CorrelHlParams) -> Result<Self, CorrelHlError> {
         let period = params.period.unwrap_or(9);
         if period == 0 {
-            return Err(CorrelHlError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
-        }
-        // Use uninitialized memory for buffers, then fill with NaN
-        let mut buffer_high = Vec::with_capacity(period);
-        let mut buffer_low = Vec::with_capacity(period);
-        unsafe {
-            buffer_high.set_len(period);
-            buffer_low.set_len(period);
-        }
-        // Initialize with NaN
-        for i in 0..period {
-            buffer_high[i] = f64::NAN;
-            buffer_low[i] = f64::NAN;
+            return Err(CorrelHlError::InvalidPeriod { period, data_len: 0 });
         }
 
         Ok(Self {
             period,
-            buffer_high,
-            buffer_low,
+            buffer_high: vec![f64::NAN; period],
+            buffer_low: vec![f64::NAN; period],
             head: 0,
-            filled: false,
+            len: 0,
+            nan_in_win: 0,
             sum_h: 0.0,
             sum_h2: 0.0,
             sum_l: 0.0,
             sum_l2: 0.0,
             sum_hl: 0.0,
-            count: 0,
+            inv_pf: 1.0 / (period as f64),
         })
     }
 
+    /// O(1) update. Returns:
+    /// - `None` during warmup (before we have `period` points)
+    /// - `Some(NaN)` if the current window contains any NaN pair
+    /// - `Some(r)` otherwise, where r ∈ [-1, 1] (up to rounding)
     #[inline(always)]
     pub fn update(&mut self, h: f64, l: f64) -> Option<f64> {
-        // Get the old values that will be replaced
-        let old_h = self.buffer_high[self.head];
-        let old_l = self.buffer_low[self.head];
+        // 1) Evict old sample if the window is full
+        if self.len == self.period {
+            let old_h = self.buffer_high[self.head];
+            let old_l = self.buffer_low[self.head];
 
-        // Update running sums by removing old values (if valid)
-        if !old_h.is_nan() && !old_l.is_nan() {
-            self.sum_h -= old_h;
-            self.sum_h2 -= old_h * old_h;
-            self.sum_l -= old_l;
-            self.sum_l2 -= old_l * old_l;
-            self.sum_hl -= old_h * old_l;
-        } else if self.count < self.period {
-            // Still in warmup phase
-            self.count += 1;
+            if old_h.is_nan() || old_l.is_nan() {
+                if self.nan_in_win > 0 {
+                    self.nan_in_win -= 1;
+                }
+            } else {
+                self.sum_h -= old_h;
+                self.sum_l -= old_l;
+                self.sum_h2 -= old_h * old_h;
+                self.sum_l2 -= old_l * old_l;
+                self.sum_hl -= old_h * old_l;
+            }
         }
 
-        // Store new values
+        // 2) Write the new pair into the ring
         self.buffer_high[self.head] = h;
         self.buffer_low[self.head] = l;
 
-        // Add new values to running sums
-        self.sum_h += h;
-        self.sum_h2 += h * h;
-        self.sum_l += l;
-        self.sum_l2 += l * l;
-        self.sum_hl += h * l;
-
-        self.head = (self.head + 1) % self.period;
-
-        if !self.filled && self.head == 0 {
-            self.filled = true;
+        // 3) Add new contributions (only if both are numbers)
+        if h.is_nan() || l.is_nan() {
+            self.nan_in_win += 1;
+        } else {
+            self.sum_h += h;
+            self.sum_l += l;
+            self.sum_h2 += h * h;
+            self.sum_l2 += l * l;
+            self.sum_hl += h * l;
         }
 
-        if !self.filled || self.count < self.period {
-            return None;
+        // 4) Advance ring
+        self.head += 1;
+        if self.head == self.period {
+            self.head = 0;
+        }
+        if self.len < self.period {
+            self.len += 1; // grow until full
         }
 
-        // Calculate correlation using running sums - O(1)
-        let pf = self.period as f64;
-        let cov = self.sum_hl - (self.sum_h * self.sum_l / pf);
-        let var_h = self.sum_h2 - (self.sum_h * self.sum_h / pf);
-        let var_l = self.sum_l2 - (self.sum_l * self.sum_l / pf);
+        // 5) Emit
+        if self.len < self.period {
+            return None; // warmup
+        }
+        if self.nan_in_win != 0 {
+            return Some(f64::NAN); // any NaN in window => NaN out
+        }
+
+        // Pearson r = cov / (std_h * std_l), with cov = E[hl] - E[h]E[l]
+        let cov = self.sum_hl - (self.sum_h * self.sum_l) * self.inv_pf;
+        let var_h = self.sum_h2 - (self.sum_h * self.sum_h) * self.inv_pf;
+        let var_l = self.sum_l2 - (self.sum_l * self.sum_l) * self.inv_pf;
 
         if var_h <= 0.0 || var_l <= 0.0 {
-            Some(0.0)
-        } else {
-            Some(cov / (var_h.sqrt() * var_l.sqrt()))
+            return Some(0.0);
         }
+
+        let denom = (var_h * var_l).sqrt();
+        Some(cov / denom)
     }
 }
 

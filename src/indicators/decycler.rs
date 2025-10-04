@@ -17,7 +17,7 @@
 //! - Batch note: precomputes second-difference once and reuses across rows for better throughput.
 //! - **AVX2 kernel**: STUB - calls scalar implementation
 //! - **AVX512 kernel**: STUB - calls scalar implementation (both short and long variants)
-//! - **Streaming**: Not implemented
+//! - **Streaming**: ✅ Enabled (O(1) scalar 2‑pole HP); matches batch after warmup
 //! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy)
 //! - **Batch operations**: ✅ Implemented with parallel processing support
 
@@ -521,16 +521,24 @@ pub fn decycler_batch_with_kernel(
 
 #[derive(Debug, Clone)]
 pub struct DecyclerStream {
+    // Parameters (immutable after construction)
     hp_period: usize,
     k: f64,
-    buffer: Vec<f64>,
-    hp: Vec<f64>,
-    idx: usize,
-    filled: bool,
-    angle: f64,
-    c: f64,
-    one_minus_alpha: f64,
-    one_minus_alpha_sq: f64,
+
+    // Coefficients (derived from period & k)
+    c: f64,          // (1 - alpha/2)^2
+    oma2: f64,       // 2 * (1 - alpha)
+    oma_sq_neg: f64, // -(1 - alpha)^2
+    c_neg2: f64,     // -2 * c (precompute)
+
+    // State (previous two inputs & hp states)
+    x1: f64,  // x[t-1]
+    x2: f64,  // x[t-2]
+    hp1: f64, // hp[t-1]
+    hp2: f64, // hp[t-2]
+
+    // Warmup tracker: number of valid (non-NaN) samples seen so far (0..=2)
+    seen: u8,
 }
 
 impl DecyclerStream {
@@ -538,78 +546,92 @@ impl DecyclerStream {
         let hp_period = params.hp_period.unwrap_or(125);
         let k = params.k.unwrap_or(0.707);
         if hp_period < 2 {
-            return Err(DecyclerError::InvalidPeriod {
-                period: hp_period,
-                data_len: 0,
-            });
+            return Err(DecyclerError::InvalidPeriod { period: hp_period, data_len: 0 });
         }
-        if !(k.is_finite()) || k <= 0.0 {
+        if !k.is_finite() || k <= 0.0 {
             return Err(DecyclerError::InvalidK { k });
         }
+
+        // Coefficient derivation per Ehlers 2‑pole high‑pass
+        // alpha = 1 + (sin(w) - 1) / cos(w), with w = 2πk / hp_period
         use std::f64::consts::PI;
-        let angle = 2.0 * PI * k / (hp_period as f64);
-        let sin_val = angle.sin();
-        let cos_val = angle.cos();
-        // Add epsilon guard to avoid division by near-zero
-        const EPSILON: f64 = 1e-10;
-        let cos_safe = if cos_val.abs() < EPSILON {
-            EPSILON.copysign(cos_val)
-        } else {
-            cos_val
+        let angle = (2.0 * PI * k) * (hp_period as f64).recip();
+        let (sin_val, cos_val) = angle.sin_cos();
+
+        const EPS: f64 = 1e-10;
+        let cos_safe = if cos_val.abs() < EPS { EPS.copysign(cos_val) } else { cos_val };
+        let alpha = 1.0 + (sin_val - 1.0) * (1.0 / cos_safe);
+
+        let oma = 1.0 - alpha;
+        let c = {
+            let t = 1.0 - 0.5 * alpha;
+            t * t
         };
-        let alpha = 1.0 + ((sin_val - 1.0) / cos_safe);
-        let one_minus_alpha_half = 1.0 - alpha / 2.0;
-        let c = one_minus_alpha_half * one_minus_alpha_half;
-        let one_minus_alpha = 1.0 - alpha;
-        let one_minus_alpha_sq = one_minus_alpha * one_minus_alpha;
+
         Ok(Self {
             hp_period,
             k,
-            buffer: vec![f64::NAN; hp_period],
-            hp: vec![0.0; hp_period],
-            idx: 0,
-            filled: false,
-            angle,
             c,
-            one_minus_alpha,
-            one_minus_alpha_sq,
+            oma2: 2.0 * oma,
+            oma_sq_neg: -(oma * oma),
+            c_neg2: -2.0 * c,
+
+            x1: f64::NAN,
+            x2: f64::NAN,
+            hp1: f64::NAN,
+            hp2: f64::NAN,
+            seen: 0,
         })
     }
+
+    /// O(1) update; returns:
+    /// - None during warmup (first two valid samples),
+    /// - Some(NaN) if a NaN arrives after warmup (propagates like offline),
+    /// - Some(value) otherwise.
     #[inline(always)]
-    pub fn update(&mut self, value: f64) -> Option<f64> {
-        // Skip leading NaNs
-        if value.is_nan() && self.idx == 0 {
-            return None;
+    pub fn update(&mut self, x: f64) -> Option<f64> {
+        // Skip leading NaNs (do not advance warmup until we get valid data)
+        if self.seen < 2 {
+            if x.is_nan() {
+                return None;
+            }
+            match self.seen {
+                0 => {
+                    // Seed per offline kernel: hp_prev2 = first valid sample
+                    self.x1 = x;
+                    self.hp1 = x;
+                    self.seen = 1;
+                    return None;
+                }
+                1 => {
+                    // Seed per offline kernel: hp_prev1 = second valid sample
+                    self.x2 = self.x1;
+                    self.x1 = x;
+                    self.hp2 = self.hp1;
+                    self.hp1 = x;
+                    self.seen = 2;
+                    return None;
+                }
+                _ => {}
+            }
         }
 
-        let idx0 = self.idx % self.hp_period;
-        self.buffer[idx0] = value;
+        // After warmup, compute 2‑pole HP via FMA chain
+        let s0 = self.c * x;
+        let s1 = self.c_neg2.mul_add(self.x1, s0);
+        let s2 = self.c.mul_add(self.x2, s1);
+        let s3 = self.oma2.mul_add(self.hp1, s2);
+        let hp = self.oma_sq_neg.mul_add(self.hp2, s3);
 
-        if self.idx == 0 {
-            self.hp[idx0] = value;
-        } else if self.idx == 1 {
-            self.hp[idx0] = value;
-        } else {
-            let prev1 = self.buffer[(self.idx + self.hp_period - 1) % self.hp_period];
-            let prev2 = self.buffer[(self.idx + self.hp_period - 2) % self.hp_period];
-            let hp_prev1 = self.hp[(self.idx + self.hp_period - 1) % self.hp_period];
-            let hp_prev2 = self.hp[(self.idx + self.hp_period - 2) % self.hp_period];
-            let val = self.c * value - 2.0 * self.c * prev1
-                + self.c * prev2
-                + 2.0 * self.one_minus_alpha * hp_prev1
-                - self.one_minus_alpha_sq * hp_prev2;
-            self.hp[idx0] = val;
-        }
+        let out = x - hp;
 
-        let out_val = value - self.hp[idx0];
-        self.idx += 1;
+        // Shift state
+        self.x2 = self.x1;
+        self.x1 = x;
+        self.hp2 = self.hp1;
+        self.hp1 = hp;
 
-        // Return None for warmup period (first + 2), matching offline behavior
-        if self.idx > 2 {
-            Some(out_val)
-        } else {
-            None
-        }
+        Some(out)
     }
 }
 

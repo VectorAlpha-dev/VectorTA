@@ -14,6 +14,9 @@
 //! - SIMD: AVX-512 enabled; >5% faster than scalar at 100k.
 //! - AVX2 implemented but disabled by default (underperforms scalar on test HW).
 //! - Streaming update: O(1) via rolling sum; zero-copy alloc helpers in use.
+//!
+//! Decision: Streaming kernel optimized (cached reciprocal, branchless mask wrap for power-of-two
+//! periods). Behavior unchanged; returns Some on first valid output (period == 1 returns immediately).
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -553,48 +556,74 @@ pub struct SmaStream {
     buffer: Vec<f64>,
     head: usize,
     sum: f64,
-    filled: bool,
+    count: usize, // number of samples seen so far (caps at period)
+    inv: f64,     // cached reciprocal of period
+    // micro-optimization: use bitmask wrap if period is power-of-two
+    use_mask: bool,
+    mask: usize,
 }
 
 impl SmaStream {
+    #[inline(always)]
     pub fn try_new(params: SmaParams) -> Result<Self, SmaError> {
         let period = params.period.unwrap_or(9);
         if period == 0 {
-            return Err(SmaError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(SmaError::InvalidPeriod { period, data_len: 0 });
         }
+        let use_mask = period.is_power_of_two();
         Ok(Self {
             period,
             buffer: vec![0.0; period],
             head: 0,
             sum: 0.0,
-            filled: false,
+            count: 0,
+            inv: (period as f64).recip(),
+            use_mask,
+            mask: period.wrapping_sub(1),
         })
     }
+
+    /// Advance the ring index without `%` in the hot path.
+    /// Uses `& mask` when `period` is power-of-two, else branch to zero.
+    #[inline(always)]
+    fn advance_head(&mut self) {
+        if self.use_mask {
+            self.head = (self.head + 1) & self.mask;
+        } else {
+            let next = self.head + 1;
+            self.head = if next == self.period { 0 } else { next };
+        }
+    }
+
+    /// O(1) streaming update. Returns `None` until the window is filled.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        if !self.filled && self.head == 0 && self.sum == 0.0 {
+        // Fast-path: period == 1 -> average is just the last value
+        if self.period == 1 {
             self.sum = value;
+            self.buffer[0] = value;
+            self.count = 1;
+            return Some(value);
+        }
+
+        if self.count < self.period {
+            // Warmup phase: accumulate until the ring is filled
+            self.sum += value;
             self.buffer[self.head] = value;
-            self.head = (self.head + 1) % self.period;
-            if self.head == 0 {
-                self.filled = true;
+            self.advance_head();
+            self.count += 1;
+            if self.count == self.period {
+                return Some(self.sum * self.inv);
             }
             return None;
         }
-        self.sum += value - self.buffer[self.head];
+
+        // Steady-state: subtract the outgoing sample, add the new one
+        let old = self.buffer[self.head];
+        self.sum += value - old;
         self.buffer[self.head] = value;
-        self.head = (self.head + 1) % self.period;
-        if !self.filled && self.head == 0 {
-            self.filled = true;
-        }
-        if self.filled {
-            Some(self.sum / self.period as f64)
-        } else {
-            None
-        }
+        self.advance_head();
+        Some(self.sum * self.inv)
     }
 }
 

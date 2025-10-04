@@ -24,7 +24,7 @@
 //! - Decision: Scalar classic path optimized (SMA/SMA + EMA) via loop‑jammed sliding sums; >60% speedup at 100k vs prior scalar on native CPU.
 //! - SIMD: AVX2/AVX512 default path enabled (vectorized CV=close×volume build; sliding windows remain scalar). Runtime selector: AVX512 → AVX2 → Scalar.
 //! - Batch: Row path reuses MACD per row; default SMA/SMA macd computation optimized to sliding sums (no per-row temporaries).
-//! - Streaming update: O(n) due to MA recalculation; left as-is.
+//! - Streaming update: O(1) for default SMA/SMA + EMA via sliding sums and one-time EMA seed; fallback remains for other MA types.
 //! - Memory: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes) and avoids O(N) temps on hot paths.
 //! - CUDA: No dedicated kernel here; improvements focus on scalar/SIMD. VWMA has a CUDA kernel.
 
@@ -1029,10 +1029,75 @@ pub unsafe fn vwmacd_streaming_scalar(
     macd_buffer: &[f64],
     signal_ema_state: Option<f64>,
 ) -> (f64, f64, f64) {
-    // TODO: Implement optimized streaming kernel with MA type support
-    // For now, this is a placeholder that returns NaN values
-    // The actual implementation would compute VWMACD values using the provided MA types and state
-    (f64::NAN, f64::NAN, f64::NAN)
+    // Default fast path only: SMA/SMA VWMA with EMA signal.
+    // For other MA types, let the caller fall back to its existing (non-O(1)) path.
+    if !(fast_ma_type.eq_ignore_ascii_case("sma")
+        && slow_ma_type.eq_ignore_ascii_case("sma")
+        && signal_ma_type.eq_ignore_ascii_case("ema"))
+    {
+        return (f64::NAN, f64::NAN, f64::NAN);
+    }
+
+    // We assume `count >= 1` when called.
+    let fast_ready = count >= fast;
+    let slow_ready = count >= slow;
+
+    let mut macd = f64::NAN;
+
+    // Compute fast/slow VWMAs from rolling sums in O(1)
+    let vwma_fast = if fast_ready && fast_v_sum != 0.0 {
+        fast_cv_sum / fast_v_sum
+    } else {
+        f64::NAN
+    };
+    let vwma_slow = if slow_ready && slow_v_sum != 0.0 {
+        slow_cv_sum / slow_v_sum
+    } else {
+        f64::NAN
+    };
+
+    if vwma_fast.is_finite() && vwma_slow.is_finite() {
+        macd = vwma_fast - vwma_slow;
+    }
+
+    // Signal (EMA), seeded once by the mean of the first `signal` MACD values.
+    let mut signal_val = f64::NAN;
+    let have_signal_window = count >= (slow + signal - 1);
+
+    if have_signal_window && macd.is_finite() {
+        // EMA coefficients (constant per stream; may be cached by caller)
+        let alpha = 2.0 / (signal as f64 + 1.0);
+        let beta = 1.0 - alpha;
+
+        signal_val = match signal_ema_state {
+            Some(prev) => {
+                // Standard EMA O(1) update
+                beta.mul_add(prev, alpha * macd) // fused multiply-add where available
+            }
+            None => {
+                // One-time seeding with the mean of the last `signal` MACD values.
+                // Include the current `macd` by replacing its slot if not yet written.
+                let macd_idx = (count - 1) % signal;
+                let mut sum = 0.0;
+                let mut valid = 0usize;
+                for i in 0..signal {
+                    let val = if i == macd_idx { macd } else { macd_buffer[i] };
+                    if val.is_finite() {
+                        sum += val;
+                        valid += 1;
+                    }
+                }
+                if valid == signal { sum / signal as f64 } else { f64::NAN }
+            }
+        };
+    }
+
+    let hist = if macd.is_finite() && signal_val.is_finite() {
+        macd - signal_val
+    } else {
+        f64::NAN
+    };
+    (macd, signal_val, hist)
 }
 
 #[derive(Debug, Clone)]
@@ -1140,11 +1205,11 @@ impl VwmacdStream {
         self.close_buffer[idx] = close;
 
         // Update running sums for SMA windows (O(1)) if we are in the default path
-        let default_ma = self
-            .fast_ma_type
-            .eq_ignore_ascii_case("sma")
-            && self.slow_ma_type.eq_ignore_ascii_case("sma");
+        let default_ma = self.fast_ma_type.eq_ignore_ascii_case("sma")
+            && self.slow_ma_type.eq_ignore_ascii_case("sma")
+            && self.signal_ma_type.eq_ignore_ascii_case("ema");
 
+        // Holders for computed VWMAs in non-default path
         let mut vwma_fast = f64::NAN;
         let mut vwma_slow = f64::NAN;
 
@@ -1154,7 +1219,6 @@ impl VwmacdStream {
             self.fast_v_sum += volume;
             self.slow_cv_sum += cv;
             self.slow_v_sum += volume;
-
             let new_count = self.count + 1;
 
             // Remove outgoing samples when windows are exceeded
@@ -1169,12 +1233,49 @@ impl VwmacdStream {
                 self.slow_v_sum -= self.volume_buffer[prev_idx];
             }
 
-            // Compute VWMAs when windows are filled
-            if new_count >= self.fast_period && self.fast_v_sum != 0.0 {
-                vwma_fast = self.fast_cv_sum / self.fast_v_sum;
+            // Compute in O(1) via streaming kernel
+            let (macd, signal, hist) = unsafe {
+                vwmacd_streaming_scalar(
+                    &self.close_volume_buffer,
+                    &self.volume_buffer,
+                    self.fast_period,
+                    self.slow_period,
+                    self.signal_period,
+                    &self.fast_ma_type,
+                    &self.slow_ma_type,
+                    &self.signal_ma_type,
+                    buf_len,
+                    idx,
+                    new_count,
+                    self.fast_cv_sum,
+                    self.fast_v_sum,
+                    self.slow_cv_sum,
+                    self.slow_v_sum,
+                    &self.macd_buffer,
+                    self.signal_ema_state,
+                )
+            };
+
+            // Write current MACD into the macd ring (so the next tick sees it)
+            let macd_idx = (new_count - 1) % self.signal_period;
+            self.macd_buffer[macd_idx] = macd;
+
+            // Advance count after using it
+            self.count = new_count;
+
+            // Initialize/advance EMA state if applicable
+            if self.count >= self.slow_period + self.signal_period - 1 {
+                if signal.is_finite() {
+                    self.signal_ema_state = Some(signal);
+                    self.signal_filled = true;
+                }
             }
-            if new_count >= self.slow_period && self.slow_v_sum != 0.0 {
-                vwma_slow = self.slow_cv_sum / self.slow_v_sum;
+
+            // Return values for default path
+            if macd.is_finite() {
+                return Some((macd, signal, hist));
+            } else {
+                return None;
             }
         } else {
             // Fallback path for non-default MA types: reuse ma.rs on small windows

@@ -18,8 +18,11 @@
 //! - **Batch (row-specific)**: Uses shared prefix sums of abs-diffs to seed ER
 //!   denominators in O(1) per row; reduces overhead for wide sweeps. Outputs
 //!   unchanged; warmup handling remains identical.
-//! - **Streaming update**: O(n) reference stream retained; could be made O(1)
-//!   with a rolling window if needed in future.
+//! - **Streaming update**: O(1) per update using fixed-size rings for abs-diff
+//!   sum and (period−1) lag. Matches batch/scalar semantics exactly.
+//!
+//! Decision: Streaming enabled (ring buffers) — identical outputs vs batch; O(1)
+//! updates by maintaining rolling |Δ| and (period−1) lagged price.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
@@ -559,8 +562,24 @@ pub fn ehlers_kama_into_slice(
 #[derive(Debug, Clone)]
 pub struct EhlersKamaStream {
     period: usize,
-    buffer: Vec<f64>, // Store all values for O(n) calculation
-    prev_kama: f64,
+    // --- for compatibility with existing tests (debug printing) ---
+    buffer: Vec<f64>,
+
+    // --- O(1) state ---
+    // Rolling sum of absolute differences over the last `period` diffs.
+    diffs: Vec<f64>,   // capacity = period
+    d_head: usize,     // next write index
+    d_len: usize,      // <= period
+    delta_sum: f64,    // Σ |Δ|
+
+    // Last (period-1) prior prices to fetch price_{t-(period-1)} in O(1).
+    lag: Vec<f64>,     // capacity = period.saturating_sub(1)
+    l_head: usize,     // next write index
+    l_len: usize,      // <= period-1
+
+    prev_price: f64,   // last observed price
+    have_prev: bool,   // have we seen at least one sample?
+    prev_kama: f64,    // Pine-style seed; set to previous price at first compute
 }
 
 impl EhlersKamaStream {
@@ -572,88 +591,120 @@ impl EhlersKamaStream {
                 data_len: 0,
             });
         }
+        let diffs_cap = period;
+        let lag_cap = period.saturating_sub(1);
+
         Ok(Self {
             period,
             buffer: Vec::new(),
+
+            diffs: vec![0.0; diffs_cap],
+            d_head: 0,
+            d_len: 0,
+            delta_sum: 0.0,
+
+            lag: if lag_cap > 0 { vec![0.0; lag_cap] } else { Vec::new() },
+            l_head: 0,
+            l_len: 0,
+
+            prev_price: f64::NAN,
+            have_prev: false,
             prev_kama: f64::NAN,
         })
     }
 
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        // Add new value to buffer
+        // Keep the debug history (does not affect O(1) math state)
         self.buffer.push(value);
-        let len = self.buffer.len();
 
-        // Need at least period values to compute
-        if len < self.period {
+        // First sample: just prime state
+        if !self.have_prev {
+            self.prev_price = value;
+            self.have_prev = true;
+
+            // push current value into (period-1) lag so the next tick sees it as a prior
+            if !self.lag.is_empty() {
+                self.lag[self.l_head] = value;
+                self.l_head = (self.l_head + 1) % self.lag.len();
+                if self.l_len < self.lag.len() { self.l_len += 1; }
+            }
             return None;
         }
 
-        // Mirror the batch implementation exactly
-        // Calculate delta_sum with PERIOD consecutive differences
-        let mut delta_sum = 0.0;
-
-        // Current index in the stream corresponds to (len - 1) in batch terms
-        let current_idx = len - 1;
-
-        // We need period consecutive differences ending at current_idx
-        // This means differences from (current_idx - period + 1) to current_idx
-        let delta_start = if current_idx >= self.period {
-            current_idx - self.period + 1
+        // 1) Update rolling sum of diffs (|value - prev|) in O(1).
+        let new_diff = (value - self.prev_price).abs();
+        if self.d_len == self.period {
+            // overwrite oldest at d_head
+            let old = self.diffs[self.d_head];
+            self.delta_sum -= old;
         } else {
-            // When current_idx < period, start from 1 (first possible difference)
-            1
-        };
+            self.d_len += 1; // grow until full
+        }
+        self.diffs[self.d_head] = new_diff;
+        self.delta_sum += new_diff;
+        self.d_head = (self.d_head + 1) % self.period;
 
-        for k in delta_start..=current_idx {
-            if k > 0 && k < len {
-                delta_sum += (self.buffer[k] - self.buffer[k - 1]).abs();
+        // 2) Can we compute yet? Need lag of length (period-1)
+        if self.l_len < self.period.saturating_sub(1) {
+            // Not enough history. Push current value for future steps and exit.
+            if !self.lag.is_empty() {
+                self.lag[self.l_head] = value;
+                self.l_head = (self.l_head + 1) % self.lag.len();
+                if self.l_len < self.lag.len() { self.l_len += 1; }
             }
+            self.prev_price = value;
+            return None;
         }
 
-        // Initialize KAMA on first calculation
-        if len == self.period {
-            // Pine-style seed: use previous value
-            self.prev_kama = self.buffer[current_idx - 1];
-
-            // Apply adaptive formula for first output
-            // Direction uses correct lookback: current_idx - (period - 1)
-            let direction =
-                (self.buffer[current_idx] - self.buffer[current_idx - (self.period - 1)]).abs();
-            let ef = if delta_sum == 0.0 {
-                0.0
-            } else {
-                (direction / delta_sum).min(1.0)
-            };
-            let s = ((0.6667 * ef) + 0.0645).powi(2);
-            let kama = s * self.buffer[current_idx] + (1.0 - s) * self.prev_kama;
-            self.prev_kama = kama;
-            return Some(kama);
-        }
-
-        // Continue with adaptive calculation for subsequent values
-        // Direction uses full period window
-        let direction =
-            (self.buffer[current_idx] - self.buffer[current_idx - (self.period - 1)]).abs();
-
-        // Calculate efficiency ratio
-        let ef = if delta_sum == 0.0 {
-            0.0
+        // 3) Compute ER components in O(1).
+        // Oldest prior price is at l_head when the lag ring is full (head = next write).
+        let direction_ref = if self.lag.is_empty() {
+            // period == 1 (degenerate); direction becomes |price - price|
+            value
         } else {
-            (direction / delta_sum).min(1.0)
+            self.lag[self.l_head] // oldest of the last (period-1) prices
         };
+        let direction = (value - direction_ref).abs();
 
-        // Ehlers smoothing constant
-        let s = ((0.6667 * ef) + 0.0645).powi(2);
+        // Handle zero volatility carefully to avoid NaN/Inf (match batch semantics).
+        let ef = if self.delta_sum == 0.0 { 0.0 } else { clamp01(direction / self.delta_sum) };
 
-        // Update KAMA
-        let kama = s * self.buffer[current_idx] + (1.0 - s) * self.prev_kama;
+        // Ehlers/Kaufman smoothing constant: s = (0.6667*ef + 0.0645)^2 (use mul_add, avoid powi)
+        let s = smooth_const_from_ef(ef);
+
+        // Pine-style first seed equals previous price
+        if self.prev_kama.is_nan() {
+            self.prev_kama = self.prev_price;
+        }
+
+        // Recurrence: KAMA_t = s*(price - prev_kama) + prev_kama (via FMA)
+        let kama = s.mul_add(value - self.prev_kama, self.prev_kama);
         self.prev_kama = kama;
+
+        // 4) Advance lag ring with *current* value for the next call
+        if !self.lag.is_empty() {
+            self.lag[self.l_head] = value;
+            self.l_head = (self.l_head + 1) % self.lag.len();
+            if self.l_len < self.lag.len() { self.l_len += 1; }
+        }
+
+        // 5) Advance prev price
+        self.prev_price = value;
 
         Some(kama)
     }
 }
+
+#[inline(always)]
+fn smooth_const_from_ef(ef: f64) -> f64 {
+    // s = (0.6667*ef + 0.0645)^2
+    let t = 0.6667f64.mul_add(ef.min(1.0), 0.0645);
+    t * t
+}
+
+#[inline(always)]
+fn clamp01(x: f64) -> f64 { x.max(0.0).min(1.0) }
 
 // Batch processing support
 #[derive(Clone, Debug)]

@@ -843,21 +843,37 @@ unsafe fn trendflex_avx512_long_into(
 }
 
 // Streaming implementation
+// Decision: Streaming uses O(1) state with Ehlers 2‑pole SSF; matches batch warmup.
 #[derive(Debug, Clone)]
 pub struct TrendFlexStream {
+    // configuration
     period: usize,
     ss_period: usize,
-    ssf: Vec<f64>,
-    ms_prev: f64,
-    buffer: Vec<f64>,
-    sum: f64,
-    idx: usize,
-    filled: bool,
-    last_raw: Option<f64>,
+
+    // IIR coefficients for Ehlers Super Smoother
     a: f64,
     a_sq: f64,
     b: f64,
     c: f64,
+
+    // rolling window over last `period` SSF values
+    buf: Vec<f64>,
+    sum: f64,
+    head: usize,
+
+    // IIR state: y[n-1], y[n-2], and last raw x[n-1]
+    prev1_ssf: f64,
+    prev2_ssf: f64,
+    last_raw: f64,
+
+    // number of SSF samples produced so far
+    n_ssf: usize,
+
+    // volatility smoother state
+    ms_prev: f64,
+
+    // cached constants
+    inv_p: f64,
 }
 
 impl TrendFlexStream {
@@ -866,6 +882,7 @@ impl TrendFlexStream {
         if period == 0 {
             return Err(TrendFlexError::ZeroTrendFlexPeriod { period });
         }
+        // choose smoother period as round(period/2)
         let ss_period = ((period as f64) / 2.0).round() as usize;
         if ss_period == 0 {
             return Err(TrendFlexError::SmootherPeriodExceedsData {
@@ -874,6 +891,7 @@ impl TrendFlexStream {
             });
         }
 
+        // Ehlers Super Smoother coefficients
         use std::f64::consts::PI;
         let a = (-1.414_f64 * PI / (ss_period as f64)).exp();
         let a_sq = a * a;
@@ -883,72 +901,96 @@ impl TrendFlexStream {
         Ok(Self {
             period,
             ss_period,
-            ssf: Vec::with_capacity(ss_period.max(3)),
-            ms_prev: 0.0,
-            buffer: vec![0.0; period],
-            sum: 0.0,
-            idx: 0,
-            filled: false,
-            last_raw: None,
             a,
             a_sq,
             b,
             c,
+            buf: vec![0.0; period],
+            sum: 0.0,
+            head: 0,
+            prev1_ssf: 0.0,
+            prev2_ssf: 0.0,
+            last_raw: 0.0,
+            n_ssf: 0,
+            ms_prev: 0.0,
+            inv_p: 1.0 / (period as f64),
         })
     }
 
+    /// O(1) update. Returns Some(value) once the rolling window is full, None during warmup.
     #[inline(always)]
-    pub fn update(&mut self, value: f64) -> Option<f64> {
-        let n = self.ssf.len();
-        if n == 0 {
-            self.ssf.push(value);
-            self.buffer[self.idx] = value;
-            self.sum += value;
-            self.idx = (self.idx + 1) % self.period;
-            self.last_raw = Some(value);
-            return None;
-        }
-        if n == 1 {
-            self.ssf.push(value);
-            self.buffer[self.idx] = value;
-            self.sum += value;
-            self.idx = (self.idx + 1) % self.period;
-            self.last_raw = Some(value);
-            return None;
-        }
-        let prev_raw = self.last_raw.unwrap();
-        let prev1 = self.ssf[n - 1];
-        let prev2 = self.ssf[n - 2];
-        let new_ssf = self.c * (value + prev_raw) + self.b * prev1 - self.a_sq * prev2;
-        self.ssf.push(new_ssf);
+    pub fn update(&mut self, x: f64) -> Option<f64> {
+        // Seed #1: y0 = x0
+        if self.n_ssf == 0 {
+            self.prev2_ssf = x;
+            self.last_raw = x;
 
-        self.last_raw = Some(value);
-        let p = self.period;
-        let old = self.buffer[self.idx];
-        let rolling_sum = self.sum;
-        let my_sum = (p as f64 * new_ssf - rolling_sum) / (p as f64);
-        self.sum = rolling_sum + new_ssf - old;
-        self.buffer[self.idx] = new_ssf;
-        self.idx = (self.idx + 1) % p;
-
-        if !self.filled && self.ssf.len() > p {
-            self.filled = true;
-        }
-        if !self.filled {
+            // seed ring with y0
+            self.buf[self.head] = x;
+            self.sum += x;
+            self.head = if self.period > 1 { 1 } else { 0 };
+            self.n_ssf = 1;
             return None;
         }
 
-        let tp_f = p as f64;
-        let inv_tp = 1.0 / tp_f;
+        // Seed #2: y1 = x1
+        if self.n_ssf == 1 {
+            self.prev1_ssf = x;
+            self.last_raw = x;
 
-        let ms_current = 0.04 * my_sum * my_sum + 0.96 * self.ms_prev;
-        self.ms_prev = ms_current;
+            if self.period > 1 {
+                self.buf[self.head] = x;
+                self.sum += x;
+                self.head = (self.head + 1) % self.period;
+            } else {
+                // period == 1: reuse buf[0]
+                self.buf[0] = x;
+                self.sum = x;
+            }
+            self.n_ssf = 2;
+            return None;
+        }
 
-        Some(if ms_current != 0.0 {
-            my_sum / ms_current.sqrt()
+        // Main recurrence (Ehlers 2-pole Super Smoother)
+        // y = c*(x + x_prev) + b*y[n-1] - a^2*y[n-2]
+        let cur = (-self.a_sq).mul_add(
+            self.prev2_ssf,
+            self.b.mul_add(self.prev1_ssf, self.c * (x + self.last_raw)),
+        );
+
+        // mean difference against rolling window sum (previous window; excludes `cur`)
+        let tp_cur_minus_sum = (self.period as f64).mul_add(cur, -self.sum);
+        let my_sum = self.inv_p * tp_cur_minus_sum;
+
+        // Decide if we will emit this tick (warmup complete after this sample)
+        let will_emit = self.n_ssf + 1 > self.period;
+
+        // Volatility smoother and normalized output (only once warmup complete)
+        let out_val = if will_emit {
+            let sq = my_sum * my_sum;
+            let ms_current = 0.04f64.mul_add(sq, 0.96f64 * self.ms_prev);
+            self.ms_prev = ms_current;
+            if ms_current > 0.0 {
+                my_sum / ms_current.sqrt()
+            } else {
+                0.0
+            }
         } else {
             0.0
-        })
+        };
+
+        // Slide window and states
+        let old = self.buf[self.head];
+        self.sum += cur - old;
+        self.buf[self.head] = cur;
+        self.head = (self.head + 1) % self.period;
+
+        self.prev2_ssf = self.prev1_ssf;
+        self.prev1_ssf = cur;
+        self.last_raw = x;
+        self.n_ssf += 1;
+
+        if will_emit { Some(out_val) } else { None }
     }
 }
 

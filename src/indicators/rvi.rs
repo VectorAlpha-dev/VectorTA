@@ -25,7 +25,11 @@
 //! - **Row-specific batch**: Not attempted; differing periods and NaN-aware windows
 //!   limit cross-row reuse. Batch uses scalar per row via selector; treat batch
 //!   benches as advisory.
-//! - **Streaming update**: Not implemented - always returns None (needs complex state tracking)
+//! - **Streaming update**: Implemented. O(1) per update for StdDev (devtype=0),
+//!   O(n) exact for mean-abs-dev (devtype=1), and O(log n) for median-abs-dev
+//!   (devtype=2) using two-heaps with lazy deletion and running sums. Smoothers
+//!   (SMA/EMA with SMA seed) mirror batch behavior; returns None until both the
+//!   deviation window and the smoother(s) are warm. NaN input resets state.
 //! - **Memory optimization**: Properly uses zero-copy helper functions (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
 //! - **TODO**: Implement actual SIMD kernels for AVX2/AVX512
 //! - **TODO**: Implement proper streaming with state tracking for deviation arrays and differences
@@ -58,6 +62,9 @@ use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use thiserror::Error;
+use std::cmp::{Ordering};
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 
 impl<'a> AsRef<[f64]> for RviInput<'a> {
     #[inline(always)]
@@ -1169,17 +1176,100 @@ pub unsafe fn rvi_avx512_long(
 
 // ========== Batch and Streaming ==========
 
+// ---- Helpers for median-based deviation ----
+/// Item kept in heaps for the median structure (store unique id = ring slot)
+#[derive(Copy, Clone, Debug)]
+struct HeapItem {
+    val: f64,
+    id: usize,
+}
+impl PartialEq for HeapItem {
+    #[inline(always)]
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id && self.val.to_bits() == other.val.to_bits()
+    }
+}
+impl Eq for HeapItem {}
+impl Ord for HeapItem {
+    #[inline(always)]
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Safe because we never push NaNs
+        match self.val.partial_cmp(&other.val).unwrap() {
+            Ordering::Equal => self.id.cmp(&other.id),
+            ord => ord,
+        }
+    }
+}
+impl PartialOrd for HeapItem {
+    #[inline(always)]
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct RviStream {
+    // Params
     period: usize,
     ma_len: usize,
-    matype: usize,
-    devtype: usize,
-    buffer: Vec<f64>,
-    up_smoother: Vec<f64>,
-    down_smoother: Vec<f64>,
-    count: usize,
-    filled: bool,
+    matype: usize,   // 0=SMA, 1=EMA
+    devtype: usize,  // 0=StdDev, 1=MeanAbsDev, 2=MedianAbsDev
+
+    // Constants
+    inv_p: f64,
+    inv_m: f64,
+    use_sma: bool,
+    alpha: f64,
+    one_m_alpha: f64,
+
+    // ---- Streaming "price diff" state ----
+    prev_x: f64,
+    have_prev: bool,
+
+    // ---- Sliding window (shared across devtypes) ----
+    win: Vec<f64>,     // last `period` values (ring)
+    head: usize,       // next index to overwrite
+    filled: usize,     // number of valid values in `win` (<= period)
+
+    // ---- devtype=0 (StdDev) ----
+    sum: f64,
+    sumsq: f64,
+
+    // ---- devtype=1 (MeanAbsDev about mean) ----
+    // Maintain sum for mean; compute abs dev in O(period) over win
+    mad_sum: f64,
+
+    // ---- devtype=2 (Median-based mean abs dev) ----
+    // Two-heaps + deletable entries (lazy pop) + sums & sizes of valid elements
+    left: BinaryHeap<HeapItem>,             // max-heap (lower half)
+    right: BinaryHeap<Reverse<HeapItem>>,   // min-heap (upper half)
+    side_of_id: Vec<u8>,                    // 0 => left, 1 => right
+    deleted: Vec<u8>,                       // mark obsolete entries (by id)
+    n_left: usize,
+    n_right: usize,
+    s_left: f64,
+    s_right: f64,
+
+    // ---- Smoothing state (shared) ----
+    // SMA
+    up_ring: Vec<f64>,
+    dn_ring: Vec<f64>,
+    up_sum: f64,
+    dn_sum: f64,
+    up_h: usize,
+    dn_h: usize,
+    up_cnt: usize,
+    dn_cnt: usize,
+
+    // EMA (with SMA seed)
+    up_prev: f64,
+    dn_prev: f64,
+    up_started: bool,
+    dn_started: bool,
+    up_seed_sum: f64,
+    dn_seed_sum: f64,
+    up_seed_cnt: usize,
+    dn_seed_cnt: usize,
 }
 
 impl RviStream {
@@ -1195,25 +1285,276 @@ impl RviStream {
                 data_len: 0,
             });
         }
+
+        let inv_p = 1.0 / period as f64;
+        let inv_m = 1.0 / ma_len as f64;
+        let use_sma = matype == 0;
+        let alpha = if use_sma { 0.0 } else { 2.0 / (ma_len as f64 + 1.0) };
+        let one_m_alpha = 1.0 - alpha;
+
         Ok(Self {
-            period,
-            ma_len,
-            matype,
-            devtype,
-            buffer: vec![f64::NAN; period + 1],
-            up_smoother: vec![f64::NAN; ma_len],
-            down_smoother: vec![f64::NAN; ma_len],
-            count: 0,
-            filled: false,
+            // params
+            period, ma_len, matype, devtype,
+            // consts
+            inv_p, inv_m, use_sma, alpha, one_m_alpha,
+            // diff state
+            prev_x: f64::NAN,
+            have_prev: false,
+            // sliding window
+            win: vec![f64::NAN; period],
+            head: 0,
+            filled: 0,
+            // stddev
+            sum: 0.0,
+            sumsq: 0.0,
+            // MAD mean sum
+            mad_sum: 0.0,
+            // median structure
+            left: BinaryHeap::new(),
+            right: BinaryHeap::new(),
+            side_of_id: vec![0; period],
+            deleted: vec![1; period], // mark all invalid initially
+            n_left: 0,
+            n_right: 0,
+            s_left: 0.0,
+            s_right: 0.0,
+            // smoothing
+            up_ring: if use_sma { vec![0.0; ma_len] } else { Vec::new() },
+            dn_ring: if use_sma { vec![0.0; ma_len] } else { Vec::new() },
+            up_sum: 0.0, dn_sum: 0.0, up_h: 0, dn_h: 0, up_cnt: 0, dn_cnt: 0,
+            up_prev: 0.0, dn_prev: 0.0,
+            up_started: false, dn_started: false,
+            up_seed_sum: 0.0, dn_seed_sum: 0.0,
+            up_seed_cnt: 0, dn_seed_cnt: 0,
         })
     }
 
     #[inline(always)]
+    fn reset_smoothing(&mut self) {
+        if self.use_sma {
+            self.up_sum = 0.0; self.dn_sum = 0.0;
+            self.up_h = 0; self.dn_h = 0;
+            self.up_cnt = 0; self.dn_cnt = 0;
+        }
+        self.up_prev = 0.0; self.dn_prev = 0.0;
+        self.up_started = false; self.dn_started = false;
+        self.up_seed_sum = 0.0; self.dn_seed_sum = 0.0;
+        self.up_seed_cnt = 0; self.dn_seed_cnt = 0;
+    }
+
+    #[inline(always)]
+    fn reset_all(&mut self) {
+        self.prev_x = f64::NAN;
+        self.have_prev = false;
+        self.head = 0;
+        self.filled = 0;
+        self.sum = 0.0;
+        self.sumsq = 0.0;
+        self.mad_sum = 0.0;
+        for i in 0..self.period {
+            self.win[i] = f64::NAN;
+            self.deleted[i] = 1;
+        }
+        self.left.clear();
+        self.right.clear();
+        self.n_left = 0; self.n_right = 0;
+        self.s_left = 0.0; self.s_right = 0.0;
+        self.reset_smoothing();
+    }
+
+    // median helpers
+    #[inline(always)]
+    fn prune_left(&mut self) {
+        while let Some(top) = self.left.peek() {
+            if self.deleted[top.id] != 0 { self.left.pop(); } else { break; }
+        }
+    }
+    #[inline(always)]
+    fn prune_right(&mut self) {
+        while let Some(Reverse(top)) = self.right.peek() {
+            if self.deleted[top.id] != 0 { self.right.pop(); } else { break; }
+        }
+    }
+    #[inline(always)]
+    fn rebalance(&mut self) {
+        self.prune_left(); self.prune_right();
+        if self.n_left > self.n_right + 1 {
+            let item = self.left.pop().unwrap();
+            self.prune_left();
+            self.n_left -= 1; self.s_left -= item.val;
+            self.n_right += 1; self.s_right += item.val;
+            self.side_of_id[item.id] = 1;
+            self.right.push(Reverse(item));
+            self.prune_right();
+        } else if self.n_left < self.n_right {
+            let Reverse(item) = self.right.pop().unwrap();
+            self.prune_right();
+            self.n_right -= 1; self.s_right -= item.val;
+            self.n_left += 1; self.s_left += item.val;
+            self.side_of_id[item.id] = 0;
+            self.left.push(item);
+            self.prune_left();
+        }
+    }
+    #[inline(always)]
+    fn median_insert(&mut self, id: usize, val: f64) {
+        self.prune_left();
+        if self.n_left == 0 || self.left.peek().map(|t| val <= t.val).unwrap_or(true) {
+            self.left.push(HeapItem { val, id });
+            self.side_of_id[id] = 0; self.deleted[id] = 0;
+            self.n_left += 1; self.s_left += val;
+        } else {
+            self.right.push(Reverse(HeapItem { val, id }));
+            self.side_of_id[id] = 1; self.deleted[id] = 0;
+            self.n_right += 1; self.s_right += val;
+        }
+        self.rebalance();
+    }
+    #[inline(always)]
+    fn median_remove(&mut self, id: usize, val: f64) {
+        self.deleted[id] = 1;
+        if self.side_of_id[id] == 0 {
+            if self.n_left > 0 { self.n_left -= 1; self.s_left -= val; }
+        } else {
+            if self.n_right > 0 { self.n_right -= 1; self.s_right -= val; }
+        }
+        self.rebalance();
+    }
+    #[inline(always)]
+    fn median_value(&mut self) -> Option<f64> {
+        self.prune_left();
+        self.left.peek().map(|t| t.val)
+    }
+    #[inline(always)]
+    fn mean_abs_dev_about_median(&mut self, m: f64) -> f64 {
+        let l = self.n_left as f64;
+        let r = self.n_right as f64;
+        let l1 = m * l - self.s_left + self.s_right - m * r;
+        l1 * self.inv_p
+    }
+
+    #[inline(always)]
+    fn stddev_current(&self) -> f64 {
+        let mean = self.sum * self.inv_p;
+        let mean_sq = self.sumsq * self.inv_p;
+        (mean_sq - mean * mean).sqrt()
+    }
+
+    // smoothing helpers
+    #[inline(always)]
+    fn push_sma(sum: &mut f64, ring: &mut [f64], head: &mut usize, cnt: &mut usize, inv_m: f64, x: f64) -> Option<f64> {
+        if *cnt < ring.len() {
+            ring[*head] = x;
+            *sum += x;
+            *head += 1; if *head == ring.len() { *head = 0; }
+            *cnt += 1;
+            if *cnt == ring.len() { Some(*sum * inv_m) } else { None }
+        } else {
+            let old = ring[*head];
+            ring[*head] = x;
+            *head += 1; if *head == ring.len() { *head = 0; }
+            *sum += x - old;
+            Some(*sum * inv_m)
+        }
+    }
+
+    #[inline(always)]
+    fn push_ema(prev: &mut f64, started: &mut bool, seed_sum: &mut f64, seed_cnt: &mut usize, ma_len: usize, inv_m: f64, alpha: f64, one_m_alpha: f64, x: f64) -> Option<f64> {
+        if !*started {
+            *seed_sum += x; *seed_cnt += 1;
+            if *seed_cnt == ma_len { *prev = *seed_sum * inv_m; *started = true; Some(*prev) } else { None }
+        } else {
+            *prev = alpha.mul_add(x, one_m_alpha * *prev);
+            Some(*prev)
+        }
+    }
+
+    #[inline(always)]
+    fn reset_smoothers_on_gap(&mut self) { self.reset_smoothing(); }
+
+    #[inline(always)]
+    fn combine_rvi(us: Option<f64>, ds: Option<f64>) -> Option<f64> {
+        match (us, ds) {
+            (Some(u), Some(d)) => {
+                let denom = u + d;
+                if denom.abs() < f64::EPSILON { None } else { Some(100.0 * (u / denom)) }
+            }
+            _ => None,
+        }
+    }
+
+    #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        // Streaming RVI not fully supported due to dependencies on previous dev array and diff.
-        // For compatibility, always return None.
-        let _ = value;
-        None
+        if value.is_nan() {
+            self.reset_all();
+            return None;
+        }
+
+        // diff
+        let d = if self.have_prev { value - self.prev_x } else { f64::NAN };
+        self.prev_x = value;
+        self.have_prev = true;
+
+        // window slide
+        let id = self.head;
+        if self.filled < self.period {
+            self.win[id] = value;
+            self.head += 1; if self.head == self.period { self.head = 0; }
+            self.filled += 1;
+            match self.devtype {
+                0 => { self.sum += value; self.sumsq += value * value; }
+                1 => { self.mad_sum += value; }
+                2 => { self.median_insert(id, value); }
+                _ => {}
+            }
+        } else {
+            let leaving = self.win[id];
+            self.win[id] = value;
+            self.head += 1; if self.head == self.period { self.head = 0; }
+            match self.devtype {
+                0 => { self.sum += value - leaving; self.sumsq += value * value - leaving * leaving; }
+                1 => { self.mad_sum += value - leaving; }
+                2 => { self.median_remove(id, leaving); self.median_insert(id, value); }
+                _ => {}
+            }
+        }
+
+        if self.filled < self.period { self.reset_smoothers_on_gap(); return None; }
+
+        // deviation
+        let dev = match self.devtype {
+            0 => {
+                let sd = self.stddev_current();
+                if !sd.is_finite() { self.reset_smoothers_on_gap(); return None; }
+                sd
+            }
+            1 => {
+                let mean = self.mad_sum * self.inv_p;
+                let mut abs_sum = 0.0;
+                for k in 0..self.period { abs_sum += (self.win[k] - mean).abs(); }
+                abs_sum * self.inv_p
+            }
+            2 => {
+                if let Some(med) = self.median_value() { self.mean_abs_dev_about_median(med) } else { self.reset_smoothers_on_gap(); return None }
+            }
+            _ => unreachable!(),
+        };
+
+        if !d.is_finite() || !dev.is_finite() { self.reset_smoothers_on_gap(); return None; }
+        let (up_i, dn_i) = if d > 0.0 { (dev, 0.0) } else if d < 0.0 { (0.0, dev) } else { (0.0, 0.0) };
+
+        // smoothing
+        let (up_s, dn_s) = if self.use_sma {
+            let up_s = Self::push_sma(&mut self.up_sum, &mut self.up_ring, &mut self.up_h, &mut self.up_cnt, self.inv_m, up_i);
+            let dn_s = Self::push_sma(&mut self.dn_sum, &mut self.dn_ring, &mut self.dn_h, &mut self.dn_cnt, self.inv_m, dn_i);
+            (up_s, dn_s)
+        } else {
+            let up_s = Self::push_ema(&mut self.up_prev, &mut self.up_started, &mut self.up_seed_sum, &mut self.up_seed_cnt, self.ma_len, self.inv_m, self.alpha, self.one_m_alpha, up_i);
+            let dn_s = Self::push_ema(&mut self.dn_prev, &mut self.dn_started, &mut self.dn_seed_sum, &mut self.dn_seed_cnt, self.ma_len, self.inv_m, self.alpha, self.one_m_alpha, dn_i);
+            (up_s, dn_s)
+        };
+
+        Self::combine_rvi(up_s, dn_s)
     }
 }
 
