@@ -706,54 +706,129 @@ pub unsafe fn hma_avx512(data: &[f64], period: usize, first: usize, out: &mut [f
 #[derive(Debug, Clone)]
 struct LinWma {
     period: usize,
-    weights: Vec<f64>,
-    inv_norm: f64,
-    buffer: Vec<f64>,
-    head: usize,
-    filled: bool,
+    inv_norm: f64,        // 1.0 / (1 + 2 + ... + n) = 2 / (n*(n+1))
+    buffer: Vec<f64>,     // circular buffer (oldest at head)
+    head: usize,          // next position to overwrite (oldest element)
+    filled: bool,         // true once we've pushed >= period samples
+    count: usize,         // samples seen so far (<= period during warmup)
+
+    // O(1) state
+    sum: f64,             // simple sum over the window
+    wsum: f64,            // weighted numerator: Σ_{i=1..n} i * x_{oldest+i-1}
+    nan_count: usize,     // number of NaNs currently in the window
+    dirty: bool,          // sums/weights invalid due to NaN; rebuild on next clean window
 }
 
 impl LinWma {
+    #[inline(always)]
     fn new(period: usize) -> Self {
-        let mut weights = Vec::with_capacity(period);
-        let mut norm = 0.0;
-        for i in 0..period {
-            let w = (i + 1) as f64;
-            weights.push(w);
-            norm += w;
-        }
+        // Triangular normalization; multiply by inv_norm instead of dividing each time.
+        let norm = (period as f64) * ((period as f64) + 1.0) * 0.5;
         Self {
             period,
-            weights,
             inv_norm: 1.0 / norm,
             buffer: vec![f64::NAN; period],
             head: 0,
             filled: false,
+            count: 0,
+            sum: 0.0,
+            wsum: 0.0,
+            nan_count: 0,
+            dirty: false,
         }
     }
 
+    /// Rebuild rolling sum & weighted sum exactly from the current window.
+    /// Called only when `nan_count == 0` but `dirty == true`.
+    #[inline(always)]
+    fn rebuild(&mut self) {
+        self.sum = 0.0;
+        self.wsum = 0.0;
+        self.nan_count = 0;
+
+        let mut idx = self.head;
+        for i in 0..self.period {
+            let v = self.buffer[idx];
+            if v.is_nan() {
+                self.nan_count += 1;
+            } else {
+                // weights are 1..n from oldest->newest (oldest is at head)
+                self.sum += v;
+                self.wsum = (i as f64 + 1.0).mul_add(v, self.wsum);
+            }
+            idx = if idx + 1 == self.period { 0 } else { idx + 1 };
+        }
+        self.dirty = self.nan_count != 0;
+        debug_assert!(self.nan_count == 0, "rebuild expected clean window");
+    }
+
+    /// O(1) rolling update. Returns None until warmup completes;
+    /// then returns Some(WMA) (NaN if any NaN exists in the window).
     #[inline(always)]
     fn update(&mut self, value: f64) -> Option<f64> {
+        let n = self.period as f64;
+
+        // Insert new value, overwriting the oldest
+        let old = self.buffer[self.head];
         self.buffer[self.head] = value;
-        self.head = (self.head + 1) % self.period;
-        if !self.filled && self.head == 0 {
-            self.filled = true;
-        }
+        self.head = if self.head + 1 == self.period { 0 } else { self.head + 1 };
+
+        // Warm-up path (filling < period)
         if !self.filled {
+            self.count += 1;
+
+            if value.is_nan() {
+                self.nan_count += 1;
+                self.dirty = true;
+            } else {
+                // weights for partial fill are 1..count with newest weight = count
+                self.sum += value;
+                self.wsum = (self.count as f64).mul_add(value, self.wsum);
+            }
+
+            if self.count == self.period {
+                self.filled = true;
+                // first full window becomes valid here
+                return Some(if self.nan_count > 0 {
+                    f64::NAN
+                } else {
+                    self.wsum * self.inv_norm
+                });
+            }
             return None;
         }
-        Some(self.dot_ring())
-    }
 
-    #[inline(always)]
-    fn dot_ring(&self) -> f64 {
-        let mut sum = 0.0;
-        let mut idx = self.head;
-        for &w in &self.weights {
-            sum += w * self.buffer[idx];
-            idx = (idx + 1) % self.period;
+        // Steady-state path (already filled)
+        // Maintain NaN accounting
+        if old.is_nan() {
+            self.nan_count = self.nan_count.saturating_sub(1);
         }
-        sum * self.inv_norm
+        if value.is_nan() {
+            self.nan_count += 1;
+        }
+
+        // Any NaN inside the window => output NaN (parity with dot_product semantics)
+        if self.nan_count > 0 {
+            self.dirty = true; // sums are unreliable while NaNs are present
+            return Some(f64::NAN);
+        }
+
+        // If window just became clean, rebuild exact sums once, then continue O(1)
+        if self.dirty {
+            self.rebuild();
+            self.dirty = false;
+            debug_assert_eq!(self.nan_count, 0);
+            return Some(self.wsum * self.inv_norm);
+        }
+
+        // Fast O(1) update:
+        //  - sum_{t+1} = sum_t + value - old
+        //  - wsum_{t+1} = wsum_t - sum_t + n * value   (uses previous sum_t)
+        let prev_sum = self.sum;
+        self.sum = prev_sum + value - old;
+        self.wsum = n.mul_add(value, self.wsum - prev_sum); // FMA: wsum += n*value - prev_sum
+
+        Some(self.wsum * self.inv_norm)
     }
 }
 
@@ -768,10 +843,7 @@ impl HmaStream {
     pub fn try_new(params: HmaParams) -> Result<Self, HmaError> {
         let period = params.period.unwrap_or(5);
         if period < 2 {
-            return Err(HmaError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(HmaError::InvalidPeriod { period, data_len: 0 });
         }
         let half = period / 2;
         if half == 0 {
@@ -789,12 +861,15 @@ impl HmaStream {
         })
     }
 
+    /// Returns None until sqrt(period) samples of the intermediate series are available.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
         let full = self.wma_full.update(value);
         let half = self.wma_half.update(value);
+
         if let (Some(f), Some(h)) = (full, half) {
-            let x = 2.0 * h - f;
+            // Intermediate x_t = 2*WMA_half - WMA_full
+            let x = 2.0f64.mul_add(h, -f);
             self.wma_sqrt.update(x)
         } else {
             None

@@ -13,7 +13,7 @@
 //!
 //! ## Developer Status
 //! - **SIMD Kernels**: Implemented but disabled by default (runtime short-circuits to scalar). Compensated per-lane sums are present for future use; current versions are slower at 10k/100k/1M.
-//! - **Streaming Performance**: O(n) - requires full window scan for Mean Absolute Deviation calculation
+//! - **Streaming Performance**: O(log n) exact — maintains an order‑statistics treap to compute MAD without full rescans
 //! - **Memory Optimization**: GOOD - properly uses alloc_with_nan_prefix helper for zero-copy allocation
 //! - Note: CCI’s MAD requires a full window scan; SIMD accelerates that scan but cannot make it O(1).
 
@@ -706,38 +706,262 @@ pub unsafe fn cci_row_avx512_long(
 
 // ---- Stream ----
 
+// Decision: Streaming uses an order‑statistics treap for exact O(log n) MAD.
+// Replaces prior O(n) scan per tick; API and warmup semantics unchanged.
+
 #[derive(Debug, Clone)]
 pub struct CciStream {
     period: usize,
     buffer: Vec<f64>,
     head: usize,
     filled: bool,
+
+    // Rolling sum of the window (exact)
     sum: f64,
-    last_sma: f64,
+
+    // Precompute scale = period / 0.015 so CCI = (price - mean) * scale / sum_abs
+    scale: f64,
+
+    // Order statistics tree over the current window values
+    ost: OrderStatsTreap,
+}
+
+// Simple deterministic SplitMix64 for treap priorities (fast, dependency-free)
+#[inline(always)]
+fn splitmix64(mut x: u64) -> u64 {
+    x = x.wrapping_add(0x9E3779B97F4A7C15);
+    let mut z = x;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+    z ^ (z >> 31)
+}
+
+#[derive(Debug, Clone)]
+struct OrderStatsTreap {
+    root: Option<Box<Node>>,
+    seed: u64,
+}
+
+#[derive(Debug, Clone)]
+struct Node {
+    key: f64,       // value
+    prio: u64,      // heap priority
+    cnt: u32,       // multiplicity of key
+    size: usize,    // total count in subtree (including multiplicities)
+    sum: f64,       // sum of all values in subtree
+    left: Option<Box<Node>>,
+    right: Option<Box<Node>>,
+}
+
+#[inline(always)]
+fn sz(t: &Option<Box<Node>>) -> usize {
+    t.as_ref().map(|n| n.size).unwrap_or(0)
+}
+#[inline(always)]
+fn sm(t: &Option<Box<Node>>) -> f64 {
+    t.as_ref().map(|n| n.sum).unwrap_or(0.0)
+}
+
+impl Node {
+    #[inline(always)]
+    fn new(key: f64, prio: u64) -> Self {
+        Self {
+            key,
+            prio,
+            cnt: 1,
+            size: 1,
+            sum: key,
+            left: None,
+            right: None,
+        }
+    }
+    #[inline(always)]
+    fn recalc(&mut self) {
+        self.size = self.cnt as usize + sz(&self.left) + sz(&self.right);
+        self.sum = (self.key * self.cnt as f64) + sm(&self.left) + sm(&self.right);
+    }
+}
+
+impl OrderStatsTreap {
+    #[inline(always)]
+    fn new() -> Self {
+        // any non-zero seed; use address entropy
+        let seed = splitmix64((&() as *const () as usize as u64) ^ 0xA5A5_A5A5_A5A5_A5A5);
+        Self { root: None, seed }
+    }
+
+    #[inline(always)]
+    fn next_prio(&mut self) -> u64 {
+        self.seed = splitmix64(self.seed);
+        self.seed
+    }
+
+    // Merge assumes all keys in 'a' <= all keys in 'b'
+    fn merge(a: Option<Box<Node>>, b: Option<Box<Node>>) -> Option<Box<Node>> {
+        match (a, b) {
+            (None, t) | (t, None) => t,
+            (Some(mut x), Some(mut y)) => {
+                if x.prio > y.prio {
+                    x.right = Self::merge(x.right.take(), Some(y));
+                    x.recalc();
+                    Some(x)
+                } else {
+                    y.left = Self::merge(Some(x), y.left.take());
+                    y.recalc();
+                    Some(y)
+                }
+            }
+        }
+    }
+
+    // Split into (<= key, > key)
+    fn split(mut t: Option<Box<Node>>, key: f64) -> (Option<Box<Node>>, Option<Box<Node>>) {
+        match t.take() {
+            None => (None, None),
+            Some(mut n) => {
+                if key < n.key {
+                    let (l, r) = Self::split(n.left.take(), key);
+                    n.left = r;
+                    n.recalc();
+                    (l, Some(n))
+                } else {
+                    let (l, r) = Self::split(n.right.take(), key);
+                    n.right = l;
+                    n.recalc();
+                    (Some(n), r)
+                }
+            }
+        }
+    }
+
+    // Insert one occurrence of key
+    fn insert(&mut self, key: f64) {
+        debug_assert!(key.is_finite());
+        self.root = match self.root.take() {
+            None => Some(Box::new(Node::new(key, self.next_prio()))),
+            Some(mut _n) => {
+                // put it back; recurse with helper
+                self.root = Some(_n);
+                Self::insert_into(self.root.take(), key, self.next_prio())
+            }
+        };
+    }
+
+    fn insert_into(t: Option<Box<Node>>, key: f64, prio: u64) -> Option<Box<Node>> {
+        match t {
+            None => Some(Box::new(Node::new(key, prio))),
+            Some(mut n) => {
+                if key == n.key {
+                    n.cnt += 1;
+                    n.recalc();
+                    Some(n)
+                } else if prio > n.prio {
+                    let (l, r) = Self::split(Some(n), key);
+                    let mut m = Box::new(Node::new(key, prio));
+                    m.left = l;
+                    m.right = r;
+                    m.recalc();
+                    Some(m)
+                } else if key < n.key {
+                    n.left = Self::insert_into(n.left.take(), key, prio);
+                    n.recalc();
+                    Some(n)
+                } else {
+                    n.right = Self::insert_into(n.right.take(), key, prio);
+                    n.recalc();
+                    Some(n)
+                }
+            }
+        }
+    }
+
+    // Erase one occurrence of key (no-op if missing)
+    fn erase(&mut self, key: f64) {
+        debug_assert!(key.is_finite());
+        self.root = Self::erase_from(self.root.take(), key);
+    }
+
+    fn erase_from(t: Option<Box<Node>>, key: f64) -> Option<Box<Node>> {
+        match t {
+            None => None,
+            Some(mut n) => {
+                if key == n.key {
+                    if n.cnt > 1 {
+                        n.cnt -= 1;
+                        n.recalc();
+                        Some(n)
+                    } else {
+                        Self::merge(n.left.take(), n.right.take())
+                    }
+                } else if key < n.key {
+                    n.left = Self::erase_from(n.left.take(), key);
+                    n.recalc();
+                    Some(n)
+                } else {
+                    n.right = Self::erase_from(n.right.take(), key);
+                    n.recalc();
+                    Some(n)
+                }
+            }
+        }
+    }
+
+    // Return (count_le, sum_le) for all keys <= 'key'
+    fn prefix_le(&self, key: f64) -> (usize, f64) {
+        debug_assert!(key.is_finite());
+        let mut t = &self.root;
+        let mut count = 0usize;
+        let mut sum = 0.0f64;
+
+        while let Some(n) = t.as_ref() {
+            if key < n.key {
+                t = &n.left;
+            } else {
+                // take left subtree + this node multiplicity
+                count += sz(&n.left) + n.cnt as usize;
+                sum += sm(&n.left) + (n.key * n.cnt as f64);
+                t = &n.right;
+            }
+        }
+        (count, sum)
+    }
+
+    #[inline(always)]
+    fn size(&self) -> usize {
+        sz(&self.root)
+    }
 }
 
 impl CciStream {
     pub fn try_new(params: CciParams) -> Result<Self, CciError> {
         let period = params.period.unwrap_or(14);
         if period == 0 {
-            return Err(CciError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(CciError::InvalidPeriod { period, data_len: 0 });
         }
-        // Use zero-copy helper for buffer initialization
+        // Initialize ring buffer with NaNs to match warmup behavior
         let buffer = alloc_with_nan_prefix(period, period);
+        let scale = (period as f64) * (1.0 / 0.015);
+
         Ok(Self {
             period,
             buffer,
             head: 0,
             filled: false,
             sum: 0.0,
-            last_sma: 0.0,
+            scale,
+            ost: OrderStatsTreap::new(),
         })
     }
+
+    /// O(log n) exact update:
+    /// - Maintain rolling sum and treap of window values.
+    /// - Compute sum|x - mean| via prefix count/sum at 'mean'.
+    /// - Return None until the buffer is filled (same semantics as before).
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
+        debug_assert!(value.is_finite(), "CCI stream expects finite inputs");
+
+        // ring write
         let old = self.buffer[self.head];
         self.buffer[self.head] = value;
         self.head = (self.head + 1) % self.period;
@@ -746,20 +970,36 @@ impl CciStream {
         }
 
         if !self.filled {
+            // warmup: accumulate partial sum and treap; no output yet
             self.sum += value;
+            self.ost.insert(value);
             return None;
         }
 
-        self.sum = self.sum - if old.is_nan() { 0.0 } else { old } + value;
-        self.last_sma = self.sum / self.period as f64;
-        let mut sum_abs = 0.0;
-        for &v in &self.buffer {
-            sum_abs += (v - self.last_sma).abs();
+        // rolling sum and treap maintenance
+        if !old.is_nan() {
+            self.sum -= old;
+            self.ost.erase(old);
         }
+        self.sum += value;
+        self.ost.insert(value);
+
+        // exact mean of the window
+        let mean = self.sum / (self.period as f64);
+
+        // prefix (<= mean): count & sum
+        let (k_le, sum_le) = self.ost.prefix_le(mean);
+
+        // Sum of absolute deviations using counts and sums:
+        // sum_abs = mean*(2k - n) + (S - 2*sum_le)
+        let n = self.period as f64;
+        let sum_abs = mean.mul_add(2.0 * (k_le as f64) - n, self.sum - 2.0 * sum_le);
+
         if sum_abs == 0.0 {
             Some(0.0)
         } else {
-            Some((value - self.last_sma) / (0.015 * (sum_abs / self.period as f64)))
+            // CCI = (value - mean) / (0.015 * (sum_abs / n)) = (value - mean) * (n / (0.015 * sum_abs))
+            Some((value - mean) * (self.scale / sum_abs))
         }
     }
 }

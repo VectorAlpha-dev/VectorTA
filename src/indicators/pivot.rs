@@ -19,7 +19,7 @@
 //!
 //! ## Developer Notes
 //! - **AVX2/AVX512 Kernels**: Implemented with per-lane validity masks; tails fallback to scalar
-//! - **Streaming**: Implemented with O(1) update performance (pure calculations)
+//! - **Streaming**: Implemented with O(1) update performance (pure calculations). Branch-minimized stream update; only gates on inputs required per mode; uses `mul_add` for FMA parity.
 //! - **Zero-copy Memory**: Uses alloc_with_nan_prefix and make_uninit_matrix for batch operations
 //! - Decision: Scalar path structured as per-mode loops (jammed) with safe indexing to aid LLVM vectorization; observed ~10–15% improvement at 100k locally. AVX2/AVX512 kernels implemented and selected via runtime kernel detection. Batch uses row-per-mode fan-out; no additional row-specific sharing beyond single-pass p/d reuse per element.
 
@@ -1737,8 +1737,10 @@ impl PivotStream {
         Ok(Self { mode })
     }
 
-    /// Update with new OHLC data and return pivot levels
-    /// Returns tuple of (r4, r3, r2, r1, pp, s1, s2, s3, s4)
+    /// O(1) streaming update, branch-minimized and FMA-friendly.
+    /// Returns (r4, r3, r2, r1, pp, s1, s2, s3, s4) or None if the inputs
+    /// required by the chosen `mode` are NaN.
+    #[inline(always)]
     pub fn update(
         &mut self,
         high: f64,
@@ -1746,99 +1748,128 @@ impl PivotStream {
         close: f64,
         open: f64,
     ) -> Option<(f64, f64, f64, f64, f64, f64, f64, f64, f64)> {
-        if high.is_nan() || low.is_nan() || close.is_nan() || open.is_nan() {
-            return None;
-        }
+        // Camarilla multipliers (keep identical to batch path for bitwise parity)
+        const C1: f64 = 0.0916;
+        const C2: f64 = 0.183;
+        const C3: f64 = 0.275;
+        const C4: f64 = 0.55;
 
-        let p = match self.mode {
-            2 => {
-                // Demark
-                if close < open {
-                    (high + 2.0 * low + close) / 4.0
-                } else if close > open {
-                    (2.0 * high + low + close) / 4.0
-                } else {
-                    (high + low + 2.0 * close) / 4.0
-                }
-            }
-            4 => (high + low + 2.0 * open) / 4.0, // Woodie
-            _ => (high + low + close) / 3.0,      // Standard/Fibonacci/Camarilla
-        };
+        // Exact binary constants for fast divides
+        const INV3: f64 = 1.0 / 3.0; // compile-time constant
+        const INV4: f64 = 0.25;
+        const INV2: f64 = 0.5;
 
-        let (r4, r3, r2, r1, s1, s2, s3, s4) = match self.mode {
+        match self.mode {
+            // ======================= STANDARD =======================
             0 => {
-                // Standard
-                let r1 = 2.0 * p - low;
-                let r2 = p + (high - low);
-                let s1 = 2.0 * p - high;
-                let s2 = p - (high - low);
-                (f64::NAN, f64::NAN, r2, r1, s1, s2, f64::NAN, f64::NAN)
-            }
-            1 => {
-                // Fibonacci
-                let r1 = p + 0.382 * (high - low);
-                let r2 = p + 0.618 * (high - low);
-                let r3 = p + 1.0 * (high - low);
-                let s1 = p - 0.382 * (high - low);
-                let s2 = p - 0.618 * (high - low);
-                let s3 = p - 1.0 * (high - low);
-                (f64::NAN, r3, r2, r1, s1, s2, s3, f64::NAN)
-            }
-            2 => {
-                // Demark
-                let r1 = if close < open {
-                    (high + 2.0 * low + close) / 2.0 - low
-                } else if close > open {
-                    (2.0 * high + low + close) / 2.0 - low
-                } else {
-                    (high + low + 2.0 * close) / 2.0 - low
-                };
-                let s1 = if close < open {
-                    (high + 2.0 * low + close) / 2.0 - high
-                } else if close > open {
-                    (2.0 * high + low + close) / 2.0 - high
-                } else {
-                    (high + low + 2.0 * close) / 2.0 - high
-                };
-                (
-                    f64::NAN,
-                    f64::NAN,
-                    f64::NAN,
-                    r1,
-                    s1,
-                    f64::NAN,
-                    f64::NAN,
-                    f64::NAN,
-                )
-            }
-            3 => {
-                // Camarilla
-                let r4 = (0.55 * (high - low)) + close;
-                let r3 = (0.275 * (high - low)) + close;
-                let r2 = (0.183 * (high - low)) + close;
-                let r1 = (0.0916 * (high - low)) + close;
-                let s1 = close - (0.0916 * (high - low));
-                let s2 = close - (0.183 * (high - low));
-                let s3 = close - (0.275 * (high - low));
-                let s4 = close - (0.55 * (high - low));
-                (r4, r3, r2, r1, s1, s2, s3, s4)
-            }
-            4 => {
-                // Woodie
-                let r3 = high + 2.0 * (p - low);
-                let r4 = r3 + (high - low);
-                let r2 = p + (high - low);
-                let r1 = 2.0 * p - low;
-                let s1 = 2.0 * p - high;
-                let s2 = p - (high - low);
-                let s3 = low - 2.0 * (high - p);
-                let s4 = s3 - (high - low);
-                (r4, r3, r2, r1, s1, s2, s3, s4)
-            }
-            _ => return None,
-        };
+                // Only H,L,C are required in this mode
+                if high.is_nan() || low.is_nan() || close.is_nan() {
+                    return None;
+                }
+                let d = high - low;
+                let p = (high + low + close) * INV3;
+                let t2 = p + p;
 
-        Some((r4, r3, r2, r1, p, s1, s2, s3, s4))
+                let r1 = t2 - low;
+                let r2 = d.mul_add(1.0, p); // p + d
+                let s1 = t2 - high;
+                let s2 = (-d).mul_add(1.0, p); // p - d
+
+                Some((f64::NAN, f64::NAN, r2, r1, p, s1, s2, f64::NAN, f64::NAN))
+            }
+
+            // ======================= FIBONACCI =======================
+            1 => {
+                if high.is_nan() || low.is_nan() || close.is_nan() {
+                    return None;
+                }
+                let d = high - low;
+                let p = (high + low + close) * INV3;
+
+                let r1 = d.mul_add(0.382, p);
+                let r2 = d.mul_add(0.618, p);
+                let r3 = d.mul_add(1.000, p);
+                let s1 = d.mul_add(-0.382, p);
+                let s2 = d.mul_add(-0.618, p);
+                let s3 = d.mul_add(-1.000, p);
+
+                Some((f64::NAN, r3, r2, r1, p, s1, s2, s3, f64::NAN))
+            }
+
+            // ======================= DEMARK =======================
+            2 => {
+                // DeMark needs O as well
+                if high.is_nan() || low.is_nan() || close.is_nan() || open.is_nan() {
+                    return None;
+                }
+                // Branchless selection of X depending on close vs open
+                // X_lt = H + 2L + C, X_gt = 2H + L + C, X_eq = H + L + 2C
+                let x_lt = high + low + low + close;
+                let x_gt = high + high + low + close;
+                let x_eq = high + low + close + close;
+
+                // Convert the comparisons to {0.0, 1.0} masks.
+                let lt: f64 = if close < open { 1.0 } else { 0.0 };
+                let gt: f64 = if close > open { 1.0 } else { 0.0 };
+                let eq: f64 = 1.0 - lt - gt;
+
+                // Fuse the weighted selection: x = lt*x_lt + gt*x_gt + eq*x_eq
+                let x = lt.mul_add(x_lt, gt.mul_add(x_gt, eq * x_eq));
+                let pp = x * INV4;
+                let half = x * INV2;
+
+                let r1 = half - low;
+                let s1 = half - high;
+
+                Some((f64::NAN, f64::NAN, f64::NAN, r1, pp, s1, f64::NAN, f64::NAN, f64::NAN))
+            }
+
+            // ======================= CAMARILLA =======================
+            3 => {
+                if high.is_nan() || low.is_nan() || close.is_nan() {
+                    return None;
+                }
+                let d = high - low;
+                let p = (high + low + close) * INV3;
+
+                // Use FMA to reduce latency and rounding
+                let r1 = d.mul_add(C1, close);
+                let r2 = d.mul_add(C2, close);
+                let r3 = d.mul_add(C3, close);
+                let r4 = d.mul_add(C4, close);
+                let s1 = (-C1).mul_add(d, close);
+                let s2 = (-C2).mul_add(d, close);
+                let s3 = (-C3).mul_add(d, close);
+                let s4 = (-C4).mul_add(d, close);
+
+                Some((r4, r3, r2, r1, p, s1, s2, s3, s4))
+            }
+
+            // ======================= WOODIE =======================
+            4 => {
+                // Woodie uses O in PP
+                if high.is_nan() || low.is_nan() || close.is_nan() || open.is_nan() {
+                    return None;
+                }
+                let d = high - low;
+                let p = (high + low + open + open) * INV4;
+                let t2 = p + p;
+
+                let r1 = t2 - low;
+                let r2 = d.mul_add(1.0, p);
+                let r3 = high + (p - low) * 2.0;
+                let r4 = (high - low).mul_add(1.0, r3); // r3 + d
+
+                let s1 = t2 - high;
+                let s2 = (-d).mul_add(1.0, p);
+                let s3 = low - (high - p) * 2.0;
+                let s4 = (-(high - low)).mul_add(1.0, s3); // s3 - d
+
+                Some((r4, r3, r2, r1, p, s1, s2, s3, s4))
+            }
+
+            _ => None,
+        }
     }
 }
 

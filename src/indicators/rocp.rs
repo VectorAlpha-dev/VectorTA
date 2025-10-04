@@ -17,7 +17,9 @@
 //! - Row-specific batch optimization enabled: when rows >= 4, precompute reciprocals
 //!   once and reuse across rows (compute `c * inv(prev) - 1`). This removes a divide
 //!   per output for additional rows while preserving scalar numerics in the single-series path.
-//! - Streaming: O(1) – simple ring buffer lookup
+//! - Streaming: O(1) – ring buffer with branchless wrap; output uses
+//!   a reciprocal ring and FMA (mul_add) on the critical path for
+//!   lower latency while preserving scalar correctness.
 //! - Memory: Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
 
 #[cfg(feature = "python")]
@@ -415,7 +417,11 @@ pub struct RocpStream {
     period: usize,
     buffer: Vec<f64>,
     head: usize,
-    filled: bool,
+    /// Warmup counter: None for first (period-1) updates; on the period-th
+    /// update we return Some(NaN) due to initial NaN in the ring.
+    warmup: usize,
+    /// Reciprocal ring to move division off the output path.
+    inv: Vec<f64>,
 }
 
 impl RocpStream {
@@ -432,23 +438,40 @@ impl RocpStream {
             period,
             buffer: vec![f64::NAN; period],
             head: 0,
-            filled: false,
+            warmup: period,
+            inv: vec![f64::NAN; period],
         })
     }
 
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        let prev = self.buffer[self.head];
-        self.buffer[self.head] = value;
-        self.head = (self.head + 1) % self.period;
+        let idx = self.head;
 
-        if !self.filled && self.head == 0 {
-            self.filled = true;
-        }
-        if !self.filled {
+        // Capture values that are 'period' apart before we overwrite the slot.
+        let prev = self.buffer[idx];
+        let inv_prev = self.inv[idx];
+
+        // Write current into the ring(s).
+        self.buffer[idx] = value;
+        // One division per tick, but moved off the output's critical path.
+        self.inv[idx] = 1.0f64 / value;
+
+        // Branchless wrap to avoid modulo on the hot path.
+        let next = idx + 1;
+        self.head = if next == self.period { 0 } else { next };
+
+        // Warmup handling: first (period-1) updates -> None; period-th -> Some(NaN).
+        if self.warmup > 1 {
+            self.warmup -= 1;
             return None;
+        } else if self.warmup == 1 {
+            self.warmup = 0;
+            // inv_prev is NaN on this tick, returning NaN (matches scalar warmup behavior).
+            return Some(value.mul_add(inv_prev, -1.0));
         }
-        Some((value - prev) / prev)
+
+        // Steady state: y = value * (1/prev) - 1, via FMA when available.
+        Some(value.mul_add(inv_prev, -1.0))
     }
 }
 
@@ -739,7 +762,7 @@ fn rocp_row_scalar_with_inv(
     let inv_prev = &inv[(start - period)..(n - period)];
     let dst = &mut out[start..];
     for ((&c, &ip), o) in curr.iter().zip(inv_prev.iter()).zip(dst.iter_mut()) {
-        *o = c * ip - 1.0;
+        *o = c.mul_add(ip, -1.0);
     }
 }
 

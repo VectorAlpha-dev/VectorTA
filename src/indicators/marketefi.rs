@@ -710,20 +710,72 @@ pub fn expand_grid(_: &MarketefiBatchRange) -> Vec<MarketefiParams> {
 }
 
 // Streaming (single-point rolling)
-#[derive(Debug, Clone)]
+// Decision: Exact update() preserved; optional update_fast() uses reciprocal + 2× NR.
+#[derive(Debug, Clone, Default)]
 pub struct MarketefiStream;
 
 impl MarketefiStream {
+    #[inline(always)]
     pub fn new() -> Self {
         Self
     }
+
+    /// Exact IEEE-754 path (unchanged semantics):
+    /// - returns None if any input is NaN or if `volume == 0.0`
+    /// - otherwise computes (high - low) / volume
+    #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, volume: f64) -> Option<f64> {
         if high.is_nan() || low.is_nan() || volume.is_nan() || volume == 0.0 {
             None
         } else {
-            Some((high - low) / volume)
+            let diff = high - low;
+            Some(diff / volume)
         }
     }
+
+    /// Optional fast-math path (opt-in):
+    /// Uses a reciprocal approximation refined by 2x Newton–Raphson in f64.
+    /// Typically matches full double precision while avoiding a full hardware divide.
+    /// Semantics: same "None" behavior as `update()`, otherwise returns a value.
+    #[inline(always)]
+    pub fn update_fast(&mut self, high: f64, low: f64, volume: f64) -> Option<f64> {
+        if high.is_nan() || low.is_nan() || volume.is_nan() || volume == 0.0 {
+            None
+        } else {
+            let diff = high - low;
+            Some(diff * approx_recip_nr2_f64(volume))
+        }
+    }
+
+    /// Optional: unchecked exact path for frameworks that validate inputs externally.
+    /// Safety contract: caller guarantees no NaNs and `volume != 0.0`.
+    #[inline(always)]
+    pub fn update_unchecked(&mut self, high: f64, low: f64, volume: f64) -> f64 {
+        debug_assert!(!high.is_nan() && !low.is_nan() && !volume.is_nan() && volume != 0.0);
+        (high - low) / volume
+    }
+}
+
+/// Fast-math helper: double-precision reciprocal via f32 seed + 2x Newton–Raphson.
+/// - For extremely tiny |x| that underflow in f32, safely fall back to exact division.
+/// - Uses `mul_add` to take advantage of hardware FMA when available.
+#[inline(always)]
+fn approx_recip_nr2_f64(x: f64) -> f64 {
+    // Smallest positive normal f32 (as f64)
+    const F32_MIN_NORM: f64 = f32::MIN_POSITIVE as f64;
+    if x.abs() < F32_MIN_NORM {
+        // Extremely rare for volumes; fall back to precise divide to avoid f32 underflow to 0.
+        return 1.0 / x;
+    }
+
+    // ~24-bit initial seed from single-precision reciprocal
+    let mut y = (1.0f32 / (x as f32)) as f64;
+
+    // Newton–Raphson refinement in f64: y <- y * (2 - x*y)
+    // Use mul_add to fuse when hardware FMA is present.
+    y *= (-x).mul_add(y, 2.0);
+    y *= (-x).mul_add(y, 2.0);
+    y
 }
 
 // Python bindings

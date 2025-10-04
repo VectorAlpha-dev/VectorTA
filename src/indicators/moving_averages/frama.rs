@@ -31,7 +31,7 @@
 //! ## Developer Notes
 //! - **AVX2 kernel**: ✅ Fully implemented with specialized small window optimizations
 //! - **AVX512 kernel**: ✅ Fully implemented with small/large window branching
-//! - **Streaming update**: ⚠️ O(n) - recalculates fractal dimension over full buffer each update
+//! - **Streaming update**: ✅ O(1) amortized via monotonic deques; numerics match batch kernels
 //! - **Memory optimization**: ✅ Uses `alloc_with_nan_prefix` for zero-copy output allocation
 //! - **Current status**: Production-ready with advanced SIMD optimizations for various window sizes
 //! - **Optimization opportunities**:
@@ -59,6 +59,7 @@ use std::error::Error;
 use std::hint::unlikely;
 use std::mem::{swap, MaybeUninit};
 use thiserror::Error;
+use std::collections::VecDeque;
 
 impl<'a> AsRef<[f64]> for FramaInput<'a> {
     #[inline(always)]
@@ -1411,6 +1412,22 @@ pub struct FramaStream {
     last_val: f64,
     d_prev: f64,
     alpha_prev: f64,
+    // --- O(1) sliding-window state ---
+    half: usize,            // n/2 (window is evenized in try_new)
+    idx: usize,             // absolute index of the next output (starts at n when warm)
+    // deques for maxima/minima
+    dq_r_max: DqMax,        // right half max(high)
+    dq_r_min: DqMin,        // right half min(low)
+    dq_l_max: DqMax,        // left  half max(high)
+    dq_l_min: DqMin,        // left  half min(low)
+    dq_w_max: DqMax,        // full  window max(high) (for N3)
+    dq_w_min: DqMin,        // full  window min(low)  (for N3)
+    // previous fallbacks when a deque is temporarily empty (e.g., NaN gaps)
+    pm_right: f64, pn_right: f64,
+    pm_left:  f64, pn_left:  f64,
+    pm_full:  f64, pn_full:  f64,
+    // precomputed constants
+    sc_floor: f64,          // 2/(sc+1)
 }
 impl FramaStream {
     pub fn try_new(params: FramaParams) -> Result<Self, FramaError> {
@@ -1439,83 +1456,210 @@ impl FramaStream {
             last_val: f64::NAN,
             d_prev: 1.0,
             alpha_prev: 2.0 / (sc as f64 + 1.0),
+            // new:
+            half: n / 2,
+            idx: 0,
+            dq_r_max: DqMax::default(),
+            dq_r_min: DqMin::default(),
+            dq_l_max: DqMax::default(),
+            dq_l_min: DqMin::default(),
+            dq_w_max: DqMax::default(),
+            dq_w_min: DqMin::default(),
+            pm_right: f64::NAN, pn_right: f64::NAN,
+            pm_left:  f64::NAN, pn_left:  f64::NAN,
+            pm_full:  f64::NAN, pn_full:  f64::NAN,
+            sc_floor: 2.0 / (sc as f64 + 1.0),
         })
     }
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
+        // Warm-up: fill circular buffer once, then seed with SMA and build deques
         if !self.filled {
             self.buffer[self.head] = (high, low, close);
             self.head += 1;
+
             if self.head == self.n {
+                // wrap and mark filled
                 self.head = 0;
                 self.filled = true;
 
+                // Seed = SMA over evenized window (match batch)
+                // (one-time O(n) cost)
                 let sum: f64 = self.buffer.iter().map(|&(_, _, c)| c).sum();
                 self.last_val = sum / self.n as f64;
+
+                // Build initial deques for i = n:
+                // left  half = [0 .. half)
+                // right half = [half .. n)
+                // full window = [0 .. n)
+                self.dq_r_max.clear(); self.dq_r_min.clear();
+                self.dq_l_max.clear(); self.dq_l_min.clear();
+                self.dq_w_max.clear(); self.dq_w_min.clear();
+
+                for j in 0..self.n {
+                    let (h, l, _) = self.buffer[j];
+                    if !(h.is_nan() || l.is_nan()) {
+                        self.dq_w_max.push(j, h);
+                        self.dq_w_min.push(j, l);
+                        if j < self.half {
+                            self.dq_l_max.push(j, h);
+                            self.dq_l_min.push(j, l);
+                        } else {
+                            self.dq_r_max.push(j, h);
+                            self.dq_r_min.push(j, l);
+                        }
+                    }
+                }
+                // initialize previous fallbacks
+                self.pm_right = self.dq_r_max.front_val().unwrap_or(f64::NAN);
+                self.pn_right = self.dq_r_min.front_val().unwrap_or(f64::NAN);
+                self.pm_left  = self.dq_l_max.front_val().unwrap_or(f64::NAN);
+                self.pn_left  = self.dq_l_min.front_val().unwrap_or(f64::NAN);
+                self.pm_full  = self.dq_w_max.front_val().unwrap_or(f64::NAN);
+                self.pn_full  = self.dq_w_min.front_val().unwrap_or(f64::NAN);
+
+                // next absolute output index
+                self.idx = self.n;
+
                 return Some(self.last_val);
             }
+
             return None;
         }
 
-        let half = self.n / 2;
-        let mut max1 = f64::MIN;
-        let mut min1 = f64::MAX;
-        let mut max2 = f64::MIN;
-        let mut min2 = f64::MAX;
-        let mut max3 = f64::MIN;
-        let mut min3 = f64::MAX;
+        // --- Streaming pass (O(1) amortized) ---
 
-        for j in 0..self.n {
-            let (h, l, _) = self.buffer[(self.head + j) % self.n];
-            if j < half {
-                if h > max2 {
-                    max2 = h;
-                }
-                if l < min2 {
-                    min2 = l;
-                }
+        // Absolute index of this new sample (not yet inserted into buffer)
+        let i = self.idx;
+
+        // 1) Expire old indices for current windows (before computing):
+        //    right half: [i - half .. i)
+        //    left  half: [i - n    .. i - half)
+        //    full  win : [i - n    .. i)
+        let right_lb = i.saturating_sub(self.half);
+        let left_lb  = i.saturating_sub(self.n);
+        self.dq_r_max.expire_lt(right_lb); self.dq_r_min.expire_lt(right_lb);
+        self.dq_l_max.expire_lt(left_lb);  self.dq_l_min.expire_lt(left_lb);
+        self.dq_w_max.expire_lt(left_lb);  self.dq_w_min.expire_lt(left_lb);
+
+        // 2) Read current window extrema (fallback to previous if a deque is empty)
+        let (max_r, min_r) = {
+            let mr = self.dq_r_max.front_val().unwrap_or(self.pm_right);
+            let nr = self.dq_r_min.front_val().unwrap_or(self.pn_right);
+            (mr, nr)
+        };
+        let (max_l, min_l) = {
+            let ml = self.dq_l_max.front_val().unwrap_or(self.pm_left);
+            let nl = self.dq_l_min.front_val().unwrap_or(self.pn_left);
+            (ml, nl)
+        };
+        let (max_w, min_w) = {
+            let mw = self.dq_w_max.front_val().unwrap_or(self.pm_full);
+            let nw = self.dq_w_min.front_val().unwrap_or(self.pn_full);
+            (mw, nw)
+        };
+
+        // Cache the extrema used this tick (match 'front_or' behavior)
+        self.pm_right = max_r; self.pn_right = min_r;
+        self.pm_left  = max_l; self.pn_left  = min_l;
+        self.pm_full  = max_w; self.pn_full  = min_w;
+
+        // 3) Compute fractal dimension & alpha (identical math & clamps)
+        let half_f = self.half as f64;
+        let win_f  = self.n as f64;
+
+        // If current bar has any NaN, mirror batch: carry forward previous value.
+        let output = if !(high.is_nan() || low.is_nan() || close.is_nan()) {
+            let n1 = (max_r - min_r) / half_f;
+            let n2 = (max_l - min_l) / half_f;
+            let n3 = (max_w - min_w) / win_f;
+
+            let d = if n1 > 0.0 && n2 > 0.0 && n3 > 0.0 {
+                ((n1 + n2).ln() - n3.ln()) / std::f64::consts::LN_2
             } else {
-                if h > max1 {
-                    max1 = h;
-                }
-                if l < min1 {
-                    min1 = l;
-                }
-            }
-            if h > max3 {
-                max3 = h;
-            }
-            if l < min3 {
-                min3 = l;
+                self.d_prev
+            };
+            self.d_prev = d;
+
+            // a0 = exp(w*(d-1)) clamped to [0.1, 1.0]
+            let mut a0 = (self.w * (d - 1.0)).exp();
+            if a0 < 0.1 { a0 = 0.1; }
+            if a0 > 1.0 { a0 = 1.0; }
+
+            let old_n = (2.0 - a0) / a0;
+            let new_n = (self.sc - self.fc) as f64 * ((old_n - 1.0) / (self.sc as f64 - 1.0))
+                        + self.fc as f64;
+
+            let mut alpha = 2.0 / (new_n + 1.0);
+            if alpha < self.sc_floor { alpha = self.sc_floor; }
+            if alpha > 1.0 { alpha = 1.0; }
+            self.alpha_prev = alpha;
+
+            // EMA-style update with FMA (matches your SIMD/scalar code)
+            close.mul_add(alpha, (1.0 - alpha) * self.last_val)
+        } else {
+            self.last_val
+        };
+
+        // 4) Post-compute: update deques for the *next* tick and rotate buffer.
+        // Push current sample (if valid) into right half & full-window deques.
+        if !(high.is_nan() || low.is_nan()) {
+            self.dq_r_max.push(i, high);
+            self.dq_r_min.push(i, low);
+            self.dq_w_max.push(i, high);
+            self.dq_w_min.push(i, low);
+        }
+
+        // Push the element that *moves* from right->left next tick: index (i - half)
+        if i >= self.half {
+            let j = i - self.half;
+            let (h_l, l_l, _) = self.buffer[j % self.n];
+            if !(h_l.is_nan() || l_l.is_nan()) {
+                self.dq_l_max.push(j, h_l);
+                self.dq_l_min.push(j, l_l);
             }
         }
 
-        let n1 = (max1 - min1) / half as f64;
-        let n2 = (max2 - min2) / half as f64;
-        let n3 = (max3 - min3) / self.n as f64;
-
-        let d = if n1 > 0.0 && n2 > 0.0 && n3 > 0.0 {
-            ((n1 + n2).ln() - n3.ln()) / std::f64::consts::LN_2
-        } else {
-            self.d_prev
-        };
-        self.d_prev = d;
-
-        let mut old_alpha = (self.w * (d - 1.0)).exp().clamp(0.1, 1.0);
-        let old_n = (2.0 - old_alpha) / old_alpha;
-        let new_n = ((self.sc as f64 - self.fc as f64) * ((old_n - 1.0) / (self.sc as f64 - 1.0)))
-            + self.fc as f64;
-        let mut alpha_ = (2.0 / (new_n + 1.0)).clamp(2.0 / (self.sc as f64 + 1.0), 1.0);
-        self.alpha_prev = alpha_;
-
-        let out = alpha_ * close + (1.0 - alpha_) * self.last_val;
-
+        // Write current bar into circular buffer (overwriting i-n)
         self.buffer[self.head] = (high, low, close);
         self.head = (self.head + 1) % self.n;
-        self.last_val = out;
 
-        Some(out)
+        // Advance absolute index and publish
+        self.idx += 1;
+        self.last_val = output;
+        Some(output)
     }
+}
+
+// --- Minimal monotonic deque helpers for O(1) streaming ---
+#[derive(Default, Debug, Clone)]
+struct DqMax { q: VecDeque<(usize, f64)> }
+#[derive(Default, Debug, Clone)]
+struct DqMin { q: VecDeque<(usize, f64)> }
+
+impl DqMax {
+    #[inline(always)] fn clear(&mut self){ self.q.clear(); }
+    #[inline(always)] fn expire_lt(&mut self, bound: usize) {
+        while let Some(&(i,_)) = self.q.front() { if i < bound { self.q.pop_front(); } else { break; } }
+    }
+    #[inline(always)] fn push(&mut self, idx: usize, val: f64) {
+        // monotone decreasing by value
+        while let Some(&(_,v)) = self.q.back() { if v >= val { break; } self.q.pop_back(); }
+        self.q.push_back((idx, val));
+    }
+    #[inline(always)] fn front_val(&self) -> Option<f64> { self.q.front().map(|&(_,v)| v) }
+}
+impl DqMin {
+    #[inline(always)] fn clear(&mut self){ self.q.clear(); }
+    #[inline(always)] fn expire_lt(&mut self, bound: usize) {
+        while let Some(&(i,_)) = self.q.front() { if i < bound { self.q.pop_front(); } else { break; } }
+    }
+    #[inline(always)] fn push(&mut self, idx: usize, val: f64) {
+        // monotone increasing by value
+        while let Some(&(_,v)) = self.q.back() { if v <= val { break; } self.q.pop_back(); }
+        self.q.push_back((idx, val));
+    }
+    #[inline(always)] fn front_val(&self) -> Option<f64> { self.q.front().map(|&(_,v)| v) }
 }
 
 #[inline(always)]

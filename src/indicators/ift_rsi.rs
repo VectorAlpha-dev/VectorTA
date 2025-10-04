@@ -19,6 +19,8 @@
 //! - Scalar: single-pass, loop-jammed implementation using O(1) LWMA recurrence and SMMA with `mul_add`.
 //!   Bench (100k) on native CPU: ~13% faster vs previous scalar.
 //!   Commands: `cargo bench --bench indicator_benchmark -- ift_rsi_bench/scalar/100k`
+//! - Streaming: O(1) per-tick via Wilder SMMA and O(1) LWMA ring; libm `tanh` for exactness.
+//!   Warmup matches batch: `first + rsi_period + wma_period - 1`.
 //! - SIMD: disabled (stubs call scalar). RSI is recursive (IIR), LWMA is already O(1),
 //!   so time-wise SIMD across time offers no measurable gains here.
 //! - Batch: rows reuse precomputed diffs (Δ⁺, Δ⁻) and each row streams O(1) LWMA.
@@ -1078,12 +1080,30 @@ unsafe fn ift_rsi_row_avx512_long(
 
 #[derive(Debug, Clone)]
 pub struct IftRsiStream {
+    // params
     rsi_period: usize,
     wma_period: usize,
-    rsi_buf: Vec<f64>,
-    wma_buf: Vec<f64>,
+
+    // --- RSI (Wilder SMMA) state ---
+    prev: f64,
+    have_prev: bool,
+    seed_g: f64,
+    seed_l: f64,
+    seed_cnt: usize,
+    avg_gain: f64,
+    avg_loss: f64,
+    seeded: bool,
+    alpha: f64,
+    beta: f64,
+
+    // --- LWMA (weights 1..wp) state over x = 0.1*(RSI-50) ---
+    buf: Vec<f64>,
     head: usize,
-    filled: bool,
+    filled: usize,
+    sum: f64,
+    num: f64,
+    wp_f: f64,
+    denom_rcp: f64,
 }
 
 impl IftRsiStream {
@@ -1097,102 +1117,141 @@ impl IftRsiStream {
                 data_len: 0,
             });
         }
+        let wp_f = wma_period as f64;
+        let denom = 0.5 * wp_f * (wp_f + 1.0);
         Ok(Self {
             rsi_period,
             wma_period,
-            rsi_buf: vec![f64::NAN; rsi_period + 1], // Need +1 for RSI to calculate differences
-            wma_buf: vec![f64::NAN; wma_period],
+
+            prev: 0.0,
+            have_prev: false,
+            seed_g: 0.0,
+            seed_l: 0.0,
+            seed_cnt: 0,
+            avg_gain: 0.0,
+            avg_loss: 0.0,
+            seeded: false,
+            alpha: 1.0 / (rsi_period as f64),
+            beta: 1.0 - 1.0 / (rsi_period as f64),
+
+            buf: vec![0.0; wma_period],
             head: 0,
-            filled: false,
+            filled: 0,
+            sum: 0.0,
+            num: 0.0,
+            wp_f,
+            denom_rcp: 1.0 / denom,
         })
     }
+
+    /// Push one price. Returns IFT-RSI once both warmups complete:
+    /// after rsi_period diffs and wma_period transformed values.
+    /// On NaN input we reset the state and return None.
+    #[inline]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        // Store value in circular buffer (using rsi_period + 1 size)
-        self.rsi_buf[self.head % (self.rsi_period + 1)] = value;
-        self.head += 1;
-
-        // Need at least rsi_period + 1 values before we can calculate RSI (for differences)
-        if self.head <= self.rsi_period {
+        if !value.is_finite() {
+            self.reset_soft();
             return None;
         }
 
-        // For the first rsi_period + 1 values, we need to use a growing slice
-        // After that, we use the circular buffer
-        let rsi_val = if self.head == self.rsi_period + 1 && !self.filled {
-            // First time we have enough data - buffer is now full of real values
-            self.filled = true;
-            match rsi(&RsiInput::from_slice(
-                &self.rsi_buf[0..=self.rsi_period],
-                RsiParams {
-                    period: Some(self.rsi_period),
-                },
-            )) {
-                Ok(res) => res.values.last().cloned().unwrap_or(f64::NAN),
-                Err(_) => return None,
-            }
-        } else if self.filled {
-            // Circular buffer is full, calculate RSI on the reordered buffer
-            let mut ordered = vec![0.0; self.rsi_period + 1];
-            let start = self.head % (self.rsi_period + 1);
-            for i in 0..(self.rsi_period + 1) {
-                ordered[i] = self.rsi_buf[(start + i) % (self.rsi_period + 1)];
-            }
-            match rsi(&RsiInput::from_slice(
-                &ordered,
-                RsiParams {
-                    period: Some(self.rsi_period),
-                },
-            )) {
-                Ok(res) => res.values.last().cloned().unwrap_or(f64::NAN),
-                Err(_) => return None,
-            }
-        } else {
-            return None;
-        };
-
-        let v1 = 0.1 * (rsi_val - 50.0);
-        let wma_idx = (self.head - self.rsi_period - 1) % self.wma_period;
-        self.wma_buf[wma_idx] = v1;
-
-        if self.head < self.rsi_period + self.wma_period {
+        // First sample: just store and wait for a diff
+        if !self.have_prev {
+            self.prev = value;
+            self.have_prev = true;
             return None;
         }
 
-        // Similar logic for WMA buffer - reorder if needed
-        let wma_val = if self.head == self.rsi_period + self.wma_period {
-            // First time we have enough data for WMA
-            match wma(&WmaInput::from_slice(
-                &self.wma_buf,
-                WmaParams {
-                    period: Some(self.wma_period),
-                },
-            )) {
-                Ok(res) => res.values.last().cloned().unwrap_or(f64::NAN),
-                Err(_) => return None,
+        // Compute one-step diff and split into gain/loss (positive)
+        let d = value - self.prev;
+        self.prev = value;
+        let gain = if d > 0.0 { d } else { 0.0 };
+        let loss = if d < 0.0 { -d } else { 0.0 };
+
+        // --- Seed Wilder averages for first rsi_period diffs ---
+        if !self.seeded {
+            self.seed_g += gain;
+            self.seed_l += loss;
+            self.seed_cnt += 1;
+            if self.seed_cnt < self.rsi_period {
+                return None; // still seeding
             }
+            // Initialize averages on the tick where we collected rsi_period diffs
+            self.avg_gain = self.seed_g / (self.rsi_period as f64);
+            self.avg_loss = self.seed_l / (self.rsi_period as f64);
+            self.seeded = true;
+
+            // We also produce an RSI value on this same tick and feed it into LWMA below.
         } else {
-            // Reorder circular buffer for WMA calculation
-            let mut ordered = vec![0.0; self.wma_period];
-            let start = (wma_idx + 1) % self.wma_period;
-            for i in 0..self.wma_period {
-                ordered[i] = self.wma_buf[(start + i) % self.wma_period];
+            // --- Regular Wilder update: O(1) ---
+            self.avg_gain = f64::mul_add(self.avg_gain, self.beta, self.alpha * gain);
+            self.avg_loss = f64::mul_add(self.avg_loss, self.beta, self.alpha * loss);
+        }
+
+        // --- Transform RSI -> x = 0.1 * (RSI - 50) ---
+        let rs = if self.avg_loss != 0.0 { self.avg_gain / self.avg_loss } else { 100.0 };
+        let rsi = 100.0 - 100.0 / (1.0 + rs);
+        let x = 0.1 * (rsi - 50.0);
+
+        // --- O(1) LWMA update over x with weights 1..wp ---
+        if self.filled < self.wma_period {
+            // build phase: num += (filled+1)*x ; sum += x
+            self.sum += x;
+            self.num = f64::mul_add((self.filled as f64) + 1.0, x, self.num);
+            self.buf[self.head] = x;
+            self.head += 1;
+            if self.head == self.wma_period {
+                self.head = 0;
             }
-            match wma(&WmaInput::from_slice(
-                &ordered,
-                WmaParams {
-                    period: Some(self.wma_period),
-                },
-            )) {
-                Ok(res) => res.values.last().cloned().unwrap_or(f64::NAN),
-                Err(_) => return None,
+            self.filled += 1;
+
+            if self.filled == self.wma_period {
+                let wma = self.num * self.denom_rcp;
+                return Some(tanh_kernel(wma));
             }
-        };
-        if wma_val.is_nan() {
-            None
+            return None;
         } else {
-            Some(wma_val.tanh())
+            // steady-state: rotate buffer, update (sum, num)
+            let x_old = self.buf[self.head];
+            self.buf[self.head] = x;
+            self.head += 1;
+            if self.head == self.wma_period {
+                self.head = 0;
+            }
+
+            // num' = num + wp*x - sum
+            let sum_prev = self.sum;
+            self.num = f64::mul_add(self.wp_f, x, self.num) - sum_prev;
+            self.sum = sum_prev + x - x_old;
+
+            let wma = self.num * self.denom_rcp;
+            return Some(tanh_kernel(wma));
         }
     }
+
+    #[inline]
+    fn reset_soft(&mut self) {
+        // lightweight reset on NaN input so subsequent values seed cleanly
+        self.have_prev = false;
+        self.seed_g = 0.0;
+        self.seed_l = 0.0;
+        self.seed_cnt = 0;
+        self.avg_gain = 0.0;
+        self.avg_loss = 0.0;
+        self.seeded = false;
+
+        self.head = 0;
+        self.filled = 0;
+        self.sum = 0.0;
+        self.num = 0.0;
+        for v in &mut self.buf {
+            *v = 0.0;
+        }
+    }
+}
+
+#[inline(always)]
+fn tanh_kernel(x: f64) -> f64 {
+    x.tanh()
 }
 
 /// Optimized single-pass scalar kernel:

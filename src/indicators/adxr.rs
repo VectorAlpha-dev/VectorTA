@@ -386,13 +386,13 @@ pub fn adxr_scalar(
         if down > up && down > 0.0 { minus_dm_sum += down; }
     }
 
-    // First DX from bootstrap
-    let plus_di0 = if atr_sum != 0.0 { (plus_dm_sum / atr_sum) * 100.0 } else { 0.0 };
-    let minus_di0 = if atr_sum != 0.0 { (minus_dm_sum / atr_sum) * 100.0 } else { 0.0 };
-    let di_sum0 = plus_di0 + minus_di0;
-    let initial_dx = if di_sum0 != 0.0 {
-        ((plus_di0 - minus_di0).abs() / di_sum0) * 100.0
-    } else { 0.0 };
+    // First DX from bootstrap (ATR cancels): DX0 = 100 * |PDM - MDM| / (PDM + MDM)
+    let denom0 = plus_dm_sum + minus_dm_sum;
+    let initial_dx = if denom0 > 0.0 {
+        100.0 * (plus_dm_sum - minus_dm_sum).abs() / denom0
+    } else {
+        0.0
+    };
 
     // Running state for Wilder smoothing.
     let mut atr = atr_sum;
@@ -434,13 +434,13 @@ pub fn adxr_scalar(
         pdm_s = pdm_s.mul_add(om, plus_dm);
         mdm_s = mdm_s.mul_add(om, minus_dm);
 
-        // DI and DX
-        let plus_di  = if atr != 0.0 { (pdm_s / atr) * 100.0 } else { 0.0 };
-        let minus_di = if atr != 0.0 { (mdm_s / atr) * 100.0 } else { 0.0 };
-        let sum_di = plus_di + minus_di;
-        let dx = if sum_di != 0.0 {
-            ((plus_di - minus_di).abs() / sum_di) * 100.0
-        } else { 0.0 };
+        // DX with one division (ATR cancels): 100 * |PDMs - MDMs| / (PDMs + MDMs)
+        let denom = pdm_s + mdm_s;
+        let dx = if denom > 0.0 {
+            100.0 * (pdm_s - mdm_s).abs() / denom
+        } else {
+            0.0
+        };
 
         // Build/extend ADX
         if dx_count < period {
@@ -601,19 +601,10 @@ unsafe fn adxr_scalar_unchecked(
         i += 1;
     }
 
-    let plus_di0 = if atr_sum != 0.0 {
-        (plus_dm_sum / atr_sum) * 100.0
-    } else {
-        0.0
-    };
-    let minus_di0 = if atr_sum != 0.0 {
-        (minus_dm_sum / atr_sum) * 100.0
-    } else {
-        0.0
-    };
-    let di_sum0 = plus_di0 + minus_di0;
-    let initial_dx = if di_sum0 != 0.0 {
-        ((plus_di0 - minus_di0).abs() / di_sum0) * 100.0
+    // Initial DX from bootstrap sums (ATR cancels)
+    let denom0 = plus_dm_sum + minus_dm_sum;
+    let initial_dx = if denom0 > 0.0 {
+        100.0 * (plus_dm_sum - minus_dm_sum).abs() / denom0
     } else {
         0.0
     };
@@ -655,11 +646,10 @@ unsafe fn adxr_scalar_unchecked(
         pdm_s = pdm_s.mul_add(om, plus_dm);
         mdm_s = mdm_s.mul_add(om, minus_dm);
 
-        let plus_di = if atr != 0.0 { (pdm_s / atr) * 100.0 } else { 0.0 };
-        let minus_di = if atr != 0.0 { (mdm_s / atr) * 100.0 } else { 0.0 };
-        let sum_di = plus_di + minus_di;
-        let dx = if sum_di != 0.0 {
-            ((plus_di - minus_di).abs() / sum_di) * 100.0
+        // DX with one division (ATR cancels)
+        let denom = pdm_s + mdm_s;
+        let dx = if denom > 0.0 {
+            100.0 * (pdm_s - mdm_s).abs() / denom
         } else {
             0.0
         };
@@ -932,11 +922,10 @@ fn adxr_row_from_precomputed(
     let pdm0 = prefix_pdm.get(period).copied().unwrap_or(0.0);
     let mdm0 = prefix_mdm.get(period).copied().unwrap_or(0.0);
 
-    let plus_di0 = if atr0 != 0.0 { (pdm0 / atr0) * 100.0 } else { 0.0 };
-    let minus_di0 = if atr0 != 0.0 { (mdm0 / atr0) * 100.0 } else { 0.0 };
-    let di_sum0 = plus_di0 + minus_di0;
-    let initial_dx = if di_sum0 != 0.0 {
-        ((plus_di0 - minus_di0).abs() / di_sum0) * 100.0
+    // Initial DX using one-division form (ATR cancels)
+    let denom0 = pdm0 + mdm0;
+    let initial_dx = if denom0 > 0.0 {
+        100.0 * (pdm0 - mdm0).abs() / denom0
     } else { 0.0 };
 
     let mut atr = atr0;
@@ -960,11 +949,10 @@ fn adxr_row_from_precomputed(
         pdm_s = pdm_s.mul_add(om, plus_dm);
         mdm_s = mdm_s.mul_add(om, minus_dm);
 
-        let plus_di  = if atr != 0.0 { (pdm_s / atr) * 100.0 } else { 0.0 };
-        let minus_di = if atr != 0.0 { (mdm_s / atr) * 100.0 } else { 0.0 };
-        let sum_di = plus_di + minus_di;
-        let dx = if sum_di != 0.0 {
-            ((plus_di - minus_di).abs() / sum_di) * 100.0
+        // DX with one division (ATR cancels)
+        let denom = pdm_s + mdm_s;
+        let dx = if denom > 0.0 {
+            100.0 * (pdm_s - mdm_s).abs() / denom
         } else { 0.0 };
 
         if dx_count < period {
@@ -1365,106 +1353,112 @@ unsafe fn adxr_row_avx512_long(
     adxr_scalar(high, low, close, period, first, out)
 }
 
+/// Decision: Streaming ring fixed; constants precomputed; DX uses one-division form.
 #[derive(Debug, Clone)]
 pub struct AdxrStream {
     period: usize,
-    // Wilder smoothing state
+    // Precomputed constants for Wilder smoothing / ADX update
+    rp: f64,  // 1/p
+    om: f64,  // 1 - 1/p
+    pm1: f64, // p - 1
+
+    // Wilder smoothing state (running SMMA of TR, +DM, -DM)
     atr: f64,
-    plus_dm_smooth: f64,
-    minus_dm_smooth: f64,
-    // Bootstrap DX average
+    pdm_s: f64,
+    mdm_s: f64,
+
+    // Bootstrap DX accumulation to build first ADX
     dx_sum: f64,
     dx_count: usize,
     adx_last: f64,
     have_adx: bool,
-    // Keep last "period" ADX values to form ADXR
+
+    // Ring buffer of last `period` ADX values (to fetch ADX from `period` bars ago)
     adx_ring: Vec<f64>,
-    adx_head: usize,
-    // Last bar
+    head: usize, // next write index (element at `head` is the oldest)
+
+    // Previous bar values to form TR/+DM/-DM deltas
     prev_hlc: Option<(f64, f64, f64)>,
-    // Bars since first finite
+
+    // Number of deltas processed since we first had a previous bar
     seen: usize,
-    first_seen: bool,
 }
 
 impl AdxrStream {
+    #[inline(always)]
     pub fn try_new(params: AdxrParams) -> Result<Self, AdxrError> {
         let period = params.period.unwrap_or(14);
         if period == 0 {
-            return Err(AdxrError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(AdxrError::InvalidPeriod { period, data_len: 0 });
         }
+        let p = period as f64;
         Ok(Self {
             period,
+            rp: 1.0 / p,
+            om: 1.0 - 1.0 / p,
+            pm1: p - 1.0,
             atr: 0.0,
-            plus_dm_smooth: 0.0,
-            minus_dm_smooth: 0.0,
+            pdm_s: 0.0,
+            mdm_s: 0.0,
             dx_sum: 0.0,
             dx_count: 0,
             adx_last: f64::NAN,
             have_adx: false,
             adx_ring: vec![f64::NAN; period],
-            adx_head: 0,
+            head: 0,
             prev_hlc: None,
             seen: 0,
-            first_seen: false,
         })
     }
 
+    /// O(1) per-bar update. Returns Some(ADXR) after warmup, otherwise None.
+    ///
+    /// Warmup timeline (assuming no NaNs and contiguous bars):
+    /// 1) Accumulate TR/+DM/-DM for `period` bars to form DX₀ from sums.
+    /// 2) Accumulate `period` DX values to form first ADX.
+    /// 3) After an additional `period` ADX updates the ring is full and ADXR becomes available.
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
-        if !self.first_seen {
-            self.prev_hlc = Some((high, low, close));
-            self.first_seen = true;
+        // Ignore non-finite updates (keeps state unchanged)
+        if !(high.is_finite() && low.is_finite() && close.is_finite()) {
             return None;
         }
 
-        let (ph, pl, pc) = self.prev_hlc.unwrap();
+        // First observation just primes the previous values
+        if self.prev_hlc.is_none() {
+            self.prev_hlc = Some((high, low, close));
+            return None;
+        }
+
+        let (ph, pl, pc) = unsafe { self.prev_hlc.unwrap_unchecked() };
         self.prev_hlc = Some((high, low, close));
-        self.seen += 1;
+        self.seen = self.seen.wrapping_add(1);
 
-        let tr = (high - low).max((high - pc).abs()).max((low - pc).abs());
-
-        let up_move = high - ph;
-        let down_move = pl - low;
-        let plus_dm = if up_move > down_move && up_move > 0.0 {
-            up_move
-        } else {
-            0.0
-        };
-        let minus_dm = if down_move > up_move && down_move > 0.0 {
-            down_move
-        } else {
-            0.0
+        // True Range (Wilder): max(high-low, |high-prev_close|, |low-prev_close|)
+        let tr = {
+            let a = high - low;
+            let b = (high - pc).abs();
+            let c = (low - pc).abs();
+            a.max(b).max(c)
         };
 
-        let p = self.period as f64;
-        let rp = 1.0 / p;
-        let om = 1.0 - rp;
+        // Directional Movement
+        let up = high - ph;
+        let down = pl - low;
+        let plus_dm = if up > down && up > 0.0 { up } else { 0.0 };
+        let minus_dm = if down > up && down > 0.0 { down } else { 0.0 };
 
+        // --- Bootstrap over the first `period` deltas
         if self.seen <= self.period {
-            // bootstrap sums over the first `period`
             self.atr += tr;
-            self.plus_dm_smooth += plus_dm;
-            self.minus_dm_smooth += minus_dm;
+            self.pdm_s += plus_dm;
+            self.mdm_s += minus_dm;
 
             if self.seen == self.period {
-                let atr0 = self.atr;
-                let plus_di0 = if atr0 != 0.0 {
-                    (self.plus_dm_smooth / atr0) * 100.0
-                } else {
-                    0.0
-                };
-                let minus_di0 = if atr0 != 0.0 {
-                    (self.minus_dm_smooth / atr0) * 100.0
-                } else {
-                    0.0
-                };
-                let di_sum = plus_di0 + minus_di0;
-                let dx0 = if di_sum != 0.0 {
-                    ((plus_di0 - minus_di0).abs() / di_sum) * 100.0
+                // First DX from bootstrap sums.
+                let denom = self.pdm_s + self.mdm_s;
+                let dx0 = if denom > 0.0 {
+                    100.0 * (self.pdm_s - self.mdm_s).abs() / denom
                 } else {
                     0.0
                 };
@@ -1474,61 +1468,51 @@ impl AdxrStream {
             return None;
         }
 
-        // Wilder smoothing after bootstrap
-        self.atr = self.atr * om + tr;
-        self.plus_dm_smooth = self.plus_dm_smooth * om + plus_dm;
-        self.minus_dm_smooth = self.minus_dm_smooth * om + minus_dm;
+        // Wilder smoothing (equivalent to EMA with alpha = 1/period)
+        self.atr = self.atr.mul_add(self.om, tr);
+        self.pdm_s = self.pdm_s.mul_add(self.om, plus_dm);
+        self.mdm_s = self.mdm_s.mul_add(self.om, minus_dm);
 
-        let atr = self.atr;
-        let plus_di = if atr != 0.0 {
-            (self.plus_dm_smooth / atr) * 100.0
-        } else {
-            0.0
-        };
-        let minus_di = if atr != 0.0 {
-            (self.minus_dm_smooth / atr) * 100.0
-        } else {
-            0.0
-        };
-        let sum_di = plus_di + minus_di;
-        let dx = if sum_di != 0.0 {
-            ((plus_di - minus_di).abs() / sum_di) * 100.0
+        // Compute DX from smoothed directional movement (ATR cancels out)
+        let denom = self.pdm_s + self.mdm_s;
+        let dx = if denom > 0.0 {
+            100.0 * (self.pdm_s - self.mdm_s).abs() / denom
         } else {
             0.0
         };
 
-        let adx_curr;
+        // Build first ADX as the average of the first `period` DX values
         if !self.have_adx {
-            // build initial ADX as average of first `period` DXs
-            if self.dx_count < self.period {
+            if self.dx_count + 1 < self.period {
                 self.dx_sum += dx;
                 self.dx_count += 1;
-                if self.dx_count == self.period {
-                    self.adx_last = self.dx_sum / p;
-                    self.have_adx = true;
-                    // store it in ring
-                    self.adx_ring[self.adx_head] = self.adx_last;
-                    self.adx_head = (self.adx_head + 1) % self.period;
-                }
                 return None;
             } else {
-                return None;
-            }
-        } else {
-            adx_curr = ((self.adx_last * (p - 1.0)) + dx) * (1.0 / p);
-            self.adx_last = adx_curr;
-            // store
-            self.adx_ring[self.adx_head] = adx_curr;
-            let idx_period_ago = (self.adx_head + self.period - 1) % self.period;
-            self.adx_head = (self.adx_head + 1) % self.period;
+                // Now dx_count + 1 == period
+                self.dx_sum += dx;
+                self.adx_last = self.dx_sum * self.rp;
+                self.have_adx = true;
 
-            // ADXR after we have ADX and also ADX from `period` bars ago
-            let adx_prev = self.adx_ring[idx_period_ago];
-            if adx_prev.is_finite() {
-                return Some(0.5 * (adx_curr + adx_prev));
-            } else {
+                // Seed ring with the first ADX; no ADXR until a full ring cycle
+                self.adx_ring[self.head] = self.adx_last;
+                self.head = (self.head + 1) % self.period;
                 return None;
             }
+        }
+
+        // Subsequent ADX: Wilder-smoothed ADX_t = ((p-1)*ADX_{t-1} + DX_t) / p
+        let adx_curr = (self.adx_last.mul_add(self.pm1, dx)) * self.rp;
+        self.adx_last = adx_curr;
+
+        // Correct ring logic: read oldest before overwrite
+        let adx_period_ago = self.adx_ring[self.head];
+        self.adx_ring[self.head] = adx_curr;
+        self.head = (self.head + 1) % self.period;
+
+        if adx_period_ago.is_finite() {
+            Some(0.5 * (adx_curr + adx_period_ago))
+        } else {
+            None
         }
     }
 }

@@ -1979,19 +1979,38 @@ pub fn wto_batch_all_outputs_with_kernel(
 }
 
 // ==================== STREAMING API ====================
+/// SIMD/streaming status: Streaming O(1) via ring SMA(4); Pine-style EMA seeding; matches scalar warmup.
 #[derive(Debug, Clone)]
 pub struct WtoStream {
+    // Params
     channel_length: usize,
     average_length: usize,
+
+    // EMA coefficients and constants
     esa_alpha: f64,
+    esa_beta: f64,
     tci_alpha: f64,
-    data_buffer: Vec<f64>,
-    esa: f64,
-    d: f64,
-    tci: f64,
-    wt2_buffer: Vec<f64>,
-    initialized: bool,
+    tci_beta: f64,
+    k015: f64, // 0.015
+    inv4: f64, // 1/4
+
+    // Running state
+    samples: usize, // number of finite samples processed since reset
+    ci_ready: bool, // becomes true once samples >= channel_length
+
+    esa: f64, // EMA(src, n1)
+    d: f64,   // EMA(|src-esa|, n1)
+    tci: f64, // EMA(ci, n2)
+
+    // WT2 SMA(4) ring buffer state (O(1) moving average)
+    ring: [f64; 4],
+    rsum: f64,
+    rpos: usize,
+    rlen: usize,
 }
+
+/// When true, WT2/HIST are NaN until 4 WT1 samples exist (strict to scalar).
+const STRICT_WT2_NANS: bool = true;
 
 impl WtoStream {
     pub fn try_new(params: WtoParams) -> Result<Self, WtoError> {
@@ -1999,111 +2018,171 @@ impl WtoStream {
         let average_length = params.average_length.unwrap_or(21);
 
         if channel_length == 0 {
-            return Err(WtoError::InvalidPeriod {
-                period: channel_length,
-                data_len: 0,
-            });
+            return Err(WtoError::InvalidPeriod { period: channel_length, data_len: 0 });
         }
         if average_length == 0 {
-            return Err(WtoError::InvalidPeriod {
-                period: average_length,
-                data_len: 0,
-            });
+            return Err(WtoError::InvalidPeriod { period: average_length, data_len: 0 });
         }
+
+        let esa_alpha = 2.0 / (channel_length as f64 + 1.0);
+        let tci_alpha = 2.0 / (average_length as f64 + 1.0);
 
         Ok(Self {
             channel_length,
             average_length,
-            esa_alpha: 2.0 / (channel_length as f64 + 1.0),
-            tci_alpha: 2.0 / (average_length as f64 + 1.0),
-            data_buffer: Vec::with_capacity(channel_length),
+            esa_alpha,
+            esa_beta: 1.0 - esa_alpha,
+            tci_alpha,
+            tci_beta: 1.0 - tci_alpha,
+            k015: 0.015_f64,
+            inv4: 0.25_f64,
+
+            samples: 0,
+            ci_ready: channel_length == 1,
+
             esa: 0.0,
             d: 0.0,
             tci: 0.0,
-            wt2_buffer: Vec::with_capacity(4),
-            initialized: false,
+
+            ring: [0.0; 4],
+            rsum: 0.0,
+            rpos: 0,
+            rlen: 0,
         })
     }
 
+    #[inline(always)]
+    fn fast_abs(x: f64) -> f64 {
+        // Branchless |x| (IEEE-754)
+        f64::from_bits(x.to_bits() & 0x7FFF_FFFF_FFFF_FFFF)
+    }
+
+    /// Update with the next value. Returns:
+    /// - None: until TCI (WT1) becomes defined (i.e., before `channel_length` finite samples).
+    /// - Some(wt1, wt2, hist): thereafter; WT2/HIST are NaN until 4 WT1 samples (strict mode).
     pub fn update(&mut self, value: f64) -> Option<(f64, f64, f64)> {
-        if value.is_nan() {
+        if !value.is_finite() {
             return None;
         }
 
-        self.data_buffer.push(value);
-        if self.data_buffer.len() > self.channel_length {
-            self.data_buffer.remove(0);
+        if self.samples == 0 {
+            // Pine-style EMA seed: first finite sample initializes ESA.
+            self.esa = value;
+            self.samples = 1;
+
+            if self.ci_ready {
+                // n1 == 1: D seeds from the first sample; denom=0 => CI=0
+                let ci = 0.0;
+                self.tci = ci;
+                self.push_wt2(ci);
+
+                let (wt2, hist) = self.emit_wt2(ci);
+                return Some((ci, wt2, hist));
+            }
+            return None;
         }
 
-        if !self.initialized {
-            if self.data_buffer.len() == self.channel_length {
-                self.esa = self.data_buffer.iter().sum::<f64>() / self.channel_length as f64;
-                self.d = 0.0;
-                self.initialized = true;
+        // Update ESA with fused pattern: esa = beta*esa + alpha*value
+        self.esa = self.esa_beta.mul_add(self.esa, self.esa_alpha * value);
+
+        // Haven't reached the CI start yet? Count and possibly seed D/TCI at the boundary.
+        if !self.ci_ready {
+            self.samples += 1;
+
+            if self.samples == self.channel_length {
+                // Seed D from first CI step: d = |x - esa|
+                self.d = Self::fast_abs(value - self.esa);
+
+                // Compute CI safely: denom = 0.015 * d; if 0 or !finite => CI=0
+                let denom = self.k015 * self.d;
+                let ci = if denom != 0.0 && denom.is_finite() {
+                    (value - self.esa) / denom
+                } else {
+                    0.0
+                };
+
+                // Seed TCI = CI at ci_start (Pine-style EMA seed for this stage)
+                self.tci = ci;
+                self.ci_ready = true;
+
+                self.push_wt2(ci);
+                let (wt2, hist) = self.emit_wt2(ci);
+                return Some((ci, wt2, hist));
             } else {
                 return None;
             }
         }
 
-        // Update ESA
-        self.esa = self.esa_alpha * value + (1.0 - self.esa_alpha) * self.esa;
+        // Steady-state path (CI/TCI defined)
+        let ad = Self::fast_abs(value - self.esa);
+        self.d = self.esa_beta.mul_add(self.d, self.esa_alpha * ad);
 
-        // Update D
-        let abs_diff = (value - self.esa).abs();
-        self.d = self.esa_alpha * abs_diff + (1.0 - self.esa_alpha) * self.d;
-
-        // Calculate CI
-        let divisor = 0.015 * self.d;
-        let ci = if divisor != 0.0 && divisor.is_finite() {
-            (value - self.esa) / divisor
-        } else {
-            0.0
-        };
-
-        // Update TCI (WaveTrend1)
-        self.tci = self.tci_alpha * ci + (1.0 - self.tci_alpha) * self.tci;
-        let wt1 = self.tci;
-
-        // Update WaveTrend2 (SMA of last 4 WaveTrend1 values)
-        self.wt2_buffer.push(wt1);
-        if self.wt2_buffer.len() > 4 {
-            self.wt2_buffer.remove(0);
+        // CI with guarded denominator
+        let mut ci = 0.0;
+        let denom = self.k015 * self.d;
+        if denom != 0.0 && denom.is_finite() {
+            ci = (value - self.esa) * (1.0 / denom);
         }
 
-        let wt2 = if self.wt2_buffer.len() == 4 {
-            self.wt2_buffer.iter().sum::<f64>() / 4.0
+        // TCI = EMA(ci, n2)
+        self.tci = self.tci_beta.mul_add(self.tci, self.tci_alpha * ci);
+
+        // WT1
+        let wt1 = self.tci;
+
+        // WT2/HIST via O(1) ring SMA(4)
+        self.push_wt2(wt1);
+        let (wt2, hist) = self.emit_wt2(wt1);
+        Some((wt1, wt2, hist))
+    }
+
+    #[inline(always)]
+    fn push_wt2(&mut self, val: f64) {
+        if self.rlen < 4 {
+            self.ring[self.rlen] = val;
+            self.rsum += val;
+            self.rlen += 1;
         } else {
-            wt1 // Until we have 4 values, just use wt1
-        };
+            self.rsum += val - self.ring[self.rpos];
+            self.ring[self.rpos] = val;
+            self.rpos = (self.rpos + 1) & 3; // modulo 4
+        }
+    }
 
-        let histogram = wt1 - wt2;
-
-        Some((wt1, wt2, histogram))
+    #[inline(always)]
+    fn emit_wt2(&self, wt1: f64) -> (f64, f64) {
+        if self.rlen == 4 {
+            let sig = self.inv4 * self.rsum;
+            (sig, wt1 - sig)
+        } else if STRICT_WT2_NANS {
+            (f64::NAN, f64::NAN)
+        } else {
+            let sig = self.rsum / (self.rlen as f64);
+            (sig, wt1 - sig)
+        }
     }
 
     pub fn last(&self) -> Option<(f64, f64, f64)> {
-        if !self.initialized {
+        if !self.ci_ready {
             return None;
         }
-
         let wt1 = self.tci;
-        let wt2 = if self.wt2_buffer.len() == 4 {
-            self.wt2_buffer.iter().sum::<f64>() / 4.0
-        } else {
-            wt1
-        };
-        let histogram = wt1 - wt2;
-
-        Some((wt1, wt2, histogram))
+        let (wt2, hist) = self.emit_wt2(wt1);
+        Some((wt1, wt2, hist))
     }
 
     pub fn reset(&mut self) {
-        self.data_buffer.clear();
-        self.wt2_buffer.clear();
+        self.samples = 0;
+        self.ci_ready = self.channel_length == 1;
+
         self.esa = 0.0;
         self.d = 0.0;
         self.tci = 0.0;
-        self.initialized = false;
+
+        self.ring = [0.0; 4];
+        self.rsum = 0.0;
+        self.rpos = 0;
+        self.rlen = 0;
     }
 }
 

@@ -1015,34 +1015,46 @@ pub unsafe fn chop_row_avx512_long(
     chop_avx512(high, low, close, period, drift, scalar, first, out)
 }
 
-// Streaming implementation (analogous to AlmaStream)
+// Streaming implementation (optimized O(1) amortized; see Decision Note below)
+// Decision Note: Streaming kernel uses monotonic deques with (idx,val) nodes and ln change-of-base
+// emission to reduce work per tick while matching scalar/batch outputs within test tolerance.
+#[derive(Copy, Clone, Debug)]
+struct Node {
+    idx: u64,
+    val: f64,
+}
+
 #[derive(Debug, Clone)]
 pub struct ChopStream {
     period: usize,
     drift: usize,
     scalar: f64,
+
+    // Precomputed constants
+    inv_drift: f64,      // 1.0 / drift
+    scale_ln: f64,       // scalar / ln(period)
+
+    // Rolling SUM(ATR(1), period)
     atr_ring: Vec<f64>,
     ring_idx: usize,
     rolling_sum_atr: f64,
-    dq_high: VecDeque<usize>,
-    dq_low: VecDeque<usize>,
-    buf_high: Vec<f64>,
-    buf_low: Vec<f64>,
-    buf_close: Vec<f64>,
-    head: usize,
+
+    // Monotonic deques for HHV/LLV
+    dq_high: VecDeque<Node>,
+    dq_low: VecDeque<Node>,
+
+    // RMA(ATR) bootstrap + state
     rma_atr: f64,
     sum_tr: f64,
-    count: usize,
+    count: u64,
     prev_close: f64,
 }
 impl ChopStream {
+    #[inline]
     pub fn try_new(params: ChopParams) -> Result<Self, ChopError> {
         let period = params.period.unwrap_or(14);
         if period == 0 {
-            return Err(ChopError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(ChopError::InvalidPeriod { period, data_len: 0 });
         }
         let drift = params.drift.unwrap_or(1);
         if drift == 0 {
@@ -1051,33 +1063,40 @@ impl ChopStream {
             ));
         }
         let scalar = params.scalar.unwrap_or(100.0);
+
+        let inv_drift = 1.0 / (drift as f64);
+        let scale_ln = scalar / (period as f64).ln();
+
         Ok(Self {
             period,
             drift,
             scalar,
+            inv_drift,
+            scale_ln,
+
             atr_ring: vec![0.0; period],
             ring_idx: 0,
             rolling_sum_atr: 0.0,
+
             dq_high: VecDeque::with_capacity(period),
             dq_low: VecDeque::with_capacity(period),
-            buf_high: vec![f64::NAN; period],
-            buf_low: vec![f64::NAN; period],
-            buf_close: vec![f64::NAN; period],
-            head: 0,
+
             rma_atr: f64::NAN,
             sum_tr: 0.0,
             count: 0,
             prev_close: f64::NAN,
         })
     }
-    pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
-        self.buf_high[self.head] = high;
-        self.buf_low[self.head] = low;
-        self.buf_close[self.head] = close;
-        let idx = self.head;
-        self.head = (self.head + 1) % self.period;
-        self.count += 1;
 
+    /// O(1) amortized per bar
+    #[inline]
+    pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
+        let idx_ring = self.ring_idx;
+        self.ring_idx = (self.ring_idx + 1) % self.period;
+        self.count = self.count.saturating_add(1);
+        let this_idx = self.count - 1;
+
+        // True Range (Wilder)
         let tr = if self.count == 1 {
             self.prev_close = close;
             self.sum_tr = high - low;
@@ -1089,79 +1108,78 @@ impl ChopStream {
             self.prev_close = close;
             hl.max(hc).max(lc)
         };
-        if self.count <= self.drift {
+
+        // ATR via RMA bootstrap then EMA-like update (alpha = 1/drift)
+        if (self.count as usize) <= self.drift {
             if self.count != 1 {
                 self.sum_tr += tr;
             }
-            if self.count == self.drift {
-                self.rma_atr = self.sum_tr / (self.drift as f64);
+            if (self.count as usize) == self.drift {
+                self.rma_atr = self.sum_tr * self.inv_drift;
             }
         } else {
-            self.rma_atr += (1.0 / (self.drift as f64)) * (tr - self.rma_atr);
+            self.rma_atr += self.inv_drift * (tr - self.rma_atr);
         }
 
-        let current_atr = if self.count <= self.drift {
-            if self.count == self.drift {
-                self.rma_atr
-            } else {
-                f64::NAN
-            }
+        let current_atr = if (self.count as usize) < self.drift {
+            f64::NAN
         } else {
             self.rma_atr
         };
-        let oldest = self.atr_ring[idx];
-        self.rolling_sum_atr -= oldest;
-        let new_val = if current_atr.is_nan() {
-            0.0
-        } else {
-            current_atr
-        };
-        self.atr_ring[idx] = new_val;
-        self.rolling_sum_atr += new_val;
 
-        // Highest-high and lowest-low logic using VecDeque.
-        let win_start = self.count.saturating_sub(self.period);
-        while let Some(&front_idx) = self.dq_high.front() {
-            if front_idx < win_start {
+        // Rolling SUM(ATR(1), period)
+        let newest = if current_atr.is_nan() { 0.0 } else { current_atr };
+        let oldest = self.atr_ring[idx_ring];
+        self.atr_ring[idx_ring] = newest;
+        self.rolling_sum_atr += newest - oldest;
+
+        // Sliding HHV / LLV via monotonic deques
+        let win_start = self.count.saturating_sub(self.period as u64);
+
+        while let Some(&front) = self.dq_high.front() {
+            if front.idx < win_start {
                 self.dq_high.pop_front();
             } else {
                 break;
             }
         }
-        while let Some(&back_idx) = self.dq_high.back() {
-            let actual_idx = (back_idx % self.period);
-            if self.buf_high[actual_idx] <= high {
-                self.dq_high.pop_back();
-            } else {
-                break;
-            }
-        }
-        self.dq_high.push_back(self.count - 1);
-
-        while let Some(&front_idx) = self.dq_low.front() {
-            if front_idx < win_start {
+        while let Some(&front) = self.dq_low.front() {
+            if front.idx < win_start {
                 self.dq_low.pop_front();
             } else {
                 break;
             }
         }
-        while let Some(&back_idx) = self.dq_low.back() {
-            let actual_idx = (back_idx % self.period);
-            if self.buf_low[actual_idx] >= low {
+
+        while let Some(&back) = self.dq_high.back() {
+            if back.val <= high {
+                self.dq_high.pop_back();
+            } else {
+                break;
+            }
+        }
+        self.dq_high.push_back(Node { idx: this_idx, val: high });
+
+        while let Some(&back) = self.dq_low.back() {
+            if back.val >= low {
                 self.dq_low.pop_back();
             } else {
                 break;
             }
         }
-        self.dq_low.push_back(self.count - 1);
+        self.dq_low.push_back(Node { idx: this_idx, val: low });
 
-        if self.count >= self.period {
-            let hh_idx = self.dq_high.front().unwrap() % self.period;
-            let ll_idx = self.dq_low.front().unwrap() % self.period;
-            let range = self.buf_high[hh_idx] - self.buf_low[ll_idx];
+        if self.count >= self.period as u64 {
+            let range = self.dq_high.front().unwrap().val - self.dq_low.front().unwrap().val;
             if range > 0.0 && self.rolling_sum_atr > 0.0 {
-                let logp = (self.period as f64).log10();
-                Some((self.scalar * (self.rolling_sum_atr.log10() - range.log10())) / logp)
+                // CHOP = scalar * ln(SUM_ATR / range) / ln(period)
+                let ratio = self.rolling_sum_atr / range;
+                let y = if (ratio - 1.0).abs() < 1e-8 {
+                    self.scale_ln * (ratio - 1.0).ln_1p()
+                } else {
+                    self.scale_ln * ratio.ln()
+                };
+                Some(y)
             } else {
                 Some(f64::NAN)
             }

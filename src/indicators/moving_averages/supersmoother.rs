@@ -21,7 +21,8 @@
 //! - **AVX512 kernel**: ❌ Stub only - has short/long path structure but both fall back to scalar
 //! - **Decision**: Runtime selection short-circuits to Scalar by default. The IIR dependency chain prevents
 //!   effective across-time SIMD; AVX2/AVX512 paths do not beat the optimized scalar by >5% in benches.
-//! - **Streaming update**: ✅ O(1) complexity - efficient recursive calculation using 2-element circular buffer
+//! - **Streaming update**: ✅ O(1) complexity using minimal state (x_prev, y1, y2)
+//!   with correct feedback terms (uses previous outputs, not inputs) per Ehlers.
 //! - **Memory optimization**: ✅ Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix) for output vectors
 //! - **Row-specific batch**: ❌ Not attempted. Potential future win by precomputing s[i] = x[i] + x[i-1]
 //!   once and reusing across rows; current code keeps per-row scalar kernel for simplicity.
@@ -399,60 +400,123 @@ pub unsafe fn supersmoother_avx512_long(
 #[derive(Debug, Clone)]
 pub struct SuperSmootherStream {
     period: usize,
-    buffer: Vec<f64>,
-    head: usize,
-    filled: bool,
+    // Coefficients
     a: f64,
     a_sq: f64,
     b: f64,
     c: f64,
+    // Minimal state for O(1) update
+    x_prev: f64, // x[t-1]
+    y1: f64,     // y[t-1]
+    y2: f64,     // y[t-2]
+    seen: u8,    // 0 = no samples, 1 = have x[t-1], >=2 = fully primed
 }
 
 impl SuperSmootherStream {
+    #[inline]
     pub fn try_new(params: SuperSmootherParams) -> Result<Self, SuperSmootherError> {
         let period = params.period.unwrap_or(14);
         if period == 0 {
-            return Err(SuperSmootherError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(SuperSmootherError::InvalidPeriod { period, data_len: 0 });
         }
-        let a = (-1.414_f64 * PI / (period as f64)).exp();
+
+        // Compute coefficients once (no divides in the hot path)
+        let inv_p = 1.0 / (period as f64);
+        let f = std::f64::consts::SQRT_2 * PI * inv_p;
+        let a = (-f).exp();
         let a_sq = a * a;
-        let b = 2.0 * a * (1.414_f64 * PI / (period as f64)).cos();
-        let c = (1.0 + a_sq - b) * 0.5;
+        let b = 2.0 * a * f.cos();
+        let c = 0.5 * (1.0 + a_sq - b);
+
         Ok(Self {
             period,
-            buffer: vec![f64::NAN; 2],
-            head: 0,
-            filled: false,
             a,
             a_sq,
             b,
             c,
+            x_prev: 0.0,
+            y1: 0.0,
+            y2: 0.0,
+            seen: 0,
         })
     }
+
+    /// One-sample O(1) update.
+    ///
+    /// Returns:
+    /// - `None` until we have seen at least two samples (initial conditions).
+    /// - `Some(y_t)` thereafter. The first `Some` returned equals the second sample (Ehlers' initial condition).
+    ///
+    /// Notes:
+    /// - `prev` (when provided) must be the previous outputs `(y_{t-1}, y_{t-2})`. If `None`, the internal state is used.
+    /// - This streaming API does not inject period-length warmup NaNs; callers align outputs as needed.
     #[inline(always)]
-    pub fn update(&mut self, value: f64, prev: Option<(f64, f64)>) -> Option<f64> {
-        self.buffer[self.head] = value;
-        self.head = (self.head + 1) % 2;
-        if !self.filled && self.head == 0 {
-            self.filled = true;
-        }
-        if !self.filled {
+    pub fn update(&mut self, x_t: f64, prev: Option<(f64, f64)>) -> Option<f64> {
+        // Ignore non-finite samples in live streams; keep state unchanged
+        if !x_t.is_finite() {
             return None;
         }
-        let prev_1 = if let Some((p1, _)) = prev {
-            p1
-        } else {
-            self.buffer[(self.head + 1) % 2]
-        };
-        let prev_2 = if let Some((_, p2)) = prev {
-            p2
-        } else {
-            self.buffer[self.head]
-        };
-        Some(self.c * (value + prev_1) + self.b * prev_1 - self.a_sq * prev_2)
+
+        match self.seen {
+            0 => {
+                // First sample: remember as x[t-1]; cannot produce output yet
+                self.x_prev = x_t;
+                self.seen = 1;
+                None
+            }
+            1 => {
+                // Second sample: Ehlers initial condition -> y[t] = x[t]
+                // Also set y[t-2] = x[t-1] so that the next step has two outputs
+                let y = x_t;
+                self.y2 = self.x_prev; // y_{t-2} := x_{t-1}
+                self.y1 = y; // y_{t-1} := x_t
+                self.x_prev = x_t; // x_{t-1} := x_t
+                self.seen = 2;
+                Some(y)
+            }
+            _ => {
+                // Fully primed: use external or internal (y_{t-1}, y_{t-2})
+                let (mut y_im1, mut y_im2) = (self.y1, self.y2);
+                if let Some((p1, p2)) = prev {
+                    y_im1 = p1;
+                    y_im2 = p2;
+                }
+
+                // y_t = c*(x_t + x_{t-1}) + b*y_{t-1} - a^2*y_{t-2}
+                let t = f64::mul_add(self.b, y_im1, -self.a_sq * y_im2);
+                let y = f64::mul_add(self.c, x_t + self.x_prev, t);
+
+                // Roll state
+                self.y2 = y_im1;
+                self.y1 = y;
+                self.x_prev = x_t;
+
+                Some(y)
+            }
+        }
+    }
+
+    /// Reconfigure the period and reset state.
+    #[inline]
+    pub fn reconfigure(&mut self, period: usize) -> Result<(), SuperSmootherError> {
+        if period == 0 {
+            return Err(SuperSmootherError::InvalidPeriod { period, data_len: 0 });
+        }
+        self.period = period;
+
+        let inv_p = 1.0 / (period as f64);
+        let f = std::f64::consts::SQRT_2 * PI * inv_p;
+        let a = (-f).exp();
+        self.a = a;
+        self.a_sq = a * a;
+        self.b = 2.0 * a * f.cos();
+        self.c = 0.5 * (1.0 + self.a_sq - self.b);
+
+        self.x_prev = 0.0;
+        self.y1 = 0.0;
+        self.y2 = 0.0;
+        self.seen = 0;
+        Ok(())
     }
 }
 

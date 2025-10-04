@@ -14,6 +14,7 @@
 //!
 //! ## Developer Notes
 //! - Decision: scalar path optimized (monotonic deque + ring-sum). Bitmask-valid fast path for period ≤64 tested but disabled by default here due to neutral/slower results; revisit after profiling. Sqrt input clamped at 0 to avoid FP round-off negatives.
+//! - Streaming: O(1) UiStream via monotonic deque (rolling max) + ring-sum (squared drawdowns); behavior matches scalar warmup and validity.
 //! - SIMD status: AVX2/AVX512 stubs delegate to scalar (branch-heavy rolling max; SIMD underperforms). Kept for future work.
 //! - Batch status: row-specific SIMD not attempted; algorithmic batch optimization groups rows by period and scales a base (scalar=1.0) series per row.
 //! - Memory/Perf: uses `alloc_with_nan_prefix` and zero-copy outputs; warmup handling matches alma.rs patterns.
@@ -537,12 +538,34 @@ pub unsafe fn ui_avx512_long(
 pub struct UiStream {
     period: usize,
     scalar: f64,
-    buffer: Vec<f64>,
-    head: usize,
-    filled: bool,
-    squared_dd_window: Vec<f64>,
-    window_idx: usize,
-    warmup_counter: usize,
+
+    // Global stream index of the next value to write (0-based)
+    i: usize,
+
+    // Index of the first finite input we have seen (to mirror 'first' in batch/scalar)
+    first_finite: Option<usize>,
+    // Computed lazily as: first + (period * 2 - 2); mirrors scalar warmup gate
+    warmup_end: Option<usize>,
+
+    // --- Rolling max (price) via monotonic deque of indices (circular buffer) ---
+    // We store indices into the *global* stream. To retrieve a value for index j,
+    // use buffer[j % period]. We only keep indices from the last 'period' samples.
+    buffer: Vec<f64>,   // ring of last 'period' prices; written at i % period
+    deq: Vec<usize>,    // circular array of size 'period' holding indices
+    dq_head: usize,     // front pointer
+    dq_tail: usize,     // next write position (one past back)
+    dq_size: usize,     // number of valid entries
+
+    // --- Last 'period' squared drawdowns (ring) + running sum for O(1) avg ---
+    sq_ring: Vec<f64>,  // squared drawdowns ring buffer
+    ring_idx: usize,    // position to overwrite in sq_ring/valid ring
+
+    // Two validity tracking modes: bitmask (<=64) or byte-ring (>64)
+    valid_mask: u64,    // used when period <= 64
+    valid_ring: Option<Vec<u8>>, // used when period > 64
+
+    sum_sq: f64,        // running sum of squared drawdowns in the ring
+    count_valid: usize, // number of valid slots in the ring (must reach 'period')
 }
 
 impl UiStream {
@@ -550,86 +573,162 @@ impl UiStream {
         let period = params.period.unwrap_or(14);
         let scalar = params.scalar.unwrap_or(100.0);
         if period == 0 {
-            return Err(UiError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(UiError::InvalidPeriod { period, data_len: 0 });
         }
         if !scalar.is_finite() {
             return Err(UiError::InvalidScalar { scalar });
         }
+
+        let use_mask = period <= 64;
         Ok(Self {
             period,
             scalar,
+
+            i: 0,
+            first_finite: None,
+            warmup_end: None,
+
             buffer: vec![f64::NAN; period],
-            head: 0,
-            filled: false,
-            squared_dd_window: vec![f64::NAN; period],
-            window_idx: 0,
-            warmup_counter: 0,
+            deq: vec![0usize; period],
+            dq_head: 0,
+            dq_tail: 0,
+            dq_size: 0,
+
+            sq_ring: vec![0.0; period],
+            ring_idx: 0,
+
+            valid_mask: 0,
+            valid_ring: (!use_mask).then(|| vec![0u8; period]),
+
+            sum_sq: 0.0,
+            count_valid: 0,
         })
     }
 
     #[inline(always)]
+    fn dq_inc(x: &mut usize, cap: usize) {
+        *x += 1;
+        if *x == cap { *x = 0; }
+    }
+    #[inline(always)]
+    fn dq_dec(x: &mut usize, cap: usize) {
+        if *x == 0 { *x = cap - 1; } else { *x -= 1; }
+    }
+
+    /// O(1) amortized update.
+    /// Returns Some(UI) when we have a fully valid window; otherwise None (during warmup or invalid data).
+    #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        // Store value in circular buffer
-        self.buffer[self.head] = value;
-        self.head = (self.head + 1) % self.period;
+        let p = self.period;
+        let cap = p; // deque capacity
 
-        // Track total values seen
-        self.warmup_counter += 1;
+        // 1) Write incoming value into the price ring (at position i % p)
+        let pos = self.i % p;
+        self.buffer[pos] = value;
 
-        // Mark when buffer is first filled
-        if !self.filled && self.head == 0 {
-            self.filled = true;
+        // Track the first finite index to mirror 'first' from batch/scalar.
+        if self.first_finite.is_none() && value.is_finite() {
+            let f = self.i;
+            self.first_finite = Some(f);
+            self.warmup_end = Some(f + (p * 2 - 2));
         }
 
-        // Need at least one full buffer before we can start calculating
-        if !self.filled {
-            return None;
-        }
-
-        // Calculate rolling max over the buffer
-        let mut max = f64::NAN;
-        for &v in &self.buffer {
-            if !v.is_nan() && (max.is_nan() || v > max) {
-                max = v;
+        // 2) Expire stale indices from monotonic deque front (indices older than start)
+        let start = if self.i + 1 >= p { self.i + 1 - p } else { 0 };
+        while self.dq_size != 0 {
+            let j = unsafe { *self.deq.get_unchecked(self.dq_head) };
+            if j < start {
+                Self::dq_inc(&mut self.dq_head, cap);
+                self.dq_size -= 1;
+            } else {
+                break;
             }
         }
 
-        // Calculate squared drawdown for current value
-        let squared_dd = if !value.is_nan() && !max.is_nan() && max != 0.0 {
-            let dd = self.scalar * (value - max) / max;
-            dd * dd
-        } else {
-            f64::NAN
-        };
-
-        // Store in circular window
-        self.squared_dd_window[self.window_idx] = squared_dd;
-        self.window_idx = (self.window_idx + 1) % self.period;
-
-        // We need period*2-1 total values before we can produce first UI output
-        // With period=5: need 9 total values, first output at index 8
-        if self.warmup_counter < self.period * 2 - 1 {
-            return None;
+        // 3) Push current index into deque (maintain descending values)
+        let xi = value;
+        let xi_finite = xi.is_finite();
+        if xi_finite {
+            while self.dq_size != 0 {
+                let mut back = self.dq_tail;
+                Self::dq_dec(&mut back, cap);
+                let j = unsafe { *self.deq.get_unchecked(back) };
+                let xj = unsafe { *self.buffer.get_unchecked(j % p) };
+                if xj <= xi {
+                    // Pop back
+                    self.dq_tail = back;
+                    self.dq_size -= 1;
+                } else {
+                    break;
+                }
+            }
+            unsafe { *self.deq.get_unchecked_mut(self.dq_tail) = self.i; }
+            Self::dq_inc(&mut self.dq_tail, cap);
+            self.dq_size += 1;
         }
 
-        // Calculate sum of squared drawdowns
-        let mut sum = 0.0;
-        let mut valid = 0usize;
-        for &sq_dd in &self.squared_dd_window {
-            if !sq_dd.is_nan() {
-                sum += sq_dd;
-                valid += 1;
+        // 4) Compute new squared drawdown once the first rolling max is attainable
+        let mut new_valid = false;
+        let mut new_sq = 0.0f64;
+
+        if let Some(first) = self.first_finite {
+            if self.i + 1 >= first + p && self.dq_size != 0 {
+                let jmax = unsafe { *self.deq.get_unchecked(self.dq_head) };
+                let m = unsafe { *self.buffer.get_unchecked(jmax % p) };
+                if xi_finite && m.is_finite() && m.abs() > f64::EPSILON {
+                    // dd = scalar * (xi - m) / m
+                    let dd = (xi - m) * (self.scalar / m);
+                    // Square via fused mul-add when available
+                    new_sq = dd.mul_add(dd, 0.0);
+                    new_valid = true;
+                }
             }
         }
 
-        if valid == self.period {
-            Some((sum / self.period as f64).sqrt())
+        // 5) Update sliding sum/ring in O(1)
+        if self.period <= 64 {
+            let bit = 1u64 << self.ring_idx;
+            if (self.valid_mask & bit) != 0 {
+                self.sum_sq -= unsafe { *self.sq_ring.get_unchecked(self.ring_idx) };
+                self.count_valid -= 1;
+                self.valid_mask &= !bit;
+            }
+            if new_valid {
+                self.sum_sq += new_sq;
+                self.count_valid += 1;
+                self.valid_mask |= bit;
+            }
         } else {
-            None
+            let vr = self.valid_ring.as_mut().unwrap();
+            let was = unsafe { *vr.get_unchecked(self.ring_idx) };
+            if was != 0 {
+                self.sum_sq -= unsafe { *self.sq_ring.get_unchecked(self.ring_idx) };
+                self.count_valid -= 1;
+            }
+            if new_valid {
+                self.sum_sq += new_sq;
+                self.count_valid += 1;
+            }
+            unsafe { *vr.get_unchecked_mut(self.ring_idx) = if new_valid { 1 } else { 0 }; }
         }
+        unsafe { *self.sq_ring.get_unchecked_mut(self.ring_idx) = new_sq; }
+        self.ring_idx += 1;
+        if self.ring_idx == p { self.ring_idx = 0; }
+
+        // Bump global index after using it everywhere
+        let i_now = self.i;
+        self.i = self.i.wrapping_add(1);
+
+        // 6) Emit UI once both (a) warmup gate passed and (b) window fully valid
+        if let Some(we) = self.warmup_end {
+            if i_now >= we && self.count_valid == p {
+                let mut avg = self.sum_sq / (p as f64);
+                if avg < 0.0 { avg = 0.0; } // clamp tiny negatives from FP error
+                // NOTE: If you enable a fast-math sqrt, call it here instead.
+                return Some(avg.sqrt());
+            }
+        }
+        None
     }
 }
 

@@ -12,7 +12,7 @@
 //! ## Developer Status
 //! **AVX2**: Stub (calls scalar)
 //! **AVX512**: Stub with short/long variants (all call scalar)
-//! **Streaming**: O(n) - Requires full window scan each update
+//! **Streaming**: O(1) amortized via monotonic deques; matches batch
 //! **Memory**: Good - Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
 
 #[cfg(feature = "python")]
@@ -42,6 +42,7 @@ use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
+use std::collections::VecDeque;
 
 // --- INPUT/OUTPUT TYPES ---
 
@@ -350,59 +351,110 @@ pub fn midpoint_avx512_long(data: &[f64], period: usize, first: usize, out: &mut
 
 // --- BATCH / STREAMING ---
 
+/// Streaming Midpoint using monotonic deques for O(1) amortized updates.
+/// SIMD: not applicable. Matches batch semantics and warmup behavior.
 #[derive(Debug, Clone)]
 pub struct MidpointStream {
     period: usize,
-    buffer: Vec<f64>,
-    head: usize,
-    filled: bool,
+    /// Monotonic decreasing deque for window maximum: stores (index, value)
+    maxdq: VecDeque<(usize, f64)>,
+    /// Monotonic increasing deque for window minimum: stores (index, value)
+    mindq: VecDeque<(usize, f64)>,
+    /// Next index to assign to an incoming sample
+    idx: usize,
+    /// Warmup countdown: None until first non-NaN is seen, then Some(period-1)..=Some(0)
+    warmup_left: Option<usize>,
 }
 
 impl MidpointStream {
     pub fn try_new(params: MidpointParams) -> Result<Self, MidpointError> {
         let period = params.period.unwrap_or(14);
         if period == 0 {
-            return Err(MidpointError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(MidpointError::InvalidPeriod { period, data_len: 0 });
         }
         Ok(Self {
             period,
-            buffer: vec![f64::NAN; period],
-            head: 0,
-            filled: false,
+            maxdq: VecDeque::with_capacity(period),
+            mindq: VecDeque::with_capacity(period),
+            idx: 0,
+            warmup_left: None,
         })
     }
+
+    /// O(1) amortized update using monotonic deques
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        self.buffer[self.head] = value;
-        self.head = (self.head + 1) % self.period;
-        if !self.filled && self.head == 0 {
-            self.filled = true;
-        }
-        if !self.filled {
-            return None;
-        }
-        Some(self.calc_midpoint())
-    }
-    #[inline(always)]
-    fn calc_midpoint(&self) -> f64 {
-        let mut highest = f64::MIN;
-        let mut lowest = f64::MAX;
-        let mut idx = self.head;
-        for _ in 0..self.period {
-            let v = self.buffer[idx];
-            if v > highest {
-                highest = v;
+        let i = self.idx;
+        self.idx = i.wrapping_add(1);
+
+        // Compute current window start (saturating to 0 before the first full window)
+        let start = i.saturating_add(1).saturating_sub(self.period);
+
+        // 1) Evict stale indices from the fronts (fell out of window)
+        while let Some(&(j, _)) = self.maxdq.front() {
+            if j < start {
+                self.maxdq.pop_front();
+            } else {
+                break;
             }
-            if v < lowest {
-                lowest = v;
-            }
-            idx = (idx + 1) % self.period;
         }
-        (highest + lowest) / 2.0
+        while let Some(&(j, _)) = self.mindq.front() {
+            if j < start {
+                self.mindq.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        // 2) Insert current value if non-NaN, maintaining monotonicity
+        if !value.is_nan() {
+            if self.warmup_left.is_none() {
+                // First valid observation: begin warmup for (period - 1) more ticks
+                self.warmup_left = Some(self.period.saturating_sub(1));
+            }
+
+            // Maintain decreasing order for maxdq: remove <= value from the back
+            while let Some(&(_, v)) = self.maxdq.back() {
+                if v <= value {
+                    self.maxdq.pop_back();
+                } else {
+                    break;
+                }
+            }
+            self.maxdq.push_back((i, value));
+
+            // Maintain increasing order for mindq: remove >= value from the back
+            while let Some(&(_, v)) = self.mindq.back() {
+                if v >= value {
+                    self.mindq.pop_back();
+                } else {
+                    break;
+                }
+            }
+            self.mindq.push_back((i, value));
+        }
+
+        // 3) Warmup handling to mirror batch (first + period - 1 are NaN)
+        match self.warmup_left {
+            None => return None,
+            Some(k) if k > 0 => {
+                self.warmup_left = Some(k - 1);
+                return None;
+            }
+            _ => {}
+        }
+
+        // 4) Compute midpoint. If window had only NaNs, deques are empty; mimic batch behavior
+        let hi = self.maxdq.front().map(|&(_, v)| v).unwrap_or(f64::MIN);
+        let lo = self.mindq.front().map(|&(_, v)| v).unwrap_or(f64::MAX);
+        Some(avg2_fast(hi, lo))
     }
+}
+
+#[inline(always)]
+fn avg2_fast(a: f64, b: f64) -> f64 {
+    // Equivalent to (a + b) / 2.0; multiplication by 0.5 avoids an explicit division
+    (a + b).mul_add(0.5, 0.0)
 }
 
 // --- BATCH API (Parameter Sweep) ---

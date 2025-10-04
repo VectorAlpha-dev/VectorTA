@@ -49,6 +49,7 @@ use rayon::prelude::*;
 use std::convert::AsRef;
 use std::mem::{ManuallyDrop, MaybeUninit};
 use thiserror::Error;
+use std::collections::VecDeque;
 
 #[derive(Debug, Clone)]
 pub enum AroonData<'a> {
@@ -282,7 +283,18 @@ pub fn aroon_scalar(high: &[f64], low: &[f64], length: usize, up: &mut [f64], do
     );
 
     // Precompute scale = 100 / length
-    let scale = 100.0 / (length as f64);
+    let scale_100 = 100.0 / (length as f64);
+
+    #[inline(always)]
+    fn pair_is_finite(h: f64, l: f64) -> bool {
+        const EXP_MASK: u64 = 0x7ff0_0000_0000_0000;
+        (h.to_bits() & EXP_MASK) != EXP_MASK && (l.to_bits() & EXP_MASK) != EXP_MASK
+    }
+
+    #[inline(always)]
+    fn aroon_percent(dist: usize, length: usize, scale_100: f64) -> f64 {
+        if dist == 0 { 100.0 } else if dist >= length { 0.0 } else { (-(dist as f64)).mul_add(scale_100, 100.0) }
+    }
 
     // For each bar i from `length` up to `len - 1`, scan a window of size `length + 1`.
     // Single-pass per window: finiteness check + argmax/argmin together to reduce memory traffic.
@@ -292,7 +304,7 @@ pub fn aroon_scalar(high: &[f64], low: &[f64], length: usize, up: &mut [f64], do
         // Initialize with the first element in the window [start..=i]
         let h0 = high[start];
         let l0 = low[start];
-        if !h0.is_finite() || !l0.is_finite() {
+        if !pair_is_finite(h0, l0) {
             up[i] = f64::NAN;
             down[i] = f64::NAN;
             continue;
@@ -311,7 +323,7 @@ pub fn aroon_scalar(high: &[f64], low: &[f64], length: usize, up: &mut [f64], do
         while off < window {
             let h = high[start + off];
             let l = low[start + off];
-            if !h.is_finite() || !l.is_finite() {
+            if !pair_is_finite(h, l) {
                 valid = false;
                 break;
             }
@@ -333,12 +345,11 @@ pub fn aroon_scalar(high: &[f64], low: &[f64], length: usize, up: &mut [f64], do
         }
 
         if off >= window {
-            // Valid window: compute from offsets (offset/length * 100)
-            let up_v = (max_off as f64) * scale;
-            let down_v = (min_off as f64) * scale;
-            // Guard against tiny FP overshoot beyond 100.0 due to rounding
-            up[i] = if max_off == length { 100.0 } else { up_v.min(100.0) };
-            down[i] = if min_off == length { 100.0 } else { down_v.min(100.0) };
+            // Valid window: compute from distances using FMA
+            let dist_hi = length - max_off;
+            let dist_lo = length - min_off;
+            up[i] = aroon_percent(dist_hi, length, scale_100);
+            down[i] = aroon_percent(dist_lo, length, scale_100);
         }
     }
 }
@@ -444,10 +455,13 @@ pub fn aroon_avx512(high: &[f64], low: &[f64], length: usize, up: &mut [f64], do
                 *up_ptr.add(i) = f64::NAN;
                 *dn_ptr.add(i) = f64::NAN;
             } else {
-                let u = (best_h_off as f64) * scale;
-                let d = (best_l_off as f64) * scale;
-                *up_ptr.add(i) = if best_h_off == length { 100.0 } else { u.min(100.0) };
-                *dn_ptr.add(i) = if best_l_off == length { 100.0 } else { d.min(100.0) };
+                // Compute distances from end of window and use FMA form
+                let dist_hi = length - best_h_off;
+                let dist_lo = length - best_l_off;
+                let up_val = (-(dist_hi as f64)).mul_add(scale, 100.0);
+                let dn_val = (-(dist_lo as f64)).mul_add(scale, 100.0);
+                *up_ptr.add(i) = if dist_hi == 0 { 100.0 } else if dist_hi >= length { 0.0 } else { up_val };
+                *dn_ptr.add(i) = if dist_lo == 0 { 100.0 } else if dist_lo >= length { 0.0 } else { dn_val };
             }
         }
     }
@@ -543,10 +557,13 @@ pub fn aroon_avx2(high: &[f64], low: &[f64], length: usize, up: &mut [f64], down
                 *up_ptr.add(i) = f64::NAN;
                 *dn_ptr.add(i) = f64::NAN;
             } else {
-                let u = (best_h_off as f64) * scale;
-                let d = (best_l_off as f64) * scale;
-                *up_ptr.add(i) = if best_h_off == length { 100.0 } else { u.min(100.0) };
-                *dn_ptr.add(i) = if best_l_off == length { 100.0 } else { d.min(100.0) };
+                // Compute distances from end of window and use FMA form
+                let dist_hi = length - best_h_off;
+                let dist_lo = length - best_l_off;
+                let up_val = (-(dist_hi as f64)).mul_add(scale, 100.0);
+                let dn_val = (-(dist_lo as f64)).mul_add(scale, 100.0);
+                *up_ptr.add(i) = if dist_hi == 0 { 100.0 } else if dist_hi >= length { 0.0 } else { up_val };
+                *dn_ptr.add(i) = if dist_lo == 0 { 100.0 } else if dist_lo >= length { 0.0 } else { dn_val };
             }
         }
     }
@@ -574,107 +591,130 @@ pub unsafe fn aroon_avx512_long(
     aroon_avx512(high, low, length, up, down)
 }
 
+/// Streaming: O(1) amortized via monotonic deques; strict >/< tie rules (earlier extreme wins).
 #[derive(Debug)]
 pub struct AroonStream {
-    length: usize,
-    buf_size: usize, // = length + 1
-    buffer_high: Vec<f64>,
-    buffer_low: Vec<f64>,
-    head: usize,  // next write position in [0..buf_size)
-    count: usize, // how many total bars have been pushed
+    length: usize,      // N
+    buf_size: usize,    // N + 1 (window width)
+    head: usize,        // ring write index for flags
+    count: usize,       // how many bars we've seen, capped at buf_size
+    t: usize,           // absolute tick index (0-based)
+    scale_100: f64,     // precomputed 100.0 / N
+
+    // Keep a ring of "invalid" flags so we can know in O(1) if the window contains NaN/Inf:
+    // 0 = finite pair, 1 = invalid pair
+    flags: Vec<u8>,
+    invalid_count: usize,
+
+    // Monotonic deques: store (value, index) pairs.
+    // maxq: decreasing by value → front is highest high in window
+    // minq: increasing by value → front is lowest low in window
+    maxq: VecDeque<(f64, usize)>,
+    minq: VecDeque<(f64, usize)>,
 }
 
 impl AroonStream {
-    /// Create a new streaming Aroon from `params`.  Extracts `length = params.length.unwrap_or(14)`.
-    /// Fails if `length == 0`.  Allocates two Vecs of size `length + 1`, each pre‐filled with NaN.
+    /// Create a new streaming Aroon. Returns error if length == 0.
+    #[inline]
     pub fn try_new(params: AroonParams) -> Result<Self, AroonError> {
         let length = params.length.unwrap_or(14);
         if length == 0 {
-            return Err(AroonError::InvalidLength {
-                length: 0,
-                data_len: 0,
-            });
+            return Err(AroonError::InvalidLength { length: 0, data_len: 0 });
         }
         let buf_size = length + 1;
         Ok(AroonStream {
             length,
             buf_size,
-            buffer_high: alloc_with_nan_prefix(buf_size, buf_size), // All NaN for circular buffer
-            buffer_low: alloc_with_nan_prefix(buf_size, buf_size),  // All NaN for circular buffer
             head: 0,
             count: 0,
+            t: 0,
+            scale_100: 100.0 / (length as f64),
+            flags: vec![0u8; buf_size],
+            invalid_count: 0,
+            maxq: VecDeque::with_capacity(buf_size),
+            minq: VecDeque::with_capacity(buf_size),
         })
     }
 
-    /// Push a new (high, low).  Until we have seen at least `length+1` bars, this returns `None`.
-    /// Once `count >= length+1`, each call returns `Some((aroon_up, aroon_down))`.
-    /// Returns `None` if any value in the current window is NaN.
+    /// Compute 100 * (length - dist)/length with exact edges and FMA when available.
+    #[inline(always)]
+    fn pct_from_distance(&self, dist: usize) -> f64 {
+        if dist == 0 {
+            100.0
+        } else if dist >= self.length {
+            0.0
+        } else {
+            (-(dist as f64)).mul_add(self.scale_100, 100.0)
+        }
+    }
+
+    /// O(1) amortized update. Returns None until we have N+1 bars or if any NaN/Inf is in-window.
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64) -> Option<(f64, f64)> {
-        // 1) Overwrite the "head" slot
-        self.buffer_high[self.head] = high;
-        self.buffer_low[self.head] = low;
+        let i = self.t;
 
-        // 2) Advance head mod buf_size
-        self.head = (self.head + 1) % self.buf_size;
-
-        // 3) Increment count until we reach buf_size
-        if self.count < self.buf_size {
+        // If the window is already full, evict the oldest flag from the rolling invalid count.
+        if self.count == self.buf_size {
+            let old = self.flags[self.head] as usize;
+            self.invalid_count -= old;
+        } else {
             self.count += 1;
         }
 
-        // 4) If we haven't yet filled `length+1` bars, return None
-        if self.count < self.buf_size {
-            return None;
+        // New flag for this pair: 1 if either is non-finite, else 0
+        let invalid = !(high.is_finite() && low.is_finite());
+        let new_flag = invalid as u8;
+
+        // Write flag into ring and advance head (branch instead of modulo to avoid /)
+        self.flags[self.head] = new_flag;
+        self.invalid_count += new_flag as usize;
+        self.head += 1;
+        if self.head == self.buf_size { self.head = 0; }
+
+        // Evict outdated indices from fronts (anything strictly before i - length)
+        // Window is [i - length, i], size = length + 1
+        let earliest = i.saturating_sub(self.length);
+        while let Some(&(_, idx)) = self.maxq.front() {
+            if idx < earliest { self.maxq.pop_front(); } else { break; }
+        }
+        while let Some(&(_, idx)) = self.minq.front() {
+            if idx < earliest { self.minq.pop_front(); } else { break; }
         }
 
-        // 5) Compute "current index" = the slot we just wrote was (head + buf_size − 1) % buf_size
-        let cur_idx = (self.head + self.buf_size - 1) % self.buf_size;
-
-        // 6) Check for NaN in the window
-        let oldest_idx = (cur_idx + 1) % self.buf_size;
-        for k in 0..=self.length {
-            let idx = (oldest_idx + k) % self.buf_size;
-            if !self.buffer_high[idx].is_finite() || !self.buffer_low[idx].is_finite() {
-                return None; // Window contains NaN
+        // Push the new samples into monotonic deques (strict comparisons preserve tie rules: earlier wins)
+        if !invalid {
+            // For highs: keep deque values strictly decreasing (older equal kept → earlier extreme wins)
+            while let Some(&(v, _)) = self.maxq.back() {
+                if high > v { self.maxq.pop_back(); } else { break; }
             }
+            self.maxq.push_back((high, i));
+
+            // For lows: keep deque values strictly increasing (older equal kept)
+            while let Some(&(v, _)) = self.minq.back() {
+                if low < v { self.minq.pop_back(); } else { break; }
+            }
+            self.minq.push_back((low, i));
         }
 
-        // 7) Scan exactly the last (length+1) bars in chronological order:
-        // Initialize to the oldest bar in the window:
-        let mut max_idx = oldest_idx;
-        let mut min_idx = oldest_idx;
-        let mut max_h = self.buffer_high[oldest_idx];
-        let mut min_l = self.buffer_low[oldest_idx];
-        // Walk forward k = 1..=length (so that:
-        //    (oldest_idx + length) % buf_size == cur_idx,
-        // covering every bar from oldest → current in order)
-        for k in 1..=self.length {
-            let idx = (oldest_idx + k) % self.buf_size;
-            let hv = self.buffer_high[idx];
-            if hv > max_h {
-                max_h = hv;
-                max_idx = idx;
-            }
-            let lv = self.buffer_low[idx];
-            if lv < min_l {
-                min_l = lv;
-                min_idx = idx;
-            }
-        }
+        // Ready to produce?
+        let out = if self.count == self.buf_size && self.invalid_count == 0 {
+            debug_assert!(self.maxq.front().is_some() && self.minq.front().is_some());
+            let max_idx = self.maxq.front().unwrap().1;
+            let min_idx = self.minq.front().unwrap().1;
 
-        // 8) "Bars ago" for that max:  dist_hi = (cur_idx − max_idx) mod buf_size
-        let dist_hi =
-            ((cur_idx as isize - max_idx as isize).rem_euclid(self.buf_size as isize)) as usize;
-        let dist_lo =
-            ((cur_idx as isize - min_idx as isize).rem_euclid(self.buf_size as isize)) as usize;
+            let dist_hi = i - max_idx;
+            let dist_lo = i - min_idx;
 
-        // 9) Aroon formula: up = (length − dist_hi)/length * 100
-        let inv_len = 1.0 / (self.length as f64);
-        let up = (self.length as f64 - dist_hi as f64) * inv_len * 100.0;
-        let down = (self.length as f64 - dist_lo as f64) * inv_len * 100.0;
+            let up = self.pct_from_distance(dist_hi);
+            let down = self.pct_from_distance(dist_lo);
+            Some((up, down))
+        } else {
+            None
+        };
 
-        Some((up, down))
+        // Advance absolute index
+        self.t = i + 1;
+        out
     }
 }
 

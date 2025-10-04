@@ -16,7 +16,8 @@
 //! ## Developer Notes
 //! - SIMD: AVX2/AVX512 remain stubs (delegate to scalar). VLMA is sequential and branchy; time-wise SIMD offers no clear win, so selection short-circuits to scalar.
 //! - Scalar: hot loop optimized with branch-reduced period updates and a LUT for smoothing constants; preserves warmup/outputs.
-//! - Streaming: O(n) reference MA/deviation; future work could add incremental updates to reduce recalculation.
+//! - Streaming: O(1) for default case (matype="sma", devtype=0) via rolling sums/sumsq and a LUT of smoothing
+//!   constants; other matypes/devtypes retain the correct O(n) fallback. Matches batch semantics exactly.
 //! - Memory: uses `alloc_with_nan_prefix` and avoids O(N) temporaries beyond required reference series.
 //! - Batch: parallel per-row sweep. Added row-optimized fast path for SMA + stddev using shared prefix sums
 //!   to compute mean/stddev in O(1) per index; other matypes/devtypes fall back to scalar per row.
@@ -1013,8 +1014,10 @@ unsafe fn vlma_avx512_long_into(
     )
 }
 
+// Decision: Streaming kernel is O(1) for SMA+stddev using rolling sums; fall back to O(n) otherwise.
 #[derive(Debug, Clone)]
 pub struct VlmaStream {
+    // existing/public-facing fields
     min_period: usize,
     max_period: usize,
     matype: String,
@@ -1022,8 +1025,16 @@ pub struct VlmaStream {
     buffer: Vec<f64>,
     head: usize,
     filled: bool,
-    period: f64,
+    period: f64,   // tracked as f64 for API parity
     last_val: f64,
+
+    // O(1) state for SMA + stddev fast path
+    sum: f64,
+    sumsq: f64,
+    nan_count: usize,
+    inv_n: f64,
+    last_p: usize,    // integer period mirror for LUT index
+    sc_lut: Vec<f64>, // sc_lut[p] = 2/(p+1), index 0 unused
 }
 
 impl VlmaStream {
@@ -1034,17 +1045,17 @@ impl VlmaStream {
         let devtype = params.devtype.unwrap_or(0);
 
         if min_period > max_period {
-            return Err(VlmaError::InvalidPeriodRange {
-                min_period,
-                max_period,
-            });
+            return Err(VlmaError::InvalidPeriodRange { min_period, max_period });
         }
         if max_period == 0 {
-            return Err(VlmaError::InvalidPeriod {
-                min_period,
-                max_period,
-                data_len: 0,
-            });
+            return Err(VlmaError::InvalidPeriod { min_period, max_period, data_len: 0 });
+        }
+
+        // Precompute smoothing constants α = 2/(p+1) for p∈[1..=max_period].
+        let mut sc_lut = Vec::with_capacity(max_period + 1);
+        sc_lut.push(0.0); // index 0 unused for alignment with period indexing
+        for p in 1..=max_period {
+            sc_lut.push(2.0 / (p as f64 + 1.0));
         }
 
         Ok(Self {
@@ -1055,86 +1066,171 @@ impl VlmaStream {
             buffer: vec![f64::NAN; max_period],
             head: 0,
             filled: false,
-            period: max_period as f64,
+            period: max_period as f64, // start at the slowest
             last_val: f64::NAN,
+
+            // O(1) rolling statistics state
+            sum: 0.0,
+            sumsq: 0.0,
+            nan_count: 0,
+            inv_n: 1.0 / (max_period as f64),
+            last_p: max_period,
+            sc_lut,
         })
     }
 
+    /// O(1) streaming update for (matype="sma", devtype=0). Falls back to O(n) build for others.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        self.buffer[self.head] = value;
+        // Ring buffer bookkeeping
+        let out_idx = self.head;
+        let v_out = self.buffer[out_idx];
+        self.buffer[out_idx] = value;
         self.head = (self.head + 1) % self.max_period;
+
         if !self.filled && self.head == 0 {
             self.filled = true;
         }
-        if !self.filled {
-            if self.last_val.is_nan() {
-                self.last_val = value;
-                return Some(value);
+
+        // Maintain rolling sums when window full
+        if self.filled {
+            if v_out.is_finite() {
+                self.sum -= v_out;
+                self.sumsq -= v_out * v_out;
+            } else {
+                self.nan_count = self.nan_count.saturating_sub(1);
             }
-            let sc = 2.0 / (self.period + 1.0);
-            let new_val = value * sc + (1.0 - sc) * self.last_val;
-            self.last_val = new_val;
-            return None;
+        }
+        if value.is_finite() {
+            self.sum += value;
+            self.sumsq += value * value;
+        } else {
+            self.nan_count += 1;
         }
 
+        // Fast path: SMA reference + standard deviation bands
+        if self.matype == "sma" && self.devtype == 0 {
+            // Warmup: seed on first finite value, then emit None until the first full window.
+            if !self.filled {
+                if self.last_val.is_nan() {
+                    if value.is_finite() {
+                        self.last_val = value;
+                        return Some(value);
+                    } else {
+                        return None;
+                    }
+                }
+                if value.is_finite() {
+                    let sc = self.sc_lut[self.last_p];
+                    self.last_val = fast_ema_update(self.last_val, value, sc);
+                }
+                return None;
+            }
+
+            // Steady-state: handle NaN input by emitting NaN and not changing state
+            if !value.is_finite() {
+                return Some(f64::NAN);
+            }
+
+            // Compute mean and stddev when no NaNs in the window
+            let (m, dv) = if self.nan_count == 0 {
+                let mean = self.sum * self.inv_n;
+                let var = (self.sumsq * self.inv_n) - mean * mean;
+                let std = if var <= 0.0 { 0.0 } else { var.sqrt() };
+                (mean, std)
+            } else {
+                (f64::NAN, f64::NAN)
+            };
+
+            // Adapt period by ±1 within [min_period, max_period]
+            let mut next_p = self.last_p;
+            if m.is_finite() && dv.is_finite() {
+                let d175 = dv * 1.75;
+                let d025 = dv * 0.25;
+                let a = m - d175;
+                let b = m - d025;
+                let c = m + d025;
+                let d = m + d175;
+
+                let inc_fast = ((value < a) as i32) | ((value > d) as i32);
+                let inc_slow = ((value >= b) as i32) & ((value <= c) as i32);
+                let delta = inc_slow - inc_fast; // -1, 0, +1
+                let p_tmp = self.last_p as isize + delta as isize;
+                next_p = if p_tmp < self.min_period as isize {
+                    self.min_period
+                } else if p_tmp > self.max_period as isize {
+                    self.max_period
+                } else {
+                    p_tmp as usize
+                };
+            }
+
+            // EMA-like smoothing with α from LUT
+            let sc = self.sc_lut[next_p];
+            self.last_val = fast_ema_update(self.last_val, value, sc);
+            self.last_p = next_p;
+            self.period = next_p as f64;
+            return Some(self.last_val);
+        }
+
+        // --- Generic fallback (non-SMA or non-stddev): O(n) window rebuild ---
         let mut window: Vec<f64> = Vec::with_capacity(self.max_period);
         for i in 0..self.max_period {
             let idx = (self.head + i) % self.max_period;
             let v = self.buffer[idx];
-            if !v.is_nan() {
+            if v.is_finite() {
                 window.push(v);
             }
         }
         if window.len() < self.max_period {
+            // Not enough finite values yet for this path; preserve warmup EMA seeding
+            if self.last_val.is_nan() && value.is_finite() {
+                self.last_val = value;
+                return Some(value);
+            }
+            if value.is_finite() {
+                let sc = 2.0 / (self.period + 1.0);
+                self.last_val = fast_ema_update(self.last_val, value, sc);
+            }
             return None;
         }
 
-        let mean = ma(&self.matype, MaData::Slice(&window), self.max_period)
-            .ok()?
-            .last()?
-            .clone();
-        let dev_params = DevParams {
-            period: Some(self.max_period),
-            devtype: Some(self.devtype),
+        // Reference mean via selected MA and deviation
+        let mean = match ma(&self.matype, MaData::Slice(&window), self.max_period) {
+            Ok(v) => *v.last().unwrap_or(&f64::NAN),
+            Err(_) => return None,
         };
-        let dev = deviation(&DevInput::from_slice(&window, dev_params))
-            .ok()?
-            .last()?
-            .clone();
-
-        let a = mean - 1.75 * dev;
-        let b = mean - 0.25 * dev;
-        let c = mean + 0.25 * dev;
-        let d = mean + 1.75 * dev;
-
-        let prev_period = if self.period == 0.0 {
-            self.max_period as f64
-        } else {
-            self.period
-        };
-        let mut new_period = if value < a || value > d {
-            prev_period - 1.0
-        } else if value >= b && value <= c {
-            prev_period + 1.0
-        } else {
-            prev_period
+        let dev_params = DevParams { period: Some(self.max_period), devtype: Some(self.devtype) };
+        let dv = match deviation(&DevInput::from_slice(&window, dev_params)) {
+            Ok(v) => *v.last().unwrap_or(&f64::NAN),
+            Err(_) => return None,
         };
 
-        if new_period < self.min_period as f64 {
-            new_period = self.min_period as f64;
-        } else if new_period > self.max_period as f64 {
-            new_period = self.max_period as f64;
+        if value.is_finite() {
+            let prev = if self.period == 0.0 { self.max_period as f64 } else { self.period };
+            let mut new_p = prev;
+            if mean.is_finite() && dv.is_finite() {
+                let a = mean - 1.75 * dv;
+                let b = mean - 0.25 * dv;
+                let c = mean + 0.25 * dv;
+                let d = mean + 1.75 * dv;
+                if value < a || value > d {
+                    new_p = (prev - 1.0).max(self.min_period as f64);
+                } else if value >= b && value <= c {
+                    new_p = (prev + 1.0).min(self.max_period as f64);
+                }
+            }
+            let sc = 2.0 / (new_p + 1.0);
+            if !self.last_val.is_nan() {
+                self.last_val = fast_ema_update(self.last_val, value, sc);
+            } else {
+                self.last_val = value;
+            }
+            self.period = new_p;
+            return Some(self.last_val);
         }
-        let sc = 2.0 / (new_period + 1.0);
-        let new_val = if self.last_val.is_nan() {
-            value
-        } else {
-            value * sc + (1.0 - sc) * self.last_val
-        };
-        self.period = new_period;
-        self.last_val = new_val;
-        Some(new_val)
+
+        Some(f64::NAN)
     }
 }
 

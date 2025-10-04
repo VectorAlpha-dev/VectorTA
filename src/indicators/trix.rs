@@ -15,6 +15,8 @@
 //! - Scalar: Optimized safe path using loop-jammed EMA1→EMA2→EMA3 with `mul_add`; no O(period) rings.
 //! - Batch: Row-specific optimization precomputes `ln(data)` once and shares across rows; parallel rows enabled.
 //! - Allocation: Uses `alloc_with_nan_prefix` / `make_uninit_matrix` patterns; warmup NaN prefix preserved.
+//!
+//! Decision: Streaming kernel uses O(1) EMA state (no rings) and matches scalar outputs and warmup.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -421,101 +423,103 @@ pub fn trix_with_kernel(input: &TrixInput, kernel: Kernel) -> Result<TrixOutput,
 #[derive(Debug, Clone)]
 pub struct TrixStream {
     period: usize,
-    stage: u8,
-    buffer1: Vec<f64>,
-    buffer2: Vec<f64>,
-    buffer3: Vec<f64>,
-    head: usize,
-    filled: bool,
-    prev_ema3: f64,
-    initialized: bool,
+    alpha: f64,
+    inv_n: f64,
+    state: StreamState,
+}
+
+#[derive(Debug, Clone)]
+enum StreamState {
+    // Accumulate logs for first SMA → EMA1 seed
+    Seed1 { need: usize, sum1: f64 },
+    // Build EMA1 for (period-1) more samples while accumulating SMA → EMA2 seed
+    Seed2 { remain: usize, ema1: f64, sum_ema1: f64 },
+    // Build EMA1 & EMA2 for (period-1) samples while accumulating SMA → EMA3 seed
+    Seed3 { remain: usize, ema1: f64, ema2: f64, sum_ema2: f64 },
+    // Fully primed: advance EMA1→EMA2→EMA3 each tick and emit ΔEMA3*10000
+    Running { ema1: f64, ema2: f64, ema3_prev: f64 },
 }
 
 impl TrixStream {
+    #[inline(always)]
     pub fn try_new(params: TrixParams) -> Result<Self, TrixError> {
         let period = params.period.unwrap_or(18);
         if period == 0 {
-            return Err(TrixError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(TrixError::InvalidPeriod { period, data_len: 0 });
         }
+        let alpha = 2.0 / (period as f64 + 1.0);
         Ok(Self {
             period,
-            stage: 0,
-            buffer1: vec![f64::NAN; period],
-            buffer2: vec![f64::NAN; period],
-            buffer3: vec![f64::NAN; period],
-            head: 0,
-            filled: false,
-            prev_ema3: f64::NAN,
-            initialized: false,
+            alpha,
+            inv_n: 1.0 / period as f64,
+            state: StreamState::Seed1 { need: period, sum1: 0.0 },
         })
     }
+
+    #[inline(always)]
+    fn reset(&mut self) {
+        self.state = StreamState::Seed1 { need: self.period, sum1: 0.0 };
+    }
+
+    /// O(1) update. Returns None until fully primed (after 3*(p-1)+1 valid points).
+    /// Emits the same quantity as the offline/scalar path: (EMA3_t - EMA3_{t-1}) * 10000.0
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        // 1) Take ln(value) (or NaN if value was NaN)
-        let log_val = if value.is_nan() { f64::NAN } else { value.ln() };
-
-        // 2) Feed log_val into the first EMA buffer
-        self.buffer1[self.head] = log_val;
-
-        // Compute EMA1 stage:
-        if self.stage < 1 && self.head == self.period - 1 {
-            // We have exactly 'period' logs in buffer1 ⇒ initialize EMA1 with simple average
-            let sum1: f64 = self.buffer1.iter().sum();
-            let ema1 = sum1 / (self.period as f64);
-            self.buffer2[self.head] = ema1;
-            self.stage = 1;
-        } else if self.stage >= 1 {
-            // Ongoing EMA1 update: EMA1[i] = α * log_val + (1−α) * prev_ema1
-            let prev_ema1 = self.buffer2[(self.head + self.period - 1) % self.period];
-            let alpha = 2.0 / (self.period as f64 + 1.0);
-            let ema1 = alpha * log_val + (1.0 - alpha) * prev_ema1;
-            self.buffer2[self.head] = ema1;
+        // TRIX uses ln(price). Reset on invalid or non-positive inputs.
+        if !value.is_finite() || value <= 0.0 {
+            self.reset();
+            return None;
         }
 
-        // Compute EMA2 stage:
-        if self.stage >= 1 {
-            if self.stage < 2 && self.head == self.period - 1 {
-                // Exactly 'period' EMAs in buffer2 ⇒ initialize EMA2 with simple average
-                let sum2: f64 = self.buffer2.iter().sum();
-                let ema2 = sum2 / (self.period as f64);
-                self.buffer3[self.head] = ema2;
-                self.stage = 2;
-            } else if self.stage >= 2 {
-                // Ongoing EMA2 update: EMA2[i] = α * EMA1[i] + (1−α) * prev_ema2
-                let prev_ema2 = self.buffer3[(self.head + self.period - 1) % self.period];
-                let alpha = 2.0 / (self.period as f64 + 1.0);
-                let ema2 = alpha * self.buffer2[self.head] + (1.0 - alpha) * prev_ema2;
-                self.buffer3[self.head] = ema2;
+        let lv = value.ln();
+        let a = self.alpha;
+
+        match &mut self.state {
+            StreamState::Seed1 { need, sum1 } => {
+                *sum1 += lv;
+                *need -= 1;
+                if *need == 0 {
+                    let ema1 = *sum1 * self.inv_n;
+                    self.state = StreamState::Seed2 { remain: self.period - 1, ema1, sum_ema1: ema1 };
+                }
+                None
+            }
+
+            StreamState::Seed2 { remain, ema1, sum_ema1 } => {
+                *ema1 = (lv - *ema1).mul_add(a, *ema1);
+                *sum_ema1 += *ema1;
+                *remain -= 1;
+                if *remain == 0 {
+                    let ema2 = *sum_ema1 * self.inv_n;
+                    let e1 = *ema1;
+                    self.state = StreamState::Seed3 { remain: self.period - 1, ema1: e1, ema2, sum_ema2: ema2 };
+                }
+                None
+            }
+
+            StreamState::Seed3 { remain, ema1, ema2, sum_ema2 } => {
+                *ema1 = (lv - *ema1).mul_add(a, *ema1);
+                *ema2 = (*ema1 - *ema2).mul_add(a, *ema2);
+                *sum_ema2 += *ema2;
+                *remain -= 1;
+                if *remain == 0 {
+                    let ema3_prev = *sum_ema2 * self.inv_n;
+                    let e1 = *ema1;
+                    let e2 = *ema2;
+                    self.state = StreamState::Running { ema1: e1, ema2: e2, ema3_prev };
+                }
+                None
+            }
+
+            StreamState::Running { ema1, ema2, ema3_prev } => {
+                *ema1 = (lv - *ema1).mul_add(a, *ema1);
+                *ema2 = (*ema1 - *ema2).mul_add(a, *ema2);
+                let ema3 = (*ema2 - *ema3_prev).mul_add(a, *ema3_prev);
+                let out = (ema3 - *ema3_prev) * 10000.0;
+                *ema3_prev = ema3;
+                Some(out)
             }
         }
-
-        // Compute EMA3 stage:
-        let mut output = None;
-        if self.stage >= 2 && self.head == self.period - 1 {
-            // Exactly 'period' EMAs in buffer3 ⇒ initialize EMA3
-            let sum3: f64 = self.buffer3.iter().sum();
-            self.prev_ema3 = sum3 / (self.period as f64);
-            self.initialized = true;
-        } else if self.stage >= 2 && self.initialized {
-            // Ongoing EMA3 update: EMA3[i] = α * EMA2[i] + (1−α) * prev_ema3
-            let prev_ema3 = self.prev_ema3;
-            let alpha = 2.0 / (self.period as f64 + 1.0);
-            let ema3 = alpha * self.buffer3[self.head] + (1.0 - alpha) * prev_ema3;
-
-            // 3) If prev_ema3 and ema3 are both valid, out = (ema3 − prev_ema3)*10000
-            if !prev_ema3.is_nan() && !ema3.is_nan() {
-                let trix_val = (ema3 - prev_ema3) * 10000.0;
-                output = Some(trix_val);
-            }
-            self.prev_ema3 = ema3;
-        }
-
-        // advance head
-        self.head = (self.head + 1) % self.period;
-        output
     }
 }
 

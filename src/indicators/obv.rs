@@ -11,7 +11,7 @@
 //!
 //! ## Developer Notes
 //! - Decision note: Scalar path optimized (branchless, mul_add). AVX-512 shows ~10% win vs scalar at 100k on x86_64; AVX2 is near parity. Left enabled; OBV is carry-bound so SIMD gains are modest.
-//! - **Streaming**: O(1) with simple cumulative calculation
+//! - **Streaming**: O(1) with branch-lean sign and mul_add to match scalar/IEEE-754 NaN parity.
 //! - **Memory**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -364,40 +364,64 @@ pub unsafe fn obv_row_avx512_long(
 
 #[derive(Clone, Debug)]
 pub struct ObvStream {
-    prev_close: Option<f64>,
-    prev_obv: Option<f64>,
+    prev_close: f64,
+    prev_obv: f64,
     initialized: bool,
 }
 
 impl ObvStream {
+    #[inline(always)]
     pub fn new() -> Self {
         Self {
-            prev_close: None,
-            prev_obv: None,
+            prev_close: f64::NAN,
+            prev_obv: 0.0,
             initialized: false,
         }
     }
+
+    /// O(1) streaming update for OBV.
+    /// Semantics match the scalar batch kernel:
+    /// - branchless sign in {-1.0, 0.0, +1.0}
+    /// - uses mul_add to mirror fused-multiply-add behavior and NaN propagation
+    /// - prev_close is advanced on every call (including NaN) to mirror scalar parity
     #[inline(always)]
     pub fn update(&mut self, close: f64, volume: f64) -> Option<f64> {
-        if !self.initialized && !close.is_nan() && !volume.is_nan() {
-            self.prev_close = Some(close);
-            self.prev_obv = Some(0.0); // OBV starts at 0, not first volume
-            self.initialized = true;
-            return Some(0.0);
-        }
+        // Find first valid observation
         if !self.initialized {
-            return None;
+            if !close.is_nan() && !volume.is_nan() {
+                self.prev_close = close;
+                self.prev_obv = 0.0; // OBV starts at 0
+                self.initialized = true;
+                return Some(0.0);
+            } else {
+                return None; // still warming up
+            }
         }
-        let mut obv = self.prev_obv.unwrap();
-        let prev = self.prev_close.unwrap();
-        if close > prev {
-            obv += volume;
-        } else if close < prev {
-            obv -= volume;
-        }
-        self.prev_obv = Some(obv);
-        self.prev_close = Some(close);
-        Some(obv)
+
+        // Branchless sign in {-1.0, 0.0, +1.0}; NaN compares are false -> 0.0
+        let s = ((close > self.prev_close) as i32 - (close < self.prev_close) as i32) as f64;
+
+        // Mirror scalar kernel exactly: FMA-style mul_add (propagates NaN per IEEE-754)
+        self.prev_obv = volume.mul_add(s, self.prev_obv);
+
+        // Always advance prev_close (including NaN) to match batch behavior across NaNs
+        self.prev_close = close;
+
+        Some(self.prev_obv)
+    }
+
+    /// Retrieve last computed OBV without mutating the stream.
+    #[inline(always)]
+    pub fn last(&self) -> Option<f64> {
+        if self.initialized { Some(self.prev_obv) } else { None }
+    }
+
+    /// Reset the streaming state.
+    #[inline(always)]
+    pub fn reset(&mut self) {
+        self.prev_close = f64::NAN;
+        self.prev_obv = 0.0;
+        self.initialized = false;
     }
 }
 

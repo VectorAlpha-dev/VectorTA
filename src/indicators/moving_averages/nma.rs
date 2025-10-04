@@ -26,6 +26,8 @@
 //   with nightly + target-cpu=native; AVX2 also improves (>5%) on the same setup.
 // - Batch: row-specific AVX512 batch is enabled and selected via the batch kernel selector; denominators
 //   use prefix sums and d[k]=|Δln| is shared across rows for strong speedups when sweeping periods.
+// - Streaming: replaced O(P) dot with an O(1) update using a short sum-of-exponentials (SOE) approximation
+//   for the numerator and exact sliding-sum denominator; warmup remains period+1 and public API unchanged.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -1714,90 +1716,282 @@ pub unsafe fn nma_row_avx512_long(data: &[f64], first: usize, period: usize, out
 
 #[derive(Debug, Clone)]
 pub struct NmaStream {
+    // ── configuration ──────────────────────────────────────────────────────────
     period: usize,
-    ln_values: Vec<f64>,
+
+    // Number of exponentials used in the numerator approximation (small, 3–4).
+    m: usize,
+    // α_m and β_m, and β_m^P for fast tail removal in the finite window
+    alpha: Vec<f64>,
+    beta: Vec<f64>,
+    beta_pow_p: Vec<f64>,
+
+    // ── state for O(1) updates ────────────────────────────────────────────────
+    // last P diffs d_t = |ln[x_t]-ln[x_{t-1}]| in a ring buffer
+    d_ring: Vec<f64>,
+    d_head: usize,      // next write position in d_ring
+    d_count: usize,     // number of valid diffs currently in d_ring (≤ P)
+    denom: f64,         // exact Σ d in the window
+    x_acc: Vec<f64>,    // X_m(t) accumulators for each exponential
+
+    // ── original value/ln rings to produce the final interpolation ────────────
+    buffer: Vec<f64>,       // last P+1 raw values
+    ln_buffer: Vec<f64>,    // last P+1 ln(values)
+    head: usize,            // next write pos in value/ln ring (size P+1)
+    filled: bool,           // becomes true once we have P+1 samples
+
+    // keep the exact weight vector for optional diagnostics (and future toggles)
     sqrt_diffs: Vec<f64>,
-    buffer: Vec<f64>,
-    ln_buffer: Vec<f64>,
-    head: usize,
-    filled: bool,
+}
+
+// Small helper: high‑accuracy ln for positive x (exact path by default).
+#[inline(always)]
+fn ln_pos(x: f64) -> f64 {
+    debug_assert!(x > 0.0);
+    x.ln()
 }
 
 impl NmaStream {
+    /// Construct the stream. Complexity: O(period * M) once to fit the SOE.
+    /// Returns Err if period == 0.
     pub fn try_new(params: NmaParams) -> Result<Self, NmaError> {
         let period = params.period.unwrap_or(40);
         if period == 0 {
-            return Err(NmaError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(NmaError::InvalidPeriod { period, data_len: 0 });
         }
+
+        // Original weights w[i] = sqrt(i+1) - sqrt(i), with w[0] applied to the NEWEST diff.
         let mut sqrt_diffs = Vec::with_capacity(period);
         for i in 0..period {
             let s0 = (i as f64).sqrt();
             let s1 = ((i + 1) as f64).sqrt();
             sqrt_diffs.push(s1 - s0);
         }
+
+        // Choose a tiny set of exponentials covering short/medium/long scales.
+        // β_m = exp(-γ_m / period) keeps shapes consistent across P.
+        // You can tweak GAMMAS below; M is chosen from period.
+        const GAMMAS: [f64; 4] = [0.25, 1.2, 3.0, 8.0];
+        let m = if period <= 64 { 3 } else { 4 };
+        let mut beta = Vec::with_capacity(m);
+        for g in GAMMAS.iter().take(m) {
+            beta.push((-g / (period as f64)).exp());
+        }
+
+        // Fit α via least squares: minimize ||A α - w||₂ with A[i,m]=β_m^i.
+        // We use normal equations (AᵀA)α = Aᵀw with a tiny ridge for stability.
+        let alpha = fit_exp_weights_least_squares(&sqrt_diffs, &beta);
+
+        let mut beta_pow_p = Vec::with_capacity(m);
+        for &b in &beta {
+            beta_pow_p.push(b.powi(period as i32));
+        }
+
         Ok(Self {
             period,
-            ln_values: vec![f64::NAN; period + 1],
-            sqrt_diffs,
+            m,
+            alpha,
+            beta,
+            beta_pow_p,
+            d_ring: vec![0.0; period],
+            d_head: 0,
+            d_count: 0,
+            denom: 0.0,
+            x_acc: vec![0.0; m],
+
             buffer: vec![f64::NAN; period + 1],
             ln_buffer: vec![f64::NAN; period + 1],
             head: 0,
             filled: false,
+
+            sqrt_diffs,
         })
     }
 
+    /// Push one value. Returns None until we have period+1 samples.
+    /// Thereafter, returns the NMA value computed in O(M) time.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        let ln_val = value.max(1e-10).ln();
+        if !value.is_finite() {
+            // Conservatively reset on NaN/Inf to avoid propagating poison.
+            self.reset_state();
+            return None;
+        }
+
+        // Compute ln now; clamp like the batch/scalar kernels.
+        let ln_val = ln_pos(value.max(1e-10));
+
+        // Index of previous sample (before we overwrite self.head).
+        // With ring size P+1, the "previous sample" lives at (head + P) % (P+1).
+        let prev_idx = (self.head + self.period) % (self.period + 1);
+        let prev_ln = self.ln_buffer[prev_idx];
+
+        // Write the new raw and ln values into the ring.
         self.buffer[self.head] = value;
         self.ln_buffer[self.head] = ln_val;
-        self.head = (self.head + 1) % (self.period + 1);
 
+        // Advance head; when it wraps, we have P+1 samples.
+        self.head = (self.head + 1) % (self.period + 1);
         if !self.filled && self.head == 0 {
             self.filled = true;
         }
+
+        // We cannot form a diff for the very first value.
+        if prev_ln.is_nan() {
+            return None;
+        }
+
+        // New diff d_{t} = |ln_t - ln_{t-1}|
+        let d_new = (ln_val - prev_ln).abs();
+
+        // Slide the d-ring and keep exact denominator (sum of last P diffs).
+        if self.d_count < self.period {
+            // Still filling: no tail to drop yet.
+            self.d_ring[self.d_head] = d_new;
+            self.d_head = (self.d_head + 1) % self.period;
+            self.d_count += 1;
+            self.denom += d_new;
+
+            // Update X_m as infinite window until we reach P diffs; we do not subtract the tail yet.
+            for m in 0..self.m {
+                self.x_acc[m] = self.beta[m] * self.x_acc[m] + d_new;
+            }
+        } else {
+            // Window full: remove oldest diff and add newest in O(1).
+            let d_old = self.d_ring[self.d_head];
+            self.d_ring[self.d_head] = d_new;
+            self.d_head = (self.d_head + 1) % self.period;
+
+            self.denom += d_new - d_old;
+
+            for m in 0..self.m {
+                // Finite-window exponential sliding update:
+                // X_m <- β X_m + d_new - β^P * d_old
+                self.x_acc[m] = self.beta[m] * self.x_acc[m] + d_new - self.beta_pow_p[m] * d_old;
+            }
+        }
+
+        // Only produce an output after we have P+1 raw samples (matches batch warmup).
         if !self.filled {
             return None;
         }
-        Some(self.dot_ring())
+
+        // Approximate numerator from the M accumulators.
+        let mut num = 0.0f64;
+        for m in 0..self.m {
+            num = (self.alpha[m] * self.x_acc[m]).mul_add(1.0, num);
+        }
+        let ratio = if self.denom == 0.0 { 0.0 } else { num / self.denom };
+
+        // Interpolate between x0 = data[j-P] and x1 = data[j-P+1].
+        // After increment, self.head points at x0; x1 is the next slot.
+        let x0 = self.buffer[self.head];
+        let x1 = self.buffer[(self.head + 1) % (self.period + 1)];
+
+        Some((x1 - x0).mul_add(ratio, x0))
     }
 
     #[inline(always)]
-    fn dot_ring(&self) -> f64 {
-        let mut num = 0.0;
-        let mut denom = 0.0;
-
-        // Calculate starting position for the newest value
-        let newest_idx = (self.head + self.period) % (self.period + 1);
-
-        for i in 0..self.period {
-            // Access in reverse order like batch: newest to oldest
-            let curr_idx = (newest_idx + self.period + 1 - i) % (self.period + 1);
-            let prev_idx = (newest_idx + self.period - i) % (self.period + 1);
-
-            let curr = self.ln_buffer[curr_idx];
-            let prev = self.ln_buffer[prev_idx];
-            let oi = (curr - prev).abs();
-
-            num += oi * self.sqrt_diffs[i];
-            denom += oi;
-        }
-
-        let ratio = if denom == 0.0 { 0.0 } else { num / denom };
-
-        // Get the values for final interpolation
-        let i = self.period - 1;
-        let x1_idx = (newest_idx + self.period + 1 - i) % (self.period + 1);
-        let x2_idx = (newest_idx + self.period - i) % (self.period + 1);
-
-        let x1 = self.buffer[x1_idx];
-        let x2 = self.buffer[x2_idx];
-
-        x1 * ratio + x2 * (1.0 - ratio)
+    fn reset_state(&mut self) {
+        self.d_head = 0;
+        self.d_count = 0;
+        self.denom = 0.0;
+        for v in &mut self.d_ring { *v = 0.0; }
+        for v in &mut self.x_acc { *v = 0.0; }
+        for v in &mut self.buffer { *v = f64::NAN; }
+        for v in &mut self.ln_buffer { *v = f64::NAN; }
+        self.head = 0;
+        self.filled = false;
     }
+}
+
+/// Fit α in w[i] ≈ Σ α_m β_m^i by least squares using normal equations.
+/// A = P×M with A[i,m]=β_m^i. We form AᵀA and Aᵀw analytically where possible.
+/// Complexity: O(P*M + M^3), with tiny M.
+fn fit_exp_weights_least_squares(w: &[f64], beta: &[f64]) -> Vec<f64> {
+    let p = w.len();
+    let m = beta.len();
+
+    // Build AᵀA (symmetric) and Aᵀw.
+    // (AᵀA)[u,v] = Σ_{i=0}^{P-1} (β_u β_v)^i = geom_sum(β_u*β_v, P)
+    let mut ata = vec![0.0f64; m * m];
+    for u in 0..m {
+        for v in u..m {
+            let r = beta[u] * beta[v];
+            let s = if (1.0 - r).abs() < 1e-15 {
+                p as f64
+            } else {
+                (1.0 - r.powi(p as i32)) / (1.0 - r)
+            };
+            ata[u * m + v] = s;
+            ata[v * m + u] = s;
+        }
+    }
+    // Aᵀw
+    let mut atw = vec![0.0f64; m];
+    for u in 0..m {
+        let mut pow = 1.0f64;
+        let bu = beta[u];
+        let mut sum = 0.0f64;
+        for i in 0..p {
+            sum += w[i] * pow;
+            pow *= bu;
+        }
+        atw[u] = sum;
+    }
+
+    // Tiny Tikhonov regularizer for numerical stability on near-collinear columns.
+    let lambda = 1e-12;
+    for i in 0..m {
+        ata[i * m + i] += lambda;
+    }
+
+    solve_linear_system(&mut ata, &mut atw, m) // returns α
+}
+
+/// Dense Gaussian elimination with partial pivoting for tiny M (≤ 6).
+fn solve_linear_system(a: &mut [f64], b: &mut [f64], n: usize) -> Vec<f64> {
+    // Forward elimination
+    for k in 0..n {
+        // Pivot
+        let mut piv = k;
+        let mut maxv = a[k * n + k].abs();
+        for i in (k + 1)..n {
+            let v = a[i * n + k].abs();
+            if v > maxv {
+                maxv = v; piv = i;
+            }
+        }
+        if piv != k {
+            for j in k..n { a.swap(k * n + j, piv * n + j); }
+            b.swap(k, piv);
+        }
+        let akk = a[k * n + k];
+        if akk.abs() < 1e-18 {
+            // Fall back: diagonal jitter to avoid NaN; this only happens if βs are pathological.
+            a[k * n + k] = 1e-18;
+        }
+        // Eliminate
+        for i in (k + 1)..n {
+            let f = a[i * n + k] / a[k * n + k];
+            if f != 0.0 {
+                for j in k..n {
+                    a[i * n + j] -= f * a[k * n + j];
+                }
+                b[i] -= f * b[k];
+            }
+        }
+    }
+    // Back substitution
+    let mut x = vec![0.0f64; n];
+    for i in (0..n).rev() {
+        let mut s = b[i];
+        for j in (i + 1)..n {
+            s -= a[i * n + j] * x[j];
+        }
+        x[i] = s / a[i * n + i];
+    }
+    x
 }
 
 // Expand grid for batch

@@ -15,7 +15,7 @@
 //! ## Developer Notes
 //! - **AVX2**: Stub implementation - calls scalar function
 //! - **AVX512**: Stub implementation - calls scalar function
-//! - **Streaming**: O(1) with efficient ring buffer and incremental RSI updates
+//! - **Streaming**: O(1) drop-in stream (no ring buffer), precomputed coeffs, FMA-based updates; matches batch warmup/anchor semantics
 //! - **Memory**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
 //! - **Decision**: Fused scalar kernel enabled for default params (14,5,4.236); ~30% faster vs prior scalar at 100k. SIMD kept as stubs due to loop-carried dependencies.
 
@@ -719,146 +719,221 @@ pub unsafe fn qqe_scalar_classic(
 }
  
 
-// ==================== STREAMING SUPPORT ====================
-/// Streaming calculator for real-time updates
+// ==================== STREAMING SUPPORT (drop-in replacement) ====================
+/// Streaming calculator for real-time updates (O(1) per tick).
+/// Mirrors batch semantics:
+///  • Wilder RSI with n-delta seed
+///  • EMA(RSI) with running-mean seed for the first `smoothing_factor` RSI points
+///  • Slow line anchored at `rsi_start + smoothing_factor - 2`, then ATR-of-RSI bands
 #[derive(Debug, Clone)]
 pub struct QqeStream {
-    buffer: Vec<f64>,
+    // Parameters
     rsi_period: usize,
     smoothing_factor: usize,
     fast_factor: f64,
-    index: usize,
-    ready: bool,
-    wwma: f64,
-    atrrsi: f64,
-    prev_qqef: f64,
-    prev_qqes: f64,
-    prev_price: f64,
+
+    // Precomputed coefficients (avoid per-tick division)
+    rsi_alpha: f64, // = 1 / rsi_period
+    rsi_beta: f64,  // = 1 - rsi_alpha
+    ema_alpha: f64, // = 2 / (smoothing_factor + 1)
+    ema_beta: f64,  // = 1 - ema_alpha
+    atr_alpha: f64, // = 1 / 14
+    atr_beta: f64,  // = 1 - atr_alpha
+
+    // Running state
+    have_prev: bool,
+    prev_price: f64,  // last input
+    deltas: usize,    // how many deltas processed (bars-1)
+
+    // RSI warmup (seed)
+    sum_gain: f64,
+    sum_loss: f64,
+
+    // Wilder RSI (post-seed)
     avg_gain: f64,
     avg_loss: f64,
+
+    // EMA-of-RSI warmup & phase
+    rsi_count: usize,   // # of RSI samples seen since first RSI
+    running_mean: f64,  // running mean during EMA warmup
+    prev_ema: f64,      // EMA-of-RSI (fast) after warmup begins
+
+    // Slow-line (QQE) state
+    anchored: bool,     // whether slow has been anchored
+    prev_fast: f64,     // fast(t-1)
+    prev_slow: f64,     // slow(t-1)
+    wwma: f64,          // Wilder smoothing of |Δfast|
+    atrrsi: f64,        // double-smoothed ATR-of-RSI
 }
 
 impl QqeStream {
+    #[inline]
     pub fn try_new(params: QqeParams) -> Result<Self, QqeError> {
         let rsi_period = params.rsi_period.unwrap_or(14);
         let smoothing_factor = params.smoothing_factor.unwrap_or(5);
         let fast_factor = params.fast_factor.unwrap_or(4.236);
 
         if rsi_period == 0 || smoothing_factor == 0 {
-            return Err(QqeError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            });
+            return Err(QqeError::InvalidPeriod { period: 0, data_len: 0 });
         }
 
-        let buffer_size = rsi_period + smoothing_factor;
+        let rsi_alpha = 1.0 / rsi_period as f64;
+        let rsi_beta = 1.0 - rsi_alpha;
+        let ema_alpha = 2.0 / (smoothing_factor as f64 + 1.0);
+        let ema_beta = 1.0 - ema_alpha;
+        let atr_alpha = 1.0 / 14.0;
+        let atr_beta = 1.0 - atr_alpha;
+
         Ok(Self {
-            buffer: vec![0.0; buffer_size],
             rsi_period,
             smoothing_factor,
             fast_factor,
-            index: 0,
-            ready: false,
-            wwma: 0.0,
-            atrrsi: 0.0,
-            prev_qqef: f64::NAN,
-            prev_qqes: 0.0,
-            prev_price: f64::NAN,
+
+            rsi_alpha,
+            rsi_beta,
+            ema_alpha,
+            ema_beta,
+            atr_alpha,
+            atr_beta,
+
+            have_prev: false,
+            prev_price: 0.0,
+            deltas: 0,
+
+            sum_gain: 0.0,
+            sum_loss: 0.0,
+
             avg_gain: 0.0,
             avg_loss: 0.0,
+
+            rsi_count: 0,
+            running_mean: 0.0,
+            prev_ema: f64::NAN,
+
+            anchored: false,
+            prev_fast: 0.0,
+            prev_slow: 0.0,
+            wwma: 0.0,
+            atrrsi: 0.0,
         })
     }
 
+    /// Push one price. Returns (fast, slow) when a value can be produced.
+    /// Before RSI seed completes, returns None. During early EMA warmup,
+    /// returns (fast, fast) and anchors slow at the correct warm index.
+    #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<(f64, f64)> {
-        // ring buffer for raw price series
-        let n = self.rsi_period + self.smoothing_factor;
-        self.buffer[self.index % n] = value;
-        self.index += 1;
-
-        if self.index <= self.rsi_period {
-            // Still warming up - accumulate for initial averages
-            if self.index == 1 {
-                self.prev_price = value;
-            } else {
-                let change = value - self.prev_price;
-                if change > 0.0 {
-                    self.avg_gain += change;
-                } else {
-                    self.avg_loss -= change;
-                }
-
-                if self.index == self.rsi_period {
-                    // Initialize Wilder averages
-                    self.avg_gain /= self.rsi_period as f64;
-                    self.avg_loss /= self.rsi_period as f64;
-                }
-                self.prev_price = value;
-            }
+        // First observation
+        if !self.have_prev {
+            self.have_prev = true;
+            self.prev_price = value;
             return None;
         }
 
-        // Update Wilder's smoothed averages (O(1))
-        let change = value - self.prev_price;
-        let alpha = 1.0 / self.rsi_period as f64;
-
-        if change > 0.0 {
-            self.avg_gain = (1.0 - alpha) * self.avg_gain + alpha * change;
-            self.avg_loss = (1.0 - alpha) * self.avg_loss;
-        } else {
-            self.avg_gain = (1.0 - alpha) * self.avg_gain;
-            self.avg_loss = (1.0 - alpha) * self.avg_loss - alpha * change;
-        }
+        // Δ price and book-keeping
+        let delta = value - self.prev_price;
         self.prev_price = value;
+        self.deltas += 1;
 
-        // Calculate RSI from Wilder averages
-        let rsi_val = if self.avg_loss == 0.0 {
-            100.0
+        // ---- 1) Wilder RSI seed over the first `rsi_period` deltas ----
+        if self.deltas <= self.rsi_period {
+            if delta > 0.0 {
+                self.sum_gain += delta;
+            } else {
+                self.sum_loss -= delta; // absolute loss
+            }
+
+            if self.deltas < self.rsi_period {
+                return None; // still seeding
+            }
+
+            // finalize initial averages
+            self.avg_gain = self.sum_gain * self.rsi_alpha;
+            self.avg_loss = self.sum_loss * self.rsi_alpha;
+
+            let denom = self.avg_gain + self.avg_loss;
+            let rsi = if denom == 0.0 { 50.0 } else { 100.0 * self.avg_gain / denom };
+
+            // first RSI -> first fast
+            self.rsi_count = 1;
+            self.running_mean = rsi;
+            self.prev_ema = rsi;
+            self.prev_fast = rsi;
+
+            // Anchor when smoothing_factor ≤ 2 (warm index may coincide with first RSI)
+            let anchor_count = self.smoothing_factor.saturating_sub(1);
+            if self.rsi_count >= anchor_count && !self.anchored {
+                self.prev_slow = rsi;
+                self.anchored = true;
+            }
+            return Some((rsi, if self.anchored { self.prev_slow } else { rsi }));
+        }
+
+        // ---- 2) Wilder RSI recursive update (O(1)) ----
+        let gain = if delta > 0.0 { delta } else { 0.0 };
+        let loss = if delta < 0.0 { -delta } else { 0.0 };
+        // avg = beta*avg + alpha*new  (use FMA when available)
+        self.avg_gain = self.rsi_beta.mul_add(self.avg_gain, self.rsi_alpha * gain);
+        self.avg_loss = self.rsi_beta.mul_add(self.avg_loss, self.rsi_alpha * loss);
+
+        let denom = self.avg_gain + self.avg_loss;
+        let rsi = if denom == 0.0 { 50.0 } else { 100.0 * self.avg_gain / denom };
+
+        self.rsi_count += 1;
+
+        // ---- 3) EMA-of-RSI with running-mean seed ----
+        let fast = if self.rsi_count <= self.smoothing_factor {
+            // running mean: mean += (x - mean)/n
+            let n = self.rsi_count as f64;
+            self.running_mean = ((n - 1.0) * self.running_mean + rsi) / n;
+            self.prev_ema = self.running_mean; // seed EMA with last mean
+            self.running_mean
         } else {
-            let rs = self.avg_gain / self.avg_loss;
-            100.0 - 100.0 / (1.0 + rs)
+            // ema = beta*ema + alpha*x   (FMA-form)
+            self.prev_ema = self.ema_beta.mul_add(self.prev_ema, self.ema_alpha * rsi);
+            self.prev_ema
         };
 
-        // EMA smoothing to get fast line
-        let k = 2.0 / (self.smoothing_factor as f64 + 1.0);
-        let fast = if self.prev_qqef.is_nan() {
-            rsi_val
-        } else {
-            k * rsi_val + (1.0 - k) * self.prev_qqef
-        };
+        // ---- 4) Slow-line (QQE) ----
+        // Anchor exactly at warm index: rsi_count == smoothing_factor - 1
+        let anchor_count = self.smoothing_factor.saturating_sub(1);
+        if !self.anchored && self.rsi_count >= anchor_count {
+            self.prev_slow = fast;
+            self.prev_fast = fast;
+            self.anchored = true;
+            return Some((fast, fast));
+        }
 
-        // Calculate slow line
-        let slow = if self.prev_qqef.is_nan() {
-            // First iteration
-            self.prev_qqes = fast;
-            fast
-        } else {
-            // Slow line via same recurrence as batch version
-            let tr = (fast - self.prev_qqef).abs();
-            self.wwma = (1.0 / 14.0) * tr + (1.0 - 1.0 / 14.0) * self.wwma;
-            self.atrrsi = (1.0 / 14.0) * self.wwma + (1.0 - 1.0 / 14.0) * self.atrrsi;
+        if self.anchored {
+            // true range over fast, double Wilder smoothing
+            let tr = (fast - self.prev_fast).abs();
+            self.wwma = self.atr_beta.mul_add(self.wwma, self.atr_alpha * tr);
+            self.atrrsi = self.atr_beta.mul_add(self.atrrsi, self.atr_alpha * self.wwma);
 
             let qup = fast + self.atrrsi * self.fast_factor;
             let qdn = fast - self.atrrsi * self.fast_factor;
 
-            let prev = self.prev_qqes;
-            let slow_val = if qup < prev {
+            let prev = self.prev_slow;
+            let slow = if qup < prev {
                 qup
-            } else if fast > prev && self.prev_qqef < prev {
+            } else if fast > prev && self.prev_fast < prev {
                 qdn
             } else if qdn > prev {
                 qdn
-            } else if fast < prev && self.prev_qqef > prev {
+            } else if fast < prev && self.prev_fast > prev {
                 qup
             } else {
                 prev
             };
 
-            self.prev_qqes = slow_val;
-            slow_val
-        };
-
-        self.prev_qqef = fast;
-        Some((fast, slow))
+            self.prev_slow = slow;
+            self.prev_fast = fast;
+            Some((fast, slow))
+        } else {
+            // Rare path if smoothing_factor == 1
+            self.prev_fast = fast;
+            Some((fast, fast))
+        }
     }
 }
 
