@@ -200,6 +200,10 @@ use crate::indicators::moving_averages::buff_averages::{
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::cwma::{cwma_batch_py, cwma_py, CwmaStreamPy};
 #[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::cwma::{
+    cwma_cuda_batch_dev_py, cwma_cuda_many_series_one_param_dev_py,
+};
+#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::dema::{
     dema_cuda_batch_dev_py, dema_cuda_many_series_one_param_dev_py,
 };
@@ -761,6 +765,14 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(cwma_py, m)?)?;
     m.add_function(wrap_pyfunction!(cwma_batch_py, m)?)?;
     m.add_class::<CwmaStreamPy>()?;
+    #[cfg(feature = "cuda")]
+    {
+        m.add_function(wrap_pyfunction!(cwma_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(
+            cwma_cuda_many_series_one_param_dev_py,
+            m
+        )?)?;
+    }
 
     // Register DEMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(dema_py, m)?)?;
