@@ -13,7 +13,7 @@
 //!
 //! ## Developer Notes
 //! - SIMD status: Loop-carried dependencies (prefix ADL and EMA recurrences) limit gains; AVX2/AVX512 remain stubs that defer to scalar.
-//! - Streaming update: O(1) per bar via EMA; math matches streaming path exactly.
+//! - Streaming update: O(1) per bar via EMA; math matches batch/scalar path exactly (no FMA), with precomputed (1-α) and guards for `volume==0` and `high==low` fast paths.
 //! - Memory: Uses zero-copy helpers (alloc_with_nan_prefix).
 //! - Batch optimization: Shares ADL across rows to avoid recomputing MFV/ADL per parameter set.
 
@@ -1018,8 +1018,12 @@ pub unsafe fn adosc_row_avx512_long(
 pub struct AdoscStream {
     short_period: usize,
     long_period: usize,
+    // EMA coefficients
     alpha_short: f64,
     alpha_long: f64,
+    one_minus_alpha_short: f64,
+    one_minus_alpha_long: f64,
+    // ADL state and EMA states
     sum_ad: f64,
     short_ema: f64,
     long_ema: f64,
@@ -1027,49 +1031,63 @@ pub struct AdoscStream {
 }
 
 impl AdoscStream {
+    #[inline(always)]
     pub fn try_new(params: AdoscParams) -> Result<Self, AdoscError> {
         let short = params.short_period.unwrap_or(3);
         let long = params.long_period.unwrap_or(10);
         if short == 0 || long == 0 {
-            return Err(AdoscError::InvalidPeriod {
-                short,
-                long,
-                data_len: 0,
-            });
+            return Err(AdoscError::InvalidPeriod { short, long, data_len: 0 });
         }
         if short >= long {
             return Err(AdoscError::ShortPeriodGreaterThanLong { short, long });
         }
+
+        // α = 2/(n+1) — standard EMA smoothing factor
+        let alpha_short = 2.0 / (short as f64 + 1.0);
+        let alpha_long = 2.0 / (long as f64 + 1.0);
+
         Ok(Self {
             short_period: short,
             long_period: long,
-            alpha_short: 2.0 / (short as f64 + 1.0),
-            alpha_long: 2.0 / (long as f64 + 1.0),
+            alpha_short,
+            alpha_long,
+            one_minus_alpha_short: 1.0 - alpha_short,
+            one_minus_alpha_long: 1.0 - alpha_long,
             sum_ad: 0.0,
             short_ema: 0.0,
             long_ema: 0.0,
             initialized: false,
         })
     }
+
+    /// O(1) update per bar. Preserves batch parity (no FMA; same MFM algebra/order).
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, close: f64, volume: f64) -> f64 {
-        let hl = high - low;
-        let mfm = if hl != 0.0 {
-            ((close - low) - (high - close)) / hl
-        } else {
-            0.0
-        };
-        let mfv = mfm * volume;
-        self.sum_ad += mfv;
+        // Fast paths that provably imply MFM == 0.0 (skip divide & extra flops):
+        if volume != 0.0 {
+            let hl = high - low;
+            if hl != 0.0 {
+                // Keep algebra/order identical to batch/scalar path:
+                let mfm = ((close - low) - (high - close)) / hl;
+                self.sum_ad += mfm * volume;
+            }
+            // else: range==0 → mfm=0 → ADL unchanged
+        }
+        // else: volume==0 → mfv=0 → ADL unchanged
+
         if !self.initialized {
+            // Bootstrap: EMA short == EMA long == ADL at i=0 → oscillator = 0.0
             self.short_ema = self.sum_ad;
             self.long_ema = self.sum_ad;
             self.initialized = true;
-        } else {
-            self.short_ema =
-                self.alpha_short * self.sum_ad + (1.0 - self.alpha_short) * self.short_ema;
-            self.long_ema = self.alpha_long * self.sum_ad + (1.0 - self.alpha_long) * self.long_ema;
+            return 0.0;
         }
+
+        // One multiply-add per EMA with precomputed complements (no FMA to keep parity)
+        let x = self.sum_ad;
+        self.short_ema = self.alpha_short * x + self.one_minus_alpha_short * self.short_ema;
+        self.long_ema = self.alpha_long * x + self.one_minus_alpha_long * self.long_ema;
+
         self.short_ema - self.long_ema
     }
 }

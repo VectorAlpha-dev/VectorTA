@@ -15,10 +15,13 @@
 //! ## Developer Status
 //! - **AVX2/AVX512**: Implemented for initial warmup sum (8/4‑wide accumulation);
 //!   rolling recurrence remains scalar due to data dependency. Runtime selection follows alma.rs.
-//! - **Streaming update**: O(1) - Efficient rolling window approach
+//! - **Streaming update**: O(1) warm‑up via incremental sum; steady‑state uses `mul_add` (FMA) for speed and single rounding.
 //! - **Memory optimization**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix) ✓
 //! - **SIMD note**: For single-series, speedups mainly come from large `period` where warmup dominates.
 //!   Recurrence uses `mul_add` when available for slight speed and improved numerical stability.
+//!
+//! Decision: Streaming enforces a contiguous run of `period` finite values before first output (parity with batch),
+//! then updates with y = (x − y)·(1/period) + y via fused `mul_add`. Matches batch to within FP roundoff.
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
@@ -689,56 +692,75 @@ pub unsafe fn wilders_avx512_long(
 
 // --- Streaming (WildersStream) ---
 
+/// Streaming Wilder's MA with O(1) warm-up and FMA recurrence.
+/// Requires a contiguous run of `period` finite values before the first output.
 #[derive(Debug, Clone)]
 pub struct WildersStream {
     period: usize,
     alpha: f64,
-    buffer: Vec<f64>,
-    head: usize,
-    filled: bool,
+
+    // O(1) warm-up state
+    warm_sum: f64,
+    warm_count: usize,
+
+    // Steady-state
     last: f64,
     started: bool,
 }
 
 impl WildersStream {
+    #[inline(always)]
     pub fn try_new(params: WildersParams) -> Result<Self, WildersError> {
         let period = params.period.unwrap_or(5);
         if period == 0 {
-            return Err(WildersError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(WildersError::InvalidPeriod { period, data_len: 0 });
         }
         let alpha = 1.0 / (period as f64);
         Ok(Self {
             period,
             alpha,
-            buffer: vec![f64::NAN; period],
-            head: 0,
-            filled: false,
+            warm_sum: 0.0,
+            warm_count: 0,
             last: f64::NAN,
             started: false,
         })
     }
+
+    /// Push one value. Returns `Some(y)` once initialized, else `None` during warm-up.
+    /// Warm-up is O(1) per tick: we incrementally build the initial average instead of
+    /// scanning the whole buffer when it fills.
+    ///
+    /// NaN/inf policy:
+    /// - Before start: require a contiguous run of `period` finite values; any non-finite
+    ///   resets the streak and keeps returning `None`.
+    /// - After start: apply the Wilder recurrence; non-finite inputs propagate per IEEE‑754.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        self.buffer[self.head] = value;
-        self.head = (self.head + 1) % self.period;
-        if !self.filled && self.head == 0 {
-            self.filled = true;
-        }
-        if !self.filled {
-            return None;
-        }
+        // Warm-up path
         if !self.started {
-            let sum: f64 = self.buffer.iter().copied().sum();
-            self.last = sum / (self.period as f64);
+            if !value.is_finite() {
+                self.warm_sum = 0.0;
+                self.warm_count = 0;
+                return None;
+            }
+
+            self.warm_sum += value;
+            self.warm_count += 1;
+
+            if self.warm_count < self.period {
+                return None;
+            }
+
+            // First output equals the simple average of the first `period` finite values
+            let y0 = self.warm_sum / (self.period as f64);
+            self.last = y0;
             self.started = true;
-            Some(self.last)
-        } else {
-            self.last += (value - self.last) * self.alpha;
-            Some(self.last)
+            return Some(self.last);
         }
+
+        // Steady-state update with FMA
+        self.last = (value - self.last).mul_add(self.alpha, self.last);
+        Some(self.last)
     }
 }
 

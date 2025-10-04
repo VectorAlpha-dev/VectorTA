@@ -20,6 +20,7 @@
 //! - AVX2/AVX512: stubs delegate to scalar; no measurable wins expected.
 //! - Batch: shares fixed-design (LU, binom, n^r) across rows with same (period, order).
 //! - Memory: Good — uses `alloc_with_nan_prefix` and `make_uninit_matrix`.
+//! - Streaming: enabled — ring buffer + binomial shift of RHS moments; O(k²) per bar; matches scalar outputs.
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
@@ -339,135 +340,259 @@ pub enum PrbError {
 
 // ==================== STREAMING SUPPORT ====================
 pub struct PrbStream {
+    // Params
     smooth_data: bool,
     smooth_period: usize,
-    regression_period: usize,
-    polynomial_order: usize,
+    regression_period: usize, // n
+    polynomial_order: usize,  // k
     regression_offset: i32,
+    equ_from: usize,
     ndev: f64,
-    buffer: Vec<f64>,
-    smooth_buffer: Vec<f64>,
+
+    // SSF (2-pole) state (Pine fallback semantics)
     ssf_y1: f64,
     ssf_y2: f64,
     ssf_c1: f64,
     ssf_c2: f64,
     ssf_c3: f64,
-    filled: bool,
+
+    // Ring buffer of smoothed values (size = n)
+    ring: Vec<f64>,
+    head: usize,  // index to overwrite next (oldest element)
+    count: usize, // total samples seen
+
+    // Rolling stats over window (population moments)
+    sum: f64,
+    sumsq: f64,
+
+    // Fixed-design precompute for (n, k)
+    m: usize,     // k + 1
+    l: Vec<f64>,  // lower triangular (from LU of normal matrix)
+    u: Vec<f64>,  // upper triangular
+    binom: Vec<f64>,
+    n_pow: Vec<f64>,
+
+    // Streaming RHS moments S_r = Σ j^r * y_j (length = m)
+    moments: Vec<f64>,
+    moments_prev: Vec<f64>,
+
+    // Work buffers for triangular solves
+    tmp_y: Vec<f64>,
+    coeffs: Vec<f64>,
+
+    // Constants reused every tick
+    x_pos: f64, // evaluation position x = n - offset + equ_from
+    inv_n: f64, // 1.0 / n
 }
 
 impl PrbStream {
     pub fn try_new(params: PrbParams) -> Result<Self, PrbError> {
         let smooth_data = params.smooth_data.unwrap_or(true);
         let smooth_period = params.smooth_period.unwrap_or(10);
-        let regression_period = params.regression_period.unwrap_or(100);
-        let polynomial_order = params.polynomial_order.unwrap_or(2);
+        let n = params.regression_period.unwrap_or(100);
+        let k = params.polynomial_order.unwrap_or(2);
         let regression_offset = params.regression_offset.unwrap_or(0);
         let ndev = params.ndev.unwrap_or(2.0);
+        let equ_from = params.equ_from.unwrap_or(0);
 
-        if polynomial_order < 1 {
-            return Err(PrbError::InvalidOrder {
-                order: polynomial_order,
-            });
+        if k < 1 {
+            return Err(PrbError::InvalidOrder { order: k });
         }
-
         if smooth_data && smooth_period < 2 {
-            return Err(PrbError::InvalidSmoothPeriod {
-                period: smooth_period,
-            });
+            return Err(PrbError::InvalidSmoothPeriod { period: smooth_period });
+        }
+        if n == 0 {
+            return Err(PrbError::InvalidPeriod { period: n, data_len: 0 });
         }
 
-        if regression_period == 0 {
-            return Err(PrbError::InvalidPeriod {
-                period: regression_period,
-                data_len: 0,
-            });
-        }
-
-        // Calculate SSF coefficients
-        let pi = std::f64::consts::PI;
+        // SSF coefficients (2‑pole) — Pine-compatible
+        let pi = core::f64::consts::PI;
         let omega = 2.0 * pi / (smooth_period as f64);
-        let a = (-std::f64::consts::SQRT_2 * pi / (smooth_period as f64)).exp();
-        let b = 2.0 * a * ((std::f64::consts::SQRT_2 / 2.0) * omega).cos();
+        let a = (-core::f64::consts::SQRT_2 * pi / (smooth_period as f64)).exp();
+        let b = 2.0 * a * ((core::f64::consts::SQRT_2 / 2.0) * omega).cos();
         let c3 = -a * a;
         let c2 = b;
         let c1 = 1.0 - c2 - c3;
 
+        // Fixed-design precompute (normal matrix LU, binomials, n^r)
+        let pre = build_fixed_design(n, k)?;
+
+        let m = k + 1;
+        let x_pos = (n as f64) - (regression_offset as f64) + (equ_from as f64);
+        let inv_n = 1.0 / (n as f64);
+
         Ok(Self {
             smooth_data,
             smooth_period,
-            regression_period,
-            polynomial_order,
+            regression_period: n,
+            polynomial_order: k,
             regression_offset,
+            equ_from,
             ndev,
-            buffer: Vec::with_capacity(regression_period),
-            smooth_buffer: Vec::with_capacity(regression_period),
-            ssf_y1: 0.0,
-            ssf_y2: 0.0,
+
+            // SSF state starts unset (NaN) for Pine fallback
+            ssf_y1: f64::NAN,
+            ssf_y2: f64::NAN,
             ssf_c1: c1,
             ssf_c2: c2,
             ssf_c3: c3,
-            filled: false,
+
+            ring: vec![0.0; n],
+            head: 0,
+            count: 0,
+
+            sum: 0.0,
+            sumsq: 0.0,
+
+            m,
+            l: pre.l,
+            u: pre.u,
+            binom: pre.binom,
+            n_pow: pre.n_pow,
+
+            moments: vec![0.0; m],
+            moments_prev: vec![0.0; m],
+            tmp_y: vec![0.0; m],
+            coeffs: vec![0.0; m],
+
+            x_pos,
+            inv_n,
         })
     }
 
-    pub fn update(&mut self, value: f64) -> Option<(f64, f64, f64)> {
-        // Apply SSF if enabled
-        let smoothed = if self.smooth_data {
-            let y = self.ssf_c1 * value + self.ssf_c2 * self.ssf_y1 + self.ssf_c3 * self.ssf_y2;
-            self.ssf_y2 = self.ssf_y1;
-            self.ssf_y1 = y;
-            y
-        } else {
-            value
-        };
-
-        // Add to buffer
-        if self.buffer.len() < self.regression_period {
-            self.buffer.push(value);
-            self.smooth_buffer.push(smoothed);
-            // Set filled when we have enough data
-            if self.buffer.len() == self.regression_period {
-                self.filled = true;
-            }
-        } else {
-            self.buffer.rotate_left(1);
-            self.buffer[self.regression_period - 1] = value;
-            self.smooth_buffer.rotate_left(1);
-            self.smooth_buffer[self.regression_period - 1] = smoothed;
+    #[inline]
+    fn ssf_step(&mut self, x: f64) -> f64 {
+        if !self.smooth_data {
+            return x;
         }
+        // Pine fallback: nz(y1, x) and nz(y2, nz(y1, x))
+        let prev1 = if self.ssf_y1.is_nan() { x } else { self.ssf_y1 };
+        let prev2 = if self.ssf_y2.is_nan() { prev1 } else { self.ssf_y2 };
+        let y = self.ssf_c1 * x + self.ssf_c2 * prev1 + self.ssf_c3 * prev2;
+        self.ssf_y2 = self.ssf_y1;
+        self.ssf_y1 = y;
+        y
+    }
 
-        if !self.filled {
+    #[inline]
+    fn reset_after_nan(&mut self) {
+        // Reset streaming state when a NaN arrives
+        self.head = 0;
+        self.count = 0;
+        self.sum = 0.0;
+        self.sumsq = 0.0;
+        for v in &mut self.ring {
+            *v = 0.0;
+        }
+        self.moments.fill(0.0);
+        self.moments_prev.fill(0.0);
+        self.tmp_y.fill(0.0);
+        self.coeffs.fill(0.0);
+        self.ssf_y1 = f64::NAN;
+        self.ssf_y2 = f64::NAN;
+    }
+
+    /// O(1) per-bar for fixed order: ring buffer + binomial shift of RHS + 1 LU solve
+    /// Returns (regression, upper, lower) once warmup completes (n + equ_from samples)
+    pub fn update(&mut self, value: f64) -> Option<(f64, f64, f64)> {
+        if value.is_nan() {
+            self.reset_after_nan();
             return None;
         }
 
-        // Calculate regression
-        let mut x_vals = vec![0.0; self.regression_period];
-        for i in 0..self.regression_period {
-            x_vals[i] = (i + 1) as f64;
+        // 1) Ingest and optionally smooth
+        let y_new = self.ssf_step(value);
+        let n = self.regression_period;
+        let k = self.polynomial_order;
+        let m = self.m;
+
+        // 2) Warmup: accumulate initial moments and stats until we have n
+        if self.count < n {
+            let j = (self.count + 1) as f64; // j in 1..=n
+            // S_0
+            self.moments[0] += y_new;
+            // S_r
+            let mut p = j; // j^1
+            for r in 1..=k {
+                self.moments[r] += y_new * p;
+                p *= j;
+            }
+            // ring + stats
+            self.ring[self.head] = y_new;
+            self.head = (self.head + 1) % n;
+            self.count += 1;
+            self.sum += y_new;
+            self.sumsq += y_new * y_new;
+
+            // Need n + equ_from samples before emitting output
+            if self.count < n + self.equ_from {
+                return None;
+            }
+            return Some(self.solve_eval_and_band());
         }
 
-        let coefficients =
-            calculate_regression_coefficients(&x_vals, &self.smooth_buffer, self.polynomial_order)
-                .ok()?;
+        // 3) Slide window in O(1)
+        let y_old = self.ring[self.head];
+        self.ring[self.head] = y_new;
+        self.head = (self.head + 1) % n;
 
-        let x_position = (self.regression_period as f64) - (self.regression_offset as f64);
-        let regression_value = evaluate_polynomial(&coefficients, x_position);
+        // Rolling stats
+        self.sum += y_new - y_old;
+        self.sumsq += y_new * y_new - y_old * y_old;
 
-        // Calculate standard deviation of the window
-        let mean = self.smooth_buffer.iter().sum::<f64>() / self.regression_period as f64;
-        let variance = self
-            .smooth_buffer
-            .iter()
-            .map(|&v| (v - mean) * (v - mean))
-            .sum::<f64>()
-            / self.regression_period as f64;
-        let stdev = variance.sqrt();
+        // 4) Binomial shift for moments
+        self.moments_prev.copy_from_slice(&self.moments);
+        self.moments[0] = self.moments_prev[0] - y_old + y_new;
+        for r in 1..=k {
+            let row = r * m;
+            let mut acc = 0.0;
+            for mm in 0..=r {
+                let sign = if ((r - mm) & 1) == 1 { -1.0 } else { 1.0 };
+                acc += sign * self.binom[row + mm] * self.moments_prev[mm];
+            }
+            self.moments[r] = acc + self.n_pow[r] * y_new;
+        }
 
-        // Calculate bands
-        let upper = regression_value + self.ndev * stdev;
-        let lower = regression_value - self.ndev * stdev;
+        // 5) Solve/evaluate/bands
+        Some(self.solve_eval_and_band())
+    }
 
-        Some((regression_value, upper, lower))
+    #[inline(always)]
+    fn solve_eval_and_band(&mut self) -> (f64, f64, f64) {
+        // Forward substitution: L * tmp_y = S
+        let m = self.m;
+        for r in 0..m {
+            let row = r * m;
+            let mut acc = self.moments[r];
+            for c in 0..r {
+                acc -= self.l[row + c] * self.tmp_y[c];
+            }
+            let diag = self.l[row + r];
+            self.tmp_y[r] = acc / diag;
+        }
+        // Back substitution: U * coeffs = tmp_y
+        for r in (0..m).rev() {
+            let row = r * m;
+            let mut acc = self.tmp_y[r];
+            for c in (r + 1)..m {
+                acc -= self.u[row + c] * self.coeffs[c];
+            }
+            self.coeffs[r] = acc / self.u[row + r];
+        }
+
+        // Horner evaluation at x_pos with FMA
+        let mut reg = 0.0f64;
+        for p in (0..m).rev() {
+            reg = reg.mul_add(self.x_pos, self.coeffs[p]);
+        }
+
+        // Population variance and bands
+        let mean = self.sum * self.inv_n;
+        let var = (self.sumsq * self.inv_n) - mean * mean;
+        let stdev = if var > 0.0 { var.sqrt() } else { 0.0 };
+        let upper = reg + self.ndev * stdev;
+        let lower = reg - self.ndev * stdev;
+        (reg, upper, lower)
     }
 }
 

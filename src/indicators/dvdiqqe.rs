@@ -21,7 +21,7 @@
 //! - SIMD selection enabled: EMA stages use AVX2/AVX512 when available; control-flow identical to scalar.
 //! - Scalar optimized: loop-jammed PVI/NVI build and range computation; no extra volume intermediates.
 //! - Batch (flat) optimized: precomputes volume selection + PVI/NVI once and reuses across rows.
-//! - Streaming update: still O(n); left for future work.
+//! - Streaming update: O(1) enabled; seeds TLs at first ready tick and matches batch warmup parity.
 //!
 //! ### TODO
 //! - Consider O(1) streaming update for trailing levels.
@@ -1859,8 +1859,9 @@ fn dvdiqqe_batch_inner_into(
 }
 
 // ==================== STREAMING API ====================
-/// Streaming DVDIQQE calculator for incremental updates
+/// Streaming DVDIQQE calculator with true O(1) updates
 pub struct DvdiqqeStream {
+    // --- parameters ---
     period: usize,
     smoothing_period: usize,
     fast_mult: f64,
@@ -1869,19 +1870,44 @@ pub struct DvdiqqeStream {
     center_type: String,
     tick_size: f64,
 
-    // Buffers
-    open_buffer: Vec<f64>,
-    high_buffer: Vec<f64>,
-    low_buffer: Vec<f64>,
-    close_buffer: Vec<f64>,
-    volume_buffer: Vec<f64>,
+    // --- precomputed constants ---
+    alpha_pvi: f64,     // 2/(period+1) for PVI/NVI EMA
+    alpha_div: f64,     // 2/(smoothing_period+1) for divergence EMA
+    alpha_rng: f64,     // 1/period for range EMAs (since wper = 2*period-1)
+    inv_tick: f64,      // 1/tick_size
+    use_tick_only: bool,
+    warmup_needed: usize, // streaming warmup gate: 2*period
 
-    // State
-    head: usize,
-    filled: bool,
+    // --- rolling state for tick-volume selection ---
+    prev_close: f64,
+    prev_sel_vol: f64,
+    tickrng_prev: f64,
+
+    // --- PVI/NVI & their EMAs (cumulative definition) ---
+    pvi: f64,
+    nvi: f64,
+    pvi_ema: f64,
+    nvi_ema: f64,
+    ema_pvi_inited: bool,
+
+    // --- divergence EMAs ---
+    pdiv_ema: f64,
+    ndiv_ema: f64,
+    ema_div_inited: bool,
+
+    // --- dvdi & double-EMA of range(|Δdvdi|) ---
+    dvdi_prev: f64,
+    rng_ema1: f64,
+    rng_ema2: f64,
+    ema_rng_inited: bool,
+
+    // --- trailing levels ---
+    fast_tl_prev: f64,
+    slow_tl_prev: f64,
+    tl_seeded: bool,
+
+    // --- counters & center line ---
     count: usize,
-
-    // Cumulative center calculation
     center_sum: f64,
     center_count: f64,
 }
@@ -1890,36 +1916,74 @@ impl DvdiqqeStream {
     pub fn try_new(params: DvdiqqeParams) -> Result<Self, DvdiqqeError> {
         let period = params.period.unwrap_or(13);
         let smoothing_period = params.smoothing_period.unwrap_or(6);
-
         if period == 0 {
-            return Err(DvdiqqeError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(DvdiqqeError::InvalidPeriod { period, data_len: 0 });
+        }
+        if smoothing_period == 0 {
+            return Err(DvdiqqeError::InvalidSmoothing { smoothing: 0 });
         }
 
-        // Need enough history for calculations
-        let buffer_size = period * 3; // Conservative buffer
+        let fast_mult = params.fast_multiplier.unwrap_or(2.618);
+        let slow_mult = params.slow_multiplier.unwrap_or(4.236);
+        if !(fast_mult.is_finite() && fast_mult > 0.0) {
+            return Err(DvdiqqeError::InvalidMultiplier { multiplier: fast_mult, which: "fast".into() });
+        }
+        if !(slow_mult.is_finite() && slow_mult > 0.0) {
+            return Err(DvdiqqeError::InvalidMultiplier { multiplier: slow_mult, which: "slow".into() });
+        }
+
+        let volume_type = params.volume_type.unwrap_or_else(|| "default".to_string());
+        let center_type = params.center_type.unwrap_or_else(|| "dynamic".to_string());
+        let tick_size = params.tick_size.unwrap_or(0.01);
+        if !(tick_size.is_finite() && tick_size > 0.0) {
+            return Err(DvdiqqeError::InvalidTick { tick: tick_size });
+        }
+
+        // EMA alphas (compute once)
+        let alpha_pvi = 2.0 / (period as f64 + 1.0);
+        let alpha_div = 2.0 / (smoothing_period as f64 + 1.0);
+        // Double-EMA of range uses wper = (2*period - 1); alpha = 1/period
+        let alpha_rng = 1.0 / (period as f64);
 
         Ok(Self {
             period,
             smoothing_period,
-            fast_mult: params.fast_multiplier.unwrap_or(2.618),
-            slow_mult: params.slow_multiplier.unwrap_or(4.236),
-            volume_type: params.volume_type.unwrap_or_else(|| "default".to_string()),
-            center_type: params.center_type.unwrap_or_else(|| "dynamic".to_string()),
-            tick_size: params.tick_size.unwrap_or(0.01),
+            fast_mult,
+            slow_mult,
+            use_tick_only: volume_type.eq_ignore_ascii_case("tick"),
+            volume_type,
+            center_type,
+            tick_size,
+            inv_tick: 1.0 / tick_size,
+            alpha_pvi,
+            alpha_div,
+            alpha_rng,
+            warmup_needed: period * 2,
 
-            open_buffer: vec![f64::NAN; buffer_size],
-            high_buffer: vec![f64::NAN; buffer_size],
-            low_buffer: vec![f64::NAN; buffer_size],
-            close_buffer: vec![f64::NAN; buffer_size],
-            volume_buffer: vec![f64::NAN; buffer_size],
+            prev_close: 0.0,
+            prev_sel_vol: 0.0,
+            tickrng_prev: tick_size,
 
-            head: 0,
-            filled: false,
+            pvi: 0.0,
+            nvi: 0.0,
+            pvi_ema: 0.0,
+            nvi_ema: 0.0,
+            ema_pvi_inited: false,
+
+            pdiv_ema: 0.0,
+            ndiv_ema: 0.0,
+            ema_div_inited: false,
+
+            dvdi_prev: 0.0,
+            rng_ema1: 0.0,
+            rng_ema2: 0.0,
+            ema_rng_inited: false,
+
+            fast_tl_prev: f64::NAN,
+            slow_tl_prev: f64::NAN,
+            tl_seeded: false,
+
             count: 0,
-
             center_sum: 0.0,
             center_count: 0.0,
         })
@@ -1928,115 +1992,152 @@ impl DvdiqqeStream {
     pub fn update(
         &mut self,
         open: f64,
-        high: f64,
-        low: f64,
+        _high: f64,
+        _low: f64,
         close: f64,
         volume: f64,
     ) -> Option<DvdiqqeStreamOutput> {
-        let buffer_size = self.open_buffer.len();
+        // ---- 1) Pine‑like tick volume selection ----
+        let rng = close - open;
+        let tickrng = if rng.abs() < self.tick_size { self.tickrng_prev } else { rng };
+        let tick_vol = (tickrng.abs() * self.inv_tick).max(0.0);
+        self.tickrng_prev = tickrng;
 
-        // Add new values to buffers
-        self.open_buffer[self.head] = open;
-        self.high_buffer[self.head] = high;
-        self.low_buffer[self.head] = low;
-        self.close_buffer[self.head] = close;
-        self.volume_buffer[self.head] = volume;
+        let sel_vol = if self.use_tick_only {
+            tick_vol
+        } else if volume.is_finite() {
+            volume
+        } else {
+            tick_vol
+        };
 
-        self.head = (self.head + 1) % buffer_size;
-        self.count = self.count.saturating_add(1);
+        // ---- 2) PVI/NVI cumulative update using dClose and volume up/down ----
+        let d_close = close - self.prev_close;
+        if sel_vol > self.prev_sel_vol {
+            self.pvi += d_close;
+        } else if sel_vol < self.prev_sel_vol {
+            self.nvi -= d_close;
+        }
+        self.prev_sel_vol = sel_vol;
+        self.prev_close = close;
 
-        if self.head == 0 {
-            self.filled = true;
+        // EMA(pvi), EMA(nvi)
+        if !self.ema_pvi_inited {
+            self.pvi_ema = self.pvi;
+            self.nvi_ema = self.nvi;
+            self.ema_pvi_inited = true;
+        } else {
+            // s += alpha * (x - s)
+            self.pvi_ema += self.alpha_pvi * (self.pvi - self.pvi_ema);
+            self.nvi_ema += self.alpha_pvi * (self.nvi - self.nvi_ema);
         }
 
-        // Need minimum data for calculation
-        let data_len = if self.filled { buffer_size } else { self.head };
-        if data_len < self.period * 2 {
+        // ---- 3) divergence = (pvi - EMA(pvi)) and (nvi - EMA(nvi)), then EMA smoothing ----
+        let pdiv = self.pvi - self.pvi_ema;
+        let ndiv = self.nvi - self.nvi_ema;
+
+        if !self.ema_div_inited {
+            self.pdiv_ema = pdiv;
+            self.ndiv_ema = ndiv;
+            self.ema_div_inited = true;
+        } else {
+            self.pdiv_ema += self.alpha_div * (pdiv - self.pdiv_ema);
+            self.ndiv_ema += self.alpha_div * (ndiv - self.ndiv_ema);
+        }
+
+        // ---- 4) dvdi = smoothed divergence difference ----
+        let dvdi = self.pdiv_ema - self.ndiv_ema;
+
+        // ---- 5) double EMA of range(|Δdvdi|) ----
+        let step_rng = (dvdi - self.dvdi_prev).abs();
+        if !self.ema_rng_inited {
+            self.rng_ema1 = step_rng;
+            self.rng_ema2 = self.rng_ema1;
+            self.ema_rng_inited = true;
+        } else {
+            self.rng_ema1 += self.alpha_rng * (step_rng - self.rng_ema1);
+            self.rng_ema2 += self.alpha_rng * (self.rng_ema1 - self.rng_ema2);
+        }
+        self.dvdi_prev = dvdi;
+
+        // ---- 6) warmup gating ----
+        self.count = self.count.saturating_add(1);
+        if self.count < self.warmup_needed {
             return None;
         }
 
-        // Prepare data slices in correct order
-        let (open_data, high_data, low_data, close_data, volume_data) = if self.filled {
-            // Circular buffer: reorder from head
-            let mut open_ordered = vec![f64::NAN; buffer_size];
-            let mut high_ordered = vec![f64::NAN; buffer_size];
-            let mut low_ordered = vec![f64::NAN; buffer_size];
-            let mut close_ordered = vec![f64::NAN; buffer_size];
-            let mut volume_ordered = vec![f64::NAN; buffer_size];
+        // ---- 7) trailing levels ----
+        let smooth_rng = self.rng_ema2;
+        let fr = smooth_rng * self.fast_mult;
+        let sr = smooth_rng * self.slow_mult;
 
-            for i in 0..buffer_size {
-                let idx = (self.head + i) % buffer_size;
-                open_ordered[i] = self.open_buffer[idx];
-                high_ordered[i] = self.high_buffer[idx];
-                low_ordered[i] = self.low_buffer[idx];
-                close_ordered[i] = self.close_buffer[idx];
-                volume_ordered[i] = self.volume_buffer[idx];
+        // Seed TLs on first ready tick exactly at dvdi
+        if !self.tl_seeded {
+            self.fast_tl_prev = dvdi;
+            self.slow_tl_prev = dvdi;
+            self.tl_seeded = true;
+
+            // seed center on the same tick if dynamic
+            if self.center_type.eq_ignore_ascii_case("dynamic") && dvdi.is_finite() {
+                self.center_sum = dvdi;
+                self.center_count = 1.0;
             }
-
-            (
-                open_ordered,
-                high_ordered,
-                low_ordered,
-                close_ordered,
-                volume_ordered,
-            )
-        } else {
-            // Linear buffer
-            (
-                self.open_buffer[..data_len].to_vec(),
-                self.high_buffer[..data_len].to_vec(),
-                self.low_buffer[..data_len].to_vec(),
-                self.close_buffer[..data_len].to_vec(),
-                self.volume_buffer[..data_len].to_vec(),
-            )
-        };
-
-        // Calculate DVDIQQE on the buffer
-        let params = DvdiqqeParams {
-            period: Some(self.period),
-            smoothing_period: Some(self.smoothing_period),
-            fast_multiplier: Some(self.fast_mult),
-            slow_multiplier: Some(self.slow_mult),
-            volume_type: Some(self.volume_type.clone()),
-            center_type: Some(self.center_type.clone()),
-            tick_size: Some(self.tick_size),
-        };
-
-        let input = DvdiqqeInput::from_slices(
-            &open_data,
-            &high_data,
-            &low_data,
-            &close_data,
-            Some(&volume_data),
-            params,
-        );
-
-        match dvdiqqe(&input) {
-            Ok(output) => {
-                // Return the latest value
-                let last_idx = output.dvdi.len() - 1;
-
-                // Update cumulative center if dynamic
-                if self.center_type == "dynamic" && output.dvdi[last_idx].is_finite() {
-                    self.center_sum += output.dvdi[last_idx];
-                    self.center_count += 1.0;
-                }
-
-                Some(DvdiqqeStreamOutput {
-                    dvdi: output.dvdi[last_idx],
-                    fast_tl: output.fast_tl[last_idx],
-                    slow_tl: output.slow_tl[last_idx],
-                    center_line: if self.center_type == "dynamic" && self.center_count > 0.0 {
-                        self.center_sum / self.center_count
-                    } else if self.center_type == "static" {
-                        0.0
-                    } else {
-                        output.center_line[last_idx]
-                    },
-                })
-            }
-            Err(_) => None,
+            return Some(DvdiqqeStreamOutput {
+                dvdi,
+                fast_tl: self.fast_tl_prev,
+                slow_tl: self.slow_tl_prev,
+                center_line: if self.center_type.eq_ignore_ascii_case("static") {
+                    0.0
+                } else if self.center_count > 0.0 {
+                    self.center_sum / self.center_count
+                } else {
+                    f64::NAN
+                },
+            });
         }
+
+        // Fast TL
+        let fast_tl = if dvdi > self.fast_tl_prev {
+            let nv = dvdi - fr;
+            if nv < self.fast_tl_prev { self.fast_tl_prev } else { nv }
+        } else {
+            let nv = dvdi + fr;
+            if nv > self.fast_tl_prev { self.fast_tl_prev } else { nv }
+        };
+
+        // Slow TL
+        let slow_tl = if dvdi > self.slow_tl_prev {
+            let nv = dvdi - sr;
+            if nv < self.slow_tl_prev { self.slow_tl_prev } else { nv }
+        } else {
+            let nv = dvdi + sr;
+            if nv > self.slow_tl_prev { self.slow_tl_prev } else { nv }
+        };
+
+        self.fast_tl_prev = fast_tl;
+        self.slow_tl_prev = slow_tl;
+
+        // ---- 8) center line ----
+        let center_val = if self.center_type.eq_ignore_ascii_case("static") {
+            0.0
+        } else {
+            if dvdi.is_finite() {
+                self.center_sum += dvdi;
+                self.center_count += 1.0;
+            }
+            if self.center_count > 0.0 {
+                self.center_sum / self.center_count
+            } else {
+                f64::NAN
+            }
+        };
+
+        Some(DvdiqqeStreamOutput {
+            dvdi,
+            fast_tl,
+            slow_tl,
+            center_line: center_val,
+        })
     }
 }
 

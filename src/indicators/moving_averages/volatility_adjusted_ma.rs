@@ -636,18 +636,60 @@ fn vama_prepare<'a>(
 }
 
 // ==================== STREAMING SUPPORT ====================
-/// Streaming calculator for real-time updates
+// Decision: Streaming upgraded to amortized O(1) via monotonic deques over deviations; smoothing (SMA/EMA/WMA) in O(1).
+// Matches batch core and preserves warmup semantics; see alma.rs for style/perf reference.
+
+/// Streaming calculator for real-time updates (amortized O(1) per tick).
 #[derive(Debug, Clone)]
 pub struct VamaStream {
-    buffer: Vec<f64>,
-    ema_buffer: Vec<f64>,
+    // --- config ---
     base_period: usize,
     vol_period: usize,
     smoothing: bool,
-    smooth_type: usize,
+    smooth_type: usize, // 1=SMA, 2=EMA, 3=WMA
     smooth_period: usize,
-    index: u64,
-    ready: bool,
+
+    // --- base EMA state ---
+    alpha: f64,       // 2/(base_period+1)
+    ema: f64,         // last EMA
+    have_ema: bool,   // first-tick bootstrap
+
+    // --- monotonic deques over deviations d_t = x_t - ema_t ---
+    // We use fixed-size ring buffers with capacity = vol_period+1 to avoid
+    // ambiguity between empty/full states when head==tail.
+    dq_cap: usize,
+    max_idx: Vec<usize>,
+    max_val: Vec<f64>,
+    max_head: usize,
+    max_tail: usize,
+
+    min_idx: Vec<usize>,
+    min_val: Vec<f64>,
+    min_head: usize,
+    min_tail: usize,
+
+    // --- smoothing state (core values are 'c_t') ---
+    // SMA/WMA need a ring of the last p core values; EMA needs only one acc.
+    sm_ring: Vec<f64>, // length = smooth_period (allocated only if smoothing)
+    sm_ptr: usize,
+    sm_count: usize,
+
+    // SMA: running sum
+    sm_sum: f64,
+
+    // EMA: accumulator + alpha
+    sm_alpha: f64,
+    sm_ema: f64,
+    have_sm_ema: bool,
+
+    // WMA: rolling numerator and simple sum
+    wma_num: f64, // N_t
+    wma_den: f64, // p*(p+1)/2 precomputed
+
+    // --- indexing / readiness ---
+    index: u64,         // number of updates observed so far
+    ready_after: usize, // when final (smoothed or core) output becomes available
+    pub ready: bool,    // externally visible readiness (kept for API parity)
 }
 
 impl VamaStream {
@@ -659,120 +701,243 @@ impl VamaStream {
         let smooth_period = params.smooth_period.unwrap_or(5);
 
         if base_period == 0 {
-            return Err(VamaError::InvalidPeriod {
-                period: base_period,
-                data_len: 0,
-            });
+            return Err(VamaError::InvalidPeriod { period: base_period, data_len: 0 });
         }
-
         if vol_period == 0 {
-            return Err(VamaError::InvalidPeriod {
-                period: vol_period,
-                data_len: 0,
-            });
+            return Err(VamaError::InvalidPeriod { period: vol_period, data_len: 0 });
         }
-
-        if smoothing && (smooth_type < 1 || smooth_type > 3) {
+        if smoothing && !(1..=3).contains(&smooth_type) {
             return Err(VamaError::InvalidSmoothType { smooth_type });
         }
 
-        let buffer_size = base_period.max(vol_period) * 2;
+        // Precompute EMA alphas
+        let alpha = 2.0 / (base_period as f64 + 1.0);
+        let sm_alpha = if smoothing && smooth_type == 2 {
+            2.0 / (smooth_period as f64 + 1.0)
+        } else {
+            0.0
+        };
+
+        // Monotonic deques capacity: window length + 1 (classic trick so head==tail => empty)
+        let dq_cap = vol_period + 1;
+        let (max_idx, max_val) = (vec![0usize; dq_cap], vec![0.0f64; dq_cap]);
+        let (min_idx, min_val) = (vec![0usize; dq_cap], vec![0.0f64; dq_cap]);
+
+        // Smoothing buffers
+        let sm_ring = if smoothing && (smooth_type == 1 || smooth_type == 3) {
+            vec![0.0f64; smooth_period]
+        } else {
+            Vec::new()
+        };
+
+        // WMA denominator
+        let wma_den = if smoothing && smooth_type == 3 {
+            let p = smooth_period as f64;
+            p.mul_add(p + 1.0, 0.0) * 0.5 // p*(p+1)/2 with FMA
+        } else {
+            0.0
+        };
+
+        // Readiness:
+        // - core VAMA needs max(base_period, vol_period) samples
+        // - SMA/WMA add (smooth_period - 1) more before a full window is available
+        // - EMA smoothing is defined immediately once core is ready
+        let core_ready = base_period.max(vol_period);
+        let smooth_lag = if smoothing {
+            match smooth_type {
+                1 | 3 => smooth_period.saturating_sub(1),
+                2 => 0,
+                _ => 0,
+            }
+        } else {
+            0
+        };
+        let ready_after = core_ready + smooth_lag;
 
         Ok(Self {
-            buffer: vec![0.0; buffer_size],
-            ema_buffer: vec![0.0; buffer_size],
             base_period,
             vol_period,
             smoothing,
             smooth_type,
             smooth_period,
+
+            alpha,
+            ema: 0.0,
+            have_ema: false,
+
+            dq_cap,
+            max_idx, max_val, max_head: 0, max_tail: 0,
+            min_idx, min_val, min_head: 0, min_tail: 0,
+
+            sm_ring,
+            sm_ptr: 0,
+            sm_count: 0,
+            sm_sum: 0.0,
+
+            sm_alpha,
+            sm_ema: 0.0,
+            have_sm_ema: false,
+
+            wma_num: 0.0,
+            wma_den,
+
             index: 0,
+            ready_after,
             ready: false,
         })
     }
 
-    pub fn update(&mut self, value: f64) -> Option<f64> {
-        // simple EMA update + O(vol_period) deviation window scan
-        let alpha = 2.0 / (self.base_period as f64 + 1.0);
+    #[inline(always)]
+    pub fn update(&mut self, x: f64) -> Option<f64> {
+        let t = self.index as usize;
 
-        // update ring
-        let n = self.buffer.len();
-        self.buffer[self.index as usize % n] = value;
-
-        // incremental ema
-        if self.index == 0 {
-            self.ema_buffer[0] = value;
+        // --- 1) base EMA update (fma for precision and speed)
+        if !self.have_ema {
+            self.ema = x;
+            self.have_ema = true;
         } else {
-            let prev = self.ema_buffer[(self.index.wrapping_sub(1)) as usize % n];
-            self.ema_buffer[self.index as usize % n] = alpha * value + (1.0 - alpha) * prev;
+            // ema = ema + alpha * (x - ema)
+            self.ema = self.alpha.mul_add(x - self.ema, self.ema);
         }
 
-        self.index = self.index.wrapping_add(1);
-        if self.index >= self.base_period.max(self.vol_period) as u64 {
-            self.ready = true;
+        // --- 2) maintain monotonic deques on deviation d_t = x - ema
+        // Expire indices falling out of the last vol_period samples
+        let cutoff = if t + 1 > self.vol_period { t + 1 - self.vol_period } else { 0 };
+        while self.max_head != self.max_tail && self.max_idx[self.max_head] < cutoff {
+            self.max_head = (self.max_head + 1) % self.dq_cap;
         }
-        if !self.ready {
+        while self.min_head != self.min_tail && self.min_idx[self.min_head] < cutoff {
+            self.min_head = (self.min_head + 1) % self.dq_cap;
+        }
+
+        // Push current deviation if finite
+        let d = x - self.ema;
+        if d.is_finite() {
+            // MAX deque: keep decreasing values
+            while self.max_head != self.max_tail {
+                let last = if self.max_tail == 0 { self.dq_cap - 1 } else { self.max_tail - 1 };
+                if self.max_val[last] <= d {
+                    self.max_tail = last; // pop_back
+                } else {
+                    break;
+                }
+            }
+            self.max_idx[self.max_tail] = t;
+            self.max_val[self.max_tail] = d;
+            self.max_tail = (self.max_tail + 1) % self.dq_cap;
+
+            // MIN deque: keep increasing values
+            while self.min_head != self.min_tail {
+                let last = if self.min_tail == 0 { self.dq_cap - 1 } else { self.min_tail - 1 };
+                if self.min_val[last] >= d {
+                    self.min_tail = last; // pop_back
+                } else {
+                    break;
+                }
+            }
+            self.min_idx[self.min_tail] = t;
+            self.min_val[self.min_tail] = d;
+            self.min_tail = (self.min_tail + 1) % self.dq_cap;
+        }
+
+        // --- 3) form the unsmoothed core once the EMA/vol windows are ready
+        let core_ready = t + 1 >= self.base_period.max(self.vol_period);
+        let core = if core_ready {
+            if self.max_head != self.max_tail && self.min_head != self.min_tail {
+                // e + 0.5*(up + dn) using fma
+                (0.5f64).mul_add(self.max_val[self.max_head] + self.min_val[self.min_head], self.ema)
+            } else {
+                // Fall back to EMA if we have no valid deviations
+                self.ema
+            }
+        } else {
+            self.index = self.index.wrapping_add(1);
             return None;
-        }
-
-        let ema_now = self.ema_buffer[(self.index.wrapping_sub(1)) as usize % n];
-        let mut hi = f64::NEG_INFINITY;
-        let mut lo = f64::INFINITY;
-        let take = self.vol_period.min(self.index as usize); // bounded at start
-        for k in 0..take {
-            let j = self.index - 1 - k as u64;
-            let x = self.buffer[j as usize % n];
-            let e = self.ema_buffer[j as usize % n];
-            let d = x - e;
-            if d > hi {
-                hi = d;
-            }
-            if d < lo {
-                lo = d;
-            }
-        }
-        let core = if hi.is_infinite() || lo.is_infinite() {
-            ema_now
-        } else {
-            ema_now + (hi + lo) / 2.0
         };
 
-        if !self.smoothing {
-            return Some(core);
-        }
-        // optional smoothing step (small fixed SMA/EMA/WMA over last smooth_period on core)
-        // keep it trivial to avoid extra storage; approximate with SMA of recent cores
-        let m = self.smooth_period.min(self.index as usize);
-        let mut sum = 0.0;
-        let mut cnt = 0usize;
-        for k in 0..m {
-            let j = self.index - 1 - k as u64;
-            let e = self.ema_buffer[j as usize % n];
-            // recompute core over that j to avoid storing history; acceptable for streaming
-            let mut hi2 = f64::NEG_INFINITY;
-            let mut lo2 = f64::INFINITY;
-            let take2 = self.vol_period.min((j + 1) as usize);
-            for kk in 0..take2 {
-                let jj = (j as usize).wrapping_sub(kk);
-                let xj = self.buffer[jj % n];
-                let ej = self.ema_buffer[jj % n];
-                let dj = xj - ej;
-                if dj > hi2 {
-                    hi2 = dj;
+        // --- 4) optional smoothing in O(1)
+        let out = if !self.smoothing {
+            core
+        } else {
+            match self.smooth_type {
+                // SMA(p): keep running sum over last p core values
+                1 => {
+                    if self.sm_ring.is_empty() {
+                        core
+                    } else {
+                        if self.sm_count < self.smooth_period {
+                            self.sm_ring[self.sm_ptr] = core;
+                            self.sm_sum += core;
+                            self.sm_ptr = (self.sm_ptr + 1) % self.smooth_period;
+                            self.sm_count += 1;
+                        } else {
+                            let old = self.sm_ring[self.sm_ptr];
+                            self.sm_ring[self.sm_ptr] = core;
+                            self.sm_ptr = (self.sm_ptr + 1) % self.smooth_period;
+                            self.sm_sum = self.sm_sum + core - old;
+                        }
+                        if self.sm_count < self.smooth_period {
+                            // not yet full window -> mirror batch semantics: delay output
+                            core
+                        } else {
+                            self.sm_sum / (self.smooth_period as f64)
+                        }
+                    }
                 }
-                if dj < lo2 {
-                    lo2 = dj;
+
+                // EMA(p): one accumulator
+                2 => {
+                    if !self.have_sm_ema {
+                        self.sm_ema = core;
+                        self.have_sm_ema = true;
+                    } else {
+                        self.sm_ema = self.sm_alpha.mul_add(core - self.sm_ema, self.sm_ema);
+                    }
+                    self.sm_ema
                 }
+
+                // WMA(p): keep simple sum S_t and weighted sum numerator N_t
+                3 => {
+                    if self.sm_ring.is_empty() {
+                        core
+                    } else {
+                        if self.sm_count < self.smooth_period {
+                            // growing phase: N += (k)*core, where k = sm_count+1
+                            self.sm_ring[self.sm_ptr] = core;
+                            let k = (self.sm_count + 1) as f64;
+                            self.wma_num = k.mul_add(core, self.wma_num);
+                            self.sm_sum += core;
+                            self.sm_ptr = (self.sm_ptr + 1) % self.smooth_period;
+                            self.sm_count += 1;
+                        } else {
+                            // rolling phase:
+                            // N_{t+1} = N_t + p*core - S_t
+                            // S_{t+1} = S_t + core - old
+                            let old = self.sm_ring[self.sm_ptr];
+                            let s_prev = self.sm_sum;
+                            self.wma_num = (self.smooth_period as f64).mul_add(core, self.wma_num) - s_prev;
+                            self.sm_ring[self.sm_ptr] = core;
+                            self.sm_ptr = (self.sm_ptr + 1) % self.smooth_period;
+                            self.sm_sum = s_prev + core - old;
+                        }
+                        if self.sm_count < self.smooth_period {
+                            core // delay until full window
+                        } else {
+                            self.wma_num / self.wma_den
+                        }
+                    }
+                }
+
+                _ => core,
             }
-            let core_j = if hi2.is_infinite() || lo2.is_infinite() {
-                e
-            } else {
-                e + (hi2 + lo2) / 2.0
-            };
-            sum += core_j;
-            cnt += 1;
+        };
+
+        // --- 5) readiness & return
+        self.index = self.index.wrapping_add(1);
+        if !self.ready && (t + 1) >= self.ready_after {
+            self.ready = true;
         }
-        Some(sum / cnt as f64)
+        Some(out)
     }
 }
 

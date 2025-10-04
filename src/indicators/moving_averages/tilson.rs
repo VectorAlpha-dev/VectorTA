@@ -24,6 +24,7 @@
 //!   Sequential EMA cascade limits SIMD wins; benches showed slower than scalar on 100k. Runtime short-circuits to scalar.
 //! - Streaming update: O(1) cascade, matches batch numerics exactly.
 //! - Memory: Uses `alloc_with_nan_prefix` and writes outputs in-place; no O(N) temporaries for outputs.
+//! - Decision: Streaming uses an O(1) warmup state-machine (no buffer), preserving scalar arithmetic order; fast-math disabled to keep exact matching.
 //! - Row-specific batch: Not attempted; limited cross-row sharing and high complexity for marginal gains.
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1169,39 +1170,63 @@ pub unsafe fn tilson_row_avx512_long(
 
 #[derive(Debug, Clone)]
 pub struct TilsonStream {
+    // Params
     period: usize,
     v_factor: f64,
-    e: [f64; 6],
+
+    // EMA cascade state
+    e1: f64,
+    e2: f64,
+    e3: f64,
+    e4: f64,
+    e5: f64,
+    e6: f64,
+
+    // Precomputed constants
     k: f64,
     one_minus_k: f64,
+    inv_p: f64,
     c1: f64,
     c2: f64,
     c3: f64,
     c4: f64,
-    lookback_total: usize,
+
+    // Warmup bookkeeping: state machine instead of a warmup buffer
+    // phase = 0 -> build SMA(e1)
+    // phase = 1 -> init e2 by averaging e1 over (period-1) updates
+    // phase = 2 -> init e3 by averaging e2 over (period-1) updates
+    // phase = 3 -> init e4 by averaging e3 over (period-1) updates
+    // phase = 4 -> init e5 by averaging e4 over (period-1) updates
+    // phase = 5 -> init e6 by averaging e5 over (period-1) updates; first output is produced here
+    // phase = 6 -> steady RUN: update e1..e6 each tick and output
+    phase: u8,
+    in_phase_count: usize,
+    sum_e1: f64,  // accumulates SMA for e1 during phase 0
+    acc: f64,     // generic accumulator used in phases 1..5
+
+    // Exposed/diagnostic (kept for parity with your tests & metrics)
+    lookback_total: usize, // = 6 * (period - 1)
     values_seen: usize,
-    initialized: bool,
-    warmup_buffer: Vec<f64>,
-    warmup_index: usize,
 }
 
 impl TilsonStream {
     pub fn try_new(params: TilsonParams) -> Result<Self, TilsonError> {
         let period = params.period.unwrap_or(5);
         let v_factor = params.volume_factor.unwrap_or(0.0);
+
         if period == 0 {
-            return Err(TilsonError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(TilsonError::InvalidPeriod { period, data_len: 0 });
         }
         if v_factor.is_nan() || v_factor.is_infinite() {
             return Err(TilsonError::InvalidVolumeFactor { v_factor });
         }
-        let lookback_total = 6 * (period - 1);
-        let k = 2.0 / (period as f64 + 1.0);
 
-        // Pre-calculate T3 coefficients
+        // smoothing constants
+        let k = 2.0 / (period as f64 + 1.0);
+        let one_minus_k = 1.0 - k;
+        let inv_p = 1.0 / (period as f64);
+
+        // T3 coefficients (standard)
         let t = v_factor * v_factor;
         let c1 = -(t * v_factor);
         let c2 = 3.0 * (t - c1);
@@ -1211,135 +1236,171 @@ impl TilsonStream {
         Ok(Self {
             period,
             v_factor,
-            e: [0.0; 6],
+            e1: 0.0, e2: 0.0, e3: 0.0, e4: 0.0, e5: 0.0, e6: 0.0,
             k,
-            one_minus_k: 1.0 - k,
-            c1,
-            c2,
-            c3,
-            c4,
-            lookback_total,
+            one_minus_k,
+            inv_p,
+            c1, c2, c3, c4,
+            phase: 0,
+            in_phase_count: 0,
+            sum_e1: 0.0,
+            acc: 0.0,
+            lookback_total: 6 * (period - 1),
             values_seen: 0,
-            initialized: false,
-            warmup_buffer: Vec::with_capacity(lookback_total + 1),
-            warmup_index: 0,
         })
     }
 
+    /// O(1) streaming update.
+    /// Returns:
+    /// - None  for the first `lookback_total` values,
+    /// - Some(t3) starting at index `lookback_total`, matching batch scalar numerics.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        // During warmup, collect values
-        if self.values_seen < self.lookback_total {
-            self.warmup_buffer.push(value);
-            self.values_seen += 1;
-            return None;
+        self.values_seen = self.values_seen.wrapping_add(1);
+
+        match self.phase {
+            // -------- Phase 0: build SMA(e1) from the first `period` samples
+            0 => {
+                self.sum_e1 += value;
+                self.in_phase_count += 1;
+                if self.in_phase_count == self.period {
+                    self.e1 = self.sum_e1 * self.inv_p;
+                    self.in_phase_count = 0;
+
+                    // Fast path for period == 1: all remaining warmup stages are zero-length.
+                    if self.period == 1 {
+                        // e2..e6 become equal to e1 immediately
+                        self.e2 = self.e1; self.e3 = self.e2; self.e4 = self.e3; self.e5 = self.e4; self.e6 = self.e5;
+                        self.phase = 6; // RUN
+                        return Some(self.combine_exact());
+                    }
+
+                    // Otherwise move to phase 1 (init e2)
+                    self.acc = self.e1; // accumulator starts with current EMA level per batch warmup
+                    self.phase = 1;
+                }
+                None
+            }
+
+            // -------- Phase 1: init e2 (average of e1 over next period-1 updates)
+            1 => {
+                self.cascade_update_upto(value, 1);
+                self.acc += self.e1;
+                self.in_phase_count += 1;
+                if self.in_phase_count == self.period - 1 {
+                    self.e2 = self.acc * self.inv_p;
+                    self.acc = self.e2;
+                    self.in_phase_count = 0;
+                    self.phase = 2;
+                }
+                None
+            }
+
+            // -------- Phase 2: init e3 (average of e2)
+            2 => {
+                self.cascade_update_upto(value, 2);
+                self.acc += self.e2;
+                self.in_phase_count += 1;
+                if self.in_phase_count == self.period - 1 {
+                    self.e3 = self.acc * self.inv_p;
+                    self.acc = self.e3;
+                    self.in_phase_count = 0;
+                    self.phase = 3;
+                }
+                None
+            }
+
+            // -------- Phase 3: init e4 (average of e3)
+            3 => {
+                self.cascade_update_upto(value, 3);
+                self.acc += self.e3;
+                self.in_phase_count += 1;
+                if self.in_phase_count == self.period - 1 {
+                    self.e4 = self.acc * self.inv_p;
+                    self.acc = self.e4;
+                    self.in_phase_count = 0;
+                    self.phase = 4;
+                }
+                None
+            }
+
+            // -------- Phase 4: init e5 (average of e4)
+            4 => {
+                self.cascade_update_upto(value, 4);
+                self.acc += self.e4;
+                self.in_phase_count += 1;
+                if self.in_phase_count == self.period - 1 {
+                    self.e5 = self.acc * self.inv_p;
+                    self.acc = self.e5;
+                    self.in_phase_count = 0;
+                    self.phase = 5;
+                }
+                None
+            }
+
+            // -------- Phase 5: init e6 (average of e5). First output is produced here.
+            5 => {
+                self.cascade_update_upto(value, 5);
+                self.acc += self.e5;
+                self.in_phase_count += 1;
+                if self.in_phase_count == self.period - 1 {
+                    self.e6 = self.acc * self.inv_p;
+                    self.phase = 6; // RUN
+                    self.in_phase_count = 0;
+                    // IMPORTANT: batch scalar writes the first output *right after* finishing e6 init
+                    return Some(self.combine_exact());
+                }
+                None
+            }
+
+            // -------- Phase 6: RUN (steady state)
+            _ => {
+                self.cascade_update_upto(value, 6);
+                Some(self.combine_exact())
+            }
         }
-
-        // Initialize after collecting exactly lookback_total values
-        if !self.initialized {
-            self.initialize_from_warmup();
-            self.initialized = true;
-            // Now process the current value (the lookback_total+1 th value)
-        }
-
-        self.values_seen += 1;
-
-        // Update the EMA cascade with the new value
-        self.e[0] = self.k * value + self.one_minus_k * self.e[0];
-        for i in 1..6 {
-            self.e[i] = self.k * self.e[i - 1] + self.one_minus_k * self.e[i];
-        }
-
-        // Calculate and return T3 value
-        Some(self.c1 * self.e[5] + self.c2 * self.e[4] + self.c3 * self.e[3] + self.c4 * self.e[2])
     }
 
-    fn initialize_from_warmup(&mut self) {
-        // Match the scalar kernel's warmup initialization
-        // The scalar implementation consumes exactly lookback_total values for warmup
-        let period = self.period;
+    // --- helpers -------------------------------------------------------------
+
+    /// Update e1..e{upto} once with new sample `x` (sequential cascade).
+    /// Upto is in [1..6]. Uses exact arithmetic order compatible with scalar kernel.
+    #[inline(always)]
+    fn cascade_update_upto(&mut self, x: f64, upto: u8) {
         let k = self.k;
-        let one_minus_k = self.one_minus_k;
+        let omk = self.one_minus_k;
 
-        // We need exactly lookback_total values, which is 6 * (period - 1)
-        // This is distributed as: period + 5*(period-1) values
+        // e1
+        self.e1 = k * x + omk * self.e1;
+        if upto == 1 { return; }
 
-        // Initialize e1 as average of first period values
-        let mut temp_real = 0.0;
-        for i in 0..period {
-            temp_real += self.warmup_buffer[self.warmup_index + i];
-        }
-        self.e[0] = temp_real / (period as f64);
-        self.warmup_index += period;
+        // e2
+        self.e2 = k * self.e1 + omk * self.e2;
+        if upto == 2 { return; }
 
-        // Initialize e2
-        temp_real = self.e[0];
-        for j in 1..period {
-            if self.warmup_index < self.warmup_buffer.len() {
-                self.e[0] = k * self.warmup_buffer[self.warmup_index] + one_minus_k * self.e[0];
-                temp_real += self.e[0];
-                self.warmup_index += 1;
-            }
-        }
-        self.e[1] = temp_real / (period as f64);
+        // e3
+        self.e3 = k * self.e2 + omk * self.e3;
+        if upto == 3 { return; }
 
-        // Initialize e3
-        temp_real = self.e[1];
-        for j in 1..period {
-            if self.warmup_index < self.warmup_buffer.len() {
-                self.e[0] = k * self.warmup_buffer[self.warmup_index] + one_minus_k * self.e[0];
-                self.e[1] = k * self.e[0] + one_minus_k * self.e[1];
-                temp_real += self.e[1];
-                self.warmup_index += 1;
-            }
-        }
-        self.e[2] = temp_real / (period as f64);
+        // e4
+        self.e4 = k * self.e3 + omk * self.e4;
+        if upto == 4 { return; }
 
-        // Initialize e4
-        temp_real = self.e[2];
-        for j in 1..period {
-            if self.warmup_index < self.warmup_buffer.len() {
-                self.e[0] = k * self.warmup_buffer[self.warmup_index] + one_minus_k * self.e[0];
-                self.e[1] = k * self.e[0] + one_minus_k * self.e[1];
-                self.e[2] = k * self.e[1] + one_minus_k * self.e[2];
-                temp_real += self.e[2];
-                self.warmup_index += 1;
-            }
-        }
-        self.e[3] = temp_real / (period as f64);
+        // e5
+        self.e5 = k * self.e4 + omk * self.e5;
+        if upto == 5 { return; }
 
-        // Initialize e5
-        temp_real = self.e[3];
-        for j in 1..period {
-            if self.warmup_index < self.warmup_buffer.len() {
-                self.e[0] = k * self.warmup_buffer[self.warmup_index] + one_minus_k * self.e[0];
-                self.e[1] = k * self.e[0] + one_minus_k * self.e[1];
-                self.e[2] = k * self.e[1] + one_minus_k * self.e[2];
-                self.e[3] = k * self.e[2] + one_minus_k * self.e[3];
-                temp_real += self.e[3];
-                self.warmup_index += 1;
-            }
-        }
-        self.e[4] = temp_real / (period as f64);
+        // e6
+        self.e6 = k * self.e5 + omk * self.e6;
+    }
 
-        // Initialize e6
-        // At this point we should have used period + 4*(period-1) values
-        // The last loop uses the remaining period-1 values to reach lookback_total
-        temp_real = self.e[4];
-        for j in 1..period {
-            if self.warmup_index < self.warmup_buffer.len() {
-                self.e[0] = k * self.warmup_buffer[self.warmup_index] + one_minus_k * self.e[0];
-                self.e[1] = k * self.e[0] + one_minus_k * self.e[1];
-                self.e[2] = k * self.e[1] + one_minus_k * self.e[2];
-                self.e[3] = k * self.e[2] + one_minus_k * self.e[3];
-                self.e[4] = k * self.e[3] + one_minus_k * self.e[4];
-                temp_real += self.e[4];
-                self.warmup_index += 1;
-            }
-        }
-        self.e[5] = temp_real / (period as f64);
-
-        self.initialized = true;
+    /// Exact-order 4-term combination: ((c1*e6 + c2*e5) + c3*e4) + c4*e3
+    /// This preserves scalar batch arithmetic to keep tests bit/tightly equal.
+    #[inline(always)]
+    fn combine_exact(&self) -> f64 {
+        let s0 = self.c1 * self.e6 + self.c2 * self.e5;
+        let s1 = s0 + self.c3 * self.e4;
+        s1 + self.c4 * self.e3
     }
 }
 

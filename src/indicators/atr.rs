@@ -20,6 +20,7 @@
 //!   - On this machine at 100k samples: AVX2/AVX512 ~2–4% faster vs scalar; at 1M, AVX512 ~4–5%.
 //!   - Scalar path optimized (~15% vs baseline) via loop‑jamming + `mul_add` + pointer access.
 //! - Batch: row‑specific optimized path shares a single TR prepass across rows; seeds via TR prefix sums.
+//! - Streaming: switched to O(1) kernel (no ring buffer/modulo), FMA update, precomputed alpha; seeds with mean(TR[0..N)).
 //! - Memory: follows alma.rs patterns (NaN warmup, zero‑copy/uninit matrix helpers, aligned buffers).
 
 #[cfg(feature = "python")]
@@ -757,15 +758,18 @@ pub unsafe fn atr_avx512_long(
 #[derive(Debug, Clone)]
 pub struct AtrStream {
     length: usize,
-    buffer: Vec<f64>,
-    idx: usize,
-    filled: bool,
-    prev_close: f64,
-    rma: f64,
-    sum: f64,
+    alpha: f64,        // 1.0 / length
+    prev_close: f64,   // NaN until first close
+    rma: f64,          // last ATR (NaN until seeded)
+    warm_sum: f64,     // sum(TR) over the first `length` samples only
+    warm_count: usize, // how many TRs we've accumulated so far
+    seeded: bool,      // true once warm_count == length
 }
 
 impl AtrStream {
+    /// Decision: O(1) streaming ATR without ring buffer/modulo.
+    /// Seeds with mean of first N TRs; steady-state uses RMA with FMA form.
+    #[inline(always)]
     pub fn try_new(params: AtrParams) -> Result<Self, AtrError> {
         let length = params.length.unwrap_or(14);
         if length == 0 {
@@ -773,40 +777,59 @@ impl AtrStream {
         }
         Ok(Self {
             length,
-            buffer: vec![0.0; length],
-            idx: 0,
-            filled: false,
+            alpha: 1.0 / (length as f64),
             prev_close: f64::NAN,
             rma: f64::NAN,
-            sum: 0.0,
+            warm_sum: 0.0,
+            warm_count: 0,
+            seeded: false,
         })
     }
+
+    /// Update with the next OHLC triple.
+    /// Returns Some(atr) once seeded with `length` TRs, otherwise None.
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
+        debug_assert!(
+            high.is_finite() && low.is_finite() && close.is_finite(),
+            "Streaming ATR assumes finite inputs; prefilter NaNs/Infs upstream if needed",
+        );
+
+        // True Range:
+        //  - First bar: TR = high - low
+        //  - Subsequent: TR = max(high, prev_close) - min(low, prev_close)
+        // This avoids abs() and matches the textbook/Wilder definition.
         let tr = if self.prev_close.is_nan() {
             high - low
         } else {
-            let hl = high - low;
-            let hc = (high - self.prev_close).abs();
-            let lc = (low - self.prev_close).abs();
-            hl.max(hc).max(lc)
+            let up = if high > self.prev_close { high } else { self.prev_close };
+            let dn = if low < self.prev_close { low } else { self.prev_close };
+            up - dn
         };
+
+        // Update prev_close for the next tick before early-returns.
         self.prev_close = close;
-        self.sum += tr - self.buffer[self.idx];
-        self.buffer[self.idx] = tr;
-        self.idx = (self.idx + 1) % self.length;
-        if !self.filled && self.idx == 0 {
-            self.filled = true;
-            self.rma = self.sum / self.length as f64;
-            return Some(self.rma);
+
+        // Warmup: accumulate the arithmetic mean of the first `length` TRs.
+        if !self.seeded {
+            self.warm_sum += tr;
+            self.warm_count += 1;
+
+            if self.warm_count == self.length {
+                // First ATR is the simple average of the first N TRs (Wilder).
+                // Subsequent ATRs follow RMA/SMMA with α = 1/N:
+                // ATR_t = ATR_{t-1} + α * (TR_t - ATR_{t-1})
+                self.rma = self.warm_sum * self.alpha;
+                self.seeded = true;
+                return Some(self.rma);
+            }
+            return None;
         }
-        if !self.filled {
-            None
-        } else {
-            let alpha = 1.0 / self.length as f64;
-            self.rma += alpha * (tr - self.rma);
-            Some(self.rma)
-        }
+
+        // Steady-state RMA (Wilder's smoothing, α = 1/length)
+        // Use FMA form for precision & speed: rma' = α*(tr - rma) + rma
+        self.rma = self.alpha.mul_add(tr - self.rma, self.rma);
+        Some(self.rma)
     }
 }
 

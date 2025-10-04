@@ -20,7 +20,7 @@
 //! - Scalar: optimized O(n) via ring-indexed monotonic deques; small-window path uses tight direct scans with unrolling; %K and %D (SMA) computed in one pass.
 //! - SIMD: AVX2/AVX512 implemented only for small windows; benches show underperformance vs scalar at 100k (default params). Runtime `Auto` short-circuits to `Scalar`.
 //! - Batch: per-row kernel mirrors scalar optimizations; no cross-row sharing (window-dependent extrema).
-//! - Streaming: still O(k) per tick.
+//! - Streaming: O(1) amortized via ring-indexed monotonic deques for %K and a running-sum ring for %D (SMA).
 //! - Memory: follows ALMA patterns (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes). %D supports SMA (matype=0).
 
 #[cfg(feature = "python")]
@@ -854,21 +854,38 @@ pub unsafe fn stochf_avx512_long(
     );
 }
 
+/// Decision: Streaming uses O(1) amortized deques for %K and a running-sum ring for %D (SMA);
+/// matches offline scalar numerics post-warmup.
 #[derive(Debug, Clone)]
 pub struct StochfStream {
+    // params
     fastk_period: usize,
     fastd_period: usize,
     fastd_matype: usize,
-    high_buffer: Vec<f64>,
-    low_buffer: Vec<f64>,
-    close_buffer: Vec<f64>,
-    k_buffer: Vec<f64>,
-    d_sma_sum: f64,
-    head: usize,
-    count: usize,
+
+    // --- Monotonic deques for %K ---
+    // Max-deque (for highest high)
+    qh_idx: Vec<usize>,
+    qh_val: Vec<f64>,
+    qh_head: usize,
+    qh_tail: usize,
+
+    // Min-deque (for lowest low)
+    ql_idx: Vec<usize>,
+    ql_val: Vec<f64>,
+    ql_head: usize,
+    ql_tail: usize,
+
+    cap_k: usize, // == fastk_period
+
+    // tick counter
+    t: usize,
+
+    // --- Ring + running sum for %D (SMA of K) ---
+    k_ring: Vec<f64>,
     k_head: usize,
     k_count: usize,
-    filled: bool,
+    d_sma_sum: f64,
 }
 
 impl StochfStream {
@@ -885,77 +902,175 @@ impl StochfStream {
             });
         }
 
+        // Preallocate fixed-size deques and %D ring
+        let cap_k = fastk_period;
+
         Ok(Self {
             fastk_period,
             fastd_period,
             fastd_matype,
-            high_buffer: vec![f64::NAN; fastk_period],
-            low_buffer: vec![f64::NAN; fastk_period],
-            close_buffer: vec![f64::NAN; fastk_period],
-            k_buffer: vec![f64::NAN; fastd_period],
-            d_sma_sum: 0.0,
-            head: 0,
-            count: 0,
+
+            qh_idx: vec![0; cap_k],
+            qh_val: vec![0.0; cap_k],
+            qh_head: 0,
+            qh_tail: 0,
+
+            ql_idx: vec![0; cap_k],
+            ql_val: vec![0.0; cap_k],
+            ql_head: 0,
+            ql_tail: 0,
+
+            cap_k,
+
+            t: 0,
+
+            k_ring: vec![0.0; fastd_period],
             k_head: 0,
             k_count: 0,
-            filled: false,
+            d_sma_sum: 0.0,
         })
     }
 
-    pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<(f64, f64)> {
-        self.high_buffer[self.head] = high;
-        self.low_buffer[self.head] = low;
-        self.close_buffer[self.head] = close;
-        self.head = (self.head + 1) % self.fastk_period;
-        if self.count < self.fastk_period {
-            self.count += 1;
+    #[inline(always)]
+    fn inc(idx: &mut usize, cap: usize) {
+        *idx += 1;
+        if *idx == cap {
+            *idx = 0;
         }
-        if self.count < self.fastk_period {
+    }
+
+    #[inline(always)]
+    fn dec(idx: &mut usize, cap: usize) {
+        if *idx == 0 {
+            *idx = cap - 1;
+        } else {
+            *idx -= 1;
+        }
+    }
+
+    #[inline(always)]
+    fn qh_expire(&mut self, win_start: usize) {
+        while self.qh_head != self.qh_tail && self.qh_idx[self.qh_head] < win_start {
+            Self::inc(&mut self.qh_head, self.cap_k);
+        }
+    }
+    #[inline(always)]
+    fn ql_expire(&mut self, win_start: usize) {
+        while self.ql_head != self.ql_tail && self.ql_idx[self.ql_head] < win_start {
+            Self::inc(&mut self.ql_head, self.cap_k);
+        }
+    }
+
+    #[inline(always)]
+    fn qh_push(&mut self, idx: usize, val: f64) {
+        // Pop <= from back (maintain decreasing values)
+        while self.qh_head != self.qh_tail {
+            let mut back = self.qh_tail;
+            Self::dec(&mut back, self.cap_k);
+            if self.qh_val[back] <= val {
+                self.qh_tail = back;
+            } else {
+                break;
+            }
+        }
+        self.qh_idx[self.qh_tail] = idx;
+        self.qh_val[self.qh_tail] = val;
+        Self::inc(&mut self.qh_tail, self.cap_k);
+    }
+
+    #[inline(always)]
+    fn ql_push(&mut self, idx: usize, val: f64) {
+        // Pop >= from back (maintain increasing values)
+        while self.ql_head != self.ql_tail {
+            let mut back = self.ql_tail;
+            Self::dec(&mut back, self.cap_k);
+            if self.ql_val[back] >= val {
+                self.ql_tail = back;
+            } else {
+                break;
+            }
+        }
+        self.ql_idx[self.ql_tail] = idx;
+        self.ql_val[self.ql_tail] = val;
+        Self::inc(&mut self.ql_tail, self.cap_k);
+    }
+
+    /// O(1) amortized per tick for both %K and %D (SMA).
+    pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<(f64, f64)> {
+        let i = self.t;
+        // advance tick (wrapping avoids debug overflow panics on very long streams)
+        self.t = self.t.wrapping_add(1);
+
+        // Push current high/low into deques (ignore NaNs like offline deque path)
+        if high == high {
+            self.qh_push(i, high);
+        }
+        if low == low {
+            self.ql_push(i, low);
+        }
+
+        // Expire elements that fell out of the window
+        let have_k_window = (i + 1) >= self.fastk_period;
+        if have_k_window {
+            let win_start = i + 1 - self.fastk_period;
+            self.qh_expire(win_start);
+            self.ql_expire(win_start);
+        } else {
+            // Not enough samples for %K yet
             return None;
         }
 
-        let mut hh = f64::NEG_INFINITY;
-        let mut ll = f64::INFINITY;
-        for i in 0..self.fastk_period {
-            let idx = (self.head + i) % self.fastk_period;
-            let h = self.high_buffer[idx];
-            let l = self.low_buffer[idx];
-            if h > hh {
-                hh = h;
-            }
-            if l < ll {
-                ll = l;
-            }
-        }
-        let k = if hh == ll {
-            if self.close_buffer[(self.head + self.fastk_period - 1) % self.fastk_period] == hh {
+        // Fetch HH/LL from deque fronts; if empty, behave like offline code (-INF/INF)
+        let hh = if self.qh_head != self.qh_tail {
+            self.qh_val[self.qh_head]
+        } else {
+            f64::NEG_INFINITY
+        };
+        let ll = if self.ql_head != self.ql_tail {
+            self.ql_val[self.ql_head]
+        } else {
+            f64::INFINITY
+        };
+
+        // %K
+        let denom = hh - ll;
+        let k = if denom == 0.0 {
+            if close == hh {
                 100.0
             } else {
                 0.0
             }
         } else {
-            100.0
-                * (self.close_buffer[(self.head + self.fastk_period - 1) % self.fastk_period] - ll)
-                / (hh - ll)
+            // Use FMA like the offline kernels for accuracy/perf where FMA exists.
+            let scale = 100.0 / denom;
+            close.mul_add(scale, (-ll) * scale)
         };
 
-        self.k_buffer[self.k_head] = k;
-        self.k_head = (self.k_head + 1) % self.fastd_period;
-        if self.k_count < self.fastd_period {
-            self.k_count += 1;
-        }
-
+        // %D (SMA of K) — O(1) running-sum update.
         let d = if self.fastd_matype != 0 {
-            f64::NAN
+            f64::NAN // only SMA supported (matype=0), match offline semantics
         } else if self.k_count < self.fastd_period {
-            f64::NAN
-        } else {
-            let mut sum = 0.0;
-            for i in 0..self.fastd_period {
-                sum += self.k_buffer[i];
+            // still filling the ring
+            self.k_ring[self.k_head] = k;
+            self.d_sma_sum += k;
+            self.k_count += 1;
+            StochfStream::inc(&mut self.k_head, self.fastd_period);
+
+            if self.k_count == self.fastd_period {
+                self.d_sma_sum / (self.fastd_period as f64)
+            } else {
+                f64::NAN
             }
-            sum / (self.fastd_period as f64)
+        } else {
+            // normal running window: subtract oldest, add newest
+            let old = self.k_ring[self.k_head];
+            self.k_ring[self.k_head] = k;
+            StochfStream::inc(&mut self.k_head, self.fastd_period);
+
+            self.d_sma_sum += k - old;
+            self.d_sma_sum / (self.fastd_period as f64)
         };
+
         Some((k, d))
     }
 }

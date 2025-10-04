@@ -901,102 +901,161 @@ pub fn reverse_rsi_into_slice(
 }
 
 // ==================== STREAMING SUPPORT ====================
+// Decision: Streaming optimized (no ring buffer); emits at warm_idx; precomputes constants.
+// Matches batch warmup semantics and alignment; scalar-safe O(1) updates.
 pub struct ReverseRsiStream {
+    // immutable params
     rsi_length: usize,
     rsi_level: f64,
     ema_length: usize,
-    buf: Vec<f64>,
-    head: usize,
-    filled: bool,
-    up_ema: f64,
-    down_ema: f64,
     alpha: f64,
     beta: f64,
-    count: usize,
+
+    // precomputed constants
+    n_minus_1: f64,   // (n - 1)
+    rs_target: f64,   // L / (100 - L)
+    rs_coeff: f64,    // (n - 1) * rs_target
+    neg_scale: f64,   // (100 - L) / L
+
+    // state
+    seen_first: bool, // started after first finite sample (matches batch 'first')
+    warm_count: usize,
+    sum_up: f64,
+    sum_dn: f64,
+    up_ema: f64,
+    down_ema: f64,
+    prev: f64,        // previous raw value (can be NaN)
 }
 
 impl ReverseRsiStream {
+    #[inline]
     pub fn try_new(params: ReverseRsiParams) -> Result<Self, ReverseRsiError> {
         let rsi_length = params.rsi_length.unwrap_or(14);
         if rsi_length == 0 {
             return Err(ReverseRsiError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
+                period: 0, data_len: 0,
             });
         }
+
         let rsi_level = params.rsi_level.unwrap_or(50.0);
         if !(0.0 < rsi_level && rsi_level < 100.0) || !rsi_level.is_finite() {
             return Err(ReverseRsiError::InvalidRsiLevel { level: rsi_level });
         }
-        let ema_length = (2 * rsi_length) - 1;
-        let a = 2.0 / (ema_length as f64 + 1.0);
+
+        // EMA warm-up has length = 2*n - 1 so that alpha = 2/(len+1) == 1/n (Wilder smoothing)
+        let ema_length = (2 * rsi_length).saturating_sub(1);
+        let alpha = 2.0 / (ema_length as f64 + 1.0); // == 1.0 / rsi_length as f64
+        let beta  = 1.0 - alpha;
+
+        // Precompute all level/length constants once
+        let n_minus_1 = (rsi_length - 1) as f64;
+        let inv = 100.0 - rsi_level;
+        let rs_target = rsi_level / inv;     // L / (100 - L)
+        let rs_coeff  = n_minus_1 * rs_target;
+        let neg_scale = inv / rsi_level;     // (100 - L) / L
+
         Ok(Self {
             rsi_length,
             rsi_level,
             ema_length,
-            buf: vec![f64::NAN; ema_length + 1],
-            head: 0,
-            filled: false,
+            alpha,
+            beta,
+            n_minus_1,
+            rs_target,
+            rs_coeff,
+            neg_scale,
+            seen_first: false,
+            warm_count: 0,
+            sum_up: 0.0,
+            sum_dn: 0.0,
             up_ema: 0.0,
             down_ema: 0.0,
-            alpha: a,
-            beta: 1.0 - a,
-            count: 0,
+            prev: f64::NAN,
         })
     }
 
-    #[inline]
+    /// O(1) update. Returns `Some(value)` once seeded; `None` during warm-up.
+    #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        let prev = if !self.filled && self.head == 0 {
-            0.0
-        } else {
-            let idx = (self.head + self.buf.len() - 1) % self.buf.len();
-            self.buf[idx]
-        };
-
-        self.buf[self.head] = value;
-        self.head = (self.head + 1) % self.buf.len();
-        if !self.filled && self.head == 0 {
-            self.filled = true;
-        }
-
-        let d = if value.is_finite() && prev.is_finite() {
-            value - prev
-        } else {
-            0.0
-        };
-        let up = d.max(0.0);
-        let dn = (-d).max(0.0);
-
-        self.count += 1;
-
-        // Warmup with SMA over ema_length samples
-        if self.count <= self.ema_length {
-            self.up_ema = ((self.count as f64 - 1.0) * self.up_ema + up) / (self.count as f64);
-            self.down_ema = ((self.count as f64 - 1.0) * self.down_ema + dn) / (self.count as f64);
-            return None;
-        } else {
-            self.up_ema = self.beta * self.up_ema + self.alpha * up;
-            self.down_ema = self.beta * self.down_ema + self.alpha * dn;
-        }
-
-        let x = (self.rsi_length - 1) as f64
-            * (self.down_ema * self.rsi_level / (100.0 - self.rsi_level) - self.up_ema);
-        let out = if x >= 0.0 {
-            value + x
-        } else {
-            let v = value + x * ((100.0 - self.rsi_level) / self.rsi_level);
-            if v.is_finite() {
-                v
-            } else {
-                0.0
+        // Start only when we see the first finite sample (matches batch's `first` logic)
+        if !self.seen_first {
+            if !value.is_finite() {
+                self.prev = value; // preserve semantics: prev = cur even if NaN
+                return None;
             }
-        };
+            // First finite sample: prev is conceptually 0.0 in the batch warm-up
+            let d = value; // value - 0.0
+            self.sum_up += if d > 0.0 { d } else { 0.0 };
+            self.sum_dn += if d < 0.0 { -d } else { 0.0 };
+            self.warm_count = 1;
+            self.prev = value;
+            self.seen_first = true;
+
+            // If ema_length == 1, we can emit v0 immediately
+            if self.ema_length == 1 {
+                self.up_ema = self.sum_up;
+                self.down_ema = self.sum_dn;
+                return Some(self.emit_seed(value));
+            }
+            return None;
+        }
+
+        // General case: compute delta guarding non-finites
+        let d = if value.is_finite() && self.prev.is_finite() { value - self.prev } else { 0.0 };
+        let up = if d > 0.0 { d } else { 0.0 };
+        let dn = if d < 0.0 { -d } else { 0.0 };
+
+        // Warm-up over ema_length samples (SMA seed), emit seed value at the last warm-up bar
+        if self.warm_count < self.ema_length {
+            self.warm_count += 1;
+            self.sum_up += up;
+            self.sum_dn += dn;
+            self.prev = value;
+
+            if self.warm_count == self.ema_length {
+                self.up_ema = self.sum_up / (self.ema_length as f64);
+                self.down_ema = self.sum_dn / (self.ema_length as f64);
+                // First output corresponds to warm_idx = first + ema_length - 1
+                return Some(self.emit_seed(value));
+            }
+            return None;
+        }
+
+        // Seeded: Wilder-EMA recurrence
+        self.up_ema   = self.beta.mul_add(self.up_ema,   self.alpha * up);
+        self.down_ema = self.beta.mul_add(self.down_ema, self.alpha * dn);
+
+        let out = self.emit_from(value);
+        self.prev = value;
         Some(out)
     }
 
+    /// Convenience wrapper that returns NaN during warm-up.
+    #[inline]
     pub fn next(&mut self, value: f64) -> f64 {
         self.update(value).unwrap_or(f64::NAN)
+    }
+
+    // ----- helpers -----
+
+    #[inline(always)]
+    fn emit_seed(&self, base: f64) -> f64 {
+        // x0 = (n-1)*(dn_ema * (L/(100-L)) - up_ema)
+        let x0 = self.rs_coeff.mul_add(self.down_ema, -self.n_minus_1 * self.up_ema);
+        // Branchless scale: if x >= 0 => 1.0 else => neg_scale
+        let m = (x0 >= 0.0) as i32 as f64;
+        let scale0 = self.neg_scale + m * (1.0 - self.neg_scale);
+        let v0 = base + x0 * scale0;
+        if v0.is_finite() || x0 >= 0.0 { v0 } else { 0.0 }
+    }
+
+    #[inline(always)]
+    fn emit_from(&self, cur: f64) -> f64 {
+        let x = self.rs_coeff.mul_add(self.down_ema, -self.n_minus_1 * self.up_ema);
+        let m = (x >= 0.0) as i32 as f64;
+        let scale = self.neg_scale + m * (1.0 - self.neg_scale);
+        let v = cur + x * scale;
+        if v.is_finite() || x >= 0.0 { v } else { 0.0 }
     }
 }
 

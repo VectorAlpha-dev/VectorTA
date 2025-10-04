@@ -29,7 +29,7 @@
 //! ## Developer Notes
 //! - **AVX2**: No dedicated SIMD implementation - uses component indicators' SIMD kernels
 //! - **AVX512**: No dedicated SIMD implementation - uses component indicators' SIMD kernels
-//! - **Streaming**: O(n) - recalculates on entire buffer each update (needs optimization)
+//! - **Streaming**: O(1) updates implemented; matches fused scalar outputs after warmup.
 //! - **Memory**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
 
 #[cfg(feature = "python")]
@@ -2133,23 +2133,180 @@ impl ModGodModeBuilder {
 }
 
 // ============================================================================
-// STREAMING SUPPORT
+// STREAMING SUPPORT  —  O(1) per update
 // ============================================================================
 
-/// Streaming calculator for Modified God Mode indicator with ring buffer
+use std::collections::VecDeque;
+
+#[inline(always)]
+fn ema_step(x: f64, prev: f64, alpha: f64, beta: f64) -> f64 {
+    beta.mul_add(prev, alpha * x)
+}
+
+#[inline(always)]
+fn nonzero(v: f64) -> bool {
+    v != 0.0 && v.is_finite()
+}
+
+#[derive(Default)]
+struct MonoMax {
+    dq: VecDeque<(usize, f64)>,
+}
+impl MonoMax {
+    #[inline(always)]
+    fn push(&mut self, idx: usize, val: f64, win: usize) {
+        while let Some(&(j, _)) = self.dq.front() {
+            if idx >= j + win {
+                self.dq.pop_front();
+            } else {
+                break;
+            }
+        }
+        while let Some(&(_, v)) = self.dq.back() {
+            if v <= val {
+                self.dq.pop_back();
+            } else {
+                break;
+            }
+        }
+        self.dq.push_back((idx, val));
+    }
+    #[inline(always)]
+    fn get(&self) -> Option<f64> {
+        self.dq.front().map(|x| x.1)
+    }
+    #[inline(always)]
+    fn clear(&mut self) {
+        self.dq.clear();
+    }
+}
+
+#[derive(Default)]
+struct MonoMin {
+    dq: VecDeque<(usize, f64)>,
+}
+impl MonoMin {
+    #[inline(always)]
+    fn push(&mut self, idx: usize, val: f64, win: usize) {
+        while let Some(&(j, _)) = self.dq.front() {
+            if idx >= j + win {
+                self.dq.pop_front();
+            } else {
+                break;
+            }
+        }
+        while let Some(&(_, v)) = self.dq.back() {
+            if v >= val {
+                self.dq.pop_back();
+            } else {
+                break;
+            }
+        }
+        self.dq.push_back((idx, val));
+    }
+    #[inline(always)]
+    fn get(&self) -> Option<f64> {
+        self.dq.front().map(|x| x.1)
+    }
+    #[inline(always)]
+    fn clear(&mut self) {
+        self.dq.clear();
+    }
+}
+
+/// Streaming calculator with O(1) updates.
+/// Keeps compact state for all recurrences; no buffer rebuilds.
 pub struct ModGodModeStream {
+    // params
     n1: usize,
     n2: usize,
     n3: usize,
     mode: ModGodModeMode,
     use_volume: bool,
-    cap: usize,
-    head: usize,
-    filled: bool,
-    high: Vec<f64>,
-    low: Vec<f64>,
-    close: Vec<f64>,
-    volume: Option<Vec<f64>>,
+
+    // precomputed constants
+    alpha1: f64,
+    beta1: f64,
+    alpha2: f64,
+    beta2: f64,
+    alpha3: f64,
+    beta3: f64,
+    // warmup gates (match conservative compound warmups from classic kernel)
+    warm_wt: usize, // when wavetrend can start
+    warm_sig: usize, // when signal (SMA6) can start
+
+    // time index (# of samples processed so far)
+    idx: usize,
+
+    // ====== TCI (EMA chains) ======
+    ema1_c: f64,
+    seed_ema1: bool,
+    ema2_abs: f64,
+    seed_ema2: bool,
+    ema3_ci: f64,
+    seed_ema3: bool,
+
+    // ====== RSI (Wilder) ======
+    rs_avg_gain: f64,
+    rs_avg_loss: f64,
+    rsi_seeded: bool,
+    rs_init_cnt: usize,
+    prev_close: f64,
+    have_prev_close: bool,
+
+    // ====== LRSI (Ehlers) ======
+    alpha_l: f64,
+    one_m_l: f64,
+    l0: f64,
+    l1: f64,
+    l2: f64,
+    l3: f64,
+
+    // ====== MFI (ring over n3) ======
+    has_vol: bool,
+    mf_pos_sum: f64,
+    mf_neg_sum: f64,
+    mf_ring_mf: Vec<f64>,
+    mf_ring_sgn: Vec<i8>,
+    mf_head: usize,
+    tp_prev: f64,
+    tp_has_prev: bool,
+
+    // ====== CSI / TSI (double EMA of momentum & abs(momentum)) ======
+    tsi_ema_m_s: f64,
+    tsi_ema_a_s: f64,
+    tsi_seed_s: bool,
+    tsi_ema_m_l: f64,
+    tsi_ema_a_l: f64,
+    tsi_seed_l: bool,
+
+    // ====== CSI_MG (double EMA of pc_norm and abs(pc)) ======
+    csi_num_e1: f64,
+    csi_num_e2: f64,
+    csi_seed_e1: bool,
+    csi_seed_e2: bool,
+    csi_den_e1: f64,
+    csi_den_e2: f64,
+
+    // ====== CBCI: RSI momentum over n2 + EMA(RSI,n3) ======
+    rsi_ring: Vec<f64>,
+    rsi_ring_head: usize,
+    rsi_ema: f64,
+    rsi_ema_seed: bool,
+
+    // ====== %R (Willy on close-only over n2) via monotonic deques ======
+    w_max: MonoMax,
+    w_min: MonoMin,
+
+    // ====== signal SMA(6) & histogram EMA(n3) ======
+    sig_ring: [f64; 6],
+    sig_head: usize,
+    sig_sum: f64,
+    sig_seeded: bool,
+    sig_count: usize,
+
+    hist_prev: f64,
+    hist_seeded: bool,
 }
 
 impl ModGodModeStream {
@@ -2171,23 +2328,108 @@ impl ModGodModeStream {
     }
 
     pub fn new(n1: usize, n2: usize, n3: usize, mode: ModGodModeMode, use_volume: bool) -> Self {
-        let cap = (n1.max(n2).max(n3)).max(64); // Minimum 64 for efficient ring buffer
+        // precompute alphas for EMAs
+        let alpha1 = 2.0 / (n1 as f64 + 1.0);
+        let beta1 = 1.0 - alpha1;
+        let alpha2 = 2.0 / (n2 as f64 + 1.0);
+        let beta2 = 1.0 - alpha2;
+        let alpha3 = 2.0 / (n3 as f64 + 1.0);
+        let beta3 = 1.0 - alpha3;
+
+        // Align warmups with fused scalar path: start wavetrend at max(n1,n2,n3)-1
+        let warm_wt = n1.max(n2).max(n3) - 1;
+        let warm_sig = warm_wt + (6 - 1); // need 6 samples for SMA(6)
+
         Self {
             n1,
             n2,
             n3,
             mode,
             use_volume,
-            cap,
-            head: 0,
-            filled: false,
-            high: vec![f64::NAN; cap],
-            low: vec![f64::NAN; cap],
-            close: vec![f64::NAN; cap],
-            volume: use_volume.then(|| vec![0.0; cap]),
+            alpha1,
+            beta1,
+            alpha2,
+            beta2,
+            alpha3,
+            beta3,
+            warm_wt,
+            warm_sig,
+            idx: 0,
+
+            // TCI
+            ema1_c: 0.0,
+            seed_ema1: false,
+            ema2_abs: 0.0,
+            seed_ema2: false,
+            ema3_ci: 0.0,
+            seed_ema3: false,
+
+            // RSI
+            rs_avg_gain: 0.0,
+            rs_avg_loss: 0.0,
+            rsi_seeded: false,
+            rs_init_cnt: 0,
+            prev_close: 0.0,
+            have_prev_close: false,
+
+            // LRSI
+            alpha_l: 0.7,
+            one_m_l: 1.0 - 0.7,
+            l0: 0.0,
+            l1: 0.0,
+            l2: 0.0,
+            l3: 0.0,
+
+            // MFI
+            has_vol: use_volume,
+            mf_pos_sum: 0.0,
+            mf_neg_sum: 0.0,
+            mf_ring_mf: vec![0.0; n3.max(1)],
+            mf_ring_sgn: vec![0; n3.max(1)],
+            mf_head: 0,
+            tp_prev: 0.0,
+            tp_has_prev: false,
+
+            // TSI
+            tsi_ema_m_s: 0.0,
+            tsi_ema_a_s: 0.0,
+            tsi_seed_s: false,
+            tsi_ema_m_l: 0.0,
+            tsi_ema_a_l: 0.0,
+            tsi_seed_l: false,
+
+            // CSI_MG
+            csi_num_e1: 0.0,
+            csi_num_e2: 0.0,
+            csi_seed_e1: false,
+            csi_seed_e2: false,
+            csi_den_e1: 0.0,
+            csi_den_e2: 0.0,
+
+            // CBCI
+            rsi_ring: vec![f64::NAN; n2.max(1)],
+            rsi_ring_head: 0,
+            rsi_ema: 0.0,
+            rsi_ema_seed: false,
+
+            // Willy deques
+            w_max: MonoMax::default(),
+            w_min: MonoMin::default(),
+
+            // signal/hist
+            sig_ring: [0.0; 6],
+            sig_head: 0,
+            sig_sum: 0.0,
+            sig_seeded: false,
+            sig_count: 0,
+
+            hist_prev: 0.0,
+            hist_seeded: false,
         }
     }
 
+    /// Push one bar; returns (wt, sig, hist) when ready.
+    #[inline]
     pub fn update(
         &mut self,
         high: f64,
@@ -2195,108 +2437,459 @@ impl ModGodModeStream {
         close: f64,
         volume: Option<f64>,
     ) -> Option<(f64, f64, f64)> {
-        // Write to ring buffer at current head position
-        self.high[self.head] = high;
-        self.low[self.head] = low;
-        self.close[self.head] = close;
-
-        if let Some(ref mut vol_buf) = self.volume {
-            vol_buf[self.head] = volume.unwrap_or(0.0);
-        }
-
-        // Advance head and mark filled if wrapped
-        self.head = (self.head + 1) % self.cap;
-        if self.head == 0 {
-            self.filled = true;
-        }
-
-        // Determine how much data we actually have
-        let effective_len = if self.filled { self.cap } else { self.head };
-        let min_required = self.n1.max(self.n2).max(self.n3);
-
-        if effective_len < min_required {
+        // reject NaNs
+        if !(high.is_finite() && low.is_finite() && close.is_finite()) {
+            self.idx += 1;
             return None;
         }
+        let i = self.idx;
 
-        // Create properly ordered slices from ring buffer
-        let (high_slice, low_slice, close_slice, vol_slice) = if self.filled {
-            // Buffer has wrapped - need to concatenate in proper order
-            let mut h = Vec::with_capacity(self.cap);
-            let mut l = Vec::with_capacity(self.cap);
-            let mut c = Vec::with_capacity(self.cap);
-            let mut v = self.volume.as_ref().map(|_| Vec::with_capacity(self.cap));
-
-            // From head to end (oldest data)
-            for i in self.head..self.cap {
-                h.push(self.high[i]);
-                l.push(self.low[i]);
-                c.push(self.close[i]);
-                if let Some(ref vol_buf) = self.volume {
-                    v.as_mut().unwrap().push(vol_buf[i]);
-                }
-            }
-            // From start to head (newest data)
-            for i in 0..self.head {
-                h.push(self.high[i]);
-                l.push(self.low[i]);
-                c.push(self.close[i]);
-                if let Some(ref vol_buf) = self.volume {
-                    v.as_mut().unwrap().push(vol_buf[i]);
-                }
-            }
-            (h, l, c, v)
+        // ====== TCI chain ======
+        if !self.seed_ema1 {
+            self.ema1_c = close;
+            self.seed_ema1 = true;
         } else {
-            // Buffer hasn't wrapped yet - data is contiguous
-            (
-                self.high[..self.head].to_vec(),
-                self.low[..self.head].to_vec(),
-                self.close[..self.head].to_vec(),
-                self.volume.as_ref().map(|v| v[..self.head].to_vec()),
-            )
+            self.ema1_c = ema_step(close, self.ema1_c, self.alpha1, self.beta1);
+        }
+
+        let abs_dev = (close - self.ema1_c).abs();
+        if !self.seed_ema2 {
+            self.ema2_abs = abs_dev;
+            self.seed_ema2 = true;
+        } else {
+            self.ema2_abs = ema_step(abs_dev, self.ema2_abs, self.alpha1, self.beta1);
+        }
+
+        let mut tci_val = f64::NAN;
+        if nonzero(self.ema2_abs) {
+            let inv = (0.025 * self.ema2_abs).recip();
+            let ci = (close - self.ema1_c) * inv;
+            if !self.seed_ema3 {
+                self.ema3_ci = ci;
+                self.seed_ema3 = true;
+            } else {
+                self.ema3_ci = ema_step(ci, self.ema3_ci, self.alpha2, self.beta2);
+            }
+            tci_val = self.ema3_ci + 50.0;
+        }
+
+        // ====== RSI (Wilder) ======
+        let mut rsi_val = f64::NAN;
+        if !self.have_prev_close {
+            self.prev_close = close;
+            self.have_prev_close = true;
+        } else {
+            let ch = close - self.prev_close;
+            let gain = if ch > 0.0 { ch } else { 0.0 };
+            let loss = if ch < 0.0 { -ch } else { 0.0 };
+
+            if !self.rsi_seeded {
+                self.rs_init_cnt += 1;
+                self.rs_avg_gain += gain;
+                self.rs_avg_loss += loss;
+                if self.rs_init_cnt >= self.n3 {
+                    self.rs_avg_gain /= self.n3 as f64;
+                    self.rs_avg_loss /= self.n3 as f64;
+                    self.rsi_seeded = true;
+                    let rs = if self.rs_avg_loss == 0.0 {
+                        f64::INFINITY
+                    } else {
+                        self.rs_avg_gain / self.rs_avg_loss
+                    };
+                    rsi_val = 100.0 * (rs / (1.0 + rs));
+                }
+            } else {
+                // Wilder smoothing
+                let n3m1 = (self.n3 - 1) as f64;
+                self.rs_avg_gain = (self.rs_avg_gain * n3m1 + gain) / self.n3 as f64;
+                self.rs_avg_loss = (self.rs_avg_loss * n3m1 + loss) / self.n3 as f64;
+                let rs = if self.rs_avg_loss == 0.0 {
+                    f64::INFINITY
+                } else {
+                    self.rs_avg_gain / self.rs_avg_loss
+                };
+                rsi_val = 100.0 * (rs / (1.0 + rs));
+            }
+        }
+
+        // ====== Laguerre RSI (alpha=0.7 per file) ======
+        {
+            let p_l0 = self.l0;
+            self.l0 = self.alpha_l * close + self.one_m_l * p_l0;
+            let p_l1 = self.l1;
+            self.l1 = -self.one_m_l * self.l0 + p_l0 + self.one_m_l * p_l1;
+            let p_l2 = self.l2;
+            self.l2 = -self.one_m_l * self.l1 + p_l1 + self.one_m_l * p_l2;
+            let p_l3 = self.l3;
+            self.l3 = -self.one_m_l * self.l2 + p_l2 + self.one_m_l * p_l3;
+        }
+        let cu = (self.l0 - self.l1).max(0.0)
+            + (self.l1 - self.l2).max(0.0)
+            + (self.l2 - self.l3).max(0.0);
+        let cd = (self.l1 - self.l0).max(0.0)
+            + (self.l2 - self.l1).max(0.0)
+            + (self.l3 - self.l2).max(0.0);
+        let lrsi_val = if nonzero(cu + cd) {
+            100.0 * cu / (cu + cd)
+        } else {
+            f64::NAN
         };
 
-        // Calculate with current history
-        let params = ModGodModeParams {
-            n1: Some(self.n1),
-            n2: Some(self.n2),
-            n3: Some(self.n3),
-            mode: Some(self.mode),
-            use_volume: Some(self.use_volume),
-        };
+        // ====== MFI (if volume used) else RSI substitute ======
+        let mut mf_val = f64::NAN;
+        if self.has_vol {
+            let v = volume.unwrap_or(0.0);
+            let tp = (high + low + close) * (1.0 / 3.0);
+            if self.tp_has_prev {
+                let sign: i8 = if tp > self.tp_prev {
+                    1
+                } else if tp < self.tp_prev {
+                    -1
+                } else {
+                    0
+                };
+                let mf_raw = tp * v;
 
-        let input = ModGodModeInput::from_slices(
-            &high_slice,
-            &low_slice,
-            &close_slice,
-            vol_slice.as_deref(),
-            params,
-        );
+                if self.rsi_seeded {
+                    // remove aged contrib
+                    let old_mf = self.mf_ring_mf[self.mf_head];
+                    let old_sg = self.mf_ring_sgn[self.mf_head];
+                    if old_sg > 0 {
+                        self.mf_pos_sum -= old_mf;
+                    } else if old_sg < 0 {
+                        self.mf_neg_sum -= old_mf;
+                    }
 
-        match mod_god_mode(&input) {
-            Ok(output) => {
-                let last_idx = output.wavetrend.len() - 1;
-                Some((
-                    output.wavetrend[last_idx],
-                    output.signal[last_idx],
-                    output.histogram[last_idx],
-                ))
+                    // insert new
+                    self.mf_ring_mf[self.mf_head] = mf_raw;
+                    self.mf_ring_sgn[self.mf_head] = sign;
+                    if sign > 0 {
+                        self.mf_pos_sum += mf_raw;
+                    } else if sign < 0 {
+                        self.mf_neg_sum += mf_raw;
+                    }
+                    self.mf_head = (self.mf_head + 1) % self.n3.max(1);
+
+                    let denom = self.mf_pos_sum + self.mf_neg_sum;
+                    if denom > 0.0 {
+                        mf_val = 100.0 * (self.mf_pos_sum / denom);
+                    } else if self.mf_neg_sum == 0.0 {
+                        mf_val = 100.0;
+                    }
+                } else {
+                    // warmup rings, but do not produce a value yet
+                    self.mf_ring_mf[self.mf_head] = mf_raw;
+                    self.mf_ring_sgn[self.mf_head] = sign;
+                    self.mf_head = (self.mf_head + 1) % self.n3.max(1);
+                }
             }
-            Err(_e) => {
-                // Silently return None for errors during warmup
-                None
+            self.tp_prev = tp;
+            self.tp_has_prev = true;
+        } else {
+            mf_val = rsi_val; // RSI-as-MF when no volume, per fused scalar kernel
+        }
+
+        // ====== CBCI (mom(RSI,n2) + EMA(RSI,n3)) ======
+        let mut cbci_val = f64::NAN;
+        if self.rsi_seeded {
+            let old = self.rsi_ring[self.rsi_ring_head];
+            self.rsi_ring[self.rsi_ring_head] = rsi_val;
+            self.rsi_ring_head = (self.rsi_ring_head + 1) % self.n2.max(1);
+            let mom = if old.is_finite() && rsi_val.is_finite() {
+                rsi_val - old
+            } else {
+                f64::NAN
+            };
+
+            if !self.rsi_ema_seed && rsi_val.is_finite() {
+                self.rsi_ema = rsi_val;
+                self.rsi_ema_seed = true;
+            } else if rsi_val.is_finite() {
+                self.rsi_ema = ema_step(rsi_val, self.rsi_ema, self.alpha3, self.beta3);
             }
+
+            if mom.is_finite() && self.rsi_ema_seed {
+                cbci_val = mom + self.rsi_ema;
+            }
+        }
+
+        // ====== CSI / TSI ======
+        let mut csi_val = f64::NAN;
+        let mut csi_mg_val = f64::NAN;
+
+        // Godmode: RSI blended with TSI (double-EMA of momentum)
+        if matches!(self.mode, ModGodModeMode::Godmode) && self.have_prev_close {
+            let mom = close - self.prev_close;
+            let am = mom.abs();
+
+            if !self.tsi_seed_s {
+                self.tsi_ema_m_s = mom;
+                self.tsi_ema_a_s = am;
+                self.tsi_seed_s = true;
+            } else {
+                self.tsi_ema_m_s = ema_step(mom, self.tsi_ema_m_s, self.alpha1, self.beta1);
+                self.tsi_ema_a_s = ema_step(am, self.tsi_ema_a_s, self.alpha1, self.beta1);
+            }
+
+            if !self.tsi_seed_l && self.tsi_seed_s {
+                self.tsi_ema_m_l = self.tsi_ema_m_s;
+                self.tsi_ema_a_l = self.tsi_ema_a_s;
+                self.tsi_seed_l = true;
+            } else if self.tsi_seed_l {
+                self.tsi_ema_m_l = ema_step(self.tsi_ema_m_s, self.tsi_ema_m_l, self.alpha2, self.beta2);
+                self.tsi_ema_a_l = ema_step(self.tsi_ema_a_s, self.tsi_ema_a_l, self.alpha2, self.beta2);
+            }
+
+            if self.tsi_seed_l && nonzero(self.tsi_ema_a_l) && rsi_val.is_finite() {
+                let tsi = 100.0 * (self.tsi_ema_m_l / self.tsi_ema_a_l);
+                csi_val = 0.5 * (rsi_val + (0.5 * tsi + 50.0));
+            }
+        }
+
+        // GodmodeMg: RSI blended with modified TSI using normalized pc and abs(pc)
+        if matches!(self.mode, ModGodModeMode::GodmodeMg) && self.have_prev_close {
+            let a = self.prev_close;
+            let b = close;
+            let avg = 0.5 * (a + b);
+            let pc_norm = if avg != 0.0 { (b - a) * avg.recip() } else { 0.0 };
+            let apc = (b - a).abs();
+
+            if !self.csi_seed_e1 {
+                self.csi_num_e1 = pc_norm;
+                self.csi_den_e1 = apc;
+                self.csi_seed_e1 = true;
+            } else {
+                self.csi_num_e1 = ema_step(pc_norm, self.csi_num_e1, self.alpha1, self.beta1);
+                self.csi_den_e1 = ema_step(apc, self.csi_den_e1, self.alpha1, self.beta1);
+            }
+
+            if !self.csi_seed_e2 && self.csi_seed_e1 {
+                self.csi_num_e2 = self.csi_num_e1;
+                self.csi_den_e2 = self.csi_den_e1;
+                self.csi_seed_e2 = true;
+            } else if self.csi_seed_e2 {
+                self.csi_num_e2 = ema_step(self.csi_num_e1, self.csi_num_e2, self.alpha2, self.beta2);
+                self.csi_den_e2 = ema_step(self.csi_den_e1, self.csi_den_e2, self.alpha2, self.beta2);
+            }
+
+            if self.csi_seed_e2 && nonzero(self.csi_den_e2) && rsi_val.is_finite() {
+                let ttsi = 50.0 * (self.csi_num_e2 / self.csi_den_e2) + 50.0;
+                csi_mg_val = 0.5 * (rsi_val + ttsi);
+            }
+        }
+
+        // ====== Willy (%R on close-only, window n2) via monotonic deques ======
+        self.w_max.push(i, close, self.n2);
+        self.w_min.push(i, close, self.n2);
+        let mut willy_val = f64::NAN;
+        if i + 1 >= self.n2 {
+            if let (Some(hi), Some(lo)) = (self.w_max.get(), self.w_min.get()) {
+                let rng = hi - lo;
+                if rng != 0.0 {
+                    willy_val = 60.0 * (close - hi) / rng + 80.0;
+                }
+            }
+        }
+
+        // ====== Combine by mode into wavetrend ======
+        let ready_wt = i >= self.warm_wt;
+        let mut wt = f64::NAN;
+        if ready_wt {
+            let mut sum = 0.0;
+            let mut cnt = 0i32;
+            match self.mode {
+                ModGodModeMode::Godmode => {
+                    if tci_val.is_finite() {
+                        sum += tci_val;
+                        cnt += 1;
+                    }
+                    if csi_val.is_finite() {
+                        sum += csi_val;
+                        cnt += 1;
+                    }
+                    if mf_val.is_finite() {
+                        sum += mf_val;
+                        cnt += 1;
+                    }
+                    if willy_val.is_finite() {
+                        sum += willy_val;
+                        cnt += 1;
+                    }
+                }
+                ModGodModeMode::Tradition => {
+                    if tci_val.is_finite() {
+                        sum += tci_val;
+                        cnt += 1;
+                    }
+                    if mf_val.is_finite() {
+                        sum += mf_val;
+                        cnt += 1;
+                    }
+                    if rsi_val.is_finite() {
+                        sum += rsi_val;
+                        cnt += 1;
+                    }
+                }
+                ModGodModeMode::GodmodeMg => {
+                    if tci_val.is_finite() {
+                        sum += tci_val;
+                        cnt += 1;
+                    }
+                    if csi_mg_val.is_finite() {
+                        sum += csi_mg_val;
+                        cnt += 1;
+                    }
+                    if mf_val.is_finite() {
+                        sum += mf_val;
+                        cnt += 1;
+                    }
+                    if willy_val.is_finite() {
+                        sum += willy_val;
+                        cnt += 1;
+                    }
+                    if cbci_val.is_finite() {
+                        sum += cbci_val;
+                        cnt += 1;
+                    }
+                    if lrsi_val.is_finite() {
+                        sum += lrsi_val;
+                        cnt += 1;
+                    }
+                }
+                ModGodModeMode::TraditionMg => {
+                    if tci_val.is_finite() {
+                        sum += tci_val;
+                        cnt += 1;
+                    }
+                    if mf_val.is_finite() {
+                        sum += mf_val;
+                        cnt += 1;
+                    }
+                    if rsi_val.is_finite() {
+                        sum += rsi_val;
+                        cnt += 1;
+                    }
+                    if cbci_val.is_finite() {
+                        sum += cbci_val;
+                        cnt += 1;
+                    }
+                    if lrsi_val.is_finite() {
+                        sum += lrsi_val;
+                        cnt += 1;
+                    }
+                }
+            }
+            if cnt > 0 {
+                wt = sum / (cnt as f64);
+            }
+        }
+
+        // ====== signal SMA(6) (incremental seeding from warm_wt) ======
+        let mut sig = f64::NAN;
+        if i >= self.warm_wt && wt.is_finite() {
+            if !self.sig_seeded {
+                // fill until we have 6 samples
+                self.sig_ring[self.sig_head] = wt;
+                self.sig_head = (self.sig_head + 1) % 6;
+                self.sig_sum += wt;
+                self.sig_count += 1;
+                if self.sig_count == 6 {
+                    self.sig_seeded = true;
+                    sig = self.sig_sum / 6.0;
+                }
+            } else {
+                let old = self.sig_ring[self.sig_head];
+                self.sig_ring[self.sig_head] = wt;
+                self.sig_head = (self.sig_head + 1) % 6;
+                self.sig_sum += wt - old;
+                sig = self.sig_sum / 6.0;
+            }
+        }
+
+        // ====== histogram EMA(n3) of diff ======
+        let mut hist = f64::NAN;
+        if self.sig_seeded && sig.is_finite() && wt.is_finite() {
+            let d = (wt - sig) * 2.0 + 50.0;
+            if !self.hist_seeded {
+                self.hist_prev = d;
+                self.hist_seeded = true;
+                hist = d;
+            } else {
+                self.hist_prev = ema_step(d, self.hist_prev, self.alpha3, self.beta3);
+                hist = self.hist_prev;
+            }
+        }
+
+        self.prev_close = close;
+        self.idx += 1;
+
+        if self.sig_seeded && hist.is_finite() {
+            Some((wt, sig, hist))
+        } else {
+            None
         }
     }
 
     pub fn reset(&mut self) {
-        self.head = 0;
-        self.filled = false;
-        self.high.fill(f64::NAN);
-        self.low.fill(f64::NAN);
-        self.close.fill(f64::NAN);
-        if let Some(ref mut vol_buf) = self.volume {
-            vol_buf.fill(0.0);
-        }
+        self.idx = 0;
+
+        self.ema1_c = 0.0;
+        self.seed_ema1 = false;
+        self.ema2_abs = 0.0;
+        self.seed_ema2 = false;
+        self.ema3_ci = 0.0;
+        self.seed_ema3 = false;
+
+        self.rs_avg_gain = 0.0;
+        self.rs_avg_loss = 0.0;
+        self.rsi_seeded = false;
+        self.rs_init_cnt = 0;
+        self.prev_close = 0.0;
+        self.have_prev_close = false;
+
+        self.l0 = 0.0;
+        self.l1 = 0.0;
+        self.l2 = 0.0;
+        self.l3 = 0.0;
+
+        self.mf_pos_sum = 0.0;
+        self.mf_neg_sum = 0.0;
+        self.mf_ring_mf.fill(0.0);
+        self.mf_ring_sgn.fill(0);
+        self.mf_head = 0;
+        self.tp_prev = 0.0;
+        self.tp_has_prev = false;
+
+        self.tsi_ema_m_s = 0.0;
+        self.tsi_ema_a_s = 0.0;
+        self.tsi_seed_s = false;
+        self.tsi_ema_m_l = 0.0;
+        self.tsi_ema_a_l = 0.0;
+        self.tsi_seed_l = false;
+
+        self.csi_num_e1 = 0.0;
+        self.csi_num_e2 = 0.0;
+        self.csi_seed_e1 = false;
+        self.csi_seed_e2 = false;
+        self.csi_den_e1 = 0.0;
+        self.csi_den_e2 = 0.0;
+
+        self.rsi_ring.fill(f64::NAN);
+        self.rsi_ring_head = 0;
+        self.rsi_ema = 0.0;
+        self.rsi_ema_seed = false;
+
+        self.w_max.clear();
+        self.w_min.clear();
+
+        self.sig_ring = [0.0; 6];
+        self.sig_head = 0;
+        self.sig_sum = 0.0;
+        self.sig_seeded = false;
+        self.sig_count = 0;
+
+        self.hist_prev = 0.0;
+        self.hist_seeded = false;
     }
 }
 

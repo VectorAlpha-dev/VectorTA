@@ -967,15 +967,36 @@ fn sama_batch_inner_into(
 }
 
 // ========== Streaming Support ==========
+// Decision: Streaming uses monotonic deques for O(1) updates; SIMD not needed.
 
 #[derive(Debug, Clone)]
 pub struct SamaStream {
+    // Parameters
     length: usize,
     maj_length: usize,
     min_length: usize,
+
+    // Precomputed constants
+    maj_alpha: f64,
+    min_alpha: f64,
+    delta: f64, // min_alpha - maj_alpha
+
+    // Ring buffer of last (length + 1) samples
+    cap: usize, // = length + 1
     buf: Vec<f64>,
-    head: usize,
-    filled: bool,
+    head: usize, // next write position in buf (t % cap)
+    tick: usize, // current time index t (monotonic)
+
+    // Monotonic deques (store time indices, not values)
+    // Implemented as rings for zero-alloc updates
+    max_idx: Vec<usize>, // capacity cap
+    min_idx: Vec<usize>, // capacity cap
+    max_head: usize,
+    min_head: usize,
+    max_len: usize,
+    min_len: usize,
+
+    // Filter state
     sama_val: f64,
 }
 
@@ -990,103 +1011,142 @@ impl SamaStream {
                 data_len: 0,
             });
         }
+
+        let cap = length + 1;
+        let maj_alpha = 2.0 / (maj as f64 + 1.0);
+        let min_alpha = 2.0 / (min as f64 + 1.0);
+
         Ok(Self {
             length,
             maj_length: maj,
             min_length: min,
-            buf: vec![f64::NAN; length + 1],
+
+            maj_alpha,
+            min_alpha,
+            delta: min_alpha - maj_alpha,
+
+            cap,
+            buf: vec![f64::NAN; cap],
             head: 0,
-            filled: false,
+            tick: 0,
+
+            max_idx: vec![0usize; cap],
+            min_idx: vec![0usize; cap],
+            max_head: 0,
+            min_head: 0,
+            max_len: 0,
+            min_len: 0,
+
             sama_val: f64::NAN,
         })
     }
 
+    /// Amortized O(1) update via monotonic deques.
+    /// - Advances time even on NaN input (window slides), but does not update the EMA state in that case.
+    /// - Returns the new SAMA value or NaN if the input is NaN.
     #[inline]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        // Pine-compatible: start computing immediately with first valid value
-        if value.is_nan() {
-            // For NaN input, don't update buffer but return current sama_val if we have one
-            return if self.sama_val.is_nan() {
-                None
-            } else {
-                Some(self.sama_val)
-            };
+        let t = self.tick;
+        let cap = self.cap;
+
+        // 1) Drop outdated indices from deque heads.
+        // Window is inclusive: [t - length, t] after inserting this sample at logical index t.
+        let oldest = t.saturating_sub(self.length);
+
+        while self.max_len > 0 {
+            let idx = self.max_idx[self.max_head];
+            if idx >= oldest {
+                break;
+            }
+            self.max_head += 1;
+            if self.max_head == cap {
+                self.max_head = 0;
+            }
+            self.max_len -= 1;
+        }
+        while self.min_len > 0 {
+            let idx = self.min_idx[self.min_head];
+            if idx >= oldest {
+                break;
+            }
+            self.min_head += 1;
+            if self.min_head == cap {
+                self.min_head = 0;
+            }
+            self.min_len -= 1;
         }
 
+        // 2) Write current value into the ring after popping outdated to avoid stale reads.
         self.buf[self.head] = value;
-        self.head = (self.head + 1) % (self.length + 1);
 
-        // count of valid samples seen so far
-        let count = if self.filled {
-            self.length + 1
-        } else {
-            // ring not full; count valid values in the entire buffer
-            let mut c = 0;
-            for i in 0..(self.length + 1) {
-                if !self.buf[i].is_nan() {
-                    c += 1;
-                }
+        // 3) If current value is NaN, slide the window but don't touch deques or EMA.
+        if value.is_nan() {
+            self.head += 1;
+            if self.head == cap {
+                self.head = 0;
             }
-            c
-        };
-        if !self.filled && count == self.length + 1 {
-            self.filled = true;
+            self.tick = t.wrapping_add(1);
+            return Some(f64::NAN);
         }
 
-        // Pine-compatible: compute immediately even with just 1 sample
-        if count == 0 {
-            return None;
-        }
-
-        // compute hh/ll over all valid samples in the buffer
-        let mut hh = f64::NEG_INFINITY;
-        let mut ll = f64::INFINITY;
-
-        if self.filled {
-            // Buffer is full, iterate from head (oldest) through all elements
-            let mut idx = self.head;
-            for _ in 0..(self.length + 1) {
-                let v = self.buf[idx];
-                if !v.is_nan() {
-                    if v > hh {
-                        hh = v;
-                    }
-                    if v < ll {
-                        ll = v;
-                    }
-                }
-                idx = (idx + 1) % (self.length + 1);
-            }
-        } else {
-            // Buffer not full, check all slots for valid values
-            for i in 0..(self.length + 1) {
-                let v = self.buf[i];
-                if !v.is_nan() {
-                    if v > hh {
-                        hh = v;
-                    }
-                    if v < ll {
-                        ll = v;
-                    }
-                }
+        // 4) Push to MAX deque (monotonically decreasing values).
+        while self.max_len > 0 {
+            let back_pos = (self.max_head + self.max_len - 1) % cap;
+            let back_idx = self.max_idx[back_pos];
+            let back_val = self.buf[back_idx % cap];
+            if back_val <= value {
+                self.max_len -= 1;
+            } else {
+                break;
             }
         }
+        let ins_pos_max = (self.max_head + self.max_len) % cap;
+        self.max_idx[ins_pos_max] = t;
+        self.max_len += 1;
 
-        let min_alpha = 2.0 / (self.min_length as f64 + 1.0);
-        let maj_alpha = 2.0 / (self.maj_length as f64 + 1.0);
-        let mult = if hh != ll {
-            (2.0 * value - ll - hh).abs() / (hh - ll)
-        } else {
-            0.0
-        };
-        let a = (mult * (min_alpha - maj_alpha) + maj_alpha).powi(2);
+        // 5) Push to MIN deque (monotonically increasing values).
+        while self.min_len > 0 {
+            let back_pos = (self.min_head + self.min_len - 1) % cap;
+            let back_idx = self.min_idx[back_pos];
+            let back_val = self.buf[back_idx % cap];
+            if back_val >= value {
+                self.min_len -= 1;
+            } else {
+                break;
+            }
+        }
+        let ins_pos_min = (self.min_head + self.min_len) % cap;
+        self.min_idx[ins_pos_min] = t;
+        self.min_len += 1;
 
+        // 6) Read extrema from deque fronts.
+        let hh = self.buf[self.max_idx[self.max_head] % cap];
+        let ll = self.buf[self.min_idx[self.min_head] % cap];
+
+        // mult = |2*p - ll - hh| / (hh - ll)    (guard zero denom)
+        let denom = hh - ll;
+        let c = (value + value) - (hh + ll);
+        let mult = if denom > 0.0 { c.abs() / denom } else { 0.0 };
+
+        // final_alpha = (maj_alpha + mult * delta)^2, using FMA and square by multiply
+        let a = mult.mul_add(self.delta, self.maj_alpha);
+        let alpha = a * a;
+
+        // EMA update: y += alpha*(x - y), seeded on first finite value
         if self.sama_val.is_nan() {
-            // Initialize with first price for proper moving average behavior
             self.sama_val = value;
         } else {
-            self.sama_val = (value - self.sama_val) * a + self.sama_val;
+            let diff = value - self.sama_val;
+            self.sama_val = diff.mul_add(alpha, self.sama_val);
         }
+
+        // 7) Advance ring/tick.
+        self.head += 1;
+        if self.head == cap {
+            self.head = 0;
+        }
+        self.tick = t.wrapping_add(1);
+
         Some(self.sama_val)
     }
 
@@ -1094,11 +1154,16 @@ impl SamaStream {
     pub fn next(&mut self, value: f64) -> f64 {
         self.update(value).unwrap_or(f64::NAN)
     }
+
     #[inline]
     pub fn reset(&mut self) {
         self.buf.fill(f64::NAN);
         self.head = 0;
-        self.filled = false;
+        self.tick = 0;
+        self.max_len = 0;
+        self.min_len = 0;
+        self.max_head = 0;
+        self.min_head = 0;
         self.sama_val = f64::NAN;
     }
 }

@@ -16,7 +16,7 @@
 //! - **SIMD status**: Implemented AVX2 and AVX512 single-series + batch-row kernels.
 //!   - Runtime selection short-circuits to Scalar for `period <= 32` where SIMD underperforms.
 //!   - For longer periods, AVX512 engages via `Kernel::Auto` (subject to CPU support).
-//! - **Streaming update**: O(n) per update (full dot). Future work: explore incremental updates.
+//! - **Streaming update**: Exact O(p) ring-buffer dot (fast scalar) with optional O(1) SOE approx; tests use the exact path.
 //! - **Memory**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix) for outputs.
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -1107,55 +1107,277 @@ unsafe fn srwma_row_avx512_long(
 
 #[derive(Debug, Clone)]
 pub struct SrwmaStream {
-    period: usize,
-    weights: Vec<f64>,
-    sum_weights: f64,
-    data_history: Vec<f64>,
+    period: usize,   // user period
+    wlen: usize,     // p = period - 1
+    inv_norm: f64,   // 1 / sum(weights)
+    // exact O(p) path
+    weights: Vec<f64>, // length p; weights[k] = sqrt(period - k), k=0..p-1 (k=0 is newest)
+    ring: Vec<f64>,    // mirrored ring buffer, length 2p
+    head: usize,       // write index in [0, p)
+    count: usize,      // total samples seen
+    // optional O(1) approximate path
+    approx: Option<SrwmaApprox>,
+}
+
+#[derive(Debug, Clone)]
+struct SrwmaApprox {
+    // Sum-of-Exponentials approximation: w_k ~ sum_j a_j r_j^k on k in [0, p-1]
+    a: Vec<f64>,        // coefficients (length Q)
+    r: Vec<f64>,        // bases in (0,1) (length Q)
+    r_pow_p1: Vec<f64>, // r_j^(p+1) for finite-window subtraction
+    s: Vec<f64>,        // state S_t^(j), one per exponential
+    denom: f64,         // sum_j a_j * sum_{k=0}^{p-1} r_j^k
+    // for x_{t-p} access
+    lag_buf: Vec<f64>,  // ring of length p+1 to fetch the leaving sample
+    lag_head: usize,    // write index within lag_buf
 }
 
 impl SrwmaStream {
     pub fn try_new(params: SrwmaParams) -> Result<Self, SrwmaError> {
         let period = params.period.unwrap_or(14);
         if period == 0 {
-            return Err(SrwmaError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(SrwmaError::InvalidPeriod { period, data_len: 0 });
         }
-        let wlen = period - 1;
-        let mut weights = Vec::with_capacity(wlen);
-        let mut sumw = 0.0;
-        for i in 0..wlen {
-            let w = ((period - i) as f64).sqrt();
+        let p = period - 1;
+
+        // Precompute descending weights: w[k] = sqrt(period - k), k=0..p-1
+        let mut weights = Vec::with_capacity(p);
+        let mut sumw = 0.0f64;
+        for k in 0..p {
+            let w = ((period - k) as f64).sqrt();
             weights.push(w);
             sumw += w;
         }
 
+        // Allocate mirrored ring of length 2p; if p==0 (period==1), this won't be used.
+        let ring_len = 2 * p.max(1);
+
         Ok(Self {
             period,
+            wlen: p,
+            inv_norm: if sumw == 0.0 { 0.0 } else { 1.0 / sumw },
             weights,
-            sum_weights: sumw,
-            data_history: Vec::new(),
+            ring: vec![0.0; ring_len],
+            head: 0,
+            count: 0,
+            approx: None,
         })
     }
 
+    /// Exact SRWMA update using a mirrored ring buffer. Still O(p), but faster than
+    /// a grow-only history due to contiguous reads and no modulo branches.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        self.data_history.push(value);
-        let idx = self.data_history.len() - 1;
+        let p = self.wlen;
+        // For period==1 (p=0), there is no defined window; maintain prior behavior (None until warmup).
+        if p == 0 {
+            self.count += 1;
+            return if self.count <= self.period + 1 { None } else { Some(value) };
+        }
 
-        if idx + 1 <= self.period + 1 {
+        // Write new sample into ring and its mirror
+        let h = self.head;
+        self.ring[h] = value;
+        self.ring[h + p] = value;
+        self.head = if h + 1 == p { 0 } else { h + 1 };
+        self.count += 1;
+
+        // Preserve warmup semantics: None until count > period + 1
+        if self.count <= self.period + 1 {
             return None;
         }
 
-        let wlen = self.period - 1;
-        let mut sum = 0.0;
-        for k in 0..wlen {
-            let data_idx = idx - k;
-            sum += self.data_history[data_idx] * self.weights[k];
+        // After advancing, `self.head` points to the next write position.
+        // The newest sample is at index start = self.head + p - 1 in the mirrored area.
+        let start = self.head + p - 1;
+
+        // Reverse dot: sum_{k=0}^{p-1} ring[start - k] * weights[k]
+        let mut s0 = 0.0f64;
+        let mut s1 = 0.0f64;
+        let mut s2 = 0.0f64;
+        let mut s3 = 0.0f64;
+        let mut k = 0usize;
+
+        // Unroll by 4 safely
+        while k + 4 <= p {
+            let d0 = self.ring[start - (k + 0)];
+            let d1 = self.ring[start - (k + 1)];
+            let d2 = self.ring[start - (k + 2)];
+            let d3 = self.ring[start - (k + 3)];
+
+            let w0 = self.weights[k + 0];
+            let w1 = self.weights[k + 1];
+            let w2 = self.weights[k + 2];
+            let w3 = self.weights[k + 3];
+
+            s0 = d0.mul_add(w0, s0);
+            s1 = d1.mul_add(w1, s1);
+            s2 = d2.mul_add(w2, s2);
+            s3 = d3.mul_add(w3, s3);
+            k += 4;
         }
-        Some(sum / self.sum_weights)
+        while k < p {
+            let d = self.ring[start - k];
+            let w = self.weights[k];
+            s0 = d.mul_add(w, s0);
+            k += 1;
+        }
+        let sum = (s0 + s1) + (s2 + s3);
+        Some(sum * self.inv_norm)
     }
+
+    // --------------------- Optional O(1) approximation ---------------------
+    /// Enable the SOE approximation (Q exponentials). Does not affect exact `update()`.
+    pub fn enable_approx_soe(&mut self, q: usize) {
+        if self.approx.is_some() || q == 0 {
+            return;
+        }
+        let p = self.wlen;
+
+        // Choose a simple grid of time constants scaled by p
+        let taus: Vec<f64> = match q {
+            1 => vec![0.35 * p as f64],
+            2 => vec![0.12, 0.5].into_iter().map(|f| f * p as f64).collect(),
+            3 => vec![0.07, 0.20, 0.60]
+                .into_iter()
+                .map(|f| f * p as f64)
+                .collect(),
+            _ => vec![0.05, 0.12, 0.25, 0.60]
+                .into_iter()
+                .map(|f| f * p as f64)
+                .chain((4..q).map(|k| (0.60 + 0.35 * (k as f64 - 3.0) / (q as f64 - 3.0)) * p as f64))
+                .collect(),
+        };
+        let r: Vec<f64> = taus
+            .into_iter()
+            .map(|tau| (-1.0f64 / tau.max(1.0)).exp())
+            .collect();
+
+        // Build normal equations G a = b for least-squares fit of sqrt(period-k)
+        let mut g = vec![0.0f64; q * q];
+        let mut b = vec![0.0f64; q];
+        for i in 0..q {
+            for j in 0..q {
+                let rij = r[i] * r[j];
+                let gij = if (1.0 - rij).abs() < 1e-12 {
+                    p as f64
+                } else {
+                    (1.0 - rij.powi(p as i32)) / (1.0 - rij)
+                };
+                g[i * q + j] = gij;
+            }
+
+            let mut acc = 0.0f64;
+            let mut pow = 1.0f64;
+            for k in 0..p {
+                let w = ((self.period - k) as f64).sqrt();
+                acc += w * pow;
+                pow *= r[i];
+            }
+            b[i] = acc;
+        }
+
+        // Solve for coefficients a
+        let a = solve_small_ge(&g, &b, q);
+
+        // Precompute denom and r^(p+1)
+        let mut r_pow_p1 = Vec::with_capacity(q);
+        let mut denom = 0.0;
+        for j in 0..q {
+            let rj = r[j];
+            r_pow_p1.push(rj.powi((p as i32) + 1));
+            denom += a[j]
+                * if (1.0 - rj).abs() < 1e-12 {
+                    p as f64
+                } else {
+                    (1.0 - rj.powi(p as i32)) / (1.0 - rj)
+                };
+        }
+
+        self.approx = Some(SrwmaApprox {
+            a,
+            r,
+            r_pow_p1,
+            s: vec![0.0; q],
+            denom,
+            lag_buf: vec![0.0; p + 1],
+            lag_head: 0,
+        });
+    }
+
+    /// O(1) amortized update using SOE approximation. Optional; returns None until warmup.
+    #[inline(always)]
+    pub fn update_approx_soe(&mut self, value: f64) -> Option<f64> {
+        let some = self.approx.as_mut()?;
+        let p = self.wlen;
+
+        // Maintain lag buffer of length p+1; x_{t-p} leaves the window
+        let x_old = some.lag_buf[some.lag_head];
+        some.lag_buf[some.lag_head] = value;
+        some.lag_head = if some.lag_head + 1 == (p + 1) { 0 } else { some.lag_head + 1 };
+
+        // Update Q exponential states: S_t = r S_{t-1} + r x_t - r^{p+1} x_{t-p}
+        for j in 0..some.s.len() {
+            some.s[j] = some.r[j] * some.s[j] + some.r[j] * value - some.r_pow_p1[j] * x_old;
+        }
+
+        // Reuse exact counters/warmup alignment
+        self.count += 1;
+        if self.count <= self.period + 1 {
+            return None;
+        }
+
+        let mut num = 0.0;
+        for j in 0..some.s.len() {
+            num += some.a[j] * some.s[j];
+        }
+        Some(num / some.denom)
+    }
+}
+
+// Small dense Gaussian elimination with partial pivoting (q <= ~8).
+#[inline]
+fn solve_small_ge(g: &[f64], b: &[f64], n: usize) -> Vec<f64> {
+    let mut a = vec![0.0; n * n];
+    a.copy_from_slice(g);
+    let mut x = b.to_vec();
+    for k in 0..n {
+        // pivot row
+        let mut piv = k;
+        let mut best = a[k * n + k].abs();
+        for i in (k + 1)..n {
+            let v = a[i * n + k].abs();
+            if v > best {
+                best = v;
+                piv = i;
+            }
+        }
+        if piv != k {
+            for j in k..n {
+                a.swap(k * n + j, piv * n + j);
+            }
+            x.swap(k, piv);
+        }
+        let akk = a[k * n + k];
+        if akk.abs() < 1e-18 {
+            continue;
+        }
+        for i in (k + 1)..n {
+            let f = a[i * n + k] / akk;
+            for j in (k + 1)..n {
+                a[i * n + j] -= f * a[k * n + j];
+            }
+            x[i] -= f * x[k];
+        }
+    }
+    for i in (0..n).rev() {
+        let mut s = x[i];
+        for j in (i + 1)..n {
+            s -= a[i * n + j] * x[j];
+        }
+        x[i] = s / a[i * n + i].max(1e-30);
+    }
+    x
 }
 
 #[cfg(test)]

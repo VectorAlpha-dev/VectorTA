@@ -775,18 +775,82 @@ pub unsafe fn coppock_avx512_long(
     coppock_avx512_short(data, short, long, first, out)
 }
 
+// Decision: Streaming uses O(1) WMA/SMA/EMA recurrence and cached reciprocals; matches batch semantics within test tolerances.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MaMode {
+    Wma,
+    Sma,
+    Ema,
+    Unsupported,
+}
+
 #[derive(Debug, Clone)]
 pub struct CoppockStream {
+    // Parameters
     short: usize,
     long: usize,
     ma_period: usize,
     ma_type: String,
-    buffer: Vec<f64>,
-    head: usize,
-    filled: bool,
-    ma_buf: Vec<f64>,
-    ma_head: usize,
-    ma_filled: bool,
+    mode: MaMode,
+
+    // ---- Price ring (for ROC) ----
+    price: Vec<f64>,
+    inv_price: Vec<f64>,
+    p_head: usize,
+    p_filled: bool,
+
+    // ---- Sum-of-ROC ring (for MA) ----
+    roc: Vec<f64>,
+    r_head: usize,
+    r_filled: bool,
+
+    // ---- Rolling accumulators ----
+    // For SMA/WMA:
+    ma_sum: f64,     // S_t
+    wma_num: f64,    // Q_t
+    wma_denom: f64,  // N*(N+1)/2
+
+    // For EMA:
+    ema_alpha: f64,
+    ema_val: f64,
+    ema_init: bool,
+}
+
+#[inline(always)]
+fn parse_mode(s: &str) -> MaMode {
+    match s {
+        "wma" => MaMode::Wma,
+        "sma" => MaMode::Sma,
+        "ema" => MaMode::Ema,
+        _ => MaMode::Unsupported,
+    }
+}
+
+#[inline(always)]
+fn bump(i: &mut usize, n: usize) {
+    *i += 1;
+    if *i == n {
+        *i = 0;
+    }
+}
+
+#[inline(always)]
+fn wrap_sub(idx: usize, offset: usize, n: usize) -> usize {
+    let j = idx + n - offset;
+    if j >= n {
+        j - n
+    } else {
+        j
+    }
+}
+
+#[inline(always)]
+fn safe_inv(x: f64) -> f64 {
+    if x.is_finite() && x != 0.0 {
+        1.0 / x
+    } else {
+        f64::NAN
+    }
 }
 
 impl CoppockStream {
@@ -803,95 +867,131 @@ impl CoppockStream {
                 data_len: 0,
             });
         }
-        // buffer needs to hold the entire window for "short" and "long"
+
+        let mode = parse_mode(&ma_type);
+
+        let price_cap = long.max(short) + 1;
+        let ma_cap = ma_period;
+
         Ok(Self {
             short,
             long,
             ma_period,
             ma_type,
-            buffer: vec![f64::NAN; long.max(short) + 1],
-            head: 0,
-            filled: false,
-            ma_buf: vec![f64::NAN; ma_period],
-            ma_head: 0,
-            ma_filled: false,
+            mode,
+
+            price: vec![f64::NAN; price_cap],
+            inv_price: vec![f64::NAN; price_cap],
+            p_head: 0,
+            p_filled: false,
+
+            roc: vec![f64::NAN; ma_cap],
+            r_head: 0,
+            r_filled: false,
+
+            ma_sum: 0.0,
+            wma_num: 0.0,
+            wma_denom: (ma_period * (ma_period + 1)) as f64 * 0.5,
+
+            ema_alpha: 2.0 / (ma_period as f64 + 1.0),
+            ema_val: f64::NAN,
+            ema_init: false,
         })
     }
 
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        let n = self.buffer.len();
-        // 1) Write new price into "write_idx"
-        let write_idx = self.head;
-        self.buffer[write_idx] = value;
-        // 2) Advance head to next slot
-        self.head = (write_idx + 1) % n;
-        // 3) Once this ring buffer has wrapped once, "filled" = true
-        if !self.filled && self.head == 0 {
-            self.filled = true;
+        // --- 1) push price + reciprocal into price ring ---
+        let p_n = self.price.len();
+        let write_p = self.p_head;
+
+        self.price[write_p] = value;
+        self.inv_price[write_p] = safe_inv(value);
+
+        bump(&mut self.p_head, p_n);
+        if !self.p_filled && self.p_head == 0 {
+            self.p_filled = true;
         }
-        if !self.filled {
-            // We haven't yet seen "long.max(short)+1" prices => cannot compute ROC
+        if !self.p_filled {
             return None;
         }
 
-        // 4) "idx" is the location we just wrote into
-        let idx = write_idx;
-        let cur = self.buffer[idx];
-        let prev_short = self.buffer[(idx + n - self.short) % n];
-        let prev_long = self.buffer[(idx + n - self.long) % n];
-        if prev_short.is_nan() || prev_long.is_nan() || cur.is_nan() {
-            return None;
-        }
-        // 5) Compute the two ROCs (short and long)
-        let short_val = ((cur / prev_short) - 1.0) * 100.0;
-        let long_val = ((cur / prev_long) - 1.0) * 100.0;
-        let sum_roc = short_val + long_val;
+        // Index of current (the value we just wrote)
+        let cur_idx = write_p;
+        let prev_s_idx = wrap_sub(cur_idx, self.short, p_n);
+        let prev_l_idx = wrap_sub(cur_idx, self.long, p_n);
 
-        // 6) Push into the MA circular buffer
-        let ma_n = self.ma_buf.len();
-        let write_ma = self.ma_head;
-        self.ma_buf[write_ma] = sum_roc;
-        self.ma_head = (write_ma + 1) % ma_n;
-        if !self.ma_filled && self.ma_head == 0 {
-            self.ma_filled = true;
-        }
-        if !self.ma_filled {
-            // haven't yet seen "ma_period" values => return None
+        let cur = self.price[cur_idx];
+        let invs = self.inv_price[prev_s_idx];
+        let invl = self.inv_price[prev_l_idx];
+
+        if !(cur.is_finite() && invs.is_finite() && invl.is_finite()) {
             return None;
         }
 
-        // 7) Perform WMA or SMA over the last "ma_period" entries
-        let mut smoothed = 0.0;
-        if self.ma_type == "wma" {
-            // denom = 1 + 2 + ⋯ + ma_n = ma_n * (ma_n + 1) / 2
-            let denom = (ma_n * (ma_n + 1) / 2) as f64;
-            for i in 0..ma_n {
-                // "idx_in_window" = (ma_head + i) % ma_n
-                // When i = ma_n - 1 => (ma_head + ma_n - 1) % ma_n is the "newest" sum_roc
-                let idx2 = (self.ma_head + i) % ma_n;
-                smoothed += self.ma_buf[idx2] * (i + 1) as f64;
+        // --- 2) Compute sum of ROCs using cached reciprocals ---
+        let mut sum_roc = (cur * (invs + invl) - 2.0) * 100.0;
+
+        // --- 3) feed into MA ring, using O(1) updates ---
+        let n = self.ma_period;
+        let write_r = self.r_head;
+        let old = self.roc[write_r];
+
+        if !self.r_filled {
+            // Building the first window:
+            // Q += (k)*x, S += x, where k = write_r+1 in [1..n]
+            self.ma_sum += sum_roc;
+            self.wma_num += (write_r as f64 + 1.0) * sum_roc;
+
+            self.roc[write_r] = sum_roc;
+            bump(&mut self.r_head, n);
+
+            if !self.r_filled && self.r_head == 0 {
+                self.r_filled = true;
             }
-            smoothed /= denom;
-        } else if self.ma_type == "sma" {
-            let mut count = 0;
-            for i in 0..ma_n {
-                let idx2 = (self.ma_head + i) % ma_n;
-                let v = self.ma_buf[idx2];
-                if !v.is_nan() {
-                    smoothed += v;
-                    count += 1;
+
+            if !self.r_filled {
+                return None;
+            }
+
+            // First tick with a complete MA window:
+            return Some(match self.mode {
+                MaMode::Wma => self.wma_num / self.wma_denom,
+                MaMode::Sma => self.ma_sum / n as f64,
+                MaMode::Ema => {
+                    // Initialize EMA to first full-window value
+                    self.ema_val = sum_roc;
+                    self.ema_init = true;
+                    self.ema_val
                 }
-            }
-            if count > 0 {
-                smoothed /= count as f64;
-            }
-        } else {
-            // only "wma" and "sma" supported in streaming
-            return None;
+                MaMode::Unsupported => return None,
+            });
         }
 
-        Some(smoothed)
+        // Rolling window is full: update in O(1)
+        let prev_sum = self.ma_sum; // S_t
+        self.ma_sum = prev_sum - old + sum_roc; // S_{t+1}
+        // Q_{t+1} = Q_t + N*new - S_t
+        self.wma_num = self.wma_num + (n as f64) * sum_roc - prev_sum;
+
+        // overwrite & advance
+        self.roc[write_r] = sum_roc;
+        bump(&mut self.r_head, n);
+
+        Some(match self.mode {
+            MaMode::Wma => self.wma_num / self.wma_denom,
+            MaMode::Sma => self.ma_sum / n as f64,
+            MaMode::Ema => {
+                if !self.ema_init {
+                    self.ema_val = sum_roc;
+                    self.ema_init = true;
+                } else {
+                    self.ema_val = self.ema_alpha * sum_roc + (1.0 - self.ema_alpha) * self.ema_val;
+                }
+                self.ema_val
+            }
+            MaMode::Unsupported => return None,
+        })
     }
 }
 #[derive(Clone, Debug)]

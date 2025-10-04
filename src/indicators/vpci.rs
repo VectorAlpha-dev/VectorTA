@@ -19,8 +19,9 @@
 //! - Batch: per-row execution now reuses shared prefix sums and selects AVX2/AVX512 per row when
 //!   `short_range <= long_range`; VPCIS remains scalar per row. Gains are modest (memory-bound),
 //!   but positive on 100k.
-//! - Streaming: O(n) ring-buffer implementation; VPCIS is returned as the current VPCI value for
-//!   streaming mode to avoid a rolling history buffer.
+//! - Streaming: O(1) ring-buffer implementation using rolling sums for
+//!   short/long windows; returns a proper VPCIS (volume-weighted average of
+//!   VPCI over the short window). See Decision note in VpciStream.
 //! - Allocation: Uses `alloc_with_nan_prefix`/matrix helpers for zero-copy outputs and warmup prefixes.
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -199,16 +200,38 @@ impl VpciBuilder {
     }
 }
 
-/// Streaming implementation for VPCI indicator
+///
+/// Decision: Streaming is O(1) per update with rolling sums; VPCIS is the
+/// short-window volume-weighted average of VPCI, matching the batch path.
 #[derive(Clone, Debug)]
 pub struct VpciStream {
     short_range: usize,
     long_range: usize,
-    close_buffer: Vec<f64>,
-    volume_buffer: Vec<f64>,
-    head: usize,
-    filled: bool,
-    count: usize,
+
+    // Ring buffers for last `long_range` samples
+    close_buf: Vec<f64>,
+    volume_buf: Vec<f64>,
+    head: usize,   // next index to write in long ring
+    count: usize,  // total samples seen
+
+    // Rolling sums for long window
+    sum_c_long: f64,
+    sum_v_long: f64,
+    sum_cv_long: f64,
+
+    // Rolling sums for short window
+    sum_c_short: f64,
+    sum_v_short: f64,
+    sum_cv_short: f64,
+
+    // VPCIS numerator: rolling sum of (VPCI * Volume) over short window
+    vpci_vol_buf: Vec<f64>,
+    vpci_vol_head: usize,
+    sum_vpci_vol_short: f64,
+
+    // Precomputed reciprocals
+    inv_long: f64,
+    inv_short: f64,
 }
 
 impl VpciStream {
@@ -217,16 +240,8 @@ impl VpciStream {
         let long_range = params.long_range.unwrap_or(25);
 
         if short_range == 0 || long_range == 0 {
-            return Err(VpciError::InvalidRange {
-                period: if short_range == 0 {
-                    short_range
-                } else {
-                    long_range
-                },
-                data_len: 0,
-            });
+            return Err(VpciError::InvalidRange { period: 0, data_len: 0 });
         }
-
         if short_range > long_range {
             return Err(VpciError::InvalidRange {
                 period: short_range,
@@ -237,109 +252,121 @@ impl VpciStream {
         Ok(Self {
             short_range,
             long_range,
-            close_buffer: vec![f64::NAN; long_range],
-            volume_buffer: vec![f64::NAN; long_range],
+            close_buf: vec![0.0; long_range],
+            volume_buf: vec![0.0; long_range],
             head: 0,
-            filled: false,
             count: 0,
+
+            sum_c_long: 0.0,
+            sum_v_long: 0.0,
+            sum_cv_long: 0.0,
+
+            sum_c_short: 0.0,
+            sum_v_short: 0.0,
+            sum_cv_short: 0.0,
+
+            vpci_vol_buf: vec![0.0; short_range],
+            vpci_vol_head: 0,
+            sum_vpci_vol_short: 0.0,
+
+            inv_long: 1.0 / (long_range as f64),
+            inv_short: 1.0 / (short_range as f64),
         })
     }
 
     #[inline(always)]
-    pub fn update(&mut self, close: f64, volume: f64) -> Option<(f64, f64)> {
-        self.close_buffer[self.head] = close;
-        self.volume_buffer[self.head] = volume;
-        self.head = (self.head + 1) % self.long_range;
-        self.count += 1;
+    fn zf(x: f64) -> f64 {
+        if x.is_finite() { x } else { 0.0 }
+    }
 
-        if !self.filled && self.head == 0 {
-            self.filled = true;
-        }
+    /// Push one (close, volume). Returns (VPCI, VPCIS) once long window is filled.
+    #[inline(always)]
+    pub fn update(&mut self, close: f64, volume: f64) -> Option<(f64, f64)> {
+        // Coerce non-finite inputs to zero for contributions (prefix-sum semantics)
+        let c_new = Self::zf(close);
+        let v_new = Self::zf(volume);
+        let cv_new = c_new * v_new;
+
+        // Indices
+        let i = self.head; // leaving long window
+        let j = (self.head + self.long_range - self.short_range) % self.long_range; // leaving short
+
+        // Values leaving long window
+        let c_old_L = Self::zf(self.close_buf[i]);
+        let v_old_L = Self::zf(self.volume_buf[i]);
+        let cv_old_L = c_old_L * v_old_L;
+
+        // Values leaving short window
+        let c_old_S = Self::zf(self.close_buf[j]);
+        let v_old_S = Self::zf(self.volume_buf[j]);
+        let cv_old_S = c_old_S * v_old_S;
+
+        // Write new sample into rings (store raw; zf applied for contributions)
+        self.close_buf[i] = close;
+        self.volume_buf[i] = volume;
+
+        // Advance ring and count
+        self.head = (self.head + 1) % self.long_range;
+        self.count = self.count.saturating_add(1);
+
+        // Update rolling sums
+        self.sum_c_long += c_new - c_old_L;
+        self.sum_v_long += v_new - v_old_L;
+        self.sum_cv_long += cv_new - cv_old_L;
+
+        self.sum_c_short += c_new - c_old_S;
+        self.sum_v_short += v_new - v_old_S;
+        self.sum_cv_short += cv_new - cv_old_S;
 
         // Need at least long_range values to compute
         if self.count < self.long_range {
             return None;
         }
 
-        Some(self.compute_current())
-    }
+        // Long window components
+        let sv_l = self.sum_v_long;
+        let sc_l = self.sum_c_long;
+        let scv_l = self.sum_cv_long;
+        let sma_l = sc_l * self.inv_long;
+        let vwma_l = if sv_l != 0.0 { scv_l / sv_l } else { f64::NAN };
+        let vpc = vwma_l - sma_l;
 
-    #[inline(always)]
-    fn compute_current(&self) -> (f64, f64) {
-        // Calculate VWMAs and SMAs using ring buffer
-        let vwma_long = self.compute_vwma(self.long_range);
-        let vwma_short = self.compute_vwma(self.short_range);
-        let sma_close_long = self.compute_sma_close(self.long_range);
-        let sma_close_short = self.compute_sma_close(self.short_range);
-        let sma_volume_long = self.compute_sma_volume(self.long_range);
-        let sma_volume_short = self.compute_sma_volume(self.short_range);
+        // Short window components
+        let sv_s = self.sum_v_short;
+        let sc_s = self.sum_c_short;
+        let scv_s = self.sum_cv_short;
 
-        // Calculate VPCI
-        let vpc = vwma_long - sma_close_long;
-        let vpr = if sma_close_short != 0.0 {
-            vwma_short / sma_close_short
+        // vpr = (VWMA_S / SMA_S) = (scv_s * short) / (sv_s * sc_s)
+        let vpr = if sv_s != 0.0 && sc_s != 0.0 {
+            (scv_s * (self.short_range as f64)) / (sv_s * sc_s)
         } else {
             f64::NAN
         };
-        let vm = if sma_volume_long != 0.0 {
-            sma_volume_short / sma_volume_long
+
+        // vm = (SMA_V_S / SMA_V_L) = (sv_s * long) / (sv_l * short)
+        let vm = if sv_l != 0.0 {
+            (sv_s * (self.long_range as f64)) / (sv_l * (self.short_range as f64))
         } else {
             f64::NAN
         };
 
         let vpci = vpc * vpr * vm;
 
-        // NOTE: VPCIS (smoothed VPCI) calculation requires historical VPCI values.
-        // In streaming mode, properly calculating VPCIS = SMA(VPCI*Volume, short) / SMA(Volume, short)
-        // would require maintaining a rolling buffer of past VPCI values.
-        // For now, we return the current VPCI value for both to maintain API compatibility.
-        // Users requiring accurate VPCIS in streaming mode should use the batch API instead.
-        (vpci, vpci)
-    }
+        // VPCIS: maintain rolling sum of (VPCI * Volume) over short window
+        let vpci_vol_new = if vpci.is_finite() { vpci * v_new } else { 0.0 };
+        let vpci_vol_old = self.vpci_vol_buf[self.vpci_vol_head];
+        self.sum_vpci_vol_short += vpci_vol_new - vpci_vol_old;
+        self.vpci_vol_buf[self.vpci_vol_head] = vpci_vol_new;
+        self.vpci_vol_head = (self.vpci_vol_head + 1) % self.short_range;
 
-    #[inline(always)]
-    fn compute_vwma(&self, period: usize) -> f64 {
-        let mut sum_cv = 0.0;
-        let mut sum_v = 0.0;
-        let mut idx = (self.head + self.long_range - period) % self.long_range;
-
-        for _ in 0..period {
-            sum_cv += self.close_buffer[idx] * self.volume_buffer[idx];
-            sum_v += self.volume_buffer[idx];
-            idx = (idx + 1) % self.long_range;
-        }
-
-        if sum_v != 0.0 {
-            sum_cv / sum_v
+        let denom = sv_s * self.inv_short; // SMA(Volume, short)
+        let vpcis = if denom != 0.0 && denom.is_finite() {
+            (self.sum_vpci_vol_short * self.inv_short) / denom
         } else {
             f64::NAN
-        }
-    }
+        };
 
-    #[inline(always)]
-    fn compute_sma_close(&self, period: usize) -> f64 {
-        let mut sum = 0.0;
-        let mut idx = (self.head + self.long_range - period) % self.long_range;
-
-        for _ in 0..period {
-            sum += self.close_buffer[idx];
-            idx = (idx + 1) % self.long_range;
-        }
-
-        sum / period as f64
-    }
-
-    #[inline(always)]
-    fn compute_sma_volume(&self, period: usize) -> f64 {
-        let mut sum = 0.0;
-        let mut idx = (self.head + self.long_range - period) % self.long_range;
-
-        for _ in 0..period {
-            sum += self.volume_buffer[idx];
-            idx = (idx + 1) % self.long_range;
-        }
-
-        sum / period as f64
+        Some((vpci, vpcis))
     }
 }
 

@@ -606,88 +606,138 @@ pub fn highpass_2_pole_avx512(data: &[f64], period: usize, k: f64, first: usize,
 pub struct HighPass2Stream {
     period: usize,
     k: f64,
-    // precomputed
+    // precomputed coeffs
     c: f64,
-    two_1m: f64,
-    neg_oma_sq: f64,
-    // state
+    cm2: f64,        // == -2.0 * c
+    two_1m: f64,     // == 2.0 * (1 - alpha)
+    neg_oma_sq: f64, // == -(1 - alpha)^2
+    // rolling state
     x_im2: f64,
     x_im1: f64,
     y_im2: f64,
     y_im1: f64,
-    idx: usize,
+    seen: usize, // number of samples observed so far
 }
 
 impl HighPass2Stream {
+    #[inline]
     pub fn try_new(params: HighPass2Params) -> Result<Self, HighPass2Error> {
         let period = params.period.unwrap_or(48);
         let k = params.k.unwrap_or(0.707);
+
         if period < 2 {
-            return Err(HighPass2Error::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(HighPass2Error::InvalidPeriod { period, data_len: 0 });
         }
         if !(k > 0.0) || !k.is_finite() {
             return Err(HighPass2Error::InvalidK { k });
         }
 
-        use std::f64::consts::PI;
-        let angle = 2.0 * PI * k / (period as f64);
-        let sin_val = angle.sin();
-        let cos_val = angle.cos();
-        let alpha = 1.0 + ((sin_val - 1.0) / cos_val);
-        let c = (1.0 - 0.5 * alpha).powi(2);
-        let two_1m = 2.0 * (1.0 - alpha);
-        let neg_oma_sq = -(1.0 - alpha).powi(2);
+        use core::f64::consts::PI;
+
+        // θ = 2π k / period
+        let theta = 2.0 * PI * k / (period as f64);
+
+        // Compute sin and cos together; generally cheaper than calling each separately.
+        let (s, c0) = theta.sin_cos();
+
+        // Guard against cos≈0 producing INF alpha for pathological parameter choices.
+        let cos_guard = if c0.abs() < 1.0e-12 { c0.signum() * 1.0e-12 } else { c0 };
+
+        // α = 1 + (sinθ - 1)/cosθ  ==  (cosθ + sinθ − 1)/cosθ
+        let invc = 1.0 / cos_guard;
+        let alpha = (s - 1.0).mul_add(invc, 1.0);
+
+        // Precompute constants used every tick
+        let one_minus_alpha = 1.0 - alpha;
+        let t = 1.0 - 0.5 * alpha;
+        let c = t * t;
 
         Ok(Self {
             period,
             k,
             c,
-            two_1m,
-            neg_oma_sq,
+            cm2: -2.0 * c,
+            two_1m: 2.0 * one_minus_alpha,
+            neg_oma_sq: -(one_minus_alpha * one_minus_alpha),
             x_im2: f64::NAN,
             x_im1: f64::NAN,
             y_im2: f64::NAN,
             y_im1: f64::NAN,
-            idx: 0,
+            seen: 0,
         })
     }
 
+    /// Reset the internal state (warmup restarts).
+    #[inline(always)]
+    pub fn reset(&mut self) {
+        self.x_im2 = f64::NAN;
+        self.x_im1 = f64::NAN;
+        self.y_im2 = f64::NAN;
+        self.y_im1 = f64::NAN;
+        self.seen = 0;
+    }
+
+    /// O(1) streaming update.
+    ///
+    /// Returns `None` until warmup completes (i.e., until `seen >= period`),
+    /// then returns `Some(y_i)` on each call. Seeding behavior matches batch:
+    /// the first two internal outputs are pass-throughs of the inputs.
     #[inline(always)]
     pub fn update(&mut self, x_i: f64) -> Option<f64> {
-        // seed first two samples as pass-through like batch kernel, but suppress output until warmup_end
-        let y_i = if self.idx == 0 {
-            self.x_im2 = x_i;
-            self.y_im2 = x_i;
-            x_i
-        } else if self.idx == 1 {
-            self.x_im1 = x_i;
-            self.y_im1 = x_i;
-            x_i
-        } else {
-            // recurrence
-            let t = self.c * x_i - 2.0 * self.c * self.x_im1
-                + self.c * self.x_im2
-                + self.two_1m * self.y_im1
-                + self.neg_oma_sq * self.y_im2;
+        // Maintain sane behavior if a data source yields NaN/Inf
+        if !x_i.is_finite() {
+            self.reset();
+            return None;
+        }
 
-            // rotate state
-            self.x_im2 = self.x_im1;
-            self.x_im1 = x_i;
-            self.y_im2 = self.y_im1;
-            self.y_im1 = t;
-            t
+        // First two samples: pass-through (batch seeds y[first], y[first+1] = x[..])
+        let y_i = match self.seen {
+            0 => {
+                self.x_im2 = x_i;
+                self.y_im2 = x_i;
+                x_i
+            }
+            1 => {
+                self.x_im1 = x_i;
+                self.y_im1 = x_i;
+                x_i
+            }
+            _ => {
+                // y[i] = c*(x[i] - 2*x[i-1] + x[i-2]) + 2*(1-α)*y[i-1] - (1-α)^2*y[i-2]
+                // Evaluate with two FMA chains to reduce latency and rounding.
+                let dx2 = self
+                    .c
+                    .mul_add(self.x_im2, self.cm2.mul_add(self.x_im1, self.c * x_i));
+                let y = self
+                    .two_1m
+                    .mul_add(self.y_im1, self.neg_oma_sq.mul_add(self.y_im2, dx2));
+
+                // Rotate state
+                self.x_im2 = self.x_im1;
+                self.x_im1 = x_i;
+                self.y_im2 = self.y_im1;
+                self.y_im1 = y;
+
+                y
+            }
         };
 
-        let out = if self.idx + 1 >= (self.period) {
-            Some(y_i)
-        } else {
-            None
-        };
-        self.idx += 1;
-        out
+        self.seen += 1;
+
+        // Suppress outputs until "warmup_end" = period-1 samples observed
+        if self.seen >= self.period { Some(y_i) } else { None }
+    }
+
+    /// How many samples remain before `update()` starts returning `Some(..)`.
+    #[inline(always)]
+    pub fn warmup_left(&self) -> usize {
+        self.period.saturating_sub(self.seen)
+    }
+
+    /// Expose coefficients for debugging/validation if desired.
+    #[inline(always)]
+    pub fn coeffs(&self) -> (f64, f64, f64, f64) {
+        (self.c, self.cm2, self.two_1m, self.neg_oma_sq)
     }
 }
 

@@ -16,7 +16,7 @@
 //!
 //! ## Developer Notes
 //! - SIMD: not implemented for this indicator; workload is sequential/windowed and largely memory-bound/branch-heavy. Keep scalar as reference path.
-//! - Scalar classic path optimized: O(1) rolling updates for mean/stddev/TR with monotonic deques for highs/lows and closed-form linreg; used for default params. Small micro-opt hoists 1/den.
+//! - Streaming kernel: replaced with O(1) update using rolling sums + TR ring + monotonic deques, matching classic scalar outputs after warmup.
 //! - Batch (ScalarBatch): row-specific path implemented. Rows are grouped by `length` and share a single rolling state; momentum is shared per-length and squeeze levels are computed per-row using squared-threshold compares. Other batch kernels fall back to per-row computation.
 
 #[cfg(feature = "python")]
@@ -796,15 +796,132 @@ pub fn ttm_squeeze_into(
     ttm_squeeze_into_slices(dst_momentum, dst_squeeze, input, kernel)
 }
 
-// Streaming support with ring buffer for O(1) updates
+// --------- internal helper: monotonic deque over (idx, val)
+#[derive(Debug, Clone)]
+struct MonoDeque {
+    idx: Vec<usize>,
+    val: Vec<f64>,
+    head: usize,
+    tail: usize,
+    len: usize,
+    cap: usize,
+    is_max: bool,
+}
+
+impl MonoDeque {
+    #[inline(always)]
+    fn new(cap: usize, is_max: bool) -> Self {
+        Self {
+            idx: vec![0; cap],
+            val: vec![f64::NAN; cap],
+            head: 0,
+            tail: 0,
+            len: 0,
+            cap,
+            is_max,
+        }
+    }
+
+    #[inline(always)]
+    fn clear(&mut self) {
+        self.head = 0;
+        self.tail = 0;
+        self.len = 0;
+    }
+
+    #[inline(always)]
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    #[inline(always)]
+    fn front_val(&self) -> f64 {
+        debug_assert!(self.len > 0);
+        self.val[self.head]
+    }
+
+    // Evict all entries with idx < min_idx
+    #[inline(always)]
+    fn expire(&mut self, min_idx: usize) {
+        while self.len > 0 {
+            let i = self.idx[self.head];
+            if i >= min_idx {
+                break;
+            }
+            self.head += 1;
+            if self.head == self.cap {
+                self.head = 0;
+            }
+            self.len -= 1;
+        }
+    }
+
+    // Push new (idx, value), discarding dominated tail
+    #[inline(always)]
+    fn push(&mut self, idx: usize, value: f64) {
+        while self.len > 0 {
+            let back_pos = if self.tail == 0 { self.cap - 1 } else { self.tail - 1 };
+            let back_val = self.val[back_pos];
+            // For max: keep strictly decreasing; for min: keep strictly increasing
+            let ok = if self.is_max { back_val >= value } else { back_val <= value };
+            if ok {
+                break;
+            }
+            self.tail = back_pos;
+            self.len -= 1;
+        }
+        self.idx[self.tail] = idx;
+        self.val[self.tail] = value;
+        self.tail += 1;
+        if self.tail == self.cap {
+            self.tail = 0;
+        }
+        self.len += 1;
+    }
+}
+
+// ---------------- O(1) streaming kernel ----------------
 #[derive(Debug, Clone)]
 pub struct TtmSqueezeStream {
     params: TtmSqueezeParams,
+
+    // ring buffers (close + TR are used for rolling sums; hi/lo kept for compatibility/reset)
     hi: Vec<f64>,
     lo: Vec<f64>,
     cl: Vec<f64>,
-    head: usize,
-    filled: bool,
+    tr: Vec<f64>,
+
+    head: usize,  // next write position in rings
+    filled: bool, // window full?
+    t: usize,     // absolute tick index (monotonic, 0..)
+
+    // rolling aggregates for BB/KC and LinReg
+    sum0: f64,   // Σ close
+    sum1: f64,   // Σ (r * close) with r in [0..n-1], oldest..newest
+    sumsq: f64,  // Σ close^2
+    tr_sum: f64, // Σ TR
+
+    // previous close (for TR of the next bar)
+    prev_close: Option<f64>,
+
+    // precomputed constants for length n
+    n: usize,
+    n_f64: f64,
+    inv_n: f64,
+    sx: f64,
+    sx2: f64,
+    inv_den: f64, // 1 / (n*sx2 - sx*sx)
+    half_nm1: f64,
+
+    // squared multipliers to avoid sqrt per tick
+    bb_sq: f64,
+    kc_low_sq: f64,
+    kc_mid_sq: f64,
+    kc_high_sq: f64,
+
+    // monotonic deques for highest(high, n) / lowest(low, n)
+    max_q: MonoDeque,
+    min_q: MonoDeque,
 }
 
 impl TtmSqueezeStream {
@@ -817,180 +934,220 @@ impl TtmSqueezeStream {
             });
         }
 
+        // Precompute constants for closed-form linreg on x = 0..n-1
+        let n_f64 = n as f64;
+        let inv_n = 1.0 / n_f64;
+        let sx = 0.5 * n_f64 * (n_f64 - 1.0);
+        let sx2 = (n_f64 - 1.0) * n_f64 * (2.0 * n_f64 - 1.0) / 6.0;
+        let den = n_f64 * sx2 - sx * sx;
+        let inv_den = if den > 0.0 { 1.0 / den } else { 0.0 }; // guard n==1
+        let half_nm1 = 0.5 * (n_f64 - 1.0);
+
+        // Pre-square multipliers (sqrt-free comparisons)
+        let bb = params.bb_mult.unwrap_or(2.0);
+        let kc_hi = params.kc_mult_high.unwrap_or(1.0);
+        let kc_md = params.kc_mult_mid.unwrap_or(1.5);
+        let kc_lo = params.kc_mult_low.unwrap_or(2.0);
+
         Ok(Self {
             params,
             hi: vec![f64::NAN; n],
             lo: vec![f64::NAN; n],
             cl: vec![f64::NAN; n],
+            tr: vec![0.0; n],
+
             head: 0,
             filled: false,
+            t: 0,
+
+            sum0: 0.0,
+            sum1: 0.0,
+            sumsq: 0.0,
+            tr_sum: 0.0,
+
+            prev_close: None,
+
+            n,
+            n_f64,
+            inv_n,
+            sx,
+            sx2,
+            inv_den,
+            half_nm1,
+
+            bb_sq: bb * bb,
+            kc_low_sq: kc_lo * kc_lo,
+            kc_mid_sq: kc_md * kc_md,
+            kc_high_sq: kc_hi * kc_hi,
+
+            max_q: MonoDeque::new(n, true),
+            min_q: MonoDeque::new(n, false),
         })
     }
 
+    /// O(1) update. Returns (momentum, squeeze) after warmup; None otherwise.
     #[inline]
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<(f64, f64)> {
-        let n = self.hi.len();
+        let n = self.n;
+        let pos = self.head;
 
-        // Store new values in ring buffer
-        self.hi[self.head] = high;
-        self.lo[self.head] = low;
-        self.cl[self.head] = close;
-        self.head = (self.head + 1) % n;
-
-        if !self.filled && self.head == 0 {
-            self.filled = true;
-        }
-        if !self.filled {
-            return None;
-        }
-
-        // Calculate SMA basis over ring
-        let mut sum = 0.0;
-        let mut cnt = 0;
-        for k in 0..n {
-            let idx = (self.head + k) % n;
-            let v = self.cl[idx];
-            if v.is_nan() {
-                continue;
-            }
-            sum += v;
-            cnt += 1;
-        }
-        if cnt == 0 {
-            return None;
-        }
-        let m = sum / cnt as f64;
-
-        // Calculate TR SMA approximate
-        let mut tr_sum = 0.0;
-        let mut tr_cnt = 0;
-        for k in 0..n {
-            let idx = (self.head + k) % n;
-            let pc = if k == 0 {
-                self.cl[(self.head + n - 1) % n]
-            } else {
-                self.cl[(self.head + k - 1) % n]
-            };
-
-            let hl = self.hi[idx] - self.lo[idx];
-            let hc = (self.hi[idx] - pc).abs();
-            let lc = (self.lo[idx] - pc).abs();
-            let tr = hl.max(hc).max(lc);
-
-            if tr.is_finite() {
-                tr_sum += tr;
-                tr_cnt += 1;
-            }
-        }
-        if tr_cnt == 0 {
-            return None;
-        }
-        let dkc = tr_sum / tr_cnt as f64;
-
-        // Calculate standard deviation for BB
-        let std = {
-            let mut ss = 0.0;
-            let mut c = 0;
-            for k in 0..n {
-                let idx = (self.head + k) % n;
-                let v = self.cl[idx];
-                if v.is_nan() {
-                    continue;
+        // --- compute TR for this bar ---
+        let tr_new = match self.prev_close {
+            Some(pc) => {
+                let hl = high - low;
+                let hc = (high - pc).abs();
+                let lc = (low - pc).abs();
+                if hl >= hc {
+                    if hl >= lc { hl } else { lc }
+                } else if hc >= lc {
+                    hc
+                } else {
+                    lc
                 }
-                let d = v - m;
-                ss += d * d;
-                c += 1;
             }
-            if c > 1 {
-                (ss / c as f64).sqrt()
-            } else {
-                return None;
-            }
+            None => high - low,
         };
 
-        // Calculate BB and KC bands
-        let bb_mult = self.params.bb_mult.unwrap_or(2.0);
-        let bb_u = m + bb_mult * std;
-        let bb_l = m - bb_mult * std;
+        // --- expire (only when window is already full) ---
+        if self.filled {
+            // After inserting index t, the valid window is [t-n+1 .. t]
+            let min_idx = self.t + 1 - n;
+            self.max_q.expire(min_idx);
+            self.min_q.expire(min_idx);
+        }
 
-        let kc_lo = self.params.kc_mult_low.unwrap_or(2.0);
-        let kc_md = self.params.kc_mult_mid.unwrap_or(1.5);
-        let kc_hi = self.params.kc_mult_high.unwrap_or(1.0);
+        // --- push into deques ---
+        self.max_q.push(self.t, high);
+        self.min_q.push(self.t, low);
 
-        let u_lo = m + dkc * kc_lo;
-        let l_lo = m - dkc * kc_lo;
-        let u_md = m + dkc * kc_md;
-        let l_md = m - dkc * kc_md;
-        let u_hi = m + dkc * kc_hi;
-        let l_hi = m - dkc * kc_hi;
+        // --- rolling aggregates ---
+        let old_c = self.cl[pos];
+        let old_tr = self.tr[pos];
 
-        // Determine squeeze state
-        let sqz = if bb_l < l_lo || bb_u > u_lo {
+        // write rings
+        self.hi[pos] = high;
+        self.lo[pos] = low;
+        self.cl[pos] = close;
+        self.tr[pos] = tr_new;
+
+        if !self.filled {
+            // seeding [0 .. n-1]
+            self.sum0 += close;
+            self.sumsq = close.mul_add(close, self.sumsq);
+            self.sum1 += (self.t as f64) * close; // r = 0..n-1 while filling
+            self.tr_sum += tr_new;
+
+            self.prev_close = Some(close);
+            self.head = (pos + 1) % n;
+            self.t += 1;
+
+            if self.t < n {
+                return None;
+            }
+
+            // first full window reached
+            self.filled = true;
+            return Some(self.emit());
+        }
+
+        // rolling step (window already full)
+        let sum0_old = self.sum0;
+
+        // Σclose, Σclose²
+        self.sum0 += close - old_c;
+        self.sumsq = close.mul_add(close, self.sumsq - old_c * old_c);
+
+        // Σ(r*close) with r in [0..n-1]
+        // shift weights by -1, drop oldest, add newest with weight (n-1)
+        self.sum1 = self.sum1 - sum0_old + old_c + (self.n_f64 - 1.0) * close;
+
+        // ΣTR
+        self.tr_sum += tr_new - old_tr;
+
+        self.prev_close = Some(close);
+        self.head = (pos + 1) % n;
+        self.t += 1;
+
+        Some(self.emit())
+    }
+
+    #[inline]
+    fn emit(&self) -> (f64, f64) {
+        // BB variance and KC width (SMA(TR))
+        let m = self.sum0 * self.inv_n;
+        let var = (-m).mul_add(m, self.sumsq * self.inv_n); // E[c^2] - m^2
+        let var_pos = if var > 0.0 { var } else { 0.0 };
+
+        let dkc = self.tr_sum * self.inv_n;
+        let dkc2 = dkc * dkc;
+
+        // sqrt-free squeeze state via squared compares
+        let bbv = self.bb_sq * var_pos;
+        let t_low = self.kc_low_sq * dkc2;
+        let t_mid = self.kc_mid_sq * dkc2;
+        let t_hi = self.kc_high_sq * dkc2;
+
+        let sqz = if bbv > t_low {
             0.0 // NoSqz
-        } else if bb_l >= l_hi || bb_u <= u_hi {
+        } else if bbv <= t_hi {
             3.0 // HighSqz
-        } else if bb_l >= l_md || bb_u <= u_md {
+        } else if bbv <= t_mid {
             2.0 // MidSqz
         } else {
             1.0 // LowSqz
         };
 
-        // Find highest/lowest over ring
-        let mut hi = f64::NEG_INFINITY;
-        let mut lo = f64::INFINITY;
-        for k in 0..n {
-            let idx = (self.head + k) % n;
-            let h = self.hi[idx];
-            if h.is_finite() && h > hi {
-                hi = h;
-            }
-            let l = self.lo[idx];
-            if l.is_finite() && l < lo {
-                lo = l;
-            }
-        }
+        // Momentum = linreg(close - avg(avg(highest, lowest), m), n, 0)
+        // highest/lowest from deques (always present once filled)
+        let highest = if self.max_q.is_empty() {
+            f64::NAN
+        } else {
+            self.max_q.front_val()
+        };
+        let lowest = if self.min_q.is_empty() {
+            f64::NAN
+        } else {
+            self.min_q.front_val()
+        };
 
-        // Calculate momentum via linear regression on ring
-        let midpoint = (hi + lo) * 0.5;
-        let avg = (midpoint + m) * 0.5;
+        let midpoint = 0.5 * (highest + lowest);
+        let avg = 0.5 * (midpoint + m);
 
-        let mut sx = 0.0;
-        let mut sy = 0.0;
-        let mut sxy = 0.0;
-        let mut sx2 = 0.0;
-        let mut nobs = 0.0;
+        // Closed-form linreg over x=0..n-1
+        // slope = (n*sxy - sx*sy)/den, intercept at x=0 = sy/n - slope*(sx/n)
+        // value at x=n-1 => intercept + slope*(n-1)
+        let sy = self.sum0 - avg * self.n_f64;
+        let sxy = self.sum1 - avg * self.sx;
 
-        for k in 0..n {
-            let idx = (self.head + k) % n;
-            let y = self.cl[idx] - avg;
-            if y.is_nan() {
-                continue;
-            }
-            let x = k as f64;
-            sx += x;
-            sy += y;
-            sxy += x * y;
-            sx2 += x * x;
-            nobs += 1.0;
-        }
+        let mom = if self.n >= 2 && self.inv_den.is_finite() {
+            let slope = self.n_f64.mul_add(sxy, -(self.sx * sy)) * self.inv_den;
+            sy * self.inv_n + slope * self.half_nm1
+        } else {
+            f64::NAN
+        };
 
-        if nobs < 2.0 {
-            return None;
-        }
-
-        let slope = (nobs * sxy - sx * sy) / (nobs * sx2 - sx * sx);
-        let intercept = (sy - slope * sx) / nobs;
-        let mom = intercept + slope * ((n - 1) as f64);
-
-        Some((mom, sqz))
+        (mom, sqz)
     }
 
     pub fn reset(&mut self) {
         self.hi.fill(f64::NAN);
         self.lo.fill(f64::NAN);
         self.cl.fill(f64::NAN);
+        self.tr.fill(0.0);
+
         self.head = 0;
         self.filled = false;
+        self.t = 0;
+
+        self.sum0 = 0.0;
+        self.sum1 = 0.0;
+        self.sumsq = 0.0;
+        self.tr_sum = 0.0;
+
+        self.prev_close = None;
+
+        self.max_q.clear();
+        self.min_q.clear();
     }
 }
 
