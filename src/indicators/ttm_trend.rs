@@ -493,49 +493,78 @@ pub unsafe fn ttm_trend_avx512_long(
     ttm_trend_scalar(source, close, period, first, out)
 }
 
+/// Decision: Streaming tightened (mask wrap + inv_period, period==1 fast path).
+/// Preserves semantics and warmup; scalar path remains safe (no unsafe).
 #[derive(Debug, Clone)]
 pub struct TtmTrendStream {
     period: usize,
-    buffer: Vec<f64>,
-    sum: f64,
-    head: usize,
-    filled: bool,
+    inv_period: f64,   // precomputed 1/period
+    buffer: Vec<f64>,  // ring buffer of last `period` source values
+    sum: f64,          // rolling sum of the window
+    head: usize,       // write index
+    len: usize,        // number of values seen so far (capped at `period`)
+    pow2_mask: usize,  // period-1 if power-of-two, else 0
 }
 
 impl TtmTrendStream {
+    #[inline(always)]
     pub fn try_new(params: TtmTrendParams) -> Result<Self, TtmTrendError> {
         let period = params.period.unwrap_or(5);
         if period == 0 {
-            return Err(TtmTrendError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(TtmTrendError::InvalidPeriod { period, data_len: 0 });
         }
+        let pow2_mask = if period.is_power_of_two() { period - 1 } else { 0 };
         Ok(Self {
             period,
+            inv_period: 1.0 / (period as f64),
             buffer: vec![0.0; period],
             sum: 0.0,
             head: 0,
-            filled: false,
+            len: 0,
+            pow2_mask,
         })
     }
+
+    #[inline(always)]
+    fn bump(&mut self) {
+        if self.pow2_mask != 0 {
+            self.head = (self.head + 1) & self.pow2_mask;
+        } else {
+            let h = self.head + 1;
+            self.head = if h == self.period { 0 } else { h };
+        }
+    }
+
+    /// Push one (source, close). Returns None until the window fills.
     #[inline(always)]
     pub fn update(&mut self, src_val: f64, close_val: f64) -> Option<bool> {
+        // Fast path: period == 1
+        if self.period == 1 {
+            let old = self.buffer[self.head]; // always index 0
+            self.buffer[self.head] = src_val;
+            self.sum += src_val - old; // keeps `sum` as last src
+            self.len = 1; // becomes and stays full
+            // head stays 0 (bump would also keep it 0 via mask path)
+            return Some(close_val > src_val);
+        }
+
+        // General path: maintain rolling sum over ring buffer
         let old = self.buffer[self.head];
         self.buffer[self.head] = src_val;
-        if self.filled {
-            self.sum += src_val - old;
-        } else {
-            self.sum += src_val;
+        // One form for all stages: early on `old == 0.0`
+        self.sum += src_val - old;
+        self.bump();
+
+        if self.len < self.period {
+            self.len += 1;
+            if self.len < self.period {
+                return None; // warmup not complete
+            }
+            // just became full -> fall through and compute first value
         }
-        self.head = (self.head + 1) % self.period;
-        if !self.filled && self.head == 0 {
-            self.filled = true;
-        }
-        if !self.filled {
-            return None;
-        }
-        Some(close_val > self.sum / (self.period as f64))
+
+        let avg = self.sum * self.inv_period;
+        Some(close_val > avg)
     }
 }
 

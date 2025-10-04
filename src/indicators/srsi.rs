@@ -20,7 +20,7 @@
 //! ## Developer Notes
 //! - Scalar optimized: inlined Wilder RSI + O(n) min/max via block prefix/suffix scans (avoids per-iteration modulo) and rolling SMAs. Defaults (14,14,3,3) use classic path for bitwise-identical outputs.
 //! - **AVX2/AVX512 Kernels**: Delegated to scalar for now; sliding-window min/max is branchy and memory-bound, so SIMD shows no clear win. Revisit with alternative layouts if profiling warrants.
-//! - **Streaming Performance**: Basic implementation using recalculation approach (O(n)). Proper streaming would require maintaining separate RSI and Stochastic state machines.
+//! - **Streaming**: Enabled O(1) per-tick kernel using Wilder RSI + monotonic deques for Stoch window and rolling SMAs for K/D; matches scalar outputs after warmup.
 //! - **Memory Optimization**: Batch mode uses RSI result caching to avoid redundant calculations across parameter combinations. Uses zero-copy helper functions for output allocation.
 
 #[cfg(feature = "python")]
@@ -56,6 +56,7 @@ use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
+use std::collections::VecDeque;
 
 impl<'a> AsRef<[f64]> for SrsiInput<'a> {
     #[inline(always)]
@@ -797,15 +798,43 @@ pub fn srsi_row_avx512_long(
 
 #[derive(Debug, Clone)]
 pub struct SrsiStream {
+    // --- configuration ---
     rsi_period: usize,
     stoch_period: usize,
     k_period: usize,
     d_period: usize,
-    rsi_buffer: Vec<f64>,
-    stoch_buffer: Vec<f64>,
-    k_buffer: Vec<f64>,
-    head: usize,
-    filled: usize,
+
+    // --- Wilder RSI state ---
+    prev: f64,            // last price
+    has_prev: bool,
+    init_count: usize,    // number of deltas accumulated for initial avg
+    sum_gain: f64,
+    sum_loss: f64,
+    avg_gain: f64,
+    avg_loss: f64,
+    alpha: f64,           // 1 / rsi_period
+    rsi_ready: bool,
+    rsi_index: usize,     // 0-based index of produced RSI samples since ready
+    last_rsi: f64,
+
+    // --- Stoch(RSI): window min/max via monotonic deques (amortized O(1)) ---
+    // Each holds (rsi_index, value)
+    max_q: VecDeque<(usize, f64)>, // non-increasing values
+    min_q: VecDeque<(usize, f64)>, // non-decreasing values
+
+    // --- Slow %K SMA state (rolling) ---
+    fk_ring: Vec<f64>,
+    fk_sum: f64,
+    fk_pos: usize,
+    fk_count: usize,
+    inv_k: f64,
+
+    // --- Slow %D SMA state (rolling over Slow %K) ---
+    sk_ring: Vec<f64>,
+    sk_sum: f64,
+    sk_pos: usize,
+    sk_count: usize,
+    inv_d: f64,
 }
 
 impl SrsiStream {
@@ -824,18 +853,232 @@ impl SrsiStream {
             stoch_period,
             k_period,
             d_period,
-            rsi_buffer: vec![f64::NAN; rsi_period],
-            stoch_buffer: vec![f64::NAN; stoch_period],
-            k_buffer: vec![f64::NAN; k_period],
-            head: 0,
-            filled: 0,
+
+            prev: f64::NAN,
+            has_prev: false,
+            init_count: 0,
+            sum_gain: 0.0,
+            sum_loss: 0.0,
+            avg_gain: 0.0,
+            avg_loss: 0.0,
+            alpha: 1.0 / (rsi_period as f64),
+            rsi_ready: false,
+            rsi_index: 0,
+            last_rsi: f64::NAN,
+
+            max_q: VecDeque::with_capacity(stoch_period),
+            min_q: VecDeque::with_capacity(stoch_period),
+
+            fk_ring: vec![0.0; k_period],
+            fk_sum: 0.0,
+            fk_pos: 0,
+            fk_count: 0,
+            inv_k: 1.0 / (k_period as f64),
+
+            sk_ring: vec![0.0; d_period],
+            sk_sum: 0.0,
+            sk_pos: 0,
+            sk_count: 0,
+            inv_d: 1.0 / (d_period as f64),
         })
     }
 
-    pub fn update(&mut self, _value: f64) -> Option<(f64, f64)> {
-        // Proper implementation would require full RSI + Stoch ring buffers
-        // Currently unimplemented to avoid misleading results
-        None
+    /// Reset the streaming state (keeps parameterization).
+    #[inline]
+    pub fn reset(&mut self) {
+        self.prev = f64::NAN;
+        self.has_prev = false;
+        self.init_count = 0;
+        self.sum_gain = 0.0;
+        self.sum_loss = 0.0;
+        self.avg_gain = 0.0;
+        self.avg_loss = 0.0;
+        self.rsi_ready = false;
+        self.rsi_index = 0;
+        self.last_rsi = f64::NAN;
+        self.max_q.clear();
+        self.min_q.clear();
+        self.fk_ring.fill(0.0);
+        self.fk_sum = 0.0;
+        self.fk_pos = 0;
+        self.fk_count = 0;
+        self.sk_ring.fill(0.0);
+        self.sk_sum = 0.0;
+        self.sk_pos = 0;
+        self.sk_count = 0;
+    }
+
+    /// Push one price; returns Some((slow_k, slow_d)) only after full warmup,
+    /// else returns None during warmup.
+    ///
+    /// Complexity: amortized O(1) per call.
+    pub fn update(&mut self, v: f64) -> Option<(f64, f64)> {
+        if !v.is_finite() {
+            // Consistent with batch path: missing/invalid breaks continuity.
+            self.reset();
+            return None;
+        }
+
+        // --- Stage 1: build Wilder RSI in O(1) ---
+        if !self.has_prev {
+            self.prev = v;
+            self.has_prev = true;
+            return None; // need at least one delta
+        }
+
+        let ch = v - self.prev;
+        self.prev = v;
+
+        // Warmup: accumulate first rsi_period deltas to form initial averages.
+        if !self.rsi_ready {
+            if ch > 0.0 { self.sum_gain += ch; } else { self.sum_loss += -ch; }
+            self.init_count += 1;
+
+            if self.init_count < self.rsi_period {
+                return None; // still accumulating initial averages
+            }
+            // Set initial Wilder averages
+            self.avg_gain = self.sum_gain / (self.rsi_period as f64);
+            self.avg_loss = self.sum_loss / (self.rsi_period as f64);
+
+            // First RSI value after warmup (matches scalar implementation)
+            let rsi = if self.avg_loss == 0.0 {
+                100.0
+            } else {
+                let rs = self.avg_gain / self.avg_loss;
+                100.0 - 100.0 / (1.0 + rs)
+            };
+            self.last_rsi = rsi;
+            self.rsi_ready = true;
+            self.rsi_index = 0;
+
+            // Seed deques with first RSI
+            self.push_rsi_to_deques(self.rsi_index, rsi);
+            // Not enough RSI samples yet for Stoch %K
+            return None;
+        }
+
+        // Wilder smoothing update (use mul_add for precision+speed)
+        let gain = if ch > 0.0 { ch } else { 0.0 };
+        let loss = if ch < 0.0 { -ch } else { 0.0 };
+        self.avg_gain = (gain - self.avg_gain).mul_add(self.alpha, self.avg_gain);
+        self.avg_loss = (loss - self.avg_loss).mul_add(self.alpha, self.avg_loss);
+
+        let rsi = if self.avg_loss == 0.0 {
+            100.0
+        } else {
+            let rs = self.avg_gain / self.avg_loss;
+            100.0 - 100.0 / (1.0 + rs)
+        };
+        self.last_rsi = rsi;
+
+        // --- Stage 2: push RSI into monotonic min/max for Stoch window ---
+        self.rsi_index += 1;
+        self.push_rsi_to_deques(self.rsi_index, rsi);
+
+        // Not enough RSI samples for Fast %K yet?
+        if self.rsi_index + 1 < self.stoch_period {
+            return None;
+        }
+
+        // Window start index (inclusive) over RSI stream
+        let start = self.rsi_index + 1 - self.stoch_period;
+        // Evict expired from front (strictly less than window start)
+        while let Some(&(j, _)) = self.max_q.front() {
+            if j < start { self.max_q.pop_front(); } else { break; }
+        }
+        while let Some(&(j, _)) = self.min_q.front() {
+            if j < start { self.min_q.pop_front(); } else { break; }
+        }
+
+        debug_assert!(!self.max_q.is_empty() && !self.min_q.is_empty());
+        let hi = self.max_q.front().unwrap().1;
+        let lo = self.min_q.front().unwrap().1;
+
+        // Fast %K on RSI
+        let fast_k = if hi > lo {
+            // Avoid divide in tight loops where possible (see fast-math note below)
+            let range = hi - lo;
+            ((rsi - lo) * 100.0) / range
+        } else {
+            50.0
+        };
+
+        // --- Stage 3: Slow %K (SMA of Fast %K) in O(1) ---
+        let slow_k_opt = Self::push_sma(
+            fast_k,
+            &mut self.fk_ring,
+            &mut self.fk_sum,
+            &mut self.fk_pos,
+            &mut self.fk_count,
+            self.k_period,
+            self.inv_k,
+        );
+
+        let slow_k = match slow_k_opt {
+            None => return None, // waiting for K SMA to fill
+            Some(v) => v,
+        };
+
+        // --- Stage 4: Slow %D (SMA of Slow %K) in O(1) ---
+        let slow_d_opt = Self::push_sma(
+            slow_k,
+            &mut self.sk_ring,
+            &mut self.sk_sum,
+            &mut self.sk_pos,
+            &mut self.sk_count,
+            self.d_period,
+            self.inv_d,
+        );
+
+        slow_d_opt.map(|d| (slow_k, d))
+    }
+
+    #[inline(always)]
+    fn push_rsi_to_deques(&mut self, idx: usize, rsi: f64) {
+        // Insert into max deque: keep values non-increasing
+        while let Some(&(_, v)) = self.max_q.back() {
+            if v <= rsi { self.max_q.pop_back(); } else { break; }
+        }
+        if self.max_q.len() == self.stoch_period { self.max_q.pop_front(); } // keep <= capacity
+        self.max_q.push_back((idx, rsi));
+
+        // Insert into min deque: keep values non-decreasing
+        while let Some(&(_, v)) = self.min_q.back() {
+            if v >= rsi { self.min_q.pop_back(); } else { break; }
+        }
+        if self.min_q.len() == self.stoch_period { self.min_q.pop_front(); } // keep <= capacity
+        self.min_q.push_back((idx, rsi));
+    }
+
+    #[inline(always)]
+    fn push_sma(
+        new_val: f64,
+        ring: &mut [f64],
+        sum: &mut f64,
+        pos: &mut usize,
+        count: &mut usize,
+        period: usize,
+        inv_period: f64,
+    ) -> Option<f64> {
+        if *count < period {
+            *sum += new_val;
+            ring[*pos] = new_val;
+            *pos += 1;
+            if *pos == period { *pos = 0; }
+            *count += 1;
+            if *count == period {
+                Some(*sum * inv_period)
+            } else {
+                None
+            }
+        } else {
+            *sum += new_val - ring[*pos];
+            ring[*pos] = new_val;
+            *pos += 1;
+            if *pos == period { *pos = 0; }
+            Some(*sum * inv_period)
+        }
     }
 }
 

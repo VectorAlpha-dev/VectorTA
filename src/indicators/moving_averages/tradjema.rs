@@ -630,16 +630,31 @@ unsafe fn tradjema_compute_into_avx512(
 }
 
 // ==================== STREAMING IMPLEMENTATION ====================
+/// Streaming TRADJEMA with O(1) amortized updates using monotonic deques
 #[derive(Debug, Clone)]
 pub struct TradjemaStream {
     length: usize,
     mult: f64,
-    tr_buffer: Vec<f64>,
-    idx: usize,
-    filled: bool,
-    prev_close: f64,
-    tradjema: f64,
     alpha: f64,
+
+    // absolute time index (0-based)
+    i: usize,
+    filled: bool,
+
+    // EMA state
+    prev_close: f64,   // src is lagged: close[i-1]
+    tradjema: f64,     // last EMA value (y)
+
+    // Monotonic deques for TR window [i-length+1 .. i]
+    // We use ring buffers identical in behavior to the scalar path.
+    min_vals: Vec<f64>,
+    min_idx:  Vec<usize>,
+    max_vals: Vec<f64>,
+    max_idx:  Vec<usize>,
+    min_head: usize,
+    min_tail: usize,
+    max_head: usize,
+    max_tail: usize,
 }
 
 impl TradjemaStream {
@@ -648,105 +663,152 @@ impl TradjemaStream {
         let mult = params.mult.unwrap_or(10.0);
 
         if length < 2 {
-            return Err(TradjemaError::InvalidLength {
-                length,
-                data_len: 0,
-            });
+            return Err(TradjemaError::InvalidLength { length, data_len: 0 });
         }
         if mult <= 0.0 || !mult.is_finite() {
             return Err(TradjemaError::InvalidMult { mult });
         }
+        let cap = length;
 
         Ok(Self {
             length,
             mult,
-            tr_buffer: vec![0.0; length],
-            idx: 0,
+            alpha: 2.0 / (length as f64 + 1.0),
+
+            i: 0,
             filled: false,
+
             prev_close: f64::NAN,
             tradjema: f64::NAN,
-            alpha: 2.0 / (length as f64 + 1.0),
+
+            min_vals: vec![0.0; cap],
+            min_idx:  vec![0;   cap],
+            max_vals: vec![0.0; cap],
+            max_idx:  vec![0;   cap],
+            min_head: 0,
+            min_tail: 0,
+            max_head: 0,
+            max_tail: 0,
         })
     }
 
     #[inline(always)]
+    fn inc(i: &mut usize, cap: usize) {
+        *i += 1;
+        if *i == cap { *i = 0; }
+    }
+    #[inline(always)]
+    fn dec(i: usize, cap: usize) -> usize {
+        if i == 0 { cap - 1 } else { i - 1 }
+    }
+    #[inline(always)]
+    fn minq_push(&mut self, v: f64, idx: usize) {
+        let cap = self.length;
+        let mut back = Self::dec(self.min_tail, cap);
+        // strict ">" to preserve older equal elements (matches batch/scalar)
+        while self.min_tail != self.min_head && self.min_vals[back] > v {
+            self.min_tail = back;
+            back = Self::dec(self.min_tail, cap);
+        }
+        self.min_vals[self.min_tail] = v;
+        self.min_idx[self.min_tail]  = idx;
+        Self::inc(&mut self.min_tail, cap);
+    }
+    #[inline(always)]
+    fn maxq_push(&mut self, v: f64, idx: usize) {
+        let cap = self.length;
+        let mut back = Self::dec(self.max_tail, cap);
+        // strict "<" to preserve older equal elements (matches batch/scalar)
+        while self.max_tail != self.max_head && self.max_vals[back] < v {
+            self.max_tail = back;
+            back = Self::dec(self.max_tail, cap);
+        }
+        self.max_vals[self.max_tail] = v;
+        self.max_idx[self.max_tail]  = idx;
+        Self::inc(&mut self.max_tail, cap);
+    }
+    #[inline(always)]
+    fn q_expire(head: &mut usize, tail: &mut usize, id: &mut [usize], cur: usize, len: usize, cap: usize) {
+        // Drop anything with index <= cur - len  (window is [cur-len+1 .. cur])
+        let lim = cur.saturating_sub(len);
+        while *head != *tail && id[*head] <= lim {
+            Self::inc(head, cap);
+        }
+    }
+
+    #[inline(always)]
+    fn max3(a: f64, b: f64, c: f64) -> f64 {
+        let m = if a > b { a } else { b };
+        if m > c { m } else { c }
+    }
+
+    /// Stream one OHLC bar. Returns `Some(value)` once the window is full,
+    /// otherwise `None` during warmup.
+    #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
-        // Calculate true range with previous close
+        // --- Compute True Range for the current bar (matches batch/scalar) ---
         let tr = if self.prev_close.is_nan() {
             high - low
         } else {
             let hl = high - low;
             let hc = (high - self.prev_close).abs();
-            let lc = (low - self.prev_close).abs();
-            hl.max(hc).max(lc)
+            let lc = (low  - self.prev_close).abs();
+            Self::max3(hl, hc, lc)
         };
 
-        // Update ring buffer
-        self.tr_buffer[self.idx] = tr;
-        self.idx = (self.idx + 1) % self.length;
+        // --- Warmup: push until window is full (i == length-1) ---
+        if !self.filled {
+            self.minq_push(tr, self.i);
+            self.maxq_push(tr, self.i);
 
-        // Not filled yet
-        if !self.filled && self.idx != 0 {
-            self.prev_close = close; // keep prev_close for lagged src
-            return None;
-        }
-
-        // First bar with full window
-        if !self.filled && self.idx == 0 {
-            self.filled = true;
-
-            // Min/max over full window
-            let mut tr_low = self.tr_buffer[0];
-            let mut tr_high = self.tr_buffer[0];
-            for &v in &self.tr_buffer[1..] {
-                if v < tr_low {
-                    tr_low = v;
-                }
-                if v > tr_high {
-                    tr_high = v;
-                }
+            if self.i + 1 < self.length {
+                // Not full yet
+                self.prev_close = close; // maintain lagged src
+                self.i += 1;
+                return None;
             }
-            let curr_tr = self.tr_buffer[self.length - 1];
-            let tr_adj = if tr_high != tr_low {
-                (curr_tr - tr_low) / (tr_high - tr_low)
-            } else {
-                0.0
-            };
 
-            let adjusted_alpha = self.alpha * (1.0 + tr_adj * self.mult);
-            let src = if self.prev_close.is_nan() {
-                close
-            } else {
-                self.prev_close
-            }; // 1-bar lag
-            self.tradjema = 0.0 + adjusted_alpha * (src - 0.0); // Pine seed
+            // First full window at i == length-1
+            let lo = self.min_vals[self.min_head];
+            let hi = self.max_vals[self.max_head];
+            let den = hi - lo;
+            let tr_adj = if den != 0.0 { (tr - lo) / den } else { 0.0 };
+            let a0 = self.alpha * (1.0 + tr_adj * self.mult);
 
-            self.prev_close = close;
+            // Seed EMA with lag-1 source (src = close[i-1])
+            let src = self.prev_close; // guaranteed finite here
+            self.tradjema = src.mul_add(a0, 0.0); // FMA for accuracy/perf
+
+            self.prev_close = close; // advance lag
+            self.filled = true;
+            self.i += 1;
             return Some(self.tradjema);
         }
 
-        // Subsequent bars
-        let mut tr_low = self.tr_buffer[0];
-        let mut tr_high = self.tr_buffer[0];
-        for &v in &self.tr_buffer[1..] {
-            if v < tr_low {
-                tr_low = v;
-            }
-            if v > tr_high {
-                tr_high = v;
-            }
-        }
-        let tr_adj = if tr_high != tr_low {
-            (tr - tr_low) / (tr_high - tr_low)
-        } else {
-            0.0
-        };
+        // --- Steady-state (window already full) ---
+        // 1) expire elements that just left the window (do this *before* push)
+        let cap = self.length;
+        Self::q_expire(&mut self.min_head, &mut self.min_tail, &mut self.min_idx, self.i, self.length, cap);
+        Self::q_expire(&mut self.max_head, &mut self.max_tail, &mut self.max_idx, self.i, self.length, cap);
 
-        let adjusted_alpha = self.alpha * (1.0 + tr_adj * self.mult);
-        let src = self.prev_close; // lagged source
-        self.tradjema += adjusted_alpha * (src - self.tradjema);
+        // 2) push TR for the current index
+        self.minq_push(tr, self.i);
+        self.maxq_push(tr, self.i);
 
+        // 3) read window min/max and update EMA with the lagged source
+        let lo = self.min_vals[self.min_head];
+        let hi = self.max_vals[self.max_head];
+        let den = hi - lo;
+        let tr_adj = if den != 0.0 { (tr - lo) / den } else { 0.0 };
+        let a = self.alpha * (1.0 + tr_adj * self.mult);
+
+        let src = self.prev_close; // src is close[i-1]
+        self.tradjema = (src - self.tradjema).mul_add(a, self.tradjema);
+
+        // 4) advance state
         self.prev_close = close;
+        self.i += 1;
+
         Some(self.tradjema)
     }
 }

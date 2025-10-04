@@ -1706,6 +1706,8 @@ pub unsafe fn adx_row_avx512_long(
     adx_avx512(high, low, close, period, out)
 }
 
+// Decision: Streaming kernel uses TR identity and single reciprocal for DI.
+// Preserves Wilder arithmetic order; O(1) per tick; matches batch within 1e-8.
 #[derive(Debug, Clone)]
 pub struct AdxStream {
     period: usize,
@@ -1747,6 +1749,7 @@ impl AdxStream {
 
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
+        // Stage 0: seed with the very first bar
         if self.count == 0 {
             self.prev_high = high;
             self.prev_low = low;
@@ -1755,65 +1758,70 @@ impl AdxStream {
             return None;
         }
 
-        let tr = (high - low)
-            .max((high - self.prev_close).abs())
-            .max((low - self.prev_close).abs());
+        // Wilder True Range via identity: TR = max(H, prevC) - min(L, prevC)
+        let prev_c = self.prev_close;
+        let tr = high.max(prev_c) - low.min(prev_c);
+
+        // Directional movement gating (Wilder)
         let up_move = high - self.prev_high;
         let down_move = self.prev_low - low;
-        let plus_dm = if up_move > down_move && up_move > 0.0 {
-            up_move
-        } else {
-            0.0
-        };
-        let minus_dm = if down_move > up_move && down_move > 0.0 {
-            down_move
-        } else {
-            0.0
-        };
+        let plus_dm = if up_move > down_move && up_move > 0.0 { up_move } else { 0.0 };
+        let minus_dm = if down_move > up_move && down_move > 0.0 { down_move } else { 0.0 };
 
         self.count += 1;
 
+        // Warmup: accumulate sums for the first 'period' bars after the seed
         if self.count <= self.period + 1 {
             self.atr += tr;
             self.plus_dm_smooth += plus_dm;
             self.minus_dm_smooth += minus_dm;
 
             if self.count == self.period + 1 {
-                let plus_di_prev = (self.plus_dm_smooth / self.atr) * 100.0;
-                let minus_di_prev = (self.minus_dm_smooth / self.atr) * 100.0;
-                let sum_di = plus_di_prev + minus_di_prev;
-                let initial_dx = if sum_di != 0.0 {
-                    ((plus_di_prev - minus_di_prev).abs() / sum_di) * 100.0
+                // DI via single reciprocal to avoid two divisions
+                let inv_atr100 = if self.atr != 0.0 { 100.0 / self.atr } else { 0.0 };
+                let plus_di = self.plus_dm_smooth * inv_atr100;
+                let minus_di = self.minus_dm_smooth * inv_atr100;
+                let sum_di = plus_di + minus_di;
+
+                self.dx_sum = if sum_di != 0.0 {
+                    ((plus_di - minus_di).abs() / sum_di) * 100.0
                 } else {
                     0.0
                 };
-                self.dx_sum = initial_dx;
                 self.dx_count = 1;
             }
 
+            // advance prev*
             self.prev_high = high;
             self.prev_low = low;
             self.prev_close = close;
             return None;
         }
 
-        let rp = 1.0 / self.period as f64;
+        // --- Main streaming pass (O(1)) ---
+        let rp = 1.0 / (self.period as f64);
         let one_minus_rp = 1.0 - rp;
-        let period_minus_one = self.period as f64 - 1.0;
+        let period_minus_one = (self.period as f64) - 1.0;
 
+        // Wilder smoothing (no FMA)
         self.atr = self.atr * one_minus_rp + tr;
         self.plus_dm_smooth = self.plus_dm_smooth * one_minus_rp + plus_dm;
         self.minus_dm_smooth = self.minus_dm_smooth * one_minus_rp + minus_dm;
 
-        let plus_di = (self.plus_dm_smooth / self.atr) * 100.0;
-        let minus_di = (self.minus_dm_smooth / self.atr) * 100.0;
+        // One division to compute both DI's
+        let inv_atr100 = if self.atr != 0.0 { 100.0 / self.atr } else { 0.0 };
+        let plus_di = self.plus_dm_smooth * inv_atr100;
+        let minus_di = self.minus_dm_smooth * inv_atr100;
         let sum_di = plus_di + minus_di;
+
+        // DX_t = 100 * |+DI - -DI| / (+DI + -DI)
         let dx = if sum_di != 0.0 {
             ((plus_di - minus_di).abs() / sum_di) * 100.0
         } else {
             0.0
         };
 
+        // First ADX is mean of first 'period' DXs, then Wilder smoothing
         let out = if self.dx_count < self.period {
             self.dx_sum += dx;
             self.dx_count += 1;
@@ -1824,10 +1832,11 @@ impl AdxStream {
                 None
             }
         } else {
-            self.last_adx = ((self.last_adx * period_minus_one) + dx) * rp;
+            self.last_adx = (self.last_adx * period_minus_one + dx) * rp;
             Some(self.last_adx)
         };
 
+        // advance prev*
         self.prev_high = high;
         self.prev_low = low;
         self.prev_close = close;

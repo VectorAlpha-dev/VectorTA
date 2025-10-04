@@ -797,106 +797,102 @@ pub unsafe fn supertrend_scalar_classic(
     Ok(())
 }
 
-// Streaming (stateful) implementation for parity
+// Streaming (stateful) implementation — drop-in replacement
+// Decision: Streaming uses O(1) state (prev bands, prev close, boolean state) and FMA for band math.
 #[derive(Debug, Clone)]
 pub struct SuperTrendStream {
     pub period: usize,
     pub factor: f64,
     atr_stream: crate::indicators::atr::AtrStream,
-    buffer_high: Vec<f64>,
-    buffer_low: Vec<f64>,
-    buffer_close: Vec<f64>,
-    head: usize,
-    filled: bool,
+    // O(1) state we actually need
     prev_upper_band: f64,
     prev_lower_band: f64,
-    prev_trend: f64,
+    prev_close: f64,
+    upper_state: bool, // true = using upper band, false = using lower band
+    warmed: bool,      // first output has been produced
 }
+
 impl SuperTrendStream {
+    #[inline]
     pub fn try_new(params: SuperTrendParams) -> Result<Self, SuperTrendError> {
         let period = params.period.unwrap_or(10);
         let factor = params.factor.unwrap_or(3.0);
-        let atr_stream = crate::indicators::atr::AtrStream::try_new(AtrParams {
-            length: Some(period),
-        })?;
+        let atr_stream = crate::indicators::atr::AtrStream::try_new(AtrParams { length: Some(period) })?;
         Ok(Self {
             period,
             factor,
             atr_stream,
-            buffer_high: vec![f64::NAN; period],
-            buffer_low: vec![f64::NAN; period],
-            buffer_close: vec![f64::NAN; period],
-            head: 0,
-            filled: false,
             prev_upper_band: f64::NAN,
             prev_lower_band: f64::NAN,
-            prev_trend: f64::NAN,
+            prev_close: f64::NAN,
+            upper_state: false,
+            warmed: false,
         })
     }
+
+    /// O(1) update:
+    /// - Uses Wilder/RMA ATR stream from `AtrStream` (first `Some` after `period` ticks)
+    /// - Tightens bands against previous close and bands (matches scalar core)
+    /// - Emits (trend, changed) once warmup is complete
+    #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<(f64, f64)> {
-        self.buffer_high[self.head] = high;
-        self.buffer_low[self.head] = low;
-        self.buffer_close[self.head] = close;
-        self.head = (self.head + 1) % self.period;
+        // 1) Update embedded ATR; None until warmup is complete.
+        let atr = match self.atr_stream.update(high, low, close) {
+            Some(v) => v,
+            None => return None,
+        };
 
-        if !self.filled && self.head == 0 {
-            self.filled = true;
-        }
-        let atr_opt = self.atr_stream.update(high, low, close);
-        if !self.filled || atr_opt.is_none() {
-            return None;
-        }
-        let idx = if self.head == 0 {
-            self.period - 1
-        } else {
-            self.head - 1
-        };
-        let avg = (self.buffer_high[idx] + self.buffer_low[idx]) / 2.0;
-        let atr = atr_opt.unwrap();
-        let upper_basic = avg + self.factor * atr;
-        let lower_basic = avg - self.factor * atr;
+        // 2) Compute HL2 and basic bands with FMA
+        let hl2 = (high + low) * 0.5;
+        let upper_basic = self.factor.mul_add(atr, hl2);
+        let lower_basic = (-self.factor).mul_add(atr, hl2);
 
-        let upper_band = if self.prev_upper_band.is_nan() {
-            upper_basic
-        } else if self.buffer_close[(self.head + self.period - 2) % self.period]
-            <= self.prev_upper_band
-        {
-            f64::min(upper_basic, self.prev_upper_band)
-        } else {
-            upper_basic
-        };
-        let lower_band = if self.prev_lower_band.is_nan() {
-            lower_basic
-        } else if self.buffer_close[(self.head + self.period - 2) % self.period]
-            >= self.prev_lower_band
-        {
-            f64::max(lower_basic, self.prev_lower_band)
-        } else {
-            lower_basic
-        };
-        let prev_trend = self.prev_trend;
-        let mut trend = f64::NAN;
+        // 3) First emission: seed state; changed = 0.0
+        if !self.warmed {
+            self.prev_upper_band = upper_basic;
+            self.prev_lower_band = lower_basic;
+            self.upper_state = close <= self.prev_upper_band;
+            let trend = if self.upper_state { self.prev_upper_band } else { self.prev_lower_band };
+            self.prev_close = close;
+            self.warmed = true;
+            return Some((trend, 0.0));
+        }
+
+        // 4) Tighten bands using previous close vs previous bands
+        let mut curr_upper_band = upper_basic;
+        if self.prev_close <= self.prev_upper_band {
+            curr_upper_band = curr_upper_band.min(self.prev_upper_band);
+        }
+        let mut curr_lower_band = lower_basic;
+        if self.prev_close >= self.prev_lower_band {
+            curr_lower_band = curr_lower_band.max(self.prev_lower_band);
+        }
+
+        // 5) Decide trend & change from previous state
         let mut changed = 0.0;
-        if prev_trend.is_nan() || (prev_trend - self.prev_upper_band).abs() < f64::EPSILON {
-            if close <= upper_band {
-                trend = upper_band;
-                changed = 0.0;
+        let trend = if self.upper_state {
+            if close <= curr_upper_band {
+                curr_upper_band
             } else {
-                trend = lower_band;
                 changed = 1.0;
+                self.upper_state = false;
+                curr_lower_band
             }
-        } else if (prev_trend - self.prev_lower_band).abs() < f64::EPSILON {
-            if close >= lower_band {
-                trend = lower_band;
-                changed = 0.0;
+        } else {
+            if close >= curr_lower_band {
+                curr_lower_band
             } else {
-                trend = upper_band;
                 changed = 1.0;
+                self.upper_state = true;
+                curr_upper_band
             }
-        }
-        self.prev_upper_band = upper_band;
-        self.prev_lower_band = lower_band;
-        self.prev_trend = trend;
+        };
+
+        // 6) Carry state forward
+        self.prev_upper_band = curr_upper_band;
+        self.prev_lower_band = curr_lower_band;
+        self.prev_close = close;
+
         Some((trend, changed))
     }
 }

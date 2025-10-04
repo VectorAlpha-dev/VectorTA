@@ -720,129 +720,241 @@ unsafe fn cora_wave_avx512(
     cora_wave_scalar(data, period, r_multi, smooth_period, first_val, out);
 }
 
+/// Decision: Streaming uses O(1) CoRa recurrence; WMA smoothing recomputes per emission by default
+/// to match scalar/batch numerics exactly. Optional O(1) WMA is implemented but disabled by default.
 #[derive(Debug, Clone)]
 pub struct CoraWaveStream {
-    buffer: Vec<f64>,
-    raw_buffer: Vec<f64>,
+    // ---- config ----
     period: usize,
     r_multi: f64,
     smooth: bool,
-    smooth_period: usize,
-    weights: Vec<f64>,
-    weight_sum: f64,
-    wma_weights: Vec<f64>,
-    wma_weight_sum: f64,
-    index: usize,
-    ready: bool,
+    smooth_period: usize, // m
+
+    // ---- precomputed geometric parameters for CoRa ----
+    base: f64,     // geometric ratio R = 1 + r*r_multi
+    inv_R: f64,    // 1/R
+    a_old: f64,    // "a" in the derivation: start_wt (== w0 * inv_R)
+    w_last: f64,   // weight of newest sample when window is full: a*R^p
+    inv_wsum: f64, // 1 / sum(weights)
+
+    // ---- state: CoRa ----
+    ring_x: Vec<f64>,
+    head_x: usize, // points at slot to overwrite next
+    idx: usize,    // number of samples seen
+    have_S: bool,
+    S: f64,        // current (unnormalized) weighted sum
+
+    // ---- state: smoothing (WMA over CoRa outputs) ----
+    m: usize,
+    wma_sum: f64,
+    ring_y: Vec<f64>,
+    head_y: usize,
+    y_count: usize, // number of CoRa values stored so far
+    // O(1) WMA running sums (used only in FAST mode)
+    Ssum_y: f64, // simple sum of last m CoRa values
+    Wsum_y: f64, // weighted sum with weights 1..m
+
+    // ---- behavior toggles ----
+    fast_smooth: bool, // false => recompute WMA per emission (exact match); true => O(1)
 }
 
 impl CoraWaveStream {
+    #[inline]
     pub fn try_new(params: CoraWaveParams) -> Result<Self, CoraWaveError> {
         let period = params.period.unwrap_or(20);
         let r_multi = params.r_multi.unwrap_or(2.0);
         let smooth = params.smooth.unwrap_or(true);
 
         if period == 0 {
-            return Err(CoraWaveError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(CoraWaveError::InvalidPeriod { period, data_len: 0 });
         }
-
         if r_multi < 0.0 || !r_multi.is_finite() {
             return Err(CoraWaveError::InvalidRMulti { value: r_multi });
         }
 
-        let smooth_period = if smooth {
+        // ----- smoothing length (m) -----
+        let m = if smooth {
             ((period as f64).sqrt().round() as usize).max(1)
         } else {
             1
         };
 
-        // Pre-calculate CoRa weights
-        let (weights, weight_sum) = if period == 1 {
-            (vec![1.0], 1.0)
+        // ===== CoRa geometric weights (no full weight vector needed) =====
+        // Weight definition used elsewhere in this file:
+        //   w_j = start_wt * base^(j+1), j = 0..p-1, newest uses j=p-1.
+        let p = period;
+        let start_wt = 0.01_f64;
+        // step ratio baseline across j (prior to r_multi):
+        let end_wt = p as f64;
+        let r = (end_wt / start_wt).powf(1.0 / (p as f64 - 1.0)) - 1.0;
+        let base = 1.0 + r * r_multi;
+        let inv_R = 1.0 / base;
+        // a_old := "a" in the recurrence; here it's simply start_wt
+        let a_old = start_wt;
+
+        // base^p and final weight on newest element when window is full
+        let base_pow_p = if (base - 1.0).abs() < 1e-16 { 1.0 } else { base.powi(p as i32) };
+        let w_last = a_old * base_pow_p;
+
+        // geometric series: sum_{j=0}^{p-1} start_wt * base^(j+1)
+        let weight_sum = if (base - 1.0).abs() < 1e-16 {
+            // r_multi == 0 ⇒ base == 1 ⇒ all weights equal to start_wt
+            a_old * (p as f64)
         } else {
-            let start_wt = 0.01;
-            let end_wt = period as f64;
-            let r = (end_wt / start_wt).powf(1.0 / (period as f64 - 1.0)) - 1.0;
-            let base = 1.0 + r * r_multi;
-
-            let mut w = Vec::with_capacity(period);
-            let mut s = 0.0;
-            for j in 0..period {
-                let cw = start_wt * base.powi((j + 1) as i32);
-                w.push(cw);
-                s += cw;
-            }
-            (w, s)
+            a_old * base * (base_pow_p - 1.0) / (base - 1.0)
         };
+        let inv_wsum = 1.0 / weight_sum;
 
-        // Pre-calculate WMA weights if smoothing
-        let mut wma_weights = Vec::new();
-        let mut wma_weight_sum = 0.0;
-        if smooth_period > 1 {
-            for i in 1..=smooth_period {
-                let weight = i as f64;
-                wma_weights.push(weight);
-                wma_weight_sum += weight;
-            }
-        }
+        // ----- WMA fixed denominator -----
+        let wma_sum = (m as f64) * ((m as f64) + 1.0) * 0.5;
+
+        // Default behavior: keep exact WMA numerics (same order as scalar path).
+        const FAST_WMA_O1_DEFAULT: bool = false;
 
         Ok(Self {
-            buffer: vec![0.0; period],
-            raw_buffer: vec![0.0; smooth_period.max(1)],
-            period,
+            period: p,
             r_multi,
             smooth,
-            smooth_period,
-            weights,
-            weight_sum,
-            wma_weights,
-            wma_weight_sum,
-            index: 0,
-            ready: false,
+            smooth_period: m,
+            base,
+            inv_R,
+            a_old,
+            w_last,
+            inv_wsum,
+            ring_x: vec![0.0; p],
+            head_x: 0,
+            idx: 0,
+            have_S: false,
+            S: 0.0,
+            m,
+            wma_sum,
+            ring_y: vec![0.0; m.max(1)],
+            head_y: 0,
+            y_count: 0,
+            Ssum_y: 0.0,
+            Wsum_y: 0.0,
+            fast_smooth: FAST_WMA_O1_DEFAULT,
         })
     }
 
-    pub fn update(&mut self, value: f64) -> Option<f64> {
-        self.buffer[self.index % self.period] = value;
-        self.index += 1;
+    /// Push one value. Returns Some(value) when warm-up is complete, else None.
+    #[inline]
+    pub fn update(&mut self, x_new: f64) -> Option<f64> {
+        // write new sample into ring_x; remember outgoing when the window is full
+        let pos = self.head_x;
+        let x_old = self.ring_x[pos];
+        self.ring_x[pos] = x_new;
+        self.head_x = (pos + 1) % self.period;
+        self.idx += 1;
 
-        if self.index >= self.period {
-            self.ready = true;
+        // Build initial S when the window first fills
+        if !self.have_S {
+            if self.idx < self.period {
+                return None;
+            }
+            // idx == period here: compute initial dot product S = Σ w_j * x_{oldest..newest}
+            //   oldest is at head_x, newest at head_x+(p-1)
+            let mut S = 0.0;
+            let mut w = self.a_old * self.base; // start_wt * base^(0+1)
+            let mut i = 0usize;
+            while i < self.period {
+                // chronological order: oldest..newest
+                let xi = self.ring_x[(self.head_x + i) % self.period];
+                S = xi.mul_add(w, S);
+                w *= self.base;
+                i += 1;
+            }
+            self.S = S;
+            self.have_S = true;
+
+            // First CoRa output
+            let y = self.S * self.inv_wsum;
+            if self.m == 1 {
+                return Some(y);
+            }
+            // store for smoothing warm-up
+            self.ring_y[self.y_count] = y;
+            self.y_count += 1;
+            // next write position advances accordingly
+            self.head_y = self.y_count % self.m;
+            if self.fast_smooth {
+                self.Ssum_y += y;
+                self.Wsum_y += (self.y_count as f64) * y; // weights 1..k during warm-up
+            }
+            return None;
         }
 
-        if self.ready {
-            // Calculate CoRa MA
-            let mut sum = 0.0;
-            for i in 0..self.period {
-                let idx = (self.index - self.period + i) % self.period;
-                sum += self.buffer[idx] * self.weights[i];
-            }
-            let cora_value = sum / self.weight_sum;
+        // O(1) CoRa recurrence:
+        // S' = (S / R) - a_old * x_old + (a_old * R^p) * x_new
+        self.S = (self.S * self.inv_R) - self.a_old * x_old + self.w_last * x_new;
+        let y = self.S * self.inv_wsum;
 
-            if self.smooth_period > 1 {
-                // Store in raw buffer for smoothing
-                let raw_idx = (self.index - 1) % self.smooth_period;
-                self.raw_buffer[raw_idx] = cora_value;
+        // No smoothing?
+        if self.m == 1 {
+            return Some(y);
+        }
 
-                if self.index >= self.period + self.smooth_period - 1 {
-                    // Apply WMA smoothing
-                    let mut smooth_sum = 0.0;
-                    for i in 0..self.smooth_period {
-                        let idx = (self.index - self.smooth_period + i) % self.smooth_period;
-                        smooth_sum += self.raw_buffer[idx] * self.wma_weights[i];
-                    }
-                    Some(smooth_sum / self.wma_weight_sum)
-                } else {
-                    None
+        // Smoothing path
+        if !self.fast_smooth {
+            // ---- Exact per-emission recompute (matches scalar path numerically) ----
+            // Maintain a ring of last m CoRa values.
+            if self.y_count < self.m {
+                // still filling the window
+                self.ring_y[self.head_y] = y;
+                self.head_y = (self.head_y + 1) % self.m;
+                self.y_count += 1;
+                if self.y_count < self.m {
+                    return None;
                 }
+                // just reached full window: emit initial WMA
+                let mut acc = 0.0;
+                let mut k = 0usize;
+                while k < self.m {
+                    let idx = (self.head_y + k) % self.m; // oldest..newest
+                    let v = self.ring_y[idx];
+                    acc = v.mul_add((k + 1) as f64, acc);
+                    k += 1;
+                }
+                return Some(acc / self.wma_sum);
             } else {
-                Some(cora_value)
+                // steady-state: overwrite oldest, then compute
+                self.ring_y[self.head_y] = y;
+                self.head_y = (self.head_y + 1) % self.m;
+                let mut acc = 0.0;
+                let mut k = 0usize;
+                while k < self.m {
+                    let idx = (self.head_y + k) % self.m; // oldest..newest
+                    let v = self.ring_y[idx];
+                    acc = v.mul_add((k + 1) as f64, acc);
+                    k += 1;
+                }
+                return Some(acc / self.wma_sum);
             }
         } else {
-            None
+            // ---- FAST O(1) WMA update ----
+            if self.y_count < self.m {
+                // still filling the y-ring
+                self.ring_y[self.y_count] = y;
+                self.y_count += 1;
+                self.Ssum_y += y;
+                self.Wsum_y += (self.y_count as f64) * y;
+                if self.y_count < self.m {
+                    return None;
+                }
+                // just reached full window: emit initial WMA
+                self.head_y = 0;
+                return Some(self.Wsum_y / self.wma_sum);
+            }
+
+            // slide window by 1 in O(1)
+            let y_old = self.ring_y[self.head_y];
+            // update weighted sum and simple sum
+            self.Wsum_y = self.Wsum_y - self.Ssum_y + (self.m as f64) * y;
+            self.ring_y[self.head_y] = y;
+            self.Ssum_y = self.Ssum_y + y - y_old;
+            self.head_y = (self.head_y + 1) % self.m;
+
+            Some(self.Wsum_y / self.wma_sum)
         }
     }
 }

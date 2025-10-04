@@ -13,6 +13,7 @@
 //! - **`Err(VidyaError)`** on invalid parameters or insufficient data.
 //!
 //! ## Developer Notes
+//! - Decision: Streaming kernel tightened per GUIDE. Uses mul_add for sums/EMA, one-sqrt ratio, and mod-free long-ring wrap; outputs match scalar/batch.
 //! - **SIMD Status**: AVX2 enabled with an unsafe + FMA (mul_add) implementation that yields
 //!   ~16–20% speedups on realistic sizes. This can introduce very small numerical differences
 //!   versus the scalar path due to operation reordering and fused operations. Tests use slightly
@@ -838,53 +839,77 @@ impl VidyaStream {
     }
 
     #[inline(always)]
-    pub fn update(&mut self, value: f64) -> Option<f64> {
-        // Oldest values before inserting the new one
+    pub fn update(&mut self, x: f64) -> Option<f64> {
+        // Pull tails before we overwrite ring slots.
         let long_tail = self.long_buf[self.head];
-        let short_tail = self.short_buf[self.idx % self.short_period];
+        let short_idx = self.idx % self.short_period;
+        let short_tail = self.short_buf[short_idx];
 
-        self.long_sum += value;
-        self.long_sum2 += value * value;
-        if self.idx >= self.long_period - self.short_period {
-            self.short_sum += value;
-            self.short_sum2 += value * value;
+        // Phase boundary for when short window starts accumulating.
+        let phase2_start = self.long_period - self.short_period;
+
+        // --- PUSH new sample into rolling stats (use FMA for sum of squares) ---
+        self.long_sum += x;
+        self.long_sum2 = x.mul_add(x, self.long_sum2);
+
+        if self.idx >= phase2_start {
+            self.short_sum += x;
+            self.short_sum2 = x.mul_add(x, self.short_sum2);
         }
 
+        // --- POP old sample(s) once the long window is full ---
         if self.idx >= self.long_period {
             self.long_sum -= long_tail;
-            self.long_sum2 -= long_tail * long_tail;
+            self.long_sum2 = (-long_tail).mul_add(long_tail, self.long_sum2);
+
             self.short_sum -= short_tail;
-            self.short_sum2 -= short_tail * short_tail;
+            self.short_sum2 = (-short_tail).mul_add(short_tail, self.short_sum2);
         }
 
-        self.long_buf[self.head] = value;
-        self.short_buf[self.idx % self.short_period] = value;
-        self.head = (self.head + 1) % self.long_period;
+        // Commit to rings
+        self.long_buf[self.head] = x;
+        self.short_buf[short_idx] = x;
+
+        // Branchless (mod-free) wrap for the long ring head.
+        let mut h = self.head + 1;
+        if h == self.long_period {
+            h = 0;
+        }
+        self.head = h;
+
+        // Advance sample count.
         self.idx += 1;
 
+        // Warm-up handling mirrors batch: first defined output at (long - 2)
         if self.idx < self.long_period - 1 {
-            self.val = value;
+            self.val = x;
             return None;
         }
         if self.idx == self.long_period - 1 {
-            self.val = value;
+            self.val = x;
             return Some(self.val);
         }
 
-        let sp = self.short_period as f64;
-        let lp = self.long_period as f64;
-        let short_div = 1.0 / sp;
-        let long_div = 1.0 / lp;
-        let short_stddev =
-            (self.short_sum2 * short_div - (self.short_sum * short_div).powi(2)).sqrt();
-        let long_stddev = (self.long_sum2 * long_div - (self.long_sum * long_div).powi(2)).sqrt();
-        let mut k = short_stddev / long_stddev;
-        if k.is_nan() {
-            k = 0.0;
-        }
-        k *= self.alpha;
-        self.val = (value - self.val) * k + self.val;
+        // --- Compute adaptive factor k = α * sqrt(short_var / long_var) ---
+        let short_inv = 1.0 / (self.short_period as f64);
+        let long_inv = 1.0 / (self.long_period as f64);
 
+        let short_mean = self.short_sum * short_inv;
+        let long_mean = self.long_sum * long_inv;
+
+        // Variances via one-pass rolling sums.
+        let short_var = self.short_sum2 * short_inv - (short_mean * short_mean);
+        let long_var = self.long_sum2 * long_inv - (long_mean * long_mean);
+
+        // Guard degenerate windows and avoid NaNs/Infs.
+        let mut k = 0.0;
+        if long_var > 0.0 && short_var > 0.0 {
+            // Exact: one sqrt of the variance ratio.
+            k = (short_var / long_var).sqrt() * self.alpha;
+        }
+
+        // EMA-style fused update: y += k * (x - y)
+        self.val = (x - self.val).mul_add(k, self.val);
         Some(self.val)
     }
 }

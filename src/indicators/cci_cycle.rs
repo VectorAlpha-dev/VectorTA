@@ -13,7 +13,7 @@
 //!
 //! ## Developer Status
 //! - **SIMD Kernels**: AVX2/AVX512 accelerate the double-EMA stage; stochastic passes remain scalar
-//! - **Streaming Performance**: O(n) - requires full recalculation due to dependencies on CCI, EMA, and SMMA calculations
+//! - **Streaming Performance**: O(1) per-tick (amortized): EMA/SMMA as constant-time recurrences; rolling min/max via monotonic deques; CCI MAD after exact init via Wilder RMA.
 //! - **Memory Optimization**: GOOD - properly uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
 //! - Decision: Stochastic min/max now uses O(n) monotonic deques; SIMD not beneficial there due to data-dependent control flow.
 
@@ -72,7 +72,7 @@ fn fmadd(a: f64, b: f64, c: f64) -> f64 {
 }
 
 // Monotonic index deque with power-of-two ring buffer for O(1) ops.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct MonoIdxDeque {
     buf: Vec<usize>,
     head: usize,
@@ -865,24 +865,65 @@ fn naive_pf_and_normalize_scalar(
     }
 }
 
-// ==================== STREAMING SUPPORT ====================
-/// Streaming calculator for real-time updates
+// ==================== STREAMING SUPPORT (drop-in) ====================
+/// Decision: Streaming enabled via O(1) recurrences and deques; CCI MAD uses Wilder RMA after exact init.
 #[derive(Debug, Clone)]
 pub struct CciCycleStream {
-    buffer: Vec<f64>,
-    cci_buffer: Vec<f64>,
-    ema_short_state: f64,
-    ema_long_state: f64,
-    smma_state: f64,
-    pf_state: f64,
-    pff_state: f64,
+    // config
     length: usize,
     factor: f64,
-    index: usize,
-    ready: bool,
+    half: usize,
+    smma_p: usize,
+
+    // constant reciprocals / scales
+    inv_len: f64,
+    inv_smma_p: f64,
+    alpha_s: f64,
+    alpha_l: f64,
+    cci_scale: f64,   // = 1.0 / 0.015
+
+    // global index
+    i: usize,
+
+    // ---- CCI window (SMA + mean deviation) ----
+    x_win: Vec<f64>,     // length
+    x_sum: f64,
+    x_count: usize,      // number of valid samples seen so far (caps at length)
+    dev_rma: f64,        // RMA of |x - sma| after exact init
+    dev_init_done: bool, // exact MAD done once at first full window
+
+    // ---- EMA(short/long) ----
+    ema_s: f64,
+    ema_l: f64,
+    ema_inited: bool,
+
+    // ---- SMMA over (2*ema_s - ema_l) ----
+    smma: f64,
+    smma_init_sum: f64,
+    smma_init_count: usize,
+    smma_inited: bool,
+
+    // ---- Stage buffers (for stoch windows) ----
+    ccis_win: Vec<f64>,   // ring (length) of SMMA(double-EMA)
+    pf_win: Vec<f64>,     // ring (length) of smoothed %K (first stoch)
+
+    // ---- Deques for rolling min/max (O(1)) ----
+    q_min_cc: MonoIdxDeque,
+    q_max_cc: MonoIdxDeque,
+    q_min_pf: MonoIdxDeque,
+    q_max_pf: MonoIdxDeque,
+
+    // ---- Smoothing states for the two stoch passes ----
+    prev_f1: f64,     // last unsmoothed %K on ccis (for zero-range fallback)
+    pf_smooth: f64,   // smoothed %K (first pass)
+    out_prev: f64,    // smoothed %K of second pass (final output)
+
+    // gating
+    warmup_after: usize, // conservative: length*4 (matches batch)
 }
 
 impl CciCycleStream {
+    #[inline]
     pub fn try_new(params: CciCycleParams) -> Result<Self, CciCycleError> {
         let length = params.length.unwrap_or(10);
         let factor = params.factor.unwrap_or(0.5);
@@ -894,35 +935,298 @@ impl CciCycleStream {
             });
         }
 
+        // periods used in batch path
+        let half = (length + 1) / 2;
+        let smma_p = ((length as f64).sqrt().round() as usize).max(1);
+
+        // coefficients and constants (compute once)
+        let inv_len = 1.0 / (length as f64);
+        let inv_smma_p = 1.0 / (smma_p as f64);
+        let alpha_s = 2.0 / (half as f64 + 1.0);    // EMA α = 2/(n+1)
+        let alpha_l = 2.0 / (length as f64 + 1.0);  // EMA α = 2/(n+1)
+        let cci_scale = 1.0 / 0.015;
+
         Ok(Self {
-            buffer: vec![0.0; length * 2],
-            cci_buffer: vec![0.0; length],
-            ema_short_state: f64::NAN,
-            ema_long_state: f64::NAN,
-            smma_state: f64::NAN,
-            pf_state: f64::NAN,
-            pff_state: f64::NAN,
             length,
             factor,
-            index: 0,
-            ready: false,
+            half,
+            smma_p,
+
+            inv_len,
+            inv_smma_p,
+            alpha_s,
+            alpha_l,
+            cci_scale,
+
+            i: 0,
+
+            x_win: vec![f64::NAN; length],
+            x_sum: 0.0,
+            x_count: 0,
+            dev_rma: f64::NAN,
+            dev_init_done: false,
+
+            ema_s: f64::NAN,
+            ema_l: f64::NAN,
+            ema_inited: false,
+
+            smma: f64::NAN,
+            smma_init_sum: 0.0,
+            smma_init_count: 0,
+            smma_inited: false,
+
+            ccis_win: vec![f64::NAN; length],
+            pf_win: vec![f64::NAN; length],
+
+            q_min_cc: MonoIdxDeque::with_cap_pow2(length * 2),
+            q_max_cc: MonoIdxDeque::with_cap_pow2(length * 2),
+            q_min_pf: MonoIdxDeque::with_cap_pow2(length * 2),
+            q_max_pf: MonoIdxDeque::with_cap_pow2(length * 2),
+
+            prev_f1: f64::NAN,
+            pf_smooth: f64::NAN,
+            out_prev: f64::NAN,
+
+            warmup_after: length * 4,
         })
     }
 
-    pub fn update(&mut self, value: f64) -> Option<f64> {
-        // This would require implementing streaming versions of CCI, EMA, SMMA
-        // For now, return None until enough data collected
-        let buffer_len = self.buffer.len();
-        self.buffer[self.index % buffer_len] = value;
-        self.index += 1;
+    #[inline]
+    fn clear_deques(&mut self) {
+        self.q_min_cc.head = 0; self.q_min_cc.tail = 0;
+        self.q_max_cc.head = 0; self.q_max_cc.tail = 0;
+        self.q_min_pf.head = 0; self.q_min_pf.tail = 0;
+        self.q_max_pf.head = 0; self.q_max_pf.tail = 0;
+    }
 
-        if self.index >= self.length * 4 {
-            self.ready = true;
+    #[inline(always)]
+    fn ring_idx(&self, i: usize) -> usize { i & (self.length - 1) /* if pow2 */ }
+
+    #[inline(always)]
+    fn rb_pos(&self, i: usize) -> usize {
+        // works for any length
+        i % self.length
+    }
+
+    /// One-tick update. Returns `Some(value)` only after conservative warmup; otherwise `None`.
+    #[inline]
+    pub fn update(&mut self, value: f64) -> Option<f64> {
+        // On NaN input, reset streaming states (mirrors batch NaN gaps)
+        if !value.is_finite() {
+            self.x_sum = 0.0;
+            self.x_count = 0;
+            self.dev_rma = f64::NAN;
+            self.dev_init_done = false;
+
+            self.ema_s = f64::NAN;
+            self.ema_l = f64::NAN;
+            self.ema_inited = false;
+
+            self.smma = f64::NAN;
+            self.smma_init_sum = 0.0;
+            self.smma_init_count = 0;
+            self.smma_inited = false;
+
+            self.prev_f1 = f64::NAN;
+            self.pf_smooth = f64::NAN;
+            self.out_prev = f64::NAN;
+
+            // mark current ring slots as NaN and clear deques
+            let pos = self.rb_pos(self.i);
+            self.x_win[pos] = f64::NAN;
+            self.ccis_win[pos] = f64::NAN;
+            self.pf_win[pos] = f64::NAN;
+            self.clear_deques();
+
+            self.i = self.i.wrapping_add(1);
+            return None;
         }
 
-        if self.ready {
-            // Would need to implement incremental calculation
-            None // Placeholder
+        let i = self.i;
+        let pos = self.rb_pos(i);
+
+        // ---- Sliding SMA over input (exact) ----
+        let old = self.x_win[pos];
+        if self.x_count < self.length {
+            self.x_count += 1;
+        } else if old.is_finite() {
+            self.x_sum -= old;
+        }
+        self.x_win[pos] = value;
+        self.x_sum += value;
+
+        // Only produce CCI after we have a full window
+        let mut cci_val = f64::NAN;
+        if self.x_count == self.length {
+            let sma = self.x_sum * self.inv_len;
+
+            // One-time exact MAD init (O(length) once)
+            if !self.dev_init_done {
+                let mut mad = 0.0;
+                for &v in &self.x_win {
+                    mad += (v - sma).abs();
+                }
+                mad *= self.inv_len;
+                self.dev_rma = mad;
+                self.dev_init_done = true;
+            } else {
+                // RMA update of |x - sma| (O(1))
+                let abs_dev = (value - sma).abs();
+                self.dev_rma = fmadd(abs_dev - self.dev_rma, self.inv_len, self.dev_rma);
+            }
+
+            // CCI = (x - sma) / (0.015 * mean_dev)
+            if self.dev_rma.is_finite() && self.dev_rma > 0.0 {
+                let num = value - sma;
+                cci_val = num * (self.cci_scale / self.dev_rma);
+            } else {
+                cci_val = 0.0;
+            }
+        }
+
+        // ---- EMA short/long on CCI ----
+        if cci_val.is_finite() {
+            if !self.ema_inited {
+                self.ema_s = cci_val;
+                self.ema_l = cci_val;
+                self.ema_inited = true;
+            } else {
+                self.ema_s = fmadd(cci_val - self.ema_s, self.alpha_s, self.ema_s);
+                self.ema_l = fmadd(cci_val - self.ema_l, self.alpha_l, self.ema_l);
+            }
+        }
+
+        // ---- double EMA = 2*ema_s - ema_l ----
+        let mut de = f64::NAN;
+        if self.ema_inited {
+            de = self.ema_s + self.ema_s - self.ema_l;
+        }
+
+        // ---- SMMA(dEMA) with period ~ sqrt(length) ----
+        let mut ccis = f64::NAN;
+        if de.is_finite() {
+            if !self.smma_inited {
+                // init as arithmetic mean of first smma_p samples
+                self.smma_init_sum += de;
+                self.smma_init_count += 1;
+                if self.smma_init_count == self.smma_p {
+                    self.smma = self.smma_init_sum * self.inv_smma_p;
+                    self.smma_inited = true;
+                }
+            } else {
+                // SMMA recurrence: prev + (x - prev)/p  (Wilder RMA)
+                self.smma = fmadd(de - self.smma, self.inv_smma_p, self.smma);
+            }
+            ccis = if self.smma_inited { self.smma } else { f64::NAN };
+        }
+
+        // Store ccis in ring and update deques (first stoch window)
+        self.ccis_win[pos] = ccis;
+
+        let stoch_len = self.length;
+        let start_cc = i.saturating_sub(stoch_len - 1);
+        self.q_min_cc.evict_older_than(start_cc);
+        self.q_max_cc.evict_older_than(start_cc);
+
+        if ccis.is_finite() {
+            // maintain monotone increasing deque for min
+            while !self.q_min_cc.is_empty() {
+                let b = self.q_min_cc.back();
+                let bv = self.ccis_win[self.rb_pos(b)];
+                if ccis <= bv { self.q_min_cc.pop_back(); } else { break; }
+            }
+            self.q_min_cc.push_back(i);
+
+            // maintain monotone decreasing deque for max
+            while !self.q_max_cc.is_empty() {
+                let b = self.q_max_cc.back();
+                let bv = self.ccis_win[self.rb_pos(b)];
+                if ccis >= bv { self.q_max_cc.pop_back(); } else { break; }
+            }
+            self.q_max_cc.push_back(i);
+        }
+
+        // ---- First stochastic normalization on ccis -> %K1 (smoothed to pf_smooth) ----
+        let mut pf_now = f64::NAN;
+        if i + 1 >= stoch_len && self.smma_inited && ccis.is_finite()
+            && !self.q_min_cc.is_empty() && !self.q_max_cc.is_empty()
+        {
+            let mn = self.ccis_win[self.rb_pos(self.q_min_cc.front())];
+            let mx = self.ccis_win[self.rb_pos(self.q_max_cc.front())];
+            let mut f1 = f64::NAN;
+            if mn.is_finite() && mx.is_finite() {
+                let range = mx - mn;
+                if range > 0.0 {
+                    let inv_range = 1.0 / range;
+                    f1 = (ccis - mn) * inv_range * 100.0;
+                } else {
+                    f1 = if self.prev_f1.is_nan() { 50.0 } else { self.prev_f1 };
+                }
+            }
+            if !f1.is_nan() {
+                self.pf_smooth = if self.pf_smooth.is_nan() || self.factor == 0.0 {
+                    f1
+                } else {
+                    fmadd(f1 - self.pf_smooth, self.factor, self.pf_smooth)
+                };
+                pf_now = self.pf_smooth;
+                self.prev_f1 = f1;
+            } else {
+                self.prev_f1 = f64::NAN;
+            }
+        }
+        self.pf_win[pos] = pf_now;
+
+        // Maintain deques for pf window
+        let start_pf = i.saturating_sub(stoch_len - 1);
+        self.q_min_pf.evict_older_than(start_pf);
+        self.q_max_pf.evict_older_than(start_pf);
+
+        if pf_now.is_finite() {
+            while !self.q_min_pf.is_empty() {
+                let b = self.q_min_pf.back();
+                let bv = self.pf_win[self.rb_pos(b)];
+                if pf_now <= bv { self.q_min_pf.pop_back(); } else { break; }
+            }
+            self.q_min_pf.push_back(i);
+
+            while !self.q_max_pf.is_empty() {
+                let b = self.q_max_pf.back();
+                let bv = self.pf_win[self.rb_pos(b)];
+                if pf_now >= bv { self.q_max_pf.pop_back(); } else { break; }
+            }
+            self.q_max_pf.push_back(i);
+        }
+
+        // ---- Second stochastic normalization on pf -> %K2, smoothed to final out ----
+        let mut out_now = f64::NAN;
+        if pf_now.is_finite() && !self.q_min_pf.is_empty() && !self.q_max_pf.is_empty() {
+            let mn = self.pf_win[self.rb_pos(self.q_min_pf.front())];
+            let mx = self.pf_win[self.rb_pos(self.q_max_pf.front())];
+            if mn.is_finite() && mx.is_finite() {
+                let range = mx - mn;
+                if range > 0.0 {
+                    let inv_range = 1.0 / range;
+                    let f2 = (pf_now - mn) * inv_range * 100.0;
+                    self.out_prev = if self.out_prev.is_nan() || self.factor == 0.0 {
+                        f2
+                    } else {
+                        fmadd(f2 - self.out_prev, self.factor, self.out_prev)
+                    };
+                    out_now = self.out_prev;
+                } else {
+                    // flat window: hold previous
+                    out_now = if self.out_prev.is_nan() { 50.0 } else { self.out_prev };
+                    self.out_prev = out_now;
+                }
+            }
+        }
+
+        self.i = i.wrapping_add(1);
+
+        // Conservative warmup to match batch behavior: emit only after length*4
+        if self.i >= self.warmup_after && out_now.is_finite() {
+            Some(out_now)
         } else {
             None
         }

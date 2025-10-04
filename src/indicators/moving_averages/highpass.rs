@@ -772,10 +772,9 @@ impl HighPassStream {
                 data_len: 0,
             });
         }
-        let k = 1.0;
-        let two_pi_k_div = 2.0 * std::f64::consts::PI * k / (period as f64);
-        let sin_val = two_pi_k_div.sin();
-        let cos_val = two_pi_k_div.cos();
+        // θ = 2π/period (k fixed at 1)
+        let theta = (2.0 * core::f64::consts::PI) / (period as f64);
+        let (sin_val, cos_val) = theta.sin_cos();
         if cos_val.abs() < 1e-15 {
             return Err(HighPassError::InvalidAlpha { cos_val });
         }
@@ -783,7 +782,7 @@ impl HighPassStream {
         Ok(Self {
             period,
             alpha,
-            one_minus_half_alpha: 1.0 - alpha / 2.0,
+            one_minus_half_alpha: 1.0 - 0.5 * alpha,
             one_minus_alpha: 1.0 - alpha,
             prev_data: f64::NAN,
             prev_output: f64::NAN,
@@ -792,17 +791,29 @@ impl HighPassStream {
     }
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> f64 {
-        if !self.initialized {
-            self.prev_data = value;
-            self.prev_output = value;
-            self.initialized = true;
-            return value;
+        // Cold seed path kept out of the hot block to help the optimizer.
+        #[cold]
+        #[inline(never)]
+        fn seed(this: &mut HighPassStream, v: f64) -> f64 {
+            this.prev_data = v;
+            this.prev_output = v;
+            this.initialized = true;
+            v
         }
-        let out = self.one_minus_half_alpha * value - self.one_minus_half_alpha * self.prev_data
-            + self.one_minus_alpha * self.prev_output;
-        self.prev_data = value;
-        self.prev_output = out;
-        out
+
+        if self.initialized {
+            // Hot path: 1 sub + 1 mul + 1 FMA
+            // out = (1 - α) * prev_output + (1 - α/2) * (value - prev_data)
+            let dx = value - self.prev_data;
+            let y = self
+                .one_minus_alpha
+                .mul_add(self.prev_output, self.one_minus_half_alpha * dx);
+            self.prev_data = value;
+            self.prev_output = y;
+            y
+        } else {
+            seed(self, value)
+        }
     }
 }
 

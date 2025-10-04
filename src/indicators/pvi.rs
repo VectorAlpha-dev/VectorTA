@@ -3,6 +3,8 @@
 //! The Positive Volume Index (PVI) tracks price changes only when volume increases, starting from an initial value.
 //! Like ALMA, this indicator provides builder, batch, and streaming APIs, kernel stubs, and parameter expansion.
 //!
+//! Decision: Streaming kernel micro-optimized; exact math preserved and NaN handling kept cold. O(1) per tick maintained.
+//!
 //! ## Parameters
 //! - **initial_value**: Starting PVI value. Default is 1000.0.
 //!
@@ -527,6 +529,7 @@ enum StreamState {
 }
 
 impl PviStream {
+    #[inline]
     pub fn try_new(params: PviParams) -> Result<Self, PviError> {
         let initial = params.initial_value.unwrap_or(1000.0);
         Ok(Self {
@@ -537,37 +540,76 @@ impl PviStream {
             state: StreamState::Init,
         })
     }
+
+    /// O(1) update; returns `Some(pvi)` when a value is produced, else `None` (caller typically writes NaN).
+    ///
+    /// Hot path characteristics:
+    /// - In `Valid` state we only test the current inputs for NaN. `last_*` are guaranteed non-NaN.
+    /// - Volume check short-circuits when `volume <= last_volume` (PVI stays constant).
+    /// - Math mirrors the scalar batch kernel (`pvi += r * pvi`) to preserve rounding/semantics.
     #[inline(always)]
     pub fn update(&mut self, close: f64, volume: f64) -> Option<f64> {
-        match self.state {
-            StreamState::Init => {
-                if close.is_nan() || volume.is_nan() {
-                    None
-                } else {
-                    self.last_close = close;
-                    self.last_volume = volume;
-                    self.curr = self.initial_value;
-                    self.state = StreamState::Valid;
-                    Some(self.curr)
-                }
-            }
-            StreamState::Valid => {
-                if close.is_nan()
-                    || volume.is_nan()
-                    || self.last_close.is_nan()
-                    || self.last_volume.is_nan()
-                {
-                    None
-                } else {
-                    if volume > self.last_volume {
-                        self.curr += ((close - self.last_close) / self.last_close) * self.curr;
-                    }
-                    self.last_close = close;
-                    self.last_volume = volume;
-                    Some(self.curr)
-                }
-            }
+        // Fast initialize if this is our first valid observation.
+        if let StreamState::Init = self.state {
+            return self.init_or_none(close, volume);
         }
+
+        // Fast path: current inputs must be valid; `last_*` are valid by invariant after init.
+        if close.is_nan() | volume.is_nan() {
+            // Very rare case → keep it cold.
+            return self.cold_invalid(close, volume);
+        }
+
+        if volume > self.last_volume {
+            // Same math as scalar kernel: r = (c - prev)/prev; pvi += r * pvi
+            // (Avoid mul_add here to mirror scalar rounding exactly.)
+            let prev = self.last_close;
+            let r = (close - prev) / prev;
+            self.curr += r * self.curr;
+            // For AVX-like rounding, one could use: self.curr = f64::mul_add(r, self.curr, self.curr);
+        }
+
+        // Advance previouss
+        self.last_close = close;
+        self.last_volume = volume;
+
+        Some(self.curr)
+    }
+
+    /// First valid tick handler: seed state and emit the initial value.
+    #[inline(always)]
+    fn init_or_none(&mut self, close: f64, volume: f64) -> Option<f64> {
+        if close.is_nan() || volume.is_nan() {
+            return None;
+        }
+        self.last_close = close;
+        self.last_volume = volume;
+        self.curr = self.initial_value;
+        self.state = StreamState::Valid;
+        Some(self.curr)
+    }
+
+    /// Rare path: at least one of {close, volume} is NaN. Kept cold to help branch prediction & I-cache.
+    #[cold]
+    #[inline(never)]
+    fn cold_invalid(&mut self, _close: f64, _volume: f64) -> Option<f64> {
+        // Batch semantics: on an invalid step we emit NaN (via None) and do not change last_* or curr.
+        // (The next valid step resumes using the previous valid last_*.)
+        None
+    }
+
+    /// Optional: zero-checking variant for inner tight loops when inputs are guaranteed finite.
+    #[inline(always)]
+    pub fn update_unchecked_finite(&mut self, close: f64, volume: f64) -> f64 {
+        debug_assert!(self.state == StreamState::Valid);
+        if volume > self.last_volume {
+            let prev = self.last_close;
+            let r = (close - prev) / prev;
+            self.curr += r * self.curr;
+        }
+        self.last_close = close;
+        self.last_volume = volume;
+        self.curr
     }
 }
 

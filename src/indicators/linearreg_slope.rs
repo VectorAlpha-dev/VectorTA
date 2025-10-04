@@ -16,7 +16,7 @@
 //! ## Developer Notes
 //! - Scalar optimized: O(N) rolling accumulators for Sy and Sxy with Kahan-compensated updates and periodic exact recompute to bound drift. Matches tests and avoids O(N·P).
 //! - SIMD status: AVX2/AVX512 kernels are currently short-circuited to the scalar path. Vectorizing the initial window introduced tiny numeric deltas beyond the module’s tight tolerance; with O(1) rolling updates dominating, SIMD did not yield consistent wins. Revisit if tolerance/patterns change.
-//! - Streaming: Not implemented
+//! - Streaming: O(1) updates with Kahan compensation + periodic exact recompute; matches scalar outputs.
 //! - Memory optimization: ✅ Uses `alloc_with_nan_prefix` (zero-copy)
 //! - Batch operations: ✅ Implemented with parallel processing support; no row-specific shared-precompute variant yet (consider prefix sums for future work).
 
@@ -833,92 +833,201 @@ unsafe fn linearreg_slope_row_avx512_long(
 
 #[derive(Debug, Clone)]
 pub struct LinearRegSlopeStream {
+    // Window config / ring buffer
     period: usize,
     buffer: Vec<f64>,
-    head: usize,
+    head: usize,       // index of the oldest element (slot to overwrite next)
     filled: bool,
+    warm_count: usize, // 0..=period; number of samples accumulated since last reset
+
+    // Precomputed constants for x = 0..(n-1)
     n: f64,
+    m: f64,
     sum_x: f64,
     sum_x2: f64,
-    sum_y: f64,
-    sum_xy: f64,
-    count: usize,
+    denom: f64,
+    inv_denom: f64,
+
+    // Rolling accumulators (Kahan compensated)
+    sum_y: f64,   // S_y = sum y
+    sum_y_c: f64, // Kahan compensation for S_y
+    sum_xy: f64,  // S_xy = sum j*y_j with j in [0..n-1]
+    sum_xy_c: f64,// Kahan compensation for S_xy
+
+    // Housekeeping for periodic exact recompute to bound drift
+    step: usize,
+    recalc_mask: usize, // power-of-two minus 1 (default 255 => every 256 steps)
 }
 
 impl LinearRegSlopeStream {
+    #[inline]
     pub fn try_new(params: LinearRegSlopeParams) -> Result<Self, LinearRegSlopeError> {
         let period = params.period.unwrap_or(14);
-        // Linear regression requires at least 2 points to define a slope
         if period < 2 {
-            return Err(LinearRegSlopeError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(LinearRegSlopeError::InvalidPeriod { period, data_len: 0 });
         }
+
         let n = period as f64;
-        let sum_x = (period - 1) as f64 * n / 2.0;
-        let sum_x2 = (period - 1) as f64 * n * (2.0 * (period - 1) as f64 + 1.0) / 6.0;
+        let m = (period - 1) as f64;
+
+        // sum_x = 0+1+...+(n-1) = (n-1)*n/2
+        let sum_x = 0.5 * m * n;
+        // sum_x2 = 0^2+1^2+...+(n-1)^2 = (n-1)*n*(2n-1)/6
+        let sum_x2 = (m * n) * (2.0 * m + 1.0) / 6.0;
+
+        let denom = n * sum_x2 - sum_x * sum_x;
+        // denom should be > 0 for period >= 2
+        let inv_denom = if denom.abs() > f64::EPSILON { 1.0 / denom } else { f64::NAN };
+
         Ok(Self {
             period,
-            buffer: vec![f64::NAN; period],
+            buffer: vec![0.0; period],
             head: 0,
             filled: false,
+            warm_count: 0,
+
             n,
+            m,
             sum_x,
             sum_x2,
+            denom,
+            inv_denom,
+
             sum_y: 0.0,
+            sum_y_c: 0.0,
             sum_xy: 0.0,
-            count: 0,
+            sum_xy_c: 0.0,
+
+            step: 0,
+            recalc_mask: 255, // recompute exactly every 256 steady-state updates
         })
     }
 
+    /// O(1) update. Returns `Some(slope)` once `period` samples have been seen, else `None`.
+    /// Behavior on non-finite input: resets the window and returns `None`.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        let old_value = self.buffer[self.head];
-        self.buffer[self.head] = value;
-        let old_head = self.head;
-        self.head = (self.head + 1) % self.period;
-
-        if !self.filled && self.head == 0 {
-            self.filled = true;
-        }
-
-        // Calculate sum_y and sum_xy for current window
-        if self.filled {
-            self.sum_xy = 0.0;
-            self.sum_y = 0.0;
-            let mut idx = self.head;
-            for x in 0..self.period {
-                let y = self.buffer[idx];
-                self.sum_y += y;
-                self.sum_xy += (x as f64) * y;
-                idx = (idx + 1) % self.period;
-            }
-        } else {
-            // Still filling buffer
-            self.count += 1;
-            if !value.is_nan() {
-                // Add new value's contribution
-                // Position is (count - 1) in the logical window
-                self.sum_y += value;
-                self.sum_xy += (self.count - 1) as f64 * value;
-            }
-            if self.count < self.period {
-                return None;
-            }
-        }
-
-        if !self.filled {
+        // Guard against NaN/Inf: treat as a break in the data stream (contiguous-valid policy).
+        if !value.is_finite() {
+            self.reset_state();
             return None;
         }
 
-        let numerator = self.n * self.sum_xy - self.sum_x * self.sum_y;
-        let denominator = self.n * self.sum_x2 - self.sum_x * self.sum_x;
-        Some(if denominator.abs() < f64::EPSILON {
-            f64::NAN
-        } else {
-            numerator / denominator
-        })
+        if !self.filled {
+            // Warm-up: accumulate at logical position j = warm_count
+            let j = self.warm_count as f64;
+
+            // Write into ring
+            self.buffer[self.head] = value;
+            self.head = (self.head + 1) % self.period;
+
+            // Kahan update for sum_y += value
+            let y0 = value - self.sum_y_c;
+            let t0 = self.sum_y + y0;
+            self.sum_y_c = (t0 - self.sum_y) - y0;
+            self.sum_y = t0;
+
+            // Kahan update for sum_xy += j*value
+            let jy = j * value;
+            let y1 = jy - self.sum_xy_c;
+            let t1 = self.sum_xy + y1;
+            self.sum_xy_c = (t1 - self.sum_xy) - y1;
+            self.sum_xy = t1;
+
+            self.warm_count += 1;
+            if self.warm_count < self.period {
+                return None;
+            }
+
+            // First complete window
+            self.filled = true;
+            // After warm-up, head points to the oldest element (slot to overwrite next).
+            return self.emit_slope();
+        }
+
+        // Steady-state: O(1) rolling updates.
+        let y_old = self.buffer[self.head];
+        self.buffer[self.head] = value;
+        self.head = (self.head + 1) % self.period;
+
+        // sum_y' = sum_y + (y_new - y_old)  (Kahan)
+        let delta0 = value - y_old;
+        let yk0 = delta0 - self.sum_y_c;
+        let t0 = self.sum_y + yk0;
+        self.sum_y_c = (t0 - self.sum_y) - yk0;
+        self.sum_y = t0;
+
+        // sum_xy' = sum_xy - sum_y' + n*y_new  (Kahan)
+        let delta1 = -self.sum_y + self.n * value;
+        let yk1 = delta1 - self.sum_xy_c;
+        let t1 = self.sum_xy + yk1;
+        self.sum_xy_c = (t1 - self.sum_xy) - yk1;
+        self.sum_xy = t1;
+
+        self.step = self.step.wrapping_add(1);
+        if (self.step & self.recalc_mask) == 0 {
+            // Periodic exact recompute (amortized O(1)) to bound drift from compensation
+            self.recompute_exact();
+        }
+
+        self.emit_slope()
+    }
+
+    #[inline(always)]
+    fn emit_slope(&self) -> Option<f64> {
+        if !self.filled || !(self.denom.is_finite()) {
+            return None;
+        }
+
+        // Optional "perfect linear window" snap: if the window is exactly linear,
+        // return the two-point slope (matches the batch scalar path’s behavior).
+        if self.m > 0.0 {
+            let first = self.buffer[self.head]; // oldest
+            let last = self.buffer[(self.head + self.period - 1) % self.period]; // newest
+            let a2 = (last - first) / self.m;
+
+            // Model sums for a perfect line y = first + a2*j
+            let s0_model = a2.mul_add(self.sum_x, first * self.n);
+            let s1_model = a2.mul_add(self.sum_x2, first * self.sum_x);
+
+            let tol0 = 1e-12_f64 * 1.0_f64.max(self.sum_y.abs()).max(s0_model.abs());
+            let tol1 = 1e-12_f64 * 1.0_f64.max(self.sum_xy.abs()).max(s1_model.abs());
+            if (self.sum_y - s0_model).abs() <= tol0 && (self.sum_xy - s1_model).abs() <= tol1 {
+                return Some(a2);
+            }
+        }
+
+        // slope = (n*S_xy - S_x*S_y) / denom  — use precomputed reciprocal
+        let num = self.n.mul_add(self.sum_xy, -self.sum_x * self.sum_y);
+        Some(num * self.inv_denom)
+    }
+
+    #[inline(always)]
+    fn recompute_exact(&mut self) {
+        let mut sy = 0.0;
+        let mut sxy = 0.0;
+        let mut idx = self.head;
+        for j in 0..self.period {
+            let y = self.buffer[idx];
+            sy += y;
+            sxy = (j as f64).mul_add(y, sxy);
+            idx += 1;
+            if idx == self.period { idx = 0; }
+        }
+        self.sum_y = sy;
+        self.sum_y_c = 0.0;
+        self.sum_xy = sxy;
+        self.sum_xy_c = 0.0;
+    }
+
+    #[inline(always)]
+    fn reset_state(&mut self) {
+        self.head = 0;
+        self.filled = false;
+        self.warm_count = 0;
+        self.sum_y = 0.0; self.sum_y_c = 0.0;
+        self.sum_xy = 0.0; self.sum_xy_c = 0.0;
+        // Leave buffer contents as-is; warm-up logic ignores old values.
     }
 }
 

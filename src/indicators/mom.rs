@@ -352,6 +352,9 @@ pub struct MomStream {
 }
 
 impl MomStream {
+    // Decision: Streaming optimized (no `%`, mask when power-of-two; period==1 fast path).
+    // Rationale: MOM is bandwidth-bound; drop constant costs while keeping scalar path safe.
+    // Outputs unchanged vs batch; warmup semantics preserved.
     pub fn try_new(params: MomParams) -> Result<Self, MomError> {
         let period = params.period.unwrap_or(10);
         if period == 0 {
@@ -370,17 +373,54 @@ impl MomStream {
 
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        let prev = self.buffer[self.head];
-        self.buffer[self.head] = value;
-        self.head = (self.head + 1) % self.period;
+        // Fast path for period == 1: adjacent difference
+        if self.period == 1 {
+            let prev = self.buffer[0];
+            self.buffer[0] = value;
 
-        if !self.filled && self.head == 0 {
-            self.filled = true;
+            if !self.filled {
+                self.filled = true; // warm on next tick
+                return None;
+            }
+            return Some(value - prev);
         }
+
+        let idx = self.head;
+        let prev = self.buffer[idx];
+        self.buffer[idx] = value;
+
+        // Advance head without `%` when possible.
+        let next = idx + 1;
+        if self.period.is_power_of_two() {
+            // power-of-two capacity: cheaper than modulo
+            let mask = self.period - 1;
+            self.head = next & mask;
+        } else if next == self.period {
+            self.head = 0;
+        } else {
+            self.head = next;
+        }
+
+        // Warmup: None until the first wrap completes
         if !self.filled {
+            if self.head == 0 {
+                self.filled = true;
+            }
             return None;
         }
+
         Some(value - prev)
+    }
+
+    /// Optional helper: reset warmup on NaN input to mirror batch semantics
+    #[inline(always)]
+    pub fn update_reset_on_nan(&mut self, value: f64) -> Option<f64> {
+        if value.is_nan() {
+            self.head = 0;
+            self.filled = false;
+            return None;
+        }
+        self.update(value)
     }
 }
 

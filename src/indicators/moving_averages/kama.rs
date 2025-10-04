@@ -22,7 +22,7 @@
 //! ## Developer Notes
 //! - **Scalar path**: ✅ Safe, loop-jammed hot loop; uses `mul_add` and squares via multiply (no `powi`), reuses trailing load.
 //! - **AVX2/AVX512**: ✅ Vectorized initial Σ|Δp|; FMA; reuses `next_tail` for direction and clamps prefetch.
-//! - **Streaming update**: ✅ O(1) ring-update for Σ|Δp|; identical warmup behavior.
+//! - **Streaming update**: ✅ O(1) ring-update using fixed-size rings (no VecDeque); identical warmup behavior.
 //! - **Batch**: ✅ Shared prefix-sum precompute for Σ|Δp| seeding across rows (reduces per-row setup).
 //! - **Memory**: ✅ `alloc_with_nan_prefix` and matrix helpers; no O(N) temporaries for outputs.
 //! - **Status**: Stable; AVX2/AVX512 are modestly faster than scalar at 100k; keep enabled.
@@ -566,30 +566,47 @@ pub unsafe fn kama_avx512(data: &[f64], period: usize, first_valid: usize, out: 
     }
 }
 
-use std::collections::VecDeque;
+// Decision: streaming uses fixed-size ring buffers for prices and |Δp| diffs.
+// Rationale: removes growable deque overhead and branchiness; identical outputs.
 
 #[derive(Debug, Clone)]
 pub struct KamaStream {
     period: usize,
-    buffer: VecDeque<f64>,
-    prev_kama: f64,
-    sum_roc1: f64,
-    const_max: f64,
-    const_diff: f64,
+
+    // Fixed-size rings
+    prices: Vec<f64>, // last `period` prices, oldest at head_p
+    diffs: Vec<f64>,  // last `period` |Δp| diffs, oldest at head_d
+
+    head_p: usize, // index of oldest price
+    head_d: usize, // index of oldest diff
+    count: usize,  // number of ingested samples
+    seeded: bool,  // whether first KAMA was emitted
+
+    prev_price: f64, // p_{t-1}
+    prev_kama: f64,  // KAMA_{t-1}
+    sum_roc1: f64,   // rolling Σ|Δp| over window
+
+    // Smoothing constant parameters (Kaufman: slow=30, fast=2)
+    const_max: f64,  // 2/(30+1)
+    const_diff: f64, // (2/(2+1)) - const_max
 }
 
 impl KamaStream {
+    #[inline]
     pub fn try_new(params: KamaParams) -> Result<Self, KamaError> {
         let period = params.period.unwrap_or(30);
         if period == 0 {
-            return Err(KamaError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(KamaError::InvalidPeriod { period, data_len: 0 });
         }
         Ok(Self {
             period,
-            buffer: VecDeque::with_capacity(period + 1),
+            prices: vec![0.0; period],
+            diffs: vec![0.0; period],
+            head_p: 0,
+            head_d: 0,
+            count: 0,
+            seeded: false,
+            prev_price: 0.0,
             prev_kama: 0.0,
             sum_roc1: 0.0,
             const_max: 2.0 / (30.0 + 1.0),
@@ -597,48 +614,76 @@ impl KamaStream {
         })
     }
 
+    /// Push one price; returns `Some(kama)` after warmup, else `None`.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        if self.buffer.len() < self.period {
-            self.buffer.push_back(value);
+        // First sample
+        if self.count == 0 {
+            self.prices[0] = value;
+            self.prev_price = value;
+            self.count = 1;
             return None;
         }
 
-        if self.buffer.len() == self.period {
-            self.sum_roc1 = 0.0;
-            for i in 0..(self.period - 1) {
-                let a = self.buffer[i];
-                let b = self.buffer[i + 1];
-                self.sum_roc1 += (b - a).abs();
-            }
-            if let Some(&last) = self.buffer.back() {
-                self.sum_roc1 += (value - last).abs();
-            }
+        // New absolute diff vs previous price
+        let new_diff = (value - self.prev_price).abs();
+
+        // Accumulate until we have `period` historical prices
+        if self.count < self.period {
+            // Store sequentially; keep rolling sum of |Δp|
+            self.diffs[self.count - 1] = new_diff;
+            self.sum_roc1 += new_diff;
+
+            self.prices[self.count] = value;
+            self.prev_price = value;
+            self.count += 1;
+            return None;
+        }
+
+        // Seed: emit first KAMA (equals current price), completing Σ|Δp| with edge diff
+        if !self.seeded {
+            self.sum_roc1 += new_diff;
 
             self.prev_kama = value;
-            self.buffer.push_back(value);
+
+            // finalize rings for steady-state sliding
+            self.diffs[self.period - 1] = new_diff;
+
+            // replace oldest price with current value and advance head
+            self.prices[self.head_p] = value;
+            self.head_p = if self.period == 1 { 0 } else { 1 };
+            self.head_d = 0;
+
+            self.prev_price = value;
+            self.seeded = true;
             return Some(self.prev_kama);
         }
 
-        let old_front = self.buffer.pop_front().unwrap();
-        let new_front = *self.buffer.front().unwrap();
+        // Steady-state updates
+        let old_diff = self.diffs[self.head_d];
+        self.sum_roc1 += new_diff - old_diff;
 
-        self.sum_roc1 -= (new_front - old_front).abs();
-
-        let last = *self.buffer.back().unwrap();
-        self.sum_roc1 += (value - last).abs();
-
-        let direction = (value - new_front).abs();
-
+        let tail_price = self.prices[self.head_p];
+        let direction = (value - tail_price).abs();
         let er = if self.sum_roc1 == 0.0 {
             0.0
         } else {
-            direction / self.sum_roc1
+            // Use multiply-by-reciprocal form (one div + one mul)
+            direction * (1.0 / self.sum_roc1)
         };
-        let sc = (er * self.const_diff + self.const_max).powi(2);
-        self.prev_kama += (value - self.prev_kama) * sc;
+        let t = er.mul_add(self.const_diff, self.const_max);
+        let sc = t * t;
 
-        self.buffer.push_back(value);
+        self.prev_kama = (value - self.prev_kama).mul_add(sc, self.prev_kama);
+
+        // Slide rings
+        self.diffs[self.head_d] = new_diff;
+        self.head_d = if self.head_d + 1 == self.period { 0 } else { self.head_d + 1 };
+
+        self.prices[self.head_p] = value;
+        self.head_p = if self.head_p + 1 == self.period { 0 } else { self.head_p + 1 };
+
+        self.prev_price = value;
         Some(self.prev_kama)
     }
 }

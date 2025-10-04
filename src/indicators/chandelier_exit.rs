@@ -247,19 +247,32 @@ pub struct ChandelierExitStream {
     period: usize,
     mult: f64,
     use_close: bool,
-    // ring buffers of length period
-    buf_h: Vec<f64>,
-    buf_l: Vec<f64>,
-    buf_c: Vec<f64>,
-    head: usize,
-    filled: bool,
+
+    // index of current bar (0-based)
+    i: usize,
+
     // Wilder ATR state
-    atr_prev: Option<f64>,
-    tr_sum: f64,
+    alpha: f64,            // 1.0 / period
+    atr_prev: Option<f64>, // None until seed is built
+    warm_tr_sum: f64,      // sum of TR for first N bars
     prev_close: Option<f64>,
-    long_prev: f64,
-    short_prev: f64,
-    dir_prev: i8,
+
+    // trailing state (unmasked raw stops)
+    long_raw_prev: f64,    // NaN until warm is reached
+    short_raw_prev: f64,   // NaN until warm is reached
+    dir_prev: i8,          // Pine-style: starts at 1
+
+    // Monotonic deques for rolling max/min over chosen source
+    cap: usize,            // power-of-two capacity
+    mask: usize,
+    // max deque
+    dq_max_idx: Vec<usize>,
+    dq_max_val: Vec<f64>,
+    hmax: usize, tmax: usize,
+    // min deque
+    dq_min_idx: Vec<usize>,
+    dq_min_val: Vec<f64>,
+    hmin: usize, tmin: usize,
 }
 
 #[cfg(not(feature = "wasm"))]
@@ -267,140 +280,180 @@ impl ChandelierExitStream {
     pub fn try_new(p: ChandelierExitParams) -> Result<Self, ChandelierExitError> {
         let period = p.period.unwrap_or(22);
         if period == 0 {
-            return Err(ChandelierExitError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(ChandelierExitError::InvalidPeriod { period, data_len: 0 });
         }
+        let mult = p.mult.unwrap_or(3.0);
+        let use_close = p.use_close.unwrap_or(true);
+
+        let cap = period.next_power_of_two();
         Ok(Self {
             period,
-            mult: p.mult.unwrap_or(3.0),
-            use_close: p.use_close.unwrap_or(true),
-            buf_h: vec![f64::NAN; period],
-            buf_l: vec![f64::NAN; period],
-            buf_c: vec![f64::NAN; period],
-            head: 0,
-            filled: false,
+            mult,
+            use_close,
+            i: 0,
+
+            alpha: 1.0 / (period as f64),
             atr_prev: None,
-            tr_sum: 0.0,
+            warm_tr_sum: 0.0,
             prev_close: None,
-            long_prev: f64::NAN,
-            short_prev: f64::NAN,
+
+            long_raw_prev: f64::NAN,
+            short_raw_prev: f64::NAN,
             dir_prev: 1,
+
+            cap,
+            mask: cap - 1,
+            dq_max_idx: vec![0usize; cap],
+            dq_max_val: vec![f64::NAN; cap],
+            hmax: 0, tmax: 0,
+            dq_min_idx: vec![0usize; cap],
+            dq_min_val: vec![f64::NAN; cap],
+            hmin: 0, tmin: 0,
         })
     }
 
     #[inline(always)]
-    pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<(f64, f64)> {
-        // TR
-        let tr = if let Some(pc) = self.prev_close {
+    pub fn get_warmup_period(&self) -> usize { self.period - 1 }
+
+    // ---- deque helpers ----
+    #[inline(always)]
+    fn evict_old(&mut self, i: usize) {
+        // evict indices older than window [i - period + 1 .. i]
+        while self.hmax != self.tmax {
+            let idx = self.dq_max_idx[self.hmax & self.mask];
+            if idx + self.period <= i { self.hmax = self.hmax.wrapping_add(1); } else { break; }
+        }
+        while self.hmin != self.tmin {
+            let idx = self.dq_min_idx[self.hmin & self.mask];
+            if idx + self.period <= i { self.hmin = self.hmin.wrapping_add(1); } else { break; }
+        }
+    }
+    #[inline(always)]
+    fn push_max(&mut self, i: usize, v: f64) {
+        if v.is_nan() { return; }
+        // pop smaller values
+        while self.hmax != self.tmax {
+            let back_pos = (self.tmax.wrapping_sub(1)) & self.mask;
+            if self.dq_max_val[back_pos] < v { self.tmax = self.tmax.wrapping_sub(1); } else { break; }
+        }
+        let pos = self.tmax & self.mask;
+        self.dq_max_idx[pos] = i;
+        self.dq_max_val[pos] = v;
+        self.tmax = self.tmax.wrapping_add(1);
+    }
+    #[inline(always)]
+    fn push_min(&mut self, i: usize, v: f64) {
+        if v.is_nan() { return; }
+        // pop larger values
+        while self.hmin != self.tmin {
+            let back_pos = (self.tmin.wrapping_sub(1)) & self.mask;
+            if self.dq_min_val[back_pos] > v { self.tmin = self.tmin.wrapping_sub(1); } else { break; }
+        }
+        let pos = self.tmin & self.mask;
+        self.dq_min_idx[pos] = i;
+        self.dq_min_val[pos] = v;
+        self.tmin = self.tmin.wrapping_add(1);
+    }
+    #[inline(always)]
+    fn front_max(&self) -> f64 {
+        if self.hmax != self.tmax { self.dq_max_val[self.hmax & self.mask] } else { f64::NAN }
+    }
+    #[inline(always)]
+    fn front_min(&self) -> f64 {
+        if self.hmin != self.tmin { self.dq_min_val[self.hmin & self.mask] } else { f64::NAN }
+    }
+
+    // True Range helper (Wilder)
+    #[inline(always)]
+    fn true_range(high: f64, low: f64, prev_close: Option<f64>) -> f64 {
+        if let Some(pc) = prev_close {
             let hl = (high - low).abs();
             let hc = (high - pc).abs();
             let lc = (low - pc).abs();
             hl.max(hc.max(lc))
         } else {
             (high - low).abs()
-        };
+        }
+    }
 
-        // ATR (Wilder)
-        let atr = if self.atr_prev.is_none() {
-            self.tr_sum += tr;
-            if !self.filled {
-                // advance ring but we will return None until filled
-                self.buf_h[self.head] = high;
-                self.buf_l[self.head] = low;
-                self.buf_c[self.head] = close;
-                self.head = (self.head + 1) % self.period;
-                self.filled = self.head == 0;
-                self.prev_close = Some(close);
-                if !self.filled {
-                    return None;
-                }
-                let seed = self.tr_sum / self.period as f64;
-                self.atr_prev = Some(seed);
-                seed
-            } else {
-                unreachable!()
-            }
+    #[inline(always)]
+    pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<(f64, f64)> {
+        let i = self.i;
+        let warm = self.period - 1;
+
+        // 1) TR & ATR update (Wilder / RMA)
+        let tr = Self::true_range(high, low, self.prev_close);
+
+        // Maintain window deques for this bar (evict then push current)
+        self.evict_old(i);
+        if self.use_close {
+            self.push_max(i, close);
+            self.push_min(i, close);
         } else {
-            let prev = self.atr_prev.unwrap();
-            let n = self.period as f64;
-            let next = (prev * (n - 1.0) + tr) / n;
+            self.push_max(i, high);
+            self.push_min(i, low);
+        }
+
+        let atr = if let Some(prev) = self.atr_prev {
+            // Wilder recurrence: ATR_t = ATR_{t-1} + α * (TR_t - ATR_{t-1})
+            let next = (tr - prev).mul_add(self.alpha, prev);
             self.atr_prev = Some(next);
             next
-        };
-
-        // ring push
-        self.buf_h[self.head] = high;
-        self.buf_l[self.head] = low;
-        self.buf_c[self.head] = close;
-        self.head = (self.head + 1) % self.period;
-
-        // window extrema
-        let (highest, lowest) = if self.use_close {
-            (window_max(&self.buf_c), window_min(&self.buf_c))
         } else {
-            (window_max(&self.buf_h), window_min(&self.buf_l))
+            // seed with SMA(TR, N) on the warm bar
+            self.warm_tr_sum += tr;
+            if i < warm {
+                self.prev_close = Some(close);
+                self.i = i + 1;
+                return None;
+            }
+            let seed = self.warm_tr_sum * self.alpha;
+            self.atr_prev = Some(seed);
+            seed
         };
 
-        // candidates
-        let ls0 = highest - self.mult * atr;
-        let ss0 = lowest + self.mult * atr;
+        // 2) Rolling extrema from deques
+        let highest = self.front_max();
+        let lowest  = self.front_min();
 
-        // trail with nz-prev semantics
-        let lsp = if self.long_prev.is_nan() {
-            ls0
-        } else {
-            self.long_prev
-        };
-        let ssp = if self.short_prev.is_nan() {
-            ss0
-        } else {
-            self.short_prev
-        };
+        // 3) Candidate raw stops (use FMA for single-rounding)
+        let ls0 = (-self.mult).mul_add(atr, highest); // highest - mult * atr
+        let ss0 = ( self.mult).mul_add(atr, lowest);  // lowest  + mult * atr
 
-        let ls = if let Some(pc) = self.prev_close {
-            if pc > lsp {
-                ls0.max(lsp)
+        // 4) nz-prev semantics (raw, unmasked)
+        let lsp = if self.long_raw_prev.is_nan()  { ls0 } else { self.long_raw_prev  };
+        let ssp = if self.short_raw_prev.is_nan() { ss0 } else { self.short_raw_prev };
+
+        // 5) Trail using previous close; match batch semantics:
+        //    - on the first warm bar (i == warm) do NOT trail
+        //    - for i > warm use prev_close
+        let (ls, ss) = if i > warm {
+            if let Some(pc) = self.prev_close {
+                let ls = if pc > lsp { ls0.max(lsp) } else { ls0 };
+                let ss = if pc < ssp { ss0.min(ssp) } else { ss0 };
+                (ls, ss)
             } else {
-                ls0
+                (ls0, ss0)
             }
         } else {
-            ls0
-        };
-        let ss = if let Some(pc) = self.prev_close {
-            if pc < ssp {
-                ss0.min(ssp)
-            } else {
-                ss0
-            }
-        } else {
-            ss0
+            (ls0, ss0)
         };
 
-        // direction
-        let d = if close > ssp {
-            1
-        } else if close < lsp {
-            -1
-        } else {
-            self.dir_prev
-        };
+        // 6) Direction decision from previous raw stops
+        let d = if close > ssp { 1 } else if close < lsp { -1 } else { self.dir_prev };
 
-        self.long_prev = ls;
-        self.short_prev = ss;
-        self.dir_prev = d;
-        self.prev_close = Some(close);
+        // 7) Persist state
+        self.long_raw_prev  = ls;
+        self.short_raw_prev = ss;
+        self.dir_prev       = d;
+        self.prev_close     = Some(close);
+        self.i              = i + 1;
 
+        // 8) Masked outputs (only one side active)
         Some((
             if d == 1 { ls } else { f64::NAN },
             if d == -1 { ss } else { f64::NAN },
         ))
-    }
-
-    #[inline(always)]
-    pub fn get_warmup_period(&self) -> usize {
-        self.period - 1
     }
 }
 

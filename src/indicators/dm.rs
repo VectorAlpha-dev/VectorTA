@@ -18,8 +18,10 @@
 //! - **SIMD Kernels**: Implemented (candidate generation only), but Auto short-circuits to scalar
 //!   by default because AVX2 underperforms and AVX512 gains are small (~4% at 100k on test CPU).
 //!   You can still force `Kernel::Avx2`/`Kernel::Avx512` explicitly to use SIMD.
-//! - **Streaming Performance**: O(1) - uses exponential smoothing for efficient incremental updates
+//! - **Streaming Performance**: O(1) - uses exponential (Wilder) smoothing for efficient incremental updates
 //! - **Memory Optimization**: GOOD - uses alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes throughout
+//! - **Decision Note**: Streaming kernel caches `1/period` and uses FMA when available; exact Wilder
+//!   smoothing preserved. Outputs match baseline within existing tolerances.
 
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
@@ -785,6 +787,7 @@ pub unsafe fn dm_avx512_long(
 #[derive(Debug, Clone)]
 pub struct DmStream {
     period: usize,
+    inv_period: f64, // cached 1.0 / period for O(1) updates without per-tick division
     sum_plus: f64,
     sum_minus: f64,
     prev_high: f64,
@@ -801,8 +804,10 @@ impl DmStream {
                 data_len: 0,
             });
         }
+        let inv = 1.0 / (period as f64);
         Ok(Self {
             period,
+            inv_period: inv,
             sum_plus: 0.0,
             sum_minus: 0.0,
             prev_high: f64::NAN,
@@ -811,44 +816,59 @@ impl DmStream {
         })
     }
 
+    /// O(1) streaming update using Wilder smoothing.
+    /// Returns None until warmup completes; then returns smoothed (+DM, -DM).
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64) -> Option<(f64, f64)> {
+        // First sample only seeds prev_* (keeps identical warmup semantics to original).
         if self.count == 0 {
             self.prev_high = high;
             self.prev_low = low;
         }
 
-        let diff_p = high - self.prev_high;
-        let diff_m = self.prev_low - low;
+        // Raw directional moves versus previous bar.
+        let dp = high - self.prev_high;
+        let dm = self.prev_low - low;
+
+        // Advance prev_* for next tick.
         self.prev_high = high;
         self.prev_low = low;
 
-        let plus_val = if diff_p > 0.0 && diff_p > diff_m {
-            diff_p
-        } else {
-            0.0
-        };
-        let minus_val = if diff_m > 0.0 && diff_m > diff_p {
-            diff_m
-        } else {
-            0.0
-        };
+        // Positive parts (branchless clamp to zero).
+        let dp_pos = dp.max(0.0);
+        let dm_pos = dm.max(0.0);
 
+        // Apply Wilder’s “use only the larger, zero the other”.
+        let plus_val = if dp_pos > dm_pos { dp_pos } else { 0.0 };
+        let minus_val = if dm_pos > dp_pos { dm_pos } else { 0.0 };
+
+        // Warmup: accumulate the first (period-1) diffs.
         if self.count < self.period - 1 {
             self.sum_plus += plus_val;
             self.sum_minus += minus_val;
             self.count += 1;
             return None;
         } else if self.count == self.period - 1 {
+            // Final warmup step: emit the initial Wilder sums.
             self.sum_plus += plus_val;
             self.sum_minus += minus_val;
             self.count += 1;
             return Some((self.sum_plus, self.sum_minus));
         }
 
-        let inv_period = 1.0 / (self.period as f64);
-        self.sum_plus = self.sum_plus - (self.sum_plus * inv_period) + plus_val;
-        self.sum_minus = self.sum_minus - (self.sum_minus * inv_period) + minus_val;
+        // Steady state: Wilder smoothing sum <- sum - sum/period + new
+        #[cfg(target_feature = "fma")]
+        {
+            // sum_next = (-inv).mul_add(sum, sum + new) == sum - sum*inv + new
+            self.sum_plus = (-self.inv_period).mul_add(self.sum_plus, self.sum_plus + plus_val);
+            self.sum_minus = (-self.inv_period).mul_add(self.sum_minus, self.sum_minus + minus_val);
+        }
+        #[cfg(not(target_feature = "fma"))]
+        {
+            self.sum_plus = self.sum_plus - (self.sum_plus * self.inv_period) + plus_val;
+            self.sum_minus = self.sum_minus - (self.sum_minus * self.inv_period) + minus_val;
+        }
+
         Some((self.sum_plus, self.sum_minus))
     }
 }

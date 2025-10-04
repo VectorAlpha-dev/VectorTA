@@ -27,7 +27,7 @@
 //! - AVX2: ✅ FMA + weight synthesis; ~1.7–2.2× vs scalar at 100k
 //! - AVX512: ✅ Short/long variants; ~3.3–3.5× vs scalar at 100k
 //! - Batch (rows): ✅ AVX2/AVX512 batch paths use shared prefix sums (P,Q) across rows for O(1) per-tick updates; >5% faster than scalar batch at 100k
-//! - Streaming update: ⚠️ Currently O(n) per update via `dot_ring()`
+//! - Streaming update: ✅ O(1) per update via rolling S/R with Kahan compensation
 //! - Memory: ✅ Uses `alloc_with_nan_prefix` for zero-copy outputs and avoids O(N) temporaries on single-series paths
 //! - Status: SIMD enabled; fastest on AVX512 > AVX2 > Scalar by clear margins at realistic sizes (10k–100k)
 //! - Notes: For batch, scalar path remains per-row kernels; SIMD batch selects the shared-prefix implementation.
@@ -51,6 +51,8 @@ use rayon::prelude::*;
 use std::convert::AsRef;
 use std::mem::{ManuallyDrop, MaybeUninit};
 use thiserror::Error;
+
+// Decision: Streaming uses O(1) updates maintaining S and R with Kahan compensation; matches batch outputs.
 impl<'a> AsRef<[f64]> for EpmaInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
@@ -681,14 +683,36 @@ unsafe fn epma_avx512_long(
 
 #[derive(Debug, Clone)]
 pub struct EpmaStream {
-    period: usize,
+    period: usize,   // ring capacity (p), EPMA window is p1 = p - 1
     offset: usize,
+    p1: usize,       // period - 1
+
+    // ring buffer and head (head always points to the excluded slot)
     buffer: Vec<f64>,
     head: usize,
-    filled: bool,
-    seen: usize,
-    weights: Vec<f64>,
-    weight_sum: f64,
+
+    // counts
+    seen: usize,     // total updates seen
+    included: usize, // number of elements currently in the EPMA window (<= p1)
+
+    // rolling stats over last p1 samples (oldest->newest)
+    sum: f64,    // S_t = sum x
+    sum_c: f64,  // Kahan compensation for sum
+    ramp: f64,   // R_t = sum i*x (i = 0..p1-1 oldest->newest)
+    ramp_c: f64, // Kahan compensation for ramp
+
+    // normalization
+    c0: f64,       // 2 - offset
+    inv_wsum: f64, // 1 / weight_sum
+}
+
+// small helper for compensated addition
+#[inline(always)]
+fn kahan_add(sum: &mut f64, c: &mut f64, x: f64) {
+    let y = x - *c;
+    let t = *sum + y;
+    *c = (t - *sum) - y;
+    *sum = t;
 }
 
 impl EpmaStream {
@@ -697,62 +721,96 @@ impl EpmaStream {
         let offset = params.offset.unwrap_or(4);
 
         if period < 2 {
-            return Err(EpmaError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(EpmaError::InvalidPeriod { period, data_len: 0 });
         }
-
         if offset >= period {
             return Err(EpmaError::InvalidOffset { offset });
         }
 
-        let mut weights = Vec::with_capacity(period - 1);
-        for i in 0..(period - 1) {
-            weights.push((period as i32 - i as i32 - offset as i32) as f64);
-        }
-        let weight_sum: f64 = weights.iter().sum();
+        let p1 = period - 1;
+        let c0 = 2.0 - (offset as f64);
+
+        // Sum of weights over the p1-sample EPMA window:
+        // W = p1*c0 + 0.5*(p1-1)*p1
+        let p1f = p1 as f64;
+        let wsum = p1f.mul_add(c0, 0.5 * (p1f - 1.0) * p1f);
+        let inv_wsum = 1.0 / wsum; // if wsum==0, IEEE will propagate ±Inf/NaN like batch
 
         Ok(Self {
             period,
             offset,
-            buffer: alloc_with_nan_prefix(period, period),
+            p1,
+
+            // Using zeros; the excluded slot (head) is never read into stats,
+            // and we only read x_out after we have at least p1 included elements.
+            buffer: vec![0.0; period],
             head: 0,
-            filled: false,
+
             seen: 0,
-            weights,
-            weight_sum,
+            included: 0,
+
+            sum: 0.0,
+            sum_c: 0.0,
+            ramp: 0.0,
+            ramp_c: 0.0,
+
+            c0,
+            inv_wsum,
         })
     }
 
+    /// O(1) update. Returns the raw input during warmup (<= period+offset+1),
+    /// otherwise the EPMA value for the window ending at this tick.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
+        let p = self.period;
+        let p1m1 = (self.p1 - 1) as f64;
+
+        // Oldest included value (drops only when we already have p1 included)
+        let idx_out = (self.head + 1) % p;
+        let x_out = if self.included == self.p1 {
+            // window full: this will be dropped from the included set
+            self.buffer[idx_out]
+        } else {
+            0.0
+        };
+
+        // Write the new value into the excluded slot, then advance head
         self.buffer[self.head] = value;
-        self.head = (self.head + 1) % self.period;
+        self.head = (self.head + 1) % p;
         self.seen += 1;
 
-        if !self.filled && self.head == 0 {
-            self.filled = true;
+        // Update rolling statistics
+        if self.included < self.p1 {
+            // growth phase: window size m increases by 1, weights are 0..m
+            let m = self.included as f64;
+
+            kahan_add(&mut self.sum, &mut self.sum_c, value);
+            // R_{new} = R_{old} + m * value
+            kahan_add(&mut self.ramp, &mut self.ramp_c, m * value);
+
+            self.included += 1;
+        } else {
+            // steady phase: constant-size window (size = p1)
+            let s_old = self.sum;
+
+            // S_{new} = S_{old} + (value - x_out)
+            let delta_s = value - x_out;
+            kahan_add(&mut self.sum, &mut self.sum_c, delta_s);
+
+            // R_{new} = R_{old} + [(x_out - S_{old}) + (p1-1)*value]
+            let delta_r = p1m1.mul_add(value, x_out - s_old);
+            kahan_add(&mut self.ramp, &mut self.ramp_c, delta_r);
         }
 
-        if self.seen <= self.period + self.offset + 1 {
+        // Warmup convention: return raw value until we pass (period + offset + 1) samples
+        if self.seen <= (self.period + self.offset + 1) {
             return Some(value);
         }
 
-        Some(self.dot_ring())
-    }
-
-    #[inline(always)]
-    fn dot_ring(&self) -> f64 {
-        let mut idx = (self.head + self.period - 1) % self.period;
-        let mut sum = 0.0;
-
-        for &w in &self.weights {
-            sum += w * self.buffer[idx];
-            idx = if idx == 0 { self.period - 1 } else { idx - 1 };
-        }
-
-        sum / self.weight_sum
+        // num = c0 * S + R
+        let num = self.c0.mul_add(self.sum, self.ramp);
+        Some(num * self.inv_wsum)
     }
 }
 

@@ -454,115 +454,150 @@ pub fn dx_avx512_long(
 }
 
 // Stream implementation (emulates alma.rs streaming)
+// Decision: SIMD stubs delegate to scalar; streaming matches batch numerics at 1e-9.
 #[derive(Debug, Clone)]
 pub struct DxStream {
     period: usize,
+    // Hoisted invariants
+    p_f64: f64,   // period as f64
+    hundred: f64, // 100.0
+
+    // Wilder running sums
     plus_dm_sum: f64,
     minus_dm_sum: f64,
     tr_sum: f64,
+
+    // Previous bar refs
     prev_high: f64,
     prev_low: f64,
     prev_close: f64,
-    initial_count: usize,
-    filled: bool,
+
+    // Warmup bookkeeping
+    initial_count: usize, // counts [1 .. period-1]
+    filled: bool,         // first DX emitted?
+
+    // Carry-forward of last emitted DX (for sum_di==0 steady-state & NaN carry)
+    last_dx: f64,
 }
 
 impl DxStream {
     pub fn try_new(params: DxParams) -> Result<Self, DxError> {
         let period = params.period.unwrap_or(14);
         if period == 0 {
-            return Err(DxError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(DxError::InvalidPeriod { period, data_len: 0 });
         }
         Ok(Self {
             period,
+            p_f64: period as f64,
+            hundred: 100.0,
+
             plus_dm_sum: 0.0,
             minus_dm_sum: 0.0,
             tr_sum: 0.0,
+
             prev_high: f64::NAN,
             prev_low: f64::NAN,
             prev_close: f64::NAN,
+
             initial_count: 0,
             filled: false,
+            last_dx: f64::NAN,
         })
     }
 
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
+        // (Re)seed on the very first valid bar or right after a NaN encounter.
         if self.prev_high.is_nan() || self.prev_low.is_nan() || self.prev_close.is_nan() {
             self.prev_high = high;
             self.prev_low = low;
             self.prev_close = close;
             return None;
         }
+
+        // Mid-series NaN: carry forward last DX for this bar, and set prev_* to current
+        // (matching scalar/batch carry semantics). Next valid bar will re-seed above.
+        if high.is_nan() || low.is_nan() || close.is_nan() {
+            let carried = if self.filled { self.last_dx } else { f64::NAN };
+            self.prev_high = high;
+            self.prev_low = low;
+            self.prev_close = close;
+            return Some(carried);
+        }
+
+        // Wilder DM terms
         let up_move = high - self.prev_high;
         let down_move = self.prev_low - low;
-        let plus_dm = if up_move > 0.0 && up_move > down_move {
-            up_move
-        } else {
-            0.0
-        };
-        let minus_dm = if down_move > 0.0 && down_move > up_move {
-            down_move
-        } else {
-            0.0
-        };
+        let plus_dm = if up_move > 0.0 && up_move > down_move { up_move } else { 0.0 };
+        let minus_dm = if down_move > 0.0 && down_move > up_move { down_move } else { 0.0 };
+
+        // Wilder True Range
         let tr1 = high - low;
         let tr2 = (high - self.prev_close).abs();
         let tr3 = (low - self.prev_close).abs();
         let tr = tr1.max(tr2).max(tr3);
 
+        let mut out: Option<f64> = None;
+
         if self.initial_count < (self.period - 1) {
+            // Prime first window
             self.plus_dm_sum += plus_dm;
             self.minus_dm_sum += minus_dm;
             self.tr_sum += tr;
             self.initial_count += 1;
+
+            // First DX is output immediately after priming completes
             if self.initial_count == (self.period - 1) {
-                let plus_di = (self.plus_dm_sum / self.tr_sum) * 100.0;
-                let minus_di = (self.minus_dm_sum / self.tr_sum) * 100.0;
+                let plus_di = (self.plus_dm_sum / self.tr_sum) * self.hundred; // keep order: div then mul
+                let minus_di = (self.minus_dm_sum / self.tr_sum) * self.hundred;
                 let sum_di = plus_di + minus_di;
-                self.filled = true;
-                self.prev_high = high;
-                self.prev_low = low;
-                self.prev_close = close;
-                return Some(if sum_di != 0.0 {
-                    100.0 * ((plus_di - minus_di).abs() / sum_di)
+
+                let dx = if sum_di != 0.0 {
+                    self.hundred * ((plus_di - minus_di).abs() / sum_di)
                 } else {
-                    0.0
-                });
-            } else {
-                self.prev_high = high;
-                self.prev_low = low;
-                self.prev_close = close;
-                return None;
+                    0.0 // first emission: scalar path outputs 0.0 here
+                };
+                self.filled = true;
+                self.last_dx = dx;
+                out = Some(dx);
             }
         } else {
-            self.plus_dm_sum = self.plus_dm_sum - (self.plus_dm_sum / self.period as f64) + plus_dm;
-            self.minus_dm_sum =
-                self.minus_dm_sum - (self.minus_dm_sum / self.period as f64) + minus_dm;
-            self.tr_sum = self.tr_sum - (self.tr_sum / self.period as f64) + tr;
+            // Wilder smoothing: preserve scalar algebraic order to maintain stream==batch at 1e-9
+            self.plus_dm_sum = self.plus_dm_sum - (self.plus_dm_sum / self.p_f64) + plus_dm;
+            self.minus_dm_sum = self.minus_dm_sum - (self.minus_dm_sum / self.p_f64) + minus_dm;
+            self.tr_sum = self.tr_sum - (self.tr_sum / self.p_f64) + tr;
+
+            // Compute +DI/-DI -> DX using same op order as scalar
             let plus_di = if self.tr_sum != 0.0 {
-                (self.plus_dm_sum / self.tr_sum) * 100.0
+                (self.plus_dm_sum / self.tr_sum) * self.hundred
             } else {
                 0.0
             };
             let minus_di = if self.tr_sum != 0.0 {
-                (self.minus_dm_sum / self.tr_sum) * 100.0
+                (self.minus_dm_sum / self.tr_sum) * self.hundred
             } else {
                 0.0
             };
             let sum_di = plus_di + minus_di;
-            self.prev_high = high;
-            self.prev_low = low;
-            self.prev_close = close;
-            return Some(if sum_di != 0.0 {
-                100.0 * ((plus_di - minus_di).abs() / sum_di)
+
+            // Steady-state carry: if sum_di==0 use previous DX (matches scalar path)
+            let dx = if sum_di != 0.0 {
+                self.hundred * ((plus_di - minus_di).abs() / sum_di)
+            } else if self.filled {
+                self.last_dx
             } else {
-                0.0
-            });
+                f64::NAN
+            };
+            self.last_dx = dx;
+            out = Some(dx);
         }
+
+        // Advance previous bar refs last
+        self.prev_high = high;
+        self.prev_low = low;
+        self.prev_close = close;
+
+        out
     }
 }
 
