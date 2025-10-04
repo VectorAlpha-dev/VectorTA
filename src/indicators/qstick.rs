@@ -1051,48 +1051,113 @@ unsafe fn qstick_row_avx512_long(
 
 #[derive(Debug, Clone)]
 pub struct QstickStream {
+    /// Decision: streaming kernel uses O(1) ring buffer with length counter and reciprocal.
+    /// Same warmup semantics; avoids NaN sentinel and uses bitmask wrap when period is power-of-two.
     period: usize,
-    buffer: Vec<f64>,
-    head: usize,
-    filled: bool,
-    sum: f64,
+    inv_p: f64,        // 1.0 / period, avoids a division every tick
+    buffer: Vec<f64>,  // ring buffer of last `period` diffs (close - open)
+    head: usize,       // write index
+    len: usize,        // number of valid elements in buffer, clamped to period
+    sum: f64,          // rolling sum of diffs in the current window
+    mask: usize,       // period - 1 if period is power-of-two, else 0
 }
 
 impl QstickStream {
+    #[inline(always)]
     pub fn try_new(params: QstickParams) -> Result<Self, QstickError> {
         let period = params.period.unwrap_or(5);
         if period == 0 {
-            return Err(QstickError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(QstickError::InvalidPeriod { period, data_len: 0 });
         }
+        let mask = if period.is_power_of_two() { period - 1 } else { 0 };
         Ok(Self {
             period,
-            buffer: vec![f64::NAN; period],
+            inv_p: 1.0 / (period as f64),
+            buffer: vec![0.0; period], // contents irrelevant until len == period
             head: 0,
-            filled: false,
+            len: 0,
             sum: 0.0,
+            mask,
         })
     }
 
+    /// O(1) update: add newest (close - open), subtract the element we overwrite (once full).
+    /// Warmup: returns None until `period` samples have been seen, then always returns Some(avg).
     #[inline(always)]
     pub fn update(&mut self, open: f64, close: f64) -> Option<f64> {
         let diff = close - open;
-        if self.buffer[self.head].is_nan() {
+        let h = self.head;
+
+        if self.len < self.period {
+            // Filling phase: no subtraction yet
+            self.buffer[h] = diff;
             self.sum += diff;
+            self.head = if self.mask != 0 {
+                (h + 1) & self.mask
+            } else if h + 1 == self.period {
+                0
+            } else {
+                h + 1
+            };
+            self.len += 1;
+            if self.len == self.period {
+                Some(self.sum * self.inv_p)
+            } else {
+                None
+            }
         } else {
-            self.sum += diff - self.buffer[self.head];
+            // Steady-state: subtract the one we overwrite, add the new one
+            let old = self.buffer[h];
+            self.sum += diff - old;
+            self.buffer[h] = diff;
+            self.head = if self.mask != 0 {
+                (h + 1) & self.mask
+            } else if h + 1 == self.period {
+                0
+            } else {
+                h + 1
+            };
+            Some(self.sum * self.inv_p)
         }
-        self.buffer[self.head] = diff;
-        self.head = (self.head + 1) % self.period;
-        if !self.filled && self.head == 0 {
-            self.filled = true;
-        }
-        if self.filled {
-            Some(self.sum / (self.period as f64))
+    }
+
+    /// Optional helper: reset without reallocating. Keeps buffer contents; len=0 disables subtraction until refilled.
+    #[inline(always)]
+    pub fn reset(&mut self) {
+        self.head = 0;
+        self.len = 0;
+        self.sum = 0.0;
+    }
+
+    /// Optional fast path if you already have (close - open) upstream.
+    #[inline(always)]
+    pub fn update_diff(&mut self, diff: f64) -> Option<f64> {
+        let h = self.head;
+
+        if self.len < self.period {
+            self.buffer[h] = diff;
+            self.sum += diff;
+            self.head = if self.mask != 0 {
+                (h + 1) & self.mask
+            } else if h + 1 == self.period {
+                0
+            } else {
+                h + 1
+            };
+            self.len += 1;
+            if self.len == self.period { Some(self.sum * self.inv_p) } else { None }
         } else {
-            None
+            let old = self.buffer[h];
+            self.sum += diff - old;
+            self.buffer[h] = diff;
+            self.head = if self.mask != 0 {
+                (h + 1) & self.mask
+            } else if h + 1 == self.period {
+                0
+            } else {
+                h + 1
+            };
+            Some(self.sum * self.inv_p)
         }
     }
 }

@@ -12,7 +12,8 @@
 //! - SIMD status: Implemented as stubs delegating to scalar. Sliding-sum dependencies (SMA5, SMA34, SMA5(AO))
 //!   make effective time-axis SIMD limited; scalar path is faster/stable. Revisit only with fused precompute.
 //! - Scalar path: Single-pass, ring buffers, manual index wrap (no `%`) and warmup prefix writes from index 38.
-//! - Streaming update: O(1) via fixed-size ring buffers; matches batch results after warmup.
+//! - Streaming update: O(1) via fixed-size ring buffers using compare-based wrap and constant reciprocals
+//!   (no per-tick `%` or `/`), matching batch/scalar numerics after warmup.
 //! - Memory: Zero-copy/uninitialized allocation with NaN warmup via `alloc_with_nan_prefix`.
 //! - Row-specific batch: Not applicable (no tunable params; single row). Keep batch helper for API parity.
 
@@ -332,49 +333,103 @@ impl AcoscStream {
     }
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64) -> Option<(f64, f64)> {
+        // Keep constants identical to batch/scalar to minimize rounding drift.
+        const PERIOD_SMA5: usize = 5;
+        const PERIOD_SMA34: usize = 34;
+        const INV5: f64 = 1.0 / 5.0;
+        const INV34: f64 = 1.0 / 34.0;
+
+        // Same operation order as batch/scalar to preserve numerics.
         let med = (high + low) * 0.5;
+
+        // Number of points seen so far.
         self.filled += 1;
-        if self.filled <= 34 {
+
+        // Phase 1: prefill the 34-/5-length windows (no outputs yet).
+        if self.filled <= PERIOD_SMA34 {
+            // Fill 34-sample window
             self.sum34 += med;
             self.queue34[self.filled - 1] = med;
-            if self.filled <= 5 {
+
+            // Fill 5-sample window in the first 5 ticks
+            if self.filled <= PERIOD_SMA5 {
                 self.sum5 += med;
                 self.queue5[self.filled - 1] = med;
             }
             return None;
         }
-        if self.filled < 39 {
-            self.sum34 += med - self.queue34[self.idx34];
+
+        // Phase 2: warm the 5-of-AO window (ticks 35..=38). No outputs yet.
+        if self.filled < (PERIOD_SMA34 + PERIOD_SMA5) {
+            // Roll 34
+            let old34 = self.queue34[self.idx34];
+            self.sum34 += med - old34;
             self.queue34[self.idx34] = med;
-            self.idx34 = (self.idx34 + 1) % 34;
-            let sma34 = self.sum34 / 34.0;
-            self.sum5 += med - self.queue5[self.idx5];
+            self.idx34 += 1;
+            if self.idx34 == PERIOD_SMA34 {
+                self.idx34 = 0;
+            }
+            let sma34 = self.sum34 * INV34;
+
+            // Roll 5
+            let old5 = self.queue5[self.idx5];
+            self.sum5 += med - old5;
             self.queue5[self.idx5] = med;
-            self.idx5 = (self.idx5 + 1) % 5;
-            let sma5 = self.sum5 / 5.0;
+            self.idx5 += 1;
+            if self.idx5 == PERIOD_SMA5 {
+                self.idx5 = 0;
+            }
+            let sma5 = self.sum5 * INV5;
+
+            // Accumulate AO into its 5-length smoother
             let ao = sma5 - sma34;
             self.sum5_ao += ao;
             self.queue5_ao[self.idx5_ao] = ao;
-            self.idx5_ao = (self.idx5_ao + 1) % 5;
+            self.idx5_ao += 1;
+            if self.idx5_ao == PERIOD_SMA5 {
+                self.idx5_ao = 0;
+            }
             return None;
         }
-        self.sum34 += med - self.queue34[self.idx34];
+
+        // Phase 3: steady state (from tick 39 onward): produce outputs every call.
+        // Roll 34
+        let old34 = self.queue34[self.idx34];
+        self.sum34 += med - old34;
         self.queue34[self.idx34] = med;
-        self.idx34 = (self.idx34 + 1) % 34;
-        let sma34 = self.sum34 / 34.0;
-        self.sum5 += med - self.queue5[self.idx5];
+        self.idx34 += 1;
+        if self.idx34 == PERIOD_SMA34 {
+            self.idx34 = 0;
+        }
+        let sma34 = self.sum34 * INV34;
+
+        // Roll 5
+        let old5 = self.queue5[self.idx5];
+        self.sum5 += med - old5;
         self.queue5[self.idx5] = med;
-        self.idx5 = (self.idx5 + 1) % 5;
-        let sma5 = self.sum5 / 5.0;
+        self.idx5 += 1;
+        if self.idx5 == PERIOD_SMA5 {
+            self.idx5 = 0;
+        }
+        let sma5 = self.sum5 * INV5;
+
+        // AO and its SMA5
         let ao = sma5 - sma34;
         let old_ao = self.queue5_ao[self.idx5_ao];
         self.sum5_ao += ao - old_ao;
         self.queue5_ao[self.idx5_ao] = ao;
-        self.idx5_ao = (self.idx5_ao + 1) % 5;
-        let sma5_ao = self.sum5_ao / 5.0;
+        self.idx5_ao += 1;
+        if self.idx5_ao == PERIOD_SMA5 {
+            self.idx5_ao = 0;
+        }
+
+        let sma5_ao = self.sum5_ao * INV5;
+
+        // Oscillator and its one-step momentum
         let res = ao - sma5_ao;
         let mom = res - self.prev_res;
         self.prev_res = res;
+
         Some((res, mom))
     }
 }

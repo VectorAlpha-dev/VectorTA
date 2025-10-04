@@ -16,7 +16,7 @@
 //! ## Developer Status
 //! - **SIMD Kernels**: AVX2/AVX512 enabled (AXPY-style) — disabled by default for Auto since scalar is as fast or faster on typical CPUs (memory-bound). Use explicit Avx2/Avx512 kernels only for experimentation.
 //! - **Row-Specific Batch**: Not implemented; MA cost dominates and AXPY write per row is cheap. Potential future work: group by (ma_type, period) and reuse `range_ma` across rows.
-//! - **Streaming**: O(n) performance (recalculates MA on full buffer each update)
+//! - **Streaming**: O(1) for SMA/EMA; Other MA types fall back to O(n) with correct chronological order
 //! - **Memory**: Good zero-copy usage (alloc_with_nan_prefix, make_uninit_matrix)
 use crate::indicators::moving_averages::ma::{ma, MaData};
 use crate::utilities::data_loader::Candles;
@@ -607,29 +607,75 @@ unsafe fn kaufmanstop_avx512_impl(
     }
 }
 
+// Decision: Streaming uses O(1) SMA/EMA; Other MA types fall back to O(n) over
+// the current window in chronological order for correctness. SIMD remains disabled
+// by default for Auto due to memory-bound AXPY behavior.
+
 #[derive(Debug, Clone)]
 pub struct KaufmanstopStream {
+    // Params
     period: usize,
     mult: f64,
     direction: String,
     ma_type: String,
+
+    // Ring buffer of high-low ranges
     range_buffer: Vec<f64>,
     buffer_head: usize,
     filled: bool,
+
+    // Cached direction and scale
+    is_long: bool,
+    signed_mult: f64,
+
+    // Which streaming path to use
+    kind: StreamMaKind,
+
+    // --- O(1) SMA state ---
+    sum: f64,
+    valid_count: u32,
+    inv_period: f64, // 1.0 / period (used when no NaNs in window)
+
+    // --- O(1) EMA state ---
+    alpha: f64,
+    beta: f64,
+    ema: f64,
+    ema_ready: bool, // becomes true after first seed from SMA
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamMaKind {
+    SMA,
+    EMA,
+    Other, // WMA/SMMA/... -> fallback O(n)
 }
 
 impl KaufmanstopStream {
     pub fn try_new(params: KaufmanstopParams) -> Result<Self, KaufmanstopError> {
         let period = params.period.unwrap_or(22);
+        if period == 0 {
+            return Err(KaufmanstopError::InvalidPeriod { period, data_len: 0 });
+        }
+
         let mult = params.mult.unwrap_or(2.0);
         let direction = params.direction.unwrap_or_else(|| "long".to_string());
         let ma_type = params.ma_type.unwrap_or_else(|| "sma".to_string());
-        if period == 0 {
-            return Err(KaufmanstopError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
-        }
+
+        let is_long = direction.eq_ignore_ascii_case("long");
+        let signed_mult = if is_long { -mult } else { mult };
+
+        let kind = if ma_type.eq_ignore_ascii_case("sma") {
+            StreamMaKind::SMA
+        } else if ma_type.eq_ignore_ascii_case("ema") {
+            StreamMaKind::EMA
+        } else {
+            StreamMaKind::Other
+        };
+
+        // EMA coefficients (ignored for SMA/Other)
+        let alpha = 2.0 / (period as f64 + 1.0);
+        let beta = 1.0 - alpha;
+
         Ok(Self {
             period,
             mult,
@@ -638,39 +684,116 @@ impl KaufmanstopStream {
             range_buffer: vec![f64::NAN; period],
             buffer_head: 0,
             filled: false,
+
+            is_long,
+            signed_mult,
+            kind,
+
+            sum: 0.0,
+            valid_count: 0,
+            inv_period: 1.0 / period as f64,
+
+            alpha,
+            beta,
+            ema: f64::NAN,
+            ema_ready: false,
         })
     }
+
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64) -> Option<f64> {
-        let diff = if high.is_nan() || low.is_nan() {
-            f64::NAN
-        } else {
-            high - low
-        };
-        self.range_buffer[self.buffer_head] = diff;
-        self.buffer_head = (self.buffer_head + 1) % self.period;
+        // Compute current range (may be NaN)
+        let new = if high.is_nan() || low.is_nan() { f64::NAN } else { high - low };
 
-        if !self.filled && self.buffer_head == 0 {
-            self.filled = true;
+        // Did we already have a full window before inserting this sample?
+        let was_filled = self.filled;
+
+        // If the window is already full, remove the value that is about to be overwritten
+        if was_filled {
+            let old = self.range_buffer[self.buffer_head];
+            if old == old {
+                // old.is_nan() == false
+                self.sum -= old;
+                // valid_count > 0 by construction when old is finite
+                self.valid_count -= 1;
+            }
         }
+
+        // Write the new value into the ring and add to running stats if finite
+        self.range_buffer[self.buffer_head] = new;
+        if new == new {
+            self.sum += new;
+            self.valid_count += 1;
+        }
+
+        // Advance ring
+        self.buffer_head += 1;
+        if self.buffer_head == self.period {
+            self.buffer_head = 0;
+            if !self.filled {
+                self.filled = true; // window just became full
+            }
+        }
+
+        // Warmup: do not emit until we have a full window of samples (NaNs allowed)
         if !self.filled {
             return None;
         }
 
-        let ma_val = ma(
-            &self.ma_type,
-            MaData::Slice(&self.range_buffer),
-            self.period,
-        )
-        .ok()
-        .and_then(|v| v.last().copied());
-        ma_val.map(|val| {
-            if self.direction.eq_ignore_ascii_case("long") {
-                low - val * self.mult
-            } else {
-                high + val * self.mult
+        // Compute MA in O(1) for SMA/EMA; otherwise fall back to O(n) for correctness
+        let ma_val = match self.kind {
+            StreamMaKind::SMA => {
+                // If all values in the window are NaN, the SMA is NaN
+                if self.valid_count == 0 {
+                    f64::NAN
+                } else if self.valid_count as usize == self.period {
+                    // Hot path (no NaNs in window): multiply by 1/N to avoid slow div
+                    self.sum * self.inv_period
+                } else {
+                    // Mixed window (some NaNs): average over valid samples
+                    self.sum / (self.valid_count as f64)
+                }
             }
-        })
+            StreamMaKind::EMA => {
+                // Seed EMA with the average of the first full window (matches batch init).
+                if !self.ema_ready {
+                    if self.valid_count == 0 {
+                        // Keep trying to seed until the window has finite data
+                        f64::NAN
+                    } else {
+                        self.ema = self.sum / (self.valid_count as f64);
+                        self.ema_ready = true;
+                        self.ema
+                    }
+                } else {
+                    // After seeding: only update EMA when the new range is finite
+                    if new == new {
+                        // ema = beta*ema + alpha*new (use fused multiply-add where available)
+                        self.ema = self.ema.mul_add(self.beta, self.alpha * new);
+                    }
+                    self.ema
+                }
+            }
+            StreamMaKind::Other => {
+                // Fallback path (O(n) but correct): evaluate MA over the current window
+                // in chronological order (oldest -> newest) using a small scratch buffer.
+                let n = self.period;
+                let mut tmp = vec![f64::NAN; n];
+                // Oldest element in the window is at buffer_head (next to be overwritten)
+                let tail = n - self.buffer_head;
+                tmp[..tail].copy_from_slice(&self.range_buffer[self.buffer_head..]);
+                tmp[tail..].copy_from_slice(&self.range_buffer[..self.buffer_head]);
+
+                ma(&self.ma_type, MaData::Slice(&tmp), n)
+                    .ok()
+                    .and_then(|v| v.last().copied())
+                    .unwrap_or(f64::NAN)
+            }
+        };
+
+        // Final stop = base ± mult * MA(range)
+        let base = if self.is_long { low } else { high };
+        Some(ma_val.mul_add(self.signed_mult, base))
     }
 }
 

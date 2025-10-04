@@ -18,7 +18,8 @@
 //! - Scalar path optimized to O(n) via two-stage box filters (triangle = SMA ⊗ SMA).
 //! - SIMD (AVX2/AVX512) stubs route to the optimized scalar; data dependencies limit gains.
 //! - Batch row kernels reuse the same O(n) per-row algorithm; prefix sums variant under review.
-//! - Streaming path remains ring-dot for now; future work may apply a two-accumulator stream.
+//! - Streaming path now uses O(1) two-accumulator SMA-of-SMA (triangle = boxcar ⊗ boxcar),
+//!   matching batch outputs and eliminating per-tick O(p) dot products.
 //!
 //! ## Decision Log
 //! - SIMD underperforms on single-series due to loop-carried deps; keep stubs delegating to scalar.
@@ -329,7 +330,7 @@ fn build_symmetric_triangle_vec(n: usize) -> Vec<f64> {
         for i in (1..=half).rev() {
             w.push(i as f64);
         }
-        let sum: f64 = w.iter().sum();
+        let sum: f64 = triangle_weight_sum(n);
         for x in &mut w {
             *x /= sum;
         }
@@ -341,12 +342,25 @@ fn build_symmetric_triangle_vec(n: usize) -> Vec<f64> {
         for i in (1..half_plus).rev() {
             w.push(i as f64);
         }
-        let sum: f64 = w.iter().sum();
+        let sum: f64 = triangle_weight_sum(n);
         for x in &mut w {
             *x /= sum;
         }
     }
     w
+}
+
+#[inline(always)]
+fn triangle_weight_sum(n: usize) -> f64 {
+    if (n & 1) == 0 {
+        // n = 2m => sum = m(m+1)
+        let m = (n >> 1) as f64;
+        m * (m + 1.0)
+    } else {
+        // n = 2m-1 => sum = m^2
+        let m = ((n + 1) >> 1) as f64;
+        m * m
+    }
 }
 
 #[inline(always)]
@@ -380,12 +394,13 @@ fn build_symmetric_triangle_avec(n: usize) -> AVec<f64> {
         }
     }
 
-    // Normalize in-place
-    let sum: f64 = weights.iter().sum();
+    // Normalize in-place (closed-form triangle weight sum).
+    // For n <= 2 we already pushed normalized weights.
+    let sum: f64 = if n <= 2 { 1.0 } else { triangle_weight_sum(n) };
     for w in weights.iter_mut() {
         *w /= sum;
     }
-
+    
     weights
 }
 
@@ -532,54 +547,120 @@ unsafe fn swma_avx512_long(
 
 #[derive(Debug, Clone)]
 pub struct SwmaStream {
+    // public-facing parameter
     period: usize,
-    weights: Vec<f64>,
-    buffer: Vec<f64>,
-    head: usize,
-    filled: bool,
+
+    // triangle as two boxcars: a + b - 1 = period
+    a: usize,
+    b: usize,
+    inv_ab: f64, // 1.0 / (a * b)
+
+    // Stage 1 (SMA over raw samples, length = a)
+    ring_a: aligned_vec::AVec<f64>,
+    idx_a: usize,
+    cnt_a: usize,
+    s1_sum: f64,
+
+    // Stage 2 (SMA over s1_sum, length = b)
+    ring_b: aligned_vec::AVec<f64>,
+    idx_b: usize,
+    cnt_b: usize,
+    s2_sum: f64,
 }
 
 impl SwmaStream {
     pub fn try_new(params: SwmaParams) -> Result<Self, SwmaError> {
         let period = params.period.unwrap_or(5);
         if period == 0 {
-            return Err(SwmaError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(SwmaError::InvalidPeriod { period, data_len: 0 });
         }
-        let weights = build_symmetric_triangle_vec(period);
+
+        // Map period -> (a, b) where a + b - 1 = period.
+        // Odd period: a=b=m, Even period: a=m, b=m+1
+        let (a, b) = if (period & 1) != 0 {
+            let m = (period + 1) >> 1;
+            (m, m)
+        } else {
+            let m = period >> 1;
+            (m, m + 1)
+        };
+
+        // Aligned rings (cacheline aligned like the rest of the codebase)
+        let mut ring_a = aligned_vec::AVec::<f64>::with_capacity(aligned_vec::CACHELINE_ALIGN, a);
+        ring_a.resize(a, 0.0);
+
+        let mut ring_b = aligned_vec::AVec::<f64>::with_capacity(aligned_vec::CACHELINE_ALIGN, b);
+        ring_b.resize(b, 0.0);
+
         Ok(Self {
             period,
-            weights,
-            buffer: vec![f64::NAN; period],
-            head: 0,
-            filled: false,
+            a,
+            b,
+            inv_ab: 1.0 / ((a as f64) * (b as f64)),
+            ring_a,
+            idx_a: 0,
+            cnt_a: 0,
+            s1_sum: 0.0,
+            ring_b,
+            idx_b: 0,
+            cnt_b: 0,
+            s2_sum: 0.0,
         })
     }
 
+    /// O(1) per tick:
+    /// - push x into length-a SMA (s1_sum)
+    /// - push s1_sum into length-b SMA (s2_sum)
+    /// returns Some(y) when both windows are full, else None (warmup)
     #[inline(always)]
-    pub fn update(&mut self, value: f64) -> Option<f64> {
-        self.buffer[self.head] = value;
-        self.head = (self.head + 1) % self.period;
-        if !self.filled && self.head == 0 {
-            self.filled = true;
-        }
-        if !self.filled {
-            return None;
-        }
-        Some(self.dot_ring())
-    }
+    pub fn update(&mut self, x: f64) -> Option<f64> {
+        // ---- stage 1: SMA over raw samples (length a) ----
+        let ia = self.idx_a;
+        // old value at write position (oldest sample if window is full)
+        let old_a = self.ring_a[ia];
 
-    #[inline(always)]
-    fn dot_ring(&self) -> f64 {
-        let mut sum = 0.0;
-        let mut idx = self.head;
-        for &w in &self.weights {
-            sum += w * self.buffer[idx];
-            idx = (idx + 1) % self.period;
+        if self.cnt_a == self.a {
+            // window full: drop oldest
+            self.s1_sum -= old_a;
+        } else {
+            // still filling
+            self.cnt_a += 1;
         }
-        sum
+        self.ring_a[ia] = x;
+        self.s1_sum += x;
+
+        // bump write index with manual wrap (faster than %)
+        self.idx_a = ia + 1;
+        if self.idx_a == self.a {
+            self.idx_a = 0;
+        }
+
+        // ---- stage 2: SMA over s1_sum values (length b) ----
+        if self.cnt_a == self.a {
+            let ib = self.idx_b;
+            let old_s1 = self.ring_b[ib];
+
+            if self.cnt_b == self.b {
+                self.s2_sum -= old_s1;
+            } else {
+                self.cnt_b += 1; // start filling b-window
+            }
+            self.ring_b[ib] = self.s1_sum;
+            self.s2_sum += self.s1_sum;
+
+            self.idx_b = ib + 1;
+            if self.idx_b == self.b {
+                self.idx_b = 0;
+            }
+
+            if self.cnt_b == self.b {
+                // both windows full: SWMA = (sum of last b of s1_sums) / (a*b)
+                return Some(self.s2_sum * self.inv_ab);
+            }
+        }
+
+        // warmup until we have 'a' s1_sums and then 'b' of those
+        None
     }
 }
 

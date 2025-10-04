@@ -1035,20 +1035,30 @@ unsafe fn kvo_row_avx512_long(
     )
 }
 
+// Decision: Streaming kernel tightened; semantics preserved (O(1)).
+// Caches sign and reduces branches; warmup behavior unchanged.
 #[derive(Debug, Clone)]
 pub struct KvoStream {
+    // periods & smoothing
     short_period: usize,
     long_period: usize,
     short_alpha: f64,
     long_alpha: f64,
+
+    // rolling state
     prev_hlc: f64,
     prev_dm: f64,
-    trend: i32,
     cm: f64,
+    trend: i32, // 1 = up, 0 = down (init -1 before we know)
+    sign: f64,  // +1.0 for up, -1.0 for down (cached)
+
+    // EMA state
     short_ema: f64,
     long_ema: f64,
-    filled: bool,
-    first: bool,
+
+    // warmup flags
+    first: bool,  // waiting for seed of prev_hlc/prev_dm
+    seeded: bool, // EMA seeded with first vf
 }
 
 impl KvoStream {
@@ -1056,10 +1066,7 @@ impl KvoStream {
         let short_period = params.short_period.unwrap_or(2);
         let long_period = params.long_period.unwrap_or(5);
         if short_period < 1 || long_period < short_period {
-            return Err(KvoError::InvalidPeriod {
-                short: short_period,
-                long: long_period,
-            });
+            return Err(KvoError::InvalidPeriod { short: short_period, long: long_period });
         }
         Ok(Self {
             short_period,
@@ -1068,47 +1075,64 @@ impl KvoStream {
             long_alpha: 2.0 / (long_period as f64 + 1.0),
             prev_hlc: 0.0,
             prev_dm: 0.0,
-            trend: -1,
             cm: 0.0,
+            trend: -1,   // unknown at start
+            sign: -1.0,  // matches trend = -1 default (tie -> -1)
             short_ema: 0.0,
             long_ema: 0.0,
-            filled: false,
             first: true,
+            seeded: false,
         })
     }
 
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, close: f64, volume: f64) -> Option<f64> {
+        // First bar: seed prev_* and wait for the next bar to start producing values
         if self.first {
             self.prev_hlc = high + low + close;
             self.prev_dm = high - low;
             self.first = false;
             return None;
         }
+
+        // Compute current aggregates
         let hlc = high + low + close;
         let dm = high - low;
-        if hlc > self.prev_hlc && self.trend != 1 {
-            self.trend = 1;
-            self.cm = self.prev_dm;
-        } else if hlc < self.prev_hlc && self.trend != 0 {
-            self.trend = 0;
-            self.cm = self.prev_dm;
+
+        // Trend & CM update (minimize branches, semantics unchanged)
+        if hlc > self.prev_hlc {
+            if self.trend != 1 {
+                self.trend = 1;
+                self.cm = self.prev_dm; // reset on flip
+                self.sign = 1.0;
+            }
+        } else if hlc < self.prev_hlc {
+            if self.trend != 0 {
+                self.trend = 0;
+                self.cm = self.prev_dm; // reset on flip
+                self.sign = -1.0;
+            }
         }
         self.cm += dm;
-        let vf = volume
-            * (dm / self.cm * 2.0 - 1.0).abs()
-            * 100.0
-            * if self.trend == 1 { 1.0 } else { -1.0 };
-        if !self.filled {
+
+        // Volume Force (VF): VF = V * | 2*(dm/cm) - 1 | * 100 * sign
+        let temp = ((dm / self.cm) * 2.0 - 1.0).abs();
+        let vf = volume * temp * 100.0 * self.sign;
+
+        // EMA updates
+        if !self.seeded {
             self.short_ema = vf;
             self.long_ema = vf;
-            self.filled = true;
+            self.seeded = true;
         } else {
-            self.short_ema = (vf - self.short_ema) * self.short_alpha + self.short_ema;
-            self.long_ema = (vf - self.long_ema) * self.long_alpha + self.long_ema;
+            self.short_ema += (vf - self.short_ema) * self.short_alpha;
+            self.long_ema += (vf - self.long_ema) * self.long_alpha;
         }
+
+        // advance state
         self.prev_hlc = hlc;
         self.prev_dm = dm;
+
         Some(self.short_ema - self.long_ema)
     }
 }

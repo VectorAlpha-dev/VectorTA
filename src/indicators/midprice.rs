@@ -14,7 +14,8 @@
 //! ## Developer Notes
 //! - **AVX2**: Stub implementation - calls scalar function
 //! - **AVX512**: Multiple stub functions (midprice_avx512_short, midprice_avx512_long) - all call scalar
-//! - **Streaming**: O(n) for each update - scans entire buffer to find min/max (needs optimization)
+//! - **Streaming**: O(1) amortized per update via two monotonic deques (max of highs, min of lows);
+//!   warmup matches batch semantics (first_valid_idx + period - 1). Accuracy unchanged.
 //! - **Memory**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
 
 #[cfg(feature = "python")]
@@ -350,62 +351,98 @@ pub unsafe fn midprice_avx512_long(
 }
 
 // --- Streaming Struct ---
+// Decision: Switch streaming to O(1) amortized updates using two
+// monotonic deques; warmup matches batch (first_valid_idx + period - 1).
 #[derive(Debug, Clone)]
 pub struct MidpriceStream {
     period: usize,
-    high_buffer: Vec<f64>,
-    low_buffer: Vec<f64>,
-    head: usize,
-    filled: bool,
+    // Have we observed the first fully valid (high, low)?
+    started: bool,
+    // Number of valid bars seen since `started` (also the next index to use).
+    seen: usize,
+    // Monotonic deques; store (index_since_start, value)
+    dq_high: std::collections::VecDeque<(usize, f64)>, // max queue (descending values)
+    dq_low:  std::collections::VecDeque<(usize, f64)>, // min queue (ascending values)
 }
 
 impl MidpriceStream {
     pub fn try_new(params: MidpriceParams) -> Result<Self, MidpriceError> {
         let period = params.period.unwrap_or(14);
         if period == 0 {
-            return Err(MidpriceError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(MidpriceError::InvalidPeriod { period, data_len: 0 });
         }
+        let cap = period + 1;
         Ok(Self {
             period,
-            high_buffer: vec![0.0; period],
-            low_buffer: vec![0.0; period],
-            head: 0,
-            filled: false,
+            started: false,
+            seen: 0,
+            dq_high: std::collections::VecDeque::with_capacity(cap),
+            dq_low:  std::collections::VecDeque::with_capacity(cap),
         })
     }
+
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64) -> Option<f64> {
-        self.high_buffer[self.head] = high;
-        self.low_buffer[self.head] = low;
-        self.head = (self.head + 1) % self.period;
-        if !self.filled && self.head == 0 {
-            self.filled = true;
+        // Delay start until both high & low are finite, mirroring batch warmup
+        if !self.started {
+            if !(high.is_finite() && low.is_finite()) {
+                return None;
+            }
+            self.started = true;
+            self.seen = 0; // first valid sample uses index 0
         }
-        if !self.filled {
+
+        let i = self.seen;
+
+        // Push into max-deque for highs (keep descending values)
+        if high.is_finite() {
+            while let Some(&(_, v)) = self.dq_high.back() {
+                if v <= high { self.dq_high.pop_back(); } else { break; }
+            }
+            self.dq_high.push_back((i, high));
+        }
+
+        // Push into min-deque for lows (keep ascending values)
+        if low.is_finite() {
+            while let Some(&(_, v)) = self.dq_low.back() {
+                if v >= low { self.dq_low.pop_back(); } else { break; }
+            }
+            self.dq_low.push_back((i, low));
+        }
+
+        // Evict items that fell out of the window [i - period + 1, i]
+        let start = i.saturating_add(1).saturating_sub(self.period);
+        while let Some(&(idx, _)) = self.dq_high.front() {
+            if idx < start { self.dq_high.pop_front(); } else { break; }
+        }
+        while let Some(&(idx, _)) = self.dq_low.front() {
+            if idx < start { self.dq_low.pop_front(); } else { break; }
+        }
+
+        // Advance stream index
+        self.seen = i + 1;
+
+        // Not enough bars since start → still warming
+        if self.seen < self.period {
             return None;
         }
+
         Some(self.calc())
     }
+
     #[inline(always)]
     fn calc(&self) -> f64 {
-        let mut highest = f64::NEG_INFINITY;
-        let mut lowest = f64::INFINITY;
-        let mut idx = self.head;
-        for _ in 0..self.period {
-            let h = self.high_buffer[idx];
-            let l = self.low_buffer[idx];
-            if h > highest {
-                highest = h;
-            }
-            if l < lowest {
-                lowest = l;
-            }
-            idx = (idx + 1) % self.period;
-        }
-        (highest + lowest) / 2.0
+        let max_h = self
+            .dq_high
+            .front()
+            .map(|&(_, v)| v)
+            .unwrap_or(f64::NEG_INFINITY);
+        let min_l = self
+            .dq_low
+            .front()
+            .map(|&(_, v)| v)
+            .unwrap_or(f64::INFINITY);
+        (max_h + min_l) / 2.0
     }
 }
 

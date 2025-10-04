@@ -32,6 +32,8 @@
 //!   - Decision: keep SIMD disabled by default for VWAP; runtime selection short-circuits to scalar.
 //!   - Rationale: per-element bucket IDs require integer division; segmented prefix-sum makes effective SIMD complex and data-dependent; stubs ensure correctness.
 
+//! Decision: Streaming kernel uses boundary-only division and lazy month cutoffs; matches scalar/batch outputs and reduces per-tick overhead.
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -57,7 +59,7 @@ use crate::utilities::helpers::{
     alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
     make_uninit_matrix,
 };
-use chrono::{Datelike, NaiveDateTime};
+use chrono::{Datelike, NaiveDate, NaiveDateTime};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -591,51 +593,193 @@ pub unsafe fn vwap_avx512(
     vwap_scalar(timestamps, volumes, prices, count, unit_char, out)
 }
 
-/// Streaming VWAP (per anchor bucket)
+/// Streaming VWAP (per anchor bucket) — O(1) update with minimized divisions.
+/// Divisions:
+///   - 'm'/'h'/'d': at most one integer division when entering a new window,
+///     zero divisions for all subsequent ticks inside the same window.
+///   - 'M' (months): no chrono conversion on every tick; we compute the next
+///     boundary only when the tick crosses it.
 #[derive(Debug, Clone)]
 pub struct VwapStream {
+    // configuration
     anchor: String,
     count: u32,
     unit_char: char,
+
+    // fast path for linear-time anchors (m/h/d)
+    bucket_ms: i64,    // 0 for 'M' anchors
+    next_cutoff: i64,  // absolute timestamp (ms) of the next bucket boundary
     current_group_id: i64,
+
+    // accumulators
     volume_sum: f64,
     vol_price_sum: f64,
 }
 
 impl VwapStream {
+    #[inline]
     pub fn try_new(params: VwapParams) -> Result<Self, VwapError> {
         let anchor = params.anchor.unwrap_or_else(|| "1d".to_string());
         let (count, unit_char) = parse_anchor(&anchor)
             .map_err(|e| VwapError::ParseAnchorError { msg: e.to_string() })?;
+
+        // Precompute bucket size for m/h/d; 0 means month-based path.
+        const MINUTE_MS: i64 = 60_000;
+        const HOUR_MS: i64 = 3_600_000;
+        const DAY_MS: i64 = 86_400_000;
+
+        let bucket_ms = match unit_char {
+            'm' => (count as i64).saturating_mul(MINUTE_MS),
+            'h' => (count as i64).saturating_mul(HOUR_MS),
+            'd' => (count as i64).saturating_mul(DAY_MS),
+            'M' => 0,
+            _ => return Err(VwapError::UnsupportedAnchorUnit { unit_char }),
+        };
+
         Ok(Self {
             anchor,
             count,
             unit_char,
-            current_group_id: -1,
+            bucket_ms,
+            next_cutoff: i64::MIN,      // lazy-init on first tick
+            current_group_id: i64::MIN, // lazy-init on first tick
             volume_sum: 0.0,
             vol_price_sum: 0.0,
         })
     }
 
+    /// Amortized O(1) update with zero divisions inside a window for m/h/d.
+    /// Returns `Some(vwap)` if cumulative volume in the current window > 0, else `None`.
     #[inline(always)]
     pub fn update(&mut self, timestamp: i64, price: f64, volume: f64) -> Option<f64> {
-        let group_id = match self.unit_char {
-            'm' => (timestamp / (self.count as i64 * 60_000)),
-            'h' => (timestamp / (self.count as i64 * 3_600_000)),
-            'd' => (timestamp / (self.count as i64 * 86_400_000)),
-            'M' => match floor_to_month(timestamp, self.count) {
-                Ok(g) => g,
-                Err(_) => return None,
-            },
-            _ => return None,
-        };
-        if group_id != self.current_group_id {
-            self.current_group_id = group_id;
-            self.volume_sum = 0.0;
-            self.vol_price_sum = 0.0;
+        match self.unit_char {
+            'm' | 'h' | 'd' => self.update_linear(timestamp, price, volume),
+            'M' => self.update_month(timestamp, price, volume),
+            _ => None,
         }
+    }
+
+    // --------- m/h/d path (no chrono on tick; divisions only on boundary) ---------
+
+    #[inline(always)]
+    fn init_linear(&mut self, ts: i64) {
+        // One division to seed the stream.
+        let gid = ts / self.bucket_ms;
+        self.current_group_id = gid;
+        // next_cutoff = start_of_window + bucket_ms = (gid + 1) * bucket_ms
+        self.next_cutoff = gid
+            .saturating_add(1)
+            .saturating_mul(self.bucket_ms);
+        self.volume_sum = 0.0;
+        self.vol_price_sum = 0.0;
+    }
+
+    #[inline(always)]
+    fn roll_linear_to(&mut self, ts: i64) {
+        // We crossed one or more windows. Compute how many with a single division, once.
+        // k = number of whole buckets to jump forward (>= 1).
+        let delta = ts.saturating_sub(self.next_cutoff);
+        let k = (delta / self.bucket_ms).saturating_add(1);
+        self.current_group_id = self.current_group_id.saturating_add(k);
+        self.next_cutoff = self
+            .next_cutoff
+            .saturating_add(self.bucket_ms.saturating_mul(k));
+        self.volume_sum = 0.0;
+        self.vol_price_sum = 0.0;
+    }
+
+    #[inline(always)]
+    fn update_linear(&mut self, ts: i64, price: f64, volume: f64) -> Option<f64> {
+        debug_assert!(self.bucket_ms > 0);
+        if self.current_group_id == i64::MIN {
+            self.init_linear(ts);
+        } else if ts >= self.next_cutoff {
+            self.roll_linear_to(ts); // one division per boundary crossing
+        }
+
+        // Accumulate with FMA to reduce rounding error and improve throughput.
         self.volume_sum += volume;
-        self.vol_price_sum += volume * price;
+        self.vol_price_sum = price.mul_add(volume, self.vol_price_sum);
+
+        if self.volume_sum > 0.0 {
+            Some(self.vol_price_sum / self.volume_sum)
+        } else {
+            None
+        }
+    }
+
+    // ---------------------------- 'M' (months) path ----------------------------
+
+    // Helper: compute current month-group id and the next bucket boundary timestamp in ms.
+    // gid definition matches `floor_to_month(ts, count)`.
+    #[inline]
+    fn month_gid_and_next_cutoff(&self, ts_ms: i64) -> Result<(i64, i64), VwapError> {
+        // Convert to calendar time once (only when boundary init/crossing).
+        let seconds = ts_ms / 1000;
+        let nanos = ((ts_ms % 1000) * 1_000_000) as u32;
+        let dt = NaiveDateTime::from_timestamp_opt(seconds, nanos)
+            .ok_or_else(|| VwapError::MonthConversionError { ts_ms })?;
+
+        let year = dt.year();
+        let month = dt.month() as i32; // 1..=12
+        let total_months = (year - 1970) as i64 * 12 + (month - 1) as i64;
+        let gid = total_months / (self.count as i64);
+
+        // Compute next bucket's first day 00:00:00 as ms since epoch.
+        let next_bucket_months = gid
+            .saturating_add(1)
+            .saturating_mul(self.count as i64);
+
+        let next_year = 1970 + next_bucket_months.div_euclid(12);
+        let next_month0 = next_bucket_months.rem_euclid(12); // 0..=11
+        let next_date = NaiveDate::from_ymd_opt(next_year as i32, (next_month0 + 1) as u32, 1)
+            .ok_or_else(|| VwapError::MonthConversionError { ts_ms })?;
+        let next_dt = next_date
+            .and_hms_opt(0, 0, 0)
+            .ok_or_else(|| VwapError::MonthConversionError { ts_ms })?;
+
+        // chrono NaiveDateTime::timestamp() gives seconds since epoch; multiply to ms.
+        let next_ms = next_dt.timestamp().saturating_mul(1000);
+
+        Ok((gid, next_ms))
+    }
+
+    #[inline(always)]
+    fn init_month(&mut self, ts: i64) -> Option<()> {
+        match self.month_gid_and_next_cutoff(ts) {
+            Ok((gid, next_ms)) => {
+                self.current_group_id = gid;
+                self.next_cutoff = next_ms;
+                self.volume_sum = 0.0;
+                self.vol_price_sum = 0.0;
+                Some(())
+            }
+            Err(_) => None,
+        }
+    }
+
+    #[inline(always)]
+    fn update_month(&mut self, ts: i64, price: f64, volume: f64) -> Option<f64> {
+        if self.current_group_id == i64::MIN {
+            if self.init_month(ts).is_none() {
+                return None;
+            }
+        } else if ts >= self.next_cutoff {
+            // We may have skipped multiple month-groups; recompute gid and next cutoff
+            match self.month_gid_and_next_cutoff(ts) {
+                Ok((gid, next_ms)) => {
+                    self.current_group_id = gid;
+                    self.next_cutoff = next_ms;
+                    self.volume_sum = 0.0;
+                    self.vol_price_sum = 0.0;
+                }
+                Err(_) => return None,
+            }
+        }
+
+        self.volume_sum += volume;
+        self.vol_price_sum = price.mul_add(volume, self.vol_price_sum);
+
         if self.volume_sum > 0.0 {
             Some(self.vol_price_sum / self.volume_sum)
         } else {

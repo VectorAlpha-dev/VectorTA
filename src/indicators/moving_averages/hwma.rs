@@ -641,12 +641,20 @@ pub unsafe fn hwma_avx512_long(
 
 #[derive(Debug, Clone)]
 pub struct HwmaStream {
+    // user params (0,1)
     na: f64,
     nb: f64,
     nc: f64,
+    // precomputed complements
+    one_m_na: f64,
+    one_m_nb: f64,
+    one_m_nc: f64,
+    // last state (level, trend, accel) and the cached smoothed output s = f + v + 0.5 a
     last_f: f64,
     last_v: f64,
     last_a: f64,
+    last_s: f64,
+    // init flag
     filled: bool,
 }
 
@@ -655,7 +663,6 @@ impl HwmaStream {
         let na = params.na.unwrap_or(0.2);
         let nb = params.nb.unwrap_or(0.1);
         let nc = params.nc.unwrap_or(0.1);
-
         if !na.is_finite() || !nb.is_finite() || !nc.is_finite() {
             return Err(HwmaError::InvalidParams { na, nb, nc });
         }
@@ -666,30 +673,107 @@ impl HwmaStream {
             na,
             nb,
             nc,
+            one_m_na: 1.0 - na,
+            one_m_nb: 1.0 - nb,
+            one_m_nc: 1.0 - nc,
             last_f: f64::NAN,
             last_v: 0.0,
             last_a: 0.0,
+            last_s: f64::NAN,
             filled: false,
         })
     }
 
+    /// O(1) streaming update. Returns the new HWMA value.
+    ///
+    /// This follows the exact same algebra and evaluation order as the scalar kernel:
+    ///   s_prev = 0.5·a + (f + v)
+    ///   f' = (1-na)·s_prev + na·x
+    ///   v' = nb·(f' - f) + (1-nb)·(v + a)
+    ///   a' = nc·(v' - v) + (1-nc)·a
+    ///   s_new = 0.5·a' + (f' + v')
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
+        // Cold init path once; keep it separate for better icache and branch prediction.
         if !self.filled {
+            // identical to batch/scalar initialization: f=x0, v=0, a=0, s=x0
             self.last_f = value;
             self.last_v = 0.0;
             self.last_a = 0.0;
+            self.last_s = value;
             self.filled = true;
-            return Some(self.last_f + self.last_v + 0.5 * self.last_a);
+            return Some(value);
         }
-        let f = (1.0 - self.na) * (self.last_f + self.last_v + 0.5 * self.last_a) + self.na * value;
-        let v = (1.0 - self.nb) * (self.last_v + self.last_a) + self.nb * (f - self.last_f);
-        let a = (1.0 - self.nc) * self.last_a + self.nc * (v - self.last_v);
-        let hwma_val = f + v + 0.5 * a;
-        self.last_f = f;
-        self.last_v = v;
-        self.last_a = a;
-        Some(hwma_val)
+
+        // hot path — straight line, FMA friendly
+        // s_prev was cached last tick
+        let s_prev = self.last_s;
+
+        // f' = (1-na)*s_prev + na*value   (one mul + one FMA)
+        let f_new = self.one_m_na.mul_add(s_prev, self.na * value);
+
+        // v' = nb*(f' - f) + (1-nb)*(v + a)
+        let sum_va = self.last_v + self.last_a;
+        let v_new = self.nb.mul_add(f_new - self.last_f, self.one_m_nb * sum_va);
+
+        // a' = nc*(v' - v) + (1-nc)*a
+        let a_new = self.nc.mul_add(v_new - self.last_v, self.one_m_nc * self.last_a);
+
+        // s_new = f' + v' + 0.5*a'   (use FMA for the 0.5*a' term)
+        let s_new = 0.5f64.mul_add(a_new, f_new + v_new);
+
+        // commit state
+        self.last_f = f_new;
+        self.last_v = v_new;
+        self.last_a = a_new;
+        self.last_s = s_new;
+
+        Some(s_new)
+    }
+
+    // Optional: if you want a branchless inner loop after explicit init,
+    // you can call init_once() then repeatedly call update_unchecked().
+    #[inline(always)]
+    pub fn init_once(&mut self, first_value: f64) -> f64 {
+        self.last_f = first_value;
+        self.last_v = 0.0;
+        self.last_a = 0.0;
+        self.last_s = first_value;
+        self.filled = true;
+        first_value
+    }
+
+    /// Same math as `update` but assumes the stream is already initialized.
+    /// Useful for ultra‑hot paths after `init_once`.
+    #[inline(always)]
+    pub fn update_unchecked(&mut self, value: f64) -> f64 {
+        debug_assert!(self.filled);
+        let f_new = self.one_m_na.mul_add(self.last_s, self.na * value);
+        let sum_va = self.last_v + self.last_a;
+        let v_new = self.nb.mul_add(f_new - self.last_f, self.one_m_nb * sum_va);
+        let a_new = self.nc.mul_add(v_new - self.last_v, self.one_m_nc * self.last_a);
+        let s_new = 0.5f64.mul_add(a_new, f_new + v_new);
+        self.last_f = f_new;
+        self.last_v = v_new;
+        self.last_a = a_new;
+        self.last_s = s_new;
+        s_new
+    }
+
+    /// Predict the next HWMA value for a hypothetical input without mutating state.
+    #[inline(always)]
+    pub fn predict_next(&self, x: f64) -> f64 {
+        if !self.filled {
+            return x;
+        }
+        let f_new = self.one_m_na.mul_add(self.last_s, self.na * x);
+        let v_new = self
+            .nb
+            .mul_add(f_new - self.last_f, self.one_m_nb * (self.last_v + self.last_a));
+        let a_new = self
+            .nc
+            .mul_add(v_new - self.last_v, self.one_m_nc * self.last_a);
+        0.5f64.mul_add(a_new, f_new + v_new)
     }
 }
 

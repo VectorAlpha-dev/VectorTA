@@ -17,7 +17,9 @@
 //! - **SIMD Status**: AVX2 and AVX512 kernels are stubs (delegate to scalar).
 //!   Decision: DM smoothing is a scalar recurrence and the rolling extremum is branchy;
 //!   no consistent wins observed across CPUs, so runtime selection short-circuits to scalar.
-//! - **Streaming Performance**: O(1) - efficient monotonic deque for rolling extremum
+//! - **Streaming Performance**: O(1) streaming via a fixed-size ring buffer + FMA for the
+//!   Wilder recurrence and candidate formation. Replaces VecDeque to avoid allocator churn
+//!   and matches scalar warmup/emission semantics exactly.
 //! - **Memory Optimization**: ✓ Uses alloc_with_nan_prefix and zero-copy batch operations
 //! - **Batch Support**: ✓ Full parallel batch parameter sweep implementation
 //! - **TODO**: Implement actual AVX2/AVX512 SIMD kernels for DM calculations and rolling operations
@@ -44,7 +46,6 @@ use crate::utilities::helpers::{
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
-use std::collections::VecDeque;
 use std::error::Error;
 use thiserror::Error;
 
@@ -674,12 +675,18 @@ pub unsafe fn safezonestop_avx2(
 
 #[derive(Debug, Clone)]
 pub struct SafeZoneStopStream {
+    // params
     period: usize,
     mult: f64,
     max_lookback: usize,
     dir_long: bool,
 
-    // index of current bar (0-based). increments after each processed pair.
+    // constants
+    inv_p: f64,    // 1.0 / period
+    alpha: f64,    // 1.0 - inv_p
+    warm_i: usize, // max(period, max_lookback) - 1
+
+    // index of last processed bar (0-based for the very first "prev" bar stored)
     i: usize,
 
     // previous bar to form DM
@@ -688,48 +695,61 @@ pub struct SafeZoneStopStream {
     prev_low: f64,
 
     // Wilder state
-    boot_n: usize,  // number of raw DM terms accumulated toward bootstrap
+    boot_n: usize,  // number of raw DM terms accumulated
     boot_sum: f64,  // sum of raw DM terms during bootstrap
-    dm_prev: f64,   // last Wilder-smoothed DM
-    dm_ready: bool, // true once bootstrap completes
+    dm_prev: f64,   // last Wilder-smoothed DM (as a SUM)
+    dm_ready: bool, // true once bootstrap completes (at j = period)
 
-    // monotonic deque for rolling extremum of candidate values
-    dq_idx: VecDeque<usize>,
-    dq_val: VecDeque<f64>,
-
-    warmup_i: usize, // earliest i with a usable output
+    // monotonic deque for rolling extremum of candidate values (fixed-size ring buffer)
+    cap: usize,        // = max_lookback.max(1) + 1
+    q_idx: Vec<usize>, // ring buffer of indices
+    q_val: Vec<f64>,   // ring buffer of candidate values
+    q_head: usize,     // points to current front element
+    q_tail: usize,     // points to next insertion slot
+    q_len: usize,      // number of elements in deque
 }
 
 impl SafeZoneStopStream {
+    #[inline]
+    fn ring_inc(&self, x: usize) -> usize {
+        let y = x + 1;
+        if y == self.cap { 0 } else { y }
+    }
+    #[inline]
+    fn ring_dec(&self, x: usize) -> usize {
+        if x == 0 { self.cap - 1 } else { x - 1 }
+    }
+
     pub fn try_new(params: SafeZoneStopParams, direction: &str) -> Result<Self, SafeZoneStopError> {
         let period = params.period.unwrap_or(22);
         let mult = params.mult.unwrap_or(2.5);
         let max_lookback = params.max_lookback.unwrap_or(3);
-
         if period == 0 {
-            return Err(SafeZoneStopError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(SafeZoneStopError::InvalidPeriod { period, data_len: 0 });
         }
         if direction != "long" && direction != "short" {
             return Err(SafeZoneStopError::InvalidDirection);
         }
+        let dir_long = direction.as_bytes()[0] == b'l';
+        let inv_p = 1.0 / (period as f64);
+        let alpha = 1.0 - inv_p;
 
-        let dir_long = direction == "long";
-        let warmup_i = period.max(max_lookback.saturating_sub(1)); // matches warm_len(first=0,...)
+        // match scalar emission boundary
+        let warm_i = period.max(max_lookback).saturating_sub(1);
 
-        let mut dq_idx = VecDeque::with_capacity(max_lookback.max(1));
-        let mut dq_val = VecDeque::with_capacity(max_lookback.max(1));
-        // ensure no future reallocs within bounds
-        dq_idx.shrink_to_fit();
-        dq_val.shrink_to_fit();
+        // fixed-size ring buffers; +1 avoids head==tail ambiguity
+        let cap = max_lookback.max(1) + 1;
+        let q_idx = vec![0usize; cap];
+        let q_val = vec![0.0f64; cap];
 
         Ok(Self {
             period,
             mult,
             max_lookback,
             dir_long,
+            inv_p,
+            alpha,
+            warm_i,
             i: 0,
             have_prev: false,
             prev_high: f64::NAN,
@@ -738,66 +758,76 @@ impl SafeZoneStopStream {
             boot_sum: 0.0,
             dm_prev: f64::NAN,
             dm_ready: false,
-            dq_idx,
-            dq_val,
-            warmup_i,
+            cap,
+            q_idx,
+            q_val,
+            q_head: 0,
+            q_tail: 0,
+            q_len: 0,
         })
     }
 
     #[inline]
-    fn push_candidate(&mut self, j: usize, cand: f64) {
-        // evict out-of-window indices: keep j' in [j+1-max_lookback, j]
-        let start = j + 1 - self.max_lookback;
-        while let Some(&front_idx) = self.dq_idx.front() {
-            if front_idx < start {
-                self.dq_idx.pop_front();
-                self.dq_val.pop_front();
-            } else {
-                break;
-            }
-        }
-        // maintain monotonicity
-        if self.dir_long {
-            while let Some(&back_val) = self.dq_val.back() {
-                if back_val <= cand {
-                    self.dq_val.pop_back();
-                    self.dq_idx.pop_back();
-                } else {
-                    break;
-                }
-            }
-        } else {
-            while let Some(&back_val) = self.dq_val.back() {
-                if back_val >= cand {
-                    self.dq_val.pop_back();
-                    self.dq_idx.pop_back();
-                } else {
-                    break;
-                }
-            }
-        }
-        self.dq_idx.push_back(j);
-        self.dq_val.push_back(cand);
-    }
-
-    #[inline]
     fn reset_on_nan(&mut self) {
-        // Hard reset to match scalar assumptions if a NaN appears
         self.have_prev = false;
         self.boot_n = 0;
         self.boot_sum = 0.0;
         self.dm_prev = f64::NAN;
         self.dm_ready = false;
-        self.dq_idx.clear();
-        self.dq_val.clear();
+        self.q_head = 0;
+        self.q_tail = 0;
+        self.q_len = 0;
     }
 
+    #[inline]
+    fn push_candidate(&mut self, j: usize, cand: f64) {
+        // evict indices outside [j+1-max_lookback, j]
+        let start = j.saturating_add(1).saturating_sub(self.max_lookback);
+        while self.q_len > 0 {
+            let idx_front = self.q_idx[self.q_head];
+            if idx_front < start {
+                self.q_head = self.ring_inc(self.q_head);
+                self.q_len -= 1;
+            } else {
+                break;
+            }
+        }
+        // maintain monotonicity: max-queue for long, min-queue for short
+        if self.dir_long {
+            while self.q_len > 0 {
+                let last = self.ring_dec(self.q_tail);
+                if self.q_val[last] <= cand {
+                    self.q_tail = last;
+                    self.q_len -= 1;
+                } else {
+                    break;
+                }
+            }
+        } else {
+            while self.q_len > 0 {
+                let last = self.ring_dec(self.q_tail);
+                if self.q_val[last] >= cand {
+                    self.q_tail = last;
+                    self.q_len -= 1;
+                } else {
+                    break;
+                }
+            }
+        }
+        // push
+        self.q_idx[self.q_tail] = j;
+        self.q_val[self.q_tail] = cand;
+        self.q_tail = self.ring_inc(self.q_tail);
+        self.q_len += 1;
+    }
+
+    /// Push one (high, low). Returns stop when available, else None.
+    #[inline]
     pub fn update(&mut self, high: f64, low: f64) -> Option<f64> {
         if !high.is_finite() || !low.is_finite() {
             self.reset_on_nan();
             return None;
         }
-
         if !self.have_prev {
             self.prev_high = high;
             self.prev_low = low;
@@ -806,58 +836,51 @@ impl SafeZoneStopStream {
             return None; // need two bars to form first DM
         }
 
-        // Form raw DM at j = i+1 from prev and current
+        // form raw DM from prev and current
         let up = high - self.prev_high;
         let dn = self.prev_low - low;
-
+        let up_pos = if up > 0.0 { up } else { 0.0 };
+        let dn_pos = if dn > 0.0 { dn } else { 0.0 };
         let dm_raw = if self.dir_long {
-            if dn > up && dn > 0.0 {
-                dn
-            } else {
-                0.0
-            }
+            if dn_pos > up_pos { dn_pos } else { 0.0 }
         } else {
-            if up > dn && up > 0.0 {
-                up
-            } else {
-                0.0
-            }
+            if up_pos > dn_pos { up_pos } else { 0.0 }
         };
 
+        // index j corresponds to the DM we just formed
         let j = self.i + 1;
 
-        // Wilder smoothing
+        // Wilder smoothing (DM as a smoothed SUM, bootstrap with first 'period' sum)
         if !self.dm_ready {
             self.boot_n += 1;
             self.boot_sum += dm_raw;
             if self.boot_n == self.period {
-                self.dm_prev = self.boot_sum; // bootstrap at j = period
+                self.dm_prev = self.boot_sum;
                 self.dm_ready = true;
             }
         } else {
-            self.dm_prev = self.dm_prev - (self.dm_prev / self.period as f64) + dm_raw;
+            // dm_prev = (1 - 1/p)*dm_prev + dm_raw  (use FMA)
+            self.dm_prev = self.alpha.mul_add(self.dm_prev, dm_raw);
         }
 
-        // Build candidate using previous bar's extreme and current smoothed DM
+        // candidate uses previous bar's extreme and current smoothed DM
         if self.dm_ready {
             let cand = if self.dir_long {
-                self.prev_low - self.mult * self.dm_prev
+                (-self.mult).mul_add(self.dm_prev, self.prev_low)  // prev_low - mult*dm
             } else {
-                self.prev_high + self.mult * self.dm_prev
+                self.mult.mul_add(self.dm_prev, self.prev_high)    // prev_high + mult*dm
             };
             self.push_candidate(j, cand);
         }
 
-        // advance prev for next tick
+        // advance prev, index
         self.prev_high = high;
         self.prev_low = low;
         self.i = j;
 
-        // Output when both conditions hold:
-        // 1) dm_ready (i >= period)
-        // 2) i >= warmup_i
-        if self.dm_ready && self.i >= self.warmup_i && !self.dq_val.is_empty() {
-            Some(*self.dq_val.front().unwrap())
+        // emit only after warm and when deque has a value
+        if self.dm_ready && self.i >= self.warm_i && self.q_len > 0 {
+            Some(self.q_val[self.q_head])
         } else {
             None
         }

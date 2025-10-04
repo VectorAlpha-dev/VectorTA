@@ -19,7 +19,8 @@
 //!   dependencies, lane-wise SIMD is not viable; expected gains are modest and workload-dependent.
 //! - **Batch status**: Row-specific batch kernels not attempted here. A future pass can precompute the ratio
 //!   and a prefix sum once, then fill rows via differences for multi-x speedups without changing outputs.
-//! - **Streaming**: Implemented with O(1) update performance
+//! - **Streaming**: O(1) updates with a mask-based ring buffer; exact division preserved. Matches scalar
+//!   path byte-for-byte. FMA-friendly updates; no unsafe in scalar logic.
 //! - **Zero-copy Memory**: Uses alloc_with_nan_prefix and make_uninit_matrix for batch operations
 
 #[cfg(feature = "python")]
@@ -519,74 +520,113 @@ pub unsafe fn mass_avx512_long(
 
 #[derive(Debug, Clone)]
 pub struct MassStream {
+    // config
     period: usize,
-    ring: Vec<f64>,
-    ring_index: usize,
+
+    // ring buffer for O(1) rolling-sum
+    ring: Box<[f64]>,
+    idx: usize,
+    mask: usize, // power-of-two mask or usize::MAX when not power-of-two
     sum_ratio: f64,
+
+    // EMA state
     alpha: f64,
     inv_alpha: f64,
     ema1: f64,
     ema2: f64,
-    bar: usize,
-    filled: bool,
+
+    // progress counters / warmup thresholds
+    t: usize,         // bars seen since first valid
+    warm_ema2: usize, // == 8
+    warm_ratio: usize, // == 16
+    warm_out: usize,  // == 16 + period - 1
 }
 
 impl MassStream {
+    #[inline]
     pub fn try_new(params: MassParams) -> Result<Self, MassError> {
         let period = params.period.unwrap_or(5);
         if period == 0 {
-            return Err(MassError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(MassError::InvalidPeriod { period, data_len: 0 });
         }
+
+        let ring = vec![0.0; period].into_boxed_slice();
+        // If period is a power of two, (i+1)&mask wraps branchlessly; else fall back to compare/reset.
+        let mask = if period.is_power_of_two() { period - 1 } else { usize::MAX };
 
         Ok(Self {
             period,
-            ring: vec![0.0; period],
-            ring_index: 0,
+            ring,
+            idx: 0,
+            mask,
             sum_ratio: 0.0,
-            alpha: 2.0 / 10.0,
+
+            alpha: 2.0 / 10.0,          // EMA(9) => α = 2/(9+1)
             inv_alpha: 1.0 - (2.0 / 10.0),
+
             ema1: f64::NAN,
             ema2: f64::NAN,
-            bar: 0,
-            filled: false,
+
+            t: 0,
+            warm_ema2: 8,
+            warm_ratio: 16,
+            warm_out: 16 + (period - 1),
         })
     }
 
+    /// Returns None during warmup; Some(value) once we have at least 16 + period - 1 bars.
+    /// O(1) per-bar: one subtraction, a couple FMAs, one division, and constant-time ring maintenance.
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64) -> Option<f64> {
         let hl = high - low;
-        if self.bar == 0 {
+
+        // seed both EMAs on the first bar
+        if self.t == 0 {
             self.ema1 = hl;
             self.ema2 = hl;
-            self.bar += 1;
+            self.t = 1;
             return None;
         }
+
+        // ema1 = ema1*(1-α) + hl*α   (mul_add encourages FMA on CPUs that support it)
         self.ema1 = self.ema1.mul_add(self.inv_alpha, hl * self.alpha);
 
-        if self.bar == 8 {
+        // seed ema2 on the 9th bar (t == 8), then keep updating thereafter
+        if self.t == self.warm_ema2 {
             self.ema2 = self.ema1;
         }
-        if self.bar >= 8 {
+        if self.t >= self.warm_ema2 {
             self.ema2 = self.ema2.mul_add(self.inv_alpha, self.ema1 * self.alpha);
         }
 
-        if self.bar >= 16 {
-            let ratio = self.ema1 / self.ema2;
-            self.sum_ratio -= self.ring[self.ring_index];
-            self.ring[self.ring_index] = ratio;
-            self.sum_ratio += ratio;
-            self.ring_index = (self.ring_index + 1) % self.period;
+        let mut out = None;
 
-            if self.bar >= 16 + (self.period - 1) {
-                self.bar += 1;
-                return Some(self.sum_ratio);
+        if self.t >= self.warm_ratio {
+            // exact division (matches offline kernels)
+            let ratio = self.ema1 / self.ema2;
+
+            // slide O(1) rolling sum via ring buffer (safe indexing)
+            let old = self.ring[self.idx];
+            self.sum_ratio = (self.sum_ratio - old) + ratio;
+            self.ring[self.idx] = ratio;
+
+            // advance ring index (branchless for power-of-two periods)
+            if self.mask != usize::MAX {
+                self.idx = (self.idx + 1) & self.mask;
+            } else {
+                self.idx += 1;
+                if self.idx == self.period {
+                    self.idx = 0;
+                }
+            }
+
+            if self.t >= self.warm_out {
+                out = Some(self.sum_ratio);
             }
         }
-        self.bar += 1;
-        None
+
+        self.t += 1;
+        out
     }
 }
 

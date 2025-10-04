@@ -15,6 +15,9 @@
 //! - **`Err(AroonOscError)`** otherwise.
 //!
 //! ## Developer Notes
+//! - Decision: Streaming switched to true amortized O(1) using two monotonic deques (max-high, min-low),
+//!   preserving earliest-index tie rules and computing `(hi_idx - lo_idx) * (100/length)`.
+//!   This fixes the previous stream path’s sign issue and improves worst-case update cost.
 //! - Scalar: single-pass implementation with two paths:
 //!   - length <= 64: tight window rescan jammed across high/low (fastest for small windows)
 //!   - length > 64: O(n) monotonic deques for max(high)/min(low) with earliest-index tie rules
@@ -907,115 +910,128 @@ pub fn aroon_osc_batch_into_slice(
 #[derive(Debug, Clone)]
 pub struct AroonOscStream {
     length: usize,
-    high_buffer: Vec<f64>,
-    low_buffer: Vec<f64>,
-    head: usize,
-    filled: bool,
-    // Track max/min indices for O(1) updates
-    highest_idx: usize,
-    lowest_idx: usize,
+    scale: f64, // 100.0 / length
+    cap: usize, // window size = length + 1 (inclusive [t-length, t])
+    t: usize,   // absolute index for the next sample
+
+    // Monotonic decreasing deque for highs (max)
+    hi_idx: Vec<usize>,
+    hi_val: Vec<f64>,
+    hi_head: usize,
+    hi_tail: usize,
+    hi_len: usize,
+
+    // Monotonic increasing deque for lows (min)
+    lo_idx: Vec<usize>,
+    lo_val: Vec<f64>,
+    lo_head: usize,
+    lo_tail: usize,
+    lo_len: usize,
 }
 
 impl AroonOscStream {
+    #[inline(always)]
     pub fn try_new(params: AroonOscParams) -> Result<Self, AroonOscError> {
         let length = params.length.unwrap_or(14);
         if length == 0 {
             return Err(AroonOscError::InvalidLength { length });
         }
+        let cap = length + 1; // inclusive window [t-length, t]
         Ok(Self {
             length,
-            high_buffer: vec![f64::NAN; length + 1],
-            low_buffer: vec![f64::NAN; length + 1],
-            head: 0,
-            filled: false,
-            highest_idx: 0,
-            lowest_idx: 0,
+            scale: 100.0 / length as f64,
+            cap,
+            t: 0,
+            hi_idx: vec![0; cap],
+            hi_val: vec![0.0; cap],
+            hi_head: 0,
+            hi_tail: 0,
+            hi_len: 0,
+            lo_idx: vec![0; cap],
+            lo_val: vec![0.0; cap],
+            lo_head: 0,
+            lo_tail: 0,
+            lo_len: 0,
         })
     }
+
+    /// O(1) amortized per update.
+    /// Returns `None` until we've seen `length+1` bars (first non-NaN at t == length).
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64) -> Option<f64> {
-        let window = self.length + 1;
-        let old_head = self.head;
+        let idx = self.t; // index of this bar
+        let min_idx_in_window = idx.saturating_sub(self.length); // earliest index allowed
 
-        self.high_buffer[self.head] = high;
-        self.low_buffer[self.head] = low;
-
-        if self.filled {
-            // Check if we need to update highest/lowest indices
-            // If the value being overwritten is the current max/min, we need to rescan
-            if self.highest_idx == old_head || high >= self.high_buffer[self.highest_idx] {
-                // Need to find new highest
-                self.update_highest_idx();
-            }
-
-            if self.lowest_idx == old_head || low <= self.low_buffer[self.lowest_idx] {
-                // Need to find new lowest
-                self.update_lowest_idx();
-            }
+        // 1) Expire outdated indices from the fronts
+        while self.hi_len > 0 && self.hi_idx[self.hi_head] < min_idx_in_window {
+            self.hi_head = self.inc_wrap(self.hi_head);
+            self.hi_len -= 1;
+        }
+        while self.lo_len > 0 && self.lo_idx[self.lo_head] < min_idx_in_window {
+            self.lo_head = self.inc_wrap(self.lo_head);
+            self.lo_len -= 1;
         }
 
-        self.head = (self.head + 1) % window;
-        if !self.filled && self.head == 0 {
-            self.filled = true;
-            // Initialize indices when first filled
-            self.update_highest_idx();
-            self.update_lowest_idx();
+        // 2) Normalize NaNs so they never become extrema
+        let h = if high.is_finite() { high } else { f64::NEG_INFINITY };
+        let l = if low.is_finite() { low } else { f64::INFINITY };
+
+        // 3) Push new high into a strictly decreasing deque (preserves earliest index on ties)
+        while self.hi_len > 0 {
+            let last = self.dec_wrap(self.hi_tail);
+            if self.hi_val[last] < h {
+                self.hi_tail = last;
+                self.hi_len -= 1;
+            } else {
+                break;
+            }
         }
-        if !self.filled {
+        self.hi_idx[self.hi_tail] = idx;
+        self.hi_val[self.hi_tail] = h;
+        self.hi_tail = self.inc_wrap(self.hi_tail);
+        self.hi_len += 1;
+
+        // 4) Push new low into a strictly increasing deque (preserves earliest index on ties)
+        while self.lo_len > 0 {
+            let last = self.dec_wrap(self.lo_tail);
+            if self.lo_val[last] > l {
+                self.lo_tail = last;
+                self.lo_len -= 1;
+            } else {
+                break;
+            }
+        }
+        self.lo_idx[self.lo_tail] = idx;
+        self.lo_val[self.lo_tail] = l;
+        self.lo_tail = self.inc_wrap(self.lo_tail);
+        self.lo_len += 1;
+
+        // 5) Advance time
+        self.t = idx.wrapping_add(1);
+
+        // 6) Emit oscillator after warmup (first non-NaN at t == length)
+        if idx < self.length {
             return None;
         }
-        Some(self.calc_ring_fast())
-    }
-    #[inline(always)]
-    fn update_highest_idx(&mut self) {
-        let w = self.length + 1;
-        let mut highest = f64::NEG_INFINITY;
-        let mut highest_idx = 0;
-        for i in 0..w {
-            if self.high_buffer[i] >= highest {
-                highest = self.high_buffer[i];
-                highest_idx = i;
-            }
-        }
-        self.highest_idx = highest_idx;
+        debug_assert!(self.hi_len > 0 && self.lo_len > 0);
+
+        // Aroon Osc = (hi_idx - lo_idx) * (100/length)
+        let hi_i = self.hi_idx[self.hi_head] as i64;
+        let lo_i = self.lo_idx[self.lo_head] as i64;
+        let v = (hi_i - lo_i) as f64 * self.scale;
+
+        // Strictly speaking this clamp isn't needed (diff in [-length, length])
+        Some(v.max(-100.0).min(100.0))
     }
 
     #[inline(always)]
-    fn update_lowest_idx(&mut self) {
-        let w = self.length + 1;
-        let mut lowest = f64::INFINITY;
-        let mut lowest_idx = 0;
-        for i in 0..w {
-            if self.low_buffer[i] <= lowest {
-                lowest = self.low_buffer[i];
-                lowest_idx = i;
-            }
-        }
-        self.lowest_idx = lowest_idx;
+    fn inc_wrap(&self, x: usize) -> usize {
+        let y = x + 1;
+        if y == self.cap { 0 } else { y }
     }
-
     #[inline(always)]
-    fn calc_ring_fast(&self) -> f64 {
-        let window = self.length + 1;
-        // Calculate how many bars ago the highest/lowest occurred
-        let bars_since_high = if self.highest_idx >= self.head {
-            self.highest_idx - self.head
-        } else {
-            window - self.head + self.highest_idx
-        };
-
-        let bars_since_low = if self.lowest_idx >= self.head {
-            self.lowest_idx - self.head
-        } else {
-            window - self.head + self.lowest_idx
-        };
-
-        let offset_highest = self.length - bars_since_high;
-        let offset_lowest = self.length - bars_since_low;
-        let inv_length = 1.0 / self.length as f64;
-        let up = (self.length as f64 - offset_highest as f64) * inv_length * 100.0;
-        let down = (self.length as f64 - offset_lowest as f64) * inv_length * 100.0;
-        up - down
+    fn dec_wrap(&self, x: usize) -> usize {
+        if x == 0 { self.cap - 1 } else { x - 1 }
     }
 }
 

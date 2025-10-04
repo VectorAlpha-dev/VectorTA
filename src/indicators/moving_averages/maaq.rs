@@ -15,7 +15,7 @@
 //! ## Developer Status
 //! - SIMD: AVX2 implemented (vectorized init |Δ| + scalar stream). AVX512 delegates to AVX2 to avoid downclock regressions.
 //! - Speed: On 100k, AVX2/AVX512 ~2–3% faster than scalar; keep enabled but modest gains (stream is inherently serial).
-//! - Streaming update: O(n) per series with O(1) rolling noise via ring buffer.
+//! - Streaming update: O(1) per update via rolling |Δ| sum; warmup parity preserved.
 //! - Batch (row-specific): Not adopted; shared prefix-sum approach did not show >5% wins in this repo’s profile.
 //! - Memory: Zero-copy/uninit helpers used (alloc_with_nan_prefix, make_uninit_matrix). Warmup parity with ALMA preserved.
 
@@ -652,32 +652,38 @@ pub fn maaq_avx512(
     maaq_avx2(data, period, fast_p, slow_p, first, out)
 }
 
-// Streaming/Stateful MaaqStream
+// Streaming/Stateful MaaqStream  — O(1) per update
 #[derive(Debug, Clone)]
 pub struct MaaqStream {
     period: usize,
     fast_period: usize,
     slow_period: usize,
-    buffer: Vec<f64>,
-    diff: Vec<f64>,
-    head: usize,
+    buffer: Vec<f64>, // ring buffer of last `period` prices
+    diff: Vec<f64>,   // ring buffer of |Δ| aligned with `buffer` writes
+    head: usize,      // next write position (also the oldest element)
     filled: bool,
-    last: f64,
-    count: usize,
+    last: f64,        // last output value (EMA state)
+    count: usize,     // number of values seen so far
+    // ---- new for O(1) ----
+    vol_sum: f64,     // rolling sum of |Δ| in the window
+    fast_sc: f64,     // precomputed 2/(fast_period+1)
+    slow_sc: f64,     // precomputed 2/(slow_period+1)
 }
 
 impl MaaqStream {
+    /// Decision: Streaming uses O(1) rolling |Δ| and FMA; matches batch post-warmup.
     pub fn try_new(params: MaaqParams) -> Result<Self, MaaqError> {
         let period = params.period.unwrap_or(11);
         let fast_p = params.fast_period.unwrap_or(2);
         let slow_p = params.slow_period.unwrap_or(30);
+
         if period == 0 || fast_p == 0 || slow_p == 0 {
-            return Err(MaaqError::ZeroPeriods {
-                period,
-                fast_p,
-                slow_p,
-            });
+            return Err(MaaqError::ZeroPeriods { period, fast_p, slow_p });
         }
+
+        let fast_sc = 2.0 / (fast_p as f64 + 1.0);
+        let slow_sc = 2.0 / (slow_p as f64 + 1.0);
+
         Ok(Self {
             period,
             fast_period: fast_p,
@@ -688,49 +694,83 @@ impl MaaqStream {
             filled: false,
             last: f64::NAN,
             count: 0,
+            vol_sum: 0.0,
+            fast_sc,
+            slow_sc,
         })
     }
+
+    /// Push one sample; returns the stream value.
+    /// Warmup semantics: return raw inputs for the first `period` samples (batch parity:
+    /// those indices would be NaN), then switch to EMA-style MAAQ that matches batch output.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        // During warmup, just return the raw value
-        if self.count < self.period {
+        // ---- Warmup: fill buffers, accumulate vol_sum, echo input ----
+        if !self.filled {
             let prev = if self.count > 0 {
-                self.buffer[(self.head + self.period - 1) % self.period]
+                // previous input (for |Δ|)
+                let idx_prev = (self.head + self.period - 1) % self.period;
+                self.buffer[idx_prev]
             } else {
                 value
             };
             let d = (value - prev).abs();
+
             self.buffer[self.head] = value;
             self.diff[self.head] = d;
-            self.head = (self.head + 1) % self.period;
+            self.vol_sum += d;
+
+            self.head += 1;
+            if self.head == self.period {
+                self.head = 0;
+            }
+
             self.count += 1;
-            self.last = value;
+            self.last = value; // EMA state equals last input during warmup
+
             if self.count == self.period {
                 self.filled = true;
             }
-            return Some(value); // Return raw values during warmup
+            return Some(value); // stream returns raw values during warmup
         }
 
-        // After warmup, compute MAAQ
-        let prev = self.buffer[(self.head + self.period - 1) % self.period];
+        // ---- Steady state: O(1) update of Σ|Δ| and EMA ----
+
+        // Previous input x_{t-1} for new |Δ|
+        let idx_prev = (self.head + self.period - 1) % self.period;
+        let prev_input = self.buffer[idx_prev];
+
+        // Drop oldest |Δ|, insert newest |Δ|
+        let old_diff = self.diff[self.head];
+        self.vol_sum -= old_diff;
+
+        let new_diff = (value - prev_input).abs();
+        self.diff[self.head] = new_diff;
+        self.vol_sum += new_diff;
+
+        // Value leaving the window is x_{t-period}
         let old_value = self.buffer[self.head];
-        let d = (value - prev).abs();
+
+        // Overwrite buffer with the current input (advance ring)
         self.buffer[self.head] = value;
-        self.diff[self.head] = d;
-        self.head = (self.head + 1) % self.period;
-        let sum: f64 = self.diff.iter().sum();
-        let noise = sum;
-        let signal = (value - old_value).abs();
-        let fast_sc = 2.0 / (self.fast_period as f64 + 1.0);
-        let slow_sc = 2.0 / (self.slow_period as f64 + 1.0);
-        let ratio = if noise.abs() < f64::EPSILON {
-            0.0
+        self.head += 1;
+        if self.head == self.period {
+            self.head = 0;
+        }
+
+        // Efficiency ratio ER in [0, 1] (guard div-by-zero on flat windows)
+        let er = if self.vol_sum > f64::EPSILON {
+            (value - old_value).abs() / self.vol_sum
         } else {
-            signal / noise
+            0.0
         };
-        let sc = ratio.mul_add(fast_sc, slow_sc);
-        let temp = sc * sc;
-        let out = self.last + temp * (value - self.last);
+
+        // SC = (er * fast + slow)^2  (use FMA and square)
+        let mut sc = self.fast_sc.mul_add(er, self.slow_sc);
+        sc *= sc;
+
+        // EMA-style update: y = y_prev + sc * (x - y_prev)
+        let out = sc.mul_add(value - self.last, self.last);
         self.last = out;
         Some(out)
     }

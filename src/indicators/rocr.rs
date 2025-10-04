@@ -12,7 +12,8 @@
 //! ## Developer Status
 //! - SIMD implemented (AVX2/AVX512) but disabled by default: memory-bound, no speedup vs scalar.
 //!   Auto kernel selection short-circuits to scalar; explicit SIMD remains for benchmarking.
-//! - Streaming: O(1) — simple ring-buffer lookup.
+//! - Streaming: O(1) — updated to a branch-lean, modulo-free head wrap; exact semantics preserved
+//!   (past == 0 or NaN yields 0.0; otherwise value / past). 
 //! - Memory: Good — uses `alloc_with_nan_prefix` and `make_uninit_matrix`.
 //! - Batch: Scalar path uses a shared 1/x precompute (row-specific) to reduce per-row work; runtime
 //!   selection still defaults to scalar batch. SIMD batch paths are kept for benchmarking.
@@ -438,29 +439,38 @@ impl RocrStream {
 
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
+        // Bit masks for IEEE-754 f64
+        const ABS_MASK: u64 = 0x7fff_ffff_ffff_ffff; // |x| == 0  <=> (bits & ABS_MASK) == 0
+        const EXP_MASK: u64 = 0x7ff0_0000_0000_0000; // exponent all 1s
+        const MAN_MASK: u64 = 0x000f_ffff_ffff_ffff; // mantissa != 0 => NaN when exponent is all 1s
+
+        // 1) Read past sample at current head position.
+        let past = self.buffer[self.head];
+
+        // 2) Compute output once we have filled the ring. Divide first, then mask to 0.0 if
+        //    denominator is 0 or NaN. This preserves existing semantics and avoids an extra branch.
         let out = if self.filled {
-            let prev = self.buffer[self.head];
-            if prev == 0.0 || prev.is_nan() {
-                0.0
-            } else {
-                value / prev
-            }
+            let y = value / past; // allowed even if past is 0 or NaN
+            let pb = past.to_bits();
+            let is_zero = (pb & ABS_MASK) == 0;
+            let is_nan = (pb & EXP_MASK) == EXP_MASK && (pb & MAN_MASK) != 0;
+            let good_mask: u64 = (!(is_zero | is_nan) as u64).wrapping_neg(); // all-1s if good, else 0
+            Some(f64::from_bits(y.to_bits() & good_mask))
         } else {
-            // do not emit until filled
-            self.buffer[self.head] = value;
-            self.head = (self.head + 1) % self.period;
-            if !self.filled && self.head == 0 {
-                self.filled = true;
-            }
-            return None;
+            None
         };
 
+        // 3) Write current value and advance head without modulo.
         self.buffer[self.head] = value;
-        self.head = (self.head + 1) % self.period;
-        if !self.filled && self.head == 0 {
+        let next = self.head + 1;
+        if next == self.period {
+            self.head = 0;
             self.filled = true;
+        } else {
+            self.head = next;
         }
-        Some(out)
+
+        out
     }
 }
 

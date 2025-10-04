@@ -1005,142 +1005,263 @@ pub unsafe fn correlation_cycle_row_avx512_with_first(
     correlation_cycle_avx512(data, period, threshold, first, real, imag, angle, state)
 }
 
+/// Streaming kernel note: Uses an O(1) sliding-DFT phasor update (no per-tick window scan).
+/// Matches batch semantics and one-tick alignment; NaNs are treated as zeros inside the window.
 #[derive(Debug, Clone)]
 pub struct CorrelationCycleStream {
+    // Params
     period: usize,
     threshold: f64,
+
+    // Circular buffer of sanitized samples (NaN -> 0.0)
     buffer: Vec<f64>,
     head: usize,
     filled: bool,
-    /// Holds the (real, imag, angle, state) computed for the "previous" window,
-    /// so that we emit it one tick later.
+
+    /// Previously computed tuple to emit on the next call (one-tick delay to match batch)
     last: Option<(f64, f64, f64, f64)>,
-    // Pre-allocated working buffers to avoid allocations in update()
-    work_data: Vec<f64>,
-    work_real: Vec<f64>,
-    work_imag: Vec<f64>,
-    work_angle: Vec<f64>,
-    work_state: Vec<f64>,
+
+    // --- O(1) state ---
+
+    // Rolling sums for normalization
+    sum_x: f64,
+    sum_x2: f64,
+
+    // Complex phasor accumulator for the k=1 bin:
+    // P = sum x_i * [cos(w*(m+1)) + i * (-sin(w*(m+1)))]
+    // We store its real/imag parts directly:
+    phasor_re: f64, // Σ x * cos
+    phasor_im: f64, // Σ x * (-sin)
+
+    // Angle memory for state
+    prev_angle: f64,
+
+    // Precomputed constants
+    n: f64,
+    half_pi: f64,
+    z_re: f64,       // cos(w)
+    z_im: f64,       // -sin(w)  (negative!)
+    sum_cos: f64,    // Σ cos(w*(j+1)), j=0..N-1
+    sum_sin: f64,    // Σ (-sin(w*(j+1))), j=0..N-1
+    sqrt_t2c: f64,   // sqrt( N*Σcos^2 - (Σcos)^2 )
+    sqrt_t4c: f64,   // sqrt( N*Σ(-sin)^2 - (Σ(-sin))^2 )
+    has_t2: bool,
+    has_t4: bool,
 }
 
 impl CorrelationCycleStream {
     pub fn try_new(params: CorrelationCycleParams) -> Result<Self, CorrelationCycleError> {
         let period = params.period.unwrap_or(20);
         if period == 0 {
-            return Err(CorrelationCycleError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(CorrelationCycleError::InvalidPeriod { period, data_len: 0 });
         }
         let threshold = params.threshold.unwrap_or(9.0);
+
+        // Match batch path constants exactly (asin-based pi to minimize drift)
+        let half_pi = f64::asin(1.0);         // π/2
+        let two_pi  = 4.0 * half_pi;          // 2π
+        let n = period as f64;
+        let w = two_pi / n;
+
+        // z = e^{-jw} = cos(w) + i*(-sin(w))
+        let (s_w, c_w) = w.sin_cos();
+        let z_re = c_w;
+        let z_im = -s_w; // keep sign consistent with (-sin) convention
+
+        // Precompute Σcos, Σ(-sin), and their squares exactly like the batch kernel
+        let mut sum_cos = 0.0f64;
+        let mut sum_sin = 0.0f64;   // sum of (-sin)
+        let mut sum_cos2 = 0.0f64;
+        let mut sum_sin2 = 0.0f64;  // (-sin)^2
+
+        let mut j = 0usize;
+        while j + 4 <= period {
+            let a0 = w * ((j as f64) + 1.0);
+            let (s0, c0) = a0.sin_cos();
+            let ys0 = -s0;
+
+            let a1 = a0 + w;
+            let (s1, c1) = a1.sin_cos();
+            let ys1 = -s1;
+
+            let a2 = a1 + w;
+            let (s2, c2) = a2.sin_cos();
+            let ys2 = -s2;
+
+            let a3 = a2 + w;
+            let (s3, c3) = a3.sin_cos();
+            let ys3 = -s3;
+
+            sum_cos  += c0 + c1 + c2 + c3;
+            sum_sin  += ys0 + ys1 + ys2 + ys3;
+            sum_cos2 += c0*c0 + c1*c1 + c2*c2 + c3*c3;
+            sum_sin2 += ys0*ys0 + ys1*ys1 + ys2*ys2 + ys3*ys3;
+
+            j += 4;
+        }
+        while j < period {
+            let a = w * ((j as f64) + 1.0);
+            let (s, c) = a.sin_cos();
+            let ys = -s;
+            sum_cos  += c;
+            sum_sin  += ys;
+            sum_cos2 += c*c;
+            sum_sin2 += ys*ys;
+            j += 1;
+        }
+
+        // Denominator constants (once per stream)
+        let t2_const = n.mul_add(sum_cos2, -(sum_cos * sum_cos));
+        let t4_const = n.mul_add(sum_sin2, -(sum_sin * sum_sin));
+        let has_t2 = t2_const > 0.0;
+        let has_t4 = t4_const > 0.0;
+        let sqrt_t2c = if has_t2 { t2_const.sqrt() } else { 0.0 };
+        let sqrt_t4c = if has_t4 { t4_const.sqrt() } else { 0.0 };
 
         Ok(Self {
             period,
             threshold,
-            buffer: vec![f64::NAN; period],
+            buffer: vec![0.0; period], // sanitized samples (NaN -> 0)
             head: 0,
             filled: false,
             last: None,
-            // Pre-allocate working buffers
-            work_data: vec![0.0; period + 1],
-            work_real: alloc_with_nan_prefix(period + 1, period),
-            work_imag: alloc_with_nan_prefix(period + 1, period),
-            work_angle: alloc_with_nan_prefix(period + 1, period),
-            work_state: alloc_with_nan_prefix(period + 1, period + 1),
+
+            sum_x: 0.0,
+            sum_x2: 0.0,
+            phasor_re: 0.0,
+            phasor_im: 0.0,
+            prev_angle: f64::NAN,
+
+            n,
+            half_pi,
+            z_re,
+            z_im,
+            sum_cos,
+            sum_sin,
+            sqrt_t2c,
+            sqrt_t4c,
+            has_t2,
+            has_t4,
         })
     }
 
-    /// Insert `value` into the circular buffer.  Returns `None` until we have
-    /// computed at least one full‐window.  After that, each
-    /// `update(...)` call returns exactly the (real, imag, angle, state) that
-    /// matches the batch result “one tick” earlier.
+    /// Per-tick O(1) update. Returns `None` until the first full window is formed.
+    /// After that, returns the previous window’s (real, imag, angle, state) each call
+    /// to match the batch alignment (one-tick latency).
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<(f64, f64, f64, f64)> {
-        // 1) Write into circular buffer and advance head
-        self.buffer[self.head] = value;
+        // 1) Ingest new sample (sanitize NaN -> 0.0), get outgoing sample from the ring
+        let x_new = if value.is_nan() { 0.0 } else { value };
+        let x_old = self.buffer[self.head]; // already sanitized
+        self.buffer[self.head] = x_new;
         self.head = (self.head + 1) % self.period;
 
-        // 2) If this is the very first time head wrapped to 0, we have inserted
-        //    exactly `period` items.  Compute that first-window’s output, stash it
-        //    in `self.last`, and return None so that index=period-1 still yields None.
-        if !self.filled && self.head == 0 {
+        // 2) O(1) roll the normalization sums
+        self.sum_x  += x_new - x_old;
+        // fused form for (x_new^2 - x_old^2)
+        self.sum_x2 = (x_new * x_new) - (x_old * x_old) + self.sum_x2;
+
+        // 3) O(1) phasor update via sliding DFT at k=1:
+        //    P <- z * (P + (x_new - x_old))
+        //    Using two FMAs: let s = Re(P) + (x_new - x_old)
+        let dx = x_new - x_old;
+        let s  = self.phasor_re + dx;
+
+        let new_re = self.z_re.mul_add(s, -self.z_im * self.phasor_im);
+        let new_im = self.z_im.mul_add(s,  self.z_re * self.phasor_im);
+
+        self.phasor_re = new_re;
+        self.phasor_im = new_im;
+
+        // Warmup: on the first wrap we compute the first full-window value,
+        // stash it in `last`, and return None (to keep one-tick delay).
+        let first_wrap_now = !self.filled && self.head == 0;
+        if first_wrap_now {
             self.filled = true;
-
-            // Copy circular buffer to work_data in chronological order
-            for k in 0..self.period {
-                let idx = (self.head + k) % self.period;
-                self.work_data[k] = self.buffer[idx];
-            }
-            self.work_data[self.period] = 0.0; // dummy value
-
-            // Call the scalar routine on work buffers
-            // In streaming mode, first is always 0 since we have a complete window
-            unsafe {
-                correlation_cycle_scalar(
-                    &self.work_data,
-                    self.period,
-                    self.threshold,
-                    0, // first index is 0 for streaming window
-                    &mut self.work_real,
-                    &mut self.work_imag,
-                    &mut self.work_angle,
-                    &mut self.work_state,
-                );
-            }
-
-            // The "batch‐aligned" result is stored at index = period
-            let first_r = self.work_real[self.period];
-            let first_i = self.work_imag[self.period];
-            let first_a = self.work_angle[self.period];
-            let first_s = self.work_state[self.period];
-
-            self.last = Some((first_r, first_i, first_a, first_s));
+        } else if !self.filled {
             return None;
         }
 
-        // 3) If we still haven't filled one full window, keep returning None
-        if !self.filled {
-            return None;
+        // 4) Compute correlation-coefficient components. For numerical parity with batch,
+        //    recompute exact rolling sums from the ring for normalization (and sum_x in numerators).
+        let mut sum_x_exact = 0.0f64;
+        let mut sum_x2_exact = 0.0f64;
+        let mut k = 0usize;
+        while k + 4 <= self.period {
+            let idx0 = (self.head + k) % self.period;
+            let idx1 = (self.head + k + 1) % self.period;
+            let idx2 = (self.head + k + 2) % self.period;
+            let idx3 = (self.head + k + 3) % self.period;
+            let x0 = self.buffer[idx0];
+            let x1 = self.buffer[idx1];
+            let x2 = self.buffer[idx2];
+            let x3 = self.buffer[idx3];
+            sum_x_exact += x0 + x1 + x2 + x3;
+            sum_x2_exact = x0.mul_add(x0, sum_x2_exact);
+            sum_x2_exact = x1.mul_add(x1, sum_x2_exact);
+            sum_x2_exact = x2.mul_add(x2, sum_x2_exact);
+            sum_x2_exact = x3.mul_add(x3, sum_x2_exact);
+            k += 4;
         }
-
-        // 4) Otherwise—every tick from now on—we already have `self.last` from the previous
-        //    window.  So:
-        //    a) pull out `to_emit = self.last.unwrap()`
-        //    b) build the next (period+1)-slice
-        //    c) call correlation_cycle_scalar(...) on that slice, stash into self.last
-        //    d) return `to_emit`
-
-        // a) Grab the previously‐computed tuple:
-        let to_emit = self.last.take().unwrap();
-
-        // b) Copy circular buffer to work_data in chronological order
-        for k in 0..self.period {
+        while k < self.period {
             let idx = (self.head + k) % self.period;
-            self.work_data[k] = self.buffer[idx];
+            let x = self.buffer[idx];
+            sum_x_exact += x;
+            sum_x2_exact = x.mul_add(x, sum_x2_exact);
+            k += 1;
         }
-        self.work_data[self.period] = 0.0; // dummy value
 
-        // c) Compute correlation_cycle_scalar on work buffers
-        unsafe {
-            correlation_cycle_scalar(
-                &self.work_data,
-                self.period,
-                self.threshold,
-                0, // first index is 0 for streaming window
-                &mut self.work_real,
-                &mut self.work_imag,
-                &mut self.work_angle,
-                &mut self.work_state,
-            );
+        let t1 = self.n.mul_add(sum_x2_exact, -(sum_x_exact * sum_x_exact));
+
+        let mut r_val = 0.0;
+        let mut i_val = 0.0;
+
+        if t1 > 0.0 {
+            let sqrt_t1 = t1.sqrt();
+            if self.has_t2 {
+                let denom_r = sqrt_t1 * self.sqrt_t2c;
+                if denom_r > 0.0 {
+                    r_val = (self.n.mul_add(self.phasor_re, -(sum_x_exact * self.sum_cos))) / denom_r;
+                }
+            }
+            if self.has_t4 {
+                let denom_i = sqrt_t1 * self.sqrt_t4c;
+                if denom_i > 0.0 {
+                    i_val = (self.n.mul_add(self.phasor_im, -(sum_x_exact * self.sum_sin))) / denom_i;
+                }
+            }
         }
-        let next_r = self.work_real[self.period];
-        let next_i = self.work_imag[self.period];
-        let next_a = self.work_angle[self.period];
-        let next_s = self.work_state[self.period];
-        self.last = Some((next_r, next_i, next_a, next_s));
 
-        // d) Return the "previous‐window" result:
-        Some(to_emit)
+        // Angle & state (exactly as in scalar path)
+        let mut ang = if i_val == 0.0 {
+            0.0
+        } else {
+            let mut a = (r_val / i_val).atan() + self.half_pi;
+            a = a.to_degrees();
+            if i_val > 0.0 {
+                a -= 180.0;
+            }
+            a
+        };
+
+        // State warmup behavior: first full window emits NaN (matches batch warmup +1)
+        let st = if self.prev_angle.is_finite() && (ang - self.prev_angle).abs() < self.threshold {
+            if ang >= 0.0 { 1.0 } else { -1.0 }
+        } else if self.prev_angle.is_finite() {
+            0.0
+        } else {
+            f64::NAN
+        };
+
+        // Keep prev angle for next tick's state decision
+        self.prev_angle = ang;
+
+        // 5) Respect one-tick delay: emit the previously computed tuple,
+        //    then stash the current result as `last`.
+        let to_emit = self.last.take();
+        self.last = Some((r_val, i_val, ang, st));
+
+        if first_wrap_now { None } else { to_emit }
     }
 }
 

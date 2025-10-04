@@ -48,7 +48,7 @@
 //! ## Developer Notes
 //! - SIMD status: AVX2/AVX512 enable a vectorized first-window init for Standard Deviation (devtype 0,3), then use the O(1) scalar slide. >5% speedup at 1M; modest at 100k. MAD/MedAD fall back to scalar.
 //! - Batch: row-specific stddev uses prefix sums (shared across rows) for O(1) per output; MAD/MedAD remain scalar per-window.
-//! - Streaming: O(1) ring-buffer kernel using Σx/Σx² with branchy wrap and precomputed 1/period; matches batch numerics.
+//! - Streaming: StdDev/Mode O(1); MAD/MedAD O(log n) exact via order-statistics treap.
 //! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy)
 //! - **Batch operations**: ✅ Implemented with parallel processing support
 
@@ -1659,8 +1659,10 @@ pub struct DeviationStream {
     sum: f64,
     sum_sq: f64,
     count: usize,
-    // Precomputed 1/period for steady-state
-    inv_p: f64,
+    // Hoisted division for per-tick variance and abs-mean
+    inv_n: f64,
+    // Order-statistics treap for MAD/MedAD (finite values only)
+    tree: OstTreap,
 }
 
 impl DeviationStream {
@@ -1685,50 +1687,14 @@ impl DeviationStream {
             sum: 0.0,
             sum_sq: 0.0,
             count: 0,
-            inv_p: 1.0 / (period as f64),
+            inv_n: 1.0 / (period as f64),
+            tree: OstTreap::new(),
         })
     }
 
     #[cfg(not(feature = "wasm"))]
     #[inline(always)]
-    pub fn update(&mut self, value: f64) -> Option<f64> {
-        let old_value = self.buffer[self.head];
-        self.buffer[self.head] = value;
-        // Branchy wrap beats modulo in hot loops
-        self.head += 1;
-        if self.head == self.period {
-            self.head = 0;
-        }
-
-        // Update running sums for O(1) standard deviation
-        if self.devtype == 0 || self.devtype == 3 {
-            // Add new first (matches batch slide ordering), then remove old
-            if value.is_finite() {
-                self.sum += value;
-                self.sum_sq = value.mul_add(value, self.sum_sq);
-                self.count += 1;
-            }
-            if old_value.is_finite() {
-                self.sum -= old_value;
-                self.sum_sq -= old_value * old_value;
-                self.count -= 1;
-            }
-        }
-
-        if !self.filled && self.head == 0 {
-            self.filled = true;
-        }
-        if !self.filled {
-            return None;
-        }
-        Some(match self.devtype {
-            0 => self.std_dev_ring_o1(),
-            1 => self.mean_abs_dev_ring(),
-            2 => self.median_abs_dev_ring(),
-            3 => self.std_dev_ring_o1(), // Mode deviation uses same as standard for now
-            _ => f64::NAN,
-        })
-    }
+    pub fn update(&mut self, value: f64) -> Option<f64> { self.update_impl(value) }
 
     #[cfg(not(feature = "wasm"))]
     #[inline(always)]
@@ -1790,72 +1756,238 @@ impl DeviationStream {
     }
 }
 
+impl DeviationStream {
+    #[inline(always)]
+    fn push_pop(&mut self, value: f64) {
+        let out = self.buffer[self.head];
+        if out.is_finite() {
+            self.sum -= out;
+            self.sum_sq -= out * out;
+            self.count -= 1;
+            self.tree.erase(out);
+        }
+        self.buffer[self.head] = value;
+        if value.is_finite() {
+            self.sum += value;
+            self.sum_sq = value.mul_add(value, self.sum_sq);
+            self.count += 1;
+            self.tree.insert(value);
+        }
+        self.head += 1;
+        if self.head == self.period {
+            self.head = 0;
+            if !self.filled { self.filled = true; }
+        }
+    }
+
+    #[inline(always)]
+    fn stddev_o1(&self) -> f64 {
+        if !self.filled || self.count < self.period { return f64::NAN; }
+        if self.period == 1 { return 0.0; }
+        let mean = self.sum * self.inv_n;
+        let mut var = (self.sum_sq * self.inv_n) - mean * mean;
+        if var < 0.0 { var = 0.0; }
+        sqrt_fast(var)
+    }
+
+    #[inline(always)]
+    fn mad_log_n(&self) -> f64 {
+        if !self.filled || self.count < self.period { return f64::NAN; }
+        let n = self.period as i64;
+        let m = self.sum * self.inv_n;
+        let k_le = self.tree.count_leq(m) as i64;
+        let s_le = self.tree.sum_leq(m);
+        let s_all = self.tree.sum_all();
+        let abs_sum = m * ((2 * k_le - n) as f64) + (s_all - 2.0 * s_le);
+        abs_sum * self.inv_n
+    }
+
+    #[inline(always)]
+    fn medad_log_n(&self) -> f64 {
+        if !self.filled || self.count < self.period { return f64::NAN; }
+        let n = self.period;
+        let med = if (n & 1) == 1 {
+            self.tree.kth((n / 2 + 1) as u32)
+        } else {
+            let a = self.tree.kth((n / 2) as u32);
+            let b = self.tree.kth((n / 2 + 1) as u32);
+            0.5 * (a + b)
+        };
+        if (n & 1) == 1 {
+            self.kth_abs_distance(med, (n / 2 + 1) as u32)
+        } else {
+            let d1 = self.kth_abs_distance(med, (n / 2) as u32);
+            let d2 = self.kth_abs_distance(med, (n / 2 + 1) as u32);
+            0.5 * (d1 + d2)
+        }
+    }
+
+    #[inline(always)]
+    fn kth_abs_distance(&self, m: f64, k: u32) -> f64 {
+        let n = self.period as u32;
+        let n_l = self.tree.count_lt(m) as u32;
+        let n_r = n - n_l;
+        let left_at = |idx: u32| -> f64 {
+            let rank = n_l - idx;
+            let x = self.tree.kth(rank);
+            m - x
+        };
+        let right_at = |idx: u32| -> f64 {
+            let rank = n_l + 1 + idx;
+            let x = self.tree.kth(rank);
+            x - m
+        };
+        let mut lo = k.saturating_sub(n_r);
+        let mut hi = k.min(n_l);
+        while lo <= hi {
+            let i = (lo + hi) >> 1; let j = k - i;
+            let a_left  = if i == 0   { f64::NEG_INFINITY } else { left_at(i - 1) };
+            let a_right = if i == n_l { f64::INFINITY     } else { left_at(i)     };
+            let b_left  = if j == 0   { f64::NEG_INFINITY } else { right_at(j - 1)};
+            let b_right = if j == n_r { f64::INFINITY     } else { right_at(j)    };
+            if a_left <= b_right && b_left <= a_right { return a_left.max(b_left); }
+            else if a_left > b_right { hi = i - 1; } else { lo = i + 1; }
+        }
+        0.0
+    }
+
+    #[inline(always)]
+    fn update_impl(&mut self, value: f64) -> Option<f64> {
+        self.push_pop(value);
+        if !self.filled { return None; }
+        Some(match self.devtype {
+            0 => self.stddev_o1(),
+            1 => self.mad_log_n(),
+            2 => self.medad_log_n(),
+            3 => self.stddev_o1(),
+            _ => f64::NAN,
+        })
+    }
+}
+
+#[inline(always)]
+fn norm(x: f64) -> f64 { if x == 0.0 { 0.0 } else { x } }
+
+#[inline(always)]
+fn sqrt_fast(x: f64) -> f64 { x.sqrt() }
+
+// Order-statistics treap: supports insert/erase, count/rank, and prefix sums.
+#[derive(Debug, Clone, Default)]
+struct OstTreap { root: Link, rng: u64 }
+type Link = Option<Box<Node>>;
+#[derive(Debug, Clone)]
+struct Node { key: f64, pri: u64, cnt: u32, size: u32, sum: f64, l: Link, r: Link }
+
+impl OstTreap {
+    #[inline(always)] fn new() -> Self { Self { root: None, rng: 0x9E3779B97F4A7C15 } }
+
+    #[inline(always)] fn insert(&mut self, x: f64) { debug_assert!(x.is_finite()); self.root = Self::ins(self.root.take(), norm(x), self.next()); }
+    #[inline(always)] fn erase(&mut self, x: f64) { debug_assert!(x.is_finite()); self.root = Self::del(self.root.take(), norm(x)); }
+    #[inline(always)] fn count_lt(&self, x: f64) -> usize { Self::cnt_lt(&self.root, x) as usize }
+    #[inline(always)] fn count_leq(&self, x: f64) -> usize { Self::cnt_leq(&self.root, x) as usize }
+    #[inline(always)] fn sum_leq(&self, x: f64) -> f64 { Self::sum_leq_impl(&self.root, x) }
+    #[inline(always)] fn sum_all(&self) -> f64 { Self::sum(&self.root) }
+    #[inline(always)] fn kth(&self, k: u32) -> f64 { debug_assert!(k >= 1 && k <= Self::sz(&self.root)); Self::kth_impl(&self.root, k) }
+
+    #[inline(always)] fn next(&mut self) -> u64 { let mut x = self.rng; x ^= x << 13; x ^= x >> 7; x ^= x << 17; self.rng = x; x }
+    #[inline(always)] fn sz(n: &Link) -> u32 { n.as_ref().map(|p| p.size).unwrap_or(0) }
+    #[inline(always)] fn sum(n: &Link) -> f64 { n.as_ref().map(|p| p.sum).unwrap_or(0.0) }
+    #[inline(always)] fn pull(n: &mut Box<Node>) { n.size = n.cnt + Self::sz(&n.l) + Self::sz(&n.r); n.sum = n.cnt as f64 * n.key + Self::sum(&n.l) + Self::sum(&n.r); }
+
+    #[inline(always)] fn rot_right(mut y: Box<Node>) -> Box<Node> { let mut x = y.l.take().expect("rotate right"); y.l = x.r.take(); Self::pull(&mut y); x.r = Some(y); Self::pull(&mut x); x }
+    #[inline(always)] fn rot_left(mut x: Box<Node>) -> Box<Node> { let mut y = x.r.take().expect("rotate left"); x.r = y.l.take(); Self::pull(&mut x); y.l = Some(x); Self::pull(&mut y); y }
+
+    fn ins(t: Link, key: f64, pri: u64) -> Link {
+        match t {
+            None => Some(Box::new(Node { key, pri, cnt: 1, size: 1, sum: key, l: None, r: None })),
+            Some(mut n) => match key.total_cmp(&n.key) {
+                core::cmp::Ordering::Equal => { n.cnt += 1; n.size += 1; n.sum += key; Some(n) }
+                core::cmp::Ordering::Less => { n.l = Self::ins(n.l.take(), key, pri); if n.l.as_ref().unwrap().pri > n.pri { n = Self::rot_right(n); } else { Self::pull(&mut n); } Some(n) }
+                core::cmp::Ordering::Greater => { n.r = Self::ins(n.r.take(), key, pri); if n.r.as_ref().unwrap().pri > n.pri { n = Self::rot_left(n); } else { Self::pull(&mut n); } Some(n) }
+            }
+        }
+    }
+
+    fn del(t: Link, key: f64) -> Link {
+        match t {
+            None => None,
+            Some(mut n) => match key.total_cmp(&n.key) {
+                core::cmp::Ordering::Equal => {
+                    if n.cnt > 1 { n.cnt -= 1; n.size -= 1; n.sum -= key; Some(n) } else {
+                        match (n.l.take(), n.r.take()) {
+                            (None, None) => None,
+                            (Some(l), None) => Some(l),
+                            (None, Some(r)) => Some(r),
+                            (Some(l), Some(r)) => {
+                                if l.pri > r.pri {
+                                    let mut new = Self::rot_right(Box::new(Node { l: Some(l), r: Some(r), ..*n }));
+                                    new.r = Self::del(new.r.take(), key); Self::pull(&mut new); Some(new)
+                                } else {
+                                    let mut new = Self::rot_left(Box::new(Node { l: Some(l), r: Some(r), ..*n }));
+                                    new.l = Self::del(new.l.take(), key); Self::pull(&mut new); Some(new)
+                                }
+                            }
+                        }
+                    }
+                }
+                core::cmp::Ordering::Less => { n.l = Self::del(n.l.take(), key); Self::pull(&mut n); Some(n) }
+                core::cmp::Ordering::Greater => { n.r = Self::del(n.r.take(), key); Self::pull(&mut n); Some(n) }
+            }
+        }
+    }
+
+    fn kth_impl(t: &Link, mut k: u32) -> f64 {
+        let n = t.as_ref().unwrap(); let ls = Self::sz(&n.l);
+        if k <= ls { return Self::kth_impl(&n.l, k); }
+        k -= ls; if k <= n.cnt { return n.key; }
+        k -= n.cnt; Self::kth_impl(&n.r, k)
+    }
+
+    fn cnt_leq(t: &Link, x: f64) -> u32 {
+        match t {
+            None => 0,
+            Some(n) => match x.total_cmp(&n.key) {
+                core::cmp::Ordering::Less => Self::cnt_leq(&n.l, x),
+                core::cmp::Ordering::Equal => Self::sz(&n.l) + n.cnt,
+                core::cmp::Ordering::Greater => Self::sz(&n.l) + n.cnt + Self::cnt_leq(&n.r, x),
+            }
+        }
+    }
+
+    fn cnt_lt(t: &Link, x: f64) -> u32 {
+        match t {
+            None => 0,
+            Some(n) => match x.total_cmp(&n.key) {
+                core::cmp::Ordering::Less => Self::cnt_lt(&n.l, x),
+                core::cmp::Ordering::Equal => Self::sz(&n.l),
+                core::cmp::Ordering::Greater => Self::sz(&n.l) + n.cnt + Self::cnt_lt(&n.r, x),
+            }
+        }
+    }
+
+    fn sum_leq_impl(t: &Link, x: f64) -> f64 {
+        match t {
+            None => 0.0,
+            Some(n) => match x.total_cmp(&n.key) {
+                core::cmp::Ordering::Less => Self::sum_leq_impl(&n.l, x),
+                core::cmp::Ordering::Equal => Self::sum(&n.l) + n.cnt as f64 * n.key,
+                core::cmp::Ordering::Greater => Self::sum(&n.l) + n.cnt as f64 * n.key + Self::sum_leq_impl(&n.r, x),
+            }
+        }
+    }
+}
+
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 impl DeviationStream {
     #[wasm_bindgen(constructor)]
     pub fn new(period: usize, devtype: usize) -> Result<DeviationStream, JsValue> {
-        if period == 0 {
-            return Err(JsValue::from_str("Invalid period: period = 0"));
-        }
-        if !(0..=3).contains(&devtype) {
-            return Err(JsValue::from_str(&format!(
-                "Invalid devtype: devtype = {}",
-                devtype
-            )));
-        }
-        Ok(DeviationStream {
-            period,
-            devtype,
-            buffer: vec![f64::NAN; period],
-            head: 0,
-            filled: false,
-            sum: 0.0,
-            sum_sq: 0.0,
-            count: 0,
-            inv_p: 1.0 / (period as f64),
-        })
+        let params = DeviationParams { period: Some(period), devtype: Some(devtype) };
+        DeviationStream::try_new(params).map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
     #[wasm_bindgen]
-    pub fn update(&mut self, value: f64) -> Option<f64> {
-        let old_value = self.buffer[self.head];
-        self.buffer[self.head] = value;
-        // Branchy wrap beats modulo in hot loops
-        self.head += 1;
-        if self.head == self.period {
-            self.head = 0;
-        }
-
-        // Update running sums for O(1) standard deviation
-        if self.devtype == 0 || self.devtype == 3 {
-            // Add new first (matches batch slide ordering), then remove old
-            if value.is_finite() {
-                self.sum += value;
-                self.sum_sq = value.mul_add(value, self.sum_sq);
-                self.count += 1;
-            }
-            if old_value.is_finite() {
-                self.sum -= old_value;
-                self.sum_sq -= old_value * old_value;
-                self.count -= 1;
-            }
-        }
-
-        if !self.filled && self.head == 0 {
-            self.filled = true;
-        }
-        if !self.filled {
-            return None;
-        }
-        Some(match self.devtype {
-            0 => self.std_dev_ring_o1(),
-            1 => self.mean_abs_dev_ring(),
-            2 => self.median_abs_dev_ring(),
-            3 => self.std_dev_ring_o1(), // Mode deviation uses same as standard for now
-            _ => f64::NAN,
-        })
-    }
+    pub fn update(&mut self, value: f64) -> Option<f64> { self.update_impl(value) }
 
     #[inline(always)]
     fn std_dev_ring_o1(&self) -> f64 {
