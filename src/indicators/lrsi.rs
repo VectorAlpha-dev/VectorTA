@@ -15,6 +15,10 @@
 //! - **Streaming**: O(1) performance
 //! - **Memory**: Good zero-copy usage (alloc_with_nan_prefix, make_uninit_matrix)
 //! - **Batch**: Row kernels reuse a precomputed mid-price series for all rows
+//!
+//! Decision: Streaming kernel mirrors scalar FMA ordering and uses a branchless
+//! CU/CD split; outputs match the batch scalar path. SIMD remains delegated due
+//! to IIR time dependency.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
@@ -516,9 +520,12 @@ impl LrsiStream {
     }
     #[inline(always)]
     pub fn update(&mut self, price: f64) -> Option<f64> {
+        // Ignore NaNs; do not advance state
         if price.is_nan() {
             return None;
         }
+
+        // One-time init to match batch warmup behavior
         if !self.initialized {
             self.l0 = price;
             self.l1 = price;
@@ -526,49 +533,55 @@ impl LrsiStream {
             self.l3 = price;
             self.initialized = true;
             self.count = 0;
-            return None; // Return None for first update to match batch
+            return None; // first seen sample doesn't produce output
         }
-        let alpha = self.alpha;
+
+        // 4-stage Laguerre filter with FMA ordering (matches scalar batch path)
         let gamma = self.gamma;
+        let mgamma = -gamma;
 
-        let l0 = alpha * price + gamma * self.l0;
-        let l1 = -gamma * l0 + self.l0 + gamma * self.l1;
-        let l2 = -gamma * l1 + self.l1 + gamma * self.l2;
-        let l3 = -gamma * l2 + self.l2 + gamma * self.l3;
+        let l0_prev = self.l0;
+        let l1_prev = self.l1;
+        let l2_prev = self.l2;
+        let l3_prev = self.l3;
 
-        self.l0 = l0;
-        self.l1 = l1;
-        self.l2 = l2;
-        self.l3 = l3;
+        let t0 = (price - l0_prev).mul_add(self.alpha, l0_prev);
+        let t1 = gamma.mul_add(l1_prev, mgamma.mul_add(t0, l0_prev));
+        let t2 = gamma.mul_add(l2_prev, mgamma.mul_add(t1, l1_prev));
+        let t3 = gamma.mul_add(l3_prev, mgamma.mul_add(t2, l2_prev));
+
+        // Commit state
+        self.l0 = t0;
+        self.l1 = t1;
+        self.l2 = t2;
+        self.l3 = t3;
         self.count += 1;
 
-        // Return None until we have 4 values (count >= 3 after initialization)
+        // Warmup = 4 samples total (emit after 3 updates post-initialization)
         if self.count < 3 {
             return None;
         }
 
-        let mut cu = 0.0;
-        let mut cd = 0.0;
-        if l0 >= l1 {
-            cu += l0 - l1;
-        } else {
-            cd += l1 - l0;
+        // Branchless CU/CD via positive-part identity
+        let d01 = t0 - t1;
+        let d12 = t1 - t2;
+        let d23 = t2 - t3;
+
+        let a01 = d01.abs();
+        let a12 = d12.abs();
+        let a23 = d23.abs();
+
+        let sum_abs = a01 + a12 + a23;
+        if sum_abs <= f64::EPSILON {
+            return Some(0.0);
         }
-        if l1 >= l2 {
-            cu += l1 - l2;
-        } else {
-            cd += l2 - l1;
-        }
-        if l2 >= l3 {
-            cu += l2 - l3;
-        } else {
-            cd += l3 - l2;
-        }
-        Some(if (cu + cd).abs() < f64::EPSILON {
-            0.0
-        } else {
-            cu / (cu + cd)
-        })
+
+        // Match scalar addition order for numerical reproducibility
+        let cu = 0.5 * (d01 + a01 + d12 + a12 + d23 + a23);
+
+        // Use exact divide to mirror scalar kernel
+        let v = cu / sum_abs;
+        Some(v.min(1.0).max(0.0))
     }
 }
 

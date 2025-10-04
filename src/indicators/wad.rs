@@ -19,6 +19,7 @@
 //!   so SIMD here focuses on reducing branch mispredictions and improving ILP via unrolling
 //!   and FMA-friendly expressions rather than true wide data-parallelism.
 //! - Scalar path remains the reference; it is safe and branchless to minimize mispredictions.
+//! - Decision: streaming update uses a branchless, FMA‑friendly kernel (cold start only) matching scalar semantics.
 //! - Streaming update: O(1) with minimal state.
 //! - Memory: Uses the crate’s zero-copy/uninitialized helpers where applicable.
 
@@ -641,19 +642,26 @@ impl WadStream {
     }
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> f64 {
-        let ad = if let Some(pc) = self.prev_close {
-            if close > pc {
-                close - low.min(pc)
-            } else if close < pc {
-                close - high.max(pc)
-            } else {
-                0.0
+        // Branchless hot path; first tick initializes prev_close and returns 0.0
+        let pc = match self.prev_close {
+            Some(pc) => pc,
+            None => {
+                self.prev_close = Some(close);
+                return self.sum;
             }
-        } else {
-            0.0
         };
-        self.prev_close = Some(close);
+
+        // TRH = max(high, prev_close); TRL = min(low, prev_close)
+        let trh = pc.max(high);
+        let trl = pc.min(low);
+
+        // Masks as {0.0, 1.0}; FMA-friendly accumulation
+        let gt = (close > pc) as i32 as f64;
+        let lt = (close < pc) as i32 as f64;
+        let ad = gt.mul_add(close - trl, lt * (close - trh));
+
         self.sum += ad;
+        self.prev_close = Some(close);
         self.sum
     }
 }

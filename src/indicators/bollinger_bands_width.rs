@@ -1,5 +1,7 @@
 //! # Bollinger Bands Width (BBW)
 //!
+//! Decision note: Streaming path now uses an O(1) rolling-sum/sumsq kernel for stddev with SMA/EMA; SIMD remains disabled by default due to underperformance vs scalar.
+//!
 //! Bollinger Bands Width (sometimes called Bandwidth) shows the relative distance between
 //! the upper and lower Bollinger Bands compared to the middle band.
 //! It is typically calculated as: `(upper_band - lower_band) / middle_band`
@@ -58,6 +60,150 @@ impl<'a> AsRef<[f64]> for BollingerBandsWidthInput<'a> {
             BollingerBandsWidthData::Slice(s) => s,
             BollingerBandsWidthData::Candles { candles, source } => source_type(candles, source),
         }
+    }
+}
+
+/// O(1) streaming Bollinger Band Width for devtype=0 (stddev) with SMA/EMA middle.
+/// Exact population-σ math, matching classic scalar kernels.
+/// NaN/non-finite input resets state and returns None on that tick.
+#[derive(Clone, Debug)]
+pub struct BollingerBandsWidthStream {
+    period: usize,
+    u_plus_d: f64,
+    kind: BBWMiddle,
+    devtype: usize, // currently only 0 (stddev) supported in O(1) path
+    // ring buffer
+    buf: Box<[f64]>,
+    head: usize,   // next position to overwrite (oldest sample)
+    filled: usize, // number of valid samples in buf, capped at period
+    // rolling sums
+    sum: f64,
+    sumsq: f64,
+    // EMA state (only when kind == Ema)
+    ema: f64,
+    alpha: f64,
+    beta: f64,
+    ema_seeded: bool, // true after first full window
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum BBWMiddle {
+    Sma,
+    Ema,
+}
+
+impl BollingerBandsWidthStream {
+    #[inline(always)]
+    pub fn new(period: usize, devup: f64, devdn: f64, matype: &str, devtype: usize) -> Self {
+        assert!(period > 0);
+        let kind = if matype.eq_ignore_ascii_case("ema") {
+            BBWMiddle::Ema
+        } else {
+            BBWMiddle::Sma
+        };
+        let alpha = 2.0 / (period as f64 + 1.0);
+        Self {
+            period,
+            u_plus_d: devup + devdn,
+            kind,
+            devtype,
+            buf: vec![0.0; period].into_boxed_slice(),
+            head: 0,
+            filled: 0,
+            sum: 0.0,
+            sumsq: 0.0,
+            ema: 0.0,
+            alpha,
+            beta: 1.0 - alpha,
+            ema_seeded: false,
+        }
+    }
+
+    #[inline(always)]
+    pub fn reset(&mut self) {
+        self.head = 0;
+        self.filled = 0;
+        self.sum = 0.0;
+        self.sumsq = 0.0;
+        self.ema = 0.0;
+        self.ema_seeded = false;
+        // Buffer contents can remain; `filled` gates validity.
+    }
+
+    /// Feed one sample. Returns None until warm-up completes (period samples).
+    /// On devtype != 0, this returns None (O(1) path supports stddev only).
+    #[inline(always)]
+    pub fn update(&mut self, x: f64) -> Option<f64> {
+        if !x.is_finite() {
+            self.reset();
+            return None;
+        }
+        if self.devtype != 0 {
+            return None;
+        }
+
+        if self.filled == self.period {
+            // overwrite oldest value
+            let old = self.buf[self.head];
+            self.sum += x - old;
+            self.sumsq += x * x - old * old;
+            self.buf[self.head] = x;
+            self.head += 1;
+            if self.head == self.period {
+                self.head = 0;
+            }
+        } else {
+            // still warming
+            self.buf[self.head] = x;
+            self.head += 1;
+            if self.head == self.period {
+                self.head = 0;
+            }
+            self.sum += x;
+            self.sumsq += x * x;
+            self.filled += 1;
+            if self.filled < self.period {
+                return None;
+            }
+        }
+
+        debug_assert!(self.filled == self.period);
+        let inv_n = 1.0 / (self.period as f64);
+        let mu = self.sum * inv_n;
+        let mut var_w = (self.sumsq * inv_n) - mu * mu;
+        if var_w < 0.0 {
+            var_w = 0.0;
+        }
+
+        let (mid, var_about_mid) = match self.kind {
+            BBWMiddle::Sma => (mu, var_w),
+            BBWMiddle::Ema => {
+                if !self.ema_seeded {
+                    // First full window: seed EMA from SMA and use window variance
+                    self.ema = mu;
+                    self.ema_seeded = true;
+                    (self.ema, var_w)
+                } else {
+                    // After seeding, update EMA each tick and use parallel variance
+                    self.ema = self.alpha * x + self.beta * self.ema;
+                    let diff = mu - self.ema;
+                    (self.ema, var_w + diff * diff)
+                }
+            }
+        };
+
+        let std = fast_sqrt64(var_about_mid);
+        Some((self.u_plus_d * std) / mid)
+    }
+}
+
+#[inline(always)]
+fn fast_sqrt64(x: f64) -> f64 {
+    // Exact path only; fast-math approximations are intentionally not used by default.
+    if x <= 0.0 {
+        0.0
+    } else {
+        x.sqrt()
     }
 }
 
@@ -2118,12 +2264,7 @@ pub fn bollinger_bands_width_py<'py>(
 #[cfg(feature = "python")]
 #[pyclass(name = "BollingerBandsWidthStream")]
 pub struct BollingerBandsWidthStreamPy {
-    period: usize,
-    devup: f64,
-    devdn: f64,
-    matype: String,
-    devtype: usize,
-    buf: std::collections::VecDeque<f64>,
+    inner: BollingerBandsWidthStream,
 }
 
 #[cfg(feature = "python")]
@@ -2140,38 +2281,20 @@ impl BollingerBandsWidthStreamPy {
         if period == 0 {
             return Err(PyValueError::new_err("period must be > 0"));
         }
+        let mt = matype.unwrap_or("sma");
+        let dt = devtype.unwrap_or(0);
         Ok(Self {
-            period,
-            devup,
-            devdn,
-            matype: matype.unwrap_or("sma").to_string(),
-            devtype: devtype.unwrap_or(0),
-            buf: std::collections::VecDeque::with_capacity(period),
+            inner: BollingerBandsWidthStream::new(period, devup, devdn, mt, dt),
         })
     }
 
+    /// O(1) update; returns None until warm-up completes.
     fn update(&mut self, value: f64) -> Option<f64> {
-        if self.buf.len() == self.period {
-            self.buf.pop_front();
-        }
-        self.buf.push_back(value);
-        if self.buf.len() < self.period {
-            return None;
-        }
+        self.inner.update(value)
+    }
 
-        let window: Vec<f64> = self.buf.iter().copied().collect();
-        let params = BollingerBandsWidthParams {
-            period: Some(self.period),
-            devup: Some(self.devup),
-            devdn: Some(self.devdn),
-            matype: Some(self.matype.clone()),
-            devtype: Some(self.devtype),
-        };
-        // Compute one step by reusing scalar_into on a tiny slice
-        let input = BollingerBandsWidthInput::from_slice(&window, params);
-        let mut out = vec![f64::NAN; self.period];
-        let _ = bollinger_bands_width_into_slice(&mut out, &input, Kernel::Scalar);
-        out.last().copied()
+    fn reset(&mut self) {
+        self.inner.reset();
     }
 }
 

@@ -1838,180 +1838,182 @@ pub fn ultosc_into_slice(
 #[derive(Debug, Clone)]
 pub struct UltOscStream {
     params: UltOscParams,
+    // Ring buffers hold the last `max_period` CMTL and TR values.
     cmtl_buf: Vec<f64>,
     tr_buf: Vec<f64>,
+
+    // Rolling sums for each window: sum of CMTL ("_a") and sum of TR ("_b").
     sum1_a: f64,
     sum1_b: f64,
     sum2_a: f64,
     sum2_b: f64,
     sum3_a: f64,
     sum3_b: f64,
+
+    // Circular index and counters
     buffer_idx: usize,
+    count: usize,
+
+    // Periods
     max_period: usize,
     p1: usize,
     p2: usize,
     p3: usize,
-    initialized: bool,
+
+    // Weights: 100 * [4,2,1] / 7 precomputed
+    w1: f64,
+    w2: f64,
+    w3: f64,
+
+    // Previous close (needed to form the first valid pair)
     prev_close: Option<f64>,
 }
 
 impl UltOscStream {
+    #[inline]
     pub fn try_new(params: UltOscParams) -> Result<Self, UltOscError> {
         let p1 = params.timeperiod1.unwrap_or(7);
         let p2 = params.timeperiod2.unwrap_or(14);
         let p3 = params.timeperiod3.unwrap_or(28);
 
         if p1 == 0 || p2 == 0 || p3 == 0 {
-            return Err(UltOscError::InvalidPeriods {
-                p1,
-                p2,
-                p3,
-                data_len: 0,
-            });
+            return Err(UltOscError::InvalidPeriods { p1, p2, p3, data_len: 0 });
         }
 
         let max_period = p1.max(p2).max(p3);
 
-        Ok(UltOscStream {
+        // Precompute weights using the canonical 4:2:1 blend scaled to 0..100.
+        // w1 = 100 * 4 / 7, w2 = 100 * 2 / 7, w3 = 100 * 1 / 7
+        const INV7_100: f64 = 100.0 / 7.0;
+        let w1 = INV7_100 * 4.0;
+        let w2 = INV7_100 * 2.0;
+        let w3 = INV7_100 * 1.0;
+
+        Ok(Self {
             params,
             cmtl_buf: vec![0.0; max_period],
             tr_buf: vec![0.0; max_period],
+
             sum1_a: 0.0,
             sum1_b: 0.0,
             sum2_a: 0.0,
             sum2_b: 0.0,
             sum3_a: 0.0,
             sum3_b: 0.0,
+
             buffer_idx: 0,
+            count: 0,
+
             max_period,
             p1,
             p2,
             p3,
-            initialized: false,
+
+            w1,
+            w2,
+            w3,
             prev_close: None,
         })
     }
 
+    #[inline(always)]
+    fn idx_minus(&self, k: usize) -> usize {
+        // (buffer_idx + max_period - k) % max_period
+        let mut j = self.buffer_idx + self.max_period - k;
+        if j >= self.max_period {
+            j -= self.max_period;
+        }
+        j
+    }
+
+    /// Push one bar; returns Some(ultosc) once the largest window is filled, None otherwise.
+    #[inline]
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
-        if high.is_nan() || low.is_nan() || close.is_nan() {
+        // We need a previous close to form the first pair.
+        let prev_close = match self.prev_close {
+            Some(pc) => pc,
+            None => {
+                self.prev_close = Some(close);
+                return None; // warmup: no previous close yet
+            }
+        };
+
+        // Match scalar semantics: if any of hi/lo/ci/prev_c is NaN, this bar contributes zeros
+        // but the ring still advances and windows still evict.
+        let valid = !(high.is_nan() | low.is_nan() | close.is_nan() | prev_close.is_nan());
+
+        // Compute today's (CMTL, TR) or zeros when invalid.
+        let (c_new, t_new) = if valid {
+            // CMTL = close - true_low, true_low = min(low, prev_close)
+            let true_low = if low < prev_close { low } else { prev_close };
+
+            // TR = max( high - low, |high - prev_close|, |low - prev_close| )
+            // (Equivalent to Wilder's true range via true-high/true-low.)
+            let base = high - low;
+            let d1 = (high - prev_close).abs();
+            let d2 = (low - prev_close).abs();
+            let tr = if d1 > base {
+                if d2 > d1 { d2 } else { d1 }
+            } else {
+                if d2 > base { d2 } else { base }
+            };
+
+            (close - true_low, tr)
+        } else {
+            (0.0, 0.0)
+        };
+
+        // Evict oldest contributions for each window (only once the window is full).
+        if self.count >= self.p1 {
+            let j = self.idx_minus(self.p1);
+            self.sum1_a -= self.cmtl_buf[j];
+            self.sum1_b -= self.tr_buf[j];
+        }
+        if self.count >= self.p2 {
+            let j = self.idx_minus(self.p2);
+            self.sum2_a -= self.cmtl_buf[j];
+            self.sum2_b -= self.tr_buf[j];
+        }
+        if self.count >= self.p3 {
+            let j = self.idx_minus(self.p3);
+            self.sum3_a -= self.cmtl_buf[j];
+            self.sum3_b -= self.tr_buf[j];
+        }
+
+        // Overwrite ring slot with today's values…
+        self.cmtl_buf[self.buffer_idx] = c_new;
+        self.tr_buf[self.buffer_idx] = t_new;
+
+        // …and add them to all three rolling sums (adding zeros when invalid is a no-op).
+        self.sum1_a += c_new;
+        self.sum1_b += t_new;
+        self.sum2_a += c_new;
+        self.sum2_b += t_new;
+        self.sum3_a += c_new;
+        self.sum3_b += t_new;
+
+        // Advance ring & counters
+        self.buffer_idx += 1;
+        if self.buffer_idx == self.max_period {
+            self.buffer_idx = 0;
+        }
+        self.count += 1;
+
+        // Update previous close after consuming the bar (even if it's NaN)
+        self.prev_close = Some(close);
+
+        // Not enough bars yet to output
+        if self.count < self.max_period {
             return None;
         }
 
-        if let Some(prev_close) = self.prev_close {
-            // Calculate true range and close minus true low
-            let true_low = low.min(prev_close);
-            let mut true_range = high - low;
-            let diff1 = (high - prev_close).abs();
-            if diff1 > true_range {
-                true_range = diff1;
-            }
-            let diff2 = (low - prev_close).abs();
-            if diff2 > true_range {
-                true_range = diff2;
-            }
+        // Ratios via reciprocal multiply + FMA chain (same as scalar path)
+        let t1 = if self.sum1_b != 0.0 { self.sum1_a * self.sum1_b.recip() } else { 0.0 };
+        let t2 = if self.sum2_b != 0.0 { self.sum2_a * self.sum2_b.recip() } else { 0.0 };
+        let t3 = if self.sum3_b != 0.0 { self.sum3_a * self.sum3_b.recip() } else { 0.0 };
 
-            let cmtl_val = close - true_low;
-            let tr_val = true_range;
-
-            // Update circular buffers
-            self.cmtl_buf[self.buffer_idx] = cmtl_val;
-            self.tr_buf[self.buffer_idx] = tr_val;
-
-            if !self.initialized {
-                // Prime the sums during warmup
-                self.sum1_a += cmtl_val;
-                self.sum1_b += tr_val;
-                self.sum2_a += cmtl_val;
-                self.sum2_b += tr_val;
-                self.sum3_a += cmtl_val;
-                self.sum3_b += tr_val;
-
-                // Check if we've filled the largest period
-                if self.buffer_idx + 1 >= self.max_period {
-                    self.initialized = true;
-
-                    // Adjust sums to their correct window sizes
-                    self.sum1_a = 0.0;
-                    self.sum1_b = 0.0;
-                    self.sum2_a = 0.0;
-                    self.sum2_b = 0.0;
-                    self.sum3_a = 0.0;
-                    self.sum3_b = 0.0;
-
-                    for i in 0..self.p1 {
-                        let idx =
-                            (self.buffer_idx + self.max_period + 1 - self.p1 + i) % self.max_period;
-                        self.sum1_a += self.cmtl_buf[idx];
-                        self.sum1_b += self.tr_buf[idx];
-                    }
-
-                    for i in 0..self.p2 {
-                        let idx =
-                            (self.buffer_idx + self.max_period + 1 - self.p2 + i) % self.max_period;
-                        self.sum2_a += self.cmtl_buf[idx];
-                        self.sum2_b += self.tr_buf[idx];
-                    }
-
-                    for i in 0..self.p3 {
-                        let idx =
-                            (self.buffer_idx + self.max_period + 1 - self.p3 + i) % self.max_period;
-                        self.sum3_a += self.cmtl_buf[idx];
-                        self.sum3_b += self.tr_buf[idx];
-                    }
-                }
-            } else {
-                // We're initialized, maintain rolling sums
-
-                // Add new values
-                self.sum1_a += cmtl_val;
-                self.sum1_b += tr_val;
-                self.sum2_a += cmtl_val;
-                self.sum2_b += tr_val;
-                self.sum3_a += cmtl_val;
-                self.sum3_b += tr_val;
-
-                // Remove old values
-                let old_idx_1 = (self.buffer_idx + self.max_period + 1 - self.p1) % self.max_period;
-                self.sum1_a -= self.cmtl_buf[old_idx_1];
-                self.sum1_b -= self.tr_buf[old_idx_1];
-
-                let old_idx_2 = (self.buffer_idx + self.max_period + 1 - self.p2) % self.max_period;
-                self.sum2_a -= self.cmtl_buf[old_idx_2];
-                self.sum2_b -= self.tr_buf[old_idx_2];
-
-                let old_idx_3 = (self.buffer_idx + self.max_period + 1 - self.p3) % self.max_period;
-                self.sum3_a -= self.cmtl_buf[old_idx_3];
-                self.sum3_b -= self.tr_buf[old_idx_3];
-            }
-
-            // Advance circular buffer index
-            self.buffer_idx = (self.buffer_idx + 1) % self.max_period;
-
-            if self.initialized {
-                // Calculate ULTOSC
-                let v1 = if self.sum1_b != 0.0 {
-                    4.0 * (self.sum1_a / self.sum1_b)
-                } else {
-                    0.0
-                };
-                let v2 = if self.sum2_b != 0.0 {
-                    2.0 * (self.sum2_a / self.sum2_b)
-                } else {
-                    0.0
-                };
-                let v3 = if self.sum3_b != 0.0 {
-                    self.sum3_a / self.sum3_b
-                } else {
-                    0.0
-                };
-                let ultosc_val = 100.0 * (v1 + v2 + v3) / 7.0;
-                self.prev_close = Some(close);
-                return Some(ultosc_val);
-            }
-        }
-
-        self.prev_close = Some(close);
-        None
+        let acc = f64::mul_add(self.w2, t2, self.w3 * t3);
+        Some(f64::mul_add(self.w1, t1, acc))
     }
 }
 

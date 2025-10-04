@@ -18,7 +18,7 @@
 //! - SIMD (single-series): kept as stubs delegating to scalar; rolling deps limit wins. Documented choice per guide.
 //! - Scalar fast paths: SMA path is O(1) with rolling sums; EMA path optimized to O(1) using window sums and EMA-based MSE. Hot loops use FMA (`mul_add`) and unchecked indexing to eliminate bounds checks.
 //! - Batch (row-specific): SMA+stddev path shares prefix sums and uses AVX2/AVX512 for base/scale copy; selected at runtime.
-//! - Streaming: current implementation is O(n) per update; future work could maintain rolling stats to avoid temporaries.
+//! - Streaming: O(1) for devtype==0 with SMA/EMA/WMA using ring-buffer + rolling stats; otherwise falls back to O(n) slow path for correctness.
 
 #[cfg(feature = "cuda")]
 use crate::cuda::{CudaZscore, CudaZscoreError};
@@ -570,29 +570,73 @@ pub unsafe fn zscore_avx512_long(
     zscore_scalar(data, period, first, ma_type, nbdev, devtype)
 }
 
+/// Streaming kernel decision: O(1) for SMA/EMA/WMA with stddev; otherwise fall back to slow path for exactness.
 #[derive(Debug, Clone)]
 pub struct ZscoreStream {
+    // config
     period: usize,
     ma_type: String,
     nbdev: f64,
     devtype: usize,
+
+    // ring buffer
     buffer: Vec<f64>,
     head: usize,
     filled: bool,
+
+    // O(1) state for devtype==0 (stddev)
+    // uniform window sums
+    sum: f64,
+    sum2: f64,
+    // WMA rolling weighted sum (weights 1..n, newest has weight n)
+    wsum: f64,
+
+    // EMA state
+    ema: f64,
+    ema_inited: bool,
+
+    // NaN tracking (any NaN in window -> z = NaN)
+    nan_count: usize,
+
+    // precomputed constants
+    inv_period: f64,
+    wma_denom: f64,
+    inv_wma_denom: f64,
+    inv_nbdev: f64,
+
+    // parsed MA kind to avoid per-tick string compares
+    kind: MaKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MaKind {
+    Sma,
+    Ema,
+    Wma,
+    Other,
 }
 
 impl ZscoreStream {
     pub fn try_new(params: ZscoreParams) -> Result<Self, ZscoreError> {
         let period = params.period.unwrap_or(14);
         if period == 0 {
-            return Err(ZscoreError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(ZscoreError::InvalidPeriod { period, data_len: 0 });
         }
         let ma_type = params.ma_type.unwrap_or_else(|| "sma".to_string());
         let nbdev = params.nbdev.unwrap_or(1.0);
         let devtype = params.devtype.unwrap_or(0);
+
+        let kind = match ma_type.to_ascii_lowercase().as_str() {
+            "sma" => MaKind::Sma,
+            "ema" => MaKind::Ema,
+            "wma" => MaKind::Wma,
+            _ => MaKind::Other,
+        };
+
+        let n = period as f64;
+        let wden = n * (n + 1.0) * 0.5;
+        let inv_nbdev = if nbdev != 0.0 { 1.0 / nbdev } else { f64::INFINITY };
+
         Ok(Self {
             period,
             ma_type,
@@ -601,34 +645,139 @@ impl ZscoreStream {
             buffer: vec![f64::NAN; period],
             head: 0,
             filled: false,
+
+            sum: 0.0,
+            sum2: 0.0,
+            wsum: 0.0,
+
+            ema: 0.0,
+            ema_inited: false,
+
+            nan_count: period, // buffer seeded with NaNs
+
+            inv_period: 1.0 / n,
+            wma_denom: wden,
+            inv_wma_denom: 1.0 / wden,
+            inv_nbdev,
+            kind,
         })
     }
 
+    /// Push a value; return z-score once the window is full.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
+        // Evict oldest, insert newest in ring
+        let old = self.buffer[self.head];
         self.buffer[self.head] = value;
         self.head = (self.head + 1) % self.period;
-        if !self.filled && self.head == 0 {
+        let just_filled = !self.filled && self.head == 0;
+        if just_filled {
             self.filled = true;
         }
-        if !self.filled {
-            return None;
+
+        // NaN bookkeeping (uniform: any NaN in window => z = NaN)
+        if old.is_nan() {
+            self.nan_count = self.nan_count.saturating_sub(1);
         }
-        Some(self.compute_zscore())
+        if value.is_nan() {
+            self.nan_count += 1;
+        }
+
+        // Before sums change, store previous sum for WMA recurrence
+        let sum_prev = self.sum;
+
+        // Update uniform window sums ignoring NaNs (they simply don't contribute)
+        let old_c = if old.is_nan() { 0.0 } else { old };
+        let new_c = if value.is_nan() { 0.0 } else { value };
+
+        self.sum = self.sum + new_c - old_c;
+        self.sum2 = self.sum2 + new_c * new_c - old_c * old_c;
+
+        // WMA weighted-sum update (weights shift by -1; newest gets weight n)
+        // s2' = s2 - s1_old + n * new
+        self.wsum = self.wsum - sum_prev + (self.period as f64) * new_c;
+
+        if !self.filled {
+            return None; // warmup
+        }
+
+        // devtype==0 fast-paths; otherwise use the slow but correct path
+        if self.devtype == 0 && self.nbdev != 0.0 && self.nan_count == 0 {
+            // pick mean based on MA kind
+            let mean = match self.kind {
+                MaKind::Sma => {
+                    // SMA: μ = E[x]
+                    self.sum * self.inv_period
+                }
+                MaKind::Ema => {
+                    // EMA seed: first full window uses SMA; then EMA updates each tick
+                    if !self.ema_inited {
+                        self.ema = self.sum * self.inv_period;
+                        self.ema_inited = true;
+                        self.ema
+                    } else {
+                        let alpha = 2.0 / ((self.period as f64) + 1.0); // α = 2/(n+1)
+                        self.ema = self.ema.mul_add(1.0 - alpha, alpha * new_c);
+                        self.ema
+                    }
+                }
+                MaKind::Wma => {
+                    // WMA mean with linear weights (1..n), newest has weight n
+                    self.wsum * self.inv_wma_denom
+                }
+                MaKind::Other => {
+                    // Not optimized in O(1)
+                    return Some(self.compute_zscore_slow());
+                }
+            };
+
+            // population variance / MSE around chosen mean
+            let ex = self.sum * self.inv_period;
+            let ex2 = self.sum2 * self.inv_period;
+
+            let var = if self.kind == MaKind::Sma {
+                let v = ex2 - mean * mean;
+                if v < 0.0 { 0.0 } else { v }
+            } else {
+                let v = ex2 - 2.0 * mean * ex + mean * mean;
+                if v < 0.0 { 0.0 } else { v }
+            };
+
+            let sd = var.sqrt();
+            if sd == 0.0 || !sd.is_finite() {
+                return Some(f64::NAN);
+            }
+
+            // latest value is the one just written (at head-1)
+            let last_idx = if self.head == 0 { self.period - 1 } else { self.head - 1 };
+            let last = self.buffer[last_idx];
+            let z = (last - mean) / (sd * self.nbdev);
+            return Some(z);
+        }
+
+        // Fallback: non-stddev, nbdev==0, NaNs in window, or unknown ma_type
+        Some(self.compute_zscore_slow())
     }
 
+    /// Former O(n) path preserved for correctness in non-fast cases.
+    /// It recreates the ordered window and delegates to `ma()` + `deviation()`.
     #[inline(always)]
-    fn compute_zscore(&self) -> f64 {
+    fn compute_zscore_slow(&self) -> f64 {
+        // Reconstruct the window in time order [oldest..newest]
         let mut ordered = vec![0.0; self.period];
         let mut idx = self.head;
         for i in 0..self.period {
             ordered[i] = self.buffer[idx];
             idx = (idx + 1) % self.period;
         }
+
+        // mean from requested MA type
         let means = match ma(&self.ma_type, MaData::Slice(&ordered), self.period) {
             Ok(m) => m,
             Err(_) => return f64::NAN,
         };
+
+        // deviation per requested devtype
         let dev_input = DevInput {
             data: DeviationData::Slice(&ordered),
             params: DevParams {
@@ -643,6 +792,7 @@ impl ZscoreStream {
         for s in &mut sigmas {
             *s *= self.nbdev;
         }
+
         let mean = means[self.period - 1];
         let sigma = sigmas[self.period - 1];
         let value = ordered[self.period - 1];

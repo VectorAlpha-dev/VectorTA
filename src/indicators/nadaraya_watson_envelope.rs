@@ -840,17 +840,25 @@ pub unsafe fn nadaraya_watson_envelope_into_slices_avx512(
 }
 
 // ==================== STREAMING SUPPORT ====================
+// Decision: exact O(L) streaming with double-buffer ring and reversed weights.
+// Approximate O(1) streaming is not enabled to keep exactness.
 pub struct NweStream {
     lookback: usize,
-    weights: Vec<f64>,
-    den: f64,
 
-    // price ring
-    ring: Vec<f64>,
+    // Precomputed Gaussian weights (forward) and reversed for contiguous dot
+    weights: Vec<f64>,
+    w_rev: Vec<f64>,
+    den: f64,
+    inv_den: f64,
+
+    // Price rings
+    ring: Vec<f64>,  // logical ring
+    ring2: Vec<f64>, // mirrored buffer to avoid modulo in dot
+
     head: usize,
     filled: bool,
 
-    // residual ring for MAE
+    // Residual MAE(499) state
     mae_len: usize,
     resid_ring: Vec<f64>,
     resid_head: usize,
@@ -859,6 +867,7 @@ pub struct NweStream {
     resid_nan_count: usize,
 
     multiplier: f64,
+    mae_scale: f64, // = multiplier / mae_len
 }
 
 impl NweStream {
@@ -879,68 +888,87 @@ impl NweStream {
             return Err(NweError::InvalidLookback { lookback });
         }
 
+        // Precompute forward weights and denominator
         let mut weights = vec![0.0; lookback];
+        let mut den = 0.0;
         for k in 0..lookback {
-            weights[k] = gaussian_kernel(k as f64, bandwidth);
+            let wk = (-(k as f64) * (k as f64) / (2.0 * bandwidth * bandwidth)).exp();
+            weights[k] = wk;
+            den += wk;
         }
-        let den: f64 = weights.iter().sum();
+        // Reversed order for contiguous dot against oldest..newest window
+        let mut w_rev = vec![0.0; lookback];
+        for i in 0..lookback {
+            w_rev[i] = weights[lookback - 1 - i];
+        }
+        let inv_den = 1.0 / den;
+
+        let nan = f64::NAN;
 
         Ok(Self {
             lookback,
             weights,
+            w_rev,
             den,
-            ring: vec![f64::NAN; lookback],
+            inv_den,
+
+            ring: vec![nan; lookback],
+            ring2: vec![nan; 2 * lookback],
+
             head: 0,
             filled: false,
+
             mae_len: 499,
-            resid_ring: vec![f64::NAN; 499],
+            resid_ring: vec![nan; 499],
             resid_head: 0,
             resid_filled: false,
             resid_sum: 0.0,
-            resid_nan_count: 499, // start as all NaN
+            resid_nan_count: 499, // start as all NaN (not yet filled)
+
             multiplier,
+            mae_scale: if 499 > 0 { multiplier / 499.0 } else { 0.0 },
         })
     }
 
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<(f64, f64)> {
-        // push price into ring
-        self.ring[self.head] = value;
-        self.head = (self.head + 1) % self.lookback;
-        if !self.filled && self.head == 0 {
+        // Push into ring and mirror buffer
+        let pos = self.head;
+        self.ring[pos] = value;
+        self.ring2[pos] = value;
+        self.ring2[pos + self.lookback] = value;
+
+        // Advance head
+        self.head = pos + 1;
+        if self.head == self.lookback {
+            self.head = 0;
             self.filled = true;
         }
 
-        // endpoint regression when filled
+        // Endpoint regression when filled
         let y = if self.filled {
-            let mut num = 0.0;
-            for k in 0..self.lookback {
-                // newest at head-1 maps to weights[0]
-                let idx = (self.head + self.lookback - 1 - k) % self.lookback;
-                let x = self.ring[idx];
+            let slice = &self.ring2[self.head..self.head + self.lookback]; // oldest..newest
+            let w = &self.w_rev;                                           // reversed weights
+
+            let mut acc = 0.0;
+            let mut any_nan = false;
+            for i in 0..self.lookback {
+                let x = slice[i];
                 if x.is_nan() {
-                    num = f64::NAN;
+                    any_nan = true;
                     break;
                 }
-                num += x * self.weights[k];
+                acc = x.mul_add(w[i], acc);
             }
-            if num.is_nan() {
-                f64::NAN
-            } else {
-                num / self.den
-            }
+            if any_nan { f64::NAN } else { acc * self.inv_den }
         } else {
             f64::NAN
         };
 
-        // update residual ring
-        let resid = if !value.is_nan() && !y.is_nan() {
-            (value - y).abs()
-        } else {
-            f64::NAN
-        };
+        // Update residual ring for MAE(499)
+        let resid = if !value.is_nan() && !y.is_nan() { (value - y).abs() } else { f64::NAN };
 
-        // remove old
+        // Remove old at head
         let old = self.resid_ring[self.resid_head];
         if old.is_nan() {
             self.resid_nan_count = self.resid_nan_count.saturating_sub(1);
@@ -948,7 +976,7 @@ impl NweStream {
             self.resid_sum -= old;
         }
 
-        // insert new
+        // Insert new
         self.resid_ring[self.resid_head] = resid;
         if resid.is_nan() {
             self.resid_nan_count += 1;
@@ -956,13 +984,14 @@ impl NweStream {
             self.resid_sum += resid;
         }
 
-        self.resid_head = (self.resid_head + 1) % self.mae_len;
-        if !self.resid_filled && self.resid_head == 0 {
+        self.resid_head += 1;
+        if self.resid_head == self.mae_len {
+            self.resid_head = 0;
             self.resid_filled = true;
         }
 
         if self.filled && self.resid_filled && self.resid_nan_count == 0 && !y.is_nan() {
-            let mae = (self.resid_sum / (self.mae_len as f64)) * self.multiplier;
+            let mae = self.resid_sum * self.mae_scale; // (sum/499)*multiplier
             Some((y + mae, y - mae))
         } else {
             None
@@ -970,10 +999,13 @@ impl NweStream {
     }
 
     pub fn reset(&mut self) {
-        self.ring.fill(f64::NAN);
+        let nan = f64::NAN;
+        self.ring.fill(nan);
+        self.ring2.fill(nan);
         self.head = 0;
         self.filled = false;
-        self.resid_ring.fill(f64::NAN);
+
+        self.resid_ring.fill(nan);
         self.resid_head = 0;
         self.resid_filled = false;
         self.resid_sum = 0.0;

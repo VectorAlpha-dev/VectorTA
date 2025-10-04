@@ -15,6 +15,7 @@
 //! - SIMD enabled (AVX2/AVX512): vectorizes initial accumulation; rolling core remains scalar.
 //! - Streaming update: O(1) via two rolling sums; no full-size temporaries.
 //! - Memory: uses zero-copy helpers for outputs; tiny O(period) ring buffer only.
+//! - Decision: Streaming kernel tightened (no modulo; precomputed reciprocals; NaN semantics preserved).
 //! - Rationale: TRIMA = SMA(SMA(x, m1), m2); SIMD helps initial sums; main loop is sequential.
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
@@ -872,33 +873,36 @@ pub unsafe fn trima_row_avx512_long(
 
 #[derive(Debug, Clone)]
 pub struct TrimaStream {
-    // the overall TRIMA period
+    // Overall TRIMA period and split into two passes
     period: usize,
-    // the two intermediate SMA window‐sizes
     m1: usize,
     m2: usize,
 
-    // first SMA window
-    buffer1: Vec<f64>,
+    // Precomputed reciprocals to avoid per-tick division
+    inv_m1: f64,
+    inv_m2: f64,
+
+    // First SMA ring
+    buf1: Box<[f64]>,
     sum1: f64,
     head1: usize,
     filled1: bool,
 
-    // second SMA window
-    buffer2: Vec<f64>,
+    // Second SMA ring (over SMA1)
+    buf2: Box<[f64]>,
     sum2: f64,
     head2: usize,
     filled2: bool,
 }
 
 impl TrimaStream {
+    #[inline]
     pub fn try_new(params: TrimaParams) -> Result<Self, TrimaError> {
         let period = params.period.unwrap_or(30);
-        if period == 0 || period <= 3 {
+        if period <= 3 {
             return Err(TrimaError::PeriodTooSmall { period });
         }
-        // compute m₁ and m₂ exactly as in the “two‐pass” formula:
-        //   m₁ = (period+1)/2,    m₂ = period−m₁+1
+        // TRIMA = SMA(SMA(x, m1), m2), where m1+m2-1 = period.
         let m1 = (period + 1) / 2;
         let m2 = period - m1 + 1;
 
@@ -906,64 +910,70 @@ impl TrimaStream {
             period,
             m1,
             m2,
-            buffer1: vec![f64::NAN; m1],
+            inv_m1: 1.0 / (m1 as f64),
+            inv_m2: 1.0 / (m2 as f64),
+
+            // Fill with NaN so early rotations don't subtract (preserve semantics)
+            buf1: vec![f64::NAN; m1].into_boxed_slice(),
             sum1: 0.0,
             head1: 0,
             filled1: false,
-            buffer2: vec![f64::NAN; m2],
+
+            buf2: vec![f64::NAN; m2].into_boxed_slice(),
             sum2: 0.0,
             head2: 0,
             filled2: false,
         })
     }
 
-    /// Feed a single new raw price into the TRIMA‐stream.
-    /// Returns `Some(trima_value)` only once enough data has been seen for both sub‐windows;
-    /// otherwise returns `None` (which the test harness will compare as NaN).
+    /// O(1) streaming update.
+    /// - Returns `None` until both internal windows are fully warmed.
+    /// - Preserves current NaN-handling semantics: NaN inputs do not pollute sums;
+    ///   division denominator stays fixed (m1/m2), matching batch output on finite inputs.
     #[inline(always)]
     pub fn update(&mut self, x: f64) -> Option<f64> {
-        // ──  STEP 1:  Update the m₁‐window (compute first‐stage SMA)  ──
-        let old1 = self.buffer1[self.head1];
-        self.buffer1[self.head1] = x;
-        self.head1 = (self.head1 + 1) % self.m1;
-        if !self.filled1 && self.head1 == 0 {
-            self.filled1 = true;
+        // ---- Pass 1: SMA over x with window m1 ----
+        let old1 = self.buf1[self.head1];
+        self.buf1[self.head1] = x;
+        self.head1 += 1;
+        if self.head1 == self.m1 {
+            self.head1 = 0;
+            self.filled1 = true; // first wrap completes warmup of pass 1
         }
-        // Adjust sum1, always ignoring NaNs:
+
         if !old1.is_nan() {
             self.sum1 -= old1;
         }
         if !x.is_nan() {
             self.sum1 += x;
         }
-        // Once filled1 is true, we can compute SMA₁ = sum1 / m₁:
-        let sma1 = if self.filled1 {
-            Some(self.sum1 / (self.m1 as f64))
-        } else {
-            None
-        };
 
-        // ──  STEP 2:  Once we have an SMA₁, feed it into the m₂‐window (second pass)  ──
-        if let Some(s1) = sma1 {
-            let old2 = self.buffer2[self.head2];
-            self.buffer2[self.head2] = s1;
-            self.head2 = (self.head2 + 1) % self.m2;
-            if !self.filled2 && self.head2 == 0 {
-                self.filled2 = true;
-            }
-            if !old2.is_nan() {
-                self.sum2 -= old2;
-            }
-            if !s1.is_nan() {
-                self.sum2 += s1;
-            }
-            // Once filled2 == true, we can output TRIMA = sum2 / m₂
-            if self.filled2 {
-                return Some(self.sum2 / (self.m2 as f64));
-            }
+        if !self.filled1 {
+            return None; // not enough for the first SMA yet
         }
 
-        None
+        let s1 = self.sum1 * self.inv_m1;
+
+        // ---- Pass 2: SMA over s1 with window m2 ----
+        let old2 = self.buf2[self.head2];
+        self.buf2[self.head2] = s1;
+        self.head2 += 1;
+        if self.head2 == self.m2 {
+            self.head2 = 0;
+            self.filled2 = true; // first wrap completes warmup of pass 2
+        }
+
+        if !old2.is_nan() {
+            self.sum2 -= old2;
+        }
+        // s1 is finite once pass1 is filled; add unconditionally for speed
+        self.sum2 += s1;
+
+        if self.filled2 {
+            Some(self.sum2 * self.inv_m2)
+        } else {
+            None
+        }
     }
 }
 

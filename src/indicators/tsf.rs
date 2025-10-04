@@ -704,12 +704,19 @@ pub struct TsfStream {
     buffer: Vec<f64>,
     head: usize,
     filled: bool,
-    sum_x: f64,
+
+    // precomputed invariants for x = 0..p-1
+    pf: f64,       // p as f64
+    sum_x: f64,    // ∑ x
     sum_x_sqr: f64,
-    divisor: f64,
-    // Sliding-window accumulators when filled
-    s0: f64,
-    s1: f64,
+    divisor: f64,  // p*∑x² - (∑x)²
+
+    // sliding accumulators (when window is clean)
+    s0: f64,       // ∑ y
+    s1: f64,       // ∑ (j*y)
+
+    // counts NaNs currently inside the window (valid only after filled==true)
+    nan_count: usize,
 }
 
 impl TsfStream {
@@ -719,89 +726,162 @@ impl TsfStream {
             return Err(TsfError::PeriodTooSmall { period });
         }
 
-        // Precompute ∑ x and ∑ x² for x = 0..period-1
-        let sum_x = (0..period).map(|x| x as f64).sum::<f64>();
-        let sum_x_sqr = (0..period).map(|x| (x as f64) * (x as f64)).sum::<f64>();
-        let divisor = (period as f64 * sum_x_sqr) - (sum_x * sum_x);
+        // Precompute ∑x and ∑x² for x = 0..period-1 (loop form to mirror scalar path numerics)
+        let pf = period as f64;
+        let mut sum_x = 0.0f64;
+        let mut sum_x_sqr = 0.0f64;
+        for x in 0..period {
+            let xf = x as f64;
+            sum_x += xf;
+            sum_x_sqr += xf * xf;
+        }
+        let divisor = pf * sum_x_sqr - (sum_x * sum_x);
 
         Ok(Self {
             period,
             buffer: vec![f64::NAN; period],
             head: 0,
             filled: false,
+            pf,
             sum_x,
             sum_x_sqr,
             divisor,
             s0: 0.0,
             s1: 0.0,
+            nan_count: 0,
         })
     }
 
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        let pf = self.period as f64;
-
-        // Not filled yet: insert and wait until full, then initialize sums from ring
+        // 1) Warmup: fill the ring; when full, initialize sums once and return first forecast
         if !self.filled {
             self.buffer[self.head] = value;
-            self.head = (self.head + 1) % self.period;
+            self.advance_head();
             if self.head == 0 {
                 self.filled = true;
-                // Initialize s0/s1 from ring contents
-                let (s0, s1) = self.recompute_from_ring();
+
+                // Compute S0/S1 once from ring and initialize nan_count.
+                let (s0, s1, nan_count) = self.recompute_from_ring_checked();
                 self.s0 = s0;
                 self.s1 = s1;
-                let m = (pf * self.s1 - self.sum_x * self.s0) / self.divisor;
-                let b = (self.s0 - m * self.sum_x) / pf;
-                return Some(b + m * pf);
+                self.nan_count = nan_count;
+
+                if self.nan_count > 0 || !self.s0.is_finite() || !self.s1.is_finite() {
+                    return Some(f64::NAN);
+                }
+
+                // First forecast after warmup: forecast = b + m*pf
+                let m = (self.pf * self.s1 - self.sum_x * self.s0) / self.divisor;
+                let b = (self.s0 - m * self.sum_x) / self.pf;
+                return Some(b + m * self.pf);
             }
             return None;
         }
 
-        // Filled: slide window in O(1) when finite, otherwise recompute from ring
-        let y_old = self.buffer[self.head]; // oldest element
+        // 2) Steady state: slide the window by one.
+        let y_old = self.buffer[self.head];
         let y_new = value;
-
-        // Replace oldest with new value in the ring
         self.buffer[self.head] = y_new;
 
-        if self.s0.is_finite() && self.s1.is_finite() && y_old.is_finite() && y_new.is_finite() {
-            // Fast O(1) update
-            let new_s0 = self.s0 + (y_new - y_old);
-            let new_s1 = pf * y_new + self.s1 - new_s0;
-            self.s0 = new_s0;
-            self.s1 = new_s1;
-        } else {
-            // Recover by recomputing sums from the ring
-            let (s0, s1) = self.recompute_from_ring();
-            self.s0 = s0;
-            self.s1 = s1;
+        // Maintain NaN count in O(1).
+        let prev_nan_count = self.nan_count;
+        if y_old.is_nan() {
+            self.nan_count = self.nan_count.saturating_sub(1);
+        }
+        if y_new.is_nan() {
+            self.nan_count = self.nan_count.saturating_add(1);
         }
 
-        // Advance head to the next oldest slot
-        self.head = (self.head + 1) % self.period;
+        let out = if self.nan_count == 0 {
+            // Window is clean now.
+            if prev_nan_count == 0
+                && self.s0.is_finite()
+                && self.s1.is_finite()
+                && y_old.is_finite()
+                && y_new.is_finite()
+            {
+                // O(1) update for S0 and S1
+                let new_s0 = self.s0 + (y_new - y_old);
+                // S1' = S1 + p*y_new - S0'   (with j=0..p-1 indexing)
+                let new_s1 = self.pf * y_new + self.s1 - new_s0;
+                self.s0 = new_s0;
+                self.s1 = new_s1;
+            } else {
+                // Window just became clean (or state was contaminated): one O(p) recovery.
+                let (s0, s1) = self.recompute_from_ring_clean();
+                self.s0 = s0;
+                self.s1 = s1;
+            }
 
-        let m = (pf * self.s1 - self.sum_x * self.s0) / self.divisor;
-        let b = (self.s0 - m * self.sum_x) / pf;
-        Some(b + m * pf)
+            // Forecast = b + m*pf with standard OLS closed form
+            let m = (self.pf * self.s1 - self.sum_x * self.s0) / self.divisor;
+            let b = (self.s0 - m * self.sum_x) / self.pf;
+            b + m * self.pf
+        } else {
+            // Window contains at least one NaN → forecast is NaN; keep S0/S1 in a poisoned state.
+            self.s0 = f64::NAN;
+            self.s1 = f64::NAN;
+            f64::NAN
+        };
+
+        self.advance_head();
+        Some(out)
     }
 
     #[inline(always)]
-    fn recompute_from_ring(&self) -> (f64, f64) {
-        // Recompute S0, S1 across the ring starting at the oldest element (head)
-        let mut s0 = 0.0f64;
-        let mut s1 = 0.0f64;
+    fn advance_head(&mut self) {
+        // Branchy wrap avoids a modulo in the hot path.
+        self.head += 1;
+        if self.head == self.period {
+            self.head = 0;
+        }
+    }
+
+    // Recompute assuming the window is clean (no NaNs) – faster than the checked version.
+    #[inline(always)]
+    fn recompute_from_ring_clean(&self) -> (f64, f64) {
+        let mut s0 = 0.0;
+        let mut s1 = 0.0;
+        let mut idx = self.head;
+        for j in 0..self.period {
+            let v = self.buffer[idx];
+            // under contract: no NaNs here
+            s0 += v;
+            s1 += (j as f64) * v;
+            idx += 1;
+            if idx == self.period {
+                idx = 0;
+            }
+        }
+        (s0, s1)
+    }
+
+    // Recompute with NaN detection; returns (S0,S1,nan_count).
+    #[inline(always)]
+    fn recompute_from_ring_checked(&self) -> (f64, f64, usize) {
+        let mut s0 = 0.0;
+        let mut s1 = 0.0;
+        let mut cnt = 0usize;
         let mut idx = self.head;
         for j in 0..self.period {
             let v = self.buffer[idx];
             if v.is_nan() {
-                return (f64::NAN, f64::NAN);
+                cnt += 1;
+            } else {
+                s0 += v;
+                s1 += (j as f64) * v;
             }
-            s0 += v;
-            s1 += (j as f64) * v;
-            idx = (idx + 1) % self.period;
+            idx += 1;
+            if idx == self.period {
+                idx = 0;
+            }
         }
-        (s0, s1)
+        if cnt > 0 {
+            (f64::NAN, f64::NAN, cnt)
+        } else {
+            (s0, s1, 0)
+        }
     }
 }
 

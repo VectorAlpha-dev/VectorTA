@@ -494,118 +494,120 @@ pub unsafe fn fosc_avx512_long(data: &[f64], period: usize, first: usize, out: &
 
 // --------- Streaming (Stateful) ---------
 
+// Decision: Streaming uses O(1) sliding OLS updates and the previous bar's forecast
+// to match scalar semantics exactly. SIMD underperforms; scalar remains reference.
+
 #[derive(Debug, Clone)]
 pub struct FoscStream {
     period: usize,
     buffer: Vec<f64>,
-    idx: usize, // Circular buffer index
+    idx: usize,     // circular write index (points to oldest)
     filled: bool,
-    x: f64,  // Sum of x values (constant for fixed window)
-    x2: f64, // Sum of x^2 values (constant for fixed window)
-    y: f64,  // Running sum of y values
-    xy: f64, // Running sum of x*y values
+
+    // OLS invariants for x = 1..=p
+    x: f64,         // sum i
+    x2: f64,        // sum i^2
+    inv_den: f64,   // 1 / (p*x2 - x*x)
+    inv_p: f64,     // 1 / p
+    p_f64: f64,     // p as f64
+    p1: f64,        // p + 1
+
+    // Running window stats (full window once filled)
+    y: f64,         // sum y_i
+    xy: f64,        // sum i*y_i (i=1 oldest .. p newest)
+
+    // Forecast for next bar computed from the current window
+    // (used on the next update to match scalar semantics)
     tsf: f64,
-    count: usize, // Number of values added so far
+
+    count: usize,
 }
 
 impl FoscStream {
     pub fn try_new(params: FoscParams) -> Result<Self, FoscError> {
         let period = params.period.unwrap_or(5);
         if period == 0 {
-            return Err(FoscError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(FoscError::InvalidPeriod { period, data_len: 0 });
         }
-        let mut x = 0.0;
-        let mut x2 = 0.0;
-        for i in 0..period {
-            let xi = (i + 1) as f64;
-            x += xi;
-            x2 += xi * xi;
-        }
+        let p = period as f64;
+        // Closed forms for Σi and Σi^2 to avoid loops
+        let x  = 0.5 * p * (p + 1.0);
+        let x2 = (p * (p + 1.0) * (2.0 * p + 1.0)) / 6.0;  // p(p+1)(2p+1)/6
+        let den = p * x2 - x * x;
+        let inv_den = if den.abs() < f64::EPSILON { 0.0 } else { 1.0 / den };
+
         Ok(Self {
             period,
-            buffer: vec![f64::NAN; period],
+            buffer: vec![0.0; period],
             idx: 0,
             filled: false,
+
             x,
             x2,
+            inv_den,
+            inv_p: 1.0 / p,
+            p_f64: p,
+            p1: p + 1.0,
+
             y: 0.0,
             xy: 0.0,
             tsf: 0.0,
             count: 0,
         })
     }
+
+    /// Streaming update in O(1).
+    /// Returns None during warmup; thereafter returns the Forecast Oscillator
+    /// using the previous one-step-ahead linear regression forecast
+    /// (matches the scalar/batch semantics).
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        // During warmup phase
+        // Warmup: build the initial window (no outputs yet)
         if self.count < self.period {
             self.buffer[self.idx] = value;
+            self.y  += value;
+            self.xy += value * (self.count as f64 + 1.0);
 
-            // Update running sums
-            self.y += value;
-            self.xy += value * ((self.count + 1) as f64);
-
-            self.idx = (self.idx + 1) % self.period;
+            // advance ring index without modulo
+            self.idx += 1;
+            if self.idx == self.period { self.idx = 0; }
             self.count += 1;
 
             if self.count == self.period {
                 self.filled = true;
+
+                // Prepare the very first forecast for the next tick
+                let b = (self.p_f64.mul_add(self.xy, -self.x * self.y)) * self.inv_den; // (p*xy - x*y)/den
+                let a = (self.y - b * self.x) * self.inv_p;
+                self.tsf = b.mul_add(self.p1, a); // forecast for next bar
             }
             return None;
         }
 
-        // After warmup - use circular buffer
-        let old_value = self.buffer[self.idx];
-        self.buffer[self.idx] = value;
-
-        // Update running sums incrementally
-        // For xy, we need to adjust for the circular nature
-        // When we remove old_value, it was at position 1 in the window
-        // When we add new value, it's at position period
-        if !old_value.is_nan() {
-            self.y -= old_value;
-            // Recalculate xy by removing old contribution
-            let mut xy_temp = 0.0;
-            for i in 0..self.period {
-                let buf_idx = (self.idx + i + 1) % self.period;
-                let xi = (i + 1) as f64;
-                xy_temp += self.buffer[buf_idx] * xi;
-            }
-            self.xy = xy_temp;
-        }
-
-        if !value.is_nan() {
-            self.y += value;
-        }
-
-        self.idx = (self.idx + 1) % self.period;
-
-        if !self.filled {
-            return None;
-        }
-
-        // Calculate linear regression parameters
-        let p = 1.0 / (self.period as f64);
-        let denom = (self.period as f64) * self.x2 - self.x * self.x;
-        let bd = if denom.abs() < f64::EPSILON {
-            0.0
-        } else {
-            1.0 / denom
-        };
-        let b = (self.period as f64 * self.xy - self.x * self.y) * bd;
-        let a = (self.y - b * self.x) * p;
-
-        // Time Series Forecast
-        let tsf = a + b * ((self.period + 1) as f64);
-
-        // Current value is the one we just added
-        let out = if !value.is_nan() && value != 0.0 {
-            100.0 * (value - tsf) / value
+        // From here on we have a full window.
+        // Emit oscillator for current price using the previous forecast.
+        let out = if value.is_finite() && value != 0.0 {
+            // Write as 100 * (1 - tsf/price) to keep a single division
+            100.0 * (1.0 - self.tsf / value)
         } else {
             f64::NAN
         };
+
+        // Slide window: replace oldest with new value
+        let old = self.buffer[self.idx];
+        self.buffer[self.idx] = value;
+        self.idx += 1;
+        if self.idx == self.period { self.idx = 0; }
+
+        // O(1) accumulator updates
+        let y_prev = self.y;
+        self.y  = y_prev - old + value;
+        self.xy = self.xy - y_prev + self.p_f64 * value;
+
+        // Compute forecast for the next bar (used on the next update)
+        let b = (self.p_f64.mul_add(self.xy, -self.x * self.y)) * self.inv_den;
+        let a = (self.y - b * self.x) * self.inv_p;
+        self.tsf = b.mul_add(self.p1, a);
 
         Some(out)
     }

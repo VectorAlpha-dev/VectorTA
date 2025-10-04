@@ -23,6 +23,7 @@
 //! - **Err(AlligatorError)** otherwise
 //!
 //! ## Developer Notes
+//! - Decision: Streaming kernel uses O(1) SMMA recurrence with per-line seeding and optional forward shift; outputs match scalar numerics.
 //! - **AVX2/AVX512 kernels**: Currently stubs calling scalar (AVX512 has conditional dispatch for short/long)
 //! - **Streaming update**: O(1) - maintains three SMMA states with simple update calculations
 //! - **Memory optimization**: Uses `alloc_with_nan_prefix` for zero-copy allocation
@@ -654,29 +655,112 @@ pub unsafe fn alligator_smma_scalar(
     (jaw_smma_val, teeth_smma_val, lips_smma_val)
 }
 
-// Streaming variant for tick-by-tick mode (parity with AlmaStream)
+// Streaming variant for tick-by-tick mode (drop-in; preserves API)
+// Internal helper for one SMMA line (period p, forward offset k).
+#[derive(Debug, Clone)]
+struct Smmaline {
+    // Params
+    period: usize,
+    offset: usize,
+    inv: f64,     // 1.0 / period
+
+    // State
+    seeded: bool, // true once the first SMA seed is complete
+    count: usize, // samples seen during seeding
+    sum: f64,     // running sum used only until seeded
+    value: f64,   // last SMMA value
+
+    // Forward shift (k bars into the future): ring buffer of size = offset
+    off_head: usize,
+    off_filled: bool,
+    off_buf: Vec<f64>,
+}
+
+impl Smmaline {
+    #[inline(always)]
+    fn new(period: usize, offset: usize) -> Self {
+        debug_assert!(period > 0);
+        // Allocate only what's needed for the forward shift.
+        let off_buf = if offset > 0 {
+            // The contents don't matter; we gate on off_filled.
+            vec![0.0_f64; offset]
+        } else {
+            Vec::new()
+        };
+        Self {
+            period,
+            offset,
+            inv: 1.0 / period as f64,
+            seeded: false,
+            count: 0,
+            sum: 0.0,
+            value: f64::NAN,
+            off_head: 0,
+            off_filled: false,
+            off_buf,
+        }
+    }
+
+    // O(1) update that returns the *unshifted* SMMA once the line is seeded.
+    #[inline(always)]
+    fn update_unshifted(&mut self, x: f64) -> Option<f64> {
+        if !self.seeded {
+            // Build the initial SMA seed in O(1) per tick with a running sum.
+            self.sum += x;
+            self.count += 1;
+            if self.count == self.period {
+                self.value = self.sum * self.inv; // SMA seed
+                self.seeded = true;
+                Some(self.value)
+            } else {
+                None
+            }
+        } else {
+            // SMMA recurrence: v += (x - v) / period
+            // Use FMA if available via mul_add.
+            let delta = x - self.value;
+            // self.value = self.value + delta * self.inv;
+            self.value = delta.mul_add(self.inv, self.value);
+            Some(self.value)
+        }
+    }
+
+    // O(1) update that returns the *shifted* (forward) output.
+    // First returns Some after both the seed is ready and the forward queue is "full".
+    #[inline(always)]
+    fn update_shifted(&mut self, x: f64) -> Option<f64> {
+        let y = self.update_unshifted(x)?;
+        if self.offset == 0 {
+            return Some(y);
+        }
+        // Pop from ring only after it has wrapped once.
+        let out = if self.off_filled {
+            Some(self.off_buf[self.off_head])
+        } else {
+            None
+        };
+        self.off_buf[self.off_head] = y;
+        self.off_head += 1;
+        if self.off_head == self.offset {
+            self.off_head = 0;
+            self.off_filled = true;
+        }
+        out
+    }
+
+    #[inline(always)]
+    fn is_seeded(&self) -> bool {
+        self.seeded
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AlligatorStream {
-    jaw_period: usize,
-    jaw_offset: usize,
-    teeth_period: usize,
-    teeth_offset: usize,
-    lips_period: usize,
-    lips_offset: usize,
-    jaw_buf: Vec<f64>,
-    teeth_buf: Vec<f64>,
-    lips_buf: Vec<f64>,
-    jaw_head: usize,
-    teeth_head: usize,
-    lips_head: usize,
-    jaw_filled: bool,
-    teeth_filled: bool,
-    lips_filled: bool,
-    jaw_val: f64,
-    teeth_val: f64,
-    lips_val: f64,
-    idx: usize,
+    jaw: Smmaline,
+    teeth: Smmaline,
+    lips: Smmaline,
 }
+
 impl AlligatorStream {
     pub fn try_new(params: AlligatorParams) -> Result<Self, AlligatorError> {
         let jaw_period = params.jaw_period.unwrap_or(13);
@@ -687,88 +771,47 @@ impl AlligatorStream {
         let lips_offset = params.lips_offset.unwrap_or(3);
 
         if jaw_period == 0 {
-            return Err(AlligatorError::InvalidJawPeriod {
-                period: jaw_period,
-                data_len: 0,
-            });
+            return Err(AlligatorError::InvalidJawPeriod { period: jaw_period, data_len: 0 });
         }
         if teeth_period == 0 {
-            return Err(AlligatorError::InvalidTeethPeriod {
-                period: teeth_period,
-                data_len: 0,
-            });
+            return Err(AlligatorError::InvalidTeethPeriod { period: teeth_period, data_len: 0 });
         }
         if lips_period == 0 {
-            return Err(AlligatorError::InvalidLipsPeriod {
-                period: lips_period,
-                data_len: 0,
-            });
+            return Err(AlligatorError::InvalidLipsPeriod { period: lips_period, data_len: 0 });
         }
 
         Ok(Self {
-            jaw_period,
-            jaw_offset,
-            teeth_period,
-            teeth_offset,
-            lips_period,
-            lips_offset,
-            jaw_buf: vec![f64::NAN; jaw_period],
-            teeth_buf: vec![f64::NAN; teeth_period],
-            lips_buf: vec![f64::NAN; lips_period],
-            jaw_head: 0,
-            teeth_head: 0,
-            lips_head: 0,
-            jaw_filled: false,
-            teeth_filled: false,
-            lips_filled: false,
-            jaw_val: f64::NAN,
-            teeth_val: f64::NAN,
-            lips_val: f64::NAN,
-            idx: 0,
+            jaw:   Smmaline::new(jaw_period,   jaw_offset),
+            teeth: Smmaline::new(teeth_period, teeth_offset),
+            lips:  Smmaline::new(lips_period,  lips_offset),
         })
     }
 
+    /// O(1) tick update.
+    /// Returns unshifted (no forward shift applied) SMMA values once *all three* lines are seeded,
+    /// preserving the original stream behavior/semantics.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<(f64, f64, f64)> {
-        self.idx += 1;
-
-        // Jaw
-        self.jaw_buf[self.jaw_head] = value;
-        self.jaw_head = (self.jaw_head + 1) % self.jaw_period;
-        if !self.jaw_filled && self.jaw_head == 0 {
-            self.jaw_filled = true;
-            self.jaw_val = self.jaw_buf.iter().copied().sum::<f64>() / self.jaw_period as f64;
-        } else if self.jaw_filled {
-            self.jaw_val =
-                (self.jaw_val * (self.jaw_period as f64 - 1.0) + value) / self.jaw_period as f64;
+        let j = self.jaw.update_unshifted(value);
+        let t = self.teeth.update_unshifted(value);
+        let l = self.lips.update_unshifted(value);
+        match (j, t, l) {
+            (Some(jv), Some(tv), Some(lv)) => Some((jv, tv, lv)),
+            _ => None,
         }
+    }
 
-        // Teeth
-        self.teeth_buf[self.teeth_head] = value;
-        self.teeth_head = (self.teeth_head + 1) % self.teeth_period;
-        if !self.teeth_filled && self.teeth_head == 0 {
-            self.teeth_filled = true;
-            self.teeth_val = self.teeth_buf.iter().copied().sum::<f64>() / self.teeth_period as f64;
-        } else if self.teeth_filled {
-            self.teeth_val = (self.teeth_val * (self.teeth_period as f64 - 1.0) + value)
-                / self.teeth_period as f64;
+    /// Optional helper: returns *forward-shifted* outputs matching batch/array semantics.
+    /// First returns Some after each line is seeded *and* its forward offset queue is filled.
+    #[inline(always)]
+    pub fn update_shifted(&mut self, value: f64) -> Option<(f64, f64, f64)> {
+        let j = self.jaw.update_shifted(value);
+        let t = self.teeth.update_shifted(value);
+        let l = self.lips.update_shifted(value);
+        match (j, t, l) {
+            (Some(jv), Some(tv), Some(lv)) => Some((jv, tv, lv)),
+            _ => None,
         }
-
-        // Lips
-        self.lips_buf[self.lips_head] = value;
-        self.lips_head = (self.lips_head + 1) % self.lips_period;
-        if !self.lips_filled && self.lips_head == 0 {
-            self.lips_filled = true;
-            self.lips_val = self.lips_buf.iter().copied().sum::<f64>() / self.lips_period as f64;
-        } else if self.lips_filled {
-            self.lips_val =
-                (self.lips_val * (self.lips_period as f64 - 1.0) + value) / self.lips_period as f64;
-        }
-
-        if self.idx < self.jaw_period.max(self.teeth_period).max(self.lips_period) {
-            return None;
-        }
-        Some((self.jaw_val, self.teeth_val, self.lips_val))
     }
 }
 

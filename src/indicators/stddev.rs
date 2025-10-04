@@ -27,6 +27,7 @@
 //! - Batch SIMD: row-specific AVX2/AVX512 from prefix sums is enabled and faster than scalar by ~5–10% at 100k on a modern x86_64 CPU.
 //! - Streaming parity: scalar path computes variance with the same operation order as the stream (`mean = sum/den; var = sum2/den - mean*mean`) to ensure bitwise consistency in tests.
 //! - Allocation: follows alma.rs patterns (warmup prefix via `alloc_with_nan_prefix`; batch via `make_uninit_matrix`/`init_matrix_prefixes`).
+//! - Streaming kernel: O(1) modulo-free ring buffer; NaN-robust using a `nan_count` window tracker. Emits NaN only while a NaN is inside the window and recovers as soon as it slides out.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
@@ -442,6 +443,7 @@ pub struct StdDevStream {
     filled: bool,
     sum: f64,
     sum_sqr: f64,
+    nan_count: usize, // Track NaNs currently inside the window
 }
 
 impl StdDevStream {
@@ -465,36 +467,98 @@ impl StdDevStream {
             filled: false,
             sum: 0.0,
             sum_sqr: 0.0,
+            nan_count: 0,
         })
     }
 
+    /// O(1) update with NaN-robustness and modulo-free ring advance.
+    ///
+    /// - Maintains rolling sum and sum of squares ignoring NaNs (tracked via `nan_count`).
+    /// - Emits `None` until warmup completes (first `period` values seen).
+    /// - Emits `NaN` if any NaN is inside the current window; recovers once it slides out.
+    /// - Computes variance with the same operation order as the scalar path for parity:
+    ///   mean = sum/den; var = sum2/den - mean*mean.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        if self.filled {
-            let old = self.buffer[self.head];
-            self.sum += value - old;
-            self.sum_sqr += value * value - old * old;
-        } else {
-            self.sum += value;
-            self.sum_sqr += value * value;
-            if self.head + 1 == self.period {
+        // Warmup phase: fill buffer, build sums, first emit at window-full.
+        if !self.filled {
+            if value.is_nan() {
+                self.nan_count += 1;
+            } else {
+                self.sum += value;
+                self.sum_sqr += value * value;
+            }
+            self.buffer[self.head] = value;
+
+            let next = self.head + 1;
+            if next == self.period {
+                // Window becomes full on this tick; emit first value
+                self.head = 0;
                 self.filled = true;
+
+                if self.nan_count > 0 {
+                    return Some(f64::NAN);
+                }
+                let den = self.period as f64;
+                let mean = self.sum / den;
+                let var = (self.sum_sqr / den) - (mean * mean);
+                return Some(if var <= 0.0 { 0.0 } else { var.sqrt() * self.nbdev });
+            } else {
+                self.head = next;
+                return None;
             }
         }
 
-        self.buffer[self.head] = value;
-        self.head = (self.head + 1) % self.period;
+        // Steady state: drop oldest, add newest.
+        let old = self.buffer[self.head];
+        let new_is_nan = value.is_nan();
+        let old_is_nan = old.is_nan();
 
-        if !self.filled {
-            return None;
+        // Update sums with operation order parity when both are finite.
+        match (old_is_nan, new_is_nan) {
+            (false, false) => {
+                // Match original rounding: single add of (new - old)
+                self.sum += value - old;
+                self.sum_sqr += (value * value) - (old * old);
+            }
+            (false, true) => {
+                // Remove only the finite old; add no contribution for NaN new
+                self.sum -= old;
+                self.sum_sqr -= old * old;
+                self.nan_count += 1;
+            }
+            (true, false) => {
+                // Old was NaN; just add the finite new
+                if self.nan_count > 0 { self.nan_count -= 1; }
+                self.sum += value;
+                self.sum_sqr += value * value;
+            }
+            (true, true) => {
+                // NaN slid out and NaN slid in: nan_count unchanged; sums unchanged
+                // Maintain nan_count explicitly
+                // old NaN out
+                if self.nan_count > 0 { self.nan_count -= 1; }
+                // new NaN in
+                self.nan_count += 1;
+            }
         }
-        let mean = self.sum / self.period as f64;
-        let var = (self.sum_sqr / self.period as f64) - (mean * mean);
-        Some(if var <= 0.0 {
-            0.0
-        } else {
-            var.sqrt() * self.nbdev
-        })
+
+        // Write new value into ring
+        self.buffer[self.head] = value;
+
+        // Advance ring head without modulo
+        self.head += 1;
+        if self.head == self.period { self.head = 0; }
+
+        // Emit NaN if any NaN in the window
+        if self.nan_count > 0 {
+            return Some(f64::NAN);
+        }
+
+        let den = self.period as f64;
+        let mean = self.sum / den;
+        let var = (self.sum_sqr / den) - (mean * mean);
+        Some(if var <= 0.0 { 0.0 } else { var.sqrt() * self.nbdev })
     }
 }
 

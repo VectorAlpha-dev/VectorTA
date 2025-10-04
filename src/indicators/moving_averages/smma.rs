@@ -16,7 +16,7 @@
 //! - **AVX2 kernel**: Enabled (relaxed FMA). Uses FMA and reciprocal multiply for speed;
 //!   rounding may differ very slightly vs scalar but stays within 1e-7 in tests.
 //! - **AVX512 kernel**: Routes to AVX2 implementation.
-//! - **Streaming update**: O(1) - Efficient exponential smoothing with previous value
+//! - **Streaming update**: O(1) – Drop-in state machine matching batch semantics; no ring buffer
 //! - **Memory optimization**: GOOD - Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix)
 //! - **SIMD note**: The SMMA recurrence is sequential; SIMD provides little gain without
 //!   changing the algorithm and may change rounding. Stubs keep scalar for bit‑consistency.
@@ -486,48 +486,93 @@ pub fn expand_grid(r: &SmmaBatchRange) -> Vec<SmmaParams> {
         .collect()
 }
 
+/// Decision: Streaming uses an O(1) state machine (no ring buffer) that
+/// exactly matches batch warm-up and NaN handling.
 #[derive(Debug, Clone)]
 pub struct SmmaStream {
     period: usize,
-    buffer: Vec<f64>,
-    head: usize,
-    filled: bool,
-    value: f64,
+    // Cached constants
+    pf64: f64,
+    pm1: f64,
+    inv_p: f64,
+    // State machine mirrors batch semantics
+    state: SmmaStreamState,
+}
+
+#[derive(Debug, Clone)]
+enum SmmaStreamState {
+    SeekingFirst,
+    Warming { sum: f64, count: usize },
+    Ready { value: f64 },
 }
 
 impl SmmaStream {
+    #[inline]
     pub fn try_new(params: SmmaParams) -> Result<Self, SmmaError> {
         let period = params.period.unwrap_or(7);
         if period == 0 {
-            return Err(SmmaError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(SmmaError::InvalidPeriod { period, data_len: 0 });
         }
+        let pf64 = period as f64;
         Ok(Self {
             period,
-            buffer: vec![f64::NAN; period],
-            head: 0,
-            filled: false,
-            value: f64::NAN,
+            pf64,
+            pm1: pf64 - 1.0,
+            inv_p: 1.0 / pf64,
+            state: SmmaStreamState::SeekingFirst,
         })
     }
+
+    /// O(1) streaming update. Returns None until the first `period` finite
+    /// values after the first finite have been seen; Some(smma) thereafter.
     #[inline(always)]
     pub fn update(&mut self, v: f64) -> Option<f64> {
-        self.buffer[self.head] = v;
-        self.head = (self.head + 1) % self.period;
-        if !self.filled && self.head == 0 {
-            self.filled = true;
-            let sum: f64 = self.buffer.iter().sum();
-            self.value = sum / self.period as f64;
-            return Some(self.value);
+        use SmmaStreamState::*;
+        match &mut self.state {
+            SeekingFirst => {
+                if v.is_finite() {
+                    if self.period == 1 {
+                        self.state = Ready { value: v };
+                        return Some(v);
+                    }
+                    self.state = Warming { sum: v, count: 1 };
+                }
+                None
+            }
+            Warming { sum, count } => {
+                // Accumulate the first `period` samples starting at first finite
+                *sum += v;
+                *count += 1;
+                if *count == self.period {
+                    let first_val = *sum / self.pf64;
+                    self.state = Ready { value: first_val };
+                    Some(first_val)
+                } else {
+                    None
+                }
+            }
+            Ready { value } => {
+                let next = (*value * self.pm1 + v) / self.pf64;
+                *value = next;
+                Some(next)
+            }
         }
-        if self.filled {
-            self.value = (self.value * (self.period as f64 - 1.0) + v) / (self.period as f64);
-            Some(self.value)
-        } else {
-            None
+    }
+
+    #[inline(always)]
+    pub fn is_ready(&self) -> bool {
+        matches!(self.state, SmmaStreamState::Ready { .. })
+    }
+    #[inline(always)]
+    pub fn current(&self) -> Option<f64> {
+        match self.state {
+            SmmaStreamState::Ready { value } => Some(value),
+            _ => None,
         }
+    }
+    #[inline]
+    pub fn reset(&mut self) {
+        self.state = SmmaStreamState::SeekingFirst;
     }
 }
 

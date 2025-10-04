@@ -26,6 +26,9 @@
 //! - [ ] Implement actual AVX512 SIMD kernel (currently stub)
 //! - [ ] Optimize batch operations with SIMD processing
 //! - [ ] Consider unrolling main calculation loop for better ILP
+//!
+//! Decision note: Streaming kernel uses branch-wrapped ring indices (no modulo),
+//! precomputed reciprocal, and mul_add for precision parity with batch.
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -911,80 +914,93 @@ unsafe fn dpo_row_avx512_long(data: &[f64], first: usize, period: usize, out: &m
 
 #[derive(Debug, Clone)]
 pub struct DpoStream {
+    // params
     period: usize,
     back: usize,
-    sma_buf: Vec<f64>, // Buffer for SMA calculation (size = period)
-    lag_buf: Vec<f64>, // Buffer for lagged values (size = back + 1)
+    inv_period: f64,
+
+    // state
+    sma_buf: Vec<f64>,  // length = period
+    lag_buf: Vec<f64>,  // length = back + 1
     sum: f64,
+
     sma_head: usize,
     lag_head: usize,
-    sma_filled: bool,
-    lag_filled: bool,
     count: usize,
 }
 
 impl DpoStream {
+    #[inline]
     pub fn try_new(params: DpoParams) -> Result<Self, DpoError> {
         let period = params.period.unwrap_or(5);
         if period == 0 {
-            return Err(DpoError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(DpoError::InvalidPeriod { period, data_len: 0 });
         }
         let back = period / 2 + 1;
+        let inv_period = 1.0f64 / (period as f64);
+
         Ok(Self {
             period,
             back,
+            inv_period,
+
+            // Use NaNs for SMA ring so we can skip subtracting a stale value
             sma_buf: vec![f64::NAN; period],
+            // Lag ring holds last (back+1) prices; head points to next write
             lag_buf: vec![f64::NAN; back + 1],
             sum: 0.0,
+
             sma_head: 0,
             lag_head: 0,
-            sma_filled: false,
-            lag_filled: false,
             count: 0,
         })
     }
 
+    /// O(1) update:
+    ///   - push `value` into lag ring (size back+1)
+    ///   - push into SMA ring (size period) and update rolling sum
+    ///   - once both rings are filled, emit DPO = price[i-back] - mean
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        // Update lag buffer
+        // === lag ring: write then advance (no `%`)
         self.lag_buf[self.lag_head] = value;
-        self.lag_head = (self.lag_head + 1) % self.lag_buf.len();
-
-        // Update SMA buffer
-        if !self.sma_buf[self.sma_head].is_nan() {
-            self.sum -= self.sma_buf[self.sma_head];
+        self.lag_head += 1;
+        if self.lag_head == self.lag_buf.len() {
+            self.lag_head = 0;
         }
-        self.sma_buf[self.sma_head] = value;
-        self.sum += value;
-        self.sma_head = (self.sma_head + 1) % self.period;
 
+        // === SMA ring: evict old (if any), add new
+        let old = self.sma_buf[self.sma_head];
+        self.sma_buf[self.sma_head] = value;
+        self.sma_head += 1;
+        if self.sma_head == self.period {
+            self.sma_head = 0;
+        }
+
+        if old.is_nan() {
+            // warming: nothing to remove yet
+            self.sum += value;
+        } else {
+            // steady-state: remove old, add new
+            self.sum += value - old;
+        }
+
+        // === bookkeeping
         self.count += 1;
 
-        // Check if buffers are filled
-        if !self.sma_filled && self.count >= self.period {
-            self.sma_filled = true;
-        }
-        if !self.lag_filled && self.count > self.back {
-            self.lag_filled = true;
-        }
-
-        // We need both buffers filled to produce output
-        if !self.sma_filled || !self.lag_filled {
+        // need: (count >= period) AND (count > back)
+        if self.count < self.period || self.count <= self.back {
             return None;
         }
 
-        // Get lagged value (back positions ago)
-        let lag_idx = (self.lag_head + self.lag_buf.len() - self.back - 1) % self.lag_buf.len();
-        let lagged_value = self.lag_buf[lag_idx];
+        // In a ring of size (back+1), the element "back steps ago" lives at `lag_head` now.
+        let lagged_value = self.lag_buf[self.lag_head];
 
-        // Calculate SMA
-        let sma = self.sum / self.period as f64;
+        // DPO = lagged_value - (sum / period). Use mul_add so HW can fuse FMA:
+        // result = (-inv_period) * sum + lagged_value  (one rounding)
+        let dpo = (-self.inv_period).mul_add(self.sum, lagged_value);
 
-        // DPO = Price[i - back] - SMA
-        Some(lagged_value - sma)
+        Some(dpo)
     }
 }
 

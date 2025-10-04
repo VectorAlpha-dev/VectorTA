@@ -14,7 +14,7 @@
 //! ## Developer Notes
 //! - **SIMD Status**: AVX2/AVX512 implemented for initial accumulation but disabled by default
 //!   (sliding window is loop-carried; <5% gain vs scalar at 100k).
-//! - **Streaming Performance**: O(1) — maintains separate ring buffers for short/long periods
+//! - **Streaming Performance**: O(1) — single ring buffer + running sums and NaN counters
 //! - **Scalar Path**: Tightened with unchecked indexing + loop-jamming (faster, tests unchanged)
 //! - **Memory Optimization**: ✓ Uses alloc_with_nan_prefix for output allocation
 //! - **Batch Support**: ✓ Row-specific optimization via shared prefix sums across parameter rows
@@ -648,65 +648,141 @@ pub unsafe fn vosc_row_avx512_long(
 pub struct VoscStream {
     short_period: usize,
     long_period: usize,
-    short_buf: Vec<f64>,
-    long_buf: Vec<f64>,
-    short_head: usize,
-    long_head: usize,
-    short_filled: bool,
-    long_filled: bool,
+
+    // Circular buffer holds the last `long_period` samples.
+    buf: Vec<f64>,
+    head: usize,    // next write index (points to the oldest sample)
+    count: usize,   // number of values seen so far (caps at long_period)
+
+    // Running state for O(1) updates
+    short_sum: f64,
+    long_sum: f64,
+    short_nan: usize,
+    long_nan: usize,
+
+    // Precomputed reciprocals to match batch formula exactly
+    inv_short: f64,
+    inv_long: f64,
 }
 
 impl VoscStream {
     pub fn try_new(params: VoscParams) -> Result<Self, VoscError> {
         let short_period = params.short_period.unwrap_or(2);
         let long_period = params.long_period.unwrap_or(5);
+
         if short_period == 0 {
-            return Err(VoscError::InvalidShortPeriod {
-                period: short_period,
-                data_len: 0,
-            });
+            return Err(VoscError::InvalidShortPeriod { period: short_period, data_len: 0 });
         }
         if long_period == 0 {
-            return Err(VoscError::InvalidLongPeriod {
-                period: long_period,
-                data_len: 0,
-            });
+            return Err(VoscError::InvalidLongPeriod { period: long_period, data_len: 0 });
         }
         if short_period > long_period {
             return Err(VoscError::ShortPeriodGreaterThanLongPeriod);
         }
+
         Ok(Self {
             short_period,
             long_period,
-            short_buf: vec![f64::NAN; short_period],
-            long_buf: vec![f64::NAN; long_period],
-            short_head: 0,
-            long_head: 0,
-            short_filled: false,
-            long_filled: false,
+
+            buf: vec![f64::NAN; long_period],
+            head: 0,
+            count: 0,
+
+            short_sum: 0.0,
+            long_sum: 0.0,
+            short_nan: short_period, // start as "all NaN" until we populate
+            long_nan: long_period,   // start as "all NaN" until we populate
+
+            inv_short: 1.0 / (short_period as f64),
+            inv_long: 1.0 / (long_period as f64),
         })
     }
 
+    /// O(1) streaming update:
+    /// - Adds `value` into both windows.
+    /// - Subtracts the element that falls out of each window.
+    /// - Returns None until long window is full; thereafter returns the VOSC or NaN if a window contains NaN.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        self.short_buf[self.short_head] = value;
-        self.long_buf[self.long_head] = value;
+        let L = self.long_period;
+        let S = self.short_period;
+        let head = self.head;
 
-        self.short_head = (self.short_head + 1) % self.short_period;
-        self.long_head = (self.long_head + 1) % self.long_period;
+        // Values to be removed (captured before overwrite)
+        // Oldest of the long window is exactly at `head`.
+        let old_long = unsafe { *self.buf.get_unchecked(head) };
 
-        if !self.short_filled && self.short_head == 0 {
-            self.short_filled = true;
+        // Oldest of the short window is at (head + L - S) % L when short is already full.
+        let old_short = if self.count >= S {
+            unsafe { *self.buf.get_unchecked((head + L - S) % L) }
+        } else {
+            0.0 // won't be used
+        };
+
+        // ---- Add the new value into both running sums / NaN counters
+        if value.is_nan() {
+            // The new sample contributes a NaN to both windows immediately.
+            self.long_nan += 1;
+            self.short_nan += 1;
+        } else {
+            self.long_sum += value;
+            self.short_sum += value;
         }
-        if !self.long_filled && self.long_head == 0 {
-            self.long_filled = true;
+
+        // ---- Remove the sample that falls out of the long window (only after the long window filled)
+        if self.count >= L {
+            if old_long.is_nan() {
+                // a previously-counted NaN leaves the window
+                self.long_nan -= 1;
+            } else {
+                self.long_sum -= old_long;
+            }
+        } else {
+            // We are still in long warmup; reduce the implicit "all-NaN" count by 1
+            self.long_nan -= 1;
         }
-        if !self.short_filled || !self.long_filled {
-            return None;
+
+        // ---- Remove the sample that falls out of the short window (only after the short window filled)
+        if self.count >= S {
+            if old_short.is_nan() {
+                self.short_nan -= 1;
+            } else {
+                self.short_sum -= old_short;
+            }
+        } else {
+            // We are still in short warmup; reduce the implicit "all-NaN" count by 1
+            self.short_nan -= 1;
         }
-        let short_avg = self.short_buf.iter().copied().sum::<f64>() / self.short_period as f64;
-        let long_avg = self.long_buf.iter().copied().sum::<f64>() / self.long_period as f64;
-        Some(100.0 * (short_avg - long_avg) / long_avg)
+
+        // ---- Commit: write new sample, advance head, bump count
+        unsafe { *self.buf.get_unchecked_mut(head) = value; }
+        let mut next = head + 1;
+        if next == L { next = 0; }
+        self.head = next;
+
+        // Bump count (saturating at L) and emit None until we have L samples total
+        if self.count < L {
+            self.count += 1;
+            if self.count < L {
+                // Still warming the long window -> no output yet
+                return None;
+            }
+        }
+
+        // Short is guaranteed full if long is full (since S <= L).
+        debug_assert!(self.count >= S);
+
+        // If either window contains a NaN, the oscillator is NaN (matches batch semantics).
+        if self.long_nan != 0 || self.short_nan != 0 {
+            return Some(f64::NAN);
+        }
+
+        // Match the batch formula exactly to avoid rounding drift:
+        //   lavg = long_sum / L,  savg = short_sum / S
+        //   VOSC = 100 * (savg - lavg) / lavg
+        let lavg = self.long_sum * self.inv_long;
+        let savg = self.short_sum * self.inv_short;
+        Some(100.0 * (savg - lavg) / lavg)
     }
 }
 

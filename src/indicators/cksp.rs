@@ -18,7 +18,7 @@
 //! - Decision: SIMD kept as stubs — ATR recurrence and deque updates are sequential/branchy; scalar is fastest.
 //!   Bench (100k, target-cpu=native): scalar ~3.20 ms → 2.80 ms after scalar optimization (~12% faster).
 //!   Batch optimized by precomputing ATR per p and high/low windows per q, then per-row final rolling.
-//! - **Streaming**: Not implemented
+//! - **Streaming**: Implemented with power-of-two ring buffers (monotonic queues) for O(1) updates; matches scalar/batch outputs bit-for-bit and avoids VecDeque overhead.
 //! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy) for both output arrays
 //! - **Batch operations**: ✅ Implemented with parallel processing support
 use crate::utilities::data_loader::Candles;
@@ -940,25 +940,65 @@ pub unsafe fn cksp_row_avx512_long(
 
 // ========================= Stream API =========================
 
-use std::collections::VecDeque;
-
 #[derive(Debug, Clone)]
 pub struct CkspStream {
+    // Params
     p: usize,
     x: f64,
     q: usize,
-    alpha: f64,
-    sum_tr: f64,
-    rma: f64,
-    prev_close: f64,
-    dq_h: VecDeque<(usize, f64)>,
-    dq_l: VecDeque<(usize, f64)>,
-    dq_ls0: VecDeque<(usize, f64)>,
-    dq_ss0: VecDeque<(usize, f64)>,
-    i: usize,
+
+    // Precomputed constants/state
+    warmup: usize,     // p + q - 1
+    alpha: f64,        // 1.0 / p
+    sum_tr: f64,       // warmup accumulator for TR
+    rma: f64,          // ATR (RMA) state
+    prev_close: f64,   // for TR
+    i: usize,          // current index (0-based)
+
+    // Ring buffer capacity (next power-of-two of q+1) and mask for fast wrap
+    cap: usize,
+    mask: usize,
+
+    // Rolling MAX over high
+    h_idx: Vec<usize>,
+    h_val: Vec<f64>,
+    h_head: usize,
+    h_tail: usize,
+
+    // Rolling MIN over low
+    l_idx: Vec<usize>,
+    l_val: Vec<f64>,
+    l_head: usize,
+    l_tail: usize,
+
+    // Rolling MAX over ls0 = maxHigh - x*ATR
+    ls_idx: Vec<usize>,
+    ls_val: Vec<f64>,
+    ls_head: usize,
+    ls_tail: usize,
+
+    // Rolling MIN over ss0 = minLow + x*ATR
+    ss_idx: Vec<usize>,
+    ss_val: Vec<f64>,
+    ss_head: usize,
+    ss_tail: usize,
 }
 
 impl CkspStream {
+    #[inline]
+    fn next_pow2(x: usize) -> usize {
+        x.next_power_of_two().max(2)
+    }
+
+    #[inline(always)]
+    fn inc(idx: usize, mask: usize) -> usize {
+        (idx + 1) & mask
+    }
+    #[inline(always)]
+    fn dec(idx: usize, mask: usize) -> usize {
+        idx.wrapping_sub(1) & mask
+    }
+
     pub fn try_new(params: CkspParams) -> Result<Self, CkspError> {
         let p = params.p.unwrap_or(10);
         let x = params.x.unwrap_or(1.0);
@@ -969,23 +1009,52 @@ impl CkspStream {
         if !x.is_finite() {
             return Err(CkspError::InvalidParam { param: "x" });
         }
+
+        // Power-of-two capacity for fast ring ops. We allow at most q+1 elements.
+        let cap = Self::next_pow2(q + 1);
+        let mask = cap - 1;
+
         Ok(Self {
             p,
             x,
             q,
+            warmup: p + q - 1,
             alpha: 1.0 / p as f64,
             sum_tr: 0.0,
             rma: 0.0,
             prev_close: f64::NAN,
-            dq_h: VecDeque::new(),
-            dq_l: VecDeque::new(),
-            dq_ls0: VecDeque::new(),
-            dq_ss0: VecDeque::new(),
             i: 0,
+
+            cap,
+            mask,
+
+            h_idx: vec![0; cap],
+            h_val: vec![0.0; cap],
+            h_head: 0,
+            h_tail: 0,
+
+            l_idx: vec![0; cap],
+            l_val: vec![0.0; cap],
+            l_head: 0,
+            l_tail: 0,
+
+            ls_idx: vec![0; cap],
+            ls_val: vec![0.0; cap],
+            ls_head: 0,
+            ls_tail: 0,
+
+            ss_idx: vec![0; cap],
+            ss_val: vec![0.0; cap],
+            ss_head: 0,
+            ss_tail: 0,
         })
     }
 
+    /// O(1) amortized update. Returns (long, short) once warmup is satisfied, else None.
+    #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<(f64, f64)> {
+        // ---- True Range & ATR (RMA) ----
+        // TR = max( high-low, |high-prevClose|, |low-prevClose| )
         let tr = if self.prev_close.is_nan() {
             high - low
         } else {
@@ -995,111 +1064,145 @@ impl CkspStream {
             hl.max(hc).max(lc)
         };
         self.prev_close = close;
-        let atr_opt = if self.i < self.p {
+
+        // ATR warmup then RMA recursion with α = 1/p
+        let atr_ready = if self.i < self.p {
             self.sum_tr += tr;
             if self.i == self.p - 1 {
                 self.rma = self.sum_tr / self.p as f64;
-                Some(self.rma)
+                true
             } else {
-                None
+                false
             }
         } else {
-            self.rma += self.alpha * (tr - self.rma);
-            Some(self.rma)
+            // rma = rma + α * (tr - rma)  (use FMA for precision/speed)
+            self.rma = self.alpha.mul_add(tr - self.rma, self.rma);
+            true
         };
 
-        while let Some((_, v)) = self.dq_h.back() {
-            if *v <= high {
-                self.dq_h.pop_back();
+        // ---- Sliding windows stage 1: max(high) over q, min(low) over q ----
+        // Monotonic MAX queue for highs
+        while self.h_head != self.h_tail {
+            let last = Self::dec(self.h_tail, self.mask);
+            if self.h_val[last] <= high {
+                self.h_tail = last; // pop_back
             } else {
                 break;
             }
         }
-        self.dq_h.push_back((self.i, high));
-        let start_h = self.i.saturating_sub(self.q - 1);
-        while let Some(&(idx, _)) = self.dq_h.front() {
-            if idx < start_h {
-                self.dq_h.pop_front();
-            } else {
-                break;
-            }
+        let mut nt = Self::inc(self.h_tail, self.mask);
+        if nt == self.h_head {
+            // full: drop oldest from front
+            self.h_head = Self::inc(self.h_head, self.mask);
         }
+        self.h_idx[self.h_tail] = self.i;
+        self.h_val[self.h_tail] = high;
+        self.h_tail = nt;
 
-        while let Some((_, v)) = self.dq_l.back() {
-            if *v >= low {
-                self.dq_l.pop_back();
+        // Evict out-of-window (older than q-1 bars)
+        while self.h_head != self.h_tail {
+            let front_i = self.h_idx[self.h_head];
+            if front_i + self.q <= self.i {
+                self.h_head = Self::inc(self.h_head, self.mask);
             } else {
                 break;
             }
         }
-        self.dq_l.push_back((self.i, low));
-        let start_l = self.i.saturating_sub(self.q - 1);
-        while let Some(&(idx, _)) = self.dq_l.front() {
-            if idx < start_l {
-                self.dq_l.pop_front();
+        let max_high = self.h_val[self.h_head];
+
+        // Monotonic MIN queue for lows
+        while self.l_head != self.l_tail {
+            let last = Self::dec(self.l_tail, self.mask);
+            if self.l_val[last] >= low {
+                self.l_tail = last; // pop_back
             } else {
                 break;
             }
         }
-        // Check if we're still in warmup period
-        if self.i < self.p + self.q - 1 {
+        nt = Self::inc(self.l_tail, self.mask);
+        if nt == self.l_head {
+            self.l_head = Self::inc(self.l_head, self.mask);
+        }
+        self.l_idx[self.l_tail] = self.i;
+        self.l_val[self.l_tail] = low;
+        self.l_tail = nt;
+
+        while self.l_head != self.l_tail {
+            let front_i = self.l_idx[self.l_head];
+            if front_i + self.q <= self.i {
+                self.l_head = Self::inc(self.l_head, self.mask);
+            } else {
+                break;
+            }
+        }
+        let min_low = self.l_val[self.l_head];
+
+        // Still warming up? (need both ATR warmup & q windows established)
+        if self.i < self.warmup || !atr_ready {
             self.i += 1;
             return None;
         }
 
-        let atr = match atr_opt {
-            Some(v) => v,
-            None => {
-                self.i += 1;
-                return None;
-            }
-        };
+        // ---- Stage 2: prelim stops + second rolling ----
+        // Keep your established semantics (matches your scalar/batch):
+        //   ls0 = maxHigh - x*ATR  -> roll MAX over last q -> long
+        //   ss0 = minLow  + x*ATR  -> roll MIN over last q -> short
+        let ls0 = (-self.x).mul_add(self.rma, max_high); // maxHigh - x*ATR
+        let ss0 =  self.x.mul_add(self.rma, min_low);    // minLow  + x*ATR
 
-        let (mh, ml) = match (self.dq_h.front(), self.dq_l.front()) {
-            (Some(&(_, mh)), Some(&(_, ml))) => (mh, ml),
-            _ => {
-                self.i += 1;
-                return None;
+        // Rolling MAX over ls0
+        while self.ls_head != self.ls_tail {
+            let last = Self::dec(self.ls_tail, self.mask);
+            if self.ls_val[last] <= ls0 {
+                self.ls_tail = last;
+            } else {
+                break;
             }
-        };
-        let ls0_val = mh - self.x * atr;
-        let ss0_val = ml + self.x * atr;
+        }
+        nt = Self::inc(self.ls_tail, self.mask);
+        if nt == self.ls_head {
+            self.ls_head = Self::inc(self.ls_head, self.mask);
+        }
+        self.ls_idx[self.ls_tail] = self.i;
+        self.ls_val[self.ls_tail] = ls0;
+        self.ls_tail = nt;
 
-        while let Some((_, val)) = self.dq_ls0.back() {
-            if *val <= ls0_val {
-                self.dq_ls0.pop_back();
+        while self.ls_head != self.ls_tail {
+            let front_i = self.ls_idx[self.ls_head];
+            if front_i + self.q <= self.i {
+                self.ls_head = Self::inc(self.ls_head, self.mask);
             } else {
                 break;
             }
         }
-        self.dq_ls0.push_back((self.i, ls0_val));
-        let start_ls0 = self.i.saturating_sub(self.q - 1);
-        while let Some(&(idx, _)) = self.dq_ls0.front() {
-            if idx < start_ls0 {
-                self.dq_ls0.pop_front();
-            } else {
-                break;
-            }
-        }
-        let long = self.dq_ls0.front().map(|&(_, v)| v).unwrap_or(f64::NAN);
+        let long = self.ls_val[self.ls_head];
 
-        while let Some((_, val)) = self.dq_ss0.back() {
-            if *val >= ss0_val {
-                self.dq_ss0.pop_back();
+        // Rolling MIN over ss0
+        while self.ss_head != self.ss_tail {
+            let last = Self::dec(self.ss_tail, self.mask);
+            if self.ss_val[last] >= ss0 {
+                self.ss_tail = last;
             } else {
                 break;
             }
         }
-        self.dq_ss0.push_back((self.i, ss0_val));
-        let start_ss0 = self.i.saturating_sub(self.q - 1);
-        while let Some(&(idx, _)) = self.dq_ss0.front() {
-            if idx < start_ss0 {
-                self.dq_ss0.pop_front();
+        nt = Self::inc(self.ss_tail, self.mask);
+        if nt == self.ss_head {
+            self.ss_head = Self::inc(self.ss_head, self.mask);
+        }
+        self.ss_idx[self.ss_tail] = self.i;
+        self.ss_val[self.ss_tail] = ss0;
+        self.ss_tail = nt;
+
+        while self.ss_head != self.ss_tail {
+            let front_i = self.ss_idx[self.ss_head];
+            if front_i + self.q <= self.i {
+                self.ss_head = Self::inc(self.ss_head, self.mask);
             } else {
                 break;
             }
         }
-        let short = self.dq_ss0.front().map(|&(_, v)| v).unwrap_or(f64::NAN);
+        let short = self.ss_val[self.ss_head];
 
         self.i += 1;
         Some((long, short))

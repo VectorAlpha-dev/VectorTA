@@ -15,7 +15,7 @@
 //! - Scalar optimized: hoisted invariants, used `mul_add`, and avoided per-step intercept; ~5% speedup at 100k (period=14) on x86-64.
 //! - SIMD Kernels: kept as stubs (fallback to scalar). CFO is inherently sequential; warm-start vectorization yields negligible benefit for short periods.
 //! - Row-specific batch: not implemented. Potential via prefix sums (P/Q) for shared sums across rows; defer to a future PR.
-//! - Streaming Performance: O(n) - requires full window for linear regression calculation
+//! - Streaming Performance: O(1) per tick via rolling S_y/S_xy and precomputed OLS constants
 //! - Memory Optimization: GOOD - properly uses alloc_with_nan_prefix and make_uninit_matrix helpers for zero-copy allocation
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyUntypedArrayMethods};
@@ -606,11 +606,25 @@ pub unsafe fn cfo_row_avx512_long(
 
 #[derive(Debug, Clone)]
 pub struct CfoStream {
+    // params
     period: usize,
     scalar: f64,
+
+    // circular buffer
     buf: Vec<f64>,
-    idx: usize,
+    idx: usize,    // next write position (holds the oldest sample)
     filled: bool,
+
+    // rolling accumulators for the current full window
+    sum_y: f64,    // S_y = sum of y
+    sum_xy: f64,   // S_xy = sum of k*y_k with k=1..n (oldest -> newest)
+
+    // precomputed OLS constants for x = 1..n
+    n: f64,
+    inv_n: f64,
+    sx: f64,          // Σx
+    inv_denom: f64,   // 1 / ( n*Σx^2 - (Σx)^2 )
+    half_nm1: f64,    // (n-1)/2 for forecasting at x=n
 }
 
 impl CfoStream {
@@ -623,51 +637,89 @@ impl CfoStream {
             });
         }
         let scalar = params.scalar.unwrap_or(100.0);
+        let n = period as f64;
+        let inv_n = 1.0 / n;
+        let sx = ((period * (period + 1)) / 2) as f64; // Σ x
+        let sx2 = ((period * (period + 1) * (2 * period + 1)) / 6) as f64; // Σ x^2
+        let inv_denom = 1.0 / (n * sx2 - sx * sx);
+        let half_nm1 = 0.5 * (n - 1.0);
+
         Ok(Self {
             period,
             scalar,
             buf: vec![f64::NAN; period],
             idx: 0,
             filled: false,
+            sum_y: 0.0,
+            sum_xy: 0.0,
+            n,
+            inv_n,
+            sx,
+            inv_denom,
+            half_nm1,
         })
     }
+
+    /// O(1) per tick:
+    /// - while warming: append, accumulate S_y and S_xy with proper weights (k=1..m).
+    /// - after full: evict oldest y_old = buf[idx], do:
+    ///       S_xy <- S_xy - S_y + n*v
+    ///       S_y  <- S_y - y_old + v
+    ///   then advance idx (circular) and emit CFO for the new window.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        self.buf[self.idx] = value;
-        self.idx = (self.idx + 1) % self.period;
-        if !self.filled && self.idx == 0 {
-            self.filled = true;
-        }
         if !self.filled {
-            return None;
-        }
-        Some(self.calc())
-    }
-    #[inline(always)]
-    fn calc(&self) -> f64 {
-        let n = self.period;
-        let x = (n * (n + 1)) / 2;
-        let x2 = (n * (n + 1) * (2 * n + 1)) / 6;
-        let x_f = x as f64;
-        let x2_f = x2 as f64;
-        let period_f = n as f64;
-        let bd = 1.0 / (period_f * x2_f - x_f * x_f);
+            // warm-up: assign increasing weights k=1..(idx+1) to the items
+            let k = (self.idx as f64) + 1.0;
+            self.sum_y += value;
+            self.sum_xy = value.mul_add(k, self.sum_xy);
 
-        let mut sum_y = 0.0;
-        let mut sum_xy = 0.0;
-        let mut idx = self.idx;
-        for i in 0..n {
-            let v = self.buf[idx];
-            sum_y += v;
-            sum_xy += v * (i as f64 + 1.0);
-            idx = (idx + 1) % n;
+            self.buf[self.idx] = value;
+            self.idx += 1;
+
+            if self.idx == self.period {
+                self.idx = 0;
+                self.filled = true;
+                // window just became full; compute CFO for this first full window
+                return Some(self.calc_current());
+            } else {
+                return None;
+            }
         }
-        let b = (period_f * sum_xy - x_f * sum_y) * bd;
-        let a = (sum_y - b * x_f) / period_f;
-        let forecast = a + b * period_f;
-        let cur = self.buf[(self.idx + n - 1) % n];
+
+        // steady-state: evict oldest and insert new in O(1)
+        let y_old = self.buf[self.idx]; // oldest sample about to be overwritten
+
+        // update weighted and plain sums (use old sums on the RHS)
+        let new_sum_xy = (self.n * value) + (self.sum_xy - self.sum_y);
+        let new_sum_y = self.sum_y - y_old + value;
+
+        // commit
+        self.buf[self.idx] = value;
+        self.sum_xy = new_sum_xy;
+        self.sum_y = new_sum_y;
+
+        // advance "oldest" pointer
+        self.idx = (self.idx + 1) % self.period;
+
+        Some(self.calc_current())
+    }
+
+    // Keeps the old private API shape but now uses the O(1) accumulators.
+    #[inline(always)]
+    fn calc_current(&self) -> f64 {
+        debug_assert!(self.filled, "calc_current() called before buffer filled");
+        // newest sample is the one we just wrote; idx now points at the new oldest,
+        // so the newest is at (idx + n - 1) % n
+        let cur = self.buf[(self.idx + self.period - 1) % self.period];
+
         if cur.is_finite() && cur != 0.0 {
-            self.scalar * (cur - forecast) / cur
+            // slope b and forecast at x = n (the right edge of the window)
+            let b = (-self.sx).mul_add(self.sum_y, self.n * self.sum_xy) * self.inv_denom;
+            let f = b.mul_add(self.half_nm1, self.sum_y * self.inv_n);
+
+            // CFO = scalar * (1 - f/cur)  (1 div + 1 FMA; avoids (cur - f)*(scalar/cur))
+            self.scalar.mul_add(-f / cur, self.scalar)
         } else {
             f64::NAN
         }

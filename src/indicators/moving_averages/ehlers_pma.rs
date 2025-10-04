@@ -25,7 +25,7 @@
 //! ## Developer Notes
 //! - **AVX2 kernel**: ❌ Stub only - delegates to scalar (no proven win)
 //! - **AVX512 kernel**: ❌ Stub only - delegates to scalar (no proven win)
-//! - **Streaming update**: ✅ O(1) complexity - efficient incremental computation
+//! - **Streaming update**: ✅ O(1) low-constant recurrences (A,S,A1,S1,A2,T)
 //! - **Memory optimization**: ✅ Uses zero-copy helpers (alloc_with_nan_prefix) for output vectors
 //! - Decision: SIMD not enabled — per-iteration dot products are already efficiently
 //!   auto-vectorized by the compiler; explicit AVX2/AVX512 showed no consistent >5% win
@@ -730,32 +730,74 @@ pub fn ehlers_pma_into_slices(
     ehlers_pma_into_slices_with_kernel(predict, trigger, input, Kernel::Auto)
 }
 
-// Streaming implementation
+// Streaming implementation (recurrences + rings; TradingView 1-bar lag)
 #[derive(Debug, Clone)]
 pub struct EhlersPmaStream {
-    // feed WMA7 with prev tick to replicate TV's [1] lag
+    // TradingView parity: feed WMA7 with previous tick (1-bar lag)
     prev: Option<f64>,
-    wma1_buffer: Vec<f64>,    // holds 7 values of src_lag
-    predict_buffer: Vec<f64>, // holds 4 values of predict
-    wma1_values: Vec<f64>,    // holds 7 values of wma1
+
+    // Rings for values needed to retire oldest in O(1) recurrences
+    x_ring: [f64; 7], // raw (lagged) prices
+    w_ring: [f64; 7], // WMA1 values
+    p_ring: [f64; 4], // last 4 predicts (for trigger)
+
+    // Heads
+    x_head: usize,
+    w_head: usize,
+    p_head: usize,
+
+    // Fill counts
+    filled_x: usize, // 0..=7 (price window)
+    filled_w: usize, // 0..=7 (wma1 window)
+    filled_p: usize, // 0..=4 (trigger window)
+
+    // Rolling accumulators
+    // Prices: A = sum, S = weighted sum (1..7)
+    A: f64,
+    S: f64,
+    // WMA1: A1 = sum, S1 = weighted sum (1..7)
+    A1: f64,
+    S1: f64,
+    // Trigger: A2 = sum of last 4 predicts, T = weighted sum (4,3,2,1)
+    A2: f64,
+    T: f64,
 }
 
 impl EhlersPmaStream {
+    #[inline]
     pub fn try_new(_params: EhlersPmaParams) -> Result<Self, EhlersPmaError> {
         Ok(Self {
             prev: None,
-            wma1_buffer: Vec::with_capacity(7),
-            predict_buffer: Vec::with_capacity(4),
-            wma1_values: Vec::with_capacity(7),
+            x_ring: [0.0; 7],
+            w_ring: [0.0; 7],
+            p_ring: [0.0; 4],
+            x_head: 0,
+            w_head: 0,
+            p_head: 0,
+            filled_x: 0,
+            filled_w: 0,
+            filled_p: 0,
+            A: 0.0,
+            S: 0.0,
+            A1: 0.0,
+            S1: 0.0,
+            A2: 0.0,
+            T: 0.0,
         })
     }
 
+    #[inline]
     pub fn update(&mut self, value: f64) -> Option<(f64, f64)> {
-        // src_lag = previous tick
+        // Ignore NaNs to mirror batch behavior (batch waits until first_valid)
+        if value.is_nan() {
+            return None;
+        }
+
+        // Establish 1-bar lag source
         let src_lag = match self.prev {
             None => {
                 self.prev = Some(value);
-                return None; // need one tick to establish lag
+                return None; // need one finite tick to establish lag
             }
             Some(p) => {
                 self.prev = Some(value);
@@ -763,71 +805,234 @@ impl EhlersPmaStream {
             }
         };
 
-        // maintain 7-wide buffer of src_lag
-        if self.wma1_buffer.len() < 7 {
-            self.wma1_buffer.push(src_lag);
-        } else {
-            self.wma1_buffer.rotate_left(1);
-            self.wma1_buffer[6] = src_lag;
-        }
-        if self.wma1_buffer.len() < 7 {
+        const INV_28: f64 = 1.0 / 28.0; // sum 1..7
+        const INV_10: f64 = 1.0 / 10.0; // 4+3+2+1
+
+        // Push lagged price into 7-ring and update A,S once full
+        if self.filled_x < 7 {
+            self.x_ring[self.x_head] = src_lag;
+            self.x_head += 1;
+            if self.x_head == 7 {
+                self.x_head = 0;
+            }
+            self.filled_x += 1;
+
+            if self.filled_x < 7 {
+                return None;
+            }
+
+            // One-time O(7) seed of A,S over x_ring
+            let x = &self.x_ring;
+            self.A = ((x[0] + x[1]) + (x[2] + x[3])) + ((x[4] + x[5]) + x[6]);
+
+            // Compute weighted sum in the same newest-first order as batch/scalar
+            // 7*newest + 6*... + ... + 1*oldest
+            self.S = 7.0 * x[6]
+                + 6.0 * x[5]
+                + 5.0 * x[4]
+                + 4.0 * x[3]
+                + 3.0 * x[2]
+                + 2.0 * x[1]
+                + 1.0 * x[0];
+
+            // Derive first w1 via explicit 7-term weighted sum (parity with batch)
+            let w1 = self.S * INV_28;
+
+            let old_A1 = self.A1; // 0 initially
+            let w_old = self.w_ring[self.w_head]; // 0 initially
+            self.S1 = self.S1 + 7.0 * w1 - old_A1;
+            self.A1 = self.A1 + w1 - w_old;
+
+            self.w_ring[self.w_head] = w1;
+            self.w_head += 1;
+            if self.w_head == 7 {
+                self.w_head = 0;
+            }
+            self.filled_w = 1; // we now have one WMA1 sample in the 7-ring
+
+            // Not enough WMA1 samples to form WMA2 yet
             return None;
         }
 
-        let wma1 = (7.0 * self.wma1_buffer[6]
-            + 6.0 * self.wma1_buffer[5]
-            + 5.0 * self.wma1_buffer[4]
-            + 4.0 * self.wma1_buffer[3]
-            + 3.0 * self.wma1_buffer[2]
-            + 2.0 * self.wma1_buffer[1]
-            + 1.0 * self.wma1_buffer[0])
-            / 28.0;
-
-        if self.wma1_values.len() < 7 {
-            self.wma1_values.push(wma1);
-        } else {
-            self.wma1_values.rotate_left(1);
-            self.wma1_values[6] = wma1;
+        // Rolling update for price LWMA accumulators
+        let x_old = self.x_ring[self.x_head];
+        let old_A = self.A;
+        self.A = self.A + src_lag - x_old;
+        self.S = self.S + 7.0 * src_lag - old_A;
+        self.x_ring[self.x_head] = src_lag;
+        self.x_head += 1;
+        if self.x_head == 7 {
+            self.x_head = 0;
         }
-        if self.wma1_values.len() < 7 {
+        // Compute WMA1 via explicit 7-term weighted sum from price ring (parity)
+        let i0 = if self.x_head == 0 { 6 } else { self.x_head - 1 }; // newest
+        let i1 = if i0 == 0 { 6 } else { i0 - 1 };
+        let i2 = if i1 == 0 { 6 } else { i1 - 1 };
+        let i3 = if i2 == 0 { 6 } else { i2 - 1 };
+        let i4 = if i3 == 0 { 6 } else { i3 - 1 };
+        let i5 = if i4 == 0 { 6 } else { i4 - 1 };
+        let i6 = if i5 == 0 { 6 } else { i5 - 1 };
+        let w1_num = 7.0 * self.x_ring[i0]
+            + 6.0 * self.x_ring[i1]
+            + 5.0 * self.x_ring[i2]
+            + 4.0 * self.x_ring[i3]
+            + 3.0 * self.x_ring[i4]
+            + 2.0 * self.x_ring[i5]
+            + 1.0 * self.x_ring[i6];
+        let w1 = w1_num * INV_28;
+
+        // Rolling update for WMA1 LWMA accumulators
+        let old_A1 = self.A1;
+        let w_old = self.w_ring[self.w_head];
+        self.S1 = self.S1 + 7.0 * w1 - old_A1;
+        self.A1 = self.A1 + w1 - w_old;
+        self.w_ring[self.w_head] = w1;
+        self.w_head += 1;
+        if self.w_head == 7 {
+            self.w_head = 0;
+        }
+        if self.filled_w < 7 {
+            self.filled_w += 1;
+        }
+        if self.filled_w < 7 {
+            // Still seeding WMA2 window; no predict yet
             return None;
         }
 
-        let wma2 = (7.0 * self.wma1_values[6]
-            + 6.0 * self.wma1_values[5]
-            + 5.0 * self.wma1_values[4]
-            + 4.0 * self.wma1_values[3]
-            + 3.0 * self.wma1_values[2]
-            + 2.0 * self.wma1_values[1]
-            + 1.0 * self.wma1_values[0])
-            / 28.0;
+        // Compute WMA2 via explicit 7-term weighted sum from WMA1 ring (parity)
+        let k0 = if self.w_head == 0 { 6 } else { self.w_head - 1 }; // newest
+        let k1 = if k0 == 0 { 6 } else { k0 - 1 };
+        let k2 = if k1 == 0 { 6 } else { k1 - 1 };
+        let k3 = if k2 == 0 { 6 } else { k2 - 1 };
+        let k4 = if k3 == 0 { 6 } else { k3 - 1 };
+        let k5 = if k4 == 0 { 6 } else { k4 - 1 };
+        let k6 = if k5 == 0 { 6 } else { k5 - 1 };
+        let w2_num = 7.0 * self.w_ring[k0]
+            + 6.0 * self.w_ring[k1]
+            + 5.0 * self.w_ring[k2]
+            + 4.0 * self.w_ring[k3]
+            + 3.0 * self.w_ring[k4]
+            + 2.0 * self.w_ring[k5]
+            + 1.0 * self.w_ring[k6];
+        let w2 = w2_num * INV_28;
+        let predict = 2.0 * w1 - w2;
 
-        let predict = 2.0 * wma1 - wma2;
-
-        if self.predict_buffer.len() < 4 {
-            self.predict_buffer.push(predict);
-        } else {
-            self.predict_buffer.rotate_left(1);
-            self.predict_buffer[3] = predict;
+        // Rolling trigger accumulators over last 4 predicts
+        let old_A2 = self.A2;
+        let p_old = self.p_ring[self.p_head];
+        self.T = self.T + 4.0 * predict - old_A2;
+        self.A2 = self.A2 + predict - p_old;
+        self.p_ring[self.p_head] = predict;
+        self.p_head += 1;
+        if self.p_head == 4 {
+            self.p_head = 0;
         }
-        if self.predict_buffer.len() < 4 {
+
+        if self.filled_p < 4 {
+            self.filled_p += 1;
+        }
+        if self.filled_p < 4 {
             return Some((predict, f64::NAN));
         }
 
-        let trigger = (4.0 * self.predict_buffer[3]
-            + 3.0 * self.predict_buffer[2]
-            + 2.0 * self.predict_buffer[1]
-            + 1.0 * self.predict_buffer[0])
-            / 10.0;
-
+        // Compute trigger via explicit 4-term weighted sum for parity
+        let j0 = if self.p_head == 0 { 3 } else { self.p_head - 1 }; // newest
+        let j1 = if j0 == 0 { 3 } else { j0 - 1 };
+        let j2 = if j1 == 0 { 3 } else { j1 - 1 };
+        let j3 = if j2 == 0 { 3 } else { j2 - 1 };
+        let trigger = (4.0 * self.p_ring[j0]
+            + 3.0 * self.p_ring[j1]
+            + 2.0 * self.p_ring[j2]
+            + 1.0 * self.p_ring[j3])
+            * INV_10;
         Some((predict, trigger))
     }
 
+    #[inline]
     pub fn reset(&mut self) {
         self.prev = None;
-        self.wma1_buffer.clear();
-        self.predict_buffer.clear();
-        self.wma1_values.clear();
+        self.x_ring = [0.0; 7];
+        self.w_ring = [0.0; 7];
+        self.p_ring = [0.0; 4];
+        self.x_head = 0;
+        self.w_head = 0;
+        self.p_head = 0;
+        self.filled_x = 0;
+        self.filled_w = 0;
+        self.filled_p = 0;
+        self.A = 0.0;
+        self.S = 0.0;
+        self.A1 = 0.0;
+        self.S1 = 0.0;
+        self.A2 = 0.0;
+        self.T = 0.0;
+    }
+}
+
+// Optional FastMath helper (not used by default). Keep private and parity-safe off.
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
+struct RollingLwma<const N: usize> {
+    buf: [f64; N],
+    head: usize,
+    filled: usize,
+    total: f64, // sum of window
+    num: f64,   // weighted numerator: N*newest + ... + 1*oldest
+}
+
+#[allow(dead_code)]
+impl<const N: usize> RollingLwma<N> {
+    #[inline]
+    fn new() -> Self {
+        Self { buf: [f64::NAN; N], head: 0, filled: 0, total: 0.0, num: 0.0 }
+    }
+    #[inline]
+    fn reset(&mut self) {
+        self.buf.fill(f64::NAN);
+        self.head = 0;
+        self.filled = 0;
+        self.total = 0.0;
+        self.num = 0.0;
+    }
+    /// Push `x`. Returns Some(lwma) once `N` samples are available.
+    #[inline]
+    fn push(&mut self, x: f64) -> Option<f64> {
+        if self.filled < N {
+            self.buf[self.head] = x;
+            self.head = (self.head + 1) % N;
+            self.filled += 1;
+            if self.filled == N {
+                // One-time O(N) init for exact numerator
+                let mut w = 1.0;
+                let mut acc = 0.0;
+                let mut sum = 0.0;
+                let mut i = self.head; // oldest is at head
+                for _ in 0..N {
+                    let v = self.buf[i];
+                    acc += w * v;
+                    sum += v;
+                    w += 1.0;
+                    i += 1;
+                    if i == N { i = 0; }
+                }
+                self.num = acc;
+                self.total = sum;
+                let den = (N * (N + 1) / 2) as f64;
+                return Some(self.num / den);
+            }
+            return None;
+        }
+        // Constant-time recurrence (Wikipedia LWMA)
+        let x_old = self.buf[self.head];
+        let total_old = self.total;
+        self.buf[self.head] = x;
+        self.head = (self.head + 1) % N;
+
+        self.num = self.num + (N as f64) * x - total_old;
+        self.total = total_old + x - x_old;
+
+        let den = (N * (N + 1) / 2) as f64;
+        Some(self.num / den)
     }
 }
 

@@ -14,8 +14,8 @@
 //! ## Developer Notes
 //! - **AVX2 kernel**: ✅ Fully implemented - 4-wide SIMD with FMA operations for weighted averaging
 //! - **AVX512 kernel**: ✅ Fully implemented - Dual-path optimization (short ≤32, long >32 periods), 8-wide SIMD
-//! - **Streaming update**: ⚠️ O(n) complexity - dot_ring() iterates through all Pascal weights
-//!   - TODO: Could optimize to O(1) with incremental updates using Pascal's triangle properties
+//! - **Streaming update**: ✅ Exact Pascal cascade — period-1 additions + 1 multiply by 2^{-n}
+//!   - Warmup identical to batch (first period-1 suppressed). Normalization is exact power-of-two.
 //! - **Memory optimization**: ✅ Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix) for output vectors
 //! - **Note**: Pascal weights are precomputed and normalized, suitable for SIMD vectorization
 //!
@@ -634,57 +634,92 @@ pub unsafe fn pwma_avx512_long(
     _mm_sfence();
 }
 
+/// Streaming kernel: Pascal cascade. Exact once warm (no per-tap multiplies).
 #[derive(Debug, Clone)]
 pub struct PwmaStream {
-    period: usize,
-    weights: Vec<f64>,
-    buffer: Vec<f64>,
-    head: usize,
-    filled: bool,
+    period: usize, // window length (m)
+    n: usize,      // m - 1
+    // Per-stage "previous input" for the n cascaded [1, 1] stages.
+    // prev[0] holds previous x_t      (stage 0)
+    // prev[i] holds previous out_(i-1) (stage i)
+    prev: Vec<f64>,
+    // Number of samples seen so far (used for warmup gating)
+    seen: usize,
+    // Normalization factor = 2^{-n} (precomputed once)
+    norm: f64,
 }
 
 impl PwmaStream {
     pub fn try_new(params: PwmaParams) -> Result<Self, PwmaError> {
         let period = params.period.unwrap_or(5);
         if period == 0 {
-            return Err(PwmaError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(PwmaError::InvalidPeriod { period, data_len: 0 });
         }
-        let weights = pascal_weights(period)?;
+        let n = period.saturating_sub(1);
+
+        // Normalization by 2^n (exact power-of-two scaling).
+        let norm = fast_pow2_neg_i32(n as i32);
+
+        // Initialize per-stage memories with NaN so the cascade naturally
+        // suppresses output until warm (seen >= n).
+        let mut prev = Vec::with_capacity(n);
+        prev.resize(n, f64::NAN);
+
         Ok(Self {
             period,
-            weights,
-            buffer: vec![f64::NAN; period],
-            head: 0,
-            filled: false,
+            n,
+            prev,
+            seen: 0,
+            norm,
         })
     }
 
+    /// Push one new sample. Returns `Some(y)` once the window is full
+    /// (after `period - 1` updates). Before that, returns `None`.
     #[inline(always)]
-    pub fn update(&mut self, value: f64) -> Option<f64> {
-        self.buffer[self.head] = value;
-        self.head = (self.head + 1) % self.period;
-
-        if !self.filled && self.head == 0 {
-            self.filled = true;
+    pub fn update(&mut self, x: f64) -> Option<f64> {
+        // Fast path for period == 1 (n == 0): PWMA is the sample itself.
+        if self.n == 0 {
+            return Some(x);
         }
-        if !self.filled {
+
+        // Addition-only Pascal cascade:
+        //   a_0 = x_t
+        //   for i = 0..n-1:
+        //       a_{i+1} = a_i + prev[i];  prev[i] <- a_i
+        let mut a = x;
+        for p in &mut self.prev {
+            let out = a + *p;
+            *p = a;
+            a = out;
+        }
+
+        // Warmup gating: produce output only after n samples observed.
+        if self.seen < self.n {
+            self.seen += 1;
             return None;
         }
-        Some(self.dot_ring())
-    }
 
-    #[inline(always)]
-    fn dot_ring(&self) -> f64 {
-        let mut sum = 0.0;
-        let mut idx = self.head;
-        for &w in &self.weights {
-            sum += w * self.buffer[idx];
-            idx = (idx + 1) % self.period;
-        }
-        sum
+        // Normalize once per sample.
+        Some(a * self.norm)
+    }
+}
+
+#[inline(always)]
+fn fast_pow2_neg_i32(e: i32) -> f64 {
+    // Returns 2^{-e}. Handles normal & subnormal ranges; falls back if out-of-range.
+    if (0..=1023).contains(&e) {
+        // Normal: exponent = 1023 - e, mantissa = 0
+        let bits = ((1023 - e) as u64) << 52;
+        f64::from_bits(bits)
+    } else if (1024..=1074).contains(&e) {
+        // Subnormal: exponent=0, set appropriate mantissa bit.
+        let s = e - 1023; // 1..=51
+        let mant = 1u64 << (52 - s as u32);
+        f64::from_bits(mant)
+    } else {
+        // Very large e – safe fallback (rare for PWMA periods)
+        (2.0f64).powi(-e)
     }
 }
 

@@ -29,7 +29,7 @@
 //! ## Developer Notes
 //! - **AVX2 kernel**: STUB - calls scalar implementation (lines 459-469)
 //! - **AVX512 kernel**: STUB - calls scalar implementation (lines 491-501, 505-514)
-//! - **Streaming**: Not implemented
+//! - **Streaming**: Implemented O(1) ring updates; no modulo in hot path; precomputed reciprocals and coefficients.
 //! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy) for all three outputs (lines 339-341, 444-446)
 //! - **Batch operations**: ✅ Implemented with parallel processing support
 
@@ -906,6 +906,9 @@ pub struct EmdStream {
     fraction: f64,
     per_up_low: usize,
     per_mid: usize,
+    // reciprocals to avoid per-update division
+    inv_up_low: f64,
+    inv_mid: f64,
     sum_up: f64,
     sum_low: f64,
     sum_mb: f64,
@@ -922,6 +925,8 @@ pub struct EmdStream {
     price_prev2: f64,
     alpha: f64,
     beta: f64,
+    // precomputed to avoid redundant ops each tick
+    beta_times_one_plus_alpha: f64,
     half_one_minus_alpha: f64,
     initialized: bool,
     count: usize,
@@ -946,24 +951,30 @@ impl EmdStream {
             return Err(EmdError::InvalidFraction { fraction });
         }
 
-        // Precompute constants for performance
-        let beta = (2.0 * std::f64::consts::PI / period as f64).cos();
-        let gamma = 1.0 / ((4.0 * std::f64::consts::PI * delta / period as f64).cos());
+        // Precompute constants for performance (Ehlers coefficients)
+        let two_pi_over_p = 2.0 * std::f64::consts::PI / (period as f64);
+        let beta = (two_pi_over_p).cos();
+        let gamma = 1.0 / ((2.0 * delta * two_pi_over_p).cos()); // = 1 / cos(4π·δ/p)
         let alpha = gamma - (gamma * gamma - 1.0).sqrt();
         let half_one_minus_alpha = 0.5 * (1.0 - alpha);
+        let beta_times_one_plus_alpha = beta * (1.0 + alpha);
+        let per_up_low = 50usize;
+        let per_mid = 2 * period;
 
         Ok(Self {
             period,
             delta,
             fraction,
-            per_up_low: 50,
-            per_mid: 2 * period,
+            per_up_low,
+            per_mid,
+            inv_up_low: 1.0 / (per_up_low as f64),
+            inv_mid: 1.0 / (per_mid as f64),
             sum_up: 0.0,
             sum_low: 0.0,
             sum_mb: 0.0,
-            sp_ring: vec![0.0; 50],
-            sv_ring: vec![0.0; 50],
-            bp_ring: vec![0.0; 2 * period],
+            sp_ring: vec![0.0; per_up_low],
+            sv_ring: vec![0.0; per_up_low],
+            bp_ring: vec![0.0; per_mid],
             idx_up_low: 0,
             idx_mid: 0,
             bp_prev1: 0.0,
@@ -974,6 +985,7 @@ impl EmdStream {
             price_prev2: 0.0,
             alpha,
             beta,
+            beta_times_one_plus_alpha,
             half_one_minus_alpha,
             initialized: false,
             count: 0,
@@ -994,9 +1006,11 @@ impl EmdStream {
             self.initialized = true;
         }
         let bp_curr = if self.count >= 2 {
+            // .5*(1-α)*(p[i]-p[i-2]) + β*(1+α)*bp[i-1] - α*bp[i-2]
             self.half_one_minus_alpha * (price - self.price_prev2)
-                + self.beta * (1.0 + self.alpha) * self.bp_prev1
-                - self.alpha * self.bp_prev2
+                + self
+                    .beta_times_one_plus_alpha
+                    .mul_add(self.bp_prev1, -self.alpha * self.bp_prev2)
         } else {
             price
         };
@@ -1012,33 +1026,36 @@ impl EmdStream {
         }
         let sp = peak_curr * self.fraction;
         let sv = valley_curr * self.fraction;
-        self.sum_up += sp;
-        self.sum_low += sv;
-        self.sum_mb += bp_curr;
+
+        // constant-time ring maintenance: sum += new - old
         let old_sp = self.sp_ring[self.idx_up_low];
         let old_sv = self.sv_ring[self.idx_up_low];
         let old_bp = self.bp_ring[self.idx_mid];
+        self.sum_up += sp - old_sp;
+        self.sum_low += sv - old_sv;
+        self.sum_mb += bp_curr - old_bp;
         self.sp_ring[self.idx_up_low] = sp;
         self.sv_ring[self.idx_up_low] = sv;
         self.bp_ring[self.idx_mid] = bp_curr;
-        if self.count >= self.per_up_low {
-            self.sum_up -= old_sp;
-            self.sum_low -= old_sv;
+
+        // wrap without modulo in the hot path
+        self.idx_up_low += 1;
+        if self.idx_up_low == self.per_up_low {
+            self.idx_up_low = 0;
         }
-        if self.count >= self.per_mid {
-            self.sum_mb -= old_bp;
+        self.idx_mid += 1;
+        if self.idx_mid == self.per_mid {
+            self.idx_mid = 0;
         }
-        self.idx_up_low = (self.idx_up_low + 1) % self.per_up_low;
-        self.idx_mid = (self.idx_mid + 1) % self.per_mid;
         let mut ub = None;
         let mut lb = None;
         let mut mb = None;
         if self.count + 1 >= self.per_up_low {
-            ub = Some(self.sum_up / self.per_up_low as f64);
-            lb = Some(self.sum_low / self.per_up_low as f64);
+            ub = Some(self.sum_up * self.inv_up_low);
+            lb = Some(self.sum_low * self.inv_up_low);
         }
         if self.count + 1 >= self.per_mid {
-            mb = Some(self.sum_mb / self.per_mid as f64);
+            mb = Some(self.sum_mb * self.inv_mid);
         }
         self.bp_prev2 = self.bp_prev1;
         self.bp_prev1 = bp_curr;
