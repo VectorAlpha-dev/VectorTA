@@ -2009,8 +2009,9 @@ impl DeviationStream {
         }
 
         // At this point, count == period if finite; use precomputed inverse
-        let mean = self.sum * self.inv_p;
-        let var = (self.sum_sq * self.inv_p) - mean * mean;
+        // Use cached `inv_n` (1.0/period). `inv_p` was a typo.
+        let mean = self.sum * self.inv_n;
+        let var = (self.sum_sq * self.inv_n) - mean * mean;
         var.sqrt()
     }
 
