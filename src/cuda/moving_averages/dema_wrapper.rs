@@ -178,12 +178,12 @@ impl CudaDema {
             .map(|p| p.period.unwrap_or(0) as i32)
             .collect();
 
-        // VRAM estimate and guard
+        // VRAM estimate and guard (add ~64MB headroom like ALMA)
         let prices_bytes = series_len * std::mem::size_of::<f32>();
         let periods_bytes = periods.len() * std::mem::size_of::<i32>();
         let out_bytes = series_len * periods.len() * std::mem::size_of::<f32>();
-        let required = prices_bytes + periods_bytes + out_bytes + 32 * 1024 * 1024; // +32MB headroom
-        if !Self::will_fit(required) {
+        let required = prices_bytes + periods_bytes + out_bytes;
+        if !Self::will_fit(required, 64 * 1024 * 1024) {
             return Err(CudaDemaError::InvalidInput(
                 "insufficient device memory for DEMA batch".into(),
             ));
@@ -269,8 +269,8 @@ impl CudaDema {
         // VRAM guard (prices already on device, so only periods + output + headroom)
         let periods_bytes = periods.len() * std::mem::size_of::<i32>();
         let out_bytes = series_len * periods.len() * std::mem::size_of::<f32>();
-        let required = periods_bytes + out_bytes + 32 * 1024 * 1024;
-        if !Self::will_fit(required) {
+        let required = periods_bytes + out_bytes;
+        if !Self::will_fit(required, 64 * 1024 * 1024) {
             return Err(CudaDemaError::InvalidInput("insufficient device memory for DEMA batch".into()));
         }
 
@@ -422,10 +422,10 @@ impl CudaDema {
     ) -> Result<DeviceArrayF32, CudaDemaError> {
         let (first_valids, period) = Self::prepare_many_series_inputs(data_tm_f32, num_series, series_len, params)?;
 
-        // VRAM estimate and guard
+        // VRAM estimate and guard (~64MB headroom like ALMA)
         let elems = num_series * series_len;
-        let required = elems * 2 * std::mem::size_of::<f32>() + num_series * std::mem::size_of::<i32>() + 32 * 1024 * 1024;
-        if !Self::will_fit(required) {
+        let required = elems * 2 * std::mem::size_of::<f32>() + num_series * std::mem::size_of::<i32>();
+        if !Self::will_fit(required, 64 * 1024 * 1024) {
             return Err(CudaDemaError::InvalidInput(
                 "insufficient device memory for DEMA many-series".into(),
             ));
@@ -565,9 +565,11 @@ impl CudaDema {
         }
     }
     #[inline]
-    fn will_fit(required_bytes: usize) -> bool {
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
         if !Self::mem_check_enabled() { return true; }
-        mem_get_info().map(|(free, _)| required_bytes <= free).unwrap_or(true)
+        mem_get_info()
+            .map(|(free, _)| required_bytes.saturating_add(headroom_bytes) <= free)
+            .unwrap_or(true)
     }
 
     fn prepare_many_series_inputs(

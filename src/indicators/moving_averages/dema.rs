@@ -2021,6 +2021,7 @@ pub fn dema_cuda_many_series_one_param_dev_py(
     device_id: usize,
 ) -> PyResult<DeviceArrayF32Py> {
     use crate::cuda::cuda_available;
+    use numpy::PyUntypedArrayMethods;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
