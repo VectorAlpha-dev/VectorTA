@@ -48,32 +48,32 @@ extern "C" __global__ void linreg_batch_f32(const float* __restrict__ prices,
     }
 
     const int warm = first_valid + period - 1;
-    const float period_f = static_cast<float>(period);
-    const float x_sum = x_sums[combo];
-    const float denom_inv = denom_invs[combo];
-    const float inv_period = inv_periods[combo];
+    const double period_f = static_cast<double>(period);
+    const double x_sum = static_cast<double>(x_sums[combo]);
+    const double denom_inv = static_cast<double>(denom_invs[combo]);
+    const double inv_period = static_cast<double>(inv_periods[combo]);
 
-    float y_sum = 0.0f;
-    float xy_sum = 0.0f;
+    double y_sum = 0.0;
+    double xy_sum = 0.0;
     for (int k = 0; k < period - 1; ++k) {
-        const float val = prices[first_valid + k];
-        const float x = static_cast<float>(k + 1);
+        const double val = static_cast<double>(prices[first_valid + k]);
+        const double x = static_cast<double>(k + 1);
         y_sum += val;
         xy_sum += val * x;
     }
 
     for (int idx = warm; idx < series_len; ++idx) {
-        const float latest = prices[idx];
+        const double latest = static_cast<double>(prices[idx]);
         y_sum += latest;
         xy_sum += latest * period_f;
 
-        const float b = (period_f * xy_sum - x_sum * y_sum) * denom_inv;
-        const float a = (y_sum - b * x_sum) * inv_period;
-        out[base + idx] = a + b * period_f;
+        const double b = (period_f * xy_sum - x_sum * y_sum) * denom_inv;
+        const double a = (y_sum - b * x_sum) * inv_period;
+        out[base + idx] = static_cast<float>(a + b * period_f);
 
         xy_sum -= y_sum;
         const int oldest = idx - period + 1;
-        y_sum -= prices[oldest];
+        y_sum -= static_cast<double>(prices[oldest]);
     }
 }
 
@@ -113,29 +113,32 @@ extern "C" __global__ void linreg_many_series_one_param_f32(
     }
 
     const int warm = first_valid + period - 1;
-    const float period_f = static_cast<float>(period);
+    const double period_f = static_cast<double>(period);
 
-    float y_sum = 0.0f;
-    float xy_sum = 0.0f;
+    double y_sum = 0.0;
+    double xy_sum = 0.0;
     for (int k = 0; k < period - 1; ++k) {
         const int row = first_valid + k;
-        const float val = prices_tm[idx(row)];
-        const float x = static_cast<float>(k + 1);
+        const double val = static_cast<double>(prices_tm[idx(row)]);
+        const double x = static_cast<double>(k + 1);
         y_sum += val;
         xy_sum += val * x;
     }
 
     for (int row = warm; row < series_len; ++row) {
-        const float latest = prices_tm[idx(row)];
+        const double latest = static_cast<double>(prices_tm[idx(row)]);
         y_sum += latest;
         xy_sum += latest * period_f;
 
-        const float b = (period_f * xy_sum - x_sum * y_sum) * denom_inv;
-        const float a = (y_sum - b * x_sum) * inv_period;
-        out_tm[idx(row)] = a + b * period_f;
+        const double x_sum_d = static_cast<double>(x_sum);
+        const double denom_inv_d = static_cast<double>(denom_inv);
+        const double inv_period_d = static_cast<double>(inv_period);
+        const double b = (period_f * xy_sum - x_sum_d * y_sum) * denom_inv_d;
+        const double a = (y_sum - b * x_sum_d) * inv_period_d;
+        out_tm[idx(row)] = static_cast<float>(a + b * period_f);
 
         xy_sum -= y_sum;
         const int oldest_row = row - period + 1;
-        y_sum -= prices_tm[idx(oldest_row)];
+        y_sum -= static_cast<double>(prices_tm[idx(oldest_row)]);
     }
 }

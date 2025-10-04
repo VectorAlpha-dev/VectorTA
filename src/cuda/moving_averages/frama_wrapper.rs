@@ -1,9 +1,14 @@
 //! CUDA scaffolding for the Fractal Adaptive Moving Average (FRAMA).
 //!
-//! Follows the VRAM-first approach established by the ALMA integration: host
-//! validation prepares parameter sweeps, kernels operate entirely in `f32`, and
-//! zero-copy `DeviceArrayF32` handles are returned for both the single-series
-//! batch path and the many-series × one-parameter path.
+//! Aligned with the ALMA integration:
+//! - Policy-based kernel selection with introspection (record last choice).
+//! - PTX JIT with DetermineTargetFromContext and stable O2 fallback.
+//! - VRAM-first checks and simple grid chunking to respect launch limits.
+//! - Warmup/NaN handling and semantics match the scalar reference.
+//!
+//! Kernels expected (recurrence/time-marching; one thread per combo/series):
+//! - "frama_batch_f32"                   // one-series × many-params
+//! - "frama_many_series_one_param_f32"   // many-series × one-param (time-major)
 
 #![cfg(feature = "cuda")]
 
@@ -12,15 +17,53 @@ use crate::indicators::moving_averages::frama::{FramaBatchRange, FramaParams};
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{CopyDestination, DeviceBuffer};
-use cust::module::Module;
+use cust::memory::{mem_get_info, CopyDestination, DeviceBuffer};
+use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const FRAMA_MAX_WINDOW: usize = 1024;
+
+// -------- Kernel selection policy (keep simple for recurrence kernels) --------
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelPolicy {
+    Auto,
+    // Each thread processes one combo across time. Tunable block_x for occupancy.
+    Plain { block_x: u32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelPolicy {
+    Auto,
+    // One thread per series (time-major). Tunable block_x.
+    OneD { block_x: u32 },
+    // Placeholder for API symmetry with ALMA; falls back to OneD.
+    Tiled2D { tx: u32, ty: u32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CudaFramaPolicy {
+    pub batch: BatchKernelPolicy,
+    pub many_series: ManySeriesKernelPolicy,
+}
+impl Default for CudaFramaPolicy {
+    fn default() -> Self {
+        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+    }
+}
+
+// -------- Introspection (selected kernel) --------
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelSelected { Plain { block_x: u32 } }
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }
 
 #[derive(Debug)]
 pub enum CudaFramaError {
@@ -86,6 +129,12 @@ pub struct CudaFrama {
     module: Module,
     stream: Stream,
     _context: Context,
+    device_id: u32,
+    policy: CudaFramaPolicy,
+    last_batch: Option<BatchKernelSelected>,
+    last_many: Option<ManySeriesKernelSelected>,
+    debug_batch_logged: bool,
+    debug_many_logged: bool,
 }
 
 impl CudaFrama {
@@ -96,7 +145,20 @@ impl CudaFrama {
         let context = Context::new(device).map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/frama_kernel.ptx"));
-        let module = Module::from_ptx(ptx, &[]).map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
+        let jit_opts = &[
+            ModuleJitOption::DetermineTargetFromContext,
+            ModuleJitOption::OptLevel(OptLevel::O2),
+        ];
+        let module = match Module::from_ptx(ptx, jit_opts) {
+            Ok(m) => m,
+            Err(_) => {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                    m
+                } else {
+                    Module::from_ptx(ptx, &[]).map_err(|e| CudaFramaError::Cuda(e.to_string()))?
+                }
+            }
+        };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
 
@@ -104,7 +166,71 @@ impl CudaFrama {
             module,
             stream,
             _context: context,
+            device_id: device_id as u32,
+            policy: CudaFramaPolicy::default(),
+            last_batch: None,
+            last_many: None,
+            debug_batch_logged: false,
+            debug_many_logged: false,
         })
+    }
+
+    pub fn new_with_policy(device_id: usize, policy: CudaFramaPolicy) -> Result<Self, CudaFramaError> {
+        let mut s = Self::new(device_id)?;
+        s.policy = policy;
+        Ok(s)
+    }
+    pub fn set_policy(&mut self, policy: CudaFramaPolicy) { self.policy = policy; }
+    pub fn policy(&self) -> &CudaFramaPolicy { &self.policy }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+
+    #[inline]
+    fn maybe_log_batch_debug(&self) {
+        static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
+        if self.debug_batch_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_batch {
+                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] FRAMA batch selected kernel: {:?}", sel);
+                }
+                unsafe { (*(self as *const _ as *mut CudaFrama)).debug_batch_logged = true; }
+            }
+        }
+    }
+
+    #[inline]
+    fn maybe_log_many_debug(&self) {
+        static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
+        if self.debug_many_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_many {
+                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] FRAMA many-series selected kernel: {:?}", sel);
+                }
+                unsafe { (*(self as *const _ as *mut CudaFrama)).debug_many_logged = true; }
+            }
+        }
+    }
+
+    // ---------- VRAM helpers ----------
+    #[inline]
+    fn mem_check_enabled() -> bool {
+        match env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && v.to_lowercase() != "false",
+            Err(_) => true,
+        }
+    }
+    #[inline]
+    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    #[inline]
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+        if !Self::mem_check_enabled() { return true; }
+        if let Some((free, _)) = Self::device_mem_info() {
+            required_bytes.saturating_add(headroom_bytes) <= free
+        } else { true }
     }
 
     fn prepare_batch_inputs(
@@ -205,41 +331,65 @@ impl CudaFrama {
             .module
             .get_function("frama_batch_f32")
             .map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
+        // Policy/override for block size (threads per block)
+        let block_x: u32 = match self.policy.batch {
+            BatchKernelPolicy::Plain { block_x } => block_x,
+            BatchKernelPolicy::Auto => std::env::var("FRAMA_BLOCK_X").ok().and_then(|v| v.parse().ok()).unwrap_or(256),
+        };
 
-        let block_x: u32 = 32;
-        let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
-        let grid: GridSize = (grid_x.max(1), 1, 1).into();
-        let block: BlockSize = (block_x, 1, 1).into();
-
+        // Introspection
         unsafe {
-            let mut high_ptr = d_high.as_device_ptr().as_raw();
-            let mut low_ptr = d_low.as_device_ptr().as_raw();
-            let mut close_ptr = d_close.as_device_ptr().as_raw();
-            let mut win_ptr = d_windows.as_device_ptr().as_raw();
-            let mut sc_ptr = d_scs.as_device_ptr().as_raw();
-            let mut fc_ptr = d_fcs.as_device_ptr().as_raw();
-            let mut len_i = series_len as i32;
-            let mut combos_i = n_combos as i32;
-            let mut first_valid_i = first_valid as i32;
-            let mut out_ptr = d_out.as_device_ptr().as_raw();
-
-            let args: &mut [*mut c_void] = &mut [
-                &mut high_ptr as *mut _ as *mut c_void,
-                &mut low_ptr as *mut _ as *mut c_void,
-                &mut close_ptr as *mut _ as *mut c_void,
-                &mut win_ptr as *mut _ as *mut c_void,
-                &mut sc_ptr as *mut _ as *mut c_void,
-                &mut fc_ptr as *mut _ as *mut c_void,
-                &mut len_i as *mut _ as *mut c_void,
-                &mut combos_i as *mut _ as *mut c_void,
-                &mut first_valid_i as *mut _ as *mut c_void,
-                &mut out_ptr as *mut _ as *mut c_void,
-            ];
-
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
+            let this = self as *const _ as *mut CudaFrama;
+            (*this).last_batch = Some(BatchKernelSelected::Plain { block_x });
         }
+        self.maybe_log_batch_debug();
+
+        // Chunk grid.x launches if n_combos is huge: launch multiple passes and offset param/output pointers.
+        const MAX_PER_LAUNCH: usize = 65_535 * 256; // generous upper bound for combos processed per launch
+        let mut start = 0usize;
+        while start < n_combos {
+            let len = (n_combos - start).min(MAX_PER_LAUNCH);
+            let grid_x = ((len as u32) + block_x - 1) / block_x;
+            let grid: GridSize = (grid_x.max(1), 1, 1).into();
+            let block: BlockSize = (block_x, 1, 1).into();
+
+            unsafe {
+                // Offset parameter and output pointers by `start`
+                let mut high_ptr = d_high.as_device_ptr().as_raw();
+                let mut low_ptr = d_low.as_device_ptr().as_raw();
+                let mut close_ptr = d_close.as_device_ptr().as_raw();
+                let mut win_ptr = d_windows.as_device_ptr().add(start).as_raw();
+                let mut sc_ptr = d_scs.as_device_ptr().add(start).as_raw();
+                let mut fc_ptr = d_fcs.as_device_ptr().add(start).as_raw();
+                let mut len_i = series_len as i32;
+                let mut combos_i = len as i32;
+                let mut first_valid_i = first_valid as i32;
+                let mut out_ptr = d_out.as_device_ptr().add(start * series_len).as_raw();
+
+                let args: &mut [*mut c_void] = &mut [
+                    &mut high_ptr as *mut _ as *mut c_void,
+                    &mut low_ptr as *mut _ as *mut c_void,
+                    &mut close_ptr as *mut _ as *mut c_void,
+                    &mut win_ptr as *mut _ as *mut c_void,
+                    &mut sc_ptr as *mut _ as *mut c_void,
+                    &mut fc_ptr as *mut _ as *mut c_void,
+                    &mut len_i as *mut _ as *mut c_void,
+                    &mut combos_i as *mut _ as *mut c_void,
+                    &mut first_valid_i as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+
+                self.stream
+                    .launch(&func, grid, block, 0, args)
+                    .map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
+            }
+            start += len;
+        }
+
+        // Ensure the kernel finishes before we hand out the VRAM handle
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
 
         Ok(())
     }
@@ -253,12 +403,22 @@ impl CudaFrama {
         first_valid: usize,
         len: usize,
     ) -> Result<DeviceArrayF32, CudaFramaError> {
-        let d_high =
-            DeviceBuffer::from_slice(high).map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
-        let d_low =
-            DeviceBuffer::from_slice(low).map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
-        let d_close =
-            DeviceBuffer::from_slice(close).map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
+        // VRAM estimate (inputs + params + outputs) + headroom
+        let prices_bytes = len * 3 * std::mem::size_of::<f32>();
+        let params_bytes = combos.len() * 3 * std::mem::size_of::<i32>();
+        let out_bytes = len * combos.len() * std::mem::size_of::<f32>();
+        let required = prices_bytes + params_bytes + out_bytes;
+        let headroom = 64 * 1024 * 1024;
+        if !Self::will_fit(required, headroom) {
+            return Err(CudaFramaError::InvalidInput(format!(
+                "estimated device memory {:.2} MB exceeds free VRAM",
+                (required as f64) / (1024.0 * 1024.0)
+            )));
+        }
+
+        let d_high = DeviceBuffer::from_slice(high).map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
+        let d_low = DeviceBuffer::from_slice(low).map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
+        let d_close = DeviceBuffer::from_slice(close).map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
 
         let windows: Vec<i32> = combos.iter().map(|c| c.window.unwrap() as i32).collect();
         let scs: Vec<i32> = combos.iter().map(|c| c.sc.unwrap() as i32).collect();
@@ -439,8 +599,15 @@ impl CudaFrama {
             .module
             .get_function("frama_many_series_one_param_f32")
             .map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
-
-        let block_x: u32 = 64;
+        // Policy/override
+        let block_x: u32 = match self.policy.many_series {
+            ManySeriesKernelPolicy::OneD { block_x } => block_x,
+            ManySeriesKernelPolicy::Tiled2D { tx, .. } => tx, // fall back to OneD geometry
+            ManySeriesKernelPolicy::Auto => std::env::var("FRAMA_MS1P_BLOCK_X").ok().and_then(|v| v.parse().ok()).unwrap_or(128),
+        };
+        // Introspection
+        unsafe { let this = self as *const _ as *mut CudaFrama; (*this).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
+        self.maybe_log_many_debug();
         let grid_x = ((num_series as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -475,7 +642,10 @@ impl CudaFrama {
                 .map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
         }
 
-        Ok(())
+        // Ensure completion for consistent timing in benches/tests
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaFramaError::Cuda(e.to_string()))
     }
 
     fn run_many_series_kernel(
@@ -490,12 +660,23 @@ impl CudaFrama {
         sc: i32,
         fc: i32,
     ) -> Result<DeviceArrayF32, CudaFramaError> {
-        let d_high =
-            DeviceBuffer::from_slice(high_tm).map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
-        let d_low =
-            DeviceBuffer::from_slice(low_tm).map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
-        let d_close =
-            DeviceBuffer::from_slice(close_tm).map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
+        // VRAM estimate
+        let elems = cols * rows;
+        let prices_bytes = elems * 3 * std::mem::size_of::<f32>();
+        let out_bytes = elems * std::mem::size_of::<f32>();
+        let first_valids_bytes = cols * std::mem::size_of::<i32>();
+        let required = prices_bytes + out_bytes + first_valids_bytes;
+        let headroom = 64 * 1024 * 1024;
+        if !Self::will_fit(required, headroom) {
+            return Err(CudaFramaError::InvalidInput(format!(
+                "estimated device memory {:.2} MB exceeds free VRAM",
+                (required as f64) / (1024.0 * 1024.0)
+            )));
+        }
+
+        let d_high = DeviceBuffer::from_slice(high_tm).map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
+        let d_low = DeviceBuffer::from_slice(low_tm).map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
+        let d_close = DeviceBuffer::from_slice(close_tm).map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
         let d_first = DeviceBuffer::from_slice(first_valids)
             .map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(cols * rows) }

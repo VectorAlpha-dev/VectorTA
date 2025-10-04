@@ -45,6 +45,9 @@ impl DeviceArrayF32Py {
         d.set_item("shape", (self.inner.rows, self.inner.cols))?;
         d.set_item("typestr", "<f4")?;
         d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        // Provide a stream hint for consumers like CuPy. Using legacy default stream (1)
+        // is broadly compatible and avoids some runtime setDevice quirks on certain setups.
+        d.set_item("stream", 1i64)?;
         d.set_item("version", 3)?;
         Ok(d)
     }
