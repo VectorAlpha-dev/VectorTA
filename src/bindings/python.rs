@@ -217,6 +217,10 @@ use crate::indicators::moving_averages::dma::{
 };
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::edcf::{edcf_batch_py, edcf_py, EdcfStreamPy};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::edcf::{
+    edcf_cuda_batch_dev_py, edcf_cuda_many_series_one_param_dev_py,
+};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::ehlers_ecema::{
     ehlers_ecema_batch_py, ehlers_ecema_py, EhlersEcemaStreamPy,
@@ -788,6 +792,11 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(edcf_py, m)?)?;
     m.add_function(wrap_pyfunction!(edcf_batch_py, m)?)?;
     m.add_class::<EdcfStreamPy>()?;
+    #[cfg(feature = "cuda")]
+    {
+        m.add_function(wrap_pyfunction!(edcf_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(edcf_cuda_many_series_one_param_dev_py, m)?)?;
+    }
 
     // Register EMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(ema_py, m)?)?;
