@@ -467,31 +467,33 @@ impl CudaCwma {
                 .get_function("cwma_batch_f32")
                 .map_err(|e| CudaCwmaError::Cuda(e.to_string()))?;
 
-            unsafe {
-                let mut prices_ptr = d_prices.as_device_ptr().as_raw();
-                let mut weights_ptr = d_weights.as_device_ptr().as_raw();
-                let mut periods_ptr = d_periods.as_device_ptr().as_raw();
-                let mut inv_ptr = d_inv_norms.as_device_ptr().as_raw();
-                let mut max_period_i = max_period as i32;
-                let mut series_len_i = series_len as i32;
-                let mut n_combos_i = n_combos as i32;
-                let mut first_valid_i = first_valid as i32;
-                let mut out_ptr = d_out.as_device_ptr().as_raw();
-                let grid: GridSize = (grid_x, n_combos as u32, 1).into();
-                let args: &mut [*mut c_void] = &mut [
-                    &mut prices_ptr as *mut _ as *mut c_void,
-                    &mut weights_ptr as *mut _ as *mut c_void,
-                    &mut periods_ptr as *mut _ as *mut c_void,
-                    &mut inv_ptr as *mut _ as *mut c_void,
-                    &mut max_period_i as *mut _ as *mut c_void,
-                    &mut series_len_i as *mut _ as *mut c_void,
-                    &mut n_combos_i as *mut _ as *mut c_void,
-                    &mut first_valid_i as *mut _ as *mut c_void,
-                    &mut out_ptr as *mut _ as *mut c_void,
-                ];
-                self.stream
-                    .launch(&func, grid, block, shared_bytes, args)
-                    .map_err(|e| CudaCwmaError::Cuda(e.to_string()))?;
+            for (start, len) in Self::grid_y_chunks(n_combos) {
+                unsafe {
+                    let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+                    let mut weights_ptr = d_weights.as_device_ptr().add(start * max_period).as_raw();
+                    let mut periods_ptr = d_periods.as_device_ptr().add(start).as_raw();
+                    let mut inv_ptr = d_inv_norms.as_device_ptr().add(start).as_raw();
+                    let mut max_period_i = max_period as i32;
+                    let mut series_len_i = series_len as i32;
+                    let mut n_combos_i = len as i32;
+                    let mut first_valid_i = first_valid as i32;
+                    let mut out_ptr = d_out.as_device_ptr().add(start * series_len).as_raw();
+                    let grid: GridSize = (grid_x, len as u32, 1).into();
+                    let args: &mut [*mut c_void] = &mut [
+                        &mut prices_ptr as *mut _ as *mut c_void,
+                        &mut weights_ptr as *mut _ as *mut c_void,
+                        &mut periods_ptr as *mut _ as *mut c_void,
+                        &mut inv_ptr as *mut _ as *mut c_void,
+                        &mut max_period_i as *mut _ as *mut c_void,
+                        &mut series_len_i as *mut _ as *mut c_void,
+                        &mut n_combos_i as *mut _ as *mut c_void,
+                        &mut first_valid_i as *mut _ as *mut c_void,
+                        &mut out_ptr as *mut _ as *mut c_void,
+                    ];
+                    self.stream
+                        .launch(&func, grid, block, shared_bytes, args)
+                        .map_err(|e| CudaCwmaError::Cuda(e.to_string()))?;
+                }
             }
             unsafe {
                 let this = self as *const _ as *mut CudaCwma;
